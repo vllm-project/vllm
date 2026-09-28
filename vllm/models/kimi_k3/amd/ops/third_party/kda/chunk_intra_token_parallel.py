@@ -109,9 +109,8 @@ def chunk_kda_fwd_kernel_intra_token_parallel(
 
     # g: [B, T, HV, K], beta: [B, T, HV]
     desc_g = make_tensor_descriptor(g + i_t * HV * K, [HV, K], [K, 1], [BH, BK])
-    desc_beta = make_tensor_descriptor(beta + i_t * HV, [HV], [1], [BH])
     b_g = desc_g.load([i_hg * BH, 0]).to(tl.float32)
-    b_beta = desc_beta.load([i_hg * BH]).to(tl.float32)
+    b_beta = tl.load(beta + i_t * HV + o_hv, mask=m_hv, other=0).to(tl.float32)
     b_k *= b_beta[:, None]
 
     for j in range(i_ts, min(i_t + 1, min(T, i_ts + BC))):
