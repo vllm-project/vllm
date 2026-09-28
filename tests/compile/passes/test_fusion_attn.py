@@ -12,6 +12,7 @@ from tests.v1.attention.utils import (
     create_common_attn_metadata,
     dense_kv_cache_views,
 )
+from vllm._aiter_ops import is_aiter_found_and_supported, rocm_aiter_ops
 from vllm._custom_ops import cutlass_scaled_fp4_mm, scaled_fp4_quant
 from vllm.compilation.passes.fusion.attn_quant_fusion import (
     ATTN_OP,
@@ -187,6 +188,17 @@ class TestAttentionFp8StaticQuantPatternModel(AttentionQuantPatternModel):
         """Forward pass that creates the pattern to be fused."""
         attn_output = self.attn(q, k, v)
         return self.fp8_linear(attn_output)
+
+
+class TestAttentionAiterFp8StaticQuantPatternModel(
+    TestAttentionFp8StaticQuantPatternModel
+):
+    aiter_quant = True
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.fp8_linear.kernel.quant_fp8.use_aiter = True
+        self.fp8_linear.input_scale.fill_(0.125)
 
 
 class TestAttentionNvfp4QuantPatternModel(AttentionQuantPatternModel):
@@ -455,11 +467,12 @@ def test_attention_quant_pattern(
         )
 
     # Check quantization ops in the graph before and after fusion
-    quant_op = (
-        torch.ops.aten.reciprocal
-        if "-quant_fp8" in custom_ops_list
-        else QUANT_OPS[quant_key]
-    )
+    if "-quant_fp8" in custom_ops_list:
+        quant_op = torch.ops.aten.reciprocal
+    elif getattr(model_class, "aiter_quant", False):
+        quant_op = torch.ops.vllm.rocm_aiter_per_tensor_quant.default
+    else:
+        quant_op = QUANT_OPS[quant_key]
 
     if expect_fusion:
         # Note: for fp8, fully_replaced=False because query quant ops remain in
@@ -523,3 +536,46 @@ def test_attention_quant_pattern(
 
     # Check that results are close
     torch.testing.assert_close(result_unfused, result_fused, atol=1e-2, rtol=1e-2)
+    if getattr(model_class, "aiter_quant", False):
+        # Query quantization remains; exactly the output quant op is removed.
+        assert test_backend.op_count(quant_op, before=True) == (
+            test_backend.op_count(quant_op) + 1
+        )
+        for model in (model_unfused, model_fused):
+            torch.testing.assert_close(
+                model.fp8_linear.input_scale,
+                torch.full_like(model.fp8_linear.input_scale, 0.125),
+                atol=0,
+                rtol=0,
+            )
+
+
+@pytest.mark.skipif(
+    not current_platform.is_rocm() or not is_aiter_found_and_supported(),
+    reason="Requires ROCm AITER attention and quantization",
+)
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
+def test_rocm_aiter_static_quant_attention(
+    dtype, dist_init, disable_vllm_compile_cache, monkeypatch
+):
+    """Fuse the actual AITER op without changing its static scale or outputs."""
+    try:
+        with monkeypatch.context() as patch:
+            patch.setenv("VLLM_ROCM_USE_AITER", "1")
+            rocm_aiter_ops.refresh_env_variables()
+            test_attention_quant_pattern(
+                num_qo_heads=32,
+                num_kv_heads=8,
+                head_size=128,
+                batch_size=8,
+                dtype=dtype,
+                kv_cache_dtype="fp8",
+                custom_ops="+quant_fp8",
+                model_name="amd/Llama-3.1-8B-Instruct-FP8-KV",
+                model_class=TestAttentionAiterFp8StaticQuantPatternModel,
+                backend=AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN,
+                dist_init=dist_init,
+                disable_vllm_compile_cache=disable_vllm_compile_cache,
+            )
+    finally:
+        rocm_aiter_ops.refresh_env_variables()
