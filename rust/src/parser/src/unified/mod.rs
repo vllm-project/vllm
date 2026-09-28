@@ -5,6 +5,7 @@
 
 mod combined;
 mod gemma4;
+pub mod hf;
 mod hy;
 mod inkling;
 mod kimi_k3;
@@ -280,6 +281,8 @@ pub enum UnifiedParserError {
     Reasoning(#[from] ReasoningError),
     #[error(transparent)]
     Tool(#[from] ToolParserError),
+    #[error(transparent)]
+    HfTemplate(#[from] hf::HfTemplateError),
 }
 
 /// Returns the ID for the given token, or an error if it's not found.

@@ -84,6 +84,8 @@ rand = "0.9.2"
 rand_distr = "0.5.1"
 rayon = "1.11.0"
 reasoning-parser = "1.2.2"
+regex-automata = "0.4.14"
+regex-syntax = "0.8.10"
 reqwest = { version = "0.12.8", default-features = false, features = ["native-tls"] }
 reqwest-0-13 = { package = "reqwest", version = "0.13.4", default-features = false, features = ["native-tls"] }
 riptoken = { version = "0.3.0", default-features = false }

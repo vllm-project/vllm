@@ -17,6 +17,9 @@ use crate::request::ChatTool;
 /// Canonical public names for registered unified parsers.
 pub mod names {
     pub const GEMMA4: &str = "gemma4";
+    /// Executes the checkpoint's Hugging Face `response_template`. Constructed by
+    /// the chat backend from model files rather than through the registry.
+    pub const HF: &str = "hf";
     pub const HY_V3: &str = "hy_v3";
     pub const HY_V4: &str = "hy_v4";
     pub const INKLING: &str = "inkling";

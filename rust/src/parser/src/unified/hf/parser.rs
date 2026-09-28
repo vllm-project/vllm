@@ -1,0 +1,682 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
+//! Streaming executor for a compiled [`ResponseTemplate`].
+//!
+//! Follows `ResponseParser` in `response_parser.py`: a flat region state
+//! machine that, outside explicit regions, watches every explicit open plus the
+//! implicit region's close, and inside an explicit region watches only that
+//! region's close. Instead of region events and an aggregated dict, it emits
+//! ordered unified parser events:
+//!
+//! - text and reasoning stream as they arrive, with `strip` applied so that the
+//!   concatenated deltas equal Transformers' stripped value. For a field without
+//!   `repeats`, stripping spans all its occurrences: an interrupted field (text,
+//!   tool call, more text) streams every occurrence, where Transformers keeps only
+//!   the last;
+//! - a tool call starts at its opener when the opener captures the function
+//!   name, and its arguments are emitted when the region closes.
+
+use std::mem::take;
+use std::sync::Arc;
+
+use serde_json::Value;
+use thiserror_ext::AsReport as _;
+use vllm_tokenizer::{DecodedText, DynTokenizer, TokenAnchor, TokenAttribution};
+use winnow::error::{ErrMode, ModalResult};
+use winnow::stream::{Partial, Stream};
+
+use super::coerce::ToolParams;
+use super::content::is_python_space;
+use super::pattern::Resolution;
+use super::template::{Region, ResponseTemplate, Role, Watch, WatchKind};
+use super::transform::{process_field, python_type_name};
+use super::{unsupported, value};
+use crate::tool::{Tool, ToolCallDelta};
+use crate::unified::{Result, UnifiedParser, UnifiedParserOutput, parsing_failed};
+use crate::utils::{incomplete, parse_buffered_event, safe_text_len_mul};
+
+/// Prompt tail windows, in tokens, searched for the start anchor before
+/// decoding the whole prompt.
+const PROMPT_WINDOWS: [usize; 3] = [64, 512, 4096];
+
+/// Unified parser executing a checkpoint's `response_template`.
+///
+/// Original Python implementation:
+/// <https://github.com/huggingface/transformers/blob/6d43ab4008/src/transformers/utils/chat_parsing/response_parser.py>
+pub struct HfUnifiedParser {
+    template: Arc<ResponseTemplate>,
+    tool_params: ToolParams,
+    tokenizer: DynTokenizer,
+    buffer: DecodedText,
+    current: Current,
+    /// Number of closed occurrences per region.
+    closed: Vec<usize>,
+    /// Strip state per region: per occurrence with `repeats`, per stream otherwise.
+    strip: Vec<StripState>,
+    next_tool_index: usize,
+}
+
+/// The region currently receiving text.
+enum Current {
+    /// No implicit field is declared: text outside regions is discarded.
+    Sink,
+    /// The implicit region, opened lazily on its first byte.
+    Implicit(Occurrence),
+    /// An explicit region, opened by its open boundary.
+    Explicit(Occurrence),
+}
+
+/// One occurrence of a region.
+struct Occurrence {
+    region: usize,
+    /// Whether the occurrence has content to close (`_opened`).
+    opened: bool,
+    captures: Vec<(String, String)>,
+    /// Opener text, returned by [`UnifiedParser::reset`].
+    raw_open: String,
+    /// Buffered body of a tool-call region.
+    body: String,
+    /// Index of the tool call started at the opener, if any.
+    tool_index: Option<usize>,
+    /// `join` separator still to emit before this occurrence's content.
+    separator: Option<String>,
+}
+
+/// Strip-compatible streaming state of a text or reasoning occurrence.
+#[derive(Default)]
+struct StripState {
+    enabled: bool,
+    /// Whether a non-whitespace character has been seen.
+    started: bool,
+    /// Trailing whitespace held until more text arrives or the region closes.
+    held: DecodedText,
+}
+
+/// One parsed step of the buffered input.
+enum Step {
+    /// Text routed into the current region.
+    Text,
+    /// A boundary of the current state's watch list.
+    Boundary {
+        watch: Watch,
+        captures: Vec<(String, String)>,
+    },
+}
+
+/// A committable boundary match at the current position.
+struct BoundaryMatch {
+    watch: Watch,
+    len: usize,
+    captures: Vec<(String, String)>,
+}
+
+impl BoundaryMatch {
+    /// Preference order of `_scan`: longest first, opens before closes, then by
+    /// field name.
+    fn key<'t>(&self, template: &'t ResponseTemplate) -> (std::cmp::Reverse<usize>, bool, &'t str) {
+        (
+            std::cmp::Reverse(self.len),
+            self.watch.kind == WatchKind::Close,
+            template.regions[self.watch.region].name.as_str(),
+        )
+    }
+}
+
+/// How the step loop treats its input.
+#[derive(Clone, Copy)]
+enum Mode {
+    /// Prompt text after the start anchor: state transitions only, no events.
+    Prefill,
+    /// Generated text; more may follow.
+    Stream,
+    /// Generated text at the end of the stream.
+    Eof,
+}
+
+impl Mode {
+    fn emits(self) -> bool {
+        !matches!(self, Self::Prefill)
+    }
+}
+
+impl HfUnifiedParser {
+    /// Create a parser for one request.
+    pub fn new(template: Arc<ResponseTemplate>, tools: &[Tool], tokenizer: DynTokenizer) -> Self {
+        let mut parser = Self {
+            closed: vec![0; template.regions.len()],
+            strip: template.regions.iter().map(StripState::new).collect(),
+            current: Current::Sink,
+            template,
+            tool_params: ToolParams::new(tools),
+            tokenizer,
+            buffer: DecodedText::default(),
+            next_tool_index: 0,
+        };
+        parser.reset_to_implicit();
+        parser
+    }
+
+    /// Clear all per-stream state.
+    fn reset_state(&mut self) {
+        self.buffer.clear();
+        self.closed.fill(0);
+        self.strip = self.template.regions.iter().map(StripState::new).collect();
+        self.next_tool_index = 0;
+        self.reset_to_implicit();
+    }
+
+    /// Return to the implicit region, or the sink when there is none.
+    fn reset_to_implicit(&mut self) {
+        self.current = match self.template.implicit {
+            Some(region) => {
+                Current::Implicit(self.occurrence(region, false, Vec::new(), String::new()))
+            }
+            None => Current::Sink,
+        };
+    }
+
+    /// Start a new occurrence of `region`.
+    fn occurrence(
+        &mut self,
+        region: usize,
+        opened: bool,
+        captures: Vec<(String, String)>,
+        raw_open: String,
+    ) -> Occurrence {
+        let spec = &self.template.regions[region];
+        let separator = spec
+            .join
+            .as_ref()
+            .filter(|join| !join.is_empty() && self.closed[region] > 0)
+            .cloned();
+        if spec.repeats {
+            self.strip[region] = StripState::new(spec);
+        }
+        Occurrence {
+            region,
+            opened,
+            captures,
+            raw_open,
+            body: String::new(),
+            tool_index: None,
+            separator,
+        }
+    }
+
+    /// Parse buffered input until more is needed.
+    fn drive(&mut self, output: &mut UnifiedParserOutput, mode: Mode) -> Result<()> {
+        let template = Arc::clone(&self.template);
+        loop {
+            let (watch, candidates) = match &self.current {
+                Current::Explicit(occurrence) => {
+                    let region = &template.regions[occurrence.region];
+                    (
+                        region.close_watch.as_slice(),
+                        region.close_candidates.as_slice(),
+                    )
+                }
+                Current::Sink | Current::Implicit(_) => (
+                    template.idle_watch.as_slice(),
+                    template.idle_candidates.as_slice(),
+                ),
+            };
+            let eof = matches!(mode, Mode::Eof);
+            let Some((step, consumed_len)) = parse_buffered_event(&self.buffer.text, |input| {
+                parse_step(input, &template, watch, candidates, eof)
+            })?
+            else {
+                return Ok(());
+            };
+            let piece = self.buffer.drain_prefix(consumed_len);
+            match step {
+                Step::Text => self.route(piece, output, mode),
+                Step::Boundary { watch, captures } => {
+                    self.close_current(output, mode)?;
+                    match watch.kind {
+                        WatchKind::Open => {
+                            self.open_explicit(watch.region, captures, piece.text, output, mode)
+                        }
+                        // The implicit region's close: start a fresh implicit occurrence.
+                        WatchKind::Close => {}
+                    }
+                }
+            }
+        }
+    }
+
+    /// Route a text piece into the current region.
+    fn route(&mut self, piece: DecodedText, output: &mut UnifiedParserOutput, mode: Mode) {
+        let (occurrence, role) = match &mut self.current {
+            Current::Sink => return,
+            Current::Implicit(occurrence) | Current::Explicit(occurrence) => {
+                let role = self.template.regions[occurrence.region].role;
+                (occurrence, role)
+            }
+        };
+        let strip = &mut self.strip[occurrence.region];
+        if piece.text.is_empty() {
+            // Zero-width tokens still count as reasoning.
+            if role == Role::Reasoning && mode.emits() {
+                output.push_reasoning(piece);
+            }
+            return;
+        }
+        occurrence.opened = true;
+
+        match role {
+            Role::ToolCalls => occurrence.body.push_str(&piece.text),
+            Role::Text | Role::Reasoning if !mode.emits() => {
+                // Prompt text is never emitted; it only decides whether later
+                // leading whitespace is still stripped.
+                strip.started |= !piece.text.chars().all(is_python_space);
+            }
+            Role::Text | Role::Reasoning => {
+                let (visible, dropped) = strip.feed(piece);
+                if role == Role::Reasoning {
+                    push_dropped_reasoning(output, dropped);
+                }
+                if visible.text.is_empty() {
+                    return;
+                }
+                if let Some(separator) = occurrence.separator.take() {
+                    push_role(output, role, DecodedText::unattributed(separator));
+                }
+                push_role(output, role, visible);
+            }
+        }
+    }
+
+    /// Open an explicit region.
+    fn open_explicit(
+        &mut self,
+        region: usize,
+        captures: Vec<(String, String)>,
+        raw_open: String,
+        output: &mut UnifiedParserOutput,
+        mode: Mode,
+    ) {
+        let mut occurrence = self.occurrence(region, true, captures, raw_open);
+        let early_name = self.template.regions[region].early_name.as_deref().and_then(|group| {
+            occurrence
+                .captures
+                .iter()
+                .find(|(name, _)| name == group)
+                .map(|(_, text)| text.clone())
+        });
+        if let Some(name) = early_name
+            && mode.emits()
+        {
+            let tool_index = self.allocate_tool_index();
+            occurrence.tool_index = Some(tool_index);
+            output.push_call(ToolCallDelta {
+                tool_index,
+                name: Some(name),
+                arguments: String::new(),
+            });
+        }
+        self.current = Current::Explicit(occurrence);
+    }
+
+    /// Close the current region and reset to the implicit region.
+    ///
+    /// Skipped (aside from the reset) when the current region never opened --
+    /// avoids vacuous open/close pairs at every explicit boundary.
+    fn close_current(&mut self, output: &mut UnifiedParserOutput, mode: Mode) -> Result<()> {
+        let template = Arc::clone(&self.template);
+        let current = std::mem::replace(&mut self.current, Current::Sink);
+        let occurrence = match current {
+            Current::Implicit(occurrence) | Current::Explicit(occurrence) if occurrence.opened => {
+                Some(occurrence)
+            }
+            _ => None,
+        };
+        // Without `repeats`, trailing whitespace stays held in case the field
+        // continues; it is dropped at the end of the stream.
+        let held = occurrence
+            .as_ref()
+            .filter(|occurrence| template.regions[occurrence.region].repeats)
+            .map(|occurrence| take(&mut self.strip[occurrence.region].held));
+        if let Some(occurrence) = &occurrence {
+            self.closed[occurrence.region] += 1;
+        }
+        self.reset_to_implicit();
+        // Regions closed inside the prompt contribute nothing to the output.
+        let Some(occurrence) = occurrence.filter(|_| mode.emits()) else {
+            return Ok(());
+        };
+
+        let region = &template.regions[occurrence.region];
+        match region.role {
+            Role::Text | Role::Reasoning => {
+                if region.role == Role::Reasoning
+                    && let Some(held) = held
+                {
+                    push_dropped_reasoning(output, held);
+                }
+                // An empty occurrence still joins: `previous + join + ""`.
+                if let Some(separator) = occurrence.separator {
+                    push_role(output, region.role, DecodedText::unattributed(separator));
+                }
+            }
+            Role::ToolCalls => {
+                let mut value = process_field(
+                    &region.name,
+                    &occurrence.body,
+                    &region.content,
+                    region.transform.as_ref(),
+                    region.transform_each,
+                    &occurrence.captures,
+                )?;
+                if !self.tool_params.is_empty() {
+                    self.tool_params.coerce_tool_calls(&mut value);
+                }
+                self.emit_calls(value, occurrence.tool_index, output)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Emit the tool calls of a closed tool-call region.
+    // TODO: stream arguments incrementally instead of once at region close; the
+    // dialects (e.g. Gemma 4's unquoted keys and `<|"|>` strings, `xml-inline`)
+    // need incremental conversion rather than raw passthrough.
+    fn emit_calls(
+        &mut self,
+        value: Value,
+        started: Option<usize>,
+        output: &mut UnifiedParserOutput,
+    ) -> Result<()> {
+        let calls = match value {
+            Value::Array(calls) => calls,
+            call => vec![call],
+        };
+        for (position, call) in calls.into_iter().enumerate() {
+            let (name, arguments) = call_parts(call)?;
+            let (tool_index, name) = match (position, started) {
+                (0, Some(tool_index)) => (tool_index, None),
+                _ => (self.allocate_tool_index(), Some(name)),
+            };
+            output.push_call(ToolCallDelta {
+                tool_index,
+                name,
+                arguments,
+            });
+        }
+        Ok(())
+    }
+
+    fn allocate_tool_index(&mut self) -> usize {
+        let tool_index = self.next_tool_index;
+        self.next_tool_index += 1;
+        tool_index
+    }
+
+    /// Return the prompt text after the last start-anchor match, if any.
+    ///
+    /// Searches geometrically growing tail windows before decoding the whole
+    /// prompt. A decoded suffix can differ from the full decode only in its first
+    /// character, so a match is accepted only after that character unless the
+    /// window is the whole prompt.
+    fn prompt_remainder(&self, prompt_token_ids: &[u32]) -> Result<Option<String>> {
+        let len = prompt_token_ids.len();
+        let windows = PROMPT_WINDOWS.into_iter().filter(|window| *window < len).chain([len]);
+        for window in windows {
+            let text = self.tokenizer.decode(&prompt_token_ids[len - window..], false).map_err(
+                |error| parsing_failed!("failed to decode prompt: {}", error.as_report()),
+            )?;
+            let whole = window == len;
+            if let Some((start, end)) = self.template.last_start_anchor(&text) {
+                let first_char = text.chars().next().map_or(0, char::len_utf8);
+                if whole || start >= first_char {
+                    return Ok(Some(text[end..].to_string()));
+                }
+            }
+        }
+        Ok(None)
+    }
+}
+
+impl StripState {
+    fn new(region: &Region) -> Self {
+        Self {
+            enabled: region.role != Role::ToolCalls && region.content.strips(),
+            ..Self::default()
+        }
+    }
+
+    /// Split a piece into its visible part and whitespace dropped by `strip`.
+    ///
+    /// Leading whitespace is dropped until the first non-whitespace character;
+    /// trailing whitespace is held until more non-whitespace text arrives (then
+    /// released) or the region closes (then dropped).
+    fn feed(&mut self, mut piece: DecodedText) -> (DecodedText, DecodedText) {
+        if !self.enabled {
+            return (piece, DecodedText::default());
+        }
+        let mut dropped = DecodedText::default();
+        if !self.started {
+            let lead = piece.text.len() - piece.text.trim_start_matches(is_python_space).len();
+            if lead == piece.text.len() {
+                return (DecodedText::default(), piece);
+            }
+            dropped = piece.drain_prefix(lead);
+            self.started = true;
+        }
+        let body_len = piece.text.trim_end_matches(is_python_space).len();
+        if body_len == 0 {
+            self.held.append(piece);
+            return (DecodedText::default(), dropped);
+        }
+        let head = piece.drain_prefix(body_len);
+        let mut visible = take(&mut self.held);
+        visible.append(head);
+        self.held = piece;
+        (visible, dropped)
+    }
+}
+
+/// Push visible text of `role`.
+fn push_role(output: &mut UnifiedParserOutput, role: Role, piece: DecodedText) {
+    match role {
+        Role::Text => output.push_text(piece.text),
+        Role::Reasoning => output.push_reasoning(piece),
+        Role::ToolCalls => unreachable!("tool-call bodies are buffered"),
+    }
+}
+
+/// Keep the tokens of stripped reasoning whitespace in the reasoning count.
+fn push_dropped_reasoning(output: &mut UnifiedParserOutput, dropped: DecodedText) {
+    if dropped.attributions.is_empty() {
+        return;
+    }
+    output.push_reasoning(DecodedText {
+        text: String::new(),
+        attributions: dropped
+            .attributions
+            .into_iter()
+            .map(|attribution| TokenAttribution {
+                token_id: attribution.token_id,
+                anchor: TokenAnchor::ZeroWidth { byte_offset: 0 },
+            })
+            .collect(),
+    });
+}
+
+/// Extract the function name and serialized arguments of one tool-call value.
+///
+/// Accepts the OpenAI shape `{"function": {"name", "arguments"}}` and the bare
+/// `{"name", "arguments"}` shape. Missing arguments become `{}`; string
+/// arguments (e.g. `allow_non_json` fallbacks) pass through unchanged.
+fn call_parts(call: Value) -> Result<(String, String)> {
+    let Value::Object(mut call) = call else {
+        return Err(value!("tool call must be a dict, got {}", python_type_name(&call)).into());
+    };
+    let function = match call.remove("function") {
+        Some(Value::Object(function)) => function,
+        Some(other) => {
+            return Err(value!(
+                "tool call 'function' must be a dict, got {}",
+                python_type_name(&other)
+            )
+            .into());
+        }
+        None => call,
+    };
+    let Some(Value::String(name)) = function.get("name") else {
+        return Err(value!("tool call has no string function name").into());
+    };
+    let arguments = match function.get("arguments") {
+        None => "{}".to_string(),
+        Some(Value::String(arguments)) => arguments.clone(),
+        Some(arguments) => serde_json::to_string(arguments)
+            .map_err(|error| value!("failed to serialize tool arguments: {}", error.as_report()))?,
+    };
+    Ok((name.clone(), arguments))
+}
+
+/// Parse one step: safe text before the next candidate, or a boundary at it.
+fn parse_step(
+    input: &mut Partial<&str>,
+    template: &ResponseTemplate,
+    watch: &[Watch],
+    candidates: &[String],
+    eof: bool,
+) -> ModalResult<Step> {
+    let candidate_refs: Vec<&str> = candidates.iter().map(String::as_str).collect();
+    match safe_text_len_mul(input, &candidate_refs) {
+        Ok(0) => {}
+        Ok(_) => return Ok(Step::Text),
+        // At the end of the stream a partial candidate is plain text.
+        Err(ErrMode::Incomplete(_)) if eof => {
+            let len = input.eof_offset();
+            input.next_slice(len);
+            return Ok(Step::Text);
+        }
+        Err(error) => return Err(error),
+    }
+
+    // Any pending boundary blocks the position; otherwise the preferred match wins.
+    let text = **input;
+    let mut best: Option<BoundaryMatch> = None;
+    for &watch in watch {
+        match template.boundary(watch).resolve(text, eof) {
+            Resolution::Pending => return incomplete(),
+            Resolution::NoMatch => {}
+            Resolution::Matched { len, captures } => {
+                let candidate = BoundaryMatch {
+                    watch,
+                    len,
+                    captures,
+                };
+                if best.as_ref().is_none_or(|best| candidate.key(template) < best.key(template)) {
+                    best = Some(candidate);
+                }
+            }
+        }
+    }
+
+    match best {
+        Some(BoundaryMatch {
+            watch,
+            len,
+            captures,
+        }) => {
+            input.next_slice(len);
+            Ok(Step::Boundary { watch, captures })
+        }
+        None => {
+            // Not a boundary: the candidate's first character is plain text.
+            let len = text.chars().next().map_or(0, char::len_utf8);
+            input.next_slice(len);
+            Ok(Step::Text)
+        }
+    }
+}
+
+impl UnifiedParser for HfUnifiedParser {
+    fn create(_tools: &[Tool], _tokenizer: DynTokenizer) -> Result<Box<dyn UnifiedParser>>
+    where
+        Self: Sized + 'static,
+    {
+        Err(unsupported!(
+            "the `hf` parser is built from the checkpoint's response_template; construct it with \
+             `HfUnifiedParser::new`"
+        )
+        .into())
+    }
+
+    fn initialize(&mut self, prompt_token_ids: &[u32]) -> Result<()> {
+        self.reset_state();
+        if prompt_token_ids.is_empty() {
+            return Ok(());
+        }
+        let Some(remainder) = self.prompt_remainder(prompt_token_ids)? else {
+            self.template.warn_missing_anchor_once();
+            return Ok(());
+        };
+        // A partial boundary at the end of the prompt stays buffered, so the
+        // generated text can complete it.
+        self.buffer = DecodedText::unattributed(remainder);
+        self.drive(&mut UnifiedParserOutput::default(), Mode::Prefill)
+    }
+
+    fn preserve_special_tokens(&self) -> bool {
+        // Templates spell boundaries with special tokens and expect decoding
+        // with them kept.
+        true
+    }
+
+    // TODO: derive a structural-tag output grammar from literal-bounded templates.
+
+    fn parse_into(&mut self, delta: DecodedText, output: &mut UnifiedParserOutput) -> Result<()> {
+        self.buffer.append(delta);
+        self.drive(output, Mode::Stream)
+    }
+
+    fn finish(&mut self) -> Result<UnifiedParserOutput> {
+        let mut output = UnifiedParserOutput::default();
+        self.drive(&mut output, Mode::Eof)?;
+        // Trailing zero-width tokens carry no text for the step loop to consume.
+        let rest = self.buffer.take();
+        self.route(rest, &mut output, Mode::Eof);
+        self.close_current(&mut output, Mode::Eof)?;
+        for (region, strip) in self.template.regions.iter().zip(&mut self.strip) {
+            let held = take(&mut strip.held);
+            if region.role == Role::Reasoning {
+                push_dropped_reasoning(&mut output, held);
+            }
+        }
+
+        let missing: Vec<_> = self
+            .template
+            .regions
+            .iter()
+            .zip(&self.closed)
+            .filter(|(region, closed)| !region.optional && **closed == 0)
+            .map(|(region, _)| region.name.as_str())
+            .collect();
+        if !missing.is_empty() {
+            return Err(parsing_failed!(
+                "Required response_template fields missing from parsed output: {missing:?}"
+            ));
+        }
+
+        self.reset_state();
+        Ok(output)
+    }
+
+    fn reset(&mut self) -> String {
+        let mut raw = String::new();
+        if let Current::Implicit(occurrence) | Current::Explicit(occurrence) =
+            std::mem::replace(&mut self.current, Current::Sink)
+        {
+            raw.push_str(&occurrence.raw_open);
+            raw.push_str(&occurrence.body);
+            raw.push_str(&self.strip[occurrence.region].held.text);
+        }
+        raw.push_str(&self.buffer.take().text);
+        self.reset_state();
+        raw
+    }
+}

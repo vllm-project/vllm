@@ -5,11 +5,12 @@
 
 mod unified;
 
-use std::sync::Once;
+use std::sync::{Arc, Once};
 
 use futures::StreamExt as _;
 use tracing::info;
 use vllm_parser::output_grammar::{BuiltOutputGrammar, OutputGrammarContext};
+use vllm_parser::unified::hf::{HfTemplateError, HfUnifiedParser, ResponseTemplate};
 use vllm_parser::unified::{CombinedParser, UnifiedParser};
 use vllm_text::tokenizer::DynTokenizer;
 use xgrammar_structural_tag::ToolChoice;
@@ -20,7 +21,7 @@ use crate::error::Result;
 use crate::output::{ChatOutputProcessor, DynChatEventStream, DynDecodedTextEventStream};
 use crate::parser::reasoning::{ReasoningParser, ReasoningParserFactory};
 use crate::parser::tool::{ToolParser, ToolParserFactory};
-use crate::parser::unified::UnifiedParserFactory;
+use crate::parser::unified::{UnifiedParserFactory, names};
 use crate::parser::{ParserSelection, ToolStrictLevel};
 use crate::request::{ChatRequest, ChatTool};
 use crate::{Error, Result as ChatResult};
@@ -64,9 +65,32 @@ impl DefaultChatOutputProcessor {
         reasoning_parser: &ParserSelection,
         tool_strict_level: ToolStrictLevel,
     ) -> ChatResult<Self> {
+        Self::with_response_template(
+            request,
+            model_id,
+            tokenizer,
+            None,
+            tool_call_parser,
+            reasoning_parser,
+            tool_strict_level,
+        )
+    }
+
+    /// Like [`Self::new`], additionally providing the model's compiled
+    /// `response_template` for the `hf` parser.
+    pub fn with_response_template(
+        request: &mut ChatRequest,
+        model_id: &str,
+        tokenizer: DynTokenizer,
+        response_template: Option<&Arc<ResponseTemplate>>,
+        tool_call_parser: &ParserSelection,
+        reasoning_parser: &ParserSelection,
+        tool_strict_level: ToolStrictLevel,
+    ) -> ChatResult<Self> {
         let parser = if let Some(parser) = Self::resolve_optional_unified_parser(
             request.tools(),
             tokenizer.clone(),
+            response_template,
             tool_call_parser.resolve_tool_name(model_id),
             reasoning_parser.resolve_reasoning_name(model_id),
         )? {
@@ -141,12 +165,15 @@ impl DefaultChatOutputProcessor {
     fn resolve_optional_unified_parser(
         tools: &[ChatTool],
         tokenizer: DynTokenizer,
+        response_template: Option<&Arc<ResponseTemplate>>,
         tool_name: Option<&str>,
         reasoning_name: Option<&str>,
     ) -> ChatResult<Option<Box<dyn UnifiedParser>>> {
         let factory = UnifiedParserFactory::global();
-        let Some(parser_name) =
-            tool_name.into_iter().chain(reasoning_name).find(|name| factory.contains(name))
+        let Some(parser_name) = tool_name
+            .into_iter()
+            .chain(reasoning_name)
+            .find(|name| *name == names::HF || factory.contains(name))
         else {
             return Ok(None);
         };
@@ -157,7 +184,20 @@ impl DefaultChatOutputProcessor {
             });
         }
 
-        let parser = factory.create(parser_name, tools, tokenizer)?;
+        let parser = if parser_name == names::HF {
+            let template = response_template.ok_or_else(|| Error::ParserInitialization {
+                kind: "unified",
+                name: parser_name.to_string(),
+                error: Box::new(HfTemplateError::Unsupported {
+                    message: "the model provides no usable `response_template` in \
+                              tokenizer_config.json (see the model loading logs)"
+                        .to_string(),
+                }),
+            })?;
+            Box::new(HfUnifiedParser::new(template.clone(), tools, tokenizer))
+        } else {
+            factory.create(parser_name, tools, tokenizer)?
+        };
 
         UNIFIED_PARSER_LOG_ONCE.call_once(|| info!(parser_name, "using unified parser"));
         Ok(Some(parser))
@@ -230,6 +270,8 @@ impl ChatOutputProcessor for DefaultChatOutputProcessor {
 mod tests {
     use std::sync::Arc;
 
+    use thiserror_ext::AsReport as _;
+    use vllm_parser::unified::hf::ResponseTemplate;
     use vllm_tokenizer::test_utils::TestTokenizer;
 
     use super::DefaultChatOutputProcessor;
@@ -388,6 +430,75 @@ mod tests {
         };
 
         expect_test::expect!["unified parsing requires the tool and reasoning selections to resolve to the same parser; resolved tool=qwen3_xml, reasoning=gemma4"]
+            .assert_eq(&format!("{error}"));
+    }
+
+    fn hf_template() -> Arc<ResponseTemplate> {
+        Arc::new(
+            ResponseTemplate::from_json(&serde_json::json!({
+                "start_anchor": "<|turn>model\n",
+                "fields": {
+                    "thinking": {"open": "<|channel>thought\n", "close": "<channel|>"},
+                    "content": {"close": "<turn|>"},
+                },
+            }))
+            .unwrap(),
+        )
+    }
+
+    #[test]
+    fn explicit_hf_uses_the_model_response_template() {
+        let mut request = ChatRequest::for_test();
+        let hf = ParserSelection::Explicit("hf".to_string());
+
+        DefaultChatOutputProcessor::with_response_template(
+            &mut request,
+            "other-model",
+            tokenizer(),
+            Some(&hf_template()),
+            &hf,
+            &hf,
+            ToolStrictLevel::Auto,
+        )
+        .unwrap();
+        assert!(!request.decode_options.skip_special_tokens);
+    }
+
+    #[test]
+    fn explicit_hf_without_response_template_fails() {
+        let hf = ParserSelection::Explicit("hf".to_string());
+        let error = match DefaultChatOutputProcessor::new(
+            &mut ChatRequest::for_test(),
+            "other-model",
+            tokenizer(),
+            &hf,
+            &hf,
+            ToolStrictLevel::Auto,
+        ) {
+            Ok(_) => panic!("expected hf without a response_template to fail"),
+            Err(error) => error,
+        };
+
+        expect_test::expect!["failed to initialize unified parser `hf`: unsupported response_template: the model provides no usable `response_template` in tokenizer_config.json (see the model loading logs)"]
+            .assert_eq(&error.to_report_string());
+    }
+
+    #[test]
+    fn hf_requires_matching_parser_selections() {
+        let error = match DefaultChatOutputProcessor::with_response_template(
+            &mut ChatRequest::for_test(),
+            "other-model",
+            tokenizer(),
+            Some(&hf_template()),
+            &ParserSelection::Explicit("hf".to_string()),
+            &ParserSelection::None,
+            ToolStrictLevel::Auto,
+        ) {
+            Ok(_) => panic!("expected mixed hf parser selection to fail"),
+            Err(error) => error,
+        };
+
+        expect_test::expect!["unified parsing requires the tool and reasoning selections to resolve to the same parser; resolved tool=hf, reasoning=none"]
             .assert_eq(&format!("{error}"));
     }
 }

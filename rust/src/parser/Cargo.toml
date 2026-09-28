@@ -9,11 +9,14 @@ test-util = []
 
 [dependencies]
 easy-ext.workspace = true
+regex-automata.workspace = true
+regex-syntax.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 serde_with.workspace = true
 thiserror.workspace = true
 thiserror-ext.workspace = true
+tracing.workspace = true
 vllm-tokenizer.workspace = true
 winnow.workspace = true
 xgrammar-structural-tag.workspace = true
