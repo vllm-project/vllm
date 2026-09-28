@@ -1,11 +1,28 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import os
+from unittest.mock import patch
+
 import pytest
 import regex as re
 import requests
+import torch
+from transformers import AutoModelForCausalLM
 
-from tests.entrypoints.serve.dev.rlhf.conftest import gen, health, ok, server
+from tests.entrypoints.serve.dev.rlhf.conftest import (
+    MODEL_NAME,
+    gen,
+    health,
+    ok,
+    server,
+)
 from tests.utils import multi_gpu_test
+from vllm.distributed.weight_transfer import (
+    HTTPVLLMWeightSyncClient,
+    ModuleSource,
+    WeightTransferTrainerFactory,
+)
+from vllm.distributed.weight_transfer.ipc_engine import IPCTrainerInitInfo
 
 
 def weight_checker(url: str, action: str, baseline=None) -> requests.Response:
@@ -72,6 +89,29 @@ class TestSingleGPU:
     def test_reset_changes_weights_and_reload_restores_them(self, server_url):
         reset_reload_and_compare(server_url)
         assert ok(gen(server_url))
+
+
+def test_ipc_weight_transfer_restores_reset_weights():
+    """The documented RL flow: reset, then transfer the checkpoint back."""
+    args = ["--weight-transfer-config", '{"backend": "ipc"}']
+    with (
+        patch.dict(os.environ, {"VLLM_ALLOW_INSECURE_SERIALIZATION": "1"}),
+        server(extra_args=args, port=8772) as url,
+    ):
+        baseline = checksums(url)
+        weight_checker(url, "reset").raise_for_status()
+        trainer_model = AutoModelForCausalLM.from_pretrained(
+            MODEL_NAME, torch_dtype=torch.bfloat16
+        ).cuda()
+        WeightTransferTrainerFactory.trainer_init(
+            IPCTrainerInitInfo(rank=0),
+            client=HTTPVLLMWeightSyncClient(url),
+            source=ModuleSource(trainer_model),
+        ).send_weights()
+        assert weight_checker(url, "compare", baseline).json() == {
+            "match": True,
+            "mismatches": [],
+        }
 
 
 @multi_gpu_test(num_gpus=4)
