@@ -164,8 +164,12 @@ class StagedWriteTensor:
 
         self._staged_write_indices: list[int] = []
         self._staged_write_starts: list[int] = []
-        self._staged_write_contents: list[int | float] = []
+        self._staged_write_contents: list[np.ndarray] = []
+        self._staged_write_numel = 0
         self._staged_write_cu_lens: list[int] = []
+        self._staged_write_np_dtype = torch.empty(
+            0, dtype=dtype, device="cpu"
+        ).numpy().dtype
 
         new_buffer = partial(UvaBufferPool, max_concurrency=max_concurrency)
 
@@ -175,23 +179,43 @@ class StagedWriteTensor:
         self.write_contents = new_buffer(1, dtype=dtype) if uva_instead_of_gpu else None
 
     def stage_write(
-        self, index: int, start: int, x: Iterable[int] | Iterable[float]
+        self,
+        index: int,
+        start: int,
+        x: Iterable[int] | Iterable[float] | np.ndarray,
     ) -> None:
         assert index >= 0
         assert start >= 0
-        if not x:
+        if isinstance(x, np.ndarray):
+            contents = x.astype(self._staged_write_np_dtype, copy=False).reshape(-1)
+        elif isinstance(x, (list, tuple)):
+            contents = np.asarray(x, dtype=self._staged_write_np_dtype).reshape(-1)
+        else:
+            contents = np.fromiter(x, dtype=self._staged_write_np_dtype)
+        if contents.size == 0:
             return
         self._staged_write_indices.append(index)
         self._staged_write_starts.append(start)
-        self._staged_write_contents.extend(x)
-        self._staged_write_cu_lens.append(len(self._staged_write_contents))
+        self._staged_write_contents.append(contents)
+        self._staged_write_numel += contents.size
+        self._staged_write_cu_lens.append(self._staged_write_numel)
 
     def stage_write_elem(self, index: int, x: int) -> None:
         assert index >= 0
         self._staged_write_indices.append(index)
         self._staged_write_starts.append(0)
-        self._staged_write_contents.append(x)
-        self._staged_write_cu_lens.append(len(self._staged_write_contents))
+        self._staged_write_contents.append(
+            np.asarray([x], dtype=self._staged_write_np_dtype)
+        )
+        self._staged_write_numel += 1
+        self._staged_write_cu_lens.append(self._staged_write_numel)
+
+    def _materialize_staged_write_contents(self) -> np.ndarray:
+        if not self._staged_write_contents:
+            return np.empty(0, dtype=self._staged_write_np_dtype)
+        if len(self._staged_write_contents) == 1:
+            return self._staged_write_contents[0]
+        return np.concatenate(self._staged_write_contents)
 
     def apply_write(self) -> None:
         n = len(self._staged_write_indices)
@@ -202,14 +226,13 @@ class StagedWriteTensor:
         starts_uva = self.write_starts.copy_to_uva(self._staged_write_starts)
         cu_lens_uva = self.write_cu_lens.copy_to_uva(self._staged_write_cu_lens)
 
+        contents = self._materialize_staged_write_contents()
         if self.write_contents is None:
             write_contents = async_tensor_h2d(
-                self._staged_write_contents, device=self.device, dtype=self.dtype
+                contents, device=self.device, dtype=self.dtype
             )
         else:
-            write_contents = self.write_contents.copy_to_uva(
-                self._staged_write_contents
-            )
+            write_contents = self.write_contents.copy_to_uva(contents)
 
         # Write diffs to the GPU buffer
         _apply_write_kernel[(n,)](
@@ -230,6 +253,7 @@ class StagedWriteTensor:
         self._staged_write_indices.clear()
         self._staged_write_starts.clear()
         self._staged_write_contents.clear()
+        self._staged_write_numel = 0
         self._staged_write_cu_lens.clear()
 
 
@@ -258,7 +282,8 @@ class FusedStagedWriter:
         group_ids: list[int] = []
         indices: list[int] = []
         starts: list[int] = []
-        contents: list[int | float] = []
+        content_chunks: list[np.ndarray] = []
+        num_contents = 0
         cu_lens: list[int] = []
 
         for group_id, t in enumerate(tensors):
@@ -269,8 +294,9 @@ class FusedStagedWriter:
             group_ids.extend([group_id] * n)
             indices.extend(t._staged_write_indices)
             starts.extend(t._staged_write_starts)
-            content_base = len(contents)
-            contents.extend(t._staged_write_contents)
+            content_base = num_contents
+            content_chunks.extend(t._staged_write_contents)
+            num_contents += t._staged_write_numel
             cu_lens.extend(content_base + cu_len for cu_len in t._staged_write_cu_lens)
 
         if not group_ids:
@@ -280,6 +306,11 @@ class FusedStagedWriter:
         indices_uva = self.indices.copy_to_uva(indices)
         starts_uva = self.starts.copy_to_uva(starts)
         cu_lens_uva = self.cu_lens.copy_to_uva(cu_lens)
+        contents = (
+            content_chunks[0]
+            if len(content_chunks) == 1
+            else np.concatenate(content_chunks)
+        )
         contents_gpu = async_tensor_h2d(contents, device=self.device, dtype=torch.int32)
 
         _apply_write_kernel[(len(group_ids),)](
