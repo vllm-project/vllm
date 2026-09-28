@@ -58,6 +58,7 @@ if current_platform.is_xpu():
     from .fusion.xpu_moe_shared_fusion import XpuMoESharedFusionPass
     from .fusion.xpu_qkv_norm_rope_fusion import XpuQkvNormRopeFusionPass
     from .utility.xpu_all_reduce_inplace import XpuAllReduceInplacePass
+    from .utility.xpu_gdn_output_alloc import XpuGdnOutputAllocPass
 
 from .inductor_pass import (
     CustomGraphPass,
@@ -232,6 +233,9 @@ class PostGradPassManager(CustomGraphPass):  # type: ignore[misc]
 
             if self.pass_config.fuse_xpu_qkv_norm_rope:
                 self.passes += [XpuQkvNormRopeFusionPass(config)]
+
+            if self.pass_config.xpu_gdn_output_alloc:
+                self.passes += [XpuGdnOutputAllocPass(config)]
 
             # After the fusions, which may change the all-reduce inputs.
             if self.pass_config.xpu_inplace_all_reduce:

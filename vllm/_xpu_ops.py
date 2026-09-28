@@ -215,6 +215,9 @@ def _gdn_attention_core_xpu_impl(
     attn_metadata_raw = forward_context.attn_metadata
 
     if attn_metadata_raw is None:
+        # Profile / dummy run: define the output (callers may allocate it
+        # uninitialized, see XpuGdnOutputAllocPass).
+        core_attn_out.zero_()
         return
 
     assert isinstance(attn_metadata_raw, dict)
@@ -285,6 +288,10 @@ def _gdn_attention_core_xpu_impl(
         tp_size=self.tp_size,
         reorder_input=not self.gqa_interleaved_layout,
     )
+    # The kernel writes the first num_actual_tokens rows; zero any padding
+    # rows so the whole output is defined.
+    if core_attn_out.size(0) > attn_metadata.num_actual_tokens:
+        core_attn_out[attn_metadata.num_actual_tokens :].zero_()
 
 
 def _xpu_ops_deepseek_scaling_rope_impl(

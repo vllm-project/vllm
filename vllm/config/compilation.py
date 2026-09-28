@@ -156,6 +156,9 @@ class PassConfig:
     fuse_xpu_qkv_norm_rope: bool = False
     """Fuse the gated QKV split, q/k RMSNorm and (M)RoPE of full attention
     into one XPU kernel."""
+    xpu_gdn_output_alloc: bool = False
+    """Allocate the XPU GDN core output uninitialized instead of zero-filled
+    (the XPU op defines every row itself)."""
     xpu_inplace_all_reduce: bool = False
     """Run the XPU tensor-parallel all-reduce in place (no input copy) where
     its input is a fresh intermediate with no other user."""
@@ -331,6 +334,12 @@ class PassConfig:
                 "not XPU. The fusion will be disabled."
             )
             self.fuse_xpu_qkv_norm_rope = False
+        if self.xpu_gdn_output_alloc and not current_platform.is_xpu():
+            logger.warning_once(
+                "XPU GDN output allocation pass enabled but the current platform "
+                "is not XPU. It will be disabled."
+            )
+            self.xpu_gdn_output_alloc = False
         if self.xpu_inplace_all_reduce and not current_platform.is_xpu():
             logger.warning_once(
                 "XPU in-place all-reduce enabled but the current platform is "
