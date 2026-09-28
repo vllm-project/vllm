@@ -50,6 +50,7 @@ from vllm.entrypoints.openai.chat_completion.serving import OpenAIServingChat
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.serve.engine.protocol import ErrorResponse, UsageInfo
 from vllm.entrypoints.serve.exception_handling.utils import sanitize_message
+from vllm.entrypoints.serve.utils.api_utils import ContinuousUsageStatsThrottler
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.logger import init_logger
 from vllm.renderers.hf import HfRenderer, resolve_chat_template
@@ -842,12 +843,19 @@ class AnthropicServingMessages(OpenAIServingChat):
 
             first_item = True
             finish_reason = None
+            # Whether the terminal empty-choices usage summary chunk has been
+            # seen; no intermediate usage update may follow it.
+            final_usage_seen = False
             # Matched stop string, when generation stopped on one (a str);
             # int stop-token-id / None are not stop sequences.
             stop_sequence: int | str | None = None
             state = _ActiveBlockState()
             # Map from tool call index to tool_use_id
             tool_index_to_id: dict[int, str] = {}
+            # Continuous usage-stats throttler (see api_utils): defines the
+            # cadence of intermediate message_delta usage events, shared
+            # policy with the other streaming endpoints.
+            usage_throttler = ContinuousUsageStatsThrottler()
 
             def stop_active_block():
                 events: list[str] = []
@@ -952,6 +960,9 @@ class AnthropicServingMessages(OpenAIServingChat):
 
                         # last chunk including usage info
                         if len(origin_chunk.choices) == 0:
+                            # No intermediate usage update may trail the final
+                            # summary; the flush below handles block teardown.
+                            final_usage_seen = True
                             for event in stop_and_flush():
                                 yield event
                             if isinstance(stop_sequence, str):
@@ -980,6 +991,29 @@ class AnthropicServingMessages(OpenAIServingChat):
                             finish_reason = origin_chunk.choices[0].finish_reason
                             stop_sequence = origin_chunk.choices[0].stop_reason
                             # continue
+
+                        # Intermediate continuous usage update (requested via
+                        # stream_options.continuous_usage_stats set during
+                        # request conversion). Mid-stream message_delta events
+                        # carry cumulative usage with an otherwise-empty
+                        # delta; only the terminal message_delta (empty-choices
+                        # chunk above) may carry stop_reason / cache details.
+                        if (
+                            origin_chunk.usage is not None
+                            and not final_usage_seen
+                            and usage_throttler.should_emit(
+                                origin_chunk.usage.completion_tokens or 0,
+                                terminal=finish_reason is not None,
+                            )
+                        ):
+                            usage_chunk = AnthropicStreamEvent(
+                                type="message_delta",
+                                # Set explicitly so exclude_unset=True keeps it.
+                                delta=AnthropicDelta(stop_sequence=None),
+                                usage=_build_anthropic_usage(origin_chunk.usage),
+                            )
+                            usage_data = usage_chunk.model_dump_json(exclude_unset=True)
+                            yield wrap_data_with_event(usage_data, "message_delta")
 
                         # thinking / text content
                         reasoning_delta = origin_chunk.choices[0].delta.reasoning
