@@ -9,9 +9,7 @@ are never computed. Output is bf16 (ll_bf16's fp32-output bonus is given up
 to preserve the production rounding boundary).
 
 The GEMM uses an FMA backend for M <= 4 and a split-K MMA backend beyond,
-both with PDL. It is bit-identical to the unfused
-``hc_silu(bf16(ll_bf16_gemm))`` reference on the computed columns. Dispatch
-is gated to M <= 48 with an F.linear + hc_silu fallback.
+both with PDL. Dispatch is gated to M <= 48 with an F.linear + hc_silu fallback.
 """
 
 from __future__ import annotations
@@ -37,14 +35,8 @@ _MAX_FUSED_M = 48
 _TUNED_SHAPE = (320, 4, 10240)
 
 _DEFAULT_FMA_MAX_M = 4
-# bs=256 is ~0.1-0.35 us faster on this shape but changes the shuffle
-# reduction tree, which breaks bit-identity with the ll_bf16 reference
-# (1-ulp flips observed at M=4 on GB300). bs=128 stays.
 _DEFAULT_FMA_BS = 128
-# (split_k, num_stages, tile_n); tile_n=16 and (6, 4) are the ll_bf16
-# defaults. split_k=6 keeps the ll_bf16 K-reduction order and is the only
-# split that stays bit-identical; num_stages/tile_n only affect pipelining
-# and N-tiling.
+# (split_k, num_stages, tile_n)
 _DEFAULT_SPLITK_CONFIG = (6, 4, 16)
 
 # SM100f-specific tuned split-K configs for the mHC down shape (K=10240,

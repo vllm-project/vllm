@@ -45,7 +45,7 @@ def st_shared_remote_f32(remote_addr, val, *, loc=None, ip=None):
 
 
 def _sigmoid_f32(x):
-    return 1.0 / (1.0 + cute.math.exp(x * (-1.0)))
+    return cute.math.rcp(1.0 + cute.math.exp(-x), approx=True)
 
 
 class HcDownSiluMma:

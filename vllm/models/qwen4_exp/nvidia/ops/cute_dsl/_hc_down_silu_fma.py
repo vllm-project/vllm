@@ -14,7 +14,7 @@ from cutlass import const_expr
 
 
 def _sigmoid_f32(x):
-    return 1.0 / (1.0 + cute.math.exp(x * (-1.0)))
+    return cute.math.rcp(1.0 + cute.math.exp(-x), approx=True)
 
 
 class HcDownSiluFma:
