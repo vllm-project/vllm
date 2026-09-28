@@ -356,9 +356,9 @@ __global__ void wvSplitK_int4_hf_sml_(
 }
 #endif  // defined(__HIP__GFX1X__)
 
-// W4A16 skinny GEMM "medium" kernel: activation matrix marginally exceeds LDS.
-// Loads as much of A into LDS as fits; overflowing rows fall back to global
-// memory.  Also handles M not divisible by YTILE via commitColumn tracking.
+// W4A16 skinny GEMM "medium" kernel: the activation exceeds LDS. Loads as
+// much of A into LDS as fits; overflowing rows fall back to global memory.
+// Also handles M not divisible by YTILE via commitColumn tracking.
 #if defined(__HIP__GFX1X__)
 template <typename scalar_t, int THRDS, int YTILE, int WvPrGrp, int A_CHUNK,
           int UNRL, int N, int GROUP_SIZE = 0, bool HAS_ZERO_POINTS = false>
