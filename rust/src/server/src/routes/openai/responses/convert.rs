@@ -16,7 +16,8 @@ use tracing::warn;
 use uuid::Uuid;
 use vllm_chat::{
     AssistantContentBlock, AssistantToolCall, ChatContent, ChatContentPart, ChatMessage,
-    ChatOptions, ChatRequest, ChatTool, ChatToolChoice, GenerationPromptMode, ResolvedToolContext,
+    ChatOptions, ChatRequest, ChatTool, ChatToolChoice, Error as ChatError, GenerationPromptMode,
+    ResolvedToolContext,
 };
 use vllm_text::SamplingParams;
 use vllm_text::output::TextDecodeOptions;
@@ -31,6 +32,7 @@ use super::types::{
 use super::validate;
 use crate::error::{ApiError, bail_invalid_request};
 use crate::lora::LoraModelResolution;
+use crate::routes::openai::utils::resolve_generation_prompt_truncation;
 use crate::routes::openai::utils::structured_outputs::{
     JsonSchemaFormat, ResponseFormat, convert_from_response_format,
 };
@@ -110,6 +112,7 @@ pub(crate) fn prepare_responses_request(
         background: _,
         stream,
         temperature,
+        watermarking,
         top_p,
         top_k,
         top_logprobs,
@@ -161,9 +164,15 @@ pub(crate) fn prepare_responses_request(
         parallel_tool_calls.unwrap_or(true),
     )
     .map_err(|error| {
+        let param = match &error {
+            ChatError::ToolChoiceRequiresTools | ChatError::ToolChoiceFunctionNotFound { .. } => {
+                "tool_choice"
+            }
+            _ => "tools",
+        };
         ApiError::invalid_request(
             format!("failed to resolve request tools: {error}"),
-            Some("tools"),
+            Some(param),
         )
     })?;
 
@@ -224,13 +233,14 @@ pub(crate) fn prepare_responses_request(
         })?;
 
     let session_id = resolve_session_id(&ctx, session_id.as_deref(), vllm_xargs.as_ref());
+    let prompt_truncation = response_prompt_truncation(truncation.as_deref())?;
 
     let chat_request = ChatRequest {
         request_id: request_id.clone(),
         messages,
         sampling_params: SamplingParams {
             temperature,
-            watermarking: true,
+            watermarking,
             top_p,
             top_k,
             seed,
@@ -239,6 +249,8 @@ pub(crate) fn prepare_responses_request(
             thinking_token_budget: None,
             logprobs: None,
             prompt_logprobs: None,
+            prompt_logprob_token_ids: None,
+            prompt_logprob_start: None,
             min_p: None,
             frequency_penalty,
             presence_penalty,
@@ -272,7 +284,7 @@ pub(crate) fn prepare_responses_request(
             min_tokens: min_tokens.unwrap_or(0),
         },
         intermediate: stream,
-        prompt_truncation: None,
+        prompt_truncation,
         priority: ctx.priority.or(priority).unwrap_or(0),
         documents: None,
         cache_salt,
@@ -309,6 +321,25 @@ pub(crate) fn prepare_responses_request(
         request_id,
         meta,
         chat_request,
+    })
+}
+
+/// Map Responses API truncation onto the shared chat prompt policy.
+///
+/// `auto` retains the newest prompt tokens that fit after output-token
+/// reservation, matching the Python Responses frontend.
+fn response_prompt_truncation(
+    truncation: Option<&str>,
+) -> Result<Option<vllm_text::PromptTruncation>, ApiError> {
+    if truncation != Some("auto") {
+        return Ok(None);
+    }
+
+    resolve_generation_prompt_truncation(Some(-1), None).map_err(|error| {
+        ApiError::invalid_request(
+            format!("invalid automatic prompt truncation: {error}"),
+            Some("truncation"),
+        )
     })
 }
 
@@ -816,7 +847,7 @@ pub(crate) fn build_usage(usage: &vllm_chat::ChatTokenUsage) -> ResponseUsage {
 }
 
 /// Build the top-level response object for non-streaming responses and the
-/// terminal `response.completed` event.
+/// terminal streaming event.
 pub(crate) fn build_response(
     meta: &ResponseMeta,
     request_id: &str,
@@ -920,6 +951,17 @@ mod tests {
     }
 
     #[test]
+    fn responses_function_tool_defaults_parameters_to_null() {
+        let tools = convert_tools(&[json!({
+            "type": "function",
+            "name": "lookup",
+        })])
+        .expect("convert function tool");
+
+        assert_eq!(tools[0].parameters, Value::Null);
+    }
+
+    #[test]
     fn usage_preserves_reasoning_and_cached_token_counts() {
         let usage = build_usage(&ChatTokenUsage {
             engine: TokenUsage {
@@ -933,5 +975,12 @@ mod tests {
         assert_eq!(usage.input_tokens_details.cached_tokens, 3);
         assert_eq!(usage.output_tokens_details.reasoning_tokens, 2);
         assert_eq!(usage.total_tokens, 12);
+    }
+
+    #[test]
+    fn auto_truncation_uses_the_shared_input_budget_policy() {
+        assert!(response_prompt_truncation(Some("disabled")).unwrap().is_none());
+        assert!(response_prompt_truncation(None).unwrap().is_none());
+        assert!(response_prompt_truncation(Some("auto")).unwrap().is_some());
     }
 }

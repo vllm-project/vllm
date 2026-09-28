@@ -8,7 +8,7 @@
 //! simple (non-Harmony) streaming path of the Python frontend in
 //! `vllm/entrypoints/openai/responses/streaming_events.py`, with one
 //! deliberate improvement: item IDs stay consistent between streamed events
-//! and the terminal `response.completed` payload.
+//! and the terminal response payload.
 
 use serde_json::{Map, Value};
 use uuid::Uuid;
@@ -57,7 +57,7 @@ impl ResponseStreamEvent {
 }
 
 /// Build one lifecycle event (`response.created`, `response.in_progress`,
-/// `response.completed`, `response.failed`).
+/// `response.completed`, `response.incomplete`, `response.failed`).
 pub(crate) fn response_lifecycle_event(
     event_type: &'static str,
     response: &super::types::ResponsesResponse,
@@ -87,6 +87,9 @@ pub(crate) struct OutputItemStreamer {
     /// IDs of streamed items in emission order, together with their block
     /// kind. Used to keep final-response item IDs consistent with the stream.
     streamed_ids: Vec<(AssistantBlockKind, String)>,
+    /// Completed items emitted before the terminal event. This supplies the
+    /// authoritative partial output when an upstream stream fails.
+    completed_items: Vec<ResponseOutputItem>,
 }
 
 /// The currently streamed assistant output item.
@@ -115,6 +118,7 @@ impl OutputItemStreamer {
             current: None,
             include_reasoning,
             streamed_ids: Vec::new(),
+            completed_items: Vec::new(),
         }
     }
 
@@ -205,6 +209,11 @@ impl OutputItemStreamer {
             }
         }
         items
+    }
+
+    /// Return completed streamed items for a failed terminal response.
+    pub(crate) fn completed_output_items(&self) -> Vec<ResponseOutputItem> {
+        self.completed_items.clone()
     }
 
     fn open_reasoning_if_needed(&mut self) -> Vec<ResponseStreamEvent> {
@@ -350,7 +359,7 @@ impl OutputItemStreamer {
             return vec![];
         };
         let output_index = self.output_index;
-        let events = match open {
+        let (events, item) = match open {
             OpenItem::Reasoning { item_id, text } => {
                 let part = TextPart::reasoning_text(text.clone());
                 let item = ResponseOutputItem::Reasoning {
@@ -359,24 +368,27 @@ impl OutputItemStreamer {
                     content: Some(vec![part.clone()]),
                     status: Some(ResponseItemStatus::Completed),
                 };
-                vec![
-                    part_event(
-                        "response.reasoning_text.done",
-                        output_index,
-                        &item_id,
-                        [("text", Value::String(text))],
-                    ),
-                    part_event(
-                        "response.reasoning_part.done",
-                        output_index,
-                        &item_id,
-                        [(
-                            "part",
-                            serde_json::to_value(part).expect("part must serialize"),
-                        )],
-                    ),
-                    output_item_event("response.output_item.done", output_index, item),
-                ]
+                (
+                    vec![
+                        part_event(
+                            "response.reasoning_text.done",
+                            output_index,
+                            &item_id,
+                            [("text", Value::String(text))],
+                        ),
+                        part_event(
+                            "response.reasoning_part.done",
+                            output_index,
+                            &item_id,
+                            [(
+                                "part",
+                                serde_json::to_value(part).expect("part must serialize"),
+                            )],
+                        ),
+                        output_item_event("response.output_item.done", output_index, item.clone()),
+                    ],
+                    item,
+                )
             }
             OpenItem::Message { item_id, text } => {
                 let part = ResponseOutputContentPart::OutputText {
@@ -390,27 +402,30 @@ impl OutputItemStreamer {
                     status: ResponseItemStatus::Completed,
                     content: vec![part.clone()],
                 };
-                vec![
-                    part_event(
-                        "response.output_text.done",
-                        output_index,
-                        &item_id,
-                        [
-                            ("text", Value::String(text)),
-                            ("logprobs", Value::Array(vec![])),
-                        ],
-                    ),
-                    part_event(
-                        "response.content_part.done",
-                        output_index,
-                        &item_id,
-                        [(
-                            "part",
-                            serde_json::to_value(&part).expect("part must serialize"),
-                        )],
-                    ),
-                    output_item_event("response.output_item.done", output_index, item),
-                ]
+                (
+                    vec![
+                        part_event(
+                            "response.output_text.done",
+                            output_index,
+                            &item_id,
+                            [
+                                ("text", Value::String(text)),
+                                ("logprobs", Value::Array(vec![])),
+                            ],
+                        ),
+                        part_event(
+                            "response.content_part.done",
+                            output_index,
+                            &item_id,
+                            [(
+                                "part",
+                                serde_json::to_value(&part).expect("part must serialize"),
+                            )],
+                        ),
+                        output_item_event("response.output_item.done", output_index, item.clone()),
+                    ],
+                    item,
+                )
             }
             OpenItem::FunctionCall {
                 item_id,
@@ -440,20 +455,22 @@ impl OutputItemStreamer {
                         ("name", Value::String(name.clone())),
                     ],
                 )];
+                let item = ResponseOutputItem::FunctionCall {
+                    id: item_id,
+                    call_id,
+                    name,
+                    arguments,
+                    status: Some(ResponseItemStatus::Completed),
+                };
                 events.push(output_item_event(
                     "response.output_item.done",
                     output_index,
-                    ResponseOutputItem::FunctionCall {
-                        id: item_id,
-                        call_id,
-                        name,
-                        arguments,
-                        status: Some(ResponseItemStatus::Completed),
-                    },
+                    item.clone(),
                 ));
-                events
+                (events, item)
             }
         };
+        self.completed_items.push(item);
         self.output_index += 1;
         events
     }

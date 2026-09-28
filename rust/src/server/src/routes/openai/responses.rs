@@ -188,7 +188,8 @@ struct TerminalOutput {
 ///
 /// Emits `response.created`/`response.in_progress` upfront, item events as
 /// generation proceeds, and one terminal `response.completed` or
-/// `response.failed` event. Mid-stream errors are reported through
+/// `response.failed` event. A completed event can carry an incomplete response,
+/// matching the Python frontend. Mid-stream errors are reported through
 /// `response.failed` so the transport stream itself stays infallible.
 #[try_stream]
 async fn responses_event_stream(
@@ -239,11 +240,15 @@ async fn responses_event_stream(
             }
             Err(error) => {
                 error!(error = %error.as_report(), "responses stream failed");
+                for event in items.on_stream_end() {
+                    y.yield_ok(event).await;
+                }
                 emit_failed(
                     &mut y,
                     &meta,
                     &request_id,
                     created_at,
+                    items.completed_output_items(),
                     "The response stream failed before generation completed.",
                 )
                 .await;
@@ -263,6 +268,7 @@ async fn responses_event_stream(
             &meta,
             &request_id,
             created_at,
+            items.completed_output_items(),
             "The response stream ended before generation completed.",
         )
         .await;
@@ -282,6 +288,7 @@ async fn responses_event_stream(
             &meta,
             &request_id,
             created_at,
+            items.final_output_items(&message),
             "The model failed to generate a response.",
         )
         .await;
@@ -312,13 +319,14 @@ async fn emit_failed(
     meta: &ResponseMeta,
     request_id: &str,
     created_at: u64,
+    output: Vec<self::types::ResponseOutputItem>,
     message: &str,
 ) {
     let mut failed = build_response(
         meta,
         request_id,
         created_at,
-        vec![],
+        output,
         ResponseItemStatus::Failed,
         None,
         None,

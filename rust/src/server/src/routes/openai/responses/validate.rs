@@ -29,7 +29,11 @@ pub(super) fn validate_request_compat(request: &ResponsesRequest) -> Result<(), 
         ));
     }
 
-    if request.previous_input_messages.is_some() {
+    if request
+        .previous_input_messages
+        .as_ref()
+        .is_some_and(|messages| !messages.is_empty())
+    {
         bail_invalid_request!(
             param = "previous_input_messages",
             "previous_input_messages requires Harmony rendering, which is not supported by this frontend."
@@ -50,19 +54,13 @@ pub(super) fn validate_request_compat(request: &ResponsesRequest) -> Result<(), 
         );
     }
 
-    if let Some(truncation) = &request.truncation {
-        if truncation == "auto" {
-            bail_invalid_request!(
-                param = "truncation",
-                "truncation='auto' is not supported by this frontend."
-            );
-        }
-        if truncation != "disabled" {
-            bail_invalid_request!(
-                param = "truncation",
-                "truncation must be 'disabled'; got '{truncation}'."
-            );
-        }
+    if let Some(truncation) = &request.truncation
+        && !matches!(truncation.as_str(), "auto" | "disabled")
+    {
+        bail_invalid_request!(
+            param = "truncation",
+            "truncation must be 'auto' or 'disabled'; got '{truncation}'."
+        );
     }
 
     if request.max_tool_calls.is_some() {
@@ -137,11 +135,10 @@ mod tests {
     }
 
     #[test]
-    fn auto_truncation_is_rejected_until_it_is_implemented() {
+    fn auto_truncation_is_accepted() {
         let mut request = base_request();
         request.truncation = Some("auto".to_string());
-        let error = validate_request_compat(&request).unwrap_err();
-        assert!(matches!(error, ApiError::InvalidRequest { .. }));
+        assert!(validate_request_compat(&request).is_ok());
     }
 
     #[test]
@@ -162,6 +159,14 @@ mod tests {
     }
 
     #[test]
+    fn empty_previous_input_messages_are_accepted_as_no_history() {
+        let mut request = base_request();
+        request.previous_input_messages = Some(vec![]);
+
+        assert!(validate_request_compat(&request).is_ok());
+    }
+
+    #[test]
     fn output_presentation_controls_are_accepted_for_compatibility() {
         let request = serde_json::from_value(json!({
             "model": "test-model",
@@ -171,7 +176,6 @@ mod tests {
             "text": {"verbosity": "low"},
         }))
         .unwrap();
-
         assert!(validate_request_compat(&request).is_ok());
     }
 }
