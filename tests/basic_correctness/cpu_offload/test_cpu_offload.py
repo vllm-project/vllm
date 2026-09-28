@@ -15,7 +15,7 @@ from vllm.model_executor.offloader import (
 )
 from vllm.v1.worker.gpu.model_runner import GPUModelRunner
 
-from ..utils import compare_two_settings
+from ...utils import compare_two_settings
 
 
 @pytest.mark.parametrize("disable_pin_memory", [False, True])
