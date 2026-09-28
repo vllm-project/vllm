@@ -309,6 +309,7 @@ class KimiK3KDAMetadataBuilder(GDNAttentionMetadataBuilder):
     # builder, and KDA reads per-request offsets off device within a fixed k+1 window,
     # so one k+1 graph replays any 1..k+1 mix.
     _cudagraph_support = AttentionCGSupport.ALWAYS
+    mamba_aligned_state_indices: torch.Tensor | None = None
 
     def __init__(
         self,
@@ -398,8 +399,9 @@ class KimiK3KDAMetadataBuilder(GDNAttentionMetadataBuilder):
         # KV cache groups of one pass differ only in their block tables, so
         # later groups reuse the first group's metadata.
         cache = m._cross_group_cache
-        if cache is not None and type(self) in cache:
-            return self._with_state_indices(block_table_tensor, m, *cache[type(self)])
+        cache_key = (self.kv_cache_spec, type(self))
+        if cache is not None and cache_key in cache:
+            return self._with_state_indices(block_table_tensor, m, *cache[cache_key])
 
         if not self.use_spec_decode or num_decode_draft_tokens_cpu is None:
             spec_sequence_masks_cpu = None
@@ -669,7 +671,7 @@ class KimiK3KDAMetadataBuilder(GDNAttentionMetadataBuilder):
             num_computed_tokens,
         )
         if cache is not None:
-            cache[type(self)] = batch_metadata
+            cache[cache_key] = batch_metadata
         return self._with_state_indices(block_table_tensor, m, *batch_metadata)
 
     def _with_state_indices(  # type: ignore[override]

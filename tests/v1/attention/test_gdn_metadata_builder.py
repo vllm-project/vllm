@@ -22,6 +22,7 @@ from vllm.v1.attention.backends.gdn_attn import (
     GDNAttentionMetadata,
     GDNAttentionMetadataBuilder,
 )
+from vllm.v1.attention.backends.utils import mamba_get_block_table_tensor
 from vllm.v1.kv_cache_interface import MambaSpec
 
 BLOCK_SIZE = 16
@@ -74,6 +75,16 @@ GDN_BUILD_TEST_CASES = {
         expected_num_decodes=3,
         expected_num_prefills=0,
         expected_num_prefill_tokens=0,
+        expected_num_spec_decodes=0,
+    ),
+    "regular_decode_with_prefill": GDNBuildTestCase(
+        seq_lens=[40, 100],
+        query_lens=[1, 50],
+        num_decode_draft_tokens=None,
+        num_speculative_tokens=0,
+        expected_num_decodes=1,
+        expected_num_prefills=1,
+        expected_num_prefill_tokens=50,
         expected_num_spec_decodes=0,
     ),
     # Multi-token prefill alongside spec decode — no decode to reclassify
@@ -187,15 +198,19 @@ def test_gdn_build_classification(test_case: GDNBuildTestCase):
     assert meta.num_spec_decodes == test_case.expected_num_spec_decodes
 
 
+@pytest.mark.parametrize("mamba_cache_mode", ["none", "align"])
+@pytest.mark.parametrize("full_cuda_graph", [False, True])
 @pytest.mark.parametrize(
     "test_case", GDN_BUILD_TEST_CASES.values(), ids=GDN_BUILD_TEST_CASES.keys()
 )
-def test_cross_group_build(test_case: GDNBuildTestCase):
+def test_cross_group_build(
+    test_case: GDNBuildTestCase, full_cuda_graph: bool, mamba_cache_mode: str
+):
     """A second KV cache group of the same pass shares the first group's
     batch-level metadata and builds only its own state indices."""
     batch = BatchSpec(seq_lens=test_case.seq_lens, query_lens=test_case.query_lens)
     first, second, ref = (
-        _create_gdn_builder(test_case.num_speculative_tokens, full_cuda_graph=True)
+        _create_gdn_builder(test_case.num_speculative_tokens, full_cuda_graph)
         for _ in range(3)
     )
     cache: dict = {}
@@ -205,6 +220,17 @@ def test_cross_group_build(test_case: GDNBuildTestCase):
         )
         for _ in range(2)
     )
+    for builder in (first, second, ref):
+        builder.vllm_config.cache_config.mamba_cache_mode = mamba_cache_mode
+    if mamba_cache_mode == "align":
+        # The first group exercises the CPU gather fallback; the second uses
+        # the indices MRV2 precomputes on CUDA/ROCm.
+        second.mamba_aligned_state_indices = mamba_get_block_table_tensor(
+            second_common.block_table_tensor,
+            second_common.seq_lens,
+            second.kv_cache_spec,
+            "align",
+        )
     draft_tokens = test_case.num_decode_draft_tokens
     first_meta = _build(first, batch, draft_tokens, first_common)
     meta = _build(second, batch, draft_tokens, second_common)
@@ -224,7 +250,7 @@ def test_cross_group_build(test_case: GDNBuildTestCase):
             continue
         torch.testing.assert_close(actual, getattr(expected, field.name))
         # FULL graph state indices land in this group's own buffers.
-        if meta.num_prefills == 0 and actual is not None:
+        if full_cuda_graph and meta.num_prefills == 0 and actual is not None:
             assert actual.data_ptr() == getattr(second, field.name).data_ptr()
 
 
@@ -234,6 +260,24 @@ def test_prefill_state_indices_skip_decodes():
     meta = _build(builder, BatchSpec(seq_lens=[40, 30, 20], query_lens=[1, 1, 4]))
     assert meta.num_decodes == 2
     assert meta.prefill_state_indices.tolist() == [2]
+
+
+def test_cpu_align_uses_gather_fallback(monkeypatch):
+    """CPU builders must not opt the runner into the CUDA precompute."""
+    builder = _create_gdn_builder()
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
+    builder = GDNAttentionMetadataBuilder(
+        builder.kv_cache_spec, ["layer.0"], builder.vllm_config, DEVICE
+    )
+    builder.vllm_config.cache_config.mamba_cache_mode = "align"
+    assert not hasattr(builder, "mamba_aligned_state_indices")
+    batch = BatchSpec(seq_lens=[40, 30], query_lens=[1, 1])
+    common = create_common_attn_metadata(batch, BLOCK_SIZE, DEVICE)
+    meta = _build(builder, batch, common=common)
+    expected = mamba_get_block_table_tensor(
+        common.block_table_tensor, common.seq_lens, builder.kv_cache_spec, "align"
+    )
+    torch.testing.assert_close(meta.non_spec_state_indices_tensor, expected[:, 0])
 
 
 def test_has_initial_state_after_reclassification():

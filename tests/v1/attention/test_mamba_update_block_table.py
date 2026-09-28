@@ -14,6 +14,7 @@ buffers.
 from dataclasses import fields
 from types import SimpleNamespace
 
+import pytest
 import torch
 
 from tests.v1.attention.utils import (
@@ -106,23 +107,28 @@ def test_cross_group_build():
             assert actual is getattr(first_meta, field.name)
 
 
-def test_cross_group_build_full_decode():
+@pytest.mark.parametrize("second_block_size", [16, 32])
+def test_cross_group_build_full_decode(second_block_size: int):
     """In FULL decode, a later KV cache group stages its metadata into its own
     buffers, not the first group's."""
     config = _make_vllm_config(48, 4, block_size=16)
     spec = MambaSpec(block_size=16, shapes=((1,), (1,)), dtypes=(torch.float32,))
-    first, second, ref = (
-        MockMambaBuilder(spec, ["layer0"], config, torch.device("cpu"))
-        for _ in range(3)
+    first = MockMambaBuilder(spec, ["layer0"], config, torch.device("cpu"))
+    second_spec = MambaSpec(
+        block_size=second_block_size, shapes=((1,), (1,)), dtypes=(torch.float32,)
+    )
+    second, ref = (
+        MockMambaBuilder(second_spec, ["layer0"], config, torch.device("cpu"))
+        for _ in range(2)
     )
     batch = BatchSpec(seq_lens=[40, 30, 20], query_lens=[1, 1, 1])
     cache: dict = {}
     first_common, second_common = (
-        create_common_attn_metadata(batch, 16, torch.device("cpu")).replace(
+        create_common_attn_metadata(batch, block_size, torch.device("cpu")).replace(
             is_prefilling=torch.tensor([False, False, False]),
             _cross_group_cache=cache,
         )
-        for _ in range(2)
+        for block_size in (16, second_block_size)
     )
     first.build(0, first_common)
     meta = second.build(0, second_common)
@@ -135,6 +141,23 @@ def test_cross_group_build_full_decode():
             buffer = getattr(second, field.name, None)
             if isinstance(buffer, torch.Tensor):
                 assert actual.data_ptr() == buffer.data_ptr(), field.name
+
+
+def test_cpu_align_uses_gather_fallback():
+    """CPU builders must not opt the runner into the CUDA precompute."""
+    config = _make_vllm_config(256, 4, block_size=16)
+    config.use_v2_model_runner = True
+    config.cache_config.mamba_cache_mode = "align"
+    spec = MambaSpec(block_size=16, shapes=((1,), (1,)), dtypes=(torch.float32,))
+    builder = MockMambaBuilder(spec, ["layer0"], config, torch.device("cpu"))
+    assert not hasattr(builder, "mamba_aligned_state_indices")
+    batch = BatchSpec(seq_lens=[40, 30], query_lens=[1, 1])
+    common = create_common_attn_metadata(batch, 16, torch.device("cpu")).replace(
+        is_prefilling=torch.tensor([False, False]),
+    )
+    meta = builder.build(0, common)
+    expected = common.block_table_tensor.gather(1, torch.tensor([[2], [1]]))
+    torch.testing.assert_close(meta.state_indices_tensor_d, expected)
 
 
 def test_update_block_table_copies_block_idx_to_persistent_buffers():

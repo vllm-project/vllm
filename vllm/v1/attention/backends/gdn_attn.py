@@ -85,8 +85,6 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
     _cudagraph_support = AttentionCGSupport.UNIFORM_BATCH
 
     reorder_batch_threshold: int = 1
-    # "align" mode state indices, set each step by MRV2's MambaHybridModelState.
-    mamba_aligned_state_indices: torch.Tensor | None = None
 
     def __init__(
         self,
@@ -96,6 +94,9 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
         device: torch.device,
     ):
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
+        if device.type == "cuda" and vllm_config.use_v2_model_runner:
+            # Opts into MRV2's CUDA-only aligned-index precompute.
+            self.mamba_aligned_state_indices: torch.Tensor | None = None
         self.compilation_config = vllm_config.compilation_config
         self.speculative_config = vllm_config.speculative_config
         from vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn import (
@@ -222,7 +223,7 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
         query_start_loc = m.query_start_loc
         query_start_loc_cpu = m.query_start_loc_cpu
         nums_dict, batch_ptr, token_chunk_offset_ptr = None, None, None
-        block_table_tensor = self.mamba_aligned_state_indices
+        block_table_tensor = getattr(self, "mamba_aligned_state_indices", None)
         if block_table_tensor is None:
             block_table_tensor = mamba_get_block_table_tensor(
                 m.block_table_tensor,
@@ -234,9 +235,10 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
         # later groups reuse the first group's metadata, FULL graph buffers
         # included.
         cache = m._cross_group_cache
-        if cache is not None and type(self) in cache:
+        cache_key = (self.kv_cache_spec, type(self))
+        if cache is not None and cache_key in cache:
             return self._with_state_indices(
-                block_table_tensor, m.num_reqs, *cache[type(self)]
+                block_table_tensor, m.num_reqs, *cache[cache_key]
             )
 
         uniform_spec_sequence_length = None
@@ -523,7 +525,7 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             token_chunk_offset_ptr=token_chunk_offset_ptr,
         )
         if cache is not None:
-            cache[type(self)] = (attn_metadata, spec_sequence_masks_cpu)
+            cache[cache_key] = (attn_metadata, spec_sequence_masks_cpu)
         return self._with_state_indices(
             block_table_tensor, batch_size, attn_metadata, spec_sequence_masks_cpu
         )

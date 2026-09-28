@@ -97,8 +97,6 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
 
     # Will be disabled if speculative decoding is used
     supports_update_block_table: bool = True
-    # "align" mode state indices, set each step by MRV2's MambaHybridModelState.
-    mamba_aligned_state_indices: torch.Tensor | None = None
 
     def __init__(
         self,
@@ -108,6 +106,9 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
         device: torch.device,
     ):
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
+        if device.type == "cuda" and vllm_config.use_v2_model_runner:
+            # Opts into MRV2's CUDA-only aligned-index precompute.
+            self.mamba_aligned_state_indices: torch.Tensor | None = None
 
         # Enable speculative decoding support
         self.speculative_config = vllm_config.speculative_config
@@ -284,7 +285,7 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
         Subclasses (e.g., Mamba2) can override _compute_common_metadata to add
         additional metadata.
         """
-        state_indices_tensor = self.mamba_aligned_state_indices
+        state_indices_tensor = getattr(self, "mamba_aligned_state_indices", None)
         if state_indices_tensor is None:
             state_indices_tensor = mamba_get_block_table_tensor(
                 common_attn_metadata.block_table_tensor,
@@ -295,8 +296,9 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
         # KV cache groups of one pass differ only in their state indices, so
         # later groups reuse the first group's metadata.
         cache = common_attn_metadata._cross_group_cache
-        if cache is not None and type(self) in cache:
-            return self._with_state_indices(cache[type(self)], state_indices_tensor)
+        cache_key = (self.kv_cache_spec, type(self))
+        if cache is not None and cache_key in cache:
+            return self._with_state_indices(cache[cache_key], state_indices_tensor)
         metadata = self._compute_common_metadata(
             common_attn_metadata,
             num_accepted_tokens=num_accepted_tokens,
@@ -304,7 +306,7 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
             num_decode_draft_tokens_cpu=num_decode_draft_tokens_cpu,
         )
         if cache is not None:
-            cache[type(self)] = metadata
+            cache[cache_key] = metadata
         return self._with_state_indices(metadata, state_indices_tensor)
 
     def _compute_chunk_metadata(
