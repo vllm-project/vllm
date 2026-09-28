@@ -53,10 +53,7 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
             return
 
         self.inputs_embeds = torch.zeros(
-            self.max_num_tokens,
-            self.hidden_size,
-            dtype=self.dtype,
-            device=self.device,
+            self.max_num_tokens, self.hidden_size, dtype=self.dtype, device=self.device
         )
 
     # Lifecycle hooks for model-specific optimizations. Subclasses override
@@ -140,10 +137,7 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
 
         # Initialize cudagraph manager for draft decodes (draft positions > 0).
         self.decode_cudagraph_manager = SpeculatorCudaGraphManager(
-            self.vllm_config,
-            self.device,
-            cudagraph_mode,
-            decode_query_len=1,
+            self.vllm_config, self.device, cudagraph_mode, decode_query_len=1
         )
 
     def capture(self) -> None:
@@ -272,8 +266,7 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
 
         if self.pcp_manager is not None:
             self.pcp_manager.prepare_draft_prefill(
-                input_batch,
-                self.input_buffers.input_ids[:num_tokens_padded],
+                input_batch, self.input_buffers.input_ids[:num_tokens_padded]
             )
             prefill = self.pcp_manager.draft_prefill_batch
             if prefill is not None:
