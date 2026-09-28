@@ -299,6 +299,7 @@ class DeepseekV41ModelState(DefaultModelState):
                     dtype=torch.int64,
                     device=self.device,
                 )
+            self._warm_up_replay_kernels(input_batch, slot_mappings)
         window, cacheable_groups = self._replay
         replay_start: torch.Tensor | None = None
         if window:
@@ -353,6 +354,51 @@ class DeepseekV41ModelState(DefaultModelState):
                 replay_start,
             )
         return attn_metadata
+
+    def _warm_up_replay_kernels(
+        self, input_batch: InputBatch, slot_mappings: torch.Tensor
+    ) -> None:
+        """Compile the replay kernels on the buffers they run on: the startup
+        dummy batches never replay or trim, so they would not launch them."""
+        assert self._replay is not None
+        window, cacheable_groups = self._replay
+        if not window:
+            return
+        _pad_replayed_slots_kernel.warmup(
+            slot_mappings,
+            slot_mappings.stride(0),
+            cacheable_groups,
+            input_batch.query_start_loc,
+            input_batch.positions,
+            self._replay_start,
+            window,
+            PAD_SLOT_ID,
+            NUM_GROUPS=cacheable_groups.numel(),
+            BLOCK=1024,
+            grid=(1,),
+        )
+        if self.decoder_replay_layers is None:
+            return
+        assert self._kept_slot_mappings is not None
+        _gather_replay_batch_kernel.warmup(
+            input_batch.query_start_loc,
+            self._dropped_before.copy_to_uva(np.zeros(1, dtype=np.int32)),
+            input_batch.seq_lens,
+            self._replay_start,
+            input_batch.positions,
+            slot_mappings,
+            slot_mappings.stride(0),
+            self._kept_rows,
+            self._kept_query_start_loc,
+            self._kept_positions,
+            self._kept_slot_mappings,
+            self._kept_slot_mappings.stride(0),
+            self._kept_kv_start,
+            self.decoder_replay_layers.window,
+            NUM_GROUPS=slot_mappings.shape[0],
+            BLOCK=1024,
+            grid=(1,),
+        )
 
     def _prepare_replay_batch(
         self,
