@@ -38,9 +38,12 @@ from starlette.datastructures import State
 from starlette.routing import BaseRoute
 
 from vllm.engine.protocol import EngineClient
+from vllm.logger import init_logger
 
 if TYPE_CHECKING:
     from vllm.tasks import SupportedTask
+
+logger = init_logger(__name__)
 
 
 @runtime_checkable
@@ -121,6 +124,11 @@ def attach_endpoint_plugins(
                 and previous.path == route.path
                 and previous.methods & route.methods
             ):
+                logger.info(
+                    "Endpoint plugin overrides %s %s",
+                    ", ".join(sorted(previous.methods & route.methods)),
+                    route.path,
+                )
                 # Keep replacements ahead of mounts, preserving other methods.
                 insert_at = min(insert_at, len(retained))
                 methods = previous.methods - route.methods
