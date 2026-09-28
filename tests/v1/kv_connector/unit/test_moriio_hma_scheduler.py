@@ -53,7 +53,6 @@ class _FakeScheduler(moriio_connector.MoRIIOConnectorScheduler):  # type: ignore
     def __init__(self, **attrs):
         self._mamba_group_ids: list[int] = []
         self._attn_group_ids: list[int] = [0]
-        self._ssm_state_slots_are_positional = False
         self._is_hma_required = False
         self.kv_cache_config = SimpleNamespace(
             kv_cache_groups=[None, None],
@@ -116,7 +115,7 @@ def _mamba_spec(num_states: int = 2):
         block_size=16,
         shapes=shapes,
         dtypes=(torch.float32,) * num_states,
-        mamba_cache_mode="all",
+        mamba_cache_mode="align",
     )
 
 
@@ -145,7 +144,7 @@ def test_split_block_groups_ignores_transfer_disabled_group():
         block_size=16,
         shapes=((1, 1),),
         dtypes=(torch.float32,),
-        mamba_cache_mode="all",
+        mamba_cache_mode="align",
     )
     config = SimpleNamespace(
         kv_cache_groups=[
@@ -294,20 +293,7 @@ def test_split_block_groups_accepts_empty_abort_payload():
     assert sched.split_block_groups(()) == ([], [])
 
 
-def test_split_block_groups_keeps_positional_slots_in_all_mode():
-    # mamba_cache_mode="all" keeps a state per block position.
-    sched = _FakeScheduler(
-        _has_mamba=True,
-        _attn_group_ids=[0],
-        _mamba_group_ids=[1],
-        _ssm_state_slots_are_positional=True,
-    )
-    attn, mamba = sched.split_block_groups(([1], [40, 41, 42]))
-    assert attn == [1]
-    assert mamba == [[40, 41, 42]]
-
-
-def test_split_block_groups_keeps_only_running_state_outside_all_mode():
+def test_split_block_groups_keeps_only_running_state():
     sched = _FakeScheduler(
         _has_mamba=True,
         _attn_group_ids=[0],
@@ -384,7 +370,6 @@ def _make_read_scheduler():
         _has_mamba=True,
         _attn_group_ids=[0],
         _mamba_group_ids=[1],
-        _ssm_state_slots_are_positional=True,
         request_id_to_transfer_id={},
         transfer_id_to_request_id={},
         _reqs_need_recv={},
@@ -407,17 +392,17 @@ def _make_read_request(remote_block_ids):
 
 def test_update_state_drops_decode_recompute_tail_block():
     sched = _make_read_scheduler()
-    request = _make_read_request([[10, 11], [90, 91]])
+    request = _make_read_request([[10, 11], [91]])
     blocks = _FakeBlocks(
         all_groups=([100, 101, 102], [200, 201, 202]),
     )
 
     sched.update_state_after_alloc(request, blocks, num_external_tokens=256)
 
-    assert sched._reqs_need_recv["req"][1] == [[100, 101], [200, 201]]
+    assert sched._reqs_need_recv["req"][1] == [[100, 101], [202]]
     assert sched._req_kv_params["req"]["remote_block_ids"] == [
         [10, 11],
-        [90, 91],
+        [91],
     ]
 
 

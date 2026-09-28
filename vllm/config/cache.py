@@ -59,7 +59,7 @@ CacheDType = Literal[
 
 
 MambaDType = Literal["auto", "float32", "float16", "bfloat16"]
-MambaCacheMode = Literal["all", "align", "none"]
+MambaCacheMode = Literal["align", "none"]
 PrefixCachingHashAlgo = Literal["sha256", "sha256_cbor", "xxhash", "xxhash_cbor"]
 KVOffloadingBackend = Literal["native", "lmcache"]
 
@@ -191,7 +191,6 @@ class CacheConfig:
     """The cache strategy for Mamba layers:
 
     - "none": set when prefix caching is disabled.
-    - "all": cache the mamba state of all tokens at position i * block_size.
     - "align": only cache the mamba state of the last token of each scheduler step and
       when the token is at position i * block_size. This is the default when prefix
       caching is enabled.
@@ -337,17 +336,6 @@ class CacheConfig:
         if self.mamba_block_size is not None:
             self.user_specified_mamba_block_size = True
         return self
-
-    @field_validator("mamba_cache_mode", mode="after")
-    @classmethod
-    def _validate_mamba_cache_mode(cls, mode: MambaCacheMode) -> MambaCacheMode:
-        if mode == "all":
-            logger.warning_once(
-                "Mamba cache mode 'all' is deprecated and will be removed in an "
-                "upcoming release. If this is a problem, please open an issue "
-                "at https://github.com/vllm-project/vllm/issues."
-            )
-        return mode
 
     @field_validator("cache_dtype", mode="after")
     @classmethod

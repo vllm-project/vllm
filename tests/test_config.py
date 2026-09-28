@@ -177,9 +177,6 @@ def test_kda_recoverssm_derivation_is_revalidated():
     with pytest.raises(ValueError, match="VLLM_USE_V2_MODEL_RUNNER=1"):
         VllmConfig.validate_mamba_cached_kernel(config)
     config.use_v2_model_runner = True
-    config.cache_config.mamba_cache_mode = "all"
-    with pytest.raises(ValueError, match="only none and align"):
-        VllmConfig.validate_mamba_cached_kernel(config)
     config.cache_config.mamba_cache_mode = "none"
 
     config.model_config.architecture = "NemotronHForCausalLM"
@@ -190,6 +187,12 @@ def test_kda_recoverssm_derivation_is_revalidated():
     config.parallel_config.pipeline_parallel_size = 2
     with pytest.raises(ValueError, match="pipeline_parallel_size=1"):
         VllmConfig.validate_mamba_cached_kernel(config)
+
+
+def test_mamba_cache_mode_all_is_rejected():
+    """The removed 'all' mode must fail validation instead of being ignored."""
+    with pytest.raises(ValidationError, match="mamba_cache_mode"):
+        CacheConfig(mamba_cache_mode="all")
 
 
 def test_per_request_spec_decode_metrics_requires_spec_decode():

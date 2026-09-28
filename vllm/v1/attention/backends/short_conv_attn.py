@@ -517,10 +517,6 @@ class PleShortConvAttentionMetadataBuilder(ShortConvAttentionMetadataBuilder):
             state_indices_tensor_p=state_indices_tensor_p,
             state_indices_tensor_d=state_indices_tensor_d,
             num_computed_tokens_p=num_computed_tokens_p,
-            block_idx_last_scheduled_token=None,
-            block_idx_first_scheduled_token_p=None,
-            block_idx_last_computed_token=None,
-            block_idx_last_scheduled_token_prev_step=None,
             seq_lens=m.seq_lens,
         )
 

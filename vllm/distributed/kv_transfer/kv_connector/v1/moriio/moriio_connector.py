@@ -498,11 +498,6 @@ class MoRIIOConnectorScheduler:
                     "MoRIIO hybrid (mamba/KDA) transfer is implemented for READ "
                     "mode only; set kv_connector_extra_config.read_mode=true"
                 )
-        # Only "all" mode keeps a state per block position; the other modes keep
-        # a single running state in the last slot.
-        self._ssm_state_slots_are_positional = (
-            vllm_config.cache_config.mamba_cache_mode == "all"
-        )
         self.block_size = vllm_config.cache_config.block_size
         self._max_decode_tail_blocks = (
             _MAX_LOCAL_DECODE_TAIL_BLOCKS
@@ -1247,8 +1242,8 @@ class MoRIIOConnectorScheduler:
         """Select transferable attention and Mamba block groups.
 
         The wire payload stores the attention group first, followed by every
-        Mamba group in transfer-group order. Outside ``mamba_cache_mode="all"``,
-        only each group's running-state slot is transferred.
+        Mamba group in transfer-group order. Only each group's running-state
+        slot is transferred.
         """
         if not block_ids:
             return [], []
@@ -1264,13 +1259,9 @@ class MoRIIOConnectorScheduler:
 
     def _clip_mamba_group(self, blocks: list[int]) -> list[int]:
         """Keep only the state-bearing slots of one mamba kv cache group."""
-        if not blocks:
-            return blocks
-        if not self._ssm_state_slots_are_positional:
-            # Single running state: everything before it is a null placeholder
-            # or the previous step's superseded state.
-            blocks = blocks[-1:]
-        return blocks
+        # Single running state: everything before it is a null placeholder or
+        # the previous step's superseded state.
+        return blocks[-1:]
 
     @staticmethod
     def _align_read_blocks(
