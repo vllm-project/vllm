@@ -177,6 +177,8 @@ class Qwen3MoeSparseMoeBlock(nn.Module):
         shared_expert_intermediate_size = getattr(
             config, "shared_expert_intermediate_size", 0
         )
+        self.shared_expert_gate: ReplicatedLinear | None
+        self.shared_expert: Qwen3MoeMLP | None
         if shared_expert_intermediate_size > 0:
             self.shared_expert_gate = ReplicatedLinear(
                 config.hidden_size,
@@ -302,6 +304,12 @@ class Qwen3MoeAttention(nn.Module):
             rope_parameters=rope_parameters,
             dual_chunk_attention_config=dual_chunk_attention_config,
         )
+        attention_kwargs: dict[str, Any] = {}
+        if dual_chunk_attention_config:
+            attention_kwargs = {
+                "layer_idx": extract_layer_index(prefix),
+                "dual_chunk_attention_config": dual_chunk_attention_config,
+            }
         self.attn = Attention(
             self.num_heads,
             self.head_dim,
@@ -310,12 +318,7 @@ class Qwen3MoeAttention(nn.Module):
             cache_config=cache_config,
             quant_config=quant_config,
             prefix=f"{prefix}.attn",
-            **{
-                "layer_idx": extract_layer_index(prefix),
-                "dual_chunk_attention_config": dual_chunk_attention_config,
-            }
-            if dual_chunk_attention_config
-            else {},
+            **attention_kwargs,
         )
 
         self.q_norm = RMSNorm(self.head_dim, eps=rms_norm_eps)
