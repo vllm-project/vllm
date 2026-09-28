@@ -292,10 +292,9 @@ class Qwen4ExpPLELayer(nn.Module, MambaBase):
                     token_indices=token_indices_d,
                 )
 
-            query_start_loc = metadata.non_spec_query_start_loc
+            query_start_loc = metadata.query_start_loc_p
             if query_start_loc is None:
                 raise ValueError("query_start_loc is required for prefill short-conv")
-            query_start_loc = query_start_loc[-num_prefills - 1 :] - num_decode_tokens
             has_initial_states = metadata.has_initial_states_p
             if has_initial_states is None:
                 raise ValueError(
