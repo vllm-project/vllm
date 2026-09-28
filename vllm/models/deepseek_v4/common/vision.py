@@ -27,7 +27,10 @@ from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.attention.mm_encoder_attention import (
     MMEncoderAttention,
 )
-from vllm.model_executor.layers.fusion.mm_input_norm import IdentityInputNorm
+from vllm.model_executor.layers.fusion.mm_input_norm import (
+    FusedMMInputNorm,
+    IdentityInputNorm,
+)
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     MergedColumnParallelLinear,
@@ -217,6 +220,13 @@ class DeepseekV4ViT(nn.Module):
             ]
         )
         self.norm = DeepseekV4RMSNorm(config.vision_dim)
+
+    def enable_mm_device_normalize(self) -> None:
+        self.patch_embed.input_norm = FusedMMInputNorm(
+            image_mean=[0.5, 0.5, 0.5],
+            image_std=[0.5, 0.5, 0.5],
+            rescale_factor=1 / 255,
+        )
 
     def forward(
         self, patches: torch.Tensor, n_vit_h: int, n_vit_w: int
