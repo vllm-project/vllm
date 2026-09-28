@@ -14,6 +14,7 @@ import uuid
 from collections import defaultdict
 from collections.abc import Iterator
 from concurrent.futures import Future, ThreadPoolExecutor
+from dataclasses import replace
 from functools import cached_property
 from typing import TYPE_CHECKING, Any, cast
 
@@ -428,6 +429,25 @@ class NixlBaseConnectorWorker:
             not self._is_region_replicated(region_idx)
         )
 
+    def _is_head_sharded_draft_group(self, group_idx: int) -> bool:
+        spec_type = self._group_spec_types[group_idx]
+        return (
+            self._head_sharded_draft_kv_heads is not None
+            and _is_attention_spec(spec_type)
+            and not issubclass(spec_type, (MLAAttentionSpec, SlidingWindowMLASpec))
+        )
+
+    def _group_source_ranks(
+        self, engine_id: EngineId, group_idx: int
+    ) -> tuple[int, ...]:
+        """Remote ranks that a transfer group's blocks are read from."""
+        plan = (
+            self.draft_tp_mappings[engine_id]
+            if self._is_head_sharded_draft_group(group_idx)
+            else self.tp_mappings[engine_id]
+        )
+        return plan.source_ranks_per_group[group_idx]
+
     def _has_head_sharded_draft_regions(self) -> bool:
         return any(
             self._is_head_sharded_draft_region(i)
@@ -437,6 +457,42 @@ class NixlBaseConnectorWorker:
     def _draft_kv_heads_per_rank(self, tp_size: int) -> int:
         assert self._head_sharded_draft_kv_heads is not None
         return max(1, self._head_sharded_draft_kv_heads // tp_size)
+
+    @staticmethod
+    def _remote_draft_tp_size(
+        nixl_agent_meta: NixlAgentMetadata, remote_tp_size: int
+    ) -> int:
+        """TP size the remote shards the draft's KV heads over.
+
+        A PCP x DCP producer exposes its PCP ranks as transfer ranks, but runs a
+        non-MLA draft without DCP, so each of them holds its TP rank's draft
+        heads for every token."""
+        if nixl_agent_meta.pcp_size > 1 and nixl_agent_meta.dcp_size > 1:
+            return remote_tp_size // nixl_agent_meta.pcp_size
+        return remote_tp_size
+
+    def _compute_draft_tp_mapping(
+        self, nixl_agent_meta: NixlAgentMetadata, remote_tp_size: int
+    ) -> TPMapping:
+        assert self.transfer_topo is not None
+        draft_tp_size = self._remote_draft_tp_size(nixl_agent_meta, remote_tp_size)
+        plan = compute_tp_mapping(
+            transfer_topology=self.transfer_topo,
+            remote_tp_size=draft_tp_size,
+            group_spec_types=self._group_spec_types,
+            head_sharded_kv_heads=self._head_sharded_draft_kv_heads,
+        )
+        if draft_tp_size == remote_tp_size:
+            return plan
+        # Every transfer rank of a TP1 PCP x DCP producer holds the whole draft
+        # (checked at handshake), so spread the reads across them.
+        rank = self.transfer_topo.tp_rank % remote_tp_size
+        return replace(
+            plan,
+            source_ranks_per_group=tuple((rank,) for _ in plan.source_ranks_per_group),
+            all_source_ranks=(rank,),
+            rank_to_attention_slot={rank: 0},
+        )
 
     def _set_region_layers(self, region_layers: list[list[str]]) -> None:
         layer_names = [layer_name for region in region_layers for layer_name in region]
@@ -1432,6 +1488,7 @@ class NixlBaseConnectorWorker:
         registration_ranges: dict[tuple[int, str], tuple[int, int, int]] = {}
         region_mem_types: list[str] = []
         seen_base_addresses: list[int] = []
+        seen_region_keys: list[tuple[int, bool]] = []
         self._ssm_region_indices = []
         self._scratch_region_indices = []
         self._ple_region_index = None
@@ -1651,9 +1708,16 @@ class NixlBaseConnectorWorker:
                         for segment_idx in range(num_segments)
                     ]
 
+            # Block-outer cache groups alias from byte 0 of each block, so a
+            # head-sharded draft layer can start where an MLA layer does. It
+            # must not inherit that region's replicated geometry.
+            is_draft_layer = (
+                self._head_sharded_draft_kv_heads is not None and not is_mla_region
+            )
             for base_addr, block_len, block_stride in region_specs:
-                if base_addr in seen_base_addresses:
-                    region_index = seen_base_addresses.index(base_addr)
+                region_key = (base_addr, is_draft_layer)
+                if region_key in seen_region_keys:
+                    region_index = seen_region_keys.index(region_key)
                     assert region_mem_types[region_index] == mem_type
                     self._region_is_mla[region_index] |= is_mla_region
                     if is_mla_region:
@@ -1665,6 +1729,7 @@ class NixlBaseConnectorWorker:
                 else:
                     region_index = len(seen_base_addresses)
                     seen_base_addresses.append(base_addr)
+                    seen_region_keys.append(region_key)
                     self.block_len_per_layer.append(block_len)
                     self.block_stride_per_layer.append(block_stride)
                     self.region_group_ids.append(group_id)
@@ -2275,12 +2340,8 @@ class NixlBaseConnectorWorker:
             remote_dcp_size=remote_dcp_size,
         )
         if self._has_head_sharded_draft_regions():
-            self.draft_tp_mappings[engine_id] = compute_tp_mapping(
-                transfer_topology=transfer_topo,
-                remote_tp_size=remote_tp_size,
-                group_spec_types=self._group_spec_types,
-                remote_dcp_size=remote_dcp_size,
-                head_sharded_kv_heads=self._head_sharded_draft_kv_heads,
+            self.draft_tp_mappings[engine_id] = self._compute_draft_tp_mapping(
+                nixl_agent_meta, remote_tp_size
             )
 
         remote_agent_name = self.nixl_wrapper.add_remote_agent(
@@ -2469,14 +2530,26 @@ class NixlBaseConnectorWorker:
                 tp_ratio < 0 and self.transfer_topo.is_kv_replicated(remote_engine_id)
             )
         has_draft_regions = self._has_head_sharded_draft_regions()
+        remote_draft_tp_size = self._remote_draft_tp_size(
+            nixl_agent_meta, remote_tp_size
+        )
+        # With remote DCP, only a TP1 PCP x DCP producer is supported: each of
+        # its ranks holds the whole draft, which one rank serves unsliced by DCP.
         if has_draft_regions and (
-            tp_ratio < 0 or self.dcp_size > 1 or remote_dcp_size > 1
+            tp_ratio < 0
+            or self.dcp_size > 1
+            or (
+                remote_dcp_size > 1
+                and (remote_draft_tp_size != 1 or block_size_ratio != 1)
+            )
         ):
             raise NotImplementedError(
                 "NIXL cannot transfer a head-sharded draft's KV under an MLA "
-                "target when prefill TP exceeds decode TP or with DCP: "
+                "target when prefill TP exceeds decode TP, with decode DCP, or "
+                "with prefill DCP other than TP1 PCP x DCP: "
                 f"local TP={self.transfer_topo.tp_size}, remote TP={remote_tp_size}, "
-                f"local DCP={self.dcp_size}, remote DCP={remote_dcp_size}."
+                f"local DCP={self.dcp_size}, remote DCP={remote_dcp_size}, "
+                f"remote PCP={nixl_agent_meta.pcp_size}."
             )
 
         remote_physical_per_logical = (
@@ -2571,20 +2644,21 @@ class NixlBaseConnectorWorker:
                 "Use a block-contiguous layout (e.g. LBHNC) on the prefill side."
             )
         # The MLA exemption above does not cover a head-sharded draft, which
-        # slices the prefill draft block by head.
+        # slices the prefill draft block by head. Each page's heads must be
+        # contiguous on both sides; the block and layer order may differ.
         if (
             has_draft_regions
-            and self._draft_kv_heads_per_rank(remote_tp_size)
+            and self._draft_kv_heads_per_rank(remote_draft_tp_size)
             != self._draft_kv_heads_per_rank(self.transfer_topo.tp_size)
-            and (
-                nixl_agent_meta.kv_cache_layout != kv_cache_layout
-                or not KVCacheLayout[kv_cache_layout].is_block_contiguous
+            and not all(
+                KVCacheLayout[layout].is_block_contiguous
+                for layout in (kv_cache_layout, nixl_agent_meta.kv_cache_layout)
             )
         ):
             raise RuntimeError(
-                "Head-sharded draft KV under an MLA target needs the same "
-                "block-contiguous kv_cache_layout (e.g. LBHNC) on prefill and "
-                f"decode, got local={kv_cache_layout}, "
+                "Head-sharded draft KV under an MLA target needs a "
+                "block-contiguous kv_cache_layout (e.g. LBHNC or BLHNC) on "
+                f"prefill and decode, got local={kv_cache_layout}, "
                 f"remote={nixl_agent_meta.kv_cache_layout}."
             )
 
@@ -2628,7 +2702,7 @@ class NixlBaseConnectorWorker:
                     local_heads = self._draft_kv_heads_per_rank(
                         self.transfer_topo.tp_size
                     )
-                    remote_heads = self._draft_kv_heads_per_rank(remote_tp_size)
+                    remote_heads = self._draft_kv_heads_per_rank(remote_draft_tp_size)
                 else:
                     replicated = model_replicated or self._is_region_replicated(
                         region_idx
@@ -3406,9 +3480,18 @@ class NixlBaseConnectorWorker:
 
         if num_computed_blocks is not None:
             assert num_remote_blocks is not None
+            # The remote runs a head-sharded draft without DCP.
+            region_dcp_sizes = [
+                1 if self._is_head_sharded_draft_region(i) else remote_dcp_size
+                for i in range(len(decode_block_ids))
+            ]
             matched_decode, matched_prefill = [], []
-            for decode_region, prefill_region, start in zip(
-                decode_block_ids, prefill_block_ids, num_computed_blocks, strict=True
+            for decode_region, prefill_region, start, region_dcp_size in zip(
+                decode_block_ids,
+                prefill_block_ids,
+                num_computed_blocks,
+                region_dcp_sizes,
+                strict=True,
             ):
                 local, remote = self._apply_dcp_prefix_caching(
                     decode_region,
@@ -3416,7 +3499,7 @@ class NixlBaseConnectorWorker:
                     remote_rank,
                     self.dcp_size,
                     self.dcp_rank,
-                    remote_dcp_size,
+                    region_dcp_size,
                     start,
                     num_remote_blocks=num_remote_blocks,
                 )

@@ -120,16 +120,9 @@ def test_local_descriptors_follow_each_region_pool_capacity():
     assert descriptors[:, 0].tolist() == [100, 116, 1000, 1016, 1032]
 
 
-@pytest.mark.cpu_test
-@pytest.mark.parametrize("push_pp", [False, True])
-def test_overlaid_transfer_groups_share_region_geometry(push_pp):
-    """Groups overlaid on one allocation share its transfer region."""
-    import msgspec
-
+def _register_overlaid_groups(caches, specs, push_pp=False, draft_kv_heads=None):
+    """Register one cache group per layer, each a view of one shared backing."""
     from vllm.distributed.kv_transfer.kv_connector.v1.nixl import base_worker as bw
-    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
-        NixlAgentMetadata,
-    )
     from vllm.distributed.kv_transfer.kv_connector.v1.nixl.push_worker import (
         NixlPushConnectorWorker,
     )
@@ -140,25 +133,9 @@ def test_overlaid_transfer_groups_share_region_geometry(push_pp):
         KVCacheConfig,
         KVCacheGroupSpec,
         KVCacheTensor,
-        MLAAttentionSpec,
     )
 
-    num_blocks = 4
-    spec = MLAAttentionSpec(
-        block_size=4,
-        num_kv_heads=1,
-        head_size=8,
-        dtype=torch.uint8,
-    )
-    page_size = spec.page_size_bytes
-    block_stride = 2 * page_size
-    backing = torch.zeros(num_blocks, block_stride, dtype=torch.uint8)
-    caches = {
-        "layer.0": backing[:, :page_size],
-        "layer.1": backing[:, :page_size],
-    }
-    groups = [KVCacheGroupSpec([layer_name], spec) for layer_name in caches]
-
+    num_blocks = next(iter(caches.values())).shape[0]
     worker_cls = NixlPushConnectorWorker if push_pp else NixlConnectorWorker
     worker = object.__new__(worker_cls)
     if push_pp:
@@ -179,6 +156,7 @@ def test_overlaid_transfer_groups_share_region_geometry(push_pp):
     worker.attn_backends = []
     worker._has_mamba = False
     worker._is_csa_linear = False
+    worker._head_sharded_draft_kv_heads = draft_kv_heads
     worker.vllm_config = MagicMock()
     worker.backend_name = "FLASHMLA"
     worker.num_blocks = num_blocks
@@ -226,28 +204,57 @@ def test_overlaid_transfer_groups_share_region_geometry(push_pp):
     worker.dcp_size = 1
     worker.pcp_size = 1
     worker.kv_buffer_device = "cuda"
-    worker._layer_specs = {name: spec for name in caches}
+    worker._layer_specs = dict(specs)
     worker.kv_cache_config = KVCacheConfig(
         num_blocks=num_blocks,
         kv_cache_tensors=[
             KVCacheTensor(
-                size=backing.nbytes,
+                size=cache.untyped_storage().nbytes(),
                 layers=[name],
-                layer_stride=page_size,
-                block_stride=block_stride,
+                layer_stride=specs[name].page_size_bytes,
+                block_stride=cache.stride(0),
             )
-            for name in caches
+            for name, cache in caches.items()
         ],
-        kv_cache_groups=groups,
+        kv_cache_groups=[KVCacheGroupSpec([name], specs[name]) for name in caches],
     )
 
-    transfer_topology = MagicMock()
-
     with (
-        patch.object(bw, "TransferTopology", return_value=transfer_topology),
+        patch.object(bw, "TransferTopology", return_value=MagicMock()),
         patch.object(bw, "compute_nixl_compatibility_hash", return_value="hash"),
     ):
         worker.register_kv_caches(caches)
+    return worker
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize("push_pp", [False, True])
+def test_overlaid_transfer_groups_share_region_geometry(push_pp):
+    """Groups overlaid on one allocation share its transfer region."""
+    import msgspec
+
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
+        NixlAgentMetadata,
+    )
+    from vllm.v1.kv_cache_interface import MLAAttentionSpec
+
+    num_blocks = 4
+    spec = MLAAttentionSpec(
+        block_size=4,
+        num_kv_heads=1,
+        head_size=8,
+        dtype=torch.uint8,
+    )
+    page_size = spec.page_size_bytes
+    block_stride = 2 * page_size
+    backing = torch.zeros(num_blocks, block_stride, dtype=torch.uint8)
+    caches = {
+        "layer.0": backing[:, :page_size],
+        "layer.1": backing[:, :page_size],
+    }
+    worker = _register_overlaid_groups(
+        caches, dict.fromkeys(caches, spec), push_pp=push_pp
+    )
 
     assert worker.region_group_ids == [-1]
     assert worker.block_stride_per_layer == [block_stride]
@@ -273,6 +280,44 @@ def test_overlaid_transfer_groups_share_region_geometry(push_pp):
     assert metadata.region_num_blocks == [num_blocks]
     assert metadata.region_members == ([["layer.0", "layer.1"]] if push_pp else [])
     assert worker._block_ids_by_region(([0], [2]), worker.region_group_ids) == [[0, 2]]
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize("draft_kv_heads", [None, 8])
+def test_head_sharded_draft_does_not_share_an_aliased_mla_region(draft_kv_heads):
+    """Block-outer groups alias from byte 0 of each block, so the first layer
+    of a GQA draft group starts where the first MLA layer does. Under an MLA
+    target the draft is head-sharded and needs a region of its own."""
+    from vllm.v1.kv_cache_interface import FullAttentionSpec, MLAAttentionSpec
+
+    num_blocks = 4
+    mla = MLAAttentionSpec(block_size=4, num_kv_heads=1, head_size=8, dtype=torch.uint8)
+    draft = FullAttentionSpec(
+        block_size=4, num_kv_heads=2, head_size=8, dtype=torch.uint8
+    )
+    block_stride = 2 * draft.page_size_bytes
+    backing = torch.zeros(num_blocks, block_stride, dtype=torch.uint8)
+    caches = {
+        "layer.0": backing[:, : mla.page_size_bytes],
+        "layer.1": backing[:, : draft.page_size_bytes],
+    }
+    worker = _register_overlaid_groups(
+        caches,
+        {"layer.0": mla, "layer.1": draft},
+        draft_kv_heads=draft_kv_heads,
+    )
+
+    if draft_kv_heads is None:
+        # Without a head-sharded draft the aliased layers share one region.
+        assert worker.region_group_ids == [-1]
+        assert worker._region_is_mla == [True]
+        return
+    assert worker.kv_caches_base_addr[worker.engine_id][0] == [backing.data_ptr()] * 2
+    assert worker.region_group_ids == [0, 1]
+    assert worker._region_is_mla == [True, False]
+    assert worker.block_len_per_layer == [mla.page_size_bytes, draft.page_size_bytes]
+    assert worker.block_stride_per_layer == [block_stride] * 2
+    assert worker._has_head_sharded_draft_regions()
 
 
 def _make_mla_hybrid_worker(local_block_size, kernel_block_size, num_logical_blocks):

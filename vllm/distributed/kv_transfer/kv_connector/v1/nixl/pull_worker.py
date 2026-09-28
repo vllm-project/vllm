@@ -232,11 +232,22 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
                     "require remote_num_tokens, per-group prefix counts "
                     "and unshared regions"
                 )
+
+            def region_ids_for(rank: int) -> BlockIds:
+                # A head-sharded draft's regions are read from its own ranks.
+                return [
+                    blocks
+                    if not self._is_head_sharded_draft_region(region)
+                    or rank in self.draft_tp_mappings[engine_id].all_source_ranks
+                    else []
+                    for region, blocks in enumerate(local_by_region)
+                ]
+
             read_specs = [
                 ReadSpec(
                     rank,
                     *self._apply_prefix_caching_by_region(
-                        local_by_region,
+                        region_ids_for(rank),
                         remote_by_region,
                         num_computed_blocks=num_computed_blocks,
                         num_remote_blocks=num_remote_blocks,
@@ -261,7 +272,9 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
 
             def group_ids(block_ids: BlockIds, rank: int) -> list[list[int]]:
                 return [
-                    list(block_ids[g]) if rank in plan.source_ranks_per_group[g] else []
+                    list(block_ids[g])
+                    if rank in self._group_source_ranks(engine_id, g)
+                    else []
                     for g in range(num_groups)
                 ]
 
@@ -281,7 +294,12 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
                             remote_rank=rank,
                             local_dcp_size=self.dcp_size,
                             local_dcp_rank=self.dcp_rank,
-                            remote_dcp_size=remote_info.remote_dcp_size,
+                            # The remote runs a head-sharded draft without DCP.
+                            remote_dcp_size=(
+                                1
+                                if self._is_head_sharded_draft_group(g)
+                                else remote_info.remote_dcp_size
+                            ),
                             local_num_computed_blocks=(
                                 meta.local_num_computed_blocks[g]
                             ),

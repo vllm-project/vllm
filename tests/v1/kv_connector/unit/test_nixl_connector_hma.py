@@ -86,6 +86,8 @@ def region_pull_worker():
         remote_physical_blocks_per_logical=2,
     )
     worker.tp_mappings = {"P": TPMapping(((0,), (0,)), (0,), {0: 0}, 0)}
+    worker._head_sharded_draft_kv_heads = None
+    worker.draft_tp_mappings = {}
     worker._transfer_layer_group_ids = ()
     worker._mixed_mem_types = True
     worker.src_xfer_handles_by_block_size = {64: 1}
@@ -240,6 +242,167 @@ def test_dcp_region_pull(region_pull_worker, num_pages, region_groups):
         if num_pages
         else None
     )
+
+
+def _add_pcp_dcp_draft(worker, draft_rank: int, local_region_groups, remote_groups):
+    """Pull from a TP1 PCP8 x DCP8 prefill whose last region holds a GQA draft
+    that every prefill rank stores whole; `draft_rank` serves it."""
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.tp_mapping import TPMapping
+
+    draft_spec = FullAttentionSpec(
+        block_size=64, num_kv_heads=1, head_size=8, dtype=torch.bfloat16
+    )
+    worker.kv_cache_config.kv_cache_groups.append(
+        KVCacheGroupSpec(["draft"], draft_spec)
+    )
+    worker._group_spec_types = (MLAAttentionSpec, MLAAttentionSpec, FullAttentionSpec)
+    worker._head_sharded_draft_kv_heads = 64
+    worker._region_is_mla = [True] * (len(local_region_groups) - 1) + [False]
+    worker.region_group_ids = list(local_region_groups)
+    worker.num_regions = len(local_region_groups)
+    worker.dst_region_group_ids = {"P": list(remote_groups)}
+    worker.dst_uses_region_group_mapping = {"P": True}
+    worker._uses_region_group_mapping = True
+    worker.dst_region_num_blocks = {
+        engine: [100] * worker.num_regions for engine in ("P", "D")
+    }
+    worker.block_len_per_layer = [1024] * worker.num_regions
+    remote = worker.transfer_topo.get_engine_info.return_value
+    remote.remote_tp_size = remote.remote_dcp_size = 8
+    remote.remote_physical_blocks_per_logical = 1
+    ranks = tuple(range(8))
+    groups = (ranks,) * 3
+    worker.tp_mappings["P"] = TPMapping(groups, ranks, {r: r for r in ranks}, 8)
+    worker.draft_tp_mappings["P"] = TPMapping(
+        ((draft_rank,),) * 3, (draft_rank,), {draft_rank: 0}, draft_rank
+    )
+    worker.dst_xfer_side_handles = {"P": {r: 1000 + r for r in ranks}}
+    worker._remote_agents = {"P": {(0, r): f"P-rank{r}" for r in ranks}}
+
+
+def _reads_by_rank(worker):
+    return {
+        call.kwargs["remote_xfer_side_handle"] - 1000: list(
+            zip(
+                call.kwargs["local_block_descs_ids"],
+                call.kwargs["remote_block_descs_ids"],
+            )
+        )
+        for call in worker._read_blocks_mixed.call_args_list
+    }
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize("num_pages", [0, 3, 19])
+@pytest.mark.parametrize("draft_rank", [0, 5])
+def test_dcp_region_pull_reads_replicated_draft_from_one_rank(
+    region_pull_worker, num_pages, draft_rank
+):
+    """MLA pages come from their DCP rank; the draft is not DCP-sharded on the
+    prefill side, so all of its pages come from the draft's source rank."""
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
+        RemoteMeta,
+        ReqMeta,
+    )
+
+    worker = region_pull_worker
+    # Host MLA, indexer and draft regions; prefill groups MLA with the indexer.
+    _add_pcp_dcp_draft(worker, draft_rank, (0, 1, 2), (0, 0, 1))
+    # Page p of group g lives in local block 30 + 10 * g + p. The draft's
+    # prefill blocks cover every page: page p is prefill block 60 + p.
+    local = (
+        [list(range(30 + 10 * g + g + 1, 31 + 10 * g + num_pages)) for g in range(3)]
+        if num_pages
+        else []
+    )
+    meta = ReqMeta(
+        local,
+        local,
+        tp_size=8,
+        local_num_computed_blocks=(0, 1, 2, 3),
+        remote=RemoteMeta(
+            [[10, 11, 12], list(range(60, 60 + num_pages))],
+            "localhost",
+            1,
+            "P",
+            "request-P",
+            num_tokens=max(0, num_pages * 64 - 7),
+        ),
+    )
+    worker._read_blocks_for_req("request", meta)
+
+    reads = _reads_by_rank(worker)
+    notified = {call.args[0] for call in worker.nixl_wrapper.send_notif.call_args_list}
+    for rank in range(8):
+        expected = [
+            (region * 100 + 30 + region * 10 + page, region * 100 + 10 + page // 8)
+            for region in range(2)
+            for page in range(region + 1, num_pages)
+            if page % 8 == rank
+        ]
+        if rank == draft_rank:
+            expected += [
+                (200 + 50 + page, 200 + 60 + page) for page in range(3, num_pages)
+            ]
+        if expected:
+            assert reads[rank] == expected
+            assert f"P-rank{rank}" not in notified
+        else:
+            assert rank not in reads and f"P-rank{rank}" in notified
+    assert meta.region_blocks_to_zero == (
+        [[30 + 10 * g + num_pages] for g in range(3)] if num_pages else None
+    )
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize("draft_rank", [0, 5])
+def test_dcp_pull_reads_replicated_draft_group_from_one_rank(
+    region_pull_worker, draft_rank
+):
+    """Same pairing when both sides group the caches alike: the draft group
+    skips only its locally cached prefix instead of taking DCP slices."""
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
+        RemoteMeta,
+        ReqMeta,
+    )
+
+    worker = region_pull_worker
+    # Host MLA, indexer and draft groups on both sides.
+    _add_pcp_dcp_draft(worker, draft_rank, (0, 1, 2), (0, 1, 2))
+    num_pages = 19
+    local = [list(range(30 + 11 * g + 1, 30 + 10 * g + num_pages)) for g in range(3)]
+    meta = ReqMeta(
+        local,
+        local,
+        tp_size=8,
+        # Indexed by transfer group here.
+        local_num_computed_blocks=(1, 2, 3),
+        remote=RemoteMeta(
+            [[10, 11, 12], [20, 21, 22], list(range(60, 60 + num_pages))],
+            "localhost",
+            1,
+            "P",
+            "request-P",
+        ),
+    )
+    worker._read_blocks_for_req("request", meta)
+
+    reads = _reads_by_rank(worker)
+    for rank in range(8):
+        expected = [
+            (
+                group * 100 + 30 + group * 10 + page,
+                group * 100 + 10 * (group + 1) + page // 8,
+            )
+            for group in range(2)
+            for page in range(group + 1, num_pages)
+            if page % 8 == rank
+        ]
+        if rank == draft_rank:
+            expected += [
+                (200 + 50 + page, 200 + 60 + page) for page in range(3, num_pages)
+            ]
+        assert reads[rank] == expected
 
 
 @pytest.mark.cpu_test

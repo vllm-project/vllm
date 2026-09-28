@@ -1396,9 +1396,13 @@ class TestNixlHandshake:
         assert resolve(worker) == expected
 
     @staticmethod
-    def _mla_target_with_gqa_draft(tp_size: int, tp_rank: int, remote_tp_size: int):
+    def _mla_target_with_gqa_draft(
+        tp_size: int, tp_rank: int, remote_tp_size: int, remote_pcp_size: int = 1
+    ):
         """Worker for an MLA target (REPLICATE region) plus a GQA draft with
-        8 KV heads (SPLIT region), and the prefill metadata it pairs with."""
+        8 KV heads (SPLIT region), and the prefill metadata it pairs with.
+        ``remote_pcp_size > 1`` makes the prefill TP1 PCP x DCP, whose transfer
+        ranks each hold the whole draft."""
         base_worker = "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker"
         with (
             patch(
@@ -1439,8 +1443,9 @@ class TestNixlHandshake:
         )
         worker.num_descs = len(worker.src_blocks_data)
 
+        remote_draft_tp_size = remote_tp_size // remote_pcp_size
         remote_draft_len = (
-            draft_len * max(1, 8 // remote_tp_size) // max(1, 8 // tp_size)
+            draft_len * max(1, 8 // remote_draft_tp_size) // max(1, 8 // tp_size)
         )
         meta = NixlAgentMetadata(
             engine_id=FakeNixlConnectorWorker.REMOTE_ENGINE_ID,
@@ -1455,6 +1460,8 @@ class TestNixlHandshake:
             ssm_sizes=(0, 0),
             attn_backend_name=worker.backend_name,
             physical_blocks_per_logical_kv_block=1,
+            dcp_size=remote_pcp_size,
+            pcp_size=remote_pcp_size,
         )
         return worker, meta, mla_len, draft_len
 
@@ -1553,6 +1560,109 @@ class TestNixlHandshake:
         )
         with pytest.raises(NotImplementedError, match="head-sharded draft"):
             worker.add_remote_agent(meta, remote_tp_size=8)
+
+    @patch(
+        "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker.NixlWrapper",
+        FakeNixlWrapper,
+    )
+    @pytest.mark.parametrize("tp_rank", [0, 3, 7])
+    def test_handshake_mla_target_reads_draft_head_slice_from_pcp_dcp_prefill(
+        self, default_vllm_config, dist_init, tp_rank
+    ):
+        """A TP1 PCP8 x DCP8 prefill reports transfer TP 8 and shards the MLA
+        target by token, but runs the draft without DCP: every prefill rank
+        holds all draft heads for all tokens. Each decode rank reads the MLA
+        target from all 8 ranks and its draft head slice from one of them."""
+        worker, meta, mla_len, draft_len = self._mla_target_with_gqa_draft(
+            tp_size=8, tp_rank=tp_rank, remote_tp_size=8, remote_pcp_size=8
+        )
+        worker._group_spec_types = (MLAAttentionSpec, FullAttentionSpec)
+        worker.add_remote_agent(meta, remote_tp_size=8, remote_dcp_size=8)
+
+        engine_id = FakeNixlConnectorWorker.REMOTE_ENGINE_ID
+        plan = worker.tp_mappings[engine_id]
+        # Every prefill rank holds a token shard of the target and reports
+        # done only after all 8 decode ranks have read from it.
+        assert plan.all_source_ranks == tuple(range(8))
+        assert plan.local_consumers == 8
+        draft = worker.draft_tp_mappings[engine_id]
+        assert draft.all_source_ranks == (tp_rank,)
+        assert draft.rank_offset_factor == tp_rank
+        assert worker._group_source_ranks(engine_id, 0) == tuple(range(8))
+        assert worker._group_source_ranks(engine_id, 1) == (tp_rank,)
+        assert worker._build_fa_remote(plan, meta, block_size_ratio=1).tolist() == [
+            [0x10000, mla_len, 0],
+            [0x20000 + tp_rank * draft_len, draft_len, 0],
+        ]
+
+    @patch(
+        "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker.NixlWrapper",
+        FakeNixlWrapper,
+    )
+    @pytest.mark.parametrize(
+        "local_layout,remote_layout,accepted",
+        [
+            ("LBHNC", "BLHNC", True),
+            ("BLHNC", "BLHNC", True),
+            ("LBHNC", "BLNHC", False),
+            ("LBNHC", "BLHNC", False),
+        ],
+    )
+    def test_handshake_pcp_dcp_draft_head_slice_needs_contiguous_heads(
+        self, default_vllm_config, dist_init, local_layout, remote_layout, accepted
+    ):
+        """The head slice is a byte range of each page, so both sides need the
+        page's heads contiguous; their block and layer order may differ (a DCP
+        prefill with a replicated draft must use a block-outer layout)."""
+        worker, meta, _, _ = self._mla_target_with_gqa_draft(
+            tp_size=8, tp_rank=3, remote_tp_size=8, remote_pcp_size=8
+        )
+        worker.kv_cache_layout = local_layout
+        meta.kv_cache_layout = remote_layout
+        if accepted:
+            worker.add_remote_agent(meta, remote_tp_size=8, remote_dcp_size=8)
+            return
+        with pytest.raises(RuntimeError, match="block-contiguous"):
+            worker.add_remote_agent(meta, remote_tp_size=8, remote_dcp_size=8)
+
+    @patch(
+        "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker.NixlWrapper",
+        FakeNixlWrapper,
+    )
+    def test_handshake_pcp_dcp_prefill_rejects_unsharded_draft_block(
+        self, default_vllm_config, dist_init
+    ):
+        """The draft block is sized by the prefill's real TP (1), not its
+        transfer TP (8): a block holding one rank's worth of heads is rejected."""
+        worker, meta, mla_len, draft_len = self._mla_target_with_gqa_draft(
+            tp_size=8, tp_rank=3, remote_tp_size=8, remote_pcp_size=8
+        )
+        meta.block_lens = [mla_len, draft_len]
+        meta.block_strides = [mla_len, draft_len]
+        with pytest.raises(AssertionError, match="SPLIT region 1"):
+            worker.add_remote_agent(meta, remote_tp_size=8, remote_dcp_size=8)
+
+    @patch(
+        "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker.NixlWrapper",
+        FakeNixlWrapper,
+    )
+    @pytest.mark.parametrize(
+        "tp_size,remote_pcp_size",
+        [
+            (8, 1),  # DCP over prefill TP: the draft is split by head there
+            (4, 8),  # prefill transfer TP above decode TP
+        ],
+    )
+    def test_handshake_mla_target_rejects_draft_with_other_prefill_dcp(
+        self, default_vllm_config, dist_init, tp_size, remote_pcp_size
+    ):
+        worker, meta, _, _ = self._mla_target_with_gqa_draft(
+            tp_size=tp_size, tp_rank=0, remote_tp_size=8, remote_pcp_size=1
+        )
+        meta.dcp_size = 8
+        meta.pcp_size = remote_pcp_size
+        with pytest.raises(NotImplementedError, match="head-sharded draft"):
+            worker.add_remote_agent(meta, remote_tp_size=8, remote_dcp_size=8)
 
     @patch(
         "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker.NixlWrapper",
