@@ -117,6 +117,7 @@ async def _serve(
             emulate fragmented transport.
         seen: If given, populated with the request payload.
         request_kwargs: Extra fields for the ``RequestFuncInput``.
+
     """
 
     async def handler(request: web.Request) -> web.StreamResponse:
@@ -366,7 +367,7 @@ def test_multi_line_data_payload_is_joined_with_newlines():
 
 
 def test_done_sentinel_is_skipped():
-    """vLLM sends no `[DONE]`, but other Responses servers do."""
+    """Other Responses servers send `[DONE]`, but vLLM does not."""
     output = run([PREAMBLE, text_delta("ok"), usage_event(5, 1), b"data: [DONE]\n\n"])
 
     assert output.success, output.error

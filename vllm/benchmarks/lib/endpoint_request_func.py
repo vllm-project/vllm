@@ -461,6 +461,7 @@ def _extract_sse_data(message: str) -> str | None:
     Returns:
         The payload, with multi-line payloads joined by newlines as required
         by the SSE spec, or None if the message carries no ``data:`` line.
+
     """
     # NOTE: split on "\n" rather than using splitlines(), which also breaks on
     # U+2028, U+2029 and U+0085. Those are legal inside a JSON string and the
