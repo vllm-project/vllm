@@ -30,12 +30,13 @@ from vllm.model_executor.layers.linear import (
     ReplicatedLinear,
 )
 from vllm.model_executor.models.utils import maybe_prefix
+from vllm.platforms import current_platform
 
 from ..common.hyperconnection import (
     GroupedGemmaRMSNorm,
     HyperConnectionConfig,
 )
-from .ops.cute_dsl.hc_down_silu import hc_down_silu, is_fused_eligible
+from .ops.cute_dsl.hc_down_silu import hc_down_silu
 from .ops.hc import (
     grouped_gemma_rmsnorm,
     hc_combine,
@@ -106,10 +107,14 @@ class GatedResidual(nn.Module):
                 return_bias=False,
                 disable_tp=True,
             )
-            self._use_hc_down_silu = is_fused_eligible(
-                self.input_mix_weight_down_block_inject.weight,
-                self.lora_rank,
-                self.hc_count,
+            weight = self.input_mix_weight_down_block_inject.weight
+            self._use_hc_down_silu = (
+                self.lora_rank > 0
+                and self.hc_count > 0
+                and weight.shape[0] >= self.lora_rank + self.hc_count
+                and weight.shape[1] % 8 == 0
+                and weight.dtype == torch.bfloat16
+                and current_platform.has_device_capability(90)
             )
         else:
             self.input_mix_weight_down = ReplicatedLinear(
@@ -142,6 +147,8 @@ class GatedResidual(nn.Module):
             down_and_injection = hc_down_silu(
                 xn,
                 self.input_mix_weight_down_block_inject.weight,
+                self.lora_rank,
+                self.hc_count,
             )
         else:
             down_and_injection = self.input_mix_weight_down_block_inject(xn)

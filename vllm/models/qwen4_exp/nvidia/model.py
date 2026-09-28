@@ -692,7 +692,10 @@ class Qwen4ExpForCausalLM(
             # capture size in the fused dispatch range, so no CuTe-DSL JIT
             # happens during graph capture.
             request_hc_down_silu_warmup(
-                vllm_config.compilation_config.cudagraph_capture_sizes or ()
+                vllm_config.compilation_config.cudagraph_capture_sizes or (),
+                self.config.hc_lowrank,
+                self.config.hc_count,
+                self.config.hidden_size * self.config.hc_count,
             )
 
     @staticmethod

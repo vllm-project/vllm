@@ -2,8 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Adapted from vllm/model_executor/kernels/linear/cute_dsl/ll_bf16.py.
 
-Fused Qwen4Exp mHC down projection + SiLU epilogue:
-``out[M, 336] = silu_epilogue(x[M, 10240] @ weight[336, 10240]^T)`` where
+Fused Qwen4Exp mHC down projection + SiLU epilogue, where
 columns < lora_rank get ``silu(bf16(acc) / hc_count)``, the hc_count
 injection-logit columns pass through as ``bf16(acc)``, and the pad columns
 are never computed. Output is bf16 (ll_bf16's fp32-output bonus is given up
@@ -20,7 +19,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Iterable
 from dataclasses import dataclass
-from functools import partial
+from functools import lru_cache, partial
 from typing import Any, Literal
 
 import torch
@@ -32,16 +31,10 @@ from ..hc import hc_silu
 
 logger = logging.getLogger(__name__)
 
-# Qwen4Exp mHC down+inject projection: lora_rank + hc_count + 12 pad rows.
-_RANK = 320
-_HC = 4
-_WEIGHT_N = 336
-_WEIGHT_K = 10240
-# Pad columns [_N_COMPUTE, _WEIGHT_N) are never computed or read.
-_N_COMPUTE = _RANK + _HC
-# The fused kernel stops winning past M ~ 64; gate the decode regime it was
-# tuned for.
+# The fused kernel stops winning past M ~ 64 on Qwen3.8-Next-Flash.
 _MAX_FUSED_M = 48
+# Split-K settings were tuned only for this (rank, hc, K) shape.
+_TUNED_SHAPE = (320, 4, 10240)
 
 _DEFAULT_FMA_MAX_M = 4
 # bs=256 is ~0.1-0.35 us faster on this shape but changes the shuffle
@@ -76,7 +69,12 @@ class HcDownSiluGemm:
         num_stages: int = 0
         tile_n: int = 0
 
-    def __init__(self, *, prefetch_pdl_weights: bool = False) -> None:
+    def __init__(
+        self, rank: int, hc: int, k: int, *, prefetch_pdl_weights: bool = False
+    ) -> None:
+        self.rank = rank
+        self.hc = hc
+        self.k = k
         self._prefetch_pdl_weights = prefetch_pdl_weights
         # FMA: keyed on (M, K, bs), because M and K are Constexpr.
         self._fma_cache: dict[tuple[int, int, int], Any] = {}
@@ -86,11 +84,12 @@ class HcDownSiluGemm:
         self._warmup_registered = False
 
     def dispatch(self, m: int) -> CompileKey:
-        if m <= _DEFAULT_FMA_MAX_M:
-            return self.CompileKey(backend="fma", M=m, K=_WEIGHT_K, bs=_DEFAULT_FMA_BS)
+        if m <= _DEFAULT_FMA_MAX_M or self.k < 2048:
+            return self.CompileKey(backend="fma", M=m, K=self.k, bs=_DEFAULT_FMA_BS)
         tuned = (
             _SM100F_TUNED_SPLITK
-            if current_platform.is_device_capability_family(100)
+            if (self.rank, self.hc, self.k) == _TUNED_SHAPE
+            and current_platform.is_device_capability_family(100)
             else {}
         )
         split_k, num_stages, tile_n = tuned.get(m, _DEFAULT_SPLITK_CONFIG)
@@ -130,8 +129,8 @@ class HcDownSiluGemm:
             num_stages=compile_key.num_stages,
             split_k=compile_key.split_k,
             use_pdl=current_platform.is_arch_support_pdl(),
-            rank=_RANK,
-            hc=_HC,
+            rank=self.rank,
+            hc=self.hc,
         )
         compiled = cute.compile(
             gemm,
@@ -168,8 +167,8 @@ class HcDownSiluGemm:
             bs=compile_key.bs,
             use_pdl=current_platform.is_arch_support_pdl(),
             prefetch_pdl_weights=self._prefetch_pdl_weights,
-            rank=_RANK,
-            hc=_HC,
+            rank=self.rank,
+            hc=self.hc,
         )
         compiled = cute.compile(
             gemm,
@@ -227,6 +226,9 @@ class HcDownSiluGemm:
                 name="Qwen4Exp HC down+SiLU GEMM",
                 key=(
                     "qwen4-exp-hc-down-silu",
+                    self.rank,
+                    self.hc,
+                    self.k,
                     self._prefetch_pdl_weights,
                     compile_key,
                 ),
@@ -274,7 +276,10 @@ class HcDownSiluGemm:
 
         M, K = hidden_states.shape
         N = router_weight.shape[0]
-        w_gemm = router_weight[:_N_COMPUTE]
+        n_compute = self.rank + self.hc
+        if self.k != K or self.rank <= 0 or self.hc <= 0 or n_compute > N:
+            raise ValueError("hc_down_silu_gemm received an unsupported shape")
+        w_gemm = router_weight[:n_compute]
         compile_key = self.dispatch(M)
         self.compile(compile_key)
         if compile_key.backend == "mma":
@@ -285,39 +290,34 @@ class HcDownSiluGemm:
             kernel = self._fma_cache[(compile_key.M, compile_key.K, compile_key.bs)]
 
         output = torch.empty(M, N, dtype=torch.bfloat16, device=hidden_states.device)
-        out_gemm = output[:, :_N_COMPUTE]
+        out_gemm = output[:, :n_compute]
         if compile_key.backend == "mma":
             kernel(hidden_states, w_gemm, out_gemm, 1.0)
         else:
-            kernel(hidden_states, w_gemm, out_gemm, _N_COMPUTE)
+            kernel(hidden_states, w_gemm, out_gemm, n_compute)
         return output
 
 
-_hc_down_silu_gemm_kernel = HcDownSiluGemm()
-_hc_down_silu_gemm_m1_pdl_kernel = HcDownSiluGemm(prefetch_pdl_weights=True)
-
-
-def is_fused_eligible(weight: torch.Tensor, lora_rank: int, hc_count: int) -> bool:
-    """Check the supported down+inject configuration and platform."""
-    return (
-        lora_rank == _RANK
-        and hc_count == _HC
-        and weight.shape == (_WEIGHT_N, _WEIGHT_K)
-        and weight.dtype == torch.bfloat16
-        and current_platform.is_cuda()
-        and current_platform.has_device_capability(90)
-    )
+@lru_cache
+def _get_kernel(
+    rank: int, hc: int, k: int, prefetch_pdl_weights: bool = False
+) -> HcDownSiluGemm:
+    return HcDownSiluGemm(rank, hc, k, prefetch_pdl_weights=prefetch_pdl_weights)
 
 
 def hc_down_silu(
     x: torch.Tensor,
     weight: torch.Tensor,
+    rank: int,
+    hc: int,
 ) -> torch.Tensor:
     """Qwen4Exp HC down projection + SiLU, with an unfused fallback.
 
     Args:
-        x: Normalized hyper-hidden input, [M, 10240].
-        weight: Merged down+inject weight, [336, 10240].
+        x: Normalized hyper-hidden input, [M, K].
+        weight: Merged down+inject weight, [N, K].
+        rank: Number of low-rank output columns.
+        hc: Number of injection-logit output columns.
 
     Returns:
         [M, weight.shape[0]] bf16 tensor; pad columns are uninitialized when
@@ -326,41 +326,53 @@ def hc_down_silu(
     """
     if (
         not envs.VLLM_BATCH_INVARIANT
-        and x.shape[0] <= _MAX_FUSED_M
+        and 1 <= x.shape[0] <= _MAX_FUSED_M
         and x.dtype == torch.bfloat16
+        and weight.dtype == torch.bfloat16
+        and x.is_cuda
+        and weight.is_cuda
         and x.is_contiguous()
         and weight.is_contiguous()
-        and is_fused_eligible(weight, _RANK, _HC)
+        and current_platform.has_device_capability(90)
+        and x.shape[1] % 8 == 0
+        and rank > 0
+        and hc > 0
+        and weight.shape[0] >= rank + hc
     ):
-        kernel = (
-            _hc_down_silu_gemm_m1_pdl_kernel
-            if x.shape[0] == 1
-            else _hc_down_silu_gemm_kernel
-        )
+        kernel = _get_kernel(rank, hc, weight.shape[1], x.shape[0] == 1)
         return kernel(x, weight)
     down = torch.nn.functional.linear(x, weight)
-    lora = hc_silu(down[:, :_RANK], _HC)
-    return torch.cat([lora, down[:, _RANK:]], dim=1)
+    lora = hc_silu(down[:, :rank], hc)
+    return torch.cat([lora, down[:, rank:]], dim=1)
 
 
-def request_hc_down_silu_warmup(m_values: Iterable[int]) -> None:
+def request_hc_down_silu_warmup(
+    m_values: Iterable[int], rank: int, hc: int, k: int
+) -> None:
     """Precompile the fused kernels for CUDA-graph capture token counts.
 
     Args:
         m_values: Token counts the model may capture CUDA graphs for; values
             outside the fused dispatch range are ignored.
+        rank: Number of low-rank output columns.
+        hc: Number of injection-logit output columns.
+        k: Input feature size.
 
     """
-    if not current_platform.has_device_capability(90):
+    if (
+        not current_platform.has_device_capability(90)
+        or rank <= 0
+        or hc <= 0
+        or k % 8 != 0
+    ):
         return
     m_set = {int(m) for m in m_values if 1 <= m <= _MAX_FUSED_M}
     # M=1 dispatches to the weight-prefetching PDL variant.
-    _hc_down_silu_gemm_m1_pdl_kernel.request_warmup(m_set & {1})
-    _hc_down_silu_gemm_kernel.request_warmup(m_set - {1})
+    _get_kernel(rank, hc, k, True).request_warmup(m_set & {1})
+    _get_kernel(rank, hc, k).request_warmup(m_set - {1})
 
 
 __all__ = [
     "hc_down_silu",
-    "is_fused_eligible",
     "request_hc_down_silu_warmup",
 ]
