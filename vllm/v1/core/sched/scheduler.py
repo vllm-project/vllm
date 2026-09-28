@@ -2771,7 +2771,7 @@ class Scheduler(SchedulerInterface):
         is no running requests taking KV cache.
         """
         if reset_running_requests and self.aux_output_connector is not None:
-            if self._pause_state != PauseState.PAUSED_ALL:
+            if self.running and self._pause_state != PauseState.PAUSED_ALL:
                 raise RuntimeError(
                     "AuxOutput Connector only supports resetting running requests "
                     "after pause(mode='keep')."
