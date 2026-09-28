@@ -1237,7 +1237,9 @@ class AttentionScheduler {
     };
 
     MaterializedPlan plan;
-    if (input.isa == ISA::AMX) {
+    // Keep FP8 batches without multi-token verification on legacy scheduling.
+    if (input.isa == ISA::AMX &&
+        (!input.fp8_kv_cache || has_multi_token_request)) {
       auto [workitems, reductions] = materialize_plan(
           batch_plan,
           selected_request_plans.empty() ? nullptr : &selected_request_plans);
