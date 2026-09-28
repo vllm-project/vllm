@@ -233,13 +233,8 @@ def split_indexer_prefill_chunks(
     return chunks
 
 
-# Below this row count the TP all-gather latency is larger than the saved
-# replicated indexer work on Hopper.  Keep the threshold conservative so small
-# /medium prefills retain the zero-communication path.
-# The all-gather only amortizes its launch and synchronization cost once a
-# rank owns a substantial prefill slice.  Keep the replicated path for
-# short/medium requests; on TP4 this makes the optimized path start at 64K
-# prefill rows while retaining the long-context benefit.
+# Keep the replicated path for short prefills; on TP4 sharding starts at 64K
+# rows, where the all-gather overhead is amortized by the saved MQA work.
 MIN_TP_SHARD_ROWS_PER_RANK = 16_384
 
 
@@ -249,13 +244,7 @@ def balanced_prefill_row_shard(
     compress_ratio: int,
     tp_size: int,
 ) -> list[int] | None:
-    """Return contiguous TP row counts balanced by indexer MQA work.
-
-    Every prefill query row is independent: row ``j`` scores the compressed-K
-    interval starting at ``seq_len - query_len + 1 + j``.  Assigning rows by
-    this cumulative cost keeps all TP ranks busy even for long, ragged
-    prefills, while exchanging only the final top-k indices.
-    """
+    """Return contiguous TP row counts balanced by indexer MQA work."""
     num_rows = int(query_lens_cpu.sum())
     if tp_size < 2 or num_rows < MIN_TP_SHARD_ROWS_PER_RANK * tp_size:
         return None

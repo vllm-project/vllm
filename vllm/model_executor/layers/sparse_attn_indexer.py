@@ -517,9 +517,7 @@ def sparse_attn_indexer(
             scales_spec,
             *gather_specs,
         )
-        # Contiguous window of prefill rows this rank scores. The builder emits
-        # row_shard_sizes from replicated scheduler metadata, so every TP rank
-        # agrees on whether the exchange below runs.
+        # Score one contiguous row window per rank; metadata is replicated.
         shard_sizes = prefill_metadata.row_shard_sizes
         shard_start = shard_stop = 0
         if shard_sizes is not None:
@@ -543,9 +541,8 @@ def sparse_attn_indexer(
                     chunk.local_cu_seq_lens,
                 )
 
-            # Narrow the scoring to this rank's rows. The gather above stays
-            # unconditional: later chunks of the same request reuse that
-            # workspace via `skip_kv_gather`, so every rank must fill it.
+            # Narrow scoring to this rank; KV gathers remain unconditional for
+            # continuation chunks that reuse the workspace.
             row_start, row_end = chunk.token_start, chunk.token_end
             if shard_sizes is not None:
                 row_start = max(row_start, shard_start)
@@ -662,10 +659,7 @@ def sparse_attn_indexer(
                 )
 
         if shard_sizes is not None:
-            # Every row was scored and ranked end to end by one rank, so this is
-            # a layout-preserving concatenation, not a top-k merge. all_gatherv
-            # allocates its output, so the source may alias the destination.
-            # Metadata token counts can include graph padding, unlike the shard.
+            # Rows are already fully ranked, so this is a layout gather.
             prefill_end = num_decode_tokens + sum(shard_sizes)
             local_topk = topk_indices_buffer[
                 shard_start:shard_stop, :topk_tokens

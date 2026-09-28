@@ -242,11 +242,7 @@ def sparse_attn_indexer_kpool(
         prefill_metadata = attn_metadata_narrowed.prefill
         assert prefill_metadata is not None
 
-        # The indexer projections and K cache are replicated across TP ranks,
-        # so long prefills otherwise recompute the same MQA logits/top-k four
-        # times.  Each query row is independent; score one contiguous shard
-        # per rank and exchange only the final token indices. KV gathers remain
-        # unconditional because continuation query chunks reuse their cache.
+        # Score one contiguous row shard per rank and exchange final indices.
         shard_sizes = getattr(prefill_metadata, "row_shard_sizes", None)
         shard_start = shard_stop = 0
         if shard_sizes is not None:
@@ -393,7 +389,6 @@ def sparse_attn_indexer_kpool(
                 topk_indices_buffer[row_start:row_end, : expanded.shape[-1]] = expanded
 
         if shard_sizes is not None:
-            # Metadata token counts can include graph padding, unlike the shard.
             prefill_end = num_decode_tokens + sum(shard_sizes)
             # K-pool expansion appends the request's incomplete tail after the
             # logical top-k history.  Those ``index_kpool - 1`` entries are
