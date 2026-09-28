@@ -9,6 +9,12 @@ prefill.
 
 Conversely, a prompt chunk of exactly decode_query_len tokens has a decode
 batch's shape, and must not be classified as a uniform decode batch.
+
+split_decodes_prefills_and_extends assumes more: that requests carrying
+computed context precede those carrying none, since it takes the first
+context-less request as the start of the prefills. A context-less request
+sorted in front of one part-way through a long prompt makes that request a
+prefill, and the prefill path never reads the KV cache.
 """
 
 import ast
@@ -20,19 +26,29 @@ import numpy as np
 import torch
 
 from vllm.v1.attention.backend import CommonAttentionMetadata
-from vllm.v1.attention.backends.utils import split_decodes_and_prefills
+from vllm.v1.attention.backends.utils import (
+    split_decodes_and_prefills,
+    split_decodes_prefills_and_extends,
+)
 from vllm.v1.worker.gpu.model_runner import GPUModelRunner, sort_batch_req_ids
 from vllm.v1.worker.utils import get_uniform_decode_token_count
 
 
-def _make_common_attn_metadata(query_lens: list[int]) -> CommonAttentionMetadata:
+def _make_common_attn_metadata(
+    query_lens: list[int], num_computed: list[int] | None = None
+) -> CommonAttentionMetadata:
     num_reqs = len(query_lens)
     num_tokens = sum(query_lens)
     query_start_loc = torch.zeros(num_reqs + 1, dtype=torch.int32)
     torch.cumsum(
         torch.tensor(query_lens, dtype=torch.int32), 0, out=query_start_loc[1:]
     )
-    seq_lens = torch.tensor([1000 + q for q in query_lens], dtype=torch.int32)
+    # seq_len == query_len marks a request with no computed context.
+    if num_computed is None:
+        num_computed = [1000] * num_reqs
+    seq_lens = torch.tensor(
+        [c + q for c, q in zip(num_computed, query_lens)], dtype=torch.int32
+    )
     return CommonAttentionMetadata(
         query_start_loc=query_start_loc,
         query_start_loc_cpu=query_start_loc,
@@ -61,6 +77,7 @@ def _make_runner(
         req_id_to_index={req_id: i for i, req_id in enumerate(req_states)},
         # The runner keeps this as min(num_computed_tokens, prefill_len).
         num_computed_prefill_tokens=np.minimum(num_computed, prefill_lens),
+        num_computed_tokens_np=num_computed,
         prefill_len=SimpleNamespace(np=prefill_lens),
     )
     return runner
@@ -235,6 +252,53 @@ def test_spec_decodes_lead_short_prefill_tail():
     assert (num_decode_tokens, num_prefill_tokens) == (16, 1)
 
 
+def test_context_carrying_requests_lead_context_less_ones():
+    # Same token count, so only computed context can separate them: the
+    # request part-way through its prompt must not sort behind a fresh one.
+    num_tokens_per_req = {"fresh": 4096, "resumed": 4096}
+    req_id_to_index = {"fresh": 0, "resumed": 1}
+    num_computed = np.array([0, 100_000], dtype=np.int32)
+
+    req_ids = sort_batch_req_ids(
+        num_tokens_per_req, {}, 1, num_computed, req_id_to_index
+    )
+    assert req_ids == ["resumed", "fresh"]
+
+
+def test_extends_precede_prefills_through_the_splitter():
+    """The chunk with context must be classified as an extend, not a prefill.
+
+    split_decodes_prefills_and_extends takes the first context-less request as
+    the start of the prefills and does not re-check the rest, so the ordering
+    is what keeps the context-carrying request off the prefill path -- which
+    never reads the KV cache and would silently drop its history.
+    """
+    num_tokens_per_req = {"fresh": 4096, "resumed": 4096, "d0": 1}
+    req_id_to_index = {"fresh": 0, "resumed": 1, "d0": 2}
+    num_computed = np.array([0, 100_000, 32], dtype=np.int32)
+
+    req_ids = sort_batch_req_ids(
+        num_tokens_per_req, {}, 1, num_computed, req_id_to_index
+    )
+    assert req_ids == ["d0", "resumed", "fresh"]
+
+    def classify(order: list[str]) -> tuple[int, int, int]:
+        metadata = _make_common_attn_metadata(
+            [num_tokens_per_req[r] for r in order],
+            [int(num_computed[req_id_to_index[r]]) for r in order],
+        )
+        num_decodes, num_extends, num_prefills, *_ = split_decodes_prefills_and_extends(
+            metadata
+        )
+        return num_decodes, num_extends, num_prefills
+
+    assert classify(req_ids) == (1, 1, 1)
+
+    # Ordering context-less first is what the classifier cannot recover from:
+    # "resumed" then falls on the prefill side of the boundary.
+    assert classify(["d0", "fresh", "resumed"]) == (1, 0, 2)
+
+
 def test_uniform_decode_uses_state_index_not_batch_position():
     """The gather must read each request's own state, not its batch slot.
 
@@ -250,6 +314,7 @@ def test_uniform_decode_uses_state_index_not_batch_position():
     runner.req_states = SimpleNamespace(
         req_id_to_index={"prefilling": 0, "decode_a": 1, "decode_b": 2},
         num_computed_prefill_tokens=np.array([8, 16, 16], dtype=np.int32),
+        num_computed_tokens_np=np.array([8, 16, 16], dtype=np.int32),
         prefill_len=SimpleNamespace(np=np.array([40, 16, 16], dtype=np.int32)),
     )
     scheduler_output = SimpleNamespace(
