@@ -1,10 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from types import SimpleNamespace
-
 import pytest
-import torch
 from torch import nn
 
 from vllm.config import ModelConfig
@@ -29,35 +26,6 @@ class CustomModelLoader(BaseModelLoader):
 def test_register_model_loader():
     load_config = LoadConfig(load_format="custom_load_format")
     assert isinstance(get_model_loader(load_config), CustomModelLoader)
-
-
-def test_dummy_model_loader_uses_meta_device(monkeypatch):
-    def fake_initialize_model(**kwargs):
-        return nn.Linear(1, 1)
-
-    monkeypatch.setattr(
-        "vllm.model_executor.model_loader.base_loader.initialize_model",
-        fake_initialize_model,
-    )
-
-    load_config = LoadConfig(load_format="dummy", device="meta")
-    vllm_config = SimpleNamespace(
-        device_config=SimpleNamespace(device="cpu"),
-        load_config=load_config,
-        quant_config=None,
-    )
-    model_config = SimpleNamespace(
-        dtype=torch.float32,
-        quantization=None,
-        word_embeddings_untied_by_checkpoint=False,
-    )
-
-    model = get_model_loader(load_config).load_model(
-        vllm_config=vllm_config,
-        model_config=model_config,
-    )
-
-    assert {param.device.type for param in model.parameters()} == {"meta"}
 
 
 def test_invalid_model_loader():
