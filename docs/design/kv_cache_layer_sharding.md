@@ -36,9 +36,12 @@ otherwise ordinary `KVCacheConfig`.
 The allocator places owned bundles in persistent ranges and nonowner bundles in
 two alternating scratch slots. Bundle components use aligned offsets in one byte
 arena; attention still sees stable tensor views. Capacity search uses the same
-layout builder as final allocation and chooses the minimum feasible logical block
-count across ranks. Allocation includes alignment padding. The scheduler retains
-the usual null block and rejects an override larger than physical capacity.
+layout builder as final allocation. It converts each worker's physical memory
+budget to a logical block capacity; the common KV cache config flow then handles
+override, auto-fit, null-block reservation, admission checks, and the minimum
+block count across workers. KVPP supplies physical tensor views after that
+logical configuration is built. Allocation includes alignment padding, and an
+override larger than physical capacity is rejected.
 
 The offload path registers only persistent owner views. A common per-block byte
 budget across ranks keeps distributed CPU/disk block IDs aligned even when owner

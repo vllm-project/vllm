@@ -140,10 +140,7 @@ def test_layer_sharded_storage_preserves_logical_groups_and_reuses_scratch():
 
 
 def test_layer_sharded_worker_capacities_and_offload_budget_agree():
-    from vllm.v1.kv_cache_placement import (
-        build_kv_cache_storage,
-        plan_layer_sharded_configs,
-    )
+    from vllm.v1.kv_cache_placement import build_kv_cache_storage, layer_specs
     from vllm.v1.simple_kv_offload.manager import SimpleCPUOffloadScheduler
 
     config, placement = _layer_sharded_cache_case()
@@ -160,9 +157,9 @@ def test_layer_sharded_worker_capacities_and_offload_budget_agree():
         max_model_len=32, original_max_model_len=32
     )
     vllm_config.cache_config.kv_cache_layout = "LBNHC"
-    result = plan_layer_sharded_configs(
-        vllm_config, [config.kv_cache_groups] * 2, placements, budgets
-    )
+    vllm_config.cache_config.kv_cache_placement = "layer_sharded"
+    specs = layer_specs(config.kv_cache_groups)
+    result = get_kv_cache_configs(vllm_config, [specs] * 2, budgets, placements)
     assert [c.num_blocks for c in result] == [7, 7]
     for c, budget in zip(result, budgets):
         assert c.storage_plan.allocation_bytes <= budget
@@ -175,11 +172,62 @@ def test_layer_sharded_worker_capacities_and_offload_budget_agree():
         SimpleCPUOffloadScheduler._derive_cpu_config(scheduler, 20 * page).num_blocks
         == 4
     )
+    vllm_config.cache_config.num_gpu_blocks_override = 6
+    overridden = get_kv_cache_configs(vllm_config, [specs] * 2, budgets, placements)
+    assert [c.num_blocks for c in overridden] == [6, 6]
     vllm_config.cache_config.num_gpu_blocks_override = 8
     with pytest.raises(ValueError, match="exceeds physical capacity"):
-        plan_layer_sharded_configs(
-            vllm_config, [config.kv_cache_groups] * 2, placements, budgets
-        )
+        get_kv_cache_configs(vllm_config, [specs] * 2, budgets, placements)
+
+
+def test_layer_sharded_auto_fit_uses_common_kv_cache_flow():
+    from vllm.v1.kv_cache_placement import build_kv_cache_storage, layer_specs
+
+    config, placement = _layer_sharded_cache_case()
+    peer = replace(placement, rank=1)
+    vllm_config = VllmConfig()
+    vllm_config.model_config = SimpleNamespace(
+        max_model_len=128, original_max_model_len=-1
+    )
+    vllm_config.cache_config.kv_cache_layout = "LBNHC"
+    vllm_config.cache_config.kv_cache_placement = "layer_sharded"
+    placements = [placement, peer]
+    budgets = [
+        build_kv_cache_storage(
+            replace(config, num_blocks=5), p, KVCacheLayout.LBNHC
+        ).storage_plan.allocation_bytes
+        for p in placements
+    ]
+    specs = layer_specs(config.kv_cache_groups)
+
+    result = get_kv_cache_configs(vllm_config, [specs] * 2, budgets, placements)
+
+    assert [c.num_blocks for c in result] == [5, 5]
+    assert vllm_config.model_config.max_model_len == 4 * 16
+    assert all(c.storage_plan is not None for c in result)
+
+
+def test_replicated_kv_cache_config_ignores_optional_placements():
+    from vllm.v1.kv_cache_placement import layer_specs
+
+    config, placement = _layer_sharded_cache_case()
+    specs = layer_specs(config.kv_cache_groups)
+    vllm_config = VllmConfig()
+    vllm_config.model_config = SimpleNamespace(
+        max_model_len=32, original_max_model_len=32
+    )
+    vllm_config.cache_config.kv_cache_layout = "LBNHC"
+    logical_budget = 7 * sum(spec.page_size_bytes for spec in specs.values())
+
+    result = get_kv_cache_configs(
+        vllm_config,
+        [specs] * 2,
+        [logical_budget] * 2,
+        [placement, replace(placement, rank=1)],
+    )
+
+    assert [c.num_blocks for c in result] == [7, 7]
+    assert all(c.storage_plan is None for c in result)
 
 
 def test_layer_sharded_rejects_inconsistent_replica_domains():

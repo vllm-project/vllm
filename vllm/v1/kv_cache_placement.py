@@ -3,8 +3,6 @@
 """Worker-local KV storage placement, independent of logical block ownership."""
 
 from dataclasses import dataclass, replace
-from typing import TYPE_CHECKING
-
 from vllm.utils.math_utils import round_up
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
@@ -16,10 +14,6 @@ from vllm.v1.kv_cache_interface import (
     compute_layout_strides,
 )
 from vllm.v1.kv_cache_layout import KVCacheLayout
-
-if TYPE_CHECKING:
-    from vllm.config import VllmConfig
-
 
 @dataclass(frozen=True)
 class KVCacheBundle:
@@ -239,98 +233,31 @@ def fit_kv_cache_storage(
     return low
 
 
-def plan_layer_sharded_configs(
-    vllm_config: "VllmConfig",
-    worker_groups: list[list[KVCacheGroupSpec]],
-    placements: list[KVCachePlacement],
-    available_memory: list[int],
-) -> list[KVCacheConfig]:
-    """Plan common logical capacity against every worker's physical layout."""
-    from vllm.v1.core.kv_cache_utils import get_max_concurrency_for_kv_cache_config
+def get_layer_sharded_capacity(
+    groups: list[KVCacheGroupSpec],
+    placement: KVCachePlacement,
+    layout: KVCacheLayout,
+    available_memory: int,
+) -> int:
+    """Convert a physical memory budget to the usual logical block capacity."""
+    specs = layer_specs(groups)
+    if not specs or any(not isinstance(s, FullAttentionSpec) for s in specs.values()):
+        raise ValueError("KVPP currently requires full-attention cache specs.")
+    if len({s.block_size for s in specs.values()}) != 1:
+        raise ValueError("KVPP currently requires a common cache block size.")
+    config = KVCacheConfig(num_blocks=1, kv_cache_tensors=[], kv_cache_groups=groups)
+    return fit_kv_cache_storage(config, placement, layout, available_memory)
 
-    if not len(worker_groups) == len(placements) == len(available_memory):
-        raise ValueError("Each worker must provide its KV placement and budget.")
-    layout = vllm_config.cache_config.get_resolved_kv_cache_layout()
-    configs = []
-    capacities = []
-    for groups, placement, available in zip(
-        worker_groups, placements, available_memory
-    ):
-        specs = layer_specs(groups)
-        if not specs or any(
-            not isinstance(s, FullAttentionSpec) for s in specs.values()
-        ):
-            raise ValueError("KVPP currently requires full-attention cache specs.")
-        if len({s.block_size for s in specs.values()}) != 1:
-            raise ValueError("KVPP currently requires a common cache block size.")
-        config = KVCacheConfig(
-            num_blocks=1,
-            kv_cache_tensors=[],
-            kv_cache_groups=groups,
-            prefix_cache_retention_interval=(
-                vllm_config.cache_config.prefix_cache_retention_interval
-            ),
-        )
-        configs.append(config)
-        capacities.append(fit_kv_cache_storage(config, placement, layout, available))
-    num_blocks = min(capacities)
-    override = vllm_config.cache_config.num_gpu_blocks_override
-    if override is not None:
-        if override > num_blocks:
-            raise ValueError(
-                f"KVPP block override {override} exceeds physical capacity "
-                f"{num_blocks}."
-            )
-        num_blocks = override
-    if num_blocks < 2:
-        raise ValueError(
-            "KVPP memory budget cannot hold a usable block and null block."
-        )
-    configs = [
-        build_kv_cache_storage(replace(c, num_blocks=num_blocks), p, layout)
-        for c, p in zip(configs, placements)
-    ]
 
-    offload_block_size_bytes = max(
+def set_layer_sharded_offload_block_size(configs: list[KVCacheConfig]) -> None:
+    """Use one persistent-block budget for offload across all KV ranks."""
+    block_size_bytes = max(
         sum(
-            layer_specs(c.kv_cache_groups)[name].page_size_bytes
-            for name in c.storage_plan.persistent_layers
+            layer_specs(config.kv_cache_groups)[name].page_size_bytes
+            for name in config.storage_plan.persistent_layers
         )
-        for c in configs
-        if c.storage_plan is not None
+        for config in configs
+        if config.storage_plan is not None
     )
     for config in configs:
-        config.offload_block_size_bytes = offload_block_size_bytes
-
-    def fits_length(length: int) -> bool:
-        original = vllm_config.model_config.max_model_len
-        try:
-            vllm_config.model_config.max_model_len = length
-            return all(
-                get_max_concurrency_for_kv_cache_config(
-                    vllm_config, replace(c, num_blocks=num_blocks - 1)
-                )
-                >= 1
-                for c in configs
-            )
-        finally:
-            vllm_config.model_config.max_model_len = original
-
-    model = vllm_config.model_config
-    if model.original_max_model_len == -1:
-        low, high = 0, model.max_model_len + 1
-        while low + 1 < high:
-            middle = (low + high) // 2
-            if fits_length(middle):
-                low = middle
-            else:
-                high = middle
-        if low == 0:
-            raise ValueError("KVPP cannot fit even one token at this memory budget.")
-        model.max_model_len = low
-    elif not fits_length(model.max_model_len):
-        raise ValueError(
-            "KVPP physical capacity is insufficient for max_model_len; increase "
-            "the KV memory budget or reduce max_model_len."
-        )
-    return configs
+        config.offload_block_size_bytes = block_size_bytes
