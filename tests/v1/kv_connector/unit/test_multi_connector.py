@@ -36,12 +36,14 @@ from vllm.distributed.kv_transfer.kv_connector.v1.multi_connector import (
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl import (
     NixlKVConnectorStats,
 )
+from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.outputs import (
     KVConnectorOutput,
     KVConnectorWorkerMetadata,
     ModelRunnerOutput,
 )
+from vllm.v1.request import RequestStatus
 
 MODEL_NAME = "meta-llama/Llama-3.2-1B-Instruct"
 
@@ -160,13 +162,11 @@ KVConnectorFactory.register_connector(
 )
 
 
-def test_register_finished_partial_tail_notifies_every_connector():
-    connector = object.__new__(MultiConnector)
-    first = MagicMock(spec_set=KVConnectorBase_V1)
-    second = MagicMock(spec_set=KVConnectorBase_V1)
+def test_register_finished_partial_tail_notifies_every_connector(mc):
+    connector = mc
+    first, second = connector.sub_connectors
     first.register_finished_partial_tail.return_value = True
     second.register_finished_partial_tail.return_value = False
-    connector._connectors = [first, second]
     request = MagicMock()
     block_ids = ([1], [2])
     offloads = [(1, 2, 12)]
@@ -220,7 +220,9 @@ def async_saves(mc):
     return mc
 
 
-def _send_step(connector, notifications=(), *, receiving=None):
+def _send_step(
+    connector, notifications=(), *, receiving=None, failed_receiving=(), scheduler=None
+):
     outputs = []
     for rank in range(2):
         metadata = MultiKVConnectorWorkerMetadata(
@@ -238,8 +240,32 @@ def _send_step(connector, notifications=(), *, receiving=None):
     output = KVOutputAggregator(2).aggregate(outputs).kv_connector_output
     assert output is not None
     output.finished_recving = receiving
-    connector.update_connector_output(output)
+    output.failed_recving = set(failed_receiving)
+    if scheduler is None:
+        connector.update_connector_output(output)
+    else:
+        scheduler._update_from_kv_xfer_finished(output)
     return output
+
+
+def _scheduler_with_request(connector, status):
+    request = SimpleNamespace(request_id="r", status=status)
+    request.is_finished = lambda: RequestStatus.is_finished(request.status)
+    scheduler = object.__new__(Scheduler)
+    scheduler.connector = connector
+    scheduler.requests = {request.request_id: request}
+    scheduler.finished_recving_kv_req_ids = set()
+    scheduler._free_request_blocks = MagicMock()
+    connector.on_new_request(request)
+    return scheduler, request
+
+
+def _start_async_receive(connector, request):
+    first, second = connector.sub_connectors
+    first.get_num_new_matched_tokens.return_value = 16, True
+    second.get_num_new_matched_tokens.return_value = 0, False
+    assert connector.get_num_new_matched_tokens(request, 0) == (16, True)
+    connector.update_state_after_alloc(request, MagicMock(), 16)
 
 
 def _finish_with_async_saves(connector):
@@ -249,6 +275,10 @@ def _finish_with_async_saves(connector):
 
 
 def _assert_save_state_cleared(connector):
+    assert not connector._partial_tail_owners
+    assert not connector._async_load_candidates
+    assert not connector._async_load_owners
+    assert not connector._requests_to_connector
     assert not connector._async_save_owners
     assert not connector._completed_async_saves
     assert not any(connector._send_workers)
@@ -319,28 +349,198 @@ def test_send_completion_uses_child_finished_count(async_saves):
     assert _send_step(async_saves, [(1, 1)]).finished_sending == {"r"}
 
 
-def test_unexpected_send_and_aborted_receive_release_tracking(async_saves):
+def test_unexpected_send_does_not_create_tracking(async_saves):
     # Unregistered ACKs must not create persistent request state.
     assert _send_step(async_saves, [(0, 0), (1, 1)]).finished_sending is None
     _assert_save_state_cleared(async_saves)
-    _finish_with_async_saves(async_saves)
-    assert _send_step(async_saves, [(0, 0)]).finished_sending is None
-    output = _send_step(async_saves, receiving={"r"})
-    assert output.finished_recving == {"r"}
-    assert output.finished_sending is None
-    _assert_save_state_cleared(async_saves)
-    assert _send_step(async_saves, [(0, 1), (1, 0), (1, 1)]).finished_sending is None
-    _assert_save_state_cleared(async_saves)
 
 
-def test_normal_receive_keeps_tracking_for_later_saves(async_saves):
-    request = SimpleNamespace(request_id="r")
-    async_saves.on_new_request(request)
-    assert _send_step(async_saves, receiving={"r"}).finished_recving == {"r"}
+@pytest.mark.parametrize("receiver_saves", [False, True])
+@pytest.mark.parametrize("first_completion", ["receive", "send", "both"])
+def test_aborted_receive_waits_for_another_send_owner(
+    async_saves, receiver_saves, first_completion
+):
+    """Finishing a cancelled load must not free another child's save source."""
+    scheduler, request = _scheduler_with_request(
+        async_saves, RequestStatus.WAITING_FOR_REMOTE_KVS
+    )
+    _start_async_receive(async_saves, request)
+    async_saves.sub_connectors[0].request_finished.return_value = (
+        receiver_saves,
+        None,
+    )
+    request.status = RequestStatus.FINISHED_ABORTED
     assert async_saves.request_finished(request, [1])[0]
-    assert _send_step(
-        async_saves, [(0, 0), (0, 1), (1, 0), (1, 1)]
-    ).finished_sending == {"r"}
+
+    send_acks = [(1, 0), (1, 1)]
+    if receiver_saves:
+        send_acks += [(0, 0), (0, 1)]
+    completions: dict[str, dict[str, set[str] | list[tuple[int, int]]]] = {
+        "receive": {"receiving": {"r"}},
+        "send": {"notifications": send_acks},
+        "both": {"receiving": {"r"}, "notifications": send_acks},
+    }
+    output = _send_step(
+        async_saves, scheduler=scheduler, **completions[first_completion]
+    )
+    if first_completion != "both":
+        scheduler._free_request_blocks.assert_not_called()
+        assert output.finished_recving is None
+        assert output.finished_sending is None
+        assert "r" in scheduler.requests
+        remaining = "send" if first_completion == "receive" else "receive"
+        _send_step(async_saves, scheduler=scheduler, **completions[remaining])
+    scheduler._free_request_blocks.assert_called_once_with(request)
+    assert not scheduler.requests
+    _assert_save_state_cleared(async_saves)
+    # Duplicate terminal notifications cannot trigger a second block release.
+    _send_step(async_saves, scheduler=scheduler, **completions["both"])
+    scheduler._free_request_blocks.assert_called_once_with(request)
+
+
+def test_aborted_receive_only_releases_once_and_allows_request_id_reuse(
+    async_saves,
+):
+    async_saves.sub_connectors[0].request_finished.return_value = False, None
+    async_saves.sub_connectors[1].request_finished.return_value = False, None
+    for _ in range(2):
+        scheduler, request = _scheduler_with_request(
+            async_saves, RequestStatus.WAITING_FOR_REMOTE_KVS
+        )
+        _start_async_receive(async_saves, request)
+        request.status = RequestStatus.FINISHED_ABORTED
+        assert async_saves.request_finished(request, [1])[0]
+        _send_step(async_saves, receiving={"r"}, scheduler=scheduler)
+        scheduler._free_request_blocks.assert_called_once_with(request)
+        assert not scheduler.requests
+        _assert_save_state_cleared(async_saves)
+
+
+def test_receiving_child_save_is_independent_of_its_receive(async_saves):
+    """A receiver may still be saving blocks from an earlier prefill."""
+    scheduler, request = _scheduler_with_request(
+        async_saves, RequestStatus.WAITING_FOR_REMOTE_KVS
+    )
+    _start_async_receive(async_saves, request)
+    request.status = RequestStatus.FINISHED_ABORTED
+    assert async_saves.request_finished(request, [1])[0]
+    _send_step(async_saves, [(1, 0), (1, 1)], receiving={"r"}, scheduler=scheduler)
+    scheduler._free_request_blocks.assert_not_called()
+    _send_step(async_saves, [(0, 0), (0, 1)], scheduler=scheduler)
+    scheduler._free_request_blocks.assert_called_once_with(request)
+    _assert_save_state_cleared(async_saves)
+
+
+@pytest.mark.parametrize("failed", [False, True])
+def test_normal_receive_keeps_tracking_for_later_saves(async_saves, failed):
+    scheduler, request = _scheduler_with_request(
+        async_saves, RequestStatus.WAITING_FOR_REMOTE_KVS
+    )
+    _start_async_receive(async_saves, request)
+    output = _send_step(
+        async_saves,
+        receiving={"r"},
+        failed_receiving={"r"} if failed else (),
+        scheduler=scheduler,
+    )
+    assert output.finished_recving == {"r"}
+    assert output.failed_recving == ({"r"} if failed else set())
+    assert scheduler.finished_recving_kv_req_ids == {"r"}
+    scheduler._free_request_blocks.assert_not_called()
+    request.status = RequestStatus.FINISHED_STOPPED
+    assert async_saves.request_finished(request, [1])[0]
+    _send_step(async_saves, [(1, 0), (1, 1)], scheduler=scheduler)
+    scheduler._free_request_blocks.assert_not_called()
+    _send_step(async_saves, [(0, 0), (0, 1)], scheduler=scheduler)
+    scheduler._free_request_blocks.assert_called_once_with(request)
+    _assert_save_state_cleared(async_saves)
+
+
+@pytest.mark.parametrize("allocate_zero_tokens", [False, True])
+def test_async_lookup_without_external_allocation_does_not_create_a_receive_wait(
+    async_saves, allocate_zero_tokens
+):
+    scheduler, request = _scheduler_with_request(
+        async_saves, RequestStatus.FINISHED_ABORTED
+    )
+    first, second = async_saves.sub_connectors
+    first.get_num_new_matched_tokens.return_value = 16, True
+    second.get_num_new_matched_tokens.return_value = 0, False
+    assert async_saves.get_num_new_matched_tokens(request, 0) == (16, True)
+    if allocate_zero_tokens:
+        async_saves.update_state_after_alloc(request, MagicMock(), 0)
+    assert async_saves.request_finished(request, [1])[0]
+    _send_step(async_saves, [(0, 0), (0, 1), (1, 0), (1, 1)], scheduler=scheduler)
+    scheduler._free_request_blocks.assert_called_once_with(request)
+    _assert_save_state_cleared(async_saves)
+
+
+def test_partial_tail_owner_releases_after_its_send_ack(async_saves):
+    """Scheduler must hear completion even if only the tail hook delays free."""
+    scheduler, request = _scheduler_with_request(
+        async_saves, RequestStatus.FINISHED_STOPPED
+    )
+    first, second = async_saves.sub_connectors
+    first.register_finished_partial_tail.return_value = True
+    second.register_finished_partial_tail.return_value = False
+    for child in async_saves.sub_connectors:
+        child.request_finished.return_value = False, None
+    partial_tail_delay = async_saves.register_finished_partial_tail(
+        request, ([1],), [(0, 1, 12)]
+    )
+    delay_free, _ = async_saves.request_finished(request, [1])
+    assert partial_tail_delay or delay_free
+    _send_step(async_saves, [(0, 0)], scheduler=scheduler)
+    scheduler._free_request_blocks.assert_not_called()
+    _send_step(async_saves, [(0, 1)], scheduler=scheduler)
+    scheduler._free_request_blocks.assert_called_once_with(request)
+    assert not scheduler.requests
+    _assert_save_state_cleared(async_saves)
+
+
+@pytest.mark.parametrize("early_ranks", [(0,), (0, 1)])
+def test_partial_tail_requires_new_acks_after_earlier_saves(async_saves, early_ranks):
+    """A newly accepted tail must not reuse earlier full-block send ACKs."""
+    scheduler, request = _scheduler_with_request(
+        async_saves, RequestStatus.FINISHED_STOPPED
+    )
+    first, second = async_saves.sub_connectors
+    first.register_finished_partial_tail.return_value = True
+    second.register_finished_partial_tail.return_value = False
+    first.request_finished.return_value = False, None
+    _send_step(async_saves, [(0, rank) for rank in early_ranks], scheduler=scheduler)
+    assert async_saves.register_finished_partial_tail(request, ([1],), [(0, 1, 12)])
+    assert async_saves.request_finished(request, [1])[0]
+    _send_step(async_saves, [(0, 1), (1, 0), (1, 1)], scheduler=scheduler)
+    scheduler._free_request_blocks.assert_not_called()
+    _send_step(async_saves, [(0, 0)], scheduler=scheduler)
+    scheduler._free_request_blocks.assert_called_once_with(request)
+    _assert_save_state_cleared(async_saves)
+
+
+@pytest.mark.parametrize("receive_first", [False, True])
+def test_partial_tail_and_receive_from_same_child_both_delay_free(
+    async_saves, receive_first
+):
+    scheduler, request = _scheduler_with_request(
+        async_saves, RequestStatus.WAITING_FOR_REMOTE_KVS
+    )
+    _start_async_receive(async_saves, request)
+    first, second = async_saves.sub_connectors
+    first.register_finished_partial_tail.return_value = True
+    second.register_finished_partial_tail.return_value = False
+    for child in async_saves.sub_connectors:
+        child.request_finished.return_value = False, None
+    request.status = RequestStatus.FINISHED_ABORTED
+    assert async_saves.register_finished_partial_tail(request, ([1],), [(0, 1, 12)])
+    assert async_saves.request_finished(request, [1])[0]
+    receive = {"receiving": {"r"}}
+    send = {"notifications": [(0, 0), (0, 1)]}
+    _send_step(async_saves, scheduler=scheduler, **(receive if receive_first else send))
+    scheduler._free_request_blocks.assert_not_called()
+    _send_step(async_saves, scheduler=scheduler, **(send if receive_first else receive))
+    scheduler._free_request_blocks.assert_called_once_with(request)
+    assert not scheduler.requests
     _assert_save_state_cleared(async_saves)
 
 

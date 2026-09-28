@@ -211,8 +211,11 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
         # A mapping from request id to the index of the connector chosen to
         # load the request from (if any).
         self._requests_to_connector: dict[str, int] = {}
+        self._async_load_candidates: set[str] = set()
+        self._async_load_owners: dict[str, int] = {}
 
         # Scheduler-side owners and completions, including ACKs before finish.
+        self._partial_tail_owners: dict[str, set[int]] = {}
         self._async_save_owners: dict[str, set[int]] = {}
         self._completed_async_saves: dict[str, set[int]] = {}
         self._send_workers: tuple[dict[str, set[int]], ...] = tuple(
@@ -442,6 +445,8 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
         request: "Request",
         num_computed_tokens: int,
     ) -> tuple[int | None, bool]:
+        self._requests_to_connector.pop(request.request_id, None)
+        self._async_load_candidates.discard(request.request_id)
         to_return = (0, False)
         for i, c in enumerate(self._connectors):
             toks, load_async = c.get_num_new_matched_tokens(
@@ -455,6 +460,8 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
             # to this request.
             if to_return[0] == 0 and toks > 0:
                 self._requests_to_connector[request.request_id] = i
+                if load_async:
+                    self._async_load_candidates.add(request.request_id)
                 to_return = (toks, load_async)
         return to_return
 
@@ -475,6 +482,12 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
             else:
                 # Other connectors still receive the request's real blocks
                 c.update_state_after_alloc(request, blocks, 0)
+        if (
+            num_external_tokens > 0
+            and request.request_id in self._async_load_candidates
+        ):
+            self._async_load_owners[request.request_id] = chosen_connector
+        self._async_load_candidates.discard(request.request_id)
 
     def on_new_request(self, request: "Request") -> None:
         self._completed_async_saves[request.request_id] = set()
@@ -491,8 +504,12 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
         )
 
     def _forget_async_saves(self, req_id: str) -> None:
+        self._partial_tail_owners.pop(req_id, None)
         self._async_save_owners.pop(req_id, None)
         self._completed_async_saves.pop(req_id, None)
+        self._async_load_owners.pop(req_id, None)
+        self._async_load_candidates.discard(req_id)
+        self._requests_to_connector.pop(req_id, None)
         for workers in self._send_workers:
             workers.pop(req_id, None)
 
@@ -549,17 +566,25 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
                     self._send_workers[i].pop(req_id, None)
                     if owners is not None:
                         owners.discard(i)
-                        if not owners:
+                        if not owners and req_id not in self._async_load_owners:
                             finished_sending.add(req_id)
         finally:
             # restore kv_connector_worker_meta
             connector_output.kv_connector_worker_meta = multi_connector_worker_meta
-            connector_output.finished_sending = finished_sending or None
-        aborted_recvs = (
-            set(connector_output.finished_recving or ())
-            & self._async_save_owners.keys()
-        )
-        for req_id in finished_sending | aborted_recvs:
+        finished_recving: set[str] = set()
+        for req_id in connector_output.finished_recving or ():
+            if self._async_load_owners.pop(req_id, None) is None:
+                continue
+            owners = self._async_save_owners.get(req_id)
+            if owners is None:
+                # A live request can resume as soon as its selected load ends.
+                finished_recving.add(req_id)
+            elif not owners:
+                # A finished request releases once both load and save are done.
+                finished_sending.add(req_id)
+        connector_output.finished_recving = finished_recving or None
+        connector_output.finished_sending = finished_sending or None
+        for req_id in finished_sending:
             self._forget_async_saves(req_id)
 
     def get_handshake_metadata(self) -> KVConnectorHandshakeMetadata | None:
@@ -594,11 +619,12 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
             [KVConnectorBase_V1], tuple[bool, dict[str, Any] | None]
         ],
     ) -> tuple[bool, dict[str, Any] | None]:
-        async_save_owners: set[int] = set()
+        async_save_owners = self._partial_tail_owners.pop(request.request_id, set())
+        load_owner = self._async_load_owners.get(request.request_id)
         kv_txfer_params = None
         for i, c in enumerate(self._connectors):
-            async_save, txfer_params = per_connector_fn(c)
-            if async_save:
+            delay_free, txfer_params = per_connector_fn(c)
+            if delay_free:
                 async_save_owners.add(i)
             if txfer_params is not None:
                 if kv_txfer_params is not None:
@@ -613,14 +639,15 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
                     kv_txfer_params = txfer_params
         completed = self._completed_async_saves.setdefault(request.request_id, set())
         pending = async_save_owners - completed
-        if pending:
+        delay_free = bool(pending) or load_owner is not None
+        if delay_free:
             self._async_save_owners[request.request_id] = pending
         else:
             self._forget_async_saves(request.request_id)
 
         self._requests_to_connector.pop(request.request_id, None)
 
-        return bool(pending), kv_txfer_params
+        return delay_free, kv_txfer_params
 
     def request_finished(
         self,
@@ -638,11 +665,24 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
         block_ids: tuple[list[int], ...],
         partial_tail_offloads: list[tuple[int, int, int]],
     ) -> bool:
-        accepted = [
-            c.register_finished_partial_tail(request, block_ids, partial_tail_offloads)
-            for c in self._connectors
-        ]
-        return any(accepted)
+        owners = {
+            i
+            for i, c in enumerate(self._connectors)
+            if c.register_finished_partial_tail(
+                request, block_ids, partial_tail_offloads
+            )
+        }
+        if owners:
+            self._partial_tail_owners.setdefault(request.request_id, set()).update(
+                owners
+            )
+            # A finish-time tail is new work, independent of earlier save ACKs.
+            self._completed_async_saves.setdefault(
+                request.request_id, set()
+            ).difference_update(owners)
+            for i in owners:
+                self._send_workers[i].pop(request.request_id, None)
+        return bool(owners)
 
     def request_finished_all_groups(
         self,

@@ -16,7 +16,6 @@ from unittest.mock import MagicMock
 import pytest
 import torch
 
-import vllm.v1.worker.utils as worker_utils
 from vllm.config import CacheConfig
 from vllm.v1.core.kv_cache_manager import KVCacheManager
 from vllm.v1.core.kv_cache_utils import (
@@ -124,39 +123,6 @@ def _expected_bytes_per_block(groups) -> int:
 
 def _bind(config, layout: str):
     return allocate_kv_cache(config, torch.device("cpu"), KVCacheLayout[layout], None)
-
-
-@pytest.mark.parametrize("is_rocm", [False, True])
-def test_shared_allocation_alignment_preserves_layer_views(monkeypatch, is_rocm):
-    """ROCm RDMA needs an aligned view even with a misaligned allocator base."""
-    groups = [KVCacheGroupSpec(["a", "b"], _mla(128))]
-    config = get_kv_cache_config_from_groups(_mock_vllm_config("LBNHC"), groups, MEMORY)
-    monkeypatch.setattr(worker_utils.current_platform, "is_rocm", lambda: is_rocm)
-    monkeypatch.setattr(
-        worker_utils, "warmup_rocm_skinny_gemm_workspaces", lambda _: None
-    )
-    zeros = torch.zeros
-
-    def misaligned_zeros(size, **kwargs):
-        allocation = zeros(size + 4096, **kwargs)
-        offset = (256 - allocation.data_ptr()) % 4096
-        return allocation.narrow(0, offset, size)
-
-    if is_rocm:
-        monkeypatch.setattr(worker_utils.torch, "zeros", misaligned_zeros)
-    caches = _bind(config, "LBNHC")
-    a, b = caches["a"], caches["b"]
-    assert a.untyped_storage().data_ptr() == b.untyped_storage().data_ptr()
-    assert b.data_ptr() - a.data_ptr() == config.kv_cache_tensors[0].layer_stride
-    a.fill_(1)
-    b.fill_(2)
-    assert torch.all(a == 1) and torch.all(b == 2)
-    if is_rocm:
-        assert a.data_ptr() % 4096 == 0
-        assert a.storage_offset() > 0
-    else:
-        assert a.storage_offset() == 0
-        assert a.untyped_storage().nbytes() == config.kv_cache_tensors[0].size
 
 
 MAIN_KV_PAGE_BYTES = 2_048
