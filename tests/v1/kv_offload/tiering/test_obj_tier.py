@@ -41,8 +41,8 @@ from vllm.v1.kv_offload.tiering.manager import (
 from vllm.v1.kv_offload.tiering.obj.config import ObjStoreConfig
 from vllm.v1.kv_offload.tiering.obj.manager import (
     _CUOBJ_MAX_MEMORY_REG_SIZE_BYTES,
-    _build_primary_dram_descriptors,
     ObjectStoreSecondaryTierManager,
+    _build_primary_dram_descriptors,
 )
 
 # ---------------------------------------------------------------------------
