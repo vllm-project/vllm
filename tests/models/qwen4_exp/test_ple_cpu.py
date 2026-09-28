@@ -10,6 +10,7 @@ import pytest
 import torch
 from torch import nn
 
+from vllm.models.qwen4_exp.cpu import ple_layer as ple_layer_module
 from vllm.models.qwen4_exp.cpu.model_state import Qwen4ExpModelState
 from vllm.models.qwen4_exp.cpu.ngram_embedding import (
     Qwen4ExpPLEEmbeddingMethod,
@@ -20,6 +21,7 @@ from vllm.models.qwen4_exp.cpu.ops.ple import ple_gate, ple_ngram_ids
 from vllm.models.qwen4_exp.cpu.ple_layer import Qwen4ExpPLELayer
 from vllm.models.qwen4_exp.cpu.runtime import has_active_triton_cpu_backend
 from vllm.platforms import current_platform
+from vllm.v1.attention.backends.short_conv_attn import PleShortConvAttentionMetadata
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 from vllm.v1.worker.gpu.model_states.mamba_hybrid import MambaHybridModelState
 
@@ -285,3 +287,59 @@ def test_cpu_ple_short_conv_matches_shared_reference(
     assert torch.equal(conv_state, state_reference)
     assert torch.equal(conv_state[NULL_BLOCK_ID], null_state)
     assert torch.equal(actual[num_real_tokens:], residual[num_real_tokens:])
+
+
+def test_cpu_ple_short_conv_runs_after_metadata_free_compile(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    layer_name = "model.layers.0.ple"
+    layer = Qwen4ExpPLELayer.__new__(Qwen4ExpPLELayer)
+    nn.Module.__init__(layer)
+    layer.prefix = layer_name
+    layer.conv_state_len = 1
+    layer.num_spec_tokens = 0
+    layer.kv_cache = (torch.zeros(1, 1, 1),)
+    layer.conv1d = nn.Conv1d(1, 1, 2, groups=1, bias=False)
+
+    def update_state(**kwargs) -> None:
+        scale = 2 if kwargs["metadata"].num_prefills else 3
+        kwargs["residual"].add_(kwargs["inputs"] * scale)
+        kwargs["conv_state"].add_(kwargs["inputs"].sum() * scale)
+
+    monkeypatch.setattr(layer, "_short_conv_dilated_dispatch", update_state)
+    context = SimpleNamespace(
+        attn_metadata=None,
+        no_compile_layers={layer_name: layer},
+    )
+    monkeypatch.setattr(ple_layer_module, "get_forward_context", lambda: context)
+
+    def run_short_conv(inputs: torch.Tensor, residual: torch.Tensor) -> torch.Tensor:
+        layer._short_conv(inputs, residual)
+        return residual
+
+    compiled = torch.compile(
+        run_short_conv,
+        backend="inductor",
+        fullgraph=True,
+        options={"guard_filter_fn": torch.compiler.skip_all_guards_unsafe},
+    )
+    inputs = torch.ones(1, 1)
+    warmup_output = compiled(inputs, torch.zeros_like(inputs))
+    assert torch.equal(warmup_output, torch.zeros_like(inputs))
+    assert torch.equal(layer.kv_cache[0], torch.zeros_like(layer.kv_cache[0]))
+
+    for num_prefills, num_decodes in [(1, 0), (0, 1)]:
+        metadata = PleShortConvAttentionMetadata.__new__(PleShortConvAttentionMetadata)
+        metadata.num_prefills = num_prefills
+        metadata.num_decodes = num_decodes
+        context.attn_metadata = {layer_name: metadata}
+        previous_state = layer.kv_cache[0].clone()
+        output = compiled(inputs, torch.zeros_like(inputs))
+        compiled_state = layer.kv_cache[0].clone()
+        layer.kv_cache[0].copy_(previous_state)
+        expected = torch.zeros_like(inputs)
+        layer._short_conv_impl(inputs, expected)
+        assert torch.equal(output, expected)
+        assert torch.equal(compiled_state, layer.kv_cache[0])
+
+    assert torch.equal(layer.kv_cache[0], torch.full_like(layer.kv_cache[0], 5))
