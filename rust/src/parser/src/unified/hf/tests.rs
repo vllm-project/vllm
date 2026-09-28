@@ -17,6 +17,7 @@ use vllm_tokenizer::{DecodedText, TokenAnchor, TokenAttribution, Tokenizer as _}
 
 use super::{HfTemplateError, HfUnifiedParser, ResponseTemplate};
 use crate::tool::Tool;
+use crate::tool::test_utils::split_by_chars;
 use crate::unified::{UnifiedParser, UnifiedParserError, UnifiedParserEvent, UnifiedParserOutput};
 
 fn cohere_template() -> Value {
@@ -215,20 +216,6 @@ fn parse(template: Value, text: &str) -> Value {
     message(&parse_events(&compile(template), &[], "", &[text]).unwrap())
 }
 
-/// Split `text` at char boundaries into chunks of `step` chars.
-fn fixed_chunks(text: &str, step: usize) -> Vec<&str> {
-    let mut chunks = Vec::new();
-    let mut start = 0;
-    for (count, (index, _)) in text.char_indices().enumerate() {
-        if count > 0 && count % step == 0 {
-            chunks.push(&text[start..index]);
-            start = index;
-        }
-    }
-    chunks.push(&text[start..]);
-    chunks
-}
-
 /// Split `text` at pseudo-random char boundaries (xorshift, seeded).
 fn random_chunks(text: &str, seed: u64) -> Vec<&str> {
     let mut state = seed | 1;
@@ -395,7 +382,7 @@ fn streaming_matches_whole_string_for_every_chunking() {
         let template = compile(template);
         let expected = message(&parse_events(&template, &[], "", &[text]).unwrap());
         let mut chunkings: Vec<Vec<&str>> =
-            [1, 2, 3, 5, 7, 13, 31].map(|step| fixed_chunks(text, step)).into();
+            [1, 2, 3, 5, 7, 13, 31].map(|step| split_by_chars(text, step)).into();
         chunkings.extend((0..30).map(|seed| random_chunks(text, 0xC0DE_5EED + seed)));
         for chunks in chunkings {
             assert_eq!(chunks.concat(), text);
@@ -904,7 +891,7 @@ fn differential_against_transformers() {
             None => case["expected"].clone(),
         };
 
-        for chunks in [vec![text], fixed_chunks(text, 1)] {
+        for chunks in [vec![text], split_by_chars(text, 1)] {
             let actual = parse_events(template, &tools, prefix, &chunks);
             match (&actual, expected.get("error")) {
                 (Err(_), Some(_)) => {}

@@ -9,11 +9,12 @@
 use regex_automata::meta::Regex;
 use regex_automata::util::syntax;
 use serde::Deserialize;
-use serde_json::{Map, Number, Value};
+use serde_json::{Map, Value};
 use thiserror_ext::AsReport as _;
 
 use super::spec::{ContentKind, deserialize};
 use super::{Result, invalid, unsupported};
+use crate::tool::{convert_integer_text, convert_number_text};
 use crate::unified::{self, parsing_failed};
 
 // Sentinel characters for lax-JSON string pre-extraction — ASCII control chars
@@ -25,8 +26,10 @@ const LAX_CLOSE: char = '\u{2}';
 #[derive(Debug, Clone)]
 pub(super) enum ContentParser {
     Text(TextArgs),
-    Int(TextArgs),
-    Float(TextArgs),
+    /// Converted like an `integer` tool parameter.
+    Int,
+    /// Converted like a `number` tool parameter.
+    Float,
     Bool(TextArgs),
     Json(JsonArgs),
     XmlInline(XmlInlineArgs),
@@ -117,8 +120,15 @@ impl ContentParser {
         let args = Value::Object(args.clone());
         Ok(match kind {
             ContentKind::Text => Self::Text(deserialize(&args, &context)?),
-            ContentKind::Int => Self::Int(deserialize(&args, &context)?),
-            ContentKind::Float => Self::Float(deserialize(&args, &context)?),
+            // Number conversion ignores `strip`, but a malformed value is still rejected.
+            ContentKind::Int => {
+                deserialize::<TextArgs>(&args, &context)?;
+                Self::Int
+            }
+            ContentKind::Float => {
+                deserialize::<TextArgs>(&args, &context)?;
+                Self::Float
+            }
             ContentKind::Bool => Self::Bool(deserialize(&args, &context)?),
             ContentKind::Json => {
                 let args: JsonArgs = deserialize(&args, &context)?;
@@ -169,11 +179,10 @@ impl ContentParser {
     pub fn parse(&self, text: &str) -> unified::Result<Value> {
         match self {
             Self::Text(args) => Ok(Value::String(args.apply(text).to_string())),
-            Self::Int(args) => python_int(args.apply(text))
+            // Numbers follow the tool-parameter conversion.
+            Self::Int => convert_integer_text(text)
                 .ok_or_else(|| parsing_failed!("int: invalid literal {text:?}")),
-            Self::Float(args) => python_float(args.apply(text))
-                .and_then(Number::from_f64)
-                .map(Value::Number)
+            Self::Float => convert_number_text(text)
                 .ok_or_else(|| parsing_failed!("float: invalid or non-finite literal {text:?}")),
             Self::Bool(args) => {
                 let text = args.apply(text).to_lowercase();
@@ -198,9 +207,9 @@ impl ValueParserSpec {
 }
 
 impl TextArgs {
-    /// Apply `_text`: strip Python whitespace unless disabled.
+    /// Apply `_text`: strip surrounding whitespace unless disabled.
     pub fn apply(self, text: &str) -> &str {
-        if self.strip { python_strip(text) } else { text }
+        if self.strip { text.trim() } else { text }
     }
 }
 
@@ -374,77 +383,6 @@ pub(super) fn compile_regex(scope: &str, pattern: &str) -> Result<Regex> {
         })
 }
 
-/// Python `str.isspace()` for one character.
-///
-/// Rust's `char::is_whitespace` omits the information separators U+001C..U+001F,
-/// which Python treats as whitespace.
-pub(super) fn is_python_space(c: char) -> bool {
-    c.is_whitespace() || ('\u{1c}'..='\u{1f}').contains(&c)
-}
-
-/// Python `str.strip()`.
-fn python_strip(text: &str) -> &str {
-    text.trim_matches(is_python_space)
-}
-
-/// Python `int(text)` for base-10 literals, as a JSON number.
-///
-/// Accepts surrounding whitespace, a sign, and single underscores between digits.
-// TODO: Python also accepts non-ASCII decimal digits and integers wider than 64 bits.
-fn python_int(text: &str) -> Option<Value> {
-    let digits = python_digits(python_strip(text), false)?;
-    if let Ok(value) = digits.parse::<i64>() {
-        return Some(Value::Number(value.into()));
-    }
-    digits.parse::<u64>().ok().map(|value| Value::Number(value.into()))
-}
-
-/// Python `float(text)`.
-///
-/// Accepts surrounding whitespace, `inf`/`infinity`/`nan` in any case, and single
-/// underscores between digits. Non-finite results are returned as-is; callers
-/// decide whether JSON can represent them.
-fn python_float(text: &str) -> Option<f64> {
-    let text = python_strip(text);
-    let unsigned = text.strip_prefix(['+', '-']).unwrap_or(text);
-    if ["inf", "infinity", "nan"]
-        .iter()
-        .any(|special| unsigned.eq_ignore_ascii_case(special))
-    {
-        return text.to_ascii_lowercase().parse().ok();
-    }
-    python_digits(text, true)?.parse().ok()
-}
-
-/// Validate Python underscore placement and remove underscores.
-///
-/// With `float = false` only a sign and ASCII digits are allowed; otherwise the
-/// decimal point and exponent characters are allowed as well. Rust's parser then
-/// validates the remaining syntax.
-fn python_digits(text: &str, float: bool) -> Option<String> {
-    let mut out = String::with_capacity(text.len());
-    let mut previous: Option<char> = None;
-    let mut chars = text.chars().peekable();
-    while let Some(c) = chars.next() {
-        if c == '_' {
-            let between_digits = previous.is_some_and(|p| p.is_ascii_digit())
-                && chars.peek().is_some_and(|n| n.is_ascii_digit());
-            if !between_digits {
-                return None;
-            }
-        } else if c.is_ascii_digit()
-            || matches!(c, '+' | '-')
-            || (float && matches!(c, '.' | 'e' | 'E'))
-        {
-            out.push(c);
-        } else {
-            return None;
-        }
-        previous = Some(c);
-    }
-    (!out.is_empty()).then_some(out)
-}
-
 fn default_strip() -> bool {
     true
 }
@@ -472,7 +410,7 @@ mod tests {
     }
 
     #[test]
-    fn scalar_parsers_follow_python_conversions() {
+    fn scalar_parsers_convert_like_tool_parameters() {
         let int = parser("int", json!({}));
         assert_eq!(int.parse(" 42\n").unwrap(), json!(42));
         assert_eq!(int.parse("-1_000").unwrap(), json!(-1000));
@@ -492,7 +430,7 @@ mod tests {
         let text = parser("text", json!({"strip": false}));
         assert_eq!(text.parse(" a \n").unwrap(), json!(" a \n"));
         assert_eq!(
-            parser("text", json!({})).parse("\u{1c} a \n").unwrap(),
+            parser("text", json!({})).parse(" a \n").unwrap(),
             json!("a")
         );
     }

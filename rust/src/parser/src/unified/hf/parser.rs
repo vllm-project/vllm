@@ -27,11 +27,10 @@ use vllm_tokenizer::{DecodedText, DynTokenizer, TokenAnchor, TokenAttribution};
 use winnow::error::{ErrMode, ModalResult};
 use winnow::stream::{Partial, Stream};
 
-use super::content::is_python_space;
-use super::pattern::Resolution;
+use super::pattern::{Captures, Resolution};
 use super::template::{
     FieldName, Region, RegionKind, Repeat, ResponseTemplate, TextRegion, TextRole, ToolCallRegion,
-    Watch, WatchKind,
+    Watch, WatchKind, WatchSet,
 };
 use crate::tool::{Tool, ToolCallDelta, ToolSchemas};
 use crate::unified::{
@@ -53,8 +52,8 @@ pub struct HfUnifiedParser {
     tokenizer: DynTokenizer,
     buffer: DecodedText,
     mode: HfMode,
-    /// Number of closed occurrences per region.
-    closed: Vec<usize>,
+    /// Whether each region has closed an occurrence.
+    closed: Vec<bool>,
     /// Strip state per region: per occurrence with `repeats`, per stream otherwise.
     strip: Vec<StripState>,
     emitted_tool_count: usize,
@@ -75,7 +74,7 @@ struct Occurrence {
     region: usize,
     /// Whether the occurrence has content to close (`_opened`).
     opened: bool,
-    captures: Vec<(String, String)>,
+    captures: Captures,
     /// Opener text, returned by [`UnifiedParser::reset`].
     raw_open: String,
     /// Buffered body of a tool-call region.
@@ -101,17 +100,14 @@ enum HfEvent {
     /// Text routed into the current region.
     Text,
     /// A boundary of the current mode's watch list.
-    Boundary {
-        watch: Watch,
-        captures: Vec<(String, String)>,
-    },
+    Boundary { watch: Watch, captures: Captures },
 }
 
 /// A committable boundary match at the current position.
 struct BoundaryMatch {
     watch: Watch,
     len: usize,
-    captures: Vec<(String, String)>,
+    captures: Captures,
 }
 
 impl BoundaryMatch {
@@ -147,7 +143,7 @@ impl HfUnifiedParser {
     /// Create a parser for one request.
     pub fn new(template: Arc<ResponseTemplate>, tools: &[Tool], tokenizer: DynTokenizer) -> Self {
         let mut parser = Self {
-            closed: vec![0; template.regions.len()],
+            closed: vec![false; template.regions.len()],
             strip: template.regions.iter().map(StripState::new).collect(),
             mode: HfMode::Discard,
             template,
@@ -163,17 +159,17 @@ impl HfUnifiedParser {
     /// Clear all per-stream state.
     fn reset_state(&mut self) {
         self.buffer.clear();
-        self.closed.fill(0);
+        self.closed.fill(false);
         self.strip = self.template.regions.iter().map(StripState::new).collect();
         self.emitted_tool_count = 0;
         self.reset_to_implicit();
     }
 
-    /// Return to the implicit region, or the sink when there is none.
+    /// Return to the implicit region, or discard text when there is none.
     fn reset_to_implicit(&mut self) {
         self.mode = match self.template.implicit {
             Some(region) => {
-                HfMode::Implicit(self.occurrence(region, false, Vec::new(), String::new()))
+                HfMode::Implicit(self.occurrence(region, false, Captures::new(), String::new()))
             }
             None => HfMode::Discard,
         };
@@ -184,7 +180,7 @@ impl HfUnifiedParser {
         &mut self,
         region: usize,
         opened: bool,
-        captures: Vec<(String, String)>,
+        captures: Captures,
         raw_open: String,
     ) -> Occurrence {
         let spec = &self.template.regions[region];
@@ -192,7 +188,7 @@ impl HfUnifiedParser {
         if let RegionKind::Text(text) = &spec.kind {
             if let Repeat::Join(join) = &text.repeat
                 && !join.is_empty()
-                && self.closed[region] > 0
+                && self.closed[region]
             {
                 separator = Some(join.clone());
             }
@@ -215,22 +211,13 @@ impl HfUnifiedParser {
     fn drive(&mut self, output: &mut UnifiedParserOutput, phase: Phase) -> Result<()> {
         let template = Arc::clone(&self.template);
         loop {
-            let (watch, markers) = match &self.mode {
-                HfMode::Explicit(occurrence) => {
-                    let region = &template.regions[occurrence.region];
-                    (
-                        region.close_watch.as_slice(),
-                        region.close_markers.as_slice(),
-                    )
-                }
-                HfMode::Discard | HfMode::Implicit(_) => (
-                    template.idle_watch.as_slice(),
-                    template.idle_markers.as_slice(),
-                ),
+            let watch = match &self.mode {
+                HfMode::Explicit(occurrence) => &template.regions[occurrence.region].close_watch,
+                HfMode::Discard | HfMode::Implicit(_) => &template.idle_watch,
             };
             let eof = matches!(phase, Phase::Eof);
             let Some((step, consumed_len)) = parse_buffered_event(&self.buffer.text, |input| {
-                parse_next_event(input, &template, watch, markers, eof)
+                parse_next_event(input, &template, watch, eof)
             })?
             else {
                 return Ok(());
@@ -282,7 +269,7 @@ impl HfUnifiedParser {
         if !phase.emits() {
             // Prompt text is never emitted; it only decides whether later
             // leading whitespace is still stripped.
-            strip.started |= !piece.text.chars().all(is_python_space);
+            strip.started |= !piece.text.trim_start().is_empty();
             return;
         }
         let (visible, dropped) = strip.feed(piece);
@@ -302,7 +289,7 @@ impl HfUnifiedParser {
     fn open_explicit(
         &mut self,
         region: usize,
-        captures: Vec<(String, String)>,
+        captures: Captures,
         raw_open: String,
         output: &mut UnifiedParserOutput,
         phase: Phase,
@@ -312,11 +299,7 @@ impl HfUnifiedParser {
             RegionKind::ToolCalls(ToolCallRegion {
                 name_group: Some(group),
                 ..
-            }) => occurrence
-                .captures
-                .iter()
-                .find(|(name, _)| name == group)
-                .map(|(_, text)| text.clone()),
+            }) => occurrence.captures.get(group).and_then(Value::as_str).map(str::to_string),
             _ => None,
         };
         if let Some(name) = opener_name
@@ -356,7 +339,7 @@ impl HfUnifiedParser {
             })
             .map(|occurrence| take(&mut self.strip[occurrence.region].held));
         if let Some(occurrence) = &occurrence {
-            self.closed[occurrence.region] += 1;
+            self.closed[occurrence.region] = true;
         }
         self.reset_to_implicit();
         // Regions closed inside the prompt contribute nothing to the output.
@@ -473,14 +456,14 @@ impl StripState {
         }
         let mut dropped = DecodedText::default();
         if !self.started {
-            let lead = piece.text.len() - piece.text.trim_start_matches(is_python_space).len();
+            let lead = piece.text.len() - piece.text.trim_start().len();
             if lead == piece.text.len() {
                 return (DecodedText::default(), piece);
             }
             dropped = piece.drain_prefix(lead);
             self.started = true;
         }
-        let body_len = piece.text.trim_end_matches(is_python_space).len();
+        let body_len = piece.text.trim_end().len();
         if body_len == 0 {
             self.held.append(piece);
             return (DecodedText::default(), dropped);
@@ -585,12 +568,11 @@ fn serialize_arguments(arguments: &impl serde::Serialize) -> Result<String> {
 fn parse_next_event(
     input: &mut Partial<&str>,
     template: &ResponseTemplate,
-    watch: &[Watch],
-    markers: &[String],
+    watch: &WatchSet,
     eof: bool,
 ) -> ModalResult<HfEvent> {
-    let marker_refs: Vec<&str> = markers.iter().map(String::as_str).collect();
-    match safe_text_len_mul(input, &marker_refs) {
+    let markers: Vec<&str> = watch.markers.iter().map(String::as_str).collect();
+    match safe_text_len_mul(input, &markers) {
         Ok(0) => {}
         Ok(_) => return Ok(HfEvent::Text),
         // At the end of the stream a partial marker is plain text.
@@ -605,7 +587,7 @@ fn parse_next_event(
     // Any pending boundary blocks the position; otherwise the preferred match wins.
     let text = **input;
     let mut best: Option<BoundaryMatch> = None;
-    for &watch in watch {
+    for &watch in &watch.boundaries {
         match template.boundary(watch).resolve(text, eof) {
             Resolution::Pending => return incomplete(),
             Resolution::NoMatch => {}
@@ -698,7 +680,7 @@ impl UnifiedParser for HfUnifiedParser {
             .regions
             .iter()
             .zip(&self.closed)
-            .filter(|(region, closed)| !region.optional && **closed == 0)
+            .filter(|(region, closed)| !region.optional && !**closed)
             .map(|(region, _)| region.name.as_str())
             .collect();
         if !missing.is_empty() {

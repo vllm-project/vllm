@@ -406,12 +406,8 @@ fn try_convert_value(param_type: &JsonParamType, input: &ParamInput) -> Option<V
 fn try_convert_text_value(param_type: &JsonParamType, value: &str) -> Option<Value> {
     match param_type {
         JsonParamType::String => Some(Value::String(value.to_string())),
-        JsonParamType::Integer => without_digit_separators(value.trim())?
-            .parse::<i64>()
-            .ok()
-            .map(Number::from)
-            .map(Value::Number),
-        JsonParamType::Number => try_convert_number(&without_digit_separators(value.trim())?),
+        JsonParamType::Integer => convert_integer_text(value),
+        JsonParamType::Number => convert_number_text(value),
         JsonParamType::Boolean => try_convert_boolean(value),
         JsonParamType::Object { .. } if value.trim().is_empty() => Some(Value::Object(Map::new())),
         JsonParamType::Array { .. } if value.trim().is_empty() => Some(Value::Array(Vec::new())),
@@ -504,6 +500,20 @@ fn without_digit_separators(value: &str) -> Option<std::borrow::Cow<'_, str>> {
                 && bytes.get(index + 1).is_some_and(u8::is_ascii_digit))
     });
     valid.then(|| value.replace('_', "").into())
+}
+
+/// Convert raw text to a JSON integer, as for an `integer` parameter.
+pub(crate) fn convert_integer_text(value: &str) -> Option<Value> {
+    without_digit_separators(value.trim())?
+        .parse::<i64>()
+        .ok()
+        .map(Number::from)
+        .map(Value::Number)
+}
+
+/// Convert raw text to a JSON number, as for a `number` parameter.
+pub(crate) fn convert_number_text(value: &str) -> Option<Value> {
+    try_convert_number(&without_digit_separators(value.trim())?)
 }
 
 /// Convert one raw string value to a JSON number.

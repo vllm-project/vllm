@@ -16,6 +16,7 @@ use regex_automata::util::primitives::StateID;
 use regex_automata::{Anchored, Input, MatchKind, PatternID};
 use regex_syntax::hir::literal::{ExtractKind, Extractor};
 use regex_syntax::hir::{Hir, HirKind};
+use serde_json::{Map, Value};
 use thiserror_ext::AsReport as _;
 
 use super::{Result, unsupported};
@@ -23,14 +24,15 @@ use super::{Result, unsupported};
 /// Upper bound for the memory of one boundary DFA.
 const DFA_SIZE_LIMIT: usize = 16 << 20;
 
+/// Named capture groups of a boundary match, as string values: the scope a
+/// transform template reads them from.
+pub(super) type Captures = Map<String, Value>;
+
 /// Outcome of resolving a boundary at a candidate position.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum Resolution {
     /// The boundary matches `len` bytes; more input cannot change the match.
-    Matched {
-        len: usize,
-        captures: Vec<(String, String)>,
-    },
+    Matched { len: usize, captures: Captures },
     /// More input could still produce or change a match.
     Pending,
     /// No match starts here, whatever input follows.
@@ -150,7 +152,10 @@ impl StreamingPattern {
             .enumerate()
             .filter_map(|(index, name)| {
                 let span = captures.get_group(index)?;
-                Some((name?.to_string(), text[span.range()].to_string()))
+                Some((
+                    name?.to_string(),
+                    Value::String(text[span.range()].to_string()),
+                ))
             })
             .collect();
         Resolution::Matched {
@@ -280,7 +285,7 @@ mod tests {
     fn matched(len: usize, name: &str) -> Resolution {
         Resolution::Matched {
             len,
-            captures: vec![("name".to_string(), name.to_string())],
+            captures: Captures::from_iter([("name".to_string(), name.into())]),
         }
     }
 
@@ -358,7 +363,7 @@ mod tests {
             alternation.resolve("ab!", true),
             Resolution::Matched {
                 len: 2,
-                captures: vec![]
+                captures: Captures::new()
             }
         );
     }

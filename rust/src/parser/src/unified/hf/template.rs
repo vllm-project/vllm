@@ -13,7 +13,7 @@ use regex_automata::meta::Regex;
 use serde_json::Value;
 
 use super::content::{ContentParser, TextArgs, compile_regex};
-use super::pattern::{Resolution, StreamingPattern};
+use super::pattern::{Captures, Resolution, StreamingPattern};
 use super::spec::{AnchorSpec, FieldSpec, TemplateSpec};
 use super::transform::{FieldTransform, Transform};
 use super::{Result, invalid, unsupported};
@@ -28,8 +28,7 @@ pub struct ResponseTemplate {
     pub(super) implicit: Option<usize>,
     /// Boundaries watched outside explicit regions: every explicit open plus the
     /// implicit region's close.
-    pub(super) idle_watch: Vec<Watch>,
-    pub(super) idle_markers: Vec<String>,
+    pub(super) idle_watch: WatchSet,
     warned_missing_anchor: AtomicBool,
 }
 
@@ -41,8 +40,8 @@ pub(super) struct Region {
     pub open: Option<Boundary>,
     /// `None`: the region runs to the end of the stream.
     pub close: Option<Boundary>,
-    pub close_watch: Vec<Watch>,
-    pub close_markers: Vec<String>,
+    /// Boundaries watched inside this region: its close, if any.
+    pub close_watch: WatchSet,
     pub optional: bool,
     pub kind: RegionKind,
 }
@@ -121,6 +120,15 @@ pub(super) enum WatchKind {
     Close,
 }
 
+/// The boundaries watched in one parser mode.
+#[derive(Debug, Default)]
+pub(super) struct WatchSet {
+    pub boundaries: Vec<Watch>,
+    /// Literals, deduplicated, whose occurrences are the only positions any of
+    /// the boundaries can match at.
+    pub markers: Vec<String>,
+}
+
 impl ResponseTemplate {
     /// Compile the `response_template` object from `tokenizer_config.json`.
     pub fn from_json(value: &Value) -> Result<Self> {
@@ -129,7 +137,8 @@ impl ResponseTemplate {
         let regions = spec
             .fields
             .iter()
-            .map(|(name, field)| Region::compile(name, field))
+            .enumerate()
+            .map(|(index, (name, field))| Region::compile(index, name, field))
             .collect::<Result<Vec<_>>>()?;
 
         // A field without an open anchor is the implicit-open / leftover sink; at most one is allowed.
@@ -157,51 +166,33 @@ impl ResponseTemplate {
             AnchorSpec::Pattern(pattern) => compile_regex("response_template", pattern)?,
         };
 
-        let mut idle_watch: Vec<_> = regions
-            .iter()
-            .enumerate()
-            .filter(|(_, region)| region.open.is_some())
-            .map(|(region, _)| Watch {
+        let opens = regions.iter().enumerate().filter_map(|(region, spec)| {
+            let watch = Watch {
                 region,
                 kind: WatchKind::Open,
-            })
-            .collect();
-        if let Some(region) = implicit
-            && regions[region].close.is_some()
-        {
-            idle_watch.push(Watch {
+            };
+            Some((watch, spec.open.as_ref()?))
+        });
+        let implicit_close = implicit.and_then(|region| {
+            let watch = Watch {
                 region,
                 kind: WatchKind::Close,
-            });
-        }
-        let idle_markers = markers(&regions, &idle_watch);
+            };
+            Some((watch, regions[region].close.as_ref()?))
+        });
+        let idle_watch = WatchSet::new(opens.chain(implicit_close));
 
-        let mut template = Self {
+        Ok(Self {
             start_anchor,
             regions,
             implicit,
             idle_watch,
-            idle_markers,
             warned_missing_anchor: AtomicBool::new(false),
-        };
-        for region in 0..template.regions.len() {
-            let close_watch: Vec<_> = template.regions[region]
-                .close
-                .is_some()
-                .then_some(Watch {
-                    region,
-                    kind: WatchKind::Close,
-                })
-                .into_iter()
-                .collect();
-            template.regions[region].close_markers = markers(&template.regions, &close_watch);
-            template.regions[region].close_watch = close_watch;
-        }
-        Ok(template)
+        })
     }
 
-    /// Return the end offset of the last start-anchor match in `prompt`, and
-    /// the start offset of that match.
+    /// Return the start and end offsets of the last start-anchor match in
+    /// `prompt`.
     pub(super) fn last_start_anchor(&self, prompt: &str) -> Option<(usize, usize)> {
         self.start_anchor
             .find_iter(prompt)
@@ -232,8 +223,8 @@ impl ResponseTemplate {
 }
 
 impl Region {
-    /// Validate a single field spec and compile it.
-    fn compile(name: &str, field: &FieldSpec) -> Result<Self> {
+    /// Validate the spec of the field at `index` and compile it.
+    fn compile(index: usize, name: &str, field: &FieldSpec) -> Result<Self> {
         let scope = format!("Field '{name}'");
         let open = field.open(&scope)?.map(|spec| Boundary::compile(&scope, spec)).transpose()?;
         let close = field.close(&scope)?.map(|spec| Boundary::compile(&scope, spec)).transpose()?;
@@ -323,12 +314,19 @@ impl Region {
             }
         };
 
+        let close_watch = WatchSet::new(close.as_ref().map(|close| {
+            let watch = Watch {
+                region: index,
+                kind: WatchKind::Close,
+            };
+            (watch, close)
+        }));
+
         Ok(Self {
             name,
             open,
             close,
-            close_watch: Vec::new(),
-            close_markers: Vec::new(),
+            close_watch,
             optional: field.optional,
             kind,
         })
@@ -423,11 +421,13 @@ impl Boundary {
     }
 
     /// Named capture groups.
-    pub fn group_names(&self) -> Box<dyn Iterator<Item = &str> + '_> {
+    pub fn group_names(&self) -> impl Iterator<Item = &str> {
         match self {
-            Self::Literals(_) => Box::new(std::iter::empty()),
-            Self::Pattern(pattern) => Box::new(pattern.group_names()),
+            Self::Literals(_) => None,
+            Self::Pattern(pattern) => Some(pattern.group_names()),
         }
+        .into_iter()
+        .flatten()
     }
 
     /// Resolve this boundary at the start of `text`.
@@ -446,7 +446,7 @@ impl Boundary {
                 match literals.iter().find(|literal| text.starts_with(literal.as_str())) {
                     Some(literal) => Resolution::Matched {
                         len: literal.len(),
-                        captures: Vec::new(),
+                        captures: Captures::new(),
                     },
                     None => Resolution::NoMatch,
                 }
@@ -464,20 +464,18 @@ impl Boundary {
     }
 }
 
-/// Collect the scan markers of `watch`, deduplicated.
-fn markers(regions: &[Region], watch: &[Watch]) -> Vec<String> {
-    let mut out: Vec<String> = Vec::new();
-    for entry in watch {
-        let region = &regions[entry.region];
-        let boundary = match entry.kind {
-            WatchKind::Open => region.open.as_ref(),
-            WatchKind::Close => region.close.as_ref(),
-        };
-        for marker in boundary.into_iter().flat_map(Boundary::markers) {
-            if !out.contains(marker) {
-                out.push(marker.clone());
+impl WatchSet {
+    /// Collect the watched boundaries and their deduplicated markers.
+    fn new<'a>(entries: impl IntoIterator<Item = (Watch, &'a Boundary)>) -> Self {
+        let mut set = Self::default();
+        for (watch, boundary) in entries {
+            set.boundaries.push(watch);
+            for marker in boundary.markers() {
+                if !set.markers.contains(marker) {
+                    set.markers.push(marker.clone());
+                }
             }
         }
+        set
     }
-    out
 }

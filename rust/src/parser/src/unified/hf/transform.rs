@@ -11,6 +11,7 @@ use std::sync::LazyLock;
 use regex_automata::meta::Regex;
 use serde_json::{Map, Value};
 
+use super::pattern::Captures;
 use super::{Result, invalid};
 use crate::unified::{self, parsing_failed};
 
@@ -116,7 +117,7 @@ impl Transform {
                     let Some(object) = value.as_object() else {
                         return Err(parsing_failed!(
                             "transform placeholder '{{{dotted}}}' cannot index into {} at '{key}'",
-                            python_type_name(value)
+                            json_type_name(value)
                         ));
                     };
                     let Some(next) = object.get(key) else {
@@ -149,23 +150,18 @@ impl FieldTransform {
         &self,
         field_name: &str,
         parsed: Value,
-        captures: &[(String, String)],
+        captures: &Captures,
     ) -> unified::Result<Value> {
-        let captures: Map<String, Value> = captures
-            .iter()
-            .map(|(name, text)| (name.clone(), Value::String(text.clone())))
-            .collect();
-
         if !self.each {
-            let mut scope = captures;
+            let mut scope = captures.clone();
             scope.insert("content".to_string(), parsed);
             return self.template.apply(&scope);
         }
 
         let Value::Array(items) = parsed else {
             return Err(parsing_failed!(
-                "Field '{field_name}': transform_each requires the parsed content to be a list, got {}.",
-                python_type_name(&parsed)
+                "Field '{field_name}': transform_each requires the parsed content to be an array, got {}.",
+                json_type_name(&parsed)
             ));
         };
         items
@@ -173,8 +169,8 @@ impl FieldTransform {
             .map(|item| {
                 let Value::Object(item) = item else {
                     return Err(parsing_failed!(
-                        "Field '{field_name}': transform_each requires each list element to be a dict, got {}.",
-                        python_type_name(&item)
+                        "Field '{field_name}': transform_each requires each array element to be an object, got {}.",
+                        json_type_name(&item)
                     ));
                 };
                 let mut scope = captures.clone();
@@ -186,16 +182,15 @@ impl FieldTransform {
     }
 }
 
-/// Python type name of a JSON value, for error messages.
-fn python_type_name(value: &Value) -> &'static str {
+/// JSON type name of a value, for error messages.
+fn json_type_name(value: &Value) -> &'static str {
     match value {
-        Value::Null => "NoneType",
-        Value::Bool(_) => "bool",
-        Value::Number(number) if number.is_f64() => "float",
-        Value::Number(_) => "int",
-        Value::String(_) => "str",
-        Value::Array(_) => "list",
-        Value::Object(_) => "dict",
+        Value::Null => "null",
+        Value::Bool(_) => "boolean",
+        Value::Number(_) => "number",
+        Value::String(_) => "string",
+        Value::Array(_) => "array",
+        Value::Object(_) => "object",
     }
 }
 
@@ -245,7 +240,7 @@ mod tests {
         .assert_debug_eq(&apply(json!("{name}"), json!({"content": 1})));
         expect_test::expect![[r#"
             ParsingFailed {
-                message: "transform placeholder '{content.a}' cannot index into int at 'a'",
+                message: "transform placeholder '{content.a}' cannot index into number at 'a'",
             }
         "#]]
         .assert_debug_eq(&apply(json!("{content.a}"), json!({"content": 1})));
