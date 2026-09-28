@@ -10,6 +10,7 @@ These tests verify:
 5. Eviction coordination between tiers
 """
 
+import time
 from collections.abc import Iterable
 from unittest.mock import MagicMock, patch
 
@@ -42,6 +43,7 @@ from vllm.v1.kv_offload.base import (
 from vllm.v1.kv_offload.cpu.policies.lru import LRUCachePolicy
 from vllm.v1.kv_offload.tiering.base import (
     JobResult,
+    JobTimeoutStatus,
     SecondaryTierManager,
     TieringOffloadingMetrics,
     TransferJob,
@@ -340,6 +342,28 @@ class TestTieringOffloadingManager:
         if req_context.req_id not in self.manager._req_state:
             self.manager.on_new_request(req_context)
 
+    def _make_expired_promotion(self, monkeypatch):
+        monkeypatch.setattr(
+            ExampleSecondaryTierManager,
+            "io_timeout_seconds",
+            property(lambda self: 60),
+        )
+        self._start_request()
+        key = to_keys([1])[0]
+        prepared = self.primary_tier.prepare_write([key], _CTX)
+        assert prepared is not None
+        slot = prepared.store_spec.chunk_ids[0]
+        job = TransferJob(
+            self.manager._next_job_id(),
+            [key],
+            np.array([slot]),
+            True,
+            _CTX,
+            submit_time=time.monotonic() - 61,
+        )
+        self.manager._register_job(job, 0)
+        return key, slot, job
+
     def test_failed_promotion_finalizes_primary_with_failure(self, manager_setup):
         """A failed promotion still finalizes the primary slots with
         success=False; the tier corrects its own verdict."""
@@ -394,6 +418,50 @@ class TestTieringOffloadingManager:
         ):
             self.manager._process_finished_jobs()
         completed.assert_called_once_with(to_keys([1]), _CTX, True)
+
+    @pytest.mark.parametrize("completion_delay", [60, 61])
+    def test_late_physical_completion_reports_only_timeout(
+        self, manager_setup, monkeypatch, completion_delay
+    ):
+        key, slot, job = self._make_expired_promotion(monkeypatch)
+        self.secondary_tier1.completed_jobs.append(
+            JobResult(job.job_id, True, completed_at=job.submit_time + completion_delay)
+        )
+
+        self.manager._process_finished_jobs()
+
+        assert self.primary_tier.lookup(key, _CTX) is LookupResult.MISS
+        assert slot in self.primary_tier._free_list
+        stats = self.manager.get_stats()
+        assert stats is not None
+        assert (
+            stats.data["data"][TieringOffloadingMetrics.IO_TIMEOUTS][
+                ("1:example", "load")
+            ]
+            == 1
+        )
+        self.manager._process_finished_jobs()
+        later_stats = self.manager.get_stats()
+        assert later_stats is not None
+        assert TieringOffloadingMetrics.IO_TIMEOUTS not in later_stats.data["data"]
+
+    def test_completion_queued_during_poll_is_not_timed_out(
+        self, manager_setup, monkeypatch
+    ):
+        key, _, job = self._make_expired_promotion(monkeypatch)
+        result = JobResult(job.job_id, True, completed_at=job.submit_time + 59)
+        self.secondary_tier1.get_finished_jobs = MagicMock(side_effect=[[], [result]])
+        self.secondary_tier1.on_job_timeout = MagicMock(
+            return_value=JobTimeoutStatus.COMPLETED
+        )
+
+        self.manager._process_finished_jobs()
+
+        assert self.primary_tier.lookup(key, _CTX) is LookupResult.HIT
+        assert self.secondary_tier1.get_finished_jobs.call_count == 2
+        stats = self.manager.get_stats()
+        assert stats is not None
+        assert TieringOffloadingMetrics.IO_TIMEOUTS not in stats.data["data"]
 
     def test_take_events_aggregates_tier_owned_events(self, manager_setup):
         primary_event = OffloadingEvent(to_keys([1]), Medium.CPU, removed=False)
@@ -1276,7 +1344,7 @@ class TestTieringOffloadingManager:
         self._simulate_on_schedule_end()
 
         ctx = self._make_request_level_request("req_cascade")
-        self.manager.primary_tier.lookup = lambda key, req_context: (LookupResult.RETRY)
+        self.manager.primary_tier.lookup = lambda key, req_context: LookupResult.RETRY
 
         with pytest.raises(AssertionError):
             self.manager._cascade_existing_chunks_to_request_level_tiers(keys, ctx, {0})

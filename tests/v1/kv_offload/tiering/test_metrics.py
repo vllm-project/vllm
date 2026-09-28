@@ -148,6 +148,28 @@ def test_tiering_metrics_tracker_records_finished_job_metrics():
     tracker.assert_idle()
 
 
+def test_timeout_keeps_primary_usage_until_physical_release():
+    tracker = TieringMetricsTracker(
+        tier_types=["fs"], num_primary_chunks=2, primary_chunk_size=16
+    )
+    job = JobMetadata(TransferJob(0, to_keys([0]), np.array([0]), True, _CTX), 0)
+    tracker.on_job_registered(job)
+    tracker.on_job_finished(
+        job,
+        JobResult(job_id=0, success=False, timed_out=True),
+        hold_primary=True,
+    )
+
+    stats = tracker.take_stats()
+    assert stats is not None
+    values = stats.data["data"]
+    assert values[TieringOffloadingMetrics.PRIMARY_WRITE_USAGE_PERC][("1:fs",)] == 0.5
+    assert values[TieringOffloadingMetrics.IO_TIMEOUTS][("1:fs", "load")] == 1
+
+    tracker.on_job_released(job)
+    tracker.assert_idle()
+
+
 def test_tiering_metrics_tracker_records_partial_promotion_success_bytes():
     tracker = TieringMetricsTracker(
         tier_types=["fs"],

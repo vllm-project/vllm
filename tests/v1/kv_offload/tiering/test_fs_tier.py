@@ -34,12 +34,16 @@ from vllm.v1.kv_offload.config import (
     OffloadingModelConfig,
     OffloadingParallelConfig,
 )
-from vllm.v1.kv_offload.tiering.base import TransferJob
+from vllm.v1.kv_offload.tiering.base import JobTimeoutStatus, TransferJob
 from vllm.v1.kv_offload.tiering.factory import SecondaryTierFactory
 from vllm.v1.kv_offload.tiering.fs.manager import (
     FileSystemTierManager,
 )
 from vllm.v1.kv_offload.tiering.fs.thread_pool import DualQueueThreadPool
+from vllm.v1.kv_offload.tiering.manager import (
+    CPUPrimaryTierOffloadingManager,
+    TieringOffloadingManager,
+)
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -204,6 +208,25 @@ def fs_tier_with_events(tmp_path):
         locality="LOCAL",
     )
     yield tier
+    tier.shutdown()
+
+
+@pytest.fixture
+def fs_timeout_manager(tmp_path):
+    tensor = _page_aligned_zero_tensor(_NUM_BLOCKS, _BLOCK_ELEMENTS)
+    tier = FileSystemTierManager(
+        offloading_spec=_MOCK_OFFLOADING_SPEC,
+        primary_kv_view=memoryview(tensor.numpy()),
+        tier_type="fs",
+        root_dir=str(tmp_path),
+        n_read_threads=1,
+        n_write_threads=1,
+        io_timeout_seconds=60,
+    )
+    region = MagicMock()
+    region.create_kv_memoryview.return_value = tier._primary_kv_view
+    primary = CPUPrimaryTierOffloadingManager(_NUM_BLOCKS, region)
+    yield tier, tensor, primary, TieringOffloadingManager(primary, [tier])
     tier.shutdown()
 
 
@@ -462,6 +485,383 @@ def test_wait_idle_blocks_until_tasks_complete():
         gate.set()
         pool.shutdown(wait=True)
         waiter.join(timeout=5.0)
+
+
+def test_finished_job_cannot_be_canceled_before_result_is_collected():
+    pool = DualQueueThreadPool(n_read_threads=1, n_write_threads=0)
+    try:
+        pool.enqueue_load(1, 1, [lambda: None])
+        pool.wait_idle()
+        assert pool.resolve_timeout(1) is JobTimeoutStatus.COMPLETED
+        assert [result[0] for result in pool.get_finished()] == [1]
+    finally:
+        pool.shutdown()
+
+
+def test_timed_out_load_keeps_slot_reserved_until_worker_returns(
+    fs_timeout_manager, monkeypatch
+):
+    tier, tensor, primary, manager = fs_timeout_manager
+    loaded_key = key(1)
+    prepared = primary.prepare_write([loaded_key], _CTX)
+    assert prepared is not None
+    slot = prepared.store_spec.chunk_ids[0]
+    job = make_job(10, [loaded_key], [slot], is_promotion=True)
+    started = threading.Event()
+    release = threading.Event()
+
+    def late_load(paths, view, offsets, block_size, use_o_direct):
+        started.set()
+        assert release.wait(timeout=5)
+        view.cast("B")[offsets[0]] = 123
+
+    monkeypatch.setattr(
+        "vllm.v1.kv_offload.tiering.fs.manager.batch_load_block", late_load
+    )
+    manager._register_job(job, 0)
+    tier.submit_load(job)
+    assert started.wait(timeout=5)
+    try:
+        job.submit_time = time.monotonic() - 61
+        manager._process_finished_jobs()
+        assert primary.lookup(loaded_key, _CTX) is LookupResult.MISS
+        with pytest.raises(RuntimeError, match="I/O targets are unsafe"):
+            primary.reset_cache()
+        assert slot not in primary._free_list
+        assert manager.has_pending_work()
+
+        # Recompute the same key into a new slot before the old read returns.
+        another = primary.prepare_write([loaded_key], _CTX)
+        assert another is not None
+        assert another.store_spec.chunk_ids[0] != slot
+        tensor[another.store_spec.chunk_ids[0], 0] = 42
+        primary.complete_write([loaded_key], _CTX)
+
+        release.set()
+        tier.drain_jobs()
+        manager._process_finished_jobs()
+        assert tensor[another.store_spec.chunk_ids[0], 0] == 42
+        assert primary.lookup(loaded_key, _CTX) is LookupResult.HIT
+        assert slot in primary._free_list
+        assert not manager.has_pending_work()
+    finally:
+        release.set()
+
+
+def test_timed_out_store_releases_pin_only_after_worker_returns(
+    fs_timeout_manager, monkeypatch
+):
+    tier, _, primary, manager = fs_timeout_manager
+    stored_key = key(1)
+    prepared = primary.prepare_write([stored_key], _CTX)
+    assert prepared is not None
+    slot = prepared.store_spec.chunk_ids[0]
+    primary.complete_write([stored_key], _CTX, True)
+    primary.prepare_read([stored_key], _CTX)
+    job = make_job(11, [stored_key], [slot])
+    started = threading.Event()
+    release = threading.Event()
+
+    def late_store(*args):
+        started.set()
+        assert release.wait(timeout=5)
+
+    monkeypatch.setattr(
+        "vllm.v1.kv_offload.tiering.fs.manager.batch_store_block", late_store
+    )
+    manager._register_job(job, 0)
+    tier.submit_store(job)
+    assert started.wait(timeout=5)
+    try:
+        job.submit_time = time.monotonic() - 61
+        manager._process_finished_jobs()
+        assert primary._policy.get(stored_key).ref_cnt == 1
+
+        release.set()
+        tier.drain_jobs()
+        manager._process_finished_jobs()
+        assert primary._policy.get(stored_key).ref_cnt == 0
+    finally:
+        release.set()
+
+
+def test_queued_load_timeout_releases_slot_without_running(
+    fs_timeout_manager, monkeypatch
+):
+    tier, _, primary, manager = fs_timeout_manager
+    started = [threading.Event(), threading.Event()]
+    release = threading.Event()
+    ran_load = threading.Event()
+
+    def blocker(index):
+        started[index].set()
+        assert release.wait(timeout=5)
+
+    tier._pool.enqueue_load(-1, 1, [lambda: blocker(0)])
+    tier._pool.enqueue_store(-2, 1, [lambda: blocker(1)])
+    assert all(event.wait(timeout=5) for event in started)
+    monkeypatch.setattr(
+        "vllm.v1.kv_offload.tiering.fs.manager.batch_load_block",
+        lambda *args: ran_load.set(),
+    )
+    pending_key = key(3)
+    prepared = primary.prepare_write([pending_key], _CTX)
+    assert prepared is not None
+    slot = prepared.store_spec.chunk_ids[0]
+    job = make_job(12, [pending_key], [slot], is_promotion=True)
+    manager._register_job(job, 0)
+    tier.submit_load(job)
+    try:
+        job.submit_time = time.monotonic() - 61
+        manager._process_finished_jobs()
+        assert not ran_load.is_set()
+        assert slot in primary._free_list
+    finally:
+        release.set()
+        tier.drain_jobs()
+        tier._pool.get_finished()
+
+
+@pytest.mark.parametrize("use_c_ext", [False, True])
+@pytest.mark.parametrize("is_promotion", [False, True])
+@pytest.mark.parametrize("expire", [False, True])
+def test_deadline_retains_buffer_through_real_io(
+    fs_timeout_manager, monkeypatch, use_c_ext, is_promotion, expire
+):
+    """A late batch may touch its slot, but cannot publish a second success."""
+    import vllm.v1.kv_offload.tiering.fs.io as io_mod
+
+    if use_c_ext and not io_mod._HAS_FSIO_C:
+        pytest.skip("fs_io_C extension not built")
+    monkeypatch.setattr(io_mod, "_HAS_FSIO_C", use_c_ext)
+    tier, tensor, primary, manager = fs_timeout_manager
+    keys = [key(1)]
+    prepared = primary.prepare_write(keys, _CTX)
+    assert prepared is not None
+    slot = int(prepared.store_spec.chunk_ids[0])
+    tensor[slot].fill_(7)
+    path = tier.file_mapper.get_file_name(keys[0])
+    if is_promotion:
+        io_mod.batch_store_block(
+            [path],
+            tier._primary_kv_view,
+            [slot * tier._block_size],
+            tier._block_size,
+            tier._use_o_direct,
+        )
+        tensor[slot].zero_()
+    else:
+        primary.complete_write(keys, _CTX)
+        primary.prepare_read(keys, _CTX)
+
+    job = make_job(20, keys, [slot], is_promotion=is_promotion)
+    if expire:
+        job.submit_time -= 61
+    started, release = threading.Event(), threading.Event()
+    operation = "batch_load_block" if is_promotion else "batch_store_block"
+    batch = getattr(io_mod, operation)
+
+    def blocked_batch(*args):
+        started.set()
+        assert release.wait(10)
+        batch(*args)
+
+    monkeypatch.setattr(
+        "vllm.v1.kv_offload.tiering.fs.manager." + operation, blocked_batch
+    )
+    manager._register_job(job, 0)
+    submit = tier.submit_load if is_promotion else tier.submit_store
+    submit(job)
+    try:
+        assert started.wait(5)
+        manager._process_finished_jobs()
+        assert tier._pool._inflight_jobs == 1
+        if expire:
+            assert not manager._jobs
+            assert manager._timed_out_jobs
+            assert slot not in primary._free_list
+            assert not manager._should_store_to_tier(tier, 1)
+            tier.lookup = MagicMock(return_value=LookupResult.HIT)
+            manager.on_new_request(_CTX)
+            manager._processed_jobs_this_step = False
+            assert manager.lookup(key(99), _CTX) is LookupResult.MISS
+            tier.lookup.assert_not_called()
+        if is_promotion:
+            assert primary._num_write_pending_chunks == 1
+        else:
+            assert primary._policy.get(keys[0]).ref_cnt == 1
+
+        release.set()
+        tier.drain_jobs()
+        manager._process_finished_jobs()
+        assert tier._pool._inflight_jobs == 0
+        assert not manager.has_pending_work()
+        assert manager._should_store_to_tier(tier, 1)
+        if is_promotion:
+            assert torch.all(tensor[slot] == 7)
+            assert primary._num_write_pending_chunks == 0
+            expected = LookupResult.MISS if expire else LookupResult.HIT
+            assert primary.lookup(keys[0], _CTX) is expected
+            assert primary._free_list.count(slot) == int(expire)
+        else:
+            assert primary._policy.get(keys[0]).ref_cnt == 0
+            with open(path, "rb") as stored:
+                assert stored.read() == tensor[slot].numpy().tobytes()
+        stats = manager.get_stats()
+        from vllm.v1.kv_offload.tiering.base import TieringOffloadingMetrics
+
+        counts = stats.data["data"].get(TieringOffloadingMetrics.IO_TIMEOUTS, {})
+        assert sum(counts.values()) == int(expire)
+        manager._process_finished_jobs()
+        assert tier._pool.get_finished() == []
+        assert primary._free_list.count(slot) == int(expire and is_promotion)
+    finally:
+        release.set()
+
+
+def test_shutdown_counts_only_physically_finished_jobs():
+    """Cancel queued tasks without declaring the running task memory-safe."""
+    pool = DualQueueThreadPool(1, 0)
+    started, release = threading.Event(), threading.Event()
+    idle, checked = threading.Event(), threading.Event()
+    canceled_ran = threading.Event()
+
+    def blocked():
+        started.set()
+        assert release.wait(10)
+
+    pool.enqueue_load(1, 2, [blocked, canceled_ran.set])
+    assert started.wait(5)
+    pool.enqueue_store(2, 1, [canceled_ran.set])
+    original_wait_for = pool._condition.wait_for
+
+    def observed_wait_for(predicate):
+        def observed_predicate():
+            result = predicate()
+            checked.set()
+            return result
+
+        return original_wait_for(observed_predicate)
+
+    pool._condition.wait_for = observed_wait_for
+
+    def wait_until_idle():
+        pool.wait_idle()
+        idle.set()
+
+    waiter = threading.Thread(target=wait_until_idle)
+    try:
+        pool.shutdown(wait=False)
+        assert pool._inflight_jobs == 1
+        waiter.start()
+        assert checked.wait(5)
+        assert not idle.is_set()
+        assert [(r[0], r[1]) for r in pool.get_finished()] == [(2, False)]
+        with pytest.raises(RuntimeError, match="after shutdown"):
+            pool.enqueue_load(3, 1, [canceled_ran.set])
+        release.set()
+        pool.shutdown(wait=True)
+        waiter.join(5)
+        assert idle.is_set()
+        assert pool._inflight_jobs == 0
+        assert not canceled_ran.is_set()
+        assert [(r[0], r[1]) for r in pool.get_finished()] == [(1, False)]
+        pool.shutdown()
+        assert pool._inflight_jobs == 0
+        assert pool.get_finished() == []
+    finally:
+        release.set()
+        pool.shutdown()
+        if waiter.ident is not None:
+            waiter.join(5)
+
+
+@pytest.mark.parametrize("timeout", [0, -1, float("nan"), float("inf")])
+def test_invalid_io_timeout_rejected(fs_tier, tmp_path, timeout):
+    tier, _ = fs_tier
+    with pytest.raises(ValueError, match="finite and positive"):
+        FileSystemTierManager(
+            offloading_spec=_MOCK_OFFLOADING_SPEC,
+            primary_kv_view=tier._primary_kv_view,
+            tier_type="fs",
+            root_dir=str(tmp_path),
+            io_timeout_seconds=timeout,
+        )
+
+
+@pytest.mark.parametrize("is_promotion", [False, True])
+def test_disabled_deadline_accepts_old_job(fs_tier, is_promotion):
+    tier, _ = fs_tier
+    assert tier.io_timeout_seconds is None
+    tier.submit_store(make_job(1, [key(1)], [0]))
+    assert drain(tier)[0].success
+    job = make_job(2, [key(1)], [1], is_promotion=is_promotion)
+    job.submit_time -= 86400
+    submit = tier.submit_load if is_promotion else tier.submit_store
+    submit(job)
+    (result,) = drain(tier)
+    assert result.success
+    assert not result.timed_out
+    assert tier._job_deadlines == {}
+
+
+def test_reset_waits_for_timed_out_load(fs_timeout_manager, monkeypatch):
+    tier, _, primary, manager = fs_timeout_manager
+    prepared = primary.prepare_write([key(1)], _CTX)
+    assert prepared is not None
+    slot = int(prepared.store_spec.chunk_ids[0])
+    job = make_job(30, [key(1)], [slot], is_promotion=True)
+    job.submit_time -= 61
+    started, release, draining = (threading.Event() for _ in range(3))
+    reset_done = threading.Event()
+    errors = []
+
+    def blocked(*args):
+        started.set()
+        assert release.wait(10)
+
+    monkeypatch.setattr(
+        "vllm.v1.kv_offload.tiering.fs.manager.batch_load_block", blocked
+    )
+    manager._register_job(job, 0)
+    tier.submit_load(job)
+    original_wait_idle = tier._pool.wait_idle
+
+    def observed_drain():
+        draining.set()
+        original_wait_idle()
+
+    monkeypatch.setattr(tier._pool, "wait_idle", observed_drain)
+    monkeypatch.setattr(primary, "reset_cache", MagicMock(wraps=primary.reset_cache))
+
+    def reset():
+        try:
+            manager.reset_cache()
+        except Exception as exc:
+            errors.append(exc)
+        finally:
+            reset_done.set()
+
+    resetter = threading.Thread(target=reset)
+    try:
+        assert started.wait(5)
+        manager._process_finished_jobs()
+        resetter.start()
+        assert draining.wait(5)
+        assert not reset_done.is_set()
+        primary.reset_cache.assert_not_called()
+        assert slot not in primary._free_list
+        release.set()
+        resetter.join(5)
+        assert reset_done.is_set()
+        assert not errors
+        primary.reset_cache.assert_called_once()
+        assert not manager.has_pending_work()
+        assert primary._num_write_pending_chunks == 0
+    finally:
+        release.set()
+        if resetter.ident is not None:
+            resetter.join(5)
 
 
 def test_batch_lookup_c_extension(tmp_path):

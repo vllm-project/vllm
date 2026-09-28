@@ -13,7 +13,7 @@ from collections import deque
 from collections.abc import Callable, Iterable
 
 from vllm.logger import init_logger
-from vllm.v1.kv_offload.tiering.base import JobId
+from vllm.v1.kv_offload.tiering.base import JobId, JobTimeoutStatus
 
 logger = init_logger(__name__)
 
@@ -31,6 +31,8 @@ class JobState:
         "_success",
         "_transfer_time",
         "_lock",
+        "started",
+        "canceled",
     )
 
     def __init__(self, job_id: JobId, n_tasks: int) -> None:
@@ -40,6 +42,9 @@ class JobState:
         self._success = True
         self._transfer_time = 0.0
         self._lock = threading.Lock()
+        # Guarded by the pool condition, alongside queue membership.
+        self.started = False
+        self.canceled = False
 
     @property
     def job_id(self) -> JobId:
@@ -76,7 +81,8 @@ class DualQueueThreadPool:
         self._condition = threading.Condition(threading.Lock())
         self._stop = False
         self._threads: list[threading.Thread] = []
-        self._finished_q: deque[tuple[JobId, bool, float]] = deque()
+        self._finished_q: dict[JobId, tuple[bool, float, float]] = {}
+        self._jobs: dict[JobId, JobState] = {}
         self._inflight_jobs = 0  # guarded by _condition
 
         for i in range(n_read_threads):
@@ -108,6 +114,9 @@ class DualQueueThreadPool:
         """Enqueue load tasks for a job (high-priority for load-priority threads)."""
         state = JobState(job_id, n_tasks)
         with self._condition:
+            if self._stop:
+                raise RuntimeError("Cannot enqueue I/O after shutdown")
+            self._jobs[job_id] = state
             self._inflight_jobs += 1
             for fn in tasks:
                 self._load_q.append((fn, state))
@@ -122,24 +131,43 @@ class DualQueueThreadPool:
         """Enqueue store tasks for a job (high-priority for store-priority threads)."""
         state = JobState(job_id, n_tasks)
         with self._condition:
+            if self._stop:
+                raise RuntimeError("Cannot enqueue I/O after shutdown")
+            self._jobs[job_id] = state
             self._inflight_jobs += 1
             for fn in tasks:
                 self._store_q.append((fn, state))
             self._condition.notify(n_tasks)
 
-    def get_finished(self) -> list[tuple[JobId, bool, float]]:
-        # No lock needed: deque is thread-safe for concurrent append/popleft,
-        # and the manager is the sole popper.
-        jobs = []
-        while self._finished_q:
-            jobs.append(self._finished_q.popleft())
-        return jobs
+    def get_finished(self) -> list[tuple[JobId, bool, float, float]]:
+        with self._condition:
+            jobs = [(job_id, *result) for job_id, result in self._finished_q.items()]
+            for job_id in self._finished_q:
+                del self._jobs[job_id]
+            self._finished_q.clear()
+            return jobs
+
+    def resolve_timeout(self, job_id: JobId) -> JobTimeoutStatus:
+        """Check for a completion or cancel a job that has not started."""
+        with self._condition:
+            if job_id in self._finished_q:
+                return JobTimeoutStatus.COMPLETED
+            state = self._jobs.get(job_id)
+            if state is None or state.started:
+                return JobTimeoutStatus.RUNNING
+            # Workers skip these tasks before calling them. Keep queue entries
+            # until then so cancellation is O(1), even with a stalled pool.
+            state.canceled = True
+            del self._jobs[job_id]
+            self._inflight_jobs -= 1
+            self._condition.notify_all()
+            return JobTimeoutStatus.CANCELED
 
     def wait_idle(self) -> None:
         """Block until there are no in-flight jobs.
 
-        After this returns, every submitted job has had its last task
-        finish, so no worker thread is still copying data. Note:
+        After this returns, every task has finished or been canceled before
+        starting, so no worker thread is still copying data. Note:
         completed jobs may still be sitting in ``_finished_q`` waiting
         for ``get_finished()`` to drain them.
         """
@@ -149,11 +177,19 @@ class DualQueueThreadPool:
     def shutdown(self, wait: bool = True) -> None:
         with self._condition:
             self._stop = True
-            self._load_q.clear()
-            self._store_q.clear()
-            # Cancelled tasks will not decrement _inflight_jobs; reset it so a
-            # subsequent wait_idle() returns instead of hanging.
-            self._inflight_jobs = 0
+            for queue in (self._load_q, self._store_q):
+                while queue:
+                    _, state = queue.popleft()
+                    if state.canceled:
+                        continue
+                    finished, _, total_time = state.task_done(False, 0.0)
+                    if finished:
+                        self._finished_q[state.job_id] = (
+                            False,
+                            total_time,
+                            time.monotonic(),
+                        )
+                        self._inflight_jobs -= 1
             self._condition.notify_all()
         if wait:
             for t in self._threads:
@@ -171,6 +207,10 @@ class DualQueueThreadPool:
                 primary = self._load_q if load_priority else self._store_q
                 secondary = self._store_q if load_priority else self._load_q
                 task, state = primary.popleft() if primary else secondary.popleft()
+                if state.canceled:
+                    del task
+                    continue
+                state.started = True
             try:
                 start_time = time.monotonic()
                 task()
@@ -189,6 +229,8 @@ class DualQueueThreadPool:
 
             if job_finished:
                 with self._condition:
-                    self._finished_q.append((state.job_id, success, total_time))
+                    completed_at = time.monotonic()
+                    self._finished_q[state.job_id] = (success, total_time, completed_at)
                     self._inflight_jobs -= 1
                     self._condition.notify_all()
+            del task

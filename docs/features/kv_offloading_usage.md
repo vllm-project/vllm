@@ -191,10 +191,17 @@ The filesystem tier (`type: "fs"`) writes blocks to a filesystem directory.
 | `root_dir` | yes | — | Base directory; vLLM creates subdirectories beneath it (see [On-Disk Layout](#on-disk-layout)). |
 | `n_read_threads` | no | `16` | Read-priority I/O threads (load path). |
 | `n_write_threads` | no | `16` | Write-priority I/O threads (store path). |
+| `io_timeout_seconds` | no | `null` | Finite positive deadline in seconds, measured from submission; expired jobs fail when the scheduler next polls the tier. |
 | `enable_kv_events` | no | `false` | Publish `BlockStored` KV events (medium `STORAGE`) for successfully stored blocks. Requires KV cache events to be enabled globally. |
 | `locality` | no | unspecified | `LOCAL` or `REMOTE` relative to the publishing vLLM instance. Included in the tier's KV events only when explicitly configured. |
 
 Each thread group prefers its own queue but pulls from the other when its primary queue is empty, so a write-heavy or read-heavy burst won't leave the off-priority queue waiting. Size the totals to your storage's effective concurrency.
+
+When `io_timeout_seconds` is set, the tiering manager reports an expired job as failed without waiting for its filesystem I/O to return. Primary-tier slots remain reserved until the worker actually finishes, so late I/O cannot access a reused slot. No extra block buffer is allocated. A blocked filesystem syscall still occupies its worker thread and primary-tier slots until it returns.
+
+While any timed-out I/O remains unfinished, new promotions and cascades to that filesystem tier are skipped; they resume after all such I/O completes. Other tiers and GPU recomputation remain available, subject to primary-tier capacity. The timeout counter is `vllm:kv_offload_tiering_io_timeouts{tier,direction}`; primary read/write usage gauges continue to include the retained slots.
+
+`drain_jobs()`, cache reset, and shutdown still wait for physical completion and can block indefinitely on a stuck syscall. Completion is acknowledged under the pool lock, so a result published at or after the deadline is conservatively treated as timed out even if the syscall returned slightly earlier.
 
 #### On-Disk Layout
 

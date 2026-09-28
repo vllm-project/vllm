@@ -197,6 +197,13 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
                 labelnames=(TIER_LABEL,),
             )
         )
+        metrics[TieringOffloadingMetrics.IO_TIMEOUTS] = OffloadingCounterMetadata(
+            documentation=(
+                "Number of filesystem tier jobs whose I/O deadline expired, "
+                "labeled by tier and direction."
+            ),
+            labelnames=("tier", "direction"),
+        )
         metrics[TieringOffloadingMetrics.CHUNK_QUERIES] = OffloadingCounterMetadata(
             documentation=(
                 "Number of chunk lookup queries sent to a tier, labeled by tier."
