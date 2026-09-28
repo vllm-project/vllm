@@ -60,6 +60,7 @@ def fused_qk_norm_rope_and_unified_kv_cache_update_impl(
     is_neox: bool,
     v_norm: bool,
     layer_name: LayerNameType,
+    q_out_fp8: torch.Tensor | None = None,
 ) -> torch.Tensor:
     layer_name = _resolve_layer_name(layer_name)
     _, attn_layer, kv_cache, layer_slot_mapping = get_attention_context(layer_name)
@@ -78,11 +79,14 @@ def fused_qk_norm_rope_and_unified_kv_cache_update_impl(
             kv_cache,
             layer_slot_mapping,
             v_norm,
+            q_out_fp8,
         )
     else:
         # Profiling/dummy run: define q_out/k_out (consumed by attention).
         q_out.zero_()
         k_out.zero_()
+        if q_out_fp8 is not None:
+            q_out_fp8.zero_()
 
     return torch.empty(0, device=qkv.device, dtype=qkv.dtype)
 
@@ -99,6 +103,7 @@ def fused_qk_norm_rope_and_unified_kv_cache_update_fake(
     is_neox: bool,
     v_norm: bool,
     layer_name: LayerNameType,
+    q_out_fp8: torch.Tensor | None = None,
 ) -> torch.Tensor:
     return torch.empty(0, device=qkv.device, dtype=qkv.dtype)
 
@@ -106,7 +111,7 @@ def fused_qk_norm_rope_and_unified_kv_cache_update_fake(
 direct_register_custom_op(
     op_name="fused_qk_norm_rope_and_unified_kv_cache_update",
     op_func=fused_qk_norm_rope_and_unified_kv_cache_update_impl,
-    mutates_args=["q_out", "k_out"],
+    mutates_args=["q_out", "k_out", "q_out_fp8"],
     fake_impl=fused_qk_norm_rope_and_unified_kv_cache_update_fake,
 )
 
@@ -333,6 +338,7 @@ class QkNormRopeKvCachePattern:
             is_neox=self.is_neox,
             v_norm=self.v_norm,
             layer_name=self._get_layer_name(layer_name),
+            q_out_fp8=None,
         )
         return results[0], results[1], results[2], v
 
@@ -435,6 +441,41 @@ class QkNormRopeKvCachePattern:
         )
         _, _, v = qkv.split([self.q_size, self.k_size, self.v_size], dim=-1)
         v = v.view(qkv.shape[0], self.num_kv_heads, self.head_size_v)
+
+        if self.query_quant_group_shape.is_per_tensor():
+            # The fused kernel fp8-quantizes Q directly (static per-tensor scale,
+            # from layer._q_scale_cpu), so we skip the separate scaled_quant. The
+            # bf16 q_out is still written by the kernel but goes unused here.
+            q_out_fp8 = torch.empty(
+                qkv.shape[0],
+                self.num_heads,
+                self.head_size,
+                device=qkv.device,
+                dtype=current_platform.fp8_dtype(),
+            )
+            results = auto_functionalized(
+                self.FUSED_OP,
+                q_out=q_out,
+                k_out=k_out,
+                qkv=qkv,
+                positions=positions,
+                q_weight=q_weight,
+                k_weight=k_weight,
+                rms_norm_eps=self.eps,
+                cos_sin_cache=cos_sin_cache,
+                is_neox=self.is_neox,
+                v_norm=self.v_norm,
+                layer_name=self._get_layer_name(layer_name),
+                q_out_fp8=q_out_fp8,
+            )
+            # results = [dummy, q_out, k_out, q_out_fp8]
+            q_fp8 = results[3].view(-1, self.q_size)
+            # Static per-tensor scale is an unchanged input; return it as the scale
+            # output the pattern exposes (the separate quant op's scale write-back).
+            return results[0], q_fp8, results[2], v, q_scale
+
+        # Per-head / group static-quant fallback (out of scope for the fused Q
+        # path): the kernel returns bf16 Q and we re-quantize separately.
         results = auto_functionalized(
             self.FUSED_OP,
             q_out=q_out,
@@ -448,9 +489,8 @@ class QkNormRopeKvCachePattern:
             is_neox=self.is_neox,
             v_norm=self.v_norm,
             layer_name=self._get_layer_name(layer_name),
+            q_out_fp8=None,
         )
-        # Re-apply the same quant form on the kernel's bf16 q_out; the fused
-        # operation does not quantize Q.
         q_fp8_flat = results[1].view(-1, self.q_size)
         q_fp8, q_scale_out = self._quantize_query(q_fp8_flat, q_scale)
         if q_scale_out is None:
