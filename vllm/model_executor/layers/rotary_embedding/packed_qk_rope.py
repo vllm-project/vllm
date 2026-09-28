@@ -23,13 +23,20 @@ def _packed_qk_rope_kernel(
     pid_h = tl.program_id(1)
     rm = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
     rk = tl.arange(0, BLOCK_K)
+    rk_half = tl.arange(0, BLOCK_K // 2)
     mask_m = rm < seqlen
 
     base = qk_ptr + pid_h * qk_head_stride + rm[:, None] * qk_row_stride
     mask_x = mask_m[:, None] & (rk < rotary_dim)[None, :]
     x = tl.load(base + rk[None, :], mask=mask_x, other=0.0).to(tl.float32)
-    f = tl.load(freqs_ptr + rm[:, None] * rotary_dim + rk[None, :], mask=mask_x)
-    cos, sin = tl.split(tl.reshape(f, (BLOCK_M, BLOCK_K // 2, 2)))
+    # Two strided reads, not one contiguous read plus tl.split: the register
+    # layout decides how the backend contracts the o1 multiply-add, and this
+    # form matches what flash_attn's rotary kernel produces. Splitting costs
+    # bitwise equality with it, by up to one ULP on ROCm.
+    f_base = freqs_ptr + rm[:, None] * rotary_dim + 2 * rk_half[None, :]
+    mask_f = mask_m[:, None] & (rk_half < rotary_dim // 2)[None, :]
+    cos = tl.load(f_base, mask=mask_f, other=1.0)
+    sin = tl.load(f_base + 1, mask=mask_f, other=0.0)
 
     x0, x1 = tl.split(tl.reshape(x, (BLOCK_M, BLOCK_K // 2, 2)))
     o0 = x0 * cos - x1 * sin
