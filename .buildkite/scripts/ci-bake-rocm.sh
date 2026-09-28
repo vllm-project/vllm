@@ -877,11 +877,25 @@ should_export_kernel_symbol_map() {
     esac
 }
 
-configure_kernel_symbol_map_export() {
+export_kernel_symbol_map() {
     should_export_kernel_symbol_map || return 0
-    if [[ "${TARGET}" != "kernel-symbol-map-rocm" ]]; then
-        BAKE_TARGETS+=("kernel-symbol-map-rocm")
-    fi
+    echo "--- :world_map: Exporting ROCm kernel symbol map"
+    rm -rf ./kernel-symbol-map-rocm || return 1
+    docker buildx bake \
+        "${BAKE_ALLOW_ARGS[@]}" "${BAKE_FILES[@]}" \
+        --progress "${BUILDKIT_PROGRESS:-plain}" \
+        kernel-symbol-map-rocm || return 1
+    upload_kernel_symbol_map_if_present
+}
+
+export_kernel_symbol_map_from_cache() {
+    should_export_kernel_symbol_map || return 0
+    # A separate shell keeps setup failures fatal inside the optional export.
+    FORCE_BUILD=1 VLLM_KERNEL_SYMBOL_MAP=1 UPLOAD_ROCM_WHEEL_ARTIFACTS=0 \
+        CI_HCL_SOURCE="${CI_HCL_PATH}" VLLM_BAKE_FILE="${VLLM_BAKE_FILE}" \
+        BUILDER_NAME="${BUILDER_NAME}" \
+        bash "${BASH_SOURCE[0]}" kernel-symbol-map-rocm \
+        || echo "ROCm kernel symbol map export from cache failed; continuing without it" >&2
 }
 
 upload_kernel_symbol_map_if_present() {
@@ -1487,7 +1501,7 @@ maybe_skip_existing_image() {
     fi
     if ! is_ci_base_target \
         && { should_upload_wheel_artifacts || should_export_rocm_smoke \
-            || should_export_kernel_symbol_map; }; then
+            || [[ "${TARGET}" == "kernel-symbol-map-rocm" ]]; }; then
         echo "Local-output targets always run for the current build"
         return 0
     fi
@@ -1535,11 +1549,13 @@ maybe_skip_existing_image() {
 
         echo "Commit image already exists: ${IMAGE_TAG}"
         echo "Skipping build"
+        export_kernel_symbol_map_from_cache
         exit 0
     fi
 
     echo "Image already exists: ${IMAGE_TAG}"
     echo "Skipping build"
+    export_kernel_symbol_map_from_cache
     exit 0
 }
 
@@ -1843,6 +1859,7 @@ EOF
 uses_rocm_csrc_cache() {
     case "${TARGET}" in
         csrc-rocm-ci \
+            | kernel-symbol-map-rocm \
             | test-rocm-ci \
             | test-rocm-ci-with-wheel \
             | test-rocm-ci-with-artifacts \
@@ -2287,6 +2304,15 @@ EOF
 EOF
         write_hcl_string_list_attr "  " "cache-to" "${rust_cache_to[@]}"
         cat <<EOF
+}
+
+target "kernel-symbol-map-rocm" {
+  cache-from = concat(
+    get_cache_from_rocm_csrc(),
+EOF
+        write_hcl_string_list "    " "${csrc_content_cache_from[@]}"
+        cat <<EOF
+  )
 }
 
 target "test-rocm-ci" {
@@ -2787,7 +2813,6 @@ main() {
     # Keep the context override last so every bake target uses the owned tree.
     write_build_context_override
     resolve_ci_base_dependency_targets
-    configure_kernel_symbol_map_export
     print_bake_config
     if [[ "${BAKE_PRINT_ONLY:-0}" == "1" ]]; then
         echo "BAKE_PRINT_ONLY=1 set; skipping build"
@@ -2803,7 +2828,7 @@ main() {
         # from an earlier build or retry.
         rm -rf ./build/rocm-smoke-export
     fi
-    if should_export_kernel_symbol_map; then
+    if [[ "${TARGET}" == "kernel-symbol-map-rocm" ]]; then
         rm -rf ./kernel-symbol-map-rocm
     fi
     seed_dependency_caches_if_needed
@@ -2812,7 +2837,12 @@ main() {
     promote_stable_ci_base_tag
     publish_ci_base_handoff_ref
     upload_wheel_artifacts_if_present
-    upload_kernel_symbol_map_if_present
+    if [[ "${TARGET}" == "kernel-symbol-map-rocm" ]]; then
+        upload_kernel_symbol_map_if_present
+    else
+        export_kernel_symbol_map \
+            || echo "ROCm kernel symbol map export or upload failed; continuing without it" >&2
+    fi
 }
 
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
