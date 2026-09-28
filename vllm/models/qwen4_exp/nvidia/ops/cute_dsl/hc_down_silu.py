@@ -56,95 +56,58 @@ class HcDownSiluGemm:
             return ("fma", m, self.k, 128)
         return ("mma", *_SM100F_TUNED_SPLITK[m])
 
-    @staticmethod
-    def _fake_gemm_tensors(*, M, K, N, divisibility: int):
-        from cutlass import BFloat16
-        from quack.compile_utils import make_fake_tensor
-
-        hidden_states = make_fake_tensor(BFloat16, (M, K), divisibility=divisibility)
-        router_weight = make_fake_tensor(BFloat16, (N, K), divisibility=divisibility)
-        output = make_fake_tensor(BFloat16, (M, N), divisibility=1)
-        return hidden_states, router_weight, output
-
-    def _compile_mma(self, compile_key: CompileKey) -> None:
-        import cutlass.cute as cute
-
-        from ._hc_down_silu_mma import HcDownSiluMma
-
-        _, split_k, num_stages, tile_n = compile_key
-        hidden_states, router_weight, output = self._fake_gemm_tensors(
-            M=cute.sym_int(),
-            K=cute.sym_int(),
-            N=cute.sym_int(),
-            divisibility=8,
-        )
-        gemm = HcDownSiluMma(
-            tile_n=tile_n,
-            num_stages=num_stages,
-            split_k=split_k,
-            rank=self.rank,
-            hc=self.hc,
-        )
-        self._compiled[compile_key] = cute.compile(
-            gemm,
-            hidden_states,
-            router_weight,
-            output,
-            cute.runtime.make_fake_stream(use_tvm_ffi_env_stream=True),
-            options="--enable-tvm-ffi",
-        )
-        logger.debug(
-            "Compiled hc_down_silu_mma: sk=%d ns=%d tile_n=%d",
-            split_k,
-            num_stages,
-            tile_n,
-        )
-
-    def _compile_fma(self, compile_key: CompileKey) -> None:
-        import cutlass.cute as cute
-
-        from ._hc_down_silu_fma import HcDownSiluFma
-
-        _, M, K, threadblock_size = compile_key
-        N = cute.sym_int()
-        hidden_states, router_weight, output = self._fake_gemm_tensors(
-            M=M,
-            K=K,
-            N=N,
-            divisibility=8,
-        )
-        gemm = HcDownSiluFma(
-            k=K,
-            threadblock_size=threadblock_size,
-            prefetch_pdl_weights=self._prefetch_pdl_weights,
-            rank=self.rank,
-            hc=self.hc,
-        )
-        self._compiled[compile_key] = cute.compile(
-            gemm,
-            hidden_states,
-            router_weight,
-            output,
-            M,
-            K,
-            1,  # runtime N placeholder for fake-tensor compile
-            cute.runtime.make_fake_stream(use_tvm_ffi_env_stream=True),
-            options="--enable-tvm-ffi --ptxas-options -maxrregcount=64",
-        )
-        logger.debug(
-            "Compiled hc_down_silu_fma: M=%d, K=%d, threadblock_size=%d",
-            M,
-            K,
-            threadblock_size,
-        )
-
     def compile(self, compile_key: CompileKey) -> None:
         if compile_key in self._compiled:
             return
+
+        import cutlass.cute as cute
+        from cutlass import BFloat16
+        from quack.compile_utils import make_fake_tensor
+
+        N = cute.sym_int()
+        gemm: Any
+        extra_args: tuple[int, ...]
         if compile_key[0] == "mma":
-            self._compile_mma(compile_key)
+            from ._hc_down_silu_mma import HcDownSiluMma
+
+            _, split_k, num_stages, tile_n = compile_key
+            M, K = cute.sym_int(), cute.sym_int()
+            gemm = HcDownSiluMma(
+                tile_n=tile_n,
+                num_stages=num_stages,
+                split_k=split_k,
+                rank=self.rank,
+                hc=self.hc,
+            )
+            extra_args = ()
+            options = "--enable-tvm-ffi"
         else:
-            self._compile_fma(compile_key)
+            from ._hc_down_silu_fma import HcDownSiluFma
+
+            _, M, K, threadblock_size = compile_key
+            gemm = HcDownSiluFma(
+                k=K,
+                threadblock_size=threadblock_size,
+                prefetch_pdl_weights=self._prefetch_pdl_weights,
+                rank=self.rank,
+                hc=self.hc,
+            )
+            extra_args = (M, K, 1)  # runtime N placeholder
+            options = "--enable-tvm-ffi --ptxas-options -maxrregcount=64"
+
+        hidden_states = make_fake_tensor(BFloat16, (M, K), divisibility=8)
+        router_weight = make_fake_tensor(BFloat16, (N, K), divisibility=8)
+        output = make_fake_tensor(BFloat16, (M, N), divisibility=1)
+        self._compiled[compile_key] = cute.compile(
+            gemm,
+            hidden_states,
+            router_weight,
+            output,
+            *extra_args,
+            cute.runtime.make_fake_stream(use_tvm_ffi_env_stream=True),
+            options=options,
+        )
+        logger.debug("Compiled hc_down_silu: %s", compile_key)
 
     def request_warmup(self, m_values: Iterable[int]) -> None:
         m_values = set(m_values)
