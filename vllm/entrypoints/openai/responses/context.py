@@ -359,6 +359,10 @@ class ParsableContext(ConversationContext):
                 enable_auto_tools=self.enable_auto_tools,
                 model_output_token_ids=completion.token_ids,
             )
+            # Each round is a separate generation, so count it on its own ids.
+            self.num_reasoning_tokens += self.response_parser.count_reasoning_tokens(
+                completion.token_ids or []
+            )
             if not self.request.include_reasoning:
                 reasoning = None
             self.response_messages.extend(
