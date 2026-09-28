@@ -9,7 +9,7 @@ from vllm import LLM, SamplingParams
 from vllm.config import CompilationConfig, CompilationMode
 from vllm.platforms import current_platform
 
-from ....utils import check_answers, fork_new_process_for_each_test, prep_prompts
+from ...utils import check_answers, fork_new_process_for_each_test, prep_prompts
 
 # global seed
 SEED = 42
