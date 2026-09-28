@@ -121,6 +121,62 @@ def test_rewrites_every_layer(fusion_pass):
         assert src.target is FUSED
 
 
+def _norm_moe_graph(extra_normed_user=False):
+    """Graph: res' , h = fused_add_rms_norm(x, res, w.float() + 1, eps); moe(h);
+    returns the graph and the node using res'."""
+    g = fx.Graph()
+    val = torch.empty(4, HIDDEN, dtype=torch.float16, device="meta")
+    x, res, w, layer = (g.placeholder(n) for n in ("x", "res", "w", "layer"))
+    x.meta["val"], res.meta["val"] = val, val
+    w.meta["val"] = torch.empty(HIDDEN, dtype=torch.float16, device="meta")
+    wf = g.call_function(
+        torch.ops.prims.convert_element_type.default, (w, torch.float32)
+    )
+    w1 = g.call_function(torch.ops.aten.add.Tensor, (wf, 1.0))
+    norm = g.call_function(
+        torch.ops.vllm_ir.fused_add_rms_norm.default, (x, res, w1, 1e-6)
+    )
+    h = g.call_function(operator.getitem, (norm, 0))
+    h.meta["val"] = val
+    new_res = g.call_function(operator.getitem, (norm, 1))
+    new_res.meta["val"] = val
+    *_, out = _moe_layer(g, h, layer)
+    res_user = g.call_function(torch.ops.aten.mul.Tensor, (new_res, 3.0))
+    outs = [out, res_user]
+    if extra_normed_user:
+        outs.append(h)
+    g.output(tuple(outs))
+    return g, res_user
+
+
+def test_input_norm_fused(fusion_pass):
+    if not hasattr(torch.ops.vllm, "xpu_moe_shared_fused_resadd_norm"):
+        pytest.skip("needs vllm._xpu_ops")
+    fusion_pass.fuse_input_norm = True
+    g, res_user = _norm_moe_graph()
+    fusion_pass(g)
+    fused = torch.ops.vllm.xpu_moe_shared_fused_resadd_norm.default
+    assert _count(g, fused) == 1
+    assert _count(g, torch.ops.vllm_ir.fused_add_rms_norm.default) == 0
+    assert _count(g, MOE) == 0
+    node = next(n for n in g.nodes if n.target is fused)
+    x, res, w, eps, _ = node.args
+    assert (x.name, res.name, w.name, eps) == ("x", "res", "w", 1e-6)
+    # The new residual comes from the fused op.
+    src = res_user.args[0]
+    assert src.target is operator.getitem and src.args == (node, 1)
+
+
+def test_input_norm_with_other_user_not_fused(fusion_pass):
+    if not hasattr(torch.ops.vllm, "xpu_moe_shared_fused_resadd_norm"):
+        pytest.skip("needs vllm._xpu_ops")
+    fusion_pass.fuse_input_norm = True
+    g, _ = _norm_moe_graph(extra_normed_user=True)
+    fusion_pass(g)
+    assert _count(g, torch.ops.vllm_ir.fused_add_rms_norm.default) == 1
+    assert _count(g, FUSED) == 1
+
+
 def test_range_gating(fusion_pass):
     assert fusion_pass.is_applicable_for_range(Range(start=1, end=8))
     assert not fusion_pass.is_applicable_for_range(Range(start=9, end=4096))

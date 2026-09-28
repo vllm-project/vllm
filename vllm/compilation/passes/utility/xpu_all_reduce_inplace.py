@@ -36,15 +36,26 @@ def _xpu_all_reduce_inplace_available() -> bool:
     return hasattr(torch.ops.vllm, "xpu_all_reduce_")
 
 
-def _is_fresh_tensor(node: fx.Node) -> bool:
-    """Whether node is a call to an op that returns a new, non-aliasing,
-    contiguous tensor (so mutating it cannot affect any other value)."""
+def _returns_fresh_tensors(node: fx.Node) -> bool:
+    """Whether node calls a non-mutating op none of whose results alias."""
     if node.op != "call_function" or not isinstance(node.target, torch._ops.OpOverload):
         return False
     schema = node.target._schema
-    if schema.is_mutable or len(schema.returns) != 1:
+    return not schema.is_mutable and all(r.alias_info is None for r in schema.returns)
+
+
+def _is_fresh_tensor(node: fx.Node) -> bool:
+    """Whether node is a new, non-aliasing, contiguous tensor (a single-result
+    op or one result of a multi-result op), so mutating it cannot affect any
+    other value."""
+    producer = node
+    if node.op == "call_function" and node.target is operator.getitem:
+        producer = node.args[0]
+        if not isinstance(producer, fx.Node):
+            return False
+    elif len(getattr(getattr(node.target, "_schema", None), "returns", ())) != 1:
         return False
-    if schema.returns[0].alias_info is not None:
+    if not _returns_fresh_tensors(producer):
         return False
     val = node.meta.get("val")
     return isinstance(val, torch.Tensor) and val.is_contiguous()
@@ -91,4 +102,6 @@ class XpuAllReduceInplacePass(VllmInductorPass):
         )
 
     def uuid(self) -> str:
-        return VllmInductorPass.hash_source(self, _is_fresh_tensor)
+        return VllmInductorPass.hash_source(
+            self, _is_fresh_tensor, _returns_fresh_tensors
+        )

@@ -943,6 +943,61 @@ def _xpu_moe_shared_fused_fake(
     return torch.empty_like(hidden_states)
 
 
+def xpu_moe_shared_fused_norm_available(hidden_size: int) -> bool:
+    try:
+        from vllm_xpu_kernels.moe_shared_fused_interface import router_norm_supports
+    except ImportError:
+        return False
+    return router_norm_supports(hidden_size)
+
+
+def _xpu_moe_shared_fused_resadd_norm_impl(
+    x: torch.Tensor,
+    residual: torch.Tensor,
+    norm_weight: torch.Tensor,
+    eps: float,
+    layer_name: LayerNameType,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """xpu_moe_shared_fused preceded by the block's residual-add + Gemma
+    RMSNorm (``fused_add_rms_norm(x, residual, 1 + norm_weight, eps)``).
+
+    Returns (MoE output, new residual).
+    """
+    from vllm.model_executor.layers.fused_moe.runner.moe_runner import (
+        _resolve_layer_name,
+        get_layer_from_name,
+    )
+
+    runner = get_layer_from_name(_resolve_layer_name(layer_name))
+    plan = _xpu_moe_shared_fused_plan(runner)
+    x = x.contiguous()
+    normed = torch.empty_like(x)
+    residual_out = torch.empty_like(x)
+    out, topk_ids = plan.forward_resadd_norm_routed(
+        torch.empty_like(x),
+        x,
+        residual.contiguous(),
+        norm_weight,
+        eps,
+        normed,
+        residual_out,
+    )
+    capture_fn = runner.router.capture_fn
+    if capture_fn is not None:
+        capture_fn(topk_ids)
+    return out, residual_out
+
+
+def _xpu_moe_shared_fused_resadd_norm_fake(
+    x: torch.Tensor,
+    residual: torch.Tensor,
+    norm_weight: torch.Tensor,
+    eps: float,
+    layer_name: LayerNameType,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    return torch.empty_like(x), torch.empty_like(x)
+
+
 @triton.jit
 def _softplus(x):
     return tl.where(x <= 20.0, tl.math.log(tl.math.exp(x) + 1.0), x)
@@ -1696,6 +1751,12 @@ class xpu_ops:
                     op_name="xpu_moe_shared_fused",
                     op_func=_xpu_moe_shared_fused_impl,
                     fake_impl=_xpu_moe_shared_fused_fake,
+                    tags=(torch.Tag.needs_fixed_stride_order,),
+                )
+                direct_register_custom_op(
+                    op_name="xpu_moe_shared_fused_resadd_norm",
+                    op_func=_xpu_moe_shared_fused_resadd_norm_impl,
+                    fake_impl=_xpu_moe_shared_fused_resadd_norm_fake,
                     tags=(torch.Tag.needs_fixed_stride_order,),
                 )
 

@@ -80,6 +80,21 @@ def test_unsafe_inputs_unchanged(ar_pass, producer):
     assert ALL_REDUCE in _targets(g)
 
 
+def test_rewrites_result_of_multi_output_op(ar_pass):
+    g = fx.Graph()
+    a, b = g.placeholder("a"), g.placeholder("b")
+    a.meta["val"], b.meta["val"] = _val(4, 8), _val(4, 8)
+    # aten.var_mean returns two fresh tensors.
+    vm = g.call_function(torch.ops.aten.var_mean.correction, (a, [1]))
+    x = g.call_function(operator.getitem, (vm, 0))
+    x.meta["val"] = _val(4)
+    y = g.call_function(ALL_REDUCE, (x, "tp:0"))
+    y.meta["val"] = _val(4)
+    g.output((y,))
+    ar_pass(g)
+    assert ar_pass.matched_count == 1
+
+
 def test_input_with_other_user_unchanged(ar_pass):
     g = _graph("add", extra_user=True)
     ar_pass(g)
