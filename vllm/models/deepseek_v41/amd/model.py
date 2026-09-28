@@ -925,8 +925,11 @@ def _make_deepseek_v4_weights_mapper(
             # The ``embed.weight`` -> ``embed_tokens.weight`` suffix rule
             # renames the engram fp8 table but not its scale; route the
             # scale explicitly to the same module.
+            re.compile(r"(engram\.embed)\.scale$"): r"\1_tokens.weight_scale_inv",
+            # Quark exports spell the same tensor ``embed.weight_scale``,
+            # which the ``\.scale$`` rules never match.
             re.compile(
-                r"(engram\.embed)\.(?:weight_)?scale$"
+                r"(engram\.embed)\.weight_scale$"
             ): r"\1_tokens.weight_scale_inv",
             re.compile(r"\.scale$"): f".{linear_scale_name}",
         }
@@ -940,8 +943,11 @@ def _make_deepseek_v4_weights_mapper(
                 r"(\.experts\.\d+\.w[123]\.base_layer)\.scale$"
             ): r"\1.weight_scale_inv",
             # Same engram reroute as the fp4 branch above.
+            re.compile(r"(engram\.embed)\.scale$"): r"\1_tokens.weight_scale_inv",
+            # Quark exports spell the same tensor ``embed.weight_scale``,
+            # which the ``\.scale$`` rules never match.
             re.compile(
-                r"(engram\.embed)\.(?:weight_)?scale$"
+                r"(engram\.embed)\.weight_scale$"
             ): r"\1_tokens.weight_scale_inv",
             re.compile(r"\.scale$"): f".{linear_scale_name}",
         }
