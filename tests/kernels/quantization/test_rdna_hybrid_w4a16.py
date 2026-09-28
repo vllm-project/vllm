@@ -19,7 +19,7 @@ if not current_platform.is_rocm():
 
 pytest.importorskip("triton")
 
-from vllm.platforms.rocm import on_gfx1x  # noqa: E402
+from vllm.platforms.rocm import on_gfx1x, on_gfx115x  # noqa: E402
 
 device = "cuda"
 
@@ -493,12 +493,21 @@ def _hip_skinny_reference(
         (3, 4096, 256, 64),
         (4, 2560, 256, 128),
         (5, 4096, 256, 32),
+        # K * batch beyond what LDS holds (32768 fp16 elements): on gfx115x the
+        # medium kernel reads the overflow rows from global memory; elsewhere
+        # the op rejects these, as the layer routes them to Triton.
+        (3, 16384, 512, 32),
+        (4, 16384, 512, 128),
+        (5, 21504, 512, 32),
     ],
 )
 def test_hip_skinny_wvSplitK_int4_g(dtype, M, K, N, G, has_zp):
     """Test HIP wvSplitK_int4_g kernel directly via _custom_ops."""
     import vllm._custom_ops as ops
     from vllm.utils.platform_utils import num_compute_units
+
+    if K * M > LDS_CAPACITY_ELEMENTS and not on_gfx115x():
+        pytest.skip("deep-K HIP path is gfx115x only")
 
     set_random_seed(0)
 
@@ -587,6 +596,8 @@ def test_hip_skinny_padded_group_stride(dtype, G, has_zp, M):
         (1, 256, 256, 64),
         (1, 512, 256, 32),
         (1, 512, 256, 128),
+        # Past LDS: HIP on gfx115x, Triton elsewhere.
+        (2, 20480, 256, 64),
         (32, 512, 256, 64),
         (64, 1024, 256, 128),
     ],
@@ -825,17 +836,30 @@ def test_process_weights_pads_cliff_rows(K, expected_weight_stride, dist_init):
 
 @pytest.mark.skipif(not on_gfx1x(), reason="Hybrid path is gfx11/gfx12 only")
 @pytest.mark.parametrize(
-    "M,K,expected_path",
+    "M,K,gfx115x,expected_path",
     [
-        (4, 8192, "hip"),
-        (4, 9728, "hip"),
-        (4, 9856, "triton"),
-        (MAX_SKINNY_BATCH_SIZE + 1, 1024, "triton"),
+        (4, 8192, False, "hip"),
+        (4, 9728, False, "hip"),
+        (4, 9856, False, "triton"),
+        (4, 9856, True, "hip"),
+        (MAX_SKINNY_BATCH_SIZE + 1, 1024, True, "triton"),
     ],
-    ids=["regular_limit", "medium_range", "above_medium", "batch_too_large"],
+    ids=[
+        "regular_limit",
+        "medium_range",
+        "above_medium",
+        "above_medium_gfx115x",
+        "batch_too_large",
+    ],
 )
-def test_rdna_hybrid_w4a16_dispatch_boundaries(M, K, expected_path, monkeypatch):
-    """Route only supported regular and medium skinny shapes to HIP."""
+def test_rdna_hybrid_w4a16_dispatch_boundaries(
+    M, K, gfx115x, expected_path, monkeypatch
+):
+    """Route only supported regular and medium skinny shapes to HIP.
+
+    gfx115x drops the K*M bound, so a shape past the medium limit still goes to
+    HIP there; the batch bound holds on every target.
+    """
     import vllm._custom_ops as ops
 
     N, G = 16, 128
@@ -854,6 +878,7 @@ def test_rdna_hybrid_w4a16_dispatch_boundaries(M, K, expected_path, monkeypatch)
 
     monkeypatch.setattr(ops, "wvSplitK_int4_g", fake_hip)
     monkeypatch.setattr(hybrid_module, "triton_w4a16_skinny_fmt_gemm", fake_triton)
+    monkeypatch.setattr(hybrid_module, "_on_gfx115x", lambda: gfx115x)
 
     output = hybrid_module._rdna_hybrid_w4a16_apply_impl(
         x_mk, w_q, scales, None, None, 40, G
