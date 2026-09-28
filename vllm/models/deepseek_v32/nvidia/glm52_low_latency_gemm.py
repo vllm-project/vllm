@@ -1,9 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""GLM-5.2 decode GEMM selection for unquantized BF16 on SM103."""
+"""GLM-5.2 decode GEMM selection for unquantized BF16 on SM10x (incl. B200/SM100)."""
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from typing import Literal
 
@@ -12,18 +13,34 @@ from torch import nn
 
 import vllm.envs as envs
 from vllm import _custom_ops as ops
+from vllm.logger import init_logger
 from vllm.model_executor.kernels.linear.cute_dsl.skinny_gemm import (
     SkinnyGemmConfig,
     shape_dynamic_skinny_gemm,
 )
 from vllm.model_executor.layers.linear import (
     LinearBase,
+    RowParallelLinear,
     UnquantizedLinearMethod,
 )
 from vllm.platforms import current_platform
 
+logger = init_logger(__name__)
+
 Backend = Literal["cute", "dsv3_fused_a"]
 ResolvedCall = tuple[Backend, SkinnyGemmConfig | None]
+
+# Short human-readable description used in the startup enable/disable log lines.
+FEATURE_NAME = "GLM-5.2 low-latency GEMM plan"
+
+# Environment-variable kill switch for the whole GLM-5.2 low-latency GEMM plan.
+# Setting it to "1" disables the feature entirely and falls back to the stock
+# UnquantizedLinearMethod -> F.linear (cuBLASLt) path.
+VLLM_DISABLE_GLM52_LOW_LATENCY_GEMM = "VLLM_DISABLE_GLM52_LOW_LATENCY_GEMM"
+
+
+def _feature_disabled_by_env() -> bool:
+    return os.getenv(VLLM_DISABLE_GLM52_LOW_LATENCY_GEMM, "0") == "1"
 
 
 @dataclass(frozen=True, slots=True)
@@ -53,14 +70,20 @@ GLM52_QKV_A_PROJECTION = GLM52ProjectionSpec(
     dsv3_tokens=frozenset(range(3, 17)),
 )
 
-GLM52_Q_B_PROJECTION = GLM52ProjectionSpec(
-    n=2048,
-    k=2048,
-    cute_configs=(
-        (1, SkinnyGemmConfig(1, 128, 4, static_k=2048)),
-        (2, SkinnyGemmConfig(2, 64, 2, k_unroll=2)),
-    ),
-    dsv3_tokens=frozenset(range(3, 17)),
+# Dense gate_up (layers 0-2 of GLM-5.2): [2*intermediate_size/TP, hidden] =
+# [2*12288/4, 6144] = [6144, 6144] at TP=4.  There is deliberately NO
+# dsv3_tokens entry: the C++ dsv3_fused_a_gemm kernel has no (6144,6144)
+# specialization, so adding one would HARD-ERROR at prefill ("unsupported DSV3
+# fused-A GEMM shape").  The cute M=1 config is the only winner.
+#
+# COLLISION RULE: GLM52_PROJECTIONS is keyed on (n, k).  If two specs ever
+# share (n, k), the second silently overwrites the first with no error.  In this
+# run dense gate_up (6144,6144) and o_proj (6144,4096) do NOT collide, but
+# the rule is TP-dependent and must be kept in mind when adding specs.
+GLM52_DENSE_GATE_UP_PROJECTION = GLM52ProjectionSpec(
+    n=6144,
+    k=6144,
+    cute_configs=((1, SkinnyGemmConfig(1, 128, 4, static_k=6144)),),
 )
 
 # The MTP eh_proj is a plain nn.Linear, so it gets its plan through
@@ -79,14 +102,16 @@ GLM52_PROJECTIONS = {
     (spec.n, spec.k): spec
     for spec in (
         GLM52_QKV_A_PROJECTION,
-        GLM52_Q_B_PROJECTION,
+        GLM52_DENSE_GATE_UP_PROJECTION,
         GLM52_EH_PROJECTION,
     )
 }
 
 
-def _is_sm103() -> bool:
-    return current_platform.is_device_capability((10, 3))
+def _is_sm10x() -> bool:
+    # Widened from is_device_capability((10, 3)): the tuned kernels are valid on
+    # the whole SM10x family, which includes B200 (10, 0).
+    return current_platform.is_device_capability_family(100)
 
 
 def _is_supported_row_major(tensor: torch.Tensor) -> bool:
@@ -113,6 +138,11 @@ def run_glm52_plan(
     weight: torch.Tensor,
 ) -> torch.Tensor | None:
     if plan is None or not _runtime_ok(x, weight):
+        return None
+    # Guard-safe dispatch: only a RANGE guard (allowed on the dynamic token
+    # dim), never an equality specialization.  An equality guard here makes
+    # torch.compile raise ConstraintViolationError when the token dim is dynamic.
+    if x.shape[0] > 16:
         return None
     entry = plan.get(x.shape[0])
     if entry is None:
@@ -144,7 +174,9 @@ def build_glm52_plan(
     weight: torch.Tensor | None, dtype: torch.dtype
 ) -> dict[int, ResolvedCall] | None:
     """Plan for a weight the walk below cannot reach (a plain ``nn.Linear``)."""
-    if dtype != torch.bfloat16 or not _is_sm103():
+    if _feature_disabled_by_env():
+        return None
+    if dtype != torch.bfloat16 or not _is_sm10x():
         return None
     if weight is None or weight.dim() != 2 or weight.dtype != torch.bfloat16:
         return None
@@ -177,10 +209,14 @@ def enable_glm52_low_latency_gemm(
     module: nn.Module,
     dtype: torch.dtype,
 ) -> None:
-    if dtype != torch.bfloat16 or not _is_sm103():
+    if _feature_disabled_by_env():
+        logger.info("%s is DISABLED (env override)", FEATURE_NAME)
+        return
+    if dtype != torch.bfloat16 or not _is_sm10x():
         return
 
     warmup_configs: set[SkinnyGemmConfig] = set()
+    installed = 0
     for child in module.modules():
         if (
             not isinstance(child, LinearBase)
@@ -193,7 +229,33 @@ def enable_glm52_low_latency_gemm(
         spec = GLM52_PROJECTIONS.get(tuple(weight.shape))
         if spec is None:
             continue
+        # Step-0 diagnostic: log every layer the plan touches.  Uses the module
+        # prefix (LinearBase exposes no name accessor) so the shape key can be audited
+        # against the log before trusting any timing.
+        logger.debug(
+            "GLM-5.2 low-latency GEMM: installing plan on %s (%s) shape=%s "
+            "dtype=%s quant_method=%s",
+            child.prefix,
+            child.__class__.__name__,
+            tuple(weight.shape),
+            weight.dtype,
+            type(child.quant_method).__name__,
+        )
+        if isinstance(child, RowParallelLinear) and getattr(child, "bias", None) is not None:
+            logger.warning(
+                "GLM-5.2 low-latency GEMM: %s is a RowParallelLinear with a "
+                "bias; the plan bypasses biased layers silently.",
+                child.prefix,
+            )
         child.quant_method = GLM52LowLatencyLinearMethod(spec.build_plan())
+        installed += 1
         warmup_configs.update(config for _, config in spec.cute_configs)
 
+    if installed == 0:
+        logger.warning(
+            "GLM-5.2 low-latency GEMM plan is ENABLED but no projection matched "
+            "(0 switched)"
+        )
+    else:
+        logger.info("%s is ENABLED (%d projection(s) switched)", FEATURE_NAME, installed)
     _request_warmup(dtype, warmup_configs)
