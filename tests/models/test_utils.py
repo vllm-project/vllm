@@ -1,14 +1,18 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from types import SimpleNamespace
+
 import pytest
 import regex as re
 import torch
 
+from vllm.config.load import LoadConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
+from vllm.model_executor.model_loader.default_loader import DefaultModelLoader
 from vllm.model_executor.models.utils import (
     AutoWeightsLoader,
     WeightsMapper,
@@ -167,6 +171,92 @@ def test_module_load_shared_params_that_are_not_tied_embeddings():
 
     assert loaded == {"gate.weight"}
     assert torch.all(mod.gate.weight == torch.Tensor([[1, 2], [3, 4]]))
+
+
+@pytest.fixture(params=[None, True], ids=["default", "explicit"])
+def aria_weights(request, dist_init, monkeypatch):
+    from vllm.model_executor.models.aria import AriaForConditionalGeneration
+
+    # Keep Aria's loader and mapper, replacing only inference-model construction.
+    model = AriaForConditionalGeneration.__new__(AriaForConditionalGeneration)
+    torch.nn.Module.__init__(model)
+    embeddings = ModuleWithTiedWeights(tie=False)
+    model.language_model = embeddings.model
+    model.lm_head = embeddings.lm_head
+    model.multi_modal_projector = torch.nn.Module()
+    model.multi_modal_projector.query = torch.nn.Parameter(torch.zeros(2, 2))
+    model.language_model.layers = torch.nn.ModuleList([torch.nn.Module()])
+    mlp = ModuleWithSharedParam()
+    mlp.router_weight = torch.nn.Parameter(torch.zeros(2, 2))
+    model.language_model.layers[0].mlp = mlp
+
+    weights = {
+        "model.multi_modal_projector.query": torch.full((2, 2), 1.0),
+        "language_model.model.embed_tokens.weight": make_embedding_weights(2.0),
+        "language_model.lm_head.weight": make_embedding_weights(2.0),
+        "language_model.model.layers.0.mlp.router.weight": torch.full((2, 2), 3.0),
+        "language_model.model.layers.0.mlp.experts.gate.weight": torch.full(
+            (2, 2), 4.0
+        ),
+    }
+    extra_config = (
+        {} if request.param is None else {"enable_weights_track": request.param}
+    )
+    loader = DefaultModelLoader(LoadConfig(model_loader_extra_config=extra_config))
+    monkeypatch.setattr(loader, "get_all_weights", lambda *_: iter(weights.items()))
+    return model, loader, weights
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize(
+    ("checkpoint_name", "parameter_name"),
+    [
+        ("model.multi_modal_projector.query", "multi_modal_projector.query"),
+        (
+            "language_model.model.layers.0.mlp.router.weight",
+            "language_model.layers.0.mlp.router_weight",
+        ),
+    ],
+)
+def test_aria_rejects_missing_weights(aria_weights, checkpoint_name, parameter_name):
+    model, loader, weights = aria_weights
+    del weights[checkpoint_name]
+
+    with pytest.raises(
+        ValueError,
+        match="Following weights were not initialized from checkpoint:.*"
+        + re.escape(parameter_name),
+    ):
+        loader.load_weights(model, SimpleNamespace(quantization=None, is_moe=True))
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize("tie", [False, True])
+def test_aria_loads_complete_weights_with_shared_parameters(aria_weights, tie):
+    model, loader, weights = aria_weights
+    embed_tokens = model.language_model.embed_tokens
+    if tie:
+        model.lm_head = model.lm_head.tie_weights(embed_tokens)
+
+    loader.load_weights(model, SimpleNamespace(quantization=None, is_moe=True))
+
+    torch.testing.assert_close(
+        model.multi_modal_projector.query, weights["model.multi_modal_projector.query"]
+    )
+    mlp = model.language_model.layers[0].mlp
+    torch.testing.assert_close(
+        mlp.router_weight, weights["language_model.model.layers.0.mlp.router.weight"]
+    )
+    assert mlp.gate is mlp.experts.gate
+    torch.testing.assert_close(
+        mlp.gate.weight,
+        weights["language_model.model.layers.0.mlp.experts.gate.weight"],
+    )
+    assert (model.lm_head.weight is embed_tokens.weight) is tie
+    for embedding in (embed_tokens, model.lm_head):
+        torch.testing.assert_close(
+            embedding.weight[:VOCAB_SIZE], make_embedding_weights(2.0)
+        )
 
 
 class raise_if_cuda_sync:
