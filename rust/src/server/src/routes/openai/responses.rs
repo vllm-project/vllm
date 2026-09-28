@@ -24,14 +24,13 @@ use asynk_strim_attr::{TryYielder, try_stream};
 use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::HeaderMap;
-use axum::response::sse::{Event, Sse};
+use axum::response::sse::Event;
 use axum::response::{IntoResponse, Response};
 use futures::{Stream, StreamExt as _, pin_mut};
 use thiserror_ext::AsReport as _;
 use tracing::{error, info, trace};
 use tracing_futures::Instrument as _;
-use vllm_chat::{ChatEvent, ChatEventStream, ChatEventStreamTrait, FinishReason};
-use vllm_llm::TokenUsage;
+use vllm_chat::{ChatEvent, ChatEventStream, ChatEventStreamTrait, ChatTokenUsage, FinishReason};
 
 use self::convert::{ResponseMeta, build_response, build_usage, prepare_responses_request};
 use self::streaming::{OutputItemStreamer, ResponseStreamEvent, response_lifecycle_event};
@@ -40,7 +39,7 @@ use crate::config::ApiServerOptions;
 use crate::error::{ApiError, chat_submit_error, server_error};
 use crate::routes::openai::utils::validated_json::ValidatedJson;
 use crate::state::AppState;
-use crate::utils::{resolve_request_context, unix_timestamp};
+use crate::utils::{resolve_request_context, sse_response, unix_timestamp};
 
 /// Create one response (`POST /v1/responses`).
 pub async fn create_responses(
@@ -63,6 +62,7 @@ pub async fn create_responses(
     );
 
     let created_at = unix_timestamp();
+    let api_server_options = state.api_server_options;
 
     let chat_stream =
         match state.chat.chat(prepared.chat_request).instrument(request_span.clone()).await {
@@ -77,14 +77,14 @@ pub async fn create_responses(
         let event_stream =
             responses_event_stream(chat_stream, prepared.meta, prepared.request_id, created_at);
         let sse_stream = responses_sse_stream(event_stream).instrument(request_span);
-        Sse::new(sse_stream).into_response()
+        sse_response(sse_stream, api_server_options.sse_keep_alive_interval)
     } else {
         let response = match collect_responses(
             chat_stream,
             &prepared.meta,
             &prepared.request_id,
             created_at,
-            &state.api_server_options,
+            &api_server_options,
         )
         .instrument(request_span)
         .await
@@ -178,7 +178,7 @@ fn response_status(finish_reason: &FinishReason) -> ResponseItemStatus {
 /// Terminal event metadata captured from the internal `Done` chat event.
 struct TerminalOutput {
     message: vllm_chat::AssistantMessage,
-    usage: TokenUsage,
+    usage: ChatTokenUsage,
     finish_reason: FinishReason,
     kv_transfer_params: Option<serde_json::Value>,
     ec_transfer_params: Option<serde_json::Value>,
