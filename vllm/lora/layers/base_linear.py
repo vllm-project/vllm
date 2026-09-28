@@ -216,6 +216,11 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
         output = base_output[0] if isinstance(base_output, tuple) else base_output
         return self._apply_lora_to_output(x, output)
 
+    def _get_fast_prefill_lora_mapping(self) -> torch.Tensor | None:
+        if not is_forward_context_available():
+            return None
+        return get_forward_context().lora_token_mapping
+
     def _apply_lora_to_output(
         self, x: torch.Tensor, output: torch.Tensor
     ) -> torch.Tensor:
@@ -228,8 +233,16 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
             output = output.flatten(0, 1)
             x = x.flatten(0, 1)
 
+        fast_prefill_mapping = self._get_fast_prefill_lora_mapping()
+
         lora_output: torch.Tensor | None = self.punica_wrapper.add_lora_linear(
-            output, x, self.lora_a_stacked, self.lora_b_stacked, 1.0, self.output_slices
+            output,
+            x,
+            self.lora_a_stacked,
+            self.lora_b_stacked,
+            1.0,
+            self.output_slices,
+            token_lora_mapping=fast_prefill_mapping,
         )
         if not current_platform.can_update_inplace():
             output = lora_output
@@ -277,6 +290,7 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
                 1.0,
                 self.output_slices,
                 add_inputs=False,
+                token_lora_mapping=self._get_fast_prefill_lora_mapping(),
             )
             return lora_output
 

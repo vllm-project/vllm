@@ -164,6 +164,10 @@ class ForwardContext:
     # the producer does not set it.
     is_padding: torch.Tensor | None = None
 
+    # Temporary token-to-LoRA mapping for a compact sub-batch, such as the
+    # logits-only batch used by KV-sharing fast prefill.
+    lora_token_mapping: torch.Tensor | None = None
+
     # If True, bypass the compiled model call, e.g. by using .forward() directly
     skip_compiled: bool = False
 
@@ -286,6 +290,7 @@ def set_forward_context(
     slot_mapping: dict[str, torch.Tensor] | list[dict[str, torch.Tensor]] | None = None,
     skip_compiled: bool = False,
     is_padding: torch.Tensor | None = None,
+    extra_kwargs: dict[str, Any] | None = None,
 ):
     """A context manager that stores the current forward context,
     can be attention metadata, etc.
@@ -343,6 +348,8 @@ def set_forward_context(
         batch_descriptor=batch_descriptor,
         ubatch_slices=ubatch_slices,
     )
+    if extra_kwargs:
+        additional_kwargs.update(extra_kwargs)
 
     forward_context = create_forward_context(
         attn_metadata,

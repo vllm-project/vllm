@@ -197,6 +197,11 @@ class WorkerLoRAManager:
         if mapping is not None:
             self._adapter_manager.set_adapter_mapping(mapping)
 
+    def prepare_fast_prefill_token_mapping(
+        self, logits_indices: torch.Tensor | None
+    ) -> torch.Tensor | None:
+        return self._adapter_manager.prepare_fast_prefill_token_mapping(logits_indices)
+
     def supports_tower_connector_lora(self) -> bool:
         return (
             self._adapter_manager.supports_mm

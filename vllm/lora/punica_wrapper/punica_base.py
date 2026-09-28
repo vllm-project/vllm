@@ -21,6 +21,12 @@ if TYPE_CHECKING:
 class PunicaWrapperABC(ABC):
     """PunicaWrapper ABC."""
 
+    def prepare_fast_prefill_token_mapping(
+        self, logits_indices: torch.Tensor | None
+    ) -> torch.Tensor | None:
+        """Prepare metadata for the compact token batch used by fast prefill."""
+        return None
+
     @abstractmethod
     def update_metadata(
         self,
