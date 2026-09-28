@@ -70,6 +70,12 @@ _SUBCHUNK_BYTES = 8 * 1024
 # this value; more threads only add scheduling jitter.
 _MAX_COPY_THREADS = 8
 
+# Below this size, numpy slice assignment beats a numba parallel launch.
+# Measured by the small-block sweep: numpy is 3-14x faster up to 64 KiB,
+# ties at 256 KiB, and loses beyond 1 MiB. Using 256 KiB captures the
+# entire range where the kernel launch cost dominates the data movement.
+_NUMPY_COPY_MAX_BYTES = 256 * 1024
+
 
 # ---------------------------------------------------------------------------
 # Topology detection (cheap, done once at import)
@@ -211,13 +217,14 @@ def _log_decision_once() -> None:
     mode = "multithread" if _USE_MT else "single-thread"
     logger.debug(
         "memcpy mt: cores=%d numa=%d mem=%.0fGiB -> %s (%d threads, "
-        "subchunk=%d KiB)",
+        "subchunk=%d KiB, numpy_max=%d KiB)",
         _CORES,
         _NUMA,
         _MEM / _GiB_BYTES,
         mode,
         _COPY_THREADS,
         _SUBCHUNK_BYTES // 1024,
+        _NUMPY_COPY_MAX_BYTES // 1024,
     )
 
 
@@ -250,10 +257,10 @@ if _HAS_NUMBA:
 
 def _dispatch(n_threads: int) -> int:
     """Set the numba thread-pool size; return the previous value."""
-    if n_threads < 1:
-        raise ValueError(f"n_threads must be >= 1, got {n_threads}")
     if not _HAS_NUMBA:
         return n_threads
+    if n_threads < 1:
+        raise ValueError(f"n_threads must be >= 1, got {n_threads}")
     n_threads = min(n_threads, _MAX_NUMBA_THREADS)
     prev = get_num_threads()
     if prev != n_threads:
@@ -313,8 +320,12 @@ def memcpy_mt(
             f"size={size}, |src|={src_flat.size}, |dst|={dst_flat.size}"
         )
 
-    # Tiny copy: numpy slice assignment beats numba parallel dispatch.
-    if not _HAS_NUMBA or size <= sub_chunk_bytes:
+    # Small copies: numpy slice assignment beats numba parallel dispatch.
+    # The threshold is not ``sub_chunk_bytes`` because the launch overhead
+    # of a numba ``parallel=True`` kernel stays significant well past the
+    # per-task sub-chunk size — the small-block sweep shows numpy winning
+    # by 3-14x up to 64 KiB and tying at 256 KiB.
+    if not _HAS_NUMBA or size <= _NUMPY_COPY_MAX_BYTES:
         dst_flat[:size] = src_flat[:size]
         return
 
