@@ -40,6 +40,7 @@ from vllm.model_executor.layers.linear import (
 )
 from vllm.model_executor.layers.quantization.awq_triton import (
     AWQ_FUSED_FP32_SUPPORTED,
+    awq_fused_gemm_is_tuned_for_shape,
     awq_gemm_fused_fp32,
     register_awq_fused_fp32_warmup,
 )
@@ -898,6 +899,7 @@ class AutoAWQLinearMethod(BaseAWQLinearMethod):
         if (
             envs.VLLM_BATCH_INVARIANT
             and AWQ_FUSED_FP32_SUPPORTED
+            and awq_fused_gemm_is_tuned_for_shape(n, k)
             and num_groups > 0
             and k % num_groups == 0
             and k // num_groups == 128
@@ -926,6 +928,9 @@ class AutoAWQLinearMethod(BaseAWQLinearMethod):
         use_fused_bi_gemm = (
             envs.VLLM_BATCH_INVARIANT
             and AWQ_FUSED_FP32_SUPPORTED
+            and awq_fused_gemm_is_tuned_for_shape(
+                qweight.shape[1] * pack_factor, qweight.shape[0]
+            )
             and reshaped_x.dtype == torch.float16
             and scales.dtype == torch.float16
             and qweight.dtype == torch.int32

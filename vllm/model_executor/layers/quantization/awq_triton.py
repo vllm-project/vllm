@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, ClassVar
 
 import torch
 
@@ -18,8 +18,40 @@ from vllm.utils.torch_utils import direct_register_custom_op
 
 AWQ_TRITON_SUPPORTED_GROUP_SIZES = [-1, 32, 64, 128]
 AWQ_FUSED_FP32_SUPPORTED = current_platform.is_cuda() and (
-    current_platform.is_device_capability(89)
+    current_platform.has_device_capability(89)
 )
+
+# Tile configs measured on real H100 (SM90) hardware to beat the legacy
+# dequant+matmul path across M in {1, 32, 129, 256} (see PR #57047 discussion
+# of the SM89-tuned heuristic regressing on Hopper for smaller-N shapes).
+# Keyed by the exact (N, K) weight shape -- not a generalized N/K threshold,
+# since only these shapes have been measured. Unlisted (N, K) on SM90+ fall
+# back to the SM89-tuned heuristic below, which is not known to be optimal
+# there but has not regressed on any measured shape.
+_HOPPER_TUNED_TILES: dict[tuple[int, int], tuple[int, int, int, int]] = {
+    # (N, K): (BLOCK_SIZE_M, BLOCK_SIZE_N, BLOCK_SIZE_K, num_stages)
+    (2560, 4096): (128, 64, 64, 4),  # o_proj
+    (2560, 9728): (64, 64, 64, 4),  # down_proj
+    (6144, 2560): (128, 64, 64, 3),  # qkv_proj
+    (19456, 2560): (128, 128, 64, 3),  # gate_up_proj
+}
+
+
+def awq_fused_gemm_is_tuned_for_shape(n: int, k: int) -> bool:
+    """True iff the fused kernel is known to beat the legacy dequant+matmul
+    path for this device and (N, K) weight shape.
+
+    SM89 always dispatches: the existing (32,32)/(128,64) heuristic was
+    tuned and proven there for the shapes already shipping. Hopper+ only
+    dispatches for the exact shapes measured in ``_HOPPER_TUNED_TILES`` --
+    not a generalized N/K threshold, since only those shapes have real H100
+    measurements. An unlisted shape on Hopper+ falls back to the legacy path.
+    """
+    if current_platform.is_device_capability(89):
+        return True
+    if current_platform.has_device_capability(90):
+        return (n, k) in _HOPPER_TUNED_TILES
+    return False
 
 
 @triton.jit(do_not_specialize=["M"])
@@ -106,9 +138,11 @@ class AwqGemmFusedFp32Kernel(VllmTritonJitKernel["AwqGemmFusedFp32Kernel.Compile
     """Warmup-aware wrapper for awq_gemm_fused_fp32_kernel.
 
     ``M`` (token count) is excluded from the compile key via
-    ``do_not_specialize``; only ``BLOCK_SIZE_M``/``BLOCK_SIZE_N`` (chosen from
-    which side of the M<=128 threshold a call falls on) and the per-layer
-    weight shape (N, K, GROUP_SIZE) affect specialization.
+    ``do_not_specialize``. For (N, K) shapes with a Hopper-tuned tile config
+    (see ``_HOPPER_TUNED_TILES``), the same tile config is used for every M,
+    so a fixed row's launch tile never depends on batch size. Otherwise
+    ``BLOCK_SIZE_M``/``BLOCK_SIZE_N`` fall back to the SM89-tuned heuristic
+    (chosen from which side of the M<=128 threshold a call falls on).
     """
 
     @dataclass(frozen=True)
@@ -119,38 +153,55 @@ class AwqGemmFusedFp32Kernel(VllmTritonJitKernel["AwqGemmFusedFp32Kernel.Compile
         BLOCK_SIZE_M: int
         BLOCK_SIZE_N: int
         BLOCK_SIZE_K: int = 32
+        NUM_STAGES: int = 2
 
-    kernel: Any = staticmethod(awq_gemm_fused_fp32_kernel)
+    kernel: ClassVar[Any] = staticmethod(awq_gemm_fused_fp32_kernel)
 
     def dispatch(  # type: ignore[override]
         self, *, m: int, N: int, K: int, GROUP_SIZE: int
     ) -> CompileKey:
-        block_m = 32 if m <= 128 else 128
-        block_n = 32 if m <= 128 else 64
+        # The warmup tracer only supports a single expression-shaped body
+        # (conditional expressions, no if-statements/tuple-unpacking), so
+        # the Hopper-tuned-vs-fallback choice is expressed with ternaries.
+        tuned_raw = _HOPPER_TUNED_TILES.get((N, K))
+        use_tuned = tuned_raw is not None and current_platform.has_device_capability(90)
+        tuned = tuned_raw if tuned_raw is not None else (0, 0, 0, 0)
+        block_m = tuned[0] if use_tuned else (32 if m <= 128 else 128)
+        block_n = tuned[1] if use_tuned else (32 if m <= 128 else 64)
+        block_k = tuned[2] if use_tuned else 32
+        num_stages = tuned[3] if use_tuned else 2
         return self.CompileKey(
-            N=N, K=K, GROUP_SIZE=GROUP_SIZE, BLOCK_SIZE_M=block_m, BLOCK_SIZE_N=block_n
+            N=N,
+            K=K,
+            GROUP_SIZE=GROUP_SIZE,
+            BLOCK_SIZE_M=block_m,
+            BLOCK_SIZE_N=block_n,
+            BLOCK_SIZE_K=block_k,
+            NUM_STAGES=num_stages,
         )
 
     def get_warmup_keys(
         self, *, N: int, K: int, GROUP_SIZE: int = 128
     ) -> list[CompileKey]:
         # One representative M on each side of the 128 threshold covers both
-        # BLOCK_SIZE_M/N configs dispatch(...) can ever select.
+        # BLOCK_SIZE_M/N configs the SM89 fallback in dispatch(...) can
+        # select; for Hopper-tuned shapes both traced M values collapse to
+        # the same (M-independent) CompileKey, so this over-covers safely.
         return self._trace_dispatch(self.dispatch)(
             m=(1, 129), N=N, K=K, GROUP_SIZE=GROUP_SIZE
         )
 
     def warmup_inputs(self, compile_key: CompileKey) -> dict[str, Any]:
-        m = 1 if compile_key.BLOCK_SIZE_M == 32 else 129
+        # M is do_not_specialize'd, so any positive value produces a valid
+        # warmup launch for this compile key.
+        m = max(compile_key.BLOCK_SIZE_M, 1)
         num_groups = compile_key.K // compile_key.GROUP_SIZE
         return dict(
             input=TritonWarmupTensor(torch.float16, shape=(m, compile_key.K)),
             qweight=TritonWarmupTensor(
                 torch.int32, shape=(compile_key.K, compile_key.N // 8)
             ),
-            scales=TritonWarmupTensor(
-                torch.float16, shape=(num_groups, compile_key.N)
-            ),
+            scales=TritonWarmupTensor(torch.float16, shape=(num_groups, compile_key.N)),
             zeros=TritonWarmupTensor(
                 torch.int32, shape=(num_groups, compile_key.N // 8)
             ),
@@ -189,7 +240,7 @@ class AwqGemmFusedFp32Kernel(VllmTritonJitKernel["AwqGemmFusedFp32Kernel.Compile
                 BLOCK_SIZE_N=compile_key.BLOCK_SIZE_N,
                 BLOCK_SIZE_K=compile_key.BLOCK_SIZE_K,
                 num_warps=4,
-                num_stages=2,
+                num_stages=compile_key.NUM_STAGES,
             ),
             output,
         )

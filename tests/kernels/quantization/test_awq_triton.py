@@ -9,6 +9,7 @@ import pytest
 import torch
 
 from vllm.model_executor.layers.quantization.awq_triton import (
+    _HOPPER_TUNED_TILES,
     AWQ_FUSED_FP32_SUPPORTED,
     AWQ_TRITON_SUPPORTED_GROUP_SIZES,
     awq_dequantize_triton,
@@ -181,7 +182,7 @@ def test_gemm(N, K, M, splitK, group_size):
 
 fused_fp32_skip = pytest.mark.skipif(
     not AWQ_FUSED_FP32_SUPPORTED,
-    reason="awq_gemm_fused_fp32 requires CUDA on SM89.",
+    reason="awq_gemm_fused_fp32 requires CUDA on SM89 or newer.",
 )
 
 
@@ -281,6 +282,59 @@ def test_awq_gemm_fused_fp32_batch_invariant(N, K):
     reference = awq_gemm_fused_fp32(row, qweight, scales, qzeros)
 
     for m in (32, 127, 128, 129, 256):
+        batch = torch.rand((m, K), dtype=torch.float16, device=device)
+        batch[0] = row[0]
+        output = awq_gemm_fused_fp32(batch, qweight, scales, qzeros)
+        _assert_bit_identical(output[0], reference[0])
+
+
+@fused_fp32_skip
+@pytest.mark.parametrize("N,K", list(_HOPPER_TUNED_TILES.keys()))
+@pytest.mark.parametrize("M", [1, 32, 129, 256])
+def test_awq_gemm_fused_fp32_hopper_tuned_shapes(N, K, M):
+    """Correctness for the real projection shapes with a Hopper-specific
+    tile config (see _HOPPER_TUNED_TILES): on SM89 this exercises the
+    fallback heuristic instead, since the tuned table only applies on
+    has_device_capability(90); either way, output must match the reference.
+    """
+    group_size = 128
+    set_random_seed(0)
+
+    input, qweight, scales, qzeros = _make_fused_gemm_inputs(M, N, K, group_size)
+    output_fused = awq_gemm_fused_fp32(input, qweight, scales, qzeros)
+
+    assert not torch.any(torch.isinf(output_fused))
+    assert not torch.any(torch.isnan(output_fused))
+
+    dequantized_weights = awq_dequantize_triton(qweight, scales, qzeros)
+    output_ref = torch.matmul(input, dequantized_weights)
+    torch.testing.assert_close(output_fused, output_ref, atol=1e-1, rtol=1e-1)
+
+
+@fused_fp32_skip
+@pytest.mark.parametrize("N,K", list(_HOPPER_TUNED_TILES.keys()))
+def test_awq_gemm_fused_fp32_hopper_tuned_shapes_batch_invariant(N, K):
+    """The Hopper-tuned tile config is fixed per (N, K) regardless of M, so
+    a fixed row's output must be bit-identical across batch sizes."""
+    group_size = 128
+    set_random_seed(0)
+
+    qweight = torch.randint(
+        0, torch.iinfo(torch.int32).max, (K, N // 8), dtype=torch.int32, device=device
+    )
+    qzeros = torch.randint(
+        0,
+        torch.iinfo(torch.int32).max,
+        (K // group_size, N // 8),
+        dtype=torch.int32,
+        device=device,
+    )
+    scales = torch.rand((K // group_size, N), dtype=torch.float16, device=device)
+    row = torch.rand((1, K), dtype=torch.float16, device=device)
+
+    reference = awq_gemm_fused_fp32(row, qweight, scales, qzeros)
+
+    for m in (32, 129, 256):
         batch = torch.rand((m, K), dtype=torch.float16, device=device)
         batch[0] = row[0]
         output = awq_gemm_fused_fp32(batch, qweight, scales, qzeros)
