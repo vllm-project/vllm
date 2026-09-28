@@ -17,6 +17,18 @@ from vllm.logger import init_logger
 logger = init_logger(__name__)
 
 
+def _require_positive_int(name: str, value: object) -> None:
+    """Reject non-integers and non-positive values.
+
+    Note: bool is a subclass of int, so True/False must be rejected
+    explicitly; otherwise True is silently accepted as 1.
+    """
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise HTTPException(
+            status_code=400, detail=f"{name} must be a positive integer"
+        )
+
+
 def engine_client(request: Request) -> EngineClient:
     return request.app.state.engine_client
 
@@ -48,15 +60,18 @@ async def scale_elastic_ep(raw_request: Request):
             status_code=400, detail="new_data_parallel_size is required"
         )
 
-    if not isinstance(new_data_parallel_size, int) or new_data_parallel_size <= 0:
+    _require_positive_int("new_data_parallel_size", new_data_parallel_size)
+    _require_positive_int("drain_timeout", drain_timeout)
+
+    vllm_config = raw_request.app.state.vllm_config
+    if not vllm_config.parallel_config.enable_elastic_ep:
         raise HTTPException(
             status_code=400,
-            detail="new_data_parallel_size must be a positive integer",
-        )
-
-    if not isinstance(drain_timeout, int) or drain_timeout <= 0:
-        raise HTTPException(
-            status_code=400, detail="drain_timeout must be a positive integer"
+            detail=(
+                "Elastic EP scaling is not enabled on this server. "
+                "Restart the server with --enable-elastic-ep to use "
+                "/scale_elastic_ep."
+            ),
         )
 
     client = engine_client(raw_request)
@@ -76,7 +91,7 @@ async def scale_elastic_ep(raw_request: Request):
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
     except Exception as e:
-        logger.error("Scale failed: %s", e)
+        logger.exception("Scale failed")
         raise HTTPException(status_code=500, detail="Scale failed") from e
 
 
