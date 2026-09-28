@@ -142,9 +142,11 @@ class PassConfig:
     fuse_allreduce_rms: bool = None  # type: ignore[assignment]
     """Enable AllReduce/RMSNorm fusion with an eligible backend.
 
-    FlashInfer CuTe is preferred for BF16 Qwen3.5 MoE with hidden size 8192,
-    TP8/DP1 on SM107 when its static-FP8 API and NVLink multicast are available.
-    Other configurations retain the existing fusion backends. Setting False
+    FlashInfer CuTe is preferred for eligible BF16 Gemma RMSNorm patterns on
+    SM100/SM103/SM107 with NVLink multicast and its static-FP8 API. Supported
+    (TP size, hidden size) pairs are (4, 5120), (8, 5120), (8, 8192), (16, 8192),
+    with DP1 and compatible workspace lifetimes. Larger-than-capacity inputs and
+    unsupported configurations retain the existing backends. Setting False
     disables fusion and its CuTe workspace allocation.
     """
     enable_qk_norm_rope_fusion: bool = None  # type: ignore[assignment]

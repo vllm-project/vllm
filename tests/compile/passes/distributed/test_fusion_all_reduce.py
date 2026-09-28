@@ -849,18 +849,19 @@ def rocm_aiter_group_quant_fusion_pass_on_test_model(
         del all_reduce_fusion_pass
 
 
-def make_cute_config(tmp_path, local_rank):
+def make_cute_config(tmp_path, local_rank, tp_size=8, hidden_size=8192):
     config = VllmConfig()
-    config.parallel_config.tensor_parallel_size = 8
+    config.parallel_config.tensor_parallel_size = tp_size
     config.compilation_config.custom_ops = ["all", "+rms_norm", "+quant_fp8"]
     config.compilation_config.pass_config.fuse_allreduce_rms = True
-    from vllm.transformers_utils.configs.qwen3_5_moe import Qwen3_5MoeTextConfig
+    from transformers import Gemma2Config
 
     model_path = tmp_path / "shape-config"
-    Qwen3_5MoeTextConfig(
-        hidden_size=8192,
-        num_experts_per_tok=10,
-        architectures=["Qwen3_5MoeForCausalLM"],
+    # Dense configuration: AR eligibility must not depend on MoE or model type.
+    Gemma2Config(
+        hidden_size=hidden_size,
+        rms_norm_eps=1e-6,
+        architectures=["Gemma2ForCausalLM"],
     ).save_pretrained(model_path)
     config.model_config = ModelConfig(
         model=str(model_path),
@@ -872,28 +873,48 @@ def make_cute_config(tmp_path, local_rank):
 
 
 @pytest.fixture(scope="module")
-def cute_tp_environment():
-    """Keep one rendezvous across torchrun cases; release it at module teardown."""
+def cute_distributed_environment():
+    """Keep one rendezvous across shapes; rebuilding the env:// store is unsafe."""
     import os
 
+    from vllm.distributed.device_communicators import cute_allreduce as runtime
     from vllm.distributed.parallel_state import cleanup_dist_env_and_memory
 
-    if int(os.environ.get("WORLD_SIZE", "1")) != 8:
-        pytest.skip("Requires torchrun with eight SM107 ranks")
+    tp_size = int(os.environ.get("WORLD_SIZE", "1"))
+    if tp_size not in {tp for tp, _ in runtime.SUPPORTED_SHAPES}:
+        pytest.skip("Requires torchrun with a supported TP size")
     local_rank = int(os.environ["LOCAL_RANK"])
     torch.accelerator.set_device_index(local_rank)
-    if not current_platform.has_device_capability(107):
-        pytest.skip("The initial CuTe policy targets SM107")
+    if not runtime.CuteAllReduce.is_supported(torch.device("cuda", local_rank)):
+        pytest.skip("Requires CuTe static FP8, symmetric memory and NVLink multicast")
     init_distributed_environment(
-        world_size=8,
+        world_size=tp_size,
         rank=int(os.environ["RANK"]),
         distributed_init_method="env://",
         local_rank=local_rank,
     )
     try:
-        yield local_rank
+        yield local_rank, tp_size
     finally:
         cleanup_dist_env_and_memory()
+
+
+@pytest.fixture(
+    scope="module",
+    params=[(4, 5120), (8, 5120), (8, 8192), (16, 8192)],
+    ids=["tp4-h5120", "tp8-h5120", "tp8-h8192", "tp16-h8192"],
+)
+def cute_tp_environment(request, cute_distributed_environment):
+    from vllm.distributed.parallel_state import destroy_model_parallel
+
+    local_rank, tp_size = cute_distributed_environment
+    expected_tp, hidden_size = request.param
+    if tp_size != expected_tp:
+        pytest.skip(f"Requires torchrun with {expected_tp} ranks")
+    try:
+        yield local_rank, tp_size, hidden_size
+    finally:
+        destroy_model_parallel()
 
 
 @pytest.mark.skip_global_cleanup
@@ -910,7 +931,7 @@ def cute_tp_environment():
 def test_cute_allreduce_gemma_graph_replay(
     add_residual, quantized, fanout, group_shape, tmp_path, cute_tp_environment
 ):
-    """Run with torchrun over eight SM107 ranks; retain every norm consumer."""
+    """Exercise each published shape and protocol boundary, retaining norm consumers."""
     import vllm.ir
     from vllm import _custom_ops as ops
     from vllm.compilation.passes.fusion.cute_allreduce_fusion import (
@@ -919,14 +940,14 @@ def test_cute_allreduce_gemma_graph_replay(
     from vllm.distributed import ensure_model_parallel_initialized, get_tp_group
     from vllm.distributed.device_communicators import cute_allreduce as runtime
 
-    local_rank = cute_tp_environment
-    config = make_cute_config(tmp_path, local_rank)
+    local_rank, tp_size, hidden_size = cute_tp_environment
+    config = make_cute_config(tmp_path, local_rank, tp_size, hidden_size)
     with set_current_vllm_config(config, check_compile=False):
-        ensure_model_parallel_initialized(8, 1)
+        ensure_model_parallel_initialized(tp_size, 1)
         communicator = get_tp_group().device_communicator
         owner = communicator.cute_allreduce
         assert owner is not None
-        ensure_model_parallel_initialized(8, 1)
+        ensure_model_parallel_initialized(tp_size, 1)
         assert communicator.cute_allreduce is owner
         fusion = CuteAllReduceFusionPass(config)
         backend = TestBackend(
@@ -955,13 +976,18 @@ def test_cute_allreduce_gemma_graph_replay(
             return (output, updated, normalized) if fanout else (output, updated)
 
         compiled = torch.compile(forward, backend=backend, dynamic=True, fullgraph=True)
-        weight = torch.ones(8192, dtype=torch.bfloat16, device="cuda") * 0.1
+        weight = torch.ones(hidden_size, dtype=torch.bfloat16, device="cuda") * 0.1
         torch._dynamo.mark_static(weight, 0)
         scale = torch.tensor([0.1], dtype=torch.float32, device="cuda")
         # TP residuals are replicated; BT computes each token on its owner rank.
         residual_generator = torch.Generator(device="cuda").manual_seed(173)
-        for rows in (16, 17):
-            x = torch.randn(rows, 8192, dtype=torch.bfloat16, device="cuda")
+        routes = owner.policy.profiles[0].all_reduce_routes
+        rows_to_test = {1, runtime.MAX_TOKENS}
+        for boundary in routes.upper_bounds:
+            if boundary is not None and boundary < runtime.MAX_TOKENS:
+                rows_to_test.update((boundary, boundary + 1))
+        for rows in sorted(rows_to_test):
+            x = torch.randn(rows, hidden_size, dtype=torch.bfloat16, device="cuda")
             residual = torch.randn(
                 x.shape, dtype=x.dtype, device=x.device, generator=residual_generator
             )
@@ -1009,7 +1035,9 @@ def test_cute_allreduce_gemma_graph_replay(
                 torch.testing.assert_close(residual, saved[1], atol=0, rtol=0)
                 assert actual[1].data_ptr() != residual.data_ptr()
         # The functional operator retains the ordinary path past its capacity.
-        x = torch.randn(4097, 8192, dtype=torch.bfloat16, device="cuda")
+        x = torch.randn(
+            runtime.MAX_TOKENS + 1, hidden_size, dtype=torch.bfloat16, device="cuda"
+        )
         residual = torch.randn(
             x.shape, dtype=x.dtype, device=x.device, generator=residual_generator
         )
@@ -1036,8 +1064,10 @@ def test_cute_allreduce_selection_requires_every_rank(
     from vllm.distributed import ensure_model_parallel_initialized, get_tp_group
     from vllm.distributed.device_communicators import cute_allreduce as runtime
     from vllm.distributed.parallel_state import destroy_model_parallel, get_world_group
+    from vllm.platforms.interface import DeviceCapability
 
-    config = make_cute_config(tmp_path, cute_tp_environment)
+    local_rank, tp_size, hidden_size = cute_tp_environment
+    config = make_cute_config(tmp_path, local_rank, tp_size, hidden_size)
     destroy_model_parallel()
     try:
         with set_current_vllm_config(config, check_compile=False):
@@ -1047,7 +1077,7 @@ def test_cute_allreduce_selection_requires_every_rank(
                 "is_supported",
                 staticmethod(lambda _: pytest.fail("Disabled fusion probed CuTe")),
             )
-            ensure_model_parallel_initialized(8, 1)
+            ensure_model_parallel_initialized(tp_size, 1)
             assert get_tp_group().device_communicator.cute_allreduce is None
             destroy_model_parallel()
 
@@ -1057,14 +1087,31 @@ def test_cute_allreduce_selection_requires_every_rank(
                 "is_supported",
                 staticmethod(lambda _: get_world_group().rank != 0),
             )
-            ensure_model_parallel_initialized(8, 1)
+            ensure_model_parallel_initialized(tp_size, 1)
             assert get_tp_group().device_communicator.cute_allreduce is None
             fusion = CuteAllReduceFusionPass(config)
             assert fusion.disabled
             assert fusion.uuid()
+            with monkeypatch.context() as capability_patch:
+                capability_patch.setattr(
+                    runtime.CuteAllReduce, "is_supported", staticmethod(lambda _: True)
+                )
+                capability_patch.setattr(
+                    current_platform,
+                    "get_device_capability",
+                    lambda device_id=0: DeviceCapability(
+                        10, 0 if get_world_group().rank == 0 else 7
+                    ),
+                )
+                assert (
+                    runtime.CuteAllReduce.create(
+                        get_tp_group().device_communicator, config
+                    )
+                    is None
+                )
             # A cached fused graph remains executable if CuTe is unavailable.
             x = torch.full(
-                (8, 8192),
+                (8, hidden_size),
                 get_world_group().rank + 1,
                 device="cuda",
                 dtype=torch.bfloat16,
@@ -1073,6 +1120,47 @@ def test_cute_allreduce_selection_requires_every_rank(
                 x, None, torch.zeros_like(x[0]), None, 1e-6
             )
             torch.testing.assert_close(norm, torch.ones_like(norm))
-            torch.testing.assert_close(updated, torch.full_like(updated, 36))
+            torch.testing.assert_close(
+                updated, torch.full_like(updated, tp_size * (tp_size + 1) // 2)
+            )
     finally:
         destroy_model_parallel()
+
+
+@pytest.mark.parametrize("tp_size,hidden_size", [(2, 8192), (4, 8192), (8, 4096)])
+def test_cute_allreduce_unsupported_shape(tmp_path, tp_size, hidden_size):
+    """A valid model without a published CuTe shape keeps the existing backend."""
+    from vllm.distributed.device_communicators import cute_allreduce as runtime
+
+    config = make_cute_config(tmp_path, 0, tp_size, hidden_size)
+    assert not runtime.supports_config(config)
+
+
+@pytest.mark.parametrize(
+    "capability,expected", [(100, True), (103, True), (107, True), (90, False)]
+)
+def test_cute_allreduce_hardware_gate(monkeypatch, capability, expected):
+    """Blackwell-family devices share the backend; pre-Blackwell does not."""
+    import inspect
+
+    import torch.distributed._symmetric_memory as symm_mem
+
+    module = pytest.importorskip("flashinfer.comm.mnnvl_cutedsl_ar")
+    if (
+        "output_dtype"
+        not in inspect.signature(module.MNNVLCuteDSLAllReduceFusionWorkspace).parameters
+    ):
+        pytest.skip("Requires FlashInfer's CuTe static-FP8 API")
+    from flashinfer.comm import mnnvl
+
+    from vllm.distributed.device_communicators import cute_allreduce as runtime
+    from vllm.platforms.interface import DeviceCapability
+
+    monkeypatch.setattr(
+        current_platform,
+        "get_device_capability",
+        lambda device_id=0: DeviceCapability(capability // 10, capability % 10),
+    )
+    monkeypatch.setattr(symm_mem, "get_backend", lambda _: "NCCL")
+    monkeypatch.setattr(mnnvl, "is_multicast_supported", lambda _: True)
+    assert runtime.CuteAllReduce.is_supported(torch.device("cuda", 0)) == expected

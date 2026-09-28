@@ -37,8 +37,13 @@ class CuteAllReduceFusionPass(VllmPatternMatcherPass):
         super().__init__(config)
         self.disabled = not runtime.enabled_for_config(config)
         self.patterns = PatternMatcherPass(pass_name="cute_allreduce")
+        self.policy_key = "unavailable"
         if self.disabled:
             return
+        backend = runtime.get_backend()
+        assert backend is not None
+        self.policy_key = repr(backend.policy)
+        self.hidden_size = config.model_config.get_hidden_size()
         epsilon = float(config.model_config.hf_text_config.rms_norm_eps)
         self.register_patterns(epsilon)
 
@@ -119,12 +124,12 @@ class CuteAllReduceFusionPass(VllmPatternMatcherPass):
             if not (
                 isinstance(value, torch.Tensor)
                 and value.ndim == 2
-                and value.shape[-1] == 8192
+                and value.shape[-1] == self.hidden_size
                 and value.dtype == torch.bfloat16
                 and value.is_contiguous()
                 and isinstance(weight, torch.Tensor)
                 and weight.dtype == torch.bfloat16
-                and weight.shape == (8192,)
+                and weight.shape == (self.hidden_size,)
                 and weight.is_contiguous()
             ):
                 return False
@@ -167,7 +172,7 @@ class CuteAllReduceFusionPass(VllmPatternMatcherPass):
             _bind_optional_inputs,
             runtime.cute_allreduce_norm,
             inspect.unwrap(runtime.build_policy),
-            repr(runtime.build_policy()) if not self.disabled else "unavailable",
+            self.policy_key,
             str(self.disabled),
         )
 
