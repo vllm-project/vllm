@@ -8,6 +8,10 @@ import torch.nn as nn
 from transformers import AutoModel, PreTrainedConfig
 
 from vllm.config import VllmConfig
+from vllm.model_executor.layers.fusion.mm_input_norm import (
+    FusedMMInputNorm,
+    IdentityInputNorm,
+)
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.pooler import DispatchPooler
 from vllm.model_executor.layers.quantization import QuantizationConfig
@@ -22,7 +26,6 @@ from vllm.model_executor.models.internvl import (
 )
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.model_executor.models.siglip import SiglipVisionModel
-from vllm.model_executor.models.vision import FusedInputNorm
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.processor import cached_image_processor_from_config
@@ -503,13 +506,13 @@ class LlamaNemotronVLForEmbedding(LlamaNemotronVLChatModel, VllmModelForPooling)
         self.img_context_token_id = getattr(config, "img_context_token_id", None)
 
         if self.model_config.get_multimodal_config().mm_device_do_normalize:
-            self.input_norm = FusedInputNorm(
+            self.input_norm = FusedMMInputNorm(
                 image_mean=list(SIGLIP_MEAN),
                 image_std=list(SIGLIP_STD),
                 rescale_factor=1 / 255,
             )
         else:
-            self.input_norm = FusedInputNorm.identity()
+            self.input_norm = IdentityInputNorm()
 
         # Initialize pooler for embedding output
         pooler_config = vllm_config.model_config.pooler_config

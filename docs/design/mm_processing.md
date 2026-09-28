@@ -82,7 +82,7 @@ GPU-side fusion is controlled by `multimodal_config.mm_device_do_normalize`:
 | -------------------------- | ------------------------------------------ | --------------------------------------- |
 | `qwen2-vl`                 | `Qwen2VLForConditionalGeneration`          | `Qwen/Qwen2-VL-2B-Instruct`, etc.       |
 | `qwen2.5-vl`               | `Qwen2_5_VLForConditionalGeneration`       | `Qwen/Qwen2.5-VL-3B-Instruct`, etc.     |
-| `llama-nemotron-vl-embed`  | `LlamaNemotronVLModel`                     | `nvidia/llama-nemotron-embed-vl-1b-v2`  |
+| `llama-nemotron-vl-embed`  | `LlamaNemotronVLForEmbedding`              | `nvidia/llama-nemotron-embed-vl-1b-v2`  |
 | `llama-nemotron-vl-rerank` | `LlamaNemotronVLForSequenceClassification` | `nvidia/llama-nemotron-rerank-vl-1b-v2` |
 
 #### Key Properties and Gains

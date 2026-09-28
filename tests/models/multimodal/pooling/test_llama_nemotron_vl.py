@@ -23,7 +23,7 @@ from vllm.entrypoints.chat_utils import (
     ChatCompletionContentPartTextParam,
 )
 from vllm.entrypoints.pooling.scoring.typing import ScoreMultiModalParam
-from vllm.model_executor.models.vision import FusedInputNorm
+from vllm.model_executor.layers.fusion.mm_input_norm import FusedMMInputNorm
 from vllm.platforms import current_platform
 from vllm.transformers_utils.processors.nemotron_vl import (
     SIGLIP_MEAN,
@@ -58,7 +58,9 @@ HF_IMAGE_PROMPTS = IMAGE_ASSETS.prompts(
 MODELS = ["nvidia/llama-nemotron-embed-vl-1b-v2"]
 
 
+@pytest.mark.usefixtures("default_vllm_config")
 def test_device_normalization_matches_cpu_transform() -> None:
+    device = current_platform.device_type
     image = Image.new("RGB", (48, 32), color=(12, 128, 240))
     processor_kwargs = dict(
         image_size=32,
@@ -75,17 +77,17 @@ def test_device_normalization_matches_cpu_transform() -> None:
 
     expected = cpu_processor._images_to_pixel_values_lst([image])[0]
     raw_pixels = device_processor._images_to_pixel_values_lst([image])[0]
-    input_norm = FusedInputNorm(
+    input_norm = FusedMMInputNorm(
         image_mean=list(SIGLIP_MEAN),
         image_std=list(SIGLIP_STD),
         rescale_factor=1 / 255,
-    )
-    actual = input_norm(raw_pixels.flatten(start_dim=1), expected.dtype).view_as(
-        expected
-    )
+    ).to(device)
+    actual = input_norm(
+        raw_pixels.flatten(start_dim=1).to(device), expected.dtype
+    ).view_as(expected)
 
     assert raw_pixels.dtype == torch.uint8
-    torch.testing.assert_close(actual, expected)
+    torch.testing.assert_close(actual, expected.to(device))
 
 
 @pytest.mark.parametrize(("do_rescale", "do_normalize"), [(True, False), (False, True)])
