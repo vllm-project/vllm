@@ -5,7 +5,7 @@ ARG VLLM_BRANCH="main"
 ARG COMMON_WORKDIR=/app
 ARG BASE_IMAGE=rocm/vllm-dev:base
 ARG CI_BASE_IMAGE=rocm/vllm-dev:ci_base
-ARG ROCM_TRITON_KERNELS_COMMIT=0f380657dbf3ee86eb57558ff71df24f03b5d4e7
+ARG ROCM_TRITON_KERNELS_COMMIT=669b31acc1dd1b3fd93286afd5db67f65d9f7557
 ARG INSTALL_LMCACHE=false
 # NIC backend for MoRI RDMA support.
 # By default (all), drivers and userspace libraries for all supported NIC types
@@ -497,9 +497,17 @@ RUN printf '%s\n' "${LMCACHE_REF}" | grep -Eq '^[0-9a-f]{40}$' \
         /app/lmcache/requirements/common.txt)" -eq 2 \
     && test "$(grep -Fxc 'numpy<=2.2.6' \
         /app/lmcache/requirements/common.txt)" -eq 1 \
+    && test "$(grep -Fxc 'opentelemetry-api >= 1.20.0, <= 1.40.0' \
+        /app/lmcache/requirements/common.txt)" -eq 1 \
+    && test "$(grep -Fxc 'opentelemetry-sdk >= 1.20.0' \
+        /app/lmcache/requirements/common.txt)" -eq 1 \
+    && test "$(grep -Fxc 'opentelemetry-exporter-otlp >= 1.20.0' \
+        /app/lmcache/requirements/common.txt)" -eq 1 \
     && sed -i -E \
         -e '/^(cufile-python|nvtx)([<=>[:space:]]|$)/d' \
         -e 's/^numpy<=2\.2\.6$/numpy<=2.3.5/' \
+        -e 's/^opentelemetry-sdk >= 1\.20\.0$/opentelemetry-sdk >= 1.20.0, <= 1.40.0/' \
+        -e 's/^opentelemetry-exporter-otlp >= 1\.20\.0$/opentelemetry-exporter-otlp >= 1.20.0, <= 1.40.0/' \
         /app/lmcache/requirements/common.txt \
     && rm -rf /app/lmcache/.git
 
