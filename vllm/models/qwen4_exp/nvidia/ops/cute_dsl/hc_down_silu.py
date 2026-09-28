@@ -9,12 +9,10 @@ injection-logit columns pass through as ``bf16(acc)``, and the pad columns
 are never computed. Output is bf16 (ll_bf16's fp32-output bonus is given up
 to preserve the production rounding boundary).
 
-The GEMM keeps ll_bf16's dispatch (dotprod backend for M <= 4, split-K
-beyond, both with PDL) and is bit-identical to the unfused
-``hc_silu(bf16(ll_bf16_gemm))`` reference on the computed columns. Measured
-1.19-1.36x vs the unfused chain at M <= 48 on GB300 (SM103); the ll_bf16
-base GEMM falls behind cuBLAS past M ~ 64, so dispatch is gated to M <= 48
-with an F.linear + hc_silu fallback.
+The GEMM uses an FMA backend for M <= 4 and a split-K MMA backend beyond,
+both with PDL. It is bit-identical to the unfused
+``hc_silu(bf16(ll_bf16_gemm))`` reference on the computed columns. Dispatch
+is gated to M <= 48 with an F.linear + hc_silu fallback.
 """
 
 from __future__ import annotations
@@ -45,11 +43,11 @@ _N_COMPUTE = _RANK + _HC
 # tuned for.
 _MAX_FUSED_M = 48
 
-_DEFAULT_DOTPROD_MAX_M = 4
+_DEFAULT_FMA_MAX_M = 4
 # bs=256 is ~0.1-0.35 us faster on this shape but changes the shuffle
 # reduction tree, which breaks bit-identity with the ll_bf16 reference
 # (1-ulp flips observed at M=4 on GB300). bs=128 stays.
-_DEFAULT_DOTPROD_BS = 128
+_DEFAULT_FMA_BS = 128
 # (split_k, num_stages, tile_n); tile_n=16 and (6, 4) are the ll_bf16
 # defaults. split_k=6 keeps the ll_bf16 K-reduction order and is the only
 # split that stays bit-identical; num_stages/tile_n only affect pipelining
@@ -70,7 +68,7 @@ class HcDownSiluGemm:
 
     @dataclass(frozen=True, slots=True)
     class CompileKey:
-        backend: Literal["dotprod", "splitk"]
+        backend: Literal["fma", "mma"]
         M: int = 0
         K: int = 0
         bs: int = 0
@@ -80,18 +78,16 @@ class HcDownSiluGemm:
 
     def __init__(self, *, prefetch_pdl_weights: bool = False) -> None:
         self._prefetch_pdl_weights = prefetch_pdl_weights
-        # Dot-prod: keyed on (M, K, bs), because M and K are Constexpr.
-        self._compiled_cache: dict[tuple[int, int, int], Any] = {}
-        # Split-K: keyed on (split_k, num_stages, tile_n), fully shape-dynamic.
-        self._splitk_cache: dict[tuple[int, int, int], Any] = {}
+        # FMA: keyed on (M, K, bs), because M and K are Constexpr.
+        self._fma_cache: dict[tuple[int, int, int], Any] = {}
+        # MMA: keyed on (split_k, num_stages, tile_n), fully shape-dynamic.
+        self._mma_cache: dict[tuple[int, int, int], Any] = {}
         self._warmup_m: set[int] = set()
         self._warmup_registered = False
 
     def dispatch(self, m: int) -> CompileKey:
-        if m <= _DEFAULT_DOTPROD_MAX_M:
-            return self.CompileKey(
-                backend="dotprod", M=m, K=_WEIGHT_K, bs=_DEFAULT_DOTPROD_BS
-            )
+        if m <= _DEFAULT_FMA_MAX_M:
+            return self.CompileKey(backend="fma", M=m, K=_WEIGHT_K, bs=_DEFAULT_FMA_BS)
         tuned = (
             _SM100F_TUNED_SPLITK
             if current_platform.is_device_capability_family(100)
@@ -99,7 +95,7 @@ class HcDownSiluGemm:
         )
         split_k, num_stages, tile_n = tuned.get(m, _DEFAULT_SPLITK_CONFIG)
         return self.CompileKey(
-            backend="splitk",
+            backend="mma",
             split_k=split_k,
             num_stages=num_stages,
             tile_n=tile_n,
@@ -118,10 +114,10 @@ class HcDownSiluGemm:
         output = make_fake_tensor(BFloat16, (M, N), divisibility=1)
         return hidden_states, router_weight, output
 
-    def _compile_splitk(self, compile_key: CompileKey) -> None:
+    def _compile_mma(self, compile_key: CompileKey) -> None:
         import cutlass.cute as cute
 
-        from ._hc_down_silu_splitk import HcDownSiluSplitK
+        from ._hc_down_silu_mma import HcDownSiluMma
 
         hidden_states, router_weight, output = self._fake_gemm_tensors(
             M=cute.sym_int(),
@@ -129,7 +125,7 @@ class HcDownSiluGemm:
             N=cute.sym_int(),
             divisibility=8,
         )
-        gemm = HcDownSiluSplitK(
+        gemm = HcDownSiluMma(
             tile_n=compile_key.tile_n,
             num_stages=compile_key.num_stages,
             split_k=compile_key.split_k,
@@ -145,20 +141,20 @@ class HcDownSiluGemm:
             cute.runtime.make_fake_stream(use_tvm_ffi_env_stream=True),
             options="--enable-tvm-ffi",
         )
-        self._splitk_cache[
+        self._mma_cache[
             (compile_key.split_k, compile_key.num_stages, compile_key.tile_n)
         ] = compiled
         logger.debug(
-            "Compiled hc_down_silu_splitk: sk=%d ns=%d tile_n=%d",
+            "Compiled hc_down_silu_mma: sk=%d ns=%d tile_n=%d",
             compile_key.split_k,
             compile_key.num_stages,
             compile_key.tile_n,
         )
 
-    def _compile_dotprod(self, compile_key: CompileKey) -> None:
+    def _compile_fma(self, compile_key: CompileKey) -> None:
         import cutlass.cute as cute
 
-        from ._hc_down_silu_dotprod import HcDownSiluDotprod
+        from ._hc_down_silu_fma import HcDownSiluFma
 
         N = cute.sym_int()
         hidden_states, router_weight, output = self._fake_gemm_tensors(
@@ -167,7 +163,7 @@ class HcDownSiluGemm:
             N=N,
             divisibility=8,
         )
-        gemm = HcDownSiluDotprod(
+        gemm = HcDownSiluFma(
             k=compile_key.K,
             bs=compile_key.bs,
             use_pdl=current_platform.is_arch_support_pdl(),
@@ -186,28 +182,28 @@ class HcDownSiluGemm:
             cute.runtime.make_fake_stream(use_tvm_ffi_env_stream=True),
             options="--enable-tvm-ffi --ptxas-options -maxrregcount=64",
         )
-        self._compiled_cache[(compile_key.M, compile_key.K, compile_key.bs)] = compiled
+        self._fma_cache[(compile_key.M, compile_key.K, compile_key.bs)] = compiled
         logger.debug(
-            "Compiled hc_down_silu_dotprod: M=%d, K=%d, bs=%d",
+            "Compiled hc_down_silu_fma: M=%d, K=%d, bs=%d",
             compile_key.M,
             compile_key.K,
             compile_key.bs,
         )
 
     def compile(self, compile_key: CompileKey) -> None:
-        if compile_key.backend == "splitk":
-            splitk_cache_key = (
+        if compile_key.backend == "mma":
+            mma_cache_key = (
                 compile_key.split_k,
                 compile_key.num_stages,
                 compile_key.tile_n,
             )
-            if splitk_cache_key not in self._splitk_cache:
-                self._compile_splitk(compile_key)
+            if mma_cache_key not in self._mma_cache:
+                self._compile_mma(compile_key)
             return
 
-        dotprod_cache_key = (compile_key.M, compile_key.K, compile_key.bs)
-        if dotprod_cache_key not in self._compiled_cache:
-            self._compile_dotprod(compile_key)
+        fma_cache_key = (compile_key.M, compile_key.K, compile_key.bs)
+        if fma_cache_key not in self._fma_cache:
+            self._compile_fma(compile_key)
 
     def request_warmup(self, m_values: Iterable[int]) -> None:
         m_values = set(m_values)
@@ -281,18 +277,16 @@ class HcDownSiluGemm:
         w_gemm = router_weight[:_N_COMPUTE]
         compile_key = self.dispatch(M)
         self.compile(compile_key)
-        if compile_key.backend == "splitk":
-            kernel = self._splitk_cache[
+        if compile_key.backend == "mma":
+            kernel = self._mma_cache[
                 (compile_key.split_k, compile_key.num_stages, compile_key.tile_n)
             ]
         else:
-            kernel = self._compiled_cache[
-                (compile_key.M, compile_key.K, compile_key.bs)
-            ]
+            kernel = self._fma_cache[(compile_key.M, compile_key.K, compile_key.bs)]
 
         output = torch.empty(M, N, dtype=torch.bfloat16, device=hidden_states.device)
         out_gemm = output[:, :_N_COMPUTE]
-        if compile_key.backend == "splitk":
+        if compile_key.backend == "mma":
             kernel(hidden_states, w_gemm, out_gemm, 1.0)
         else:
             kernel(hidden_states, w_gemm, out_gemm, _N_COMPUTE)

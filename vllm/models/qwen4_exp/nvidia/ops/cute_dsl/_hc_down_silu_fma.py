@@ -3,7 +3,7 @@
 """Adapted from vllm/model_executor/kernels/linear/cute_dsl/_ll_bf16_dotprod.py.
 
 Fuses the Qwen4Exp mHC SiLU epilogue (SiLU(x/HC) on columns < rank, passthrough
-elsewhere, with the production bf16 rounding boundary) into the dotprod kernel.
+elsewhere, with the production bf16 rounding boundary) into the FMA kernel.
 Output is bf16 instead of fp32.
 """
 
@@ -17,8 +17,8 @@ def _sigmoid_f32(x):
     return 1.0 / (1.0 + cute.math.exp(x * (-1.0)))
 
 
-class HcDownSiluDotprod:
-    """BF16 GEMM kernel based on CTA-local dot products, with the mHC SiLU
+class HcDownSiluFma:
+    """BF16 GEMM kernel based on CTA-local FMA dot products, with the mHC SiLU
     epilogue fused into the final store.
 
     Computes C[M, N] = A[M, K] @ B[N, K]^T for bf16 inputs, rounds the fp32
@@ -75,7 +75,7 @@ class HcDownSiluDotprod:
         self.tail_tiles = self.k_tail_elems // (self.tail_vec_width * self.bs)
 
     @cute.jit
-    def _vector_dotprod(
+    def _vector_fma(
         self,
         acc: cute.Tensor,
         tA: cute.Tensor,
@@ -99,7 +99,7 @@ class HcDownSiluDotprod:
                     acc[m] = acc[m] + ar[v].to(cutlass.Float32) * br_f32[v]
 
     @cute.jit
-    def _vector_dotprod_prefetched(
+    def _vector_fma_prefetched(
         self,
         acc: cute.Tensor,
         tA: cute.Tensor,
@@ -253,7 +253,7 @@ class HcDownSiluDotprod:
         # 128-bit vectorized main loop
         if const_expr(k_main_elems > 0):
             if const_expr(self.use_pdl and self.prefetch_pdl_weights):
-                self._vector_dotprod_prefetched(
+                self._vector_fma_prefetched(
                     acc,
                     tA,
                     tB,
@@ -263,7 +263,7 @@ class HcDownSiluDotprod:
                     prefetch_tiles,
                 )
             else:
-                self._vector_dotprod(acc, tA, tB, M, main_tiles, 16)
+                self._vector_fma(acc, tA, tB, M, main_tiles, 16)
 
         # 64-bit vectorized tail (K remainder after main loop)
         if const_expr(k_tail_elems > 0):
@@ -274,7 +274,7 @@ class HcDownSiluDotprod:
             tA_t, tB_t = self._make_thread_vector_slice(
                 gA_tail_vec, gB_tail_vec, tidx, n_idx, bs
             )
-            self._vector_dotprod(acc, tA_t, tB_t, M, tail_tiles, 8)
+            self._vector_fma(acc, tA_t, tB_t, M, tail_tiles, 8)
 
         # Full scalar rounds use CuTe width-1 tiles; KS_PART is the ragged tail.
         if const_expr(ks_full > 0):
@@ -285,7 +285,7 @@ class HcDownSiluDotprod:
             tA_s, tB_s = self._make_thread_vector_slice(
                 gA_scalar_vec, gB_scalar_vec, tidx, n_idx, bs
             )
-            self._vector_dotprod(acc, tA_s, tB_s, M, ks_full, 2)
+            self._vector_fma(acc, tA_s, tB_s, M, ks_full, 2)
 
         # Only threads below KS_PART load the ragged tail.
         if const_expr(ks_part > 0):

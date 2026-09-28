@@ -48,7 +48,7 @@ def _sigmoid_f32(x):
     return 1.0 / (1.0 + cute.math.exp(x * (-1.0)))
 
 
-class HcDownSiluSplitK:
+class HcDownSiluMma:
     """BF16 GEMM kernel based on clustered split-K MMA, with the mHC SiLU
     epilogue fused into the final store.
 
