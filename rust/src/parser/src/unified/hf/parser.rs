@@ -29,8 +29,11 @@ use winnow::stream::{Partial, Stream};
 use super::coerce::ToolParams;
 use super::content::is_python_space;
 use super::pattern::Resolution;
-use super::template::{Region, ResponseTemplate, Role, Watch, WatchKind};
-use super::transform::{process_field, python_type_name};
+use super::template::{
+    FieldName, Region, RegionKind, Repeat, ResponseTemplate, TextRegion, TextRole, ToolCallRegion,
+    Watch, WatchKind,
+};
+use super::transform::python_type_name;
 use super::{unsupported, value};
 use crate::tool::{Tool, ToolCallDelta};
 use crate::unified::{Result, UnifiedParser, UnifiedParserOutput, parsing_failed};
@@ -114,11 +117,11 @@ struct BoundaryMatch {
 impl BoundaryMatch {
     /// Preference order of `_scan`: longest first, opens before closes, then by
     /// field name.
-    fn key<'t>(&self, template: &'t ResponseTemplate) -> (std::cmp::Reverse<usize>, bool, &'t str) {
+    fn key(&self, template: &ResponseTemplate) -> (std::cmp::Reverse<usize>, bool, FieldName) {
         (
             std::cmp::Reverse(self.len),
             self.watch.kind == WatchKind::Close,
-            template.regions[self.watch.region].name.as_str(),
+            template.regions[self.watch.region].name,
         )
     }
 }
@@ -185,13 +188,17 @@ impl HfUnifiedParser {
         raw_open: String,
     ) -> Occurrence {
         let spec = &self.template.regions[region];
-        let separator = spec
-            .join
-            .as_ref()
-            .filter(|join| !join.is_empty() && self.closed[region] > 0)
-            .cloned();
-        if spec.repeats {
-            self.strip[region] = StripState::new(spec);
+        let mut separator = None;
+        if let RegionKind::Text(text) = &spec.kind {
+            if let Repeat::Join(join) = &text.repeat
+                && !join.is_empty()
+                && self.closed[region] > 0
+            {
+                separator = Some(join.clone());
+            }
+            if text.repeat != Repeat::Once {
+                self.strip[region] = StripState::new(spec);
+            }
         }
         Occurrence {
             region,
@@ -247,44 +254,48 @@ impl HfUnifiedParser {
 
     /// Route a text piece into the current region.
     fn route(&mut self, piece: DecodedText, output: &mut UnifiedParserOutput, mode: Mode) {
-        let (occurrence, role) = match &mut self.current {
+        let (occurrence, region) = match &mut self.current {
             Current::Sink => return,
             Current::Implicit(occurrence) | Current::Explicit(occurrence) => {
-                let role = self.template.regions[occurrence.region].role;
-                (occurrence, role)
+                let region = &self.template.regions[occurrence.region];
+                (occurrence, region)
             }
         };
-        let strip = &mut self.strip[occurrence.region];
+        let RegionKind::Text(text) = &region.kind else {
+            if !piece.text.is_empty() {
+                occurrence.opened = true;
+                occurrence.body.push_str(&piece.text);
+            }
+            return;
+        };
+        let reasoning = text.role == TextRole::Reasoning;
         if piece.text.is_empty() {
             // Zero-width tokens still count as reasoning.
-            if role == Role::Reasoning && mode.emits() {
+            if reasoning && mode.emits() {
                 output.push_reasoning(piece);
             }
             return;
         }
         occurrence.opened = true;
 
-        match role {
-            Role::ToolCalls => occurrence.body.push_str(&piece.text),
-            Role::Text | Role::Reasoning if !mode.emits() => {
-                // Prompt text is never emitted; it only decides whether later
-                // leading whitespace is still stripped.
-                strip.started |= !piece.text.chars().all(is_python_space);
-            }
-            Role::Text | Role::Reasoning => {
-                let (visible, dropped) = strip.feed(piece);
-                if role == Role::Reasoning {
-                    push_dropped_reasoning(output, dropped);
-                }
-                if visible.text.is_empty() {
-                    return;
-                }
-                if let Some(separator) = occurrence.separator.take() {
-                    push_role(output, role, DecodedText::unattributed(separator));
-                }
-                push_role(output, role, visible);
-            }
+        let strip = &mut self.strip[occurrence.region];
+        if !mode.emits() {
+            // Prompt text is never emitted; it only decides whether later
+            // leading whitespace is still stripped.
+            strip.started |= !piece.text.chars().all(is_python_space);
+            return;
         }
+        let (visible, dropped) = strip.feed(piece);
+        if reasoning {
+            push_dropped_reasoning(output, dropped);
+        }
+        if visible.text.is_empty() {
+            return;
+        }
+        if let Some(separator) = occurrence.separator.take() {
+            push_text(output, text.role, DecodedText::unattributed(separator));
+        }
+        push_text(output, text.role, visible);
     }
 
     /// Open an explicit region.
@@ -297,13 +308,17 @@ impl HfUnifiedParser {
         mode: Mode,
     ) {
         let mut occurrence = self.occurrence(region, true, captures, raw_open);
-        let early_name = self.template.regions[region].early_name.as_deref().and_then(|group| {
-            occurrence
+        let early_name = match &self.template.regions[region].kind {
+            RegionKind::ToolCalls(ToolCallRegion {
+                early_name: Some(group),
+                ..
+            }) => occurrence
                 .captures
                 .iter()
                 .find(|(name, _)| name == group)
-                .map(|(_, text)| text.clone())
-        });
+                .map(|(_, text)| text.clone()),
+            _ => None,
+        };
         if let Some(name) = early_name
             && mode.emits()
         {
@@ -335,7 +350,10 @@ impl HfUnifiedParser {
         // continues; it is dropped at the end of the stream.
         let held = occurrence
             .as_ref()
-            .filter(|occurrence| template.regions[occurrence.region].repeats)
+            .filter(|occurrence| {
+                matches!(&template.regions[occurrence.region].kind,
+                    RegionKind::Text(text) if text.repeat != Repeat::Once)
+            })
             .map(|occurrence| take(&mut self.strip[occurrence.region].held));
         if let Some(occurrence) = &occurrence {
             self.closed[occurrence.region] += 1;
@@ -347,27 +365,26 @@ impl HfUnifiedParser {
         };
 
         let region = &template.regions[occurrence.region];
-        match region.role {
-            Role::Text | Role::Reasoning => {
-                if region.role == Role::Reasoning
+        match &region.kind {
+            RegionKind::Text(text) => {
+                if text.role == TextRole::Reasoning
                     && let Some(held) = held
                 {
                     push_dropped_reasoning(output, held);
                 }
                 // An empty occurrence still joins: `previous + join + ""`.
                 if let Some(separator) = occurrence.separator {
-                    push_role(output, region.role, DecodedText::unattributed(separator));
+                    push_text(output, text.role, DecodedText::unattributed(separator));
                 }
             }
-            Role::ToolCalls => {
-                let mut value = process_field(
-                    &region.name,
-                    &occurrence.body,
-                    &region.content,
-                    region.transform.as_ref(),
-                    region.transform_each,
-                    &occurrence.captures,
-                )?;
+            RegionKind::ToolCalls(calls) => {
+                let parsed = calls.content.parse(&occurrence.body)?;
+                let mut value = match &calls.transform {
+                    Some(transform) => {
+                        transform.apply(region.name.as_str(), parsed, &occurrence.captures)?
+                    }
+                    None => parsed,
+                };
                 if !self.tool_params.is_empty() {
                     self.tool_params.coerce_tool_calls(&mut value);
                 }
@@ -440,7 +457,10 @@ impl HfUnifiedParser {
 impl StripState {
     fn new(region: &Region) -> Self {
         Self {
-            enabled: region.role != Role::ToolCalls && region.content.strips(),
+            enabled: matches!(
+                region.kind,
+                RegionKind::Text(TextRegion { strip: true, .. })
+            ),
             ..Self::default()
         }
     }
@@ -476,12 +496,11 @@ impl StripState {
     }
 }
 
-/// Push visible text of `role`.
-fn push_role(output: &mut UnifiedParserOutput, role: Role, piece: DecodedText) {
+/// Push visible text of a text region.
+fn push_text(output: &mut UnifiedParserOutput, role: TextRole, piece: DecodedText) {
     match role {
-        Role::Text => output.push_text(piece.text),
-        Role::Reasoning => output.push_reasoning(piece),
-        Role::ToolCalls => unreachable!("tool-call bodies are buffered"),
+        TextRole::Content => output.push_text(piece.text),
+        TextRole::Reasoning => output.push_reasoning(piece),
     }
 }
 
@@ -643,7 +662,7 @@ impl UnifiedParser for HfUnifiedParser {
         self.close_current(&mut output, Mode::Eof)?;
         for (region, strip) in self.template.regions.iter().zip(&mut self.strip) {
             let held = take(&mut strip.held);
-            if region.role == Role::Reasoning {
+            if matches!(&region.kind, RegionKind::Text(text) if text.role == TextRole::Reasoning) {
                 push_dropped_reasoning(&mut output, held);
             }
         }

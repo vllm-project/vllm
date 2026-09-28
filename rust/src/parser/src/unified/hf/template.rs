@@ -6,15 +6,16 @@
 //! Validation follows `response_templates.py`; the compiled form additionally
 //! maps fields to parser roles and precomputes each state's boundary candidates.
 
+use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use regex_automata::meta::Regex;
 use serde_json::Value;
 
-use super::content::{ContentParser, compile_regex};
+use super::content::{ContentParser, TextArgs, compile_regex};
 use super::pattern::{Resolution, StreamingPattern};
-use super::schema::{AnchorSpec, FieldSpec, TemplateSpec, anchor_spec};
-use super::transform::Transform;
+use super::spec::{AnchorSpec, FieldSpec, TemplateSpec};
+use super::transform::{FieldTransform, Transform};
 use super::{Result, invalid, unsupported};
 
 /// A compiled `response_template`, shared by all requests of one model.
@@ -35,30 +36,68 @@ pub struct ResponseTemplate {
 /// One compiled field.
 #[derive(Debug)]
 pub(super) struct Region {
-    pub name: String,
-    pub role: Role,
+    pub name: FieldName,
+    /// `None`: the implicit region.
     pub open: Option<Boundary>,
     /// `None`: the region runs to the end of the stream.
     pub close: Option<Boundary>,
     pub close_watch: Vec<Watch>,
     pub close_candidates: Vec<String>,
-    pub content: ContentParser,
-    pub transform: Option<Transform>,
-    pub transform_each: bool,
-    pub repeats: bool,
-    pub join: Option<String>,
     pub optional: bool,
+    pub kind: RegionKind,
+}
+
+/// A field this parser can report, in the lexical order of its name, which
+/// Transformers uses to break ties between boundaries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(super) enum FieldName {
+    Content,
+    ReasoningContent,
+    Thinking,
+    ToolCalls,
+}
+
+/// How a region's content is reported.
+#[derive(Debug)]
+pub(super) enum RegionKind {
+    /// Streamed as it arrives.
+    Text(TextRegion),
+    /// Buffered, and parsed into tool calls at close.
+    ToolCalls(ToolCallRegion),
+}
+
+#[derive(Debug)]
+pub(super) struct TextRegion {
+    pub role: TextRole,
+    /// Whether the value is stripped (`content_args.strip`).
+    pub strip: bool,
+    pub repeat: Repeat,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum TextRole {
+    Content,
+    Reasoning,
+}
+
+/// How repeated occurrences of a text field combine.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum Repeat {
+    /// No `repeats`: occurrences stream as one value.
+    Once,
+    /// `repeats` without `join`: each occurrence is its own value.
+    Each,
+    /// `repeats` with `join`: occurrences are joined by the separator.
+    Join(String),
+}
+
+#[derive(Debug)]
+pub(super) struct ToolCallRegion {
+    pub content: ContentParser,
+    pub transform: Option<FieldTransform>,
     /// Opener capture group that provides the function name, allowing the tool
     /// call to start before its arguments are complete.
     pub early_name: Option<String>,
-}
-
-/// How a field's content is reported.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum Role {
-    Text,
-    Reasoning,
-    ToolCalls,
 }
 
 /// A region delimiter.
@@ -88,9 +127,9 @@ impl ResponseTemplate {
         let spec = TemplateSpec::from_value(value)?;
 
         let regions = spec
-            .field_specs()?
-            .into_iter()
-            .map(|(name, field)| Region::compile(name, &field))
+            .fields
+            .iter()
+            .map(|(name, field)| Region::compile(name, field))
             .collect::<Result<Vec<_>>>()?;
 
         // A field without an open anchor is the implicit-open / leftover sink; at most one is allowed.
@@ -107,26 +146,15 @@ impl ResponseTemplate {
         }
         let implicit = implicit_fields.first().map(|(index, _)| *index);
 
-        let start_anchor = match anchor_spec(
-            "response_template",
-            spec.start_anchor.as_ref(),
-            spec.start_anchor_pattern.as_deref(),
-            "start_anchor",
-            "start_anchor_pattern",
-        )? {
-            None => {
-                return Err(invalid!(
-                    "response_template must define 'start_anchor' or 'start_anchor_pattern'."
-                ));
-            }
-            Some(AnchorSpec::Literals(mut literals)) => {
+        let start_anchor = match spec.start_anchor()? {
+            AnchorSpec::Literals(mut literals) => {
                 // Sort longest-first so alternation prefers the longer alternative when both could match.
                 literals.sort_by_key(|literal| std::cmp::Reverse(literal.len()));
                 let alternation: Vec<_> =
                     literals.iter().map(|literal| regex_syntax::escape(literal)).collect();
                 compile_regex("response_template", &alternation.join("|"))?
             }
-            Some(AnchorSpec::Pattern(pattern)) => compile_regex("response_template", pattern)?,
+            AnchorSpec::Pattern(pattern) => compile_regex("response_template", pattern)?,
         };
 
         let mut idle_watch: Vec<_> = regions
@@ -207,102 +235,167 @@ impl Region {
     /// Validate a single field spec and compile it.
     fn compile(name: &str, field: &FieldSpec) -> Result<Self> {
         let scope = format!("Field '{name}'");
-        let content = ContentParser::new(&scope, &field.content, &field.content_args)?;
-        let open = anchor_spec(
-            &scope,
-            field.open.as_ref(),
-            field.open_pattern.as_deref(),
-            "open",
-            "open_pattern",
-        )?
-        .map(|spec| Boundary::compile(&scope, spec))
-        .transpose()?;
-        let close = anchor_spec(
-            &scope,
-            field.close.as_ref(),
-            field.close_pattern.as_deref(),
-            "close",
-            "close_pattern",
-        )?
-        .map(|spec| Boundary::compile(&scope, spec))
-        .transpose()?;
+        let open = field.open(&scope)?.map(|spec| Boundary::compile(&scope, spec)).transpose()?;
+        let close = field.close(&scope)?.map(|spec| Boundary::compile(&scope, spec)).transpose()?;
 
-        if field.join.is_some() && !field.repeats {
-            return Err(invalid!("{scope}: 'join' requires 'repeats': true"));
-        }
-        if field.transform_each && field.transform.is_none() {
-            return Err(invalid!(
-                "{scope}: transform_each is set but no transform was provided"
-            ));
-        }
-        let transform = field
-            .transform
-            .as_ref()
-            .map(|transform| Transform::compile(&scope, transform))
-            .transpose()?;
+        let content = ContentParser::new(&scope, field.content, &field.content_args)?;
+        let repeat = match (field.repeats, &field.join) {
+            (false, None) => Repeat::Once,
+            (true, None) => Repeat::Each,
+            (true, Some(join)) => Repeat::Join(join.clone()),
+            (false, Some(_)) => return Err(invalid!("{scope}: 'join' requires 'repeats': true")),
+        };
+        let transform = match (&field.transform, field.transform_each) {
+            (Some(template), each) => Some(FieldTransform {
+                template: Transform::compile(&scope, template)?,
+                each,
+            }),
+            (None, false) => None,
+            (None, true) => {
+                return Err(invalid!(
+                    "{scope}: transform_each is set but no transform was provided"
+                ));
+            }
+        };
 
         let captured: Vec<&str> =
             [&open, &close].into_iter().flatten().flat_map(Boundary::group_names).collect();
-        if transform.is_none() && !captured.is_empty() {
-            // Named captures only reach the output through a transform, so flag any that would be silently dropped.
-            return Err(invalid!(
-                "{scope}: open_pattern/close_pattern declares named group(s) {captured:?}, but the \
-                 field has no 'transform'. Named captures are only surfaced through a 'transform' \
-                 template (where they appear alongside 'content'). Either add a 'transform' that \
-                 uses the captures, or remove the named groups from the pattern."
-            ));
+        match &transform {
+            None if !captured.is_empty() => {
+                // Named captures only reach the output through a transform, so flag any that would be silently dropped.
+                return Err(invalid!(
+                    "{scope}: open_pattern/close_pattern declares named group(s) {captured:?}, but \
+                     the field has no 'transform'. Named captures are only surfaced through a \
+                     'transform' template (where they appear alongside 'content'). Either add a \
+                     'transform' that uses the captures, or remove the named groups from the pattern."
+                ));
+            }
+            // Without `transform_each`, the scope is the opener's captures plus `content`;
+            // any other placeholder fails on every match.
+            Some(FieldTransform {
+                template,
+                each: false,
+            }) => {
+                let open_groups: Vec<&str> = open.iter().flat_map(Boundary::group_names).collect();
+                if let Some(root) = template
+                    .placeholder_roots()
+                    .find(|root| *root != "content" && !open_groups.contains(root))
+                {
+                    return Err(invalid!(
+                        "{scope}: transform placeholder '{{{root}}}' is neither 'content' nor a \
+                         named group of open_pattern"
+                    ));
+                }
+            }
+            _ => {}
         }
 
-        let role = match name {
-            "content" => Role::Text,
-            "reasoning_content" | "thinking" => Role::Reasoning,
-            "tool_calls" => Role::ToolCalls,
+        let name = FieldName::parse(&scope, name)?;
+        let kind = match name.text_role() {
+            Some(role) => {
+                let strip = match (content, &transform) {
+                    (ContentParser::Text(TextArgs { strip }), None) => strip,
+                    _ => {
+                        return Err(unsupported!(
+                            "{scope}: text and reasoning fields must use the 'text' content \
+                             parser without a transform"
+                        ));
+                    }
+                };
+                RegionKind::Text(TextRegion {
+                    role,
+                    strip,
+                    repeat,
+                })
+            }
+            None => {
+                if matches!(repeat, Repeat::Join(_)) {
+                    return Err(unsupported!(
+                        "{scope}: 'join' requires each match to parse to a string"
+                    ));
+                }
+                let early_name = early_name(transform.as_ref(), open.as_ref());
+                RegionKind::ToolCalls(ToolCallRegion {
+                    content,
+                    transform,
+                    early_name,
+                })
+            }
+        };
+
+        Ok(Self {
+            name,
+            open,
+            close,
+            close_watch: Vec::new(),
+            close_candidates: Vec::new(),
+            optional: field.optional,
+            kind,
+        })
+    }
+}
+
+/// The opener capture group that a non-`transform_each` transform uses as the
+/// function name, if any.
+fn early_name(transform: Option<&FieldTransform>, open: Option<&Boundary>) -> Option<String> {
+    let (
+        FieldTransform {
+            template,
+            each: false,
+        },
+        open,
+    ) = (transform?, open?)
+    else {
+        return None;
+    };
+    let path = template
+        .placeholder_at(&["function", "name"])
+        .or_else(|| template.placeholder_at(&["name"]))?;
+    match path {
+        [root] if open.group_names().any(|group| group == root) => Some(root.clone()),
+        _ => None,
+    }
+}
+
+impl FieldName {
+    /// Map a field name to a reportable field.
+    fn parse(scope: &str, name: &str) -> Result<Self> {
+        Ok(match name {
+            "content" => Self::Content,
+            "reasoning_content" => Self::ReasoningContent,
+            "thinking" => Self::Thinking,
+            "tool_calls" => Self::ToolCalls,
             _ => {
                 return Err(unsupported!(
                     "{scope}: only 'content', 'reasoning_content'/'thinking', and 'tool_calls' \
                      fields can be reported"
                 ));
             }
-        };
-        if role == Role::ToolCalls && field.join.is_some() {
-            return Err(unsupported!(
-                "{scope}: 'join' requires each match to parse to a string"
-            ));
-        }
-        if role != Role::ToolCalls && (!content.is_text() || transform.is_some()) {
-            return Err(unsupported!(
-                "{scope}: text and reasoning fields must use the 'text' content parser without a transform"
-            ));
-        }
-
-        let early_name = match (&transform, &open) {
-            (Some(transform), Some(open)) if role == Role::ToolCalls && !field.transform_each => {
-                let path = transform
-                    .placeholder_at(&["function", "name"])
-                    .or_else(|| transform.placeholder_at(&["name"]));
-                path.and_then(|path| match path {
-                    [root] if open.group_names().any(|group| group == root) => Some(root.clone()),
-                    _ => None,
-                })
-            }
-            _ => None,
-        };
-
-        Ok(Self {
-            name: name.to_string(),
-            role,
-            open,
-            close,
-            close_watch: Vec::new(),
-            close_candidates: Vec::new(),
-            content,
-            transform,
-            transform_each: field.transform_each,
-            repeats: field.repeats,
-            join: field.join.clone(),
-            optional: field.optional,
-            early_name,
         })
+    }
+
+    /// The role of a text field; `None` for `tool_calls`.
+    fn text_role(self) -> Option<TextRole> {
+        match self {
+            Self::Content => Some(TextRole::Content),
+            Self::ReasoningContent | Self::Thinking => Some(TextRole::Reasoning),
+            Self::ToolCalls => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Content => "content",
+            Self::ReasoningContent => "reasoning_content",
+            Self::Thinking => "thinking",
+            Self::ToolCalls => "tool_calls",
+        }
+    }
+}
+
+impl fmt::Display for FieldName {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
     }
 }
 

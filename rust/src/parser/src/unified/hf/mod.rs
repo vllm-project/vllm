@@ -19,7 +19,7 @@ mod coerce;
 mod content;
 mod parser;
 mod pattern;
-mod schema;
+mod spec;
 mod template;
 mod transform;
 

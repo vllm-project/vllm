@@ -11,7 +11,6 @@ use std::sync::LazyLock;
 use regex_automata::meta::Regex;
 use serde_json::{Map, Value};
 
-use super::content::ContentParser;
 use super::{Result, invalid, value};
 
 /// `\{(\w+(?:\.\w+)*)\}`: a whole-string placeholder such as `{content}` or
@@ -73,6 +72,20 @@ impl Transform {
         }
     }
 
+    /// Root names of every placeholder in this template.
+    pub fn placeholder_roots(&self) -> Box<dyn Iterator<Item = &str> + '_> {
+        match self {
+            Self::Object(entries) => {
+                Box::new(entries.iter().flat_map(|(_, transform)| transform.placeholder_roots()))
+            }
+            Self::Array(transforms) => {
+                Box::new(transforms.iter().flat_map(Self::placeholder_roots))
+            }
+            Self::Placeholder(path) => Box::new(path.first().map(String::as_str).into_iter()),
+            Self::Literal(_) => Box::new(std::iter::empty()),
+        }
+    }
+
     /// Recursively instantiate this template against `scope`.
     pub fn apply(&self, scope: &Map<String, Value>) -> Result<Value> {
         Ok(match self {
@@ -119,56 +132,57 @@ impl Transform {
     }
 }
 
-/// Run `body` through the field's content parser, then optionally apply the
-/// transform template.
-///
-/// When `transform_each` is set, the parsed content must be a list and the
-/// template is applied to each element (with the element's keys unpacked into the
-/// template scope, alongside any regex captures).
-pub(super) fn process_field(
-    field_name: &str,
-    body: &str,
-    content: &ContentParser,
-    transform: Option<&Transform>,
-    transform_each: bool,
-    captures: &[(String, String)],
-) -> Result<Value> {
-    let parsed = content.parse(body)?;
-    let Some(transform) = transform else {
-        return Ok(parsed);
-    };
-    let captures: Map<String, Value> = captures
-        .iter()
-        .map(|(name, text)| (name.clone(), Value::String(text.clone())))
-        .collect();
+/// A field's transform: applied to the parsed value, or to each of its elements.
+#[derive(Debug, Clone, PartialEq)]
+pub(super) struct FieldTransform {
+    pub template: Transform,
+    /// `transform_each`: the parsed content must be a list of dicts, and the
+    /// template is applied to each element (with the element's keys unpacked into
+    /// the template scope, alongside any regex captures).
+    pub each: bool,
+}
 
-    if !transform_each {
-        let mut scope = captures;
-        scope.insert("content".to_string(), parsed);
-        return transform.apply(&scope);
+impl FieldTransform {
+    /// Apply the transform to a parsed region value.
+    pub fn apply(
+        &self,
+        field_name: &str,
+        parsed: Value,
+        captures: &[(String, String)],
+    ) -> Result<Value> {
+        let captures: Map<String, Value> = captures
+            .iter()
+            .map(|(name, text)| (name.clone(), Value::String(text.clone())))
+            .collect();
+
+        if !self.each {
+            let mut scope = captures;
+            scope.insert("content".to_string(), parsed);
+            return self.template.apply(&scope);
+        }
+
+        let Value::Array(items) = parsed else {
+            return Err(value!(
+                "Field '{field_name}': transform_each requires the parsed content to be a list, got {}.",
+                python_type_name(&parsed)
+            ));
+        };
+        items
+            .into_iter()
+            .map(|item| {
+                let Value::Object(item) = item else {
+                    return Err(value!(
+                        "Field '{field_name}': transform_each requires each list element to be a dict, got {}.",
+                        python_type_name(&item)
+                    ));
+                };
+                let mut scope = captures.clone();
+                scope.extend(item);
+                self.template.apply(&scope)
+            })
+            .collect::<Result<_>>()
+            .map(Value::Array)
     }
-
-    let Value::Array(items) = parsed else {
-        return Err(value!(
-            "Field '{field_name}': transform_each requires the parsed content to be a list, got {}.",
-            python_type_name(&parsed)
-        ));
-    };
-    items
-        .into_iter()
-        .map(|item| {
-            let Value::Object(item) = item else {
-                return Err(value!(
-                    "Field '{field_name}': transform_each requires each list element to be a dict, got {}.",
-                    python_type_name(&item)
-                ));
-            };
-            let mut scope = captures.clone();
-            scope.extend(item);
-            transform.apply(&scope)
-        })
-        .collect::<Result<_>>()
-        .map(Value::Array)
 }
 
 /// Python type name of a JSON value, for error messages.

@@ -8,9 +8,11 @@
 
 use regex_automata::meta::Regex;
 use regex_automata::util::syntax;
+use serde::Deserialize;
 use serde_json::{Map, Number, Value};
 use thiserror_ext::AsReport as _;
 
+use super::spec::{ContentKind, deserialize};
 use super::{Result, invalid, unsupported, value};
 
 // Sentinel characters for lax-JSON string pre-extraction — ASCII control chars
@@ -31,27 +33,35 @@ pub(super) enum ContentParser {
 }
 
 /// The `strip` argument shared by parsers that go through `_text`.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Deserialize)]
 pub(super) struct TextArgs {
+    #[serde(default = "default_strip")]
     pub strip: bool,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Deserialize)]
 pub(super) struct JsonArgs {
+    #[serde(flatten)]
     text: TextArgs,
     /// Quote bare-identifier keys before parsing.
+    #[serde(default)]
     unquoted_keys: bool,
     /// Strings delimited by these custom markers are pre-extracted, then restored
     /// as standard JSON strings.
+    #[serde(default)]
     string_delims: Vec<(String, String)>,
     /// Return stripped text if parsing fails.
+    #[serde(default)]
     allow_non_json: bool,
 }
 
 #[derive(Debug, Clone)]
 pub(super) struct XmlInlineArgs {
-    /// Must have named groups `key` and `value`.
     tag_pattern: Regex,
+    /// Index of the required `key` group.
+    key_group: usize,
+    /// Index of the `value` group, if the pattern declares one.
+    value_group: Option<usize>,
     value_parser: Option<Box<ContentParser>>,
     /// Collect duplicate keys into a list.
     merge_duplicates: bool,
@@ -65,77 +75,93 @@ pub(super) struct KvLinesArgs {
     value_parser: Option<Box<ContentParser>>,
 }
 
+/// `content_args` of `xml-inline`.
+#[derive(Deserialize)]
+struct XmlInlineSpec {
+    /// Must have named groups `key` and `value`.
+    tag_pattern: String,
+    value_parser: Option<ValueParserSpec>,
+    #[serde(default)]
+    merge_duplicates: bool,
+}
+
+/// `content_args` of `kv-lines`.
+#[derive(Deserialize)]
+struct KvLinesSpec {
+    #[serde(flatten)]
+    text: TextArgs,
+    #[serde(default = "default_line_sep")]
+    line_sep: String,
+    #[serde(default = "default_kv_sep")]
+    kv_sep: String,
+    value_parser: Option<ValueParserSpec>,
+}
+
+/// A nested `value_parser`: `{"name": ..., "args": {...}}`.
+#[derive(Deserialize)]
+struct ValueParserSpec {
+    #[serde(default)]
+    name: ContentKind,
+    #[serde(default)]
+    args: Map<String, Value>,
+}
+
 impl ContentParser {
-    /// Build a parser from its name and `content_args`.
+    /// Build a parser from its kind and `content_args`.
     ///
     /// Unknown argument keys are ignored, as in Transformers. Argument types and the
     /// `xml-inline` tag pattern are checked here rather than at parse time.
-    pub fn new(scope: &str, name: &str, args: &Map<String, Value>) -> Result<Self> {
-        let text = TextArgs {
-            strip: bool_arg(scope, args, "strip", true)?,
-        };
-        Ok(match name {
-            "text" => Self::Text(text),
-            "int" => Self::Int(text),
-            "float" => Self::Float(text),
-            "bool" => Self::Bool(text),
-            "json" => Self::Json(JsonArgs {
-                text,
-                unquoted_keys: bool_arg(scope, args, "unquoted_keys", false)?,
-                string_delims: string_delims_arg(scope, args)?,
-                allow_non_json: bool_arg(scope, args, "allow_non_json", false)?,
-            }),
-            "xml-inline" => {
-                let Some(pattern) = args.get("tag_pattern") else {
-                    return Err(invalid!(
-                        "{scope}: xml-inline: 'tag_pattern' content_arg is required"
-                    ));
-                };
-                let Some(pattern) = pattern.as_str() else {
-                    return Err(invalid!(
-                        "{scope}: xml-inline: 'tag_pattern' must be a string"
-                    ));
-                };
-                let tag_pattern = compile_regex(scope, pattern)?;
-                if !has_group(&tag_pattern, "key") {
-                    return Err(invalid!(
-                        "{scope}: xml-inline: tag_pattern must have a named group 'key'. Pattern: {pattern}"
-                    ));
+    pub fn new(scope: &str, kind: ContentKind, args: &Map<String, Value>) -> Result<Self> {
+        let context = format!("{scope}: content_args");
+        let args = Value::Object(args.clone());
+        Ok(match kind {
+            ContentKind::Text => Self::Text(deserialize(&args, &context)?),
+            ContentKind::Int => Self::Int(deserialize(&args, &context)?),
+            ContentKind::Float => Self::Float(deserialize(&args, &context)?),
+            ContentKind::Bool => Self::Bool(deserialize(&args, &context)?),
+            ContentKind::Json => {
+                let args: JsonArgs = deserialize(&args, &context)?;
+                if args
+                    .string_delims
+                    .iter()
+                    .any(|(open, close)| open.is_empty() || close.is_empty())
+                {
+                    return Err(invalid!("{context}: string_delims cannot be empty strings"));
                 }
+                Self::Json(args)
+            }
+            ContentKind::XmlInline => {
+                let spec: XmlInlineSpec = deserialize(&args, &context)?;
+                let tag_pattern = compile_regex(scope, &spec.tag_pattern)?;
+                let group_info = tag_pattern.group_info();
+                let Some(key_group) = group_info.to_index(Default::default(), "key") else {
+                    return Err(invalid!(
+                        "{scope}: xml-inline: tag_pattern must have a named group 'key'. Pattern: {}",
+                        spec.tag_pattern
+                    ));
+                };
+                let value_group = group_info.to_index(Default::default(), "value");
                 Self::XmlInline(XmlInlineArgs {
                     tag_pattern,
-                    value_parser: value_parser_arg(scope, args)?,
-                    merge_duplicates: bool_arg(scope, args, "merge_duplicates", false)?,
+                    key_group,
+                    value_group,
+                    value_parser: ValueParserSpec::compile(scope, spec.value_parser)?,
+                    merge_duplicates: spec.merge_duplicates,
                 })
             }
-            "kv-lines" => {
-                let line_sep = string_arg(scope, args, "line_sep", "\n")?;
-                if line_sep.is_empty() {
-                    return Err(invalid!("{scope}: kv-lines: 'line_sep' cannot be empty"));
+            ContentKind::KvLines => {
+                let spec: KvLinesSpec = deserialize(&args, &context)?;
+                if spec.line_sep.is_empty() {
+                    return Err(invalid!("{context}: line_sep cannot be empty"));
                 }
                 Self::KvLines(KvLinesArgs {
-                    text,
-                    line_sep,
-                    kv_sep: string_arg(scope, args, "kv_sep", ":")?,
-                    value_parser: value_parser_arg(scope, args)?,
+                    text: spec.text,
+                    line_sep: spec.line_sep,
+                    kv_sep: spec.kv_sep,
+                    value_parser: ValueParserSpec::compile(scope, spec.value_parser)?,
                 })
             }
-            _ => {
-                return Err(invalid!(
-                    "{scope}: unknown content parser '{name}'. Available: {CONTENT_PARSERS:?}"
-                ));
-            }
         })
-    }
-
-    /// Return whether this is the verbatim `text` parser.
-    pub fn is_text(&self) -> bool {
-        matches!(self, Self::Text(_))
-    }
-
-    /// Return whether the `text` parser strips its value.
-    pub fn strips(&self) -> bool {
-        matches!(self, Self::Text(TextArgs { strip: true }))
     }
 
     /// Parse one region body.
@@ -160,15 +186,16 @@ impl ContentParser {
     }
 }
 
-const CONTENT_PARSERS: [&str; 7] = [
-    "bool",
-    "float",
-    "int",
-    "json",
-    "kv-lines",
-    "text",
-    "xml-inline",
-];
+impl ValueParserSpec {
+    /// Build the nested parser, if any.
+    fn compile(scope: &str, spec: Option<Self>) -> Result<Option<Box<ContentParser>>> {
+        spec.map(|spec| {
+            ContentParser::new(&format!("{scope}: value_parser"), spec.name, &spec.args)
+                .map(Box::new)
+        })
+        .transpose()
+    }
+}
 
 impl TextArgs {
     /// Apply `_text`: strip Python whitespace unless disabled.
@@ -220,17 +247,13 @@ impl JsonArgs {
 impl XmlInlineArgs {
     /// Parse shallow XML-ish tags into a dict.
     fn parse(&self, text: &str) -> Result<Value> {
-        let group_info = self.tag_pattern.group_info();
-        let key_index = group_info.to_index(Default::default(), "key");
-        let value_index = group_info.to_index(Default::default(), "value");
-
         let mut out = Map::new();
         for captures in self.tag_pattern.captures_iter(text) {
-            let key = key_index
-                .and_then(|index| captures.get_group(index))
+            let key = captures
+                .get_group(self.key_group)
                 .map(|span| &text[span.range()])
                 .ok_or_else(|| value!("xml-inline: named group 'key' did not participate"))?;
-            let raw = match value_index {
+            let raw = match self.value_group {
                 // The pattern has no `value` group.
                 None => Some(""),
                 Some(index) => captures.get_group(index).map(|span| &text[span.range()]),
@@ -350,11 +373,6 @@ pub(super) fn compile_regex(scope: &str, pattern: &str) -> Result<Regex> {
         })
 }
 
-/// Return whether `regex` declares a named group `name`.
-fn has_group(regex: &Regex, name: &str) -> bool {
-    regex.group_info().to_index(Default::default(), name).is_some()
-}
-
 /// Python `str.isspace()` for one character.
 ///
 /// Rust's `char::is_whitespace` omits the information separators U+001C..U+001F,
@@ -426,82 +444,16 @@ fn python_digits(text: &str, float: bool) -> Option<String> {
     (!out.is_empty()).then_some(out)
 }
 
-/// Read an optional boolean argument.
-fn bool_arg(scope: &str, args: &Map<String, Value>, key: &str, default: bool) -> Result<bool> {
-    match args.get(key) {
-        None => Ok(default),
-        Some(Value::Bool(value)) => Ok(*value),
-        Some(other) => Err(invalid!(
-            "{scope}: content_arg '{key}' must be a bool, got {other}"
-        )),
-    }
+fn default_strip() -> bool {
+    true
 }
 
-/// Read an optional string argument.
-fn string_arg(scope: &str, args: &Map<String, Value>, key: &str, default: &str) -> Result<String> {
-    match args.get(key) {
-        None => Ok(default.to_string()),
-        Some(Value::String(value)) => Ok(value.clone()),
-        Some(other) => Err(invalid!(
-            "{scope}: content_arg '{key}' must be a string, got {other}"
-        )),
-    }
+fn default_line_sep() -> String {
+    "\n".to_string()
 }
 
-/// Read `string_delims`: a list of `[open, close]` string pairs.
-fn string_delims_arg(scope: &str, args: &Map<String, Value>) -> Result<Vec<(String, String)>> {
-    let Some(raw) = args.get("string_delims") else {
-        return Ok(Vec::new());
-    };
-    let error = || {
-        invalid!(
-            "{scope}: content_arg 'string_delims' must be a list of [open, close] string pairs"
-        )
-    };
-    let pairs = raw.as_array().ok_or_else(error)?;
-    pairs
-        .iter()
-        .map(|pair| match pair.as_array().map(Vec::as_slice) {
-            Some([Value::String(open), Value::String(close)])
-                if !open.is_empty() && !close.is_empty() =>
-            {
-                Ok((open.clone(), close.clone()))
-            }
-            _ => Err(error()),
-        })
-        .collect()
-}
-
-/// Read `value_parser`: `{"name": ..., "args": {...}}`.
-fn value_parser_arg(scope: &str, args: &Map<String, Value>) -> Result<Option<Box<ContentParser>>> {
-    let Some(raw) = args.get("value_parser") else {
-        return Ok(None);
-    };
-    let Some(raw) = raw.as_object() else {
-        return Err(invalid!(
-            "{scope}: content_arg 'value_parser' must be a dict"
-        ));
-    };
-    let name = match raw.get("name") {
-        None => "text",
-        Some(Value::String(name)) => name.as_str(),
-        Some(other) => {
-            return Err(invalid!(
-                "{scope}: value_parser 'name' must be a string, got {other}"
-            ));
-        }
-    };
-    let empty = Map::new();
-    let args = match raw.get("args") {
-        None => &empty,
-        Some(Value::Object(args)) => args,
-        Some(other) => {
-            return Err(invalid!(
-                "{scope}: value_parser 'args' must be a dict, got {other}"
-            ));
-        }
-    };
-    ContentParser::new(scope, name, args).map(|parser| Some(Box::new(parser)))
+fn default_kv_sep() -> String {
+    ":".to_string()
 }
 
 #[cfg(test)]
@@ -510,8 +462,12 @@ mod tests {
 
     use super::*;
 
+    fn kind(name: &str) -> ContentKind {
+        serde_json::from_value(json!(name)).unwrap()
+    }
+
     fn parser(name: &str, args: Value) -> ContentParser {
-        ContentParser::new("test", name, args.as_object().unwrap()).unwrap()
+        ContentParser::new("test", kind(name), args.as_object().unwrap()).unwrap()
     }
 
     #[test]
@@ -607,20 +563,33 @@ mod tests {
     #[test]
     fn invalid_arguments_are_rejected_at_load() {
         let error = |name: &str, args: Value| {
-            ContentParser::new("Field 'x'", name, args.as_object().unwrap()).unwrap_err()
+            ContentParser::new("Field 'x'", kind(name), args.as_object().unwrap()).unwrap_err()
         };
         expect_test::expect![[r#"
-            Invalid {
-                message: "Field 'x': unknown content parser 'yaml'. Available: [\"bool\", \"float\", \"int\", \"json\", \"kv-lines\", \"text\", \"xml-inline\"]",
-            }
-        "#]]
-        .assert_debug_eq(&error("yaml", json!({})));
-        expect_test::expect![[r#"
-            Invalid {
-                message: "Field 'x': xml-inline: tag_pattern must have a named group 'key'. Pattern: <(?P<k>\\w+)>",
-            }
-        "#]]
-        .assert_debug_eq(&error("xml-inline", json!({"tag_pattern": r"<(?P<k>\w+)>"})));
+            [
+                Invalid {
+                    message: "Field 'x': content_args.strip: invalid type: string \"no\", expected a boolean",
+                },
+                Invalid {
+                    message: "Field 'x': content_args.string_delims[0]: invalid length 1, expected a tuple of size 2",
+                },
+                Invalid {
+                    message: "Field 'x': content_args: missing field `tag_pattern`",
+                },
+                Invalid {
+                    message: "Field 'x': xml-inline: tag_pattern must have a named group 'key'. Pattern: <(?P<k>\\w+)>",
+                },
+                Invalid {
+                    message: "Field 'x': content_args.value_parser.name: unknown variant `yaml`, expected one of `text`, `int`, `float`, `bool`, `json`, `xml-inline`, `kv-lines`",
+                },
+            ]
+        "#]].assert_debug_eq(&[
+            error("text", json!({"strip": "no"})),
+            error("json", json!({"string_delims": [["<s>"]]})),
+            error("xml-inline", json!({})),
+            error("xml-inline", json!({"tag_pattern": r"<(?P<k>\w+)>"})),
+            error("kv-lines", json!({"value_parser": {"name": "yaml"}})),
+        ]);
         assert!(matches!(
             error("xml-inline", json!({"tag_pattern": r"(?<=a)b"})),
             super::super::HfTemplateError::Unsupported { .. }

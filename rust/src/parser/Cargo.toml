@@ -15,6 +15,7 @@ regex-automata.workspace = true
 regex-syntax.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+serde_path_to_error.workspace = true
 serde_with.workspace = true
 thiserror.workspace = true
 thiserror-ext.workspace = true

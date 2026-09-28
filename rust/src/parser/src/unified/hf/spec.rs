@@ -7,37 +7,42 @@
 //! happens when compiling into [`super::ResponseTemplate`].
 
 use serde::Deserialize;
+use serde::de::DeserializeOwned;
 use serde_json::{Map, Value};
+use serde_with::serde_as;
 use thiserror_ext::AsReport as _;
 
 use super::{Result, invalid};
 
 /// Top-level `response_template` object.
+#[serde_as]
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct TemplateSpec {
     #[serde(default = "default_version")]
-    pub version: u64,
+    version: u64,
     /// Constant keys of the Transformers output dict (e.g. `role`). Unused by the
     /// event-based executor, but validated as part of the schema.
     #[serde(default, rename = "defaults")]
     _defaults: Map<String, Value>,
-    /// Field specs in declaration order (`serde_json` preserves object order).
-    pub fields: Map<String, Value>,
-    pub start_anchor: Option<Literals>,
-    pub start_anchor_pattern: Option<String>,
+    /// Field specs in declaration order.
+    #[serde_as(as = "serde_with::Map<_, _>")]
+    pub fields: Vec<(String, FieldSpec)>,
+    start_anchor: Option<Literals>,
+    start_anchor_pattern: Option<String>,
 }
 
 /// One entry of `fields`.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct FieldSpec {
-    pub open: Option<Literals>,
-    pub open_pattern: Option<String>,
-    pub close: Option<Literals>,
-    pub close_pattern: Option<String>,
-    #[serde(default = "default_content")]
-    pub content: String,
+    open: Option<Literals>,
+    open_pattern: Option<String>,
+    close: Option<Literals>,
+    close_pattern: Option<String>,
+    #[serde(default)]
+    pub content: ContentKind,
+    /// Arguments of the `content` parser; their keys depend on the parser.
     #[serde(default)]
     pub content_args: Map<String, Value>,
     #[serde(default)]
@@ -45,15 +50,30 @@ pub(super) struct FieldSpec {
     pub join: Option<String>,
     #[serde(default = "default_optional")]
     pub optional: bool,
+    /// A free-form JSON template, compiled into a [`super::transform::Transform`].
     pub transform: Option<Value>,
     #[serde(default)]
     pub transform_each: bool,
 }
 
+/// Name of a content parser.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub(super) enum ContentKind {
+    #[default]
+    Text,
+    Int,
+    Float,
+    Bool,
+    Json,
+    XmlInline,
+    KvLines,
+}
+
 /// A literal anchor: one string, or a list of alternatives.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(untagged)]
-pub(super) enum Literals {
+enum Literals {
     One(String),
     Many(Vec<String>),
 }
@@ -70,8 +90,7 @@ pub(super) enum AnchorSpec<'a> {
 impl TemplateSpec {
     /// Parse the top-level template object.
     pub fn from_value(value: &Value) -> Result<Self> {
-        let spec: Self = serde_json::from_value(value.clone())
-            .map_err(|error| invalid!("{}", error.as_report()))?;
+        let spec: Self = deserialize(value, "response_template")?;
         if spec.version != 1 {
             return Err(invalid!(
                 "unsupported response_template version: {}",
@@ -86,30 +105,61 @@ impl TemplateSpec {
         Ok(spec)
     }
 
-    /// Parse the field specs in declaration order.
-    pub fn field_specs(&self) -> Result<Vec<(&str, FieldSpec)>> {
-        self.fields
-            .iter()
-            .map(|(name, value)| {
-                let spec = serde_json::from_value(value.clone())
-                    .map_err(|error| invalid!("Field '{name}': {}", error.as_report()))?;
-                Ok((name.as_str(), spec))
-            })
-            .collect()
+    /// The required start anchor.
+    pub fn start_anchor(&self) -> Result<AnchorSpec<'_>> {
+        anchor_spec(
+            "response_template",
+            (self.start_anchor.as_ref(), "start_anchor"),
+            (self.start_anchor_pattern.as_deref(), "start_anchor_pattern"),
+        )?
+        .ok_or_else(|| {
+            invalid!("response_template must define 'start_anchor' or 'start_anchor_pattern'.")
+        })
     }
 }
 
-/// Resolve an anchor given in literal form (`literal_key`) or regex form (`pattern_key`).
+impl FieldSpec {
+    /// The open anchor; `None` for the implicit field.
+    pub fn open(&self, scope: &str) -> Result<Option<AnchorSpec<'_>>> {
+        anchor_spec(
+            scope,
+            (self.open.as_ref(), "open"),
+            (self.open_pattern.as_deref(), "open_pattern"),
+        )
+    }
+
+    /// The close anchor; `None` when the field runs to the end of the stream.
+    pub fn close(&self, scope: &str) -> Result<Option<AnchorSpec<'_>>> {
+        anchor_spec(
+            scope,
+            (self.close.as_ref(), "close"),
+            (self.close_pattern.as_deref(), "close_pattern"),
+        )
+    }
+}
+
+/// Deserialize `value`, reporting `context` and the JSON path of any error.
+pub(super) fn deserialize<T: DeserializeOwned>(value: &Value, context: &str) -> Result<T> {
+    serde_path_to_error::deserialize(value).map_err(|error| {
+        let path = error.path().to_string();
+        let error = error.into_inner();
+        if path == "." {
+            invalid!("{context}: {}", error.as_report())
+        } else {
+            invalid!("{context}.{path}: {}", error.as_report())
+        }
+    })
+}
+
+/// Resolve an anchor given in literal form or regex form.
 ///
 /// Mirrors `_compile_anchor`: both forms at once is an error, literal lists must be
 /// non-empty and contain no empty strings, and duplicates are dropped in first-seen
 /// order.
-pub(super) fn anchor_spec<'a>(
+fn anchor_spec<'a>(
     scope: &str,
-    literals: Option<&Literals>,
-    pattern: Option<&'a str>,
-    literal_key: &str,
-    pattern_key: &str,
+    (literals, literal_key): (Option<&Literals>, &str),
+    (pattern, pattern_key): (Option<&'a str>, &str),
 ) -> Result<Option<AnchorSpec<'a>>> {
     match (literals, pattern) {
         (Some(_), Some(_)) => Err(invalid!(
@@ -145,10 +195,6 @@ pub(super) fn anchor_spec<'a>(
 
 fn default_version() -> u64 {
     1
-}
-
-fn default_content() -> String {
-    "text".to_string()
 }
 
 fn default_optional() -> bool {

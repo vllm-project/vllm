@@ -804,6 +804,24 @@ fn template_validation_errors() {
             Unsupported {
                 message: "Field 'thinking': text and reasoning fields must use the 'text' content parser without a transform",
             },
+            Invalid {
+                message: "response_template.fields.content.content: unknown variant `yaml`, expected one of `text`, `int`, `float`, `bool`, `json`, `xml-inline`, `kv-lines`",
+            },
+            Invalid {
+                message: "response_template.fields.content.repeats: invalid type: string \"yes\", expected a boolean",
+            },
+            Invalid {
+                message: "Field 'content': cannot specify both 'open' and 'open_pattern'",
+            },
+            Invalid {
+                message: "Field 'tool_calls': transform_each is set but no transform was provided",
+            },
+            Unsupported {
+                message: "Field 'tool_calls': 'join' requires each match to parse to a string",
+            },
+            Invalid {
+                message: "Field 'tool_calls': transform placeholder '{id}' is neither 'content' nor a named group of open_pattern",
+            },
         ]
     "#]]
     .assert_debug_eq(&[
@@ -816,6 +834,20 @@ fn template_validation_errors() {
         error(json!({"start_anchor": "a", "fields": {"content": {"open": [""]}}})),
         error(json!({"start_anchor": "a", "fields": {"count": {"open": "<n>", "content": "int"}}})),
         error(json!({"start_anchor": "a", "fields": {"thinking": {"open": "<n>", "content": "json"}}})),
+        error(json!({"start_anchor": "a", "fields": {"content": {"content": "yaml"}}})),
+        error(json!({"start_anchor": "a", "fields": {"content": {"repeats": "yes"}}})),
+        error(json!({"start_anchor": "a", "fields": {"content": {"open": "<x>", "open_pattern": "<y>"}}})),
+        error(json!({"start_anchor": "a", "fields": {"tool_calls": {"open": "<t>", "transform_each": true}}})),
+        error(json!({"start_anchor": "a", "fields": {"tool_calls": {"open": "<t>", "repeats": true, "join": ""}}})),
+        error(json!({
+            "start_anchor": "a",
+            "fields": {"tool_calls": {
+                "open_pattern": r"<t (?P<name>\w+)>",
+                "close_pattern": r"</t (?P<id>\d+)>",
+                "content": "json",
+                "transform": {"function": {"name": "{name}", "arguments": "{content}", "id": "{id}"}},
+            }},
+        })),
     ]);
 }
 
