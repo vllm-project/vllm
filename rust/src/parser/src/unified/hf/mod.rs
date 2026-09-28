@@ -35,7 +35,7 @@ use thiserror_ext::Macro;
 pub type Result<T> = std::result::Result<T, HfTemplateError>;
 
 /// Errors produced while loading a `response_template` or evaluating its values.
-#[derive(Debug, Error, Macro)]
+#[derive(Debug, Clone, Error, Macro)]
 #[thiserror_ext(macro(path = "crate::unified::hf", mangle))]
 pub enum HfTemplateError {
     /// The template violates the Transformers `response_template` schema.
@@ -44,6 +44,9 @@ pub enum HfTemplateError {
     /// The template is valid but uses a feature this implementation does not support.
     #[error("unsupported response_template: {message}")]
     Unsupported { message: String },
+    /// The model provides no template.
+    #[error("the model's tokenizer_config.json provides no response_template")]
+    Missing,
     /// A region value could not be parsed or transformed.
     #[error("failed to evaluate response_template value: {message}")]
     Value { message: String },

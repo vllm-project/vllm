@@ -5,7 +5,6 @@ use std::sync::Arc;
 
 use thiserror_ext::AsReport as _;
 use tracing::{info, warn};
-use vllm_parser::unified::hf::ResponseTemplate;
 use vllm_text::backend::hf::{
     HfTextBackend, ResolvedModelFiles, load_model_config, load_tokenizer_config,
 };
@@ -21,6 +20,7 @@ use crate::multimodal::{MultimodalConfigFiles, MultimodalModelInfo};
 use crate::output::{
     DefaultChatOutputProcessor, HarmonyChatOutputProcessor, validate_harmony_parser_overrides,
 };
+use crate::parser::unified::{HfTemplateError, ResponseTemplate};
 use crate::renderer::hf::{HfChatRenderer, MultimodalRenderInfo};
 use crate::renderer::{
     DeepSeekV4ChatRenderer, DeepSeekV32ChatRenderer, DeepSeekV41ChatRenderer, DynChatRenderer,
@@ -36,8 +36,9 @@ pub struct HfChatBackend {
     tokenizer: DynTokenizer,
     chat_renderer: DynChatRenderer,
     multimodal_model_info: Option<MultimodalModelInfo>,
-    /// Compiled `response_template` from `tokenizer_config.json`, for the `hf` parser.
-    response_template: Option<Arc<ResponseTemplate>>,
+    /// `response_template` from `tokenizer_config.json` for the `hf` parser, or
+    /// why it is unavailable.
+    response_template: std::result::Result<Arc<ResponseTemplate>, HfTemplateError>,
 }
 
 impl HfChatBackend {
@@ -119,24 +120,26 @@ impl HfChatBackend {
 
 /// Load and compile the checkpoint's `response_template`, if any.
 ///
-/// A template this implementation cannot execute is logged and ignored, so that
-/// only requests selecting the `hf` parser fail.
-fn load_response_template(files: &ResolvedModelFiles) -> Result<Option<Arc<ResponseTemplate>>> {
+/// A missing or unusable template is kept as an error, so that only requests
+/// selecting the `hf` parser fail.
+fn load_response_template(
+    files: &ResolvedModelFiles,
+) -> Result<std::result::Result<Arc<ResponseTemplate>, HfTemplateError>> {
     let Some(template) =
         load_tokenizer_config(files.tokenizer_config_path.as_deref())?.response_template
     else {
-        return Ok(None);
+        return Ok(Err(HfTemplateError::Missing));
     };
-    match ResponseTemplate::from_json(&template) {
+    Ok(match ResponseTemplate::from_json(&template) {
         Ok(template) => {
             info!("loaded response_template for the `hf` parser");
-            Ok(Some(Arc::new(template)))
+            Ok(Arc::new(template))
         }
         Err(error) => {
-            warn!(error = %error.as_report(), "ignoring response_template the `hf` parser cannot execute");
-            Ok(None)
+            warn!(error = %error.as_report(), "the `hf` parser cannot execute the model's response_template");
+            Err(error)
         }
-    }
+    })
 }
 
 impl ChatBackend for HfChatBackend {
@@ -163,7 +166,7 @@ impl ChatBackend for HfChatBackend {
                 request,
                 &self.model_id,
                 self.tokenizer.clone(),
-                self.response_template.as_ref(),
+                &self.response_template,
                 options.tool_call_parser,
                 options.reasoning_parser,
                 options.tool_strict_level,
