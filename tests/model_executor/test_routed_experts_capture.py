@@ -296,8 +296,10 @@ def test_routed_experts_snapshot_compacts_staged_rows():
     torch.testing.assert_close(result, expected)
 
 
-def test_routed_staging_end_to_end_preserves_logical_token_mapping():
-    """Cover the logical -> physical -> logical row mapping."""
+@pytest.mark.parametrize("k", [2, 3, 4, 8])
+@pytest.mark.parametrize("padded", [127, 128, 129])
+def test_routed_staging_end_to_end_preserves_logical_token_mapping(k, padded):
+    """Diagnose the complete logical -> physical -> logical row mapping."""
     from vllm.v1.worker.gpu.ubatch_utils import (
         compact_staged_rows,
         restore_staged_inputs,
@@ -306,7 +308,6 @@ def test_routed_staging_end_to_end_preserves_logical_token_mapping():
     from vllm.v1.worker.ubatch_utils import UBatchSlice
 
     num_tokens = 63
-    padded = 128
     logical_ids = torch.arange(num_tokens, dtype=torch.int32) + 1000
     logical_positions = torch.arange(num_tokens, dtype=torch.int64) + 2000
     logical_blocks = torch.arange(num_tokens * 2, dtype=torch.int32).reshape(
@@ -340,12 +341,19 @@ def test_routed_staging_end_to_end_preserves_logical_token_mapping():
     )
     slots = torch.cat((logical_slots, torch.full((1, padded - num_tokens), -1)), dim=1)
     slices = [
-        UBatchSlice(slice(0, 64), slice(0, 64)),
-        UBatchSlice(slice(64, 128), slice(64, 128)),
+        UBatchSlice(
+            slice(i * (padded // k), (i + 1) * (padded // k) if i < k - 1 else padded),
+            slice(i * (padded // k), (i + 1) * (padded // k) if i < k - 1 else padded),
+        )
+        for i in range(k)
     ]
 
     rows = stage_decode_tokens(batch, (blocks,), slots, slices)
-    assert rows.tolist() == [*range(32), *range(64, 95)]
+    assert rows.tolist() == [
+        i * (padded // k) + j
+        for i in range(k)
+        for j in range(num_tokens // k + (i < num_tokens % k))
+    ]
     torch.testing.assert_close(batch.input_ids[rows], logical_ids)
 
     capturer = _capturer_with_buffer(max_tokens=padded, num_layers=1)

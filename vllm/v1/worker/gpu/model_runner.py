@@ -1801,6 +1801,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 slot_mappings,
                 cg_mode=batch_desc.cg_mode,
                 for_capture=dummy_run and batch_desc.cg_mode == CUDAGraphMode.FULL,
+                num_ubatches=batch_desc.num_ubatches,
             )
         elif not (dummy_run and skip_attn_for_dummy_run):
             assert slot_mappings is not None

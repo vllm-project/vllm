@@ -385,8 +385,6 @@ class UBatchRunner:
         self.comm_stream = torch.cuda.Stream(device=device)
         # Threads and graph capture must use the same compute stream.
         self.capture_stream = torch.cuda.Stream(device=device)
-        # The microbatch threads plus the thread that starts them.
-        self.ready_barrier = threading.Barrier(self.num_ubatches + 1)
         self._pending_finish: Callable[[], Any] | None = None
         self.sm_control = create_sm_control_context(self.parallel_config)
 
@@ -482,6 +480,7 @@ class UBatchRunner:
         slot_mappings: torch.Tensor,
         cg_mode: CUDAGraphMode = CUDAGraphMode.NONE,
         for_capture: bool = False,
+        num_ubatches: int | None = None,
     ) -> UBatchState:
         """Split the batch into the microbatches the step will run on.
 
@@ -491,7 +490,8 @@ class UBatchRunner:
         FULL uses padded sizes; `for_capture` refreshes metadata from dummy
         block tables.
         """
-        ubatch_slices = create_ubatch_slices(input_batch, self.num_ubatches)
+        num_ubatches = self.num_ubatches if num_ubatches is None else num_ubatches
+        ubatch_slices = create_ubatch_slices(input_batch, num_ubatches)
         staged_rows = None
         counts = None
         if (
@@ -506,8 +506,7 @@ class UBatchRunner:
             )
             n = input_batch.num_tokens
             counts = [
-                n // self.num_ubatches + (i < n % self.num_ubatches)
-                for i in range(self.num_ubatches)
+                n // num_ubatches + (i < n % num_ubatches) for i in range(num_ubatches)
             ]
             # Single-token decode uses the captured token regions for request
             # rows too; the original request slices refer to unstaged inputs.
@@ -648,15 +647,17 @@ class UBatchRunner:
         """
         ubatch_slices = ubatch_state.slices
         assert len(ubatch_slices) == len(ubatch_state.forward_contexts)
-        assert len(ubatch_slices) == self.num_ubatches
+        num_ubatches = len(ubatch_slices)
+        assert 2 <= num_ubatches <= self.num_ubatches
+        ready_barrier = threading.Barrier(num_ubatches + 1)
 
         compute_stream = self.capture_stream if for_capture else current_stream()
         ubatch_contexts = make_ubatch_contexts(
-            num_micro_batches=self.num_ubatches,
+            num_micro_batches=num_ubatches,
             comm_stream=self.comm_stream,
             compute_stream=compute_stream,
             forward_contexts=ubatch_state.forward_contexts,
-            ready_barrier=self.ready_barrier,
+            ready_barrier=ready_barrier,
         )
 
         outputs: dict[int, Any] = {}
@@ -703,7 +704,7 @@ class UBatchRunner:
             thread.start()
 
         # Park all threads before the caller starts capture.
-        self.ready_barrier.wait()
+        ready_barrier.wait()
 
         def finish() -> Any:
             try:
@@ -717,9 +718,9 @@ class UBatchRunner:
             if errors:
                 failed = min(errors)
                 raise RuntimeError(
-                    f"Microbatch {failed} of {self.num_ubatches} failed"
+                    f"Microbatch {failed} of {num_ubatches} failed"
                 ) from errors[failed]
-            return merge_ubatch_outputs([outputs[i] for i in range(self.num_ubatches)])
+            return merge_ubatch_outputs([outputs[i] for i in range(num_ubatches)])
 
         self._pending_finish = finish
         return finish

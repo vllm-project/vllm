@@ -1354,3 +1354,52 @@ def test_fp8_shared_expert_fse_propagates_partial_shard_exclusion() -> None:
             "model.layers.0.mlp.experts",
             "model.layers.0.mlp.shared_experts",
         )
+
+
+@pytest.mark.parametrize("capacity", [2, 3, 4, 8])
+@pytest.mark.parametrize("aux", [False, True])
+def test_shared_expert_outputs_and_events_are_owned_per_microbatch(
+    monkeypatch, capacity, aux
+):
+    """Later microbatches cannot overwrite pending shared-expert outputs."""
+    from contextlib import nullcontext
+    from unittest.mock import Mock
+
+    from vllm.model_executor.layers.fused_moe.runner import shared_experts as module
+
+    monkeypatch.setenv("VLLM_DISABLE_SHARED_EXPERTS_STREAM", "0")
+    stream = object() if aux else None
+    monkeypatch.setattr(module, "aux_stream", lambda: stream)
+    monkeypatch.setattr(module, "current_stream", lambda: object())
+    monkeypatch.setattr(module.torch.cuda, "Event", lambda: Mock())
+    monkeypatch.setattr(module.torch.cuda, "stream", lambda stream: nullcontext())
+    active = [0]
+    monkeypatch.setattr(module, "dbo_current_ubatch_id", lambda: active[0])
+    shared = module.SharedExperts(
+        nn.Identity(), None, lambda: False, num_ubatches=capacity
+    )
+    order = (
+        module.SharedExpertsOrder.MULTI_STREAM_OVERLAPPED
+        if aux
+        else module.SharedExpertsOrder.NO_OVERLAP
+    )
+    monkeypatch.setattr(shared, "_determine_shared_experts_order", lambda x: order)
+    if aux:
+        assert len({id(e) for e in shared._input_ready_event}) == capacity
+        assert len({id(e) for e in shared._output_ready_event}) == capacity
+    for count in (capacity, 2, capacity):
+        expected = []
+        for i in range(count):
+            active[0] = i
+            x = torch.full((3, 4), i + count, dtype=torch.float32)
+            expected.append(x)
+            if aux:
+                assert shared.maybe_forward_async(x)
+            else:
+                shared(x, order)
+        for i in reversed(range(count)):
+            active[0] = i
+            if aux:
+                shared.wait()
+            torch.testing.assert_close(shared.output, expected[i], atol=0, rtol=0)
+        assert all(value is None for value in shared._output)

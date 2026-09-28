@@ -496,7 +496,7 @@ class Worker(WorkerBase):
             raise RuntimeError(f"Unsupported device type: {self.device_config.device}")
 
         # DSpark target and draft CUDA graphs retain workspace views concurrently.
-        num_ubatches = 2 if self.vllm_config.parallel_config.enable_dbo else 1
+        num_ubatches = max(1, self.vllm_config.parallel_config.num_ubatches)
         init_workspace_manager(
             self.device,
             num_ubatches,

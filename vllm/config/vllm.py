@@ -2172,6 +2172,11 @@ class VllmConfig:
 
         if self.parallel_config.use_ubatching:
             a2a_backend = self.parallel_config.all2all_backend
+            if self.parallel_config.num_ubatches > 2 and a2a_backend != "nixl_ep":
+                raise ValueError(
+                    "More than two microbatches currently requires nixl_ep; "
+                    "DeepEP prepare/finalize has only two handle slots."
+                )
             assert a2a_backend in [
                 "deepep_low_latency",
                 "deepep_high_throughput",
@@ -2188,6 +2193,10 @@ class VllmConfig:
             if not self.model_config.disable_cascade_attn:
                 self.model_config.disable_cascade_attn = True
                 logger.warning_once("Disabling cascade attention when DBO is enabled.")
+
+        self.parallel_config.resolve_ubatch_capacity(
+            self.use_v2_model_runner, self.scheduler_config.max_num_seqs
+        )
 
         if not self.instance_id:
             self.instance_id = random_uuid()[:5]

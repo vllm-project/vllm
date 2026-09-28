@@ -149,6 +149,11 @@ def dbo_enabled() -> bool:
     return len(_THREAD_ID_TO_CONTEXT) > 0
 
 
+def dbo_num_ubatches() -> int:
+    """Active count, independent of the configured resource capacity."""
+    return _NUM_UBATCHES if dbo_enabled() else 1
+
+
 def dbo_current_ubatch_id() -> int:
     if len(_THREAD_ID_TO_CONTEXT) == 0:
         return 0

@@ -228,13 +228,22 @@ class ParallelConfig:
     enable_dbo: bool = False
     """Enable dual batch overlap for the model executor."""
     ubatch_size: int = Field(default=0, ge=0)
-    """Number of ubatch size."""
+    """Fixed microbatch count, including when DBO is enabled. Zero leaves the
+    count to DBO; one disables splitting. Values greater than one also enable
+    microbatching without --enable-dbo."""
+    dbo_max_num_ubatches: int = Field(default=8, ge=2)
+    """Resource limit for automatic MRV2 NIXL DBO. The active count is selected
+    from the synchronized load, not fixed to this limit. Ignored when
+    ubatch_size is specified."""
+    _dbo_auto_capacity: int = 0
+    """Allocated microbatch capacity for automatic MRV2 NIXL DBO."""
 
     dbo_decode_token_threshold: int = Field(default=32, ge=0)
     """The threshold for dual batch overlap for batches only containing decodes.
     If the number of tokens in the request is greater than this threshold,
     microbatching will be used. Otherwise, the request will be processed in a
-    single batch."""
+    single batch. Automatic MRV2 NIXL DBO also uses this as the minimum real
+    tokens per microbatch when considering more than two microbatches."""
     dbo_prefill_token_threshold: int = Field(default=512, ge=0)  # TODO(lucas): tune
     """The threshold for dual batch overlap for batches that contain one or more
     prefills. If the number of tokens in the request is greater than this
@@ -600,11 +609,35 @@ class ParallelConfig:
 
     @property
     def use_ubatching(self) -> bool:
-        return self.enable_dbo or self.ubatch_size > 1
+        return self.num_ubatches > 1
 
     @property
     def num_ubatches(self) -> int:
-        return 2 if self.enable_dbo else self.ubatch_size
+        """Allocated capacity; runtime MRV2 descriptors carry the active count."""
+        if self.ubatch_size:
+            return self.ubatch_size
+        return (self._dbo_auto_capacity or 2) if self.enable_dbo else 0
+
+    @property
+    def auto_ubatching(self) -> bool:
+        return self.enable_dbo and self.ubatch_size == 0 and self._dbo_auto_capacity > 0
+
+    def resolve_ubatch_capacity(self, use_v2: bool, max_num_seqs: int) -> None:
+        self._dbo_auto_capacity = 0
+        if (
+            use_v2
+            and self.enable_dbo
+            and self.ubatch_size == 0
+            and self.data_parallel_size > 1
+            and self.all2all_backend == "nixl_ep"
+        ):
+            self._dbo_auto_capacity = max(
+                2,
+                min(
+                    self.dbo_max_num_ubatches,
+                    max_num_seqs // self.dbo_decode_token_threshold,
+                ),
+            )
 
     @property
     def local_engines_only(self) -> bool:
