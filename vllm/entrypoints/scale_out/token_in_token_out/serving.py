@@ -138,6 +138,11 @@ class ServingTokens(GenerateBaseServing):
                 f"sampling_params.n must be at most the server's max_num_seqs "
                 f"({max_num_seqs}), got {sampling_params.n}."
             )
+        # The stream schema has no field for the scores.
+        if request.stream and sampling_params.prompt_logprob_token_ids is not None:
+            return self.create_error_response(
+                "prompt_logprob_token_ids are not available when stream=true."
+            )
         if self.force_no_detokenize and sampling_params.stop:
             # SamplingParams rejects stop with detokenize=False at request
             # validation, but this server forces detokenize=False afterwards,
@@ -389,6 +394,11 @@ class ServingTokens(GenerateBaseServing):
             choices=choices,
             usage=usage,
             prompt_logprobs=clamp_prompt_logprobs(final_res.prompt_logprobs),
+            prompt_token_id_logprobs=(
+                numpy2base64(final_res.prompt_token_id_logprobs)
+                if final_res.prompt_token_id_logprobs is not None
+                else None
+            ),
             prompt_token_ids=(
                 final_res.prompt_token_ids if request.return_token_ids else None
             ),
