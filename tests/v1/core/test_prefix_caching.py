@@ -827,6 +827,52 @@ def test_hisparse_async_admission_requires_inflight_host_remainder_to_fit(
     assert bool(manager.get_blocks(request.request_id).blocks[0]) == admitted
 
 
+def test_hisparse_admitted_async_loads_can_finish_with_nothing_running(tmp_path):
+    """Admitted async loads must not strand each other on host capacity.
+
+    Without full-ISL reservation, an async load is admitted if its import pages
+    fit and, separately, each in-flight prefill's remaining host pages fit.
+    Without summing those, two imports can each hold a host page while together
+    needing more than the pool has left. Waiting requests keep their blocks and
+    are never preempted, so with nothing running no host block is ever freed.
+    """
+    from .utils import create_scheduler, mock_kv
+
+    (tmp_path / "config.json").write_text(
+        '{"architectures": ["OPTForCausalLM"], "model_type": "opt"}'
+    )
+    scheduler = create_scheduler(
+        model=str(tmp_path),
+        skip_tokenizer_init=True,
+        max_model_len=128,
+        use_kv_connector=mock_kv(matched_tokens=HISPARSE_BLOCK_SIZE, is_async=True),
+    )
+    # One null block plus three usable host blocks.
+    manager = make_hisparse_kv_cache_manager(32, 4)
+    scheduler.kv_cache_manager = manager
+    scheduler.kv_cache_config = manager.kv_cache_config
+    scheduler.scheduler_reserve_full_isl = False
+    first = make_request(
+        "first", list(range(3 * HISPARSE_BLOCK_SIZE)), HISPARSE_BLOCK_SIZE, sha256
+    )
+    second = make_request(
+        "second",
+        list(range(1000, 1000 + 3 * HISPARSE_BLOCK_SIZE)),
+        HISPARSE_BLOCK_SIZE,
+        sha256,
+    )
+    for request in (first, second):
+        scheduler.add_request(request)
+        scheduler.schedule()
+    admitted = {r.request_id for r in scheduler._inflight_prefills}
+
+    scheduler.finished_recving_kv_req_ids.update(admitted)
+    num_scheduled_tokens = 0
+    for _ in range(4):
+        num_scheduled_tokens += scheduler.schedule().total_num_scheduled_tokens
+    assert num_scheduled_tokens > 0
+
+
 @pytest.mark.parametrize(
     "evictable,local_tokens,free_blocks,admitted",
     [
