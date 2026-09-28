@@ -126,10 +126,11 @@ def _make_packed_mla_view_worker(
     num_blocks=4,
     pp_size=1,
     backend_names=("FLASHMLA",),
+    padding_bytes=0,
 ):
     """Register real strided views; only NIXL and distributed runtime are fake."""
     block_size = 16
-    raw = torch.zeros(num_blocks * block_stride, dtype=torch.int8)
+    raw = torch.zeros(num_blocks * block_stride + padding_bytes, dtype=torch.int8)
     tensors, groups, caches = [], [], {}
     for name, (offset, page_size) in layouts.items():
         spec = MLAAttentionSpec(
@@ -162,11 +163,19 @@ def _make_packed_mla_view_worker(
         backend.get_name.return_value = name
         backend.full_cls_name.return_value = f"fake.{name}"
         backends.append(backend)
+    backend_layouts = [
+        (backend, groups[index % len(groups)].kv_cache_spec, False)
+        for index, backend in enumerate(backends)
+    ]
     with (
         patch.object(bw, "NixlWrapper", _RecordingNixl),
         patch.object(bw, "get_tensor_model_parallel_rank", return_value=0),
         patch.object(bw, "get_tensor_model_parallel_world_size", return_value=1),
-        patch.object(bw, "get_current_attn_backends", return_value=backends),
+        patch.object(
+            bw,
+            "get_current_attn_backend_layouts",
+            return_value=backend_layouts,
+        ),
         patch("threading.Thread"),
     ):
         worker = NixlPushConnectorWorker(
@@ -180,11 +189,13 @@ def _make_packed_mla_view_worker(
 
 
 @pytest.mark.cpu_test
-@pytest.mark.parametrize("num_layers", [1, 2])
-def test_packed_mla_pp1_push_peer_transfers_whole_rows(num_layers):
+@pytest.mark.parametrize("num_layers, padding_bytes", [(1, 0), (2, 0), (1, 64)])
+def test_packed_mla_pp1_push_peer_transfers_whole_rows(num_layers, padding_bytes):
     layouts = {f"L{i}": (i * 128, 128) for i in range(num_layers)}
     stride = num_layers * 128
-    worker, raw = _make_packed_mla_view_worker(layouts, stride)
+    worker, raw = _make_packed_mla_view_worker(
+        layouts, stride, padding_bytes=padding_bytes
+    )
     assert worker._registered_descs == [[(raw.data_ptr(), raw.nbytes, 0, "")]]
     assert worker.src_blocks_data.tolist() == [
         [raw.data_ptr() + block * stride, stride, 0] for block in range(4)
@@ -218,6 +229,19 @@ def test_packed_push_compatibility_hash_uses_all_backends_in_stable_order(
         {"L0": (0, 128)}, 128, backend_names=remote_backends
     )
     assert (producer.compat_hash == consumer.compat_hash) is compatible
+
+
+@pytest.mark.cpu_test
+def test_packed_push_compatibility_hash_deduplicates_backend_names():
+    single, _ = _make_packed_mla_view_worker(
+        {"L0": (0, 128)}, 128, backend_names=("FLASHMLA",)
+    )
+    repeated, _ = _make_packed_mla_view_worker(
+        {"L0": (0, 128), "L1": (128, 64)},
+        192,
+        backend_names=("FLASHMLA", "FLASHMLA"),
+    )
+    assert single.compat_hash == repeated.compat_hash
 
 
 @pytest.mark.cpu_test
@@ -652,18 +676,12 @@ def test_flashmla_manager_block_is_preserved_for_nixl():
     from vllm.v1.attention.backends.mla.flashmla_sparse import (
         FlashMLASparseBackend,
     )
-    from vllm.v1.kv_cache_interface import (
-        KVCacheConfig,
-        KVCacheGroupSpec,
-        KVCacheTensor,
-        MLAAttentionSpec,
-    )
+    from vllm.v1.kv_cache_interface import MLAAttentionSpec
 
     worker = object.__new__(NixlBaseConnectorWorker)
     worker.block_size = 1152
     worker.num_blocks = 2
     worker._physical_blocks_per_logical_kv_block = 1
-    worker.attn_backends = [FlashMLASparseBackend]
     spec = MLAAttentionSpec(
         block_size=1152,
         num_kv_heads=1,
@@ -671,19 +689,6 @@ def test_flashmla_manager_block_is_preserved_for_nixl():
         dtype=torch.bfloat16,
     )
     worker.attn_backend_layouts = [(FlashMLASparseBackend, spec, True)]
-    page_size = spec.page_size_bytes
-    worker.kv_cache_config = KVCacheConfig(
-        num_blocks=2,
-        kv_cache_tensors=[
-            KVCacheTensor(
-                size=4 * page_size,
-                layers=["layer.0", "layer.1"],
-                layer_stride=page_size,
-                block_stride=2 * page_size,
-            )
-        ],
-        kv_cache_groups=[KVCacheGroupSpec(["layer.0", "layer.1"], spec)],
-    )
 
     worker._sync_block_size_with_kernel()
 

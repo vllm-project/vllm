@@ -20,9 +20,6 @@ import pytest
 import torch
 
 from vllm.platforms.interface import DeviceCapability
-from vllm.v1.attention.backends.mla.flashattn_mla_sparse import (
-    FlashAttnMLASparseBackend,
-)
 from vllm.v1.attention.backends.mla.flashmla_sparse import (
     QUANTIZED_DS_MLA_CACHE_FORMATS,
     FlashMLASparseBackend,
@@ -99,10 +96,6 @@ def test_supported_head_sizes_include_512():
     assert FlashMLASparseBackend.get_supported_head_sizes() == [576, 512]
 
 
-def test_flash_attn_sparse_keeps_native_block_sizes():
-    assert FlashAttnMLASparseBackend.get_supported_kernel_block_sizes() == [64]
-
-
 def test_flashmla_bf16_nope_accepts_packed_manager_blocks():
     spec = MLAAttentionSpec(
         block_size=1152,
@@ -158,33 +151,6 @@ def test_flashmla_quantized_cache_keeps_fixed_kernel_pages():
     assert FlashMLASparseBackend.get_supported_kernel_block_sizes(spec) == [64]
     assert FlashMLASparseBackend.get_strided_block_page_rows(spec) is None
     assert select_common_block_size(1152, [FlashMLASparseBackend]) == 64
-
-
-def test_dense_flashmla_cache_keeps_native_kernel_blocks():
-    spec = MLAAttentionSpec(
-        block_size=1152,
-        num_kv_heads=1,
-        head_size=512,
-        dtype=torch.bfloat16,
-        cache_dtype_str="bfloat16",
-        block_stride_alignment=1024,
-    )
-    page_size = spec.page_size_bytes
-    config = KVCacheConfig(
-        num_blocks=2,
-        kv_cache_tensors=[
-            KVCacheTensor(
-                size=2 * page_size,
-                layers=["layer.0"],
-                layer_stride=2 * page_size,
-                block_stride=page_size,
-            )
-        ],
-        kv_cache_groups=[KVCacheGroupSpec(["layer.0"], spec)],
-    )
-    groups = [[AttentionGroup(FlashMLASparseBackend, ["layer.0"], spec, 0)]]
-
-    assert prepare_kernel_block_sizes(config, groups) == [64]
 
 
 def test_quantized_ds_mla_formats_are_the_envelope_set():

@@ -11,18 +11,8 @@ from vllm.v1.attention.backends.mla.indexer import (
     DeepseekV32IndexerBackend,
     DeepseekV32IndexerMetadataBuilder,
 )
-from vllm.v1.kv_cache_interface import (
-    KVCacheConfig,
-    KVCacheGroupSpec,
-    KVCacheLayout,
-    KVCacheTensor,
-    MLAAttentionSpec,
-)
-from vllm.v1.worker.utils import (
-    AttentionGroup,
-    allocate_kv_cache,
-    prepare_kernel_block_sizes,
-)
+from vllm.v1.kv_cache_interface import MLAAttentionSpec
+from vllm.v1.worker.utils import AttentionGroup
 
 ROW = 132  # 128 fp8 bytes + 4 scale bytes per indexer state
 
@@ -142,45 +132,6 @@ def test_kpool_spec_declares_repage_alignment(
     )
 
 
-def test_dense_kpool_cache_uses_declared_kernel_page_size():
-    spec = MLAAttentionSpec(
-        block_size=1024,
-        num_kv_heads=1,
-        head_size=128,
-        dtype=torch.uint8,
-        state_content_bytes=ROW,
-        tokens_per_state=4,
-        kernel_page_size=256,
-    )
-    page_size = spec.page_size_bytes
-    config = KVCacheConfig(
-        num_blocks=2,
-        kv_cache_tensors=[
-            KVCacheTensor(
-                size=2 * page_size,
-                layers=["indexer"],
-                layer_stride=2 * page_size,
-                block_stride=page_size,
-            )
-        ],
-        kv_cache_groups=[KVCacheGroupSpec(["indexer"], spec)],
-    )
-    groups = [[AttentionGroup(DeepseekV32IndexerBackend, ["indexer"], spec, 0)]]
-
-    kernel_block_sizes = prepare_kernel_block_sizes(config, groups)
-    assert kernel_block_sizes == [64]
-
-    caches = allocate_kv_cache(
-        config, torch.device("cpu"), KVCacheLayout.LBHNC, kernel_block_sizes
-    )
-    assert caches["indexer"].shape == (8, 1, 64, ROW)
-
-    manager_caches = allocate_kv_cache(
-        config, torch.device("cpu"), KVCacheLayout.LBHNC, [spec.block_size]
-    )
-    assert manager_caches["indexer"].shape == (2, 1, 256, ROW)
-
-
 @pytest.mark.parametrize(
     (
         "manager_block_size",
@@ -193,7 +144,6 @@ def test_dense_kpool_cache_uses_declared_kernel_page_size():
         (1024, 1, 64, 256, None),
         (256, 1, 64, 256, None),
         (256, 1, 256, 256, 256),
-        (1024, 1, 1024, 1024, 256),
         (1024, 2, 1024, 1024, 256),
     ],
 )

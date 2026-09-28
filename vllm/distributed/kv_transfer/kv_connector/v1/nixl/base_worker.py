@@ -1410,7 +1410,7 @@ class NixlBaseConnectorWorker:
         if self._supports_pp_hma and self._has_packed_cache:
             # PP can reorder the same backends across stages of a packed model.
             backend_name = ",".join(
-                sorted(backend.get_name() for backend in self.attn_backends)
+                sorted({backend.get_name() for backend in self.attn_backends})
             )
         self.compat_hash = compute_nixl_compatibility_hash(
             self.vllm_config,
@@ -1654,7 +1654,7 @@ class NixlBaseConnectorWorker:
                 elif packed_mla_push:
                     # PP=1 decode or prefill: register whole rows, and advertise where
                     # this layer's page sits so a PP>1 prefill can write into it.
-                    storage_block_len = registration_len // num_blocks
+                    storage_block_len = block_stride
                     region_specs = [
                         (registration_base, storage_block_len, storage_block_len)
                     ]
