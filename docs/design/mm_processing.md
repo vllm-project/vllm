@@ -80,6 +80,8 @@ GPU-side fusion is controlled by `multimodal_config.mm_device_do_normalize`:
 
 | name                       | Architecture                               | Example HF Models                                     |
 | -------------------------- | ------------------------------------------ | ----------------------------------------------------- |
+| `deepseek-v4`              | `DeepseekV4ForConditionalGeneration`       | `deepseek-ai/DeepSeek-V4-Flash-Vision-Exp`            |
+| `deepseek-v4.1`            | `DeepseekV41ForCausalLM`                   | `deepseek-ai/DeepSeek-V4.1-Flash`                     |
 | `gemma-3`                  | `Gemma3ForConditionalGeneration`           | `google/gemma-3-4b-it`, etc.                          |
 | `gemma-4`                  | `Gemma4ForConditionalGeneration`           | `google/gemma-4-E2B-it`, etc.                         |
 | `glm-4v`                   | `Glm4vForConditionalGeneration`            | `zai-org/GLM-4.1V-9B-Thinking`, etc.                  |
