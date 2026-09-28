@@ -147,19 +147,16 @@ class GatedResidual(nn.Module):
             and 1 <= xn.shape[0] <= MAX_FUSED_M
         )
         if use_fused:
-            down_and_injection = hc_down_silu(
+            return hc_down_silu(
                 xn,
                 self.input_mix_weight_down_block_inject.weight,
                 self.lora_rank,
                 self.hc_count,
             )
-        else:
-            down_and_injection = self.input_mix_weight_down_block_inject(xn)
+        down_and_injection = self.input_mix_weight_down_block_inject(xn)
         split_sizes = [self.lora_rank, self.hc_count, self.pad_size]
         lora, injection, _ = down_and_injection.split(split_sizes, dim=-1)
-        if not use_fused:
-            lora = hc_silu(lora, self.hc_count)
-        return lora, injection
+        return hc_silu(lora, self.hc_count), injection
 
     def mix(
         self, hidden_states: torch.Tensor

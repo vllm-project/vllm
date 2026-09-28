@@ -146,11 +146,12 @@ def test_hc_down_silu_fused(num_tokens: int) -> None:
     x = torch.randn(num_tokens, HYPER_HIDDEN_SIZE, dtype=torch.bfloat16, device="cuda")
     weight = torch.randn(DOWN_N, HYPER_HIDDEN_SIZE, dtype=torch.bfloat16, device="cuda")
 
-    actual = hc_down_silu(x, weight, LORA_RANK, HC)
+    lora, injection = hc_down_silu(x, weight, LORA_RANK, HC)
 
     down = ll_bf16_gemm(x, weight).to(torch.bfloat16)
-    expected = torch.cat([hc_silu(down[:, :LORA_RANK], HC), down[:, LORA_RANK:]], dim=1)
-    computed = slice(0, LORA_RANK + HC)
     torch.testing.assert_close(
-        actual[:, computed], expected[:, computed], rtol=0.01, atol=0.01
+        lora, hc_silu(down[:, :LORA_RANK], HC), rtol=0.01, atol=0.01
+    )
+    torch.testing.assert_close(
+        injection, down[:, LORA_RANK : LORA_RANK + HC], rtol=0.01, atol=0.01
     )

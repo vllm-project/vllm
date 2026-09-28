@@ -178,7 +178,7 @@ def hc_down_silu(
     weight: torch.Tensor,
     rank: int,
     hc: int,
-) -> torch.Tensor:
+) -> tuple[torch.Tensor, torch.Tensor]:
     """Fused Qwen4Exp HC down projection + SiLU.
 
     Args:
@@ -188,12 +188,12 @@ def hc_down_silu(
         hc: Number of injection-logit output columns.
 
     Returns:
-        [M, weight.shape[0]] bf16 tensor; pad columns are uninitialized when
-        the fused kernel runs (production discards them).
+        LoRA activations [M, rank] and injection logits [M, hc].
 
     """
     kernel = _get_kernel(rank, hc, weight.shape[1], x.shape[0] == 1)
-    return kernel(x, weight)
+    output = kernel(x, weight)
+    return output[:, :rank], output[:, rank : rank + hc]
 
 
 def request_hc_down_silu_warmup(
