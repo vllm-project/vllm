@@ -389,6 +389,36 @@ def test_flashinfer_standalone_workspace_size(
     assert create_workspace.call_args.args[3] == expected
 
 
+def test_flashinfer_workspace_failure_is_not_retried(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Creation is collective; retrying it per all-reduce desyncs ranks."""
+    create_workspace = Mock(return_value=None)
+    monkeypatch.setattr(flashinfer_all_reduce, "_fi_ar_workspace", None)
+    monkeypatch.setattr(flashinfer_all_reduce, "_fi_ar_quant_workspace", None)
+    monkeypatch.setattr(flashinfer_all_reduce, "_fi_ar_workspace_failed", False)
+    monkeypatch.setattr(
+        flashinfer_all_reduce,
+        "_resolve_fi_ar_backend",
+        Mock(return_value=("mnnvl", True)),
+    )
+    monkeypatch.setattr(flashinfer_all_reduce, "get_node_count", lambda: 1)
+    monkeypatch.setattr(
+        flashinfer_all_reduce, "_get_tuned_standalone_max_size", Mock(return_value=None)
+    )
+    monkeypatch.setattr(flashinfer_all_reduce, "_create_workspace", create_workspace)
+    args = (2, 0, 128, 4096, torch.bfloat16, Mock())
+
+    assert flashinfer_all_reduce.get_fi_ar_workspace(*args) is None
+    assert flashinfer_all_reduce.get_fi_ar_workspace(*args) is None
+    # One mnnvl attempt plus one trtllm fallback, never repeated.
+    assert create_workspace.call_count == 2
+
+    flashinfer_all_reduce.destroy_fi_ar_workspace()
+    flashinfer_all_reduce.get_fi_ar_workspace(*args)
+    assert create_workspace.call_count == 4
+
+
 def test_flashinfer_all_reduce_precedes_nccl(monkeypatch: pytest.MonkeyPatch) -> None:
     output = torch.empty(2)
     fi_ar_comm = Mock(disabled=False)
