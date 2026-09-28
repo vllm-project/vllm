@@ -146,6 +146,14 @@ class PassConfig:
     fuse_rope_kvcache_cat_mla: bool = None  # type: ignore[assignment]
     """Enable fused MLA KV cache update with RoPE."""
 
+    # XPU specific fusions
+    fuse_xpu_moe_shared: bool = False
+    """Fuse routed and shared-expert MoE into one XPU kernel for small token
+    counts (see `xpu_moe_shared_fusion_max_token_num`)."""
+    xpu_moe_shared_fusion_max_token_num: int = 8
+    """Largest compile-range end for which the XPU MoE + shared-expert fusion
+    is applied; larger token counts keep the unfused path."""
+
     # ROCm/AITER specific fusions
     fuse_act_padding: bool = None  # type: ignore[assignment]
     """Fuse the custom RMSNorm + padding ops."""
@@ -305,6 +313,12 @@ class PassConfig:
                 "The fusion will be disabled."
             )
             self.fuse_qk_norm_rope_kvcache = False
+        if self.fuse_xpu_moe_shared and not current_platform.is_xpu():
+            logger.warning_once(
+                "XPU MoE + shared-expert fusion enabled but the current platform "
+                "is not XPU. The fusion will be disabled."
+            )
+            self.fuse_xpu_moe_shared = False
         if self.fuse_rope_kvcache_cat_mla and not current_platform.is_cuda_alike():
             logger.warning_once(
                 "MLA KV cache update with RoPE fusion enabled but the "

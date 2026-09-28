@@ -55,6 +55,7 @@ if current_platform.is_cuda():
 if current_platform.is_xpu():
     from .fusion.act_quant_fusion import ActivationQuantFusionPass
     from .fusion.rms_quant_fusion import RMSNormQuantFusionPass
+    from .fusion.xpu_moe_shared_fusion import XpuMoESharedFusionPass
 
 from .inductor_pass import (
     CustomGraphPass,
@@ -223,6 +224,9 @@ class PostGradPassManager(CustomGraphPass):  # type: ignore[misc]
             if self.pass_config.enable_qk_norm_rope_fusion:
                 self.passes += [SplitCoalescingPass(config)]
                 self.passes += [QKNormRoPEFusionPass(config)]
+
+            if self.pass_config.fuse_xpu_moe_shared:
+                self.passes += [XpuMoESharedFusionPass(config)]
 
             self.ir_lowering = VllmIRLoweringPass(config)
             self.clone_elimination = UnsafeCloneEliminationPass(config)

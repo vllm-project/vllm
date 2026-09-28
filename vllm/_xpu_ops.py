@@ -12,7 +12,7 @@ from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
-from vllm.utils.torch_utils import direct_register_custom_op
+from vllm.utils.torch_utils import LayerNameType, direct_register_custom_op
 
 logger = init_logger(__name__)
 
@@ -669,6 +669,191 @@ def _xpu_fused_input_norm_fake(
         device=x.device,
     )
     return out
+
+
+# ---------------------------------------------------------------------------
+# Fused routed + shared-expert MoE for small-batch decode.
+#
+# vllm::xpu_moe_shared_fused computes `shared_out + routed_out` of one MoE
+# layer (the value of the `add` that follows vllm::moe_forward_shared) with
+# one vllm-xpu-kernels op. It is only inserted into the graph by
+# XpuMoESharedFusionPass; eager execution never calls it. The pass checks on
+# the graph that the router input is the hidden states, so `router_logits`
+# carries the same value as `hidden_states` and the runner's own gate is
+# applied. The output is the per-rank partial sum; the TP all-reduce after it
+# stays in the graph.
+# ---------------------------------------------------------------------------
+_XPU_MOE_SHARED_FUSED_PLAN_ATTR = "_xpu_moe_shared_fused_plan"
+
+
+def xpu_moe_shared_fused_available() -> bool:
+    return hasattr(torch.ops._xpu_C, "moe_shared_fused_decode_interface")
+
+
+def _xpu_moe_shared_fused_shared_mlp(runner) -> torch.nn.Module | None:
+    # SharedExperts exposes no public accessor for the wrapped module;
+    # accessed here to keep this XPU-only fusion out of common MoE code.
+    shared = runner.shared_experts
+    return getattr(shared, "_layer", None) if shared is not None else None
+
+
+def _xpu_moe_shared_fused_experts(runner):
+    from vllm.model_executor.layers.fused_moe.experts.xpu_moe import XPUExpertsFp8
+
+    kernel = runner.routed_experts.quant_method.moe_kernel
+    experts = kernel.fused_experts if kernel is not None else None
+    return experts if isinstance(experts, XPUExpertsFp8) else None
+
+
+def xpu_moe_shared_fused_unsupported_reason(runner) -> str | None:
+    """Why `runner` cannot use the fused decode op, or None if it can.
+
+    Only reads config, dtypes and shapes; may run at compile time.
+    """
+    from vllm.model_executor.layers.activation import SiluAndMul
+    from vllm.model_executor.layers.fused_moe.activation import MoEActivation
+
+    if not xpu_moe_shared_fused_available():
+        return "vllm-xpu-kernels op not available"
+    from vllm_xpu_kernels.moe_shared_fused_interface import supports
+
+    mlp = _xpu_moe_shared_fused_shared_mlp(runner)
+    if mlp is None or getattr(mlp, "expert_gate", None) is None:
+        return "no sigmoid-gated shared expert"
+    if runner.gate is None:
+        return "router gate is not held by the MoE runner"
+    if runner.shared_expert_gate is not None:
+        return "shared-expert gate is fused into the router gate"
+    xpu_experts = _xpu_moe_shared_fused_experts(runner)
+    if xpu_experts is None:
+        return "routed experts are not XPUExpertsFp8"
+    routed = runner.routed_experts
+    moe_config = runner.moe_config
+    parallel = moe_config.moe_parallel_config
+    if runner.activation != MoEActivation.SILU or not isinstance(
+        getattr(mlp, "act_fn", None), SiluAndMul
+    ):
+        return "activation is not SiLU"
+    if runner.routed_scaling_factor != 1.0:
+        return "routed_scaling_factor != 1.0"
+    if routed.apply_router_weight_on_input:
+        return "apply_router_weight_on_input"
+    if moe_config.is_lora_enabled:
+        return "LoRA"
+    if parallel.enable_eplb:
+        return "EPLB"
+    if parallel.use_ep or parallel.ep_size != 1 or runner.expert_map is not None:
+        return "expert parallelism"
+    if parallel.dp_size != 1 or parallel.pcp_size != 1 or parallel.is_sequence_parallel:
+        return "data/context/sequence parallelism"
+    gu, down, gate = mlp.gate_up_proj, mlp.down_proj, mlp.expert_gate
+    if moe_config.has_bias or any(
+        getattr(m, "bias", None) is not None for m in (gu, down, gate)
+    ):
+        return "bias"
+    w13, w2 = routed.w13_weight, routed.w2_weight
+    s13, s2 = xpu_experts.w1_scale, xpu_experts.w2_scale
+    if not (
+        w13.dtype == torch.float8_e4m3fn
+        and w2.dtype == torch.float8_e4m3fn
+        and s13 is not None
+        and s13.dim() == 1
+        and s2 is not None
+        and s2.dim() == 1
+        and gu.weight.dtype == torch.float8_e4m3fn
+        and down.weight.dtype == torch.float8_e4m3fn
+        and gu.weight_scale.numel() == 1
+        and down.weight_scale.numel() == 1
+        and gate.weight.dtype == torch.float16
+    ):
+        return "weights are not fp8-e4m3 per-tensor"
+    # Routed w13 is [E, H, 2I]; the shared linear weights are [in, out].
+    if gu.weight.shape != w13.shape[1:] or down.weight.shape != w2.shape[1:]:
+        return "shared and routed intermediate sizes differ"
+    if not supports(
+        moe_config.in_dtype,
+        w13.dtype,
+        1,
+        moe_config.experts_per_token,
+        w13.shape[1],
+        w2.shape[1],
+    ):
+        return "kernel does not support this configuration"
+    return None
+
+
+def _xpu_moe_shared_fused_plan(runner):
+    """Kernel plan for `runner`, built on first use and cached on it.
+
+    Built lazily (during warmup / the profile run) rather than in the pass:
+    graphs loaded from the AOT compile cache never run the pass.
+    """
+    plan = getattr(runner, _XPU_MOE_SHARED_FUSED_PLAN_ATTR, None)
+    if plan is not None:
+        return plan
+    reason = xpu_moe_shared_fused_unsupported_reason(runner)
+    if reason is not None:
+        raise RuntimeError(
+            f"xpu_moe_shared_fused: {runner.layer_name} is not supported "
+            f"({reason}); XpuMoESharedFusionPass should not have rewritten it."
+        )
+    from vllm_xpu_kernels.moe_shared_fused_interface import (
+        XpuMoESharedFusedDecode,
+    )
+
+    routed = runner.routed_experts
+    experts = _xpu_moe_shared_fused_experts(runner)
+    mlp = _xpu_moe_shared_fused_shared_mlp(runner)
+    plan = XpuMoESharedFusedDecode(
+        w13=routed.w13_weight,
+        w13_scales=experts.w1_scale,
+        w2=routed.w2_weight,
+        w2_scales=experts.w2_scale,
+        shared_w13=mlp.gate_up_proj.weight,
+        shared_w13_scale=mlp.gate_up_proj.weight_scale,
+        shared_w2=mlp.down_proj.weight,
+        shared_w2_scale=mlp.down_proj.weight_scale,
+        shared_gate=mlp.expert_gate.weight,
+        top_k=runner.moe_config.experts_per_token,
+    )
+    setattr(runner, _XPU_MOE_SHARED_FUSED_PLAN_ATTR, plan)
+    return plan
+
+
+def _xpu_moe_shared_fused_impl(
+    hidden_states: torch.Tensor,
+    router_logits: torch.Tensor,
+    layer_name: LayerNameType,
+) -> torch.Tensor:
+    from vllm.model_executor.layers.fused_moe.runner.moe_runner import (
+        _resolve_layer_name,
+        get_layer_from_name,
+    )
+
+    runner = get_layer_from_name(_resolve_layer_name(layer_name))
+    plan = _xpu_moe_shared_fused_plan(runner)
+    router_logits, _ = runner.gate(hidden_states)
+    topk_weights, topk_ids = runner.router.select_experts(
+        hidden_states=hidden_states,
+        router_logits=router_logits,
+        topk_indices_dtype=runner.routed_experts.quant_method.topk_indices_dtype,
+        input_ids=None,
+    )
+    x = hidden_states.contiguous()
+    return plan.forward(
+        torch.empty_like(x),
+        x,
+        topk_weights.to(torch.float32).contiguous(),
+        topk_ids.contiguous(),
+    )
+
+
+def _xpu_moe_shared_fused_fake(
+    hidden_states: torch.Tensor,
+    router_logits: torch.Tensor,
+    layer_name: LayerNameType,
+) -> torch.Tensor:
+    return torch.empty_like(hidden_states)
 
 
 @triton.jit
@@ -1411,6 +1596,14 @@ class xpu_ops:
                 op_func=_xpu_fused_input_norm_impl,
                 fake_impl=_xpu_fused_input_norm_fake,
             )
+
+            if xpu_moe_shared_fused_available():
+                direct_register_custom_op(
+                    op_name="xpu_moe_shared_fused",
+                    op_func=_xpu_moe_shared_fused_impl,
+                    fake_impl=_xpu_moe_shared_fused_fake,
+                    tags=(torch.Tag.needs_fixed_stride_order,),
+                )
 
             _OPS_REGISTERED = True
 
