@@ -30,6 +30,9 @@ from vllm.model_executor.layers.linear import (
 )
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding.common import ApplyRotaryEmb
+from vllm.model_executor.layers.rotary_embedding.packed_qk_rope import (
+    packed_qk_rope_,
+)
 from vllm.model_executor.models.utils import maybe_prefix
 from vllm.model_executor.models.vision import (
     is_vit_use_data_parallel,
@@ -37,6 +40,7 @@ from vllm.model_executor.models.vision import (
 )
 from vllm.platforms import current_platform
 from vllm.transformers_utils.configs.kimi_k25 import KimiK25VisionConfig
+from vllm.triton_utils import HAS_TRITON
 from vllm.utils.torch_utils import async_tensor_h2d
 
 logger = init_logger(__name__)
@@ -451,14 +455,19 @@ class MoonViTEncoderLayer(nn.Module):
         )
         # xqkv: (seqlen, 3, nheads, headdim)
         xqkv = xqkv.view(*qkv_shape)
-        xq, xk, xv = torch.unbind(xqkv, dim=-3)
 
-        _apply_rope_input_validation(xq, rope_freqs_cis)
-        _apply_rope_input_validation(xk, rope_freqs_cis)
-        rope_cos = rope_freqs_cis.real.contiguous()
-        rope_sin = rope_freqs_cis.imag.contiguous()
-        xq = self.apply_rotary_emb(xq, rope_cos, rope_sin)
-        xk = self.apply_rotary_emb(xk, rope_cos, rope_sin)
+        # xq/xk alias xqkv, so the in-place rotation below is visible through
+        # them; only the fallback needs to rebind.
+        xq, xk, xv = torch.unbind(xqkv, dim=-3)
+        if HAS_TRITON:
+            packed_qk_rope_(xqkv, rope_freqs_cis)
+        else:
+            _apply_rope_input_validation(xq, rope_freqs_cis)
+            _apply_rope_input_validation(xk, rope_freqs_cis)
+            rope_cos = rope_freqs_cis.real.contiguous()
+            rope_sin = rope_freqs_cis.imag.contiguous()
+            xq = self.apply_rotary_emb(xq, rope_cos, rope_sin)
+            xk = self.apply_rotary_emb(xk, rope_cos, rope_sin)
 
         if max_seqlen is None:
             max_seqlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max()
