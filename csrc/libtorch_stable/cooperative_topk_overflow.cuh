@@ -23,6 +23,16 @@ struct OverflowProbeSummary {
   uint32_t flags;
 };
 
+__device__ __forceinline__ bool coarse_bin_needs_full_fp32_radix(
+    uint32_t coarse_bin) {
+  const uint16_t key =
+      static_cast<uint16_t>(coarse_bin << (16 - kHistBits));
+  const uint16_t bits = (key & 0x8000u)
+                            ? static_cast<uint16_t>(key & 0x7FFFu)
+                            : static_cast<uint16_t>(~key);
+  return (bits & 0x7C00u) == 0;
+}
+
 // Reconstruct exact ordered-FP32 boundaries from reduced-precision keys.
 __device__ __forceinline__ uint32_t ordered_fp32_from_fp16_key(
     uint16_t key) {
@@ -405,7 +415,7 @@ __device__ __noinline__ OverflowProbeStatus probe_arbitrary_fp32_overflow(
   auto* exact_histogram = reinterpret_cast<uint32_t*>(scratch);
 
   const auto range = hist4096::coarse_refine_range<kHistBits>(coarse_bin);
-  if (!range.finite) {
+  if (!range.finite || coarse_bin_needs_full_fp32_radix(coarse_bin)) {
     return OverflowProbeStatus::kFullRescan;
   }
 
@@ -476,8 +486,13 @@ __device__ __noinline__ OverflowProbeStatus probe_coarse_overflow(
     return probe_arbitrary_fp32_overflow<TopK, CS, UseResident>(
         row_input, my_start, my_len, coarse_bin, coarse_above, smem, scratch);
   }
-  return probe_reduced_precision_overflow<TopK, CS, UseResident>(
+  const auto status = probe_reduced_precision_overflow<TopK, CS, UseResident>(
       row_input, my_start, my_len, coarse_bin, coarse_above, smem, scratch);
+  if (status == OverflowProbeStatus::kFirstDigitReady &&
+      coarse_bin_needs_full_fp32_radix(coarse_bin)) {
+    return OverflowProbeStatus::kFullRescan;
+  }
+  return status;
 }
 
 template <uint32_t TopK, uint32_t CS, typename SmemType>
@@ -561,17 +576,19 @@ __device__ __noinline__ void exact_topk_rescan_cluster(
     int32_t* s_topk) {
   const uint32_t tx = threadIdx.x;
   const auto range = hist4096::coarse_refine_range<kHistBits>(coarse_bin);
+  const bool bounded =
+      range.finite && !coarse_bin_needs_full_fp32_radix(coarse_bin);
 
   const bool has_known_pivot = probe.status == OverflowProbeStatus::kKnownPivot;
   const uint32_t start_round =
       probe.status == OverflowProbeStatus::kFirstDigitReady ? 1 : 0;
   uint32_t prefix = start_round == 0 ? 0 : probe.pivot_or_prefix;
   uint32_t remaining = probe.status == OverflowProbeStatus::kFullRescan
-                           ? (range.finite ? TopK - coarse_above : TopK)
+                           ? (bounded ? TopK - coarse_above : TopK)
                            : probe.remaining;
-  const uint32_t rounds = range.finite ? 2 : ExactRadix::kRounds;
+  const uint32_t rounds = bounded ? 2 : ExactRadix::kRounds;
   const bool stage_final_candidates =
-      range.finite && start_round == 1 && seq_len >= CS * kSizePerStage;
+      bounded && start_round == 1 && seq_len >= CS * kSizePerStage;
   uint32_t staged_above = 0;
   uint32_t staged_candidates = 0;
   for (uint32_t round = start_round;
@@ -582,7 +599,7 @@ __device__ __noinline__ void exact_topk_rescan_cluster(
     }
     __syncthreads();
 
-    if (range.finite) {
+    if (bounded) {
       if (stage_final_candidates && round == 1) {
         if (tx == 0) {
           smem->counter_gt = 0;
@@ -626,16 +643,16 @@ __device__ __noinline__ void exact_topk_rescan_cluster(
     dsmem_hist_reduce<CS, kExactHistBins>(smem->histogram);
     find_threshold_exact(smem->histogram, smem->warp_sum, remaining,
                          &smem->match);
-    const uint32_t shift = range.finite ? (round == 0 ? 11 : 0)
-                                        : ExactRadix::shift(round);
+    const uint32_t shift = bounded ? (round == 0 ? 11 : 0)
+                                 : ExactRadix::shift(round);
     prefix |= smem->match.bin << shift;
     remaining -= smem->match.above_count;
   }
 
   const uint32_t pivot = has_known_pivot
                              ? probe.pivot_or_prefix
-                             : (range.finite ? range.base_key + prefix
-                                             : prefix);
+                             : (bounded ? range.base_key + prefix
+                                        : prefix);
 
   if (stage_final_candidates &&
       emit_staged_candidates<TopK, CS>(
