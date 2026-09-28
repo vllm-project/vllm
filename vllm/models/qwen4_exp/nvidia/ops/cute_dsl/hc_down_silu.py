@@ -27,11 +27,9 @@ logger = logging.getLogger(__name__)
 # The fused kernel stops winning past M ~ 64 on Qwen3.8-Next-Flash.
 MAX_FUSED_M = 48
 
-# (split_k, num_stages, tile_n)
-_DEFAULT_SPLITK_CONFIG = (6, 4, 16)
-
-# SM100f split-K configs tuned on Qwen3.8-Flash-Next (K=10240, N=324).
+# Split-K configs tuned on SM100f for Qwen3.8-Flash-Next (K=10240, N=324).
 _SM100F_TUNED_SPLITK: dict[int, tuple[int, int, int]] = {
+    **{m: (6, 4, 16) for m in range(5, MAX_FUSED_M + 1)},
     8: (6, 5, 8),
     16: (6, 5, 8),
     32: (6, 5, 16),
@@ -46,7 +44,7 @@ class HcDownSiluGemm:
         backend: Literal["fma", "mma"]
         M: int = 0
         K: int = 0
-        bs: int = 0
+        threadblock_size: int = 0
         split_k: int = 0
         num_stages: int = 0
         tile_n: int = 0
@@ -58,7 +56,7 @@ class HcDownSiluGemm:
         self.hc = hc
         self.k = k
         self._prefetch_pdl_weights = prefetch_pdl_weights
-        # FMA: keyed on (M, K, bs), because M and K are Constexpr.
+        # FMA: keyed on (M, K, threadblock_size), because M and K are Constexpr.
         self._fma_cache: dict[tuple[int, int, int], Any] = {}
         # MMA: keyed on (split_k, num_stages, tile_n), fully shape-dynamic.
         self._mma_cache: dict[tuple[int, int, int], Any] = {}
@@ -67,13 +65,8 @@ class HcDownSiluGemm:
 
     def dispatch(self, m: int) -> CompileKey:
         if m <= 4 or self.k < 2048:
-            return self.CompileKey(backend="fma", M=m, K=self.k, bs=128)
-        tuned = (
-            _SM100F_TUNED_SPLITK
-            if current_platform.is_device_capability_family(100)
-            else {}
-        )
-        split_k, num_stages, tile_n = tuned.get(m, _DEFAULT_SPLITK_CONFIG)
+            return self.CompileKey(backend="fma", M=m, K=self.k, threadblock_size=128)
+        split_k, num_stages, tile_n = _SM100F_TUNED_SPLITK[m]
         return self.CompileKey(
             backend="mma",
             split_k=split_k,
@@ -142,7 +135,7 @@ class HcDownSiluGemm:
         )
         gemm = HcDownSiluFma(
             k=compile_key.K,
-            bs=compile_key.bs,
+            threadblock_size=compile_key.threadblock_size,
             use_pdl=current_platform.is_arch_support_pdl(),
             prefetch_pdl_weights=self._prefetch_pdl_weights,
             rank=self.rank,
@@ -159,12 +152,14 @@ class HcDownSiluGemm:
             cute.runtime.make_fake_stream(use_tvm_ffi_env_stream=True),
             options="--enable-tvm-ffi --ptxas-options -maxrregcount=64",
         )
-        self._fma_cache[(compile_key.M, compile_key.K, compile_key.bs)] = compiled
+        self._fma_cache[
+            (compile_key.M, compile_key.K, compile_key.threadblock_size)
+        ] = compiled
         logger.debug(
-            "Compiled hc_down_silu_fma: M=%d, K=%d, bs=%d",
+            "Compiled hc_down_silu_fma: M=%d, K=%d, threadblock_size=%d",
             compile_key.M,
             compile_key.K,
-            compile_key.bs,
+            compile_key.threadblock_size,
         )
 
     def compile(self, compile_key: CompileKey) -> None:
@@ -178,7 +173,7 @@ class HcDownSiluGemm:
                 self._compile_mma(compile_key)
             return
 
-        fma_cache_key = (compile_key.M, compile_key.K, compile_key.bs)
+        fma_cache_key = (compile_key.M, compile_key.K, compile_key.threadblock_size)
         if fma_cache_key not in self._fma_cache:
             self._compile_fma(compile_key)
 
@@ -233,7 +228,9 @@ class HcDownSiluGemm:
                 (compile_key.split_k, compile_key.num_stages, compile_key.tile_n)
             ]
         else:
-            kernel = self._fma_cache[(compile_key.M, compile_key.K, compile_key.bs)]
+            kernel = self._fma_cache[
+                (compile_key.M, compile_key.K, compile_key.threadblock_size)
+            ]
 
         output = torch.empty(M, N, dtype=torch.bfloat16, device=hidden_states.device)
         out_gemm = output[:, :n_compute]

@@ -29,13 +29,13 @@ class HcDownSiluFma:
     See the base class docstring in
     vllm/model_executor/kernels/linear/cute_dsl/_ll_bf16_dotprod.py for the
     GEMM structure; only the epilogue differs. The compile key is
-    ``(M, K, bs, rank, hc)``.
+    ``(M, K, threadblock_size, rank, hc)``.
     """
 
     def __init__(
         self,
         k: int,
-        bs: int = 128,
+        threadblock_size: int = 128,
         main_vec_width: int = 8,
         tail_vec_width: int = 4,
         use_pdl: bool = False,
@@ -43,19 +43,19 @@ class HcDownSiluFma:
         rank: int = 320,
         hc: int = 4,
     ):
-        self.bs = bs
+        self.threadblock_size = threadblock_size
         self.main_vec_width = main_vec_width
         self.tail_vec_width = tail_vec_width
         self.use_pdl = use_pdl
         self.prefetch_pdl_weights = prefetch_pdl_weights
         self.rank = rank
         self.hc = hc
-        self.num_warps = bs // cute.arch.WARP_SIZE
+        self.num_warps = threadblock_size // cute.arch.WARP_SIZE
         self._init_k_tiles(k)
         self.main_prefetch_tiles = min(self.main_tiles, 8)
 
     def _vectorized_elems(self, k_extent: int, vec_width: int) -> int:
-        vector_tile = vec_width * self.bs
+        vector_tile = vec_width * self.threadblock_size
         return (k_extent // vector_tile) * vector_tile
 
     def _init_k_tiles(self, k: int) -> None:
@@ -67,12 +67,16 @@ class HcDownSiluFma:
         )
         self.k_done_all = self.k_main_elems + self.k_tail_elems
         self.scalar_rem = k - self.k_done_all
-        self.ks_full = self.scalar_rem // self.bs
-        self.ks_part = self.scalar_rem % self.bs
-        self.k_scalar_full = self.ks_full * self.bs
+        self.ks_full = self.scalar_rem // self.threadblock_size
+        self.ks_part = self.scalar_rem % self.threadblock_size
+        self.k_scalar_full = self.ks_full * self.threadblock_size
         self.k_part_offset = self.k_done_all + self.k_scalar_full
-        self.main_tiles = self.k_main_elems // (self.main_vec_width * self.bs)
-        self.tail_tiles = self.k_tail_elems // (self.tail_vec_width * self.bs)
+        self.main_tiles = self.k_main_elems // (
+            self.main_vec_width * self.threadblock_size
+        )
+        self.tail_tiles = self.k_tail_elems // (
+            self.tail_vec_width * self.threadblock_size
+        )
 
     @cute.jit
     def _vector_fma(
@@ -131,11 +135,11 @@ class HcDownSiluFma:
         gB_vec: cute.Tensor,
         tidx: cutlass.Int32,
         n_idx: cutlass.Int32,
-        bs: cutlass.Constexpr,
+        threadblock_size: cutlass.Constexpr,
     ):
         # (M/N, K_TILE, K_LANE, K_VEC); tidx selects K_LANE.
-        tA = cute.logical_divide(gA_vec, (None, (None, bs)))
-        tB = cute.logical_divide(gB_vec, (None, (None, bs)))
+        tA = cute.logical_divide(gA_vec, (None, (None, threadblock_size)))
+        tB = cute.logical_divide(gB_vec, (None, (None, threadblock_size)))
         return tA[None, (None, (tidx, None))], tB[n_idx, (None, (tidx, None))]
 
     def _make_k_slice(
@@ -176,7 +180,7 @@ class HcDownSiluFma:
             M,
             self.main_vec_width,
             self.tail_vec_width,
-            self.bs,
+            self.threadblock_size,
             self.num_warps,
             self.k_main_elems,
             self.k_tail_elems,
@@ -191,7 +195,7 @@ class HcDownSiluFma:
             self.hc,
         ).launch(
             grid=[N_dim, 1, 1],
-            block=[self.bs, 1, 1],
+            block=[self.threadblock_size, 1, 1],
             smem=M * 4 * self.num_warps,
             stream=stream,
             use_pdl=self.use_pdl,
@@ -207,7 +211,7 @@ class HcDownSiluFma:
         M: cutlass.Constexpr,
         main_vec_width: cutlass.Constexpr,
         tail_vec_width: cutlass.Constexpr,
-        bs: cutlass.Constexpr,
+        threadblock_size: cutlass.Constexpr,
         num_warps: cutlass.Constexpr,
         k_main_elems: cutlass.Constexpr,
         k_tail_elems: cutlass.Constexpr,
@@ -234,7 +238,9 @@ class HcDownSiluFma:
             gB_main = self._make_k_slice(gB, 0, k_main_elems)
             gA_vec = cute.logical_divide(gA_main, (None, main_vec_width))
             gB_vec = cute.logical_divide(gB_main, (None, main_vec_width))
-            tA, tB = self._make_thread_vector_slice(gA_vec, gB_vec, tidx, n_idx, bs)
+            tA, tB = self._make_thread_vector_slice(
+                gA_vec, gB_vec, tidx, n_idx, threadblock_size
+            )
             if const_expr(self.use_pdl and self.prefetch_pdl_weights):
                 prefetch_tiles: cutlass.Constexpr = self.main_prefetch_tiles
                 prefetched_b = cute.make_rmem_tensor(
@@ -272,7 +278,7 @@ class HcDownSiluFma:
             gA_tail_vec = cute.logical_divide(gA_tail, (None, tail_vec_width))
             gB_tail_vec = cute.logical_divide(gB_tail, (None, tail_vec_width))
             tA_t, tB_t = self._make_thread_vector_slice(
-                gA_tail_vec, gB_tail_vec, tidx, n_idx, bs
+                gA_tail_vec, gB_tail_vec, tidx, n_idx, threadblock_size
             )
             self._vector_fma(acc, tA_t, tB_t, M, tail_tiles, 8)
 
@@ -283,7 +289,7 @@ class HcDownSiluFma:
             gA_scalar_vec = cute.logical_divide(gA_scalar, (None, 1))
             gB_scalar_vec = cute.logical_divide(gB_scalar, (None, 1))
             tA_s, tB_s = self._make_thread_vector_slice(
-                gA_scalar_vec, gB_scalar_vec, tidx, n_idx, bs
+                gA_scalar_vec, gB_scalar_vec, tidx, n_idx, threadblock_size
             )
             self._vector_fma(acc, tA_s, tB_s, M, ks_full, 2)
 
