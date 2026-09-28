@@ -9,7 +9,7 @@ from torch.utils._python_dispatch import TorchDispatchMode
 
 from .sanitize import restore_layer_refs, sanitize_layer_refs
 from .types import LayerReloadingInfo, LayerTensors
-from .utils import get_layer_params_buffers, get_layer_tensors
+from .utils import get_layer_params_buffers, get_layer_tensors, get_tensor_load_numel
 
 __all__ = [
     "to_meta_tensor",
@@ -206,5 +206,5 @@ def get_numel_loaded(
     numel = counter.copied_numel
     param = args.arguments.get("param", None)
     if isinstance(param, torch.Tensor):
-        numel = min(numel, param.numel())
+        numel = min(numel, get_tensor_load_numel(param))
     return numel, return_value

@@ -18,6 +18,11 @@ from vllm.envs import (
 from vllm.exceptions import VLLMValidationError
 
 
+def test_object_storage_shm_default_name():
+    """The generated name must fit macOS's shared-memory name limit."""
+    assert len(envs._generate_shm_name()) <= 30
+
+
 def test_getattr_without_cache(monkeypatch: pytest.MonkeyPatch):
     assert envs.VLLM_HOST_IP == ""
     assert envs.VLLM_PORT is None

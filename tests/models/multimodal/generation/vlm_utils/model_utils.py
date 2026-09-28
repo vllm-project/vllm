@@ -6,7 +6,6 @@ typically specific to a small subset of models.
 """
 
 import types
-from pathlib import PosixPath
 
 import numpy as np
 import numpy.typing as npt
@@ -29,7 +28,7 @@ from vllm.logprobs import SampleLogprobs
 from vllm.platforms import current_platform
 from vllm.utils.collection_utils import is_list_of
 
-from .....conftest import HfRunner, ImageAsset, ImageTestAssets
+from .....conftest import HfRunner, ImageTestAssets
 from .types import RunnerOutput
 
 
@@ -46,17 +45,6 @@ def blip2_vllm_to_hf_output(vllm_output: RunnerOutput, model: str) -> RunnerOutp
     hf_output_ids = hf_output_ids[1:]
 
     return hf_output_ids, hf_output_str, out_logprobs
-
-
-def qwen_vllm_to_hf_output(
-    vllm_output: RunnerOutput, model: str
-) -> tuple[list[int], str, SampleLogprobs | None]:
-    """Sanitize vllm output [qwen models] to be comparable with hf output."""
-    output_ids, output_str, out_logprobs = vllm_output
-
-    hf_output_str = output_str + "<|endoftext|>"
-
-    return output_ids, hf_output_str, out_logprobs
 
 
 def qwen2_vllm_to_hf_output(
@@ -239,37 +227,6 @@ def get_llava_embeddings(image_assets: ImageTestAssets):
     return [asset.image_embeds for asset in image_assets]
 
 
-####### Prompt path encoders for models that need models on disk
-def qwen_prompt_path_encoder(
-    tmp_path: PosixPath, prompt: str, assets: list[ImageAsset] | ImageTestAssets
-) -> str:
-    """Given a temporary dir path, export one or more image assets into the
-    tempdir & replace its contents with the local path to the string so that
-    the HF version of Qwen-VL can resolve the path and load the image in its
-    forward() call.
-
-    Args:
-        tmp_path: Tempdir for test under consideration.
-        prompt: Prompt with image placeholders.
-        assets: list of image assets whose len equals the num placeholders.
-
-    """
-    # Ensure that the number of placeholders matches the number of assets;
-    # If this is not true, the test is probably written incorrectly.
-    assert prompt.count("<img></img>") == len(assets)
-
-    # Replace the placeholders with local paths to the exported assets
-    for asset in assets:
-        image_tmp_path = tmp_path / f"{asset.name}.jpg"
-        asset.pil_image.save(image_tmp_path)
-        prompt = prompt.replace(
-            "<img></img>",
-            f"<img>{image_tmp_path}</img>",
-            1,
-        )
-    return prompt
-
-
 ####### Model-specific HuggingFace runner patchers
 def deepseekvl2_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
     """Patches and returns an instance of the HfRunner to use for GLM4."""
@@ -307,16 +264,6 @@ def gemma3_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
         return hf_processor(*args, do_pan_and_scan=True, **kwargs)
 
     hf_model.processor = processor
-
-    orig_generate = hf_model.model.generate
-
-    def _generate(self, *args, **kwargs):
-        # FIXME: https://github.com/huggingface/transformers/issues/38333
-        kwargs["disable_compile"] = True
-
-        return orig_generate(*args, **kwargs)
-
-    hf_model.model.generate = types.MethodType(_generate, hf_model.model)
 
     return hf_model
 
