@@ -10,7 +10,7 @@ from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backends.mla import rocm_aiter_mla_sparse as sparse_mod
 from vllm.v1.attention.backends.mla.indexer import (
-    Glm5NextIndexerBackend,
+    DeepseekV32IndexerBackend,
     KpoolTailBackend,
 )
 from vllm.v1.attention.backends.mla.rocm_aiter_mla_sparse import (
@@ -70,7 +70,7 @@ def test_fit_kpool_indices_rejects_narrow_input():
 
 def test_rocm_sparse_mla_supports_glm_packed_layout():
     layouts = get_supported_kv_cache_layouts(
-        (ROCMAiterMLASparseBackend, Glm5NextIndexerBackend, KpoolTailBackend)
+        (ROCMAiterMLASparseBackend, DeepseekV32IndexerBackend, KpoolTailBackend)
     )
 
     assert layouts == [KVCacheLayout.BLHNC]

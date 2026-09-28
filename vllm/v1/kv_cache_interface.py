@@ -661,8 +661,8 @@ class MLAAttentionSpec(FullAttentionSpec):
     model_version: str | None = None
     cache_role: SparseCacheRole = SparseCacheRole.SPARSE
     is_index_group_leader: bool = False
-    storage_block_size: int | None = None
-    """Token width used to view storage when it differs from the kernel block."""
+    kernel_page_size: int | None = None
+    """Token width of a virtual kernel page inside a manager block."""
     # Group capability enabled when any member flattens a non-causal query block
     # into decode rows. Runtime metadata still selects causal vs. non-causal mode.
     non_causal_multi_token_decode: bool = False
@@ -683,7 +683,7 @@ class MLAAttentionSpec(FullAttentionSpec):
         model_version_set = set(spec.model_version for spec in specs)
         cache_role_set = {spec.cache_role for spec in specs}
         index_group_leader_set = {spec.is_index_group_leader for spec in specs}
-        storage_block_size_set = set(spec.storage_block_size for spec in specs)
+        kernel_page_size_set = {spec.kernel_page_size for spec in specs}
         block_stride_alignment_set = {spec.block_stride_alignment for spec in specs}
         assert (
             len(cache_dtype_str_set) == 1
@@ -691,12 +691,12 @@ class MLAAttentionSpec(FullAttentionSpec):
             and len(model_version_set) == 1
             and len(cache_role_set) == 1
             and len(index_group_leader_set) == 1
-            and len(storage_block_size_set) == 1
+            and len(kernel_page_size_set) == 1
             and len(block_stride_alignment_set) == 1
         ), (
             "All attention layers in the same KV cache group must use the same "
             "quantization method, tokens per state, model version, cache role, "
-            "index-sharing role, storage block size and block stride alignment."
+            "index-sharing role, kernel page size and block stride alignment."
         )
         merged_spec = cls(
             block_size=specs[0].block_size,
@@ -713,7 +713,7 @@ class MLAAttentionSpec(FullAttentionSpec):
             model_version=model_version_set.pop(),
             cache_role=cache_role_set.pop(),
             is_index_group_leader=index_group_leader_set.pop(),
-            storage_block_size=storage_block_size_set.pop(),
+            kernel_page_size=kernel_page_size_set.pop(),
             block_stride_alignment=block_stride_alignment_set.pop(),
             non_causal_multi_token_decode=any(
                 spec.non_causal_multi_token_decode for spec in specs

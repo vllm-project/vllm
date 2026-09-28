@@ -90,6 +90,7 @@ def test_block_size_uses_kernel_block_size(monkeypatch: pytest.MonkeyPatch):
 
     assert proposer.block_size == KERNEL_BLOCK_SIZE
     assert proposer.block_size != SCHEDULER_BLOCK_SIZE
+    # The metadata builder keeps receiving the kernel block size as well.
     assert proposer.draft_attn_groups[0].kernel_block_size == KERNEL_BLOCK_SIZE
     assert proposer.draft_attn_groups[0].block_stride_bytes == BLOCK_STRIDE_BYTES
 

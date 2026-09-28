@@ -115,6 +115,9 @@ def test_flashmla_bf16_nope_accepts_packed_manager_blocks():
         cache_dtype_str="bfloat16",
         block_stride_alignment=1024,
     )
+    (supported,) = FlashMLASparseBackend.get_supported_kernel_block_sizes(spec)
+    assert isinstance(supported, MultipleOf)
+    assert supported.base == 64
     num_blocks = 2
     layers = ["layer.0", "layer.1"]
     page_size = spec.page_size_bytes
@@ -155,7 +158,8 @@ def test_flashmla_quantized_cache_keeps_fixed_kernel_pages():
         state_content_bytes=656,
     )
 
-    assert FlashMLASparseBackend.get_supported_kernel_block_sizes_for_spec(spec) == [64]
+    assert FlashMLASparseBackend.get_supported_kernel_block_sizes() == [64]
+    assert FlashMLASparseBackend.get_supported_kernel_block_sizes(spec) == [64]
     assert select_common_block_size(1152, [FlashMLASparseBackend], [spec]) == 64
 
 

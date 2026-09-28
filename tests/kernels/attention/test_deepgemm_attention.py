@@ -322,14 +322,13 @@ def test_deepgemm_fp8_fp4_paged_mqa_logits(batch_size: int, next_n: int):
 )
 def test_deepgemm_paged_mqa_packed_manager_block_stride():
     from vllm.models.glm5next.common.sparse_indexer import _kpool_flat_page_view
-    from vllm.v1.attention.backends.mla.indexer import kpool_page_geometry
 
     torch.manual_seed(0)
     num_blocks, block_size, packed_rows = 4, 256, 320
     num_heads, head_dim, row_bytes = 64, 128, 132
-    page_size, pages_per_block, dense_stride = kpool_page_geometry(
-        block_size, None, row_bytes
-    )
+    page_size = 64
+    pages_per_block = block_size // page_size
+    dense_stride = pages_per_block
     compact_pages = kv_cache_cast_to_fp8(
         torch.randn(
             num_blocks, block_size, 1, head_dim, device="cuda", dtype=torch.bfloat16
@@ -344,11 +343,7 @@ def test_deepgemm_paged_mqa_packed_manager_block_stride():
     )
     packed_manager = packed_backing[:, :block_size]
     packed_manager.copy_(compact_pages.squeeze(2).view(num_blocks, block_size, -1))
-    packed_stride = kpool_page_geometry(
-        block_size,
-        packed_manager.stride(0) * packed_manager.element_size(),
-        row_bytes,
-    )[2]
+    packed_stride = packed_manager.stride(0) // (page_size * row_bytes)
     packed_pages = _kpool_flat_page_view(packed_manager).unsqueeze(2)
     offsets = torch.arange(pages_per_block, device="cuda", dtype=torch.int32)
     tables = [

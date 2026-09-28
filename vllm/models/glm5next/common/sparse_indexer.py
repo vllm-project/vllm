@@ -4,7 +4,7 @@
 
 import torch
 
-from vllm.v1.attention.backends.mla.indexer import kpool_page_geometry
+from vllm.utils.deep_gemm import PAGED_MQA_PAGE_SIZES
 
 RADIX_TOPK_WORKSPACE_SIZE = 1024 * 1024
 
@@ -16,15 +16,15 @@ def _kpool_flat_page_view(kv_cache: torch.Tensor) -> torch.Tensor:
     if kv_cache.ndim != 3:
         return kv_cache
     num_blocks, num_states, row_width = kv_cache.shape
-    page_states, pages_per_block, stride_pages = kpool_page_geometry(
-        num_states, kv_cache.stride(0) * kv_cache.element_size(), row_width
-    )
-    if pages_per_block == 1:
+    max_page_size = max(PAGED_MQA_PAGE_SIZES)
+    if num_states <= max_page_size:
         return kv_cache
-    assert kv_cache.stride(1) == row_width and kv_cache.stride(2) == 1, (
-        kv_cache.stride()
+    page_states = (
+        max_page_size if num_states % max_page_size == 0 else min(PAGED_MQA_PAGE_SIZES)
     )
+    pages_per_block = num_states // page_states
     page_stride = page_states * row_width
+    stride_pages = kv_cache.stride(0) // page_stride
     num_pages = (num_blocks - 1) * stride_pages + pages_per_block
     return kv_cache.as_strided(
         (num_pages, page_states, row_width), (page_stride, row_width, 1)

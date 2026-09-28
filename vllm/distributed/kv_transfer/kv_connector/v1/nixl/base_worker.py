@@ -594,13 +594,11 @@ class NixlBaseConnectorWorker:
                     for spec in iter_layer_specs(group.kv_cache_spec)
                 )
             ]
-            # A ring without a PLE table (e.g. GLM-5.3-Flash's kpool tail) is
-            # allowed; Qwen CSA-linear carries exactly one single-layer PLE owner.
-            if len(ple_groups) > 1 or (
-                ple_groups and len(ple_groups[0][1].layer_names) != 1
+            if len(ple_groups) > 1 or any(
+                len(group.layer_names) != 1 for _, group in ple_groups
             ):
                 raise ValueError(
-                    "CSA-linear NIXL requires at most one single-layer PLE cache owner."
+                    "CSA-linear NIXL requires at most one PLE cache owner."
                 )
             self._ple_group_index = ple_groups[0][0] if ple_groups else None
 

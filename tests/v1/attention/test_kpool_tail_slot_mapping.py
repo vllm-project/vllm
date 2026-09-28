@@ -27,7 +27,6 @@ import torch
 
 from vllm.v1.attention.backend import CommonAttentionMetadata
 from vllm.v1.attention.backends.mla.indexer import (
-    Glm5NextIndexerBackend,
     KpoolTailBackend,
     KpoolTailMetadataBuilder,
     compute_kpool_tail_slot_mapping,
@@ -54,13 +53,6 @@ def test_tail_backend_layout_matches_kernel_pointer_arithmetic():
     assert head_stride == KPOOL * 128 * torch.bfloat16.itemsize
     assert state_stride == 128 * torch.bfloat16.itemsize
     assert content_stride == 1
-
-
-def test_glm_indexer_keeps_both_packed_layouts():
-    assert Glm5NextIndexerBackend.supported_kv_cache_layouts() == (
-        KVCacheLayout.BLHNC,
-        KVCacheLayout.BLNHC,
-    )
 
 
 def test_tail_spec_reserves_complete_pools_for_speculation():
@@ -395,11 +387,19 @@ def test_interleaved_decode_pollution_legacy_vs_circular():
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a CUDA device")
-def test_triton_mapping_matches_cpu():
-    """CUDA matches CPU for multiple requests, an expanded ring, and
-    untouched padding."""
-    per_req = [list(range(10)), list(range(12))]
-    num_actual, padded_len, ring_size = 22, 30, 2 * KPOOL
+@pytest.mark.parametrize(
+    "per_req,num_actual,padded_len,ring_size",
+    [
+        ([list(range(10)), list(range(12))], 22, 22, KPOOL),
+        ([list(range(10)), list(range(12))], 22, 30, 2 * KPOOL),
+        ([[3, 4], [0], [7, 8, 9]], 6, 8, KPOOL),
+        ([[5]], 1, 1, KPOOL),
+    ],
+)
+def test_triton_mapping_matches_cpu(per_req, num_actual, padded_len, ring_size):
+    """The CUDA (Triton) path must match the CPU torch reference, including
+    tokens between the last request boundary and num_actual_tokens (mapped to
+    the last request) and untouched padding beyond num_actual."""
     positions, qsl, slot_mapping, _, num_reqs = make_batch(
         per_req, padded_len=padded_len
     )

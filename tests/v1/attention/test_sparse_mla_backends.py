@@ -502,8 +502,15 @@ def _run_sparse_backend_decode_correctness(
     device = torch.device(DEVICE_TYPE)
     dtype = torch.bfloat16
 
-    num_heads = max(1, 128 // tensor_parallel_size)
-    kv_lora_rank, qk_nope_head_dim, qk_rope_head_dim, v_head_dim = 512, 128, 64, 128
+    # Model hyper-parameters (kept intentionally small for the unit test)
+    total_num_heads = 128
+    # Compute per-rank heads for simulated TP
+    num_heads = max(1, total_num_heads // tensor_parallel_size)
+
+    kv_lora_rank = 512
+    qk_nope_head_dim = 128
+    qk_rope_head_dim = 64
+    v_head_dim = 128
     head_size = kv_lora_rank + qk_rope_head_dim
     topk_tokens = 128
 

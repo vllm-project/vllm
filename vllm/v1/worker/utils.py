@@ -299,6 +299,9 @@ class AttentionGroup:
             )
             for _ in range(num_metadata_builders)
         ]
+        if kernel_block_size is not None:
+            for builder in self.metadata_builders:
+                builder.set_kernel_block_size(kernel_block_size)
         if block_stride_bytes is not None:
             for builder in self.metadata_builders:
                 builder.set_block_stride_bytes(block_stride_bytes)
@@ -353,7 +356,7 @@ def select_common_block_size(
         spec = kv_cache_specs[backend_idx]
         if spec is None:
             return backend.get_supported_kernel_block_sizes()
-        return backend.get_supported_kernel_block_sizes_for_spec(spec)
+        return backend.get_supported_kernel_block_sizes(spec)
 
     def block_size_is_supported(block_size: int) -> bool:
         """Check if the block size is supported by all backends."""

@@ -77,12 +77,6 @@ class AttentionBackend(ABC):
     ) -> list[int | MultipleOf]:
         return [MultipleOf(1)]
 
-    @classmethod
-    def get_supported_kernel_block_sizes_for_spec(
-        cls, spec: "AttentionSpec"
-    ) -> list[int | MultipleOf]:
-        return cls.get_supported_kernel_block_sizes()
-
     @staticmethod
     def get_kernel_page_rows() -> int | None:
         """Rows per page the kernel addresses when a manager block larger than
@@ -637,9 +631,13 @@ class AttentionMetadataBuilder(ABC, Generic[M]):
         self.layer_names = layer_names
         self.vllm_config = vllm_config
         self.device = device
+        self.kernel_block_size: int | None = None
         # Byte stride between consecutive blocks of this group's cache; set by
         # the runner once the KV cache is laid out.
         self.block_stride_bytes: int | None = None
+
+    def set_kernel_block_size(self, kernel_block_size: int) -> None:
+        self.kernel_block_size = kernel_block_size
 
     def set_block_stride_bytes(self, block_stride_bytes: int) -> None:
         self.block_stride_bytes = block_stride_bytes

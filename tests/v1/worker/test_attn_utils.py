@@ -80,8 +80,7 @@ def test_get_kv_cache_spec_resolves_hisparse_block_size(
         backend = SimpleNamespace(
             get_name=lambda name=name: name,
             customize_spec=AttentionBackend.customize_spec,
-            get_supported_kernel_block_sizes=lambda sizes=sizes: sizes,
-            get_supported_kernel_block_sizes_for_spec=lambda _, sizes=sizes: sizes,
+            get_supported_kernel_block_sizes=lambda _spec=None, sizes=sizes: sizes,
         )
         layers[name] = SimpleNamespace(
             get_kv_cache_spec=lambda _, spec=specs[name]: spec,
@@ -451,15 +450,23 @@ def test_reshape_padded_kv_cache_strides_by_padded_page():
 
 
 @pytest.mark.parametrize(
-    ("kernel_block_sizes", "expected_num_blocks", "expected_num_states"),
+    (
+        "kernel_block_sizes",
+        "kernel_page_size",
+        "expected_num_blocks",
+        "expected_num_states",
+    ),
     [
-        (None, 4, 64),
-        ([256], 4, 64),
-        ([64], 16, 16),
+        (None, None, 4, 64),
+        ([256], None, 4, 64),
+        ([256], 128, 4, 64),
+        ([64], None, 16, 16),
+        ([64], 256, 16, 16),
     ],
 )
 def test_allocate_compressed_mla_cache(
     kernel_block_sizes: list[int] | None,
+    kernel_page_size: int | None,
     expected_num_blocks: int,
     expected_num_states: int,
 ):
@@ -469,6 +476,7 @@ def test_allocate_compressed_mla_cache(
         head_size=128,
         dtype=torch.bfloat16,
         tokens_per_state=4,
+        kernel_page_size=kernel_page_size,
     )
     num_pages = 4
     config = KVCacheConfig(
