@@ -23,7 +23,7 @@ class AttentionLayerBase(ABC):
     supports_dcp: bool = True
 
     def get_kv_cache_bundle(self) -> tuple["AttentionLayerBase", ...] | None:
-        """Components whose KV updates are replicated across TP ranks.
+        """Components whose KV updates are replicated across PCP x TP ranks.
 
         Returning None leaves this layer ineligible for layer-sharded storage.
         Implementations list actual cache modules, including auxiliary caches.

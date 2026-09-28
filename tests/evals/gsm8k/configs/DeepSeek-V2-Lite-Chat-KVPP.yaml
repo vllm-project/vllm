@@ -5,7 +5,8 @@ num_questions: 200
 num_fewshot: 5
 max_concurrency: 8
 server_args: >-
-  --tensor-parallel-size 4
+  --tensor-parallel-size 2
+  --prefill-context-parallel-size 2
   --enforce-eager
   --max-model-len 4096
   --kv-cache-memory-bytes 536870912
@@ -13,3 +14,5 @@ server_args: >-
   --enable-prefix-caching
 env:
   VLLM_USE_V2_MODEL_RUNNER: "1"
+  # PCP MoE gathers token rows; padding masks are currently rank-local.
+  VLLM_MOE_SKIP_PADDING: "0"

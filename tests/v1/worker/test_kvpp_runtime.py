@@ -12,6 +12,7 @@ from vllm.distributed import (
     cleanup_dist_env_and_memory,
     destroy_model_parallel,
     get_kvpp_group,
+    get_pcp_group,
     get_tp_group,
     init_distributed_environment,
     initialize_model_parallel,
@@ -35,10 +36,11 @@ from vllm.v1.worker.kvpp_runtime import KVPPRuntime, maybe_prepare_kvpp
 from vllm.v1.worker.utils import allocate_kv_cache
 
 
-def _runtime_worker(rank: int, port: int, tp_size: int, pp_size: int):
+def _runtime_worker(rank: int, port: int, tp_size: int, pcp_size: int, pp_size: int):
+    replica_size = pcp_size * tp_size
     torch.cuda.set_device(rank)
     init_distributed_environment(
-        world_size=tp_size * pp_size,
+        world_size=replica_size * pp_size,
         rank=rank,
         local_rank=rank,
         distributed_init_method=f"tcp://127.0.0.1:{port}",
@@ -47,22 +49,31 @@ def _runtime_worker(rank: int, port: int, tp_size: int, pp_size: int):
     vllm_config.cache_config.enable_kvpp = True
     with set_current_vllm_config(vllm_config):
         initialize_model_parallel(
-            tensor_model_parallel_size=tp_size, pipeline_model_parallel_size=pp_size
+            tensor_model_parallel_size=tp_size,
+            prefill_context_model_parallel_size=pcp_size,
+            pipeline_model_parallel_size=pp_size,
         )
     try:
         group = get_kvpp_group()
-        assert group.ranks == get_tp_group().ranks
+        stage_start = rank // replica_size * replica_size
+        assert group.ranks == list(range(stage_start, stage_start + replica_size))
+        assert group.rank_in_group == (
+            get_pcp_group().rank_in_group * tp_size + get_tp_group().rank_in_group
+        )
+        assert group.device_group is not get_pcp_group().device_group
         assert group.device_group is not get_tp_group().device_group
         warmup_process_group(group, ["broadcast"])
         local_rank = group.rank_in_group
-        stage_value = 128 * (rank // tp_size)
+        stage_value = 128 * (rank // replica_size)
         # Unequal component sizes and >2 nonowner layers exercise both scratch
         # slots repeatedly. The auxiliary component is acquired before main KV.
-        num_layers = 2 * tp_size + 3
+        num_layers = 2 * replica_size + 3
         owners = [
             owner
-            for owner in range(tp_size)
-            for _ in range(num_layers // tp_size + (owner < num_layers % tp_size))
+            for owner in range(replica_size)
+            for _ in range(
+                num_layers // replica_size + (owner < num_layers % replica_size)
+            )
         ]
         names = [
             f"layer{i}.{part}" for i in range(num_layers) for part in ("mla", "index")
@@ -84,7 +95,7 @@ def _runtime_worker(rank: int, port: int, tp_size: int, pp_size: int):
         )
         placement = KVCachePlacement(
             local_rank,
-            tp_size,
+            replica_size,
             tuple(
                 KVCacheBundle((f"layer{i}.mla", f"layer{i}.index"), owners[i])
                 for i in range(num_layers)
@@ -142,13 +153,14 @@ def _runtime_worker(rank: int, port: int, tp_size: int, pp_size: int):
             with set_current_vllm_config(vllm_config):
                 initialize_model_parallel(
                     tensor_model_parallel_size=tp_size,
+                    prefill_context_model_parallel_size=pcp_size,
                     pipeline_model_parallel_size=pp_size,
                 )
             if enabled:
                 warmup_process_group(get_kvpp_group(), ["broadcast", "all_reduce"])
                 probe = torch.tensor([rank], device="cuda")
                 get_kvpp_group().broadcast(probe)
-                assert probe.item() == rank // tp_size * tp_size
+                assert probe.item() == stage_start
             else:
                 with pytest.raises(
                     AssertionError, match="KVPP group is not initialized"
@@ -158,15 +170,18 @@ def _runtime_worker(rank: int, port: int, tp_size: int, pp_size: int):
         cleanup_dist_env_and_memory()
 
 
-@pytest.mark.parametrize("pp_size", [1, 2])
-def test_materialization_preserves_owner_and_scratch_lifetimes(pp_size):
-    tp_size = 2
-    world_size = tp_size * pp_size
+@pytest.mark.parametrize(
+    "tp_size,pcp_size,pp_size", [(2, 1, 1), (2, 1, 2), (1, 2, 2), (2, 2, 1)]
+)
+def test_materialization_preserves_owner_and_scratch_lifetimes(
+    tp_size, pcp_size, pp_size
+):
+    world_size = tp_size * pcp_size * pp_size
     if torch.cuda.device_count() < world_size:
         pytest.skip(f"Requires {world_size} CUDA GPUs")
     mp.spawn(
         _runtime_worker,
-        args=(get_open_port(), tp_size, pp_size),
+        args=(get_open_port(), tp_size, pcp_size, pp_size),
         nprocs=world_size,
         join=True,
     )

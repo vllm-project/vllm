@@ -73,7 +73,7 @@ class CacheConfig:
     enable_kvpp: bool = False
     """Enable KV layer parallelism within a verified replica group.
 
-    GPU KVPP requires Model Runner V2.
+    GPU KVPP requires Model Runner V2 and replicated KV across PCP x TP (DCP=1).
     KVPP retains each target layer on one rank and
     materializes other layers in reusable receive buffers during execution.
     """

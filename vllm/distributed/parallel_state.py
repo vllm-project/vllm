@@ -2087,9 +2087,11 @@ def initialize_model_parallel(
     global _KVPP
     assert _KVPP is None, "KVPP group is already initialized"
     if config.cache_config.enable_kvpp:
-        # Same replica ranks as TP, with independent collective ordering.
+        # Replicated KV spans PCP x TP within each DP replica and PP stage.
+        kvpp_size = prefill_context_model_parallel_size * tensor_model_parallel_size
+        kvpp_ranks = local_all_ranks if enable_elastic_ep else all_ranks
         _KVPP = init_model_parallel_group(
-            group_ranks,
+            [ranks.tolist() for ranks in kvpp_ranks.reshape(-1, kvpp_size)],
             get_world_group().local_rank,
             backend,
             use_device_communicator=False,

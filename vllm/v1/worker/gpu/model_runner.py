@@ -1947,10 +1947,17 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 kvpp_runtime=self.kvpp_runtime,
             ):
                 self.kv_connector.pre_forward(**connector_kwargs)
-                maybe_prepare_kvpp(
-                    self.kvpp_runtime,
-                    input_batch.num_computed_tokens_np[: input_batch.num_reqs],
-                )
+                if self.kvpp_runtime is not None:
+                    num_computed_tokens = input_batch.num_computed_tokens_np[
+                        : input_batch.num_reqs
+                    ]
+                    if batch_req_state is not None:
+                        # PCP query offsets include the current prefill. Use
+                        # request history shared by all PCP x TP ranks instead.
+                        num_computed_tokens = self.req_states.num_computed_tokens_np[
+                            batch_req_state.idx_mapping_np
+                        ]
+                    maybe_prepare_kvpp(self.kvpp_runtime, num_computed_tokens)
                 if ubatch_state is not None:
                     assert self.ubatch_runner is not None
                     model_output = self.ubatch_runner.run(

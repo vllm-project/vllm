@@ -5,7 +5,7 @@
 from typing import Any
 
 from vllm.config import VllmConfig, get_layers_from_vllm_config
-from vllm.distributed import get_tp_group
+from vllm.distributed import get_kvpp_group
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.platforms import current_platform
 from vllm.v1.kv_cache_placement import KVCacheBundle, KVCachePlacement
@@ -19,8 +19,6 @@ def get_kv_cache_placement(
     parallel = vllm_config.parallel_config
     if parallel.decode_context_parallel_size != 1:
         raise ValueError("KVPP requires replicated KV; DCP is not supported.")
-    if parallel.prefill_context_parallel_size != 1:
-        raise ValueError("KVPP with PCP requires a verified replica-domain backend.")
     if parallel.enable_dbo:
         raise ValueError("KVPP does not yet support overlapping microbatches.")
     if not vllm_config.model_config.enforce_eager:
@@ -69,7 +67,7 @@ def get_kv_cache_placement(
             "KVPP requires explicit replicated bundles for every target cache: "
             f"{set(specs) - covered - draft_names}"
         )
-    group = get_tp_group()
+    group = get_kvpp_group()
     if group.world_size <= 1:
         raise ValueError("KVPP requires at least two KV replica ranks.")
     if len(targets) < group.world_size:
