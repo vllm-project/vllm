@@ -23,6 +23,12 @@ _PLATFORM_CAVEAT = (
 def format_selection(selection: SelectionMetadata) -> str:
     """Render the selection metadata a capture is only valid under."""
     backends = ", ".join(sorted(set(selection.attention_backends.values())))
+    heads = (
+        f"{selection.num_query_heads} query, {selection.num_kv_heads} kv, "
+        f"head size {selection.head_size}"
+    )
+    if selection.tensor_parallel_size > 1:
+        heads += " (per rank)"
     rows = {
         "platform": selection.platform,
         "device": selection.device,
@@ -33,9 +39,10 @@ def format_selection(selection: SelectionMetadata) -> str:
         "kv cache dtype": selection.kv_cache_dtype,
         "block size": f"{selection.block_size} (kernel {selection.kernel_block_sizes})",
         "attention layers": selection.num_attention_layers,
-        "heads": f"{selection.num_query_heads} query, "
-        f"{selection.num_kv_heads} kv, head size {selection.head_size}",
+        "heads": heads,
     }
+    if selection.tensor_parallel_size > 1:
+        rows["tensor parallel"] = f"{selection.tensor_parallel_size} ranks"
     if windows := Counter(selection.sliding_windows.values()):
         rows["sliding window"] = ", ".join(
             f"{window} ({count} layers)" for window, count in sorted(windows.items())
@@ -274,6 +281,7 @@ def write_capture_files(capture: OpCapture, directory: str | os.PathLike) -> Pat
     )
     summary = {
         "model": capture.model,
+        "rank": capture.rank,
         "batch": asdict(capture.batch),
         "selection": asdict(selection),
         "ops": len(capture.ops),

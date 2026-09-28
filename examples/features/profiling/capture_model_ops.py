@@ -21,7 +21,8 @@ operators only some of them reach:
 Pass `--output-dir` to also write each capture as files (`ops.txt`,
 `ops.sequence.txt`, `capture.json`, `report.txt`), and
 `--hf-overrides '{"quantization_config": null}'` to capture a quantized
-checkpoint's unquantized path.
+checkpoint's unquantized path. With `--tensor-parallel-size N` every rank is
+captured in its own process, collectives included.
 
 Pass `--verify-against <device>` to also run on hardware and assert the two
 Chakra execution traces agree, as a regression check:
@@ -42,6 +43,7 @@ from vllm.profiler.op_capture import (
     BatchSpec,
     capture_batches,
     capture_model_ops,
+    capture_ranks,
     compare_devices,
     format_batches,
     format_diff,
@@ -104,29 +106,41 @@ def main(args: argparse.Namespace) -> int:
             equal &= diff.equal
         return 0 if equal else 1
 
-    if len(batches) == 1:
-        captures = [
-            capture_model_ops(
-                args.model,
-                batch=batches[0],
-                trace_path=args.trace,
-                engine_args=engine_args,
-                keep_going=args.keep_going,
-            )
-        ]
-    else:
-        captures = capture_batches(
+    if engine_args.tensor_parallel_size > 1:
+        ranks = capture_ranks(
             args.model, batches, engine_args=engine_args, keep_going=args.keep_going
         )
-    for index, capture in enumerate(captures):
-        print(format_report(capture, show_shapes=args.shapes), end="\n\n")
-        if args.output_dir is not None:
-            subdir = (
-                args.output_dir if len(captures) == 1 else args.output_dir / str(index)
+    elif len(batches) == 1:
+        ranks = [
+            [
+                capture_model_ops(
+                    args.model,
+                    batch=batches[0],
+                    trace_path=args.trace,
+                    engine_args=engine_args,
+                    keep_going=args.keep_going,
+                )
+            ]
+        ]
+    else:
+        ranks = [
+            capture_batches(
+                args.model, batches, engine_args=engine_args, keep_going=args.keep_going
             )
-            print(f"Wrote {write_capture_files(capture, subdir)}", end="\n\n")
-    if len(captures) > 1:
-        print(format_batches(captures))
+        ]
+    for rank, captures in enumerate(ranks):
+        output_dir = args.output_dir
+        if len(ranks) > 1:
+            print(f"===== Rank {rank} of {len(ranks)} =====", end="\n\n")
+            if output_dir is not None:
+                output_dir /= f"rank{rank}"
+        for index, capture in enumerate(captures):
+            print(format_report(capture, show_shapes=args.shapes), end="\n\n")
+            if output_dir is not None:
+                subdir = output_dir if len(captures) == 1 else output_dir / str(index)
+                print(f"Wrote {write_capture_files(capture, subdir)}", end="\n\n")
+        if len(captures) > 1:
+            print(format_batches(captures), end="\n\n")
     return 0
 
 

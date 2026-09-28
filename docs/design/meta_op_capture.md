@@ -150,7 +150,7 @@ print(format_report(capture))
 print([op.name for op in capture.custom_ops])
 ```
 
-`capture_batches(model, [BatchSpec(...), ...])` captures several batches on one built model and returns one `OpCapture` per batch; `format_batches(captures)` renders the operators only some of them reach, and `write_capture_files(capture, directory)` writes the files `--output-dir` does.
+`capture_batches(model, [BatchSpec(...), ...])` captures several batches on one built model and returns one `OpCapture` per batch; `format_batches(captures)` renders the operators only some of them reach, and `write_capture_files(capture, directory)` writes the files `--output-dir` does. `capture_ranks(model, batches, engine_args=...)` does the same on every tensor-parallel rank, one process each, returning one list per rank.
 
 `engine_args` reaches anything else a config can express, such as `quantization` or `kv_cache_dtype`; the harness overrides only `model`, `load_format` and `enforce_eager`. `compare_traces(meta_path, real_path)` diffs two traces already on disk, and `load_trace(path)` reads one as normalized operators.
 
@@ -161,7 +161,7 @@ print([op.name for op in capture.custom_ops])
 - **Kernels called outside the dispatcher are not covered**, apart from raw Triton launches. Libraries such as FlashInfer, DeepGEMM, CuTe DSL and aiter's Python API take tensors directly unless vLLM wraps the call in a custom op with a fake impl. Those that go through DLPack refuse meta tensors (`BufferError: Cannot pack tensors on meta`), which `--keep-going` reports as where the forward pass stopped. An extension that reads `data_ptr()` instead gets a null pointer, so on a real accelerator it may launch a kernel on it.
 - **Values are undefined.** Nothing data-dependent is real, including MoE routing; only shapes and the operator sequence are. Model code that reads a value on the host, e.g. `.item()`, fails on `meta`. With `--keep-going`, a custom op whose kernel does so is finished with fake outputs; outside one, the forward pass stops there.
 - **Text inputs only.** A multimodal model runs its language model over text tokens, without its vision or audio encoder. Encoder-decoder models, such as Whisper, are refused.
-- **Single process only.** The harness needs `tp=pp=dp=1`. A capture still matches one rank of a tensor-parallel run, minus the collectives and with per-rank shapes.
+- **Tensor parallelism only.** `capture_ranks` runs one process per tensor-parallel rank, so collectives appear with per-rank shapes; on `meta` they rendezvous over gloo and exchange nothing. Pipeline, context and data parallelism are refused.
 - **The batch must fit one scheduler step**, i.e. within `max_num_batched_tokens` and `max_num_seqs`, because metadata builders size their buffers by those, and within `max_model_len`.
 - **Raw Triton kernels appear in the operator list, not the execution trace**, since they never go through the dispatcher.
 - **A capture is platform-specific.** Keep the selection metadata with the operator list.
@@ -181,8 +181,8 @@ print([op.name for op in capture.custom_ops])
 `AssertionError: ... requires a CUDA device` (or similar)
 : The model's code is restricted to another platform; capture it there.
 
-`ValueError: ForwardHarness runs in a single process ...` or `... exceeds the scheduler budget ...`
-: Set the parallel sizes to 1, or raise `max_num_batched_tokens` / `max_num_seqs` in `engine_args`.
+`ValueError: ForwardHarness captures tensor-parallel ranks only ...`, `... needs one harness per rank ...` or `... exceeds the scheduler budget ...`
+: Set the pipeline, context and data parallel sizes to 1, use `capture_ranks` for tensor parallelism, or raise `max_num_batched_tokens` / `max_num_seqs` in `engine_args`.
 
 `AssertionError: Tensors left the meta device: [...]`
 : Model code created these parameters or buffers with an explicit `device=`, so they were allocated on the accelerator. Construct them on the default device instead. `--keep-going` reports them without failing.

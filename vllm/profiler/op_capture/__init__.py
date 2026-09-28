@@ -26,6 +26,7 @@ from vllm.profiler.op_capture.meta_ops import (
     UnsupportedMetaOpError,
     register_meta_impls,
 )
+from vllm.profiler.op_capture.parallel import capture_ranks
 from vllm.profiler.op_capture.recorder import OpRecorder, RecordedOp
 from vllm.profiler.op_capture.report import (
     format_batches,
@@ -54,6 +55,7 @@ __all__ = [
     "capture_batches",
     "capture_execution_trace",
     "capture_model_ops",
+    "capture_ranks",
     "compare_devices",
     "compare_traces",
     "format_batches",

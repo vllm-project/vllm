@@ -189,6 +189,8 @@ class SelectionMetadata:
     num_query_heads: int
     num_kv_heads: int
     head_size: int
+    tensor_parallel_size: int = 1
+    """Ranks the model is sharded over; head counts are per rank."""
     attention_layers: tuple[str, ...] = ()
     """Names of the attention layers, in model order."""
     sliding_windows: dict[str, int] = field(default_factory=dict)
@@ -239,6 +241,8 @@ class OpCapture:
     materialized: tuple[str, ...] = ()
     """Parameters and buffers model code put on a real device despite `meta`,
     reported by a `keep_going` capture instead of failing it."""
+    rank: int = 0
+    """Tensor-parallel rank the capture ran as."""
 
     @property
     def custom_ops(self) -> list[RecordedOp]:
@@ -267,11 +271,19 @@ class ForwardHarness:
         engine_args: Base engine args, for overriding e.g. `max_model_len` or
             `quantization`. `model`, `load_format` and `enforce_eager` are set
             by the harness.
+        rank: Tensor-parallel rank to run as, when `engine_args` asks for more
+            than one.
+        distributed_init_method: Where the ranks rendezvous, e.g.
+            `"tcp://127.0.0.1:29500"`. Required for more than one rank, each
+            running its own harness in its own process, as `capture_ranks`
+            arranges.
 
     Raises:
-        ValueError: If the config asks for more than one rank; the harness is
-            single-process. Or if the batch exceeds the scheduler's per-step
-            token or request budget, which no real step could.
+        ValueError: If the config asks for pipeline, context or data
+            parallelism, or for tensor parallelism without
+            `distributed_init_method`. Or if the batch exceeds the scheduler's
+            per-step token or request budget, or `max_model_len`, which no real
+            step could.
         NotImplementedError: If the model is encoder-decoder.
 
     """
@@ -283,13 +295,17 @@ class ForwardHarness:
         device: str = "meta",
         batch: BatchSpec | None = None,
         engine_args: EngineArgs | None = None,
+        rank: int = 0,
+        distributed_init_method: str | None = None,
     ):
         self.model_id = model
         self.batch = batch or BatchSpec()
         self.is_meta = torch.device(device).type == "meta"
         self.device = torch.device(device)
         if not self.is_meta and self.device.index is None:
-            self.device = torch.device(f"{self.device.type}:0")
+            self.device = torch.device(f"{self.device.type}:{rank}")
+        self.rank = rank
+        self._distributed_init_method = distributed_init_method
 
         engine_args = replace(engine_args) if engine_args else EngineArgs(model=model)
         engine_args.model = model
@@ -304,11 +320,16 @@ class ForwardHarness:
                 f"encoder-decoder models such as {model}."
             )
         parallel_config = self.vllm_config.parallel_config
-        if parallel_config.world_size_across_dp != 1:
+        self.tensor_parallel_size = parallel_config.tensor_parallel_size
+        if parallel_config.world_size_across_dp != self.tensor_parallel_size:
             raise ValueError(
-                "ForwardHarness runs in a single process, so it needs "
-                "tensor, pipeline and data parallel sizes of 1; got "
-                f"{parallel_config.world_size_across_dp} ranks."
+                "ForwardHarness captures tensor-parallel ranks only, so it "
+                "needs pipeline, context and data parallel sizes of 1."
+            )
+        if self.tensor_parallel_size > 1 and distributed_init_method is None:
+            raise ValueError(
+                f"tensor_parallel_size={self.tensor_parallel_size} needs one "
+                "harness per rank; use capture_ranks() to run them."
             )
         self._check_batch(self.batch)
 
@@ -402,7 +423,7 @@ class ForwardHarness:
         self._exit_stack.close()
 
     def _init_distributed(self) -> None:
-        """Build the single-rank process groups this model's layers expect.
+        """Build the process groups this model's layers expect.
 
         The model-parallel groups depend on the model -- only a MoE one gets an
         expert-parallel group -- so they are rebuilt here and torn down on exit,
@@ -410,20 +431,23 @@ class ForwardHarness:
         world group the harness had to create is torn down with them.
         """
         destroy_model_parallel()
+        world_size = self.tensor_parallel_size
         if not torch.distributed.is_initialized():
-            # Gloo keeps a meta-device capture off the accelerator entirely; at
-            # world size 1 no collective ever reaches the backend anyway.
+            # Gloo keeps a meta-device capture off the accelerator entirely:
+            # its collectives have meta kernels, which exchange nothing.
+            backend = "gloo"
+            if world_size > 1 and not self.is_meta:
+                backend = current_platform.dist_backend
             init_distributed_environment(
-                world_size=1,
-                rank=0,
-                distributed_init_method=get_distributed_init_method(
-                    "127.0.0.1", get_open_port()
-                ),
-                local_rank=0,
-                backend="gloo",
+                world_size=world_size,
+                rank=self.rank,
+                distributed_init_method=self._distributed_init_method
+                or get_distributed_init_method("127.0.0.1", get_open_port()),
+                local_rank=self.rank,
+                backend=backend,
             )
             self._exit_stack.callback(destroy_distributed_environment)
-        initialize_model_parallel(1, 1)
+        initialize_model_parallel(world_size, 1)
         self._exit_stack.callback(destroy_model_parallel)
 
     def _init_encoder_only_attn(self) -> None:
@@ -726,6 +750,7 @@ class ForwardHarness:
             num_query_heads=getattr(first, "num_heads", 0),
             num_kv_heads=getattr(first, "num_kv_heads", 0),
             head_size=getattr(first, "head_size", 0),
+            tensor_parallel_size=self.tensor_parallel_size,
             attention_layers=tuple(layers),
             sliding_windows={
                 name: window
@@ -798,6 +823,7 @@ def _capture(
         missing_kernels=tuple(sorted(missing)),
         failure=harness.failure,
         materialized=tuple(materialized),
+        rank=harness.rank,
     )
 
 
@@ -808,6 +834,8 @@ def capture_batches(
     device: str = "meta",
     engine_args: EngineArgs | None = None,
     keep_going: bool = False,
+    rank: int = 0,
+    distributed_init_method: str | None = None,
 ) -> list[OpCapture]:
     """Capture the operators a model executes on each of several batches.
 
@@ -821,6 +849,8 @@ def capture_batches(
         engine_args: As for `capture_model_ops`. `max_model_len` must cover
             the longest batch.
         keep_going: As for `capture_model_ops`.
+        rank: As for `ForwardHarness`.
+        distributed_init_method: As for `ForwardHarness`.
 
     Returns:
         One capture per batch, in the same order.
@@ -829,7 +859,12 @@ def capture_batches(
     if not batches:
         raise ValueError("capture_batches needs at least one batch")
     with ForwardHarness(
-        model, device=device, batch=batches[0], engine_args=engine_args
+        model,
+        device=device,
+        batch=batches[0],
+        engine_args=engine_args,
+        rank=rank,
+        distributed_init_method=distributed_init_method,
     ) as harness:
         captures = []
         for batch in batches:

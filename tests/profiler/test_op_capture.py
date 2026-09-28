@@ -22,6 +22,7 @@ from vllm.profiler.op_capture import (
     UnsupportedMetaOpError,
     capture_batches,
     capture_model_ops,
+    capture_ranks,
     compare_devices,
     format_diff,
     meta_ops,
@@ -131,6 +132,28 @@ def test_capture_batches_runs_each_batch_on_one_model():
         for capture in captures
     ]
     assert [op.inputs[-1] for op in embeddings] == ["i64[8]", "i64[2]"]
+
+
+def test_tensor_parallel_needs_one_harness_per_rank():
+    engine_args = EngineArgs(model=MODEL, max_model_len=1024, tensor_parallel_size=2)
+    with pytest.raises(ValueError, match="capture_ranks"):
+        ForwardHarness(MODEL, engine_args=engine_args)
+
+
+def test_capture_ranks_records_collectives_on_per_rank_shards():
+    engine_args = EngineArgs(
+        model=MODEL,
+        max_model_len=1024,
+        tensor_parallel_size=2,
+        hf_overrides={"num_hidden_layers": 1},
+    )
+    ranks = capture_ranks(MODEL, [BatchSpec()], engine_args=engine_args)
+    assert [captures[0].rank for captures in ranks] == [0, 1]
+    for (capture,) in ranks:
+        selection = capture.selection
+        assert selection.tensor_parallel_size == 2
+        assert (selection.num_query_heads, selection.num_kv_heads) == (7, 1)
+        assert "vllm::all_reduce" in {op.name for op in capture.ops}
 
 
 def test_capture_allocates_no_accelerator_memory():
