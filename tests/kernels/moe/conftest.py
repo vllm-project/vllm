@@ -58,6 +58,6 @@ def pytest_runtest_setup(item):
     # Not tryfirst: the skipping plugin evaluates skip marks in a tryfirst
     # hook, so tests about to be skipped never reach this, while fixture setup
     # still runs afterwards.
-    if item.path.name in NEEDS_CLEAN_ENTRY:
+    if item.path.name in NEEDS_CLEAN_ENTRY or "dist_init" in item.fixturenames:
         reset_workspace_manager()
         cleanup_dist_env_and_memory()
