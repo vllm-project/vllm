@@ -23,6 +23,7 @@ use vllm_engine_core_client::{
 use crate::RequestTimestamps;
 use crate::error::Result;
 use crate::inflight::RequestGuard;
+use crate::observer::ObserverContext;
 use crate::request_metrics::{RequestMetricsTracker, current_unix_timestamp_secs};
 
 /// Output tokens `[start, end)` were sampled by weights labelled `version`.
@@ -325,6 +326,8 @@ pub struct GenerateOutputStream {
     num_output_tokens: usize,
     /// Routed-expert rows received so far, concatenated on the terminal output.
     routed_experts_chunks: Vec<WireNdArray>,
+    /// Taken on finish so observers are notified at most once.
+    observer_context: Option<ObserverContext>,
     /// Removes this request's external→internal tracking edge on drop. Held for
     /// its `Drop` side effect only; never read directly.
     _request_guard: RequestGuard,
@@ -338,6 +341,7 @@ impl GenerateOutputStream {
         remote_prefill_cached_tokens: Option<usize>,
         raw_stream: EngineCoreOutputStream,
         request_metrics: RequestMetricsTracker,
+        observer_context: Option<ObserverContext>,
         request_guard: RequestGuard,
     ) -> Self {
         Self {
@@ -352,7 +356,15 @@ impl GenerateOutputStream {
             weight_version_starts: Vec::new(),
             num_output_tokens: 0,
             routed_experts_chunks: Vec::new(),
+            observer_context,
             _request_guard: request_guard,
+        }
+    }
+
+    fn finish(&mut self, received_at: f64, finish_reason: FinishReason) {
+        let stats = self.request_metrics.record_finished(received_at, &finish_reason);
+        if let Some(context) = self.observer_context.take() {
+            context.notify(finish_reason, stats);
         }
     }
 
@@ -442,7 +454,7 @@ impl GenerateOutputStream {
         if let Some(finish_reason) = finish_reason.as_ref()
             && !rejected
         {
-            self.request_metrics.record_finished(received_at, finish_reason.clone());
+            self.finish(received_at, finish_reason.clone());
         }
         let weight_versions = if finish_reason.is_some() {
             self.weight_version_spans()
@@ -559,8 +571,7 @@ impl Drop for GenerateOutputStream {
             AbortCause::StopStringMatched => FinishReason::Stop(None),
         };
 
-        self.request_metrics
-            .record_finished(current_unix_timestamp_secs(), finish_reason);
+        self.finish(current_unix_timestamp_secs(), finish_reason);
     }
 }
 
