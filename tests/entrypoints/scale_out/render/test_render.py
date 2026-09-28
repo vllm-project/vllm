@@ -651,9 +651,9 @@ async def test_messages_render_system_and_multi_turn(client):
 async def test_messages_render_merges_inline_system(client):
     """Inline system messages merge into the leading system block.
 
-    Without a --chat-template arg the /v1/messages server path detects
-    merge_inline_system=True, so render must produce the same tokens as
-    the manually pre-merged request.
+    The model's chat template rejects non-leading system messages, so the
+    /v1/messages server path detects merge_inline_system=True and render must
+    produce the same tokens as the manually pre-merged request.
     """
     inline = await client.post(
         "/v1/messages/render",
