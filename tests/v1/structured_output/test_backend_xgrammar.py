@@ -1,10 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import json
+
 import pytest
 from xgrammar import Grammar
 from xgrammar.testing import _is_grammar_accept_string
 
+from vllm.exceptions import VLLMValidationError
 from vllm.sampling_params import SamplingParams, StructuredOutputsParams
 from vllm.v1.structured_output.backend_xgrammar import (
     has_xgrammar_unsupported_json_features,
@@ -22,6 +25,7 @@ def grammar_accepts(schema: dict, text: str) -> bool:
 # ================================================
 # Unsupported schemas
 # ================================================
+
 
 @pytest.fixture
 def unsupported_string_schemas():
@@ -314,7 +318,15 @@ def supported_allof_anyof_and_oneof():
                 {"type": "string", "enum": ["auto", "none"]},
             ],
         },
+        # Corner case:
+        # "allOf" is a property name, not allOf combinator keyword
+        {"type": "object", "properties": {"allOf": {"type": "string"}}},
     ]
+
+
+# ================================================
+# Test has_xgrammar_unsupported_json_features functionality
+# ================================================
 
 
 class TestHasXGrammarUnsupportedJsonFeatures:
@@ -459,3 +471,101 @@ class TestIsGrammarAcceptString:
             assert _is_grammar_accept_string(grammar, "yes")
             assert _is_grammar_accept_string(grammar, "no\nplease")
             assert not _is_grammar_accept_string(grammar, r"no\nplease")
+
+
+# ================================================
+# Test validate_xgrammar_grammar functionality
+# ================================================
+
+
+class TestValidateXgrammarGrammar:
+    # ================================================
+    # Unsupported structural tag requests
+    # ================================================
+
+    @staticmethod
+    @pytest.fixture
+    def unsupported_json_schema_embedded_in_structural_tag():
+        """Found this problem during work on PR #59061.
+        This PR is not directly connected with the issue,
+        but still this fix was included in PR.
+        """
+        embedded_schema = {
+            "$defs": {
+                "Base": {
+                    "type": "object",
+                    "properties": {"x": {"type": "integer", "minimum": 10}},
+                    "required": ["x"],
+                }
+            },
+            "allOf": [
+                {"$ref": "#/$defs/Base"},
+                {
+                    "type": "object",
+                    "properties": {"y": {"type": "string"}},
+                    "required": ["y"],
+                },
+            ],
+        }
+        return [
+            # Legacy format (uses "structures" field)
+            {
+                "type": "structural_tag",
+                "structures": [
+                    {
+                        "begin": "<json>",
+                        "schema": embedded_schema,
+                        "end": "</json>",
+                    }
+                ],
+                "triggers": ["<json>"],
+            },
+            # New format (uses "format" field)
+            {
+                "type": "structural_tag",
+                "format": {
+                    "type": "triggered_tags",
+                    "triggers": ["<json>"],
+                    "tags": [
+                        {
+                            "begin": "<json>",
+                            "content": {
+                                "type": "json_schema",
+                                "json_schema": embedded_schema,
+                            },
+                            "end": "</json>",
+                        }
+                    ],
+                },
+            },
+        ]
+
+    # ================================================
+    # Main interface
+    # ================================================
+
+    @pytest.mark.parametrize(
+        "schema_type",
+        [
+            "unsupported_json_schema_embedded_in_structural_tag",
+        ],
+    )
+    def test_unsupported_request(self, schema_type, request):
+        """Here we check that given request is rejected by validate_xgrammar_grammar.
+        So, we MUST get exception for all the requests here.
+        Feel free to add more test cases if you observe some specific cases.
+        """
+        schemas = request.getfixturevalue(schema_type)
+        for schema in schemas:
+            try:
+                validate_xgrammar_grammar(
+                    SamplingParams(
+                        structured_outputs=StructuredOutputsParams(
+                            structural_tag=json.dumps(schema),
+                        )
+                    )
+                )
+            except VLLMValidationError:
+                pass
+            else:
+                raise AssertionError(f"Expected VLLMValidationError for: {schema}")
