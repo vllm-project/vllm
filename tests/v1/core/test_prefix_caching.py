@@ -786,10 +786,15 @@ def test_hisparse_inflight_host_import_reserves_remaining_gpu_pages():
     "full_sequence_must_fit,host_num_blocks,admitted",
     [(True, 5, False), (True, 6, True), (False, 3, False), (False, 4, True)],
 )
-def test_hisparse_async_admission_reserves_host_for_inflight_prefills(
+def test_hisparse_async_admission_requires_inflight_host_remainder_to_fit(
     full_sequence_must_fit, host_num_blocks, admitted, tmp_path
 ):
-    """Async loads reserve host blocks for the rest of in-flight prefills."""
+    """Async loads are refused unless in-flight prefills' remaining host pages fit.
+
+    Host pages reach the scheduler's in-flight reservation only through the
+    admission sentinel, so this is a fit check against the free host pool, not
+    a reservation summed with the new request's own host pages.
+    """
     from .utils import create_scheduler, mock_kv
 
     (tmp_path / "config.json").write_text(
