@@ -26,7 +26,6 @@ use vllm_tokenizer::{DecodedText, DynTokenizer, TokenAnchor, TokenAttribution};
 use winnow::error::{ErrMode, ModalResult};
 use winnow::stream::{Partial, Stream};
 
-use super::coerce::ToolParams;
 use super::content::is_python_space;
 use super::pattern::Resolution;
 use super::template::{
@@ -35,7 +34,7 @@ use super::template::{
 };
 use super::transform::python_type_name;
 use super::{unsupported, value};
-use crate::tool::{Tool, ToolCallDelta};
+use crate::tool::{Tool, ToolCallDelta, ToolSchemas};
 use crate::unified::{Result, UnifiedParser, UnifiedParserOutput, parsing_failed};
 use crate::utils::{incomplete, parse_buffered_event, safe_text_len_mul};
 
@@ -49,7 +48,7 @@ const PROMPT_WINDOWS: [usize; 3] = [64, 512, 4096];
 /// <https://github.com/huggingface/transformers/blob/6d43ab4008/src/transformers/utils/chat_parsing/response_parser.py>
 pub struct HfUnifiedParser {
     template: Arc<ResponseTemplate>,
-    tool_params: ToolParams,
+    tool_schemas: ToolSchemas,
     tokenizer: DynTokenizer,
     buffer: DecodedText,
     current: Current,
@@ -151,7 +150,7 @@ impl HfUnifiedParser {
             strip: template.regions.iter().map(StripState::new).collect(),
             current: Current::Sink,
             template,
-            tool_params: ToolParams::new(tools),
+            tool_schemas: ToolSchemas::from_tools(tools),
             tokenizer,
             buffer: DecodedText::default(),
             next_tool_index: 0,
@@ -379,15 +378,12 @@ impl HfUnifiedParser {
             }
             RegionKind::ToolCalls(calls) => {
                 let parsed = calls.content.parse(&occurrence.body)?;
-                let mut value = match &calls.transform {
+                let value = match &calls.transform {
                     Some(transform) => {
                         transform.apply(region.name.as_str(), parsed, &occurrence.captures)?
                     }
                     None => parsed,
                 };
-                if !self.tool_params.is_empty() {
-                    self.tool_params.coerce_tool_calls(&mut value);
-                }
                 self.emit_calls(value, occurrence.tool_index, output)?;
             }
         }
@@ -409,7 +405,7 @@ impl HfUnifiedParser {
             call => vec![call],
         };
         for (position, call) in calls.into_iter().enumerate() {
-            let (name, arguments) = call_parts(call)?;
+            let (name, arguments) = call_parts(call, &self.tool_schemas)?;
             let (tool_index, name) = match (position, started) {
                 (0, Some(tool_index)) => (tool_index, None),
                 _ => (self.allocate_tool_index(), Some(name)),
@@ -525,13 +521,14 @@ fn push_dropped_reasoning(output: &mut UnifiedParserOutput, dropped: DecodedText
 /// Extract the function name and serialized arguments of one tool-call value.
 ///
 /// Accepts the OpenAI shape `{"function": {"name", "arguments"}}` and the bare
-/// `{"name", "arguments"}` shape. Missing arguments become `{}`; string
+/// `{"name", "arguments"}` shape. String argument values are converted by the
+/// calling tool's parameter schema, as for the other tool parsers. Missing arguments become `{}`; string
 /// arguments (e.g. `allow_non_json` fallbacks) pass through unchanged.
-fn call_parts(call: Value) -> Result<(String, String)> {
+fn call_parts(call: Value, tool_schemas: &ToolSchemas) -> Result<(String, String)> {
     let Value::Object(mut call) = call else {
         return Err(value!("tool call must be a dict, got {}", python_type_name(&call)).into());
     };
-    let function = match call.remove("function") {
+    let mut function = match call.remove("function") {
         Some(Value::Object(function)) => function,
         Some(other) => {
             return Err(value!(
@@ -542,16 +539,19 @@ fn call_parts(call: Value) -> Result<(String, String)> {
         }
         None => call,
     };
-    let Some(Value::String(name)) = function.get("name") else {
+    let Some(Value::String(name)) = function.get("name").cloned() else {
         return Err(value!("tool call has no string function name").into());
     };
+    if let Some(Value::Object(arguments)) = function.get_mut("arguments") {
+        tool_schemas.convert_json_arguments(&name, arguments);
+    }
     let arguments = match function.get("arguments") {
         None => "{}".to_string(),
         Some(Value::String(arguments)) => arguments.clone(),
         Some(arguments) => serde_json::to_string(arguments)
             .map_err(|error| value!("failed to serialize tool arguments: {}", error.as_report()))?,
     };
-    Ok((name.clone(), arguments))
+    Ok((name, arguments))
 }
 
 /// Parse one step: safe text before the next candidate, or a boundary at it.

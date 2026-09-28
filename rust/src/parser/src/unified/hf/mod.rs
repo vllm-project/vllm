@@ -15,7 +15,6 @@
 //!
 //! [`UnifiedParserEvent`]: super::UnifiedParserEvent
 
-mod coerce;
 mod content;
 mod parser;
 mod pattern;

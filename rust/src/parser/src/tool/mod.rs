@@ -34,6 +34,7 @@ pub use kimi_k2::KimiK2ToolParser;
 pub use mimo::MiMoToolParser;
 pub use minimax_m2::MinimaxM2ToolParser;
 pub use minimax_m3::MinimaxM3ToolParser;
+pub(crate) use parameters::ToolSchemas;
 pub use qwen_coder::Qwen3CoderToolParser;
 pub use seed_oss::SeedOssToolParser;
 use serde::{Deserialize, Serialize};

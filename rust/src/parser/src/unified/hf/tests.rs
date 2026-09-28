@@ -669,7 +669,7 @@ fn missing_start_anchor_starts_from_the_initial_state() {
 }
 
 #[test]
-fn tools_coerce_string_arguments() {
+fn tools_convert_string_arguments() {
     let template = compile(json!({
         "start_anchor": "<|im_start|>assistant\n",
         "fields": {
@@ -853,12 +853,20 @@ fn template_validation_errors() {
 
 /// Cases where the Rust parser intentionally differs from Transformers, keyed by
 /// generated text.
-const DIVERGENCES: &[(&str, &str)] = &[(
-    // A field without `repeats` keeps only its last occurrence in Transformers;
-    // streamed text cannot be retracted, so every occurrence is reported.
-    r#"Before <|tool_call>call:f{x:<|"|>a, b<|"|>,y:[1,2.5,-3],z:{w:true}}<tool_call|> after"#,
-    r#"{"content": "Before  after", "tool_calls": [{"name": "f", "arguments": {"x": "a, b", "y": [1, 2.5, -3], "z": {"w": true}}}]}"#,
-)];
+const DIVERGENCES: &[(&str, &str)] = &[
+    (
+        // A field without `repeats` keeps only its last occurrence in Transformers;
+        // streamed text cannot be retracted, so every occurrence is reported.
+        r#"Before <|tool_call>call:f{x:<|"|>a, b<|"|>,y:[1,2.5,-3],z:{w:true}}<tool_call|> after"#,
+        r#"{"content": "Before  after", "tool_calls": [{"name": "f", "arguments": {"x": "a, b", "y": [1, 2.5, -3], "z": {"w": true}}}]}"#,
+    ),
+    (
+        // Arguments use the tool parsers' shared conversion, which keeps a JSON
+        // number's spelling; Transformers turns `1e3` into the integer 1000.
+        "<tool_call>\n<function=set_alarm>\nhour: seven\nratio: 1e3\nenabled: nope\n</tool_call>",
+        r#"{"tool_calls": [{"name": "set_alarm", "arguments": {"hour": "seven", "ratio": 1000.0, "enabled": "nope"}}]}"#,
+    ),
+];
 
 /// Compare against `fixtures/differential.json`, generated from Transformers
 /// `parse_response` by `fixtures/generate_differential.py`.

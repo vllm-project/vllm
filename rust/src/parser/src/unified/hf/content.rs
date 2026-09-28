@@ -382,7 +382,7 @@ pub(super) fn is_python_space(c: char) -> bool {
 }
 
 /// Python `str.strip()`.
-pub(super) fn python_strip(text: &str) -> &str {
+fn python_strip(text: &str) -> &str {
     text.trim_matches(is_python_space)
 }
 
@@ -390,7 +390,7 @@ pub(super) fn python_strip(text: &str) -> &str {
 ///
 /// Accepts surrounding whitespace, a sign, and single underscores between digits.
 // TODO: Python also accepts non-ASCII decimal digits and integers wider than 64 bits.
-pub(super) fn python_int(text: &str) -> Option<Value> {
+fn python_int(text: &str) -> Option<Value> {
     let digits = python_digits(python_strip(text), false)?;
     if let Ok(value) = digits.parse::<i64>() {
         return Some(Value::Number(value.into()));
@@ -403,7 +403,7 @@ pub(super) fn python_int(text: &str) -> Option<Value> {
 /// Accepts surrounding whitespace, `inf`/`infinity`/`nan` in any case, and single
 /// underscores between digits. Non-finite results are returned as-is; callers
 /// decide whether JSON can represent them.
-pub(super) fn python_float(text: &str) -> Option<f64> {
+fn python_float(text: &str) -> Option<f64> {
     let text = python_strip(text);
     let unsigned = text.strip_prefix(['+', '-']).unwrap_or(text);
     if ["inf", "infinity", "nan"]
