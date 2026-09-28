@@ -53,12 +53,16 @@ class ZentorchWNA16LinearKernel(CPUWNA16LinearKernel):
                 f"{_CPUWNA16_SUPPORTED_QUANT_TYPES}",
             )
 
-        if c.group_size != -1 and c.group_size % 2 != 0:
-            return (
-                False,
-                f"Group size ({c.group_size}) not supported by "
-                "CPUWNA16, supported group sizes are multiples of 2",
-            )
+        # -1 is per-channel, one group spanning K. Anything else has to divide
+        # K, which is stricter than the parent's multiple-of-2 rule.
+        if c.group_size != -1:
+            in_features = c.partition_weight_shape[0]
+            if c.group_size <= 0 or in_features % c.group_size != 0:
+                return (
+                    False,
+                    f"Group size ({c.group_size}) must divide input size "
+                    f"({in_features})",
+                )
 
         if not has_zentorch_op(["zentorch_woq_repack_weight", "zentorch_woq_linear"]):
             return (

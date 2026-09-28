@@ -353,6 +353,36 @@ def test_can_implement_accepts_shapes_cpuwna16_rejects(monkeypatch):
     assert ok, reason
 
 
+@pytest.mark.parametrize(
+    "group_size,expected_ok",
+    [
+        (-1, True),  # per-channel, one group spanning K
+        (GROUP_SIZE, True),
+        (IN_FEATURES, True),
+        (6, False),  # even, so the parent's multiple-of-2 rule would allow it
+        (0, False),
+    ],
+)
+def test_can_implement_group_size_must_divide_k(monkeypatch, group_size, expected_ok):
+    """ZenDNN WOQ groups along K, so a group that straddles the end is unusable."""
+    monkeypatch.setattr(
+        "vllm.model_executor.kernels.linear.mixed_precision.zentorch."
+        "current_platform.is_zen_cpu",
+        lambda: True,
+    )
+    monkeypatch.setattr(
+        "vllm.model_executor.kernels.linear.mixed_precision.zentorch.has_zentorch_op",
+        lambda ops: True,
+    )
+
+    ok, reason = ZentorchWNA16LinearKernel.can_implement(
+        _make_config(group_size=group_size)
+    )
+    assert ok is expected_ok, reason
+    if not expected_ok:
+        assert "must divide input size" in reason
+
+
 # ---------------------------------------------------------------------------
 # MoE DA8W4
 # ---------------------------------------------------------------------------
