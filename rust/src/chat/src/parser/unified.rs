@@ -5,6 +5,7 @@
 
 use std::sync::LazyLock;
 
+pub use vllm_parser::unified::hf::{HfTemplateError, HfUnifiedParser, ResponseTemplate};
 pub use vllm_parser::unified::{
     Gemma4UnifiedParser, HyV3UnifiedParser, HyV4UnifiedParser, InklingUnifiedParser,
     KimiK3UnifiedParser, UnifiedParser,
@@ -17,13 +18,15 @@ use crate::request::ChatTool;
 /// Canonical public names for registered unified parsers.
 pub mod names {
     pub const GEMMA4: &str = "gemma4";
-    /// Executes the checkpoint's Hugging Face `response_template`. Constructed by
-    /// the chat backend from model files rather than through the registry.
-    pub const HF: &str = "hf";
     pub const HY_V3: &str = "hy_v3";
     pub const HY_V4: &str = "hy_v4";
     pub const INKLING: &str = "inkling";
     pub const KIMI_K3: &str = "kimi_k3";
+
+    /// Executes the checkpoint's Hugging Face `response_template`. Registered for
+    /// name resolution only: it is built from the model's template, never by its
+    /// registry constructor.
+    pub const HF: &str = "hf";
 }
 
 /// Constructor signature for one registered unified parser implementation.
@@ -51,6 +54,8 @@ impl UnifiedParserFactory {
         factory.register_parser::<HyV4UnifiedParser>(names::HY_V4);
         factory.register_parser::<InklingUnifiedParser>(names::INKLING);
         factory.register_parser::<KimiK3UnifiedParser>(names::KIMI_K3);
+        // Opt-in only: no model patterns map to it.
+        factory.register_parser::<HfUnifiedParser>(names::HF);
 
         factory
             .register_pattern("gemma-4", names::GEMMA4)

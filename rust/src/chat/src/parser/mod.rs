@@ -81,11 +81,9 @@ fn validate_selection<C>(
     if let ParserSelection::Explicit(name) = selection
         && !factory.contains(name)
         && !unified.contains(name)
-        && name != unified::names::HF
     {
         let mut available_names = factory.list();
         available_names.extend(unified.list());
-        available_names.push(unified::names::HF.to_string());
         available_names.sort_unstable();
         available_names.dedup();
         return Err(crate::Error::ParserUnavailableByName {
