@@ -21,6 +21,7 @@ import gc
 import time
 from contextlib import AbstractContextManager
 from copy import deepcopy
+from dataclasses import replace
 from typing import Any, NamedTuple
 
 import numpy as np
@@ -493,7 +494,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     ),
                 )
             self.prompt_logprobs_worker = PromptLogprobsWorker(
-                self.max_num_reqs, logprobs_mode=self.model_config.logprobs_mode
+                self.max_num_reqs,
+                self.device,
+                logprobs_mode=self.model_config.logprobs_mode,
             )
             self.structured_outputs_worker = StructuredOutputsWorker(
                 max_num_logits=self.max_num_reqs * self.decode_query_len,
@@ -561,7 +564,16 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         return encoder_runner.get_encoder_timing_stats()
 
     def get_kv_cache_spec(self):
-        return get_kv_cache_spec(self.vllm_config)
+        kv_cache_spec = get_kv_cache_spec(self.vllm_config)
+        # A draft running at DCP=1 under a DCP target keeps a replicated cache.
+        if (
+            isinstance(self.speculator, DraftModelSpeculator)
+            and self.speculator.dcp_size == 1
+            and self.dcp_size > 1
+        ):
+            for name in self.speculator.draft_attn_layer_names & kv_cache_spec.keys():
+                kv_cache_spec[name] = replace(kv_cache_spec[name], dcp_sharded=False)
+        return kv_cache_spec
 
     def initialize_kv_cache(
         self,
@@ -587,6 +599,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         block_sizes = []
         max_num_blocks_per_group = []
         slot_mapping_enabled = []
+        dcp_sharded = []
         for kv_cache_group in kv_cache_config.kv_cache_groups:
             spec = kv_cache_group.kv_cache_spec
             block_sizes.append(spec.block_size)
@@ -594,6 +607,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 spec.first_spec if isinstance(spec, UniformTypeKVCacheSpecs) else spec
             )
             slot_mapping_enabled.append(layer_spec.uses_slot_mapping)
+            dcp_sharded.append(spec.dcp_sharded)
             # Let each cache type account for CP. Attention KV is DCP-sharded,
             # while Mamba/GDN recurrent state is replicated across DCP ranks.
             max_num_blocks = spec.max_num_blocks_per_req(
@@ -657,6 +671,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             device=self.device,
             kernel_block_sizes=self.kernel_block_sizes,
             slot_mapping_enabled=slot_mapping_enabled,
+            dcp_sharded=dcp_sharded,
             cp_size=self.dcp_size,
             cp_rank=self.dcp_rank,
             cp_interleave=self.cp_interleave,
@@ -2050,6 +2065,14 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.req_states.num_computed_tokens.gpu,
             self.req_states.prompt_len.np,
         )
+        prompt_token_id_logprobs_dict = (
+            self.prompt_logprobs_worker.compute_prompt_token_id_logprobs(
+                self.model.compute_logits,
+                hidden_states,
+                input_batch,
+                self.req_states.prompt_len.np,
+            )
+        )
 
         # Prepare the model runner output.
         model_runner_output = ModelRunnerOutput(
@@ -2059,6 +2082,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             req_id_to_index={req_id: i for i, req_id in enumerate(input_batch.req_ids)},
             sampled_token_ids=None,  # type: ignore
             prompt_logprobs_dict=prompt_logprobs_dict,  # type: ignore[arg-type]
+            prompt_token_id_logprobs_dict=prompt_token_id_logprobs_dict,
             cudagraph_stats=cudagraph_stats,
         )
         pending_aux_output = None
