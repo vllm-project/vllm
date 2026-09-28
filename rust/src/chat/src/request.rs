@@ -11,9 +11,9 @@ pub use vllm_parser::tool::Tool as ChatTool;
 use vllm_text::TextDecodeOptions;
 pub use vllm_text::{PromptTruncation, SamplingParams};
 
-use crate::AssistantMessageExt;
 use crate::error::{Error, Result};
 use crate::event::{AssistantContentBlock, AssistantMessage};
+use crate::{AssistantMessageExt, EffortValue};
 
 /// Role label for one text-only chat message.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -24,6 +24,9 @@ pub enum ChatRole {
     User,
     Assistant,
     ToolResponse,
+    /// Role outside the standard set, passed to chat templates unchanged.
+    #[serde(untagged)]
+    Custom(String),
 }
 
 /// One text-only chat content part in OpenAI-style block format.
@@ -223,6 +226,10 @@ pub enum ChatMessage {
         content: ChatContent,
         tool_call_id: String,
     },
+    /// Message content under a role outside the standard set, passed to chat
+    /// templates unchanged.
+    #[serde(untagged)]
+    Custom { role: String, content: ChatContent },
 }
 
 impl ChatMessage {
@@ -241,6 +248,7 @@ impl ChatMessage {
                      use ChatMessage::tool_response() instead"
                 )
             }
+            ChatRole::Custom(role) => Self::custom(role, content),
         }
     }
 
@@ -297,6 +305,14 @@ impl ChatMessage {
         }
     }
 
+    /// Construct one chat message with a role outside the standard set.
+    pub fn custom(role: impl Into<String>, content: impl Into<ChatContent>) -> Self {
+        Self::Custom {
+            role: role.into(),
+            content: content.into(),
+        }
+    }
+
     /// Return the chat role of this message.
     pub fn role(&self) -> ChatRole {
         match self {
@@ -305,6 +321,7 @@ impl ChatMessage {
             Self::User { .. } => ChatRole::User,
             Self::Assistant { .. } => ChatRole::Assistant,
             Self::ToolResponse { .. } => ChatRole::ToolResponse,
+            Self::Custom { role, .. } => ChatRole::Custom(role.clone()),
         }
     }
 
@@ -314,7 +331,8 @@ impl ChatMessage {
             Self::System { content }
             | Self::Developer { content, .. }
             | Self::User { content }
-            | Self::ToolResponse { content, .. } => content.try_flatten_to_text(),
+            | Self::ToolResponse { content, .. }
+            | Self::Custom { content, .. } => content.try_flatten_to_text(),
             Self::Assistant { content } => Ok(content.text()),
         }
     }
@@ -326,7 +344,8 @@ impl ChatMessage {
             Self::System { .. }
             | Self::Developer { .. }
             | Self::User { .. }
-            | Self::ToolResponse { .. } => None,
+            | Self::ToolResponse { .. }
+            | Self::Custom { .. } => None,
         }
     }
 
@@ -336,7 +355,8 @@ impl ChatMessage {
             Self::System { content }
             | Self::Developer { content, .. }
             | Self::User { content }
-            | Self::ToolResponse { content, .. } => content.has_multimodal(),
+            | Self::ToolResponse { content, .. }
+            | Self::Custom { content, .. } => content.has_multimodal(),
             Self::Assistant { .. } => false,
         }
     }
@@ -373,33 +393,6 @@ pub enum GenerationPromptMode {
     NoGenerationPrompt,
 }
 
-/// Effort level for reasoning models.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum ReasoningEffort {
-    None,
-    Minimal,
-    Low,
-    Medium,
-    High,
-    XHigh,
-    Max,
-}
-
-impl ReasoningEffort {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::None => "none",
-            Self::Minimal => "minimal",
-            Self::Low => "low",
-            Self::Medium => "medium",
-            Self::High => "high",
-            Self::XHigh => "xhigh",
-            Self::Max => "max",
-        }
-    }
-}
-
 /// Chat-template-related request options.
 ///
 /// These are the small subset of chat controls that currently affect prompt
@@ -415,8 +408,10 @@ pub struct ChatOptions {
     /// used instead of the model's default chat template.
     pub chat_template: Option<String>,
 
-    /// Effort level exposed to chat templates for reasoning models.
-    pub reasoning_effort: Option<ReasoningEffort>,
+    /// Model-specific reasoning effort, typically `none`, `minimal`, `low`,
+    /// `medium`, `high`, `xhigh`, or `max`. Supported names and numeric ranges
+    /// are validated by the selected renderer or HF template.
+    pub reasoning_effort: Option<EffortValue>,
 
     /// Standard response format available to model-specific renderers.
     #[serde(default)]
@@ -469,6 +464,17 @@ pub enum ChatToolChoice {
     Function {
         name: String,
     },
+}
+
+impl From<&ChatToolChoice> for xgrammar_structural_tag::ToolChoice {
+    fn from(tool_choice: &ChatToolChoice) -> Self {
+        match tool_choice {
+            ChatToolChoice::None => Self::none(),
+            ChatToolChoice::Auto => Self::auto(),
+            ChatToolChoice::Required => Self::required(),
+            ChatToolChoice::Function { name } => Self::function(name.clone()),
+        }
+    }
 }
 
 /// Resolved tool state shared by rendering, output parsing, and constraints.
@@ -684,29 +690,6 @@ impl ChatRequest {
         self.tool_context.parsing_enabled()
     }
 
-    /// Return the request-level thinking toggle when explicitly requested.
-    ///
-    /// We currently accept the two request kwargs `thinking` and
-    /// `enable_thinking`. Both must be booleans when present. If both are
-    /// present, they must have the same value. If neither key is provided,
-    /// return `None`.
-    pub(crate) fn enable_thinking(&self) -> Result<Option<bool>> {
-        let thinking = self.parse_template_bool("thinking")?;
-        let enable_thinking = self.parse_template_bool("enable_thinking")?;
-
-        match (thinking, enable_thinking) {
-            (None, None) => Ok(None),
-            (Some(thinking), Some(enable_thinking)) if thinking != enable_thinking => {
-                Err(Error::ChatTemplate(
-                    "template kwargs `thinking` and `enable_thinking` must match when both are set"
-                        .to_string(),
-                ))
-            }
-            (Some(thinking), _) => Ok(Some(thinking)),
-            (None, Some(enable_thinking)) => Ok(Some(enable_thinking)),
-        }
-    }
-
     pub(crate) fn parse_template_bool(&self, key: &str) -> Result<Option<bool>> {
         match self.chat_options.template_kwargs.get(key) {
             None => Ok(None),
@@ -721,13 +704,14 @@ impl ChatRequest {
 impl ChatRole {
     /// Return the chat-template role string used by the current text-only chat
     /// backend.
-    pub fn as_str(&self) -> &'static str {
+    pub fn as_str(&self) -> &str {
         match self {
             Self::System => "system",
             Self::Developer => "developer",
             Self::User => "user",
             Self::Assistant => "assistant",
             Self::ToolResponse => "tool_response",
+            Self::Custom(role) => role,
         }
     }
 }
@@ -737,7 +721,7 @@ mod tests {
     use serde_json::{json, to_value, Value};
 
     use super::{
-        ChatContent, ChatContentPart, ChatMessage, ChatRequest, ChatRole, ChatTool, ChatToolChoice,
+        ChatContent, ChatContentPart, ChatMessage, ChatRole, ChatTool, ChatToolChoice,
         ResolvedToolContext,
     };
     use crate::Error;

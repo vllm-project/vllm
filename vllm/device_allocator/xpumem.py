@@ -116,6 +116,7 @@ class XpuMemAllocator:
     Sleep will offload selected payloads to CPU or discard and unmap XPU
     physical memory. Wake-up remaps physical memory back to the same
     reserved virtual address and restores payload.
+
     """
 
     instance: "XpuMemAllocator | None" = None

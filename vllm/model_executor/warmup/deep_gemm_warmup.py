@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Warmup deep_gemm kernels.
+"""Warmup deep_gemm kernels.
 DeepGEMM JIT's the kernels. The warmup aims to JIT all the kernels that would
 be used during model execution beforehand.
 """
@@ -31,21 +30,21 @@ from vllm.utils.deep_gemm import (
 )
 from vllm.utils.math_utils import cdiv
 from vllm.utils.platform_utils import num_compute_units
+from vllm.v1.worker.workspace import current_workspace_manager
 
 
 def _generate_optimal_warmup_m_values(
     max_tokens: int, n: int, device: torch.device
 ) -> list[int]:
-    """
-    Generate M values that cover all possible DeepGEMM kernel configurations.
+    """Generate M values that cover all possible DeepGEMM kernel configurations.
     Reference: https://github.com/deepseek-ai/DeepGEMM/blob/79f48ee15a82dd5fad5cd9beaa393c1f755e6b55/csrc/jit_kernels/heuristics/common.hpp
 
     Args:
         max_tokens: Maximum number of tokens to warmup for
         n: The actual N dimension from the weight tensor
         device: The torch device to get properties from.
-    """
 
+    """
     # DeepGEMM's possible block sizes
     block_ms = [64, 128, 256]
     block_ns = list(range(16, min(257, n + 1), 16))
@@ -82,9 +81,7 @@ def _generate_optimal_warmup_m_values(
 def _extract_data_from_fused_moe_module(
     m_: torch.nn.Module,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, int]:
-    """
-    Extract weights, weight scales and num_topk from MoERunner module.
-    """
+    """Extract weights, weight scales and num_topk from MoERunner module."""
     assert isinstance(m_, MoERunner)
     m = m_.routed_experts
     w13 = m.w13_weight
@@ -111,8 +108,7 @@ def _extract_data_from_fused_moe_module(
 def _deep_gemm_linear_data(
     module: torch.nn.Module,
 ) -> tuple[torch.Tensor, torch.Tensor] | None:
-    """
-    Return (weight, weight_scale) for a layer whose kernel stamped itself as
+    """Return (weight, weight_scale) for a layer whose kernel stamped itself as
     ``deep_gemm_warmup_provider`` in ``process_weights_after_loading``, else None.
     """
     provider = getattr(module, "deep_gemm_warmup_provider", None)
@@ -280,15 +276,15 @@ def _deepgemm_grouped_fp8_gemm_nt_contiguous_warmup(
     )
     if not warmup_cases:
         return
-    device = w1.device
 
     def _warmup(w: torch.Tensor, w_scale: torch.Tensor):
         _, n, k = w.size()
-        a1q = torch.empty((MAX_M, k), device=device, dtype=torch.float8_e4m3fn)
-        a1q_scales = torch.zeros(
-            (MAX_M, k // block_m), device=device, dtype=torch.float32
+        a1q, a1q_scales, out = current_workspace_manager().get_simultaneous(
+            ((MAX_M, k), torch.float8_e4m3fn),
+            ((MAX_M, k // block_m), torch.float32),
+            ((MAX_M, n), torch.bfloat16),
         )
-        out = torch.empty((MAX_M, n), device=device, dtype=torch.bfloat16)
+        a1q_scales.zero_()
 
         for num_tokens, align_used, expert_ids in warmup_cases:
             with mk_alignment_scope(align_used):

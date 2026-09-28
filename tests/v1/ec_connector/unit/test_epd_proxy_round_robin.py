@@ -14,6 +14,7 @@ across calls so consecutive requests keep advancing through every URL.
 """
 
 import importlib.util
+import sys
 from collections import Counter
 from pathlib import Path
 
@@ -27,6 +28,7 @@ def _load_proxy_module():
     spec = importlib.util.spec_from_file_location("disagg_epd_proxy_under_test", path)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
     spec.loader.exec_module(module)
     return module
 
