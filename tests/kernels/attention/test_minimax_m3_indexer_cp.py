@@ -209,7 +209,7 @@ def test_indexer_context_scores_unpopulated_block_table_is_safe():
         out=out,
     )
     assert scores.data_ptr() == out.data_ptr()
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
 
 
 def _force_scores(
@@ -311,5 +311,5 @@ def test_local_topk_merge_matches_full_topk():
         init_blocks=init_blocks,
         local_blocks=local_keep,
     )
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
     assert torch.equal(got, ref)

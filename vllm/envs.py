@@ -1248,10 +1248,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     ),
     # Enable per-rank context-parallel scoring for MiniMax-M3 sparse
     # indexer on ROCm (TP>1 only).  Each rank scores 1/world_size of the
-    # global blocks, then a MAX allreduce reconstructs the full score matrix.
+    # global blocks, then an all-gather of packed top-k keys merges them.
     "VLLM_ROCM_MINIMAX_INDEXER_CP": lambda: (
-        os.getenv("VLLM_ROCM_MINIMAX_INDEXER_CP", "False").lower()
-        in ("true", "1")
+        os.getenv("VLLM_ROCM_MINIMAX_INDEXER_CP", "False").lower() in ("true", "1")
     ),
     "VLLM_ROCM_USE_AITER": lambda: (
         os.getenv("VLLM_ROCM_USE_AITER", "False").lower() in ("true", "1")

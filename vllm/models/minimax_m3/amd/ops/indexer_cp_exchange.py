@@ -10,14 +10,13 @@ merge so they cannot be dropped before the exchange.
 
 import torch
 import torch.distributed as dist
-import triton
-import triton.language as tl
 
 from vllm.distributed.parallel_state import get_tp_group
 from vllm.models.minimax_m3.amd.ops.sparse_pa import (
     PAGES_PER_SPARSE_BLOCK,
     _write_sparse_block_table_row_from_values,
 )
+from vllm.triton_utils import tl, triton
 
 DECODE_TOPK_TILE = 512
 DECODE_TOPK_NUM_WARPS = 8
@@ -319,8 +318,8 @@ def merge_topk_keys(
         keys.stride(2),
         topk_idx.stride(0),
         topk_idx.stride(1),
-        attention_block_table.stride(0) if emit else 0,
-        sparse_block_table_out.stride(0) if emit else 0,
+        attention_block_table.stride(0) if attention_block_table is not None else 0,
+        sparse_block_table_out.stride(0) if sparse_block_table_out is not None else 0,
         QUERY_LEN=query_len,
         TOPK=topk,
         INIT_BLOCKS=init_blocks,

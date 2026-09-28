@@ -3,8 +3,8 @@
 """Opt-in M3 compute-only index context partitioning, independent of global DCP."""
 
 import torch
-import triton
-import triton.language as tl
+
+from vllm.triton_utils import tl, triton
 
 # Workgroups the score grid aims for, and the floor on how few blocks one
 # chunk may walk: the query tile is loaded once outside the block loop, so a
