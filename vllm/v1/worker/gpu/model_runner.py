@@ -21,6 +21,7 @@ import gc
 import time
 from contextlib import AbstractContextManager
 from copy import deepcopy
+from dataclasses import replace
 from typing import Any, NamedTuple
 
 import numpy as np
@@ -561,7 +562,16 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         return encoder_runner.get_encoder_timing_stats()
 
     def get_kv_cache_spec(self):
-        return get_kv_cache_spec(self.vllm_config)
+        kv_cache_spec = get_kv_cache_spec(self.vllm_config)
+        # A draft running at DCP=1 under a DCP target keeps a replicated cache.
+        if (
+            isinstance(self.speculator, DraftModelSpeculator)
+            and self.speculator.dcp_size == 1
+            and self.dcp_size > 1
+        ):
+            for name in self.speculator.draft_attn_layer_names & kv_cache_spec.keys():
+                kv_cache_spec[name] = replace(kv_cache_spec[name], dcp_sharded=False)
+        return kv_cache_spec
 
     def initialize_kv_cache(
         self,
@@ -587,6 +597,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         block_sizes = []
         max_num_blocks_per_group = []
         slot_mapping_enabled = []
+        dcp_sharded = []
         for kv_cache_group in kv_cache_config.kv_cache_groups:
             spec = kv_cache_group.kv_cache_spec
             block_sizes.append(spec.block_size)
@@ -594,6 +605,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 spec.first_spec if isinstance(spec, UniformTypeKVCacheSpecs) else spec
             )
             slot_mapping_enabled.append(layer_spec.uses_slot_mapping)
+            dcp_sharded.append(spec.dcp_sharded)
             # Let each cache type account for CP. Attention KV is DCP-sharded,
             # while Mamba/GDN recurrent state is replicated across DCP ranks.
             max_num_blocks = spec.max_num_blocks_per_req(
@@ -640,7 +652,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.speculator, "enable_adaptive_verification", False
             ),
             attn_groups=self.attn_groups,
-            attn_cg_support=attn_cg_support,
             req_states=self.req_states,
             query_start_loc=self.input_buffers.query_start_loc,
             num_bonus_tokens=self.model_state.num_new_sampled_tokens_per_step,
@@ -658,6 +669,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             device=self.device,
             kernel_block_sizes=self.kernel_block_sizes,
             slot_mapping_enabled=slot_mapping_enabled,
+            dcp_sharded=dcp_sharded,
             cp_size=self.dcp_size,
             cp_rank=self.dcp_rank,
             cp_interleave=self.cp_interleave,
@@ -1646,12 +1658,16 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # Get batch descriptor and sync across DP ranks.
         num_reqs = len(scheduler_output.num_scheduled_tokens)
         num_toks = scheduler_output.total_num_scheduled_tokens
-        max_query_len = max(scheduler_output.num_scheduled_tokens.values())
+        max_query_len: int | None = max(scheduler_output.num_scheduled_tokens.values())
         batch_req_state, uniform_tok_count = self.gather_batch_req_state(
             scheduler_output, dummy_run
         )
         if batch_req_state is not None:
             num_toks = batch_req_state.num_tokens
+            if batch_req_state.has_prefill:
+                # Varlen decode graphs replay decodes only, and their bound
+                # alone would admit a short prefill.
+                max_query_len = None
             if self.pcp_manager is not None:
                 num_toks = self.pcp_manager.get_num_tokens_for_dispatch(
                     batch_req_state.num_scheduled_tokens,
