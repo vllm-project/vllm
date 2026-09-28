@@ -473,6 +473,13 @@ class SingleWriterShmObjectStorage:
     - Automatic Cleanup: Garbage collection happens transparently during
       allocation
 
+    Handle Signatures:
+    - Handles are signed with an HMAC of (key, address, monotonic_id), keyed by
+      a random secret stored at the start of the shared memory
+    - The writer signs the handles it issues and rejects stale or forged
+      handles supplied by requests
+    - Readers verify the signature in get/touch before reading shared memory
+
     Memory Layout per Object:
     `[4-byte reference_count][metadata_size][serialized_object_data]`
 
@@ -595,7 +602,18 @@ class SingleWriterShmObjectStorage:
         monotonic_id: int,
         signature: list[int] | None,
     ) -> None:
-        """Verify a handle signature without dereferencing its address."""
+        """Verify that a handle was issued for the given key.
+
+        For writers: the handle must also be the key's current entry
+        For readers: only the signature is checked
+
+        Args:
+            key: String key the handle belongs to
+            address: Address of the object
+            monotonic_id: Monotonic ID of the object
+            signature: Signature issued with the handle
+
+        """
         if self.is_writer and (
             key is None or self.key_index.get(key) != (address, monotonic_id)
         ):
@@ -649,7 +667,7 @@ class SingleWriterShmObjectStorage:
         return address, monotonic_id
 
     def get_signature(self, key: str) -> list[int]:
-        """Get the server-issued handle signature for a cached object."""
+        """Sign the handle of a cached object so readers can verify it."""
         address, monotonic_id = self.key_index[key]
         return list(self._make_signature(key, address, monotonic_id))
 
