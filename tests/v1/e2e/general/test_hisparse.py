@@ -18,6 +18,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.multi_connector import (
     MultiConnector,
 )
 from vllm.platforms import current_platform
+from vllm.sampling_params import SamplingParams
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.v1.hisparse.coordinator import get_hisparse_coordinator
 
@@ -223,3 +224,142 @@ def test_hisparse_spill_and_prefix_restore(
         assert actual == expected
         if with_offloading:
             assert _offload_load_bytes() > load_bytes
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda(), reason="HiSparse requires NVIDIA CUDA"
+)
+@pytest.mark.parametrize("eager_host_mirror", [False, True])
+@fork_new_process_for_each_test
+def test_hisparse_host_capacity_recovery_preserves_output(
+    monkeypatch: pytest.MonkeyPatch,
+    vllm_runner: type[VllmRunner],
+    eager_host_mirror: bool,
+):
+    """Test whether a request can start with GPU-only history, acquire host backing
+    later, lose its old GPU pages, and still generate exactly the same output.
+    """
+    capability = current_platform.get_device_capability()
+    if capability is None or capability.major < 9:
+        pytest.skip("Sparse MLA requires Hopper or newer")
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+    monkeypatch.setenv("VLLM_DEEP_GEMM_WARMUP", "skip")
+    target = [1000 + i % 64 for i in range(257)]
+    sampling = SamplingParams(temperature=0, max_tokens=16, ignore_eos=True)
+    with vllm_runner(
+        MODEL,
+        load_format="dummy",
+        hf_overrides=_shrink_config,
+        attention_config=AttentionConfig(
+            hisparse_config=HiSparseConfig(
+                device_buffer_size=512, eager_host_mirror=eager_host_mirror
+            )
+        ),
+        kv_transfer_config=KVTransferConfig(
+            kv_connector="HiSparseConnector",
+            kv_role="kv_both",
+            kv_connector_extra_config={"host_pool_gib": 0.01},
+        ),
+        block_size=64,
+        max_model_len=320,
+        max_num_batched_tokens=512,
+        max_num_seqs=2,
+        num_gpu_blocks_override=128,
+        enable_prefix_caching=False,
+        enable_chunked_prefill=True,
+        enforce_eager=True,
+    ) as runner:
+        expected = runner.generate([target], sampling)
+        engine = runner.llm.llm_engine.engine_core.engine_core
+        manager = engine.scheduler.kv_cache_manager
+        coordinator = get_hisparse_coordinator(manager)
+        worker = _get_hisparse_worker(runner)
+        host = coordinator.host_manager
+        assert host is not None
+        pressure_tokens = host.block_pool.get_num_free_blocks() * host.block_size
+        host.allocate_new_blocks("host-pressure", pressure_tokens, pressure_tokens)
+        # A missing DMA must fail even if the host ID held the baseline's KV.
+        with gpu_sync_allowed():
+            torch.accelerator.synchronize()
+        for cache in worker.host_caches:
+            cache.zero_()
+        original_plan = coordinator.plan_prefix_materialization
+        original_finish = worker.finish_forward
+        original_update = coordinator.update_spills
+        exhausted = False
+        released = False
+        copied_pages = 0
+        reclaimed_blocks = 0
+        miss_steps = 0
+        active_requests = {}
+
+        def plan(request_id, num_computed_tokens):
+            nonlocal exhausted, released
+            active_requests[request_id] = engine.scheduler.requests[request_id]
+            original_plan(request_id, num_computed_tokens)
+            if not released:
+                assert all(block.is_null for block in host.req_to_blocks[request_id])
+                exhausted = True
+                for hot in coordinator.hot_managers:
+                    hot.require_hot(request_id)
+                if num_computed_tokens > len(target):
+                    host.free("host-pressure")
+                    released = True
+
+        def finish():
+            nonlocal copied_pages, miss_steps
+            transfers = [
+                t for t in worker._post_forward_transfers if t.require_copy_to_host
+            ]
+            original_finish()
+            with gpu_sync_allowed():
+                torch.accelerator.synchronize()
+                for transfer in transfers:
+                    for layer_idx, cache in enumerate(worker.cache_handles):
+                        device_id = transfer.resident_block_ids[
+                            cache.runtime.resident_source_index
+                        ]
+                        start = transfer.host_block_id * worker.kernel_block_size
+                        actual_rows = worker.host_caches[layer_idx][
+                            start : start + worker.kernel_block_size
+                        ]
+                        expected_rows = worker.resident_caches[layer_idx][
+                            device_id
+                        ].cpu()
+                        assert torch.equal(actual_rows, expected_rows)
+                        assert torch.count_nonzero(expected_rows).item() > 0
+                    copied_pages += 1
+                misses = sum(
+                    runtime.index_group.swap_stats[1].item()
+                    for runtime in worker.leader_runtimes
+                )
+                miss_steps += int(misses > 0)
+
+        def update(enqueued, completed):
+            nonlocal reclaimed_blocks
+            original_update(enqueued, completed)
+            reclaimable = sum(
+                len(state.unpinned_pages) * len(coordinator.resident_managers)
+                for state in coordinator.request_states.values()
+            )
+            if reclaimable:
+                pressure = manager.block_pool.get_new_blocks(
+                    manager.block_pool.get_num_free_blocks()
+                )
+                manager.block_pool.free_blocks(pressure)
+                reclaimed_blocks += reclaimable
+            if copied_pages:
+                worker.reset_hot_state()
+
+        monkeypatch.setattr(coordinator, "plan_prefix_materialization", plan)
+        monkeypatch.setattr(worker, "finish_forward", finish)
+        monkeypatch.setattr(coordinator, "update_spills", update)
+        actual = runner.generate([target], sampling)
+
+        assert exhausted and released
+        assert copied_pages > 0
+        assert reclaimed_blocks > 0
+        assert miss_steps >= 2
+        assert len(active_requests) == 1
+        assert all(request.num_preemptions == 0 for request in active_requests.values())
+        assert actual == expected

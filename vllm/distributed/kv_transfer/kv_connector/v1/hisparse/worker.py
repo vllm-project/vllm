@@ -760,7 +760,11 @@ class HiSparseConnectorWorker:
 
     def _submit_transfers(self, transfers: list[SparseKVPageTransfer]) -> None:
         if self.cache_handles[0].runtime.eager_host_mirror:
-            self._record_transfer_completion(transfers)
+            # Recovered destinations did not exist when their rows were computed.
+            self._enqueue_transfers([t for t in transfers if t.require_copy_to_host])
+            self._record_transfer_completion(
+                [t for t in transfers if not t.require_copy_to_host]
+            )
         else:
             self._enqueue_transfers(transfers)
 

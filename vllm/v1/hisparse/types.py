@@ -13,6 +13,7 @@ class SparseKVPageTransfer:
     resident_block_ids: tuple[int, ...]
     after_forward: bool
     restore: bool = False
+    require_copy_to_host: bool = False
 
 
 @dataclass(frozen=True)

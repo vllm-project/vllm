@@ -2212,7 +2212,7 @@ class HiSparseSourceManager(FullAttentionManager):
     """Host-tier manager with a private pool; publishes hashes once durable.
 
     Host capacity is best effort: a page that cannot get a host block keeps a
-    null host entry, so its GPU copy is never written back and stays pinned.
+    null host entry and stays pinned until a recovered destination is populated.
     """
 
     coordinator: "HiSparseCoordinator | None" = None
@@ -2297,7 +2297,10 @@ class HiSparseSourceManager(FullAttentionManager):
             fit_blocks * self.block_size,
             min(num_tokens_main_model, fit_blocks * self.block_size),
         )
-        req_blocks.extend([self._null_block] * (num_required - len(req_blocks)))
+        missing_pages = range(len(req_blocks), num_required)
+        req_blocks.extend([self._null_block] * len(missing_pages))
+        assert self.coordinator is not None
+        self.coordinator.record_missing_host_pages(request_id, missing_pages)
         return new_blocks
 
     def allocate_external_computed_blocks(

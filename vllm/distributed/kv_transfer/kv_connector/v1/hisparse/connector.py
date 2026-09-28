@@ -106,6 +106,7 @@ class HiSparseConnectorScheduler:
         # HiSparse rebinds worker state every step, so the load must start
         # before the forward rather than being deferred to post-forward.
         scheduler_output.has_sync_kv_loads = True
+        recovered_host_block_id = self.coordinator.recover_host_page()
         scheduler_output.block_table_updates = (
             self.coordinator.take_block_table_updates() or None
         )
@@ -118,6 +119,8 @@ class HiSparseConnectorScheduler:
             for request in scheduler_output.scheduled_new_reqs
             for block_id in request.block_ids[source_group_id]
         ]
+        if recovered_host_block_id is not None:
+            source_block_ids.append(recovered_host_block_id)
         for new_block_ids in scheduler_output.scheduled_cached_reqs.new_block_ids:
             if new_block_ids is not None:
                 source_block_ids.extend(new_block_ids[source_group_id])

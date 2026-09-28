@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from collections import OrderedDict, deque
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
@@ -64,6 +65,8 @@ class _HiSparseRequestState:
     copies_recorded_blocks: int = 0
     pinned_clean: set[int] = field(default_factory=set)
     unpinned_pages: set[int] = field(default_factory=set)
+    missing_host_pages: deque[int] = field(default_factory=deque)
+    num_computed_pages: int = 0
 
 
 @dataclass
@@ -168,6 +171,7 @@ class HiSparseCoordinator:
         self.pending_spills: dict[int, _PendingSpill] = {}
         self.request_states: dict[str, _HiSparseRequestState] = {}
         self.next_spill_id = 0
+        self._host_recovery_requests: OrderedDict[str, None] = OrderedDict()
         # Published host block hash -> GPU copies of that page, readable until
         # the pool reuses them. Lets a host prefix hit come back GPU-resident.
         self.copies: dict[BlockHashWithGroupId, tuple[KVCacheBlock, ...]] = {}
@@ -402,6 +406,52 @@ class HiSparseCoordinator:
     # Host publication and spills
     # ------------------------------------------------------------------
 
+    def record_missing_host_pages(self, request_id: str, pages: range) -> None:
+        if not pages or not self.resident_managers:
+            return
+        self._get_request_state(request_id).missing_host_pages.extend(pages)
+        self._host_recovery_requests[request_id] = None
+
+    def recover_host_page(self) -> int | None:
+        """Retry one queued page after the step's mandatory host allocations.
+
+        Rotate requests after each attempt to bound both lookup work and added
+        DMA to one page per step, including requests with an unsealed tail.
+        """
+        if (
+            not self._host_recovery_requests
+            or len(self.spills_to_send) >= self.max_spill_pages
+        ):
+            return None
+        assert self.host_manager is not None
+        pool = self.host_manager.block_pool
+        if not pool.get_num_free_blocks():
+            return None
+        request_id = next(iter(self._host_recovery_requests))
+        self._host_recovery_requests.move_to_end(request_id)
+        state = self.request_states[request_id]
+        page_idx = state.missing_host_pages[0]
+        if (
+            request_id in self._pending_imports
+            or page_idx >= state.num_computed_pages
+            or self._resident_page_blocks(request_id, page_idx) is None
+        ):
+            return None
+        host_blocks = self.host_manager.req_to_blocks[request_id]
+        assert host_blocks[page_idx].is_null
+        host_block = pool.get_new_blocks(1)[0]
+        host_blocks[page_idx] = host_block
+        # Earlier rows could not be mirrored before this host destination existed.
+        planned = self._plan_page_transfer(
+            request_id, page_idx, after_forward=True, require_copy_to_host=True
+        )
+        assert planned
+        state.missing_host_pages.popleft()
+        if not state.missing_host_pages:
+            del self._host_recovery_requests[request_id]
+        self.block_table_updates.add(request_id)
+        return host_block.block_id
+
     def plan_prefix_materialization(
         self, request_id: str, num_computed_tokens: int
     ) -> None:
@@ -415,6 +465,7 @@ class HiSparseCoordinator:
             self._pending_imports.get(request_id, 0), host_block_size
         )
         state = self._get_request_state(request_id)
+        state.num_computed_pages = num_pages
         budget = max(self.max_spill_pages - len(self.spills_to_send), 0)
         for page_idx in range(num_pages):
             if page_idx < importing_pages:
@@ -517,6 +568,7 @@ class HiSparseCoordinator:
         *,
         after_forward: bool,
         restore: bool = False,
+        require_copy_to_host: bool = False,
     ) -> bool:
         assert self.host_manager is not None
         state = self._get_request_state(request_id)
@@ -547,6 +599,7 @@ class HiSparseCoordinator:
             resident_block_ids=tuple(block.block_id for block in blocks),
             after_forward=after_forward,
             restore=restore,
+            require_copy_to_host=require_copy_to_host,
         )
         self.pending_spills[spill_id] = _PendingSpill(
             transfer_id=spill_id,
@@ -732,6 +785,7 @@ class HiSparseCoordinator:
     def free(self, request_id: str) -> None:
         """Detach the request; its clean pages stay readable copies in the pool."""
         self._pending_imports.pop(request_id, None)
+        self._host_recovery_requests.pop(request_id, None)
         state = self.request_states.pop(request_id, None)
         if state is None:
             return

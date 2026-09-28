@@ -853,8 +853,11 @@ def test_hisparse_import_capacity_includes_hits_and_cow(
 
 @pytest.mark.parametrize("enable_caching", [False, True])
 def test_hisparse_host_exhaustion_keeps_gpu_pages_readable(enable_caching):
-    """Pages without a host destination must survive GPU cache reclamation."""
-    manager = make_hisparse_kv_cache_manager(32, 2, enable_caching=enable_caching)
+    """Recovered pages become reclaimable only after every worker finishes."""
+    manager = make_hisparse_kv_cache_manager(32, 3, enable_caching=enable_caching)
+    donor = make_request("donor", [99] * 16, HISPARSE_BLOCK_SIZE, sha256)
+    assert manager.allocate_slots(donor, 16) is not None
+    donor_host_id = manager.get_block_ids(donor.request_id)[0][0]
     request = make_request("resident", list(range(64)), HISPARSE_BLOCK_SIZE, sha256)
     assert manager.allocate_slots(request, 64) is not None
     coordinator = get_hisparse_coordinator(manager)
@@ -877,8 +880,175 @@ def test_hisparse_host_exhaustion_keeps_gpu_pages_readable(enable_caching):
     assert coordinator.request_states[request.request_id].valid_pages == {0}
     pool = coordinator.get_host_block_pool()
     assert pool is not None
+    scheduler = HiSparseConnectorScheduler(async_speculative=False)
+    scheduler.bind_coordinator(coordinator)
+    assert not scheduler.build_connector_meta(
+        SchedulerOutput.make_empty()
+    ).command.page_transfers
+    manager.free(donor)
+    free_gpu_before = manager.block_pool.get_num_free_blocks()
+    output = SchedulerOutput.make_empty()
+    metadata = scheduler.build_connector_meta(output)
+    host_block = host.req_to_blocks[request.request_id][1]
+    assert not host_block.is_null
+    resident_blocks = [
+        resident.req_to_blocks[request.request_id][1]
+        for resident in coordinator.resident_managers
+    ]
+    assert host_block.block_id == donor_host_id
+    assert metadata.source_block_ids == (donor_host_id,)
+    assert output.block_table_updates[request.request_id] == manager.get_block_ids(
+        request.request_id
+    )
+    assert host_block.ref_cnt == 2
+    assert all(block.ref_cnt == 2 for block in resident_blocks)
+    spills = metadata.command.page_transfers
+    assert len(spills) == 1
+    spill = spills[0]
+    assert spill.host_block_id == host_block.block_id
+    assert spill.after_forward and spill.require_copy_to_host
+    assert spill.resident_block_ids == tuple(
+        block.block_id for block in resident_blocks
+    )
+    coordinator.update_spills({spill.transfer_id: 2}, {spill.transfer_id: 1})
+    assert host_block.ref_cnt == 2
+    assert all(block.ref_cnt == 2 for block in resident_blocks)
+    assert coordinator.request_states[request.request_id].valid_pages == {0}
+    assert manager.block_pool.get_num_free_blocks() == free_gpu_before
+    assert coordinator.recover_host_page() is None
+    assert not coordinator.build_offload_command().page_transfers
+
+    coordinator.update_spills({}, {spill.transfer_id: 1})
+    assert host_block.ref_cnt == 1
+    assert all(block.ref_cnt == 0 for block in resident_blocks)
+    assert coordinator.request_states[request.request_id].valid_pages == {0, 1}
+    assert manager.block_pool.get_num_free_blocks() == free_gpu_before + 1
+    pressure = manager.block_pool.get_new_blocks(
+        manager.block_pool.get_num_free_blocks()
+    )
+    assert coordinator.resident_managers[0].get_resident_page("resident", 1) is None
+    for block in coordinator.resident_managers[0].req_to_blocks["resident"][2:]:
+        assert not block.is_null and block.ref_cnt == 1
+    assert host.req_to_blocks["resident"][1] is host_block
+    manager.block_pool.free_blocks(pressure)
     manager.free(request)
-    assert pool.get_num_free_blocks() == 1
+    assert pool.get_num_free_blocks() == 2
+    assert not coordinator.pending_spills
+
+
+def test_hisparse_host_recovery_rotates_requests_with_limited_capacity():
+    """A step fills one old hole; subsequent steps share capacity across requests."""
+    manager = make_hisparse_kv_cache_manager(64, 3, enable_caching=True)
+    donor = make_request("donor", [99] * 32, HISPARSE_BLOCK_SIZE, sha256)
+    assert manager.allocate_slots(donor, 32) is not None
+    requests = [
+        make_request(str(i), list(range(64)), HISPARSE_BLOCK_SIZE, sha256)
+        for i in range(2)
+    ]
+    for request in requests:
+        assert manager.allocate_slots(request, 64) is not None
+    _publish_hisparse_pages(manager)
+    manager.free(donor)
+    coordinator = get_hisparse_coordinator(manager)
+    host = coordinator.host_manager
+    assert host is not None
+    coordinator.max_spill_pages = 1
+    recovered = []
+    for request in requests:
+        block_id = coordinator.recover_host_page()
+        assert block_id is not None
+        recovered.append(block_id)
+        assert host.req_to_blocks[request.request_id][0].block_id == block_id
+        assert coordinator.recover_host_page() is None
+        spills = coordinator.build_offload_command().page_transfers
+        assert len(spills) == 1
+        # Normal materialization must not submit the recovered page twice.
+        coordinator.plan_prefix_materialization(request.request_id, 64)
+        assert not coordinator.build_offload_command().page_transfers
+        counts = {spills[0].transfer_id: 1}
+        coordinator.update_spills(counts, counts)
+    assert len(set(recovered)) == 2
+    assert coordinator.recover_host_page() is None
+    manager.free(requests[0])
+    assert coordinator.recover_host_page() is not None
+    assert not host.req_to_blocks[requests[1].request_id][1].is_null
+    _publish_hisparse_pages(manager)
+    manager.free(requests[1])
+    assert host.block_pool.get_num_free_blocks() == 2
+    assert not coordinator.has_pending_work()
+
+
+def test_hisparse_host_recovery_retains_cancelled_transfer_endpoints():
+    """Cancellation/preemption and ID reuse cannot publish an old transfer."""
+    manager = make_hisparse_kv_cache_manager(64, 2, enable_caching=True)
+    donor = make_request("donor", [99] * 16, HISPARSE_BLOCK_SIZE, sha256)
+    assert manager.allocate_slots(donor, 16) is not None
+    request = make_request("target", list(range(64)), HISPARSE_BLOCK_SIZE, sha256)
+    assert manager.allocate_slots(request, 64) is not None
+    _publish_hisparse_pages(manager)
+    manager.free(donor)
+    coordinator = get_hisparse_coordinator(manager)
+    assert coordinator.recover_host_page() is not None
+    spill = coordinator.build_offload_command().page_transfers[0]
+    pending = coordinator.pending_spills[spill.transfer_id]
+    coordinator.update_spills({spill.transfer_id: 2}, {spill.transfer_id: 1})
+    manager.free(request)
+    assert pending.host_block.ref_cnt == 1
+    assert all(block.ref_cnt == 1 for block in pending.resident_blocks)
+    assert coordinator.recover_host_page() is None
+    replacement = make_request("target", [77] * 64, HISPARSE_BLOCK_SIZE, sha256)
+    assert manager.allocate_slots(replacement, 64) is not None
+    coordinator.update_spills({}, {spill.transfer_id: 1})
+    assert pending.host_block.ref_cnt == 0
+    assert all(block.ref_cnt == 0 for block in pending.resident_blocks)
+    assert not coordinator.pending_spills
+    assert not coordinator.request_states["target"].valid_pages
+    assert manager.get_computed_blocks(replacement)[1] == 0
+    manager.free(replacement)
+    assert coordinator.get_host_block_pool().get_num_free_blocks() == 1
+
+
+def test_hisparse_recovered_prefix_preserves_shared_host_identity():
+    """Published recovered pages remain shared prefix blocks with balanced pins."""
+    manager = make_hisparse_kv_cache_manager(64, 9, enable_caching=True)
+    donor = make_request("donor", [99] * 128, HISPARSE_BLOCK_SIZE, sha256)
+    target = make_request("target", list(range(128)), HISPARSE_BLOCK_SIZE, sha256)
+    assert manager.allocate_slots(donor, 128) is not None
+    assert manager.allocate_slots(target, 96) is not None
+    _publish_hisparse_pages(manager)
+    manager.free(donor)
+    target.num_computed_tokens = 96
+    assert manager.allocate_slots(target, 32) is not None
+    _publish_hisparse_pages(manager)
+    coordinator = get_hisparse_coordinator(manager)
+    for _ in range(6):
+        assert coordinator.recover_host_page() is not None
+        _publish_hisparse_pages(manager)
+
+    duplicate = make_request("duplicate", list(range(128)), HISPARSE_BLOCK_SIZE, sha256)
+    computed, num_computed, _ = manager.get_computed_blocks(duplicate)
+    assert num_computed == 112
+    shared = manager.get_blocks("target").blocks[0][:7]
+    assert (
+        manager.allocate_slots(
+            duplicate,
+            16,
+            num_new_computed_tokens=num_computed,
+            new_computed_blocks=computed,
+        )
+        is not None
+    )
+    assert all(
+        actual is expected and actual.ref_cnt == 2
+        for actual, expected in zip(
+            manager.get_blocks("duplicate").blocks[0][:7], shared, strict=True
+        )
+    )
+    manager.free(target)
+    assert all(block.ref_cnt == 1 for block in shared)
+    manager.free(duplicate)
+    assert coordinator.get_host_block_pool().get_num_free_blocks() == 8
+    assert not coordinator.has_pending_work()
 
 
 def test_hisparse_host_cow_takes_priority_over_new_pages():

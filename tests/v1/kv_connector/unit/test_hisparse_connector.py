@@ -21,6 +21,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.hisparse.worker import (
 from vllm.distributed.kv_transfer.kv_connector.v1.multi_connector import MultiConnector
 from vllm.v1.hisparse.coordinator import get_hisparse_coordinator
 from vllm.v1.hisparse.runtime import HiSparseCacheHandle
+from vllm.v1.hisparse.types import SparseKVPageTransfer
 from vllm.v1.worker.gpu.kv_connector import ActiveKVConnector
 
 
@@ -50,6 +51,40 @@ def test_cache_manager_binding_preserves_hisparse_and_legacy_pool_hooks(nested):
 
 def test_hisparse_requires_block_outermost_device_layout():
     assert HiSparseConnector.get_required_kvcache_layout(MagicMock()) == "BLHNC"
+
+
+@pytest.mark.parametrize(
+    ("eager_host_mirror", "copy_fails"), [(False, False), (True, False), (True, True)]
+)
+def test_host_recovery_copies_pages_even_with_eager_mirroring(
+    eager_host_mirror, copy_fails
+):
+    """A late destination needs DMA even when new rows are mirrored eagerly."""
+    worker = object.__new__(HiSparseConnectorWorker)
+    worker.cache_handles = [
+        SimpleNamespace(runtime=SimpleNamespace(eager_host_mirror=eager_host_mirror))
+    ]
+    worker._enqueue_transfers = MagicMock()
+    worker._record_transfer_completion = MagicMock()
+    ordinary = SparseKVPageTransfer(1, 2, (3, 4), after_forward=True)
+    recovered = SparseKVPageTransfer(
+        2, 5, (6, 7), after_forward=True, require_copy_to_host=True
+    )
+
+    if copy_fails:
+        worker._enqueue_transfers.side_effect = RuntimeError("copy failed")
+        with pytest.raises(RuntimeError, match="copy failed"):
+            worker._submit_transfers([ordinary, recovered])
+        worker._record_transfer_completion.assert_not_called()
+        return
+    worker._submit_transfers([ordinary, recovered])
+
+    if eager_host_mirror:
+        worker._enqueue_transfers.assert_called_once_with([recovered])
+        worker._record_transfer_completion.assert_called_once_with([ordinary])
+    else:
+        worker._enqueue_transfers.assert_called_once_with([ordinary, recovered])
+        worker._record_transfer_completion.assert_not_called()
 
 
 def test_no_forward_enqueues_deferred_hisparse_transfers():
