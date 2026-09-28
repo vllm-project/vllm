@@ -49,6 +49,7 @@ PRUNED_METADATA_FIELDS = {
     "prefill_state_indices",
     "prefill_has_initial_state",
     "spec_sequence_masks",
+    "spec_sequence_masks_cpu",
     "uniform_spec_sequence_length",
     "flashinfer_prefill_query_start_loc",
     "flashinfer_prefill_seq_order",
