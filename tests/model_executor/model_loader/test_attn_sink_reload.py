@@ -175,7 +175,7 @@ def test_padded_sink_deferred_attention_finalize(monkeypatch, tp_rank: int):
     layer = _SinkLayer()
     layer.load_weights(_checkpoint_a(), head_start, head_end)
     kernel_ptr = layer.sink.data_ptr()
-    post_load_dtypes = []
+    post_load_dtypes: list[torch.dtype] = []
     layer.process_weights_after_loading = post_load_dtypes.append
     monkeypatch.setattr(
         layerwise, "is_deferred_attention_layer", lambda candidate: candidate is layer
