@@ -582,7 +582,9 @@ class Qwen3_VisionTransformer(nn.Module):
             else []
         )
         self.num_grid_per_side = int(self.num_position_embeddings**0.5)
-        self._rot_pos_ids_cache = LRUCache(capacity=1024)
+        self._rot_pos_ids_cache: LRUCache[tuple[int, int, int], torch.Tensor] = (
+            LRUCache(capacity=1024)
+        )
 
         use_data_parallel = is_vit_use_data_parallel()
         self.tp_size = (
@@ -705,7 +707,7 @@ class Qwen3_VisionTransformer(nn.Module):
         self._rot_pos_ids_cache[cache_key] = result
         return result
 
-    def rot_pos_emb(self, grid_thw: list[list[int]]):
+    def rot_pos_emb(self, grid_thw: Sequence[Sequence[int]]):
         max_grid_size = max(max(h, w) for _, h, w in grid_thw)
         pos_ids = [
             self.rot_pos_ids(h, w, self.spatial_merge_size)
@@ -731,7 +733,9 @@ class Qwen3_VisionTransformer(nn.Module):
 
         return cos_combined, sin_combined
 
-    def fast_pos_embed_interpolate(self, grid_thw: list[list[int]]) -> torch.Tensor:
+    def fast_pos_embed_interpolate(
+        self, grid_thw: Sequence[Sequence[int]]
+    ) -> torch.Tensor:
         interpolate_fn = (
             triton_pos_embed_interpolate if HAS_TRITON else pos_embed_interpolate_native
         )
@@ -752,7 +756,7 @@ class Qwen3_VisionTransformer(nn.Module):
 
     def prepare_encoder_metadata(
         self,
-        grid_thw_list: list[list[int]],
+        grid_thw_list: Sequence[Sequence[int]],
         *,
         max_batch_size: int | None = None,
         max_frames_per_batch: int | None = None,
@@ -915,7 +919,6 @@ class Qwen3VLProcessingInfo(Qwen2VLProcessingInfo):
     def get_hf_processor(self, **kwargs: object) -> Qwen3VLProcessor:
         return self.ctx.get_hf_processor(
             Qwen3VLProcessor,
-            use_fast=kwargs.pop("use_fast", True),
             **kwargs,
         )
 
@@ -1006,9 +1009,10 @@ class Qwen3VLProcessingInfo(Qwen2VLProcessingInfo):
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
+        max_frames_per_video: int = DUMMY_VIDEO_NUM_FRAMES,
     ) -> int:
         return super().get_num_frames_with_most_features(
-            seq_len, mm_counts, max_frames_per_video=DUMMY_VIDEO_NUM_FRAMES
+            seq_len, mm_counts, max_frames_per_video=max_frames_per_video
         )
 
     def get_max_video_tokens(
@@ -1254,7 +1258,7 @@ class Qwen3VLDummyInputsBuilder(BaseDummyInputsBuilder[Qwen3VLProcessingInfo]):
         )
         videos = [v.copy() for v in videos]
 
-        video_items = []
+        video_items: list[VideoItem] = []
         for video in videos:
             video_num_frames = video.shape[0]
             video_metadata = {
@@ -1340,6 +1344,7 @@ class Qwen3VLMultiModalProcessor(BaseMultiModalProcessor[Qwen3VLProcessingInfo])
         # are processed into several image patches
         video_input_ids_lst: list[list[int]] = []
         if videos := hf_data.pop("videos", []):
+            assert isinstance(videos, list)
             video_grid_thw_lst = []
             pixel_values_videos_lst = []
             timestamps_per_video = []
@@ -1362,7 +1367,7 @@ class Qwen3VLMultiModalProcessor(BaseMultiModalProcessor[Qwen3VLProcessingInfo])
 
                 # NOTE: a copy of is created to update do_sample_frames,
                 # otherwise mm_hash for the object will be incorrect.
-                video_mm_kwargs = dict(**hf_kwargs)
+                video_mm_kwargs: dict[str, Any] = dict(hf_kwargs)
                 merged = self.info.ctx.get_merged_mm_kwargs(hf_kwargs, modality="video")
                 if merged.keys() & {"size", "min_pixels", "max_pixels"}:
                     video_size = dict(self.info.get_video_processor().size)
@@ -1552,6 +1557,7 @@ class Qwen3VLMultiModalProcessor(BaseMultiModalProcessor[Qwen3VLProcessingInfo])
                 sampled_fps = sampled_fps[item_idx]
 
             timestamps = out_item["timestamps"].data
+            assert isinstance(timestamps, (list, torch.Tensor))
             assert len(timestamps) == grid_thw[0], (
                 f"The timestamps length({len(timestamps)}) should be equal "
                 f"video length ({grid_thw[0]})."
@@ -1618,7 +1624,7 @@ class Qwen3VLMultiModalProcessor(BaseMultiModalProcessor[Qwen3VLProcessingInfo])
     def get_video_repl(
         *,
         tokens_per_frame: list[int],
-        timestamps: list[float | int] | torch.Tensor,
+        timestamps: Sequence[float] | torch.Tensor,
         tokenizer: TokenizerLike,
         vision_start_token_id: int,
         vision_end_token_id: int,
@@ -1843,7 +1849,7 @@ class Qwen3VLForConditionalGeneration(
         super().__init__()
         config: Qwen3VLConfig = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
-        multimodal_config = vllm_config.model_config.multimodal_config
+        multimodal_config = vllm_config.model_config.get_multimodal_config()
 
         self.config = config
         self.model_config = vllm_config.model_config
@@ -2007,6 +2013,7 @@ class Qwen3VLForConditionalGeneration(
     def get_max_frames_per_video(self) -> int:
         mm_registry = MULTIMODAL_REGISTRY
         info = mm_registry.get_processing_info(self.model_config)
+        assert isinstance(info, Qwen3VLProcessingInfo)
         max_frames_per_video = info.get_num_frames_with_most_features(
             seq_len=self.model_config.max_model_len,
             mm_counts={"video": self.multimodal_config.get_limit_per_prompt("video")},
@@ -2255,7 +2262,7 @@ class Qwen3VLForConditionalGeneration(
                 image_grid_thw=image_grid_thw,
             )
 
-        if image_embeds is not None:
+        else:
             return Qwen2_5_VLImageEmbeddingInputs(
                 type="image_embeds",
                 image_embeds=image_embeds,
@@ -2283,7 +2290,7 @@ class Qwen3VLForConditionalGeneration(
                 timestamps=timestamps,
             )
 
-        if video_embeds is not None:
+        else:
             return Qwen2_5_VLVideoEmbeddingInputs(
                 type="video_embeds",
                 video_embeds=video_embeds,
@@ -2406,6 +2413,7 @@ class Qwen3VLForConditionalGeneration(
 
         # Apply EVS to each video.
         video_embeds_out = []
+        assert video_input.timestamps is not None
         for video_idx, (emb, size) in enumerate(zip(video_embeds_split, grid_thw_list)):
             # Compute positions.
             timestamps = video_input.timestamps[video_idx]
@@ -2413,6 +2421,7 @@ class Qwen3VLForConditionalGeneration(
 
             t, h, w = size
             if self.is_multimodal_pruning_enabled:
+                assert self.video_pruning_rate is not None
                 # Compute the retention mask for each video (EVS or VidCom2).
                 if self.video_pruning_method == "vidcom2":
                     mask_fn = vidcom2_compute_retention_mask
@@ -2584,7 +2593,7 @@ class Qwen3VLForConditionalGeneration(
                 {
                     "video_grid_thw": MultiModalFieldElem(
                         data=torch.tensor(video_grid_thw),
-                        field=None,  # HACK.
+                        field=MultiModalFieldConfig.batched("video").field,
                     ),
                 }
             ),
@@ -2612,7 +2621,9 @@ class Qwen3VLForConditionalGeneration(
         return expanded_positions
 
     def _parse_and_validate_multimodal_inputs(self, **kwargs: object) -> dict:
-        mm_input_by_modality = {}
+        mm_input_by_modality: dict[
+            str, Qwen2_5_VLImageInputs | Qwen2_5_VLVideoInputs | None
+        ] = {}
         for input_key in kwargs:
             if (
                 input_key in ("pixel_values", "image_embeds")
@@ -2660,14 +2671,20 @@ class Qwen3VLForConditionalGeneration(
         """
         for mm_feature in sorted(mm_features, key=lambda f: f.mm_position.offset):
             offset = mm_feature.mm_position.offset
+            data = mm_feature.data
+            assert data is not None
             if mm_feature.modality == "image":
-                t, h, w = mm_feature.data["image_grid_thw"].data.tolist()
+                grid = data["image_grid_thw"].data
+                assert isinstance(grid, torch.Tensor)
+                t, h, w = grid.tolist()
                 assert t == 1, f"Image must have 1 frame, got {t}"
                 llm_grid_h = h // spatial_merge_size
                 llm_grid_w = w // spatial_merge_size
                 yield offset, llm_grid_h, llm_grid_w, llm_grid_h * llm_grid_w
             elif mm_feature.modality == "video":
-                t, h, w = mm_feature.data["video_grid_thw"].data.tolist()
+                grid = data["video_grid_thw"].data
+                assert isinstance(grid, torch.Tensor)
+                t, h, w = grid.tolist()
                 llm_grid_h = h // spatial_merge_size
                 llm_grid_w = w // spatial_merge_size
 
@@ -2722,7 +2739,7 @@ class Qwen3VLForConditionalGeneration(
         mm_features: list[MultiModalFeatureSpec],
         config: Qwen3VLConfig,
     ):
-        llm_pos_ids_list = []
+        llm_pos_ids_list: list[np.ndarray] = []
         st = 0
         for (
             offset,

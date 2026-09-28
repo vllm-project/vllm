@@ -145,7 +145,10 @@ class PCPManager:
         if speculative_config is not None:
             if speculative_config.use_dspark():
                 dcp_size = parallel_config.decode_context_parallel_size
-                if dcp_size not in (1, pcp_size):
+                if (
+                    dcp_size not in (1, pcp_size)
+                    and speculative_config.draft_model_config.use_mla
+                ):
                     raise NotImplementedError(
                         "MRV2 PCP DSpark requires DCP=1 or DCP=PCP; got "
                         f"DCP={dcp_size}, PCP={pcp_size}."
@@ -754,6 +757,7 @@ class PCPManager:
     def prepare_draft_prefill(
         self, input_batch: InputBatch, input_ids: torch.Tensor
     ) -> None:
+        self.draft_prefill_batch = None
         if input_batch is not self._global_batch or self._local_batch is None:
             return
         local_batch = self._local_batch
