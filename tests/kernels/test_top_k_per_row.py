@@ -1469,6 +1469,17 @@ def _make_candidate_overflow_row(
     return row
 
 
+def _assert_topk_values_match_reference(
+    logits: torch.Tensor, indices: torch.Tensor, seq_len: int, top_k: int
+) -> None:
+    assert torch.all((indices >= 0) & (indices < seq_len))
+    sorted_indices = indices.sort(dim=1).values
+    assert torch.all(sorted_indices[:, 1:] != sorted_indices[:, :-1])
+    actual = logits.gather(1, indices.to(torch.int64)).sort(dim=1).values
+    expected = logits[:, :seq_len].topk(top_k, dim=1).values.sort(dim=1).values
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
+
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="This test requires CUDA")
 @pytest.mark.parametrize("top_k", [512, 1024, 2048])
 @pytest.mark.parametrize(
@@ -1574,12 +1585,58 @@ def test_workspace_topk_candidate_overflow(
     )
     torch.accelerator.synchronize()
 
-    assert torch.all((indices >= 0) & (indices < seq_len))
-    sorted_indices = indices.sort(dim=1).values
-    assert torch.all(sorted_indices[:, 1:] != sorted_indices[:, :-1])
-    actual = logits.gather(1, indices.to(torch.int64)).sort(dim=1).values
-    expected = logits[:, :seq_len].topk(top_k, dim=1).values.sort(dim=1).values
-    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+    _assert_topk_values_match_reference(logits, indices, seq_len, top_k)
+
+
+@pytest.mark.skipif(
+    not _has_device_capability(90), reason="cooperative_topk requires SM90+"
+)
+@pytest.mark.parametrize("num_rows", [9, 32, 34, 64])
+@pytest.mark.parametrize("seq_len", [65535, 65536, 65537])
+@torch.inference_mode()
+def test_cooperative_topk_overflow_staging_cluster_uniform(
+    num_rows: int, seq_len: int
+) -> None:
+    """Cluster CTAs must agree whether to enter staged overflow recovery."""
+    top_k = 2048
+    stride = (seq_len + 3) & ~3
+    row = _make_candidate_overflow_row(seq_len, top_k, "fp32_narrow", None)
+    logits = torch.full((num_rows, stride), float("inf"), device="cuda")
+    logits[:, :seq_len] = row.to("cuda")
+    lengths = torch.full((num_rows,), seq_len, dtype=torch.int32, device="cuda")
+    indices = torch.empty((num_rows, top_k), dtype=torch.int32, device="cuda")
+
+    _run_topk_backend(
+        "cooperative_topk", logits, lengths, indices, top_k, seq_len
+    )
+    torch.accelerator.synchronize()
+
+    _assert_topk_values_match_reference(logits, indices, seq_len, top_k)
+
+
+@pytest.mark.skipif(
+    not _has_device_capability(90), reason="cooperative_topk requires SM90+"
+)
+@pytest.mark.parametrize(
+    "num_rows,seq_len", [(1, 32768), (16, 32768), (32, 131072)]
+)
+@pytest.mark.parametrize("top_k", [512, 2048])
+@torch.inference_mode()
+def test_cooperative_topk_fp16_subnormal_coarse_overflow(
+    num_rows: int, seq_len: int, top_k: int
+) -> None:
+    generator = torch.Generator(device="cuda").manual_seed(seq_len + top_k)
+    logits = 1e-6 + 1e-8 * torch.rand(
+        (num_rows, seq_len), generator=generator, device="cuda"
+    )
+    lengths = torch.full((num_rows,), seq_len, dtype=torch.int32, device="cuda")
+    indices = torch.empty((num_rows, top_k), dtype=torch.int32, device="cuda")
+
+    _run_topk_backend(
+        "cooperative_topk", logits, lengths, indices, top_k, seq_len
+    )
+    torch.accelerator.synchronize()
+    _assert_topk_values_match_reference(logits, indices, seq_len, top_k)
 
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="This test requires CUDA")

@@ -947,12 +947,19 @@ __global__ void __launch_bounds__(FILTERED_TOPK_BLOCK_THREADS)
   const uint32_t bid = blockIdx.x;
   const int tx = threadIdx.x;
 
+  if (bid >= num_rows) return;
+
+  const int length =
+      (lengths != nullptr) ? lengths[bid] : static_cast<int>(max_len);
+  const DType* score = input + bid * max_len;
+  IdType* dst = output + bid * top_k;
+
   // Trivial case: length <= top_k
   if (length <= static_cast<int>(top_k)) {
     for (int i = tx; i < static_cast<int>(top_k); i += BLOCK_SIZE) {
       dst[i] = (i < length) ? static_cast<IdType>(i) : static_cast<IdType>(-1);
     }
-    return true;
+    return;
   }
 
   // Short path
@@ -964,14 +971,16 @@ __global__ void __launch_bounds__(FILTERED_TOPK_BLOCK_THREADS)
       hist4096::histogram_4096_topk<MAX_K, 12, 8>(score, dst, length,
                                                   dynamic_smem);
     }
-    return true;
+    return;
   }
 
-  auto& s_histogram_buf = storage.histogram;
-  auto& s_counter = storage.counter;
-  auto& s_threshold_bin_id = storage.threshold_bin;
-  auto& s_num_input = storage.num_input;
-  auto& s_indices = storage.indices;
+  // Static shared memory
+  alignas(128) __shared__ int s_histogram_buf[2][RADIX + 128];
+  alignas(128) __shared__ int s_counter;
+  alignas(128) __shared__ int s_threshold_bin_id;
+  alignas(128) __shared__ int s_num_input[2];
+  alignas(128) __shared__ int s_indices[MAX_K];
+
   auto& s_histogram = s_histogram_buf[0];
 
   auto* coarse_smem = reinterpret_cast<CoarseSmem*>(dynamic_smem);
@@ -1164,7 +1173,7 @@ __global__ void __launch_bounds__(FILTERED_TOPK_BLOCK_THREADS)
     // Stage 2: refine with 8bit radix passes
 #pragma unroll
     for (int round = 0; round < NUM_ROUNDS; ++round) {
-      auto& s_last_remain = storage.last_remain;
+      __shared__ int s_last_remain;
       const auto r_idx = round % 2;
 
       const auto _raw_num_input = s_num_input[r_idx];
@@ -1246,30 +1255,6 @@ __global__ void __launch_bounds__(FILTERED_TOPK_BLOCK_THREADS)
     const int idx = s_indices[base];
     dst[base] = static_cast<IdType>(idx);
   }
-  return true;
-}
-
-/*!
- * \brief Filtered Top-K kernel for ragged sequences.
- *
- * \tparam DType Data type (float, half, nv_bfloat16)
- * \tparam IdType Index type (int32_t)
- * \tparam VEC_SIZE Vector size for input loads (1, 2, 4, or 8)
- */
-template <typename DType, typename IdType, int VEC_SIZE, uint32_t MAX_K = 2048,
-          bool UsePredicatedShortLoads = false>
-__global__ void __launch_bounds__(FILTERED_TOPK_BLOCK_THREADS)
-    FilteredTopKUnifiedKernel(const DType* __restrict__ input,
-                              IdType* __restrict__ output,
-                              const IdType* __restrict__ lengths,
-                              uint32_t num_rows, uint32_t top_k,
-                              uint32_t max_len) {
-  const uint32_t bid = blockIdx.x;
-  if (bid >= num_rows) return;
-  const int length = lengths ? lengths[bid] : static_cast<int>(max_len);
-  __shared__ FilteredTopKStorage<MAX_K> storage;
-  filtered_topk_row<DType, IdType, VEC_SIZE, MAX_K, UsePredicatedShortLoads>(
-      input + bid * max_len, output + bid * top_k, length, top_k, storage);
 }
 
 // Helper to compute GCD for VEC_SIZE selection

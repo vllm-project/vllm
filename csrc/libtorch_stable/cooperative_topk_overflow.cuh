@@ -126,8 +126,7 @@ __device__ __forceinline__ void for_each_partition_score(
   }
 }
 
-// A finite 10-bit FP16 bin spans fewer than 22 ordered-FP32 bits, so two
-// radix-2048 passes are sufficient to select its exact pivot.
+// Bounded non-subnormal coarse bins fit in two ordered-FP32 radix passes.
 template <bool UseResident, typename SmemType>
 __device__ void build_coarse_refine_histogram(
     const float* __restrict__ scores, uint32_t length, uint32_t coarse_bin,
@@ -425,7 +424,7 @@ __device__ __noinline__ OverflowProbeStatus probe_arbitrary_fp32_overflow(
   }
   __syncthreads();
 
-  // A finite coarse bin is fully covered by the two 11-bit radix digits.
+  // The caller excludes bins that do not fit in two radix digits.
   for_each_partition_score<UseResident>(
       row_input + my_start, my_len, smem, [&](uint32_t, float score) {
         if (extract_coarse_bin(score) != coarse_bin) return;
