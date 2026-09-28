@@ -19,11 +19,15 @@ use vllm_metrics::METRICS;
 mod error;
 mod inflight;
 mod log_stats;
+mod observer;
 mod output;
 mod request;
 mod request_metrics;
 
 pub use error::{Error, Result};
+pub use observer::{
+    FinishedRequest, FinishedRequestEvents, FinishedRequestStats, RequestObserver, RequestObservers,
+};
 pub use output::{
     CollectedGenerateOutput, FinishReason, GenerateOutput, GenerateOutputStream,
     GenerateOutputStreamExt, GeneratePromptInfo, PromptCacheUsage, TokenUsage, WeightVersionSpan,
@@ -34,6 +38,7 @@ pub use vllm_engine_core_client::protocol::logprobs::{Logprobs, PositionLogprobs
 
 use crate::inflight::InflightRequests;
 use crate::log_stats::StatsLogger;
+use crate::observer::ObserverContext;
 use crate::request_metrics::{
     ParallelSamplingStats, RequestMetricHandles, RequestMetricsTracker,
     resolve_request_metric_handles,
@@ -131,6 +136,7 @@ pub struct EngineCoreLlm {
     /// construction so the request families export zero-valued series before
     /// the first request.
     request_metric_handles: BTreeMap<u32, Arc<RequestMetricHandles>>,
+    observers: RequestObservers,
 }
 
 impl EngineCoreLlm {
@@ -164,7 +170,14 @@ impl EngineCoreLlm {
             stats_logger: None,
             inflight: InflightRequests::new(),
             request_metric_handles,
+            observers: RequestObservers::default(),
         }
+    }
+
+    /// Register observers notified when a request submitted to the engine finishes.
+    pub fn with_request_observers(mut self, observers: RequestObservers) -> Self {
+        self.observers = observers;
+        self
     }
 
     /// Enable periodic stats logging at the given interval, or disable it with
@@ -296,8 +309,20 @@ impl EngineCoreLlm {
         let arrival_time = engine_request.arrival_time;
         let max_tokens_param = (engine_request.sampling_params.as_ref()).map(|p| p.max_tokens);
         let prompt_len = prompt_token_ids.len() as u32;
+        let lora_name = (engine_request.lora_request.as_ref())
+            .filter(|_| !self.observers.is_empty())
+            .map(|lora| lora.lora_name.clone());
 
         let stream = self.client.call(engine_request).await?;
+
+        let observer_context = (!self.observers.is_empty()).then(|| ObserverContext {
+            observers: self.observers.clone(),
+            external_request_id: external_request_id.clone(),
+            engine_request_id: internal_request_id.clone(),
+            model_name: self.client.model_name().to_string(),
+            lora_name,
+            engine_index: stream.engine_index(),
+        });
 
         let handles = (self.request_metric_handles.get(&stream.engine_index()))
             .expect("requests are routed only to connected engines")
@@ -316,6 +341,7 @@ impl EngineCoreLlm {
             remote_prefill_cached_tokens,
             stream,
             request_metrics,
+            observer_context,
             guard,
         ))
     }
@@ -343,7 +369,9 @@ impl EngineCoreLlm {
 
     /// Shut down the underlying engine-core client and its background tasks.
     pub async fn shutdown(self) -> Result<()> {
-        self.client.shutdown().await?;
+        let result = self.client.shutdown().await;
+        self.observers.shutdown().await;
+        result?;
         Ok(())
     }
 }
