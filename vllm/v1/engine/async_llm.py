@@ -140,7 +140,8 @@ class AsyncLLM(EngineClient):
 
         self.log_requests = log_requests
 
-        # Pause state: the lock serializes transitions, the mode gates admission.
+        # The admission flag and engine state change across an await, so without the
+        # lock a resume interleaved mid-pause can leave admission open while paused.
         self._pause_state_lock = asyncio.Lock()
         self._reject_while_paused: PauseMode | None = None
 
