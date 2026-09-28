@@ -9,7 +9,7 @@ import sys
 from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
-from types import SimpleNamespace
+from types import MethodType, SimpleNamespace
 from typing import Any, cast
 
 import pytest
@@ -2918,6 +2918,7 @@ def test_hybrid_mla_block_alignment_uses_packed_state_size(
     from vllm.model_executor.layers.attention.mla_attention import MLAAttention
     from vllm.model_executor.models import ModelRegistry
     from vllm.platforms.interface import Platform
+    from vllm.v1.attention.backends.mla.flashmla import FlashMLABackend
 
     config = VllmConfig(
         cache_config=CacheConfig(cache_dtype=cache_dtype, mamba_cache_mode="align")
@@ -2953,11 +2954,14 @@ def test_hybrid_mla_block_alignment_uses_packed_state_size(
         == expected_block_size * bytes_per_token
     )
     layer = SimpleNamespace(
+        attn_backend=FlashMLABackend,
         kv_cache_dtype=cache_dtype,
         head_size=512,
+        indexer=None,
         sliding_window=None,
         non_causal_multi_token_decode=False,
     )
+    layer._uses_flat_kv_cache = MethodType(MLAAttention._uses_flat_kv_cache, layer)
     spec = MLAAttention.get_kv_cache_spec(layer, config)
     assert config.cache_config.mamba_page_size_padded == spec.page_size_bytes
 
