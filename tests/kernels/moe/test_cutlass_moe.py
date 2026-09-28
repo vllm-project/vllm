@@ -26,6 +26,7 @@ from vllm.model_executor.layers.fused_moe.all2all_utils import (
 )
 from vllm.model_executor.layers.fused_moe.config import (
     FUSED_MOE_UNQUANTIZED_CONFIG,
+    FusedMoEParallelConfig,
     FusedMoEQuantConfig,
     fp8_w8a8_moe_quant_config,
 )
@@ -39,7 +40,10 @@ from vllm.model_executor.layers.fused_moe.experts.cutlass_moe import (
     run_cutlass_moe_mxfp4,
 )
 from vllm.model_executor.layers.fused_moe.oracle import nvfp4 as nvfp4_oracle
-from vllm.model_executor.layers.fused_moe.utils import moe_kernel_quantize_input
+from vllm.model_executor.layers.fused_moe.utils import (
+    moe_kernel_quantize_input,
+    remap_topk_to_local,
+)
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_random_seed
 
@@ -178,6 +182,36 @@ def test_cutlass_moe_permutation_maps_padding_to_zero():
     torch.testing.assert_close(restored[1], torch.zeros_like(restored[1]))
     torch.testing.assert_close(restored[2], input_tensor[1])
     torch.testing.assert_close(restored[3], torch.zeros_like(restored[3]))
+
+
+def test_remap_topk_ids_to_local():
+    device = "cuda"
+    expert_map = torch.tensor([-1, 0, -1, 1, -1, 2], dtype=torch.int32, device=device)
+    topk_ids = torch.tensor([[1, 3], [0, 5], [-1, 4]], dtype=torch.int32, device=device)
+    expected = torch.tensor(
+        [[0, 1], [-1, 2], [-1, -1]], dtype=torch.int32, device=device
+    )
+    actual = remap_topk_to_local(topk_ids, expert_map, out_dtype=torch.int32)
+    torch.testing.assert_close(actual, expected)
+
+
+def test_cutlass_fp4_moe_supports_expert_parallel_config():
+    ep_config = FusedMoEParallelConfig(
+        tp_size=1,
+        tp_rank=0,
+        pcp_size=1,
+        pcp_rank=0,
+        dp_size=8,
+        dp_rank=0,
+        ep_size=8,
+        ep_rank=0,
+        sp_size=1,
+        use_ep=True,
+        all2all_backend="allgather_reducescatter",
+        enable_eplb=False,
+    )
+    assert CutlassExpertsMxfp4._supports_parallel_config(ep_config)
+    assert CutlassExpertsFp4._supports_parallel_config(ep_config)
 
 
 @pytest.mark.parametrize("quantization", ["nvfp4", "mxfp4"])
