@@ -849,6 +849,28 @@ def rocm_aiter_group_quant_fusion_pass_on_test_model(
         del all_reduce_fusion_pass
 
 
+def make_cute_config(tmp_path, local_rank):
+    config = VllmConfig()
+    config.parallel_config.tensor_parallel_size = 8
+    config.compilation_config.custom_ops = ["all", "+rms_norm", "+quant_fp8"]
+    config.compilation_config.pass_config.fuse_allreduce_rms = True
+    from vllm.transformers_utils.configs.qwen3_5_moe import Qwen3_5MoeTextConfig
+
+    model_path = tmp_path / "shape-config"
+    Qwen3_5MoeTextConfig(
+        hidden_size=8192,
+        num_experts_per_tok=10,
+        architectures=["Qwen3_5MoeForCausalLM"],
+    ).save_pretrained(model_path)
+    config.model_config = ModelConfig(
+        model=str(model_path),
+        dtype=torch.bfloat16,
+        skip_tokenizer_init=True,
+    )
+    config.device_config = DeviceConfig(device=torch.device("cuda", local_rank))
+    return config
+
+
 @pytest.fixture(scope="module")
 def cute_tp_environment():
     """Keep one rendezvous across torchrun cases; release it at module teardown."""
@@ -898,31 +920,13 @@ def test_cute_allreduce_gemma_graph_replay(
     from vllm.distributed.device_communicators import cute_allreduce as runtime
 
     local_rank = cute_tp_environment
-    config = VllmConfig()
-    config.kernel_config.enable_cute_allreduce = True
-    config.parallel_config.tensor_parallel_size = 8
-    config.compilation_config.custom_ops = ["all", "+rms_norm", "+quant_fp8"]
-    config.compilation_config.pass_config.fuse_allreduce_rms = True
-    from vllm.transformers_utils.configs.qwen3_5_moe import Qwen3_5MoeTextConfig
-
-    model_path = tmp_path / "shape-config"
-    Qwen3_5MoeTextConfig(
-        hidden_size=8192,
-        num_experts_per_tok=10,
-        architectures=["Qwen3_5MoeForCausalLM"],
-    ).save_pretrained(model_path)
-    config.model_config = ModelConfig(
-        model=str(model_path),
-        dtype=torch.bfloat16,
-        skip_tokenizer_init=True,
-    )
-    config.device_config = DeviceConfig(device=torch.device("cuda", local_rank))
+    config = make_cute_config(tmp_path, local_rank)
     with set_current_vllm_config(config, check_compile=False):
         ensure_model_parallel_initialized(8, 1)
-        runtime.initialize_for_config(config)
         communicator = get_tp_group().device_communicator
         owner = communicator.cute_allreduce
-        runtime.initialize_for_config(config)
+        assert owner is not None
+        ensure_model_parallel_initialized(8, 1)
         assert communicator.cute_allreduce is owner
         fusion = CuteAllReduceFusionPass(config)
         backend = TestBackend(
@@ -1019,5 +1023,56 @@ def test_cute_allreduce_gemma_graph_replay(
         )
         for got, want in zip(actual, expected):
             torch.testing.assert_close(got.float(), want.float())
-        owner.destroy()
-        communicator.cute_allreduce = None
+
+
+@pytest.mark.skip_global_cleanup
+def test_cute_allreduce_selection_requires_every_rank(
+    tmp_path, cute_tp_environment, monkeypatch
+):
+    """Disabling fusion or one unsupported peer must avoid every CuTe allocation."""
+    from vllm.compilation.passes.fusion.cute_allreduce_fusion import (
+        CuteAllReduceFusionPass,
+    )
+    from vllm.distributed import ensure_model_parallel_initialized, get_tp_group
+    from vllm.distributed.device_communicators import cute_allreduce as runtime
+    from vllm.distributed.parallel_state import destroy_model_parallel, get_world_group
+
+    config = make_cute_config(tmp_path, cute_tp_environment)
+    destroy_model_parallel()
+    try:
+        with set_current_vllm_config(config, check_compile=False):
+            config.compilation_config.pass_config.fuse_allreduce_rms = False
+            monkeypatch.setattr(
+                runtime.CuteAllReduce,
+                "is_supported",
+                staticmethod(lambda _: pytest.fail("Disabled fusion probed CuTe")),
+            )
+            ensure_model_parallel_initialized(8, 1)
+            assert get_tp_group().device_communicator.cute_allreduce is None
+            destroy_model_parallel()
+
+            config.compilation_config.pass_config.fuse_allreduce_rms = True
+            monkeypatch.setattr(
+                runtime.CuteAllReduce,
+                "is_supported",
+                staticmethod(lambda _: get_world_group().rank != 0),
+            )
+            ensure_model_parallel_initialized(8, 1)
+            assert get_tp_group().device_communicator.cute_allreduce is None
+            fusion = CuteAllReduceFusionPass(config)
+            assert fusion.disabled
+            assert fusion.uuid()
+            # A cached fused graph remains executable if CuTe is unavailable.
+            x = torch.full(
+                (8, 8192),
+                get_world_group().rank + 1,
+                device="cuda",
+                dtype=torch.bfloat16,
+            )
+            norm, updated = runtime.cute_allreduce_norm(
+                x, None, torch.zeros_like(x[0]), None, 1e-6
+            )
+            torch.testing.assert_close(norm, torch.ones_like(norm))
+            torch.testing.assert_close(updated, torch.full_like(updated, 36))
+    finally:
+        destroy_model_parallel()

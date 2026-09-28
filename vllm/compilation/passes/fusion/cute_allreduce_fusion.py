@@ -39,7 +39,6 @@ class CuteAllReduceFusionPass(VllmPatternMatcherPass):
         self.patterns = PatternMatcherPass(pass_name="cute_allreduce")
         if self.disabled:
             return
-        runtime.initialize_for_config(config)
         epsilon = float(config.model_config.hf_text_config.rms_norm_eps)
         self.register_patterns(epsilon)
 
@@ -168,7 +167,7 @@ class CuteAllReduceFusionPass(VllmPatternMatcherPass):
             _bind_optional_inputs,
             runtime.cute_allreduce_norm,
             inspect.unwrap(runtime.build_policy),
-            repr(runtime.build_policy()),
+            repr(runtime.build_policy()) if not self.disabled else "unavailable",
             str(self.disabled),
         )
 

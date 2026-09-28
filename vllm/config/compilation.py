@@ -140,7 +140,13 @@ class PassConfig:
     fuse_gemm_comms: bool = None  # type: ignore[assignment]
     """Enable async TP."""
     fuse_allreduce_rms: bool = None  # type: ignore[assignment]
-    """Enable flashinfer allreduce fusion."""
+    """Enable AllReduce/RMSNorm fusion with an eligible backend.
+
+    FlashInfer CuTe is preferred for BF16 Qwen3.5 MoE with hidden size 8192,
+    TP8/DP1 on SM107 when its static-FP8 API and NVLink multicast are available.
+    Other configurations retain the existing fusion backends. Setting False
+    disables fusion and its CuTe workspace allocation.
+    """
     enable_qk_norm_rope_fusion: bool = None  # type: ignore[assignment]
     """Enable fused Q/K RMSNorm + RoPE pass."""
     fuse_rope_kvcache_cat_mla: bool = None  # type: ignore[assignment]

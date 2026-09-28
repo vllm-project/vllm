@@ -2,8 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 
-from typing import TYPE_CHECKING
-
 import torch
 from torch.distributed import ProcessGroup
 
@@ -24,9 +22,6 @@ from vllm.platforms import current_platform
 from ..utils import StatelessProcessGroup
 from .aiter_custom_all_reduce import AiterCustomAllreduce
 from .base_device_communicator import DeviceCommunicatorBase
-
-if TYPE_CHECKING:
-    from .cute_allreduce import CuteAllReduce
 
 logger = init_logger(__name__)
 
@@ -87,6 +82,7 @@ class CudaCommunicator(DeviceCommunicatorBase):
         from vllm.distributed.device_communicators.custom_all_reduce import (
             CustomAllreduce,
         )
+        from vllm.distributed.device_communicators.cute_allreduce import CuteAllReduce
         from vllm.distributed.device_communicators.flashinfer_all_reduce import (
             FlashInferAllReduce,
         )
@@ -121,6 +117,13 @@ class CudaCommunicator(DeviceCommunicatorBase):
             self.symm_mem_comm = SymmMemCommunicator(
                 group=self.cpu_group,
                 device=self.device,
+            )
+
+        if unique_name.split(":")[0] == "tp" and current_platform.is_cuda():
+            from vllm.config import get_current_vllm_config_or_none
+
+            self.cute_allreduce = CuteAllReduce.create(
+                self, get_current_vllm_config_or_none()
             )
 
         if self.use_flashinfer_allreduce and self.world_size > 1:

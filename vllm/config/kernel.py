@@ -226,16 +226,6 @@ class KernelConfig:
     Platform defaults appended automatically during VllmConfig.__post_init__.
     """
 
-    enable_cute_allreduce: bool = False
-    """Use FlashInfer CuTe AR/Gemma RMSNorm and static-FP8 output fusion.
-
-    Opt-in policy for BF16 Qwen3.5 MoE with hidden size 8192, TP8, DP1 on
-    SM107. Requires FlashInfer CuTe static-FP8 support and fuse_allreduce_rms.
-    Unsupported configurations fail at startup; calls beyond the policy's
-    token cap retain the ordinary collective. DBO, sequence parallelism,
-    LoRA, sleep mode, fault tolerance and batch invariance are not supported.
-    """
-
     enable_flashinfer_autotune: bool = None  # type: ignore[assignment]
     """If True, run FlashInfer autotuning during kernel warmup."""
 

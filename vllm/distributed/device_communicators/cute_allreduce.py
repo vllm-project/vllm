@@ -12,11 +12,13 @@ import torch
 import vllm.envs as envs
 from vllm.distributed import get_tp_group, tensor_model_parallel_all_reduce
 from vllm.logger import init_logger
+from vllm.platforms import current_platform
 from vllm.utils.torch_utils import direct_register_custom_op
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
-    from vllm.distributed.parallel_state import GroupCoordinator
+
+    from .base_device_communicator import DeviceCommunicatorBase
 
 logger = init_logger(__name__)
 MAX_TOKENS = 4096
@@ -58,13 +60,19 @@ def build_policy():
     )
 
 
-def enabled_for_config(config: "VllmConfig") -> bool:
-    if not config.kernel_config.enable_cute_allreduce:
-        return False
+def supports_config(config: "VllmConfig") -> bool:
     model, parallel = config.model_config, config.parallel_config
     if model is None:
         return False
     text = model.hf_text_config
+    spec = config.speculative_config
+    draft = getattr(spec, "draft_model_config", None)
+    if draft is not None and (
+        draft.get_hidden_size() != HIDDEN_SIZE
+        or getattr(draft.hf_text_config, "rms_norm_eps", None)
+        != getattr(text, "rms_norm_eps", None)
+    ):
+        return False
     return bool(
         getattr(text, "model_type", None) == "qwen3_5_moe_text"
         and getattr(text, "hidden_size", None) == HIDDEN_SIZE
@@ -76,6 +84,7 @@ def enabled_for_config(config: "VllmConfig") -> bool:
         and parallel.prefill_context_parallel_size == 1
         and not parallel.use_sequence_parallel_moe
         and not parallel.enable_dbo
+        and not config.compilation_config.pass_config.enable_sp
         and not parallel.enable_fault_tolerance
         and config.lora_config is None
         and not envs.VLLM_BATCH_INVARIANT
@@ -90,20 +99,53 @@ class CuteAllReduce:
     workspace for each mode; sequential target and draft layers share them.
     """
 
-    def __init__(self, tp: "GroupCoordinator", epsilon: float):
+    @classmethod
+    def create(
+        cls, tp: "DeviceCommunicatorBase", config: "VllmConfig | None"
+    ) -> "CuteAllReduce | None":
+        if config is None or not supports_config(config):
+            return None
+        available = cls.is_supported(tp.device) and tp.world_size == 8
+        # Every peer must choose the same backend before symmetric allocation.
+        agreed = torch.tensor(int(available), dtype=torch.int32, device="cpu")
+        torch.distributed.all_reduce(
+            agreed, op=torch.distributed.ReduceOp.MIN, group=tp.cpu_group
+        )
+        if not agreed.item():
+            logger.debug("CuTe AR/norm unavailable; retaining existing fusion backends")
+            return None
+        assert config.model_config is not None
+        epsilon = float(config.model_config.hf_text_config.rms_norm_eps)
+        backend = cls(tp, epsilon)
+        logger.info("Initialized FlashInfer CuTe AllReduce for Qwen TP8")
+        return backend
+
+    @staticmethod
+    def is_supported(device: torch.device) -> bool:
+        if not current_platform.is_device_capability((10, 7), device.index):
+            return False
+        try:
+            import torch.distributed._symmetric_memory as symm_mem
+            from flashinfer.comm.mnnvl import is_multicast_supported
+            from flashinfer.comm.mnnvl_cutedsl_ar import (
+                MNNVLCuteDSLAllReduceFusionWorkspace,
+            )
+        except ImportError:
+            return False
+        return (
+            "output_dtype"
+            in inspect.signature(MNNVLCuteDSLAllReduceFusionWorkspace).parameters
+            and symm_mem.get_backend(device) is not None
+            and is_multicast_supported(device.index)
+        )
+
+    def __init__(self, tp: "DeviceCommunicatorBase", epsilon: float):
         from flashinfer.comm.mnnvl_cutedsl_ar import (
             MNNVLCuteDSLAllReduceFusionWorkspace,
         )
 
         if torch.cuda.is_current_stream_capturing():
             raise RuntimeError("CuTe workspaces must be initialized before capture")
-        if tp.world_size != 8 or torch.cuda.get_device_capability(tp.device) != (10, 7):
-            raise ValueError("This CuTe policy requires TP8 on SM107")
-        if (
-            "output_dtype"
-            not in inspect.signature(MNNVLCuteDSLAllReduceFusionWorkspace).parameters
-        ):
-            raise RuntimeError("FlashInfer CuTe static-FP8 output support is required")
         # Symmetric-memory registration needs the PyTorch NCCL communicator.
         # vLLM collectives can have used only PyNccl before this point.
         torch.distributed.barrier(group=tp.device_group, device_ids=[tp.device.index])
@@ -144,33 +186,19 @@ class CuteAllReduce:
         self.workspaces.clear()
 
 
-def initialize_for_config(config: "VllmConfig") -> None:
-    if not config.kernel_config.enable_cute_allreduce:
-        return
-    if not enabled_for_config(config):
-        raise ValueError("CuTe AllReduce is unsupported for this model/configuration")
-    tp = get_tp_group()
-    communicator = tp.device_communicator
-    from .cuda_communicator import CudaCommunicator
+def enabled_for_config(config: "VllmConfig") -> bool:
+    return supports_config(config) and get_backend() is not None
 
-    assert isinstance(communicator, CudaCommunicator)
-    assert config.model_config is not None
-    if communicator.cute_allreduce is None:
-        epsilon = float(config.model_config.hf_text_config.rms_norm_eps)
-        communicator.cute_allreduce = CuteAllReduce(tp, epsilon)
-        logger.info("Initialized FlashInfer CuTe AllReduce for Qwen TP8")
+
+def get_backend() -> CuteAllReduce | None:
+    return getattr(get_tp_group().device_communicator, "cute_allreduce", None)
 
 
 def get_workspace(epsilon: float, dtype: torch.dtype, residual: bool):
-    communicator = get_tp_group().device_communicator
-    from .cuda_communicator import CudaCommunicator
-
-    if (
-        not isinstance(communicator, CudaCommunicator)
-        or communicator.cute_allreduce is None
-    ):
+    backend = get_backend()
+    if backend is None:
         raise RuntimeError("CuTe AllReduce was not initialized before execution")
-    return communicator.cute_allreduce.get_workspace(epsilon, dtype, residual)
+    return backend.get_workspace(epsilon, dtype, residual)
 
 
 def output_dtype(scale: torch.Tensor | None) -> torch.dtype:
@@ -188,7 +216,7 @@ def cute_allreduce_norm(
 
     Residual and norm weights must be replicated across the TP group.
     """
-    if 0 < input.shape[0] <= MAX_TOKENS:
+    if 0 < input.shape[0] <= MAX_TOKENS and get_backend() is not None:
         from flashinfer.comm import AllReduceFusionPattern, allreduce_fusion
 
         dtype = output_dtype(scale)
