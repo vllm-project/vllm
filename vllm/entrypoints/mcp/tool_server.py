@@ -12,6 +12,8 @@ from vllm.logger import init_logger
 logger = init_logger(__name__)
 
 if TYPE_CHECKING:
+    from argparse import Namespace
+
     from mcp.types import ListToolsResult
 
 
@@ -74,17 +76,14 @@ def post_process_tools_description(
 class ToolServer(ABC):
     @abstractmethod
     def has_tool(self, tool_name: str) -> bool:
-        """
-        Return True if the tool is supported, False otherwise.
-        """
+        """Return True if the tool is supported, False otherwise."""
         pass
 
     @abstractmethod
     def get_tool_description(
         self, tool_name: str, allowed_tools: list[str] | None = None
     ) -> ToolNamespaceConfig | None:
-        """
-        Return the tool description for the given tool name.
+        """Return the tool description for the given tool name.
         If the tool is not supported, return None.
         """
         pass
@@ -93,9 +92,7 @@ class ToolServer(ABC):
     def new_session(
         self, tool_name: str, session_id: str, headers: dict[str, str] | None = None
     ) -> AbstractAsyncContextManager[Any]:
-        """
-        Create a session for the tool.
-        """
+        """Create a session for the tool."""
         ...
 
 
@@ -232,3 +229,16 @@ class DemoToolServer(ToolServer):
         if tool_name not in self.tools:
             raise KeyError(f"Tool '{tool_name}' is not supported")
         yield self.tools[tool_name]
+
+
+async def init_tool_server(args: "Namespace") -> ToolServer | None:
+    tool_server = getattr(args, "tool_server", None)
+    if tool_server == "demo":
+        demo_server = DemoToolServer()
+        await demo_server.init_and_validate()
+        return demo_server
+    if tool_server:
+        mcp_server = MCPToolServer()
+        await mcp_server.add_tool_server(tool_server)
+        return mcp_server
+    return None

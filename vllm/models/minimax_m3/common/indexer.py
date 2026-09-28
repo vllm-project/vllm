@@ -55,6 +55,7 @@ from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     KVCacheSpec,
     MLAAttentionSpec,
+    SparseCacheRole,
 )
 
 logger = init_logger(__name__)
@@ -90,7 +91,7 @@ class MiniMaxM3IndexerBackend(AttentionBackend):
         return [128]
 
     @staticmethod
-    def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
+    def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int | MultipleOf]:
         return [128]
 
     @classmethod
@@ -148,6 +149,7 @@ class MiniMaxM3IndexerCache(nn.Module, AttentionLayerBase):
             num_kv_heads=1,
             head_size=self.head_dim,
             dtype=self.dtype,
+            cache_role=SparseCacheRole.INDEXER,
         )
 
     def forward(self) -> None: ...

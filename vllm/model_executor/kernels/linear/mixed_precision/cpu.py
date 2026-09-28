@@ -144,9 +144,6 @@ class CPUWNA16LinearKernel(MPLinearKernel):
         if (not self.config.zero_points) and (self.w_zp_name is not None):
             setattr(layer, self.w_zp_name, None)
 
-        if (not self.config.has_g_idx) and (self.w_gidx_name is not None):
-            setattr(layer, self.w_gidx_name, None)
-
         weights = getattr(layer, self.w_q_name)
         # Require GPTQ pack format
         assert weights.input_dim == weights.packed_dim
@@ -172,7 +169,6 @@ class CPUWNA16LinearKernel(MPLinearKernel):
         supports_riscv = current_platform.get_cpu_architecture() == CpuArchEnum.RISCV
         layer.use_w4a8 = (
             envs.VLLM_CPU_INT4_W4A8
-            and not self.config.has_g_idx
             and self.config.act_type == torch.bfloat16
             and (supports_amx or supports_riscv)
         )
@@ -189,7 +185,7 @@ class CPUWNA16LinearKernel(MPLinearKernel):
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        w_q, w_s, w_zp, w_gidx = self._get_weight_params(layer)
+        w_q, w_s, w_zp = self._get_weight_params(layer)
         if layer.use_w4a8:
             x = ops.int4_scaled_mm_cpu(
                 x=x,
@@ -204,7 +200,6 @@ class CPUWNA16LinearKernel(MPLinearKernel):
                 q_weight=w_q,
                 scales=w_s,
                 zeros=w_zp,
-                g_idx=w_gidx,
                 bias=bias,
                 pack_factor=8,  # 32 // 4
                 isa_hint=layer.isa_hint,
