@@ -839,6 +839,8 @@ class NixlBaseConnectorWorker:
         self._engine_ttl: float = vllm_config.kv_transfer_config.get_from_extra_config(
             "engine_ttl", 3600.0
         )
+        # Map of pull peer (host, port) -> engine_id currently serving it.
+        self._engine_by_address: dict[tuple[str, int], EngineId] = {}
 
         self.model_config = vllm_config.model_config
 
@@ -1300,6 +1302,7 @@ class NixlBaseConnectorWorker:
                         self._remote_agents[eid] = remote_agents
                         self._engine_clock_offset[eid] = clock_offset
                         self._engine_last_active[eid] = time.perf_counter()
+                        self._track_remote_engine_replacement(eid, host, port)
                     except Exception as e:
                         self._log_failure(
                             failure_type="handshake_setup_failed",
@@ -2951,25 +2954,9 @@ class NixlBaseConnectorWorker:
         self._sync_device_after_direct_recv(direct_device_recving)
 
         # Handle timeout to avoid stranding blocks on remote.
-        now = time.perf_counter()
-        while self._reqs_to_send:
-            req_id, expires = next(iter(self._reqs_to_send.items()))
-            # Sorted dict, oldest requests are put first so we can exit early.
-            if now < expires:
-                break
-            count = self.consumer_notification_counts_by_req.pop(req_id, 0)
-            self.expected_consumer_notifications_by_req.pop(req_id, None)
-            self.xfer_stats.record_kv_expired_req()
-            logger.warning(
-                "Releasing expired KV blocks for request %s which were "
-                "retrieved by %d remote worker(s) before lease expired.",
-                req_id,
-                count,
-            )
-            self._reqs_to_process.remove(req_id)
-            del self._reqs_to_send[req_id]
-            done_sending.add(req_id)
+        self._reap_expired_send_leases(done_sending)
 
+        self._cleanup_replaced_remote_engines()
         return KVConnectorTransferResults(
             finished_sending=done_sending,
             finished_recving=done_recving,
@@ -2995,6 +2982,34 @@ class NixlBaseConnectorWorker:
         Subclasses must implement this to handle mode-specific notifications.
         """
         raise NotImplementedError
+
+    def _reap_expired_send_leases(self, done_sending: set[str]) -> None:
+        """Reclaim expired send-side KV leases into ``done_sending``.
+
+        ``_reqs_to_send`` is not ordered by expiry: heartbeats update the
+        deadline in place, and mixed TTLs share the map, so a live head
+        entry can sit in front of already-expired ones. Scan every entry
+        rather than stopping at the first still-live request.
+        """
+        if not self._reqs_to_send:
+            return
+        now = time.perf_counter()
+        expired = [
+            req_id for req_id, expires in self._reqs_to_send.items() if now >= expires
+        ]
+        for req_id in expired:
+            count = self.consumer_notification_counts_by_req.pop(req_id, 0)
+            self.expected_consumer_notifications_by_req.pop(req_id, None)
+            self.xfer_stats.record_kv_expired_req()
+            logger.warning(
+                "Releasing expired KV blocks for request %s which were "
+                "retrieved by %d remote worker(s) before lease expired.",
+                req_id,
+                count,
+            )
+            self._reqs_to_process.remove(req_id)
+            del self._reqs_to_send[req_id]
+            done_sending.add(req_id)
 
     def _handle_heartbeat(self, payload: str) -> None:
         """Extend leases for requests referenced in a heartbeat.
@@ -3530,14 +3545,53 @@ class NixlBaseConnectorWorker:
             and meta.remote is not None
         }
 
+    def _track_remote_engine_replacement(
+        self, engine_id: EngineId, host: str, port: int
+    ) -> None:
+        """Record the engine currently serving a pull peer address."""
+        # TODO: Also handle push mode, which handshakes in both directions.
+        if self._TRANSFER_MODE != "pull":
+            return
+        previous = self._engine_by_address.get((host, port))
+        self._engine_by_address[(host, port)] = engine_id
+        if previous is None or previous == engine_id:
+            return
+        logger.info(
+            "Remote engine at %s:%d changed from %s to %s.",
+            host,
+            port,
+            previous,
+            engine_id,
+        )
+
+    def _cleanup_replaced_remote_engines(self) -> None:
+        """Release replaced pull peers once requests and handshakes have drained."""
+        if self._TRANSFER_MODE != "pull":
+            return
+        with self._handshake_lock:
+            if self._handshake_futures:
+                return
+            replaced = self._remote_agents.keys() - self._engine_by_address.values()
+        if not replaced:
+            return
+        # _recving_metadata is only accessed from this (main) thread.
+        busy = {
+            meta.remote.engine_id
+            for meta in self._recving_metadata.values()
+            if meta.remote is not None
+        }
+        for engine_id in replaced - busy:
+            self._cleanup_remote_engine(engine_id, log_eviction=False)
+            logger.info("Released NIXL state for replaced remote engine %s.", engine_id)
+
     def _cleanup_remote_engine(
         self, engine_id: EngineId, *, log_eviction: bool = True
     ) -> None:
         """Remove all state for a single remote engine.
 
         Releases NIXL resources (dlist handles, remote agents) and clears
-        all per-engine data structures. Used by both TTL eviction and
-        shutdown.
+        all per-engine data structures. Used by TTL eviction, replaced peer
+        cleanup and shutdown.
         """
         assert engine_id in self._remote_agents
 
@@ -3547,6 +3601,9 @@ class NixlBaseConnectorWorker:
         # Pop under the handshake lock; NIXL teardown stays outside it.
         with self._handshake_lock:
             agents = self._remote_agents.pop(engine_id)
+            for address, eid in list(self._engine_by_address.items()):
+                if eid == engine_id:
+                    del self._engine_by_address[address]
         for agent_name in agents.values():
             self.nixl_wrapper.remove_remote_agent(agent_name)
 
