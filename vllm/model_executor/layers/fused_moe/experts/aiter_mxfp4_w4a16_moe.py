@@ -139,7 +139,7 @@ def aiter_triton_kernel_w4a16_moe_forward(
     from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
         should_use_cdna4_mx_scale_swizzle,
     )
-    from vllm.platforms.rocm import on_gfx1250
+    from vllm.platforms.rocm import on_gfx950, on_gfx1250
 
     try:
         from aiter.ops.triton.moe.moe_op_gemm_a16w4 import moe_gemm_a16w4
@@ -236,6 +236,12 @@ def aiter_triton_kernel_w4a16_moe_forward(
     # kernel indexes a swizzled buffer as if it were linear.
     swz = "CDNA4_SCALE" if should_use_cdna4_mx_scale_swizzle() else None
 
+    # AITER's gfx950 Gluon a16w4 kernel (default backend="None"/auto-detect
+    # picks it) calls a Triton-Gluon AMD API that isn't available in vLLM's
+    # pinned Triton, so force the Triton backend on gfx950. gfx1250 already
+    # used Gluon before this and is unaffected, so leave it on auto-detect.
+    a16w4_backend = "triton" if on_gfx950() else None
+
     intermediate = moe_gemm_a16w4(
         hidden_states,
         w1_data,
@@ -254,6 +260,7 @@ def aiter_triton_kernel_w4a16_moe_forward(
         swiglu_add_residual=swiglu_add_residual,
         unpadded_N=unpadded_N_w1,
         unpadded_K=unpadded_K_w1,
+        backend=a16w4_backend,
     )
 
     out = moe_gemm_a16w4(
@@ -270,6 +277,7 @@ def aiter_triton_kernel_w4a16_moe_forward(
         swizzle_mx_scale=swz,
         unpadded_N=unpadded_N_w2,
         unpadded_K=unpadded_K_w2,
+        backend=a16w4_backend,
     )
 
     return out
