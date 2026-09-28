@@ -1286,24 +1286,6 @@ class AsyncMPClient(MPClient):
     async def is_sleeping_async(self) -> bool:
         return await self.call_utility_async("is_sleeping")
 
-    async def compute_weight_checksums_all_async(self) -> list[dict[str, str]]:
-        """Return checksums from every engine this client manages."""
-        return await asyncio.gather(
-            *[
-                self._call_utility_async("compute_weight_checksums", engine=engine)
-                for engine in self.core_engines
-            ]
-        )
-
-    async def reset_weights_all_async(self) -> None:
-        """Randomize weights on every engine this client manages."""
-        await asyncio.gather(
-            *[
-                self._call_utility_async("reset_weights", engine=engine)
-                for engine in self.core_engines
-            ]
-        )
-
     async def execute_dummy_batch_async(self) -> None:
         await self.call_utility_async("execute_dummy_batch")
 
@@ -1340,6 +1322,23 @@ class AsyncMPClient(MPClient):
         return await self.call_utility_async(
             "collective_rpc", method, timeout, args, kwargs
         )
+
+    async def compute_weight_checksums_async(self) -> list[dict[str, str]]:
+        # Unlike collective_rpc, gather the results of every managed engine.
+        per_engine = await asyncio.gather(
+            *[
+                self._call_utility_async(
+                    "collective_rpc",
+                    "compute_weight_checksums",
+                    None,
+                    (),
+                    None,
+                    engine=engine,
+                )
+                for engine in self.core_engines
+            ]
+        )
+        return [worker for engine in per_engine for worker in engine]
 
     async def handle_fault(
         self, ft_request: FaultToleranceRequest

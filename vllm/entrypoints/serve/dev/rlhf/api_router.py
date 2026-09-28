@@ -3,17 +3,17 @@
 
 import json
 from http import HTTPStatus
-from typing import Annotated, Any
+from typing import Annotated, Literal
 
 from fastapi import APIRouter, Body, FastAPI, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel
 
 from vllm.distributed.weight_transfer.base import (
     WeightTransferInitRequest,
     WeightTransferUpdateRequest,
 )
 from vllm.engine.protocol import EngineClient
-from vllm.entrypoints.serve.dev.rlhf.weight_checker import handle_weight_checker
 from vllm.logger import init_logger
 from vllm.v1.engine import PauseMode
 
@@ -22,17 +22,6 @@ logger = init_logger(__name__)
 
 def engine_client(request: Request) -> EngineClient:
     return request.app.state.engine_client
-
-
-async def _json_body(request: Request) -> Any:
-    """Return the JSON object body, or raise a 400 for anything else."""
-    try:
-        body = await request.json()
-    except json.JSONDecodeError as exc:
-        raise HTTPException(status_code=400, detail="Invalid JSON format") from exc
-    if not isinstance(body, dict):
-        raise HTTPException(status_code=400, detail="Expected a JSON object")
-    return body
 
 
 router = APIRouter()
@@ -112,7 +101,10 @@ async def abort_requests(raw_request: Request) -> JSONResponse:
     """
     engine = engine_client(raw_request)
 
-    body = await _json_body(raw_request)
+    try:
+        body = await raw_request.json()
+    except json.JSONDecodeError as e:
+        raise HTTPException(status_code=400, detail="Invalid JSON format") from e  # noqa: B904
 
     request_ids = body.get("request_ids")
 
@@ -164,7 +156,10 @@ async def is_paused(raw_request: Request) -> JSONResponse:
 
 @router.post("/init_weight_transfer_engine")
 async def init_weight_transfer_engine(raw_request: Request):
-    body = await _json_body(raw_request)
+    try:
+        body = await raw_request.json()
+    except json.JSONDecodeError as e:
+        raise HTTPException(status_code=400, detail="Invalid JSON format") from e  # noqa: B904
     init_info = body.get("init_info")
     if init_info is None:
         raise HTTPException(
@@ -191,7 +186,10 @@ async def start_draft_weight_update(raw_request: Request):
 
 @router.post("/update_weights")
 async def update_weights(raw_request: Request):
-    body = await _json_body(raw_request)
+    try:
+        body = await raw_request.json()
+    except json.JSONDecodeError as e:
+        raise HTTPException(status_code=400, detail="Invalid JSON format") from e  # noqa: B904
     update_info = body.get("update_info")
     if update_info is None:
         raise HTTPException(
@@ -208,20 +206,9 @@ async def update_weights(raw_request: Request):
 async def finish_weight_update(
     raw_request: Request,
     weight_version: Annotated[str | None, Body(embed=True)] = None,
-    checksum: Annotated[bool, Body(embed=True)] = False,
 ):
-    """Commit the weight update, optionally returning weight digests.
-
-    ``checksum`` hashes every covered weight copy-side, so it is opt-in and
-    reported as a snapshot of this instance rather than of the whole group.
-    """
-    checksums = await engine_client(raw_request).finish_weight_update(
-        weight_version, checksum=checksum
-    )
-    content: dict[str, Any] = {"message": "Weight update finished"}
-    if checksums is not None:
-        content["checksums"] = checksums
-    return JSONResponse(content=content)
+    await engine_client(raw_request).finish_weight_update(weight_version)
+    return JSONResponse(content={"message": "Weight update finished"})
 
 
 @router.post("/update_weight_version")
@@ -239,17 +226,44 @@ async def weight_info(raw_request: Request):
     return JSONResponse(content={"weight_version": weight_version})
 
 
-# ---------------------------------------------------------------------------
-# Weight checksum (checksum / reset / compare)
-# ---------------------------------------------------------------------------
+class WeightCheckerRequest(BaseModel):
+    action: Literal["checksum", "reset", "compare"]
+    baseline: dict[str, str] | None = None
 
 
 @router.post("/weight_checker")
-async def weight_checker(raw_request: Request) -> JSONResponse:
-    """Checksum, reset, or compare model weights."""
-    body = await _json_body(raw_request)
+async def weight_checker(
+    raw_request: Request, request: WeightCheckerRequest
+) -> JSONResponse:
+    """Checksum, reset, or compare model weights against a baseline."""
     client = engine_client(raw_request)
-    return JSONResponse(content=await handle_weight_checker(body, client))
+    if request.action == "reset":
+        await client.collective_rpc("reset_weights")
+        return JSONResponse(content={"status": "reset"})
+    baseline = request.baseline
+    if request.action == "compare" and baseline is None:
+        raise HTTPException(
+            status_code=HTTPStatus.BAD_REQUEST.value,
+            detail="action='compare' requires a 'baseline' object",
+        )
+
+    checksums: dict[str, str] = {}
+    for worker_checksums in await client.compute_weight_checksums():
+        if duplicates := checksums.keys() & worker_checksums.keys():
+            raise HTTPException(
+                status_code=HTTPStatus.INTERNAL_SERVER_ERROR.value,
+                detail=f"Duplicate weight checksum keys: {sorted(duplicates)}",
+            )
+        checksums.update(worker_checksums)
+    if request.action == "checksum" or baseline is None:
+        return JSONResponse(content={"checksums": checksums})
+
+    mismatches = sorted(
+        key
+        for key in checksums.keys() | baseline.keys()
+        if checksums.get(key) != baseline.get(key)
+    )
+    return JSONResponse(content={"match": not mismatches, "mismatches": mismatches})
 
 
 @router.get("/get_world_size")

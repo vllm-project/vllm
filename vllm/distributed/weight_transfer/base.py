@@ -545,9 +545,7 @@ class VLLMWeightSyncClient(Protocol):
 
     def update_weights(self, update_info: WeightTransferUpdatePayload) -> None: ...
 
-    def finish_weight_update(
-        self, weight_version: str | None = None, checksum: bool = False
-    ) -> dict[str, str] | None: ...
+    def finish_weight_update(self, weight_version: str | None = None) -> None: ...
 
 
 class TrainerWeightTransferEngine(ABC, Generic[TTrainerInitInfo]):

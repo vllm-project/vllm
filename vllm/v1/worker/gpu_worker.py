@@ -58,6 +58,10 @@ from vllm.distributed.weight_transfer import (
 )
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
+from vllm.model_executor.model_loader.weight_checksum import (
+    compute_tensor_digests,
+    zero_weights,
+)
 from vllm.model_executor.warmup.kernel_warmup import kernel_warmup
 from vllm.multimodal.gpu_ipc_memory import reserve_mm_ipc_gpu_memory
 from vllm.platforms import current_platform
@@ -93,10 +97,6 @@ from vllm.v1.worker.sentinel.gpu_worker_sentinel import WorkerSentinel
 from vllm.v1.worker.startup_plan import (
     maybe_apply_startup_plan,
     maybe_save_startup_plan,
-)
-from vllm.model_executor.model_loader.weight_checksum import (
-    compute_tensor_digests,
-    randomize_weights,
 )
 from vllm.v1.worker.utils import is_residual_scattered_for_sp
 from vllm.v1.worker.worker_base import CompilationTimes, WorkerBase
@@ -318,33 +318,22 @@ class Worker(WorkerBase):
     def checkpoint_restore(self) -> None:
         checkpoint_restore_distributed_state()
 
-    def _weight_checksum_key_prefix(self) -> str:
-        """Return the rank-qualified prefix for this worker's tensor keys.
-
-        Uses ``data_parallel_index`` rather than ``data_parallel_rank``: vLLM
-        resets the latter to 0 in a dense worker, so it cannot tell replicas
-        apart and every dense DP rank would emit the same keys.
-        """
-        pcp_rank = get_pcp_group().rank_in_group
-        pp_rank = get_pp_group().rank_in_group
-        tp_rank = get_tp_group().rank_in_group
-        ep_rank = (
-            get_ep_group().rank_in_group if self.vllm_config.model_config.is_moe else 0
-        )
-        dp_rank = self.parallel_config.data_parallel_index
-        return f"dp{dp_rank}:pp{pp_rank}:pcp{pcp_rank}:tp{tp_rank}:ep{ep_rank}:"
+    def _weight_checksum_prefix(self) -> str:
+        # data_parallel_rank is 0 in dense workers; only the index is unique.
+        dp = self.parallel_config.data_parallel_index
+        pp = get_pp_group().rank_in_group
+        pcp = get_pcp_group().rank_in_group
+        tp = get_tp_group().rank_in_group
+        ep = get_ep_group().rank_in_group if self.model_config.is_moe else 0
+        return f"dp{dp}:pp{pp}:pcp{pcp}:tp{tp}:ep{ep}:"
 
     def compute_weight_checksums(self) -> dict[str, str]:
-        """Return SHA-256 digests for every checksum-covered tensor here."""
-        prefix = self._weight_checksum_key_prefix()
-        return {
-            f"{prefix}{name}": digest
-            for name, digest in compute_tensor_digests(self.model_runner.model).items()
-        }
+        prefix = self._weight_checksum_prefix()
+        digests = compute_tensor_digests(self.model_runner.model)
+        return {prefix + name: digest for name, digest in digests.items()}
 
     def reset_weights(self) -> None:
-        """Randomize exactly the tensors covered by compute_weight_checksums."""
-        randomize_weights(self.model_runner.model)
+        zero_weights(self.model_runner.model)
 
     def _maybe_get_memory_pool_context(self, tag: str) -> AbstractContextManager:
         if (
@@ -1496,18 +1485,8 @@ class Worker(WorkerBase):
                 self.weight_transfer_engine.reset_weight_update_target()
                 raise
 
-    def finish_weight_update(self, checksum: bool = False) -> dict[str, str] | None:
-        """Finish the current weight update session.
-
-        Args:
-            checksum: Whether to return this worker's weight digests. Hashing
-                every weight copies each one to the host, so it stays opt-in.
-
-        Returns:
-            This worker's rank-qualified weight digests when requested,
-            otherwise None. They are taken after the transfer engine reports
-            the update complete, so they describe the committed weights.
-        """
+    def finish_weight_update(self) -> None:
+        """Finish the current weight update session."""
         self._check_weight_transfer_engine()
         assert self.weight_transfer_engine is not None
 
@@ -1524,10 +1503,6 @@ class Worker(WorkerBase):
         # Weight transfer bypasses GPUModelRunner.reload_weights().
         if not self._weight_update_is_draft:
             self.model_runner.reset_lora_state()
-
-        if not checksum:
-            return None
-        return self.compute_weight_checksums()
 
     def shutdown(self) -> None:
         gc.unfreeze()
