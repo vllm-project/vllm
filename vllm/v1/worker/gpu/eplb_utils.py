@@ -4,7 +4,7 @@
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from functools import wraps
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import torch
 import torch.nn as nn
@@ -15,6 +15,9 @@ from vllm.logger import init_logger
 from vllm.model_executor.models.interfaces import (
     get_mixture_of_experts_model,
 )
+
+if TYPE_CHECKING:
+    from vllm.v1.worker.gpu.model_runner import GPUModelRunner
 
 logger = init_logger(__name__)
 
@@ -39,7 +42,7 @@ def step_eplb_after(*, is_dummy: bool = False) -> Callable:
 
 
 @contextmanager
-def preserve_serving_state(model_runner: Any) -> Iterator[None]:
+def preserve_serving_state(model_runner: "GPUModelRunner") -> Iterator[None]:
     """Keep the elastic EP warmup out of the request pool and the KV cache."""
     # After the drain only parked streaming sessions still hold a slot, and
     # those are re-added from NewRequestData on their next chunk.
@@ -54,7 +57,7 @@ def preserve_serving_state(model_runner: Any) -> Iterator[None]:
             model_runner.kv_block_zeroer.zero_block_ids([0])
 
 
-def _remove_all_requests(model_runner: Any) -> None:
+def _remove_all_requests(model_runner: "GPUModelRunner") -> None:
     for req_id in list(model_runner.req_states.req_id_to_index):
         model_runner._remove_request(req_id)
 
@@ -104,7 +107,7 @@ class EPLBController:
         self._has_registered_models = True
         return True
 
-    def maybe_register_model(self, model: nn.Module, model_config: Any) -> bool:
+    def maybe_register_model(self, model: nn.Module, model_config: ModelConfig) -> bool:
         if not self.parallel_config.enable_eplb:
             return False
 
@@ -154,7 +157,7 @@ class EPLBController:
 
     def setup_from_mapping(
         self,
-        model_config: Any,
+        model_config: ModelConfig,
         expanded_physical_to_logical: torch.Tensor,
     ) -> None:
         # Update in place: a fresh EplbState would build a second communicator
