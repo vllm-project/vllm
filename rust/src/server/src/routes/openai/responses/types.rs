@@ -10,13 +10,11 @@
 
 use std::collections::HashMap;
 
+use crate::routes::openai::utils::types::{ReasoningEffort, StringOrArray};
 use llm_multimodal::ImageDetail;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use validator::Validate;
-use vllm_chat::ReasoningEffort;
-
-use crate::routes::openai::utils::types::StringOrArray;
 
 /// Responses API `input` field: either a plain string (single user message)
 /// or a list of input/output items.

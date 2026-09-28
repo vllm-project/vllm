@@ -16,8 +16,7 @@ use tracing::warn;
 use uuid::Uuid;
 use vllm_chat::{
     AssistantContentBlock, AssistantToolCall, ChatContent, ChatContentPart, ChatMessage,
-    ChatOptions, ChatRequest, ChatTool, ChatToolChoice, GenerationPromptMode, ReasoningEffort,
-    ResolvedToolContext,
+    ChatOptions, ChatRequest, ChatTool, ChatToolChoice, GenerationPromptMode, ResolvedToolContext,
 };
 use vllm_text::SamplingParams;
 use vllm_text::output::TextDecodeOptions;
@@ -35,6 +34,7 @@ use crate::lora::LoraModelResolution;
 use crate::routes::openai::utils::structured_outputs::{
     JsonSchemaFormat, ResponseFormat, convert_from_response_format,
 };
+use crate::routes::openai::utils::types::ReasoningEffort;
 use crate::utils::{
     ResolvedRequestContext, convert_logit_bias, merge_ec_transfer_params, merge_kv_transfer_params,
     resolve_session_id,
@@ -42,6 +42,7 @@ use crate::utils::{
 
 /// Response payload metadata echoed back on the final response object and
 /// carried by lifecycle streaming events.
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) struct ResponseMeta {
     pub model: String,
     pub instructions: Option<String>,
@@ -67,6 +68,7 @@ pub(crate) struct ResponseMeta {
 
 /// Lowered responses request plus the response metadata carried by every SSE
 /// lifecycle event.
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) struct PreparedResponsesRequest {
     pub request_id: String,
     pub meta: ResponseMeta,
@@ -228,6 +230,7 @@ pub(crate) fn prepare_responses_request(
         messages,
         sampling_params: SamplingParams {
             temperature,
+            watermarking: true,
             top_p,
             top_k,
             seed,
@@ -257,7 +260,7 @@ pub(crate) fn prepare_responses_request(
         chat_options: ChatOptions {
             generation_prompt_mode,
             chat_template: None,
-            reasoning_effort,
+            reasoning_effort: reasoning_effort.map(|effort| effort.as_str().into()),
             response_format: response_format_value,
             template_kwargs,
         },
@@ -269,6 +272,7 @@ pub(crate) fn prepare_responses_request(
             min_tokens: min_tokens.unwrap_or(0),
         },
         intermediate: stream,
+        prompt_truncation: None,
         priority: ctx.priority.or(priority).unwrap_or(0),
         documents: None,
         cache_salt,
@@ -792,7 +796,7 @@ fn tool_call_id(call: &AssistantToolCall) -> String {
 }
 
 /// Build the `usage` block of a completed response.
-pub(crate) fn build_usage(usage: &vllm_llm::TokenUsage) -> ResponseUsage {
+pub(crate) fn build_usage(usage: &vllm_chat::ChatTokenUsage) -> ResponseUsage {
     ResponseUsage {
         input_tokens: usage.prompt_token_count,
         input_tokens_details: InputTokensDetails {
@@ -802,7 +806,7 @@ pub(crate) fn build_usage(usage: &vllm_llm::TokenUsage) -> ResponseUsage {
         },
         output_tokens: usage.output_token_count,
         output_tokens_details: OutputTokensDetails {
-            reasoning_tokens: 0,
+            reasoning_tokens: usage.reasoning_tokens,
             tool_output_tokens: 0,
             output_tokens_per_turn: vec![],
             tool_output_tokens_per_turn: vec![],
@@ -900,6 +904,8 @@ fn should_continue_final_message(items: &[Value]) -> bool {
 #[cfg(test)]
 mod tests {
     use serde_json::json;
+    use vllm_chat::ChatTokenUsage;
+    use vllm_llm::TokenUsage;
 
     use super::*;
 
@@ -911,5 +917,21 @@ mod tests {
             normalize_tool_choice(Some(tool_choice), true).unwrap(),
             Some(ChatToolChoice::None)
         );
+    }
+
+    #[test]
+    fn usage_preserves_reasoning_and_cached_token_counts() {
+        let usage = build_usage(&ChatTokenUsage {
+            engine: TokenUsage {
+                prompt_token_count: 5,
+                output_token_count: 7,
+                cached_token_count: 3,
+            },
+            reasoning_tokens: 2,
+        });
+
+        assert_eq!(usage.input_tokens_details.cached_tokens, 3);
+        assert_eq!(usage.output_tokens_details.reasoning_tokens, 2);
+        assert_eq!(usage.total_tokens, 12);
     }
 }
