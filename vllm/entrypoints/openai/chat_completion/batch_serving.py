@@ -12,6 +12,7 @@ from vllm.entrypoints.chat_utils import ConversationMessage
 from vllm.entrypoints.generate.base.protocol import RequestResponseMetadata
 from vllm.entrypoints.openai.chat_completion.protocol import (
     BatchChatCompletionRequest,
+    ChatCompletionRequest,
     ChatCompletionResponse,
     ChatCompletionResponseChoice,
     ChatMessage,
@@ -40,7 +41,14 @@ class OpenAIServingChatBatch(OpenAIServingChat):
     async def render_batch_chat_request(
         self,
         request: BatchChatCompletionRequest,
-    ) -> tuple[list[list[ConversationMessage]], list[EngineInput]] | ErrorResponse:
+    ) -> (
+        tuple[
+            list[ChatCompletionRequest],
+            list[list[ConversationMessage]],
+            list[EngineInput],
+        ]
+        | ErrorResponse
+    ):
         """Validate the model and preprocess a batched chat completion request.
 
         Performs engine-aware checks then delegates per-conversation
@@ -48,8 +56,10 @@ class OpenAIServingChatBatch(OpenAIServingChat):
         once for the whole batch.
 
         Returns:
-            A tuple of (all_conversations, engine_prompts) on success — one
-            entry per conversation — or an ErrorResponse on failure.
+            A tuple of (single_requests, all_conversations, engine_prompts) on
+            success — one entry per conversation — or an ErrorResponse on
+            failure. The renderer adjusts ``single_requests`` in place, so
+            sampling must read them rather than rebuilding from ``request``.
 
         """
         error_check_ret = await self._check_model(request)
@@ -74,12 +84,14 @@ class OpenAIServingChatBatch(OpenAIServingChat):
         parser = renderer.parser
         tool_dicts: list[dict] | None = None
 
+        single_requests: list[ChatCompletionRequest] = []
         all_conversations: list[list[ConversationMessage]] = []
         all_engine_prompts: list[EngineInput] = []
 
         for messages in request.messages:
             single_request = request.to_chat_completion_request(messages)
             if renderer.use_harmony:
+                renderer.adjust_harmony_request(single_request)
                 conversation, engine_prompts = renderer._make_request_with_harmony(
                     single_request, should_include_tools=tool_dicts is not None
                 )
@@ -93,10 +105,11 @@ class OpenAIServingChatBatch(OpenAIServingChat):
                     tool_dicts=tool_dicts,
                     parser=parser,
                 )
+            single_requests.append(single_request)
             all_conversations.append(conversation)
             all_engine_prompts.append(engine_prompts[0])
 
-        return all_conversations, all_engine_prompts
+        return single_requests, all_conversations, all_engine_prompts
 
     async def create_batch_chat_completion(
         self,
@@ -111,10 +124,10 @@ class OpenAIServingChatBatch(OpenAIServingChat):
         """
         tokenizer = self.renderer.tokenizer
         assert tokenizer is not None
-        single_requests = [
-            request.to_chat_completion_request(messages)
-            for messages in request.messages
-        ]
+        render_result = await self.render_batch_chat_request(request)
+        if isinstance(render_result, ErrorResponse):
+            return render_result
+        single_requests, all_conversations, engine_prompts = render_result
 
         parser: Parser | None = None
         if self.parser_cls is not None:
@@ -126,11 +139,6 @@ class OpenAIServingChatBatch(OpenAIServingChat):
                 None,  # tools
                 chat_template_kwargs=chat_template_kwargs,
             )
-
-        render_result = await self.render_batch_chat_request(request)
-        if isinstance(render_result, ErrorResponse):
-            return render_result
-        all_conversations, engine_prompts = render_result
 
         request_id = (
             f"chatcmpl-{self._base_request_id(raw_request, request.request_id)}"
