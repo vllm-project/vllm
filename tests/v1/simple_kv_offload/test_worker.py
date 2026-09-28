@@ -36,6 +36,7 @@ from vllm.v1.core.kv_cache_utils import (
 )
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
+    KVCacheConfig,
     KVCacheGroupSpec,
     KVCacheLayout,
     KVCacheSpec,
@@ -324,8 +325,9 @@ def test_register_shared_kv_cache_storage(monkeypatch, layout: KVCacheLayout):
     )
     caches = dense_kv_cache_views(raw, spec, num_blocks, num_layers, layout)
     layer_names = [f"layer.{i}" for i in range(num_layers)]
-    cache_config = MagicMock(
+    cache_config = KVCacheConfig(
         num_blocks=num_blocks,
+        kv_cache_groups=[],
         kv_cache_tensors=[
             dense_kv_cache_tensor(
                 raw, spec, num_blocks, num_layers, layout, layer_names
@@ -360,16 +362,18 @@ def test_register_shared_kv_cache_storage(monkeypatch, layout: KVCacheLayout):
     }
 
 
-def test_register_kv_cache_storage_with_trailing_padding(monkeypatch):
+@pytest.mark.parametrize("base_offset", [0, 256])
+def test_register_kv_cache_storage_with_padding(monkeypatch, base_offset):
     num_blocks = 4
     block_bytes = 32
     cache_bytes = num_blocks * block_bytes
     raw = torch.zeros(4096, dtype=torch.int8, device="cuda")
-    cache = raw[:cache_bytes].view(num_blocks, block_bytes)
+    cache = raw[base_offset : base_offset + cache_bytes].view(num_blocks, block_bytes)
     worker = SimpleCPUOffloadWorker(
         vllm_config=None,
-        kv_cache_config=MagicMock(
+        kv_cache_config=KVCacheConfig(
             num_blocks=num_blocks,
+            kv_cache_groups=[],
             kv_cache_tensors=[
                 KVCacheTensor(
                     size=cache_bytes,
@@ -389,6 +393,7 @@ def test_register_kv_cache_storage_with_trailing_padding(monkeypatch):
     assert worker.gpu_kv_caches is not None
     assert list(worker.gpu_kv_caches) == ["layer.0"]
     assert worker.gpu_kv_caches["layer.0"].shape == (num_blocks, block_bytes)
+    assert worker.gpu_kv_caches["layer.0"].data_ptr() == cache.data_ptr()
 
 
 def test_register_separate_kv_head_groups(monkeypatch):
@@ -414,8 +419,9 @@ def test_register_separate_kv_head_groups(monkeypatch):
     layer_names = [f"layer.{i}" for i in range(num_layers)]
     worker = SimpleCPUOffloadWorker(
         vllm_config=None,
-        kv_cache_config=MagicMock(
+        kv_cache_config=KVCacheConfig(
             num_blocks=num_blocks,
+            kv_cache_groups=[],
             kv_cache_tensors=[
                 dense_kv_cache_tensor(
                     raw, spec, num_blocks, num_layers, layout, layer_names

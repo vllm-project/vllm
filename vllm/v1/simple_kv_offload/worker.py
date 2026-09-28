@@ -134,12 +134,12 @@ class SimpleCPUOffloadWorker:
             raw = torch.empty(0, dtype=torch.int8, device=cache.device).set_(
                 cache.untyped_storage()
             )
-            if storage_plan is not None:
-                # Descriptors are relative to the aligned arena's start.
-                start += (
-                    cache.storage_offset() * cache.element_size()
-                    - kv_cache_tensor.offset
-                )
+            # Resolve the arena base from the selected layer's actual view.
+            start += (
+                cache.storage_offset() * cache.element_size()
+                - kv_cache_tensor.offset
+                - kv_cache_tensor.layers.index(name) * kv_cache_tensor.layer_stride
+            )
             assert raw.numel() >= start + span, (
                 f"KV cache {name!r} storage has {raw.numel()} bytes, smaller than "
                 f"the {span} bytes it places at offset {start}"

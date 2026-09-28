@@ -3,6 +3,7 @@
 """Worker-local KV storage placement, independent of logical block ownership."""
 
 from dataclasses import dataclass, replace
+
 from vllm.utils.math_utils import round_up
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
@@ -14,6 +15,7 @@ from vllm.v1.kv_cache_interface import (
     compute_layout_strides,
 )
 from vllm.v1.kv_cache_layout import KVCacheLayout
+
 
 @dataclass(frozen=True)
 class KVCacheBundle:

@@ -39,9 +39,16 @@ arena; attention still sees stable tensor views. Capacity search uses the same
 layout builder as final allocation. It converts each worker's physical memory
 budget to a logical block capacity; the common KV cache config flow then handles
 override, auto-fit, null-block reservation, admission checks, and the minimum
-block count across workers. KVPP supplies physical tensor views after that
-logical configuration is built. Allocation includes alignment padding, and an
-override larger than physical capacity is rejected.
+block count across workers. The ordinary config builder, including its layout
+validation and tensor descriptors, runs unchanged. Once the common block count
+is final, KVPP replaces only physical tensor placement and attaches the storage
+plan; other config fields are preserved. Allocation includes alignment padding,
+and an override larger than physical capacity is rejected.
+
+Placement does not add a scheduler or block manager. The allocator uses the same
+backing allocation and view construction for both placements, with an additional
+base alignment requirement for KVPP. Broadcast and offload consume the final
+worker storage plan instead of deriving ownership or scratch placement again.
 
 The offload path registers only persistent owner views. A common per-block byte
 budget across ranks keeps distributed CPU/disk block IDs aligned even when owner

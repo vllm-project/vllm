@@ -139,11 +139,15 @@ def test_layer_sharded_storage_preserves_logical_groups_and_reuses_scratch():
     assert len({x.untyped_storage().data_ptr() for x in caches.values()}) == 1
 
 
-def test_layer_sharded_worker_capacities_and_offload_budget_agree():
+@pytest.mark.parametrize("mixed_page_sizes", [False, True])
+def test_layer_sharded_worker_capacities_and_offload_budget_agree(mixed_page_sizes):
     from vllm.v1.kv_cache_placement import build_kv_cache_storage, layer_specs
     from vllm.v1.simple_kv_offload.manager import SimpleCPUOffloadScheduler
 
     config, placement = _layer_sharded_cache_case()
+    if mixed_page_sizes:
+        specs = config.kv_cache_groups[0].kv_cache_spec.kv_cache_specs
+        specs["b"] = replace(specs["b"], head_size=32)
     other = replace(placement, rank=1)
     placements = [placement, other]
     budgets = [
@@ -172,6 +176,21 @@ def test_layer_sharded_worker_capacities_and_offload_budget_agree():
         SimpleCPUOffloadScheduler._derive_cpu_config(scheduler, 20 * page).num_blocks
         == 4
     )
+    # Placement must preserve every field produced by the common config flow.
+    vllm_config.cache_config.kv_cache_placement = "replicated"
+    logical_budget = 7 * sum(spec.page_size_bytes for spec in specs.values())
+    ordinary = get_kv_cache_configs(vllm_config, [specs] * 2, [logical_budget] * 2)
+    for sharded, replicated in zip(result, ordinary):
+        assert (
+            replace(
+                sharded,
+                kv_cache_tensors=replicated.kv_cache_tensors,
+                storage_plan=None,
+                offload_block_size_bytes=None,
+            )
+            == replicated
+        )
+    vllm_config.cache_config.kv_cache_placement = "layer_sharded"
     vllm_config.cache_config.num_gpu_blocks_override = 6
     overridden = get_kv_cache_configs(vllm_config, [specs] * 2, budgets, placements)
     assert [c.num_blocks for c in overridden] == [6, 6]

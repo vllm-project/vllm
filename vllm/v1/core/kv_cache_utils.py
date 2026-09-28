@@ -1635,7 +1635,6 @@ def get_kv_cache_config_from_groups(
     vllm_config: VllmConfig,
     kv_cache_groups: list[KVCacheGroupSpec],
     available_memory: int,
-    placement: "KVCachePlacement | None" = None,
 ) -> KVCacheConfig:
     """Generate the KV cache configuration from the KV cache groups and spec
     of each layer.
@@ -1644,8 +1643,6 @@ def get_kv_cache_config_from_groups(
         vllm_config: The global VllmConfig
         kv_cache_groups: The KV cache groups
         available_memory: Memory available for KV cache in bytes
-        placement: Optional worker-local physical placement for the tensor views.
-
     Returns:
         The generated KVCacheConfig
 
@@ -1732,9 +1729,7 @@ def get_kv_cache_config_from_groups(
         )
 
     layout = vllm_config.cache_config.get_resolved_kv_cache_layout()
-    if placement is None:
-        validate_kv_cache_layout(layout, kv_cache_groups)
-    # Layer-sharded placement builds its own physical views below.
+    validate_kv_cache_layout(layout, kv_cache_groups)
     bytes_per_block = _get_kv_cache_bytes_per_block(kv_cache_groups)
     interleaved_block_stride = bytes_per_block if layout.is_block_outermost else None
 
@@ -1754,42 +1749,41 @@ def get_kv_cache_config_from_groups(
     # group 1: | C [ blk 0 | blk 1 | ... ] | D [ blk 0 | blk 1 | ... ] |
 
     kv_cache_tensors = []
-    if placement is None:
-        for group in kv_cache_groups:
-            group_spec = group.kv_cache_spec
-            layers_by_spec: defaultdict[KVCacheSpec, list[str]] = defaultdict(list)
-            if isinstance(group_spec, UniformTypeKVCacheSpecs):
-                for layer_name, spec in group_spec.kv_cache_specs.items():
-                    layers_by_spec[spec].append(layer_name)
-            elif group.layer_names:
-                layers_by_spec[group_spec].extend(group.layer_names)
+    for group in kv_cache_groups:
+        group_spec = group.kv_cache_spec
+        layers_by_spec: defaultdict[KVCacheSpec, list[str]] = defaultdict(list)
+        if isinstance(group_spec, UniformTypeKVCacheSpecs):
+            for layer_name, spec in group_spec.kv_cache_specs.items():
+                layers_by_spec[spec].append(layer_name)
+        elif group.layer_names:
+            layers_by_spec[group_spec].extend(group.layer_names)
 
-            byte_offset = 0
-            for spec, layer_names in layers_by_spec.items():
-                layer_stride, block_stride, _, _, _ = compute_layout_strides(
-                    spec,
-                    num_blocks,
-                    len(layer_names),
-                    layout,
-                    fixed_strides=(None, interleaved_block_stride, None, None, None),
+        byte_offset = 0
+        for spec, layer_names in layers_by_spec.items():
+            layer_stride, block_stride, _, _, _ = compute_layout_strides(
+                spec,
+                num_blocks,
+                len(layer_names),
+                layout,
+                fixed_strides=(None, interleaved_block_stride, None, None, None),
+            )
+            offset = (
+                byte_offset
+                * max(layer_stride, spec.page_size_bytes)
+                // spec.page_size_bytes
+            )
+            kv_cache_tensors.append(
+                KVCacheTensor(
+                    size=size,
+                    layers=layer_names,
+                    layer_stride=layer_stride,
+                    block_stride=block_stride,
+                    offset=offset,
                 )
-                offset = (
-                    byte_offset
-                    * max(layer_stride, spec.page_size_bytes)
-                    // spec.page_size_bytes
-                )
-                kv_cache_tensors.append(
-                    KVCacheTensor(
-                        size=size,
-                        layers=layer_names,
-                        layer_stride=layer_stride,
-                        block_stride=block_stride,
-                        offset=offset,
-                    )
-                )
-                byte_offset += len(layer_names) * spec.page_size_bytes
+            )
+            byte_offset += len(layer_names) * spec.page_size_bytes
 
-    config = KVCacheConfig(
+    return KVCacheConfig(
         num_blocks=num_blocks,
         kv_cache_tensors=kv_cache_tensors,
         kv_cache_groups=kv_cache_groups,
@@ -1797,11 +1791,6 @@ def get_kv_cache_config_from_groups(
             vllm_config.cache_config.prefix_cache_retention_interval
         ),
     )
-    if placement is not None:
-        from vllm.v1.kv_cache_placement import build_kv_cache_storage
-
-        return build_kv_cache_storage(config, placement, layout)
-    return config
 
 
 def _promote_local_kv_cache_specs(
@@ -2790,20 +2779,15 @@ def get_kv_cache_configs(
         )
 
     kv_cache_configs: list[KVCacheConfig] = []
-    for i, (
-        projected_groups,
-        kv_cache_spec_one_worker,
-        available_memory_one_worker,
-    ) in enumerate(zip(projected_groups_per_worker, kv_cache_specs, available_memory)):
+    for projected_groups, kv_cache_spec_one_worker, available_memory_one_worker in zip(
+        projected_groups_per_worker, kv_cache_specs, available_memory
+    ):
         assert sum(len(group.layer_names) for group in projected_groups) == len(
             kv_cache_spec_one_worker
         ), "Some layers are not assigned to any group."
         kv_cache_configs.append(
             get_kv_cache_config_from_groups(
-                vllm_config,
-                projected_groups,
-                available_memory_one_worker,
-                placements[i] if layer_sharded and placements is not None else None,
+                vllm_config, projected_groups, available_memory_one_worker
             )
         )
 
@@ -2820,15 +2804,20 @@ def get_kv_cache_configs(
         # strides and offsets stay consistent with the shrunken allocation.
         groups = kv_cache_config.kv_cache_groups
         kv_cache_configs[i] = get_kv_cache_config_from_groups(
-            vllm_config,
-            groups,
-            min_num_blocks * _pool_bytes_per_block(groups),
-            placements[i] if layer_sharded and placements is not None else None,
+            vllm_config, groups, min_num_blocks * _pool_bytes_per_block(groups)
         )
 
     if layer_sharded:
-        from vllm.v1.kv_cache_placement import set_layer_sharded_offload_block_size
+        from vllm.v1.kv_cache_placement import (
+            build_kv_cache_storage,
+            set_layer_sharded_offload_block_size,
+        )
 
+        assert placements is not None
+        kv_cache_configs = [
+            build_kv_cache_storage(config, placement, layout)
+            for config, placement in zip(kv_cache_configs, placements)
+        ]
         set_layer_sharded_offload_block_size(kv_cache_configs)
 
     return kv_cache_configs

@@ -169,7 +169,11 @@ from vllm.v1.worker.gpu.ubatch_utils import (
     UBatchState,
     maybe_build_ubatch_runner,
 )
-from vllm.v1.worker.kv_cache_runtime import create_kv_cache_runtime, kv_cache_forward
+from vllm.v1.worker.kv_cache_runtime import (
+    KVCacheRuntime,
+    create_kv_cache_runtime,
+    kv_cache_forward,
+)
 from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
 from vllm.v1.worker.utils import (
     KVBlockZeroer,
@@ -211,6 +215,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # Lazily initialized in _init_kv_zero_meta() when the KV cache needs
         # zeroing (e.g. hybrid models with fp8 KV cache).
         self.kv_block_zeroer: KVBlockZeroer | None = None
+        self.kv_cache_runtime: KVCacheRuntime | None = None
 
         self.vocab_size = self.model_config.get_vocab_size()
         self.max_model_len = self.model_config.max_model_len
@@ -1944,9 +1949,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             ):
                 self.kv_connector.pre_forward(**connector_kwargs)
                 with kv_cache_forward(
-                    getattr(self, "kv_cache_runtime", None),
+                    self.kv_cache_runtime,
                     bool(
-                        getattr(self, "kv_cache_runtime", None) is not None
+                        self.kv_cache_runtime is not None
                         and np.any(
                             input_batch.num_computed_tokens_np[: input_batch.num_reqs]
                             > 0
@@ -2269,6 +2274,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.cudagraph_manager = None
         self.fast_prefill = None
         self.pooling_runner = None
+        self.kv_cache_runtime = None
         if hasattr(self, "kv_caches"):
             self.kv_caches.clear()
         if hasattr(self, "attn_groups"):
