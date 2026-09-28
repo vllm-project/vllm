@@ -130,6 +130,33 @@ async fn responses_accepts_auto_tool_choice_without_tools() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
+async fn responses_invalid_tool_choice_reports_tool_choice_parameter() {
+    let (app, _engine_task) = test_app_with_engine_handle().await;
+
+    for request in [
+        json!({
+            "model": "Qwen/Qwen1.5-0.5B-Chat",
+            "input": "hello",
+            "tool_choice": "required",
+        }),
+        json!({
+            "model": "Qwen/Qwen1.5-0.5B-Chat",
+            "input": "hello",
+            "tools": [weather_function_tool()],
+            "tool_choice": {"type": "function", "name": "missing"},
+        }),
+    ] {
+        let response = responses_call(&app, request).await;
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+        let json: serde_json::Value = serde_json::from_slice(&body).expect("decode json");
+        assert_eq!(json["error"]["param"], "tool_choice");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
 async fn responses_accepts_output_presentation_controls() {
     let (app, engine_task) = test_app_with_engine_handle().await;
     let response = responses_call(
@@ -149,6 +176,55 @@ async fn responses_accepts_output_presentation_controls() {
     engine_task.await.expect("mock engine task");
     let json: serde_json::Value = serde_json::from_slice(&body).expect("decode json");
     assert_eq!(json["status"], "completed");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn responses_auto_truncation_reaches_engine() {
+    let (app, engine_task) = test_app_with_engine_handle().await;
+    let response = responses_call(
+        &app,
+        json!({
+            "model": "Qwen/Qwen1.5-0.5B-Chat",
+            "input": "hello",
+            "truncation": "auto"
+        }),
+    )
+    .await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+    engine_task.await.expect("mock engine task");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("decode json");
+    assert_eq!(json["truncation"], "auto");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn responses_watermarking_defaults_and_opt_out_reach_engine_core() {
+    for watermarking in [None, Some(true), Some(false)] {
+        let (app, engine_task) = test_app_with_backend_and_engine_request_check(
+            Arc::new(FakeChatBackend::new()),
+            move |request| {
+                let params = request.sampling_params.as_ref().expect("sampling params");
+                assert_eq!(params.watermarking, watermarking.unwrap_or(true));
+            },
+        )
+        .await;
+
+        let mut body = json!({
+            "model": "Qwen/Qwen1.5-0.5B-Chat",
+            "input": "hello",
+        });
+        if let Some(watermarking) = watermarking {
+            body["watermarking"] = json!(watermarking);
+        }
+        let response = responses_call(&app, body).await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        to_bytes(response.into_body(), usize::MAX).await.expect("drain response");
+        engine_task.await.expect("mock engine task");
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -242,10 +318,78 @@ async fn responses_non_streaming_length_finish_is_incomplete() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
+async fn responses_streaming_length_finish_emits_incomplete_event() {
+    let (app, engine_task) = test_app_with_stream_output_specs(vec![
+        (vec![b'h' as u32], None),
+        (vec![b'i' as u32], Some(EngineCoreFinishReason::Length)),
+    ])
+    .await;
+    let response = responses_call(
+        &app,
+        json!({
+            "model": "Qwen/Qwen1.5-0.5B-Chat",
+            "input": "hello",
+            "max_output_tokens": 2,
+            "stream": true,
+        }),
+    )
+    .await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read streaming body");
+    engine_task.await.expect("mock engine task");
+    let stream = String::from_utf8(body.to_vec()).expect("utf8 body");
+
+    let payloads = sse_json_payloads(&stream);
+    let event_names: Vec<&str> =
+        stream.lines().filter_map(|line| line.strip_prefix("event: ")).collect();
+    let terminal = payloads.last().expect("terminal event");
+
+    assert_eq!(event_names.last(), Some(&"response.incomplete"), "{stream}");
+    assert_eq!(terminal["type"], "response.incomplete");
+    assert_eq!(terminal["response"]["status"], "incomplete");
+    assert_eq!(
+        terminal["response"]["incomplete_details"]["reason"],
+        "max_output_tokens"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn responses_streaming_abort_keeps_cancelled_status() {
+    let (app, engine_task) = test_app_with_stream_output_specs(vec![
+        (vec![b'h' as u32], None),
+        (vec![b'i' as u32], Some(EngineCoreFinishReason::Abort)),
+    ])
+    .await;
+    let response = responses_call(
+        &app,
+        json!({
+            "model": "Qwen/Qwen1.5-0.5B-Chat",
+            "input": "hello",
+            "stream": true,
+        }),
+    )
+    .await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read streaming body");
+    engine_task.await.expect("mock engine task");
+    let stream = String::from_utf8(body.to_vec()).expect("utf8 body");
+    let terminal = sse_json_payloads(&stream).pop().expect("terminal event");
+
+    assert_eq!(terminal["type"], "response.completed");
+    assert_eq!(terminal["response"]["status"], "cancelled");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
 async fn responses_streaming_error_includes_failed_response_error() {
-    let (app, engine_task) =
-        test_app_with_stream_output_specs(vec![(vec![], Some(EngineCoreFinishReason::Error))])
-            .await;
+    let (app, engine_task) = test_app_with_stream_output_specs(vec![
+        (vec![b'h' as u32], None),
+        (vec![], Some(EngineCoreFinishReason::Error)),
+    ])
+    .await;
     let response = responses_call(
         &app,
         json!({
@@ -269,6 +413,10 @@ async fn responses_streaming_error_includes_failed_response_error() {
         failed["response"]["error"]["message"],
         "The model failed to generate a response."
     );
+    assert_eq!(failed["response"]["output"][0]["content"][0]["text"], "h");
+    assert!(payloads.iter().any(|event| {
+        event["type"] == "response.output_item.done" && event["item"]["content"][0]["text"] == "h"
+    }));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

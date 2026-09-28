@@ -187,9 +187,12 @@ struct TerminalOutput {
 /// Convert one chat event stream into Responses API SSE events.
 ///
 /// Emits `response.created`/`response.in_progress` upfront, item events as
-/// generation proceeds, and one terminal `response.completed` or
-/// `response.failed` event. Mid-stream errors are reported through
-/// `response.failed` so the transport stream itself stays infallible.
+/// generation proceeds, and one terminal lifecycle event. A length-limited
+/// response emits `response.incomplete`; an aborted response uses
+/// `response.completed` with a `cancelled` response status because the
+/// Responses streaming schema has no separate cancellation event. Mid-stream
+/// errors are reported through `response.failed` so the transport stream
+/// itself stays infallible.
 #[try_stream]
 async fn responses_event_stream(
     mut stream: impl ChatEventStreamTrait + Unpin,
@@ -239,11 +242,15 @@ async fn responses_event_stream(
             }
             Err(error) => {
                 error!(error = %error.as_report(), "responses stream failed");
+                for event in items.on_stream_end() {
+                    y.yield_ok(event).await;
+                }
                 emit_failed(
                     &mut y,
                     &meta,
                     &request_id,
                     created_at,
+                    items.completed_output_items(),
                     "The response stream failed before generation completed.",
                 )
                 .await;
@@ -263,6 +270,7 @@ async fn responses_event_stream(
             &meta,
             &request_id,
             created_at,
+            items.completed_output_items(),
             "The response stream ended before generation completed.",
         )
         .await;
@@ -282,6 +290,7 @@ async fn responses_event_stream(
             &meta,
             &request_id,
             created_at,
+            items.final_output_items(&message),
             "The model failed to generate a response.",
         )
         .await;
@@ -299,11 +308,25 @@ async fn responses_event_stream(
         ec_transfer_params,
     );
     y.yield_ok(response_lifecycle_event(
-        "response.completed",
+        terminal_event_type(&finish_reason),
         &final_response,
     ))
     .await;
     Ok(())
+}
+
+/// Return the Responses lifecycle event associated with a terminal finish.
+fn terminal_event_type(finish_reason: &FinishReason) -> &'static str {
+    match finish_reason {
+        FinishReason::Length => "response.incomplete",
+        // The Responses streaming API exposes no `response.cancelled` event.
+        // Preserve the cancellation outcome on the response object itself.
+        FinishReason::Abort | FinishReason::Stop(_) | FinishReason::Repetition(_) => {
+            "response.completed"
+        }
+        // Error finishes are emitted above with an error payload.
+        FinishReason::Error => "response.failed",
+    }
 }
 
 /// Emit one terminal `response.failed` event.
@@ -312,13 +335,14 @@ async fn emit_failed(
     meta: &ResponseMeta,
     request_id: &str,
     created_at: u64,
+    output: Vec<self::types::ResponseOutputItem>,
     message: &str,
 ) {
     let mut failed = build_response(
         meta,
         request_id,
         created_at,
-        vec![],
+        output,
         ResponseItemStatus::Failed,
         None,
         None,

@@ -10,7 +10,9 @@
 
 use std::collections::HashMap;
 
-use crate::routes::openai::utils::types::{ReasoningEffort, StringOrArray};
+use crate::routes::openai::utils::types::{
+    InputAudio, ReasoningEffort, StringOrArray, default_true, deserialize_request_top_k,
+};
 use llm_multimodal::ImageDetail;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -164,9 +166,12 @@ pub struct ResponsesRequest {
     pub stream: bool,
     #[serde(default)]
     pub temperature: Option<f32>,
+    /// Whether to apply the engine's configured watermark to generated text.
+    #[serde(default = "default_true")]
+    pub watermarking: bool,
     #[serde(default)]
     pub top_p: Option<f32>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_request_top_k")]
     pub top_k: Option<u32>,
     #[serde(default)]
     pub top_logprobs: Option<i32>,
@@ -210,6 +215,7 @@ pub struct ResponsesRequest {
     #[serde(default)]
     pub priority: Option<i32>,
     #[serde(default)]
+    #[validate(length(min = 1))]
     pub cache_salt: Option<String>,
     #[serde(default)]
     pub chat_template_kwargs: Option<HashMap<String, Value>>,
@@ -221,10 +227,6 @@ pub struct ResponsesRequest {
     pub ec_transfer_params: Option<HashMap<String, Value>>,
     #[serde(default)]
     pub vllm_xargs: Option<HashMap<String, Value>>,
-}
-
-fn default_true() -> bool {
-    true
 }
 
 impl crate::routes::openai::utils::types::Normalizable for ResponsesRequest {}
@@ -292,9 +294,7 @@ pub(super) enum ResponseInputContentPart {
         file_id: Option<String>,
     },
     InputAudio {
-        data: String,
-        #[serde(default)]
-        format: Option<String>,
+        input_audio: InputAudio,
     },
     InputFile {
         #[serde(flatten)]
@@ -589,7 +589,36 @@ mod tests {
         .unwrap();
         assert!(matches!(request.input, ResponsesInput::Text(text) if text == "hello"));
         assert!(request.include_reasoning);
+        assert!(request.watermarking);
         assert_eq!(request.model.as_deref(), Some("test-model"));
+    }
+
+    #[test]
+    fn request_normalizes_top_k_disable_values() {
+        for (top_k, expected) in [
+            (json!(-1), Some(0)),
+            (json!(0), Some(0)),
+            (json!(20), Some(20)),
+        ] {
+            let request: ResponsesRequest = serde_json::from_value(json!({
+                "input": "hello",
+                "top_k": top_k,
+            }))
+            .expect("deserialize top_k");
+
+            assert_eq!(request.top_k, expected);
+        }
+    }
+
+    #[test]
+    fn request_rejects_empty_cache_salt() {
+        let request: ResponsesRequest = serde_json::from_value(json!({
+            "input": "hello",
+            "cache_salt": "",
+        }))
+        .expect("deserialize request");
+
+        assert!(request.validate().is_err());
     }
 
     #[test]
