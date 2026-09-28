@@ -1173,8 +1173,15 @@ class Scheduler(SchedulerInterface):
                     )
 
                     if num_new_tokens == 0:
-                        # The request cannot be scheduled.
-                        break
+                        if encoder_inputs_to_schedule is None:
+                            # The request cannot be scheduled.
+                            break
+                        # Encoder work stalled it: requeue it for the next
+                        # pass instead of stopping here, where one stuck
+                        # request would starve every request behind it.
+                        request_queue.pop_request()
+                        step_skipped_waiting.prepend_request(request)
+                        continue
 
                 # During async KV load, no forward pass is run yet.
                 # Allocate speculative lookahead slots later to avoid
