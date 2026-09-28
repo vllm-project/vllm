@@ -160,7 +160,7 @@ class HcDownSiluGemm:
         output = torch.empty(M, N, dtype=torch.bfloat16, device=hidden_states.device)
         out_gemm = output[:, :n_compute]
         if compile_key[0] == "mma":
-            kernel(hidden_states, w_gemm, out_gemm, 1.0)
+            kernel(hidden_states, w_gemm, out_gemm)
         else:
             kernel(hidden_states, w_gemm, out_gemm, n_compute)
         return output

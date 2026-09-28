@@ -155,7 +155,6 @@ class HcDownSiluMma:
         mB: cute.Tensor,
         mC: cute.Tensor,
         stream: CUstream,
-        scale: float = 1.0,
     ):
         bM, bN, bK = self.tile_m, self.tile_n, self.tile_k
         copy_bits: cutlass.Constexpr = self.copy_bits
@@ -207,7 +206,6 @@ class HcDownSiluMma:
             mA,
             mB,
             mC,
-            scale,
             sA_layout,
             sB_layout,
             tiled_copy_A,
@@ -238,7 +236,6 @@ class HcDownSiluMma:
         mA,
         mB,
         mC,
-        scale: cutlass.Float32,
         sA_layout: cute.ComposedLayout,
         sB_layout: cute.ComposedLayout,
         tiled_copy_A: cute.TiledCopy,
@@ -491,7 +488,6 @@ class HcDownSiluMma:
                             reduction_profile=0,
                         )
                     )
-                    total = total * scale
                 partials[cta_rank, elem_idx] = total
 
             cute.arch.sync_threads()
