@@ -3,18 +3,23 @@
 
 import time
 from contextlib import nullcontext
+from copy import deepcopy
+from types import SimpleNamespace
+from typing import TypedDict
 
 import numpy as np
 import pytest
 
 from vllm.config import ModelConfig, SchedulerConfig
+from vllm.config.multimodal import MultiModalConfig
 from vllm.exceptions import VLLMValidationError
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.hasher import MultiModalHasher
 from vllm.multimodal.parse import MultiModalDataParser
 from vllm.multimodal.processing.context import (
+    BaseProcessingInfo,
     InputProcessingContext,
-    overlay_modality_mm_kwargs,
+    _resolve_mm_processor_kwargs,
 )
 from vllm.multimodal.processing.inputs import ProcessorInputs
 from vllm.multimodal.processing.processor import (
@@ -1207,58 +1212,305 @@ def test_apply_prompt_updates_falls_back_with_index_targets():
     assert [p.tokens for p in placeholders["image"]] == [[200, 201], [9]]
 
 
-@pytest.mark.skip_global_cleanup
-def test_overlay_modality_mm_kwargs_scoped_video_does_not_leak_to_image():
-    """HF-style videos_kwargs must overlay only when modality is video."""
-    video_size = {"longest_edge": 469762048, "shortest_edge": 4096}
-    kwargs = {"videos_kwargs": {"size": video_size}}
-
-    assert overlay_modality_mm_kwargs(kwargs, None) == kwargs
-    assert "size" not in overlay_modality_mm_kwargs(kwargs, "image")
-    assert overlay_modality_mm_kwargs(kwargs, "video")["size"] == video_size
+class _TextProcessorKwargs(TypedDict, total=False):
+    padding: bool
 
 
-@pytest.mark.skip_global_cleanup
-def test_overlay_modality_mm_kwargs_flat_size_stays_shared():
-    """A flat size override keeps the current shared-namespace behavior."""
-    size = {"longest_edge": 469762048, "shortest_edge": 4096}
-    kwargs = {"size": size}
-
-    for modality in (None, "image", "video"):
-        assert overlay_modality_mm_kwargs(kwargs, modality)["size"] == size
+class _AudioProcessorKwargs(TypedDict, total=False):
+    sampling_rate: int
 
 
-@pytest.mark.skip_global_cleanup
-def test_overlay_modality_mm_kwargs_scoped_wins_over_flat_for_modality():
-    """A nested videos_kwargs size wins over a flat size for video reads."""
+class _ProcessorKwargs(TypedDict, total=False):
+    text_kwargs: _TextProcessorKwargs
+    audio_kwargs: _AudioProcessorKwargs
+
+
+class _ImageProcessorKwargs(TypedDict, total=False):
+    size: dict[str, int]
+    min_pixels: int
+
+
+class _VideoProcessorKwargs(TypedDict, total=False):
+    size: dict[str, int]
+    fps: float
+
+
+@pytest.mark.parametrize(
+    ("supported_mm_limits", "processor", "expected"),
+    [
+        (
+            {"image": None, "video": None},
+            SimpleNamespace(
+                valid_processor_kwargs=_ProcessorKwargs,
+                image_processor=SimpleNamespace(valid_kwargs=_ImageProcessorKwargs),
+                video_processor=SimpleNamespace(valid_kwargs=_VideoProcessorKwargs),
+            ),
+            {
+                "text_kwargs": {"padding"},
+                "images_kwargs": {"size", "min_pixels"},
+                "videos_kwargs": {"size", "fps"},
+            },
+        ),
+        (
+            {"image": None},
+            SimpleNamespace(
+                valid_processor_kwargs=_ProcessorKwargs,
+                image_processor=SimpleNamespace(valid_kwargs=_ImageProcessorKwargs),
+            ),
+            {
+                "text_kwargs": {"padding"},
+                "images_kwargs": {"size", "min_pixels"},
+            },
+        ),
+        (
+            {"audio": None},
+            SimpleNamespace(valid_processor_kwargs=_ProcessorKwargs),
+            {
+                "text_kwargs": {"padding"},
+                "audio_kwargs": {"sampling_rate"},
+            },
+        ),
+    ],
+)
+def test_get_supported_mm_processor_kwargs_uses_supported_modalities(
+    monkeypatch: pytest.MonkeyPatch,
+    supported_mm_limits: dict[str, int | None],
+    processor: SimpleNamespace,
+    expected: dict[str, set[str]],
+) -> None:
+    info = BaseProcessingInfo(SimpleNamespace())
+    info.__dict__["supported_mm_limits"] = supported_mm_limits
+    monkeypatch.setattr(info, "get_hf_processor", lambda **_: processor)
+
+    assert info.get_supported_mm_processor_kwargs() == expected
+
+
+def test_supported_mm_processor_kwargs_is_cached(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    info = BaseProcessingInfo(SimpleNamespace())
+    expected = {"images_kwargs": {"size"}}
+    calls = 0
+
+    def get_supported_mm_processor_kwargs() -> dict[str, set[str]]:
+        nonlocal calls
+        calls += 1
+        return expected
+
+    monkeypatch.setattr(
+        info,
+        "get_supported_mm_processor_kwargs",
+        get_supported_mm_processor_kwargs,
+    )
+
+    first = info.supported_mm_processor_kwargs
+    second = info.supported_mm_processor_kwargs
+
+    assert first is expected
+    assert second is first
+    assert calls == 1
+
+
+def test_resolve_mm_processor_kwargs_routes_supported_flat_kwargs():
     kwargs = {
-        "size": {"longest_edge": 1},
-        "videos_kwargs": {"size": {"longest_edge": 2}},
-        "images_kwargs": {"size": {"longest_edge": 3}},
+        "size": {"shortest_edge": 64},
+        "padding": True,
+        "sampling_rate": 16000,
+        "unknown": "keep",
+        "images_kwargs": {
+            "size": {"longest_edge": 1024},
+            "custom_image_kwarg": "keep",
+        },
+    }
+    kwargs_before = deepcopy(kwargs)
+
+    resolved = _resolve_mm_processor_kwargs(
+        kwargs,
+        supported_mm_processor_kwargs={
+            "text_kwargs": {"padding"},
+            "images_kwargs": {"size"},
+            "videos_kwargs": {"size"},
+            "audio_kwargs": {"sampling_rate"},
+        },
+    )
+
+    assert resolved == {
+        "unknown": "keep",
+        "text_kwargs": {"padding": True},
+        "images_kwargs": {
+            "size": {
+                "shortest_edge": 64,
+                "longest_edge": 1024,
+            },
+            "custom_image_kwarg": "keep",
+        },
+        "videos_kwargs": {
+            "size": {"shortest_edge": 64},
+        },
+        "audio_kwargs": {"sampling_rate": 16000},
+    }
+    assert kwargs == kwargs_before
+
+    video_kwargs = resolved["videos_kwargs"]
+    image_kwargs = resolved["images_kwargs"]
+    assert isinstance(video_kwargs, dict)
+    assert isinstance(image_kwargs, dict)
+    video_size = video_kwargs["size"]
+    image_size = image_kwargs["size"]
+    assert isinstance(video_size, dict)
+    assert isinstance(image_size, dict)
+    video_size["shortest_edge"] = 999
+
+    assert image_size["shortest_edge"] == 64
+    assert kwargs == kwargs_before
+
+
+def test_resolve_mm_processor_kwargs_rejects_non_mapping_destination_scope():
+    with pytest.raises(TypeError, match="images_kwargs"):
+        _resolve_mm_processor_kwargs(
+            {
+                "size": {"shortest_edge": 64},
+                "images_kwargs": 123,
+            },
+            supported_mm_processor_kwargs={
+                "images_kwargs": {"size"},
+            },
+        )
+
+
+def test_resolve_mm_processor_kwargs_without_schema_deduplicates_existing_scopes():
+    kwargs = {
+        "size": {"shortest_edge": 64},
+        "num_frames": 16,
+        "fps": 4,
+        "images_kwargs": {
+            "size": {"longest_edge": 1024},
+        },
+        "videos_kwargs": {
+            "num_frames": 8,
+        },
+        "audio_kwargs": 123,
+        "common_kwargs": {
+            "fps": 2,
+        },
+    }
+    kwargs_before = deepcopy(kwargs)
+
+    resolved = _resolve_mm_processor_kwargs(kwargs)
+
+    assert resolved == {
+        "fps": 4,
+        "images_kwargs": {
+            "size": {"longest_edge": 1024},
+        },
+        "videos_kwargs": {
+            "num_frames": 8,
+        },
+        "audio_kwargs": 123,
+        "common_kwargs": {
+            "fps": 2,
+        },
+    }
+    assert kwargs == kwargs_before
+    assert "text_kwargs" not in resolved
+
+
+@pytest.mark.parametrize(
+    "inference_kwargs",
+    [
+        {"size": {"shortest_edge": 128}},
+        {"size": {"shortest_edge": 128}, "images_kwargs": None},
+        {"size": {"shortest_edge": 128}, "images_kwargs": {}},
+    ],
+)
+def test_get_merged_mm_kwargs_treats_empty_scopes_as_absent_before_routing(
+    inference_kwargs: dict[str, object],
+):
+    mm_config = MultiModalConfig(
+        mm_processor_kwargs={
+            "size": {
+                "shortest_edge": 64,
+                "longest_edge": 512,
+            },
+            "images_kwargs": {
+                "size": {"longest_edge": 1024},
+            },
+        },
+        mm_device_do_normalize=False,
+    )
+    model_config = SimpleNamespace(get_multimodal_config=lambda: mm_config)
+    ctx = InputProcessingContext(model_config, tokenizer=None)  # type: ignore[arg-type]
+
+    merged = ctx.get_merged_mm_kwargs(
+        inference_kwargs,
+        supported_mm_processor_kwargs={
+            "images_kwargs": {"size"},
+            "videos_kwargs": {"size"},
+        },
+    )
+
+    assert merged == {
+        "images_kwargs": {
+            "size": {
+                "shortest_edge": 128,
+                "longest_edge": 1024,
+            },
+        },
+        "videos_kwargs": {
+            "size": {
+                "shortest_edge": 128,
+                "longest_edge": 512,
+            },
+        },
     }
 
-    assert overlay_modality_mm_kwargs(kwargs, "video")["size"] == {"longest_edge": 2}
-    assert overlay_modality_mm_kwargs(kwargs, "image")["size"] == {"longest_edge": 3}
-    assert overlay_modality_mm_kwargs(kwargs, None)["size"] == {"longest_edge": 1}
 
+def test_get_merged_mm_kwargs_merges_before_routing():
+    mm_config = MultiModalConfig(
+        mm_processor_kwargs={
+            "size": {
+                "shortest_edge": 64,
+                "longest_edge": 512,
+            },
+            "images_kwargs": {
+                "size": {"longest_edge": 1024},
+            },
+        },
+        mm_device_do_normalize=False,
+    )
+    model_config = SimpleNamespace(get_multimodal_config=lambda: mm_config)
+    ctx = InputProcessingContext(model_config, tokenizer=None)  # type: ignore[arg-type]
 
-@pytest.mark.skip_global_cleanup
-def test_overlay_modality_mm_kwargs_ignores_non_mapping_scoped_value():
-    kwargs = {"images_kwargs": "not-a-dict", "size": {"longest_edge": 1}}
-    assert overlay_modality_mm_kwargs(kwargs, "image")["size"] == {"longest_edge": 1}
+    merged = ctx.get_merged_mm_kwargs(
+        {
+            "size": {
+                "shortest_edge": 128,
+                "longest_edge": 768,
+            },
+            "images_kwargs": {
+                "size": {"longest_edge": 2048},
+            },
+        },
+        supported_mm_processor_kwargs={
+            "images_kwargs": {"size"},
+            "videos_kwargs": {"size"},
+        },
+    )
 
-
-@pytest.mark.skip_global_cleanup
-def test_mm_processor_kwargs_merge_then_overlay_preserves_scoping():
-    """Configured videos_kwargs overlay only for video reads after merge."""
-    from vllm.config.multimodal import MultiModalConfig
-
-    size = {"longest_edge": 469762048, "shortest_edge": 4096}
-    mm_config = MultiModalConfig(mm_processor_kwargs={"videos_kwargs": {"size": size}})
-    merged = mm_config.merge_mm_processor_kwargs({})
-    assert overlay_modality_mm_kwargs(merged, "video")["size"] == size
-    assert "size" not in overlay_modality_mm_kwargs(merged, "image")
-    assert "size" not in overlay_modality_mm_kwargs(merged, None)
+    assert merged == {
+        "images_kwargs": {
+            "size": {
+                "shortest_edge": 128,
+                "longest_edge": 2048,
+            },
+        },
+        "videos_kwargs": {
+            "size": {
+                "shortest_edge": 128,
+                "longest_edge": 768,
+            },
+        },
+    }
 
 
 def test_processor_inputs_hashes_partial_uuids():
