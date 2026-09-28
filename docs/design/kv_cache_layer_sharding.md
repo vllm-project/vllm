@@ -1,118 +1,151 @@
 # Layer-sharded KV cache (KVPP)
 
-KVPP stores each replicated MLA cache bundle on one rank in the PCP x TP replica
-group. Every rank still runs every layer. A separate NCCL process group broadcasts the
-owner's bundle into reusable receiver storage immediately before attention
-needs historical KV. Logical blocks, prefix hashes, request admission, and
-scheduler reference counts retain their existing meanings.
+KVPP increases the capacity of replicated MLA caches by assigning each layer
+bundle to one persistent owner in a PCP × TP replica group. Every rank executes
+its layers using stable attention tensor views. NCCL broadcasts materialize
+historical KV in two reusable receiver slots, with one-bundle-ahead prefetch
+before attention.
 
-## Enablement and limits
+The target workload is multi-prefix serving where a limited KV memory budget
+causes eviction. The benefit depends on cache residency, broadcast cost, and
+available computation overlap.
 
-Use `--enable-kvpp` with PCP x TP >= 2 and Model Runner V2
-(`VLLM_USE_V2_MODEL_RUNNER=1`). KVPP is disabled by default
-(`CacheConfig.enable_kvpp=False`). KVPP on GPU rejects Model Runner V1. This
-implementation supports NVIDIA CUDA and NCCL broadcast; it does not expose a
-transport selector.
+## Enablement and compatibility
 
-Choose eager execution with `--enforce-eager`, or compiled piecewise execution:
+Enable `--enable-kvpp` with `VLLM_USE_V2_MODEL_RUNNER=1`. Choose eager execution
+with `--enforce-eager`, or compiled PIECEWISE:
 
 ```text
--cc.mode=3 -cc.cudagraph_mode=PIECEWISE -cc.use_inductor_graph_partition=false
+--enable-kvpp -cc.mode=3 -cc.cudagraph_mode=PIECEWISE -cc.use_inductor_graph_partition=false
 ```
 
-Keep the default `splitting_ops`: attention and KV cache updates must remain
-outside captured graphs so cache acquisition, prefetch, and release run on every
-replay. FULL, FULL_AND_PIECEWISE, breakable graphs, and Inductor graph partitioning
-are not enabled for KVPP. The isolated GSM8K guard uses compiled PIECEWISE.
+| Component | Requirement |
+| --- | --- |
+| Device and runner | NVIDIA CUDA, NCCL, Model Runner V2 |
+| Replica group | PCP × TP ≥ 2, DCP=1; at least one target bundle per rank |
+| Cache layout | Replicated full-attention MLA, common block size, layer-compact storage |
+| Execution | Eager or compiled PIECEWISE with Dynamo splitting of attention and KV updates |
+| Offload | `SimpleCPUOffloadConnector`, using persistent owner views |
 
-For example, combine `--tensor-parallel-size 2` with
-`--prefill-context-parallel-size 2` to distribute bundles across four replica
-ranks. PCP MoE currently requires `VLLM_MOE_SKIP_PADDING=0`: its token gather
-does not gather the rank-local routing padding mask. This existing PCP limit
-also applies with KVPP disabled; the GSM8K guard sets this environment variable.
+Keep the default `splitting_ops` so cache acquisition, prefetch, and release run
+on every replay. GPU MRV1, FULL/FULL_AND_PIECEWISE graphs, breakable graphs,
+Inductor graph partitioning, DBO, HiSparse, and cross-layer KV sharing are
+unsupported. Other connectors must implement the layer-sharded storage contract.
 
-The first version requires replicated full-attention MLA caches, a common block
-size, a layer-compact layout, and at least one owned bundle per replica rank.
-A cache layer opts in with `AttentionLayerBase.get_kv_cache_bundle()`. DeepSeek MLA
-returns its main cache and, when present, its sparse-indexer cache as one bundle.
-With DCP=1, PCP gathers new prefill KV before the ordinary cache update, so every
-PCP rank retains a full replica. KVPP reuses that path unchanged. PCP retains its
-Model Runner V2 capability limits, including no PCP + PP execution yet.
-Draft caches remain local. DCP, DBO, HiSparse, and cross-layer KV sharing are
-rejected until their storage and lifetime contracts are implemented. Ordinary
-TP-sharded K/V heads cannot use owner-retains-updates.
+For TP2 × PCP2, set `--tensor-parallel-size 2` and
+`--prefill-context-parallel-size 2`. PCP retains its MRV2 capability limits,
+including the restriction on PCP + PP execution. PCP MoE requires
+`VLLM_MOE_SKIP_PADDING=0` because token gathering leaves routing padding masks
+rank-local; the GSM8K configuration includes this setting.
 
-`SimpleCPUOffloadConnector` can offload owned persistent cache; other KV
-connectors fail closed. External or remote connectors need an ownership manifest
-and a distributed completion contract before they can support this placement.
+## Cache allocation and management
 
-## Placement and capacity
+A layer declares its replicated components through
+`AttentionLayerBase.get_kv_cache_bundle()`. DeepSeek MLA bundles its main cache
+with its sparse-indexer cache when present. Draft caches remain local. PCP's
+existing prefill gather and cache update maintain full replicas when DCP=1.
 
-Workers discover bundle order from the loaded model. Contiguous, count-balanced
-partitions choose owners within the PCP x TP replica group. Before cache
-allocation, the engine checks that all ranks agree on logical cache specs, bundle order, and
-ownership. `KVCacheStoragePlan` attaches worker-local physical regions to the
-otherwise ordinary `KVCacheConfig`.
+The allocation flow extends the common KV cache pipeline:
 
-The allocator places owned bundles in persistent ranges and nonowner bundles in
-two alternating scratch slots. Bundle components are packed contiguously in one byte
-arena; attention still sees stable tensor views. Capacity search uses the same
-layout builder as final allocation. It converts each worker's physical memory
-budget to a logical block capacity; the common KV cache config flow then handles
-override, auto-fit, null-block reservation, admission checks, and the minimum
-block count across workers. The ordinary config builder, including its layout
-validation and tensor descriptors, runs unchanged. Once the common block count
-is final, KVPP replaces only physical tensor placement and attaches the storage
-plan; other config fields are preserved. Allocation uses the exact packed size,
-and an override larger than physical capacity is rejected.
+1. Discover bundles in model order and assign contiguous, count-balanced owner
+   partitions. Check agreement on logical specs, bundle order, and ownership
+   across workers.
+2. Convert each worker's physical memory budget into logical block capacity.
+   The layout builder accounts for owned bundles and two alternating scratch
+   slots, using the same packed layout as final allocation.
+3. Run the existing override, auto-fit, null-block reservation, admission checks,
+   config builder, layout validation, and cross-worker minimum-block flow.
+4. Apply physical placement after the common block count is final.
+   `KVCacheStoragePlan` records regions in the ordinary `KVCacheConfig`; the
+   allocator builds stable views into a packed byte arena using the existing
+   allocation and view-construction helpers.
+5. Use that storage plan for broadcast and offload. Register persistent owner
+   views with the offload connector. A common per-block byte budget keeps pool
+   block IDs aligned across ranks with unequal owner counts.
 
-Placement does not add a scheduler or block manager. The allocator uses the same
-backing allocation and view construction for both placements. KVPP adds no
-alignment padding beyond the cache specs. Broadcast and offload consume the final
-worker storage plan instead of deriving ownership or scratch placement again.
+Logical block IDs, prefix hashes, scheduler reference counts, and request
+admission retain their existing meanings. Physical allocation includes packing
+requirements from cache specs; block-count overrides must fit the worker budget.
 
-The offload path registers only persistent owner views. A common per-block byte
-budget across ranks keeps distributed CPU/disk block IDs aligned even when owner
-partitions have unequal sizes. Scratch does not consume offload pool
-capacity.
+## Broadcast and cache lifetime
 
-## Attention-time broadcast
+`maybe_prepare_kvpp` prepares the runtime after connector pre-forward setup.
+It determines history from scheduled request state before PCP partitioning,
+where global context lengths distinguish previous KV from current-prefill
+queries. A batch with history broadcasts each complete allocated bundle,
+including inactive blocks; a batch without history uses its cache views directly.
 
-The first historical bundle broadcasts when its first cache component is
-acquired, immediately before attention uses it. Acquiring bundle `i` waits for
-its broadcast and launches bundle `i+1` on a separate CUDA stream. The first
-acquisition can be the sparse indexer or MLA cache update. Each broadcast sends
-the complete allocated bundle, including inactive blocks. Batches without
-history skip broadcasts. History is read from the scheduled requests before PCP
-partitioning: a rank-local query offset can include tokens from the current
-prefill and must not be treated as historical KV.
+For a batch with history, the first component access to bundle `i` calls
+`acquire`, which:
 
-CUDA events enforce three dependencies: the transfer waits for preceding forward
-cache writes, attention waits for its bundle's transfer, and reusing a scratch
-slot waits for its previous attention use. The owner's persistent source and
-receiver scratch destination therefore remain valid until NCCL finishes. The
-runtime checks ordered bundle access and requires all bundles from the previous
-forward to be released before preparing the next one.
+1. Starts its broadcast if needed and makes the compute stream wait for completion.
+2. Marks the bundle active and starts bundle `i+1`, when present, on the transfer stream.
+3. Provides the same views to the cache update, sparse indexer, and attention.
 
-`KVPPRuntime` is selected through `Platform.get_kvpp_runtime_cls()` and scoped to
-`ForwardContext.kvpp_runtime` by `set_forward_context`. After the connector's
-pre-forward call, `maybe_prepare_kvpp` prepares the runtime and determines whether the
-batch has history. There is no per-forward teardown; failed forwards retain their
-state, and runner shutdown synchronizes the device before releasing cache storage.
-The KVPP group is created alongside TP in `initialize_model_parallel` only when
-KVPP is enabled and destroyed by `destroy_model_parallel`. It spans PCP x TP
-within each DP replica and PP stage, with local rank `pcp_rank * tp_size + tp_rank`
-and a separate communicator. The GPU worker warms up its broadcast through
-`warmup_process_group` after distributed initialization and before the initial
-memory snapshot. The runtime uses its device group for asynchronous broadcasts.
-Device-specific runtime implementations provide communication operations and events while group
-lifecycle remains in `parallel_state`.
+The main attention's `release` records completion for scratch reuse. CUDA events
+order preceding-forward cache writes before broadcast reads, broadcast completion
+before computation, and the previous attention use before reusing a scratch
+slot. All ranks traverse bundles in the same order and release them before the
+next forward. Failed forwards retain their state; runner shutdown synchronizes
+the device before releasing cache storage.
+
+`set_forward_context` scopes the platform-selected `KVPPRuntime` to the forward.
+`parallel_state` owns the KVPP group from `initialize_model_parallel` through
+`destroy_model_parallel`. Each group spans PCP × TP within one DP replica and PP
+stage, with local rank `pcp_rank * tp_size + tp_rank`. The GPU worker calls
+`warmup_process_group` before its initial memory snapshot. The runtime uses the
+group's device communicator for asynchronous broadcasts and manages its streams
+and events.
 
 ## Validation
 
-Module tests cover placement agreement, packed capacity, scratch aliases,
-offload's persistent-only views, broadcast lifetimes across PCP x TP within each
-PP stage, and communication-group teardown and reinitialization. The isolated
-`DeepSeek-V2-Lite-Chat` GSM8K config under `tests/evals/gsm8k/configs/` is the
-real-weight end-to-end guard. Evaluate prefill, decode, prefix reuse, and pool
-reload separately when expanding supported execution modes.
+### Accuracy and execution
+
+DeepSeek-V2-Lite-Chat on 4×H100, TP2 × PCP2, MRV2, compiled PIECEWISE:
+
+| Check | Replicated baseline | KVPP |
+| --- | ---: | ---: |
+| GSM8K, 200 questions / 5-shot | 64.0% | 63.0% |
+| Invalid answers | 0 | 0 |
+| Short/long and repeated-prefix smoke | Reference | 8/8 token-for-token matches |
+
+Both scores pass the existing 0.65 ± 0.08 threshold (max output 256, concurrency
+8). The evaluation used `08cccd2edf` with its eager-only guard removed.
+Commit `74a2ceb3a9` passed a fresh startup/capture, the eight-request comparison,
+and nine configuration tests. Observers confirmed graph replay with KVPP
+prefetch executing outside capture.
+
+Module coverage includes placement agreement, capacity, scratch aliases,
+persistent offload views, distributed lifetimes, and group reinitialization.
+The full distributed suite and helper tests were not rerun at `74a2ceb3a9`.
+`tests/evals/gsm8k/configs/DeepSeek-V2-Lite-Chat-KVPP.yaml` provides the model
+accuracy guard. Extend validation across prefill, decode, prefix reuse, and pool
+reload as execution support expands.
+
+### Capacity-constrained prefix pooling
+
+The best observed attention-before result used DeepSeek-V2-Lite-Chat on
+4×RTX 5090, TP4, MRV2 eager, with 512 MiB KV per rank. Four families each supplied
+4,096 shared prefix tokens and a 1,024-token unique suffix. Each of two measured
+rounds ran 256 requests at concurrency 4, generating one token per request after
+warmup.
+
+| Metric | Replicated baseline | KVPP |
+| --- | ---: | ---: |
+| Logical KV capacity (tokens) | 17,248 | 51,776 |
+| Prefix-cache hit rate, rounds 1 / 2 | 37.8% / 38.3% | 80.0% / 80.0% |
+| Input tokens/s, rounds 1 / 2 | 67,988 / 68,586 | 124,651 / 124,638 |
+| Mean input tokens/s | 68,287 | 124,645 (+82.5%) |
+
+This GPU-resident prefix pool used no CPU offload. Input throughput includes
+cached tokens, so the gain combines cache residency and broadcast scheduling.
+Both services used `NCCL_P2P_DISABLE=1` and disabled FlashInfer autotune. Maximum
+model length was 8,192 for baseline and 16,384 for KVPP; both served the same
+5,120-token requests.
+
+The performance data predates the current refactor and PIECEWISE support; its
+scope is the earlier eager implementation and this one-token-output workload.
+Current-revision throughput and long-output decode gains remain unmeasured.
+Device and workload matter: the H100 cropped-DSv3.2 CPU-offload experiment showed
+a throughput regression with attention-before broadcast. Source provenance and
+validation commands are recorded in [PR #59059](https://github.com/vllm-project/vllm/pull/59059).
