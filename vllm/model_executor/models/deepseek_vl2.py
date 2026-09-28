@@ -726,34 +726,23 @@ class DeepseekVLV2ForCausalLM(
         features = self.vision.forward_features(pixel_values)
         return self.projector(features)
 
-    def encoder_eager_forward(
-        self, mm_kwargs: dict[str, Any], path: str = "default"
-    ) -> torch.Tensor:
-        # The eager fallback path uses scatter_output_slices, which expects a
-        # flat [total_tokens, dim] tensor. Return the fully assembled embeddings
-        # (with newlines and view-separator) concatenated across all images.
-        pixel_values = mm_kwargs["pixel_values"]
-        images_spatial_crop = mm_kwargs["images_spatial_crop"]
-        embeddings = self._pixel_values_to_embedding(pixel_values, images_spatial_crop)
-        return torch.cat(embeddings, dim=0)
-
     def postprocess_encoder_output(
         self,
-        output: torch.Tensor,
+        outputs: dict[str, torch.Tensor],
         indices: list[int],
         per_item_out_tokens: list[int],
         dest: dict[int, torch.Tensor] | list[torch.Tensor | None],
         clone: bool = False,
         batch_mm_kwargs: dict[str, Any] | None = None,
-        local_output: torch.Tensor | None = None,
     ) -> None:
         """Assemble per-image embeddings from raw per-tile projector output.
 
-        ``output`` has shape ``[N_tiles_captured, hw, n_embed]``.
+        ``outputs["default"]`` has shape ``[N_tiles_captured, hw, n_embed]``.
         This method re-applies newlines and the view-separator that the
         eager ``_pixel_values_to_embedding`` path inserts in-line.
         """
         assert batch_mm_kwargs is not None
+        output = outputs["default"]
         images_spatial_crop = batch_mm_kwargs["images_spatial_crop"]
         _, hw, n_dim = output.shape
         h = w = int(hw**0.5)

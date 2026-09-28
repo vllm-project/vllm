@@ -909,31 +909,22 @@ class MockDeepseekVL2Model(torch.nn.Module, SupportsEncoderCudaGraph):
     def encoder_eager_forward(
         self, mm_kwargs: dict[str, Any], path: str = "default"
     ) -> torch.Tensor:
-        # Eager path uses scatter_output_slices (not postprocess_encoder_output),
-        # so we must return a flat [total_tokens, dim] assembled tensor.
-        tile_feats = self._tile_forward(mm_kwargs["pixel_values"])
-        specs = self.get_encoder_cudagraph_item_specs(mm_kwargs)
-        dest: dict[int, torch.Tensor] = {}
-        self.postprocess_encoder_output(
-            tile_feats,
-            list(range(len(specs))),
-            [s.output_tokens for s in specs],
-            dest,
-            batch_mm_kwargs=mm_kwargs,
-        )
-        return torch.cat([dest[i] for i in range(len(specs))], dim=0)
+        # Manager always runs `postprocess_encoder_output` after this, whether
+        # the batch went through eager or CUDA graph replay, so this must
+        # return the same raw per-tile shape as `encoder_cudagraph_forward`.
+        return self._tile_forward(mm_kwargs["pixel_values"])
 
     def postprocess_encoder_output(
         self,
-        output: torch.Tensor,
+        outputs: dict[str, torch.Tensor],
         indices: list[int],
         per_item_out_tokens: list[int],
         dest: dict[int, torch.Tensor] | list[torch.Tensor | None],
         clone: bool = False,
         batch_mm_kwargs: dict[str, Any] | None = None,
-        local_output: torch.Tensor | None = None,
     ) -> None:
         assert batch_mm_kwargs is not None
+        output = outputs["default"]
         images_spatial_crop = batch_mm_kwargs["images_spatial_crop"]
         _, hw, n_dim = output.shape
         h = w = int(hw**0.5)
