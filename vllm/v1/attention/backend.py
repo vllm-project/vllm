@@ -115,11 +115,15 @@ class AttentionBackend(ABC):
         )
 
     @classmethod
-    def supports_block_size(cls, block_size: int | None) -> bool:
+    def supports_block_size(
+        cls, block_size: int | None, kv_cache_spec: "KVCacheSpec | None" = None
+    ) -> bool:
         if block_size is None:
             return True
 
-        supported_kernel_block_sizes = cls.get_supported_kernel_block_sizes()
+        supported_kernel_block_sizes = cls.get_supported_kernel_block_sizes(
+            kv_cache_spec
+        )
         if not supported_kernel_block_sizes:
             return True
 

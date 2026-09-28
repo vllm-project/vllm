@@ -701,6 +701,21 @@ def test_fa4_hd256_block_size_advertisement(
 
 
 @blackwell_only
+def test_fa4_hd256_block_size_resolves_from_spec():
+    from vllm.v1.attention.backends.flash_attn import FlashAttentionBackend
+    from vllm.v1.kv_cache_interface import FullAttentionSpec
+
+    # A drafter's head-size-128 layers behind a head-size-256 target must not
+    # inherit the target's 128-token page.
+    drafter_spec = FullAttentionSpec(
+        block_size=64, num_kv_heads=1, head_size=128, dtype=torch.bfloat16
+    )
+    with _blackwell(_hd256_config()):
+        assert not FlashAttentionBackend.supports_block_size(64)
+        assert FlashAttentionBackend.supports_block_size(64, drafter_spec)
+
+
+@blackwell_only
 def test_fa4_hd256_mm_prefix_deselects_flash_attn():
     from vllm.v1.attention.backends.flash_attn import FlashAttentionBackend
 
