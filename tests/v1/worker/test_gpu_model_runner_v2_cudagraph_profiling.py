@@ -439,3 +439,48 @@ def test_teardown_profiling_state_clears_mamba_align_metadata(monkeypatch):
     assert runner.model_state._mamba_ctx is None
     assert runner.model_state._mamba_group_ids == []
     assert runner.model_state._mamba_spec is None
+
+
+class _RecordingSampler:
+    """Records the temperature each dummy slot holds when the sampler runs."""
+
+    def __init__(self, num_reqs: int) -> None:
+        self.temperature = [0.0] * num_reqs
+        self.staged = list(self.temperature)
+        self.calls: list[list[float]] = []
+
+    def add_request(self, req_idx: int, sampling_params) -> None:
+        self.staged[req_idx] = sampling_params.temperature
+
+    def apply_staged_writes(self) -> None:
+        self.temperature = list(self.staged)
+
+    def __call__(self, logits, input_batch) -> None:
+        self.calls.append(list(self.temperature))
+
+
+@pytest.mark.parametrize("is_cpu", [False, True])
+def test_dummy_sampler_run_covers_greedy_then_worst_case(monkeypatch, is_cpu):
+    """The untouched all-greedy state runs first: warmup batches all use
+    worst-case parameters, so it is the only step before serving that compiles
+    a greedy-only batch's sampler kernels. The worst-case pass that follows
+    sizes profiling, except on CPU, which sizes from resident memory."""
+    num_reqs = 3
+    runner: Any = mrv2.GPUModelRunner.__new__(mrv2.GPUModelRunner)
+    runner.model = SimpleNamespace(compute_logits=lambda hidden: hidden)
+    runner.input_buffers = None
+    runner.sampler = _RecordingSampler(num_reqs)
+    monkeypatch.setattr(
+        mrv2.InputBatch, "make_dummy", staticmethod(lambda *args, **kwargs: None)
+    )
+    monkeypatch.setattr(
+        mrv2, "current_platform", SimpleNamespace(is_cpu=lambda: is_cpu)
+    )
+
+    runner._dummy_sampler_run(torch.zeros(num_reqs, 4))
+
+    worst_case = mrv2.SamplingParams.for_sampler_warmup().temperature
+    expected = [[0.0] * num_reqs]
+    if not is_cpu:
+        expected.append([worst_case] * num_reqs)
+    assert runner.sampler.calls == expected

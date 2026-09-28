@@ -975,9 +975,17 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             num_reqs, num_reqs, self.input_buffers
         )
 
-        # Give every request worst-case sampling parameters so profiling sees
-        # the memory of top-k/top-p, penalties, and logprobs.
         assert self.sampler is not None
+        # The untouched, all-greedy state first, as warmup batches all use
+        # worst-case parameters: this is where a greedy-only batch's sampler
+        # kernels get compiled.
+        self.sampler(logits, dummy_input_batch)
+        if current_platform.is_cpu():
+            # The CPU backend sizes the KV cache from resident memory after
+            # this run; the worst-case pass would only cost time and memory.
+            return
+        # Then worst-case sampling parameters on every request, so profiling
+        # sees the memory of top-k/top-p, penalties, and logprobs.
         for req_idx in range(num_reqs):
             self.sampler.add_request(req_idx, SamplingParams.for_sampler_warmup())
         self.sampler.apply_staged_writes()
