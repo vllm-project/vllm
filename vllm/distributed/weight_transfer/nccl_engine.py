@@ -173,6 +173,11 @@ class NCCLWeightTransferEngine(
         )
 
         finalize_layerwise_reload(self.model, self.model_config)
+        # Trace policies may enqueue conversion and copy operations on the
+        # worker's current CUDA stream. Do not expose the updated model to
+        # inference until those operations have completed.
+        if torch.cuda.is_available():
+            torch.cuda.current_stream().synchronize()
 
     def receive_weights(self, update_info: NCCLWeightTransferUpdateInfo) -> None:
         """

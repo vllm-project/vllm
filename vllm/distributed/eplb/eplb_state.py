@@ -29,6 +29,7 @@ physical experts.
 import threading
 import time
 from collections.abc import Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass
 
 import torch
@@ -366,6 +367,9 @@ class EplbState:
         """
         self.validate_ep_configuration(model)
         self.is_async = self.parallel_config.eplb_config.use_async
+        self._reload_condition = threading.Condition()
+        self._weight_update_active = False
+        self._mapping_active = False
 
         physical_to_logical_map_list = (
             EplbState.build_initial_global_physical_to_logical_map(
@@ -550,7 +554,68 @@ class EplbState:
                 val = max(0, min(num_unpadded_tokens, ts.stop) - ts.start)
                 tensors[i].fill_(val)
 
+    @contextmanager
+    def _mapping_guard(self, *, reject_reload: bool = False):
+        """Serialize EPLB mapping changes with weight reload."""
+        with self._reload_condition:
+            if self._weight_update_active:
+                if reject_reload:
+                    raise RuntimeError(
+                        "Cannot change EPLB mapping during weight update"
+                    )
+                yield False
+                return
+            while self._mapping_active:
+                self._reload_condition.wait()
+                if self._weight_update_active:
+                    if reject_reload:
+                        raise RuntimeError(
+                            "Cannot change EPLB mapping during weight update"
+                        )
+                    yield False
+                    return
+            self._mapping_active = True
+        try:
+            yield True
+        finally:
+            with self._reload_condition:
+                self._mapping_active = False
+                self._reload_condition.notify_all()
+
+    def begin_weight_update(self) -> None:
+        """Wait for EPLB mapping to finish and block new mapping changes."""
+        with self._reload_condition:
+            while self._mapping_active:
+                self._reload_condition.wait()
+            self._weight_update_active = True
+
+        try:
+            self.drain_async()
+        except BaseException:
+            with self._reload_condition:
+                self._weight_update_active = False
+                self._reload_condition.notify_all()
+            raise
+
+    def finish_weight_update(self) -> None:
+        """Release the EPLB gate after a weight update or abort."""
+        with self._reload_condition:
+            if not self._weight_update_active:
+                raise RuntimeError("No active weight update")
+            self._weight_update_active = False
+            self._reload_condition.notify_all()
+
     def step(
+        self,
+        is_dummy: bool = False,
+        is_profile: bool = False,
+        log_stats: bool = False,
+    ) -> None:
+        with self._mapping_guard() as allowed:
+            if allowed:
+                self._step_impl(is_dummy, is_profile, log_stats)
+
+    def _step_impl(
         self,
         is_dummy: bool = False,
         is_profile: bool = False,
@@ -748,6 +813,17 @@ class EplbState:
                 ls.num_unpadded_tokens_tensors = num_unpadded_tokens_tensors
 
     def rearrange(
+        self,
+        is_profile: bool = False,
+        rank_mapping: dict[int, int] | None = None,
+    ) -> torch.Tensor | None:
+        with self._mapping_guard(reject_reload=True):
+            return self._rearrange(
+                is_profile=is_profile,
+                rank_mapping=rank_mapping,
+            )
+
+    def _rearrange(
         self,
         is_profile: bool = False,
         rank_mapping: dict[int, int] | None = None,

@@ -599,6 +599,7 @@ class GPUModelRunner(
         self._moe_model: MixtureOfExperts | None = None
         # NOTE(yongji): flag to temporarily disable EPLB during scaling up/down
         self.eep_eplb_suppressed = False
+        self._weight_update_previous_eplb_suppressed: bool | None = None
         """
         State of the expert parallelism load balancer.
 
@@ -3427,6 +3428,31 @@ class GPUModelRunner(
             self.model_config,
             expanded_physical_to_logical,
         )
+
+    def begin_weight_update(self) -> None:
+        """Suppress EPLB while waiting for reload to complete."""
+        if self._weight_update_previous_eplb_suppressed is not None:
+            raise RuntimeError("Weight update EPLB gate is already active")
+        self._weight_update_previous_eplb_suppressed = self.eep_eplb_suppressed
+        self.eep_eplb_suppressed = True
+        if self.eplb_state is None:
+            return
+        try:
+            self.eplb_state.begin_weight_update()
+        except BaseException:
+            self.eep_eplb_suppressed = self._weight_update_previous_eplb_suppressed
+            self._weight_update_previous_eplb_suppressed = None
+            raise
+
+    def finish_weight_update(self) -> None:
+        """Release EPLB suppression after reload or reload abort."""
+        try:
+            if self.eplb_state is not None:
+                self.eplb_state.finish_weight_update()
+        finally:
+            previous = self._weight_update_previous_eplb_suppressed
+            self._weight_update_previous_eplb_suppressed = None
+            self.eep_eplb_suppressed = False if previous is None else previous
 
     def _pool(
         self,

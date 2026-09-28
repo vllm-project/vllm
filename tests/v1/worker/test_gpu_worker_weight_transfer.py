@@ -54,9 +54,22 @@ class _RecordingModelRunner:
     def __init__(self) -> None:
         self.seen_config: VllmConfig | None = None
         self.reset_lora_calls = 0
+        self.gate_active = False
+        self.raise_on_reload = False
 
     def reload_weights(self) -> None:
+        assert self.gate_active
         self.seen_config = get_current_vllm_config()
+        if self.raise_on_reload:
+            raise ValueError("reload failed")
+
+    def begin_weight_update(self) -> None:
+        assert not self.gate_active
+        self.gate_active = True
+
+    def finish_weight_update(self) -> None:
+        assert self.gate_active
+        self.gate_active = False
 
     def reset_lora_state(self) -> None:
         self.reset_lora_calls += 1
@@ -80,6 +93,17 @@ def test_reload_weights_sets_current_config():
     Worker.reload_weights(worker)
 
     assert model_runner.seen_config is worker.vllm_config
+    assert not model_runner.gate_active
+
+
+def test_reload_weights_releases_gate_on_error():
+    worker = _make_worker(None)
+    worker.model_runner.raise_on_reload = True
+
+    with pytest.raises(ValueError, match="reload failed"):
+        Worker.reload_weights(worker)
+
+    assert not worker.model_runner.gate_active
 
 
 def test_reload_parameter_lookup_preserves_lora_module_names():

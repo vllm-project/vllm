@@ -25,8 +25,8 @@ from vllm.model_executor.kernels.mhc.tilelang import (
     mhc_pre_delayed_tilelang,
 )
 from vllm.model_executor.kernels.mhc.triton import hc_collapse_triton
-from vllm.model_executor.layers.fused_moe import (
-    fused_moe_make_expert_params_mapping,
+from vllm.model_executor.layers.fused_moe.routed_experts import (
+    RoutedExperts,
 )
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
@@ -871,8 +871,8 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
                     if is_pp_missing_parameter(name, self):
                         continue
                     narrow_weight = loaded_weight[head_rank_start:head_rank_end]
-                    n = narrow_weight.shape[0]
-                    params_dict[name][:n].copy_(narrow_weight)
+                    param = params_dict[name]
+                    param.weight_loader(param, narrow_weight)
                     loaded_params.add(name)
                     continue
                 else:
@@ -926,15 +926,29 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         first_layer = next(iter(islice(self.layers, self.start_layer, self.end_layer)))
         if first_layer.ffn.use_mega_moe:
             return make_deepseek_v4_expert_params_mapping(self.config.n_routed_experts)
-        # Params for weights, fp8 weight scales, fp8 activation scales
-        # (param_name, weight_name, expert_id, shard_id)
-        return fused_moe_make_expert_params_mapping(
-            self,
-            ckpt_gate_proj_name="w1",
-            ckpt_down_proj_name="w2",
-            ckpt_up_proj_name="w3",
-            num_experts=self.config.n_routed_experts,
-        )
+        mapping: list[tuple[str, str, int, str]] = []
+        for name, module in self.named_modules():
+            if not isinstance(module, RoutedExperts):
+                continue
+            # EPLB placement is layer-specific and may change between reloads.
+            # Qualify both sides so one layer cannot reuse another's mapping.
+            parent, suffix = name.rsplit(".experts.", 1)
+            for (
+                param_name,
+                weight_name,
+                expert_id,
+                shard_id,
+            ) in module.get_expert_mapping("w1", "w2", "w3"):
+                param_name = param_name.replace("experts.", f"experts.{suffix}.", 1)
+                mapping.append(
+                    (
+                        f"{parent}.{param_name}",
+                        f"{parent}.{weight_name}",
+                        expert_id,
+                        shard_id,
+                    )
+                )
+        return mapping
 
     def finalize_mega_moe_weights(self) -> None:
         for layer in islice(self.layers, self.start_layer, self.end_layer):

@@ -43,6 +43,7 @@ class EPLBController:
         self.device = device
         self.state: EplbState | None = None
         self.suppressed = False
+        self._weight_update_previous_suppressed: bool | None = None
         self._has_registered_models = False
 
     def prepare_load(self) -> None:
@@ -129,6 +130,31 @@ class EPLBController:
             log_stats=self.parallel_config.eplb_config.log_balancedness,
         )
 
+    def begin_weight_update(self) -> None:
+        """Block EPLB and wait for any in-flight rearrangement to finish."""
+        if self._weight_update_previous_suppressed is not None:
+            raise RuntimeError("Weight update EPLB gate is already active")
+        self._weight_update_previous_suppressed = self.suppressed
+        self.suppressed = True
+        if self.state is None:
+            return
+        try:
+            self.state.begin_weight_update()
+        except BaseException:
+            self.suppressed = self._weight_update_previous_suppressed
+            self._weight_update_previous_suppressed = None
+            raise
+
+    def finish_weight_update(self) -> None:
+        """Release the EPLB gate after reload completes or aborts."""
+        try:
+            if self.state is not None:
+                self.state.finish_weight_update()
+        finally:
+            previous = self._weight_update_previous_suppressed
+            self._weight_update_previous_suppressed = None
+            self.suppressed = False if previous is None else previous
+
     def prepare_forward(
         self,
         model_config: ModelConfig,
@@ -148,11 +174,23 @@ class EPLBController:
         moe_model = get_mixture_of_experts_model(model)
         assert moe_model is not None
 
-        self.state = EplbState.from_mapping(
-            model=moe_model,
-            model_config=model_config,
-            device=self.device,
-            parallel_config=self.parallel_config,
-            expanded_physical_to_logical=expanded_physical_to_logical,
-        )
+        if self.state is None:
+            self.state = EplbState.from_mapping(
+                model=moe_model,
+                model_config=model_config,
+                device=self.device,
+                parallel_config=self.parallel_config,
+                expanded_physical_to_logical=expanded_physical_to_logical,
+            )
+        else:
+            # Replacing the controller state is itself a mapping transition,
+            # so it must not race with an active reload round.
+            with self.state._mapping_guard(reject_reload=True):
+                self.state = EplbState.from_mapping(
+                    model=moe_model,
+                    model_config=model_config,
+                    device=self.device,
+                    parallel_config=self.parallel_config,
+                    expanded_physical_to_logical=expanded_physical_to_logical,
+                )
         self._has_registered_models = True
