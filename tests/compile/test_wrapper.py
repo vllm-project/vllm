@@ -7,7 +7,11 @@ import os
 import pytest
 import torch
 
-from vllm.compilation.wrapper import TorchCompileWithNoGuardsWrapper
+from vllm.compilation.backends import set_model_tag
+from vllm.compilation.wrapper import (
+    TorchCompileWithNoGuardsWrapper,
+    reset_compile_wrapper,
+)
 from vllm.config import (
     CompilationConfig,
     CompilationMode,
@@ -115,6 +119,26 @@ def test_torch_compile_wrapper(use_bytecode_hook, monkeypatch):
         except Exception:
             return
         raise AssertionError("expected an exception to be raised")
+
+
+def test_reset_compile_wrapper_keeps_model_tag_and_config():
+    """A drafter reset under the target config keeps its own tag and config."""
+
+    def make_config():
+        vllm_config = VllmConfig()
+        vllm_config.compilation_config = CompilationConfig()
+        vllm_config.compilation_config.mode = CompilationMode.DYNAMO_TRACE_ONCE
+        return vllm_config
+
+    draft_config = make_config()
+    with set_current_vllm_config(draft_config), set_model_tag("eagle_head"):
+        wrapper = MyWrapper(MyMod())
+
+    with set_current_vllm_config(make_config()):
+        reset_compile_wrapper(wrapper)
+
+    assert wrapper._compile_prefix == "eagle_head"
+    assert wrapper.vllm_config is draft_config
 
 
 if __name__ == "__main__":
