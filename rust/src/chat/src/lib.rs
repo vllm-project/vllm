@@ -22,6 +22,7 @@ pub use event::{
 };
 use futures::{StreamExt, TryStreamExt as _};
 pub use llm_multimodal::MediaContentPart;
+pub use multimodal::{mm_request_span, mm_timing_layer};
 use output::apply_output_grammar;
 pub use output::{
     ChatOutputProcessor, DefaultChatOutputProcessor, DynChatOutputProcessor,
@@ -47,9 +48,6 @@ pub use stream::{ChatEventStream, ChatEventStreamTrait, CollectedAssistantMessag
 pub use vllm_engine_core_client::protocol::multimodal::MmFeatures;
 pub use vllm_llm::FinishReason;
 pub use vllm_text::GenerationConfigMode;
-pub use vllm_tracing::timing::{
-    RequestTimingStats as MultiModalTimingStats, mm_request_span, mm_timing_layer,
-};
 
 mod backend;
 mod error;
@@ -74,6 +72,9 @@ pub struct ChatRequestProcessor {
     /// Effective model dtype reported by the engine.
     /// Absent for text-only frontends without an engine handshake.
     model_dtype: Option<ModelDtype>,
+    /// Effective runtime context length reported by the engine.
+    /// Absent for render-only frontends without an engine handshake.
+    max_model_len: Option<usize>,
     /// Tool-call parser selection used when preparing generation requests.
     tool_call_parser: ParserSelection,
     /// Reasoning parser selection used when preparing generation requests.
@@ -85,10 +86,11 @@ pub struct ChatRequestProcessor {
 impl ChatRequestProcessor {
     /// Create a processor with multimodal support using the effective model
     /// dtype reported by the engine.
-    fn new(backend: DynChatBackend, model_dtype: ModelDtype) -> Self {
+    fn new(backend: DynChatBackend, model_dtype: ModelDtype, max_model_len: u32) -> Self {
         Self {
             backend,
             model_dtype: Some(model_dtype),
+            max_model_len: Some(max_model_len as usize),
             tool_call_parser: ParserSelection::Auto,
             reasoning_parser: ParserSelection::Auto,
             tool_strict_level: ToolStrictLevel::Auto,
@@ -100,6 +102,7 @@ impl ChatRequestProcessor {
         Self {
             backend,
             model_dtype: None,
+            max_model_len: None,
             tool_call_parser: ParserSelection::Auto,
             reasoning_parser: ParserSelection::Auto,
             tool_strict_level: ToolStrictLevel::Auto,
@@ -139,6 +142,7 @@ impl ChatRequestProcessor {
                     rendered,
                     self.backend.multimodal_model_info(),
                     model_dtype,
+                    self.max_model_len,
                 )
                 .await
             }
@@ -163,7 +167,8 @@ impl ChatRequestProcessor {
         let features = match media {
             multimodal::MultimodalInput::Raw(parts) => {
                 let model_dtype = self.model_dtype.ok_or(Error::UnsupportedMultimodalRenderer)?;
-                info.prepare_multimodal(parts, token_ids, model_dtype).await?
+                info.prepare_multimodal(parts, token_ids, model_dtype, self.max_model_len)
+                    .await?
             }
             multimodal::MultimodalInput::Preprocessed(features) => {
                 info.prepare_preprocessed(features, token_ids.len())?
@@ -258,10 +263,11 @@ impl ChatLlm {
     /// backend.
     pub fn new(text: TextLlm, backend: DynChatBackend) -> Self {
         let model_dtype = text.engine_core_client().model_dtype();
+        let max_model_len = text.engine_core_client().max_model_len();
 
         Self {
             text,
-            processor: ChatRequestProcessor::new(backend, model_dtype),
+            processor: ChatRequestProcessor::new(backend, model_dtype, max_model_len),
         }
     }
 
