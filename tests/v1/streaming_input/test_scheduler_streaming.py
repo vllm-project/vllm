@@ -631,7 +631,7 @@ class TestStreamingScheduler(unittest.TestCase):
         ), "Cached states from different cycles should be independent objects."
 
 
-def _sampled(request_id: str, token_ids: list[int]) -> ModelRunnerOutput:
+def _model_output(request_id: str, token_ids: list[int]) -> ModelRunnerOutput:
     return ModelRunnerOutput(
         req_ids=[request_id],
         req_id_to_index={request_id: 0},
@@ -654,11 +654,11 @@ def test_next_chunk_fully_computed_after_stop_on_accepted_draft(async_scheduling
     )
     session = DummyRequest("session", prompt_token_ids=[1, 2, 3], max_tokens=2)
     scheduler.add_request(session)
-    scheduler.update_from_output(scheduler.schedule(), _sampled("session", [10]))
+    scheduler.update_from_output(scheduler.schedule(), _model_output("session", [10]))
     scheduler.update_draft_token_ids(DraftTokenIds(["session"], [[11, 12]]))
     # Both drafts are accepted, but max_tokens stops at 11.
     scheduler.update_from_output(
-        scheduler.schedule(), _sampled("session", [11, 12, 13])
+        scheduler.schedule(), _model_output("session", [11, 12, 13])
     )
     assert session.status == RequestStatus.WAITING_FOR_STREAMING_REQ
 
