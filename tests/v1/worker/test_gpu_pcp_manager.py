@@ -75,6 +75,24 @@ def test_validate_config_rejects_full_graph_for_prefills():
         )
 
 
+@pytest.mark.parametrize("draft_uses_mla", [False, True])
+@pytest.mark.parametrize("dcp_size", [1, 2, 4])
+def test_validate_config_dcp_for_dspark(draft_uses_mla, dcp_size):
+    config = _make_config(CUDAGraphMode.NONE)
+    config.parallel_config.prefill_context_parallel_size = 4
+    config.parallel_config.decode_context_parallel_size = dcp_size
+    config.model_config.hf_text_config.index_topk = 1
+    config.speculative_config = SimpleNamespace(
+        use_dspark=lambda: True,
+        draft_model_config=SimpleNamespace(use_mla=draft_uses_mla),
+    )
+    if draft_uses_mla and dcp_size == 2:
+        with pytest.raises(NotImplementedError, match="requires DCP=1 or DCP=PCP"):
+            PCPManager.validate_config(config, supports_mm_inputs=False)
+        return
+    PCPManager.validate_config(config, supports_mm_inputs=False)
+
+
 def test_replicated_decode_piecewise_graph_padding(monkeypatch):
     manager = PCPManager(
         pcp_world_size=2,
@@ -207,6 +225,18 @@ def test_partition_padding_is_derived_from_batch_descriptor(
 
     assert local_batch.num_tokens_after_padding == expected_tokens
     assert local_batch.num_reqs_after_padding == expected_reqs
+
+
+def test_dummy_draft_does_not_reuse_previous_graph_batch():
+    manager, _ = _make_capture_manager(torch.ones((4, 2), dtype=torch.int32))
+    dummy_batch = InputBatch.make_dummy(1, 4, manager.input_buffers)
+    manager.draft_prefill_batch = replace(dummy_batch)
+
+    manager.prepare_draft_prefill(dummy_batch, dummy_batch.input_ids)
+
+    assert (
+        manager.get_draft_input_buffers(manager.input_buffers) is manager.input_buffers
+    )
 
 
 def test_capture_uses_pcp_persistent_inputs():

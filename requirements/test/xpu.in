@@ -32,12 +32,13 @@ soundfile
 # --- Tool Parsing & Evaluation ---
 blobfile
 rapidfuzz
-gpt-oss >= 0.0.7; python_version > '3.11'
+gpt-oss[eval] >= 0.0.7; python_version > '3.11'
 schemathesis>=4.0.0 # Required for openai schema test.
 jiwer
 bm25s
 pystemmer
 mteb[bm25s]>=2, <3 # required for mteb test
+sentence-transformers==5.2.0 # required for embedding tests
 num2words
 pqdm
 
