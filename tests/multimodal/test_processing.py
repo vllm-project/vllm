@@ -7,7 +7,7 @@ from contextlib import nullcontext
 import numpy as np
 import pytest
 
-from vllm.config import ModelConfig
+from vllm.config import ModelConfig, SchedulerConfig
 from vllm.exceptions import VLLMValidationError
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.hasher import MultiModalHasher
@@ -32,6 +32,7 @@ from vllm.multimodal.processing.processor import (
 )
 from vllm.utils.collection_utils import flatten_2d_lists
 
+from ..models.utils import build_model_context
 from .utils import random_image
 
 pytestmark = pytest.mark.cpu_test
@@ -1361,3 +1362,37 @@ def test_processor_inputs_hashes_distinguish_kwargs_shapes(left, right):
         ).get_mm_hashes("test-model", "blake3")["image"][0]
 
     assert hash_with(left) != hash_with(right)
+
+
+@pytest.mark.parametrize(
+    ("chunked_prefill", "max_model_len", "expected_seq_len"),
+    [(None, 491520, 491520), (True, 491520, 8192), (True, 128, 128), (False, 128, 128)],
+)
+def test_dummy_inputs_scheduler_budget(
+    chunked_prefill, max_model_len, expected_seq_len
+):
+    ctx = build_model_context(
+        "llava-hf/llava-v1.6-mistral-7b-hf",
+        mm_processor_kwargs=None,
+        limit_mm_per_prompt={"image": 1},
+    )
+    ctx.model_config.max_model_len = max_model_len
+
+    processor = MULTIMODAL_REGISTRY.create_processor(
+        ctx.model_config,
+        tokenizer=ctx.tokenizer,
+    )
+    processor.apply = lambda *args, **kwargs: {"prompt_token_ids": [7]}
+
+    kwargs = {}
+    if chunked_prefill is not None:
+        kwargs["scheduler_config"] = SchedulerConfig(
+            max_model_len=max_model_len,
+            is_encoder_decoder=False,
+            max_num_batched_tokens=8192,
+            max_num_seqs=1,
+            enable_chunked_prefill=chunked_prefill,
+        )
+
+    result = processor.get_dummy_mm_inputs({"image": 1}, **kwargs)
+    assert len(result["prompt_token_ids"]) == expected_seq_len
