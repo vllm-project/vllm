@@ -107,7 +107,19 @@ class CacheConfig:
     per-instance limit, and only applies to the current vLLM instance. It does
     not matter if you have another vLLM instance running on the same GPU. For
     example, if you have two vLLM instances running on the same GPU, you can
-    set the GPU memory utilization to 0.5 for each instance."""
+    set the GPU memory utilization to 0.5 for each instance. On non-GPU
+    installs, this value controls the corresponding device memory utilization.
+    """
+
+    @property
+    def device_memory_utilization(self) -> float:
+        """Device-neutral alias for ``gpu_memory_utilization``."""
+        return self.gpu_memory_utilization
+
+    @device_memory_utilization.setter
+    def device_memory_utilization(self, value: float) -> None:
+        self.gpu_memory_utilization = value
+
     cache_dtype: CacheDType = "auto"
     """Data type for kv cache storage. If "auto", will use model data type.
     CUDA 11.8+ supports fp8 (=fp8_e4m3) and fp8_e5m2. ROCm (AMD GPU) supports
@@ -184,7 +196,7 @@ class CacheConfig:
       when the token is at position i * block_size. This is the default when prefix
       caching is enabled.
     """
-    enable_mamba_fine_grained_prefix_cache: bool = False
+    enable_mamba_shared_prefix_checkpoint: bool = False
     """Also register a Mamba "align" checkpoint at the shared-prefix junction --
     where an EAGLE/MTP sibling was observed to resume -- instead of only at the
     prompt tail. Off by default; only takes effect with `mamba_cache_mode`
@@ -274,7 +286,7 @@ class CacheConfig:
             "prefix_cache_retention_interval",
             # Prefix-caching implementation detail (doesn't affect compiled graph).
             "prefix_match_unit",
-            "enable_mamba_fine_grained_prefix_cache",
+            "enable_mamba_shared_prefix_checkpoint",
             "mamba_page_size_padded",
             "skip_page_size_padded",
             "user_specified_block_size",
