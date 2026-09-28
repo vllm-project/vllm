@@ -19,8 +19,9 @@
   #define __HIP__GFX1X__
 #endif
 
-// The decode tuning below was swept on gfx115x and is kept to it: the rest of
-// gfx11 and gfx12 also compile this kernel, and keep the behaviour they had.
+// The decode tuning and the deep-K routing below were swept on gfx115x and are
+// kept to it: the rest of gfx11 and gfx12 also compile this kernel, and keep
+// the behaviour and the K * N bound they had.
 #if defined(__gfx1150__) || defined(__gfx1151__) || defined(__gfx1152__) || \
     defined(__gfx1153__)
   #define __HIP__GFX115X__
@@ -29,6 +30,15 @@
 #define LDS_SIZE 64 * 1024
 
 static constexpr int get_lds_size_int4() { return 64 * 1024; }
+
+// Host-side twin of __HIP__GFX115X__, for the tuple choices the dispatch makes.
+static bool on_gfx115x_int4() {
+  static const bool result = [] {
+    const auto* dprops = at::cuda::getCurrentDeviceProperties();
+    return std::string(dprops->gcnArchName).find("gfx115") != std::string::npos;
+  }();
+  return result;
+}
 
 #if defined(NDEBUG)
   #undef NDEBUG
@@ -801,8 +811,18 @@ torch::Tensor wvSplitK_int4_g(const at::Tensor& in_a, const at::Tensor& in_b,
   }
   TORCH_CHECK(K_in % 16 == 0, "K must be divisible by 16");
 
+  // Every kernel indexes A linearly, which a non-contiguous activation would
+  // break.
+  TORCH_CHECK(in_b.is_contiguous(), "Activation must be contiguous");
+
   const int max_lds_len = get_lds_size_int4() / 2;
-  TORCH_CHECK(K_in * N_in <= (int64_t)(max_lds_len * 1.2),
+
+  const at::cuda::OptionalCUDAGuard device_guard(device_of(in_a));
+  const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+
+  // On gfx115x the medium kernel takes any K * N, reading the rows that do not
+  // fit in LDS from global memory. Elsewhere it keeps its 1.2x LDS bound.
+  TORCH_CHECK(on_gfx115x_int4() || K_in * N_in <= (int64_t)(max_lds_len * 1.2),
               "K*N exceeds LDS capacity (medium limit). K=", K_in, " N=", N_in);
 
   auto out_c = torch::empty(
@@ -810,9 +830,6 @@ torch::Tensor wvSplitK_int4_g(const at::Tensor& in_a, const at::Tensor& in_b,
       torch::TensorOptions().dtype(in_b.dtype()).device(in_b.device()));
 
   dim3 grid(CuCount);
-
-  const at::cuda::OptionalCUDAGuard device_guard(device_of(in_a));
-  const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
 
 // Dispatch macro: _HAS_ZP selects the HAS_ZERO_POINTS template parameter
 #define WVSPLITK_INT4G_LAUNCH(_THRDS, _YTILE, _UNRL, _N, _GS, _HAS_ZP)      \

@@ -56,9 +56,19 @@ def _on_gfx1151() -> bool:
     return on_gfx1151()
 
 
+def _on_gfx115x() -> bool:
+    if not current_platform.is_rocm():
+        return False
+    from vllm.platforms.rocm import on_gfx115x
+
+    return on_gfx115x()
+
+
 # Maximum batch size M for the HIP skinny kernel path (C++ supports N_in
-# up to 5).  When M is below this AND K*M fits in LDS, the skinny kernel is
-# used; otherwise the Triton prefill path handles the GEMM.
+# up to 5).  When M is at or below this AND K*M fits in LDS, the skinny kernel
+# is used; otherwise the Triton prefill path handles the GEMM.  On gfx115x the
+# LDS term is dropped: the medium kernel stages the activation rows that fit in
+# LDS and reads the rest from global memory.
 MAX_SKINNY_BATCH_SIZE = 5
 # 64 KiB per-workgroup LDS limit expressed in fp16 elements.
 # (AMD RDNA has 128 KiB total LDS per CU, but 64 KiB per workgroup.)
@@ -398,7 +408,7 @@ def _rdna_hybrid_w4a16_apply_impl(
     K = x_2d.shape[1]
     N = w_q.shape[0]
 
-    if M <= MAX_SKINNY_BATCH_SIZE and K * M <= LDS_CAPACITY_ELEMENTS:
+    if M <= MAX_SKINNY_BATCH_SIZE and (K * M <= LDS_CAPACITY_ELEMENTS or _on_gfx115x()):
         # record_function is not torch.compile-safe; use nullcontext when
         # compiling to keep the op traceable.
         ctx = (

@@ -19,7 +19,7 @@ if not current_platform.is_rocm():
 
 pytest.importorskip("triton")
 
-from vllm.platforms.rocm import on_gfx1x  # noqa: E402
+from vllm.platforms.rocm import on_gfx1x, on_gfx115x  # noqa: E402
 
 device = "cuda"
 
@@ -30,6 +30,7 @@ RDNAHybridW4A16LinearKernel = hybrid_module.RDNAHybridW4A16LinearKernel
 pack_int4_exllama_shuffle = hybrid_module.pack_int4_exllama_shuffle
 SUPPORTED_GROUP_SIZES = hybrid_module.SUPPORTED_GROUP_SIZES
 MAX_SKINNY_BATCH_SIZE = hybrid_module.MAX_SKINNY_BATCH_SIZE
+LDS_CAPACITY_ELEMENTS = hybrid_module.LDS_CAPACITY_ELEMENTS
 
 
 # ---------------------------------------------------------------------------
@@ -491,12 +492,21 @@ def _hip_skinny_reference(
         (3, 4096, 256, 64),
         (4, 2560, 256, 128),
         (5, 4096, 256, 32),
+        # K * batch beyond what LDS holds (32768 fp16 elements): on gfx115x the
+        # medium kernel reads the overflow rows from global memory; elsewhere
+        # the op rejects these, as the layer routes them to Triton.
+        (3, 16384, 512, 32),
+        (4, 16384, 512, 128),
+        (5, 21504, 512, 32),
     ],
 )
 def test_hip_skinny_wvSplitK_int4_g(dtype, M, K, N, G, has_zp):
     """Test HIP wvSplitK_int4_g kernel directly via _custom_ops."""
     import vllm._custom_ops as ops
     from vllm.utils.platform_utils import num_compute_units
+
+    if K * M > LDS_CAPACITY_ELEMENTS and not on_gfx115x():
+        pytest.skip("deep-K HIP path is gfx115x only")
 
     set_random_seed(0)
 
@@ -585,6 +595,8 @@ def test_hip_skinny_padded_group_stride(dtype, G, has_zp, M):
         (1, 256, 256, 64),
         (1, 512, 256, 32),
         (1, 512, 256, 128),
+        # Past LDS: HIP on gfx115x, Triton elsewhere.
+        (2, 20480, 256, 64),
         (32, 512, 256, 64),
         (64, 1024, 256, 128),
     ],
