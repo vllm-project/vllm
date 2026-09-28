@@ -1,10 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from collections.abc import Iterator
 from unittest.mock import MagicMock
 
 import pytest
 
 from vllm.distributed.kv_events import BlockStored
+from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadata
 from vllm.distributed.kv_transfer.kv_connector.v1.lmcache_connector import (
     LMCacheConnectorV1,
     LMCacheKVEvents,
@@ -783,3 +785,32 @@ class TestIntegrationScenarios:
         assert aggregated_events[0].block_hashes == ["hash_common"]
         assert aggregated_events[0].parent_block_hash == "parent_common"
         assert aggregated_events[0].token_ids == [1, 2, 3]
+
+
+def test_legacy_layerwise_engine_does_not_reuse_storers_on_empty_steps():
+    """Empty steps must not advance generators exhausted by the last forward."""
+
+    class LegacyLayerwiseEngine:
+        layerwise_storers: list[Iterator[None]]
+
+        def save_kv_layer(self, *args, **kwargs):
+            self.layerwise_storers.append(iter([None]))
+
+        def wait_for_save(self):
+            for storer in self.layerwise_storers:
+                next(storer)
+
+    connector = LMCacheConnectorV1.__new__(LMCacheConnectorV1)
+    connector._lmcache_engine = LegacyLayerwiseEngine()
+    metadata = KVConnectorMetadata()
+    connector.bind_connector_metadata(metadata)
+    connector.save_kv_layer("layer", MagicMock(), MagicMock())
+    connector.wait_for_save()
+    connector.clear_connector_metadata()
+
+    for _ in range(2):
+        connector.bind_connector_metadata(metadata)
+        connector.wait_for_save()
+        connector.clear_connector_metadata()
+
+    assert connector._lmcache_engine.layerwise_storers == []
