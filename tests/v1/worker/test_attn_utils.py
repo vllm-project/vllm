@@ -29,6 +29,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheTensor,
     MLAAttentionSpec,
     SparseCacheRole,
+    UniformTypeKVCacheSpecs,
     compute_layout_strides,
 )
 from vllm.v1.worker.gpu import attn_utils
@@ -43,6 +44,8 @@ from vllm.v1.worker.utils import (
     allocate_kv_cache,
     copy_kv_cache_blocks_inplace,
     group_block_stride_bytes,
+    prepare_kernel_block_sizes,
+    select_common_block_size_for_layout,
 )
 
 
@@ -459,9 +462,9 @@ def test_reshape_padded_kv_cache_strides_by_padded_page():
     [
         (None, None, 4, 64),
         ([256], None, 4, 64),
-        ([256], 128, 4, 64),
+        ([128], 128, 8, 32),
+        ([256], 256, 4, 64),
         ([64], None, 16, 16),
-        ([64], 256, 16, 16),
     ],
 )
 def test_allocate_compressed_mla_cache(
@@ -497,7 +500,145 @@ def test_allocate_compressed_mla_cache(
     )
 
     assert caches["layer.0"].shape == (expected_num_blocks, 1, expected_num_states, 128)
-    assert group_block_stride_bytes(config, 0) == spec.page_size_bytes
+    assert group_block_stride_bytes(config, ["layer.0"]) == spec.page_size_bytes
+
+
+def test_group_block_stride_bytes_targets_attention_group_layers():
+    narrow_spec = FullAttentionSpec(
+        block_size=16,
+        num_kv_heads=1,
+        head_size=64,
+        dtype=torch.bfloat16,
+    )
+    wide_spec = FullAttentionSpec(
+        block_size=16,
+        num_kv_heads=1,
+        head_size=128,
+        dtype=torch.bfloat16,
+    )
+    manager_spec = UniformTypeKVCacheSpecs(
+        block_size=16,
+        kv_cache_specs={"narrow": narrow_spec, "wide": wide_spec},
+    )
+    allocation_size = 2 * (narrow_spec.page_size_bytes + wide_spec.page_size_bytes)
+    config = KVCacheConfig(
+        num_blocks=2,
+        kv_cache_tensors=[
+            KVCacheTensor(
+                size=allocation_size,
+                layers=["narrow"],
+                layer_stride=2 * narrow_spec.page_size_bytes,
+                block_stride=narrow_spec.page_size_bytes,
+            ),
+            KVCacheTensor(
+                size=allocation_size,
+                layers=["wide"],
+                layer_stride=2 * wide_spec.page_size_bytes,
+                block_stride=wide_spec.page_size_bytes,
+            ),
+        ],
+        kv_cache_groups=[KVCacheGroupSpec(["narrow", "wide"], manager_spec)],
+    )
+    groups = [
+        AttentionGroup(AttentionBackend, ["narrow"], narrow_spec, 0),
+        AttentionGroup(AttentionBackend, ["wide"], wide_spec, 0),
+    ]
+
+    assert [
+        group_block_stride_bytes(config, group.layer_names) for group in groups
+    ] == [narrow_spec.page_size_bytes, wide_spec.page_size_bytes]
+
+
+@pytest.mark.parametrize(
+    ("stride_pages", "page_rows", "expected"),
+    [(1, 1, 64), (2, None, 64), (2, 1, 256)],
+)
+def test_strided_capability_controls_manager_block_retention(
+    stride_pages: int, page_rows: int | None, expected: int
+):
+    spec = MLAAttentionSpec(
+        block_size=256,
+        num_kv_heads=1,
+        head_size=128,
+        dtype=torch.bfloat16,
+    )
+    backend = SimpleNamespace(
+        get_supported_kernel_block_sizes=lambda: [64],
+        get_strided_block_page_rows=lambda _spec: page_rows,
+    )
+    page_size = spec.page_size_bytes
+    config = KVCacheConfig(
+        num_blocks=2,
+        kv_cache_tensors=[
+            KVCacheTensor(
+                size=2 * stride_pages * page_size,
+                layers=["layer.0"],
+                layer_stride=2 * stride_pages * page_size,
+                block_stride=stride_pages * page_size,
+            )
+        ],
+        kv_cache_groups=[KVCacheGroupSpec(["layer.0"], spec)],
+    )
+    groups = [[AttentionGroup(backend, ["layer.0"], spec, 0)]]
+
+    assert prepare_kernel_block_sizes(config, groups) == [expected]
+
+
+def test_all_strided_backends_must_support_manager_blocks():
+    spec = MLAAttentionSpec(
+        block_size=256,
+        num_kv_heads=1,
+        head_size=128,
+        dtype=torch.bfloat16,
+    )
+    page_size = spec.page_size_bytes
+    config = KVCacheConfig(
+        num_blocks=2,
+        kv_cache_tensors=[
+            KVCacheTensor(
+                size=4 * page_size,
+                layers=["layer.0", "layer.1"],
+                layer_stride=page_size,
+                block_stride=2 * page_size,
+            )
+        ],
+        kv_cache_groups=[KVCacheGroupSpec(["layer.0", "layer.1"], spec)],
+    )
+    capable = SimpleNamespace(
+        get_supported_kernel_block_sizes=lambda: [64],
+        get_strided_block_page_rows=lambda _spec: 1,
+    )
+    incapable = SimpleNamespace(
+        get_supported_kernel_block_sizes=lambda: [64],
+        get_strided_block_page_rows=lambda _spec: None,
+    )
+    groups = [
+        [
+            AttentionGroup(capable, ["layer.0"], spec, 0),
+            AttentionGroup(incapable, ["layer.1"], spec, 0),
+        ]
+    ]
+
+    assert prepare_kernel_block_sizes(config, groups) == [64]
+
+
+def test_strided_backends_need_no_common_native_block_size():
+    spec = MLAAttentionSpec(
+        block_size=256, num_kv_heads=1, head_size=128, dtype=torch.bfloat16
+    )
+    layouts = [
+        (
+            SimpleNamespace(
+                get_supported_kernel_block_sizes=lambda size=size: [size],
+                get_strided_block_page_rows=lambda _spec: 1,
+            ),
+            spec,
+            True,
+        )
+        for size in (32, 64)
+    ]
+
+    assert select_common_block_size_for_layout(256, layouts) == 256
 
 
 @pytest.mark.parametrize("layout", list(KVCacheLayout))

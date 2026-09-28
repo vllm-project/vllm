@@ -78,9 +78,10 @@ class AttentionBackend(ABC):
         return [MultipleOf(1)]
 
     @staticmethod
-    def get_kernel_page_rows() -> int | None:
-        """Rows per page the kernel addresses when a manager block larger than
-        its native block sizes is re-paged by the impl; None if unsupported."""
+    def get_strided_block_page_rows(
+        kv_cache_spec: "KVCacheSpec",
+    ) -> int | None:
+        """Kernel page rows used to view a larger strided manager block."""
         return None
 
     @staticmethod
@@ -615,6 +616,8 @@ class AttentionMetadataBuilder(ABC, Generic[M]):
     supports_update_block_table: bool = False
     # Whether the builder constructor requires the block-table width.
     requires_block_table_width: ClassVar[bool] = False
+    # Whether the builder constructor requires the cache block stride.
+    requires_block_stride_bytes: ClassVar[bool] = False
     # Whether all step-dependent draft decode metadata can be updated in place,
     # allowing one metadata build to be reused across autoregressive draft steps.
     supports_draft_decode_metadata_update: bool = False
@@ -632,15 +635,9 @@ class AttentionMetadataBuilder(ABC, Generic[M]):
         self.vllm_config = vllm_config
         self.device = device
         self.kernel_block_size: int | None = None
-        # Byte stride between consecutive blocks of this group's cache; set by
-        # the runner once the KV cache is laid out.
-        self.block_stride_bytes: int | None = None
 
     def set_kernel_block_size(self, kernel_block_size: int) -> None:
         self.kernel_block_size = kernel_block_size
-
-    def set_block_stride_bytes(self, block_stride_bytes: int) -> None:
-        self.block_stride_bytes = block_stride_bytes
 
     @classmethod
     def get_cudagraph_support(

@@ -674,8 +674,8 @@ class TestNixlHandshake:
         with (
             patch(
                 "vllm.distributed.kv_transfer.kv_connector.v1.nixl."
-                "base_worker.get_current_attn_backends_and_specs",
-                return_value=([FlashAttentionBackend], [None]),
+                "base_worker.get_current_attn_backend_layouts",
+                return_value=[(FlashAttentionBackend, None, False)],
             ),
             patch(
                 "vllm.distributed.kv_transfer.kv_connector.v1.nixl."
@@ -2229,10 +2229,10 @@ def test_register_kv_caches(
         patch(f"{nixl_worker}.threading.Event"),
         patch(f"{nixl_worker}.threading.Thread") as mock_thread,
         patch(
-            f"{nixl_worker}.get_current_attn_backends_and_specs"
+            f"{nixl_worker}.get_current_attn_backend_layouts"
         ) as mock_get_attn_backends,
     ):
-        mock_get_attn_backends.return_value = ([backend_cls], [None])
+        mock_get_attn_backends.return_value = [(backend_cls, None, False)]
         block_size = 16
         num_blocks = 8
         num_heads = 4
@@ -2370,9 +2370,9 @@ def test_register_packed_dsv4_mla_cache_as_single_region(
         patch(f"{nixl_worker}.NixlWrapper") as mock_nixl_wrapper,
         patch(f"{nixl_worker}.threading.Event"),
         patch(f"{nixl_worker}.threading.Thread") as mock_thread,
-        patch(f"{nixl_worker}.get_current_attn_backends_and_specs") as mock_backends,
+        patch(f"{nixl_worker}.get_current_attn_backend_layouts") as mock_backends,
     ):
-        mock_backends.return_value = ([TritonAttentionBackend], [None])
+        mock_backends.return_value = [(TritonAttentionBackend, None, False)]
         num_blocks = 2
         num_layers = 4
         block_size = 256
@@ -2711,7 +2711,9 @@ class TestPeerReplacement:
             patch.object(bw, "get_tensor_model_parallel_rank", return_value=0),
             patch.object(bw, "get_tensor_model_parallel_world_size", return_value=1),
             patch.object(
-                bw, "get_current_attn_backends", return_value=[FlashAttentionBackend]
+                bw,
+                "get_current_attn_backend_layouts",
+                return_value=[(FlashAttentionBackend, None, False)],
             ),
         ):
             self.worker = FakeNixlConnectorWorker(config, "local", hand_shake_latency=0)

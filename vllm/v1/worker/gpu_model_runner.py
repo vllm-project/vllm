@@ -7077,7 +7077,7 @@ class GPUModelRunner(
                     if not self.parallel_config.use_ubatching
                     else self.parallel_config.num_ubatches,
                     block_stride_bytes=group_block_stride_bytes(
-                        kv_cache_config, kv_cache_group_id
+                        kv_cache_config, attn_group.layer_names
                     ),
                 )
         # Calculate reorder batch threshold (if needed)

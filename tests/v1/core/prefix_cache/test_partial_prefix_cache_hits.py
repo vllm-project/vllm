@@ -2112,8 +2112,8 @@ def test_opted_out_scratch_group_keeps_partial_hash_hits():
 
 def test_kpool_tail_supports_128_token_partial_hash_hits():
     hash_block_size = 128
-    cache_block_size = 9 * hash_block_size
-    kpool_block_size = 64
+    cache_block_size = 5 * hash_block_size
+    kpool_block_size = 16
     kv_cache_config = KVCacheConfig(
         num_blocks=24,
         kv_cache_tensors=[],

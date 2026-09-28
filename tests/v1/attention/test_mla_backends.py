@@ -220,7 +220,7 @@ def test_mla_kv_cache_spec_uses_layer_cache_dtype(
     layer = SimpleNamespace(
         kv_cache_dtype=cache_dtype,
         head_size=576,
-        attn_backend=SimpleNamespace(get_kernel_page_rows=lambda: 32),
+        attn_backend=SimpleNamespace(get_strided_block_page_rows=lambda _spec: 32),
         indexer=None,
         non_causal_multi_token_decode=False,
         sliding_window=None,

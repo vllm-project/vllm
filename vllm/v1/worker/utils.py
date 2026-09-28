@@ -5,7 +5,7 @@ from collections import defaultdict
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from itertools import product as iprod
-from typing import Any, cast
+from typing import Any
 
 import numpy as np
 import torch
@@ -37,6 +37,7 @@ from vllm.v1.kv_cache_interface import (
     MambaSpec,
     UniformTypeKVCacheSpecs,
     create_kv_cache_views,
+    get_cache_view_spec,
 )
 from vllm.v1.worker.block_table import get_block_table_width
 
@@ -275,13 +276,11 @@ class AttentionGroup:
         num_metadata_builders: int = 1,
         block_stride_bytes: int | None = None,
     ):
-        kv_cache_spec_builder = (
-            self.kv_cache_spec.copy_with_new_block_size(kernel_block_size)
-            if kernel_block_size is not None
-            else self.kv_cache_spec
+        kv_cache_spec_builder = get_cache_view_spec(
+            self.kv_cache_spec, kernel_block_size, block_stride_bytes
         )
         builder_cls = self.backend.get_builder_cls()
-        builder_kwargs = {}
+        builder_kwargs: dict[str, int | None] = {}
         if builder_cls.requires_block_table_width:
             max_num_blocks = self.kv_cache_spec.max_num_blocks_per_req(
                 vllm_config, vllm_config.model_config.max_model_len
@@ -289,6 +288,8 @@ class AttentionGroup:
             builder_kwargs["block_table_width"] = get_block_table_width(
                 max_num_blocks, self.kv_cache_spec.block_size, kernel_block_size
             )
+        if builder_cls.requires_block_stride_bytes:
+            builder_kwargs["block_stride_bytes"] = block_stride_bytes
         self.metadata_builders = [
             builder_cls(
                 kv_cache_spec_builder,
@@ -302,9 +303,6 @@ class AttentionGroup:
         if kernel_block_size is not None:
             for builder in self.metadata_builders:
                 builder.set_kernel_block_size(kernel_block_size)
-        if block_stride_bytes is not None:
-            for builder in self.metadata_builders:
-                builder.set_block_stride_bytes(block_stride_bytes)
 
     def get_metadata_builder(self, ubatch_id: int = 0) -> AttentionMetadataBuilder:
         assert len(self.metadata_builders) > ubatch_id
@@ -325,7 +323,6 @@ class AttentionGroup:
 def select_common_block_size(
     kv_manager_block_size: int,
     backends: list[type[AttentionBackend]],
-    kv_cache_specs: Sequence[AttentionSpec | None] | None = None,
 ) -> int:
     """Select a block size that is supported by all backends and is a factor of
     kv_manager_block_size.
@@ -336,7 +333,6 @@ def select_common_block_size(
     Args:
         kv_manager_block_size: Block size of KV cache.
         backends: List of attention backend classes.
-        kv_cache_specs: Per-backend cache specs for spec-specific constraints.
 
     Returns:
         The selected block size.
@@ -345,24 +341,14 @@ def select_common_block_size(
         ValueError: If no valid block size found.
 
     """
-    if kv_cache_specs is not None:
-        assert len(kv_cache_specs) == len(backends)
 
-    def supported_sizes(
-        backend_idx: int, backend: type[AttentionBackend]
-    ) -> list[int | MultipleOf]:
-        if kv_cache_specs is None:
-            return backend.get_supported_kernel_block_sizes()
-        spec = kv_cache_specs[backend_idx]
-        if spec is None:
-            return backend.get_supported_kernel_block_sizes()
-        return backend.get_supported_kernel_block_sizes(spec)
-
-    def block_size_is_supported(block_size: int) -> bool:
+    def block_size_is_supported(
+        backends: list[type[AttentionBackend]], block_size: int
+    ) -> bool:
         """Check if the block size is supported by all backends."""
-        for backend_idx, backend in enumerate(backends):
+        for backend in backends:
             is_supported = False
-            for supported_size in supported_sizes(backend_idx, backend):
+            for supported_size in backend.get_supported_kernel_block_sizes():
                 if isinstance(supported_size, int):
                     if block_size == supported_size:
                         is_supported = True
@@ -375,20 +361,20 @@ def select_common_block_size(
                 return False
         return True
 
-    if block_size_is_supported(kv_manager_block_size):
+    if block_size_is_supported(backends, kv_manager_block_size):
         return kv_manager_block_size
 
     # MultipleOf constraints also accept the manager size if they accept a divisor.
     # Any remaining candidate must therefore be an explicit size from a backend.
     candidates = {
         size
-        for backend_idx, backend in enumerate(backends)
-        for size in supported_sizes(backend_idx, backend)
+        for backend in backends
+        for size in backend.get_supported_kernel_block_sizes()
         if isinstance(size, int) and kv_manager_block_size % size == 0
     }
 
     for size in sorted(candidates, reverse=True):
-        if block_size_is_supported(size):
+        if block_size_is_supported(backends, size):
             return size
     raise ValueError(
         f"No common block size for {kv_manager_block_size} ("
@@ -396,6 +382,30 @@ def select_common_block_size(
             f"{b.get_name()}: {b.get_supported_kernel_block_sizes()}" for b in backends
         )
         + ")."
+    )
+
+
+def select_common_block_size_for_layout(
+    kv_manager_block_size: int,
+    backend_layouts: Sequence[tuple[type[AttentionBackend], KVCacheSpec | None, bool]],
+) -> int:
+    """Keep manager blocks when every backend supports its cache layout."""
+    native_backends = [
+        backend
+        for backend, spec, is_strided in backend_layouts
+        if not (
+            is_strided
+            and spec is not None
+            and backend.get_strided_block_page_rows(spec) is not None
+        )
+    ]
+    if (
+        select_common_block_size(kv_manager_block_size, native_backends)
+        == kv_manager_block_size
+    ):
+        return kv_manager_block_size
+    return select_common_block_size(
+        kv_manager_block_size, [backend for backend, _, _ in backend_layouts]
     )
 
 
@@ -453,22 +463,25 @@ def allocate_kv_cache(
         kernel_block_size = None
         if kernel_block_sizes is not None and group_id < len(kernel_block_sizes):
             kernel_block_size = kernel_block_sizes[group_id]
+        cache_view_spec = get_cache_view_spec(
+            spec, kernel_block_size, tensor.block_stride
+        )
         views = create_kv_cache_views(
             buf,
             spec,
             num_blocks,
             layout,
             tensor,
-            kernel_block_size=kernel_block_size,
+            kernel_block_size=cache_view_spec.block_size,
         )
         kv_caches.update(zip(tensor.layers, views))
     return kv_caches
 
 
 def group_block_stride_bytes(
-    kv_cache_config: KVCacheConfig, kv_cache_group_id: int
+    kv_cache_config: KVCacheConfig, attention_group_layer_names: Iterable[str]
 ) -> int | None:
-    layer_names = set(kv_cache_config.kv_cache_groups[kv_cache_group_id].layer_names)
+    layer_names = set(attention_group_layer_names)
     for tensor in kv_cache_config.kv_cache_tensors:
         if layer_names.intersection(tensor.layers):
             return tensor.block_stride
@@ -492,6 +505,11 @@ def prepare_kernel_block_sizes(
         List of kernel block sizes for each cache group.
 
     """
+    block_strides = {
+        layer_name: tensor.block_stride
+        for tensor in kv_cache_config.kv_cache_tensors
+        for layer_name in tensor.layers
+    }
     kernel_block_sizes = []
     for kv_cache_gid, kv_cache_group in enumerate(kv_cache_config.kv_cache_groups):
         kv_cache_spec = kv_cache_group.kv_cache_spec
@@ -506,13 +524,15 @@ def prepare_kernel_block_sizes(
         elif isinstance(kv_cache_spec, AttentionSpec):
             # This is an attention backend that supports virtual block splitting.
             kv_manager_block_size = kv_cache_group.kv_cache_spec.block_size
-            group_backends = [g.backend for g in attn_groups[kv_cache_gid]]
-            group_specs = [g.kv_cache_spec for g in attn_groups[kv_cache_gid]]
-            assert all(isinstance(spec, AttentionSpec) for spec in group_specs)
-            selected_kernel_size = select_common_block_size(
+            groups = attn_groups[kv_cache_gid]
+            is_strided = all(
+                block_strides[name] > group.kv_cache_spec.page_size_bytes
+                for group in groups
+                for name in group.layer_names
+            )
+            selected_kernel_size = select_common_block_size_for_layout(
                 kv_manager_block_size,
-                group_backends,
-                cast(Sequence[AttentionSpec], group_specs),
+                [(group.backend, group.kv_cache_spec, is_strided) for group in groups],
             )
             kernel_block_sizes.append(selected_kernel_size)
         elif isinstance(kv_cache_spec, MambaSpec):

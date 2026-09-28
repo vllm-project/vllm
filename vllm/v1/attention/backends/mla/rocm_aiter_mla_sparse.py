@@ -40,7 +40,7 @@ from vllm.v1.attention.backends.utils import split_decodes_and_prefills
 from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
     rocm_sparse_attn_prefill,
 )
-from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheLayout
+from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheLayout, KVCacheSpec
 from vllm.v1.worker.workspace import current_workspace_manager
 
 if TYPE_CHECKING:
@@ -298,7 +298,7 @@ class ROCMAiterMLASparseBackend(AttentionBackend):
         return [1, MultipleOf(16)]
 
     @staticmethod
-    def get_kernel_page_rows() -> int:
+    def get_strided_block_page_rows(kv_cache_spec: KVCacheSpec) -> int:
         return 1
 
     @staticmethod

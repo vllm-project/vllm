@@ -377,11 +377,16 @@ def get_current_attn_backends(
         ]
 
 
-def get_current_attn_backends_and_specs(
+def get_current_attn_backend_layouts(
     vllm_config: VllmConfig, kv_cache_config: KVCacheConfig
-) -> tuple[list[type[AttentionBackend]], list[AttentionSpec | None]]:
-    """Get attention backends paired with their resolved cache specs."""
+) -> list[tuple[type[AttentionBackend], AttentionSpec | None, bool]]:
+    """Get attention backends, cache specs, and physical stride flags."""
     layer_specs: dict[str, KVCacheSpec] = {}
+    layer_strides = {
+        layer_name: tensor.block_stride
+        for tensor in kv_cache_config.kv_cache_tensors
+        for layer_name in tensor.layers
+    }
     for group in kv_cache_config.transfer_groups:
         group_spec = group.kv_cache_spec
         if isinstance(group_spec, UniformTypeKVCacheSpecs):
@@ -393,19 +398,24 @@ def get_current_attn_backends_and_specs(
     layers = get_layers_from_vllm_config(vllm_config, layer_type, list(layer_specs))
     if not layers:
         backends = get_current_attn_backends(vllm_config)
-        return backends, [None] * len(backends)
+        return [(backend, None, False) for backend in backends]
 
-    pairs: list[tuple[type[AttentionBackend], AttentionSpec | None]] = []
+    pairs: list[tuple[type[AttentionBackend], AttentionSpec | None, bool]] = []
     for layer_name, layer in layers.items():
         backend = layer.get_attn_backend()
         spec = layer_specs.get(layer_name)
         attention_spec = spec if isinstance(spec, AttentionSpec) else None
-        if not any(
-            existing_backend is backend and existing_spec == attention_spec
-            for existing_backend, existing_spec in pairs
-        ):
-            pairs.append((backend, attention_spec))
-    return [backend for backend, _ in pairs], [spec for _, spec in pairs]
+        is_strided = (
+            attention_spec is not None
+            and layer_strides[layer_name] > attention_spec.page_size_bytes
+        )
+        for index, (existing_backend, existing_spec, all_strided) in enumerate(pairs):
+            if existing_backend is backend and existing_spec == attention_spec:
+                pairs[index] = (backend, attention_spec, all_strided and is_strided)
+                break
+        else:
+            pairs.append((backend, attention_spec, is_strided))
+    return pairs
 
 
 def get_current_attn_backend(

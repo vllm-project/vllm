@@ -404,8 +404,8 @@ def _make_mla_hybrid_worker(local_block_size, kernel_block_size, num_logical_blo
         patch.object(bw, "get_tensor_model_parallel_world_size", return_value=1),
         patch.object(
             bw,
-            "get_current_attn_backends_and_specs",
-            return_value=([fake_backend], [None]),
+            "get_current_attn_backend_layouts",
+            return_value=[(fake_backend, None, False)],
         ),
         patch.object(bw, "current_platform", fake_platform),
         patch(
@@ -451,27 +451,195 @@ def test_flashmla_manager_block_is_preserved_for_nixl():
     from vllm.v1.attention.backends.mla.flashmla_sparse import (
         FlashMLASparseBackend,
     )
-    from vllm.v1.kv_cache_interface import MLAAttentionSpec
+    from vllm.v1.kv_cache_interface import (
+        KVCacheConfig,
+        KVCacheGroupSpec,
+        KVCacheTensor,
+        MLAAttentionSpec,
+    )
 
     worker = object.__new__(NixlBaseConnectorWorker)
     worker.block_size = 1152
     worker.num_blocks = 2
     worker._physical_blocks_per_logical_kv_block = 1
     worker.attn_backends = [FlashMLASparseBackend]
-    worker.attn_backend_specs = [
-        MLAAttentionSpec(
-            block_size=1152,
-            num_kv_heads=1,
-            head_size=512,
-            dtype=torch.bfloat16,
-        )
-    ]
+    spec = MLAAttentionSpec(
+        block_size=1152,
+        num_kv_heads=1,
+        head_size=512,
+        dtype=torch.bfloat16,
+    )
+    worker.attn_backend_layouts = [(FlashMLASparseBackend, spec, True)]
+    page_size = spec.page_size_bytes
+    worker.kv_cache_config = KVCacheConfig(
+        num_blocks=2,
+        kv_cache_tensors=[
+            KVCacheTensor(
+                size=4 * page_size,
+                layers=["layer.0", "layer.1"],
+                layer_stride=page_size,
+                block_stride=2 * page_size,
+            )
+        ],
+        kv_cache_groups=[KVCacheGroupSpec(["layer.0", "layer.1"], spec)],
+    )
 
     worker._sync_block_size_with_kernel()
 
     assert worker.block_size == 1152
     assert worker.num_blocks == 2
     assert worker._physical_blocks_per_logical_kv_block == 1
+
+
+@pytest.mark.cpu_test
+def test_glm_packed_backends_preserve_manager_blocks_for_nixl():
+    from vllm.distributed.kv_transfer.kv_connector import utils as connector_utils
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker import (
+        NixlBaseConnectorWorker,
+    )
+    from vllm.v1.attention.backends.gdn_attn import GDNAttentionBackend
+    from vllm.v1.attention.backends.mla.flashmla_sparse import (
+        FlashMLASparseBackend,
+    )
+    from vllm.v1.attention.backends.mla.indexer import (
+        DeepseekV32IndexerBackend,
+        KpoolTailBackend,
+    )
+    from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
+    from vllm.v1.kv_cache_interface import (
+        CircularBufferSpec,
+        KVCacheConfig,
+        KVCacheGroupSpec,
+        KVCacheTensor,
+        MambaSpec,
+        MLAAttentionSpec,
+    )
+
+    manager_block_size = 1024
+    specs = {
+        "mla": MLAAttentionSpec(
+            block_size=manager_block_size,
+            num_kv_heads=1,
+            head_size=512,
+            dtype=torch.bfloat16,
+        ),
+        "indexer": MLAAttentionSpec(
+            block_size=manager_block_size,
+            num_kv_heads=1,
+            head_size=128,
+            dtype=torch.uint8,
+            state_content_bytes=132,
+            tokens_per_state=4,
+            kernel_page_size=256,
+        ),
+        "tail": CircularBufferSpec(
+            block_size=16,
+            num_kv_heads=1,
+            head_size=128,
+            dtype=torch.bfloat16,
+        ),
+        "gdn": MambaSpec(
+            block_size=manager_block_size,
+            shapes=((8, 3), (1, 4, 4)),
+            dtypes=(torch.float16, torch.float32),
+            page_size_padded=256,
+            mamba_type=MambaAttentionBackendEnum.GDN_ATTN,
+        ),
+    }
+    backends = {
+        "mla": FlashMLASparseBackend,
+        "indexer": DeepseekV32IndexerBackend,
+        "tail": KpoolTailBackend,
+        "gdn": GDNAttentionBackend,
+    }
+    packed_stride = sum(spec.page_size_bytes for spec in specs.values())
+    config = KVCacheConfig(
+        num_blocks=2,
+        kv_cache_tensors=[
+            KVCacheTensor(
+                size=2 * packed_stride,
+                layers=[name],
+                layer_stride=2 * packed_stride,
+                block_stride=packed_stride,
+            )
+            for name in specs
+        ],
+        kv_cache_groups=[
+            KVCacheGroupSpec([name], spec) for name, spec in specs.items()
+        ],
+    )
+    layers = {
+        name: SimpleNamespace(get_attn_backend=lambda backend=backend: backend)
+        for name, backend in backends.items()
+    }
+    with patch.object(
+        connector_utils, "get_layers_from_vllm_config", return_value=layers
+    ):
+        layouts = connector_utils.get_current_attn_backend_layouts(MagicMock(), config)
+
+    assert layouts == [
+        (backends["mla"], specs["mla"], True),
+        (backends["indexer"], specs["indexer"], True),
+        (backends["tail"], specs["tail"], True),
+        (backends["gdn"], None, False),
+    ]
+
+    worker = object.__new__(NixlBaseConnectorWorker)
+    worker.block_size = manager_block_size
+    worker.num_blocks = 2
+    worker._physical_blocks_per_logical_kv_block = 1
+    worker.attn_backend_layouts = layouts
+    worker._sync_block_size_with_kernel()
+
+    assert worker.block_size == manager_block_size
+    assert worker.num_blocks == 2
+    assert worker._physical_blocks_per_logical_kv_block == 1
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize(
+    ("stride_pages", "expected"), [((2, 2), True), ((1, 2), False)]
+)
+def test_connector_layout_requires_every_matching_layer_to_be_strided(
+    stride_pages, expected
+):
+    from vllm.distributed.kv_transfer.kv_connector import utils as connector_utils
+    from vllm.v1.attention.backends.mla.flashmla_sparse import FlashMLASparseBackend
+    from vllm.v1.kv_cache_interface import (
+        KVCacheConfig,
+        KVCacheGroupSpec,
+        KVCacheTensor,
+        MLAAttentionSpec,
+    )
+
+    spec = MLAAttentionSpec(
+        block_size=256, num_kv_heads=1, head_size=512, dtype=torch.bfloat16
+    )
+    page_size = spec.page_size_bytes
+    names = ["layer.0", "layer.1"]
+    config = KVCacheConfig(
+        num_blocks=2,
+        kv_cache_tensors=[
+            KVCacheTensor(
+                size=4 * page_size,
+                layers=[name],
+                layer_stride=4 * page_size,
+                block_stride=stride * page_size,
+            )
+            for name, stride in zip(names, stride_pages, strict=True)
+        ],
+        kv_cache_groups=[KVCacheGroupSpec(names, spec)],
+    )
+    layers = {
+        name: SimpleNamespace(get_attn_backend=lambda: FlashMLASparseBackend)
+        for name in names
+    }
+    with patch.object(
+        connector_utils, "get_layers_from_vllm_config", return_value=layers
+    ):
+        layouts = connector_utils.get_current_attn_backend_layouts(MagicMock(), config)
+
+    assert layouts == [(FlashMLASparseBackend, spec, expected)]
 
 
 @pytest.mark.cpu_test
@@ -1096,8 +1264,8 @@ def _make_csa_linear_ple_worker(scratch_aliases: str = "compressed"):
         patch.object(bw, "get_tensor_model_parallel_world_size", return_value=1),
         patch.object(
             bw,
-            "get_current_attn_backends_and_specs",
-            return_value=([fake_backend], [None]),
+            "get_current_attn_backend_layouts",
+            return_value=[(fake_backend, None, False)],
         ),
         patch.object(bw, "current_platform", fake_platform),
         patch(
@@ -1346,8 +1514,8 @@ def _make_ring_worker():
         patch.object(bw, "get_tensor_model_parallel_world_size", return_value=1),
         patch.object(
             bw,
-            "get_current_attn_backends_and_specs",
-            return_value=([fake_backend], [None]),
+            "get_current_attn_backend_layouts",
+            return_value=[(fake_backend, None, False)],
         ),
         patch.object(bw, "current_platform", fake_platform),
         set_current_vllm_config(vllm_config),

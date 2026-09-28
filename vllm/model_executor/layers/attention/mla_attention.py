@@ -1371,7 +1371,14 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             is_index_group_leader=self.indexer is not None,
             non_causal_multi_token_decode=self.non_causal_multi_token_decode,
         )
-        if (page_rows := self.attn_backend.get_kernel_page_rows()) is not None:
+        page_rows = self.attn_backend.get_strided_block_page_rows(spec)
+        if page_rows is None and (
+            self.attn_backend.get_name() == "FLASHMLA_SPARSE"
+            and self.kv_cache_dtype in ("fp8_ds_mla", "nvfp4_ds_mla")
+            and current_platform.is_device_capability_family(100)
+        ):
+            page_rows = 1
+        if page_rows is not None:
             spec = replace(
                 spec,
                 block_stride_alignment=page_rows * spec.state_content_size_bytes,

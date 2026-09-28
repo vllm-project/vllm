@@ -28,7 +28,7 @@ from vllm.distributed.kv_transfer.kv_connector.utils import (
     EngineId,
     EngineTransferInfo,
     TransferTopology,
-    get_current_attn_backends_and_specs,
+    get_current_attn_backend_layouts,
     kv_postprocess_blksize_and_layout_on_receive,
     kv_postprocess_blksize_on_receive,
     kv_postprocess_layout_on_receive,
@@ -90,7 +90,7 @@ from vllm.v1.kv_cache_interface import (
     iter_layer_specs,
 )
 from vllm.v1.worker.block_table import BlockTable
-from vllm.v1.worker.utils import select_common_block_size
+from vllm.v1.worker.utils import select_common_block_size_for_layout
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -847,9 +847,10 @@ class NixlBaseConnectorWorker:
 
         # Get the attention backend from the first layer
         # NOTE (NickLucche) models with multiple backends are not supported yet
-        self.attn_backends, self.attn_backend_specs = (
-            get_current_attn_backends_and_specs(vllm_config, kv_cache_config)
+        self.attn_backend_layouts = get_current_attn_backend_layouts(
+            vllm_config, kv_cache_config
         )
+        self.attn_backends = [backend for backend, _, _ in self.attn_backend_layouts]
         self.backend_name = self.attn_backends[0].get_name()
 
         self.kv_cache_layout = (
@@ -936,8 +937,8 @@ class NixlBaseConnectorWorker:
             )
 
     def _sync_block_size_with_kernel(self) -> None:
-        kernel_block_size = select_common_block_size(
-            self.block_size, self.attn_backends, self.attn_backend_specs
+        kernel_block_size = select_common_block_size_for_layout(
+            self.block_size, self.attn_backend_layouts
         )
         # Number of blocks not accounting for kernel block mismatches
         self._logical_num_blocks = self.num_blocks

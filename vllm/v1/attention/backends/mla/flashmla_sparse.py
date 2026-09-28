@@ -142,18 +142,18 @@ class FlashMLASparseBackend(AttentionBackend):
     def get_supported_kernel_block_sizes(
         kv_cache_spec: KVCacheSpec | None = None,
     ) -> list[int | MultipleOf]:
+        return [64]
+
+    @staticmethod
+    def get_strided_block_page_rows(kv_cache_spec: KVCacheSpec) -> int | None:
         if (
             isinstance(kv_cache_spec, AttentionSpec)
             and kv_cache_spec.head_size == 512
             and kv_cache_spec.dtype == torch.bfloat16
             and kv_cache_spec.kv_quant_mode == KVQuantMode.NONE
         ):
-            return [MultipleOf(64)]
-        return [64]
-
-    @staticmethod
-    def get_kernel_page_rows() -> int:
-        return 1
+            return 1
+        return None
 
     @staticmethod
     def get_name() -> str:

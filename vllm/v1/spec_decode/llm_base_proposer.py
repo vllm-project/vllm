@@ -1760,7 +1760,7 @@ class SpecDecodeBaseProposer:
                         self.device,
                         kernel_block_size=kernel_block_size,
                         block_stride_bytes=group_block_stride_bytes(
-                            kv_cache_config, self.kv_cache_gid
+                            kv_cache_config, attn_group.layer_names
                         ),
                     )
                     attention_groups[backend_key] = attn_group

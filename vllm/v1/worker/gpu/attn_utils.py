@@ -268,7 +268,7 @@ def init_attn_backend(
                 # it on the prefill backend), so each ubatch needs its own.
                 num_metadata_builders=get_num_ubatches(vllm_config.parallel_config),
                 block_stride_bytes=group_block_stride_bytes(
-                    kv_cache_config, kv_cache_group_id
+                    kv_cache_config, group.layer_names
                 ),
             )
             # The microbatches' builders share the workspace: they all issue

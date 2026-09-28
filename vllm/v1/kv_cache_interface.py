@@ -673,6 +673,15 @@ class MLAAttentionSpec(FullAttentionSpec):
         super().__post_init__()
         _apply_alignment_padding(self)
 
+    def copy_with_new_block_size(self, block_size: int) -> Self:
+        return replace(
+            self,
+            block_size=block_size,
+            kernel_page_size=(
+                self.kernel_page_size if block_size == self.block_size else None
+            ),
+        )
+
     @classmethod
     def merge(cls, specs: list[Self]) -> Self:
         assert all(isinstance(spec, MLAAttentionSpec) for spec in specs), (
@@ -726,6 +735,27 @@ class MLAAttentionSpec(FullAttentionSpec):
                     "the same attention spec."
                 )
         return merged_spec
+
+
+def get_cache_view_spec(
+    spec: KVCacheSpec,
+    kernel_block_size: int | None,
+    block_stride_bytes: int | None,
+) -> KVCacheSpec:
+    if (
+        isinstance(spec, MLAAttentionSpec)
+        and spec.kernel_page_size is not None
+        and block_stride_bytes == spec.page_size_bytes
+        and (kernel_block_size is None or kernel_block_size < spec.block_size)
+    ):
+        return replace(
+            spec,
+            block_size=spec.kernel_page_size,
+            kernel_page_size=None,
+        )
+    if kernel_block_size is None:
+        return spec
+    return spec.copy_with_new_block_size(kernel_block_size)
 
 
 @dataclass(frozen=True, kw_only=True)

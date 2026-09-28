@@ -203,14 +203,15 @@ class DeepseekV32IndexerBackend(AttentionBackend):
     def get_supported_kernel_block_sizes(
         kv_cache_spec: KVCacheSpec | None = None,
     ) -> list[int | MultipleOf]:
-        if (
-            isinstance(kv_cache_spec, MLAAttentionSpec)
-            and kv_cache_spec.kernel_page_size is not None
-        ):
-            # Keep the packed cache at manager-block granularity; metadata
-            # expands each block into kernel pages for paged MQA.
-            return [kv_cache_spec.block_size]
         return [1, MultipleOf(16)] if current_platform.is_rocm() else [64]
+
+    @staticmethod
+    def get_strided_block_page_rows(kv_cache_spec: KVCacheSpec) -> int | None:
+        if not isinstance(kv_cache_spec, MLAAttentionSpec):
+            return None
+        if kv_cache_spec.kernel_page_size is None:
+            return None
+        return kv_cache_spec.get_num_kernel_states(kv_cache_spec.kernel_page_size)
 
     @classmethod
     def get_supported_head_sizes(cls) -> list[int]:
@@ -867,6 +868,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
     # so this is None; its own split uses self.decode_threshold.
     reorder_batch_threshold: int | None = None
     requires_block_table_width = True
+    requires_block_stride_bytes = True
 
     @classmethod
     def get_cudagraph_support(
@@ -878,8 +880,15 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
             return AttentionCGSupport.ALWAYS
         return AttentionCGSupport.UNIFORM_BATCH
 
-    def __init__(self, *args, block_table_width: int, **kwargs) -> None:
+    def __init__(
+        self,
+        *args,
+        block_table_width: int,
+        block_stride_bytes: int | None = None,
+        **kwargs,
+    ) -> None:
         super().__init__(*args, **kwargs)
+        self.block_stride_bytes = block_stride_bytes
         scheduler_config = self.vllm_config.scheduler_config
         parallel_config = self.vllm_config.parallel_config
         self.dcp_world_size = parallel_config.decode_context_parallel_size
@@ -1008,18 +1017,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
     def _expand_kernel_page_table(
         self, block_table: torch.Tensor
     ) -> tuple[int, torch.Tensor]:
-        """Expand manager block IDs into physical kernel-page IDs.
-
-        Example:
-            block_table = [[0, 2]]
-            pages_per_block = 5
-            stride_pages = 7
-
-            Manager block 0 maps to pages [0, 1, 2, 3, 4].
-            Manager block 2 maps to pages [14, 15, 16, 17, 18].
-            Result: [[0, 1, 2, 3, 4, 14, 15, 16, 17, 18]]
-
-        """
+        """Expand manager block IDs into physical kernel-page IDs."""
         spec = self.kv_cache_spec
         assert self._kernel_page_size is not None
         page_states = spec.get_num_kernel_states(self._kernel_page_size)

@@ -60,7 +60,7 @@ from vllm.v1.attention.backends.mla.sparse_utils import (
     flat_kv_row_view,
     triton_convert_req_index_to_global_index,
 )
-from vllm.v1.kv_cache_interface import AttentionSpec
+from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheSpec
 
 _FP8_KV_DTYPES = ("fp8", "fp8_e4m3")
 _WORKSPACE_BYTES = 128 * 1024 * 1024
@@ -224,7 +224,7 @@ class FlashInferMLASparseSM90Backend(AttentionBackend):
         return (num_blocks, block_size, head_size)
 
     @staticmethod
-    def get_kernel_page_rows() -> int | None:
+    def get_strided_block_page_rows(kv_cache_spec: KVCacheSpec) -> int:
         # Rows are the page table; only whole-row block stride alignment is needed.
         return 1
 

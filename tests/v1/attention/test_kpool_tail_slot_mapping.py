@@ -55,16 +55,27 @@ def test_tail_backend_layout_matches_kernel_pointer_arithmetic():
     assert content_stride == 1
 
 
-def test_tail_spec_reserves_complete_pools_for_speculation():
+@pytest.mark.parametrize(
+    ("num_speculative_tokens", "ring"),
+    [(0, 4), (1, 8), (4, 8), (7, 16), (13, 32)],
+)
+def test_tail_spec_reserves_complete_pools_for_speculation(
+    num_speculative_tokens, ring
+):
     from vllm.models.glm5next.common.attention import Glm5NextTailCache
 
-    cache = SimpleNamespace(_index_kpool=KPOOL, head_dim=128)
+    cache = SimpleNamespace(
+        _index_kpool=KPOOL,
+        head_dim=128,
+        cache_config=SimpleNamespace(block_size=640),
+    )
     spec = Glm5NextTailCache.get_kv_cache_spec(
-        cache, SimpleNamespace(num_speculative_tokens=5)
+        cache, SimpleNamespace(num_speculative_tokens=num_speculative_tokens)
     )
 
     assert isinstance(spec, CircularBufferSpec)
-    assert spec.block_size == 12
+    assert spec.block_size == ring
+    assert cache.cache_config.block_size % ring == 0
 
 
 def make_tail_block_table(own_blocks, width=64):

@@ -24,7 +24,7 @@ from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.utils import (
     EngineId,
     TransferTopology,
-    get_current_attn_backends_and_specs,
+    get_current_attn_backend_layouts,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1,
@@ -61,11 +61,12 @@ from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheSpec,
     MambaSpec,
+    MLAAttentionSpec,
     SlidingWindowSpec,
 )
 from vllm.v1.request import RequestStatus
 from vllm.v1.worker.block_table import BlockTable
-from vllm.v1.worker.utils import select_common_block_size
+from vllm.v1.worker.utils import select_common_block_size_for_layout
 
 logger = init_logger(__name__)
 
@@ -1065,9 +1066,10 @@ class MooncakeConnectorWorker:
         self.kv_cache_config = kv_cache_config
         self.use_mla = self.model_config.use_mla
         self._physical_blocks_per_logical_kv_block = 1
-        self.attn_backends, self.attn_backend_specs = (
-            get_current_attn_backends_and_specs(vllm_config, kv_cache_config)
+        self.attn_backend_layouts = get_current_attn_backend_layouts(
+            vllm_config, kv_cache_config
         )
+        self.attn_backends = [backend for backend, _, _ in self.attn_backend_layouts]
         self._sync_block_size_with_kernel()
 
         logger.debug(
@@ -1105,8 +1107,8 @@ class MooncakeConnectorWorker:
         # and draft model may use different attention backends with different
         # physical block sizes. Pick the common (smallest) block size so that
         # KV-cache registration and transfer work correctly for both models.
-        kernel_block_size = select_common_block_size(
-            self.block_size, self.attn_backends, self.attn_backend_specs
+        kernel_block_size = select_common_block_size_for_layout(
+            self.block_size, self.attn_backend_layouts
         )
         if self.block_size != kernel_block_size:
             logger.info_once(
@@ -1783,6 +1785,17 @@ class MooncakeConnectorWorker:
                     kv_block_len = layer_spec.page_size_bytes
                 else:
                     kv_block_len = block_len
+                if (
+                    isinstance(layer_spec, MLAAttentionSpec)
+                    and layer_spec.tokens_per_state > 1
+                    and cache.is_contiguous()
+                    and block_len > kv_block_len
+                    and cache.nbytes
+                    == self.kv_cache_config.num_blocks
+                    * self._physical_blocks_per_logical_kv_block
+                    * kv_block_len
+                ):
+                    block_len = kv_block_len
                 if kv_block_len > block_len:
                     raise RuntimeError(
                         "Mooncake transfer length exceeds physical block stride "

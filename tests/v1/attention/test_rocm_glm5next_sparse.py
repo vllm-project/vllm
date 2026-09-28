@@ -25,7 +25,7 @@ from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
     _validate_dsv4_sparse_dims,
     _validate_sparse_dims,
 )
-from vllm.v1.kv_cache_interface import KVCacheLayout
+from vllm.v1.kv_cache_interface import KVCacheLayout, MLAAttentionSpec
 
 
 @triton.jit
@@ -72,9 +72,15 @@ def test_rocm_sparse_mla_supports_glm_packed_layout():
     layouts = get_supported_kv_cache_layouts(
         (ROCMAiterMLASparseBackend, DeepseekV32IndexerBackend, KpoolTailBackend)
     )
+    spec = MLAAttentionSpec(
+        block_size=64,
+        num_kv_heads=1,
+        head_size=512,
+        dtype=torch.bfloat16,
+    )
 
     assert layouts == [KVCacheLayout.BLHNC]
-    assert ROCMAiterMLASparseBackend.get_kernel_page_rows() == 1
+    assert ROCMAiterMLASparseBackend.get_strided_block_page_rows(spec) == 1
 
 
 @pytest.mark.parametrize(
