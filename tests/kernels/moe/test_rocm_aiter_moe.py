@@ -22,6 +22,7 @@ import importlib
 import math
 import warnings
 from typing import Any, NamedTuple
+from unittest import mock
 
 import pytest
 import torch
@@ -565,72 +566,64 @@ def test_aiter_moe_shared_experts_enablement_follows_env(
         assert rocm_aiter_ops.is_fusion_moe_shared_experts_enabled() is expected
 
 
-def test_aiter_moe_situv2_syncs_aiter_a4w4_env(
+@pytest.mark.parametrize(
+    "value,expected_act,expected_env",
+    [
+        # Unset / auto / legacy "1" all mean the a4w4 default.
+        (None, "a4w4", {"AITER_SITUV2_A4W4": "1"}),
+        ("auto", "a4w4", {"AITER_SITUV2_A4W4": "1"}),
+        ("1", "a4w4", {"AITER_SITUV2_A4W4": "1"}),
+        ("a4w4", "a4w4", {"AITER_SITUV2_A4W4": "1"}),
+        ("0", "a16w4", {}),
+        ("a16w4", "a16w4", {}),
+        ("A8W4", "a8w4", {"AITER_SITUV2_A8W4": "1"}),
+    ],
+)
+def test_aiter_moe_situv2_activation_syncs_aiter_env(
+    value: str | None,
+    expected_act: str,
+    expected_env: dict[str, str],
     monkeypatch: pytest.MonkeyPatch,
 ):
-    """SiTUv2 MoE should route to AITER a4w4 and clear legacy a8w4 overrides."""
+    """Each SiTUv2 activation choice sets exactly its AITER dispatch env."""
+    import os
+
     from vllm._aiter_ops import rocm_aiter_ops
 
     _assert_aiter_supported()
 
     with monkeypatch.context() as mp:
-        mp.delenv("AITER_SITUV2_A8W4", raising=False)
-        mp.delenv("AITER_SITUV2_A4W4", raising=False)
-        mp.setenv("VLLM_ROCM_USE_AITER", "1")
-        mp.setenv("VLLM_ROCM_USE_AITER_MOE", "1")
-        mp.setenv("VLLM_ROCM_USE_AITER_MOE_SITUV2", "1")
-        _reload_envs()
-        rocm_aiter_ops.refresh_env_variables()
-
-        import os
-
-        assert os.environ.get("AITER_SITUV2_A4W4") == "1"
-        assert "AITER_SITUV2_A8W4" not in os.environ
-
-
-def test_aiter_moe_situv2_legacy_a8w4_alias_enables_a4w4(
-    monkeypatch: pytest.MonkeyPatch,
-):
-    """Deprecated VLLM_ROCM_USE_AITER_MOE_SITUV2_A8W4 still enables SiTUv2 a4w4."""
-    from vllm._aiter_ops import rocm_aiter_ops
-
-    _assert_aiter_supported()
-
-    with monkeypatch.context() as mp:
-        mp.delenv("AITER_SITUV2_A8W4", raising=False)
-        mp.delenv("AITER_SITUV2_A4W4", raising=False)
-        mp.delenv("VLLM_ROCM_USE_AITER_MOE_SITUV2", raising=False)
-        mp.setenv("VLLM_ROCM_USE_AITER", "1")
-        mp.setenv("VLLM_ROCM_USE_AITER_MOE", "1")
-        mp.setenv("VLLM_ROCM_USE_AITER_MOE_SITUV2_A8W4", "1")
-        _reload_envs()
-        rocm_aiter_ops.refresh_env_variables()
-
-        import os
-
-        assert os.environ.get("AITER_SITUV2_A4W4") == "1"
-        assert "AITER_SITUV2_A8W4" not in os.environ
-
-
-def test_aiter_moe_situv2_clears_aiter_env_when_disabled(
-    monkeypatch: pytest.MonkeyPatch,
-):
-    from vllm._aiter_ops import rocm_aiter_ops
-
-    _assert_aiter_supported()
-
-    with monkeypatch.context() as mp:
+        # Stale AITER overrides must be replaced by the vLLM selection.
+        mp.setenv("AITER_SITUV2_A8W4", "1")
         mp.setenv("AITER_SITUV2_A4W4", "1")
         mp.setenv("VLLM_ROCM_USE_AITER", "1")
         mp.setenv("VLLM_ROCM_USE_AITER_MOE", "1")
-        mp.delenv("VLLM_ROCM_USE_AITER_MOE_SITUV2_A8W4", raising=False)
-        mp.setenv("VLLM_ROCM_USE_AITER_MOE_SITUV2", "0")
+        if value is None:
+            mp.delenv("VLLM_ROCM_USE_AITER_MOE_SITUV2", raising=False)
+        else:
+            mp.setenv("VLLM_ROCM_USE_AITER_MOE_SITUV2", value)
         _reload_envs()
         rocm_aiter_ops.refresh_env_variables()
 
-        import os
+        assert rocm_aiter_ops.get_fused_moe_situv2_activation() == expected_act
+        assert rocm_aiter_ops.is_fused_moe_situv2_gate_up_interleaved() is (
+            expected_act == "a8w4"
+        )
+        assert rocm_aiter_ops.is_fused_moe_situv2_enabled() is (expected_act != "a16w4")
+        for name in ("AITER_SITUV2_A8W4", "AITER_SITUV2_A4W4"):
+            assert os.environ.get(name) == expected_env.get(name)
 
-        assert "AITER_SITUV2_A4W4" not in os.environ
+
+def test_aiter_moe_situv2_rejects_unknown_activation(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    with monkeypatch.context() as mp:
+        mp.setenv("VLLM_ROCM_USE_AITER_MOE_SITUV2", "a8w8")
+        _reload_envs()
+        import vllm.envs as envs
+
+        with pytest.raises(ValueError, match="VLLM_ROCM_USE_AITER_MOE_SITUV2"):
+            _ = envs.VLLM_ROCM_USE_AITER_MOE_SITUV2
 
 
 @pytest.mark.parametrize("moe_padding", [True, False])
@@ -643,6 +636,76 @@ def test_aiter_moe_padding_env_var(
         mp.setenv("VLLM_ROCM_MOE_PADDING", "1" if moe_padding else "0")
         envs = _reload_envs()
         assert envs.VLLM_ROCM_MOE_PADDING is moe_padding
+
+
+# Dispatch-policy forwarding test ------------------------------------------
+
+
+@pytest.mark.parametrize("dispatch_policy", [0, 1, 2])
+def test_aiter_moe_dispatch_policy_forwarded_to_fused_moe(
+    dispatch_policy: int,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """VLLM_ROCM_AITER_MOE_DISPATCH_POLICY should reach rocm_aiter_ops.fused_moe
+    unchanged, the same forwarding AiterExperts.apply does via
+    rocm_aiter_fused_experts, for every documented policy value (0=auto,
+    1=always single-pass, 2=always multi-pass). See vllm-project/vllm#54966.
+    """
+    from tests.kernels.moe.utils import make_dummy_moe_config
+    from vllm._aiter_ops import rocm_aiter_ops
+    from vllm.model_executor.layers.fused_moe.activation import MoEActivation
+    from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
+        rocm_aiter_fused_experts,
+    )
+
+    _assert_aiter_supported()
+    case = _make_moe_case(
+        num_tokens=8,
+        hidden_dim=256,
+        intermediate_dim=512,
+        num_experts=4,
+        topk=2,
+        seed=5,
+    )
+    w1_shuffled, w2_shuffled = _shuffle_moe_weights(case["w1"], case["w2"])
+    moe_config = make_dummy_moe_config(
+        num_experts=4,
+        experts_per_token=2,
+        hidden_dim=256,
+        intermediate_size=512,
+        in_dtype=torch.bfloat16,
+    )
+
+    with monkeypatch.context() as mp:
+        mp.setenv("VLLM_ROCM_AITER_MOE_DISPATCH_POLICY", str(dispatch_policy))
+        _reload_envs()
+        rocm_aiter_ops.refresh_env_variables()
+
+        assert rocm_aiter_ops.get_moe_dispatch_policy() == dispatch_policy, (
+            "rocm_aiter_ops cached a stale dispatch policy after the env var changed."
+        )
+
+        with mock.patch.object(
+            rocm_aiter_ops, "fused_moe", wraps=rocm_aiter_ops.fused_moe
+        ) as fused_moe_mock:
+            rocm_aiter_fused_experts(
+                hidden_states=case["hidden_states"],
+                w1=w1_shuffled,
+                w2=w2_shuffled,
+                topk_weights=case["topk_weights"],
+                topk_ids=case["topk_ids"],
+                moe_config=moe_config,
+                activation=MoEActivation.SILU,
+                moe_sorting_dispatch_policy=rocm_aiter_ops.get_moe_dispatch_policy(),
+            )
+
+        assert (
+            fused_moe_mock.call_args.kwargs["moe_sorting_dispatch_policy"]
+            == dispatch_policy
+        ), (
+            "VLLM_ROCM_AITER_MOE_DISPATCH_POLICY was not forwarded to "
+            "rocm_aiter_ops.fused_moe."
+        )
 
 
 # Enum tests --------------------------------------------------------------
