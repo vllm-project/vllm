@@ -142,6 +142,7 @@ def _silu_mul_quant_fp8_packed_kernel(
     input_ptr,
     output_q_ptr,
     output_scale_ptr,
+    expert_ends_ptr,
     M,
     input_stride_m,
     output_q_stride_m,
@@ -158,6 +159,7 @@ def _silu_mul_quant_fp8_packed_kernel(
     PACKS_PER_CTA: tl.constexpr,
     BLOCK_M: tl.constexpr,
     HAS_CLAMP: tl.constexpr,
+    EXPERT_ALIGNMENT: tl.constexpr,
 ):
     GROUPS_PER_PACK: tl.constexpr = 4
     hidden_size: tl.constexpr = N // 2
@@ -165,6 +167,13 @@ def _silu_mul_quant_fp8_packed_kernel(
     pack_tile = tl.program_id(0)
     row_start = tl.program_id(1).to(tl.int64) * BLOCK_M
     row_step = tl.num_programs(1).to(tl.int64) * BLOCK_M
+
+    if EXPERT_ALIGNMENT:
+        expert = tl.program_id(2)
+        previous_end = tl.load(expert_ends_ptr + expert - 1, expert > 0, other=0)
+        expert_start = tl.cdiv(previous_end, EXPERT_ALIGNMENT) * EXPERT_ALIGNMENT
+        row_start += expert_start.to(tl.int64)
+        M = tl.load(expert_ends_ptr + expert)
 
     groups_per_cta: tl.constexpr = PACKS_PER_CTA * GROUPS_PER_PACK
     elems_per_cta: tl.constexpr = groups_per_cta * GROUP_SIZE
@@ -254,7 +263,19 @@ def silu_mul_quant_fp8_packed_triton(
     clamp_limit: float | None = None,
     alpha: float = 1.0,
     beta: float = 0.0,
+    *,
+    expert_ends: torch.Tensor | None = None,
+    expert_alignment: int = 0,
 ) -> tuple[torch.Tensor, torch.Tensor]:
+    """Fuse activation and FP8 quantization, optionally skipping expert padding.
+
+    ``expert_ends`` uses DeepGEMM's prefix-sum layout: each entry is the
+    exclusive end of an expert's live rows, including earlier alignment gaps.
+    An expert starts at the preceding end rounded up to ``expert_alignment``.
+    Padding outputs are left unwritten and must not be consumed as live rows.
+    Without ``expert_ends``, the original dense launch configuration is used
+    and the metadata loads are compiled out.
+    """
     assert input.dim() == 2
     assert input.is_contiguous()
 
@@ -293,13 +314,29 @@ def silu_mul_quant_fp8_packed_triton(
 
     grid_n = triton.cdiv(packs_per_row, packs_per_cta)
     grid_m = min(triton.cdiv(M, BM), 4096)
-    grid = (grid_n, grid_m)
+    grid: tuple[int, ...] = (grid_n, grid_m)
+    if expert_ends is not None:
+        assert expert_ends.ndim == 1 and expert_ends.numel() > 0
+        assert expert_ends.dtype == torch.int32
+        assert expert_ends.device == input.device and expert_ends.is_contiguous()
+        assert expert_alignment > 0
+        num_experts = expert_ends.numel()
+        # Bound empty CTAs while retaining enough parallelism for full experts.
+        max_ctas = 4096 if group_size < 128 else 8192
+        grid_m = min(
+            triton.cdiv(M, BM * num_experts),
+            max(1, triton.cdiv(max_ctas, grid_n * num_experts)),
+        )
+        grid = (grid_n, grid_m, num_experts)
+    else:
+        assert expert_alignment == 0
 
     has_clamp = clamp_limit is not None
     _silu_mul_quant_fp8_packed_kernel[grid](
         input,
         output_q,
         output_scale_packed,
+        expert_ends,
         M,
         input.stride(0),
         output_q.stride(0),
@@ -316,6 +353,7 @@ def silu_mul_quant_fp8_packed_triton(
         PACKS_PER_CTA=packs_per_cta,
         BLOCK_M=BM,
         HAS_CLAMP=has_clamp,
+        EXPERT_ALIGNMENT=expert_alignment,
         num_warps=num_warps,
         num_stages=num_stages,
     )

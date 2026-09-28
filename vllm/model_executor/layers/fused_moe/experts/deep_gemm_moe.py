@@ -515,7 +515,12 @@ class DeepGemmFP4Experts(mk.FusedMoEExpertsModular):
         return (workspace1, workspace2, output)
 
     def _act_mul_quant(
-        self, input: torch.Tensor, output: torch.Tensor, activation: MoEActivation
+        self,
+        input: torch.Tensor,
+        output: torch.Tensor,
+        activation: MoEActivation,
+        expert_ends: torch.Tensor | None = None,
+        expert_alignment: int = 0,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         block_k = self._ACT_BLOCK_K
         scale_fmt = DeepGemmQuantScaleFMT.from_oracle()
@@ -531,6 +536,8 @@ class DeepGemmFP4Experts(mk.FusedMoEExpertsModular):
                     output_q=output,
                     group_size=block_k,
                     clamp_limit=self.gemm1_clamp_limit,
+                    expert_ends=expert_ends,
+                    expert_alignment=expert_alignment,
                 )
             use_ue8m0 = scale_fmt == DeepGemmQuantScaleFMT.FLOAT32_CEIL_UE8M0
             return silu_mul_per_token_group_quant_fp8_colmajor(
@@ -633,13 +640,17 @@ class DeepGemmFP4Experts(mk.FusedMoEExpertsModular):
                 recipe_b=(1, self._WEIGHT_BLOCK_K),
             )
 
-            # SwiGLU activation + FP8 requant
+            # SiLU+mul and FP8 requant use the same live expert ranges as GEMM.
             activation_out_dim = self.adjust_N_for_activation(N, activation)
             quant_out = _resize_cache(
                 workspace13.view(dtype=torch.float8_e4m3fn), (M_sum, activation_out_dim)
             )
             a2q, a2q_scale = self._act_mul_quant(
-                input=mm1_out.view(-1, N), output=quant_out, activation=activation
+                input=mm1_out.view(-1, N),
+                output=quant_out,
+                activation=activation,
+                expert_ends=grouped_layout if use_psum_layout else None,
+                expert_alignment=align_used if use_psum_layout else 0,
             )
 
             # FC2: FP8 activations x FP4 weights
