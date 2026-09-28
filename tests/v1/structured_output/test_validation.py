@@ -388,19 +388,46 @@ def test_auto_backend_falls_back_for_structural_tag_unsupported_features():
 def test_auto_backend_rejects_new_style_structural_tag_unsupported_features():
     """New-style structural tags with xgrammar-unsupported features cannot
     fall back: the guidance backend only supports the legacy
-    structures/triggers shape, so the request is rejected instead of being
-    served with a silently wrong xgrammar grammar."""
+    structures/triggers shape, so the request is rejected with a clear error
+    explaining that no backend can enforce the constraint (not the
+    misleading "Invalid grammar specification: 'triggers'" the guidance
+    serializer used to produce)."""
     params = SamplingParams(
         structured_outputs=StructuredOutputsParams(
             structural_tag=_new_style_structural_tag(SCHEMA_WITH_MULTIPLE_OF)
         )
     )
-    with pytest.raises(VLLMValidationError):
+    with pytest.raises(
+        VLLMValidationError,
+        match="no other structured output backend supports the new-style",
+    ):
         params._validate_structured_outputs(
             _StubModelConfig(is_diffusion=False),
             StructuredOutputsConfig(backend="auto"),
             tokenizer=object(),
         )
+
+
+def test_qwen_xml_parameter_unsupported_features_rejected():
+    """The deprecated qwen_xml_parameter format node embeds its schema
+    directly ({"type": "qwen_xml_parameter", "json_schema": {...}}); it must
+    get the same unsupported-feature check as json_schema nodes."""
+    tag = json.dumps(
+        {
+            "type": "structural_tag",
+            "format": {
+                "type": "qwen_xml_parameter",
+                "json_schema": SCHEMA_WITH_MULTIPLE_OF,
+            },
+        }
+    )
+    params = SamplingParams(
+        structured_outputs=StructuredOutputsParams(structural_tag=tag)
+    )
+    with pytest.raises(
+        XgrammarUnsupportedJsonFeaturesError, match="not supported by xgrammar"
+    ):
+        validate_xgrammar_grammar(params)
 
 
 def test_structural_tag_json_schemas_extraction():
@@ -416,13 +443,21 @@ def test_structural_tag_json_schemas_extraction():
                     "type": "sequence",
                     "elements": [
                         {"type": "json_schema", "json_schema": SCHEMA_CLEAN},
+                        # Deprecated node type that embeds the schema directly.
+                        {
+                            "type": "qwen_xml_parameter",
+                            "json_schema": SCHEMA_WITH_MULTIPLE_OF,
+                        },
                     ],
                 },
                 {"type": "const_string", "value": "none"},
             ],
         },
     }
-    assert _structural_tag_json_schemas(nested) == [SCHEMA_CLEAN]
+    assert _structural_tag_json_schemas(nested) == [
+        SCHEMA_CLEAN,
+        SCHEMA_WITH_MULTIPLE_OF,
+    ]
 
     legacy = {
         "type": "structural_tag",
@@ -442,18 +477,19 @@ def test_structural_tag_json_schemas_extraction():
     [_new_style_structural_tag, _legacy_structural_tag],
     ids=["new-style", "legacy"],
 )
-def test_structural_tag_payload_validation_reports_unsupported_features(make_tag):
-    """Request-level structural_tag validation reports xgrammar-unsupported
-    features with the informative error (not "Invalid ... specification"),
-    so the caller learns the tag is well-formed but needs another backend."""
+def test_structural_tag_payload_validation_defers_unsupported_features(make_tag):
+    """Request-level structural_tag validation must not reject tags whose
+    nested schemas use xgrammar-unsupported features: at request-parse time
+    no backend fallback is possible, so the tag is let through and the
+    engine's `auto` backend selection handles it (falling back to guidance
+    where supported). Rejecting here would make the fallback unreachable
+    from the OpenAI API."""
     from vllm.entrypoints.generate.base.protocol import validate_structural_tag_payload
 
-    with pytest.raises(
-        XgrammarUnsupportedJsonFeaturesError, match="not supported by xgrammar"
-    ):
-        validate_structural_tag_payload(
-            make_tag(SCHEMA_WITH_MULTIPLE_OF), parameter="response_format"
-        )
+    # Must not raise: the tag is well-formed.
+    validate_structural_tag_payload(
+        make_tag(SCHEMA_WITH_MULTIPLE_OF), parameter="response_format"
+    )
 
     # Malformed tags are still rejected as bad requests.
     with pytest.raises(
@@ -461,3 +497,21 @@ def test_structural_tag_payload_validation_reports_unsupported_features(make_tag
         match="Invalid response_format structural_tag specification",
     ):
         validate_structural_tag_payload('{"nope": 1}', parameter="response_format")
+
+
+def test_guidance_backend_rejects_new_style_structural_tag_clearly():
+    """The guidance backend only supports the legacy structures/triggers
+    shape; a new-style tag must fail with a clear error, not a KeyError on
+    "triggers" wrapped as "Invalid grammar specification"."""
+    from vllm.v1.structured_output.backend_guidance import validate_guidance_grammar
+
+    params = SamplingParams(
+        structured_outputs=StructuredOutputsParams(
+            structural_tag=_new_style_structural_tag(SCHEMA_CLEAN)
+        )
+    )
+    with pytest.raises(
+        VLLMValidationError,
+        match="does not support new-style structural tags",
+    ):
+        validate_guidance_grammar(params, tokenizer=None)

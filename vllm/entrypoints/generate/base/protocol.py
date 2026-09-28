@@ -251,9 +251,11 @@ def validate_structural_tag_payload(payload: Any, *, parameter: str) -> None:
         )
     except XgrammarUnsupportedJsonFeaturesError:
         # The tag is well-formed; only its nested JSON schemas use features
-        # xgrammar does not support. Report that directly instead of
-        # mislabeling the tag as an invalid specification.
-        raise
+        # xgrammar does not support. That is a backend-capability concern,
+        # not a malformed request: let it through so the engine's `auto`
+        # backend selection can fall back to another backend. Rejecting it
+        # here would make the fallback unreachable from the OpenAI API.
+        pass
     except (TypeError, ValueError, VLLMValidationError) as exc:
         raise VLLMValidationError(
             f"Invalid {parameter} structural_tag specification.",

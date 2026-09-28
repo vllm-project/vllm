@@ -1327,7 +1327,11 @@ class SamplingParams(
         from vllm.v1.structured_output.backend_outlines import (
             validate_structured_output_request_outlines,
         )
-        from vllm.v1.structured_output.backend_xgrammar import validate_xgrammar_grammar
+        from vllm.v1.structured_output.backend_xgrammar import (
+            XgrammarUnsupportedJsonFeaturesError,
+            is_legacy_structural_tag_shape,
+            validate_xgrammar_grammar,
+        )
         from vllm.v1.structured_output.utils import grammar_is_likely_lark
 
         if backend.startswith("xgrammar"):
@@ -1394,15 +1398,37 @@ class SamplingParams(
             try:
                 validate_xgrammar_grammar(self)
                 self.structured_outputs._backend = "xgrammar"
-            except VLLMValidationError:
+            except VLLMValidationError as exc:
                 # The request either failed validation
                 # or includes some jsonschema feature(s) that
                 # are not supported in xgrammar.
 
+                so_params = self.structured_outputs
+                if (
+                    isinstance(exc, XgrammarUnsupportedJsonFeaturesError)
+                    and so_params.structural_tag is not None
+                    and not is_legacy_structural_tag_shape(so_params.structural_tag)
+                ):
+                    # The nested schemas use features xgrammar silently drops,
+                    # and the guidance fallback only supports the legacy
+                    # structures/triggers structural tag shape, so no backend
+                    # can enforce the constraint. Fail with a clear error
+                    # instead of letting guidance die on the tag shape.
+                    raise VLLMValidationError(
+                        "The structural tag contains JSON schemas with "
+                        "features not supported by the xgrammar backend, "
+                        "which would silently drop them from the compiled "
+                        "grammar, and no other structured output backend "
+                        "supports the new-style structural tag format. "
+                        "Remove the unsupported keywords from the nested "
+                        "schema(s), or use the legacy 'structures'/'triggers' "
+                        "structural tag shape so the request can fall back "
+                        "to the guidance backend."
+                    ) from exc
+
                 skip_guidance = _is_non_tekken_mistral(tokenizer)
 
                 # Check if schema has features unsupported by guidance
-                so_params = self.structured_outputs
                 if not skip_guidance and so_params.json:
                     if isinstance(so_params.json, str):
                         try:

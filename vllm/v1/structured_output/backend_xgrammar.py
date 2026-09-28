@@ -409,8 +409,9 @@ def _structural_tag_json_schemas(s_tag: Any) -> list[dict[str, Any]]:
     """Extract the JSON schemas embedded in a structural tag payload.
 
     Handles both the new shape ({"type": "structural_tag", "format": ...}),
-    where schemas appear as {"type": "json_schema", "json_schema": {...}}
-    nodes nested anywhere inside "format", and the legacy shape
+    where schemas appear as {"type": "json_schema", "json_schema": {...}} or
+    {"type": "qwen_xml_parameter", "json_schema": {...}} nodes nested anywhere
+    inside "format", and the legacy shape
     ({"structures": [{"begin", "schema", "end"}], "triggers": [...]}).
 
     Args:
@@ -435,9 +436,16 @@ def _structural_tag_json_schemas(s_tag: Any) -> list[dict[str, Any]]:
                         schemas.append(schema)
         return schemas
 
+    # Format node types that embed a JSON schema directly. "json_schema" is
+    # the current type; "qwen_xml_parameter" is deprecated in xgrammar in
+    # favour of {"type": "json_schema", "style": "qwen_xml"}, but existing
+    # serialized tags with that type can still be loaded, so both must be
+    # checked.
+    _SCHEMA_NODE_TYPES = ("json_schema", "qwen_xml_parameter")
+
     def _collect(node: Any) -> None:
         if isinstance(node, dict):
-            if node.get("type") == "json_schema":
+            if node.get("type") in _SCHEMA_NODE_TYPES:
                 json_schema = node.get("json_schema")
                 if isinstance(json_schema, dict):
                     schemas.append(json_schema)
@@ -449,6 +457,23 @@ def _structural_tag_json_schemas(s_tag: Any) -> list[dict[str, Any]]:
 
     _collect(s_tag.get("format"))
     return schemas
+
+
+def is_legacy_structural_tag_shape(structural_tag: str | None) -> bool:
+    """Whether a structural tag uses the legacy structures/triggers shape.
+
+    The guidance fallback backend only understands the legacy shape; new-style
+    structural tags ({"type": "structural_tag", "format": ...}) cannot fall
+    back to it. Unparseable payloads return False; their validity is reported
+    separately by the grammar compilation.
+    """
+    if not structural_tag:
+        return False
+    try:
+        s_tag = json.loads(structural_tag)
+    except Exception:
+        return False
+    return isinstance(s_tag, dict) and "structures" in s_tag
 
 
 def validate_xgrammar_grammar(sampling_params: SamplingParams) -> None:
