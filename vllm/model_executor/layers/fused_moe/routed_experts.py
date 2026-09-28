@@ -832,7 +832,17 @@ class RoutedExperts(PluggableLayer):
             expert_data = param.data if full_load else param.data[expert_id]
 
         try:
-            if shard_id in ("w13", "gate_up"):
+            is_fused_gate_up = (
+                shard_id in ("w13", "gate_up")
+                or (
+                    full_load
+                    and shard_id == "w1"
+                    and getattr(self.moe_config, "is_act_and_mul", False)
+                    and loaded_weight.shape[shard_dim]
+                    == 2 * getattr(self.moe_config, "intermediate_size", -1)
+                )
+            )
+            if is_fused_gate_up:
                 gate_weight, up_weight = loaded_weight.chunk(2, dim=shard_dim)
                 success_w1 = self._weight_loader_impl(
                     param=param,
@@ -1398,6 +1408,7 @@ class RoutedExperts(PluggableLayer):
                     ckpt_gate_proj_name,
                     ckpt_up_proj_name,
                 )
+
             if gate_up is not None:
                 fused_mapping = [
                     # (param_name, weight_name, expert_id, shard_id)
@@ -1418,6 +1429,35 @@ class RoutedExperts(PluggableLayer):
                     for expert_id in range(num_physical_experts)
                     for shard_id in ("w1", "w3")
                 )
+
+                gate_up_aliases = [gate_up]
+                if gate_up != "gate_up_proj":
+                    gate_up_aliases.append("gate_up_proj")
+                    fused_mapping.extend([
+                        (f"{w13}weight", "experts.gate_up_proj", 0, "w1"),
+                        (f"{w13}weight", "experts.gate_up_proj", 1, "w3"),
+                    ])
+
+                down_aliases = [ckpt_down_proj_name]
+                if "down_proj" not in down_aliases:
+                    down_aliases.append("down_proj")
+                    fused_mapping.append(
+                        (f"{w2}weight", "experts.down_proj", 0, "w2")
+                    )
+
+                for g_name in gate_up_aliases:
+                    fused_mapping.extend([
+                        (f"{w13}weight_scale", f"experts.{g_name}.weight_scale", 0, "w1"),
+                        (f"{w13}weight_scale", f"experts.{g_name}.weight_scale", 1, "w3"),
+                        (f"{w13}weight", f"experts.{g_name}.weight", 0, "w1"),
+                        (f"{w13}weight", f"experts.{g_name}.weight", 1, "w3"),
+                    ])
+
+                for d_name in down_aliases:
+                    fused_mapping.extend([
+                        (f"{w2}weight_scale", f"experts.{d_name}.weight_scale", 0, "w2"),
+                        (f"{w2}weight", f"experts.{d_name}.weight", 0, "w2"),
+                    ])
 
         per_expert_mapping = [
             # (param_name, weight_name, expert_id, shard_id)

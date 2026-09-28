@@ -319,7 +319,7 @@ def test_routed_experts_integration_with_fast_bypass(synthetic_moe_checkpoint):
     weights_stream = [
         (name, tensor)
         for name, tensor in fast_bypass_safetensors_iterator([shard_path])
-        if name.startswith(prefix)
+        if name.startswith(prefix) and "scale" not in name
     ]
 
     # Map the yielded keys (experts.gate_up_proj -> experts.w13,
@@ -599,7 +599,7 @@ def test_routed_experts_integration_with_3d_fast_bypass(synthetic_3d_moe_checkpo
     weights_stream = [
         (name, tensor)
         for name, tensor in fast_bypass_safetensors_iterator([shard_path])
-        if name.startswith(prefix)
+        if name.startswith(prefix) and "scale" not in name
     ]
 
     mapped_stream = []
@@ -804,7 +804,7 @@ def test_mode1_vs_mode2_numerical_parity(synthetic_moe_checkpoint):
         for name, tensor in fast_bypass_safetensors_iterator(
             [shard_path], direct_vram_mode=False
         )
-        if name.startswith(prefix)
+        if name.startswith(prefix) and "scale" not in name
     ]
     list(layer_mode1.load_weights(stream_mode1))
 
@@ -819,7 +819,7 @@ def test_mode1_vs_mode2_numerical_parity(synthetic_moe_checkpoint):
         for name, tensor in fast_bypass_safetensors_iterator(
             [shard_path], direct_vram_mode=True
         )
-        if name.startswith(prefix)
+        if name.startswith(prefix) and "scale" not in name
     ]
     list(layer_mode2.load_weights(stream_mode2))
 
