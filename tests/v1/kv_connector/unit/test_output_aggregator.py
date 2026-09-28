@@ -167,7 +167,7 @@ def test_aggregate_workers_output_with_expected_finished_count():
 
 
 def test_merge_preserves_get_and_clear_fields():
-    """merge must preserve get-and-clear fields and surface them later."""
+    """Merge must preserve get-and-clear fields and surface them later."""
     aggregator = KVOutputAggregator(expected_finished_count=4)
 
     # Failed step: worker 0's output is salvaged, worker 1 is lost.

@@ -6,7 +6,6 @@ import json
 import threading
 from collections.abc import Callable
 from typing import TYPE_CHECKING, cast
-import time
 
 import msgspec
 
@@ -15,6 +14,8 @@ from vllm.distributed import stateless_destroy_torch_distributed_process_group
 from vllm.distributed.utils import stateless_init_torch_distributed_process_group
 from vllm.logger import init_logger
 from vllm.utils.network_utils import get_open_port
+from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.engine import (
     FT_STATUS_CALL_ID,
     EngineCoreOutputs,
@@ -22,8 +23,6 @@ from vllm.v1.engine import (
     UtilityOutput,
 )
 from vllm.v1.fault_tolerance.utils import FaultToleranceRequest, FaultToleranceResult
-from vllm.v1.core.sched.output import SchedulerOutput
-from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import RequestStatus
 from vllm.v1.serial_utils import UtilityResult, run_method

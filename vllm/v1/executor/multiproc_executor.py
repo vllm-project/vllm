@@ -82,11 +82,12 @@ logger = init_logger(__name__)
 
 class ExceptionWithKVConnectorOutput(Exception):
     """Exception that carries KV connector output for fault tolerance.
-    
+
     When a worker fails but KV transfer state needs to be preserved,
     this exception is used to pass the kv_connector_output along with
     the error information.
     """
+
     def __init__(self, error_msg: str, kv_connector_output: KVConnectorOutput | None):
         super().__init__(error_msg)
         self.kv_connector_output = kv_connector_output
@@ -445,7 +446,7 @@ class MultiprocExecutor(Executor):
         def get_response():
             responses = []
             has_failure = False
-            
+
             for mq in response_mqs:
                 dequeue_timeout = (
                     None if deadline is None else max(0.0, deadline - time.monotonic())
@@ -454,7 +455,7 @@ class MultiprocExecutor(Executor):
                     status, result = mq.dequeue(timeout=dequeue_timeout)
                 except TimeoutError as e:
                     raise TimeoutError(f"RPC call to {method} timed out.") from e
-                
+
                 has_kv = kv_output_aggregator is not None
 
                 if status == WorkerProc.ResponseStatus.FAILURE_WITH_KV_OUTPUT:
@@ -480,7 +481,7 @@ class MultiprocExecutor(Executor):
                     has_failure = True
                 else:
                     responses.append(result)
-            
+
             # If any worker failed, extract KV connector outputs, merge them,
             # then raise exception
             if has_failure:
@@ -488,18 +489,18 @@ class MultiprocExecutor(Executor):
                 for resp in responses:
                     if isinstance(resp, KVConnectorOutput):
                         kv_connector_outputs.append(resp)
-                    elif resp is not None and hasattr(resp, 'kv_connector_output'):
+                    elif resp is not None and hasattr(resp, "kv_connector_output"):
                         kv_output = resp.kv_connector_output
                         if kv_output is not None:
                             kv_connector_outputs.append(kv_output)
-                
+
                 if kv_connector_outputs and kv_output_aggregator is not None:
                     kv_output_aggregator.merge_failed_kv_outputs_for_ft(
                         kv_connector_outputs
                     )
-                
+
                 raise RuntimeError("One or more workers failed")
-            
+
             return responses[0] if output_rank is not None else responses
 
         future = FutureWrapper(
@@ -1058,9 +1059,7 @@ class WorkerProc:
                     kv_connector_output is not None
                     and not kv_connector_output.is_empty()
                 ):
-                    output = ExceptionWithKVConnectorOutput(
-                        str(e), kv_connector_output
-                    )
+                    output = ExceptionWithKVConnectorOutput(str(e), kv_connector_output)
                 else:
                     output = e
 

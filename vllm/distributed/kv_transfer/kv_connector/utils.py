@@ -64,7 +64,7 @@ class KVOutputAggregator:
         self._send_remaining_count = dict[str, int]()
         self._failed_recving_pending = set[str]()
         self._expected_finished_count = expected_finished_count
-        
+
         # Pending invalid block ids from failed workers
         self._pending_invalid_block_ids = set[int]()
         # Pending finished sending/recving from failed workers
