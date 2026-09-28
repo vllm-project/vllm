@@ -2,10 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 
-from transformers.configuration_utils import PretrainedConfig
+from transformers.configuration_utils import PreTrainedConfig
 
 
-class OlmoHybridConfig(PretrainedConfig):
+class OlmoHybridConfig(PreTrainedConfig):
     r"""Configuration class for [`OlmoHybridModel`]. It is used to
         instantiate an OLMo Hybrid model according to the specified
         arguments, defining the model architecture. Instantiating a

@@ -10,7 +10,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 from einops import rearrange
-from transformers import BaseImageProcessor, PretrainedConfig
+from transformers import BaseImageProcessor, PreTrainedConfig
 from transformers.activations import GELUActivation
 from transformers.feature_extraction_utils import BatchFeature
 from transformers.modeling_outputs import BaseModelOutput, BaseModelOutputWithPooling
@@ -191,7 +191,7 @@ KeyeVideoInputs: TypeAlias = KeyeVideoPixelInputs | KeyeVideoEmbeddingInputs
 
 
 class KeyeVisionEmbeddings(nn.Module):
-    def __init__(self, config: PretrainedConfig):
+    def __init__(self, config: PreTrainedConfig):
         super().__init__()
         self.config = config
         self.embed_dim = config.hidden_size
@@ -349,7 +349,7 @@ class KeyeSiglipAttention(nn.Module):
 
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ):
@@ -487,7 +487,7 @@ class SigLIPRotaryEmbedding(nn.Module):
 class KeyeSiglipEncoderLayer(nn.Module):
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ):
@@ -539,7 +539,7 @@ class KeyeSiglipEncoderLayer(nn.Module):
 class KeyeSiglipEncoder(nn.Module):
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ):
@@ -634,7 +634,7 @@ class KeyeSiglipEncoder(nn.Module):
 class KeyeSiglipVisionTransformer(nn.Module):
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ):
@@ -710,7 +710,7 @@ class KeyeSiglipVisionTransformer(nn.Module):
 
 
 class KeyeSiglipVisionModel(nn.Module):
-    config_class = PretrainedConfig
+    config_class = PreTrainedConfig
     main_input_name = "pixel_values"
 
     hf_to_vllm_mapper = WeightsMapper(
@@ -724,7 +724,7 @@ class KeyeSiglipVisionModel(nn.Module):
 
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ):
@@ -787,8 +787,8 @@ class KeyeSiglipVisionModel(nn.Module):
 class Projector(nn.Module):
     def __init__(
         self,
-        text_config: PretrainedConfig,
-        vision_config: PretrainedConfig,
+        text_config: PreTrainedConfig,
+        vision_config: PreTrainedConfig,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ):
@@ -1232,7 +1232,7 @@ class BaseKeyeModule(nn.Module, SupportsMultiModal):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
-        config: PretrainedConfig = vllm_config.model_config.hf_config
+        config: PreTrainedConfig = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
 
         self.config = config
@@ -1264,8 +1264,8 @@ class BaseKeyeModule(nn.Module, SupportsMultiModal):
     @abstractmethod
     def _build_projector(
         self,
-        text_config: PretrainedConfig,
-        vision_config: PretrainedConfig,
+        text_config: PreTrainedConfig,
+        vision_config: PreTrainedConfig,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ) -> nn.Module:
@@ -1511,8 +1511,8 @@ class KeyeForConditionalGeneration(
 ):
     def _build_projector(
         self,
-        text_config: PretrainedConfig,
-        vision_config: PretrainedConfig,
+        text_config: PreTrainedConfig,
+        vision_config: PreTrainedConfig,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ) -> nn.Module:
