@@ -2152,6 +2152,15 @@ class Scheduler(SchedulerInterface):
                         self.kv_cache_manager.estimate_cached_tokens(request)
                     )
 
+            # Extract sample logprobs before stop handling can replace the
+            # sampling parameters for a streaming continuation.
+            if (
+                request.sampling_params is not None
+                and request.sampling_params.num_logprobs is not None
+                and logprobs
+            ):
+                new_logprobs = logprobs.slice_request(req_index, len(new_token_ids))
+
             finish_reason = None
             if stopped:
                 # Capture finish_reason BEFORE _handle_stopped_request, which may
@@ -2176,14 +2185,6 @@ class Scheduler(SchedulerInterface):
                     stopped_running_reqs.add(request)
                 else:
                     stopped_preempted_reqs.add(request)
-
-            # Extract sample logprobs if needed.
-            if (
-                request.sampling_params is not None
-                and request.sampling_params.num_logprobs is not None
-                and logprobs
-            ):
-                new_logprobs = logprobs.slice_request(req_index, len(new_token_ids))
 
             if self.return_sampling_mask:
                 sampling_masks = model_runner_output.sampling_masks
@@ -2402,6 +2403,16 @@ class Scheduler(SchedulerInterface):
         """Return True if finished (can be False for resumable requests)."""
         if not request.resumable:
             return True
+
+        # Drop the finished turn's in-flight work and resume from the
+        # materialized frontier.
+        safe_frontier = request.num_computed_tokens - request.num_output_placeholders
+        assert safe_frontier >= 0
+        request.num_computed_tokens = safe_frontier
+        request.spec_token_ids = []
+        request.drop_stale_output = True
+        request.num_stale_output_tokens = request.num_in_flight_tokens
+        request.num_output_placeholders = 0
 
         if request.streaming_queue:
             update = request.streaming_queue.popleft()
