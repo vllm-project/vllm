@@ -5,6 +5,7 @@
 
 mod config;
 mod error;
+mod extensions;
 mod grpc;
 mod listener;
 mod lora;
@@ -32,6 +33,8 @@ pub use config::{
     DEFAULT_LOG_STATS_INTERVAL, DEFAULT_REQUEST_BODY_LIMIT_BYTES, HttpListenerMode, LoraModulePath,
     OutputLogging, TlsConfig,
 };
+pub use extensions::ServeExtensions;
+use extensions::StateExtensions;
 use hyper::body::Incoming;
 use hyper::server::conn::http1;
 use hyper_util::rt::{TokioIo, TokioTimer};
@@ -78,7 +81,7 @@ fn effective_served_model_names(model: &str, served_model_name: &[String]) -> Ve
 
 /// Build the shared application state for one configured model and one engine
 /// client, including any static LoRA adapters from `--lora-modules`.
-async fn build_state(config: &Config) -> Result<Arc<AppState>> {
+async fn build_state(config: &Config, extensions: &StateExtensions) -> Result<Arc<AppState>> {
     // Fix the histogram buckets before the engine connection records metrics.
     METRICS.set_custom_histogram_buckets(config.custom_histogram_buckets.clone());
 
@@ -136,7 +139,8 @@ async fn build_state(config: &Config) -> Result<Arc<AppState>> {
     let llm = Llm::new(client)
         .with_log_stats(config.log_stats_interval.filter(|_| !config.disable_log_stats))
         .with_request_id_randomization(!config.disable_request_id_randomization)
-        .with_stream_interval(config.stream_interval);
+        .with_stream_interval(config.stream_interval)
+        .with_request_observers(extensions.request_observers.clone());
     let text = TextLlm::new(llm, text_backend)
         .with_max_logprobs(config.max_logprobs)
         .with_structured_outputs_backend(config.structured_outputs_backend);
@@ -210,6 +214,28 @@ pub async fn serve_with_router_extension<F>(
 where
     F: FnOnce(Router) -> Router,
 {
+    serve_inner(config, shutdown, extend_router, StateExtensions::default()).await
+}
+
+/// Run the OpenAI-compatible HTTP server with [`ServeExtensions`].
+pub async fn serve_with_extensions(
+    config: Config,
+    shutdown: CancellationToken,
+    extensions: ServeExtensions,
+) -> Result<()> {
+    let (extend_router, extensions) = extensions.into_parts();
+    serve_inner(config, shutdown, extend_router, extensions).await
+}
+
+async fn serve_inner<F>(
+    config: Config,
+    shutdown: CancellationToken,
+    extend_router: F,
+    extensions: StateExtensions,
+) -> Result<()>
+where
+    F: FnOnce(Router) -> Router,
+{
     config.validate().context("invalid OpenAI frontend configuration")?;
 
     // Build the TLS server config once, up front, so a bad cert/key fails fast
@@ -224,7 +250,7 @@ where
     // Also check shutdown during the (potentially long) startup handshake and
     // static LoRA loading.
     let state = tokio::select! {
-        result = build_state(&config) => result?,
+        result = build_state(&config, &extensions) => result?,
         _ = shutdown.cancelled() => return Ok(()),
     };
     let model = state.primary_model_name().to_owned();
