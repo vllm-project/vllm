@@ -4,7 +4,12 @@
 
 from typing import Any
 
-from vllm.config import VllmConfig, get_layers_from_vllm_config
+from vllm.config import (
+    CompilationMode,
+    CUDAGraphMode,
+    VllmConfig,
+    get_layers_from_vllm_config,
+)
 from vllm.distributed import get_kvpp_group
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.platforms import current_platform
@@ -22,7 +27,22 @@ def get_kv_cache_placement(
     if parallel.enable_dbo:
         raise ValueError("KVPP does not yet support overlapping microbatches.")
     if not vllm_config.model_config.enforce_eager:
-        raise ValueError("KVPP currently requires explicit eager execution.")
+        compilation = vllm_config.compilation_config
+        # Cache acquisition and release must run eagerly on every replay.
+        if not (
+            compilation.mode == CompilationMode.VLLM_COMPILE
+            and compilation.cudagraph_mode == CUDAGraphMode.PIECEWISE
+            and not compilation.use_inductor_graph_partition
+            and compilation.splitting_ops_contain_attention()
+            and compilation.splitting_ops_contain_kv_cache_update()
+        ):
+            raise ValueError(
+                "KVPP requires eager execution or VLLM_COMPILE with PIECEWISE "
+                "CUDA graphs and Dynamo splitting of attention and KV cache "
+                "updates. Use --enforce-eager, or -cc.mode=3 "
+                "-cc.cudagraph_mode=PIECEWISE -cc.use_inductor_graph_partition=false "
+                "with the default splitting_ops."
+            )
     if vllm_config.attention_config.hisparse_config is not None:
         raise ValueError("KVPP cannot yet be combined with HiSparse storage.")
 

@@ -8,11 +8,22 @@ scheduler reference counts retain their existing meanings.
 
 ## Enablement and limits
 
-Use `--enable-kvpp --enforce-eager` with PCP x TP >= 2 and Model Runner V2
+Use `--enable-kvpp` with PCP x TP >= 2 and Model Runner V2
 (`VLLM_USE_V2_MODEL_RUNNER=1`). KVPP is disabled by default
 (`CacheConfig.enable_kvpp=False`). KVPP on GPU rejects Model Runner V1. This
 implementation supports NVIDIA CUDA and NCCL broadcast; it does not expose a
 transport selector.
+
+Choose eager execution with `--enforce-eager`, or compiled piecewise execution:
+
+```text
+-cc.mode=3 -cc.cudagraph_mode=PIECEWISE -cc.use_inductor_graph_partition=false
+```
+
+Keep the default `splitting_ops`: attention and KV cache updates must remain
+outside captured graphs so cache acquisition, prefetch, and release run on every
+replay. FULL, FULL_AND_PIECEWISE, breakable graphs, and Inductor graph partitioning
+are not enabled for KVPP. The isolated GSM8K guard uses compiled PIECEWISE.
 
 For example, combine `--tensor-parallel-size 2` with
 `--prefill-context-parallel-size 2` to distribute bundles across four replica
@@ -27,9 +38,9 @@ returns its main cache and, when present, its sparse-indexer cache as one bundle
 With DCP=1, PCP gathers new prefill KV before the ordinary cache update, so every
 PCP rank retains a full replica. KVPP reuses that path unchanged. PCP retains its
 Model Runner V2 capability limits, including no PCP + PP execution yet.
-Draft caches remain local. DCP, DBO, HiSparse, cross-layer KV sharing, and
-graph execution are rejected until their storage and lifetime contracts are
-implemented. Ordinary TP-sharded K/V heads cannot use owner-retains-updates.
+Draft caches remain local. DCP, DBO, HiSparse, and cross-layer KV sharing are
+rejected until their storage and lifetime contracts are implemented. Ordinary
+TP-sharded K/V heads cannot use owner-retains-updates.
 
 `SimpleCPUOffloadConnector` can offload owned persistent cache; other KV
 connectors fail closed. External or remote connectors need an ownership manifest

@@ -2,11 +2,18 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Distributed data-lifetime tests for layer-sharded cache materialization."""
 
+from types import SimpleNamespace
+
 import pytest
 import torch
 import torch.multiprocessing as mp
 
-from vllm.config import VllmConfig, set_current_vllm_config
+from vllm.config import (
+    CompilationMode,
+    CUDAGraphMode,
+    VllmConfig,
+    set_current_vllm_config,
+)
 from vllm.distributed import (
     cleanup_dist_env_and_memory,
     destroy_model_parallel,
@@ -31,8 +38,68 @@ from vllm.v1.kv_cache_placement import (
     KVCachePlacement,
     build_kv_cache_storage,
 )
+from vllm.v1.worker import kv_cache_placement
 from vllm.v1.worker.kvpp_runtime import KVPPRuntime
 from vllm.v1.worker.utils import allocate_kv_cache
+
+
+@pytest.mark.parametrize(
+    "enforce_eager,mode,cg_mode,inductor_partition,missing_split,allowed",
+    [
+        (True, 0, "NONE", False, None, True),
+        (False, 3, "PIECEWISE", False, None, True),
+        (False, 3, "FULL", False, None, False),
+        (False, 3, "FULL_AND_PIECEWISE", False, None, False),
+        (False, 3, "NONE", False, None, False),
+        (False, 0, "PIECEWISE", False, None, False),
+        (False, 3, "PIECEWISE", True, None, False),
+        (False, 3, "PIECEWISE", False, "unified_mla_kv_cache_update", False),
+        (False, 3, "PIECEWISE", False, "unified_mla_attention_with_output", False),
+    ],
+)
+def test_placement_requires_replay_time_cache_hooks(
+    monkeypatch,
+    enforce_eager,
+    mode,
+    cg_mode,
+    inductor_partition,
+    missing_split,
+    allowed,
+):
+    """Allow the verified piecewise path; reject configurations capturing KV hooks."""
+    config = VllmConfig()
+    config.model_config = SimpleNamespace(enforce_eager=enforce_eager)
+    compilation = config.compilation_config
+    compilation.mode = CompilationMode.VLLM_COMPILE
+    compilation.use_inductor_graph_partition = False
+    compilation.set_splitting_ops_for_v1("naive")
+    compilation.mode = CompilationMode(mode)
+    compilation.cudagraph_mode = CUDAGraphMode[cg_mode]
+    compilation.use_inductor_graph_partition = inductor_partition
+    if missing_split is not None:
+        compilation.splitting_ops.remove(f"vllm::{missing_split}")
+
+    layers = {}
+    for name in ("a", "b"):
+        layer = SimpleNamespace()
+        layer.get_kv_cache_bundle = lambda layer=layer: (layer,)
+        layers[name] = layer
+    monkeypatch.setattr(kv_cache_placement.current_platform, "is_cuda", lambda: True)
+    monkeypatch.setattr(
+        kv_cache_placement, "get_layers_from_vllm_config", lambda *_: layers
+    )
+    monkeypatch.setattr(
+        kv_cache_placement,
+        "get_kvpp_group",
+        lambda: SimpleNamespace(rank_in_group=0, world_size=2),
+    )
+    runner = SimpleNamespace(get_kv_cache_spec=lambda: dict.fromkeys(layers))
+    if allowed:
+        placement = kv_cache_placement.get_kv_cache_placement(config, runner)
+        assert [bundle.owner for bundle in placement.bundles] == [0, 1]
+    else:
+        with pytest.raises(ValueError, match="KVPP requires eager execution"):
+            kv_cache_placement.get_kv_cache_placement(config, runner)
 
 
 def _runtime_worker(rank: int, port: int, tp_size: int, pcp_size: int, pp_size: int):

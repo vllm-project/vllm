@@ -7,7 +7,9 @@ max_concurrency: 8
 server_args: >-
   --tensor-parallel-size 2
   --prefill-context-parallel-size 2
-  --enforce-eager
+  -cc.mode=3
+  -cc.cudagraph_mode=PIECEWISE
+  -cc.use_inductor_graph_partition=false
   --max-model-len 4096
   --kv-cache-memory-bytes 536870912
   --enable-kvpp

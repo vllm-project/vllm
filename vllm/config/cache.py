@@ -74,6 +74,8 @@ class CacheConfig:
     """Enable KV layer parallelism within a verified replica group.
 
     GPU KVPP requires Model Runner V2 and replicated KV across PCP x TP (DCP=1).
+    Execution must be eager or use compiled PIECEWISE CUDA graphs with attention
+    and KV cache updates kept outside the captured graphs.
     KVPP retains each target layer on one rank and
     materializes other layers in reusable receive buffers during execution.
     """
