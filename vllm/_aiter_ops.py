@@ -122,18 +122,6 @@ def is_aiter_found() -> bool:
 IS_AITER_FOUND = is_aiter_found()
 
 
-@functools.cache
-def _has_aiter_triton_sparse_mla() -> bool:
-    # Older aiter builds do not ship this kernel.
-    try:
-        from aiter.ops.triton.attention.sparse_mla import (  # noqa: F401
-            sparse_mla_fwd,
-        )
-    except ImportError:
-        return False
-    return True
-
-
 class _DlInfo(ctypes.Structure):
     _fields_ = [
         ("dli_fname", ctypes.c_char_p),
@@ -2417,8 +2405,6 @@ class rocm_aiter_ops:
             reason = "VLLM_ROCM_USE_AITER is off"
         elif not on_gfx950():
             reason = "the kernel is gfx950-only"
-        elif not _has_aiter_triton_sparse_mla():
-            reason = "this aiter build has no aiter.ops.triton.attention.sparse_mla"
         else:
             return True
         logger.warning_once(

@@ -40,10 +40,10 @@ def test_triton_sparse_mla_gate(monkeypatch) -> None:
         assert not enabled(aiter=True, flag=False) and not warnings
         assert not enabled(aiter=False, flag=True)
         assert "VLLM_ROCM_USE_AITER is off" in warnings.pop()
-        # Without the kernel the flag warns and falls back, whatever the arch.
-        monkeypatch.setattr(aiter_ops, "_has_aiter_triton_sparse_mla", lambda: False)
-        assert not enabled(aiter=True, flag=True)
-        assert ("sparse_mla" if on_gfx950() else "gfx950") in warnings.pop()
+        # On gfx950 the flag takes effect; elsewhere it warns and falls back.
+        assert enabled(aiter=True, flag=True) == on_gfx950()
+        if not on_gfx950():
+            assert "gfx950" in warnings.pop()
     finally:
         monkeypatch.undo()
         rocm_aiter_ops.refresh_env_variables()
