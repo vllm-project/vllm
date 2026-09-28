@@ -34,7 +34,6 @@ def test_cpu_gemm_wna16_3d_input():
         q_weight=q_weight,
         scales=scales,
         zeros=None,
-        g_idx=None,
         bias=None,
         pack_factor=pack_factor,
         isa_hint=isa_hint,
