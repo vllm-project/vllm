@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from dataclasses import fields
+from dataclasses import asdict, fields
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
@@ -516,11 +516,11 @@ def test_kimi_k3_kda_metadata_matches_shared_gdn(
             id="pure-spec-decode",
         ),
         pytest.param(
-            BatchSpec(seq_lens=[100, 65, 20], query_lens=[1, 1, 3]),
+            BatchSpec(seq_lens=[50, 32, 20], query_lens=[50, 16, 3]),
             [-1, -1, 2],
             [True, True, False],
             True,
-            id="recoverssm-mixed-prefill-and-spec-decode",
+            id="recoverssm-prefill-checkpoint-and-spec-decode",
         ),
         pytest.param(
             BatchSpec(seq_lens=[40, 30], query_lens=[1, 1]),
@@ -536,15 +536,20 @@ def test_cross_group_build(
     num_decode_draft_tokens: list[int] | None,
     is_prefilling: list[bool],
     use_recoverssm: bool,
+    monkeypatch: pytest.MonkeyPatch,
 ):
     """A second KV cache group of the same pass shares the first group's
-    batch-level metadata and builds only its own state indices."""
+    batch-level metadata but rebuilds its state indices and checkpoints."""
+    monkeypatch.setattr("vllm.utils.torch_utils.PIN_MEMORY", False)
+    monkeypatch.setattr("vllm.v1.attention.backends.utils.PIN_MEMORY", False)
     first, second, ref = (
         _make_builder(
             KimiK3KDAMetadataBuilder,
             num_speculative_tokens=2,
             full_cuda_graph=False,
             use_recoverssm=use_recoverssm,
+            mamba_cache_mode="align" if use_recoverssm else "none",
+            num_prefill_checkpoint_blocks=1 if use_recoverssm else 0,
         )
         for _ in range(3)
     )
@@ -557,15 +562,33 @@ def test_cross_group_build(
             "num_accepted_tokens": torch.ones(batch.batch_size, dtype=torch.int32),
         }
     cache: dict = {}
-    first_common, second_common = (
-        create_common_attn_metadata(batch, BLOCK_SIZE, DEVICE).replace(
-            is_prefilling=torch.tensor(is_prefilling), _cross_group_cache=cache
-        )
-        for _ in range(2)
+    first_common = create_common_attn_metadata(
+        batch, BLOCK_SIZE, DEVICE, arange_block_indices=True
+    ).replace(is_prefilling=torch.tensor(is_prefilling), _cross_group_cache=cache)
+    second_common = first_common.replace(
+        block_table_tensor=first_common.block_table_tensor + 100
     )
+    if use_recoverssm:
+        for builder, common in (
+            (first, first_common),
+            (second, second_common),
+            (ref, second_common),
+        ):
+            builder.mamba_aligned_state_indices = mamba_get_block_table_tensor(
+                common.block_table_tensor,
+                common.seq_lens,
+                builder.kv_cache_spec,
+                "align",
+            )
     first_meta = first.build(0, first_common, **kwargs)
     meta = second.build(0, second_common, **kwargs)
     expected = ref.build(0, second_common.replace(_cross_group_cache=None), **kwargs)
+
+    if use_recoverssm:
+        assert first_meta.checkpoint is not None
+        assert meta.checkpoint is not None
+        assert meta.checkpoint is not first_meta.checkpoint
+        assert meta.checkpoint.state_indices[0].item() == 102
 
     state_fields = (
         "spec_state_indices_tensor",
@@ -579,8 +602,10 @@ def test_cross_group_build(
             assert actual is second.recoverssm_context
         elif field.name not in state_fields:
             assert actual is getattr(first_meta, field.name)
-        elif field.name == "recoverssm_commit" and actual is not None:
-            torch.testing.assert_close(vars(actual), vars(expected.recoverssm_commit))
+        elif field.name in {"recoverssm_commit", "checkpoint"} and actual is not None:
+            torch.testing.assert_close(
+                asdict(actual), asdict(getattr(expected, field.name))
+            )
         else:
             torch.testing.assert_close(actual, getattr(expected, field.name))
 
