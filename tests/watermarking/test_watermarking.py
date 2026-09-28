@@ -9,6 +9,7 @@ import torch
 
 from vllm import SamplingParams
 from vllm import logger as vllm_logger
+from vllm.config import VllmConfig
 from vllm.config.watermarking import WatermarkConfig
 from vllm.platforms import current_platform
 from vllm.v1.sample.ops.topk_topp_sampler import apply_top_k_top_p_pytorch
@@ -65,9 +66,17 @@ def make_gpu_watermark_sampler(monkeypatch):
             max_num_reqs=max_num_reqs,
             vocab_size=vocab_size,
             device=torch.device("cpu"),
+            all_token_ids=SimpleNamespace(gpu=torch.zeros(max_num_reqs, 1)),
+            prompt_len=SimpleNamespace(
+                np=np.zeros(max_num_reqs, dtype=np.int32),
+                gpu=torch.zeros(max_num_reqs, dtype=torch.int32),
+            ),
+            prefill_len=SimpleNamespace(np=np.zeros(max_num_reqs, dtype=np.int32)),
+            total_len=SimpleNamespace(gpu=torch.zeros(max_num_reqs, dtype=torch.int32)),
         )
         return GPUWatermarkSampler(
             watermarker,
+            vllm_config=VllmConfig(),
             max_num_reqs=max_num_reqs,
             vocab_size=vocab_size,
             device=torch.device("cpu"),
@@ -330,8 +339,8 @@ def test_gpu_sampler_respects_mixed_request_watermarking(
     monkeypatch, make_gpu_watermark_sampler
 ):
     sampler = make_gpu_watermark_sampler(StubWatermarker(), deduplicate_contexts="none")
-    sampler.add_request(0, 1, SamplingParams(watermarking=True))
-    sampler.add_request(1, 1, SamplingParams(watermarking=False))
+    sampler.add_request(0, SamplingParams(watermarking=True))
+    sampler.add_request(1, SamplingParams(watermarking=False))
     sampler.apply_staged_writes()
     sampler._get_contexts = lambda expanded_idx_mapping: torch.zeros(
         2, 1, dtype=torch.int64
@@ -382,7 +391,7 @@ def test_gpu_sampler_filters_top_k_top_p_before_watermarking(
     sampler = make_gpu_watermark_sampler(
         watermarker, max_num_reqs=1, vocab_size=4, deduplicate_contexts="none"
     )
-    sampler.add_request(0, 1, SamplingParams(top_k=2, top_p=0.8, watermarking=True))
+    sampler.add_request(0, SamplingParams(top_k=2, top_p=0.8, watermarking=True))
     sampler.apply_staged_writes()
     sampler._get_contexts = lambda expanded_idx_mapping: torch.zeros(
         1, 1, dtype=torch.int64

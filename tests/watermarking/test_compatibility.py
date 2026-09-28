@@ -27,6 +27,8 @@ def _input_processor(server_uses_watermarking: bool = True) -> InputProcessor:
         enable_trace_replay=True,
         is_multimodal_model=False,
         supports_multimodal_inputs=False,
+        runner_type="generate",
+        is_diffusion=False,
     )
     config.watermark_config = (
         WatermarkConfig(key=42) if server_uses_watermarking else None
