@@ -15,28 +15,39 @@ pytestmark = pytest.mark.skipif(
 WIDTH = 12 * 128
 
 
-@pytest.mark.parametrize("num_tokens", [0, 1, 8, 16, 257])
-@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16, torch.float32])
+@pytest.mark.parametrize(
+    ("num_tokens", "dtype", "contiguous"),
+    [
+        *[
+            (n, dt, True)
+            for n in (0, 1, 8, 16, 257)
+            for dt in (
+                torch.bfloat16,
+                torch.float16,
+                torch.float32,
+            )
+        ],
+        # Non-contiguous input keeps the torch expression, which sigmoids in
+        # the activation dtype rather than fp32.
+        (8, torch.bfloat16, False),
+    ],
+)
 @torch.inference_mode()
-def test_sigmoid_gate_mul_matches_reference(num_tokens: int, dtype: torch.dtype):
+def test_sigmoid_gate_mul_matches_reference(
+    num_tokens: int, dtype: torch.dtype, contiguous: bool
+):
     from vllm.models.kimi_k3.amd.ops.sigmoid_gate import sigmoid_gate_mul
 
     torch.manual_seed(num_tokens)
-    x = torch.randn(num_tokens, WIDTH, dtype=dtype, device="cuda")
     gate = torch.randn(num_tokens, WIDTH, dtype=dtype, device="cuda") * 4
+    if contiguous:
+        x = torch.randn(num_tokens, WIDTH, dtype=dtype, device="cuda")
+        expected = (x.float() * gate.float().sigmoid()).to(dtype)
+    else:
+        x = torch.randn(num_tokens, 2 * WIDTH, dtype=dtype, device="cuda")[:, ::2]
+        expected = x * gate.sigmoid()
 
     out = sigmoid_gate_mul(x, gate)
 
-    expected = (x.float() * gate.float().sigmoid()).to(dtype)
     assert out.shape == x.shape and out.dtype == dtype
     torch.testing.assert_close(out, expected)
-
-
-@torch.inference_mode()
-def test_sigmoid_gate_mul_falls_back_for_noncontiguous_input():
-    from vllm.models.kimi_k3.amd.ops.sigmoid_gate import sigmoid_gate_mul
-
-    x = torch.randn(8, 2 * WIDTH, dtype=torch.bfloat16, device="cuda")[:, ::2]
-    gate = torch.randn(8, WIDTH, dtype=torch.bfloat16, device="cuda")
-
-    torch.testing.assert_close(sigmoid_gate_mul(x, gate), x * gate.sigmoid())
