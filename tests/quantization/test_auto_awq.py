@@ -361,4 +361,9 @@ def test_auto_awq_batch_invariant_dispatch_ignores_input_contiguity(monkeypatch)
         "Expected both the contiguous and non-contiguous inputs to dispatch "
         f"to the fused kernel; got {fused_calls} fused call(s)."
     )
-    torch.testing.assert_close(out_contig, out_noncontig, atol=0, rtol=0)
+    # assert_close(atol=0, rtol=0) still treats +0.0 and -0.0 as equal;
+    # compare raw bytes to catch that and any other bit-level divergence.
+    assert torch.equal(
+        out_contig.contiguous().view(torch.uint8),
+        out_noncontig.contiguous().view(torch.uint8),
+    )

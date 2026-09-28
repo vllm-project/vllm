@@ -185,6 +185,15 @@ fused_fp32_skip = pytest.mark.skipif(
 )
 
 
+def _assert_bit_identical(a: torch.Tensor, b: torch.Tensor) -> None:
+    """torch.testing.assert_close(atol=0, rtol=0) still treats +0.0 and
+    -0.0 as equal; compare raw bytes to catch that and any other
+    bit-level divergence."""
+    assert torch.equal(
+        a.contiguous().view(torch.uint8), b.contiguous().view(torch.uint8)
+    )
+
+
 def _make_fused_gemm_inputs(m: int, n: int, k: int, group_size: int):
     input = torch.rand((m, k), dtype=torch.float16, device=device)
     qweight = torch.randint(
@@ -256,10 +265,13 @@ def test_awq_gemm_fused_fp32_rejects_non_contiguous():
 
 @fused_fp32_skip
 def test_awq_gemm_fused_fp32_rejects_non_exact_group_count():
-    # K=257 with 2 quantization groups: 257 // 2 == 128 looks like a valid
-    # group_size after integer-division truncation, but 257 is not an exact
-    # multiple of 2, so the last group would read one row past scales/qzeros.
-    m, k, n, num_groups = 32, 257, 32, 2
+    # K=16416 with 128 quantization groups: 16416 // 128 == 128 looks like a
+    # valid group_size after integer-division truncation, and 16416 % 32 == 0
+    # satisfies the K/N alignment check, but 16416 is not an exact multiple
+    # of 128 (16416 = 128 * 128 + 32), so the pre-fix code accepted this
+    # shape and the kernel read 32 rows past the end of scales/qzeros for
+    # the last (partial) group.
+    m, k, n, num_groups = 32, 16416, 32, 128
     input = torch.rand((m, k), dtype=torch.float16, device=device)
     qweight = torch.randint(
         0, torch.iinfo(torch.int32).max, (k, n // 8), dtype=torch.int32, device=device
@@ -305,7 +317,7 @@ def test_awq_gemm_fused_fp32_batch_invariant(N, K):
         batch = torch.rand((m, K), dtype=torch.float16, device=device)
         batch[0] = row[0]
         output = awq_gemm_fused_fp32(batch, qweight, scales, qzeros)
-        torch.testing.assert_close(output[0], reference[0], atol=0, rtol=0)
+        _assert_bit_identical(output[0], reference[0])
 
 
 @fused_fp32_skip
