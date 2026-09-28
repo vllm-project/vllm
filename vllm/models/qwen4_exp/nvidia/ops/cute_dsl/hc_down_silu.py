@@ -27,8 +27,6 @@ logger = logging.getLogger(__name__)
 # The fused kernel stops winning past M ~ 64 on Qwen3.8-Next-Flash.
 MAX_FUSED_M = 48
 
-_DEFAULT_FMA_MAX_M = 4
-_DEFAULT_FMA_BS = 128
 # (split_k, num_stages, tile_n)
 _DEFAULT_SPLITK_CONFIG = (6, 4, 16)
 
@@ -68,8 +66,8 @@ class HcDownSiluGemm:
         self._warmup_registered = False
 
     def dispatch(self, m: int) -> CompileKey:
-        if m <= _DEFAULT_FMA_MAX_M or self.k < 2048:
-            return self.CompileKey(backend="fma", M=m, K=self.k, bs=_DEFAULT_FMA_BS)
+        if m <= 4 or self.k < 2048:
+            return self.CompileKey(backend="fma", M=m, K=self.k, bs=128)
         tuned = (
             _SM100F_TUNED_SPLITK
             if current_platform.is_device_capability_family(100)
