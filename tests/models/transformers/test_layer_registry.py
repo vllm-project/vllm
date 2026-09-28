@@ -22,6 +22,26 @@ HW_MODULE = "vllm.model_executor.hw_agnostic.layers.layernorm"
 
 
 @pytest.fixture
+def caplog_vllm(caplog):
+    """`caplog`, but also captures vLLM's loggers.
+
+    vllm/logger.py configures the "vllm" logger with propagate=False, so
+    records from child loggers like this module's `layers` logger reach
+    vLLM's own handler but never bubble up to the root logger where plain
+    `caplog` listens -- and once any `LLM`/`vllm_runner` has been constructed
+    earlier in the same pytest session (e.g. by test_backend.py in this same
+    job), that's the only path left. Attach caplog's handler directly to
+    "vllm" to see them too, regardless of session ordering.
+    """
+    logger = logging.getLogger("vllm")
+    logger.addHandler(caplog.handler)
+    try:
+        yield caplog
+    finally:
+        logger.removeHandler(caplog.handler)
+
+
+@pytest.fixture
 def fake_hw_layernorm(monkeypatch):
     """Inject a hw-agnostic `layernorm` module exposing a sentinel `RMSNorm`.
 
@@ -42,16 +62,16 @@ def test_falls_back_to_vllm_when_disabled(monkeypatch, fake_hw_layernorm):
     assert layers._resolve("layernorm", "RMSNorm") is VllmRMSNorm
 
 
-def test_uses_hw_agnostic_when_enabled(monkeypatch, fake_hw_layernorm, caplog):
+def test_uses_hw_agnostic_when_enabled(monkeypatch, fake_hw_layernorm, caplog_vllm):
     """Enabled and available: the hw-agnostic class is used and logged."""
     monkeypatch.setenv("VLLM_USE_HW_AGNOSTIC", "1")
-    with caplog.at_level(logging.INFO):
+    with caplog_vllm.at_level(logging.INFO):
         resolved = layers._resolve("layernorm", "RMSNorm")
     assert resolved is fake_hw_layernorm.RMSNorm
-    assert "Using hw-agnostic layer: RMSNorm" in caplog.text
+    assert "Using hw-agnostic layer: RMSNorm" in caplog_vllm.text
 
 
-def test_falls_back_when_symbol_missing(monkeypatch, caplog):
+def test_falls_back_when_symbol_missing(monkeypatch, caplog_vllm):
     """Enabled but the symbol is not ported: fall back to vLLM and warn."""
     monkeypatch.setenv("VLLM_USE_HW_AGNOSTIC", "1")
     # A hw-agnostic module without the requested attribute triggers fallback.
@@ -59,10 +79,10 @@ def test_falls_back_when_symbol_missing(monkeypatch, caplog):
     monkeypatch.setitem(sys.modules, HW_MODULE, empty)
     from vllm.model_executor.layers.layernorm import RMSNorm as VllmRMSNorm
 
-    with caplog.at_level(logging.WARNING):
+    with caplog_vllm.at_level(logging.WARNING):
         resolved = layers._resolve("layernorm", "RMSNorm")
     assert resolved is VllmRMSNorm
-    assert "falling back to default" in caplog.text
+    assert "falling back to default" in caplog_vllm.text
 
 
 def test_act_and_mul_falls_back_for_unknown_activation(
