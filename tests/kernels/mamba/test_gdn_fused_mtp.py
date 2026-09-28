@@ -41,6 +41,7 @@ from vllm.v1.attention.backends.gdn_attn import (  # noqa: E402
     GDNAttentionMetadata,
     GDNAttentionMetadataBuilder,
 )
+from vllm.v1.attention.backends.utils import NULL_BLOCK_ID  # noqa: E402
 from vllm.v1.kv_cache_interface import MambaSpec  # noqa: E402
 
 NUM_SPEC = 3
@@ -103,7 +104,7 @@ def _build_layer(
 ):
     layer = types.SimpleNamespace(
         prefix=PREFIX,
-        enable_packed_recurrent_decode=False,
+        enable_packed_recurrent_decode=True,
         disable_tp_for_ba_proj=False,
         tp_size=1,
         num_k_heads=H,
@@ -123,12 +124,16 @@ def _build_layer(
     )
     with set_current_vllm_config(vllm_config):
         layer.chunk_gated_delta_rule = ChunkGatedDeltaRule()
+    layer._fused_decode_ones = torch.ones(8, dtype=torch.int32, device="cuda")
     for name in (
         "rearrange_mixed_qkv",
         "_forward_core",
+        "_forward_core_decode_non_spec",
         "_forward_core_decode_spec_post_conv_fused_norm",
         "_forward_core_decode_spec_fused_norm",
         "_can_use_fused_gdn_mtp_decode",
+        "_can_use_fused_gdn_nonspec_decode",
+        "_forward_core_decode_non_spec_fused_norm",
         "_rms_norm_gated_cuda",
         "_forward_core_fused_norm",
         "_forward_core_fused_norm_packed",
@@ -154,7 +159,10 @@ def _build_layer(
         pytest.param(10, False, id="unsupported-ratio5"),
     ],
 )
-def test_fused_mtp_head_ratio_guard(num_v_heads: int, expected: bool) -> None:
+@pytest.mark.parametrize("speculative", [False, True])
+def test_fused_decode_head_ratio_guard(
+    num_v_heads: int, expected: bool, speculative: bool
+) -> None:
     if not hasattr(torch.ops._C, "fused_gdn_decode_post_conv_mtp"):
         pytest.skip("fused GDN decode MTP op is not built")
 
@@ -168,13 +176,19 @@ def test_fused_mtp_head_ratio_guard(num_v_heads: int, expected: bool) -> None:
         spec_state_indices_tensor=torch.ones(
             1, SPEC_TOKENS, dtype=torch.int32, device="cuda"
         ),
-        spec_sequence_masks=object(),
-        num_decodes=0,
-        num_spec_decodes=1,
+        spec_sequence_masks=object() if speculative else None,
+        num_prefills=0,
+        num_decodes=0 if speculative else 1,
+        num_spec_decodes=1 if speculative else 0,
     )
 
+    can_use = (
+        QwenGatedDeltaNetAttention._can_use_fused_gdn_mtp_decode
+        if speculative
+        else QwenGatedDeltaNetAttention._can_use_fused_gdn_nonspec_decode
+    )
     assert (
-        QwenGatedDeltaNetAttention._can_use_fused_gdn_mtp_decode(
+        can_use(
             cast(QwenGatedDeltaNetAttention, layer),
             cast(GDNAttentionMetadata, attn_metadata),
         )
@@ -237,30 +251,40 @@ def test_fused_forward_uses_packed_entrypoint() -> None:
 
 
 @pytest.mark.parametrize(
-    "seq_lens,query_lens,draft_tokens,expected_fused_calls",
+    "seq_lens,query_lens,draft_tokens,expected_fused_calls,use_cuda_graph",
     [
-        pytest.param([128], [SPEC_TOKENS], [NUM_SPEC], 1, id="pure-mtp"),
+        pytest.param([128], [SPEC_TOKENS], [NUM_SPEC], 1, False, id="pure-mtp"),
         pytest.param(
             [128, 96],
             [SPEC_TOKENS, 64],
             [NUM_SPEC, -1],
             0,
+            False,
             id="mixed-mtp-falls-back",
         ),
-        pytest.param([96], [64], [-1], 0, id="pure-prefill"),
-        pytest.param([128], [1], [-1], 0, id="pure-decode"),
+        pytest.param([96], [64], [-1], 0, False, id="pure-prefill"),
+        # Non-spec single-token decode routes through the fused kernel with
+        # draft width 1 and must match the Triton reference path.
+        pytest.param([128], [1], [-1], 1, False, id="pure-decode"),
+        pytest.param([128, 96], [1, 1], [-1, -1], 1, True, id="decode-graph-padding"),
+        pytest.param(
+            [128, 96], [1, 64], [-1, -1], 0, False, id="mixed-nonspec-falls-back"
+        ),
     ],
 )
 @pytest.mark.parametrize("output_gate_activation", ["silu", "sigmoid"])
+@pytest.mark.parametrize("state_dtype", [torch.float32, torch.bfloat16])
 @torch.inference_mode()
 def test_fused_model_path_matches_reference(
     seq_lens: list[int],
     query_lens: list[int],
     draft_tokens: list[int],
     expected_fused_calls: int,
+    use_cuda_graph: bool,
     output_gate_activation: str,
+    state_dtype: torch.dtype,
 ) -> None:
-    """Fused MTP and its mixed/prefill/decode fallbacks match the reference."""
+    """Fused MTP/decode paths and their fallbacks match the reference."""
     torch.manual_seed(1)
     device = torch.device("cuda")
     vllm_config = _make_vllm_config()
@@ -308,7 +332,7 @@ def test_fused_model_path_matches_reference(
         pool_size, *conv_state_shape, dtype=torch.bfloat16, device=device
     )
     ssm_state_seed = 0.01 * torch.randn(
-        pool_size, *temporal_state_shape, dtype=torch.float32, device=device
+        pool_size, *temporal_state_shape, dtype=state_dtype, device=device
     )
     a_log = 0.1 * torch.randn(HV, dtype=torch.float32, device=device)
     dt_bias = 0.1 * torch.randn(HV, dtype=torch.float32, device=device)
@@ -339,18 +363,6 @@ def test_fused_model_path_matches_reference(
         norm_weight,
         output_gate_activation,
     )
-    reference_out = torch.zeros_like(output_gate)
-    with patch.object(
-        qwen_gdn_linear_attn, "get_forward_context", return_value=context
-    ):
-        reference_layer._forward_core(
-            mixed_qkv=mixed_qkv.clone(),
-            b=b,
-            a=a,
-            core_attn_out=reference_out,
-        )
-    reference_out = reference_layer.norm(reference_out, output_gate)
-
     fused_layer = _build_layer(
         vllm_config,
         conv_state_seed.clone(),
@@ -372,21 +384,72 @@ def test_fused_model_path_matches_reference(
             wraps=fused_op,
         ) as fused_mock,
     ):
-        torch.ops.vllm.qwen_gdn_attention_core_fused_norm_packed(
-            mixed_qkvz.clone(),
-            ba,
-            fused_out,
-            layer_name=_encode_layer_name(PREFIX),
+        packed_input = mixed_qkvz.clone()
+
+        def run_fused():
+            torch.ops.vllm.qwen_gdn_attention_core_fused_norm_packed(
+                packed_input, ba, fused_out, layer_name=_encode_layer_name(PREFIX)
+            )
+
+        if use_cuda_graph:
+            run_fused()
+            torch.accelerator.synchronize()
+            fused_mock.reset_mock()
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph):
+                run_fused()
+            # Replay the two-request graph with one request in a different
+            # state slot. Padding must not update any other cache entry.
+            indices = metadata.non_spec_state_indices_tensor
+            cu_seqlens = metadata.non_spec_query_start_loc
+            assert indices is not None and cu_seqlens is not None
+            indices[:1].copy_(indices[1:2])
+            indices[1:].fill_(NULL_BLOCK_ID)
+            cu_seqlens[2:].fill_(1)
+            packed_input.copy_(mixed_qkvz)
+            fused_layer.kv_cache[0].copy_(conv_state_seed)
+            fused_layer.kv_cache[1].copy_(ssm_state_seed)
+            graph.replay()
+            torch.accelerator.synchronize()
+        else:
+            run_fused()
+
+    reference_out = torch.zeros_like(output_gate)
+    with patch.object(
+        qwen_gdn_linear_attn, "get_forward_context", return_value=context
+    ):
+        reference_layer._forward_core(
+            mixed_qkv=mixed_qkv.clone(),
+            b=b,
+            a=a,
+            core_attn_out=reference_out,
         )
+    reference_out = reference_layer.norm(reference_out, output_gate)
 
     assert fused_mock.call_count == expected_fused_calls
     torch.testing.assert_close(
         fused_layer.kv_cache[0], reference_layer.kv_cache[0], atol=0, rtol=0
     )
-    torch.testing.assert_close(fused_out, reference_out, atol=3e-2, rtol=3e-2)
+    num_valid_tokens = 1 if use_cuda_graph else num_tokens
+    torch.testing.assert_close(
+        fused_out[:num_valid_tokens],
+        reference_out[:num_valid_tokens],
+        atol=3e-2,
+        rtol=3e-2,
+    )
     torch.testing.assert_close(
         fused_layer.kv_cache[1],
         reference_layer.kv_cache[1],
         atol=3e-2,
         rtol=3e-2,
     )
+    if use_cuda_graph:
+        assert indices is not None
+        untouched = torch.ones(pool_size, dtype=torch.bool, device=device)
+        untouched[indices[:1]] = False
+        torch.testing.assert_close(
+            fused_layer.kv_cache[1][untouched],
+            ssm_state_seed[untouched],
+            atol=0,
+            rtol=0,
+        )
