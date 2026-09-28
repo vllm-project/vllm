@@ -1957,8 +1957,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                         self.model, model_inputs, ubatch_state
                     )
                 elif batch_desc.cg_mode == CUDAGraphMode.PIECEWISE:
-                    # Run the PIECEWISE graph (compiled PW cudagraph or
-                    # breakable cudagraph, chosen inside run_pw_graph).
+                    # Run the PIECEWISE graph (compiled PW cudagraph or breakable
+                    # cudagraph, chosen inside run_pw_graph). cg_mode is only
+                    # PIECEWISE after the cudagraph manager exists.
                     assert self.cudagraph_manager is not None
                     model_output = self.cudagraph_manager.run_pw_graph(
                         self.model, model_inputs
