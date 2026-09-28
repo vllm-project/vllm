@@ -24,14 +24,6 @@ class KVPPRuntime:
     source reads as well as the receivers' writes and scratch-buffer reuse.
     """
 
-    @classmethod
-    def initialize_transport(cls) -> None:
-        """Warm up the managed communicator before worker memory profiling."""
-        group = get_kvpp_group()
-        probe = torch.zeros(1, dtype=torch.uint8, device=group.device)
-        group.broadcast(probe)
-        torch.cuda.current_stream().synchronize()
-
     def __init__(self, config: KVCacheConfig, caches: dict[str, torch.Tensor]):
         plan = config.storage_plan
         assert plan is not None

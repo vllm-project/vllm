@@ -16,6 +16,7 @@ from vllm.distributed import (
     init_distributed_environment,
     initialize_model_parallel,
 )
+from vllm.distributed.utils import warmup_process_group
 from vllm.forward_context import acquire_kv_cache, release_kv_cache, set_forward_context
 from vllm.utils.network_utils import get_open_port
 from vllm.v1.kv_cache_interface import (
@@ -52,7 +53,7 @@ def _runtime_worker(rank: int, port: int, tp_size: int, pp_size: int):
         group = get_kvpp_group()
         assert group.ranks == get_tp_group().ranks
         assert group.device_group is not get_tp_group().device_group
-        KVPPRuntime.initialize_transport()
+        warmup_process_group(group, ["broadcast"])
         local_rank = group.rank_in_group
         stage_value = 128 * (rank // tp_size)
         # Unequal component sizes and >2 nonowner layers exercise both scratch
@@ -142,7 +143,7 @@ def _runtime_worker(rank: int, port: int, tp_size: int, pp_size: int):
                     pipeline_model_parallel_size=pp_size,
                 )
             if enabled:
-                KVPPRuntime.initialize_transport()
+                warmup_process_group(get_kvpp_group(), ["broadcast", "all_reduce"])
                 probe = torch.tensor([rank], device="cuda")
                 get_kvpp_group().broadcast(probe)
                 assert probe.item() == rank // tp_size * tp_size

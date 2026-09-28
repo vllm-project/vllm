@@ -117,11 +117,6 @@ class WorkerBase:
 
         return get_kv_cache_placement(self.vllm_config, self.model_runner)
 
-    def initialize_kvpp_transport(self) -> None:
-        from vllm.v1.worker.kvpp_runtime import get_kvpp_runtime_cls
-
-        get_kvpp_runtime_cls().initialize_transport()
-
     def set_kv_cache_layout(self, kv_cache_layout: str) -> None:
         """Adopt the KV cache layout resolved by the engine core."""
         record_kv_cache_layout(self.vllm_config.cache_config, kv_cache_layout)

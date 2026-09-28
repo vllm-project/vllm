@@ -266,7 +266,6 @@ class EngineCore:
             from vllm.v1.kv_cache_placement import validate_kv_cache_placements
 
             validate_kv_cache_placements(kv_cache_specs, placements)
-            self.model_executor.collective_rpc("initialize_kvpp_transport")
 
         # Some layers (e.g. Prefix LM attention) run non-causally and tag their
         # KV cache spec with ``non_causal=True``. The specs are collected here in

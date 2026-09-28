@@ -29,7 +29,7 @@ and a distributed completion contract before they can support this placement.
 ## Placement and capacity
 
 Workers discover bundle order from the loaded model. Contiguous, count-balanced
-partitions choose owners within the TP replica group. Before transport creation,
+partitions choose owners within the TP replica group. Before cache allocation,
 the engine checks that all ranks agree on logical cache specs, bundle order, and
 ownership. `KVCacheStoragePlan` attaches worker-local physical regions to the
 otherwise ordinary `KVCacheConfig`.
@@ -79,9 +79,10 @@ batch has history. There is no per-forward teardown; failed forwards retain thei
 state, and runner shutdown synchronizes the device before releasing cache storage.
 The KVPP group is created alongside TP in `initialize_model_parallel` only when
 KVPP is enabled and destroyed by `destroy_model_parallel`. It has the same ranks
-as TP and a separate communicator. The runtime warms it up before memory
-profiling and uses its device group for asynchronous broadcasts. Device-specific
-runtime implementations provide communication operations and events while group
+as TP and a separate communicator. The GPU worker warms up its broadcast through
+`warmup_process_group` after distributed initialization and before the initial
+memory snapshot. The runtime uses its device group for asynchronous broadcasts.
+Device-specific runtime implementations provide communication operations and events while group
 lifecycle remains in `parallel_state`.
 
 ## Validation
