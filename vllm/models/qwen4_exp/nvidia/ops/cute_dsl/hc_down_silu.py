@@ -9,7 +9,7 @@ are never computed. Output is bf16 (ll_bf16's fp32-output bonus is given up
 to preserve the production rounding boundary).
 
 The GEMM uses an FMA backend for M <= 4 and a split-K MMA backend beyond,
-both with PDL. Dispatch is gated to M <= 48 with an F.linear + hc_silu fallback.
+both with PDL. The model uses its Linear module above M=48.
 """
 
 from __future__ import annotations
@@ -22,15 +22,12 @@ from typing import Any, Literal
 
 import torch
 
-import vllm.envs as envs
 from vllm.platforms import current_platform
-
-from ..hc import hc_silu
 
 logger = logging.getLogger(__name__)
 
 # The fused kernel stops winning past M ~ 64 on Qwen3.8-Next-Flash.
-_MAX_FUSED_M = 48
+MAX_FUSED_M = 48
 # Split-K settings were tuned only for this (rank, hc, K) shape.
 _TUNED_SHAPE = (320, 4, 10240)
 
@@ -268,7 +265,7 @@ def hc_down_silu(
     rank: int,
     hc: int,
 ) -> torch.Tensor:
-    """Qwen4Exp HC down projection + SiLU, with an unfused fallback.
+    """Fused Qwen4Exp HC down projection + SiLU.
 
     Args:
         x: Normalized hyper-hidden input, [M, K].
@@ -281,26 +278,8 @@ def hc_down_silu(
         the fused kernel runs (production discards them).
 
     """
-    if (
-        not envs.VLLM_BATCH_INVARIANT
-        and 1 <= x.shape[0] <= _MAX_FUSED_M
-        and x.dtype == torch.bfloat16
-        and weight.dtype == torch.bfloat16
-        and x.is_cuda
-        and weight.is_cuda
-        and x.device == weight.device
-        and x.is_contiguous()
-        and weight.is_contiguous()
-        and current_platform.has_device_capability(90)
-        and x.shape[1] % 8 == 0
-        and x.shape[1] == weight.shape[1]
-        and weight.shape[0] >= rank + hc
-    ):
-        kernel = _get_kernel(rank, hc, weight.shape[1], x.shape[0] == 1)
-        return kernel(x, weight)
-    down = torch.nn.functional.linear(x, weight)
-    lora = hc_silu(down[:, :rank], hc)
-    return torch.cat([lora, down[:, rank:]], dim=1)
+    kernel = _get_kernel(rank, hc, weight.shape[1], x.shape[0] == 1)
+    return kernel(x, weight)
 
 
 def request_hc_down_silu_warmup(
@@ -318,13 +297,14 @@ def request_hc_down_silu_warmup(
     """
     if not current_platform.has_device_capability(90) or k % 8 != 0:
         return
-    m_set = {int(m) for m in m_values if 1 <= m <= _MAX_FUSED_M}
+    m_set = {int(m) for m in m_values if 1 <= m <= MAX_FUSED_M}
     # M=1 dispatches to the weight-prefetching PDL variant.
     _get_kernel(rank, hc, k, True).request_warmup(m_set & {1})
     _get_kernel(rank, hc, k).request_warmup(m_set - {1})
 
 
 __all__ = [
+    "MAX_FUSED_M",
     "hc_down_silu",
     "request_hc_down_silu_warmup",
 ]

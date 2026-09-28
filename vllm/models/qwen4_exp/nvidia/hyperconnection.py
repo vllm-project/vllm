@@ -25,6 +25,7 @@ Typical usage inside a transformer decoder layer::
 import torch
 from torch import nn
 
+import vllm.envs as envs
 from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
     ReplicatedLinear,
@@ -36,7 +37,7 @@ from ..common.hyperconnection import (
     GroupedGemmaRMSNorm,
     HyperConnectionConfig,
 )
-from .ops.cute_dsl.hc_down_silu import hc_down_silu
+from .ops.cute_dsl.hc_down_silu import MAX_FUSED_M, hc_down_silu
 from .ops.hc import (
     grouped_gemma_rmsnorm,
     hc_combine,
@@ -140,7 +141,12 @@ class GatedResidual(nn.Module):
         if not self.use_combine:
             return hc_silu(self.input_mix_weight_down(xn), self.hc_count), None
 
-        if self._use_hc_down_silu:
+        use_fused = (
+            self._use_hc_down_silu
+            and not envs.VLLM_BATCH_INVARIANT
+            and 1 <= xn.shape[0] <= MAX_FUSED_M
+        )
+        if use_fused:
             down_and_injection = hc_down_silu(
                 xn,
                 self.input_mix_weight_down_block_inject.weight,
@@ -151,7 +157,7 @@ class GatedResidual(nn.Module):
             down_and_injection = self.input_mix_weight_down_block_inject(xn)
         split_sizes = [self.lora_rank, self.hc_count, self.pad_size]
         lora, injection, _ = down_and_injection.split(split_sizes, dim=-1)
-        if not self._use_hc_down_silu:
+        if not use_fused:
             lora = hc_silu(lora, self.hc_count)
         return lora, injection
 
