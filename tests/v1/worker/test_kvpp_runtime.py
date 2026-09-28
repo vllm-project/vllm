@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Distributed data-lifetime tests for layer-sharded cache materialization."""
 
-import numpy as np
 import pytest
 import torch
 import torch.multiprocessing as mp
@@ -32,7 +31,7 @@ from vllm.v1.kv_cache_placement import (
     KVCachePlacement,
     build_kv_cache_storage,
 )
-from vllm.v1.worker.kvpp_runtime import KVPPRuntime, maybe_prepare_kvpp
+from vllm.v1.worker.kvpp_runtime import KVPPRuntime
 from vllm.v1.worker.utils import allocate_kv_cache
 
 
@@ -111,16 +110,14 @@ def _runtime_worker(rank: int, port: int, tp_size: int, pcp_size: int, pp_size: 
         observations = []
         for step in range(5):
             with set_forward_context(None, vllm_config, kvpp_runtime=kvpp_runtime):
-                maybe_prepare_kvpp(kvpp_runtime, np.array([step], dtype=np.int32))
+                kvpp_runtime.prepare_forward(has_history=step > 0)
                 for index, bundle in enumerate(placement.bundles[:-1]):
                     # Delay compute to expose premature scratch reuse.
                     acquire_kv_cache(bundle.layers[1])
                     if step == 1 and index == 0:
                         # Reject reuse without discarding the pending prefetch.
                         with pytest.raises(AssertionError, match="Previous KVPP"):
-                            maybe_prepare_kvpp(
-                                kvpp_runtime, np.array([step], dtype=np.int32)
-                            )
+                            kvpp_runtime.prepare_forward(has_history=step > 0)
                     torch.cuda._sleep(100_000)
                     acquire_kv_cache(bundle.layers[0])
                     for component, name in enumerate(bundle.layers):

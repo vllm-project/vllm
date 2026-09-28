@@ -93,6 +93,7 @@ from vllm.v1.worker.gpu.attn_utils import (
     get_kv_cache_spec,
     init_attn_backend,
     init_kv_cache,
+    maybe_prepare_kvpp,
 )
 from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.buffer_utils import set_default_max_concurrency
@@ -172,7 +173,6 @@ from vllm.v1.worker.gpu.ubatch_utils import (
 from vllm.v1.worker.kvpp_runtime import (
     KVPPRuntime,
     create_kvpp_runtime,
-    maybe_prepare_kvpp,
 )
 from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
 from vllm.v1.worker.utils import (
@@ -1947,17 +1947,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 kvpp_runtime=self.kvpp_runtime,
             ):
                 self.kv_connector.pre_forward(**connector_kwargs)
-                if self.kvpp_runtime is not None:
-                    num_computed_tokens = input_batch.num_computed_tokens_np[
-                        : input_batch.num_reqs
-                    ]
-                    if batch_req_state is not None:
-                        # PCP query offsets include the current prefill. Use
-                        # request history shared by all PCP x TP ranks instead.
-                        num_computed_tokens = self.req_states.num_computed_tokens_np[
-                            batch_req_state.idx_mapping_np
-                        ]
-                    maybe_prepare_kvpp(self.kvpp_runtime, num_computed_tokens)
+                maybe_prepare_kvpp(
+                    self.kvpp_runtime, self.req_states, batch_req_state, input_batch
+                )
                 if ubatch_state is not None:
                     assert self.ubatch_runner is not None
                     model_output = self.ubatch_runner.run(

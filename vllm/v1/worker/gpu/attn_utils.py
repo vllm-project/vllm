@@ -48,6 +48,32 @@ if TYPE_CHECKING:
         BatchExecutionDescriptor,
         CudaGraphManager,
     )
+    from vllm.v1.worker.gpu.input_batch import InputBatch
+    from vllm.v1.worker.gpu.model_runner import BatchReqState
+    from vllm.v1.worker.gpu.states import RequestState
+    from vllm.v1.worker.kvpp_runtime import KVPPRuntime
+
+
+def maybe_prepare_kvpp(
+    runtime: "KVPPRuntime | None",
+    req_states: "RequestState",
+    batch_req_state: "BatchReqState | None",
+    input_batch: "InputBatch",
+) -> None:
+    """Prepare KVPP history tracking without batch processing when disabled."""
+    if runtime is None:
+        return
+    if batch_req_state is not None:
+        # PCP-local query offsets include the current prefill. Read shared
+        # request history, selecting only this batch to exclude stale slots.
+        num_computed_tokens = req_states.num_computed_tokens_np[
+            batch_req_state.idx_mapping_np
+        ]
+    else:
+        # Dummy runs have no request-state mapping; use their synthetic context
+        # lengths and exclude padded entries.
+        num_computed_tokens = input_batch.num_computed_tokens_np[: input_batch.num_reqs]
+    runtime.prepare_forward(bool(np.any(num_computed_tokens > 0)))
 
 
 @dataclass(frozen=True)

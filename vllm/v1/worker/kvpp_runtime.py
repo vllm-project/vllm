@@ -4,7 +4,6 @@
 
 from typing import Any
 
-import numpy as np
 import torch
 import torch.distributed as dist
 
@@ -149,10 +148,3 @@ def create_kvpp_runtime(
     if config.storage_plan is None:
         return None
     return get_kvpp_runtime_cls()(config, caches)
-
-
-def maybe_prepare_kvpp(
-    kvpp_runtime: KVPPRuntime | None, num_computed_tokens: np.ndarray
-) -> None:
-    if kvpp_runtime is not None:
-        kvpp_runtime.prepare_forward(bool(np.any(num_computed_tokens > 0)))
