@@ -93,9 +93,6 @@ if TYPE_CHECKING:
 
 ReqId = str  # Internal scheduler request ID
 TransferId = str  # KV transfer coordination ID (shared by P/D)
-_BOOTSTRAP_QUERY_TIMEOUT_SECONDS = 60.0
-_BOOTSTRAP_QUERY_MAX_ATTEMPTS = 3
-_BOOTSTRAP_QUERY_RETRY_DELAY_SECONDS = 0.1
 
 # Follow NIXL (`nixl/base_worker.py`): HMA packed pages can put more than one
 # KV group on a single allocation. group_index=-1 flattens every group's block
@@ -2441,28 +2438,31 @@ class MooncakeConnectorWorker:
 
     async def _connect_to_prefiller_bootstrap(self, remote_bootstrap_addr: str):
         url = remote_bootstrap_addr + "/query"
+        max_attempts = _BOOTSTRAP_MAX_ATTEMPTS
         try:
             async with httpx.AsyncClient(
-                timeout=_BOOTSTRAP_QUERY_TIMEOUT_SECONDS
+                timeout=envs.VLLM_MOONCAKE_CONNECTOR_TIMEOUT
             ) as client:
-                for attempt in range(1, _BOOTSTRAP_QUERY_MAX_ATTEMPTS + 1):
+                backoff = 1.0
+                for attempt in range(1, max_attempts + 1):
                     try:
                         response = await client.get(url)
                         break
                     except httpx.RequestError as e:
-                        if attempt == _BOOTSTRAP_QUERY_MAX_ATTEMPTS:
+                        if attempt == max_attempts:
                             raise
                         logger.warning(
                             "Bootstrap query to %s failed on attempt %d/%d "
                             "(%s: %s); retrying in %.1f seconds",
                             remote_bootstrap_addr,
                             attempt,
-                            _BOOTSTRAP_QUERY_MAX_ATTEMPTS,
+                            max_attempts,
                             type(e).__name__,
                             e,
-                            _BOOTSTRAP_QUERY_RETRY_DELAY_SECONDS,
+                            backoff,
                         )
-                        await asyncio.sleep(_BOOTSTRAP_QUERY_RETRY_DELAY_SECONDS)
+                        await asyncio.sleep(backoff)
+                        backoff = min(backoff * 2, 10.0)
                 response.raise_for_status()
                 data: dict = response.json()
                 for _, dp_entry in data.items():
