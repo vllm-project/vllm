@@ -43,22 +43,25 @@ def _check_replayssm_parity(
     expected_v2: bool | None = None,
 ):
     # Compare logprobs, not greedy ids: ReplaySSM's fp arithmetic can flip a
-    # near-tie. Baseline and ReplaySSM run at the same TP, so TP numerics are
-    # common-mode and only ReplaySSM varies.
+    # near-tie. Keep Triton as the stable reference while mamba_backend selects
+    # the ReplaySSM implementation under test.
     common = dict(
         max_model_len=1024,
         trust_remote_code=True,
         enable_prefix_caching=False,
         mamba_cache_mode="none",
         tensor_parallel_size=tensor_parallel_size,
-        mamba_backend=mamba_backend,
     )
-    with vllm_runner(model_name, **common) as llm:
+    with vllm_runner(model_name, mamba_backend="triton", **common) as llm:
         if expected_v2 is not None:
             assert llm.llm.llm_engine.vllm_config.use_v2_model_runner is expected_v2
         baseline = llm.generate_greedy_logprobs(PROMPTS, max_tokens=32, num_logprobs=5)
     with vllm_runner(
-        model_name, use_replayssm=True, replayssm_buffer_len=16, **common
+        model_name,
+        use_replayssm=True,
+        replayssm_buffer_len=16,
+        mamba_backend=mamba_backend,
+        **common,
     ) as llm:
         if expected_v2 is not None:
             assert llm.llm.llm_engine.vllm_config.use_v2_model_runner is expected_v2
@@ -113,17 +116,20 @@ def test_replayssm_flashinfer_spec_decode_matches_baseline(vllm_runner, model_na
         trust_remote_code=True,
         enable_prefix_caching=False,
         mamba_cache_mode="none",
-        mamba_backend="flashinfer",
         speculative_config={
             "method": "ngram",
             "num_speculative_tokens": 3,
             "prompt_lookup_max": 3,
         },
     )
-    with vllm_runner(model_name, **common) as llm:
+    with vllm_runner(model_name, mamba_backend="triton", **common) as llm:
         baseline = llm.generate_greedy_logprobs(PROMPTS, max_tokens=32, num_logprobs=5)
     with vllm_runner(
-        model_name, use_replayssm=True, replayssm_buffer_len=16, **common
+        model_name,
+        use_replayssm=True,
+        replayssm_buffer_len=16,
+        mamba_backend="flashinfer",
+        **common,
     ) as llm:
         replay = llm.generate_greedy_logprobs(PROMPTS, max_tokens=32, num_logprobs=5)
 

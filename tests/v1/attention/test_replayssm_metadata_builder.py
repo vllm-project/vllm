@@ -231,6 +231,8 @@ def _create_replayssm_builder(
     vllm_config.cache_config.mamba_cache_mode = mamba_cache_mode
     vllm_config.mamba_config.backend = mamba_backend
     if num_speculative_tokens > 0:
+        # Triton ReplaySSM requires exact synchronous CPU metadata.
+        vllm_config.scheduler_config.async_scheduling = False
         vllm_config.speculative_config = SpeculativeConfig(
             method="ngram",
             num_speculative_tokens=num_speculative_tokens,
