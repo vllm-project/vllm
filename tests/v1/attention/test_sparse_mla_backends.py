@@ -245,8 +245,8 @@ def _dequantize_fp8_ds_mla_entry(
     Args:
         simulate_sm100_e8m0_scales: If True, simulate the SM100 kernel's
             float -> e8m0 -> bf16 scale conversion path.
-    """
 
+    """
     # The first kv_lora_rank bytes store FP8 latent values with one scale per
     # 128 element tile written as float32 right after the latent payload.
     scales = cache_slice.view(torch.float32)[kv_lora_rank // 4 : kv_lora_rank // 4 + 4]
@@ -283,8 +283,8 @@ def _quantize_dequantize_fp8_ds_mla(
     Args:
         simulate_sm100_e8m0_scales: If True, simulate the SM100 kernel's
             float -> e8m0 -> bf16 scale conversion in dequantization.
-    """
 
+    """
     if kv_c.numel() == 0:
         return kv_c.clone(), k_pe.clone()
 
@@ -421,7 +421,18 @@ def test_sparse_backend_decode_correctness(
     workspace_init,
     q_scale: float,
     k_scale: float,
+    monkeypatch,
 ):
+    if (
+        batch_name == "large_q_pure_prefill"
+        and backend_cls == FlashMLASparseBackend
+        and kv_cache_dtype == "fp8_ds_mla"
+        and tensor_parallel_size == 4
+    ):
+        monkeypatch.setattr(
+            "vllm.v1.attention.backends.mla.flashmla_sparse.split_prefill_chunks",
+            lambda rows, capacity: [(i, i + 1) for i in range(len(rows))],
+        )
     if kv_cache_dtype not in backend_cls.supported_kv_cache_dtypes:
         pytest.skip(f"{backend_cls.get_name()} does not support {kv_cache_dtype}")
 
@@ -774,6 +785,10 @@ def test_sparse_backend_decode_correctness(
     )
 
     with torch.inference_mode():
+        if backend_cls == FlashMLASparseBackend and kv_cache_dtype == "fp8_ds_mla":
+            from vllm.v1.worker.workspace import current_workspace_manager
+
+            current_workspace_manager().lock()
         backend_output = mock_layer.forward_impl(
             query_vllm,
             kv_c_vllm,
@@ -1648,10 +1663,12 @@ def test_split_indexer_prefill_chunks_single_request_overflow():
     assert out == expected
 
 
-# 384 is not a power of two, so it counts via the tiled atomic accumulation
-# rather than the single-tile path 128 takes.
-@pytest.mark.parametrize("num_topk_tokens", [128, 384])
-def test_triton_convert_returns_valid_counts(num_topk_tokens: int):
+# Power-of-two, GLM's padded tile, and atomic fallback, with reused buffers.
+@pytest.mark.parametrize(
+    "num_topk_tokens,reuse_buffers",
+    [(128, False), (2176, False), (2176, True), (4224, False), (4224, True)],
+)
+def test_triton_convert_returns_valid_counts(num_topk_tokens: int, reuse_buffers: bool):
     """Test that return_valid_counts correctly counts non-negative indices."""
     device = torch.device(DEVICE_TYPE)
     num_tokens = 8
@@ -1664,8 +1681,7 @@ def test_triton_convert_returns_valid_counts(num_topk_tokens: int):
         num_requests * max_blocks_per_req, dtype=torch.int32, device=device
     ).view(num_requests, max_blocks_per_req)
 
-    # Create token indices with varying numbers of valid entries: half the row,
-    # a quarter of it, the whole row, then a single valid entry -- twice over.
+    # Include partly valid, fully valid, and empty selections for each request.
     token_indices = torch.full(
         (num_tokens, num_topk_tokens), -1, dtype=torch.int32, device=device
     )
@@ -1673,7 +1689,7 @@ def test_triton_convert_returns_valid_counts(num_topk_tokens: int):
         num_topk_tokens // 2,
         num_topk_tokens // 4,
         num_topk_tokens,
-        1,
+        0,
     ] * 2
     expected_valid = []
     for i in range(num_tokens):
@@ -1687,6 +1703,15 @@ def test_triton_convert_returns_valid_counts(num_topk_tokens: int):
         expected_valid, dtype=torch.int32, device=device
     )
 
+    buffers = {}
+    if reuse_buffers:
+        buffers = dict(
+            out=torch.full_like(token_indices, -99),
+            valid_counts_out=torch.full(
+                (num_tokens,), 99, dtype=torch.int32, device=device
+            ),
+        )
+
     # Test with return_valid_counts=True
     result, valid_counts = triton_convert_req_index_to_global_index(
         req_id,
@@ -1695,6 +1720,7 @@ def test_triton_convert_returns_valid_counts(num_topk_tokens: int):
         BLOCK_SIZE=block_size,
         NUM_TOPK_TOKENS=num_topk_tokens,
         return_valid_counts=True,
+        **buffers,
     )
 
     torch.testing.assert_close(valid_counts, expected_valid_tensor, rtol=0, atol=0)

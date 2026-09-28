@@ -169,8 +169,7 @@ def collect_tool_schema(tool_schema: list[CohereNormalizedTool]) -> str:
 def _tool_definitions_to_schema_list(
     tools: str | list[Any],
 ) -> list[CohereNormalizedTool]:
-    """
-    Build the list of ``CohereNormalizedTool`` dicts expected by
+    """Build the list of ``CohereNormalizedTool`` dicts expected by
     ``collect_tool_schema``.
 
     Accepts:
@@ -214,8 +213,7 @@ def _tool_definitions_to_schema_list(
 def _has_effective_tools(
     tools: str | list[Any] | None,
 ) -> TypeGuard[str | list[Any]]:
-    """
-    True when ``tools`` contains at least one tool definition to convert.
+    """True when ``tools`` contains at least one tool definition to convert.
 
     ``ResponsesRequest`` defaults ``tools`` to ``[]``; ``ChatCompletionRequest``
     uses ``None``. Both mean "no tools" here. Strings (e.g. a JSON blob) are
@@ -236,8 +234,7 @@ def convert_schema_to_structural_tags(
     tools: str | list[Any] | None = None,
     model_architecture: str | None = None,
 ) -> str | None:
-    """
-    Returns a response_format string accepted by xgrammar's structural tag format.
+    """Returns a response_format string accepted by xgrammar's structural tag format.
     Uses the canonical shape: {"type": "structural_tag", "format": {...}} with
     format.type "triggered_tags" and tag content type "json_schema" or "grammar".
 
@@ -325,8 +322,7 @@ def _unwrap_nested_schema(candidate: Any) -> dict | None:
 
 
 def _schema_from_json_schema_field(js_wr: Any) -> dict | None:
-    """
-    Extract the JSON Schema object from Chat Completions ``json_schema`` payload.
+    """Extract the JSON Schema object from Chat Completions ``json_schema`` payload.
 
     Accepts:
     - ``JsonSchemaResponseFormat`` (Pydantic) with ``schema`` / ``json_schema`` field
@@ -565,6 +561,15 @@ class CohereCommandParser(DelegatingParser):
             rf_type = _response_format_type(rf)
             if rf_type in ("json_schema", "json_object"):
                 request.response_format = None
+        return request
+
+    def _apply_structural_tag(
+        self, request: ChatCompletionRequest | ResponsesRequest
+    ) -> ChatCompletionRequest | ResponsesRequest:
+        # Note(arpera):
+        # No need to go through _apply_structural_tag in abstract_parser.py
+        # since we have already go through _apply_structural_tags here
+        # So, override this method to return request as is
         return request
 
     def count_reasoning_tokens(self, token_ids: Sequence[int]) -> int:

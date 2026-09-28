@@ -78,6 +78,7 @@ from vllm.v1.kv_cache_interface import MambaSpec
 from ..config import ATTENTION_LAYER_TYPES, QSA_LAYER_TYPE, Qwen4ExpConfig
 from .hyperconnection import GatedResidual, HyperConnectionConfig
 from .low_latency_gemm import enable_qwen4_exp_low_latency_gemm
+from .ops.cute_dsl.hc_down_silu import request_hc_down_silu_warmup
 from .ple_layer import Qwen4ExpPLELayer
 from .qsa import Qwen4ExpQSAAttention
 
@@ -86,7 +87,6 @@ def without_modelopt_fp4(
     quant_config: QuantizationConfig | None,
 ) -> QuantizationConfig | None:
     """Return ``None`` for weights excluded from Qwen4Exp ModelOpt-FP4."""
-
     if quant_config is not None and quant_config.get_name() == "modelopt_fp4":
         return None
     return quant_config
@@ -102,7 +102,6 @@ def _remap_qsa_cache_scale_name(
     that cache directly, so only QSA layers need the final path component
     moved to the owner's persistent ``_k_scale``/``_v_scale`` buffers.
     """
-
     scale_suffixes = {
         "k_proj.k_scale": "_k_scale",
         "k_proj.output_scale": "_k_scale",
@@ -688,6 +687,16 @@ class Qwen4ExpForCausalLM(
         )
         self.set_moe_parameters(self.model.layers)
         enable_qwen4_exp_low_latency_gemm(self, self.model_config.dtype)
+        if self.model_config.dtype == torch.bfloat16:
+            # Precompile the fused HC down+SiLU kernels for every CUDA-graph
+            # capture size in the fused dispatch range, so no CuTe-DSL JIT
+            # happens during graph capture.
+            request_hc_down_silu_warmup(
+                vllm_config.compilation_config.cudagraph_capture_sizes or (),
+                self.config.hc_lowrank,
+                self.config.hc_count,
+                self.config.hidden_size * self.config.hc_count,
+            )
 
     @staticmethod
     def get_model_state_cls():

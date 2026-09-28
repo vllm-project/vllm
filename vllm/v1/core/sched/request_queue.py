@@ -129,8 +129,7 @@ class FCFSRequestQueue(deque[Request], RequestQueue):
 
 
 class PriorityRequestQueue(RequestQueue):
-    """
-    A priority queue that supports heap operations.
+    """A priority queue that supports heap operations.
 
     Respects the ordering defined in the Request class, where
     requests with a smaller value of `priority` are processed first.
