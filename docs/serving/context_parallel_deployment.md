@@ -20,6 +20,15 @@ Both approaches are under active development.
 
 Due to the auto-regressive nature of decoding, every decoding step needs to compute a small amount of query tokens w.r.t. a large number of key/value tokens stored in the paged KV cache. The core of decode context parallel is how to shard the KV cache across GPUs.
 
+`engine_client.vllm_config.cache_config.effective_attention_block_size` reports the
+initialized full-attention block size in tokens, including DCP: a physical block of
+16 tokens with DCP=4 represents 64 tokens. The same value is available through
+gRPC `Control.GetServerInfo.effective_attention_block_size`. Physical block-size
+fields retain their existing meaning. The new value is unavailable (`None` in
+Python, absent in gRPC) if there is no common full-attention size, the scheduler
+does not expose it, or an older engine omits it. gRPC also omits the value when
+engine replicas disagree. Partial cache events carry their own actual size.
+
 For a model with `H` kv-heads, a request with `T` tokens in the context needs to store `H * T` key/value tensors in the KV cache.
 
 1. If one GPU can hold them all, and the performance is good enough, then no parallelization is needed.
