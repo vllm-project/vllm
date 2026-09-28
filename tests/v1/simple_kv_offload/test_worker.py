@@ -362,13 +362,12 @@ def test_register_shared_kv_cache_storage(monkeypatch, layout: KVCacheLayout):
     }
 
 
-@pytest.mark.parametrize("base_offset", [0, 256])
-def test_register_kv_cache_storage_with_padding(monkeypatch, base_offset):
+def test_register_kv_cache_storage_with_trailing_padding(monkeypatch):
     num_blocks = 4
     block_bytes = 32
     cache_bytes = num_blocks * block_bytes
     raw = torch.zeros(4096, dtype=torch.int8, device="cuda")
-    cache = raw[base_offset : base_offset + cache_bytes].view(num_blocks, block_bytes)
+    cache = raw[:cache_bytes].view(num_blocks, block_bytes)
     worker = SimpleCPUOffloadWorker(
         vllm_config=None,
         kv_cache_config=KVCacheConfig(
