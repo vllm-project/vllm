@@ -74,7 +74,7 @@ forward to be released before preparing the next one.
 
 `KVPPRuntime` is selected through `Platform.get_kvpp_runtime_cls()` and scoped to
 `ForwardContext.kvpp_runtime` by `set_forward_context`. After the connector's
-pre-forward call, `kvpp_forward` prepares the runtime and determines whether the
+pre-forward call, `maybe_prepare_kvpp` prepares the runtime and determines whether the
 batch has history. There is no per-forward teardown; failed forwards retain their
 state, and runner shutdown synchronizes the device before releasing cache storage.
 The KVPP group is created alongside TP in `initialize_model_parallel` only when

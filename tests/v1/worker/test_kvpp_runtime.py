@@ -31,7 +31,7 @@ from vllm.v1.kv_cache_placement import (
     KVCachePlacement,
     build_kv_cache_storage,
 )
-from vllm.v1.worker.kvpp_runtime import KVPPRuntime, kvpp_forward
+from vllm.v1.worker.kvpp_runtime import KVPPRuntime, maybe_prepare_kvpp
 from vllm.v1.worker.utils import allocate_kv_cache
 
 
@@ -100,14 +100,16 @@ def _runtime_worker(rank: int, port: int, tp_size: int, pp_size: int):
         observations = []
         for step in range(5):
             with set_forward_context(None, vllm_config, kvpp_runtime=kvpp_runtime):
-                kvpp_forward(kvpp_runtime, np.array([step], dtype=np.int32))
+                maybe_prepare_kvpp(kvpp_runtime, np.array([step], dtype=np.int32))
                 for index, bundle in enumerate(placement.bundles[:-1]):
                     # Delay compute to expose premature scratch reuse.
                     acquire_kv_cache(bundle.layers[1])
                     if step == 1 and index == 0:
                         # Reject reuse without discarding the pending prefetch.
                         with pytest.raises(AssertionError, match="Previous KVPP"):
-                            kvpp_forward(kvpp_runtime, np.array([step], dtype=np.int32))
+                            maybe_prepare_kvpp(
+                                kvpp_runtime, np.array([step], dtype=np.int32)
+                            )
                     torch.cuda._sleep(100_000)
                     acquire_kv_cache(bundle.layers[0])
                     for component, name in enumerate(bundle.layers):

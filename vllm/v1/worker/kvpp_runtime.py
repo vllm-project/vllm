@@ -149,7 +149,7 @@ def create_kvpp_runtime(
     return get_kvpp_runtime_cls()(config, caches)
 
 
-def kvpp_forward(
+def maybe_prepare_kvpp(
     kvpp_runtime: KVPPRuntime | None, num_computed_tokens: np.ndarray
 ) -> None:
     if kvpp_runtime is not None:

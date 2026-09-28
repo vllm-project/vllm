@@ -172,7 +172,7 @@ from vllm.v1.worker.gpu.ubatch_utils import (
 from vllm.v1.worker.kvpp_runtime import (
     KVPPRuntime,
     create_kvpp_runtime,
-    kvpp_forward,
+    maybe_prepare_kvpp,
 )
 from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
 from vllm.v1.worker.utils import (
@@ -1947,7 +1947,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 kvpp_runtime=self.kvpp_runtime,
             ):
                 self.kv_connector.pre_forward(**connector_kwargs)
-                kvpp_forward(
+                maybe_prepare_kvpp(
                     self.kvpp_runtime,
                     input_batch.num_computed_tokens_np[: input_batch.num_reqs],
                 )
