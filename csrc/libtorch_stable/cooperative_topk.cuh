@@ -111,6 +111,7 @@ __device__ __forceinline__ void dsmem_hist_reduce(uint32_t* histogram) {
 #pragma unroll
   for (uint32_t bin = tx; bin < NumBins;
        bin += hist4096::kBlockSize) {
+    // Cover histograms wider than one CTA without changing the reduction.
     const auto addr = &histogram[off + bin / CS];
     const auto src = cluster.map_shared_rank(addr, bin % CS);
     *src = warp_reduce_sum_subN<CS>(*src);
@@ -358,7 +359,8 @@ __device__ void large_topk(const float* __restrict__ row_input,
                        &smem->counter_eq, &smem->match);
 
   const auto thr = smem->match.bin;
-  // A larger threshold bin needs the exact overflow path.
+  // A threshold bin beyond tie capacity needs exact recovery; scattering
+  // into the bounded buffer would discard possible TopK candidates.
   if (__builtin_expect(
           smem->match.equal_count > kCoarseTieCapacity, 0)) {
     recover_coarse_overflow<TopK, CS, kFused>(
@@ -464,6 +466,8 @@ __device__ void large_topk(const float* __restrict__ row_input,
       tie_ws[tp] = hist4096::Tie{t.idx + my_start, t.score};
     }
   }
+  // The common path copies one tie per thread; handle remaining ties only
+  // when the threshold bin exceeds that capacity.
   if (__builtin_expect(le > hist4096::kBlockSize, 0)) {
     copy_extra_coarse_ties<TopK>(smem->tie_buffer, le, prefix_equal,
                                  s_total_above, my_start, tie_ws, row_output);
@@ -491,7 +495,8 @@ __device__ void large_topk(const float* __restrict__ row_input,
       hist4096::tie_handle<TopK>(smem->tie_buffer, num_ties, s_total_above,
                                  row_output, smem);
     } else {
-      // Rare case: retain and rank two threshold-bin candidates per thread.
+      // The fast refiner fits one tie per thread; use the extended refiner
+      // when the threshold bin exceeds that capacity.
       refine_large_coarse_ties<TopK>(tie_ws, s_total_equal, s_total_above,
                                      row_output, smem);
     }
