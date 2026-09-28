@@ -245,6 +245,9 @@ def test_compressed_slot_mapping_warmup_includes_index_kpool():
     config = SimpleNamespace(
         cache_config=SimpleNamespace(block_size=256),
         model_config=SimpleNamespace(hf_text_config=SimpleNamespace(index_kpool=32)),
+        parallel_config=SimpleNamespace(
+            decode_context_parallel_size=1, cp_kv_cache_interleave_size=1
+        ),
     )
 
     keys = CompressedSlotMappingKernel().get_warmup_keys(config)
@@ -271,6 +274,41 @@ def test_compressed_slot_mapping_inherits_padded_token_slots():
         compress_ratio=2,
     )
     assert compressed.tolist() == [-1, -1, -1, -1, -1, 3 * 4 + 2, -1, 3 * 4 + 3]
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+def test_compressed_slot_mapping_dcp_uses_rank_local_state_positions():
+    """Under DCP each rank writes only the states it owns, at the state's
+    rank-local position."""
+    device = torch.device("cuda")
+    dcp, interleave, ratio, block_size = 2, 4, 2, 4
+    num_tokens = 32
+    query_start_loc = torch.tensor([0, num_tokens], dtype=torch.int32, device=device)
+    seq_lens = torch.tensor([num_tokens], dtype=torch.int32, device=device)
+    block_table = torch.tensor([[5, 7]], dtype=torch.int32, device=device)
+    pos = torch.arange(num_tokens)
+    for rank in range(dcp):
+        owned = (pos // interleave) % dcp == rank
+        slot_mapping = torch.where(owned, 0, -1).to(torch.int64).to(device)
+        compressed = get_compressed_slot_mapping(
+            num_tokens,
+            slot_mapping,
+            query_start_loc,
+            seq_lens,
+            block_table,
+            block_size=block_size,
+            compress_ratio=ratio,
+            dcp_world_size=dcp,
+            cp_interleave=interleave,
+        )
+        local_pos = pos // (interleave * dcp) * interleave + pos % interleave
+        state = local_pos // ratio
+        expected = torch.where(
+            owned & ((pos + 1) % ratio == 0),
+            block_table[0].cpu()[state // block_size] * block_size + state % block_size,
+            -1,
+        )
+        assert compressed.tolist() == expected.tolist()
 
 
 def test_index_conversion_warmup_uses_physical_block_stride():
