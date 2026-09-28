@@ -423,3 +423,58 @@ def test_extensible_init_settles_dcp_interleave_before_runner_reads_it():
     assert runner.extensible_kv_cache.warmup_committable_blocks == 42
     assert log == ["adjust_dcp:8", "initialize_kv_cache"]
     assert worker._kv_cache_config is kv_cache_config
+
+
+@pytest.mark.parametrize("connector_pool", [None, object()])
+def test_extensible_extend_asks_connector_for_its_memory_pool(
+    monkeypatch: pytest.MonkeyPatch, connector_pool
+):
+    """Under the extensible cache the connector is created at the final extend.
+    It is asked for a custom memory pool before it registers the KV cache, as on
+    the standard path, and one it provides cannot back a driver-mapped cache."""
+    from vllm.v1.worker.gpu_worker import Worker
+
+    log: list[str] = []
+
+    def get_mem_pool_context():
+        log.append("get_mem_pool_context")
+        return connector_pool
+
+    monkeypatch.setattr(
+        gpu_worker,
+        "ensure_kv_transfer_initialized",
+        lambda config, kv_cache_config: log.append("ensure_kv_transfer"),
+    )
+    monkeypatch.setattr(gpu_worker, "has_kv_transfer_group", lambda: True)
+    monkeypatch.setattr(
+        gpu_worker,
+        "get_kv_transfer_group",
+        lambda: SimpleNamespace(get_mem_pool_context=get_mem_pool_context),
+    )
+    monkeypatch.setattr(
+        gpu_worker,
+        "extend_kv_cache",
+        lambda runner, num_blocks: log.append(f"extend:{num_blocks}"),
+    )
+    runner = SimpleNamespace(
+        extensible_kv_cache=SimpleNamespace(
+            committed_kv_cache_tensors=lambda config, layout, num_blocks: []
+        )
+    )
+    worker = SimpleNamespace(
+        _kv_cache_config=SimpleNamespace(num_blocks=16, kv_cache_tensors=[]),
+        cache_config=SimpleNamespace(
+            get_resolved_kv_cache_layout=lambda: None, num_gpu_blocks=16
+        ),
+        vllm_config=None,
+        _v2_model_runner=lambda: runner,
+    )
+
+    if connector_pool is None:
+        Worker.extend_kv_cache(worker, 8)
+        assert log == ["ensure_kv_transfer", "get_mem_pool_context", "extend:8"]
+        assert worker.cache_config.num_gpu_blocks == 8
+    else:
+        with pytest.raises(ValueError, match="own memory pool"):
+            Worker.extend_kv_cache(worker, 8)
+        assert log == ["ensure_kv_transfer", "get_mem_pool_context"]

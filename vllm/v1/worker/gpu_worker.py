@@ -933,6 +933,17 @@ class Worker(WorkerBase):
             num_blocks,
         )
         ensure_kv_transfer_initialized(self.vllm_config, kv_cache_config)
+        # Config resolution rejects `custom_mem_pool`; a connector that wants
+        # the KV cache in its own pool some other way cannot have it either.
+        if (
+            has_kv_transfer_group()
+            and get_kv_transfer_group().get_mem_pool_context() is not None
+        ):
+            raise ValueError(
+                "The KV connector allocates the KV cache from its own memory "
+                "pool, which the extensible KV cache cannot use. Disable it with "
+                "--no-enable-extensible-kv-cache."
+            )
         extend_kv_cache(self._v2_model_runner(), num_blocks)
         self.cache_config.num_gpu_blocks = num_blocks
 
