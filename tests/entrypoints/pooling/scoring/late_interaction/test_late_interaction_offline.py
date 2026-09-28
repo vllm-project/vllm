@@ -5,7 +5,7 @@ import weakref
 
 import pytest
 
-from .util import ColBERTScoringHfRunner
+from ..util import ColBERTScoringHfRunner
 
 MODEL_NAME = "answerdotai/answerai-colbert-small-v1"
 COLBERT_DIM = 96
