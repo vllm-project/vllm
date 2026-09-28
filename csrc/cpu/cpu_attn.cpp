@@ -44,7 +44,19 @@ torch::Tensor get_scheduler_metadata(
     const int64_t window_size, const std::string& isa_hint,
     const bool enable_kv_split,
     const std::optional<torch::Tensor>& dynamic_causal,
-    const std::string& kv_cache_dtype) {
+    const std::string& kv_cache_dtype,
+    const std::optional<torch::Tensor>& decode_mask) {
+  if (decode_mask.has_value()) {
+    const torch::Tensor& mask = *decode_mask;
+    TORCH_CHECK(mask.device().is_cpu(), "decode_mask must be a CPU tensor");
+    TORCH_CHECK(mask.scalar_type() == at::kBool,
+                "decode_mask must have boolean dtype");
+    TORCH_CHECK(mask.dim() == 1, "decode_mask must be one-dimensional");
+    TORCH_CHECK(mask.is_contiguous(), "decode_mask must be contiguous");
+    TORCH_CHECK(mask.numel() == num_req,
+                "decode_mask must contain one value per request");
+  }
+
   cpu_attention::ISA isa;
   if (isa_hint == "amx") {
     isa = cpu_attention::ISA::AMX;
@@ -80,9 +92,12 @@ torch::Tensor get_scheduler_metadata(
   input.enable_kv_split = enable_kv_split;
   input.dynamic_causal =
       dynamic_causal.has_value() ? dynamic_causal->data_ptr<bool>() : nullptr;
+  input.decode_mask =
+      decode_mask.has_value() ? decode_mask->data_ptr<bool>() : nullptr;
 
   const int64_t kv_cache_idx =
       static_cast<int64_t>(parse_fp8_kv_dtype(kv_cache_dtype));
+  input.fp8_kv_cache = kv_cache_idx != 0;
   VLLM_DISPATCH_FLOATING_TYPES(dtype, "get_scheduler_metadata", [&]() {
     CPU_ATTN_DISPATCH(head_dim, isa, kv_cache_idx, [&]() {
       input.elem_size = sizeof(attn_impl::kv_cache_t);

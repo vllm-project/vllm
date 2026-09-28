@@ -71,10 +71,13 @@ def main(
     kv_cache_dtype: str = "auto",
     seed: int = 0,
     iters: int = 20,
+    verification_only: bool = False,
 ) -> None:
     set_random_seed(seed)
     num_seqs = len(seq_lens)
     query_lens = [x[0] for x in seq_lens]
+    if verification_only:
+        assert all(query_len == 4 for query_len in query_lens)
     kv_lens = [x[1] for x in seq_lens]
     num_query_heads = num_heads[0]
     num_kv_heads = num_heads[1]
@@ -151,6 +154,7 @@ def main(
         kv_cache_dtype=kv_cache_dtype,
     )
 
+    decode_mask = torch.ones(num_seqs, dtype=torch.bool) if verification_only else None
     metadata = cpu_attn_get_scheduler_metadata(
         num_reqs=num_seqs,
         num_heads=num_query_heads,
@@ -163,6 +167,8 @@ def main(
         sliding_window_size=sliding_window if sliding_window is not None else -1,
         isa=isa,
         enable_kv_split=enable_kv_split,
+        kv_cache_dtype=kv_cache_dtype,
+        decode_mask=decode_mask,
     )
 
     out_with_split = torch.empty_like(query)
@@ -192,9 +198,12 @@ def main(
             times.append((end_time - start_time) / 1e6)
         return times
 
-    # warmup
+    print("benchmark mode: synthetic CPU attention; kernel-only evidence")
+    if verification_only:
+        print("verification mode: q=4")
+
+    # Warmup, then benchmark the attention kernel.
     run_benchmark(5)
-    # benchmark
     times = run_benchmark(iters)
 
     time_min = min(times)
@@ -277,8 +286,15 @@ if __name__ == "__main__":
     )
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--iters", type=int, default=20)
+    parser.add_argument(
+        "--verification-only",
+        action="store_true",
+        help=("Run synthetic q=4 verification; results are kernel-only evidence."),
+    )
 
     args = parser.parse_args()
+    if args.verification_only:
+        args.q_len_min = args.q_len_max = 4
     print(args)
 
     seq_lens = generate_seq_lens(
@@ -313,4 +329,5 @@ if __name__ == "__main__":
         kv_cache_dtype=args.kv_cache_dtype,
         seed=args.seed,
         iters=args.iters,
+        verification_only=args.verification_only,
     )

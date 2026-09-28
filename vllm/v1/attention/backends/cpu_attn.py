@@ -254,6 +254,22 @@ class CPUAttentionMetadataBuilder(AttentionMetadataBuilder[CPUAttentionMetadata]
             )
             block_table_tensor = encoder_block_table
 
+        decode_mask = None
+        if (
+            self.isa == "amx"
+            and envs.VLLM_CPU_ATTN_SPLIT_KV
+            and self.num_kv_heads > 0
+            and self.num_heads > self.num_kv_heads
+            and self.num_heads % self.num_kv_heads == 0
+            and self.num_heads // self.num_kv_heads <= 32
+            and self.head_dim % 32 == 0
+            and self.vllm_config.uniform_decode_query_len > 1
+        ):
+            decode_mask = self._build_decode_mask(
+                common_attn_metadata,
+                dynamic_casual if dynamic_casual is not None else causal,
+            )
+
         scheduler_metadata = ops.cpu_attn_get_scheduler_metadata(
             num_reqs=num_reqs,
             num_heads=self.num_heads,
@@ -268,6 +284,7 @@ class CPUAttentionMetadataBuilder(AttentionMetadataBuilder[CPUAttentionMetadata]
             enable_kv_split=envs.VLLM_CPU_ATTN_SPLIT_KV,
             dynamic_causal=dynamic_casual,
             kv_cache_dtype=self.kv_cache_dtype,
+            decode_mask=decode_mask,
         )
 
         attn_metadata = CPUAttentionMetadata(
@@ -285,6 +302,33 @@ class CPUAttentionMetadataBuilder(AttentionMetadataBuilder[CPUAttentionMetadata]
         )
 
         return attn_metadata
+
+    def _build_decode_mask(
+        self,
+        common_attn_metadata: CommonAttentionMetadata,
+        causal: bool | torch.Tensor,
+    ) -> torch.Tensor:
+        query_lens = (
+            common_attn_metadata.query_start_loc[1:]
+            - common_attn_metadata.query_start_loc[:-1]
+        )
+        max_verification_len = self.vllm_config.uniform_decode_query_len
+        is_prefilling = common_attn_metadata.is_prefilling
+        speculative_config = self.vllm_config.speculative_config
+        is_medusa = (
+            speculative_config is not None and speculative_config.method == "medusa"
+        )
+        if is_prefilling is None or self.is_cross_attention or is_medusa:
+            return torch.zeros_like(query_lens, dtype=torch.bool)
+        request_causal = torch.as_tensor(causal, dtype=torch.bool, device="cpu")
+        if request_causal.ndim == 0:
+            request_causal = request_causal.expand_as(query_lens)
+        return (
+            request_causal
+            & (~is_prefilling)
+            & (query_lens > 0)
+            & (query_lens <= max_verification_len)
+        ).contiguous()
 
 
 class CPUAttentionBackendImpl(AttentionImpl):

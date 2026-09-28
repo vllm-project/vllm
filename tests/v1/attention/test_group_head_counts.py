@@ -39,14 +39,18 @@ def _layers(layer_num_heads: list[int]):
     }
 
 
-def _build(layer_num_heads: list[int]) -> CPUAttentionMetadataBuilder:
+def _build(
+    layer_num_heads: list[int], block_size: int = 16
+) -> CPUAttentionMetadataBuilder:
     layers = _layers(layer_num_heads)
     vllm_config = MagicMock()
     vllm_config.model_config.dtype = torch.bfloat16
     vllm_config.model_config.get_num_attention_heads.return_value = MODEL_WIDE_NUM_HEADS
     vllm_config.cache_config.cache_dtype = "auto"
+    vllm_config.uniform_decode_query_len = 4
+    vllm_config.speculative_config = None
     kv_cache_spec = SimpleNamespace(
-        num_kv_heads=NUM_KV_HEADS, head_size=64, block_size=16
+        num_kv_heads=NUM_KV_HEADS, head_size=64, block_size=block_size
     )
 
     with (
@@ -80,6 +84,82 @@ def test_mixed_head_counts_in_one_group_are_rejected():
     """Grouping guarantees uniformity; a mixed group means that broke."""
     with pytest.raises(AssertionError, match="share num_heads"):
         _build([MODEL_WIDE_NUM_HEADS, 64])
+
+
+@pytest.mark.parametrize(
+    (
+        "query_lens",
+        "is_prefilling",
+        "causal",
+        "expected",
+    ),
+    [
+        ([1, 4, 5, 0], [False] * 4, True, [True, True, False, False]),
+        (
+            [4, 4, 4],
+            [False, True, False],
+            torch.tensor([True, True, False]),
+            [True, False, False],
+        ),
+    ],
+)
+@requires_cpu
+def test_cpu_decode_mask_marks_only_eligible_requests(
+    query_lens,
+    is_prefilling,
+    causal,
+    expected,
+):
+    """Only causal decode rows within the verification limit are eligible."""
+    builder = SimpleNamespace(
+        is_cross_attention=False,
+        vllm_config=SimpleNamespace(
+            uniform_decode_query_len=4,
+            speculative_config=None,
+        ),
+    )
+    common = SimpleNamespace(
+        query_start_loc=torch.tensor([0] + query_lens, dtype=torch.int32).cumsum(0),
+        is_prefilling=torch.tensor(is_prefilling),
+    )
+
+    actual = CPUAttentionMetadataBuilder._build_decode_mask(
+        builder, common, causal=causal
+    )
+
+    assert actual.tolist() == expected
+
+
+@requires_cpu
+@pytest.mark.skipif(
+    not torch.cpu._is_amx_tile_supported(), reason="requires AMX support"
+)
+def test_cpu_builder_forwards_decode_mask_to_scheduler():
+    builder = _build([32, 32], block_size=32)
+    common = SimpleNamespace(
+        num_reqs=2,
+        num_actual_tokens=8,
+        max_query_len=4,
+        max_seq_len=101,
+        query_start_loc=torch.tensor([0, 4, 8], dtype=torch.int32),
+        seq_lens=torch.tensor([100, 101], dtype=torch.int32),
+        block_table_tensor=torch.zeros((2, 8), dtype=torch.int32),
+        slot_mapping=torch.arange(8, dtype=torch.int64),
+        causal=True,
+        is_prefilling=torch.tensor([False, True]),
+    )
+
+    with (
+        patch(
+            "vllm.v1.attention.backends.cpu_attn.ops.cpu_attn_get_scheduler_metadata",
+            return_value=torch.empty(0, dtype=torch.int8),
+        ) as scheduler,
+        patch("vllm.v1.attention.backends.cpu_attn.envs.VLLM_CPU_ATTN_SPLIT_KV", True),
+    ):
+        builder.build(0, common)
+
+    decode_mask = scheduler.call_args.kwargs["decode_mask"]
+    assert decode_mask.tolist() == [True, False]
 
 
 def test_flash_attention_geometry_comes_from_the_group():
