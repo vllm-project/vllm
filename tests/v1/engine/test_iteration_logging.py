@@ -119,7 +119,7 @@ class FakeStageEngine:
         self.events = model_executor.events if model_executor is not None else []
         self.batch_queue = None
         self.batch_queue_size = 2
-        self.is_ec_consumer = True
+        self.is_mm_encoder_only = False
         self.is_pooling_model = False
         self.check_for_draft_tokens = False
 
