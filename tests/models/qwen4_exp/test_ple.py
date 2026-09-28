@@ -932,7 +932,7 @@ def test_ngram_prefetch_ids_outlive_start_prefetch() -> None:
     prefetched: list[torch.Tensor] = []
     module.ngram_embedding = SimpleNamespace(
         supports_prefetch=True,
-        start_prefetch=lambda _, ids: prefetched.append(weak_ref_tensor(ids)),
+        start_prefetch=lambda ids: prefetched.append(weak_ref_tensor(ids)),
     )
     expected = _reference_ngram_ids(input_ids, query_start_loc, ngram_context, **params)
 
@@ -940,7 +940,7 @@ def test_ngram_prefetch_ids_outlive_start_prefetch() -> None:
     # like a later CUDA graph segment would.
     pool = torch.cuda.MemPool()
     with torch.cuda.use_mem_pool(pool):
-        module.start_prefetch(None, input_ids, query_start_loc, ngram_context)
+        module.start_prefetch(input_ids, query_start_loc, ngram_context)
         torch.full_like(expected, -1)
 
     assert torch.equal(prefetched[0], expected)

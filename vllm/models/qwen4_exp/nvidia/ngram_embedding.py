@@ -476,8 +476,3 @@ class Qwen4ExpNGramEmbedding(nn.Module):
         if regular_weights:
             loaded.update(AutoWeightsLoader(self).load_weights(regular_weights))
         return loaded
-
-
-__all__ = [
-    "Qwen4ExpNGramEmbedding",
-]
