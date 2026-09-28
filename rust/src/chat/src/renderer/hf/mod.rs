@@ -258,8 +258,8 @@ impl ChatRenderer for HfChatRenderer {
 // TODO: borrow more fields directly from the original `ChatMessage`.
 #[serde_with::skip_serializing_none]
 #[derive(Debug, Serialize)]
-struct TemplateMessage {
-    role: &'static str,
+struct TemplateMessage<'a> {
+    role: &'a str,
     content: TemplateContent,
     // Developer-role messages may provide message-local tools in the same shape
     // as top-level request tools.
@@ -322,22 +322,22 @@ struct TemplateToolDefinition {
 }
 
 /// Convert chat messages into the JSON shape expected by Jinja chat templates.
-fn to_template_messages(
-    messages: &[ChatMessage],
+fn to_template_messages<'a>(
+    messages: &'a [ChatMessage],
     content_format: ChatTemplateContentFormat,
     multimodal: Option<&MultimodalRenderInfo>,
-) -> Result<Vec<TemplateMessage>> {
+) -> Result<Vec<TemplateMessage<'a>>> {
     messages
         .iter()
         .map(|message| to_template_message(message, content_format, multimodal))
         .collect()
 }
 
-fn to_template_message(
-    message: &ChatMessage,
+fn to_template_message<'a>(
+    message: &'a ChatMessage,
     content_format: ChatTemplateContentFormat,
     multimodal: Option<&MultimodalRenderInfo>,
-) -> Result<TemplateMessage> {
+) -> Result<TemplateMessage<'a>> {
     Ok(match message {
         ChatMessage::System { content } => TemplateMessage {
             role: "system",
@@ -393,6 +393,15 @@ fn to_template_message(
             reasoning_content: None,
             tool_calls: None,
             tool_call_id: Some(tool_call_id.clone()),
+        },
+        ChatMessage::Custom { role, content } => TemplateMessage {
+            role,
+            content: to_template_content(content, content_format, multimodal)?,
+            tools: None,
+            reasoning: None,
+            reasoning_content: None,
+            tool_calls: None,
+            tool_call_id: None,
         },
     })
 }
@@ -524,7 +533,7 @@ const CONTINUE_FINAL_MESSAGE_TAG: &str = "CONTINUE_FINAL_MESSAGE_TAG ";
 // TODO: transformers v5 also allows continuing a non-`content` field (e.g.
 // `reasoning_content`) by passing a field name; only the boolean form is
 // supported here.
-fn append_continue_final_message_tag(message: &mut TemplateMessage) -> Result<String> {
+fn append_continue_final_message_tag(message: &mut TemplateMessage<'_>) -> Result<String> {
     let text = match &mut message.content {
         TemplateContent::String(text) => Some(text),
         // Pick the last text part in the message.
@@ -999,6 +1008,23 @@ mod tests {
         .unwrap();
 
         assert_eq!(rendered, "developer|policy|get_weather|city");
+    }
+
+    #[test]
+    fn chat_template_passes_custom_roles_unchanged() {
+        let request = sample_request(vec![
+            ChatMessage::custom("root", "identity"),
+            ChatMessage::system("policy"),
+            ChatMessage::user("hello"),
+        ]);
+
+        let rendered = render(
+            Some("{% for m in messages %}{{ m.role }}={{ m.content }};{% endfor %}"),
+            &request,
+        )
+        .unwrap();
+
+        assert_eq!(rendered, "root=identity;system=policy;user=hello;");
     }
 
     #[test]

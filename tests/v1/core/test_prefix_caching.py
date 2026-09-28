@@ -1336,12 +1336,12 @@ def make_kv_cache_config_three_types(
     )
 
 
-def test_prefix_cache_hit_uses_per_group_dcp_geometry():
+@pytest.mark.parametrize("draft_sharded", [True, False])
+def test_prefix_cache_hit_uses_per_group_dcp_geometry(draft_sharded):
     """Prefix lookup must use each group's DCP size, not the process-wide one.
 
-    Target and draft MLA are both sharded (DCP=8); Mamba stays replicated
-    (DCP=1). Hits then align to the sharded full-attention block, not the
-    unsharded page size.
+    Target MLA is sharded; draft MLA can opt out and Mamba stays replicated.
+    Hits must align to the target block in either case.
     """
     block_size = 16
     dcp = 8
@@ -1362,6 +1362,7 @@ def test_prefix_cache_hit_uses_per_group_dcp_geometry():
             KVCacheGroupSpec(
                 ["draft_mla"],
                 MLAAttentionSpec(
+                    dcp_sharded=draft_sharded,
                     block_size=block_size,
                     num_kv_heads=1,
                     head_size=1,
@@ -1388,10 +1389,10 @@ def test_prefix_cache_hit_uses_per_group_dcp_geometry():
     )
     target_mgr, draft_mgr, mamba_mgr = manager.coordinator.single_type_managers
     assert target_mgr.dcp_world_size == dcp
-    assert draft_mgr.dcp_world_size == dcp
+    assert draft_mgr.dcp_world_size == (dcp if draft_sharded else 1)
     assert mamba_mgr.dcp_world_size == 1
     assert target_mgr.block_size == sharded_block
-    assert draft_mgr.block_size == sharded_block
+    assert draft_mgr.block_size == (sharded_block if draft_sharded else block_size)
     assert mamba_mgr.block_size == block_size
 
     hash_fn = sha256
@@ -1407,7 +1408,11 @@ def test_prefix_cache_hit_uses_per_group_dcp_geometry():
     req1 = make_request("1", common_token_ids + [100] * 5, block_size, hash_fn)
     computed_blocks, num_computed_tokens, _ = manager.get_computed_blocks(req1)
     assert num_computed_tokens == 2 * sharded_block
-    assert [len(group) for group in computed_blocks.blocks] == [2, 2, 16]
+    assert [len(group) for group in computed_blocks.blocks] == [
+        2,
+        2 if draft_sharded else 16,
+        16,
+    ]
 
     manager.free(req0)
     manager.free(req1)

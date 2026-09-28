@@ -517,6 +517,7 @@ class RequestRunner:
             if complete_transfers:
                 self.offloading_spec.complete_transfers()
 
+            self.worker_connector.wait_for_save()
             finished_sending, finished_recving = self.worker_connector.get_finished(
                 scheduler_output.finished_req_ids
             )
