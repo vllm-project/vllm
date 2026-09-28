@@ -968,7 +968,7 @@ class RocmPlatform(Platform):
         # copies at or below this size through a blit kernel, which faults once
         # enough of them are outstanding -- HiSparse's host mirror submits
         # ~160k descriptors per step. SDMA has no such limit. In KB.
-        os.environ.setdefault("GPU_FORCE_BLIT_COPY_SIZE", "4")
+        os.environ.setdefault("GPU_FORCE_BLIT_COPY_SIZE", "2")
 
     @classmethod
     def apply_config_platform_defaults(cls, vllm_config: "VllmConfig") -> None:
