@@ -14,6 +14,43 @@ CUDA_DEVICES = [
 ]
 
 
+def _make_staging_tensor(dtype: torch.dtype) -> StagedWriteTensor:
+    tensor = StagedWriteTensor.__new__(StagedWriteTensor)
+    tensor._staged_write_indices = []
+    tensor._staged_write_starts = []
+    tensor._staged_write_contents = []
+    tensor._staged_write_numel = 0
+    tensor._staged_write_cu_lens = []
+    tensor._staged_write_np_dtype = (
+        torch.empty(0, dtype=dtype, device="cpu").numpy().dtype
+    )
+    return tensor
+
+
+def test_staged_write_contents_preserve_order_and_dtype():
+    tensor = _make_staging_tensor(torch.int32)
+
+    tensor.stage_write(0, 0, np.asarray([1, 2], dtype=np.int64))
+    tensor.stage_write(1, 3, (value for value in [3, 4]))
+    tensor.stage_write_elem(2, 5)
+
+    contents = tensor._materialize_staged_write_contents()
+    assert contents.tolist() == [1, 2, 3, 4, 5]
+    assert contents.dtype == np.int32
+    assert tensor._staged_write_cu_lens == [2, 4, 5]
+
+
+def test_clear_staged_writes_resets_chunk_bookkeeping():
+    tensor = _make_staging_tensor(torch.float32)
+    tensor.stage_write(0, 0, [1.5, 2.5])
+
+    tensor.clear_staged_writes()
+
+    assert tensor._materialize_staged_write_contents().size == 0
+    assert tensor._staged_write_numel == 0
+    assert tensor._staged_write_cu_lens == []
+
+
 @pytest.mark.skipif(not is_uva_available(), reason="UVA is not available.")
 @pytest.mark.parametrize("device", CUDA_DEVICES)
 def test_cpu_write(device):
@@ -76,7 +113,7 @@ def test_staged_write_uses_uva_contents_for_uva_target(device, monkeypatch):
     staged.stage_write(2, 3, [11, 12, 13])
     staged.apply_write()
     torch.accelerator.synchronize()
-    staged.stage_write(1, 7, [21, 22])
+    staged.stage_write(1, 7, np.asarray([21, 22], dtype=np.int64))
     staged.apply_write()
     torch.accelerator.synchronize()
     staged.stage_write(0, 1020, range(1500))
@@ -189,7 +226,7 @@ def test_staged_write_inflight(uva_target, dtype):
             expected[row, 2 : 2 + length] = values
             expected[3, 1:4] = step
             with torch.cuda.stream(stream):
-                state.stage_write(row, 2, values.tolist())
+                state.stage_write(row, 2, values.numpy())
                 state.stage_write(3, 1, [step] * 3)
                 state.apply_write()
                 # A GPU consumer observes this generation before the next update.
