@@ -1108,7 +1108,7 @@ steps:
 #--------------------------------------------------------  mi300 · entrypoints  --------------------------------------------------------#
 
 - label: ":amd: (MI300) Entrypoints Unit" # TBD
-  timeout_in_minutes: 50
+  timeout_in_minutes: 60
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   dind: false
   agent_pool: mi300_1
