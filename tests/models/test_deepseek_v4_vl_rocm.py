@@ -473,7 +473,7 @@ def test_rocm_entry_exposes_decoder_replay_layers() -> None:
     assert language_model.decoder_replay_layers is sentinel
 
     wrapper = object.__new__(DeepseekV41ForCausalLM)
-    wrapper.language_model = language_model
+    object.__setattr__(wrapper, "language_model", language_model)
     assert wrapper.decoder_replay_layers is sentinel
 
 
