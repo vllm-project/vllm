@@ -119,10 +119,10 @@ ARG PYTORCH_CPU_INDEX_BASE_URL=https://download.pytorch.org/whl
 # Copy requirements files for installation
 COPY requirements/common.txt requirements/common.txt
 COPY requirements/cpu.txt requirements/cpu.txt
-COPY use_existing_torch.py use_existing_torch.py
+COPY tools/use_existing_torch.py tools/use_existing_torch.py
 
 # For nightly: install torch nightly (CPU) first, strip torch pins from the
-# requirements via use_existing_torch.py so they can't pull it back to a release
+# requirements via tools/use_existing_torch.py so they can't pull it back to a release
 # build, then install the rest from the nightly CPU index (no --torch-backend,
 # which would force the stable channel). Release path is unchanged.
 RUN --mount=type=cache,target=/root/.cache/uv \
@@ -131,7 +131,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
         echo "Installing torch nightly (CPU)..." \
         && uv pip install torch torchaudio torchvision torchcodec --pre \
             --index-url ${PYTORCH_CPU_INDEX_BASE_URL}/nightly/cpu \
-        && python3 use_existing_torch.py --prefix \
+        && python3 tools/use_existing_torch.py --prefix \
         && uv pip install -r requirements/cpu.txt \
             --extra-index-url ${PYTORCH_CPU_INDEX_BASE_URL}/nightly/cpu; \
     else \
@@ -183,12 +183,12 @@ ENV SCCACHE_REGION=${USE_SCCACHE:+${SCCACHE_REGION_NAME}}
 # Avoid port collision with vllm-build's own sccache daemon.
 ENV SCCACHE_SERVER_PORT=4227
 
-# Copy only the Rust build inputs; build_rust.sh publishes artifacts needed
+# Copy only the Rust build inputs; tools/build_rust.sh publishes artifacts needed
 # by the wheel build stage.
 COPY rust rust
 COPY rust-toolchain.toml rust-toolchain.toml
 COPY tools/build_rust.py tools/build_rust.py
-COPY build_rust.sh build_rust.sh
+COPY tools/build_rust.sh tools/build_rust.sh
 
 # Cap cargo parallelism to avoid exhausting the CI host's open-file limit
 # (rustc spawns enough concurrent processes to hit RLIMIT_NOFILE otherwise).
@@ -210,10 +210,10 @@ RUN --mount=type=cache,target=/root/.cargo/registry,sharing=locked \
         fi; \
         sccache --show-stats; \
     fi && \
-    SETUPTOOLS_SCM_PRETEND_VERSION="0.0.0+docker.cache" bash build_rust.sh && \
+    SETUPTOOLS_SCM_PRETEND_VERSION="0.0.0+docker.cache" bash tools/build_rust.sh && \
     if [ "$USE_SCCACHE" = "1" ]; then sccache --show-stats; fi
 
-# build_rust.sh installed rustup here via rustup.rs; put it on PATH so the
+# tools/build_rust.sh installed rustup here via rustup.rs; put it on PATH so the
 # child stage below finds it on disk instead of re-downloading it.
 ENV PATH="/root/.cargo/bin:${PATH}"
 
@@ -223,7 +223,7 @@ FROM rust-build-cache AS rust-build
 RUN --mount=type=cache,target=/root/.cargo/registry,sharing=locked \
     --mount=type=cache,target=/root/.cargo/git,sharing=locked \
     --mount=type=bind,source=.git,target=.git \
-    SETUPTOOLS_SCM_PRETEND_METADATA="{dirty=false}" bash build_rust.sh
+    SETUPTOOLS_SCM_PRETEND_METADATA="{dirty=false}" bash tools/build_rust.sh
 
 ######################### SOURCE PREP IMAGE #########################
 # Shared prep (source, rust artifacts, build deps) for both vllm-build and
@@ -262,7 +262,7 @@ COPY requirements/build/cpu.txt requirements/build/cpu.txt
 
 RUN --mount=type=cache,target=/root/.cache/uv \
     if [ "${PYTORCH_NIGHTLY}" = "1" ]; then \
-        python3 /workspace/use_existing_torch.py --prefix \
+        python3 /workspace/tools/use_existing_torch.py --prefix \
         && uv pip install -r requirements/build/cpu.txt \
             --extra-index-url ${PYTORCH_CPU_INDEX_BASE_URL}/nightly/cpu; \
     else \
@@ -287,7 +287,7 @@ RUN if [ "$GIT_REPO_CHECK" != 0 ]; then bash tools/check_repo.sh ; fi
 # now-unpinned dependency. Done at the end of vllm-src so vllm-build and
 # vllm-dev, which both derive from it, inherit the unpinned tree.
 RUN if [ "${PYTORCH_NIGHTLY}" = "1" ]; then \
-        python3 /workspace/use_existing_torch.py --prefix; \
+        python3 /workspace/tools/use_existing_torch.py --prefix; \
     fi
 
 ######################### BUILD IMAGE #########################
@@ -343,7 +343,7 @@ RUN case "$(uname -m)" in \
 RUN --mount=type=cache,target=/root/.cache/uv \
     export CFLAGS="${CFLAGS:+${CFLAGS} }-std=gnu17" && \
     if [ "${PYTORCH_NIGHTLY}" = "1" ]; then \
-        python3 /workspace/use_existing_torch.py --prefix \
+        python3 /workspace/tools/use_existing_torch.py --prefix \
         && uv pip install -r requirements/test/cpu.txt \
             --extra-index-url ${PYTORCH_CPU_INDEX_BASE_URL}/nightly/cpu; \
     else \
