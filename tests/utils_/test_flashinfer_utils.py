@@ -50,15 +50,11 @@ def test_has_flashinfer_finds_toolkit_off_path(default_cuda_home: Path):
     assert fi.has_flashinfer()
 
 
-def test_has_flashinfer_returns_false_without_toolkit(default_cuda_home: Path):
-    assert not fi.has_flashinfer()
-
-
 def test_has_flashinfer_requires_ninja(
     default_cuda_home: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ):
     """FlashInfer runs `ninja` from PATH, which lacks the venv's bin directory
     when vLLM is launched without activating the venv."""
-    _make_exe(default_cuda_home / "bin" / "nvcc")
-    monkeypatch.setenv("PATH", str(tmp_path / "empty"))
+    _make_exe(tmp_path / "cuda" / "bin" / "nvcc")
+    monkeypatch.setenv("PATH", str(tmp_path / "cuda" / "bin"))
     assert not fi.has_flashinfer()

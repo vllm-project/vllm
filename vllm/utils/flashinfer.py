@@ -83,24 +83,18 @@ _DEFAULT_CUDA_HOME = "/usr/local/cuda"
 
 
 def _flashinfer_nvcc_path() -> str | None:
-    """Return the nvcc that FlashInfer's JIT would run, or None if missing.
+    """Return the nvcc FlashInfer's JIT would run, or None if it is missing.
 
-    Mirrors ``flashinfer.jit.cpp_ext.get_cuda_path()`` (``$CUDA_HOME``, then
-    ``$CUDA_PATH``, then nvcc on ``$PATH``, then ``/usr/local/cuda``) and the
-    ``$FLASHINFER_NVCC`` override, without importing FlashInfer, whose import
-    initializes CUDA.
+    Mirrors ``flashinfer.jit.cpp_ext.get_cuda_path()`` without importing
+    FlashInfer, whose import initializes CUDA.
     """
     cuda_home = os.environ.get("CUDA_HOME") or os.environ.get("CUDA_PATH")
     if not cuda_home:
         nvcc = shutil.which("nvcc")
-        if nvcc is not None:
-            cuda_home = os.path.dirname(os.path.dirname(nvcc))
-        elif os.path.exists(_DEFAULT_CUDA_HOME):
-            cuda_home = _DEFAULT_CUDA_HOME
-        else:
-            return None
-    nvcc = os.environ.get("FLASHINFER_NVCC") or os.path.join(cuda_home, "bin", "nvcc")
-    return shutil.which(nvcc)
+        cuda_home = (
+            os.path.dirname(os.path.dirname(nvcc)) if nvcc else _DEFAULT_CUDA_HOME
+        )
+    return shutil.which(os.path.join(cuda_home, "bin", "nvcc"))
 
 
 @functools.cache
@@ -128,10 +122,9 @@ def has_flashinfer() -> bool:
     ):
         logger.warning_once(
             "FlashInfer kernels are disabled: flashinfer-cubin is not installed "
-            "and nvcc (via CUDA_HOME, CUDA_PATH, PATH or /usr/local/cuda) or "
-            "ninja (via PATH) is missing, so slower fallbacks such as Triton MoE "
-            "are used. Set CUDA_HOME to a CUDA toolkit, or install "
-            "flashinfer-cubin and flashinfer-jit-cache."
+            "and nvcc (CUDA_HOME, CUDA_PATH, PATH or /usr/local/cuda) or ninja "
+            "(PATH) is missing. Set CUDA_HOME to a CUDA toolkit and put ninja on "
+            "PATH, or run `flashinfer download-kernels`."
         )
         return False
     return True
