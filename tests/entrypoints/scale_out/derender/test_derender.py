@@ -49,6 +49,7 @@ def _make_generate_response(
     token_ids: list[int] | None,
     request_id: str = "chatcmpl-test-id",
     finish_reason: str = "stop",
+    output_text: str | None = None,
     logprobs: dict | None = None,
     prompt_logprobs: list | None = None,
     kv_transfer_params: dict | None = None,
@@ -60,6 +61,8 @@ def _make_generate_response(
         "finish_reason": finish_reason,
         "logprobs": logprobs,
     }
+    if output_text is not None:
+        choice["output_text"] = output_text
     return {
         "request_id": request_id,
         "choices": [choice],
@@ -106,6 +109,40 @@ async def test_derender_chat_roundtrip(client):
     assert len(data["choices"]) == 1
     assert data["choices"][0]["message"]["content"]
     assert data["choices"][0]["message"]["role"] == "assistant"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("output_text", "include_stop", "min_tokens"),
+    [
+        ("answer", False, 0),
+        ("answer<END>", True, 0),
+        ("keep<END>allowed", False, 2),
+    ],
+)
+async def test_derender_chat_uses_engine_stop_text(
+    client, output_text, include_stop, min_tokens
+):
+    gen_req = await _render_chat(client)
+    token_ids = gen_req["token_ids"][:5]
+    response = await client.post(
+        "/v1/chat/completions/derender",
+        json={
+            "model": MODEL_NAME,
+            "generate_response": _make_generate_response(
+                token_ids, output_text=output_text
+            ),
+            "chat_request": {
+                "model": MODEL_NAME,
+                "messages": [{"role": "user", "content": "Hello"}],
+                "stop": ["<END>"],
+                "include_stop_str_in_output": include_stop,
+                "min_tokens": min_tokens,
+            },
+        },
+    )
+    assert response.status_code == 200
+    assert response.json()["choices"][0]["message"]["content"] == output_text
 
 
 @pytest.mark.asyncio
@@ -392,10 +429,11 @@ async def _render_completion(client: httpx.AsyncClient, prompt: str) -> dict:
 def _make_completion_generate_response(
     token_ids: list[int],
     request_id: str,
+    output_text: str | None = None,
     kv_transfer_params: dict | None = None,
     logprobs: dict | None = None,
 ) -> dict:
-    return {
+    response = {
         "request_id": request_id,
         "choices": [
             {
@@ -408,6 +446,9 @@ def _make_completion_generate_response(
         "prompt_logprobs": None,
         "kv_transfer_params": kv_transfer_params,
     }
+    if output_text is not None:
+        response["choices"][0]["output_text"] = output_text
+    return response
 
 
 @pytest.mark.asyncio
@@ -438,6 +479,42 @@ async def test_derender_completion_roundtrip(client):
     assert choices[1]["index"] == 1
     assert choices[0]["text"]
     assert choices[1]["text"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("output_text", "include_stop", "min_tokens"),
+    [
+        ("answer", False, 0),
+        ("answer<END>", True, 0),
+        ("keep<END>allowed", False, 2),
+    ],
+)
+async def test_derender_completion_uses_engine_stop_text(
+    client, output_text, include_stop, min_tokens
+):
+    gen_req = await _render_completion(client, "Hello")
+    token_ids = gen_req["token_ids"][:4]
+    response = await client.post(
+        "/v1/completions/derender",
+        json={
+            "model": MODEL_NAME,
+            "generate_responses": [
+                _make_completion_generate_response(
+                    token_ids, gen_req["request_id"], output_text=output_text
+                )
+            ],
+            "completion_request": {
+                "model": MODEL_NAME,
+                "prompt": "Hello",
+                "stop": ["<END>"],
+                "include_stop_str_in_output": include_stop,
+                "min_tokens": min_tokens,
+            },
+        },
+    )
+    assert response.status_code == 200
+    assert response.json()["choices"][0]["text"] == output_text
 
 
 @pytest.mark.asyncio

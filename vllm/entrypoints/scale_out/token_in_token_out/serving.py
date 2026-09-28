@@ -349,6 +349,11 @@ class ServingTokens(GenerateBaseServing):
                 logprobs=logprobs,
                 finish_reason=output.finish_reason if output.finish_reason else "stop",
                 token_ids=as_list(output.token_ids),
+                output_text=(
+                    output.text
+                    if sampling_params.stop and sampling_params.detokenize
+                    else None
+                ),
                 routed_experts=routed_experts_b64,
                 sampling_mask=sampling_mask,
             )

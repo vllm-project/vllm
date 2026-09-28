@@ -322,6 +322,8 @@ class GenerateResponseChoice(BaseModel):
     # per OpenAI spec this is the default
     finish_reason: str | None = "stop"
     token_ids: list[int] | None = None
+    output_text: str | None = None
+    """Engine-truncated text when stop strings require detokenization."""
     # Per-token expert routing decisions, base64-encoded ``.npy`` bytes
     # (numpy serialization). Shape after decode:
     #   (num_tokens - 1, num_layers, num_experts_per_tok) dtype uint8/uint16/int32

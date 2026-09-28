@@ -126,6 +126,7 @@ def _build_serving_tokens(engine: AsyncLLM, **kwargs) -> ServingTokens:
 def _make_request_output(
     request_id: str,
     token_ids: list[int],
+    text: str = "",
     finish_reason: str | None = None,
     finished: bool = False,
     prompt_token_ids: list[int] | None = None,
@@ -142,7 +143,7 @@ def _make_request_output(
         outputs=[
             CompletionOutput(
                 index=index,
-                text="",
+                text=text,
                 token_ids=token_ids,
                 cumulative_logprob=None,
                 logprobs=logprobs,
@@ -283,6 +284,34 @@ async def test_non_stream_error():
 
     with pytest.raises(GenerationError):
         await serving.serve_tokens(request)
+
+
+@pytest.mark.asyncio
+async def test_non_stream_preserves_engine_stop_text_and_token_ids():
+    engine = _mock_engine()
+
+    async def mock_generate(*args, **kwargs):
+        yield _make_request_output(
+            "req-1",
+            token_ids=[10, 20, 30],
+            text="keep<END>ignored earlier, final",
+            finish_reason="stop",
+            finished=True,
+        )
+
+    engine.generate = MagicMock(side_effect=mock_generate)
+    serving = _build_serving_tokens(engine)
+    request = GenerateRequest(
+        token_ids=[1, 2, 3],
+        sampling_params=SamplingParams(max_tokens=10, min_tokens=2, stop=["<END>"]),
+        model=MODEL_NAME,
+    )
+
+    response = await serving.serve_tokens(request)
+
+    assert isinstance(response, GenerateResponse)
+    assert response.choices[0].output_text == "keep<END>ignored earlier, final"
+    assert response.choices[0].token_ids == [10, 20, 30]
 
 
 @pytest.mark.asyncio

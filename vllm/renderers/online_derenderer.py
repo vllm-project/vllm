@@ -205,6 +205,12 @@ class OnlineDerenderer:
                 decoded_text = tokenizer.decode(
                     choice.token_ids, skip_special_tokens=skip_special
                 )
+                if (
+                    chat_request is not None
+                    and chat_request.stop
+                    and choice.output_text is not None
+                ):
+                    decoded_text = choice.output_text
                 message = ChatMessage(role="assistant", content=decoded_text)
 
             choices.append(
@@ -645,6 +651,12 @@ class OnlineDerenderer:
                 decoded_text = tokenizer.decode(
                     choice.token_ids, skip_special_tokens=skip_special
                 )
+                if (
+                    completion_request is not None
+                    and completion_request.stop
+                    and choice.output_text is not None
+                ):
+                    decoded_text = choice.output_text
                 completion_logprobs = None
                 if choice.logprobs is not None:
                     resolved = _resolve_logprobs(choice.logprobs, tokenizer)
