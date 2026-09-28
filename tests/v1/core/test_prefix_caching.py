@@ -784,12 +784,12 @@ def test_hisparse_inflight_host_import_reserves_remaining_gpu_pages():
 
 @pytest.mark.parametrize(
     "full_sequence_must_fit,host_num_blocks,admitted",
-    [(True, 2, False), (True, 3, True), (False, 2, False), (False, 3, True)],
+    [(True, 5, False), (True, 6, True), (False, 3, False), (False, 4, True)],
 )
-def test_hisparse_async_admission_requires_only_import_destinations(
+def test_hisparse_async_admission_reserves_host_for_inflight_prefills(
     full_sequence_must_fit, host_num_blocks, admitted, tmp_path
 ):
-    """Imports need host destinations, but do not reserve future prefill pages."""
+    """Async loads reserve host blocks for the rest of in-flight prefills."""
     from .utils import create_scheduler, mock_kv
 
     (tmp_path / "config.json").write_text(
@@ -845,58 +845,47 @@ def test_hisparse_import_capacity_includes_hits_and_cow(
     assert host_pool.get_num_free_blocks() == free_blocks
     assert (
         coordinator.host_manager.get_num_blocks_to_allocate(
-            "waiting", 64, [hit], 32, local_tokens, 64
+            "waiting", 32, [hit], 32, local_tokens, 32
         )
         <= host_pool.get_num_free_blocks()
     ) == admitted
 
 
 @pytest.mark.parametrize("enable_caching", [False, True])
-def test_hisparse_host_exhaustion_keeps_gpu_pages_readable(enable_caching):
-    """Pages without a host destination must survive GPU cache reclamation."""
-    manager = make_hisparse_kv_cache_manager(32, 2, enable_caching=enable_caching)
+def test_hisparse_host_exhaustion_defers_allocation(enable_caching):
+    """Pages are only allocated with host backing, so every one can be reclaimed."""
+    manager = make_hisparse_kv_cache_manager(32, 5, enable_caching=enable_caching)
+    donor = make_request("donor", [99] * 16, HISPARSE_BLOCK_SIZE, sha256)
+    assert manager.allocate_slots(donor, 16) is not None
     request = make_request("resident", list(range(64)), HISPARSE_BLOCK_SIZE, sha256)
-    assert manager.allocate_slots(request, 64) is not None
+    free_gpu = manager.block_pool.get_num_free_blocks()
+    assert manager.allocate_slots(request, 64) is None
+    assert manager.block_pool.get_num_free_blocks() == free_gpu
+
+    # The donor's in-flight write-back holds its host block until acked.
+    manager.free(donor)
     coordinator = get_hisparse_coordinator(manager)
+    assert coordinator.has_pending_reclamation()
+    assert manager.allocate_slots(request, 64) is None
+    _publish_hisparse_pages(manager)
+    assert not coordinator.has_pending_reclamation()
+    assert manager.allocate_slots(request, 64) is not None
     host = coordinator.host_manager
     assert host is not None
-    assert [b.is_null for b in host.req_to_blocks[request.request_id]] == [
-        False,
-        True,
-        True,
-        True,
-    ]
+    assert not any(b.is_null for b in host.req_to_blocks[request.request_id])
     _publish_hisparse_pages(manager)
     for hot in coordinator.hot_managers:
         hot.require_hot(request.request_id)
         hot.allocate_new_blocks(request.request_id, 64, 64)
     coordinator.update_residency(request.request_id)
+    assert coordinator.request_states[request.request_id].unpinned_pages == {0, 1}
     for resident in coordinator.resident_managers:
-        for block in resident.req_to_blocks[request.request_id][1:]:
-            assert not block.is_null and block.ref_cnt > 0
-    assert coordinator.request_states[request.request_id].valid_pages == {0}
-    pool = coordinator.get_host_block_pool()
-    assert pool is not None
-    manager.free(request)
-    assert pool.get_num_free_blocks() == 1
-
-
-def test_hisparse_host_cow_takes_priority_over_new_pages():
-    """The last host block must hold the private tail, not a fresh page."""
-    manager = make_hisparse_kv_cache_manager(32, 3)
-    coordinator = get_hisparse_coordinator(manager)
-    host = coordinator.host_manager
-    assert host is not None
-    source = host.block_pool.get_new_blocks(1)[0]
-    host.req_to_blocks["cow"] = [source]
-    host._partial_hit_reqs["cow"] = (0, source)
-
-    host.allocate_new_blocks("cow", 32, 32)
-
-    private, missing = host.req_to_blocks["cow"]
-    assert not private.is_null and private is not source
-    assert missing.is_null
-    assert host.take_host_cow_copies() == [(source, private)]
+        assert [b.ref_cnt for b in resident.req_to_blocks[request.request_id]] == [
+            0,
+            0,
+            1,
+            1,
+        ]
 
 
 @pytest.mark.parametrize("failed", [False, True])

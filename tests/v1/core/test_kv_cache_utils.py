@@ -204,6 +204,50 @@ def test_hisparse_hma_uses_resolved_gpu_block_size(
     assert scheduler_block_size == hash_block_size == gpu_block_size
 
 
+@pytest.mark.parametrize("extra_blocks,ok", [(1, False), (2, True)])
+def test_hisparse_host_pool_must_fit_max_model_len(monkeypatch, extra_blocks, ok):
+    """Every page needs a host block, so one max_model_len request must fit."""
+    monkeypatch.setattr(
+        hisparse_runtime_module.current_platform, "is_cuda_alike", lambda: True
+    )
+    specs = {
+        "model.layers.0.self_attn": MLAAttentionSpec(
+            block_size=64,
+            num_kv_heads=1,
+            head_size=576,
+            dtype=torch.bfloat16,
+            is_index_group_leader=True,
+        ),
+        "model.layers.0.self_attn.indexer": MLAAttentionSpec(
+            block_size=64,
+            num_kv_heads=1,
+            head_size=128,
+            dtype=torch.bfloat16,
+            cache_role=SparseCacheRole.INDEXER,
+        ),
+    }
+    group_spec = UniformTypeKVCacheSpecs.from_specs(specs)
+    assert group_spec is not None
+    config = SimpleNamespace(
+        attention_config=SimpleNamespace(hisparse_config=HiSparseConfig()),
+        model_config=SimpleNamespace(
+            hf_config=SimpleNamespace(index_topk=128), max_model_len=64 * 4
+        ),
+        parallel_config=SimpleNamespace(tensor_parallel_size=1, world_size=1),
+        cache_config=SimpleNamespace(num_gpu_blocks_override=7),
+    )
+    host_page = specs["model.layers.0.self_attn"].page_size_bytes
+    host_budget = (4 + extra_blocks) * host_page
+    group = KVCacheGroupSpec(list(specs), group_spec)
+
+    if ok:
+        layout = create_hisparse_layout(config, [group], host_budget=host_budget)
+        assert layout.host_num_blocks == 4 + extra_blocks
+    else:
+        with pytest.raises(ValueError, match="increase host_pool_gib"):
+            create_hisparse_layout(config, [group], host_budget=host_budget)
+
+
 def test_hisparse_rejects_deepseek_v4():
     full_specs = {
         "model.layers.0.attn": MLAAttentionSpec(
