@@ -20,6 +20,7 @@ import torch
 from vllm.model_executor.models.mimo_v2 import (
     _fused_qkv_kv_chunk_rows,
     _shard_fp8_qkv_proj,
+    _split_qkv,
 )
 from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import set_default_torch_num_threads
@@ -318,6 +319,58 @@ def test_exact_padded_layout_matches_checkpoint(geometry, tp_size, monkeypatch):
             q_scales.append(scale[base:q_end])
             kv_scales.append(scale[q_end : (c + 1) * chunk_scale_rows])
         assert torch.equal(s_rank, torch.cat(q_scales + kv_scales))
+
+
+@pytest.mark.parametrize("geometry", ["ga", "pro"])
+@pytest.mark.parametrize("tp_size", [1, 2, 4])
+def test_split_qkv_round_trips_the_padded_layout(geometry, tp_size, monkeypatch):
+    """The forward split inverts the padded gather, byte for byte.
+
+    The writer and the reader each encode the ``[Q | K V pad]`` chunk order,
+    so a one-sided change would keep every shape intact while attention reads
+    swapped K and V rows.
+    """
+    num_heads, num_kv_heads, head_dim, v_head_dim, ckpt_tp = GEOMETRIES[geometry]
+    if tp_size >= ckpt_tp or ckpt_tp % tp_size:
+        pytest.skip("padded layout needs tp_size a proper divisor below ckpt_tp")
+    rows_per_chunk = _chunk_rows(num_heads, num_kv_heads, head_dim, v_head_dim, ckpt_tp)
+    truth = torch.randn(ckpt_tp * rows_per_chunk, COLS)
+    weight, scale = _quantize_chunks(
+        truth, num_heads, num_kv_heads, head_dim, v_head_dim, ckpt_tp
+    )
+    kv_chunk_rows = _fused_qkv_kv_chunk_rows(
+        num_heads, num_kv_heads, head_dim, v_head_dim, tp_size, ckpt_tp
+    )
+    assert kv_chunk_rows
+    monkeypatch.setenv("VLLM_MIMO_EXACT_QKV", "1")
+    q_size = num_heads // tp_size * head_dim
+    k_size = num_kv_heads // tp_size * head_dim
+    v_size = num_kv_heads // tp_size * v_head_dim
+    for tp_rank in range(tp_size):
+        w_rank, _ = _shard_fp8_qkv_proj(
+            weight,
+            scale,
+            num_heads=num_heads,
+            num_kv_heads=num_kv_heads,
+            head_dim=head_dim,
+            v_head_dim=v_head_dim,
+            tp_rank=tp_rank,
+            tp_size=tp_size,
+            ckpt_tp=ckpt_tp,
+            kv_chunk_rows=kv_chunk_rows,
+        )
+        q, k, v = _split_qkv(w_rank.T, q_size, k_size, v_size, kv_chunk_rows)
+        index = _owned_index(
+            num_heads, num_kv_heads, head_dim, v_head_dim, ckpt_tp, tp_rank, tp_size
+        )
+        parts = (
+            index[:q_size],
+            index[q_size : q_size + k_size],
+            index[q_size + k_size :],
+        )
+        expected = [weight[part].T.contiguous().view(torch.uint8) for part in parts]
+        for got, want in zip((q, k, v), expected, strict=True):
+            assert torch.equal(got.contiguous().view(torch.uint8), want)
 
 
 def test_flag_off_keeps_requantizing_loader(monkeypatch):
