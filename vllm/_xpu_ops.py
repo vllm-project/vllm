@@ -803,6 +803,39 @@ def xpu_moe_shared_fused_unsupported_reason(runner) -> str | None:
         w2.shape[1],
     ):
         return "kernel does not support this configuration"
+    return _xpu_moe_shared_fused_router_unsupported_reason(runner, w13)
+
+
+def _xpu_moe_shared_fused_router_unsupported_reason(
+    runner, w13: torch.Tensor
+) -> str | None:
+    # The fused op computes the routing itself (fp16 router GEMV + softmax
+    # top-k), so the router must be the plain fused top-k softmax one.
+    from vllm_xpu_kernels.moe_shared_fused_interface import router_supports
+
+    from vllm.model_executor.layers.fused_moe.router.fused_topk_router import (
+        FusedTopKRouter,
+    )
+
+    router = runner.router
+    if type(router) is not FusedTopKRouter or router.scoring_func != "softmax":
+        return "router is not a softmax top-k router"
+    if router.eplb_state is not None:
+        return "EPLB"
+    num_experts, hidden_size = w13.shape[0], w13.shape[1]
+    gate = runner.gate
+    weight = getattr(gate, "weight", None)
+    if (
+        getattr(gate, "bias", None) is not None
+        or not isinstance(weight, torch.Tensor)
+        or weight.dtype != torch.float16
+        or tuple(weight.shape) != (num_experts, hidden_size)
+    ):
+        return "router gate is not an unquantized fp16 [E, H] linear"
+    if not router_supports(
+        weight.dtype, num_experts, runner.moe_config.experts_per_token, hidden_size
+    ):
+        return "router kernel does not support this configuration"
     return None
 
 
@@ -839,6 +872,8 @@ def _xpu_moe_shared_fused_plan(runner):
         shared_w2_scale=mlp.down_proj.weight_scale,
         shared_gate=mlp.expert_gate.weight,
         top_k=runner.moe_config.experts_per_token,
+        router_weight=runner.gate.weight.data,
+        renormalize=runner.router.renormalize,
     )
     setattr(runner, _XPU_MOE_SHARED_FUSED_PLAN_ATTR, plan)
     return plan
@@ -856,20 +891,13 @@ def _xpu_moe_shared_fused_impl(
 
     runner = get_layer_from_name(_resolve_layer_name(layer_name))
     plan = _xpu_moe_shared_fused_plan(runner)
-    router_logits, _ = runner.gate(hidden_states)
-    topk_weights, topk_ids = runner.router.select_experts(
-        hidden_states=hidden_states,
-        router_logits=router_logits,
-        topk_indices_dtype=runner.routed_experts.quant_method.topk_indices_dtype,
-        input_ids=None,
-    )
+    # Routing (the runner's gate + softmax top-k) is computed inside the op.
     x = hidden_states.contiguous()
-    return plan.forward(
-        torch.empty_like(x),
-        x,
-        topk_weights.to(torch.float32).contiguous(),
-        topk_ids.contiguous(),
-    )
+    out, topk_ids = plan.forward_routed(torch.empty_like(x), x)
+    capture_fn = runner.router.capture_fn
+    if capture_fn is not None:
+        capture_fn(topk_ids)
+    return out
 
 
 def _xpu_moe_shared_fused_fake(

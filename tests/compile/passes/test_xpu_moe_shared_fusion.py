@@ -19,6 +19,9 @@ from vllm.config.utils import Range
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.experts.xpu_moe import XPUExpertsFp8
+from vllm.model_executor.layers.fused_moe.router.fused_topk_router import (
+    FusedTopKRouter,
+)
 
 HIDDEN = 2048
 MOE = torch.ops.vllm.moe_forward_shared.default
@@ -216,7 +219,9 @@ def _xpu_experts(w1_scale, w2_scale):
     return experts
 
 
-def _stub_runner(w13, w2, s13, s2, sw13, ss13, sw2, ss2, gate_w):
+def _stub_runner(w13, w2, s13, s2, sw13, ss13, sw2, ss2, gate_w, router_w=None):
+    if router_w is None:
+        router_w = torch.empty(E, HIDDEN, dtype=torch.float16, device="meta")
     parallel = SimpleNamespace(
         enable_eplb=False,
         use_ep=False,
@@ -244,7 +249,8 @@ def _stub_runner(w13, w2, s13, s2, sw13, ss13, sw2, ss2, gate_w):
     )
     return SimpleNamespace(
         layer_name="model.layers.0.mlp.experts",
-        gate=object(),
+        gate=SimpleNamespace(weight=router_w, bias=None),
+        router=FusedTopKRouter(top_k=8, global_num_experts=E, renormalize=True),
         shared_expert_gate=None,
         shared_experts=SimpleNamespace(_layer=mlp),
         routed_scaling_factor=1.0,
@@ -283,6 +289,7 @@ def xpu_ops_mod():
 def fake_kernel_interface(monkeypatch, xpu_ops_mod):
     mod = ModuleType("vllm_xpu_kernels.moe_shared_fused_interface")
     mod.supports = lambda *args: True
+    mod.router_supports = lambda *args: True
     monkeypatch.setitem(sys.modules, mod.__name__, mod)
     monkeypatch.setattr(xpu_ops_mod, "xpu_moe_shared_fused_available", lambda: True)
     return mod
@@ -333,6 +340,11 @@ MLP = "shared_experts._layer"
         (f"{MLP}.gate_up_proj.weight_scale", torch.empty(2)),
         (f"{MLP}.down_proj.weight", _fp8(2 * I_LOCAL, HIDDEN)),
         (f"{MLP}.expert_gate.weight", torch.empty(1, HIDDEN)),
+        ("router.scoring_func", "sigmoid"),
+        ("router", SimpleNamespace(scoring_func="softmax", eplb_state=None)),
+        ("gate.bias", torch.empty(E)),
+        ("gate.weight", _fp8(E, HIDDEN)),
+        ("gate.weight", torch.empty(E, 2 * HIDDEN, dtype=torch.float16)),
     ],
 )
 def test_each_precondition(fake_kernel_interface, path, value):
@@ -368,6 +380,11 @@ def test_experts_not_xpu_fp8(fake_kernel_interface):
 
 def test_kernel_rejects_configuration(fake_kernel_interface):
     fake_kernel_interface.supports = lambda *args: False
+    assert _reason(_base_runner()) is not None
+
+
+def test_router_kernel_rejects_configuration(fake_kernel_interface):
+    fake_kernel_interface.router_supports = lambda *args: False
     assert _reason(_base_runner()) is not None
 
 
@@ -411,15 +428,16 @@ def test_op_matches_reference(monkeypatch, xpu_ops_mod, m):
     sw2, ss2 = q8(torch.randn(I_LOCAL, HIDDEN, device=dev) / 32)
     gate_w = (torch.randn(1, HIDDEN, device=dev) / 32).half()
     router_w = (torch.randn(E, HIDDEN, device=dev) / 32).half()
-    runner = _stub_runner(w13, w2, s13, s2, sw13, ss13, sw2, ss2, gate_w)
+    runner = _stub_runner(w13, w2, s13, s2, sw13, ss13, sw2, ss2, gate_w, router_w)
+    captured = []
+    runner.router.set_capture_fn(captured.append)
 
-    def route(hidden_states, router_logits, topk_indices_dtype, input_ids):
-        probs = torch.softmax(router_logits.float(), dim=-1)
+    def route(x):
+        # F.linear router + softmax top-k, renormalized.
+        probs = torch.softmax(torch.nn.functional.linear(x, router_w).float(), -1)
         tw, ti = torch.topk(probs, 8, dim=-1)
         return tw / tw.sum(-1, keepdim=True), ti.to(torch.int32)
 
-    runner.gate = lambda x: (torch.nn.functional.linear(x, router_w), None)
-    runner.router = SimpleNamespace(select_experts=route)
     monkeypatch.setattr(moe_runner, "get_layer_from_name", lambda name: runner)
 
     x = (torch.randn(m, HIDDEN, device=dev) / 4).half()
@@ -430,7 +448,9 @@ def test_op_matches_reference(monkeypatch, xpu_ops_mod, m):
         return w.float() * (s[:, None, None] if w.dim() == 3 else s)
 
     W13, W2, SW13, SW2 = deq(w13, s13), deq(w2, s2), deq(sw13, ss13), deq(sw2, ss2)
-    tw, ti = route(x, runner.gate(x)[0], None, None)
+    tw, ti = route(x)
+    assert len(captured) == 1
+    assert torch.equal(captured[0].sort(-1).values, ti.sort(-1).values)
     xf = x.float()
     ref = torch.zeros_like(xf)
     for i in range(m):
