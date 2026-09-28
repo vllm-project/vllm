@@ -497,9 +497,17 @@ RUN printf '%s\n' "${LMCACHE_REF}" | grep -Eq '^[0-9a-f]{40}$' \
         /app/lmcache/requirements/common.txt)" -eq 2 \
     && test "$(grep -Fxc 'numpy<=2.2.6' \
         /app/lmcache/requirements/common.txt)" -eq 1 \
+    && test "$(grep -Fxc 'opentelemetry-api >= 1.20.0, <= 1.40.0' \
+        /app/lmcache/requirements/common.txt)" -eq 1 \
+    && test "$(grep -Fxc 'opentelemetry-sdk >= 1.20.0' \
+        /app/lmcache/requirements/common.txt)" -eq 1 \
+    && test "$(grep -Fxc 'opentelemetry-exporter-otlp >= 1.20.0' \
+        /app/lmcache/requirements/common.txt)" -eq 1 \
     && sed -i -E \
         -e '/^(cufile-python|nvtx)([<=>[:space:]]|$)/d' \
         -e 's/^numpy<=2\.2\.6$/numpy<=2.3.5/' \
+        -e 's/^opentelemetry-sdk >= 1\.20\.0$/opentelemetry-sdk >= 1.20.0, <= 1.40.0/' \
+        -e 's/^opentelemetry-exporter-otlp >= 1\.20\.0$/opentelemetry-exporter-otlp >= 1.20.0, <= 1.40.0/' \
         /app/lmcache/requirements/common.txt \
     && rm -rf /app/lmcache/.git
 
