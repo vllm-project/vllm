@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Tests for manual fusion via maybe_fused_act_quant.
+"""Tests for manual fusion via maybe_fused_act_quant.
 
 Tests all fusion paths in _FUSED_ACT_QUANT:
 - kFp8StaticTensorSym: all platforms

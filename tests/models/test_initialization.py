@@ -1,12 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import gc
+from collections.abc import Generator
 from functools import partial
 from unittest.mock import patch
 
 import pytest
+import torch
 
 from vllm import LLM
+from vllm.logger import init_logger
+from vllm.platforms import current_platform
 from vllm.utils.mem_constants import GiB_bytes
 from vllm.v1.attention.backends.utils import resolve_kv_cache_layout
 from vllm.v1.core.kv_cache_utils import (
@@ -15,7 +20,12 @@ from vllm.v1.core.kv_cache_utils import (
 )
 from vllm.v1.engine.core import EngineCore as V1EngineCore
 
-from ..utils import create_new_process_for_each_test, requires_spawn_multiprocessing
+from ..utils import (
+    create_new_process_for_each_test,
+    requires_spawn_multiprocessing,
+    wait_for_gpu_memory_to_clear,
+    wait_for_memory_to_settle,
+)
 from .registry import (
     _TRANSFORMERS_BACKEND_MODELS,
     AUTO_EXAMPLE_MODELS,
@@ -23,6 +33,8 @@ from .registry import (
     HfExampleModels,
 )
 from .utils import dummy_hf_overrides
+
+logger = init_logger(__name__)
 
 # This minimal list of model architectures is smaller than the total list of
 # supported models. The intention is that in the "typical" regression testing
@@ -53,6 +65,37 @@ OTHER_MODEL_ARCH_LIST = set(HF_EXAMPLE_MODELS.get_supported_archs()) - set(
 )
 
 
+@pytest.fixture(autouse=True)
+def cleanup_gpu_memory_between_tests() -> Generator[None, None, None]:
+    """Reclaim GPU memory left over by each test's forked subprocess.
+
+    These tests are known to leave behind GPU memory (see the comment at
+    ``gpu_memory_utilization=0.80`` below). Each parametrized case builds an
+    LLM in a forked subprocess whose VRAM is only reclaimed asynchronously
+    when the subprocess exits, so the leftovers can OOM a later test in this
+    module (observed with the heavier multimodal archs, e.g.
+    InternVLChatModel). Mirrors ``clean_gpu_memory_between_tests`` in the
+    top-level conftest, but unconditionally for this module.
+    """
+    yield
+    gc.collect()
+    if not torch.cuda.is_available():
+        return
+    torch.accelerator.empty_cache()
+    if current_platform.is_rocm() or current_platform.is_xpu():
+        wait_for_memory_to_settle()
+        return
+    try:
+        wait_for_gpu_memory_to_clear(
+            devices=list(range(torch.accelerator.device_count())),
+            threshold_ratio=0.1,
+        )
+    except Exception as e:
+        # NVML is not usable on MIG slices (raises NVMLError_NoPermission);
+        # cleanup is best-effort, so never fail a test over it.
+        logger.info("Failed to clean GPU memory: %s", e)
+
+
 @create_new_process_for_each_test()
 def can_initialize(
     model_arch: str, monkeypatch: pytest.MonkeyPatch, EXAMPLE_MODELS: HfExampleModels
@@ -64,7 +107,6 @@ def can_initialize(
     The spawn process causes the _initialize_kv_caches_v1 function below to
     become ineffective.
     """
-
     model_info = EXAMPLE_MODELS.get_hf_info(model_arch)
     model_info.check_available_online(on_fail="skip")
     model_info.check_transformers_version(
@@ -199,13 +241,13 @@ def can_initialize(
 
 @pytest.mark.parametrize("model_arch", MINIMAL_MODEL_ARCH_LIST)
 def test_can_initialize_small_subset(model_arch: str, monkeypatch: pytest.MonkeyPatch):
-    """Test initializing small subset of supported models"""
+    """Test initializing small subset of supported models."""
     can_initialize(model_arch, monkeypatch, HF_EXAMPLE_MODELS)
 
 
 @pytest.mark.parametrize("model_arch", OTHER_MODEL_ARCH_LIST)
 def test_can_initialize_large_subset(model_arch: str, monkeypatch: pytest.MonkeyPatch):
-    """Test initializing large subset of supported models
+    """Test initializing large subset of supported models.
 
     This test covers the complement of the tests covered in the "small subset"
     test.

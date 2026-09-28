@@ -119,6 +119,14 @@ class RMSNorm(CustomOp):
         x: torch.Tensor,
         residual: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        if envs.VLLM_BATCH_INVARIANT and residual is not None:
+            assert self.variance_size_override is None, (
+                "Batch invariance is not supported for variance_size_override"
+            )
+            weight = self.weight.data if self.pass_weight_add else None
+            return ir.ops.fused_add_rms_norm.impls["native"].impl_fn(
+                x, residual, weight, self.variance_epsilon
+            )
         return self.forward_cuda(x, residual)
 
     def extra_repr(self) -> str:
@@ -171,6 +179,15 @@ class GemmaRMSNorm(CustomOp):
         x: torch.Tensor,
         residual: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        if envs.VLLM_BATCH_INVARIANT:
+            if residual is None:
+                return self.forward_cuda(x, residual)
+            return ir.ops.fused_add_rms_norm.impls["native"].impl_fn(
+                x,
+                residual,
+                self.weight.float() + 1.0,
+                self.variance_epsilon,
+            )
         import vllm._xpu_ops  # noqa: F401 registers torch.ops.vllm.xpu_gemma_rms_norm
 
         # Fall back to the native path if the fused gemma kernels are not
@@ -231,6 +248,7 @@ class RMSNormGated(CustomOp):
             device: Device to create parameters on
             dtype: Data type for parameters
             activation: Activation function name for gating
+
         """
         factory_kwargs = {"device": device, "dtype": dtype}
         super().__init__()
@@ -335,9 +353,7 @@ class RMSNormGated(CustomOp):
 
 
 class LayerNorm(nn.Module):
-    """
-    Layer Normalization.
-    """
+    """Layer Normalization."""
 
     def __init__(self, dim: int, eps: float = 1e-6):
         super().__init__()

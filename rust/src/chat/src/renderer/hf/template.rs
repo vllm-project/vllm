@@ -45,7 +45,7 @@ fn build_environment(template: String) -> Result<Environment<'static>> {
 #[serde_with::skip_serializing_none]
 #[derive(Default, Serialize)]
 pub(super) struct TemplateContext<'a> {
-    pub(super) messages: &'a [TemplateMessage],
+    pub(super) messages: &'a [TemplateMessage<'a>],
     pub(super) add_generation_prompt: bool,
     pub(super) continue_final_message: bool,
     pub(super) tools: Option<&'a [TemplateTool]>,

@@ -48,4 +48,4 @@ def create_cached_processor(model_id: str, processor_cls):
     )
     info = MultiModalProcessingInfo(ctx)
     cache = MultiModalProcessorOnlyCache(model_config)
-    return processor_cls(info, MultiModalDummyInputsBuilder(info), cache=cache), cache
+    return processor_cls(info, MultiModalDummyInputsBuilder(info)), cache
