@@ -33,6 +33,7 @@ from vllm.v1.worker.gpu.sample.watermark import (
     philox_gumbel_sample,
     repeated_context_mask,
 )
+from vllm.v1.worker.gpu.spec_decode.dflash.speculator import DFlashSpeculator
 from vllm.v1.worker.gpu.spec_decode.dspark.speculator import DSparkSpeculator
 from vllm.v1.worker.gpu.spec_decode.speculator import DraftModelSpeculator
 
@@ -1545,6 +1546,153 @@ def test_draft_watermarker_cuda_graph_reads_current_prompt_lens():
     prepare()
     graph.replay()
     assert mask.item()
+
+
+class _NextTokenWatermarker:
+    """Samples one past the last context token, exposing how contexts advance."""
+
+    context_width = 2
+
+    @staticmethod
+    def sample(logits, contexts, random_sampler=None, skip_mask=None):
+        watermarked = contexts[:, -1] + 1
+        return WatermarkSample(
+            torch.where(skip_mask, random_sampler(logits), watermarked), logits
+        )
+
+
+class _RepeatingWatermarker(_NextTokenWatermarker):
+    @staticmethod
+    def sample(logits, contexts, random_sampler=None, skip_mask=None):
+        watermarked = torch.full_like(contexts[:, -1], 7)
+        return WatermarkSample(
+            torch.where(skip_mask, random_sampler(logits), watermarked), logits
+        )
+
+
+def _ordinary_samples_are_nine(monkeypatch):
+    monkeypatch.setattr(
+        "vllm.v1.watermarking.watermarker.gumbel_sample",
+        lambda logits, *args, **kwargs: torch.full((logits.shape[0],), 9),
+    )
+
+
+def _parallel_draft_watermarker(
+    watermarker, contexts, enabled, num_steps, deduplicate_contexts="none"
+) -> DraftWatermarker:
+    num_reqs = len(contexts)
+    draft_watermarker = DraftWatermarker(
+        watermarker,
+        max_num_reqs=num_reqs,
+        device=torch.device("cpu"),
+        num_speculative_steps=num_steps,
+        deduplicate_contexts=deduplicate_contexts,
+        deduplicate_contexts_max_history=None,
+    )
+    draft_watermarker.prepare(
+        contexts=torch.tensor(contexts),
+        enabled=torch.tensor(enabled),
+        all_token_ids=torch.tensor([[100, *row] for row in contexts]),
+        prompt_lens=torch.ones(num_reqs, dtype=torch.int64),
+        total_lens=torch.full((num_reqs,), 3),
+    )
+    return draft_watermarker
+
+
+def _sample_parallel(draft_watermarker, num_reqs, num_steps, temperature):
+    num_rows = num_reqs * num_steps
+    return draft_watermarker.sample_parallel(
+        torch.zeros(num_rows, 8),
+        torch.arange(num_reqs).repeat_interleave(num_steps),
+        temperature,
+        torch.zeros(num_reqs, dtype=torch.int64),
+        torch.arange(num_rows),
+        apply_temperature=True,
+        is_drafting=True,
+        num_steps=num_steps,
+        logits_cache=torch.zeros(num_reqs, num_steps, 8),
+        logits_cache_col=torch.arange(num_steps).repeat(num_reqs),
+    )
+
+
+def test_parallel_draft_watermarking_includes_earlier_steps_in_context(
+    monkeypatch,
+):
+    # The target verifies step k with the drafts of steps < k in its context,
+    # so parallel drafts must be watermarked in step order.
+    _ordinary_samples_are_nine(monkeypatch)
+    draft_watermarker = _parallel_draft_watermarker(
+        _NextTokenWatermarker(), [[1, 2], [3, 4]], [True, True], num_steps=3
+    )
+
+    sampled = _sample_parallel(draft_watermarker, 2, 3, torch.ones(2))
+
+    assert torch.equal(sampled, torch.tensor([3, 4, 5, 5, 6, 7]))
+    assert torch.equal(draft_watermarker.contexts, torch.tensor([[4, 5], [6, 7]]))
+
+
+def test_parallel_draft_watermarking_keeps_disabled_and_greedy_drafts(
+    monkeypatch,
+):
+    _ordinary_samples_are_nine(monkeypatch)
+    draft_watermarker = _parallel_draft_watermarker(
+        _NextTokenWatermarker(),
+        [[1, 2], [3, 4], [5, 6]],
+        [True, False, True],
+        num_steps=2,
+    )
+
+    sampled = _sample_parallel(draft_watermarker, 3, 2, torch.tensor([1.0, 1.0, 0.0]))
+
+    assert torch.equal(sampled, torch.tensor([3, 4, 9, 9, 9, 9]))
+
+
+def test_parallel_draft_watermarking_deduplicates_within_the_draft_block(
+    monkeypatch,
+):
+    # Contexts [2, 7], [7, 7], [7, 7]: the last repeats an earlier step of the
+    # same block, which deduplication sees only if steps are sampled in order.
+    _ordinary_samples_are_nine(monkeypatch)
+    draft_watermarker = _parallel_draft_watermarker(
+        _RepeatingWatermarker(),
+        [[1, 2]],
+        [True],
+        num_steps=4,
+        deduplicate_contexts="single_turn",
+    )
+
+    sampled = _sample_parallel(draft_watermarker, 1, 4, torch.ones(1))
+
+    assert torch.equal(sampled, torch.tensor([7, 7, 7, 9]))
+
+
+def test_dflash_draft_sampler_watermarks_drafts_in_step_order(monkeypatch):
+    class StubModel:
+        @staticmethod
+        def compute_logits(hidden_states):
+            return torch.zeros(hidden_states.shape[0], 8)
+
+    _ordinary_samples_are_nine(monkeypatch)
+    speculator = object.__new__(DFlashSpeculator)
+    speculator.model = StubModel()
+    speculator.num_speculative_steps = 2
+    speculator.use_fp64_gumbel = False
+    speculator.acceptance_estimator = None
+    speculator.draft_watermarker = _parallel_draft_watermarker(
+        _NextTokenWatermarker(), [[1, 2], [3, 4]], [True, True], num_steps=2
+    )
+
+    sampled = speculator.sample_draft(
+        hidden_states=torch.zeros(4, 4),
+        sample_src_positions=torch.arange(4),
+        idx_mapping=torch.tensor([0, 0, 1, 1]),
+        temperature=torch.ones(2),
+        seeds=torch.zeros(2, dtype=torch.int64),
+        draft_step=torch.tensor([0, 1, 0, 1]),
+        draft_logits=torch.zeros(2, 2, 8),
+    )
+
+    assert torch.equal(sampled, torch.tensor([3, 4, 5, 6]))
 
 
 def test_dspark_reduced_vocab_draft_sampler_applies_watermarking(monkeypatch):

@@ -3769,6 +3769,47 @@ def test_dual_key_gumbel_supports_dspark():
     config._check_watermarking_unsupported()
 
 
+def _dflash_speculative_config(architectures: list[str]) -> SimpleNamespace:
+    return SimpleNamespace(
+        method="dflash",
+        draft_sample_method="probabilistic",
+        rejection_sample_method="standard",
+        parallel_drafting=True,
+        draft_model_config=SimpleNamespace(architectures=architectures),
+    )
+
+
+def test_dual_key_gumbel_supports_dflash():
+    config = _watermarked_vllm_config()
+    config.watermark_config = WatermarkConfig(algorithm="dual_key_gumbel", key=42)
+    config.speculative_config = _dflash_speculative_config(["DFlashDraftModel"])
+
+    config._check_watermarking_unsupported()
+
+
+def test_gumbel_rejects_dflash_without_target_only():
+    config = _watermarked_vllm_config()
+    config.watermark_config = WatermarkConfig(
+        algorithm="gumbel", key=42, allow_target_only_watermarking=False
+    )
+    config.speculative_config = _dflash_speculative_config(["DFlashDraftModel"])
+
+    with pytest.raises(ValueError, match="'gumbel'.*allow_target_only_watermarking"):
+        config._check_watermarking_unsupported()
+
+
+@pytest.mark.parametrize("architecture", ["DFlash2DraftModel", "LiLiCorrDraftModel"])
+def test_dual_key_gumbel_rejects_dflash_candidate_drafts(architecture):
+    # Candidate drafters sample in their own kernel and bypass the draft
+    # watermarker, so their drafts would silently go unwatermarked.
+    config = _watermarked_vllm_config()
+    config.watermark_config = WatermarkConfig(algorithm="dual_key_gumbel", key=42)
+    config.speculative_config = _dflash_speculative_config([architecture])
+
+    with pytest.raises(ValueError, match="candidate drafters"):
+        config._check_watermarking_unsupported()
+
+
 def test_dual_key_gumbel_rejects_non_autoregressive_speculation():
     config = _watermarked_vllm_config()
     config.watermark_config = WatermarkConfig(algorithm="dual_key_gumbel", key=42)
@@ -3779,7 +3820,7 @@ def test_dual_key_gumbel_rejects_non_autoregressive_speculation():
         parallel_drafting=False,
     )
 
-    with pytest.raises(ValueError, match="autoregressive model-based"):
+    with pytest.raises(ValueError, match="only model-based"):
         config._check_watermarking_unsupported()
 
 
