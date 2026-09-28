@@ -2269,10 +2269,15 @@ class HiSparseSourceManager(FullAttentionManager):
             num_local_computed_tokens,
             num_tokens_main_model,
         )
+        assert self.coordinator is not None
+        available = self.block_pool.get_num_free_blocks()
+        if total_computed_tokens > num_local_computed_tokens:
+            # An external load cannot be preempted while it waits, so it may
+            # not take host blocks other admitted loads need to finish.
+            available -= self.coordinator.reserved_host_blocks(excluding=request_id)
         # Host blocks come from a private pool, so they never count against
         # the GPU pool. Use the same admission sentinel as Mamba instead.
-        if required > self.block_pool.get_num_free_blocks():
-            assert self.coordinator is not None
+        if required > available:
             assert self.coordinator.gpu_pool is not None
             return self.coordinator.gpu_pool.num_gpu_blocks + 1
         return 0

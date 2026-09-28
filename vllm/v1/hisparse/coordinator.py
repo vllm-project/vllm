@@ -163,6 +163,10 @@ class HiSparseCoordinator:
         self._retained_copies: dict[int, tuple[KVCacheBlock, KVCacheBlock]] = {}
         # request -> prefix length an external load is still filling in.
         self._pending_imports: dict[str, int] = {}
+        # request -> host pages an admitted external load needs for its whole
+        # prompt. Later external loads may only use host blocks left over after
+        # these, as the scheduler reserves GPU blocks for in-flight prefills.
+        self._host_prompt_pages: dict[str, int] = {}
         self.block_table_updates: set[str] = set()
         self.spills_to_send: list[SparseKVPageTransfer] = []
         self.pending_spills: dict[int, _PendingSpill] = {}
@@ -487,6 +491,25 @@ class HiSparseCoordinator:
         """Note a prefix an external load is populating in host pages."""
         self._pending_imports[request_id] = num_tokens
 
+    def reserve_host_prompt(self, request: Request) -> None:
+        """Hold host pages for the rest of an admitted external load's prompt."""
+        if request.request_id not in self._pending_imports:
+            return
+        assert self.host_manager is not None
+        self._host_prompt_pages[request.request_id] = cdiv(
+            request.num_prompt_tokens, self.host_manager.block_size
+        )
+
+    def reserved_host_blocks(self, excluding: str) -> int:
+        """Host blocks other admitted external loads still need for their prompts."""
+        assert self.host_manager is not None
+        reserved = 0
+        for request_id, num_pages in self._host_prompt_pages.items():
+            if request_id != excluding:
+                held = len(self.host_manager.req_to_blocks.get(request_id, ()))
+                reserved += max(num_pages - held, 0)
+        return reserved
+
     def finish_host_import(self, request_id: str, *, failed: bool) -> None:
         num_tokens = self._pending_imports.pop(request_id, None)
         if num_tokens is not None and not failed:
@@ -735,6 +758,7 @@ class HiSparseCoordinator:
     def free(self, request_id: str) -> None:
         """Detach the request; its clean pages stay readable copies in the pool."""
         self._pending_imports.pop(request_id, None)
+        self._host_prompt_pages.pop(request_id, None)
         state = self.request_states.pop(request_id, None)
         if state is None:
             return
