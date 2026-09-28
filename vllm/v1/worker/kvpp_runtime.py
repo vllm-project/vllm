@@ -36,11 +36,10 @@ class KVPPRuntime:
         plan = config.storage_plan
         assert plan is not None
         group = get_kvpp_group()
-        if (plan.placement.rank, plan.placement.world_size) != (
+        assert (plan.placement.rank, plan.placement.world_size) == (
             group.rank_in_group,
             group.world_size,
-        ):
-            raise ValueError("KVPP allocation and execution replica ranks differ.")
+        ), "KVPP allocation and execution replica ranks differ."
         self.group = group.device_group
         self.ranks = group.ranks
         self.plan = plan
