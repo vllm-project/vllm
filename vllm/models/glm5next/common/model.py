@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Iterable
-from typing import ClassVar, Literal
+from typing import TYPE_CHECKING, ClassVar, Literal
 
 import torch
 from torch import nn
@@ -91,6 +91,9 @@ from .multimodal import (
     Glm5NextProcessingInfo,
     Glm5NextVisionTransformer,
 )
+
+if TYPE_CHECKING:
+    from vllm.v1.worker.gpu.pcp_manager import HybridPCPLayout
 
 logger = init_logger(__name__)
 
@@ -934,6 +937,8 @@ class Glm5NextModel(nn.Module):
 class Glm5NextForCausalLM(
     nn.Module, HasInnerState, SupportsPP, MixtureOfExperts, IsHybrid
 ):
+    supports_hybrid_pcp = current_platform.is_cuda()
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         self.model_config = vllm_config.model_config
@@ -956,6 +961,12 @@ class Glm5NextForCausalLM(
         self.logits_processor = LogitsProcessor(
             self.config.vocab_size, scale=self.config.logit_scale
         )
+
+    def prepare_hybrid_pcp(self, layout: "HybridPCPLayout") -> None:
+        """Build this step's KCP plan ahead of the forward."""
+        from vllm.models.glm5next.nvidia.ops import kcp
+
+        kcp.plan_for(layout, self.config.linear_conv_kernel_dim - 1)
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.embed_input_ids(input_ids)
@@ -1030,6 +1041,8 @@ class Glm5NextForCausalLM(
 class Glm5NextForConditionalGeneration(
     Glm4vForConditionalGeneration, HasInnerState, IsHybrid, MixtureOfExperts
 ):
+    supports_hybrid_pcp = current_platform.is_cuda()
+
     # The text model (KDA + dense-MLA + MoE) is a hybrid mamba model. The
     # multimodal wrapper must declare the same interfaces so vLLM treats it as
     # hybrid (auto-aligns mamba/attention block sizes, sizes the mamba state
@@ -1119,6 +1132,9 @@ class Glm5NextForConditionalGeneration(
         # Glm5NextForCausalLM does not implement make_empty_intermediate_tensors,
         # so pipeline parallelism is gated off (consistent with the text-only
         # model) and we intentionally do not alias it here.
+
+    def prepare_hybrid_pcp(self, layout: "HybridPCPLayout") -> None:
+        self.language_model.prepare_hybrid_pcp(layout)
 
     def set_moe_parameters(self) -> None:
         self.moe_mlp_layers = [

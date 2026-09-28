@@ -1,17 +1,19 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Iterator
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING
 
 import numpy as np
 import torch
 
-from vllm.config import CUDAGraphMode, VllmConfig
+from vllm.config import CUDAGraphMode, ModelConfig, VllmConfig
 from vllm.distributed.parallel_state import get_dcp_group, get_pcp_group
 from vllm.logger import init_logger
+from vllm.platforms import current_platform
 from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID, get_dcp_local_seq_lens
+from vllm.v1.worker.cp_utils import model_supports_hybrid_pcp
 from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.input_batch import (
     InputBatch,
@@ -35,6 +37,83 @@ class RankSegment:
         return self.global_batch_slice.stop - self.global_batch_slice.start
 
 
+def upload_pinned(
+    device: torch.device, dtype: torch.dtype, **arrays
+) -> dict[str, torch.Tensor]:
+    """Copy host arrays to ``device`` in one non-blocking pinned transfer.
+
+    Pinned, so the copy does not stall until the GPU drains the previous
+    step's work (per-step metadata is built ahead of the forward).
+    """
+    tensors = [torch.as_tensor(value, dtype=dtype) for value in arrays.values()]
+    packed = torch.cat([tensor.flatten() for tensor in tensors]).pin_memory()
+    views = packed.to(device, non_blocking=True).split(
+        [tensor.numel() for tensor in tensors]
+    )
+    return {
+        name: view.view(tensor.shape)
+        for name, tensor, view in zip(arrays, tensors, views)
+    }
+
+
+@dataclass
+class HybridPCPLayout:
+    """Where this rank's tokens sit in the global batch under hybrid PCP.
+
+    PCP zig-zag-shards every prefill into ``2P`` chunk slots of
+    ``ceil(len / 2P)`` tokens; rank ``r`` computes slots ``r`` and
+    ``2P - 1 - r``. Linear-attention state caches stay replicated and indexed
+    by global requests, so the Mamba metadata is built on the global batch and
+    this layout maps the rank's local tokens onto it. Local tokens are ordinary
+    decodes (one per request, replicated on every rank), then this rank's
+    prefill segments ordered by (request, slot), then padding.
+
+    Models derive their per-step indices from it once and keep them in
+    ``shared``, which every Mamba group's bound copy (``with_state_indices``)
+    references; only the state slots differ between groups.
+    """
+
+    world: int
+    rank: int
+    num_decode_tokens: int
+    num_prefill_tokens: int
+    # Host view: prefill lengths [N], tokens per (request, slot) [N, 2P], and
+    # each local segment's request, slot and first token within its request.
+    prefill_lens: np.ndarray
+    slot_lens: np.ndarray
+    segment_request: np.ndarray
+    segment_slot: np.ndarray
+    segment_start: np.ndarray
+    # Local prefill segments, relative to the first local prefill token.
+    scan_cu: np.ndarray
+    scan_cu_seqlens: torch.Tensor
+    # Rows of the global Mamba metadata.
+    decode_rows: torch.Tensor
+    prefill_rows: torch.Tensor
+    prefill_has_initial_state: torch.Tensor
+    decode_cu_seqlens: torch.Tensor
+    # State cache slots of the rows above, set per Mamba group by the model state.
+    decode_slots: torch.Tensor | None = field(default=None, repr=False)
+    prefill_slots: torch.Tensor | None = field(default=None, repr=False)
+    shared: dict = field(default_factory=dict, repr=False)
+
+    @property
+    def num_prefill_reqs(self) -> int:
+        return len(self.prefill_lens)
+
+    @property
+    def num_segments(self) -> int:
+        return len(self.segment_request)
+
+    def with_state_indices(self, state_indices: torch.Tensor) -> "HybridPCPLayout":
+        """Bind one Mamba group's per-request state slots, once per step."""
+        return replace(
+            self,
+            decode_slots=state_indices[self.decode_rows],
+            prefill_slots=state_indices[self.prefill_rows],
+        )
+
+
 class PCPManager:
     """MRV2 PC batch manager.
 
@@ -55,6 +134,7 @@ class PCPManager:
         dcp_world_size: int = 1,
         dcp_rank: int = 0,
         cp_interleave: int = 1,
+        model_config: ModelConfig | None = None,
     ) -> None:
         self.pcp_world_size = pcp_world_size
         self.pcp_rank = pcp_rank
@@ -62,15 +142,18 @@ class PCPManager:
         self.dcp_world_size = dcp_world_size
         self.dcp_rank = dcp_rank
         self.cp_interleave = cp_interleave
+        self._hybrid = pcp_world_size > 1 and model_supports_hybrid_pcp(model_config)
 
         self._global_batch: InputBatch | None = None
         self._local_batch: InputBatch | None = None
         self._local_gather_idx: torch.Tensor | None = None
         self.draft_prefill_batch: InputBatch | None = None
+        self._local_segments: tuple[RankSegment, ...] = ()
         self._block_tables = block_tables
         self._hidden_restore_idx: torch.Tensor | None = None
         self._padded_gather_idx: torch.Tensor | None = None
         self._gathered_kv_write_mask: torch.Tensor | None = None
+        self._global_block_tables: tuple[torch.Tensor, ...] | None = None
         self._pad_slot_id = torch.tensor(PAD_SLOT_ID, dtype=torch.int64, device=device)
 
         max_num_local_reqs = 2 * max_num_reqs if max_num_reqs is not None else None
@@ -142,6 +225,26 @@ class PCPManager:
         if vllm_config.lora_config is not None:
             raise NotImplementedError("MRV2 PCP does not support LoRA yet.")
         speculative_config = vllm_config.speculative_config
+        hybrid = model_supports_hybrid_pcp(model_config)
+        if hybrid:
+            # The chunk summaries use SM10x tcgen05/TMEM operations.
+            if not current_platform.is_device_capability_family(100):
+                raise NotImplementedError("Hybrid PCP requires CUDA SM10x.")
+            if speculative_config is not None:
+                raise NotImplementedError(
+                    "Hybrid PCP does not support speculative decoding yet."
+                )
+            if vllm_config.compilation_config.cudagraph_mode != CUDAGraphMode.NONE:
+                raise NotImplementedError(
+                    "Hybrid PCP does not support CUDA graphs yet. "
+                    "Use cudagraph_mode=NONE."
+                )
+            # KCP does not export Mamba prefill checkpoints yet.
+            if vllm_config.cache_config.mamba_cache_mode != "none":
+                raise NotImplementedError(
+                    "Hybrid PCP does not support Mamba prefix caching yet. "
+                    "Use --no-enable-prefix-caching."
+                )
         if speculative_config is not None:
             if speculative_config.use_dspark():
                 dcp_size = parallel_config.decode_context_parallel_size
@@ -406,6 +509,111 @@ class PCPManager:
         assert self._input_buffers is not None
         return self._input_buffers
 
+    @property
+    def global_batch(self) -> InputBatch | None:
+        """The unpartitioned scheduled batch for the current step."""
+        return self._global_batch
+
+    @property
+    def global_block_tables(self) -> tuple[torch.Tensor, ...]:
+        """Per-kv-cache-group block tables in global batch order."""
+        assert self._global_block_tables is not None
+        return self._global_block_tables
+
+    @property
+    def hybrid(self) -> bool:
+        """Whether Mamba state metadata follows global requests (hybrid PCP)."""
+        return self._hybrid
+
+    def build_hybrid_layout(self) -> HybridPCPLayout | None:
+        """Build this step's hybrid-PCP layout, or None without prefills."""
+        global_batch = self._global_batch
+        assert global_batch is not None
+        # Replicated prefills only arise with DCP.
+        assert self.dcp_world_size == 1
+        drafts = global_batch.num_draft_tokens_per_req
+        if drafts is not None and np.any(drafts > 0):
+            raise NotImplementedError(
+                "Hybrid PCP does not support speculative decoding."
+            )
+        num_reqs = global_batch.num_reqs
+        query_lens = global_batch.num_scheduled_tokens[:num_reqs].astype(np.int64)
+        is_prefilling = global_batch.is_prefilling_np[:num_reqs] & (query_lens > 0)
+        prefill_rows = np.flatnonzero(is_prefilling)
+        decode_rows = np.flatnonzero(~is_prefilling & (query_lens > 0))
+        if prefill_rows.size == 0:
+            return None
+        assert np.all(query_lens[decode_rows] == 1)
+
+        world, rank = self.pcp_world_size, self.pcp_rank
+        num_slots = 2 * world
+        prefill_lens = query_lens[prefill_rows]
+        chunk_lens = (prefill_lens + num_slots - 1) // num_slots
+        slot_lens = np.clip(
+            prefill_lens[:, None] - np.arange(num_slots) * chunk_lens[:, None],
+            0,
+            chunk_lens[:, None],
+        )
+        request_of_row = {int(row): n for n, row in enumerate(prefill_rows)}
+        query_start_loc = global_batch.query_start_loc_np
+        num_decodes = len(decode_rows)
+        segments = self._local_segments
+        for i, segment in enumerate(segments[:num_decodes]):
+            assert segment.global_batch_req_idx == decode_rows[i]
+            assert segment.rank_local_batch_slice == slice(i, i + 1)
+
+        scan_cu = [0]
+        segment_request, segment_slot, segment_start = [], [], []
+        for segment in segments[num_decodes:]:
+            n = request_of_row[segment.global_batch_req_idx]
+            start = segment.global_batch_slice.start - int(
+                query_start_loc[segment.global_batch_req_idx]
+            )
+            slot = start // int(chunk_lens[n])
+            assert slot in (rank, num_slots - 1 - rank)
+            assert (
+                start == slot * chunk_lens[n]
+                and segment.num_tokens == slot_lens[n, slot]
+            )
+            # Prefill segments are contiguous after the decodes.
+            assert segment.rank_local_batch_slice.start == num_decodes + scan_cu[-1]
+            scan_cu.append(scan_cu[-1] + segment.num_tokens)
+            segment_request.append(n)
+            segment_slot.append(slot)
+            segment_start.append(start)
+
+        rows = upload_pinned(
+            self.device, torch.int64, decode_rows=decode_rows, prefill_rows=prefill_rows
+        )
+        lengths = upload_pinned(
+            self.device,
+            torch.int32,
+            decode_cu_seqlens=np.arange(num_decodes + 1),
+            scan_cu_seqlens=np.asarray(scan_cu),
+        )
+        flags = upload_pinned(
+            self.device,
+            torch.bool,
+            prefill_has_initial_state=(
+                global_batch.num_computed_tokens_np[prefill_rows] > 0
+            ),
+        )
+        return HybridPCPLayout(
+            world=world,
+            rank=rank,
+            num_decode_tokens=num_decodes,
+            num_prefill_tokens=scan_cu[-1],
+            prefill_lens=prefill_lens,
+            slot_lens=slot_lens,
+            segment_request=np.asarray(segment_request, dtype=np.int64),
+            segment_slot=np.asarray(segment_slot, dtype=np.int64),
+            segment_start=np.asarray(segment_start, dtype=np.int64),
+            scan_cu=np.asarray(scan_cu, dtype=np.int64),
+            **rows,
+            **lengths,
+            **flags,
+        )
+
     def partition_batch(
         self, input_batch: InputBatch, batch_desc: "BatchExecutionDescriptor"
     ) -> InputBatch:
@@ -435,6 +643,7 @@ class PCPManager:
         )
 
         local_segments = segments_by_rank[self.pcp_rank]
+        self._local_segments = tuple(local_segments)
         if not local_segments:
             local_segments = [
                 RankSegment(
@@ -661,6 +870,10 @@ class PCPManager:
 
     def prepare_inputs_to_capture(self, input_batch: InputBatch) -> InputBatch:
         """Stage a capture or dummy batch in persistent PCP input buffers."""
+        # Dummy/capture batches are not partitioned; drop the previous step's
+        # global batch so hybrid-PCP consumers cannot observe a stale one.
+        self._global_batch = None
+        self._local_segments = ()
         input_buffers = self.input_buffers
         num_reqs = input_batch.num_reqs_after_padding
         num_tokens = input_batch.num_tokens_after_padding
@@ -697,6 +910,13 @@ class PCPManager:
             out_ptrs=self._local_block_table_ptrs,
         )
         slot_mappings = self.prepare_slot_mappings()
+        if self.hybrid:
+            # State caches stay indexed by global requests.
+            assert self._global_batch is not None
+            self._global_block_tables = self._block_tables.gather_block_tables(
+                self._global_batch.idx_mapping,
+                self._global_batch.num_reqs,
+            )
         return block_tables, slot_mappings
 
     def prepare_slot_mappings(self) -> torch.Tensor:
@@ -831,4 +1051,5 @@ def maybe_build_pcp_manager(
         dcp_world_size=dcp_size,
         dcp_rank=dcp_rank,
         cp_interleave=parallel_config.cp_kv_cache_interleave_size,
+        model_config=vllm_config.model_config,
     )

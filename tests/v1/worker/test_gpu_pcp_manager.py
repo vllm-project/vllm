@@ -35,10 +35,13 @@ def _make_config(cudagraph_mode: CUDAGraphMode):
             use_mla=True,
             is_encoder_decoder=False,
             hf_text_config=SimpleNamespace(),
+            hf_config=SimpleNamespace(architectures=[]),
+            registry=SimpleNamespace(resolve_model_cls=lambda *a, **kw: (object, None)),
         ),
         lora_config=None,
         speculative_config=None,
         compilation_config=SimpleNamespace(cudagraph_mode=cudagraph_mode),
+        cache_config=SimpleNamespace(mamba_cache_mode="none"),
     )
 
 
@@ -91,6 +94,72 @@ def test_validate_config_dcp_for_dspark(draft_uses_mla, dcp_size):
             PCPManager.validate_config(config, supports_mm_inputs=False)
         return
     PCPManager.validate_config(config, supports_mm_inputs=False)
+
+
+@pytest.mark.parametrize("mode", list(CUDAGraphMode))
+@pytest.mark.parametrize("dcp", [1, 2])
+@pytest.mark.parametrize("pcp", [1, 2])
+def test_hybrid_pcp_rejects_graph_capture(monkeypatch, mode, dcp, pcp):
+    """PIECEWISE must not freeze ordinary dispatch while KCP metadata is absent."""
+    config = _make_config(mode)
+    config.parallel_config.prefill_context_parallel_size = pcp
+    config.parallel_config.decode_context_parallel_size = dcp
+    config.model_config.hf_text_config.index_topk = 2048
+    monkeypatch.setattr(pcp_manager_module, "model_supports_hybrid_pcp", lambda _: True)
+    monkeypatch.setattr(
+        pcp_manager_module.current_platform,
+        "is_device_capability_family",
+        lambda _: True,
+    )
+    if pcp > 1 and mode != CUDAGraphMode.NONE:
+        with pytest.raises(NotImplementedError, match="Hybrid PCP.*CUDA graphs"):
+            PCPManager.validate_config(config, supports_mm_inputs=False)
+    else:
+        PCPManager.validate_config(config, supports_mm_inputs=False)
+
+
+@pytest.mark.parametrize("mamba_cache_mode", ["none", "align", "all"])
+def test_hybrid_pcp_rejects_mamba_prefix_caching(monkeypatch, mamba_cache_mode):
+    """KCP does not export Mamba prefill checkpoints, so prefix caching of the
+    linear-attention state must be off."""
+    config = _make_config(CUDAGraphMode.NONE)
+    config.cache_config.mamba_cache_mode = mamba_cache_mode
+    monkeypatch.setattr(pcp_manager_module, "model_supports_hybrid_pcp", lambda _: True)
+    monkeypatch.setattr(
+        pcp_manager_module.current_platform,
+        "is_device_capability_family",
+        lambda _: True,
+    )
+    if mamba_cache_mode != "none":
+        with pytest.raises(NotImplementedError, match="prefix caching"):
+            PCPManager.validate_config(config, supports_mm_inputs=False)
+    else:
+        PCPManager.validate_config(config, supports_mm_inputs=False)
+
+
+@pytest.mark.parametrize("hybrid", [False, True])
+@pytest.mark.parametrize("pcp_size", [1, 2])
+def test_validate_config_rejects_speculation_only_for_hybrid_pcp(
+    monkeypatch, hybrid, pcp_size
+):
+    config = _make_config(CUDAGraphMode.NONE)
+    config.parallel_config.prefill_context_parallel_size = pcp_size
+    config.speculative_config = SimpleNamespace(
+        method="mtp", use_dspark=lambda: False, use_multi_module_mtp=lambda: False
+    )
+    monkeypatch.setattr(
+        pcp_manager_module, "model_supports_hybrid_pcp", lambda _: hybrid
+    )
+    monkeypatch.setattr(
+        pcp_manager_module.current_platform,
+        "is_device_capability_family",
+        lambda _: True,
+    )
+    if hybrid and pcp_size > 1:
+        with pytest.raises(NotImplementedError, match="speculative decoding"):
+            PCPManager.validate_config(config, supports_mm_inputs=False)
+    else:
+        PCPManager.validate_config(config, supports_mm_inputs=False)
 
 
 def test_replicated_decode_piecewise_graph_padding(monkeypatch):
@@ -541,3 +610,75 @@ def test_partition_defers_dcp_metadata_to_post_partition_batch():
     )
     assert local_batch.dcp_local_seq_lens is not None
     assert torch.equal(local_batch.dcp_local_seq_lens.cpu(), expected)
+
+
+def _make_hybrid_manager(world, rank, lengths, prefilling, computed):
+    qsl = np.r_[0, np.cumsum(lengths)].astype(np.int32)
+    manager = PCPManager(world, rank, torch.device("cpu"))
+    manager._global_batch = SimpleNamespace(
+        num_reqs=len(lengths),
+        num_scheduled_tokens=np.asarray(lengths, dtype=np.int32),
+        is_prefilling_np=np.asarray(prefilling),
+        num_computed_tokens_np=np.asarray(computed, dtype=np.int32),
+        query_start_loc_np=qsl,
+        num_draft_tokens_per_req=None,
+    )
+    segments = manager._get_rank_segments(rank, lengths, np.asarray(prefilling), qsl)
+    manager._local_segments = tuple(segments)
+    return manager, segments, qsl
+
+
+@pytest.mark.parametrize("world", [2, 4])
+@pytest.mark.parametrize(
+    "lengths,prefilling",
+    [
+        ([1, 2, 1, 3], [False, True, False, True]),  # empty slots and parts
+        ([1, 1, 37, 150], [False, False, True, True]),
+        ([3], [True]),  # ranks without prefill tokens
+        ([64, 1, 17], [True, True, True]),  # one-token prefill
+    ],
+)
+def test_layout_maps_local_segments_to_global_requests(world, lengths, prefilling):
+    computed = [0, 9, 0, 7][: len(lengths)]
+    prefill_rows = np.flatnonzero(prefilling)
+    decode_rows = np.flatnonzero(~np.asarray(prefilling))
+    slots = 2 * world
+    for rank in range(world):
+        manager, segments, qsl = _make_hybrid_manager(
+            world, rank, lengths, prefilling, computed
+        )
+        layout = manager.build_hybrid_layout()
+        assert layout is not None
+        assert layout.decode_rows.tolist() == decode_rows.tolist()
+        assert layout.prefill_rows.tolist() == prefill_rows.tolist()
+        assert layout.prefill_has_initial_state.tolist() == [
+            computed[g] > 0 for g in prefill_rows
+        ]
+        assert layout.num_decode_tokens == len(decode_rows)
+        assert layout.prefill_lens.tolist() == [lengths[g] for g in prefill_rows]
+        prefill_segments = segments[len(decode_rows) :]
+        cu = [0] + list(np.cumsum([s.num_tokens for s in prefill_segments]))
+        assert layout.num_prefill_tokens == cu[-1]
+        assert layout.scan_cu.tolist() == cu
+        assert layout.scan_cu_seqlens.tolist() == cu
+        expected = []
+        for segment in prefill_segments:
+            g = segment.global_batch_req_idx
+            chunk = -(-lengths[g] // slots)
+            start = segment.global_batch_slice.start - qsl[g]
+            slot = start // chunk
+            assert slot in (rank, slots - 1 - rank)
+            assert layout.slot_lens[int(np.searchsorted(prefill_rows, g)), slot] == (
+                segment.num_tokens
+            )
+            expected.append((int(np.searchsorted(prefill_rows, g)), slot, start))
+        actual = zip(layout.segment_request, layout.segment_slot, layout.segment_start)
+        assert [tuple(map(int, row)) for row in actual] == expected
+
+
+def test_layout_rejects_drafts_and_skips_decode_only_batches():
+    manager, _, _ = _make_hybrid_manager(2, 0, [1, 1], [False, False], [4, 5])
+    assert manager.build_hybrid_layout() is None
+    manager._global_batch.num_draft_tokens_per_req = np.array([1, 0])
+    with pytest.raises(NotImplementedError, match="speculative decoding"):
+        manager.build_hybrid_layout()
