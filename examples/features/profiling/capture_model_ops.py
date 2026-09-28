@@ -10,13 +10,17 @@ sequence, custom kernels included. Every engine argument is accepted.
     python examples/features/profiling/capture_model_ops.py \
         --model Qwen/Qwen3-30B-A3B --max-model-len 8192
 
-Pass `--batch REQS,TOKENS[,COMPUTED]` more than once to capture several batches
--- a prefill and a long-context decode, say -- on one built model and see which
-operators only some of them reach:
+Pass `--batch REQS,TOKENS[,COMPUTED[,MM_ITEMS]]` more than once to capture
+several batches -- a prefill and a long-context decode, say -- on one built model
+and see which operators only some of them reach. `MM_ITEMS` runs a multimodal
+model's encoder on that many dummy items, as the model runner profiles it:
 
     python examples/features/profiling/capture_model_ops.py \
         --model Qwen/Qwen3-30B-A3B --max-model-len 8192 \
         --batch 1,512 --batch 8,8,4096
+
+    python examples/features/profiling/capture_model_ops.py \
+        --model Qwen/Qwen2.5-VL-3B-Instruct --batch 1,64 --batch 1,2048,0,1
 
 Pass `--output-dir` to also write each capture as files (`ops.txt`,
 `ops.sequence.txt`, `capture.json`, `report.txt`), and
@@ -55,8 +59,8 @@ from vllm.utils.argparse_utils import FlexibleArgumentParser
 
 def parse_batch(value: str) -> BatchSpec:
     fields = [int(field) for field in value.split(",")]
-    if not 2 <= len(fields) <= 3:
-        raise argparse.ArgumentTypeError("expected REQS,TOKENS[,COMPUTED]")
+    if not 2 <= len(fields) <= 4:
+        raise argparse.ArgumentTypeError("expected REQS,TOKENS[,COMPUTED[,MM_ITEMS]]")
     return BatchSpec(*fields)
 
 
@@ -67,7 +71,7 @@ def create_parser() -> FlexibleArgumentParser:
         "--batch",
         type=parse_batch,
         action="append",
-        metavar="REQS,TOKENS[,COMPUTED]",
+        metavar="REQS,TOKENS[,COMPUTED[,MM_ITEMS]]",
         help="Batch to capture; repeat for several. Default: one 8-token prefill.",
     )
     capture_group.add_argument(

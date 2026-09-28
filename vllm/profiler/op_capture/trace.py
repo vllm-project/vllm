@@ -24,6 +24,7 @@ from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from unittest.mock import patch
 
 from torch.profiler import ExecutionTraceObserver
 
@@ -215,6 +216,10 @@ def compare_devices(
     """
     context = multiprocessing.get_context("spawn")
     with ExitStack() as stack:
+        # One hash seed for both, so they iterate sets alike: the order
+        # multimodal inputs reach the device in, for one, follows it.
+        seed = os.environ.get("PYTHONHASHSEED", "0")
+        stack.enter_context(patch.dict(os.environ, PYTHONHASHSEED=seed))
         if directory is None:
             directory = stack.enter_context(tempfile.TemporaryDirectory())
         paths = {

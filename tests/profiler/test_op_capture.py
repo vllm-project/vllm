@@ -34,6 +34,7 @@ from vllm.triton_utils import HAS_TRITON, tl, triton
 from vllm.utils.torch_utils import DIRECT_REGISTERED_OPS, direct_register_custom_op
 
 MODEL = "Qwen/Qwen2.5-0.5B-Instruct"
+VL_MODEL = "Qwen/Qwen2.5-VL-3B-Instruct"
 LAYER_PREFIX = "model.layers."
 ATTENTION_OP = "vllm::unified_attention_with_output"
 
@@ -154,6 +155,25 @@ def test_capture_ranks_records_collectives_on_per_rank_shards():
         assert selection.tensor_parallel_size == 2
         assert (selection.num_query_heads, selection.num_kv_heads) == (7, 1)
         assert "vllm::all_reduce" in {op.name for op in capture.ops}
+
+
+def test_multimodal_items_need_a_multimodal_model():
+    engine_args = EngineArgs(model=MODEL, max_model_len=1024)
+    with pytest.raises(ValueError, match="no multimodal inputs"):
+        ForwardHarness(MODEL, batch=BatchSpec(num_mm_items=1), engine_args=engine_args)
+
+
+def test_multimodal_items_run_the_encoder():
+    """Only a batch with multimodal items reaches the vision tower."""
+    engine_args = EngineArgs(
+        model=VL_MODEL,
+        max_model_len=4096,
+        hf_overrides={"text_config": {"num_hidden_layers": 1}},
+    )
+    batches = [BatchSpec(num_tokens=64), BatchSpec(num_tokens=2048, num_mm_items=1)]
+    text, image = capture_batches(VL_MODEL, batches, engine_args=engine_args)
+    assert not any(op.module.startswith("visual.") for op in text.ops)
+    assert any(op.module.startswith("visual.") for op in image.ops)
 
 
 def test_capture_allocates_no_accelerator_memory():
@@ -420,6 +440,9 @@ def test_meta_capture_matches_hardware():
             BatchSpec(num_reqs=4, num_tokens=4, num_computed_tokens=16),
             1024,
         ),
+        # The vision tower's output replaces the first tokens' embeddings, and
+        # M-RoPE takes three rows of positions.
+        (VL_MODEL, BatchSpec(num_tokens=2048, num_mm_items=1), 4096),
     ],
 )
 def test_meta_capture_matches_hardware_beyond_decoders(model, batch, max_model_len):

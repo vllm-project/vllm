@@ -45,7 +45,12 @@ from vllm.model_executor.layers.mamba.ops.ssu_dispatch import (
     initialize_mamba_ssu_backend,
 )
 from vllm.model_executor.model_loader import get_model
+from vllm.model_executor.models.interfaces import SupportsMultiModal
 from vllm.model_executor.models.interfaces_base import VllmModelForPooling
+from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.multimodal.encoder_budget import MultiModalBudget
+from vllm.multimodal.inputs import BatchedTensorInputs
+from vllm.multimodal.utils import group_and_batch_mm_kwargs
 from vllm.platforms import current_platform
 from vllm.pooling_params import PoolingParams
 from vllm.profiler.op_capture.meta_ops import (
@@ -141,12 +146,16 @@ class BatchSpec:
         num_tokens: Total query tokens, split evenly across requests.
         num_computed_tokens: Context length already in the KV cache per request,
             0 for a pure prefill.
+        num_mm_items: Multimodal items to encode this step, of the modality
+            with the most tokens per item at its maximum size, as the model
+            runner profiles; their embeddings replace the batch's first tokens.
 
     """
 
     num_reqs: int = 1
     num_tokens: int = 8
     num_computed_tokens: int = 0
+    num_mm_items: int = 0
 
     @property
     def query_len(self) -> int:
@@ -284,6 +293,7 @@ class ForwardHarness:
             `distributed_init_method`. Or if the batch exceeds the scheduler's
             per-step token or request budget, or `max_model_len`, which no real
             step could.
+            Or if it has multimodal items the model cannot take.
         NotImplementedError: If the model is encoder-decoder.
 
     """
@@ -331,6 +341,7 @@ class ForwardHarness:
                 f"tensor_parallel_size={self.tensor_parallel_size} needs one "
                 "harness per rank; use capture_ranks() to run them."
             )
+        self._mm_budget: MultiModalBudget | None = None
         self._check_batch(self.batch)
 
         self.model: torch.nn.Module | None = None
@@ -362,6 +373,31 @@ class ForwardHarness:
                 f"{batch} reaches {batch.seq_len} tokens per request, beyond "
                 f"max_model_len={max_model_len}; raise it in `engine_args`."
             )
+        if batch.num_mm_items:
+            budget = self._multimodal_budget()
+            max_items = budget.mm_max_items_per_batch.get(
+                budget.get_modality_with_max_tokens(), 0
+            )
+            if batch.num_mm_items > max_items:
+                raise ValueError(
+                    f"{batch} has more multimodal items than the "
+                    f"{max_items} the encoder budget allows per step."
+                )
+
+    def _multimodal_budget(self) -> MultiModalBudget:
+        if self._mm_budget is None:
+            model_config = self.vllm_config.model_config
+            if not model_config.supports_multimodal_inputs:
+                raise ValueError(f"{self.model_id} takes no multimodal inputs.")
+            if model_config.is_multimodal_raw_input_only_model:
+                raise ValueError(
+                    f"{self.model_id} takes its multimodal inputs raw in "
+                    "forward, which the harness does not pass."
+                )
+            self._mm_budget = MultiModalBudget(self.vllm_config, MULTIMODAL_REGISTRY)
+            if not self._mm_budget.mm_max_toks_per_item:
+                raise ValueError(f"{self.model_id} has no multimodal encoder to run.")
+        return self._mm_budget
 
     def set_batch(self, batch: BatchSpec) -> None:
         """Run later forward passes on `batch`, reusing the built model and cache.
@@ -626,6 +662,45 @@ class ForwardHarness:
             .add_(batch.num_computed_tokens)
         )
 
+    def _dummy_mm_kwargs(self) -> BatchedTensorInputs:
+        budget = self._multimodal_budget()
+        items = budget.get_dummy_encoder_profile_inputs(
+            budget.get_modality_with_max_tokens(), self.batch.num_mm_items
+        )
+        _, _, mm_kwargs = next(group_and_batch_mm_kwargs(items, device=self.device))
+        return mm_kwargs
+
+    def _embed_inputs(
+        self, input_ids: torch.Tensor
+    ) -> tuple[torch.Tensor | None, torch.Tensor]:
+        """Embed the batch as the model runner does for a multimodal model.
+
+        The encoder outputs of `num_mm_items` items fill the batch's first
+        tokens, cut off where the batch ends as a chunked prefill would.
+
+        Returns:
+            The token ids, if the model still wants them, and the embeddings.
+
+        """
+        model = cast(SupportsMultiModal, self.model)
+        mm_embeds: list[torch.Tensor] = []
+        room = self.batch.num_tokens
+        if self.batch.num_mm_items:
+            for output in model.embed_multimodal(**self._dummy_mm_kwargs()):
+                if room > 0:
+                    mm_embeds.append(output[:room])
+                    room -= mm_embeds[-1].shape[0]
+        # On the host, as the runner keeps it: a boolean mask indexes a meta
+        # tensor only if its values can be read.
+        is_multimodal = torch.zeros(input_ids.shape[0], dtype=torch.bool)
+        is_multimodal[: input_ids.shape[0] - room] = True
+        inputs_embeds = model.embed_input_ids(
+            input_ids, multimodal_embeddings=mm_embeds, is_multimodal=is_multimodal
+        )
+        if self.vllm_config.model_config.requires_raw_input_tokens:
+            return input_ids, inputs_embeds
+        return None, inputs_embeds
+
     def _pooling_metadata(self, model: VllmModelForPooling) -> PoolingMetadata:
         """Pool every request's whole prompt, as the model runner does.
 
@@ -665,31 +740,43 @@ class ForwardHarness:
         """
         assert self.model is not None, "Use ForwardHarness as a context manager"
         batch = self.batch
-        input_ids = torch.zeros(batch.num_tokens, dtype=torch.long, device=self.device)
+        model_config = self.vllm_config.model_config
+        input_ids: torch.Tensor | None = torch.zeros(
+            batch.num_tokens, dtype=torch.long, device=self.device
+        )
         positions = self._positions()
+        if model_config.uses_mrope:
+            # A text token's three M-RoPE positions are its 1-D one.
+            positions = positions.repeat(3, 1)
         last_token_indices = torch.arange(
             batch.query_len - 1,
             batch.num_tokens,
             batch.query_len,
             device=self.device,
         )
-        with (
-            torch.inference_mode(),
-            set_forward_context(
+        with torch.inference_mode():
+            inputs_embeds = None
+            if model_config.supports_multimodal_inputs:
+                assert input_ids is not None
+                input_ids, inputs_embeds = self._embed_inputs(input_ids)
+            with set_forward_context(
                 self._attn_metadata,
                 self.vllm_config,
                 num_tokens=batch.num_tokens,
                 slot_mapping=self._slot_mappings,
-            ),
-        ):
-            hidden_states = self.model(input_ids=input_ids, positions=positions)
-            if self.vllm_config.model_config.runner_type == "pooling":
-                model = cast(VllmModelForPooling, self.model)
-                return model.pooler(
-                    hidden_states=hidden_states,
-                    pooling_metadata=self._pooling_metadata(model),
+            ):
+                hidden_states = self.model(
+                    input_ids=input_ids,
+                    positions=positions,
+                    inputs_embeds=inputs_embeds,
                 )
-            return self.model.compute_logits(hidden_states[last_token_indices])
+                if model_config.runner_type == "pooling":
+                    model = cast(VllmModelForPooling, self.model)
+                    return model.pooler(
+                        hidden_states=hidden_states,
+                        pooling_metadata=self._pooling_metadata(model),
+                    )
+                return self.model.compute_logits(hidden_states[last_token_indices])
 
     def record(self, keep_going: bool = False) -> OpRecorder:
         """Run the forward path, recording every dispatched operator in order.

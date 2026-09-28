@@ -204,10 +204,13 @@ def format_report(capture: OpCapture, show_shapes: bool = False) -> str:
 
 
 def _batch_label(batch: BatchSpec) -> str:
-    return (
+    label = (
         f"{batch.num_reqs} reqs, {batch.num_tokens} tokens, "
         f"{batch.num_computed_tokens} computed per req"
     )
+    if batch.num_mm_items:
+        label += f", {batch.num_mm_items} mm items"
+    return label
 
 
 def format_batches(captures: Sequence[OpCapture]) -> str:
