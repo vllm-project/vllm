@@ -79,12 +79,22 @@ if [[ -z "${OIDC_TOKEN}" ]]; then
 fi
 
 BUILD_JSON="$(mktemp)"
-trap 'rm -f "${BUILD_JSON}"' EXIT
+BUILD_JSON_STAGING="$(mktemp)"
+trap 'rm -f "${BUILD_JSON}" "${BUILD_JSON_STAGING}"' EXIT
 BUILD_URL="https://api.buildkite.com/v2/organizations/${BUILDKITE_ORGANIZATION_SLUG}/pipelines/${BUILDKITE_PIPELINE_SLUG}/builds/${BUILDKITE_BUILD_NUMBER}"
 
+# Staged so a failed request cannot clobber the last good snapshot: curl -o
+# writes the error body too, and the deadline path reports from whatever
+# snapshot it has.
 fetch_build() {
-    curl -sS -w '%{http_code}' -o "${BUILD_JSON}" \
-        -H "Authorization: Bearer ${BK_TOKEN}" "${BUILD_URL}"
+    local code
+    code="$(curl -sS -w '%{http_code}' -o "${BUILD_JSON_STAGING}" \
+        -H "Authorization: Bearer ${BK_TOKEN}" "${BUILD_URL}")"
+    if [[ "${code}" == "200" ]]; then
+        mv -f "${BUILD_JSON_STAGING}" "${BUILD_JSON}"
+        BUILD_JSON_STAGING="$(mktemp)"
+    fi
+    echo "${code}"
 }
 
 # Count jobs that have not reached a terminal state, ignoring this job: the
@@ -113,14 +123,18 @@ PY
 # finished and none of the eventual 152 hard failures visible, and HUD recorded
 # that nightly as green.
 #
-# Polling rather than a full `depends_on` barrier: Buildkite groups carry no
-# key, so a barrier means naming all ~250 step keys, which silently rots when a
-# step is added and fails the pipeline upload when one is removed or excluded
-# from this lane (AMD, retired A100). The pipeline does gate this step on the
-# long pole so it is scheduled near the end of the build -- that keeps the agent
-# from idling for hours, but it is only a hint, and this loop is what actually
-# guarantees the snapshot is complete.
-POLL_INTERVAL_S="${CRCR_POLL_INTERVAL_S:-60}"
+# Polling rather than a `depends_on` barrier: Buildkite groups carry no key, so
+# a barrier means naming all ~250 step keys, which silently rots when a step is
+# added and fails the pipeline upload when one is removed or excluded from this
+# lane (AMD, retired A100). Gating on a single step was tried and is worse: a
+# dependency that fails or is cancelled takes the report with it despite
+# allow_dependency_failure (builds 91191 and 91461 both lost their report that
+# way), so this step depends only on the image it runs in.
+# 15 min: the wait now spans the whole build, so a 60s poll made ~420 requests
+# against an API shared with the rest of CI to learn something that changes on
+# the order of minutes. The cost is up to one interval of extra latency after
+# the last job lands.
+POLL_INTERVAL_S="${CRCR_POLL_INTERVAL_S:-900}"
 
 # The deadline is measured from when the *build* started, not from when this
 # script did, so "report no later than N hours into the build" holds however
@@ -130,6 +144,9 @@ POLL_INTERVAL_S="${CRCR_POLL_INTERVAL_S:-60}"
 # Resolved after the first fetch, from the build's own created_at.
 MAX_BUILD_AGE_S="${CRCR_MAX_BUILD_AGE_S:-25200}"
 WAIT_DEADLINE=""
+# Used until created_at is known. Without it, an API outage on the very first
+# request leaves the deadline unresolved and the loop spins to the step timeout.
+FALLBACK_DEADLINE=$(( $(date +%s) + MAX_BUILD_AGE_S ))
 
 build_deadline() {
     python3 - "${BUILD_JSON}" "${MAX_BUILD_AGE_S}" <<'PY'
@@ -146,8 +163,26 @@ PY
 while :; do
     http_code="$(fetch_build)"
     if [[ "${http_code}" != "200" ]]; then
-        echo "buildkite API returned ${http_code} -- skipping report"
-        exit 0
+        # A transient 429/5xx must not cost the whole report: treating one
+        # failure as fatal would drop a nightly for a blip. Keep polling on the
+        # last good snapshot; only give up if the deadline passes having never
+        # fetched one.
+        echo "buildkite API returned ${http_code}"
+        if [[ ! -s "${BUILD_JSON}" ]]; then
+            if (( $(date +%s) >= ${WAIT_DEADLINE:-$FALLBACK_DEADLINE} )); then
+                echo "no build data was ever fetched -- nothing to report"
+                exit 0
+            fi
+            sleep "${POLL_INTERVAL_S}"
+            continue
+        fi
+        if (( $(date +%s) >= ${WAIT_DEADLINE:-$FALLBACK_DEADLINE} )); then
+            echo "deadline reached while the API is unavailable --" \
+                "reporting from the last good snapshot"
+            break
+        fi
+        sleep "${POLL_INTERVAL_S}"
+        continue
     fi
     if [[ -z "${WAIT_DEADLINE}" ]]; then
         WAIT_DEADLINE="$(build_deadline)" || WAIT_DEADLINE=""
