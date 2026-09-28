@@ -1197,6 +1197,21 @@ class TestAdjustRequest:
                 ],
             ),
             (
+                {
+                    "tool_choice": "auto",
+                    "strict_tools": True,
+                    "response_format_type": "json_schema",
+                },
+                [
+                    "COMMENTARY",
+                    "TOOL_CALL_1_CHANNEL_FIRST",
+                    "TOOL_CALL_1_FUNCTION_FIRST",
+                    "TOOL_CALL_2_CHANNEL_FIRST",
+                    "TOOL_CALL_2_FUNCTION_FIRST",
+                    "FINAL_JSON_SCHEMA",
+                ],
+            ),
+            (
                 {"response_format_type": "json_schema"},
                 ["FINAL_JSON_SCHEMA"],
             ),
@@ -1281,6 +1296,7 @@ class TestAdjustRequest:
             "tool_auto_strict",
             "tool_required",
             "tool_named",
+            "pr56086_tool_auto_strict_response_format_json_schema",
             "response_format_json_schema",
             "response_format_json_object",
             "structured_outputs_json",
