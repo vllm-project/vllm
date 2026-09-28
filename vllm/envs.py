@@ -2173,7 +2173,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_USE_SIMPLE_KV_OFFLOAD": lambda: bool(
         int(os.getenv("VLLM_USE_SIMPLE_KV_OFFLOAD", "0"))
     ),
-    # Direct DCP ops default on when applicable; set to 1 to enforce or 0 to disable.
+    # Direct DCP ops default on when applicable. Set to 1 to bypass feature
+    # heuristics (but not topology safety), or 0 to disable.
     "VLLM_USE_DIRECT_DCP_A2A": lambda: maybe_convert_bool(
         os.getenv("VLLM_USE_DIRECT_DCP_A2A")
     ),

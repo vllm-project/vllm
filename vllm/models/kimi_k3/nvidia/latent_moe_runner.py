@@ -9,7 +9,12 @@ import vllm.envs as envs
 from vllm.config import get_current_vllm_config
 from vllm.distributed import (
     get_tensor_model_parallel_rank,
+    get_tp_group,
     tensor_model_parallel_all_reduce,
+)
+from vllm.distributed.device_communicators.nvlink_fabric import (
+    SymmetricMemoryTopology,
+    get_symmetric_memory_topology,
 )
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.moe_output import UnfinalizedMoEOutput
@@ -88,6 +93,18 @@ class LatentMoERunner(MoERunner):
                 "K3 latent-MoE tail fusion currently supports TP=8 and TP=16, "
                 "but TP=%d is configured. Falling back to the default path.",
                 self.moe_config.tp_size,
+            )
+            self.enable_k3_latent_moe_tail_fusion = False
+
+        if (
+            self.enable_k3_latent_moe_tail_fusion
+            and use_fused_path
+            and get_symmetric_memory_topology(get_tp_group().cpu_group)
+            is SymmetricMemoryTopology.UNSUPPORTED
+        ):
+            logger.warning_once(
+                "K3 latent-MoE tail fusion requires TP ranks to share a "
+                "symmetric-memory fabric. Falling back to the default path."
             )
             self.enable_k3_latent_moe_tail_fusion = False
 

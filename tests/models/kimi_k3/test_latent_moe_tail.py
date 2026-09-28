@@ -32,8 +32,17 @@ EPS = 0.1
 TOP_K = 8
 
 
-def test_deferred_finalize_enabled_before_moe_kernel_setup(
+@pytest.mark.parametrize(
+    ("topology", "tail_enabled"),
+    [
+        (latent_moe_runner.SymmetricMemoryTopology.CROSS_NODE_NVLINK, True),
+        (latent_moe_runner.SymmetricMemoryTopology.UNSUPPORTED, False),
+    ],
+)
+def test_tail_fusion_requires_supported_topology(
     monkeypatch: pytest.MonkeyPatch,
+    topology: latent_moe_runner.SymmetricMemoryTopology,
+    tail_enabled: bool,
 ) -> None:
     class FakeMoEConfig:
         tp_size = 8
@@ -95,13 +104,28 @@ def test_deferred_finalize_enabled_before_moe_kernel_setup(
             model_config=SimpleNamespace(enable_sleep_mode=False),
         ),
     )
+    monkeypatch.setattr(
+        latent_moe_runner,
+        "get_tp_group",
+        lambda: SimpleNamespace(cpu_group=object()),
+    )
+    monkeypatch.setattr(
+        latent_moe_runner,
+        "get_symmetric_memory_topology",
+        lambda _group: topology,
+    )
     monkeypatch.setattr(KimiK3LatentMoETailOp, "initialize", fake_tail_initialize)
 
-    latent_moe_runner.LatentMoERunner()
+    runner = latent_moe_runner.LatentMoERunner()
 
-    assert moe_config.use_deferred_moe_finalize
-    assert moe_config.defer_moe_finalize_max_num_tokens == 128
-    assert initialized_with["experts_per_token"] == 16
+    assert runner.enable_k3_latent_moe_tail_fusion is tail_enabled
+    if tail_enabled:
+        assert moe_config.use_deferred_moe_finalize
+        assert moe_config.defer_moe_finalize_max_num_tokens == 128
+        assert initialized_with["experts_per_token"] == 16
+    else:
+        assert not moe_config.use_deferred_moe_finalize
+        assert not initialized_with
 
 
 def _make_deferred_routed_output(

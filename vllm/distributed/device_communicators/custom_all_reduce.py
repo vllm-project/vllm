@@ -14,7 +14,10 @@ from vllm.distributed.device_communicators.all_reduce_utils import (
     CUSTOM_ALL_REDUCE_MAX_SIZES,
     gpu_p2p_access_check,
 )
-from vllm.distributed.parallel_state import in_the_same_node_as
+from vllm.distributed.device_communicators.nvlink_fabric import (
+    SymmetricMemoryTopology,
+    get_symmetric_memory_topology,
+)
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 
@@ -66,14 +69,7 @@ def _group_can_attempt_mnnvl(
     group: ProcessGroup,
     device: torch.device,
 ) -> bool:
-    """Return whether every rank can enter the cross-node MNNVL path.
-
-    MNNVL is available only on Blackwell-class GPUs. Local multicast support
-    is necessary but does not establish that the process group spans an MNNVL
-    domain; the symmetric-memory rendezvous below performs that group-level
-    check. The CPU all-reduce keeps every rank on the same control-flow path
-    when a heterogeneous or partially configured group is encountered.
-    """
+    """Return whether every rank can enter the cross-node MNNVL path."""
     device_index = device.index
     local_support = (
         device_index is not None
@@ -147,15 +143,9 @@ class CustomAllreduce:
         ),
         symm_mem_enabled=False,
     ) -> None:
-        """Args:
-            group: the process group to work on. If None, it will use the
-                default process group.
-            device: the device to bind the CustomAllreduce to. If None,
-                it will be bound to f"cuda:{local_rank}".
-        It is the caller's responsibility to make sure each communicator
-        is bind to a unique device, and all communicators in this group
-        are in the same node.
+        """Initialize the communicator.
 
+        Each rank must bind its communicator to a unique device.
         """
         self._IS_CAPTURING = False
         self._ptr = 0
@@ -195,7 +185,8 @@ class CustomAllreduce:
             "CustomAllreduce should be attached to a non-NCCL group."
         )
 
-        same_node = all(in_the_same_node_as(group, source_rank=0))
+        topology = get_symmetric_memory_topology(group)
+        same_node = topology is SymmetricMemoryTopology.INTRA_NODE
         self.mnnvl_only = not same_node
 
         rank = dist.get_rank(group=self.group)
@@ -212,6 +203,13 @@ class CustomAllreduce:
                 "warning, specify disable_custom_all_reduce=True explicitly.",
                 world_size,
                 str(CustomAllreduce._SUPPORTED_WORLD_SIZES),
+            )
+            return
+
+        if topology is SymmetricMemoryTopology.UNSUPPORTED:
+            logger.warning(
+                "Custom collectives are disabled because this multi-node "
+                "group does not share an NVLink fabric."
             )
             return
 

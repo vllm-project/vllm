@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import random
+from unittest.mock import MagicMock
 
 import pytest
 import ray
@@ -203,6 +204,31 @@ def test_custom_allreduce_filters_dtype(
     communicator.max_size = 1024
 
     assert communicator.should_custom_ar(torch.empty(16, dtype=dtype)) is expected
+
+
+def test_cross_node_without_nvlink_skips_custom_allreduce(monkeypatch):
+    process_group = object()
+    mnnvl_capability_probe = MagicMock()
+    monkeypatch.setattr(car, "custom_ar", True)
+    monkeypatch.setattr(car.dist, "get_backend", lambda _group: car.dist.Backend.GLOO)
+    monkeypatch.setattr(car.dist, "get_rank", lambda *, group: 0)
+    monkeypatch.setattr(car.dist, "get_world_size", lambda *, group: 2)
+    monkeypatch.setattr(
+        car,
+        "get_symmetric_memory_topology",
+        lambda _group: car.SymmetricMemoryTopology.UNSUPPORTED,
+    )
+    monkeypatch.setattr(
+        car,
+        "_supports_mnnvl_multimem_reduce_scatter",
+        mnnvl_capability_probe,
+    )
+
+    communicator = car.CustomAllreduce(process_group, torch.device("cuda:0"))
+
+    assert communicator.disabled
+    assert communicator.mnnvl_only
+    mnnvl_capability_probe.assert_not_called()
 
 
 @pytest.mark.parametrize(

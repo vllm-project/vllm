@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 
+from types import SimpleNamespace
+
 import pytest
 import torch
 
@@ -291,6 +293,23 @@ def test_async_tp_pass_requires_full_graph_compilation():
         AssertionError, match="AsyncTPPass requires full-graph compilation"
     ):
         async_tp_pass.is_applicable_for_range(Range(start=8, end=8))
+
+
+def test_async_tp_rejects_unsupported_symmetric_memory_topology(monkeypatch):
+    from vllm.compilation.passes.fusion import collective_fusion
+
+    monkeypatch.setattr(
+        collective_fusion,
+        "get_tp_group",
+        lambda: SimpleNamespace(cpu_group=object()),
+    )
+    monkeypatch.setattr(
+        collective_fusion,
+        "get_symmetric_memory_topology",
+        lambda _group: collective_fusion.SymmetricMemoryTopology.UNSUPPORTED,
+    )
+
+    assert not AsyncTPPass.is_topology_supported()
 
 
 def async_tp_pass_on_test_model(

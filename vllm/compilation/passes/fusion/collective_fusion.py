@@ -14,6 +14,10 @@ from torch.distributed._symmetric_memory import enable_symm_mem_for_group
 from vllm.config import VllmConfig
 from vllm.config.utils import Range
 from vllm.distributed import get_tp_group
+from vllm.distributed.device_communicators.nvlink_fabric import (
+    SymmetricMemoryTopology,
+    get_symmetric_memory_topology,
+)
 from vllm.distributed.parallel_state import (
     get_tensor_model_parallel_world_size,
 )
@@ -915,11 +919,25 @@ class FlashInferAllGatherFP4Pattern(
 
 
 class AsyncTPPass(VllmFusionPatternMatcherPass):
+    @staticmethod
+    def is_topology_supported() -> bool:
+        if (
+            get_symmetric_memory_topology(get_tp_group().cpu_group)
+            is SymmetricMemoryTopology.UNSUPPORTED
+        ):
+            logger.warning_once(
+                "Async TP is disabled because the TP ranks do not share a "
+                "symmetric-memory fabric."
+            )
+            return False
+        return True
+
     @enable_fake_mode
     def __init__(self, config: VllmConfig) -> None:
         super().__init__(config, pass_name="async_tp_pass")
 
-        enable_symm_mem_for_group(get_tp_group().device_group.group_name)
+        tp_group = get_tp_group()
+        enable_symm_mem_for_group(tp_group.device_group.group_name)
         GEMMReduceScatterPattern(self.model_dtype, self.device).register(self.pm_pass)
 
         AllGatherGEMMPattern(self.model_dtype, self.device).register(self.pm_pass)
