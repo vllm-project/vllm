@@ -172,6 +172,10 @@ class _ShapelessLayer:
         self.__dict__.update(attrs)
 
 
+class _CacheOnlyLayer(_ShapelessLayer):
+    """A layer owning a KV cache without running attention, as an indexer does."""
+
+
 def test_head_counts_come_from_the_first_layer_that_has_them():
     """A hybrid model's layers do not all carry attention's head counts.
 
@@ -212,6 +216,60 @@ def test_a_model_without_head_counts_reports_them_as_unknown(capture):
     (row,) = [line for line in lines if line.strip().startswith("heads")]
     assert "unknown" in row
     assert "0" not in row
+
+
+def test_selection_metadata_counts_cache_only_layers_by_kind(monkeypatch):
+    """Sparse attention's indexer and compressor are attention layers too.
+
+    They own a KV cache without running attention, so the count exceeds the
+    model's depth and only its composition explains why.
+    """
+    engine_args = EngineArgs(
+        model=MODEL, max_model_len=1024, hf_overrides={"num_hidden_layers": 2}
+    )
+    layers = {
+        "layers.0.attn": _ShapelessLayer(num_heads=16, num_kv_heads=2, head_size=128),
+        "layers.1.attn": _ShapelessLayer(num_heads=16, num_kv_heads=2, head_size=128),
+        "layers.0.attn.indexer.k_cache": _CacheOnlyLayer(),
+        "layers.1.attn.indexer.k_cache": _CacheOnlyLayer(),
+        "layers.0.attn.compressor.state_cache": _CacheOnlyLayer(),
+    }
+    with ForwardHarness(MODEL, engine_args=engine_args) as harness:
+        monkeypatch.setattr(harness, "_attention_layers", lambda: layers)
+        selection = harness.selection_metadata()
+    assert selection.num_attention_layers == len(selection.attention_layers) == 5
+    assert selection.num_model_layers == 2
+    assert selection.layer_kinds == (("_CacheOnlyLayer", 3), ("_ShapelessLayer", 2))
+
+
+def test_per_layer_counts_do_not_divide_by_cache_only_layers(capture):
+    """Operators run once per decoder layer, not once per `AttentionLayerBase`.
+
+    A sparse-attention model reports four times its depth in attention layers,
+    which would understate every per-layer operator by that factor.
+    """
+    inflated = replace(
+        capture.selection,
+        num_attention_layers=4 * capture.selection.num_attention_layers,
+    )
+    before = format_report(capture).splitlines()
+    after = format_report(replace(capture, selection=inflated)).splitlines()
+    assert len(before) == len(after)
+    differing = [line for line, other in zip(before, after) if line != other]
+    assert len(differing) == 1
+    assert differing[0].strip().startswith("attention layers")
+
+
+def test_layer_kinds_explain_the_attention_layer_count(capture):
+    """One number for several layer kinds reads as a wrong number without them."""
+    selection = replace(
+        capture.selection,
+        num_attention_layers=9,
+        layer_kinds=(("Attention", 6), ("DeepseekV4IndexerCache", 3)),
+    )
+    lines = format_report(replace(capture, selection=selection)).splitlines()
+    (row,) = [line for line in lines if line.strip().startswith("attention layers")]
+    assert row.endswith("9 (6 Attention, 3 DeepseekV4IndexerCache)")
 
 
 def test_multimodal_items_need_a_multimodal_model():
@@ -269,7 +327,7 @@ def test_op_counts_scale_with_layer_count(capture):
     Only the first layer differs, normalizing its input where the rest add a
     residual to theirs.
     """
-    layers = capture.selection.num_attention_layers
+    layers = capture.selection.num_model_layers
     by_layer = _ops_by_layer(_capture(num_hidden_layers=2 * layers))
     assert len(by_layer) == 2 * layers
     repeated = by_layer["1"]

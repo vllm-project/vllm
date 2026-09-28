@@ -32,6 +32,10 @@ def format_selection(selection: SelectionMetadata) -> str:
         )
         if selection.tensor_parallel_size > 1:
             heads += " (per rank)"
+    layers = str(selection.num_attention_layers)
+    if len(selection.layer_kinds) > 1:
+        kinds = ", ".join(f"{count} {name}" for name, count in selection.layer_kinds)
+        layers += f" ({kinds})"
     rows = {
         "platform": selection.platform,
         "device": selection.device,
@@ -41,7 +45,7 @@ def format_selection(selection: SelectionMetadata) -> str:
         "kv cache layout": selection.kv_cache_layout,
         "kv cache dtype": selection.kv_cache_dtype,
         "block size": f"{selection.block_size} (kernel {selection.kernel_block_sizes})",
-        "attention layers": selection.num_attention_layers,
+        "attention layers": layers,
         "heads": heads,
     }
     if selection.tensor_parallel_size > 1:
@@ -60,9 +64,12 @@ def format_selection(selection: SelectionMetadata) -> str:
 
 
 def format_summary(capture: OpCapture) -> str:
-    """Render operator counts, total and per attention layer, most frequent first."""
+    """Render operator counts, total and per decoder layer, most frequent first."""
     counts = Counter(op.name for op in capture.ops)
-    layers = max(capture.selection.num_attention_layers, 1)
+    selection = capture.selection
+    # Not `num_attention_layers`: that counts KV-cache-only layers too, which
+    # would divide a sparse-attention model's counts by four times its depth.
+    layers = max(selection.num_model_layers or selection.num_attention_layers, 1)
     width = max((len(name) for name in counts), default=1)
     lines = [
         f"Operator summary ({len(capture.ops)} calls, {len(counts)} distinct)",

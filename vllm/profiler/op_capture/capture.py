@@ -11,6 +11,7 @@ comes from the `meta` load format, so an HF config is all that is needed.
 """
 
 import os
+from collections import Counter
 from collections.abc import Iterable, Iterator, Sequence
 from contextlib import ExitStack, contextmanager, nullcontext
 from dataclasses import dataclass, field, replace
@@ -171,6 +172,12 @@ class SelectionMetadata:
     block_size: int
     kernel_block_sizes: tuple[int, ...]
     num_attention_layers: int
+    """Layers deriving from `AttentionLayerBase`, KV-cache-only ones included.
+
+    Sparse attention's indexer and compressor own a KV cache without running
+    attention, so on those models this exceeds the decoder layer count: 243
+    against 61 for DeepSeek-V4-Pro. `layer_kinds` gives the composition.
+    """
     num_query_heads: int | None
     num_kv_heads: int | None
     head_size: int | None
@@ -185,6 +192,10 @@ class SelectionMetadata:
     """Ranks the model is sharded over; head counts are per rank."""
     attention_layers: tuple[str, ...] = ()
     """Names of the attention layers, in model order."""
+    num_model_layers: int = 0
+    """Decoder layers on this rank, the denominator for per-layer op counts."""
+    layer_kinds: tuple[tuple[str, int], ...] = ()
+    """Class name and count of each `attention_layers` kind, most common first."""
     sliding_windows: dict[str, int] = field(default_factory=dict)
     """Window of every sliding-window attention layer, keyed by layer name."""
     moe_experts: tuple[str, ...] = ()
@@ -865,14 +876,16 @@ class ForwardHarness:
             kv_cache_dtype=config.cache_config.cache_dtype,
             block_size=config.cache_config.block_size or 0,
             kernel_block_sizes=tuple(self.kernel_block_sizes),
-            num_attention_layers=sum(
-                len(group.layer_names) for group in self._all_attn_groups()
-            ),
+            num_attention_layers=len(layers),
             num_query_heads=getattr(shaped, "num_heads", None),
             num_kv_heads=getattr(shaped, "num_kv_heads", None),
             head_size=getattr(shaped, "head_size", None),
             tensor_parallel_size=self.tensor_parallel_size,
             attention_layers=tuple(layers),
+            num_model_layers=config.model_config.get_num_layers(config.parallel_config),
+            layer_kinds=tuple(
+                Counter(type(layer).__name__ for layer in layers.values()).most_common()
+            ),
             sliding_windows={
                 name: window
                 for name, layer in layers.items()
