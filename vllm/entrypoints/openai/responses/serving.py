@@ -832,18 +832,12 @@ class OpenAIServingResponses(GenerateBaseServing):
         num_generated_tokens = context.num_output_tokens
         num_cached_tokens = context.num_cached_tokens
         num_reasoning_tokens = context.num_reasoning_tokens
-        # For text-based reasoning parsers (e.g., <think>...</think>),
-        # HarmonyContext already counts reasoning tokens via channels.
-        # For Simple/Parsable contexts, derive reasoning_tokens from
-        # accumulated output token IDs using the parser if not already set.
-        if (
-            num_reasoning_tokens == 0
-            and isinstance(context, (SimpleContext, ParsableContext))
-            and context.response_parser is not None
-        ):
-            accumulated = getattr(context, "_accumulated_token_ids", []) or []
+        # HarmonyContext and ParsableContext count reasoning tokens as each
+        # round is appended. SimpleContext is single-round but accumulates
+        # streaming deltas, so count its full output once here.
+        if isinstance(context, SimpleContext) and context.response_parser is not None:
             num_reasoning_tokens = context.response_parser.count_reasoning_tokens(
-                accumulated
+                context._accumulated_token_ids
             )
 
         usage = ResponseUsage(
