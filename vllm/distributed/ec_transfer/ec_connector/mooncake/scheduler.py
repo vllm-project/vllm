@@ -20,8 +20,8 @@ import torch
 from vllm.distributed.ec_transfer.ec_connector.base import (
     ECConnectorMetadata,
 )
-from vllm.distributed.ec_transfer.ec_connector.cpu.common import (
-    _get_encoder_cache_hidden_dim,
+from vllm.distributed.ec_transfer.ec_connector.encoder_output_width import (
+    get_encoder_output_width,
 )
 from vllm.distributed.ec_transfer.ec_connector.mooncake.config import (
     _RESERVATION_TTL_SECONDS,
@@ -445,7 +445,7 @@ class ECMooncakeScheduler:
     def _encoder_output_spec(self, request: Any, index: int) -> TensorSpec:
         dtype = self._model_config.dtype
         assert isinstance(dtype, torch.dtype)
-        hidden_dim = _get_encoder_cache_hidden_dim(
+        hidden_dim = get_encoder_output_width(
             self._vllm_config, request.mm_features[index].modality
         )
         shape = (request.get_num_encoder_embeds(index), hidden_dim)

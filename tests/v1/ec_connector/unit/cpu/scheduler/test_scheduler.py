@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import uuid
-from types import SimpleNamespace
 
 import torch
 
@@ -98,7 +97,9 @@ def _load_blocks(meta, mm_hash: str) -> list[int]:
 
 def _seed_cached(s: ECCPUScheduler, mm_hash: str, n_blocks: int):
     """Pre-populate a ready cache entry backed by real blocks."""
-    s._cache.alloc(mm_hash, n_blocks)
+    # One embedding per block, so the shape fills the blocks exactly.
+    width = _BS // s._dtype.itemsize
+    s._cache.alloc(mm_hash, n_blocks, (n_blocks, width))
     s._cache.mark_ready(mm_hash)
 
 
@@ -132,17 +133,13 @@ def test_offload_reuse_cycle(monkeypatch):
 
 
 def test_omni_allocates_and_reloads_each_modality_shape():
-    """Visual DeepStack needs more blocks, not a wider audio reload."""
-    cfg = create_ec_vllm_config()
+    """Each modality is saved and reloaded at its own measured width.
+
+    Qwen3-Omni's visual DeepStack output is four times the embedding width
+    while its audio is not; one width for both under- or over-allocates.
+    """
+    cfg = create_ec_vllm_config(encoder_output_widths={"image": 128, "audio": 32})
     cfg.ec_transfer_config.ec_connector_extra_config["ec_cpu_bytes"] = 4096
-    cfg.model_config.get_inputs_embeds_size.return_value = 32
-    cfg.model_config.hf_config = SimpleNamespace(
-        thinker_config=SimpleNamespace(
-            vision_config=SimpleNamespace(
-                out_hidden_size=32, deepstack_visual_indexes=[8, 16, 24]
-            )
-        )
-    )
     s = ECCPUScheduler(cfg)
     req = _Request(
         [
@@ -182,7 +179,9 @@ def test_omni_allocates_and_reloads_each_modality_shape():
         s._metadata_resolver._cache = {"image": set(), "audio": set()}
         _, params = s.request_finished(req)
         assert params["image"]["size_bytes"] == 2 * 128 * 2
+        assert params["image"]["shape"] == [2, 128]
         assert params["audio"]["size_bytes"] == 2 * 32 * 2
+        assert params["audio"]["shape"] == [2, 32]
     finally:
         s.shutdown()
 

@@ -25,7 +25,6 @@ import logging
 import time
 import uuid
 from collections import deque
-from types import SimpleNamespace
 from unittest.mock import MagicMock, Mock, patch
 
 import numpy as np
@@ -909,13 +908,11 @@ def test_e2e_scheduler_worker_save_then_load(make_worker, monkeypatch, modality,
     monkeypatch.setattr(sched_mod, "create_ec_shared_region", lambda cfg: region)
 
     config = _vllm_config()
-    config.model_config.hf_config = SimpleNamespace(
-        thinker_config=SimpleNamespace(
-            vision_config=SimpleNamespace(
-                out_hidden_size=_HIDDEN_DIM, deepstack_visual_indexes=[8, 16, 24]
-            )
-        )
-    )
+    # Visual DeepStack is four embeddings wide; audio is one.
+    config.ec_transfer_config.mm_encoder_output_widths = {
+        "image": 4 * _HIDDEN_DIM,
+        "audio": _HIDDEN_DIM,
+    }
     scheduler = ECCPUScheduler(config)
 
     # -- Step 1: scheduler allocates, worker saves --

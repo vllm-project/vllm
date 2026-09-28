@@ -45,25 +45,28 @@ KEY = (
 SPEC = TensorSpec((2, 2), "torch.float32", 16)
 
 
-@pytest.mark.parametrize("model_type", ["omni", "vl", "plain"])
-def test_push_and_store_shapes_follow_each_modality(monkeypatch, model_type):
-    """DeepStack expands visual embeddings, not the audio in the same request."""
+@pytest.mark.parametrize("visual_width", [2048, 8192], ids=["plain", "deepstack"])
+def test_push_and_store_shapes_follow_each_modality(monkeypatch, visual_width):
+    """Each push is sized at its modality's measured encoder output width.
+
+    DeepStack widens the visual embeddings, not the audio in the same request.
+    """
     from vllm.distributed.ec_transfer.ec_connector.mooncake import scheduler
 
     monkeypatch.setattr(scheduler, "ensure_mooncake_available", lambda: None)
-    config = create_ec_vllm_config(ec_role="ec_producer", dtype=torch.bfloat16)
+    config = create_ec_vllm_config(
+        ec_role="ec_producer",
+        dtype=torch.bfloat16,
+        encoder_output_widths={
+            "image": visual_width,
+            "audio": 2048,
+            "video": visual_width,
+        },
+    )
     config.ec_transfer_config.ec_connector_extra_config["cross_encoder_cache"] = True
     config.use_v2_model_runner = True
     config.lora_config = None
     config.model_config.multimodal_config = MultiModalConfig()
-    config.model_config.get_inputs_embeds_size.return_value = 2048
-    vision = SimpleNamespace(out_hidden_size=2048, deepstack_visual_indexes=[8, 16, 24])
-    hf_config = SimpleNamespace(vision_config=vision)
-    if model_type == "omni":
-        hf_config = SimpleNamespace(thinker_config=hf_config)
-    elif model_type == "plain":
-        hf_config = SimpleNamespace()
-    config.model_config.hf_config = hf_config
     modalities = ["image", "audio", "video"]
     request = SimpleNamespace(
         request_id="mixed",
@@ -81,7 +84,6 @@ def test_push_and_store_shapes_follow_each_modality(monkeypatch, model_type):
         metadata = instance.build_connector_meta(
             SimpleNamespace(free_encoder_mm_hashes=[], preempted_req_ids=set())
         )
-        visual_width = 2048 if model_type == "plain" else 8192
         for spec, width in zip(
             metadata.pushes, [visual_width, 2048, visual_width], strict=True
         ):

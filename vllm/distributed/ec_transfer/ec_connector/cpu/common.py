@@ -68,20 +68,6 @@ class ECCPUWorkerMetadata(ECConnectorWorkerMetadata):
         return self
 
 
-def _get_encoder_cache_hidden_dim(vllm_config: "VllmConfig", modality: str) -> int:
-    """Return the encoder output width, including visual DeepStack features."""
-    model_config = vllm_config.model_config
-    if modality in ("image", "video"):
-        hf_config = model_config.hf_config
-        hf_config = getattr(hf_config, "thinker_config", hf_config)
-        vision_config = getattr(hf_config, "vision_config", None)
-        out_hidden_size = getattr(vision_config, "out_hidden_size", None)
-        deepstack_indexes = getattr(vision_config, "deepstack_visual_indexes", None)
-        if out_hidden_size is not None and deepstack_indexes:
-            return out_hidden_size * (1 + len(deepstack_indexes))
-    return model_config.get_inputs_embeds_size()
-
-
 def create_ec_shared_region(vllm_config: "VllmConfig") -> ECSharedRegion:
     """Build the EC mmap region from `vllm_config`.
 

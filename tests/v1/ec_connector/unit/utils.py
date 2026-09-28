@@ -19,12 +19,16 @@ _EXECUTOR_BACKEND = "mp"
 _PCP_SIZE = 1
 
 
+_EMBED_WIDTH = 32
+
+
 def create_ec_vllm_config(
     *,
     ec_role: ECRole = "ec_both",
     tensor_parallel_size: int = 1,
     rank: int = 0,
     dtype: torch.dtype = torch.float16,
+    encoder_output_widths: dict[str, int] | None = None,
 ) -> Mock:
     """Build a `VllmConfig` stand-in for EC connector unit tests.
 
@@ -41,6 +45,8 @@ def create_ec_vllm_config(
         tensor_parallel_size: TP degree.
         rank: Global rank of this worker.
         dtype: Encoder cache dtype.
+        encoder_output_widths: Per-modality encoder output width, as a
+            producer measures it at startup. Defaults to the embedding width.
 
     Returns:
         A `VllmConfig`-specced mock carrying the configs above.
@@ -57,12 +63,17 @@ def create_ec_vllm_config(
         ec_connector="ECCPUConnector",
         ec_role=ec_role,
         engine_id=str(uuid.uuid4()),
+        mm_encoder_output_widths=dict.fromkeys(
+            ("image", "video", "audio"), _EMBED_WIDTH
+        )
+        if encoder_output_widths is None
+        else encoder_output_widths,
     )
 
     model_config = Mock(spec=ModelConfig)
     model_config.dtype = dtype
     model_config.hf_config = SimpleNamespace()
-    model_config.get_inputs_embeds_size.return_value = 32
+    model_config.get_inputs_embeds_size.return_value = _EMBED_WIDTH
 
     vllm_config = Mock(spec=VllmConfig)
     vllm_config.ec_transfer_config = ec_transfer_config

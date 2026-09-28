@@ -27,6 +27,9 @@ from vllm.distributed import (
     cleanup_dist_env_and_memory,
     stateless_destroy_torch_distributed_process_group,
 )
+from vllm.distributed.ec_transfer.ec_connector.encoder_output_width import (
+    measure_encoder_output_widths,
+)
 from vllm.envs import enable_envs_cache
 from vllm.logger import init_logger
 from vllm.logging_utils.dump_input import dump_engine_exception
@@ -297,6 +300,8 @@ class EngineCore:
             [s for specs in kv_cache_specs for s in specs.values()],
         )
         self.model_executor.set_kv_cache_layout(layout.name)
+
+        measure_encoder_output_widths(vllm_config, self.collective_rpc)
 
         has_kv_cache = any(kv_cache_spec for kv_cache_spec in kv_cache_specs)
         if has_kv_cache:
