@@ -121,7 +121,7 @@ def _with_tool_strict(
     return tool
 
 
-def _resolve_tool_strictness(
+def resolve_tool_strictness(
     tools: Sequence[ChatCompletionToolsParam | ResponsesTool],
     tool_choice: ToolChoice,
     strict_level: ToolStrictLevel,
@@ -158,7 +158,7 @@ def get_model_structural_tag(
     if not tools or tool_choice == "none":
         return None
 
-    tools = _resolve_tool_strictness(tools, tool_choice, strict_level)
+    tools = resolve_tool_strictness(tools, tool_choice, strict_level)
     if tools is None:
         return None
 

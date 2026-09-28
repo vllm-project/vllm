@@ -141,7 +141,7 @@ if TYPE_CHECKING:
     VLLM_ROCM_USE_AITER_LINEAR_HIPBMM: bool = False
     VLLM_ROCM_USE_AITER_MOE: bool = True
     VLLM_ROCM_AITER_MOE_DISPATCH_POLICY: int = 0
-    VLLM_ROCM_USE_AITER_MOE_SITUV2: bool = False
+    VLLM_ROCM_USE_AITER_MOE_SITUV2: Literal["auto", "a4w4", "a8w4", "a16w4"] = "auto"
     VLLM_ROCM_USE_AITER_RMSNORM: bool = True
     VLLM_ROCM_USE_AITER_MLA: bool = True
     VLLM_ROCM_AITER_MLA_ASM_PADDING: Literal["auto", "gluon", "asm"] = "auto"
@@ -260,6 +260,7 @@ if TYPE_CHECKING:
     VLLM_ROCM_QUICK_REDUCE_MIN_SIZE_BYTES_MB: int | None = None
     VLLM_ROCM_QUICK_REDUCE_QUANTIZATION_MIN_SIZE_KB: int | None = None
     VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT: int = 480
+    VLLM_MOONCAKE_CONNECTOR_TIMEOUT: float = 30.0
     VLLM_ENABLE_CUDAGRAPH_GC: bool = False
     VLLM_LOOPBACK_IP: str = ""
     VLLM_ALLOW_CHUNKED_LOCAL_ATTN_WITH_HYBRID_KV_CACHE: bool = True
@@ -1280,18 +1281,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ROCM_USE_AITER_MOE": lambda: (
         os.getenv("VLLM_ROCM_USE_AITER_MOE", "True").lower() in ("true", "1")
     ),
-    # Route K3 SiTU MXFP4 MoE through the FlyDSL SiTUv2 path (a4w4 fp4
-    # activations, separated gate/up layout) instead of default a16w4. vLLM
-    # sets AITER_SITUV2_A4W4 at init when this flag is on and clears any
-    # legacy AITER_SITUV2_A8W4 override (AITER checks A8W4 first).
-    # VLLM_ROCM_USE_AITER_MOE_SITUV2_A8W4 is a deprecated alias for existing
-    # recipes; it does not select a8w4 kernels.
-    # Needs AITER >= v0.1.20 (ROCm/aiter#4463) for the a4w4 dispatch flag
-    # and tuned kimik3_a4w4_*_fmoe.csv rows; otherwise FlyDSL uses heuristics.
-    "VLLM_ROCM_USE_AITER_MOE_SITUV2": lambda: (
-        os.getenv("VLLM_ROCM_USE_AITER_MOE_SITUV2", "0").lower() in ("true", "1")
-        or os.getenv("VLLM_ROCM_USE_AITER_MOE_SITUV2_A8W4", "0").lower()
-        in ("true", "1")
+    # Activation dtype for the Kimi-K3 SiTU MXFP4 MoE (AITER FlyDSL SiTUv2):
+    # auto (= a4w4), a4w4, a8w4 or a16w4. Legacy 1/0 mean a4w4/a16w4.
+    "VLLM_ROCM_USE_AITER_MOE_SITUV2": env_with_choices(
+        "VLLM_ROCM_USE_AITER_MOE_SITUV2",
+        "auto",
+        ["auto", "a4w4", "a8w4", "a16w4", "0", "1"],
+        case_sensitive=False,
     ),
     # MoE sorting dispatch policy for AITER fused MoE kernels.
     #   0 = auto (default): single-pass for small batches, multi-pass
@@ -1717,6 +1713,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # via `ec_transfer_params.peer_port` on the producer's response.
     "VLLM_EC_SIDE_CHANNEL_PORT": lambda: int(
         os.getenv("VLLM_EC_SIDE_CHANNEL_PORT", "5601")
+    ),
+    # Per-request timeout (seconds) when a prefiller worker registers with
+    # the Mooncake bootstrap server.
+    "VLLM_MOONCAKE_CONNECTOR_TIMEOUT": lambda: float(
+        os.getenv("VLLM_MOONCAKE_CONNECTOR_TIMEOUT", "30.0")
     ),
     # Port used for Mooncake handshake between remote agents.
     "VLLM_MOONCAKE_BOOTSTRAP_PORT": lambda: int(
