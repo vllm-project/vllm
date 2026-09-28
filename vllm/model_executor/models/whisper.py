@@ -326,7 +326,6 @@ class WhisperCrossAttention(WhisperAttention):
             prefix=f"{prefix}.kv_proj",
         )
 
-    # Cross-attention takes encoder states instead of self-attention metadata.
     def forward(  # type: ignore[override]
         self,
         hidden_states: torch.Tensor,
