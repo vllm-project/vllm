@@ -373,6 +373,14 @@ class WeightCacheDaemon:
         cmd = request.get("cmd")
         if cmd == "get_state":
             self._handle_get_state(conn, request)
+        elif cmd == "get_memory":
+            send_msg(
+                conn,
+                {
+                    "status": "ok",
+                    "memory_bytes": torch.accelerator.memory_allocated(),
+                },
+            )
         elif cmd == "release":
             self._handle_release(conn)
         else:

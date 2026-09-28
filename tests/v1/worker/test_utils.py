@@ -13,7 +13,7 @@ import torch
 
 import vllm.v1.attention.backends.mla.index_group as index_group_module
 import vllm.v1.hisparse.runtime as hisparse_runtime_module
-from vllm.config import CacheConfig, CUDAGraphMode, LoadConfig
+from vllm.config import CacheConfig, CUDAGraphMode
 from vllm.config.mamba import MambaBackendEnum, MambaConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.hisparse import (
     worker as hisparse_worker_module,
@@ -1404,29 +1404,25 @@ def _memory_snapshot(total_gib: int, free_gib: int) -> MemorySnapshot:
     )
 
 
-def test_request_memory_charges_ipc_daemon_weights():
-    """Zero-copy ipc_cache weights live in the daemon, so the memory already in
-    use on the device is charged against the utilization budget instead of
-    failing the free-memory check."""
+def test_request_memory_charges_external_weights():
+    """Externally held weights are charged against the utilization budget;
+    the engine is granted only the remainder."""
     cache_config = CacheConfig(gpu_memory_utilization=0.9)
-    # A daemon holds 70 GiB of a 100 GiB device before the worker starts.
+    # 70 GiB of a 100 GiB device is held externally before the worker starts.
     snapshot = _memory_snapshot(total_gib=100, free_gib=30)
 
     with pytest.raises(ValueError, match="less than desired"):
         request_memory(snapshot, cache_config)
-    with pytest.raises(ValueError, match="less than desired"):
-        request_memory(
-            snapshot,
-            cache_config,
-            LoadConfig(
-                load_format="ipc_cache", model_loader_extra_config={"mode": "copy"}
-            ),
-        )
 
-    zero_copy = LoadConfig(load_format="ipc_cache")
-    assert request_memory(snapshot, cache_config, zero_copy) == 20 * GiB_bytes
+    # 90 GiB budget - 70 GiB external = 20 GiB for the engine.
+    assert request_memory(snapshot, cache_config, 70 * GiB_bytes) == 20 * GiB_bytes
 
-    with pytest.raises(ValueError, match="exceeds the desired"):
+    # The external weights alone exceed the utilization budget.
+    with pytest.raises(ValueError, match="exceed the desired"):
+        request_memory(snapshot, cache_config, 95 * GiB_bytes)
+
+    # Other tenants squeeze free memory below the engine's remainder.
+    with pytest.raises(ValueError, match="less than the engine's budget"):
         request_memory(
-            _memory_snapshot(total_gib=100, free_gib=5), cache_config, zero_copy
+            _memory_snapshot(total_gib=100, free_gib=10), cache_config, 70 * GiB_bytes
         )
