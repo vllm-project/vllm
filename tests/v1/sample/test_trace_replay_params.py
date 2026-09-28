@@ -4,6 +4,8 @@
 import pytest
 
 from vllm import SamplingParams
+from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
+from vllm.entrypoints.openai.completion.protocol import CompletionRequest
 from vllm.exceptions import VLLMValidationError
 from vllm.sampling_params import StructuredOutputsParams
 
@@ -31,6 +33,21 @@ def test_sampling_params_trace_field_preserved_by_clone():
     cloned = params.clone()
     assert cloned.trace_decode_token_ids == ids
     assert cloned.trace_decode_token_ids is not params.trace_decode_token_ids
+
+
+@pytest.mark.parametrize(
+    "request_cls, request_kwargs",
+    [
+        (ChatCompletionRequest, {"messages": [{"role": "user", "content": "hi"}]}),
+        (CompletionRequest, {"prompt": "hi"}),
+    ],
+)
+def test_openai_request_forwards_trace_field(request_cls, request_kwargs):
+    request = request_cls(
+        model="test-model", trace_decode_token_ids=[7, 8], **request_kwargs
+    )
+    params = request.to_sampling_params(max_tokens=10, default_sampling_params={})
+    assert params.trace_decode_token_ids == [7, 8]
 
 
 def test_sampling_params_trace_field_rejects_empty_list():

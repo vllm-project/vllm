@@ -12,7 +12,6 @@ from vllm.tracing import instrument
 from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT, ModelRunnerOutput
 from vllm.v1.worker.cpu.model_runner import CPUModelRunner
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
-from vllm.v1.worker.simulated.sampler import SimulatedSampler
 
 logger = init_logger(__name__)
 
@@ -23,20 +22,9 @@ if TYPE_CHECKING:
 class SimulatedCPUModelRunner(CPUModelRunner):
     """CPU runner that simulates model execution while preserving scheduler/KV logic."""
 
-    def load_model(self, load_dummy_weights: bool = False, *args, **kwargs) -> None:
-        super().load_model(load_dummy_weights, *args, **kwargs)
-        self.simulated_sampler = SimulatedSampler(self.req_states)
-
     @instrument(span_name="Warmup (Simulated CPU)")
     def warming_up_model(self) -> None:
         logger.info("Skipping model warmup for simulated forward.")
-
-    def add_requests(self, scheduler_output: "SchedulerOutput") -> None:
-        super().add_requests(scheduler_output)
-        for request in scheduler_output.scheduled_new_reqs:
-            assert request.sampling_params is not None
-            req_idx = self.req_states.req_id_to_index[request.req_id]
-            self.simulated_sampler.add_request(req_idx, request.sampling_params)
 
     @torch.inference_mode()
     def execute_model(
@@ -75,14 +63,24 @@ class SimulatedCPUModelRunner(CPUModelRunner):
         )
         req_ids = input_batch.req_ids
         req_id_to_index = {req_id: i for i, req_id in enumerate(req_ids)}
-        sampler_output = self.simulated_sampler.sample(input_batch)
-        num_sampled = sampler_output.num_sampled
-        num_rejected = sampler_output.num_rejected
-        assert num_sampled is not None and num_rejected is not None
+
+        assert self.sampler is not None
+        trace_replay_state = self.sampler.trace_replay_state
+        assert trace_replay_state is not None
+        sampled = torch.zeros(
+            input_batch.num_reqs, dtype=torch.int64, device=self.device
+        )
+        trace_replay_state.apply_trace(sampled, input_batch.idx_mapping)
+        sampled_token_ids = sampled.view(-1, 1)
+
+        seq_lens = input_batch.seq_lens[: input_batch.num_reqs]
+        prefill_lens = torch.from_numpy(input_batch.prefill_len_np)
+        num_sampled = (seq_lens >= prefill_lens).to(torch.int32)
+        num_rejected = torch.zeros_like(num_sampled)
 
         self.postprocess_sampled(
             idx_mapping=input_batch.idx_mapping,
-            sampled_tokens=sampler_output.sampled_token_ids,
+            sampled_tokens=sampled_token_ids,
             num_sampled=num_sampled,
             num_rejected=num_rejected,
             query_start_loc=input_batch.query_start_loc,
@@ -90,7 +88,7 @@ class SimulatedCPUModelRunner(CPUModelRunner):
         sampled_token_ids_list = [
             token_ids[:num_tokens]
             for token_ids, num_tokens in zip(
-                sampler_output.sampled_token_ids.tolist(), num_sampled.tolist()
+                sampled_token_ids.tolist(), num_sampled.tolist()
             )
         ]
 
@@ -102,8 +100,9 @@ class SimulatedCPUModelRunner(CPUModelRunner):
 
     def initialize_kv_cache_tensors(
         self,
-        is_profiling: bool = False,
-        kv_cache_allocation_context: AbstractContextManager | None = None,
+        *,
+        is_profiling: bool,
+        kv_cache_allocation_context: AbstractContextManager | None,
     ) -> None:
         self.kv_caches = []
         logger.info(

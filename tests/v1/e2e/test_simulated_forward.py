@@ -66,14 +66,14 @@ def test_simulate_forward_model_matrix(
 
     _check_model_available(model)
 
-    # No max_tokens/ignore_eos: generation must emit the caller-provided
-    # tokens and then terminate via EOS instead of padding to max_model_len.
-    simulated_output_token_ids = [501, 502]
+    # No max_tokens: generation must stop after the trace instead of padding
+    # to max_model_len.
     sampling_params = SamplingParams(
         temperature=0.0,
         detokenize=False,
-        extra_args={"simulated_output_token_ids": simulated_output_token_ids},
+        trace_decode_token_ids=[501, 502],
     )
+    prompt = [1000, 1001, 1002, 1003]
 
     with vllm_runner(
         model,
@@ -82,13 +82,8 @@ def test_simulate_forward_model_matrix(
         kv_cache_memory_bytes=16 * 1024**3,
         max_model_len=1024,
     ) as vllm_model:
-        eos_token_id = vllm_model.llm.get_tokenizer().eos_token_id
-        outputs = vllm_model.generate(
-            [[1000, 1001, 1002, 1003]],
-            sampling_params=sampling_params,
-        )
-        assert outputs[0][0][0][-3:] == [501, 502, eos_token_id]
-        assert simulated_output_token_ids == [501, 502]
+        outputs = vllm_model.generate([prompt], sampling_params=sampling_params)
+        assert outputs[0][0][0] == prompt + [501, 502]
 
         group_count = _get_kv_cache_group_count(vllm_model)
         if group_count is not None:
@@ -110,10 +105,8 @@ def test_simulate_forward_prefix_cache_hybrid_retention_zero(
 
     sampling_params = SamplingParams(
         temperature=0.0,
-        max_tokens=2,
-        ignore_eos=True,
         detokenize=False,
-        extra_args={"simulated_output_token_ids": [501, 502]},
+        trace_decode_token_ids=[501, 502],
     )
     prompt = [1000 + (i % 127) for i in range(512)]
 
@@ -136,10 +129,8 @@ def test_simulate_forward_prefix_cache_hybrid_retention_zero(
 
         second_sampling_params = SamplingParams(
             temperature=0.0,
-            max_tokens=2,
-            ignore_eos=True,
             detokenize=False,
-            extra_args={"simulated_output_token_ids": [503, 504]},
+            trace_decode_token_ids=[503, 504],
         )
         outputs = vllm_model.generate([prompt], sampling_params=second_sampling_params)
         assert outputs[0][0][0][-2:] == [503, 504]

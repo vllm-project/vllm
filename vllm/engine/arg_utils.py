@@ -1953,7 +1953,8 @@ class EngineArgs:
             max_logprobs=self.max_logprobs,
             logprobs_mode=self.logprobs_mode,
             use_fp64_gumbel=self.use_fp64_gumbel,
-            enable_trace_replay=self.enable_trace_replay,
+            # Simulated forward emits output tokens only via trace replay.
+            enable_trace_replay=self.enable_trace_replay or self.simulate_forward,
             disable_sliding_window=self.disable_sliding_window,
             disable_cascade_attn=self.disable_cascade_attn,
             skip_tokenizer_init=self.skip_tokenizer_init,
