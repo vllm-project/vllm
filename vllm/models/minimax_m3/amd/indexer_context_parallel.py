@@ -15,7 +15,6 @@ Enabled by ``VLLM_ROCM_MINIMAX_INDEXER_CP=1`` (ROCm, TP>1 only).
 
 import torch
 import torch.distributed as dist
-import triton
 
 from vllm.config import get_current_vllm_config
 from vllm.distributed import get_tensor_model_parallel_world_size
@@ -39,6 +38,7 @@ from vllm.models.minimax_m3.common.indexer import (
     MiniMaxM3IndexerTritonImpl,
 )
 from vllm.platforms import current_platform
+from vllm.triton_utils import triton
 
 
 class MiniMaxM3IndexerTritonCPImpl(MiniMaxM3IndexerTritonImpl):
@@ -64,7 +64,7 @@ class MiniMaxM3IndexerTritonCPImpl(MiniMaxM3IndexerTritonImpl):
         vllm_config = get_current_vllm_config()
         max_model_len = vllm_config.model_config.max_model_len
         device = (
-            torch.device("cuda", torch.cuda.current_device())
+            torch.device("cuda", torch.accelerator.current_device_index())
             if torch.cuda.is_available()
             else torch.device("cpu")
         )
