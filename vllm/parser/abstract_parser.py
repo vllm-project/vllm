@@ -5,11 +5,21 @@ import contextlib
 import json
 from abc import abstractmethod
 from collections.abc import Sequence
-from dataclasses import dataclass, field
-from functools import cached_property
+from dataclasses import dataclass, field, replace
 
 from openai.types.responses import ToolChoiceFunction
 from pydantic import TypeAdapter, ValidationError
+from xgrammar import Grammar, StructuralTag
+from xgrammar.structural_tag import (
+    ConstStringFormat,
+    Format,
+    GrammarFormat,
+    JSONSchemaFormat,
+    OrFormat,
+    RegexFormat,
+    TagFormat,
+    TriggeredTagsFormat,
+)
 
 from vllm.entrypoints.chat_utils import (
     get_tool_call_id_type,
@@ -26,17 +36,20 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
 )
 from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
+from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
 from vllm.parser.metrics import record_tool_parser_invocation
 from vllm.parser.utils import count_history_tool_calls
 from vllm.reasoning.abs_reasoning_parsers import ReasoningParser
-from vllm.sampling_params import StructuredOutputsParams
+from vllm.sampling_params import SamplingParams, StructuredOutputsParams
 from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers.abstract_tool_parser import Tool, ToolParser
 from vllm.tool_parsers.streaming import (
     extract_named_tool_call_streaming,
     extract_required_tool_call_streaming,
 )
+from vllm.tool_parsers.structural_tag_registry import resolve_tool_strictness
+from vllm.tool_parsers.tool_strict_level import ToolStrictLevel
 
 logger = init_logger(__name__)
 
@@ -84,30 +97,20 @@ class StreamState:
 
 
 class Parser:
-    """
-    Abstract Parser class that unifies ReasoningParser and ToolParser into
-    a single interface for parsing model output.
+    """Parse model output into reasoning, content and tool calls.
 
-    This class provides a unified way to handle both reasoning extraction
-    (e.g., chain-of-thought content in <think> tags) and tool call extraction
-    (e.g., function calls in XML/JSON format) from model outputs.
-
-    Subclasses can either:
-    1. Override the abstract methods directly for custom parsing logic
-    2. Set `reasoning_parser` and `tool_parser` properties to delegate to
-       existing parser implementations
-
-    Class Attributes:
-        reasoning_parser_cls: The ReasoningParser class to use (for compatibility
-            with code that needs the class, not instance).
-        tool_parser_cls: The ToolParser class to use (for compatibility with
-            code that needs the class, not instance).
+    The serving layer holds one ``Parser`` per request and calls only the
+    members defined here. ``ParserEngine`` implements them over a single
+    declarative engine; ``DelegatingParser`` composes a legacy
+    ``ReasoningParser`` / ``ToolParser`` pair.
     """
 
     # Class-level parser classes for compatibility with existing patterns
     # Subclasses should override these if they use specific parser classes
     reasoning_parser_cls: type[ReasoningParser] | None = None
     tool_parser_cls: type[ToolParser] | None = None
+    # Server-side floor for tool-call structural tags (--tool-strict-level).
+    tool_strict_level: ToolStrictLevel = ToolStrictLevel.AUTO
 
     def __init__(
         self,
@@ -151,28 +154,15 @@ class Parser:
             engine_based=self._engine_based,
         )
 
-    @cached_property
-    def vocab(self) -> dict[str, int]:
-        """Get the vocabulary mapping from tokens to IDs."""
-        return self.model_tokenizer.get_vocab()
-
     @property
     def reasoning_parser(self) -> ReasoningParser | None:
         """The underlying reasoning parser, if any."""
         return self._reasoning_parser
 
-    @reasoning_parser.setter
-    def reasoning_parser(self, parser: ReasoningParser | None) -> None:
-        self._reasoning_parser = parser
-
     @property
     def tool_parser(self) -> ToolParser | None:
         """The underlying tool parser, if any."""
         return self._tool_parser
-
-    @tool_parser.setter
-    def tool_parser(self, parser: ToolParser | None) -> None:
-        self._tool_parser = parser
 
     def _initialize_history_tool_call_cnt(
         self,
@@ -187,105 +177,10 @@ class Parser:
         state.history_tool_call_cnt = count_history_tool_calls(request)
         state.history_tool_call_cnt_initialized = True
 
-    # ========== Reasoning Parser Methods ==========
-
-    @abstractmethod
-    def is_reasoning_end(self, input_ids: list[int]) -> bool:
-        """
-        Check if the reasoning content ends in the input_ids.
-
-        Used by structured engines like `xgrammar` to check if the
-        reasoning content ends in the model output.
-
-        Args:
-            input_ids: The token IDs of the model output.
-
-        Returns:
-            True if the reasoning content ends in the input_ids.
-        """
-
-    def is_reasoning_end_streaming(
-        self, input_ids: list[int], delta_ids: list[int]
-    ) -> bool:
-        """
-        Check if the reasoning content ends during a decode step.
-
-        Args:
-            input_ids: The entire model output token IDs.
-            delta_ids: The last few computed tokens at the current decode step.
-
-        Returns:
-            True if the reasoning content ends in the delta_ids.
-        """
-        return self.is_reasoning_end(input_ids)
-
-    @abstractmethod
-    def extract_content_ids(self, input_ids: list[int]) -> list[int]:
-        """
-        Extract content token IDs from the input_ids.
-
-        This extracts the non-reasoning content (e.g., everything after
-        the </think> tag).
-
-        Args:
-            input_ids: The token IDs of the model output.
-
-        Returns:
-            The extracted content token IDs.
-        """
-
-    @abstractmethod
-    def extract_reasoning(
-        self,
-        model_output: str,
-        request: ChatCompletionRequest | ResponsesRequest,
-    ) -> tuple[str | None, str | None]:
-        """
-        Extract reasoning content from a complete model-generated string.
-
-        Used for non-streaming responses where we have the entire model
-        response available before sending to the client.
-
-        Args:
-            model_output: The complete model-generated string.
-            request: The request object used to generate the output.
-
-        Returns:
-            A tuple of (reasoning, response_content).
-        """
-
-    @abstractmethod
-    def extract_reasoning_streaming(
-        self,
-        previous_text: str,
-        current_text: str,
-        delta_text: str,
-        previous_token_ids: Sequence[int],
-        current_token_ids: Sequence[int],
-        delta_token_ids: Sequence[int],
-    ) -> DeltaMessage | None:
-        """
-        Extract reasoning content from a streaming delta message.
-
-        Args:
-            previous_text: Text from all previous tokens.
-            current_text: Text including the current delta.
-            delta_text: The new text in this delta.
-            previous_token_ids: Token IDs from previous generation.
-            current_token_ids: All token IDs including current.
-            delta_token_ids: The new token IDs in this delta.
-
-        Returns:
-            A DeltaMessage with reasoning and/or content fields, or None.
-        """
-
-    # ========== Tool Parser Methods ==========
-
     def adjust_request(
         self, request: ChatCompletionRequest | ResponsesRequest
     ) -> ChatCompletionRequest | ResponsesRequest:
-        """
-        Adjust the request parameters for tool calling.
+        """Adjust the request parameters for tool calling.
 
         Can be overridden by subclasses to modify request parameters
         (e.g., setting structured output schemas for tool calling).
@@ -295,53 +190,23 @@ class Parser:
 
         Returns:
             The adjusted request.
+
         """
         return request
 
     @abstractmethod
-    def extract_tool_calls(
-        self,
-        model_output: str,
-        request: ChatCompletionRequest | ResponsesRequest,
-    ) -> ExtractedToolCallInformation:
-        """
-        Extract tool calls from a complete model-generated string.
+    def is_reasoning_end(self, input_ids: list[int]) -> bool:
+        """Check if the reasoning content ends in the input_ids.
 
-        Used for non-streaming responses.
+        Called with the rendered prompt to decide whether generation starts
+        after reasoning. Must be a pure function of the input_ids.
 
         Args:
-            model_output: The complete model-generated string.
-            request: The request object used to generate the output.
+            input_ids: The token IDs of the model output.
 
         Returns:
-            ExtractedToolCallInformation containing the tool calls.
-        """
+            True if the reasoning content ends in the input_ids.
 
-    @abstractmethod
-    def extract_tool_calls_streaming(
-        self,
-        previous_text: str,
-        current_text: str,
-        delta_text: str,
-        previous_token_ids: Sequence[int],
-        current_token_ids: Sequence[int],
-        delta_token_ids: Sequence[int],
-        request: ChatCompletionRequest | ResponsesRequest,
-    ) -> DeltaMessage | None:
-        """
-        Extract tool calls from a streaming delta message.
-
-        Args:
-            previous_text: Text from all previous tokens.
-            current_text: Text including the current delta.
-            delta_text: The new text in this delta.
-            previous_token_ids: Token IDs from previous generation.
-            current_token_ids: All token IDs including current.
-            delta_token_ids: The new token IDs in this delta.
-            request: The request object.
-
-        Returns:
-            A DeltaMessage with tool_calls field, or None.
         """
 
     @abstractmethod
@@ -362,6 +227,7 @@ class Parser:
 
         Returns:
             A tuple of (reasoning, content, tool_calls).
+
         """
 
     @abstractmethod
@@ -383,9 +249,69 @@ class Parser:
         return 0
 
 
+def structured_outputs_to_format(params: StructuredOutputsParams) -> Format | None:
+    """Map StructuredOutputsParams in a XGrammar Format."""
+    if params.json_object:
+        return JSONSchemaFormat(json_schema={"type": "object"})
+    if params.json is not None:
+        schema = params.json
+        if isinstance(schema, str):
+            schema = json.loads(schema)
+        return JSONSchemaFormat(json_schema=schema)
+    if params.regex is not None:
+        return RegexFormat(pattern=params.regex)
+    if params.choice is not None:
+        return OrFormat(
+            elements=[ConstStringFormat(value=choice) for choice in params.choice]
+        )
+    if params.grammar is not None:
+        from vllm.v1.structured_output.utils import grammar_is_likely_lark
+
+        grammar = params.grammar
+        # IMPORTANT(arpera):
+        # GrammarFormat only accepts EBNF.
+        if grammar_is_likely_lark(grammar):
+            try:
+                grammar = str(Grammar.from_lark(grammar))
+            except Exception as e:
+                raise VLLMValidationError("Invalid grammar specification.") from e
+        return GrammarFormat(grammar=grammar)
+    if params.structural_tag is not None:
+        s_tag = json.loads(params.structural_tag)
+        if "structures" in s_tag:
+            # LegacyStructuralTagResponseFormat
+            return TriggeredTagsFormat(
+                triggers=s_tag["triggers"],
+                tags=[
+                    TagFormat(
+                        begin=structure["begin"],
+                        content=JSONSchemaFormat(json_schema=structure["schema"]),
+                        end=structure["end"],
+                    )
+                    for structure in s_tag["structures"]
+                ],
+            )
+        # StructuralTagResponseFormat
+        return StructuralTag.model_validate(s_tag).format
+    return None
+
+
+def _xgrammar_supports(structured_outputs: StructuredOutputsParams) -> bool:
+    """Whether the constraint passes xgrammar validation on its own."""
+    from vllm.v1.structured_output.backend_xgrammar import validate_xgrammar_grammar
+
+    try:
+        # validate_xgrammar_grammar rewrites `choice` into `grammar` in place.
+        validate_xgrammar_grammar(
+            SamplingParams(structured_outputs=replace(structured_outputs))
+        )
+    except (TypeError, ValueError, VLLMValidationError):
+        return False
+    return True
+
+
 class DelegatingParser(Parser):
-    """
-    A Parser implementation that delegates to separate ReasoningParser and
+    """A Parser implementation that delegates to separate ReasoningParser and
     ToolParser instances.
 
     This is the recommended base class for creating model-specific parsers
@@ -538,18 +464,14 @@ class DelegatingParser(Parser):
             request = self._reasoning_parser.adjust_request(request)
         if self._tool_parser is not None:
             request = self._apply_structural_tag(request)
-        if self._tool_parser is not None:
             request = self._tool_parser.adjust_request(request)
         return request
 
     def _apply_structural_tag(
         self, request: ChatCompletionRequest | ResponsesRequest
     ) -> ChatCompletionRequest | ResponsesRequest:
-        if (
-            self._tool_parser is None
-            or self._tool_parser.structural_tag_model is None
-            or not request.tools
-        ):
+        tool_parser = self._tool_parser
+        if tool_parser is None or not request.tools:
             return request
 
         need_tool_calling = (
@@ -563,16 +485,69 @@ class DelegatingParser(Parser):
         if not need_tool_calling:
             return request
 
-        structure_tag = self._tool_parser.get_structural_tag(
-            request,
-            reasoning=False,
-        )
-        if structure_tag is None:
+        structured_outputs = request.extract_structured_outputs()
+        is_auto = request.tool_choice == "auto"
+
+        resolved_tools = None
+        if tool_parser.structural_tag_model is not None:
+            resolved_tools = resolve_tool_strictness(
+                request.tools,
+                request.tool_choice,
+                self.tool_strict_level,
+            )
+
+        output_format = None
+        if resolved_tools and is_auto and structured_outputs:
+            if not _xgrammar_supports(structured_outputs):
+                logger.warning_once(
+                    "Tool calls are not constrained for tool_choice=auto with "
+                    "structured outputs because xgrammar does not support the "
+                    "structured output constraint; the structured output "
+                    "constraint applies.",
+                    scope="local",
+                )
+                return request
+            output_format = structured_outputs_to_format(structured_outputs)
+
+        if resolved_tools is not None:
+            tag_request = request
+            if output_format is not None:
+                # IMPORTANT(arpera):
+                # The "auto" tag allows plain text in response.
+                # Use tag "required" here to ensure structured-output branch
+                # remains meaningful.
+                tag_request = request.model_copy(update={"tool_choice": "required"})
+            tools_structural_tag = tool_parser.get_structural_tag(
+                tag_request,
+                reasoning=False,
+                strict_level=self.tool_strict_level,
+            )
+        else:
+            tools_structural_tag = None
+
+        if tools_structural_tag is None:
+            if is_auto and structured_outputs is not None:
+                logger.warning_once(
+                    "Tool calls are not constrained for tool_choice=auto with "
+                    "structured outputs because structural tags are unavailable; "
+                    "the structured output constraint applies.",
+                    scope="local",
+                )
             return request
 
-        structural_tag = json.dumps(structure_tag.model_dump())
+        structural_tag = tools_structural_tag
+        if output_format is not None:
+            structural_tag = StructuralTag(
+                format=OrFormat(elements=[tools_structural_tag.format, output_format])
+            )
+        elif structured_outputs is not None and not is_auto:
+            logger.warning_once(
+                "structured outputs are ignored because tool_choice forces tool call.",
+                scope="local",
+            )
+
         request.structured_outputs = StructuredOutputsParams(
-            structural_tag=structural_tag,
+            structural_tag=json.dumps(structural_tag.model_dump()),
         )
         if isinstance(request, ResponsesRequest):
             request.text = None
@@ -746,14 +721,14 @@ class DelegatingParser(Parser):
             return False
         return self._reasoning_parser.is_reasoning_end(input_ids)
 
-    def is_reasoning_end_streaming(
+    def _is_reasoning_end_streaming(
         self, input_ids: list[int], delta_ids: list[int]
     ) -> bool:
         if self._reasoning_parser is None:
             return False
         return self._reasoning_parser.is_reasoning_end_streaming(input_ids, delta_ids)
 
-    def extract_content_ids(self, input_ids: list[int]) -> list[int]:
+    def _extract_content_ids(self, input_ids: list[int]) -> list[int]:
         if self._reasoning_parser is None:
             return input_ids
         return self._reasoning_parser.extract_content_ids(input_ids)
@@ -867,13 +842,13 @@ class DelegatingParser(Parser):
                     reasoning_parser.has_engine_confirmed_reasoning_end()
                 )
             else:
-                should_transition = self.is_reasoning_end_streaming(
+                should_transition = self._is_reasoning_end_streaming(
                     current_token_ids, delta_token_ids
                 )
             if should_transition:
                 state.reasoning_ended = True
                 reasoning_transitioned = True
-                current_token_ids = self.extract_content_ids(delta_token_ids)
+                current_token_ids = self._extract_content_ids(delta_token_ids)
                 # Flush whenever the reasoning parser is engine-based (not only
                 # when _engine_based is True): it buffers the post-marker text
                 # (e.g. the "<" of "<tool_call>"), surfaced via finish_streaming().
