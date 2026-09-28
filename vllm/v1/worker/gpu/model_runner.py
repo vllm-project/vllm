@@ -31,7 +31,7 @@ import vllm.envs as envs
 from vllm.compilation.counter import compilation_counter
 from vllm.compilation.cuda_graph import CUDAGraphStat
 from vllm.config import VllmConfig
-from vllm.config.compilation import CUDAGraphMode
+from vllm.config.compilation import CompilationMode, CUDAGraphMode
 from vllm.distributed.aux_output_connector.worker import (
     AuxOutputWorkerConnector,
     get_aux_output_connector,
@@ -1705,6 +1705,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             return self._merge_ec_connector_no_forward(scheduler_output, empty_output)
 
         cudagraph_stats = None
+        fast_prefill_lora_mapping = None
         if not dummy_run:
             # Common case.
             # Prepare all the inputs and copy to the input buffers.
@@ -1734,6 +1735,17 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     input_batch.num_scheduled_tokens,
                 )
                 self._set_active_loras(*lora_inputs)
+                if (
+                    input_batch.fast_prefill is not None
+                    and num_active_loras > 0
+                    and batch_desc.cg_mode == CUDAGraphMode.NONE
+                    and self.compilation_config.mode == CompilationMode.NONE
+                ):
+                    fast_prefill_lora_mapping = (
+                        self.lora_manager.prepare_fast_prefill_token_mapping(
+                            input_batch.fast_prefill.logits_indices_padded
+                        )
+                    )
         else:
             # No actual tokens to run. A dummy run for DP or memory profiling.
             dummy_num_reqs = batch_desc.num_reqs or num_reqs
@@ -1929,6 +1941,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 slot_mapping=slot_mappings_by_layer,
                 skip_compiled=skip_compiled,
                 is_padding=input_batch.is_padding,
+                extra_kwargs={
+                    "fast_prefill_lora_mapping": fast_prefill_lora_mapping,
+                },
             ):
                 self.kv_connector.pre_forward(**connector_kwargs)
                 if ubatch_state is not None:
