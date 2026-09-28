@@ -187,11 +187,8 @@ class FlashInferMLASparseSM120Impl(SparseMLACommonImpl[FlashInferMLASparseMetada
         kv_rows, block_stride_rows = flat_kv_row_view(
             kv_c_and_k_pe_cache, attn_metadata.block_size
         )
-        if attn_metadata.block_size == 64 and block_stride_rows == 64:
-            kernel_kv_cache = kv_c_and_k_pe_cache
-        else:
-            kv_rows_bytes = kv_rows.view(torch.uint8)
-            kernel_kv_cache = kv_rows_bytes.view(-1, 64, kv_rows_bytes.shape[-1])
+        kv_rows_bytes = kv_rows.view(torch.uint8)
+        kernel_kv_cache = kv_rows_bytes.view(-1, 64, kv_rows_bytes.shape[-1])
         topk_indices_physical = cast(
             torch.Tensor,
             triton_convert_req_index_to_global_index(

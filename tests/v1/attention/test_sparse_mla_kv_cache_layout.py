@@ -48,8 +48,8 @@ pytestmark = pytest.mark.skip_global_cleanup
 @pytest.mark.parametrize(
     "backend,cache_dtype,sm100,stride_alignment",
     [
-        (FlashInferMLASparseTRTLLMBackend, "auto", True, 1152),
-        (FlashInferMLASparseTRTLLMBackend, "fp8", True, 576),
+        (FlashInferMLASparseTRTLLMBackend, "auto", True, 32 * 1152),
+        (FlashInferMLASparseTRTLLMBackend, "fp8", True, 32 * 576),
         (FlashMLASparseBackend, "auto", True, 1152),
         (FlashMLASparseBackend, "fp8_ds_mla", False, None),
         (FlashMLASparseBackend, "fp8_ds_mla", True, 656),

@@ -27,6 +27,7 @@ from vllm.v1.kv_cache_interface import (
     HiddenStateCacheSpec,
     HiSparseHotSpec,
     HiSparseResidentSpec,
+    KpoolTailSpec,
     KVCacheGroupRole,
     KVCacheSpec,
     MambaSpec,
@@ -1277,6 +1278,10 @@ class CircularBufferManager(FullAttentionManager):
 
     def get_num_skipped_tokens(self, num_computed_tokens: int) -> int:
         return 0
+
+
+class KpoolTailManager(CircularBufferManager):
+    """One-block circular scratch manager for ``KpoolTailSpec``."""
 
 
 class ChunkedLocalAttentionManager(SingleTypeKVCacheManager):
@@ -2667,6 +2672,11 @@ def register_all_kvcache_specs(vllm_config):
         SlidingWindowMLASpec,
         SlidingWindowManager,
         uniform_type_base_spec=SlidingWindowMLASpec,
+    )
+    KVCacheSpecRegistry.register(
+        KpoolTailSpec,
+        KpoolTailManager,
+        uniform_type_base_spec=KpoolTailSpec,
     )
 
     KVCacheSpecRegistry.register(
