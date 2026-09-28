@@ -59,6 +59,9 @@ from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_engine import (
     MoRIIOWrapper,
     MoRIIOWriter,
 )
+from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_heartbeat import (
+    MoRIIOHeartbeat,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_layout import (
     LayerTransferGeometry,
     MambaOffsetTemplate,
@@ -224,6 +227,28 @@ class MoRIIOConnector(KVConnectorBase_V1, SupportsHMA):
         # The READ path always transfers the recurrent-state slot, including
         # when the attention prefix is already present locally.
         return self.mode == MoRIIOMode.READ and self._transfers_mamba_state
+
+    @property
+    def requires_full_step_completion(self) -> bool:
+        return self.mode == MoRIIOMode.READ
+
+    def get_sync_load_block_ids(self, request: "Request") -> list[int]:
+        scheduler = self.connector_scheduler
+        if (
+            self.mode != MoRIIOMode.READ
+            or not self.kv_transfer_config.is_kv_consumer
+            or scheduler is None
+            or not scheduler._has_mamba
+            or self._vllm_config.cache_config.get_resolved_kv_cache_layout().name
+            != "LBNHC"
+        ):
+            return []
+        pending = scheduler._reqs_need_recv.get(request.request_id)
+        if pending is None:
+            return []
+        # Hybrid READ fills these entire attention pages and aborts on failure.
+        # The destination list already excludes local hits and lookahead blocks.
+        return pending[1][0]
 
     def __init__(
         self,
@@ -760,6 +785,10 @@ class MoRIIOConnectorScheduler:
             # here: register_kv_caches refuses WRITE mode for them, so there is
             # no recurrent-state accounting to do.
             return num_external_tokens, True
+
+        params = request.kv_transfer_params
+        if not params or not params.get("do_remote_prefill"):
+            return 0, False
 
         # READ mode always recomputes the last token locally on the decoder.
         #
@@ -1613,7 +1642,7 @@ class MoRIIOConnectorWorker:
 
         self.moriio_engine = None
         self._handle_request_thread = None
-        self._ping_thread = None
+        self._heartbeat: MoRIIOHeartbeat | None = None
         self._writer = MoRIIOWriter(self)
         # Completions that arrived before transfer_id_to_request_id was populated.
         # Retried each step until the mapping is established.
@@ -1643,10 +1672,7 @@ class MoRIIOConnectorWorker:
         )
 
         if self._rank == 0 and self.moriio_config.proxy_ip:
-            self._ping_thread = threading.Thread(
-                target=self._ping, args=(self.zmq_context,), daemon=True
-            )
-            self._ping_thread.start()
+            self._heartbeat = self._start_heartbeat()
 
         logger.info(
             "Initializing MoRIIO Engine, engine = %s, role = %s",
@@ -1708,6 +1734,7 @@ class MoRIIOConnectorWorker:
         # KV Caches and moriio tracking data.
         self.kv_caches: dict[str, torch.Tensor] = {}
         self.kv_layer_mr_offset: dict[str, int] = {}
+        self.kv_region_mr_offsets: dict[str, list[int]] = {}
         self.layer_base_addr_index: dict[str, int] = {}
 
         # Map of engine_id -> kv_caches_base_addr. For TP case, each local
@@ -1894,75 +1921,31 @@ class MoRIIOConnectorWorker:
             remote_engine_id
         ]
 
-    def _ping(self, zmq_context):
-        # Use host:port format for http_address (compatible with official router)
-        http_address = f"{self.request_address}"
-        # Include host so the router embeds it in the request_id; the connector
-        # on the other side parses host/ports from there.
-        zmq_address = (
-            f"host:{self.local_ip},"
-            f"handshake:{self.handshake_port},"
-            f"notify:{self.notify_port}"
+    def _start_heartbeat(self) -> MoRIIOHeartbeat:
+        payload = {
+            "type": "P" if self.is_producer else "D",
+            "http_address": self.request_address,
+            "zmq_address": (
+                f"host:{self.local_ip},handshake:{self.handshake_port},"
+                f"notify:{self.notify_port}"
+            ),
+            "dp_size": self.moriio_config.dp_size,
+            "tp_size": self.moriio_config.tp_size,
+            "transfer_mode": self.mode.name,
+        }
+        return MoRIIOHeartbeat(
+            f"tcp://{self.proxy_ip}:{self.proxy_ping_port}",
+            payload,
+            MoRIIOConstants.PING_INTERVAL,
+            MoRIIOConstants.MAX_PING_RETRIES,
         )
-        role = "P" if self.is_producer else "D"
-
-        retry_count = 0
-        index = 1
-        with zmq_context.socket(zmq.DEALER) as sock:
-            sock.connect(f"tcp://{self.proxy_ip}:{self.proxy_ping_port}")
-
-            while True:
-                try:
-                    data = {
-                        "type": role,  # "P" or "D"
-                        "http_address": http_address,
-                        "zmq_address": zmq_address,
-                        # dp_size/tp_size are not used by the official vLLM router
-                        # (routing operates at the http_address level); they are
-                        # consumed only by the toy proxy server.
-                        "dp_size": self.moriio_config.dp_size,
-                        "tp_size": self.moriio_config.tp_size,
-                        # transfer_mode is included so the router can distinguish
-                        # READ (prefill-then-decode, sequential) from WRITE (concurrent)
-                        # scheduling.
-                        "transfer_mode": self.mode.name,
-                    }
-
-                    sock.send(msgpack.dumps(data))
-                    # logger.debug(f"Successfully sent ping message #{index}")
-                    retry_count = 0
-
-                except ConnectionRefusedError:
-                    logger.info(
-                        "Connection refused: %s:%s -> %s:%s",
-                        self.local_ip,
-                        self.local_ping_port,
-                        self.proxy_ip,
-                        self.proxy_ping_port,
-                    )
-                    retry_count += 1
-
-                except OSError as e:
-                    logger.info("OS error when sending ping: %s", e)
-                    retry_count += 1
-
-                except Exception as e:
-                    logger.info("Unexpected error when sending ping: %s", e)
-                    retry_count += 1
-                    if retry_count >= MoRIIOConstants.MAX_PING_RETRIES:
-                        logger.error(
-                            "Max retries (%s) exceeded. Stopping ping loop.",
-                            MoRIIOConstants.MAX_PING_RETRIES,
-                        )
-                        raise RuntimeError(
-                            f"Ping failed after {retry_count} retries"
-                        ) from e
-
-                finally:
-                    time.sleep(MoRIIOConstants.PING_INTERVAL)
-                    index += 1
 
     def shutdown(self):
+        heartbeat = getattr(self, "_heartbeat", None)
+        if heartbeat is not None:
+            heartbeat.shutdown()
+            self._heartbeat = None
+
         if hasattr(self, "moriio_wrapper") and self.moriio_wrapper:
             self.moriio_wrapper.shutdown()
 
@@ -2269,24 +2252,28 @@ class MoRIIOConnectorWorker:
     ) -> tuple[torch.Tensor, dict[str, int]]:
         page_size = 4096
         backing = next(iter(kv_caches.values())).view(torch.uint8)
-        nbytes = backing.untyped_storage().nbytes()
-        base = torch.as_strided(backing, (nbytes,), (1,), 0)
-        ptr = base.data_ptr()
-        slack = ptr % page_size
-        end = 0
+        storage = backing.untyped_storage()
+        storage_ptr = storage.data_ptr()
+        regions = []
         for layer_name in kv_caches:
-            _, region_len = next(
-                iter(self._iter_layer_registration_regions(layer_name))
-            )
-            end = max(end, kv_caches[layer_name].data_ptr() - ptr + region_len)
-        reg_nbytes = ((slack + end + page_size - 1) // page_size) * page_size
-        if reg_nbytes > nbytes:
+            for region, region_len in self._iter_layer_registration_regions(layer_name):
+                if (
+                    region.device != backing.device
+                    or region.untyped_storage().data_ptr() != storage_ptr
+                ):
+                    raise ValueError("Shared KV regions must use the same storage")
+                regions.append((region.data_ptr(), region_len))
+        # The first transferable layer need not be the allocation's first view.
+        # Align its registration within storage, never before the allocation.
+        mr_ptr = min(ptr for ptr, _ in regions) // page_size * page_size
+        end = max(ptr + length for ptr, length in regions)
+        if mr_ptr < storage_ptr or end > storage_ptr + storage.nbytes():
             raise ValueError(
-                f"shared KV backing too small for page-aligned MR: "
-                f"need {reg_nbytes}, have {nbytes}"
+                "Page-aligned shared KV registration is outside its storage"
             )
-        reg = torch.as_strided(base, (reg_nbytes,), (1,), 0 if slack == 0 else -slack)
-        mr_ptr = reg.data_ptr()
+        # RDMA accepts an arbitrary extent; rounding the final SSM region up
+        # could extend the registration past the last allocated byte.
+        reg = torch.as_strided(backing, (end - mr_ptr,), (1,), mr_ptr - storage_ptr)
         return reg, {
             name: cache.data_ptr() - mr_ptr for name, cache in kv_caches.items()
         }
@@ -2463,9 +2450,11 @@ class MoRIIOConnectorWorker:
             and len({id(t.untyped_storage()) for t in kv_caches.values()}) == 1
         )
         shared_mr = None
+        shared_mr_base = None
         if shared_backing:
             reg_tensor, self.kv_layer_mr_offset = self._build_shared_kv_mr(kv_caches)
             shared_mr = self.moriio_wrapper.register_local_tensor(reg_tensor)
+            shared_mr_base = reg_tensor.data_ptr()
 
         # Say it out loud when the groups disagree. This is expected on a hybrid
         # model and used to be fatal, so a run that silently had one page size
@@ -2511,11 +2500,21 @@ class MoRIIOConnectorWorker:
                     ssm.is_contiguous(),
                     ssm.untyped_storage().nbytes(),
                 )
+                self.kv_region_mr_offsets[layer_name] = []
                 for tensor in (conv, ssm):
                     alias = self._contiguous_byte_alias(tensor)
-                    meta = self.moriio_wrapper.register_local_tensor(alias)
+                    meta = (
+                        shared_mr
+                        if shared_mr is not None
+                        else self.moriio_wrapper.register_local_tensor(alias)
+                    )
                     self.layer_name_to_local_kv_cache_metadata[layer_name].append(meta)
                     self.local_kv_cache_size.append(alias.numel())
+                    self.kv_region_mr_offsets[layer_name].append(
+                        0
+                        if shared_mr_base is None
+                        else alias.data_ptr() - shared_mr_base
+                    )
             else:
                 moriio_mem_metadata = shared_mr or (
                     self.moriio_wrapper.register_local_tensor(kv_cache)
@@ -2728,6 +2727,11 @@ class MoRIIOConnectorWorker:
                     )
                     to_remove.append(req_id)
                 elif state is TransferBatchState.FAILED:
+                    if self._has_mamba:
+                        raise TransferError(
+                            f"MoRIIO hybrid READ failed for request {req_id}; "
+                            "refusing to release or reuse in-flight KV blocks"
+                        )
                     failed_status = next(
                         (status for status in statuses if status.Failed()), None
                     )
@@ -2765,6 +2769,11 @@ class MoRIIOConnectorWorker:
                     # indefinitely on this request.
                     _age = time.monotonic() - self._recving_transfers_start[req_id]
                     if _age > _xfer_timeout:
+                        if self._has_mamba:
+                            raise TransferError(
+                                f"MoRIIO hybrid READ timed out for request {req_id}; "
+                                "refusing to release or reuse in-flight KV blocks"
+                            )
                         logger.error(
                             "RDMA read TIMED OUT for req %s after %.1fs "
                             "(kv_connector_extra_config.recv_abort_timeout=%.0f)",
@@ -3445,6 +3454,8 @@ class MoRIIOConnectorWorker:
         local_slots: list[int],
         remote_slots: list[int],
         remote_tp_size: int,
+        remote_moriio_meta: MoRIIOAgentMetadata,
+        remote_engine_id: EngineId,
         request_id: str,
         deadline: float,
     ) -> list:
@@ -3460,10 +3471,22 @@ class MoRIIOConnectorWorker:
             remote_slots,
             remote_tp_size=remote_tp_size,
         )
+        local_region_offsets = self.kv_region_mr_offsets[layer_name]
+        remote_metas = self.layer_name_to_remote_kv_cache_metadata[remote_engine_id][
+            layer_name
+        ]
+        base_idx = self.layer_base_addr_index[layer_name]
+        remote_region_offsets = [
+            remote_moriio_meta.kv_caches_base_addr[base_idx + i]
+            - self.moriio_wrapper.get_unpack_memory_metadata(meta).data
+            for i, meta in enumerate(remote_metas)
+        ]
         statuses: list = []
-        for sess_idx, sl in (
-            (region_sessions[0], slice(0, n_conv)),
-            (region_sessions[1], slice(n_conv, None)),
+        for region_idx, (sess_idx, sl) in enumerate(
+            (
+                (region_sessions[0], slice(0, n_conv)),
+                (region_sessions[1], slice(n_conv, None)),
+            )
         ):
             region_sizes = sizes[sl]
             if not region_sizes:
@@ -3472,8 +3495,11 @@ class MoRIIOConnectorWorker:
                 self._post_read_with_backoff(
                     sessions[sess_idx],
                     region_sizes,
-                    local[sl],
-                    remote[sl],
+                    [offset + local_region_offsets[region_idx] for offset in local[sl]],
+                    [
+                        offset + remote_region_offsets[region_idx]
+                        for offset in remote[sl]
+                    ],
                     request_id,
                     layer_name,
                     deadline,
@@ -3496,8 +3522,8 @@ class MoRIIOConnectorWorker:
         read_remote_data posts synchronously, so a send-queue-full rejection is
         a Failed() status on return; a separate CQ-poll thread drains
         completions and frees SQ depth, so we back off and re-post until
-        transfer_timeout, then store the failed status (get_finished notifies
-        prefill and drops the request non-fatally).
+        transfer_timeout, then store the failed status for completion/error
+        handling. Hybrid failures abort before releasing source KV.
         """
         _backoff = _SQ_FULL_BACKOFF_INITIAL_S
         while True:
@@ -3510,8 +3536,8 @@ class MoRIIOConnectorWorker:
                 logger.warning(
                     "MoRIIO READ send queue stayed full past "
                     "transfer_timeout for req %s layer %s; storing failed "
-                    "status (get_finished notifies prefill and drops the "
-                    "request). Raise qp_per_transfer if frequent.",
+                    "status for completion/error handling. "
+                    "Raise qp_per_transfer if frequent.",
                     request_id,
                     layer_name,
                 )
@@ -3652,6 +3678,8 @@ class MoRIIOConnectorWorker:
                     local_mamba,
                     remote_mamba,
                     remote_tp_size,
+                    remote_moriio_meta,
+                    remote_dp_engine_id,
                     request_id,
                     _sq_deadline,
                 )

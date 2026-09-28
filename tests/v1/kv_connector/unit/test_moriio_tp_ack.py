@@ -5,6 +5,7 @@ import threading
 from types import SimpleNamespace
 
 import pytest
+import torch
 
 from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_common import (
     MoRIIOMode,
@@ -13,6 +14,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_common import (
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_connector import (
     MoRIIOConnector,
+    MoRIIOConnectorScheduler,
     MoRIIOConnectorWorker,
     get_moriio_expected_ack_count,
     get_moriio_remote_tp_rank,
@@ -22,6 +24,173 @@ from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_connector import
 from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_engine import (
     MoRIIOWrapper,
 )
+from vllm.distributed.kv_transfer.kv_connector.v1.ssm_conv_transfer_utils import (
+    MambaConvSplitInfo,
+)
+from vllm.v1.kv_cache_interface import MambaSpec
+
+
+@pytest.mark.parametrize(
+    "params,expected",
+    [
+        (None, (0, False)),
+        ({}, (0, False)),
+        ({"do_remote_prefill": False}, (0, False)),
+        ({"do_remote_prefill": True}, (31, False)),
+    ],
+)
+def test_read_matches_only_requests_with_pending_remote_prefill(params, expected):
+    scheduler = MoRIIOConnectorScheduler.__new__(MoRIIOConnectorScheduler)
+    scheduler.is_producer = False
+    scheduler.mode = MoRIIOMode.READ
+    request = SimpleNamespace(num_prompt_tokens=32, kv_transfer_params=params)
+
+    assert scheduler.get_num_new_matched_tokens(request, 0) == expected
+
+
+@pytest.mark.parametrize(
+    "mode,consumer,has_mamba,layout,pending,expected",
+    [
+        (MoRIIOMode.READ, True, True, "LBNHC", [[7, 8], [90]], [7, 8]),
+        (MoRIIOMode.READ, True, True, "LBNHC", [[], [90]], []),
+        (MoRIIOMode.READ, True, True, "LBNHC", None, []),
+        (MoRIIOMode.READ, False, True, "LBNHC", [[7], [90]], []),
+        (MoRIIOMode.READ, True, False, "LBNHC", [[7]], []),
+        (MoRIIOMode.READ, True, True, "NBLHC", [[7], [90]], []),
+        (MoRIIOMode.WRITE, True, True, "LBNHC", [[7], [90]], []),
+    ],
+)
+def test_sync_read_initializes_only_supported_attention_destinations(
+    mode, consumer, has_mamba, layout, pending, expected
+):
+    connector = MoRIIOConnector.__new__(MoRIIOConnector)
+    connector.mode = mode
+    connector.kv_transfer_config = SimpleNamespace(is_kv_consumer=consumer)
+    connector._vllm_config = SimpleNamespace(
+        cache_config=SimpleNamespace(
+            get_resolved_kv_cache_layout=lambda: SimpleNamespace(name=layout)
+        )
+    )
+    request = SimpleNamespace(request_id="req")
+    connector.connector_scheduler = SimpleNamespace(
+        _has_mamba=has_mamba,
+        _reqs_need_recv={} if pending is None else {"req": (request, pending)},
+    )
+
+    assert connector.get_sync_load_block_ids(request) == expected
+
+
+@pytest.mark.parametrize("mode", [MoRIIOMode.READ, MoRIIOMode.WRITE])
+def test_read_requires_completion_of_draft_kv_writes(mode):
+    connector = MoRIIOConnector.__new__(MoRIIOConnector)
+    connector.mode = mode
+
+    assert connector.requires_full_step_completion is (mode == MoRIIOMode.READ)
+
+
+def _unaligned_cpu_backing():
+    raw = bytearray(12288)
+    original = torch.frombuffer(raw, dtype=torch.uint8)
+    offset = (128 - original.data_ptr()) % 4096
+    return torch.frombuffer(raw, dtype=torch.uint8, offset=offset, count=8192)
+
+
+def _mamba_registration_worker(caches):
+    worker = MoRIIOConnectorWorker.__new__(MoRIIOConnectorWorker)
+    worker.kv_caches = caches
+    spec = MambaSpec(
+        block_size=16,
+        shapes=((4, 1), (2, 2)),
+        dtypes=(torch.float32, torch.float32),
+    )
+    worker.layer_to_spec = dict.fromkeys(caches, spec)
+    return worker
+
+
+def test_shared_registration_covers_final_ssm_with_unaligned_first_enabled_layer():
+    backing = _unaligned_cpu_backing()
+    # Earlier layers can be transfer-disabled. The first enabled layer need
+    # not begin at the aligned start of the common allocation.
+    cache = backing[-64:].view(2, 1, 1, 32)
+    worker = _mamba_registration_worker({"kda": cache})
+
+    registration, offsets = worker._build_shared_kv_mr(worker.kv_caches)
+
+    expected_base = cache.data_ptr() // 4096 * 4096
+    assert registration.data_ptr() == expected_base
+    assert registration.data_ptr() >= backing.data_ptr()
+    assert registration.data_ptr() + registration.numel() == (
+        backing.data_ptr() + backing.numel()
+    )
+    assert registration.untyped_storage().data_ptr() == backing.data_ptr()
+    assert offsets == {"kda": cache.data_ptr() - expected_base}
+
+
+def test_shared_registration_refuses_alignment_before_storage():
+    cache = _unaligned_cpu_backing()[:64].view(2, 1, 1, 32)
+    worker = _mamba_registration_worker({"kda": cache})
+
+    with pytest.raises(ValueError, match="outside.*storage"):
+        worker._build_shared_kv_mr(worker.kv_caches)
+
+
+def test_shared_registration_refuses_regions_from_other_storage():
+    backing = _unaligned_cpu_backing()
+    other = _unaligned_cpu_backing()
+    worker = _mamba_registration_worker(
+        {
+            "first": backing[-64:].view(2, 1, 1, 32),
+            "other": other[-64:].view(2, 1, 1, 32),
+        }
+    )
+
+    with pytest.raises(ValueError, match="same storage"):
+        worker._build_shared_kv_mr(worker.kv_caches)
+
+
+def test_mamba_reads_address_each_region_relative_to_shared_registration(monkeypatch):
+    cache = torch.zeros((2, 1, 1, 32), dtype=torch.uint8)
+    worker = _mamba_registration_worker({"kda": cache})
+    worker.world_size = 1
+    worker._conv_decomp = MambaConvSplitInfo(1, (1, 1, 2), 4, (16, 16))
+    worker._mamba_offset_templates = {}
+    worker.kv_region_mr_offsets = {"kda": [128, 144]}
+    worker.layer_base_addr_index = {"kda": 0}
+    worker.layer_name_to_remote_kv_cache_metadata = {"peer": {"kda": [4096, 4096]}}
+    worker.moriio_wrapper = MoRIIOWrapper(
+        moriio_engine=SimpleNamespace(allocate_transfer_uid=lambda: 1)
+    )
+    worker.moriio_wrapper.local_memory_registered = True
+    monkeypatch.setattr(
+        worker.moriio_wrapper,
+        "get_unpack_memory_metadata",
+        lambda address: SimpleNamespace(data=address),
+    )
+    posted = []
+
+    class Session:
+        def batch_read(self, local, remote, sizes, uid):
+            posted.append((local, remote, sizes))
+            return SimpleNamespace(Failed=lambda: False)
+
+    statuses = worker._post_mamba_reads(
+        "kda",
+        [Session(), Session()],
+        [0, 1],
+        [1],
+        [0],
+        1,
+        SimpleNamespace(kv_caches_base_addr=[4352, 4368]),
+        "peer",
+        "req",
+        float("inf"),
+    )
+
+    assert len(statuses) == 2
+    assert posted == [
+        ([160, 164, 168], [256, 260, 264], [4, 4, 8]),
+        ([176], [272], [16]),
+    ]
 
 
 def test_remote_tp_rank_same_tp_maps_to_self():
@@ -430,6 +599,80 @@ def test_failed_read_reports_blocks_only_without_hma(has_mamba, expected_invalid
     worker._record_failed_recv("req")
 
     assert worker.get_block_ids_with_load_errors() == expected_invalid
+
+
+@pytest.mark.parametrize(
+    "states,elapsed,has_mamba,error",
+    [
+        (["failed", "pending"], 1, True, "failed"),
+        (["pending", "failed"], 1, True, "failed"),
+        (["pending"], 121, True, "timed out"),
+        (["done", "done"], 121, True, None),
+        (["pending"], 120, True, None),
+        (["failed", "pending"], 1, False, None),
+    ],
+)
+def test_read_completion_preserves_hybrid_blocks_on_error(
+    monkeypatch, states, elapsed, has_mamba, error
+):
+    class Status:
+        def __init__(self, state):
+            self.state = state
+
+        def Succeeded(self):
+            return self.state == "done"
+
+        def Failed(self):
+            return self.state == "failed"
+
+        def Message(self):
+            return self.state
+
+        def Code(self):
+            return self.state
+
+    monkeypatch.setattr(
+        "vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_connector.time.monotonic",
+        lambda: 1000.0,
+    )
+    worker = MoRIIOConnectorWorker.__new__(MoRIIOConnectorWorker)
+    worker.is_producer = False
+    worker.mode = MoRIIOMode.READ
+    worker.world_size = 8
+    worker._has_mamba = has_mamba
+    worker.moriio_config = SimpleNamespace(recv_abort_timeout=120.0)
+    worker.moriio_wrapper = MoRIIOWrapper()
+    notifications = []
+    monkeypatch.setattr(
+        worker.moriio_wrapper,
+        "send_notify",
+        lambda *args, **kwargs: notifications.append((args, kwargs)),
+    )
+    worker._recving_transfers = {"req": {"layer": [Status(state) for state in states]}}
+    worker._recving_transfers_callback_addr = {"req": ("host", "7000", "tx")}
+    worker._recving_transfers_start = {"req": 1000.0 - elapsed}
+    worker._recving_local_blocks = {"req": [7, 8]}
+    worker._invalid_block_ids = set()
+
+    if error is not None:
+        with pytest.raises(TransferError, match=error):
+            worker.get_finished()
+        assert notifications == []
+        assert "req" in worker._recving_transfers
+        assert worker._recving_transfers_callback_addr == {
+            "req": ("host", "7000", "tx")
+        }
+        assert worker._recving_transfers_start == {"req": 1000.0 - elapsed}
+        assert worker._recving_local_blocks == {"req": [7, 8]}
+        assert worker.get_block_ids_with_load_errors() == set()
+    else:
+        assert worker.get_finished() == (set(), set())
+        completed = states == ["done", "done"] or not has_mamba
+        assert len(notifications) == int(completed)
+        assert bool(worker._recving_transfers) is not completed
+        assert worker.get_block_ids_with_load_errors() == (
+            set() if has_mamba else {7, 8}
+        )
 
 
 def test_hybrid_step_barrier_fails_closed(monkeypatch):

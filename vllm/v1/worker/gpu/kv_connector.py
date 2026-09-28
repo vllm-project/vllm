@@ -29,6 +29,10 @@ if TYPE_CHECKING:
 class KVConnector:
     """KVConnector interface used by GPUModelRunner."""
 
+    @property
+    def requires_full_step_completion(self) -> bool:
+        return False
+
     def pre_forward(self, scheduler_output: "SchedulerOutput", **kwargs: Any) -> None:
         pass
 
@@ -60,6 +64,10 @@ class ActiveKVConnector(KVConnector):
 
         self._pending_load_kwargs: dict[str, Any] | None = None
         self._disabled = False
+
+    @property
+    def requires_full_step_completion(self) -> bool:
+        return not self._disabled and self.kv_connector.requires_full_step_completion
 
     def pre_forward(self, scheduler_output: "SchedulerOutput", **kwargs: Any) -> None:
         if self._disabled:

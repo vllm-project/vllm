@@ -268,7 +268,9 @@ class KimiK3ToolParser(ToolParser):
             return m["c"] or None
         return self._strip_response_content(before)
 
-    def _extract_response_content(self, current_text: str) -> str | None:
+    def _extract_response_content(
+        self, current_text: str, *, finished: bool = False
+    ) -> str | None:
         # Streaming response text is computed from the accumulated text. This is
         # what keeps split markers from leaking:
         #   <|open|> / response / <|sep|>Hi     -> emit only "Hi" after open closes
@@ -289,6 +291,8 @@ class KimiK3ToolParser(ToolParser):
         candidates = [i for i in (tools_start, response_end) if i != -1]
         if candidates:
             sendable_idx = min(candidates)
+        elif finished:
+            sendable_idx = len(current_text)
         else:
             overlap = max(
                 _partial_tag_overlap(current_text, self.response_open),

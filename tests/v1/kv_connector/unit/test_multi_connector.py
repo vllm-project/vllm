@@ -4,6 +4,7 @@ import filecmp
 import shutil
 import tempfile
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock
 
@@ -14,9 +15,11 @@ from tests.v1.kv_connector.unit.utils import create_vllm_config
 from vllm import LLM, SamplingParams
 from vllm.config import KVTransferConfig
 from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
+from vllm.distributed.kv_transfer.kv_connector.utils import KVOutputAggregator
 from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorRole
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1,
+    KVConnectorTransferResults,
     SupportsHMA,
     supports_hma,
 )
@@ -34,7 +37,11 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl import (
     NixlKVConnectorStats,
 )
 from vllm.v1.kv_cache_interface import KVCacheConfig
-from vllm.v1.outputs import KVConnectorOutput, KVConnectorWorkerMetadata
+from vllm.v1.outputs import (
+    KVConnectorOutput,
+    KVConnectorWorkerMetadata,
+    ModelRunnerOutput,
+)
 
 MODEL_NAME = "meta-llama/Llama-3.2-1B-Instruct"
 
@@ -200,6 +207,200 @@ def mc() -> MultiConnector:
     )
 
     return mc
+
+
+@pytest.fixture
+def async_saves(mc):
+    """Two save owners whose two worker ranks may finish in different steps."""
+    for child in mc.sub_connectors:
+        child.get_finished_count.return_value = None
+        child.request_finished.return_value = True, None
+        child.build_connector_worker_meta.return_value = None
+    mc._world_size = 2
+    return mc
+
+
+def _send_step(connector, notifications=(), *, receiving=None):
+    outputs = []
+    for rank in range(2):
+        metadata = MultiKVConnectorWorkerMetadata(
+            metadata=(None, None),
+            finished_sending=tuple(
+                {"r": {rank}} if (child, rank) in notifications else {}
+                for child in range(2)
+            ),
+        )
+        outputs.append(
+            ModelRunnerOutput.with_kv_conn_output_only(
+                KVConnectorOutput(kv_connector_worker_meta=metadata)
+            )
+        )
+    output = KVOutputAggregator(2).aggregate(outputs).kv_connector_output
+    assert output is not None
+    output.finished_recving = receiving
+    connector.update_connector_output(output)
+    return output
+
+
+def _finish_with_async_saves(connector):
+    request = SimpleNamespace(request_id="r")
+    connector.on_new_request(request)
+    assert connector.request_finished(request, [1])[0]
+
+
+def _assert_save_state_cleared(connector):
+    assert not connector._async_save_owners
+    assert not connector._completed_async_saves
+    assert not any(connector._send_workers)
+
+
+def test_send_completion_requires_each_child_and_distinct_rank(async_saves):
+    """A different child or a duplicate rank cannot satisfy a missing ACK."""
+    _finish_with_async_saves(async_saves)
+    assert _send_step(async_saves, [(0, 0), (1, 1)]).finished_sending is None
+    assert _send_step(async_saves, [(0, 0), (1, 0)]).finished_sending is None
+    assert _send_step(async_saves, [(0, 1)]).finished_sending == {"r"}
+    _assert_save_state_cleared(async_saves)
+    assert (
+        _send_step(async_saves, [(0, 0), (0, 1), (1, 0), (1, 1)]).finished_sending
+        is None
+    )
+    _assert_save_state_cleared(async_saves)
+
+
+def test_non_owner_cannot_filter_other_connector_send_completion(async_saves):
+    first = async_saves.sub_connectors[0]
+    first.request_finished.return_value = False, None
+    seen = []
+
+    def filter_completion(output):
+        seen.append(output.finished_sending)
+        output.finished_sending = None
+
+    first.update_connector_output.side_effect = filter_completion
+    _finish_with_async_saves(async_saves)
+    assert _send_step(async_saves, [(1, 0), (1, 1)]).finished_sending == {"r"}
+    assert seen == [None]
+    _assert_save_state_cleared(async_saves)
+
+
+def test_scheduler_child_completion_waits_for_other_save_owner(async_saves):
+    """A child may finish in update_connector_output, without a worker ACK."""
+    _finish_with_async_saves(async_saves)
+
+    def finish_first(output):
+        output.finished_sending = {"r"}
+
+    async_saves.sub_connectors[0].update_connector_output.side_effect = finish_first
+    assert _send_step(async_saves).finished_sending is None
+    assert _send_step(async_saves, [(1, 0), (1, 1)]).finished_sending == {"r"}
+    _assert_save_state_cleared(async_saves)
+
+
+@pytest.mark.parametrize("early_children", [(0,), (0, 1)])
+def test_send_completion_before_request_finished_is_reconciled(
+    async_saves, early_children
+):
+    request = SimpleNamespace(request_id="r")
+    async_saves.on_new_request(request)
+    early = [(child, rank) for child in early_children for rank in range(2)]
+    assert _send_step(async_saves, early).finished_sending is None
+    pending, _ = async_saves.request_finished(request, [1])
+    assert pending == (early_children == (0,))
+    if pending:
+        assert _send_step(async_saves, [(1, 0), (1, 1)]).finished_sending == {"r"}
+    _assert_save_state_cleared(async_saves)
+
+
+def test_send_completion_uses_child_finished_count(async_saves):
+    async_saves.sub_connectors[0].get_finished_count.return_value = 1
+    _finish_with_async_saves(async_saves)
+    assert _send_step(async_saves, [(0, 0), (1, 0)]).finished_sending is None
+    assert _send_step(async_saves, [(1, 1)]).finished_sending == {"r"}
+
+
+def test_unexpected_send_and_aborted_receive_release_tracking(async_saves):
+    # Unregistered ACKs must not create persistent request state.
+    assert _send_step(async_saves, [(0, 0), (1, 1)]).finished_sending is None
+    _assert_save_state_cleared(async_saves)
+    _finish_with_async_saves(async_saves)
+    assert _send_step(async_saves, [(0, 0)]).finished_sending is None
+    output = _send_step(async_saves, receiving={"r"})
+    assert output.finished_recving == {"r"}
+    assert output.finished_sending is None
+    _assert_save_state_cleared(async_saves)
+    assert _send_step(async_saves, [(0, 1), (1, 0), (1, 1)]).finished_sending is None
+    _assert_save_state_cleared(async_saves)
+
+
+def test_normal_receive_keeps_tracking_for_later_saves(async_saves):
+    request = SimpleNamespace(request_id="r")
+    async_saves.on_new_request(request)
+    assert _send_step(async_saves, receiving={"r"}).finished_recving == {"r"}
+    assert async_saves.request_finished(request, [1])[0]
+    assert _send_step(
+        async_saves, [(0, 0), (0, 1), (1, 0), (1, 1)]
+    ).finished_sending == {"r"}
+    _assert_save_state_cleared(async_saves)
+
+
+def test_no_async_saves_release_tracking(async_saves):
+    request = SimpleNamespace(request_id="r")
+    async_saves.on_new_request(request)
+    for child in async_saves.sub_connectors:
+        child.request_finished.return_value = False, None
+    assert not async_saves.request_finished(request, [1])[0]
+    _assert_save_state_cleared(async_saves)
+
+
+def test_sync_load_zeroing_exclusion_uses_only_selected_connector(mc):
+    """An unselected child cannot suppress initialization of fresh pages."""
+    request = SimpleNamespace(request_id="r")
+    first, second = mc.sub_connectors
+    first.get_sync_load_block_ids.return_value = [1, 2]
+    second.get_sync_load_block_ids.return_value = [3]
+    assert mc.get_sync_load_block_ids(request) == []
+    mc._requests_to_connector["r"] = 1
+    assert mc.get_sync_load_block_ids(request) == [3]
+    first.get_sync_load_block_ids.assert_not_called()
+
+
+def test_worker_preserves_send_identity_and_receive_failures(async_saves, monkeypatch):
+    from vllm.distributed.kv_transfer.kv_connector.v1 import multi_connector
+
+    monkeypatch.setattr(
+        multi_connector, "get_world_group", lambda: SimpleNamespace(rank=1)
+    )
+    async_saves.sub_connectors[
+        0
+    ].get_transfer_results.return_value = KVConnectorTransferResults(
+        finished_sending={"r"}
+    )
+    async_saves.sub_connectors[
+        1
+    ].get_transfer_results.return_value = KVConnectorTransferResults(
+        finished_recving={"recv"}, failed_recving={"recv"}
+    )
+    result = async_saves.get_transfer_results(set())
+    assert not result.finished_sending
+    assert result.finished_recving == result.failed_recving == {"recv"}
+    metadata = async_saves.build_connector_worker_meta()
+    assert isinstance(metadata, MultiKVConnectorWorkerMetadata)
+    assert metadata.finished_sending == ({"r": {1}}, {})
+    assert async_saves.build_connector_worker_meta() is None
+
+
+def test_worker_send_metadata_merge_preserves_inputs_and_deduplicates_ranks():
+    first = MultiKVConnectorWorkerMetadata(
+        metadata=(None, None), finished_sending=({"r": {0}}, {"r": {1}})
+    )
+    second = MultiKVConnectorWorkerMetadata(
+        metadata=(None, None), finished_sending=({"r": {0, 1}}, {})
+    )
+    result = first.aggregate(second)
+    assert result.finished_sending == ({"r": {0, 1}}, {"r": {1}})
+    assert first.finished_sending == ({"r": {0}}, {"r": {1}})
+    assert second.finished_sending == ({"r": {0, 1}}, {})
 
 
 def test_multi_connector_mem_pool_context_none(mc: MultiConnector):

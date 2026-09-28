@@ -2566,6 +2566,44 @@ def test_has_sync_kv_loads(
     assert output.has_sync_kv_loads is expected_has_sync_loads
 
 
+@pytest.mark.parametrize("overwrite_full_blocks", [False, True])
+@pytest.mark.skip_global_cleanup
+def test_sync_kv_load_only_skips_zeroing_overwritten_blocks(
+    overwrite_full_blocks: bool, tmp_path
+):
+    """A synchronous RDMA load must not race zeroing of its destinations."""
+    (tmp_path / "config.json").write_text(
+        '{"architectures": ["OPTForCausalLM"], "model_type": "opt"}'
+    )
+    scheduler = create_scheduler(
+        model=str(tmp_path),
+        skip_tokenizer_init=True,
+        use_kv_connector=mock_kv(matched_tokens=16, is_async=False),
+        block_size=16,
+    )
+    scheduler.needs_kv_cache_zeroing = True
+    # Full-attention pages also require zeroing in a mixed-precision pool.
+    manager = scheduler.kv_cache_manager.coordinator.single_type_managers[0]
+    manager._record_new_block_ids = True
+    request = create_requests(num_requests=1, num_tokens=48, block_size=16)[0]
+    scheduler.add_request(request)
+
+    def loaded_blocks(request):
+        blocks = scheduler.kv_cache_manager.get_blocks(request.request_id)
+        return list(blocks.get_block_ids()[0][:1])
+
+    if overwrite_full_blocks:
+        scheduler.connector.get_sync_load_block_ids = loaded_blocks
+
+    output = scheduler.schedule()
+    blocks = list(
+        scheduler.kv_cache_manager.get_blocks(request.request_id).get_block_ids()[0]
+    )
+    expected = blocks[1:] if overwrite_full_blocks else blocks
+    assert output.new_block_ids_to_zero == expected
+    assert not scheduler._skip_zero_block_ids
+
+
 def test_kv_connector_honors_skip_reading_prefix_cache():
     """A request that must score every prompt row takes no external hit."""
     BLOCK_SIZE = 16

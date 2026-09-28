@@ -416,15 +416,18 @@ def allocate_kv_cache(
     # rounding tail it would pin the whole segment at engine shutdown.
     if current_platform.is_rocm():
         warmup_rocm_skinny_gemm_workspaces(device)
-        # Pad to the page granularity MoRIIO needs to register the shared
-        # backing as a single RDMA memory region. Other platforms keep the
-        # exact-size allocation (see #53974), so anything reading
-        # storage.nbytes() has to tolerate the tail on ROCm alone.
+        # Align the view as well as its length for MoRIIO's shared RDMA region:
+        # the ROCm caching allocator need not return a page-aligned base.
+        # Other platforms keep exact-size storage (see #53974).
         page_size = 4096
         buf_size = ((raw_size + page_size - 1) // page_size) * page_size
+        allocation = torch.zeros(
+            buf_size + page_size - 1, dtype=torch.int8, device=device
+        )
+        alignment_offset = (-allocation.data_ptr()) % page_size
+        buf = allocation.narrow(0, alignment_offset, buf_size)
     else:
-        buf_size = raw_size
-    buf = torch.zeros(buf_size, dtype=torch.int8, device=device)
+        buf = torch.zeros(raw_size, dtype=torch.int8, device=device)
 
     kv_caches: dict[str, torch.Tensor] = {}
     for tensor in kv_cache_config.kv_cache_tensors:

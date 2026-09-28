@@ -369,7 +369,9 @@ class MoRIIOConfig:
 
         return cls(
             local_ip=resolve_host_ip(extra_config),
-            local_kv_port=get_open_port(),
+            # MoRI publishes the bound port after RDMA backend initialization.
+            # Let bind(0) reserve it atomically across concurrent TP workers.
+            local_kv_port=0 if backend == "rdma" else get_open_port(),
             proxy_ip=extra_config.get("proxy_ip", ""),
             local_ping_port=get_open_port(),
             proxy_ping_port=int(extra_config.get("proxy_ping_port", 0)),
