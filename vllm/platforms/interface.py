@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import contextlib
+import copy
 import enum
 import functools
 import itertools
@@ -865,11 +866,18 @@ class Platform:
 
         kv_quant_mode = get_kv_quant_mode(cache_config.cache_dtype)
 
+        local_num_kv_heads = model_config.get_num_kv_heads(parallel_config)
+        alignment_num_kv_heads = (
+            local_num_kv_heads
+            if model_config.use_mla
+            else max(1, model_config.get_total_num_kv_heads())
+        )
+
         # Compute attention page size for 1 token
         if model_config.use_mla:
             attn_page_size_1_token = MLAAttentionSpec(
                 block_size=1,
-                num_kv_heads=model_config.get_num_kv_heads(parallel_config),
+                num_kv_heads=local_num_kv_heads,
                 head_size=model_config.get_head_size(),
                 dtype=kv_cache_dtype,
                 cache_dtype_str=cache_config.cache_dtype,
@@ -887,7 +895,7 @@ class Platform:
 
             tq_spec = FullAttentionSpec(
                 block_size=1,
-                num_kv_heads=model_config.get_num_kv_heads(parallel_config),
+                num_kv_heads=local_num_kv_heads,
                 head_size=model_config.get_head_size(),
                 dtype=kv_cache_dtype,
                 kv_quant_mode=kv_quant_mode,
@@ -896,7 +904,7 @@ class Platform:
             if cache_config.kv_cache_dtype_skip_layers:
                 skip_page = FullAttentionSpec(
                     block_size=1,
-                    num_kv_heads=model_config.get_num_kv_heads(parallel_config),
+                    num_kv_heads=local_num_kv_heads,
                     head_size=model_config.get_head_size(),
                     dtype=model_config.dtype,
                 ).page_size_bytes
@@ -909,7 +917,7 @@ class Platform:
         else:
             attn_spec = FullAttentionSpec(
                 block_size=1,
-                num_kv_heads=model_config.get_num_kv_heads(parallel_config),
+                num_kv_heads=local_num_kv_heads,
                 head_size=model_config.get_head_size(),
                 dtype=kv_cache_dtype,
                 kv_quant_mode=kv_quant_mode,
@@ -917,6 +925,13 @@ class Platform:
             attn_page_size_1_token = backend_cls.customize_spec(
                 attn_spec
             ).page_size_bytes
+
+        if model_config.use_mla:
+            alignment_attn_page_size_1_token = attn_page_size_1_token
+        else:
+            alignment_attn_page_size_1_token = (
+                attn_page_size_1_token * alignment_num_kv_heads // local_num_kv_heads
+            )
 
         # Compute mamba page size
         model_cls, _ = ModelRegistry.resolve_model_cls(
@@ -938,6 +953,33 @@ class Platform:
 
         if mamba_page_size == 0:
             return
+
+        # Use the global Mamba/attention ratio so heterogeneous TP P/D
+        # deployments choose the same logical token block size. The local page
+        # size check below still enforces the per-rank memory invariant.
+        #
+        # Ask the model for its unsharded state instead of scaling the local
+        # page size by the TP size: shard padding means the total state is not
+        # simply `local * tp`. Mamba2 extends `n_groups` to keep each head's
+        # groups on one shard, so the summed state grows with the TP size.
+        alignment_vllm_config = copy.copy(vllm_config)
+        alignment_vllm_config.parallel_config = copy.copy(parallel_config)
+        alignment_vllm_config.parallel_config.tensor_parallel_size = 1
+        if hasattr(model_cls, "get_mamba_specs_from_config"):
+            alignment_mamba_page_size = max(
+                spec.page_size_bytes
+                for spec in model_cls.get_mamba_specs_from_config(alignment_vllm_config)
+            )
+        else:
+            alignment_mamba_page_size = MambaSpec(
+                shapes=model_cls.get_mamba_state_shape_from_config(
+                    alignment_vllm_config
+                ),
+                dtypes=model_cls.get_mamba_state_dtype_from_config(
+                    alignment_vllm_config
+                ),
+                block_size=-1,
+            ).page_size_bytes
 
         # mamba_block_size here should either be user specified value or None
         mamba_block_size = (
@@ -969,16 +1011,18 @@ class Platform:
             # mamba2 kernels.
             base_chunk_size = mamba_block_size or model_config.get_mamba_chunk_size()
             assert base_chunk_size is not None
-            attn_tokens_per_mamba_state = cdiv(mamba_page_size, attn_page_size_1_token)
+            attn_tokens_per_mamba_state = cdiv(
+                alignment_mamba_page_size, alignment_attn_page_size_1_token
+            )
             chunk_size = lcm(base_chunk_size, kernel_block_alignment_size)
             attn_block_size = chunk_size * cdiv(attn_tokens_per_mamba_state, chunk_size)
             cache_config.mamba_block_size = attn_block_size
         else:
             # Without prefix caching, use minimum block size that satisfies
-            # both backend alignment and mamba page size compatibility
+            # both backend alignment and TP-stable mamba page size compatibility.
             attn_block_size = kernel_block_alignment_size * cdiv(
-                mamba_page_size,
-                kernel_block_alignment_size * attn_page_size_1_token,
+                alignment_mamba_page_size,
+                kernel_block_alignment_size * alignment_attn_page_size_1_token,
             )
             indexer_align = cls._get_indexer_block_alignment(vllm_config)
             if indexer_align:
