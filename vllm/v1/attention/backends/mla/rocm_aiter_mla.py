@@ -823,7 +823,9 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
             )
             for _ in range(2)
         ]
-        self._fp8_ps_staging_free: list[torch.cuda.Event | None] = [None, None]
+        # One event per slot, recorded after that slot's H2D copy. synchronize()
+        # on an event that has not been recorded yet returns immediately.
+        self._fp8_ps_staging_free = [torch.cuda.Event(), torch.cuda.Event()]
         self._fp8_ps_slot = 0
 
         from vllm.platforms import current_platform
@@ -924,9 +926,8 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
         slot = self._fp8_ps_slot
         self._fp8_ps_slot ^= 1
         staging_free = self._fp8_ps_staging_free[slot]
-        if staging_free is not None:
-            with gpu_sync_allowed():
-                staging_free.synchronize()
+        with gpu_sync_allowed():
+            staging_free.synchronize()
         (
             work_indptr_host,
             work_info_host,
@@ -956,9 +957,7 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
         )
         for dst, src in zip(self._fp8_ps_device_outputs, self._fp8_ps_staging[slot]):
             dst.copy_(src, non_blocking=True)
-        staging_free = torch.cuda.Event()
         staging_free.record()
-        self._fp8_ps_staging_free[slot] = staging_free
 
         total_prefill_tokens = int(qo_indptr_cpu[-1].item())
         kv_indices = torch.arange(
