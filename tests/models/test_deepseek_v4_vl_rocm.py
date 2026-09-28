@@ -463,6 +463,20 @@ def test_vl_wrapper_groups_child_that_finalizes_during_load() -> None:
     assert model.language_model.finalized_values == [(1.0, 3.0)]
 
 
+def test_rocm_entry_exposes_decoder_replay_layers() -> None:
+    from vllm.models.deepseek_v41.amd.model import DeepseekV41LLMForCausalLM
+    from vllm.models.deepseek_v41.amd.vl_model import DeepseekV41ForCausalLM
+
+    language_model = object.__new__(DeepseekV41LLMForCausalLM)
+    sentinel = object()
+    language_model.model = SimpleNamespace(decoder_replay_layers=sentinel)
+    assert language_model.decoder_replay_layers is sentinel
+
+    wrapper = object.__new__(DeepseekV41ForCausalLM)
+    wrapper.language_model = language_model
+    assert wrapper.decoder_replay_layers is sentinel
+
+
 def test_vl_wrapper_dummy_load_delegates_finalization() -> None:
     from vllm.models.deepseek_v4.common.vl_model import (
         DeepseekV4ForConditionalGeneration,
