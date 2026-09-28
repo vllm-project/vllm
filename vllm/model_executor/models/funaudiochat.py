@@ -26,7 +26,7 @@ from transformers.feature_extraction_utils import BatchFeature
 from transformers.modeling_outputs import BaseModelOutput
 
 from vllm.config import VllmConfig
-from vllm.config.multimodal import BaseDummyOptions
+from vllm.config.multimodal import MultiModalDummyOptions
 from vllm.inputs import MultiModalDataDict
 from vllm.model_executor.layers.attention.mm_encoder_attention import MMEncoderAttention
 from vllm.model_executor.layers.linear import QKVParallelLinear, RowParallelLinear
@@ -519,12 +519,17 @@ class FunAudioChatProcessingInfo(BaseProcessingInfo):
 
     @cached_property
     def feature_extractor(self) -> WhisperFeatureExtractor:
-        return WhisperFeatureExtractor.from_pretrained(self.model_id)
+        return WhisperFeatureExtractor.from_pretrained(
+            self.model_id,
+            revision=self.ctx.model_config.revision,
+        )
 
     @cached_property
     def speech_tokenizer(self) -> TokenizersBackend:
         return TokenizersBackend.from_pretrained(
-            self.model_id, subfolder="speech_tokenizer"
+            self.model_id,
+            subfolder="speech_tokenizer",
+            revision=self.ctx.model_config.tokenizer_revision,
         )
 
     def get_feature_extractor(self) -> WhisperFeatureExtractor:
@@ -575,7 +580,7 @@ class FunAudioChatDummyInputsBuilder(
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions],
+        mm_options: MultiModalDummyOptions,
     ) -> MultiModalDataDict:
         feature_extractor = self.info.get_feature_extractor()
         sampling_rate = int(feature_extractor.sampling_rate)
@@ -592,14 +597,12 @@ class FunAudioChatDummyInputsBuilder(
             1,
             (target_num_frames * sampling_rate + token_fps - 1) // token_fps,
         )
-        num_audios = int(mm_counts.get("audio", 0))
 
-        audio_overrides = mm_options.get("audio")
         return {
             "audio": self._get_dummy_audios(
                 length=audio_len,
-                num_audios=num_audios,
-                overrides=audio_overrides,
+                num_audios=int(mm_counts.get("audio", 0)),
+                overrides=mm_options.get("audio"),
             )
         }
 
@@ -607,21 +610,32 @@ class FunAudioChatDummyInputsBuilder(
 class FunAudioChatMultiModalProcessor(
     BaseMultiModalProcessor[FunAudioChatProcessingInfo]
 ):
-    def _call_hf_processor(
+    def _apply_hf_processor_main(
         self,
-        prompt: str,
-        mm_data: Mapping[str, object],
-        mm_kwargs: Mapping[str, object],
-        tok_kwargs: Mapping[str, object],
+        mm_items: MultiModalDataItems,
+        hf_kwargs: Mapping[str, object],
     ) -> BatchFeature:
+        mm_data, hf_kwargs, passthrough_data = self._get_hf_mm_inputs(
+            mm_items, hf_kwargs
+        )
+
+        if not mm_data:
+            return self._finalize_hf_mm_data(mm_data, hf_kwargs, passthrough_data)
+
+        prompt_text = self.dummy_inputs.get_dummy_text(mm_items.get_all_counts())
+
         tokenizer = self.info.get_tokenizer()
-        input_ids = torch.tensor([tokenizer.encode(prompt, **tok_kwargs)])
+        input_ids = torch.tensor([tokenizer.encode(prompt_text)])
 
-        audios = mm_data.get("audios", [])
+        audios = mm_data.get("audio", [])
         if not audios:
-            return BatchFeature({"input_ids": input_ids})
+            processed_data = BatchFeature({"input_ids": input_ids})
+            return self._finalize_hf_mm_data(
+                mm_data, hf_kwargs, passthrough_data, processed_data
+            )
+        assert isinstance(audios, Sequence)
 
-        feature_extractor = self.info.get_feature_extractor(**mm_kwargs)
+        feature_extractor = self.info.get_feature_extractor(**hf_kwargs)
         sr = int(feature_extractor.sampling_rate)
         min_samples = int(getattr(feature_extractor, "n_fft", 400) or 400)
 
@@ -672,16 +686,10 @@ class FunAudioChatMultiModalProcessor(
             "feature_exist_mask": torch.ones((len(wavs),), dtype=torch.bool),
         }
 
-        return BatchFeature({"input_ids": input_ids, **mm_inputs})
-
-    def _hf_processor_applies_updates(
-        self,
-        prompt_text: str,
-        mm_items: MultiModalDataItems,
-        hf_processor_mm_kwargs: Mapping[str, object],
-        tokenization_kwargs: Mapping[str, object],
-    ) -> bool:
-        return False
+        processed_data = BatchFeature({"input_ids": input_ids, **mm_inputs})
+        return self._finalize_hf_mm_data(
+            mm_data, hf_kwargs, passthrough_data, processed_data
+        )
 
     def _get_mm_fields_config(
         self,
@@ -690,7 +698,9 @@ class FunAudioChatMultiModalProcessor(
     ) -> Mapping[str, MultiModalFieldConfig]:
         return {
             "speech_ids": MultiModalFieldConfig.batched("audio"),
-            "speech_attention_mask": MultiModalFieldConfig.batched("audio"),
+            "speech_attention_mask": MultiModalFieldConfig.batched(
+                "audio", keep_on_cpu=True
+            ),
             "input_features": MultiModalFieldConfig.batched("audio"),
             "feature_attention_mask": MultiModalFieldConfig.batched("audio"),
             "feature_exist_mask": MultiModalFieldConfig.batched("audio"),
@@ -741,7 +751,7 @@ class FunAudioChatMultiModalProcessor(
         return [
             PromptReplacement(
                 modality="audio",
-                target=audio_token,
+                target=[audio_token_id],
                 replacement=get_replacement_funaudiochat,
             )
         ]
@@ -753,6 +763,8 @@ class FunAudioChatMultiModalProcessor(
     dummy_inputs=FunAudioChatDummyInputsBuilder,
 )
 class FunAudioChatForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
+    hf_to_vllm_mapper = WeightsMapper(orig_to_new_prefix={"audio_invert_tower.": None})
+
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> str | None:
         if modality.startswith("audio"):
@@ -962,5 +974,5 @@ class FunAudioChatForConditionalGeneration(nn.Module, SupportsMultiModal, Suppor
         return self.language_model.compute_logits(hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(self, skip_prefixes=["audio_invert_tower."])
-        return loader.load_weights(weights)
+        loader = AutoWeightsLoader(self)
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)

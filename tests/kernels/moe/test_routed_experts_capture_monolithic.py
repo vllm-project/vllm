@@ -51,7 +51,7 @@ if not has_flashinfer_trtllm_fused_moe() or not current_platform.is_cuda():
         allow_module_level=True,
     )
 
-if not current_platform.has_device_capability(100):
+if not current_platform.is_device_capability_family(100):
     pytest.skip(
         "TRT-LLM fused MoE kernels require SM100+",
         allow_module_level=True,

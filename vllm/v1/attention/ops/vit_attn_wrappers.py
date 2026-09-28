@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-This file contains ops for ViT attention to be compatible with torch.compile
+"""This file contains ops for ViT attention to be compatible with torch.compile
 as there are operations here not supported by torch.compile (for instance,
 `.item()` in flash attention)
 
@@ -20,6 +19,7 @@ import torch.nn.functional as F
 
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.platforms import current_platform
+from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.torch_utils import direct_register_custom_op
 
 
@@ -50,9 +50,21 @@ def flash_attn_maxseqlen_wrapper(
         cu_seqlens = torch.arange(
             0, (batch_size + 1) * q_len, step=q_len, dtype=torch.int32, device=q.device
         )
-    max_seqlen = q_len if max_seqlen is None else max_seqlen.item()
+    if max_seqlen is None:
+        max_seqlen = q_len
+    else:
+        # `flash_attn_varlen_func` needs a Python int for kernel launch bounds.
+        with gpu_sync_allowed():
+            max_seqlen = max_seqlen.item()
 
     q, k, v = (einops.rearrange(x, "b s ... -> (b s) ...") for x in [q, k, v])
+
+    if current_platform.is_cuda() and torch.cuda.is_current_stream_capturing():
+        # workaround for encoder CUDA-graph replay paddings with NaNs edge case
+        kwargs["out"] = torch.zeros(
+            q.shape[0], q.shape[1], v.shape[-1], dtype=q.dtype, device=q.device
+        )
+
     output = flash_attn_varlen_func(
         q,
         k,
@@ -159,7 +171,12 @@ def triton_attn_wrapper(
         cu_seqlens = torch.arange(
             0, (batch_size + 1) * q_len, step=q_len, dtype=torch.int32, device=q.device
         )
-    max_seqlen = q_len if max_seqlen is None else max_seqlen.item()
+    if max_seqlen is None:
+        max_seqlen = q_len
+    else:
+        # `context_attention_fwd` needs a Python int.
+        with gpu_sync_allowed():
+            max_seqlen = max_seqlen.item()
 
     q, k, v = (einops.rearrange(x, "b s ... -> (b s) ...") for x in [q, k, v])
     output = torch.empty_like(q)
@@ -227,14 +244,21 @@ def apply_sdpa(
     scale: float | None = None,
     enable_gqa: bool = False,
 ) -> torch.Tensor:
-    """
-    Input shape:
+    """Input shape:
     (batch_size x seq_len x num_heads x head_size)
     """
     q, k, v = (einops.rearrange(x, "b s h d -> b h s d") for x in [q, k, v])
-    output = F.scaled_dot_product_attention(
-        q, k, v, dropout_p=0.0, scale=scale, enable_gqa=enable_gqa
-    )
+    if current_platform.is_zen_cpu() and hasattr(torch.ops.zentorch, "zentorch_sdpa"):
+        # Schema: (query, key, value, dropout_p=0., is_causal=False, *,
+        # attn_mask=None, scale=None) -> (attention, logsumexp).
+        # No enable_gqa: GQA is inferred from key.size(1) vs query.size(1).
+        output, _ = torch.ops.zentorch.zentorch_sdpa(
+            q, k, v, dropout_p=0.0, is_causal=False, scale=scale
+        )
+    else:
+        output = F.scaled_dot_product_attention(
+            q, k, v, dropout_p=0.0, scale=scale, enable_gqa=enable_gqa
+        )
     output = einops.rearrange(output, "b h s d -> b s h d ")
     return output
 
@@ -261,7 +285,9 @@ def torch_sdpa_wrapper(
 
     outputs = []
 
-    lens = (cu_seqlens[1:] - cu_seqlens[:-1]).tolist()
+    # `torch.split` needs Python int sizes.
+    with gpu_sync_allowed():
+        lens = (cu_seqlens[1:] - cu_seqlens[:-1]).tolist()
     q_chunks = torch.split(q, lens, dim=1)
     k_chunks = torch.split(k, lens, dim=1)
     v_chunks = torch.split(v, lens, dim=1)
@@ -337,7 +363,10 @@ def flashinfer_wrapper(
     batch_offsets_qko = cu_seqlens[:cu_seqlength].view(-1, 1, 1, 1)
     batch_offsets_v = cu_seqlens[cu_seqlength:].view(-1, 1, 1, 1)
     sequence_lengths = sequence_lengths.view(-1, 1, 1, 1)
-    max_seqlen = max_seqlen.item()
+    # `cudnn_batch_prefill_with_kv_cache` needs Python ints for the
+    # max-token-per-seq bounds.
+    with gpu_sync_allowed():
+        max_seqlen = max_seqlen.item()
 
     output, _ = cudnn_batch_prefill_with_kv_cache(
         q,

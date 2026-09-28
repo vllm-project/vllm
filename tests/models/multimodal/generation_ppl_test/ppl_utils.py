@@ -72,6 +72,7 @@ def vqa_ppl_test(
         # and avoid batch different requests together.
 
         model_config = vllm_model.llm.llm_engine.model_config
+        mm_device_do_normalize = model_config.multimodal_config.mm_device_do_normalize
 
         # Confirm whether vllm is using the correct architecture
         if model_info.architecture:
@@ -147,6 +148,7 @@ def vqa_ppl_test(
 
     differ = (vllm_ppl - hf_ppl) / hf_ppl
     print("Model:", model_info.name)
+    print("mm_device_do_normalize:", mm_device_do_normalize)
     print("VLLM:", f"dtype:{vllm_dtype}", f"head_dtype:{head_dtype}", vllm_ppl)
     print("Transformers:", hf_dtype, hf_ppl)
     print("Difference (%):", differ * 100)

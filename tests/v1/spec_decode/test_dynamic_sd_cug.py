@@ -16,6 +16,7 @@ from vllm.config import (
     VllmConfig,
 )
 from vllm.v1.worker.gpu import cudagraph_utils as gpu_cudagraph_utils
+from vllm.v1.worker.utils import get_uniform_decode_token_count
 
 pytestmark = pytest.mark.cpu_test
 
@@ -38,7 +39,6 @@ def _create_vllm_config_for_dsd(
     a schedule covering every query length in ``[1, max_decode_query_len]`` is
     generated.
     """
-
     max_decode_query_len = max_spec_tokens + 1
     max_capture_tokens = max_num_seqs * max_decode_query_len
 
@@ -90,7 +90,6 @@ def test_dynamic_sd_full_cudagraph_covers_all_uniform_decode_shapes(monkeypatch)
     shapes have been built, dispatch() should pick a FULL graph for every
     uniform decode batch shape produced by DSD up to max_num_seqs.
     """
-
     max_num_seqs = 512
     max_spec_tokens = 7
     max_decode_query_len = max_spec_tokens + 1
@@ -123,10 +122,11 @@ def test_dynamic_sd_full_cudagraph_covers_all_uniform_decode_shapes(monkeypatch)
             # Uniform decode means every request contributes the same number of
             # tokens, so the total token count is exactly num_reqs * query_len.
             num_tokens = num_reqs * max_query_len
-            uniform_tok_count = gpu_cudagraph_utils.get_uniform_token_count(
+            uniform_tok_count = get_uniform_decode_token_count(
                 num_reqs,
                 num_tokens,
                 max_query_len,
+                has_prefill=False,
             )
 
             # The scheduler should mark every one of these shapes as a uniform
@@ -149,6 +149,37 @@ def test_dynamic_sd_full_cudagraph_covers_all_uniform_decode_shapes(monkeypatch)
             assert desc.num_active_loras == 0
 
 
+def test_dynamic_sd_cudagraphs_use_clamped_query_length(monkeypatch):
+    """Clamp configured K=5 to K=3, yielding query length 4 rather than 6."""
+    monkeypatch.setattr(
+        gpu_cudagraph_utils,
+        "get_pp_group",
+        lambda: SimpleNamespace(is_first_rank=True, is_last_rank=True),
+    )
+    monkeypatch.setattr(
+        gpu_cudagraph_utils.current_platform,
+        "get_global_graph_pool",
+        lambda: None,
+    )
+
+    vllm_config = _create_vllm_config_for_dsd(
+        max_num_seqs=16,
+        max_spec_tokens=3,
+        num_spec_per_batch_size=[(1, 16, 5)],
+    )
+    manager = gpu_cudagraph_utils.CudaGraphManager(
+        vllm_config=vllm_config,
+        device=torch.device("cpu"),
+        cudagraph_mode=CUDAGraphMode.FULL_AND_PIECEWISE,
+        decode_query_len=4,
+    )
+
+    full_query_lens = {
+        desc.uniform_token_count for desc in manager._capture_descs[CUDAGraphMode.FULL]
+    }
+    assert full_query_lens == {4}
+
+
 def test_dynamic_sd_non_uniform_batch_falls_back_to_piecewise(monkeypatch):
     """DSD should use PIECEWISE when the batch is not a uniform decode batch.
 
@@ -157,7 +188,6 @@ def test_dynamic_sd_non_uniform_batch_falls_back_to_piecewise(monkeypatch):
     FULL candidates should be skipped in favor of the mixed-batch PIECEWISE
     graph under FULL_AND_PIECEWISE mode.
     """
-
     max_spec_tokens = 4
 
     monkeypatch.setattr(
@@ -196,6 +226,76 @@ def test_dynamic_sd_non_uniform_batch_falls_back_to_piecewise(monkeypatch):
     assert desc.num_active_loras == 0
 
 
+def test_prompt_chunks_shaped_like_spec_decode_miss_the_full_graph(monkeypatch):
+    """A batch holding K+1-token prompt chunks must not replay a decode graph.
+
+    Prompt chunks of exactly K + 1 tokens give the batch a spec-decode shape
+    by coincidence; replaying the FULL graph over them corrupts every request
+    in the batch. See https://github.com/vllm-project/vllm/issues/49918.
+    """
+    max_spec_tokens = 7
+    decode_query_len = max_spec_tokens + 1
+
+    monkeypatch.setattr(
+        gpu_cudagraph_utils,
+        "get_pp_group",
+        lambda: SimpleNamespace(is_first_rank=True, is_last_rank=True),
+    )
+
+    vllm_config = _create_vllm_config_for_dsd(
+        max_num_seqs=64,
+        max_spec_tokens=max_spec_tokens,
+        use_dynamic_sd=False,
+    )
+    manager = gpu_cudagraph_utils.CudaGraphManager(
+        vllm_config=vllm_config,
+        device=torch.device("cpu"),
+        cudagraph_mode=CUDAGraphMode.FULL_AND_PIECEWISE,
+        decode_query_len=decode_query_len,
+    )
+    manager._graphs_captured = True
+
+    num_decodes, num_chunks = 6, 2
+    num_reqs = num_decodes + num_chunks
+    num_tokens = num_reqs * decode_query_len
+
+    # The batch shape is indistinguishable from a full batch of spec decodes.
+    assert (
+        get_uniform_decode_token_count(
+            num_reqs, num_tokens, decode_query_len, has_prefill=False
+        )
+        == decode_query_len
+    )
+
+    # Two of the requests are decode_query_len tokens into a longer prompt.
+    uniform_tok_count = get_uniform_decode_token_count(
+        num_reqs, num_tokens, decode_query_len, has_prefill=True
+    )
+    assert uniform_tok_count is None
+    desc = manager.dispatch(
+        num_reqs=num_reqs,
+        num_tokens=num_tokens,
+        uniform_token_count=uniform_tok_count,
+        num_active_loras=0,
+    )
+    assert desc.cg_mode == CUDAGraphMode.PIECEWISE
+    assert desc.uniform_token_count is None
+
+    # The same shape with every request decoding still gets its FULL graph.
+    uniform_tok_count = get_uniform_decode_token_count(
+        num_reqs, num_tokens, decode_query_len, has_prefill=False
+    )
+    assert uniform_tok_count == decode_query_len
+    desc = manager.dispatch(
+        num_reqs=num_reqs,
+        num_tokens=num_tokens,
+        uniform_token_count=uniform_tok_count,
+        num_active_loras=0,
+    )
+    assert desc.cg_mode == CUDAGraphMode.FULL
+    assert desc.uniform_token_count == decode_query_len
+
+
 def test_basic_sd_does_not_capture_shorter_full_decode_shapes(monkeypatch):
     """Without DSD, only the max decode query length should get FULL graphs.
 
@@ -203,7 +303,6 @@ def test_basic_sd_does_not_capture_shorter_full_decode_shapes(monkeypatch):
     Uniform batches with smaller query lengths should therefore miss the FULL
     path entirely when using FULL_AND_PIECEWISE.
     """
-
     max_num_seqs = 512
     max_spec_tokens = 7
     max_decode_query_len = max_spec_tokens + 1
@@ -233,10 +332,11 @@ def test_basic_sd_does_not_capture_shorter_full_decode_shapes(monkeypatch):
             # These are still uniform decode batches, but basic SD should only
             # have FULL graphs for query_len == max_decode_query_len.
             num_tokens = num_reqs * max_query_len
-            uniform_tok_count = gpu_cudagraph_utils.get_uniform_token_count(
+            uniform_tok_count = get_uniform_decode_token_count(
                 num_reqs,
                 num_tokens,
                 max_query_len,
+                has_prefill=False,
             )
             assert uniform_tok_count == max_query_len
 
@@ -257,21 +357,20 @@ def test_basic_sd_does_not_capture_shorter_full_decode_shapes(monkeypatch):
 def test_dynamic_sd_only_captures_scheduled_query_lengths(monkeypatch):
     """DSD should only capture FULL graphs for query lengths in the schedule.
 
-    With a partial schedule of ``(1, 32, 4)`` and ``(32, 128, 3)``, only the
+    With a partial schedule of ``(1, 31, 4)`` and ``(32, 128, 3)``, only the
     scheduled speculative-token counts (K = 4 and K = 3) become decode query
     lengths (K + 1 = 5 and 4). Uniform batches at those query lengths should get
     FULL graphs, while every other query length (e.g. the lower values 1, 2, 3)
     must fall back to the mixed-batch PIECEWISE graph.
     """
-
     max_num_seqs = 128
     max_spec_tokens = 7
     max_decode_query_len = max_spec_tokens + 1
 
     # (range_start, range_end, num_speculative_tokens): K = 4 and K = 3 are
-    # scheduled, so FULL decode graphs should exist for query lengths K + 1,
-    # i.e. exactly {5, 4}.
-    num_spec_per_batch_size = [(1, 32, 4), (32, 128, 3)]
+    # scheduled in non-overlapping tiers, so FULL decode graphs should exist
+    # for query lengths K + 1, i.e. exactly {5, 4}.
+    num_spec_per_batch_size = [(1, 31, 4), (32, 128, 3)]
     scheduled_query_lens = {entry[2] + 1 for entry in num_spec_per_batch_size}
 
     monkeypatch.setattr(
@@ -298,10 +397,11 @@ def test_dynamic_sd_only_captures_scheduled_query_lengths(monkeypatch):
     for num_reqs in range(1, max_num_seqs + 1):
         for max_query_len in range(1, max_decode_query_len + 1):
             num_tokens = num_reqs * max_query_len
-            uniform_tok_count = gpu_cudagraph_utils.get_uniform_token_count(
+            uniform_tok_count = get_uniform_decode_token_count(
                 num_reqs,
                 num_tokens,
                 max_query_len,
+                has_prefill=False,
             )
             assert uniform_tok_count == max_query_len
 

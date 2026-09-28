@@ -127,6 +127,7 @@ def _repeat_logprob_config(
       `logprob_prompt_logprob_list` enough times to match the
       number of `test_prompts`, or else is truncated to match
       the number of `test_prompts`
+
     """
     num_test_prompts = len(test_prompts)
     # Make sure there is a logprobs configuration for each test prompt
@@ -312,7 +313,7 @@ def test_get_logprobs_and_prompt_logprobs(
     temperature: float,
     example_prompts: list[str],
 ) -> None:
-    """Test V1 Engine logprobs & prompt logprobs
+    """Test V1 Engine logprobs & prompt logprobs.
 
     Exercise a variety of combinations of `logprobs` and `prompt_logprobs`
     settings and validate that
@@ -337,6 +338,7 @@ def test_get_logprobs_and_prompt_logprobs(
       batch_logprobs_composition: logprobs configuration for test batch
       temperature: "temperature" sampling parameter
       example_prompts: example prompt fixture
+
     """
     vllm_config = vllm_model.llm.llm_engine.vllm_config
     do_apc = vllm_config.cache_config.enable_prefix_caching
@@ -389,7 +391,7 @@ def test_get_logprobs_and_prompt_logprobs(
 
 
 def test_max_logprobs():
-    """vLLM v1 engine should fail a request with `logprobs > max_logprobs`
+    """VLLM v1 engine should fail a request with `logprobs > max_logprobs`
     Should also fail for `prompt_logprobs > max_logprobs`
     APC should not matter as this test checks basic request validation.
     """
@@ -431,11 +433,12 @@ def test_logprob_token_ids_validate_vocab_bounds_invalid(token_ids: list[int]):
 
 
 def test_none_logprobs(vllm_model, example_prompts):
-    """Engine should return `logprobs` and `prompt_logprobs` as `None`
+    """Engine should return `logprobs` and `prompt_logprobs` as `None`.
 
     Args:
       vllm_model: vLLM model fixture
       example_prompts: list of example prompts (test fixture)
+
     """
     max_tokens = 5
 
@@ -459,11 +462,12 @@ def test_none_logprobs(vllm_model, example_prompts):
 
 
 def test_zero_logprobs(vllm_model, example_prompts):
-    """Engine should return sampled token and prompt token logprobs
+    """Engine should return sampled token and prompt token logprobs.
 
     Args:
       vllm_model: vLLM model fixture
       example_prompts: list of example prompts (test fixture)
+
     """
     max_tokens = 5
 
@@ -491,10 +495,11 @@ def test_zero_logprobs(vllm_model, example_prompts):
 
 
 def test_all_logprobs(example_prompts):
-    """Engine should return all vocabulary logprobs and prompt logprobs
+    """Engine should return all vocabulary logprobs and prompt logprobs.
 
     Args:
       example_prompts: list of example prompts (test fixture)
+
     """
     with VllmRunner(
         "facebook/opt-125m",
@@ -535,8 +540,9 @@ def test_logprobs_mode(logprobs_mode: LogprobsMode):
         "facebook/opt-125m",
         max_logprobs=5,
         enable_prefix_caching=False,
-        # 2 other llms alive during whole session
-        gpu_memory_utilization=0.05,
+        # 2 other llms alive during whole session; must also cover the
+        # cudagraph memory reservation from startup profiling.
+        gpu_memory_utilization=0.1,
         max_model_len=16,
         logprobs_mode=logprobs_mode,
     )
@@ -575,7 +581,7 @@ def test_prompt_logprobs_mode():
         llm = LLM(
             "facebook/opt-125m",
             enable_prefix_caching=False,
-            gpu_memory_utilization=0.05,
+            gpu_memory_utilization=0.1,
             max_model_len=16,
             logprobs_mode=mode,
         )
@@ -1114,7 +1120,6 @@ def test_correct_decoded_token_preserves_valid_tokens():
 def test_spec_decode_logprobs(
     logprobs_mode: LogprobsMode,
     model_setup: tuple[str, str, dict, int],
-    monkeypatch,
 ):
     """Spec decode logprobs should match those of the base model.
 
@@ -1127,19 +1132,9 @@ def test_spec_decode_logprobs(
         logprobs_mode: logprobs mode.
         model_setup: Tuple of (method, base model name,
             speculative_config dict, top_logprobs).
-        monkeypatch: pytest fixture for setting env vars.
+
     """
     from vllm import LLM
-
-    # The ROCm skinny GEMM kernels (gemm_kernels.cu) are
-    # non-deterministic across LLM instantiations due to persistent
-    # workgroup scheduling and wave-level shuffle reductions, which
-    # causes logprob differences that get misattributed to spec decode.
-    # Disable them so this test isolates spec decode correctness only.
-    # TODO(akaratza): Remove this workaround once the follow-up to
-    # https://github.com/vllm-project/vllm/pull/33493#issuecomment-3906083975
-    # lands with a determinism fix for wvSplitK kernels.
-    monkeypatch.setenv("VLLM_ROCM_USE_SKINNY_GEMM", "0")
 
     method, model_name, spec_config, top_logprobs = model_setup
 
@@ -1235,7 +1230,6 @@ def test_prompt_logprobs_with_chunking_and_preemption():
     This test ensures that the num_prompt_logprobs tracking persists
     across preemptions and prefill chunks.
     """
-
     # Create prompts that will trigger chunking and preemption
     prompts = [
         "The following numbers of the sequence "
@@ -1256,7 +1250,7 @@ def test_prompt_logprobs_with_chunking_and_preemption():
         max_model_len=512,
         enable_chunked_prefill=True,
         max_num_batched_tokens=48,  # Force prefill chunking
-        num_gpu_blocks_override=32,  # Force preemptions
+        num_gpu_blocks_override=33,  # Force preemptions (32 usable + null block)
         disable_log_stats=False,
         gpu_memory_utilization=0.25,
     ) as vllm_model:

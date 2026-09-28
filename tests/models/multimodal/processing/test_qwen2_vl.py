@@ -1,14 +1,69 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import pytest
-from packaging.version import Version
-from transformers import __version__ as TRANSFORMERS_VERSION
+from typing import Any
 
+import numpy as np
+import pytest
+import torch
+from PIL import Image
+
+from vllm.model_executor.layers.fusion.mm_input_norm import build_mm_input_norm
 from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.multimodal.cache import MultiModalProcessorOnlyCache
+from vllm.multimodal.inputs import batched_tensors_equal
+from vllm.platforms import current_platform
 
 from ....conftest import ImageTestAssets
 from ...utils import build_model_context
+
+
+def test_jina_vl_processing_order() -> None:
+    """Jina's document-first prompt keeps cached features and hashes aligned."""
+    ctx = build_model_context(
+        "jinaai/jina-reranker-m0",
+        runner="pooling",
+        limit_mm_per_prompt={"image": 2},
+        mm_processor_cache_gb=1,
+    )
+    cache = MultiModalProcessorOnlyCache(ctx.model_config)
+    processor = MULTIMODAL_REGISTRY.create_processor(
+        ctx.model_config,
+        tokenizer=ctx.tokenizer,
+    )
+
+    placeholder = "<|vision_start|><|image_pad|><|vision_end|>"
+    query_image = Image.new("RGB", (128, 160), color=(255, 0, 0))
+    document_image = Image.new("RGB", (192, 128), color=(0, 255, 0))
+
+    def process(images: list[Image.Image]):
+        return processor(
+            placeholder * len(images),
+            mm_items=processor.info.parse_mm_data({"image": images}),
+            cache=cache,
+        )
+
+    query = process([query_image])
+    document = process([document_image])
+    pair = process([query_image, document_image])
+
+    pair_items = pair["mm_kwargs"]["image"]
+    assert pair["mm_hashes"]["image"] == [
+        document["mm_hashes"]["image"][0],
+        query["mm_hashes"]["image"][0],
+    ]
+    assert batched_tensors_equal(
+        pair_items[0].get_data(),
+        document["mm_kwargs"]["image"][0].get_data(),
+    )
+    assert batched_tensors_equal(
+        pair_items[1].get_data(),
+        query["mm_kwargs"]["image"][0].get_data(),
+    )
+    assert [item.length for item in pair["mm_placeholders"]["image"]] == [
+        document["mm_placeholders"]["image"][0].length,
+        query["mm_placeholders"]["image"][0].length,
+    ]
 
 
 @pytest.mark.parametrize("model_id", ["Qwen/Qwen2-VL-2B-Instruct"])
@@ -41,12 +96,6 @@ def test_processor_override(
     kwargs_on_init: bool,
 ):
     """Ensure Qwen2VLMultiModalProcessor handles min/max pixels properly."""
-    if (
-        Version(TRANSFORMERS_VERSION) < Version("5.2.0")
-        and "size" in mm_processor_kwargs
-    ):
-        pytest.skip("`size` ignored by `Qwen2VLProcessor.__call__`")
-
     ctx = build_model_context(
         model_id,
         mm_processor_kwargs=mm_processor_kwargs if kwargs_on_init else None,
@@ -92,12 +141,6 @@ def test_get_image_size_with_most_features(
     model_id: str,
     mm_processor_kwargs: dict[str, object],
 ):
-    if (
-        Version(TRANSFORMERS_VERSION) < Version("5.2.0")
-        and "size" in mm_processor_kwargs
-    ):
-        pytest.skip("`size` ignored by `Qwen2VLProcessor.__call__`")
-
     ctx = build_model_context(
         model_id,
         mm_processor_kwargs=mm_processor_kwargs,
@@ -128,3 +171,90 @@ def test_get_image_size_with_most_features(
         t, h, w = grid_thw[0]
         tokens = (t * h * w) // (merge_size**2)
         assert tokens < max_tokens
+
+
+def _build_qwen2_5_vl_video_mm_data(num_frames: int, fps: float) -> dict[str, Any]:
+    video = np.zeros((num_frames, 56, 56, 3), dtype=np.uint8)
+    metadata = {
+        "fps": fps,
+        "duration": num_frames / fps,
+        "total_num_frames": num_frames,
+        "frames_indices": list(range(num_frames)),
+        "video_backend": "opencv",
+        "do_sample_frames": False,
+    }
+    return {"video": [(video, metadata)]}
+
+
+@pytest.mark.parametrize("model_id", ["Qwen/Qwen2.5-VL-3B-Instruct"])
+def test_qwen2_5_vl_video_fps_to_second_per_grid_ts(model_id: str) -> None:
+    ctx = build_model_context(model_id, limit_mm_per_prompt={"image": 0, "video": 1})
+    processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+    temporal_patch_size = (
+        processor.info.get_hf_processor().video_processor.temporal_patch_size
+    )
+
+    prompt = "<|vision_start|><|video_pad|><|vision_end|>"
+    for fps in (1.0, 30.0):
+        mm_data = _build_qwen2_5_vl_video_mm_data(num_frames=32, fps=fps)
+        processed = processor(prompt, mm_items=processor.info.parse_mm_data(mm_data))
+        spg = processed["mm_kwargs"]["video"][0].get_data()["second_per_grid_ts"]
+        assert float(spg) == pytest.approx(temporal_patch_size / fps, rel=2e-2)
+
+
+@pytest.mark.usefixtures("default_vllm_config")
+@pytest.mark.parametrize(
+    "model_id", ["Qwen/Qwen2-VL-2B-Instruct", "Qwen/Qwen2.5-VL-3B-Instruct"]
+)
+@pytest.mark.parametrize("num_imgs", [1, 2])
+def test_mm_device_do_normalize(
+    image_assets: ImageTestAssets, model_id: str, num_imgs: int
+) -> None:
+    """Device-side normalisation must reproduce the on-CPU processor result.
+
+    Runs on any platform: the CPU platform exercises the ``forward_native``
+    fallback, accelerators exercise the fused kernel.
+    """
+    device = current_platform.device_type
+    ctx = build_model_context(
+        model_id,
+        limit_mm_per_prompt={"image": num_imgs},
+    )
+    ctx.model_config.multimodal_config.mm_device_do_normalize = False
+    processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+
+    # Build the image str / prompt based on the number of images we pass
+    prompt = "<|vision_start|><|image_pad|><|vision_end|>" * num_imgs
+    mm_data = {"image": [image_assets[0].pil_image] * num_imgs}
+
+    processed_inputs_with_normalize = processor(
+        prompt,
+        mm_items=processor.info.parse_mm_data(mm_data),
+    )
+    pixel_values_with_normalize = processed_inputs_with_normalize[
+        "mm_kwargs"
+    ].get_data()["pixel_values"]
+    dtype = pixel_values_with_normalize.dtype
+
+    processed_inputs_without_normalize = processor(
+        prompt,
+        mm_items=processor.info.parse_mm_data(mm_data),
+        hf_processor_mm_kwargs={"do_normalize": False, "do_rescale": False},
+    )
+    pixel_values_without_normalize = processed_inputs_without_normalize[
+        "mm_kwargs"
+    ].get_data()["pixel_values"]
+
+    ctx.model_config.multimodal_config.mm_device_do_normalize = True
+    input_norm = build_mm_input_norm(ctx.model_config).to(device)
+
+    # With normalisation disabled, the processor emits raw uint8 pixels,
+    # matching the production mm_device_do_normalize path.
+    assert pixel_values_without_normalize.dtype == torch.uint8
+    pixel_values_do_input_norm = input_norm(
+        pixel_values_without_normalize.to(device), dtype
+    )
+
+    torch.testing.assert_close(
+        pixel_values_with_normalize.to(device), pixel_values_do_input_norm
+    )
