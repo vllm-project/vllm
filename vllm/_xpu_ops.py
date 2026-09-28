@@ -82,6 +82,23 @@ if hasattr(torch.ops._xpu_C, "qkv_split_norm_rope"):
         return None
 
 
+if hasattr(torch.ops._xpu_C, "fp8_gemm_w8a16_pair"):
+
+    @register_fake("_xpu_C::fp8_gemm_w8a16_pair")
+    def _fp8_gemm_w8a16_pair_fake(
+        input: torch.Tensor,
+        q_weight1: torch.Tensor,
+        weight_scale1: torch.Tensor,
+        q_weight2: torch.Tensor,
+        weight_scale2: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        shape = input.shape[:-1]
+        return (
+            input.new_empty((*shape, q_weight1.size(1))),
+            input.new_empty((*shape, q_weight2.size(1))),
+        )
+
+
 if hasattr(torch.ops._xpu_C, "fp4_gemm"):
 
     @register_fake("_xpu_C::fp4_gemm")
