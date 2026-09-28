@@ -127,7 +127,7 @@ def test_indexer_context_scores_matches_reference(rank: int):
     assert (got[~hit] == SENTINEL).all()
 
 
-@pytest.mark.parametrize("bound", [2048, 16384])
+@pytest.mark.parametrize("bound", [8192, 65536])
 @torch.inference_mode()
 def test_indexer_context_scores_independent_of_shape_bound(bound: int):
     """A grid sized for max_model_len scores a short batch identically.
@@ -248,10 +248,11 @@ def _force_scores(
 def _lexsort_topk(score_row: torch.Tensor, n: int) -> torch.Tensor:
     """Higher score first, then higher block id (matches packed CP keys)."""
     score_cpu = score_row.detach().float().cpu()
-    idx = torch.arange(score_cpu.numel())
-    # torch.lexsort: last row is the primary key, ascending.
-    order = torch.lexsort(torch.stack((-idx.to(score_cpu.dtype), -score_cpu)))
-    return idx[order][:n]
+    # Start in descending block-id order, then stable-sort on descending score
+    # so ties keep the higher block id, which is how the packed key breaks them.
+    order = torch.arange(score_cpu.numel() - 1, -1, -1)
+    order = order[torch.argsort(-score_cpu[order], stable=True)]
+    return order[:n]
 
 
 @torch.inference_mode()
