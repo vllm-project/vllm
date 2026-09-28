@@ -84,6 +84,18 @@ class _ReasoningOnlyParser(DelegatingParser):
         return None
 
 
+class _CountingParser(_NoOpParser):
+    """Parser that records the ids it counts; token id 7 is reasoning."""
+
+    def __init__(self, tokenizer, *args, **kwargs):
+        super().__init__(tokenizer)
+        self.counted_ids: list[list[int]] = []
+
+    def count_reasoning_tokens(self, token_ids: Sequence[int]) -> int:
+        self.counted_ids.append(list(token_ids))
+        return sum(token_id == 7 for token_id in token_ids)
+
+
 class _StubToolParser:
     """Minimal tool parser stub that always returns a hardcoded tool call."""
 
@@ -337,6 +349,25 @@ def test_multi_turn_accumulation():
     assert len(ctx.response_messages) == 2
     texts = [m.content[0].text for m in ctx.response_messages]
     assert texts == ["First turn", "Second turn"]
+
+
+def test_reasoning_tokens_counted_per_round():
+    """Each round is counted on its own ids, not the concatenated rounds."""
+    ctx = _make_context(_CountingParser)
+
+    ctx.append_output(_make_request_output(token_ids=[7, 7, 1]))
+    ctx.append_output(_make_request_output(token_ids=[7, 2]))
+
+    assert ctx.response_parser.counted_ids == [[7, 7, 1], [7, 2]]
+    assert ctx.num_reasoning_tokens == 3
+
+
+def test_reasoning_tokens_zero_without_parser():
+    ctx = _make_context(None)
+
+    ctx.append_output(_make_request_output(token_ids=[7, 7, 1]))
+
+    assert ctx.num_reasoning_tokens == 0
 
 
 def test_num_init_messages_offset():
