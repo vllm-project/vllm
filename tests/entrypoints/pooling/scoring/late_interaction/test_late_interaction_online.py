@@ -8,7 +8,7 @@ import requests
 from tests.utils import RemoteOpenAIServer
 from vllm.entrypoints.pooling.scoring.protocol import RerankResponse, ScoreResponse
 
-from .util import ColBERTScoringHfRunner
+from ..util import ColBERTScoringHfRunner
 
 MODEL_NAME = "answerdotai/answerai-colbert-small-v1"
 COLBERT_DIM = 96
