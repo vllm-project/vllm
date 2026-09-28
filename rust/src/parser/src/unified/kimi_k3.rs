@@ -29,11 +29,10 @@
 //! Channel markers are structural only when their `<|open|>` / `<|close|>` /
 //! `<|sep|>` bytes come from the dedicated special tokens. The model can spell
 //! the same text with ordinary BPE tokens (for example while quoting a
-//! configuration snippet in its reasoning); under
-//! [`AttributionMode::Tokens`] such text stays content in the current channel,
-//! while [`AttributionMode::TextOnly`] keeps the historical spelling-based
-//! matching for callers without token attribution. Channel names such as
-//! `think` are ordinary text either way.
+//! configuration snippet in its reasoning); such text stays content in the
+//! current channel. The parser therefore expects token-attributed input from
+//! the incremental detokenizer: fed unattributed text, it treats every marker
+//! as content. Channel names such as `think` are ordinary text either way.
 //!
 //! Argument decoding mirrors the renderer's type tagging (inverse encoding):
 //! `type="string"` values pass the raw text through, other types are
@@ -43,9 +42,9 @@
 //! Known limitation (shared with the Python parser): string argument and
 //! response bodies are emitted raw, so a value that literally contains
 //! `<|close|>argument<|sep|>` or `<|close|>response<|sep|>` is
-//! indistinguishable from a real closing marker. Under
-//! [`AttributionMode::Tokens`] this now only applies to `argument` and `json`
-//! blocks inside a call body, which are still parsed from text.
+//! indistinguishable from a real closing marker. With token attribution this
+//! now only applies to `argument` and `json` blocks inside a call body, which
+//! are still parsed from text.
 
 mod structural_tag;
 
@@ -60,7 +59,7 @@ use winnow::prelude::*;
 use winnow::token::{literal, rest, take_till, take_until, take_while};
 
 use self::structural_tag::KIMI_K3_STRUCTURAL_TAG_BUILDER;
-use super::{AttributionMode, Result, UnifiedParser, UnifiedParserOutput, special_token};
+use super::{Result, UnifiedParser, UnifiedParserOutput, special_token};
 use crate::output_grammar::{
     self, BuiltOutputGrammar, OutputGrammarContext, visible_format_from_builder,
 };
@@ -138,19 +137,11 @@ struct Markers {
 }
 
 impl Markers {
-    /// Build the markers; under [`AttributionMode::TextOnly`] they carry no
-    /// token guards and match by spelling alone.
-    fn new(tokens: &SpecialTokens, attribution: AttributionMode) -> Self {
-        let guarded = |marker: Marker| match attribution {
-            AttributionMode::Tokens => marker,
-            AttributionMode::TextOnly => marker.without_guards(),
-        };
-        let open = |tag: &str| {
-            guarded(Marker::special(&tokens.open).then_text(tag).then_special(&tokens.sep))
-        };
-        let close = |tag: &str| {
-            guarded(Marker::special(&tokens.close).then_text(tag).then_special(&tokens.sep))
-        };
+    fn new(tokens: &SpecialTokens) -> Self {
+        let open =
+            |tag: &str| Marker::special(&tokens.open).then_text(tag).then_special(&tokens.sep);
+        let close =
+            |tag: &str| Marker::special(&tokens.close).then_text(tag).then_special(&tokens.sep);
 
         Self {
             think_open: open("think"),
@@ -160,10 +151,10 @@ impl Markers {
             tools_open: open("tools"),
             tools_close: close("tools"),
             message_close: close("message"),
-            end_of_msg: guarded(Marker::special(&tokens.end_of_msg)),
-            call_open: guarded(Marker::special(&tokens.open).then_text("call")),
+            end_of_msg: Marker::special(&tokens.end_of_msg),
+            call_open: Marker::special(&tokens.open).then_text("call"),
             call_close: close("call"),
-            sep: guarded(Marker::special(&tokens.sep)),
+            sep: Marker::special(&tokens.sep),
         }
     }
 }
@@ -228,30 +219,18 @@ pub struct KimiK3UnifiedParser {
 }
 
 impl KimiK3UnifiedParser {
-    /// Create a Kimi K3 parser expecting token-attributed input
-    /// ([`AttributionMode::Tokens`]).
+    /// Create a Kimi K3 parser expecting token-attributed input.
     pub fn new(_tools: &[Tool], tokenizer: DynTokenizer) -> Result<Self> {
         let special_tokens = SpecialTokens::new(tokenizer.as_ref())?;
 
         Ok(Self {
             buffer: DecodedText::default(),
             mode: KimiK3Mode::default(),
-            markers: Markers::new(&special_tokens, AttributionMode::default()),
+            markers: Markers::new(&special_tokens),
             emitted_call_count: 0,
             tokenizer,
             special_tokens,
         })
-    }
-
-    /// Choose how marker spellings are matched; see [`AttributionMode`].
-    ///
-    /// Callers whose detokenizer does not produce token attribution must select
-    /// [`AttributionMode::TextOnly`]; feeding unattributed text to a
-    /// [`AttributionMode::Tokens`] parser treats every marker as content.
-    #[must_use]
-    pub fn with_attribution_mode(mut self, attribution: AttributionMode) -> Self {
-        self.markers = Markers::new(&self.special_tokens, attribution);
-        self
     }
 
     /// Detect the prefilled generation channel from the prompt tail.
@@ -734,7 +713,7 @@ mod tests {
     };
     use crate::tool::ToolCallDelta;
     use crate::unified::{
-        AttributionMode, UnifiedParser, UnifiedParserError, UnifiedParserEvent, UnifiedParserOutput,
+        UnifiedParser, UnifiedParserError, UnifiedParserEvent, UnifiedParserOutput,
     };
 
     const OPEN_ID: u32 = 256;
@@ -813,11 +792,6 @@ mod tests {
     /// their special tokens.
     fn test_parser() -> KimiK3UnifiedParser {
         KimiK3UnifiedParser::new(&[], Arc::new(tokenizer())).unwrap()
-    }
-
-    /// The spelling-based fallback for callers without token attribution.
-    fn text_only_parser() -> KimiK3UnifiedParser {
-        test_parser().with_attribution_mode(AttributionMode::TextOnly)
     }
 
     /// Run token IDs through the real incremental decoder to obtain attributed
@@ -1332,7 +1306,7 @@ mod tests {
     #[test]
     fn kimi_k3_markers_spell_the_documented_strings() {
         let special_tokens = super::SpecialTokens::new(&tokenizer()).unwrap();
-        let markers = super::Markers::new(&special_tokens, AttributionMode::Tokens);
+        let markers = super::Markers::new(&special_tokens);
 
         assert_eq!(markers.think_open.as_str(), THINK_OPEN);
         assert_eq!(markers.think_close.as_str(), THINK_CLOSE);
@@ -1447,60 +1421,5 @@ mod tests {
 
         assert_eq!(first_call(&output).name, Some(format!("a{SEP}b")));
         assert_eq!(first_call(&output).arguments, r#"{"x":1}"#);
-    }
-
-    #[test]
-    fn kimi_k3_text_only_mode_matches_marker_spelling_regardless_of_tokens() {
-        // The documented fallback for callers without attribution: same bytes,
-        // no provenance check, so the ordinary spelling closes the channel.
-        let mut ids = ordinary(THINK_CLOSE);
-        ids.extend(structural("after"));
-
-        let mut parser = text_only_parser();
-        start_in_reasoning(&mut parser);
-        let output = parse_decoded(&mut parser, decode_ids(&ids));
-
-        assert_eq!(output.reasoning_text(), "");
-        assert_eq!(output.normal_text(), "after");
-    }
-
-    #[test]
-    fn kimi_k3_text_only_mode_on_unattributed_text_matches_tokens_mode() {
-        let outputs = [
-            thinking_output(
-                "step by step",
-                "the answer",
-                &call("tool=\"calc\" index=\"1\"", &arg("x", "number", "42")),
-            ),
-            format!(
-                "{RESPONSE_OPEN}answer{RESPONSE_CLOSE}\n{TOOLS_OPEN}{}{TOOLS_CLOSE}\n<|close|>message{SEP}",
-                call("tool=\"calc\" index=\"1\"", ""),
-            ),
-            format!("{THINK_OPEN}still thinking"),
-        ];
-
-        for text in &outputs {
-            let expected = collect_stream(&mut test_parser(), &[text]);
-            for size in [1, 3, 7] {
-                let mut parser = text_only_parser();
-                let mut output = UnifiedParserOutput::default();
-                for chunk in char_chunks(text, size) {
-                    parser.parse_into(DecodedText::unattributed(chunk), &mut output).unwrap();
-                }
-                output.append(parser.finish().unwrap());
-
-                assert_eq!(
-                    output.reasoning_text(),
-                    expected.reasoning_text(),
-                    "{text:?} / {size}"
-                );
-                assert_eq!(
-                    output.normal_text(),
-                    expected.normal_text(),
-                    "{text:?} / {size}"
-                );
-                assert_eq!(output.calls(), expected.calls(), "{text:?} / {size}");
-            }
-        }
     }
 }
