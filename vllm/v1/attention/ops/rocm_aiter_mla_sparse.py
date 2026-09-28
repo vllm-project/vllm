@@ -1811,7 +1811,7 @@ def _mxfp8_wo_a_bmm_kernel(
     a_ptr,  # [T, G * K] e4m3
     as_ptr,  # [T, G * K // 32] E8M0
     w_ptr,  # [G * R, K] e4m3
-    ws_ptr,  # [G * R, K // 32] E8M0
+    ws_ptr,  # [G * R // SCALE_ROWS, K // 32] E8M0
     out_ptr,  # [T, G * R]
     num_tokens,
     stride_at,
@@ -1821,6 +1821,7 @@ def _mxfp8_wo_a_bmm_kernel(
     stride_out,
     R: tl.constexpr,
     K: tl.constexpr,
+    SCALE_ROWS: tl.constexpr,
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
     BLOCK_K: tl.constexpr,
@@ -1841,7 +1842,7 @@ def _mxfp8_wo_a_bmm_kernel(
         as_ptr + offs_m[:, None] * stride_ast + (group * (K // 32) + offs_sk)[None, :]
     )
     w_ptrs = w_ptr + offs_n[:, None] * stride_wn + offs_k[None, :]
-    ws_ptrs = ws_ptr + offs_n[:, None] * stride_wsn + offs_sk[None, :]
+    ws_ptrs = ws_ptr + (offs_n // SCALE_ROWS)[:, None] * stride_wsn + offs_sk[None, :]
 
     acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
     for _ in range(K // BLOCK_K):
@@ -1926,6 +1927,7 @@ def _rocm_mxfp8_wo_a_bmm_impl(
         out.stride(0),
         R=o_lora_rank,
         K=group_dim,
+        SCALE_ROWS=weight.shape[0] // weight_scale.shape[0],
         BLOCK_M=block_m,
         BLOCK_N=block_n,
         BLOCK_K=block_k,
@@ -1967,7 +1969,8 @@ def rocm_mxfp8_wo_a_bmm(
     ``a`` is the [T, G * K] e4m3 attention output and ``a_scale`` its
     [T, G * K // 32] E8M0 scales, as the sparse decode reduce writes them.
     The weight is the checkpoint's MXFP8 ``wo_a`` as loaded, [G * R, K] with
-    [G * R, K // 32] scales, so there is no dequantized copy to keep.
+    either [G * R // 32, K // 32] block scales or [G * R, K // 32] per-row
+    scales, so there is no dequantized copy to keep.
     Returns [T, G * R].
     """
     return torch.ops.vllm.rocm_dsv41_mxfp8_wo_a_bmm(
