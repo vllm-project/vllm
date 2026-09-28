@@ -51,6 +51,10 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import QuickGELU
 from vllm.model_executor.layers.attention import MMEncoderAttention
 from vllm.model_executor.layers.conv import Conv3dLayer
+from vllm.model_executor.layers.fusion.mm_input_norm import (
+    IdentityInputNorm,
+    build_mm_input_norm,
+)
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     RowParallelLinear,
@@ -105,7 +109,6 @@ from .utils import (
     maybe_prefix,
 )
 from .vision import (
-    FusedInputNorm,
     get_vit_attn_backend,
     is_vit_use_data_parallel,
     run_dp_sharded_mrope_vision_model,
@@ -562,9 +565,7 @@ class Qwen2VisionTransformer(nn.Module):
             in_channels=in_channels,
             embed_dim=embed_dim,
         )
-        self.input_norm = (
-            input_norm if input_norm is not None else FusedInputNorm.identity()
-        )
+        self.input_norm = input_norm if input_norm is not None else IdentityInputNorm()
 
         norm_layer = partial(nn.LayerNorm, eps=norm_eps)
         head_dim = embed_dim // num_heads
@@ -1210,17 +1211,23 @@ class Qwen2VLForConditionalGeneration(
         tokens_per_second = getattr(self.config.vision_config, "tokens_per_second", 1.0)
         for mm_feature in sorted(mm_features, key=lambda f: f.mm_position.offset):
             offset = mm_feature.mm_position.offset
+            data = mm_feature.data
+            assert data is not None
             if mm_feature.modality == "image":
-                t, h, w = mm_feature.data["image_grid_thw"].data.tolist()
+                image_grid_thw = data["image_grid_thw"]
+                assert isinstance(image_grid_thw.data, torch.Tensor)
+                t, h, w = image_grid_thw.data.tolist()
                 assert t == 1, f"Image must have 1 frame, got {t}"
                 yield offset, 1, h // spatial_merge_size, w // spatial_merge_size, 1.0
             elif mm_feature.modality == "video":
-                t, h, w = mm_feature.data["video_grid_thw"].data.tolist()
+                video_grid_thw = data["video_grid_thw"]
+                assert isinstance(video_grid_thw.data, torch.Tensor)
+                t, h, w = video_grid_thw.data.tolist()
                 second_per_grid_ts = 1.0
-                if mm_feature.data.get("second_per_grid_ts", None):
-                    second_per_grid_ts = mm_feature.data[
-                        "second_per_grid_ts"
-                    ].data.item()
+                second_per_grid_ts_field = data.get("second_per_grid_ts")
+                if second_per_grid_ts_field is not None:
+                    assert isinstance(second_per_grid_ts_field.data, torch.Tensor)
+                    second_per_grid_ts = second_per_grid_ts_field.data.item()
                 t_factor = second_per_grid_ts * tokens_per_second
                 yield (
                     offset,
@@ -1284,7 +1291,7 @@ class Qwen2VLForConditionalGeneration(
         super().__init__()
         config: Qwen2VLConfig = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
-        multimodal_config = vllm_config.model_config.multimodal_config
+        multimodal_config = vllm_config.model_config.get_multimodal_config()
         self.model_config = vllm_config.model_config
         self.use_data_parallel = multimodal_config.mm_encoder_tp_mode == "data"
         self.config = config
@@ -1295,7 +1302,7 @@ class Qwen2VLForConditionalGeneration(
                 config.vision_config,
                 norm_eps=getattr(config, "rms_norm_eps", 1e-6),
                 quant_config=quant_config,
-                input_norm=FusedInputNorm.from_model_config(self.model_config),
+                input_norm=build_mm_input_norm(self.model_config),
                 prefix=maybe_prefix(prefix, "visual"),
             )
 
@@ -1327,7 +1334,7 @@ class Qwen2VLForConditionalGeneration(
                 image_grid_thw=image_grid_thw,
             )
 
-        if image_embeds is not None:
+        else:
             return Qwen2VLImageEmbeddingInputs(
                 type="image_embeds",
                 image_embeds=image_embeds,
@@ -1351,7 +1358,7 @@ class Qwen2VLForConditionalGeneration(
                 video_grid_thw=video_grid_thw,
             )
 
-        if video_embeds is not None:
+        else:
             return Qwen2VLVideoEmbeddingInputs(
                 type="video_embeds",
                 video_embeds=video_embeds,
@@ -1410,7 +1417,7 @@ class Qwen2VLForConditionalGeneration(
         return video_embeds.split(sizes)
 
     def _parse_and_validate_multimodal_inputs(self, **kwargs: object) -> dict:
-        modalities = {}
+        modalities: dict[str, Qwen2VLImageInputs | Qwen2VLVideoInputs | None] = {}
 
         # Preserve the order of modalities if there are multiple of them
         # from the order of kwargs.
@@ -1480,6 +1487,7 @@ class Qwen2VLForConditionalGeneration(
     def get_max_frames_per_video(self) -> int:
         mm_registry = MULTIMODAL_REGISTRY
         info = mm_registry.get_processing_info(self.model_config)
+        assert isinstance(info, Qwen2VLProcessingInfo)
         max_frames_per_video = info.get_num_frames_with_most_features(
             seq_len=self.model_config.max_model_len,
             mm_counts={"video": self.multimodal_config.get_limit_per_prompt("video")},
