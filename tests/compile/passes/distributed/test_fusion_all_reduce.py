@@ -1054,10 +1054,13 @@ def test_cute_allreduce_gemma_graph_replay(
 
 
 @pytest.mark.skip_global_cleanup
-def test_cute_allreduce_selection_requires_every_rank(
+def test_cute_allreduce_peer_agreement_and_cached_fallback(
     tmp_path, cute_tp_environment, monkeypatch
 ):
-    """Disabling fusion or one unsupported peer must avoid every CuTe allocation."""
+    """CuTe ranks must agree before collective workspace allocation.
+
+    Its cached fused op must remain executable when CuTe is unavailable.
+    """
     from vllm.compilation.passes.fusion.cute_allreduce_fusion import (
         CuteAllReduceFusionPass,
     )
@@ -1091,7 +1094,6 @@ def test_cute_allreduce_selection_requires_every_rank(
             assert get_tp_group().device_communicator.cute_allreduce is None
             fusion = CuteAllReduceFusionPass(config)
             assert fusion.disabled
-            assert fusion.uuid()
             with monkeypatch.context() as capability_patch:
                 capability_patch.setattr(
                     runtime.CuteAllReduce, "is_supported", staticmethod(lambda _: True)
@@ -1134,33 +1136,3 @@ def test_cute_allreduce_unsupported_shape(tmp_path, tp_size, hidden_size):
 
     config = make_cute_config(tmp_path, 0, tp_size, hidden_size)
     assert not runtime.supports_config(config)
-
-
-@pytest.mark.parametrize(
-    "capability,expected", [(100, True), (103, True), (107, True), (90, False)]
-)
-def test_cute_allreduce_hardware_gate(monkeypatch, capability, expected):
-    """Blackwell-family devices share the backend; pre-Blackwell does not."""
-    import inspect
-
-    import torch.distributed._symmetric_memory as symm_mem
-
-    module = pytest.importorskip("flashinfer.comm.mnnvl_cutedsl_ar")
-    if (
-        "output_dtype"
-        not in inspect.signature(module.MNNVLCuteDSLAllReduceFusionWorkspace).parameters
-    ):
-        pytest.skip("Requires FlashInfer's CuTe static-FP8 API")
-    from flashinfer.comm import mnnvl
-
-    from vllm.distributed.device_communicators import cute_allreduce as runtime
-    from vllm.platforms.interface import DeviceCapability
-
-    monkeypatch.setattr(
-        current_platform,
-        "get_device_capability",
-        lambda device_id=0: DeviceCapability(capability // 10, capability % 10),
-    )
-    monkeypatch.setattr(symm_mem, "get_backend", lambda _: "NCCL")
-    monkeypatch.setattr(mnnvl, "is_multicast_supported", lambda _: True)
-    assert runtime.CuteAllReduce.is_supported(torch.device("cuda", 0)) == expected

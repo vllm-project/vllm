@@ -140,15 +140,7 @@ class PassConfig:
     fuse_gemm_comms: bool = None  # type: ignore[assignment]
     """Enable async TP."""
     fuse_allreduce_rms: bool = None  # type: ignore[assignment]
-    """Enable AllReduce/RMSNorm fusion with an eligible backend.
-
-    FlashInfer CuTe is preferred for eligible BF16 Gemma RMSNorm patterns on
-    SM100/SM103/SM107 with NVLink multicast and its static-FP8 API. Supported
-    (TP size, hidden size) pairs are (4, 5120), (8, 5120), (8, 8192), (16, 8192),
-    with DP1 and compatible workspace lifetimes. Larger-than-capacity inputs and
-    unsupported configurations retain the existing backends. Setting False
-    disables fusion and its CuTe workspace allocation.
-    """
+    """Enable AllReduce/RMSNorm fusion with an eligible backend."""
     enable_qk_norm_rope_fusion: bool = None  # type: ignore[assignment]
     """Enable fused Q/K RMSNorm + RoPE pass."""
     fuse_rope_kvcache_cat_mla: bool = None  # type: ignore[assignment]
