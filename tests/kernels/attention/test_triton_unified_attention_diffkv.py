@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Unit tests for the Triton DiffKV unified-attention kernel."""
 
+from unittest.mock import Mock
+
 import pytest
 import torch
 
@@ -17,6 +19,7 @@ from vllm.v1.attention.backends.fa_utils import (
     is_flash_attn_varlen_func_available,
 )
 from vllm.v1.attention.ops.triton_unified_attention_diffkv import (
+    kernel_unified_attention_diffkv,
     unified_attention_diffkv,
 )
 
@@ -68,17 +71,25 @@ def _alloc_segm_buffers(seq_threshold_3D: int, num_query_heads: int, head_size_v
 
 
 # MiMo TP2 global layer; forcing SM12x lets CUDA CI take BLOCK_M=32.
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="SM12x tuning is CUDA-only")
 @pytest.mark.parametrize("block_size", BLOCK_SIZES)
+@pytest.mark.parametrize(
+    ("query_len", "expected_block_m"), [(63, 16), (64, 32), (65, 32), (257, 32)]
+)
 @torch.inference_mode()
-def test_triton_unified_attn_diffkv_prefill_block_m_32(
+def test_triton_unified_attn_diffkv_prefill_block_m(
     block_size: int,
+    query_len: int,
+    expected_block_m: int,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(current_platform, "is_device_capability_family", lambda _: True)
+    kernel_run = Mock(wraps=kernel_unified_attention_diffkv.run)
+    monkeypatch.setattr(kernel_unified_attention_diffkv, "run", kernel_run)
     torch.set_default_device(DEVICE_TYPE)
     set_random_seed(0)
 
-    query_lens = [1, 257]
+    query_lens = [1, query_len]
     kv_lens = [1344, 294]
     num_query_heads, num_kv_heads = 32, 2
     head_size_qk, head_size_v = 192, 128
@@ -132,6 +143,7 @@ def test_triton_unified_attn_diffkv_prefill_block_m_32(
         max_seqlen_q=max(query_lens),
     )
 
+    assert kernel_run.call_args.kwargs["BLOCK_M"] == expected_block_m
     torch.testing.assert_close(triton_out, ref_out, atol=2e-2, rtol=2e-2)
 
 

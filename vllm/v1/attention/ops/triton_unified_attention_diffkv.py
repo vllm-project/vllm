@@ -428,7 +428,7 @@ def unified_attention_diffkv(
     # between two positions; measured on SM12x only. Batch invariance forbids
     # a tile shape that depends on the batch's longest query.
     if (
-        max_seqlen_q >= 256
+        max_seqlen_q >= 64
         and num_queries_per_kv == 16
         and head_size_qk == 192
         and head_size_v == 128
