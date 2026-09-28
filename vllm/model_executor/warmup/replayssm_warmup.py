@@ -111,6 +111,7 @@ def _temporary_replayssm_autotune_state(
         dummy_block_ids = range(1, max_num_reqs + 1)
         for block_table in block_tables:
             block_table.block_table.np[:max_num_reqs, 0] = dummy_block_ids
+        runner.input_batch.block_table.mark_dirty()
         runner.input_batch.block_table.commit_block_table(max_num_reqs)
 
     first_tracker = next(iter(tracker_specs.values()), None)
@@ -145,6 +146,7 @@ def _temporary_replayssm_autotune_state(
             assert block_tables is not None and saved_block_ids is not None
             for block_table, block_ids in zip(block_tables, saved_block_ids):
                 block_table.block_table.np[:max_num_reqs, 0] = block_ids
+            runner.input_batch.block_table.mark_dirty()
             runner.input_batch.block_table.commit_block_table(max_num_reqs)
         for tensor in reset_tensors.values():
             tensor[1 : max_num_reqs + 1].zero_()
