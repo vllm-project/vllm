@@ -38,6 +38,10 @@ from vllm.model_executor.layers.linear import (
     UnquantizedLinearMethod,
     set_weight_attrs,
 )
+from vllm.model_executor.layers.quantization.awq_triton import (
+    AWQ_FUSED_FP32_SUPPORTED,
+    awq_gemm_fused_fp32,
+)
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
     QuantizeMethodBase,
@@ -904,7 +908,28 @@ class AutoAWQLinearMethod(BaseAWQLinearMethod):
         FP16_MATMUL_HEURISTIC_CONDITION = x.shape[:-1].numel() >= 256
         # Batch invariant mode requires torch.matmul path
         # for Triton override
-        if FP16_MATMUL_HEURISTIC_CONDITION or envs.VLLM_BATCH_INVARIANT:
+        use_fused_bi_gemm = (
+            envs.VLLM_BATCH_INVARIANT
+            and AWQ_FUSED_FP32_SUPPORTED
+            and reshaped_x.dtype == torch.float16
+            and scales.dtype == torch.float16
+            and qweight.dtype == torch.int32
+            and qzeros.dtype == torch.int32
+            and reshaped_x.is_contiguous()
+            and qweight.is_contiguous()
+            and scales.is_contiguous()
+            and qzeros.is_contiguous()
+            and qweight.shape[0] == reshaped_x.shape[1]
+            and scales.shape[1] == qweight.shape[1] * pack_factor
+            and qzeros.shape[0] == scales.shape[0]
+            and qzeros.shape[1] == qweight.shape[1]
+            and reshaped_x.shape[1] % 32 == 0
+            and qweight.shape[1] * pack_factor % 32 == 0
+            and qweight.shape[0] // scales.shape[0] == 128
+        )
+        if use_fused_bi_gemm:
+            out = awq_gemm_fused_fp32(reshaped_x, qweight, scales, qzeros)
+        elif FP16_MATMUL_HEURISTIC_CONDITION or envs.VLLM_BATCH_INVARIANT:
             out = ops.awq_dequantize(qweight, scales, qzeros, 0, 0, 0)
             out = torch.matmul(reshaped_x, out)
         else:
