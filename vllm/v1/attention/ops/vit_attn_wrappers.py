@@ -59,10 +59,9 @@ def flash_attn_maxseqlen_wrapper(
 
     q, k, v = (einops.rearrange(x, "b s ... -> (b s) ...") for x in [q, k, v])
 
-    out = None
-    if not is_rocm_aiter and torch.cuda.is_current_stream_capturing():
+    if current_platform.is_cuda() and torch.cuda.is_current_stream_capturing():
         # workaround for encoder CUDA-graph replay paddings with NaNs edge case
-        out = torch.zeros(
+        kwargs["out"] = torch.zeros(
             q.shape[0], q.shape[1], v.shape[-1], dtype=q.dtype, device=q.device
         )
 
@@ -77,7 +76,6 @@ def flash_attn_maxseqlen_wrapper(
         dropout_p=0.0,
         causal=False,
         softmax_scale=scale,
-        out=out,
         **kwargs,
     )
     context_layer = einops.rearrange(output, "(b s) h d -> b s h d", b=batch_size)
