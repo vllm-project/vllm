@@ -141,6 +141,41 @@ RUN --mount=type=cache,target=/root/.cache/uv \
        sed -i '/#include "internal\/pycore_atomic.h"/i\#include "dynamic_annotations.h"' numba/_dispatcher.cpp; \
     fi && python setup.py bdist_wheel
 
+# Shared FFmpeg for torchcodec video decoding (UBI has no ffmpeg package).
+FROM base AS ffmpeg-build
+ARG FFMPEG_VERSION=n6.1.2
+WORKDIR /tmp
+RUN microdnf install -y pkgconf-pkg-config xz && \
+    curl -LO https://github.com/FFmpeg/FFmpeg/archive/refs/tags/${FFMPEG_VERSION}.tar.gz && \
+    tar -xzf ${FFMPEG_VERSION}.tar.gz && \
+    cd FFmpeg-${FFMPEG_VERSION} && \
+    ./configure --prefix=/usr/local --libdir=/usr/local/lib \
+        --enable-shared --disable-static --enable-pic \
+        --disable-doc --disable-debug --disable-ffplay --disable-ffprobe \
+        --extra-cflags="-Wno-incompatible-pointer-types" && \
+    make -j"$(nproc)" && \
+    make install
+
+# Torchcodec video decoder (no s390x wheels; CPU / FFmpeg only s390x does not support audio decoding).
+FROM python-install AS torchcodec-builder
+ARG TORCHCODEC_VERSION=v0.14.0
+WORKDIR /tmp
+ENV LD_LIBRARY_PATH="/usr/local/lib:$LD_LIBRARY_PATH"
+ENV PKG_CONFIG_PATH="/usr/local/lib/pkgconfig:$PKG_CONFIG_PATH"
+RUN --mount=type=cache,target=/root/.cache/uv \
+    --mount=type=bind,from=ffmpeg-build,source=/usr/local,target=/usr/local \
+    git clone --depth 1 --branch ${TORCHCODEC_VERSION} \
+        https://github.com/pytorch/torchcodec.git && \
+    cd torchcodec && \
+    uv pip install torch==2.13.0 --index-url https://download.pytorch.org/whl/cpu && \
+    uv pip install pybind11 setuptools wheel && \
+    pybind11_DIR="$(python -c 'import pybind11; print(pybind11.get_cmake_dir())')" && \
+    export pybind11_DIR CMAKE_PREFIX_PATH="${pybind11_DIR}:${CMAKE_PREFIX_PATH}" && \
+    export I_CONFIRM_THIS_IS_NOT_A_LICENSE_VIOLATION=1 && \
+    export TORCHCODEC_DISABLE_COMPILE_WARNING_AS_ERROR=1 && \
+    export TORCHCODEC_CMAKE_BUILD_DIR="${PWD}/build" && \
+    python setup.py bdist_wheel
+
 # Build OpenCV from source for s390x
 FROM python-install AS opencv-builder
 WORKDIR /tmp
@@ -179,6 +214,10 @@ RUN --mount=type=bind,from=gperftools-build,src=/tmp/gperftools-2.16,target=/gpe
     make -C /gperftools install-libLTLIBRARIES && \
     /sbin/ldconfig
 
+RUN --mount=type=bind,from=ffmpeg-build,source=/usr/local,target=/ffmpeg-prefix \
+    cp -a /ffmpeg-prefix/lib/. /usr/local/lib/ && \
+    /sbin/ldconfig
+
 ENV LD_PRELOAD=/usr/local/lib/libtcmalloc_minimal.so.4
 
 # Install dependencies, including PyTorch and Apache Arrow
@@ -190,17 +229,20 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=bind,from=numba-builder,source=/tmp/llvmlite/dist,target=/tmp/llvmlite-wheels/ \
     --mount=type=bind,from=numba-builder,source=/tmp/numba/dist,target=/tmp/numba-wheels/ \
     --mount=type=bind,from=opencv-builder,source=/tmp/opencv-python/dist,target=/tmp/opencv-wheels/ \
+    --mount=type=bind,from=torchcodec-builder,source=/tmp/torchcodec/dist,target=/tmp/torchcodec-wheels/ \
      VISION_WHL_FILE=$(ls /tmp/vision-wheels/*.whl) && \
      HF_XET_WHL_FILE=$(ls /tmp/hf-xet-wheels/*.whl) && \
      LLVM_WHL_FILE=$(ls /tmp/llvmlite-wheels/*.whl) && \
      NUMBA_WHL_FILE=$(ls /tmp/numba-wheels/*.whl) && \
      OPENCV_WHL_FILE=$(ls /tmp/opencv-wheels/*.whl) && \
+     TORCHCODEC_WHL_FILE=$(ls /tmp/torchcodec-wheels/*.whl) && \
      uv pip install -v \
         $VISION_WHL_FILE \
         $HF_XET_WHL_FILE \
         $LLVM_WHL_FILE \
         $NUMBA_WHL_FILE \
         $OPENCV_WHL_FILE \
+        $TORCHCODEC_WHL_FILE \
         --torch-backend cpu \
         --index-strategy unsafe-best-match \
         -r requirements/build/cpu.txt \
