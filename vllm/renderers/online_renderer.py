@@ -116,7 +116,13 @@ def _reused_prompt_token_ids(request: Any) -> list[int] | None:
     if not isinstance(kv, dict):
         return None
     ids = kv.pop("prompt_token_ids", None)
-    if ids is None or getattr(request, "echo", False):
+    if ids is None:
+        return None
+    if getattr(request, "echo", False):
+        logger.debug(
+            "Ignoring kv_transfer_params['prompt_token_ids']: "
+            "echo is set, so messages are rendered instead."
+        )
         return None
     # bool is an int subclass, hence the exact type check.
     if (

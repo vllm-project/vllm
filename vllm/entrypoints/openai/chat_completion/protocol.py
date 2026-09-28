@@ -21,6 +21,7 @@ from pydantic import (
 from vllm.config import ModelConfig
 from vllm.entrypoints.chat_utils import (
     MM_PARSER_MAP,
+    TEXT_PART_TYPES,
     ChatCompletionMessageParam,
     ChatTemplateContentFormatOption,
 )
@@ -59,10 +60,8 @@ logger = init_logger(__name__)
 _INT64_MIN = -(2**63)
 _INT64_MAX = 2**63 - 1
 
-# Content part types that carry text rather than multimodal data.
-_TEXT_CONTENT_PART_TYPES = frozenset(
-    {"text", "input_text", "output_text", "refusal", "thinking", "tool_reference"}
-)
+# Content part types that carry no multimodal data.
+_TEXT_CONTENT_PART_TYPES = TEXT_PART_TYPES | {"tool_reference"}
 # Keys that mark a content part as multimodal, whatever its ``type``.
 _MEDIA_CONTENT_PART_KEYS = frozenset(MM_PARSER_MAP) - _TEXT_CONTENT_PART_TYPES
 
@@ -1009,6 +1008,10 @@ class ChatCompletionRequest(OpenAIBaseModel):
                     or not isinstance(part_type := part.get("type", "text"), str)
                     or part_type not in _TEXT_CONTENT_PART_TYPES
                 ):
+                    logger.debug(
+                        "Ignoring kv_transfer_params['prompt_token_ids']: "
+                        "messages have non-text content and are rendered instead."
+                    )
                     kv_transfer_params.pop("prompt_token_ids")
                     return data
         return data
