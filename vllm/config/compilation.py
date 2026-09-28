@@ -156,6 +156,9 @@ class PassConfig:
     fuse_xpu_qkv_norm_rope: bool = False
     """Fuse the gated QKV split, q/k RMSNorm and (M)RoPE of full attention
     into one XPU kernel."""
+    xpu_inplace_all_reduce: bool = False
+    """Run the XPU tensor-parallel all-reduce in place (no input copy) where
+    its input is a fresh intermediate with no other user."""
 
     # ROCm/AITER specific fusions
     fuse_act_padding: bool = None  # type: ignore[assignment]
@@ -328,6 +331,12 @@ class PassConfig:
                 "not XPU. The fusion will be disabled."
             )
             self.fuse_xpu_qkv_norm_rope = False
+        if self.xpu_inplace_all_reduce and not current_platform.is_xpu():
+            logger.warning_once(
+                "XPU in-place all-reduce enabled but the current platform is "
+                "not XPU. It will be disabled."
+            )
+            self.xpu_inplace_all_reduce = False
         if self.fuse_rope_kvcache_cat_mla and not current_platform.is_cuda_alike():
             logger.warning_once(
                 "MLA KV cache update with RoPE fusion enabled but the "

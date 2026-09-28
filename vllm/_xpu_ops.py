@@ -900,6 +900,34 @@ def _xpu_moe_shared_fused_impl(
     return out
 
 
+_XPU_ALL_REDUCE_OPTIONS: dict[int, object] = {}
+
+
+def _xpu_all_reduce_inplace_impl(x: torch.Tensor, group_name: str) -> None:
+    """In-place sum all-reduce of x over the device group of group_name.
+
+    Same collective as XpuCommunicator.all_reduce (torch.distributed on the
+    group's device process group) without its copy; only inserted by
+    XpuAllReduceInplacePass where x is a fresh intermediate.
+    """
+    from vllm.distributed.parallel_state import _groups
+
+    group = _groups[group_name]()
+    if group is None:
+        raise ValueError(f"Group {group_name} is destroyed.")
+    pg = group.device_group
+    opts = _XPU_ALL_REDUCE_OPTIONS.get(id(pg))
+    if opts is None:
+        opts = torch.distributed.AllreduceOptions()
+        opts.reduceOp = torch.distributed.ReduceOp.SUM
+        _XPU_ALL_REDUCE_OPTIONS[id(pg)] = opts
+    pg.allreduce([x], opts).wait()
+
+
+def _xpu_all_reduce_inplace_fake(x: torch.Tensor, group_name: str) -> None:
+    return None
+
+
 def _xpu_moe_shared_fused_fake(
     hidden_states: torch.Tensor,
     router_logits: torch.Tensor,
@@ -1647,6 +1675,13 @@ class xpu_ops:
                 op_name="xpu_fused_input_norm",
                 op_func=_xpu_fused_input_norm_impl,
                 fake_impl=_xpu_fused_input_norm_fake,
+            )
+
+            direct_register_custom_op(
+                op_name="xpu_all_reduce_",
+                op_func=_xpu_all_reduce_inplace_impl,
+                mutates_args=["x"],
+                fake_impl=_xpu_all_reduce_inplace_fake,
             )
 
             if xpu_moe_shared_fused_available():
