@@ -544,6 +544,14 @@ class Worker(WorkerBase):
         ):
             self.model_runner.load_model(load_dummy_weights=load_dummy_weights)
 
+        if self.vllm_config.kernel_config.enable_cute_allreduce:
+            # Cache hits bypass the compiler pass, but still need its runtime state.
+            from vllm.distributed.device_communicators.cute_allreduce import (
+                initialize_for_config,
+            )
+
+            initialize_for_config(self.vllm_config)
+
         if has_ec_transfer():
             get_ec_transfer().start_worker_services()
 

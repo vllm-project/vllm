@@ -172,6 +172,10 @@ class PostGradPassManager(CustomGraphPass):  # type: ignore[misc]
                 self.passes += [RocmAiterTritonAddRMSNormPadFusionPass(config)]
 
             if self.pass_config.fuse_allreduce_rms:
+                if config.kernel_config.enable_cute_allreduce:
+                    from .fusion.cute_allreduce_fusion import CuteAllReduceFusionPass
+
+                    self.passes += [CuteAllReduceFusionPass(config)]
                 if rocm_aiter_ops.is_enabled():
                     self.passes += [RocmAiterAllReduceFusionPass(config)]
                 else:

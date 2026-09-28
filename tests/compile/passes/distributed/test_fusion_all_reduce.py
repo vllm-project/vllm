@@ -847,3 +847,177 @@ def rocm_aiter_group_quant_fusion_pass_on_test_model(
         assert backend.op_count(fused_quant_op) == 2
         assert backend.op_count(fused_indexer_op) == 2
         del all_reduce_fusion_pass
+
+
+@pytest.fixture(scope="module")
+def cute_tp_environment():
+    """Keep one rendezvous across torchrun cases; release it at module teardown."""
+    import os
+
+    from vllm.distributed.parallel_state import cleanup_dist_env_and_memory
+
+    if int(os.environ.get("WORLD_SIZE", "1")) != 8:
+        pytest.skip("Requires torchrun with eight SM107 ranks")
+    local_rank = int(os.environ["LOCAL_RANK"])
+    torch.accelerator.set_device_index(local_rank)
+    if not current_platform.has_device_capability(107):
+        pytest.skip("The initial CuTe policy targets SM107")
+    init_distributed_environment(
+        world_size=8,
+        rank=int(os.environ["RANK"]),
+        distributed_init_method="env://",
+        local_rank=local_rank,
+    )
+    try:
+        yield local_rank
+    finally:
+        cleanup_dist_env_and_memory()
+
+
+@pytest.mark.skip_global_cleanup
+@pytest.mark.parametrize("add_residual", [False, True])
+@pytest.mark.parametrize(
+    "quantized,fanout,group_shape",
+    [
+        (False, False, None),
+        (True, False, None),
+        (True, False, (-1, -1)),
+        (True, True, (-1, -1)),
+    ],
+)
+def test_cute_allreduce_gemma_graph_replay(
+    add_residual, quantized, fanout, group_shape, tmp_path, cute_tp_environment
+):
+    """Run with torchrun over eight SM107 ranks; retain every norm consumer."""
+    import vllm.ir
+    from vllm import _custom_ops as ops
+    from vllm.compilation.passes.fusion.cute_allreduce_fusion import (
+        CuteAllReduceFusionPass,
+    )
+    from vllm.distributed import ensure_model_parallel_initialized, get_tp_group
+    from vllm.distributed.device_communicators import cute_allreduce as runtime
+
+    local_rank = cute_tp_environment
+    config = VllmConfig()
+    config.kernel_config.enable_cute_allreduce = True
+    config.parallel_config.tensor_parallel_size = 8
+    config.compilation_config.custom_ops = ["all", "+rms_norm", "+quant_fp8"]
+    config.compilation_config.pass_config.fuse_allreduce_rms = True
+    from vllm.transformers_utils.configs.qwen3_5_moe import Qwen3_5MoeTextConfig
+
+    model_path = tmp_path / "shape-config"
+    Qwen3_5MoeTextConfig(
+        hidden_size=8192,
+        num_experts_per_tok=10,
+        architectures=["Qwen3_5MoeForCausalLM"],
+    ).save_pretrained(model_path)
+    config.model_config = ModelConfig(
+        model=str(model_path),
+        dtype=torch.bfloat16,
+        skip_tokenizer_init=True,
+    )
+    config.device_config = DeviceConfig(device=torch.device("cuda", local_rank))
+    with set_current_vllm_config(config, check_compile=False):
+        ensure_model_parallel_initialized(8, 1)
+        runtime.initialize_for_config(config)
+        communicator = get_tp_group().device_communicator
+        owner = communicator.cute_allreduce
+        runtime.initialize_for_config(config)
+        assert communicator.cute_allreduce is owner
+        fusion = CuteAllReduceFusionPass(config)
+        backend = TestBackend(
+            fusion, FixFunctionalizationPass(config), PostCleanupPass(config)
+        )
+
+        def reference_norm(x, residual, weight):
+            reduced = tensor_model_parallel_all_reduce(x)
+            gamma = weight.float() + 1.0
+            if add_residual:
+                normalized, updated = vllm.ir.ops.fused_add_rms_norm(
+                    reduced, residual.clone(), gamma, 1e-6
+                )
+            else:
+                normalized = vllm.ir.ops.rms_norm(reduced, gamma, 1e-6)
+                updated = reduced
+            return normalized, updated
+
+        def forward(x, residual, weight, scale):
+            normalized, updated = reference_norm(x, residual, weight)
+            output = (
+                ops.scaled_fp8_quant(normalized, scale, group_shape=group_shape)[0]
+                if quantized
+                else normalized
+            )
+            return (output, updated, normalized) if fanout else (output, updated)
+
+        compiled = torch.compile(forward, backend=backend, dynamic=True, fullgraph=True)
+        weight = torch.ones(8192, dtype=torch.bfloat16, device="cuda") * 0.1
+        torch._dynamo.mark_static(weight, 0)
+        scale = torch.tensor([0.1], dtype=torch.float32, device="cuda")
+        # TP residuals are replicated; BT computes each token on its owner rank.
+        residual_generator = torch.Generator(device="cuda").manual_seed(173)
+        for rows in (16, 17):
+            x = torch.randn(rows, 8192, dtype=torch.bfloat16, device="cuda")
+            residual = torch.randn(
+                x.shape, dtype=x.dtype, device=x.device, generator=residual_generator
+            )
+            # Model weights fix the hidden width; only token count is dynamic.
+            torch._dynamo.mark_static(x, 1)
+            torch._dynamo.mark_static(residual, 1)
+            compiled(x, residual, weight, scale)
+            assert fusion.matched_count == 1
+            nodes = list(
+                find_op_nodes(
+                    torch.ops.vllm.cute_allreduce_norm.default, backend.graph_post_pass
+                )
+            )
+            assert len(nodes) == 1
+            assert (nodes[0].args[3] is not None) == (quantized and not fanout)
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph):
+                actual = compiled(x, residual, weight, scale)
+            for _ in range(2):
+                x.normal_()
+                residual.normal_(generator=residual_generator)
+                saved = x.clone(), residual.clone()
+                expected = forward(x, residual, weight, scale)
+                graph.replay()
+                torch.accelerator.synchronize()
+                if quantized:
+                    # Isolate FP8 conversion from AR/residual rounding differences.
+                    norm, _ = runtime.cute_allreduce_norm(
+                        x, residual if add_residual else None, weight, None, 1e-6
+                    )
+                    reference, _ = reference_norm(x, residual, weight)
+                    torch.testing.assert_close(norm, reference, atol=0.06, rtol=0.03)
+                    quantized_norm = ops.scaled_fp8_quant(norm, scale)[0]
+                    expected = (quantized_norm, *expected[1:])
+                for got, want in zip(actual, expected):
+                    if got.dtype == torch.float8_e4m3fn:
+                        torch.testing.assert_close(
+                            got.float(), want.float(), atol=0, rtol=0
+                        )
+                    else:
+                        torch.testing.assert_close(
+                            got.float(), want.float(), atol=0.06, rtol=0.03
+                        )
+                torch.testing.assert_close(x, saved[0], atol=0, rtol=0)
+                torch.testing.assert_close(residual, saved[1], atol=0, rtol=0)
+                assert actual[1].data_ptr() != residual.data_ptr()
+        # The functional operator retains the ordinary path past its capacity.
+        x = torch.randn(4097, 8192, dtype=torch.bfloat16, device="cuda")
+        residual = torch.randn(
+            x.shape, dtype=x.dtype, device=x.device, generator=residual_generator
+        )
+        expected = forward(x, residual, weight, scale)
+        actual = runtime.cute_allreduce_norm(
+            x,
+            residual if add_residual else None,
+            weight,
+            scale if quantized else None,
+            1e-6,
+        )
+        for got, want in zip(actual, expected):
+            torch.testing.assert_close(got.float(), want.float())
+        owner.destroy()
+        communicator.cute_allreduce = None
