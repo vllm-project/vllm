@@ -5,6 +5,7 @@ daemon via CUDA IPC instead of loading from disk."""
 
 import dataclasses
 import socket
+import time
 from copy import copy
 
 import torch
@@ -46,6 +47,7 @@ logger = init_logger(__name__)
 
 _CONNECT_TIMEOUT_S = 5.0
 _STATE_TIMEOUT_S = 300.0
+_STARTUP_RETRY_INTERVAL_S = 0.5
 
 
 class IpcModelLoader(BaseModelLoader):
@@ -295,7 +297,36 @@ class IpcModelLoader(BaseModelLoader):
             dp_rank=dp_group.rank_in_group,
             is_draft=self.is_draft,
         )
+        if not self.fallback:
+            return self._request_state_with_startup_wait(cache_config)
         return self._request_state(cache_config)
+
+    def _request_state_with_startup_wait(
+        self, cache_config: WeightCacheKey
+    ) -> WeightCacheState:
+        deadline = time.monotonic() + self.state_timeout_s
+        waiting_logged = False
+        while True:
+            try:
+                return self._request_state(cache_config)
+            except WeightCacheUnavailableError as e:
+                if time.monotonic() >= deadline:
+                    raise WeightCacheUnavailableError(
+                        "Weight cache daemon did not become ready within "
+                        f"{self.state_timeout_s:.1f}s"
+                    ) from e
+                if not waiting_logged:
+                    logger.info(
+                        "Waiting up to %.1fs for the weight cache daemon to start",
+                        self.state_timeout_s,
+                    )
+                    waiting_logged = True
+                time.sleep(
+                    max(
+                        0.0,
+                        min(_STARTUP_RETRY_INTERVAL_S, deadline - time.monotonic()),
+                    )
+                )
 
     def _request_state(self, cache_config: WeightCacheKey) -> WeightCacheState:
         with self._connect(self.state_timeout_s) as conn:

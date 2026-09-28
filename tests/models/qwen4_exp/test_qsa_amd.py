@@ -159,7 +159,7 @@ def _make_indexer(*, use_fused: bool, num_tokens: int = 2) -> QSAIndexer:
     indexer.raw_key_cache = SimpleNamespace(
         kv_cache=torch.zeros(1, 4, 1, head_dim + 12),
         key_cache=torch.zeros(1, 4, 1, head_dim),
-        rope_position_cache=torch.zeros(1, 4, 1, 3, dtype=torch.int64),
+        cache_rope_positions=True,
         rope_position_offset=head_dim,
     )
     indexer.compressed_key_cache = SimpleNamespace(

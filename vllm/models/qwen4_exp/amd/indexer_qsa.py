@@ -307,7 +307,7 @@ class QSAIndexer(nn.Module):
             mrope_section=getattr(self.rotary_emb, "mrope_section", None),
             rope_pos_offset=(
                 raw_key_cache.rope_position_offset
-                if raw_key_cache.rope_position_cache is not None
+                if raw_key_cache.cache_rope_positions
                 else None
             ),
         )
