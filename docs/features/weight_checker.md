@@ -43,9 +43,8 @@ curl -X POST $URL/resume
 
 ## Limitations
 
-- Between `reset` and the transfer the weights are invalid. Pause with
-  `mode=abort` or `mode=wait` so the prefix cache is cleared too; with
-  `mode=keep`, call `/reset_prefix_cache` before `/resume`.
+- Between `reset` and the transfer the weights are invalid, so pause before
+  `reset` and resume only after the transfer.
 - A request covers the engines managed by the API server it reaches. With
   several API servers (for example `--data-parallel-external-lb`), send it to
   each one.

@@ -36,39 +36,42 @@ def reset_reload_and_compare(url: str) -> None:
     }
 
 
-@pytest.fixture(scope="module")
+@pytest.fixture(scope="class")
 def server_url():
     with server() as url:
         yield url
 
 
-@pytest.mark.parametrize(
-    "payload",
-    [{}, {"action": "frobnicate"}, {"action": "compare"}, [], None],
-)
-def test_invalid_request_returns_400(server_url, payload):
-    response = requests.post(f"{server_url}/weight_checker", json=payload, timeout=10)
-    assert response.status_code == 400, response.text
-    assert health(server_url) == 200
+class TestSingleGPU:
+    @pytest.mark.parametrize(
+        "payload",
+        [{}, {"action": "frobnicate"}, {"action": "compare"}, [], None],
+    )
+    def test_invalid_request_returns_400(self, server_url, payload):
+        response = requests.post(
+            f"{server_url}/weight_checker", json=payload, timeout=10
+        )
+        assert response.status_code == 400, response.text
+        assert health(server_url) == 200
 
+    def test_checksum_is_stable_and_compare_reports_differences(self, server_url):
+        baseline = checksums(server_url)
+        assert all(
+            re.fullmatch(r"[0-9a-f]{64}", digest) for digest in baseline.values()
+        )
+        assert checksums(server_url) == baseline
 
-def test_checksum_is_stable_and_compare_reports_differences(server_url):
-    baseline = checksums(server_url)
-    assert all(re.fullmatch(r"[0-9a-f]{64}", digest) for digest in baseline.values())
-    assert checksums(server_url) == baseline
+        changed, missing, *_ = baseline
+        altered = {**baseline, changed: "0" * 64}
+        del altered[missing]
+        assert weight_checker(server_url, "compare", altered).json() == {
+            "match": False,
+            "mismatches": sorted([changed, missing]),
+        }
 
-    changed, missing, *_ = baseline
-    altered = {**baseline, changed: "0" * 64}
-    del altered[missing]
-    assert weight_checker(server_url, "compare", altered).json() == {
-        "match": False,
-        "mismatches": sorted([changed, missing]),
-    }
-
-
-def test_reset_changes_weights_and_reload_restores_them(server_url):
-    reset_reload_and_compare(server_url)
-    assert ok(gen(server_url))
+    def test_reset_changes_weights_and_reload_restores_them(self, server_url):
+        reset_reload_and_compare(server_url)
+        assert ok(gen(server_url))
 
 
 @multi_gpu_test(num_gpus=4)
