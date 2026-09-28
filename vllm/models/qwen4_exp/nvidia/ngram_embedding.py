@@ -22,6 +22,7 @@ from ..common.ngram_embedding import (
     Qwen4ExpPLEEmbedding,
     Qwen4ExpPLEEmbeddingMethod,
     Qwen4ExpPLEFp8EmbeddingMethod,
+    Qwen4ExpPLEINCEmbeddingMethod,
     Qwen4ExpPLEPinnedHostEmbedding,
     Qwen4ExpPLEUnquantizedEmbeddingMethod,
 )
@@ -34,6 +35,7 @@ __all__ = [
     "Qwen4ExpPLEEmbedding",
     "Qwen4ExpPLEEmbeddingMethod",
     "Qwen4ExpPLEFp8EmbeddingMethod",
+    "Qwen4ExpPLEINCEmbeddingMethod",
     "Qwen4ExpPLEPinnedHostEmbedding",
     "Qwen4ExpPLEUnquantizedEmbeddingMethod",
     "Qwen4ExpNGramEmbedding",

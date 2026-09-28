@@ -16,6 +16,7 @@ import vllm.model_executor.parameter as parameter_module
 import vllm.models.qwen4_exp.common.ngram_embedding as ngram_embedding_module
 from vllm.config.quantization import QuantizationConfigArgs
 from vllm.model_executor.layers.quantization.fp8 import Fp8Config
+from vllm.model_executor.layers.quantization.inc import INCConfig
 from vllm.model_executor.layers.quantization.modelopt import (
     ModelOptMixedPrecisionConfig,
     ModelOptNvFp4Config,
@@ -36,6 +37,7 @@ from vllm.models.qwen4_exp.nvidia.ngram_embedding import (
     Qwen4ExpPLEDeviceEmbedding,
     Qwen4ExpPLEEmbeddingMethod,
     Qwen4ExpPLEFp8EmbeddingMethod,
+    Qwen4ExpPLEINCEmbeddingMethod,
     Qwen4ExpPLEPinnedHostEmbedding,
     Qwen4ExpPLEUnquantizedEmbeddingMethod,
 )
@@ -420,6 +422,44 @@ def test_ple_fp8_embedding_respects_checkpoint_shard_exclusions() -> None:
     assert isinstance(
         Qwen4ExpPLEEmbeddingMethod.from_quant_config(None, prefix),
         Qwen4ExpPLEUnquantizedEmbeddingMethod,
+    )
+
+
+def test_ple_inc_embedding_loads_only_bf16_checkpoint_shards() -> None:
+    method = Qwen4ExpPLEEmbeddingMethod.from_quant_config(
+        INCConfig(weight_bits=4, group_size=128),
+        "model.layers.1.ple.ple_embedding.ngram_embedding",
+    )
+    assert isinstance(method, Qwen4ExpPLEINCEmbeddingMethod)
+
+    embedding = Qwen4ExpPLEDeviceEmbedding.__new__(Qwen4ExpPLEDeviceEmbedding)
+    nn.Module.__init__(embedding)
+    method.create_weights(
+        embedding,
+        input_size_per_partition=2,
+        output_partition_sizes=[4],
+        input_size=4,
+        output_size=4,
+        params_dtype=torch.bfloat16,
+        weight_loader=partial(copy_ple_embedding_shard_, tp_start=2, tp_end=6),
+    )
+    embedding.weight.data.fill_(-1)
+    bf16_shard = torch.arange(8, dtype=torch.float32).reshape(4, 2).bfloat16()
+
+    embedding.weight.weight_loader(
+        embedding.weight, bf16_shard, checkpoint_start=0
+    )
+    torch.testing.assert_close(embedding.weight[:2], bf16_shard[2:])
+    torch.testing.assert_close(
+        embedding.weight[2:], torch.full_like(embedding.weight[2:], -1)
+    )
+
+    with pytest.raises(ValueError, match="only supports BF16 checkpoint weights"):
+        embedding.weight.weight_loader(
+            embedding.weight, bf16_shard.half(), checkpoint_start=4
+        )
+    torch.testing.assert_close(
+        embedding.weight[2:], torch.full_like(embedding.weight[2:], -1)
     )
 
 
