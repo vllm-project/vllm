@@ -268,6 +268,12 @@ class Plamo3Parser(ParserEngine):
         delta.reasoning = self._strip_unfinished_marker(delta.reasoning)
         if not self.skip_tool_parsing:
             delta.content = self._strip_unfinished_marker(delta.content)
+        # The flush emits the remaining (never-streamed) tool-call
+        # arguments; an empty remainder must match non-streaming
+        # extraction (_extract_args_json), which normalizes it to '{}'.
+        for tc in delta.tool_calls or []:
+            if tc.function is not None and not (tc.function.arguments or "").strip():
+                tc.function.arguments = "{}"
         if delta.reasoning is None and delta.content is None and not delta.tool_calls:
             return None
         return delta

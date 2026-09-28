@@ -288,14 +288,10 @@ def test_multiple_calls_keep_indices_ids_and_arguments_separate(
     expected = [{"name": "weather", "arguments": '{"city":"東京"}'}]
     if truncated_second:
         expected.append({"name": "clo", "arguments": "{}"})
-        stream_expected = [
-            *expected[:-1],
-            {"name": "clo", "arguments": ""},
-        ]
     else:
         output += END_TOOL_REQUESTS
         expected.append({"name": "clock", "arguments": '{"timezone":"Asia/Tokyo"}'})
-        stream_expected = expected
+    stream_expected = expected
     _, content, calls = parser_cls(mock_tokenizer).parse(
         output, mock_request, enable_auto_tools=True
     )
@@ -464,6 +460,36 @@ def test_tool_block_can_end_reasoning_implicitly(
     result = collect_output(_stream(parser_cls(mock_tokenizer), mock_tokenizer, output))
     assert (result.reasoning, result.content) == ("reasoning", "")
     assert result.tool_calls == [{"name": "weather", "arguments": "{}"}]
+
+
+def test_every_cut_point_matches_non_streaming(
+    parser_cls, mock_tokenizer, mock_request
+):
+    output = (
+        BEGIN_THINK
+        + "Reasoning. "
+        + END_THINK
+        + "Before tools. "
+        + BEGIN_TOOL_REQUESTS
+        + _tool_call("weather", '{"city":"東京"}')
+        + END_TOOL_REQUESTS
+        + EOT
+    )
+    ids = mock_tokenizer.encode(output, add_special_tokens=False)
+    for k in range(1, len(ids) + 1):
+        prefix = mock_tokenizer.decode(ids[:k])
+        reasoning, content, calls = parser_cls(mock_tokenizer).parse(
+            prefix, mock_request, enable_auto_tools=True
+        )
+        result = collect_output(
+            _stream(parser_cls(mock_tokenizer), mock_tokenizer, prefix)
+        )
+        assert (result.reasoning, result.content) == (
+            (reasoning or ""),
+            (content or ""),
+        ), k
+        expected = [{"name": c.name, "arguments": c.arguments} for c in (calls or [])]
+        assert result.tool_calls == expected, (k, expected, result.tool_calls)
 
 
 @pytest.mark.parametrize(
