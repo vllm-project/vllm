@@ -18,11 +18,19 @@ from __future__ import annotations
 
 import functools
 import json
+from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
 import regex as re
 
-from vllm.parser.engine.events import EventType
+from vllm.entrypoints.generate.base.protocol import (
+    DeltaMessage,
+    DeltaToolCall,
+    ExtractedToolCallInformation,
+    FunctionCall,
+    ToolCall,
+)
+from vllm.parser.engine.events import EventType, SemanticEvent
 from vllm.parser.engine.parser_engine import ParserEngine
 from vllm.parser.engine.parser_engine_config import (
     ParserEngineConfig,
@@ -55,6 +63,9 @@ _PARAM_RE = re.compile(
     re.DOTALL,
 )
 _PARTIAL_PARAM_RE = re.compile(r"<\s*parameter\s*=\s*([^>]+)>(.*)$", re.DOTALL)
+_PARAM_OPEN_RE = re.compile(r"<\s*parameter\s*=\s*([^>]*)>")
+_FUNC_OPEN_RE = re.compile(r"<function=([^>]*)>")
+_FUNC_BODY_RE = re.compile(r"<function=[^>]*>(.*)</function>", re.DOTALL)
 
 
 def _trim_wrapping_newlines(value: str) -> str:
@@ -64,6 +75,27 @@ def _trim_wrapping_newlines(value: str) -> str:
     if value.endswith("\n"):
         value = value[:-1]
     return value
+
+
+def _greedy_qwen_args(raw_args: str) -> str:
+    """Keep the first parameter through the final closer.
+
+    Used when closers outnumber openers, so a later ``<parameter=`` tag is
+    text inside the value rather than another parameter.
+    """
+    match = _PARAM_OPEN_RE.search(raw_args)
+    if match is None:
+        return "{}"
+    name = match.group(1).strip()
+    if not name:
+        return "{}"
+    end = raw_args.rfind(PARAM_END)
+    value_start = match.end()
+    value = raw_args[value_start:] if end < value_start else raw_args[value_start:end]
+    return json.dumps(
+        {name: _trim_wrapping_newlines(value)},
+        ensure_ascii=False,
+    )
 
 
 def _qwen3_arg_converter(raw_args: str, partial: bool) -> str:
@@ -227,6 +259,8 @@ class Qwen3Parser(ParserEngine):
         tools: list[Tool] | None = None,
         **kwargs,
     ) -> None:
+        self._qwen_source_text = ""
+        self._held_later_calls: list[DeltaToolCall] = []
         chat_kwargs = kwargs.get("chat_template_kwargs", {}) or {}
         self.thinking_enabled = chat_kwargs.get("enable_thinking", True)
         kwargs.setdefault(
@@ -246,6 +280,114 @@ class Qwen3Parser(ParserEngine):
             tools,
             **kwargs,
         )
+
+    def _reset(self, initial_state: ParserState | None = None) -> None:
+        super()._reset(initial_state=initial_state)
+        self._qwen_source_text = ""
+        self._held_later_calls = []
+
+    def _feed(
+        self,
+        delta_text: str,
+        delta_token_ids: Sequence[int],
+    ) -> list[SemanticEvent]:
+        self._qwen_source_text += delta_text
+        return super()._feed(delta_text, delta_token_ids)
+
+    def _closers_exceed_openers(self, text: str) -> bool:
+        """True when a closer was copied into a parameter value.
+
+        The model's own closer then has no matching opener. Balanced
+        parallel calls do not.
+        """
+        pairs = (
+            (PARAM_START, PARAM_END),
+            (FUNC_PREFIX, FUNC_END),
+            (self.TOOL_START, self.TOOL_END),
+        )
+        return any(text.count(closer) > text.count(opener) for opener, closer in pairs)
+
+    def _collapsed_call(self, text: str) -> tuple[str, str] | None:
+        opened = _FUNC_OPEN_RE.search(text)
+        if opened is None:
+            return None
+        name = opened.group(1).strip()
+        if not name or not self._accept_tool_name(name):
+            return None
+        body_match = _FUNC_BODY_RE.search(text)
+        body = body_match.group(1) if body_match is not None else ""
+        args_json = self._fix_arg_types(_greedy_qwen_args(body), name)
+        return name, args_json
+
+    def _build_extracted_result(
+        self,
+        *deltas: DeltaMessage | None,
+    ) -> ExtractedToolCallInformation:
+        result = super()._build_extracted_result(*deltas)
+        text = self._qwen_source_text
+        if not text or not self._closers_exceed_openers(text):
+            return result
+        collapsed = self._collapsed_call(text)
+        if collapsed is None:
+            if len(result.tool_calls) <= 1:
+                return result
+            return ExtractedToolCallInformation(
+                tools_called=True,
+                tool_calls=result.tool_calls[:1],
+                content=result.content,
+            )
+        name, args_json = collapsed
+        call_id = result.tool_calls[0].id if result.tool_calls else None
+        tool_call = ToolCall(
+            function=FunctionCall(name=name, arguments=args_json),
+            **({"id": call_id} if call_id else {}),
+        )
+        return ExtractedToolCallInformation(
+            tools_called=True,
+            tool_calls=[tool_call],
+            content=result.content,
+        )
+
+    def _park_later_calls(self, delta: DeltaMessage | None) -> DeltaMessage | None:
+        if delta is None or not delta.tool_calls:
+            return delta
+        kept: list[DeltaToolCall] = []
+        for call in delta.tool_calls:
+            if call.index > 0:
+                self._held_later_calls.append(call)
+            else:
+                kept.append(call)
+        delta.tool_calls = kept
+        if not delta.tool_calls and not delta.content and not delta.reasoning:
+            return None
+        return delta
+
+    def _release_held_calls(self, delta: DeltaMessage | None) -> DeltaMessage | None:
+        delta = self._park_later_calls(delta)
+        later = self._held_later_calls
+        self._held_later_calls = []
+        if not later or self._closers_exceed_openers(self._qwen_source_text):
+            return delta
+        if delta is None:
+            return DeltaMessage(tool_calls=later)
+        delta.tool_calls = list(delta.tool_calls) + later
+        return delta
+
+    def _events_to_delta(
+        self,
+        events: list[SemanticEvent],
+        finished: bool = False,
+    ) -> DeltaMessage | None:
+        delta = super()._events_to_delta(events, finished=finished)
+        if finished:
+            return self._release_held_calls(delta)
+        return self._park_later_calls(delta)
+
+    def finish_streaming(self) -> DeltaMessage | None:
+        delta = super().finish_streaming()
+        if self._held_later_calls:
+            return self._release_held_calls(delta)
+        return delta
 
     def extract_reasoning(
         self,
