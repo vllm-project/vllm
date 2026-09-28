@@ -41,6 +41,7 @@ def chunk_kda_prefill(
     chunk_indices: torch.Tensor | None = None,
     chunk_offsets: torch.Tensor | None = None,
     use_fused_chunk: bool = False,
+    use_gluon_chunk: bool = False,
     out: torch.Tensor | None = None,
     checkpoint_state: torch.Tensor | None = None,
     checkpoint_offsets: torch.Tensor | None = None,
@@ -98,6 +99,15 @@ def chunk_kda_prefill(
             raise ValueError("state_cache replaces initial_state/output_final_state")
         if state_indices is None or has_initial_state is None:
             raise ValueError("state_cache needs state_indices and has_initial_state")
+
+    if use_gluon_chunk:
+        from aiter.ops.triton.attention.chunk_kda import chunk_kda
+
+        return chunk_kda(
+            q, k, v, raw_g, raw_beta, A_log, g_bias, lower_bound, cu_seqlens,
+            chunk_indices, chunk_offsets, scale, out, initial_state,
+            output_final_state, state_cache, state_indices, has_initial_state,
+        )  # fmt: skip
 
     # Only the fused walk addresses the paged rows directly. The Triton path
     # gathers the rows it needs and scatters the results back here, so callers

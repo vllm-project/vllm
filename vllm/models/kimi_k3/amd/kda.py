@@ -234,9 +234,20 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
         self.use_fused_chunk = backend == "fused" or (
             backend == "auto" and is_fused_kda_chunk_supported()
         )
+        # aiter's Gluon chunk kernel needs the bounded (safe) gate.
+        self.use_gluon_chunk = (
+            backend == "auto"
+            and on_gfx1250()
+            and rocm_aiter_ops.is_enabled()
+            and self.use_safe_gate
+        )
         logger.info_once(
             "Kimi-K3 KDA prefill backend: %s",
-            "fused" if self.use_fused_chunk else "triton",
+            "fused"
+            if self.use_fused_chunk
+            else "gluon"
+            if self.use_gluon_chunk
+            else "triton",
         )
 
         self.o_norm = FusedRMSNormGated(self.head_dim, activation="sigmoid")
@@ -608,6 +619,7 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
                     chunk_indices=m.chunk_indices,
                     chunk_offsets=m.chunk_offsets,
                     use_fused_chunk=use_fused_chunk,
+                    use_gluon_chunk=self.use_gluon_chunk,
                     out=core_attn_out[:, nd_tok:num_actual_tokens] if direct else None,
                 )
                 # chunk_kda_prefill updates `recurrent_state` in place, so
