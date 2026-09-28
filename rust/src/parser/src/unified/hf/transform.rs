@@ -186,7 +186,7 @@ impl FieldTransform {
 }
 
 /// Python type name of a JSON value, for error messages.
-pub(super) fn python_type_name(value: &Value) -> &'static str {
+fn python_type_name(value: &Value) -> &'static str {
     match value {
         Value::Null => "NoneType",
         Value::Bool(_) => "bool",

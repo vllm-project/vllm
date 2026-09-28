@@ -20,7 +20,8 @@
 use std::mem::take;
 use std::sync::Arc;
 
-use serde_json::Value;
+use serde::Deserialize;
+use serde_json::{Map, Value};
 use thiserror_ext::AsReport as _;
 use vllm_tokenizer::{DecodedText, DynTokenizer, TokenAnchor, TokenAttribution};
 use winnow::error::{ErrMode, ModalResult};
@@ -32,7 +33,6 @@ use super::template::{
     FieldName, Region, RegionKind, Repeat, ResponseTemplate, TextRegion, TextRole, ToolCallRegion,
     Watch, WatchKind,
 };
-use super::transform::python_type_name;
 use super::{unsupported, value};
 use crate::tool::{Tool, ToolCallDelta, ToolSchemas};
 use crate::unified::{Result, UnifiedParser, UnifiedParserOutput, parsing_failed};
@@ -518,40 +518,65 @@ fn push_dropped_reasoning(output: &mut UnifiedParserOutput, dropped: DecodedText
     });
 }
 
+/// One tool call produced by a tool-call region, after its transform.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum ToolCallValue {
+    /// The OpenAI shape `{"type": "function", "function": {...}}`.
+    Wrapped { function: FunctionValue },
+    /// The bare `{"name", "arguments"}` shape.
+    Bare(FunctionValue),
+}
+
+#[derive(Deserialize)]
+struct FunctionValue {
+    name: String,
+    /// Missing or `null` arguments become `{}`.
+    #[serde(default)]
+    arguments: Option<ArgumentsValue>,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum ArgumentsValue {
+    /// An argument object, typed by the tool schema.
+    Object(Map<String, Value>),
+    /// Pre-serialized or non-JSON arguments (e.g. an `allow_non_json`
+    /// fallback), passed through unchanged.
+    Text(String),
+    /// Any other JSON value, serialized as is.
+    Other(Value),
+}
+
 /// Extract the function name and serialized arguments of one tool-call value.
 ///
-/// Accepts the OpenAI shape `{"function": {"name", "arguments"}}` and the bare
-/// `{"name", "arguments"}` shape. String argument values are converted by the
-/// calling tool's parameter schema, as for the other tool parsers. Missing arguments become `{}`; string
-/// arguments (e.g. `allow_non_json` fallbacks) pass through unchanged.
+/// String argument values are converted by the calling tool's parameter
+/// schema, as for the other tool parsers.
 fn call_parts(call: Value, tool_schemas: &ToolSchemas) -> Result<(String, String)> {
-    let Value::Object(mut call) = call else {
-        return Err(value!("tool call must be a dict, got {}", python_type_name(&call)).into());
-    };
-    let mut function = match call.remove("function") {
-        Some(Value::Object(function)) => function,
-        Some(other) => {
-            return Err(value!(
-                "tool call 'function' must be a dict, got {}",
-                python_type_name(&other)
+    let (ToolCallValue::Wrapped { function } | ToolCallValue::Bare(function)) =
+        ToolCallValue::deserialize(&call).map_err(|_| {
+            value!(
+                "tool call must be {{\"function\": {{\"name\": ..., \"arguments\": ...}}}} or \
+                 {{\"name\": ..., \"arguments\": ...}} with a string name, got {call}"
             )
-            .into());
-        }
-        None => call,
-    };
-    let Some(Value::String(name)) = function.get("name").cloned() else {
-        return Err(value!("tool call has no string function name").into());
-    };
-    if let Some(Value::Object(arguments)) = function.get_mut("arguments") {
-        tool_schemas.convert_json_arguments(&name, arguments);
-    }
-    let arguments = match function.get("arguments") {
+        })?;
+    let FunctionValue { name, arguments } = function;
+    let arguments = match arguments {
         None => "{}".to_string(),
-        Some(Value::String(arguments)) => arguments.clone(),
-        Some(arguments) => serde_json::to_string(arguments)
-            .map_err(|error| value!("failed to serialize tool arguments: {}", error.as_report()))?,
+        Some(ArgumentsValue::Text(arguments)) => arguments,
+        Some(ArgumentsValue::Object(mut arguments)) => {
+            tool_schemas.convert_json_arguments(&name, &mut arguments);
+            serialize_arguments(&arguments)?
+        }
+        Some(ArgumentsValue::Other(arguments)) => serialize_arguments(&arguments)?,
     };
     Ok((name, arguments))
+}
+
+/// Serialize tool-call arguments to JSON text.
+fn serialize_arguments(arguments: &impl serde::Serialize) -> Result<String> {
+    serde_json::to_string(arguments)
+        .map_err(|error| value!("failed to serialize tool arguments: {}", error.as_report()).into())
 }
 
 /// Parse one step: safe text before the next candidate, or a boundary at it.

@@ -917,3 +917,31 @@ fn differential_against_transformers() {
         }
     }
 }
+
+#[test]
+fn tool_call_value_shapes() {
+    // No transform: the parsed JSON is the tool call itself.
+    let template = compile(json!({
+        "start_anchor": "<|assistant|>",
+        "fields": {"tool_calls": {"open": "<tool_call>", "close": "</tool_call>", "content": "json"}},
+    }));
+    let parse =
+        |text: &str| parse_events(&template, &[], "", &[text]).map(|events| message(&events));
+
+    assert_eq!(
+        parse(r#"<tool_call>{"type": "function", "function": {"name": "f", "arguments": {"a": 1}}}</tool_call>"#).unwrap(),
+        json!({"tool_calls": [{"name": "f", "arguments": {"a": 1}}]})
+    );
+    assert_eq!(
+        parse(r#"<tool_call>[{"name": "f", "arguments": null}, {"name": "g", "arguments": "raw"}]</tool_call>"#).unwrap(),
+        json!({"tool_calls": [{"name": "f", "arguments": {}}, {"name": "g", "arguments": "raw"}]})
+    );
+    expect_test::expect![[r#"
+        HfTemplate(
+            Value {
+                message: "tool call must be {\"function\": {\"name\": ..., \"arguments\": ...}} or {\"name\": ..., \"arguments\": ...} with a string name, got {\"name\":1}",
+            },
+        )
+    "#]]
+        .assert_debug_eq(&parse(r#"<tool_call>{"name": 1}</tool_call>"#).unwrap_err());
+}
