@@ -180,7 +180,7 @@ def test_merge_preserves_get_and_clear_fields():
         kv_cache_events=make_events(1, 2, 3, 4),
         expected_finished_count=2,
     )
-    aggregator.merge_kv_connector_output([salvaged, None])
+    aggregator.merge_failed_kv_outputs_for_ft([salvaged, None])
     assert aggregator._expected_finished_count == 2
 
     # Recovered step: both workers succeed.
@@ -214,7 +214,7 @@ def test_merge_seeds_pending_finished_recving():
     aggregator = KVOutputAggregator(expected_finished_count=2)
 
     # Failed step: req1's recv votes completed (2/2), flagged as failed.
-    aggregator.merge_kv_connector_output(
+    aggregator.merge_failed_kv_outputs_for_ft(
         [
             KVConnectorOutput(finished_recving={"req1"}),
             KVConnectorOutput(finished_recving={"req1"}, failed_recving={"req1"}),
@@ -236,7 +236,7 @@ def test_merge_kv_cache_events_do_not_raise_quorum():
     aggregator = KVOutputAggregator(expected_finished_count=2)
 
     # Failed step: only worker 0 reported event E0.
-    aggregator.merge_kv_connector_output(
+    aggregator.merge_failed_kv_outputs_for_ft(
         [KVConnectorOutput(kv_cache_events=make_events(1, 2, 3, 4)), None]
     )
 

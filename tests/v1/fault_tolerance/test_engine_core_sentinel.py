@@ -20,7 +20,7 @@ def _model_output(kv_connector_output: KVConnectorOutput | None) -> ModelRunnerO
 
 
 def _done_future(result=None, exception=None) -> Future:
-    future = Future()
+    future: Future = Future()
     if exception is not None:
         future.set_exception(exception)
     else:

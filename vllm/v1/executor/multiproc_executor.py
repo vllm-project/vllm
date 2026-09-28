@@ -484,7 +484,7 @@ class MultiprocExecutor(Executor):
             # If any worker failed, extract KV connector outputs, merge them,
             # then raise exception
             if has_failure:
-                kv_connector_outputs = []
+                kv_connector_outputs: list[KVConnectorOutput | None] = []
                 for resp in responses:
                     if isinstance(resp, KVConnectorOutput):
                         kv_connector_outputs.append(resp)
@@ -494,7 +494,9 @@ class MultiprocExecutor(Executor):
                             kv_connector_outputs.append(kv_output)
                 
                 if kv_connector_outputs and kv_output_aggregator is not None:
-                    kv_output_aggregator.merge_kv_connector_output(kv_connector_outputs)
+                    kv_output_aggregator.merge_failed_kv_outputs_for_ft(
+                        kv_connector_outputs
+                    )
                 
                 raise RuntimeError("One or more workers failed")
             
@@ -1065,7 +1067,7 @@ class WorkerProc:
         if isinstance(output, ExceptionWithKVConnectorOutput):
             # FT scenario: worker failed but we extracted KV connector state
             # so that KV transfer progress is not lost.
-            result = (
+            result: tuple[WorkerProc.ResponseStatus, Any] = (
                 WorkerProc.ResponseStatus.FAILURE_WITH_KV_OUTPUT,
                 output.kv_connector_output,
             )

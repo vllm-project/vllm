@@ -23,7 +23,11 @@ from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.outputs import KVConnectorOutput, ModelRunnerOutput
 
 if TYPE_CHECKING:
+    from vllm.distributed.kv_events import KVConnectorKVEvents
     from vllm.distributed.kv_transfer.kv_connector.base import KVConnectorBase
+    from vllm.distributed.kv_transfer.kv_connector.v1.base import (
+        KVConnectorWorkerMetadata,
+    )
 
 logger = init_logger(__name__)
 
@@ -69,8 +73,8 @@ class KVOutputAggregator:
         # Pending worker meta / kv cache events from failed workers
         # (get-and-clear APIs, so they must be preserved until the next
         # aggregate() surfaces them)
-        self._pending_kv_connector_worker_meta = None
-        self._pending_kv_cache_events = None
+        self._pending_kv_connector_worker_meta: KVConnectorWorkerMetadata | None = None
+        self._pending_kv_cache_events: KVConnectorKVEvents | None = None
 
     @classmethod
     def from_connector(cls, connector: "KVConnectorBase", world_size: int):
@@ -211,21 +215,14 @@ class KVOutputAggregator:
 
         return output
 
-    def merge_kv_connector_output(
+    def merge_failed_kv_outputs_for_ft(
         self, kv_connector_outputs: list[KVConnectorOutput | None]
     ) -> None:
-        """Merge KV connector outputs from failed workers into the aggregator.
+        """Merge KV outputs salvaged from failed workers into pending state.
 
-        Unlike aggregate(), this method does NOT return the merged result.
-        It only updates the internal state (remaining count dictionaries,
-        invalid_block_ids, failed_recving, and the get-and-clear fields
-        kv_connector_worker_meta / kv_cache_events), so that when all
-        workers recover and complete successfully in a future step, the
-        finished requests can be properly identified and returned.
-
-        This is used in fault tolerance scenarios where some workers fail
-        but their KV transfer progress needs to be preserved for later
-        aggregation.
+        Unlike aggregate(), this only updates internal state (remaining
+        counts, invalid_block_ids, failed_recving, and get-and-clear fields)
+        so the salvaged progress is surfaced at a later aggregate() call.
         """
 
         def update_remaining_count(
