@@ -14,8 +14,7 @@ from vllm.v1.kv_offload.cpu.policies.base import (
 
 
 class LRUCachePolicy(CachePolicy):
-    """
-    LRU caching policy with logical recency independent of transfer pinning.
+    """LRU caching policy with logical recency independent of transfer pinning.
 
     Evictable chunks live in a lazy-invalidating min-heap. A chunk's recency
     can therefore be updated while it is pinned; when it later becomes

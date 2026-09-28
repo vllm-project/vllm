@@ -136,6 +136,7 @@ def mistral_config(
 
     Returns:
         A frozen :class:`ParserEngineConfig` with ``initial_state=CONTENT``.
+
     """
     if reasoning_encoding == "special_token":
         think_start = _THINK_START_SPECIAL
@@ -467,6 +468,7 @@ class MistralParser(ParserEngine):
 
         Returns:
             A JSON Schema dict, or ``None`` if the named tool is not found.
+
         """
         tool_choice = request.tool_choice
         tools = request.tools or []

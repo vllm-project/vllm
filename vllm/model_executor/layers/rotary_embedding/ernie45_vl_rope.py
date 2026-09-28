@@ -8,7 +8,7 @@ from .mrope import MRotaryEmbedding
 
 
 class Ernie4_5_VLRotaryEmbedding(MRotaryEmbedding):
-    """3D rotary positional embedding. 3D is t:time h:height w:width"""
+    """3D rotary positional embedding. 3D is t:time h:height w:width."""
 
     def forward_native(  # type: ignore[override]
         self,
