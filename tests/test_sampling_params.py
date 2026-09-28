@@ -113,6 +113,7 @@ def test_narrow_diffusion_canvas_requires_async_scheduling(
         diffusion_config=DiffusionConfig(canvas_length=8),
         tokenizer=None,
         validate_logits_processors_params=lambda params: None,
+        resolve_watermarking=lambda params: False,
     )
     params = SamplingParams(extra_args=extra_args)
     if not async_scheduling and extra_args.get("diffusion_canvas_length") == 4:
