@@ -2706,12 +2706,10 @@ def get_kv_cache_configs(
     if vllm_config.cache_config.enable_kvpp:
         from vllm.v1.kv_cache_placement import get_layer_sharded_capacity
 
-        if placements is None:
-            raise ValueError("Layer-sharded KV needs worker placement metadata.")
-        if len(placements) != len(available_memory) or len(placements) != len(
-            projected_groups_per_worker
-        ):
-            raise ValueError("Each worker must provide its KV placement and budget.")
+        assert placements is not None, "KVPP requires worker placement metadata."
+        assert (
+            len(placements) == len(available_memory) == len(projected_groups_per_worker)
+        ), "KVPP placement, budget, and worker counts must match."
         layout = vllm_config.cache_config.get_resolved_kv_cache_layout()
         capacities = [
             get_layer_sharded_capacity(groups, placement, layout, available)
