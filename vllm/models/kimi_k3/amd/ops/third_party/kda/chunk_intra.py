@@ -210,17 +210,18 @@ def chunk_kda_fwd_kernel_inter_solve_fused(
     # save off-diagonal Aqk blocks and prepare Akk
     ################################################################################
     desc_Aqk = make_tensor_descriptor(Aqk, [T, BT], [HV * BT, 1], [BC, BC])
-    desc_beta = make_tensor_descriptor(beta + bos * HV + i_hv, [T], [HV], [BC])
+    p_beta = beta + bos * HV + i_hv
+    o_bc = tl.arange(0, BC)
     if i_tc1 < T:
         desc_Aqk.store([i_tc1, 0], (b_Aqk10 * scale).to(desc_Aqk.dtype))
 
-        b_b1 = desc_beta.load([i_tc1]).to(tl.float32)
+        b_b1 = tl.load(p_beta + (i_tc1 + o_bc) * HV, mask=i_tc1 + o_bc < T, other=0).to(tl.float32)
         b_Akk10 = b_Akk10 * b_b1[:, None]
     if i_tc2 < T:
         desc_Aqk.store([i_tc2, 0], (b_Aqk20 * scale).to(desc_Aqk.dtype))
         desc_Aqk.store([i_tc2, BC], (b_Aqk21 * scale).to(desc_Aqk.dtype))
 
-        b_b2 = desc_beta.load([i_tc2]).to(tl.float32)
+        b_b2 = tl.load(p_beta + (i_tc2 + o_bc) * HV, mask=i_tc2 + o_bc < T, other=0).to(tl.float32)
         b_Akk20 = b_Akk20 * b_b2[:, None]
         b_Akk21 = b_Akk21 * b_b2[:, None]
     if i_tc3 < T:
@@ -228,7 +229,7 @@ def chunk_kda_fwd_kernel_inter_solve_fused(
         desc_Aqk.store([i_tc3, BC], (b_Aqk31 * scale).to(desc_Aqk.dtype))
         desc_Aqk.store([i_tc3, 2 * BC], (b_Aqk32 * scale).to(desc_Aqk.dtype))
 
-        b_b3 = desc_beta.load([i_tc3]).to(tl.float32)
+        b_b3 = tl.load(p_beta + (i_tc3 + o_bc) * HV, mask=i_tc3 + o_bc < T, other=0).to(tl.float32)
         b_Akk30 = b_Akk30 * b_b3[:, None]
         b_Akk31 = b_Akk31 * b_b3[:, None]
         b_Akk32 = b_Akk32 * b_b3[:, None]
@@ -405,12 +406,11 @@ def chunk_kda_fwd_kernel_intra_sub_chunk(
     desc_q = make_tensor_descriptor(q, [T, K], [H * K, 1], [BC, BK])
     desc_k = make_tensor_descriptor(k, [T, K], [H * K, 1], [BC, BK])
     desc_g = make_tensor_descriptor(g, [T, K], [HV * K, 1], [BC, BK])
-    desc_beta = make_tensor_descriptor(beta, [T], [HV], [BC])
 
     b_q = desc_q.load([i_ti, 0])
     b_k = desc_k.load([i_ti, 0])
     b_g = desc_g.load([i_ti, 0])
-    b_beta = desc_beta.load([i_ti]).to(tl.float32)
+    b_beta = tl.load(beta + o_c * HV, mask=m_c, other=0).to(tl.float32)
 
     if USE_GATHER:
         b_gn = gather(

@@ -94,8 +94,8 @@ def recompute_w_u_fwd_kernel(
         T = eos - bos
     else:
         bos, eos = i_b * T, i_b * T + T
-    desc_b = make_tensor_descriptor(beta + bos * H + i_h, [T], [H], [BT])
-    b_b = desc_b.load([i_t * BT]).to(tl.float32)
+    o_b = i_t * BT + tl.arange(0, BT)
+    b_b = tl.load(beta + (bos + o_b) * H + i_h, mask=o_b < T, other=0).to(tl.float32)
 
     desc_A = make_tensor_descriptor(A + (bos * H + i_h) * BT, [T, BT], [H * BT, 1], [BT, BT])
     b_A = desc_A.load([i_t * BT, 0])
