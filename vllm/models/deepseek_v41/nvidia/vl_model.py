@@ -331,3 +331,11 @@ class DeepseekV41ForCausalLM(
         if getattr(self, "_weights_finalized", False):
             return
         self.language_model.process_weights_after_loading()
+        self._weights_finalized = True
+
+    def create_reload_state(self, key: str):
+        from vllm.model_executor.model_loader.reload.model import (
+            create_deepseek_model_reload_state,
+        )
+
+        return create_deepseek_model_reload_state(self, key)

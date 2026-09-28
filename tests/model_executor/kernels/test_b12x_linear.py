@@ -38,7 +38,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8StaticTensorSym,
     kMxfp4Dynamic,
 )
-from vllm.platforms import PlatformEnum
+from vllm.platforms import PlatformEnum, current_platform
 
 
 @pytest.mark.parametrize(
@@ -290,6 +290,132 @@ def test_b12x_tensor_fp8_process_weights_packs_modelopt_layout(
     assert layer.weight.weight_loader is weight_loader
     assert layer.weight_scale.weight_loader is scale_loader
     torch.testing.assert_close(layer.input_scale, torch.tensor(0.5))
+
+
+@pytest.mark.parametrize("preserve", [False, True])
+@pytest.mark.parametrize("incompatible_layout", [False, True])
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="Requires CUDA FP8 requant")
+def test_b12x_tensor_fp8_reload_trace_keeps_nested_packed_storage(
+    monkeypatch, preserve, incompatible_layout
+) -> None:
+    """A packer test double checks storage lifecycle, not B12x numerical packing."""
+    import vllm.utils.b12x as b12x_utils
+    from vllm.model_executor.layers.quantization.fp8 import Fp8Config, Fp8LinearMethod
+    from vllm.model_executor.model_loader.reload.trace import (
+        ModelReloadTracer,
+        ReloadError,
+    )
+    from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+
+    @dataclass(frozen=True)
+    class Scales:
+        alpha: torch.Tensor
+
+    @dataclass(frozen=True)
+    class PackedWeight:
+        values: torch.Tensor
+        scales: Scales
+        out_features: int
+
+    change_layout = False
+
+    def pack(weight, output_scale):
+        return PackedWeight(
+            weight.clone(), Scales(output_scale.clone()), 64 + int(change_layout)
+        )
+
+    monkeypatch.setitem(
+        b12x_utils._B12X_SUBMODULES,
+        "b12x.gemm.tensor_fp8_linear",
+        types.SimpleNamespace(pack_weight=pack),
+    )
+    kernel = object.__new__(B12xTensorFP8ScaledMMLinearKernel)
+    kernel.config = types.SimpleNamespace(weight_shape=(64, 128))
+    kernel.layer_param_names = (
+        "weight",
+        "weight_scale",
+        "input_scale",
+        "input_scale_ub",
+    )
+    method = object.__new__(Fp8LinearMethod)
+    method.fp8_linear = kernel
+    method.use_marlin = method.block_quant = False
+    method.act_q_static = True
+    method.quant_config = Fp8Config(True, "static")
+    layer = torch.nn.Module()
+    layer.quant_method = method
+    layer.logical_widths = [64]
+    sources = {
+        "weight": torch.ones((64, 128), dtype=torch.float8_e4m3fn, device="cuda"),
+        "weight_scale": torch.tensor([0.25], device="cuda"),
+        "input_scale": torch.tensor([0.5], device="cuda"),
+    }
+    for name, source in sources.items():
+        param = torch.nn.Parameter(torch.empty_like(source), requires_grad=False)
+        param.weight_loader = default_weight_loader
+        layer.register_parameter(name, param)
+    trace = ModelReloadTracer()
+    trace.register_fp8("linear", layer)
+
+    def load(values):
+        for name, source in values.items():
+            param = getattr(layer, name)
+            param.weight_loader(param, source)
+
+    with trace.observe():
+        load(sources)
+    method.process_weights_after_loading(layer)
+    trace.bind_runtime()
+    state = trace.states["linear"]
+    packed = layer.b12x_tensor_fp8_packed_weight
+    identities = {
+        name: (target.tensor, target.tensor.data_ptr())
+        for name, target in state.targets.items()
+    }
+    for factor in (0.5, 1.5):
+        incoming = {
+            name: (source.float() * factor).to(source.dtype)
+            for name, source in sources.items()
+        }
+        change_layout = incompatible_layout and factor == 1.5
+        if change_layout:
+            previous = {
+                name: target.tensor.clone() for name, target in state.targets.items()
+            }
+            with (
+                pytest.raises(ReloadError, match="incompatible runtime layout"),
+                trace.round(preserve_checkpoint=preserve),
+            ):
+                load(incoming)
+            assert trace.failed and not state.complete
+            for name, value in previous.items():
+                torch.testing.assert_close(
+                    state.targets[name].tensor.float(), value.float(), rtol=0, atol=0
+                )
+        else:
+            with trace.round(preserve_checkpoint=preserve):
+                load(incoming)
+                assert state.complete
+            torch.testing.assert_close(
+                packed.values.float(), incoming["weight"].float()
+            )
+            torch.testing.assert_close(
+                packed.scales.alpha,
+                torch.tensor([0.125 * factor**2], device="cuda"),
+            )
+            if preserve:
+                for name, source in incoming.items():
+                    torch.testing.assert_close(
+                        state.checkpoint[name].float(), source.float(), rtol=0, atol=0
+                    )
+            else:
+                assert not state.checkpoint
+        assert layer.b12x_tensor_fp8_packed_weight is packed
+        assert layer.b12x_warmup_provider is kernel
+        for name, target in state.targets.items():
+            assert target.resolve() is identities[name][0]
+            assert target.tensor.data_ptr() == identities[name][1]
+        assert layer.weight.numel() == layer.weight_scale.numel() == 0
 
 
 def test_b12x_tensor_fp8_apply_quantizes_and_uses_packed_weight(

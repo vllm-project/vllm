@@ -28,6 +28,7 @@ physical experts.
 import threading
 import time
 from collections.abc import Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass
 
 import torch
@@ -280,6 +281,9 @@ class EplbState:
         """
         The flag indicates whether the EPLB is running in async mode.
         """
+        self._reload_condition = threading.Condition()
+        self._weight_update_active = False
+        self._mapping_active = False
         self.rearrange_event: CpuGpuEvent = CpuGpuEvent()
         """
         Event to signal when a new rearrangement is needed for the async thread.
@@ -550,7 +554,70 @@ class EplbState:
                 val = max(0, min(num_unpadded_tokens, ts.stop) - ts.start)
                 tensors[i].fill_(val)
 
+    @contextmanager
+    def _mapping_guard(self, *, reject_reload: bool = False):
+        """Serialize EPLB mapping changes with weight reload."""
+        with self._reload_condition:
+            if self._weight_update_active:
+                if reject_reload:
+                    raise RuntimeError(
+                        "Cannot change EPLB mapping during weight update"
+                    )
+                yield False
+                return
+            while self._mapping_active:
+                self._reload_condition.wait()
+                if self._weight_update_active:
+                    if reject_reload:
+                        raise RuntimeError(
+                            "Cannot change EPLB mapping during weight update"
+                        )
+                    yield False
+                    return
+            self._mapping_active = True
+        try:
+            yield True
+        finally:
+            with self._reload_condition:
+                self._mapping_active = False
+                self._reload_condition.notify_all()
+
+    def begin_weight_update(self) -> None:
+        """Wait for EPLB mapping to finish and block new mapping changes."""
+        with self._reload_condition:
+            while self._mapping_active:
+                self._reload_condition.wait()
+            self._weight_update_active = True
+
+        try:
+            # Async EPLB may have published a transfer after ``step`` returned.
+            # Drain it before reload can observe or modify expert storage.
+            self.drain_async()
+        except BaseException:
+            with self._reload_condition:
+                self._weight_update_active = False
+                self._reload_condition.notify_all()
+            raise
+
+    def finish_weight_update(self) -> None:
+        """Release the EPLB gate after a weight update or abort."""
+        with self._reload_condition:
+            if not self._weight_update_active:
+                raise RuntimeError("No active weight update")
+            self._weight_update_active = False
+            self._reload_condition.notify_all()
+
     def step(
+        self,
+        is_dummy: bool = False,
+        is_profile: bool = False,
+        log_stats: bool = False,
+    ) -> None:
+        with self._mapping_guard() as allowed:
+            if allowed:
+                self._step_impl(is_dummy, is_profile, log_stats)
+
+    def _step_impl(
         self,
         is_dummy: bool = False,
         is_profile: bool = False,
@@ -577,7 +644,7 @@ class EplbState:
         """
         ep_group = get_ep_group().device_group
         if is_profile:
-            self.rearrange(is_profile=True)
+            self._rearrange(is_profile=True)
             return
 
         if is_dummy:
@@ -682,7 +749,7 @@ class EplbState:
                 self._update_layer_should_record(log_stats=log_stats)
                 return
             self.expert_rearrangement_step = 0
-            self.rearrange()
+            self._rearrange()
 
         self._update_layer_should_record(log_stats=log_stats)
 
@@ -753,15 +820,30 @@ class EplbState:
         rank_mapping: dict[int, int] | None = None,
         use_last_expert_load: bool = False,
     ) -> torch.Tensor | None:
+        """Rearrange experts, rejecting changes during weight reload."""
+        with self._mapping_guard(reject_reload=True):
+            return self._rearrange(
+                is_profile=is_profile,
+                rank_mapping=rank_mapping,
+                use_last_expert_load=use_last_expert_load,
+            )
+
+    def _rearrange(
+        self,
+        is_profile: bool = False,
+        rank_mapping: dict[int, int] | None = None,
+        use_last_expert_load: bool = False,
+    ) -> torch.Tensor | None:
         """Rearrange the experts according to the current load.
 
         Args:
-            is_profile (bool): If `True`, perform a dummy rearrangement.
-                This is used in `profile_run` to reserve enough memory,
-                no memory movement will be performed. Default is False.
-            rank_mapping (dict[int, int] | None): The rank mapping
-                when scaling is done in EEP.
-            use_last_expert_load: Use the last reshuffle's logical-expert totals.
+        is_profile (bool): If `True`, perform a dummy rearrangement.
+            This is used in `profile_run` to reserve enough memory,
+            no memory movement will be performed. Default is False.
+        rank_mapping (dict[int, int] | None): The rank mapping
+            when scaling is done in EEP.
+        use_last_expert_load: Use the last reshuffle's logical-expert totals.
+        use_last_expert_load: Use the last reshuffle's logical-expert totals.
 
         """
         ep_group = get_ep_group().device_group
@@ -1105,6 +1187,14 @@ class EplbState:
         model_config: ModelConfig,
         expanded_physical_to_logical: torch.Tensor,
     ) -> None:
+        with self._mapping_guard(reject_reload=True):
+            self._update_mapping(model_config, expanded_physical_to_logical)
+
+    def _update_mapping(
+        self,
+        model_config: ModelConfig,
+        expanded_physical_to_logical: torch.Tensor,
+    ) -> None:
         eplb_model_state = self.model_states[model_config.compute_hash()]
         eplb_model_state.physical_to_logical_map_buffer.copy_(
             expanded_physical_to_logical
@@ -1133,6 +1223,17 @@ class EplbState:
         eplb_model_state.logical_replica_count.copy_(logical_replica_count)
 
     def reconfigure_physical_expert_slots(
+        self,
+        model_config: ModelConfig,
+        num_physical_experts: int,
+    ) -> None:
+        with self._mapping_guard(reject_reload=True):
+            self._reconfigure_physical_expert_slots(
+                model_config,
+                num_physical_experts,
+            )
+
+    def _reconfigure_physical_expert_slots(
         self,
         model_config: ModelConfig,
         num_physical_experts: int,

@@ -497,16 +497,20 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
         c_dtype = self.humming_configs["w13"].c_dtype
         down_a_dtype = w2_config.a_dtype
         torch_dtype_map = {
-            dtypes.float16: torch.float16,
-            dtypes.bfloat16: torch.bfloat16,
-            dtypes.float32: torch.float32,
-            dtypes.float8e3m4: torch.uint8,
-            dtypes.float8e4m3: torch.float8_e4m3fn,
-            dtypes.float8e5m2: torch.float8_e5m2,
-            dtypes.int8: torch.int8,
-            dtypes.int4: torch.uint8,
-            dtypes.float4e0m3: torch.uint8,
-            dtypes.float4e2m1: torch.uint8,
+            dtype: torch_dtype
+            for name, torch_dtype in (
+                ("float16", torch.float16),
+                ("bfloat16", torch.bfloat16),
+                ("float32", torch.float32),
+                ("float8e3m4", torch.uint8),
+                ("float8e4m3", torch.float8_e4m3fn),
+                ("float8e5m2", torch.float8_e5m2),
+                ("int8", torch.int8),
+                ("int4", torch.uint8),
+                ("float4e0m3", torch.uint8),
+                ("float4e2m1", torch.uint8),
+            )
+            if (dtype := getattr(dtypes, name, None)) is not None
         }
 
         buffer_metas = {

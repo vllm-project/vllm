@@ -418,6 +418,36 @@ class WeightTransferEngine(ABC, Generic[TInitInfo, TUpdateInfo]):
         self.model = self._default_model
         self.model_config = self._default_model_config
 
+    def _start_checkpoint_reload(self) -> None:
+        if self.config.reload_mode == "trace":
+            from vllm.model_executor.model_loader.reload.integration import (
+                get_model_reload_tracer,
+            )
+
+            get_model_reload_tracer(self.model).begin_round(
+                preserve_checkpoint=self.config.preserve_checkpoint
+            )
+        else:
+            from vllm.model_executor.model_loader.reload import (
+                initialize_layerwise_reload,
+            )
+
+            initialize_layerwise_reload(self.model)
+
+    def _finish_checkpoint_reload(self) -> None:
+        if self.config.reload_mode == "trace":
+            from vllm.model_executor.model_loader.reload.integration import (
+                get_model_reload_tracer,
+            )
+
+            get_model_reload_tracer(self.model).finish()
+        else:
+            from vllm.model_executor.model_loader.reload import (
+                finalize_layerwise_reload,
+            )
+
+            finalize_layerwise_reload(self.model, self.model_config)
+
     def parse_init_info(self, init_dict: dict[str, Any]) -> TInitInfo:
         """Construct typed init info from dict with validation.
 
@@ -495,11 +525,25 @@ class WeightTransferEngine(ABC, Generic[TInitInfo, TUpdateInfo]):
             update_info: Dictionary containing backend-specific update info
 
         """
-        typed_update_info = self.parse_update_info(update_info)
-        self.receive_weights(typed_update_info)
-        # NCCL broadcast / IPC paths may be asynchronous. Synchronize here so the
-        # next step uses the new weights.
-        torch.accelerator.synchronize()
+        trace = None
+        if self.config.reload_mode == "trace":
+            from vllm.model_executor.model_loader.reload.integration import (
+                get_model_reload_tracer,
+            )
+            from vllm.model_executor.model_loader.reload.trace import ReloadError
+
+            trace = get_model_reload_tracer(self.model)
+            if not trace.active:
+                raise ReloadError("Trace UPDATE requires an active START")
+        try:
+            typed_update_info = self.parse_update_info(update_info)
+            self.receive_weights(typed_update_info)
+            # Complete reads before a sender reuses its NCCL/IPC buffer.
+            torch.accelerator.synchronize()
+        except BaseException:
+            if trace is not None:
+                trace.abort()
+            raise
 
     @abstractmethod
     def receive_weights(self, update_info: TUpdateInfo) -> None:

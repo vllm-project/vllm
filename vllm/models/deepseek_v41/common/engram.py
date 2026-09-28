@@ -686,6 +686,10 @@ class ParallelEngramEmbedding(nn.Module):
                 {
                     "weight_loader": self._weight_loader,
                     "engram_vocab_start": self.vocab_start_idx,
+                    # These lookup tables are fixed model state.  They are
+                    # loaded for cold initialization, but are intentionally
+                    # excluded from incremental weight reloads.
+                    "reload_frozen": True,
                 },
             )
 

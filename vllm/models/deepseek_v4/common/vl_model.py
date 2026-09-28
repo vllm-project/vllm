@@ -343,6 +343,13 @@ class DeepseekV4ForConditionalGeneration(
         self.language_model.process_weights_after_loading()
         self._weights_finalized = True
 
+    def create_reload_state(self, key: str):
+        from vllm.model_executor.model_loader.reload.model import (
+            create_deepseek_model_reload_state,
+        )
+
+        return create_deepseek_model_reload_state(self, key)
+
     def get_mm_mapping(self) -> MultiModelKeys:
         """Get the module prefixes in the multimodal model."""
         return MultiModelKeys.from_string_field(

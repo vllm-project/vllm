@@ -51,12 +51,23 @@ class _RecordingEngine:
 
 
 class _RecordingModelRunner:
-    def __init__(self) -> None:
+    def __init__(self, raise_on_reload: bool = False) -> None:
         self.seen_config: VllmConfig | None = None
         self.reset_lora_calls = 0
+        self.raise_on_reload = raise_on_reload
+        self.begin_weight_update_calls = 0
+        self.finish_weight_update_calls = 0
+
+    def begin_weight_update(self) -> None:
+        self.begin_weight_update_calls += 1
+
+    def finish_weight_update(self) -> None:
+        self.finish_weight_update_calls += 1
 
     def reload_weights(self) -> None:
         self.seen_config = get_current_vllm_config()
+        if self.raise_on_reload:
+            raise RuntimeError("reload failed")
 
     def reset_lora_state(self) -> None:
         self.reset_lora_calls += 1
@@ -80,6 +91,20 @@ def test_reload_weights_sets_current_config():
     Worker.reload_weights(worker)
 
     assert model_runner.seen_config is worker.vllm_config
+    assert model_runner.begin_weight_update_calls == 1
+    assert model_runner.finish_weight_update_calls == 1
+
+
+def test_reload_weights_releases_eplb_gate_on_error():
+    worker = _make_worker(None)
+    model_runner = _RecordingModelRunner(raise_on_reload=True)
+    worker.model_runner = model_runner  # type: ignore[assignment]
+
+    with pytest.raises(RuntimeError, match="reload failed"):
+        Worker.reload_weights(worker)
+
+    assert model_runner.begin_weight_update_calls == 1
+    assert model_runner.finish_weight_update_calls == 1
 
 
 def test_reload_parameter_lookup_preserves_lora_module_names():

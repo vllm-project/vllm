@@ -1,15 +1,68 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import threading
 from unittest.mock import MagicMock
 
 import pytest
 import torch
 
 from vllm.distributed.eplb.eplb_state import (
+    EplbState,
     _commit_eplb_maps,
     _commit_eplb_maps_for_layer,
 )
+
+
+def _make_reload_gate_state() -> EplbState:
+    state = EplbState.__new__(EplbState)
+    state._reload_condition = threading.Condition()
+    state._weight_update_active = False
+    state._mapping_active = False
+    state.is_async = False
+    state.drain_async = MagicMock()
+    return state
+
+
+def test_eplb_reload_waits_for_mapping_and_blocks_new_mapping():
+    state = _make_reload_gate_state()
+    mapping_started = threading.Event()
+    release_mapping = threading.Event()
+    reload_attempted = threading.Event()
+    reload_started = threading.Event()
+
+    def mapping_worker():
+        with state._mapping_guard():
+            mapping_started.set()
+            release_mapping.wait(timeout=2)
+
+    mapping_thread = threading.Thread(target=mapping_worker)
+    mapping_thread.start()
+    assert mapping_started.wait(timeout=2)
+
+    def reload_worker():
+        reload_attempted.set()
+        state.begin_weight_update()
+        reload_started.set()
+
+    reload_thread = threading.Thread(target=reload_worker)
+    reload_thread.start()
+    assert reload_attempted.wait(timeout=2)
+    assert not reload_started.is_set()
+
+    release_mapping.set()
+    mapping_thread.join(timeout=2)
+    reload_thread.join(timeout=2)
+    assert reload_started.is_set()
+
+    with (
+        pytest.raises(RuntimeError, match="during weight update"),
+        state._mapping_guard(reject_reload=True),
+    ):
+        pass
+
+    state.finish_weight_update()
+    assert not state._weight_update_active
 
 
 def _make_model_state(

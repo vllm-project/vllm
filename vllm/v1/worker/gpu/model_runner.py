@@ -2306,6 +2306,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.model, self.model_config, expanded_physical_to_logical
         )
 
+    def begin_weight_update(self) -> None:
+        self.eplb.begin_weight_update()
+
+    def finish_weight_update(self) -> None:
+        self.eplb.finish_weight_update()
+
     ########### EPLB methods end ###########
 
     # Out-of-tree hardware runners can select a PCP manager class.

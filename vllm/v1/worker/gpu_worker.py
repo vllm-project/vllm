@@ -564,8 +564,15 @@ class Worker(WorkerBase):
         self.model_runner.update_config(overrides)
 
     def reload_weights(self, *args, **kwargs) -> None:
+        eplb_gate_acquired = False
         with set_current_vllm_config(self.vllm_config):
-            self.model_runner.reload_weights(*args, **kwargs)
+            try:
+                self.model_runner.begin_weight_update()
+                eplb_gate_acquired = True
+                self.model_runner.reload_weights(*args, **kwargs)
+            finally:
+                if eplb_gate_acquired:
+                    self.model_runner.finish_weight_update()
 
     @torch.inference_mode()
     def determine_available_memory(self) -> int:
@@ -1456,11 +1463,16 @@ class Worker(WorkerBase):
                 "active. Call finish_weight_update first."
             )
 
+        eplb_gate_acquired = False
         try:
             if is_draft:
                 self._set_draft_weight_update_target()
+            self.model_runner.begin_weight_update()
+            eplb_gate_acquired = True
             self.weight_transfer_engine.start_weight_update()
         except BaseException:
+            if eplb_gate_acquired:
+                self.model_runner.finish_weight_update()
             self.weight_transfer_engine.reset_weight_update_target()
             raise
         self._weight_update_active = True
@@ -1501,6 +1513,7 @@ class Worker(WorkerBase):
             except BaseException:
                 self._weight_update_active = False
                 self.weight_transfer_engine.reset_weight_update_target()
+                self.model_runner.finish_weight_update()
                 raise
 
     def finish_weight_update(self) -> None:
@@ -1513,10 +1526,13 @@ class Worker(WorkerBase):
                 "finish_weight_update called without a matching start_weight_update."
             )
 
-        with set_current_vllm_config(self.vllm_config):
-            self.weight_transfer_engine.finish_weight_update()
+        try:
+            with set_current_vllm_config(self.vllm_config):
+                self.weight_transfer_engine.finish_weight_update()
+        finally:
             self.weight_transfer_engine.reset_weight_update_target()
             self._weight_update_active = False
+            self.model_runner.finish_weight_update()
 
         # Weight transfer bypasses GPUModelRunner.reload_weights().
         if not self._weight_update_is_draft:

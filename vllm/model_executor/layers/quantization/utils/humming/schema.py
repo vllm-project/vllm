@@ -54,30 +54,41 @@ def humming_update_schema_hadamard_block_size(
 if has_humming():
     from vllm.utils.humming import dtypes as humming_dtypes
 
+    def _optional_dtype(name: str) -> "humming_dtypes.DataType | None":
+        return getattr(humming_dtypes, name, None)
+
     _HUMMING_TO_QUANT_DTYPE: dict[humming_dtypes.DataType, Any] = {
-        humming_dtypes.float4e0m3: FP4_DTYPE,
-        humming_dtypes.float4e2m1: FP4_DTYPE,
-        humming_dtypes.float6e2m3: scalar_types.float6_e2m3f,
-        humming_dtypes.float6e3m2: scalar_types.float6_e3m2f,
-        humming_dtypes.float8e3m4: FP8_DTYPE,
-        humming_dtypes.float8e4m3: FP8_DTYPE,
-        humming_dtypes.float8e5m2: torch.float8_e5m2,
-        humming_dtypes.int8: torch.int8,
-        humming_dtypes.uint4: INT4_DTYPE,
-        humming_dtypes.uint8: INT8_DTYPE,
-        humming_dtypes.uint2: torch.uint8,
-        humming_dtypes.uint3: torch.uint8,
-        humming_dtypes.uint5: torch.uint8,
-        humming_dtypes.uint6: torch.uint8,
-        humming_dtypes.uint7: torch.uint8,
+        dtype: quant_dtype
+        for name, quant_dtype in (
+            ("float4e0m3", FP4_DTYPE),
+            ("float4e2m1", FP4_DTYPE),
+            ("float6e2m3", scalar_types.float6_e2m3f),
+            ("float6e3m2", scalar_types.float6_e3m2f),
+            ("float8e3m4", FP8_DTYPE),
+            ("float8e4m3", FP8_DTYPE),
+            ("float8e5m2", torch.float8_e5m2),
+            ("int8", torch.int8),
+            ("uint4", INT4_DTYPE),
+            ("uint8", INT8_DTYPE),
+            ("uint2", torch.uint8),
+            ("uint3", torch.uint8),
+            ("uint5", torch.uint8),
+            ("uint6", torch.uint8),
+            ("uint7", torch.uint8),
+        )
+        if (dtype := _optional_dtype(name)) is not None
     }
 
     _HUMMING_TO_SCALE_DTYPE: dict[humming_dtypes.DataType, torch.dtype] = {
-        humming_dtypes.float8e8m0: MXFP_SCALE_DTYPE,
-        humming_dtypes.float8e4m3: FP8_DTYPE,
-        humming_dtypes.float16: torch.float16,
-        humming_dtypes.bfloat16: torch.bfloat16,
-        humming_dtypes.float32: torch.float32,
+        dtype: scale_dtype
+        for name, scale_dtype in (
+            ("float8e8m0", MXFP_SCALE_DTYPE),
+            ("float8e4m3", FP8_DTYPE),
+            ("float16", torch.float16),
+            ("bfloat16", torch.bfloat16),
+            ("float32", torch.float32),
+        )
+        if (dtype := _optional_dtype(name)) is not None
     }
 
 
@@ -294,12 +305,6 @@ def check_and_fallback_input_schema(
             humming_dtypes.float8e3m4,
             humming_dtypes.int8,
         ),
-        humming_dtypes.float4e0m3: (
-            humming_dtypes.int4,
-            humming_dtypes.float8e4m3,
-            humming_dtypes.float8e3m4,
-            humming_dtypes.int8,
-        ),
         humming_dtypes.int8: (
             humming_dtypes.float8e4m3,
             humming_dtypes.float8e3m4,
@@ -310,6 +315,14 @@ def check_and_fallback_input_schema(
             humming_dtypes.float8e3m4,
         ),
     }
+    float4e0m3 = _optional_dtype("float4e0m3")
+    if float4e0m3 is not None:
+        dtype_fallback_order_map[float4e0m3] = (
+            humming_dtypes.int4,
+            humming_dtypes.float8e4m3,
+            humming_dtypes.float8e3m4,
+            humming_dtypes.int8,
+        )
 
     weight_schema = weight_schema.to_humming_schema(param_dtype)
     input_schema = input_schema.to_humming_schema(param_dtype)

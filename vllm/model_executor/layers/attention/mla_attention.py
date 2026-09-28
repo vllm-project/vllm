@@ -310,6 +310,7 @@ from vllm.v1.kv_cache_interface import (
 )
 
 if TYPE_CHECKING:
+    from vllm.model_executor.model_loader.reload.trace import ReloadState
     from vllm.v1.attention.backends.mla.index_group import (
         SparseMLAIndexGroupBuilder,
     )
@@ -1230,7 +1231,13 @@ class MLAAttention(nn.Module, AttentionLayerBase):
     def process_weights_after_loading(self, act_dtype: torch.dtype):
         # Let per-backend impls do their own weight packing first (no-op
         # unless overridden), mirroring Attention.process_weights_after_loading.
+        from vllm.model_executor.model_loader.reload.mla import (
+            get_mla_processing_policy,
+        )
+
         self.impl.process_weights_after_loading(act_dtype)
+        self._mla_processing_policy = get_mla_processing_policy(self)
+        self._mla_act_dtype = act_dtype
 
         if self.is_amx_bmm_enabled:
             # AMXMLAImpl already packed its own W_UK/W_UV above, for both
@@ -1339,6 +1346,26 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         )
         if not should_load_quant_weights(quant_method):
             set_default_quant_scales(self, register_buffer=False)
+
+    def create_reload_state(self, key: str) -> "ReloadState":
+        """Create the derived MLA state sourced from ``kv_b_proj``."""
+        from vllm.model_executor.model_loader.reload.mla import (
+            MLAReloadPolicy,
+            get_mla_processing_policy,
+        )
+        from vllm.model_executor.model_loader.reload.trace import ReloadState
+
+        processing = getattr(self, "_mla_processing_policy", None)
+        if processing is None:
+            processing = get_mla_processing_policy(self)
+        source_key = f"{self.layer_name.removesuffix('.attn')}.kv_b_proj"
+        return ReloadState(
+            key=key,
+            module=self,
+            roles=(),
+            policy=MLAReloadPolicy(self, self.kv_b_proj, processing),
+            dependencies=(source_key,),
+        )
 
     def get_attn_backend(self) -> type[AttentionBackend]:
         return self.attn_backend

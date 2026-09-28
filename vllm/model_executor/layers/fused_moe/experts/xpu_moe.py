@@ -180,6 +180,7 @@ class XPUExperts(mk.FusedMoEExpertsModular):
             hidden_states=hidden_states,
             topk_weights=topk_weights,
             topk_ids=topk_ids,
+            expert_map=expert_map,
             a1q_scale=a1q_scale,
         )
 

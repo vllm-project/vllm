@@ -59,6 +59,8 @@ def test_worker_drives_communicator_suspension(monkeypatch, enable_nccl_comm_sus
     worker._sleep_saved_parameters = {}
     worker._sleep_saved_buffers = {}
     worker._sleep_saved_draft_buffers = {}
+    worker._sleep_saved_parameters = {}
+    worker._sleep_saved_draft_parameters = {}
     worker.vllm_config = SimpleNamespace(
         model_config=SimpleNamespace(enable_nccl_comm_suspend=enable_nccl_comm_suspend)
     )

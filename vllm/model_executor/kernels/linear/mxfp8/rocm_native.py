@@ -242,10 +242,23 @@ class RocmDotScaledMxfp8LinearKernel(Mxfp8LinearKernel):
         return True, None
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        weight = layer.weight.data  # [N, K] fp8
+        weight, weight_scale = self.process_reload_tensors(
+            layer, layer.weight.data, layer.weight_scale.data
+        )
+        layer.weight = Parameter(weight.contiguous(), requires_grad=False)
+        layer.weight_scale = Parameter(weight_scale, requires_grad=False)
+
+    def process_reload_tensors(
+        self,
+        layer: torch.nn.Module,
+        weight: torch.Tensor,
+        weight_scale: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        del layer
+        weight = weight  # [N, K] fp8
         N, K = weight.shape
         scale_k = K // MXFP8_BLOCK_SIZE
-        weight_scale = layer.weight_scale.data[:N, :scale_k].contiguous()
+        weight_scale = weight_scale[:N, :scale_k].contiguous()
         block_scale = _as_block32_scale(weight_scale)
         if block_scale is not None:
             # Checkpoints with 32x32 scale blocks (DeepSeek V4/V4.1) get them
@@ -254,8 +267,7 @@ class RocmDotScaledMxfp8LinearKernel(Mxfp8LinearKernel):
             weight_scale = block_scale
         elif K % _DOT_SCALED_K_ALIGN != 0:
             weight = dequant_mxfp8_to_bf16(weight.contiguous(), weight_scale)
-        layer.weight = Parameter(weight.contiguous(), requires_grad=False)
-        layer.weight_scale = Parameter(weight_scale, requires_grad=False)
+        return weight, weight_scale
 
     def apply_weights(
         self,
