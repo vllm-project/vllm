@@ -394,6 +394,147 @@ class TestDetokenizeDelta:
         assert results[0] == self._one_shot(tokenizer, token_ids)
 
 
+
+class TestMetaspaceLeadingSpace:
+    """Derender must preserve the leading space on Metaspace tokenizers.
+
+    Regression for #59043: cold ``tokenizer.decode`` / empty
+    ``DerenderStreamState`` strips the SentencePiece ``▁`` from the first
+    output token. Seeding with the prompt (as live DecodeStream does) keeps
+    it. Uses Phi-3; Byte-level BPE models are unaffected.
+    """
+
+    MODEL = "microsoft/Phi-3-mini-4k-instruct"
+
+    @pytest.fixture
+    def phi_tokenizer(self):
+        from vllm.tokenizers import get_tokenizer
+
+        return get_tokenizer(self.MODEL)
+
+    @pytest.fixture
+    def phi_derenderer(self, phi_tokenizer):
+        from unittest.mock import MagicMock
+
+        from vllm.renderers.online_derenderer import OnlineDerenderer
+
+        renderer = MagicMock()
+        renderer.get_tokenizer.return_value = phi_tokenizer
+        renderer._executor = ThreadPoolExecutor(max_workers=1)
+        model_config = MagicMock()
+        model_config.hf_config.model_type = "phi3"
+        model_config.model = self.MODEL
+        return OnlineDerenderer(
+            model_config=model_config,
+            renderer=renderer,
+            request_logger=None,
+            chat_template=None,
+            chat_template_content_format="string",
+        )
+
+    @pytest.fixture
+    def sample_ids(self, phi_tokenizer):
+        prompt = "<|user|>\nHi<|end|>\n<|assistant|>\n"
+        output = "Hello there, output"
+        prompt_ids = phi_tokenizer.encode(prompt, add_special_tokens=False)
+        output_ids = phi_tokenizer.encode(output, add_special_tokens=False)
+        # Sanity: cold decode drops the leading space; seeded does not.
+        cold = phi_tokenizer.decode(output_ids, skip_special_tokens=True)
+        assert not cold.startswith(" "), cold
+        return prompt_ids, output_ids
+
+    def test_detokenize_ids_seeded_keeps_leading_space(
+        self, phi_derenderer, phi_tokenizer, sample_ids
+    ):
+        prompt_ids, output_ids = sample_ids
+        cold = phi_derenderer._detokenize_ids(
+            phi_tokenizer, output_ids, prompt_token_ids=None
+        )
+        seeded = phi_derenderer._detokenize_ids(
+            phi_tokenizer, output_ids, prompt_token_ids=prompt_ids
+        )
+        assert cold == "Hello there, output"
+        assert seeded == " Hello there, output"
+
+    def test_batch_chat_uses_generate_response_prompt_ids(
+        self, phi_derenderer, sample_ids
+    ):
+        prompt_ids, output_ids = sample_ids
+        gen = GenerateResponse(
+            request_id="metaspace-test",
+            choices=[
+                GenerateResponseChoice(
+                    index=0, token_ids=output_ids, finish_reason="stop"
+                )
+            ],
+            prompt_token_ids=prompt_ids,
+        )
+        choices = phi_derenderer._derender_chat(gen)
+        assert choices[0].message.content == " Hello there, output"
+
+    def test_batch_chat_request_prompt_ids_override(
+        self, phi_derenderer, sample_ids
+    ):
+        prompt_ids, output_ids = sample_ids
+        gen = GenerateResponse(
+            request_id="metaspace-test",
+            choices=[
+                GenerateResponseChoice(
+                    index=0, token_ids=output_ids, finish_reason="stop"
+                )
+            ],
+            prompt_token_ids=None,
+        )
+        choices = phi_derenderer._derender_chat(gen, prompt_token_ids=prompt_ids)
+        assert choices[0].message.content == " Hello there, output"
+
+    def test_batch_chat_without_prompt_keeps_cold_decode(
+        self, phi_derenderer, sample_ids
+    ):
+        _, output_ids = sample_ids
+        gen = GenerateResponse(
+            request_id="metaspace-test",
+            choices=[
+                GenerateResponseChoice(
+                    index=0, token_ids=output_ids, finish_reason="stop"
+                )
+            ],
+        )
+        choices = phi_derenderer._derender_chat(gen)
+        assert choices[0].message.content == "Hello there, output"
+
+    @pytest.mark.asyncio
+    async def test_chat_stream_seeded_first_chunk(
+        self, phi_derenderer, sample_ids
+    ):
+        prompt_ids, output_ids = sample_ids
+        chunk, state = await phi_derenderer.derender_chat_stream(
+            model=self.MODEL,
+            generate_chunk=_make_stream_chunk(output_ids, finish_reason="stop"),
+            state=None,
+            prompt_token_ids=prompt_ids,
+        )
+        text = "".join(
+            (c.delta.content or "") for c in chunk.choices if c.delta is not None
+        )
+        assert text == " Hello there, output"
+        assert state.prev_tokens  # seeded window carried forward
+
+    @pytest.mark.asyncio
+    async def test_completion_stream_seeded_first_chunk(
+        self, phi_derenderer, sample_ids
+    ):
+        prompt_ids, output_ids = sample_ids
+        chunk, _ = await phi_derenderer.derender_completion_stream(
+            model=self.MODEL,
+            generate_chunk=_make_stream_chunk(output_ids, finish_reason="stop"),
+            state=None,
+            prompt_token_ids=prompt_ids,
+        )
+        text = "".join(c.text for c in chunk.choices)
+        assert text == " Hello there, output"
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "stream_method",

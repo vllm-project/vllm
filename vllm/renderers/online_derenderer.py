@@ -39,7 +39,10 @@ from vllm.logger import init_logger
 from vllm.parser import Parser, ParserManager
 from vllm.renderers import BaseRenderer
 from vllm.tokenizers import TokenizerLike
-from vllm.tokenizers.detokenizer_utils import detokenize_incrementally
+from vllm.tokenizers.detokenizer_utils import (
+    convert_prompt_ids_to_tokens,
+    detokenize_incrementally,
+)
 from vllm.utils import random_uuid
 from vllm.utils.async_utils import make_async
 
@@ -113,16 +116,23 @@ class OnlineDerenderer:
         self,
         generate_response: GenerateResponse,
         chat_request: ChatCompletionRequest | None = None,
+        prompt_token_ids: list[int] | None = None,
     ) -> list[ChatCompletionResponseChoice]:
-        return await self._derender_chat_async(generate_response, chat_request)
+        return await self._derender_chat_async(
+            generate_response, chat_request, prompt_token_ids
+        )
 
     def _derender_chat(
         self,
         generate_response: GenerateResponse,
         chat_request: ChatCompletionRequest | None = None,
+        prompt_token_ids: list[int] | None = None,
     ) -> list[ChatCompletionResponseChoice]:
         tokenizer = self.renderer.get_tokenizer()
         choices: list[ChatCompletionResponseChoice] = []
+        seed_ids = _resolve_prompt_token_ids(
+            prompt_token_ids, generate_response.prompt_token_ids
+        )
 
         for choice in generate_response.choices:
             if not choice.token_ids:
@@ -138,8 +148,11 @@ class OnlineDerenderer:
                 # Parser path: decode with special tokens preserved
                 # so the parser can see markers like </think>,
                 # <tool_call>, or Harmony channel tokens.
-                decoded_text = tokenizer.decode(
-                    choice.token_ids, skip_special_tokens=False
+                decoded_text = self._detokenize_ids(
+                    tokenizer,
+                    choice.token_ids,
+                    prompt_token_ids=seed_ids,
+                    skip_special_tokens=False,
                 )
 
                 chat_template_kwargs: dict[str, Any] = {}
@@ -202,8 +215,11 @@ class OnlineDerenderer:
                     if chat_request is not None
                     else True
                 )
-                decoded_text = tokenizer.decode(
-                    choice.token_ids, skip_special_tokens=skip_special
+                decoded_text = self._detokenize_ids(
+                    tokenizer,
+                    choice.token_ids,
+                    prompt_token_ids=seed_ids,
+                    skip_special_tokens=skip_special,
                 )
                 message = ChatMessage(role="assistant", content=decoded_text)
 
@@ -217,6 +233,58 @@ class OnlineDerenderer:
             )
 
         return choices
+
+    def _seed_detok_state(
+        self,
+        tokenizer: TokenizerLike,
+        prompt_token_ids: list[int] | None,
+        skip_special_tokens: bool = True,
+    ) -> DerenderStreamState:
+        """Seed incremental detok state from the prompt token tail.
+
+        Mirrors ``SlowIncrementalDetokenizer`` / engine DecodeStream prefill
+        so Metaspace/SentencePiece keep the leading space on the first
+        output token. Returns an empty state when no prompt IDs are given
+        (cold decode, preserving prior behaviour).
+        """
+        if not prompt_token_ids:
+            return DerenderStreamState()
+        prev_tokens, prefix_offset, read_offset = convert_prompt_ids_to_tokens(
+            tokenizer,
+            prompt_token_ids,
+            skip_special_tokens=skip_special_tokens,
+        )
+        return DerenderStreamState(
+            prev_tokens=prev_tokens,
+            prefix_offset=prefix_offset,
+            read_offset=read_offset,
+        )
+
+    def _detokenize_ids(
+        self,
+        tokenizer: TokenizerLike,
+        token_ids: list[int],
+        prompt_token_ids: list[int] | None = None,
+        skip_special_tokens: bool = True,
+        spaces_between_special_tokens: bool = True,
+    ) -> str:
+        """Detokenize output IDs, optionally seeded with the prompt tail.
+
+        Batch chat/completion derender routes through this so they share
+        the same incremental decode as the streaming path
+        (``_detokenize_delta``).
+        """
+        state = self._seed_detok_state(
+            tokenizer, prompt_token_ids, skip_special_tokens=skip_special_tokens
+        )
+        text, _ = self._detokenize_delta(
+            tokenizer,
+            token_ids,
+            state,
+            skip_special_tokens=skip_special_tokens,
+            spaces_between_special_tokens=spaces_between_special_tokens,
+        )
+        return text
 
     def _detokenize_delta(
         self,
@@ -311,20 +379,19 @@ class OnlineDerenderer:
                 (validated by the caller — see `ServingDerender`) because
                 plain detokenization would leak raw parser markup into `content`.
             prompt_tokens: Prompt token count for the usage chunk.
-            prompt_token_ids: Prompt token IDs. Parser path only. Lets
-                `parse_delta` settle its initial reasoning state. Required
-                when a reasoning or tool parser is configured (validated by
-                the caller — see ``ServingDerender``). Without it reasoning
-                left open by the prompt would be misclassified as content.
+            prompt_token_ids: Prompt token IDs. Seeds incremental
+                detokenization on the first chunk (Metaspace leading space)
+                and, on the parser path, lets `parse_delta` settle its
+                initial reasoning state. Required when a reasoning or tool
+                parser is configured (validated by the caller — see
+                ``ServingDerender``). Without it reasoning left open by the
+                prompt would be misclassified as content.
 
         Returns:
             (chunk, updated_state) — the derendered SSE chunk and the state
             the client must pass to the next call.
 
         """
-        if state is None:
-            state = DerenderStreamState()
-
         # A single DerenderStreamState is threaded through every choice in
         # this chunk. Correct only when there is at most one choice per SSE
         # event (n=1, one call per index), as the streaming derender
@@ -345,6 +412,8 @@ class OnlineDerenderer:
                     "chat_request is required for streaming chat derender "
                     "when a tool or reasoning parser is configured"
                 )
+            if state is None:
+                state = DerenderStreamState()
             return await self._derender_chat_stream_parsed_async(
                 parser_cls,
                 model,
@@ -359,6 +428,12 @@ class OnlineDerenderer:
         skip_special = (
             chat_request.skip_special_tokens if chat_request is not None else True
         )
+        if state is None:
+            # Seed from the prompt on the first chunk so Metaspace keeps
+            # the leading space on the first output token.
+            state = self._seed_detok_state(
+                tokenizer, prompt_token_ids, skip_special_tokens=skip_special
+            )
         stream_choices: list[ChatCompletionResponseStreamChoice] = []
         updated_state = state
 
@@ -453,8 +528,12 @@ class OnlineDerenderer:
         # Ephemeral incremental detok window, local to this call. Threaded
         # across both the replay and current chunk phases (via `nonlocal`)
         # so multi-byte characters split across that boundary still decode
-        # correctly. Discarded once the call returns.
-        detok_state = DerenderStreamState()
+        # correctly. Discarded once the call returns. Seeded from the
+        # prompt so Metaspace keeps the leading space on the first output
+        # token (special tokens preserved for the parser).
+        detok_state = self._seed_detok_state(
+            tokenizer, prompt_token_ids, skip_special_tokens=False
+        )
 
         def _replay(token_ids: list[int], chunk_lens: list[int]) -> None:
             """Replay prior chunks through `parse_delta` to rebuild parser
@@ -607,9 +686,13 @@ class OnlineDerenderer:
         generate_responses: list[GenerateResponse],
         prompt_tokens: list[int] | None = None,
         completion_request: CompletionRequest | None = None,
+        prompt_token_ids: list[list[int]] | None = None,
     ) -> tuple[list[CompletionResponseChoice], int, int]:
         return await self._derender_completion_async(
-            generate_responses, prompt_tokens, completion_request
+            generate_responses,
+            prompt_tokens,
+            completion_request,
+            prompt_token_ids,
         )
 
     def _derender_completion(
@@ -617,10 +700,14 @@ class OnlineDerenderer:
         generate_responses: list[GenerateResponse],
         prompt_tokens: list[int] | None = None,
         completion_request: CompletionRequest | None = None,
+        prompt_token_ids: list[list[int]] | None = None,
     ) -> tuple[list[CompletionResponseChoice], int, int]:
         n = len(generate_responses)
         prompt_tokens_list: list[int] = (
             prompt_tokens if prompt_tokens is not None else [0] * n
+        )
+        prompt_ids_list: list[list[int] | None] = (
+            list(prompt_token_ids) if prompt_token_ids is not None else [None] * n
         )
 
         skip_special = (
@@ -634,7 +721,12 @@ class OnlineDerenderer:
         total_completion_tokens = 0
         index = 0
 
-        for gen, pt in zip(generate_responses, prompt_tokens_list):
+        for gen, pt, req_prompt_ids in zip(
+            generate_responses, prompt_tokens_list, prompt_ids_list
+        ):
+            seed_ids = _resolve_prompt_token_ids(
+                req_prompt_ids, gen.prompt_token_ids
+            )
             for choice in gen.choices:
                 if not choice.token_ids:
                     raise ValueError(
@@ -642,8 +734,11 @@ class OnlineDerenderer:
                         "has empty or null token_ids"
                     )
 
-                decoded_text = tokenizer.decode(
-                    choice.token_ids, skip_special_tokens=skip_special
+                decoded_text = self._detokenize_ids(
+                    tokenizer,
+                    choice.token_ids,
+                    prompt_token_ids=seed_ids,
+                    skip_special_tokens=skip_special,
                 )
                 completion_logprobs = None
                 if choice.logprobs is not None:
@@ -672,6 +767,7 @@ class OnlineDerenderer:
         state: DerenderStreamState | None = None,
         prompt_tokens: int | None = None,
         completion_request: CompletionRequest | None = None,
+        prompt_token_ids: list[int] | None = None,
     ) -> tuple[CompletionStreamResponse, DerenderStreamState]:
         """Process one GenerateStreamResponse chunk for streaming completions.
 
@@ -690,14 +786,13 @@ class OnlineDerenderer:
             prompt_tokens: Prompt token count for usage (from the render step).
             completion_request: Original CompletionRequest from ``/render``;
                 supplies ``skip_special_tokens``.
+            prompt_token_ids: Prompt token IDs. Seeds detok state on the
+                first chunk so Metaspace keeps the leading space.
 
         Returns:
             (chunk, updated_state) — the derendered chunk and updated state.
 
         """
-        if state is None:
-            state = DerenderStreamState()
-
         # See the equivalent check in derender_chat_stream: a single
         # DerenderStreamState is threaded through every choice in this
         # chunk, so more than one choice per chunk would corrupt the
@@ -713,6 +808,10 @@ class OnlineDerenderer:
             if completion_request is not None
             else True
         )
+        if state is None:
+            state = self._seed_detok_state(
+                tokenizer, prompt_token_ids, skip_special_tokens=skip_special
+            )
         stream_choices: list[CompletionResponseStreamChoice] = []
         updated_state = state
 
@@ -748,6 +847,18 @@ class OnlineDerenderer:
             metrics=generate_chunk.metrics,
         )
         return chunk, updated_state
+
+
+def _resolve_prompt_token_ids(
+    request_prompt_token_ids: list[int] | None,
+    generate_prompt_token_ids: list[int] | None,
+) -> list[int] | None:
+    """Prefer request-level prompt IDs, else those on the generate response."""
+    if request_prompt_token_ids:
+        return request_prompt_token_ids
+    if generate_prompt_token_ids:
+        return generate_prompt_token_ids
+    return None
 
 
 def _parse_token_id_placeholder(token: str) -> int | None:

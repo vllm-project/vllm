@@ -147,7 +147,9 @@ class ServingDerender(BaseServing):
 
         try:
             choices = await self.online_derenderer.derender_chat(
-                request.generate_response, request.chat_request
+                request.generate_response,
+                request.chat_request,
+                prompt_token_ids=request.prompt_token_ids,
             )
         except ValueError as exc:
             return self.create_error_response(str(exc))
@@ -211,6 +213,7 @@ class ServingDerender(BaseServing):
             request.generate_responses,
             request.prompt_tokens,
             completion_request=request.completion_request,
+            prompt_token_ids=request.prompt_token_ids,
         )
 
         first = request.generate_responses[0]
@@ -378,6 +381,7 @@ class ServingDerender(BaseServing):
                 state=request.stream_state,
                 prompt_tokens=request.prompt_tokens,
                 completion_request=request.completion_request,
+                prompt_token_ids=request.prompt_token_ids,
             )
         except ValueError as exc:
             return self.create_error_response(str(exc))

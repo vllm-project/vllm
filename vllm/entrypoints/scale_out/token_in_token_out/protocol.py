@@ -427,6 +427,14 @@ class DerenderChatRequest(BaseModel):
     request context they expect (request.tools, request.tool_choice,
     request._grammar_from_parser, etc.).
     """
+
+    prompt_token_ids: list[int] | None = None
+    """Prompt token IDs used to seed incremental detokenization.
+
+    Needed so Metaspace/SentencePiece decoders keep the leading space on
+    the first output token (same as the engine's DecodeStream prefill).
+    Falls back to ``generate_response.prompt_token_ids`` when omitted.
+    """
     # --8<-- [end:derender-chat-request]
 
 
@@ -460,6 +468,14 @@ class DerenderCompletionRequest(BaseModel):
     Mirrors chat_request on DerenderChatRequest. Required by the parsing
     so parsers receive the full request context.
     """
+
+    prompt_token_ids: list[list[int]] | None = None
+    """Prompt token IDs per response, for seeding incremental detokenization.
+
+    Parallel to ``generate_responses``. Each entry falls back to that
+    response's ``prompt_token_ids`` when the list is omitted or the entry
+    is empty.
+    """
     # --8<-- [end:derender-completion-request]
 
     @model_validator(mode="after")
@@ -470,6 +486,14 @@ class DerenderCompletionRequest(BaseModel):
             raise ValueError(
                 f"prompt_tokens length ({len(self.prompt_tokens)}) must equal "
                 f"generate_responses length ({len(self.generate_responses)})"
+            )
+        if self.prompt_token_ids is not None and len(self.prompt_token_ids) != len(
+            self.generate_responses
+        ):
+            raise ValueError(
+                f"prompt_token_ids length ({len(self.prompt_token_ids)}) must "
+                f"equal generate_responses length "
+                f"({len(self.generate_responses)})"
             )
         return self
 
@@ -616,16 +640,19 @@ class DerenderChatStreamRequest(BaseModel):
     """Prompt token count for usage. Forwarded from the render step."""
 
     prompt_token_ids: list[int] | None = None
-    """Prompt token IDs. Required by the parser path's `parse_delta` to
-    settle its initial reasoning state (e.g. chat templates that pre-open
-    ``<think>``). `prompt_tokens` is a usage count and cannot serve this
-    purpose. Sourced from `GenerateRequest.token_ids` at the render step.
+    """Prompt token IDs. Used to seed incremental detokenization (so
+    Metaspace/SentencePiece keep the leading space on the first output
+    token) and, on the parser path, by `parse_delta` to settle its
+    initial reasoning state (e.g. chat templates that pre-open
+    ``<think>``). `prompt_tokens` is a usage count and cannot serve
+    either purpose. Sourced from `GenerateRequest.token_ids` at the
+    render step.
 
     Rejected with a 400 (by `ServingDerender`) when a tool or reasoning
     parser is configured and this is omitted. Without it, `parse_delta`
     cannot tell whether the prompt left reasoning open and would silently
-    misclassify reasoning content as plain content. Unused on the plain
-    detokenization path.
+    misclassify reasoning content as plain content. Optional on the plain
+    detokenization path (falls back to cold decode when omitted).
     """
 
     chat_request: ChatCompletionRequest | None = None
@@ -653,6 +680,12 @@ class DerenderCompletionStreamRequest(BaseModel):
 
     prompt_tokens: int | None = None
     """Prompt token count for usage."""
+
+    prompt_token_ids: list[int] | None = None
+    """Prompt token IDs used to seed incremental detokenization on the
+    first chunk (``stream_state is None``). Optional; cold decode when
+    omitted.
+    """
 
     completion_request: CompletionRequest | None = None
     """The original (post adjust_request) CompletionRequest from /render."""
