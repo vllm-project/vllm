@@ -1450,6 +1450,7 @@ class ChatTemplateConfig:
     chat_template: str | None = None
     chat_template_content_format: ChatTemplateContentFormatOption = "auto"
     trust_request_chat_template: bool = False
+    trust_request_mm_kwargs: bool = False
 
 
 def validate_chat_template(chat_template: Path | str | None):

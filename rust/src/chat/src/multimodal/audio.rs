@@ -259,7 +259,7 @@ mod tests {
             uuid: Some("audio-1".to_string()),
         }];
         async {
-            info.prepare_multimodal(parts, &mut vec![AUDIO_PAD_ID], ModelDtype::Float32)
+            info.prepare_multimodal(parts, &mut vec![AUDIO_PAD_ID], ModelDtype::Float32, None)
                 .instrument(mm_request_span("request-1"))
                 .await
                 .unwrap();

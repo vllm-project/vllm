@@ -127,7 +127,7 @@ class InputBatch:
 
         req_ids = [f"req_{i}_{random_uuid()}" for i in range(num_reqs)]
         idx_mapping_np = np.arange(num_reqs, dtype=np.intp)
-        idx_mapping = torch.arange(num_reqs, dtype=torch.int64, device=device)
+        idx_mapping = torch.arange(num_reqs, dtype=torch.int32, device=device)
         expanded_idx_mapping = idx_mapping
         expanded_local_pos = torch.zeros(num_reqs, dtype=torch.int32, device=device)
 
@@ -555,28 +555,12 @@ def _post_update_kernel(
     all_token_ids_ptr,
     all_token_ids_stride,
     total_len_ptr,
-    broadcast_drafts_ptr,
-    broadcast_drafts_stride,
-    draft_tokens_ptr,
-    draft_tokens_stride,
-    num_spec,
 ):
     req_id = tl.program_id(0)
     req_state_idx = tl.load(idx_mapping_ptr + req_id)
     if req_state_idx < 0:
         # Filter rows with negative index entries.
         return
-
-    if broadcast_drafts_ptr is not None:
-        # PP path: adopt the draft tokens proposed by the last rank's
-        # speculator so the next verification step embeds the real drafts.
-        for i in range(num_spec):
-            token_id = tl.load(
-                broadcast_drafts_ptr + req_id * broadcast_drafts_stride + i
-            )
-            tl.store(
-                draft_tokens_ptr + req_state_idx * draft_tokens_stride + i, token_id
-            )
 
     total_len = tl.load(total_len_ptr + req_state_idx)
     num_sampled = tl.load(num_sampled_ptr + req_id)
@@ -638,11 +622,6 @@ def post_update(
     all_token_ids: torch.Tensor,
     # [max_num_reqs]
     total_len: torch.Tensor,
-    # [num_reqs, num_spec]; drafts broadcast from the last PP rank. Only
-    # passed on non-last PP ranks, which never run the speculator.
-    broadcast_drafts: torch.Tensor | None = None,
-    # [max_num_reqs, num_spec]
-    draft_tokens_out: torch.Tensor | None = None,
 ) -> None:
     num_reqs = idx_mapping.shape[0]
     _post_update_kernel[(num_reqs,)](
@@ -659,11 +638,6 @@ def post_update(
         all_token_ids,
         all_token_ids.stride(0),
         total_len,
-        broadcast_drafts,
-        broadcast_drafts.stride(0) if broadcast_drafts is not None else 0,
-        draft_tokens_out,
-        draft_tokens_out.stride(0) if draft_tokens_out is not None else 0,
-        broadcast_drafts.shape[1] if broadcast_drafts is not None else 0,
         num_warps=1,
     )
 
