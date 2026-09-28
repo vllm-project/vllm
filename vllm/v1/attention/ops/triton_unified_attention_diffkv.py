@@ -47,6 +47,28 @@ logger = init_logger(__name__)
 is_batch_invariant = envs.VLLM_BATCH_INVARIANT
 
 
+def can_use_split_kv(
+    max_seqlen_q: int,
+    num_seqs: int,
+    seq_threshold_3D: int | None,
+    num_par_softmax_segments: int | None,
+    softmax_segm_output: torch.Tensor | None,
+    softmax_segm_max: torch.Tensor | None,
+    softmax_segm_expsum: torch.Tensor | None,
+) -> bool:
+    """One definition of 3D split-KV eligibility for launcher and builders."""
+    return not (
+        seq_threshold_3D is None
+        or num_par_softmax_segments is None
+        or softmax_segm_output is None
+        or softmax_segm_max is None
+        or softmax_segm_expsum is None
+        or max_seqlen_q > 1
+        or num_seqs > seq_threshold_3D
+        or is_batch_invariant
+    )
+
+
 @triton.jit
 def kernel_unified_attention_diffkv(
     # Output destinations.  In 2D mode we write the final result into
@@ -431,15 +453,14 @@ def unified_attention_diffkv(
     # Decide between 2D and 3D launch.  Mirrors the standard launcher:
     # 3D requires preallocated softmax buffers, decode-only batches, and
     # a small number of sequences (otherwise 2D already saturates the SM).
-    use_3d = not (
-        seq_threshold_3D is None
-        or num_par_softmax_segments is None
-        or softmax_segm_output is None
-        or softmax_segm_max is None
-        or softmax_segm_expsum is None
-        or max_seqlen_q > 1
-        or num_seqs > seq_threshold_3D
-        or is_batch_invariant
+    use_3d = can_use_split_kv(
+        max_seqlen_q,
+        num_seqs,
+        seq_threshold_3D,
+        num_par_softmax_segments,
+        softmax_segm_output,
+        softmax_segm_max,
+        softmax_segm_expsum,
     )
 
     # Tile size: 32 for prefill-class kernels.  Decode (small Q) prefers
