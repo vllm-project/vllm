@@ -201,6 +201,11 @@ def main(
     print("benchmark mode: synthetic CPU attention; kernel-only evidence")
     if verification_only:
         print("verification mode: q=4")
+        print(f"resolved ISA: {isa}")
+        if enable_kv_split:
+            print("KV splitting: enabled")
+        else:
+            print("KV splitting: disabled (--enable-kv-split not set)")
 
     # Warmup, then benchmark the attention kernel.
     run_benchmark(5)

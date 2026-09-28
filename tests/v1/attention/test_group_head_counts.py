@@ -95,6 +95,7 @@ def test_mixed_head_counts_in_one_group_are_rejected():
     ),
     [
         ([1, 4, 5, 0], [False] * 4, True, [True, True, False, False]),
+        ([4], None, True, [False]),
         (
             [4, 4, 4],
             [False, True, False],
@@ -120,7 +121,7 @@ def test_cpu_decode_mask_marks_only_eligible_requests(
     )
     common = SimpleNamespace(
         query_start_loc=torch.tensor([0] + query_lens, dtype=torch.int32).cumsum(0),
-        is_prefilling=torch.tensor(is_prefilling),
+        is_prefilling=(None if is_prefilling is None else torch.tensor(is_prefilling)),
     )
 
     actual = CPUAttentionMetadataBuilder._build_decode_mask(
