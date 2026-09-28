@@ -58,6 +58,7 @@ from vllm.v1.core.kv_cache_utils import (
 from vllm.v1.hisparse.layout import (
     create_hisparse_layout,
     get_hisparse_gpu_memory_usage,
+    get_hisparse_steady_state_concurrency,
 )
 from vllm.v1.kv_cache_interface import (
     ChunkedLocalAttentionSpec,
@@ -202,6 +203,45 @@ def test_hisparse_hma_uses_resolved_gpu_block_size(
         ),
     )
     assert scheduler_block_size == hash_block_size == gpu_block_size
+
+
+def test_hisparse_steady_state_concurrency_excludes_spilled_resident_pages():
+    """Resident pages spill to host, so only their active tail pins GPU blocks."""
+    block_size = 16
+    config = SimpleNamespace(
+        model_config=SimpleNamespace(max_model_len=10 * block_size),
+        parallel_config=SimpleNamespace(decode_context_parallel_size=1),
+    )
+    attn_spec = FullAttentionSpec(
+        block_size=block_size, num_kv_heads=1, head_size=64, dtype=torch.float16
+    )
+    page_size = attn_spec.page_size_bytes
+    kv_cache_config = KVCacheConfig(
+        num_blocks=64,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(["source"], attn_spec, host_resident=True),
+            KVCacheGroupSpec(["indexer"], attn_spec),
+            KVCacheGroupSpec(
+                ["resident"],
+                HiSparseResidentSpec(block_size=block_size, page_size=page_size),
+            ),
+            KVCacheGroupSpec(
+                ["hot"],
+                HiSparseHotSpec(
+                    block_size=block_size, page_size=page_size, blocks_per_request=4
+                ),
+            ),
+        ],
+        hisparse_host_num_blocks=100,
+    )
+
+    # GPU per request: indexer 10 + resident tail 2 + hot 4; host allows 10x.
+    assert get_hisparse_steady_state_concurrency(config, kv_cache_config) == 4.0
+    # The worst-case bound charges all 10 resident pages.
+    assert get_max_concurrency_for_kv_cache_config(
+        config, kv_cache_config
+    ) == pytest.approx(64 / 24)
 
 
 def test_hisparse_rejects_deepseek_v4():
