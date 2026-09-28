@@ -8,39 +8,13 @@ import numpy as np
 import torch
 import torch.distributed as dist
 
-from vllm.distributed import get_tp_group
+from vllm.distributed import get_kvpp_group
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils.import_utils import resolve_obj_by_qualname
 from vllm.v1.kv_cache_interface import KVCacheConfig
 
-_device_group: Any = None
 logger = init_logger(__name__)
-
-
-def initialize_kvpp_transport() -> Any:
-    """Initialize a separate communicator before worker memory profiling."""
-    global _device_group
-    if _device_group is None:
-        if not current_platform.is_cuda():
-            raise ValueError("KVPP broadcast currently requires NVIDIA CUDA.")
-        tp = get_tp_group()
-        _device_group = dist.new_group(
-            ranks=tp.ranks,
-            backend=dist.get_backend(tp.device_group),
-            use_local_synchronization=True,
-        )
-        probe = torch.zeros(1, dtype=torch.uint8, device="cuda")
-        dist.broadcast(probe, src=tp.ranks[0], group=_device_group)
-        torch.cuda.current_stream().synchronize()
-    return _device_group
-
-
-def destroy_kvpp_transport() -> None:
-    global _device_group
-    if _device_group is not None:
-        dist.destroy_process_group(_device_group)
-        _device_group = None
 
 
 class KVPPRuntime:
@@ -52,23 +26,23 @@ class KVPPRuntime:
 
     @classmethod
     def initialize_transport(cls) -> None:
-        initialize_kvpp_transport()
-
-    @classmethod
-    def shutdown_transport(cls) -> None:
-        destroy_kvpp_transport()
+        """Warm up the managed communicator before worker memory profiling."""
+        group = get_kvpp_group()
+        probe = torch.zeros(1, dtype=torch.uint8, device=group.device)
+        group.broadcast(probe)
+        torch.cuda.current_stream().synchronize()
 
     def __init__(self, config: KVCacheConfig, caches: dict[str, torch.Tensor]):
         plan = config.storage_plan
         assert plan is not None
-        tp = get_tp_group()
+        group = get_kvpp_group()
         if (plan.placement.rank, plan.placement.world_size) != (
-            tp.rank_in_group,
-            tp.world_size,
+            group.rank_in_group,
+            group.world_size,
         ):
             raise ValueError("KVPP allocation and execution replica ranks differ.")
-        self.group = initialize_kvpp_transport()
-        self.ranks = tp.ranks
+        self.group = group.device_group
+        self.ranks = group.ranks
         self.plan = plan
         descriptor = config.kv_cache_tensors[0]
         first = caches[descriptor.layers[0]]
@@ -182,11 +156,6 @@ def create_kvpp_runtime(
     if config.storage_plan is None:
         return None
     return get_kvpp_runtime_cls()(config, caches)
-
-
-def shutdown_kvpp_runtime() -> None:
-    if current_platform.get_kvpp_runtime_cls() is not None:
-        get_kvpp_runtime_cls().shutdown_transport()
 
 
 def kvpp_forward(

@@ -1549,6 +1549,14 @@ def get_tp_group() -> GroupCoordinator:
     return _TP
 
 
+_KVPP: GroupCoordinator | None = None
+
+
+def get_kvpp_group() -> GroupCoordinator:
+    assert _KVPP is not None, "KVPP group is not initialized"
+    return _KVPP
+
+
 _ETP: GroupCoordinator | None = None
 
 
@@ -2076,6 +2084,18 @@ def initialize_model_parallel(
         group_name="tp",
     )
 
+    global _KVPP
+    assert _KVPP is None, "KVPP group is already initialized"
+    if config.cache_config.enable_kvpp:
+        # Same replica ranks as TP, with independent collective ordering.
+        _KVPP = init_model_parallel_group(
+            group_ranks,
+            get_world_group().local_rank,
+            backend,
+            use_device_communicator=False,
+            group_name="kvpp",
+        )
+
     global _ETP
     assert _ETP is None, "Engram tensor-parallel group is already initialized"
     engram_tensor_parallel_size = (
@@ -2371,9 +2391,11 @@ def get_node_count() -> int:
 
 def destroy_model_parallel():
     """Set the groups to none and destroy them."""
-    from vllm.v1.worker.kvpp_runtime import shutdown_kvpp_runtime
+    global _KVPP
+    if _KVPP:
+        _KVPP.destroy()
+    _KVPP = None
 
-    shutdown_kvpp_runtime()
     global _TP, _ETP
 
     if _ETP and _ETP is not _TP:

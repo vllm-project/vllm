@@ -77,14 +77,18 @@ forward to be released before preparing the next one.
 pre-forward call, `kvpp_forward` prepares the runtime and determines whether the
 batch has history. There is no per-forward teardown; failed forwards retain their
 state, and runner shutdown synchronizes the device before releasing cache storage.
-This lets a future device implementation supply its own communicator and events
-while keeping logical scheduler state and model bundle declarations independent
-of the transport.
+The KVPP group is created alongside TP in `initialize_model_parallel` only when
+KVPP is enabled and destroyed by `destroy_model_parallel`. It has the same ranks
+as TP and a separate communicator. The runtime warms it up before memory
+profiling and uses its device group for asynchronous broadcasts. Device-specific
+runtime implementations provide communication operations and events while group
+lifecycle remains in `parallel_state`.
 
 ## Validation
 
-Module tests cover placement agreement, capacity and alignment, scratch aliases,
-offload's persistent-only views, and multi-rank broadcast lifetimes. The isolated
+Module tests cover placement agreement, packed capacity, scratch aliases,
+offload's persistent-only views, broadcast lifetimes within each PP stage, and
+communication-group teardown and reinitialization. The isolated
 `DeepSeek-V2-Lite-Chat` GSM8K config under `tests/evals/gsm8k/configs/` is the
 real-weight end-to-end guard. Evaluate prefill, decode, prefix reuse, and pool
 reload separately when expanding supported execution modes.

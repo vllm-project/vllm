@@ -10,6 +10,9 @@ import torch.multiprocessing as mp
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.distributed import (
     cleanup_dist_env_and_memory,
+    destroy_model_parallel,
+    get_kvpp_group,
+    get_tp_group,
     init_distributed_environment,
     initialize_model_parallel,
 )
@@ -31,25 +34,34 @@ from vllm.v1.worker.kvpp_runtime import KVPPRuntime, kvpp_forward
 from vllm.v1.worker.utils import allocate_kv_cache
 
 
-def _runtime_worker(rank: int, port: int, world_size: int):
+def _runtime_worker(rank: int, port: int, tp_size: int, pp_size: int):
     torch.cuda.set_device(rank)
     init_distributed_environment(
-        world_size=world_size,
+        world_size=tp_size * pp_size,
         rank=rank,
         local_rank=rank,
         distributed_init_method=f"tcp://127.0.0.1:{port}",
     )
     vllm_config = VllmConfig()
+    vllm_config.cache_config.enable_kvpp = True
     with set_current_vllm_config(vllm_config):
-        initialize_model_parallel(tensor_model_parallel_size=world_size)
+        initialize_model_parallel(
+            tensor_model_parallel_size=tp_size, pipeline_model_parallel_size=pp_size
+        )
     try:
+        group = get_kvpp_group()
+        assert group.ranks == get_tp_group().ranks
+        assert group.device_group is not get_tp_group().device_group
+        KVPPRuntime.initialize_transport()
+        local_rank = group.rank_in_group
+        stage_value = 128 * (rank // tp_size)
         # Unequal component sizes and >2 nonowner layers exercise both scratch
         # slots repeatedly. The auxiliary component is acquired before main KV.
-        num_layers = 2 * world_size + 3
+        num_layers = 2 * tp_size + 3
         owners = [
             owner
-            for owner in range(world_size)
-            for _ in range(num_layers // world_size + (owner < num_layers % world_size))
+            for owner in range(tp_size)
+            for _ in range(num_layers // tp_size + (owner < num_layers % tp_size))
         ]
         names = [
             f"layer{i}.{part}" for i in range(num_layers) for part in ("mla", "index")
@@ -70,8 +82,8 @@ def _runtime_worker(rank: int, port: int, world_size: int):
             [KVCacheGroupSpec(names, UniformTypeKVCacheSpecs(16, specs))],
         )
         placement = KVCachePlacement(
-            rank,
-            world_size,
+            local_rank,
+            tp_size,
             tuple(
                 KVCacheBundle((f"layer{i}.mla", f"layer{i}.index"), owners[i])
                 for i in range(num_layers)
@@ -102,10 +114,10 @@ def _runtime_worker(rank: int, port: int, world_size: int):
                             observations.append(
                                 (
                                     caches[name].clone(),
-                                    10 * index + component + step - 1,
+                                    stage_value + 10 * index + component + step - 1,
                                 )
                             )
-                        caches[name].fill_(10 * index + component + step)
+                        caches[name].fill_(stage_value + 10 * index + component + step)
                     release_kv_cache(bundle.layers[0])
             # Do not synchronize between steps: next-step broadcasts must also
             # wait for the previous owner's writes and receiver scratch use.
@@ -114,19 +126,44 @@ def _runtime_worker(rank: int, port: int, world_size: int):
             assert torch.all(observed == expected), (rank, expected)
         assert torch.all(caches["draft"] == 111 + rank)
         for i, owner in enumerate(owners):
-            if owner == rank:
-                assert torch.all(caches[f"layer{i}.mla"] == 10 * i + 4)
+            if owner == local_rank:
+                assert torch.all(caches[f"layer{i}.mla"] == stage_value + 10 * i + 4)
+
+        del kvpp_runtime, group
+        # Reinitializing model parallelism must not retain a stale KVPP group.
+        for enabled in (False, True):
+            destroy_model_parallel()
+            with pytest.raises(AssertionError, match="KVPP group is not initialized"):
+                get_kvpp_group()
+            vllm_config.cache_config.enable_kvpp = enabled
+            with set_current_vllm_config(vllm_config):
+                initialize_model_parallel(
+                    tensor_model_parallel_size=tp_size,
+                    pipeline_model_parallel_size=pp_size,
+                )
+            if enabled:
+                KVPPRuntime.initialize_transport()
+                probe = torch.tensor([rank], device="cuda")
+                get_kvpp_group().broadcast(probe)
+                assert probe.item() == rank // tp_size * tp_size
+            else:
+                with pytest.raises(
+                    AssertionError, match="KVPP group is not initialized"
+                ):
+                    get_kvpp_group()
     finally:
         cleanup_dist_env_and_memory()
 
 
-def test_materialization_preserves_owner_and_scratch_lifetimes():
-    world_size = 2
+@pytest.mark.parametrize("pp_size", [1, 2])
+def test_materialization_preserves_owner_and_scratch_lifetimes(pp_size):
+    tp_size = 2
+    world_size = tp_size * pp_size
     if torch.cuda.device_count() < world_size:
         pytest.skip(f"Requires {world_size} CUDA GPUs")
     mp.spawn(
         _runtime_worker,
-        args=(get_open_port(), world_size),
+        args=(get_open_port(), tp_size, pp_size),
         nprocs=world_size,
         join=True,
     )
