@@ -484,6 +484,15 @@ def _hip_skinny_reference(
         (5, 256, 256, 32),
         # N == 8 is exactly one packed zero-point word.
         (1, 256, 8, 32),
+        # K must exceed THRDS * A_CHUNK * UNRL for the K loop to run a whole
+        # unrolled block; every K above is below that bound, so without these
+        # the deep-K path goes untested. 2560 is not a multiple of the 1024 K
+        # step the batch 2 and 4 tuples take, so it also hits the ragged tail.
+        (1, 4096, 256, 128),
+        (2, 2560, 256, 32),
+        (3, 4096, 256, 64),
+        (4, 2560, 256, 128),
+        (5, 4096, 256, 32),
     ],
 )
 def test_hip_skinny_wvSplitK_int4_g(dtype, M, K, N, G, has_zp):
