@@ -13,6 +13,23 @@ from vllm.platforms import (
 )
 
 
+@pytest.fixture
+def caplog_vllm(caplog):
+    """`caplog`, but also captures vLLM's loggers.
+
+    vllm/logger.py configures the "vllm" logger with propagate=False, so
+    records from child loggers like "vllm.platforms" reach vLLM's own
+    handler but never bubble up to the root logger where plain `caplog`
+    listens. Attach caplog's handler directly to "vllm" to see them too.
+    """
+    logger = logging.getLogger("vllm")
+    logger.addHandler(caplog.handler)
+    try:
+        yield caplog
+    finally:
+        logger.removeHandler(caplog.handler)
+
+
 def test_is_amd_zen_cpu_detects_amd_with_avx512():
     cpuinfo = "vendor_id: AuthenticAMD\nflags: avx avx2 avx512f avx512bw"
     with (
@@ -65,7 +82,7 @@ def test_cpu_target_selects_cpu_platform_from_non_cpu_wheel(
     rocm_plugin.assert_not_called()
 
 
-def test_broken_zentorch_falls_back_to_cpu_platform(caplog):
+def test_broken_zentorch_falls_back_to_cpu_platform(caplog_vllm):
     original_import = builtins.__import__
 
     def import_with_broken_zentorch(name, *args, **kwargs):
@@ -84,16 +101,16 @@ def test_broken_zentorch_falls_back_to_cpu_platform(caplog):
         patch("vllm.platforms.vllm_version_matches_substr", return_value=True),
         patch("vllm.platforms._is_amd_zen_cpu", return_value=True),
         patch.object(builtins, "__import__", side_effect=import_with_broken_zentorch),
-        caplog.at_level(logging.DEBUG, logger="vllm.platforms"),
+        caplog_vllm.at_level(logging.DEBUG, logger="vllm.platforms"),
     ):
         platform = resolve_current_platform_cls_qualname()
 
     assert platform == "vllm.platforms.cpu.CpuPlatform"
-    assert "zentorch failed to import" in caplog.text
-    assert "OSError: incompatible shared library" in caplog.text
+    assert "zentorch failed to import" in caplog_vllm.text
+    assert "OSError: incompatible shared library" in caplog_vllm.text
 
 
-def test_zentorch_failure_other_than_oserror_is_not_recovered(caplog):
+def test_zentorch_failure_other_than_oserror_is_not_recovered(caplog_vllm):
     original_import = builtins.__import__
 
     def import_with_broken_zentorch(name, *args, **kwargs):
@@ -112,15 +129,15 @@ def test_zentorch_failure_other_than_oserror_is_not_recovered(caplog):
         patch("vllm.platforms.vllm_version_matches_substr", return_value=True),
         patch("vllm.platforms._is_amd_zen_cpu", return_value=True),
         patch.object(builtins, "__import__", side_effect=import_with_broken_zentorch),
-        caplog.at_level(logging.DEBUG, logger="vllm.platforms"),
+        caplog_vllm.at_level(logging.DEBUG, logger="vllm.platforms"),
     ):
         platform = resolve_current_platform_cls_qualname()
 
     assert platform == "vllm.platforms.interface.UnspecifiedPlatform"
-    assert "RuntimeError: unknown zentorch failure" in caplog.text
+    assert "RuntimeError: unknown zentorch failure" in caplog_vllm.text
 
 
-def test_platform_plugin_failure_is_logged(caplog):
+def test_platform_plugin_failure_is_logged(caplog_vllm):
     def failing_plugin():
         raise RuntimeError("plugin exploded")
 
@@ -132,10 +149,10 @@ def test_platform_plugin_failure_is_logged(caplog):
             clear=True,
         ),
         patch("vllm.platforms.load_plugins_by_group", return_value={}),
-        caplog.at_level(logging.DEBUG, logger="vllm.platforms"),
+        caplog_vllm.at_level(logging.DEBUG, logger="vllm.platforms"),
     ):
         platform = resolve_current_platform_cls_qualname()
 
     assert platform == "vllm.platforms.interface.UnspecifiedPlatform"
-    assert "Platform plugin cpu failed during detection" in caplog.text
-    assert "RuntimeError: plugin exploded" in caplog.text
+    assert "Platform plugin cpu failed during detection" in caplog_vllm.text
+    assert "RuntimeError: plugin exploded" in caplog_vllm.text

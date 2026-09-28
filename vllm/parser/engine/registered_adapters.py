@@ -14,6 +14,7 @@ from vllm.parser.engine.adapters import make_adapters
 from vllm.parser.gemma4 import Gemma4Parser
 from vllm.parser.glm47_moe import Glm47MoeParser
 from vllm.parser.granite import GraniteParser
+from vllm.parser.granite_thinking import GraniteThinkingParser
 from vllm.parser.inkling import InklingParser
 from vllm.parser.kimi_k2 import KimiK2Parser
 from vllm.parser.minimax_m2 import MinimaxM2Parser
@@ -51,6 +52,11 @@ from vllm.parser.seed_oss import SeedOssParser
     GraniteParserReasoningAdapter,
     GraniteParserToolAdapter,
 ) = make_adapters(GraniteParser)
+
+(
+    GraniteThinkingParserReasoningAdapter,
+    GraniteThinkingParserToolAdapter,
+) = make_adapters(GraniteThinkingParser)
 
 (
     NemotronV3ParserReasoningAdapter,
