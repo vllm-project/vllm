@@ -404,7 +404,6 @@ class DeepseekV32Attention(MLAAttention):
 
         q = self.q_b_proj(q_c)[0].view(-1, self.num_local_heads, self.qk_head_dim)
         q_nope, q_pe = q.split([self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1)
-        ql_nope = torch.bmm(q_nope.transpose(0, 1), self.W_UK_T).transpose(0, 1)
 
         if self.indexer is not None and not self.skip_topk:
             index_q = self.indexer.wq_b(q_c)[0]
@@ -412,6 +411,24 @@ class DeepseekV32Attention(MLAAttention):
         else:
             index_q = None
 
+        fuse_q_proj = (
+            not self._fp8_query
+            and q.shape[0] > 0
+            and self.num_local_heads in (4, 8, 16, 32, 64, 128)
+            and (has_indexer or (self.num_local_heads <= 32 and q.shape[0] <= 1024))
+            and q_pe.shape[2] in (32, 64, 128)
+            and self.W_UK_T.shape == (self.num_local_heads, 192, 512)
+            and q.dtype == torch.bfloat16
+            and (index_q is None or index_q.shape[2] in (64, 128, 256))
+        )
+        if fuse_q_proj:
+            ql_nope = torch.empty(
+                (q.shape[0], self.num_local_heads, self.W_UK_T.shape[-1]),
+                dtype=q.dtype,
+                device=q.device,
+            )
+        else:
+            ql_nope = torch.bmm(q_nope.transpose(0, 1), self.W_UK_T).transpose(0, 1)
         index_q_fp8, index_weights_out, mqa_q = fused_q(
             positions,
             q_pe,
@@ -426,6 +443,8 @@ class DeepseekV32Attention(MLAAttention):
             has_indexer=has_indexer,
             index_rope_interleave=self._index_rope_interleave,
             quantize_mqa=self._fp8_query,
+            q_nope=q_nope if fuse_q_proj else None,
+            w_uk_t=self.W_UK_T if fuse_q_proj else None,
         )
 
         self._sparse_indexer_and_attn(

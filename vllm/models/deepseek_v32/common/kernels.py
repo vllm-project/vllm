@@ -774,6 +774,19 @@ def _fused_q_kernel(
     index_weights_head_scale,
     index_weights_out_ptr,
     index_weights_out_stride,
+    # optional NoPE projection for the bf16 MQA query.
+    q_nope_ptr,
+    q_nope_stride0,
+    q_nope_stride1,
+    w_uk_t_ptr,
+    w_uk_t_stride0,
+    w_uk_t_stride1,
+    w_uk_t_stride2,
+    NUM_TOKENS: tl.constexpr,
+    Q_GEMM_CTAS: tl.constexpr,
+    Q_ROPE_CTAS: tl.constexpr,
+    FUSE_Q_PROJ: tl.constexpr,
+    Q_BN: tl.constexpr,
     HAS_INDEXER: tl.constexpr,
     INDEX_ROPE_INTERLEAVE: tl.constexpr,
     QUANTIZE_MQA: tl.constexpr,
@@ -781,15 +794,61 @@ def _fused_q_kernel(
     FP8_MAX: tl.constexpr,
     USE_FNUZ: tl.constexpr,
 ):
-    tok_idx = tl.program_id(0).to(tl.int64)
-    pid = tl.program_id(1)
-    head_idx = tl.program_id(2)
+    if FUSE_Q_PROJ:
+        program = tl.program_id(0)
+        if program < Q_GEMM_CTAS:
+            n_blocks = 512 // Q_BN
+            token_tile = program // (NUM_Q_HEADS * n_blocks)
+            head = program // n_blocks % NUM_Q_HEADS
+            cols = program % n_blocks * Q_BN + tl.arange(0, Q_BN)
+            tokens = token_tile * 16 + tl.arange(0, 16)
+            acc = tl.full((16, Q_BN), 0, tl.float32)
+            for block in range(3):
+                k = block * 64 + tl.arange(0, 64)
+                q = tl.load(
+                    q_nope_ptr
+                    + tokens[:, None] * q_nope_stride0
+                    + head * q_nope_stride1
+                    + k[None, :],
+                    tokens[:, None] < NUM_TOKENS,
+                    other=0,
+                )
+                w = tl.load(
+                    w_uk_t_ptr
+                    + head * w_uk_t_stride0
+                    + k[:, None] * w_uk_t_stride1
+                    + cols[None, :] * w_uk_t_stride2
+                )
+                acc = tl.dot(q, w, acc)
+            tl.store(
+                ql_nope_ptr
+                + tokens[:, None] * ql_nope_stride0
+                + head * ql_nope_stride1
+                + cols[None, :],
+                acc.to(tl.bfloat16),
+                tokens[:, None] < NUM_TOKENS,
+            )
+            return
+        sub = program - Q_GEMM_CTAS
+        if sub < Q_ROPE_CTAS:
+            tok_idx = sub // triton.cdiv(NUM_Q_HEADS, 2)
+            head_idx = sub % triton.cdiv(NUM_Q_HEADS, 2)
+            pid = 0
+        else:
+            sub -= Q_ROPE_CTAS
+            tok_idx = sub // NUM_INDEX_Q_HEADS
+            head_idx = sub % NUM_INDEX_Q_HEADS
+            pid = 1
+    else:
+        tok_idx = tl.program_id(0).to(tl.int64)
+        pid = tl.program_id(1)
+        head_idx = tl.program_id(2)
     if USE_PDL:
         tl.extra.cuda.gdc_wait()
         tl.extra.cuda.gdc_launch_dependents()
     fp8_dtype = tl.float8e4b8 if USE_FNUZ else tl.float8e4nv
 
-    if pid == 2:
+    if pid == 2 and not FUSE_Q_PROJ:
         # ql_nope quantize + pack into the front of mqa_q_fp8. On the bf16
         # query path ql_nope is consumed as-is (no pack), so skip entirely.
         if not QUANTIZE_MQA:
@@ -965,6 +1024,8 @@ def fused_q(
     has_indexer: bool = True,
     index_rope_interleave: bool = False,
     quantize_mqa: bool = True,
+    q_nope: torch.Tensor | None = None,
+    w_uk_t: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Fuse the MQA-query and indexer-query RoPE/quantization.
 
@@ -972,17 +1033,27 @@ def fused_q(
     is True (FlashInfer sparse, fp8 query) ``mqa_q`` is a single fp8 tensor
     packing ``[ql_nope; q_pe]``. When False (FlashMLA sparse, bf16 query) it is
     the RoPE'd ``q_pe`` in bf16; the caller pairs it with ``ql_nope`` as the
-    ``(ql_nope, q_pe)`` tuple the backend expects.
+    ``(ql_nope, q_pe)`` tuple the backend expects. With ``q_nope`` and
+    ``w_uk_t``, the bf16 NoPE projection is fused into the same launch.
     """
     assert positions.ndim == 1
     assert positions.dtype == torch.int64
     assert q_pe.ndim == 3
     assert q_pe_cos_sin_cache.ndim == 2
-    assert ql_nope.ndim == 3
-    assert ql_nope.shape[:2] == q_pe.shape[:2]
+    assert ql_nope.ndim == 3 and ql_nope.shape[:2] == q_pe.shape[:2]
     assert q_scale.dtype == torch.float32 and q_scale.numel() == 1
     num_tokens = positions.shape[0]
     num_q_heads = q_pe.shape[1]
+    fuse_q_proj = q_nope is not None
+    if fuse_q_proj:
+        assert q_nope is not None and w_uk_t is not None and not quantize_mqa
+        assert q_nope.shape == (num_tokens, num_q_heads, 192)
+        assert w_uk_t.shape == (num_q_heads, 192, 512)
+        assert ql_nope.shape == (num_tokens, num_q_heads, 512)
+        assert q_nope.dtype == w_uk_t.dtype == ql_nope.dtype == torch.bfloat16
+    else:
+        q_nope = w_uk_t = ql_nope  # unused by the unprojected kernel
+    assert q_nope is not None and w_uk_t is not None
     # Grid's 3rd dim must cover the MQA-pack heads (pid 0/2 iterate 2 heads
     # each) and, when present, the indexer heads (pid 1).
     mqa_grid_heads = (num_q_heads + 1) // 2
@@ -1000,7 +1071,7 @@ def fused_q(
     # fused_q is shared with the ROCm path, and the CuTeDSL module imports
     # cutlass at module scope, so only reach for it on CUDA.
     cutedsl_kernel: Callable[..., None] | None = None
-    if current_platform.is_cuda():
+    if current_platform.is_cuda() and not fuse_q_proj:
         from vllm.models.deepseek_v32.nvidia.ops.fused_q_cutedsl import (
             fused_q_cutedsl,
             is_fused_q_cutedsl_supported,
@@ -1055,11 +1126,25 @@ def fused_q(
         )
         return index_q_fp8, index_weights_out, mqa_q
 
-    use_pdl = current_platform.is_arch_support_pdl()
+    use_pdl = current_platform.is_arch_support_pdl() and not fuse_q_proj
     pdl_kwargs = (
         {"USE_PDL": use_pdl, "launch_pdl": True} if use_pdl else {"USE_PDL": use_pdl}
     )
-    _fused_q_kernel[(num_tokens, 3, grid_heads)](
+    q_bn = 64 if not fuse_q_proj or num_tokens <= 8 else 128
+    q_gemm_ctas = (
+        triton.cdiv(num_tokens, 16) * num_q_heads * triton.cdiv(ql_nope.shape[2], q_bn)
+        if fuse_q_proj
+        else 0
+    )
+    q_rope_ctas = num_tokens * mqa_grid_heads if fuse_q_proj else 0
+    grid: tuple[int, ...] = (num_tokens, 3, grid_heads)
+    if fuse_q_proj:
+        grid = (
+            q_gemm_ctas
+            + q_rope_ctas
+            + (num_tokens * num_index_q_heads if has_indexer else 0),
+        )
+    _fused_q_kernel[grid](
         positions,
         q_pe,
         q_pe.stride(0),
@@ -1097,16 +1182,26 @@ def fused_q(
         index_weights_head_scale,
         index_weights_out,
         index_weights_out.stride(0),
+        q_nope,
+        q_nope.stride(0),
+        q_nope.stride(1),
+        w_uk_t,
+        w_uk_t.stride(0),
+        w_uk_t.stride(1),
+        w_uk_t.stride(2),
+        NUM_TOKENS=num_tokens if fuse_q_proj else 0,
+        Q_GEMM_CTAS=q_gemm_ctas,
+        Q_ROPE_CTAS=q_rope_ctas,
+        FUSE_Q_PROJ=fuse_q_proj,
+        Q_BN=q_bn,
         HAS_INDEXER=has_indexer,
         INDEX_ROPE_INTERLEAVE=index_rope_interleave,
         QUANTIZE_MQA=quantize_mqa,
         FP8_MAX=_FP8_MAX,
         USE_FNUZ=_USE_FNUZ,
         **pdl_kwargs,
-        # num_warps=1 is optimal here: each program is a single 128-element
-        # rope+quant, so the kernel is program-count/occupancy bound, not
-        # per-program compute bound (swept 1/2/4/8 — 1 wins or ties everywhere).
-        num_warps=1,
+        # RoPE-only programs favor one warp; the projection needs four.
+        num_warps=4 if fuse_q_proj else 1,
     )
     return index_q_fp8, index_weights_out, mqa_q
 
