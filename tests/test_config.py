@@ -802,13 +802,13 @@ def test_dsa_models_select_matching_mtp(model_type, expected_architecture):
 
 @pytest.mark.skip_global_cleanup
 def test_jina_ocr_selects_text_config_for_mtp():
-    from transformers import PretrainedConfig
+    from transformers import PreTrainedConfig
 
-    text_config = PretrainedConfig(
+    text_config = PreTrainedConfig(
         architectures=["DeepseekV2ForCausalLM"],
         num_hidden_layers=12,
     )
-    hf_config = PretrainedConfig(
+    hf_config = PreTrainedConfig(
         architectures=["DeepseekOCRForCausalLM"],
         text_config=text_config,
         mtp_num_heads=1,

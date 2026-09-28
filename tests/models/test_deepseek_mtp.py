@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import pytest
-from transformers import PretrainedConfig
+from transformers import PreTrainedConfig
 
 from vllm.model_executor.models.deepseek_mtp import (
     _get_mtp_block_config,
@@ -24,7 +24,7 @@ def _fast_mtp_config(**overrides):
         "n_routed_experts": 64,
     }
     values.update(overrides)
-    return PretrainedConfig(**values)
+    return PreTrainedConfig(**values)
 
 
 def test_fast_mtp_uses_dense_decoder_config():

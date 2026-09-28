@@ -49,7 +49,7 @@ from .utils import (
 )
 
 
-def _get_mtp_block_config(config: PretrainedConfig) -> PretrainedConfig:
+def _get_mtp_block_config(config: PreTrainedConfig) -> PreTrainedConfig:
     """Return the decoder config used by an MTP block.
 
     FastMTP checkpoints can use a dense draft block even when the target model
@@ -63,7 +63,7 @@ def _get_mtp_block_config(config: PretrainedConfig) -> PretrainedConfig:
     return mtp_config
 
 
-def _map_fast_mtp_weight_name(config: PretrainedConfig, name: str) -> str | None:
+def _map_fast_mtp_weight_name(config: PreTrainedConfig, name: str) -> str | None:
     """Map FastMTP checkpoint names to DeepSeekMTP's layer layout."""
     if not hasattr(config, "mtp_num_heads"):
         return name
