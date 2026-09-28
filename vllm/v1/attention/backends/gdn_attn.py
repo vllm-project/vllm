@@ -3,7 +3,7 @@
 """Backend for GatedDeltaNet attention."""
 
 from dataclasses import dataclass, replace
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 import torch
 
@@ -26,6 +26,9 @@ from vllm.v1.attention.backends.utils import (
     split_decodes_and_prefills,
 )
 from vllm.v1.kv_cache_interface import MambaSpec
+
+if TYPE_CHECKING:
+    from vllm.v1.worker.gpu.pcp_manager import HybridPCPLayout
 
 
 class GDNAttentionBackend(AttentionBackend):
@@ -84,6 +87,9 @@ class GDNAttentionMetadata:
     nums_dict: dict | None = None
     batch_ptr: torch.Tensor | None = None
     token_chunk_offset_ptr: torch.Tensor | None = None
+
+    # Hybrid PCP layout of local tokens; the other fields index global requests.
+    pcp_layout: "HybridPCPLayout | None" = None
 
 
 class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]):

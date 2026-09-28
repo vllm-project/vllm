@@ -763,6 +763,43 @@ class GroupCoordinator:
         else:
             return self._all_gather_out_place(input_, dim)
 
+    def all_gather_buffer(
+        self,
+        shape: tuple[int, ...],
+        dtype: torch.dtype,
+        parts: int = 1,
+        key: str = "ag_buffer",
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Buffer for ``parts`` in-place all-gathers and this rank's chunks.
+
+        The buffer is [parts * world * shape[0], ...]; part q is gathered by
+        ``all_gather_in_place(buffer.chunk(parts)[q])``. The returned chunks
+        view this rank's [parts, shape[0], ...] rows, so producers write them
+        directly and the gathers copy no input. The buffer may be reused by
+        the next request with the same ``key``.
+        """
+        world, rows = self.world_size, shape[0]
+        if world == 1:
+            output = torch.empty(
+                (parts * rows, *shape[1:]), dtype=dtype, device=self.device
+            )
+        else:
+            assert self.device_communicator is not None
+            output = self.device_communicator.all_gather_buffer(
+                shape, dtype, self.device, parts, key
+            )
+        local = output.view(parts, world, rows, *shape[1:])[:, self.rank_in_group]
+        return output, local
+
+    def all_gather_in_place(
+        self, output: torch.Tensor, stream: torch.cuda.Stream | None = None
+    ) -> torch.Tensor:
+        """All-gather the dim-0 rank chunks of one part of ``all_gather_buffer``."""
+        if self.world_size > 1:
+            assert self.device_communicator is not None
+            self.device_communicator.all_gather_in_place(output, stream)
+        return output
+
     def _all_gather_out_place(self, input_: torch.Tensor, dim: int) -> torch.Tensor:
         if self.device_communicator is None:
             raise ValueError("No device communicator found")
