@@ -7,15 +7,15 @@ import mmap
 import socket
 import time
 import uuid
-from collections.abc import Collection, Iterable, Mapping
+from collections.abc import Collection, Iterable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
+import msgspec
 from kvcr import (
     DURATION_METRIC,
     KVCR,
     ROUTER_HINT_CAPABILITIES,
-    ROUTER_HINT_KEY,
     STATE_METRIC,
     TRANSFER_BLOCKS_METRIC,
     TRANSFER_BYTES_METRIC,
@@ -575,14 +575,11 @@ class KVCRSecondaryTierManager(SecondaryTierManager):
 
     @override
     def on_new_request(self, req_context: ReqContext) -> RequestOffloadingContext:
-        params = getattr(req_context, "kv_transfer_params", None)
-        if isinstance(params, Mapping):
-            hint = params.get(ROUTER_HINT_KEY)
-            if hint is not None:
-                self._kvcr.submit_hint(
-                    request_id=req_context.req_id,
-                    hints=hint,
-                )
+        if (hint := req_context.kv_hints) is not None:
+            self._kvcr.submit_hint(
+                request_id=req_context.req_id,
+                hints=msgspec.to_builtins(hint),
+            )
         return RequestOffloadingContext()
 
     @override
