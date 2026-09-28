@@ -49,6 +49,7 @@ from vllm.model_executor.layers.fused_moe import (
 from vllm.model_executor.layers.fused_moe.utils import (
     is_model_fused_shared_expert_compatible,
 )
+from vllm.model_executor.layers.fusion.mm_input_norm import build_mm_input_norm
 from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
     MinimaxM3QKVParallelLinearWithIndexer,
@@ -1697,6 +1698,7 @@ class MiniMaxM3SparseForConditionalGeneration(
     # data``; ``run_dp_sharded_mrope_vision_model`` shards the work across
     # ranks (see ``_process_image_input`` / ``_process_video_input``).
     supports_encoder_tp_data = True
+    supports_mm_device_do_normalize = True
 
     packed_modules_mapping = {
         "qkv_proj": ["q_proj", "k_proj", "v_proj"],
@@ -1742,6 +1744,7 @@ class MiniMaxM3SparseForConditionalGeneration(
                 text_hidden_size=text_hidden_size,
                 projector_hidden_size=projector_hidden_size,
                 quant_config=self.quant_config,
+                input_norm=build_mm_input_norm(vllm_config.model_config),
                 prefix=maybe_prefix(prefix, "vision_tower"),
             )
 
@@ -1773,9 +1776,7 @@ class MiniMaxM3SparseForConditionalGeneration(
         }
 
     def _process_image_input(self, image_input: dict) -> tuple[torch.Tensor, ...]:
-        pixel_values: torch.Tensor = image_input["pixel_values"].type(
-            self.vision_tower.dtype
-        )
+        pixel_values: torch.Tensor = image_input["pixel_values"]
         grid_thw: torch.Tensor = image_input["image_grid_thw"]
         assert grid_thw.ndim == 2
 
@@ -1799,9 +1800,7 @@ class MiniMaxM3SparseForConditionalGeneration(
         return image_embeds.split(sizes)
 
     def _process_video_input(self, video_input: dict) -> tuple[torch.Tensor, ...]:
-        pixel_values: torch.Tensor = video_input["pixel_values_videos"].type(
-            self.vision_tower.dtype
-        )
+        pixel_values: torch.Tensor = video_input["pixel_values_videos"]
         grid_thw: torch.Tensor = video_input["video_grid_thw"]
         assert grid_thw.ndim == 2
 
