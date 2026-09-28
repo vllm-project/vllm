@@ -615,23 +615,6 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
                 self.aux_stream_list = aux_streams
         return super()._run_parallel_input_projections(hidden_states)
 
-    def _enable_multi_stream_overlap(self) -> bool:
-        """ROCm multi-stream gates: streams and capture region.
-
-        Dict metadata marks piecewise cudagraph, whose eager breaks rebuild
-        the attention inputs on the owning stream. Forking side streams
-        there would rely on runtime HIP event sync, which is unreliable in
-        this overlap on ROCm (event waits can hang), so multi-stream only
-        runs where the fork/join becomes static graph edges: inside capture,
-        or with non-dict metadata (full cudagraph or the profile run), which
-        has no eager breaks.
-        """
-        attn_metadata = get_forward_context().attn_metadata
-        return self.aux_stream_list is not None and (
-            torch.cuda.is_current_stream_capturing()
-            or not isinstance(attn_metadata, dict)
-        )
-
     def forward(
         self,
         positions: torch.Tensor,
@@ -641,7 +624,9 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
         if (
             self.indexer is None
             or self._prepare_and_attn_fn == self._prepare_and_attn_eager
-            or not self._enable_multi_stream_overlap()
+            or not current_platform.enable_multi_stream_overlap(
+                self.aux_stream_list, get_forward_context().attn_metadata
+            )
         ):
             # Sequential fallback: no forks outside the capture region, where
             # HIP event sync is unreliable; MRV1 keeps the input prep in its

@@ -1107,6 +1107,27 @@ class RocmPlatform(Platform):
         return "gfx1" in _GCN_ARCH
 
     @classmethod
+    def enable_multi_stream_overlap(
+        cls,
+        aux_stream_list: list[torch.cuda.Stream] | None,
+        attn_metadata: object,
+    ) -> bool:
+        """ROCm multi-stream gates: streams and capture region.
+
+        Dict metadata marks piecewise cudagraph, whose eager breaks rebuild
+        the attention inputs on the owning stream. Forking side streams
+        there would rely on runtime HIP event sync, which is unreliable in
+        this overlap on ROCm (event waits can hang), so multi-stream only
+        runs where the fork/join becomes static graph edges: inside capture,
+        or with non-dict metadata (full cudagraph or the profile run), which
+        has no eager breaks.
+        """
+        return aux_stream_list is not None and (
+            torch.cuda.is_current_stream_capturing()
+            or not isinstance(attn_metadata, dict)
+        )
+
+    @classmethod
     def get_static_graph_wrapper_cls(cls) -> str:
         return "vllm.compilation.cuda_graph.CUDAGraphWrapper"
 

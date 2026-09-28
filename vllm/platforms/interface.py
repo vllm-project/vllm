@@ -1121,6 +1121,16 @@ class Platform:
         return False
 
     @classmethod
+    def enable_multi_stream_overlap(
+        cls,
+        aux_stream_list: list[torch.cuda.Stream] | None,
+        attn_metadata: object,
+    ) -> bool:
+        """Whether the current platform should enable multi-stream overlap
+        for the given aux streams and attention metadata."""
+        return False
+
+    @classmethod
     def supports_mx(cls) -> bool:
         """Returns whether the current platform supports MX types."""
         return False
