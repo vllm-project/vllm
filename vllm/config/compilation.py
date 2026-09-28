@@ -153,6 +153,9 @@ class PassConfig:
     xpu_moe_shared_fusion_max_token_num: int = 8
     """Largest compile-range end for which the XPU MoE + shared-expert fusion
     is applied; larger token counts keep the unfused path."""
+    fuse_xpu_qkv_norm_rope: bool = False
+    """Fuse the gated QKV split, q/k RMSNorm and (M)RoPE of full attention
+    into one XPU kernel."""
 
     # ROCm/AITER specific fusions
     fuse_act_padding: bool = None  # type: ignore[assignment]
@@ -319,6 +322,12 @@ class PassConfig:
                 "is not XPU. The fusion will be disabled."
             )
             self.fuse_xpu_moe_shared = False
+        if self.fuse_xpu_qkv_norm_rope and not current_platform.is_xpu():
+            logger.warning_once(
+                "XPU QKV norm+RoPE fusion enabled but the current platform is "
+                "not XPU. The fusion will be disabled."
+            )
+            self.fuse_xpu_qkv_norm_rope = False
         if self.fuse_rope_kvcache_cat_mla and not current_platform.is_cuda_alike():
             logger.warning_once(
                 "MLA KV cache update with RoPE fusion enabled but the "

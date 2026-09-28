@@ -58,6 +58,30 @@ if hasattr(torch.ops._xpu_C, "fp8_gemm_w8a16"):
         return torch.empty((M, N), dtype=input.dtype, device=input.device)
 
 
+if hasattr(torch.ops._xpu_C, "qkv_split_norm_rope"):
+
+    @register_fake("_xpu_C::qkv_split_norm_rope")
+    def _qkv_split_norm_rope_fake(
+        qkv: torch.Tensor,
+        positions: torch.Tensor,
+        q_weight: torch.Tensor,
+        k_weight: torch.Tensor,
+        cos_sin_cache: torch.Tensor,
+        q_out: torch.Tensor,
+        k_out: torch.Tensor,
+        gate_out: torch.Tensor | None,
+        num_q_heads: int,
+        num_kv_heads: int,
+        head_dim: int,
+        rotary_dim: int,
+        eps: float,
+        weight_offset: float,
+        mrope_section: list[int],
+        mrope_interleaved: bool,
+    ) -> None:
+        return None
+
+
 if hasattr(torch.ops._xpu_C, "fp4_gemm"):
 
     @register_fake("_xpu_C::fp4_gemm")
