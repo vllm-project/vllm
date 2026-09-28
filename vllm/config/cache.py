@@ -75,8 +75,6 @@ class CacheConfig:
     Accepts None (meaning "use default"). After construction, always int."""
     user_specified_block_size: bool = field(default=False, init=False)
     """Whether block_size was explicitly provided. Derived automatically."""
-    user_specified_mamba_block_size: bool = field(default=False, init=False)
-    """Whether mamba_block_size was explicitly provided. Derived automatically."""
     kv_cache_layout: str | None = field(default=None, init=False)
     """Resolved physical KV cache layout name (a ``KVCacheLayout`` member).
 
@@ -289,7 +287,6 @@ class CacheConfig:
             "mamba_page_size_padded",
             "skip_page_size_padded",
             "user_specified_block_size",
-            "user_specified_mamba_block_size",
             "_block_size_resolved",
             # Post-init/derived counters
             "num_gpu_blocks",
@@ -333,8 +330,6 @@ class CacheConfig:
             self.block_size = self.DEFAULT_BLOCK_SIZE
         else:
             self.user_specified_block_size = True
-        if self.mamba_block_size is not None:
-            self.user_specified_mamba_block_size = True
         return self
 
     @field_validator("cache_dtype", mode="after")

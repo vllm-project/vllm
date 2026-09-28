@@ -287,7 +287,6 @@ class PleShortConvAttentionMetadataBuilder(ShortConvAttentionMetadataBuilder):
         token_chunk_offset_ptr = None
         has_initial_states_p = None
         has_initial_states_d = None
-        num_computed_tokens_p = None
         # Original request indices of the non-spec requests, ordered
         # [decodes, prefills]. Used to gather per-request data consistently.
         non_spec_req_idx_cpu: torch.Tensor | None = None
@@ -426,10 +425,9 @@ class PleShortConvAttentionMetadataBuilder(ShortConvAttentionMetadataBuilder):
                 assert non_spec_query_start_loc is not None
                 query_start_loc_d = non_spec_query_start_loc[: num_decodes + 1]
             if num_prefills > 0:
-                num_computed_tokens_p = num_computed_tokens[
-                    num_decodes : num_decodes + num_prefills
-                ]
-                has_initial_states_p = num_computed_tokens_p > 0
+                has_initial_states_p = (
+                    num_computed_tokens[num_decodes : num_decodes + num_prefills] > 0
+                )
                 assert non_spec_query_start_loc is not None
                 assert non_spec_query_start_loc_cpu is not None
                 query_start_loc_p = (
@@ -516,7 +514,6 @@ class PleShortConvAttentionMetadataBuilder(ShortConvAttentionMetadataBuilder):
             query_start_loc_d=query_start_loc_d,
             state_indices_tensor_p=state_indices_tensor_p,
             state_indices_tensor_d=state_indices_tensor_d,
-            num_computed_tokens_p=num_computed_tokens_p,
             seq_lens=m.seq_lens,
         )
 

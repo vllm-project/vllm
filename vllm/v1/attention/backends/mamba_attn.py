@@ -39,7 +39,6 @@ class BaseMambaAttentionMetadata:
     # the batch has no prefill requests.
     has_initial_states_p: torch.Tensor | None
     query_start_loc_p: torch.Tensor | None
-    num_computed_tokens_p: torch.Tensor | None
     state_indices_tensor_p: torch.Tensor | None
 
     # The following tensors are used for decode requests and
@@ -577,7 +576,6 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
             replayssm_scratch=replayssm_scratch,
             num_accepted_tokens=num_accepted_tokens,
             query_start_loc_d=query_start_loc_d,
-            num_computed_tokens_p=None,
             num_reqs=num_reqs,
             seq_lens=common_attn_metadata.seq_lens,
             nums_dict=nums_dict,
