@@ -48,6 +48,40 @@ def _text_config(**kwargs) -> Qwen4ExpTextConfig:
     return Qwen4ExpTextConfig(**values)
 
 
+@pytest.mark.parametrize("hisparse", [False, True])
+def test_qsa_compressed_keys_are_not_hisparse_host_sources(hisparse: bool) -> None:
+    """Enabling main-KV offload must keep the compressed indexer on device."""
+    from vllm.config import AttentionConfig, CacheConfig, HiSparseConfig
+    from vllm.models.qwen4_exp.common.qsa_cache import QSACompressedKeyCache
+    from vllm.v1.kv_cache_interface import MLAAttentionSpec, SparseCacheRole
+
+    config = SimpleNamespace(
+        attention_config=AttentionConfig(
+            hisparse_config=HiSparseConfig() if hisparse else None
+        ),
+        compilation_config=SimpleNamespace(static_forward_context={}),
+    )
+    cache = QSACompressedKeyCache(
+        head_size=128,
+        dtype=torch.bfloat16,
+        cache_config=CacheConfig(block_size=64),
+        prefix="qsa.indexer.compressed",
+        vllm_config=config,
+        compress_ratio=4,
+    )
+
+    spec = cache.get_kv_cache_spec(config)
+
+    assert spec == MLAAttentionSpec(
+        block_size=64,
+        num_kv_heads=1,
+        head_size=128,
+        dtype=torch.bfloat16,
+        tokens_per_state=4,
+        cache_role=SparseCacheRole.INDEXER if hisparse else SparseCacheRole.SPARSE,
+    )
+
+
 def test_qwen4_exp_mtp_returns_sample_and_multi_streams() -> None:
     from vllm.models.qwen4_exp.nvidia.mtp import (
         Qwen4ExpMultiTokenPredictor,

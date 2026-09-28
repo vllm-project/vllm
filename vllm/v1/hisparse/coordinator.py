@@ -510,6 +510,16 @@ class HiSparseCoordinator:
             )
         self._publish_host_blocks_if_ready(request_id)
 
+    def plan_prefix_tail_restore(self, request_id: str, page_idx: int) -> None:
+        """Restore a local hit once every resident group has its private tail.
+
+        Host COW runs before page restores on the worker. Resident managers
+        call this after allocation; the last one makes the transfer ready.
+        """
+        self._plan_page_transfer(
+            request_id, page_idx, after_forward=False, restore=True
+        )
+
     def _plan_page_transfer(
         self,
         request_id: str,

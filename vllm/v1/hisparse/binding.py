@@ -26,8 +26,10 @@ from vllm.v1.kv_cache_interface import (
     KVCacheLayout,
     KVCacheSpec,
     MLAAttentionSpec,
+    SparseFullAttentionSpec,
     UniformTypeKVCacheSpecs,
     create_kv_cache_views,
+    iter_layer_specs,
 )
 from vllm.v1.worker.utils import allocate_kv_cache, select_common_block_size
 
@@ -41,20 +43,20 @@ def resolve_hisparse_block_size(
     kv_cache_spec: dict[str, KVCacheSpec],
     attn_layers: Mapping[str, "AttentionLayerBase"],
 ) -> None:
-    """Resolve a common kernel block size in-place for HiSparse MLA specs."""
+    """Resolve one logical block size for sparse sources and their indexers."""
     if vllm_config.attention_config.hisparse_config is None:
         return
-    mla_specs = {
+    sparse_specs = {
         name: spec
         for name, spec in kv_cache_spec.items()
-        if isinstance(spec, MLAAttentionSpec)
+        if isinstance(spec, (MLAAttentionSpec, SparseFullAttentionSpec))
     }
-    if not mla_specs:
+    if not sparse_specs:
         return
-    block_sizes = {spec.block_size for spec in mla_specs.values()}
+    block_sizes = {spec.block_size for spec in sparse_specs.values()}
     if len(block_sizes) != 1:
         raise ValueError("HiSparse requires one scheduler block size.")
-    backends = [attn_layers[name].get_attn_backend() for name in mla_specs]
+    backends = [attn_layers[name].get_attn_backend() for name in sparse_specs]
     try:
         block_size = select_common_block_size(block_sizes.pop(), backends)
     except ValueError as error:
@@ -64,7 +66,7 @@ def resolve_hisparse_block_size(
         ) from error
     kv_cache_spec.update(
         (name, spec.copy_with_new_block_size(block_size))
-        for name, spec in mla_specs.items()
+        for name, spec in sparse_specs.items()
     )
 
 
@@ -76,6 +78,16 @@ def allocate_hisparse_kv_caches(
     host_pool: HiSparseHostPool,
 ) -> dict[str, torch.Tensor]:
     """Allocate the host pool separately from the shared device backing."""
+    if layout is not KVCacheLayout.BLNHC and any(
+        isinstance(spec, SparseFullAttentionSpec)
+        for group in kv_cache_config.kv_cache_groups
+        if group.host_resident
+        for spec in iter_layer_specs(group.kv_cache_spec)
+    ):
+        raise ValueError(
+            "HiSparse sparse full attention requires BLNHC so each token's "
+            "complete K/V heads form a contiguous copy row."
+        )
     device_config = copy(kv_cache_config)
     device_config.kv_cache_tensors = [
         tensor
@@ -204,6 +216,8 @@ def bind_hisparse_kv_caches(
 ) -> list[HiSparseCacheHandle]:
     """Bind existing cache storage and block tables; return the bound handles."""
     assert host_pool.registered is not None
+    (source_group_id,) = kv_cache_config.host_group_ids
+    source_group_spec = kv_cache_config.kv_cache_groups[source_group_id].kv_cache_spec
     tensor_configs = {
         name: (
             tensor_config,
@@ -276,6 +290,33 @@ def bind_hisparse_kv_caches(
             assert source_cache.untyped_storage().data_ptr() == (
                 host_pool.registered.untyped_storage().data_ptr()
             )
+            source_spec = (
+                source_group_spec.kv_cache_specs[layer_name]
+                if isinstance(source_group_spec, UniformTypeKVCacheSpecs)
+                else source_group_spec
+            )
+            if isinstance(source_spec, SparseFullAttentionSpec):
+                expected_shape = (
+                    source_spec.num_kv_heads,
+                    source_spec.block_size,
+                    source_spec.head_size + source_spec.head_size_v,
+                )
+                if source_cache.ndim != 4 or source_cache.shape[1:] != expected_shape:
+                    raise ValueError(
+                        "HiSparse sparse full-attention source must have shape "
+                        f"[blocks, {expected_shape}], got {tuple(source_cache.shape)}."
+                    )
+                # Keep the canonical [B, H, N, K+V] view for layers/connectors.
+                # The copy runtime addresses one complete token across all heads.
+                token_rows = source_cache.transpose(1, 2)
+                if not token_rows.is_contiguous():
+                    raise ValueError(
+                        "HiSparse sparse full attention requires unpadded, "
+                        "contiguous token rows in the host LBNHC layout."
+                    )
+                source_cache = token_rows.view(
+                    token_rows.shape[0], token_rows.shape[1], -1
+                )
             cache_handle.runtime.shared_host_region = host_pool.shared_region
             cache_handle.runtime.bind_source_cache(
                 source_cache,
@@ -288,7 +329,6 @@ def bind_hisparse_kv_caches(
 
     if hot_backing is None or not cache_handles:
         raise RuntimeError("HiSparse found no hot-cache handles.")
-    (source_group_id,) = kv_cache_config.host_group_ids
     for cache_handle in cache_handles:
         cache_handle.source_block_table = block_tables.input_block_tables[
             source_group_id
