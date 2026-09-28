@@ -20,10 +20,10 @@
 # limitations under the License.
 """Falcon configuration."""
 
-from transformers.configuration_utils import PretrainedConfig
+from transformers.configuration_utils import PreTrainedConfig
 
 
-class RWConfig(PretrainedConfig):
+class RWConfig(PreTrainedConfig):
     model_type = "falcon"
     keys_to_ignore_at_inference = ["past_key_values"]
     attribute_map = {
