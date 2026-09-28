@@ -12,6 +12,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import is_deferred_attention_layer
 from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+from vllm.model_executor.utils import copy_derived_buffer
 
 from .meta import (
     SKIP_LOAD_TENSORS,
@@ -264,7 +265,7 @@ def finalize_layerwise_processing(model: torch.nn.Module, model_config: ModelCon
             if info.load_numel_total > 0:  # type: ignore[operator]
                 logger.warning("%s: Failed to load weights", layer.__class__.__name__)
             _place_kernel_tensors(layer, info)
-            _run_post_weights_reload(layer)
+            info.post_weights_reload_pending = True
 
         # Process non-attention layers which did not load all elements. This can happen
         # if the created weight has extra padding elements which are not loaded
@@ -280,6 +281,14 @@ def finalize_layerwise_processing(model: torch.nn.Module, model_config: ModelCon
     for layer, info in deferred_attn:
         _finalize_attention_layer(layer, info, model_config)
         info.reset()
+
+    # Secondary state can depend on children or deferred attention. Complete
+    # only after every primary tensor is stable, with children before parents.
+    for layer in reversed(list(model.modules())):
+        info = get_layerwise_info(layer)
+        if info.post_weights_reload_pending:
+            _run_post_weights_reload(layer)
+            info.post_weights_reload_pending = False
 
     LOADING_LAYERS.clear()
 
@@ -303,7 +312,7 @@ def _finalize_attention_layer(
         _place_kernel_tensors(layer, info)
     layer.process_weights_after_loading(model_config.dtype)
     if is_reload:
-        _run_post_weights_reload(layer)
+        info.post_weights_reload_pending = True
 
 
 def _reload_attention_scales(layer: torch.nn.Module, info: LayerReloadingInfo) -> None:
@@ -403,7 +412,14 @@ def _copy_and_restore_kernel_tensors(
     loaded_tensor_names = {name for name, _ in info.loaded_weights}
     for name, param in parameters.items():
         param.data.copy_(getattr(layer, name))
+    derived_names = getattr(layer, "_vllm_derived_buffers", ())
     for name, buffer in buffers.items():
+        if name in derived_names:
+            temporary = layer._buffers.get(name)
+            if temporary is not None:
+                copy_derived_buffer(buffer, temporary, name)
+            # A secondary cache may instead be refreshed by the completion hook.
+            continue
         if name not in layer._buffers:
             continue
         if name in non_persistent and name not in loaded_tensor_names:
@@ -412,18 +428,24 @@ def _copy_and_restore_kernel_tensors(
 
     _place_kernel_tensors(layer, info)
     if run_post_weights_reload:
-        _run_post_weights_reload(layer)
+        info.post_weights_reload_pending = True
 
 
 def _run_post_weights_reload(layer: torch.nn.Module) -> None:
-    post_weights_reload = getattr(layer, "post_weights_reload", None)
-    if post_weights_reload is not None:
-        post_weights_reload()
+    """Complete a reload after primary weights reach final stable storage.
 
+    Quantization helpers finish before the module's secondary state. This
+    completion contract also applies after selective refresh_derived_state();
+    hooks must not depend on layerwise metadata or temporary PWAL tensors.
+    """
     quant_method = getattr(layer, "quant_method", None)
     post_weights_reload = getattr(quant_method, "post_weights_reload", None)
     if post_weights_reload is not None:
         post_weights_reload(layer)
+
+    post_weights_reload = getattr(layer, "post_weights_reload", None)
+    if post_weights_reload is not None:
+        post_weights_reload()
 
 
 def _place_kernel_tensors(layer: torch.nn.Module, info: LayerReloadingInfo):

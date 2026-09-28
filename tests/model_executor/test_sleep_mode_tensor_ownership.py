@@ -378,9 +378,7 @@ def test_static_helper_buffer_keeps_owner_storage() -> None:
     helper = SimpleNamespace()
     original = torch.tensor([1, 2])
 
-    first = FusedMoEExperts._publish_helper_buffer(
-        helper, layer, "stride", original
-    )
+    first = FusedMoEExperts._publish_helper_buffer(helper, layer, "stride", original)
     second = FusedMoEExperts._publish_helper_buffer(
         helper, layer, "stride", torch.tensor([3, 4])
     )

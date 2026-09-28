@@ -33,6 +33,7 @@ from vllm.model_executor.layers.fused_moe.utils import (
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
 )
+from vllm.model_executor.utils import publish_runtime_buffer, rebind_runtime_buffers
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import PIN_MEMORY
 from vllm.v1.worker.ubatching import (
@@ -506,44 +507,17 @@ class FusedMoEExperts(ABC):
         *,
         derived: bool = False,
     ) -> torch.Tensor | None:
-        """Publish helper-owned runtime state on its owning module.
-
-        ``FusedMoEExperts`` is not an ``nn.Module`` and therefore only keeps an
-        alias. The owning layer controls the tensor storage lifetime.
-        """
-        if tensor is None:
-            return None
-        buffer_name = f"_moe_{name}"
-        helper_buffers = getattr(self, "_helper_buffer_names", None)
-        if helper_buffers is None:
-            helper_buffers = self._helper_buffer_names = {}
-        helper_buffers[name] = buffer_name
-
-        if derived:
-            from vllm.model_executor.utils import (
-                register_derived_buffer,
-                set_derived_buffer,
-            )
-
-            if buffer_name not in layer._buffers:
-                register_derived_buffer(layer, buffer_name)
-            return set_derived_buffer(layer, buffer_name, tensor)
-
-        if buffer_name not in layer._buffers:
-            layer.register_buffer(buffer_name, tensor, persistent=False)
-            return tensor
-
-        existing = layer._buffers[buffer_name]
-        assert existing is not None
-        return existing
+        """Publish MoE helper state through the common ownership API."""
+        return publish_runtime_buffer(
+            layer, self, name, f"_moe_{name}", tensor, derived=derived
+        )
 
     def refresh_derived_buffers(self, layer: torch.nn.Module) -> None:  # noqa: B027
         """Refresh weight-derived helper buffers after stable storage returns."""
 
     def rebind_runtime_buffers(self, layer: torch.nn.Module) -> None:
         """Rebind helper aliases to storage owned by ``layer``."""
-        for name, buffer_name in getattr(self, "_helper_buffer_names", {}).items():
-            setattr(self, name, layer._buffers[buffer_name])
+        rebind_runtime_buffers(layer, self)
 
     def post_weights_reload(self, layer: torch.nn.Module) -> None:
         self.refresh_derived_buffers(layer)

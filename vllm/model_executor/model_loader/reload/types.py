@@ -37,9 +37,14 @@ class LayerReloadingInfo:
     # persistence survives `_non_persistent_buffers_set` being mutated during reload
     kernel_non_persistent_buffers: set[str] = field(default_factory=set)
 
+    # Completion waits until child/deferred layers also have stable storage.
+    post_weights_reload_pending: bool = False
+
     def reset(self):
         self.__init__(  # type: ignore[misc]
-            restore_metadata=self.restore_metadata, restore_device=self.restore_device
+            restore_metadata=self.restore_metadata,
+            restore_device=self.restore_device,
+            post_weights_reload_pending=self.post_weights_reload_pending,
         )
 
     def can_load(self) -> bool:

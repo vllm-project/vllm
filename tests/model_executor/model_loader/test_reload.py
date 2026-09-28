@@ -40,7 +40,12 @@ from vllm.model_executor.model_loader.weight_utils import (
     composed_weight_loader,
     default_weight_loader,
 )
-from vllm.model_executor.utils import register_derived_buffer, set_derived_buffer
+from vllm.model_executor.utils import (
+    bind_runtime_buffer,
+    rebind_runtime_buffers,
+    register_derived_buffer,
+    set_derived_buffer,
+)
 from vllm.platforms import current_platform
 
 
@@ -136,7 +141,8 @@ class _DerivedBufferQuantMethod(QuantizeMethodBase):
 
     def post_weights_reload(self, layer: torch.nn.Module) -> None:
         self.helper.refresh(layer)
-        self.helper.weight_squared = layer._buffers["weight_squared"]
+        rebind_runtime_buffers(layer, self.helper)
+        layer.reload_events.append("quant")
 
 
 class _DerivedBufferLayer(torch.nn.Module):
@@ -146,9 +152,15 @@ class _DerivedBufferLayer(torch.nn.Module):
         self.weight.weight_loader = default_weight_loader
         register_derived_buffer(self, "weight_squared")
         self.quant_method = _DerivedBufferQuantMethod()
+        bind_runtime_buffer(
+            self, self.quant_method.helper, "weight_squared", "weight_squared"
+        )
+        self.reload_events = []
         self.buffer_seen_by_module_post_reload: torch.Tensor | None = None
 
     def post_weights_reload(self) -> None:
+        assert self.reload_events[-1] == "quant"
+        self.reload_events.append("module")
         self.buffer_seen_by_module_post_reload = self.weight_squared
 
 
@@ -282,17 +294,98 @@ def test_complete_weight_load_refreshes_derived_buffer_in_stable_storage():
     assert torch.equal(stable_buffer, first_weight.square())
     assert layer.quant_method.helper.weight_squared is stable_buffer
 
-    # Complete a second checkpoint load. PWAL first derives into temporary
-    # storage; post_weights_reload must then refresh the restored stable buffer.
+    record_metadata_for_reloading(model)
+    for weight in (second_weight, first_weight):
+        layer.reload_events.clear()
+        initialize_layerwise_reload(model)
+        layer.weight.weight_loader(layer.weight, weight)
+        finalize_layerwise_reload(model, model_config)
+
+        assert layer.weight_squared.data_ptr() == stable_pointer
+        assert torch.equal(layer.weight_squared, weight.square())
+        assert layer.buffer_seen_by_module_post_reload is layer.weight_squared
+        assert layer.quant_method.helper.weight_squared is layer.weight_squared
+        assert layer.reload_events == ["quant", "module"]
+
+
+@pytest.mark.parametrize("lazy", [False, True])
+def test_reload_commits_pwal_value_or_refreshes_materialized_lazy_cache(lazy):
+    """Source-dropping PWAL and lazy caches both update graph-stable buffers."""
+
+    class Method(_DerivedBufferQuantMethod):
+        def process_weights_after_loading(self, layer):
+            if not lazy or layer.weight_squared is None:
+                self.helper.refresh(layer)
+            if not lazy:
+                layer.register_parameter("weight", None)
+
+        def post_weights_reload(self, layer):
+            if lazy:
+                self.helper.refresh(layer)
+            rebind_runtime_buffers(layer, self.helper)
+            layer.reload_events.append("quant")
+
+    layer = _DerivedBufferLayer()
+    layer.quant_method = Method()
+    bind_runtime_buffer(
+        layer, layer.quant_method.helper, "weight_squared", "weight_squared"
+    )
+    model = torch.nn.Sequential(layer)
+    config = Mock(spec=ModelConfig)
+    first = torch.arange(4, dtype=torch.float32).reshape(2, 2)
+    second = first + 5
+    # Capture checkpoint schema before the destructive transform drops its source.
+    record_metadata_for_reloading(model)
+    initialize_online_processing(layer)
+    layer.weight.weight_loader(layer.weight, first)
+    finalize_layerwise_reload(model, config)
+    stable = layer.weight_squared
+    pointer = stable.data_ptr()
+
+    for weight in (second, first):
+        layer.reload_events.clear()
+        initialize_layerwise_reload(model)
+        layer.weight.weight_loader(layer.weight, weight)
+        finalize_layerwise_reload(model, config)
+        assert layer.weight_squared is stable
+        assert stable.data_ptr() == pointer
+        assert torch.equal(stable, weight.square())
+        assert layer.quant_method.helper.weight_squared is stable
+        assert layer.reload_events == ["quant", "module"]
+        if not lazy:
+            assert layer.weight is None
+
+
+@pytest.mark.parametrize("load_weights", [False, True])
+def test_deferred_attention_completion_runs_once_after_final_processing(load_weights):
+    class Attention(_ReloadableAttentionLayer):
+        def __init__(self):
+            super().__init__()
+            self.quant_method = SimpleNamespace(
+                post_weights_reload=lambda layer: events.append("quant")
+            )
+
+        def process_weights_after_loading(self, act_dtype):
+            events.append("attention")
+
+        def post_weights_reload(self):
+            assert not self.weight.is_meta
+            events.append("module")
+
+    events = []
+    layer = Attention()
+    model = torch.nn.Sequential(layer)
     record_metadata_for_reloading(model)
     initialize_layerwise_reload(model)
-    layer.weight.weight_loader(layer.weight, second_weight)
-    finalize_layerwise_reload(model, model_config)
-
-    assert layer.weight_squared.data_ptr() == stable_pointer
-    assert torch.equal(layer.weight_squared, second_weight.square())
-    assert layer.buffer_seen_by_module_post_reload is layer.weight_squared
-    assert layer.quant_method.helper.weight_squared is layer.weight_squared
+    if load_weights:
+        # The stand-in has no attention scales requiring quant processing.
+        layer.quant_method = None
+        layer.weight.weight_loader(layer.weight, torch.full((2, 2), 7.0))
+    assert events == []
+    finalize_layerwise_reload(model, Mock(spec=ModelConfig))
+    assert events == (
+        ["attention", "module"] if load_weights else ["attention", "quant", "module"]
+    )
 
 
 def test_none_buffer_placeholder_survives_reload_metadata_round_trip():
@@ -1300,3 +1393,28 @@ def test_online_quantize_reload(
         mul_perp = llm.generate_prompt_perplexity(["3 4 = 12"], mask=["3 4 ="])[0]
         add_perp = llm.generate_prompt_perplexity(["3 4 = 7"], mask=["3 4 ="])[0]
         assert add_perp < mul_perp
+
+
+def test_parent_completion_waits_for_unloaded_child_storage():
+    """A parent cache must see its child's restored weight, never a meta tensor."""
+
+    class Parent(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.child = torch.nn.Linear(2, 2, bias=False)
+            register_derived_buffer(self, "mirror")
+            set_derived_buffer(self, "mirror", self.child.weight.detach().clone())
+            self.calls = 0
+
+        def post_weights_reload(self):
+            set_derived_buffer(self, "mirror", self.child.weight.detach())
+            self.calls += 1
+
+    model = Parent()
+    pointer = model.mirror.data_ptr()
+    record_metadata_for_reloading(model)
+    initialize_layerwise_reload(model)
+    finalize_layerwise_reload(model, Mock(spec=ModelConfig))
+    assert model.calls == 1
+    assert model.mirror.data_ptr() == pointer
+    assert torch.equal(model.mirror, model.child.weight)
