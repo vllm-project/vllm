@@ -332,6 +332,10 @@ def _rocm_select_topk(
     """
     rows = scores.shape[0]
     k_pad = triton.next_power_of_2(min(topk_blocks, nblocks))
+    # _scan_range_topk does a running top-K_PAD merge one TILE-wide slice at a
+    # time; tl.topk silently corrupts its output if asked for more elements
+    # than the slice holds, so the tile must never be smaller than K_PAD.
+    tile = max(_TILE, k_pad)
 
     num_chunks = 1
     if rows < _TARGET_PROGRAMS:
@@ -340,7 +344,7 @@ def _rocm_select_topk(
         want = min(
             triton.cdiv(_TARGET_PROGRAMS, max(rows, 1)),
             _MAX_CHUNKS,
-            max(1, nblocks // _TILE),
+            max(1, nblocks // tile),
         )
         num_chunks = max(1, triton.next_power_of_2(want + 1) // 2)
 
@@ -351,7 +355,7 @@ def _rocm_select_topk(
         OUT_K=topk_blocks,
         K_PAD=k_pad,
         TAIL=triton.next_power_of_2(topk_blocks - k_pad) if topk_blocks > k_pad else 0,
-        TILE=_TILE,
+        TILE=tile,
     )
     if num_chunks == 1:
         _row_topk_kernel[(rows,)](
@@ -371,7 +375,7 @@ def _rocm_select_topk(
         ROW_REPEAT=row_repeat,
         NUM_CHUNKS=num_chunks,
         K_PAD=k_pad,
-        TILE=_TILE,
+        TILE=tile,
     )
     _row_topk_merge_kernel[(rows,)](
         partial,
