@@ -87,3 +87,14 @@ def test_identity_reasoning_parser_basic(tokenizer):
         delta_token_ids=[],
     )
     assert result_none is None
+
+
+@pytest.mark.parametrize("thinking,expected", [(True, 3), (False, 0)])
+def test_count_reasoning_tokens_delegates(tokenizer, thinking, expected):
+    parser = DeepSeekV3ReasoningParser(
+        tokenizer, chat_template_kwargs={"thinking": thinking}
+    )
+    think = tokenizer.convert_tokens_to_ids(["<think>", "</think>"])
+    token_ids = [think[0], 11, 12, 13, think[1], 14]
+
+    assert parser.count_reasoning_tokens(token_ids) == expected
