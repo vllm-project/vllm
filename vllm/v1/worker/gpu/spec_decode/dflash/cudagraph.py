@@ -42,17 +42,16 @@ def _prepare_dflash_inputs_to_capture(
     attn_metadata = None
     if not skip_attn:
         query_start_loc_cpu = torch.from_numpy(input_batch.query_start_loc_np)
-        dcp_local_seq_lens = None
         if block_tables.cp_size > 1:
-            prepare_dcp_local_seq_lens(
+            input_batch.dcp_local_seq_lens = prepare_dcp_local_seq_lens(
                 input_buffers.dcp_local_seq_lens,
-                input_buffers.seq_lens,
-                num_reqs,
+                input_batch.seq_lens,
+                input_batch.num_reqs,
                 block_tables.cp_size,
                 block_tables.cp_rank,
                 block_tables.cp_interleave,
+                num_reqs_padded=input_batch.num_reqs_after_padding,
             )
-            dcp_local_seq_lens = input_buffers.dcp_local_seq_lens
         attn_metadata = build_attn_metadata(
             attn_groups=attn_groups,
             num_reqs=num_reqs,
@@ -61,7 +60,7 @@ def _prepare_dflash_inputs_to_capture(
             query_start_loc_cpu=query_start_loc_cpu,
             max_query_len=num_tokens // num_reqs,
             seq_lens=input_batch.seq_lens,
-            dcp_local_seq_lens=dcp_local_seq_lens,
+            dcp_local_seq_lens=input_batch.dcp_local_seq_lens,
             max_seq_len=max_model_len,
             block_tables=input_block_tables,
             slot_mappings=slot_mappings,
@@ -85,8 +84,12 @@ class DFlashCudaGraphManager(CudaGraphManager):
         kv_cache_config: KVCacheConfig,
         max_model_len: int,
         causal: bool | Mapping[int, bool],
+        precompute_context_kv: Callable[[int], None],
         progress_bar_desc: str = "Capturing CUDA graphs",
     ) -> None:
+        """``precompute_context_kv(num_reqs)`` is captured ahead of the query
+        forward."""
+
         def create_forward_fn(
             desc: BatchExecutionDescriptor,
             warmup: bool,
@@ -111,13 +114,17 @@ class DFlashCudaGraphManager(CudaGraphManager):
             )
             attn_metadata, slot_mappings = attn_state
 
-            return lambda cg_mode: forward_fn(
-                num_reqs,
-                num_tokens,
-                attn_metadata,
-                slot_mappings,
-                num_tokens_across_dp,
-                cg_mode,
-            )
+            def forward(cg_mode: CUDAGraphMode) -> None:
+                precompute_context_kv(num_reqs)
+                forward_fn(
+                    num_reqs,
+                    num_tokens,
+                    attn_metadata,
+                    slot_mappings,
+                    num_tokens_across_dp,
+                    cg_mode,
+                )
+
+            return forward
 
         super().capture(create_forward_fn, progress_bar_desc)

@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Deploy DeepSeek R1 or V3 with Ray Serve LLM.
+"""Deploy DeepSeek R1 or V3 with Ray Serve LLM.
 
 Ray Serve LLM is a scalable and production-grade model serving library built
 on the Ray distributed computing framework and first-class support for the vLLM engine.

@@ -7,13 +7,14 @@
 # Ovis Config with AimV2 config registration removed for Transformers compatibility
 from typing import Any
 
-from transformers import AutoConfig, PretrainedConfig
+from transformers import AutoConfig, PreTrainedConfig
 
 
-class AIMv2Config(PretrainedConfig):
+class AIMv2Config(PreTrainedConfig):
     """This is the configuration class to store the configuration of an [`AIMv2Model`].
     Instantiating a configuration with the defaults will yield a similar configuration
     to that of the [apple/aimv2-large-patch14-224](https://huggingface.co/apple/aimv2-large-patch14-224).
+
     Args:
         hidden_size: Dimension of the hidden representations.
         intermediate_size: Dimension of the SwiGLU representations.
@@ -28,7 +29,8 @@ class AIMv2Config(PretrainedConfig):
         projection_dropout: Dropout ratio for the projection layer after the attention.
         qkv_bias: Whether to add a bias to the queries, keys and values.
         use_bias: Whether to add a bias in the feed-forward and projection layers.
-        kwargs: Keyword arguments for the [`PretrainedConfig`].
+        kwargs: Keyword arguments for the [`PreTrainedConfig`].
+
     """
 
     model_type: str = "aimv2"
@@ -68,7 +70,7 @@ class AIMv2Config(PretrainedConfig):
 # ----------------------------------------------------------------------
 #                     Visual Tokenizer Configuration
 # ----------------------------------------------------------------------
-class BaseVisualTokenizerConfig(PretrainedConfig):
+class BaseVisualTokenizerConfig(PreTrainedConfig):
     def __init__(
         self,
         vocab_size=16384,
@@ -76,7 +78,7 @@ class BaseVisualTokenizerConfig(PretrainedConfig):
         tau=1.0,
         depths=None,
         drop_cls_token=False,
-        backbone_config: PretrainedConfig | dict | None = None,
+        backbone_config: PreTrainedConfig | dict | None = None,
         hidden_stride: int = 1,
         **kwargs,
     ):
@@ -90,10 +92,10 @@ class BaseVisualTokenizerConfig(PretrainedConfig):
         self.backbone_kwargs = dict[str, Any]()
         self.drop_cls_token = drop_cls_token
         if backbone_config is not None:
-            assert isinstance(backbone_config, (PretrainedConfig, dict)), (
-                f"expect `backbone_config` to be instance of PretrainedConfig or dict, but got {type(backbone_config)} type"
+            assert isinstance(backbone_config, (PreTrainedConfig, dict)), (
+                f"expect `backbone_config` to be instance of PreTrainedConfig or dict, but got {type(backbone_config)} type"
             )
-            if not isinstance(backbone_config, PretrainedConfig):
+            if not isinstance(backbone_config, PreTrainedConfig):
                 model_type = backbone_config["model_type"]
                 if model_type != "aimv2":
                     backbone_config.pop("model_type")
@@ -137,13 +139,13 @@ AutoConfig.register("aimv2_visual_tokenizer", Aimv2VisualTokenizerConfig)
 # ----------------------------------------------------------------------
 #                           Ovis Configuration
 # ----------------------------------------------------------------------
-class OvisConfig(PretrainedConfig):
+class OvisConfig(PreTrainedConfig):
     model_type = "ovis"
 
     def __init__(
         self,
-        llm_config: PretrainedConfig | dict | None = None,
-        visual_tokenizer_config: PretrainedConfig | dict | None = None,
+        llm_config: PreTrainedConfig | dict | None = None,
+        visual_tokenizer_config: PreTrainedConfig | dict | None = None,
         multimodal_max_length=8192,
         hidden_size=None,
         conversation_formatter_class=None,
@@ -153,10 +155,10 @@ class OvisConfig(PretrainedConfig):
     ):
         super().__init__(**kwargs)
         if llm_config is not None:
-            assert isinstance(llm_config, (PretrainedConfig, dict)), (
-                f"expect `llm_config` to be instance of PretrainedConfig or dict, but got {type(llm_config)} type"
+            assert isinstance(llm_config, (PreTrainedConfig, dict)), (
+                f"expect `llm_config` to be instance of PreTrainedConfig or dict, but got {type(llm_config)} type"
             )
-            if not isinstance(llm_config, PretrainedConfig):
+            if not isinstance(llm_config, PreTrainedConfig):
                 model_type = llm_config["model_type"]
                 llm_config.pop("model_type")
                 llm_config = AutoConfig.for_model(model_type, **llm_config)
@@ -164,10 +166,10 @@ class OvisConfig(PretrainedConfig):
         # map llm_config to text_config
         self.text_config = llm_config
         if visual_tokenizer_config is not None:
-            assert isinstance(visual_tokenizer_config, (PretrainedConfig, dict)), (
-                f"expect `visual_tokenizer_config` to be instance of PretrainedConfig or dict, but got {type(visual_tokenizer_config)} type"
+            assert isinstance(visual_tokenizer_config, (PreTrainedConfig, dict)), (
+                f"expect `visual_tokenizer_config` to be instance of PreTrainedConfig or dict, but got {type(visual_tokenizer_config)} type"
             )
-            if not isinstance(visual_tokenizer_config, PretrainedConfig):
+            if not isinstance(visual_tokenizer_config, PreTrainedConfig):
                 model_type = visual_tokenizer_config["model_type"]
                 visual_tokenizer_config.pop("model_type")
                 visual_tokenizer_config = AutoConfig.for_model(
