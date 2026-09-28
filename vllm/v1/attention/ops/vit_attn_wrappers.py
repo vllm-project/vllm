@@ -58,6 +58,7 @@ def flash_attn_maxseqlen_wrapper(
             max_seqlen = max_seqlen.item()
 
     q, k, v = (einops.rearrange(x, "b s ... -> (b s) ...") for x in [q, k, v])
+    kwargs["out"] = torch.empty_like(q, memory_format=torch.contiguous_format)
     output = flash_attn_varlen_func(
         q,
         k,
@@ -71,7 +72,8 @@ def flash_attn_maxseqlen_wrapper(
         softmax_scale=scale,
         **kwargs,
     )
-    return einops.rearrange(output, "(b s) h d -> b s h d", b=batch_size).contiguous()
+    context_layer = einops.rearrange(output, "(b s) h d -> b s h d", b=batch_size)
+    return context_layer
 
 
 def flash_attn_maxseqlen_wrapper_fake(
@@ -185,7 +187,9 @@ def triton_attn_wrapper(
         sliding_window_k=None,
         softmax_scale=scale,
     )
-    return einops.rearrange(output, "(b s) h d -> b s h d", b=batch_size)
+
+    context_layer = einops.rearrange(output, "(b s) h d -> b s h d", b=batch_size)
+    return context_layer
 
 
 def triton_attn_wrapper_fake(
@@ -358,6 +362,11 @@ def flashinfer_wrapper(
     with gpu_sync_allowed():
         max_seqlen = max_seqlen.item()
 
+    output_buffer = torch.empty_like(
+        q,
+        dtype=o_data_type,
+        memory_format=torch.contiguous_format,
+    )
     output, _ = cudnn_batch_prefill_with_kv_cache(
         q,
         k,
@@ -378,12 +387,13 @@ def flashinfer_wrapper(
         k_scale=k_scale,
         v_scale=v_scale,
         o_data_type=o_data_type,
+        out=output_buffer,
     )
 
     if is_reshaped:
         output = einops.rearrange(output, "(b s) h d -> b s h d", b=reshape_batch_size)
 
-    return output.contiguous()
+    return output
 
 
 def vit_flashinfer_wrapper_fake(
