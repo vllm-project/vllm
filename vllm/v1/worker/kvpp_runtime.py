@@ -104,8 +104,9 @@ class KVPPRuntime:
         index = self.layer_indices.get(layer_name)
         if index is None or index == self.active_index:
             return
-        if index != self.next_index or self.active_index is not None:
-            raise RuntimeError(f"Out-of-order KVPP access to {layer_name}.")
+        assert index == self.next_index and self.active_index is None, (
+            f"Out-of-order KVPP access to {layer_name}."
+        )
         if self.has_history:
             if self.pending is None:
                 self._prefetch(index)
