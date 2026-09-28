@@ -1379,6 +1379,7 @@ class CompilationConfig:
         max_num_reqs: int | None = None,
         is_profiling: bool = False,
         piecewise_capture_available: bool = True,
+        breakable_cudagraph_available: bool = False,
     ) -> CUDAGraphMode:
         from vllm.v1.attention.backend import AttentionCGSupport
 
@@ -1424,19 +1425,22 @@ class CompilationConfig:
                 f"with {min_cg_attn_backend} backend (support: "
                 f"{min_cg_support})"
             )
-            if self.mode == CompilationMode.VLLM_COMPILE and (
-                self.splitting_ops_contain_attention()
-                or self.use_inductor_graph_partition
+            if breakable_cudagraph_available or (
+                self.mode == CompilationMode.VLLM_COMPILE
+                and (
+                    self.splitting_ops_contain_attention()
+                    or self.use_inductor_graph_partition
+                )
             ):
                 msg += (
                     "; setting cudagraph_mode=PIECEWISE because "
-                    "attention is compiled piecewise"
+                    "piecewise graph capture is supported"
                 )
                 cudagraph_mode = CUDAGraphMode.PIECEWISE
             else:
                 msg += (
                     "; setting cudagraph_mode=NONE because "
-                    "attention is not compiled piecewise"
+                    "piecewise graph capture is not supported"
                 )
                 cudagraph_mode = CUDAGraphMode.NONE
             logger.warning(msg)

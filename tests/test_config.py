@@ -814,6 +814,30 @@ def test_late_piecewise_restrictions_without_compilation(monkeypatch, engine_kwa
     assert config.compilation_config.max_cudagraph_capture_size == 0
 
 
+@pytest.mark.parametrize(
+    ("breakable_available", "piecewise_available", "expected"),
+    [(True, True, "PIECEWISE"), (False, True, "NONE"), (True, False, "NONE")],
+)
+def test_resolve_cudagraph_mode_keeps_breakable_graphs_for_cache_only_attention(
+    breakable_available, piecewise_available, expected
+):
+    """Extraction must retain available piecewise graphs without torch.compile."""
+    config = CompilationConfig(
+        mode=CompilationMode.NONE,
+        cudagraph_mode=CUDAGraphMode.FULL_AND_PIECEWISE,
+    )
+
+    resolved = config.resolve_cudagraph_mode_and_sizes(
+        AttentionCGSupport.NEVER,
+        "CacheOnlyAttentionBackend",
+        use_v2_model_runner=True,
+        piecewise_capture_available=piecewise_available,
+        breakable_cudagraph_available=breakable_available,
+    )
+
+    assert resolved == config.cudagraph_mode == CUDAGraphMode[expected]
+
+
 def test_resolve_cudagraph_mode_skips_mamba_block_check_while_profiling():
     """Cudagraph memory profiling uses a minimal KV cache, so the Mamba
     block-count guard must only fire for the real cache sizing."""
