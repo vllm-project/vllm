@@ -23,6 +23,7 @@ from vllm.model_executor.layers.mamba.mamba_utils import (
 from vllm.transformers_utils.configs.qwen4_exp import (
     Qwen4ExpTextConfig,
 )
+from vllm.utils.torch_utils import direct_register_custom_op
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 from vllm.v1.attention.backends.short_conv_attn import (
     PleShortConvAttentionBackend,
@@ -305,8 +306,11 @@ class Qwen4ExpPLELayer(nn.Module, MambaBase):
                 token_indices=non_spec_token_indices,
             )
 
-    @eager_break_during_capture
     def _short_conv(self, inputs: torch.Tensor, residual: torch.Tensor) -> None:
+        torch.ops.vllm.qwen4_exp_cpu_ple_short_conv(inputs, residual, self.prefix)
+
+    @eager_break_during_capture
+    def _short_conv_impl(self, inputs: torch.Tensor, residual: torch.Tensor) -> None:
         attn_metadata = get_forward_context().attn_metadata
         if attn_metadata is None:
             return
@@ -382,6 +386,24 @@ class Qwen4ExpPLELayer(nn.Module, MambaBase):
         )
         self._short_conv(conv_input, gated_output)
         return gated_output
+
+
+def qwen4_exp_cpu_ple_short_conv(
+    inputs: torch.Tensor,
+    residual: torch.Tensor,
+    layer_name: str,
+) -> None:
+    layer = get_forward_context().no_compile_layers[layer_name]
+    if not isinstance(layer, Qwen4ExpPLELayer):
+        raise TypeError(f"{layer_name} is not a Qwen4Exp PLE owner")
+    layer._short_conv_impl(inputs, residual)
+
+
+direct_register_custom_op(
+    op_name="qwen4_exp_cpu_ple_short_conv",
+    op_func=qwen4_exp_cpu_ple_short_conv,
+    mutates_args=["residual"],
+)
 
 
 __all__ = [

@@ -110,7 +110,13 @@ def default_breakable_cudagraph_architectures() -> frozenset[str]:
     from vllm.platforms import current_platform
 
     if current_platform.is_cpu():
-        return frozenset()
+        return DEFAULT_BREAKABLE_CUDAGRAPH_ARCHITECTURES - frozenset(
+            {
+                "Qwen4ExpForCausalLM",
+                "Qwen4ExpForConditionalGeneration",
+                "Qwen4ExpMTP",
+            }
+        )
 
     if current_platform.is_rocm():
         # Breakable CUDA graphs currently regress performance on ROCm for

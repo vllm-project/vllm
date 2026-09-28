@@ -586,13 +586,16 @@ def test_dsa_models_default_to_mrv2_and_breakable_cudagraph(
         ("DeepseekV32MTPModel", "rocm", False),
         ("GlmMoeDsaForCausalLM", "cuda", True),
         ("GlmMoeDsaForCausalLM", "rocm", False),
+        ("DeepseekV32ForCausalLM", "cpu", True),
         ("Qwen4ExpForCausalLM", "cuda", True),
         ("Qwen4ExpForCausalLM", "rocm", False),
+        ("Qwen4ExpForCausalLM", "cpu", False),
         ("Qwen4ExpForConditionalGeneration", "cuda", True),
         ("Qwen4ExpForConditionalGeneration", "rocm", False),
         ("Qwen4ExpForConditionalGeneration", "cpu", False),
         ("Qwen4ExpMTP", "cuda", True),
         ("Qwen4ExpMTP", "rocm", False),
+        ("Qwen4ExpMTP", "cpu", False),
     ],
 )
 def test_breakable_cudagraph_platform_default(
@@ -619,6 +622,26 @@ def test_breakable_cudagraph_platform_default(
             assert config.compilation_config.mode == CompilationMode.NONE
     finally:
         os.environ.pop("VLLM_USE_BREAKABLE_CUDAGRAPH", None)
+        default_breakable_cudagraph_architectures.cache_clear()
+
+
+def test_cpu_qwen4exp_breakable_cudagraph_can_be_forced(monkeypatch):
+    from vllm.config.vllm import default_breakable_cudagraph_architectures
+    from vllm.platforms import current_platform
+
+    monkeypatch.setenv("VLLM_USE_BREAKABLE_CUDAGRAPH", "1")
+    monkeypatch.setattr(current_platform, "is_rocm", lambda: False)
+    monkeypatch.setattr(current_platform, "is_cpu", lambda: True)
+    default_breakable_cudagraph_architectures.cache_clear()
+    config = SimpleNamespace(
+        model_config=SimpleNamespace(architectures=["Qwen4ExpForCausalLM"]),
+        compilation_config=CompilationConfig(),
+    )
+
+    try:
+        assert VllmConfig._maybe_enable_breakable_cudagraph(config)
+        assert config.compilation_config.mode == CompilationMode.NONE
+    finally:
         default_breakable_cudagraph_architectures.cache_clear()
 
 
