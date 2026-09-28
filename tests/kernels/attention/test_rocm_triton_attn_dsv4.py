@@ -8,6 +8,7 @@ import pytest
 import torch
 
 from vllm.platforms import current_platform
+from vllm.utils.torch_utils import set_random_seed
 
 pytestmark = pytest.mark.skipif(
     not current_platform.is_rocm(), reason="Only used by ROCm"
@@ -435,11 +436,11 @@ def test_build_ragged_indices_from_dense_drops_invalid_entries(
     )
 
     device = torch.device("cuda")
-    gen = torch.Generator().manual_seed(width + num_queries)
+    set_random_seed(width + num_queries)
     num_rows = 5000
-    indices = torch.randint(0, num_rows + 100, (num_queries, width), generator=gen)
-    indices[torch.rand(num_queries, width, generator=gen) < 0.3] = -1
-    lengths = torch.randint(0, width + 8, (num_queries,), generator=gen)
+    indices = torch.randint(0, num_rows + 100, (num_queries, width))
+    indices[torch.rand(num_queries, width) < 0.3] = -1
+    lengths = torch.randint(0, width + 8, (num_queries,))
 
     flat, indptr = build_ragged_indices_from_dense(
         indices.to(device, torch.int32),
