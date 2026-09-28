@@ -68,10 +68,8 @@ from vllm.v1.attention.backends.utils import (
     resolve_kv_cache_layout,
 )
 from vllm.v1.core.kv_cache_utils import (
-    _max_memory_usage_bytes_from_groups,
-    _pool_bytes_per_block,
     get_kv_cache_configs,
-    get_kv_cache_groups,
+    min_kv_cache_memory_bytes,
 )
 from vllm.v1.kv_cache_interface import (
     EncoderOnlyAttentionSpec,
@@ -111,30 +109,6 @@ def _model_runner_torch_cuda() -> Iterator[None]:
         for name, value in saved.items():
             if vars(torch.cuda).get(name) is not value:
                 setattr(torch.cuda, name, value)
-
-
-def _kv_cache_budget(config: VllmConfig, specs: dict[str, KVCacheSpec]) -> int:
-    """Bytes to size the KV cache with: one request at the model's maximum length.
-
-    The cache shapes reach the operators, so a meta and a real capture have to
-    agree on them rather than on whatever memory each device happens to have.
-    Sized with the engine's own admission check, over the same cache groups it
-    would build, plus the null block the block pool holds back. Shrink the
-    budget by lowering `max_model_len`.
-
-    Args:
-        config: Config the specs were built from.
-        specs: KV cache spec of every attention layer.
-
-    Returns:
-        The budget in bytes.
-
-    """
-    # Copied: grouping may unify the specs of a hybrid model in place.
-    groups = get_kv_cache_groups(config, dict(specs))
-    return _max_memory_usage_bytes_from_groups(config, groups) + _pool_bytes_per_block(
-        groups
-    )
 
 
 @dataclass(frozen=True)
@@ -547,10 +521,12 @@ class ForwardHarness:
         resolve_kv_cache_layout(
             config, [layout_names], list(self.kv_cache_specs.values())
         )
+        # Sized for one request of `max_model_len`, not by device memory: the
+        # cache shapes reach the ops, so meta and real captures must agree.
         kv_cache_config = get_kv_cache_configs(
             config,
             [self.kv_cache_specs],
-            [_kv_cache_budget(config, self.kv_cache_specs)],
+            [min_kv_cache_memory_bytes(config, self.kv_cache_specs)],
         )[0]
         initialize_mamba_ssu_backend(
             config.mamba_config,
