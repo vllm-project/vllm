@@ -109,10 +109,7 @@ class GatedResidual(nn.Module):
             )
             weight = self.input_mix_weight_down_block_inject.weight
             self._use_hc_down_silu = (
-                self.lora_rank > 0
-                and self.hc_count > 0
-                and weight.shape[0] >= self.lora_rank + self.hc_count
-                and weight.shape[1] % 8 == 0
+                weight.shape[1] % 8 == 0
                 and weight.dtype == torch.bfloat16
                 and current_platform.has_device_capability(90)
             )

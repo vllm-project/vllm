@@ -100,9 +100,6 @@ class HcDownSiluGemm:
             tile_n=tile_n,
         )
 
-    def get_warmup_keys(self, m_values: Iterable[int]) -> list[CompileKey]:
-        return list(dict.fromkeys(self.dispatch(m) for m in m_values))
-
     @staticmethod
     def _fake_gemm_tensors(*, M, K, N, divisibility: int):
         from cutlass import BFloat16
@@ -234,51 +231,19 @@ class HcDownSiluGemm:
                 ),
                 compile=partial(self.compile, compile_key),
             )
-            for compile_key in self.get_warmup_keys(sorted(self._warmup_m))
+            for compile_key in dict.fromkeys(
+                self.dispatch(m) for m in sorted(self._warmup_m)
+            )
         )
-
-    @staticmethod
-    def _validate_inputs(
-        hidden_states: torch.Tensor,
-        router_weight: torch.Tensor,
-    ) -> None:
-        if hidden_states.dim() != 2 or router_weight.dim() != 2:
-            raise ValueError("hidden_states and router_weight must be 2D tensors")
-        if (
-            hidden_states.dtype != torch.bfloat16
-            or router_weight.dtype != torch.bfloat16
-        ):
-            raise ValueError("hidden_states and router_weight must have dtype=bfloat16")
-        if hidden_states.device.type != "cuda" or router_weight.device.type != "cuda":
-            raise ValueError(
-                "hidden_states and router_weight must have device_type=cuda"
-            )
-        if hidden_states.device != router_weight.device:
-            raise ValueError(
-                "hidden_states and router_weight must be on the same CUDA device"
-            )
-        if hidden_states.shape[1] != router_weight.shape[1]:
-            raise ValueError(
-                "hidden_states and router_weight must have matching K dimensions"
-            )
-        # Kernels use vectorized bf16 loads and require 16-byte row alignment.
-        if hidden_states.shape[1] % 8 != 0:
-            raise ValueError("hc_down_silu_gemm requires K to be divisible by 8")
-        if not hidden_states.is_contiguous() or not router_weight.is_contiguous():
-            raise ValueError("hc_down_silu_gemm requires contiguous row-major inputs")
 
     def __call__(
         self,
         hidden_states: torch.Tensor,  # [M, K] bf16
         router_weight: torch.Tensor,  # [N, K] bf16
     ) -> torch.Tensor:  # [M, N] bf16
-        self._validate_inputs(hidden_states, router_weight)
-
-        M, K = hidden_states.shape
+        M = hidden_states.shape[0]
         N = router_weight.shape[0]
         n_compute = self.rank + self.hc
-        if self.k != K or self.rank <= 0 or self.hc <= 0 or n_compute > N:
-            raise ValueError("hc_down_silu_gemm received an unsupported shape")
         w_gemm = router_weight[:n_compute]
         compile_key = self.dispatch(M)
         self.compile(compile_key)
@@ -331,12 +296,12 @@ def hc_down_silu(
         and weight.dtype == torch.bfloat16
         and x.is_cuda
         and weight.is_cuda
+        and x.device == weight.device
         and x.is_contiguous()
         and weight.is_contiguous()
         and current_platform.has_device_capability(90)
         and x.shape[1] % 8 == 0
-        and rank > 0
-        and hc > 0
+        and x.shape[1] == weight.shape[1]
         and weight.shape[0] >= rank + hc
     ):
         kernel = _get_kernel(rank, hc, weight.shape[1], x.shape[0] == 1)
@@ -359,12 +324,7 @@ def request_hc_down_silu_warmup(
         k: Input feature size.
 
     """
-    if (
-        not current_platform.has_device_capability(90)
-        or rank <= 0
-        or hc <= 0
-        or k % 8 != 0
-    ):
+    if not current_platform.has_device_capability(90) or k % 8 != 0:
         return
     m_set = {int(m) for m in m_values if 1 <= m <= _MAX_FUSED_M}
     # M=1 dispatches to the weight-prefetching PDL variant.
