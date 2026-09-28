@@ -8,7 +8,7 @@ from typing import Any
 
 import torch
 import torch.nn.functional as F
-from transformers import PretrainedConfig
+from transformers import PreTrainedConfig
 
 from vllm.config.model import AttnTypeStr, ModelConfig, ModelDType, RunnerOption
 from vllm.config.pooler import SequencePoolingType, TokenPoolingType
@@ -446,12 +446,12 @@ def get_vllm_extra_kwargs(model_info: ModelInfo, vllm_extra_kwargs):
 
 
 def dummy_hf_overrides(
-    hf_config: PretrainedConfig,
+    hf_config: PreTrainedConfig,
     *,
     model_arch: str = "",
     exist_overrides: dict[str, Any] | None = None,
     use_original_num_layers: bool = False,
-) -> PretrainedConfig:
+) -> PreTrainedConfig:
     """Dummy HF overrides function used to create dummy model
     with only minimum nums of layer.
     """

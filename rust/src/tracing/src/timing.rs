@@ -16,8 +16,9 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use tracing::field::{Field, Visit};
-use tracing::span::{Attributes, Span};
-use tracing::{Id, Subscriber, info_span};
+use tracing::span::Attributes;
+use tracing::{Id, Subscriber};
+use tracing_subscriber::filter::{Filtered, LevelFilter};
 use tracing_subscriber::layer::{Context, Layer};
 use tracing_subscriber::registry::LookupSpan;
 
@@ -60,6 +61,27 @@ impl Visit for SpanFields {
 
 /// `tracing` layer that aggregates stage-span timings per request, keyed by
 /// the nearest ancestor span with a `request_id` field.
+///
+/// # Span contract
+///
+/// Timed spans must have the configured target and a `stage` field. The
+/// `request_id` is taken from the timed span itself or its nearest ancestor
+/// carrying that field, regardless of the ancestor's target. Spans without
+/// a request ID are ignored. Span names are unrestricted. Both the timed spans
+/// and their `request_id` ancestors must be at `INFO` level or above.
+///
+/// Both fields are read at span creation; subsequent [`tracing::Span::record`]
+/// calls are ignored. String values are used verbatim; other values use their
+/// debug representation. Prefer string fields for stable keys.
+///
+/// # Timing semantics
+///
+/// Each sample measures wall-clock time from span creation to final close,
+/// including async waits and any time the span remains alive through cloned
+/// handles. Nested and concurrent spans are measured independently, so their
+/// durations can overlap. Repeated stages accumulate under `"{stage}_secs"`
+/// for each request. Closing spans are recorded regardless of the operation's
+/// success, failure, or cancellation; callers select the samples to report.
 pub struct RequestTimingLayer {
     target: &'static str,
     stats: Arc<Mutex<HashMap<String, StageStats>>>,
@@ -73,13 +95,18 @@ pub struct RequestTimingStats {
 impl RequestTimingLayer {
     /// Create the layer and its stats handle. Only spans whose target equals
     /// `target` and that carry a `stage` field are timed.
-    pub fn new(target: &'static str) -> (Self, RequestTimingStats) {
+    ///
+    /// The layer is filtered to `INFO` so that, composed with a filtered log
+    /// layer, it does not raise the subscriber's max level hint and enable
+    /// `DEBUG`/`TRACE` callsites that the log layer would discard anyway.
+    pub fn new<S>(target: &'static str) -> (Filtered<Self, LevelFilter, S>, RequestTimingStats) {
         let stats = Arc::new(Mutex::new(HashMap::new()));
+        let layer = Self {
+            target,
+            stats: Arc::clone(&stats),
+        };
         (
-            Self {
-                target,
-                stats: Arc::clone(&stats),
-            },
+            Filtered::new(layer, LevelFilter::INFO),
             RequestTimingStats { stats },
         )
     }
@@ -87,6 +114,10 @@ impl RequestTimingLayer {
 
 impl RequestTimingStats {
     /// Drain and return `{request_id: {stage_secs}}` records.
+    ///
+    /// Returns accumulated timings since the previous drain. Spans still open
+    /// contribute to a later drain; finish the measured work before calling
+    /// this method to collect complete request timings.
     pub fn stat(&self) -> HashMap<String, StageStats> {
         std::mem::take(&mut *self.stats.lock().unwrap())
     }
@@ -139,31 +170,12 @@ where
     }
 }
 
-/// Target of the multimodal preprocessing stage spans.
-const MM_STAGE_TARGET: &str = "mm_processor_timing";
-
-/// Create the timing layer and its stats handle for multimodal preprocessing
-/// stage spans (`vllm-bench mm-processor`), mirroring the Python
-/// `TimingContext` / `MultiModalTimingRegistry`.
-pub fn mm_timing_layer() -> (RequestTimingLayer, RequestTimingStats) {
-    RequestTimingLayer::new(MM_STAGE_TARGET)
-}
-
-/// Span carrying the `request_id` used to attribute multimodal stage timings.
-pub fn mm_request_span(request_id: &str) -> Span {
-    info_span!("mm_request", request_id)
-}
-
-/// Span for one multimodal preprocessing stage; the elapsed time is recorded
-/// on close.
-pub fn mm_stage_span(stage: &'static str) -> Span {
-    info_span!(target: MM_STAGE_TARGET, "mm_stage", stage)
-}
-
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
     use super::*;
-    use tracing::info_span;
+    use tracing::{debug, debug_span, info_span};
     use tracing_subscriber::layer::SubscriberExt as _;
 
     const TARGET: &str = "test_request_timing";
@@ -213,6 +225,63 @@ mod tests {
             drop(stage_span("media_fetch"));
         });
         assert!(stats.stat().is_empty());
+    }
+
+    #[test]
+    fn does_not_enable_debug_at_info() {
+        let (timing_layer, _) = RequestTimingLayer::new(TARGET);
+        let info_layer = tracing_subscriber::fmt::layer()
+            .with_writer(std::io::sink)
+            .with_filter(LevelFilter::INFO);
+        let subscriber = tracing_subscriber::registry().with(timing_layer).with(info_layer);
+        let evaluated_debug_fields = AtomicUsize::new(0);
+
+        tracing::subscriber::with_default(subscriber, || {
+            assert_eq!(LevelFilter::current(), LevelFilter::INFO);
+            debug!(
+                value = evaluated_debug_fields.fetch_add(1, Ordering::Relaxed),
+                "debug event"
+            );
+            assert!(debug_span!("debug span").is_disabled());
+        });
+
+        assert_eq!(evaluated_debug_fields.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn does_not_disable_explicit_debug_logging() {
+        let (timing_layer, _) = RequestTimingLayer::new(TARGET);
+        let debug_layer = tracing_subscriber::fmt::layer()
+            .with_writer(std::io::sink)
+            .with_filter(LevelFilter::DEBUG);
+        let subscriber = tracing_subscriber::registry().with(timing_layer).with(debug_layer);
+        let evaluated_debug_fields = AtomicUsize::new(0);
+
+        tracing::subscriber::with_default(subscriber, || {
+            assert_eq!(LevelFilter::current(), LevelFilter::DEBUG);
+            debug!(
+                value = evaluated_debug_fields.fetch_add(1, Ordering::Relaxed),
+                "debug event"
+            );
+            assert!(!debug_span!("debug span").is_disabled());
+        });
+
+        assert_eq!(evaluated_debug_fields.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn records_stage_timings_when_logging_at_warn() {
+        let (timing_layer, stats) = RequestTimingLayer::new(TARGET);
+        let warn_layer = tracing_subscriber::fmt::layer()
+            .with_writer(std::io::sink)
+            .with_filter(LevelFilter::WARN);
+        let subscriber = tracing_subscriber::registry().with(timing_layer).with(warn_layer);
+        tracing::subscriber::with_default(subscriber, || {
+            info_span!("request", request_id = "req-1").in_scope(|| {
+                drop(stage_span("media_fetch"));
+            });
+        });
+        assert!(stats.stat()["req-1"].contains_key("media_fetch_secs"));
     }
 
     #[test]
