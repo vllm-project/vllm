@@ -23,20 +23,13 @@ def _packed_qk_rope_kernel(
     pid_h = tl.program_id(1)
     rm = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
     rk = tl.arange(0, BLOCK_K)
-    rk_half = tl.arange(0, BLOCK_K // 2)
     mask_m = rm < seqlen
 
     base = qk_ptr + pid_h * qk_head_stride + rm[:, None] * qk_row_stride
     mask_x = mask_m[:, None] & (rk < rotary_dim)[None, :]
     x = tl.load(base + rk[None, :], mask=mask_x, other=0.0).to(tl.float32)
-    # Two strided reads, not one contiguous read plus tl.split: the register
-    # layout decides how the backend contracts the o1 multiply-add, and this
-    # form matches what flash_attn's rotary kernel produces. Splitting costs
-    # bitwise equality with it, by up to one ULP on ROCm.
-    f_base = freqs_ptr + rm[:, None] * rotary_dim + 2 * rk_half[None, :]
-    mask_f = mask_m[:, None] & (rk_half < rotary_dim // 2)[None, :]
-    cos = tl.load(f_base, mask=mask_f, other=1.0)
-    sin = tl.load(f_base + 1, mask=mask_f, other=0.0)
+    f = tl.load(freqs_ptr + rm[:, None] * rotary_dim + rk[None, :], mask=mask_x)
+    cos, sin = tl.split(tl.reshape(f, (BLOCK_M, BLOCK_K // 2, 2)))
 
     x0, x1 = tl.split(tl.reshape(x, (BLOCK_M, BLOCK_K // 2, 2)))
     o0 = x0 * cos - x1 * sin
@@ -53,8 +46,10 @@ def packed_qk_rope_(xqkv: torch.Tensor, freqs_cis: torch.Tensor) -> None:
         freqs_cis: contiguous (seqlen, headdim // 2) complex64 rotary freqs,
             read through its interleaved re/im fp32 view.
 
-    Bitwise identical to ``ApplyRotaryEmb(enable_fp32_compute=True)`` applied
-    to Q and K separately, but in one kernel with ~5x less memory traffic.
+    Matches ``ApplyRotaryEmb(enable_fp32_compute=True)`` applied to Q and K
+    separately to within one ULP, but in one kernel with ~5x less memory
+    traffic. Both compute in fp32; the gap is which product the compiler
+    keeps exact inside the fused multiply-add, which differs per backend.
     Requires triton: callers must check HAS_TRITON and use the unfused path
     otherwise. Contract violations raise.
 
