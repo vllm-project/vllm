@@ -221,6 +221,7 @@ class OpenAIServingChat(GenerateBaseServing):
     async def render_chat_request(
         self,
         request: ChatCompletionRequest,
+        raw_request: Request | None = None,
     ) -> tuple[list[ConversationMessage], list[EngineInput]] | ErrorResponse:
         """Validate the model and preprocess a chat completion request.
 
@@ -238,6 +239,11 @@ class OpenAIServingChat(GenerateBaseServing):
             return error_check_ret
 
         self._preflight(request.n or 1)
+
+        # The X-VLLM-CACHE-SALT header overrides the body's cache_salt.
+        # Resolved here (before rendering) so the renderer and every
+        # downstream consumer see the effective value.
+        request.cache_salt = self._get_cache_salt(request, raw_request)
 
         return await self.online_renderer.render_chat(request)
 
@@ -273,7 +279,7 @@ class OpenAIServingChat(GenerateBaseServing):
                 chat_template_kwargs=chat_template_kwargs,
                 model_config=self.model_config,
             )
-        result = await self.render_chat_request(request)
+        result = await self.render_chat_request(request, raw_request)
         if isinstance(result, ErrorResponse):
             return result
 

@@ -11,6 +11,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 import pytest_asyncio
 from openai import OpenAI
+from starlette.requests import Request
 
 from tests.entrypoints.openai.utils import (
     accumulate_streaming_response,
@@ -1737,8 +1738,8 @@ async def test_serving_chat_did_set_correct_cache_salt(model_type):
     orig_render_chat_request = serving_chat.render_chat_request
     captured_inputs = []
 
-    async def render_chat_request(request):
-        result = await orig_render_chat_request(request)
+    async def render_chat_request(request, raw_request=None):
+        result = await orig_render_chat_request(request, raw_request)
 
         assert isinstance(result, tuple)
         conversation, engine_inputs = result
@@ -1770,6 +1771,55 @@ async def test_serving_chat_did_set_correct_cache_salt(model_type):
 
     assert len(captured_inputs) == 1
     assert captured_inputs[0]["cache_salt"] == "test_salt"
+
+
+@pytest.mark.asyncio
+async def test_serving_chat_did_set_correct_cache_salt_from_header():
+    """The X-VLLM-CACHE-SALT header overrides the body's cache_salt."""
+    mock_engine = MagicMock(spec=AsyncLLM)
+    mock_engine.errored = False
+    mock_engine.model_config = MockModelConfig()
+    mock_engine.input_processor = MagicMock()
+    mock_engine.renderer = _build_renderer(mock_engine.model_config)
+
+    serving_chat = _build_serving_chat(mock_engine)
+
+    orig_render_chat_request = serving_chat.render_chat_request
+    captured_inputs = []
+
+    async def render_chat_request(request, raw_request=None):
+        result = await orig_render_chat_request(request, raw_request)
+
+        assert isinstance(result, tuple)
+        conversation, engine_inputs = result
+        captured_inputs.extend(engine_inputs)
+
+        return result
+
+    serving_chat.render_chat_request = render_chat_request
+
+    req = ChatCompletionRequest(
+        model=MODEL_NAME,
+        messages=[{"role": "user", "content": "what is 1+1?"}],
+        cache_salt="body-salt",
+    )
+
+    raw_request = Request(
+        {
+            "type": "http",
+            "method": "POST",
+            "path": "/v1/chat/completions",
+            "headers": [
+                (b"x-vllm-cache-salt", b"header-salt"),
+            ],
+        }
+    )
+
+    with suppress(Exception):
+        await serving_chat.create_chat_completion(req, raw_request)
+
+    assert len(captured_inputs) == 1
+    assert captured_inputs[0]["cache_salt"] == "header-salt"
 
 
 @pytest.mark.asyncio

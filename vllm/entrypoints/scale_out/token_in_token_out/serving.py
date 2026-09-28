@@ -159,6 +159,9 @@ class ServingTokens(GenerateBaseServing):
         except (OverflowError, TypeError, ValueError) as e:
             return self.create_error_response(e)
 
+        # The X-VLLM-CACHE-SALT header overrides the body's cache_salt.
+        request.cache_salt = self._get_cache_salt(request, raw_request)
+
         engine_input: EngineInput
         if request.content_parts:
             tracker = AsyncMultiModalItemTracker(self.model_config)

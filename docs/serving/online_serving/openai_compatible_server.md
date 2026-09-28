@@ -134,6 +134,19 @@ completion = client.chat.completions.create(
 )
 ```
 
+The `X-VLLM-CACHE-SALT` request header sets the prefix-cache salt for the
+request, taking precedence over the `cache_salt` field in the JSON request
+body. See [Prefix Cache Timing Side-Channel Mitigation](../../usage/security.md#prefix-cache-timing-side-channel-mitigation-cache-salting)
+for the security background and how to choose a salt value.
+
+```python
+completion = client.chat.completions.create(
+    model="NousResearch/Meta-Llama-3-8B-Instruct",
+    messages=[{"role": "user", "content": "Hello!"}],
+    extra_headers={"X-VLLM-CACHE-SALT": "per-user-or-per-tenant-secret"},
+)
+```
+
 ## API Reference
 
 ### Completions API

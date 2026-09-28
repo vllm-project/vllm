@@ -20,6 +20,7 @@ from vllm.entrypoints.generate.base.protocol import validate_request_mm_kwargs
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.serve.engine.serving import BaseServing
 from vllm.entrypoints.serve.engine.typing import AnyRequest
+from vllm.entrypoints.serve.utils.request_headers import parse_request_headers
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.lora.request import LoRARequest
 from vllm.renderers.base import BaseRenderer
@@ -125,11 +126,19 @@ class PoolingBaseServing(ABC, BaseServing):
         lora_request = self._maybe_get_adapters(request)
         model_name = self.models.model_name(lora_request)
         priorities = getattr(request, "priority", 0)
+        # The X-VLLM-CACHE-SALT header overrides the body's cache_salt.
+        cache_salt = getattr(request, "cache_salt", None)
+        if raw_request is not None:
+            header_cache_salt = parse_request_headers(raw_request.headers).cache_salt
+            if header_cache_salt is not None:
+                cache_salt = header_cache_salt
         prompt_extras = {
             k: v
-            for k in ("mm_processor_kwargs", "cache_salt", "chat_template_kwargs")
+            for k in ("mm_processor_kwargs", "chat_template_kwargs")
             if (v := getattr(request, k, None)) is not None
         }
+        if cache_salt is not None:
+            prompt_extras["cache_salt"] = cache_salt
 
         ctx = PoolingServeContext(
             request=request,

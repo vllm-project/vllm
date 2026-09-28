@@ -111,6 +111,11 @@ class OpenAIServingChatBatch(OpenAIServingChat):
         """
         tokenizer = self.renderer.tokenizer
         assert tokenizer is not None
+
+        # The X-VLLM-CACHE-SALT header overrides the body's cache_salt; the
+        # effective salt applies to every conversation in the batch.
+        request.cache_salt = self._get_cache_salt(request, raw_request)
+
         single_requests = [
             request.to_chat_completion_request(messages)
             for messages in request.messages
