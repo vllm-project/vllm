@@ -357,11 +357,11 @@ class Worker(WorkerBase):
 
     def compute_weight_checksums(self) -> dict[str, str]:
         prefix = self._weight_checksum_prefix()
-        digests = compute_tensor_digests(self.model_runner.model)
+        digests = compute_tensor_digests(self.model_runner.get_model())
         return {prefix + name: digest for name, digest in digests.items()}
 
     def reset_weights(self) -> None:
-        zero_weights(self.model_runner.model)
+        zero_weights(self.model_runner.get_model())
 
     def _maybe_get_memory_pool_context(self, tag: str) -> AbstractContextManager:
         if (

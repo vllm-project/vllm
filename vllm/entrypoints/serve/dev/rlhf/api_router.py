@@ -227,25 +227,27 @@ async def weight_info(raw_request: Request):
 
 
 class WeightCheckerRequest(BaseModel):
-    action: Literal["checksum", "reset", "compare"]
-    baseline: dict[str, str] | None = None
+    action: Literal["checksum", "reset"]
+
+
+class WeightCheckerCompareRequest(BaseModel):
+    action: Literal["compare"]
+    baseline: dict[str, str]
 
 
 @router.post("/weight_checker")
 async def weight_checker(
-    raw_request: Request, request: WeightCheckerRequest
+    raw_request: Request,
+    request: Annotated[
+        WeightCheckerRequest | WeightCheckerCompareRequest,
+        Body(discriminator="action"),
+    ],
 ) -> JSONResponse:
     """Checksum, reset, or compare model weights against a baseline."""
     client = engine_client(raw_request)
     if request.action == "reset":
         await client.collective_rpc_all_engines("reset_weights")
         return JSONResponse(content={"status": "reset"})
-    baseline = request.baseline
-    if request.action == "compare" and baseline is None:
-        raise HTTPException(
-            status_code=HTTPStatus.BAD_REQUEST.value,
-            detail="action='compare' requires a 'baseline' object",
-        )
 
     checksums: dict[str, str] = {}
     for worker_checksums in await client.collective_rpc_all_engines(
@@ -257,9 +259,10 @@ async def weight_checker(
                 detail=f"Duplicate weight checksum keys: {sorted(duplicates)}",
             )
         checksums.update(worker_checksums)
-    if request.action == "checksum" or baseline is None:
+    if not isinstance(request, WeightCheckerCompareRequest):
         return JSONResponse(content={"checksums": checksums})
 
+    baseline = request.baseline
     mismatches = sorted(
         key
         for key in checksums.keys() | baseline.keys()

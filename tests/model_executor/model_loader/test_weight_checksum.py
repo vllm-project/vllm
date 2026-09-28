@@ -7,6 +7,7 @@ import torch
 import torch.nn as nn
 
 from vllm.config import ParallelConfig
+from vllm.model_executor import parameter
 from vllm.model_executor.model_loader.weight_checksum import (
     compute_tensor_digests,
     zero_weights,
@@ -46,6 +47,20 @@ def test_zero_weights_changes_every_parameter_and_no_buffer():
     after = compute_tensor_digests(model)
     assert all(before[name] != after[name] for name in before)
     assert model.k_scale.item() == 2.0
+
+
+def test_shared_weight_partitions_are_hashed_and_reset(monkeypatch):
+    monkeypatch.setattr(parameter, "get_tensor_model_parallel_rank", lambda: 0)
+    monkeypatch.setattr(parameter, "get_tensor_model_parallel_world_size", lambda: 1)
+    model = nn.Module()
+    model.transform = parameter.SharedWeightParameter(weight_loader=None)
+    model.transform.add_partition(0, object(), 2, 2)
+    model.transform.partitions[0].data.fill_(3.0)
+
+    before = compute_tensor_digests(model)
+    zero_weights(model)
+    assert set(before) == {"transform.0"}
+    assert compute_tensor_digests(model) != before
 
 
 def test_dense_dp_replicas_get_distinct_key_prefixes(monkeypatch):

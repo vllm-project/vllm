@@ -50,6 +50,7 @@ curl -X POST $URL/resume
   several API servers (for example `--data-parallel-external-lb`), send it to
   each one.
 - Buffers, draft models and LoRA adapters are not checked.
+- CPU backends that repack linear weights hide them from the checker.
 - The engine must be awake: sleep level 2 discards the weight storage.
 - `--offload-backend prefetch` is not supported: parameters point at staging
   buffers, not the offloaded weights.
