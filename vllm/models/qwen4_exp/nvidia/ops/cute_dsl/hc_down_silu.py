@@ -29,10 +29,9 @@ MAX_FUSED_M = 48
 
 # Split-K configs tuned on SM100f for Qwen3.8-Flash-Next (K=10240, N=324).
 _SM100F_TUNED_SPLITK: dict[int, tuple[int, int, int]] = {
-    **{m: (6, 4, 16) for m in range(5, MAX_FUSED_M + 1)},
-    8: (6, 5, 8),
-    16: (6, 5, 8),
-    32: (6, 5, 16),
+    **{m: (6, 5, 8) for m in range(5, 17)},
+    **{m: (6, 5, 16) for m in range(17, 33)},
+    **{m: (6, 4, 16) for m in range(33, MAX_FUSED_M + 1)},
 }
 
 
