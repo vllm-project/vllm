@@ -415,9 +415,6 @@ class CutlassExpertsFp8(CutlassExpertsFp8Base):
 
     @staticmethod
     def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
-        # STANDARD format applies expert_map in moe_permute before grouped GEMM.
-        # The CUTLASS kernel itself only sees local expert ids. Some all2all
-        # backends are incompatible with this prepare/finalize path.
         return not (
             moe_parallel_config.use_fi_nvl_two_sided_kernels
             or moe_parallel_config.use_deepep_ht_kernels
