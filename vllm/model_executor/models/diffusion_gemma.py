@@ -1493,7 +1493,7 @@ class DiffusionSampler:
         # [tile * W, vocab] copies, so a tile is also bounded by free memory.
         widths_np = states.canvas_width_np[decode_slots_np]
         order = np.argsort(widths_np, kind="stable")
-        free = current_platform.mem_get_info()[0] if num_decode > 0 else 0
+        free = torch.accelerator.get_memory_info()[0] if num_decode > 0 else 0
         run_start = 0
         while run_start < num_decode:
             W = int(widths_np[order[run_start]])
