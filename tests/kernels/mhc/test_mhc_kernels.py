@@ -65,7 +65,13 @@ def test_sm90_mhc_prenorm_preserves_register_operands(
     Regression adapted from deepseek-ai/DeepGEMM#448. These multi-stage K
     loops reproduce corruption that short decode shapes do not expose.
     """
-    from vllm.utils.deep_gemm import tf32_hc_prenorm_gemm
+    from vllm.utils.deep_gemm import (
+        is_deep_gemm_supported,
+        tf32_hc_prenorm_gemm,
+    )
+
+    if not is_deep_gemm_supported():
+        pytest.skip("DeepGEMM required")
 
     set_random_seed(123)
     monkeypatch.setattr(torch.backends.cuda.matmul, "allow_tf32", False)
