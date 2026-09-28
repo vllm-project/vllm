@@ -38,7 +38,6 @@ class HcDownSiluFma:
         threadblock_size: int = 128,
         main_vec_width: int = 8,
         tail_vec_width: int = 4,
-        use_pdl: bool = False,
         prefetch_pdl_weights: bool = False,
         rank: int = 320,
         hc: int = 4,
@@ -46,7 +45,6 @@ class HcDownSiluFma:
         self.threadblock_size = threadblock_size
         self.main_vec_width = main_vec_width
         self.tail_vec_width = tail_vec_width
-        self.use_pdl = use_pdl
         self.prefetch_pdl_weights = prefetch_pdl_weights
         self.rank = rank
         self.hc = hc
@@ -198,7 +196,7 @@ class HcDownSiluFma:
             block=[self.threadblock_size, 1, 1],
             smem=M * 4 * self.num_warps,
             stream=stream,
-            use_pdl=self.use_pdl,
+            use_pdl=True,
             min_blocks_per_mp=1,
         )
 
@@ -241,7 +239,7 @@ class HcDownSiluFma:
             tA, tB = self._make_thread_vector_slice(
                 gA_vec, gB_vec, tidx, n_idx, threadblock_size
             )
-            if const_expr(self.use_pdl and self.prefetch_pdl_weights):
+            if const_expr(self.prefetch_pdl_weights):
                 prefetch_tiles: cutlass.Constexpr = self.main_prefetch_tiles
                 prefetched_b = cute.make_rmem_tensor(
                     cute.make_layout(
@@ -253,12 +251,11 @@ class HcDownSiluFma:
                 for tile in cutlass.range_constexpr(prefetch_tiles):
                     cute.autovec_copy(tB[None, tile], prefetched_b[tile, None])
 
-        if const_expr(self.use_pdl):
-            cute.arch.griddepcontrol_wait()
+        cute.arch.griddepcontrol_wait()
 
         # 128-bit vectorized main loop
         if const_expr(k_main_elems > 0):
-            if const_expr(self.use_pdl and self.prefetch_pdl_weights):
+            if const_expr(self.prefetch_pdl_weights):
                 self._vector_fma_prefetched(
                     acc,
                     tA,
@@ -334,5 +331,4 @@ class HcDownSiluFma:
                     gC[m, n_idx] = (z * _sigmoid_f32(z)).to(cutlass.BFloat16)
                 else:
                     gC[m, n_idx] = x_bf16
-        if const_expr(self.use_pdl):
-            cute.arch.griddepcontrol_launch_dependents()
+        cute.arch.griddepcontrol_launch_dependents()

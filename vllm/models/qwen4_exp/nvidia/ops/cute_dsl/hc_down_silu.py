@@ -99,7 +99,6 @@ class HcDownSiluGemm:
             tile_n=compile_key.tile_n,
             num_stages=compile_key.num_stages,
             split_k=compile_key.split_k,
-            use_pdl=current_platform.is_arch_support_pdl(),
             rank=self.rank,
             hc=self.hc,
         )
@@ -136,7 +135,6 @@ class HcDownSiluGemm:
         gemm = HcDownSiluFma(
             k=compile_key.K,
             threadblock_size=compile_key.threadblock_size,
-            use_pdl=current_platform.is_arch_support_pdl(),
             prefetch_pdl_weights=self._prefetch_pdl_weights,
             rank=self.rank,
             hc=self.hc,

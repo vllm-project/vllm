@@ -13,7 +13,6 @@ import math
 import cutlass
 import cutlass.cute as cute
 from cuda.bindings.driver import CUstream
-from cutlass import const_expr
 from cutlass._mlir import ir as _ir
 from cutlass._mlir.dialects import llvm as _llvm
 from cutlass.cutlass_dsl import dsl_user_op
@@ -72,7 +71,6 @@ class HcDownSiluMma:
         num_stages: int = 2,
         num_dma_warps: int = 4,
         split_k: int = 8,
-        use_pdl: bool = False,
         rank: int = 320,
         hc: int = 4,
     ):
@@ -86,7 +84,6 @@ class HcDownSiluMma:
         self.copy_bits = 128
         self.num_stages = num_stages
         self.split_k = split_k
-        self.use_pdl = use_pdl
         self.mma_shape = (16, 8, 16)  # mma.sync.aligned.m16n8k16
         self.atom_layout = (1, 1, 1)  # one MMA atom per warp
         self.num_dma_warps = num_dma_warps
@@ -232,7 +229,7 @@ class HcDownSiluMma:
                 self.split_k,
             ],  # split-K CTAs form one cluster
             stream=stream,
-            use_pdl=self.use_pdl,
+            use_pdl=True,
         )
 
     @cute.kernel
@@ -344,8 +341,7 @@ class HcDownSiluMma:
                 tBsB[None, None, None, producer_state.index],
                 pred=tBpB,
             )
-            if const_expr(self.use_pdl):
-                cute.arch.griddepcontrol_wait()
+            cute.arch.griddepcontrol_wait()
             cute.copy(
                 tiled_copy_A,
                 tAgA[None, None, None, k_start],
@@ -512,7 +508,7 @@ class HcDownSiluMma:
             cute.arch.cluster_arrive()
             cute.arch.cluster_wait()  # peer DSMEM stores are now visible
 
-            if const_expr(self.use_pdl) and mma_tidx == 0:
+            if mma_tidx == 0:
                 cute.arch.griddepcontrol_launch_dependents()
             cute.arch.sync_threads()
 
