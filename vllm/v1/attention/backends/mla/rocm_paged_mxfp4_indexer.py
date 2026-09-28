@@ -42,9 +42,8 @@ from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheSpec
 logger = init_logger(__name__)
 
 # The consumers walk the pool instead of the context once the context is this
-# many pools long. Not measured end to end yet: at speculative decode the
-# gather loses to the dense walk until the pool is about a 3x cut (32 heads),
-# and at prefill it issues 1.15-1.19x the dense walk's loads per key.
+# many pools long. Set from kernel timings, not end-to-end runs: the gather
+# loads more per key than the dense walk, so it only wins on a large cut.
 _GATHER_MIN_CUT_DECODE = 3.0
 _GATHER_MIN_CUT_PREFILL = 1.5
 
@@ -365,8 +364,7 @@ class RocmMxfp4IndexerMetadataBuilder(DeepseekV32IndexerMetadataBuilder):
         max_model_len = vllm_config.model_config.max_model_len
         self.logits_width = max_model_len // self.compress_ratio
         # Every dense layer of this group reads the same rows through the same
-        # page geometry, so the step builds their schedule once; the scheduler
-        # launch costs about half a decode launch.
+        # page geometry, so the step builds their schedule once, not per layer.
         self.decode_schedule_buffer = torch.empty(
             rocm_mxfp4_decode_schedule_words(
                 num_heads, head_dim, self.page_entries, self.native_next_n

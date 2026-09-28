@@ -25,10 +25,6 @@ from vllm.models.deepseek_v41.amd.rocm import (
     rocm_mxfp4_indexer_k_store,
     rocm_mxfp4_indexer_q_quant,
 )
-from vllm.models.deepseek_v41.common.ops import (
-    fused_indexer_q_rope_quant,
-    indexer_k_norm_rope_store,
-)
 from vllm.platforms.rocm import on_gfx950
 from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backends.mla.indexer import (
@@ -288,7 +284,7 @@ def _prefill_metadata(
     )
 
 
-# 128-token pages are what vLLM allocates for this kernel; 64 is the default.
+# The kernel prefers 128-token pages.
 BLOCKS = pytest.mark.parametrize("block", [128, 64])
 
 
@@ -481,19 +477,38 @@ def test_prefill_layers_match_reference(
     )
 
 
-def _fp8_keys(case, ratio, req):
-    """A request's keys through vLLM's FP8 indexer K writer, dequantized."""
-    k_pre = case.k_pre[req]
-    pos = torch.arange(k_pre.shape[0], device=DEVICE)
-    slot = torch.where((pos + 1) % ratio == 0, pos // ratio, -1)
-    cache = torch.zeros(
-        k_pre.shape[0] // ratio, 1, HEAD_DIM + 4, dtype=torch.uint8, device=DEVICE
-    )
-    indexer_k_norm_rope_store(
-        k_pre, pos, case.cos_sin, case.norm, 1e-6, cache, slot, ratio, False
-    )
-    values = cache[:, 0, :HEAD_DIM].view(current_platform.fp8_dtype()).float()
-    return values * cache[:, 0, HEAD_DIM:].view(torch.float32)
+def _rope_gptj(x, cos_sin, positions):
+    """GPT-J RoPE on the last 64 dims, as the indexer rotates Q and K."""
+    x = x.float().clone()
+    cos, sin = cos_sin[positions].chunk(2, dim=-1)
+    if x.dim() == 3:
+        cos, sin = cos[:, None], sin[:, None]
+    rot = x[..., -64:]
+    even, odd = rot[..., 0::2].clone(), rot[..., 1::2].clone()
+    rot[..., 0::2] = even * cos - odd * sin
+    rot[..., 1::2] = odd * cos + even * sin
+    return x
+
+
+def _mxfp4_round_trip(x):
+    """MXFP4 round trip of x, rounded as the writers do: a scale of
+    2^ceil(log2(amax / 6)) per 32 values, then the nearest e2m1 value."""
+    blocks = x.float().unflatten(-1, (-1, 32))
+    amax = blocks.abs().amax(-1, keepdim=True).clamp(min=2**-126)
+    scale = torch.exp2(torch.ceil(torch.log2(amax / 6)))
+    y = (blocks / scale).clamp(-6, 6)
+    grid = _E2M1.to(x.device)
+    idx = (y.abs()[..., None] - grid).abs().argmin(-1)
+    return (grid[idx] * y.sign() * scale).flatten(-2)
+
+
+def _torch_keys(case, ratio, req):
+    """A request's compressed keys in torch: k_norm of each group's last
+    token, rotated at the group's first position, through MXFP4."""
+    k = case.k_pre[req][ratio - 1 :: ratio].float()
+    k = k * torch.rsqrt(k.pow(2).mean(-1, keepdim=True) + 1e-6) * case.norm
+    pos = torch.arange(k.shape[0], device=DEVICE) * ratio
+    return _mxfp4_round_trip(_rope_gptj(k, case.cos_sin, pos))
 
 
 def _topk_indices(q, weights, keys, ends, k):
@@ -511,12 +526,10 @@ def _recall(selected, reference):
 @BLOCKS
 @pytest.mark.parametrize("ratio", [2, 1])
 @pytest.mark.parametrize("step", ["decode", "prefill"])
-def test_selection_from_bf16_tracks_fp8(monkeypatch, step, ratio, block):
+def test_selection_from_bf16_matches_torch(monkeypatch, step, ratio, block):
     """End to end from bf16 K and Q: vLLM's MXFP4 K store and Q quant, the
     paged pool, metadata from the planning functions the builder calls, and
-    the indexer op pick mostly what vLLM's FP8 K/Q quantizers pick on the same
-    inputs. aiter tests the kernels' numerics; wiring bugs drop the overlap
-    well below the threshold."""
+    the indexer op pick what the same MXFP4 math picks in torch."""
     if step == "decode":
         case = _Case([3000, 2600, 1900, 3500, 1200, 2200, 3900, 1600], block, seed=1)
         rows = [(req, n - 1) for req, n in enumerate(case.seq_lens)]
@@ -566,15 +579,14 @@ def test_selection_from_bf16_tracks_fp8(monkeypatch, step, ratio, block):
     assert bool(((out >= 0) & (out < ends[:, None])).all())
     assert all(row.unique().numel() == TOPK for row in out)
 
-    q8, w8 = fused_indexer_q_rope_quant(
-        pos, q_bf16, case.cos_sin, w, *scales, use_fp4=False
-    )
-    overlap = []
+    q_ref = _mxfp4_round_trip(_rope_gptj(q_bf16, case.cos_sin, pos))
+    w_ref = w * scales[0] * scales[1]
+    agree = []
     for req in range(len(case.seq_lens)):
         mine = torch.tensor([r == req for r, _ in rows], device=DEVICE)
-        fp8_topk = _topk_indices(
-            q8[mine].float(), w8[mine], _fp8_keys(case, ratio, req), ends[mine], TOPK
+        ref = _topk_indices(
+            q_ref[mine], w_ref[mine], _torch_keys(case, ratio, req), ends[mine], TOPK
         )
-        overlap.append(_recall(out[mine], fp8_topk))
-    # MXFP4 rounding alone keeps about 0.8 of FP8's picks; chance is under 0.06.
-    assert torch.cat(overlap).mean().item() >= 0.7
+        agree.append(_recall(out[mine], ref))
+    # Only rounding ties separate the two, so nearly every pick matches.
+    assert torch.cat(agree).mean().item() >= 0.9
