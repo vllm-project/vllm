@@ -255,6 +255,19 @@ class TestExampleSecondaryTierManager:
         # Third chunk not present
         assert tier.lookup(chunks[2], _CTX) is LookupResult.MISS
 
+    def test_config_info_keys_match_the_filled_values(self):
+        """A name the declaration misses becomes a dropped label at runtime."""
+        mock_view = memoryview(torch.zeros((10, 16), dtype=torch.int8).numpy())
+        tier = ExampleSecondaryTierManager(
+            offloading_spec=_MOCK_OFFLOADING_SPEC,
+            primary_kv_view=mock_view,
+            tier_type="example",
+            custom_param=67,
+        )
+        info = tier.config_info()
+        assert tuple(info) == ExampleSecondaryTierManager.config_info_keys({})
+        assert info["example_info"] == 67
+
 
 # What a request-level cascade does with a key already present in the primary
 # tier, keyed by what primary lookup says about it. SUPPLY reaches the peer now,
@@ -1521,8 +1534,8 @@ if __name__ == "__main__":
 def test_tiering_manager_reports_one_config_info_series_for_each_tier():
     """The info metric holds one series for each tier, and the tier label tells
     the series apart. A tier cannot know its own index, so the manager adds the
-    label. A tier fills the names it owns only. No in-tree primary tier
-    publishes a fact yet, so its series carries the tier label only."""
+    label. A tier fills the names it owns only, so the CPU primary tier fills
+    its cpu_ labels on its own series alone."""
     mock_region = _mock_mmap_region(5)
     primary_tier = CPUPrimaryTierOffloadingManager(
         num_chunks=5, mmap_region=mock_region
@@ -1541,7 +1554,7 @@ def test_tiering_manager_reports_one_config_info_series_for_each_tier():
     )
 
     assert manager.config_info() == [
-        {"tier": "0:primary"},
+        {"tier": "0:primary", "cpu_num_chunks": 5},
         {"tier": "1:test_metrics", "path": "/mnt/test_metrics"},
         {"tier": "2:test_metrics", "path": "/mnt/test_metrics"},
     ]
@@ -1559,7 +1572,7 @@ def test_tiering_manager_reports_the_primary_series_with_no_secondary_tier():
         secondary_tiers=[],
     )
 
-    assert manager.config_info() == [{"tier": "0:primary"}]
+    assert manager.config_info() == [{"tier": "0:primary", "cpu_num_chunks": 5}]
 
 
 def test_tiering_manager_rejects_a_primary_tier_with_two_info_mappings():
@@ -1641,7 +1654,7 @@ def test_tiering_spec_declares_the_config_info_keys_the_manager_fills():
     ):
         keys = TieringOffloadingSpec.config_info_keys({"secondary_tiers": tier_configs})
 
-    assert keys == ("tier", "path")
+    assert keys == ("cpu_num_chunks", "tier", "path")
     filled: set[str] = set()
     for info in manager.config_info():
         assert set(info) <= set(keys)

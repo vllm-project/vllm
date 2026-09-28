@@ -370,6 +370,9 @@ class SecondaryTierManager(ABC):
         declaration, and it rejects the reserved name tier, which it adds
         itself. Every other rule matches OffloadingSpec.config_info_keys().
 
+        For an example, see ExampleTierInfo in tiering/example/manager.py.
+        ExampleSecondaryTierManager declares its names and fills its values.
+
         Args:
             tier_config: Configuration dict of this tier.
 

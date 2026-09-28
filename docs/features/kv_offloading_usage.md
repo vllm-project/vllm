@@ -121,8 +121,11 @@ The gauge holds one series for each configuration that the manager reports. A ma
 | Label | Declared by | Meaning | Notes |
 | --- | --- | --- | --- |
 | `tier` | `TieringOffloadingSpec` | The tier that this series reports. | `<index>:<type>`. Index `0` is the CPU primary tier, and a secondary tier index starts at 1. `<type>` is the `type` key of the tier config, such as `1:fs`. |
+| `cpu_num_chunks` | `CPUOffloadingSpec` or `TieringOffloadingSpec` | Chunk slots in the CPU tier. | Chunks, not GPU blocks. `cpu_bytes_to_use` divided by the bytes of one chunk. |
 
-The spec declares the label names in the API server process, and the manager fills the values in the engine process. The names of every series bind once, at the declaration. A label that one series owns reads empty on every other series. No in-tree manager publishes a fact of its own yet, so `tier` is the only label today.
+The spec declares the label names in the API server process, and the manager fills the values in the engine process. The names of every series bind once, at the declaration. A label that one series owns reads empty on every other series.
+
+`CPUOffloadingSpec` publishes `cpu_num_chunks` on its one series. `TieringOffloadingSpec` publishes it on the `0:primary` series. For a worked example of a secondary tier, the `example` tier publishes one label, `example_info`.
 
 A manager adds a label with `config_info_keys()` of its spec and `config_info()` of its own class. A name that a manager fills and the spec does not declare is dropped, and the engine log then holds one warning line.
 

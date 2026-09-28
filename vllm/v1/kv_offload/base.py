@@ -4,7 +4,7 @@
 
 from abc import ABC, abstractmethod
 from collections.abc import Collection, Iterable, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from enum import Enum, auto
 from typing import TYPE_CHECKING, Any, ClassVar, NamedTuple, NewType, TypeVar
 
@@ -240,6 +240,39 @@ class OffloadingKVEventsConfig:
 ConfigInfoMapping = Mapping[str, str | int | float | bool]
 
 
+@dataclass(frozen=True)
+class ConfigInfo:
+    """Static, per-engine facts that one offloading component publishes.
+
+    A subclass declares one field for each label of
+    vllm:kv_offload_config_info. OffloadingSpec.config_info_keys() returns the
+    names in the API-server process, and OffloadingManager.config_info()
+    returns the values in the engine process. Both sides come off the same
+    fields, so a name cannot appear on one side alone. Document
+    every field in docs/features/kv_offloading_usage.md.
+
+    For an example, see CPUOffloadingInfo in cpu/common.py. CPUOffloadingSpec
+    declares its names, and CPUOffloadingManager fills its values.
+    """
+
+    @classmethod
+    def config_info_keys(cls) -> tuple[str, ...]:
+        """Return one label name for each field, in field order."""
+        return tuple(info.name for info in fields(cls))
+
+    def as_config_info(self) -> ConfigInfoMapping:
+        """Return the label values, under the names of config_info_keys().
+
+        Returns "None" for an unknown fact. Done so the label will not be
+        dropped, as an empty label would be.
+        """
+        values = (getattr(self, info.name) for info in fields(self))
+        return {
+            key: "None" if value is None else value
+            for key, value in zip(self.config_info_keys(), values)
+        }
+
+
 class OffloadingManager(ABC):
     @abstractmethod
     def lookup(self, key: OffloadKey, req_context: ReqContext) -> LookupResult:
@@ -424,8 +457,11 @@ class OffloadingManager(ABC):
         An implementation fills every declared name on every call, and gives
         the string "None" to a value the configuration does not set. A test of
         the implementation should assert that the names here match the
-        declaration of the spec, because the runtime check reads the declaration
-        of every series together and cannot see one unfilled name.
+        declaration of the spec.
+
+        Document each key that you publish in
+        docs/features/kv_offloading_usage.md, because a label name reaches a
+        dashboard and stays there.
 
         Returns:
             One mapping of label name to value for each series of the info
@@ -627,12 +663,9 @@ class OffloadingSpec(ABC):
     def config_info_keys(cls, extra_config: dict[str, Any]) -> tuple[str, ...]:
         """Return the info metric label names of this spec.
 
-        The spec declares the names, and OffloadingManager.config_info() of
-        the matching manager fills the values. Only the spec runs in the
-        API-server process, which must declare the gauge before the first
-        payload, so the two sides must agree on the names. They need not agree
-        on the order: the frontend reads each declared name out of the
-        payload. A declared name a manager does not fill becomes an empty
+        The spec declares the label names, and OffloadingManager.config_info() of
+        the matching manager fills the values. The two sides must agree on the
+        names. A declared name a manager does not fill becomes an empty
         label value, and a name a manager adds is dropped, with one log line
         for either gap.
 
