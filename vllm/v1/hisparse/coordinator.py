@@ -231,6 +231,23 @@ class HiSparseCoordinator:
         manager = self.host_manager
         return manager.block_pool if manager is not None else None
 
+    def host_usage(self) -> tuple[int, int] | None:
+        """Host blocks backing live or cached prefixes, and pool capacity.
+
+        A used block either backs an allocated page (in-flight spill
+        destination, imported prefix, or running request) or holds a
+        published, evictable cached prefix. Eviction reclaims cached blocks
+        on demand, so high usage alone does not block admissions.
+        """
+        pool = self.get_host_block_pool()
+        if pool is None:
+            return None
+        total = pool.num_gpu_blocks - 1  # Exclude the null block.
+        return pool.num_gpu_blocks - pool.get_num_free_blocks() - 1, total
+
+    def num_pending_spills(self) -> int:
+        return len(self.pending_spills)
+
     # ------------------------------------------------------------------
     # GPU copies of published host pages
     # ------------------------------------------------------------------
