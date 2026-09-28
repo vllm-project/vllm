@@ -3125,6 +3125,14 @@ class VllmConfig:
             unsupported = "it requires the V2 model runner"
         elif self.attention_config.hisparse_config is not None:
             unsupported = "HiSparse allocates its KV cache itself"
+        elif (
+            self.kv_transfer_config is not None
+            and self.kv_transfer_config.uses_custom_mem_pool()
+        ):
+            unsupported = (
+                "custom_mem_pool allocates the KV cache from a connector's "
+                "memory pool, which a driver-mapped cache cannot use"
+            )
         if requested is None:
             cache_config.enable_extensible_kv_cache = unsupported is None
         elif requested and unsupported is not None:
