@@ -9,8 +9,10 @@ import pytest
 import torch
 
 from vllm.model_executor.layers.quantization.awq_triton import (
+    AWQ_FUSED_FP32_SUPPORTED,
     AWQ_TRITON_SUPPORTED_GROUP_SIZES,
     awq_dequantize_triton,
+    awq_gemm_fused_fp32,
     awq_gemm_triton,
 )
 from vllm.platforms import current_platform
@@ -175,3 +177,102 @@ def test_gemm(N, K, M, splitK, group_size):
     torch.testing.assert_close(
         output_triton.cpu(), output_torch.cpu(), atol=1e-1, rtol=1e-1
     )
+
+
+fused_fp32_skip = pytest.mark.skipif(
+    not AWQ_FUSED_FP32_SUPPORTED,
+    reason="awq_gemm_fused_fp32 requires CUDA on SM89.",
+)
+
+
+def _make_fused_gemm_inputs(m: int, n: int, k: int, group_size: int):
+    input = torch.rand((m, k), dtype=torch.float16, device=device)
+    qweight = torch.randint(
+        0, torch.iinfo(torch.int32).max, (k, n // 8), dtype=torch.int32, device=device
+    )
+    qzeros = torch.randint(
+        0,
+        torch.iinfo(torch.int32).max,
+        (k // group_size, n // 8),
+        dtype=torch.int32,
+        device=device,
+    )
+    scales = torch.rand((k // group_size, n), dtype=torch.float16, device=device)
+    return input, qweight, scales, qzeros
+
+
+# input   - [M, K], fp16
+# qweight - [K, N // 8], int32
+# qzeros  - [K // G, N // 8], int32
+# scales  - [K // G, N], fp16
+# Kernel switches (BLOCK_SIZE_M, BLOCK_SIZE_N) from (32, 32) to (128, 64) once
+# M > 128; M=127/128/129 straddle that boundary. N values include a
+# `N % 64 == 32` tail that only shows up once M > 128 selects BLOCK_SIZE_N=64.
+@fused_fp32_skip
+@pytest.mark.parametrize("M", [1, 32, 127, 128, 129, 256])
+@pytest.mark.parametrize("N", [32, 64, 96, 160])
+@pytest.mark.parametrize("K", [128, 256])
+def test_awq_gemm_fused_fp32(M, N, K):
+    group_size = 128
+
+    set_random_seed(0)
+
+    input, qweight, scales, qzeros = _make_fused_gemm_inputs(M, N, K, group_size)
+
+    output_fused = awq_gemm_fused_fp32(input, qweight, scales, qzeros)
+
+    assert not torch.any(torch.isinf(output_fused))
+    assert not torch.any(torch.isnan(output_fused))
+
+    dequantized_weights = awq_dequantize_triton(qweight, scales, qzeros)
+    output_ref = torch.matmul(input, dequantized_weights)
+
+    torch.testing.assert_close(output_fused, output_ref, atol=1e-1, rtol=1e-1)
+
+
+@fused_fp32_skip
+def test_awq_gemm_fused_fp32_rejects_wrong_dtype():
+    input, qweight, scales, qzeros = _make_fused_gemm_inputs(32, 32, 128, 128)
+    with pytest.raises(ValueError, match="FP16 inputs and scales"):
+        awq_gemm_fused_fp32(input.float(), qweight, scales, qzeros)
+
+
+@fused_fp32_skip
+def test_awq_gemm_fused_fp32_rejects_non_contiguous():
+    input, qweight, scales, qzeros = _make_fused_gemm_inputs(32, 64, 128, 128)
+    k, packed_n = qweight.shape
+    qweight_padded = torch.randint(
+        0,
+        torch.iinfo(torch.int32).max,
+        (k, packed_n * 2),
+        dtype=torch.int32,
+        device=device,
+    )
+    qweight_noncontig = qweight_padded[:, ::2]
+    assert not qweight_noncontig.is_contiguous()
+    with pytest.raises(ValueError, match="contiguous"):
+        awq_gemm_fused_fp32(input, qweight_noncontig, scales, qzeros)
+
+
+@fused_fp32_skip
+def test_awq_gemm_fused_fp32_rejects_unsupported_group_size():
+    # group_size=64 is a supported AWQ group size in general, but the fused
+    # kernel only implements 128; scales/qzeros shaped for group_size=64
+    # should be rejected rather than silently dequantized incorrectly.
+    input, qweight, scales, qzeros = _make_fused_gemm_inputs(32, 32, 128, 64)
+    with pytest.raises(ValueError, match="group_size=128"):
+        awq_gemm_fused_fp32(input, qweight, scales, qzeros)
+
+
+@fused_fp32_skip
+def test_awq_gemm_fused_fp32_rejects_unaligned_n():
+    input, qweight, scales, qzeros = _make_fused_gemm_inputs(32, 32, 128, 128)
+    # N=16 is not a multiple of 32; simulate by truncating N-dependent tensors
+    # (re-contiguous-ing the slices, since the shape-checks run before this one).
+    with pytest.raises(ValueError, match="aligned to 32"):
+        awq_gemm_fused_fp32(
+            input,
+            qweight[:, :2].contiguous(),
+            scales[:, :16].contiguous(),
+            qzeros[:, :2].contiguous(),
+        )

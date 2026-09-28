@@ -237,3 +237,61 @@ def test_auto_awq_config_get_name():
     from vllm.model_executor.layers.quantization.auto_awq import AutoAWQConfig
 
     assert AutoAWQConfig.get_name() == "auto_awq"
+
+
+@pytest.mark.skipif(
+    not is_quant_method_supported("auto_awq"),
+    reason="auto_awq is not supported on this GPU type.",
+)
+@pytest.mark.skipif(
+    not (current_platform.is_cuda() and current_platform.is_device_capability(89)),
+    reason="The fused AWQ BI GEMM path only dispatches on SM89.",
+)
+@pytest.mark.parametrize("model_id", AWQ_MODELS)
+def test_auto_awq_batch_invariant_uses_fused_gemm(
+    model_id: str, monkeypatch, dist_init, workspace_init
+):
+    """Under VLLM_BATCH_INVARIANT on SM89, AWQ linears should dispatch to the
+    fused GEMM (not the legacy dequantize-then-matmul fallback)."""
+    monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
+    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
+
+    import vllm.model_executor.layers.quantization.auto_awq as auto_awq_module
+
+    fused_calls = 0
+    original_fused_gemm = auto_awq_module.awq_gemm_fused_fp32
+
+    def _counting_fused_gemm(*args, **kwargs):
+        nonlocal fused_calls
+        fused_calls += 1
+        return original_fused_gemm(*args, **kwargs)
+
+    monkeypatch.setattr(auto_awq_module, "awq_gemm_fused_fp32", _counting_fused_gemm)
+
+    model, vllm_config = load_model_without_vllm_runner(
+        model_id,
+        dtype=torch.float16,
+        quantization="auto_awq",
+        model_config_kwargs={"max_model_len": 2048},
+    )
+    target_device = torch.device(current_platform.device_type)
+
+    monkeypatch.setattr(Attention, "forward", lambda _, q, k, v: q.contiguous())
+    input_ids = torch.tensor([1, 2, 3, 4], device=target_device)
+    positions = torch.arange(input_ids.numel(), device=target_device)
+    with (
+        set_current_vllm_config(vllm_config),
+        set_forward_context(None, vllm_config, num_tokens=input_ids.numel()),
+    ):
+        hidden_states = model(input_ids, positions, None)
+
+    # Deliberately stop at the AWQ-quantized transformer layers rather than
+    # calling compute_logits: the lm_head's own (unquantized)
+    # linear_batch_invariant path is unrelated to AWQ dispatch and, on some
+    # GPUs, hits a pre-existing OutOfResources error in vLLM's persistent
+    # matmul kernel for this vocab size (see #<TODO: file separately>).
+    assert torch.isfinite(hidden_states).all()
+    assert fused_calls > 0, (
+        "Expected the fused AWQ BI GEMM to be dispatched at least once; "
+        "got 0 calls, so this run silently fell back to the legacy path."
+    )
