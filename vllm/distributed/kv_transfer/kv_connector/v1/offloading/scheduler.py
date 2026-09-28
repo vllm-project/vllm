@@ -1275,6 +1275,8 @@ class OffloadingConnectorScheduler:
             if req_status is None:
                 continue
             req = req_status.req
+            if req.skip_writing_prefix_cache:
+                continue
             max_boundary = self._calc_num_offloadable_tokens(req_status, req.num_tokens)
             for group_idx, block_id, boundary in entries:
                 config_idx = config_idx_by_group.get(group_idx)
@@ -1355,6 +1357,8 @@ class OffloadingConnectorScheduler:
                 continue
             req_status = self._req_status.get(req_id)
             assert req_status is not None
+            if req_status.req.skip_writing_prefix_cache:
+                continue
             boundaries = {boundary for _, _, boundary in entries}
             assert len(boundaries) == 1
             boundary = boundaries.pop()
@@ -1512,6 +1516,8 @@ class OffloadingConnectorScheduler:
             if req_status is None:
                 continue
             req = req_status.req
+            if req.skip_writing_prefix_cache:
+                continue
 
             if req.status is RequestStatus.FINISHED_ABORTED:
                 num_tokens_after_batch = req.num_computed_tokens

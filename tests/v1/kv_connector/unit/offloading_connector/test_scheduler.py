@@ -147,6 +147,7 @@ def test_swa_offload_window_covers_unaligned_hit(
     request.num_tokens = request.num_prompt_tokens = 4353
     request.block_hashes = [BlockHash(f"h{i}".encode()) for i in range(544)]
     request.skip_reading_prefix_cache = False
+    request.skip_writing_prefix_cache = False
     sched.on_new_request(request)
     state = sched._req_status[request.request_id]
     state.update_offload_keys()
@@ -223,6 +224,7 @@ def _make_partial_tail_request(
     request.all_token_ids = list(range(30))
     request.lora_request = None
     request.skip_reading_prefix_cache = False
+    request.skip_writing_prefix_cache = False
     request.is_finished.return_value = False
     scheduler.on_new_request(request)
     return request
@@ -317,6 +319,29 @@ def test_partial_tail_store_uses_attention_and_recurrent_cow_sources():
     assert recurrent_event.token_ids == []
     assert len(recurrent_event.block_hashes) == 1
     assert recurrent_event.parent_block_hash is None
+
+
+def test_skip_writing_prefix_cache_skips_partial_tail_stores():
+    scheduler = _make_partial_tail_scheduler()
+    request = _make_partial_tail_request(scheduler)
+    request.skip_writing_prefix_cache = True
+    req_status = scheduler._req_status["req"]
+    req_status.group_states[0].block_ids[:] = [11, 12]
+    req_status.group_states[1].block_ids[:] = [0, 21]
+    scheduler.manager.prepare_store.side_effect = lambda keys, req_context: (
+        generate_store_output(keys)
+    )
+
+    output = SimpleNamespace(
+        kv_connector_block_state=KVConnectorBlockState(
+            req_ids=set(),
+            resolve_block_ids={}.__getitem__,
+            boundary_state_offloads={"req": [(1, 98, 16), (1, 99, 28)]},
+        )
+    )
+
+    assert scheduler._build_partial_tail_store_jobs(output) == {}
+    scheduler.manager.prepare_store.assert_not_called()
 
 
 def test_aligned_boundary_store_uses_exact_source_with_partial_tail():
@@ -545,6 +570,7 @@ def test_recurrent_group_unhashed_block_does_not_truncate_load_boundary():
     request.block_hashes = [BlockHash(f"b{i}".encode()) for i in range(16)]
     request.all_token_ids = list(range(64))
     request.lora_request = None
+    request.skip_writing_prefix_cache = False
     request.is_finished.return_value = False
     scheduler.on_new_request(request)
 
@@ -2994,6 +3020,46 @@ def test_skip_reading_prefix_cache(request_runner, async_scheduling: bool):
 
 
 @pytest.mark.parametrize("async_scheduling", [True, False])
+def test_skip_writing_prefix_cache(request_runner, async_scheduling: bool):
+    """CPU cache reads remain enabled, but newly computed KV is not stored."""
+    block_size = 4
+    blocks_per_chunk = 3
+    tokens_per_chunk = block_size * blocks_per_chunk
+
+    runner = request_runner(
+        block_size=block_size,
+        num_gpu_blocks=100,
+        async_scheduling=async_scheduling,
+        blocks_per_chunk=blocks_per_chunk,
+    )
+
+    runner.new_request(token_ids=[0] * tokens_per_chunk)
+    runner.manager.prepare_store.side_effect = lambda keys, req_context: (
+        generate_store_output(keys)
+    )
+    runner.run(
+        decoded_tokens=[EOS_TOKEN_ID],
+        expected_stored=(0, 1, 2),
+    )
+
+    runner.scheduler.reset_prefix_cache()
+    runner.new_request(
+        token_ids=[0] * tokens_per_chunk + [1] * tokens_per_chunk,
+        skip_writing_prefix_cache=True,
+    )
+    runner.connector_scheduler._maximal_prefix_lookup = lambda keys, ctx, *_: 1
+    runner.manager.prepare_store.side_effect = lambda keys, req_context: (
+        generate_store_output(keys)
+    )
+    runner.run(
+        decoded_tokens=[EOS_TOKEN_ID],
+        expected_loaded=(0, 1, 2),
+    )
+
+    runner.manager.prepare_store.assert_not_called()
+
+
+@pytest.mark.parametrize("async_scheduling", [True, False])
 def test_max_load_tokens_limits_external_load(request_runner, async_scheduling: bool):
     """The load cap limits external reads without changing the store path."""
     block_size = 4
@@ -3064,6 +3130,7 @@ class TestEagle:
         req.request_id = "test-req"
         req.num_tokens = num_tokens
         req.kv_transfer_params = None
+        req.skip_writing_prefix_cache = False
         num_hash_blocks = max(
             len(hashes) * scheduler.config.kv_group_configs[idx].hashes_per_chunk
             for idx, hashes in enumerate(offload_keys_per_group)
@@ -3865,6 +3932,7 @@ class TestEagle:
         request.all_token_ids = list(range(1200))
         request.lora_request = None
         request.shared_prefix_boundary = 0
+        request.skip_writing_prefix_cache = False
         request.status = RequestStatus.RUNNING
         request.is_finished.return_value = False
         scheduler.on_new_request(request)
@@ -4614,6 +4682,7 @@ class TestMambaHybridOffloadServing:
             ]
             request.all_token_ids = list(range(self.PROMPT_TOKENS))
             request.lora_request = None
+            request.skip_writing_prefix_cache = False
             request.is_finished.return_value = False
             request.status = None
             scheduler.on_new_request(request)
