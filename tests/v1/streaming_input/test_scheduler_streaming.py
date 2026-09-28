@@ -4,6 +4,7 @@
 import unittest
 from unittest.mock import MagicMock
 
+import numpy as np
 import torch
 
 from vllm.config import DeviceConfig, VllmConfig
@@ -20,7 +21,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     KVCacheGroupSpec,
 )
-from vllm.v1.outputs import ModelRunnerOutput
+from vllm.v1.outputs import LogprobsLists, ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus, StreamingUpdate
 from vllm.v1.structured_output import StructuredOutputManager
 
@@ -84,6 +85,61 @@ def create_scheduler() -> Scheduler:
 
 
 class TestStreamingScheduler(unittest.TestCase):
+    def test_chunk_logprobs_do_not_depend_on_continuation_arrival(self):
+        """A queued continuation must not change the finishing chunk's logprobs."""
+        for continuation_queued in (False, True):
+            with self.subTest(continuation_queued=continuation_queued):
+                scheduler = create_scheduler()
+                session = DummyRequest("session", prompt_token_ids=[1, 2, 3])
+                session.sampling_params = SamplingParams(
+                    stop_token_ids=[STOP_TOKEN], max_tokens=16, logprobs=0
+                )
+                scheduler.add_request(session)
+                scheduled = scheduler.schedule()
+
+                continuation = DummyRequest("session", prompt_token_ids=[4, 5])
+                assert continuation.sampling_params.logprobs is None
+                if continuation_queued:
+                    scheduler.add_request(continuation)
+
+                logprobs = LogprobsLists(
+                    logprob_token_ids=np.array([[STOP_TOKEN]], dtype=np.int32),
+                    logprobs=np.array([[-0.25]], dtype=np.float32),
+                    sampled_token_ranks=np.array([1], dtype=np.int32),
+                )
+                runner_output = ModelRunnerOutput(
+                    req_ids=[session.request_id],
+                    req_id_to_index={session.request_id: 0},
+                    sampled_token_ids=[[STOP_TOKEN]],
+                    logprobs=logprobs,
+                    prompt_logprobs_dict={},
+                    pooler_output=[],
+                )
+                outputs = scheduler.update_from_output(scheduled, runner_output)
+                [output] = outputs[session.client_index].outputs
+
+                if not continuation_queued:
+                    assert session.status == RequestStatus.WAITING_FOR_STREAMING_REQ
+                    scheduler.add_request(continuation)
+                assert session.status == RequestStatus.WAITING
+                assert session.sampling_params is continuation.sampling_params
+                assert output.new_token_ids == [STOP_TOKEN]
+                assert output.finish_reason == FinishReason.STOP
+                assert output.new_logprobs is not None, (
+                    "The finishing chunk requested logprobs; the continuation's "
+                    "settings must not suppress them"
+                )
+                np.testing.assert_array_equal(
+                    output.new_logprobs.logprob_token_ids, logprobs.logprob_token_ids
+                )
+                np.testing.assert_array_equal(
+                    output.new_logprobs.logprobs, logprobs.logprobs
+                )
+                np.testing.assert_array_equal(
+                    output.new_logprobs.sampled_token_ranks,
+                    logprobs.sampled_token_ranks,
+                )
+
     def test_add_request(self):
         scheduler = create_scheduler()
 
