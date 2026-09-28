@@ -23,12 +23,12 @@ state, so the caller holds the baseline. Invalid requests return HTTP 400.
 ```bash
 URL=http://localhost:8000
 
-# 1. Save the original digests.
+# 1. Stop serving, then save the original digests.
+curl -X POST "$URL/pause?mode=abort"
 curl -X POST $URL/weight_checker -H 'Content-Type: application/json' \
   -d '{"action":"checksum"}' > baseline.json
 
-# 2. Stop serving, then zero the weights.
-curl -X POST "$URL/pause?mode=abort"
+# 2. Zero the weights.
 curl -X POST $URL/weight_checker -H 'Content-Type: application/json' \
   -d '{"action":"reset"}'
 
@@ -43,8 +43,8 @@ curl -X POST $URL/resume
 
 ## Limitations
 
-- Between `reset` and the transfer the weights are invalid, so pause before
-  `reset` and resume only after the transfer.
+- Stay paused from `checksum` to `compare`: the weights are invalid between
+  `reset` and the transfer, and EPLB moves experts while serving.
 - A request covers the engines managed by the API server it reaches. With
   several API servers (for example `--data-parallel-external-lb`), send it to
   each one.
