@@ -174,3 +174,16 @@ def test_sm100_bf16_512_priority_unchanged(num_heads):
 def test_sm100_576_priority_unchanged():
     order = _sparse_order("auto", 576, num_heads=32)
     assert order[0] == "FLASHMLA_SPARSE", order
+
+
+@pytest.mark.parametrize("num_heads", [16, 32, 64])
+@pytest.mark.parametrize(
+    ("kv_cache_dtype", "expected"),
+    [
+        ("fp8", ["FLASHINFER_MLA_SPARSE", "FLASHMLA_SPARSE"]),
+        ("nvfp4_ds_mla", ["FLASHMLA_SPARSE", "FLASHINFER_MLA_SPARSE"]),
+    ],
+)
+def test_sm100_quantized_sparse_priority(kv_cache_dtype, expected, num_heads):
+    """FlashInfer serves nvfp4_ds_mla through fp8 staging, so it is opt-in."""
+    assert _sparse_order(kv_cache_dtype, 576, num_heads=num_heads) == expected
