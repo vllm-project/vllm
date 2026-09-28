@@ -7,6 +7,7 @@ import pytest
 import ray
 
 from tests.utils import wait_for_memory_to_settle
+from vllm.config import CacheConfig
 from vllm.config.model import ModelDType
 from vllm.platforms import current_platform
 from vllm.sampling_params import SamplingParams
@@ -77,8 +78,14 @@ def test_engine_log_metrics_ray(
         ray.get(actor.run.remote())
     finally:
         ray.shutdown()
+        # Unset resolves to 1.0 under the extensible KV cache, which does not
+        # need that memory free up front; wait for the standard fraction.
         wait_for_memory_to_settle(
-            threshold_ratio=1.0 - engine_args.gpu_memory_utilization
+            threshold_ratio=1.0
+            - (
+                engine_args.gpu_memory_utilization
+                or CacheConfig.DEFAULT_GPU_MEMORY_UTILIZATION
+            )
         )
 
 
