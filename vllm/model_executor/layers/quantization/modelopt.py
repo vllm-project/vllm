@@ -1517,6 +1517,18 @@ class ModelOptMixedPrecisionConfig(ModelOptQuantConfigBase):
         super().__init__(exclude_modules)
         self.kv_cache_quant_method = kv_cache_quant_method
         self.quantized_layers = quantized_layers
+        for prefix, recipe in quantized_layers.items():
+            if recipe.get("quant_algo", "").upper() == "Q8_0" and any(
+                recipe.get(key) != value
+                for key, value in {
+                    "group_size": 32,
+                    "block_payload_bytes": 34,
+                    "packing": "ggml",
+                }.items()
+            ):
+                raise ValueError(
+                    f"Unsupported Q8_0 block layout for {prefix}: {recipe}"
+                )
         self.fp8_config = fp8_config
         self.nvfp4_config = nvfp4_config
         self.w4a16_nvfp4_config = w4a16_nvfp4_config
@@ -1765,6 +1777,15 @@ class ModelOptMixedPrecisionConfig(ModelOptQuantConfigBase):
             return None
 
         quant_algo = self._resolve_quant_algo(prefix)
+
+        if quant_algo == "Q8_0":
+            if not isinstance(layer, (LinearBase, ParallelLMHead)):
+                raise ValueError(f"Q8_0 requires a dense linear or LM head: {prefix}")
+            from vllm.model_executor.layers.quantization.modelopt_q8_0 import (
+                ModelOptQ80LinearMethod,
+            )
+
+            return ModelOptQ80LinearMethod()
 
         if isinstance(layer, (LinearBase, ParallelLMHead)):
             # Per-prefix algo -> its sub-config, then the generic linear method.

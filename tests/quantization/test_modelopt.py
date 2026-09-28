@@ -272,6 +272,93 @@ def test_modelopt_mixed_precision_dispatches_every_linear_algo(algo):
     assert isinstance(method, ModelOptLinearMethod), (algo, type(method).__name__)
 
 
+def test_modelopt_mixed_precision_routes_q8_0_and_rejects_other_block_layouts():
+    from vllm.model_executor.layers.linear import LinearBase
+    from vllm.model_executor.layers.quantization.modelopt_q8_0 import (
+        ModelOptQ80LinearMethod,
+    )
+
+    recipe = {
+        "quant_algo": "Q8_0",
+        "group_size": 32,
+        "block_payload_bytes": 34,
+        "packing": "ggml",
+    }
+
+    def config_for(layer_recipe):
+        return ModelOptMixedPrecisionConfig.from_config(
+            {
+                "quantization": {
+                    "quant_algo": "MIXED_PRECISION",
+                    "quantized_layers": {"model.layers.0.q_proj": layer_recipe},
+                }
+            }
+        )
+
+    config = config_for(recipe)
+    assert isinstance(
+        config.get_quant_method(MagicMock(spec=LinearBase), "model.layers.0.q_proj"),
+        ModelOptQ80LinearMethod,
+    )
+    with pytest.raises(ValueError, match="Unsupported Q8_0 block layout"):
+        config_for({**recipe, "group_size": 64})
+
+
+def test_modelopt_q8_0_loader_preserves_codes_and_fp16_scales(monkeypatch):
+    from vllm.model_executor.layers.quantization import modelopt_q8_0 as q8
+
+    monkeypatch.setattr(q8, "get_tensor_model_parallel_world_size", lambda: 1)
+    monkeypatch.setattr(
+        "vllm.model_executor.parameter.get_tensor_model_parallel_rank", lambda: 0
+    )
+    monkeypatch.setattr(
+        "vllm.model_executor.parameter.get_tensor_model_parallel_world_size",
+        lambda: 1,
+    )
+    monkeypatch.setattr(
+        q8, "prepare_humming_linear_layer_config", lambda *_args: "config"
+    )
+    monkeypatch.setattr(q8, "get_humming_linear_compute_config", lambda: "compute")
+    method = q8.ModelOptQ80LinearMethod()
+    layer = torch.nn.Module()
+    method.create_weights(
+        layer,
+        input_size_per_partition=64,
+        output_partition_sizes=[2],
+        input_size=64,
+        output_size=2,
+        params_dtype=torch.bfloat16,
+        weight_loader=lambda param, value: param.data.copy_(value),
+    )
+    with pytest.raises(ValueError, match="invalid FP16 scales"):
+        method.process_weights_after_loading(layer)
+    scales = torch.tensor([[0.25, 0.5], [0.125, 1.0]], dtype=torch.float16)
+    codes = (torch.arange(128, dtype=torch.int16) - 64).to(torch.int8).reshape(2, 64)
+    blocks = torch.empty((2, 2, 34), dtype=torch.uint8)
+    blocks[..., :2] = scales.unsqueeze(-1).contiguous().view(torch.uint8)
+    blocks[..., 2:] = codes.reshape(2, 2, 32).view(torch.uint8)
+    with pytest.raises(ValueError, match="uint8"):
+        layer.weight.weight_loader(layer.weight, blocks.float())
+    layer.weight.weight_loader(layer.weight, blocks)
+    method.process_weights_after_loading(layer)
+
+    assert torch.equal(layer.weight.view(torch.uint8), codes.view(torch.uint8) ^ 128)
+    assert torch.equal(layer.weight_scale.view(torch.uint8), scales.view(torch.uint8))
+    assert method.layer_config == "config"
+
+    monkeypatch.setattr(q8, "get_tensor_model_parallel_world_size", lambda: 2)
+    with pytest.raises(NotImplementedError, match="TP=1"):
+        q8.ModelOptQ80LinearMethod().create_weights(
+            torch.nn.Module(),
+            input_size_per_partition=64,
+            output_partition_sizes=[2],
+            input_size=128,
+            output_size=2,
+            params_dtype=torch.bfloat16,
+            weight_loader=lambda param, value: param.data.copy_(value),
+        )
+
+
 @pytest.mark.parametrize("algo", ["FP8_PB_WO", "FP8_BLOCK_SCALES"])
 def test_modelopt_mixed_precision_dispatches_block_fp8_moe(algo):
     config = ModelOptMixedPrecisionConfig.from_config(
