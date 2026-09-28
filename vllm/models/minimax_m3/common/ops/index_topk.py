@@ -122,7 +122,11 @@ def _index_block_score_kernel(
         block_shape=(BLOCK_SIZE_Q, head_dim),
         order=(1, 0),
     )
-    q = tl.load(q_ptrs, boundary_check=(0,), padding_option="zero").to(tl.bfloat16)
+    q = tl.load(q_ptrs, boundary_check=(0,), padding_option="zero")
+    # FP8 has no mixed-dtype dot with bf16/fp32. Leave bf16 and fp32 loads
+    # in their stored dtype so fp32 pipeline tests keep full precision.
+    if q.dtype.is_fp8():
+        q = q.to(tl.bfloat16)
     q_start = prefix_len + pid_q * BLOCK_SIZE_Q
 
     off_q = tl.arange(0, BLOCK_SIZE_Q) + pid_q * BLOCK_SIZE_Q + prefix_len
@@ -145,7 +149,9 @@ def _index_block_score_kernel(
             + page * stride_ik_blk
             + off_k[None, :] * stride_ik_pos
             + off_d[:, None] * stride_ik_d,
-        ).to(tl.bfloat16)
+        )
+        if k.dtype.is_fp8():
+            k = k.to(tl.bfloat16)
         qk = tl.dot(q, k, out_dtype=tl.float32)
         # apply causal mask as needed
         if q_start < i + BLOCK_SIZE_K:
@@ -359,7 +365,9 @@ def _decode_index_score_kernel(
         + off_d[:, None] * stride_q_d,
         mask=q_mask[None, :],
         other=0.0,
-    ).to(tl.bfloat16)  # [D,HQ]
+    )  # [D,HQ]
+    if q.dtype.is_fp8():
+        q = q.to(tl.bfloat16)
     for blk in tl.range(chunk_start_block, chunk_end_block):
         page = tl.load(bt_row + blk).to(tl.int64)
         pos = blk * BLOCK_SIZE_K + off_k
@@ -372,9 +380,12 @@ def _decode_index_score_kernel(
             + page * stride_ik_blk
             + off_k[:, None] * stride_ik_pos
             + off_d * stride_ik_d,
-        ).to(tl.bfloat16)  # [N,D]
-        # BF16 operands keep FP8 dot instructions out of the fallback path;
-        # FP32 accumulation preserves score accuracy.
+        )  # [N,D]
+        # Upcast only FP8 cache loads. BF16 operands keep FP8 dot
+        # instructions out of the fallback path; FP32 accumulation
+        # preserves score accuracy. BF16/FP32 loads stay as stored.
+        if k.dtype.is_fp8():
+            k = k.to(tl.bfloat16)
         kq = tl.dot(k, q, out_dtype=tl.float32)  # [N,HQ]
         kq = tl.where(pos_mask & q_mask[None, :], kq, float("-inf"))
         score = tl.max(kq, axis=0)  # [HQ]
