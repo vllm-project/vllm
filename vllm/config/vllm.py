@@ -2077,14 +2077,14 @@ class VllmConfig:
                 raise ValueError(
                     "The moonep all2all backend does not support EPLB yet: "
                     "EPLB rearranges expert parameters in a layout MoonEP's "
-                    "replicated [E+B] weights do not follow. Disable "
+                    "symmetric-memory weight views do not follow. Disable "
                     "--enable-eplb or use a different --all2all-backend."
                 )
             if self.parallel_config.expert_placement_strategy != "linear":
                 raise ValueError(
                     "The moonep all2all backend requires linear expert "
-                    "placement: its load-time all-gather assumes each rank "
-                    "holds a contiguous chunk of the global expert range. Got "
+                    "placement: MoonEP's planner assumes each rank holds a "
+                    "contiguous chunk of the global expert range. Got "
                     "--expert-placement-strategy "
                     f"{self.parallel_config.expert_placement_strategy!r}."
                 )

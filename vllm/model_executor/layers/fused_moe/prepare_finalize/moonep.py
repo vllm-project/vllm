@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """MoonEP (https://github.com/MoonshotAI/MoonEP) prepare/finalize.
 
-BF16 correctness-first proof of concept on top of vLLM's modular kernel
+BF16 correctness-first integration on top of vLLM's modular kernel
 interface.
 
 MoonEP differs from DeepEP-style backends in two ways that shape this
@@ -10,28 +10,31 @@ integration:
 
 - ``dispatch`` returns tokens already grouped by expert *row* (a fixed
   ``[NvS, H]`` layout with ``NvS = S x K`` real slots plus padding) together
-  with a ``cu_seqlens[E+B]`` segment table and an opaque ``plan``. There is
-  no per-token topk id tensor after dispatch; the expert compute must be a
+  with a ``cu_seqlens[2 * epn]`` segment table and an opaque ``plan``. There
+  is no per-token topk id tensor after dispatch; the expert compute must be a
   grouped GEMM over ``cu_seqlens`` segments.
-- Rows ``[E, E+B)`` of the weight/segment space are dynamic redundant-expert
-  prefetch slots. ``plan.experts_to_copy`` names the source expert of each
-  slot and ``Buffer.prefetch_weight`` must run between dispatch and expert
-  compute.
+- Rows ``[epn, 2 * epn)`` of the weight/segment space are dynamic
+  redundant-expert prefetch slots (``epn = E / R`` local experts per rank).
+  ``plan.experts_to_copy`` names the source expert of each slot and
+  ``Buffer.prefetch_weight`` must run between dispatch and expert compute.
 
-PoC limitations:
+Weight ownership follows MoonEP's contract: each rank keeps only its own
+``epn`` experts; the prefetch slots live in one process-global symmetric
+pool per projection that every layer shares. See
+:class:`MoonEPExpertWeightPools`.
+
+Limitations:
 - BF16 / unquantized only, eager only.
-- Expert weights are replicated in global-expert order on every rank
-  (memory-heavy). Production Kimi-K3 serving requires sharded
-  symmetric-memory expert ownership, where rows ``[0, E)`` physically alias
-  each home rank's parameter memory.
 - Route weights are applied inside the expert compute and MoonEP's
   ``combine`` performs the K-sum, so ``finalize`` requires
   ``TopKWeightAndReduceNoOP``.
 """
 
+import os
 from typing import Any, NamedTuple
 
 import torch
+import torch.distributed as dist
 import torch.nn.functional as F
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
@@ -41,19 +44,21 @@ from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceNoOP,
 )
 
-MOONEP_DEFAULT_NUM_PREFETCH_SLOTS = 4
 MOONEP_DEFAULT_TOKEN_PADDING = 128
 MOONEP_DEFAULT_NUM_SMS = 32
 # MoonEP's weight-prefetch kernel tiles hidden and intermediate dims by 128.
 MOONEP_WEIGHT_TILE = 128
 
 
-class MoonEPExpertWeightLayout(NamedTuple):
-    """Contiguous BF16 expert weights in MoonEP ``[E+B, ...]`` layout.
+class MoonEPExpertWeights(NamedTuple):
+    """One MoE layer's expert weights in MoonEP's compute layout.
 
-    Rows ``[0, E)`` hold expert weights in global expert order; rows
-    ``[E, E+B)`` are mutable prefetch slots filled by
-    ``Buffer.prefetch_weight``.
+    ``gate``/``up``/``down`` are contiguous ``[2 * epn, ...]`` compute views:
+    rows ``[0, epn)`` are this rank's own experts (global ids
+    ``[ep_rank * epn, (ep_rank + 1) * epn)``), rows ``[epn, 2 * epn)`` alias
+    this rank's slice of the process-global prefetch pool, filled by
+    ``Buffer.prefetch_weight``. ``*_prefetch_buffer`` are the ``[R, epn, ...]``
+    all-rank pool views that ``prefetch_weight`` writes through.
 
     The prefetch slots never need re-zeroing between calls: the planner
     marks unused slots with ``-1`` in ``plan.experts_to_copy`` (skipped by
@@ -61,100 +66,231 @@ class MoonEPExpertWeightLayout(NamedTuple):
     stale slot contents are never read; used slots are fully overwritten.
     """
 
-    full_gate_weight: torch.Tensor
-    full_up_weight: torch.Tensor
-    full_down_weight: torch.Tensor
-    num_prefetch_slots: int
+    gate: torch.Tensor
+    up: torch.Tensor
+    down: torch.Tensor
+    gate_prefetch_buffer: torch.Tensor
+    up_prefetch_buffer: torch.Tensor
+    down_prefetch_buffer: torch.Tensor
+    num_local_experts: int
+
+    @property
+    def local_gate(self) -> torch.Tensor:
+        return self.gate[: self.num_local_experts]
+
+    @property
+    def local_up(self) -> torch.Tensor:
+        return self.up[: self.num_local_experts]
+
+    @property
+    def local_down(self) -> torch.Tensor:
+        return self.down[: self.num_local_experts]
+
+    def prefetch_kwargs(self) -> dict[str, torch.Tensor]:
+        return dict(
+            local_gate_weight=self.local_gate,
+            local_up_weight=self.local_up,
+            local_down_weight=self.local_down,
+            gate_prefetch_buffer=self.gate_prefetch_buffer,
+            up_prefetch_buffer=self.up_prefetch_buffer,
+            down_prefetch_buffer=self.down_prefetch_buffer,
+        )
 
 
-def make_moonep_weight_layout(
-    w13_weight: torch.Tensor,
-    w2_weight: torch.Tensor,
-    num_prefetch_slots: int,
-) -> MoonEPExpertWeightLayout:
-    """Build the replicated ``[E+B, ...]`` PoC weight layout.
+class _MoonEPPrefetchPool:
+    """This rank's prefetch slots for one projection shape, mapped everywhere.
 
-    ``w13_weight`` must be ``[E, 2I, H]`` (gate rows first) and ``w2_weight``
-    ``[E, H, I]``, both BF16 in global expert order.
+    Allocates one VMM chunk of ``num_local_experts`` expert rows (padded to
+    the VMM granularity) and exports it so that (a) every EP rank maps all
+    ranks' chunks as the ``[R, epn, ...]`` prefetch-buffer view that
+    ``prefetch_weight`` writes through, and (b) each layer on this rank can
+    map the chunk again right behind its own expert weights to form the
+    contiguous ``[2 * epn, ...]`` compute view.
     """
-    if num_prefetch_slots <= 0:
-        raise ValueError(
-            f"num_prefetch_slots must be positive, got {num_prefetch_slots}"
+
+    def __init__(
+        self,
+        expert_shape: tuple[int, ...],
+        num_local_experts: int,
+        dtype: torch.dtype,
+        group: dist.ProcessGroup,
+        use_fabric: bool,
+    ):
+        from moonep._C import (  # type: ignore[import-not-found]
+            nvl_dist_alloc,
+            nvl_release_mem_handle,
         )
-    if w13_weight.dtype != torch.bfloat16 or w2_weight.dtype != torch.bfloat16:
-        raise NotImplementedError("MoonEP PoC supports BF16 weights only.")
-    num_experts, two_i, hidden_size = w13_weight.shape
-    intermediate_size = two_i // 2
-    if tuple(w2_weight.shape) != (num_experts, hidden_size, intermediate_size):
-        raise ValueError(
-            f"w2_weight shape {tuple(w2_weight.shape)} does not match "
-            f"w13_weight shape {tuple(w13_weight.shape)}"
-        )
-    if hidden_size % MOONEP_WEIGHT_TILE or intermediate_size % MOONEP_WEIGHT_TILE:
-        raise ValueError(
-            "MoonEP weight prefetch requires hidden_size and intermediate_size "
-            f"to be multiples of {MOONEP_WEIGHT_TILE}; got H={hidden_size}, "
-            f"I={intermediate_size}"
+        from moonep.buffer import (  # type: ignore[import-not-found]
+            _map_nvl_dist_tensor,
+            pad_dim0_for_alignment,
         )
 
-    full_gate_weight = torch.empty(
-        num_experts + num_prefetch_slots,
-        intermediate_size,
-        hidden_size,
-        dtype=torch.bfloat16,
-        device=w13_weight.device,
-    )
-    full_up_weight = torch.empty_like(full_gate_weight)
-    full_down_weight = torch.empty(
-        num_experts + num_prefetch_slots,
-        hidden_size,
-        intermediate_size,
-        dtype=torch.bfloat16,
-        device=w2_weight.device,
-    )
+        self.num_local_experts = num_local_experts
+        self.dtype = dtype
+        self.use_fabric = use_fabric
+        self.chunk_shape = [
+            pad_dim0_for_alignment([num_local_experts, *expert_shape], dtype),
+            *expert_shape,
+        ]
+        rank = dist.get_rank(group)
+        world_size = dist.get_world_size(group)
 
-    full_gate_weight[:num_experts].copy_(w13_weight[:, :intermediate_size, :])
-    full_up_weight[:num_experts].copy_(w13_weight[:, intermediate_size:, :])
-    full_down_weight[:num_experts].copy_(w2_weight)
-    full_gate_weight[num_experts:].zero_()
-    full_up_weight[num_experts:].zero_()
-    full_down_weight[num_experts:].zero_()
+        keepalive, shareable, owned_handle = nvl_dist_alloc(
+            shape=self.chunk_shape, dtype=dtype, use_fabric=use_fabric
+        )
+        nvl_release_mem_handle(owned_handle)
+        # Keep a handle for the per-layer compute-view mappings: the fd is
+        # closed by _map_nvl_dist_tensor once peers have imported it, so
+        # dup it first; a fabric handle can be imported any number of times.
+        self._own_fd: int | None = None
+        if use_fabric:
+            self._shareable = shareable
+        else:
+            self._own_fd = os.dup(int(shareable.item()))
+            self._shareable = torch.tensor([self._own_fd], dtype=torch.int64)
+        all_ranks = _map_nvl_dist_tensor(
+            self.chunk_shape,
+            dtype,
+            shareable,
+            keepalive,
+            rank,
+            world_size,
+            group,
+            use_fabric,
+        )
+        # Payload sits at the start of each rank's chunk; the rank stride
+        # skips the alignment padding, as prefetch_weight allows.
+        self.all_rank_view = all_ranks.view(world_size, *self.chunk_shape)[
+            :, :num_local_experts
+        ]
 
-    return MoonEPExpertWeightLayout(
-        full_gate_weight=full_gate_weight.contiguous(),
-        full_up_weight=full_up_weight.contiguous(),
-        full_down_weight=full_down_weight.contiguous(),
-        num_prefetch_slots=num_prefetch_slots,
-    )
+    def map_compute_view(self, local_chunk_shareable: torch.Tensor) -> torch.Tensor:
+        """Map ``[local chunk, this rank's prefetch chunk]`` back to back.
+
+        Returns the ``[2 * padded_epn, ...]`` mapping; the caller places its
+        expert weights at the end of the first chunk so they abut the
+        prefetch payload at the start of the second.
+        """
+        from moonep._C import nvl_dist_map  # type: ignore[import-not-found]
+
+        shareables = torch.cat(
+            [local_chunk_shareable.reshape(1, -1), self._shareable.reshape(1, -1)]
+        )
+        if not self.use_fabric:
+            shareables = shareables.reshape(-1)
+        return nvl_dist_map(
+            chunk_shape=self.chunk_shape,
+            dtype=self.dtype,
+            shareables=shareables.contiguous(),
+            local_rank=0,
+            world_size=2,
+            use_fabric=self.use_fabric,
+        )
+
+    def close(self) -> None:
+        if self._own_fd is not None:
+            os.close(self._own_fd)
+            self._own_fd = None
+        self.all_rank_view = None
 
 
-def gather_moonep_weight_layout(
-    w13_local: torch.Tensor,
-    w2_local: torch.Tensor,
-    num_global_experts: int,
-    num_prefetch_slots: int,
-) -> MoonEPExpertWeightLayout:
-    """Build the replicated ``[E+B, ...]`` layout from this rank's local experts.
+class MoonEPExpertWeightPools:
+    """Process-global MoonEP prefetch pools plus per-layer weight placement.
 
-    PoC bridge: each EP rank loads only its own experts (linear placement),
-    so all-gather them once at load time into global expert order on every
-    rank. Production MoonEP instead maps rows ``[0, E)`` onto each home
-    rank's parameter memory via symmetric memory (RFC #52095 item 5).
+    One instance per EP group (owned by the MoonEP all2all manager). The
+    pools are created collectively on first use and shared by every MoE
+    layer, so the extra memory is ``epn`` expert weights per projection per
+    rank in total, not per layer.
     """
-    from vllm.distributed import get_ep_group
 
-    ep_group = get_ep_group()
-    ep_size = ep_group.world_size
-    if ep_size == 1:
-        return make_moonep_weight_layout(w13_local, w2_local, num_prefetch_slots)
-    if w13_local.size(0) * ep_size != num_global_experts:
-        raise NotImplementedError(
-            "MoonEP PoC requires num_experts to be evenly divisible across EP "
-            f"ranks: {num_global_experts} experts, {ep_size} ranks"
+    def __init__(self, group: dist.ProcessGroup | None):
+        self.group = group
+        self._pools: dict[tuple[str, tuple[int, ...], torch.dtype], Any] = {}
+        self._use_fabric: bool | None = None
+
+    def _pool(
+        self, name: str, expert_shape: tuple[int, ...], epn: int, dtype: torch.dtype
+    ) -> _MoonEPPrefetchPool:
+        key = (name, (epn, *expert_shape), dtype)
+        pool = self._pools.get(key)
+        if pool is None:
+            from moonep.buffer import (  # type: ignore[import-not-found]
+                _use_fabric_for_group,
+            )
+
+            if self._use_fabric is None:
+                self._use_fabric = _use_fabric_for_group(self.group)
+            pool = _MoonEPPrefetchPool(
+                expert_shape, epn, dtype, self.group, self._use_fabric
+            )
+            self._pools[key] = pool
+        return pool
+
+    def _place(self, name: str, local_weight: torch.Tensor) -> tuple[Any, Any]:
+        """Copy ``local_weight`` ``[epn, ...]`` into a VMM chunk mapped right in
+        front of this rank's prefetch slots; returns the compute view and the
+        all-rank prefetch view."""
+        from moonep._C import (  # type: ignore[import-not-found]
+            nvl_dist_alloc,
+            nvl_release_mem_handle,
         )
-    w13_global = ep_group.all_gather(w13_local.contiguous(), dim=0)
-    w2_global = ep_group.all_gather(w2_local.contiguous(), dim=0)
-    return make_moonep_weight_layout(w13_global, w2_global, num_prefetch_slots)
+
+        epn = local_weight.size(0)
+        expert_shape = tuple(local_weight.shape[1:])
+        pool = self._pool(name, expert_shape, epn, local_weight.dtype)
+        keepalive, shareable, owned_handle = nvl_dist_alloc(
+            shape=pool.chunk_shape, dtype=local_weight.dtype, use_fabric=pool.use_fabric
+        )
+        nvl_release_mem_handle(owned_handle)
+        try:
+            full = pool.map_compute_view(shareable)
+        finally:
+            if not pool.use_fabric:
+                os.close(int(shareable.item()))
+        # The compute-view mapping now keeps the physical chunk alive.
+        del keepalive
+        padded_epn = pool.chunk_shape[0]
+        view = full[padded_epn - epn : padded_epn + epn]
+        view[:epn].copy_(local_weight)
+        return view, pool.all_rank_view
+
+    def build_expert_weights(
+        self, w13_local: torch.Tensor, w2_local: torch.Tensor
+    ) -> MoonEPExpertWeights:
+        """Place a layer's local experts (``w13`` ``[epn, 2I, H]`` gate rows
+        first, ``w2`` ``[epn, H, I]``, BF16) into MoonEP's compute layout."""
+        if w13_local.dtype != torch.bfloat16 or w2_local.dtype != torch.bfloat16:
+            raise NotImplementedError("MoonEP supports BF16 weights only.")
+        epn, two_i, hidden_size = w13_local.shape
+        intermediate_size = two_i // 2
+        if tuple(w2_local.shape) != (epn, hidden_size, intermediate_size):
+            raise ValueError(
+                f"w2_weight shape {tuple(w2_local.shape)} does not match "
+                f"w13_weight shape {tuple(w13_local.shape)}"
+            )
+        if hidden_size % MOONEP_WEIGHT_TILE or intermediate_size % MOONEP_WEIGHT_TILE:
+            raise ValueError(
+                "MoonEP weight prefetch requires hidden_size and intermediate_size "
+                f"to be multiples of {MOONEP_WEIGHT_TILE}; got H={hidden_size}, "
+                f"I={intermediate_size}"
+            )
+        gate, gate_pool = self._place("gate", w13_local[:, :intermediate_size, :])
+        up, up_pool = self._place("up", w13_local[:, intermediate_size:, :])
+        down, down_pool = self._place("down", w2_local)
+        return MoonEPExpertWeights(
+            gate=gate,
+            up=up,
+            down=down,
+            gate_prefetch_buffer=gate_pool,
+            up_prefetch_buffer=up_pool,
+            down_prefetch_buffer=down_pool,
+            num_local_experts=epn,
+        )
+
+    def close(self) -> None:
+        for pool in self._pools.values():
+            pool.close()
+        self._pools.clear()
 
 
 MOONEP_MIN_DISPATCH_TOKENS = 128
@@ -219,14 +355,14 @@ class MoonEPPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         max_tokens_per_rank: int,
         num_dispatchers: int,
         num_global_experts: int,
-        weight_layout: MoonEPExpertWeightLayout | None = None,
+        expert_weights: MoonEPExpertWeights | None = None,
     ):
         super().__init__()
         self.buffer_pool = buffer_pool
         self.max_tokens_per_rank = max_tokens_per_rank
         self.num_dispatchers_ = num_dispatchers
         self.num_global_experts = num_global_experts
-        self.weight_layout = weight_layout
+        self.expert_weights = expert_weights
         self._fused_experts: Any = None
 
         # dispatch state consumed by finalize (and the expert runner)
@@ -236,24 +372,24 @@ class MoonEPPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         self._buffer: Any = None  # the pool buffer used by the current step
 
     def post_init_setup(self, fused_experts: mk.FusedMoEExperts) -> None:
-        # The [E+B] weight layout is attached to the experts by their
+        # The expert weights are attached to the experts by their
         # process_weights_after_loading hook (after this runs), so keep the
-        # reference and resolve the layout lazily in prepare().
+        # reference and resolve them lazily in prepare().
         self._fused_experts = fused_experts
 
-    def _resolve_weight_layout(self) -> MoonEPExpertWeightLayout:
-        if self.weight_layout is None and self._fused_experts is not None:
-            layout = getattr(self._fused_experts, "weight_layout", None)
-            if isinstance(layout, MoonEPExpertWeightLayout):
-                self.weight_layout = layout
-        # Redundant experts' weights must be in rows [E, E+B) before the
-        # expert compute reads them; skipping prefetch silently corrupts
+    def _resolve_expert_weights(self) -> MoonEPExpertWeights:
+        if self.expert_weights is None and self._fused_experts is not None:
+            weights = getattr(self._fused_experts, "expert_weights", None)
+            if isinstance(weights, MoonEPExpertWeights):
+                self.expert_weights = weights
+        # Redundant experts' weights must be in the prefetch slots before
+        # the expert compute reads them; skipping prefetch silently corrupts
         # output.
-        assert self.weight_layout is not None, (
-            "MoonEPPrepareAndFinalize: weight layout not available (the "
+        assert self.expert_weights is not None, (
+            "MoonEPPrepareAndFinalize: expert weights not available (the "
             "experts' process_weights_after_loading has not run)"
         )
-        return self.weight_layout
+        return self.expert_weights
 
     @property
     def num_dispatched_slots(self) -> int:
@@ -339,9 +475,9 @@ class MoonEPPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         defer_input_quant: bool = False,
     ) -> mk.PrepareResultType:
         if a1.dtype != torch.bfloat16:
-            raise NotImplementedError("MoonEP PoC supports BF16 hidden states only.")
+            raise NotImplementedError("MoonEP supports BF16 hidden states only.")
         if quant_config.quant_dtype is not None:
-            raise NotImplementedError("MoonEP PoC does not support quantized dispatch.")
+            raise NotImplementedError("MoonEP does not support quantized dispatch.")
         assert num_experts == self.num_global_experts
         assert self._plan is None, (
             "MoonEPPrepareAndFinalize.prepare() called again before finalize()"
@@ -381,18 +517,13 @@ class MoonEPPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         self._plan = plan
         self._cu_seqlens = cu_seqlens
 
-        weight_layout = self._resolve_weight_layout()
         self._buffer.prefetch_weight(
-            plan=plan,
-            full_gate_weight=weight_layout.full_gate_weight,
-            full_up_weight=weight_layout.full_up_weight,
-            full_down_weight=weight_layout.full_down_weight,
+            plan=plan, **self._resolve_expert_weights().prefetch_kwargs()
         )
 
-        # Segment sizes per [E+B] weight row. NOTE: this is per *row*, not
-        # per local expert, and NvS rows are expert-grouped rather than
-        # token-major — only MoonEP-aware expert implementations can consume
-        # this activation layout.
+        # Segment sizes per [2 * epn] weight row. NOTE: NvS rows are
+        # expert-grouped rather than token-major — only MoonEP-aware expert
+        # implementations can consume this activation layout.
         expert_num_tokens = torch.diff(cu_seqlens, prepend=cu_seqlens.new_zeros(1))
         expert_tokens_meta = mk.ExpertTokensMetadata(
             expert_num_tokens=expert_num_tokens,
