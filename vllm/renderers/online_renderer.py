@@ -4,7 +4,7 @@ import time
 from collections.abc import Sequence
 from dataclasses import dataclass
 from http import HTTPStatus
-from typing import TYPE_CHECKING, Any, TypeAlias
+from typing import TYPE_CHECKING, Any, TypeAlias, cast
 
 from openai.types.responses import ResponseFunctionToolCall, ResponseOutputItem
 from openai.types.responses.tool import Mcp, Tool
@@ -17,6 +17,7 @@ from vllm.entrypoints.chat_utils import (
     ChatTemplateContentFormatOption,
     ConversationMessage,
 )
+from vllm.entrypoints.generate.base.protocol import validate_request_mm_kwargs
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionNamedToolChoiceParam,
     ChatCompletionRequest,
@@ -123,10 +124,12 @@ class OnlineRenderer:
         chat_template: str | None,
         chat_template_content_format: ChatTemplateContentFormatOption,
         trust_request_chat_template: bool = False,
+        trust_request_mm_kwargs: bool = False,
         enable_auto_tools: bool = False,
         exclude_tools_when_tool_choice_none: bool = False,
         tool_parser: str | None = None,
         reasoning_parser: str | None = None,
+        tool_strict_level: str = "auto",
         default_chat_template_kwargs: dict[str, Any] | None = None,
         log_error_stack: bool = False,
     ) -> None:
@@ -141,6 +144,7 @@ class OnlineRenderer:
             tool_parser_name=tool_parser,
             reasoning_parser_name=reasoning_parser,
             enable_auto_tools=enable_auto_tools,
+            tool_strict_level=tool_strict_level,
             model_name=model_config.model,
             is_harmony=self.use_harmony,
         )
@@ -153,6 +157,7 @@ class OnlineRenderer:
             default_chat_template_kwargs or {}
         )
         self.trust_request_chat_template = trust_request_chat_template
+        self.trust_request_mm_kwargs = trust_request_mm_kwargs
 
         self.log_error_stack = log_error_stack
         self.supports_browsing = False
@@ -546,9 +551,58 @@ class OnlineRenderer:
         Called directly by render_completion_request and delegated to by
         OpenAIServingCompletion.render_completion_request after its engine-aware checks.
         """
-        # Return error for unsupported features.
+        prompt_input = request.prompt
         if request.suffix is not None:
-            return self.create_error_response("suffix is not currently supported")
+            if request.echo:
+                return self.create_error_response(
+                    "Echo is unsupported with suffix.",
+                    param="suffix",
+                )
+
+            if request.prompt_embeds is not None:
+                return self.create_error_response(
+                    "suffix is not supported with prompt_embeds",
+                    param="suffix",
+                )
+
+            if request.truncate_prompt_tokens is not None:
+                return self.create_error_response(
+                    "suffix is not supported with truncate_prompt_tokens",
+                    param="suffix",
+                )
+
+            if isinstance(request.prompt, str):
+                rendered_prompt = self.renderer.render_completion_suffix(
+                    request.prompt, request.suffix
+                )
+                if rendered_prompt is None:
+                    return self.create_error_response(
+                        "suffix is only supported for models with FIM completion "
+                        "rendering",
+                        param="suffix",
+                    )
+                prompt_input = rendered_prompt
+            elif isinstance(request.prompt, list) and all(
+                isinstance(prompt, str) for prompt in request.prompt
+            ):
+                rendered_prompts = []
+                for prompt in cast(list[str], request.prompt):
+                    rendered_prompt = self.renderer.render_completion_suffix(
+                        prompt, request.suffix
+                    )
+                    if rendered_prompt is None:
+                        return self.create_error_response(
+                            "suffix is only supported for models with FIM completion "
+                            "rendering",
+                            param="suffix",
+                        )
+                    rendered_prompts.append(rendered_prompt)
+                prompt_input = rendered_prompts
+            else:
+                return self.create_error_response(
+                    "suffix requires text prompt input for FIM completion rendering",
+                    param="suffix",
+                )
 
         if request.echo and request.prompt_embeds is not None:
             return self.create_error_response("Echo is unsupported with prompt embeds.")
@@ -560,7 +614,7 @@ class OnlineRenderer:
 
         engine_inputs = await self.preprocess_completion(
             request,
-            prompt_input=request.prompt,
+            prompt_input=prompt_input,
             prompt_embeds=request.prompt_embeds,
             skip_mm_cache=skip_mm_cache,
         )
@@ -623,6 +677,11 @@ class OnlineRenderer:
         """Copied from GenerateBaseServing._preprocess_cmpl."""
         renderer = self.renderer
         model_config = self.model_config
+        validate_request_mm_kwargs(
+            mm_processor_kwargs=getattr(request, "mm_processor_kwargs", None),
+            media_io_kwargs=getattr(request, "media_io_kwargs", None),
+            trust_request_mm_kwargs=self.trust_request_mm_kwargs,
+        )
 
         parsed_prompts = [
             (
@@ -659,6 +718,11 @@ class OnlineRenderer:
     ) -> tuple[list[ConversationMessage], list[EngineInput]]:
         """Copied from GenerateBaseServing._preprocess_chat."""
         renderer = self.renderer
+        validate_request_mm_kwargs(
+            mm_processor_kwargs=getattr(request, "mm_processor_kwargs", None),
+            media_io_kwargs=getattr(request, "media_io_kwargs", None),
+            trust_request_mm_kwargs=self.trust_request_mm_kwargs,
+        )
         mm_config = self.model_config.multimodal_config
 
         default_template_kwargs = merge_kwargs(

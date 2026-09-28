@@ -7,6 +7,8 @@ import pytest
 import torch
 import torch.distributed
 
+import vllm.distributed.eplb.eplb_communicator as eplb_comm
+import vllm.utils.gpu_sync_debug as gsd
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.distributed.eplb.eplb_communicator import (
     create_eplb_communicator,
@@ -21,8 +23,32 @@ from vllm.distributed.parallel_state import (
     ensure_model_parallel_initialized,
     get_tp_group,
 )
+from vllm.platforms import current_platform
 
 from .eplb_utils import distributed_run, set_env_vars_and_device
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+def test_gloo_receive_staging_does_not_force_gpu_sync(monkeypatch):
+    """Gloo receives must reach the GPU without an implicit pageable copy."""
+    monkeypatch.setattr(gsd, "_SYNC_CHECK_MODE", "error")
+    monkeypatch.setattr(gsd, "_sync_check_enabled", True)
+    gsd._install_copy_checkers()
+    monkeypatch.setattr(eplb_comm, "is_local_first_rank", lambda: False)
+
+    monkeypatch.setattr(eplb_comm, "P2POp", lambda op, tensor, peer, group: tensor)
+
+    def receive(tensors):
+        for tensor in tensors:
+            tensor.fill_(7)
+        return []
+
+    monkeypatch.setattr(eplb_comm, "batch_isend_irecv", receive)
+    communicator = eplb_comm.TorchDistGlooStagedEplbCommunicator(cpu_group=None)
+    dst = torch.empty(32, device="cuda")
+    communicator.add_recv([dst], src_rank=1, expert_id=0)
+    gsd.with_gpu_sync_check(communicator.execute)()
+    torch.testing.assert_close(dst.cpu(), torch.full((32,), 7.0))
 
 
 def create_expert_indices_with_redundancy(
@@ -31,8 +57,7 @@ def create_expert_indices_with_redundancy(
     total_physical_experts: int,
     redundancy_config: list[int],  # redundancy for each logical expert
 ) -> torch.Tensor:
-    """
-    Create expert indices with redundancy.
+    """Create expert indices with redundancy.
 
     Args:
         num_layers: number of layers
@@ -42,6 +67,7 @@ def create_expert_indices_with_redundancy(
 
     Returns:
         indices: Shape (num_layers, total_physical_experts)
+
     """
     assert sum(redundancy_config) == total_physical_experts
     assert len(redundancy_config) == num_logical_experts
@@ -70,8 +96,7 @@ def create_expert_weights(
     device: torch.device,
     physical_to_logical_mapping: torch.Tensor,
 ) -> list[list[torch.Tensor]]:
-    """
-    Create fake expert weights tensor for testing.
+    """Create fake expert weights tensor for testing.
 
     Use `arange` to generate predictable weights values, based on logical
     expert ID.
@@ -80,6 +105,7 @@ def create_expert_weights(
     Args:
         physical_to_logical_mapping: Shape (num_layers, num_local_experts)
             mapping[layer, physical_pos] = logical_expert_id
+
     """
     expert_weights = []
 
@@ -183,12 +209,14 @@ def verify_redundant_experts_have_same_weights(
     ep_rank: int,
     world_size: int,
     num_local_experts: int,
+    cpu_group,
 ) -> bool:
-    """
-    Verify that all replicas of the same logical expert have the same weights.
-    """
+    """Verify that all replicas of the same logical expert have the same weights."""
     num_layers = len(expert_weights)
     total_physical_experts = world_size * num_local_experts
+    # XPU: gloo does not support XPU tensors, so gather on CPU then move back.
+    # CUDA: gloo supports CUDA tensors directly, keep original device.
+    use_cpu_gather = current_platform.is_xpu()
 
     ok = True
     for layer in range(num_layers):
@@ -196,31 +224,35 @@ def verify_redundant_experts_have_same_weights(
         all_weights: list[torch.Tensor] = []
 
         for weight_idx, hidden_size in enumerate(hidden_sizes):
+            orig_device = expert_weights[layer][weight_idx].device
+
+            if use_cpu_gather:
+                local_weights = expert_weights[layer][weight_idx].cpu()
+                gather_device = "cpu"
+            else:
+                local_weights = expert_weights[layer][weight_idx]
+                gather_device = orig_device
+
             # Create tensor to store all expert weights
             # Shape: [total_physical_experts, hidden_size]
             gathered_weights = torch.zeros(
                 total_physical_experts,
                 hidden_size,
-                device=expert_weights[layer][weight_idx].device,
-                dtype=expert_weights[layer][weight_idx].dtype,
+                device=gather_device,
+                dtype=local_weights.dtype,
             )
-
-            # Use all_gather to collect expert weights from current node
-            # expert_weights[layer][weight_idx] shape:
-            # [num_local_experts, hidden_size]
-            local_weights = expert_weights[layer][
-                weight_idx
-            ]  # [num_local_experts, hidden_size]
 
             # Split tensor along dim 0 into a list for all_gather
             gathered_weights_list = torch.chunk(gathered_weights, world_size, dim=0)
 
             torch.distributed.all_gather(
-                # Output list: each element corresponds to one rank's weights
                 list(gathered_weights_list),
-                local_weights,  # Input: current rank's local weights
+                local_weights,
+                group=cpu_group,
             )
 
+            if use_cpu_gather:
+                gathered_weights = gathered_weights.to(orig_device)
             all_weights.append(gathered_weights)
 
         # Verify that all replicas of the same logical expert have the same
@@ -271,9 +303,23 @@ def verify_redundant_experts_have_same_weights(
     return ok
 
 
-def assert_verification_synced(local_ok: bool, msg: str) -> None:
-    ok_tensor = torch.tensor([1 if local_ok else 0], device="cuda", dtype=torch.int32)
-    torch.distributed.all_reduce(ok_tensor, op=torch.distributed.ReduceOp.MIN)
+def assert_verification_synced(local_ok: bool, msg: str, cpu_group) -> None:
+    if current_platform.is_xpu():
+        # XPU: default group backend (gloo) does not support XPU tensors;
+        # use CPU tensor with cpu_group instead.
+        ok_tensor = torch.tensor(
+            [1 if local_ok else 0], device="cpu", dtype=torch.int32
+        )
+        torch.distributed.all_reduce(
+            ok_tensor, op=torch.distributed.ReduceOp.MIN, group=cpu_group
+        )
+    else:
+        # CUDA: nccl (default group) supports device tensors directly.
+        device = torch.accelerator.current_accelerator()
+        ok_tensor = torch.tensor(
+            [1 if local_ok else 0], device=device, dtype=torch.int32
+        )
+        torch.distributed.all_reduce(ok_tensor, op=torch.distributed.ReduceOp.MIN)
     assert bool(ok_tensor.item()), msg
 
 
@@ -313,8 +359,10 @@ def _test_async_transfer_layer_without_mtp_worker(
 
         ep_group_coordinator = get_tp_group()
         ep_group = ep_group_coordinator.device_group
+        cpu_group = ep_group_coordinator.cpu_group
         ep_rank = torch.distributed.get_rank()
-        device = torch.device(f"cuda:{ep_rank}")
+        accelerator_type = torch.accelerator.current_accelerator().type
+        device = torch.device(f"{accelerator_type}:{ep_rank}")
 
         total_physical_experts = world_size * num_local_experts
         hidden_sizes = [16, 32]
@@ -353,7 +401,7 @@ def _test_async_transfer_layer_without_mtp_worker(
         new_indices_cpu = new_indices.cpu()
 
         expert_buffer = [torch.empty_like(w) for w in expert_weights[0]]
-        cuda_stream = torch.cuda.Stream(device=device)
+        stream = torch.Stream(device=device)
 
         communicator = create_eplb_communicator_or_raise(
             group_coordinator=ep_group_coordinator,
@@ -361,7 +409,7 @@ def _test_async_transfer_layer_without_mtp_worker(
             expert_weights=expert_weights,
             expert_buffer=expert_buffer,
         )
-        communicator.set_stream(cuda_stream)
+        communicator.set_stream(stream)
 
         for layer_idx in range(num_layers):
             transfer_metadata = transfer_layer(
@@ -371,10 +419,10 @@ def _test_async_transfer_layer_without_mtp_worker(
                 expert_weights_buffer=expert_buffer,
                 ep_group=ep_group,
                 communicator=communicator,
-                cuda_stream=cuda_stream,
+                stream=stream,
                 layer_idx=layer_idx,
             )
-            cuda_stream.synchronize()
+            stream.synchronize()
             move_from_buffer(
                 expert_weights=expert_weights[layer_idx],
                 expert_weights_buffers=expert_buffer,
@@ -398,6 +446,7 @@ def _test_async_transfer_layer_without_mtp_worker(
             ep_rank,
             world_size,
             num_local_experts,
+            cpu_group=cpu_group,
         )
         and local_ok
     )
@@ -405,6 +454,7 @@ def _test_async_transfer_layer_without_mtp_worker(
         local_ok,
         "Async transfer verification failed on at least one rank. "
         "See logs for details.",
+        cpu_group=cpu_group,
     )
 
 
@@ -429,9 +479,11 @@ def _test_rearrange_expert_weights_with_redundancy(
         )
 
         ep_group_coordinator = get_tp_group()
-        ep_group = ep_group_coordinator.cpu_group
+        ep_group = ep_group_coordinator.device_group
+        cpu_group = ep_group_coordinator.cpu_group
         ep_rank = torch.distributed.get_rank()
-        device = torch.device(f"cuda:{ep_rank}")
+        accelerator_type = torch.accelerator.current_accelerator().type
+        device = torch.device(f"{accelerator_type}:{ep_rank}")
 
         # Test parameters
         total_physical_experts = world_size * num_local_experts
@@ -500,12 +552,14 @@ def _test_rearrange_expert_weights_with_redundancy(
             ep_rank,
             world_size,
             num_local_experts,
+            cpu_group=cpu_group,
         )
         and local_ok
     )
     assert_verification_synced(
         local_ok,
         "Rearrange verification failed on at least one rank. See logs for details.",
+        cpu_group=cpu_group,
     )
 
 
@@ -533,7 +587,7 @@ def _test_rearrange_expert_weights_with_redundancy(
     ],
 )
 @pytest.mark.parametrize(
-    "eplb_communicator", ["torch_nccl", "torch_gloo", "pynccl", "nixl"]
+    "eplb_communicator", ["torch_nccl", "torch_gloo", "torch_xccl", "pynccl", "nixl"]
 )
 def test_rearrange_expert_weights_with_redundancy(
     world_size,
@@ -543,9 +597,14 @@ def test_rearrange_expert_weights_with_redundancy(
     eplb_communicator,
 ):
     """Test the functionality of rearranging expert weights with redundancy."""
-
     if eplb_communicator == "nixl" and not has_nixl():
         pytest.skip("NIXL is not available")
+    if eplb_communicator == "nixl" and current_platform.is_xpu():
+        pytest.skip("NIXL does not support XPU")
+    if eplb_communicator in ("torch_nccl", "pynccl") and not torch.cuda.is_available():
+        pytest.skip(f"{eplb_communicator} requires CUDA")
+    if eplb_communicator == "torch_xccl" and not current_platform.is_xpu():
+        pytest.skip("torch_xccl requires XPU")
     if torch.accelerator.device_count() < world_size:
         pytest.skip(f"Need at least {world_size} GPUs to run the test")
     distributed_run(
@@ -570,9 +629,11 @@ def _test_rearrange_expert_weights_no_change(env, world_size) -> None:
         )
 
         ep_group_coordinator = get_tp_group()
-        ep_group = ep_group_coordinator.cpu_group
+        ep_group = ep_group_coordinator.device_group
+        cpu_group = ep_group_coordinator.cpu_group
         ep_rank = torch.distributed.get_rank()
-        device = torch.device(f"cuda:{ep_rank}")
+        accelerator_type = torch.accelerator.current_accelerator().type
+        device = torch.device(f"{accelerator_type}:{ep_rank}")
 
         num_layers = 2
         num_local_experts = 2
@@ -601,9 +662,10 @@ def _test_rearrange_expert_weights_no_change(env, world_size) -> None:
             original_weights.append(layer_copy)
 
         expert_buffer = [torch.empty_like(w) for w in expert_weights[0]]
+        default_backend = "torch_xccl" if current_platform.is_xpu() else "torch_nccl"
         communicator = create_eplb_communicator_or_raise(
             group_coordinator=ep_group_coordinator,
-            backend="torch_nccl",
+            backend=default_backend,
             expert_weights=expert_weights,
             expert_buffer=expert_buffer,
         )
@@ -635,6 +697,7 @@ def _test_rearrange_expert_weights_no_change(env, world_size) -> None:
     assert_verification_synced(
         local_ok,
         "No-change EPLB verification failed on at least one rank.",
+        cpu_group=cpu_group,
     )
 
 
@@ -644,7 +707,7 @@ def _test_rearrange_expert_weights_no_change(env, world_size) -> None:
         (2, 2, 2, 3),
     ],
 )
-@pytest.mark.parametrize("eplb_communicator", ["torch_gloo", "nixl"])
+@pytest.mark.parametrize("eplb_communicator", ["torch_gloo", "torch_xccl", "nixl"])
 def test_async_transfer_layer_without_mtp(
     world_size: int,
     num_layers: int,
@@ -653,9 +716,12 @@ def test_async_transfer_layer_without_mtp(
     eplb_communicator: str,
 ):
     """Exercise async EPLB transfer path without MTP/spec decode."""
-
     if eplb_communicator == "nixl" and not has_nixl():
         pytest.skip("NIXL is not available")
+    if eplb_communicator == "nixl" and current_platform.is_xpu():
+        pytest.skip("NIXL does not support XPU")
+    if eplb_communicator == "torch_xccl" and not current_platform.is_xpu():
+        pytest.skip("torch_xccl requires XPU")
     if torch.accelerator.device_count() < world_size:
         pytest.skip(f"Need at least {world_size} GPUs to run the test")
 
@@ -671,11 +737,9 @@ def test_async_transfer_layer_without_mtp(
 
 @pytest.mark.parametrize("world_size", [2, 4])
 def test_rearrange_expert_weights_no_change(world_size):
-    """
-    Test that when the indices do not change, the weights should remain
+    """Test that when the indices do not change, the weights should remain
     unchanged.
     """
-
     if torch.accelerator.device_count() < world_size:
         pytest.skip(f"Need at least {world_size} GPUs to run the test")
     distributed_run(
@@ -696,9 +760,11 @@ def _test_rearrange_expert_weights_profile_mode(env, world_size) -> None:
         )
 
         ep_group_coordinator = get_tp_group()
-        ep_group = ep_group_coordinator.cpu_group
+        ep_group = ep_group_coordinator.device_group
+        cpu_group = ep_group_coordinator.cpu_group
         ep_rank = torch.distributed.get_rank()
-        device = torch.device(f"cuda:{ep_rank}")
+        accelerator_type = torch.accelerator.current_accelerator().type
+        device = torch.device(f"{accelerator_type}:{ep_rank}")
 
         num_layers = 1
         num_local_experts = 2
@@ -734,9 +800,10 @@ def _test_rearrange_expert_weights_profile_mode(env, world_size) -> None:
             original_weights.append(layer_copy)
 
         expert_buffer = [torch.empty_like(w) for w in expert_weights[0]]
+        default_backend = "torch_xccl" if current_platform.is_xpu() else "torch_nccl"
         communicator = create_eplb_communicator_or_raise(
             group_coordinator=ep_group_coordinator,
-            backend="torch_nccl",
+            backend=default_backend,
             expert_weights=expert_weights,
             expert_buffer=expert_buffer,
         )
@@ -769,13 +836,13 @@ def _test_rearrange_expert_weights_profile_mode(env, world_size) -> None:
     assert_verification_synced(
         local_ok,
         "Profile-mode EPLB verification failed on at least one rank.",
+        cpu_group=cpu_group,
     )
 
 
 @pytest.mark.parametrize("world_size", [2, 4])
 def test_rearrange_expert_weights_profile_mode(world_size):
     """Test profile mode (should not copy actual weights)"""
-
     if torch.accelerator.device_count() < world_size:
         pytest.skip(f"Need at least {world_size} GPUs to run the test")
     distributed_run(

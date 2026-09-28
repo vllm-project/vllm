@@ -12,9 +12,13 @@ from fastapi import Request
 
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.chat_utils import AsyncMultiModalItemTracker
-from vllm.entrypoints.generate.base.protocol import RequestResponseMetadata
+from vllm.entrypoints.generate.base.protocol import (
+    PerRequestMetrics,
+    RequestResponseMetadata,
+)
 from vllm.entrypoints.generate.base.serving import (
     GenerateBaseServing,
+    build_spec_decoding_metrics,
     clamp_prompt_logprobs,
 )
 from vllm.entrypoints.openai.chat_completion.protocol import (
@@ -44,7 +48,10 @@ from vllm.sampling_params import RequestOutputKind, SamplingParams
 from vllm.utils.collection_utils import as_list
 from vllm.utils.serial_utils import numpy2base64
 
-from .mm_features import mm_kwargs_from_features
+from .mm_features import (
+    mm_kwargs_from_features,
+    placeholder_ranges_from_engine_input,
+)
 from .protocol import (
     GenerateRequest,
     GenerateResponse,
@@ -131,6 +138,16 @@ class ServingTokens(GenerateBaseServing):
                 f"sampling_params.n must be at most the server's max_num_seqs "
                 f"({max_num_seqs}), got {sampling_params.n}."
             )
+        if self.force_no_detokenize and sampling_params.stop:
+            # SamplingParams rejects stop with detokenize=False at request
+            # validation, but this server forces detokenize=False afterwards,
+            # so the combination must be rejected here or stop strings are
+            # silently never applied.
+            return self.create_error_response(
+                "stop strings are not supported on a --tokens-only server "
+                "because detokenization is disabled. Check stop strings on "
+                "the coordinator, or use stop_token_ids."
+            )
         try:
             msgspec.msgpack.encode(
                 (
@@ -194,6 +211,14 @@ class ServingTokens(GenerateBaseServing):
                 prompt_embeds=None,
                 skip_mm_cache=True,
             )
+
+        # Offsets are relative to the decoder prompt, so they are not
+        # meaningful for encoder-decoder models.
+        request._response_mm_placeholders = (
+            placeholder_ranges_from_engine_input(engine_input)
+            if request.return_token_ids and not self.model_config.is_encoder_decoder
+            else None
+        )
 
         # Schedule the request and get the result generator.
         result_generator: AsyncGenerator[RequestOutput, None] | None = None
@@ -352,6 +377,11 @@ class ServingTokens(GenerateBaseServing):
 
         request_metadata.final_usage_info = usage
 
+        per_request_metrics = None
+        if request.sampling_params.n == 1:
+            spec_stats = build_spec_decoding_metrics(final_res)
+            if spec_stats is not None:
+                per_request_metrics = PerRequestMetrics(speculative_decoding=spec_stats)
         response = GenerateResponse(
             request_id=request_id,
             created=created_time,
@@ -359,6 +389,11 @@ class ServingTokens(GenerateBaseServing):
             choices=choices,
             usage=usage,
             prompt_logprobs=clamp_prompt_logprobs(final_res.prompt_logprobs),
+            prompt_token_ids=(
+                final_res.prompt_token_ids if request.return_token_ids else None
+            ),
+            mm_placeholders=request._response_mm_placeholders,
+            metrics=per_request_metrics,
             kv_transfer_params=final_res.kv_transfer_params,
             ec_transfer_params=final_res.ec_transfer_params,
         )
@@ -395,8 +430,10 @@ class ServingTokens(GenerateBaseServing):
         num_prompt_tokens = 0
         num_generated_tokens: list[int] = []
         first_iteration = True
+        prompt_token_ids: list[int] | None = None
         num_cached_tokens = None
         sampling_params: SamplingParams = request.sampling_params
+        last_res: RequestOutput | None = None
 
         include_usage, include_continuous_usage = should_include_usage(
             request.stream_options, False
@@ -404,9 +441,12 @@ class ServingTokens(GenerateBaseServing):
 
         try:
             async for res in result_generator:
+                last_res = res
                 if first_iteration:
                     if res.prompt_token_ids is not None:
                         num_prompt_tokens = len(res.prompt_token_ids)
+                        if request.return_token_ids:
+                            prompt_token_ids = res.prompt_token_ids
                     if res.encoder_prompt_token_ids is not None:
                         num_prompt_tokens += len(res.encoder_prompt_token_ids)
                     num_cached_tokens = res.num_cached_tokens
@@ -421,7 +461,11 @@ class ServingTokens(GenerateBaseServing):
                     finish_reason = output.finish_reason
                     self._raise_if_error(finish_reason, request_id)
 
-                    if not delta_token_ids:
+                    # Still emit a terminal empty chunk while prompt metadata
+                    # is pending, so zero-token completions deliver it.
+                    if not delta_token_ids and (
+                        finish_reason is None or prompt_token_ids is None
+                    ):
                         continue
 
                     if sampling_params.logprobs is not None:
@@ -453,6 +497,10 @@ class ServingTokens(GenerateBaseServing):
                             )
                         ],
                     )
+                    if prompt_token_ids is not None:
+                        chunk.prompt_token_ids = prompt_token_ids
+                        chunk.mm_placeholders = request._response_mm_placeholders
+                        prompt_token_ids = None
                     if include_continuous_usage:
                         chunk.usage = UsageInfo(
                             prompt_tokens=num_prompt_tokens,
@@ -460,7 +508,13 @@ class ServingTokens(GenerateBaseServing):
                             total_tokens=(num_prompt_tokens + num_generated_tokens[i]),
                         )
 
-                    yield f"data: {chunk.model_dump_json()}\n\n"
+                    # Omit fields that are absent from token-bearing chunks.
+                    exclude = {
+                        name
+                        for name in ("prompt_token_ids", "mm_placeholders", "metrics")
+                        if getattr(chunk, name) is None
+                    }
+                    yield f"data: {chunk.model_dump_json(exclude=exclude)}\n\n"
 
             total_completion_tokens = sum(num_generated_tokens)
             final_usage_info = UsageInfo(
@@ -475,10 +529,18 @@ class ServingTokens(GenerateBaseServing):
                 )
 
             if include_usage:
+                per_request_metrics = None
+                if sampling_params.n == 1:
+                    spec_stats = build_spec_decoding_metrics(last_res)
+                    if spec_stats is not None:
+                        per_request_metrics = PerRequestMetrics(
+                            speculative_decoding=spec_stats
+                        )
                 final_chunk = GenerateStreamResponse(
                     request_id=request_id,
                     choices=[],
                     usage=final_usage_info,
+                    metrics=per_request_metrics,
                 )
                 yield f"data: {final_chunk.model_dump_json(exclude_none=True)}\n\n"
 
@@ -528,7 +590,10 @@ class ServingTokens(GenerateBaseServing):
                                 step_top_logprobs.items()
                             )
                             if num_output_top_logprobs is not None
-                            and i < max(num_output_top_logprobs, 1)
+                            and (
+                                num_output_top_logprobs == -1
+                                or i < max(num_output_top_logprobs, 1)
+                            )
                         ],
                     )
                 )
