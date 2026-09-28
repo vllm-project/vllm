@@ -99,6 +99,10 @@ def _discover_pairings() -> list[_PairingInfo]:
             # terminal matching; combined-parser replay coverage lives in
             # test_inkling.py.
             continue
+        if cfg.name == "granite":
+            # Granite has a JSON-array tool body with no TOOL_END terminal;
+            # its replay coverage lives in test_granite.py.
+            continue
 
         parser_cls = type(
             f"_Delegating{engine_cls.__name__}",
