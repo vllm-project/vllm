@@ -11,7 +11,7 @@ import torch.nn.functional as F
 from transformers import BatchFeature
 
 from vllm.config import VllmConfig
-from vllm.config.multimodal import BaseDummyOptions
+from vllm.config.multimodal import MultiModalDummyOptions
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.inputs import MultiModalDataDict
 from vllm.model_executor.layers.activation import get_act_fn
@@ -63,15 +63,14 @@ from .vision import is_vit_use_data_parallel, run_dp_sharded_vision_model
 
 
 class Step3VLImagePixelInputs(TensorSchema):
-    """
-    Dimensions:
-        - bn: Batch size * number of images
-        - c: Number of channels (3)
-        - h: Height
-        - w: Width
-        - bnp: Batch size * number of images * number of patches
-        - hp: Height of patch
-        - wp: Width of patch
+    """Dimensions:
+    - bn: Batch size * number of images
+    - c: Number of channels (3)
+    - h: Height
+    - w: Width
+    - bnp: Batch size * number of images * number of patches
+    - hp: Height of patch
+    - wp: Width of patch
     """
 
     type: Literal["pixel_values"]
@@ -81,11 +80,10 @@ class Step3VLImagePixelInputs(TensorSchema):
 
 
 class Step3VLImageEmbeddingInputs(TensorSchema):
-    """
-    Dimensions:
-        - bn: Batch size * number of images
-        - f: Image feature size
-        - h: Hidden size (must match the hidden size of language model backbone)
+    """Dimensions:
+    - bn: Batch size * number of images
+    - f: Image feature size
+    - h: Hidden size (must match the hidden size of language model backbone)
     """
 
     type: Literal["image_embeds"] = "image_embeds"
@@ -141,19 +139,16 @@ class Step3VLDummyInputsBuilder(BaseDummyInputsBuilder[Step3VLProcessingInfo]):
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions],
+        mm_options: MultiModalDummyOptions,
     ) -> MultiModalDataDict:
         target_width, target_height = self.info.get_image_size_with_most_features()
-        num_images = mm_counts.get("image", 0)
-
-        image_overrides = mm_options.get("image")
 
         return {
             "image": self._get_dummy_images(
                 width=target_width,
                 height=target_height,
-                num_images=num_images,
-                overrides=image_overrides,
+                num_images=mm_counts.get("image", 0),
+                overrides=mm_options.get("image"),
             )
         }
 
@@ -297,7 +292,7 @@ class Step3VisionEmbeddings(nn.Module):
 
 
 class Step3VisionAttention(nn.Module):
-    """Multi-headed attention from 'Attention Is All You Need' paper"""
+    """Multi-headed attention from 'Attention Is All You Need' paper."""
 
     def __init__(
         self,
@@ -350,7 +345,7 @@ class Step3VisionAttention(nn.Module):
         self,
         hidden_states: torch.Tensor,
     ):
-        """Input shape: Batch x Time x Channel"""
+        """Input shape: Batch x Time x Channel."""
         bsz, tgt_len, _ = hidden_states.size()
 
         # get query proj

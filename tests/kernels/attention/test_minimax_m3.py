@@ -19,7 +19,10 @@ from vllm.models.minimax_m3.common.ops.sparse_attn import (
     minimax_m3_sparse_attn,
     minimax_m3_sparse_attn_decode,
 )
-from vllm.models.minimax_m3.common.sparse_attention import MiniMaxM3SparseTritonImpl
+from vllm.models.minimax_m3.common.sparse_attention import (
+    MiniMaxM3SparseTritonImpl,
+    minimax_m3_rebase_slots_to_page16,
+)
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_random_seed
 from vllm.v1.attention.backends.utils import record_kv_cache_layout
@@ -28,6 +31,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheLayout,
     MLAAttentionSpec,
     compute_layer_kv_cache_shape_bytes,
+    get_kv_quant_mode,
 )
 
 if not (current_platform.is_cuda() or current_platform.is_rocm()):
@@ -1025,17 +1029,20 @@ def test_decode_index_topk_correctness(
         "expected",
     ),
     [
-        (0, 24, 1, 16, True, (2, False, False)),
-        (1, 1, 1, 16, True, (16, True, True)),
-        (512, 4, 1, 16, True, (16, True, True)),
-        (513, 24, 4, 16, True, (16, True, True)),
-        (2760, 5, 2, 16, True, (16, True, True)),
-        (8192, 64, 4, 16, True, (16, True, True)),
-        (8193, 4, 1, 16, True, (16, False, False)),
-        (8193, 16, 1, 16, True, (4, False, False)),
-        (65534, 64, 1, 16, True, (1, False, False)),
-        (513, 16, 1, 13, True, (4, False, False)),
-        (513, 16, 4, 16, False, (1, False, False)),
+        (0, 24, 1, 16, True, (2, 512, 8, 2, False, False)),
+        (1, 1, 1, 16, True, (1, 128, 2, 1, True, True)),
+        (74, 4, 1, 16, True, (1, 128, 2, 1, True, True)),
+        (128, 4, 1, 16, True, (1, 128, 2, 1, True, True)),
+        (129, 4, 1, 16, True, (16, 512, 4, 2, True, True)),
+        (512, 4, 1, 16, True, (16, 512, 4, 2, True, True)),
+        (513, 24, 4, 16, True, (16, 512, 4, 2, True, True)),
+        (2760, 5, 2, 16, True, (16, 512, 4, 2, True, True)),
+        (8192, 64, 4, 16, True, (16, 512, 4, 2, True, True)),
+        (8193, 4, 1, 16, True, (16, 512, 8, 2, False, False)),
+        (8193, 16, 1, 16, True, (4, 512, 8, 2, False, False)),
+        (65534, 64, 1, 16, True, (1, 512, 8, 2, False, False)),
+        (513, 16, 1, 13, True, (4, 512, 8, 2, False, False)),
+        (513, 16, 4, 16, False, (1, 512, 8, 2, False, False)),
     ],
 )
 def test_amd_decode_topk_launch_policy(
@@ -1044,9 +1051,9 @@ def test_amd_decode_topk_launch_policy(
     num_idx_heads: int,
     topk: int,
     is_gfx950: bool,
-    expected: tuple[int, bool, bool],
+    expected: tuple[int, int, int, int, bool, bool],
 ):
-    """All supported head and query layouts use adaptive selection."""
+    """The short-context specialization has strict dispatch boundaries."""
     from vllm.models.minimax_m3.amd.ops.index_topk import (
         _decode_topk_launch_policy,
     )
@@ -1073,19 +1080,23 @@ def test_amd_decode_topk_launch_policy(
         "single_tile_guaranteed",
         "adaptive_final_merge",
         "max_blocks",
+        "block_size_k",
+        "num_warps",
+        "num_stages",
         "topk",
         "num_idx_heads",
     ),
     [
-        (1, False, False, 65534, 16, 1),
-        (2, False, False, 8193, 16, 1),
-        (4, False, False, 8193, 16, 1),
-        (8, False, False, 8193, 16, 1),
-        (16, False, False, 8193, 16, 1),
-        (16, False, False, 65534, 16, 1),
-        (2, True, False, 513, 13, 1),
-        (4, False, True, 8192, 16, 2),
-        (16, True, True, 8192, 16, 4),
+        (1, False, False, 65534, 512, 8, 2, 16, 1),
+        (2, False, False, 8193, 512, 8, 2, 16, 1),
+        (4, False, False, 8193, 512, 8, 2, 16, 1),
+        (8, False, False, 8193, 512, 8, 2, 16, 1),
+        (16, False, False, 8193, 512, 8, 2, 16, 1),
+        (16, False, False, 65534, 512, 8, 2, 16, 1),
+        (2, True, False, 513, 512, 8, 2, 13, 1),
+        (4, False, True, 8192, 512, 4, 2, 16, 2),
+        (16, True, True, 8192, 512, 4, 2, 16, 4),
+        (1, True, True, 74, 128, 2, 1, 16, 1),
     ],
 )
 def test_amd_decode_fused_topk_total_order_and_replay(
@@ -1093,10 +1104,13 @@ def test_amd_decode_fused_topk_total_order_and_replay(
     single_tile_guaranteed: bool,
     adaptive_final_merge: bool,
     max_blocks: int,
+    block_size_k: int,
+    num_warps: int,
+    num_stages: int,
     topk: int,
     num_idx_heads: int,
 ):
-    """Atomic multi-chunk selection is ordered and resets graph state."""
+    """Selector specializations preserve ordering and graph state."""
     from vllm.models.minimax_m3.amd.ops.index_topk import (
         SPARSE_BLOCK_SIZE,
         _decode_topk_fused_kernel,
@@ -1104,18 +1118,25 @@ def test_amd_decode_fused_topk_total_order_and_replay(
 
     set_random_seed(0)
     block_size_t = 1 << (topk - 1).bit_length()
+    block_counts = tuple(
+        count
+        for count in (
+            15,
+            16,
+            17,
+            block_size_k // 2 - 1,
+            block_size_k // 2,
+            block_size_k // 2 + 1,
+            block_size_k - 1,
+            block_size_k,
+            block_size_k + 1,
+        )
+        if count <= max_blocks
+    )
     long_seq_lens_list = [
         0,
         1,
-        15 * SPARSE_BLOCK_SIZE,
-        16 * SPARSE_BLOCK_SIZE,
-        17 * SPARSE_BLOCK_SIZE,
-        255 * SPARSE_BLOCK_SIZE,
-        256 * SPARSE_BLOCK_SIZE,
-        257 * SPARSE_BLOCK_SIZE,
-        511 * SPARSE_BLOCK_SIZE,
-        512 * SPARSE_BLOCK_SIZE,
-        513 * SPARSE_BLOCK_SIZE,
+        *(blocks * SPARSE_BLOCK_SIZE for blocks in block_counts),
         max_blocks * SPARSE_BLOCK_SIZE,
     ]
     short_seq_lens_list = [0, 1, 127, 128, 129, 0, 1, 128, 129, 0, 1, 129]
@@ -1126,12 +1147,13 @@ def test_amd_decode_fused_topk_total_order_and_replay(
         boundary_limit = 4
     if boundary_limit:
         boundary_blocks = [
-            (active_chunks - 1) * 512 + 1
+            (active_chunks - 1) * block_size_k + 1
             for active_chunks in range(3, boundary_limit + 1)
         ]
-        assert [(num_blocks + 511) // 512 for num_blocks in boundary_blocks] == list(
-            range(3, boundary_limit + 1)
-        )
+        assert [
+            (num_blocks + block_size_k - 1) // block_size_k
+            for num_blocks in boundary_blocks
+        ] == list(range(3, boundary_limit + 1))
         long_seq_lens_list.extend(
             num_blocks * SPARSE_BLOCK_SIZE for num_blocks in boundary_blocks
         )
@@ -1139,6 +1161,8 @@ def test_amd_decode_fused_topk_total_order_and_replay(
             num_blocks * SPARSE_BLOCK_SIZE for num_blocks in reversed(boundary_blocks)
         )
     batch = len(long_seq_lens_list)
+    repeats = (batch + len(short_seq_lens_list) - 1) // len(short_seq_lens_list)
+    short_seq_lens_list = (short_seq_lens_list * repeats)[:batch]
     score = torch.randn((num_idx_heads, batch, max_blocks), device="cuda")
     score[:, :, 0] = float("nan")
     score[:, :, 1] = float("inf")
@@ -1147,8 +1171,9 @@ def test_amd_decode_fused_topk_total_order_and_replay(
     score[:, :, 4] = -0.0
     score[:, :, 5] = 7.0
     score[:, :, 6] = -1e30
-    score[:, :, 256] = 7.0
-    score[:, :, 512] = 7.0
+    for index in (block_size_k // 2, block_size_k):
+        if index < max_blocks:
+            score[:, :, index] = 7.0
 
     seq_lens = torch.empty(batch, device="cuda", dtype=torch.int32)
     partial = torch.full(
@@ -1198,13 +1223,13 @@ def test_amd_decode_fused_topk_total_order_and_replay(
             pages_per_sparse_block=8,
             block_page_stride=8,
             NUM_TOPK_CHUNKS=num_topk_chunks,
-            BLOCK_SIZE_K=512,
+            BLOCK_SIZE_K=block_size_k,
             BLOCK_SIZE_T=block_size_t,
             EMIT_SPARSE_TABLE=False,
             SINGLE_TILE_GUARANTEED=single_tile_guaranteed,
             ADAPTIVE_FINAL_MERGE=adaptive_final_merge,
-            num_warps=4 if adaptive_final_merge else 8,
-            num_stages=2,
+            num_warps=num_warps,
+            num_stages=num_stages,
         )
 
     score_cpu = score.cpu()
@@ -1251,6 +1276,7 @@ def test_amd_decode_fused_topk_total_order_and_replay(
         (16, False, False, 8193),
         (4, False, True, 8192),
         (16, True, True, 8192),
+        (1, True, True, 74),
     ):
         graph = torch.cuda.CUDAGraph()
         torch.accelerator.synchronize()
@@ -1650,8 +1676,9 @@ def test_main_cache_layout_contract():
         assert set(order) == set(range(len(order)))
 
 
-def test_aiter_sparse_pa_layout_contract(monkeypatch):
-    """The shuffle-only AITER path retains separately contiguous K/V storage."""
+@pytest.mark.parametrize("layout", [KVCacheLayout.LHBNC, KVCacheLayout.LBHNC])
+def test_aiter_sparse_pa_layout_contract(monkeypatch, layout):
+    """Build the exact separate and packed page-16 views used by the model."""
     import vllm.models.minimax_m3.common.sparse_attention as sparse_attn_mod
 
     monkeypatch.setattr(sparse_attn_mod.rocm_aiter_ops, "is_enabled", lambda: True)
@@ -1663,21 +1690,43 @@ def test_aiter_sparse_pa_layout_contract(monkeypatch):
 
     backend = sparse_attn_mod.MiniMaxM3SparseBackend
     assert KVCacheLayout.LHBNC in backend.supported_kv_cache_layouts()
+    assert KVCacheLayout.LBHNC in backend.supported_kv_cache_layouts()
 
-    nb, h = 7, 1
+    nb, h = 3, 1
+    cache_dtype = current_platform.fp8_dtype()
     spec = FullAttentionSpec(
         block_size=BLOCK_SIZE,
         num_kv_heads=h,
         head_size=HEAD_DIM,
-        dtype=DTYPE,
+        dtype=cache_dtype,
+        kv_quant_mode=get_kv_quant_mode("fp8"),
         num_head_slots=2,
-        state_content_bytes=h * HEAD_DIM * DTYPE.itemsize,
+        state_content_bytes=h * HEAD_DIM * cache_dtype.itemsize,
     )
     raw = torch.zeros(nb * spec.page_size_bytes, dtype=torch.int8)
-    view = dense_kv_cache_views(raw, spec, nb, 1, KVCacheLayout.LHBNC)[0]
-    key_cache, value_cache = view.unbind(1)
-    assert key_cache.is_contiguous()
-    assert value_cache.is_contiguous()
+    kv_cache = dense_kv_cache_views(raw, spec, nb, 1, layout)[0].view(cache_dtype)
+    key_cache, value_cache = kv_cache.unbind(1)
+    x = 16 // cache_dtype.itemsize
+    pages_per_side = BLOCK_SIZE // 16
+    if key_cache.is_contiguous() and value_cache.is_contiguous():
+        k_src, v_src = key_cache, value_cache
+        block_pages, v_page_offset = pages_per_side, 0
+    else:
+        assert kv_cache.is_contiguous()
+        k_src = v_src = kv_cache
+        block_pages, v_page_offset = 2 * pages_per_side, pages_per_side
+
+    num_phys16 = nb * block_pages
+    k_view = k_src.view(num_phys16, h, HEAD_DIM // x, 16, x)
+    v_view = v_src.view(num_phys16, h, 16 // x, HEAD_DIM, x)[v_page_offset:]
+    assert k_view.is_contiguous()
+    assert v_view.is_contiguous()
+    if layout is KVCacheLayout.LHBNC:
+        assert k_view.shape == (24, 1, 8, 16, 16)
+        assert v_view.shape == (24, 1, 1, 128, 16)
+    else:
+        assert k_view.shape == (48, 1, 8, 16, 16)
+        assert v_view.shape == (40, 1, 1, 128, 16)
 
 
 def test_aiter_sparse_pa_rejects_multiple_kv_heads(monkeypatch):
@@ -1745,6 +1794,330 @@ def test_aiter_indexer_requires_the_aiter_attend(monkeypatch):
     )
     reason = indexer_aiter_mod.aiter_indexer_unsupported_reason(**kwargs)
     assert reason is None or "AITER sparse PA attend" not in reason
+
+
+def test_aiter_consolidated_qknorm_enabled(monkeypatch):
+    from vllm._aiter_ops import rocm_aiter_ops
+
+    monkeypatch.setattr("vllm._aiter_ops.is_aiter_found_and_supported", lambda: True)
+    monkeypatch.setattr(rocm_aiter_ops, "_AITER_ENABLED", True)
+
+    scale = torch.tensor([0.25])
+    assert rocm_aiter_ops.fused_qknorm_idxrqknorm_enabled("auto")
+    assert rocm_aiter_ops.fused_qknorm_idxrqknorm_enabled("fp8", scale, scale)
+    assert rocm_aiter_ops.fused_qknorm_idxrqknorm_enabled("fp8_e4m3", scale, scale)
+    assert not rocm_aiter_ops.fused_qknorm_idxrqknorm_enabled("fp8")
+    assert not rocm_aiter_ops.fused_qknorm_idxrqknorm_enabled("fp8", scale, None)
+    assert not rocm_aiter_ops.fused_qknorm_idxrqknorm_enabled("fp8_e5m2", scale, scale)
+
+    monkeypatch.setattr(rocm_aiter_ops, "_AITER_ENABLED", False)
+    assert not rocm_aiter_ops.fused_qknorm_idxrqknorm_enabled("auto")
+
+    monkeypatch.setattr(rocm_aiter_ops, "_AITER_ENABLED", True)
+    monkeypatch.setattr("vllm._aiter_ops.is_aiter_found_and_supported", lambda: False)
+    assert not rocm_aiter_ops.fused_qknorm_idxrqknorm_enabled("auto")
+
+
+def _fake_aiter_qknorm_args(kv_cache_dtype: str = "auto") -> dict:
+    tensor = torch.empty(1)
+    return {
+        "qkv": tensor,
+        "q_norm_weight": tensor,
+        "k_norm_weight": tensor,
+        "cos_sin_cache": tensor,
+        "positions": tensor,
+        "num_heads": 16,
+        "num_kv_heads": 1,
+        "rotary_dim": 64,
+        "eps": 1e-6,
+        "slot_mapping": tensor,
+        "kv_cache_k": tensor,
+        "kv_cache_v": tensor,
+        "q_out": tensor,
+        "kv_cache_dtype": kv_cache_dtype,
+    }
+
+
+def _install_fake_aiter_qknorm(monkeypatch: pytest.MonkeyPatch) -> list[dict]:
+    """Stub ``aiter.fused_qknorm_idxrqknorm`` so mapping tests run without AITER."""
+    import sys
+    import types
+    from typing import Any
+
+    calls: list[dict] = []
+
+    def fake_op(*args, **kwargs):
+        calls.append(kwargs)
+
+    existing = sys.modules.get("aiter")
+    if existing is not None:
+        monkeypatch.setattr(existing, "fused_qknorm_idxrqknorm", fake_op, raising=False)
+    else:
+        fake_mod: Any = types.ModuleType("aiter")
+        fake_mod.fused_qknorm_idxrqknorm = fake_op
+        monkeypatch.setitem(sys.modules, "aiter", fake_mod)
+    return calls
+
+
+def test_aiter_consolidated_qknorm_packed_shuffle_unequal_spans(monkeypatch):
+    from vllm._aiter_ops import rocm_aiter_ops
+
+    calls = _install_fake_aiter_qknorm(monkeypatch)
+    call_args = _fake_aiter_qknorm_args()
+    call_args["kv_cache_k"] = torch.empty(2, 1)
+    call_args["kv_cache_v"] = torch.empty(1, 1)
+
+    rocm_aiter_ops.fused_qknorm_idxrqknorm(**call_args)
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize(
+    ("kv_cache_dtype", "aiter_dtype", "passes_scales"),
+    [
+        ("auto", "auto", False),
+        ("fp8", "fp8_e4m3_static", True),
+        ("fp8_e4m3", "fp8_e4m3_static", True),
+    ],
+)
+def test_aiter_consolidated_qknorm_dtype_and_layout_mapping(
+    monkeypatch, kv_cache_dtype, aiter_dtype, passes_scales
+):
+    from vllm._aiter_ops import rocm_aiter_ops
+
+    calls = _install_fake_aiter_qknorm(monkeypatch)
+    call_args = _fake_aiter_qknorm_args(kv_cache_dtype)
+    k_scale = torch.tensor([0.25])
+    v_scale = torch.tensor([0.5])
+    call_args.update(k_scale=k_scale, v_scale=v_scale)
+
+    rocm_aiter_ops.fused_qknorm_idxrqknorm(**call_args)
+    assert len(calls) == 1
+    kwargs = calls[0]
+    assert kwargs["kv_cache_dtype"] == aiter_dtype
+    assert kwargs["index_cache_dtype"] == "auto"
+    assert kwargs["block_size"] == 16
+    assert kwargs["asm_layout"] is True
+    if passes_scales:
+        assert kwargs["k_scale"] is k_scale
+        assert kwargs["v_scale"] is v_scale
+    else:
+        assert kwargs["k_scale"] is None
+        assert kwargs["v_scale"] is None
+
+
+def test_aiter_consolidated_qknorm_fp8_index_dtype_mapping(monkeypatch):
+    from vllm._aiter_ops import rocm_aiter_ops
+
+    calls = _install_fake_aiter_qknorm(monkeypatch)
+    fp8 = current_platform.fp8_dtype()
+    call_args = _fake_aiter_qknorm_args("fp8")
+    call_args.update(
+        k_scale=torch.tensor([0.25]),
+        v_scale=torch.tensor([0.5]),
+        index_cache=torch.empty(1, dtype=fp8),
+        index_q_out=torch.empty(1, dtype=fp8),
+        num_index_heads=1,
+    )
+
+    rocm_aiter_ops.fused_qknorm_idxrqknorm(**call_args)
+    assert calls[0]["index_cache_dtype"] == "fp8"
+    assert calls[0]["kv_cache_dtype"] == "fp8_e4m3_static"
+
+
+@pytest.mark.parametrize("skip_index_branch", [False, True])
+def test_aiter_consolidated_qknorm_full_and_skip_index_args(
+    monkeypatch, skip_index_branch
+):
+    from vllm._aiter_ops import rocm_aiter_ops
+
+    calls = _install_fake_aiter_qknorm(monkeypatch)
+    call_args = _fake_aiter_qknorm_args()
+    if skip_index_branch:
+        call_args.update(skip_index_branch=True)
+    else:
+        tensor = torch.empty(1)
+        call_args.update(
+            index_q_norm_weight=tensor,
+            index_k_norm_weight=tensor,
+            num_index_heads=1,
+            index_cache=tensor,
+            index_q_out=tensor,
+            index_slot_mapping=tensor,
+        )
+
+    rocm_aiter_ops.fused_qknorm_idxrqknorm(**call_args)
+    kwargs = calls[0]
+    assert kwargs["skip_index_branch"] is skip_index_branch
+    if skip_index_branch:
+        assert kwargs["index_q_norm_weight"] is None
+        assert kwargs["index_k_norm_weight"] is None
+        assert kwargs["index_cache"] is None
+        assert kwargs["index_q_out"] is None
+        assert kwargs["index_slot_mapping"] is None
+    else:
+        assert kwargs["index_q_norm_weight"] is not None
+        assert kwargs["index_k_norm_weight"] is not None
+        assert kwargs["index_cache"] is not None
+        assert kwargs["index_q_out"] is not None
+        assert kwargs["index_slot_mapping"] is not None
+
+
+def test_aiter_consolidated_qknorm_rejects_fp8_e5m2(monkeypatch):
+    from vllm._aiter_ops import rocm_aiter_ops
+
+    monkeypatch.setattr("vllm._aiter_ops.is_aiter_found_and_supported", lambda: True)
+    monkeypatch.setattr(rocm_aiter_ops, "_AITER_ENABLED", True)
+    scale = torch.tensor([0.25])
+    assert not rocm_aiter_ops.fused_qknorm_idxrqknorm_enabled("fp8_e5m2", scale, scale)
+
+
+def test_aiter_sparse_pa_slot_rebase_preserves_page_offsets():
+    slots = torch.tensor([0, 15, 16, 127, 128, 129, -1])
+    actual = minimax_m3_rebase_slots_to_page16(slots, block_size=128)
+    expected = torch.tensor([0, 15, 16, 127, 256, 257, -1])
+    assert torch.equal(actual, expected)
+
+
+@pytest.mark.skipif(
+    not current_platform.is_rocm(),
+    reason="The consolidated packed-SHUFFLE AITER op is ROCm-only",
+)
+@pytest.mark.parametrize("skip_index_branch", [False, True])
+@pytest.mark.parametrize("fp8_index", [False, True])
+def test_aiter_consolidated_qknorm_real_packed_shuffle(skip_index_branch, fp8_index):
+    from vllm._aiter_ops import rocm_aiter_ops
+
+    torch.manual_seed(20260831)
+    num_tokens = 4
+    num_heads = 16
+    num_kv_heads = 1
+    num_index_heads = 1
+    rotary_dim = 64
+    head_dim = 128
+    logical_block_size = 128
+    num_blocks = 3
+    fp8_dtype = current_platform.fp8_dtype()
+
+    qkv = torch.randn(
+        num_tokens,
+        (num_heads + 2 * num_kv_heads + num_index_heads + 1) * head_dim,
+        dtype=torch.bfloat16,
+        device="cuda",
+    )
+    weights = [
+        torch.randn(head_dim, dtype=torch.bfloat16, device="cuda") for _ in range(4)
+    ]
+    cos_sin_cache = torch.randn(16, rotary_dim, dtype=torch.bfloat16, device="cuda")
+    positions = torch.arange(num_tokens, dtype=torch.int64, device="cuda")
+    logical_slots = torch.tensor([0, 127, 128, -1], dtype=torch.int64, device="cuda")
+    slot_mapping = minimax_m3_rebase_slots_to_page16(logical_slots, logical_block_size)
+    index_slot_mapping = logical_slots.clone()
+
+    packed = torch.zeros(
+        num_blocks,
+        2,
+        logical_block_size,
+        head_dim,
+        dtype=fp8_dtype,
+        device="cuda",
+    )
+    x = 16 // packed.element_size()
+    pages_per_side = logical_block_size // 16
+    num_phys16 = num_blocks * 2 * pages_per_side
+    kv_cache_k = packed.view(num_phys16, num_kv_heads, head_dim // x, 16, x)
+    kv_cache_v = packed.view(num_phys16, num_kv_heads, 16 // x, head_dim, x)[
+        pages_per_side:
+    ]
+    assert kv_cache_k.shape == (48, 1, 8, 16, 16)
+    assert kv_cache_v.shape == (40, 1, 1, 128, 16)
+
+    q_out = torch.zeros(
+        num_tokens, num_heads * head_dim, dtype=torch.bfloat16, device="cuda"
+    )
+    index_dtype = fp8_dtype if fp8_index else torch.bfloat16
+    if fp8_index:
+        index_q_out = torch.empty(
+            (num_tokens, num_index_heads * head_dim),
+            dtype=index_dtype,
+            device="cuda",
+        )
+        index_cache = torch.empty(
+            (num_blocks, logical_block_size, head_dim),
+            dtype=index_dtype,
+            device="cuda",
+        )
+        index_q_out.view(torch.uint8).fill_(7)
+        index_cache.view(torch.uint8).fill_(7)
+    else:
+        index_q_out = torch.full(
+            (num_tokens, num_index_heads * head_dim),
+            7,
+            dtype=torch.bfloat16,
+            device="cuda",
+        )
+        index_cache = torch.full(
+            (num_blocks, logical_block_size, head_dim),
+            7,
+            dtype=torch.bfloat16,
+            device="cuda",
+        )
+    scale = torch.tensor([0.02], dtype=torch.float32, device="cuda")
+
+    kwargs = {}
+    if not skip_index_branch:
+        kwargs = {
+            "index_q_norm_weight": weights[2],
+            "index_k_norm_weight": weights[3],
+            "index_cache": index_cache,
+            "index_q_out": index_q_out,
+            "index_slot_mapping": index_slot_mapping,
+        }
+    rocm_aiter_ops.fused_qknorm_idxrqknorm(
+        qkv,
+        weights[0],
+        weights[1],
+        cos_sin_cache,
+        positions,
+        num_heads,
+        num_kv_heads,
+        rotary_dim,
+        1e-6,
+        slot_mapping,
+        kv_cache_k,
+        kv_cache_v,
+        q_out,
+        "fp8",
+        scale,
+        scale,
+        num_index_heads=num_index_heads,
+        skip_index_branch=skip_index_branch,
+        **kwargs,
+    )
+    torch.accelerator.synchronize()
+
+    assert torch.isfinite(q_out).all()
+    assert torch.count_nonzero(q_out) > 0
+    assert torch.count_nonzero(packed) > 0
+    if fp8_index:
+        index_q_untouched = torch.all(index_q_out.view(torch.uint8) == 7)
+        index_cache_untouched = torch.all(index_cache.view(torch.uint8) == 7)
+        index_cache_t0 = torch.all(index_cache[0, 0].view(torch.uint8) == 7)
+        index_cache_t127 = torch.all(index_cache[0, 127].view(torch.uint8) == 7)
+        index_cache_t128 = torch.all(index_cache[1, 0].view(torch.uint8) == 7)
+    else:
+        index_q_untouched = torch.all(index_q_out == 7)
+        index_cache_untouched = torch.all(index_cache == 7)
+        index_cache_t0 = torch.all(index_cache[0, 0] == 7)
+        index_cache_t127 = torch.all(index_cache[0, 127] == 7)
+        index_cache_t128 = torch.all(index_cache[1, 0] == 7)
+    if skip_index_branch:
+        assert index_q_untouched
+        assert index_cache_untouched
+    else:
+        assert not index_q_untouched
+        assert not index_cache_t0
+        assert not index_cache_t127
+        assert not index_cache_t128
 
 
 def test_indexer_cache_squeezes_to_contiguous_3d():

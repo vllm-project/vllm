@@ -31,8 +31,7 @@ logger = init_logger(__name__)
 def get_mem_info_wrapper(
     device: int | str | torch.device | None = None,
 ) -> tuple[int, int]:
-    """
-    Get memory info for a device, compatible with torch.accelerator.get_memory_info API.
+    """Get memory info for a device, matching `torch.accelerator.get_memory_info`.
 
     Args:
         device: Device specification. Can be:
@@ -43,6 +42,7 @@ def get_mem_info_wrapper(
 
     Returns:
         Tuple[int, int]: (free_memory, total_memory) in bytes
+
     """
     # Handle None - use current device
     if device is None:
@@ -162,6 +162,25 @@ class XPUPlatform(Platform):
         if selected_backend == AttentionBackendEnum.TRITON_ATTN:
             logger.info_once("Using Triton backend.")
             return AttentionBackendEnum.TRITON_ATTN.get_path()
+        elif attn_selector_config.use_batch_invariant:
+            # Flash Attention on XPU has not been validated for batch
+            # invariance. Honor an explicit Flash Attention request;
+            # otherwise fall back to Triton Attention, which implements
+            # batch-invariant kernels.
+            if selected_backend == AttentionBackendEnum.FLASH_ATTN:
+                logger.warning_once(
+                    "Using Flash Attention on XPU with batch invariance "
+                    "enabled because it was explicitly requested. This "
+                    "backend has not been validated for batch invariance "
+                    "on XPU and may produce non-deterministic results "
+                    "across batch sizes."
+                )
+                return AttentionBackendEnum.FLASH_ATTN.get_path()
+            logger.info_once(
+                "VLLM_BATCH_INVARIANT is enabled. Using Triton Attention "
+                "backend on XPU, which implements batch-invariant kernels."
+            )
+            return AttentionBackendEnum.TRITON_ATTN.get_path()
         elif attn_selector_config.use_mm_prefix:
             # Flash Attention on XPU has no FA4 kernel, so it cannot apply the
             # multimodal prefix-LM bidirectional mask. Honor an explicit Flash
@@ -237,9 +256,7 @@ class XPUPlatform(Platform):
 
     @classmethod
     def set_device(cls, device: torch.device) -> None:
-        """
-        Set the device for the current platform.
-        """
+        """Set the device for the current platform."""
         torch.xpu.set_device(device)
 
     @classmethod
@@ -285,6 +302,27 @@ class XPUPlatform(Platform):
         # lazy import to avoid circular import
         from vllm.config import CUDAGraphMode
 
+        if envs.VLLM_BATCH_INVARIANT:
+            model_config = vllm_config.model_config
+            if model_config is not None and (
+                model_config.quantization is not None
+                or vllm_config.quant_config is not None
+            ):
+                raise ValueError(
+                    "XPU batch invariance currently supports only unquantized "
+                    f"models; got quantization={model_config.quantization!r}. "
+                    "Use an unquantized model or disable VLLM_BATCH_INVARIANT."
+                )
+
+            cache_dtype = vllm_config.cache_config.cache_dtype
+            if cache_dtype not in ("auto", "float16", "bfloat16"):
+                raise ValueError(
+                    "XPU batch invariance currently does not support quantized "
+                    f"KV caches; got kv_cache_dtype={cache_dtype!r}. "
+                    "Use an unquantized KV cache dtype or disable "
+                    "VLLM_BATCH_INVARIANT."
+                )
+
         compilation_config = vllm_config.compilation_config
         if compilation_config.compile_sizes is None:
             compilation_config.compile_sizes = []
@@ -298,16 +336,15 @@ class XPUPlatform(Platform):
                 "XPU Graph is not supported in the current PyTorch version, "
                 "disabling cudagraph_mode."
             )
-        elif not envs.VLLM_XPU_ENABLE_XPU_GRAPH:
+
+        if (
+            vllm_config.model_config is not None
+            and vllm_config.model_config.enable_sleep_mode
+            and compilation_config.cudagraph_mode != CUDAGraphMode.NONE
+        ):
             compilation_config.cudagraph_mode = CUDAGraphMode.NONE
             logger.warning_once(
-                "XPU Graph is disabled by environment variable, "
-                "please set VLLM_XPU_ENABLE_XPU_GRAPH=1 to enable it."
-            )
-        else:
-            logger.warning_once(
-                "XPU Graph support is experimental and currently only supports "
-                "single-GPU execution."
+                "XPU Graph is not compatible with sleep mode, disabling cudagraph_mode."
             )
 
         # Disable fusion passes not yet supported on XPU.
@@ -491,7 +528,7 @@ class XPUPlatform(Platform):
         using_inductor = cc.backend == "inductor" and cc.mode != CompilationMode.NONE
         default = ["native"] if using_inductor else ["vllm_c", "native"]
 
-        return IrOpPriorityConfig.with_default(default)
+        return IrOpPriorityConfig.with_default(default, gelu_and_mul_sparse=["native"])
 
     @classmethod
     def device_count(cls) -> int:

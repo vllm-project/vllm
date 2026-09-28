@@ -1,10 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Bounds on request-controlled inputs that would otherwise amplify work.
+"""Bounds and alignment checks for request-controlled inputs.
 
-Consolidates the regression tests for the request-input amplification fixes:
-stop-string caps, bad-words dedup/tokenization limit, stop-token-id dedup,
-beam-width/sequence caps, and the DeepSeek history-scan bound.
+Covers prompt-mask alignment, stop-string caps, bad-words dedup/tokenization
+limits, stop-token-id dedup, beam-width/sequence caps, and the DeepSeek
+history-scan bound.
 """
 
 import os
@@ -12,8 +12,10 @@ import subprocess
 import sys
 from collections.abc import Callable
 from typing import Protocol
+from unittest.mock import Mock
 
 import pytest
+import torch
 from pydantic import ValidationError
 
 import vllm.envs as envs
@@ -25,10 +27,134 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
 from vllm.entrypoints.openai.completion.protocol import CompletionRequest
 from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.exceptions import VLLMValidationError
+from vllm.inputs.engine import embeds_input
 from vllm.sampling_params import BeamSearchParams
 from vllm.tokenizers import deepseek_v4_encoding, deepseek_v32_encoding
+from vllm.v1.engine.input_processor import InputProcessor
 
 pytestmark = [pytest.mark.cpu_test, pytest.mark.skip_global_cleanup]
+
+
+@pytest.fixture
+def prompt_embeds_processor():
+    model_config = Mock(
+        max_model_len=16,
+        max_logprobs=20,
+        logits_processors=None,
+        is_diffusion=False,
+        return_sampling_mask=False,
+    )
+    model_config.get_vocab_size.return_value = 32
+    model_config.try_get_generation_config.return_value = {}
+    config = Mock(
+        model_config=model_config,
+        speculative_config=None,
+        structured_outputs_config=None,
+    )
+    renderer = Mock(tokenizer=None)
+    renderer.get_eos_token_id.return_value = None
+    registry = Mock()
+    registry.supports_multimodal_inputs.return_value = False
+    return InputProcessor(config, renderer, mm_registry=registry)
+
+
+@pytest.mark.parametrize("mask_len", [0, 1, 2, 4])
+def test_prompt_embeds_mask_length_rejected_before_engine_submission(
+    prompt_embeds_processor, mask_len
+):
+    """Reject short, long, and broadcastable masks before they reach a worker."""
+    prompt = embeds_input(
+        torch.zeros(3, 4),
+        prompt_token_ids=[1, 2, 3],
+        is_token_ids=[False] * mask_len,
+    )
+
+    with pytest.raises(VLLMValidationError, match="prompt_is_token_ids") as exc_info:
+        prompt_embeds_processor.process_inputs(
+            "invalid", prompt, SamplingParams(max_tokens=1), ("generate",)
+        )
+
+    assert exc_info.value.parameter == "prompt_is_token_ids"
+
+
+@pytest.mark.parametrize(
+    ("token_ids", "mask"),
+    [(None, None), ([1, 2, 3], None), ([1, 2, 3], [True, False, True])],
+    ids=["pure-embeds", "token-ids-without-mask", "mixed"],
+)
+def test_prompt_embeds_valid_inputs_preserved(prompt_embeds_processor, token_ids, mask):
+    embeds = torch.zeros(3, 4)
+    prompt = embeds_input(embeds, prompt_token_ids=token_ids, is_token_ids=mask)
+
+    request = prompt_embeds_processor.process_inputs(
+        "valid", prompt, SamplingParams(max_tokens=1), ("generate",)
+    )
+
+    assert request.prompt_embeds is embeds
+    assert request.prompt_token_ids == token_ids
+    assert request.prompt_is_token_ids == mask
+
+
+@pytest.mark.parametrize("offset", [-1, 0, 2, 3, 4, 2**127])
+def test_routed_experts_offset_validated_before_engine_submission(offset):
+    """Reject invalid offsets even when routed-expert output is disabled."""
+    processor = Mock(spec=InputProcessor)
+    processor.tokenizer = None
+    processor.generation_config_fields = {}
+    processor.renderer = Mock()
+    processor.renderer.get_eos_token_id.return_value = None
+    processor.vllm_config = Mock()
+    params = SamplingParams(routed_experts_prompt_start=offset)
+    prompt = {"type": "token", "prompt_token_ids": [1, 2, 3]}
+
+    if not 0 <= offset <= 3:
+        with pytest.raises(VLLMValidationError, match="routed_experts_prompt_start"):
+            InputProcessor.process_inputs(
+                processor, "invalid", prompt, params, ("generate",)
+            )
+        params.routed_experts_prompt_start = 0
+
+    request = InputProcessor.process_inputs(
+        processor, "valid", prompt, params, ("generate",)
+    )
+    assert (
+        request.sampling_params.routed_experts_prompt_start
+        == params.routed_experts_prompt_start
+    )
+
+
+def _process_inputs_with_max_model_len(
+    params: SamplingParams, max_model_len: int = 2048
+):
+    processor = Mock(spec=InputProcessor)
+    processor.tokenizer = None
+    processor.generation_config_fields = {}
+    processor.renderer = Mock()
+    processor.renderer.get_eos_token_id.return_value = None
+    processor.vllm_config = Mock()
+    processor.model_config = Mock()
+    processor.model_config.max_model_len = max_model_len
+    prompt = {"type": "token", "prompt_token_ids": [1, 2, 3]}
+    return InputProcessor.process_inputs(
+        processor, "req", prompt, params, ("generate",)
+    )
+
+
+def test_unset_max_tokens_rejects_oversized_min_tokens():
+    """Reject min_tokens that only becomes invalid after max_tokens is filled."""
+    params = SamplingParams(max_tokens=None, min_tokens=2147483648)
+    with pytest.raises(
+        VLLMValidationError,
+        match="min_tokens must be less than or equal to max_tokens",
+    ):
+        _process_inputs_with_max_model_len(params)
+
+
+def test_unset_max_tokens_accepts_min_tokens_within_filled_max():
+    params = SamplingParams(max_tokens=None, min_tokens=10)
+    request = _process_inputs_with_max_model_len(params)
+    assert request.sampling_params.max_tokens == 2045
+    assert request.sampling_params.min_tokens == 10
 
 
 # --- Stop strings: public requests cap the number of stop strings ---------

@@ -65,7 +65,7 @@ def test_cpu_target_selects_cpu_platform_from_non_cpu_wheel(
     rocm_plugin.assert_not_called()
 
 
-def test_platform_detection_logs_zentorch_import_failure(caplog):
+def test_broken_zentorch_falls_back_to_cpu_platform(caplog):
     original_import = builtins.__import__
 
     def import_with_broken_zentorch(name, *args, **kwargs):
@@ -88,6 +88,54 @@ def test_platform_detection_logs_zentorch_import_failure(caplog):
     ):
         platform = resolve_current_platform_cls_qualname()
 
+    assert platform == "vllm.platforms.cpu.CpuPlatform"
+    assert "zentorch failed to import" in caplog.text
+    assert "OSError: incompatible shared library" in caplog.text
+
+
+def test_zentorch_failure_other_than_oserror_is_not_recovered(caplog):
+    original_import = builtins.__import__
+
+    def import_with_broken_zentorch(name, *args, **kwargs):
+        if name == "zentorch":
+            raise RuntimeError("unknown zentorch failure")
+        return original_import(name, *args, **kwargs)
+
+    with (
+        patch("vllm.platforms.envs.VLLM_TARGET_DEVICE", "cuda"),
+        patch.dict(
+            "vllm.platforms.builtin_platform_plugins",
+            {"cpu": cpu_platform_plugin},
+            clear=True,
+        ),
+        patch("vllm.platforms.load_plugins_by_group", return_value={}),
+        patch("vllm.platforms.vllm_version_matches_substr", return_value=True),
+        patch("vllm.platforms._is_amd_zen_cpu", return_value=True),
+        patch.object(builtins, "__import__", side_effect=import_with_broken_zentorch),
+        caplog.at_level(logging.DEBUG, logger="vllm.platforms"),
+    ):
+        platform = resolve_current_platform_cls_qualname()
+
+    assert platform == "vllm.platforms.interface.UnspecifiedPlatform"
+    assert "RuntimeError: unknown zentorch failure" in caplog.text
+
+
+def test_platform_plugin_failure_is_logged(caplog):
+    def failing_plugin():
+        raise RuntimeError("plugin exploded")
+
+    with (
+        patch("vllm.platforms.envs.VLLM_TARGET_DEVICE", "cuda"),
+        patch.dict(
+            "vllm.platforms.builtin_platform_plugins",
+            {"cpu": failing_plugin},
+            clear=True,
+        ),
+        patch("vllm.platforms.load_plugins_by_group", return_value={}),
+        caplog.at_level(logging.DEBUG, logger="vllm.platforms"),
+    ):
+        platform = resolve_current_platform_cls_qualname()
+
     assert platform == "vllm.platforms.interface.UnspecifiedPlatform"
     assert "Platform plugin cpu failed during detection" in caplog.text
-    assert "OSError: incompatible shared library" in caplog.text
+    assert "RuntimeError: plugin exploded" in caplog.text

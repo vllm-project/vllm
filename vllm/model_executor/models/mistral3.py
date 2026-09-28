@@ -11,7 +11,7 @@ from transformers import BatchFeature, Mistral3Config, PixtralVisionConfig
 from transformers.models.pixtral import PixtralProcessor
 
 from vllm.config import VllmConfig
-from vllm.config.multimodal import BaseDummyOptions
+from vllm.config.multimodal import MultiModalDummyOptions
 from vllm.inputs import MultiModalDataDict
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -58,12 +58,11 @@ from .utils import (
 
 
 class Mistral3ImagePixelInputs(TensorSchema):
-    """
-    Dimensions:
-        - bn: Batch size * number of images
-        - c: Number of channels (3)
-        - h: Height of each image
-        - w: Width of each image
+    """Dimensions:
+    - bn: Batch size * number of images
+    - c: Number of channels (3)
+    - h: Height of each image
+    - w: Width of each image
     """
 
     type: Literal["pixel_values_pixtral"] = "pixel_values_pixtral"
@@ -77,9 +76,7 @@ class Mistral3ImagePixelInputs(TensorSchema):
 
 
 class Mistral3PatchMerger(nn.Module):
-    """
-    Learned merging of spatial_merge_size ** 2 patches
-    """
+    """Learned merging of spatial_merge_size ** 2 patches."""
 
     def __init__(
         self, vision_hidden_size: int, spatial_merge_size: int, patch_size: int
@@ -195,18 +192,13 @@ class Mistral3HFEncoderInfo(PixtralHFEncoderInfo):
             image_width = math.floor(image_width / ratio)
             image_height = math.floor(image_height / ratio)
 
-        patch_size = self.vision_config.patch_size
         assert isinstance(self.hf_config, Mistral3Config)
-        spatial_merge_size = self.hf_config.spatial_merge_size
+        merged_patch_size = (
+            self.vision_config.patch_size * self.hf_config.spatial_merge_size
+        )
 
-        # The HF processor rounds each dimension up to the vision patch size
-        # before the projector drops incomplete spatial-merge groups. This is
-        # not equivalent to rounding directly to the merged patch size.
-        num_width_patches = (image_width - 1) // patch_size + 1
-        num_height_patches = (image_height - 1) // patch_size + 1
-
-        ncols = num_width_patches // spatial_merge_size
-        nrows = num_height_patches // spatial_merge_size
+        ncols = (image_width - 1) // merged_patch_size + 1
+        nrows = (image_height - 1) // merged_patch_size + 1
         return ncols, nrows
 
 
@@ -251,7 +243,7 @@ class Mistral3ProcessingInfo(BaseProcessingInfo):
         return ImageSize(width=width, height=height)
 
 
-class Mistral3DummyInputsBuilder(BaseDummyInputsBuilder[Mistral3ProcessingInfo]):
+class Mistral3DummyInputsBuilder(BaseDummyInputsBuilder):
     def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
         num_images = mm_counts.get("image", 0)
 
@@ -264,26 +256,22 @@ class Mistral3DummyInputsBuilder(BaseDummyInputsBuilder[Mistral3ProcessingInfo])
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions],
+        mm_options: MultiModalDummyOptions,
     ) -> MultiModalDataDict:
-        num_images = mm_counts.get("image", 0)
-
         target_width, target_height = self.info.get_image_size_with_most_features()
-
-        image_overrides = mm_options.get("image")
 
         return {
             "image": self._get_dummy_images(
                 width=target_width,
                 height=target_height,
-                num_images=num_images,
-                overrides=image_overrides,
+                num_images=mm_counts.get("image", 0),
+                overrides=mm_options.get("image"),
             )
         }
 
 
 class Mistral3MultiModalProcessor(BaseMultiModalProcessor[Mistral3ProcessingInfo]):
-    def _get_hf_processor_text(self, mm_counts: Mapping[str, int]) -> str:
+    def _get_hf_mm_text(self, mm_counts: Mapping[str, int]) -> str:
         return self.dummy_inputs.get_dummy_text(mm_counts)
 
     def _postprocess_hf_mm_data(
@@ -365,6 +353,7 @@ def _get_num_hidden_layers(hf_config: Mistral3Config) -> int:
 
     Args:
         hf_config: Model config with vision feature layer(s).
+
     """
     feature_layers = hf_config.vision_feature_layer
     num_hidden_layers = hf_config.vision_config.num_hidden_layers
@@ -588,9 +577,12 @@ class Mistral3ForConditionalGeneration(
             positions: Position indices for the input tokens.
             intermediate_tensors: Intermediate tensors from prior forward pass.
             inputs_embeds: Optional tensor of input embeddings.
+            **kwargs: Multimodal inputs for this batch, forwarded to the
+                multimodal embedding path.
 
         Info:
             [`Mistral3ImagePixelInputs`][vllm.model_executor.models.mistral3.Mistral3ImagePixelInputs]
+
         """
         if intermediate_tensors is not None:
             inputs_embeds = None
@@ -612,9 +604,7 @@ class Mistral3ForConditionalGeneration(
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
     def get_mm_mapping(self) -> MultiModelKeys:
-        """
-        Get the module prefix in multimodal models
-        """
+        """Get the module prefix in multimodal models."""
         return MultiModelKeys.from_string_field(
             language_model="language_model",
             connector="multi_modal_projector",
