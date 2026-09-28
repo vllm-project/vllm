@@ -22,6 +22,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.model_loader.base_loader import BaseModelLoader
 from vllm.model_executor.model_loader.default_loader import DefaultModelLoader
 from vllm.model_executor.model_loader.utils import (
+    get_draft_load_config,
     initialize_model,
     process_weights_after_loading,
 )
@@ -112,43 +113,37 @@ class IpcModelLoader(BaseModelLoader):
                 f"{load_config.load_format}: {sorted(extra_config)}"
             )
 
-    @classmethod
-    def get_external_weight_memory(
-        cls, load_config: LoadConfig, vllm_config: VllmConfig
-    ) -> int:
+    def get_external_weight_memory(self, vllm_config: VllmConfig) -> int:
         # Copy mode clones the weights into this process; nothing external.
-        extra_config = load_config.model_loader_extra_config
-        if not isinstance(extra_config, dict):
-            extra_config = {}
-        if extra_config.get("mode", "zero_copy") != "zero_copy":
+        if self.mode != "zero_copy":
             return 0
-        # Mirror the loader: with fallback off it waits for the daemon at
-        # load time, so wait here too; with fallback on an unreachable daemon
-        # means a disk load, i.e. the weights are not external.
-        wait = not bool(extra_config.get("fallback", True))
-        timeout_s = float(extra_config.get("state_timeout_s", _STATE_TIMEOUT_S))
-        total = cls._query_daemon_memory(
-            extra_config, is_draft=False, wait=wait, timeout_s=timeout_s
-        )
+        total = self._daemon_memory()
         if is_draft_model_cacheable(vllm_config.speculative_config):
-            total += cls._query_daemon_memory(
-                extra_config, is_draft=True, wait=wait, timeout_s=timeout_s
-            )
+            # The draft group is queried with the same config the engine
+            # would load the draft with.
+            draft_config = get_draft_load_config(vllm_config)
+            if draft_config.load_format == "ipc_cache":
+                total += IpcModelLoader(draft_config)._daemon_memory()
         return total
 
-    @classmethod
-    def _query_daemon_memory(
-        cls, extra_config: dict, *, is_draft: bool, wait: bool, timeout_s: float
-    ) -> int:
-        """GPU bytes held by the daemon group; 0 when unreachable and the
-        loader will fall back to disk (wait=False)."""
-        deadline = time.monotonic() + timeout_s
-        waiting_logged = False
+    def _daemon_memory(self) -> int:
+        deadline = time.monotonic() + self.state_timeout_s
         while True:
             try:
-                return cls._query_daemon_memory_once(extra_config, is_draft=is_draft)
+                with self._connect(self.connect_timeout_s) as conn:
+                    send_msg(conn, {"cmd": "get_memory"})
+                    response = recv_msg(conn)
+                if response.get("status") != "ok":
+                    raise WeightCacheUnavailableError(
+                        "Weight cache daemon rejected the memory query: "
+                        f"{response.get('message')}"
+                    )
+                return int(response.get("memory_bytes", 0))
             except (WeightCacheUnavailableError, ConnectionError, OSError) as e:
-                if not wait:
+                # Mirror the loader: with fallback off it waits for the daemon
+                # at load time, so wait here too; with fallback on an
+                # unreachable daemon means a disk load, i.e. nothing external.
+                if self.fallback:
                     logger.warning(
                         "Cannot query weight cache daemon memory (%s); "
                         "assuming the weights are not externally held",
@@ -158,44 +153,18 @@ class IpcModelLoader(BaseModelLoader):
                 if time.monotonic() >= deadline:
                     raise WeightCacheUnavailableError(
                         "Weight cache daemon did not become ready within "
-                        f"{timeout_s:.1f}s"
+                        f"{self.state_timeout_s:.1f}s"
                     ) from e
-                if not waiting_logged:
-                    logger.info(
-                        "Waiting up to %.1fs for the weight cache daemon to start",
-                        timeout_s,
-                    )
-                    waiting_logged = True
+                logger.info_once(
+                    "Waiting up to %.1fs for the weight cache daemon to start",
+                    self.state_timeout_s,
+                )
                 time.sleep(
                     max(
                         0.0,
                         min(_STARTUP_RETRY_INTERVAL_S, deadline - time.monotonic()),
                     )
                 )
-
-    @classmethod
-    def _query_daemon_memory_once(cls, extra_config: dict, *, is_draft: bool) -> int:
-        socket_path = extra_config.get("socket_path")
-        socket_dir = extra_config.get("socket_dir")
-        # Draft sockets are always derived (see __init__).
-        if socket_path is None or is_draft:
-            socket_path = get_socket_path(
-                get_current_device_uuid(), socket_dir, is_draft=is_draft
-            )
-        strict_perms = socket_dir is None and extra_config.get("socket_path") is None
-        verify_socket_owner(socket_path, strict_perms=strict_perms)
-        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        sock.settimeout(_CONNECT_TIMEOUT_S)
-        with sock:
-            sock.connect(socket_path)
-            send_msg(sock, {"cmd": "get_memory"})
-            response = recv_msg(sock)
-        if response.get("status") != "ok":
-            raise WeightCacheUnavailableError(
-                f"Weight cache daemon rejected the memory query: "
-                f"{response.get('message')}"
-            )
-        return int(response.get("memory_bytes", 0))
 
     def download_model(self, model_config: ModelConfig) -> None:
         DefaultModelLoader(self._fallback_load_config()).download_model(model_config)

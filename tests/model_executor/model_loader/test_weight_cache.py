@@ -332,7 +332,5 @@ def test_ipc_loader_copy_mode_reports_no_external_weight_memory():
     copy_mode = LoadConfig(
         load_format="ipc_cache", model_loader_extra_config={"mode": "copy"}
     )
-    assert (
-        IpcModelLoader.get_external_weight_memory(copy_mode, None)  # type: ignore[arg-type]
-        == 0
-    )
+    loader = IpcModelLoader(copy_mode)
+    assert loader.get_external_weight_memory(None) == 0  # type: ignore[arg-type]

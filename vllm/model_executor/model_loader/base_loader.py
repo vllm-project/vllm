@@ -28,10 +28,7 @@ class BaseModelLoader(ABC):
     def __init__(self, load_config: LoadConfig):
         self.load_config = load_config
 
-    @classmethod
-    def get_external_weight_memory(
-        cls, load_config: LoadConfig, vllm_config: VllmConfig
-    ) -> int:
+    def get_external_weight_memory(self, vllm_config: VllmConfig) -> int:
         """Get weights memory from external process;
         0 when the weights are not external."""
         return 0
