@@ -860,8 +860,8 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         self.use_trtllm_gen_varlen_decode = self._uses_trtllm_gen_varlen_decode(
             vllm_config, self.flashinfer_trtllm_api_decode_kernel, self.use_dcp
         )
-        # trtllm-gen decode reads seq_lens and block tables from the buffers
-        # that fused draft steps advance in place; DCP-local seq_lens are not.
+        # Fused draft steps advance seq_lens in place and keep block tables fixed,
+        # so one trtllm-gen decode build serves every step (not DCP-local seq_lens).
         self.supports_draft_decode_metadata_update = (
             self.flashinfer_trtllm_api_decode_kernel
             == FlashInferDecodeKernel.TRTLLM_GEN

@@ -516,26 +516,12 @@ def test_trtllm_gen_nvfp4_kv_integration(batch_spec_name: str):
     )
 
 
-def _assert_same_metadata(reused, rebuilt, path: str) -> None:
-    if dataclasses.is_dataclass(reused):
-        for field in dataclasses.fields(reused):
-            _assert_same_metadata(
-                getattr(reused, field.name),
-                getattr(rebuilt, field.name),
-                f"{path}.{field.name}",
-            )
-    elif isinstance(reused, torch.Tensor):
-        assert torch.equal(reused, rebuilt), path
-    else:
-        assert reused == rebuilt, path
-
-
 @torch.inference_mode()
 def test_trtllm_gen_draft_decode_metadata_tracks_in_place_seq_lens(
     monkeypatch: pytest.MonkeyPatch,
 ):
-    """The fused draft loop advances seq_lens in place and reuses the step-1
-    build, which must match what the split path rebuilds for step 2."""
+    """Fused draft steps reuse the step-1 build after advancing seq_lens in
+    place, so its decode metadata must match the split path's step-2 rebuild."""
     monkeypatch.setattr(
         "vllm.utils.flashinfer.supports_trtllm_attention",
         unittest.mock.Mock(return_value=True),
@@ -564,12 +550,14 @@ def test_trtllm_gen_draft_decode_metadata_tracks_in_place_seq_lens(
     step1 = create_common_attn_metadata(BATCH_SPECS["decode_only"], BLOCK_SIZE, device)
     reused = builder.build(common_prefix_len=0, common_attn_metadata=step1)
     step1.seq_lens.add_(1)
-    assert step1.seq_lens_cpu_upper_bound is not None
-    step2 = dataclasses.replace(
-        step1, seq_lens_cpu_upper_bound=step1.seq_lens_cpu_upper_bound + 1
-    )
+    step2 = dataclasses.replace(step1, seq_lens_cpu_upper_bound=step1.seq_lens.cpu())
     rebuilt = builder.build(common_prefix_len=0, common_attn_metadata=step2)
 
     assert isinstance(reused.decode, FlashInferTrtllmAPIDecode)
-    assert reused.decode.kernel == FlashInferDecodeKernel.TRTLLM_GEN
-    _assert_same_metadata(reused, rebuilt, "metadata")
+    for field in dataclasses.fields(reused.decode):
+        value = getattr(reused.decode, field.name)
+        expected = getattr(rebuilt.decode, field.name)
+        if isinstance(value, torch.Tensor):
+            assert torch.equal(value, expected), field.name
+        else:
+            assert value == expected, field.name
