@@ -117,7 +117,7 @@ def make_nvfp4_kv_cache(
 
     # Dequantize for the FA2 reference baseline.
     ref_k = dequant_nvfp4_kv_cache(
-        k_data, k_scales, kv_scale_val, head_size, block_size
+        k_data, k_scales, kv_scale_val, head_size, block_size, swizzled_scales=False
     ).to(torch.bfloat16)
     ref_v = dequant_nvfp4_kv_cache(
         v_data, v_scales, kv_scale_val, head_size, block_size

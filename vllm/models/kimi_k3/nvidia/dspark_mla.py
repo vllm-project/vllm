@@ -15,7 +15,10 @@ from vllm.model_executor.layers.linear import (
     ReplicatedLinear,
 )
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
-from vllm.model_executor.models.qwen3_dspark import DSparkMarkovHead
+from vllm.model_executor.models.qwen3_dspark import (
+    DSparkConfidenceHead,
+    DSparkMarkovHead,
+)
 from vllm.model_executor.models.utils import (
     AutoWeightsLoader,
     WeightsMapper,
@@ -27,6 +30,10 @@ from vllm.models.kimi_k3.nvidia.mla import MultiHeadLatentAttention
 from vllm.models.kimi_k3.nvidia.model import KimiMLP
 from vllm.utils.torch_utils import is_quantized_kv_cache
 from vllm.v1.worker.workspace import current_workspace_manager
+
+_GROUPED_KV_CACHE_DTYPES = frozenset(
+    {"auto", "bfloat16", "fp8", "fp8_e4m3", "fp8_e5m2"}
+)
 
 
 def _duplicate_context_kv_weights(
@@ -184,6 +191,18 @@ class K3DSparkModel(nn.Module):
             self.config.markov_rank,
             prefix=maybe_prefix(prefix, "markov_head"),
         )
+        self.confidence_head: DSparkConfidenceHead | None = None
+        if getattr(self.config, "enable_confidence_head", False):
+            with_markov = getattr(self.config, "confidence_head_with_markov", False)
+            input_dim = self.config.hidden_size + (
+                self.config.markov_rank if with_markov else 0
+            )
+            self.confidence_head = DSparkConfidenceHead(
+                input_dim,
+                prefix=maybe_prefix(prefix, "confidence_head"),
+                bias=True,
+                with_markov=with_markov,
+            )
         self._max_num_context_tokens = (
             vllm_config.scheduler_config.max_num_batched_tokens
         )
@@ -233,6 +252,13 @@ class K3DSparkModel(nn.Module):
         self._context_kv_lora_rank = attn0.kv_lora_rank
         self._context_rope_dim = attn0.qk_rope_head_dim
         self._context_rms_norm_eps = attn0.kv_a_layernorm.variance_epsilon
+        self._context_kv_scales: torch.Tensor | None = None
+        if attn0.kv_cache_dtype in _GROUPED_KV_CACHE_DTYPES and is_quantized_kv_cache(
+            attn0.kv_cache_dtype
+        ):
+            self._context_kv_scales = torch.stack(
+                [attn._k_scale.reshape(()) for attn in attentions]
+            )
 
     def _precompute_fused_context_kv(
         self,
@@ -286,16 +312,18 @@ class K3DSparkModel(nn.Module):
             return
 
         cache_layers = [layer.self_attn for layer in self.layers]
+        cache_dtype = cache_layers[0].kv_cache_dtype
         if (
-            not is_quantized_kv_cache(cache_layers[0].kv_cache_dtype)
+            cache_dtype in _GROUPED_KV_CACHE_DTYPES
+            and all(cl.kv_cache_dtype == cache_dtype for cl in cache_layers)
             and self._has_uniform_block_layout(cache_layers)
             and (
                 isinstance(context_slot_mapping, torch.Tensor)
                 or all(s is not None for s in context_slot_mapping)
             )
         ):
-            # Grouped context KV insert only supports unquantized (bf16) KV cache
-            # and assumes that all layers share the same block layout.
+            # Grouped context KV insert assumes that all layers share the same
+            # cache dtype and block layout.
 
             if isinstance(context_slot_mapping, (list, tuple)):
                 per_layer_slot_mappings = [
@@ -321,6 +349,8 @@ class K3DSparkModel(nn.Module):
                 ref_cache.size(1),
                 ref_cache.stride(0),
                 ref_cache.stride(1),
+                self._context_kv_scales,
+                cache_dtype,
             )
             return
 
@@ -421,6 +451,12 @@ class K3DSparkForCausalLM(nn.Module):
         assert vllm_config.speculative_config is not None
         self.draft_model_config = vllm_config.speculative_config.draft_model_config
         self.config = self.draft_model_config.hf_config
+        if getattr(self.config, "enable_confidence_head", False):
+            # The class mapper drops the head as training-only; keep it for drafts
+            # that actually built one, since adaptive verification reads it.
+            self.hf_to_vllm_mapper = self.hf_to_vllm_mapper | WeightsMapper(
+                orig_to_new_substr={"confidence_head": "confidence_head"}
+            )
         target_layer_num = vllm_config.model_config.get_total_num_hidden_layers()
         self.model = K3DSparkModel(
             vllm_config=vllm_config,
@@ -479,10 +515,18 @@ class K3DSparkForCausalLM(nn.Module):
     def markov_bias(self, markov_embed: torch.Tensor) -> torch.Tensor:
         return self.model.markov_head.bias(markov_embed, self.logits_processor)
 
+    def compute_confidence(
+        self, head_hidden: torch.Tensor, markov_embed: torch.Tensor
+    ) -> torch.Tensor:
+        """Per-position acceptance probability for each drafted token."""
+        assert self.model.confidence_head is not None
+        return torch.sigmoid(self.model.confidence_head(head_hidden, markov_embed))
+
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)
         # read: 1. all weights. 2. context kv weights
         weights = _duplicate_context_kv_weights(weights, len(self.model.layers))
-        loaded_weights = loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
+
+    def process_weights_after_loading(self) -> None:
         self.model._build_fused_context_kv_metadata()
-        return loaded_weights
