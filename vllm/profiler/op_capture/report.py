@@ -271,10 +271,9 @@ def write_capture_files(capture: OpCapture, directory: str | os.PathLike) -> Pat
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=True)
     selection = capture.selection
+    distinct = sorted({op.name for op in capture.ops})
     (directory / "report.txt").write_text(format_report(capture, show_shapes=True))
-    (directory / "ops.txt").write_text(
-        "".join(f"{name}\n" for name in sorted({op.name for op in capture.ops}))
-    )
+    (directory / "ops.txt").write_text("".join(f"{name}\n" for name in distinct))
     (directory / "ops.sequence.txt").write_text(
         "".join(
             f"{'  ' * op.depth}{op.signature} -> {', '.join(op.outputs) or '()'}"
@@ -288,7 +287,7 @@ def write_capture_files(capture: OpCapture, directory: str | os.PathLike) -> Pat
         "batch": asdict(capture.batch),
         "selection": asdict(selection),
         "ops": len(capture.ops),
-        "distinct_ops": len({op.name for op in capture.ops}),
+        "distinct_ops": len(distinct),
         "failure": None if capture.failure is None else asdict(capture.failure),
         "missing_kernels": capture.missing_kernels,
         "placeholder_ops": sorted({op.name for op in capture.placeholder_ops}),

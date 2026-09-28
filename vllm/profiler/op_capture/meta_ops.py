@@ -25,7 +25,7 @@ Registrations only add the `Meta` key, so they are inert for real tensors, and
 they never replace a kernel vLLM or PyTorch already registered.
 """
 
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from contextlib import contextmanager
 from typing import Any
 
@@ -58,14 +58,21 @@ LEAF_NAMESPACES = frozenset(
 )
 """Namespaces of vLLM's compiled kernel extensions, whose bodies are never run."""
 
+NATIVE_PREFIXES = ("aten::", "prim::", "prims::")
+"""Prefixes of PyTorch's own operators, as opposed to vLLM's custom ops."""
+
 MetaKernel = Callable[[dict[str, Any]], Any]
 """An override's signature: schema arguments by name, in to the op's outputs."""
 
 
+def _first_tensor(values: Iterable[Any]) -> torch.Tensor | None:
+    return next((value for value in values if isinstance(value, torch.Tensor)), None)
+
+
 def _like_first_tensor(arguments: dict[str, Any]) -> torch.Tensor:
-    return torch.empty_like(
-        next(value for value in arguments.values() if isinstance(value, torch.Tensor))
-    )
+    first = _first_tensor(arguments.values())
+    assert first is not None
+    return torch.empty_like(first)
 
 
 def _fa2_varlen_fwd(arguments: dict[str, Any]) -> list[torch.Tensor]:
@@ -330,9 +337,7 @@ def placeholder_outputs(
             returns a type with no placeholder.
 
     """
-    like = next(
-        (v for v in (*args, *kwargs.values()) if isinstance(v, torch.Tensor)), None
-    )
+    like = _first_tensor((*args, *kwargs.values()))
     outputs: list[Any] = []
     for ret in schema.returns:
         return_type = str(ret.type)

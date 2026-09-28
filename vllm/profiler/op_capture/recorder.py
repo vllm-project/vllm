@@ -19,6 +19,7 @@ from torch.utils._python_dispatch import TorchDispatchMode
 import vllm
 from vllm.profiler.op_capture.meta_ops import (
     LEAF_NAMESPACES,
+    NATIVE_PREFIXES,
     UnsupportedMetaOpError,
     placeholder_outputs,
 )
@@ -115,7 +116,7 @@ class RecordedOp:
     @property
     def is_custom(self) -> bool:
         """Whether this is a vLLM custom op rather than a native PyTorch one."""
-        return not self.name.startswith(("aten::", "prim::", "prims::"))
+        return not self.name.startswith(NATIVE_PREFIXES)
 
     @property
     def is_leaf_kernel(self) -> bool:

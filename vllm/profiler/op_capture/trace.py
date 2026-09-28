@@ -30,10 +30,7 @@ from torch.profiler import ExecutionTraceObserver
 
 from vllm.engine.arg_utils import EngineArgs
 from vllm.profiler.op_capture.capture import BatchSpec, capture_model_ops
-from vllm.profiler.op_capture.meta_ops import LEAF_NAMESPACES
-
-NATIVE_PREFIXES = ("aten::", "prim::", "prims::")
-"""Prefixes of PyTorch's own operators, as opposed to vLLM's custom ops."""
+from vllm.profiler.op_capture.meta_ops import LEAF_NAMESPACES, NATIVE_PREFIXES
 
 _NON_OP_PREFIXES = ("[pytorch|", "##", "[param|")
 

@@ -290,10 +290,9 @@ class ForwardHarness:
     Raises:
         ValueError: If the config asks for pipeline, context or data
             parallelism, or for tensor parallelism without
-            `distributed_init_method`. Or if the batch exceeds the scheduler's
-            per-step token or request budget, or `max_model_len`, which no real
-            step could.
-            Or if it has multimodal items the model cannot take.
+            `distributed_init_method`; or if the batch is one no real step
+            could run: over the scheduler budget or `max_model_len`, or with
+            multimodal items the model cannot take.
         NotImplementedError: If the model is encoder-decoder.
 
     """
@@ -310,8 +309,8 @@ class ForwardHarness:
     ):
         self.model_id = model
         self.batch = batch or BatchSpec()
-        self.is_meta = torch.device(device).type == "meta"
         self.device = torch.device(device)
+        self.is_meta = self.device.type == "meta"
         if not self.is_meta and self.device.index is None:
             self.device = torch.device(f"{self.device.type}:{rank}")
         self.rank = rank
@@ -385,26 +384,27 @@ class ForwardHarness:
                 )
 
     def _multimodal_budget(self) -> MultiModalBudget:
-        if self._mm_budget is None:
-            model_config = self.vllm_config.model_config
-            if not model_config.supports_multimodal_inputs:
-                raise ValueError(f"{self.model_id} takes no multimodal inputs.")
-            if model_config.is_multimodal_raw_input_only_model:
-                raise ValueError(
-                    f"{self.model_id} takes its multimodal inputs raw in "
-                    "forward, which the harness does not pass."
-                )
-            self._mm_budget = MultiModalBudget(self.vllm_config, MULTIMODAL_REGISTRY)
-            if not self._mm_budget.mm_max_toks_per_item:
-                raise ValueError(f"{self.model_id} has no multimodal encoder to run.")
-        return self._mm_budget
+        if self._mm_budget is not None:
+            return self._mm_budget
+        model_config = self.vllm_config.model_config
+        if not model_config.supports_multimodal_inputs:
+            raise ValueError(f"{self.model_id} takes no multimodal inputs.")
+        if model_config.is_multimodal_raw_input_only_model:
+            raise ValueError(
+                f"{self.model_id} takes its multimodal inputs raw in "
+                "forward, which the harness does not pass."
+            )
+        budget = MultiModalBudget(self.vllm_config, MULTIMODAL_REGISTRY)
+        if not budget.mm_max_toks_per_item:
+            raise ValueError(f"{self.model_id} has no multimodal encoder to run.")
+        self._mm_budget = budget
+        return budget
 
     def set_batch(self, batch: BatchSpec) -> None:
         """Run later forward passes on `batch`, reusing the built model and cache.
 
         Raises:
-            ValueError: If the batch exceeds the scheduler budget or
-                `max_model_len`.
+            ValueError: As `ForwardHarness` does for its batch.
 
         """
         self._check_batch(batch)
@@ -522,13 +522,16 @@ class ForwardHarness:
         for group in self.encoder_only_groups:
             group.create_metadata_builders(config, self.device)
 
+    def _attention_layers(self) -> dict[str, AttentionLayerBase]:
+        return get_layers_from_vllm_config(
+            self.vllm_config, cast(type[Any], AttentionLayerBase)
+        )
+
     def _init_kv_cache(self) -> None:
         """Group layers by backend, size the cache, and bind it to the layers."""
         config = self.vllm_config
         self._init_encoder_only_attn()
-        layers: dict[str, AttentionLayerBase] = get_layers_from_vllm_config(
-            config, cast(type[Any], AttentionLayerBase)
-        )
+        layers = self._attention_layers()
         self.kv_cache_specs = {
             name: spec
             for name, layer in layers.items()
@@ -670,17 +673,11 @@ class ForwardHarness:
         _, _, mm_kwargs = next(group_and_batch_mm_kwargs(items, device=self.device))
         return mm_kwargs
 
-    def _embed_inputs(
-        self, input_ids: torch.Tensor
-    ) -> tuple[torch.Tensor | None, torch.Tensor]:
+    def _embed_inputs(self, input_ids: torch.Tensor) -> torch.Tensor:
         """Embed the batch as the model runner does for a multimodal model.
 
         The encoder outputs of `num_mm_items` items fill the batch's first
         tokens, cut off where the batch ends as a chunked prefill would.
-
-        Returns:
-            The token ids, if the model still wants them, and the embeddings.
-
         """
         model = cast(SupportsMultiModal, self.model)
         mm_embeds: list[torch.Tensor] = []
@@ -694,12 +691,9 @@ class ForwardHarness:
         # tensor only if its values can be read.
         is_multimodal = torch.zeros(input_ids.shape[0], dtype=torch.bool)
         is_multimodal[: input_ids.shape[0] - room] = True
-        inputs_embeds = model.embed_input_ids(
+        return model.embed_input_ids(
             input_ids, multimodal_embeddings=mm_embeds, is_multimodal=is_multimodal
         )
-        if self.vllm_config.model_config.requires_raw_input_tokens:
-            return input_ids, inputs_embeds
-        return None, inputs_embeds
 
     def _pooling_metadata(self, model: VllmModelForPooling) -> PoolingMetadata:
         """Pool every request's whole prompt, as the model runner does.
@@ -741,9 +735,7 @@ class ForwardHarness:
         assert self.model is not None, "Use ForwardHarness as a context manager"
         batch = self.batch
         model_config = self.vllm_config.model_config
-        input_ids: torch.Tensor | None = torch.zeros(
-            batch.num_tokens, dtype=torch.long, device=self.device
-        )
+        input_ids = torch.zeros(batch.num_tokens, dtype=torch.long, device=self.device)
         positions = self._positions()
         if model_config.uses_mrope:
             # A text token's three M-RoPE positions are its 1-D one.
@@ -757,8 +749,8 @@ class ForwardHarness:
         with torch.inference_mode():
             inputs_embeds = None
             if model_config.supports_multimodal_inputs:
-                assert input_ids is not None
-                input_ids, inputs_embeds = self._embed_inputs(input_ids)
+                inputs_embeds = self._embed_inputs(input_ids)
+            keep_ids = inputs_embeds is None or model_config.requires_raw_input_tokens
             with set_forward_context(
                 self._attn_metadata,
                 self.vllm_config,
@@ -766,7 +758,7 @@ class ForwardHarness:
                 slot_mapping=self._slot_mappings,
             ):
                 hidden_states = self.model(
-                    input_ids=input_ids,
+                    input_ids=input_ids if keep_ids else None,
                     positions=positions,
                     inputs_embeds=inputs_embeds,
                 )
@@ -814,9 +806,7 @@ class ForwardHarness:
     def selection_metadata(self) -> SelectionMetadata:
         """Collect the hardware-dependent choices this capture depends on."""
         config = self.vllm_config
-        layers: dict[str, AttentionLayerBase] = get_layers_from_vllm_config(
-            config, cast(type[Any], AttentionLayerBase)
-        )
+        layers = self._attention_layers()
         first = next(iter(layers.values()), None)
         return SelectionMetadata(
             platform=current_platform.device_name,
