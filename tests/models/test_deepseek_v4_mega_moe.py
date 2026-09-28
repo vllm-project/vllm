@@ -851,6 +851,42 @@ def test_deepseek_v4_mega_moe_stages_shared_scale_tma_layout(shared_block_m):
     assert torch.all(fused_shared_x_sf[~populated] == -1)
 
 
+@pytest.mark.parametrize("enabled", [False, True])
+def test_hc_broadcast_refresh_after_repeated_reload(enabled):
+    from vllm.model_executor.model_loader.reload.layerwise import (
+        finalize_layerwise_processing,
+        initialize_layerwise_reload,
+        record_metadata_for_reloading,
+    )
+    from vllm.model_executor.utils import register_derived_buffer
+    from vllm.models.deepseek_v4.nvidia.model import DeepseekV4DecoderLayer
+
+    layer = object.__new__(DeepseekV4DecoderLayer)
+    torch.nn.Module.__init__(layer)
+    layer.hc_mult = 2
+    layer.hidden_size = 2
+    layer.hc_attn_fn = torch.nn.Parameter(torch.arange(8.0).view(2, 4))
+    register_derived_buffer(layer, "hc_attn_fn_broadcast")
+    layer._hc_broadcast_enabled = enabled
+    if enabled:
+        layer._refresh_hc_broadcast()
+    pointer = layer.hc_attn_fn_broadcast.data_ptr() if enabled else None
+    record_metadata_for_reloading(layer)
+    for value in (3.0, 1.0, 3.0):
+        initialize_layerwise_reload(layer)
+        layer.hc_attn_fn.weight_loader(layer.hc_attn_fn, torch.full((2, 4), value))
+        finalize_layerwise_processing(
+            layer, model_config=SimpleNamespace(dtype=torch.float32)
+        )
+        if enabled:
+            assert layer.hc_attn_fn_broadcast.data_ptr() == pointer
+            torch.testing.assert_close(
+                layer.hc_attn_fn_broadcast, torch.full((2, 2), 2 * value)
+            )
+        else:
+            assert layer.hc_attn_fn_broadcast is None
+
+
 def test_deepseek_v4_pwal_hook_finalizes_mega_moe_and_mhc_broadcast():
     """The loader invokes the model-level PWAL hook for every load format,
     so it must finalize megamoe + mhc broadcast weights to cover dummy
