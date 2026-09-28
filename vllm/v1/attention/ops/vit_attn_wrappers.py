@@ -58,6 +58,13 @@ def flash_attn_maxseqlen_wrapper(
             max_seqlen = max_seqlen.item()
 
     q, k, v = (einops.rearrange(x, "b s ... -> (b s) ...") for x in [q, k, v])
+
+    if current_platform.is_cuda() and torch.cuda.is_current_stream_capturing():
+        # workaround for encoder CUDA-graph replay paddings with NaNs edge case
+        kwargs["out"] = torch.zeros(
+            q.shape[0], q.shape[1], v.shape[-1], dtype=q.dtype, device=q.device
+        )
+
     output = flash_attn_varlen_func(
         q,
         k,
