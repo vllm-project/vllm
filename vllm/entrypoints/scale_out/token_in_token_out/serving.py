@@ -138,6 +138,10 @@ class ServingTokens(GenerateBaseServing):
                 f"sampling_params.n must be at most the server's max_num_seqs "
                 f"({max_num_seqs}), got {sampling_params.n}."
             )
+        if request.stream and sampling_params.prompt_logprob_token_ids is not None:
+            return self.create_error_response(
+                "prompt_logprob_token_ids are not available when stream=true."
+            )
         if self.force_no_detokenize and sampling_params.stop:
             # SamplingParams rejects stop with detokenize=False at request
             # validation, but this server forces detokenize=False afterwards,

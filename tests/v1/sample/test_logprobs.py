@@ -1413,13 +1413,31 @@ def test_prompt_logprob_token_ids_with_chunking_and_preemption(monkeypatch):
     # unchunked, unpreempted run of the same requests. Batch composition moves
     # bf16 tail logprobs by a few percent; a misaligned row differs by nats.
     with VllmRunner(
-        "Qwen/Qwen3-0.6B", max_model_len=512, gpu_memory_utilization=0.25
+        "Qwen/Qwen3-0.6B",
+        max_model_len=512,
+        max_logprobs=64,
+        gpu_memory_utilization=0.25,
     ) as reference:
         reference_outputs = reference.llm.generate(prompts, sampling_params)
+        own_ids = [list(dict.fromkeys(o.prompt_token_ids)) for o in reference_outputs]
+        self_scored = reference.llm.generate(
+            prompts,
+            [
+                SamplingParams(
+                    max_tokens=1, prompt_logprobs=0, prompt_logprob_token_ids=ids
+                )
+                for ids in own_ids
+            ],
+        )
     for output, ref in zip(outputs, reference_outputs):
         np.testing.assert_allclose(
             output.prompt_token_id_logprobs, ref.prompt_token_id_logprobs, rtol=0.1
         )
+    for output, ids in zip(self_scored, own_ids):
+        scores = output.prompt_token_id_logprobs
+        for row, target in enumerate(output.prompt_token_ids[1:]):
+            expected = output.prompt_logprobs[row + 1][target].logprob
+            assert scores[row, ids.index(target)] == pytest.approx(expected, abs=1e-3)
 
 
 def test_prompt_logprob_token_ids_drop_partially_scored_prefills(monkeypatch):

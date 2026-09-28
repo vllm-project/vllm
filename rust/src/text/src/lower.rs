@@ -126,6 +126,7 @@ pub fn lower_sampling_params(
         prompt_logprobs,
         logprob_token_ids.as_deref(),
         prompt_logprob_token_ids.as_deref(),
+        prompt_logprob_start,
         sampling_limits,
     )?;
     validate_repetition_detection(repetition_detection.as_ref())?;
@@ -1139,34 +1140,40 @@ mod tests {
 
     #[test]
     fn lower_sampling_params_validates_prompt_logprob_token_ids() {
-        let lower = |ids: Vec<u32>| {
+        let lower = |ids: Option<Vec<u32>>, start: Option<u32>| {
             lower_sampling_params_with_limits(
                 SamplingParams {
-                    prompt_logprob_token_ids: Some(ids),
+                    prompt_logprob_token_ids: ids,
+                    prompt_logprob_start: start,
                     ..Default::default()
                 },
                 sample_sampling_limits(),
             )
         };
+        let rejects = |ids, start| match lower(ids, start) {
+            Err(error) => error.to_string(),
+            Ok(_) => panic!("expected rejection"),
+        };
 
-        assert_eq!(
-            lower(vec![1, 2]).unwrap().prompt_logprob_token_ids,
-            Some(vec![1, 2])
-        );
-        assert!(matches!(
-            lower((0..21).collect()),
-            Err(Error::Logprobs(LogprobsError::TooManyCount {
-                parameter: "prompt_logprob_token_ids",
-                ..
-            }))
-        ));
-        assert!(matches!(
-            lower(vec![1000]),
-            Err(Error::TokenIds(TokenIdsError::OutOfVocab {
-                parameter: "prompt_logprob_token_ids",
-                ..
-            }))
-        ));
+        let params = lower(Some(vec![1, 2]), Some(1)).unwrap();
+        assert_eq!(params.prompt_logprob_token_ids, Some(vec![1, 2]));
+        assert_eq!(params.prompt_logprob_start, Some(1));
+        expect_test::expect![[r#"
+            [
+                "prompt_logprob_token_ids must not be empty.",
+                "requested prompt_logprob_token_ids of 21, which is greater than max allowed: 20",
+                "token_id(s) [1000] in prompt_logprob_token_ids are out of vocabulary. Vocabulary size: 1000",
+                "prompt_logprob_token_ids must not contain duplicates.",
+                "prompt_logprob_start requires prompt_logprob_token_ids.",
+            ]
+        "#]]
+        .assert_debug_eq(&[
+            rejects(Some(vec![]), None),
+            rejects(Some((0..21).collect()), None),
+            rejects(Some(vec![1000]), None),
+            rejects(Some(vec![1, 1]), None),
+            rejects(None, Some(0)),
+        ]);
     }
 
     #[test]

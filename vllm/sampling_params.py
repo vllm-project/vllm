@@ -292,7 +292,7 @@ class SamplingParams(
     prompt_logprob_token_ids: list[int] | None = None
     """Token IDs to score at each scored causal prompt row, where row i scores
     them as predictions of prompt token i + 1. The last prompt row is excluded,
-    so the result has `prompt_len - 1 - prompt_logprob_start` rows."""
+    so the result has `max(prompt_len - 1 - prompt_logprob_start, 0)` rows."""
     prompt_logprob_start: int | None = None
     """First causal prompt row to score; defaults to the first row."""
     logprob_token_ids: list[int] | None = None
