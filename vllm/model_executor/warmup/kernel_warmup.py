@@ -37,6 +37,7 @@ from vllm.model_executor.warmup.qwen_vl_triton_warmup import qwen_vl_triton_warm
 from vllm.model_executor.warmup.replayssm_warmup import (
     replayssm_autotune_warmup,
 )
+from vllm.model_executor.warmup.triton_autotune import triton_autotune
 from vllm.model_executor.warmup.watermark_sample_warmup import (
     watermark_sample_warmup,
 )
@@ -219,6 +220,9 @@ def kernel_warmup(worker: "Worker", *, process_local_only: bool = False):
 
     if process_local_only:
         return
+
+    if worker.vllm_config.kernel_config.enable_triton_autotune:
+        triton_autotune(worker)
 
     flashinfer_sparse_mla_decode_autotune_warmup(worker)
     deepseek_v4_sparse_mla_attention_warmup(worker)
