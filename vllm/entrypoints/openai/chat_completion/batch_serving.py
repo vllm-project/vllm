@@ -91,6 +91,7 @@ class OpenAIServingChatBatch(OpenAIServingChat):
         for messages in request.messages:
             single_request = request.to_chat_completion_request(messages)
             if renderer.use_harmony:
+                renderer.adjust_harmony_request(single_request)
                 conversation, engine_prompts = renderer._make_request_with_harmony(
                     single_request, should_include_tools=tool_dicts is not None
                 )
