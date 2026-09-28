@@ -16,7 +16,7 @@ from vllm.config.cache import CacheDType
 from vllm.logger import init_logger
 from vllm.utils.math_utils import next_power_of_2
 from vllm.utils.torch_utils import is_quantized_kv_cache
-from vllm.v1.attention.backend import AttentionLayer, AttentionType
+from vllm.v1.attention.backend import AttentionCGSupport, AttentionLayer, AttentionType
 from vllm.v1.attention.backends.triton_attn import (
     TritonAttentionBackend,
     TritonAttentionImpl,
@@ -43,6 +43,8 @@ class TritonAttentionDiffKVMetadataBuilder(TritonAttentionMetadataBuilder):
     re-allocate with ``next_power_of_2(head_size_v)`` instead.
     """
 
+    _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.UNIFORM_BATCH
+
     def __init__(
         self,
         kv_cache_spec: AttentionSpec,
@@ -51,6 +53,7 @@ class TritonAttentionDiffKVMetadataBuilder(TritonAttentionMetadataBuilder):
         device: torch.device,
     ):
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
+        self._init_reorder_batch_threshold(1, supports_spec_as_decode=True)
 
         head_size_v = TritonAttentionDiffKVBackend.head_size_v
         head_size_v_padded = next_power_of_2(head_size_v)
