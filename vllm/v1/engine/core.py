@@ -142,117 +142,130 @@ class EngineCore:
         if executor_fail_callback is not None:
             self.model_executor.register_failure_callback(executor_fail_callback)
 
-        self.available_gpu_memory_for_kv_cache = -1
+        try:
+            # A failed init must still tear down the spawned workers.
+            self.available_gpu_memory_for_kv_cache = -1
 
-        if envs.VLLM_ELASTIC_EP_SCALE_UP_LAUNCH:
-            self._eep_scale_up_before_kv_init()
+            if envs.VLLM_ELASTIC_EP_SCALE_UP_LAUNCH:
+                self._eep_scale_up_before_kv_init()
 
-        # Setup KV Caches and update CacheConfig after profiling.
-        kv_cache_config = self._initialize_kv_caches(vllm_config)
-        self.structured_output_manager = StructuredOutputManager(vllm_config)
+            # Setup KV Caches and update CacheConfig after profiling.
+            kv_cache_config = self._initialize_kv_caches(vllm_config)
+            self.structured_output_manager = StructuredOutputManager(vllm_config)
 
-        # Setup scheduler.
-        Scheduler = vllm_config.scheduler_config.get_scheduler_cls()
+            # Setup scheduler.
+            Scheduler = vllm_config.scheduler_config.get_scheduler_cls()
 
-        if len(kv_cache_config.kv_cache_groups) == 0:  # noqa: SIM102
-            # Encoder models without KV cache don't support
-            # chunked prefill. But do SSM models?
-            if vllm_config.scheduler_config.enable_chunked_prefill:
-                logger.warning("Disabling chunked prefill for model without KVCache")
-                vllm_config.scheduler_config.enable_chunked_prefill = False
+            if len(kv_cache_config.kv_cache_groups) == 0:  # noqa: SIM102
+                # Encoder models without KV cache don't support
+                # chunked prefill. But do SSM models?
+                if vllm_config.scheduler_config.enable_chunked_prefill:
+                    logger.warning("Disabling chunked prefill for model without KVCache")
+                    vllm_config.scheduler_config.enable_chunked_prefill = False
 
-        scheduler_block_size, hash_block_size = resolve_kv_cache_block_sizes(
-            kv_cache_config, vllm_config
-        )
-
-        self.scheduler: SchedulerInterface = Scheduler(
-            vllm_config=vllm_config,
-            kv_cache_config=kv_cache_config,
-            structured_output_manager=self.structured_output_manager,
-            include_finished_set=include_finished_set,
-            log_stats=self.log_stats,
-            block_size=scheduler_block_size,
-            hash_block_size=hash_block_size,
-        )
-        self._initialize_effective_attention_block_size()
-        self.use_spec_decode = vllm_config.speculative_config is not None
-        self.check_for_draft_tokens = (
-            self.use_spec_decode or vllm_config.model_config.is_diffusion
-        )
-        if self.scheduler.connector is not None:  # type: ignore
-            self.model_executor.init_kv_output_aggregator(self.scheduler.connector)  # type: ignore
-        if self.scheduler.ec_connector is not None:  # type: ignore
-            self.model_executor.init_ec_output_aggregator()
-
-        self.mm_receiver_cache = engine_receiver_cache_from_config(vllm_config)
-
-        # If a KV connector is initialized for scheduler, we want to collect
-        # handshake metadata from all workers so the connector in the scheduler
-        # will have the full context
-        kv_connector = self.scheduler.get_kv_connector()
-        if kv_connector is not None:
-            # Collect and store KV connector xfer metadata from workers
-            # (after KV cache registration)
-            xfer_handshake_metadata = (
-                self.model_executor.get_kv_connector_handshake_metadata()
+            scheduler_block_size, hash_block_size = resolve_kv_cache_block_sizes(
+                kv_cache_config, vllm_config
             )
 
-            if xfer_handshake_metadata:
-                # xfer_handshake_metadata is list of dicts from workers
-                # Each dict already has structure {(pp_rank, tp_rank): metadata}
-                # Merge all worker dicts into a single dict
-                content: dict[tuple[int, int], Any] = {}
-                for worker_dict in xfer_handshake_metadata:
-                    if worker_dict is not None:
-                        content.update(worker_dict)
-                kv_connector.set_xfer_handshake_metadata_pp_aware(content)
-
-        # Setup batch queue for pipeline parallelism.
-        # Batch queue for scheduled batches. This enables us to asynchronously
-        # schedule and execute batches, and is required by pipeline parallelism
-        # to eliminate pipeline bubbles.
-        self.batch_queue_size = vllm_config.max_concurrent_batches
-        self.batch_queue: (
-            deque[tuple[Future[ModelRunnerOutput], SchedulerOutput, Future[Any]]] | None
-        ) = None
-        if self.batch_queue_size > 1:
-            logger.debug("Batch queue is enabled with size %d", self.batch_queue_size)
-            self.batch_queue = deque(maxlen=self.batch_queue_size)
-
-        self.is_ec_consumer = (
-            vllm_config.ec_transfer_config is None
-            or vllm_config.ec_transfer_config.is_ec_consumer
-        )
-        self.is_pooling_model = vllm_config.model_config.runner_type == "pooling"
-
-        self.request_block_hasher: Callable[[Request], list[BlockHash]] | None = None
-        if vllm_config.cache_config.enable_prefix_caching or kv_connector is not None:
-            caching_hash_fn = get_hash_fn_by_name(
-                vllm_config.cache_config.prefix_caching_hash_algo
+            self.scheduler: SchedulerInterface = Scheduler(
+                vllm_config=vllm_config,
+                kv_cache_config=kv_cache_config,
+                structured_output_manager=self.structured_output_manager,
+                include_finished_set=include_finished_set,
+                log_stats=self.log_stats,
+                block_size=scheduler_block_size,
+                hash_block_size=hash_block_size,
             )
-            init_none_hash(caching_hash_fn)
-
-            self.request_block_hasher = get_request_block_hasher(
-                hash_block_size, caching_hash_fn
+            self._initialize_effective_attention_block_size()
+            self.use_spec_decode = vllm_config.speculative_config is not None
+            self.check_for_draft_tokens = (
+                self.use_spec_decode or vllm_config.model_config.is_diffusion
             )
+            if self.scheduler.connector is not None:  # type: ignore
+                self.model_executor.init_kv_output_aggregator(self.scheduler.connector)  # type: ignore
+            if self.scheduler.ec_connector is not None:  # type: ignore
+                self.model_executor.init_ec_output_aggregator()
 
-        self.step_fn = (
-            self.step if self.batch_queue is None else self.step_with_batch_queue
-        )
-        self.async_scheduling = vllm_config.scheduler_config.async_scheduling
+            self.mm_receiver_cache = engine_receiver_cache_from_config(vllm_config)
 
-        self.aborts_queue = queue.Queue[list[str]]()
+            # If a KV connector is initialized for scheduler, we want to collect
+            # handshake metadata from all workers so the connector in the scheduler
+            # will have the full context
+            kv_connector = self.scheduler.get_kv_connector()
+            if kv_connector is not None:
+                # Collect and store KV connector xfer metadata from workers
+                # (after KV cache registration)
+                xfer_handshake_metadata = (
+                    self.model_executor.get_kv_connector_handshake_metadata()
+                )
 
-        self._idle_state_callbacks: list[Callable] = []
+                if xfer_handshake_metadata:
+                    # xfer_handshake_metadata is list of dicts from workers
+                    # Each dict already has structure {(pp_rank, tp_rank): metadata}
+                    # Merge all worker dicts into a single dict
+                    content: dict[tuple[int, int], Any] = {}
+                    for worker_dict in xfer_handshake_metadata:
+                        if worker_dict is not None:
+                            content.update(worker_dict)
+                    kv_connector.set_xfer_handshake_metadata_pp_aware(content)
 
-        # Mark the startup heap as static so that it's ignored by GC.
-        # Reduces pause times of oldest generation collections.
-        freeze_gc_heap()
-        # If enable, attach GC debugger after static variable freeze.
-        maybe_attach_gc_debug_callback()
-        # Enable environment variable cache (e.g. assume no more
-        # environment variable overrides after this point)
-        enable_envs_cache()
+            # Setup batch queue for pipeline parallelism.
+            # Batch queue for scheduled batches. This enables us to asynchronously
+            # schedule and execute batches, and is required by pipeline
+            # parallelism to eliminate pipeline bubbles.
+            self.batch_queue_size = vllm_config.max_concurrent_batches
+            self.batch_queue: (
+                deque[tuple[Future[ModelRunnerOutput], SchedulerOutput, Future[Any]]]
+                | None
+            ) = None
+            if self.batch_queue_size > 1:
+                logger.debug(
+                    "Batch queue is enabled with size %d", self.batch_queue_size
+                )
+                self.batch_queue = deque(maxlen=self.batch_queue_size)
+
+            self.is_ec_consumer = (
+                vllm_config.ec_transfer_config is None
+                or vllm_config.ec_transfer_config.is_ec_consumer
+            )
+            self.is_pooling_model = vllm_config.model_config.runner_type == "pooling"
+
+            self.request_block_hasher: Callable[[Request], list[BlockHash]] | None = (
+                None
+            )
+            if (
+                vllm_config.cache_config.enable_prefix_caching
+                or kv_connector is not None
+            ):
+                caching_hash_fn = get_hash_fn_by_name(
+                    vllm_config.cache_config.prefix_caching_hash_algo
+                )
+                init_none_hash(caching_hash_fn)
+
+                self.request_block_hasher = get_request_block_hasher(
+                    hash_block_size, caching_hash_fn
+                )
+
+            self.step_fn = (
+                self.step if self.batch_queue is None else self.step_with_batch_queue
+            )
+            self.async_scheduling = vllm_config.scheduler_config.async_scheduling
+
+            self.aborts_queue = queue.Queue[list[str]]()
+
+            self._idle_state_callbacks: list[Callable] = []
+
+            # Mark the startup heap as static so that it's ignored by GC.
+            # Reduces pause times of oldest generation collections.
+            freeze_gc_heap()
+            # If enable, attach GC debugger after static variable freeze.
+            maybe_attach_gc_debug_callback()
+            # Enable environment variable cache (e.g. assume no more
+            # environment variable overrides after this point)
+            enable_envs_cache()
+        except BaseException:
+            self._shutdown_executor_on_init_failure()
+            raise
 
     @instrument(span_name="Prepare model")
     def _initialize_kv_caches(self, vllm_config: VllmConfig) -> KVCacheConfig:
@@ -795,13 +808,33 @@ class EngineCore:
             # More efficient to abort all as a single batch.
             self.abort_requests(request_ids)
 
+    def _shutdown_executor_on_init_failure(self) -> None:
+        """Best-effort teardown for failures after the executor spawned workers.
+
+        EngineCore.__init__ constructs the executor before the scheduler, so an
+        exception in any later step (e.g. scheduler construction) leaves worker
+        processes running and holding GPU memory. The partially-constructed
+        EngineCore is unreachable from ``run_engine_core`` (the assignment never
+        completes), so its ``finally`` cannot call ``shutdown()`` and the
+        executor's weakref finalizer is not deterministic enough. This runs the
+        regular shutdown path and is safe on a partial object because
+        ``shutdown()`` guards every attribute it touches.
+        """
+        try:
+            self.shutdown()
+        except Exception:
+            logger.exception("Failed to shut down executor after init failure.")
+
     def shutdown(self):
         logger.debug_once("[shutdown] EngineCore: tearing down local resources")
-        self.structured_output_manager.clear_backend()
-        if self.model_executor:
-            self.model_executor.shutdown()
-        if self.scheduler:
-            self.scheduler.shutdown()
+        if structured_output_manager := getattr(
+            self, "structured_output_manager", None
+        ):
+            structured_output_manager.clear_backend()
+        if model_executor := getattr(self, "model_executor", None):
+            model_executor.shutdown()
+        if scheduler := getattr(self, "scheduler", None):
+            scheduler.shutdown()
 
         # Undo the gc.freeze() from __init__ so that the objects allocated
         # during engine startup (model weights, KV caches, etc.) become
@@ -1159,52 +1192,57 @@ class EngineCoreProc(EngineCore):
                 internal_dp_balancing,
             )
 
-            # Initialize fault tolerance settings.
-            self.enable_fault_tolerance = (
-                vllm_config.parallel_config.enable_fault_tolerance
-            )
-            if self.enable_fault_tolerance:
-                self.ft_sentinel = EngineCoreSentinel(
-                    engine=self,
-                    parallel_config=vllm_config.parallel_config,
+            try:
+                # A failed startup must still tear down the spawned workers.
+                # Initialize fault tolerance settings.
+                self.enable_fault_tolerance = (
+                    vllm_config.parallel_config.enable_fault_tolerance
                 )
+                if self.enable_fault_tolerance:
+                    self.ft_sentinel = EngineCoreSentinel(
+                        engine=self,
+                        parallel_config=vllm_config.parallel_config,
+                    )
 
-            # Background Threads and Queues for IO. These enable us to
-            # overlap ZMQ socket IO with GPU since they release the GIL,
-            # and to overlap some serialization/deserialization with the
-            # model forward pass.
-            # Threads handle Socket <-> Queues and core_busy_loop uses Queue.
-            ready_event = threading.Event()
-            input_thread = threading.Thread(
-                target=self.process_input_sockets,
-                args=(
-                    addresses.inputs,
-                    addresses.coordinator_input,
-                    identity,
-                    ready_event,
-                ),
-                daemon=True,
-            )
-            input_thread.start()
+                # Background Threads and Queues for IO. These enable us to
+                # overlap ZMQ socket IO with GPU since they release the GIL,
+                # and to overlap some serialization/deserialization with the
+                # model forward pass.
+                # Threads handle Socket <-> Queues and core_busy_loop uses Queue.
+                ready_event = threading.Event()
+                input_thread = threading.Thread(
+                    target=self.process_input_sockets,
+                    args=(
+                        addresses.inputs,
+                        addresses.coordinator_input,
+                        identity,
+                        ready_event,
+                    ),
+                    daemon=True,
+                )
+                input_thread.start()
 
-            self.output_thread = threading.Thread(
-                target=self.process_output_sockets,
-                args=(
-                    addresses.outputs,
-                    addresses.coordinator_output,
-                    self.engine_index,
-                ),
-                daemon=True,
-            )
-            self.output_thread.start()
+                self.output_thread = threading.Thread(
+                    target=self.process_output_sockets,
+                    args=(
+                        addresses.outputs,
+                        addresses.coordinator_output,
+                        self.engine_index,
+                    ),
+                    daemon=True,
+                )
+                self.output_thread.start()
 
-            # Don't complete handshake until DP coordinator ready message is
-            # received.
-            while not ready_event.wait(timeout=10):
-                if not input_thread.is_alive():
-                    raise RuntimeError("Input socket thread died during startup")
-                assert addresses.coordinator_input is not None
-                logger.info("Waiting for READY message from DP Coordinator...")
+                # Don't complete handshake until DP coordinator ready message
+                # is received.
+                while not ready_event.wait(timeout=10):
+                    if not input_thread.is_alive():
+                        raise RuntimeError("Input socket thread died during startup")
+                    assert addresses.coordinator_input is not None
+                    logger.info("Waiting for READY message from DP Coordinator...")
+            except BaseException:
+                self._shutdown_executor_on_init_failure()
+                raise
 
     @contextmanager
     def _perform_handshakes(
