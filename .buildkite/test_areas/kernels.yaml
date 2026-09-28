@@ -47,7 +47,7 @@ steps:
       label: ":amd: (MI300) Core Operation Kernels Shard %N"
       dind: false
       device: mi300_1
-      timeout_in_minutes: 40
+      timeout_in_minutes: 45
       working_dir: "/vllm-workspace/tests"
       depends_on:
       - image-build-amd
@@ -143,6 +143,33 @@ steps:
   commands:
     - pytest -v -s kernels/test_fused_deepseek_v4_*.py
     - pytest -v -s models/test_deepseek_v4_mega_moe.py
+  mirror:
+    amd:
+      label: ":amd: (MI355) DeepSeek V4 MoE Integration"
+      dind: false
+      device: mi355_1
+      num_devices: 1
+      timeout_in_minutes: 20
+      working_dir: /vllm-workspace/tests
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - tests/models/test_deepseek_v4_vl_rocm.py
+      - vllm/models/deepseek_v4/amd/
+      - vllm/models/deepseek_v4/common/
+      - vllm/model_executor/layers/fused_moe/
+      - vllm/model_executor/layers/activation.py
+      - vllm/model_executor/layers/linear.py
+      - vllm/config/
+      - vllm/forward_context.py
+      - vllm/v1/worker/workspace.py
+      - vllm/_aiter_ops.py
+      - vllm/platforms/rocm.py
+      - vllm/envs.py
+      commands:
+      # Common qnorm/RoPE/cache kernels already run in the H100 AMD mirror.
+      # Pin the tested BF16 Triton routing and shared-expert path before imports.
+      - VLLM_ROCM_USE_AITER_MOE=0 pytest -v -s models/test_deepseek_v4_vl_rocm.py
 
 # Own job so mHC never shares a process with FlashInfer's import-time
 # ptxas override.
