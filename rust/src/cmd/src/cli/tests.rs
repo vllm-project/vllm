@@ -184,6 +184,7 @@ fn serve_args_forward_python_flags_with_separator() {
                         engine_ready_timeout_secs: 600,
                         tool_call_parser: Auto,
                         reasoning_parser: Auto,
+                        tool_strict_level: Auto,
                         renderer: Auto,
                         language_model_only: false,
                         max_logprobs: None,
@@ -199,6 +200,7 @@ fn serve_args_forward_python_flags_with_separator() {
                         enable_prompt_tokens_details: false,
                         enable_request_id_headers: false,
                         enable_scale_out: false,
+                        sse_keep_alive_interval: 0,
                         disable_log_stats: false,
                         served_model_name: [],
                         allowed_origins: JsonStringList(
@@ -1023,6 +1025,7 @@ fn frontend_args_accept_json() {
                         engine_ready_timeout_secs: 600,
                         tool_call_parser: None,
                         reasoning_parser: None,
+                        tool_strict_level: Auto,
                         renderer: Auto,
                         language_model_only: false,
                         max_logprobs: None,
@@ -1038,6 +1041,7 @@ fn frontend_args_accept_json() {
                         enable_prompt_tokens_details: false,
                         enable_request_id_headers: false,
                         enable_scale_out: false,
+                        sse_keep_alive_interval: 0,
                         disable_log_stats: false,
                         served_model_name: [],
                         allowed_origins: JsonStringList(
@@ -1693,6 +1697,7 @@ fn serve_args_accept_handshake_aliases() {
                         engine_ready_timeout_secs: 600,
                         tool_call_parser: Auto,
                         reasoning_parser: Auto,
+                        tool_strict_level: Auto,
                         renderer: Auto,
                         language_model_only: false,
                         max_logprobs: None,
@@ -1708,6 +1713,7 @@ fn serve_args_accept_handshake_aliases() {
                         enable_prompt_tokens_details: false,
                         enable_request_id_headers: false,
                         enable_scale_out: false,
+                        sse_keep_alive_interval: 0,
                         disable_log_stats: false,
                         served_model_name: [],
                         allowed_origins: JsonStringList(
@@ -1850,6 +1856,7 @@ fn serve_frontend_config_uses_dp_address_as_advertised_host() {
             },
             tool_call_parser: Auto,
             reasoning_parser: Auto,
+            tool_strict_level: Auto,
             renderer: Auto,
             language_model_only: false,
             chat_template: None,
@@ -1863,6 +1870,7 @@ fn serve_frontend_config_uses_dp_address_as_advertised_host() {
                 enable_prompt_tokens_details: false,
                 enable_request_id_headers: false,
                 enable_scale_out: false,
+                sse_keep_alive_interval: None,
             },
             cors: CorsConfig {
                 allow_origins: [
@@ -1942,6 +1950,7 @@ fn serve_frontend_config_keeps_tcp_transport_for_non_local_only_topology() {
             },
             tool_call_parser: Auto,
             reasoning_parser: Auto,
+            tool_strict_level: Auto,
             renderer: Auto,
             language_model_only: false,
             chat_template: None,
@@ -1955,6 +1964,7 @@ fn serve_frontend_config_keeps_tcp_transport_for_non_local_only_topology() {
                 enable_prompt_tokens_details: false,
                 enable_request_id_headers: false,
                 enable_scale_out: false,
+                sse_keep_alive_interval: None,
             },
             cors: CorsConfig {
                 allow_origins: [
@@ -2055,6 +2065,7 @@ fn frontend_config_uses_external_coordinator_when_coordinator_address_is_present
             },
             tool_call_parser: None,
             reasoning_parser: None,
+            tool_strict_level: Auto,
             renderer: Auto,
             language_model_only: false,
             chat_template: None,
@@ -2068,6 +2079,7 @@ fn frontend_config_uses_external_coordinator_when_coordinator_address_is_present
                 enable_prompt_tokens_details: false,
                 enable_request_id_headers: false,
                 enable_scale_out: false,
+                sse_keep_alive_interval: None,
             },
             cors: CorsConfig {
                 allow_origins: [

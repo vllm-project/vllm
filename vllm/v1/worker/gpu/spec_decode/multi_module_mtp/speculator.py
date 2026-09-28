@@ -166,6 +166,7 @@ class MultiModuleMTPSpeculator(DraftModelSpeculator):
             input_batch.idx_mapping,
             temperature,
             seeds,
+            dummy_run=dummy_run,
         )
 
         num_tokens = input_batch.num_tokens
