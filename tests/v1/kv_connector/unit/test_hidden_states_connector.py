@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """CPU-only unit tests for ExampleHiddenStatesConnector KV-cache-group logic."""
 
+from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
@@ -9,6 +10,7 @@ import torch
 
 from vllm.distributed.kv_transfer.kv_connector.v1.example_hidden_states_connector import (  # noqa: E501
     ExampleHiddenStatesConnector,
+    extract_from_kv_cache,
 )
 from vllm.v1.core.kv_cache_utils import get_kv_cache_groups
 from vllm.v1.kv_cache_interface import (
@@ -16,9 +18,11 @@ from vllm.v1.kv_cache_interface import (
     HiddenStateCacheSpec,
     KVCacheGroupSpec,
     KVCacheLayout,
+    KVCacheTensor,
     MambaSpec,
     MLAAttentionSpec,
     SlidingWindowMLASpec,
+    create_kv_cache_views,
 )
 
 
@@ -137,10 +141,13 @@ def test_hidden_state_group_isolated_from_packed_mla_groups():
     )
 
 
-def test_hidden_state_group_isolated_from_packed_mixed_page_groups():
+@pytest.mark.parametrize("head_size, expected_block_size", [(2048, 2), (65536, 1)])
+def test_hidden_state_group_isolated_from_packed_mixed_page_groups(
+    head_size, expected_block_size
+):
     # Packed grouping keeps groups with unequal page sizes (blocks are strided
     # by the widest group), so the hidden group is appended without padding.
-    hidden = _hidden(16)
+    hidden = replace(_hidden(16), head_size=head_size)
     spec = {
         "layers.0.attn": _full(16),
         "layers.1.mamba": MambaSpec(
@@ -164,11 +171,47 @@ def test_hidden_state_group_isolated_from_packed_mixed_page_groups():
         if isinstance(group.kv_cache_spec, HiddenStateCacheSpec)
     ]
     assert len(hidden_group_ids) == 1
-    assert groups[hidden_group_ids[0]].kv_cache_spec == hidden
+    hidden_spec = groups[hidden_group_ids[0]].kv_cache_spec
+    assert hidden_spec.block_size == expected_block_size
+    assert hidden_spec.page_size_bytes <= max(
+        _full(16).page_size_bytes, hidden.page_size_bytes // hidden.block_size
+    )
     cfg = SimpleNamespace(kv_cache_groups=groups)
     assert (
         ExampleHiddenStatesConnector._find_cache_kv_group_id(cfg) == hidden_group_ids[0]
     )
+
+
+@pytest.mark.parametrize("layout", [KVCacheLayout.LBNHC, KVCacheLayout.BLHNC])
+def test_hidden_state_writes_preserve_native_pages(layout):
+    """The extractor and connector must respect packed offsets and strides."""
+    from vllm.model_executor.models.extract_hidden_states import basic_cache
+
+    spec = HiddenStateCacheSpec(
+        block_size=4, num_kv_heads=3, head_size=8, dtype=torch.float32
+    )
+    num_blocks = 7
+    native_bytes = 64
+    stride = native_bytes + spec.page_size_bytes
+    raw = torch.full((num_blocks * stride,), 42, dtype=torch.int8)
+    tensor = KVCacheTensor(
+        size=raw.numel(),
+        layers=["hidden"],
+        offset=native_bytes,
+        block_stride=stride,
+        layer_stride=spec.page_size_bytes,
+    )
+    (cache,) = create_kv_cache_views(raw, spec, num_blocks, layout, tensor)
+    # Noncontiguous, interleaved blocks from two requests, including a partial
+    # final block. Block zero is reserved for padding writes.
+    slots = torch.tensor([20, 21, 22, 23, 8, 9, 16, 17, 18])
+    expected = torch.arange(9 * 3 * 8, dtype=torch.float32).reshape(9, 3, 8)
+    basic_cache(expected, cache, slots)
+    basic_cache(torch.zeros(1, 3, 8), cache, torch.tensor([-1]))
+    torch.testing.assert_close(extract_from_kv_cache(cache, slots, 9), expected)
+    assert (raw.view(num_blocks, stride)[:, :native_bytes] == 42).all()
+    # Untouched pages must also survive the writes.
+    assert (raw.view(num_blocks, stride)[[1, 3, 6]] == 42).all()
 
 
 # ---- abort-path robustness --------------------------------------------------

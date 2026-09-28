@@ -612,24 +612,5 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
 
     @classmethod
     def get_required_kvcache_layout(cls, vllm_config: "VllmConfig") -> str | None:
-        """Get the required KV cache layout for this connector.
-
-        Args:
-            vllm_config (VllmConfig): the vllm config.
-
-        Returns:
-            str: the required KV cache layout. e.g. HND, or NHD.
-            None if the connector does not require a specific layout.
-
-        """
-        if cls is KVConnectorBase_V1:
-            raise TypeError(
-                "get_required_kvcache_layout should not be called "
-                "on the abstract base class"
-            )
-        # LBNHC means we have (num_tokens, num_heads)
-        # LBHNC means we have (num_heads, num_tokens)
-        # For now, we only support LBNHC layout since this keeps the
-        # hidden states for each token together in memory.
-        # LBHNC is primarily used when sharding heads across devices.
-        return "LBNHC"
+        """Index logical cache views, independently of their physical strides."""
+        return None
