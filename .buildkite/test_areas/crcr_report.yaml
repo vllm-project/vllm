@@ -1,13 +1,31 @@
 group: CRCR Report
+# The report waits for the rest of the build (see crcr-report.sh), so gate it on
+# the long pole rather than letting it wait on an agent. A torch-nightly build
+# is tail-heavy: of 347 jobs in build 90830, 344 finished inside 3.5h and three
+# stragglers stretched it to 12.7h, with lm-eval-large-models-4xh100 last in
+# both 90830 (+760 min) and 90640 (+799 min) by a margin of hours.
+#
+# Depending on it means Buildkite does not schedule this step until the build is
+# nearly over, so the agent polls briefly instead of idling ~13h. It is a
+# scheduling hint, not the correctness mechanism: the script still waits for
+# every job, so if this stops being the slowest step the report is late to start
+# but still correct.
 depends_on:
   - image-build-cpu
+  - lm-eval-large-models-4xh100
 steps:
   - label: ":satellite: Report nightly results to CRCR"
     key: crcr-report
     if: build.env("TORCH_NIGHTLY") == "1"
     soft_fail: true
     allow_dependency_failure: true
-    timeout_in_minutes: 15
+    # depends_on defers the start to near the end of the build, so in the normal
+    # case the script polls for minutes. This only has to cover the case where
+    # the long pole finishes early and something else is still running, so it is
+    # sized against the whole build rather than the expected wait. The script's
+    # own deadline (CRCR_MAX_WAIT_S, 13h) trips first and still sends a partial
+    # report; this is the backstop that stops the job outliving the build.
+    timeout_in_minutes: 840
     device: cpu-small
     commands:
       - bash /vllm-workspace/.buildkite/scripts/crcr-report.sh
