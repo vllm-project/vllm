@@ -5,6 +5,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 import torch.nn as nn
+from torch.testing._internal.two_tensor import TwoTensor
 
 from vllm.config import ParallelConfig
 from vllm.model_executor import parameter
@@ -61,6 +62,20 @@ def test_shared_weight_partitions_are_hashed_and_reset(monkeypatch):
     zero_weights(model)
     assert set(before) == {"transform.0"}
     assert compute_tensor_digests(model) != before
+
+
+def test_tensor_subclass_inner_tensors_are_hashed_and_reset():
+    model = nn.Module()
+    model.weight = nn.Parameter(
+        TwoTensor(torch.ones(2, 2), torch.full((2, 2), 2.0)), requires_grad=False
+    )
+
+    before = compute_tensor_digests(model)
+    zero_weights(model)
+    assert set(before) == {"weight.a", "weight.b"}
+    assert all(
+        before[name] != digest for name, digest in compute_tensor_digests(model).items()
+    )
 
 
 def test_dense_dp_replicas_get_distinct_key_prefixes(monkeypatch):

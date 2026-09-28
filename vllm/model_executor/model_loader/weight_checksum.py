@@ -7,18 +7,26 @@ from collections.abc import Iterator
 
 import torch
 import torch.nn as nn
+from torch.utils._python_dispatch import is_traceable_wrapper_subclass
 
 from vllm.model_executor.parameter import SharedWeightParameter
 
 
+def _tensors(name: str, tensor: torch.Tensor) -> Iterator[tuple[str, torch.Tensor]]:
+    # Both keep their bytes in inner tensors (e.g. TorchAO's qdata and scale).
+    if isinstance(tensor, SharedWeightParameter):
+        for index, partition in tensor.partitions.items():
+            yield from _tensors(f"{name}.{index}", partition)
+    elif is_traceable_wrapper_subclass(tensor):
+        for attr in tensor.__tensor_flatten__()[0]:
+            yield from _tensors(f"{name}.{attr}", getattr(tensor, attr))
+    else:
+        yield name, tensor
+
+
 def _weights(model: nn.Module) -> Iterator[tuple[str, torch.Tensor]]:
     for name, param in model.named_parameters():
-        if isinstance(param, SharedWeightParameter):
-            # Its tensors live in partitions; its own data is empty.
-            for index, partition in param.partitions.items():
-                yield f"{name}.{index}", partition
-        else:
-            yield name, param
+        yield from _tensors(name, param)
 
 
 def compute_tensor_digests(model: nn.Module) -> dict[str, str]:
