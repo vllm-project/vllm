@@ -31,7 +31,6 @@ from vllm.v1.attention.backends.mla.indexer import (
     DeepseekV41IndexerBackend,
 )
 from vllm.v1.attention.ops.rocm_paged_mxfp4_indexer import (
-    MAX_LOGITS_BYTES,
     build_rocm_mxfp4_decode_schedule,
     rocm_mxfp4_consumer_rows,
     rocm_mxfp4_decode_schedule_words,
@@ -216,10 +215,9 @@ def split_prefill_chunks(
     ``max_logits_bytes``. A request too wide to launch whole is cut on its
     query rows.
     """
-    budget = min(max_logits_bytes, MAX_LOGITS_BYTES)
 
     def max_rows(width: int) -> int:
-        return max(1, budget // (4 * max(width, 1)))
+        return max(1, max_logits_bytes // (4 * max(width, 1)))
 
     chunks: list[tuple[slice, slice]] = []
     end = 0

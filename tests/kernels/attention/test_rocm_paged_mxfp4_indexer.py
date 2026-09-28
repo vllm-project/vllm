@@ -27,6 +27,7 @@ from vllm.models.deepseek_v41.amd.rocm import (
 )
 from vllm.platforms.rocm import on_gfx950
 from vllm.utils.math_utils import cdiv
+from vllm.utils.torch_utils import set_random_seed
 from vllm.v1.attention.backends.mla.indexer import (
     DeepseekV32IndexerPrefillChunkMetadata,
 )
@@ -74,12 +75,11 @@ class _Case:
     ratio-1 pages side by side in every block) and into natural-order caches
     the reference reads. The bf16 inputs are kept for the end-to-end test."""
 
-    def __init__(self, seq_lens, block, seed=0):
+    def __init__(self, seq_lens, block):
         from aiter.ops.triton.fusions.k_norm_rope_mxfp4_cache import (
             k_norm_rope_mxfp4_cache,
         )
 
-        torch.manual_seed(seed)
         self.seq_lens = seq_lens
         num_blocks = sum(cdiv(n, block) for n in seq_lens) + 3
         perm = torch.randperm(num_blocks)
@@ -292,6 +292,7 @@ BLOCKS = pytest.mark.parametrize("block", [128, 64])
 def test_k_store_stays_inside_its_pages(block):
     """The writer touches only its pages of the block-major pool. What they hold
     is checked by the layer tests, which read them back through aiter's kernel."""
+    set_random_seed(0)
     case = _Case([700, 333], block)
     assert int(case.pool[~case.page_bytes].count_nonzero()) == 0
 
@@ -302,6 +303,7 @@ def test_k_store_stays_inside_its_pages(block):
     [(8, 4096, 512), (128, 4096, 512), (8, 16384, 2048)],
 )
 def test_topk_matches_torch_on_both_kernels(rows, width, k):
+    set_random_seed(0)
     logits = torch.randn(rows, width, device=DEVICE)
     lengths = torch.randint(1, width + 1, (rows,), dtype=torch.int32, device=DEVICE)
     lengths[0] = k // 2  # shorter than k, so the rest of the row pads with -1
@@ -425,6 +427,7 @@ def _run_layers(monkeypatch, case, rows, metadata):
     ids=["native6", "native2", "padded", "ragged"],
 )
 def test_decode_layers_match_reference(monkeypatch, block, query_lens):
+    set_random_seed(0)
     next_n = max(query_lens)
     case = _Case([q and n for q, n in zip(query_lens, [900, 333, 610, 1200])], block)
     # a padding request has next_n rows of its own and no context
@@ -460,6 +463,7 @@ def test_decode_layers_match_reference(monkeypatch, block, query_lens):
 def test_prefill_layers_match_reference(
     monkeypatch, seq_lens, new_tokens, chunks, gather_rows, block
 ):
+    set_random_seed(0)
     case = _Case(seq_lens, block)
     rows = [
         (req, n - q + i)
@@ -478,8 +482,9 @@ def test_prefill_layers_match_reference(
 
 
 def _rope_gptj(x, cos_sin, positions):
-    """GPT-J RoPE on the last 64 dims, as the indexer rotates Q and K."""
-    x = x.float().clone()
+    """GPT-J RoPE on the last 64 dims, as the indexer rotates Q and K: bf16 in
+    and out."""
+    x = x.bfloat16().float()
     cos, sin = cos_sin[positions].chunk(2, dim=-1)
     if x.dim() == 3:
         cos, sin = cos[:, None], sin[:, None]
@@ -487,17 +492,19 @@ def _rope_gptj(x, cos_sin, positions):
     even, odd = rot[..., 0::2].clone(), rot[..., 1::2].clone()
     rot[..., 0::2] = even * cos - odd * sin
     rot[..., 1::2] = odd * cos + even * sin
-    return x
+    return x.bfloat16()
 
 
 def _mxfp4_round_trip(x):
     """MXFP4 round trip of x, rounded as the writers do: a scale of
-    2^ceil(log2(amax / 6)) per 32 values, then the nearest e2m1 value."""
+    2^ceil(log2(amax / 6)) per 32 values, then the nearest e2m1 value, ties to
+    even."""
     blocks = x.float().unflatten(-1, (-1, 32))
     amax = blocks.abs().amax(-1, keepdim=True).clamp(min=2**-126)
     scale = torch.exp2(torch.ceil(torch.log2(amax / 6)))
     y = (blocks / scale).clamp(-6, 6)
-    grid = _E2M1.to(x.device)
+    # Even codes first: argmin keeps the first of two equal distances.
+    grid = torch.cat([_E2M1[0::2], _E2M1[1::2]]).to(x.device)
     idx = (y.abs()[..., None] - grid).abs().argmin(-1)
     return (grid[idx] * y.sign() * scale).flatten(-2)
 
@@ -530,13 +537,14 @@ def test_selection_from_bf16_matches_torch(monkeypatch, step, ratio, block):
     """End to end from bf16 K and Q: vLLM's MXFP4 K store and Q quant, the
     paged pool, metadata from the planning functions the builder calls, and
     the indexer op pick what the same MXFP4 math picks in torch."""
+    set_random_seed(0)
     if step == "decode":
-        case = _Case([3000, 2600, 1900, 3500, 1200, 2200, 3900, 1600], block, seed=1)
+        case = _Case([3000, 2600, 1900, 3500, 1200, 2200, 3900, 1600], block)
         rows = [(req, n - 1) for req, n in enumerate(case.seq_lens)]
         metadata = _decode_metadata(case, rows, ratio, [1] * len(rows))
     else:
         new_tokens = [300, 200, 250]
-        case = _Case([1500, 900, 2000], block, seed=1)
+        case = _Case([1500, 900, 2000], block)
         rows = [
             (req, n - q + i)
             for req, (n, q) in enumerate(zip(case.seq_lens, new_tokens))
@@ -588,5 +596,4 @@ def test_selection_from_bf16_matches_torch(monkeypatch, step, ratio, block):
             q_ref[mine], w_ref[mine], _torch_keys(case, ratio, req), ends[mine], TOPK
         )
         agree.append(_recall(out[mine], ref))
-    # Only rounding ties separate the two, so nearly every pick matches.
-    assert torch.cat(agree).mean().item() >= 0.9
+    assert torch.cat(agree).mean().item() >= 0.99

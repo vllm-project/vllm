@@ -45,9 +45,6 @@ if TYPE_CHECKING:
     )
 
 MXFP4_BLOCK_SIZE = 32
-# A logits tensor stays under 2 GiB: Triton's AMD backend specializes pointers
-# to storage below that, and buffer loads and stores take 32-bit offsets.
-MAX_LOGITS_BYTES = 2**31 - 1
 
 
 @functools.cache
@@ -186,7 +183,7 @@ def rocm_mxfp4_consumer_rows(num_candidate_cols: int) -> int:
     """Query rows per candidate-consumer launch. Its logits are [rows, pool]
     fp32 whatever the context, so the logits budget alone sizes it."""
     budget = envs.VLLM_SPARSE_INDEXER_MAX_LOGITS_MB * 1024 * 1024
-    return max(1, min(budget, MAX_LOGITS_BYTES) // (4 * num_candidate_cols))
+    return max(1, budget // (4 * num_candidate_cols))
 
 
 def reserve_rocm_mxfp4_indexer_workspace(

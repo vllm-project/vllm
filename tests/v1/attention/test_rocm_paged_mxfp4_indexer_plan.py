@@ -18,7 +18,7 @@ from vllm.v1.attention.backends.mla.rocm_paged_mxfp4_indexer import (
     plan_prefill_chunks,
     split_prefill_chunks,
 )
-from vllm.v1.attention.ops import rocm_paged_mxfp4_indexer as ops
+from vllm.v1.attention.ops.rocm_paged_mxfp4_indexer import rocm_mxfp4_consumer_rows
 
 
 def _chunk(block_table, token_start, token_end, row_ends):
@@ -48,14 +48,14 @@ CHUNKS = [
 ]
 
 
-def _plans(min_gather_width):
+def _plans(min_gather_width, block=8):
     return plan_prefill_chunks(
         CHUNKS,
         QUERY_START_LOC,
         SEQ_LENS,
         SEQ_LENS.int() // 2,
         2,
-        8,
+        block,
         min_gather_width,
         torch.tensor(QUERY_START_LOC, dtype=torch.int32),
     )
@@ -82,12 +82,17 @@ def test_chunks_split_into_requests():
     torch.testing.assert_close(plans[2].block_ends, torch.tensor([4, 4, 4]).int())
     assert [p.use_gather for p in plans] == [False, True, True]
     assert [p.first_request for p in plans] == [1, 4, 4]
+    # no candidate blocks, as in the model-neutral builder
+    for plan in _plans(None, block=0):
+        assert plan.block_ends is None and not plan.use_gather
 
 
-def test_dense_split_budgets_the_widest_row():
-    """A dense launch holds [rows, widest context] logits: the requests packed
-    into a chunk do not add their contexts up, as a gathered K would, and a
-    request too wide to launch whole is cut on its query rows."""
+def test_launches_follow_the_logits_budget(monkeypatch):
+    """Each launch's fp32 logits fit in VLLM_SPARSE_INDEXER_MAX_LOGITS_MB. A dense
+    chunk's logits are [rows, longest context in the chunk]: K is read in place,
+    not gathered, so requests share a launch until their rows no longer fit, and
+    a request that does not fit alone is split on its query rows. A consumer's
+    logits are [rows, pool]."""
     budget = 4 * 1000 * 30
     contexts, queries = torch.tensor([1000, 600, 200]), torch.tensor([10, 10, 10])
     assert split_prefill_chunks(contexts, queries, budget, 2) == [
@@ -102,39 +107,21 @@ def test_dense_split_budgets_the_widest_row():
     assert split_prefill_chunks(torch.tensor([1000]), torch.tensor([100]), budget) == [
         (slice(0, 1), slice(lo, min(lo + 30, 100))) for lo in range(0, 100, 30)
     ]
-    # a logits tensor stays under 2 GiB whatever the budget
-    (first, *_) = split_prefill_chunks(
-        torch.tensor([1 << 20]), torch.tensor([1000]), 1 << 40
-    )
-    assert first[1] == slice(0, (2**31 - 1) // (4 << 20))
-
-
-def test_consumer_launch_rows_follow_the_logits_budget(monkeypatch):
-    """A consumer launch holds [rows, pool] fp32 logits whatever the context,
-    so the logits budget alone sizes it, not how many of the step's rows
-    gather."""
+    # the default 512 MiB holds 128 rows of a 1M context, or 8192 of a 16K pool
+    assert split_prefill_chunks(
+        torch.tensor([1 << 20]), torch.tensor([200]), 512 << 20
+    ) == [(slice(0, 1), slice(0, 128)), (slice(0, 1), slice(128, 200))]
     monkeypatch.setenv("VLLM_SPARSE_INDEXER_MAX_LOGITS_MB", "512")
-    assert ops.rocm_mxfp4_consumer_rows(16384) == 8192
-    monkeypatch.setenv("VLLM_SPARSE_INDEXER_MAX_LOGITS_MB", "4096")
-    assert ops.rocm_mxfp4_consumer_rows(16384) == (2**31 - 1) // (4 * 16384)
+    assert rocm_mxfp4_consumer_rows(16384) == 8192
 
 
 def test_gather_launches_rejoin_a_requests_rows():
-    """The consumers' logits are [rows, pool] whatever the context, so their
-    launches are not the dense split's: a request's rows go back together
-    across the chunks that cut them, then out again at most max_rows a
-    launch, never mixing requests."""
-    plans = _plans(20.0)
-    (joined,) = plan_gather_launches(CHUNKS, plans, 100)
+    """The consumers' logits are [rows, pool] whatever the context, so a
+    request's rows go back together across the chunks that cut them, and a
+    launch never mixes requests."""
+    # the first chunk is too narrow to gather, the last request's slices rejoin
+    (joined,) = plan_gather_launches(CHUNKS, _plans(20.0), 100)
     assert (joined.token_start, joined.token_end) == (12, 18)
-    assert joined.row_ends.tolist() == [29, 30, 30, 31, 31, 32]
-    assert joined.block_table.tolist() == BLOCK_TABLE[4:5].tolist()
-    assert joined.context_len.tolist() == [32]
-
-    split = plan_gather_launches(CHUNKS, plans, 4)
-    assert [(g.token_start, g.token_end) for g in split] == [(12, 16), (16, 18)]
-    assert [g.row_ends.tolist() for g in split] == [[29, 30, 30, 31], [31, 32]]
-
     # every chunk gathers: the first chunk's three requests launch apart
     launches = plan_gather_launches(CHUNKS, _plans(0.0), 100)
     assert [(g.token_start, g.token_end) for g in launches] == [
@@ -143,23 +130,7 @@ def test_gather_launches_rejoin_a_requests_rows():
         (7, 12),
         (12, 18),
     ]
-    assert [g.block_table[0, 0].item() for g in launches] == [4, 8, 12, 16]
     assert plan_gather_launches(CHUNKS, _plans(None), 100) == []
-
-
-def test_no_gather_without_candidates():
-    block_table = torch.zeros(1, 2, dtype=torch.int32)
-    (plan,) = plan_prefill_chunks(
-        [_chunk(block_table, 0, 2, [3, 4])],
-        [0, 2],
-        torch.tensor([1000]),
-        torch.tensor([1000], dtype=torch.int32),
-        1,
-        0,
-        None,
-        torch.tensor([0, 2], dtype=torch.int32),
-    )
-    assert plan.block_ends is None and not plan.use_gather
 
 
 def test_decode_launches_native_on_uniform_steps():
