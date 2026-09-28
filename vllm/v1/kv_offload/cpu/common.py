@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from dataclasses import dataclass
-from typing import ClassVar
 
 import numpy as np
 
@@ -31,26 +30,17 @@ class CPULoadStoreSpec(BlockIDsLoadStoreSpec):
 
 @dataclass(frozen=True)
 class CPUOffloadingInfo(ConfigInfo):
-    """Static, per-engine facts about the CPU offload tier.
+    """Static facts about the CPU offload tier."""
 
-    CPUOffloadingManager fills the values through
-    OffloadingManager.config_info(), and CPUOffloadingSpec declares the names
-    through OffloadingSpec.config_info_keys(). Document every field in
-    docs/features/kv_offloading_usage.md.
-
-    """
-
-    key_prefix: ClassVar[str] = "cpu_"
-
-    # Chunk slots in the tier. Chunks, not GPU blocks. See blocks_per_chunk.
-    num_chunks: int
+    # Chunk slots in the tier. Chunks, not GPU blocks. See cpu_blocks_per_chunk.
+    cpu_num_chunks: int
     # GPU blocks for each chunk: the chunk-to-block conversion factor.
-    blocks_per_chunk: int
+    cpu_blocks_per_chunk: int
     # Page-aligned bytes of one chunk, or None from a caller that does not
-    # report it. With num_chunks it gives the exact size of the tier in bytes,
-    # the only capacity that holds for every model shape.
-    kv_bytes_per_chunk: int | None
+    # report it. With cpu_num_chunks it gives the exact size of the tier in
+    # bytes, the only capacity that holds for every model shape.
+    cpu_kv_bytes_per_chunk: int | None
     # Upper bound on the KV tokens the tier holds, over the request lengths up
     # to max_model_len. None when max_model_len is not known. See
-    # CPUOffloadingManager._capacity_tokens_at_max_len.
-    capacity_tokens_at_max_len: int | None
+    # _capacity_tokens_at_max_len in cpu/manager.py.
+    cpu_capacity_tokens_at_max_len: int | None

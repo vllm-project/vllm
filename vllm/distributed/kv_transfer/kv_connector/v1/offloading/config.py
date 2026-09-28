@@ -4,19 +4,18 @@
 
 from typing import TYPE_CHECKING
 
-from vllm.distributed.kv_transfer.kv_connector.v1.offloading.scheduler import (
-    get_sliding_window_size_in_chunks,
-)
-from vllm.utils.math_utils import round_up
+from vllm.utils.math_utils import cdiv, round_up
 from vllm.v1.core.kv_cache_utils import (
     resolve_dcp_kv_block_size,
     resolve_kv_cache_block_sizes,
 )
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
+    ChunkedLocalAttentionSpec,
     FullAttentionSpec,
     KVCacheGroupRole,
     KVCacheSpec,
+    MambaSpec,
     MLAAttentionSpec,
     SlidingWindowMLASpec,
     SlidingWindowSpec,
@@ -57,6 +56,32 @@ def _group_kv_bytes_per_block(group: "KVCacheGroupSpec") -> int:
     if isinstance(spec, UniformTypeKVCacheSpecs):
         return spec.page_size_bytes
     return spec.page_size_bytes * len(group.layer_names)
+
+
+def get_sliding_window_size_in_chunks(
+    kv_cache_spec: KVCacheSpec, tokens_per_chunk: int
+) -> int | None:
+    if isinstance(kv_cache_spec, SlidingWindowSpec):
+        assert kv_cache_spec.sliding_window > 0
+        return max(
+            cdiv(kv_cache_spec.sliding_window, tokens_per_chunk),
+            cdiv(
+                kv_cache_spec.sliding_window - 1 + kv_cache_spec.extra_retained_tokens,
+                tokens_per_chunk,
+            ),
+        )
+
+    if isinstance(kv_cache_spec, ChunkedLocalAttentionSpec):
+        # Attention never reaches back past one chunk
+        assert kv_cache_spec.attention_chunk_size > 0
+        return cdiv(kv_cache_spec.attention_chunk_size, tokens_per_chunk)
+
+    if isinstance(kv_cache_spec, MambaSpec):
+        # Mamba depends on a single state
+        return 1
+
+    assert isinstance(kv_cache_spec, FullAttentionSpec)
+    return None
 
 
 def build_offloading_config(
