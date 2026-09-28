@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from vllm.engine.protocol import StreamingInput
-from vllm.outputs import RequestOutput
+from vllm.outputs import STREAM_FINISHED, RequestOutput
 from vllm.sampling_params import RequestOutputKind, SamplingParams
 from vllm.v1.engine.async_llm import AsyncLLM
 from vllm.v1.engine.output_processor import RequestOutputCollector
@@ -170,3 +170,31 @@ async def test_generate_with_async_generator():
     assert outputs[2].finished is True
     # Both inputs were processed
     assert inputs_received == ["Hello", " world"]
+
+
+@pytest.mark.asyncio
+async def test_empty_input_stream_finishes_without_engine_request():
+    llm = AsyncLLM.__new__(AsyncLLM)
+    llm._validate_streaming_input_sampling_params = MagicMock()
+    llm.get_supported_tasks = AsyncMock(return_value=("generate",))
+    llm._run_output_handler = MagicMock()
+    llm._add_request = AsyncMock()
+
+    final_req = MagicMock()
+    final_req.request_id = "request-int"
+    llm.input_processor = MagicMock()
+    llm.input_processor.process_inputs.return_value = final_req
+
+    async def empty_stream():
+        return
+        yield  # pragma: no cover
+
+    queue = await llm._add_streaming_input_request(
+        "request", empty_stream(), SamplingParams(max_tokens=4)
+    )
+    task = queue._input_stream_task
+    assert task is not None
+    await task
+
+    assert queue.get_nowait() is STREAM_FINISHED
+    llm._add_request.assert_not_awaited()
