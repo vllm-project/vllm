@@ -32,15 +32,17 @@ from vllm.utils.torch_utils import (
 )
 
 if TYPE_CHECKING:
-    from transformers import PretrainedConfig
+    from transformers import PreTrainedConfig
     from transformers.conversion_mapping import WeightRenaming
 
-    from vllm.config.model import ModelConfig
     from vllm.model_executor.layers.quantization import QuantizationConfig
 
 logger = init_logger(__name__)
 
 ShardId: TypeAlias = str | int | tuple[int, ...]
+"""One shard of a stacked parameter. A tuple is a single contiguous span."""
+ShardIds: TypeAlias = ShardId | list[ShardId]
+"""One shard, or a list of shards the same weight is loaded into in turn."""
 
 
 @dataclass
@@ -52,7 +54,9 @@ class WeightsMapper:
     orig_to_new_renaming: list["WeightRenaming"] = field(default_factory=list)
     orig_to_new_regex: Mapping[re.Pattern, str | None] = field(default_factory=dict)
     orig_to_new_substr: Mapping[str, str | None] = field(default_factory=dict)
-    orig_to_new_stacked: Mapping[str, tuple[str, ShardId]] = field(default_factory=dict)
+    orig_to_new_stacked: Mapping[str, tuple[str, ShardIds]] = field(
+        default_factory=dict
+    )
     orig_to_new_prefix: Mapping[str, str | None] = field(default_factory=dict)
     orig_to_new_suffix: Mapping[str, str | None] = field(default_factory=dict)
 
@@ -73,16 +77,21 @@ class WeightsMapper:
             orig_to_new_suffix={**self.orig_to_new_suffix, **other.orig_to_new_suffix},
         )
 
-    def _map_name(self, key: str) -> str | None:
-        """Map a weight name (backward-compatible wrapper that discards shard_id)."""
+    def map_name(self, key: str) -> str | None:
+        """Map a weight name; returns ``None`` if the weight should be ignored."""
         result = self._map_name_with_shard(key)
         return result[0] if result is not None else None
 
-    def _map_name_with_shard(self, key: str) -> tuple[str, ShardId | None] | None:
+    def _map_name(self, key: str) -> str | None:
+        """Backward-compatible alias for :meth:`map_name`."""
+        return self.map_name(key)
+
+    def _map_name_with_shard(self, key: str) -> tuple[str, ShardIds | None] | None:
         """Map a weight name and extract any shard_id metadata.
 
         Returns:
-            (mapped_name, shard_id) if the name should be kept.
+            (mapped_name, shard_id) if the name should be kept. A list of shard
+            ids means the weight is loaded into each of those shards in turn.
             None if the name should be dropped.
 
         """
@@ -113,7 +122,7 @@ class WeightsMapper:
 
                 key = key.replace(substr, new_key, 1)
 
-        shard_id: ShardId | None = None
+        shard_id: ShardIds | None = None
         for substr, (new_key, new_shard_id) in self.orig_to_new_stacked.items():
             if substr in key:
                 key = key.replace(substr, new_key, 1)
@@ -143,9 +152,16 @@ class WeightsMapper:
             if result is None:
                 continue
             out_name, shard_id = result
-            if shard_id is not None:
-                data.shard_id = shard_id
-            yield out_name, data
+            if shard_id is None:
+                yield out_name, data
+                continue
+            shard_ids = shard_id if isinstance(shard_id, list) else [shard_id]
+            for i, one_shard_id in enumerate(shard_ids):
+                # Each shard carries its own id, so extra shards need their own
+                # tensor object; `detach` aliases the storage instead of copying.
+                shard_data = data if i == 0 else data.detach()
+                shard_data.shard_id = one_shard_id
+                yield out_name, shard_data
 
     def apply_list(self, values: list[str]) -> list[str]:
         return [
@@ -320,7 +336,7 @@ class AutoWeightsLoader:
         """
         # Add persistent registered buffers.
         # Non-persistent buffers are excluded, matching PyTorch state_dict().
-        non_persistent = getattr(module, "_non_persistent_buffers_set", set())
+        non_persistent: set[str] = getattr(module, "_non_persistent_buffers_set", set())
         for buf_name, buf in module.named_buffers(recurse=False):
             if buf_name not in child_params and buf_name not in non_persistent:
                 child_params[buf_name] = buf
@@ -541,7 +557,7 @@ def maybe_fuse_shared_experts(
 
 
 def get_spec_layer_idx_from_weight_name(
-    config: "ModelConfig", weight_name: str
+    config: "PreTrainedConfig", weight_name: str
 ) -> int | None:
     """Return the MTP layer index a weight belongs to, or None.
 
@@ -570,7 +586,7 @@ def get_spec_layer_idx_from_weight_name(
 
 
 def skip_spec_layers(
-    weights: Iterable[tuple[str, torch.Tensor]], config: "ModelConfig"
+    weights: Iterable[tuple[str, torch.Tensor]], config: "PreTrainedConfig"
 ) -> Iterable[tuple[str, torch.Tensor]]:
     """Drop MTP spec-layer weights (loaded by the MTP head, not the base model).
 
@@ -593,7 +609,7 @@ def init_vllm_registered_model(
     vllm_config: VllmConfig,
     *,
     prefix: str = "",
-    hf_config: "PretrainedConfig | None" = None,
+    hf_config: "PreTrainedConfig | None" = None,
     architectures: list[str] | None = None,
 ) -> nn.Module:
     """Helper function to initialize an inner model registered to vLLM,
@@ -612,11 +628,11 @@ def init_vllm_registered_model(
 
 
 @overload
-def flatten_bn(x: torch.Tensor) -> torch.Tensor: ...
+def flatten_bn(x: list[torch.Tensor]) -> list[torch.Tensor]: ...
 
 
 @overload
-def flatten_bn(x: list[torch.Tensor]) -> list[torch.Tensor]: ...
+def flatten_bn(x: torch.Tensor) -> torch.Tensor: ...
 
 
 @overload
@@ -956,7 +972,9 @@ def get_draft_quant_config(vllm_config: VllmConfig) -> "QuantizationConfig | Non
         The draft model's config if available, None otherwise.
 
     """
-    draft_model_config = vllm_config.speculative_config.draft_model_config
+    speculative_config = vllm_config.speculative_config
+    assert speculative_config is not None
+    draft_model_config = speculative_config.draft_model_config
     draft_load_config = vllm_config.load_config
 
     return (
