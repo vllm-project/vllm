@@ -6,11 +6,12 @@ import vllm.v1.worker.cpu.shm  # noqa # isort: skip
 
 import os
 
+import psutil
 import torch
 
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
-from vllm.utils.mem_utils import format_gib, get_cpu_memory
+from vllm.utils.mem_utils import format_gib
 from vllm.utils.torch_utils import set_random_seed
 from vllm.v1.worker.gpu_worker import Worker, init_worker_distributed_environment
 from vllm.v1.worker.simulated.model_runner import SimulatedCPUModelRunner
@@ -26,7 +27,12 @@ class SimulatedCPUWorker(Worker):
         self.device = torch.device("cpu")
         self.parallel_config.disable_custom_all_reduce = True
 
-        os.environ["VLLM_DIST_IDENT"] = self.distributed_init_method.split(":")[-1]
+        init_method = self.distributed_init_method
+        os.environ["VLLM_DIST_IDENT"] = (
+            os.path.basename(init_method.removeprefix("file://"))
+            if init_method.startswith("file://")
+            else init_method.split(":")[-1]
+        )
         init_worker_distributed_environment(
             self.vllm_config,
             self.rank,
@@ -43,7 +49,7 @@ class SimulatedCPUWorker(Worker):
         simulated_kv_cache_size = self.cache_config.kv_cache_memory_bytes
         if simulated_kv_cache_size is None:
             simulated_kv_cache_size = int(
-                get_cpu_memory() * self.cache_config.gpu_memory_utilization
+                psutil.virtual_memory().total * self.cache_config.gpu_memory_utilization
             )
         logger.info(
             "Using %s GiB simulated KV cache memory for virtual KV cache.",

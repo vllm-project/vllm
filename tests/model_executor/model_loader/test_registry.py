@@ -44,8 +44,13 @@ def test_dummy_model_loader_uses_meta_device(monkeypatch):
     vllm_config = SimpleNamespace(
         device_config=SimpleNamespace(device="cpu"),
         load_config=load_config,
+        quant_config=None,
     )
-    model_config = SimpleNamespace(dtype=torch.float32, quantization=None)
+    model_config = SimpleNamespace(
+        dtype=torch.float32,
+        quantization=None,
+        word_embeddings_untied_by_checkpoint=False,
+    )
 
     model = get_model_loader(load_config).load_model(
         vllm_config=vllm_config,

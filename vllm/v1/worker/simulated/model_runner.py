@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from contextlib import AbstractContextManager
 from typing import TYPE_CHECKING
 
 import torch
@@ -30,6 +31,13 @@ class SimulatedCPUModelRunner(CPUModelRunner):
     def warming_up_model(self) -> None:
         logger.info("Skipping model warmup for simulated forward.")
 
+    def add_requests(self, scheduler_output: "SchedulerOutput") -> None:
+        super().add_requests(scheduler_output)
+        for request in scheduler_output.scheduled_new_reqs:
+            assert request.sampling_params is not None
+            req_idx = self.req_states.req_id_to_index[request.req_id]
+            self.simulated_sampler.add_request(req_idx, request.sampling_params)
+
     @torch.inference_mode()
     def execute_model(
         self,
@@ -38,6 +46,8 @@ class SimulatedCPUModelRunner(CPUModelRunner):
         dummy_run: bool = False,
         skip_attn_for_dummy_run: bool = False,
         is_profile: bool = False,
+        context_len: int = 0,
+        valid_dummy_state_slots: bool = False,
     ) -> ModelRunnerOutput:
         if dummy_run:
             return EMPTY_MODEL_RUNNER_OUTPUT
@@ -45,25 +55,23 @@ class SimulatedCPUModelRunner(CPUModelRunner):
         self.finish_requests(scheduler_output)
         self.free_states(scheduler_output)
         self.add_requests(scheduler_output)
-        for request in scheduler_output.scheduled_new_reqs:
-            sampling_params = request.sampling_params
-            assert sampling_params is not None
-            req_idx = self.req_states.req_id_to_index[request.req_id]
-            self.simulated_sampler.add_request(req_idx, sampling_params)
         self.update_requests(scheduler_output)
         self.block_tables.apply_staged_writes()
 
         if not scheduler_output.total_num_scheduled_tokens:
             return EMPTY_MODEL_RUNNER_OUTPUT
 
-        num_reqs = len(scheduler_output.num_scheduled_tokens)
+        batch_req_state, _ = self.gather_batch_req_state(scheduler_output, dummy_run)
+        assert batch_req_state is not None
         input_batch = self.prepare_inputs(
             scheduler_output,
+            batch_req_state,
             BatchExecutionDescriptor(
                 cg_mode=CUDAGraphMode.NONE,
-                num_tokens=scheduler_output.total_num_scheduled_tokens,
-                num_reqs=num_reqs,
+                num_tokens=batch_req_state.num_tokens,
+                num_reqs=len(batch_req_state.req_ids),
             ),
+            num_active_loras=0,
         )
         req_ids = input_batch.req_ids
         req_id_to_index = {req_id: i for i, req_id in enumerate(req_ids)}
@@ -92,7 +100,11 @@ class SimulatedCPUModelRunner(CPUModelRunner):
             sampled_token_ids=sampled_token_ids_list,
         )
 
-    def initialize_kv_cache_tensors(self) -> None:
+    def initialize_kv_cache_tensors(
+        self,
+        is_profiling: bool = False,
+        kv_cache_allocation_context: AbstractContextManager | None = None,
+    ) -> None:
         self.kv_caches = []
         logger.info(
             "Initialized virtual KV cache with %d groups and %d blocks; "
