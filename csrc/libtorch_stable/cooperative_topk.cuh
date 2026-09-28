@@ -104,15 +104,15 @@ __device__ __forceinline__ void dsmem_hist_reduce(uint32_t* histogram) {
   // Fold the distributed per-rank bins into cluster-visible totals.
   auto cluster = cooperative_groups::this_cluster();
   cluster.sync();
-  const uint32_t tx = threadIdx.x;
-  const uint32_t rank = blockIdx.y;
-  constexpr uint32_t kLocal = NumBins / CS;
-  const uint32_t off = kLocal * rank;
+  const auto tx = threadIdx.x;
+  const auto rank = blockIdx.y;
+  constexpr auto kLocal = NumBins / CS;
+  const auto off = kLocal * rank;
 #pragma unroll
   for (uint32_t bin = tx; bin < NumBins;
        bin += hist4096::kBlockSize) {
-    auto* addr = &histogram[off + bin / CS];
-    auto* src = cluster.map_shared_rank(addr, bin % CS);
+    const auto addr = &histogram[off + bin / CS];
+    const auto src = cluster.map_shared_rank(addr, bin % CS);
     *src = warp_reduce_sum_subN<CS>(*src);
   }
   cluster.sync();
@@ -252,6 +252,8 @@ struct SmemFused {
   alignas(128) float score_buffer[kStages][kSizePerStage];
 };
 
+using Smem8 = SmemFused<kFusedStagesCS8>;
+using Smem16 = SmemFused<kFusedStagesCS16>;
 using Smem4 = SmemFused<kStreamingStagesCS4, 2>;
 using SmemSinglePass = SmemFused<kMaxSinglePassStages>;
 
@@ -290,7 +292,9 @@ __device__ void large_topk(const float* __restrict__ row_input,
 
   if constexpr (kFused) {
     // Fused init + TMA prologue
-    if (tx < kHistBins) smem->histogram[tx] = 0;
+    if (tx < kHistBins) {
+      smem->histogram[tx] = 0;  // all threads zero histogram
+    }
     if (tx == 0) {  // thread 0 issues TMA - then all threads continue working
                     // until mbarrier sync
       smem->counter_gt = 0;
@@ -335,7 +339,9 @@ __device__ void large_topk(const float* __restrict__ row_input,
     }
   } else {
     // Twopass: init then stream histogram pass
-    if (tx < kHistBins) smem->histogram[tx] = 0;
+    if (tx < kHistBins) {
+      smem->histogram[tx] = 0;
+    }
     if (tx == 0) {
       smem->counter_gt = 0;
       smem->counter_eq = 0;
@@ -388,7 +394,7 @@ __device__ void large_topk(const float* __restrict__ row_input,
     __syncthreads();
   } else {
     // Twopass scatter: re-stream data via TMA
-    uint32_t scatter_phases[kStreamingStagesCS4] = {};
+    uint32_t scatter_phases[kStreamingStagesCS4] = {0, 0};
     tma_stream_pass<SmemType, kStreamingStagesCS4, kHistBits, true>(
         row_input + my_start, my_len, thr, s_topk, scatter_phases, smem);
   }
@@ -475,8 +481,9 @@ __device__ void large_topk(const float* __restrict__ row_input,
   // Tie-breaking uses FP32 (4-round radix sort)
   if constexpr (TopK <= hist4096::kBlockSize) {
     if (s_total_equal <= hist4096::kMaxTies) {
-      // Common case: copy one tie per thread back to smem, then refine.
+      // copy ties from tie_ws back to smem, then refine
       const uint32_t num_ties = s_total_equal;
+      // TODO (roberto): could vectorize with uint2 (8 bytes = exactly one Tie)
       for (uint32_t i = tx; i < num_ties; i += hist4096::kBlockSize) {
         smem->tie_buffer[i] = hist4096::Tie{tie_ws[i].idx, tie_ws[i].score};
       }
@@ -489,6 +496,7 @@ __device__ void large_topk(const float* __restrict__ row_input,
                                      row_output, smem);
     }
   } else {
+    // TopK=2048: process directly from tie_ws (GMEM)
     hist4096::tie_handle_large<TopK>(tie_ws, s_total_equal, s_total_above,
                                      row_output, smem);
   }
@@ -535,11 +543,18 @@ __device__ void cooperative_topk_body(CooperativeTopKParams<TopK> params) {
   // Large path: init mbarriers + state, then dispatch fused or twopass
   const uint32_t per_block =
       (params.stride + CS - 1) / CS;  // how many elements per block
+  constexpr uint32_t kFusedMax = ((CS == 16)  ? kFusedStagesCS16
+                                  : (CS == 8) ? kFusedStagesCS8
+                                              : kMaxSinglePassStages) *
+                                 kSizePerStage;
+  const bool use_singlepass =
+      per_block <=
+      kFusedMax;  // single pass or TMA streaming: histogram+scatter
+
+  // Select smem type and stage count at compile time based on CS
   constexpr uint32_t kFusedStages = (CS == 16)  ? kFusedStagesCS16
                                     : (CS == 8) ? kFusedStagesCS8
                                                 : kMaxSinglePassStages;
-  constexpr uint32_t kFusedMax = kFusedStages * kSizePerStage;
-  const bool use_singlepass = per_block <= kFusedMax;
   using FusedSmem = SmemFused<kFusedStages>;
 
   extern __shared__ uint8_t sr[];
@@ -564,10 +579,12 @@ __device__ void cooperative_topk_body(CooperativeTopKParams<TopK> params) {
     // single-pass staging capacity.
     auto* smem = reinterpret_cast<Smem4*>(sr);
     if (tx < 2 * kStreamingStagesCS4) {
-      mbarrier_init(&smem->barrier[0][tx], 1);
+      mbarrier_init(&smem->barrier[0][tx],
+                    1);  // init 2×2=4 barriers (2 passes × 2 stages)
     }
     __syncthreads();
-    uint32_t hp[kStreamingStagesCS4] = {};
+    uint32_t hp[kStreamingStagesCS4] = {0,
+                                        0};  // histogram+scatter pass counters
     large_topk<TopK, CS, Smem4, false>(in, out, sl, hp, row_tie_ws);
   }
 }
