@@ -57,6 +57,13 @@ pub(crate) fn validate_request_compat(
         }
     }
 
+    if request.stream && request.sampling_params.inner.prompt_logprob_token_ids.is_some() {
+        bail_invalid_request!(
+            param = "sampling_params",
+            "`prompt_logprob_token_ids` are not available when `stream=true`."
+        );
+    }
+
     Ok(())
 }
 
@@ -167,6 +174,17 @@ mod tests {
         }))
         .expect("parse request");
         assert!(validate_request_compat(&request, &served(&["Qwen/Qwen1.5-0.5B-Chat"])).is_err());
+    }
+
+    #[test]
+    fn validate_request_compat_rejects_streaming_prompt_logprob_token_ids() {
+        let request: GenerateRequest = serde_json::from_value(json!({
+            "token_ids": [11, 22],
+            "stream": true,
+            "sampling_params": {"prompt_logprob_token_ids": [1, 2]}
+        }))
+        .expect("parse request");
+        assert!(validate_request_compat(&request, &served(&["test-model"])).is_err());
     }
 
     #[test]

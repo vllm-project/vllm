@@ -15,6 +15,7 @@ use vllm_engine_core_client::protocol::output::{
     EngineCoreFinishReason, RequestSpecDecodeMetrics, StopReason,
 };
 use vllm_engine_core_client::protocol::sampling_mask::SamplingMask;
+use vllm_engine_core_client::protocol::tensor::WireNdArray;
 use vllm_engine_core_client::{AbortCause, EngineCoreOutputStream};
 
 use crate::error::Result;
@@ -38,6 +39,7 @@ pub struct CollectedGenerateOutput {
     pub request_id: String,
     pub prompt_token_ids: Vec<u32>,
     pub prompt_logprobs: Option<Logprobs>,
+    pub prompt_token_id_logprobs: Option<WireNdArray>,
     pub token_ids: Vec<u32>,
     pub logprobs: Option<Logprobs>,
     pub finish_reason: FinishReason,
@@ -62,6 +64,8 @@ pub struct GeneratePromptInfo {
     /// Prompt logprobs returned by engine-core for scored prompt positions,
     /// when requested.
     pub prompt_logprobs: Option<Logprobs>,
+    /// Log probabilities of `prompt_logprob_token_ids`, when requested.
+    pub prompt_token_id_logprobs: Option<WireNdArray>,
 }
 
 /// The reason a request finished.
@@ -206,6 +210,7 @@ impl GenerateOutput {
             prompt_info: prompt_token_ids.map(|ids| GeneratePromptInfo {
                 prompt_token_ids: ids,
                 prompt_logprobs: None,
+                prompt_token_id_logprobs: None,
             }),
             token_ids,
             logprobs: None,
@@ -247,6 +252,7 @@ impl GenerateOutputStream {
             pending_prompt_info: Some(GeneratePromptInfo {
                 prompt_token_ids,
                 prompt_logprobs: None,
+                prompt_token_id_logprobs: None,
             }),
             raw_stream,
             request_metrics,
@@ -281,6 +287,11 @@ impl Stream for GenerateOutputStream {
         {
             info.prompt_logprobs =
                 raw.new_prompt_logprobs_tensors.map(|value| value.into_direct().unwrap());
+        }
+        if let Some(info) = &mut self.pending_prompt_info
+            && info.prompt_token_id_logprobs.is_none()
+        {
+            info.prompt_token_id_logprobs = raw.prompt_token_id_logprobs;
         }
 
         let logprobs = raw.new_logprobs.map(|value| value.into_direct().unwrap());
@@ -361,6 +372,7 @@ impl<T: Stream<Item = Result<GenerateOutput>> + Send> T {
             pin_mut!(stream);
             let mut prompt_token_ids = None;
             let mut prompt_logprobs = None;
+            let mut prompt_token_id_logprobs = None;
             let mut cached_token_count = 0;
             let mut collected: Option<CollectedGenerateOutput> = None;
 
@@ -373,6 +385,9 @@ impl<T: Stream<Item = Result<GenerateOutput>> + Send> T {
                     }
                     if prompt_logprobs.is_none() {
                         prompt_logprobs = info.prompt_logprobs;
+                    }
+                    if prompt_token_id_logprobs.is_none() {
+                        prompt_token_id_logprobs = info.prompt_token_id_logprobs;
                     }
                 }
 
@@ -393,6 +408,7 @@ impl<T: Stream<Item = Result<GenerateOutput>> + Send> T {
                         request_id: output.request_id,
                         prompt_token_ids: prompt_token_ids.take().unwrap_or_default(),
                         prompt_logprobs: prompt_logprobs.take(),
+                        prompt_token_id_logprobs: prompt_token_id_logprobs.take(),
                         token_ids: output.token_ids,
                         logprobs: output.logprobs,
                         finish_reason: FinishReason::Error,

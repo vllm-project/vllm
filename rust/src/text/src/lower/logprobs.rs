@@ -6,6 +6,7 @@
 //! `-1` is expanded only for bounds checks. The original request values are
 //! passed through to engine-core.
 
+use itertools::Itertools as _;
 use thiserror::Error;
 
 use crate::backend::SamplingLimits;
@@ -35,6 +36,12 @@ pub enum LogprobsError {
          len(logprob_token_ids). Got logprobs={logprobs}, len(logprob_token_ids)={num_token_ids}."
     )]
     TokenIdsMismatch { logprobs: i32, num_token_ids: usize },
+    #[error("prompt_logprob_token_ids must not be empty.")]
+    EmptyPromptLogprobTokenIds,
+    #[error("prompt_logprob_token_ids must not contain duplicates.")]
+    DuplicatePromptLogprobTokenIds,
+    #[error("prompt_logprob_start requires prompt_logprob_token_ids.")]
+    PromptLogprobStartWithoutTokenIds,
 }
 
 /// Validate logprobs count sampling parameters.
@@ -42,6 +49,8 @@ pub(super) fn validate_logprobs(
     logprobs: Option<i32>,
     prompt_logprobs: Option<i32>,
     logprob_token_ids: Option<&[u32]>,
+    prompt_logprob_token_ids: Option<&[u32]>,
+    prompt_logprob_start: Option<u32>,
     sampling_limits: SamplingLimits,
 ) -> Result<(), LogprobsError> {
     let vocab_size = sampling_limits.model_vocab_size;
@@ -50,7 +59,26 @@ pub(super) fn validate_logprobs(
 
     validate_logprobs_count(logprobs, max_logprobs, vocab_size, "logprobs")?;
     validate_logprobs_count(prompt_logprobs, max_logprobs, vocab_size, "prompt_logprobs")?;
+    validate_logprobs_count(
+        prompt_logprob_token_ids.map(|ids| ids.len() as i32),
+        max_logprobs,
+        vocab_size,
+        "prompt_logprob_token_ids",
+    )?;
+    validate_prompt_logprob_token_ids(prompt_logprob_token_ids, prompt_logprob_start)?;
     validate_logprob_token_ids(logprobs, logprob_token_ids)
+}
+
+fn validate_prompt_logprob_token_ids(
+    token_ids: Option<&[u32]>,
+    start: Option<u32>,
+) -> Result<(), LogprobsError> {
+    match token_ids {
+        Some([]) => Err(LogprobsError::EmptyPromptLogprobTokenIds),
+        Some(ids) if !ids.iter().all_unique() => Err(LogprobsError::DuplicatePromptLogprobTokenIds),
+        None if start.is_some() => Err(LogprobsError::PromptLogprobStartWithoutTokenIds),
+        _ => Ok(()),
+    }
 }
 
 fn validate_logprobs_count(
