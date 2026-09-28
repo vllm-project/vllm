@@ -27,6 +27,7 @@ from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tenso
     CompressedTensorsConfig,
 )
 from vllm.model_executor.layers.quantization.fp8 import Fp8Config
+from vllm.model_executor.layers.quantization.inc import INCConfig
 from vllm.model_executor.layers.quantization.modelopt import (
     ModelOptMixedPrecisionConfig,
     ModelOptQuantConfigBase,
@@ -190,6 +191,8 @@ class Qwen4ExpPLEEmbeddingMethod(QuantizeMethodBase):
             and quant_config.get_scheme_dict(None, layer_name=prefix) is None
         ):
             return Qwen4ExpPLEUnquantizedEmbeddingMethod()
+        if isinstance(quant_config, INCConfig):
+            return Qwen4ExpPLEINCEmbeddingMethod()
         if not isinstance(quant_config, Fp8Config):
             raise NotImplementedError(
                 "Qwen4Exp PLE embedding does not support quantization config "
@@ -270,6 +273,40 @@ class Qwen4ExpPLEUnquantizedEmbeddingMethod(Qwen4ExpPLEEmbeddingMethod):
     ) -> torch.Tensor:
         del layer, output_dtype
         return embeddings
+
+
+class Qwen4ExpPLEINCEmbeddingMethod(Qwen4ExpPLEUnquantizedEmbeddingMethod):
+    """Load unquantized BF16 PLE weights from INC checkpoints."""
+
+    def create_weights(
+        self,
+        layer: Qwen4ExpPLEEmbedding,
+        input_size_per_partition: int,
+        output_partition_sizes: list[int],
+        input_size: int,
+        output_size: int,
+        params_dtype: torch.dtype,
+        **extra_weight_attrs,
+    ) -> None:
+        weight_loader = extra_weight_attrs["weight_loader"]
+
+        def load_bf16_weight(param, loaded_weight, *args, **kwargs):
+            if loaded_weight.dtype != torch.bfloat16:
+                raise ValueError(
+                    "INC PLE embedding only supports BF16 checkpoint weights; "
+                    f"received {loaded_weight.dtype}"
+                )
+            return weight_loader(param, loaded_weight, *args, **kwargs)
+
+        super().create_weights(
+            layer,
+            input_size_per_partition,
+            output_partition_sizes,
+            input_size,
+            output_size,
+            params_dtype,
+            **{**extra_weight_attrs, "weight_loader": load_bf16_weight},
+        )
 
 
 class Qwen4ExpPLEFp8EmbeddingMethod(Qwen4ExpPLEEmbeddingMethod):
