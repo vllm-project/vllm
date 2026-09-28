@@ -26,9 +26,6 @@ from vllm.model_executor.kernels.linear.mixed_precision import (
     MPLinearKernel,
     MPLinearLayerConfig,
 )
-from vllm.model_executor.kernels.linear.mixed_precision.allspark import (
-    AllSparkLinearKernel,
-)
 from vllm.model_executor.kernels.linear.mixed_precision.conch import (
     ConchLinearKernel,
 )
@@ -504,7 +501,6 @@ _POSSIBLE_KERNELS: dict[PlatformEnum, list[type[MPLinearKernel]]] = {
     PlatformEnum.CUDA: [
         CutlassW4A8LinearKernel,
         MacheteLinearKernel,
-        AllSparkLinearKernel,
         MarlinLinearKernel,
         ConchLinearKernel,
         ExllamaLinearKernel,
@@ -884,10 +880,15 @@ def choose_mp_linear_kernel(
     )
 
 
-def init_mxfp8_linear_kernel(*, bmm_batch_size: int | None = None) -> Mxfp8LinearKernel:
+def init_mxfp8_linear_kernel(
+    *, weight_shape: tuple[int, int], bmm_batch_size: int | None = None
+) -> Mxfp8LinearKernel:
     """Select and instantiate the best MXFP8 linear kernel for the
-    current platform."""
-    config = Mxfp8LinearLayerConfig(bmm_batch_size=bmm_batch_size)
+    current platform and `(N, K)` weight shape."""
+    config = Mxfp8LinearLayerConfig(
+        weight_shape=weight_shape,
+        bmm_batch_size=bmm_batch_size,
+    )
 
     platform = current_platform._enum
     possible: list[type[Mxfp8LinearKernel]]
@@ -1272,7 +1273,6 @@ __all__ = [
     "ZentorchWNA16LinearKernel",
     "MPLinearKernel",
     "MPLinearLayerConfig",
-    "AllSparkLinearKernel",
     "ConchLinearKernel",
     "CPUWNA16LinearKernel",
     "CutlassW4A8LinearKernel",
