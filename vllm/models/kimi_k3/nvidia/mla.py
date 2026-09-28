@@ -75,7 +75,11 @@ from vllm.model_executor.layers.quantization import (
     resolve_quant_method,
 )
 from vllm.model_executor.layers.rotary_embedding import RotaryEmbedding, get_rope
-from vllm.model_executor.utils import replace_parameter
+from vllm.model_executor.utils import (
+    register_derived_buffer,
+    replace_parameter,
+    set_derived_buffer,
+)
 from vllm.models.common.ops import fused_q_kv_rmsnorm
 from vllm.models.kimi_k3.nvidia.low_latency_gemm import try_low_latency_gemm
 from vllm.models.kimi_k3.nvidia.ops.fused_mla_key_concat_kv_cache import (
@@ -326,6 +330,8 @@ class MultiHeadLatentAttention(nn.Module, AttentionLayerBase):
             num_heads=self.num_local_heads,
         )
         _init_kv_cache_quant(self, quant_config, prefix)
+        register_derived_buffer(self, "_q_scale_inv")
+        register_derived_buffer(self, "_k_scale_inv")
         # Unit (1.0) scale for the fused fp8 prefill path: q/k/v are cast
         # unscaled to match forward_mha (the prefill flash path does not
         # dequantize); only the cache uses _k_scale.
@@ -464,12 +470,14 @@ class MultiHeadLatentAttention(nn.Module, AttentionLayerBase):
         # K3 has no runtime calculate_kv_scales path) so the fp8 fused kernels
         # in the decode/prefill hot path take a ready inverse instead of
         # launching a per-step reciprocal kernel.
-        self.register_buffer(
-            "_q_scale_inv", self._q_scale.reciprocal().reshape(1), persistent=False
-        )
-        self.register_buffer(
-            "_k_scale_inv", self._k_scale.reciprocal().reshape(1), persistent=False
-        )
+        self._refresh_derived_buffers()
+
+    def _refresh_derived_buffers(self) -> None:
+        set_derived_buffer(self, "_q_scale_inv", self._q_scale.reciprocal().reshape(1))
+        set_derived_buffer(self, "_k_scale_inv", self._k_scale.reciprocal().reshape(1))
+
+    def post_weights_reload(self) -> None:
+        self._refresh_derived_buffers()
 
     def _v_up_proj(self, x: torch.Tensor, out: torch.Tensor) -> None:
         """Project latent attention output back to ``v`` via ``W_UV`` (bmm)."""

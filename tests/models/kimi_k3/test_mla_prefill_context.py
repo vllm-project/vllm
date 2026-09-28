@@ -18,6 +18,12 @@ from vllm.model_executor.layers.attention.mla_attention import (
     MLACommonPrefillMetadata,
     build_mla_chunked_context_metadata,
 )
+from vllm.model_executor.model_loader.reload.layerwise import (
+    finalize_layerwise_reload,
+    initialize_layerwise_reload,
+    record_metadata_for_reloading,
+)
+from vllm.model_executor.utils import register_derived_buffer
 from vllm.models.kimi_k3.nvidia.mla import MultiHeadLatentAttention
 from vllm.platforms import current_platform
 
@@ -317,3 +323,43 @@ def test_fused_context_rejects_an_unquantized_query() -> None:
     )
     with pytest.raises(AssertionError, match="new-token epilogue"):
         layer._compute_prefill_context(q, SimpleNamespace(prefill=prefill))
+
+
+@pytest.mark.parametrize("materialize_before_reload", [False, True])
+def test_mla_inverse_scales_keep_storage_across_repeated_reload(
+    materialize_before_reload,
+):
+    """Deferred scale reload must update graph-visible reciprocal values in place."""
+    layer = MultiHeadLatentAttention.__new__(MultiHeadLatentAttention)
+    torch.nn.Module.__init__(layer)
+    layer.quant_method = None
+    layer.register_buffer("_q_scale", torch.tensor(2.0))
+    layer.register_buffer("_k_scale", torch.tensor(4.0))
+    register_derived_buffer(layer, "_q_scale_inv")
+    register_derived_buffer(layer, "_k_scale_inv")
+    # Exercise the scale lifecycle without constructing the unrelated BMM kernels.
+    layer.process_weights_after_loading = lambda dtype: layer._refresh_derived_buffers()
+    if materialize_before_reload:
+        layer._refresh_derived_buffers()
+    record_metadata_for_reloading(layer)
+    stable = (
+        (layer._q_scale_inv, layer._k_scale_inv) if materialize_before_reload else None
+    )
+    pointers = (
+        tuple(value.data_ptr() for value in stable) if stable is not None else None
+    )
+    for q_scale, k_scale in ((8.0, 16.0), (2.0, 4.0)):
+        initialize_layerwise_reload(layer)
+        layer._q_scale.weight_loader(layer._q_scale, torch.tensor(q_scale))
+        layer._k_scale.weight_loader(layer._k_scale, torch.tensor(k_scale))
+        finalize_layerwise_reload(layer, SimpleNamespace(dtype=torch.float32))
+        current = (layer._q_scale_inv, layer._k_scale_inv)
+        if stable is None:
+            stable = current
+            pointers = tuple(value.data_ptr() for value in current)
+        assert all(value is original for value, original in zip(current, stable))
+        assert tuple(value.data_ptr() for value in current) == pointers
+        torch.testing.assert_close(current[0], torch.tensor([1.0 / q_scale]))
+        torch.testing.assert_close(current[1], torch.tensor([1.0 / k_scale]))
+        assert "_q_scale_inv" not in layer.state_dict()
+        assert "_k_scale_inv" not in layer.state_dict()
