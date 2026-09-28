@@ -327,6 +327,7 @@ if TYPE_CHECKING:
     VLLM_GPU_NIC_PCIE_MAPPING: str = ""
     VLLM_NIC_SELECTION_VARS: str = ""
     VLLM_ENABLE_HPC_OPS: bool = False
+    VLLM_MIMO_EXACT_QKV: bool = False
 
 
 def get_default_cache_root():
@@ -2212,6 +2213,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_SKIP_VERSION_SUFFIX": lambda: bool(
         int(os.getenv("VLLM_SKIP_VERSION_SUFFIX", "0"))
     ),
+    # Load MiMo-V2 fused-QKV fp8 checkpoints with bit-exact rows below ckpt_tp
+    # instead of dequantize-plus-requantize.
+    "VLLM_MIMO_EXACT_QKV": lambda: os.environ.get("VLLM_MIMO_EXACT_QKV", "0") == "1",
 }
 
 

@@ -76,10 +76,10 @@ def _quantize_chunks(truth, num_heads, num_kv_heads, head_dim, v_head_dim, ckpt_
     return torch.cat(weights, dim=0), torch.cat(scales, dim=0)
 
 
-def _owned_rows(
-    truth, num_heads, num_kv_heads, head_dim, v_head_dim, ckpt_tp, tp_rank, tp_size
+def _owned_index(
+    num_heads, num_kv_heads, head_dim, v_head_dim, ckpt_tp, tp_rank, tp_size
 ):
-    """Rows the rank must own, in the forward's `[Q | K | V]` order."""
+    """Checkpoint row indices of the rank's slice, in the forward's `[Q | K | V]`."""
     rows_per_chunk = _chunk_rows(num_heads, num_kv_heads, head_dim, v_head_dim, ckpt_tp)
     q_per_chunk = num_heads // ckpt_tp * head_dim
     k_per_chunk = num_kv_heads // ckpt_tp * head_dim
@@ -108,7 +108,17 @@ def _owned_rows(
         chunk, offset = divmod(head, num_kv_heads // ckpt_tp)
         start = chunk * rows_per_chunk + q_per_chunk + k_per_chunk + offset * v_head_dim
         index += list(range(start, start + v_head_dim))
-    return truth[torch.tensor(index)]
+    return torch.tensor(index)
+
+
+def _owned_rows(
+    truth, num_heads, num_kv_heads, head_dim, v_head_dim, ckpt_tp, tp_rank, tp_size
+):
+    """Rows the rank must own, in the forward's `[Q | K | V]` order."""
+    index = _owned_index(
+        num_heads, num_kv_heads, head_dim, v_head_dim, ckpt_tp, tp_rank, tp_size
+    )
+    return truth[index]
 
 
 def _dequantize(weight, scale):
@@ -194,6 +204,76 @@ def test_exact_chunk_matches_checkpoint(geometry, tp_size):
         expected_w = weight.chunk(tp_size, dim=0)[0]
         assert torch.equal(w_rank.view(torch.uint8), expected_w.view(torch.uint8))
         assert torch.equal(s_rank, scale.chunk(tp_size, dim=0)[0])
+
+
+@pytest.mark.parametrize("tp_size", [1, 2])
+def test_exact_gather_permutes_checkpoint_rows(tp_size, monkeypatch):
+    """With VLLM_MIMO_EXACT_QKV open the gather touches not a single bit.
+
+    The SWA geometry divides every chunk segment into whole scale blocks, so
+    the rank's slice must come back as a pure row permutation of the
+    checkpoint weights and of its per-chunk scale grid.
+    """
+    num_heads, num_kv_heads, head_dim, v_head_dim, ckpt_tp = GEOMETRIES["swa"]
+    rows_per_chunk = _chunk_rows(num_heads, num_kv_heads, head_dim, v_head_dim, ckpt_tp)
+    truth = torch.randn(ckpt_tp * rows_per_chunk, COLS)
+    weight, scale = _quantize_chunks(
+        truth, num_heads, num_kv_heads, head_dim, v_head_dim, ckpt_tp
+    )
+    monkeypatch.setenv("VLLM_MIMO_EXACT_QKV", "1")
+    chunk_scale_rows = cdiv(rows_per_chunk, BLOCK)
+    for tp_rank in range(tp_size):
+        w_rank, s_rank = _shard_fp8_qkv_proj(
+            weight,
+            scale,
+            num_heads=num_heads,
+            num_kv_heads=num_kv_heads,
+            head_dim=head_dim,
+            v_head_dim=v_head_dim,
+            tp_rank=tp_rank,
+            tp_size=tp_size,
+            ckpt_tp=ckpt_tp,
+        )
+        index = _owned_index(
+            num_heads, num_kv_heads, head_dim, v_head_dim, ckpt_tp, tp_rank, tp_size
+        )
+        assert torch.equal(w_rank.view(torch.uint8), weight[index].view(torch.uint8))
+        scale_index = (
+            (index // rows_per_chunk) * chunk_scale_rows
+            + (index % rows_per_chunk) // BLOCK
+        ).view(-1, BLOCK)
+        assert (scale_index == scale_index[:, :1]).all()
+        assert torch.equal(s_rank, scale[scale_index[:, 0]])
+
+
+def test_gate_leaves_straddling_segments_untouched(monkeypatch):
+    """A segment that straddles a scale block must not be gated into exactness.
+
+    The GA geometry's K segment is 192 rows — one and a half scale blocks —
+    so opening the gate must leave the dequantize-requantize path in place,
+    byte for byte as when the gate is closed.
+    """
+    num_heads, num_kv_heads, head_dim, v_head_dim, ckpt_tp = GEOMETRIES["ga"]
+    rows_per_chunk = _chunk_rows(num_heads, num_kv_heads, head_dim, v_head_dim, ckpt_tp)
+    truth = torch.randn(ckpt_tp * rows_per_chunk, COLS)
+    weight, scale = _quantize_chunks(
+        truth, num_heads, num_kv_heads, head_dim, v_head_dim, ckpt_tp
+    )
+    kwargs = dict(
+        num_heads=num_heads,
+        num_kv_heads=num_kv_heads,
+        head_dim=head_dim,
+        v_head_dim=v_head_dim,
+        tp_rank=1,
+        tp_size=2,
+        ckpt_tp=ckpt_tp,
+    )
+    monkeypatch.delenv("VLLM_MIMO_EXACT_QKV", raising=False)
+    closed = _shard_fp8_qkv_proj(weight, scale, **kwargs)
+    monkeypatch.setenv("VLLM_MIMO_EXACT_QKV", "1")
+    opened = _shard_fp8_qkv_proj(weight, scale, **kwargs)
+    assert torch.equal(opened[0].view(torch.uint8), closed[0].view(torch.uint8))
+    assert torch.equal(opened[1], closed[1])
 
 
 def test_wrong_chunk_count_is_detected():

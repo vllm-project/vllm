@@ -6,6 +6,7 @@ from itertools import islice
 import torch
 from torch import nn
 
+from vllm import envs
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import (
     CacheConfig,
@@ -520,9 +521,13 @@ def _shard_fp8_qkv_proj(
         [Q_1 | Q_2 | ... | Q_g | K_1 | K_2 | ... | K_g | V_1 | V_2 | ... | V_g]
 
     When ``tp_size == ckpt_tp`` the checkpoint chunk *is* that layout, so a
-    plain chunk of both weight and scale suffices. Otherwise each rank's Q, K
-    and V rows are gathered from the chunks that hold them, dequantized with
-    the chunk's own scales, reordered, and re-quantized to fp8.
+    plain chunk of both weight and scale suffices. When ``tp_size`` is a
+    proper divisor of ``ckpt_tp`` and, under per-chunk scales, each chunk's
+    Q, K and V segments span whole scale blocks, the rank gathers its rows
+    as an exact block permutation with no dequantize-requantize round trip.
+    Otherwise each rank's Q, K and V rows are gathered from the chunks that
+    hold them, dequantized with the chunk's own scales, reordered, and
+    re-quantized to fp8.
     """
     assert num_heads % tp_size == 0, (
         f"num_heads={num_heads} must be divisible by tp_size={tp_size}."
@@ -589,6 +594,35 @@ def _shard_fp8_qkv_proj(
         return (
             w_full.chunk(ckpt_tp, dim=0)[tp_rank],
             s_full.chunk(ckpt_tp, dim=0)[tp_rank],
+        )
+
+    exact_ok = (
+        envs.VLLM_MIMO_EXACT_QKV
+        and per_chunk_scales
+        and tp_size < ckpt_tp
+        and ckpt_tp % tp_size == 0
+        and q_per_chunk % block == 0
+        and k_per_chunk % block == 0
+        and v_per_chunk % block == 0
+    )
+    if exact_ok:
+        chunks = sorted({h // (num_heads // ckpt_tp) for h in q_head_ids})
+        assert chunks == sorted({h // (num_kv_heads // ckpt_tp) for h in kv_head_ids})
+        q_end, k_end = q_per_chunk, q_per_chunk + k_per_chunk
+
+        def wrows(c: int, a: int, b: int) -> torch.Tensor:
+            return w_full[c * rows_per_chunk + a : c * rows_per_chunk + b]
+
+        def srows(c: int, a: int, b: int) -> torch.Tensor:
+            base = c * chunk_scale_rows
+            return s_full[base + a // block : base + cdiv(b, block)]
+
+        segs = ((0, q_end), (q_end, k_end), (k_end, rows_per_chunk))
+        ws = [wrows(c, *sg) for sg in segs for c in chunks]
+        ss = [srows(c, *sg) for sg in segs for c in chunks]
+        return (
+            torch.cat([w.view(torch.uint8) for w in ws]).view(w_full.dtype),
+            torch.cat(ss),
         )
 
     # Gather this rank's Q, K and V rows from the chunks that hold them.
