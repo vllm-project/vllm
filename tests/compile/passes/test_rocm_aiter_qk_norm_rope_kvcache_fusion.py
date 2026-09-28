@@ -517,8 +517,14 @@ def _run_qk_norm_rope_kvcache_fusion_test(
                 else torch.ops._C.static_scaled_fp8_quant.default
             )
             assert backend.op_count(expected_quant_op, before=True) > 0
-            # Query quantization remains separate after the prologue fusion.
-            assert backend.op_count(expected_quant_op) > 0
+            # RoPE per-tensor Q quant is folded into the fused kernel (q_out_fp8),
+            # so no separate quant op remains. MRoPE and the per-head/group form
+            # keep the separate query quantization.
+            q_quant_folded = mrope_section is None and num_kv_heads != 1
+            if q_quant_folded:
+                assert backend.op_count(expected_quant_op) == 0
+            else:
+                assert backend.op_count(expected_quant_op) > 0
 
         # Sweep-backed (18.2k pts, PR #42749): native-rope ref worst 7.7e-3 -> 1e-2;
         # AITER-triton-rope ref is itself approximate (plateau 1.28e-2) -> 2e-2.
@@ -738,9 +744,47 @@ def test_qk_norm_mrope_kvcache_fusion_quark_scalar_query_scale(
         kv_cache_dtype="fp8",
         rms_norm_eps=1e-6,
         custom_op="+rotary_embedding",
+        has_v_norm=False,
         monkeypatch=monkeypatch,
         mrope_section=(24, 20, 20),
         mrope_interleaved=True,
+        use_quark_scalar_query_scale=True,
+    )
+
+
+@pytest.mark.parametrize(
+    ("num_heads", "num_kv_heads"),
+    [(32, 2), (16, 1), (8, 1)],
+    ids=["tp2", "tp4", "tp8"],
+)
+@pytest.mark.skipif(not IS_AITER_FOUND, reason="Requires AITER")
+def test_qk_norm_rope_kvcache_fusion_quark_scalar_query_scale(
+    num_heads: int,
+    num_kv_heads: int,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    # RoPE (non-MRoPE) fp8 quant_query path. For num_kv_heads != 1 the query
+    # scale is per-tensor, so the Q fp8 quant is folded into the fused kernel
+    # (q_out_fp8) and no separate quant op should remain; num_kv_heads == 1 uses
+    # the per-head/group static quant, which stays separate.
+    _run_qk_norm_rope_kvcache_fusion_test(
+        attn_backend=AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN,
+        enable_aiter_triton_rope=False,
+        num_tokens=5,
+        num_heads=num_heads,
+        num_kv_heads=num_kv_heads,
+        head_size=128,
+        rotary_dim=128,
+        block_size=16,
+        is_neox=True,
+        use_shuffle_kv_layout="0",
+        kv_layout=KVCacheLayout.LBHNC,
+        dtype=torch.bfloat16,
+        kv_cache_dtype="fp8",
+        rms_norm_eps=1e-6,
+        custom_op="+rotary_embedding",
+        has_v_norm=False,
+        monkeypatch=monkeypatch,
         use_quark_scalar_query_scale=True,
     )
 
