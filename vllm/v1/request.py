@@ -43,6 +43,7 @@ class StreamingUpdate:
     max_tokens: int
     arrival_time: float
     sampling_params: SamplingParams | None
+    structured_output_request: StructuredOutputRequest | None
 
     @classmethod
     def from_request(cls, request: "Request") -> "StreamingUpdate | None":
@@ -54,6 +55,7 @@ class StreamingUpdate:
             max_tokens=request.max_tokens,
             arrival_time=request.arrival_time,
             sampling_params=request.sampling_params,
+            structured_output_request=request.structured_output_request,
         )
 
 
