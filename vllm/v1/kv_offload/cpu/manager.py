@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections import OrderedDict
-from collections.abc import Collection, Iterable, Mapping, Sequence
+from collections.abc import Collection, Iterable, Sequence
 from dataclasses import dataclass, field
 
 from typing_extensions import override
@@ -11,6 +11,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading.metrics import (
 )
 from vllm.utils.math_utils import cdiv, round_down
 from vllm.v1.kv_offload.base import (
+    ConfigInfoMapping,
     LoadStoreSpec,
     LookupResult,
     Medium,
@@ -82,6 +83,17 @@ def _capacity_tokens_at_max_len(
     the last token of a chunk. Measure one such length for each group chunk size,
     add max_model_len, and keep the largest result.
 
+    Every candidate length holds full chunks, on purpose. A partly filled chunk
+    costs a whole slot, so it never serves more tokens than the full chunk length
+    below it.
+
+    Args:
+        groups: The offloading groups, which give the block size of each group.
+        blocks_per_chunk: GPU blocks for each chunk, the same count for every
+            group.
+        num_chunks: Chunk slots in the tier.
+        max_model_len: The longest request that the engine accepts.
+
     Returns:
         The token count, or None when max_model_len is 0 and the caller
         therefore did not know the longest request.
@@ -106,7 +118,7 @@ def _build_config_info(
     num_chunks: int,
     kv_bytes_per_chunk: int | None,
     config: OffloadingConfig,
-) -> Mapping[str, str | int | float | bool]:
+) -> ConfigInfoMapping:
     """Render the static facts of the CPU tier as info metric labels.
 
     Args:
@@ -125,10 +137,10 @@ def _build_config_info(
     """
     blocks_per_chunk = config.cache.blocks_per_chunk
     return CPUOffloadingInfo(
-        num_chunks=num_chunks,
-        blocks_per_chunk=blocks_per_chunk,
-        kv_bytes_per_chunk=kv_bytes_per_chunk,
-        capacity_tokens_at_max_len=_capacity_tokens_at_max_len(
+        cpu_num_chunks=num_chunks,
+        cpu_blocks_per_chunk=blocks_per_chunk,
+        cpu_kv_bytes_per_chunk=kv_bytes_per_chunk,
+        cpu_capacity_tokens_at_max_len=_capacity_tokens_at_max_len(
             config.groups,
             blocks_per_chunk,
             num_chunks,
@@ -163,7 +175,7 @@ class CPUOffloadingManager(OffloadingManager):
         self._num_chunks: int = num_chunks
         # Rendered once: the facts are static, and the scheduler reads them on
         # its own path.
-        self._config_info: Mapping[str, str | int | float | bool] = (
+        self._config_info: ConfigInfoMapping = (
             _build_config_info(num_chunks, kv_bytes_per_chunk, config)
             if config is not None
             else {}
@@ -543,7 +555,7 @@ class CPUOffloadingManager(OffloadingManager):
             self.events.clear()
 
     @override
-    def config_info(self) -> Sequence[Mapping[str, str | int | float | bool]]:
+    def config_info(self) -> Sequence[ConfigInfoMapping]:
         """Report the CPU cache facts of the one cache this manager holds."""
         return [self._config_info]
 

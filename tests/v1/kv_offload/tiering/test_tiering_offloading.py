@@ -17,7 +17,7 @@ import numpy as np
 import pytest
 import torch
 
-from tests.v1.kv_offload.test_factory import _make_offloading_config
+from tests.v1.kv_offload.conftest import make_offloading_config
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.metrics import (
     OffloadingConnectorStats,
 )
@@ -1640,7 +1640,7 @@ def test_tiering_spec_declares_the_config_info_keys_the_manager_fills():
         primary_tier=CPUPrimaryTierOffloadingManager(
             num_chunks=5,
             mmap_region=mock_region,
-            config=_make_offloading_config(blocks_per_chunk=2, max_model_len=1024),
+            config=make_offloading_config(blocks_per_chunk=2, max_model_len=1024),
         ),
         secondary_tiers=[
             MetricsSecondaryTierManager(

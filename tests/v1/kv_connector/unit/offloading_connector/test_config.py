@@ -186,6 +186,7 @@ _HIDDEN_STATE_KWARGS: dict[str, Any] = {
     "head_size": 512,
     "dtype": torch.float32,
 }
+
 _MAMBA_SPEC = MambaSpec(
     block_size=16,
     shapes=((16, 1),),

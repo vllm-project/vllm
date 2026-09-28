@@ -128,7 +128,7 @@ The gauge holds one series for each configuration that the manager reports. A ma
 
 `CPUOffloadingSpec` publishes the four `cpu_` labels on its one series. `TieringOffloadingSpec` publishes them on the `0:primary` series.
 
-The spec declares the label names in the API server process, and the manager fills the values in the engine process. The names of every series bind once, at the declaration. A label that one series owns reads empty on every other series.
+The spec declares the label names in the API server process, and the manager fills the values in the engine process. The names of every series bind once, at the declaration. A label that one series owns reads empty on every other series. For a worked example, the `example` secondary tier publishes one label, `example_info`.
 
 A manager adds a label with `config_info_keys()` of its spec and `config_info()` of its own class. A name that a manager fills and the spec does not declare is dropped, and the engine log then holds one warning line.
 
