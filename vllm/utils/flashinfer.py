@@ -474,6 +474,22 @@ def has_flashinfer_sparse_mla_sm120_config(num_q_heads: int, top_k: int) -> bool
 
 
 @functools.cache
+def has_flashinfer_nvfp4_sparse_mla_decode() -> bool:
+    """Return ``True`` if FlashInfer has its native NVFP4 sparse MLA decode.
+
+    ``flashinfer.mla.nvfp4_sparse_mla_decode`` (experimental) reads ``nvfp4_ds_mla``
+    rows as stored, without staging them as FP8.
+    """
+    if not has_flashinfer():
+        return False
+    try:
+        from flashinfer.mla import nvfp4_sparse_mla_decode
+    except ImportError:
+        return False
+    return callable(nvfp4_sparse_mla_decode)
+
+
+@functools.cache
 def has_flashinfer_cutedsl() -> bool:
     """Return ``True`` if FlashInfer cutedsl module is available."""
     return (
