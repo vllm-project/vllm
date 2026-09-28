@@ -159,6 +159,9 @@ class PassConfig:
     fuse_xpu_fp8_gemm_pair: bool = False
     """Run two XPU fp8 linears sharing their input as one op (one GEMV launch
     for decode-sized inputs)."""
+    fuse_xpu_norm_fp8_gemm: bool = False
+    """Fuse the (gated or residual-add Gemma) RMSNorm feeding an XPU fp8
+    linear into the linear (one GEMV launch for decode rows)."""
     xpu_gdn_output_alloc: bool = False
     """Allocate the XPU GDN core output uninitialized instead of zero-filled
     (the XPU op defines every row itself)."""
@@ -343,6 +346,12 @@ class PassConfig:
                 "XPU. The fusion will be disabled."
             )
             self.fuse_xpu_fp8_gemm_pair = False
+        if self.fuse_xpu_norm_fp8_gemm and not current_platform.is_xpu():
+            logger.warning_once(
+                "XPU norm + fp8 GEMM fusion enabled but the current platform is "
+                "not XPU. The fusion will be disabled."
+            )
+            self.fuse_xpu_norm_fp8_gemm = False
         if self.xpu_gdn_output_alloc and not current_platform.is_xpu():
             logger.warning_once(
                 "XPU GDN output allocation pass enabled but the current platform "

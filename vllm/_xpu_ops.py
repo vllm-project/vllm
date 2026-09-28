@@ -99,6 +99,48 @@ if hasattr(torch.ops._xpu_C, "fp8_gemm_w8a16_pair"):
         )
 
 
+if hasattr(torch.ops._xpu_C, "gated_rmsnorm_fp8_gemm"):
+
+    @register_fake("_xpu_C::gated_rmsnorm_fp8_gemm")
+    def _gated_rmsnorm_fp8_gemm_fake(
+        x: torch.Tensor,
+        z: torch.Tensor,
+        norm_weight: torch.Tensor,
+        eps: float,
+        q_weight: torch.Tensor,
+        weight_scale: torch.Tensor,
+    ) -> torch.Tensor:
+        return x.new_empty((x.shape[0], q_weight.size(1)))
+
+    @register_fake("_xpu_C::resadd_rmsnorm_fp8_gemm")
+    def _resadd_rmsnorm_fp8_gemm_fake(
+        x: torch.Tensor,
+        residual: torch.Tensor,
+        norm_weight: torch.Tensor,
+        eps: float,
+        q_weight: torch.Tensor,
+        weight_scale: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        return x.new_empty((x.shape[0], q_weight.size(1))), torch.empty_like(x)
+
+    @register_fake("_xpu_C::resadd_rmsnorm_fp8_gemm_pair")
+    def _resadd_rmsnorm_fp8_gemm_pair_fake(
+        x: torch.Tensor,
+        residual: torch.Tensor,
+        norm_weight: torch.Tensor,
+        eps: float,
+        q_weight1: torch.Tensor,
+        weight_scale1: torch.Tensor,
+        q_weight2: torch.Tensor,
+        weight_scale2: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        return (
+            x.new_empty((x.shape[0], q_weight1.size(1))),
+            x.new_empty((x.shape[0], q_weight2.size(1))),
+            torch.empty_like(x),
+        )
+
+
 if hasattr(torch.ops._xpu_C, "fp4_gemm"):
 
     @register_fake("_xpu_C::fp4_gemm")
