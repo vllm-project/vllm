@@ -1,0 +1,63 @@
+{
+    "triton_version": "3.6.0",
+    "1": {
+        "BLOCK_SIZE_M": 16,
+        "BLOCK_SIZE_N": 16,
+        "BLOCK_SIZE_K": 64,
+        "GROUP_SIZE_M": 1,
+        "SPLIT_K": 1,
+        "num_warps": 2,
+        "num_stages": 2,
+        "waves_per_eu": 4
+    },
+    "2": {
+        "BLOCK_SIZE_M": 16,
+        "BLOCK_SIZE_N": 16,
+        "BLOCK_SIZE_K": 64,
+        "GROUP_SIZE_M": 1,
+        "SPLIT_K": 1,
+        "num_warps": 1,
+        "num_stages": 2,
+        "waves_per_eu": 4
+    },
+    "4": {
+        "BLOCK_SIZE_M": 32,
+        "BLOCK_SIZE_N": 16,
+        "BLOCK_SIZE_K": 64,
+        "GROUP_SIZE_M": 1,
+        "SPLIT_K": 1,
+        "num_warps": 2,
+        "num_stages": 2,
+        "waves_per_eu": 2
+    },
+    "8": {
+        "BLOCK_SIZE_M": 32,
+        "BLOCK_SIZE_N": 16,
+        "BLOCK_SIZE_K": 64,
+        "GROUP_SIZE_M": 1,
+        "SPLIT_K": 1,
+        "num_warps": 2,
+        "num_stages": 2,
+        "waves_per_eu": 2
+    },
+    "16": {
+        "BLOCK_SIZE_M": 32,
+        "BLOCK_SIZE_N": 16,
+        "BLOCK_SIZE_K": 64,
+        "GROUP_SIZE_M": 4,
+        "SPLIT_K": 1,
+        "num_warps": 2,
+        "num_stages": 2,
+        "waves_per_eu": 0
+    },
+    "32": {
+        "BLOCK_SIZE_M": 32,
+        "BLOCK_SIZE_N": 16,
+        "BLOCK_SIZE_K": 64,
+        "GROUP_SIZE_M": 4,
+        "SPLIT_K": 1,
+        "num_warps": 2,
+        "num_stages": 2,
+        "waves_per_eu": 0
+    }
+}

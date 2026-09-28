@@ -1,0 +1,56 @@
+name: Buf
+
+on:
+  pull_request:
+    paths:
+      - "rust/proto/**"
+      - ".github/workflows/buf.yml"
+  push:
+    tags:
+      - "v*"
+  schedule:
+    - cron: "0 8 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  proto:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 0
+      - uses: bufbuild/buf-action@8c6a16e16f12ba20b6470afa9c2ba9b5ba8c97c3 # v1.5.0
+        with:
+          version: 1.72.0
+          input: rust/proto
+          token: ${{ github.repository == 'vllm-project/vllm' && github.event_name != 'pull_request' && secrets.BUF_TOKEN || '' }}
+          format: false
+          breaking: false
+          pr_comment: false
+          push: false
+      - name: Publish nightly schema
+        if: github.repository == 'vllm-project/vllm' && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
+        run: >-
+          buf push rust/proto
+          --create
+          --create-default-label main
+          --create-visibility public
+          --label nightly
+          --source-control-url "${{ github.server_url }}/${{ github.repository }}/commit/${{ github.sha }}"
+      - name: Publish release schema
+        if: github.repository == 'vllm-project/vllm' && github.event_name == 'push'
+        run: >-
+          buf push rust/proto
+          --create
+          --create-default-label main
+          --create-visibility public
+          --label main
+          --label "${GITHUB_REF_NAME}"
+          --source-control-url "${{ github.server_url }}/${{ github.repository }}/commit/${{ github.sha }}"

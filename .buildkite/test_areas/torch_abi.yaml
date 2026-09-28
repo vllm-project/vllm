@@ -1,0 +1,14 @@
+group: Torch ABI
+depends_on:
+  - image-build
+steps:
+- label: Torch Stable ABI Audit
+  key: torch-stable-abi-audit
+  timeout_in_minutes: 5
+  source_file_dependencies:
+  - .buildkite/check-torch-abi.py
+  - csrc/
+  - cmake/
+  - setup.py
+  commands:
+  - python3 /vllm-workspace/.buildkite/check-torch-abi.py

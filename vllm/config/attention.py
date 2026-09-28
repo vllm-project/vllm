@@ -1,0 +1,204 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
+from dataclasses import field
+from typing import Any, Literal
+
+from pydantic import field_validator
+
+from vllm.config.utils import config
+from vllm.logger import init_logger
+from vllm.v1.attention.backends.mla.prefill.registry import MLAPrefillBackendEnum
+from vllm.v1.attention.backends.registry import AttentionBackendEnum
+
+logger = init_logger(__name__)
+
+IndexerKVDType = Literal["auto", "bf16", "fp8", "mxfp4", "nvfp4"]
+MiniMaxM3MSADecodeBackend = Literal["triton", "cutlass"]
+
+
+@config
+class AttentionConfig:
+    """Configuration for attention mechanisms in vLLM."""
+
+    backend: AttentionBackendEnum | None = None
+    """Attention backend to use. Use "auto" or None for automatic selection."""
+
+    minimax_m3_msa_decode_backend: MiniMaxM3MSADecodeBackend = "triton"
+    """Sparse decode kernel used by the MiniMax M3 MSA backend."""
+
+    backend_per_kind: dict[str, AttentionBackendEnum] = field(default_factory=dict)
+    """Per-KV-cache-group attention backend overrides, keyed by
+    `KVCacheSpecKind` (e.g. `{"mla_attention": "FLASHINFER_MLA",
+    "sliding_window_mla": "TRITON_MLA"}`). This lets a model that splits its
+    layers across multiple KV-cache groups (e.g. interleaved full and
+    sliding-window attention) use a different backend per group.
+
+    An entry overrides `backend` for layers of the matching kind; kinds not
+    listed fall back to `backend` (or automatic selection). A selected backend
+    that is invalid for that kind raises at startup."""
+
+    flash_attn_version: Literal[2, 3, 4] | None = None
+    """Force vllm to use a specific flash-attention version (2, 3, or 4).
+    Only valid when using the flash-attention backend."""
+
+    use_prefill_decode_attention: bool = False
+    """Use separate prefill and decode kernels for attention instead of
+    the unified triton kernel."""
+
+    flash_attn_max_num_splits_for_cuda_graph: int = 32
+    """Flash Attention max number splits for cuda graph decode."""
+
+    tq_max_kv_splits_for_cuda_graph: int = 32
+    """TurboQuant max NUM_KV_SPLITS for cuda graph decode.
+    Fixes the split count so grid dimensions are constant across captures,
+    and buffers can be pre-allocated to avoid inflating the memory estimate."""
+
+    use_trtllm_attention: bool | None = None
+    """If set to True/False, use or don't use the TRTLLM attention backend
+    in flashinfer. If None, auto-detect the attention backend in flashinfer."""
+
+    disable_flashinfer_q_quantization: bool = False
+    """If set, when using fp8 kv, do not quantize Q to fp8."""
+
+    mla_prefill_backend: MLAPrefillBackendEnum | None = None
+    """MLA prefill backend to use. If None, will be selected automatically.
+    Valid options: FLASH_ATTN (FA3/FA4), FLASHINFER, TRTLLM_RAGGED."""
+
+    use_prefill_query_quantization: bool = False
+    """If set, quantize query for attention in prefill."""
+
+    use_fp4_indexer_cache: bool | None = None
+    """Deprecated alias for `indexer_kv_dtype`; use that instead. True maps to
+    `mxfp4`, False is a no-op (it selected the model default already)."""
+
+    indexer_kv_dtype: IndexerKVDType = "auto"
+    """Data type for the sparse-attention indexer K cache. "auto" picks the
+    model's default (bf16 for MiniMax M3, fp8 for the DeepSeek sparse
+    indexer). Quantized formats (fp8, mxfp4, nvfp4) require indexer kernel
+    support in the backend."""
+
+    use_non_causal: bool = False
+    """Whether to use non-causal (bidirectional) attention."""
+
+    sparse_mla_force_mqa: bool = False
+    """Force sparse MLA to use forward_mqa for all requests, including prefill.
+    When False (default), pure prefill batches use forward_mha when implemented.
+    Set to True to always use the MQA path."""
+
+    flex_attn_block_m: int | None = None
+    """Triton kernel BLOCK_M tile size for flex attention.
+    Must be a power of 2 >= 16. If None and VLLM_BATCH_INVARIANT=1,
+    defaults to 16."""
+
+    flex_attn_block_n: int | None = None
+    """Triton kernel BLOCK_N tile size for flex attention.
+    Must be a power of 2 >= 16. If None and VLLM_BATCH_INVARIANT=1,
+    defaults to 16."""
+
+    flex_attn_q_block_size: int | None = None
+    """Logical Q block size for the flex attention block mask.
+    Must be a power of 2 and divisible by flex_attn_block_m.
+    If None, uses 16 for paged KV attention on PyTorch >= 2.9, and 128
+    for encoder-only attention or older PyTorch versions."""
+
+    flex_attn_kv_block_size: int | None = None
+    """Logical KV block size for the flex attention block mask.
+    Must be a power of 2 and divisible by flex_attn_block_n.
+    If None, uses the KV cache block size for paged KV attention on
+    PyTorch >= 2.9, and 128 for encoder-only attention or older PyTorch
+    versions."""
+
+    def __post_init__(self) -> None:
+        msa_aliases: dict[AttentionBackendEnum, MiniMaxM3MSADecodeBackend] = {
+            AttentionBackendEnum.CUTLASS_MSA: "cutlass",
+            AttentionBackendEnum.TRITON_MSA: "triton",
+        }
+        if self.backend in msa_aliases:
+            self.minimax_m3_msa_decode_backend = msa_aliases[self.backend]
+            # The alias selects only MiniMax's sparse decode kernel. Dense
+            # layers still use the platform's normal automatic backend.
+            self.backend = None
+
+        if self.use_fp4_indexer_cache is not None:
+            logger.warning(
+                "use_fp4_indexer_cache is deprecated and will be removed in "
+                "v0.19. Use indexer_kv_dtype instead (True -> 'mxfp4')."
+            )
+            if self.use_fp4_indexer_cache:
+                if self.indexer_kv_dtype not in ("auto", "mxfp4"):
+                    raise ValueError(
+                        "use_fp4_indexer_cache=True conflicts with "
+                        f"indexer_kv_dtype={self.indexer_kv_dtype!r}. Set only "
+                        "indexer_kv_dtype."
+                    )
+                self.indexer_kv_dtype = "mxfp4"
+
+    def resolve_indexer_kv_dtype(self, default: IndexerKVDType) -> IndexerKVDType:
+        """Resolve `indexer_kv_dtype`, substituting `default` for "auto"."""
+        if self.indexer_kv_dtype == "auto":
+            return default
+        return self.indexer_kv_dtype
+
+    def compute_hash(self) -> str:
+        """
+        Provide a hash that uniquely identifies all the configs
+        that affect the structure of the computation
+        graph from input ids/embeddings to the final hidden states,
+        excluding anything before input ids/embeddings and after
+        the final hidden states.
+        """
+        from vllm.config.utils import get_hash_factors, hash_factors
+
+        # Folded into indexer_kv_dtype by __post_init__.
+        ignored_factors: set[str] = {"use_fp4_indexer_cache"}
+        factors = get_hash_factors(self, ignored_factors)
+        return hash_factors(factors)
+
+    @field_validator("backend", mode="before")
+    @classmethod
+    def validate_backend_before(cls, value: Any) -> Any:
+        """Enable parsing of the `backend` enum type from string.
+
+        The special value "auto" is treated as None, which triggers
+        automatic backend selection.
+        """
+        if isinstance(value, str):
+            if value.lower() == "auto":
+                return None
+            return AttentionBackendEnum[value.upper()]
+        return value
+
+    @field_validator("mla_prefill_backend", mode="before")
+    @classmethod
+    def validate_mla_prefill_backend_before(cls, value: Any) -> Any:
+        """Enable parsing of the `mla_prefill_backend` enum type from string."""
+        if isinstance(value, str):
+            return MLAPrefillBackendEnum[value.upper()]
+        return value
+
+    @field_validator("backend_per_kind", mode="before")
+    @classmethod
+    def validate_backend_per_kind_before(cls, value: Any) -> Any:
+        """Parse the `backend_per_kind` map from strings.
+
+        Keys must be valid `KVCacheSpecKind` values; values are parsed like
+        `backend` (enum name, case-insensitive).
+        """
+        from vllm.v1.kv_cache_interface import KVCacheSpecKind
+
+        if not isinstance(value, dict):
+            return value
+        valid_kinds = {kind.value for kind in KVCacheSpecKind}
+        parsed: dict[str, AttentionBackendEnum] = {}
+        for kind, backend in value.items():
+            if kind not in valid_kinds:
+                raise ValueError(
+                    f"Unknown KV cache group kind '{kind}' in "
+                    f"backend_per_kind. Valid kinds are: "
+                    f"{', '.join(sorted(valid_kinds))}."
+                )
+            if isinstance(backend, str):
+                backend = AttentionBackendEnum[backend.upper()]
+            parsed[kind] = backend
+        return parsed
