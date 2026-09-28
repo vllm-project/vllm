@@ -148,6 +148,8 @@ class EngineCore:
         if envs.VLLM_ELASTIC_EP_SCALE_UP_LAUNCH:
             self._eep_scale_up_before_kv_init()
 
+        measure_encoder_output_widths(vllm_config, self.collective_rpc)
+
         # Setup KV Caches and update CacheConfig after profiling.
         kv_cache_config = self._initialize_kv_caches(vllm_config)
         self.structured_output_manager = StructuredOutputManager(vllm_config)
@@ -300,8 +302,6 @@ class EngineCore:
             [s for specs in kv_cache_specs for s in specs.values()],
         )
         self.model_executor.set_kv_cache_layout(layout.name)
-
-        measure_encoder_output_widths(vllm_config, self.collective_rpc)
 
         has_kv_cache = any(kv_cache_spec for kv_cache_spec in kv_cache_specs)
         if has_kv_cache:

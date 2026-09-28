@@ -61,8 +61,9 @@ def measure_encoder_output_widths(
 ) -> None:
     """Record the encoder output widths on an EC producer's config.
 
-    Call before memory profiling, so the dummy encode's transient allocations
-    are not mistaken for free memory.
+    Call after the model is loaded and before the KV cache is allocated: the
+    Scheduler's connector reads the widths, and once the KV cache holds the
+    memory budget there is no room left for a dummy encode.
 
     Raises:
         ValueError: No worker could encode a dummy item, or workers disagree.
