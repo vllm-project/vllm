@@ -383,7 +383,13 @@ def select_common_block_size(
     for size in sorted(candidates, reverse=True):
         if block_size_is_supported(backends, size):
             return size
-    raise ValueError(f"No common block size for {kv_manager_block_size}.")
+    raise ValueError(
+        f"No common block size for {kv_manager_block_size} ("
+        + "; ".join(
+            f"{b.get_name()}: {b.get_supported_kernel_block_sizes()}" for b in backends
+        )
+        + ")."
+    )
 
 
 def allocate_kv_cache(

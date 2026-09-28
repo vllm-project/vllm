@@ -54,6 +54,9 @@ class MultipleOf:
     def __init__(self, base: int):
         self.base = base
 
+    def __repr__(self) -> str:
+        return f"MultipleOf({self.base})"
+
 
 class AttentionBackend(ABC):
     """Abstract class for attention backends."""
