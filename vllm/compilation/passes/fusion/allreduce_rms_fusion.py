@@ -1633,36 +1633,12 @@ class RocmAiterAllReduceFusionPass(VllmFusionPatternMatcherPass):
             )
 
         for epsilon in [1e-5, 1e-6]:
-            # Register Gemma variants before generic and quant-fused patterns;
-            # their raw weights require (1 + weight) scaling in the kernel.
-            self.register(
-                AiterAllreduceFusedGemmaRMSNormPattern(
-                    epsilon,
-                    self.model_dtype,
-                    self.device,
-                )
-            )
-            self.register(
-                AiterAllreduceFusedAddGemmaRMSNormPattern(
-                    epsilon,
-                    self.model_dtype,
-                    self.device,
-                )
-            )
-            self.register(
-                AiterAllreduceFusedAddGemmaRMSNormOutputOnlyPattern(
-                    epsilon,
-                    self.model_dtype,
-                    self.device,
-                )
-            )
-
             # Quant-fused variants must register first so the pattern matcher
             # tries them before the AR+RMS-only variants. Otherwise the
             # AR+RMS-only fusion runs first and consumes the all_reduce node,
             # leaving the trailing quant op stranded as an unfused kernel.
             # Register larger subgraphs first (DeepSeek indexer fan-out, then
-            # quant-only AR+RMS+quant, then AR+RMS-only).
+            # quant-only AR+RMS+quant, then Gemma AR+RMS, then AR+RMS-only).
             if supports_per_group_quant:
                 self.register(
                     AiterAllreduceFusedAddRMSNormGroupQuantWithIndexerPattern(
@@ -1685,6 +1661,39 @@ class RocmAiterAllReduceFusionPass(VllmFusionPatternMatcherPass):
                         self.device,
                     )
                 )
+
+            # Gemma variants keep the raw weight and apply (1 + weight) inside
+            # the kernel, so their pattern is the generic AR+RMS subgraph plus
+            # the weight-side add -- they must beat the generic AR+RMS-only
+            # variants below, which would otherwise match first and bake the
+            # pre-added weight in at the activation dtype.
+            #
+            # They still register after the quant-fused variants: the fused
+            # AR+RMS+quant op has no gemma_norm mode, so a Gemma graph with a
+            # trailing quant has to keep folding (1 + weight) outside the
+            # kernel. Registering Gemma first would let the AR+RMS-only match
+            # consume the all_reduce and strand that quant.
+            self.register(
+                AiterAllreduceFusedGemmaRMSNormPattern(
+                    epsilon,
+                    self.model_dtype,
+                    self.device,
+                )
+            )
+            self.register(
+                AiterAllreduceFusedAddGemmaRMSNormPattern(
+                    epsilon,
+                    self.model_dtype,
+                    self.device,
+                )
+            )
+            self.register(
+                AiterAllreduceFusedAddGemmaRMSNormOutputOnlyPattern(
+                    epsilon,
+                    self.model_dtype,
+                    self.device,
+                )
+            )
 
             self.register(
                 AiterAllreduceFusedRMSNormPattern(

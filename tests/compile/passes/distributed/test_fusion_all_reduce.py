@@ -387,6 +387,32 @@ class TestAiterAllReduceRMSNormGroupQuantFP8Model(torch.nn.Module):
         ]
 
 
+class TestAiterAllReduceGemmaRMSNormGroupQuantFP8Model(
+    TestAiterAllReduceRMSNormGroupQuantFP8Model
+):
+    """Gemma norms feeding the per-group FP8 quant sites.
+
+    The fused AR+RMS+quant op has no ``gemma_norm`` mode, so these sites must
+    keep matching the quant-fused patterns with the pre-added ``1 + weight``.
+    The Gemma AR+RMS-only patterns match a prefix of the same subgraph, so if
+    they were registered ahead of the quant-fused ones they would consume the
+    ``all_reduce`` and strand ``rocm_aiter_group_fp8_quant`` as a separate
+    kernel -- which the ``fully_replaced=True`` check below would catch.
+    """
+
+    def __init__(
+        self,
+        hidden_size=128,
+        token_num=16,
+        eps=1e-6,
+        dtype: torch.dtype = torch.bfloat16,
+    ):
+        super().__init__(hidden_size, token_num, eps, dtype)
+        self.norm = [GemmaRMSNorm(hidden_size, eps) for _ in range(4)]
+        for norm in self.norm:
+            norm.weight.requires_grad_(False)
+
+
 class TestAllReduceFusedAddRMSNormStaticQuantFP4Model(torch.nn.Module):
     def __init__(
         self, hidden_size=16, token_num=16, eps=1e-6, dtype: torch.dtype = torch.float16
@@ -695,6 +721,13 @@ def all_reduce_fusion_pass_on_test_model(
 @pytest.mark.parametrize("hidden_size", [128])
 @pytest.mark.parametrize("dtype", [torch.bfloat16])
 @pytest.mark.parametrize("enable_rms_norm_custom_op", [True, False])
+@pytest.mark.parametrize(
+    "test_model_cls",
+    [
+        TestAiterAllReduceRMSNormGroupQuantFP8Model,
+        TestAiterAllReduceGemmaRMSNormGroupQuantFP8Model,
+    ],
+)
 @pytest.mark.skipif(
     not current_platform.is_rocm(),
     reason="ROCm AITER AR+RMS+per-group-FP8-quant fusion is ROCm-only",
@@ -706,6 +739,7 @@ def test_rocm_aiter_all_reduce_rmsnorm_group_quant_fp8_fusion_pass_replace(
     hidden_size: int,
     dtype: torch.dtype,
     enable_rms_norm_custom_op: bool,
+    test_model_cls: type[torch.nn.Module],
     monkeypatch: pytest.MonkeyPatch,
 ):
     """Sibling of ``test_all_reduce_fusion_pass_replace`` for the new
@@ -721,6 +755,10 @@ def test_rocm_aiter_all_reduce_rmsnorm_group_quant_fp8_fusion_pass_replace(
       residual, DSv3.2 indexer fan-out; parametrized over
       ``rocm_aiter_group_fp8_quant``
       producer).
+
+    Parametrized over plain and Gemma norms: the Gemma AR+RMS-only patterns
+    match a prefix of these subgraphs, so this also pins their registration
+    order behind the quant-fused ones.
     """
     with monkeypatch.context() as m:
         m.setenv("VLLM_ROCM_USE_AITER", "1")
@@ -741,7 +779,7 @@ def test_rocm_aiter_all_reduce_rmsnorm_group_quant_fp8_fusion_pass_replace(
             args=(
                 num_processes,
                 master_port,
-                TestAiterAllReduceRMSNormGroupQuantFP8Model,
+                test_model_cls,
                 batch_size,
                 seq_len,
                 hidden_size,
