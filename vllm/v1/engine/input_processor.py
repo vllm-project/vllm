@@ -97,6 +97,9 @@ class InputProcessor:
         params validator for the active model runner."""
         custom_logitsprocs = self.model_config.logits_processors
         if self.vllm_config.use_v2_model_runner:
+            if self.model_config.runner_type == "pooling" and not custom_logitsprocs:
+                return lambda _: None
+
             from vllm.v1.worker.gpu.sample.logits_processor import (
                 build_custom_logits_processors_params_validator,
             )
