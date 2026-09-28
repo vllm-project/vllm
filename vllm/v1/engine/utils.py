@@ -30,7 +30,7 @@ from vllm.utils.network_utils import (
 )
 from vllm.utils.system_utils import get_mp_context
 from vllm.v1.engine.coordinator import DPCoordinator
-from vllm.v1.executor import Executor
+from vllm.v1.executor import Executor, UniProcExecutor
 from vllm.v1.executor.ray_utils import WORKER_SPECIFIC_ENV_VARS
 from vllm.v1.utils import _SubprocessWrapper, get_engine_client_zmq_addr, shutdown
 
@@ -141,6 +141,41 @@ def _node_ip_from_resources(node_resources: dict) -> str | None:
     return None
 
 
+@contextlib.contextmanager
+def _configure_engine_startup_threads(
+    executor_class: type[Executor], local_engine_count: int
+) -> Iterator[None]:
+    if not issubclass(executor_class, UniProcExecutor):
+        yield
+        return
+
+    import torch
+
+    from vllm.utils.torch_utils import OMP_NUM_THREADS_SET_BY_VLLM
+    from vllm.v1.executor.multiproc_executor import set_multiprocessing_worker_envs
+
+    original_threads = torch.get_num_threads()
+    original_env = {
+        key: os.environ.get(key)
+        for key in ("OMP_NUM_THREADS", OMP_NUM_THREADS_SET_BY_VLLM)
+    }
+    try:
+        # UniProc's worker lives in EngineCore, so configure its inherited
+        # startup threads here, before either spawning or forking that process.
+        set_multiprocessing_worker_envs(
+            local_engine_count, max_cpu_threads=original_threads
+        )
+        yield
+    finally:
+        if torch.get_num_threads() != original_threads:
+            torch.set_num_threads(original_threads)
+        for key, value in original_env.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+
 class CoreEngineProcManager:
     """Utility class to handle creation, readiness, and shutdown
     of background processes used by the AsyncLLM and LLMEngine.
@@ -159,83 +194,87 @@ class CoreEngineProcManager:
         client_handshake_address: str | None = None,
         tensor_queue: Queue | None = None,
     ):
-        self._request_shutdown_timeout = vllm_config.shutdown_timeout
-        context = get_mp_context()
-        common_kwargs = {
-            "vllm_config": vllm_config,
-            "local_client": local_client,
-            "handshake_address": handshake_address,
-            "executor_class": executor_class,
-            "log_stats": log_stats,
-            "tensor_queue": tensor_queue,
-        }
+        with _configure_engine_startup_threads(executor_class, local_engine_count):
+            self._request_shutdown_timeout = vllm_config.shutdown_timeout
+            context = get_mp_context()
+            common_kwargs = {
+                "vllm_config": vllm_config,
+                "local_client": local_client,
+                "handshake_address": handshake_address,
+                "executor_class": executor_class,
+                "log_stats": log_stats,
+                "tensor_queue": tensor_queue,
+            }
 
-        if client_handshake_address:
-            common_kwargs["client_handshake_address"] = client_handshake_address
+            if client_handshake_address:
+                common_kwargs["client_handshake_address"] = client_handshake_address
 
-        is_dp = vllm_config.parallel_config.data_parallel_size > 1
+            is_dp = vllm_config.parallel_config.data_parallel_size > 1
 
-        from vllm.v1.engine.core import EngineCoreProc
+            from vllm.v1.engine.core import EngineCoreProc
 
-        self.processes: list[BaseProcess] = []
-        local_dp_ranks = []
-        for index in range(local_engine_count):
-            local_index = local_start_index + index
-            global_index = start_index + index
+            self.processes: list[BaseProcess] = []
+            local_dp_ranks = []
+            for index in range(local_engine_count):
+                local_index = local_start_index + index
+                global_index = start_index + index
 
-            # Start EngineCore in background process.
-            local_dp_ranks.append(local_index)
-            self.processes.append(
-                context.Process(
-                    target=EngineCoreProc.run_engine_core,
-                    name=f"EngineCore_DP{global_index}" if is_dp else "EngineCore",
-                    kwargs=common_kwargs
-                    | {"dp_rank": global_index, "local_dp_rank": local_index},
-                )
-            )
-
-        self._finalizer = weakref.finalize(self, shutdown, self.processes)
-        self.manager_stopped = threading.Event()
-        self.failed_proc_name: str | None = None
-
-        # All ranks share this config object: capture the user-provided
-        # --device-ids list before the per-rank shard overwrites it. Mutating
-        # the config before each proc.start() works because the spawn method
-        # pickles process args at start() time, sequentially per rank.
-        user_assigned_gpu_ids = vllm_config.parallel_config.assigned_physical_gpu_ids
-        try:
-            for proc, local_dp_rank in zip(self.processes, local_dp_ranks):
-                # Populate the logical-to-physical GPU mapping in DP for
-                # platforms that cannot rely on
-                # torch.accelerator.set_device_index(), and for Ray.
-                needs_device_env_isolation = not (
-                    current_platform.is_cuda_alike() or current_platform.is_xpu()
-                )
-                if is_dp and (
-                    needs_device_env_isolation or vllm_config.parallel_config.use_ray
-                ):
-                    set_assigned_physical_gpu_ids_for_dp_rank(
-                        vllm_config, local_dp_rank, user_assigned_gpu_ids
+                # Start EngineCore in background process.
+                local_dp_ranks.append(local_index)
+                self.processes.append(
+                    context.Process(
+                        target=EngineCoreProc.run_engine_core,
+                        name=f"EngineCore_DP{global_index}" if is_dp else "EngineCore",
+                        kwargs=common_kwargs
+                        | {"dp_rank": global_index, "local_dp_rank": local_index},
                     )
+                )
 
-                with numa_utils.configure_subprocess(
-                    # EngineCore itself does not have a TP/PP-local rank.
-                    # When DP is enabled, set_assigned_physical_gpu_ids_for_dp_rank()
-                    # populates the logical-to-physical mapping for this DP
-                    # shard, so local_rank=0 means "the first local GPU in
-                    # this shard". The actual TP/PP worker processes spawned
-                    # by the executor are bound separately with their own
-                    # local_rank values.
-                    vllm_config,
-                    local_rank=0,
-                    dp_local_rank=local_dp_rank,
-                    process_kind="EngineCore",
-                ):
-                    proc.start()
-        finally:
-            # Kill other procs if not all are running.
-            if self.finished_procs():
-                self.shutdown()
+            self._finalizer = weakref.finalize(self, shutdown, self.processes)
+            self.manager_stopped = threading.Event()
+            self.failed_proc_name: str | None = None
+
+            # All ranks share this config object: capture the user-provided
+            # --device-ids list before the per-rank shard overwrites it. Mutating
+            # the config before each proc.start() works because the spawn method
+            # pickles process args at start() time, sequentially per rank.
+            user_assigned_gpu_ids = (
+                vllm_config.parallel_config.assigned_physical_gpu_ids
+            )
+            try:
+                for proc, local_dp_rank in zip(self.processes, local_dp_ranks):
+                    # Populate the logical-to-physical GPU mapping in DP for
+                    # platforms that cannot rely on
+                    # torch.accelerator.set_device_index(), and for Ray.
+                    needs_device_env_isolation = not (
+                        current_platform.is_cuda_alike() or current_platform.is_xpu()
+                    )
+                    if is_dp and (
+                        needs_device_env_isolation
+                        or vllm_config.parallel_config.use_ray
+                    ):
+                        set_assigned_physical_gpu_ids_for_dp_rank(
+                            vllm_config, local_dp_rank, user_assigned_gpu_ids
+                        )
+
+                    with numa_utils.configure_subprocess(
+                        # EngineCore itself does not have a TP/PP-local rank.
+                        # set_assigned_physical_gpu_ids_for_dp_rank() populates
+                        # the logical-to-physical mapping for this DP
+                        # shard, so local_rank=0 means "the first local GPU in
+                        # this shard". The actual TP/PP worker processes spawned
+                        # by the executor are bound separately with their own
+                        # local_rank values.
+                        vllm_config,
+                        local_rank=0,
+                        dp_local_rank=local_dp_rank,
+                        process_kind="EngineCore",
+                    ):
+                        proc.start()
+            finally:
+                # Kill other procs if not all are running.
+                if self.finished_procs():
+                    self.shutdown()
 
     def shutdown(self, timeout: float | None = None) -> None:
         """Shutdown engine core processes with configurable timeout."""
