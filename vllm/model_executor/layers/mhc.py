@@ -292,6 +292,229 @@ class MHCPreOp(CustomOp):
         )
 
 
+# --8<-- [start:mhc_pre_delayed]
+@CustomOp.register("mhc_pre_delayed")
+class MHCPreDelayedOp(CustomOp):
+    """MHC pre block using the pre-mix carried from the previous sublayer.
+
+    Same gates as :class:`MHCPreOp`, but the stream collapse applies the
+    caller's ``pre_mix`` and this sublayer's pre-mix is returned for the next
+    sublayer seam.
+
+    Passing ``sublayer_out`` / ``post_layer_mix`` / ``comb_res_mix`` also
+    applies the preceding post block, which lets AITER fold it into the pre
+    projection and saves a launch. Returns residual, post_mix, comb_mix,
+    layer_input, next_pre_mix; ``residual`` is the caller's own tensor when
+    no post is requested.
+    """
+
+    # --8<-- [end:mhc_pre_delayed]
+    @classmethod
+    def enabled(cls) -> bool:
+        return True
+
+    def __init__(self) -> None:
+        super().__init__()
+        # Built here, not lazily: CustomOp resolves dispatch against the
+        # current vLLM config, which is only set during model construction.
+        self._post = MHCPostOp()
+
+    def _maybe_post(
+        self,
+        residual: torch.Tensor,
+        sublayer_out: torch.Tensor | None,
+        post_layer_mix: torch.Tensor | None,
+        comb_res_mix: torch.Tensor | None,
+    ) -> torch.Tensor:
+        if sublayer_out is None:
+            return residual
+        assert post_layer_mix is not None and comb_res_mix is not None
+        return self._post(sublayer_out, residual, post_layer_mix, comb_res_mix)
+
+    def forward_cuda(
+        self,
+        residual: torch.Tensor,
+        fn: torch.Tensor,
+        hc_scale: torch.Tensor,
+        hc_base: torch.Tensor,
+        rms_eps: float,
+        hc_pre_eps: float,
+        hc_sinkhorn_eps: float,
+        hc_post_mult_value: float,
+        sinkhorn_repeat: int,
+        pre_mix: torch.Tensor | None = None,
+        x: torch.Tensor | None = None,
+        norm_weight: torch.Tensor | None = None,
+        norm_eps: float = 1e-6,
+        sublayer_out: torch.Tensor | None = None,
+        post_layer_mix: torch.Tensor | None = None,
+        comb_res_mix: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        residual = self._maybe_post(
+            residual, sublayer_out, post_layer_mix, comb_res_mix
+        )
+        return residual, *torch.ops.vllm.mhc_pre_delayed_tilelang(
+            residual,
+            fn,
+            hc_scale,
+            hc_base,
+            rms_eps,
+            hc_pre_eps,
+            hc_sinkhorn_eps,
+            hc_post_mult_value,
+            sinkhorn_repeat,
+            pre_mix,
+            x,
+            norm_weight,
+            norm_eps,
+        )
+
+    def forward_hip(
+        self,
+        residual: torch.Tensor,
+        fn: torch.Tensor,
+        hc_scale: torch.Tensor,
+        hc_base: torch.Tensor,
+        rms_eps: float,
+        hc_pre_eps: float,
+        hc_sinkhorn_eps: float,
+        hc_post_mult_value: float,
+        sinkhorn_repeat: int,
+        pre_mix: torch.Tensor | None = None,
+        x: torch.Tensor | None = None,
+        norm_weight: torch.Tensor | None = None,
+        norm_eps: float = 1e-6,
+        sublayer_out: torch.Tensor | None = None,
+        post_layer_mix: torch.Tensor | None = None,
+        comb_res_mix: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        # The AITER delayed path drives mhc_pre_gemm_sqrsum against `residual`
+        # and folds no RMSNorm, so it cannot serve the model-entry broadcast
+        # (which projects a narrower `x`) or a fused norm. Both are handled by
+        # TileLang, or by the reference when TileLang is unavailable.
+        if (
+            x is None
+            and norm_weight is None
+            and _aiter_mhc_supported(residual, None, supports_norm=False)
+        ):
+            from vllm._aiter_ops import rocm_aiter_ops
+
+            num_tokens = residual.numel() // (residual.shape[-1] * residual.shape[-2])
+            # Folding the post in only pays while the residual still fits in
+            # cache; past that AITER's heuristic wants the separate kernels,
+            # which can ask for a non-temporal store and a large-m split-k.
+            if sublayer_out is not None and (
+                rocm_aiter_ops.mhc_fused_post_pre_delayed_prefers_unfused(num_tokens)
+            ):
+                residual = self._maybe_post(
+                    residual, sublayer_out, post_layer_mix, comb_res_mix
+                )
+                sublayer_out = None
+            # The op writes the folded post's residual into this buffer rather
+            # than returning it, since on the unfused path it has none of its
+            # own and an op must not hand back one of its inputs.
+            residual_out = (
+                torch.empty_like(residual) if sublayer_out is not None else None
+            )
+            rest = torch.ops.vllm.mhc_pre_delayed_aiter(
+                residual,
+                fn,
+                hc_scale,
+                hc_base,
+                rms_eps,
+                hc_pre_eps,
+                hc_sinkhorn_eps,
+                hc_post_mult_value,
+                sinkhorn_repeat,
+                pre_mix,
+                sublayer_out,
+                post_layer_mix,
+                comb_res_mix,
+                residual_out,
+            )
+            return (residual if residual_out is None else residual_out), *rest
+        residual = self._maybe_post(
+            residual, sublayer_out, post_layer_mix, comb_res_mix
+        )
+        if HAS_TILELANG_MHC:
+            return residual, *torch.ops.vllm.mhc_pre_delayed_tilelang(
+                residual,
+                fn,
+                hc_scale,
+                hc_base,
+                rms_eps,
+                hc_pre_eps,
+                hc_sinkhorn_eps,
+                hc_post_mult_value,
+                sinkhorn_repeat,
+                pre_mix,
+                x,
+                norm_weight,
+                norm_eps,
+            )
+        # The post is already applied, so it must not be requested again.
+        return self.forward_native(
+            residual,
+            fn,
+            hc_scale,
+            hc_base,
+            rms_eps,
+            hc_pre_eps,
+            hc_sinkhorn_eps,
+            hc_post_mult_value,
+            sinkhorn_repeat,
+            pre_mix,
+            x,
+            norm_weight,
+            norm_eps,
+        )
+
+    def forward_native(
+        self,
+        residual: torch.Tensor,
+        fn: torch.Tensor,
+        hc_scale: torch.Tensor,
+        hc_base: torch.Tensor,
+        rms_eps: float,
+        hc_pre_eps: float,
+        hc_sinkhorn_eps: float,
+        hc_post_mult_value: float,
+        sinkhorn_repeat: int,
+        pre_mix: torch.Tensor | None = None,
+        x: torch.Tensor | None = None,
+        norm_weight: torch.Tensor | None = None,
+        norm_eps: float = 1e-6,
+        sublayer_out: torch.Tensor | None = None,
+        post_layer_mix: torch.Tensor | None = None,
+        comb_res_mix: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        residual = self._maybe_post(
+            residual, sublayer_out, post_layer_mix, comb_res_mix
+        )
+        post_mix, comb_mix, layer_input, next_pre_mix = (
+            mhc_kernels.mhc_pre_delayed_torch(
+                residual,
+                fn,
+                hc_scale,
+                hc_base,
+                rms_eps,
+                hc_pre_eps,
+                hc_sinkhorn_eps,
+                hc_post_mult_value,
+                sinkhorn_repeat,
+                pre_mix=pre_mix,
+                x=x,
+            )
+        )
+        return (
+            residual,
+            post_mix,
+            comb_mix,
+            _apply_mhc_norm(layer_input, norm_weight, norm_eps),
+            next_pre_mix,
+        )
+
+
 # --8<-- [start:mhc_post]
 @CustomOp.register("mhc_post")
 class MHCPostOp(CustomOp):

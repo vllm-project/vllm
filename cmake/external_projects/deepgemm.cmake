@@ -28,9 +28,12 @@ if(DEEPGEMM_SRC_DIR)
   message(STATUS "DeepGEMM using local DEEPGEMM_SRC_DIR: ${deepgemm_SOURCE_DIR}")
 else()
   # Keep in sync with tools/install_deepgemm.sh
-  set(_DEEPGEMM_UPSTREAM_REPO "https://github.com/deepseek-ai/DeepGEMM.git")
-  # Pinned to the tip of the nv_dev branch (SM120 support).
-  set(_DEEPGEMM_UPSTREAM_TAG "8b1392b978f5a03c828dd1711090d7fb50958b8a")
+  set(_DEEPGEMM_UPSTREAM_REPO "https://github.com/vllm-project/DeepGEMM.git")
+  # Pinned to the fork's dev branch: upstream 2.8.0 plus the SM120
+  # port, the SM90 paged-MQA kv_block=32/next_n=4 port, configurable SwiGLU
+  # alpha/beta, and SiTU for FP8/FP4 Mega MoE. Also includes the CUDA 12.x
+  # layout header fix from vllm-project/DeepGEMM#12.
+  set(_DEEPGEMM_UPSTREAM_TAG "e1f418c2a4f20818221f6b0e578b4c2f634d4c3f")
 
   set(_deepgemm_fc_root "${FETCHCONTENT_BASE_DIR}")
   if(NOT _deepgemm_fc_root)
@@ -51,7 +54,7 @@ else()
       BINARY_DIR "${_deepgemm_bin}"
       GIT_REPOSITORY "${_DEEPGEMM_UPSTREAM_REPO}"
       GIT_TAG "${_DEEPGEMM_UPSTREAM_TAG}"
-      GIT_SUBMODULES "third-party/cutlass" "third-party/fmt"
+      GIT_SUBMODULES "third-party/cutlass" "third-party/deep_jit"
       GIT_PROGRESS TRUE
     )
   endif()
@@ -119,13 +122,15 @@ if(DEEPGEMM_ARCHS)
   message(STATUS "DeepGEMM _C will be built for: ${_dg_pythons}")
 
   # add_custom_command does no implicit header scanning; glob explicitly so
-  # header-only edits in DeepGEMM/cutlass/fmt re-trigger the rebuild.
+  # header-only edits in DeepGEMM/cutlass/deep_jit re-trigger the rebuild.
   file(GLOB_RECURSE _dg_headers
     "${deepgemm_SOURCE_DIR}/csrc/*.h"
     "${deepgemm_SOURCE_DIR}/csrc/*.hpp"
     "${deepgemm_SOURCE_DIR}/deep_gemm/include/*.h"
     "${deepgemm_SOURCE_DIR}/deep_gemm/include/*.hpp"
-    "${deepgemm_SOURCE_DIR}/deep_gemm/include/*.cuh")
+    "${deepgemm_SOURCE_DIR}/deep_gemm/include/*.cuh"
+    "${deepgemm_SOURCE_DIR}/third-party/deep_jit/include/*.h"
+    "${deepgemm_SOURCE_DIR}/third-party/deep_jit/include/*.hpp")
 
   set(_dg_markers)
   set(_dg_seen_soabis)
