@@ -7,6 +7,7 @@ from typing import Any
 
 import torch
 
+from vllm.config import CompilationConfig, CompilationMode
 from vllm.model_executor.warmup.jit_warmup import JitWarmupRegistry
 from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT
 from vllm.v1.worker.gpu import eplb_utils as eplb
@@ -74,6 +75,7 @@ def _make_runner(**overrides: Any) -> Any:
         eplb_config=SimpleNamespace(log_balancedness=True),
     )
     runner.vllm_config = SimpleNamespace(
+        compilation_config=CompilationConfig(mode=CompilationMode.NONE),
         load_config=runner.load_config,
         model_config=runner.model_config,
     )

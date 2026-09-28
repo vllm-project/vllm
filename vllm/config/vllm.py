@@ -3045,9 +3045,6 @@ class VllmConfig:
         unsupported: list[str] = []
         speculative_config = self.speculative_config
 
-        if self.compilation_config.mode == CompilationMode.STOCK_TORCH_COMPILE:
-            unsupported.append("stock torch.compile")
-
         if (
             self.compilation_config.pass_config.enable_sp
             and self.parallel_config.tensor_parallel_size > 1
