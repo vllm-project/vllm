@@ -394,6 +394,23 @@ def test_moe_splitting_ops_deepep_ht_inductor_partition():
     ]
 
 
+@pytest.mark.parametrize("enable_eager_tp_all_reduce", [False, True])
+def test_eager_tp_all_reduce_splitting_op(enable_eager_tp_all_reduce):
+    """The in-place TP all-reduce becomes a piecewise boundary next to the
+    default splitting ops, exactly once, and only when the flag is set."""
+    config = CompilationConfig(
+        mode=CompilationMode.VLLM_COMPILE,
+        cudagraph_mode=CUDAGraphMode.PIECEWISE,
+        enable_eager_tp_all_reduce=enable_eager_tp_all_reduce,
+    )
+    for _ in range(2):
+        config.set_splitting_ops_for_v1(all2all_backend="allgather_reducescatter")
+    assert config.splitting_ops_contain_attention()
+    assert config.splitting_ops.count("vllm::all_reduce_inplace_") == int(
+        enable_eager_tp_all_reduce
+    )
+
+
 def test_should_split():
     import torch
 
