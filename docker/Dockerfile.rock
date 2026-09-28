@@ -135,7 +135,7 @@ RUN --mount=type=cache,id=vllm-rocm-uv,target=/root/.cache/uv \
     cd ${COMMON_WORKDIR}/vllm \
     && uv pip install --system -r requirements/build/rust.txt \
     && python3 -c \
-        "from setuptools_scm import get_version; print(get_version())" \
+        "from setuptools_scm import get_version; print(get_version(git_describe_command=['git', 'describe', '--dirty', '--tags', '--long', '--abbrev=40', '--match', 'v[0-9]*']))" \
         > /vllm-version.txt
 
 # -----------------------
@@ -171,7 +171,7 @@ COPY rust/proto /rust-input/vllm/rust/proto
 COPY rust/src /rust-input/vllm/rust/src
 COPY rust-toolchain.toml /rust-input/vllm/rust-toolchain.toml
 COPY tools/build_rust.py /rust-input/vllm/tools/build_rust.py
-COPY build_rust.sh /rust-input/vllm/build_rust.sh
+COPY tools/build_rust.sh /rust-input/vllm/tools/build_rust.sh
 
 FROM base AS rust_input_1
 ARG VLLM_REPO
@@ -188,7 +188,7 @@ RUN git clone --no-checkout --filter=blob:none ${VLLM_REPO} /rust-input/vllm \
         rust/src/** \
         rust-toolchain.toml \
         tools/build_rust.py \
-        build_rust.sh \
+        tools/build_rust.sh \
     && git checkout FETCH_HEAD
 
 FROM rust_input_${REMOTE_VLLM} AS rust-input
@@ -244,7 +244,7 @@ RUN --mount=type=cache,id=vllm-rocm-uv,target=/root/.cache/uv \
 COPY --from=rust-input /rust-input/vllm/rust rust
 COPY --from=rust-input /rust-input/vllm/rust-toolchain.toml rust-toolchain.toml
 COPY --from=rust-input /rust-input/vllm/tools/build_rust.py tools/build_rust.py
-COPY --from=rust-input /rust-input/vllm/build_rust.sh build_rust.sh
+COPY --from=rust-input /rust-input/vllm/tools/build_rust.sh tools/build_rust.sh
 COPY --from=vllm-version /vllm-version.txt /tmp/vllm-version.txt
 
 # Build the release binary. Cargo's registry/git caches can be written by
@@ -258,7 +258,7 @@ RUN --mount=type=cache,id=vllm-rocm-cargo-registry,target=/root/.cargo/registry,
         && sccache --show-stats; \
     fi \
     && export SETUPTOOLS_SCM_PRETEND_VERSION="$(cat /tmp/vllm-version.txt)" \
-    && bash build_rust.sh \
+    && bash tools/build_rust.sh \
     && test -x vllm/vllm-rs \
     && if [ "$USE_SCCACHE" = "1" ]; then \
         sccache --show-stats; \
@@ -368,7 +368,7 @@ COPY --from=build_vllm ${COMMON_WORKDIR}/vllm/requirements /requirements
 COPY --from=build_vllm ${COMMON_WORKDIR}/vllm/benchmarks /benchmarks
 COPY --from=build_vllm ${COMMON_WORKDIR}/vllm/tests /tests
 COPY --from=build_vllm ${COMMON_WORKDIR}/vllm/examples /examples
-COPY --from=build_vllm ${COMMON_WORKDIR}/vllm/scripts/benchmark_helion_kernels.py /scripts/benchmark_helion_kernels.py
+COPY --from=build_vllm ${COMMON_WORKDIR}/vllm/tools/benchmark_helion_kernels.py /tools/benchmark_helion_kernels.py
 COPY --from=build_vllm ${COMMON_WORKDIR}/vllm/tools/install_torchcodec_rocm.sh /tools/install_torchcodec_rocm.sh
 COPY --from=build_vllm ${COMMON_WORKDIR}/vllm/docker/Dockerfile /docker/Dockerfile
 COPY --from=build_vllm ${COMMON_WORKDIR}/vllm/docker/Dockerfile.cpu /docker/Dockerfile.cpu
@@ -729,7 +729,7 @@ COPY --from=build_vllm_wheel_release ${COMMON_WORKDIR}/vllm/requirements /requir
 COPY --from=build_vllm_wheel_release ${COMMON_WORKDIR}/vllm/benchmarks /benchmarks
 COPY --from=build_vllm_wheel_release ${COMMON_WORKDIR}/vllm/tests /tests
 COPY --from=build_vllm_wheel_release ${COMMON_WORKDIR}/vllm/examples /examples
-COPY --from=build_vllm_wheel_release ${COMMON_WORKDIR}/vllm/scripts/benchmark_helion_kernels.py /scripts/benchmark_helion_kernels.py
+COPY --from=build_vllm_wheel_release ${COMMON_WORKDIR}/vllm/tools/benchmark_helion_kernels.py /tools/benchmark_helion_kernels.py
 COPY --from=build_vllm_wheel_release ${COMMON_WORKDIR}/vllm/tools/install_torchcodec_rocm.sh /tools/install_torchcodec_rocm.sh
 COPY --from=build_vllm_wheel_release ${COMMON_WORKDIR}/vllm/docker/Dockerfile /docker/Dockerfile
 COPY --from=build_vllm_wheel_release ${COMMON_WORKDIR}/vllm/docker/Dockerfile.cpu /docker/Dockerfile.cpu
@@ -776,13 +776,21 @@ RUN --mount=type=bind,from=build_nixl,src=/app/install,target=/nixl_install \
     uv pip install --system /nixl_install/*.whl /deep_install/*.whl
 
 # RDMA userspace libraries plus FFmpeg dev libs needed by torchcodec.
-RUN apt-get update -q -y && apt-get install -q -y --no-install-recommends \
+RUN timeout --kill-after=30s 5m apt-get update -q -y --error-on=any \
+    -o Acquire::Retries=3 \
+    -o Acquire::http::Timeout=30 \
+    -o Acquire::https::Timeout=30 \
+    && apt-get install -q -y --no-install-recommends \
+    -o Acquire::Retries=3 \
+    -o Acquire::http::Timeout=30 \
+    -o Acquire::https::Timeout=30 \
     librdmacm1 \
     libibverbs1 \
     ibverbs-providers \
     ibverbs-utils \
     util-linux \
     unzip \
+    libsodium23 \
     pkg-config ffmpeg libavcodec-dev libavformat-dev libavutil-dev \
     libswscale-dev libavdevice-dev libavfilter-dev libswresample-dev \
     && rm -rf /var/lib/apt/lists/*
