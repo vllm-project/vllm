@@ -257,3 +257,15 @@ def test_dequant_fp4_ue8m0_gran32_decodes_lut_and_scales():
             expected[row, 2 * col + 1] = _E2M1_LUT[byte >> 4]
         expected[row] *= 2.0**row
     assert torch.equal(out, expected.to(torch.bfloat16))
+
+
+def test_fi_mega_moe_rejects_reload_without_packed_weight_ownership():
+    from vllm.models.deepseek_v4.nvidia.fi_moe import DeepseekV4MegaMoEExpertsFI
+
+    experts = object.__new__(DeepseekV4MegaMoEExpertsFI)
+    torch.nn.Module.__init__(experts)
+    experts._mega_layer = None
+    experts.prepare_for_reload()
+    experts._mega_layer = object()
+    with pytest.raises(NotImplementedError, match="backend-owned packed weights"):
+        experts.prepare_for_reload()
