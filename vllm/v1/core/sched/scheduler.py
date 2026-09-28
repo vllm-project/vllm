@@ -871,16 +871,16 @@ class Scheduler(SchedulerInterface):
 
         # Next, schedule the WAITING requests.
         if not preempted_reqs and self._pause_state == PauseState.UNPAUSED:
-            step_skipped_waiting = create_request_queue(self.policy)
-            step_skipped_kv_holding = create_request_queue(self.policy)
+            step_skipped_waiting: deque[Request] = deque()
+            step_skipped_kv_holding: deque[Request] = deque()
 
             def skip_request(from_queue: RequestQueue) -> None:
                 request_to_skip = from_queue.pop_request()
                 self.deferred_waiting.add(request_to_skip)
                 if self._holds_kv_blocks(request_to_skip):
-                    step_skipped_kv_holding.prepend_request(request_to_skip)
+                    step_skipped_kv_holding.appendleft(request_to_skip)
                 else:
-                    step_skipped_waiting.prepend_request(request_to_skip)
+                    step_skipped_waiting.appendleft(request_to_skip)
 
             while token_budget > 0:
                 # Requests holding KV blocks are always drained first.
@@ -2377,6 +2377,8 @@ class Scheduler(SchedulerInterface):
     @staticmethod
     def _holds_kv_blocks(request: Request) -> bool:
         # Whether a request currently has kv blocks allocated.
+        # num_computed_tokens is reset to 0 if kv transfer fails for requests in
+        # WAITING_FOR_REMOTE_KVS state, before their allocated blocks are freed.
         return (
             request.num_computed_tokens > 0
             or request.status == RequestStatus.WAITING_FOR_REMOTE_KVS
@@ -3073,6 +3075,8 @@ class Scheduler(SchedulerInterface):
         self.finished_recving_kv_req_ids.remove(request.request_id)
 
     def _handle_blocked_waiting_request(self, request: Request) -> bool:
+        """Returns True if scheduling of this request should proceed, False if
+        it should be skipped for this step."""
         if request.status == RequestStatus.WAITING_FOR_REMOTE_KVS:
             # Check whether async loading requests are finished.
             request_id = request.request_id
