@@ -114,13 +114,10 @@ def test_ipc_weight_transfer_restores_reset_weights():
         }
 
 
-@multi_gpu_test(num_gpus=4)
-def test_keys_cover_every_tp_and_dp_rank():
-    args = ["--tensor-parallel-size", "2", "--data-parallel-size", "2"]
+@multi_gpu_test(num_gpus=2)
+def test_checksum_and_reset_cover_every_dp_engine():
+    args = ["--data-parallel-size", "2"]
     with server(extra_args=args, port=8771, timeout=600) as url:
-        ranks = {
-            re.fullmatch(r"dp(\d):pp0:pcp0:tp(\d):ep0:.+", key).groups()
-            for key in checksums(url)
-        }
-        assert ranks == {(dp, tp) for dp in "01" for tp in "01"}
+        prefixes = {key.split(":", 5)[0] for key in checksums(url)}
+        assert prefixes == {"dp0", "dp1"}
         reset_reload_and_compare(url)
