@@ -15,6 +15,7 @@ from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fusion.quant_activation import QuantizedActivation
 from vllm.model_executor.layers.quantization.utils.quant_utils import kMxfp8Dynamic
+from vllm.model_executor.utils import register_derived_buffer, set_derived_buffer
 from vllm.models.deepseek_v41.attention import (
     DeepseekV4Attention,
     _replace_layer_index,
@@ -508,8 +509,10 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
         self.wo_a.is_bmm = False
         self._has_kv_transfer = vllm_config.kv_transfer_config is not None
         # Block scale for the preshuffled weight; None = not preshuffled.
-        self._wqa_wkv_scale: torch.Tensor | None = None
-        self._wo_b_scale: torch.Tensor | None = None
+        register_derived_buffer(self, "_wqa_wkv_scale")
+        register_derived_buffer(self, "_wo_b_scale")
+        for linear in (self.fused_wqa_wkv, self.wo_b, self.wo_a):
+            linear._vllm_defer_weights_reload = True
         self._fused_compressor_weight: torch.Tensor | None
         self.register_buffer("_fused_compressor_weight", None, persistent=False)
         self._fused_compressor_split_sizes: tuple[int, int] | None = None
@@ -538,7 +541,15 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
     def get_padded_num_q_heads(cls, num_heads: int) -> int:
         return num_heads
 
-    def prepare_attn_preshuffle(self) -> None:
+    def process_weights_for_reload(self) -> None:
+        from vllm.model_executor.model_loader.reload.layerwise import get_layerwise_info
+
+        for linear in (self.fused_wqa_wkv, self.wo_b, self.wo_a):
+            if get_layerwise_info(linear).reload_restore_pending:
+                linear.quant_method.process_weights_after_loading(linear)
+        self.prepare_attn_preshuffle(reloading=True)
+
+    def prepare_attn_preshuffle(self, *, reloading: bool = False) -> None:
         from vllm._aiter_ops import rocm_aiter_ops
 
         if not rocm_aiter_ops.is_enabled():
@@ -549,6 +560,13 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
         from vllm.model_executor.utils import replace_parameter
 
         def _prep(linear) -> torch.Tensor | None:
+            if reloading:
+                from vllm.model_executor.model_loader.reload.layerwise import (
+                    get_layerwise_info,
+                )
+
+                if not get_layerwise_info(linear).reload_restore_pending:
+                    return None
             w = getattr(linear, "weight", None)
             if w is None or w.dim() != 2:
                 return None
@@ -568,8 +586,13 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
             )
             return ws
 
-        self._wqa_wkv_scale = _prep(self.fused_wqa_wkv)
-        self._wo_b_scale = _prep(self.wo_b)
+        for name, linear in (
+            ("_wqa_wkv_scale", self.fused_wqa_wkv),
+            ("_wo_b_scale", self.wo_b),
+        ):
+            scale = _prep(linear)
+            if scale is not None:
+                set_derived_buffer(self, name, scale)
 
     def prepare_compressor_gemm_fusion(self) -> bool:
         # V4.1 derives index keys from the source compressor's emitted latent

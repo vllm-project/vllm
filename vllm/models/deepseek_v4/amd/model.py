@@ -71,6 +71,7 @@ from vllm.model_executor.models.utils import (
     make_layers,
     maybe_prefix,
 )
+from vllm.model_executor.utils import register_derived_buffer, set_derived_buffer
 from vllm.models.deepseek_v4.amd.rocm import DeepseekV4ROCMAiterMLAAttention
 from vllm.platforms import current_platform
 from vllm.platforms.rocm import on_gfx950
@@ -128,7 +129,12 @@ class DeepseekV4MLP(nn.Module):
         # gate_up_proj B-preshuffle (ColumnParallel -> no all-reduce); set at load.
         self._gateup = rocm_aiter_ops.is_enabled()
         # Block scale for the preshuffled gate_up weight; None = not preshuffled.
-        self._gateup_scale: torch.Tensor | None = None
+        register_derived_buffer(self, "_gateup_scale")
+        self.gate_up_proj._vllm_defer_weights_reload = True
+
+    def process_weights_for_reload(self) -> None:
+        self.gate_up_proj.quant_method.process_weights_after_loading(self.gate_up_proj)
+        self.prepare_gateup_preshuffle()
 
     def prepare_gateup_preshuffle(self) -> None:
         # B-preshuffle the gate_up_proj weight in place (single weight).
@@ -154,7 +160,7 @@ class DeepseekV4MLP(nn.Module):
             "weight",
             rocm_aiter_ops.shuffle_weight(w.data, layout=(16, 16)),
         )
-        self._gateup_scale = ws
+        set_derived_buffer(self, "_gateup_scale", ws)
 
     def forward(self, x):
         if self._gateup_scale is not None and x.dim() == 2:
