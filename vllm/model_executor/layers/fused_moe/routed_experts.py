@@ -36,6 +36,28 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
+def _index_expert_mapping(
+    mapping: list[tuple[str, str, int, str]],
+) -> dict[str, list[tuple[str, str, int, str]]]:
+    """Index by logical checkpoint ID, preserving entry order and EPLB replicas.
+
+    An empty index keeps the full scan for unsupported mapping names.
+    """
+    mapping_by_expert: dict[str, list[tuple[str, str, int, str]]] = {}
+    for entry in mapping:
+        prefix, _, suffix = entry[1].partition(".")
+        expert_key, sep, _ = suffix.partition(".")
+        if (
+            prefix != "experts"
+            or not expert_key
+            or (expert_key.isdecimal() and not sep)
+        ):
+            return {}
+        if expert_key.isdecimal():
+            mapping_by_expert.setdefault(expert_key, []).append(entry)
+    return mapping_by_expert
+
+
 class FusedMoeWeightScaleSupported(Enum):
     TENSOR = "tensor"
     CHANNEL = "channel"
@@ -889,14 +911,22 @@ class RoutedExperts(PluggableLayer):
         self, weights: Iterable[tuple[str, torch.Tensor]]
     ) -> Iterable[str]:
         expert_mapping = self.get_expert_mapping(include_fused=True)
+        mapping_by_expert = _index_expert_mapping(expert_mapping)
+
         for expert_name, loaded_weight in weights:
             qual_name = f"{self.layer_name}.{expert_name}"
-            # Fused expert weights can be identified by their 3D tensors
             is_fused = loaded_weight.dim() == 3
+            # Fused tensors and ambiguous names keep the full mapping.
+            candidates = expert_mapping
+            if not is_fused and qual_name.count("experts.") == 1:
+                expert_key = qual_name.partition("experts.")[2].partition(".")[0]
+                candidates = mapping_by_expert.get(expert_key, expert_mapping)
+
             matched = False
-            for param_name, weight_name, expert_id, shard_id in expert_mapping:
+            for param_name, weight_name, expert_id, shard_id in candidates:
                 if weight_name not in qual_name:
                     if matched and is_fused:
+                        # Fused tensors use the first contiguous run of matches.
                         break
                     continue
                 matched = True
@@ -1224,7 +1254,7 @@ class RoutedExperts(PluggableLayer):
         topk_ids: torch.Tensor,
         shared_experts: "SharedExperts | None" = None,
         shared_experts_input: torch.Tensor | None = None,
-    ) -> torch.Tensor:
+    ) -> torch.Tensor | UnfinalizedMoEOutput:
         """Execute routed experts using the quantization method's apply function.
 
         This is called by the runner after router selection (for modular kernels)
@@ -1239,7 +1269,7 @@ class RoutedExperts(PluggableLayer):
             shared_experts_input: Input for shared experts (if any)
 
         Returns:
-            Output tensor from routed experts.
+            Finalized routed states or a deferred-finalize output.
 
         """
         assert not self.quant_method.is_monolithic

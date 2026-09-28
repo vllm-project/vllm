@@ -7,7 +7,7 @@ from contextlib import nullcontext
 import numpy as np
 import pytest
 
-from vllm.config import ModelConfig
+from vllm.config import ModelConfig, SchedulerConfig
 from vllm.exceptions import VLLMValidationError
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.hasher import MultiModalHasher
@@ -32,6 +32,7 @@ from vllm.multimodal.processing.processor import (
 )
 from vllm.utils.collection_utils import flatten_2d_lists
 
+from ..models.utils import build_model_context
 from .utils import random_image
 
 pytestmark = pytest.mark.cpu_test
@@ -1324,3 +1325,74 @@ def test_processor_inputs_hashes_ignore_unrelated_kwargs():
     )
 
     assert inputs.get_mm_hashes("test-model", "blake3") == {"image": ["image-uuid"]}
+
+
+@pytest.mark.parametrize(
+    ("left", "right"),
+    [
+        # Shifting the key/value boundary: both flatten to the dotted key
+        # "mm_processor_kwargs.abc" followed by no value bytes.
+        ({"ab": "c"}, {"a": "bc"}),
+        # A nested mapping and a caller-supplied dotted key flatten alike.
+        ({"size": {"shortest_edge": 224}}, {"size.shortest_edge": 224}),
+        # A sequence and a mapping keyed by stringified indices flatten alike.
+        ({"fps": [2, 4]}, {"fps": {"0": 2, "1": 4}}),
+        # None contributes the key alone, which a zero-byte value also does.
+        ({"video_pruning_rate": None}, {"video_pruning_rate": ""}),
+        # An empty container contributes nothing, as does omitting the key.
+        ({"size": {}}, {}),
+    ],
+)
+def test_processor_inputs_hashes_distinguish_kwargs_shapes(left, right):
+    """Distinct processor kwargs must not share a multi-modal hash.
+
+    ``hf_processor_mm_kwargs`` is per-request input, so both the keys and the
+    values here are caller-controlled. The hash is the identity of the
+    processor cache entry and is mixed into the prefix-cache block key, so two
+    requests sharing one is a cross-request cache hit.
+    """
+    image = random_image(np.random.RandomState(0), min_wh=8, max_wh=9)
+    mm_data_items = MultiModalDataParser().parse_mm_data({"image": [image]})
+
+    def hash_with(hf_processor_mm_kwargs):
+        return ProcessorInputs(
+            prompt=[],
+            mm_data_items=mm_data_items,
+            hf_processor_mm_kwargs=hf_processor_mm_kwargs,
+        ).get_mm_hashes("test-model", "blake3")["image"][0]
+
+    assert hash_with(left) != hash_with(right)
+
+
+@pytest.mark.parametrize(
+    ("chunked_prefill", "max_model_len", "expected_seq_len"),
+    [(None, 491520, 491520), (True, 491520, 8192), (True, 128, 128), (False, 128, 128)],
+)
+def test_dummy_inputs_scheduler_budget(
+    chunked_prefill, max_model_len, expected_seq_len
+):
+    ctx = build_model_context(
+        "llava-hf/llava-v1.6-mistral-7b-hf",
+        mm_processor_kwargs=None,
+        limit_mm_per_prompt={"image": 1},
+    )
+    ctx.model_config.max_model_len = max_model_len
+
+    processor = MULTIMODAL_REGISTRY.create_processor(
+        ctx.model_config,
+        tokenizer=ctx.tokenizer,
+    )
+    processor.apply = lambda *args, **kwargs: {"prompt_token_ids": [7]}
+
+    kwargs = {}
+    if chunked_prefill is not None:
+        kwargs["scheduler_config"] = SchedulerConfig(
+            max_model_len=max_model_len,
+            is_encoder_decoder=False,
+            max_num_batched_tokens=8192,
+            max_num_seqs=1,
+            enable_chunked_prefill=chunked_prefill,
+        )
+
+    result = processor.get_dummy_mm_inputs({"image": 1}, **kwargs)
+    assert len(result["prompt_token_ids"]) == expected_seq_len

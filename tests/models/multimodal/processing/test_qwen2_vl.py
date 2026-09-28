@@ -1,16 +1,18 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from typing import Any
+
+import numpy as np
 import pytest
 import torch
-from packaging.version import Version
 from PIL import Image
-from transformers import __version__ as TRANSFORMERS_VERSION
 
-from vllm.model_executor.models.vision import FusedInputNorm
+from vllm.model_executor.layers.fusion.mm_input_norm import build_mm_input_norm
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.cache import MultiModalProcessorOnlyCache
 from vllm.multimodal.inputs import batched_tensors_equal
+from vllm.platforms import current_platform
 
 from ....conftest import ImageTestAssets
 from ...utils import build_model_context
@@ -28,7 +30,6 @@ def test_jina_vl_processing_order() -> None:
     processor = MULTIMODAL_REGISTRY.create_processor(
         ctx.model_config,
         tokenizer=ctx.tokenizer,
-        cache=cache,
     )
 
     placeholder = "<|vision_start|><|image_pad|><|vision_end|>"
@@ -39,6 +40,7 @@ def test_jina_vl_processing_order() -> None:
         return processor(
             placeholder * len(images),
             mm_items=processor.info.parse_mm_data({"image": images}),
+            cache=cache,
         )
 
     query = process([query_image])
@@ -62,45 +64,6 @@ def test_jina_vl_processing_order() -> None:
         document["mm_placeholders"]["image"][0].length,
         query["mm_placeholders"]["image"][0].length,
     ]
-
-
-@pytest.mark.parametrize(
-    ("image_mean", "image_std", "rescale_factor", "is_identity"),
-    [
-        ([0.0, 0.0, 0.0], [1.0, 1.0, 1.0], 1.0, True),
-        ([0.5, 0.5, 0.5], [0.25, 0.25, 0.25], 1 / 255, False),
-    ],
-)
-def test_fused_input_norm_initialization_on_device(
-    monkeypatch: pytest.MonkeyPatch,
-    image_mean: list[float],
-    image_std: list[float],
-    rescale_factor: float,
-    is_identity: bool,
-):
-    """Identity detection must not synchronize the default device."""
-    original_allclose = torch.allclose
-
-    def cpu_allclose(input: torch.Tensor, other: torch.Tensor, *args, **kwargs):
-        assert input.device.type == "cpu"
-        assert other.device.type == "cpu"
-        return original_allclose(input, other, *args, **kwargs)
-
-    monkeypatch.setattr(torch, "allclose", cpu_allclose)
-    # Exercise the real accelerator when available. The meta device gives the
-    # CPU-only test shard the same non-CPU default-device semantics without
-    # requiring a CUDA-enabled PyTorch build.
-    default_device = "cuda" if torch.cuda.is_available() else "meta"
-    with torch.device(default_device):
-        input_norm = FusedInputNorm(image_mean, image_std, rescale_factor)
-
-    assert input_norm.is_identity is is_identity
-    if is_identity:
-        assert input_norm.weight is None
-        assert input_norm.bias is None
-    else:
-        assert input_norm.weight.device.type == default_device
-        assert input_norm.bias.device.type == default_device
 
 
 @pytest.mark.parametrize("model_id", ["Qwen/Qwen2-VL-2B-Instruct"])
@@ -133,12 +96,6 @@ def test_processor_override(
     kwargs_on_init: bool,
 ):
     """Ensure Qwen2VLMultiModalProcessor handles min/max pixels properly."""
-    if (
-        Version(TRANSFORMERS_VERSION) < Version("5.2.0")
-        and "size" in mm_processor_kwargs
-    ):
-        pytest.skip("`size` ignored by `Qwen2VLProcessor.__call__`")
-
     ctx = build_model_context(
         model_id,
         mm_processor_kwargs=mm_processor_kwargs if kwargs_on_init else None,
@@ -184,12 +141,6 @@ def test_get_image_size_with_most_features(
     model_id: str,
     mm_processor_kwargs: dict[str, object],
 ):
-    if (
-        Version(TRANSFORMERS_VERSION) < Version("5.2.0")
-        and "size" in mm_processor_kwargs
-    ):
-        pytest.skip("`size` ignored by `Qwen2VLProcessor.__call__`")
-
     ctx = build_model_context(
         model_id,
         mm_processor_kwargs=mm_processor_kwargs,
@@ -222,16 +173,49 @@ def test_get_image_size_with_most_features(
         assert tokens < max_tokens
 
 
+def _build_qwen2_5_vl_video_mm_data(num_frames: int, fps: float) -> dict[str, Any]:
+    video = np.zeros((num_frames, 56, 56, 3), dtype=np.uint8)
+    metadata = {
+        "fps": fps,
+        "duration": num_frames / fps,
+        "total_num_frames": num_frames,
+        "frames_indices": list(range(num_frames)),
+        "video_backend": "opencv",
+        "do_sample_frames": False,
+    }
+    return {"video": [(video, metadata)]}
+
+
+@pytest.mark.parametrize("model_id", ["Qwen/Qwen2.5-VL-3B-Instruct"])
+def test_qwen2_5_vl_video_fps_to_second_per_grid_ts(model_id: str) -> None:
+    ctx = build_model_context(model_id, limit_mm_per_prompt={"image": 0, "video": 1})
+    processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+    temporal_patch_size = (
+        processor.info.get_hf_processor().video_processor.temporal_patch_size
+    )
+
+    prompt = "<|vision_start|><|video_pad|><|vision_end|>"
+    for fps in (1.0, 30.0):
+        mm_data = _build_qwen2_5_vl_video_mm_data(num_frames=32, fps=fps)
+        processed = processor(prompt, mm_items=processor.info.parse_mm_data(mm_data))
+        spg = processed["mm_kwargs"]["video"][0].get_data()["second_per_grid_ts"]
+        assert float(spg) == pytest.approx(temporal_patch_size / fps, rel=2e-2)
+
+
+@pytest.mark.usefixtures("default_vllm_config")
 @pytest.mark.parametrize(
     "model_id", ["Qwen/Qwen2-VL-2B-Instruct", "Qwen/Qwen2.5-VL-3B-Instruct"]
 )
 @pytest.mark.parametrize("num_imgs", [1, 2])
 def test_mm_device_do_normalize(
-    image_assets: ImageTestAssets,
-    model_id: str,
-    num_imgs: int,
-):
-    """Ensure that enable mm_device_do_normalize yields the correct result."""
+    image_assets: ImageTestAssets, model_id: str, num_imgs: int
+) -> None:
+    """Device-side normalisation must reproduce the on-CPU processor result.
+
+    Runs on any platform: the CPU platform exercises the ``forward_native``
+    fallback, accelerators exercise the fused kernel.
+    """
+    device = current_platform.device_type
     ctx = build_model_context(
         model_id,
         limit_mm_per_prompt={"image": num_imgs},
@@ -262,9 +246,15 @@ def test_mm_device_do_normalize(
     ].get_data()["pixel_values"]
 
     ctx.model_config.multimodal_config.mm_device_do_normalize = True
-    input_norm = FusedInputNorm.from_model_config(ctx.model_config)
+    input_norm = build_mm_input_norm(ctx.model_config).to(device)
+
+    # With normalisation disabled, the processor emits raw uint8 pixels,
+    # matching the production mm_device_do_normalize path.
+    assert pixel_values_without_normalize.dtype == torch.uint8
     pixel_values_do_input_norm = input_norm(
-        pixel_values_without_normalize.to(dtype), dtype
+        pixel_values_without_normalize.to(device), dtype
     )
 
-    torch.testing.assert_close(pixel_values_with_normalize, pixel_values_do_input_norm)
+    torch.testing.assert_close(
+        pixel_values_with_normalize.to(device), pixel_values_do_input_norm
+    )
