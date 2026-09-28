@@ -881,7 +881,7 @@ class Ernie4_5_VLProcessingInfo(BaseProcessingInfo):
         return self.ctx.model_config.hf_config
 
     def get_hf_processor(self, **kwargs: object):
-        return self.ctx.get_hf_processor(use_fast=True, **kwargs)
+        return self.ctx.get_hf_processor(**kwargs)
 
     def get_image_processor(self, **kwargs: object):
         return self.get_hf_processor(**kwargs).image_processor
