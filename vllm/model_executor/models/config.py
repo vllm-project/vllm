@@ -676,8 +676,8 @@ class Nemotron3_5AsrForRNNTConfig(VerifyAndUpdateConfig):
             raise ValueError(
                 "Nemotron 3.5 ASR requires tokenizer mode nemotron3_5_asr."
             )
-        # Generic beam search needs alternative-token scores, but RNNT state
-        # currently follows a single greedy path. Use the existing request limit.
+        # The greedy RNNT adapter does not expose meaningful alternative-token
+        # scores, so limit the existing logprob request interface to zero.
         if model_config.max_logprobs != 0:
             logger.info("Limiting Nemotron RNNT alternative-token logprobs to zero.")
             model_config.max_logprobs = 0

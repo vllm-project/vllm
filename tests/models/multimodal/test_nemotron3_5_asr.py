@@ -25,7 +25,7 @@ from vllm.model_executor.models.nemotron3_5_asr import (
     Nemotron3_5AsrAudioEncoder,
     Nemotron3_5AsrDecodeState,
     Nemotron3_5AsrForRNNT,
-    _decode_next_token,
+    _decode_next_tokens,
 )
 from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
 from vllm.v1.worker.gpu.model_states.nemotron3_5_asr import (
@@ -174,14 +174,18 @@ def test_nemotron_audio_encoder_preserves_batch_and_valid_lengths(
 
 
 class _ScriptedJoint(torch.nn.Module):
-    def __init__(self, token_ids: list[int], vocab_size: int):
+    def __init__(self, token_ids: list[list[int]], vocab_size: int):
         super().__init__()
-        self.tokens = iter(token_ids)
+        self.tokens = [iter(tokens) for tokens in token_ids]
         self.vocab_size = vocab_size
+        self.batch_sizes: list[int] = []
 
     def forward(self, decoder_hidden_states, encoder_hidden_states):
-        logits = torch.full((1, self.vocab_size), -1.0)
-        logits[0, next(self.tokens)] = 1.0
+        batch_size = encoder_hidden_states.shape[0]
+        self.batch_sizes.append(batch_size)
+        logits = torch.full((batch_size, self.vocab_size), -1.0)
+        for row, request in enumerate(encoder_hidden_states[:, 0].long().tolist()):
+            logits[row, next(self.tokens[request])] = 1.0
         return logits
 
 
@@ -189,58 +193,72 @@ def test_nemotron_rnnt_advances_on_blank_and_symbol_limit() -> None:
     config = _get_tiny_config()
     config.max_symbols_per_step = 2
     blank = config.blank_token_id
-    state = Nemotron3_5AsrDecodeState(
-        encoder_frames=torch.zeros(3, config.decoder_hidden_size),
-        decoder_cache=Nemotron3_5AsrRNNTDecoderCache(config),
-        last_token_id=blank,
-    )
+    states = [
+        Nemotron3_5AsrDecodeState(
+            encoder_frames=torch.full((frames, config.decoder_hidden_size), float(i)),
+            decoder_cache=Nemotron3_5AsrRNNTDecoderCache(config),
+            last_token_id=blank,
+        )
+        for i, frames in enumerate((3, 1, 2))
+    ]
+    state = states[0]
     decoder = Nemotron3_5AsrRNNTDecoder(config).eval()
-    joint = _ScriptedJoint([2, blank, blank, 3, 0], config.vocab_size)
+    joint = _ScriptedJoint(
+        [[2, blank, blank, 3, 0], [blank], [blank, 4, blank]], config.vocab_size
+    )
 
     with torch.inference_mode():
-        assert (
-            _decode_next_token(
-                state,
-                decoder,
-                joint,
-                blank_token_id=blank,
-                max_symbols_per_step=2,
-            )
-            == 2
-        )
+        assert _decode_next_tokens(
+            states[:2],
+            decoder,
+            joint,
+            blank_token_id=blank,
+            max_symbols_per_step=2,
+        ) == [2, None]
         assert (state.frame_idx, state.symbols_at_frame) == (0, 1)
-        assert (
-            _decode_next_token(
-                state,
-                decoder,
-                joint,
-                blank_token_id=blank,
-                max_symbols_per_step=2,
-            )
-            == 3
-        )
+        assert _decode_next_tokens(
+            [state, states[2]],
+            decoder,
+            joint,
+            blank_token_id=blank,
+            max_symbols_per_step=2,
+        ) == [3, 4]
         assert (state.frame_idx, state.symbols_at_frame) == (2, 1)
-        assert (
-            _decode_next_token(
-                state,
-                decoder,
-                joint,
-                blank_token_id=blank,
-                max_symbols_per_step=2,
-            )
-            == 0
-        )
+        # Blanks preserve initialized state; a fresh blank seed initializes it.
+        for row, inputs in ((0, [blank, 2]), (2, [blank])):
+            reference_cache = Nemotron3_5AsrRNNTDecoderCache(config)
+            for token in inputs:
+                decoder(torch.tensor([[token]]), cache=reference_cache)
+            for field in ("cache", "hidden_state", "cell_state"):
+                torch.testing.assert_close(
+                    getattr(states[row].decoder_cache, field),
+                    getattr(reference_cache, field),
+                )
+        assert _decode_next_tokens(
+            states,
+            decoder,
+            joint,
+            blank_token_id=blank,
+            max_symbols_per_step=2,
+        ) == [0, None, None]
         assert (state.frame_idx, state.symbols_at_frame) == (3, 0)
-        assert (
-            _decode_next_token(
-                state,
+        assert _decode_next_tokens(
+            states,
+            decoder,
+            joint,
+            blank_token_id=blank,
+            max_symbols_per_step=2,
+        ) == [None, None, None]
+        state.num_tokens_to_replay = 1
+        with pytest.raises(RuntimeError, match="exhausted before replaying"):
+            _decode_next_tokens(
+                [state],
                 decoder,
                 joint,
                 blank_token_id=blank,
                 max_symbols_per_step=2,
             )
-            is None
-        )
+    assert joint.batch_sizes == [2, 2, 2, 1, 2]
 
 
 def test_nemotron_eager_dummy_prepare_profiles_decoder_without_live_mutation() -> None:
@@ -277,66 +295,81 @@ def test_nemotron_eager_dummy_prepare_profiles_decoder_without_live_mutation() -
     ):
         model.forward(batch.input_ids, batch.positions, **inputs)
 
-    assert decode.call_count == batch.num_reqs
-    assert join.call_count == batch.num_reqs
+    assert decode.call_count == 1
+    assert decode.call_args.args[0].shape == (batch.num_reqs, 1)
+    assert join.call_count == 1
+    assert join.call_args.args[0].shape[0] == batch.num_reqs
     assert state.decode_states == {"live": live_state}
     assert live_state.frame_idx == 0
     assert not live_state.decoder_cache.is_initialized
 
 
 @pytest.mark.parametrize("num_tokens_to_replay", [0, 3])
-def test_nemotron_greedy_tokens_match_transformers(num_tokens_to_replay: int) -> None:
+@pytest.mark.parametrize("batch_size", [1, 3])
+def test_nemotron_greedy_tokens_match_transformers(
+    num_tokens_to_replay: int, batch_size: int
+) -> None:
     torch.manual_seed(0)
     config = _get_tiny_config()
     config.max_symbols_per_step = 2
     hf_model = HFNemotron3_5AsrForRNNT(config).eval()
     model = Nemotron3_5AsrForRNNT(vllm_config=_get_vllm_config(config)).eval()
     model.load_weights(hf_model.state_dict().items())
-    features = torch.randn(1, 26, config.encoder_config.num_mel_bins)
-    mask = torch.zeros(1, 26, dtype=torch.bool)
-    mask[:, :25] = True
-    prompt_ids = torch.tensor([2])
+    features = torch.randn(batch_size, 26, config.encoder_config.num_mel_bins)
+    mask = torch.zeros(batch_size, 26, dtype=torch.bool)
+    for row, length in enumerate((25, 17, 9)[:batch_size]):
+        mask[row, :length] = True
+    prompt_ids = torch.arange(2, 2 + batch_size)
+    replay_counts = [
+        max(0, num_tokens_to_replay - row * 2) for row in range(batch_size)
+    ]
 
     with torch.inference_mode():
         encoded, output_mask = model.audio_encoder(features, mask, prompt_ids)
         assert output_mask is not None
-        state = Nemotron3_5AsrDecodeState(
-            encoder_frames=encoded[0][output_mask[0]],
-            decoder_cache=Nemotron3_5AsrRNNTDecoderCache(config),
-            last_token_id=config.blank_token_id,
-            num_tokens_to_replay=num_tokens_to_replay,
-        )
-        token_ids = []
-        for _ in range(64):
-            hidden_states = model.forward(
-                input_ids=torch.tensor([config.blank_token_id]),
-                positions=torch.tensor([0]),
-                decode_states=[state],
-                query_end_positions=[1],
-                decode_ready=[True],
+        states = [
+            Nemotron3_5AsrDecodeState(
+                encoder_frames=encoded[row][output_mask[row]],
+                decoder_cache=Nemotron3_5AsrRNNTDecoderCache(config),
+                last_token_id=config.blank_token_id,
+                num_tokens_to_replay=replay_counts[row],
             )
-            token_id = int(model.compute_logits(hidden_states).argmax(dim=-1).item())
-            if token_id == config.blank_token_id:
+            for row in range(batch_size)
+        ]
+        token_ids: list[list[int]] = [[] for _ in states]
+        for step in range(64):
+            # Admit later rows after the first request already has an LSTM cache.
+            ready = [row == 0 or step > 0 for row in range(batch_size)]
+            hidden_states = model.forward(
+                input_ids=torch.full((batch_size,), config.blank_token_id),
+                positions=torch.zeros(batch_size, dtype=torch.long),
+                decode_states=states,
+                query_end_positions=list(range(1, batch_size + 1)),
+                decode_ready=ready,
+            )
+            selected = model.compute_logits(hidden_states).argmax(dim=-1).tolist()
+            for row, token_id in enumerate(selected):
+                if ready[row] and token_id != config.blank_token_id:
+                    token_ids[row].append(token_id)
+            if all(ready) and all(token == config.blank_token_id for token in selected):
                 break
-            token_ids.append(token_id)
-        assert state.frame_idx == state.encoder_frames.shape[0]
-
-        reference = hf_model.generate(
-            input_features=features,
-            attention_mask=mask,
-            prompt_ids=prompt_ids,
-            decoder_start_token_id=config.blank_token_id,
-            max_new_tokens=64,
-        )
-
-    assert (
-        token_ids
-        == [
-            token_id
-            for token_id in reference.sequences[0].tolist()
-            if token_id != config.blank_token_id
-        ][num_tokens_to_replay:]
-    )
+        for row, state in enumerate(states):
+            assert state.frame_idx == state.encoder_frames.shape[0]
+            reference = hf_model.generate(
+                input_features=features[row : row + 1],
+                attention_mask=mask[row : row + 1],
+                prompt_ids=prompt_ids[row : row + 1],
+                decoder_start_token_id=config.blank_token_id,
+                max_new_tokens=64,
+            )
+            assert (
+                token_ids[row]
+                == [
+                    token_id
+                    for token_id in reference.sequences[0].tolist()
+                    if token_id != config.blank_token_id
+                ][replay_counts[row] :]
+            )
 
 
 def test_nemotron_loads_all_transformers_weights() -> None:

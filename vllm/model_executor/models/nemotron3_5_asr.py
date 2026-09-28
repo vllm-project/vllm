@@ -5,7 +5,7 @@
 import math
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import torch
 from torch import nn
@@ -29,7 +29,7 @@ from transformers.models.nemotron3_5_asr.processing_nemotron3_5_asr import (
 )
 
 from vllm.config import ModelConfig, SpeechToTextConfig, VllmConfig
-from vllm.config.multimodal import BaseDummyOptions
+from vllm.config.multimodal import MultiModalDummyOptions
 from vllm.config.speech_to_text import SpeechToTextParams
 from vllm.inputs import (
     ExplicitEncoderDecoderPrompt,
@@ -41,7 +41,11 @@ from vllm.inputs import (
 from vllm.model_executor.models.whisper_utils import ISO639_1_SUPPORTED_LANGS
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import MultiModalFieldConfig, MultiModalKwargsItems
-from vllm.multimodal.parse import MultiModalDataItems, MultiModalDataParser
+from vllm.multimodal.parse import (
+    AudioProcessorItems,
+    MultiModalDataItems,
+    MultiModalDataParser,
+)
 from vllm.multimodal.processing import (
     BaseDummyInputsBuilder,
     BaseProcessingInfo,
@@ -49,6 +53,7 @@ from vllm.multimodal.processing import (
     PromptReplacement,
     PromptUpdate,
 )
+from vllm.multimodal.processing.processor import HFMultiModalInputs
 from vllm.renderers import TokenizeParams
 from vllm.transformers_utils.processors.nemotron3_5_asr import (
     NemotronAsrStreamingFeatureExtractor,
@@ -62,8 +67,6 @@ if TYPE_CHECKING:
     from vllm.v1.worker.gpu.model_states.nemotron3_5_asr import (
         Nemotron3_5AsrModelState,
     )
-
-_MAX_AUDIO_CLIP_SECONDS = 30
 
 
 def _get_subsampling_output_lengths(
@@ -163,15 +166,16 @@ class Nemotron3_5AsrProcessingInfo(BaseProcessingInfo):
         feature_extractor = self.get_feature_extractor()
         encoder_config = self.get_hf_config().encoder_config
         max_mel_frames = _get_max_subsampling_input_length(
-            encoder_config.max_position_embeddings,
+            min(
+                encoder_config.max_position_embeddings,
+                self.ctx.model_config.max_model_len,
+            ),
             subsampling_factor=encoder_config.subsampling_factor,
             subsampling_conv_kernel_size=encoder_config.subsampling_conv_kernel_size,
             subsampling_conv_stride=encoder_config.subsampling_conv_stride,
         )
-        return min(
-            max_mel_frames * feature_extractor.hop_length - 1,
-            _MAX_AUDIO_CLIP_SECONDS * feature_extractor.sampling_rate,
-        )
+        # Centered STFT adds one physical frame beyond floor(samples / hop).
+        return max_mel_frames * feature_extractor.hop_length - 1
 
     @property
     def skip_prompt_length_check(self) -> bool:
@@ -190,7 +194,7 @@ class Nemotron3_5AsrDummyInputsBuilder(
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions],
+        mm_options: MultiModalDummyOptions,
     ) -> MultiModalDataDict:
         num_audios = mm_counts.get("audio", 0)
         audio_len = self.info.get_max_audio_samples()
@@ -215,39 +219,47 @@ class Nemotron3_5AsrMultiModalProcessor(
         self,
         prompt: str | list[int],
         mm_items: MultiModalDataItems,
-    ) -> str | list[int]:
+    ) -> list[int]:
         return [0]
 
     def create_decoder_prompt(
         self,
         prompt: str | list[int],
         mm_items: MultiModalDataItems,
-    ) -> str | list[int]:
+    ) -> list[int]:
         return [self.info.get_hf_config().blank_token_id]
 
-    def _preprocess_hf_mm_data(
+    def _get_hf_mm_inputs(
         self,
-        mm_data: Mapping[str, object],
+        mm_items: MultiModalDataItems,
         hf_processor_mm_kwargs: Mapping[str, object],
-    ) -> tuple[Mapping[str, object], Mapping[str, object]]:
+    ) -> HFMultiModalInputs:
+        hf_inputs = super()._get_hf_mm_inputs(mm_items, hf_processor_mm_kwargs)
         if hf_processor_mm_kwargs.get("is_streaming"):
             raise ValueError(
                 "Nemotron 3.5 ASR does not support streaming audio chunks yet."
             )
         feature_extractor = self.info.get_feature_extractor(**hf_processor_mm_kwargs)
 
-        mm_data = dict(mm_data)
-        mm_data["audio"] = mm_data.pop("audios")
         max_samples = self.info.get_max_audio_samples()
-        audio_kwargs = hf_processor_mm_kwargs.get("audio_kwargs", {})
+        audio_kwargs = cast(
+            Mapping[str, object], hf_processor_mm_kwargs.get("audio_kwargs", {})
+        )
         for key in ("max_length", "pad_to_multiple_of"):
-            value = hf_processor_mm_kwargs.get(key, audio_kwargs.get(key))
+            value = cast(
+                int | None, hf_processor_mm_kwargs.get(key, audio_kwargs.get(key))
+            )
             if value is not None and value > max_samples:
                 raise ValueError(
                     "Padded audio exceeds the profiled Nemotron audio length."
                 )
-        for audio in mm_data["audio"]:
-            if not feature_extractor.hop_length <= len(audio) <= max_samples:
+        audios = mm_items.get_items("audio", AudioProcessorItems)
+        for index in range(len(audios)):
+            if (
+                not feature_extractor.hop_length
+                <= audios.get_audio_length(index)
+                <= max_samples
+            ):
                 raise ValueError(
                     "Nemotron 3.5 ASR expects between "
                     f"{feature_extractor.hop_length} and {max_samples} audio samples "
@@ -258,7 +270,7 @@ class Nemotron3_5AsrMultiModalProcessor(
             "sampling_rate", feature_extractor.sampling_rate
         )
 
-        return mm_data, hf_processor_mm_kwargs
+        return hf_inputs._replace(hf_kwargs=hf_processor_mm_kwargs)
 
     def _get_mm_fields_config(
         self,
@@ -371,43 +383,83 @@ class Nemotron3_5AsrDecodeState:
     num_tokens_to_replay: int = 0
 
 
-def _decode_next_token(
-    state: Nemotron3_5AsrDecodeState,
+def _decode_next_tokens(
+    states: list[Nemotron3_5AsrDecodeState],
     decoder: Nemotron3_5AsrRNNTDecoder,
     joint: Nemotron3_5AsrRNNTJointNetwork,
     *,
     blank_token_id: int,
     max_symbols_per_step: int,
-) -> int | None:
-    """Return the next transcript token, or None after the last audio frame."""
-    while state.frame_idx < state.encoder_frames.shape[0]:
-        decoder_output = decoder(
-            torch.tensor(
-                [[state.last_token_id]],
+) -> list[int | None]:
+    """Advance active requests to their next transcript token or exhaustion."""
+    selected: list[int | None] = [None] * len(states)
+    pending = list(enumerate(states))
+    while pending:
+        active = []
+        for index, state in pending:
+            if state.frame_idx < state.encoder_frames.shape[0]:
+                active.append((index, state))
+            elif state.num_tokens_to_replay:
+                raise RuntimeError("RNNT exhausted before replaying the prefix.")
+        if not active:
+            break
+
+        # HF initializes every fresh row, including its blank seed. Once the
+        # cache is initialized, blank rows instead preserve the previous state.
+        active.sort(key=lambda item: item[1].decoder_cache.is_initialized)
+        groups = [
+            [s for _, s in active if s.decoder_cache.is_initialized == initialized]
+            for initialized in (False, True)
+        ]
+        decoder_outputs = []
+        for initialized, group in zip((False, True), groups):
+            if not group:
+                continue
+            cache = Nemotron3_5AsrRNNTDecoderCache(group[0].decoder_cache.config)
+            if initialized:
+                cache.cache = torch.cat([s.decoder_cache.cache for s in group])
+                cache.hidden_state = torch.cat(
+                    [s.decoder_cache.hidden_state for s in group], dim=1
+                )
+                cache.cell_state = torch.cat(
+                    [s.decoder_cache.cell_state for s in group], dim=1
+                )
+                cache.is_initialized = True
+            input_ids = torch.tensor(
+                [[s.last_token_id] for s in group],
                 dtype=torch.long,
-                device=state.encoder_frames.device,
-            ),
-            cache=state.decoder_cache,
-        )
-        logits = joint(
-            decoder_output[:, -1, :],
-            state.encoder_frames[state.frame_idx].unsqueeze(0),
-        )
-        token_id = int(logits.argmax(dim=-1).item())
-        if token_id == blank_token_id:
-            state.frame_idx += 1
-            state.symbols_at_frame = 0
-            state.last_token_id = blank_token_id
-            continue
+                device=group[0].encoder_frames.device,
+            )
+            decoder_outputs.append(decoder(input_ids, cache=cache)[:, -1, :])
+            for row, state in enumerate(group):
+                state.decoder_cache.update(
+                    cache.cache[row : row + 1],
+                    cache.hidden_state[:, row : row + 1],
+                    cache.cell_state[:, row : row + 1],
+                )
 
-        state.last_token_id = token_id
-        state.symbols_at_frame += 1
-        if state.symbols_at_frame >= max_symbols_per_step:
-            state.frame_idx += 1
-            state.symbols_at_frame = 0
-        return token_id
+        encoder_frames = torch.stack([s.encoder_frames[s.frame_idx] for _, s in active])
+        logits = joint(torch.cat(decoder_outputs), encoder_frames)
+        token_ids = logits.argmax(dim=-1).tolist()
+        pending = []
+        for (index, state), token_id in zip(active, token_ids):
+            state.last_token_id = token_id
+            if token_id == blank_token_id:
+                state.frame_idx += 1
+                state.symbols_at_frame = 0
+                pending.append((index, state))
+                continue
 
-    return None
+            state.symbols_at_frame += 1
+            if state.symbols_at_frame >= max_symbols_per_step:
+                state.frame_idx += 1
+                state.symbols_at_frame = 0
+            if state.num_tokens_to_replay:
+                state.num_tokens_to_replay -= 1
+                pending.append((index, state))
+            else:
+                selected[index] = token_id
+    return selected
 
 
 @MULTIMODAL_REGISTRY.register_processor(
@@ -446,7 +498,7 @@ class Nemotron3_5AsrForRNNT(nn.Module, SupportsTranscription, SupportsMultiModal
         del model_config, task_type
         return SpeechToTextConfig(
             sample_rate=16_000,
-            max_audio_clip_s=_MAX_AUDIO_CLIP_SECONDS,
+            max_audio_clip_s=None,
             min_energy_split_window_size=None,
         )
 
@@ -478,10 +530,14 @@ class Nemotron3_5AsrForRNNT(nn.Module, SupportsTranscription, SupportsMultiModal
         self.joint = Nemotron3_5AsrRNNTJointNetwork(self.config)
 
     def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings:
-        input_features = kwargs["input_features"]
-        attention_mask = kwargs.get("attention_mask")
-        prompt_ids = kwargs.get("prompt_ids")
-        lookahead = kwargs.get("num_lookahead_tokens")
+        input_features = cast(
+            torch.Tensor | list[torch.Tensor], kwargs["input_features"]
+        )
+        attention_mask = cast(
+            torch.Tensor | list[torch.Tensor] | None, kwargs.get("attention_mask")
+        )
+        prompt_ids = cast(torch.Tensor | None, kwargs.get("prompt_ids"))
+        lookahead = cast(int | torch.Tensor | None, kwargs.get("num_lookahead_tokens"))
         dtype = self.audio_encoder.encoder_projector.weight.dtype
         if isinstance(input_features, torch.Tensor):
             hidden_states, output_mask = self.audio_encoder(
@@ -525,32 +581,21 @@ class Nemotron3_5AsrForRNNT(nn.Module, SupportsTranscription, SupportsMultiModal
         )
         if decode_states is not None:
             assert query_end_positions is not None and decode_ready is not None
-            for state, end, ready in zip(
-                decode_states, query_end_positions, decode_ready
-            ):
-                if state is None or not ready:
-                    continue
-                # Rebuild the predictor after preemption before emitting new text.
-                while state.num_tokens_to_replay:
-                    token_id = _decode_next_token(
-                        state,
-                        self.decoder,
-                        self.joint,
-                        blank_token_id=self.config.blank_token_id,
-                        max_symbols_per_step=self.config.max_symbols_per_step,
-                    )
-                    if token_id is None:
-                        raise RuntimeError(
-                            "RNNT exhausted before replaying the prefix."
-                        )
-                    state.num_tokens_to_replay -= 1
-                token_id = _decode_next_token(
-                    state,
-                    self.decoder,
-                    self.joint,
-                    blank_token_id=self.config.blank_token_id,
-                    max_symbols_per_step=self.config.max_symbols_per_step,
+            active = [
+                (state, end)
+                for state, end, ready in zip(
+                    decode_states, query_end_positions, decode_ready
                 )
+                if state is not None and ready
+            ]
+            token_ids = _decode_next_tokens(
+                [state for state, _ in active],
+                self.decoder,
+                self.joint,
+                blank_token_id=self.config.blank_token_id,
+                max_symbols_per_step=self.config.max_symbols_per_step,
+            )
+            for (_, end), token_id in zip(active, token_ids):
                 if token_id is not None:
                     selected_ids[end - 1, 0] = token_id
         return selected_ids

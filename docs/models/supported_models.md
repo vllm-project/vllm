@@ -738,7 +738,10 @@ Speech2Text models trained specifically for Automatic Speech Recognition.
 
 !!! note
     `Nemotron3_5AsrForRNNT` supports greedy transcription of one complete audio
-    clip per request, up to 30 seconds. Use Model Runner V2, `--enforce-eager`,
+    clip per request. Audio length is bounded by the checkpoint's encoder position
+    capacity and `--max-model-len`, measured in encoder frames. Profiling uses this
+    bound; reduce `--max-model-len` to lower the maximum audio size and memory use.
+    Use Model Runner V2, `--enforce-eager`,
     and TP=1 / PP=1. Quantization, beam search, alternative-token logprobs,
     and cache-aware streaming are not supported. Its renderer and logprobs
     limit are configured automatically. Generic beam search requests alternative

@@ -179,11 +179,17 @@ def test_nemotron_processor_builds_encoder_decoder_contract(
 
 
 @pytest.mark.parametrize(
-    ("max_encoder_frames", "expected_audio_samples", "expected_encoder_frames"),
-    [(4, 3999, 4), (5000, 480000, 376)],
+    (
+        "max_encoder_frames",
+        "max_model_len",
+        "expected_audio_samples",
+        "expected_encoder_frames",
+    ),
+    [(4, 4096, 3999, 4), (5000, 6000, 6398879, 5000), (5000, 512, 654239, 512)],
 )
 def test_nemotron_dummy_audio_is_bounded(
     max_encoder_frames: int,
+    max_model_len: int,
     expected_audio_samples: int,
     expected_encoder_frames: int,
 ) -> None:
@@ -191,6 +197,7 @@ def test_nemotron_dummy_audio_is_bounded(
     info.ctx.model_config.hf_config.encoder_config.max_position_embeddings = (
         max_encoder_frames
     )
+    info.ctx.model_config.max_model_len = max_model_len
     builder = Nemotron3_5AsrDummyInputsBuilder(info)
 
     mm_data = builder.get_dummy_mm_data(
