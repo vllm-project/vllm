@@ -10,6 +10,7 @@ from vllm.model_executor.warmup.triton_autotune import (
     TritonAutotuneRegistry,
     TunableConfigTable,
     TuningItem,
+    _Discovery,
     _merge_pending_items,
     _merge_results,
     _shard_items,
@@ -94,9 +95,14 @@ def test_distributed_run_tunes_rank_slice_and_commits_union():
         nonlocal gather_calls
         assert group is world.cpu_group
         if gather_calls == 0:
-            output[:] = [list(items) + [remote_item], list(items)]
-        else:
+            output[:] = [
+                _Discovery(("fake",), items + (remote_item,), ()),
+                _Discovery(("fake",), items, ()),
+            ]
+        elif gather_calls == 1:
             output[:] = [remote_result, value]
+        else:
+            output[:] = [[], []]
         gather_calls += 1
 
     with (
@@ -115,10 +121,10 @@ def test_distributed_run_tunes_rank_slice_and_commits_union():
         remote_item: {"BLOCK_SIZE": 2},
         _item(8): {"BLOCK_SIZE": 8},
     }
-    assert gather_calls == 2
+    assert gather_calls == 3
 
 
-def test_discovery_failure_still_reaches_both_collectives():
+def test_discovery_failure_reaches_both_collectives_then_fails_closed():
     class _FailingDiscoveryTable(_FakeTable):
         def pending_items(self, worker):
             raise RuntimeError("bad model shape")
@@ -134,6 +140,7 @@ def test_discovery_failure_still_reaches_both_collectives():
         output[0] = value
 
     with (
+        pytest.raises(RuntimeError, match="discovery failed"),
         patch("vllm.distributed.parallel_state.get_world_group", return_value=world),
         patch(
             "vllm.model_executor.warmup.triton_autotune."
@@ -143,8 +150,46 @@ def test_discovery_failure_still_reaches_both_collectives():
     ):
         registry.run(object())
 
-    assert gathered_values == [[], {}]
-    assert table.committed == {}
+    assert gathered_values == [
+        _Discovery(("fake",), (), ("fake",)),
+        {},
+    ]
+    assert table.committed is None
+
+
+def test_registry_mismatch_reaches_both_collectives_then_fails_closed():
+    item = _item(1)
+    table = _FakeTable([item])
+    registry = TritonAutotuneRegistry()
+    registry.register(table)
+    world = SimpleNamespace(world_size=2, rank_in_group=0, cpu_group=object())
+    gather_calls = 0
+
+    def all_gather_object(output, value, group):
+        nonlocal gather_calls
+        if gather_calls == 0:
+            output[:] = [
+                value,
+                _Discovery(("other",), (), ()),
+            ]
+        else:
+            output[:] = [value, {}]
+        gather_calls += 1
+
+    with (
+        pytest.raises(RuntimeError, match="differ across ranks"),
+        patch("vllm.distributed.parallel_state.get_world_group", return_value=world),
+        patch(
+            "vllm.model_executor.warmup.triton_autotune."
+            "torch.distributed.all_gather_object",
+            side_effect=all_gather_object,
+        ),
+    ):
+        registry.run(object())
+
+    assert table.tuned == []
+    assert table.committed is None
+    assert gather_calls == 2
 
 
 def test_tuning_failure_still_reaches_result_collective():
@@ -174,5 +219,38 @@ def test_tuning_failure_still_reaches_result_collective():
     ):
         registry.run(object())
 
-    assert gathered_values == [[item], {}]
+    assert gathered_values == [_Discovery(("fake",), (item,), ()), {}, []]
     assert table.committed == {}
+
+
+def test_commit_failure_is_synchronized_before_any_rank_proceeds():
+    class _FailingCommitTable(_FakeTable):
+        def commit(self, results):
+            raise OSError("cache is read-only")
+
+    table = _FailingCommitTable([_item(1)])
+    registry = TritonAutotuneRegistry()
+    registry.register(table)
+    world = SimpleNamespace(world_size=1, rank_in_group=0, cpu_group=object())
+    gathered_values = []
+
+    def all_gather_object(output, value, group):
+        gathered_values.append(value)
+        output[0] = value
+
+    with (
+        pytest.raises(RuntimeError, match="commit failed"),
+        patch("vllm.distributed.parallel_state.get_world_group", return_value=world),
+        patch(
+            "vllm.model_executor.warmup.triton_autotune."
+            "torch.distributed.all_gather_object",
+            side_effect=all_gather_object,
+        ),
+    ):
+        registry.run(object())
+
+    assert gathered_values == [
+        _Discovery(("fake",), (_item(1),), ()),
+        {_item(1): {"BLOCK_SIZE": 1}},
+        ["fake: OSError: cache is read-only"],
+    ]

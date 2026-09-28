@@ -34,6 +34,13 @@ class TuningItem:
     bucket: int
 
 
+@dataclass(frozen=True)
+class _Discovery:
+    tables: tuple[str, ...]
+    items: tuple[TuningItem, ...]
+    failed_tables: tuple[str, ...]
+
+
 class TunableConfigTable(ABC):
     """Adapter between a config-table kernel family and warmup autotuning."""
 
@@ -101,8 +108,9 @@ class TritonAutotuneRegistry:
     def tables(self) -> tuple[TunableConfigTable, ...]:
         return tuple(self._tables[name] for name in sorted(self._tables))
 
-    def _discover(self, worker: Worker) -> list[TuningItem]:
+    def _discover(self, worker: Worker) -> _Discovery:
         pending: list[TuningItem] = []
+        failed_tables: list[str] = []
         for table in self.tables:
             try:
                 items = list(table.pending_items(worker))
@@ -113,11 +121,16 @@ class TritonAutotuneRegistry:
                 pending.extend(items)
             except Exception:
                 # Discovery must not make one rank skip the collectives below.
+                failed_tables.append(table.name)
                 logger.exception(
                     "Failed to discover pending Triton configs for table %s.",
                     table.name,
                 )
-        return pending
+        return _Discovery(
+            tables=tuple(sorted(self._tables)),
+            items=tuple(pending),
+            failed_tables=tuple(failed_tables),
+        )
 
     def run(self, worker: Worker) -> None:
         """Discover, shard, tune, and commit missing configs on every rank."""
@@ -127,13 +140,30 @@ class TritonAutotuneRegistry:
         from vllm.distributed.parallel_state import get_world_group
 
         world = get_world_group()
-        pending_by_rank: list[list[TuningItem] | None] = [None] * world.world_size
+        discoveries: list[_Discovery | None] = [None] * world.world_size
         torch.distributed.all_gather_object(
-            pending_by_rank,
+            discoveries,
             self._discover(worker),
             group=world.cpu_group,
         )
-        pending = _merge_pending_items(items or [] for items in pending_by_rank)
+        discovery_results = tuple(
+            result for result in discoveries if result is not None
+        )
+        local_tables = tuple(sorted(self._tables))
+        registry_mismatch = any(
+            result.tables != local_tables for result in discovery_results
+        )
+        discovery_failures = tuple(
+            (rank, table)
+            for rank, result in enumerate(discovery_results)
+            for table in result.failed_tables
+        )
+        can_tune = not registry_mismatch and not discovery_failures
+        pending = (
+            _merge_pending_items(result.items for result in discovery_results)
+            if can_tune
+            else ()
+        )
 
         local_results: dict[TuningItem, TuningConfig] = {}
         for item in _shard_items(pending, world.rank_in_group, world.world_size):
@@ -155,14 +185,46 @@ class TritonAutotuneRegistry:
         )
         results = _merge_results(result or {} for result in results_by_rank)
 
-        for table in self.tables:
-            table.commit(
-                {
-                    item: config
-                    for item, config in results.items()
-                    if item.table == table.name
-                }
+        if registry_mismatch:
+            registered = tuple(result.tables for result in discovery_results)
+            raise RuntimeError(
+                f"Triton autotune tables differ across ranks: {registered!r}"
             )
+        if discovery_failures:
+            raise RuntimeError(
+                f"Triton autotune discovery failed for {discovery_failures!r}"
+            )
+
+        commit_failures: list[str] = []
+        for table in self.tables:
+            try:
+                table.commit(
+                    {
+                        item: config
+                        for item, config in results.items()
+                        if item.table == table.name
+                    }
+                )
+            except Exception as error:
+                logger.exception(
+                    "Failed to commit Triton autotune configs for table %s.",
+                    table.name,
+                )
+                commit_failures.append(f"{table.name}: {type(error).__name__}: {error}")
+
+        commit_failures_by_rank: list[list[str] | None] = [None] * world.world_size
+        torch.distributed.all_gather_object(
+            commit_failures_by_rank,
+            commit_failures,
+            group=world.cpu_group,
+        )
+        failed_commits = tuple(
+            (rank, failure)
+            for rank, failures in enumerate(commit_failures_by_rank)
+            for failure in failures or []
+        )
+        if failed_commits:
+            raise RuntimeError(f"Triton autotune commit failed: {failed_commits!r}")
 
 
 TRITON_AUTOTUNE_REGISTRY = TritonAutotuneRegistry()
