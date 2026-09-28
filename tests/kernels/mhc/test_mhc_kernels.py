@@ -1302,10 +1302,7 @@ def test_mhc_pre_delayed_rocm_aiter(num_tokens, carried):
 
 
 @pytest.mark.skipif(
-    not (
-        current_platform.is_rocm()
-        and HAS_AITER_MHC_FUSED_POST_PRE_DELAYED_RMS_NORM
-    ),
+    not (current_platform.is_rocm() and HAS_AITER_MHC_FUSED_POST_PRE_DELAYED_RMS_NORM),
     reason="AITER fused delayed-seam kernel required (gfx950)",
 )
 @pytest.mark.parametrize("num_tokens", [1, 2, 7, 128, 1024])

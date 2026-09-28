@@ -281,9 +281,7 @@ class DeepseekV4DecoderLayer(nn.Module):
         # hc_attn_fn_broadcast instead of the 4-stream residual with hc_attn_fn.
         # The fused kernel only takes the latter, so that seam keeps the
         # separate attn_norm.
-        fuse_attn_norm = self.fuse_seam_norm and not (
-            residual is None and x.dim() == 2
-        )
+        fuse_attn_norm = self.fuse_seam_norm and not (residual is None and x.dim() == 2)
         # The reference collapses each sublayer's input with the *previous*
         # sublayer's pre-mix: attention uses the pre-mix carried in (identity
         # for the first layer), the FFN uses this layer's attention pre-mix.
