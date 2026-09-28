@@ -38,11 +38,16 @@ def checksums(url: str) -> dict[str, str]:
     return response.json()["checksums"]
 
 
+def dp_ranks(keys) -> set[str]:
+    return {key.split(":", 1)[0] for key in keys}
+
+
 def reset_reload_and_compare(url: str) -> None:
     baseline = checksums(url)
     try:
         weight_checker(url, "reset").raise_for_status()
-        assert weight_checker(url, "compare", baseline).json()["match"] is False
+        comparison = weight_checker(url, "compare", baseline).json()
+        assert dp_ranks(comparison["mismatches"]) == dp_ranks(baseline)
     finally:
         requests.post(
             f"{url}/collective_rpc", json={"method": "reload_weights"}, timeout=300
@@ -118,6 +123,5 @@ def test_ipc_weight_transfer_restores_reset_weights():
 def test_checksum_and_reset_cover_every_dp_engine():
     args = ["--data-parallel-size", "2"]
     with server(extra_args=args, port=8771, timeout=600) as url:
-        prefixes = {key.split(":", 5)[0] for key in checksums(url)}
-        assert prefixes == {"dp0", "dp1"}
+        assert dp_ranks(checksums(url)) == {"dp0", "dp1"}
         reset_reload_and_compare(url)
