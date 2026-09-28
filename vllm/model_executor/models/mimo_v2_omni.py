@@ -69,7 +69,10 @@ from .qwen2_5_vl import (
     Qwen2_5_VLVideoInputs,
     Qwen2_5_VLVideoPixelInputs,
 )
-from .qwen2_vl import _create_qwen2vl_field_factory
+from .qwen2_vl import (
+    Qwen2VLMultiModalDataParser,
+    _create_qwen2vl_field_factory,
+)
 from .utils import AutoWeightsLoader, IntermediateTensors, WeightsMapper, maybe_prefix
 
 
@@ -670,6 +673,14 @@ class MiMoVisionTransformer(nn.Module):
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
 
+class MiMoV2OmniMultiModalDataParser(Qwen2VLMultiModalDataParser):
+    # Video stays raw: get_video_replacement also reads second_per_grid_ts and
+    # video_start_times, which a metadata-only rewrite would not carry.
+    embedding_fields = {
+        "image": Qwen2VLMultiModalDataParser.embedding_fields["image"],
+    }
+
+
 class MiMoV2OmniProcessingInfo(BaseProcessingInfo):
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
         return {"audio": None, "image": None, "video": None}
@@ -691,9 +702,7 @@ class MiMoV2OmniProcessingInfo(BaseProcessingInfo):
     def get_data_parser(self):
         # Without embedding_fields the EC producer publishes no metadata and
         # the EPD proxy never rewrites the media item.
-        from vllm.model_executor.models.qwen2_vl import Qwen2VLMultiModalDataParser
-
-        return Qwen2VLMultiModalDataParser(
+        return MiMoV2OmniMultiModalDataParser(
             self.get_hf_config().vision_config.spatial_merge_size,
             target_sr=24000.0,
             expected_hidden_size=self._get_expected_hidden_size(),
