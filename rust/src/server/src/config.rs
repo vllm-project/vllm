@@ -14,6 +14,7 @@ use serde_json::Value;
 use vllm_chat::multimodal::MmLimitPerPrompt;
 use vllm_chat::{
     ChatTemplateContentFormatOption, GenerationConfigMode, ParserSelection, RendererSelection,
+    ToolStrictLevel,
 };
 use vllm_engine_core_client::{CoordinatorMode as EngineCoreCoordinatorMode, TransportMode};
 use vllm_text::backend::hf::HfOverrides;
@@ -58,6 +59,9 @@ pub struct ApiServerOptions {
     pub enable_request_id_headers: bool,
     /// When `true`, register the scale-out `/inference/v1/generate` route.
     pub enable_scale_out: bool,
+    /// Idle interval after which streaming SSE responses send a keep-alive
+    /// comment. `None` disables keep-alive comments.
+    pub sse_keep_alive_interval: Option<Duration>,
 }
 
 /// CORS settings mirroring Python's `CORSMiddleware`; the default is permissive.
@@ -229,6 +233,8 @@ pub struct Config {
     pub tool_call_parser: ParserSelection,
     /// Reasoning parser selection.
     pub reasoning_parser: ParserSelection,
+    /// Server-side floor for tool-call structural tags.
+    pub tool_strict_level: ToolStrictLevel,
     /// Chat renderer selection.
     pub renderer: RendererSelection,
     /// Disable frontend-side multimodal preprocessing and render the model as

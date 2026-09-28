@@ -18,6 +18,9 @@ from openai.types.responses import (
     ResponseTextConfig,
     ResponseTextDeltaEvent,
 )
+from openai.types.responses import (
+    ResponseUsage as OpenAIResponseUsage,
+)
 from openai.types.responses.response_format_text_json_schema_config import (
     ResponseFormatTextJSONSchemaConfig,
 )
@@ -45,6 +48,7 @@ from vllm.entrypoints.openai.responses.context import (
     SimpleContext,
 )
 from vllm.entrypoints.openai.responses.protocol import (
+    ResponseCompletedEvent,
     ResponseCreatedEvent,
     ResponseRawMessageAndToken,
     ResponsesRequest,
@@ -68,6 +72,7 @@ from vllm.renderers.online_renderer import (
     _extract_allowed_tools_from_mcp_requests,
 )
 from vllm.sampling_params import SamplingParams
+from vllm.v1.metrics.stats import RequestStateStats
 
 pytestmark = pytest.mark.skip_global_cleanup
 
@@ -743,6 +748,7 @@ class TestInitializeToolSessions:
         class ToolCallingHarmonyContext(HarmonyContext):
             def __init__(self):
                 self._messages = []
+                self.request = None
                 self._needs_tool_call = True
 
             def append_output(self, output) -> None:
@@ -792,11 +798,59 @@ class TestInitializeToolSessions:
             pass
 
         assert serving_responses_instance.engine_client.generate.call_count == 2
+        assert context.request_metrics_cover_all_generation_turns is False
         followup_engine_input = (
             serving_responses_instance.engine_client.generate.call_args_list[1].args[0]
         )
         assert followup_engine_input.get("cache_salt") == "request-salt"
         assert followup_engine_input["prompt_token_ids"] == [3, 4]
+
+    @pytest.mark.asyncio
+    async def test_harmony_tool_followup_respects_max_output_tokens(
+        self, serving_responses_instance
+    ):
+        class ToolCallingHarmonyContext(HarmonyContext):
+            def __init__(self, request):
+                self._messages = []
+                self.request = request
+                self._needs_tool_call = True
+
+            def append_output(self, output) -> None:
+                pass
+
+            def need_builtin_tool_call(self) -> bool:
+                return self._needs_tool_call
+
+            async def call_tool(self):
+                self._needs_tool_call = False
+                return []
+
+            def append_tool_output(self, output) -> None:
+                pass
+
+        max_tokens_per_turn = []
+
+        async def generate_output(engine_input, sampling_params, *args, **kwargs):
+            max_tokens_per_turn.append(sampling_params.max_tokens)
+            yield MagicMock()
+
+        serving_responses_instance.engine_client.generate.side_effect = generate_output
+        serving_responses_instance.online_renderer.render_responses_harmony_messages = (
+            MagicMock(return_value=tokens_input([1, 2, 3]))
+        )
+        context = ToolCallingHarmonyContext(
+            ResponsesRequest(input="test", max_output_tokens=10)
+        )
+
+        async for _ in serving_responses_instance._generate_with_builtin_tools(
+            request_id="req",
+            engine_input=tokens_input([1]),
+            sampling_params=SamplingParams(max_tokens=10),
+            context=context,
+        ):
+            pass
+
+        assert max_tokens_per_turn == [10, 10]
 
     @pytest.mark.asyncio
     async def test_initialize_tool_sessions(
@@ -906,24 +960,19 @@ class TestValidateGeneratorInput:
         assert isinstance(result, ErrorResponse)
 
 
-@pytest.mark.asyncio
-async def test_reasoning_tokens_counted_for_text_reasoning_model(monkeypatch):
-    """Ensure reasoning_tokens usage is derived from thinking token spans."""
+class _Qwen3FakeTokenizer:
+    def __init__(self):
+        self._vocab = {"<think>": 1, "</think>": 2, "reason": 3, "final": 4}
 
-    class FakeTokenizer:
-        def __init__(self):
-            self._vocab = {"<think>": 1, "</think>": 2, "reason": 3, "final": 4}
+    def get_vocab(self):
+        return self._vocab
 
-        def get_vocab(self):
-            return self._vocab
+    def decode(self, token_ids):
+        id_to_token = {v: k for k, v in self._vocab.items()}
+        return "".join(id_to_token.get(token_id, "x") for token_id in token_ids)
 
-        def decode(self, token_ids):
-            id_to_token = {v: k for k, v in self._vocab.items()}
-            return "".join(id_to_token.get(token_id, "x") for token_id in token_ids)
 
-    # Force non-harmony, SimpleContext path
-    monkeypatch.setattr(envs, "VLLM_USE_EXPERIMENTAL_PARSER_CONTEXT", False)
-
+def _make_qwen3_serving() -> tuple[OpenAIServingResponses, _Qwen3FakeTokenizer]:
     engine_client = MagicMock()
     model_config = MagicMock()
     model_config.hf_config.model_type = "test"
@@ -933,21 +982,66 @@ async def test_reasoning_tokens_counted_for_text_reasoning_model(monkeypatch):
     engine_client.input_processor = MagicMock()
     engine_client.renderer = MagicMock()
 
-    tokenizer = FakeTokenizer()
+    tokenizer = _Qwen3FakeTokenizer()
     engine_client.renderer.get_tokenizer.return_value = tokenizer
-
-    models = MagicMock()
 
     serving = OpenAIServingResponses(
         engine_client=engine_client,
-        models=models,
+        models=MagicMock(),
         online_renderer=MagicMock(),
         request_logger=None,
         chat_template=None,
         chat_template_content_format="auto",
         reasoning_parser="qwen3",
     )
+    return serving, tokenizer
 
+
+def _make_text_request_output(text: str, token_ids: list[int]) -> RequestOutput:
+    return RequestOutput(
+        request_id="req",
+        prompt="hi",
+        prompt_token_ids=[7, 8],
+        prompt_logprobs=None,
+        outputs=[
+            CompletionOutput(
+                index=0,
+                text=text,
+                token_ids=token_ids,
+                cumulative_logprob=0.0,
+                logprobs=None,
+                finish_reason="stop",
+                stop_reason=None,
+            )
+        ],
+        finished=True,
+        num_cached_tokens=0,
+        num_cache_creation_tokens=3,
+    )
+
+
+async def _run_full_generator(serving, request, context, tokenizer):
+    async def dummy_result_generator():
+        yield None
+
+    return await serving.responses_full_generator(
+        request=request,
+        sampling_params=SamplingParams(max_tokens=16),
+        result_generator=dummy_result_generator(),
+        context=context,
+        model_name="test-model",
+        tokenizer=tokenizer,
+        request_metadata=RequestResponseMetadata(request_id="req"),
+    )
+
+
+@pytest.mark.asyncio
+async def test_reasoning_tokens_counted_for_text_reasoning_model(monkeypatch):
+    """Ensure reasoning_tokens usage is derived from thinking token spans."""
+    # Force non-harmony, SimpleContext path
+    monkeypatch.setattr(envs, "VLLM_USE_EXPERIMENTAL_PARSER_CONTEXT", False)
+
+    serving, tokenizer = _make_qwen3_serving()
     request = ResponsesRequest(input="hi", tools=[], stream=False)
     response_parser = serving._make_response_parser(
         request,
@@ -957,44 +1051,17 @@ async def test_reasoning_tokens_counted_for_text_reasoning_model(monkeypatch):
 
     # Build a SimpleContext with thinking tokens in the output.
     context = SimpleContext(response_parser=response_parser)
-    token_ids = [1, 10, 2, 20]  # <think> 10 </think> 20 -> reasoning token count = 1
-    completion = CompletionOutput(
-        index=0,
-        text="<think>reason</think>final",
-        token_ids=token_ids,
-        cumulative_logprob=0.0,
-        logprobs=None,
-        finish_reason="stop",
-        stop_reason=None,
+    # <think> 10 </think> 20 -> reasoning token count = 1
+    context.append_output(
+        _make_text_request_output("<think>reason</think>final", [1, 10, 2, 20])
     )
-    req_output = RequestOutput(
-        request_id="req",
-        prompt="hi",
-        prompt_token_ids=[7, 8],
-        prompt_logprobs=None,
-        outputs=[completion],
-        finished=True,
-        num_cached_tokens=0,
-    )
-    context.append_output(req_output)
 
-    async def dummy_result_generator():
-        yield None
-
-    sampling_params = SamplingParams(max_tokens=16)
-    metadata = RequestResponseMetadata(request_id="req")
-
-    response = await serving.responses_full_generator(
-        request=request,
-        sampling_params=sampling_params,
-        result_generator=dummy_result_generator(),
-        context=context,
-        model_name="test-model",
-        tokenizer=tokenizer,
-        request_metadata=metadata,
-    )
+    response = await _run_full_generator(serving, request, context, tokenizer)
 
     assert response.usage.output_tokens_details.reasoning_tokens == 1
+    assert response.usage.input_tokens_details.cache_write_tokens == 3
+
+    OpenAIResponseUsage.model_validate(response.usage.model_dump(mode="json"))
 
 
 class TestExtractAllowedToolsFromMcpRequests:
@@ -1241,9 +1308,19 @@ class TestHarmonyPreambleStreaming:
             assert "response.output_item.done" in type_names
 
 
-def _make_simple_context_with_output(text, token_ids, response_parser=None):
-    """Create a SimpleContext with a RequestOutput containing the given text."""
-    ctx = SimpleContext(response_parser=response_parser)
+_PER_REQUEST_STATS = RequestStateStats(
+    queued_ts=1.0,
+    scheduled_ts=1.5,
+    first_token_ts=2.0,
+    last_token_ts=3.0,
+)
+
+
+def _make_request_output(
+    text,
+    token_ids,
+    metrics: RequestStateStats | None = None,
+):
     completion = CompletionOutput(
         index=0,
         text=text,
@@ -1253,7 +1330,7 @@ def _make_simple_context_with_output(text, token_ids, response_parser=None):
         finish_reason=None,
         stop_reason=None,
     )
-    req_output = RequestOutput(
+    return RequestOutput(
         request_id="req",
         prompt="hi",
         prompt_token_ids=[7, 8],
@@ -1261,13 +1338,29 @@ def _make_simple_context_with_output(text, token_ids, response_parser=None):
         outputs=[completion],
         finished=False,
         num_cached_tokens=0,
+        metrics=metrics,
     )
+
+
+def _make_simple_context_with_output(
+    text,
+    token_ids,
+    response_parser=None,
+    metrics: RequestStateStats | None = None,
+):
+    """Create a SimpleContext with a RequestOutput containing the given text."""
+    ctx = SimpleContext(response_parser=response_parser)
+    req_output = _make_request_output(text, token_ids, metrics)
     ctx.append_output(req_output)
+    ctx.request_metrics = metrics
     return ctx
 
 
-def _make_serving_instance_with_reasoning():
-    """Create an OpenAIServingResponses with a mocked reasoning parser."""
+def _make_serving_instance(
+    *,
+    reasoning_parser: str = "",
+    enable_per_request_metrics: bool = False,
+) -> OpenAIServingResponses:
     engine_client = MagicMock()
     model_config = MagicMock()
     model_config.max_model_len = 100
@@ -1278,18 +1371,112 @@ def _make_serving_instance_with_reasoning():
     engine_client.input_processor = MagicMock()
     engine_client.renderer = MagicMock()
 
-    models = MagicMock()
-
-    serving = OpenAIServingResponses(
+    return OpenAIServingResponses(
         engine_client=engine_client,
-        models=models,
+        models=MagicMock(),
         online_renderer=MagicMock(),
         request_logger=None,
         chat_template=None,
         chat_template_content_format="auto",
-        reasoning_parser="qwen3",
+        reasoning_parser=reasoning_parser,
+        enable_per_request_metrics=enable_per_request_metrics,
     )
-    return serving
+
+
+async def _empty_context_generator():
+    if False:
+        yield
+
+
+async def _make_full_metrics_response(
+    enable_per_request_metrics: bool,
+    request_metrics_cover_all_generation_turns: bool = True,
+):
+    serving = _make_serving_instance(
+        enable_per_request_metrics=enable_per_request_metrics
+    )
+    request = ResponsesRequest(input="hi", tools=[], stream=False, store=False)
+    sampling_params = SamplingParams(max_tokens=16)
+    context = SimpleContext()
+    context.request_metrics_cover_all_generation_turns = (
+        request_metrics_cover_all_generation_turns
+    )
+
+    async def generate(*args, **kwargs):
+        yield _make_request_output("hello", [10, 20], _PER_REQUEST_STATS)
+
+    serving.engine_client.generate.side_effect = generate
+    result_generator = serving._generate_with_builtin_tools(
+        request_id=request.request_id,
+        engine_input=tokens_input([7, 8]),
+        sampling_params=sampling_params,
+        context=context,
+    )
+    response = await serving.responses_full_generator(
+        request=request,
+        sampling_params=sampling_params,
+        result_generator=result_generator,
+        context=context,
+        model_name="test-model",
+        tokenizer=MagicMock(),
+        request_metadata=RequestResponseMetadata(request_id="req"),
+    )
+    assert isinstance(response, ResponsesResponse)
+    return response
+
+
+@pytest.mark.asyncio
+async def test_responses_per_request_metrics_follow_server_flag():
+    disabled_response = await _make_full_metrics_response(False)
+    assert disabled_response.metrics is None
+    assert "metrics" not in disabled_response.model_dump(mode="json")
+
+    enabled_response = await _make_full_metrics_response(True)
+    assert enabled_response.metrics is not None
+    assert enabled_response.metrics.time_to_first_token_ms == pytest.approx(500.0)
+
+
+@pytest.mark.asyncio
+async def test_responses_streaming_metrics_only_on_completed_event():
+    serving = _make_serving_instance(enable_per_request_metrics=True)
+    request = ResponsesRequest(input="hi", tools=[], stream=True, store=False)
+    context = _make_simple_context_with_output(
+        "hello", [10, 20], metrics=_PER_REQUEST_STATS
+    )
+
+    events = [
+        event
+        async for event in serving.responses_stream_generator(
+            request=request,
+            sampling_params=SamplingParams(max_tokens=16),
+            result_generator=_empty_context_generator(),
+            context=context,
+            model_name="test-model",
+            tokenizer=MagicMock(),
+            request_metadata=RequestResponseMetadata(request_id="req"),
+        )
+    ]
+
+    for event in events[:-1]:
+        assert "metrics" not in event.response.model_dump(mode="json")
+    assert isinstance(events[-1], ResponseCompletedEvent)
+    assert events[-1].response.metrics is not None
+    assert events[-1].response.metrics.time_to_first_token_ms == pytest.approx(500.0)
+
+
+@pytest.mark.asyncio
+async def test_responses_metrics_suppressed_for_multiple_generation_turns():
+    response = await _make_full_metrics_response(
+        True, request_metrics_cover_all_generation_turns=False
+    )
+
+    assert response.metrics is None
+    assert "metrics" not in response.model_dump(mode="json")
+
+
+def _make_serving_instance_with_reasoning():
+    """Create an OpenAIServingResponses with a mocked reasoning parser."""
+    return _make_serving_instance(reasoning_parser="qwen3")
 
 
 def _identity_increment(event):

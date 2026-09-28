@@ -1695,7 +1695,6 @@ def add_cli_args(parser: FlexibleArgumentParser):
         - "auto" will use the tokenizer from `mistral_common` for Mistral models
         if available, otherwise it will use the "hf" tokenizer.\n
         - "hf" will use the fast tokenizer if available.\n
-        - "slow" will always use the slow tokenizer.\n
         - "mistral" will always use the tokenizer from `mistral_common`.\n
         - "deepseek_v32" will always use the tokenizer from `deepseek_v32`.\n
         - Other custom values can be supported via plugins.""",
@@ -2216,6 +2215,11 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
             raise ValueError(
                 "Sampling parameters are only supported by openai-compatible backends."
             )
+
+        # The Responses API accepts every sampling parameter above except
+        # min_p, which it would silently drop as an unknown field.
+        if args.backend == "openai-responses" and "min_p" in sampling_params:
+            raise ValueError("--min-p is not supported by the Responses API.")
 
         if "temperature" not in sampling_params:
             print(
