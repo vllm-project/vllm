@@ -149,6 +149,7 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
                           const uint32_t* zero_points,
                           const scalar_t* __restrict__ BIAS, scalar_t* C,
                           const int _WvPrGrp, const int CuCount,
+                          const int group_stride,
                           const int B_row_stride_bytes) {
   constexpr int max_lds_len = LDS_SIZE / 2;
 
@@ -179,9 +180,9 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
 
   uint32_t m = (blockIdx.x * _WvPrGrp + (threadIdx.y % _WvPrGrp)) * YTILE;
 
-  // For per-group, precompute num_groups and scale stride
-  [[maybe_unused]] const int num_groups =
-      (GROUP_SIZE > 0) ? (K / GROUP_SIZE) : 0;
+  // Scale and zero-point rows carry their own row stride, which the caller
+  // may pad beyond K / GROUP_SIZE.
+  [[maybe_unused]] const int num_groups = (GROUP_SIZE > 0) ? group_stride : 0;
 
   float sum[N][YTILE];
 
@@ -424,7 +425,8 @@ __global__ void wvSplitK_int4_hf_sml_(
     const uint8_t* B_packed, const scalar_t* __restrict__ A,
     const scalar_t* scale, const uint32_t* zero_points,
     const scalar_t* __restrict__ BIAS, scalar_t* C, const int _WvPrGrp,
-    const int CuCount, const int B_row_stride_bytes) {
+    const int CuCount, const int group_stride,
+    const int B_row_stride_bytes) {
   UNREACHABLE_CODE
 }
 #endif  // defined(__HIP__GFX1X__)
@@ -441,6 +443,7 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
                       const scalar_t* scale, const uint32_t* zero_points,
                       const scalar_t* __restrict__ BIAS, scalar_t* C,
                       const int _WvPrGrp, const int CuCount,
+                      const int group_stride,
                       const int B_row_stride_bytes) {
   constexpr int max_lds_len = LDS_SIZE / 2;
 
@@ -484,8 +487,9 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
 
   if (threadIdx.y >= _WvPrGrp) return;
 
-  [[maybe_unused]] const int num_groups =
-      (GROUP_SIZE > 0) ? (K / GROUP_SIZE) : 0;
+  // Scale and zero-point rows carry their own row stride, which the caller
+  // may pad beyond K / GROUP_SIZE.
+  [[maybe_unused]] const int num_groups = (GROUP_SIZE > 0) ? group_stride : 0;
 
   float sum[N][YTILE];
 
@@ -696,7 +700,7 @@ __global__ void wvSplitK_int4_hf_(
     const uint8_t* B_packed, const scalar_t* __restrict__ A,
     const scalar_t* scale, const uint32_t* zero_points,
     const scalar_t* __restrict__ BIAS, scalar_t* C, const int _WvPrGrp,
-    const int CuCount, const int B_row_stride_bytes) {
+    const int CuCount, const int group_stride, const int B_row_stride_bytes) {
   UNREACHABLE_CODE
 }
 #endif  // defined(__HIP__GFX1X__)
@@ -768,6 +772,17 @@ torch::Tensor wvSplitK_int4_g(const at::Tensor& in_a, const at::Tensor& in_b,
   TORCH_CHECK(in_scale.size(0) == M_in && in_scale.size(1) == num_groups,
               "Scale must be [M, K/group_size] = [", M_in, ", ", num_groups,
               "] but got [", in_scale.size(0), ", ", in_scale.size(1), "]");
+  // Scale and zero-point rows are indexed by their own stride, so the caller
+  // may pad them past K / group_size. Only dim 0 may be padded; dim 1 must
+  // stay contiguous because the kernel reads consecutive groups.
+  const int64_t group_stride = in_scale.stride(0);
+  TORCH_CHECK(in_scale.stride(1) == 1, "Scale must be contiguous in dim 1");
+  TORCH_CHECK(group_stride >= num_groups,
+              "Scale row stride must be at least K/group_size=", num_groups,
+              ", got ", group_stride);
+  TORCH_CHECK(std::in_range<int>(group_stride),
+              "Scale row stride overflows int");
+  const int group_stride_i32 = static_cast<int>(group_stride);
   if (in_zero_points.has_value()) {
     // The kernel reads the words as uint32, so either signedness is accepted.
     TORCH_CHECK(in_zero_points->dtype() == at::kInt ||
@@ -780,8 +795,11 @@ torch::Tensor wvSplitK_int4_g(const at::Tensor& in_a, const at::Tensor& in_b,
                 in_zero_points->sizes());
     TORCH_CHECK(M_in % 8 == 0,
                 "M must be divisible by 8 for packed zero points, got ", M_in);
-    TORCH_CHECK(in_zero_points->is_contiguous(),
-                "Zero points must be contiguous");
+    TORCH_CHECK(in_zero_points->stride(1) == 1,
+                "Zero points must be contiguous in dim 1");
+    TORCH_CHECK(in_zero_points->stride(0) == group_stride,
+                "Zero points must share the scale row stride ", group_stride,
+                ", got ", in_zero_points->stride(0));
     TORCH_CHECK(in_zero_points->size(0) == M_in / 8 &&
                     in_zero_points->size(1) == num_groups,
                 "Zero points must be [M/8, K/group_size] = [", M_in / 8, ", ",
@@ -812,12 +830,12 @@ torch::Tensor wvSplitK_int4_g(const at::Tensor& in_a, const at::Tensor& in_b,
       wvSplitK_int4_hf_sml_<fptype, _THRDS, _YTILE, 16, 16, _UNRL, _N, _GS, \
                             _HAS_ZP><<<grid, block, 0, stream>>>(           \
           K_in, M_in, Bx_in, By_in, wptr, aptr, sptr, zpptr, biasptr, cptr, \
-          __wvPrGrp, CuCount, b_row_stride_bytes_i32);                      \
+          __wvPrGrp, CuCount, group_stride_i32, b_row_stride_bytes_i32);   \
     else                                                                    \
       wvSplitK_int4_hf_<fptype, _THRDS, _YTILE, 16, 16, _UNRL, _N, _GS,     \
                         _HAS_ZP><<<grid, block, 0, stream>>>(               \
           K_in, M_in, Bx_in, By_in, wptr, aptr, sptr, zpptr, biasptr, cptr, \
-          __wvPrGrp, CuCount, b_row_stride_bytes_i32);                      \
+          __wvPrGrp, CuCount, group_stride_i32, b_row_stride_bytes_i32);   \
   }
 
 #define WVSPLITK_INT4G(_YTILE, _UNRL, _N, _GS, _HAS_ZP) \
