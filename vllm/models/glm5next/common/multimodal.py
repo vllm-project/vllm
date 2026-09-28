@@ -43,6 +43,7 @@ from vllm.model_executor.models.vision import (
 )
 from vllm.models.common.ops import fused_q_kv_rmsnorm
 from vllm.multimodal.parse import ImageSize, MultiModalDataItems
+from vllm.transformers_utils.processors.glm5next import glm_sample_frame_indices
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 
@@ -662,30 +663,12 @@ class Glm5NextProcessingInfo(Glm4vProcessingInfo):
     ) -> list[int]:
         """Timestamps for the video placeholder, from the pixel path's sampler.
 
-        ``_construct_video_placeholder`` emits one frame of placeholders per
-        timestamp, so the timestamps decide how many placeholders the prompt
-        gets while ``video_grid_thw`` decides how many rows the vision tower
-        produces. The inherited implementation samples with GLM-4.6V's
-        constants (``DYNAMIC_FPS_THRES`` and ``extract_t = duration *
-        target_fps * temporal_patch_size``), but this checkpoint's pixels are
-        sampled by ``Glm5NextVideoProcessor.sample_frames``, which uses
-        ``fps_interval`` and ``extract_t = duration * target_fps``. The two
-        agree only for source durations between 30 s and 300 s; anywhere else
-        the prompt and the encoder disagree and the counts collide in
-        ``_merge_multimodal_embeddings``.
-
-        Sampling here with the video processor's own policy makes the count
-        structural instead of coincidental: ``_preprocess`` pads the frame axis
-        up to a multiple of ``temporal_patch_size`` and sets ``grid_t`` to the
-        padded frame count divided by it, so one timestamp per temporal patch
-        is exactly ``grid_t`` timestamps. Only the values come from the
-        sampler, and they keep the inherited convention -- the first frame of
-        each temporal patch, ``int(frame_index / fps)`` seconds.
+        The inherited GLM-4.6V timestamp sampling uses different constants
+        than this checkpoint's ``Glm5NextVideoProcessor`` pixel sampling, so
+        placeholder count and ``video_grid_thw`` disagree outside 30-300s
+        durations. Sampling with the pixel path's own policy makes one
+        timestamp per temporal patch == ``grid_t``.
         """
-        from vllm.transformers_utils.processors.glm5next import (
-            glm_sample_frame_indices,
-        )
-
         video_processor = self.get_video_processor()
         temporal_patch_size = int(
             getattr(video_processor, "temporal_patch_size", 1) or 1
