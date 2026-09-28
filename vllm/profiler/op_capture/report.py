@@ -5,7 +5,7 @@
 import json
 import os
 from collections import Counter
-from collections.abc import Sequence
+from collections.abc import Sequence, Set
 from dataclasses import asdict, dataclass, field
 from itertools import groupby
 from pathlib import Path
@@ -23,12 +23,15 @@ _PLATFORM_CAVEAT = (
 def format_selection(selection: SelectionMetadata) -> str:
     """Render the selection metadata a capture is only valid under."""
     backends = ", ".join(sorted(set(selection.attention_backends.values())))
-    heads = (
-        f"{selection.num_query_heads} query, {selection.num_kv_heads} kv, "
-        f"head size {selection.head_size}"
-    )
-    if selection.tensor_parallel_size > 1:
-        heads += " (per rank)"
+    if selection.num_query_heads is None:
+        heads = "unknown (no layer reports head counts)"
+    else:
+        heads = (
+            f"{selection.num_query_heads} query, {selection.num_kv_heads} kv, "
+            f"head size {selection.head_size}"
+        )
+        if selection.tensor_parallel_size > 1:
+            heads += " (per rank)"
     rows = {
         "platform": selection.platform,
         "device": selection.device,
@@ -78,6 +81,7 @@ def format_gaps(capture: OpCapture) -> str | None:
 
     """
     lines = []
+    placeholder_ops = capture.placeholder_ops
     if capture.failure is not None:
         failure = capture.failure
         where = failure.module or "top level"
@@ -89,7 +93,7 @@ def format_gaps(capture: OpCapture) -> str | None:
         ]
         if failure.location:
             lines.append(f"    at {failure.location}")
-        if placeholder_ops := capture.placeholder_ops:
+        if placeholder_ops:
             lines.append(
                 f"    may be a knock-on effect of the placeholder for "
                 f"{placeholder_ops[0].name}, if it is shape-related"
@@ -104,7 +108,7 @@ def format_gaps(capture: OpCapture) -> str | None:
             "(the ops they would have dispatched next are missing):"
         )
         lines += [f"    {name}: {error}" for name, error in body_errors.items()]
-    if placeholders := Counter(op.name for op in capture.placeholder_ops):
+    if placeholders := Counter(op.name for op in placeholder_ops):
         lines.append(
             "  Output shapes unknown, placeholders used (add to OVERRIDES; "
             "shapes after the first are guesses):"
@@ -142,13 +146,22 @@ class _Node:
 
 def _build_tree(capture: OpCapture) -> _Node:
     root = _Node(name="")
+    # Consecutive ops share a module, and a module's node is the same every time,
+    # so each distinct path is walked once rather than once per op.
+    nodes = {"": root}
     for op in capture.ops:
-        node = root
-        path = ""
-        for part in filter(None, op.module.split(".")):
-            path = f"{path}.{part}" if path else part
-            node = node.children.setdefault(part, _Node(name=part))
-            node.module_type = capture.module_types.get(path, node.module_type)
+        node = nodes.get(op.module)
+        if node is None:
+            node = root
+            path = ""
+            for part in filter(None, op.module.split(".")):
+                path = f"{path}.{part}" if path else part
+                child = node.children.get(part)
+                if child is None:
+                    child = node.children[part] = _Node(name=part)
+                    child.module_type = capture.module_types.get(path, "")
+                node = child
+            nodes[op.module] = node
         node.ops.append(op)
     return root
 
@@ -244,8 +257,10 @@ def format_batches(captures: Sequence[OpCapture]) -> str:
     return "\n".join(lines)
 
 
-def _annotation(op: RecordedOp, selection: SelectionMetadata) -> str:
-    if not op.is_custom or op.module not in selection.attention_layers:
+def _annotation(
+    op: RecordedOp, selection: SelectionMetadata, attention_layers: Set[str]
+) -> str:
+    if not op.is_custom or op.module not in attention_layers:
         return ""
     window = selection.sliding_windows.get(op.module)
     return f" [sliding_window={window}]" if window else " [full]"
@@ -272,12 +287,15 @@ def write_capture_files(capture: OpCapture, directory: str | os.PathLike) -> Pat
     directory.mkdir(parents=True, exist_ok=True)
     selection = capture.selection
     distinct = sorted({op.name for op in capture.ops})
+    # A hybrid model has hundreds of attention layers, and every op asks.
+    attention_layers = frozenset(selection.attention_layers)
     (directory / "report.txt").write_text(format_report(capture, show_shapes=True))
     (directory / "ops.txt").write_text("".join(f"{name}\n" for name in distinct))
     (directory / "ops.sequence.txt").write_text(
         "".join(
             f"{'  ' * op.depth}{op.signature} -> {', '.join(op.outputs) or '()'}"
-            f"  @{op.module or '<top>'}{_annotation(op, selection)}\n"
+            f"  @{op.module or '<top>'}"
+            f"{_annotation(op, selection, attention_layers)}\n"
             for op in capture.ops
         )
     )

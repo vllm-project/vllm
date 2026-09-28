@@ -11,7 +11,7 @@ comes from the `meta` load format, so an HF config is all that is needed.
 """
 
 import os
-from collections.abc import Iterator, Sequence
+from collections.abc import Iterable, Iterator, Sequence
 from contextlib import ExitStack, contextmanager, nullcontext
 from dataclasses import dataclass, field, replace
 from itertools import chain
@@ -171,9 +171,16 @@ class SelectionMetadata:
     block_size: int
     kernel_block_sizes: tuple[int, ...]
     num_attention_layers: int
-    num_query_heads: int
-    num_kv_heads: int
-    head_size: int
+    num_query_heads: int | None
+    num_kv_heads: int | None
+    head_size: int | None
+    """Shape of the first layer reporting one, `None` if no layer does.
+
+    Hybrid models mix layer types -- Mamba mixers and sparse attention's indexer
+    report no head counts, and a model may implement attention in a class that
+    reports none either -- so these describe one representative layer, not the
+    whole model. `attention_backends` is the per-layer breakdown.
+    """
     tensor_parallel_size: int = 1
     """Ranks the model is sharded over; head counts are per rank."""
     attention_layers: tuple[str, ...] = ()
@@ -818,11 +825,33 @@ class ForwardHarness:
     def _all_attn_groups(self) -> list[AttentionGroup]:
         return [*chain.from_iterable(self.attn_groups), *self.encoder_only_groups]
 
+    @staticmethod
+    def _first_shaped_layer(
+        layers: Iterable[AttentionLayerBase],
+    ) -> AttentionLayerBase | None:
+        """The first layer reporting a full head shape, `None` if none does.
+
+        A hybrid model's layers are not all self-attention: Mamba mixers and the
+        indexer of sparse attention are `AttentionLayerBase` too, and report
+        either no heads or their own -- a Mamba mixer's `num_heads` counts state
+        heads. Reading the counts off whichever layer comes first reports those
+        as if they were attention's.
+        """
+        shape_attrs = ("num_heads", "num_kv_heads", "head_size")
+        return next(
+            (
+                layer
+                for layer in layers
+                if all(getattr(layer, attr, None) is not None for attr in shape_attrs)
+            ),
+            None,
+        )
+
     def selection_metadata(self) -> SelectionMetadata:
         """Collect the hardware-dependent choices this capture depends on."""
         config = self.vllm_config
         layers = self._attention_layers()
-        first = next(iter(layers.values()), None)
+        shaped = self._first_shaped_layer(layers.values())
         return SelectionMetadata(
             platform=current_platform.device_name,
             device=str(self.device),
@@ -839,9 +868,9 @@ class ForwardHarness:
             num_attention_layers=sum(
                 len(group.layer_names) for group in self._all_attn_groups()
             ),
-            num_query_heads=getattr(first, "num_heads", 0),
-            num_kv_heads=getattr(first, "num_kv_heads", 0),
-            head_size=getattr(first, "head_size", 0),
+            num_query_heads=getattr(shaped, "num_heads", None),
+            num_kv_heads=getattr(shaped, "num_kv_heads", None),
+            head_size=getattr(shaped, "head_size", None),
             tensor_parallel_size=self.tensor_parallel_size,
             attention_layers=tuple(layers),
             sliding_windows={
@@ -899,12 +928,10 @@ def _capture(
     elif harness.is_meta:
         harness.assert_on_meta()
     dispatch_key = current_platform.dispatch_key
-    missing = {
-        op.name
-        for op in recorder.ops
-        if not op.name.startswith("triton::")
-        and not has_kernel_for(op.name, dispatch_key)
-    }
+    # Asked once per distinct operator: a forward pass records tens of thousands
+    # of calls but only hundreds of names.
+    dispatched = {op.name for op in recorder.ops if not op.name.startswith("triton::")}
+    missing = {name for name in dispatched if not has_kernel_for(name, dispatch_key)}
     return OpCapture(
         model=harness.model_id,
         batch=harness.batch,

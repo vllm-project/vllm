@@ -3,6 +3,7 @@
 """Meta-device operator capture: what it records, and that hardware agrees."""
 
 from collections import defaultdict
+from dataclasses import replace
 
 import pytest
 import torch
@@ -28,6 +29,7 @@ from vllm.profiler.op_capture import (
     capture_ranks,
     compare_devices,
     format_diff,
+    format_report,
     meta_ops,
     register_meta_impls,
     write_capture_files,
@@ -158,8 +160,44 @@ def test_capture_ranks_records_collectives_on_per_rank_shards():
     for (capture,) in ranks:
         selection = capture.selection
         assert selection.tensor_parallel_size == 2
-        assert (selection.num_query_heads, selection.num_kv_heads) == (7, 1)
+        heads = (selection.num_query_heads, selection.num_kv_heads, selection.head_size)
+        assert heads == (7, 1, 64)
         assert "vllm::all_reduce" in {op.name for op in capture.ops}
+
+
+class _ShapelessLayer:
+    """An attention layer exposing only the attributes it is given."""
+
+    def __init__(self, **attrs) -> None:
+        self.__dict__.update(attrs)
+
+
+def test_head_counts_come_from_the_first_layer_that_has_them():
+    """A hybrid model's layers do not all carry attention's head counts.
+
+    Mamba mixers and the indexer of sparse attention are attention layers too,
+    and they lead the model, so reading the counts off whichever layer comes
+    first reports another layer type's shape -- or a zero -- as attention's.
+    """
+    first_shaped = ForwardHarness._first_shaped_layer
+    indexer = _ShapelessLayer(topk_tokens=2048)
+    mamba = _ShapelessLayer(num_heads=128, head_size=64)
+    attention = _ShapelessLayer(num_heads=16, num_kv_heads=2, head_size=128)
+    assert first_shaped([indexer, mamba, attention]) is attention
+    assert first_shaped([attention, mamba]) is attention
+    assert first_shaped([indexer, mamba]) is None
+    assert first_shaped([]) is None
+
+
+def test_a_model_without_head_counts_reports_them_as_unknown(capture):
+    """No layer to read them off must read as unknown, not as a shape of zero."""
+    selection = replace(
+        capture.selection, num_query_heads=None, num_kv_heads=None, head_size=None
+    )
+    lines = format_report(replace(capture, selection=selection)).splitlines()
+    (row,) = [line for line in lines if line.strip().startswith("heads")]
+    assert "unknown" in row
+    assert "0" not in row
 
 
 def test_multimodal_items_need_a_multimodal_model():

@@ -72,6 +72,8 @@ Selection metadata
 
 A model with sliding-window layers or MoE layers adds rows such as `sliding window  128 (18 layers)` and `moe experts  XPUExpertsMxFp4`.
 
+`heads` describes the first layer that reports a head shape, not the whole model: a hybrid model's Mamba mixers and sparse attention's indexer report no head counts, or their own, and a model may implement attention in a class that reports none either -- `heads` then reads `unknown (no layer reports head counts)`. The per-layer breakdown is `attention backend`, which lists every backend in play.
+
 then the module tree, with identical sibling layers collapsed and `*` marking custom ops (extra indentation marks an op issued from inside another op):
 
 ```text

@@ -62,9 +62,9 @@ def describe(value: Any) -> str:
     """Render one operator argument or result as a short shape/dtype string."""
     if isinstance(value, torch.Tensor):
         dtype = _DTYPE_ABBREVIATIONS.get(value.dtype, str(value.dtype)[6:])
-        return f"{dtype}[{','.join(str(size) for size in value.shape)}]"
+        return f"{dtype}[{','.join(map(str, value.shape))}]"
     if isinstance(value, (list, tuple)):
-        return f"[{', '.join(describe(item) for item in value)}]"
+        return f"[{', '.join(map(describe, value))}]"
     if isinstance(value, torch.dtype):
         return _DTYPE_ABBREVIATIONS.get(value, str(value)[6:])
     if isinstance(value, (bool, int, float, str)) or value is None:
@@ -249,7 +249,7 @@ class OpRecorder(TorchDispatchMode):
             module=path,
             module_type=module_type,
             depth=self._depth,
-            inputs=tuple(describe(arg) for arg in args)
+            inputs=tuple(map(describe, args))
             + tuple(f"{key}={describe(value)}" for key, value in kwargs.items()),
         )
         self.ops.append(record)
