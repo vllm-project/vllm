@@ -251,6 +251,15 @@ that may call 1+ triton kernels. On rare (but unfortunate) occasions, it may
 produce an incorrect triton kernel. This may manifest as silent incorrectness,
 CUDA illegal memory accesses, or loud errors.
 
+### Deterministic compilation
+
+When vLLM selects combo-kernel defaults, it disables combo-kernel benchmarking
+if Inductor's `deterministic` setting is enabled. A `deterministic` value in
+`inductor_compile_config` takes precedence over the global Inductor setting.
+Explicit `combo_kernels` or `benchmark_combo_kernel` settings are preserved.
+This avoids conflicting compilation defaults; it does not guarantee reproducible
+model outputs.
+
 ### Inductor runtime assertions
 
 By default (on torch < 2.12), vLLM disables Inductor's runtime assertions
