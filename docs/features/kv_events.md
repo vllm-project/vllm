@@ -70,17 +70,18 @@ ownership, and session metadata.
 1. Subscribe to live events and receive a message before requesting a snapshot.
    Merely connecting a SUB socket does not establish delivery.
 2. Continue buffering live messages while the snapshot request is outstanding.
-3. Build a **new private index** from all snapshot chunks in order. Snapshot
-   stores can include evicted ancestors needed to reconstruct descendants or
-   tokenless offload entries. Trailing removals remove that excess residency.
+3. Apply all snapshot chunks in order, as ordinary events, to an index that
+   holds nothing for this publisher. Snapshot stores can include evicted
+   ancestors needed to reconstruct descendants or tokenless offload entries.
+   Removals in the snapshot drop that excess residency.
 4. Discard buffered messages at or below the snapshot sequence. Apply the
    remaining messages only if their identities match and their sequences are
    consecutive, starting at `snapshot_sequence + 1`.
-5. Atomically install the private index in the router, then continue consuming
-   consecutive live messages. Treat empty heartbeat batches as sequence updates.
+5. Continue consuming consecutive live messages. Treat empty heartbeat batches
+   as sequence updates.
 6. On a gap, identity change, timeout, malformed reply, or buffer exhaustion,
-   mark this publisher's routing state unavailable and start again with a fresh
-   private index. Do not install a partial or unavailable snapshot.
+   clear this publisher's state and start again. Do not apply a partial or
+   unavailable snapshot.
 
 `SnapshotClient` in the example implements the transport part of this procedure.
 Its `bootstrap()` returns snapshot chunks followed by the validated buffered
@@ -91,9 +92,12 @@ The recorder keeps one record per block hash: its parent, tokens and hash
 inputs. A record is retained while the block is resident in any tier, while a
 retained record names it as parent, and for 64 event-carrying batches after
 its last residency ends, because an offload store can complete after its GPU
-copy was evicted. A snapshot teaches every retained block, parents first,
-removes them again, and then stores each live residency by hash with its exact
-count. `AllBlocksCleared` from the GPU block pool clears GPU residency;
+copy was evicted. A snapshot stores every retained block with its tokens,
+parents first: a live block in one of its live scopes, a dead block in its
+group's GPU scope. It then removes the dead blocks, stores each live residency
+by hash with its exact count, and removes each live block's first store. A
+consumer that counts references per scope and hash, and forgets an engine hash
+once no entry holds its key, ends with the exact live residency. `AllBlocksCleared` from the GPU block pool clears GPU residency;
 offloaded residency and its reconstruction metadata remain. Consumers must
 apply the same tier semantics to the subsequent live stream.
 

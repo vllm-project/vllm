@@ -2,11 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Live-state KV event snapshots.
 
-A snapshot is a synthesized event program for a fresh, private consumer
-index. It stores every block the consumer must be able to name after the cut,
-parents first, removes them all again, which keeps what the consumer learned
-about each hash, and then stores each live residency by hash with its exact
-count.
+A snapshot is a synthesized event program that a consumer applies like live
+events. It stores every block the consumer must be able to name after the cut,
+parents first, removes the dead ones again, stores each live residency by hash
+with its exact count, and then removes the first store of each live block.
 
 State is per block, not per source event. A block's record holds its parent,
 tokens and hash inputs. A record is retained while the block is resident in
@@ -338,13 +337,16 @@ class KVCacheSnapshot:
     def export(
         self, max_blocks_per_event: int = 1024
     ) -> Iterator[BlockStored | BlockRemoved]:
-        """Teach every retained block, clear it, then set live residency.
+        """Teach every retained block, clear the dead, then set live residency.
 
-        Each retained block is stored once with its tokens, parents first, in
-        its group's GPU scope, and removed there again; the consumer keeps
-        what it learned about each hash. Token-less stores then bring every
-        live scope to its exact count. Clearing before setting keeps a dead
-        block from removing a live block the consumer keys identically.
+        Each retained block is stored once with its tokens, parents first: a
+        live block in one of its live scopes, a dead block in its group's GPU
+        scope. Dead blocks are removed again. Token-less stores then bring
+        every live scope to its exact count, and a last removal drops the
+        teaching store of each live block. The consumer counts references per
+        scope and hash, so that removal never evicts, a live block keeps its
+        engine hash resolvable throughout, and a dead block the consumer keys
+        like a live one is removed before the live residency is set.
         Only an untainted snapshot can be exported.
         """
         assert not self.tainted
@@ -355,13 +357,21 @@ class KVCacheSnapshot:
                 roots.append(h)
             else:
                 children.setdefault(record.parent, []).append(h)
+        live_scope: dict[ExternalBlockHash, tuple[str | None, int | None]] = {}
+        for medium, group, h in self._live:
+            live_scope.setdefault(h, (medium, group))
 
-        def attrs(record: _Record) -> tuple:
-            return (record.group, record.block_size, record.lora_id, record.lora_name)
+        def scope(h: ExternalBlockHash) -> tuple[str | None, int | None]:
+            return live_scope.get(h) or (MEDIUM_GPU, self._records[h].group)
+
+        def attrs(h: ExternalBlockHash) -> tuple:
+            record = self._records[h]
+            return (scope(h), record.block_size, record.lora_id, record.lora_name)
 
         def segment(blocks: list[ExternalBlockHash]) -> BlockStored:
             first = self._records[blocks[0]]
-            kind, window = self._groups.get(first.group, (None, None))
+            medium, group = scope(blocks[0])
+            kind, window = self._groups.get(group, (None, None))
             tokens: list[int] = []
             extra: list[Any] = []
             for h in blocks:
@@ -374,44 +384,45 @@ class KVCacheSnapshot:
                 token_ids=tokens,
                 block_size=first.block_size,
                 lora_id=first.lora_id,
-                medium=MEDIUM_GPU,
+                medium=medium,
                 lora_name=first.lora_name,
                 extra_keys=extra,
-                group_idx=first.group,
+                group_idx=group,
                 kv_cache_spec_kind=kind,
                 kv_cache_spec_sliding_window=window,
             )
+
+        def removals(hashes: Iterator[ExternalBlockHash]) -> Iterator[BlockRemoved]:
+            scoped: dict[tuple[str | None, int | None], list[ExternalBlockHash]] = {}
+            for h in hashes:
+                scoped.setdefault(scope(h), []).append(h)
+            for (medium, group), blocks in scoped.items():
+                for start in range(0, len(blocks), max_blocks_per_event):
+                    yield BlockRemoved(
+                        block_hashes=blocks[start : start + max_blocks_per_event],
+                        medium=medium,
+                        group_idx=group,
+                    )
 
         stack = list(reversed(roots))
         while stack:
             h = stack.pop()
             blocks = [h]
-            record = self._records[h]
-            key = attrs(record)
+            key = attrs(h)
             while True:
                 kids = children.get(h, ())
                 if len(kids) != 1:
                     stack.extend(reversed(kids))
                     break
                 child = kids[0]
-                child_record = self._records[child]
-                if attrs(child_record) != key or len(blocks) == max_blocks_per_event:
+                if attrs(child) != key or len(blocks) == max_blocks_per_event:
                     stack.append(child)
                     break
                 blocks.append(child)
                 h = child
             yield segment(blocks)
 
-        taught: dict[int | None, list[ExternalBlockHash]] = {}
-        for h, record in self._records.items():
-            taught.setdefault(record.group, []).append(h)
-        for group, hashes in taught.items():
-            for start in range(0, len(hashes), max_blocks_per_event):
-                yield BlockRemoved(
-                    block_hashes=hashes[start : start + max_blocks_per_event],
-                    medium=MEDIUM_GPU,
-                    group_idx=group,
-                )
+        yield from removals(h for h in self._records if h not in live_scope)
 
         # Every live scope reaches its exact count, one reference per round.
         refs: dict[tuple[str | None, int | None], list[tuple[ExternalBlockHash, int]]]
@@ -437,6 +448,8 @@ class KVCacheSnapshot:
                     )
                 round_ += 1
                 owed = [(h, count) for h, count in owed if count > round_]
+
+        yield from removals(iter(live_scope))
 
 
 class KVEventSnapshotRecorder:

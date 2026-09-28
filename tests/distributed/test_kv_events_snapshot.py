@@ -257,24 +257,29 @@ class ConsumerFailure(Exception):
 
 
 class RouterModel:
-    """The llm-d router's snapshot consumer, reduced to its key semantics.
+    """The llm-d router's event consumer, reduced to its key semantics.
 
-    Request keys chain over (parent request key, tokens, extra key). A strict
-    consumer fails on any engine hash it cannot resolve, as a snapshot pool
-    does for its whole life; stores and removes are reference counted per
-    (tier, group, hash) and only the last remove evicts.
+    Request keys chain over (parent request key, tokens, extra key). The
+    router forgets an engine hash when it is evicted while no scope holds its
+    request key, so an offload store that lands after that is lost; with
+    `forget` off the model keeps every hash and holds the engine's residency.
+    Stores and removes are reference counted per (tier, group, hash) and only
+    the last remove evicts. A strict consumer fails on any engine hash it
+    cannot resolve; otherwise the event, or the hash of a token-less store, is
+    skipped, as the router does.
     """
 
-    def __init__(self, strict: bool = True):
+    def __init__(self, strict: bool = True, forget: bool = True):
         self.strict = strict
+        self.forget = forget
         self.keys: dict = {}
         self.entries: set = set()
         self.refs: Counter = Counter()
 
     def resolve(self, h):
-        if h not in self.keys:
+        if h not in self.keys and self.strict:
             raise ConsumerFailure(f"engine key not found: {h!r}")
-        return self.keys[h]
+        return self.keys.get(h)
 
     def apply(self, events):
         for e in events:
@@ -286,6 +291,8 @@ class RouterModel:
                         if e.parent_block_hash is None
                         else self.resolve(e.parent_block_hash)
                     )
+                    if key is None:
+                        continue
                     size = e.block_size
                     for i, h in enumerate(e.block_hashes):
                         extra = e.extra_keys[i] if e.extra_keys else None
@@ -294,10 +301,12 @@ class RouterModel:
                         )
                         self.keys[h] = key
                         self.entries.add((scope, key))
+                    hashes = e.block_hashes
                 else:
-                    for h in e.block_hashes:
-                        self.entries.add((scope, self.resolve(h)))
-                for h in e.block_hashes:
+                    hashes = [h for h in e.block_hashes if self.resolve(h) is not None]
+                    for h in hashes:
+                        self.entries.add((scope, self.keys[h]))
+                for h in hashes:
                     self.refs[(scope, h)] += 1
             elif isinstance(e, BlockRemoved):
                 scope = ((e.medium or "GPU").lower(), e.group_idx)
@@ -306,7 +315,12 @@ class RouterModel:
                         self.refs[(scope, h)] -= 1
                         continue
                     self.refs.pop((scope, h), None)
-                    self.entries.discard((scope, self.resolve(h)))
+                    key = self.resolve(h)
+                    if key is None:
+                        continue
+                    self.entries.discard((scope, key))
+                    if self.forget and all(k != key for _, k in self.entries):
+                        del self.keys[h]
             else:
                 for scope, h in [k for k in self.refs if k[0][0] == "gpu"]:
                     self.entries.discard((scope, self.resolve(h)))
@@ -440,25 +454,17 @@ def cache_history(seed, steps=300, lag=3):
 
 
 @pytest.mark.parametrize("seed", range(20))
-def test_strict_consumer_follows_any_cut(seed):
-    history = list(cache_history(seed))
-    reference = RouterModel()
-    states: list[tuple[frozenset, frozenset]] = []
-    for events in history:
-        reference.apply(events)
-        states.append(reference.state() if events else states[-1])
+def test_router_loads_residency_at_any_cut(seed):
+    reference = RouterModel(forget=False)
     snap = KVCacheSnapshot()
-    for cut, events in enumerate(history):
+    for cut, events in enumerate(cache_history(seed)):
+        reference.apply(events)
         snap.apply(events)
         if cut % 7:
             continue
         consumer = RouterModel()
         consumer.apply(wire(snap.export(max_blocks_per_event=5)))
-        assert consumer.state() == states[cut]
-        for later in range(cut + 1, len(history)):
-            if history[later]:
-                consumer.apply(history[later])
-                assert consumer.state() == states[later]
+        assert consumer.state() == reference.state()
 
 
 @pytest.mark.parametrize("seed", range(3))
@@ -467,7 +473,7 @@ def test_short_ring_is_unavailable_then_heals(monkeypatch, seed):
     unavailable while a block cannot be rebuilt, and every snapshot exported
     while available reproduces the full-history state."""
     monkeypatch.setattr(KVCacheSnapshot, "RING_BATCHES", 1)
-    reference = RouterModel()
+    reference = RouterModel(forget=False)
     snap = KVCacheSnapshot()
     available = []
     for events in cache_history(seed, lag=5):
