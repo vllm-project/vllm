@@ -2371,9 +2371,9 @@ def get_node_count() -> int:
 
 def destroy_model_parallel():
     """Set the groups to none and destroy them."""
-    from vllm.v1.worker.kv_cache_runtime import shutdown_kv_cache_runtime
+    from vllm.v1.worker.kvpp_runtime import shutdown_kvpp_runtime
 
-    shutdown_kv_cache_runtime()
+    shutdown_kvpp_runtime()
     global _TP, _ETP
 
     if _ETP and _ETP is not _TP:

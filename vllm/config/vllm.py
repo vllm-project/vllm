@@ -3099,8 +3099,8 @@ class VllmConfig:
     def _get_v1_model_runner_unsupported_features(self) -> list[str]:
         unsupported: list[str] = []
 
-        if self.cache_config.kv_cache_placement == "layer_sharded":
-            unsupported.append("Layer-sharded KV cache (KVPP); use Model Runner V2")
+        if self.cache_config.enable_kvpp:
+            unsupported.append("KVPP; use Model Runner V2")
 
         # PCP runtime support is implemented only by the V2 model runner.
         if self.parallel_config.prefill_context_parallel_size > 1:

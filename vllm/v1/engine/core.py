@@ -261,12 +261,12 @@ class EngineCore:
         # Get all kv cache needed by the model
         kv_cache_specs = self.model_executor.get_kv_cache_specs()
         placements = None
-        if vllm_config.cache_config.kv_cache_placement == "layer_sharded":
+        if vllm_config.cache_config.enable_kvpp:
             placements = self.model_executor.collective_rpc("get_kv_cache_placement")
             from vllm.v1.kv_cache_placement import validate_kv_cache_placements
 
             validate_kv_cache_placements(kv_cache_specs, placements)
-            self.model_executor.collective_rpc("initialize_kv_cache_transport")
+            self.model_executor.collective_rpc("initialize_kvpp_transport")
 
         # Some layers (e.g. Prefix LM attention) run non-causally and tag their
         # KV cache spec with ``non_causal=True``. The specs are collected here in

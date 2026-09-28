@@ -169,10 +169,10 @@ from vllm.v1.worker.gpu.ubatch_utils import (
     UBatchState,
     maybe_build_ubatch_runner,
 )
-from vllm.v1.worker.kv_cache_runtime import (
-    KVCacheRuntime,
-    create_kv_cache_runtime,
-    kv_cache_forward,
+from vllm.v1.worker.kvpp_runtime import (
+    KVPPRuntime,
+    create_kvpp_runtime,
+    kvpp_forward,
 )
 from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
 from vllm.v1.worker.utils import (
@@ -215,7 +215,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # Lazily initialized in _init_kv_zero_meta() when the KV cache needs
         # zeroing (e.g. hybrid models with fp8 KV cache).
         self.kv_block_zeroer: KVBlockZeroer | None = None
-        self.kv_cache_runtime: KVCacheRuntime | None = None
+        self.kvpp_runtime: KVPPRuntime | None = None
 
         self.vocab_size = self.model_config.get_vocab_size()
         self.max_model_len = self.model_config.max_model_len
@@ -765,9 +765,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.kv_caches = [
             cache for cache in kv_caches_dict.values() if cache.device == self.device
         ]
-        self.kv_cache_runtime = create_kv_cache_runtime(
-            self.kv_cache_config, kv_caches_dict
-        )
+        self.kvpp_runtime = create_kvpp_runtime(self.kv_cache_config, kv_caches_dict)
         if is_profiling:
             self.kv_connector = NO_OP_KV_CONNECTOR
         else:
@@ -1948,10 +1946,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 is_padding=input_batch.is_padding,
             ):
                 self.kv_connector.pre_forward(**connector_kwargs)
-                with kv_cache_forward(
-                    self.kv_cache_runtime,
+                with kvpp_forward(
+                    self.kvpp_runtime,
                     bool(
-                        self.kv_cache_runtime is not None
+                        self.kvpp_runtime is not None
                         and np.any(
                             input_batch.num_computed_tokens_np[: input_batch.num_reqs]
                             > 0
@@ -2274,7 +2272,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.cudagraph_manager = None
         self.fast_prefill = None
         self.pooling_runner = None
-        self.kv_cache_runtime = None
+        self.kvpp_runtime = None
         if hasattr(self, "kv_caches"):
             self.kv_caches.clear()
         if hasattr(self, "attn_groups"):

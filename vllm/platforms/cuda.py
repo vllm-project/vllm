@@ -602,8 +602,8 @@ class CudaPlatformBase(Platform):
         )
 
     @classmethod
-    def get_kv_cache_runtime_cls(cls) -> str:
-        return "vllm.v1.worker.kv_cache_runtime.KVCacheRuntime"
+    def get_kvpp_runtime_cls(cls) -> str:
+        return "vllm.v1.worker.kvpp_runtime.KVPPRuntime"
 
     @classmethod
     def supports_fp8(cls) -> bool:

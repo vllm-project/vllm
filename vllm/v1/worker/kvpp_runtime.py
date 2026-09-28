@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Materialize layer-sharded caches before their first device access."""
+"""Materialize KVPP caches before their first device access."""
 
 from contextlib import contextmanager
 from typing import Any
@@ -19,7 +19,7 @@ _device_group: Any = None
 logger = init_logger(__name__)
 
 
-def initialize_kv_cache_transport() -> Any:
+def initialize_kvpp_transport() -> Any:
     """Initialize a separate communicator before worker memory profiling."""
     global _device_group
     if _device_group is None:
@@ -37,14 +37,14 @@ def initialize_kv_cache_transport() -> Any:
     return _device_group
 
 
-def destroy_kv_cache_transport() -> None:
+def destroy_kvpp_transport() -> None:
     global _device_group
     if _device_group is not None:
         dist.destroy_process_group(_device_group)
         _device_group = None
 
 
-class KVCacheRuntime:
+class KVPPRuntime:
     """One ordered execution context with one-layer-ahead prefetch.
 
     Tensor views are fixed at initialization. Events protect the owner's
@@ -53,11 +53,11 @@ class KVCacheRuntime:
 
     @classmethod
     def initialize_transport(cls) -> None:
-        initialize_kv_cache_transport()
+        initialize_kvpp_transport()
 
     @classmethod
     def shutdown_transport(cls) -> None:
-        destroy_kv_cache_transport()
+        destroy_kvpp_transport()
 
     def __init__(self, config: KVCacheConfig, caches: dict[str, torch.Tensor]):
         plan = config.storage_plan
@@ -68,7 +68,7 @@ class KVCacheRuntime:
             tp.world_size,
         ):
             raise ValueError("KVPP allocation and execution replica ranks differ.")
-        self.group = initialize_kv_cache_transport()
+        self.group = initialize_kvpp_transport()
         self.ranks = tp.ranks
         self.plan = plan
         descriptor = config.kv_cache_tensors[0]
@@ -111,8 +111,8 @@ class KVCacheRuntime:
         if self.running:
             raise RuntimeError("Concurrent KVPP forwards require separate scratch.")
         context = get_forward_context()
-        previous = context.kv_cache_runtime
-        context.kv_cache_runtime = self
+        previous = context.kvpp_runtime
+        context.kvpp_runtime = self
         self.running = True
         self.has_history = has_history
         self.next_index = 0
@@ -128,7 +128,7 @@ class KVCacheRuntime:
                 # Cover partially executed forwards before storage is released.
                 self.pending[2].synchronize()
                 self.pending = None
-            context.kv_cache_runtime = previous
+            context.kvpp_runtime = previous
             self.running = False
 
     def _prefetch(self, index: int) -> None:
@@ -186,30 +186,30 @@ class KVCacheRuntime:
         self.next_index = index + 1
 
 
-def get_kv_cache_runtime_cls() -> type[KVCacheRuntime]:
-    path = current_platform.get_kv_cache_runtime_cls()
+def get_kvpp_runtime_cls() -> type[KVPPRuntime]:
+    path = current_platform.get_kvpp_runtime_cls()
     if path is None:
-        raise ValueError("The device platform has no layer-sharded KV runtime.")
+        raise ValueError("The device platform has no KVPP runtime.")
     return resolve_obj_by_qualname(path)
 
 
-def create_kv_cache_runtime(
+def create_kvpp_runtime(
     config: KVCacheConfig, caches: dict[str, torch.Tensor]
-) -> KVCacheRuntime | None:
+) -> KVPPRuntime | None:
     if config.storage_plan is None:
         return None
-    return get_kv_cache_runtime_cls()(config, caches)
+    return get_kvpp_runtime_cls()(config, caches)
 
 
-def shutdown_kv_cache_runtime() -> None:
-    if current_platform.get_kv_cache_runtime_cls() is not None:
-        get_kv_cache_runtime_cls().shutdown_transport()
+def shutdown_kvpp_runtime() -> None:
+    if current_platform.get_kvpp_runtime_cls() is not None:
+        get_kvpp_runtime_cls().shutdown_transport()
 
 
 @contextmanager
-def kv_cache_forward(runtime: KVCacheRuntime | None, has_history: bool):
-    if runtime is None:
+def kvpp_forward(kvpp_runtime: KVPPRuntime | None, has_history: bool):
+    if kvpp_runtime is None:
         yield
     else:
-        with runtime.forward(has_history):
+        with kvpp_runtime.forward(has_history):
             yield

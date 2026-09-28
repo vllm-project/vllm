@@ -70,11 +70,11 @@ class CacheConfig:
 
     DEFAULT_BLOCK_SIZE: ClassVar[int] = 16
 
-    kv_cache_placement: Literal["replicated", "layer_sharded"] = "replicated"
-    """Physical placement of KV caches within a verified replica group.
+    enable_kvpp: bool = False
+    """Enable KV layer parallelism within a verified replica group.
 
     GPU KVPP requires Model Runner V2.
-    ``layer_sharded`` (KVPP) retains each target layer on one rank and
+    KVPP retains each target layer on one rank and
     materializes other layers in reusable receive buffers during execution.
     """
 

@@ -2703,8 +2703,7 @@ def get_kv_cache_configs(
         for worker_spec in kv_cache_specs
     ]
 
-    layer_sharded = vllm_config.cache_config.kv_cache_placement == "layer_sharded"
-    if layer_sharded:
+    if vllm_config.cache_config.enable_kvpp:
         from vllm.v1.kv_cache_placement import get_layer_sharded_capacity
 
         if placements is None:
@@ -2807,7 +2806,7 @@ def get_kv_cache_configs(
             vllm_config, groups, min_num_blocks * _pool_bytes_per_block(groups)
         )
 
-    if layer_sharded:
+    if vllm_config.cache_config.enable_kvpp:
         from vllm.v1.kv_cache_placement import (
             build_kv_cache_storage,
             set_layer_sharded_offload_block_size,

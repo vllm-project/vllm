@@ -108,7 +108,7 @@ class WorkerBase:
         """Layout names every attention backend supports, most preferred first."""
         backends = get_current_attn_backends(self.vllm_config)
         layouts = get_supported_kv_cache_layouts(backends)
-        if self.vllm_config.cache_config.kv_cache_placement == "layer_sharded":
+        if self.vllm_config.cache_config.enable_kvpp:
             layouts = [layout for layout in layouts if layout.is_layer_compact]
         return [layout.name for layout in layouts]
 
@@ -117,10 +117,10 @@ class WorkerBase:
 
         return get_kv_cache_placement(self.vllm_config, self.model_runner)
 
-    def initialize_kv_cache_transport(self) -> None:
-        from vllm.v1.worker.kv_cache_runtime import get_kv_cache_runtime_cls
+    def initialize_kvpp_transport(self) -> None:
+        from vllm.v1.worker.kvpp_runtime import get_kvpp_runtime_cls
 
-        get_kv_cache_runtime_cls().initialize_transport()
+        get_kvpp_runtime_cls().initialize_transport()
 
     def set_kv_cache_layout(self, kv_cache_layout: str) -> None:
         """Adopt the KV cache layout resolved by the engine core."""

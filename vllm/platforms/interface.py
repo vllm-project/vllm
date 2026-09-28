@@ -1110,8 +1110,8 @@ class Platform:
         return "vllm.distributed.device_communicators.base_device_communicator.DeviceCommunicatorBase"  # noqa
 
     @classmethod
-    def get_kv_cache_runtime_cls(cls) -> str | None:
-        """Optional layer-sharded KV execution/transport implementation."""
+    def get_kvpp_runtime_cls(cls) -> str | None:
+        """Optional KVPP execution and transport implementation."""
         return None
 
     @classmethod

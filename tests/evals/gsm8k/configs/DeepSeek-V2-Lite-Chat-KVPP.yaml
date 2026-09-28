@@ -9,7 +9,7 @@ server_args: >-
   --enforce-eager
   --max-model-len 4096
   --kv-cache-memory-bytes 536870912
-  --kv-cache-placement layer_sharded
+  --enable-kvpp
   --enable-prefix-caching
 env:
   VLLM_USE_V2_MODEL_RUNNER: "1"

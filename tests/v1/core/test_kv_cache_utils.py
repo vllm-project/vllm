@@ -161,7 +161,7 @@ def test_layer_sharded_worker_capacities_and_offload_budget_agree(mixed_page_siz
         max_model_len=32, original_max_model_len=32
     )
     vllm_config.cache_config.kv_cache_layout = "LBNHC"
-    vllm_config.cache_config.kv_cache_placement = "layer_sharded"
+    vllm_config.cache_config.enable_kvpp = True
     specs = layer_specs(config.kv_cache_groups)
     result = get_kv_cache_configs(vllm_config, [specs] * 2, budgets, placements)
     assert [c.num_blocks for c in result] == [7, 7]
@@ -177,7 +177,7 @@ def test_layer_sharded_worker_capacities_and_offload_budget_agree(mixed_page_siz
         == 4
     )
     # Placement must preserve every field produced by the common config flow.
-    vllm_config.cache_config.kv_cache_placement = "replicated"
+    vllm_config.cache_config.enable_kvpp = False
     logical_budget = 7 * sum(spec.page_size_bytes for spec in specs.values())
     ordinary = get_kv_cache_configs(vllm_config, [specs] * 2, [logical_budget] * 2)
     for sharded, replicated in zip(result, ordinary):
@@ -190,7 +190,7 @@ def test_layer_sharded_worker_capacities_and_offload_budget_agree(mixed_page_siz
             )
             == replicated
         )
-    vllm_config.cache_config.kv_cache_placement = "layer_sharded"
+    vllm_config.cache_config.enable_kvpp = True
     vllm_config.cache_config.num_gpu_blocks_override = 6
     overridden = get_kv_cache_configs(vllm_config, [specs] * 2, budgets, placements)
     assert [c.num_blocks for c in overridden] == [6, 6]
@@ -209,7 +209,7 @@ def test_layer_sharded_auto_fit_uses_common_kv_cache_flow():
         max_model_len=128, original_max_model_len=-1
     )
     vllm_config.cache_config.kv_cache_layout = "LBNHC"
-    vllm_config.cache_config.kv_cache_placement = "layer_sharded"
+    vllm_config.cache_config.enable_kvpp = True
     placements = [placement, peer]
     budgets = [
         build_kv_cache_storage(

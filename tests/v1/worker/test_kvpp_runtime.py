@@ -26,7 +26,7 @@ from vllm.v1.kv_cache_placement import (
     KVCachePlacement,
     build_kv_cache_storage,
 )
-from vllm.v1.worker.kv_cache_runtime import KVCacheRuntime
+from vllm.v1.worker.kvpp_runtime import KVPPRuntime
 from vllm.v1.worker.utils import allocate_kv_cache
 
 
@@ -82,16 +82,16 @@ def _runtime_worker(rank: int, port: int, world_size: int):
         caches = allocate_kv_cache(
             config, torch.device("cuda", rank), KVCacheLayout.LBNHC
         )
-        runtime = KVCacheRuntime(config, caches)
+        kvpp_runtime = KVPPRuntime(config, caches)
         caches["draft"].fill_(111 + rank)
         observations = []
         for step in range(5):
-            with set_forward_context(None, vllm_config), runtime.forward(step > 0):
+            with set_forward_context(None, vllm_config), kvpp_runtime.forward(step > 0):
                 for index, bundle in enumerate(placement.bundles[:-1]):
                     # Delay compute to expose premature scratch reuse.
-                    runtime.acquire(bundle.layers[1])
+                    kvpp_runtime.acquire(bundle.layers[1])
                     torch.cuda._sleep(100_000)
-                    runtime.acquire(bundle.layers[0])
+                    kvpp_runtime.acquire(bundle.layers[0])
                     for component, name in enumerate(bundle.layers):
                         if step:
                             observations.append(
@@ -101,7 +101,7 @@ def _runtime_worker(rank: int, port: int, world_size: int):
                                 )
                             )
                         caches[name].fill_(10 * index + component + step)
-                    runtime.release(bundle.layers[0])
+                    kvpp_runtime.release(bundle.layers[0])
             # Do not synchronize between steps: next-step broadcasts must also
             # wait for the previous owner's writes and receiver scratch use.
         torch.cuda.synchronize()

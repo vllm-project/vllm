@@ -8,10 +8,11 @@ scheduler reference counts retain their existing meanings.
 
 ## Enablement and limits
 
-Use `--kv-cache-placement layer_sharded --enforce-eager` with TP >= 2 and Model
-Runner V2 (`VLLM_USE_V2_MODEL_RUNNER=1`). The default `replicated` placement is
-unchanged. KVPP on GPU rejects Model Runner V1. This implementation supports
-NVIDIA CUDA and NCCL broadcast; it does not expose a transport selector.
+Use `--enable-kvpp --enforce-eager` with TP >= 2 and Model Runner V2
+(`VLLM_USE_V2_MODEL_RUNNER=1`). KVPP is disabled by default
+(`CacheConfig.enable_kvpp=False`). KVPP on GPU rejects Model Runner V1. This
+implementation supports NVIDIA CUDA and NCCL broadcast; it does not expose a
+transport selector.
 
 The first version requires replicated full-attention MLA caches, a common block
 size, a layer-compact layout, and at least one owned bundle per TP rank. A cache
@@ -71,8 +72,8 @@ receiver scratch destination therefore remain valid until NCCL finishes. The
 runtime checks ordered bundle access and rejects concurrent forwards sharing the
 same scratch arena.
 
-The CUDA runtime is selected through `Platform.get_kv_cache_runtime_cls()` and
-scoped to `ForwardContext`. This lets a future device implementation supply its
+`KVPPRuntime` is selected through `Platform.get_kvpp_runtime_cls()` and scoped to
+`ForwardContext.kvpp_runtime`. This lets a future device implementation supply its
 own communicator and events while keeping logical scheduler state and model
 bundle declarations independent of the transport.
 

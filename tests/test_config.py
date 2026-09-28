@@ -1250,16 +1250,16 @@ def test_models_default_to_v2_model_runner(model_config, expected, monkeypatch):
 
 
 @pytest.mark.parametrize(
-    "pcp_size,placement,error",
+    "pcp_size,enable_kvpp,error",
     [
-        (2, "replicated", "prefill context parallel"),
-        (1, "layer_sharded", "Layer-sharded KV cache"),
-        (1, "replicated", None),
+        (2, False, "prefill context parallel"),
+        (1, True, "KVPP"),
+        (1, False, None),
     ],
 )
-def test_v1_model_runner_rejects_v2_only_features(pcp_size, placement, error):
+def test_v1_model_runner_rejects_v2_only_features(pcp_size, enable_kvpp, error):
     config = SimpleNamespace(
-        cache_config=CacheConfig(kv_cache_placement=placement),
+        cache_config=CacheConfig(enable_kvpp=enable_kvpp),
         parallel_config=ParallelConfig(
             prefill_context_parallel_size=pcp_size,
             distributed_executor_backend="mp",
