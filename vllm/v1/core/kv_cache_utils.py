@@ -2058,11 +2058,21 @@ def get_kv_cache_groups(
     }
 
     if packed_groups := _get_packed_kv_cache_groups(vllm_config, filtered_spec):
-        # Block-outermost blocks are strided by the widest group, so hidden
-        # groups need no page alignment.
-        packed_groups += [
-            KVCacheGroupSpec([name], spec) for name, spec in hidden_specs.items()
-        ]
+        # Hidden states are unsharded and can dwarf the native packed pages.
+        # Fit them within the native block stride while preserving divisibility
+        # for prefix-cache hashing. A single token is the minimum page size.
+        if hidden_specs:
+            native_page = _get_kv_cache_bytes_per_block(packed_groups)
+            for name, spec in hidden_specs.items():
+                per_token = (
+                    spec.num_kv_heads * spec.head_size * get_dtype_size(spec.dtype)
+                )
+                block_size = _largest_divisor_at_most(
+                    spec.block_size, max(native_page // per_token, 1)
+                )
+                packed_groups.append(
+                    KVCacheGroupSpec([name], replace(spec, block_size=block_size))
+                )
         return packed_groups
 
     # Prefer preserving each layer's cache semantics. If physical pages cannot

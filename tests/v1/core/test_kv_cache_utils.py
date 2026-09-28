@@ -78,6 +78,7 @@ from vllm.v1.kv_cache_interface import (
     SlidingWindowSpec,
     SparseCacheRole,
     UniformTypeKVCacheSpecs,
+    create_kv_cache_views,
     get_kv_cache_spec_kind,
     get_kv_cache_spec_sliding_window,
     is_full_attention_spec,
@@ -2461,10 +2462,12 @@ def test_generate_scheduler_kv_cache_config():
     )
 
 
-def test_packed_groups_glm5_like_hybrid():
+@pytest.mark.parametrize("hidden_states", [False, True])
+@pytest.mark.parametrize("block_size", [1024, 1152])
+def test_packed_groups_glm5_like_hybrid(hidden_states, block_size):
     vllm_config = VllmConfig(model_config=ModelConfig(max_model_len=8192))
     vllm_config.cache_config.kv_cache_layout = "BLHNC"
-    kpool, block_size = 4, 1024
+    kpool = 4
     kv_cache_spec: dict[str, KVCacheSpec] = {}
     for i in range(11):
         kv_cache_spec[f"layers.{i}.attn"] = MLAAttentionSpec(
@@ -2496,7 +2499,22 @@ def test_packed_groups_glm5_like_hybrid():
             block_size=block_size,
         )
 
+    native_groups = kv_cache_utils.get_kv_cache_groups(vllm_config, kv_cache_spec)
+    native_stride = kv_cache_utils._get_kv_cache_bytes_per_block(native_groups)
+    if hidden_states:
+        kv_cache_spec["cache_only_layers.45"] = HiddenStateCacheSpec(
+            block_size=block_size,
+            num_kv_heads=6,
+            head_size=5120,
+            dtype=torch.bfloat16,
+        )
     groups = kv_cache_utils.get_kv_cache_groups(vllm_config, kv_cache_spec)
+    if hidden_states:
+        hidden = groups[-1].kv_cache_spec
+        assert isinstance(hidden, HiddenStateCacheSpec)
+        assert 1 <= hidden.block_size < block_size
+        assert block_size % hidden.block_size == 0
+        assert hidden.page_size_bytes <= native_stride
     attn = [
         g
         for g in groups
@@ -2528,10 +2546,24 @@ def test_packed_groups_glm5_like_hybrid():
     strides = {t.block_stride for t in kv_cache_config.kv_cache_tensors}
     assert len(strides) == 1
     (block_stride,) = strides
+    assert block_stride == native_stride
     # Blocks sit a whole number of 32-row MLA pages and 64-state indexer pages
     # apart so both caches can be re-paged for their kernels.
     assert block_stride % (32 * 576 * 2) == 0
     assert block_stride % (64 * 132) == 0
+    if hidden_states:
+        tensor = next(
+            t
+            for t in kv_cache_config.kv_cache_tensors
+            if "cache_only_layers.45" in t.layers
+        )
+        # Groups share a pool, but own distinct block IDs. Writing the hidden
+        # page in block 1 must preserve the native pages in blocks 0 and 2.
+        raw = torch.full((3 * block_stride,), 42, dtype=torch.int8)
+        (view,) = create_kv_cache_views(raw, hidden, 3, KVCacheLayout.BLHNC, tensor)
+        view[1].zero_()
+        assert (raw[:block_stride] == 42).all()
+        assert (raw[2 * block_stride :] == 42).all()
 
 
 def test_get_kv_cache_capacity_after_scheduler_unwrap():

@@ -28,6 +28,7 @@ def get_and_check_output(output, expected_shape):
     assert torch.equal(token_ids, torch.tensor(prompt_token_ids))
 
     assert hidden_states.shape == expected_shape
+    assert torch.isfinite(hidden_states).all()
 
     # Verify hidden_states are not all zeros (i.e., they were actually computed)
     assert not torch.allclose(hidden_states, torch.zeros_like(hidden_states))
@@ -248,11 +249,11 @@ def test_extract_hidden_states_with_predictable_dummy_model(
     example_hidden_states_connector.cleanup_hidden_states(custom_path)
 
 
+@pytest.mark.parametrize("layout", ["LBNHC", "BLHNC"])
 @create_new_process_for_each_test()
-def test_extract_hidden_states_qwen35_hybrid_smoke(tmp_path):
-    """Smoke test for Qwen3.5 hybrid (mamba + full-attention) models.
-    Uses load_format="dummy" to just check shape/plumbing.
-    """
+def test_extract_hidden_states_qwen35_hybrid_smoke(tmp_path, monkeypatch, layout):
+    """Mixed-length concurrent extraction must match serial runs on one engine."""
+    monkeypatch.setenv("VLLM_KV_CACHE_LAYOUT", layout)
     layer_ids = [5, 11, 17]
     hidden_size = 1024  # Qwen/Qwen3.5-0.8B hidden_size
 
@@ -270,32 +271,107 @@ def test_extract_hidden_states_qwen35_hybrid_smoke(tmp_path):
             "kv_role": "kv_producer",
             "kv_connector_extra_config": {"shared_storage_path": str(tmp_path)},
         },
-        max_model_len=256,
+        max_model_len=512,
+        max_num_batched_tokens=128,
+        enable_prefix_caching=False,
         enforce_eager=True,
-        gpu_memory_utilization=0.4,
+        max_num_seqs=4,
+        kv_cache_memory_bytes=512 * 1024**2,
+        limit_mm_per_prompt={"image": 0, "video": 0},
         load_format="dummy",
     )
 
-    prompts = ["Hello world", "Test prompt with several tokens"]
+    prompts = ["Hello world", "Test prompt with several tokens", "word " * 300]
+    _check_concurrent_extraction(llm, prompts, len(layer_ids), hidden_size)
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda() or not current_platform.has_device_capability(90),
+    reason="GLM sparse MLA test requires SM90 or newer CUDA",
+)
+@pytest.mark.parametrize("use_v2", [False, True])
+@create_new_process_for_each_test()
+def test_extract_hidden_states_glm5next_packed(tmp_path, monkeypatch, use_v2):
+    """Exercise MLA, pooled indexer, circular tails, KDA, and mHC together."""
+    from vllm.transformers_utils.configs.glm5_next import Glm5NextTextConfig
+
+    monkeypatch.setenv("VLLM_KV_CACHE_LAYOUT", "BLHNC")
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", str(int(use_v2)))
+    config = Glm5NextTextConfig(
+        architectures=["Glm5NextForCausalLM"],
+        vocab_size=256,
+        pad_token_id=0,
+        hidden_size=512,
+        intermediate_size=1024,
+        num_hidden_layers=4,
+        num_attention_heads=16,
+        q_lora_rank=128,
+        linear_num_heads=4,
+        n_routed_experts=None,
+        first_k_dense_replace=4,
+        layer_types=["linear_attention"] * 3 + ["deepseek_sparse_attention"],
+        index_head_dim=128,
+        index_n_heads=16,
+        index_topk=128,
+        max_position_embeddings=2048,
+    )
+    config.save_pretrained(tmp_path)
+    layer_ids = [0, 1, 3]
+    llm = LLM(
+        model=str(tmp_path),
+        skip_tokenizer_init=True,
+        dtype="bfloat16",
+        load_format="dummy",
+        enforce_eager=True,
+        enable_prefix_caching=False,
+        block_size=128,
+        max_model_len=1536,
+        max_num_batched_tokens=128,
+        max_num_seqs=4,
+        kv_cache_memory_bytes=64 * 1024**2,
+        speculative_config={
+            "method": "extract_hidden_states",
+            "num_speculative_tokens": 1,
+            "draft_model_config": {
+                "hf_config": {"eagle_aux_hidden_state_layer_ids": layer_ids}
+            },
+        },
+        kv_transfer_config={
+            "kv_connector": "ExampleHiddenStatesConnector",
+            "kv_role": "kv_producer",
+            "kv_connector_extra_config": {
+                "shared_storage_path": str(tmp_path / "hidden_states")
+            },
+        },
+    )
+    prompts = [
+        {
+            "prompt_token_ids": [
+                ((i + request_idx * 31) % 255) + 1 for i in range(length)
+            ]
+        }
+        for request_idx, length in enumerate((7, 257, 1201))
+    ]
+    _check_concurrent_extraction(llm, prompts, len(layer_ids), config.hidden_size)
+
+
+def _check_concurrent_extraction(llm, prompts, num_layers, hidden_size):
     sampling_params = SamplingParams(max_tokens=1, temperature=0.0)
+    references = []
+    for prompt in prompts:
+        (output,) = llm.generate([prompt], sampling_params)
+        _, hidden_states = get_and_check_output(
+            output, (len(output.prompt_token_ids), num_layers, hidden_size)
+        )
+        references.append(hidden_states)
     outputs = llm.generate(prompts, sampling_params)
 
     assert len(outputs) == len(prompts)
-    for output in outputs:
-        assert output.kv_transfer_params is not None
-        hidden_states_path = output.kv_transfer_params.get("hidden_states_path")
-        assert hidden_states_path is not None
-
-        obj = example_hidden_states_connector.load_hidden_states(hidden_states_path)
-        token_ids = obj["token_ids"]
-        hidden_states = obj["hidden_states"]
-
-        assert torch.equal(token_ids, torch.tensor(output.prompt_token_ids))
-        assert hidden_states.shape == (
-            len(output.prompt_token_ids),
-            len(layer_ids),
-            hidden_size,
+    for output, reference in zip(outputs, references):
+        _, hidden_states = get_and_check_output(
+            output, (len(output.prompt_token_ids), num_layers, hidden_size)
         )
+        torch.testing.assert_close(hidden_states, reference, atol=1e-5, rtol=1e-2)
 
 
 @pytest.mark.timeout(
