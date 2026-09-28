@@ -60,8 +60,41 @@ class TestGetMLAPrefillBackend:
 
     def test_cpu_uses_sdpa_prefill(self):
         vllm_config = _make_vllm_config()
+        zen_cls = MLAPrefillBackendEnum.ZEN_CPU.get_class()
+
+        # A Zen CPU with zentorch selects the Zen backend, so expect whichever
+        # one this host offers.
+        expected = (
+            zen_cls if zen_cls.is_available() else MLAPrefillBackendEnum.CPU.get_class()
+        )
 
         with patch("vllm.platforms.current_platform") as mock_platform:
+            mock_platform.is_cpu.return_value = True
+
+            backend = get_mla_prefill_backend(vllm_config)
+            assert backend is expected
+
+    def test_zen_cpu_prefers_zentorch_prefill(self):
+        vllm_config = _make_vllm_config()
+        zen_cls = MLAPrefillBackendEnum.ZEN_CPU.get_class()
+
+        with (
+            patch("vllm.platforms.current_platform") as mock_platform,
+            patch.object(zen_cls, "is_available", return_value=True),
+        ):
+            mock_platform.is_cpu.return_value = True
+
+            backend = get_mla_prefill_backend(vllm_config)
+            assert backend is zen_cls
+
+    def test_zen_cpu_falls_back_when_zentorch_unavailable(self):
+        vllm_config = _make_vllm_config()
+        zen_cls = MLAPrefillBackendEnum.ZEN_CPU.get_class()
+
+        with (
+            patch("vllm.platforms.current_platform") as mock_platform,
+            patch.object(zen_cls, "is_available", return_value=False),
+        ):
             mock_platform.is_cpu.return_value = True
 
             backend = get_mla_prefill_backend(vllm_config)
@@ -312,6 +345,40 @@ class TestBackendValidation:
                 selector_config_glm5,
             )
             assert invalid_reasons == []
+
+    def test_flash_attn_accepts_glm53_flash_nope_dimensions(self):
+        """(256, 0, 256) runs the same FA kernels as GLM-5's (192, 64, 256); a
+        RoPE-carrying 320-wide query does not."""
+        try:
+            from vllm.v1.attention.backends.mla.prefill.flash_attn import (
+                FlashAttnPrefillBackend,
+            )
+        except ImportError:
+            pytest.skip("MLA prefill backend not available")
+            return
+
+        capability = DeviceCapability(major=10, minor=0)
+
+        def validate(qk_rope_head_dim: int) -> list[str]:
+            selector_config = MLAPrefillSelectorConfig(
+                dtype=torch.bfloat16,
+                mla_dimensions=MLADimensions(
+                    qk_nope_head_dim=256,
+                    qk_rope_head_dim=qk_rope_head_dim,
+                    v_head_dim=256,
+                ),
+            )
+            with patch.object(
+                FlashAttnPrefillBackend, "is_available", return_value=True
+            ):
+                return FlashAttnPrefillBackend.validate_configuration(
+                    capability, selector_config
+                )
+
+        assert validate(qk_rope_head_dim=0) == []
+        invalid_reasons = validate(qk_rope_head_dim=64)
+        assert len(invalid_reasons) == 1
+        assert "supported MLA dimensions" in invalid_reasons[0]
 
 
 @pytest.mark.skipif(

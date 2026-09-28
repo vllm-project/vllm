@@ -113,8 +113,7 @@ class SparseNCCLWeightTransferUpdateInfo(WeightTransferUpdateInfo):
 class SparseNCCLWeightTransferEngine(
     WeightTransferEngine[NCCLWeightTransferInitInfo, SparseNCCLWeightTransferUpdateInfo]
 ):
-    """
-    Sparse weight transfer engine using NCCL.
+    """Sparse weight transfer engine using NCCL.
 
     Receives checkpoint-coordinate patches broadcast from the trainer and applies
     them through the model's native weight loader. Sparse updates modify initialized

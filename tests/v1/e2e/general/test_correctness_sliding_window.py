@@ -35,8 +35,7 @@ model_config = {
 def test_sliding_window_retrieval(
     model, batch_size, seed, disable_hybrid_kv_cache_manager, vllm_runner
 ):
-    """
-    The test does a bunch of assignments "x1 = 10\nx2 = 33\n..." and then
+    """The test does a bunch of assignments "x1 = 10\nx2 = 33\n..." and then
     asks for value of one of them (which is outside the sliding window).
     If we tell it upfront which we are going to be looking for, then
     it answers correctly (mostly).
@@ -112,14 +111,14 @@ def test_hybrid_kv_cache_manager_output_equivalence(model, vllm_runner):
 
 
 def check_length(prompts: list[str], llm: LLM, sliding_window: int):
-    """
-    Check if the prompt length is valid, i.e., longer than the sliding window
+    """Check if the prompt length is valid, i.e., longer than the sliding window
     size and shorter than the model's max length.
 
     Args:
         prompts: list of prompts
         llm: LLM object
         sliding_window: Sliding window size
+
     """
     tokenizer = llm.get_tokenizer()
     max_model_len = llm.llm_engine.model_config.max_model_len

@@ -41,7 +41,7 @@ from vllm.model_executor.models.utils import (
 from vllm.sequence import IntermediateTensors
 
 from .bert_with_rope import BertWithRope, JinaRobertaModel
-from .interfaces import SupportsCrossEncoding
+from .interfaces import SupportsCrossEncoding, SupportsLoRA
 from .interfaces_base import attn_type, default_pooling_type
 
 
@@ -139,11 +139,14 @@ class RobertaEmbeddingModel(BertEmbeddingModel):
         self, vllm_config: VllmConfig, prefix: str = ""
     ) -> BertModel | BertWithRope:
         hf_config = vllm_config.model_config.hf_config
-        kwargs = dict(vllm_config=vllm_config, prefix=prefix)
         if getattr(hf_config, "position_embedding_type", "absolute") == "absolute":
-            return BertModel(**kwargs, embedding_class=RobertaEmbedding)
+            return BertModel(
+                vllm_config=vllm_config,
+                prefix=prefix,
+                embedding_class=RobertaEmbedding,
+            )
         else:
-            return JinaRobertaModel(**kwargs)
+            return JinaRobertaModel(vllm_config=vllm_config, prefix=prefix)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
         weights_list = list(weights)
@@ -263,7 +266,7 @@ class BgeM3EmbeddingModel(RobertaEmbeddingModel):
 
 
 @default_pooling_type(seq_pooling_type="CLS")
-class RobertaForSequenceClassification(nn.Module, SupportsCrossEncoding):
+class RobertaForSequenceClassification(nn.Module, SupportsCrossEncoding, SupportsLoRA):
     """A model that uses Roberta to provide embedding functionalities.
 
     This class encapsulates the BertModel and provides an interface for
@@ -272,9 +275,11 @@ class RobertaForSequenceClassification(nn.Module, SupportsCrossEncoding):
     Attributes:
         roberta: An instance of BertModel used for forward operations.
         _pooler: An instance of Pooler used for pooling operations.
+
     """
 
     is_pooling_model = True
+    packed_modules_mapping = {"qkv_proj": ["query", "key", "value"]}
     jina_to_vllm_mapper = WeightsMapper(
         orig_to_new_substr={
             "emb_ln": "embeddings.LayerNorm",
@@ -291,7 +296,8 @@ class RobertaForSequenceClassification(nn.Module, SupportsCrossEncoding):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         config = vllm_config.model_config.hf_config
-        self.padding_idx: int = vllm_config.model_config.hf_config.pad_token_id
+        self.config = config
+        self.padding_idx: int = config.pad_token_id
 
         self.num_labels = config.num_labels
         self.roberta = BertModel(
