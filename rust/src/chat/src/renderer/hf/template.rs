@@ -8,12 +8,15 @@
 //! - special tokens are wired to `vllm_text::backends::hf::HfSpecialTokens`
 
 use std::collections::HashMap;
+use std::error::Error as _;
 use std::fs;
+use std::iter;
 use std::path::Path;
 
-use minijinja::Environment;
+use minijinja::{Environment, Error as MinijinjaError, ErrorKind, Value};
 use serde::{Deserialize, Serialize};
 use serde_json::{self};
+use thiserror::Error as ThisError;
 use vllm_text::backend::hf::HfSpecialTokens;
 
 use super::error::TemplateError;
@@ -38,8 +41,33 @@ fn build_environment(template: String) -> Result<Environment<'static>> {
     env.set_unknown_method_callback(minijinja_contrib::pycompat::unknown_method_callback);
     env.add_filter("tojson", hf_tojson_filter);
     env.add_function("__hf_generation", render_generation);
+    env.add_function("raise_exception", raise_exception);
 
     Ok(env)
+}
+
+/// Error source attached by [`raise_exception`], so that a template rejecting
+/// its input can be told apart from a template that fails to render.
+#[derive(Debug, ThisError)]
+#[error("{message}")]
+struct RaisedTemplateException {
+    message: String,
+}
+
+/// Abort rendering with the template's own message.
+fn raise_exception(message: Value) -> std::result::Result<Value, MinijinjaError> {
+    let message = message.to_string();
+    Err(
+        MinijinjaError::new(ErrorKind::InvalidOperation, message.clone())
+            .with_source(RaisedTemplateException { message }),
+    )
+}
+
+/// Return the template's message if `error` came from [`raise_exception`].
+fn raised_exception_message(error: &MinijinjaError) -> Option<String> {
+    iter::successors(error.source(), |&error| error.source())
+        .find_map(|error| error.downcast_ref::<RaisedTemplateException>())
+        .map(|raised| raised.message.clone())
 }
 
 #[serde_with::skip_serializing_none]
@@ -126,7 +154,10 @@ impl CompiledChatTemplate {
     /// prompt.
     pub fn apply(&self, ctx: TemplateContext<'_>) -> Result<String> {
         let tmpl = self.env.get_template("chat")?;
-        tmpl.render(ctx).map_err(TemplateError::from)
+        tmpl.render(ctx).map_err(|error| match raised_exception_message(&error) {
+            Some(message) => TemplateError::Raised { message },
+            None => TemplateError::from(error),
+        })
     }
 
     pub fn content_format(&self) -> ChatTemplateContentFormat {
@@ -186,6 +217,57 @@ mod tests {
         assert!(
             err.contains("failed to render jinja template"),
             "Error should explain parse failure, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_raise_exception_returns_template_message() {
+        let template = CompiledChatTemplate::new(
+            "{{- raise_exception('Unexpected reasoning effort ' ~ reasoning_effort ~ '.') }}"
+                .to_string(),
+            ChatTemplateContentFormatOption::Auto,
+        )
+        .unwrap();
+        let mut kwargs = HashMap::new();
+        kwargs.insert("reasoning_effort".to_string(), serde_json::json!("high"));
+
+        let error = template
+            .apply(TemplateContext {
+                template_kwargs: Some(&kwargs),
+                ..Default::default()
+            })
+            .unwrap_err();
+
+        assert!(
+            matches!(&error, TemplateError::Raised { message } if message == "Unexpected reasoning effort high."),
+            "expected a raised template exception, got: {error:?}"
+        );
+    }
+
+    #[test]
+    fn test_raise_exception_in_untaken_branch_renders() {
+        let template = CompiledChatTemplate::new(
+            "{% if messages %}{{ raise_exception('unreachable') }}{% endif %}ok".to_string(),
+            ChatTemplateContentFormatOption::Auto,
+        )
+        .unwrap();
+
+        assert_eq!(template.apply(TemplateContext::default()).unwrap(), "ok");
+    }
+
+    #[test]
+    fn test_unknown_function_is_not_reported_as_raised() {
+        let template = CompiledChatTemplate::new(
+            "{{ undefined_helper('not registered') }}".to_string(),
+            ChatTemplateContentFormatOption::Auto,
+        )
+        .unwrap();
+
+        let error = template.apply(TemplateContext::default()).unwrap_err();
+
+        assert!(
+            matches!(error, TemplateError::Jinja(_)),
+            "expected a jinja render error, got: {error:?}"
         );
     }
 
