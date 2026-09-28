@@ -1588,6 +1588,7 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
 
     def get_core_engine_for_request(self, request: EngineCoreRequest) -> EngineIdentity:
         if (engine := self.reqs_in_flight.get(request.request_id)) is not None:
+            # This is for streaming-input session affinity.
             return engine
 
         # Engines are in rank order.
