@@ -1056,6 +1056,167 @@ def _tc(*, args, id=None, name=None):
     )
 
 
+class TestStreamingUsageInterval:
+    @pytest.mark.parametrize("block_type", ["text", "thinking", "tool_use"])
+    @pytest.mark.parametrize(
+        "env_interval, request_interval, expected",
+        [
+            (None, None, []),
+            ("2", None, [4, 8]),
+            ("1", 2, [4, 8]),
+            ("2", 0, []),
+            ("0", 1, [2, 4, 6, 8]),
+            ("0", 3, [6]),
+            ("0", 10, []),
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_usage_cadence_preserves_content_and_final_usage(
+        self, monkeypatch, block_type, env_interval, request_interval, expected
+    ):
+        """Usage updates preserve content and final totals for every block type."""
+        env_name = "VLLM_ANTHROPIC_USAGE_STREAM_INTERVAL"
+        if env_interval is None:
+            monkeypatch.delenv(env_name, raising=False)
+        else:
+            monkeypatch.setenv(env_name, env_interval)
+        kwargs = {}
+        if request_interval is not None:
+            kwargs["usage_stream_interval"] = request_interval
+        request = _make_request(
+            [{"role": "user", "content": "Hello"}], stream=True, **kwargs
+        )
+        stop_reason = "tool_use" if block_type == "tool_use" else "end_turn"
+
+        async def sse_input():
+            yield _make_stream_chunk(
+                delta=DeltaMessage(role="assistant"),
+                usage=UsageInfo(prompt_tokens=10, completion_tokens=0, total_tokens=10),
+            )
+            for i, args in enumerate(["{", '"x"', ":1", "}"]):
+                if block_type == "tool_use":
+                    delta = DeltaMessage(
+                        tool_calls=[
+                            _tc(args=args, id="call_1", name="test")
+                            if i == 0
+                            else _tc(args=args)
+                        ]
+                    )
+                elif block_type == "thinking":
+                    delta = DeltaMessage(reasoning="a")
+                else:
+                    delta = DeltaMessage(content="a")
+                yield _make_stream_chunk(
+                    delta=delta,
+                    usage=UsageInfo(
+                        prompt_tokens=10,
+                        completion_tokens=2 * (i + 1),
+                        total_tokens=10 + 2 * (i + 1),
+                    ),
+                )
+            yield _make_stream_chunk(
+                finish_reason="tool_calls" if block_type == "tool_use" else "stop",
+                usage=UsageInfo(
+                    prompt_tokens=10, completion_tokens=10, total_tokens=20
+                ),
+            )
+            yield _make_stream_chunk(
+                choices=[],
+                usage=UsageInfo(
+                    prompt_tokens=10,
+                    completion_tokens=10,
+                    total_tokens=20,
+                    prompt_tokens_details=PromptTokenUsageInfo(cached_tokens=4),
+                ),
+            )
+            yield "data: [DONE]"
+
+        converter = _make_stream_converter()
+        converter._merge_inline_system = False
+        converter.to_chat_completion_request = _convert
+        converter.create_chat_completion = AsyncMock(return_value=sse_input())
+        result = await AnthropicServingMessages.create_messages(converter, request)
+        output = [event async for event in result]
+        events = _parse_sse_events(output)
+        updates = [data for event, data in events if event == "message_delta"]
+        assert [data["usage"]["output_tokens"] for data in updates] == expected + [10]
+        for update in updates[:-1]:
+            assert update["delta"] == {"stop_reason": None, "stop_sequence": None}
+            assert set(update["usage"]) == {"output_tokens"}
+        assert [event for event, _ in events][-3:] == [
+            "content_block_stop",
+            "message_delta",
+            "message_stop",
+        ]
+        for event, data in events:
+            if event.startswith("content_block_"):
+                assert "usage" not in data
+
+        assert updates[-1]["delta"]["stop_reason"] == stop_reason
+        assert updates[-1]["usage"]["input_tokens"] == 6
+        assert updates[-1]["usage"]["cache_read_input_tokens"] == 4
+        block_types = [
+            data["content_block"]["type"]
+            for event, data in events
+            if event == "content_block_start"
+        ]
+        assert block_types == [block_type]
+        content_field = "partial_json" if block_type == "tool_use" else block_type
+        content = "".join(
+            data["delta"][content_field]
+            for event, data in events
+            if event == "content_block_delta"
+            and data["delta"]["type"] != "signature_delta"
+        )
+        if block_type == "tool_use":
+            assert json.loads(content) == {"x": 1}
+        else:
+            assert content == "aaaa"
+
+    @pytest.mark.parametrize("from_env", [False, True])
+    def test_negative_interval_is_rejected(self, monkeypatch, from_env):
+        kwargs = {}
+        if from_env:
+            monkeypatch.setenv("VLLM_ANTHROPIC_USAGE_STREAM_INTERVAL", "-1")
+        else:
+            kwargs["usage_stream_interval"] = -1
+        with pytest.raises(ValidationError, match="usage_stream_interval"):
+            _make_request([{"role": "user", "content": "Hello"}], **kwargs)
+
+    @pytest.mark.asyncio
+    async def test_unknown_usage_is_not_reported_as_zero(self):
+        async def sse_input():
+            yield _make_stream_chunk(delta=DeltaMessage(role="assistant"))
+            for usage in [
+                None,
+                UsageInfo(prompt_tokens=10, completion_tokens=None, total_tokens=10),
+                UsageInfo(prompt_tokens=10, completion_tokens=6, total_tokens=16),
+            ]:
+                yield _make_stream_chunk(delta=DeltaMessage(content="a"), usage=usage)
+            yield _make_stream_chunk(finish_reason="stop")
+            yield _make_stream_chunk(
+                choices=[],
+                usage=UsageInfo(prompt_tokens=10, completion_tokens=6, total_tokens=16),
+            )
+            yield "data: [DONE]"
+
+        converter = _make_stream_converter()
+        output = [
+            event
+            async for event in converter.message_stream_converter(
+                sse_input(), usage_stream_interval=2
+            )
+        ]
+        updates = [
+            data
+            for event, data in _parse_sse_events(output)
+            if event == "message_delta"
+        ]
+        assert [data["usage"]["output_tokens"] for data in updates] == [6, 6]
+        assert updates[0]["delta"]["stop_reason"] is None
+        assert updates[1]["delta"]["stop_reason"] == "end_turn"
+
+
 class TestMessageStreamConverterToolUseContentBuffering:
     """Regression test for tool_use arguments being silently dropped.
 

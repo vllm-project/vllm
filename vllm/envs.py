@@ -27,6 +27,7 @@ if TYPE_CHECKING:
     VLLM_ENGINE_READY_TIMEOUT_S: int = 600
     VLLM_API_KEY: str | None = None
     VLLM_DEBUG_LOG_API_SERVER_RESPONSE: bool = False
+    VLLM_ANTHROPIC_USAGE_STREAM_INTERVAL: int = 0
     S3_ACCESS_KEY_ID: str | None = None
     S3_SECRET_ACCESS_KEY: str | None = None
     S3_ENDPOINT_URL: str | None = None
@@ -737,6 +738,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Interval in seconds to log a warning message when the ring buffer is full
     "VLLM_RINGBUFFER_WARNING_INTERVAL": lambda: int(
         os.environ.get("VLLM_RINGBUFFER_WARNING_INTERVAL", "60")
+    ),
+    # Emit Anthropic usage updates every N backend chunks. Zero disables them.
+    "VLLM_ANTHROPIC_USAGE_STREAM_INTERVAL": lambda: int(
+        os.getenv("VLLM_ANTHROPIC_USAGE_STREAM_INTERVAL", "0")
     ),
     # path to cudatoolkit home directory, under which should be bin, include,
     # and lib directories.
@@ -2317,6 +2322,7 @@ def compile_factors() -> dict[str, object]:
         # Credential; never affects compiled artifacts and must not be
         # persisted in cache_key_factors.json.
         "VLLM_API_KEY",
+        "VLLM_ANTHROPIC_USAGE_STREAM_INTERVAL",
         "VLLM_USAGE_STATS_SERVER",
         "VLLM_NO_USAGE_STATS",
         "VLLM_DO_NOT_TRACK",

@@ -26,6 +26,7 @@ We currently support the following OpenAI APIs:
 ## Anthropic APIs
 
 - Anthropic messages API (`/v1/messages`, `/v1/messages/count_tokens`)
+    - Set `VLLM_ANTHROPIC_USAGE_STREAM_INTERVAL` to control the interval for streaming usage updates on the `/v1/messages` endpoint
 
 ## Cohere APIs
 
