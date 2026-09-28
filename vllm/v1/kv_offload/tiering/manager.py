@@ -48,6 +48,7 @@ from vllm.v1.kv_offload.cpu.common import CPULoadStoreSpec
 from vllm.v1.kv_offload.cpu.manager import CPUOffloadingManager
 from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
 from vllm.v1.kv_offload.tiering.base import (
+    TIER_LABEL,
     JobId,
     JobResult,
     ParentManager,
@@ -1000,12 +1001,12 @@ class TieringOffloadingManager(OffloadingManager):
         """
         (primary_info,) = self.primary_tier.config_info()
         primary_tier_info = dict(primary_info)
-        primary_tier_info["tier"] = self._metrics.primary_tier_label[0]
+        primary_tier_info[TIER_LABEL] = self._metrics.primary_tier_label[0]
         tier_infos = [primary_tier_info]
 
         for tier in self.secondary_tiers:
             tier_info = dict(tier.config_info())
-            tier_info["tier"] = self._metrics.tier_label(self._tier_index[tier])[0]
+            tier_info[TIER_LABEL] = self._metrics.tier_label(self._tier_index[tier])[0]
             tier_infos.append(tier_info)
 
         return tier_infos

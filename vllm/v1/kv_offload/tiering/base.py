@@ -36,6 +36,8 @@ if TYPE_CHECKING:
 # Type alias for job IDs used in async transfer tracking
 JobId = int
 
+TIER_LABEL = "tier"
+
 
 class TieringOffloadingMetrics:
     """Metric names for TieringOffloadingManager."""
