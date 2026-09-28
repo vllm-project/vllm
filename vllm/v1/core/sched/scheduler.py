@@ -2383,10 +2383,13 @@ class Scheduler(SchedulerInterface):
     @staticmethod
     def _holds_kv_blocks(request: Request) -> bool:
         # Whether a request currently has kv blocks allocated.
-        # num_computed_tokens is reset to 0 if kv transfer fails for requests in
-        # WAITING_FOR_REMOTE_KVS state, before their allocated blocks are freed.
+        # While always the case when status is WAITING_FOR_REMOTE_KVS
+        # or WAITING_FOR_STREAMING_REQ, there are such cases where it's
+        # WAITING or PREEMPTED.
         return (
             request.num_computed_tokens > 0
+            # num_computed_tokens is reset to 0 if kv transfer fails for requests in
+            # WAITING_FOR_REMOTE_KVS state, before their allocated blocks are freed.
             or request.status == RequestStatus.WAITING_FOR_REMOTE_KVS
         )
 
