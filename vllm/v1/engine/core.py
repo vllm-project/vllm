@@ -1438,7 +1438,10 @@ class EngineCoreProc(EngineCore):
         if counts != self.last_counts:
             self.last_counts = counts
             stats = SchedulerStats(
-                *counts, kv_cache_usage=self.scheduler.get_kv_cache_usage()
+                *counts,
+                kv_cache_usage=self.scheduler.get_kv_cache_usage(),
+                mean_queue_time=self.scheduler.get_mean_queue_time(),
+                preempted_total=self.scheduler.get_preempted_count(),
             )
             self.output_queue.put_nowait((-1, EngineCoreOutputs(scheduler_stats=stats)))
 
@@ -2182,6 +2185,8 @@ class DPEngineCoreProc(EngineCoreProc):
             stats = SchedulerStats(
                 *counts,
                 kv_cache_usage=self.scheduler.get_kv_cache_usage(),
+                mean_queue_time=self.scheduler.get_mean_queue_time(),
+                preempted_total=self.scheduler.get_preempted_count(),
                 step_counter=self.step_counter,
                 current_wave=self.current_wave,
             )
