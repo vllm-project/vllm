@@ -1271,32 +1271,38 @@ def test_draft_sampler_uses_ordinary_samples_for_repeated_contexts(monkeypatch):
 
     first = draft_watermarker.sample(
         torch.zeros(1, 8),
-        idx_mapping=idx_mapping,
+        idx_mapping,
         temperature=temperature,
-        seeds=seeds,
-        positions=torch.tensor([0]),
-        draft_step=0,
-        draft_logits=draft_logits,
+        seed=seeds,
+        pos=torch.tensor([0]),
+        apply_temperature=True,
+        is_drafting=True,
+        logits_cache_col=torch.tensor(0),
+        logits_cache=draft_logits,
         use_fp64=False,
     )
     second = draft_watermarker.sample(
         torch.zeros(1, 8),
-        idx_mapping=idx_mapping,
+        idx_mapping,
         temperature=temperature,
-        seeds=seeds,
-        positions=torch.tensor([1]),
-        draft_step=1,
-        draft_logits=draft_logits,
+        seed=seeds,
+        pos=torch.tensor([1]),
+        apply_temperature=True,
+        is_drafting=True,
+        logits_cache_col=torch.tensor(1),
+        logits_cache=draft_logits,
         use_fp64=False,
     )
     repeated = draft_watermarker.sample(
         torch.zeros(1, 8),
-        idx_mapping=idx_mapping,
+        idx_mapping,
         temperature=temperature,
-        seeds=seeds,
-        positions=torch.tensor([2]),
-        draft_step=2,
-        draft_logits=draft_logits,
+        seed=seeds,
+        pos=torch.tensor([2]),
+        apply_temperature=True,
+        is_drafting=True,
+        logits_cache_col=torch.tensor(2),
+        logits_cache=draft_logits,
         use_fp64=False,
     )
 
@@ -1384,12 +1390,14 @@ def test_draft_sampler_deduplicates_against_committed_history(monkeypatch):
     )
     sampled = draft_watermarker.sample(
         torch.zeros(1, 8),
-        idx_mapping=torch.tensor([0]),
+        torch.tensor([0]),
         temperature=torch.tensor([1.0]),
-        seeds=torch.tensor([0]),
-        positions=torch.tensor([0]),
-        draft_step=0,
-        draft_logits=torch.zeros(1, 1, 8),
+        seed=torch.tensor([0]),
+        pos=torch.tensor([0]),
+        apply_temperature=True,
+        is_drafting=True,
+        logits_cache_col=torch.tensor(0),
+        logits_cache=torch.zeros(1, 1, 8),
         use_fp64=False,
     )
 
@@ -1458,12 +1466,14 @@ def test_draft_watermarker_deduplicates_across_a_block_on_cuda(
         step_logits.append(logits)
         sampled = draft_watermarker.sample(
             logits,
-            idx_mapping=idx_mapping,
+            idx_mapping,
             temperature=torch.ones(num_reqs).cuda(),
-            seeds=torch.zeros(num_reqs, dtype=torch.int64).cuda(),
-            positions=torch.full((num_reqs,), 5 + step, dtype=torch.int64).cuda(),
-            draft_step=torch.tensor(step).cuda(),
-            draft_logits=draft_logits,
+            seed=torch.zeros(num_reqs, dtype=torch.int64).cuda(),
+            pos=torch.full((num_reqs,), 5 + step, dtype=torch.int64).cuda(),
+            apply_temperature=True,
+            is_drafting=True,
+            logits_cache_col=torch.tensor(step).cuda(),
+            logits_cache=draft_logits,
             use_fp64=False,
         )
         assert torch.equal(sampled.cpu(), torch.tensor([6, 6]))
@@ -1505,11 +1515,14 @@ def test_dspark_reduced_vocab_draft_sampler_applies_watermarking(monkeypatch):
         logits,
         idx_mapping,
         temperature,
-        seeds,
-        positions,
-        draft_step,
-        draft_logits,
-        use_fp64,
+        seed,
+        pos,
+        apply_temperature,
+        is_drafting,
+        logits_cache=None,
+        logits_cache_col=None,
+        use_fp64=False,
+        logits_cache_source=None,
     ):
         watermark_logits.append(logits.clone())
         return torch.tensor([4, 5])

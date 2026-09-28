@@ -98,20 +98,26 @@ class DraftWatermarker:
     def sample(
         self,
         logits: torch.Tensor,
-        *,
         idx_mapping: torch.Tensor,
         temperature: torch.Tensor,
-        seeds: torch.Tensor,
-        positions: torch.Tensor,
-        draft_step: int | torch.Tensor,
-        draft_logits: torch.Tensor,
-        use_fp64: bool,
+        seed: torch.Tensor,
+        pos: torch.Tensor,
+        apply_temperature: bool,
+        is_drafting: bool,
+        logits_cache: torch.Tensor | None = None,
+        logits_cache_col: torch.Tensor | None = None,
+        use_fp64: bool = False,
+        logits_cache_source: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        assert apply_temperature
+        assert is_drafting
+        assert logits_cache is not None
+        assert logits_cache_col is not None
         num_rows = logits.shape[0]
         request_temperatures = temperature[idx_mapping]
         contexts = self.contexts[:num_rows]
         steps, enabled = self._sampling_state(
-            logits, idx_mapping, request_temperatures, draft_step, contexts
+            logits, idx_mapping, request_temperatures, logits_cache_col, contexts
         )
 
         processed_logits = logits / torch.where(
@@ -120,13 +126,15 @@ class DraftWatermarker:
         random_sampler = RandomSampler(
             expanded_idx_mapping=idx_mapping,
             temperatures=temperature,
-            seeds=seeds,
-            positions=positions,
+            seeds=seed,
+            positions=pos,
             use_fp64=use_fp64,
             is_drafting=True,
-            logits_cache=draft_logits,
+            logits_cache=logits_cache,
             logits_cache_col=steps,
-            logits_cache_source=logits,
+            logits_cache_source=(
+                logits if logits_cache_source is None else logits_cache_source
+            ),
         )
         sampled = self.watermarker.sample(
             processed_logits,
