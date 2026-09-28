@@ -643,6 +643,9 @@ class _MockGDNLayer:
 @pytest.mark.parametrize("eps", [1e-5, 1e-6])
 @pytest.mark.parametrize("flatten_heads", [True, False])
 @pytest.mark.parametrize("quant_fp8_op", ["-quant_fp8", "+quant_fp8"])
+# The gated norm is matched either as its native decomposition or as the
+# vllm.fla_rms_norm_gated custom op (ROCm's default for unquantized models).
+@pytest.mark.parametrize("rms_norm_gated_op", ["-rms_norm_gated", "+rms_norm_gated"])
 @pytest.mark.skipif(
     (not current_platform.is_rocm() or not IS_AITER_FOUND),
     reason="Only test on ROCm with aiter package installed",
@@ -655,6 +658,7 @@ def test_aiter_fusion_rmsnorm_gated_quant(
     eps: float,
     flatten_heads: bool,
     quant_fp8_op: str,
+    rms_norm_gated_op: str,
     monkeypatch: pytest.MonkeyPatch,
 ):
     group_shape = GroupShape(1, 128)
@@ -662,7 +666,7 @@ def test_aiter_fusion_rmsnorm_gated_quant(
         model_config=ModelConfig(dtype=dtype),
         compilation_config=CompilationConfig(
             mode=CompilationMode.VLLM_COMPILE,
-            custom_ops=["-rms_norm", "-silu_and_mul", quant_fp8_op],
+            custom_ops=["-rms_norm", "-silu_and_mul", quant_fp8_op, rms_norm_gated_op],
             pass_config=PassConfig(fuse_norm_quant=True, eliminate_noops=True),
         ),
     )
