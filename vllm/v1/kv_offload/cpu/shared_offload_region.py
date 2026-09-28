@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import contextlib
 import errno
 import mmap
 import os
@@ -121,6 +120,7 @@ class SharedOffloadRegion:
         self._views: list[torch.Tensor] = []
         self._canonical_offset = 0
         self.is_pinned = False
+        self.pinned_addresses: list[int] = []
         if rank is not None:
             # byte offset to this worker's first slot within each chunk row
             self._worker_offset = rank * cpu_page_size
@@ -167,14 +167,8 @@ class SharedOffloadRegion:
                 populate_write_fn(self.mmap_obj, 0, self.total_size_bytes)
         except Exception:
             if created_path:
-                with contextlib.suppress(FileNotFoundError):
-                    os.unlink(self.mmap_path)
-            if hasattr(self, "mmap_obj") and self.mmap_obj is not None:
-                self.mmap_obj.close()
-                self.mmap_obj = None
-            if hasattr(self, "fd") and self.fd is not None:
-                os.close(self.fd)
-                self.fd = None
+                self._unlink_shared_path()
+            self._cleanup_local_resources()
             # Peers block inside the barrier until the collective times out if
             # we die before reaching it.  Arrive anyway so every worker calls
             # barrier() exactly once and they fail on their own errors instead
@@ -187,13 +181,10 @@ class SharedOffloadRegion:
                         "Failed to release peers waiting at the mmap barrier",
                         exc_info=True,
                     )
-            if barrier is not None and not created_path:
-                self.abort_startup_cleanup()
-            elif barrier is None and not created_path:
-                if unlink_owner:
-                    self.abort_startup_cleanup()
-                else:
-                    self._cleanup_local_resources()
+                if not created_path:
+                    self._unlink_shared_path()
+            elif unlink_owner:
+                self._unlink_shared_path()
             raise
 
         if barrier is not None:
@@ -226,7 +217,6 @@ class SharedOffloadRegion:
             self._views = []
             self._canonical_offset = 0
             self.is_pinned = False
-            self.pinned_addresses: list[int] = []
 
             if populate_only_on_creator:
                 return
