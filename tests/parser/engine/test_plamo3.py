@@ -415,6 +415,38 @@ def test_partial_end_think_is_consistent_between_streaming_and_non_streaming(
     assert (result.reasoning, result.content, result.tool_calls) == ("visible", "", [])
 
 
+@pytest.mark.parametrize(
+    "suffix",
+    [
+        "<|plamo:begin_",
+        "<|plamo:begin_tool_name",
+        "<|plamo:end_tool",
+    ],
+)
+def test_unfinished_marker_prefixes_are_stripped(mock_tokenizer, suffix):
+    parser = Plamo3Parser(mock_tokenizer)
+    assert parser._strip_unfinished_marker("visible" + suffix) == "visible"
+
+
+@pytest.mark.parametrize("suffix", ["<|plamo:", "<|plamo:b"])
+def test_non_token_prefix_is_not_stripped(mock_tokenizer, suffix):
+    parser = Plamo3Parser(mock_tokenizer)
+    text = "visible" + suffix
+    assert parser._strip_unfinished_marker(text) == text
+
+
+def test_complete_markers_are_not_stripped(mock_tokenizer):
+    parser = Plamo3Parser(mock_tokenizer)
+    text = "visible" + BEGIN_TOOL_NAME
+    assert parser._strip_unfinished_marker(text) == text
+
+
+def test_short_prefix_is_not_stripped(mock_tokenizer):
+    parser = Plamo3Parser(mock_tokenizer)
+    text = "visible<"
+    assert parser._strip_unfinished_marker(text) == text
+
+
 def test_tool_block_can_end_reasoning_implicitly(
     parser_cls, mock_tokenizer, mock_request
 ):

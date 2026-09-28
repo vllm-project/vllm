@@ -180,13 +180,12 @@ class Plamo3Parser(ParserEngine):
         self._reasoning_end_token_id_sequence: list[int] = list(
             tokenizer.encode(END_THINK, add_special_tokens=False)
         )
-        self._partial_think_end_markers = tuple(
-            tokenizer.decode(
-                self._reasoning_end_token_id_sequence[:size],
-                skip_special_tokens=False,
-            )
-            for size in range(1, len(self._reasoning_end_token_id_sequence))
-        )
+        # Token-ID sequences of every terminal literal, for token-level
+        # unfinished-marker detection.
+        self._terminal_token_id_sequences: dict[str, tuple[int, ...]] = {
+            literal: tuple(tokenizer.encode(literal, add_special_tokens=False))
+            for literal in self.parser_engine_config.terminal_literals
+        }
 
     def is_reasoning_end(self, input_ids: list[int]) -> bool:
         # Detect PLaMo reasoning boundaries that span multiple token IDs.
@@ -214,25 +213,22 @@ class Plamo3Parser(ParserEngine):
                 return input_ids[i + len(end_ids) :]
         return input_ids
 
-    def _strip_partial_think_end(self, value: str | None) -> str | None:
-        for marker in reversed(self._partial_think_end_markers):
-            if value and value.endswith(marker):
-                return value[: -len(marker)] or None
-        return value
-
-    def _strip_unfinished_marker(
-        self, value: str | None, *, prefix: str = "<|plamo:"
-    ) -> str | None:
+    def _strip_unfinished_marker(self, value: str | None) -> str | None:
         if not value:
             return value
-        start = value.rfind(prefix)
-        if start >= 0:
-            suffix = value[start:]
-            if any(
-                marker != suffix and marker.startswith(suffix)
-                for marker in self.parser_engine_config.terminal_literals
-            ):
-                return value[:start] or None
+        marker_start = value.rfind("<|plamo:")
+        if marker_start < 0:
+            return value or None
+        suffix = value[marker_start:]
+        # Strip a trailing partial marker at the token-ID level.
+        suffix_ids = tuple(
+            self.model_tokenizer.encode(suffix, add_special_tokens=False)
+        )
+        if any(
+            len(seq) > len(suffix_ids) and seq[: len(suffix_ids)] == suffix_ids
+            for seq in self._terminal_token_id_sequences.values()
+        ):
+            return value[:marker_start] or None
         return value or None
 
     def _coalesce_finished_tool_events(
@@ -269,7 +265,7 @@ class Plamo3Parser(ParserEngine):
         if delta is None:
             return None
 
-        delta.reasoning = self._strip_partial_think_end(delta.reasoning)
+        delta.reasoning = self._strip_unfinished_marker(delta.reasoning)
         if not self.skip_tool_parsing:
             delta.content = self._strip_unfinished_marker(delta.content)
         if delta.reasoning is None and delta.content is None and not delta.tool_calls:
@@ -312,8 +308,5 @@ class Plamo3Parser(ParserEngine):
         model_output: str,
         request: ChatCompletionRequest | ResponsesRequest,
     ) -> tuple[str | None, str | None]:
-        # Strip a truncated multi-token reasoning marker from parsed output.
-        if not self.thinking_enabled:
-            return None, model_output
         reasoning, content = super().extract_reasoning(model_output, request)
-        return self._strip_partial_think_end(reasoning), content
+        return self._strip_unfinished_marker(reasoning), content
