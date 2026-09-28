@@ -362,3 +362,49 @@ def test_rocm_git_fetch_disables_automatic_maintenance(tmp_path: Path) -> None:
         "origin",
         "HEAD",
     ]
+
+
+def test_rocm_map_export_uses_current_build_and_backend_filename(
+    tmp_path: Path,
+) -> None:
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    agent = fake_bin / "buildkite-agent"
+    agent.write_text('#!/bin/sh\nprintf "%s\\n" "$@"\n')
+    agent.chmod(0o755)
+    env = os.environ.copy()
+    env.update(
+        VLLM_KERNEL_SYMBOL_MAP="1", BUILDKITE="true", PATH=f"{fake_bin}:{env['PATH']}"
+    )
+    command = (
+        'source "$1"; TARGET=test-rocm-ci; BAKE_TARGETS=("$TARGET"); '
+        'configure_kernel_symbol_map_export; printf "%s\\n" "${BAKE_TARGETS[@]}"; '
+        "upload_kernel_symbol_map_if_present"
+    )
+    missing = subprocess.run(
+        ["bash", "-c", command, "bash", str(ROCM_CI_BAKE)],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    assert missing.returncode == 1
+    assert "export is missing" in missing.stderr
+    export = tmp_path / "kernel-symbol-map-rocm"
+    export.mkdir()
+    (export / "kernel_symbol_map.rocm.json.gz").write_bytes(b"map fixture")
+    result = subprocess.run(
+        ["bash", "-c", command, "bash", str(ROCM_CI_BAKE)],
+        cwd=tmp_path,
+        env=env,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert result.stdout.splitlines() == [
+        "test-rocm-ci",
+        "kernel-symbol-map-rocm",
+        "artifact",
+        "upload",
+        "kernel_symbol_map.rocm.json.gz",
+    ]

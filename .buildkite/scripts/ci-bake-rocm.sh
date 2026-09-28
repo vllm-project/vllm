@@ -867,6 +867,36 @@ should_export_rocm_smoke() {
         || "${TARGET}" == "smoke-test-rocm-ci" ]]
 }
 
+should_export_kernel_symbol_map() {
+    [[ "${VLLM_KERNEL_SYMBOL_MAP:-0}" == "1" ]] || return 1
+    case "${TARGET}" in
+        test-rocm-ci|test-rocm-ci-with-wheel|test-rocm-ci-with-artifacts|\
+        export-wheel-rocm|csrc-rocm-ci|smoke-test-rocm-ci|kernel-symbol-map-rocm)
+            return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+configure_kernel_symbol_map_export() {
+    should_export_kernel_symbol_map || return 0
+    if [[ "${TARGET}" != "kernel-symbol-map-rocm" ]]; then
+        BAKE_TARGETS+=("kernel-symbol-map-rocm")
+    fi
+}
+
+upload_kernel_symbol_map_if_present() {
+    should_export_kernel_symbol_map || return 0
+    local map_dir="./kernel-symbol-map-rocm"
+    local map_name="kernel_symbol_map.rocm.json.gz"
+    if [[ ! -s "${map_dir}/${map_name}" ]]; then
+        echo "ROCm kernel symbol map export is missing: ${map_dir}/${map_name}" >&2
+        return 1
+    fi
+    if [[ "${BUILDKITE:-false}" == "true" ]]; then
+        (cd "${map_dir}" && buildkite-agent artifact upload "${map_name}")
+    fi
+}
+
 verify_rocm_smoke_export() {
     local marker="./build/rocm-smoke-export/vllm-smoke-ok"
     local expected_smoke_id="${BUILDKITE_BUILD_ID:-local}"
@@ -1456,7 +1486,8 @@ maybe_skip_existing_image() {
         return 0
     fi
     if ! is_ci_base_target \
-        && { should_upload_wheel_artifacts || should_export_rocm_smoke; }; then
+        && { should_upload_wheel_artifacts || should_export_rocm_smoke \
+            || should_export_kernel_symbol_map; }; then
         echo "Local-output targets always run for the current build"
         return 0
     fi
@@ -2756,6 +2787,7 @@ main() {
     # Keep the context override last so every bake target uses the owned tree.
     write_build_context_override
     resolve_ci_base_dependency_targets
+    configure_kernel_symbol_map_export
     print_bake_config
     if [[ "${BAKE_PRINT_ONLY:-0}" == "1" ]]; then
         echo "BAKE_PRINT_ONLY=1 set; skipping build"
@@ -2771,12 +2803,16 @@ main() {
         # from an earlier build or retry.
         rm -rf ./build/rocm-smoke-export
     fi
+    if should_export_kernel_symbol_map; then
+        rm -rf ./kernel-symbol-map-rocm
+    fi
     seed_dependency_caches_if_needed
     run_bake
     verify_rocm_smoke_export
     promote_stable_ci_base_tag
     publish_ci_base_handoff_ref
     upload_wheel_artifacts_if_present
+    upload_kernel_symbol_map_if_present
 }
 
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
