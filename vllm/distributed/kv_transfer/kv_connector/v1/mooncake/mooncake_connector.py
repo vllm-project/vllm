@@ -2443,7 +2443,7 @@ class MooncakeConnectorWorker:
             async with httpx.AsyncClient(
                 timeout=envs.VLLM_MOONCAKE_CONNECTOR_TIMEOUT
             ) as client:
-                backoff = 1.0
+                retry_delay = 0.1
                 for attempt in range(1, max_attempts + 1):
                     try:
                         response = await client.get(url)
@@ -2459,10 +2459,9 @@ class MooncakeConnectorWorker:
                             max_attempts,
                             type(e).__name__,
                             e,
-                            backoff,
+                            retry_delay,
                         )
-                        await asyncio.sleep(backoff)
-                        backoff = min(backoff * 2, 10.0)
+                        await asyncio.sleep(retry_delay)
                 response.raise_for_status()
                 data: dict = response.json()
                 for _, dp_entry in data.items():

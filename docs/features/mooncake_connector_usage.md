@@ -55,7 +55,7 @@ cache), see [ECMooncakeConnector Usage Guide](mooncake_ec_connector_usage.md).
     - Raise this if bootstrap server timeout warnings appear on hosts with very large host-memory segments
     - Bootstrap registration uses up to 3 attempts internally, with exponential backoff capped at 10 seconds; connection errors and timeouts are both retried
     - Once registration attempts are exhausted the caller raises instead of blocking, so failures surface rather than hanging
-    - Metadata queries reuse the same timeout and 3-attempt limit, with exponential backoff capped at 10 seconds. If all attempts fail, the error is logged and waiting queries are notified
+    - Metadata queries reuse the same timeout and 3-attempt limit, with a fixed 100ms delay between attempts. If all attempts fail, the error is logged and waiting queries are notified
 
 - `WITH_NVIDIA_PEERMEM`: Selects how mooncake registers GPU memory for RDMA. Read by mooncake, not vLLM.
     - Default: 1, which uses `ibv_reg_mr()` and requires the `nvidia-peermem` kernel module to be loaded
