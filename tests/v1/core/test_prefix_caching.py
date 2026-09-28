@@ -852,7 +852,8 @@ def test_hisparse_admitted_async_loads_can_finish_with_nothing_running(tmp_path)
     scheduler.kv_cache_manager = manager
     scheduler.kv_cache_config = manager.kv_cache_config
     scheduler.scheduler_reserve_full_isl = False
-    # MultiConnector also forwards every admission to the HiSparse connector.
+    # MultiConnector forwards every admission to non-chosen connectors with 0
+    # external tokens (pinned in test_multi_connector.py); HiSparse is one.
     hisparse = object.__new__(HiSparseConnector)
     hisparse.connector_scheduler = HiSparseConnectorScheduler(async_speculative=False)
     hisparse.bind_kv_cache_manager(manager)
