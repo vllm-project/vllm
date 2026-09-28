@@ -85,6 +85,11 @@ from vllm.v1.attention.ops.dcp import (
     cp_lse_ag_out_rs,
     dcp_a2a_lse_reduce,
 )
+from vllm.v1.attention.ops.flashinfer_repage import (
+    PackedKVPageGeometry,
+    remap_page_ids,
+    repage_block_table,
+)
 from vllm.v1.attention.ops.merge_attn_states import merge_attn_states
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
@@ -484,6 +489,44 @@ class FlashInferBackend(AttentionBackend):
     def get_builder_cls() -> type["FlashInferMetadataBuilder"]:
         return FlashInferMetadataBuilder
 
+    @classmethod
+    def get_kv_cache_view_block_size(
+        cls,
+        spec: KVCacheSpec,
+        kernel_block_size: int,
+        vllm_config: VllmConfig,
+    ) -> int:
+        if (
+            vllm_config.cache_config.get_resolved_kv_cache_layout()
+            != KVCacheLayout.BLHNC
+            or not isinstance(spec, AttentionSpec)
+        ):
+            return kernel_block_size
+        if (
+            spec.kv_quant_mode != KVQuantMode.NONE
+            or spec.tokens_per_state != 1
+            or spec.head_size != spec.head_size_v
+            or spec.num_heads != spec.num_kv_heads
+            or spec.state_content_size_bytes
+            != 2 * spec.head_size * get_dtype_size(spec.dtype)
+        ):
+            raise NotImplementedError(
+                "Packed FlashInfer re-paging requires one unquantized state "
+                "per token with equal K/V dimensions in a [B,H,M,2D] view."
+            )
+        transfer = vllm_config.kv_transfer_config
+        if transfer is not None and any(
+            transfer.has_connector(name)
+            for name in ("NixlConnector", "NixlPullConnector", "NixlPushConnector")
+        ):
+            # NIXL infers physical block splitting from the kernel block size.
+            # Re-paging retains manager-sized physical blocks instead.
+            raise NotImplementedError(
+                "NIXL's physical block splitting must be adapted before it can "
+                "transfer FlashInfer manager-sized re-paged caches."
+            )
+        return spec.block_size
+
     @staticmethod
     def get_dtype_for_flashinfer(kv_cache_dtype: str) -> torch.dtype:
         if kv_cache_dtype in ("fp8", "fp8_e4m3"):
@@ -683,6 +726,7 @@ class FlashInferMetadata:
     """
 
     cascade_wrapper: MultiLevelCascadeAttentionWrapper | None
+    repage_geometry: PackedKVPageGeometry | None = None
 
 
 class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
@@ -702,6 +746,9 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         self.attention_config = vllm_config.attention_config
         self._num_speculative_tokens = vllm_config.num_speculative_tokens
         self._workspace_buffer = None
+        self._repage_source: torch.Tensor | None = None
+        self._repage_geometry: PackedKVPageGeometry | None = None
+        self._repage_block_tables: torch.Tensor | None = None
         self._prefill_wrapper: (
             BatchPrefillWithPagedKVCacheWrapper | BatchDCPPrefillWrapper | None
         ) = None  # Wrapper for prefill/append
@@ -923,6 +970,45 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
     @property
     def kv_cache_layout(self) -> KVCacheLayout:
         return self.cache_config.get_resolved_kv_cache_layout()
+
+    def _resolve_repage_geometry(
+        self, block_table: torch.Tensor
+    ) -> PackedKVPageGeometry | None:
+        if self.kv_cache_layout != KVCacheLayout.BLHNC or not self.layer_names:
+            return None
+        context = self.vllm_config.compilation_config.static_forward_context
+        cache = context[self.layer_names[0]].kv_cache
+        if cache is self._repage_source:
+            return self._repage_geometry
+        geometry = None
+        if cache.ndim == 4 and cache.shape[2] != self.page_size:
+            FlashInferBackend.get_kv_cache_view_block_size(
+                self.kv_cache_spec.copy_with_new_block_size(cache.shape[2]),
+                self.page_size,
+                self.vllm_config,
+            )
+            if (
+                cache.shape[1] != self.num_kv_heads
+                or cache.shape[3] != 2 * self.head_dim
+            ):
+                raise ValueError(
+                    "Packed FlashInfer cache does not match its layer spec."
+                )
+            geometry = PackedKVPageGeometry.from_cache(cache, self.page_size)
+            for name in self.layer_names[1:]:
+                other = context[name].kv_cache
+                if PackedKVPageGeometry.from_cache(other, self.page_size) != geometry:
+                    raise ValueError("FlashInfer metadata group has mixed KV geometry.")
+            # The runner also pads the table's width for token alignment.
+            width = block_table.shape[1]
+            self._repage_block_tables = torch.empty(
+                (self.max_num_reqs, width), dtype=torch.int32, device=self.device
+            )
+        else:
+            self._repage_block_tables = None
+        self._repage_source = cache
+        self._repage_geometry = geometry
+        return geometry
 
     # Keep SM90 prefill/decode Q dtype selection in one place.
     def get_q_data_type(self, is_prefill: bool) -> torch.dtype:
@@ -1289,6 +1375,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         block_table_tensor: torch.Tensor,
         num_reqs: int,
         page_size: int,
+        repage_geometry: PackedKVPageGeometry | None = None,
     ) -> torch.Tensor:
         """Compute paged_kv_indptr, paged_kv_indices and paged_kv_last_page_len.
 
@@ -1312,6 +1399,10 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             block_table_tensor.stride(0),
             paged_kv_indptr,
             BLOCK_SIZE=1024,
+            PAGES_PER_BLOCK=(repage_geometry.pages_per_block if repage_geometry else 1),
+            BLOCK_STRIDE_PAGES=(
+                repage_geometry.block_stride_pages if repage_geometry else 1
+            ),
         )
 
         # write self.paged_kv_last_page_len_cpu inplace
@@ -1362,6 +1453,9 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         # - Prefill (FI native or TRTLLM)
         # - Decode (FI native, XQA, or trtllm-gen)
         use_cascade = common_prefix_len > 0
+        repage_geometry = self._resolve_repage_geometry(block_table_tensor)
+        if repage_geometry is not None and use_cascade:
+            raise NotImplementedError("Cascade attention cannot consume re-paged KV.")
         uses_spec_reorder = self.reorder_batch_threshold > 1
         # Page sizes >= 128 must use trtllm-gen; force it for prefill too.
         prefill_force_trtllm = (
@@ -1438,6 +1532,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             prefill=None,
             decode=None,
             cascade_wrapper=None,
+            repage_geometry=repage_geometry,
         )
 
         # Guard access to seq_lens_cpu, which may not always be needed
@@ -1517,9 +1612,26 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                 block_table_tensor,
                 num_reqs,
                 page_size,
+                repage_geometry,
             )
         else:
             paged_kv_indices = None
+
+        if repage_geometry is not None and (
+            (num_prefills > 0 and prefill_use_trtllm)
+            or (num_decodes > 0 and decode_with_flashinfer_trtllm_api)
+        ):
+            assert self._repage_block_tables is not None
+            repage_seq_lens = seq_lens
+            if self.use_dcp:
+                assert common_attn_metadata.dcp_local_seq_lens is not None
+                repage_seq_lens = common_attn_metadata.dcp_local_seq_lens
+            block_table_tensor = repage_block_table(
+                block_table_tensor,
+                repage_seq_lens,
+                self._repage_block_tables,
+                repage_geometry,
+            )
 
         # Early-out for cascade attention
         if use_cascade:
@@ -1866,6 +1978,9 @@ class FlashInferImpl(AttentionImpl):
         sinks: torch.Tensor | None = None,
     ) -> None:
         self.num_heads = num_heads
+        self._repage_source: torch.Tensor | None = None
+        self._repage_view_geometry: PackedKVPageGeometry | None = None
+        self._repage_view: torch.Tensor | None = None
         self.head_size = head_size
         self.scale = float(scale)
         self.num_kv_heads = num_kv_heads
@@ -2113,6 +2228,18 @@ class FlashInferImpl(AttentionImpl):
 
         num_actual_tokens = attn_metadata.num_actual_tokens
         kv_cache_layout = attn_metadata.kv_cache_layout
+
+        if attn_metadata.repage_geometry is not None:
+            geometry = attn_metadata.repage_geometry
+            if (
+                self._repage_source is not kv_cache
+                or self._repage_view_geometry != geometry
+            ):
+                self._repage_source = kv_cache
+                self._repage_view_geometry = geometry
+                self._repage_view = geometry.read_view(kv_cache)
+            assert self._repage_view is not None
+            kv_cache = self._repage_view
 
         # FlashInfer treats uint8 KV cache as NVFP4. vLLM stores FP8 KV cache
         # as uint8 bytes, so pass FP8 caches with their logical dtype.
@@ -2786,6 +2913,8 @@ def _copy_page_indices_kernel(
     block_table_stride,
     cu_num_blocks,
     BLOCK_SIZE: tl.constexpr,
+    PAGES_PER_BLOCK: tl.constexpr = 1,
+    BLOCK_STRIDE_PAGES: tl.constexpr = 1,
 ):
     req_idx = tl.program_id(0)
     row_ptr = block_table + req_idx * block_table_stride
@@ -2796,6 +2925,8 @@ def _copy_page_indices_kernel(
     offset = tl.arange(0, BLOCK_SIZE)
     for i in tl.range(0, num_blocks, BLOCK_SIZE):
         block_ids = tl.load(row_ptr + i + offset, mask=i + offset < num_blocks)
+        if PAGES_PER_BLOCK != BLOCK_STRIDE_PAGES:
+            block_ids = remap_page_ids(block_ids, PAGES_PER_BLOCK, BLOCK_STRIDE_PAGES)
         tl.store(
             page_indices + start_idx + i + offset,
             block_ids,

@@ -391,6 +391,8 @@ def allocate_kv_cache(
     device: torch.device,
     layout: KVCacheLayout,
     kernel_block_sizes: list[int] | None = None,
+    *,
+    vllm_config: VllmConfig | None = None,
 ) -> dict[str, torch.Tensor]:
     """Allocate the KV cache and view it as ``[B, H, N, C]`` per layer.
 
@@ -442,6 +444,25 @@ def allocate_kv_cache(
             kernel_block_size = kernel_block_sizes[group_id]
         if isinstance(spec, MLAAttentionSpec) and spec.storage_block_size is not None:
             kernel_block_size = spec.storage_block_size
+
+        if (
+            vllm_config is not None
+            and kernel_block_size is not None
+            and kernel_block_size != spec.block_size
+            and tensor.block_stride != spec.page_size_bytes
+        ):
+            context = vllm_config.compilation_config.static_forward_context
+            view_sizes = {
+                context[name]
+                .get_attn_backend()
+                .get_kv_cache_view_block_size(spec, kernel_block_size, vllm_config)
+                for name in tensor.layers
+            }
+            if len(view_sizes) != 1:
+                raise ValueError(
+                    "Layers sharing a KV tensor require the same view size."
+                )
+            kernel_block_size = view_sizes.pop()
 
         views = create_kv_cache_views(
             buf,
@@ -653,7 +674,11 @@ def bind_kv_cache_to_layers(
     # splits conv/ssm), so the kv_caches dict can hold a single tensor per
     # layer for the KV connector to register.
     for layer_name, kv_cache in kv_caches.items():
-        forward_context[layer_name].bind_kv_cache(kv_cache)
+        layer = forward_context[layer_name]
+        if hasattr(layer, "impl") and hasattr(layer.impl, "_repage_source"):
+            layer.impl._repage_source = None
+            layer.impl._repage_view = None
+        layer.bind_kv_cache(kv_cache)
 
     ordered_layer_names = sorted(
         kv_caches, key=lambda name: extract_layer_index(name, num_attn_module)
@@ -680,6 +705,9 @@ def clear_layer_kv_caches(layers: Iterable[Any]) -> None:
                 layer.impl._k_scale_cache = None
             if hasattr(layer.impl, "_v_scale_cache"):
                 layer.impl._v_scale_cache = None
+            if hasattr(layer.impl, "_repage_source"):
+                layer.impl._repage_source = None
+                layer.impl._repage_view = None
 
 
 def copy_kv_cache_blocks_inplace(
