@@ -165,6 +165,45 @@ def test_json_logging(monkeypatch, tmp_path):
     assert log["process"] == os.getpid()
 
 
+@pytest.mark.parametrize("factory_order", ["before", "after", "replacement"])
+def test_configure_logging_preserves_application_record_factory(
+    monkeypatch, factory_order
+):
+    """Application fields survive initial configuration and reconfiguration."""
+    original_factory = logging.getLogRecordFactory()
+    monkeypatch.setattr(vllm_logger, "dictConfig", lambda _: None)
+    monkeypatch.setattr(vllm_logger, "_last_configured_logging_config", None)
+    monkeypatch.setattr(vllm_logger, "_vllm_process_info", None)
+    config = LoggingConfig()
+    formatter = logging.Formatter("%(request_id)s %(vllm_process_name)s %(message)s")
+
+    try:
+        logging.setLogRecordFactory(logging.LogRecord)
+        if factory_order != "before":
+            configure_logging(config)
+        base_factory = (
+            logging.LogRecord
+            if factory_order == "replacement"
+            else logging.getLogRecordFactory()
+        )
+
+        def application_factory(*args, **kwargs):
+            record = base_factory(*args, **kwargs)
+            record.request_id = "request-123"
+            return record
+
+        logging.setLogRecordFactory(application_factory)
+        decorate_logs("Worker_DP0")
+        for _ in range(2):
+            configure_logging(config)
+            record = logging.getLogger("application").makeRecord(
+                "application", logging.INFO, __file__, 1, "probe", (), None
+            )
+            assert formatter.format(record) == "request-123 Worker_DP0 probe"
+    finally:
+        logging.setLogRecordFactory(original_factory)
+
+
 def test_use_color_force_color(monkeypatch):
     """FORCE_COLOR forces colored logs without a TTY, while NO_COLOR and an
     explicit VLLM_LOGGING_COLOR=0 take precedence over it."""
@@ -223,9 +262,11 @@ def test_logger_configuring_can_be_disabled(monkeypatch):
     monkeypatch.setenv("VLLM_CONFIGURE_LOGGING", "0")
     monkeypatch.delenv("VLLM_LOGGING_CONFIG_PATH", raising=False)
 
+    original_factory = logging.getLogRecordFactory()
     with patch("vllm.logger.dictConfig") as dict_config_mock:
         configure_logging(LoggingConfig(configure_logging=False))
     dict_config_mock.assert_not_called()
+    assert logging.getLogRecordFactory() is original_factory
 
 
 def test_an_error_is_raised_when_custom_logging_config_file_does_not_exist(monkeypatch):
