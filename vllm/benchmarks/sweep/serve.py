@@ -220,8 +220,8 @@ def run_comb(
     link_vars: list[tuple[str, str]],
     base_path: Path,
     num_runs: int,
-    warmup_num_prompts: int = 0,
     dry_run: bool,
+    warmup_num_prompts: int = 0,
     continue_on_error: bool = False,
 ):
     if not _comb_is_valid(serve_comb, bench_comb, link_vars):
