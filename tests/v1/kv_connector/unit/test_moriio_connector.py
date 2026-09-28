@@ -147,6 +147,8 @@ def _write_consumer_scheduler_for_finished_request(tp_size: int = 2):
     scheduler.mode = MoRIIOMode.WRITE
     scheduler.tp_size = tp_size
     scheduler._reqs_need_recv = {}
+    scheduler._write_recvs_in_flight = set()
+    scheduler._finished_write_recvs_in_flight = set()
     scheduler.unmap_request_id = MagicMock()
     return scheduler
 
