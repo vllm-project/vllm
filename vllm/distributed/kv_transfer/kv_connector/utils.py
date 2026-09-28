@@ -215,10 +215,10 @@ class KVOutputAggregator:
 
         return output
 
-    def merge_failed_kv_outputs_for_ft(
+    def ft_merge_kv_connector_output_on_failed(
         self, kv_connector_outputs: list[KVConnectorOutput | None]
     ) -> None:
-        """Merge KV outputs salvaged from failed workers into pending state.
+        """FT merge of KV connector outputs salvaged from failed workers.
 
         Unlike aggregate(), this only updates internal state (remaining
         counts, invalid_block_ids, failed_recving, and get-and-clear fields)
