@@ -153,7 +153,7 @@ def test_layer_sharded_worker_capacities_and_offload_budget_agree(mixed_page_siz
     budgets = [
         build_kv_cache_storage(
             replace(config, num_blocks=n), p, KVCacheLayout.LBNHC
-        ).storage_plan.allocation_bytes
+        ).storage_plan.backing_size
         for n, p in zip([9, 7], placements)
     ]
     vllm_config = VllmConfig()
@@ -166,7 +166,7 @@ def test_layer_sharded_worker_capacities_and_offload_budget_agree(mixed_page_siz
     result = get_kv_cache_configs(vllm_config, [specs] * 2, budgets, placements)
     assert [c.num_blocks for c in result] == [7, 7]
     for c, budget in zip(result, budgets):
-        assert c.storage_plan.allocation_bytes <= budget
+        assert c.storage_plan.backing_size <= budget
     page = config.kv_cache_groups[0].kv_cache_spec.first_spec.page_size_bytes
     assert [c.offload_block_size_bytes for c in result] == [5 * page] * 2
     scheduler = generate_scheduler_kv_cache_config(result)
@@ -214,7 +214,7 @@ def test_layer_sharded_auto_fit_uses_common_kv_cache_flow():
     budgets = [
         build_kv_cache_storage(
             replace(config, num_blocks=5), p, KVCacheLayout.LBNHC
-        ).storage_plan.allocation_bytes
+        ).storage_plan.backing_size
         for p in placements
     ]
     specs = layer_specs(config.kv_cache_groups)
@@ -260,7 +260,7 @@ def test_layer_sharded_rejects_inconsistent_replica_domains():
         validate_kv_cache_placements([specs] * 2, [placement] * 2)
     with pytest.raises(ValueError, match="ownership/layout"):
         validate_kv_cache_placements(
-            [specs] * 2, [placement, replace(peer, alignment=4096)]
+            [specs] * 2, [placement, replace(peer, scratch_slots=3)]
         )
     other_specs = dict(specs)
     other_specs["a"] = replace(specs["a"], head_size=256)
@@ -268,29 +268,28 @@ def test_layer_sharded_rejects_inconsistent_replica_domains():
         validate_kv_cache_placements([specs, other_specs], [placement, peer])
 
 
-@pytest.mark.parametrize("alignment", [256, 2 * 1024 * 1024])
-def test_layer_sharded_capacity_includes_exact_alignment_cost(alignment):
+@pytest.mark.parametrize("num_blocks", [1, 3, 7])
+def test_layer_sharded_capacity_matches_exact_allocation(num_blocks):
     """The capacity boundary must be identical to actual allocation geometry."""
     from vllm.v1.kv_cache_placement import (
         build_kv_cache_storage,
         fit_kv_cache_storage,
     )
+    from vllm.v1.worker.utils import allocate_kv_cache
 
     config, placement = _layer_sharded_cache_case()
-    placement = replace(placement, alignment=alignment)
+    config = replace(config, num_blocks=num_blocks)
     result = build_kv_cache_storage(config, placement, KVCacheLayout.LBNHC)
-    budget = result.storage_plan.allocation_bytes
+    budget = result.storage_plan.backing_size
     count = fit_kv_cache_storage(config, placement, KVCacheLayout.LBNHC, budget)
-    fitted = build_kv_cache_storage(
-        replace(config, num_blocks=count), placement, KVCacheLayout.LBNHC
+    assert count == num_blocks
+    assert (
+        fit_kv_cache_storage(config, placement, KVCacheLayout.LBNHC, budget - 1)
+        == num_blocks - 1
     )
-    overflow = build_kv_cache_storage(
-        replace(config, num_blocks=count + 1), placement, KVCacheLayout.LBNHC
-    )
-    assert count >= config.num_blocks
-    assert fitted.storage_plan.allocation_bytes <= budget
-    assert overflow.storage_plan.allocation_bytes > budget
     assert fit_kv_cache_storage(config, placement, KVCacheLayout.LBNHC, 0) == 0
+    caches = allocate_kv_cache(result, torch.device("cpu"), KVCacheLayout.LBNHC)
+    assert all(cache.untyped_storage().nbytes() == budget for cache in caches.values())
 
 
 def test_layer_sharded_bundle_keeps_indexer_and_scales_with_owner():
@@ -302,7 +301,8 @@ def test_layer_sharded_bundle_keeps_indexer_and_scales_with_owner():
 
     config, placement = _layer_sharded_cache_case()
     spec = config.kv_cache_groups[0].kv_cache_spec
-    spec.kv_cache_specs["b"] = replace(spec.kv_cache_specs["b"], head_size=32)
+    spec.kv_cache_specs["a"] = replace(spec.kv_cache_specs["a"], head_size=31)
+    spec.kv_cache_specs["b"] = replace(spec.kv_cache_specs["b"], head_size=17)
     placement = replace(
         placement,
         bundles=(KVCacheBundle(("a", "b"), 1), *placement.bundles[2:]),
@@ -310,6 +310,11 @@ def test_layer_sharded_bundle_keeps_indexer_and_scales_with_owner():
     result = build_kv_cache_storage(config, placement, KVCacheLayout.LBNHC)
     region = result.storage_plan.regions[0]
     assert region.bundle.layers == ("a", "b")
+    first, second = result.kv_cache_tensors[:2]
+    assert second.offset - first.offset == spec.kv_cache_specs["a"].page_size_bytes * 3
+    assert region.size == sum(
+        spec.kv_cache_specs[n].page_size_bytes * 3 for n in ("a", "b")
+    )
     for tensor in result.kv_cache_tensors[:2]:
         assert region.offset <= tensor.offset
         assert (

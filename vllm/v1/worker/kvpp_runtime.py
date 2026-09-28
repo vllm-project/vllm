@@ -2,14 +2,13 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Materialize KVPP caches before their first device access."""
 
-from contextlib import contextmanager
 from typing import Any
 
+import numpy as np
 import torch
 import torch.distributed as dist
 
 from vllm.distributed import get_tp_group
-from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils.import_utils import resolve_obj_by_qualname
@@ -73,9 +72,8 @@ class KVPPRuntime:
         self.plan = plan
         descriptor = config.kv_cache_tensors[0]
         first = caches[descriptor.layers[0]]
-        base = first.storage_offset() * first.element_size() - descriptor.offset
         backing = torch.empty(0, dtype=torch.int8, device=first.device).set_(
-            first.untyped_storage(), base, (plan.backing_size,), (1,)
+            first.untyped_storage()
         )
         self.regions = [r for r in plan.regions if r.bundle.owner is not None]
         self.buffers = [backing.narrow(0, r.offset, r.size) for r in self.regions]
@@ -88,9 +86,8 @@ class KVPPRuntime:
         self.slot_last_use: dict[int, torch.cuda.Event] = {}
         self.pending: tuple[int, Any, torch.cuda.Event] | None = None
         self.active_index: int | None = None
-        self.next_index = 0
+        self.next_index = len(self.regions)
         self.has_history = False
-        self.running = False
         logger.info(
             "KVPP rank %d/%d (%s): %d logical blocks, %d/%d owned target bundles, "
             "%d persistent bytes, %d total allocation bytes, "
@@ -102,34 +99,20 @@ class KVPPRuntime:
             sum(r.bundle.owner == plan.placement.rank for r in self.regions),
             len(self.regions),
             sum(r.size for r in plan.regions if r.scratch_slot is None),
-            plan.allocation_bytes,
+            plan.backing_size,
             sum(r.size for r in self.regions),
         )
 
-    @contextmanager
-    def forward(self, has_history: bool):
-        if self.running:
-            raise RuntimeError("Concurrent KVPP forwards require separate scratch.")
-        context = get_forward_context()
-        assert context.kvpp_runtime is None, "Nested KVPP forwards are not supported."
-        context.kvpp_runtime = self
-        self.running = True
+    def prepare_forward(self, has_history: bool) -> None:
+        assert (
+            self.next_index == len(self.regions)
+            and self.active_index is None
+            and self.pending is None
+        ), "Previous KVPP forward is incomplete."
         self.has_history = has_history
         self.next_index = 0
-        self.active_index = None
         self.ready = torch.cuda.Event()
         self.ready.record(torch.cuda.current_stream())
-        try:
-            yield
-            if self.next_index != len(self.regions) or self.active_index is not None:
-                raise RuntimeError("KVPP forward did not consume every target bundle.")
-        finally:
-            if self.pending is not None:
-                # Cover partially executed forwards before storage is released.
-                self.pending[2].synchronize()
-                self.pending = None
-            context.kvpp_runtime = None
-            self.running = False
 
     def _prefetch(self, index: int) -> None:
         region = self.regions[index]
@@ -206,10 +189,8 @@ def shutdown_kvpp_runtime() -> None:
         get_kvpp_runtime_cls().shutdown_transport()
 
 
-@contextmanager
-def kvpp_forward(kvpp_runtime: KVPPRuntime | None, has_history: bool):
-    if kvpp_runtime is None:
-        yield
-    else:
-        with kvpp_runtime.forward(has_history):
-            yield
+def kvpp_forward(
+    kvpp_runtime: KVPPRuntime | None, num_computed_tokens: np.ndarray
+) -> None:
+    if kvpp_runtime is not None:
+        kvpp_runtime.prepare_forward(bool(np.any(num_computed_tokens > 0)))

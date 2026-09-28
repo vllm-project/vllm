@@ -35,7 +35,7 @@ ownership. `KVCacheStoragePlan` attaches worker-local physical regions to the
 otherwise ordinary `KVCacheConfig`.
 
 The allocator places owned bundles in persistent ranges and nonowner bundles in
-two alternating scratch slots. Bundle components use aligned offsets in one byte
+two alternating scratch slots. Bundle components are packed contiguously in one byte
 arena; attention still sees stable tensor views. Capacity search uses the same
 layout builder as final allocation. It converts each worker's physical memory
 budget to a logical block capacity; the common KV cache config flow then handles
@@ -43,17 +43,17 @@ override, auto-fit, null-block reservation, admission checks, and the minimum
 block count across workers. The ordinary config builder, including its layout
 validation and tensor descriptors, runs unchanged. Once the common block count
 is final, KVPP replaces only physical tensor placement and attaches the storage
-plan; other config fields are preserved. Allocation includes alignment padding,
+plan; other config fields are preserved. Allocation uses the exact packed size,
 and an override larger than physical capacity is rejected.
 
 Placement does not add a scheduler or block manager. The allocator uses the same
-backing allocation and view construction for both placements, with an additional
-base alignment requirement for KVPP. Broadcast and offload consume the final
+backing allocation and view construction for both placements. KVPP adds no
+alignment padding beyond the cache specs. Broadcast and offload consume the final
 worker storage plan instead of deriving ownership or scratch placement again.
 
 The offload path registers only persistent owner views. A common per-block byte
 budget across ranks keeps distributed CPU/disk block IDs aligned even when owner
-partitions have unequal sizes. Scratch and padding do not consume offload pool
+partitions have unequal sizes. Scratch does not consume offload pool
 capacity.
 
 ## Attention-time broadcast
@@ -69,13 +69,17 @@ CUDA events enforce three dependencies: the transfer waits for preceding forward
 cache writes, attention waits for its bundle's transfer, and reusing a scratch
 slot waits for its previous attention use. The owner's persistent source and
 receiver scratch destination therefore remain valid until NCCL finishes. The
-runtime checks ordered bundle access and rejects concurrent forwards sharing the
-same scratch arena.
+runtime checks ordered bundle access and requires all bundles from the previous
+forward to be released before preparing the next one.
 
 `KVPPRuntime` is selected through `Platform.get_kvpp_runtime_cls()` and scoped to
-`ForwardContext.kvpp_runtime`. This lets a future device implementation supply its
-own communicator and events while keeping logical scheduler state and model
-bundle declarations independent of the transport.
+`ForwardContext.kvpp_runtime` by `set_forward_context`. After the connector's
+pre-forward call, `kvpp_forward` prepares the runtime and determines whether the
+batch has history. There is no per-forward teardown; failed forwards retain their
+state, and runner shutdown synchronizes the device before releasing cache storage.
+This lets a future device implementation supply its own communicator and events
+while keeping logical scheduler state and model bundle declarations independent
+of the transport.
 
 ## Validation
 

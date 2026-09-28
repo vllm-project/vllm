@@ -86,5 +86,4 @@ def get_kv_cache_placement(
         group.rank_in_group,
         group.world_size,
         tuple(bundles),
-        alignment=256,
     )

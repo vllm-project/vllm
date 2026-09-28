@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Distributed data-lifetime tests for layer-sharded cache materialization."""
 
+import numpy as np
 import pytest
 import torch
 import torch.multiprocessing as mp
@@ -12,7 +13,7 @@ from vllm.distributed import (
     init_distributed_environment,
     initialize_model_parallel,
 )
-from vllm.forward_context import set_forward_context
+from vllm.forward_context import acquire_kv_cache, release_kv_cache, set_forward_context
 from vllm.utils.network_utils import get_open_port
 from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
@@ -26,7 +27,7 @@ from vllm.v1.kv_cache_placement import (
     KVCachePlacement,
     build_kv_cache_storage,
 )
-from vllm.v1.worker.kvpp_runtime import KVPPRuntime
+from vllm.v1.worker.kvpp_runtime import KVPPRuntime, kvpp_forward
 from vllm.v1.worker.utils import allocate_kv_cache
 
 
@@ -58,7 +59,7 @@ def _runtime_worker(rank: int, port: int, world_size: int):
             name: MLAAttentionSpec(
                 block_size=16,
                 num_kv_heads=1,
-                head_size=128 if name.endswith("mla") else 32,
+                head_size=31 if name.endswith("mla") else 17,
                 dtype=torch.bfloat16,
             )
             for name in names
@@ -76,7 +77,6 @@ def _runtime_worker(rank: int, port: int, world_size: int):
                 for i in range(num_layers)
             )
             + (KVCacheBundle(("draft",), None),),
-            alignment=2 * 1024 * 1024,
         )
         config = build_kv_cache_storage(config, placement, KVCacheLayout.LBNHC)
         caches = allocate_kv_cache(
@@ -86,12 +86,17 @@ def _runtime_worker(rank: int, port: int, world_size: int):
         caches["draft"].fill_(111 + rank)
         observations = []
         for step in range(5):
-            with set_forward_context(None, vllm_config), kvpp_runtime.forward(step > 0):
+            with set_forward_context(None, vllm_config, kvpp_runtime=kvpp_runtime):
+                kvpp_forward(kvpp_runtime, np.array([step], dtype=np.int32))
                 for index, bundle in enumerate(placement.bundles[:-1]):
                     # Delay compute to expose premature scratch reuse.
-                    kvpp_runtime.acquire(bundle.layers[1])
+                    acquire_kv_cache(bundle.layers[1])
+                    if step == 1 and index == 0:
+                        # Reject reuse without discarding the pending prefetch.
+                        with pytest.raises(AssertionError, match="Previous KVPP"):
+                            kvpp_forward(kvpp_runtime, np.array([step], dtype=np.int32))
                     torch.cuda._sleep(100_000)
-                    kvpp_runtime.acquire(bundle.layers[0])
+                    acquire_kv_cache(bundle.layers[0])
                     for component, name in enumerate(bundle.layers):
                         if step:
                             observations.append(
@@ -101,7 +106,7 @@ def _runtime_worker(rank: int, port: int, world_size: int):
                                 )
                             )
                         caches[name].fill_(10 * index + component + step)
-                    kvpp_runtime.release(bundle.layers[0])
+                    release_kv_cache(bundle.layers[0])
             # Do not synchronize between steps: next-step broadcasts must also
             # wait for the previous owner's writes and receiver scratch use.
         torch.cuda.synchronize()

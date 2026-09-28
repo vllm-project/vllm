@@ -256,6 +256,7 @@ def create_forward_context(
     additional_kwargs: dict[str, Any] | None = None,
     skip_compiled: bool = False,
     is_padding: torch.Tensor | None = None,
+    kvpp_runtime: "KVPPRuntime | None" = None,
 ):
     if vllm_config.compilation_config.fast_moe_cold_start:
         all_moe_layers = vllm_config.compilation_config.static_all_moe_layers
@@ -274,6 +275,7 @@ def create_forward_context(
         skip_compiled=skip_compiled,
         additional_kwargs=additional_kwargs or {},
         is_padding=is_padding,
+        kvpp_runtime=kvpp_runtime,
     )
 
 
@@ -304,6 +306,7 @@ def set_forward_context(
     slot_mapping: dict[str, torch.Tensor] | list[dict[str, torch.Tensor]] | None = None,
     skip_compiled: bool = False,
     is_padding: torch.Tensor | None = None,
+    kvpp_runtime: "KVPPRuntime | None" = None,
 ):
     """A context manager that stores the current forward context,
     can be attention metadata, etc.
@@ -373,6 +376,7 @@ def set_forward_context(
         additional_kwargs,
         skip_compiled,
         is_padding=is_padding,
+        kvpp_runtime=kvpp_runtime,
     )
 
     try:

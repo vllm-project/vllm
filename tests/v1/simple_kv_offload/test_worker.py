@@ -559,7 +559,6 @@ def test_layer_sharded_offload_roundtrip_excludes_scratch(rank):
         rank,
         2,
         tuple(KVCacheBundle(tuple(names[2 * i : 2 * i + 2]), i % 2) for i in range(5)),
-        alignment=2 * 1024 * 1024,
     )
     config = build_kv_cache_storage(
         KVCacheConfig(4, [], [group]), placement, KVCacheLayout.LBNHC

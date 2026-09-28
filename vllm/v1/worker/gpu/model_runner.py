@@ -1944,33 +1944,28 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 slot_mapping=slot_mappings_by_layer,
                 skip_compiled=skip_compiled,
                 is_padding=input_batch.is_padding,
+                kvpp_runtime=self.kvpp_runtime,
             ):
                 self.kv_connector.pre_forward(**connector_kwargs)
-                with kvpp_forward(
+                kvpp_forward(
                     self.kvpp_runtime,
-                    bool(
-                        self.kvpp_runtime is not None
-                        and np.any(
-                            input_batch.num_computed_tokens_np[: input_batch.num_reqs]
-                            > 0
-                        )
-                    ),
-                ):
-                    if ubatch_state is not None:
-                        assert self.ubatch_runner is not None
-                        model_output = self.ubatch_runner.run(
-                            self.model, model_inputs, ubatch_state
-                        )
-                    elif batch_desc.cg_mode == CUDAGraphMode.PIECEWISE:
-                        # Run the PIECEWISE graph (compiled PW cudagraph or
-                        # breakable cudagraph, chosen inside run_pw_graph).
-                        assert self.cudagraph_manager is not None
-                        model_output = self.cudagraph_manager.run_pw_graph(
-                            self.model, model_inputs
-                        )
-                    else:
-                        # Eager (NONE): call the raw model directly.
-                        model_output = self.model(**model_inputs)
+                    input_batch.num_computed_tokens_np[: input_batch.num_reqs],
+                )
+                if ubatch_state is not None:
+                    assert self.ubatch_runner is not None
+                    model_output = self.ubatch_runner.run(
+                        self.model, model_inputs, ubatch_state
+                    )
+                elif batch_desc.cg_mode == CUDAGraphMode.PIECEWISE:
+                    # Run the PIECEWISE graph (compiled PW cudagraph or
+                    # breakable cudagraph, chosen inside run_pw_graph).
+                    assert self.cudagraph_manager is not None
+                    model_output = self.cudagraph_manager.run_pw_graph(
+                        self.model, model_inputs
+                    )
+                else:
+                    # Eager (NONE): call the raw model directly.
+                    model_output = self.model(**model_inputs)
 
         self.kv_connector.finish_forward()
 

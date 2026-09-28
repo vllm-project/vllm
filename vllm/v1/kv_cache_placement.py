@@ -4,7 +4,6 @@
 
 from dataclasses import dataclass, replace
 
-from vllm.utils.math_utils import round_up
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheConfig,
@@ -36,7 +35,6 @@ class KVCachePlacement:
     rank: int
     world_size: int
     bundles: tuple[KVCacheBundle, ...]
-    alignment: int = 256
     scratch_slots: int = 2
 
     def __post_init__(self) -> None:
@@ -44,8 +42,6 @@ class KVCachePlacement:
             raise ValueError("KV placement requires at least one cache bundle.")
         if not 0 <= self.rank < self.world_size:
             raise ValueError("Invalid KV cache placement rank.")
-        if self.alignment <= 0 or self.alignment & (self.alignment - 1):
-            raise ValueError("KV cache alignment must be a positive power of two.")
         if self.scratch_slots < 2:
             raise ValueError("Layer prefetch requires at least two scratch slots.")
         names = [name for bundle in self.bundles for name in bundle.layers]
@@ -71,11 +67,6 @@ class KVCacheStoragePlan:
     placement: KVCachePlacement
     regions: tuple[KVCacheBundleRegion, ...]
     backing_size: int
-
-    @property
-    def allocation_bytes(self) -> int:
-        # The allocator may need to advance to the requested base alignment.
-        return self.backing_size + self.placement.alignment - 1
 
     @property
     def persistent_layers(self) -> tuple[str, ...]:
@@ -146,7 +137,6 @@ def build_kv_cache_storage(
     if any(group.host_resident for group in config.kv_cache_groups):
         raise ValueError("Layer-sharded KV does not support host-resident groups.")
 
-    alignment = placement.alignment
     component_offsets: list[dict[str, int]] = []
     bundle_sizes = []
     for bundle in placement.bundles:
@@ -156,11 +146,10 @@ def build_kv_cache_storage(
             spec = specs[name]
             if not spec.has_layer_views:
                 raise ValueError(f"KV placement needs a layer view for {name}.")
-            offset = round_up(offset, alignment)
             offsets[name] = offset
             offset += spec.page_size_bytes * config.num_blocks
         component_offsets.append(offsets)
-        bundle_sizes.append(round_up(offset, alignment))
+        bundle_sizes.append(offset)
 
     scratch_size = max(
         (
@@ -212,27 +201,15 @@ def fit_kv_cache_storage(
     layout: KVCacheLayout,
     available_bytes: int,
 ) -> int:
-    """Find the largest allocatable block count including alignment padding."""
+    """Convert the packed bytes per logical block to an allocatable count."""
     if available_bytes < 0:
         raise ValueError("Available KV memory must be nonnegative.")
 
-    def fits(num_blocks: int) -> bool:
-        candidate = build_kv_cache_storage(
-            replace(config, num_blocks=num_blocks), placement, layout
-        )
-        assert candidate.storage_plan is not None
-        return candidate.storage_plan.allocation_bytes <= available_bytes
-
-    low, high = 0, 1
-    while fits(high):
-        low, high = high, high * 2
-    while low + 1 < high:
-        middle = (low + high) // 2
-        if fits(middle):
-            low = middle
-        else:
-            high = middle
-    return low
+    single_block = build_kv_cache_storage(
+        replace(config, num_blocks=1), placement, layout
+    )
+    assert single_block.storage_plan is not None
+    return available_bytes // single_block.storage_plan.backing_size
 
 
 def get_layer_sharded_capacity(
