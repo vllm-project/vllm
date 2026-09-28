@@ -38,20 +38,18 @@ class KVCachePlacement:
     scratch_slots: int = 2
 
     def __post_init__(self) -> None:
-        if not self.bundles:
-            raise ValueError("KV placement requires at least one cache bundle.")
-        if not 0 <= self.rank < self.world_size:
-            raise ValueError("Invalid KV cache placement rank.")
-        if self.scratch_slots < 2:
-            raise ValueError("Layer prefetch requires at least two scratch slots.")
+        assert self.bundles, "KV placement requires at least one cache bundle."
+        assert 0 <= self.rank < self.world_size, "Invalid KV cache placement rank."
+        assert self.scratch_slots >= 2, (
+            "Layer prefetch requires at least two scratch slots."
+        )
         names = [name for bundle in self.bundles for name in bundle.layers]
-        if len(names) != len(set(names)) or any(not b.layers for b in self.bundles):
-            raise ValueError("Every KV cache component must occur in one bundle.")
-        if any(
-            b.owner is not None and not 0 <= b.owner < self.world_size
-            for b in self.bundles
-        ):
-            raise ValueError("KV cache owner is outside its replica domain.")
+        assert len(names) == len(set(names)) and all(b.layers for b in self.bundles), (
+            "Every KV cache component must occur in one bundle."
+        )
+        assert all(
+            b.owner is None or 0 <= b.owner < self.world_size for b in self.bundles
+        ), "KV cache owner is outside its replica domain."
 
 
 @dataclass(frozen=True)
@@ -132,8 +130,9 @@ def build_kv_cache_storage(
         raise ValueError("KV storage must include at least the null block.")
     specs = layer_specs(config.kv_cache_groups)
     names = {name for bundle in placement.bundles for name in bundle.layers}
-    if names != set(specs):
-        raise ValueError("KV placement must cover the complete worker cache spec.")
+    assert names == set(specs), (
+        "KV placement must cover the complete worker cache spec."
+    )
     if any(group.host_resident for group in config.kv_cache_groups):
         raise ValueError("Layer-sharded KV does not support host-resident groups.")
 

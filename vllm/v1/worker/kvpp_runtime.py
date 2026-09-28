@@ -125,8 +125,9 @@ class KVPPRuntime:
         # Auxiliary indexer accesses end before the bundle's main attention.
         if layer_name != region.bundle.layers[0]:
             return
-        if self.active_index != index:
-            raise RuntimeError(f"KVPP release without acquisition: {layer_name}.")
+        assert self.active_index == index, (
+            f"KVPP release without acquisition: {layer_name}."
+        )
         if region.scratch_slot is not None:
             done = torch.cuda.Event()
             done.record(torch.cuda.current_stream())
