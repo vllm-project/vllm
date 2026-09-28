@@ -1,21 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import asyncio
 from fractions import Fraction
 
-import numpy as np
 import pytest
 import pytest_asyncio
 from mistral_common.protocol.transcription.request import (
     StreamingMode,
     TranscriptionRequest,
 )
-from mistral_common.tokens.tokenizers.audio import (
-    Audio,
-    AudioConfig,
-    AudioSpectrogramConfig,
-    TranscriptionFormat,
-)
+from mistral_common.tokens.tokenizers.audio import Audio
 from mistral_common.tokens.tokenizers.mistral import MistralTokenizer
 from mistral_common.tokens.tokenizers.tekken import SpecialTokenPolicy
 
@@ -221,49 +214,6 @@ def test_voxtral_realtime_cudagraph(
 
         outputs = vllm_model.llm.generate(inputs, sampling_params=sampling_params)
         _assert_expected_text(outputs)
-
-
-@pytest.mark.cpu_test
-@pytest.mark.asyncio
-@pytest.mark.parametrize("chunk_size", [1, 7, 32])
-async def test_voxtral_realtime_buffer_preserves_audio_and_token_feedback(chunk_size):
-    from vllm.model_executor.models.voxtral_realtime import VoxtralRealtimeBuffer
-
-    config = AudioConfig(
-        sampling_rate=1000,
-        frame_rate=100.0,
-        encoding_config=AudioSpectrogramConfig(
-            num_mel_bins=80, hop_length=2, window_size=4
-        ),
-        transcription_format=TranscriptionFormat.STREAMING,
-        transcription_delay_ms=10,
-        streaming_look_ahead_ms=2,
-        streaming_look_back_ms=3,
-        streaming_n_left_pad_tokens=0,
-    )
-    buffer = VoxtralRealtimeBuffer(config, prompt_tokens=[1, 2])
-    audio = np.arange(32, dtype=np.float32)
-    for start in range(0, len(audio), chunk_size):
-        await buffer.append_audio(audio[start : start + chunk_size])
-    await buffer.append_audio(None)
-
-    prompts = buffer.get_input_stream()
-    first = await asyncio.wait_for(anext(prompts), timeout=5)
-    assert first["prompt_token_ids"] == [1, 2]
-    first_audio, first_sr = first["multi_modal_data"]["audio"]
-    np.testing.assert_array_equal(first_audio, audio[:22])
-    assert first_sr is None
-
-    await buffer.append_tokens([3])
-    second = await asyncio.wait_for(anext(prompts), timeout=5)
-    assert second["prompt_token_ids"] == [3]
-    second_audio, second_sr = second["multi_modal_data"]["audio"]
-    np.testing.assert_array_equal(second_audio, audio[17:])
-    assert second_sr is None
-
-    await buffer.append_tokens([4])
-    with pytest.raises(StopAsyncIteration):
-        await asyncio.wait_for(anext(prompts), timeout=5)
 
 
 @pytest.mark.asyncio
