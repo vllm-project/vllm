@@ -38,8 +38,27 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
-_PER_EXPERT_PATTERN = re.compile(r"experts\.(\d+)\.([^.]+)\.")
-_QUAL_NAME_PATTERN = re.compile(r"experts\.(\d+)\.([^.]+)")
+
+def _index_expert_mapping(
+    mapping: list[tuple[str, str, int, str]],
+) -> dict[str, list[tuple[str, str, int, str]]]:
+    """Index by logical checkpoint ID, preserving entry order and EPLB replicas.
+
+    An empty index keeps the full scan for unsupported mapping names.
+    """
+    mapping_by_expert: dict[str, list[tuple[str, str, int, str]]] = {}
+    for entry in mapping:
+        prefix, _, suffix = entry[1].partition(".")
+        expert_key, sep, _ = suffix.partition(".")
+        if (
+            prefix != "experts"
+            or not expert_key
+            or (expert_key.isdecimal() and not sep)
+        ):
+            return {}
+        if expert_key.isdecimal():
+            mapping_by_expert.setdefault(expert_key, []).append(entry)
+    return mapping_by_expert
 
 
 class FusedMoeWeightScaleSupported(Enum):
@@ -1080,43 +1099,22 @@ class RoutedExperts(PluggableLayer):
         self, weights: Iterable[tuple[str, torch.Tensor]]
     ) -> Iterable[str]:
         expert_mapping = self.get_expert_mapping(include_fused=True)
-
-        # Pre-index mapping into fast O(1) lookups to avoid O(N) string checks per key
-        per_expert_fast_map: dict[tuple[int, str], list[tuple[str, str, int, str]]] = (
-            defaultdict(list)
-        )
-        fused_fast_entries: list[tuple[str, str, int, str]] = []
-        for entry in expert_mapping:
-            m = _PER_EXPERT_PATTERN.search(entry[1])
-            if m:
-                per_expert_fast_map[(int(m.group(1)), m.group(2))].append(entry)
-            else:
-                fused_fast_entries.append(entry)
-        # Sort fused entries by weight_name length descending so longer suffixes
-        # (e.g. .weight_scale, .weight_scale_inv) match before shorter prefixes
-        fused_fast_entries.sort(key=lambda x: len(x[1]), reverse=True)
+        mapping_by_expert = _index_expert_mapping(expert_mapping)
 
         for expert_name, loaded_weight in weights:
             qual_name = f"{self.layer_name}.{expert_name}"
-            # Fused expert weights can be identified by their 3D tensors
             is_fused = loaded_weight.dim() == 3
-
-            qm = _QUAL_NAME_PATTERN.search(qual_name) if not is_fused else None
-            if qm:
-                candidate_mapping = per_expert_fast_map.get(
-                    (int(qm.group(1)), qm.group(2))
-                )
-                if candidate_mapping is None:
-                    candidate_mapping = expert_mapping
-            elif is_fused:
-                candidate_mapping = fused_fast_entries
-            else:
-                candidate_mapping = expert_mapping
+            # Fused tensors and ambiguous names keep the full mapping.
+            candidates = expert_mapping
+            if not is_fused and qual_name.count("experts.") == 1:
+                expert_key = qual_name.partition("experts.")[2].partition(".")[0]
+                candidates = mapping_by_expert.get(expert_key, expert_mapping)
 
             matched = False
-            for param_name, weight_name, expert_id, shard_id in candidate_mapping:
+            for param_name, weight_name, expert_id, shard_id in candidates:
                 if weight_name not in qual_name:
                     if matched and is_fused:
+                        # Fused tensors use the first contiguous run of matches.
                         break
                     continue
                 matched = True
@@ -1132,10 +1130,7 @@ class RoutedExperts(PluggableLayer):
                 param_name = weight_name.removeprefix(f"{self.layer_name}.")
                 param = getattr(self, param_name, None)
                 if param is None:
-                    if (
-                        param_name.endswith(("w13_bias", "w2_bias"))
-                        or "scale" in param_name
-                    ):
+                    if param_name.endswith(("w13_bias", "w2_bias")):
                         continue
                     raise AttributeError(
                         f"Layer {self.layer_name} has no parameter {param_name!r} "
@@ -1176,12 +1171,18 @@ class RoutedExperts(PluggableLayer):
 
                 # Fast path 1: bulk 3D loading for fused checkpoints
                 # under TP / linear EP
+                moe_config = getattr(self, "moe_config", None)
+                parallel_config = (
+                    getattr(moe_config, "moe_parallel_config", None)
+                    if moe_config is not None
+                    else None
+                )
                 is_ep = (
-                    getattr(self.moe_config, "enable_expert_parallel", False)
-                    and getattr(self.moe_config.moe_parallel_config, "ep_size", 1) > 1
+                    getattr(moe_config, "enable_expert_parallel", False)
+                    and getattr(parallel_config, "ep_size", 1) > 1
                 )
                 ep_size = (
-                    getattr(self.moe_config.moe_parallel_config, "ep_size", 1)
+                    getattr(parallel_config, "ep_size", 1)
                     if is_ep
                     else 1
                 )
@@ -1197,7 +1198,7 @@ class RoutedExperts(PluggableLayer):
                         or (
                             is_ep
                             and getattr(
-                                self.moe_config, "expert_placement_strategy", "linear"
+                                moe_config, "expert_placement_strategy", "linear"
                             )
                             == "linear"
                             and (
@@ -1214,7 +1215,7 @@ class RoutedExperts(PluggableLayer):
                         and experts_shard.shape[0] == param.data.shape[0] * ep_size
                     ):
                         ep_rank = getattr(
-                            self.moe_config.moe_parallel_config, "ep_rank", 0
+                            parallel_config, "ep_rank", 0
                         )
                         num_local_experts = param.data.shape[0]
                         bulk_weight = bulk_weight.narrow(
@@ -1260,7 +1261,8 @@ class RoutedExperts(PluggableLayer):
                         )
                         yield param_name
 
-        self.flush_host_staging()
+        if hasattr(self, "flush_host_staging"):
+            self.flush_host_staging()
 
     def get_expert_mapping(
         self,
@@ -1397,171 +1399,12 @@ class RoutedExperts(PluggableLayer):
                     ckpt_up_proj_name,
                 )
             if gate_up is not None:
-                # 3D consolidated entries: place longer suffixes first to
-                # prevent substring collision in model loaders.
-                # When routed_experts_prefix is non-empty, anchor with a
-                # leading dot so '.experts.' does not collide with
-                # 'shared_experts.' substrings.
-                prefix_sep = "." if routed_experts_prefix != "" else ""
                 fused_mapping = [
                     # (param_name, weight_name, expert_id, shard_id)
-                    # Quant scale variants with longer suffixes first
-                    (
-                        f"{prefix_sep}{w13}weight_scale_inv",
-                        f"{prefix_sep}experts.gate_up_proj.weight_scale_inv",
-                        0,
-                        "w13",
-                    ),
-                    (
-                        f"{prefix_sep}{w2}weight_scale_inv",
-                        f"{prefix_sep}experts.down_proj.weight_scale_inv",
-                        0,
-                        "w2",
-                    ),
-                    (
-                        f"{prefix_sep}{w13}weight_scale_2",
-                        f"{prefix_sep}experts.gate_up_proj.weight_scale_2",
-                        0,
-                        "w13",
-                    ),
-                    (
-                        f"{prefix_sep}{w2}weight_scale_2",
-                        f"{prefix_sep}experts.down_proj.weight_scale_2",
-                        0,
-                        "w2",
-                    ),
-                    (
-                        f"{prefix_sep}{w13}weight_scale",
-                        f"{prefix_sep}experts.gate_up_proj.weight_scale",
-                        0,
-                        "w13",
-                    ),
-                    (
-                        f"{prefix_sep}{w2}weight_scale",
-                        f"{prefix_sep}experts.down_proj.weight_scale",
-                        0,
-                        "w2",
-                    ),
-                    (
-                        f"{prefix_sep}{w13}input_scale",
-                        f"{prefix_sep}experts.gate_up_proj.input_scale",
-                        0,
-                        "w13",
-                    ),
-                    (
-                        f"{prefix_sep}{w2}input_scale",
-                        f"{prefix_sep}experts.down_proj.input_scale",
-                        0,
-                        "w2",
-                    ),
-                    # Base weights
-                    (
-                        f"{prefix_sep}{w13}weight",
-                        f"{prefix_sep}experts.gate_up_proj.weight",
-                        0,
-                        "w13",
-                    ),
-                    (
-                        f"{prefix_sep}{w13}weight",
-                        f"{prefix_sep}experts.gate_up_proj",
-                        0,
-                        "w13",
-                    ),
-                    (
-                        f"{prefix_sep}{w2}weight",
-                        f"{prefix_sep}experts.down_proj.weight",
-                        0,
-                        "w2",
-                    ),
-                    (
-                        f"{prefix_sep}{w2}weight",
-                        f"{prefix_sep}experts.down_proj",
-                        0,
-                        "w2",
-                    ),
+                    (f"{w13}weight", f"experts.{gate_up}", 0, "w1"),
+                    (f"{w13}weight", f"experts.{gate_up}", 1, "w3"),
+                    (f"{w2}weight", f"experts.{ckpt_down_proj_name}", 0, "w2"),
                 ]
-                if gate_up != "gate_up_proj":
-                    fused_mapping.extend(
-                        [
-                            (
-                                f"{prefix_sep}{w13}weight_scale_inv",
-                                f"{prefix_sep}experts.{gate_up}.weight_scale_inv",
-                                0,
-                                "w13",
-                            ),
-                            (
-                                f"{prefix_sep}{w13}weight_scale_2",
-                                f"{prefix_sep}experts.{gate_up}.weight_scale_2",
-                                0,
-                                "w13",
-                            ),
-                            (
-                                f"{prefix_sep}{w13}weight_scale",
-                                f"{prefix_sep}experts.{gate_up}.weight_scale",
-                                0,
-                                "w13",
-                            ),
-                            (
-                                f"{prefix_sep}{w13}input_scale",
-                                f"{prefix_sep}experts.{gate_up}.input_scale",
-                                0,
-                                "w13",
-                            ),
-                            (
-                                f"{prefix_sep}{w13}weight",
-                                f"{prefix_sep}experts.{gate_up}.weight",
-                                0,
-                                "w13",
-                            ),
-                            (
-                                f"{prefix_sep}{w13}weight",
-                                f"{prefix_sep}experts.{gate_up}",
-                                0,
-                                "w13",
-                            ),
-                        ]
-                    )
-                if ckpt_down_proj_name != "down_proj":
-                    fused_mapping.extend(
-                        [
-                            (
-                                f"{prefix_sep}{w2}weight_scale_inv",
-                                f"{prefix_sep}experts.{ckpt_down_proj_name}.weight_scale_inv",
-                                0,
-                                "w2",
-                            ),
-                            (
-                                f"{prefix_sep}{w2}weight_scale_2",
-                                f"{prefix_sep}experts.{ckpt_down_proj_name}.weight_scale_2",
-                                0,
-                                "w2",
-                            ),
-                            (
-                                f"{prefix_sep}{w2}weight_scale",
-                                f"{prefix_sep}experts.{ckpt_down_proj_name}.weight_scale",
-                                0,
-                                "w2",
-                            ),
-                            (
-                                f"{prefix_sep}{w2}input_scale",
-                                f"{prefix_sep}experts.{ckpt_down_proj_name}.input_scale",
-                                0,
-                                "w2",
-                            ),
-                            (
-                                f"{prefix_sep}{w2}weight",
-                                f"{prefix_sep}experts.{ckpt_down_proj_name}.weight",
-                                0,
-                                "w2",
-                            ),
-                            (
-                                f"{prefix_sep}{w2}weight",
-                                f"{prefix_sep}experts.{ckpt_down_proj_name}",
-                                0,
-                                "w2",
-                            ),
-                        ]
-                    )
                 fused_mapping.extend(
                     (
                         w13,
