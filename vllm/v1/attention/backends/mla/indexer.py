@@ -200,7 +200,7 @@ class DeepseekV32IndexerBackend(AttentionBackend):
         return "DEEPSEEK_V32_INDEXER"
 
     @staticmethod
-    def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
+    def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int | MultipleOf]:
         return [1, MultipleOf(16)] if current_platform.is_rocm() else [64]
 
     @classmethod
@@ -228,7 +228,7 @@ class KpoolTailBackend(DeepseekV32IndexerBackend):
         return []
 
     @staticmethod
-    def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
+    def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int | MultipleOf]:
         return [MultipleOf(1)]
 
     @staticmethod
@@ -237,6 +237,15 @@ class KpoolTailBackend(DeepseekV32IndexerBackend):
 
 
 class DeepseekV4IndexerBackend(DeepseekV32IndexerBackend):
+    @classmethod
+    def supports_device_cpu_query_lens_mismatch(cls) -> bool:
+        # ROCm runs adaptive verification through the per-token flattened
+        # indexer path, which derives row ownership from device decode lengths.
+        return (
+            current_platform.is_rocm()
+            or super().supports_device_cpu_query_lens_mismatch()
+        )
+
     @staticmethod
     def get_name() -> str:
         return "DEEPSEEK_V4_INDEXER"
@@ -248,18 +257,24 @@ class DeepseekV4IndexerBackend(DeepseekV32IndexerBackend):
         return (KVCacheLayout.BLHNC, KVCacheLayout.BLNHC)
 
     @staticmethod
-    def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
+    def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int | MultipleOf]:
         # Block sizes count uncompressed tokens: C4 indexer pages hold 64 rows.
         return [256]
 
 
 class DeepseekV41IndexerBackend(DeepseekV4IndexerBackend):
+    @classmethod
+    def supports_device_cpu_query_lens_mismatch(cls) -> bool:
+        # The ROCm flattened-query support above is validated for the
+        # DeepSeek-V4 adaptive DSpark path only.
+        return DeepseekV32IndexerBackend.supports_device_cpu_query_lens_mismatch()
+
     @staticmethod
     def get_name() -> str:
         return "DEEPSEEK_V41_INDEXER"
 
     @staticmethod
-    def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
+    def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int | MultipleOf]:
         return [64 if current_platform.is_device_capability_family(90) else 128]
 
 
@@ -802,6 +817,15 @@ def _supports_flattened_device_query_lens() -> bool:
     )
 
 
+def _rocm_supports_flattened_device_query_lens(vllm_config: VllmConfig) -> bool:
+    model_config = vllm_config.model_config
+    return (
+        current_platform.is_rocm()
+        and model_config is not None
+        and "DeepseekV4ForCausalLM" in model_config.architectures
+    )
+
+
 def _supports_native_decode(next_n: int) -> bool:
     """Whether decode can pass `next_n` Q rows per request to the kernel
     instead of flattening to one single-token row per query, which re-reads
@@ -822,7 +846,10 @@ def _use_flattening(vllm_config: VllmConfig) -> bool:
     return not _supports_native_decode(next_n) or (
         speculative_config is not None
         and speculative_config.enable_adaptive_verification
-        and _supports_flattened_device_query_lens()
+        and (
+            _supports_flattened_device_query_lens()
+            or _rocm_supports_flattened_device_query_lens(vllm_config)
+        )
     )
 
 
