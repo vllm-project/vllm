@@ -3,20 +3,18 @@
 
 import json
 import time
+from http import HTTPStatus
 from typing import TYPE_CHECKING, Literal, TypeAlias
 
-from fastapi import UploadFile
+from fastapi import HTTPException, UploadFile
 from pydantic import (
     Field,
     model_validator,
 )
 
 from vllm.config.speech_to_text import SpeechToTextParams
-from vllm.entrypoints.openai.engine.protocol import (
-    DeltaMessage,
-    OpenAIBaseModel,
-    UsageInfo,
-)
+from vllm.entrypoints.generate.base.protocol import DeltaMessage
+from vllm.entrypoints.serve.engine.protocol import OpenAIBaseModel, UsageInfo
 from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
 from vllm.sampling_params import (
@@ -273,6 +271,11 @@ class TranslationRequest(OpenAIBaseModel):
     def validate_stream_options(cls, data):
         if not isinstance(data, dict):
             return data
+        if isinstance(data.get("file"), str):
+            raise HTTPException(
+                status_code=HTTPStatus.UNPROCESSABLE_ENTITY,
+                detail="Expected 'file' to be a file-like object, not 'str'.",
+            )
         stream_opts = ["stream_include_usage", "stream_continuous_usage_stats"]
         stream = data.get("stream", False)
         if any(bool(data.get(so, False)) for so in stream_opts) and not stream:

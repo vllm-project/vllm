@@ -205,6 +205,7 @@ def detokenize_incrementally(
         skip_special_tokens: Whether to skip special tokens.
         spaces_between_special_tokens: Whether to add spaces between special
             tokens.
+
     """
     new_token_id = all_input_ids[-1]
     # This is the first iteration for this sequence

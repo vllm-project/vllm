@@ -1204,6 +1204,40 @@ Full example: [examples/generate/multimodal/openai_chat_completion_client_for_mu
     export VLLM_AUDIO_FETCH_TIMEOUT=<timeout>
     ```
 
+#### Audio Decoding Backend
+
+vLLM decodes audio bytes into waveforms using a selectable decoding backend:
+
+| Backend | Description |
+| --- | --- |
+| `auto` (default) | soundfile, falling back to torchcodec, then PyAV |
+| `soundfile` | libsndfile only, no fallback |
+| `pyav` | PyAV (FFmpeg) only, no fallback |
+| `torchcodec` | TorchCodec (PyTorch-native) only, no fallback |
+
+Select the backend per server via `--media-io-kwargs`:
+
+```bash
+vllm serve mistralai/Voxtral-Mini-3B-2507 \
+  --media-io-kwargs '{"audio": {"audio_backend": "soundfile"}}'
+```
+
+!!! tip
+    `pyav` drives FFmpeg through a per-frame Python generator, so under
+    concurrency the Python/C crossings contend on the GIL. `torchcodec`
+    decodes each stream in a single call that releases the GIL for its whole
+    duration. Select it explicitly for concurrent decoding workloads.
+    `auto` prefers soundfile for supported formats to preserve their existing
+    decoding behavior, including encoder padding. Audio extracted from formats
+    that soundfile cannot read, such as video containers, can use torchcodec
+    through the fallback chain.
+
+!!! note
+    `torchcodec` ships as a requirement on CUDA, CPU and XPU builds. On other
+    platforms (e.g. ROCm, TPU), install it manually to enable that backend.
+    torchcodec also links against a system FFmpeg installation. If the package
+    or FFmpeg is unavailable, `auto` uses the soundfile → PyAV chain.
+
 ### Embedding Inputs
 
 To input pre-computed embeddings belonging to a data type (i.e. image, video, or audio) directly to the language model,
@@ -1364,6 +1398,13 @@ Just like with offline inference, you can skip sending media if you expect cache
             "type": "image_pil",
             "image_pil": None,
             "uuid": image_uuid,
+        },
+
+        # video_url:
+        {
+            "type": "video_url",
+            "video_url": {},
+            "uuid": video_uuid,
         },
 
     ```

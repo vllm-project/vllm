@@ -75,6 +75,7 @@ def parse_thinking_output(text: str) -> dict[str, str | None]:
         >>> result = parse_thinking_output(output_text)
         >>> print(result["thinking"])  # chain-of-thought reasoning or None
         >>> print(result["answer"])    # final answer
+
     """
     if _THINKING_END_TAG in text:
         parts = text.split(_THINKING_END_TAG, 1)

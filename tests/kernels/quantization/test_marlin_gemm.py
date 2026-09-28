@@ -17,7 +17,8 @@ from vllm.model_executor.layers.quantization.utils.int8_utils import (
     per_token_quant_int8,
 )
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
-    marlin_make_empty_g_idx,
+    get_marlin_workspace,
+    marlin_make_empty,
     marlin_make_workspace_new,
     marlin_permute_bias,
     query_marlin_supported_quant_types,
@@ -40,10 +41,10 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     gptq_pack,
     gptq_quantize_weights,
     quantize_weights,
-    sort_weights,
 )
 from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
+from vllm.v1.worker.workspace import current_workspace_manager
 
 if current_platform.is_rocm():
     pytest.skip(
@@ -51,8 +52,6 @@ if current_platform.is_rocm():
         allow_module_level=True,
     )
 
-ACT_ORDER_OPTS = [False, True]
-K_FULL_OPTS = [False, True]
 USE_ATOMIC_ADD_OPTS = [False, True]
 USE_FP32_REDUCE_OPTS = [True]
 
@@ -80,13 +79,11 @@ DENSE_MARLIN_QUANT_TEST_CONFIGS = [
     # GPTQ-INT4
     {
         "b_type": scalar_types.uint4b8,
-        "support_act_order": True,
         "group_blocks": [-1, 2, 4, 8],
     },
     # GPTQ-INT8
     {
         "b_type": scalar_types.uint8b128,
-        "support_act_order": True,
         "group_blocks": [-1, 2, 4, 8],
     },
     # FP8
@@ -202,26 +199,14 @@ def test_marlin_int4_fp8_preprocess_awq():
 @pytest.mark.parametrize("k_chunk", MARLIN_K_CHUNKS)
 @pytest.mark.parametrize("n_chunk", MARLIN_N_CHUNKS)
 @pytest.mark.parametrize("quant_type", query_marlin_supported_quant_types(False, False))
-@pytest.mark.parametrize("act_order", ACT_ORDER_OPTS)
 @pytest.mark.parametrize("is_a_8bit", [True, False])
 @pytest.mark.parametrize("nk_factors", MARLIN_REPACK_NK_FACTORS)
-def test_gptq_marlin_repack(
-    k_chunk, n_chunk, quant_type, act_order, is_a_8bit, nk_factors
-):
+def test_gptq_marlin_repack(k_chunk, n_chunk, quant_type, is_a_8bit, nk_factors):
     n_factor, k_factor = nk_factors
 
     size_k = k_chunk * k_factor
     size_n = n_chunk * n_factor
     group_size = 128
-
-    # Filter act_order
-    if act_order:
-        if group_size == -1:
-            return
-        if group_size == size_k:
-            return
-        if is_a_8bit:
-            return
 
     # Normalize group_size
     if group_size == -1:
@@ -231,19 +216,11 @@ def test_gptq_marlin_repack(
     # Create input
     b_weight = rand_data((size_k, size_n))
 
-    # Quantize (and apply act_order if provided)
-    w_ref, q_w, s, g_idx, rand_perm = gptq_quantize_weights(
-        b_weight, quant_type, group_size, act_order
-    )
+    # Quantize
+    _, q_w, _ = gptq_quantize_weights(b_weight, quant_type, group_size)
 
     # Pack to GPTQ format
     q_w_gptq = gptq_pack(q_w, quant_type.size_bits, size_k, size_n)
-
-    # For act_order, sort the "weights" and "g_idx" so that group ids are
-    # increasing
-    sort_indices = torch.empty(0, dtype=torch.int, device=b_weight.device)
-    if act_order:
-        q_w, g_idx, sort_indices = sort_weights(q_w, g_idx)
 
     # Pack to Marlin format
     weight_perm = get_weight_perm(quant_type.size_bits, is_a_8bit)
@@ -253,12 +230,12 @@ def test_gptq_marlin_repack(
 
     opcheck(
         torch.ops._C.gptq_marlin_repack,
-        (q_w_gptq, sort_indices, size_k, size_n, quant_type.size_bits, is_a_8bit),
+        (q_w_gptq, size_k, size_n, quant_type.size_bits, is_a_8bit),
     )
 
     # Run Marlin repack GPU kernel
     marlin_q_w_2 = ops.gptq_marlin_repack(
-        q_w_gptq, sort_indices, size_k, size_n, quant_type.size_bits, is_a_8bit
+        q_w_gptq, size_k, size_n, quant_type.size_bits, is_a_8bit
     )
     torch.accelerator.synchronize()
 
@@ -319,8 +296,6 @@ def marlin_generate_valid_test_cases():
         MNK_FACTORS,
         MARLIN_N_CHUNKS,
         MARLIN_K_CHUNKS,
-        ACT_ORDER_OPTS,
-        K_FULL_OPTS,
         USE_ATOMIC_ADD_OPTS,
         USE_FP32_REDUCE_OPTS,
     )
@@ -333,8 +308,6 @@ def marlin_generate_valid_test_cases():
         size_m,
         size_n,
         size_k,
-        act_order,
-        is_k_full,
         use_atomic_add,
         use_fp32_reduce,
     ):
@@ -351,24 +324,17 @@ def marlin_generate_valid_test_cases():
         if group_size > 0 and size_k % group_size != 0:
             return False
 
-        if act_order and group_size in [-1, size_k]:
-            return False
         if group_size == size_k:
-            return False
-        if not act_order and is_k_full:
             return False
 
         return a_type.size_bits < 16 or a_type is c_type
 
     cases = []
     for case in all_combinations:
-        quant_test_config, mnk_factors, n_chunk, k_chunk, act_order, *_ = case
+        quant_test_config, mnk_factors, n_chunk, k_chunk, *_ = case
         size_m = mnk_factors[0]
         size_n = mnk_factors[1] * n_chunk
         size_k = mnk_factors[2] * k_chunk
-
-        if act_order and not quant_test_config.get("support_act_order", False):
-            continue
 
         f16_types = [scalar_types.float16, scalar_types.bfloat16]
         inner_combinations = itertools.product(
@@ -398,7 +364,7 @@ def marlin_generate_valid_test_cases():
 @pytest.mark.parametrize(
     (
         "a_type, b_type, c_type, group_blocks,"
-        "size_m, size_n, size_k, act_order, is_k_full,"
+        "size_m, size_n, size_k,"
         "use_atomic_add, use_fp32_reduce"
     ),
     marlin_generate_valid_test_cases(),
@@ -411,8 +377,6 @@ def test_marlin_gemm(
     size_m,
     size_n,
     size_k,
-    act_order,
-    is_k_full,
     use_atomic_add,
     use_fp32_reduce,
 ):
@@ -448,27 +412,21 @@ def test_marlin_gemm(
             )
             marlin_s2 = None
 
-        g_idx = None
-        sort_indices = None
         marlin_zp = None
     elif b_type == scalar_types.float8_e4m3fn:
         w_ref, marlin_q_w, marlin_s = marlin_quant_fp8_torch(
             b_weight.T, group_size, input_dtype=a_dtype
         )
-        g_idx = None
-        sort_indices = None
         marlin_zp = None
         marlin_s2 = None
     elif has_zp:
         w_ref, marlin_q_w, marlin_s, marlin_zp = awq_marlin_quantize(
             b_weight, b_type, group_size, input_dtype=a_dtype
         )
-        g_idx = None
-        sort_indices = None
         marlin_s2 = None
     else:
-        w_ref, marlin_q_w, marlin_s, g_idx, sort_indices, _ = marlin_quantize(
-            b_weight, b_type, group_size, act_order, input_dtype=a_dtype
+        w_ref, marlin_q_w, marlin_s = marlin_quantize(
+            b_weight, b_type, group_size, input_dtype=a_dtype
         )
 
         marlin_zp = None
@@ -506,14 +464,11 @@ def test_marlin_gemm(
         a_scales,
         marlin_s2,
         marlin_zp,
-        g_idx,
-        sort_indices,
         workspace,
         b_type,
         a_input.shape[0],
         b_weight.shape[1],
         a_input.shape[1],
-        is_k_full=is_k_full,
         use_atomic_add=use_atomic_add,
         use_fp32_reduce=use_fp32_reduce,
         is_zp_float=False,
@@ -522,6 +477,62 @@ def test_marlin_gemm(
 
     max_diff = compute_max_diff(output, output_ref)
     assert max_diff < 0.04
+
+
+def test_marlin_persistent_locks_cuda_graph_streams(workspace_init):
+    """Compiled GEMMs select stream-local locks at runtime and survive replay."""
+    size_m, size_k, size_n = 32, 1024, 2048
+    inputs = [rand_data((size_m, size_k)) for _ in range(2)]
+    weight = rand_data((size_k, size_n))
+    quant_type = scalar_types.uint4b8
+    w_ref, qweight, scales = marlin_quantize(weight, quant_type, 128)
+    zeros = marlin_make_empty(scales.device)
+    streams = [torch.cuda.Stream() for _ in inputs]
+    graphs = [torch.cuda.CUDAGraph() for _ in inputs]
+    locks = []
+    outputs = []
+
+    @torch.compile(backend="eager", fullgraph=True)
+    def run(x):
+        return torch.ops.vllm.marlin_gemm(
+            x,
+            qweight,
+            None,
+            scales,
+            None,
+            None,
+            zeros,
+            None,
+            quant_type.id,
+            size_m,
+            size_n,
+            size_k,
+            use_atomic_add=False,
+            use_fp32_reduce=True,
+        )
+
+    for stream, graph, x in zip(streams, graphs, inputs):
+        stream.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(stream):
+            locks.append(get_marlin_workspace(x.device))
+            run(x)
+            with torch.cuda.graph(graph, stream=stream):
+                outputs.append(run(x))
+        torch.cuda.current_stream().wait_stream(stream)
+
+    assert locks[0].data_ptr() != locks[1].data_ptr()
+    current_workspace_manager().lock()
+    for _ in range(3):
+        for stream, graph, x, lock in zip(streams, graphs, inputs, locks):
+            with torch.cuda.stream(stream):
+                assert get_marlin_workspace(x.device) is lock
+                x.add_(0.1)
+                graph.replay()
+        for stream in streams:
+            torch.cuda.current_stream().wait_stream(stream)
+        for x, output, lock in zip(inputs, outputs, locks):
+            assert compute_max_diff(output, x @ w_ref) < 0.04
+            assert torch.count_nonzero(lock) == 0
 
 
 def test_marlin_gemm_subset_input():
@@ -535,11 +546,9 @@ def test_marlin_gemm_subset_input():
     a_input = rand_data((big_m, big_k))[8 : size_m + 8, 8 : size_k + 8]
     b_weight = rand_data((size_k, size_n))
 
-    w_ref, marlin_q_w, marlin_s, g_idx, sort_indices, _ = marlin_quantize(
-        b_weight, quant_type, group_size, False
-    )
+    w_ref, marlin_q_w, marlin_s = marlin_quantize(b_weight, quant_type, group_size)
 
-    marlin_zp = marlin_make_empty_g_idx(marlin_s.device)
+    marlin_zp = marlin_make_empty(marlin_s.device)
     workspace = marlin_make_workspace_new(a_input.device)
 
     output = ops.marlin_gemm(
@@ -551,14 +560,11 @@ def test_marlin_gemm_subset_input():
         None,
         None,
         marlin_zp,
-        g_idx,
-        sort_indices,
         workspace,
         quant_type,
         a_input.shape[0],
         b_weight.shape[1],
         a_input.shape[1],
-        is_k_full=True,
         use_atomic_add=False,
         use_fp32_reduce=True,
         is_zp_float=False,
@@ -584,11 +590,9 @@ def test_marlin_gemm_with_bias(size_m):
 
     marlin_bias = marlin_permute_bias(b_bias)
 
-    w_ref, marlin_q_w, marlin_s, g_idx, sort_indices, _ = marlin_quantize(
-        b_weight, quant_type, group_size, False
-    )
+    w_ref, marlin_q_w, marlin_s = marlin_quantize(b_weight, quant_type, group_size)
 
-    marlin_zp = marlin_make_empty_g_idx(marlin_s.device)
+    marlin_zp = marlin_make_empty(marlin_s.device)
     workspace = marlin_make_workspace_new(a_input.device)
 
     output = ops.marlin_gemm(
@@ -600,14 +604,11 @@ def test_marlin_gemm_with_bias(size_m):
         None,
         None,
         marlin_zp,
-        g_idx,
-        sort_indices,
         workspace,
         quant_type,
         a_input.shape[0],
         b_weight.shape[1],
         a_input.shape[1],
-        is_k_full=True,
         use_atomic_add=False,
         use_fp32_reduce=True,
         is_zp_float=False,

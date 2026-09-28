@@ -281,6 +281,7 @@ target "_ci-rocm" {
   args = {
     ARG_PYTORCH_ROCM_ARCH = PYTORCH_ROCM_ARCH
     CI_BASE_IMAGE         = CI_BASE_IMAGE
+    ROCM_SMOKE_ID         = BUILDKITE_BUILD_ID
     max_jobs              = CI_MAX_JOBS
   }
 }
@@ -295,6 +296,15 @@ target "test-rocm-ci" {
     IMAGE_TAG_LATEST,
   ])
   output = ["type=registry"]
+}
+
+# Validate the test image in the shared BuildKit graph and export only the
+# success marker. This avoids pulling the multi-GB image into the host daemon.
+target "smoke-test-rocm-ci" {
+  inherits   = ["_common-rocm", "_ci-rocm"]
+  target     = "export_test_smoke"
+  cache-from = get_cache_from_rocm()
+  output     = ["type=local,dest=./build/rocm-smoke-export"]
 }
 
 # Cache-only target for the source-scoped ROCm native build stage.
@@ -341,7 +351,13 @@ group "test-rocm-ci-with-artifacts" {
 # Full test image + wheel export. Kept for fallback/debugging when a pushed,
 # build-scoped image is useful.
 group "test-rocm-ci-with-wheel" {
-  targets = ["rust-rocm-ci", "csrc-rocm-ci", "test-rocm-ci", "export-wheel-rocm"]
+  targets = [
+    "rust-rocm-ci",
+    "csrc-rocm-ci",
+    "test-rocm-ci",
+    "smoke-test-rocm-ci",
+    "export-wheel-rocm",
+  ]
 }
 
 # Primary output tag for the ci_base build. In Buildkite this is a unique,

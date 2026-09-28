@@ -13,7 +13,7 @@ from vllm.v1.request import RequestStatus
 from vllm.v1.structured_output import StructuredOutputGrammar
 from vllm.v1.utils import ConstantList
 
-from .utils import create_requests, create_scheduler
+from .utils import create_requests, create_scheduler, mock_kv
 
 pytestmark = pytest.mark.cpu_test
 
@@ -145,40 +145,30 @@ def test_abort():
         assert req.num_output_tokens == abort_order_copy.index(i)
 
 
-def test_preempt():
-    scheduler = create_scheduler(async_scheduling=True)
-    requests = create_requests(num_requests=10, max_tokens=20)
+def test_connector_metadata_precedes_async_placeholder_advance(monkeypatch):
+    """Mirroring must see earlier unresolved outputs, excluding the current step."""
+    scheduler = create_scheduler(
+        async_scheduling=True,
+        use_kv_connector=mock_kv(matched_tokens=0, is_async=False),
+    )
+    (request,) = create_requests(num_requests=1, num_tokens=4, max_tokens=4)
+    scheduler.add_request(request)
 
-    for req in requests:
-        scheduler.add_request(req)
+    assert scheduler.connector is not None
+    build_connector_meta = scheduler.connector.build_connector_meta
+    observed_placeholders = []
 
-    sched_outputs: deque[SchedulerOutput] = deque()
-    sched_outputs.append(scheduler.schedule())
-    sched_outputs.append(scheduler.schedule())
+    def record_placeholders(scheduler_output):
+        observed_placeholders.append(request.num_output_placeholders)
+        return build_connector_meta(scheduler_output)
 
-    abort_order = [0, 8, 3, 1, 6, 4, 2, 5, 7, 9]
-    abort_order_copy = abort_order.copy()
+    monkeypatch.setattr(
+        scheduler.connector, "build_connector_meta", record_placeholders
+    )
+    scheduler.schedule()
+    scheduler.schedule()
 
-    def abort_request():
-        if not abort_order:
-            return
-        req = requests[abort_order.pop(0)]
-        scheduler.finish_requests(req.request_id, RequestStatus.FINISHED_ABORTED)
-
-    while sched_outputs:
-        # Abort a scheduled request.
-        abort_request()
-        sched_output = sched_outputs.popleft()
-        model_runner_output = _make_model_runner_output(sched_output)
-        scheduler.update_from_output(sched_output, model_runner_output)
-
-        sched_output = scheduler.schedule()
-        if sched_output.num_scheduled_tokens:
-            sched_outputs.append(sched_output)
-
-    for i, req in enumerate(requests):
-        assert req.status == RequestStatus.FINISHED_ABORTED
-        assert req.num_output_tokens == abort_order_copy.index(i)
+    assert observed_placeholders == [0, 1]
 
 
 def test_prefix_caching_for_prefill_dedup():
@@ -308,7 +298,6 @@ def test_abort_request_when_structured_output_fsm_cannot_advance():
     request = create_requests(num_requests=1, num_tokens=1)[0]
     request.structured_output_request = Mock()
     request.structured_output_request.grammar = Mock(spec=StructuredOutputGrammar)
-    request.structured_output_request.grammar.accept_tokens.return_value = False
     request.status = RequestStatus.RUNNING
     request.num_computed_tokens = request.num_tokens
     request.num_output_placeholders = 1
@@ -317,10 +306,7 @@ def test_abort_request_when_structured_output_fsm_cannot_advance():
     scheduler.connector = None
     scheduler.ec_connector = None
     scheduler.structured_output_manager = Mock()
-    scheduler.structured_output_manager.should_advance.return_value = True
-    scheduler.structured_output_manager.trim_reasoning_for_advance.side_effect = (
-        lambda request, new_token_ids: new_token_ids
-    )
+    scheduler.structured_output_manager.accept_tokens.return_value = False
     scheduler.requests = {request.request_id: request}
     scheduler.running = [request]
     scheduler.waiting = Mock()
@@ -331,9 +317,9 @@ def test_abort_request_when_structured_output_fsm_cannot_advance():
     scheduler.finished_req_ids = set()
     scheduler.finished_req_ids_dict = None
     scheduler.grammar_compile_error_reqs = set()
+    scheduler.encoder_cache_mismatch_reqs = set()
     scheduler.vllm_config = Mock()
-    scheduler.vllm_config.model_config.enable_return_routed_experts = False
-    scheduler.enable_return_routed_experts = False
+    scheduler.aux_output_connector = None
     scheduler.return_sampling_mask = False
     scheduler.recompute_kv_load_failures = False
     scheduler.defer_block_free = False
@@ -701,16 +687,29 @@ def test_requires_kv_delivery_defaults_to_producer_role():
         assert scheduler.requires_kv_delivery is expected, role
 
 
-@pytest.mark.parametrize("kv_role", ["kv_producer", "kv_consumer"])
-def test_kv_pressure_preempt_mid_handoff(kv_role: str):
-    """P/D race: a request is KV-pressure preempted while the output of its
-    final prefill chunk -- the hand-off token that would finish it -- is in
-    flight.
+@pytest.mark.parametrize(
+    ("kv_role", "defer_free"),
+    [
+        ("kv_producer", False),
+        ("kv_consumer", False),
+        ("kv_consumer", True),
+    ],
+)
+def test_kv_pressure_preempt_mid_handoff(kv_role: str, defer_free: bool):
+    """P/D race: KV pressure hits while the output of a request's final
+    prefill chunk -- the hand-off token that would finish it -- is in flight.
 
-    On a producer, that output must be dropped so the request recomputes;
-    delivering it would finish the request and hand off blocks the preemption
-    already freed, so the consumer pulls garbage. A consumer hands nothing off,
-    so it keeps the lossless deliver-stale path.
+    When the victim's blocks free immediately, the request is preempted. On a
+    producer, that output must be dropped so the request recomputes; delivering
+    it would finish the request and hand off blocks the preemption already
+    freed, so the consumer pulls garbage. A consumer hands nothing off, so it
+    keeps the lossless deliver-stale path.
+
+    A consumer with overlapping batches (async scheduling or PP) instead fences
+    the victim's free behind its in-flight output, so the allocation retry
+    stops instead of preempting; the request then finishes from that output
+    once it lands. The gate depends on the platform (async scheduling is
+    force-disabled on CPU), so force the flag to cover both paths everywhere.
     """
     is_producer = kv_role == "kv_producer"
     scheduler = create_scheduler(
@@ -722,10 +721,13 @@ def test_kv_pressure_preempt_mid_handoff(kv_role: str):
         max_num_batched_tokens=512,
     )
     assert scheduler.requires_kv_delivery is is_producer
+    # The production gate requires overlapping batches, which async
+    # scheduling only provides off-CPU.
+    scheduler.defer_block_free = defer_free
 
     # 32-token prompts fill 2 blocks each, exhausting the usable pool, so the
-    # next decode allocation preempts the tail of the running queue (the handoff
-    # request) while its prefill output is still in flight.
+    # next decode allocation targets the tail of the running queue (the
+    # handoff request) while its prefill output is still in flight.
     decoder = create_requests(
         num_requests=1, num_tokens=32, max_tokens=8, req_ids=["decoder"]
     )[0]
@@ -739,9 +741,17 @@ def test_kv_pressure_preempt_mid_handoff(kv_role: str):
     assert handoff.num_output_placeholders == 1
 
     scheduler.schedule()
-    assert handoff.status == RequestStatus.PREEMPTED
-    assert handoff.num_stale_output_tokens == handoff.num_prompt_tokens
-    assert handoff.drop_stale_output is is_producer
+    if defer_free:
+        # The victim's blocks are fenced behind its in-flight output, so
+        # preempting it could not satisfy the allocation; the retry stops
+        # instead of preempting.
+        assert handoff.status == RequestStatus.RUNNING
+        assert handoff.num_stale_output_tokens == 0
+    else:
+        # Blocks free immediately, so the handoff request is preempted.
+        assert handoff.status == RequestStatus.PREEMPTED
+        assert handoff.num_stale_output_tokens == handoff.num_prompt_tokens
+        assert handoff.drop_stale_output is is_producer
 
     scheduler.update_from_output(sched_output, _make_model_runner_output(sched_output))
 
