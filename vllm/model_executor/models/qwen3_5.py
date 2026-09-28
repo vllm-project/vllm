@@ -157,6 +157,7 @@ class Qwen3_5DecoderLayer(Qwen3NextDecoderLayer):
                 model_config=model_config,
                 cache_config=cache_config,
                 quant_config=quant_config,
+                max_num_seqs=vllm_config.scheduler_config.max_num_seqs,
                 prefix=f"{prefix}.self_attn",
                 reduce_results=not self.use_attn_reduce_scatter_for_moe,
             )
