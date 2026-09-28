@@ -111,7 +111,7 @@ class KVPPRuntime:
         if self.running:
             raise RuntimeError("Concurrent KVPP forwards require separate scratch.")
         context = get_forward_context()
-        previous = context.kvpp_runtime
+        assert context.kvpp_runtime is None, "Nested KVPP forwards are not supported."
         context.kvpp_runtime = self
         self.running = True
         self.has_history = has_history
@@ -128,7 +128,7 @@ class KVPPRuntime:
                 # Cover partially executed forwards before storage is released.
                 self.pending[2].synchronize()
                 self.pending = None
-            context.kvpp_runtime = previous
+            context.kvpp_runtime = None
             self.running = False
 
     def _prefetch(self, index: int) -> None:
