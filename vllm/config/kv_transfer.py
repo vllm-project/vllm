@@ -138,6 +138,17 @@ class KVTransferConfig:
     def get_from_extra_config(self, key, default) -> Any:
         return self.kv_connector_extra_config.get(key, default)
 
+    def uses_custom_mem_pool(self) -> bool:
+        """Whether a connector allocates the KV cache from its own memory pool
+        (``custom_mem_pool``), directly or in MultiConnector."""
+        configs = [self.kv_connector_extra_config]
+        if self.kv_connector == "MultiConnector":
+            configs += [
+                child.get("kv_connector_extra_config", {})
+                for child in self.kv_connector_extra_config.get("connectors", [])
+            ]
+        return any(config.get("custom_mem_pool") for config in configs)
+
     def has_connector(self, connector_name: str) -> bool:
         """Whether ``connector_name`` is configured, directly or in MultiConnector."""
         if self.kv_connector == connector_name:

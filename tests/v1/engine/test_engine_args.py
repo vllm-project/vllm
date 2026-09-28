@@ -432,6 +432,38 @@ def test_executor_agrees_committable_blocks_across_workers():
 
 
 @requires_cuda
+@pytest.mark.parametrize("multi", [False, True])
+def test_extensible_kv_cache_rejects_connector_memory_pool(multi):
+    """A connector's custom memory pool (Mooncake NVLink/BAREX) must own the KV
+    allocation, which the driver-mapped extensible cache bypasses: the feature
+    stays off by default and an explicit request is an error."""
+    from vllm.config.kv_transfer import KVTransferConfig
+
+    mooncake = {
+        "kv_connector": "MooncakeStoreConnector",
+        "kv_role": "kv_both",
+        "kv_connector_extra_config": {"custom_mem_pool": "NVLINK"},
+    }
+    if multi:
+        transfer = KVTransferConfig(
+            kv_connector="MultiConnector",
+            kv_role="kv_both",
+            kv_connector_extra_config={"connectors": [mooncake]},
+        )
+    else:
+        transfer = KVTransferConfig(**mooncake)
+
+    def make_config(**kwargs):
+        return EngineArgs(
+            model="facebook/opt-125m", kv_transfer_config=transfer, **kwargs
+        ).create_engine_config(UsageContext.OPENAI_API_SERVER)
+
+    assert not make_config().cache_config.enable_extensible_kv_cache
+    with pytest.raises(ValueError, match="custom_mem_pool"):
+        make_config(enable_extensible_kv_cache=True)
+
+
+@requires_cuda
 def test_extensible_kv_cache_connector_needs_block_compact_layout():
     from vllm.config.kv_transfer import KVTransferConfig
     from vllm.v1.attention.backends.utils import resolve_kv_cache_layout
