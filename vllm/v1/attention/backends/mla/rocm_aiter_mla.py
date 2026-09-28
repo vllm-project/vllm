@@ -282,7 +282,7 @@ class AiterMLABackend(MLACommonBackend):
         return []
 
     @staticmethod
-    def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
+    def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int | MultipleOf]:
         # The aiter MLA decode kernel always operates with page_size=1
         # internally (the wrapper flattens kv_buffer via .view(-1, 1, 1, H)).
         # We support any kernel_block_size by expanding block-level indices

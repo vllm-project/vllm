@@ -9,7 +9,7 @@ from unittest.mock import patch
 import numpy as np
 import pytest
 import torch
-from transformers import PretrainedConfig
+from transformers import PreTrainedConfig
 
 from vllm.config import PoolerConfig, set_current_vllm_config
 from vllm.model_executor.layers.pooler import PoolingParamsUpdate
@@ -315,7 +315,7 @@ def test_dispatch_seq_cls_honors_token_pooling_type(tok_pooling_type):
         model_config=SimpleNamespace(
             pooler_config=pooler_config,
             head_dtype=None,
-            hf_config=PretrainedConfig(num_labels=3),
+            hf_config=PreTrainedConfig(num_labels=3),
         ),
     )
     classifier = torch.nn.Linear(4, 3)
