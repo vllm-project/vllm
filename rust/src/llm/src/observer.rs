@@ -101,6 +101,16 @@ pub trait RequestObserver: Send + Sync + 'static {
     }
 }
 
+impl<T: RequestObserver + ?Sized> RequestObserver for Arc<T> {
+    fn on_finished(&self, request: &Arc<FinishedRequest>) {
+        (**self).on_finished(request);
+    }
+
+    fn shutdown(&self) -> BoxFuture<'_, ()> {
+        (**self).shutdown()
+    }
+}
+
 /// Registered observers, notified in order. Cloning is cheap.
 #[derive(Clone, Default)]
 pub struct RequestObservers(Arc<[Arc<dyn RequestObserver>]>);
