@@ -61,7 +61,6 @@ class ColQwen3ProcessingInfo(Qwen3VLProcessingInfo):
         # correctly for the Qwen3-VL backbone.
         return self.ctx.get_hf_processor(
             Qwen3VLProcessor,
-            use_fast=kwargs.pop("use_fast", True),
             **kwargs,
         )
 
