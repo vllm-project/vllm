@@ -6,7 +6,7 @@ import copy
 from collections.abc import Callable
 from dataclasses import replace
 from math import lcm
-from types import SimpleNamespace
+from types import MethodType, SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
@@ -533,7 +533,9 @@ def test_nixl_hisparse_full_block_import_keeps_a_writable_tail(num_tokens):
         kv_cache_manager=manager,
         failed_recving_kv_req_ids=set(),
         finished_recving_kv_req_ids={request.request_id},
+        prefix_replay_tokens=0,
     )
+    scheduler._mark_prefix_replay = MethodType(Scheduler._mark_prefix_replay, scheduler)
     Scheduler._update_waiting_for_remote_kv(scheduler, request)
     assert request.num_tokens - request.num_computed_tokens == 1
     assert manager.allocate_slots(request, num_new_tokens=1) is not None
@@ -1334,12 +1336,12 @@ def make_kv_cache_config_three_types(
     )
 
 
-def test_prefix_cache_hit_uses_per_group_dcp_geometry():
+@pytest.mark.parametrize("draft_sharded", [True, False])
+def test_prefix_cache_hit_uses_per_group_dcp_geometry(draft_sharded):
     """Prefix lookup must use each group's DCP size, not the process-wide one.
 
-    Target and draft MLA are both sharded (DCP=8); Mamba stays replicated
-    (DCP=1). Hits then align to the sharded full-attention block, not the
-    unsharded page size.
+    Target MLA is sharded; draft MLA can opt out and Mamba stays replicated.
+    Hits must align to the target block in either case.
     """
     block_size = 16
     dcp = 8
@@ -1360,6 +1362,7 @@ def test_prefix_cache_hit_uses_per_group_dcp_geometry():
             KVCacheGroupSpec(
                 ["draft_mla"],
                 MLAAttentionSpec(
+                    dcp_sharded=draft_sharded,
                     block_size=block_size,
                     num_kv_heads=1,
                     head_size=1,
@@ -1386,10 +1389,10 @@ def test_prefix_cache_hit_uses_per_group_dcp_geometry():
     )
     target_mgr, draft_mgr, mamba_mgr = manager.coordinator.single_type_managers
     assert target_mgr.dcp_world_size == dcp
-    assert draft_mgr.dcp_world_size == dcp
+    assert draft_mgr.dcp_world_size == (dcp if draft_sharded else 1)
     assert mamba_mgr.dcp_world_size == 1
     assert target_mgr.block_size == sharded_block
-    assert draft_mgr.block_size == sharded_block
+    assert draft_mgr.block_size == (sharded_block if draft_sharded else block_size)
     assert mamba_mgr.block_size == block_size
 
     hash_fn = sha256
@@ -1405,7 +1408,11 @@ def test_prefix_cache_hit_uses_per_group_dcp_geometry():
     req1 = make_request("1", common_token_ids + [100] * 5, block_size, hash_fn)
     computed_blocks, num_computed_tokens, _ = manager.get_computed_blocks(req1)
     assert num_computed_tokens == 2 * sharded_block
-    assert [len(group) for group in computed_blocks.blocks] == [2, 2, 16]
+    assert [len(group) for group in computed_blocks.blocks] == [
+        2,
+        2 if draft_sharded else 16,
+        16,
+    ]
 
     manager.free(req0)
     manager.free(req1)
@@ -2267,7 +2274,7 @@ def test_hybrid_cache_mamba_align_shared_prefix_detection():
         use_eagle_block_drop=False,
         hash_block_size=block_size,
         mamba_partial_cache_hit=False,
-        mamba_fine_grained_prefix_cache=False,
+        mamba_shared_prefix_checkpoint=False,
         mamba_has_prefill_checkpoint_blocks=False,
     )
     req_2.shared_prefix_boundary = shared_prefix_boundary
@@ -5935,3 +5942,29 @@ def test_device_eviction_keeps_host_prefix():
     assert host_block.block_hash is not None, (
         "Device eviction invalidated unrelated host KV"
     )
+
+
+def test_get_unhashed_block_ids_all_groups():
+    """Unhashed, non-null block ids are reported per KV cache group.
+    A group with no unhashed blocks reports an empty list, not a missing entry.
+    """
+
+    def hashed(block_id: int, group_id: int) -> KVCacheBlock:
+        block = KVCacheBlock(block_id=block_id)
+        block.set_block_hash(make_block_hash_with_group_id(BlockHash(b"h"), group_id))
+        return block
+
+    blocks = KVCacheBlocks(
+        (
+            [
+                KVCacheBlock(block_id=1),  # unhashed
+                hashed(2, group_id=0),  # cached
+                KVCacheBlock(block_id=3, is_null=True),  # null padding
+                KVCacheBlock(block_id=4),  # unhashed
+            ],
+            # No unhashed blocks in this group.
+            [hashed(5, group_id=1), KVCacheBlock(block_id=6, is_null=True)],
+        )
+    )
+
+    assert blocks.get_unhashed_block_ids_all_groups() == [[1, 4], []]

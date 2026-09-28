@@ -793,6 +793,7 @@ class DeepseekV4MoE(nn.Module):
         use_sequence_parallel: bool = False,
         *,
         num_hash_layers: int,
+        reduce_results: bool = True,
         n_routed_experts: int | None = None,
         n_activated_experts: int | None = None,
         image_sentinel_lo: int = IMAGE_SENTINEL_BASE_ID,
@@ -804,6 +805,7 @@ class DeepseekV4MoE(nn.Module):
         quant_config = vllm_config.quant_config
         self.prefix = prefix
         self.use_sequence_parallel = use_sequence_parallel
+        self.reduce_results = reduce_results
         moe_backend = vllm_config.kernel_config.moe_backend
         validate_fi_moe_ep_config(vllm_config)
         self.use_mega_moe = moe_backend in MEGA_MOE_BACKENDS
@@ -993,25 +995,24 @@ class DeepseekV4MoE(nn.Module):
         prefix: str,
     ) -> None:
         parallel_config = vllm_config.parallel_config
-        self.tp_rank = get_tensor_model_parallel_rank()
+        ep_group = get_ep_group()
+        ep_size = ep_group.world_size
+        ep_rank = ep_group.rank_in_group
 
         eplb_config = parallel_config.eplb_config
         self.n_redundant_experts = eplb_config.num_redundant_experts
         self.n_shared_experts = config.n_shared_experts or 0
         self.n_logical_experts = self.n_routed_experts
         self.n_physical_experts = self.n_logical_experts + self.n_redundant_experts
-        assert self.n_physical_experts % self.tp_size == 0, (
-            f"n_physical_experts={self.n_physical_experts} must be divisible by "
-            f"tp_size={self.tp_size}. Adjust num_redundant_experts."
-        )
-        self.n_local_physical_experts = self.n_physical_experts // self.tp_size
+        self.n_local_physical_experts = self.n_physical_experts // ep_size
         self.n_local_experts = self.n_local_physical_experts
-        self.experts_start_idx = self.tp_rank * self.n_local_experts
+        self.experts_start_idx = ep_rank * self.n_local_experts
         self.experts_end_idx = self.experts_start_idx + self.n_local_experts
         self.physical_expert_start = self.experts_start_idx
         self.physical_expert_end = self.experts_end_idx
 
         self.experts = FusedMoEFactory(
+            reduce_results=self.reduce_results,
             shared_experts=self.shared_experts,
             gate=self.gate,
             num_experts=self.n_routed_experts,

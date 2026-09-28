@@ -10,6 +10,7 @@ import asyncio
 from unittest.mock import patch
 
 import pytest
+import torch
 
 from vllm.config import set_current_vllm_config
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_connector import (
@@ -21,6 +22,11 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_connector im
     PullReqMeta,
     SendBlockMeta,
     TransferRegion,
+)
+from vllm.v1.kv_cache_interface import (
+    FullAttentionSpec,
+    KVCacheConfig,
+    KVCacheGroupSpec,
 )
 
 from .test_mooncake_connector import FakeMooncakeWrapper, patch_worker_dependencies
@@ -440,17 +446,19 @@ def test_request_finished_with_hma_groups():
 # ---------------------------------------------------------------------------
 #  Worker-side load-failure reporting (HMA vs non-HMA)
 # ---------------------------------------------------------------------------
-def _make_kv_consumer_worker(swa_enabled: bool, disable_hma: bool = False):
+def _make_kv_consumer_worker(
+    swa_enabled: bool = False, kv_cache_config: KVCacheConfig | None = None
+):
     block_size = 16
     vllm_config = create_vllm_config(
         kv_connector="MooncakeConnector",
         kv_role="kv_consumer",
         block_size=block_size,
     )
-    vllm_config.scheduler_config.disable_hybrid_kv_cache_manager = disable_hma
-    kv_cache_config = make_kv_cache_config(
-        block_size=block_size, swa_enabled=swa_enabled
-    )
+    if kv_cache_config is None:
+        kv_cache_config = make_kv_cache_config(
+            block_size=block_size, swa_enabled=swa_enabled
+        )
     with set_current_vllm_config(vllm_config), patch_worker_dependencies():
         connector = MooncakeConnector(
             vllm_config, KVConnectorRole.WORKER, kv_cache_config
@@ -472,17 +480,41 @@ def _make_pull_meta(d_req_id: str, local_block_ids: list[list[int]]) -> PullReqM
 # requires an accelerator device, so (like the worker tests in
 # test_mooncake_connector.py) they run on the GPU KV-connectors job only.
 @pytest.mark.parametrize(
-    "swa_enabled,disable_hma,expected_is_hma",
+    "swa_enabled,expected_is_hma",
     [
-        (True, False, True),  # SWA group present, HMA enabled
-        (True, True, False),  # SWA group present, but HMA disabled
-        (False, False, False),  # FA only, HMA not needed
+        (True, True),  # multiple groups (FA + SWA)
+        (False, False),  # single group, block-level reporting is unambiguous
     ],
 )
-def test_worker_is_hma_required(swa_enabled, disable_hma, expected_is_hma):
-    """Worker-side _is_hma_required mirrors the scheduler's derivation."""
-    worker = _make_kv_consumer_worker(swa_enabled, disable_hma)
+def test_worker_is_hma_required(swa_enabled, expected_is_hma):
+    """Worker-side _is_hma_required mirrors the scheduler's condition."""
+    worker = _make_kv_consumer_worker(swa_enabled=swa_enabled)
     assert worker._is_hma_required is expected_is_hma
+
+
+def test_worker_is_hma_required_multiple_full_attention_groups():
+    """Two full-attention groups with different block sizes also select
+    request-level failure reporting, matching the scheduler."""
+    kv_cache_config = KVCacheConfig(
+        num_blocks=100,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                ["layer0"],
+                FullAttentionSpec(
+                    block_size=16, num_kv_heads=4, head_size=16, dtype=torch.float16
+                ),
+            ),
+            KVCacheGroupSpec(
+                ["layer1"],
+                FullAttentionSpec(
+                    block_size=32, num_kv_heads=4, head_size=16, dtype=torch.float16
+                ),
+            ),
+        ],
+    )
+    worker = _make_kv_consumer_worker(kv_cache_config=kv_cache_config)
+    assert worker._is_hma_required
 
 
 def test_worker_failed_recv_reports_request_level_failure_with_hma():
