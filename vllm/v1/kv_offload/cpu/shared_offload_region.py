@@ -183,7 +183,7 @@ class SharedOffloadRegion:
                     )
                 if not created_path:
                     self._unlink_shared_path()
-            elif unlink_owner:
+            elif unlink_owner and not created_path:
                 self._unlink_shared_path()
             raise
 
