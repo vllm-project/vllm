@@ -189,6 +189,20 @@ def test_head_counts_come_from_the_first_layer_that_has_them():
     assert first_shaped([]) is None
 
 
+def test_selection_metadata_leaves_unreported_head_counts_unset(monkeypatch):
+    """The whole path, on a model whose layers report no shape at all."""
+    engine_args = EngineArgs(
+        model=MODEL, max_model_len=1024, hf_overrides={"num_hidden_layers": 1}
+    )
+    with ForwardHarness(MODEL, engine_args=engine_args) as harness:
+        monkeypatch.setattr(
+            harness, "_attention_layers", lambda: {"shapeless": _ShapelessLayer()}
+        )
+        selection = harness.selection_metadata()
+    heads = (selection.num_query_heads, selection.num_kv_heads, selection.head_size)
+    assert heads == (None, None, None)
+
+
 def test_a_model_without_head_counts_reports_them_as_unknown(capture):
     """No layer to read them off must read as unknown, not as a shape of zero."""
     selection = replace(
