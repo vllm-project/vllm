@@ -5,7 +5,7 @@ from collections.abc import Iterable
 
 import torch
 import torch.nn as nn
-from transformers import AutoModel, PretrainedConfig
+from transformers import AutoModel, PreTrainedConfig
 
 from vllm.config import VllmConfig
 from vllm.model_executor.layers.linear import ReplicatedLinear
@@ -149,7 +149,7 @@ class LlamaNemotronVLChatModel(nn.Module, SupportsMultiModal, SupportsPP, Suppor
         )
 
     def _patch_quant_config(
-        self, config: PretrainedConfig, quant_config: QuantizationConfig | None
+        self, config: PreTrainedConfig, quant_config: QuantizationConfig | None
     ):
         # the awq models from OpenGVLab missing `modules_to_not_convert`
         # patch the quant_config to add `modules_to_not_convert` back
@@ -163,7 +163,7 @@ class LlamaNemotronVLChatModel(nn.Module, SupportsMultiModal, SupportsPP, Suppor
 
     def _init_vision_model(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         quant_config: QuantizationConfig | None,
         *,
         prefix: str,
@@ -175,7 +175,7 @@ class LlamaNemotronVLChatModel(nn.Module, SupportsMultiModal, SupportsPP, Suppor
 
     def _init_mlp1(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         vit_hidden_size: int | None = None,
         vision_projection_hidden_size: int | None = None,
     ) -> nn.Module:
@@ -518,7 +518,7 @@ class LlamaNemotronVLForEmbedding(LlamaNemotronVLChatModel, VllmModelForPooling)
 
     def _init_vision_model(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         quant_config,
         *,
         prefix: str,
@@ -533,7 +533,7 @@ class LlamaNemotronVLForEmbedding(LlamaNemotronVLChatModel, VllmModelForPooling)
 
     def _init_mlp1(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         vit_hidden_size: int | None = None,
         vision_projection_hidden_size: int | None = None,
     ) -> nn.Module:

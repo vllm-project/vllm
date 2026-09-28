@@ -23,6 +23,8 @@ from vllm.utils.torch_utils import is_torch_equal_or_newer
 
 logger = init_logger(__name__)
 
+_last_inductor_triton_cache_dir: str | None = None
+
 
 class CompilerInterface:
     """The interface for a compiler that can be used by vLLM."""
@@ -453,19 +455,22 @@ class InductorAdaptor(CompilerInterface):
     def initialize_cache(
         self, cache_dir: str, disable_cache: bool = False, prefix: str = ""
     ) -> None:
+        global _last_inductor_triton_cache_dir
         self.cache_dir = cache_dir
         self.prefix = prefix
         self.base_cache_dir = cache_dir[: -len(prefix)] if prefix else cache_dir
         if disable_cache:
             return
-        # redirect the cache directory to a subdirectory
-        # set flags so that Inductor and Triton store their cache
-        # in the cache_dir, then users only need to copy the cache_dir
-        # to another machine to reuse the cache.
+        # Keep artifacts together unless the caller supplies a Triton cache.
         inductor_cache = os.path.join(self.base_cache_dir, "inductor_cache")
         os.makedirs(inductor_cache, exist_ok=True)
         os.environ["TORCHINDUCTOR_CACHE_DIR"] = inductor_cache
-        triton_cache = os.path.join(self.base_cache_dir, "triton_cache")
+        triton_cache = os.environ.get("TRITON_CACHE_DIR")
+        # A directory assigned by an earlier adaptor is still a model-local
+        # default, rather than a caller override for subsequent models.
+        if triton_cache is None or triton_cache == _last_inductor_triton_cache_dir:
+            triton_cache = os.path.join(self.base_cache_dir, "triton_cache")
+            _last_inductor_triton_cache_dir = triton_cache
         os.makedirs(triton_cache, exist_ok=True)
         os.environ["TRITON_CACHE_DIR"] = triton_cache
 
