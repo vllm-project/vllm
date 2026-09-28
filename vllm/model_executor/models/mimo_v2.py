@@ -487,6 +487,42 @@ def _requantize_fp8(
     return w_rank[:rows_rank], s_rank
 
 
+def _fused_qkv_kv_chunk_rows(
+    num_heads: int,
+    num_kv_heads: int,
+    head_dim: int,
+    v_head_dim: int,
+    tp_size: int,
+    ckpt_tp: int,
+    block: int = 128,
+) -> int:
+    """Padded ``K | V`` rows per checkpoint chunk, or 0 for ``[Q | K | V]``.
+
+    0 when the de-interleaved ``[Q | K | V]`` layout is already exact: a rank
+    owns at most one checkpoint chunk, the chunk counts do not divide, or
+    every chunk's Q, K and V rows span whole scale blocks (a block
+    permutation; MiMo SWA layers). When a rank owns several chunks whose K
+    and V rows share a scale block (MiMo global layers: 192 K + 128 V rows),
+    the rank keeps each chunk's K and V rows together, zero-padded to whole
+    blocks, so every row keeps its checkpoint scale::
+
+        [Q_1 | ... | Q_g | K_1 V_1 pad | ... | K_g V_g pad]
+    """
+    if (
+        ckpt_tp <= tp_size
+        or ckpt_tp % tp_size
+        or num_heads % ckpt_tp
+        or num_kv_heads % ckpt_tp
+    ):
+        return 0
+    q_rows = num_heads // ckpt_tp * head_dim
+    k_rows = num_kv_heads // ckpt_tp * head_dim
+    v_rows = num_kv_heads // ckpt_tp * v_head_dim
+    if q_rows % block or (k_rows % block == 0 and v_rows % block == 0):
+        return 0
+    return cdiv(k_rows + v_rows, block) * block
+
+
 def _shard_fp8_qkv_proj(
     w_full: torch.Tensor,
     s_full: torch.Tensor,
@@ -498,6 +534,7 @@ def _shard_fp8_qkv_proj(
     tp_size: int,
     ckpt_tp: int,
     block: int = 128,
+    kv_chunk_rows: int = 0,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Shard the fp8 qkv_proj weights for ``tp_rank``.
 
@@ -524,7 +561,9 @@ def _shard_fp8_qkv_proj(
     plain chunk of both weight and scale suffices. When ``tp_size`` is a
     proper divisor of ``ckpt_tp`` and, under per-chunk scales, each chunk's
     Q, K and V segments span whole scale blocks, the rank gathers its rows
-    as an exact block permutation with no dequantize-requantize round trip.
+    as an exact block permutation with no dequantize-requantize round trip;
+    with ``kv_chunk_rows`` a K segment that straddles a scale block gathers
+    into the zero-padded ``[Q_1..Q_g | K_1 V_1 pad | ..]`` layout instead.
     Otherwise each rank's Q, K and V rows are gathered from the chunks that
     hold them, dequantized with the chunk's own scales, reordered, and
     re-quantized to fp8.
@@ -602,8 +641,7 @@ def _shard_fp8_qkv_proj(
         and tp_size < ckpt_tp
         and ckpt_tp % tp_size == 0
         and q_per_chunk % block == 0
-        and k_per_chunk % block == 0
-        and v_per_chunk % block == 0
+        and (kv_chunk_rows or (k_per_chunk % block == 0 and v_per_chunk % block == 0))
     )
     if exact_ok:
         chunks = sorted({h // (num_heads // ckpt_tp) for h in q_head_ids})
@@ -617,12 +655,31 @@ def _shard_fp8_qkv_proj(
             base = c * chunk_scale_rows
             return s_full[base + a // block : base + cdiv(b, block)]
 
-        segs = ((0, q_end), (q_end, k_end), (k_end, rows_per_chunk))
-        ws = [wrows(c, *sg) for sg in segs for c in chunks]
-        ss = [srows(c, *sg) for sg in segs for c in chunks]
+        if kv_chunk_rows:
+            pad = kv_chunk_rows - (rows_per_chunk - q_end)
+            ws = [wrows(c, 0, q_end) for c in chunks]
+            for c in chunks:
+                kv = wrows(c, q_end, rows_per_chunk).view(torch.uint8)
+                ws.append(
+                    torch.cat([kv, kv.new_zeros((pad, kv.shape[1]))]).view(w_full.dtype)
+                )
+            ss = [srows(c, 0, q_end) for c in chunks] + [
+                srows(c, q_end, rows_per_chunk) for c in chunks
+            ]
+        else:
+            segs = ((0, q_end), (q_end, k_end), (k_end, rows_per_chunk))
+            ws = [wrows(c, *sg) for sg in segs for c in chunks]
+            ss = [srows(c, *sg) for sg in segs for c in chunks]
         return (
             torch.cat([w.view(torch.uint8) for w in ws]).view(w_full.dtype),
             torch.cat(ss),
+        )
+
+    if envs.VLLM_MIMO_EXACT_QKV and kv_chunk_rows:
+        raise ValueError(
+            "the padded [Q | K V pad] gather requires per-chunk scales, tp_size "
+            f"a proper divisor below ckpt_tp={ckpt_tp}, and whole-block Q rows; "
+            f"got {s_full.shape[0]} scale rows at tp_size={tp_size}."
         )
 
     # Gather this rank's Q, K and V rows from the chunks that hold them.

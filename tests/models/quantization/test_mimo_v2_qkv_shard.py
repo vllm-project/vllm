@@ -17,7 +17,10 @@ equal to and above ``ckpt_tp`` (the last case replicating KV heads).
 import pytest
 import torch
 
-from vllm.model_executor.models.mimo_v2 import _shard_fp8_qkv_proj
+from vllm.model_executor.models.mimo_v2 import (
+    _fused_qkv_kv_chunk_rows,
+    _shard_fp8_qkv_proj,
+)
 from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import set_default_torch_num_threads
 
@@ -246,12 +249,83 @@ def test_exact_gather_permutes_checkpoint_rows(tp_size, monkeypatch):
         assert torch.equal(s_rank, scale[scale_index[:, 0]])
 
 
-def test_gate_leaves_straddling_segments_untouched(monkeypatch):
-    """A segment that straddles a scale block must not be gated into exactness.
+@pytest.mark.parametrize("geometry", ["ga", "pro"])
+@pytest.mark.parametrize("tp_size", [1, 2, 4])
+def test_exact_padded_layout_matches_checkpoint(geometry, tp_size, monkeypatch):
+    """With VLLM_MIMO_EXACT_QKV open a straddling K segment gathers padded.
 
-    The GA geometry's K segment is 192 rows — one and a half scale blocks —
-    so opening the gate must leave the dequantize-requantize path in place,
-    byte for byte as when the gate is closed.
+    The GA and Pro geometries give each chunk 192 K + 128 V rows, one and a
+    half scale blocks, so the rank keeps each chunk's K and V rows together
+    zero-padded to whole blocks: every weight byte and every scale row must
+    come back exactly as the checkpoint wrote it, and the pad rows zero.
+    """
+    num_heads, num_kv_heads, head_dim, v_head_dim, ckpt_tp = GEOMETRIES[geometry]
+    if tp_size >= ckpt_tp or ckpt_tp % tp_size:
+        pytest.skip("padded layout needs tp_size a proper divisor below ckpt_tp")
+    rows_per_chunk = _chunk_rows(num_heads, num_kv_heads, head_dim, v_head_dim, ckpt_tp)
+    q_per_chunk = num_heads // ckpt_tp * head_dim
+    k_per_chunk = num_kv_heads // ckpt_tp * head_dim
+    v_per_chunk = num_kv_heads // ckpt_tp * v_head_dim
+    truth = torch.randn(ckpt_tp * rows_per_chunk, COLS)
+    weight, scale = _quantize_chunks(
+        truth, num_heads, num_kv_heads, head_dim, v_head_dim, ckpt_tp
+    )
+    kv_chunk_rows = _fused_qkv_kv_chunk_rows(
+        num_heads, num_kv_heads, head_dim, v_head_dim, tp_size, ckpt_tp
+    )
+    assert kv_chunk_rows == cdiv(k_per_chunk + v_per_chunk, BLOCK) * BLOCK
+    monkeypatch.setenv("VLLM_MIMO_EXACT_QKV", "1")
+    chunks_per_rank = ckpt_tp // tp_size
+    q_size = num_heads // tp_size * head_dim
+    chunk_scale_rows = cdiv(rows_per_chunk, BLOCK)
+    pad = kv_chunk_rows - (k_per_chunk + v_per_chunk)
+    for tp_rank in range(tp_size):
+        w_rank, s_rank = _shard_fp8_qkv_proj(
+            weight,
+            scale,
+            num_heads=num_heads,
+            num_kv_heads=num_kv_heads,
+            head_dim=head_dim,
+            v_head_dim=v_head_dim,
+            tp_rank=tp_rank,
+            tp_size=tp_size,
+            ckpt_tp=ckpt_tp,
+            kv_chunk_rows=kv_chunk_rows,
+        )
+        index = _owned_index(
+            num_heads, num_kv_heads, head_dim, v_head_dim, ckpt_tp, tp_rank, tp_size
+        )
+        q_idx, kv_idx = index[:q_size], index[q_size:]
+        k_idx, v_idx = kv_idx.split(
+            [chunks_per_rank * k_per_chunk, chunks_per_rank * v_per_chunk]
+        )
+        pieces = [weight[q_idx].view(torch.uint8)]
+        for c in range(chunks_per_rank):
+            k_rows = k_idx[c * k_per_chunk : (c + 1) * k_per_chunk]
+            v_rows = v_idx[c * v_per_chunk : (c + 1) * v_per_chunk]
+            pieces += [
+                weight[k_rows].view(torch.uint8),
+                weight[v_rows].view(torch.uint8),
+                torch.zeros(pad, COLS, dtype=torch.uint8),
+            ]
+        assert torch.equal(w_rank.view(torch.uint8), torch.cat(pieces))
+
+        first_chunk = tp_rank * chunks_per_rank
+        q_scales, kv_scales = [], []
+        for c in range(first_chunk, first_chunk + chunks_per_rank):
+            base = c * chunk_scale_rows
+            q_end = base + q_per_chunk // BLOCK
+            q_scales.append(scale[base:q_end])
+            kv_scales.append(scale[q_end : (c + 1) * chunk_scale_rows])
+        assert torch.equal(s_rank, torch.cat(q_scales + kv_scales))
+
+
+def test_flag_off_keeps_requantizing_loader(monkeypatch):
+    """Default: the exact gather stays shut even for the padded layout.
+
+    A straddling K segment gathers exactly only under VLLM_MIMO_EXACT_QKV;
+    with the flag off the loader must dequantize-requantize whether or not
+    kv_chunk_rows is requested.
     """
     num_heads, num_kv_heads, head_dim, v_head_dim, ckpt_tp = GEOMETRIES["ga"]
     rows_per_chunk = _chunk_rows(num_heads, num_kv_heads, head_dim, v_head_dim, ckpt_tp)
@@ -269,11 +343,17 @@ def test_gate_leaves_straddling_segments_untouched(monkeypatch):
         ckpt_tp=ckpt_tp,
     )
     monkeypatch.delenv("VLLM_MIMO_EXACT_QKV", raising=False)
-    closed = _shard_fp8_qkv_proj(weight, scale, **kwargs)
-    monkeypatch.setenv("VLLM_MIMO_EXACT_QKV", "1")
-    opened = _shard_fp8_qkv_proj(weight, scale, **kwargs)
-    assert torch.equal(opened[0].view(torch.uint8), closed[0].view(torch.uint8))
-    assert torch.equal(opened[1], closed[1])
+    plain = _shard_fp8_qkv_proj(weight, scale, **kwargs)
+    padded = _shard_fp8_qkv_proj(
+        weight,
+        scale,
+        kv_chunk_rows=_fused_qkv_kv_chunk_rows(
+            num_heads, num_kv_heads, head_dim, v_head_dim, 2, ckpt_tp
+        ),
+        **kwargs,
+    )
+    assert torch.equal(plain[0].view(torch.uint8), padded[0].view(torch.uint8))
+    assert torch.equal(plain[1], padded[1])
 
 
 def test_wrong_chunk_count_is_detected():
