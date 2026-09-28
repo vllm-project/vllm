@@ -15,6 +15,8 @@ imports) should use subprocess or be run in a GPU environment.
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 import torch
 
@@ -295,3 +297,68 @@ def test_auto_awq_batch_invariant_uses_fused_gemm(
         "Expected the fused AWQ BI GEMM to be dispatched at least once; "
         "got 0 calls, so this run silently fell back to the legacy path."
     )
+
+
+@pytest.mark.skipif(
+    not (current_platform.is_cuda() and current_platform.is_device_capability(89)),
+    reason="The fused AWQ BI GEMM path only dispatches on SM89.",
+)
+def test_auto_awq_batch_invariant_dispatch_ignores_input_contiguity(monkeypatch):
+    """The fused kernel and the legacy dequant+matmul fallback are not
+    numerically identical, so a layer's dispatch choice must not depend on
+    incidental input contiguity: a non-contiguous activation must still
+    route to the fused kernel, not silently fall back to the other
+    algorithm for what is otherwise the same layer."""
+    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
+
+    import vllm.model_executor.layers.quantization.auto_awq as auto_awq_module
+
+    fused_calls = 0
+    original_fused_gemm = auto_awq_module.awq_gemm_fused_fp32
+
+    def _counting_fused_gemm(*args, **kwargs):
+        nonlocal fused_calls
+        fused_calls += 1
+        return original_fused_gemm(*args, **kwargs)
+
+    monkeypatch.setattr(auto_awq_module, "awq_gemm_fused_fp32", _counting_fused_gemm)
+
+    class _FakeQuantConfig:
+        pack_factor = 8
+
+    device = torch.device(current_platform.device_type)
+    k, n, group_size, m = 3584, 512, 128, 16
+
+    layer = SimpleNamespace()
+    layer.qweight = torch.randint(
+        0, torch.iinfo(torch.int32).max, (k, n // 8), dtype=torch.int32, device=device
+    )
+    layer.scales = torch.rand((k // group_size, n), dtype=torch.float16, device=device)
+    layer.qzeros = torch.randint(
+        0,
+        torch.iinfo(torch.int32).max,
+        (k // group_size, n // 8),
+        dtype=torch.int32,
+        device=device,
+    )
+
+    method = auto_awq_module.AutoAWQLinearMethod.__new__(
+        auto_awq_module.AutoAWQLinearMethod
+    )
+    method.quant_config = _FakeQuantConfig()
+
+    x_contig = torch.rand((m, k), dtype=torch.float16, device=device)
+    padded = torch.zeros((m, 2 * k), dtype=torch.float16, device=device)
+    padded[:, :k] = x_contig
+    x_noncontig = padded[:, :k]
+    assert not x_noncontig.is_contiguous()
+    assert torch.equal(x_contig, x_noncontig)
+
+    out_contig = method.apply(layer, x_contig)
+    out_noncontig = method.apply(layer, x_noncontig)
+
+    assert fused_calls == 2, (
+        "Expected both the contiguous and non-contiguous inputs to dispatch "
+        f"to the fused kernel; got {fused_calls} fused call(s)."
+    )
+    torch.testing.assert_close(out_contig, out_noncontig, atol=0, rtol=0)
