@@ -350,11 +350,12 @@ class RocmMxfp4IndexerMetadataBuilder(DeepseekV32IndexerMetadataBuilder):
         self.candidate_block_size = 0
         self.min_gather_width: float | None = None
 
-        int32 = dict(dtype=torch.int32, device=device)
         self.decode_block_ends_buffer = torch.zeros(
-            self.arange_buffer.shape[0], **int32
+            self.arange_buffer.shape[0], dtype=torch.int32, device=device
         )
-        self.context_lens_buffer = torch.zeros(self.arange_buffer.shape[0], **int32)
+        self.context_lens_buffer = torch.zeros(
+            self.arange_buffer.shape[0], dtype=torch.int32, device=device
+        )
         spec_config = vllm_config.speculative_config
         # Adaptive verification replays a FULL graph on drafts reallocated
         # across requests, so a step's shape does not fix its query lengths.
@@ -369,7 +370,8 @@ class RocmMxfp4IndexerMetadataBuilder(DeepseekV32IndexerMetadataBuilder):
             rocm_mxfp4_decode_schedule_words(
                 num_heads, head_dim, self.page_entries, self.native_next_n
             ),
-            **int32,
+            dtype=torch.int32,
+            device=device,
         )
 
     def _split_indexer_prefill_chunks(  # type: ignore[override]
