@@ -15,6 +15,7 @@ from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
 from vllm.multimodal.audio import resample_audio_pyav
 from vllm.utils.import_utils import PlaceholderModule
+from vllm.utils.math_utils import cdiv
 from vllm.utils.mem_constants import MiB_bytes
 from vllm.utils.serial_utils import tensor2base64
 from vllm.utils.sparse_utils import (
@@ -74,9 +75,10 @@ _TORCHCODEC_UNAVAILABLE_MSG = (
 # over-long stream is rejected rather than truncated to the limit.
 _DURATION_GUARD_MARGIN_S = 1.0
 
-# Largest Vorbis block (window) size in samples. Trailing encoder padding is
-# shorter than one block, which bounds the correction `load_audio_torchcodec`
-# applies for FFmpeg < 5.0's missing Ogg end_trimming.
+# Largest Vorbis block (window) size in samples at the stream's native sample
+# rate. Trailing encoder padding is shorter than one block, which bounds the
+# correction `load_audio_torchcodec` applies for FFmpeg < 5.0's missing Ogg
+# end_trimming.
 _VORBIS_MAX_BLOCK_SAMPLES = 8192
 
 
@@ -370,11 +372,14 @@ def load_audio_torchcodec(
     # and is exactly the valid sample count, so the tail can be trimmed down
     # to it. Only trim a plausible padding amount: a larger mismatch means
     # the metadata disagrees with the stream, and trimming would cut real
-    # audio.
+    # audio. The block bound is in native-rate samples, so scale it by the
+    # resample ratio before comparing against the decoded (output-rate) tail.
     if metadata.codec == "vorbis" and metadata.duration_seconds is not None:
         expected_samples = round(metadata.duration_seconds * samples.sample_rate)
         padding = samples.data.shape[-1] - expected_samples
-        if 0 < padding <= _VORBIS_MAX_BLOCK_SAMPLES:
+        native_sr = metadata.sample_rate or samples.sample_rate
+        max_padding = cdiv(_VORBIS_MAX_BLOCK_SAMPLES * samples.sample_rate, native_sr)
+        if 0 < padding <= max_padding:
             samples.data = samples.data[..., :expected_samples]
 
     # Authoritative post-decode checks: the metadata estimates above can be
