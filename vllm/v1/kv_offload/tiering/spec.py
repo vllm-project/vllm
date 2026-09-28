@@ -429,13 +429,7 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
     @classmethod
     @override
     def config_info_keys(cls, extra_config: dict[str, Any]) -> tuple[str, ...]:
-        """Return the label names of all tiers, with no repeat.
-
-        The metric holds one series for each tier, and the tier label tells the
-        series apart, so the declaration is the union of the names of every
-        tier. TieringOffloadingManager.config_info() fills the values in the
-        engine process, so the two sides declare and fill the same names.
-        """
+        """Return TIER_LABEL and the label names of all tiers, with no repeat."""
         # dict.fromkeys() keeps one copy of a name that two tier types share.
         keys = dict.fromkeys(super().config_info_keys(extra_config))
         keys[TIER_LABEL] = None

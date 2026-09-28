@@ -242,17 +242,14 @@ ConfigInfoMapping = Mapping[str, str | int | float | bool]
 
 @dataclass(frozen=True)
 class ConfigInfo:
-    """Static, per-engine facts that one offloading component publishes.
+    """Static facts that one component publishes on vllm:kv_offload_config_info.
 
-    A subclass declares one field for each label of
-    vllm:kv_offload_config_info. OffloadingSpec.config_info_keys() returns the
-    names in the API-server process, and OffloadingManager.config_info()
-    returns the values in the engine process. Both sides come off the same
-    fields, so a name cannot appear on one side alone. Document
-    every field in docs/features/kv_offloading_usage.md.
-
-    For an example, see CPUOffloadingInfo in cpu/common.py. CPUOffloadingSpec
-    declares its names, and CPUOffloadingManager fills its values.
+    Each field is one label. The OffloadingSpec declares the names with
+    config_info_keys(), and the OffloadingManager fills the values with
+    as_config_info(). A declared name that the manager does not fill reads
+    empty, and an undeclared name is dropped. The values must stay fixed for
+    the process lifetime. Document each field in
+    docs/features/kv_offloading_usage.md. See CPUOffloadingInfo for an example.
     """
 
     @classmethod
@@ -261,11 +258,7 @@ class ConfigInfo:
         return tuple(info.name for info in fields(cls))
 
     def as_config_info(self) -> ConfigInfoMapping:
-        """Return the label values, under the names of config_info_keys().
-
-        Returns "None" for an unknown fact. Done so the label will not be
-        dropped, as an empty label would be.
-        """
+        """Return the label values. A None value becomes "None", not empty."""
         values = (getattr(self, info.name) for info in fields(self))
         return {
             key: "None" if value is None else value
@@ -446,30 +439,9 @@ class OffloadingManager(ABC):
         return None
 
     def config_info(self) -> Sequence[ConfigInfoMapping]:
-        """Return static config facts to publish as info metric labels.
+        """Return the info metric labels, one mapping for each series.
 
-        The scheduler reads this once, after the manager is built, so the
-        values must stay fixed for the process lifetime.
-        OffloadingSpec.config_info_keys() declares which names reach
-        Prometheus: a declared name that is absent here becomes an empty label
-        value, and a name added here that the spec did not declare is dropped.
-
-        An implementation fills every declared name on every call, and gives
-        the string "None" to a value the configuration does not set. A test of
-        the implementation should assert that the names here match the
-        declaration of the spec.
-
-        Document each key that you publish in
-        docs/features/kv_offloading_usage.md, because a label name reaches a
-        dashboard and stays there.
-
-        Returns:
-            One mapping of label name to value for each series of the info
-            metric. A manager that reports one configuration returns exactly one
-            mapping. The frontend renders each value with str(), so a value must
-            be a scalar that msgpack carries, not an enum or an object. The
-            default reports one series with no fact.
-
+        The scheduler reads this once. See ConfigInfo.
         """
         return [{}]
 
@@ -661,21 +633,12 @@ class OffloadingSpec(ABC):
 
     @classmethod
     def config_info_keys(cls, extra_config: dict[str, Any]) -> tuple[str, ...]:
-        """Return the info metric label names of this spec.
+        """Return the info metric label names that the manager fills.
 
-        The spec declares the label names, and OffloadingManager.config_info() of
-        the matching manager fills the values. The two sides must agree on the
-        names. A declared name a manager does not fill becomes an empty
-        label value, and a name a manager adds is dropped, with one log line
-        for either gap.
+        See ConfigInfo.
 
         Args:
-            extra_config: kv_connector_extra_config of this instance, the same
-                mapping the spec itself receives.
-
-        Returns:
-            Tuple of label names. The default empty tuple gives the metric no
-            manager labels, and still publishes it.
+            extra_config: kv_connector_extra_config of this instance.
 
         """
         return ()

@@ -983,20 +983,10 @@ class TieringOffloadingManager(OffloadingManager):
 
     @override
     def config_info(self) -> Sequence[ConfigInfoMapping]:
-        """Compose one info mapping for each tier, primary tier first.
-
-        Every mapping holds the tier label, so two tiers of one type stay
-        apart. A tier fills the labels it owns, and the frontend renders a label
-        of another tier as an empty value. The label names match the names that
-        TieringOffloadingSpec.config_info_keys() declares.
-
-        Returns:
-            One mapping for each tier, primary tier first.
+        """Return one mapping for each tier, primary tier first, with TIER_LABEL.
 
         Raises:
-            ValueError: If the primary tier returns more than one mapping. This
-                manager holds one primary tier, so two mappings would give two
-                series with one tier label.
+            ValueError: If the primary tier returns more than one mapping.
 
         """
         (primary_info,) = self.primary_tier.config_info()

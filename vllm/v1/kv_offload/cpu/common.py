@@ -30,13 +30,7 @@ class CPULoadStoreSpec(BlockIDsLoadStoreSpec):
 
 @dataclass(frozen=True)
 class CPUOffloadingInfo(ConfigInfo):
-    """Static, per-engine facts about the CPU offload tier.
-
-    CPUOffloadingManager fills the values through
-    OffloadingManager.config_info(), and CPUOffloadingSpec declares the names
-    through OffloadingSpec.config_info_keys(). Each field name is the label
-    name. Document every field in docs/features/kv_offloading_usage.md.
-    """
+    """Static facts about the CPU offload tier."""
 
     # Chunk slots in the tier. Chunks, not GPU blocks.
     cpu_num_chunks: int

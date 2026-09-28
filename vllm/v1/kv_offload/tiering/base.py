@@ -366,42 +366,18 @@ class SecondaryTierManager(ABC):
     def config_info_keys(cls, tier_config: dict[str, Any]) -> tuple[str, ...]:
         """Return the info metric label names of this tier.
 
-        The metric holds one series for each tier, and the tier label tells the
-        series apart, so a tier declares its own names only.
-        TieringOffloadingSpec merges the names of every tier into one
-        declaration, and it rejects the reserved name tier, which it adds
-        itself. Every other rule matches OffloadingSpec.config_info_keys().
-
-        For an example, see ExampleTierInfo in tiering/example/manager.py.
-        ExampleSecondaryTierManager declares its names and fills its values.
+        TieringOffloadingSpec merges the names of all tiers and adds
+        TIER_LABEL, so a tier must not declare it. See ConfigInfo.
 
         Args:
             tier_config: Configuration dict of this tier.
-
-        Returns:
-            Tuple of the label names this tier owns. Empty by default.
 
         """
         return ()
 
     def config_info(self) -> ConfigInfoMapping:
-        """Return static config facts to publish as info metric labels.
+        """Return the info metric labels of this tier, for its one series.
 
-        One tier gives one series, so this returns one mapping and not a list.
-        A tier cannot know its own index, so TieringOffloadingManager adds the
-        tier label. A tier fills the names it owns, and the frontend renders a
-        name of another tier as an empty value. Every other rule matches
-        OffloadingManager.config_info(), including the name agreement with
-        TieringOffloadingSpec.config_info_keys().
-
-        A test of the implementation should assert that the names here match
-        config_info_keys() of the same class. The runtime check reads the
-        declaration of all tiers together. It therefore cannot see a name that
-        this tier declares and leaves unfilled, because that empty value reads
-        the same as a name of another tier.
-
-        Returns:
-            One mapping of label name to value. Empty by default.
-
+        TieringOffloadingManager adds TIER_LABEL. See ConfigInfo.
         """
         return {}
