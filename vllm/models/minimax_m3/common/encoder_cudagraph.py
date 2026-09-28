@@ -32,7 +32,7 @@ class MiniMaxM3EncoderCudaGraphMixin(SupportsEncoderCudaGraph):
 
     vision_tower: "MiniMaxVLVisionModel"
     multimodal_config: "MultiModalConfig | None"
-    _encoder_cg_pad_totals: dict[int, int]
+    _encoder_cg_pad_totals: dict[int, int] = {}
 
     def get_encoder_cudagraph_config(self) -> "EncoderCudaGraphConfig":
         from vllm.v1.attention.backends.registry import AttentionBackendEnum
