@@ -16,9 +16,9 @@ steps:
     - pytest -v -s models/test_initialization.py::test_can_initialize_small_subset
   mirror:
     amd:
-      label: ":amd: (MI355) Basic Models (Initialization)"
+      label: ":amd: (MI355 DPX) Basic Models (Initialization)"
       dind: false
-      device: mi355_1
+      device: mi355_dpx
       timeout_in_minutes: 30
       depends_on:
       - image-build-amd
@@ -39,9 +39,9 @@ steps:
   parallelism: 14
   mirror:
     amd:
-      label: ":amd: (MI355) Basic Models (Extra Initialization) Shard %N"
+      label: ":amd: (MI355 DPX) Basic Models (Extra Initialization) Shard %N"
       dind: false
-      device: mi355_1
+      device: mi355_dpx
       timeout_in_minutes: 60
       parallelism: 10
       working_dir: "/vllm-workspace/tests"
@@ -70,9 +70,9 @@ steps:
     - pytest -v -s models/test_terratorch.py models/transformers/test_backend.py models/test_registry.py models/test_deepseek_v4_vl_rocm.py
   mirror:
     amd:
-      label: ":amd: (MI300) Basic Models (Other)"
+      label: ":amd: (MI355 DPX) Basic Models (Other)"
       dind: false
-      device: mi300_1
+      device: mi355_dpx
       timeout_in_minutes: 65
       depends_on:
       - image-build-amd
@@ -138,9 +138,9 @@ steps:
     - pytest -v -s models/glm5next
   mirror:
     amd:
-      label: ":amd: (MI355) GLM5Next"
+      label: ":amd: (MI355 DPX) GLM5Next"
       dind: false
-      device: mi355_1
+      device: mi355_dpx
       timeout_in_minutes: 35
       working_dir: "/vllm-workspace/tests"
       depends_on:
@@ -162,13 +162,15 @@ steps:
     - pytest -v -s models/qwen4_exp/test_hc_ops.py models/qwen4_exp/test_qsa_pre_indexer.py models/qwen4_exp/test_qsa_reference.py
   mirror:
     amd:
-      label: ":amd: (MI300) Qwen4 Exp"
+      label: ":amd: (MI355 DPX) Qwen4 Exp"
       dind: false
-      device: mi300_1
+      device: mi355_dpx
       depends_on:
       - image-build-amd
       commands:
       - pytest -v -s models/qwen4_exp/test_qsa_amd.py
+      # PLE and QSA import conflicting HC registrations in a shared process.
+      - pytest -v -s models/qwen4_exp/test_ple.py
 
 - label: ":computer: (CPU) Qwen4 Exp"
   key: qwen4-exp-unit-tests-cpu

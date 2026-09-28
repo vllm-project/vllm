@@ -178,6 +178,11 @@ class FlashAttnMLASparseImpl(SparseMLACommonImpl[FlashAttnMLASparseMetadata]):
         assert self.topk_indices_buffer is not None, (
             "Indexer or topk_indices_buffer required for sparse MLA"
         )
+        self.cu_seqlens_q_buffer = torch.arange(
+            self.topk_indices_buffer.shape[0] + 1,
+            dtype=torch.int32,
+            device=self.topk_indices_buffer.device,
+        )
         self.supports_quant_query_input = False
 
     def forward_mqa(
@@ -306,9 +311,7 @@ class FlashAttnMLASparseImpl(SparseMLACommonImpl[FlashAttnMLASparseMetadata]):
             kv_cache if cache_is_flat else flat_kv_row_view(kv_cache, block_size)[0]
         )
 
-        cu_seqlens_q = torch.arange(
-            0, q_rope.shape[0] + 1, dtype=torch.int32, device=q_rope.device
-        )
+        cu_seqlens_q = self.cu_seqlens_q_buffer[: q_rope.shape[0] + 1]
         v_cache = kv_rows[:, : self.kv_lora_rank].unsqueeze(1).unsqueeze(1)
         if self.qk_rope_head_dim == 0:
             # FA3's QV path requires the 64-wide Q/K specialization. For NoPE
