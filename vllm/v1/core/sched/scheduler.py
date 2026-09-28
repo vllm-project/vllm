@@ -134,6 +134,9 @@ class Scheduler(SchedulerInterface):
             if self.scheduler_config.max_num_scheduled_tokens is not None
             else self.scheduler_config.max_num_batched_tokens
         )
+        self.adaptive_long_prefill_threshold = (
+            self.scheduler_config.long_prefill_token_threshold_adaptive
+        )
         self.max_model_len = vllm_config.model_config.max_model_len
         self.enable_kv_cache_events = (
             self.kv_events_config is not None
@@ -231,6 +234,7 @@ class Scheduler(SchedulerInterface):
         # Grammar compilation failures to finish as per-request errors in
         # update_from_output.
         self.grammar_compile_error_reqs: set[str] = set()
+        self.encoder_cache_mismatch_reqs: set[str] = set()
 
         # Encoder-related.
         # Calculate encoder cache size if applicable
@@ -602,11 +606,20 @@ class Scheduler(SchedulerInterface):
         # `long_prefill_token_threshold` exists to stop a long prefill from
         # starving other requests of the token budget. When it is the only
         # request there is nobody to starve, so let it use the whole budget.
+        num_eligible_reqs = (
+            len(self.running) + len(self.waiting) + len(self.skipped_waiting)
+        )
         long_prefill_token_threshold = (
             self.scheduler_config.long_prefill_token_threshold
-            if len(self.running) + len(self.waiting) + len(self.skipped_waiting) > 1
+            if num_eligible_reqs > 1
             else 0
         )
+        if long_prefill_token_threshold > 0 and self.adaptive_long_prefill_threshold:
+            # Floor the cap at a fair share of the input budget so it never
+            # cuts a request below max_num_batched_tokens / num requests.
+            long_prefill_token_threshold = max(
+                long_prefill_token_threshold, input_budget // num_eligible_reqs
+            )
 
         # First, schedule the RUNNING requests.
         req_index = 0
@@ -1702,6 +1715,29 @@ class Scheduler(SchedulerInterface):
             num_output_tokens=num_output_tokens,
         )
 
+    def _reject_on_encoder_cache_embed_mismatch(
+        self,
+        request: Request,
+        input_id: int,
+        identifier: str,
+        cached_num_encoder_embeds: int,
+        requested_num_encoder_embeds: int,
+    ) -> bool:
+        if cached_num_encoder_embeds == requested_num_encoder_embeds:
+            return False
+        logger.warning(
+            "Encoder cache entry for multimodal identifier %r holds %d "
+            "embeddings, but request %s input %d expects %d. A client-provided "
+            "multimodal UUID may have been reused for different content.",
+            identifier,
+            cached_num_encoder_embeds,
+            request.request_id,
+            input_id,
+            requested_num_encoder_embeds,
+        )
+        self.encoder_cache_mismatch_reqs.add(request.request_id)
+        return True
+
     def _try_schedule_encoder_inputs(
         self,
         request: Request,
@@ -1740,7 +1776,7 @@ class Scheduler(SchedulerInterface):
         # NOTE: since scheduler operates on the request level (possibly with
         # multiple encoder inputs per request), we need to create temporary
         # trackers for accounting at the encoder input level.
-        mm_hashes_to_schedule = set()
+        mm_hashes_to_schedule: dict[str, int] = {}
         num_embeds_to_schedule = 0
 
         encoder_window_end = (
@@ -1782,9 +1818,34 @@ class Scheduler(SchedulerInterface):
                 # We are not using the encoder cache for encoder-decoder models,
                 # yet.
                 if item_identifier in mm_hashes_to_schedule:
+                    scheduled_num_encoder_embeds = mm_hashes_to_schedule[
+                        item_identifier
+                    ]
+                    if self._reject_on_encoder_cache_embed_mismatch(
+                        request,
+                        i,
+                        item_identifier,
+                        scheduled_num_encoder_embeds,
+                        num_encoder_embeds,
+                    ):
+                        return [], 0, encoder_compute_budget, []
                     # The same encoder input has already been scheduled in the
                     # current step.
                     continue
+
+                cached_num_encoder_embeds = (
+                    self.encoder_cache_manager.get_cached_num_encoder_embeds(request, i)
+                )
+                if cached_num_encoder_embeds is not None and (
+                    self._reject_on_encoder_cache_embed_mismatch(
+                        request,
+                        i,
+                        item_identifier,
+                        cached_num_encoder_embeds,
+                        num_encoder_embeds,
+                    )
+                ):
+                    return [], 0, encoder_compute_budget, []
 
                 if self.encoder_cache_manager.check_and_update_cache(request, i):
                     # The encoder input is already computed and cached from a
@@ -1845,14 +1906,14 @@ class Scheduler(SchedulerInterface):
             if self.ec_connector is not None and self.ec_connector.has_cache_item(
                 item_identifier
             ):
-                mm_hashes_to_schedule.add(item_identifier)
+                mm_hashes_to_schedule[item_identifier] = num_encoder_embeds
                 external_load_encoder_input.append(i)
                 num_embeds_to_schedule += num_encoder_embeds
                 continue
 
             num_embeds_to_schedule += num_encoder_embeds
             encoder_compute_budget -= num_encoder_embeds
-            mm_hashes_to_schedule.add(item_identifier)
+            mm_hashes_to_schedule[item_identifier] = num_encoder_embeds
             encoder_inputs_to_schedule.append(i)
 
         return (
@@ -2173,6 +2234,8 @@ class Scheduler(SchedulerInterface):
 
         error_req_ids = set(self.grammar_compile_error_reqs)
         self.grammar_compile_error_reqs.clear()
+        error_req_ids.update(self.encoder_cache_mismatch_reqs)
+        self.encoder_cache_mismatch_reqs.clear()
         if failed_kv_load_req_ids and not self.recompute_kv_load_failures:
             error_req_ids.update(failed_kv_load_req_ids)
         if self.ec_connector is not None:
