@@ -27,7 +27,7 @@ EPS = 1e-6
 LORA_RANK = 320
 DOWN_N = LORA_RANK + HC + 12  # merged down+inject weight, 16-row padded
 
-requires_cute_dsl = pytest.mark.skipif(
+requires_sm90 = pytest.mark.skipif(
     not current_platform.has_device_capability(90),
     reason="fused HC down+SiLU requires SM90+",
 )
@@ -136,7 +136,7 @@ def test_hc_combine_norm_unit_injection(num_tokens: int) -> None:
     torch.testing.assert_close(actual_norm, expected_norm)
 
 
-@requires_cute_dsl
+@requires_sm90
 @pytest.mark.parametrize("num_tokens", [1, 2, 4, 8, 16, 32, 48])
 def test_hc_down_silu_fused(num_tokens: int) -> None:
     # The fused op must stay bit-identical to the unfused ll_bf16 reference
@@ -155,7 +155,7 @@ def test_hc_down_silu_fused(num_tokens: int) -> None:
     assert torch.equal(actual[:, computed], expected[:, computed])
 
 
-@requires_cute_dsl
+@requires_sm90
 @pytest.mark.parametrize("num_tokens", [1, 5])
 @pytest.mark.parametrize("hc_count", [2, 4])
 def test_hc_down_silu_fused_other_shape(num_tokens: int, hc_count: int) -> None:
@@ -173,7 +173,6 @@ def test_hc_down_silu_fused_other_shape(num_tokens: int, hc_count: int) -> None:
     assert torch.equal(actual[:, : rank + hc_count], expected[:, : rank + hc_count])
 
 
-@requires_cute_dsl
 @pytest.mark.parametrize(
     "rank,hc_count,k", [(LORA_RANK, HC, HYPER_HIDDEN_SIZE), (128, 2, 2048)]
 )
