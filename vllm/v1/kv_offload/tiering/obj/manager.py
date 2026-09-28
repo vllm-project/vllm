@@ -366,7 +366,7 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
                     telemetry = self._agent.get_xfer_telemetry(entry.xfer_handle)
                     transfer_time = telemetry.xferDuration / 1e6
                 except Exception as exc:
-                    logger.warning(
+                    logger.warning_once(
                         "get_xfer_telemetry failed for job %d: %s", job_id, exc
                     )
 
