@@ -97,6 +97,7 @@ def validate_registered_overrides(hw_modules: dict[str, str]) -> None:
     Raises:
         TypeError: If an override is not a subclass of the class published under
             its name.
+
     """
     for hw_name in hw_modules.values():
         hw_module = importlib.import_module(hw_name)
