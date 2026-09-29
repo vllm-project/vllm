@@ -1065,7 +1065,9 @@ class DeepEPV2All2AllManager(All2AllManagerBase):
         if os.environ.get("EP_DISABLE_GIN", "0") != "0":
             return
 
-        gin_type = query_nccl_gin_type(group)
+        gin_type = query_nccl_gin_type(
+            group, railed=envs.VLLM_DEEPEP_V2_ALLOW_HYBRID_MODE
+        )
         if gin_type is None:
             raise RuntimeError(
                 "DeepEPv2 communicator properties query failed; "
