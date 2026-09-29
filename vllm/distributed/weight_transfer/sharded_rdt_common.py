@@ -60,6 +60,7 @@ def check_ray_rdt_version() -> None:
 
     Raises:
         ValueError: the installed Ray predates ``RDT_MIN_RAY_VERSION``.
+
     """
     import importlib.metadata
 
@@ -162,6 +163,7 @@ class RdtRouter:
             ValueError: ``workers_per_replica`` does not divide
                 ``num_consumers``, so the deployments are not uniform and two
                 workers of one deployment would share a block index.
+
         """
         self.num_producers = max(1, num_producers)
         self.num_consumers = max(1, num_consumers)
@@ -263,6 +265,7 @@ class RdtRouter:
         Raises:
             ValueError: an owner set is empty or out of range, or a class index
                 does not resolve.
+
         """
         for c, row in enumerate(self._owner_sets):
             if not row:
