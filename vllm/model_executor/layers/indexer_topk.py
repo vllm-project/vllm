@@ -93,8 +93,6 @@ def deep_select_topk(
     end: torch.Tensor | None = None,
     output_idx: torch.Tensor | None = None,
     indices_dtype: torch.dtype = torch.int32,
-    *,
-    sorted_index: bool = False,
 ) -> torch.Tensor:
     """Select the top-k indices per row of `input` with DeepSelect.
 
@@ -108,7 +106,6 @@ def deep_select_topk(
         output_idx: Optional preallocated (num_rows, topk) output tensor whose
             stride(0) is 32B-aligned (e.g. a slice of a wider buffer).
         indices_dtype: Output dtype when `output_idx` is not provided.
-        sorted_index: Sort selected logical positions in ascending order.
 
     Returns:
         The (num_rows, topk) indices tensor.
@@ -136,7 +133,7 @@ def deep_select_topk(
         None,  # begin is not supported
         end,
         False,  # sorted_value
-        sorted_index,
+        False,  # sorted_index
         None,  # output_value
         output_idx,
         None,  # output_idx_offset
@@ -309,13 +306,7 @@ class SparseIndexerTopk(torch.nn.Module):
         backend = self.resolve_backend(logits, topk_tokens, logits.shape[0])
         if backend == "deep_select":
             row_ends = self._row_ends(seq_lens, next_n, logits.shape[0])
-            deep_select_topk(
-                logits,
-                topk_tokens,
-                end=row_ends,
-                output_idx=topk_indices,
-                sorted_index=True,
-            )
+            deep_select_topk(logits, topk_tokens, end=row_ends, output_idx=topk_indices)
         elif backend == "cooperative":
             (topk_workspace,) = current_workspace_manager().get_simultaneous(
                 ((RADIX_TOPK_WORKSPACE_SIZE,), torch.uint8),

@@ -1698,8 +1698,8 @@ def test_deep_select_topk_preallocated_output() -> None:
 @pytest.mark.parametrize("width", [256, 4096, 131072])
 @pytest.mark.parametrize("top_k", [512, 1024, 2048])
 @torch.inference_mode()
-def test_deep_select_sorted_decode_graph(width: int, top_k: int) -> None:
-    """Decode preserves logical order and masks short rows on graph replay."""
+def test_deep_select_decode_graph(width: int, top_k: int) -> None:
+    """Decode respects dynamic row bounds and padding on graph replay."""
     from vllm.model_executor.layers.indexer_topk import SparseIndexerTopk
 
     set_random_seed(0)
@@ -1725,7 +1725,6 @@ def test_deep_select_sorted_decode_graph(width: int, top_k: int) -> None:
     for row, end in enumerate(lengths.tolist()):
         count = min(end, top_k)
         picked = indices[row, :count].long()
-        assert torch.all(picked[1:] > picked[:-1])
         torch.testing.assert_close(
             logits[row, picked].sort().values,
             logits[row, :end].topk(count).values.sort().values,
@@ -1754,7 +1753,6 @@ def test_sparse_indexer_auto_deep_select_masked_candidates() -> None:
 
     for row in range(logits.shape[0]):
         picked = indices[row].long()
-        assert torch.all(picked[1:] > picked[:-1])
         torch.testing.assert_close(
             logits[row, picked].sort().values,
             logits[row].topk(512).values.sort().values,

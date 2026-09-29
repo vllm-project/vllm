@@ -63,7 +63,6 @@ def test_kpool_auto_uses_deep_select_on_hopper() -> None:
     for row, length in enumerate(pool_lens.tolist()):
         count = min(length, 512)
         picked = output[row, :count].long()
-        assert torch.all(picked[1:] > picked[:-1])
         torch.testing.assert_close(
             logits[row, picked].sort().values,
             logits[row, :length].topk(count).values.sort().values,
