@@ -43,7 +43,8 @@
                     },
                     "style": "glm_xml",
                     "any_order": false,
-                    "max_whitespace_cnt": null
+                    "max_whitespace_cnt": null,
+                    "excludes": []
                   },
                   "end": "</tool_call>"
                 },
@@ -76,7 +77,8 @@
                     },
                     "style": "glm_xml",
                     "any_order": false,
-                    "max_whitespace_cnt": null
+                    "max_whitespace_cnt": null,
+                    "excludes": []
                   },
                   "end": "</tool_call>"
                 }
@@ -140,7 +142,8 @@
                     },
                     "style": "glm_xml",
                     "any_order": false,
-                    "max_whitespace_cnt": null
+                    "max_whitespace_cnt": null,
+                    "excludes": []
                   },
                   "end": "</tool_call>"
                 },
@@ -173,7 +176,8 @@
                     },
                     "style": "glm_xml",
                     "any_order": false,
-                    "max_whitespace_cnt": null
+                    "max_whitespace_cnt": null,
+                    "excludes": []
                   },
                   "end": "</tool_call>"
                 }
@@ -231,7 +235,8 @@
                 },
                 "style": "glm_xml",
                 "any_order": false,
-                "max_whitespace_cnt": null
+                "max_whitespace_cnt": null,
+                "excludes": []
               },
               "end": "</tool_call>"
             }

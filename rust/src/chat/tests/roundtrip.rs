@@ -192,10 +192,7 @@ impl RoundtripCase {
             thinking_behavior: ThinkingBehavior::Toggleable { default: true },
             json_fmt: compact_json_fmt(),
             sort_json_keys: false,
-            // TODO: MiMo renders compact `<tool_call><function=...>` calls, but its
-            // tool parser reuses the Qwen3-Coder builder with newline-delimited tags:
-            // `required` rejects the calls, and the `auto` trigger never fires.
-            tool_choice_variants: &[ToolChoiceVariant::Auto],
+            tool_choice_variants: ToolChoiceVariant::ALL,
         }
     }
 

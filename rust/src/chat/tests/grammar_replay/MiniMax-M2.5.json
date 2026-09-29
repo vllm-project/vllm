@@ -58,7 +58,8 @@
                           },
                           "style": "minimax_xml",
                           "any_order": false,
-                          "max_whitespace_cnt": null
+                          "max_whitespace_cnt": null,
+                          "excludes": []
                         },
                         "end": "</invoke>\n"
                       },
@@ -91,7 +92,8 @@
                           },
                           "style": "minimax_xml",
                           "any_order": false,
-                          "max_whitespace_cnt": null
+                          "max_whitespace_cnt": null,
+                          "excludes": []
                         },
                         "end": "</invoke>\n"
                       }
@@ -170,7 +172,8 @@
                         },
                         "style": "minimax_xml",
                         "any_order": false,
-                        "max_whitespace_cnt": null
+                        "max_whitespace_cnt": null,
+                        "excludes": []
                       },
                       "end": "</invoke>\n"
                     },
@@ -203,7 +206,8 @@
                         },
                         "style": "minimax_xml",
                         "any_order": false,
-                        "max_whitespace_cnt": null
+                        "max_whitespace_cnt": null,
+                        "excludes": []
                       },
                       "end": "</invoke>\n"
                     }
@@ -275,7 +279,8 @@
                     },
                     "style": "minimax_xml",
                     "any_order": false,
-                    "max_whitespace_cnt": null
+                    "max_whitespace_cnt": null,
+                    "excludes": []
                   },
                   "end": "</invoke>\n"
                 },

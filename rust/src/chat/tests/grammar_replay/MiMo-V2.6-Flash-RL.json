@@ -25,12 +25,12 @@
             {
               "type": "triggered_tags",
               "triggers": [
-                "<tool_call>\n<function="
+                "<tool_call>"
               ],
               "tags": [
                 {
                   "type": "tag",
-                  "begin": "<tool_call>\n<function=get_weather>\n",
+                  "begin": "<tool_call><function=get_weather>",
                   "content": {
                     "type": "json_schema",
                     "json_schema": {
@@ -46,13 +46,14 @@
                     },
                     "style": "qwen_xml",
                     "any_order": false,
-                    "max_whitespace_cnt": null
+                    "max_whitespace_cnt": null,
+                    "excludes": []
                   },
-                  "end": "\n</function>\n</tool_call>"
+                  "end": "</function></tool_call>"
                 },
                 {
                   "type": "tag",
-                  "begin": "<tool_call>\n<function=add>\n",
+                  "begin": "<tool_call><function=add>",
                   "content": {
                     "type": "json_schema",
                     "json_schema": {
@@ -79,16 +80,19 @@
                     },
                     "style": "qwen_xml",
                     "any_order": false,
-                    "max_whitespace_cnt": null
+                    "max_whitespace_cnt": null,
+                    "excludes": []
                   },
-                  "end": "\n</function>\n</tool_call>"
+                  "end": "</function></tool_call>"
                 }
               ],
               "at_least_one": false,
               "stop_after_first": false,
               "excludes": [
                 "<think>",
-                "</think>"
+                "</think>",
+                "</tool_call>",
+                "<function="
               ]
             }
           ]
@@ -97,6 +101,154 @@
       },
       "completion": "<think>Need call the weather and add tools.</think>I will call the tools.<tool_call><function=get_weather><parameter=location>Shanghai</parameter></function></tool_call><tool_call><function=add><parameter=y>1.0</parameter><parameter=x>2</parameter><parameter=items>[\"left\", \"right\"]</parameter></function></tool_call>",
       "generation_token_ids": [151667, 23657, 1618, 279, 9104, 323, 912, 7375, 13, 151668, 40, 686, 1618, 279, 7375, 13, 151657, 27, 1688, 28280, 69364, 1784, 16181, 28, 2527, 29, 2016, 30070, 522, 16181, 1472, 1688, 29, 151658, 151657, 27, 1688, 92784, 1784, 16181, 29368, 29, 16, 13, 15, 522, 16181, 1784, 16181, 25387, 29, 17, 522, 16181, 1784, 16181, 28, 3615, 29, 1183, 2359, 497, 330, 1291, 1341, 522, 16181, 1472, 1688, 29, 151658, 151645]
+    },
+    "required": {
+      "grammar": {
+        "format": {
+          "type": "sequence",
+          "elements": [
+            {
+              "type": "optional",
+              "content": {
+                "type": "tag",
+                "begin": "<think>",
+                "content": {
+                  "type": "any_text",
+                  "excludes": [],
+                  "max_tokens": null,
+                  "max_chars": null
+                },
+                "end": "</think>"
+              }
+            },
+            {
+              "type": "triggered_tags",
+              "triggers": [
+                "<tool_call>"
+              ],
+              "tags": [
+                {
+                  "type": "tag",
+                  "begin": "<tool_call><function=get_weather>",
+                  "content": {
+                    "type": "json_schema",
+                    "json_schema": {
+                      "type": "object",
+                      "properties": {
+                        "location": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "location"
+                      ]
+                    },
+                    "style": "qwen_xml",
+                    "any_order": false,
+                    "max_whitespace_cnt": null,
+                    "excludes": []
+                  },
+                  "end": "</function></tool_call>"
+                },
+                {
+                  "type": "tag",
+                  "begin": "<tool_call><function=add>",
+                  "content": {
+                    "type": "json_schema",
+                    "json_schema": {
+                      "type": "object",
+                      "properties": {
+                        "y": {
+                          "type": "number"
+                        },
+                        "x": {
+                          "type": "number"
+                        },
+                        "items": {
+                          "type": "array",
+                          "items": {
+                            "type": "string"
+                          }
+                        }
+                      },
+                      "required": [
+                        "y",
+                        "x",
+                        "items"
+                      ]
+                    },
+                    "style": "qwen_xml",
+                    "any_order": false,
+                    "max_whitespace_cnt": null,
+                    "excludes": []
+                  },
+                  "end": "</function></tool_call>"
+                }
+              ],
+              "at_least_one": true,
+              "stop_after_first": false,
+              "excludes": [
+                "<think>",
+                "</think>",
+                "</tool_call>",
+                "<function="
+              ]
+            }
+          ]
+        },
+        "coverage": "from_token_zero"
+      },
+      "completion": "<think>Need call the weather and add tools.</think><tool_call><function=get_weather><parameter=location>Shanghai</parameter></function></tool_call><tool_call><function=add><parameter=y>1.0</parameter><parameter=x>2</parameter><parameter=items>[\"left\", \"right\"]</parameter></function></tool_call>",
+      "generation_token_ids": [151667, 23657, 1618, 279, 9104, 323, 912, 7375, 13, 151668, 151657, 27, 1688, 28280, 69364, 1784, 16181, 28, 2527, 29, 2016, 30070, 522, 16181, 1472, 1688, 29, 151658, 151657, 27, 1688, 92784, 1784, 16181, 29368, 29, 16, 13, 15, 522, 16181, 1784, 16181, 25387, 29, 17, 522, 16181, 1784, 16181, 28, 3615, 29, 1183, 2359, 497, 330, 1291, 1341, 522, 16181, 1472, 1688, 29, 151658, 151645]
+    },
+    "named": {
+      "grammar": {
+        "format": {
+          "type": "sequence",
+          "elements": [
+            {
+              "type": "optional",
+              "content": {
+                "type": "tag",
+                "begin": "<think>",
+                "content": {
+                  "type": "any_text",
+                  "excludes": [],
+                  "max_tokens": null,
+                  "max_chars": null
+                },
+                "end": "</think>"
+              }
+            },
+            {
+              "type": "tag",
+              "begin": "<tool_call><function=get_weather>",
+              "content": {
+                "type": "json_schema",
+                "json_schema": {
+                  "type": "object",
+                  "properties": {
+                    "location": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "location"
+                  ]
+                },
+                "style": "qwen_xml",
+                "any_order": false,
+                "max_whitespace_cnt": null,
+                "excludes": []
+              },
+              "end": "</function></tool_call>"
+            }
+          ]
+        },
+        "coverage": "from_token_zero"
+      },
+      "completion": "<think>Need call the weather and add tools.</think><tool_call><function=get_weather><parameter=location>Shanghai</parameter></function></tool_call>",
+      "generation_token_ids": [151667, 23657, 1618, 279, 9104, 323, 912, 7375, 13, 151668, 151657, 27, 1688, 28280, 69364, 1784, 16181, 28, 2527, 29, 2016, 30070, 522, 16181, 1472, 1688, 29, 151658, 151645]
     }
   }
 }

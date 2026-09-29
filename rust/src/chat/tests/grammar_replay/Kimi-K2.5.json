@@ -60,7 +60,8 @@
                               },
                               "style": "json",
                               "any_order": false,
-                              "max_whitespace_cnt": null
+                              "max_whitespace_cnt": null,
+                              "excludes": []
                             }
                           ]
                         },
@@ -106,7 +107,8 @@
                               },
                               "style": "json",
                               "any_order": false,
-                              "max_whitespace_cnt": null
+                              "max_whitespace_cnt": null,
+                              "excludes": []
                             }
                           ]
                         },
@@ -190,7 +192,8 @@
                             },
                             "style": "json",
                             "any_order": false,
-                            "max_whitespace_cnt": null
+                            "max_whitespace_cnt": null,
+                            "excludes": []
                           }
                         ]
                       },
@@ -236,7 +239,8 @@
                             },
                             "style": "json",
                             "any_order": false,
-                            "max_whitespace_cnt": null
+                            "max_whitespace_cnt": null,
+                            "excludes": []
                           }
                         ]
                       },
@@ -312,7 +316,8 @@
                         },
                         "style": "json",
                         "any_order": false,
-                        "max_whitespace_cnt": null
+                        "max_whitespace_cnt": null,
+                        "excludes": []
                       }
                     ]
                   },

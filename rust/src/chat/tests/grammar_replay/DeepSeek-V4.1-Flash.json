@@ -49,7 +49,8 @@
                           },
                           "style": "deepseek_v4_1_xml",
                           "any_order": false,
-                          "max_whitespace_cnt": null
+                          "max_whitespace_cnt": null,
+                          "excludes": []
                         },
                         "end": "</｜DSML｜ invoke>\n"
                       },
@@ -82,7 +83,8 @@
                           },
                           "style": "deepseek_v4_1_xml",
                           "any_order": false,
-                          "max_whitespace_cnt": null
+                          "max_whitespace_cnt": null,
+                          "excludes": []
                         },
                         "end": "</｜DSML｜ invoke>\n"
                       }
@@ -152,7 +154,8 @@
                         },
                         "style": "deepseek_v4_1_xml",
                         "any_order": false,
-                        "max_whitespace_cnt": null
+                        "max_whitespace_cnt": null,
+                        "excludes": []
                       },
                       "end": "</｜DSML｜ invoke>\n"
                     },
@@ -185,7 +188,8 @@
                         },
                         "style": "deepseek_v4_1_xml",
                         "any_order": false,
-                        "max_whitespace_cnt": null
+                        "max_whitespace_cnt": null,
+                        "excludes": []
                       },
                       "end": "</｜DSML｜ invoke>\n"
                     }
@@ -248,7 +252,8 @@
                     },
                     "style": "deepseek_v4_1_xml",
                     "any_order": false,
-                    "max_whitespace_cnt": null
+                    "max_whitespace_cnt": null,
+                    "excludes": []
                   },
                   "end": "</｜DSML｜ invoke>\n"
                 },
