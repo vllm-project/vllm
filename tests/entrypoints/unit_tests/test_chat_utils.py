@@ -3277,6 +3277,12 @@ def test_dynamic_role_allow_list_is_treated_as_a_filter():
     assert roles_rendered_by_chat_template(template) == frozenset()
 
 
+def test_dynamic_role_equality_is_treated_as_a_filter():
+    """``message.role == some_var`` is a filter even though the name is hidden."""
+    template = "{% if message.role == allowed_role %}{{ message.content }}{% endif %}"
+    assert roles_rendered_by_chat_template(template) == frozenset()
+
+
 @pytest.mark.parametrize(
     "message,expected",
     [
@@ -3516,6 +3522,163 @@ def test_structured_text_unknown_role_is_rejected():
             ],
             _FILTERING_TEMPLATE,
             _filtering_render,
+        )
+
+
+def test_probe_tokens_do_not_hide_an_earlier_dropped_message():
+    """Index 1's probe must not match inside index 10's probe."""
+    template = """
+    {% for message in messages %}
+    {% if message.role == 'user' %}
+    user:{{ message.content }}
+    {% elif message.role != 'usr' %}
+    {{ message.role }}:{{ message.content }}
+    {% endif %}
+    {% endfor %}
+    """
+    messages = []
+    for index in range(11):
+        if index == 1:
+            messages.append({"role": "usr", "content": "secret"})
+        elif index == 10:
+            messages.append({"role": "wizard", "content": "visible"})
+        else:
+            messages.append({"role": "user", "content": f"turn {index}"})
+
+    def render_text(rendered_messages):
+        parts = []
+        for message in rendered_messages:
+            role = message.get("role")
+            content = message.get("content")
+            if role == "usr" or not isinstance(content, str):
+                continue
+            parts.append(f"{role}:{content}")
+        return "\n".join(parts)
+
+    with pytest.raises(VLLMValidationError, match="'usr'") as exc_info:
+        assert_chat_template_rendered_messages(messages, template, render_text)
+    assert exc_info.value.value == "usr"
+
+
+def test_many_omitted_structural_messages_share_one_render():
+    """Dropping many image turns must not re-render once per message."""
+    messages = [
+        {
+            "role": f"wizard{index}",
+            "content": [{"type": "image", "image_url": "http://example.test/a"}],
+        }
+        for index in range(24)
+    ]
+    calls = 0
+
+    def render_text(rendered_messages):
+        nonlocal calls
+        calls += 1
+        return _filtering_render(rendered_messages)
+
+    with pytest.raises(VLLMValidationError, match="'wizard0'") as exc_info:
+        assert_chat_template_rendered_messages(
+            messages, _FILTERING_TEMPLATE, render_text
+        )
+    assert calls == 2
+    assert exc_info.value.value[0] == "wizard0"
+    assert exc_info.value.value[-1] == "wizard23"
+
+
+def test_many_rendered_tool_calls_are_checked_together():
+    """A template that prints every tool name is not probed once per call."""
+    messages = [
+        {
+            "role": "wizard",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": f"call_{index}",
+                    "type": "function",
+                    "function": {"name": f"lookup{index}", "arguments": "{}"},
+                }
+            ],
+        }
+        for index in range(24)
+    ]
+    calls = 0
+
+    def render_text(rendered_messages):
+        nonlocal calls
+        calls += 1
+        names = []
+        for message in rendered_messages:
+            for call in message.get("tool_calls") or []:
+                function = call.get("function") or {}
+                name = function.get("name")
+                if isinstance(name, str):
+                    names.append(name)
+        return "\n".join(names)
+
+    assert_chat_template_rendered_messages(messages, _FILTERING_TEMPLATE, render_text)
+    assert calls == 3
+
+
+def test_batched_omission_keeps_a_rendered_tool_call():
+    """Many dropped images plus one printed tool call stay a handful of renders."""
+    messages = [
+        {
+            "role": f"drop{index}",
+            "content": [{"type": "image", "image_url": "http://example.test/a"}],
+        }
+        for index in range(12)
+    ]
+    messages.append(
+        {
+            "role": "keeper",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {"name": "lookup", "arguments": "{}"},
+                }
+            ],
+        }
+    )
+    calls = 0
+
+    def render_text(rendered_messages):
+        nonlocal calls
+        calls += 1
+        names = []
+        for message in rendered_messages:
+            for call in message.get("tool_calls") or []:
+                function = call.get("function") or {}
+                name = function.get("name")
+                if isinstance(name, str):
+                    names.append(name)
+        return "\n".join(names)
+
+    with pytest.raises(VLLMValidationError, match="'drop0'") as exc_info:
+        assert_chat_template_rendered_messages(
+            messages, _FILTERING_TEMPLATE, render_text
+        )
+    assert calls == 4
+    assert "keeper" not in str(exc_info.value)
+    assert exc_info.value.value[-1] == "drop11"
+
+
+def test_variable_role_equality_still_rejects_a_dropped_turn():
+    template = "{% if message.role == required %}{{ message.content }}{% endif %}"
+
+    def render_text(rendered_messages):
+        return "".join(
+            message["content"]
+            for message in rendered_messages
+            if message.get("role") == "user" and isinstance(message.get("content"), str)
+        )
+
+    with pytest.raises(VLLMValidationError, match="'usr'"):
+        assert_chat_template_rendered_messages(
+            [{"role": "usr", "content": "hello"}],
+            template,
+            render_text,
         )
 
 

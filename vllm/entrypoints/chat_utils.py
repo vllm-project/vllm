@@ -2329,8 +2329,9 @@ def _roles_from_compare(
 
     Only ``==`` and ``in`` count. ``!=`` and ``not in`` are generation-prompt
     guards (ChatML checks ``messages[-1]['role'] != 'assistant'``) and do not
-    select which roles are rendered. A non-literal ``in`` target such as
-    ``message.role in allowed_roles`` is dynamic.
+    select which roles are rendered. A non-literal target, whether
+    ``message.role in allowed_roles`` or ``message.role == some_var``, is
+    dynamic.
 
     Returns:
         ``("ignore", empty)`` when the node is not a role inclusion test,
@@ -2356,7 +2357,10 @@ def _roles_from_compare(
         literal_node = operand.expr if left_is_role else node.expr
         names = _literal_role_names(literal_node)
         if names is None:
-            return "ignore", set()
+            # ``message.role == some_var`` names no literal. Same as
+            # ``role in allowed_roles``: a filter may exist, so probe
+            # instead of skipping the check.
+            return "dynamic", set()
         return "literal", set(names)
 
     if not left_is_role:
@@ -2383,8 +2387,8 @@ def roles_rendered_by_chat_template(chat_template: str) -> frozenset[str] | None
     Returns:
         Roles named by ``==`` / ``in`` tests. An empty set means the
         template filters on role, but the allowed names are not literals
-        (``message.role in allowed_roles``). ``None`` means there is no
-        role filter.
+        (``message.role in allowed_roles`` or ``message.role == some_var``).
+        ``None`` means there is no role filter.
 
     """
     try:
@@ -2500,12 +2504,110 @@ def _unique_roles(roles: Iterable[str]) -> list[str]:
     return seen
 
 
+def _role_probe_token(prefix: str, index: int) -> str:
+    """Build a probe token that is not a substring of another index's token."""
+    return f"{prefix}_{index:06d}_"
+
+
+def _render_probe_text(
+    render_text: Callable[[Sequence[Mapping[str, Any]]], str],
+    messages: Sequence[Mapping[str, Any]],
+) -> str | None:
+    try:
+        rendered = render_text(messages)
+    except Exception:
+        return None
+    if not isinstance(rendered, str):
+        return None
+    return rendered
+
+
+def _messages_without(
+    conversation: Sequence[Mapping[str, Any]],
+    indexes: set[int],
+) -> list[Mapping[str, Any]]:
+    return [
+        message for index, message in enumerate(conversation) if index not in indexes
+    ]
+
+
+def _stamp_tool_call_probe(message: dict[str, Any], token: str) -> bool:
+    """Append ``token`` to tool-call names this message already has.
+
+    A new text part is not added. A template can echo that part while still
+    dropping the tool call or image that made the message a suspect.
+    """
+    tool_calls = message.get("tool_calls")
+    if not isinstance(tool_calls, list):
+        return False
+    stamped: list[Any] = []
+    wrote = False
+    for call in tool_calls:
+        if not isinstance(call, dict):
+            stamped.append(call)
+            continue
+        call = copy.deepcopy(call)
+        function = call.get("function")
+        if isinstance(function, dict) and isinstance(function.get("name"), str):
+            function["name"] = function["name"] + token
+            wrote = True
+        stamped.append(call)
+    if wrote:
+        message["tool_calls"] = stamped
+    return wrote
+
+
+def _tool_call_indexes_echoed(
+    conversation: Sequence[Mapping[str, Any]],
+    suspects: Sequence[tuple[int, str]],
+    render_text: Callable[[Sequence[Mapping[str, Any]]], str],
+) -> set[int] | None:
+    """Suspects whose tool-call name is still present after one probe render.
+
+    ``None`` means the probe did not return text. An empty set means no
+    stamped name showed up; that is not proof the message was dropped.
+    """
+    try:
+        probed = copy.deepcopy(list(conversation))
+    except Exception:
+        logger.warning(
+            "Could not copy the conversation to check dropped roles.",
+            exc_info=True,
+        )
+        return None
+
+    prefix = "vllmprobe" + random_uuid().replace("-", "")[:12]
+    tokens: list[tuple[int, str]] = []
+    for index, _role in suspects:
+        message = probed[index]
+        if not isinstance(message, dict):
+            continue
+        token = _role_probe_token(prefix, index)
+        if _stamp_tool_call_probe(message, token):
+            tokens.append((index, token))
+    if not tokens:
+        return set()
+
+    rendered = _render_probe_text(render_text, probed)
+    if rendered is None:
+        return None
+    folded = rendered.lower()
+    return {index for index, token in tokens if token.lower() in folded}
+
+
 def _roles_dropped_by_omission(
     conversation: Sequence[Mapping[str, Any]],
     suspects: Sequence[tuple[int, str]],
     render_text: Callable[[Sequence[Mapping[str, Any]]], str],
 ) -> list[str]:
-    """Roles whose removal leaves the rendered prompt unchanged."""
+    """Roles whose removal leaves the rendered prompt unchanged.
+
+    Every suspect is removed in one render. An unchanged prompt means each
+    of them was omitted. If the prompt changes, tool-call names are stamped
+    and checked in a second render so messages the template actually prints
+    are cleared together. Only a mixed remainder is split, and a fully
+    omitted subgroup is still decided by one render.
+    """
     try:
         baseline = render_text(conversation)
     except Exception:
@@ -2519,18 +2621,61 @@ def _roles_dropped_by_omission(
             "Chat template probe did not return text; skipping the dropped-role check."
         )
         return []
-    dropped: list[str] = []
-    for index, role in suspects:
-        reduced = [message for i, message in enumerate(conversation) if i != index]
-        try:
-            alternate = render_text(reduced)
-        except Exception:
-            # Removing the message changed rendering enough to fail.
-            # That is not a silent drop.
-            continue
+
+    group = list(suspects)
+    if not group:
+        return []
+
+    def dropped_in(
+        subgroup: Sequence[tuple[int, str]],
+        known_alternate: str | None = None,
+        *,
+        have_known: bool = False,
+    ) -> list[str]:
+        if not subgroup:
+            return []
+        if have_known:
+            alternate = known_alternate
+        else:
+            alternate = _render_probe_text(
+                render_text,
+                _messages_without(conversation, {index for index, _role in subgroup}),
+            )
         if isinstance(alternate, str) and alternate == baseline:
-            dropped.append(role)
-    return dropped
+            return [role for _index, role in subgroup]
+        # One comparison cannot tell which member of a changed group was
+        # the one that contributed. A single message that changes the
+        # prompt, or whose removal fails to render, is not a silent drop.
+        if len(subgroup) == 1:
+            return []
+        mid = len(subgroup) // 2
+        return dropped_in(subgroup[:mid]) + dropped_in(subgroup[mid:])
+
+    alternate = _render_probe_text(
+        render_text,
+        _messages_without(conversation, {index for index, _role in group}),
+    )
+    if isinstance(alternate, str) and alternate == baseline:
+        return [role for _index, role in group]
+
+    has_tool_calls = False
+    for index, _role in group:
+        message = conversation[index]
+        tool_calls = message.get("tool_calls") if isinstance(message, Mapping) else None
+        if isinstance(tool_calls, list) and tool_calls:
+            has_tool_calls = True
+            break
+    if has_tool_calls:
+        echoed = _tool_call_indexes_echoed(conversation, group, render_text)
+        if echoed:
+            group = [(index, role) for index, role in group if index not in echoed]
+            if not group:
+                return []
+            # ``alternate`` also removed the echoed messages, so it does
+            # not describe this smaller group.
+            return dropped_in(group)
+
+    return dropped_in(group, alternate, have_known=True)
 
 
 def assert_chat_template_rendered_messages(
@@ -2620,7 +2765,7 @@ def _roles_dropped_by_text_probe(
     prefix = "vllmprobe" + random_uuid().replace("-", "")[:12]
     tokens: list[tuple[str, str]] = []
     for index, role in suspects:
-        token = f"{prefix}{index}"
+        token = _role_probe_token(prefix, index)
         message = probed[index]
         if isinstance(message, dict) and _inject_probe_token(message, token):
             tokens.append((token, role))
