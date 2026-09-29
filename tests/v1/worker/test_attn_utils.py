@@ -7,8 +7,10 @@ while keeping per-block content compact, so padding bytes at the end of each pag
 never addressed by the logical view.
 """
 
+from dataclasses import replace
 from types import SimpleNamespace
 from typing import Any
+from weakref import ref
 
 import numpy as np
 import pytest
@@ -41,6 +43,7 @@ from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 from vllm.v1.worker.utils import (
     AttentionGroup,
     allocate_kv_cache,
+    clear_layer_kv_caches,
     copy_kv_cache_blocks_inplace,
 )
 
@@ -521,6 +524,61 @@ def test_copy_kv_cache_blocks_shared_storage(layout: KVCacheLayout):
     for layer_idx, cache in enumerate(caches):
         torch.testing.assert_close(cache[2], expected[layer_idx][0])
         torch.testing.assert_close(cache[1], expected[layer_idx][1])
+
+
+@pytest.mark.parametrize("padded", [False, True])
+def test_packed_allocation_retains_manager_blocks(padded):
+    class Backend(AttentionBackend):
+        @classmethod
+        def get_kv_cache_view_block_size(cls, spec, kernel_block_size, vllm_config):
+            return spec.block_size
+
+    spec = FullAttentionSpec(
+        block_size=128, num_kv_heads=2, head_size=64, dtype=torch.bfloat16
+    )
+    block_stride = 2 * spec.page_size_bytes
+    layers = ["layer.0"] if padded else ["layer.0", "layer.1"]
+    if padded:
+        spec = replace(spec, page_size_padded=block_stride)
+    config = KVCacheConfig(
+        num_blocks=3,
+        kv_cache_tensors=[
+            KVCacheTensor(
+                size=3 * block_stride,
+                layers=layers,
+                layer_stride=spec.page_size_bytes,
+                block_stride=block_stride,
+            )
+        ],
+        kv_cache_groups=[KVCacheGroupSpec(layers, spec)],
+    )
+    context = {
+        name: SimpleNamespace(get_attn_backend=lambda: Backend) for name in layers
+    }
+    caches = allocate_kv_cache(
+        config,
+        torch.device("cpu"),
+        KVCacheLayout.BLHNC,
+        [32],
+        vllm_config=SimpleNamespace(
+            compilation_config=SimpleNamespace(static_forward_context=context)
+        ),
+    )
+    for cache in caches.values():
+        assert cache.shape == (3, 2, 128, 128)
+        assert cache.stride(0) * cache.element_size() == block_stride
+
+
+def test_clear_layer_kv_caches_releases_flashinfer_read_views():
+    cache = torch.empty((2, 1, 128, 128), dtype=torch.bfloat16, device="cpu")
+    cache_ref = ref(cache)
+    layer = SimpleNamespace(
+        kv_cache=cache,
+        impl=SimpleNamespace(_repage_source=cache, _repage_view=cache[:, :, :32]),
+    )
+    del cache
+    clear_layer_kv_caches([layer])
+    assert cache_ref() is None
 
 
 def test_fixed_block_stride_propagates_outward_in_lhbnc():
