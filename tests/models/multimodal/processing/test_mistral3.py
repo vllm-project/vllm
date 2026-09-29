@@ -4,19 +4,29 @@
 
 import pytest
 import torch
+import torch.nn.functional as F
 from PIL import Image
 from transformers import AutoProcessor, BatchFeature
 from transformers.models.pixtral import PixtralProcessor
 
-from vllm.model_executor.layers.fusion.mm_input_norm import build_mm_input_norm
+from vllm.model_executor.layers.fusion.mm_input_norm import (
+    FusedMMInputNorm,
+    IdentityInputNorm,
+    build_mm_input_norm,
+)
 from vllm.model_executor.models.lightonocr import (
     LightOnOCRForConditionalGeneration,
     LightOnOCRProcessingInfo,
 )
 from vllm.model_executor.models.mistral3 import Mistral3HFEncoderInfo
-from vllm.model_executor.models.pixtral import PixtralHFEncoderInfo
+from vllm.model_executor.models.pixtral import (
+    PixtralHFEncoderInfo,
+    pixtral_patch_embed,
+)
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import MultiModalKwargsItems
+from vllm.platforms import current_platform
+from vllm.triton_utils import HAS_TRITON
 
 from ...utils import build_model_context
 
@@ -25,6 +35,65 @@ from ...utils import build_model_context
 _MODEL_CONFIG_KWARGS = {"config_format": "hf"}
 _MODEL_ID = "mistralai/Mistral-Small-3.1-24B-Instruct-2503"
 _LIGHTON_MODEL_ID = "lightonai/LightOnOCR-1B-1025"
+
+_RGB_MEAN = [0.48145466, 0.4578275, 0.40821073]
+_RGB_STD = [0.26862954, 0.26130258, 0.27577711]
+_RGB_RESCALE = 1.0 / 255.0
+
+
+@pytest.mark.usefixtures("default_vllm_config")
+@pytest.mark.skipif(
+    not HAS_TRITON or not current_platform.is_cuda(), reason="CUDA Triton kernel"
+)
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("normalize", [False, True])
+@pytest.mark.parametrize(("channels", "patch_shape"), [(3, (4, 4)), (2, (2, 4))])
+def test_pixtral_patch_embed_preserves_image_order_and_strides(
+    dtype: torch.dtype,
+    normalize: bool,
+    channels: int,
+    patch_shape: tuple[int, int],
+):
+    """Packed projection matches CHW normalization and patch convolution."""
+    device = torch.device(current_platform.device_type)
+    norm = (
+        FusedMMInputNorm(
+            _RGB_MEAN[:channels],
+            _RGB_STD[:channels],
+            _RGB_RESCALE,
+            channel=channels,
+        ).to(device)
+        if normalize
+        else IdentityInputNorm()
+    )
+    weight = torch.randn(32, channels, *patch_shape, device=device, dtype=dtype)
+    images = [
+        torch.randint(0, 256, (channels, 17, 18), device=device, dtype=torch.uint8),
+        torch.randint(0, 256, (channels, 25, 17), device=device, dtype=torch.uint8)[
+            :, 1:17, 1:17
+        ],
+        torch.randint(0, 256, (channels, 19, 20), device=device, dtype=torch.uint8)[
+            :, 1:17, 2:18
+        ],
+    ]
+    reference = []
+    for image in images:
+        if normalize:
+            normalized = (
+                image.float() * norm.weight[:, None, None] + norm.bias[:, None, None]
+            )
+        else:
+            normalized = image
+        reference.append(
+            F.conv2d(normalized.to(dtype).unsqueeze(0), weight, stride=patch_shape)
+        )
+    packed, actual = pixtral_patch_embed(images, weight, norm)
+    for expected, result in zip(reference, actual):
+        torch.testing.assert_close(result, expected, rtol=0.01, atol=0.02)
+    expected_packed = torch.cat(
+        [result.flatten(2).transpose(1, 2) for result in reference], dim=1
+    )
+    torch.testing.assert_close(packed, expected_packed, rtol=0.01, atol=0.02)
 
 
 def _process_images_with_hf(
