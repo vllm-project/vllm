@@ -59,6 +59,7 @@ vllm serve <model> \
 | `auto_start` | `false` | Spawn the server from the first worker if none is running. |
 | `num_workers` | `4` | Transfer threads per worker. |
 | `timeout_ms` | `30000` | How long a transfer may run before the worker treats the server as stalled. |
+| `layerwise_load`, `layerwise_load_stages` | `true`, `4` | With `load_async=false`, load in this many stages of consecutive layers; each attention layer waits only for its own stage. Models with Mamba-style layers always load asynchronously. |
 | `load_async`, `lookup_async`, `lazy_offload`, `key_namespace` | | Shared connector options, as in embedded mode. |
 
 `capacity_bytes` and `dram_*` options are only accepted together with

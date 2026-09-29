@@ -99,6 +99,7 @@ The same configuration can be used on every host.
 | `lookup_timeout_ms` | `2000` | Longest a scheduler lookup waits for the master before reporting misses. |
 | `num_workers`, `timeout_ms` | `4`, `30000` | Transfer threads per worker, and how long a transfer may run before the worker treats the pool as stalled. |
 | `load_failure_quarantine_ms` | `30000` | How long an object that failed to load is treated as a miss. |
+| `layerwise_load`, `layerwise_load_stages` | `true`, `4` | As in standalone mode. |
 | `load_async`, `lookup_async`, `lazy_offload`, `key_namespace` | | Shared connector options, as in embedded mode. |
 
 `dram_use_shared_memory`, `dram_shm_name`, and the `dram_*_watermark` options

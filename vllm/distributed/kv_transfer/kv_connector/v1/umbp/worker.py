@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import math
 from collections.abc import Sequence
 from dataclasses import dataclass, field, replace
 from typing import Any, cast
@@ -21,6 +22,7 @@ from .data import (
     BlockLoadBatch,
     BlockTransferPlan,
     KVLayoutPlanner,
+    KVRange,
     StoreEventResult,
     TransferJobState,
     TransferJobStatus,
@@ -52,12 +54,17 @@ class UMBPStoreConnectorWorker:
         layerwise_load: bool = True,
         layerwise_store: bool = False,
         enable_kv_cache_events: bool = False,
+        layerwise_load_stages: int = 4,
     ) -> None:
         self.runtime = runtime
         self.layout = layout
         self.codec = codec
         self.layerwise_load = layerwise_load
         self.layerwise_store = layerwise_store
+        if layerwise_load_stages < 1:
+            raise ValueError("layerwise_load_stages must be positive")
+        self.layerwise_load_stages = layerwise_load_stages
+        self._stage_of: dict[str, str] = {}
         self.enable_kv_cache_events = enable_kv_cache_events
         self._load_jobs: dict[str, dict[str | None, TransferJobState]] = {}
         self._store_jobs: dict[str, TransferJobState] = {}
@@ -168,22 +175,18 @@ class UMBPStoreConnectorWorker:
             )
             self._load_jobs[request_id] = {None: self.runtime.load(materialized)}
             return
+        stage_of = self._load_stages(materialized)
         plans_by_layer: dict[str, list[BlockTransferPlan]] = {}
         for plan in materialized:
-            layer_names = {item.layer_name for item in plan.ranges}
-            if not layer_names:
+            if not plan.ranges:
                 plans_by_layer.setdefault("__bulk__", []).append(plan)
                 continue
-            for layer_name in layer_names:
-                plans_by_layer.setdefault(layer_name, []).append(
-                    replace(
-                        plan,
-                        ranges=tuple(
-                            item
-                            for item in plan.ranges
-                            if item.layer_name == layer_name
-                        ),
-                    )
+            ranges_by_stage: dict[str, list[KVRange]] = {}
+            for item in plan.ranges:
+                ranges_by_stage.setdefault(stage_of[item.layer_name], []).append(item)
+            for stage, ranges in ranges_by_stage.items():
+                plans_by_layer.setdefault(stage, []).append(
+                    replace(plan, ranges=tuple(ranges))
                 )
         jobs = self._load_jobs.setdefault(request_id, {})
         for layer_name, layer_plans in plans_by_layer.items():
@@ -192,6 +195,27 @@ class UMBPStoreConnectorWorker:
                 submitted=len(layer_plans),
             )
             jobs[layer_name] = self.runtime.load(layer_plans)
+
+    def _load_stages(self, plans: Sequence[BlockTransferPlan]) -> dict[str, str]:
+        """Map each layer to the first layer of its load stage.
+
+        Consecutive layers share a stage, so one runtime call serves several
+        layers; a layer waits only for its own stage.
+        """
+        layers = dict.fromkeys(
+            item.layer_name for plan in plans for item in plan.ranges
+        )
+        if not layers.keys() - self._stage_of.keys():
+            return self._stage_of
+        if self.layout is not None:
+            order = [region.layer_name for region in self.layout.regions]
+            layers = dict.fromkeys([*order, *layers])
+        names = list(layers)
+        size = max(1, math.ceil(len(names) / self.layerwise_load_stages))
+        self._stage_of = {
+            name: names[index - index % size] for index, name in enumerate(names)
+        }
+        return self._stage_of
 
     def _finish_job(
         self,
@@ -261,6 +285,12 @@ class UMBPStoreConnectorWorker:
             # Asynchronous loads fill blocks of requests that do not run until
             # get_finished reports them, so no forward pass reads those blocks.
             return
+        stage = self._stage_of.get(layer_name)
+        if stage is not None:
+            if not any(stage in jobs for jobs in self._load_jobs.values()):
+                # An earlier layer of this stage already waited for it.
+                return
+            layer_name = stage
         self._drain_load_jobs(wait=True, layer_name=layer_name)
 
     def save_kv_layer(

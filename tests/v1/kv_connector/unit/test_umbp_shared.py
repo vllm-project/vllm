@@ -1277,6 +1277,32 @@ def test_lazy_target_matches_cache_group_geometry():
     )
 
 
+def test_layerwise_load_groups_consecutive_layers_into_stages():
+    handle = _LayerRecordingWorkerHandle()
+    worker = UMBPStoreConnectorWorker(handle, layerwise_load_stages=2)
+    plan = BlockTransferPlan(
+        key="staged",
+        block_id=1,
+        ranges=tuple(
+            KVRange(f"layer{i}", 0, 1, 1000 * (i + 1), 16, 16, 16 * i) for i in range(4)
+        ),
+    )
+    worker.start_load_kv(
+        None, UMBPConnectorMetadata(async_load=False, load_requests={"req": [plan]})
+    )
+
+    assert [
+        sorted(item.layer_name for item in calls[0].ranges)
+        for calls in handle.load_calls
+    ] == [["layer0", "layer1"], ["layer2", "layer3"]]
+    worker.wait_for_layer_load("layer0")
+    worker.wait_for_layer_load("layer1")
+    assert len(handle.wait_calls) == 1
+    worker.wait_for_layer_load("layer2")
+    worker.wait_for_layer_load("layer3")
+    assert len(handle.wait_calls) == 2
+
+
 def test_hybrid_model_loads_asynchronously_even_when_sync_is_requested():
     codec = BlockIdentityCodec(UMBPNamespace("hybrid-sync"))
     block_hashes = [b"a", b"b"]

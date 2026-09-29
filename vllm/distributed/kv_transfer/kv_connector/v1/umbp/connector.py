@@ -125,13 +125,19 @@ class UMBPStoreConnector(KVConnectorBase_V1, SupportsHMA):
                 layerwise_store=runtime.capabilities.layerwise_store,
             )
         else:
+            options = runtime_config.options
+            stages = options.get("layerwise_load_stages", 4)
+            if type(stages) is not int or stages <= 0:
+                raise ValueError("layerwise_load_stages must be a positive integer")
             self.connector_worker = UMBPStoreConnectorWorker(
                 runtime.create_worker_handle(
                     namespace.value, topology, layout_descriptor
                 ),
                 layout,
                 codec=codec,
-                layerwise_load=runtime.capabilities.layerwise_load,
+                layerwise_load=runtime.capabilities.layerwise_load
+                and bool(options.get("layerwise_load", True)),
+                layerwise_load_stages=stages,
                 layerwise_store=runtime.capabilities.layerwise_store,
                 enable_kv_cache_events=bool(
                     vllm_config.kv_events_config
