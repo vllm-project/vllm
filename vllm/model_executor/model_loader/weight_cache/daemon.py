@@ -179,16 +179,19 @@ class WeightCacheDaemon:
         socket_dir: str | None = None,
         is_draft: bool = False,
         dp_rank: int = 0,
+        pp_rank: int = 0,
     ):
         parallel_config = vllm_config.parallel_config
-        if parallel_config.data_parallel_size > 1:
+        self.tp_size = parallel_config.tensor_parallel_size
+        self.pp_size = parallel_config.pipeline_parallel_size
+        self.dp_size = parallel_config.data_parallel_size
+        if self.dp_size > 1:
             # The engine sets these on each DP rank's workers; the MoE/EP
             # layers read them to place their expert shards.
-            tp_size = parallel_config.tensor_parallel_size
             if parallel_config.nnodes > 1:
-                world_size = parallel_config.data_parallel_size * tp_size
+                world_size = self.dp_size * self.tp_size
                 local_world = world_size // parallel_config.nnodes
-                start_dp_rank = parallel_config.node_rank * local_world // tp_size
+                start_dp_rank = parallel_config.node_rank * local_world // self.tp_size
             else:
                 start_dp_rank = parallel_config.data_parallel_rank
             parallel_config = replace(
@@ -207,12 +210,10 @@ class WeightCacheDaemon:
         else:
             self.model_config = vllm_config.model_config
         self.global_rank = global_rank
-        self.tp_rank = global_rank % parallel_config.tensor_parallel_size
-        self.pp_rank = global_rank // parallel_config.tensor_parallel_size
+        rank_in_dp = global_rank - dp_rank * self.pp_size * self.tp_size
+        self.tp_rank = rank_in_dp % self.tp_size
+        self.pp_rank = rank_in_dp // self.tp_size
         self.dp_rank = dp_rank
-        self.tp_size = parallel_config.tensor_parallel_size
-        self.pp_size = parallel_config.pipeline_parallel_size
-        self.dp_size = parallel_config.data_parallel_size
         self.world_size = self.dp_size * self.pp_size * self.tp_size
         self.local_rank = local_rank
         self.distributed_init_method = distributed_init_method
@@ -426,6 +427,7 @@ def _run_daemon(
     ready_queue: "multiprocessing.Queue[tuple[str, int]]",
     is_draft: bool = False,
     dp_rank: int = 0,
+    pp_rank: int = 0,
 ) -> None:
     daemon = WeightCacheDaemon(
         vllm_config,
@@ -435,6 +437,7 @@ def _run_daemon(
         socket_dir,
         is_draft,
         dp_rank,
+        pp_rank,
     )
     daemon.load_model()
     daemon.serve_forever(
@@ -442,26 +445,34 @@ def _run_daemon(
     )
 
 
-def plan_local_ranks(parallel_config: ParallelConfig) -> list[tuple[int, int, int]]:
-    """``(local_rank, dp_rank, tp_rank)`` for every GPU this launcher serves.
+def plan_local_ranks(
+    parallel_config: ParallelConfig,
+) -> list[tuple[int, int, int, int]]:
+    """``(local_rank, dp_rank, pp_rank, tp_rank)`` for every local daemon.
 
-    Global ranks enumerate DP then TP: ``global = dp_rank * tp_size + tp_rank``.
+    Global ranks enumerate DP, PP, then TP: ``global = dp_rank * pp_size *
+    tp_size + pp_rank * tp_size + tp_rank``.
     With ``--nnodes`` the engine hands each node a contiguous block of global
     ranks, so node ``r`` serves ``node_rank * local + i``; without it a
     launcher's block starts at ``--data-parallel-start-rank * tp_size``.
     """
     tp_size = parallel_config.tensor_parallel_size
-    world_size = parallel_config.data_parallel_size * tp_size
+    pp_size = parallel_config.pipeline_parallel_size
+    world_size = parallel_config.data_parallel_size * pp_size * tp_size
     if parallel_config.nnodes > 1:
         local_world_size = world_size // parallel_config.nnodes
         base = parallel_config.node_rank * local_world_size
     else:
-        local_world_size = parallel_config.data_parallel_size_local * tp_size
-        base = parallel_config.data_parallel_rank * tp_size
-    return [
-        (i, (base + i) // tp_size, (base + i) % tp_size)
-        for i in range(local_world_size)
-    ]
+        local_world_size = parallel_config.data_parallel_size_local * pp_size * tp_size
+        base = parallel_config.data_parallel_rank * pp_size * tp_size
+    placements = []
+    for local_rank in range(local_world_size):
+        global_rank = base + local_rank
+        rank_in_dp = global_rank % (pp_size * tp_size)
+        dp_rank = global_rank // (pp_size * tp_size)
+        pp_rank, tp_rank = divmod(rank_in_dp, tp_size)
+        placements.append((local_rank, dp_rank, pp_rank, tp_rank))
+    return placements
 
 
 def get_draft_daemon_config(vllm_config: VllmConfig) -> VllmConfig | None:
