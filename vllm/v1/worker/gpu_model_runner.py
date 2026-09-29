@@ -7200,8 +7200,6 @@ class GPUModelRunner(
             kernel_block_sizes: The kernel block sizes for each KV cache group.
 
         """
-        from vllm.v1.core.kv_cache_utils import dcp_world_size_for_kv_cache_spec
-
         block_sizes = []
         max_num_blocks = []
         slot_mapping_modes = []
@@ -7219,10 +7217,9 @@ class GPUModelRunner(
             else:
                 slot_mapping_modes.append(SlotMappingMode.TOKEN_TO_KV_SLOT)
             dcp_world_sizes.append(
-                dcp_world_size_for_kv_cache_spec(
-                    kv_cache_spec,
-                    self.parallel_config.decode_context_parallel_size,
-                )
+                self.parallel_config.decode_context_parallel_size
+                if kv_cache_spec.dcp_sharded
+                else 1
             )
             max_num_blocks_per_req = kv_cache_spec.max_num_blocks_per_req(
                 self.vllm_config, max_model_len

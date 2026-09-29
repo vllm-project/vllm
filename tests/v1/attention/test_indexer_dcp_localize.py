@@ -1140,6 +1140,10 @@ def test_stable_topk_triton_key_encoding_orders_like_reference():
     )
     ref_key = (ref_score_key << 32) | ((~ids) & 0xFFFFFFFF)
     ref_key = torch.where(valid, ref_key, torch.zeros_like(ref_key))
+    # The score occupies bits 32..63, so the key must be compared as an
+    # unsigned word; flip the sign bit (as the fp64 oracle does before its
+    # topk) to make signed argsort produce the unsigned order.
+    ref_key = ref_key ^ torch.iinfo(torch.int64).min
 
     # Same total order == same descending argsort (all keys distinct because
     # the id rides in each key). NaN and -0.0 handling intentionally differ

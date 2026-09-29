@@ -121,6 +121,10 @@ class DeepseekV4SWACache(torch.nn.Module, AttentionLayerBase):
             "nvfp4_ds_mla",
         )
         return SlidingWindowMLASpec(
+            # Replicated across DCP ranks: the SWA cache is bounded by the
+            # window (~constant per request), so sharding saves nothing and
+            # replication keeps the fused kernels collective-free.
+            dcp_sharded=False,
             bounded_replay=self.bounded_replay,
             block_size=self.block_size,
             num_kv_heads=1,

@@ -277,7 +277,17 @@ def test_compressed_slot_mapping_inherits_padded_token_slots():
     assert compressed.tolist() == [-1, -1, -1, -1, -1, 3 * 4 + 2, -1, 3 * 4 + 3]
 
 
-def test_index_conversion_warmup_uses_physical_block_stride():
+def test_index_conversion_warmup_uses_physical_block_stride(monkeypatch):
+    # The remap-tiling helper (#57458) calls triton.next_power_of_2 while
+    # picking warmup keys; the CPU TritonPlaceholder doesn't provide it.
+    from vllm.v1.attention.backends.mla import sparse_utils
+
+    monkeypatch.setattr(
+        sparse_utils.triton,
+        "next_power_of_2",
+        lambda n: 1 << max(int(n) - 1, 0).bit_length(),
+        raising=False,
+    )
     config = SimpleNamespace(
         cache_config=SimpleNamespace(block_size=64),
         model_config=SimpleNamespace(

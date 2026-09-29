@@ -182,6 +182,10 @@ class CompressorStateCache(torch.nn.Module, AttentionLayerBase):
         # would break page matching.
         uses_fp8_ds_mla_layout = vllm_config.cache_config.cache_dtype == "fp8_ds_mla"
         return SlidingWindowMLASpec(  # only has one vector instead of K + V
+            # Replicated across DCP ranks: the compressor ring is bounded by
+            # the compress window (~constant per request), so sharding saves
+            # nothing and replication keeps the fused kernels collective-free.
+            dcp_sharded=False,
             block_size=self.block_size,
             num_kv_heads=1,
             head_size=self.state_dim,
