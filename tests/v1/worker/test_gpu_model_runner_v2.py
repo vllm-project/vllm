@@ -8,7 +8,6 @@ import pytest
 import torch
 
 import vllm.v1.worker.gpu.model_runner as model_runner_module
-from vllm.config import CompilationMode
 from vllm.model_executor.warmup.jit_warmup import JitWarmupRegistry
 from vllm.v1.kv_cache_interface import (
     CircularBufferSpec,
@@ -298,45 +297,3 @@ def test_capture_model_profile_only_skips_lock(monkeypatch):
     runner.capture_model(profile_only=True)
 
     assert lock_calls == []
-
-
-@pytest.mark.parametrize(
-    "mode",
-    [
-        CompilationMode.NONE,
-        CompilationMode.STOCK_TORCH_COMPILE,
-        CompilationMode.VLLM_COMPILE,
-    ],
-)
-def test_stock_compile_executes_only_for_requested_mode(mode):
-    from vllm.compilation.counter import compilation_counter
-    from vllm.compilation.wrapper import compile_model_with_stock_torch
-    from vllm.config import CompilationConfig
-
-    class Model(torch.nn.Module):
-        def __init__(self):
-            super().__init__()
-            self.linear = torch.nn.Linear(4, 2)
-
-        def forward(self, inputs):
-            return self.linear(inputs).relu()
-
-    model = Model()
-    inputs = torch.randn(3, 4)
-    expected = model(inputs)
-    config = SimpleNamespace(
-        compilation_config=CompilationConfig(mode=mode, backend="eager")
-    )
-    graphs_before = torch._dynamo.utils.counters["stats"]["unique_graphs"]
-    stock_before = compilation_counter.stock_torch_compile_count
-
-    compile_model_with_stock_torch(model, config)
-    actual = model(inputs)
-
-    torch.testing.assert_close(actual, expected)
-    stock_requested = mode == CompilationMode.STOCK_TORCH_COMPILE
-    assert (
-        compilation_counter.stock_torch_compile_count == stock_before + stock_requested
-    )
-    graphs_after = torch._dynamo.utils.counters["stats"]["unique_graphs"]
-    assert (graphs_after > graphs_before) is stock_requested

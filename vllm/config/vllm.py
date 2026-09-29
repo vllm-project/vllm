@@ -2041,6 +2041,7 @@ class VllmConfig:
         self._validate_mm_processor_device()
 
         if self.use_v2_model_runner:
+            self._disable_cudagraphs_for_v2_stock_torch_compile()
             self._validate_v2_model_runner()
         else:
             self._validate_v1_model_runner()
@@ -3302,6 +3303,28 @@ class VllmConfig:
                 "proton_graph_attribution=True to capture replayed kernels. "
                 "Enable attribution or use --enforce-eager."
             )
+
+    def _disable_cudagraphs_for_v2_stock_torch_compile(self) -> None:
+        """Run stock torch.compile without CUDA graphs in Model Runner V2.
+
+        V1 never wraps a stock-compiled model in CUDAGraphWrapper, so it runs
+        without CUDA graphs. V2's CUDA graph manager would otherwise capture
+        FULL graphs around the stock-compiled model, so disable them to match.
+        """
+        compilation_config = self.compilation_config
+        if (
+            compilation_config.mode != CompilationMode.STOCK_TORCH_COMPILE
+            or compilation_config.cudagraph_mode == CUDAGraphMode.NONE
+        ):
+            return
+        logger.info_once(
+            "CUDA graphs are not supported with stock torch.compile in Model "
+            "Runner V2. Overriding cudagraph_mode %s to NONE.",
+            compilation_config.cudagraph_mode.name,
+        )
+        compilation_config.cudagraph_mode = CUDAGraphMode.NONE
+        compilation_config.max_cudagraph_capture_size = 0
+        compilation_config.cudagraph_capture_sizes = []
 
     def _validate_v2_model_runner(self) -> None:
         """Check for features not yet supported by the V2 model runner."""

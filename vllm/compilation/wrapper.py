@@ -53,14 +53,10 @@ def _compilation_context() -> Generator[None, None, None]:
 def compile_model_with_stock_torch(
     model: torch.nn.Module, vllm_config: VllmConfig
 ) -> None:
-    compilation_config = vllm_config.compilation_config
-    if compilation_config.mode != CompilationMode.STOCK_TORCH_COMPILE:
-        return
-
     from vllm.env_override import _apply_constrain_to_fx_strides_patch
 
     _apply_constrain_to_fx_strides_patch()
-    backend = compilation_config.init_backend(vllm_config)
+    backend = vllm_config.compilation_config.init_backend(vllm_config)
     compilation_counter.stock_torch_compile_count += 1
     model.compile(fullgraph=True, backend=backend)
 

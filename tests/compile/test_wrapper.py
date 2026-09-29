@@ -7,7 +7,11 @@ import os
 import pytest
 import torch
 
-from vllm.compilation.wrapper import TorchCompileWithNoGuardsWrapper
+from vllm.compilation.counter import compilation_counter
+from vllm.compilation.wrapper import (
+    TorchCompileWithNoGuardsWrapper,
+    compile_model_with_stock_torch,
+)
 from vllm.config import (
     CompilationConfig,
     CompilationMode,
@@ -115,6 +119,50 @@ def test_torch_compile_wrapper(use_bytecode_hook, monkeypatch):
         except Exception:
             return
         raise AssertionError("expected an exception to be raised")
+
+
+@pytest.mark.parametrize(
+    "mode",
+    [
+        CompilationMode.NONE,
+        CompilationMode.STOCK_TORCH_COMPILE,
+        CompilationMode.VLLM_COMPILE,
+    ],
+)
+def test_compile_model_with_stock_torch(mode, monkeypatch):
+    """Only STOCK_TORCH_COMPILE compiles the whole model in place."""
+    graphs: list[torch.fx.GraphModule] = []
+
+    def recording_backend(gm: torch.fx.GraphModule, example_inputs):
+        graphs.append(gm)
+        return gm.forward
+
+    monkeypatch.setattr(
+        CompilationConfig,
+        "init_backend",
+        lambda self, vllm_config, *args, **kwargs: recording_backend,
+    )
+
+    class Model(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.linear = torch.nn.Linear(4, 2)
+
+        def forward(self, x: torch.Tensor):
+            return self.linear(x).relu()
+
+    vllm_config = VllmConfig()
+    vllm_config.compilation_config = CompilationConfig(mode=mode)
+    model = Model()
+    x = torch.randn(3, 4)
+    expected = model(x)
+    is_stock = mode == CompilationMode.STOCK_TORCH_COMPILE
+
+    torch._dynamo.reset()
+    with compilation_counter.expect(stock_torch_compile_count=int(is_stock)):
+        compile_model_with_stock_torch(model, vllm_config)
+    torch.testing.assert_close(model(x), expected)
+    assert len(graphs) == int(is_stock)
 
 
 if __name__ == "__main__":
