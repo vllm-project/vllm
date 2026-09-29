@@ -3,17 +3,25 @@
 
 import asyncio
 import contextlib
+import errno
+import socket
+import threading
 import time
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import httpx
 import pytest
 import torch
 import zmq.asyncio
 
 from tests.v1.attention.utils import dense_kv_cache_views
 from vllm import envs
-from vllm.config import set_current_vllm_config
+from vllm.config import KVTransferConfig, set_current_vllm_config
+from vllm.distributed.kv_transfer.kv_connector.v1.mooncake import (
+    mooncake_connector,
+    mooncake_utils,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_connector import (
     KVConnectorRole,
     MooncakeConnector,
@@ -33,8 +41,8 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_connector im
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_utils import (
     MooncakeBootstrapServer,
+    RegisterWorkerPayload,
 )
-from vllm.utils.network_utils import get_open_port
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheConfig,
@@ -531,11 +539,139 @@ def test_prompt_less_than_block_size():
 @pytest.fixture
 def bootstrap_server():
     """Fixture to launch and cleanup a Mooncake Bootstrap HTTP Server."""
-    port = get_open_port()
-    server = MooncakeBootstrapServer("127.0.0.1", port)
+    server = MooncakeBootstrapServer("127.0.0.1", 0)
+    try:
+        server.start()
+        yield server
+    finally:
+        server.shutdown()
+
+
+def test_bootstrap_server_occupied_port_raises_to_caller():
+    with socket.create_server(("127.0.0.1", 0)) as listener:
+        server = MooncakeBootstrapServer("127.0.0.1", listener.getsockname()[1])
+        try:
+            with pytest.raises(OSError) as exc_info:
+                server.start(timeout=0.05)
+            assert exc_info.value.errno == errno.EADDRINUSE
+        finally:
+            server.shutdown()
+
+
+def test_bootstrap_server_retains_and_releases_assigned_port(bootstrap_server):
+    port = bootstrap_server.port
+    assert port > 0
+    with (
+        pytest.raises(OSError) as exc_info,
+        socket.create_server(("127.0.0.1", port)),
+    ):
+        pass
+    assert exc_info.value.errno == errno.EADDRINUSE
+
+    bootstrap_server.shutdown()
+    with socket.create_server(("127.0.0.1", port)):
+        pass
+
+
+@pytest.mark.parametrize("failure", ["exit", "error", "timeout"])
+def test_bootstrap_server_startup_failure_releases_port(monkeypatch, failure):
+    stop = threading.Event()
+
+    def run_without_starting(server, *, sockets):
+        if failure == "error":
+            raise SystemExit(1)
+        if failure == "timeout":
+            while not server.should_exit and not stop.wait(0.01):
+                pass
+
+    monkeypatch.setattr(mooncake_utils.uvicorn.Server, "run", run_without_starting)
+    server = MooncakeBootstrapServer("127.0.0.1", 0)
+    try:
+        error = TimeoutError if failure == "timeout" else RuntimeError
+        with pytest.raises(error):
+            server.start(timeout=0.05 if failure == "timeout" else 1.0)
+        assert server.port > 0
+        with socket.create_server(("127.0.0.1", server.port)):
+            pass
+    finally:
+        stop.set()
+        server.shutdown()
+
+
+@pytest.mark.parametrize("state", ["stopping", "exited"])
+def test_bootstrap_server_rejects_stale_started_state(monkeypatch, state):
+    release = threading.Event()
+
+    def run_until_released(server, *, sockets):
+        server.started = True
+        release.wait()
+
+    monkeypatch.setattr(mooncake_utils.uvicorn.Server, "run", run_until_released)
+    server = MooncakeBootstrapServer("127.0.0.1", 0)
+    try:
+        server.start()
+        thread = server.server_thread
+        assert thread is not None
+        if state == "stopping":
+            with patch.object(thread, "join", return_value=None):
+                server.shutdown()
+        else:
+            release.set()
+            thread.join(timeout=5)
+            assert not thread.is_alive()
+
+        with pytest.raises(RuntimeError, match="still starting or stopping"):
+            server.start()
+    finally:
+        release.set()
+        server.shutdown()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("external", [False, True])
+async def test_register_worker_recovers_from_slow_bootstrap_server(
+    monkeypatch, external
+):
+    """End-to-end: a real HTTP server that responds slower than the configured
+    timeout must be retried on the wire, not treated as fatal."""
+    original = MooncakeBootstrapServer.register_worker
+    state = {"done": False, "calls": 0}
+
+    async def slow_register(self, payload: RegisterWorkerPayload):
+        state["calls"] += 1
+        if not state["done"]:
+            state["done"] = True
+            # Record the worker first, then stall past the client timeout, so
+            # the retry exercises the duplicate-registration path.
+            response = await original(self, payload)
+            await asyncio.sleep(1.5)
+            return response
+        return await original(self, payload)
+
+    monkeypatch.setattr(MooncakeBootstrapServer, "register_worker", slow_register)
+
+    monkeypatch.setenv("VLLM_MOONCAKE_CONNECTOR_TIMEOUT", "0.5")
+    monkeypatch.setattr(mooncake_connector, "_BOOTSTRAP_MAX_ATTEMPTS", 5)
+
+    server = MooncakeBootstrapServer("127.0.0.1", 0)
     server.start()
-    yield server
-    server.shutdown()
+    try:
+        monkeypatch.setenv("VLLM_MOONCAKE_BOOTSTRAP_PORT", str(server.port))
+        worker = _make_local_register_worker_stub()
+        if external:
+            worker.vllm_config = _make_bootstrap_vllm_config(
+                bootstrap_server_address=f"127.0.0.1:{server.port}"
+            )
+            assert not should_launch_bootstrap_server(worker.vllm_config)
+        await MooncakeConnectorWorker.register_worker_with_bootstrap(worker)
+        assert state["calls"] == 2
+
+        async with httpx.AsyncClient() as client:
+            response = await client.get(f"http://127.0.0.1:{server.port}/query")
+            assert response.status_code == 200
+            assert response.json()["0"]["engine_id"] == "eng-1"
+    finally:
+        server.shutdown()
 
 
 @pytest.mark.asyncio
@@ -589,9 +725,16 @@ async def test_bootstrap_server(bootstrap_server: MooncakeBootstrapServer):
         assert data["0"]["worker_addr"]["0"]["0"] == "tcp://1.1.1.1:1111"
         assert data["0"]["worker_addr"]["0"]["1"] == "tcp://2.2.2.2:2222"
 
-    # Test failure: re-registering the same worker
+    # Re-registering the identical payload is idempotent.
     async with httpx.AsyncClient() as client:
         response = await client.post(f"{base_url}/register", json=payload1)
+        assert response.status_code == 200
+        assert response.json() == {"status": "ok"}
+
+    # Test failure: same ranks, conflicting address
+    payload1_conflict = dict(payload1, addr="tcp://9.9.9.9:9999")
+    async with httpx.AsyncClient() as client:
+        response = await client.post(f"{base_url}/register", json=payload1_conflict)
         assert response.status_code == 400
         assert "is already registered" in response.text
 
@@ -615,8 +758,16 @@ def _make_bootstrap_vllm_config(
     data_parallel_rank_local: int = 0,
     data_parallel_index: int = 0,
     nnodes_within_dp: int = 1,
+    bootstrap_server_address: str | None = None,
 ) -> SimpleNamespace:
     return SimpleNamespace(
+        kv_transfer_config=KVTransferConfig(
+            kv_connector="MooncakeConnector",
+            kv_role="kv_producer",
+            kv_connector_extra_config={
+                "bootstrap_server_address": bootstrap_server_address
+            },
+        ),
         parallel_config=SimpleNamespace(
             local_engines_only=local_engines_only,
             data_parallel_rank_local=data_parallel_rank_local,
@@ -624,8 +775,140 @@ def _make_bootstrap_vllm_config(
             nnodes_within_dp=nnodes_within_dp,
             master_addr="model-parallel-master",
             data_parallel_master_ip="data-parallel-master",
-        )
+        ),
     )
+
+
+def _make_local_register_worker_stub():
+    return SimpleNamespace(
+        vllm_config=SimpleNamespace(
+            kv_transfer_config=None,
+            parallel_config=SimpleNamespace(
+                local_engines_only=False,
+                data_parallel_rank_local=0,
+                data_parallel_index=0,
+                nnodes_within_dp=1,
+                master_addr="127.0.0.1",
+                data_parallel_master_ip="127.0.0.1",
+            ),
+        ),
+        hostname="127.0.0.1",
+        side_channel_port=1234,
+        engine_id="eng-1",
+        dp_rank=0,
+        tp_rank=0,
+        pp_rank=0,
+    )
+
+
+def _make_register_worker_stub():
+    return SimpleNamespace(
+        vllm_config=_make_bootstrap_vllm_config(),
+        hostname="127.0.0.1",
+        side_channel_port=1234,
+        engine_id="eng-1",
+        dp_rank=0,
+        tp_rank=0,
+        pp_rank=0,
+    )
+
+
+class _FlakyAsyncClient:
+    """httpx.AsyncClient stub that read-times-out `failures` times first."""
+
+    def __init__(self, failures: int, calls: list[int], **kwargs):
+        self.failures = failures
+        self.calls = calls
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc_info):
+        return False
+
+    async def post(self, url, json=None):
+        self.calls.append(1)
+        if len(self.calls) <= self.failures:
+            raise httpx.ReadTimeout("simulated slow bootstrap server")
+        response = MagicMock()
+        response.raise_for_status = MagicMock()
+        return response
+
+
+@pytest.mark.asyncio
+async def test_register_worker_retries_on_read_timeout(monkeypatch):
+    """A slow rank-0 bootstrap response must be retried, not treated as fatal."""
+    monkeypatch.setattr(mooncake_connector, "_BOOTSTRAP_MAX_ATTEMPTS", 5)
+    monkeypatch.setattr(asyncio, "sleep", AsyncMock())
+
+    calls: list[int] = []
+    monkeypatch.setattr(
+        httpx,
+        "AsyncClient",
+        lambda **kwargs: _FlakyAsyncClient(2, calls),
+    )
+
+    worker = _make_register_worker_stub()
+    await MooncakeConnectorWorker.register_worker_with_bootstrap(worker)
+
+    assert len(calls) == 3
+
+
+@pytest.mark.asyncio
+async def test_register_worker_raises_after_max_attempts(monkeypatch):
+    """Terminal registration failure must raise, not loop forever."""
+    monkeypatch.setattr(mooncake_connector, "_BOOTSTRAP_MAX_ATTEMPTS", 3)
+    monkeypatch.setattr(asyncio, "sleep", AsyncMock())
+
+    calls: list[int] = []
+    monkeypatch.setattr(
+        httpx,
+        "AsyncClient",
+        lambda **kwargs: _FlakyAsyncClient(99, calls),
+    )
+
+    worker = _make_register_worker_stub()
+    with pytest.raises(RuntimeError, match="after 3 attempts"):
+        await MooncakeConnectorWorker.register_worker_with_bootstrap(worker)
+
+    assert len(calls) == 3
+
+
+@pytest.mark.asyncio
+async def test_sender_listener_failure_propagates_to_caller(monkeypatch):
+    """A terminal registration failure must surface via the Future rather than
+    leaving register_kv_caches blocked on its ready event."""
+    monkeypatch.setenv("VLLM_MOONCAKE_CONNECTOR_TIMEOUT", "0.1")
+    monkeypatch.setattr(mooncake_connector, "_BOOTSTRAP_MAX_ATTEMPTS", 1)
+
+    loop = asyncio.new_event_loop()
+    thread = threading.Thread(target=loop.run_forever, daemon=True)
+    thread.start()
+
+    async def failing_listener(ready_event):
+        raise RuntimeError("simulated terminal registration failure")
+
+    try:
+        ready_event = threading.Event()
+        fut = asyncio.run_coroutine_threadsafe(failing_listener(ready_event), loop)
+
+        deadline = time.monotonic() + 10.0
+        raised = None
+        while not ready_event.wait(timeout=0.1):
+            if fut.done():
+                try:
+                    fut.result()
+                except RuntimeError as e:
+                    raised = e
+                break
+            assert time.monotonic() < deadline, "caller blocked past its deadline"
+
+        assert raised is not None
+        assert "simulated terminal registration failure" in str(raised)
+    finally:
+        loop.call_soon_threadsafe(loop.stop)
+        thread.join(timeout=5)
+        loop.close()
 
 
 @pytest.mark.parametrize(
@@ -705,6 +988,22 @@ def test_get_mooncake_bootstrap_addr_selects_expected_host(
         expected_host,
         envs.VLLM_MOONCAKE_BOOTSTRAP_PORT,
     )
+
+
+@pytest.mark.parametrize(
+    ("address", "expected"),
+    [("external:12345", ("external", 12345)), ("[::1]:12345", ("::1", 12345))],
+)
+def test_get_mooncake_bootstrap_addr_uses_external_endpoint(address, expected):
+    config = _make_bootstrap_vllm_config(bootstrap_server_address=address)
+    assert get_mooncake_bootstrap_addr(config) == expected
+
+
+@pytest.mark.parametrize("address", [":12345", "host:0", "host:65536"])
+def test_get_mooncake_bootstrap_addr_rejects_invalid_external_address(address):
+    config = _make_bootstrap_vllm_config(bootstrap_server_address=address)
+    with pytest.raises(ValueError, match="bootstrap_server_address"):
+        get_mooncake_bootstrap_addr(config)
 
 
 def test_scheduler_request_finished():
