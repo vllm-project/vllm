@@ -20,6 +20,7 @@ use zeromq::util::PeerIdentity;
 use zeromq::{DealerSocket, PushSocket, SocketOptions, SubSocket, XPubSocket, ZmqMessage};
 
 use crate::protocol::handshake::{EngineCoreReadyResponse, HandshakeInitMessage, ReadyMessage};
+use crate::protocol::kv_hints::{KvHintAction, KvHintsEnvelope};
 use crate::protocol::logprobs::MaybeWireLogprobs;
 use crate::protocol::multimodal::{
     MmFeatureSpec, MmField, MmFieldElem, MmFlatField, MmKwargValue, MmModality, MmSlice,
@@ -165,6 +166,16 @@ fn sample_request_with_id(request_id: &str) -> EngineCoreRequest {
         }),
         arrival_time: 42.5,
         session_id: Some("session-1".to_string()),
+        kv_hints: Some(KvHintsEnvelope {
+            protocol_version: "0.1".to_string(),
+            message_id: "msg-1".to_string(),
+            actions: vec![KvHintAction {
+                action_id: "action-1".to_string(),
+                action_type: "example.action".to_string(),
+                action_version: "1.0".to_string(),
+                payload: BTreeMap::from([("key".to_string(), serde_json::json!("value"))]),
+            }],
+        }),
         ..EngineCoreRequest::default()
     }
 }
@@ -288,6 +299,7 @@ fn handshake_test_config(
         coordinator_mode,
         model_name: model_name.to_string(),
         client_index,
+        engine_stats_enabled: true,
     }
 }
 
@@ -311,6 +323,7 @@ fn bootstrapped_test_config(
         coordinator_mode,
         model_name: "test-model".to_string(),
         client_index,
+        engine_stats_enabled: true,
     }
 }
 
@@ -2673,6 +2686,8 @@ fn python_msgpack_fixtures_match_rust_encoding() {
             thinking_token_budget: None,
             logprobs: None,
             prompt_logprobs: None,
+            prompt_logprob_token_ids: None,
+            prompt_logprob_start: None,
             min_p: 0.0,
             frequency_penalty: 0.0,
             presence_penalty: 0.0,
@@ -2712,15 +2727,15 @@ fn python_msgpack_fixtures_match_rust_encoding() {
         decode_value(&rmp_serde::to_vec_named(&expected_multimodal_request.mm_features).unwrap());
     assert_eq!(python_mm_features, rust_mm_features);
 
-    let decoded_sampling_mask_outputs: EngineCoreOutputs =
-        rmp_serde::from_slice(&sampling_mask_outputs_bytes).unwrap();
+    let decoded_sampling_mask_outputs =
+        decode_engine_core_outputs(&[bytes::Bytes::from(sampling_mask_outputs_bytes)]).unwrap();
     let sampling_mask_output =
         &decoded_sampling_mask_outputs.as_request_batch().unwrap().outputs[0];
     assert!(sampling_mask_output.mm_cache_miss_hashes.is_none());
-    assert!(matches!(
-        sampling_mask_output.new_sampling_mask.as_ref(),
-        Some(Value::Array(fields)) if fields.len() == 3
-    ));
+    assert_eq!(
+        sampling_mask_output.new_sampling_mask.as_ref().unwrap().rows,
+        vec![vec![2, 12, 16, 17, 18]]
+    );
 
     let decoded_outputs: EngineCoreOutputs = rmp_serde::from_slice(&outputs_bytes).unwrap();
     // Match msgspec's base-schema result for the same extended Python message.
@@ -2759,6 +2774,7 @@ fn python_msgpack_fixtures_match_rust_encoding() {
                         mm_cache_miss_hashes: None,
                         new_sampling_mask: None,
                         spec_decode_metrics: None,
+                        prompt_token_id_logprobs: None,
                     },
                 ],
                 scheduler_stats: None,

@@ -58,12 +58,17 @@ from vllm.model_executor.layers.quantization.quark.quark import (  # noqa: E501
 from vllm.model_executor.layers.quantization.quark.quark_moe import (  # noqa: E501
     QuarkMoEMethod,
     QuarkW4A8Fp8MoEMethod,
+    QuarkW4A16Int4MoEMethod,
     QuarkW8A8Fp8MoEMethod,
     QuarkW8A8Int8MoEMethod,
 )
-from vllm.model_executor.layers.quantization.quark.schemes import QuarkScheme
+from vllm.model_executor.layers.quantization.quark.schemes import (
+    QuarkScheme,
+    QuarkW4A16Int4,
+)
 from vllm.model_executor.layers.quantization.quark.utils import (
     QuarkQTensorHint,
+    canonicalize_quark_packed_int4,
     should_ignore_layer,
 )
 from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
@@ -97,6 +102,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kNvfp4Static,
 )
 from vllm.model_executor.models.llama import LlamaForCausalLM
+from vllm.model_executor.models.utils import WeightsMapper
 from vllm.platforms import current_platform
 from vllm.transformers_utils.repo_utils import hf_api
 
@@ -849,7 +855,7 @@ def test_quant_method_dispatch_ignored(default_vllm_config):
         UnquantizedFusedMoEMethod,
     )
 
-    dynamic_mxfp4_config = _make_qtensor_config(
+    mxfp4_config = _make_qtensor_config(
         {
             "dtype": "fp4",
             "qscheme": "per_group",
@@ -860,24 +866,23 @@ def test_quant_method_dispatch_ignored(default_vllm_config):
         None,
         exclude=["self_attn.q_proj", "mlp.down_proj"],
     )
-    dynamic_mxfp4_config.dynamic_mxfp4_quant = True
-
-    assert dynamic_mxfp4_config.get_quant_method_target(
-        "self_attn.q_proj", LinearBase
-    ) == (kMxfp4Static, None, QuarkLinearMethod)
-    attention_proj = TestLinear()
-    assert isinstance(
-        dynamic_mxfp4_config.get_quant_method(attention_proj, "self_attn.q_proj"),
-        QuarkLinearMethod,
+    assert mxfp4_config.get_quant_method_target("self_attn.q_proj", LinearBase) == (
+        None,
+        None,
+        UnquantizedLinearMethod,
     )
-    assert isinstance(attention_proj.scheme, QuarkOCP_MX)
-    assert attention_proj.scheme.dynamic_mxfp4_quant
-
-    assert dynamic_mxfp4_config.get_quant_method_target(
-        "mlp.down_proj", LinearBase
-    ) == (None, None, UnquantizedLinearMethod)
     assert isinstance(
-        dynamic_mxfp4_config.get_quant_method(TestLinear(), "mlp.down_proj"),
+        mxfp4_config.get_quant_method(TestLinear(), "self_attn.q_proj"),
+        UnquantizedLinearMethod,
+    )
+
+    assert mxfp4_config.get_quant_method_target("mlp.down_proj", LinearBase) == (
+        None,
+        None,
+        UnquantizedLinearMethod,
+    )
+    assert isinstance(
+        mxfp4_config.get_quant_method(TestLinear(), "mlp.down_proj"),
         UnquantizedLinearMethod,
     )
 
@@ -902,6 +907,184 @@ def test_quant_method_dispatch_target(case):
     assert weight_quant_key == case.weight_quant_key
     assert act_quant_key == case.act_quant_key
     assert method_cls is (QuarkLinearMethod if is_linear else case.dispatch_cls)
+
+
+def test_quant_method_dispatch_mxfp8_2d_block(default_vllm_config):
+    """Shape B (DeepSeek-V4.1): 32x32 per-block e8m0 routes to QuarkOCP_MX.
+
+    Verifies that get_quant_method and get_quant_method_target agree (the
+    short-circuit that previously caused them to diverge has been removed).
+    """
+    from vllm.model_executor.layers.quantization.quark.schemes import QuarkOCP_MX
+    from vllm.model_executor.layers.quantization.utils.quant_utils import kMxfp8Static
+
+    default_vllm_config.model_config = SimpleNamespace(dtype=torch.bfloat16)
+    mxfp8_spec = {
+        "weight": {
+            "dtype": "fp8_e4m3",
+            "qscheme": "per_block",
+            "block_size": [32, 32],
+            "symmetric": True,
+            "is_dynamic": False,
+            "scale_type": "float8_e8m0fnu",
+        },
+        "input_tensors": {
+            "dtype": "fp8_e4m3",
+            "qscheme": "per_group",
+            "group_size": 32,
+            "symmetric": True,
+            "is_dynamic": True,
+        },
+    }
+    config = QuarkConfig(
+        {
+            "global_quant_config": {
+                "weight": {
+                    "dtype": "fp4",
+                    "qscheme": "per_group",
+                    "group_size": 32,
+                    "scale_format": "e8m0",
+                    "is_dynamic": False,
+                },
+                "input_tensors": {
+                    "dtype": "fp4",
+                    "qscheme": "per_group",
+                    "group_size": 32,
+                    "scale_format": "e8m0",
+                    "is_dynamic": True,
+                },
+            },
+            "layer_type_quant_config": {},
+            "layer_quant_config": {"layers.0.attn.wkv": mxfp8_spec},
+            "exclude": [],
+        }
+    )
+
+    class TestLinear(LinearBase):
+        def __init__(self):
+            torch.nn.Module.__init__(self)
+
+    # get_quant_method_target now routes MXFP8 through the matcher chain.
+    wk, ak, mcls = config.get_quant_method_target("layers.0.attn.wkv", LinearBase)
+    assert wk == kMxfp8Static
+    assert mcls is QuarkLinearMethod
+
+    linear = TestLinear()
+    method = config.get_quant_method(linear, "layers.0.attn.wkv")
+    assert isinstance(method, QuarkLinearMethod)
+    assert isinstance(linear.scheme, QuarkOCP_MX)
+    assert linear.scheme.weight_quant_key == kMxfp8Static
+    assert linear.scheme.scale_block_rows == 32
+
+    # Experts still fall through to the global MXFP4 spec.
+    assert (
+        config.get_quant_method_target("layers.0.ffn.experts", RoutedExperts)[2]
+        is not QuarkLinearMethod
+    )
+
+    # 128x128 per-block FP8 (DeepSeek V4) keeps its existing Quark scheme.
+    v4_spec = {
+        "weight": {**mxfp8_spec["weight"], "block_size": [128, 128]},
+        "input_tensors": {**mxfp8_spec["input_tensors"], "group_size": 128},
+    }
+    v4_config = _make_qtensor_config(v4_spec["weight"], v4_spec["input_tensors"])
+    assert v4_config.get_quant_method_target("linear", LinearBase)[2] is (
+        QuarkLinearMethod
+    )
+    linear = TestLinear()
+    assert isinstance(v4_config.get_quant_method(linear, "linear"), QuarkLinearMethod)
+    assert isinstance(linear.scheme, QuarkW8A8Fp8PerBlock)
+
+
+def test_quant_method_dispatch_mxfp8_canonical(default_vllm_config):
+    """Shape A (canonical MX): per_group/group_size=32/e8m0 FP8 routes
+    to QuarkOCP_MX with scale_block_rows == 1.
+
+    This covers the canonical MXFP8 spelling (no 2-D block). Validated by
+    synthetic dispatch test only — no canonical-MXFP8 checkpoint on hand.
+    """
+    from vllm.model_executor.layers.quantization.quark.schemes import QuarkOCP_MX
+    from vllm.model_executor.layers.quantization.utils.quant_utils import kMxfp8Static
+
+    default_vllm_config.model_config = SimpleNamespace(dtype=torch.bfloat16)
+    mxfp8_canonical_spec = {
+        "weight": {
+            "dtype": "fp8_e4m3",
+            "qscheme": "per_group",
+            "group_size": 32,
+            "scale_format": "e8m0",
+            "is_dynamic": False,
+        },
+        "input_tensors": {
+            "dtype": "fp8_e4m3",
+            "qscheme": "per_group",
+            "group_size": 32,
+            "scale_format": "e8m0",
+            "is_dynamic": True,
+        },
+    }
+    config = QuarkConfig(
+        {
+            "global_quant_config": mxfp8_canonical_spec,
+            "layer_type_quant_config": {},
+            "layer_quant_config": {},
+            "exclude": [],
+        }
+    )
+
+    wk, ak, mcls = config.get_quant_method_target("linear", LinearBase)
+    assert wk == kMxfp8Static
+    assert mcls is QuarkLinearMethod
+
+    class TestLinear(LinearBase):
+        def __init__(self):
+            torch.nn.Module.__init__(self)
+
+    linear = TestLinear()
+    method = config.get_quant_method(linear, "linear")
+    assert isinstance(method, QuarkLinearMethod)
+    assert isinstance(linear.scheme, QuarkOCP_MX)
+    assert linear.scheme.weight_quant_key == kMxfp8Static
+    assert linear.scheme.scale_block_rows == 1
+
+
+def test_quant_method_dispatch_mxfp8_moe_raises(default_vllm_config):
+    """MXFP8 in a MoE config raises ValueError — experts are unsupported."""
+    from vllm.model_executor.layers.quantization.quark.quark_moe import (
+        QuarkOCP_MX_MoEMethod,
+    )
+
+    default_vllm_config.model_config = SimpleNamespace(dtype=torch.bfloat16)
+    mxfp8_spec = {
+        "weight": {
+            "dtype": "fp8_e4m3",
+            "qscheme": "per_group",
+            "group_size": 32,
+            "scale_format": "e8m0",
+            "is_dynamic": False,
+        },
+        "input_tensors": {
+            "dtype": "fp8_e4m3",
+            "qscheme": "per_group",
+            "group_size": 32,
+            "scale_format": "e8m0",
+            "is_dynamic": True,
+        },
+    }
+    config = QuarkConfig(
+        {
+            "global_quant_config": mxfp8_spec,
+            "layer_type_quant_config": {},
+            "layer_quant_config": {},
+            "exclude": [],
+        }
+    )
+    wk, ak, mcls = config.get_quant_method_target("experts", RoutedExperts)
+    assert mcls is QuarkOCP_MX_MoEMethod
+    # The OCP MX MoE constructor should fail loudly for MXFP8.
+    fake_moe_config = MagicMock()
+    with pytest.raises(ValueError, match="MXFP8 experts are not supported"):
+        QuarkOCP_MX_MoEMethod(fake_moe_config, wk, ak)
 
 
 @pytest.mark.parametrize(
@@ -1876,3 +2059,539 @@ def test_glm5next_attn_loader_accepts_deepseek_weight_scale_inv():
     )
     assert target.loaded_shard is None  # o_proj is a direct (non-fused) proj
     assert torch.equal(target.loaded_weight, _dequant_fp8_block(weight, scale, 128))
+
+
+_REVERSE_AWQ_PACK_ORDER = [0, 4, 1, 5, 2, 6, 3, 7]
+
+
+def _quark_int4_config(
+    *,
+    pack_method: str = "reorder",
+    symmetric: bool = True,
+    exclude: list[str] | None = None,
+) -> dict:
+    return {
+        "quant_method": "quark",
+        "export": {"pack_method": pack_method, "kv_cache_group": []},
+        "global_quant_config": {
+            "weight": {
+                "dtype": "int4",
+                "group_size": 128,
+                "symmetric": symmetric,
+            }
+        },
+        "exclude": exclude or [],
+    }
+
+
+def _sign_extend_int4_nibbles(t: torch.Tensor) -> torch.Tensor:
+    mask = (t & 0x8).bool()
+    t = t.clone()
+    t[mask] = t[mask] | 0xF0
+    return t
+
+
+def _dequantize_quark_signed_awq_torch(
+    qweight: torch.Tensor,
+    scales: torch.Tensor,
+    qzeros: torch.Tensor,
+    group_size: int,
+    *,
+    pack_reorder: bool = True,
+) -> torch.Tensor:
+    bits = 4
+    shifts = torch.arange(0, 32, bits, device=qweight.device)
+    iweights = ((qweight[:, :, None] >> shifts[None, None, :]) & 0xF).to(torch.int8)
+    iweights = iweights.view(qweight.shape[0], -1)
+    zeros = ((qzeros[:, :, None] >> shifts[None, None, :]) & 0xF).to(torch.int8)
+    zeros = zeros.view(qzeros.shape[0], -1)
+
+    if pack_reorder:
+        order = torch.tensor(_REVERSE_AWQ_PACK_ORDER, device=qweight.device)
+    else:
+        order = torch.arange(8, device=qweight.device)
+    iweights = iweights.view(qweight.shape[0], -1, 8)[:, :, order].reshape(
+        qweight.shape[0], -1
+    )
+    zeros = zeros.view(qzeros.shape[0], -1, 8)[:, :, order].reshape(qzeros.shape[0], -1)
+    iweights = _sign_extend_int4_nibbles(iweights & 0xF)
+    zeros = _sign_extend_int4_nibbles(zeros & 0xF)
+
+    scales = scales.repeat_interleave(group_size, dim=0)
+    zeros = zeros.repeat_interleave(group_size, dim=0)
+    return (iweights - zeros) * scales
+
+
+def _dequantize_awq_unsigned_torch(
+    qweight: torch.Tensor,
+    scales: torch.Tensor,
+    qzeros: torch.Tensor,
+    group_size: int,
+    *,
+    pack_reorder: bool = True,
+) -> torch.Tensor:
+    bits = 4
+    shifts = torch.arange(0, 32, bits, device=qweight.device)
+    iweights = ((qweight[:, :, None] >> shifts[None, None, :]) & 0xF).to(torch.int8)
+    iweights = iweights.view(qweight.shape[0], -1)
+    zeros = ((qzeros[:, :, None] >> shifts[None, None, :]) & 0xF).to(torch.int8)
+    zeros = zeros.view(qzeros.shape[0], -1)
+
+    if pack_reorder:
+        order = torch.tensor(_REVERSE_AWQ_PACK_ORDER, device=qweight.device)
+    else:
+        order = torch.arange(8, device=qweight.device)
+    iweights = iweights.view(qweight.shape[0], -1, 8)[:, :, order].reshape(
+        qweight.shape[0], -1
+    )
+    zeros = zeros.view(qzeros.shape[0], -1, 8)[:, :, order].reshape(qzeros.shape[0], -1)
+
+    scales = scales.repeat_interleave(group_size, dim=0)
+    zeros = zeros.repeat_interleave(group_size, dim=0)
+    return (iweights - zeros) * scales
+
+
+def _pack_int4_nibbles(nibbles: torch.Tensor, *, pack_reorder: bool) -> torch.Tensor:
+    pack_order = (
+        torch.tensor(_REVERSE_AWQ_PACK_ORDER, device=nibbles.device)
+        if pack_reorder
+        else torch.arange(8, device=nibbles.device)
+    )
+    shifts = pack_order * 4
+    return ((nibbles.to(torch.int64) & 0xF) << shifts).sum(dim=-1).to(torch.int32)
+
+
+class TestQuarkInt4Format:
+    """Tests for Quark INT4 export format compatibility."""
+
+    def test_quark_order_pack_method_uses_native_int4_scheme(self):
+        quant_config = QuarkConfig.from_config(_quark_int4_config(pack_method="order"))
+        weight_config = quant_config.quant_config["global_quant_config"]
+        weight_key, act_key, scheme_cls = quant_config._get_scheme_cls_from_config(
+            weight_config
+        )
+        assert scheme_cls is QuarkW4A16Int4
+
+        scheme = quant_config.init_scheme(
+            scheme_cls,
+            weight_quant_key=weight_key,
+            activation_quant_key=act_key,
+            weight_config=weight_config["weight"],
+        )
+        assert isinstance(scheme, QuarkW4A16Int4)
+        assert not scheme.pack_reorder
+
+    def test_quark_int4_scheme_supports_asymmetric_weights(self):
+        quant_config = QuarkConfig.from_config(_quark_int4_config(symmetric=False))
+        weight_config = quant_config.quant_config["global_quant_config"]
+        weight_key, act_key, scheme_cls = quant_config._get_scheme_cls_from_config(
+            weight_config
+        )
+        assert scheme_cls is QuarkW4A16Int4
+
+        scheme = quant_config.init_scheme(
+            scheme_cls,
+            weight_quant_key=weight_key,
+            activation_quant_key=act_key,
+            weight_config=weight_config["weight"],
+        )
+        assert isinstance(scheme, QuarkW4A16Int4)
+        assert not scheme.is_symmetric
+
+    @pytest.mark.parametrize("missing_field", ["group_size", "symmetric"])
+    def test_quark_int4_scheme_requires_weight_config_fields(self, missing_field):
+        from vllm.model_executor.layers.quantization.utils.quant_utils import (
+            kInt4Static,
+        )
+
+        weight_config = {
+            "dtype": "int4",
+            "group_size": 128,
+            "symmetric": True,
+        }
+        weight_config.pop(missing_field)
+        quant_config = QuarkConfig.from_config(
+            {
+                "quant_method": "quark",
+                "export": {"pack_method": "reorder", "kv_cache_group": []},
+                "global_quant_config": {"weight": weight_config},
+                "exclude": [],
+            }
+        )
+
+        with pytest.raises(ValueError, match=missing_field):
+            quant_config.init_scheme(
+                QuarkW4A16Int4,
+                weight_quant_key=kInt4Static,
+                activation_quant_key=None,
+                weight_config=weight_config,
+            )
+
+    def test_quark_int4_moe_uses_native_moe_method(self):
+        from unittest.mock import MagicMock, patch
+
+        from vllm.model_executor.layers.quantization.utils.quant_utils import (
+            kInt4StaticAsym,
+        )
+
+        quant_config = QuarkConfig.from_config(_quark_int4_config(symmetric=False))
+        moe_config = type("MoeConfig", (), {})()
+        moe_config.has_bias = False
+
+        mock_backend = MagicMock()
+        mock_experts_cls = MagicMock()
+        with patch(
+            "vllm.model_executor.layers.quantization.quark.quark_moe"
+            ".select_wna16_moe_backend",
+            return_value=(mock_backend, mock_experts_cls),
+        ):
+            method = QuarkW4A16Int4MoEMethod(
+                kInt4StaticAsym,
+                None,
+                quant_config.quant_config["global_quant_config"]["weight"],
+                quant_config.pack_method,
+                moe_config,
+            )
+
+        assert method.group_size == 128
+        assert method.pack_reorder
+        assert method.use_wna16_backend
+
+    def test_triton_wna16_experts_supports_asymmetric_int4(self):
+        from vllm.model_executor.layers.fused_moe.experts.triton_moe import (
+            TritonWNA16Experts,
+        )
+        from vllm.model_executor.layers.quantization.utils.quant_utils import (
+            kInt4Static,
+            kInt4Static32,
+            kInt4Static32Asym,
+            kInt4StaticAsym,
+        )
+
+        for key in [kInt4Static, kInt4Static32, kInt4StaticAsym, kInt4Static32Asym]:
+            assert TritonWNA16Experts._supports_quant_scheme(key, None), (
+                f"{key} should be supported by TritonWNA16Experts"
+            )
+
+    def test_quark_moe_loader_shards_w2_zero_point_across_tp_ranks(self):
+        """w2 zero-points are sharded along the intermediate dim per TP rank.
+
+        Loading the same Quark checkpoint tensor at tensor_parallel_size=2 for
+        both ranks must jointly reconstruct the tensor_parallel_size=1 (full)
+        result, with no overlap or gap. This guards the custom loader's TP
+        split for the packed zero-point layout.
+        """
+
+        class _FakeMoEConfig:
+            has_bias = False
+
+            def __init__(self, tp_size, tp_rank):
+                self.tp_size = tp_size
+                self.tp_rank = tp_rank
+
+        class _FakeLayer:
+            def __init__(self, moe_config):
+                self.moe_config = moe_config
+                self.intermediate_size_per_partition = 64
+                self.group_size_div_factor = 1
+
+        def load_w2_zero_point(raw_zp, tp_size, tp_rank):
+            from unittest.mock import MagicMock, patch
+
+            from vllm.model_executor.layers.quantization.utils.quant_utils import (
+                kInt4StaticAsym,
+            )
+
+            quant_config = QuarkConfig.from_config(_quark_int4_config(symmetric=False))
+            moe_config = _FakeMoEConfig(tp_size, tp_rank)
+            with patch(
+                "vllm.model_executor.layers.quantization.quark.quark_moe"
+                ".select_wna16_moe_backend",
+                return_value=(MagicMock(), MagicMock()),
+            ):
+                method = QuarkW4A16Int4MoEMethod(
+                    kInt4StaticAsym,
+                    None,
+                    quant_config.quant_config["global_quant_config"]["weight"],
+                    quant_config.pack_method,
+                    moe_config,
+                )
+
+            layer = _FakeLayer(moe_config)
+            # The loader converts the packed zero-point, then writes the
+            # per-rank slice into param.data[expert_id]. A single expert dim is
+            # enough; the last dim shrinks by tp_size after sharding.
+            param = torch.nn.Parameter(
+                torch.zeros(1, 16, 8 // tp_size, dtype=torch.uint8),
+                requires_grad=False,
+            )
+            loader = method.get_weight_loader(layer, weight_loader=None)
+            loader(
+                param,
+                raw_zp.clone(),
+                weight_name="w2_weight_zero_point",
+                shard_id="w2",
+                expert_id=0,
+            )
+            return param.data[0]
+
+        # Quark-packed zero-point for one expert: rows = hidden // pack_factor,
+        # cols carry the (packed) intermediate dim, split evenly across ranks.
+        raw_zp = torch.randint(0, 256, (8, 16), dtype=torch.uint8)
+
+        full = load_w2_zero_point(raw_zp, tp_size=1, tp_rank=0)
+        shard0 = load_w2_zero_point(raw_zp, tp_size=2, tp_rank=0)
+        shard1 = load_w2_zero_point(raw_zp, tp_size=2, tp_rank=1)
+
+        expected = full.view(full.size(0), 2, -1)
+        torch.testing.assert_close(shard0, expected[:, 0])
+        torch.testing.assert_close(shard1, expected[:, 1])
+
+    def test_quark_shared_expert_gate_keeps_quantized_tensors(self):
+        quant_config = QuarkConfig.from_config(_quark_int4_config())
+        mapper = quant_config.get_cache_scale_mapper()
+
+        output_names = {
+            name
+            for name, _ in mapper.apply(
+                [
+                    (
+                        "model.language_model.layers.0.mlp.shared_expert_gate.weight",
+                        torch.zeros(1),
+                    ),
+                    (
+                        "model.language_model.layers.0.mlp.shared_expert_gate"
+                        ".weight_scale",
+                        torch.zeros(1),
+                    ),
+                    (
+                        "model.language_model.layers.0.mlp.shared_expert_gate"
+                        ".weight_zero_point",
+                        torch.zeros(1),
+                    ),
+                ]
+            )
+        }
+
+        assert (
+            "model.language_model.layers.0.mlp.shared_expert_gate.weight"
+            in output_names
+        )
+        assert (
+            "model.language_model.layers.0.mlp.shared_expert_gate.weight_scale"
+            in output_names
+        )
+        assert (
+            "model.language_model.layers.0.mlp.shared_expert_gate.weight_zero_point"
+            in output_names
+        )
+
+    def test_quark_apply_mapper_updates_exclude_and_layer_quant_config(self):
+        quant_config = QuarkConfig.from_config(
+            {
+                **_quark_int4_config(),
+                "exclude": ["lm_head"],
+                "layer_quant_config": {
+                    "model.language_model.layers.0.mlp.gate": {
+                        "weight": {"dtype": "float16"},
+                    },
+                },
+            }
+        )
+        quant_config.apply_vllm_mapper(
+            WeightsMapper(
+                orig_to_new_prefix={
+                    "lm_head": "language_model.lm_head",
+                    "model.language_model.": "language_model.model.",
+                },
+            )
+        )
+
+        layer_quant_config = quant_config.quant_config["layer_quant_config"]
+        assert "language_model.model.layers.0.mlp.gate" in layer_quant_config
+        assert "model.language_model.layers.0.mlp.gate" not in layer_quant_config
+        assert quant_config.quant_config["exclude"] == [
+            "language_model.lm_head",
+        ]
+
+    def test_quark_apply_mapper_ignores_non_string_list_entries(self):
+        quant_config = QuarkConfig.from_config(
+            {
+                **_quark_int4_config(),
+                "algo_config": [
+                    {"name": "qronos", "inside_layer_modules": ["self_attn.q_proj"]}
+                ],
+            }
+        )
+        quant_config.apply_vllm_mapper(WeightsMapper())
+
+        assert quant_config.quant_config["algo_config"] == [
+            {"name": "qronos", "inside_layer_modules": ["self_attn.q_proj"]}
+        ]
+
+    def test_quark_exclude_matches_via_mapper_prefix(self):
+        quant_config = QuarkConfig.from_config(_quark_int4_config(exclude=["lm_head"]))
+        quant_config.apply_vllm_mapper(
+            WeightsMapper(orig_to_new_prefix={"lm_head": "language_model.lm_head"})
+        )
+
+        exclude_layers = quant_config.quant_config["exclude"]
+        assert should_ignore_layer("language_model.lm_head", ignore=exclude_layers)
+        assert not should_ignore_layer(
+            "language_model.model.layers.0.mlp.gate", ignore=exclude_layers
+        )
+
+
+@pytest.mark.parametrize("symmetric", [False, True])
+@pytest.mark.parametrize("pack_method", ["order", "reorder"])
+def test_quark_int4_canonicalizes_pack_for_kernel_layout(pack_method, symmetric):
+    """Quark pack order is normalized to the layout expected by awq_* ops.
+
+    This reuses the existing AWQ dequant/gemm kernels for compute only; loading
+    still goes through the native Quark quantization path, not AutoAWQ.
+    """
+    pack_reorder = pack_method == "reorder"
+    group_size = 2
+    packed_values = torch.tensor(
+        [
+            [0, 1, 7, 8, 9, 15, 2, 14],
+            [15, 8, 0, 3, 12, 7, 1, 9],
+        ],
+        dtype=torch.int32,
+    )
+    packed_zeros = torch.zeros((1, 8), dtype=torch.int32)
+    qweight = _pack_int4_nibbles(packed_values, pack_reorder=pack_reorder).view(2, 1)
+    qzeros = _pack_int4_nibbles(packed_zeros, pack_reorder=pack_reorder).view(1, 1)
+    scales = torch.ones((1, 8), dtype=torch.float16)
+
+    dequantize = (
+        _dequantize_quark_signed_awq_torch
+        if symmetric
+        else _dequantize_awq_unsigned_torch
+    )
+    expected = dequantize(
+        qweight,
+        scales,
+        qzeros,
+        group_size,
+        pack_reorder=pack_reorder,
+    )
+    canonical_weight = canonicalize_quark_packed_int4(
+        qweight,
+        pack_reorder=pack_reorder,
+        is_symmetric=symmetric,
+    )
+    canonical_zero = canonicalize_quark_packed_int4(
+        qzeros,
+        pack_reorder=pack_reorder,
+        is_symmetric=symmetric,
+    )
+    actual = _dequantize_awq_unsigned_torch(
+        canonical_weight, scales, canonical_zero, group_size
+    )
+
+    assert torch.equal(actual, expected)
+
+
+# ---------------------------------------------------------------------------
+# override_quantization_method: Quark always delegates to QuarkConfig
+# ---------------------------------------------------------------------------
+
+_QUARK_MXFP4_CFG = {
+    "quant_method": "quark",
+    "global_quant_config": {
+        "weight": {"dtype": "fp4", "qscheme": "per_group", "group_size": 32},
+    },
+}
+
+_QUARK_MXFP8_CFG = {
+    "quant_method": "quark",
+    "global_quant_config": {
+        "weight": {
+            "dtype": "fp8_e4m3",
+            "qscheme": "per_block",
+            "block_size": [32, 32],
+            "scale_type": "float8_e8m0fnu",
+            "symmetric": True,
+        },
+    },
+}
+
+_QUARK_MIXED_CFG = {
+    "quant_method": "quark",
+    "global_quant_config": {
+        "weight": {"dtype": "fp4", "qscheme": "per_group", "group_size": 32},
+    },
+    "layer_quant_config": {"layers.0.attn": {"weight": {"dtype": "fp8_e4m3"}}},
+}
+
+_FP8_CFG = {"quant_method": "fp8"}
+
+_DSV4_FP8_CFG = {"quant_method": "deepseek_v4_fp8"}
+
+
+@pytest.mark.parametrize(
+    "quant_config_cls",
+    [
+        "deepseek_v41",
+        "deepseek_v4",
+    ],
+)
+@pytest.mark.parametrize(
+    "hf_quant_cfg, expect_none",
+    [
+        (_QUARK_MXFP4_CFG, True),
+        (_QUARK_MXFP8_CFG, True),
+        (_QUARK_MIXED_CFG, True),
+        (_FP8_CFG, False),
+        (_DSV4_FP8_CFG, False),
+    ],
+    ids=[
+        "quark-mxfp4",
+        "quark-mxfp8",
+        "quark-mixed",
+        "native-fp8",
+        "deepseek-v4-fp8",
+    ],
+)
+def test_quark_override_delegates_to_quark_config(
+    quant_config_cls, hf_quant_cfg, expect_none
+):
+    """Any quant_method=='quark' must return None (delegate to QuarkConfig).
+
+    Native FP8 configs should still be claimed by the model-specific config.
+    """
+    import importlib
+
+    if quant_config_cls == "deepseek_v41":
+        # Module was renamed from deepseek_v4_1 to deepseek_v41 upstream.
+        for mod_name in (
+            "vllm.models.deepseek_v41.quant_config",
+            "vllm.models.deepseek_v4_1.quant_config",
+        ):
+            try:
+                mod = importlib.import_module(mod_name)
+                break
+            except ModuleNotFoundError:
+                continue
+        else:
+            pytest.skip("deepseek_v41 quant_config not found")
+        model_type = "deepseek_v41"
+    else:
+        mod = importlib.import_module("vllm.models.deepseek_v4.quant_config")
+        model_type = "deepseek_v4"
+
+    config_cls = mod.DeepseekV4FP8Config
+    hf_config = SimpleNamespace(model_type=model_type)
+    result = config_cls.override_quantization_method(
+        hf_quant_cfg, None, hf_config=hf_config
+    )
+
+    if expect_none:
+        assert result is None, (
+            f"Quark config should delegate to QuarkConfig (return None), got {result!r}"
+        )
+    else:
+        assert result == "deepseek_v4_fp8", (
+            f"Native FP8 should be claimed by DeepseekV4FP8Config, got {result!r}"
+        )

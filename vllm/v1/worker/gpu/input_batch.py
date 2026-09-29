@@ -17,12 +17,7 @@ if TYPE_CHECKING:
 
 
 class InputBuffers:
-    def __init__(
-        self,
-        max_num_reqs: int,
-        max_num_tokens: int,
-        device: torch.device,
-    ):
+    def __init__(self, max_num_reqs: int, max_num_tokens: int, device: torch.device):
         self.max_num_reqs = max_num_reqs
         self.max_num_tokens = max_num_tokens
         self.device = device
@@ -86,6 +81,8 @@ class InputBatch:
     is_prefilling_np: np.ndarray
     # == np.any(is_prefilling_np)
     has_prefill: bool
+    # No prefills, or only prefill rows that run as decodes.
+    decode_graph_eligible: bool
 
     # [num_tokens_after_padding]
     input_ids: torch.Tensor
@@ -118,6 +115,11 @@ class InputBatch:
     # [num_reqs] set only under PCP+DCP (see CommonAttentionMetadata).
     dcp_local_seq_lens_cpu_upper_bound: torch.Tensor | None = None
 
+    # [num_reqs] prefilling rows that schedule one new prompt token (excluding
+    # drafts) over existing context and so compute exactly like decodes.
+    # None if there are no prefills.
+    prefill_runs_as_decode_np: np.ndarray | None = None
+
     @classmethod
     def make_dummy(
         cls,
@@ -125,13 +127,14 @@ class InputBatch:
         num_tokens: int,
         input_buffers: InputBuffers,
         max_query_len: int | None = None,
+        is_padding: bool = True,
     ) -> "InputBatch":
         assert 0 < num_reqs <= num_tokens
         device = input_buffers.device
 
         req_ids = [f"req_{i}_{random_uuid()}" for i in range(num_reqs)]
         idx_mapping_np = np.arange(num_reqs, dtype=np.intp)
-        idx_mapping = torch.arange(num_reqs, dtype=torch.int64, device=device)
+        idx_mapping = torch.arange(num_reqs, dtype=torch.int32, device=device)
         expanded_idx_mapping = idx_mapping
         expanded_local_pos = torch.zeros(num_reqs, dtype=torch.int32, device=device)
 
@@ -168,7 +171,7 @@ class InputBatch:
         input_ids = input_buffers.input_ids[:num_tokens].zero_()
         positions = input_buffers.positions[:num_tokens].zero_()
 
-        input_buffers.is_padding[:num_tokens].fill_(True)
+        input_buffers.is_padding[:num_tokens].fill_(is_padding)
         is_padding = input_buffers.is_padding[:num_tokens]
 
         logits_indices = query_start_loc[1:] - 1
@@ -200,6 +203,7 @@ class InputBatch:
             num_computed_prefill_tokens_np=np.zeros(num_reqs, dtype=np.int32),
             is_prefilling_np=np.zeros(num_reqs, dtype=np.bool_),
             has_prefill=False,
+            decode_graph_eligible=True,
             input_ids=input_ids,
             positions=positions,
             is_padding=is_padding,
@@ -473,11 +477,7 @@ def combine_sampled_and_draft_tokens(
     num_reqs = idx_mapping.shape[0]
     num_speculative_steps = draft_tokens.shape[-1]
 
-    logits_indices = torch.empty(
-        num_logits,
-        dtype=torch.int64,
-        device=input_ids.device,
-    )
+    logits_indices = torch.empty(num_logits, dtype=torch.int64, device=input_ids.device)
     _combine_sampled_and_draft_tokens_kernel[(num_reqs,)](
         input_ids,
         idx_mapping,
@@ -710,9 +710,7 @@ def expand_idx_mapping(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     num_reqs = idx_mapping.shape[0]
     expanded_idx_mapping = idx_mapping.new_empty(total_num_logits)
-    expanded_local_pos = torch.empty(
-        total_num_logits, dtype=torch.int32, device=idx_mapping.device
-    )
+    expanded_local_pos = idx_mapping.new_empty(total_num_logits)
     _expand_idx_mapping_kernel[(num_reqs,)](
         idx_mapping,
         expanded_idx_mapping,

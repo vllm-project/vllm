@@ -19,7 +19,7 @@ from transformers.models.whisper.modeling_whisper import sinusoids
 
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, ModelConfig, SpeechToTextConfig, VllmConfig
-from vllm.config.multimodal import BaseDummyOptions
+from vllm.config.multimodal import MultiModalDummyOptions
 from vllm.config.speech_to_text import SpeechToTextParams
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.inputs import (
@@ -63,6 +63,7 @@ from vllm.multimodal.processing import (
 )
 from vllm.multimodal.processing.processor import HFMultiModalInputs
 from vllm.renderers import TokenizeParams
+from vllm.tokenizers import TokenizerLike
 from vllm.transformers_utils.processor import cached_processor_from_config
 from vllm.utils.jsontree import json_map_leaves
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
@@ -325,7 +326,7 @@ class WhisperCrossAttention(WhisperAttention):
             prefix=f"{prefix}.kv_proj",
         )
 
-    def forward(
+    def forward(  # type: ignore[override]
         self,
         hidden_states: torch.Tensor,
         encoder_hidden_states: torch.Tensor | None,
@@ -724,21 +725,18 @@ class WhisperDummyInputsBuilder(BaseDummyInputsBuilder[WhisperProcessingInfo]):
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions],
+        mm_options: MultiModalDummyOptions,
     ) -> MultiModalDataDict:
         feature_extractor = self.info.get_feature_extractor()
 
         sampling_rate = feature_extractor.sampling_rate
         audio_len = feature_extractor.chunk_length * sampling_rate
-        num_audios = mm_counts.get("audio", 0)
-
-        audio_overrides = mm_options.get("audio")
 
         return {
             "audio": self._get_dummy_audios(
                 length=audio_len,
-                num_audios=num_audios,
-                overrides=audio_overrides,
+                num_audios=mm_counts.get("audio", 0),
+                overrides=mm_options.get("audio"),
             )
         }
 
@@ -770,6 +768,7 @@ class WhisperMultiModalProcessor(EncDecMultiModalProcessor[WhisperProcessingInfo
             hf_kwargs=dict(
                 hf_inputs.hf_kwargs,
                 sampling_rate=feature_extractor.sampling_rate,
+                truncation=True,
             )
         )
 
@@ -874,7 +873,7 @@ class WhisperForConditionalGeneration(
     @classmethod
     def get_language_token_ids(
         cls,
-        tokenizer: object,
+        tokenizer: TokenizerLike,
     ) -> list[int]:
         """Return token IDs for all supported language tokens.
 
@@ -910,8 +909,8 @@ class WhisperForConditionalGeneration(
     def parse_language_detection_output(
         cls,
         token_ids: list[int],
-        tokenizer: object,
-    ) -> str | None:
+        tokenizer: TokenizerLike,
+    ) -> str:
         """Parse the language token predicted by Whisper.
 
         Decodes the first token ID and extracts the language code from the
@@ -1006,6 +1005,7 @@ class WhisperForConditionalGeneration(
         audio_input = self._parse_and_validate_audio_input(**kwargs)
         # Split concatenated encoder outputs into one tensor per audio input
         enc_output = self.model.get_encoder_outputs(audio_input["input_features"])
+        assert enc_output is not None
         # The assumption is we can only process whole mm items (audios)
         return enc_output.unbind(dim=0)
 
@@ -1023,8 +1023,12 @@ class WhisperForConditionalGeneration(
     def _parse_and_validate_audio_input(self, **kwargs: object) -> WhisperAudioInputs:
         input_features = kwargs.pop("input_features", None)
 
+        def to_dtype(value: object) -> torch.Tensor:
+            assert isinstance(value, torch.Tensor)
+            return value.to(self.dtype)
+
         if input_features is not None:
-            input_features = json_map_leaves(lambda x: x.to(self.dtype), input_features)
+            input_features = json_map_leaves(to_dtype, input_features)
 
         return WhisperAudioInputs(input_features=input_features)
 

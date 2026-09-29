@@ -26,10 +26,10 @@ import torch
 import torch.nn as nn
 from torch import Tensor
 from torch.nn.functional import gumbel_softmax, pad, softmax
-from transformers import BatchFeature, PretrainedConfig
+from transformers import BatchFeature, PreTrainedConfig
 
 from vllm.config import VllmConfig
-from vllm.config.multimodal import BaseDummyOptions
+from vllm.config.multimodal import MultiModalDummyOptions
 from vllm.inputs import MultiModalDataDict
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.quantization import QuantizationConfig
@@ -59,7 +59,12 @@ from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.processors.ovis import OvisProcessor
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
-from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
+from .interfaces import (
+    MultiModalEmbeddings,
+    SupportsMultiModal,
+    SupportsPP,
+    supports_pp,
+)
 
 # Cannot find the following number from hf config.
 IMAGE_TOKEN = "<image>"
@@ -88,7 +93,7 @@ def st_argmax(y_soft: torch.Tensor, dim: int):  # straight-through softmax
 class VisualTokenizer(torch.nn.Module):
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ):
@@ -115,7 +120,7 @@ class VisualTokenizer(torch.nn.Module):
 
     def _init_backbone(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ) -> nn.Module:
@@ -281,7 +286,7 @@ class OvisProcessingInfo(BaseProcessingInfo):
         # minus 1 for presented image token
         return (patch_grid_length // hidden_stride) ** 2 - 1
 
-    def get_image_pad_token(self) -> str:
+    def get_image_pad_token(self) -> str | None:
         hf_text_config = self.get_hf_config().get_text_config()
         text_model_type = hf_text_config.model_type
         return IMAGE_PAD_TOKEN_MAP.get(text_model_type)
@@ -306,20 +311,16 @@ class OvisDummyInputsBuilder(BaseDummyInputsBuilder[OvisProcessingInfo]):
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions],
+        mm_options: MultiModalDummyOptions,
     ) -> MultiModalDataDict:
-        num_images = mm_counts.get("image", 0)
-
         target_width, target_height = self.info.get_image_size_with_most_features()
-
-        image_overrides = mm_options.get("image")
 
         mm_data = {
             "image": self._get_dummy_images(
                 width=target_width,
                 height=target_height,
-                num_images=num_images,
-                overrides=image_overrides,
+                num_images=mm_counts.get("image", 0),
+                overrides=mm_options.get("image"),
             ),
         }
         return mm_data
@@ -418,7 +419,7 @@ class Ovis(nn.Module, SupportsMultiModal, SupportsPP):
         config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
 
-        self.config: PretrainedConfig = config
+        self.config: PreTrainedConfig = config
 
         with self._mark_language_model(vllm_config):
             self.llm = init_vllm_registered_model(
@@ -439,8 +440,10 @@ class Ovis(nn.Module, SupportsMultiModal, SupportsPP):
         text_model_type = self.config.get_text_config().model_type
         self.image_pad_token_id = IMAGE_PAD_TOKEN_ID_MAP[text_model_type]
 
+        language_model = self.get_language_model()
+        assert supports_pp(language_model)
         self.make_empty_intermediate_tensors = (
-            self.get_language_model().make_empty_intermediate_tensors
+            language_model.make_empty_intermediate_tensors
         )
 
     def _parse_and_validate_image_input(
