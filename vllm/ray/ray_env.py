@@ -36,6 +36,9 @@ except json.JSONDecodeError:
 DEFAULT_ENV_VAR_PREFIXES: set[str] = {
     "VLLM_",
     "FLASH_ATTENTION_",
+    # TODO: Remove this env override and use config-based NVFP4 4/6
+    # configuration once https://github.com/flashinfer-ai/flashinfer/pull/5152
+    # is merged.
     "FLASHINFER_",
     "LMCACHE_",
     "NCCL_",
