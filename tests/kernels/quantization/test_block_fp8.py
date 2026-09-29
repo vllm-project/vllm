@@ -37,7 +37,8 @@ from vllm.utils.flashinfer import (
 )
 from vllm.utils.import_utils import has_deep_gemm
 
-if current_platform.get_device_capability() < (9, 0):
+capability = current_platform.get_device_capability()
+if capability is None or capability < (9, 0):
     pytest.skip("FP8 Triton requires CUDA 9.0 or higher", allow_module_level=True)
 
 vllm_config = VllmConfig()
@@ -258,7 +259,7 @@ def test_w8a8_block_fp8_torch_scaled_mm_matmul():
     stub = BlockWiseTorchFP8ScaledMMLinearKernel.__new__(
         BlockWiseTorchFP8ScaledMMLinearKernel
     )
-    stub.config = types.SimpleNamespace(out_dtype=out_dtype)
+    stub.config = types.SimpleNamespace(out_dtype=out_dtype)  # type: ignore[assignment]
     out = stub.apply_block_scaled_mm(
         A_fp8_cuda.cuda(), B_fp8.cuda(), As_cuda.cuda(), Bs.cuda()
     )

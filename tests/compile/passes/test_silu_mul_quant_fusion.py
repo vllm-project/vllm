@@ -60,7 +60,7 @@ class TestSiluMulFp8QuantModel(torch.nn.Module):
     def __init__(
         self,
         hidden_size: int,
-        force_kernel: FP8ScaledMMLinearKernel,
+        force_kernel: type[FP8ScaledMMLinearKernel],
         dtype: torch.dtype,
         **kwargs,
     ):
@@ -282,7 +282,7 @@ def test_fusion_silu_and_mul_quant(
     ],
     enable_silu_mul_custom_op: bool,
     enable_quant_fp8_custom_op: bool,
-    force_kernel: FP8ScaledMMLinearKernel | None,
+    force_kernel: type[FP8ScaledMMLinearKernel] | None,
     monkeypatch: pytest.MonkeyPatch,
 ):
     if model_class is TestSiluMulNvfp4QuantModel and not is_nvfp4_supported():
@@ -330,7 +330,10 @@ def test_fusion_silu_and_mul_quant(
         passes = [NoOpEliminationPass(config), *fusion_passes, PostCleanupPass(config)]
         backend = TestBackend(*passes)
         model = model_class(
-            hidden_size=hidden_size, force_kernel=force_kernel, x=x, dtype=dtype
+            hidden_size=hidden_size,
+            force_kernel=force_kernel,  # type: ignore[arg-type]
+            x=x,
+            dtype=dtype,
         )
 
         # First dimension dynamic

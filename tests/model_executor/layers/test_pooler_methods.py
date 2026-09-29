@@ -26,6 +26,7 @@ from vllm.model_executor.layers.pooler.tokwise.methods import (
     get_tok_pooling_method,
 )
 from vllm.pooling_params import PoolingParams
+from vllm.tasks import PoolingTask
 from vllm.v1.pool.metadata import PoolingCursor, PoolingMetadata, PoolingStates
 
 _CPU = torch.device("cpu")
@@ -66,7 +67,7 @@ def _make_pooling_cursor(
 def _make_metadata(
     prompt_lens: list[int],
     *,
-    tasks: list[str] | None = None,
+    tasks: list[PoolingTask] | None = None,
     token_ids: list[list[int]] | None = None,
     pooling_params: list[PoolingParams] | None = None,
     num_scheduled_tokens: list[int] | None = None,
@@ -319,7 +320,7 @@ def test_dispatch_seq_cls_honors_token_pooling_type(tok_pooling_type):
         ),
     )
     classifier = torch.nn.Linear(4, 3)
-    with set_current_vllm_config(config):
+    with set_current_vllm_config(config):  # type: ignore[arg-type]
         pooler = DispatchPooler.for_seq_cls(pooler_config, classifier=classifier)
 
     token_ids = [[2, 99, 3, 99], [4, 99], [5, 6]]

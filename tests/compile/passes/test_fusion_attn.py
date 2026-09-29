@@ -33,6 +33,7 @@ from vllm.config import (
     VllmConfig,
     set_current_vllm_config,
 )
+from vllm.config.cache import CacheDType
 from vllm.forward_context import get_forward_context, set_forward_context
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
@@ -198,6 +199,7 @@ class TestAttentionAiterFp8StaticQuantPatternModel(
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.fp8_linear.kernel.quant_fp8.use_aiter = True
+        assert self.fp8_linear.input_scale is not None
         self.fp8_linear.input_scale.fill_(0.125)
 
 
@@ -307,7 +309,7 @@ def test_attention_quant_pattern(
     head_size: int,
     batch_size: int,
     dtype: torch.dtype,
-    kv_cache_dtype: str,
+    kv_cache_dtype: CacheDType,
     custom_ops: str,
     model_name: str,
     model_class: type[AttentionQuantPatternModel],

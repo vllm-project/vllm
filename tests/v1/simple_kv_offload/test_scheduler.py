@@ -19,6 +19,7 @@ from vllm.config import (
     SchedulerConfig,
     VllmConfig,
 )
+from vllm.config.cache import MambaCacheMode
 from vllm.config.kv_events import KVEventsConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.simple_cpu_offload_connector import (
     SimpleCPUOffloadConnector,
@@ -1243,7 +1244,7 @@ def test_preemption_no_cpu_block_leak() -> None:
         block_hasher=req._block_hasher,
     )
     hit_tokens, is_async = sched.get_num_new_matched_tokens(req2, num_computed_tokens=0)
-    assert hit_tokens > 0
+    assert hit_tokens is not None and hit_tokens > 0
 
     gpu_blocks2 = fix.gpu_block_pool.get_new_blocks(num_blocks)
     kv_blocks2 = KVCacheBlocks(blocks=(gpu_blocks2,))
@@ -1338,7 +1339,7 @@ def test_inflight_finish_deferred_cleanup() -> None:
         block_hasher=req._block_hasher,
     )
     hit_tokens, _ = sched.get_num_new_matched_tokens(req2, num_computed_tokens=0)
-    assert hit_tokens > 0
+    assert hit_tokens is not None and hit_tokens > 0
 
     gpu_blocks2 = fix.gpu_block_pool.get_new_blocks(num_blocks)
     kv_blocks2 = KVCacheBlocks(blocks=(gpu_blocks2,))
@@ -1896,7 +1897,7 @@ def test_reset_pending_loads() -> None:
         block_hasher=req._block_hasher,
     )
     hit_tokens, is_async = sched.get_num_new_matched_tokens(req2, num_computed_tokens=0)
-    assert hit_tokens > 0
+    assert hit_tokens is not None and hit_tokens > 0
 
     gpu_blocks2 = gpu_pool.get_new_blocks(num_blocks)
     kv_blocks2 = KVCacheBlocks(blocks=(gpu_blocks2,))
@@ -2246,7 +2247,7 @@ def _make_hybrid_attention_mamba_scheduler(
     hash_block_size: int | None = None,
     dcp_world_size: int = 4,
     lazy: bool = False,
-    mamba_cache_mode: str = "align",
+    mamba_cache_mode: MambaCacheMode = "align",
     enable_kv_cache_events: bool = False,
 ) -> SchedulerFixture:
     """Build a scheduler for one attention group plus one Mamba group."""

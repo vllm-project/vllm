@@ -306,18 +306,17 @@ def _collect_required_tool_streaming_json(output_json: str, delta_len: int) -> s
 
     combined_messages = "["
     for message in messages:
-        if message.tool_calls[0].function.name:
+        fn = message.tool_calls[0].function
+        assert fn is not None
+        if fn.name:
             if len(combined_messages) > 1:
                 combined_messages += "},"
 
             combined_messages += (
-                '{"name": "'
-                + message.tool_calls[0].function.name
-                + '", "parameters": '
-                + message.tool_calls[0].function.arguments
+                '{"name": "' + fn.name + '", "parameters": ' + (fn.arguments or "")
             )
         else:
-            combined_messages += message.tool_calls[0].function.arguments
+            combined_messages += fn.arguments or ""
     combined_messages += "}]"
     return combined_messages
 
