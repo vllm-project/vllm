@@ -49,7 +49,7 @@ from vllm.v1.attention.backend import AttentionType
 if typing.TYPE_CHECKING:
     from vllm.transformers_utils.configs.step3p5 import Step3p5Config
 else:
-    from transformers import PretrainedConfig as Step3p5Config
+    from transformers import PreTrainedConfig as Step3p5Config
 
 from .interfaces import MixtureOfExperts, SupportsPP
 from .utils import (

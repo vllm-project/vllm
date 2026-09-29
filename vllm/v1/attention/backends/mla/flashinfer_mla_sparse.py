@@ -38,7 +38,6 @@ from vllm.v1.kv_cache_interface import AttentionSpec
 
 if TYPE_CHECKING:
     from vllm.model_executor.models.deepseek_v2 import Indexer
-    from vllm.v1.attention.backend import CommonAttentionMetadata
 
 logger = init_logger(__name__)
 
@@ -83,7 +82,7 @@ class FlashInferMLASparseTRTLLMBackend(_FlashInferMLASparseBackendBase):
     ]
 
     @staticmethod
-    def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
+    def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int | MultipleOf]:
         return [32, 64]
 
     @staticmethod
@@ -172,7 +171,7 @@ class FlashInferMLASparseSM120Backend(_FlashInferMLASparseBackendBase):
         return "FLASHINFER_MLA_SPARSE_SM120"
 
     @staticmethod
-    def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
+    def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int | MultipleOf]:
         return [64, 256]
 
     @staticmethod
@@ -300,12 +299,6 @@ class FlashInferMLASparseTRTLLMMetadataBuilder(FlashInferMLASparseMetadataBuilde
                     vllm_config.scheduler_config.max_num_batched_tokens,
                 ),
             )
-
-    def _build_req_id_per_token(
-        self,
-        common_attn_metadata: "CommonAttentionMetadata",
-    ) -> torch.Tensor:
-        return common_attn_metadata.token_to_req_indices(self.req_id_per_token_buffer)
 
 
 # Global workspace buffer (lazily initialized)
