@@ -1445,7 +1445,7 @@ class TestDetectMergeInlineSystem:
             AnthropicServingMessages._should_merge_inline_system(online_renderer)
             is expected
         )
-        assert mock_logger.warning.called is expected
+        assert mock_logger.warning_once.called is expected
 
 
 # ======================================================================
