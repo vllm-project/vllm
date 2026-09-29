@@ -35,12 +35,18 @@ async def health(raw_request: Request) -> Response:
 
 @router.get("/ready", response_class=Response)
 async def health_ready(raw_request: Request) -> Response:
-    """Readiness check — verifies GPU can execute inference."""
+    """Readiness check.
+
+    503 if the engine is dead, sleeping or paused, or if the dummy forward
+    pass it runs while idle fails or times out.
+    """
     client = engine_client(raw_request)
     if client is None:
         return Response(status_code=200)
     try:
-        await client.check_health_gpu()
-        return Response(status_code=200)
+        ready = await client.check_health_gpu()
+    except NotImplementedError:
+        return await health(raw_request)
     except EngineDeadError:
-        return Response(status_code=503)
+        ready = False
+    return Response(status_code=200 if ready else 503)

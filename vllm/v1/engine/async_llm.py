@@ -201,6 +201,7 @@ class AsyncLLM(EngineClient):
             self.logger_manager.log_engine_initialized()
 
         self._client_count = client_count
+        self._gpu_health_probe: asyncio.Task[bool] | None = None
 
         self.output_handler: asyncio.Task | None = None
         try:
@@ -1066,33 +1067,36 @@ class AsyncLLM(EngineClient):
         if self.errored:
             raise self.dead_error
 
-    async def check_health_gpu(self) -> None:
+    async def check_health_gpu(self) -> bool:
         logger.debug("Called check_health_gpu.")
-        # First do the basic liveness check.
         await self.check_health()
 
-        # Like SGLang's health_generate path, avoid injecting extra GPU work
-        # while real requests are in flight. This keeps readiness probes from
-        # competing with user traffic; active-traffic stalls need a separate
-        # forward-progress watchdog.
-        if self.output_processor.has_unfinished_requests():
-            return
-
-        # When idle, verify GPU can execute a forward pass.
+        # Single-flight: concurrent and timed-out callers await the pending
+        # probe instead of queueing more utility calls on a stalled engine.
+        probe = self._gpu_health_probe
+        if probe is None:
+            probe = asyncio.create_task(self.engine_core.check_ready_async())
+            probe.add_done_callback(self._on_gpu_health_probe_done)
+            self._gpu_health_probe = probe
         try:
-            await asyncio.wait_for(
-                self.engine_core.execute_dummy_batch_async(),
-                timeout=envs.VLLM_HEALTH_CHECK_GPU_TIMEOUT,
+            return await asyncio.wait_for(
+                asyncio.shield(probe), timeout=envs.VLLM_HEALTH_CHECK_GPU_TIMEOUT
             )
         except asyncio.TimeoutError:
             logger.warning(
                 "GPU health check timed out after %ss",
                 envs.VLLM_HEALTH_CHECK_GPU_TIMEOUT,
             )
-            raise self.dead_error from None
         except Exception:
             logger.warning("GPU health check failed", exc_info=True)
-            raise self.dead_error from None
+        return False
+
+    def _on_gpu_health_probe_done(self, probe: asyncio.Task[bool]) -> None:
+        if self._gpu_health_probe is probe:
+            self._gpu_health_probe = None
+        if not probe.cancelled():
+            # Mark the exception retrieved even if every caller timed out.
+            probe.exception()
 
     async def start_profile(self, profile_prefix: str | None = None) -> None:
         coros = [self.engine_core.profile_async(True, profile_prefix)]

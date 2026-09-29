@@ -813,9 +813,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
         os.environ.get("VLLM_ENGINE_READY_TIMEOUT_S", "600")
     ),
     # Timeout in seconds for GPU health check (dummy forward pass).
-    # Default is 20 seconds.
-    "VLLM_HEALTH_CHECK_GPU_TIMEOUT": lambda: int(
-        os.environ.get("VLLM_HEALTH_CHECK_GPU_TIMEOUT", "20")
+    # Default is 20 seconds; non-positive values fall back to the default.
+    "VLLM_HEALTH_CHECK_GPU_TIMEOUT": lambda: (
+        val
+        if (val := int(os.environ.get("VLLM_HEALTH_CHECK_GPU_TIMEOUT", "20"))) > 0
+        else 20
     ),
     # API key for vLLM API server
     "VLLM_API_KEY": lambda: os.environ.get("VLLM_API_KEY", None),

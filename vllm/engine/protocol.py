@@ -162,14 +162,6 @@ class EngineClient(ABC):
         ...
 
     @abstractmethod
-    async def check_health_gpu(self) -> None:
-        """Raise if GPU is unhealthy.
-
-        Runs a dummy forward pass to verify GPU can execute inference.
-        """
-        ...
-
-    @abstractmethod
     async def start_profile(self) -> None:
         """Start profiling the engine."""
         ...
@@ -264,6 +256,22 @@ class EngineClient(ABC):
         self, new_data_parallel_size: int, drain_timeout: int = 300
     ) -> None:
         """Scale the engine."""
+        raise NotImplementedError
+
+    async def check_health_gpu(self) -> bool:
+        """Check whether the engine can serve requests.
+
+        An idle engine runs a dummy forward pass, except under MoE data
+        parallelism, where only liveness and sleep state are checked.
+
+        Returns:
+            Whether the engine is ready. False if it is alive but sleeping or
+            paused, or its dummy forward pass failed or timed out.
+
+        Raises:
+            EngineDeadError: If the engine is dead.
+
+        """
         raise NotImplementedError
 
     async def collective_rpc(
