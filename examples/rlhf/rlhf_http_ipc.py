@@ -1,25 +1,28 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""RLHF weight syncing against a `vllm serve` HTTP server, using NCCL for the
+"""RLHF weight syncing against a `vllm serve` HTTP server, using CUDA IPC for the
 data plane.
 
   * OpenAI-compatible API for inference requests
   * HTTP endpoints for the weight-transfer control plane
-  * NCCL for the weight data plane
+  * CUDA IPC handles for the weight data plane
 
-3-GPU layout (single node):
-  Inference — GPUs 0-1, `vllm serve` with TP=2 and fp8 quantization
-  Training  — GPU 2, a bf16 Hugging Face model in this process
-              (the server quantizes to fp8 as it loads)
+1-GPU layout (single node): IPC shares GPU memory directly, so the server (TP=1)
+and the training model both live on GPU 0. The server is started with
+`--gpu-memory-utilization 0.5` to leave room for the training model.
 
 The script starts the server itself, then:
 
   1. Generate over HTTP → gibberish (server started with dummy weights).
-  2. Pause generation, sync real weights trainer → server over NCCL, resume.
+  2. Pause generation, sync real weights trainer → server over IPC, resume.
   3. Generate again → sensible output.
 
+IPC handles are pickled for HTTP transport, so both sides need
+`VLLM_ALLOW_INSECURE_SERIALIZATION=1`; this script sets it for itself and for
+the server it spawns.
+
 Run:
-    $ python examples/rl/rlhf_http_nccl.py
+    $ python examples/rlhf/rlhf_http_ipc.py
 """
 
 import os
@@ -37,18 +40,21 @@ from vllm.distributed.weight_transfer import (
     ModuleSource,
     WeightTransferTrainerFactory,
 )
-from vllm.distributed.weight_transfer.nccl_engine import NCCLTrainerInitInfo
-from vllm.utils.network_utils import get_ip, get_open_port
+from vllm.distributed.weight_transfer.ipc_engine import IPCTrainerInitInfo
 
 MODEL_NAME = "facebook/opt-125m"
 
 SERVER_PORT = 8000
 BASE_URL = f"http://localhost:{SERVER_PORT}"
 
-INFERENCE_TP_SIZE = 2
-# Physical GPUs for the server; the trainer takes the next one.
-SERVER_DEVICE_IDS = "0,1"
-TRAINER_DEVICE = "cuda:2"
+# IPC requires colocation: the server and the training model share this GPU.
+SERVER_DEVICE_IDS = "0"
+TRAINER_DEVICE = "cuda:0"
+# Leave room on the shared GPU for the training model.
+SERVER_GPU_MEMORY_UTILIZATION = 0.5
+
+# Needed to (de)serialize IPC handles across the HTTP boundary.
+os.environ["VLLM_ALLOW_INSECURE_SERIALIZATION"] = "1"
 
 PROMPTS = [
     "Hello, my name is",
@@ -65,22 +71,23 @@ def start_vllm_server() -> subprocess.Popen:
         "serve",
         MODEL_NAME,
         "--tensor-parallel-size",
-        str(INFERENCE_TP_SIZE),
+        "1",
         "--device-ids",
         SERVER_DEVICE_IDS,
-        "--quantization",
-        "fp8",
         "--enforce-eager",
         "--load-format",
         "dummy",
+        "--gpu-memory-utilization",
+        str(SERVER_GPU_MEMORY_UTILIZATION),
         "--port",
         str(SERVER_PORT),
         "--weight-transfer-config",
-        '{"backend": "nccl"}',
+        '{"backend": "ipc"}',
     ]
     env = os.environ.copy()
     # Exposes the weight-transfer and pause/resume endpoints.
     env["VLLM_SERVER_DEV_MODE"] = "1"
+    env["VLLM_ALLOW_INSECURE_SERIALIZATION"] = "1"
     print(f"[server] Launching: {' '.join(serve_args)}")
     proc = subprocess.Popen(
         serve_args,
@@ -130,13 +137,6 @@ def resume_generation(base_url: str) -> None:
     requests.post(f"{base_url}/resume", timeout=60).raise_for_status()
 
 
-def get_world_size(base_url: str) -> int:
-    """Get the number of inference workers from the vLLM server."""
-    response = requests.get(f"{base_url}/get_world_size", timeout=10)
-    response.raise_for_status()
-    return response.json()["world_size"]
-
-
 def print_generations(label: str, prompts: list[str], outputs: list[str]) -> None:
     print("-" * 50)
     print(label)
@@ -149,7 +149,7 @@ def print_generations(label: str, prompts: list[str], outputs: list[str]) -> Non
 def main():
     server_proc = start_vllm_server()
     try:
-        # The trainer sits on the GPU after the server's, and is NCCL rank 0.
+        # The training model must sit on the same physical GPU as the server.
         torch.accelerator.set_device_index(TRAINER_DEVICE)
 
         print(f"[trainer] Loading training model: {MODEL_NAME} on {TRAINER_DEVICE}")
@@ -157,6 +157,7 @@ def main():
             MODEL_NAME, dtype=torch.bfloat16
         )
         train_model.to(TRAINER_DEVICE)
+        train_model.eval()  # eval mode to save memory on the shared GPU
 
         client = OpenAI(base_url=f"{BASE_URL}/v1", api_key="EMPTY")
 
@@ -164,37 +165,21 @@ def main():
         outputs = generate_completions(client, MODEL_NAME, PROMPTS)
         print_generations("BEFORE weight sync (dummy weights):", PROMPTS, outputs)
 
-        # The transfer NCCL group is the trainer plus every inference worker.
-        world_size = get_world_size(BASE_URL) + 1
-        master_address = get_ip()
-        master_port = get_open_port()
-        print(
-            f"[transfer] Rendezvous at {master_address}:{master_port}, "
-            f"world_size={world_size} (1 trainer + {world_size - 1} vLLM workers)"
-        )
-
-        # `trainer_init` drives the handshake: it initializes the server's
-        # transfer engine while opening the trainer's own NCCL endpoint, so both
-        # ends rendezvous together.
+        # IPC needs no data-plane rendezvous; `trainer_init` only ships the
+        # `packed` flag, which the server must decode with.
+        print("[transfer] Initializing IPC weight transfer...")
         engine = WeightTransferTrainerFactory.trainer_init(
-            init_info=NCCLTrainerInitInfo(
-                master_address=master_address,
-                master_port=master_port,
-                world_size=world_size,
-                rank=0,  # single-GPU trainer is the sole (sender) rank
-                packed=True,
-            ),
+            init_info=IPCTrainerInitInfo(rank=0, packed=False),  # rank 0 = sender
             client=HTTPVLLMWeightSyncClient(BASE_URL),
             source=ModuleSource(train_model),
         )
 
         pause_generation(BASE_URL)
 
-        # Drives start_weight_update / update_weights / finish_weight_update,
-        # concurrent with the NCCL broadcast.
-        print("[sync] Broadcasting weights via NCCL...")
+        # Drives start_weight_update / update_weights / finish_weight_update.
+        print("[sync] Sharing weights via CUDA IPC...")
         engine.send_weights()
-        print("[sync] Weight broadcast complete.")
+        print("[sync] Weight transfer complete.")
 
         resume_generation(BASE_URL)
 

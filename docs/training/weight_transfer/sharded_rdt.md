@@ -121,6 +121,6 @@ To adapt a trainer that is not a plain `nn.Module` — a Megatron export, a raw 
 
 ## Examples
 
-- [Small MoE on 4 GPUs](../../../examples/rl/rlhf_sharded_rdt_small_ep.py) — 2 FSDP2 trainer ranks → 2 vLLM DP ranks with expert parallelism, one node. It pairs a trainer fleet with a separate inference fleet, the only arrangement this backend supports, and asserts that the sync moved the weights and that a second sync leaves generation unchanged — so it runs unattended in CI
+- [Small MoE on 4 GPUs](../../../examples/rlhf/rlhf_sharded_rdt_small_ep.py) — 2 FSDP2 trainer ranks → 2 vLLM DP ranks with expert parallelism, one node. It pairs a trainer fleet with a separate inference fleet, the only arrangement this backend supports, and asserts that the sync moved the weights and that a second sync leaves generation unchanged — so it runs unattended in CI
 
 It keeps the trainer deliberately small — just enough FSDP2 to make the weights real — so the file stays about the weight sync rather than about the trainer. For a full RL trainer, SkyRL integrates this backend with Megatron (PP-local gathering and expert-stack fusion for MoE) alongside FSDP: [NovaSky-AI/SkyRL#1753](https://github.com/NovaSky-AI/SkyRL/pull/1753).

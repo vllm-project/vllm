@@ -10,7 +10,7 @@ vLLM's examples are organized into the following categories:
 - **[`reasoning/`](../../examples/reasoning)** – Examples for reasoning with vLLM.
 - **[`tool_calling/`](../../examples/tool_calling)** – Examples for function/tool calling with vLLM.
 - **[`applications/`](../../examples/applications)** – Application examples such as simpler api server, chatbots and RAG (Retrieval-Augmented Generation).
-- **[`rl/`](../../examples/rl)** – Reinforcement learning examples.
+- **[`rlhf/`](../../examples/rlhf)** – RLHF (Reinforcement Learning from Human Feedback) examples.
 - **[`deployment/`](../../examples/deployment)** – Examples for deploying vLLM in production.
 - **[`ray_serving/`](../../examples/ray_serving)** – Scalable serving using Ray.
 - **[`disaggregated/`](../../examples/disaggregated)** – Examples for Disaggregated P/D (Prefill/Decoding) inference, including various kv cache connectors (LMCache, Mooncake, FlexKV, P2P NCCL) and failure recovery.
