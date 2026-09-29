@@ -23,6 +23,7 @@ import zmq.asyncio
 
 from vllm import envs
 from vllm.config import VllmConfig
+from vllm.config.kv_events import KVEventsConfig
 from vllm.envs import VLLM_ENGINE_READY_TIMEOUT_S
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
@@ -85,6 +86,10 @@ class EngineCoreClient(ABC):
     * SyncMPClient: ZMQ + background proc EngineCore (for LLM)
     * AsyncMPClient: ZMQ + background proc EngineCore w/ asyncio (for AsyncLLM)
     """
+
+    def get_kv_event_sources(self) -> dict[int, KVEventsConfig]:
+        """KV-event publisher config of each ready engine, keyed by DP rank."""
+        return {}
 
     @staticmethod
     def make_client(
@@ -193,7 +198,10 @@ class EngineCoreClient(ABC):
     def sleep(self, level: int = 1, mode: PauseMode = "abort") -> None:
         raise NotImplementedError
 
-    def wake_up(self, tags: list[str] | None = None) -> None:
+    def release_kv_cache_memory(self) -> None:
+        raise NotImplementedError
+
+    def wake_up(self, tags: list[str] | None = None) -> bool:
         raise NotImplementedError
 
     def is_sleeping(self) -> bool:
@@ -285,7 +293,10 @@ class EngineCoreClient(ABC):
     async def sleep_async(self, level: int = 1, mode: PauseMode = "abort") -> None:
         raise NotImplementedError
 
-    async def wake_up_async(self, tags: list[str] | None = None) -> None:
+    async def release_kv_cache_memory_async(self) -> None:
+        raise NotImplementedError
+
+    async def wake_up_async(self, tags: list[str] | None = None) -> bool:
         raise NotImplementedError
 
     async def is_sleeping_async(self) -> bool:
@@ -355,6 +366,11 @@ class InprocClient(EngineCoreClient):
             log_stats,
             executor_fail_callback=executor_fail_callback,
         )
+        # Release the executor's workers when the client is collected, as
+        # MPClient does; they hold GPU memory for the life of the process
+        # otherwise. The callback must not reference self, or self would stay
+        # reachable and the finalizer would never run.
+        self._finalizer = weakref.finalize(self, self.engine_core.shutdown)
 
     def get_output(self) -> EngineCoreOutputs:
         outputs, model_executed = self.engine_core.step_fn()
@@ -373,7 +389,8 @@ class InprocClient(EngineCoreClient):
             self.engine_core.abort_requests(request_ids)
 
     def shutdown(self, timeout: float | None = None) -> None:
-        self.engine_core.shutdown()
+        if self._finalizer.detach() is not None:
+            self.engine_core.shutdown()
 
     def profile(self, is_start: bool = True, profile_prefix: str | None = None) -> None:
         self.engine_core.profile(is_start, profile_prefix)
@@ -397,8 +414,11 @@ class InprocClient(EngineCoreClient):
         result = self.engine_core.sleep(level, mode)
         assert result is None
 
-    def wake_up(self, tags: list[str] | None = None) -> None:
-        self.engine_core.wake_up(tags)
+    def release_kv_cache_memory(self) -> None:
+        self.engine_core.release_kv_cache_memory()
+
+    def wake_up(self, tags: list[str] | None = None) -> bool:
+        return self.engine_core.wake_up(tags)
 
     def is_sleeping(self) -> bool:
         return self.engine_core.is_sleeping()
@@ -563,6 +583,7 @@ class MPClient(EngineCoreClient):
         self.vllm_config = vllm_config
         self._renderer: BaseRenderer | None = renderer
         self._effective_attention_block_sizes: set[int | None] = set()
+        self._kv_event_sources: dict[int, KVEventsConfig] = {}
 
         # ZMQ setup.
         sync_ctx = zmq.Context(io_threads=2)
@@ -851,6 +872,14 @@ class MPClient(EngineCoreClient):
             else:
                 assert response.dp_stats_address == self.stats_update_address
 
+        if response.kv_events_config is not None:
+            self._kv_event_sources[response.data_parallel_rank] = (
+                response.kv_events_config
+            )
+
+    def get_kv_event_sources(self) -> dict[int, KVEventsConfig]:
+        return dict(self._kv_event_sources)
+
 
 def _process_utility_output(
     output: UtilityOutput, utility_results: dict[int, AnyFuture]
@@ -1021,8 +1050,11 @@ class SyncMPClient(MPClient):
     def sleep(self, level: int = 1, mode: PauseMode = "abort") -> None:
         self.call_utility("sleep", level, mode)
 
-    def wake_up(self, tags: list[str] | None = None) -> None:
-        self.call_utility("wake_up", tags)
+    def release_kv_cache_memory(self) -> None:
+        self.call_utility("release_kv_cache_memory")
+
+    def wake_up(self, tags: list[str] | None = None) -> bool:
+        return self.call_utility("wake_up", tags)
 
     def is_sleeping(self) -> bool:
         return self.call_utility("is_sleeping")
@@ -1265,8 +1297,11 @@ class AsyncMPClient(MPClient):
     async def sleep_async(self, level: int = 1, mode: PauseMode = "abort") -> None:
         await self.call_utility_async("sleep", level, mode)
 
-    async def wake_up_async(self, tags: list[str] | None = None) -> None:
-        await self.call_utility_async("wake_up", tags)
+    async def release_kv_cache_memory_async(self) -> None:
+        await self.call_utility_async("release_kv_cache_memory")
+
+    async def wake_up_async(self, tags: list[str] | None = None) -> bool:
+        return await self.call_utility_async("wake_up", tags)
 
     async def is_sleeping_async(self) -> bool:
         return await self.call_utility_async("is_sleeping")
@@ -1552,6 +1587,10 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
         ) // client_count
 
     def get_core_engine_for_request(self, request: EngineCoreRequest) -> EngineIdentity:
+        if (engine := self.reqs_in_flight.get(request.request_id)) is not None:
+            # This is for streaming-input session affinity.
+            return engine
+
         # Engines are in rank order.
         if (eng_index := request.data_parallel_rank) is None and (
             eng_index := get_late_interaction_engine_index(
@@ -1854,13 +1893,29 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
         await asyncio.to_thread(self._coord_store.wait, ready_keys)
         logger.info("[Elastic EP] Successfully started new engines")
 
+    def _eep_commit_pause_mode(self) -> PauseMode:
+        from vllm.distributed.elastic_ep.elastic_execute import (
+            can_reuse_fused_moe_kernel,
+        )
+
+        # MRV2 re-warms through the request pool, so running requests must
+        # finish first while new ones stay queued in the scheduler.
+        parallel_config = self.vllm_config.parallel_config
+        if self.vllm_config.use_v2_model_runner and not can_reuse_fused_moe_kernel(
+            parallel_config
+        ):
+            return "wait"
+        return "keep"
+
     async def _commit_scale_up_elastic_ep(self, new_data_parallel_size: int) -> None:
         new_core_engines = [
             rank.to_bytes(2, "little")
             for rank in range(len(self.core_engines), new_data_parallel_size)
         ]
 
-        await self.pause_scheduler_async(mode="keep", clear_cache=False)
+        await self.pause_scheduler_async(
+            mode=self._eep_commit_pause_mode(), clear_cache=False
+        )
         wait_future = self._eep_wait_for_setup_switch_complete()
         finish_futures = [
             asyncio.create_task(
@@ -1929,8 +1984,11 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
         self.lb_engines = self.lb_engines[:new_data_parallel_size]
         # Pending coordinator snapshots must use the surviving ranks too.
         self.engine_ranks_managed = self.engine_ranks_managed[:new_data_parallel_size]
+        for rank in range(new_data_parallel_size, cur_data_parallel_size):
+            self._kv_event_sources.pop(rank, None)
         removed_dp_size = cur_data_parallel_size - new_data_parallel_size
-        pause_modes = ["keep"] * new_data_parallel_size + ["abort"] * removed_dp_size
+        eep_mode = self._eep_commit_pause_mode()
+        pause_modes = [eep_mode] * new_data_parallel_size + ["abort"] * removed_dp_size
         pause_futures = [
             self._call_utility_async("pause_scheduler", mode, False, engine=engine)
             for mode, engine in zip(pause_modes, old_core_engines)

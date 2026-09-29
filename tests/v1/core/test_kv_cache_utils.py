@@ -1019,6 +1019,37 @@ def test_request_block_hasher(hash_fn):
 
 
 @pytest.mark.parametrize("hash_fn", [sha256, sha256_cbor])
+def test_request_block_hasher_incremental_append_with_multiple_mm_features(hash_fn):
+    mm_positions = [
+        PlaceholderRange(offset=4, length=2),
+        PlaceholderRange(offset=6, length=1),
+    ]
+    incremental = make_request(
+        request_id="incremental",
+        prompt_token_ids=list(range(7)),
+        block_size=4,
+        hash_fn=hash_fn,
+        mm_positions=mm_positions,
+        mm_hashes=["A", "B"],
+    )
+    incremental.append_output_token_ids(7)
+    fresh = make_request(
+        request_id="fresh",
+        prompt_token_ids=list(range(8)),
+        block_size=4,
+        hash_fn=hash_fn,
+        mm_positions=mm_positions,
+        mm_hashes=["A", "B"],
+    )
+
+    expected_second_hash = hash_fn(
+        (incremental.block_hashes[0], (4, 5, 6, 7), (("A", 0), ("B", 2)))
+    )
+    assert incremental.block_hashes[1] == expected_second_hash
+    assert incremental.block_hashes == fresh.block_hashes
+
+
+@pytest.mark.parametrize("hash_fn", [sha256, sha256_cbor])
 def test_hash_tokens_different_mm_input(hash_fn):
     request1 = make_request(
         request_id="0",
@@ -1066,6 +1097,22 @@ def test_hash_request_tokens_no_mm_inputs(hash_fn):
 
 def _stats(requests: int, queries: int, hits: int) -> PrefixCacheStats:
     return PrefixCacheStats(requests=requests, queries=queries, hits=hits)
+
+
+def test_metrics_empty_distinguishes_no_queries_from_no_hits():
+    """`hit_rate` alone cannot tell the two apart; `empty` can.
+
+    Both an unobserved window and a genuine all-miss window report a hit
+    rate of 0.0, so anything surfacing that number to a human has to check
+    `empty` first - which is what the prefix-cache log line does.
+    """
+    metrics = CachingMetrics(max_recent_requests=5)
+    assert metrics.empty
+    assert metrics.hit_rate == 0.0
+
+    metrics.observe(_stats(1, 20, 0))
+    assert not metrics.empty
+    assert metrics.hit_rate == 0.0
 
 
 def test_metrics():
@@ -1552,19 +1599,142 @@ def test_project_kv_cache_groups_to_worker():
     assert set(proj_spec.kv_cache_specs.keys()) == {"layer1", "layer3"}
 
 
-def test_dcp_world_size_for_kv_cache_spec_shards_full_attention_only():
-    dcp = 8
-    full = FullAttentionSpec(
-        block_size=16, num_kv_heads=1, head_size=1, dtype=torch.float32
+@pytest.mark.parametrize("sliding_window", [None, 256])
+@pytest.mark.parametrize("disable_hybrid", [False, True])
+@pytest.mark.parametrize("pcp_size", [1, 4])
+def test_dcp_target_allocates_replicated_draft_independently(
+    monkeypatch, sliding_window, disable_hybrid, pcp_size
+):
+    """A draft must retain all positions even when the target shards them."""
+    from vllm.v1.attention.backends.utils import resolve_kv_cache_layout
+
+    monkeypatch.delenv("VLLM_KV_CACHE_LAYOUT", raising=False)
+    config = VllmConfig(model_config=ModelConfig(max_model_len=1024))
+    config.parallel_config.decode_context_parallel_size = 4
+    config.parallel_config.prefill_context_parallel_size = pcp_size
+    config.scheduler_config.disable_hybrid_kv_cache_manager = disable_hybrid
+    config.cache_config.block_size = 16
+    config.cache_config.kv_cache_layout = None
+    draft_args = dict(
+        block_size=16,
+        num_kv_heads=8,
+        head_size=64,
+        dtype=torch.bfloat16,
+        dcp_sharded=False,
     )
-    mla = new_mla_spec()
-    mamba = new_mamba_spec()
-    uniform_mla = UniformTypeKVCacheSpecs(block_size=16, kv_cache_specs={"layer": mla})
-    assert kv_cache_utils.dcp_world_size_for_kv_cache_spec(full, dcp) == dcp
-    assert kv_cache_utils.dcp_world_size_for_kv_cache_spec(mla, dcp) == dcp
-    assert kv_cache_utils.dcp_world_size_for_kv_cache_spec(uniform_mla, dcp) == dcp
-    assert kv_cache_utils.dcp_world_size_for_kv_cache_spec(mamba, dcp) == 1
-    assert kv_cache_utils.dcp_world_size_for_kv_cache_spec(full, 1) == 1
+    draft = (
+        FullAttentionSpec(**draft_args)
+        if sliding_window is None
+        else SlidingWindowSpec(**draft_args, sliding_window=sliding_window)
+    )
+    specs = {"target": new_mla_spec(), "draft": draft}
+    layout = resolve_kv_cache_layout(config, [["LBHNC", "BLHNC"]], specs.values())
+    assert layout == KVCacheLayout.BLHNC
+    groups = get_kv_cache_groups(config, specs)
+    assert [group.layer_names for group in groups] == [["target"], ["draft"]]
+    widths = [g.kv_cache_spec.max_num_blocks_per_req(config, 1024) for g in groups]
+    assert widths == [16, 64]
+
+    cache_config = kv_cache_utils.get_kv_cache_config_from_groups(
+        config, groups, available_memory=16 * 1024 * 1024
+    )
+    scheduler_config = generate_scheduler_kv_cache_config([cache_config])
+    assert get_max_concurrency_for_kv_cache_config(config, cache_config) > 0
+    assert get_max_concurrency_for_kv_cache_config(config, cache_config) == (
+        get_max_concurrency_for_kv_cache_config(config, scheduler_config)
+    )
+    manager = KVCacheManager(
+        scheduler_config,
+        max_model_len=1024,
+        hash_block_size=16,
+        scheduler_block_size=64,
+        dcp_world_size=4,
+        pcp_world_size=pcp_size,
+        enable_caching=True,
+    )
+    assert manager.coordinator.group_block_sizes == (64, 16)
+    request = make_request("replicated-draft", [1] * 65, block_size=16, hash_fn=sha256)
+    blocks = manager.allocate_slots(request, 65)
+    assert blocks is not None
+    assert [len(group) for group in blocks.blocks] == [2, 5]
+    manager.cache_blocks(request, 64)
+    cached_request = make_request(
+        "cached-draft", [1] * 65, block_size=16, hash_fn=sha256
+    )
+    cached_blocks, num_cached, _ = manager.get_computed_blocks(cached_request)
+    assert num_cached == 64
+    assert [len(group) for group in cached_blocks.blocks] == [1, 4]
+
+
+@pytest.mark.parametrize("use_mla", [False, True])
+def test_full_attention_merge_preserves_replicated_cache_geometry(use_mla):
+    config = VllmConfig(model_config=ModelConfig(max_model_len=1024))
+    config.parallel_config.decode_context_parallel_size = 4
+    draft = replace(
+        new_mla_spec() if use_mla else new_kv_cache_spec(),
+        block_size=16,
+        dcp_sharded=False,
+    )
+    merged = type(draft).merge([draft, draft])
+    wrapped = UniformTypeKVCacheSpecs.from_specs({"draft": merged})
+    assert wrapped is not None and not wrapped.dcp_sharded
+    assert merged.max_num_blocks_per_req(config, 1024) == 64
+    assert merged.max_memory_usage_bytes(config) == 64 * draft.page_size_bytes
+    assert kv_cache_utils.resolve_dcp_kv_block_size(merged, 4) == 16
+    with pytest.raises(AssertionError):
+        type(draft).merge([draft, replace(draft, dcp_sharded=True)])
+
+
+@pytest.mark.parametrize("with_draft", [False, True])
+@pytest.mark.parametrize("indexer_alignment", [None, 512])
+def test_sparse_mla_preserves_physical_row_addressing(with_draft, indexer_alignment):
+    from vllm.v1.attention.backends.mla.sparse_utils import flat_kv_row_view
+    from vllm.v1.worker.utils import allocate_kv_cache
+
+    config = VllmConfig(model_config=ModelConfig(max_model_len=1024))
+    config.cache_config.kv_cache_layout = "BLHNC"
+    config.parallel_config.decode_context_parallel_size = 4
+    common = dict(block_size=64, num_kv_heads=1, dtype=torch.uint8)
+    specs = {
+        "target": MLAAttentionSpec(
+            **common,
+            head_size=576,
+            state_content_bytes=656,
+            block_stride_alignment=656,
+            cache_dtype_str="fp8_ds_mla",
+            is_index_group_leader=True,
+        ),
+        "indexer": MLAAttentionSpec(
+            **common,
+            head_size=132,
+            cache_role=SparseCacheRole.INDEXER,
+            block_stride_alignment=indexer_alignment,
+        ),
+        "draft": SlidingWindowSpec(
+            block_size=64,
+            num_kv_heads=64,
+            head_size=64,
+            dtype=torch.bfloat16,
+            sliding_window=2048,
+            dcp_sharded=False,
+        ),
+    }
+    if not with_draft:
+        del specs["draft"]
+    groups = get_kv_cache_groups(config, specs)
+    cache_config = kv_cache_utils.get_kv_cache_config_from_groups(
+        config, groups, available_memory=8 * 1024 * 1024
+    )
+    caches = allocate_kv_cache(
+        cache_config, torch.device("cpu"), KVCacheLayout.BLHNC, [64] * len(groups)
+    )
+    cache = caches["target"].squeeze(1)
+    if indexer_alignment is not None:
+        assert caches["indexer"].stride(0) % indexer_alignment == 0
+    rows, stride_rows = flat_kv_row_view(cache, 64)
+    cache[1, 0].fill_(7)
+    torch.testing.assert_close(rows[stride_rows], cache[1, 0])
+    assert torch.all(rows[stride_rows] == 7)
 
 
 @pytest.mark.parametrize(
@@ -3768,6 +3938,8 @@ def test_unify_hybrid_kv_cache_specs():
         "layer_1": before_spec_1,
         "layer_2": before_spec_2,
     }
+    kv_cache_spec["draft_layer_1"] = replace(before_spec_1, dcp_sharded=False)
+    kv_cache_spec["draft_layer_2"] = replace(before_spec_2, dcp_sharded=False)
     kv_cache_utils.unify_hybrid_kv_cache_specs(kv_cache_spec)
     expected_spec_1 = new_kv_cache_spec(block_size=64)
     expected_spec_2 = new_kv_cache_spec(
@@ -3776,6 +3948,7 @@ def test_unify_hybrid_kv_cache_specs():
     assert kv_cache_spec["layer_1"] == expected_spec_1
     assert kv_cache_spec["layer_2"] == expected_spec_2
     assert kv_cache_spec["layer_2"].page_size_bytes == 64 * 1024
+    assert kv_cache_spec["draft_layer_2"] == replace(expected_spec_2, dcp_sharded=False)
 
     # 2. has_full_attention and has_chunked_local_attention
     before_spec_1 = new_kv_cache_spec()
@@ -3824,6 +3997,11 @@ def test_unify_hybrid_kv_cache_specs():
         "layer_2": new_chunked_local_attention_spec(attention_chunk_size=512),
     }
 
+    with pytest.raises(ValueError):
+        kv_cache_utils.unify_hybrid_kv_cache_specs(kv_cache_spec)
+
+    # Replicated Mamba state still requires the hybrid cache manager.
+    kv_cache_spec = {"attention": new_kv_cache_spec(), "mamba": new_mamba_spec()}
     with pytest.raises(ValueError):
         kv_cache_utils.unify_hybrid_kv_cache_specs(kv_cache_spec)
 
@@ -4259,12 +4437,16 @@ def _deepseek_v4_specs(model_version="deepseek_v4"):
     }
 
 
-def test_deepseek_v4_draft_group_annotated_on_packed_path():
+@pytest.mark.parametrize(
+    ("method", "model_type"),
+    [("mtp", "deepseek_v4"), ("dspark", "deepseek_v4"), ("dspark", "deepseek_v41")],
+)
+def test_deepseek_v4_draft_group_annotated_on_packed_path(method, model_type):
     # DeepseekV4's MTP block reuses the target's decoder layer, so its spec
     # carries no draft marker and only the positional rule can find it. This
     # pins the pre-existing behaviour that the unified annotator must preserve.
     groups = get_kv_cache_groups(
-        _spec_decode_grouping_config(method="mtp", model_type="deepseek_v4"),
+        _spec_decode_grouping_config(method=method, model_type=model_type),
         _deepseek_v4_specs(model_version=None),
     )
 
@@ -4273,13 +4455,93 @@ def test_deepseek_v4_draft_group_annotated_on_packed_path():
     assert "model.layers.3.self_attn.attn" in flagged[0].layer_names
 
 
-def test_deepseek_v4_annotation_requires_model_type():
-    # The positional rule is only sound for DeepseekV4, where the draft layer
-    # is known to be registered last. Without that model gate nothing may be
-    # flagged, however the grouping happens to fall out.
+def test_trailing_layer_fallback_applies_to_any_mtp_model():
+    # The positional rule is sound for every MTP drafter, not just DeepseekV4:
+    # MTP blocks reuse the target's decoder layer (no spec marker) and always
+    # register after every target layer. The model_type must not gate it.
     groups = get_kv_cache_groups(
         _spec_decode_grouping_config(method="mtp", model_type="other"),
         _deepseek_v4_specs(),
     )
 
+    flagged = [g for g in groups if g.is_eagle_group]
+    assert len(flagged) == 1
+    assert "model.layers.3.self_attn.attn" in flagged[0].layer_names
+
+
+def _qwen3_5_hybrid_specs(with_mtp_layer: bool):
+    """Qwen3.5-shaped hybrid: repeating [GDN x3, full-attn x1] blocks, with
+    the MTP drafter's full-attn layer (spec-identical to the target's)
+    registered last."""
+    specs = {}
+    idx = 0
+    for _ in range(2):
+        for _ in range(3):
+            specs[f"model.layers.{idx}.linear_attn"] = new_mamba_spec(
+                mamba_cache_mode="align"
+            )
+            idx += 1
+        specs[f"model.layers.{idx}.self_attn.attn"] = new_kv_cache_spec()
+        idx += 1
+    if with_mtp_layer:
+        specs["mtp.layers.0.self_attn.attn"] = new_kv_cache_spec()
+    return specs
+
+
+def test_qwen3_5_mtp_draft_group_annotated_on_hybrid_path(caplog_vllm):
+    # A hybrid mamba + full-attention model with an MTP drafter that is
+    # spec-indistinguishable from the target reaches the general multi-group
+    # path. The trailing-layer rule must locate the draft group there so the
+    # Mamba groups are not swept up by the flag-all consumer fallback.
+    groups = get_kv_cache_groups(
+        _spec_decode_grouping_config(method="mtp", model_type="qwen3_5"),
+        _qwen3_5_hybrid_specs(with_mtp_layer=True),
+    )
+
+    flagged = [g for g in groups if g.is_eagle_group]
+    assert len(flagged) == 1
+    assert "mtp.layers.0.self_attn.attn" in flagged[0].layer_names
+    for group in groups:
+        if any(
+            isinstance(spec, MambaSpec)
+            for spec in iter_layer_specs(group.kv_cache_spec)
+        ):
+            assert not group.is_eagle_group
+    assert "could be identified as the draft model's" not in caplog_vllm.text
+
+
+@pytest.mark.parametrize("method", ["eagle", "eagle3", "dspark"])
+def test_non_mtp_eagle_hybrid_still_warns(caplog_vllm, method):
+    # Other drafters are not covered by the trailing-layer rule, so an
+    # unidentifiable hybrid draft must still warn.
+    groups = get_kv_cache_groups(
+        _spec_decode_grouping_config(method=method, model_type="qwen3_5"),
+        _qwen3_5_hybrid_specs(with_mtp_layer=True),
+    )
+
     assert not any(g.is_eagle_group for g in groups)
+    assert "could be identified as the draft model's" in caplog_vllm.text
+
+
+def test_trailing_layer_fallback_requires_exact_partition():
+    # If the groups do not partition the layers exactly (e.g. a caller that
+    # dropped or duplicated layers), the positional rule is meaningless and
+    # must not fire.
+    from vllm.v1.core.kv_cache_utils import _annotate_eagle_groups
+
+    specs = _qwen3_5_hybrid_specs(with_mtp_layer=True)
+    config = _spec_decode_grouping_config(method="mtp", model_type="qwen3_5")
+    groups = get_kv_cache_groups(config, specs)
+    for g in groups:
+        g.is_eagle_group = False
+    # Remove one layer from its group: no longer an exact partition.
+    trimmed = [
+        KVCacheGroupSpec(
+            [n for n in g.layer_names if n != "model.layers.0.linear_attn"],
+            g.kv_cache_spec,
+        )
+        for g in groups
+    ]
+    _annotate_eagle_groups(config, specs, trimmed, use_trailing_layer_fallback=True)
+
+    assert not any(g.is_eagle_group for g in trimmed)
