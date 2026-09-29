@@ -282,27 +282,29 @@ def test_rocm_kimi_replayssm_rejects_prefix_caching_default_align(monkeypatch):
 
 
 @pytest.mark.parametrize(
-    ("architecture", "connector", "allowed"),
+    ("architecture", "connector"),
     [
-        ("KimiK3ForConditionalGeneration", "SimpleCPUOffloadConnector", True),
-        ("KimiLinearForCausalLM", "SimpleCPUOffloadConnector", True),
-        ("KimiK3ForConditionalGeneration", "NixlConnector", False),
-        ("KimiK3ForConditionalGeneration", "LMCacheMPConnector", False),
-        ("KimiK3ForConditionalGeneration", "MultiConnector", False),
-        ("NemotronHForCausalLM", "SimpleCPUOffloadConnector", False),
+        ("KimiK3ForConditionalGeneration", "SimpleCPUOffloadConnector"),
+        ("KimiLinearForCausalLM", "SimpleCPUOffloadConnector"),
+        ("KimiK3ForConditionalGeneration", "NixlConnector"),
+        ("KimiK3ForConditionalGeneration", "LMCacheMPConnector"),
+        ("KimiK3ForConditionalGeneration", "MultiConnector"),
+        ("NemotronHForCausalLM", "SimpleCPUOffloadConnector"),
     ],
 )
-def test_rocm_replayssm_kv_connector_exemption_is_cpu_offload_only(
-    monkeypatch, architecture: str, connector: str, allowed: bool
+def test_rocm_replayssm_rejects_kv_connectors(
+    monkeypatch, architecture: str, connector: str
 ):
+    """CPU offload needs prefix caching, which selects align mode.
+
+    ROCm Kimi ReplaySSM rejects align, so SimpleCPUOffloadConnector has no
+    working configuration and is rejected with every other connector.
+    """
     config = _rocm_kimi_replayssm_config(monkeypatch)
     config.model_config.architecture = architecture
     config.kv_transfer_config = SimpleNamespace(
         kv_connector=connector, is_kv_transfer_instance=True
     )
-    if allowed:
-        VllmConfig.validate_mamba_cached_kernel(config)
-        return
     with pytest.raises(ValueError, match="incompatible with KV connectors"):
         VllmConfig.validate_mamba_cached_kernel(config)
 

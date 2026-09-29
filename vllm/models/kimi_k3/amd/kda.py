@@ -46,6 +46,7 @@ from vllm.models.kimi_k3.amd.kda_metadata import (
 from vllm.models.kimi_k3.amd.ops.fused_sigmoid_gating import (
     fused_sigmoid_gating_delta_rule_update,
 )
+from vllm.models.kimi_k3.amd.ops.third_party.kda import fused_recurrent_kda
 from vllm.models.kimi_k3.amd.ops.kda_chunk import (
     is_fused_kda_chunk_supported,
 )
@@ -275,7 +276,7 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
         # ROCm can fuse the whole decode step (conv + recurrence + gated norm)
         # into one kernel, which wants a width-major fp32 conv weight staged at
         # load time. Everything else keeps the [channel, width] layout.
-        conv_state_dtype = self.get_state_dtype()[0]
+        conv_state_dtype, recurrent_state_dtype = self.get_state_dtype()[:2]
         decode_conv1d_weight = None
         if is_fused_kda_decode_supported(
             self.local_num_heads,
@@ -284,6 +285,7 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
             self.num_spec,
             vllm_config.model_config.dtype,
             conv_state_dtype,
+            recurrent_state_dtype,
         ):
             logger.info_once("Fused KDA decode kernel (conv+KDA+norm) is enabled.")
             decode_conv1d_weight = torch.empty(
@@ -340,8 +342,16 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
                 "The fused KDA chunk kernel requires gfx950 and a build that "
                 "includes it."
             )
-        self.use_fused_chunk = backend == "fused" or (
-            backend == "auto" and is_fused_kda_chunk_supported()
+        # The fused walk addresses the paged state directly and requires fp32.
+        # BF16 recurrent state stays on the Triton chunk path.
+        if backend == "fused" and recurrent_state_dtype != torch.float32:
+            raise RuntimeError(
+                "The fused KDA chunk kernel requires an fp32 recurrent state; "
+                "got --mamba-ssm-cache-dtype "
+                f"{self.cache_config.mamba_ssm_cache_dtype}."
+            )
+        self.use_fused_chunk = recurrent_state_dtype == torch.float32 and (
+            backend == "fused" or (backend == "auto" and is_fused_kda_chunk_supported())
         )
         logger.info_once(
             "Kimi-K3 KDA prefill backend: %s",
@@ -573,32 +583,56 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
                 rearrange(x, "n (h d) -> 1 n h d", d=self.head_dim)
                 for x in mixed_qkv_spec.split(self.local_projection_size, dim=-1)
             )
-            # Under ReplaySSM the kernel grid follows the row count, so keep the
-            # padded rows: their cu_seqlens entries are zero-length and skipped.
-            spec_cu_seqlens = (
-                spec_query_start_loc
-                if m.replayssm
-                else spec_query_start_loc[: m.num_spec_decodes + 1]
-            )
             # Spec-only batches write directly into core_attn_out.
             spec_out = (
                 core_attn_out[:, : q_spec.shape[1]]
                 if m.num_prefills == 0 and m.num_decodes == 0
                 else None
             )
-            core_attn_out_spec = self._run_kda_sigmoid_gating(
-                q=q_spec,
-                k=k_spec,
-                v=v_spec,
-                gate=g1_spec,
-                beta=beta_spec,
-                metadata=m,
-                cu_seqlens=spec_cu_seqlens,
-                ssm_state_indices=(None if m.replayssm else spec_state_indices_tensor),
-                num_accepted_tokens=(None if m.replayssm else num_accepted_tokens),
-                replayssm_slot_idx=(m.replayssm_spec_slot_idx if m.replayssm else None),
-                out=spec_out,
-            )
+            if m.replayssm:
+                # The ReplaySSM grid follows the row count, so keep the padded
+                # rows: their cu_seqlens entries are zero-length and skipped.
+                core_attn_out_spec = self._run_kda_sigmoid_gating(
+                    q=q_spec,
+                    k=k_spec,
+                    v=v_spec,
+                    gate=g1_spec,
+                    beta=beta_spec,
+                    metadata=m,
+                    cu_seqlens=spec_query_start_loc,
+                    ssm_state_indices=None,
+                    num_accepted_tokens=None,
+                    replayssm_slot_idx=m.replayssm_spec_slot_idx,
+                    out=spec_out,
+                )
+            else:
+                # fused_recurrent_kda keeps packed Q/K/V strides and tunes the
+                # launch for short uniform verification windows. The sigmoid
+                # kernel copies those views and is slower on this path.
+                spec_cu_seqlens = spec_query_start_loc[: m.num_spec_decodes + 1]
+                uniform_sequence_length = m.uniform_spec_sequence_length
+                if (
+                    uniform_sequence_length is not None
+                    and q_spec.shape[1]
+                    != m.num_spec_decodes * uniform_sequence_length
+                ):
+                    uniform_sequence_length = None
+                core_attn_out_spec, _ = fused_recurrent_kda(
+                    q=q_spec,
+                    k=k_spec,
+                    v=v_spec,
+                    raw_g=g1_spec,
+                    raw_beta=beta_spec,
+                    A_log=self.A_log,
+                    dt_bias=self.dt_bias,
+                    lower_bound=self.gate_lower_bound,
+                    initial_state=recurrent_state,
+                    cu_seqlens=spec_cu_seqlens,
+                    ssm_state_indices=spec_state_indices_tensor,
+                    num_accepted_tokens=num_accepted_tokens,
+                    uniform_sequence_length=uniform_sequence_length,
+                    out=spec_out,
+                )
 
         # ---------- non-spec path (prefill or plain decode) ----------
         core_attn_out_non_spec = None

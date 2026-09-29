@@ -3468,8 +3468,7 @@ class VllmConfig:
         )
 
         # ROCm Kimi-K3 ReplaySSM is the only path that runs on Model Runner
-        # V2 and with MLA CPU offload. Keep every other ReplaySSM backend on
-        # the upstream V1 / no-connector rules.
+        # V2. Keep every other ReplaySSM backend on the upstream V1 rules.
         kimi_kda_rocm = current_platform.is_rocm() and kimi_kda
 
         if self.model_config is not None and not self.model_config.supports_replayssm:
@@ -3535,15 +3534,12 @@ class VllmConfig:
                 "--mamba-backend flashinfer or Model Runner V1"
             )
         # ReplaySSM cursors and ring records live in the metadata builder and
-        # have no transfer path, so only the CPU offload tier the MLA layers
-        # use is allowed.
+        # have no transfer path. SimpleCPUOffloadConnector also requires
+        # prefix caching, which selects align mode, and ROCm Kimi ReplaySSM
+        # rejects align, so there is no working offload configuration yet.
         if (
             self.kv_transfer_config is not None
             and self.kv_transfer_config.is_kv_transfer_instance
-            and not (
-                kimi_kda_rocm
-                and self.kv_transfer_config.kv_connector == "SimpleCPUOffloadConnector"
-            )
         ):
             raise ValueError(
                 "--use-replayssm is incompatible with KV connectors "

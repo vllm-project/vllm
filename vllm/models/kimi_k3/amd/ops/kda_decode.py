@@ -33,8 +33,12 @@ def is_fused_kda_decode_supported(
     num_spec: int,
     input_dtype: torch.dtype,
     conv_state_dtype: torch.dtype,
+    recurrent_state_dtype: torch.dtype,
 ) -> bool:
-    """Whether the fused decode kernel can serve this layer on this device."""
+    """Whether the fused decode kernel can serve this layer on this device.
+
+    The kernel loads and stores the recurrent state as fp32.
+    """
     from vllm.platforms.rocm import on_gfx942, on_gfx950
 
     if (
@@ -44,6 +48,7 @@ def is_fused_kda_decode_supported(
         or num_spec != 0
         or input_dtype != torch.bfloat16
         or conv_state_dtype != torch.bfloat16
+        or recurrent_state_dtype != torch.float32
         or is_conv_state_dim_first()
         or not hasattr(torch.ops._C, "fused_kda_decode")
     ):
