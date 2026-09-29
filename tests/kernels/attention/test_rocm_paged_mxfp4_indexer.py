@@ -520,7 +520,7 @@ def _torch_keys(case, ratio, req):
 
 def _topk_indices(q, weights, keys, ends, k):
     """Top-k of sum_h relu(q_h . key) * weights_h over each row's [0, end)."""
-    scores = (torch.einsum("thd,nd->thn", q, keys).relu() * weights[..., None]).sum(1)
+    scores = (torch.einsum("thd,cd->thc", q, keys).relu() * weights[..., None]).sum(1)
     cols = torch.arange(keys.shape[0], device=DEVICE)
     return scores.masked_fill(cols >= ends[:, None], float("-inf")).topk(k).indices
 
