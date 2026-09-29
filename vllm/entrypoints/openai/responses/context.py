@@ -35,6 +35,7 @@ from vllm.entrypoints.openai.responses.protocol import (
 from vllm.entrypoints.openai.responses.utils import (
     build_response_output_items,
     construct_tool_dicts,
+    response_item_status,
 )
 from vllm.entrypoints.serve.utils.tool_calls_utils import (
     maybe_filter_parallel_tool_calls,
@@ -378,6 +379,7 @@ class ParsableContext(ConversationContext):
                         tool_calls or [], self.request
                     ),
                     tools=self.request.tools,
+                    finish_reason=completion.finish_reason,
                 )
             )
         elif completion.text:
@@ -385,7 +387,7 @@ class ParsableContext(ConversationContext):
                 ResponseOutputMessage(
                     type="message",
                     id=f"msg_{random_uuid()}",
-                    status="completed",
+                    status=response_item_status(completion.finish_reason),
                     role="assistant",
                     content=[
                         ResponseOutputText(

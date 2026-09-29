@@ -3,11 +3,16 @@
 
 """Tests for the /derender endpoints (postprocessing counterpart to /render)."""
 
+from unittest.mock import MagicMock
+
 import httpx
 import pytest
 import pytest_asyncio
 
 from tests.utils import RemoteLaunchRenderServer
+from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
+from vllm.entrypoints.scale_out.token_in_token_out.protocol import GenerateResponse
+from vllm.renderers.online_derenderer import OnlineDerenderer
 from vllm.tokenizers import get_tokenizer
 
 MODEL_NAME = "hmellor/tiny-random-LlamaForCausalLM"
@@ -1200,3 +1205,55 @@ async def test_e2e_harmony_reasoning(harmony_client, harmony_tokenizer):
     assert msg["reasoning"] is not None
     assert reasoning_text in msg["reasoning"]
     assert answer_text in (msg["content"] or "")
+
+
+_HERMES_TOOL_CALL_TEXT = (
+    '<tool_call>\n{"name": "get_weather", "arguments": {"city": "Paris"}}\n</tool_call>'
+)
+
+
+@pytest.mark.parametrize(
+    ("tool_choice", "text", "engine_finish_reason", "expected_finish_reason"),
+    [
+        ("auto", _HERMES_TOOL_CALL_TEXT, "stop", "tool_calls"),
+        ("auto", _HERMES_TOOL_CALL_TEXT, "length", "length"),
+        ("required", "Hello there", "stop", "stop"),
+    ],
+)
+def test_derender_chat_finish_reason_matches_chat_completion(
+    tool_choice, text, engine_finish_reason, expected_finish_reason
+):
+    """/derender applies the same finish_reason rule as the coupled chat
+    path: ``tool_calls`` only for a real call at a natural stop."""
+    tokenizer = get_tokenizer(MODEL_NAME)
+    renderer = MagicMock()
+    renderer.get_tokenizer.return_value = tokenizer
+    model_config = MagicMock()
+    model_config.model = MODEL_NAME
+    model_config.hf_config.model_type = "llama"
+    derenderer = OnlineDerenderer(
+        model_config,
+        renderer,
+        request_logger=None,
+        chat_template="{{ messages }}",
+        chat_template_content_format="auto",
+        enable_auto_tools=True,
+        tool_parser="hermes",
+    )
+    request = ChatCompletionRequest(
+        model=MODEL_NAME,
+        messages=[{"role": "user", "content": "Weather in Paris?"}],
+        tools=_E2E_TOOLS,
+        tool_choice=tool_choice,
+    )
+    response = GenerateResponse.model_validate(
+        _make_generate_response(
+            tokenizer.encode(text, add_special_tokens=False),
+            finish_reason=engine_finish_reason,
+        )
+    )
+
+    (choice,) = derenderer._derender_chat(response, request)
+
+    assert choice.finish_reason == expected_finish_reason
+    assert bool(choice.message.tool_calls) == (text == _HERMES_TOOL_CALL_TEXT)

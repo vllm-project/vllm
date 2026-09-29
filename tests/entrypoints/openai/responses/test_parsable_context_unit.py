@@ -446,3 +446,27 @@ def test_num_init_messages_offset():
     items = ctx.make_response_output_items()
     assert len(items) == 1
     assert items[0].type == "message"
+
+
+def test_length_truncation_marks_last_item_incomplete():
+    """A turn cut by max_output_tokens ends in an ``incomplete`` item, both
+    with a parser (tool call) and without one (plain message)."""
+    request = _make_request(
+        tool_choice="auto",
+        tools=[
+            {
+                "type": "function",
+                "name": "get_weather",
+                "parameters": {"type": "object", "properties": {}},
+            }
+        ],
+    )
+    ctx = _make_context(_ToolCallingParser, request=request, enable_auto_tools=True)
+    ctx.append_output(_make_request_output(text="calling tool", finish_reason="length"))
+    assert ctx.response_messages[-1].type == "function_call"
+    assert ctx.response_messages[-1].status == "incomplete"
+
+    ctx = _make_context(None)
+    ctx.append_output(_make_request_output(text="cut mid sen", finish_reason="length"))
+    assert ctx.response_messages[-1].type == "message"
+    assert ctx.response_messages[-1].status == "incomplete"
