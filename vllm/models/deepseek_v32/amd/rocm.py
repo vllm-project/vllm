@@ -172,20 +172,23 @@ class DeepseekV32MLAAttention(DeepseekV32Attention):
             )
         cos_sin_cache = self.indexer_rope_emb._match_cos_sin_cache_dtype(index_q)
         cos_cache, sin_cache = cos_sin_cache.chunk(2, dim=-1)
+        # Passed beside forward_hip so overrides keep the base signature.
+        self.indexer_op._qk_fusion_call = {
+            "k_norm_weight": self._k_norm_weight_fp32,
+            "k_norm_bias": self._k_norm_bias_fp32,
+            "k_norm_eps": float(self.indexer.k_norm.eps),
+            "positions": positions,
+            "cos_cache": cos_cache,
+            "sin_cache": sin_cache,
+            "weights_scale": self._indexer_weights_scale,
+            "is_neox_style": bool(self.indexer_rope_emb.is_neox_style),
+            "use_qk_rope_cache_fusion": True,
+        }
         self.indexer_op.forward_hip(
             hidden_states,
             index_q,
             index_k.contiguous(),
             index_weights.contiguous(),
-            k_norm_weight=self._k_norm_weight_fp32,
-            k_norm_bias=self._k_norm_bias_fp32,
-            k_norm_eps=float(self.indexer.k_norm.eps),
-            positions=positions,
-            cos_cache=cos_cache,
-            sin_cache=sin_cache,
-            weights_scale=self._indexer_weights_scale,
-            is_neox_style=bool(self.indexer_rope_emb.is_neox_style),
-            use_qk_rope_cache_fusion=True,
         )
 
     def _build_q_for_attn(
