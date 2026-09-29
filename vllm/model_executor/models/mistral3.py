@@ -479,7 +479,10 @@ class Mistral3ForConditionalGeneration(
             self.vision_tower = init_vision_tower_for_mistral3(
                 config,
                 quant_config=quant_config,
-                input_norm=build_mm_input_norm(vllm_config.model_config),
+                input_norm=build_mm_input_norm(
+                    vllm_config.model_config,
+                    enforce_enable=vllm_config.compilation_config.compile_mm_encoder,
+                ),
                 require_post_norm=False,
                 prefix=maybe_prefix(prefix, "vision_tower"),
             )

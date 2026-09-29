@@ -227,8 +227,10 @@ class FusedMMInputNorm(CustomOp):
         image_std: list[float],
         rescale_factor: float,
         channel: int = 3,
+        *,
+        enforce_enable: bool = False,
     ):
-        super().__init__()
+        super().__init__(enforce_enable=enforce_enable)
 
         assert len(image_mean) == len(image_std) == channel, (
             f"image_mean/image_std must have {channel} entries, "
@@ -332,7 +334,9 @@ class FusedMMInputNorm(CustomOp):
         return self.forward_native(pixel_values, visual_dtype)
 
 
-def build_mm_input_norm(model_config: ModelConfig) -> nn.Module:
+def build_mm_input_norm(
+    model_config: ModelConfig, *, enforce_enable: bool = False
+) -> nn.Module:
     """Build the input normalisation module for a model.
 
     Returns an ``IdentityInputNorm`` when device-side normalisation is
@@ -357,4 +361,5 @@ def build_mm_input_norm(model_config: ModelConfig) -> nn.Module:
         image_std=params.image_std,
         rescale_factor=params.rescale_factor,
         channel=len(params.image_mean),
+        enforce_enable=enforce_enable,
     )
