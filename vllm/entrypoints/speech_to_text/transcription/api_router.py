@@ -8,7 +8,7 @@ from typing import Annotated
 
 from anyio import CancelScope
 from fastapi import APIRouter, Form, Request
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import JSONResponse, PlainTextResponse, StreamingResponse
 from starlette.types import Receive, Scope, Send
 
 from vllm.entrypoints.serve.utils.api_utils import (
@@ -71,6 +71,9 @@ async def create_transcriptions(
         return JSONResponse(
             content=generator.model_dump(), status_code=generator.error.code
         )
+
+    elif isinstance(generator, str):
+        return PlainTextResponse(content=generator)
 
     elif isinstance(generator, TranscriptionResponseVariant):
         return JSONResponse(content=generator.model_dump())
