@@ -280,10 +280,10 @@ class LLMEngine:
         n = params.n if isinstance(params, SamplingParams) else 1
 
         if n == 1:
-            # Add the request to EngineCore; it may reject it while paused.
-            self.engine_core.add_request(request)
             # Make a new RequestState and queue.
             self.output_processor.add_request(request, prompt_text, None, 0)
+            # Add the request to EngineCore.
+            self.engine_core.add_request(request)
             return req_id
 
         # Fan out child requests (for n>1).
@@ -294,12 +294,12 @@ class LLMEngine:
             child_request.request_id = request_id
             child_request.sampling_params = child_params
 
-            # Add the request to EngineCore.
-            self.engine_core.add_request(child_request)
             # Make a new RequestState and queue.
             self.output_processor.add_request(
                 child_request, prompt_text, parent_req, idx
             )
+            # Add the request to EngineCore.
+            self.engine_core.add_request(child_request)
 
         return req_id
 

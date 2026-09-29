@@ -6,7 +6,6 @@ from typing import TYPE_CHECKING
 import pytest
 
 from vllm import LLM
-from vllm.exceptions import EnginePausedError
 from vllm.sampling_params import SamplingParams, StructuredOutputsParams
 from vllm.v1.metrics.reader import Counter, Gauge, Histogram, Metric, Vector
 
@@ -238,15 +237,3 @@ def test_skip_tokenizer_initialization(model: str):
     assert len(completions) > 0
     assert completions[0].text == ""
     assert completions[0].token_ids
-
-
-def test_inproc_add_while_paused_raises_without_residue(vllm_runner, monkeypatch):
-    """The in-process engine rejects by raising; nothing is left for step()
-    to wait on, including the siblings of an n>1 request."""
-    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
-    with _vllm_model(False, vllm_runner) as vllm_model:
-        engine = vllm_model.llm.llm_engine
-        engine.sleep(level=0)
-        with pytest.raises(EnginePausedError):
-            engine.add_request("paused", "Hello", SamplingParams(max_tokens=5, n=2))
-        assert not engine.has_unfinished_requests()

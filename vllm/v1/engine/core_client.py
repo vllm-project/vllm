@@ -25,7 +25,6 @@ from vllm import envs
 from vllm.config import VllmConfig
 from vllm.config.kv_events import KVEventsConfig
 from vllm.envs import VLLM_ENGINE_READY_TIMEOUT_S
-from vllm.exceptions import EnginePausedError
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.renderers import BaseRenderer
@@ -382,8 +381,6 @@ class InprocClient(EngineCoreClient):
         return self.engine_core.get_supported_tasks()
 
     def add_request(self, request: EngineCoreRequest) -> None:
-        if self.engine_core.rejects_new_requests() and not request.abort_immediately:
-            raise EnginePausedError()
         req, request_wave = self.engine_core.preprocess_add_request(request)
         self.engine_core.add_request(req, request_wave)
 

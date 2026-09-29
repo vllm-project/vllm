@@ -883,12 +883,14 @@ class EngineCore:
     ) -> Future | None:
         """Pause generation; behavior depends on mode.
 
-        "abort" rejects new adds and "keep" queues them; both skip step().
+        All pause modes queue new adds -- "abort" and "keep" skip step();
+        "wait" allows step() so in-flight requests can drain.
 
         - ``abort``: Set PAUSED_NEW, abort all requests, wait for abort
           outputs to be sent (when running with output_queue), optionally
           clear caches, then complete the returned Future.
-        - ``wait``: Not supported in-process; see ``EngineCoreProc``.
+        - ``wait``: Set PAUSED_NEW (queue adds, keep stepping); when drained,
+          optionally clear caches, then complete the returned Future.
         - ``keep``: Set PAUSED_ALL; return a Future that completes when the
           output queue is empty.
         """
@@ -909,10 +911,6 @@ class EngineCore:
     def resume_scheduler(self) -> None:
         """Resume the scheduler and flush any requests queued while paused."""
         self.scheduler.set_pause_state(PauseState.UNPAUSED)
-
-    def rejects_new_requests(self) -> bool:
-        """Whether a boundary pause (abort/wait) has closed admission."""
-        return self.scheduler.pause_state == PauseState.PAUSED_NEW
 
     def is_scheduler_paused(self) -> bool:
         """Return whether the scheduler is in any pause state."""
@@ -1643,7 +1641,10 @@ class EngineCoreProc(EngineCore):
 
     def _reject_add_while_paused(self, request: Request) -> bool:
         # A cleanup marker carries no work; it must still reach the KV connector.
-        if request.abort_immediately or not self.rejects_new_requests():
+        if (
+            request.abort_immediately
+            or self.scheduler.pause_state != PauseState.PAUSED_NEW
+        ):
             return False
         self._send_finish_outputs_to_client(
             [request.request_id], request.client_index, FinishReason.PAUSED
