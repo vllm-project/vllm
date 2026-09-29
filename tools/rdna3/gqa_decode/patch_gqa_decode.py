@@ -69,6 +69,27 @@ def _load():
     return _ext
 
 
+def _load_v7():
+    """WMMA kernel (pth_decode_int8_rdna3_wmma.cu), behind VLLM_RDNA3_ATTN_V7=18."""
+    if os.environ.get("VLLM_RDNA3_ATTN_V7") not in ("1", "18"):
+        return None
+    from torch.utils.cpp_extension import load
+
+    here = os.path.dirname(os.path.abspath(__file__))
+    src = os.environ.get("VLLM_RDNA3_ATTN_V7_SRC",
+                         os.path.join(here, "pth_decode_int8_rdna3_wmma.cu"))
+    build_dir = os.environ.get("VLLM_RDNA3_ATTN_V7_BUILD",
+                               os.path.join(here, "build_wmma"))
+    os.makedirs(build_dir, exist_ok=True)
+    e = load(name="pth_wmma", sources=[src], build_directory=build_dir,
+             extra_cuda_cflags=["-DUSE_ROCM", "-O3", "--offload-arch=gfx1100"],
+             verbose=False)
+    print("[gqa-decode] WMMA ACTIVO", file=sys.stderr, flush=True)
+    # cfg = splits * 1000 + minimum tokens per split: 240 splits = 5 resident
+    # blocks per WGP, 32 tokens (two WMMA tiles) at least per split.
+    return lambda *a: e.pth_decode_int8_v8(*a, 240032)
+
+
 def _heads_per_wave(num_q: int, num_q_heads: int, num_kv_heads: int, splits: int) -> int:
     """Largest head group that still leaves _WAVE_FLOOR waves."""
     ratio = num_q_heads // max(num_kv_heads, 1)
@@ -94,9 +115,29 @@ def apply() -> None:
         return
     ext = _load()
 
+    ext7 = _load_v7()
+    _v7_fallo = []
+
     def wrapper(out, query, key_cache, value_cache, k_scale_cache, v_scale_cache,
                 block_table, q_to_req, q_to_klen, mid_o_buf, sm_scale,
                 num_kv_splits):
+        if (ext7 is not None and query.dtype == torch.float16
+                and k_scale_cache.size(2) == 1 and query.size(2) == 256
+                and query.size(1) * 4 <= 32):
+            # WMMA: the k+1 rows of a request share one KV pass.
+            # A failure falls through to the GQA kernel below, not to the
+            # image kernel, and is reported once.
+            try:
+                return ext7(
+                    out, query, key_cache, value_cache, k_scale_cache,
+                    v_scale_cache, block_table, q_to_req, q_to_klen, mid_o_buf,
+                    sm_scale, num_kv_splits,
+                )
+            except Exception as e:  # noqa: BLE001
+                if not _v7_fallo:
+                    _v7_fallo.append(1)
+                    print("[gqa-decode] v7 FALLBACK a GQA:", e, file=sys.stderr,
+                          flush=True)
         try:
             hpw = _heads_per_wave(
                 query.size(0), query.size(1), k_scale_cache.size(2),
@@ -144,7 +185,12 @@ def apply_when_imported() -> None:
             if fullname != _TARGET:
                 return None
             sys.meta_path.remove(self)
-            spec = importlib.machinery.PathFinder.find_spec(fullname, path, target)
+            # Encadenar: preguntar al RESTO de sys.meta_path, no a PathFinder a secas.
+            # Varios parches enganchan este mismo modulo; con PathFinder el primero
+            # que responde se lo queda y los demas no se ejecutan nunca (asi perdimos
+            # el GQA desde el 23-sep sin una sola linea en el log).
+            import importlib.util
+            spec = importlib.util.find_spec(fullname)
             if spec is None or spec.loader is None:
                 return None
             inner = spec.loader.exec_module
