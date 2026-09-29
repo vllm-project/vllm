@@ -192,6 +192,10 @@ def test_flashinfer_cutedsl_fp4_moe(
         VllmConfig(parallel_config=ParallelConfig(pipeline_parallel_size=1))
     ):
         hidden_states = torch.randn((m, k), device="cuda", dtype=dtype) / 10
+        # Keep GEMM1 activation variance stable as K changes, so the fixed
+        # tolerance against the BF16 GEMM2 reference measures comparable FP4
+        # quantization error at each hidden width.
+        hidden_states *= (512 / k) ** 0.5
 
         w1_rows = 2 * n if activation.is_gated else n
         w1 = torch.randn((e, w1_rows, k), device="cuda", dtype=dtype) / 15
