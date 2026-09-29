@@ -1,8 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-DeepEP test utilities
-"""
+"""DeepEP test utilities."""
 
 import dataclasses
 import os
@@ -255,6 +253,7 @@ def make_deepep_v2_a2a(
         hidden=v2_args.hidden_size,
         num_topk=v2_args.num_topk,
         use_fp8_dispatch=v2_args.use_fp8_dispatch,
+        allow_hybrid_mode=False,
         explicitly_destroy=True,
     )
     return DeepEPV2PrepareAndFinalize(

@@ -51,6 +51,12 @@ pub fn print_results(
         "{:<40} {:<10.2}",
         "Request throughput (req/s):", metrics.request_throughput
     );
+    if is_pooling {
+        println!(
+            "{:<40} {:<10.2}",
+            "Input throughput (inputs/s):", metrics.input_sequence_throughput
+        );
+    }
     if metrics.request_goodput > 0.0 {
         println!(
             "{:<40} {:<10.2}",

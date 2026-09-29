@@ -117,6 +117,7 @@ echo "Building TorchCodec (MAX_JOBS=$MAX_JOBS)..."
 pip wheel . --no-build-isolation --no-deps -w "$BUILD_DIR/dist"
 
 # Install the built wheel
+# shellcheck disable=SC2012  # `ls` sorting is relied on here; TODO: switch to `find` in a follow-up cleanup PR
 BUILT_WHEEL=$(ls "$BUILD_DIR/dist"/torchcodec-*.whl 2>/dev/null | head -1)
 if [ -z "$BUILT_WHEEL" ]; then
     echo "Error: No wheel produced"

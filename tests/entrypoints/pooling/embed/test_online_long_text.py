@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Test cases for long text embedding with automatic chunking mechanism.
+"""Test cases for long text embedding with automatic chunking mechanism.
 
 This test suite validates vLLM's automatic chunking functionality for handling
 text inputs that exceed the model's maximum token length, specifically targeting
@@ -16,7 +15,6 @@ import pytest_asyncio
 
 from tests.utils import RemoteOpenAIServer
 from vllm.entrypoints.pooling.embed.protocol import EmbeddingResponse
-from vllm.platforms import current_platform
 
 
 def _generate_random_text(word_count: int) -> str:
@@ -225,10 +223,6 @@ def server_with_chunked_processing():
         "0.8",
     ]
 
-    # ROCm: Use Flex Attention to support encoder-only self-attention.
-    if current_platform.is_rocm():
-        args.extend(["--attention-backend", "FLEX_ATTENTION"])
-
     with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
         yield remote_server
 
@@ -247,7 +241,6 @@ async def test_long_text_embedding_1500_chars(
 ):
     """Test embedding processing for ~1500 character long text
     (~1028 tokens, exceeding 512 token limit)."""
-
     # Verify text length
     # Verify text has sufficient word count (approximately 1500 words)
     word_count = len(LONG_TEXT_1500_WORDS.split())
@@ -296,7 +289,6 @@ async def test_long_text_embedding_2500_chars(
 ):
     """Test embedding processing for ~2500 character long text
     (~2048 tokens, requiring multiple chunks)."""
-
     # Verify text length
     # Verify text has sufficient word count (approximately 2500 words)
     word_count = len(LONG_TEXT_2500_WORDS.split())
@@ -344,7 +336,6 @@ async def test_batch_long_text_embedding(
     client_with_chunked_processing: openai.AsyncOpenAI, model_name: str
 ):
     """Test batch long text embedding processing."""
-
     input_texts = [
         LONG_TEXT_1500_WORDS,
         LONG_TEXT_2500_WORDS,
@@ -390,7 +381,6 @@ async def test_chunked_vs_normal_consistency(
 ):
     """Test consistency between chunked and
     normal processing (using short text)."""
-
     # Use a short text within the 512 token limit
     short_text = (
         "Artificial intelligence technology is changing our world, "
@@ -429,7 +419,6 @@ async def test_chunked_processing_response_format(
     client_with_chunked_processing: openai.AsyncOpenAI, model_name: str
 ):
     """Test response format and structure during chunked processing."""
-
     # Test with long text to trigger chunking
     embedding_response = await client_with_chunked_processing.embeddings.create(
         model=model_name,

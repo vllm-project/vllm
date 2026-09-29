@@ -43,6 +43,7 @@ def distributed_run(fn, world_size, timeout=60):
         fn: Function to run in each process
         world_size: Number of processes to spawn
         timeout: Maximum time in seconds to wait for processes (default: 60)
+
     """
     number_of_processes = world_size
     processes = []
@@ -634,11 +635,9 @@ def test_acquire_read_releases_slot_when_reader_raises():
 
 
 def test_warning_logs(caplog_vllm):
-    """
-    Test that warning logs are emitted at VLLM_RINGBUFFER_WARNING_INTERVAL intervals
+    """Test that warning logs are emitted at VLLM_RINGBUFFER_WARNING_INTERVAL intervals
     when indefinite=False, and are not emitted when indefinite=True.
     """
-
     # Patch the warning log interval to every 1 ms during reads
     with mock.patch(
         "vllm.distributed.device_communicators.shm_broadcast.VLLM_RINGBUFFER_WARNING_INTERVAL",
@@ -694,14 +693,43 @@ def test_check_shm_free_space_raises_when_insufficient(tmp_path):
 
 
 def test_check_shm_free_space_passes_when_sufficient(tmp_path):
-    with mock.patch.object(
-        shm_broadcast.shutil, "disk_usage", return_value=_fake_disk_usage(512 << 20)
+    with (
+        mock.patch.object(
+            shm_broadcast.shutil,
+            "disk_usage",
+            return_value=_fake_disk_usage(512 << 20),
+        ),
+        mock.patch.object(shm_broadcast, "check_cgroup_memory_available"),
     ):
         check_shm_free_space(240 << 20, shm_path=str(tmp_path))
 
 
 def test_check_shm_free_space_skipped_when_path_missing(tmp_path):
-    check_shm_free_space(1 << 60, shm_path=str(tmp_path / "does-not-exist"))
+    with mock.patch.object(shm_broadcast, "check_cgroup_memory_available"):
+        check_shm_free_space(1 << 60, shm_path=str(tmp_path / "does-not-exist"))
+
+
+def test_check_shm_free_space_checks_cgroup(tmp_path):
+    with (
+        mock.patch.object(
+            shm_broadcast.shutil,
+            "disk_usage",
+            return_value=_fake_disk_usage(512 << 20),
+        ),
+        mock.patch.object(
+            shm_broadcast, "check_cgroup_memory_available"
+        ) as check_cgroup,
+    ):
+        check_shm_free_space(
+            240 << 20,
+            shm_path=str(tmp_path),
+            allocation_name="SHM mmap",
+        )
+
+    check_cgroup.assert_called_once_with(
+        240 << 20,
+        "SHM mmap",
+    )
 
 
 def test_shm_ring_buffer_creation_checks_free_space():
@@ -713,3 +741,68 @@ def test_shm_ring_buffer_creation_checks_free_space():
         pytest.raises(RuntimeError, match="Insufficient space"),
     ):
         ShmRingBuffer(n_reader=1, max_chunk_bytes=24 * 1024 * 1024, max_chunks=10)
+
+
+def test_remote_subscribe_addr_unique_concurrent_writers(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Writers bind the remote socket to port 0 (kernel-assigned), so
+    concurrent writers never race for the same probed port and the
+    announced address is connectable.
+
+    Pre-fix, the writer probed a port with get_open_port() and bound it
+    afterwards; pinning the probe to one free port makes every writer
+    bind the same port and fail deterministically on that code path,
+    while the late-binding implementation never consults the probe."""
+    from vllm.distributed.device_communicators import shm_broadcast
+
+    colliding_port = get_open_port()
+    monkeypatch.setattr(
+        shm_broadcast, "get_open_port", lambda: colliding_port, raising=False
+    )
+
+    n_writers = 32
+    queues: list[MessageQueue] = []
+    lock = threading.Lock()
+
+    def make_writer():
+        q = MessageQueue(
+            n_reader=1,
+            n_local_reader=0,
+            max_chunk_bytes=4096,
+            max_chunks=2,
+            connect_ip="127.0.0.1",
+        )
+        with lock:
+            queues.append(q)
+
+    threads = [threading.Thread(target=make_writer) for _ in range(n_writers)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert len(queues) == n_writers
+    addrs = [q.export_handle().remote_subscribe_addr for q in queues]
+    assert all(addr and addr.startswith("tcp://") for addr in addrs)
+    assert len(set(addrs)) == n_writers
+
+    writer = queues[0]
+    received = []
+
+    def reader_main():
+        reader = MessageQueue.create_from_handle(writer.export_handle(), rank=0)
+        reader.wait_until_ready()
+        received.append(reader.dequeue())
+        reader.remote_socket.close(linger=0)
+
+    reader_thread = threading.Thread(target=reader_main)
+    reader_thread.start()
+    writer.wait_until_ready()
+    writer.enqueue("ping")
+    reader_thread.join(timeout=30)
+    assert not reader_thread.is_alive()
+    assert received == ["ping"]
+
+    for q in queues:
+        q.remote_socket.close(linger=0)
