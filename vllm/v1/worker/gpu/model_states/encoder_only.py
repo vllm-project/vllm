@@ -213,6 +213,7 @@ class EncoderOnlyModelState(DefaultModelState):
             max_seq_len=max_seq_len,
             block_table_tensor=self._dummy_block_table[:num_reqs],
             slot_mapping=self._dummy_slot_mapping[:num_tokens],
+            is_dummy_batch=input_batch.is_dummy,
             seq_lens_cpu_upper_bound=input_batch.seq_lens_cpu_upper_bound[:num_reqs],
             positions=input_batch.positions,
         )

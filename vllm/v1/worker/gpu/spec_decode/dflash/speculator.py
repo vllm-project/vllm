@@ -493,18 +493,17 @@ class DFlashSpeculator(DraftModelSpeculator):
             self._precompute_context_kv(0, num_target_tokens, dummy_run)
 
         is_full_cudagraph = batch_desc.cg_mode == CUDAGraphMode.FULL
-        # During FULL cudagraph with a model that supports decode metadata updates,
-        # the metadata update is captured in the graph, and we can skip the full
-        # build below.
-        if not (is_full_cudagraph and self.supports_decode_metadata_update):
-            draft_attn_metadata = self._build_uniform_attn_metadata(
-                num_reqs=num_reqs,
-                batch_desc=batch_desc,
-                num_query_per_req=self.num_query_per_req,
-                seq_lens_cpu_upper_bound=input_batch.seq_lens_cpu_upper_bound,
-                step=self.num_query_per_req,
-                causal=self._group_causal,
-            )
+        # Rebuild the draft attention metadata even when replaying the FULL
+        # graph so that any attention metadata builder state is updated.
+        draft_attn_metadata = self._build_uniform_attn_metadata(
+            num_reqs=num_reqs,
+            batch_desc=batch_desc,
+            num_query_per_req=self.num_query_per_req,
+            seq_lens_cpu_upper_bound=input_batch.seq_lens_cpu_upper_bound,
+            step=self.num_query_per_req,
+            is_dummy=input_batch.is_dummy,
+            causal=self._group_causal,
+        )
 
         # DFlash processes all speculative tokens in one forward pass,
         # so the real token count is num_query_tokens.

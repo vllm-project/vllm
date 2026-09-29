@@ -1351,6 +1351,7 @@ def _grouping_config():
     return SimpleNamespace(
         scheduler_config=SimpleNamespace(disable_hybrid_kv_cache_manager=False),
         speculative_config=None,
+        parallel_config=SimpleNamespace(decode_context_parallel_size=1),
         cache_config=cache_config,
     )
 
@@ -1948,6 +1949,7 @@ def test_check_enough_kv_cache_memory_reserves_null_block():
 def _spec_decode_grouping_config(method="dspark", model_type=None):
     """Grouping config with an EAGLE-family speculative method enabled."""
     return SimpleNamespace(
+        parallel_config=SimpleNamespace(decode_context_parallel_size=1),
         scheduler_config=SimpleNamespace(disable_hybrid_kv_cache_manager=False),
         cache_config=SimpleNamespace(
             get_resolved_kv_cache_layout=lambda: SimpleNamespace(

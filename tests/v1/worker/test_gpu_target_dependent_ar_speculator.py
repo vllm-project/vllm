@@ -73,8 +73,10 @@ class _TextOnlyDraftModel(torch.nn.Module):
 
 
 @pytest.mark.parametrize("cg_mode", [CUDAGraphMode.NONE, CUDAGraphMode.FULL])
-def test_pcp_draft_metadata_keeps_graph_padding_in_decode(cg_mode):
+@pytest.mark.parametrize("is_dummy", [False, True])
+def test_pcp_draft_metadata_keeps_graph_padding_in_decode(cg_mode, is_dummy):
     def build(common_prefix_len, common_attn_metadata):
+        assert common_attn_metadata.is_dummy_batch is is_dummy
         return split_decodes_and_prefills(
             common_attn_metadata,
             decode_threshold=1,
@@ -116,6 +118,7 @@ def test_pcp_draft_metadata_keeps_graph_padding_in_decode(cg_mode):
         num_query_per_req=1,
         seq_lens_cpu_upper_bound=torch.tensor([10, 20], dtype=torch.int32),
         step=1,
+        is_dummy=is_dummy,
     )
     assert metadata["draft"] == (num_reqs_padded, 0, num_reqs_padded, 0)
 
@@ -449,6 +452,7 @@ def test_multi_step_decode_replays_captured_graph_as_expected(
         seq_lens_cpu_upper_bound=None,
         num_tokens_across_dp=None,
         num_speculative_steps=num_speculative_steps,
+        is_dummy=False,
     )
 
     assert generate_draft.call_count == expected_eager_calls
