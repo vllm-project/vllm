@@ -843,7 +843,7 @@ def test_abort_before_hit_uses_placeholder_then_later_hit_heals_removal(
     [event] = runner.connector_scheduler.take_events()
     assert isinstance(event, BlockRemoved)
     assert event.medium == MEDIUM_CPU
-    assert len(event.block_hashes) == 2
+    assert len(event.block_hashes) == 1
     assert key not in tracker._pending_event_metadata
 
 
@@ -902,8 +902,8 @@ def test_promotion_hit_precedes_stored_event_translation(
         if isinstance(event, BlockStored) and event.medium == MEDIUM_CPU
     ]
     assert len(events) == 1
-    assert len(events[0].block_hashes) == blocks_per_chunk
-    assert events[0].block_size == 4
+    assert len(events[0].block_hashes) == 1
+    assert events[0].block_size == 4 * blocks_per_chunk
     assert events[0].token_ids == token_ids
 
 
