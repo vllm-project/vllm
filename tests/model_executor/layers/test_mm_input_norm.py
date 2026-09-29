@@ -265,7 +265,7 @@ class TestFusedMMInputNormKernel:
 class TestFusedMMInputNormConstruction:
     """Weight/bias buffer semantics at init time."""
 
-    def test_compiled_encoder_enables_only_requested_input_norm(self):
+    def test_input_norm_is_always_enabled(self):
         config = VllmConfig(
             compilation_config=CompilationConfig(
                 mode=CompilationMode.VLLM_COMPILE,
@@ -275,14 +275,12 @@ class TestFusedMMInputNormConstruction:
         )
         with set_current_vllm_config(config):
             FusedMMInputNorm(_RGB_MEAN, _RGB_STD, _RGB_RESCALE)
-            FusedMMInputNorm(_RGB_MEAN, _RGB_STD, _RGB_RESCALE, enforce_enable=True)
             assert (
                 config.compilation_config.enabled_custom_ops["fused_mm_input_norm"] == 1
             )
-            assert (
-                config.compilation_config.disabled_custom_ops["fused_mm_input_norm"]
-                == 1
-            )
+            assert not config.compilation_config.disabled_custom_ops[
+                "fused_mm_input_norm"
+            ]
 
     def test_identity_config_buffers(self):
         """Numerically identity parameters still build plain weight/bias
