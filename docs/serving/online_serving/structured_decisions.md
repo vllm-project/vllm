@@ -146,6 +146,7 @@ same prompt.
 | `instructions` | optional context placed ahead of the questions |
 | `decision_template` | a Jinja decision template for this request, used only with `--trust-request-chat-template` |
 | `chat_template_kwargs` | passed to the chat template, for example `{"enable_thinking": false}` |
+| `seed` | optional, mixed into each question's label shuffle; average the answers over several seeds to cancel label bias |
 
 A question with any field other than `type`, `instructions` and `criteria` is
 rejected with a 400.

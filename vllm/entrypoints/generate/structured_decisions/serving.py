@@ -57,6 +57,7 @@ def parse_questions(
                 spec.criteria,
                 alphabet,
                 limits.max_options,
+                request.seed,
             )
         )
     return questions

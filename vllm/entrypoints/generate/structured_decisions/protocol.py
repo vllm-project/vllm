@@ -35,6 +35,12 @@ class StructuredDecisionRequest(OpenAIBaseModel):
         "server to run with --trust-request-chat-template.",
     )
     chat_template_kwargs: dict[str, Any] | None = None
+    seed: int | None = Field(
+        default=None,
+        description="Picks each question's label draw. Reading a question "
+        "under several seeds and averaging the answers cancels the model's "
+        "preference for particular labels.",
+    )
     priority: int = Field(default=0, ge=-(2**63), le=2**63 - 1)
     request_id: str = Field(default_factory=random_uuid)
 

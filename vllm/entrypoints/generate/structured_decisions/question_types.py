@@ -78,10 +78,12 @@ def build_question(
     criteria: Any,
     alphabet: tuple[str, ...],
     max_options: int,
+    seed: int | None = None,
 ) -> Question:
     """Builds a question whose labels come from ``alphabet``, shortest first.
-    Labels of one length are shuffled with a seed from the question's content,
-    so a repeated question gets the same labels and the same prompt tokens.
+    Labels of one length are shuffled with a seed from ``seed`` and the
+    question's content, so a repeated question gets the same labels and the
+    same prompt tokens.
     Longer labels, such as two-letter codes, carry more meaning of their own,
     so a question uses them only when it runs out of shorter ones."""
     if not qid or ":" in qid or "\n" in qid:
@@ -104,7 +106,13 @@ def build_question(
         )
     if not isinstance(instructions, str):
         instructions = "" if instructions is None else str(instructions)
-    content = [qid, type_name, instructions, [(o.name, o.description) for o in options]]
+    content = [
+        seed,
+        qid,
+        type_name,
+        instructions,
+        [(o.name, o.description) for o in options],
+    ]
     digest = hashlib.sha256(json.dumps(content).encode()).digest()
     rng = random.Random(digest)
     shuffled = []

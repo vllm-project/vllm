@@ -34,6 +34,16 @@ def test_choice_labels_and_options():
     assert len(set(q.labels)) == 3 and set(q.labels) <= set(LETTERS)
     assert choice().labels == q.labels
     assert choice(instructions="Which queue?").labels != q.labels
+    seeded = build_question(
+        "bucket",
+        "choice",
+        "Which team?",
+        {"billing": "money", "outage": None, "other": None},
+        LETTERS,
+        128,
+        seed=7,
+    )
+    assert seeded.labels != q.labels
     wide = build_question(
         "q",
         "choice",
