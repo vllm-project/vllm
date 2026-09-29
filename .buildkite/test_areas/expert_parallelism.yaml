@@ -16,9 +16,9 @@ steps:
   - pytest -v -s distributed/test_eplb_utils.py
   mirror:
     amd:
-      label: ":amd: (MI300) EPLB Algorithm"
+      label: ":amd: (MI355 DPX) EPLB Algorithm"
       dind: false
-      device: mi300_1
+      device: mi355_dpx
       timeout_in_minutes: 30
       depends_on:
       - image-build-amd
@@ -64,7 +64,7 @@ steps:
   - vllm/distributed/
   - "!vllm/distributed/kv_transfer/"
   - vllm/engine/
-  - vllm/executor/
+  - vllm/v1/executor/
   - vllm/compilation/
   - tests/distributed/
   commands:
