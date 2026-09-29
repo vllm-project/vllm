@@ -1,8 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-
-"""
-Server CPUs usually need several cores to saturate copy bandwidth, so we
+# ruff: noqa: E402
+"""Server CPUs usually need several cores to saturate copy bandwidth, so we
 use a numba ``parallel=True`` kernel that copies independent segments
 concurrently. Desktop CPUs already saturate with a single core, so the
 multi-threading heuristic stays off there.
@@ -20,12 +19,10 @@ Examples:
     >>> memcpy_mt(src, dst, 4096)
     >>> np.array_equal(src, dst)
     True
+
 """
 
 import os
-from typing import Optional
-
-import numpy as np
 
 _GiB_BYTES = 1 << 30
 
@@ -52,6 +49,8 @@ try:
 except ImportError:
     _HAS_NUMBA = False
     _MAX_NUMBA_THREADS = 1
+
+import numpy as np
 
 from vllm.logger import init_logger
 
@@ -80,6 +79,7 @@ _NUMPY_COPY_MAX_BYTES = 256 * 1024
 # ---------------------------------------------------------------------------
 # Topology detection (cheap, done once at import)
 # ---------------------------------------------------------------------------
+
 
 def _detect_logical_cores() -> int:
     try:
@@ -110,7 +110,7 @@ def _detect_numa_nodes() -> int:
     return max(count, 1)
 
 
-def _read_cgroup_memory_limit() -> Optional[int]:
+def _read_cgroup_memory_limit() -> int | None:
     """Best-effort cgroup v1/v2 memory limit in bytes."""
     candidates = (
         "/sys/fs/cgroup/memory.max",  # cgroup v2
@@ -156,6 +156,7 @@ def _detect_memory_bytes() -> int:
 # Heuristic: enable multi-threaded copy?
 # ---------------------------------------------------------------------------
 
+
 def _auto_detect_mt(cores: int, numa: int, mem_bytes: int) -> bool:
     # Multiple NUMA nodes: almost certainly a server; a single thread cannot
     # saturate cross-node bandwidth.
@@ -167,9 +168,7 @@ def _auto_detect_mt(cores: int, numa: int, mem_bytes: int) -> bool:
         return True
     # Huge memory: a host with >500 GiB RAM is essentially always a
     # multi-channel server, even if NUMA is disabled or cores are capped.
-    if mem_bytes > 500 * _GiB_BYTES:
-        return True
-    return False
+    return mem_bytes > 500 * _GiB_BYTES
 
 
 _CORES = _detect_logical_cores()
@@ -178,15 +177,9 @@ _MEM = _detect_memory_bytes()
 
 # Without numba there is no thread pool to drive; always single-threaded.
 # Also respect NUMBA_NUM_THREADS=1.
-_USE_MT = (
-    _HAS_NUMBA
-    and _MAX_NUMBA_THREADS > 1
-    and _auto_detect_mt(_CORES, _NUMA, _MEM)
-)
+_USE_MT = _HAS_NUMBA and _MAX_NUMBA_THREADS > 1 and _auto_detect_mt(_CORES, _NUMA, _MEM)
 
-_COPY_THREADS = (
-    min(_CORES, _MAX_COPY_THREADS, _MAX_NUMBA_THREADS) if _USE_MT else 1
-)
+_COPY_THREADS = min(_CORES, _MAX_COPY_THREADS, _MAX_NUMBA_THREADS) if _USE_MT else 1
 
 
 def use_multithread() -> bool:
@@ -255,6 +248,7 @@ if _HAS_NUMBA:
 # Thread dispatch
 # ---------------------------------------------------------------------------
 
+
 def _dispatch(n_threads: int) -> int:
     """Set the numba thread-pool size; return the previous value."""
     if not _HAS_NUMBA:
@@ -272,14 +266,13 @@ def _dispatch(n_threads: int) -> int:
 # Internal helpers
 # ---------------------------------------------------------------------------
 
+
 def _flatten_u8(arr: np.ndarray, *, require_contiguous: bool) -> np.ndarray:
     """Return a 1-D ``uint8`` view of ``arr``."""
     a = np.asarray(arr)
     if not a.flags.c_contiguous:
         if require_contiguous:
-            raise ValueError(
-                "dst must be C-contiguous for zero-copy flat byte access"
-            )
+            raise ValueError("dst must be C-contiguous for zero-copy flat byte access")
         a = np.ascontiguousarray(a)
     if a.dtype == np.uint8 and a.ndim == 1:
         return a
@@ -290,6 +283,7 @@ def _flatten_u8(arr: np.ndarray, *, require_contiguous: bool) -> np.ndarray:
 # Public API
 # ---------------------------------------------------------------------------
 
+
 def memcpy_mt(
     src: np.ndarray,
     dst: np.ndarray,
@@ -299,13 +293,9 @@ def memcpy_mt(
     max_copy_threads: int = _MAX_COPY_THREADS,
 ) -> None:
     if sub_chunk_bytes <= 0:
-        raise ValueError(
-            f"sub_chunk_bytes must be positive, got {sub_chunk_bytes}"
-        )
+        raise ValueError(f"sub_chunk_bytes must be positive, got {sub_chunk_bytes}")
     if max_copy_threads < 1:
-        raise ValueError(
-            f"max_copy_threads must be >= 1, got {max_copy_threads}"
-        )
+        raise ValueError(f"max_copy_threads must be >= 1, got {max_copy_threads}")
 
     size = int(size)
     if size <= 0:

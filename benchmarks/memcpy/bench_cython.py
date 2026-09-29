@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
-"""
-Benchmark CPU block copy bandwidth with random block indices (Cython + OpenMP).
+"""Benchmark CPU block copy bandwidth with random block indices (Cython + OpenMP).
 
 Mirrors ``bench.py`` (the memcpy_utils benchmark) *exactly*: each Cython
 call copies ONE contiguous block via a small OpenMP ``prange`` over the
@@ -33,11 +32,10 @@ import argparse
 import sys
 import tempfile
 import time
+from collections.abc import Callable
 from pathlib import Path
-from typing import Callable, List
 
 import numpy as np
-
 
 # ---------------------------------------------------------------------------
 # Cython source
@@ -135,18 +133,20 @@ def build_module(verbose: bool = True):
     for flags in flags_list:
         try:
             ext = Extension(extra_compile_args=flags, **common)
-            dist = Distribution({
-                "ext_modules": cythonize(
-                    [ext],
-                    compiler_directives={
-                        "boundscheck": False,
-                        "wraparound": False,
-                        "cdivision": True,
-                        "language_level": 3,
-                    },
-                    quiet=not verbose,
-                )
-            })
+            dist = Distribution(
+                {
+                    "ext_modules": cythonize(
+                        [ext],
+                        compiler_directives={
+                            "boundscheck": False,
+                            "wraparound": False,
+                            "cdivision": True,
+                            "language_level": 3,
+                        },
+                        quiet=not verbose,
+                    )
+                }
+            )
             cmd = dist.get_command_obj("build_ext")
             cmd.inplace = 1
             cmd.build_lib = str(build_dir)
@@ -178,8 +178,8 @@ def parse_size(text: str) -> int:
         "mib": 1 << 20,
         "gib": 1 << 30,
         "kb": 1000,
-        "mb": 1000 ** 2,
-        "gb": 1000 ** 3,
+        "mb": 1000**2,
+        "gb": 1000**3,
     }
     low = text.lower()
     for suf, mul in suffixes.items():
@@ -201,7 +201,7 @@ def format_size(num_bytes: float, decimal_places: int = 2) -> str:
     return f"{size:.{decimal_places}f} {units[e]}"
 
 
-def print_row(cols: List[str], widths: List[int]) -> None:
+def print_row(cols: list[str], widths: list[int]) -> None:
     print(" | ".join(f"{c:>{w}}" for c, w in zip(cols, widths)))
 
 
@@ -236,12 +236,12 @@ def bench_call(
     """Return the mean bandwidth in GiB/s over ``n_runs`` timed runs."""
     for _ in range(warmup):
         fn()
-    samples: List[float] = []
+    samples: list[float] = []
     for _ in range(n_runs):
         t0 = time.perf_counter()
         fn()
         dt = time.perf_counter() - t0
-        samples.append(bytes_per_run / dt / (1024 ** 3))
+        samples.append(bytes_per_run / dt / (1024**3))
     return sum(samples) / len(samples)
 
 
@@ -256,10 +256,8 @@ def fixed_threads(args) -> int:
     return min(args.threads_list, key=lambda t: abs(t - 8))
 
 
-def warmup_kernel(module, src, dst, off_s, off_d, block, sub_chunk,
-                  n_threads) -> None:
-    """
-    Compile the Cython module and prime the OMP thread pool.
+def warmup_kernel(module, src, dst, off_s, off_d, block, sub_chunk, n_threads) -> None:
+    """Compile the Cython module and prime the OMP thread pool.
 
     Sets the OMP pool size here (not per call) so that timed runs do not
     pay for ``omp_set_num_threads`` — matching ``memcpy_utils`` where the
@@ -291,8 +289,7 @@ def sweep_threads(module, args) -> None:
     idx_s, idx_d = make_indices(n_blocks, iters)
     off_s, off_d = make_offsets(idx_s, idx_d, block)
 
-    threads_list = ([args.threads] if args.threads is not None
-                    else args.threads_list)
+    threads_list = [args.threads] if args.threads is not None else args.threads_list
     warmup_kernel(module, src, dst, off_s, off_d, block, sc, threads_list[0])
 
     bytes_per_run = iters * block
@@ -360,12 +357,11 @@ def sweep_block(module, args) -> None:
         warmup_kernel(module, src, dst, off_s, off_d, block, sc, T)
         bytes_per_run = run_iters * block
 
-        def fn(off_s=off_s, off_d=off_d, block=block,
-               iters=run_iters) -> None:
+        def fn(off_s=off_s, off_d=off_d, block=block, iters=run_iters) -> None:
             run_window(module, src, dst, off_s, off_d, block, sc, iters)
 
         mean = bench_call(fn, bytes_per_run, args.runs, warmup=args.warmup)
-        us_per_launch = 1e6 * (bytes_per_run / (mean * (1024 ** 3))) / run_iters
+        us_per_launch = 1e6 * (bytes_per_run / (mean * (1024**3))) / run_iters
 
         print_row(
             [
@@ -443,44 +439,88 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description="Cython + OpenMP per-block copy benchmark (memcpy only)",
     )
-    parser.add_argument("--sweep",
-                        choices=["threads", "block", "subchunk", "all"],
-                        default="all",
-                        help="which dimension to sweep (default: all)")
+    parser.add_argument(
+        "--sweep",
+        choices=["threads", "block", "subchunk", "all"],
+        default="all",
+        help="which dimension to sweep (default: all)",
+    )
 
-    parser.add_argument("--size", type=parse_size, default=4 * (1 << 30),
-                        help="total buffer size (default 4GiB)")
-    parser.add_argument("--block", type=parse_size, default=1 << 20,
-                        help="block size for threads/subchunk sweeps (default 1MiB)")
-    parser.add_argument("--sub-chunk", type=parse_size, default=8 << 10,
-                        help="sub-chunk size for threads/block sweeps (default 8KiB)")
-    parser.add_argument("--iters", type=int, default=2048,
-                        help="number of random blocks per timed window (default 2048)")
+    parser.add_argument(
+        "--size",
+        type=parse_size,
+        default=4 * (1 << 30),
+        help="total buffer size (default 4GiB)",
+    )
+    parser.add_argument(
+        "--block",
+        type=parse_size,
+        default=1 << 20,
+        help="block size for threads/subchunk sweeps (default 1MiB)",
+    )
+    parser.add_argument(
+        "--sub-chunk",
+        type=parse_size,
+        default=8 << 10,
+        help="sub-chunk size for threads/block sweeps (default 8KiB)",
+    )
+    parser.add_argument(
+        "--iters",
+        type=int,
+        default=2048,
+        help="number of random blocks per timed window (default 2048)",
+    )
 
-    parser.add_argument("--threads", type=int, default=None,
-                        help="single-mode: one thread count to test; also used "
-                             "as the fixed thread count for non-thread sweeps")
-    parser.add_argument("--threads-list", type=int, nargs="+",
-                        default=[1, 2, 4, 8, 12, 16, 24, 32],
-                        help="multi-mode: thread counts to sweep")
+    parser.add_argument(
+        "--threads",
+        type=int,
+        default=None,
+        help="single-mode: one thread count to test; also used "
+        "as the fixed thread count for non-thread sweeps",
+    )
+    parser.add_argument(
+        "--threads-list",
+        type=int,
+        nargs="+",
+        default=[1, 2, 4, 8, 12, 16, 24, 32],
+        help="multi-mode: thread counts to sweep",
+    )
 
-    parser.add_argument("--blocks", type=parse_size, nargs="+",
-                        default=[4 << 10, 16 << 10, 64 << 10, 256 << 10,
-                                 1 << 20, 4 << 20, 16 << 20],
-                        help="block sizes to sweep")
+    parser.add_argument(
+        "--blocks",
+        type=parse_size,
+        nargs="+",
+        default=[4 << 10, 16 << 10, 64 << 10, 256 << 10, 1 << 20, 4 << 20, 16 << 20],
+        help="block sizes to sweep",
+    )
 
-    parser.add_argument("--sub-chunks", type=parse_size, nargs="+",
-                        default=[1 << 10, 2 << 10, 4 << 10, 8 << 10,
-                                 16 << 10, 32 << 10, 64 << 10, 1 << 20],
-                        help="sub-chunk sizes to sweep")
+    parser.add_argument(
+        "--sub-chunks",
+        type=parse_size,
+        nargs="+",
+        default=[
+            1 << 10,
+            2 << 10,
+            4 << 10,
+            8 << 10,
+            16 << 10,
+            32 << 10,
+            64 << 10,
+            1 << 20,
+        ],
+        help="sub-chunk sizes to sweep",
+    )
 
-    parser.add_argument("--runs", type=int, default=5,
-                        help="timed runs per configuration (default 5)")
-    parser.add_argument("--warmup", type=int, default=1,
-                        help="warm-up runs before timing (default 1)")
+    parser.add_argument(
+        "--runs", type=int, default=5, help="timed runs per configuration (default 5)"
+    )
+    parser.add_argument(
+        "--warmup", type=int, default=1, help="warm-up runs before timing (default 1)"
+    )
     parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument("--quiet-build", action="store_true",
-                        help="suppress Cython build output")
+    parser.add_argument(
+        "--quiet-build", action="store_true", help="suppress Cython build output"
+    )
     args = parser.parse_args()
 
     if args.seed is not None:
@@ -497,8 +537,10 @@ def main() -> None:
         max_t = max(args.threads_list)
         omp_max = module.get_omp_max_threads()
         if max_t > omp_max:
-            print(f"[warn] requested up to {max_t} threads but "
-                  f"OMP max is {omp_max}; runs will be clamped by OpenMP.")
+            print(
+                f"[warn] requested up to {max_t} threads but "
+                f"OMP max is {omp_max}; runs will be clamped by OpenMP."
+            )
             print()
 
     if args.sweep in ("threads", "all"):

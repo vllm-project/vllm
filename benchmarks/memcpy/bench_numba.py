@@ -27,16 +27,16 @@ Notes on the measurement setup:
 
 import argparse
 import time
-from typing import Callable, List
+from collections.abc import Callable
 
 import numpy as np
 
 from vllm.utils import memcpy_utils as mod
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def parse_size(text: str) -> int:
     """Parse ``'4GiB'`` / ``'512MiB'`` / ``'1073741824'`` -> bytes."""
@@ -46,8 +46,8 @@ def parse_size(text: str) -> int:
         "mib": 1 << 20,
         "gib": 1 << 30,
         "kb": 1000,
-        "mb": 1000 ** 2,
-        "gb": 1000 ** 3,
+        "mb": 1000**2,
+        "gb": 1000**3,
     }
     low = text.lower()
     for suf, mul in suffixes.items():
@@ -78,16 +78,16 @@ def bench(
     """Return the mean bandwidth in GiB/s over ``n_runs`` timed runs."""
     for _ in range(warmup):
         fn()
-    samples: List[float] = []
+    samples: list[float] = []
     for _ in range(n_runs):
         t0 = time.perf_counter()
         fn()
         dt = time.perf_counter() - t0
-        samples.append(bytes_per_run / dt / (1024 ** 3))
+        samples.append(bytes_per_run / dt / (1024**3))
     return sum(samples) / len(samples)
 
 
-def print_row(cols: List[str], widths: List[int]) -> None:
+def print_row(cols: list[str], widths: list[int]) -> None:
     print(" | ".join(f"{c:>{w}}" for c, w in zip(cols, widths)))
 
 
@@ -98,9 +98,11 @@ def print_row(cols: List[str], widths: List[int]) -> None:
 kernel = mod._copy_kernel
 
 if mod._HAS_NUMBA:
+
     def set_threads(n: int) -> None:
         mod.set_num_threads(min(n, mod._MAX_NUMBA_THREADS))
 else:
+
     def set_threads(n: int) -> None:
         pass
 
@@ -108,6 +110,7 @@ else:
 # ---------------------------------------------------------------------------
 # Buffers and index arrays
 # ---------------------------------------------------------------------------
+
 
 def make_buffers(size: int):
     src = np.arange(size, dtype=np.uint8)
@@ -128,8 +131,7 @@ def make_offsets(idx_s, idx_d, block):
 
 
 def warmup_kernel(src, dst, off_s, off_d, block, sub_chunk, n_threads) -> None:
-    """
-    Trigger the lazy JIT compile so it is not counted in any timing.
+    """Trigger the lazy JIT compile so it is not counted in any timing.
 
     ``n_threads`` must match the thread count the timed runs will use.
     Numba's compilation is thread-count agnostic, but resetting the pool
@@ -139,9 +141,12 @@ def warmup_kernel(src, dst, off_s, off_d, block, sub_chunk, n_threads) -> None:
     if not mod._HAS_NUMBA:
         return
     set_threads(n_threads)
-    kernel(src[off_s[0]:off_s[0] + block],
-           dst[off_d[0]:off_d[0] + block],
-           block, sub_chunk)
+    kernel(
+        src[off_s[0] : off_s[0] + block],
+        dst[off_d[0] : off_d[0] + block],
+        block,
+        sub_chunk,
+    )
 
 
 def run_kernel_window(src, dst, off_s, off_d, block, sub_chunk, iters) -> None:
@@ -150,7 +155,7 @@ def run_kernel_window(src, dst, off_s, off_d, block, sub_chunk, iters) -> None:
     for i in range(iters):
         s = off_s[i]
         d = off_d[i]
-        k(src[s:s + block], dst[d:d + block], block, sub_chunk)
+        k(src[s : s + block], dst[d : d + block], block, sub_chunk)
 
 
 def run_numpy_window(src, dst, off_s, off_d, block, iters) -> None:
@@ -158,24 +163,28 @@ def run_numpy_window(src, dst, off_s, off_d, block, iters) -> None:
     for i in range(iters):
         s = off_s[i]
         d = off_d[i]
-        dst[d:d + block] = src[s:s + block]
+        dst[d : d + block] = src[s : s + block]
 
 
-def run_memcpy_mt_window(src, dst, off_s, off_d, block, iters,
-                         max_copy_threads, sub_chunk) -> None:
+def run_memcpy_mt_window(
+    src, dst, off_s, off_d, block, iters, max_copy_threads, sub_chunk
+) -> None:
     """Same window but through the public ``memcpy_mt`` wrapper."""
     fn = mod.memcpy_mt
     for i in range(iters):
         s = off_s[i]
         d = off_d[i]
-        fn(src[s:s + block], dst[d:d + block], block,
-           sub_chunk_bytes=sub_chunk,
-           max_copy_threads=max_copy_threads)
+        fn(
+            src[s : s + block],
+            dst[d : d + block],
+            block,
+            sub_chunk_bytes=sub_chunk,
+            max_copy_threads=max_copy_threads,
+        )
 
 
 def fixed_threads(args) -> int:
-    """
-    Thread count used by sweeps that do not vary the thread pool size.
+    """Thread count used by sweeps that do not vary the thread pool size.
 
     Prefer the tuned default from ``memcpy_utils`` (``_MAX_COPY_THREADS``);
     if the user passed ``--threads``, honour that instead. The idea is to
@@ -184,13 +193,13 @@ def fixed_threads(args) -> int:
     """
     if args.threads is not None:
         return args.threads
-    return min(args.threads_list,
-               key=lambda t: abs(t - mod._MAX_COPY_THREADS))
+    return min(args.threads_list, key=lambda t: abs(t - mod._MAX_COPY_THREADS))
 
 
 # ---------------------------------------------------------------------------
 # Sweep: thread count
 # ---------------------------------------------------------------------------
+
 
 def sweep_threads(args) -> None:
     """Vary the numba thread-pool size at fixed block and sub-chunk."""
@@ -205,8 +214,7 @@ def sweep_threads(args) -> None:
     idx_s, idx_d = make_indices(n_blocks, iters)
     off_s, off_d = make_offsets(idx_s, idx_d, block)
 
-    threads_list = ([args.threads] if args.threads is not None
-                    else args.threads_list)
+    threads_list = [args.threads] if args.threads is not None else args.threads_list
     warmup_kernel(src, dst, off_s, off_d, block, sc, threads_list[0])
 
     bytes_per_run = iters * block
@@ -240,6 +248,7 @@ def sweep_threads(args) -> None:
 # ---------------------------------------------------------------------------
 # Sweep: block size
 # ---------------------------------------------------------------------------
+
 
 def sweep_block(args) -> None:
     """Vary the block size at fixed thread count and sub-chunk.
@@ -281,12 +290,11 @@ def sweep_block(args) -> None:
         warmup_kernel(src, dst, off_s, off_d, block, sc, T)
         bytes_per_run = run_iters * block
 
-        def fn(off_s=off_s, off_d=off_d, block=block,
-               iters=run_iters) -> None:
+        def fn(off_s=off_s, off_d=off_d, block=block, iters=run_iters) -> None:
             run_kernel_window(src, dst, off_s, off_d, block, sc, iters)
 
         mean = bench(fn, bytes_per_run, args.runs, warmup=args.warmup)
-        us_per_launch = 1e6 * (bytes_per_run / (mean * (1024 ** 3))) / run_iters
+        us_per_launch = 1e6 * (bytes_per_run / (mean * (1024**3))) / run_iters
 
         print_row(
             [
@@ -304,6 +312,7 @@ def sweep_block(args) -> None:
 # ---------------------------------------------------------------------------
 # Sweep: sub-chunk size
 # ---------------------------------------------------------------------------
+
 
 def sweep_subchunk(args) -> None:
     """Vary the sub-chunk size at fixed thread count and block size.
@@ -369,9 +378,9 @@ def sweep_subchunk(args) -> None:
 # Sweep: small blocks — numpy vs numba kernel
 # ---------------------------------------------------------------------------
 
+
 def sweep_small(args) -> None:
-    """
-    Compare numpy slice assignment against ``_copy_kernel`` on small blocks.
+    """Compare numpy slice assignment against ``_copy_kernel`` on small blocks.
 
     ``memcpy_mt`` short-circuits to numpy when ``size <= sub_chunk_bytes``
     (8 KiB by default). This sweep checks whether that threshold should be
@@ -411,12 +420,12 @@ def sweep_small(args) -> None:
         eff_sc = min(args.sub_chunk, block)
         warmup_kernel(src, dst, off_s, off_d, block, eff_sc, T)
 
-        def fn_np(off_s=off_s, off_d=off_d, block=block,
-                  iters=run_iters) -> None:
+        def fn_np(off_s=off_s, off_d=off_d, block=block, iters=run_iters) -> None:
             run_numpy_window(src, dst, off_s, off_d, block, iters)
 
-        def fn_nb(off_s=off_s, off_d=off_d, block=block,
-                  iters=run_iters, eff_sc=eff_sc) -> None:
+        def fn_nb(
+            off_s=off_s, off_d=off_d, block=block, iters=run_iters, eff_sc=eff_sc
+        ) -> None:
             run_kernel_window(src, dst, off_s, off_d, block, eff_sc, iters)
 
         np_bw = bench(fn_np, bytes_per_run, args.runs, warmup=args.warmup)
@@ -439,9 +448,9 @@ def sweep_small(args) -> None:
 # Sweep: end-to-end memcpy_mt
 # ---------------------------------------------------------------------------
 
+
 def sweep_memcpy(args) -> None:
-    """
-    End-to-end ``memcpy_mt`` across block sizes.
+    """End-to-end ``memcpy_mt`` across block sizes.
 
     Unlike the ``small`` sweep this goes through the public wrapper, so
     it includes ``_flatten_u8``, argument validation, and the two
@@ -480,11 +489,11 @@ def sweep_memcpy(args) -> None:
         bytes_per_run = run_iters * block
 
         # Warm up the numpy short-circuit and the numba kernel once.
-        mod.memcpy_mt(src[:block], dst[:block], block,
-                      sub_chunk_bytes=sc, max_copy_threads=T)
+        mod.memcpy_mt(
+            src[:block], dst[:block], block, sub_chunk_bytes=sc, max_copy_threads=T
+        )
 
-        def fn(off_s=off_s, off_d=off_d, block=block,
-               iters=run_iters) -> None:
+        def fn(off_s=off_s, off_d=off_d, block=block, iters=run_iters) -> None:
             run_memcpy_mt_window(src, dst, off_s, off_d, block, iters, T, sc)
 
         mean = bench(fn, bytes_per_run, args.runs, warmup=args.warmup)
@@ -493,7 +502,7 @@ def sweep_memcpy(args) -> None:
             [
                 format_size(block),
                 f"{mean:.2f}",
-                f"{mean * (1024 ** 3) / 1e9:.2f}",
+                f"{mean * (1024**3) / 1e9:.2f}",
             ],
             widths,
         )
@@ -503,6 +512,7 @@ def sweep_memcpy(args) -> None:
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
+
 
 def main() -> None:
     parser = argparse.ArgumentParser(
@@ -515,43 +525,87 @@ def main() -> None:
         help="which dimension to sweep (default: all)",
     )
 
-    parser.add_argument("--size", type=parse_size, default=4 * (1 << 30),
-                        help="total buffer size (default 4GiB)")
-    parser.add_argument("--block", type=parse_size, default=1 << 20,
-                        help="block size for threads/subchunk sweeps (default 1MiB)")
-    parser.add_argument("--sub-chunk", type=parse_size, default=8 << 10,
-                        help="sub-chunk size for threads/block sweeps (default 8KiB)")
-    parser.add_argument("--iters", type=int, default=2048,
-                        help="number of random blocks per timed window (default 2048)")
+    parser.add_argument(
+        "--size",
+        type=parse_size,
+        default=4 * (1 << 30),
+        help="total buffer size (default 4GiB)",
+    )
+    parser.add_argument(
+        "--block",
+        type=parse_size,
+        default=1 << 20,
+        help="block size for threads/subchunk sweeps (default 1MiB)",
+    )
+    parser.add_argument(
+        "--sub-chunk",
+        type=parse_size,
+        default=8 << 10,
+        help="sub-chunk size for threads/block sweeps (default 8KiB)",
+    )
+    parser.add_argument(
+        "--iters",
+        type=int,
+        default=2048,
+        help="number of random blocks per timed window (default 2048)",
+    )
 
-    parser.add_argument("--threads", type=int, default=None,
-                        help="single-mode: one thread count to test; also used "
-                             "as the fixed thread count for non-thread sweeps")
-    parser.add_argument("--threads-list", type=int, nargs="+",
-                        default=[1, 2, 4, 8, 12, 16, 24, 32],
-                        help="multi-mode: thread counts to sweep; the entry "
-                             "closest to _MAX_COPY_THREADS is used as the "
-                             "default for non-thread sweeps")
+    parser.add_argument(
+        "--threads",
+        type=int,
+        default=None,
+        help="single-mode: one thread count to test; also used "
+        "as the fixed thread count for non-thread sweeps",
+    )
+    parser.add_argument(
+        "--threads-list",
+        type=int,
+        nargs="+",
+        default=[1, 2, 4, 8, 12, 16, 24, 32],
+        help="multi-mode: thread counts to sweep; the entry "
+        "closest to _MAX_COPY_THREADS is used as the "
+        "default for non-thread sweeps",
+    )
 
-    parser.add_argument("--blocks", type=parse_size, nargs="+",
-                        default=[4 << 10, 16 << 10, 64 << 10, 256 << 10,
-                                 1 << 20, 4 << 20, 16 << 20],
-                        help="block sizes for block/memcpy sweeps")
+    parser.add_argument(
+        "--blocks",
+        type=parse_size,
+        nargs="+",
+        default=[4 << 10, 16 << 10, 64 << 10, 256 << 10, 1 << 20, 4 << 20, 16 << 20],
+        help="block sizes for block/memcpy sweeps",
+    )
 
-    parser.add_argument("--sub-chunks", type=parse_size, nargs="+",
-                        default=[1 << 10, 2 << 10, 4 << 10, 8 << 10,
-                                 16 << 10, 32 << 10, 64 << 10, 1 << 20],
-                        help="sub-chunk sizes for the subchunk sweep")
+    parser.add_argument(
+        "--sub-chunks",
+        type=parse_size,
+        nargs="+",
+        default=[
+            1 << 10,
+            2 << 10,
+            4 << 10,
+            8 << 10,
+            16 << 10,
+            32 << 10,
+            64 << 10,
+            1 << 20,
+        ],
+        help="sub-chunk sizes for the subchunk sweep",
+    )
 
-    parser.add_argument("--small-blocks", type=parse_size, nargs="+",
-                        default=[1 << 10, 4 << 10, 16 << 10, 64 << 10,
-                                 256 << 10, 1 << 20],
-                        help="block sizes for the numpy-vs-numba sweep")
+    parser.add_argument(
+        "--small-blocks",
+        type=parse_size,
+        nargs="+",
+        default=[1 << 10, 4 << 10, 16 << 10, 64 << 10, 256 << 10, 1 << 20],
+        help="block sizes for the numpy-vs-numba sweep",
+    )
 
-    parser.add_argument("--runs", type=int, default=5,
-                        help="timed runs per configuration (default 5)")
-    parser.add_argument("--warmup", type=int, default=1,
-                        help="warm-up runs before timing (default 1)")
+    parser.add_argument(
+        "--runs", type=int, default=5, help="timed runs per configuration (default 5)"
+    )
+    parser.add_argument(
+        "--warmup", type=int, default=1, help="warm-up runs before timing (default 1)"
+    )
     parser.add_argument("--seed", type=int, default=0)
     args = parser.parse_args()
 
@@ -559,8 +613,10 @@ def main() -> None:
         np.random.seed(args.seed)
 
     if not mod._HAS_NUMBA:
-        print("[note] numba is not available; _copy_kernel is a no-op stub "
-              "and all timings will reflect Python overhead only.")
+        print(
+            "[note] numba is not available; _copy_kernel is a no-op stub "
+            "and all timings will reflect Python overhead only."
+        )
         print()
 
     # Show the environment once so the numbers are interpretable.
@@ -577,9 +633,11 @@ def main() -> None:
     if args.threads is None and args.threads_list:
         max_t = max(args.threads_list)
         if max_t > mod._MAX_NUMBA_THREADS:
-            print(f"[warn] requested up to {max_t} threads but "
-                  f"NUMBA_NUM_THREADS={mod._MAX_NUMBA_THREADS}; "
-                  f"re-run with NUMBA_NUM_THREADS>={max_t} to go higher.")
+            print(
+                f"[warn] requested up to {max_t} threads but "
+                f"NUMBA_NUM_THREADS={mod._MAX_NUMBA_THREADS}; "
+                f"re-run with NUMBA_NUM_THREADS>={max_t} to go higher."
+            )
             print()
 
     if args.sweep in ("threads", "all"):

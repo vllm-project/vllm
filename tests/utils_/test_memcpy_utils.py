@@ -169,6 +169,6 @@ class TestMemcpyMt:
         prev = mod.get_num_threads()
         with mock.patch.object(mod, "_copy_kernel",
                                side_effect=RuntimeError("boom")):
-            with pytest.raises(RuntimeError, match="boom"):
+            with pytest.raises(RuntimeError, match="boom"):   # noqa: SIM117
                 mod.memcpy_mt(src, dst, n, max_copy_threads=2)
         assert mod.get_num_threads() == prev
