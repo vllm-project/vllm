@@ -177,6 +177,34 @@ async def test_derender_chat_logprobs(client):
 
 
 @pytest.mark.asyncio
+async def test_derender_chat_logprobs_preserve_sentencepiece_space(client):
+    """Resolved SentencePiece logprob tokens preserve their leading space."""
+    tokenizer = get_tokenizer(MODEL_NAME)
+    token_ids = tokenizer.encode("x true", add_special_tokens=False)
+    spaced_token_id = next(
+        token_id
+        for token_id in token_ids
+        if tokenizer.convert_ids_to_tokens([token_id])[0].startswith("▁")
+    )
+
+    response = await client.post(
+        "/v1/chat/completions/derender",
+        json={
+            "model": MODEL_NAME,
+            "generate_response": _make_generate_response(
+                token_ids,
+                logprobs=_make_logprobs_with_placeholders(spaced_token_id),
+            ),
+        },
+    )
+
+    assert response.status_code == 200
+    entry = response.json()["choices"][0]["logprobs"]["content"][0]
+    assert entry["token"].startswith(" ")
+    assert entry["bytes"][0] == ord(" ")
+
+
+@pytest.mark.asyncio
 async def test_derender_chat_logprobs_bytes(client):
     """Resolved logprob entries have bytes populated as list[int]."""
     gen_req = await _render_chat(client)
