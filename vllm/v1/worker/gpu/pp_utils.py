@@ -279,6 +279,12 @@ class PPHandler:
 
         if slot.event is not None:
             self.main_stream.wait_event(slot.event)
+        num_sampled = slot.num_sampled
+        if exclude_mask.any():
+            # Some model-state postprocessors consume num_sampled before they
+            # inspect idx_mapping (RecoverSSM commit is one example). Make an
+            # excluded row a true no-op for those paths as well.
+            num_sampled = torch.where(idx_mapping >= 0, num_sampled, 0)
         if slot.draft_tokens is not None and draft_tokens_to_update is not None:
             draft_tokens = slot.draft_tokens
             draft_idx_mapping = slot.idx_mapping
@@ -295,7 +301,7 @@ class PPHandler:
 
         return dict(
             sampled_tokens=slot.sampled_tokens,
-            num_sampled=slot.num_sampled,
+            num_sampled=num_sampled,
             num_rejected=slot.num_rejected,
             idx_mapping=idx_mapping,
         )

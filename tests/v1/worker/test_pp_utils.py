@@ -353,7 +353,7 @@ def test_filtered_receive_mapping_keeps_serving_int32_specialization():
                 event=None,
                 sampled_tokens=torch.empty(2, 1, dtype=torch.int64),
                 combined=torch.empty(2, 2, dtype=torch.int32),
-                num_sampled=torch.empty(2, dtype=torch.int32),
+                num_sampled=torch.tensor([2, 3], dtype=torch.int32),
                 num_rejected=torch.empty(2, dtype=torch.int32),
                 idx_mapping=torch.tensor([0, 1], dtype=torch.int32),
                 idx_mapping_np=np.array([0, 1], dtype=np.intp),
@@ -372,6 +372,7 @@ def test_filtered_receive_mapping_keeps_serving_int32_specialization():
     assert outputs is not None
     assert outputs["idx_mapping"].dtype == torch.int32
     assert outputs["idx_mapping"].tolist() == [-1, 1]
+    assert outputs["num_sampled"].tolist() == [0, 3]
 
 
 def test_warmup_pp_decode_update_matches_serving_specialization(monkeypatch):
