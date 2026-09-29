@@ -106,8 +106,8 @@ def test_flashinfer_autotune_uses_token_buckets_for_each_dummy_run(skip_attn):
 
     assert get_buckets.call_args_list == [call(8192), call(128)]
     assert autotune.call_args_list == [
-        call(tuning_buckets=max_buckets),
-        call(tuning_buckets=deferred_buckets),
+        call(tuning_buckets=max_buckets, round_up=True),
+        call(tuning_buckets=deferred_buckets, round_up=True),
     ]
     assert runner._dummy_run.call_args_list == [
         call(
