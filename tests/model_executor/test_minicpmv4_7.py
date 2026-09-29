@@ -3,13 +3,15 @@
 import pytest
 import torch
 
-from vllm.model_executor.models.minicpmv4_6 import MiniCPMV4_6ForConditionalGeneration
+from vllm.model_executor.models.minicpmv4_6 import (
+    MiniCPMV4_6ForConditionalGeneration,
+    _stack_vit_merger_qkv,
+)
 from vllm.model_executor.models.minicpmv4_7 import (
     MiniCPMV4_7ForConditionalGeneration,
     MiniCPMV4_7MultiModalProcessor,
     MiniCPMV4_7ProcessingInfo,
     _compute_canvas_single,
-    _stack_vit_merger_qkv,
     build_image_bounds,
     canvas_rope_delta,
 )

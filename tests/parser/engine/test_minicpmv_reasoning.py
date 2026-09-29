@@ -18,7 +18,6 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
 from vllm.parser.minicpmv import (
     EscapedNewlineNormalizer,
     MiniCPMVOutputNormalizer,
-    MiniCPMVParser,
     recover_newlines,
 )
 from vllm.parser.parser_manager import ParserManager
@@ -32,6 +31,19 @@ _VOCAB = {
     "<tool_call>": 13,
     "</tool_call>": 14,
 }
+
+_TOOLS = [
+    ChatCompletionToolsParam(
+        type="function",
+        function={
+            "name": "get_weather",
+            "parameters": {
+                "type": "object",
+                "properties": {"city": {"type": "string"}},
+            },
+        },
+    )
+]
 
 
 @pytest.fixture
@@ -47,39 +59,52 @@ def request_obj():
     )
 
 
+def _make_parser(tokenizer, *, enable_thinking=None, tools=None):
+    """Build the parser the serving stack resolves for MiniCPM-V.
+
+    Everything is built through ``ParserManager`` so the tests exercise the
+    ``DelegatingParser`` the server actually drives, not the parser engine on
+    its own. Tool calling goes through ``qwen3_coder``: MiniCPM-V emits that
+    XML syntax verbatim and has no tool parser of its own.
+    """
+    parser_cls = ParserManager.get_parser(
+        tool_parser_name="qwen3_coder" if tools else None,
+        reasoning_parser_name="minicpmv",
+        enable_auto_tools=bool(tools),
+    )
+    assert parser_cls is not None
+    kwargs = {}
+    if enable_thinking is not None:
+        kwargs["chat_template_kwargs"] = {"enable_thinking": enable_thinking}
+    return parser_cls(tokenizer, tools, **kwargs)
+
+
 def test_reasoning_parser_is_registered():
     parser_cls = ReasoningParserManager.get_reasoning_parser("minicpmv")
 
     assert parser_cls.__name__ == "MiniCPMVParserReasoningAdapter"
 
 
-def test_tool_parser_is_registered():
-    parser_cls = ToolParserManager.get_tool_parser("minicpmv")
+def test_no_minicpmv_tool_parser_is_registered():
+    """MiniCPM-V deliberately registers no tool parser.
 
-    assert parser_cls.__name__ == "MiniCPMVEngineToolParser"
+    The family emits the Qwen3-Coder XML syntax verbatim, so
+    ``--tool-call-parser qwen3_coder`` already covers it. Registering a
+    ``minicpmv`` tool parser would duplicate that name for no parsing gain.
+    """
+    with pytest.raises(KeyError):
+        ToolParserManager.get_tool_parser("minicpmv")
 
 
-def test_tool_parser_composes_with_reasoning_parser(mock_tokenizer):
-    """`--tool-call-parser minicpmv` must work through the serving Parser."""
-    tools = [
-        ChatCompletionToolsParam(
-            type="function",
-            function={
-                "name": "get_weather",
-                "parameters": {
-                    "type": "object",
-                    "properties": {"city": {"type": "string"}},
-                },
-            },
-        )
-    ]
+def test_composes_with_qwen3_coder_tool_parser(mock_tokenizer):
+    """`--tool-call-parser qwen3_coder` must work through the serving Parser."""
     request = ChatCompletionRequest(
         model="test-model",
         messages=[{"role": "user", "content": "hi"}],
-        tools=tools,
+        tools=_TOOLS,
     )
     parser_cls = ParserManager.get_parser(
-        tool_parser_name="minicpmv",
+        tool_parser_name="qwen3_coder",
         reasoning_parser_name="minicpmv",
         enable_auto_tools=True,
     )
@@ -101,10 +126,7 @@ def test_tool_parser_composes_with_reasoning_parser(mock_tokenizer):
 class TestNonThinking:
     @pytest.fixture
     def parser(self, mock_tokenizer):
-        return MiniCPMVParser(
-            mock_tokenizer,
-            chat_template_kwargs={"enable_thinking": False},
-        )
+        return _make_parser(mock_tokenizer, enable_thinking=False)
 
     def test_plain_content_is_unchanged(self, parser):
         reasoning, content = parser.extract_reasoning("The answer is 42.", None)
@@ -152,11 +174,11 @@ class TestNonThinking:
         reasoning, content = simulate_reasoning_streaming(
             parser,
             [
-                "<thi",
-                "nk>",
+                "<",
+                "think>",
                 "private reasoning",
-                "</thi",
-                "nk>",
+                "</",
+                "think>",
                 "final answer",
             ],
         )
@@ -180,12 +202,20 @@ class TestNonThinking:
         assert reasoning == ""
         assert content == "reasoningfinal answer"
 
-    def test_tool_calls_are_parsed(self, parser, request_obj):
+    def test_tool_calls_are_parsed(self, mock_tokenizer):
         """Thinking is off by default, and tool calls must still be parsed."""
+        parser = _make_parser(mock_tokenizer, enable_thinking=False, tools=_TOOLS)
+        request = ChatCompletionRequest(
+            model="test-model",
+            messages=[{"role": "user", "content": "hi"}],
+            tools=_TOOLS,
+        )
+
         reasoning, content, tool_calls = parser.parse(
             "<tool_call><function=get_weather>"
             "<parameter=city>SF</parameter></function></tool_call>",
-            request_obj,
+            request,
+            enable_auto_tools=True,
         )
 
         assert reasoning is None
@@ -194,13 +224,40 @@ class TestNonThinking:
         assert tool_calls[0].name == "get_weather"
         assert "SF" in tool_calls[0].arguments
 
+    def test_streaming_tool_calls_are_parsed(self, mock_tokenizer):
+        """Regression: tool calls must stream when thinking is explicitly off.
+
+        The reasoning parser used to report ``reasoning_ended=False`` in
+        non-thinking mode, which kept the delegating parser in its reasoning
+        phase and streamed the raw ``<tool_call>`` XML to the client as content.
+        """
+        parser = _make_parser(mock_tokenizer, enable_thinking=False, tools=_TOOLS)
+        request = ChatCompletionRequest(
+            model="test-model",
+            messages=[{"role": "user", "content": "hi"}],
+            tools=_TOOLS,
+        )
+
+        delta = parser.parse_delta(
+            "<tool_call><function=get_weather>"
+            "<parameter=city>SF</parameter></function></tool_call>",
+            [],
+            request,
+            prompt_token_ids=[],
+            finished=True,
+        )
+
+        assert delta is not None
+        assert delta.tool_calls
+        assert delta.tool_calls[0].function is not None
+        assert delta.tool_calls[0].function.name == "get_weather"
+        assert "SF" in (delta.tool_calls[0].function.arguments or "")
+        assert not delta.content
+
 
 class TestThinking:
     def test_standard_think_tags_are_parsed(self, mock_tokenizer):
-        parser = MiniCPMVParser(
-            mock_tokenizer,
-            chat_template_kwargs={"enable_thinking": True},
-        )
+        parser = _make_parser(mock_tokenizer, enable_thinking=True)
 
         reasoning, content = parser.extract_reasoning(
             "<think>private reasoning</think>final answer",
@@ -211,10 +268,7 @@ class TestThinking:
         assert content == "final answer"
 
     def test_reserved_markers_are_removed(self, mock_tokenizer):
-        parser = MiniCPMVParser(
-            mock_tokenizer,
-            chat_template_kwargs={"enable_thinking": True},
-        )
+        parser = _make_parser(mock_tokenizer, enable_thinking=True)
 
         reasoning, content = parser.extract_reasoning(
             "<think><reserved_12>private reasoning</think><|reserved_13|>final answer",
@@ -226,10 +280,7 @@ class TestThinking:
 
     def test_streaming_im_end_is_removed(self):
         tokenizer = make_mock_tokenizer(_VOCAB, special_tokens=[])
-        parser = MiniCPMVParser(
-            tokenizer,
-            chat_template_kwargs={"enable_thinking": True},
-        )
+        parser = _make_parser(tokenizer, enable_thinking=True)
 
         reasoning, content = simulate_reasoning_streaming(
             parser,
@@ -330,10 +381,7 @@ class TestNewlineRecovery:
         assert result.tool_calls[0].function.arguments == arguments
 
     def test_parse_recovers_content(self, mock_tokenizer, request_obj):
-        parser = MiniCPMVParser(
-            mock_tokenizer,
-            chat_template_kwargs={"enable_thinking": False},
-        )
+        parser = _make_parser(mock_tokenizer, enable_thinking=False)
 
         reasoning, content, tool_calls = parser.parse(
             "first\\nsecond",
@@ -342,13 +390,10 @@ class TestNewlineRecovery:
 
         assert reasoning is None
         assert content == "first\nsecond"
-        assert tool_calls is None
+        assert not tool_calls
 
     def test_parse_delta_recovers_content(self, mock_tokenizer, request_obj):
-        parser = MiniCPMVParser(
-            mock_tokenizer,
-            chat_template_kwargs={"enable_thinking": False},
-        )
+        parser = _make_parser(mock_tokenizer, enable_thinking=False)
 
         chunk = parser.parse_delta(
             "first\\",
@@ -372,10 +417,7 @@ class TestNewlineRecovery:
     def test_buffered_delta_is_dropped_not_sent_empty(
         self, mock_tokenizer, request_obj
     ):
-        parser = MiniCPMVParser(
-            mock_tokenizer,
-            chat_template_kwargs={"enable_thinking": False},
-        )
+        parser = _make_parser(mock_tokenizer, enable_thinking=False)
         parser.parse_delta("hello", [], request_obj, finished=False)
 
         # The lone backtick is held back for the next chunk. Reporting it as an
