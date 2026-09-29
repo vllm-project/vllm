@@ -69,7 +69,14 @@ def _group_can_attempt_mnnvl(
     group: ProcessGroup,
     device: torch.device,
 ) -> bool:
-    """Return whether every rank can enter the cross-node MNNVL path."""
+    """Return whether every rank can enter the cross-node MNNVL path.
+
+    MNNVL is available only on Blackwell-class GPUs. Local multicast support
+    is necessary but does not establish that the process group spans an MNNVL
+    domain; the caller performs that group-level topology check before this
+    local capability probe. The CPU all-reduce keeps every rank on the same
+    control-flow path for heterogeneous or partially configured groups.
+    """
     device_index = device.index
     local_support = (
         device_index is not None
