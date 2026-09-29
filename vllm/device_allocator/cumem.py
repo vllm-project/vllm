@@ -423,10 +423,10 @@ class CuMemAllocator:
             if expandable_was_enabled:
                 set_alloc_conf(prev_conf)
 
-    def get_current_usage(self) -> int:
-        """Get the total number of bytes allocated in the memory pool."""
-        sum_bytes: int = 0
-        for ptr, data in self.pointer_to_data.items():
-            handle = data.handle
-            sum_bytes += handle[1]
-        return sum_bytes
+    def get_current_usage(self, tag: str | None = None) -> int:
+        """Get the bytes allocated in the memory pool, optionally for one tag."""
+        return sum(
+            data.handle[1]
+            for data in self.pointer_to_data.values()
+            if tag is None or data.tag == tag
+        )

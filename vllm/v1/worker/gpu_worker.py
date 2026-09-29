@@ -359,7 +359,7 @@ class Worker(WorkerBase):
 
         allocator = get_mem_allocator_instance()
         if tag == "weights":
-            assert allocator.get_current_usage() == 0, (
+            assert allocator.get_current_usage(tag="weights") == 0, (
                 "CuMem allocator can only be used for one instance per process."
             )
         return allocator.use_memory_pool(tag=tag)
@@ -503,7 +503,16 @@ class Worker(WorkerBase):
             _num_workspace_lanes(self.vllm_config, self.use_v2_model_runner),
         )
 
-        # Construct the model runner
+        # Construct the model runner. Its persistent buffers (input buffers,
+        # speculator state, ...) live in the "runtime" pool, offloaded on sleep.
+        with self._maybe_get_memory_pool_context(tag="runtime"):
+            self._init_model_runner()
+
+        if self.rank == 0:
+            # If usage stat is enabled, collect relevant info.
+            report_usage_stats(self.vllm_config)
+
+    def _init_model_runner(self) -> None:
         if self.use_v2_model_runner:
             if self.vllm_config.is_mm_encoder_only:
                 from vllm.v1.worker.mm_encoder_model_runner import (
@@ -524,10 +533,6 @@ class Worker(WorkerBase):
             )
 
             self.model_runner = GPUModelRunnerV1(self.vllm_config, self.device)
-
-        if self.rank == 0:
-            # If usage stat is enabled, collect relevant info.
-            report_usage_stats(self.vllm_config)
 
     def handle_ft_command(self, ft_request):
         assert self.worker_sentinel is not None

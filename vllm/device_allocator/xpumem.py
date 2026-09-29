@@ -338,8 +338,9 @@ class XpuMemAllocator:
         finally:
             self.current_tag = old_tag
 
-    def get_current_usage(self) -> int:
-        total = 0
-        for data in self.pointer_to_data.values():
-            total += data.handle[1]
-        return total
+    def get_current_usage(self, tag: str | None = None) -> int:
+        return sum(
+            data.handle[1]
+            for data in self.pointer_to_data.values()
+            if tag is None or data.tag == tag
+        )

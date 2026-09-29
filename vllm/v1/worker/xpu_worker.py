@@ -216,9 +216,10 @@ class XPUWorker(Worker):
 
         # Construct the model runner
         model_runner = XPUModelRunnerV2 if self.use_v2_model_runner else XPUModelRunner
-        self.model_runner = model_runner(  # type: ignore
-            self.vllm_config, self.device
-        )
+        with self._maybe_get_memory_pool_context(tag="runtime"):
+            self.model_runner = model_runner(  # type: ignore
+                self.vllm_config, self.device
+            )
 
         if self.rank == 0:
             # If usage stat is enabled, collect relevant info.
