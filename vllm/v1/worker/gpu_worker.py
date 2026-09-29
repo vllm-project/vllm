@@ -812,9 +812,7 @@ class Worker(WorkerBase):
         if mem_pool_context is None:
             mem_pool_context = self._maybe_get_memory_pool_context(tag="kv_cache")
 
-        # Block tables and metadata built with the KV cache go to the offloaded
-        # "runtime" pool; the KV cache itself uses the nested pool above. Skipped
-        # with KV/aux-output connectors, whose registered buffers must stay put.
+        # Offload state built with the KV cache, except connector-registered buffers.
         runtime_pool = (
             nullcontext()
             if has_kv_transfer_group() or self.vllm_config.aux_output_config.enabled
