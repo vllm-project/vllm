@@ -380,25 +380,26 @@ def test_kvcr_tier_refreshes_processed_prefix(
     assert list(ctx._offload_key_positions) == keys
 
 
-@pytest.mark.parametrize("operation", ["submit_load", "submit_store"])
-def test_kvcr_tier_aligns_full_prefix_around_transfer_completion(
-    monkeypatch, operation
-):
-    """Align completed prefixes even when the request has already finished."""
+def test_kvcr_tier_batches_consecutive_completions(monkeypatch):
+    """Batch completions without reordering requests that share keys."""
     kvcr = RecordingKVCR()
     tier = _make_tier(monkeypatch, kvcr)
     ctx = ReqContext(req_id="req")
-    head, tail, future_tail = (OffloadKey(key) for key in (b"head", b"tail", b"future"))
-    for key, end_token in ((tail, 32), (head, 16), (future_tail, 48)):
+    head, middle, tail, future = map(OffloadKey, (b"h", b"m", b"t", b"f"))
+    for key, end_token in ((tail, 48), (head, 16), (middle, 32), (future, 64)):
         ctx.set_offload_key_position(key, end_token)
-    getattr(tier, operation)(_job(7, ctx, key=tail))
-    assert kvcr.align_sequence_calls == []
+    other = ReqContext(req_id="other")
+    other.set_offload_key_position(head, 16)
+    tier.submit_store(_job(7, ctx, key=tail))
+    tier.submit_load(_job(8, ctx, key=middle))
+    tier.submit_store(_job(9, other, key=head))
+    tier.submit_load(_job(10, ctx, key=middle))
 
-    tier.on_request_finished(ctx)
-    assert list(tier.get_finished_jobs()) == [JobResult(7, True)]
+    assert [job.job_id for job in tier.get_finished_jobs()] == [7, 8, 9, 10]
     assert kvcr.align_sequence_calls == [
-        ([head, tail, future_tail], True),
-        ([head, tail], False),
+        ([head, middle, tail], False),
+        ([head], False),
+        ([head, middle], False),
     ]
 
 

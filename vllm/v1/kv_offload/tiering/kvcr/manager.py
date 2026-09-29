@@ -535,6 +535,7 @@ class KVCRSecondaryTierManager(SecondaryTierManager):
 
     def _poll_finished_jobs(self) -> list[JobResult]:
         results: list[JobResult] = []
+        completed_prefixes: list[tuple[ReqContext, int]] = []
         for op_handle, entries in self._kvcr.poll_completed():
             job_state = self._jobs_by_op.get(op_handle)
             if job_state is None:
@@ -557,19 +558,25 @@ class KVCRSecondaryTierManager(SecondaryTierManager):
                 )
                 continue
             self._jobs_by_op.pop(op_handle, None)
-            # Include earlier resident keys, even when only the tail transferred.
             positions = job.req_context._offload_key_positions
             end_token = max((positions.get(key, -1) for key in job.keys), default=-1)
-            self._align_sequence(
-                [key for key, position in positions.items() if position <= end_token],
-                job.req_context,
-            )
+            # Preserve ordering across requests, which may share prefix keys.
+            if completed_prefixes and completed_prefixes[-1][0] is job.req_context:
+                end_token = max(end_token, completed_prefixes.pop()[1])
+            completed_prefixes.append((job.req_context, end_token))
             results.append(
                 JobResult(
                     job_id=job.job_id,
                     success=success,
                     successful_keys=successful_keys if not success else None,
                 )
+            )
+        for req_context, end_token in completed_prefixes:
+            # Include earlier resident keys, even when only the tail transferred.
+            positions = req_context._offload_key_positions
+            self._align_sequence(
+                [key for key, position in positions.items() if position <= end_token],
+                req_context,
             )
         results.extend(self._framework_pin_adapter.take_pin_job_results())
         return results
