@@ -467,6 +467,12 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
         for c in self._connectors:
             c.on_new_request(request)
 
+    def get_sync_load_block_ids(self, request: "Request") -> list[int]:
+        chosen = self._requests_to_connector.get(request.request_id)
+        if chosen is None:
+            return []
+        return self._connectors[chosen].get_sync_load_block_ids(request)
+
     def build_connector_meta(
         self, scheduler_output: SchedulerOutput
     ) -> MultiKVConnectorMetadata:

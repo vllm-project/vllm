@@ -353,6 +353,9 @@ class Scheduler(SchedulerInterface):
 
         self.has_mamba_layers = kv_cache_config.has_mamba_layers
         self.needs_kv_cache_zeroing = kv_cache_config.needs_kv_cache_zeroing
+        # Blocks that KV loads will overwrite this step, skipped from
+        # zeroing since the zeroing could race the out-of-band write.
+        self._skip_zero_block_ids: set[int] = set()
         self.need_mamba_block_aligned_split = (
             self.has_mamba_layers and self.cache_config.mamba_cache_mode == "align"
         )
@@ -1302,6 +1305,11 @@ class Scheduler(SchedulerInterface):
                 if num_external_computed_tokens > 0:
                     # load_kv_async is False here
                     has_sync_kv_loads = True
+                    if self.needs_kv_cache_zeroing:
+                        assert self.connector is not None
+                        self._skip_zero_block_ids.update(
+                            self.connector.get_sync_load_block_ids(request)
+                        )
                 if self.log_stats:
                     request.record_event(
                         EngineCoreEventType.SCHEDULED, scheduled_timestamp

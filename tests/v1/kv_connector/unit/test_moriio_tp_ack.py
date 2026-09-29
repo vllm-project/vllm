@@ -24,6 +24,41 @@ from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_engine import (
 )
 
 
+@pytest.mark.parametrize(
+    "mode,consumer,has_mamba,layout,pending,expected",
+    [
+        (MoRIIOMode.READ, True, True, "LBNHC", [[7, 8], [90]], [7, 8]),
+        (MoRIIOMode.READ, True, True, "LBHNC", [[7, 8], [90]], [7, 8]),
+        (MoRIIOMode.READ, True, True, "LBHNC", [[], [90]], []),
+        (MoRIIOMode.READ, True, True, "LBHNC", None, []),
+        (MoRIIOMode.READ, True, True, "LBNHC", [[], [90]], []),
+        (MoRIIOMode.READ, True, True, "LBNHC", None, []),
+        (MoRIIOMode.READ, False, True, "LBNHC", [[7], [90]], []),
+        (MoRIIOMode.READ, True, False, "LBNHC", [[7]], []),
+        (MoRIIOMode.READ, True, True, "NBLHC", [[7], [90]], []),
+        (MoRIIOMode.WRITE, True, True, "LBNHC", [[7], [90]], []),
+    ],
+)
+def test_sync_read_initializes_only_supported_attention_destinations(
+    mode, consumer, has_mamba, layout, pending, expected
+):
+    connector = MoRIIOConnector.__new__(MoRIIOConnector)
+    connector.mode = mode
+    connector.kv_transfer_config = SimpleNamespace(is_kv_consumer=consumer)
+    connector._vllm_config = SimpleNamespace(
+        cache_config=SimpleNamespace(
+            get_resolved_kv_cache_layout=lambda: SimpleNamespace(name=layout)
+        )
+    )
+    request = SimpleNamespace(request_id="req")
+    connector.connector_scheduler = SimpleNamespace(
+        _has_mamba=has_mamba,
+        _reqs_need_recv={} if pending is None else {"req": (request, pending)},
+    )
+
+    assert connector.get_sync_load_block_ids(request) == expected
+
+
 def test_remote_tp_rank_same_tp_maps_to_self():
     assert [get_moriio_remote_tp_rank(rank, 4, 4) for rank in range(4)] == [
         0,
