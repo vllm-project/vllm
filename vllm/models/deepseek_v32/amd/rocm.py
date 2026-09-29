@@ -6,6 +6,7 @@ import torch
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.forward_context import get_forward_context
+from vllm.logger import init_logger
 from vllm.model_executor.layers.sparse_attn_indexer import SparseAttnIndexer
 from vllm.model_executor.models.deepseek_v2 import DeepseekV32IndexerCache
 from vllm.models.deepseek_v32.attention import DeepseekV32Attention, DeepseekV32Indexer
@@ -16,6 +17,8 @@ from vllm.v1.attention.backends.mla.indexer import DeepseekV32IndexerBackend
 from vllm.v1.attention.backends.mla.rocm_aiter_mla_sparse import (
     ROCMAiterMLASparseBackend,
 )
+
+logger = init_logger(__name__)
 
 
 class DeepseekV32ROCmIndexerCache(DeepseekV32IndexerCache):
@@ -58,6 +61,28 @@ class DeepseekV32MLAAttention(DeepseekV32Attention):
                 topk_indices_buffer,
                 skip_k_cache_insert=True,
             )
+        # ROCm serve uses this module, not model_executor Indexer.forward.
+        # The AITER kernel replaces the indexer half of fused_norm_rope/fused_q.
+        self.use_qk_rope_cache_fusion = False
+        self._k_norm_weight_fp32: torch.Tensor | None = None
+        self._k_norm_bias_fp32: torch.Tensor | None = None
+        self._indexer_weights_scale = 1.0
+        if self.indexer is not None:
+            self._indexer_weights_scale = (
+                self.indexer.softmax_scale * self.indexer.n_head**-0.5
+            )
+            self.use_qk_rope_cache_fusion = (
+                rocm_aiter_ops.is_dsv32_indexer_qk_fusion_enabled()
+                and self.indexer.head_dim == 128
+                and self.indexer.rope_dim == 64
+                and self.indexer.head_dim == self.indexer.quant_block_size
+                and getattr(config, "model_type", None) != "glm_moe_dsa"
+            )
+        if self.use_qk_rope_cache_fusion:
+            logger.info_once(
+                "DSv3.2 indexer Q-RoPE+quant+K-cache fusion enabled "
+                "(aiter.indexer_qk_rope_quant_and_cache)"
+            )
         self._fp8_kv = is_quantized_kv_cache(self.kv_cache_dtype)
         self._fp8_kv_needs_view = self._fp8_kv and self.kv_cache_dtype != "fp8_ds_mla"
 
@@ -86,7 +111,14 @@ class DeepseekV32MLAAttention(DeepseekV32Attention):
             device=hidden_states.device,
         )
         self._fused_attention(
-            positions, q_c, kv_c, k_pe, index_k, index_weights, output
+            hidden_states,
+            positions,
+            q_c,
+            kv_c,
+            k_pe,
+            index_k,
+            index_weights,
+            output,
         )
         return self.o_proj(output)[0]
 
@@ -117,6 +149,44 @@ class DeepseekV32MLAAttention(DeepseekV32Attention):
         """Run the ROCm sparse indexer (forward_hip) if this layer has an indexer."""
         if self.indexer_op is not None:
             self.indexer_op.forward_hip(q_c, index_q_fp8, None, index_weights_out)
+
+    def _run_fused_indexer_qk(
+        self,
+        hidden_states: torch.Tensor,
+        positions: torch.Tensor,
+        index_q: torch.Tensor,
+        index_k: torch.Tensor,
+        index_weights: torch.Tensor,
+    ) -> None:
+        """RoPE, FP8 quant, and K-cache write inside the indexer custom op."""
+        assert self.indexer is not None
+        assert self.indexer_op is not None
+        # The kernel asserts fp32 LN params; a bf16 cast drifts from the
+        # unfused LayerNorm.
+        if self._k_norm_weight_fp32 is None:
+            self._k_norm_weight_fp32 = (
+                self.indexer.k_norm.weight.detach().to(torch.float32).contiguous()
+            )
+            self._k_norm_bias_fp32 = (
+                self.indexer.k_norm.bias.detach().to(torch.float32).contiguous()
+            )
+        cos_sin_cache = self.indexer_rope_emb._match_cos_sin_cache_dtype(index_q)
+        cos_cache, sin_cache = cos_sin_cache.chunk(2, dim=-1)
+        self.indexer_op.forward_hip(
+            hidden_states,
+            index_q,
+            index_k.contiguous(),
+            index_weights.contiguous(),
+            k_norm_weight=self._k_norm_weight_fp32,
+            k_norm_bias=self._k_norm_bias_fp32,
+            k_norm_eps=float(self.indexer.k_norm.eps),
+            positions=positions,
+            cos_cache=cos_cache,
+            sin_cache=sin_cache,
+            weights_scale=self._indexer_weights_scale,
+            is_neox_style=bool(self.indexer_rope_emb.is_neox_style),
+            use_qk_rope_cache_fusion=True,
+        )
 
     def _build_q_for_attn(
         self,
@@ -162,6 +232,7 @@ class DeepseekV32MLAAttention(DeepseekV32Attention):
     @eager_break_during_capture
     def _fused_attention(
         self,
+        hidden_states: torch.Tensor,
         positions: torch.Tensor,
         q_c: torch.Tensor,
         kv_c: torch.Tensor,
@@ -213,6 +284,16 @@ class DeepseekV32MLAAttention(DeepseekV32Attention):
             mla_kv_cache = self.kv_cache
             mla_k_scale = self._k_scale
 
+        # The AITER kernel owns indexer K-norm/RoPE/cache and Q RoPE+quant.
+        # fused_norm_rope / fused_q still run for the MLA tensors.
+        fuse_indexer_qk = (
+            self.use_qk_rope_cache_fusion
+            and has_indexer
+            and index_k is not None
+            and index_weights is not None
+        )
+        fused_has_indexer = has_indexer and not fuse_indexer_qk
+
         q_c = fused_norm_rope(
             positions,
             q_c,
@@ -235,7 +316,7 @@ class DeepseekV32MLAAttention(DeepseekV32Attention):
             mla_kv_cache=mla_kv_cache,
             mla_kv_cache_dtype=self.kv_cache_dtype,
             mla_k_scale=mla_k_scale,
-            has_indexer=has_indexer,
+            has_indexer=fused_has_indexer,
             index_rope_interleave=self._index_rope_interleave,
         )
 
@@ -252,18 +333,25 @@ class DeepseekV32MLAAttention(DeepseekV32Attention):
             q_pe,
             self.rotary_emb.cos_sin_cache,
             index_q,
-            self.indexer_rope_emb.cos_sin_cache if has_indexer else None,
+            self.indexer_rope_emb.cos_sin_cache if fused_has_indexer else None,
             ql_nope,
             self._q_scale,
             index_weights,
             indexer_softmax_scale,
             indexer_n_head_scale,
-            has_indexer=has_indexer,
+            has_indexer=fused_has_indexer,
             index_rope_interleave=self._index_rope_interleave,
             quantize_mqa=self._fp8_kv,
         )
 
-        if self.indexer is not None and not self.skip_topk:
+        if fuse_indexer_qk:
+            assert index_q is not None
+            assert index_k is not None
+            assert index_weights is not None
+            self._run_fused_indexer_qk(
+                hidden_states, positions, index_q, index_k, index_weights
+            )
+        elif self.indexer is not None and not self.skip_topk:
             self._run_indexer(q_c, index_q_fp8, index_weights_out)
 
         if attn_metadata is None:
