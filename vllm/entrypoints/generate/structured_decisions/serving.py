@@ -86,7 +86,7 @@ class ServingStructuredDecisions(BaseServing):
         request: StructuredDecisionRequest,
         raw_request: Request | None = None,
     ) -> StructuredDecisionResponse | ErrorResponse:
-        if (error := await self._check_model(request)) is not None:
+        if (error := await self._check_model(request)) is not None:  # type: ignore[arg-type]
             return error
         engine_client = self.strategy.context.engine_client
         if engine_client.errored:
@@ -98,7 +98,7 @@ class ServingStructuredDecisions(BaseServing):
             questions = parse_questions(
                 request, self.limits, self.template.label_alphabet(self._tokenizer())
             )
-            lora_request = self._maybe_get_adapters(request)
+            lora_request = self._maybe_get_adapters(request)  # type: ignore[arg-type]
             engine_client.check_admission(len(questions))
             reads = await self.strategy.read(
                 questions,

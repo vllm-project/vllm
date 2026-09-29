@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from types import SimpleNamespace
+from typing import Any
 
 from vllm.entrypoints.generate.structured_decisions.strategies import (
     NextTokenStrategy,
@@ -8,7 +9,7 @@ from vllm.entrypoints.generate.structured_decisions.strategies import (
 )
 
 
-def model_naming(strategy: str) -> SimpleNamespace:
+def model_naming(strategy: str) -> Any:
     return SimpleNamespace(_model_info=SimpleNamespace(decision_read_strategy=strategy))
 
 

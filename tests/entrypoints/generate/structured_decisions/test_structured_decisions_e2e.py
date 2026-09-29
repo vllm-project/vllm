@@ -116,7 +116,7 @@ def test_answers_averaged_over_seeds(server, state, questions, expected):
             for name, p in answer["probabilities"].items():
                 totals.setdefault(qid, {}).setdefault(name, 0.0)
                 totals[qid][name] += p
-    assert {qid: max(t, key=t.get) for qid, t in totals.items()} == expected
+    assert {qid: max(t, key=lambda n: t[n]) for qid, t in totals.items()} == expected
 
 
 @pytest.mark.parametrize(

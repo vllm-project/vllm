@@ -164,9 +164,11 @@ class NextTokenStrategy(ReadStrategy):
 
         reads = []
         for q, slot, result in zip(questions, slots, results):
-            if result is None or not result.outputs or not result.outputs[0].logprobs:
+            output = (
+                result.outputs[0] if result is not None and result.outputs else None
+            )
+            if result is None or output is None or not output.logprobs:
                 raise RuntimeError(f"question {q.id!r}: the read returned no logprobs")
-            output = result.outputs[0]
             logprobs = output.logprobs[0]
             label_logprobs = [logprobs[t].logprob for t in slot.label_ids]
             reads.append(
