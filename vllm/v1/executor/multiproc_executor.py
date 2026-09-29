@@ -1098,13 +1098,10 @@ class WorkerProc:
         decorate_logs(process_name)
 
 
-def set_multiprocessing_worker_envs(
-    local_world_size: int = 1, *, max_cpu_threads: int | None = None
-):
+def set_multiprocessing_worker_envs(local_world_size: int = 1):
     """Set up environment variables that should be used when there are workers
     in a multiprocessing environment. This should be called by the parent
-    process before worker processes are created. ``max_cpu_threads`` caps the
-    total CPU thread budget shared by local workers."""
+    process before worker processes are created"""
     _maybe_force_spawn()
 
     if current_platform.is_cpu() or "OMP_NUM_THREADS" in os.environ:
@@ -1116,10 +1113,6 @@ def set_multiprocessing_worker_envs(
     # the dlopen of shared objects or, in a forked worker, deadlocks (libgomp
     # is not fork-safe).
     num_threads = startup_omp_num_threads(local_world_size)
-    if max_cpu_threads is not None:
-        num_threads = min(
-            num_threads, max(1, max_cpu_threads // max(1, local_world_size))
-        )
     os.environ["OMP_NUM_THREADS"] = str(num_threads)
     os.environ[OMP_NUM_THREADS_SET_BY_VLLM] = "1"
 

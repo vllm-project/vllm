@@ -8,6 +8,7 @@ from threading import Event
 from types import SimpleNamespace
 
 import pytest
+import torch
 import zmq
 
 import vllm.platforms as platforms
@@ -28,85 +29,94 @@ pytestmark = pytest.mark.skip_global_cleanup
 
 
 @pytest.mark.parametrize(
-    ("executor_class", "local_engine_count", "user_threads", "cpu_limits", "expected"),
+    (
+        "executor_class",
+        "local_engine_count",
+        "initial_threads",
+        "user_threads",
+        "fail_start",
+        "expected",
+    ),
     [
-        (UniProcExecutor, 1, None, (192, 192, 12), (12, "12", "1")),
-        (UniProcExecutor, 2, None, (192, 192, 12), (6, "6", "1")),
-        (UniProcExecutor, 2, "5", (5, 192, 12), (5, "5", None)),
+        (UniProcExecutor, 1, 192, None, False, (12, "12", "1")),
+        (UniProcExecutor, 2, 192, None, False, (6, "6", "1")),
+        (UniProcExecutor, 2, 192, None, True, (6, "6", "1")),
+        (UniProcExecutor, 2, 5, None, False, (5, "5", "1")),
+        (UniProcExecutor, 2, 1, None, False, (1, "1", "1")),
+        (UniProcExecutor, 2, 5, "5", False, (5, "5", None)),
         (
             multiproc_executor.MultiprocExecutor,
             2,
+            192,
             None,
-            (192, 192, 12),
+            False,
             (192, None, None),
         ),
-        (UniProcExecutor, 1, None, (112, 224, None), (112, "112", "1")),
-        (UniProcExecutor, 2, None, (112, 224, None), (56, "56", "1")),
-        (UniProcExecutor, 2, None, (1, 224, None), (1, "1", "1")),
     ],
 )
-@pytest.mark.parametrize("fail_context", [False, True])
-def test_engine_core_startup_threads_respect_quota_before_launch(
+def test_engine_core_startup_threads_are_scoped_to_launch(
     monkeypatch: pytest.MonkeyPatch,
     executor_class,
     local_engine_count: int,
+    initial_threads: int,
     user_threads: str | None,
-    cpu_limits: tuple[int, int, int | None],
+    fail_start: bool,
     expected: tuple[int, str | None, str | None],
-    fail_context: bool,
 ):
-    """UniProc workers inherit their CPU share before context creation and start."""
+    """UniProc workers inherit their CPU share and restore the parent."""
     marker = torch_utils.OMP_NUM_THREADS_SET_BY_VLLM
     monkeypatch.delenv(marker, raising=False)
     monkeypatch.delenv("OMP_NUM_THREADS", raising=False)
     if user_threads is not None:
         monkeypatch.setenv("OMP_NUM_THREADS", user_threads)
-    initial_threads, visible_cpus, quota = cpu_limits
-    monkeypatch.setattr(torch_utils, "_cgroup_cpu_limit", lambda: quota)
-    monkeypatch.setattr(
-        torch_utils.os, "sched_getaffinity", lambda pid: set(range(visible_cpus))
-    )
-    monkeypatch.setattr(multiproc_executor, "_maybe_force_spawn", lambda: None)
+    monkeypatch.setattr(torch_utils, "available_cpu_count", lambda: 12)
     platform = SimpleNamespace(
         is_cpu=lambda: False, is_cuda_alike=lambda: True, is_xpu=lambda: False
     )
     monkeypatch.setattr(engine_utils, "current_platform", platform)
-    monkeypatch.setattr(multiproc_executor, "current_platform", platform)
     threads = SimpleNamespace(count=initial_threads)
-    monkeypatch.setattr(
-        multiproc_executor.torch, "get_num_threads", lambda: threads.count
-    )
-    monkeypatch.setattr(
-        multiproc_executor.torch,
-        "set_num_threads",
-        lambda count: setattr(threads, "count", count),
-    )
-    observed = []
+    setter_calls = []
 
-    def record_startup_state():
-        observed.append(
-            (threads.count, os.environ.get("OMP_NUM_THREADS"), os.environ.get(marker))
+    def set_threads(count):
+        setter_calls.append(count)
+        threads.count = count
+
+    monkeypatch.setattr(torch, "get_num_threads", lambda: threads.count)
+    monkeypatch.setattr(torch, "set_num_threads", set_threads)
+    start_states = []
+
+    def thread_state():
+        return (
+            threads.count,
+            os.environ.get("OMP_NUM_THREADS"),
+            os.environ.get(marker),
         )
 
+    def start_process():
+        start_states.append(thread_state())
+        if fail_start:
+            raise RuntimeError("start failed")
+
     def get_context():
-        record_startup_state()
-        if fail_context:
-            raise RuntimeError("context unavailable")
+        assert thread_state() == (initial_threads, user_threads, None)
         return SimpleNamespace(
             Process=lambda **kwargs: SimpleNamespace(
-                exitcode=None, start=record_startup_state
+                name=kwargs["name"],
+                exitcode=1 if fail_start else None,
+                start=start_process,
             )
         )
 
     monkeypatch.setattr(engine_utils, "get_mp_context", get_context)
+    monkeypatch.setattr(engine_utils, "shutdown", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(
         engine_utils.numa_utils,
         "configure_subprocess",
         lambda *args, **kwargs: nullcontext(),
     )
     with (
-        pytest.raises(RuntimeError, match="context unavailable")
-        if fail_context
+        pytest.raises(RuntimeError, match="start failed")
+        if fail_start
         else nullcontext()
     ):
         manager = CoreEngineProcManager(
@@ -127,10 +137,13 @@ def test_engine_core_startup_threads_respect_quota_before_launch(
             log_stats=False,
         )
         manager._finalizer.detach()
-    assert observed == [expected] * (1 if fail_context else local_engine_count + 1)
-    assert threads.count == initial_threads
-    assert os.environ.get("OMP_NUM_THREADS") == user_threads
-    assert marker not in os.environ
+    assert start_states == [expected] * (1 if fail_start else local_engine_count)
+    assert thread_state() == (initial_threads, user_threads, None)
+    assert setter_calls == (
+        [expected[0], initial_threads]
+        if executor_class is UniProcExecutor and expected[0] < initial_threads
+        else []
+    )
 
 
 @pytest.mark.parametrize(
