@@ -1,10 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""FlyDSL FP8 MLA prefill in the ROCM_AITER_FA prefill backend.
+"""ROCM_AITER_FLYDSL_FP8 MLA prefill backend.
 
-Checks the fused per-tensor FP8 quantization against a torch reference and the
-backend's FP8 new-token and context-chunk attention against its BF16 path,
-including the fallback when AITER reports the configuration unsupported.
+Checks the fused per-tensor FP8 quantization against a torch reference, and the
+backend's FP8 new-token and context-chunk attention (including long contexts
+and Q reuse) against the BF16 ROCM_AITER_FA backend. End-to-end correctness
+against SDPA is covered in tests/v1/attention/test_mla_backends.py.
 """
 
 import math
@@ -19,7 +20,17 @@ from vllm.platforms import current_platform
 if not current_platform.is_rocm():
     pytest.skip("ROCm-only test", allow_module_level=True)
 
-from vllm._aiter_ops import rocm_aiter_ops  # noqa: E402
+from vllm.v1.attention.backends.mla.prefill import aiter_flydsl_fp8  # noqa: E402
+from vllm.v1.attention.backends.mla.prefill.aiter_flash_attn import (  # noqa: E402
+    AiterFlashAttnPrefillBackend,
+)
+from vllm.v1.attention.backends.mla.prefill.aiter_flydsl_fp8 import (  # noqa: E402
+    AiterFlyDSLFP8PrefillBackend,
+)
+from vllm.v1.attention.backends.mla.prefill.base import MLADimensions  # noqa: E402
+from vllm.v1.attention.backends.mla.prefill.selector import (  # noqa: E402
+    MLAPrefillSelectorConfig,
+)
 from vllm.v1.attention.ops.triton_per_tensor_fp8_quant import (  # noqa: E402
     fused_per_tensor_fp8_quant,
 )
@@ -68,17 +79,9 @@ def test_fused_per_tensor_fp8_quant_zero_input() -> None:
     assert x_fp8.float().abs().max().item() == 0
 
 
-def _make_backend(monkeypatch, enabled: bool, v_head_dim: int = V_HEAD_DIM):
-    from vllm.v1.attention.backends.mla.prefill import aiter_flash_attn
-
-    monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1")
-    monkeypatch.setenv(
-        "VLLM_ROCM_USE_AITER_FLYDSL_FP8_PREFILL", "1" if enabled else "0"
-    )
-    rocm_aiter_ops.refresh_env_variables()
-    aiter_flash_attn._get_flydsl_fp8_attn.cache_clear()
+def _make_backend(backend_cls, v_head_dim: int = V_HEAD_DIM):
     vllm_config = SimpleNamespace(model_config=SimpleNamespace(dtype=torch.bfloat16))
-    return aiter_flash_attn.AiterFlashAttnPrefillBackend(
+    return backend_cls(
         num_heads=NUM_HEADS,
         scale=1.0 / math.sqrt(QK_HEAD_DIM),
         kv_lora_rank=KV_LORA_RANK,
@@ -89,13 +92,23 @@ def _make_backend(monkeypatch, enabled: bool, v_head_dim: int = V_HEAD_DIM):
     )
 
 
-@pytest.fixture(autouse=True)
-def _restore_aiter_env():
-    yield
-    from vllm.v1.attention.backends.mla.prefill import aiter_flash_attn
+def _selector_config(v_head_dim: int) -> MLAPrefillSelectorConfig:
+    return MLAPrefillSelectorConfig(
+        dtype=torch.bfloat16,
+        mla_dimensions=MLADimensions(
+            qk_nope_head_dim=QK_NOPE_HEAD_DIM,
+            qk_rope_head_dim=QK_ROPE_HEAD_DIM,
+            v_head_dim=v_head_dim,
+        ),
+    )
 
-    rocm_aiter_ops.refresh_env_variables()
-    aiter_flash_attn._get_flydsl_fp8_attn.cache_clear()
+
+def _skip_if_unsupported() -> None:
+    reasons = AiterFlyDSLFP8PrefillBackend.validate_configuration(
+        current_platform.get_device_capability(), _selector_config(V_HEAD_DIM)
+    )
+    if reasons:
+        pytest.skip(f"ROCM_AITER_FLYDSL_FP8 unavailable: {reasons}")
 
 
 def _cu_seqlens(lens: list[int]) -> torch.Tensor:
@@ -123,11 +136,9 @@ def _assert_close_to_bf16(fp8_result, bf16_result) -> None:
     [([2048], [16384]), ([128], [65536]), ([300, 1, 4000], [0, 5000, 64])],
 )
 def test_flydsl_fp8_prefill_matches_bf16(monkeypatch, query_lens, context_lens):
-    fp8_backend = _make_backend(monkeypatch, enabled=True)
-    if not fp8_backend.use_flydsl_fp8:
-        pytest.skip("AITER FlyDSL FP8 attention unsupported on this device/build")
-    bf16_backend = _make_backend(monkeypatch, enabled=False)
-    assert not bf16_backend.use_flydsl_fp8
+    _skip_if_unsupported()
+    fp8_backend = _make_backend(AiterFlyDSLFP8PrefillBackend)
+    bf16_backend = _make_backend(AiterFlashAttnPrefillBackend)
 
     torch.manual_seed(0)
     num_tokens, num_ctx = sum(query_lens), sum(context_lens)
@@ -149,15 +160,13 @@ def test_flydsl_fp8_prefill_matches_bf16(monkeypatch, query_lens, context_lens):
         max_query_len=max(query_lens),
         max_seq_len=max(context_lens),
     )
-    from vllm.v1.attention.backends.mla.prefill import aiter_flash_attn
-
     quantized_counts: list[int] = []
 
     def spy_quant(*tensors, **kwargs):
         quantized_counts.append(len(tensors))
         return fused_per_tensor_fp8_quant(*tensors, **kwargs)
 
-    monkeypatch.setattr(aiter_flash_attn, "fused_per_tensor_fp8_quant", spy_quant)
+    monkeypatch.setattr(aiter_flydsl_fp8, "fused_per_tensor_fp8_quant", spy_quant)
     results = []
     for backend in (fp8_backend, bf16_backend):
         backend.prepare_metadata(metadata)
@@ -179,9 +188,10 @@ def test_flydsl_fp8_prefill_matches_bf16(monkeypatch, query_lens, context_lens):
     )
 
 
-def test_flydsl_fp8_prefill_falls_back_when_unsupported(monkeypatch):
-    if not _make_backend(monkeypatch, enabled=True).use_flydsl_fp8:
-        pytest.skip("AITER FlyDSL FP8 attention unsupported on this device/build")
+def test_flydsl_fp8_prefill_rejects_unsupported_head_dims():
+    _skip_if_unsupported()
     # AITER's capability check rejects this V head dim.
-    backend = _make_backend(monkeypatch, enabled=True, v_head_dim=100)
-    assert not backend.use_flydsl_fp8
+    reasons = AiterFlyDSLFP8PrefillBackend.validate_configuration(
+        current_platform.get_device_capability(), _selector_config(100)
+    )
+    assert any("does not support" in r for r in reasons)
