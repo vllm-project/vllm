@@ -103,6 +103,33 @@ def make_vllm_config() -> VllmConfig:
     )
 
 
+class _ToyKernelA:
+    pass
+
+
+class _ToyKernelB:
+    pass
+
+
+class _ToyQuantMethod:
+    def __init__(self, kernel: object):
+        self.fp8_linear = kernel
+
+
+@support_torch_compile
+class KernelSwitchMod(torch.nn.Module):
+    """Model whose 'kernel selection' can be flipped via a constructor arg,
+    mimicking how a layer's quant_method holds the chosen kernel instance."""
+
+    def __init__(self, kernel_cls: type, **kwargs):
+        super().__init__()
+        self.proj = torch.nn.Linear(10, 10, bias=False)
+        self.proj.quant_method = _ToyQuantMethod(kernel_cls())
+
+    def forward(self, x: torch.Tensor):
+        return self.proj(x)
+
+
 @contextmanager
 def use_vllm_config(vllm_config: VllmConfig):
     with set_forward_context({}, vllm_config), set_current_vllm_config(vllm_config):
@@ -190,6 +217,67 @@ def test_save_and_load(monkeypatch: pytest.MonkeyPatch):
                 "Expected was_aot_compile_fn_loaded_from_disk to be True"
             )
             assert torch.allclose(ret, expected)
+
+
+@pytest.mark.skipif(not is_torch_equal_or_newer("2.10.0"), reason="requires torch 2.10")
+def test_kernel_selection_hash_key():
+    """The kernel-selection factor must be stable for identical models and
+    change when any layer's selected kernel class changes."""
+    from vllm.compilation.decorators import _kernel_selection_hash_key
+
+    def build(kernel_cls: type) -> torch.nn.Module:
+        mod = torch.nn.Module()
+        mod.proj = torch.nn.Linear(10, 10, bias=False)
+        mod.proj.quant_method = _ToyQuantMethod(kernel_cls())
+        return mod
+
+    assert _kernel_selection_hash_key(build(_ToyKernelA)) == (
+        _kernel_selection_hash_key(build(_ToyKernelA))
+    )
+    assert _kernel_selection_hash_key(build(_ToyKernelA)) != (
+        _kernel_selection_hash_key(build(_ToyKernelB))
+    )
+
+
+@pytest.mark.skipif(not is_torch_equal_or_newer("2.10.0"), reason="requires torch 2.10")
+def test_aot_cache_key_tracks_kernel_selection(monkeypatch: pytest.MonkeyPatch):
+    """Kernel selection happens at layer-construction time and is invisible
+    to the traced source files, so the AOT cache key must include it.
+    Switching kernels with an unchanged vLLM version/env/config must not
+    load the stale artifact baked for the previous kernel."""
+    with monkeypatch.context() as m, tempfile.TemporaryDirectory() as tmpdirname:
+        args = (torch.randn(10, 10),)
+        m.setenv("VLLM_CACHE_ROOT", tmpdirname)
+        m.setenv("VLLM_USE_AOT_COMPILE", "1")
+        m.setenv("VLLM_USE_MEGA_AOT_ARTIFACT", "1")
+        m.setenv("VLLM_USE_STANDALONE_COMPILE", "1")
+
+        vllm_config = make_vllm_config()
+        with (
+            use_vllm_config(vllm_config),
+            compilation_counter.expect(
+                num_aot_compiles=1,
+                num_aot_artifacts_saved=1,
+                num_aot_artifacts_loaded=0,
+            ),
+        ):
+            KernelSwitchMod(kernel_cls=_ToyKernelA, vllm_config=vllm_config)(*args)
+
+        disable_envs_cache()
+        torch._dynamo.reset()
+
+        # Same version, env and config, but a different selected kernel:
+        # must recompile instead of loading kernel A's artifact.
+        vllm_config = make_vllm_config()
+        with (
+            use_vllm_config(vllm_config),
+            compilation_counter.expect(
+                num_aot_compiles=1,
+                num_aot_artifacts_saved=1,
+                num_aot_artifacts_loaded=0,
+            ),
+        ):
+            KernelSwitchMod(kernel_cls=_ToyKernelB, vllm_config=vllm_config)(*args)
 
 
 @pytest.mark.skipif(

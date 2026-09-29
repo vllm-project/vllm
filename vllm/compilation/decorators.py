@@ -7,7 +7,7 @@ import inspect
 import os
 import sys
 from collections.abc import Callable, Generator
-from typing import TYPE_CHECKING, Any, TypeAlias, TypeVar, overload
+from typing import TYPE_CHECKING, Any, TypeAlias, TypeVar, cast, overload
 from unittest.mock import patch
 
 import torch
@@ -260,6 +260,36 @@ def _model_hash_key(fn: Callable[..., Any]) -> str:
     sha256_hash.update(vllm.__version__.encode())
     sha256_hash.update(fn.__qualname__.encode())
     sha256_hash.update(str(fn.__code__.co_firstlineno).encode())
+    return sha256_hash.hexdigest()
+
+
+def _kernel_selection_hash_key(model: torch.nn.Module) -> str:
+    """Hash the quantization kernel selected by each layer of `model`.
+
+    Kernels are chosen at layer-construction time, which dynamo never
+    traces, so a same-version change in selection (a source patch, a new
+    hardware branch, etc.) is invisible to both the env/config hash factors
+    and the load-time traced-source check, and would silently load a stale
+    AOT artifact baked for the previous kernel.
+
+    Layer names and counts are deliberately excluded: pipeline-parallel
+    ranks hold disjoint layer subsets and must keep producing the same hash
+    to share one cache directory.
+    """
+    signatures = set()
+    for module in model.modules():
+        quant_method = getattr(module, "quant_method", None)
+        if quant_method is None:
+            continue
+        qm_type = f"{type(quant_method).__module__}.{type(quant_method).__qualname__}"
+        attrs = tuple(
+            f"{attr}={type(value).__module__}.{type(value).__qualname__}"
+            for attr, value in sorted(vars(quant_method).items())
+        )
+        signatures.add((qm_type, attrs))
+    sha256_hash = hashlib.sha256()
+    for signature in sorted(signatures):
+        sha256_hash.update(str(signature).encode())
     return sha256_hash.hexdigest()
 
 
@@ -538,6 +568,7 @@ def _support_torch_compile(
 
             factors: list[str] = aot_compile_hash_factors(self.vllm_config)
 
+            factors.append(_kernel_selection_hash_key(cast(nn.Module, self)))
             factors.append(_model_hash_key(self.forward))
             hash_key = hashlib.sha256(str(factors).encode()).hexdigest()
             cache_dir = os.path.join(
