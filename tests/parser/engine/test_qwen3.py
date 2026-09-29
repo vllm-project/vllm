@@ -636,6 +636,38 @@ class TestStreaming:
         assert "Read" in names
 
 
+_WEATHER_CALL = (
+    "<tool_call>\n<function=get_weather>\n"
+    "<parameter=city>Tokyo</parameter>\n"
+    "</function>\n</tool_call>"
+)
+
+
+class TestContentAroundToolCalls:
+    """parse() must not drop text the streaming path returns."""
+
+    @pytest.mark.parametrize(
+        "text,expected_content",
+        [
+            (_WEATHER_CALL + "\nDone.", "Done."),
+            (
+                "First Tokyo." + _WEATHER_CALL + "\nNow again." + _WEATHER_CALL,
+                "First Tokyo.\nNow again.",
+            ),
+        ],
+        ids=["after", "between"],
+    )
+    def test_parse_matches_streaming(
+        self, parser, mock_request, text, expected_content
+    ):
+        _, content, tool_calls = parser.parse(text, mock_request)
+        assert content == expected_content
+        assert tool_calls and all(tc.name == "get_weather" for tc in tool_calls)
+
+        results = simulate_tool_streaming(parser, mock_request, list(text))
+        assert collect_content(results).strip() == expected_content
+
+
 class TestArgConverter:
     """Direct tests for the Qwen3 arg_converter with multi-line values."""
 

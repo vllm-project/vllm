@@ -734,6 +734,11 @@ class ParserEngine(Parser):
             reasoning = reasoning.rstrip() or None
 
         content = delta.content if delta else None
+        # Text after a tool call is deferred to the next streaming delta,
+        # which never comes in a single pass.
+        if self._deferred_content:
+            content = (content or "") + self._deferred_content
+            self._deferred_content = ""
         if content:
             content = self._strip_content_whitespace(
                 content, tool_call_info.tools_called
