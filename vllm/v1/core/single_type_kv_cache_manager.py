@@ -2042,9 +2042,21 @@ class MambaManager(SingleTypeKVCacheManager):
             blocks = self.req_to_blocks[request.request_id]
             assert 0 <= checkpoint_idx < len(blocks)
             checkpoint_block = blocks[checkpoint_idx]
+            # The prompt's final chunk caches only up to its last full block,
+            # so ``num_tokens < num_prompt_tokens`` holds there too; its
+            # checkpoint is the prompt's reusable boundary, not a transient one.
+            is_prompt_checkpoint = (
+                checkpoint_position
+                == get_mamba_prefill_checkpoint_position(
+                    request.num_prompt_tokens,
+                    hash_block_size,
+                    self.drop_eagle_checkpoint_block,
+                )
+            )
             if (
                 retention_interval == 0
                 and num_tokens < request.num_prompt_tokens
+                and not is_prompt_checkpoint
                 and checkpoint_position != request.shared_prefix_boundary
             ):
                 # retention_interval == 0 keeps this transient checkpoint

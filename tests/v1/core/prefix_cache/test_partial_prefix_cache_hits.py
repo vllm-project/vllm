@@ -2531,3 +2531,37 @@ def test_boundary_states_offered_past_prompt_for_resumed_prefill():
     offered = [b for _, _, b in drain_boundary_state_offloads(manager).get("0", [])]
     assert 2 * block_size in offered
     assert req0.num_prompt_tokens < 2 * block_size
+
+
+def test_prompt_end_checkpoint_survives_sparse_retention_with_coarse_hash():
+    """With hash_block_size == mamba block size (no fine-grained matching), the
+    hybrid coordinator caches the final chunk only up to its last full block,
+    so the managers see ``num_tokens < num_prompt_tokens`` there too. The
+    prompt-end checkpoint must still be published under retention_interval=0,
+    otherwise the next request that extends this prompt misses the prefix.
+    """
+    block_size = 32
+    manager = make_full_mamba_manager(
+        dcp_world_size=1,
+        hash_block_size=block_size,
+        full_block_size=block_size,
+        mamba_block_size=block_size,
+        num_prefill_checkpoint_blocks=1,
+    )
+    manager.coordinator.retention_interval = 0
+
+    # 240 tokens: not block aligned, prompt-end checkpoint at 224.
+    request = make_request("producer", list(range(240)), block_size, sha256)
+    computed_blocks, num_computed, _ = manager.get_computed_blocks(request)
+    assert manager.allocate_slots(request, 128, num_computed, computed_blocks)
+    request.num_computed_tokens = 128
+    manager.new_step_starts()
+    assert manager.allocate_slots(request, 112) is not None
+
+    end_hash = request.block_hashes[224 // block_size - 1]
+    assert manager.block_pool.get_cached_block(end_hash, [1]) is not None
+
+    # A request extending the prompt resumes from that checkpoint.
+    follower = make_request("follower", list(range(240)) + [7] * 40, block_size, sha256)
+    _, num_hit, _ = manager.get_computed_blocks(follower)
+    assert num_hit == 224
