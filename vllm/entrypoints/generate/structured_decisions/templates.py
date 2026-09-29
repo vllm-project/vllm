@@ -18,7 +18,6 @@ import string
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
-from functools import lru_cache
 from typing import Any
 
 import jinja2
@@ -224,25 +223,3 @@ def label_position(
             f"question {question.id!r}: two labels share a token"
         )
     return pos, label_ids
-
-
-@lru_cache(maxsize=16)
-def compile_template(source: str) -> DecisionTemplate:
-    return DecisionTemplate(source)
-
-
-def select_template(
-    server_source: str | None,
-    request_source: str | None,
-    trust_request_template: bool,
-) -> DecisionTemplate:
-    """The template for one request: its own when the server trusts request
-    templates, otherwise the server's, otherwise the default."""
-    if request_source is not None:
-        if not trust_request_template:
-            raise StructuredDecisionError(
-                "decision_template in a request needs the server to run with "
-                "--trust-request-chat-template"
-            )
-        return compile_template(request_source)
-    return compile_template(server_source or DEFAULT_DECISION_TEMPLATE)

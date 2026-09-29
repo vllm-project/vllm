@@ -19,7 +19,6 @@ def server():
         "--max-num-seqs",
         "32",
         "--enable-prefix-caching",
-        "--trust-request-chat-template",
     ]
     with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
         yield remote_server
@@ -146,38 +145,3 @@ def test_validation_errors(server, questions, match):
     response = post(server, {"model": MODEL_NAME, "state": "x", "questions": questions})
     assert response.status_code == 400
     assert match in response.json()["error"]["message"]
-
-
-TEMPLATE_BODY = {
-    "model": MODEL_NAME,
-    "state": "Team: billing.",
-    "questions": {
-        "team": {
-            "type": "choice",
-            "instructions": "Which team does the message name?",
-            "criteria": {"billing": None, "shipping": None},
-        }
-    },
-    "chat_template_kwargs": {"enable_thinking": False},
-}
-
-
-def test_request_template(server):
-    template = (
-        "{% macro answer(question, label) %}{{ question.id }} -> {{ label }}"
-        "{% endmacro %}"
-        "Classify the ticket.\n"
-        "{% for q in questions %}{{ q.instructions }}\n"
-        "{% for o in q.options %}{{ o.label }} = {{ o.name }}\n{% endfor %}"
-        "{% endfor %}"
-        "Reply as: id -> label"
-    )
-    custom = post(server, dict(TEMPLATE_BODY, decision_template=template))
-    assert custom.status_code == 200, custom.text
-    default = post(server, TEMPLATE_BODY)
-    assert default.status_code == 200, default.text
-    custom, default = custom.json(), default.json()
-    # Different probabilities show the request's template rendered the prompt.
-    assert custom["answers"]["team"]["probabilities"]["billing"] != pytest.approx(
-        default["answers"]["team"]["probabilities"]["billing"], abs=1e-3
-    )

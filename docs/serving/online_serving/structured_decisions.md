@@ -86,8 +86,7 @@ something other than a label, so the answer deserves less trust.
 The system prompt comes from a Jinja template, rendered in the same sandboxed
 environment as chat templates. The server uses its built-in template unless it
 starts with `--decision-template`. That flag takes a file path or the template
-inline. A request may send its own `decision_template` when the server runs
-with `--trust-request-chat-template`.
+inline.
 
 The template receives `instructions` (a string or `None`) and `questions`, a
 list of objects with `id`, `type`, `instructions` and `options`. Each option has
@@ -142,7 +141,6 @@ same prompt.
 | `state` | what the questions are about: a string, or JSON that is sent as its JSON text |
 | `questions` | question id to `{type, instructions, criteria}`, asked in this order |
 | `instructions` | optional context placed ahead of the questions |
-| `decision_template` | a Jinja decision template for this request, used only with `--trust-request-chat-template` |
 | `chat_template_kwargs` | passed to the chat template, for example `{"enable_thinking": false}` |
 | `seed` | optional, mixed into each question's label shuffle; average the answers over several seeds to cancel label bias |
 

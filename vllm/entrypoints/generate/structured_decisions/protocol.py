@@ -29,11 +29,6 @@ class StructuredDecisionRequest(OpenAIBaseModel):
     instructions: str | None = Field(
         default=None, description="Context placed ahead of the questions."
     )
-    decision_template: str | None = Field(
-        default=None,
-        description="A Jinja decision template for this request. Needs the "
-        "server to run with --trust-request-chat-template.",
-    )
     chat_template_kwargs: dict[str, Any] | None = None
     seed: int | None = Field(
         default=None,

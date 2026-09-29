@@ -21,7 +21,7 @@ from .protocol import (
 )
 from .question_types import Question, StructuredDecisionError, build_question
 from .strategies import DecisionLimits, ReadStrategy
-from .templates import select_template
+from .templates import DEFAULT_DECISION_TEMPLATE, DecisionTemplate
 
 logger = init_logger(__name__)
 
@@ -43,8 +43,6 @@ def parse_questions(
         )
     questions = []
     for qid, spec in request.questions.items():
-        # Unknown fields are refused: a field this server ignores could be one
-        # that changes the answer.
         if spec.model_extra:
             raise StructuredDecisionError(
                 f"question {qid!r}: unknown field(s) {sorted(spec.model_extra)}"
@@ -70,7 +68,6 @@ class ServingStructuredDecisions(BaseServing):
         strategy: ReadStrategy,
         *,
         decision_template: str | None = None,
-        trust_request_template: bool = False,
         request_logger: RequestLogger | None = None,
     ) -> None:
         model_config = strategy.context.engine_client.model_config
@@ -79,18 +76,7 @@ class ServingStructuredDecisions(BaseServing):
         )
         self.strategy = strategy
         self.limits = strategy.limits()
-        self.decision_template = decision_template
-        self.trust_request_template = trust_request_template
-        # A broken server template, or one with fewer than two labels for this
-        # tokenizer, stops startup here.
-        alphabet = select_template(decision_template, None, False).label_alphabet(
-            self._tokenizer()
-        )
-        if len(alphabet) < 2:
-            raise ValueError(
-                "--decision-template: fewer than two labels read cleanly with "
-                "this model's tokenizer"
-            )
+        self.template = DecisionTemplate(decision_template or DEFAULT_DECISION_TEMPLATE)
 
     def _tokenizer(self) -> TokenizerLike:
         return self.strategy.context.online_renderer.renderer.get_tokenizer()
@@ -109,19 +95,14 @@ class ServingStructuredDecisions(BaseServing):
         base_id = self._base_request_id(raw_request, default=request.request_id)
         request_id = f"decision-{base_id}"
         try:
-            template = select_template(
-                self.decision_template,
-                request.decision_template,
-                self.trust_request_template,
-            )
             questions = parse_questions(
-                request, self.limits, template.label_alphabet(self._tokenizer())
+                request, self.limits, self.template.label_alphabet(self._tokenizer())
             )
             lora_request = self._maybe_get_adapters(request)
             engine_client.check_admission(len(questions))
             reads = await self.strategy.read(
                 questions,
-                template,
+                self.template,
                 request.instructions,
                 state_text(request.state),
                 request_id=request_id,

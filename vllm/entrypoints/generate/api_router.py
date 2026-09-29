@@ -250,7 +250,6 @@ async def init_generate_state(
             decision_template=load_chat_template(
                 getattr(args, "decision_template", None)
             ),
-            trust_request_template=args.trust_request_chat_template,
             request_logger=request_logger,
         )
         if strategy_cls is not None

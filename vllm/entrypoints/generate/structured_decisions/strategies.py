@@ -72,8 +72,7 @@ class ReadStrategy(ABC):
         lora_request: LoRARequest | None,
         priority: int,
     ) -> list[QuestionRead]:
-        """One read per question, in order. Raises StructuredDecisionError for
-        a request the model cannot answer."""
+        """One read per question, in order."""
 
 
 READ_STRATEGIES: dict[str, type[ReadStrategy]] = {}

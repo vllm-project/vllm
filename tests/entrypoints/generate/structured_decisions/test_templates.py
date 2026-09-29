@@ -12,7 +12,6 @@ from vllm.entrypoints.generate.structured_decisions.templates import (
     DEFAULT_DECISION_TEMPLATE,
     LABEL_CANDIDATES,
     DecisionTemplate,
-    select_template,
 )
 from vllm.tokenizers import get_tokenizer
 
@@ -76,21 +75,6 @@ def test_custom_template_and_answer():
 def test_bad_template_is_a_request_error():
     with pytest.raises(StructuredDecisionError, match="decision template"):
         DecisionTemplate("{% for q in questions %}")
-
-
-def test_select_template_trust_gate():
-    qs = questions()
-    assert select_template(None, None, False).render(None, qs).answer(qs[0], "A") == (
-        "bucket: A"
-    )
-    with pytest.raises(StructuredDecisionError, match="trust-request-chat-template"):
-        select_template(None, "custom", False)
-    assert select_template(None, "custom", True).render(None, []).system_text == (
-        "custom"
-    )
-    assert select_template("server", None, False).render(None, []).system_text == (
-        "server"
-    )
 
 
 def test_slot_on_default_answer():
