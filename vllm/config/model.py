@@ -1103,7 +1103,9 @@ class ModelConfig:
         if runner == "pooling" and task in {"embed", "classify"}:
             if task == "embed":
                 cls += "EmbeddingModel"
-            elif task == "classify":
+            elif self.architectures[0].endswith("ForTokenClassification"):
+                cls += "ForTokenClassification"
+            else:
                 cls += "ForSequenceClassification"
         else:
             cls += "ForCausalLM"

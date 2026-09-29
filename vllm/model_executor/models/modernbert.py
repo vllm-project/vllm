@@ -18,16 +18,13 @@ from vllm.model_executor.layers.linear import (
     QKVParallelLinear,
     RowParallelLinear,
 )
-from vllm.model_executor.layers.pooler.tokwise import pooler_for_token_classify
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.sequence import IntermediateTensors
 
-from .interfaces import SupportsLoRA
-from .interfaces_base import attn_type, default_pooling_type
-from .utils import AutoWeightsLoader, WeightsMapper, maybe_prefix
+from .utils import WeightsMapper
 
 
 class ModernBertEmbeddings(nn.Module):
@@ -254,8 +251,7 @@ class ModernBertEncoderLayer(nn.Module):
 
 
 @support_torch_compile
-@default_pooling_type(seq_pooling_type="CLS")
-class ModernBertModel(nn.Module, SupportsLoRA):
+class ModernBertModel(nn.Module):
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={
             "model.layers.": "encoder_layer.layers.",
@@ -263,11 +259,6 @@ class ModernBertModel(nn.Module, SupportsLoRA):
             "model.": "",
         }
     )
-
-    packed_modules_mapping = {
-        "Wqkv": ["Wqkv"],
-        "Wi": ["Wi"],
-    }
 
     def __init__(
         self,
@@ -323,72 +314,3 @@ class ModernBertModel(nn.Module, SupportsLoRA):
         )
         norm_outputs = self.final_norm(outputs)
         return norm_outputs
-
-
-class ModernBertPredictionHead(nn.Module):
-    def __init__(self, config):
-        super().__init__()
-        self.config = config
-        self.dense = nn.Linear(
-            config.hidden_size, config.hidden_size, bias=config.classifier_bias
-        )
-        self.act = ACT2FN[config.classifier_activation]
-        self.norm = nn.LayerNorm(
-            config.hidden_size,
-            eps=getattr(config, "norm_eps", 1e-5),
-            bias=getattr(config, "norm_bias", True),
-        )
-
-    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        return self.norm(self.act(self.dense(hidden_states)))
-
-
-@attn_type("encoder_only")
-@default_pooling_type(tok_pooling_type="ALL")
-class ModernBertForTokenClassification(nn.Module):
-    is_pooling_model = True
-
-    hf_to_vllm_mapper = WeightsMapper(orig_to_new_prefix={"drop": None})
-
-    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
-        super().__init__()
-        config = vllm_config.model_config.hf_config
-        self.head_dtype = vllm_config.model_config.head_dtype
-        self.num_labels = config.num_labels
-        self.model = ModernBertModel(
-            vllm_config=vllm_config, prefix=maybe_prefix(prefix, "modernbert")
-        )
-        self.head = ModernBertPredictionHead(config)
-        self.classifier = nn.Linear(
-            config.hidden_size, config.num_labels, dtype=self.head_dtype
-        )
-
-        pooler_config = vllm_config.model_config.pooler_config
-        assert pooler_config is not None
-
-        self.pooler = pooler_for_token_classify(pooler_config)
-
-    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
-        return self.model.embed_input_ids(input_ids)
-
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
-        loader = AutoWeightsLoader(self)
-        loaded_params = loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
-        return loaded_params
-
-    def forward(
-        self,
-        input_ids: torch.Tensor | None,
-        positions: torch.Tensor,
-        intermediate_tensors: IntermediateTensors | None = None,
-        inputs_embeds: torch.Tensor | None = None,
-    ) -> torch.Tensor:
-        hidden_states = self.model(
-            input_ids=input_ids,
-            positions=positions,
-            inputs_embeds=inputs_embeds,
-            intermediate_tensors=intermediate_tensors,
-        )
-        hidden_states = self.head(hidden_states)
-        hidden_states = hidden_states.to(self.head_dtype)
-        return self.classifier(hidden_states)

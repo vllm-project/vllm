@@ -292,10 +292,6 @@ _REWARD_MODELS = {
 
 _TOKEN_CLASSIFICATION_MODELS = {
     "BertForTokenClassification": ("bert", "BertForTokenClassification"),
-    "ModernBertForTokenClassification": (
-        "modernbert",
-        "ModernBertForTokenClassification",
-    ),
     "OpenAIPrivacyFilterForTokenClassification": (
         "openai_privacy_filter",
         "OpenAIPrivacyFilterForTokenClassification",
@@ -722,6 +718,11 @@ _TRANSFORMERS_SUPPORTED_MODELS = {
         "transformers",
         "TransformersForSequenceClassification",
     ),
+    # Token classification models
+    "ModernBertForTokenClassification": (
+        "transformers",
+        "TransformersForTokenClassification",
+    ),
     # Multimodal models
     "Emu3ForConditionalGeneration": (
         "transformers",
@@ -769,6 +770,11 @@ _TRANSFORMERS_BACKEND_MODELS = {
     "TransformersMultiModalForSequenceClassification": (
         "transformers",
         "TransformersMultiModalForSequenceClassification",
+    ),
+    # Token classification models
+    "TransformersForTokenClassification": (
+        "transformers",
+        "TransformersForTokenClassification",
     ),
 }
 

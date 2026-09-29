@@ -20,17 +20,23 @@ from typing import TYPE_CHECKING
 
 import torch
 import torch.nn as nn
-from transformers import AutoModelForSequenceClassification
+from transformers import (
+    AutoModelForSequenceClassification,
+    AutoModelForTokenClassification,
+)
 
 from vllm.config.utils import getattr_iter
 from vllm.model_executor.layers.pooler import DispatchPooler
 from vllm.model_executor.layers.pooler.seqwise import get_seq_pooling_method
+from vllm.model_executor.layers.pooler.tokwise import pooler_for_token_classify
 from vllm.model_executor.models.interfaces import SupportsCrossEncoding
 from vllm.model_executor.models.interfaces_base import VllmModelForPooling
 
 from .base import Base
 
 if TYPE_CHECKING:
+    from transformers.models.auto.auto_factory import _BaseAutoModelClass
+
     from vllm.config import VllmConfig
 
 
@@ -61,9 +67,64 @@ class EmbeddingMixin(VllmModelForPooling, Base):
         self.pooler = DispatchPooler.for_embedding(pooler_config)
 
 
-class SequenceClassificationMixin(SupportsCrossEncoding, VllmModelForPooling, Base):
+class ClassificationMixin(VllmModelForPooling, Base):
     default_seq_pooling_type = "CLS"
 
+    def init_classifier(
+        self, auto_cls: type["_BaseAutoModelClass"], reshape: bool
+    ) -> nn.Module:
+        """Adopt the classifier, and any head before it, from `auto_cls`."""
+        # Certain information about the model and classifier can only be
+        # inferred from the `For*Classification` class. Therefore, we
+        # instantiate it on the "meta" device to avoid allocating GPU memory.
+        with torch.device("meta"):
+            cls_model = auto_cls.from_config(
+                self.config,
+                dtype=self.model_config.dtype,
+                trust_remote_code=self.model_config.trust_remote_code,
+            )
+
+        # When used for classification, some models have their
+        # pooling layers removed. Make sure this is reflected in vLLM.
+        for module in cls_model.modules():
+            if hasattr(module, "pooler") and module.pooler is None:
+                self.model.pooler = None
+                break
+
+        # Unlike `lm_head`, `classifier` is not always `nn.Linear`.
+        self.classifier = getattr_iter(cls_model, ["classifier", "score"], None)
+        if self.classifier is None:
+            raise ValueError(
+                "Could not find `classifier` or `score` layer in the "
+                f"`{auto_cls.__name__}` instance."
+            )
+        self.init_parameters(self.classifier, dtype=self.model_config.head_dtype)
+
+        if reshape:
+            # Order `ClassifierWithReshape` ahead of the classifier's own class so
+            # that its `super().forward(...)` reaches the original implementation.
+            self.classifier.__class__ = type(
+                "ClassifierWithReshape",
+                (ClassifierWithReshape, type(self.classifier)),
+                {},
+            )
+
+        # Modules between the base model and `classifier` (e.g. ModernBERT's `head`)
+        heads = []
+        for name, module in cls_model.named_children():
+            if module is cls_model.base_model:
+                continue
+            if module is self.classifier:
+                break
+            if isinstance(module, nn.Dropout):
+                continue
+            self.init_parameters(module, dtype=self.model_config.head_dtype)
+            setattr(self, name, module)
+            heads.append(module)
+        return nn.Sequential(*heads, self.classifier) if heads else self.classifier
+
+
+class SequenceClassificationMixin(SupportsCrossEncoding, ClassificationMixin):
     def __init__(self, *, vllm_config: "VllmConfig", prefix: str = ""):
         # Skip VllmModelForPooling.__init__ and call the next class in MRO
         super(VllmModelForPooling, self).__init__(
@@ -73,54 +134,8 @@ class SequenceClassificationMixin(SupportsCrossEncoding, VllmModelForPooling, Ba
         pooler_config = vllm_config.model_config.pooler_config
         assert pooler_config is not None
 
-        # Certain information about the model and classifier can only be
-        # inferred from the `ForSequenceClassification` class. Therefore, we
-        # instantiate it on the "meta" device to avoid allocating GPU memory.
-        with torch.device("meta"):
-            seq_cls_model = AutoModelForSequenceClassification.from_config(
-                self.config,
-                dtype=self.model_config.dtype,
-                trust_remote_code=self.model_config.trust_remote_code,
-            )
-
-        # When used for sequence classification, some models have their
-        # pooling layers removed. Make sure this is reflected in vLLM.
-        for module in seq_cls_model.modules():
-            if hasattr(module, "pooler") and module.pooler is None:
-                self.model.pooler = None
-                break
-
-        # Unlike `lm_head`, `classifier` is not always `nn.Linear`.
-        self.classifier = getattr_iter(seq_cls_model, ["classifier", "score"], None)
-        if self.classifier is None:
-            raise ValueError(
-                "Could not find `classifier` or `score` layer in the "
-                "`AutoModelForSequenceClassification` instance."
-            )
-        self.init_parameters(self.classifier, dtype=self.model_config.head_dtype)
-
-        # Order `ClassifierWithReshape` ahead of the classifier's own class so that
-        # its `super().forward(...)` reaches the original implementation.
-        self.classifier.__class__ = type(
-            "ClassifierWithReshape",
-            (ClassifierWithReshape, type(self.classifier)),
-            {},
-        )
-
-        # Modules applied between pooling and `classifier` (e.g. ModernBERT's `head`)
-        heads = []
-        for name, module in seq_cls_model.named_children():
-            if module is seq_cls_model.base_model:
-                continue
-            if module is self.classifier:
-                break
-            if isinstance(module, nn.Dropout):
-                continue
-            self.init_parameters(module, dtype=self.model_config.head_dtype)
-            setattr(self, name, module)
-            heads.append(module)
-        classifier = (
-            nn.Sequential(*heads, self.classifier) if heads else self.classifier
+        classifier = self.init_classifier(
+            AutoModelForSequenceClassification, reshape=True
         )
 
         pooling = None
@@ -136,3 +151,19 @@ class SequenceClassificationMixin(SupportsCrossEncoding, VllmModelForPooling, Ba
             pooling=pooling,
             classifier=classifier,
         )
+
+
+class TokenClassificationMixin(ClassificationMixin):
+    def __init__(self, *, vllm_config: "VllmConfig", prefix: str = ""):
+        # Skip VllmModelForPooling.__init__ and call the next class in MRO
+        super(VllmModelForPooling, self).__init__(
+            vllm_config=vllm_config, prefix=prefix
+        )
+
+        pooler_config = vllm_config.model_config.pooler_config
+        assert pooler_config is not None
+
+        classifier = self.init_classifier(
+            AutoModelForTokenClassification, reshape=False
+        )
+        self.pooler = pooler_for_token_classify(pooler_config, classifier=classifier)
