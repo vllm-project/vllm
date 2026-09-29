@@ -5,7 +5,7 @@
 from dataclasses import dataclass, replace
 from enum import Enum
 from functools import partial
-from typing import ClassVar
+from typing import ClassVar, cast
 
 import numpy as np
 import torch
@@ -496,13 +496,11 @@ class FlashInferBackend(AttentionBackend):
         kernel_block_size: int,
         vllm_config: VllmConfig,
     ) -> int:
+        spec = cast(AttentionSpec, spec)
         if (
             vllm_config.cache_config.get_resolved_kv_cache_layout()
             != KVCacheLayout.BLHNC
-            or not isinstance(spec, AttentionSpec)
             or spec.kv_quant_mode != KVQuantMode.NONE
-            or spec.tokens_per_state != 1
-            or spec.head_size != spec.head_size_v
         ):
             return kernel_block_size
         transfer = vllm_config.kv_transfer_config
