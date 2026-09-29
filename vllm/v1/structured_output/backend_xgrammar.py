@@ -21,7 +21,6 @@ from vllm.v1.structured_output.backend_types import (
 from vllm.v1.structured_output.utils import (
     choice_as_grammar,
     compile_regex_with_timeout,
-    convert_lark_to_ebnf,
     grammar_is_likely_lark,
 )
 
@@ -38,6 +37,10 @@ class XgrammarBackend(StructuredOutputBackend):
     def __post_init__(self):
         self.disable_any_whitespace = (
             self.vllm_config.structured_outputs_config.disable_any_whitespace
+        )
+        model_config = self.vllm_config.model_config
+        is_plamo3 = (
+            model_config is not None and model_config.hf_config.model_type == "plamo3"
         )
 
         if is_mistral_tokenizer(self.tokenizer):
@@ -58,6 +61,10 @@ class XgrammarBackend(StructuredOutputBackend):
                 stop_token_ids=stop_token_ids,
                 add_prefix_space=True,
             )
+        elif is_plamo3 and callable(
+            init_xgrammar := getattr(self.tokenizer, "init_xgrammar", None)
+        ):
+            tokenizer_info, _ = init_xgrammar()
         else:
             tokenizer_info = xgr.TokenizerInfo.from_huggingface(
                 self.tokenizer,
@@ -91,7 +98,10 @@ class XgrammarBackend(StructuredOutputBackend):
                 '{"type": "object"}', any_whitespace=not self.disable_any_whitespace
             )
         elif request_type == StructuredOutputOptions.GRAMMAR:
-            ctx = self.compiler.compile_grammar(grammar_spec)
+            if grammar_is_likely_lark(grammar_spec):
+                ctx = self.compiler.compile_lark(grammar_spec)
+            else:
+                ctx = self.compiler.compile_grammar(grammar_spec)
         elif request_type == StructuredOutputOptions.REGEX:
             ctx = compile_regex_with_timeout(
                 self.compiler.compile_regex,
@@ -404,19 +414,13 @@ def validate_xgrammar_grammar(sampling_params: SamplingParams) -> None:
         return
 
     if so_params.grammar:
-        if grammar_is_likely_lark(so_params.grammar):
-            # xgrammar supports EBNF grammars only
-            try:
-                so_params.grammar = convert_lark_to_ebnf(so_params.grammar)
-            except ValueError as e:
-                raise VLLMValidationError(
-                    "Failed to convert the grammar from Lark to EBNF. "
-                ) from e
-
-        # Test parsing EBNF grammar, possibly already converted from Lark
+        # Parse the grammar with the same syntax `compile_grammar` will use,
+        # but don't compile it. The grammar is passed on unchanged.
         try:
-            # parse the grammar, but we aren't compiling it.
-            xgr.Grammar.from_ebnf(so_params.grammar)
+            if grammar_is_likely_lark(so_params.grammar):
+                xgr.Grammar.from_lark(so_params.grammar)
+            else:
+                xgr.Grammar.from_ebnf(so_params.grammar)
         except Exception as e:
             raise VLLMValidationError("Invalid grammar specification.") from e
         return

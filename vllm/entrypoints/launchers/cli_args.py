@@ -14,6 +14,9 @@ from typing import Any, Literal
 import vllm.envs as envs
 from vllm.config import config
 from vllm.engine.arg_utils import AsyncEngineArgs, optional_type
+from vllm.entrypoints.anthropic.protocol import (
+    AnthropicDisabledThinkingEffortOption,
+)
 from vllm.entrypoints.chat_utils import (
     ChatTemplateContentFormatOption,
     validate_chat_template,
@@ -90,6 +93,11 @@ class BaseFrontendArgs:
     """Whether to trust the chat template provided in the request. If False,
     the server will always use the chat template specified by `--chat-template`
     or the ones from tokenizer."""
+    trust_request_mm_kwargs: bool = False
+    """Whether to trust per-request multimodal kwargs (`mm_processor_kwargs`
+    and `media_io_kwargs`). If False, the server rejects non-empty values
+    because they can change multimodal preprocessing resource usage. Only
+    enable this when API clients are trusted."""
     default_chat_template_kwargs: dict[str, Any] | None = None
     """Default keyword arguments to pass to the chat template renderer.
     These will be merged with request-level chat_template_kwargs,
@@ -131,8 +139,6 @@ class BaseFrontendArgs:
     The `demo` Python tool executes model-generated code in Docker without
     network isolation by default. See the security guide for more
     information."""
-    log_config_file: str | None = envs.VLLM_LOGGING_CONFIG_PATH
-    """Path to logging config JSON file for both vllm and uvicorn"""
     max_log_len: int | None = None
     """Max number of prompt characters or prompt ID numbers being printed in
     log. The default of None means unlimited."""
@@ -181,6 +187,13 @@ class BaseFrontendArgs:
     ``--default-chat-template-kwargs '{"cohere_format": "..."}'`` -- any
     explicit request-level ``chat_template_kwargs.cohere_format`` takes
     priority."""
+    anthropic_disabled_thinking_effort: AnthropicDisabledThinkingEffortOption = "auto"
+    """Anthropic ``/v1/messages`` only. The ``reasoning_effort`` used for
+    requests with ``thinking: {"type": "disabled"}``. ``none`` turns thinking
+    off for models that support it; ``low`` suits models that always think
+    (e.g. GLM-5.3) or reject ``none`` (e.g. gpt-oss). ``auto`` (default) uses
+    ``low`` when the renderer rejects ``none`` or renders it the same as a
+    thinking effort, and ``none`` otherwise."""
     log_error_stack: bool = envs.VLLM_SERVER_DEV_MODE
     """If set to True, log the stack trace of error responses"""
     tokens_only: bool = False
