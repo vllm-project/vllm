@@ -76,6 +76,8 @@ def _bicubic_resize_and_normalize(
     unchanged so rescaling and normalization can run on the model device.
     """
     tensor = tensor.permute(0, 3, 1, 2)
+    if do_cpu_normalize:
+        tensor = tensor.to(dtype=torch.float32)
     if size is not None:
         tensor = torch.nn.functional.interpolate(
             tensor, size=size, mode="bicubic", align_corners=False, antialias=True
@@ -84,7 +86,6 @@ def _bicubic_resize_and_normalize(
     if not do_cpu_normalize:
         return tensor.contiguous()
 
-    tensor = tensor.to(dtype=torch.float32)
     tensor = tensor / 255.0
     if norm_mean is not None and norm_std is not None:
         tensor = (tensor - norm_mean) / norm_std

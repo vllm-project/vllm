@@ -83,7 +83,7 @@ GPU-side fusion is controlled by `multimodal_config.mm_device_do_normalize`:
 | `intern-s1-pro`    | `InternS1ProForConditionalGeneration`    | `internlm/Intern-S1-Pro`                              |
 | `intern-s2-mobius` | `InternS2MobiusForConditionalGeneration` | `internlm/Intern-S2-Mobius`                           |
 | `mistral3`         | `Mistral3ForConditionalGeneration`       | `mistralai/Mistral-Small-3.2-24B-Instruct-2506`, etc. |
-| `nano-nemotron-vl` | `NemotronH_Nano_VL_V2`                   | `nvidia/NVIDIA-Nemotron-Nano-12B-v2-VL-BF16`, etc.    |
+| `nano-nemotron-vl` | `NemotronH_Nano_VL_V2`                   | `nvidia/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-NVFP4` |
 | `qwen2-vl`         | `Qwen2VLForConditionalGeneration`        | `Qwen/Qwen2-VL-2B-Instruct`, etc.                     |
 | `qwen2.5-vl`       | `Qwen2_5_VLForConditionalGeneration`     | `Qwen/Qwen2.5-VL-3B-Instruct`, etc.                   |
 | `qwen3-vl`         | `Qwen3VLForConditionalGeneration`        | `Qwen/Qwen3-VL-4B-Instruct`, etc.                     |

@@ -28,10 +28,7 @@ from vllm.inputs import MultiModalDataDict, MultiModalInput
 from vllm.logger import init_logger
 from vllm.lora.layers.base import BaseLayerWithLoRA
 from vllm.model_executor.layers.activation import ReLUSquaredActivation
-from vllm.model_executor.layers.fusion.mm_input_norm import (
-    FusedMMInputNorm,
-    IdentityInputNorm,
-)
+from vllm.model_executor.layers.fusion.mm_input_norm import FusedMMInputNorm
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.interfaces import (
@@ -997,14 +994,14 @@ class NemotronH_Nano_VL_V2(
         assert isinstance(llm_dtype, torch.dtype)
         self.llm_dtype = llm_dtype
         with self._mark_tower_model(vllm_config, {"image", "video", "audio"}):
-            self.input_norm = (
+            self.input_norm: FusedMMInputNorm | None = (
                 FusedMMInputNorm(
                     image_mean=config.norm_mean,
                     image_std=config.norm_std,
                     rescale_factor=1.0 / 255.0,
                 )
                 if multimodal_config.mm_device_do_normalize
-                else IdentityInputNorm()
+                else None
             )
             self.vision_model = self.get_vit_model_from_radio_config(config).to(
                 llm_dtype
@@ -1104,6 +1101,8 @@ class NemotronH_Nano_VL_V2(
         return x
 
     def _normalize_pixel_values(self, pixel_values: torch.Tensor) -> torch.Tensor:
+        if self.input_norm is None:
+            return pixel_values
         shape = pixel_values.shape
         if pixel_values.ndim == 4:
             flattened = pixel_values.reshape(shape[0], -1)
