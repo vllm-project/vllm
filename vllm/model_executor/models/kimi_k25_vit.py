@@ -38,7 +38,6 @@ from vllm.model_executor.models.vision import (
     is_vit_use_data_parallel,
     run_dp_sharded_mrope_vision_model,
 )
-from vllm.platforms import current_platform
 from vllm.transformers_utils.configs.kimi_k25 import KimiK25VisionConfig
 from vllm.triton_utils import HAS_TRITON
 from vllm.utils.torch_utils import async_tensor_h2d
