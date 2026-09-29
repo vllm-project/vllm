@@ -86,81 +86,47 @@ def test_mixed_head_counts_in_one_group_are_rejected():
         _build([MODEL_WIDE_NUM_HEADS, 64])
 
 
-@pytest.mark.parametrize(
-    (
-        "query_lens",
-        "is_prefilling",
-        "causal",
-        "expected",
-    ),
-    [
-        ([1, 4, 5, 0], [False] * 4, True, [True, True, False, False]),
-        ([4], None, True, [False]),
-        (
-            [4, 4, 4],
-            [False, True, False],
-            torch.tensor([True, True, False]),
-            [True, False, False],
-        ),
-    ],
-)
-@requires_cpu
-def test_cpu_decode_mask_marks_only_eligible_requests(
-    query_lens,
-    is_prefilling,
-    causal,
-    expected,
-):
-    """Only causal decode rows within the verification limit are eligible."""
-    builder = SimpleNamespace(
-        is_cross_attention=False,
-        vllm_config=SimpleNamespace(
-            uniform_decode_query_len=4,
-            speculative_config=None,
-        ),
-    )
-    common = SimpleNamespace(
-        query_start_loc=torch.tensor([0] + query_lens, dtype=torch.int32).cumsum(0),
-        is_prefilling=(None if is_prefilling is None else torch.tensor(is_prefilling)),
-    )
-
-    actual = CPUAttentionMetadataBuilder._build_decode_mask(
-        builder, common, causal=causal
-    )
-
-    assert actual.tolist() == expected
-
-
 @requires_cpu
 @pytest.mark.skipif(
     not torch.cpu._is_amx_tile_supported(), reason="requires AMX support"
 )
-def test_cpu_builder_forwards_decode_mask_to_scheduler():
-    builder = _build([32, 32], block_size=32)
+@pytest.mark.parametrize(
+    ("is_cross_attention", "speculative_method", "expected_group"),
+    [
+        (False, None, 4),
+        (False, "medusa", 4),
+        (True, None, 1),
+    ],
+)
+def test_cpu_builder_schedules_short_query_without_phase_marker(
+    is_cross_attention, speculative_method, expected_group
+):
+    builder = _build([32], block_size=32)
+    builder.is_cross_attention = is_cross_attention
+    if speculative_method is not None:
+        builder.vllm_config.speculative_config = SimpleNamespace(
+            method=speculative_method
+        )
     common = SimpleNamespace(
-        num_reqs=2,
-        num_actual_tokens=8,
+        num_reqs=1,
+        num_actual_tokens=4,
         max_query_len=4,
-        max_seq_len=101,
-        query_start_loc=torch.tensor([0, 4, 8], dtype=torch.int32),
-        seq_lens=torch.tensor([100, 101], dtype=torch.int32),
-        block_table_tensor=torch.zeros((2, 8), dtype=torch.int32),
-        slot_mapping=torch.arange(8, dtype=torch.int64),
+        max_seq_len=8192,
+        query_start_loc=torch.tensor([0, 4], dtype=torch.int32),
+        seq_lens=torch.tensor([8192], dtype=torch.int32),
+        block_table_tensor=torch.zeros((1, 256), dtype=torch.int32),
+        slot_mapping=torch.arange(4, dtype=torch.int64),
         causal=True,
-        is_prefilling=torch.tensor([False, True]),
+        is_prefilling=None,
     )
 
-    with (
-        patch(
-            "vllm.v1.attention.backends.cpu_attn.ops.cpu_attn_get_scheduler_metadata",
-            return_value=torch.empty(0, dtype=torch.int8),
-        ) as scheduler,
-        patch("vllm.v1.attention.backends.cpu_attn.envs.VLLM_CPU_ATTN_SPLIT_KV", True),
-    ):
-        builder.build(0, common)
+    with patch("vllm.v1.attention.backends.cpu_attn.envs.VLLM_CPU_ATTN_SPLIT_KV", True):
+        metadata = builder.build(0, common).scheduler_metadata
 
-    decode_mask = scheduler.call_args.kwargs["decode_mask"]
-    assert decode_mask.tolist() == [True, False]
+    words = metadata.view(torch.int32)
+    workitem_count = words[68 // 4].item()
+    workitems = words[192 // 4 : 192 // 4 + workitem_count * 12].reshape(-1, 12)
+    assert set(workitems[:, 3].tolist()) == {expected_group}
 
 
 def test_flash_attention_geometry_comes_from_the_group():

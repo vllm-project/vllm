@@ -460,7 +460,8 @@ def varlen_with_paged_kv(
     v_scale: float = 1.0,
     dynamic_causal: list[bool] | None = None,
     s_aux_dtype: torch.dtype = torch.bfloat16,
-    decode_mask: list[bool] | None = None,
+    expected_grouped_requests: set[int] | None = None,
+    expected_mha_requests: set[int] | None = None,
 ) -> None:
     set_random_seed(0)
     num_seqs = len(seq_lens)
@@ -476,9 +477,6 @@ def varlen_with_paged_kv(
         torch.tensor(dynamic_causal, dtype=torch.bool)
         if dynamic_causal is not None
         else None
-    )
-    decode_mask_tensor = (
-        torch.tensor(decode_mask, dtype=torch.bool) if decode_mask is not None else None
     )
 
     # for n heads the set of slopes is the geometric sequence that starts
@@ -569,7 +567,6 @@ def varlen_with_paged_kv(
         enable_kv_split=False,
         dynamic_causal=dynamic_causal_tensor,
         kv_cache_dtype=kv_cache_dtype,
-        decode_mask=decode_mask_tensor,
     )
 
     out_without_split = torch.empty_like(query)
@@ -608,8 +605,14 @@ def varlen_with_paged_kv(
         enable_kv_split=True,
         dynamic_causal=dynamic_causal_tensor,
         kv_cache_dtype=kv_cache_dtype,
-        decode_mask=decode_mask_tensor,
     )
+    if expected_grouped_requests is not None or expected_mha_requests is not None:
+        q_head_nums = _metadata_q_head_nums_by_request(metadata)
+        for req_id in expected_grouped_requests or ():
+            assert len(q_head_nums[req_id]) == 1
+            assert next(iter(q_head_nums[req_id])) > 1
+        for req_id in expected_mha_requests or ():
+            assert q_head_nums[req_id] == {1}
 
     out_with_split = torch.empty_like(query)
     cpu_attention_with_kv_cache(
@@ -660,7 +663,6 @@ def varlen_with_paged_kv(
             enable_kv_split=True,
             dynamic_causal=dynamic_causal_tensor,
             kv_cache_dtype="auto",
-            decode_mask=decode_mask_tensor,
         )
         ref_output = torch.empty_like(query)
         cpu_attention_with_kv_cache(
@@ -1373,7 +1375,6 @@ def test_varlen_with_paged_kv_dynamic_causal(
 @pytest.mark.skipif(not torch.cpu._is_amx_tile_supported(), reason="no AMX support.")
 def test_amx_spec_decode_gqa_mixed_request_correctness(kv_cache_dtype: str) -> None:
     varlen_with_paged_kv(
-        # q=5 is beyond the builder's configured verification limit of four.
         seq_lens=[(5, 513), (1, 193), (4, 1025)],
         num_heads=(32, 4),
         head_size=128,
@@ -1386,17 +1387,75 @@ def test_amx_spec_decode_gqa_mixed_request_correctness(kv_cache_dtype: str) -> N
         use_sink=True,
         isa="amx",
         kv_cache_dtype=kv_cache_dtype,
-        decode_mask=[False, True, True],
     )
+
+
+@pytest.mark.parametrize("kv_cache_dtype", ["auto", "fp8_e4m3", "fp8_e5m2"])
+@pytest.mark.skipif(not torch.cpu._is_amx_tile_supported(), reason="no AMX support.")
+def test_amx_gqa_mixed_prefill_boundary(kv_cache_dtype: str) -> None:
+    # At a Q:KV-head ratio of 32, q=33 exceeds the grouped work bound.
+    varlen_with_paged_kv(
+        seq_lens=[(17, 8192), (33, 8193)],
+        num_heads=(32, 1),
+        head_size=128,
+        sliding_window=None,
+        dtype=torch.bfloat16,
+        block_size=32,
+        soft_cap=None,
+        num_blocks=512,
+        use_alibi=False,
+        use_sink=False,
+        isa="amx",
+        kv_cache_dtype=kv_cache_dtype,
+        expected_grouped_requests={0},
+        expected_mha_requests={1},
+    )
+
+
+@pytest.mark.skipif(not torch.cpu._is_amx_tile_supported(), reason="no AMX support.")
+def test_amx_gqa_causal_q4_long_context() -> None:
+    varlen_with_paged_kv(
+        seq_lens=[(4, 8192)],
+        num_heads=(32, 4),
+        head_size=128,
+        sliding_window=None,
+        dtype=torch.bfloat16,
+        block_size=32,
+        soft_cap=None,
+        num_blocks=256,
+        use_alibi=False,
+        use_sink=False,
+        isa="amx",
+        kv_cache_dtype="auto",
+        expected_grouped_requests={0},
+    )
+
+
+def _metadata_q_head_nums_by_request(metadata: torch.Tensor) -> dict[int, set[int]]:
+    # Mirror AttentionMetadata's 192-byte header and the 48-byte
+    # AttentionWorkItemGroup layout, including q_head_num at byte offset 12.
+    metadata_words = metadata.view(torch.int32)
+    workitem_group_num = metadata_words[68 // 4].item()
+    workitems = metadata_words[192 // 4 : 192 // 4 + workitem_group_num * 12]
+    workitems = workitems.reshape(workitem_group_num, 12)
+    return {
+        req_id: set(workitems[workitems[:, 0] == req_id, 3].tolist())
+        for req_id in torch.unique(workitems[:, 0]).tolist()
+    }
 
 
 def _scheduler_metadata_for_test(
     query_lens: list[int],
     seq_lens: list[int],
-    decode_mask: torch.Tensor | None,
+    dynamic_causal: list[bool] | None = None,
 ) -> torch.Tensor:
     query_start_loc = torch.tensor([0] + query_lens, dtype=torch.int32).cumsum(
         0, dtype=torch.int32
+    )
+    dynamic_causal_tensor = (
+        torch.tensor(dynamic_causal, dtype=torch.bool)
+        if dynamic_causal is not None
+        else None
     )
     return cpu_attn_get_scheduler_metadata(
         num_reqs=len(query_lens),
@@ -1406,36 +1465,23 @@ def _scheduler_metadata_for_test(
         seq_lens=torch.tensor(seq_lens, dtype=torch.int32),
         dtype=torch.bfloat16,
         query_start_loc=query_start_loc,
-        causal=True,
+        causal=dynamic_causal is None,
         sliding_window_size=-1,
         isa="amx",
         enable_kv_split=True,
-        decode_mask=decode_mask,
+        dynamic_causal=dynamic_causal_tensor,
     )
 
 
-@pytest.mark.parametrize(
-    ("decode_mask", "message"),
-    [
-        (torch.tensor([[True, False]]), "one-dimensional"),
-        (torch.tensor([1, 0], dtype=torch.int32), "boolean dtype"),
-        (torch.tensor([True, False, True, False])[::2], "contiguous"),
-        (torch.tensor([True]), "one value per request"),
-    ],
-)
-def test_cpu_scheduler_rejects_invalid_decode_mask(
-    decode_mask: torch.Tensor, message: str
-) -> None:
-    with pytest.raises(RuntimeError, match=message):
-        _scheduler_metadata_for_test([1, 1], [256, 256], decode_mask)
-
-
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA tensor")
-def test_cpu_scheduler_rejects_non_cpu_decode_mask() -> None:
-    with pytest.raises(RuntimeError, match="CPU tensor"):
-        _scheduler_metadata_for_test(
-            [1, 1], [256, 256], torch.ones(2, dtype=torch.bool, device="cuda")
-        )
+@pytest.mark.skipif(not torch.cpu._is_amx_tile_supported(), reason="no AMX support.")
+def test_amx_scheduler_keeps_noncausal_request_on_mha() -> None:
+    metadata = _scheduler_metadata_for_test(
+        [4, 4], [8192, 8192], dynamic_causal=[True, False]
+    )
+    q_head_nums = _metadata_q_head_nums_by_request(metadata)
+    assert len(q_head_nums[0]) == 1
+    assert next(iter(q_head_nums[0])) > 1
+    assert q_head_nums[1] == {1}
 
 
 # ---------------------------------------------------------------------------

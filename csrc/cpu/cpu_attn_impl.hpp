@@ -89,6 +89,7 @@ struct AttentionWorkItemGroup {
     ss << "split_id: " << split_id << ",\n";
     ss << "local_split_id: " << local_split_id << ",\n";
     ss << ']';
+
     return ss.str();
   }
 };
@@ -126,6 +127,7 @@ struct ReductionWorkItemGroup {
     ss << "split_num: " << split_num << ",\n";
     ss << "scratch_offset: " << scratch_offset << ",\n";
     ss << ']';
+
     return ss.str();
   }
 };
@@ -140,7 +142,7 @@ struct AttentionTaskSpan {
 
 struct AttentionMetadata {
   std::atomic_int64_t counter;
-  char _padding_after_counter[56];
+  char _padding1[56];
   ISA isa;
   int32_t workitem_group_num;
   int32_t reduction_item_num;
@@ -158,7 +160,7 @@ struct AttentionMetadata {
                     int32_t reduction_item_num, int32_t reduction_split_num,
                     int32_t task_span_num)
       : counter(0),
-        _padding_after_counter{},
+        _padding1{},
         isa(isa),
         workitem_group_num(workitem_group_num),
         reduction_item_num(reduction_item_num),
@@ -229,7 +231,7 @@ struct AttentionMetadata {
     for (int32_t i = 0; i < workitem_group_num; ++i) {
       ss << (workitem_groups_ptr + i)->to_string() << ",\n";
     }
-    ss << "reduction items:\n";
+    ss << "reduction items: \n";
     for (int32_t i = 0; i < reduction_item_num; ++i) {
       ss << (reduction_items_ptr + i)->to_string() << ",\n";
     }
@@ -432,7 +434,6 @@ class AttentionScheduler {
     int32_t kv_block_alignment;  // context length alignment requirement
     bool enable_kv_split;
     bool* dynamic_causal;
-    bool* decode_mask;
     bool fp8_kv_cache;
   };
 
@@ -451,19 +452,22 @@ class AttentionScheduler {
     const auto request_q_token_num = [&](const int32_t req_id) {
       return input.query_start_loc[req_id + 1] - input.query_start_loc[req_id];
     };
-    const auto request_decode_eligible = [&](const int32_t req_id) {
-      return input.decode_mask != nullptr && input.decode_mask[req_id];
-    };
     const int32_t original_q_head_per_kv =
         input.num_heads_q / input.num_heads_kv;
     const bool supports_gqa = original_q_head_per_kv <= max_num_q_per_iter;
+    // Bound grouped query tiles per KV head by the MHA head-task count.
+    const int32_t max_gqa_candidate_q =
+        original_q_head_per_kv > 0
+            ? original_q_head_per_kv *
+                  (max_num_q_per_iter / original_q_head_per_kv)
+            : 0;
     const bool uses_amx = input.isa == ISA::AMX;
     const bool supported_amx_geometry =
         uses_amx && input.head_dim > 0 && input.head_dim % 32 == 0;
     const int32_t min_split_kv_len =
         ((max_num_q_per_iter * 4 + kv_len_alignment - 1) / kv_len_alignment) *
         kv_len_alignment;
-    const int32_t min_auto_verify_split_kv_len =
+    const int32_t min_adaptive_split_kv_len =
         ((max_num_q_per_iter * 8 + kv_len_alignment - 1) / kv_len_alignment) *
         kv_len_alignment;
     const int64_t default_tile_size = calcu_default_tile_size(
@@ -491,12 +495,12 @@ class AttentionScheduler {
       return is_dynamic_causal ? input.dynamic_causal[req_id] : causal;
     };
     const auto request_semantic_eligible = [&](const int32_t req_id) {
-      return request_q_token_num(req_id) > 0 &&
-             request_decode_eligible(req_id) && request_causal(req_id);
+      return request_q_token_num(req_id) > 0 && request_causal(req_id);
     };
     const auto request_adaptive_eligible = [&](const int32_t req_id) {
       return request_semantic_eligible(req_id) && supports_gqa &&
              original_q_head_per_kv > 1 && request_q_token_num(req_id) > 1 &&
+             request_q_token_num(req_id) <= max_gqa_candidate_q &&
              supported_amx_geometry && input.enable_kv_split;
     };
     bool has_multi_token_request = false;
@@ -526,12 +530,12 @@ class AttentionScheduler {
           }
         };
     const auto legacy_kv_len_per_thread =
-        [&](const SchedulePlan& plan, const bool verification,
+        [&](const SchedulePlan& plan, const bool adaptive_request,
             const std::vector<SchedulePlan>* request_plans) {
           int64_t total_aligned_kv_len = 0;
           for (int32_t req_id = 0; req_id < input.num_reqs; ++req_id) {
             const bool in_category =
-                verification
+                adaptive_request
                     ? request_adaptive_eligible(req_id)
                     : (supports_gqa && request_q_token_num(req_id) == 1);
             if (!in_category) {
@@ -558,15 +562,15 @@ class AttentionScheduler {
         };
     const auto compatibility_split_num =
         [&](const int32_t tile_q, const int64_t aligned_kv_len,
-            const bool verification, const int64_t kv_len_per_thread) {
+            const bool adaptive_request, const int64_t kv_len_per_thread) {
           if (!input.enable_kv_split) {
             return int32_t{1};
           }
           const int32_t min_split_len =
-              verification ? min_auto_verify_split_kv_len : min_split_kv_len;
+              adaptive_request ? min_adaptive_split_kv_len : min_split_kv_len;
           int64_t split_num =
               (aligned_kv_len + kv_len_per_thread - 1) / kv_len_per_thread;
-          if (verification) {
+          if (adaptive_request) {
             const int32_t query_tokens = std::max(tile_q, 1);
             split_num = (split_num + query_tokens - 1) / query_tokens;
           }
@@ -584,14 +588,14 @@ class AttentionScheduler {
         [&](const int32_t req_id, const SchedulePlan& req_plan,
             const bool plan_eligible, const bool ordinary_decode,
             const int64_t decode_kv_len_per_thread,
-            const int64_t verification_kv_len_per_thread) {
+            const int64_t adaptive_kv_len_per_thread) {
           RequestScheduleMetrics result;
           ScheduleMetrics& metrics = result.metrics;
           if (request_q_token_num(req_id) == 0) {
             return result;
           }
           const int32_t required_split_kv_len =
-              plan_eligible ? min_auto_verify_split_kv_len : min_split_kv_len;
+              plan_eligible ? min_adaptive_split_kv_len : min_split_kv_len;
           const bool compatibility_split =
               ordinary_decode ||
               (plan_eligible && req_plan.grouped && req_plan.q_head_num > 1);
@@ -610,7 +614,7 @@ class AttentionScheduler {
                     compatibility_split
                         ? compatibility_split_num(
                               tile_q, aligned_kv_len, plan_eligible,
-                              plan_eligible ? verification_kv_len_per_thread
+                              plan_eligible ? adaptive_kv_len_per_thread
                                             : decode_kv_len_per_thread)
                         : 1;
                 if (split_num > 1 &&
@@ -710,10 +714,10 @@ class AttentionScheduler {
         [&](const int32_t req_id, const SchedulePlan& req_plan,
             const bool plan_eligible, const bool ordinary_decode,
             const int64_t decode_kv_len_per_thread,
-            const int64_t verification_kv_len_per_thread) {
+            const int64_t adaptive_kv_len_per_thread) {
           RequestScheduleMetrics result = evaluate_request_plan(
               req_id, req_plan, plan_eligible, ordinary_decode,
-              decode_kv_len_per_thread, verification_kv_len_per_thread);
+              decode_kv_len_per_thread, adaptive_kv_len_per_thread);
           if (!result.valid || result.metrics.runnable_tasks == 0) {
             result.metrics.score = std::numeric_limits<double>::infinity();
             return result.metrics;
@@ -728,7 +732,7 @@ class AttentionScheduler {
           bool has_grouped_plan = false;
           const int64_t decode_kv_len_per_thread =
               legacy_kv_len_per_thread(plan, false, request_plans);
-          const int64_t verification_kv_len_per_thread =
+          const int64_t adaptive_kv_len_per_thread =
               legacy_kv_len_per_thread(plan, true, request_plans);
           for (int32_t req_id = 0; req_id < input.num_reqs; ++req_id) {
             const bool plan_eligible = request_adaptive_eligible(req_id);
@@ -744,7 +748,7 @@ class AttentionScheduler {
             has_grouped_plan |= plan_eligible && req_plan.grouped;
             RequestScheduleMetrics request_metrics = evaluate_request_plan(
                 req_id, req_plan, plan_eligible, ordinary_decode,
-                decode_kv_len_per_thread, verification_kv_len_per_thread);
+                decode_kv_len_per_thread, adaptive_kv_len_per_thread);
             if (!request_metrics.valid) {
               return metrics;
             }
@@ -792,7 +796,7 @@ class AttentionScheduler {
 
       const int64_t decode_kv_len_per_thread =
           legacy_kv_len_per_thread(mha_plan, false, &selected_request_plans);
-      const int64_t verification_kv_len_per_thread =
+      const int64_t adaptive_kv_len_per_thread =
           legacy_kv_len_per_thread(mha_plan, true, &selected_request_plans);
 #pragma omp parallel for schedule(static, 1)
       for (int32_t req_id = 0; req_id < input.num_reqs; ++req_id) {
@@ -802,7 +806,7 @@ class AttentionScheduler {
         SchedulePlan selected_plan = mha_plan;
         ScheduleMetrics selected_metrics = evaluate_request(
             req_id, selected_plan, true, false, decode_kv_len_per_thread,
-            verification_kv_len_per_thread);
+            adaptive_kv_len_per_thread);
         for (int32_t group = 2; group <= original_q_head_per_kv; ++group) {
           if (original_q_head_per_kv % group != 0 ||
               group > max_num_q_per_iter) {
@@ -811,7 +815,7 @@ class AttentionScheduler {
           const SchedulePlan candidate{group, true};
           const ScheduleMetrics metrics = evaluate_request(
               req_id, candidate, true, false, decode_kv_len_per_thread,
-              verification_kv_len_per_thread);
+              adaptive_kv_len_per_thread);
           if (metrics.score < selected_metrics.score) {
             selected_plan = candidate;
             selected_metrics = metrics;
@@ -862,7 +866,7 @@ class AttentionScheduler {
                                           selected_request_plans) {
       const int64_t decode_kv_len_per_thread = legacy_kv_len_per_thread(
           selected_plan, false, selected_request_plans);
-      const int64_t verification_kv_len_per_thread =
+      const int64_t adaptive_kv_len_per_thread =
           legacy_kv_len_per_thread(selected_plan, true, selected_request_plans);
       std::vector<SchedulePlan> request_plans;
       request_plans.reserve(input.num_reqs);
@@ -903,7 +907,7 @@ class AttentionScheduler {
                                       req_plan.q_head_num > 1)
                       ? compatibility_split_num(
                             q_tile_token_num, aligned_kv_len, plan_eligible,
-                            plan_eligible ? verification_kv_len_per_thread
+                            plan_eligible ? adaptive_kv_len_per_thread
                                           : decode_kv_len_per_thread)
                       : 1;
               const int32_t reduction_id =
@@ -1237,7 +1241,7 @@ class AttentionScheduler {
     };
 
     MaterializedPlan plan;
-    // Keep FP8 batches without multi-token verification on legacy scheduling.
+    // Keep FP8 batches without multi-token candidates on legacy scheduling.
     if (input.isa == ISA::AMX &&
         (!input.fp8_kv_cache || has_multi_token_request)) {
       auto [workitems, reductions] = materialize_plan(
@@ -2441,16 +2445,6 @@ class AttentionMainLoop {
                   float* curr_max_buffer = max_buffer + q_tile_head_offset;
                   float* curr_sum_buffer = sum_buffer + q_tile_head_offset;
 
-                  // std::printf(
-                  //     "thread=%d req=%d q=[%d,%d) heads=[%d,%d) kv_head=%d "
-                  //     "kv=[%d,%d)\n",
-                  //     thread_id, current_group_idx,
-                  //     q_token_start_idx + q_head_tile_token_offset,
-                  //     q_token_start_idx + q_head_tile_token_offset +
-                  //         q_tile_token_num,
-                  //     q_head_start_idx, q_head_start_idx + q_tile_head_num,
-                  //     kv_head_idx, aligned_actual_kv_tile_pos_left,
-                  //     aligned_actual_kv_tile_pos_right);
                   bool debug_info = false;
                   // if (debug_info) {
                   //   std::printf("\tq_iter_idx: %d, q_token_start: %d,"
