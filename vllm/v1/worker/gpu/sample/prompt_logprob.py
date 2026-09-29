@@ -9,7 +9,7 @@ import torch
 from vllm.config.model import LogprobsMode
 from vllm.sampling_params import SamplingParams
 from vllm.triton_utils import tl, triton
-from vllm.utils.torch_utils import async_tensor_h2d
+from vllm.utils.torch_utils import PIN_MEMORY
 from vllm.v1.outputs import LogprobsTensors
 from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.sample.logprob import (
@@ -53,10 +53,12 @@ class PromptLogprobsWorker:
         if uses_prompt_logprobs:
             self.in_progress_prompt_logprobs[req_id] = []
         if sampling_params.prompt_logprob_token_ids is not None:
-            # Decoded arrays may be read-only; torch.from_numpy warns on those.
-            ids = np.require(sampling_params.prompt_logprob_token_ids, requirements="W")
+            ids = sampling_params.prompt_logprob_token_ids
+            # One host copy: the decoded (read-only) array goes straight to pinned.
+            host = torch.empty(ids.shape, dtype=torch.int32, pin_memory=PIN_MEMORY)
+            host.numpy()[:] = ids
             # Upload int32 and widen on device: gather takes int64 indices.
-            ids = async_tensor_h2d(ids, self.device).long()
+            ids = host.to(self.device, non_blocking=True).long()
             self.token_id_scores[req_id] = _TokenIdScores(
                 ids.clamp_min(0), ids < 0, sampling_params.prompt_logprob_start or 0
             )
