@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import json
+import threading
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
@@ -32,6 +33,9 @@ else:
     xgr = LazyLoader("xgr", globals(), "xgrammar")
 
 logger = init_logger(__name__)
+
+# One BatchGrammarMatcher per thread, since bitmask fills can run in a pool.
+_batch_matcher_local = threading.local()
 
 
 @dataclass
@@ -298,6 +302,25 @@ class XgrammarGrammar(StructuredOutputGrammar):
 
     def fill_bitmask(self, bitmask: torch.Tensor, idx: int) -> None:
         self.matcher.fill_next_token_bitmask(bitmask, idx)
+
+    @classmethod
+    def fill_bitmask_batch(
+        cls,
+        grammars: list[tuple[StructuredOutputGrammar, int]],
+        bitmask: torch.Tensor,
+    ) -> None:
+        matchers: list[xgr.GrammarMatcher] = []
+        batch_indices: list[int] = []
+        for grammar, batch_index in grammars:
+            assert isinstance(grammar, XgrammarGrammar)
+            matchers.append(grammar.matcher)
+            batch_indices.append(batch_index)
+
+        batch_matcher = getattr(_batch_matcher_local, "matcher", None)
+        if batch_matcher is None:
+            batch_matcher = xgr.BatchGrammarMatcher(max_threads=1)
+            _batch_matcher_local.matcher = batch_matcher
+        batch_matcher.batch_fill_next_token_bitmask(matchers, bitmask, batch_indices)
 
     def is_terminated(self) -> bool:
         return self._is_terminated

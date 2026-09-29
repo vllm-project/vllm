@@ -81,6 +81,24 @@ class StructuredOutputGrammar(ABC):
 
         """
 
+    @classmethod
+    def fill_bitmask_batch(
+        cls,
+        grammars: "list[tuple[StructuredOutputGrammar, int]]",
+        bitmask: "torch.Tensor",
+    ) -> None:
+        """Fills the bitmask for several grammars of this class.
+
+        Backends can override this to fill all rows in a single call.
+
+        Args:
+            grammars: (grammar, batch_index) pairs to fill
+            bitmask (torch.Tensor): The bitmask to fill
+
+        """
+        for grammar, batch_index in grammars:
+            grammar.fill_bitmask(bitmask, batch_index)
+
     @abstractmethod
     def is_terminated(self) -> bool:
         """Checks whether the structured output process has terminated.

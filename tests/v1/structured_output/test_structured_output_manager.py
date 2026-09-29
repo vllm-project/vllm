@@ -1,15 +1,20 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import threading
 import time
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from threading import Event
+from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import numpy as np
 import pytest
+import torch
 from transformers import AutoTokenizer
 
+import vllm.v1.structured_output.backend_xgrammar as backend_xgrammar
 from vllm.config import (
     DeviceConfig,
     SchedulerConfig,
@@ -26,7 +31,8 @@ from vllm.sampling_params import SamplingParams, StructuredOutputsParams
 from vllm.v1.request import Request
 from vllm.v1.structured_output import StructuredOutputManager
 from vllm.v1.structured_output.backend_outlines import OutlinesBackend, OutlinesGrammar
-from vllm.v1.structured_output.backend_xgrammar import XgrammarBackend
+from vllm.v1.structured_output.backend_types import StructuredOutputGrammar
+from vllm.v1.structured_output.backend_xgrammar import XgrammarBackend, XgrammarGrammar
 from vllm.v1.structured_output.request import get_structured_output_key
 
 TOKENIZER = "gpt2"
@@ -842,3 +848,78 @@ def test_clear_backend_without_grammar(skip_tokenizer_init, max_num_seqs):
     for executor in executors:
         with pytest.raises(RuntimeError, match="cannot schedule new futures"):
             executor.submit(int, 0)
+
+
+class _PerRowGrammar(StructuredOutputGrammar):
+    """Grammar without a batched fill, to check the per-row fallback."""
+
+    def __init__(self):
+        self.filled: list[int] = []
+
+    def accept_tokens(self, request_id: str, tokens: list[int]) -> bool:
+        return True
+
+    def validate_tokens(self, tokens: list[int]) -> list[int]:
+        return tokens
+
+    def rollback(self, num_tokens: int) -> None:
+        pass
+
+    def fill_bitmask(self, bitmask: torch.Tensor, batch_index: int) -> None:
+        self.filled.append(batch_index)
+
+    def is_terminated(self) -> bool:
+        return False
+
+    def reset(self):
+        pass
+
+
+def test_fill_bitmasks_batches_xgrammar(monkeypatch):
+    manager = StructuredOutputManager.__new__(StructuredOutputManager)
+    manager._grammar_bitmask = torch.zeros((6, 2), dtype=torch.int32)
+    manager._full_mask = torch.tensor(-1, dtype=torch.int32)
+
+    batch_filler = MagicMock()
+    batch_matcher_cls = MagicMock(return_value=batch_filler)
+    monkeypatch.setattr(backend_xgrammar, "_batch_matcher_local", threading.local())
+    monkeypatch.setattr(
+        backend_xgrammar,
+        "xgr",
+        SimpleNamespace(BatchGrammarMatcher=batch_matcher_cls),
+    )
+
+    matcher0 = object()
+    matcher1 = object()
+    grammar0 = XgrammarGrammar(vocab_size=64, matcher=matcher0, ctx=object())
+    grammar1 = XgrammarGrammar(vocab_size=64, matcher=matcher1, ctx=object())
+    terminated = XgrammarGrammar(vocab_size=64, matcher=object(), ctx=object())
+    terminated._is_terminated = True
+    other0 = _PerRowGrammar()
+    other1 = _PerRowGrammar()
+
+    manager._fill_bitmasks(
+        [
+            (grammar0, 0, True, ()),
+            (grammar1, 1, True, ()),
+            (terminated, 2, True, ()),
+            (grammar0, 3, False, ()),
+            (other0, 4, True, ()),
+            (other1, 5, True, ()),
+        ]
+    )
+
+    # xgrammar rows are filled in one batched call, others one row at a time.
+    batch_matcher_cls.assert_called_once_with(max_threads=1)
+    batch_filler.batch_fill_next_token_bitmask.assert_called_once_with(
+        [matcher0, matcher1], manager._grammar_bitmask, [0, 1]
+    )
+    assert other0.filled == [4]
+    assert other1.filled == [5]
+    assert manager._grammar_bitmask[2].tolist() == [-1, -1]
+    assert manager._grammar_bitmask[3].tolist() == [-1, -1]
+
+    # The batch matcher is reused on the same thread.
+    manager._fill_bitmasks([(grammar0, 0, True, ()), (grammar1, 1, True, ())])
+    batch_matcher_cls.assert_called_once_with(max_threads=1)
+    assert batch_filler.batch_fill_next_token_bitmask.call_count == 2
