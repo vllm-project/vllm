@@ -299,7 +299,7 @@ TEST_MODEL = "test-model"
 
 @pytest.fixture(autouse=True)
 def _clean_registry():
-    """vLLM metrics share the process-wide registry, so drop them per test."""
+    """VLLM metrics share the process-wide registry, so drop them per test."""
     unregister_vllm_metrics()
     yield
     unregister_vllm_metrics()
