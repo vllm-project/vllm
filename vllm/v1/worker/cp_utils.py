@@ -18,16 +18,20 @@ else:
 logger = init_logger(__name__)
 
 
-def check_attention_cp_compatibility(vllm_config: VllmConfig) -> None:
+def check_attention_cp_compatibility(
+    vllm_config: VllmConfig,
+    target_layer_names: set[str] | None = None,
+) -> None:
     pcp_size = vllm_config.parallel_config.prefill_context_parallel_size
     dcp_size = vllm_config.parallel_config.decode_context_parallel_size
     interleave_size = vllm_config.parallel_config.cp_kv_cache_interleave_size
     if pcp_size * dcp_size > 1:
         layer_type = cast(type[Any], AttentionLayerBase)
         layers = get_layers_from_vllm_config(vllm_config, layer_type)
-        for layer in layers.values():
+        for layer_name, layer in layers.items():
+            check_pcp = target_layer_names is None or layer_name in target_layer_names
             get_attn_backend = getattr(layer, "get_attn_backend", None)
-            if pcp_size > 1 and get_attn_backend is not None:
+            if pcp_size > 1 and check_pcp and get_attn_backend is not None:
                 backend = get_attn_backend()
                 assert backend.supports_pcp(), (
                     "PCP requires attention backend support, "
@@ -35,6 +39,8 @@ def check_attention_cp_compatibility(vllm_config: VllmConfig) -> None:
                 )
             layer_impl = getattr(layer, "impl", None)
             if layer_impl is None:
+                continue
+            if not check_pcp and layer_impl.dcp_world_size == 1:
                 continue
             if vllm_config.speculative_config is not None and interleave_size > 1:
                 assert layer_impl.supports_mtp_with_cp_non_trivial_interleave_size, (
