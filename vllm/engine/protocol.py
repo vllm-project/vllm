@@ -258,6 +258,22 @@ class EngineClient(ABC):
         """Scale the engine."""
         raise NotImplementedError
 
+    async def check_health_gpu(self) -> bool:
+        """Check whether the engine can serve requests.
+
+        An idle engine runs a dummy forward pass, except under MoE data
+        parallelism, where only liveness and sleep state are checked.
+
+        Returns:
+            Whether the engine is ready. False if it is alive but sleeping or
+            paused, or its dummy forward pass failed or timed out.
+
+        Raises:
+            EngineDeadError: If the engine is dead.
+
+        """
+        raise NotImplementedError
+
     async def collective_rpc(
         self,
         method: str,
