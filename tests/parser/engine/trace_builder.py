@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import functools
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 from tests.parser.engine.replay_harness import (
@@ -28,6 +28,7 @@ from tests.parser.engine.replay_harness import (
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionToolsParam,
 )
+from vllm.parser import plamo3
 from vllm.parser.engine.registered_adapters import (
     DeepSeekV4Parser,
     DeepSeekV32Parser,
@@ -35,10 +36,12 @@ from vllm.parser.engine.registered_adapters import (
     Gemma4Parser,
     Glm47MoeParser,
     GraniteParser,
+    GraniteThinkingParser,
     InklingParser,
     KimiK2Parser,
     MinimaxM2Parser,
     NemotronV3Parser,
+    Plamo3Parser,
     Qwen3Parser,
     SeedOssParser,
 )
@@ -594,6 +597,30 @@ def _build_nemotron_v3(scenario: Scenario, validate: bool = True) -> Sample:
     )
 
 
+def _build_granite_thinking(scenario: Scenario, validate: bool = True) -> Sample:
+    """Granite 4.2: the Nemotron V3 grammar plus leading-newline stripping on
+    content after ``</think>``."""
+    sample = _build_qwen3(
+        scenario,
+        name="granite_thinking_parser",
+        parser_cls=GraniteThinkingParser,
+        strip_trailing_ws=True,
+        validate=False,
+    )
+    sample = replace(
+        sample,
+        expected_content=(
+            sample.expected_content.lstrip("\n")
+            if sample.expected_content
+            else sample.expected_content
+        ),
+        content_lstrip="\n",
+    )
+    if validate:
+        _validate_sample(sample, GraniteThinkingParser)
+    return sample
+
+
 # ── Seed-OSS (Qwen3 XML grammar with Seed wrapper tokens) ────────────
 
 _SEED_OSS_VOCAB: dict[str, int] = {
@@ -1043,6 +1070,70 @@ def _build_inkling(scenario: Scenario, validate: bool = True) -> Sample:
     return sample
 
 
+# ── PLaMo3 (literal nested tool-request wrappers) ───────────────────
+
+_PLAMO3_MARKERS = (
+    plamo3.BEGIN_THINK,
+    plamo3.END_THINK,
+    plamo3.BEGIN_TOOL_REQUESTS,
+    plamo3.END_TOOL_REQUESTS,
+    plamo3.BEGIN_TOOL_REQUEST,
+    plamo3.END_TOOL_REQUEST,
+    plamo3.BEGIN_TOOL_NAME,
+    plamo3.END_TOOL_NAME,
+    plamo3.BEGIN_TOOL_ARGUMENTS,
+    plamo3.END_TOOL_ARGUMENTS,
+    plamo3.EOT,
+)
+_PLAMO3_VOCAB = {marker: 300 + i for i, marker in enumerate(_PLAMO3_MARKERS)}
+
+
+def _plamo3_tool_segments(tc: ToolCallSpec) -> list[tuple[str, bool]]:
+    args = json.dumps(tc.arguments, ensure_ascii=False, separators=(",", ":"))
+    return [
+        (plamo3.BEGIN_TOOL_REQUEST, True),
+        (plamo3.BEGIN_TOOL_NAME, True),
+        (tc.name, False),
+        (plamo3.END_TOOL_NAME, True),
+        (plamo3.BEGIN_TOOL_ARGUMENTS, True),
+        (args, False),
+        (plamo3.END_TOOL_ARGUMENTS, True),
+        (plamo3.END_TOOL_REQUEST, True),
+    ]
+
+
+def _plamo3_segments(scenario: Scenario) -> list[tuple[str, bool]]:
+    segs: list[tuple[str, bool]] = [
+        (plamo3.BEGIN_THINK, True),
+        (scenario.reasoning or "", False),
+        (plamo3.END_THINK, True),
+    ]
+    if scenario.content is not None:
+        segs.append((scenario.content, False))
+    if scenario.tool_calls is not None:
+        segs.append((plamo3.BEGIN_TOOL_REQUESTS, True))
+        for tool_call in scenario.tool_calls:
+            segs.extend(_plamo3_tool_segments(tool_call))
+        segs.append((plamo3.END_TOOL_REQUESTS, True))
+    return segs
+
+
+def _build_plamo3(scenario: Scenario, validate: bool = True) -> Sample:
+    sample = _make_sample(
+        sample_id=f"plamo3-{scenario.id}",
+        description=scenario.description,
+        vocab=_PLAMO3_VOCAB,
+        segments=_plamo3_segments(scenario),
+        expected_reasoning=scenario.reasoning or "",
+        expected_content=_qwen3_expected_content(scenario),
+        expected_tool_calls=_expected_tc(scenario),
+        tools=_expected_tools(scenario),
+    )
+    if validate:
+        _validate_sample(sample, Plamo3Parser)
+    return sample
+
+
 # ── Granite (JSON-array tool bodies, no reasoning) ───────────────────────
 
 _GRANITE_VOCAB: dict[str, int] = {
@@ -1136,11 +1227,13 @@ _BUILDERS: dict[str, Any] = {
     "granite": _build_granite,
     "minimax_m2": _build_minimax_m2,
     "nemotron_v3": _build_nemotron_v3,
+    "granite_thinking_parser": _build_granite_thinking,
     "seed_oss": _build_seed_oss,
     "glm47_moe": _build_glm47_moe,
     "kimi_k2": _build_kimi_k2,
     "qwen3": _build_qwen3,
     "inkling": _build_inkling,
+    "plamo3": _build_plamo3,
 }
 
 
@@ -1150,23 +1243,3 @@ def build_samples(model: str) -> tuple[Sample, ...]:
     builder = _BUILDERS[model]
     scenarios = _KIMI_K2_SCENARIOS if model == "kimi_k2" else SCENARIOS
     return tuple(s for s in (builder(sc) for sc in scenarios) if s is not None)
-
-
-def build_sample(model: str, scenario: Scenario) -> Sample | None:
-    """Build a single sample for one model + scenario."""
-    return _BUILDERS[model](scenario)
-
-
-def build_scaling_sample(
-    model: str, token_count: int, validate: bool = False
-) -> Sample:
-    """Build a sample with approximately *token_count* tokens."""
-    sentence = "The quick brown fox jumps over the lazy dog. "
-    text = sentence * (token_count // 10 + 1)
-    scenario = Scenario(
-        id=f"scaling-{token_count}",
-        description=f"Scaling test with ~{token_count} tokens",
-        reasoning=text,
-        tool_calls=[_READ_TOOL],
-    )
-    return _BUILDERS[model](scenario, validate=validate)

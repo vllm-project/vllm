@@ -48,6 +48,7 @@ def test_prepare_attn_forwards_positions(monkeypatch: pytest.MonkeyPatch) -> Non
         seq_lens_cpu_upper_bound=torch.tensor([1537], dtype=torch.int32),
         seq_lens=torch.tensor([1537], dtype=torch.int32),
         is_prefilling_np=torch.tensor([False]).numpy(),
+        prefill_runs_as_decode_np=None,
         dcp_local_seq_lens=None,
         positions=positions,
         prompt_lens=torch.tensor([1024], dtype=torch.int32),
@@ -94,6 +95,7 @@ def _input_batch_with_no_scheduled_drafts() -> SimpleNamespace:
         max_query_len=None,
         seq_lens_cpu_upper_bound=torch.tensor([10, 10], dtype=torch.int32),
         is_prefilling_np=np.array([False, False]),
+        prefill_runs_as_decode_np=None,
         num_draft_tokens_per_req=None,
         idx_mapping=torch.tensor([0, 1], dtype=torch.int64),
         query_start_loc=torch.tensor([0, 1, 2], dtype=torch.int32),
@@ -273,8 +275,7 @@ def test_padded_prompt_tail_builds_as_spec_decode(
         seq_lens_cpu_upper_bound=torch.tensor(seq_lens, dtype=torch.int32),
         seq_lens=torch.tensor(seq_lens, dtype=torch.int32),
         is_prefilling_np=np.array(is_prefilling),
-        prefill_len_np=np.array([40, 129, 100], dtype=np.int32),
-        num_computed_prefill_tokens_np=np.array([40, 128, 0], dtype=np.int32),
+        prefill_runs_as_decode_np=np.array([False, True, False]),
         dcp_local_seq_lens=None,
         positions=torch.zeros(12, dtype=torch.int64),
         prompt_lens=None,
@@ -292,11 +293,12 @@ def test_padded_prompt_tail_builds_as_spec_decode(
     mamba_metadata = build_attn_metadata.call_args.kwargs[
         "model_specific_attn_metadata"
     ]
+    assert mamba_metadata.is_prefilling.tolist() == [False, False, True]
 
     builder = _create_gdn_builder(num_speculative_tokens=k)
     common = create_common_attn_metadata(
         BatchSpec(seq_lens=seq_lens, query_lens=query_lens), BLOCK_SIZE, DEVICE
-    ).replace(is_prefilling=torch.tensor(is_prefilling))
+    ).replace(**mamba_metadata.get_extra_common_attn_kwargs(0, 3))
     meta = builder.build(
         common_prefix_len=0,
         common_attn_metadata=common,

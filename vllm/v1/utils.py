@@ -530,7 +530,7 @@ def run_api_server_worker_proc(
     client_config = client_config or {}
     server_index = client_config.get("client_index", 0)
 
-    # Set process title and add process-specific prefix to stdout and stderr.
+    # Set process title and process-specific log metadata.
     set_process_title("APIServer", str(server_index))
     decorate_logs()
 

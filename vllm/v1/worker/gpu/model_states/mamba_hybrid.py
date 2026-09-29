@@ -278,10 +278,13 @@ class MambaHybridModelState(DefaultModelState):
         else:
             max_seq_len = seq_lens_cpu_upper_bound[:num_reqs].max().item()
 
+        is_prefilling_np = input_batch.is_prefilling_np
+        if input_batch.prefill_runs_as_decode_np is not None:
+            # A prompt tail the scheduler padded with placeholder drafts must run
+            # as a spec-decode row: the prefill kernels can't roll them back.
+            is_prefilling_np = is_prefilling_np & ~input_batch.prefill_runs_as_decode_np
         is_prefilling = torch.zeros(num_reqs, dtype=torch.bool, device="cpu")
-        is_prefilling[: input_batch.num_reqs] = torch.from_numpy(
-            input_batch.is_prefilling_np
-        )
+        is_prefilling[: input_batch.num_reqs] = torch.from_numpy(is_prefilling_np)
         # During CUDAGraph capture, num_decode_draft_tokens_cpu and num_accepted_tokens
         # are created by attn_metadata_builder.build_for_cudagraph_capture, so we only
         # compute them during actual (non-capture) forward execution.
@@ -293,28 +296,13 @@ class MambaHybridModelState(DefaultModelState):
                 input_batch.idx_mapping
             ]
 
-            is_prefilling_for_state = input_batch.is_prefilling_np
             num_draft_tokens_per_req = input_batch.num_draft_tokens_per_req
-            if num_draft_tokens_per_req is not None:
-                # Test request state, not num_scheduled_tokens == draft_count+1:
-                # adaptive rewrites num_scheduled_tokens to an even split, so that
-                # equality rarely holds and would demote every verify row to decode.
-                # A one-token prompt tail over prior state that the scheduler padded
-                # with placeholder drafts is also a spec-decode row: the prefill
-                # kernels can't roll the placeholders back.
-                num_computed = input_batch.num_computed_prefill_tokens_np
-                is_prompt_tail = (num_computed > 0) & (
-                    input_batch.prefill_len_np - num_computed == 1
-                )
-                is_prefilling_for_state = input_batch.is_prefilling_np & ~(
-                    is_prompt_tail & (num_draft_tokens_per_req > 0)
-                )
             num_decode_draft_tokens_cpu = torch.from_numpy(
                 compute_num_decode_draft_tokens(
                     num_reqs,
                     input_batch.num_scheduled_tokens,
                     num_draft_tokens_per_req,
-                    is_prefilling_for_state,
+                    is_prefilling_np,
                 )
             )
 
