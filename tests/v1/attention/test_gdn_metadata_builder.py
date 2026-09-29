@@ -21,6 +21,7 @@ from vllm.v1.attention.backends.gdn_attn import (
     GDNAttentionMetadata,
     GDNAttentionMetadataBuilder,
 )
+from vllm.v1.attention.backends.utils import mamba_get_block_table_tensor
 from vllm.v1.kv_cache_interface import MambaSpec
 
 BLOCK_SIZE = 16
@@ -73,6 +74,17 @@ GDN_BUILD_TEST_CASES = {
         expected_num_decodes=3,
         expected_num_prefills=0,
         expected_num_prefill_tokens=0,
+        expected_num_spec_decodes=0,
+    ),
+    # No speculative config, decode alongside prefill
+    "regular_decode_with_prefill": GDNBuildTestCase(
+        seq_lens=[40, 100],
+        query_lens=[1, 50],
+        num_decode_draft_tokens=None,
+        num_speculative_tokens=0,
+        expected_num_decodes=1,
+        expected_num_prefills=1,
+        expected_num_prefill_tokens=50,
         expected_num_spec_decodes=0,
     ),
     # Multi-token prefill alongside spec decode — no decode to reclassify
@@ -155,9 +167,12 @@ def _build(
     builder: GDNAttentionMetadataBuilder,
     batch_spec: BatchSpec,
     num_decode_draft_tokens: list[int] | None = None,
+    block_table: torch.Tensor | None = None,
 ) -> GDNAttentionMetadata:
     """Build GDN attention metadata, optionally with spec-decode kwargs."""
     common = create_common_attn_metadata(batch_spec, BLOCK_SIZE, DEVICE)
+    if block_table is not None:
+        common = common.replace(block_table_tensor=block_table)
     kwargs: dict = {}
     if num_decode_draft_tokens is not None:
         kwargs["num_decode_draft_tokens_cpu"] = torch.tensor(
@@ -182,6 +197,54 @@ def test_gdn_build_classification(test_case: GDNBuildTestCase):
     assert meta.num_prefills == test_case.expected_num_prefills
     assert meta.num_prefill_tokens == test_case.expected_num_prefill_tokens
     assert meta.num_spec_decodes == test_case.expected_num_spec_decodes
+
+
+@pytest.mark.parametrize("mamba_cache_mode", ["none", "align"])
+@pytest.mark.parametrize("full_cuda_graph", [False, True])
+@pytest.mark.parametrize(
+    "test_case", GDN_BUILD_TEST_CASES.values(), ids=GDN_BUILD_TEST_CASES.keys()
+)
+def test_update_block_table_matches_build(
+    test_case: GDNBuildTestCase, full_cuda_graph: bool, mamba_cache_mode: str
+):
+    """update_block_table() on another group's metadata matches build()."""
+    batch = BatchSpec(seq_lens=test_case.seq_lens, query_lens=test_case.query_lens)
+    src, dst, ref = (
+        _create_gdn_builder(test_case.num_speculative_tokens, full_cuda_graph)
+        for _ in range(3)
+    )
+    for builder in (src, dst, ref):
+        builder.vllm_config.cache_config.mamba_cache_mode = mamba_cache_mode
+    common = create_common_attn_metadata(batch, BLOCK_SIZE, DEVICE)
+    if mamba_cache_mode == "align":
+        # MRV2 precomputes these for every Mamba group each step.
+        dst.mamba_aligned_state_indices = ref.mamba_aligned_state_indices = (
+            mamba_get_block_table_tensor(
+                common.block_table_tensor, common.seq_lens, ref.kv_cache_spec, "align"
+            )
+        )
+    draft_tokens = test_case.num_decode_draft_tokens
+    expected = _build(ref, batch, draft_tokens, common.block_table_tensor)
+    source = _build(src, batch, draft_tokens)
+    fields = (
+        "spec_state_indices_tensor",
+        "non_spec_state_indices_tensor",
+        "prefill_state_indices",
+    )
+    source_indices = [getattr(source, f) for f in fields]
+    source_indices = [t if t is None else t.clone() for t in source_indices]
+    meta = dst.update_block_table(
+        source, common.block_table_tensor, common.slot_mapping
+    )
+
+    for field, source_index in zip(fields, source_indices):
+        actual = getattr(meta, field)
+        torch.testing.assert_close(actual, getattr(expected, field))
+        # The source group's indices are untouched.
+        torch.testing.assert_close(getattr(source, field), source_index)
+        # FULL graph state indices land in this group's own buffers.
+        if full_cuda_graph and meta.num_prefills == 0 and actual is not None:
+            assert actual.data_ptr() == getattr(dst, field).data_ptr()
 
 
 def test_has_initial_state_after_reclassification():
@@ -304,3 +367,66 @@ def test_cudagraph_capture_batch_stays_decode_only():
     assert staged is not None
     assert staged.data_ptr() == builder.non_spec_state_indices_tensor.data_ptr()
     torch.testing.assert_close(staged, common_attn_metadata.block_table_tensor[:, 0])
+
+
+@pytest.mark.parametrize("num_spec", [0, 3])
+@pytest.mark.parametrize("prefix_match_unit, expected_offset", [(16, 96), (8, 96)])
+def test_checkpoint_metadata_preserves_non_spec_order(
+    num_spec, prefix_match_unit, expected_offset
+):
+    """Only eligible non-spec rows get a checkpoint in their reserved page."""
+    from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
+
+    vllm_config = create_vllm_config(
+        model_name="Qwen/Qwen3.5-0.8B",
+        block_size=BLOCK_SIZE,
+    )
+    if num_spec > 0:
+        vllm_config.speculative_config = SpeculativeConfig(
+            method="ngram",
+            num_speculative_tokens=num_spec,
+        )
+    vllm_config.cache_config.mamba_cache_mode = "align"
+    vllm_config.cache_config.prefix_match_unit = prefix_match_unit
+    mamba_spec = MambaSpec(
+        block_size=64,
+        shapes=((16, 64),),
+        dtypes=(torch.float16,),
+        mamba_cache_mode="align",
+        num_speculative_blocks=num_spec,
+        num_prefill_checkpoint_blocks=1,
+        prefill_checkpoint_alignment=16,
+    )
+    builder = GDNAttentionMetadataBuilder(
+        kv_cache_spec=mamba_spec,
+        layer_names=["layer.0"],
+        vllm_config=vllm_config,
+        device=DEVICE,
+    )
+    batch = BatchSpec(
+        seq_lens=[65, 100, 100], query_lens=[3 if num_spec else 1, 100, 99]
+    )
+    common = create_common_attn_metadata(batch, 64, DEVICE, arange_block_indices=True)
+    table = common.block_table_tensor + 1
+    if num_spec:
+        table = torch.cat([table, torch.zeros(3, num_spec, dtype=table.dtype)], dim=1)
+    common = common.replace(block_table_tensor=table)
+    kwargs = {}
+    if num_spec:
+        kwargs = dict(
+            num_decode_draft_tokens_cpu=torch.tensor([2, -1, -1], dtype=torch.int32),
+            num_accepted_tokens=torch.ones(3, dtype=torch.int32),
+        )
+
+    actual = builder.build(0, common, **kwargs)
+    assert actual.checkpoint is not None
+    offsets = [expected_offset, 0] if num_spec else [0, expected_offset, 0]
+    slots = [common.block_table_tensor[1, 0].item(), NULL_BLOCK_ID]
+    if not num_spec:
+        slots.insert(0, NULL_BLOCK_ID)
+    torch.testing.assert_close(
+        actual.checkpoint.checkpoint_offsets, torch.tensor(offsets, dtype=torch.int32)
+    )
+    torch.testing.assert_close(
+        actual.checkpoint.state_indices, torch.tensor(slots, dtype=torch.int32)
+    )
