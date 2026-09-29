@@ -27,6 +27,7 @@ from pydantic import BaseModel, Field, ValidationError
 
 from vllm.entrypoints.anthropic.api_router import attach_router
 from vllm.entrypoints.anthropic.protocol import (
+    AnthropicCountTokensRequest,
     AnthropicMessagesRequest,
 )
 from vllm.entrypoints.anthropic.serving import (
@@ -1908,6 +1909,32 @@ class TestThinkingConfig:
         assert result.reasoning_effort == "high"
         assert result.include_reasoning is True
         assert result.thinking_token_budget is None
+
+    @pytest.mark.parametrize(
+        "config",
+        [
+            pytest.param({"output_config": {"effort": "low"}}, id="effort"),
+            pytest.param({"thinking": {"type": "disabled"}}, id="disabled"),
+            pytest.param(
+                {"thinking": {"type": "enabled", "budget_tokens": 2048}},
+                id="enabled",
+            ),
+        ],
+    )
+    def test_count_tokens_matches_messages(self, config):
+        """Effort and thinking change the rendered prompt, so count_tokens must
+        apply them the same way /v1/messages does."""
+        messages = [{"role": "user", "content": "Hello"}]
+        expected = _convert(
+            AnthropicMessagesRequest(
+                model="test-model", max_tokens=4096, messages=messages, **config
+            )
+        )
+        result = _convert(
+            AnthropicCountTokensRequest(model="test-model", messages=messages, **config)
+        )
+        assert result.reasoning_effort == expected.reasoning_effort
+        assert result.thinking_token_budget == expected.thinking_token_budget
 
 
 class TestProbeDisabledThinkingEffort:
