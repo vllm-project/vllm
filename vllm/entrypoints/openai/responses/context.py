@@ -37,6 +37,9 @@ from vllm.entrypoints.openai.responses.utils import (
     build_response_output_items,
     construct_tool_dicts,
 )
+from vllm.entrypoints.serve.utils.tool_calls_utils import (
+    maybe_filter_parallel_tool_calls,
+)
 from vllm.outputs import RequestOutput
 from vllm.parser.abstract_parser import Parser
 from vllm.tokenizers import TokenizerLike
@@ -369,7 +372,9 @@ class ParsableContext(ConversationContext):
                 build_response_output_items(
                     reasoning=reasoning,
                     content=content,
-                    tool_calls=tool_calls,
+                    tool_calls=maybe_filter_parallel_tool_calls(
+                        tool_calls or [], self.request
+                    ),
                     tools=self.request.tools,
                 )
             )
