@@ -12,7 +12,7 @@ from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.distributed.kv_transfer.kv_connector.utils import get_current_attn_backends
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
-from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.multimodal.cache import worker_receiver_cache_from_config
 from vllm.tracing import instrument
 from vllm.utils.import_utils import resolve_obj_by_qualname
 from vllm.utils.system_utils import update_environment_variables
@@ -268,6 +268,12 @@ class WorkerWrapperBase:
 
         load_general_plugins()
 
+        # Let the platform replace core Triton kernels (e.g. CPU fallback
+        # implementations) before any worker or model code can launch them.
+        from vllm.platforms import current_platform
+
+        current_platform.register_triton_kernel_overrides()
+
         parallel_config = vllm_config.parallel_config
         if isinstance(parallel_config.worker_cls, str):
             worker_class: type[WorkerBase] = resolve_obj_by_qualname(
@@ -315,26 +321,10 @@ class WorkerWrapperBase:
             )
 
         shared_worker_lock = kwargs.pop("shared_worker_lock", None)
-        if shared_worker_lock is None:
-            msg = (
-                "Missing `shared_worker_lock` argument from executor. "
-                "This argument is needed for mm_processor_cache_type='shm'."
-            )
-
-            mm_config = vllm_config.model_config.multimodal_config
-            if mm_config and mm_config.mm_processor_cache_type == "shm":
-                raise ValueError(msg)
-            else:
-                logger.warning_once(msg)
-
-            self.mm_receiver_cache = None
-        else:
-            self.mm_receiver_cache = (
-                MULTIMODAL_REGISTRY.worker_receiver_cache_from_config(
-                    vllm_config,
-                    shared_worker_lock,
-                )
-            )
+        self.mm_receiver_cache = worker_receiver_cache_from_config(
+            vllm_config,
+            shared_worker_lock,
+        )
 
         with set_current_vllm_config(self.vllm_config):
             # To make vLLM config available during worker initialization

@@ -550,9 +550,7 @@ class GPUModelRunner(
         self.mm_registry = MULTIMODAL_REGISTRY
         self.uses_mrope = model_config.uses_mrope
         self.mrope_num_dims = model_config.mrope_num_dims
-        self.supports_mm_inputs = self.mm_registry.supports_multimodal_inputs(
-            model_config
-        )
+        self.supports_mm_inputs = model_config.supports_multimodal_inputs
 
         if self.model_config.is_encoder_decoder:
             # Maximum length of the encoder input, only for encoder-decoder
@@ -4834,6 +4832,23 @@ class GPUModelRunner(
             self.input_batch.is_token_ids[i, pos] = True
             self.input_batch.num_tokens_no_spec[i] = pos + 1
         self.input_batch.prev_req_id_to_index = prev_req_id_to_index
+
+    @contextmanager
+    def preserve_serving_state(self):
+        multi_block_table = self.input_batch.block_table
+        saved = [
+            (bt.block_table.gpu.clone(), bt.block_table.cpu.clone())
+            for bt in multi_block_table.block_tables
+        ]
+        multi_block_table.clear()
+        try:
+            yield
+        finally:
+            for bt, (saved_gpu, saved_cpu) in zip(
+                multi_block_table.block_tables, saved
+            ):
+                bt.block_table.gpu.copy_(saved_gpu)
+                bt.block_table.cpu.copy_(saved_cpu)
 
     def take_draft_token_ids(self) -> DraftTokenIds | None:
         if not self.num_spec_tokens or not self._draft_token_req_ids:

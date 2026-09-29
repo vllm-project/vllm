@@ -381,6 +381,7 @@ class GenerateResponse(BaseModel):
     choices: list[GenerateResponseChoice]
     usage: UsageInfo | None = Field(default=None)
     prompt_logprobs: list[dict[int, Logprob] | None] | None = None
+    prompt_token_id_logprobs: str | None = None
     prompt_token_ids: list[int] | None = None
     mm_placeholders: dict[str, list[PlaceholderRangeInfo]] | None = None
     metrics: PerRequestMetrics | None = None
@@ -602,6 +603,7 @@ class DerenderChatStreamRequest(BaseModel):
     the client carried ``stream_state``.
     """
 
+    # --8<-- [start:derender-chat-stream-request]
     stream: Literal[True]
 
     model: str | None = None
@@ -629,6 +631,7 @@ class DerenderChatStreamRequest(BaseModel):
 
     chat_request: ChatCompletionRequest | None = None
     """The original (post adjust_request) ChatCompletionRequest from /render."""
+    # --8<-- [end:derender-chat-stream-request]
 
 
 class DerenderCompletionStreamRequest(BaseModel):
@@ -639,6 +642,7 @@ class DerenderCompletionStreamRequest(BaseModel):
     returns the derendered chunk plus updated state.
     """
 
+    # --8<-- [start:derender-completion-stream-request]
     stream: Literal[True]
 
     model: str | None = None
@@ -653,6 +657,7 @@ class DerenderCompletionStreamRequest(BaseModel):
 
     completion_request: CompletionRequest | None = None
     """The original (post adjust_request) CompletionRequest from /render."""
+    # --8<-- [end:derender-completion-stream-request]
 
 
 class DerenderChatStreamResponse(BaseModel):
