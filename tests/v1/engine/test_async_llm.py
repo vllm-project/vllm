@@ -1131,7 +1131,13 @@ async def test_pause_admission_policy_per_mode(mode: str):
         if mode != "keep":
             with pytest.raises(EnginePausedError):
                 await asyncio.wait_for(collector.get(), timeout=60)
-            assert not engine.output_processor.has_unfinished_requests()
+
+            # The other child's rejection may still be in flight.
+            async def drained():
+                while engine.output_processor.has_unfinished_requests():
+                    await asyncio.sleep(0.01)
+
+            await asyncio.wait_for(drained(), timeout=10)
             assert not engine.output_processor.parent_requests
 
         await engine.resume_generation()

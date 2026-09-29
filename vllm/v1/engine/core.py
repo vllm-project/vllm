@@ -883,9 +883,7 @@ class EngineCore:
     ) -> Future | None:
         """Pause generation; behavior depends on mode.
 
-        "abort" and "wait" reject new adds; "keep" queues them. "abort" and
-        "keep" skip step(); "wait" allows step() so everything already
-        admitted can drain.
+        "abort" rejects new adds and "keep" queues them; both skip step().
 
         - ``abort``: Set PAUSED_NEW, abort all requests, wait for abort
           outputs to be sent (when running with output_queue), optionally
