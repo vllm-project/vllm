@@ -4,7 +4,7 @@
 import functools
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import cast
+from typing import Any, cast
 
 import torch
 
@@ -16,8 +16,14 @@ from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fusion.quant_activation import QuantizedActivation
 from vllm.model_executor.layers.quantization.utils.quant_utils import kMxfp8Dynamic
+from vllm.model_executor.layers.rocm_paged_mxfp4_indexer import (
+    RocmSparseAttnIndexer,
+    RocmSparseMQAIndexer,
+)
 from vllm.models.deepseek_v41.attention import (
     DeepseekV4Attention,
+    DeepseekV4Indexer,
+    DeepseekV4IndexerCache,
     _replace_layer_index,
 )
 from vllm.models.deepseek_v41.common.ops import dequantize_and_gather_k_cache
@@ -592,18 +598,60 @@ def rocm_mxfp4_indexer_q_quant(
     return (q_packed, q_scale.view(torch.int32).squeeze(-1)), weights_out
 
 
-def rocm_mxfp4_indexer_ops(
-    num_heads: int,
-) -> tuple[
-    Callable[..., None],
-    Callable[..., tuple[tuple[torch.Tensor, torch.Tensor], torch.Tensor]],
-]:
-    """The K store and Q quant of an indexer with ``num_heads`` query heads,
-    called as `indexer_k_norm_rope_store` and `fused_indexer_q_rope_quant`."""
-    return (
-        functools.partial(rocm_mxfp4_indexer_k_store, num_heads=num_heads),
-        rocm_mxfp4_indexer_q_quant,
-    )
+class DeepseekV41RocmMxfp4Indexer(DeepseekV4Indexer):
+    """The indexer on aiter's paged MXFP4 cache: its K store and Q quant write
+    in the order aiter's MQA-logits kernel reads, and its layers score with it.
+    ``_produce_k`` and ``forward_q`` mirror ``DeepseekV4Indexer``'s except for
+    those two calls."""
+
+    mqa_cls = RocmSparseMQAIndexer
+    attn_cls = RocmSparseAttnIndexer
+
+    def _produce_k(
+        self,
+        latent: torch.Tensor | None,
+        positions: torch.Tensor,
+        rotary_emb: torch.nn.Module,
+    ) -> None:
+        attn_metadata = get_forward_context().attn_metadata
+        if not isinstance(attn_metadata, dict) or latent is None:
+            return
+        assert self.owns_k
+        indexer_metadata = cast(Any, attn_metadata[self.k_cache.prefix])
+        k_pre, _ = self.wk(latent)
+        rocm_mxfp4_indexer_k_store(
+            k_pre,
+            positions,
+            rotary_emb.cos_sin_cache,
+            self.k_norm.weight,
+            self.k_norm.variance_epsilon,
+            self.k_cache.kv_cache,
+            indexer_metadata.slot_mapping,
+            self.compress_ratio,
+            self.use_fp4_kv,
+            num_heads=self.n_head,
+        )
+
+    def forward_q(
+        self,
+        qr: torch.Tensor | QuantizedActivation,
+        qr_scale: torch.Tensor | None,
+        indexer_weights: torch.Tensor,
+        positions: torch.Tensor,
+        rotary_emb: torch.nn.Module,
+    ) -> tuple[torch.Tensor | None, torch.Tensor | None, torch.Tensor | None]:
+        q = self._wq_b_proj(qr, qr_scale).view(-1, self.n_head, self.head_dim)
+        (q, q_scale), weights = rocm_mxfp4_indexer_q_quant(
+            positions,
+            q,
+            rotary_emb.cos_sin_cache,
+            indexer_weights,
+            self.softmax_scale,
+            self.n_head**-0.5,
+            use_fp4=self.use_fp4_kv,
+            weights_out_dtype=self.indexer_weights_dtype,
+        )
+        return q, q_scale, weights
 
 
 class DeepseekV4ROCMAiterMLASparseBackend(DeepseekV4SparseMLABackend):
@@ -632,6 +680,13 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
     backend_cls = DeepseekV4ROCMAiterMLASparseBackend
     swa_backend_cls = DeepseekV41ROCMAiterSparseSWABackend
     _use_aiter_sparse_mla = False
+
+    def _indexer_cls(
+        self, k_cache: DeepseekV4IndexerCache | None
+    ) -> type[DeepseekV4Indexer]:
+        if k_cache is not None and k_cache.rocm_mxfp4:
+            return DeepseekV41RocmMxfp4Indexer
+        return super()._indexer_cls(k_cache)
 
     def __init__(self, *args, **kwargs):
         vllm_config = args[0] if args else kwargs["vllm_config"]

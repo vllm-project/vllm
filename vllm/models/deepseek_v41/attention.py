@@ -264,6 +264,13 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         """Return whether this instance stores fp8 KV in fp8_ds_mla layout."""
         return self.use_fp8_ds_mla_layout
 
+    def _indexer_cls(
+        self, k_cache: "DeepseekV4IndexerCache | None"
+    ) -> type["DeepseekV4Indexer"]:
+        """The indexer for this layer's index K cache. A platform subclass
+        returns one that writes and scores its own cache layout."""
+        return DeepseekV4Indexer
+
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -452,7 +459,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
                     )
             is_candidate_source = layer_id == self.candidate_source_layer
             uses_candidates = 0 <= self.candidate_source_layer < layer_id
-            self.indexer = DeepseekV4Indexer(
+            self.indexer = self._indexer_cls(index_k_cache)(
                 vllm_config,
                 config=config,
                 hidden_size=self.hidden_size,
@@ -1233,6 +1240,12 @@ class DeepseekV4Indexer(nn.Module):
     later indexers mask their scores to those blocks before their own top-k.
     """
 
+    # The scoring layers; a platform subclass swaps in its own.
+    mqa_cls: ClassVar[type["SparseMQAIndexer | RocmSparseMQAIndexer"]] = (
+        SparseMQAIndexer
+    )
+    attn_cls: ClassVar[type[SparseAttnIndexer]] = SparseAttnIndexer
+
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -1312,18 +1325,6 @@ class DeepseekV4Indexer(nn.Module):
             )
             self.k_norm = RMSNorm(self.head_dim, config.rms_norm_eps)
         self.k_cache = k_cache
-        # ROCm MXFP4 swaps in aiter's K store and Q quant, which write in its
-        # paged MXFP4 MQA-logits kernel's order, and layers that score with it.
-        self._k_store = indexer_k_norm_rope_store
-        self._q_rope_quant = fused_indexer_q_rope_quant
-        mqa_cls: type[SparseMQAIndexer | RocmSparseMQAIndexer] = SparseMQAIndexer
-        attn_cls = SparseAttnIndexer
-        if k_cache.rocm_mxfp4:
-            from vllm.model_executor.layers import rocm_paged_mxfp4_indexer as rocm
-            from vllm.models.deepseek_v41.amd.rocm import rocm_mxfp4_indexer_ops
-
-            self._k_store, self._q_rope_quant = rocm_mxfp4_indexer_ops(self.n_head)
-            mqa_cls, attn_cls = rocm.RocmSparseMQAIndexer, rocm.RocmSparseAttnIndexer
 
         # Candidate consumers can score only the candidate blocks (opt-in);
         # the candidate source and pre-candidate indexers stay dense.
@@ -1341,7 +1342,7 @@ class DeepseekV4Indexer(nn.Module):
                 )
             assert candidate_block_buffer is not None
             assert topk_indices_buffer is not None
-            self.indexer_op = mqa_cls(
+            self.indexer_op = self.mqa_cls(
                 self.k_cache,
                 self.topk_tokens,
                 self.head_dim,
@@ -1351,7 +1352,7 @@ class DeepseekV4Indexer(nn.Module):
                 candidate_block_size,
             )
         else:
-            self.indexer_op = attn_cls(
+            self.indexer_op = self.attn_cls(
                 self.k_cache,
                 self.quant_block_size,
                 self.scale_fmt,
@@ -1370,7 +1371,7 @@ class DeepseekV4Indexer(nn.Module):
         # The fused Q kernel writes the per-head weights in the dtype the
         # scoring kernels take, so no cast runs per step.
         self.indexer_weights_dtype = (
-            mqa_cls.weights_dtype if use_sparse_logits else torch.float32
+            self.mqa_cls.weights_dtype if use_sparse_logits else torch.float32
         )
 
     def _produce_k(
@@ -1395,7 +1396,7 @@ class DeepseekV4Indexer(nn.Module):
         # non-boundary tokens hold garbage latent and are skipped by the
         # store kernel.
         k_pre, _ = self.wk(latent)
-        self._k_store(
+        indexer_k_norm_rope_store(
             k_pre,
             positions,
             rotary_emb.cos_sin_cache,
@@ -1422,7 +1423,7 @@ class DeepseekV4Indexer(nn.Module):
         """
         q = self._wq_b_proj(qr, qr_scale)
         q = q.view(-1, self.n_head, self.head_dim)
-        q_quant, weights = self._q_rope_quant(
+        q_quant, weights = fused_indexer_q_rope_quant(
             positions,
             q,
             rotary_emb.cos_sin_cache,
