@@ -144,25 +144,19 @@ sequenceDiagram
     participant Model as model
     participant Loader as 被包装的 param.weight_loader
 
-    Note over Caller,Model: 先暂停推理并协调参与 ranks
     Caller->>Engine: start_weight_update()
     Engine->>Engine: _start_checkpoint_reload()
     Engine->>Trace: begin_round(preserve_checkpoint=...)
-    Note over Trace: 校验 runtime 并准备本轮状态
     loop 每个传输 chunk
         Caller->>Engine: update_weights(update_info)
         Engine->>Engine: parse_update_info() / receive_weights()
         Engine->>Model: load_weights(weights)
         Model->>Loader: weight_loader(param, loaded_weight, ...)
-        Note over Loader,Trace: 加载成功后更新 slots，并可能完成该层
         Engine->>Engine: torch.accelerator.synchronize()
     end
     Caller->>Engine: finish_weight_update()
     Engine->>Engine: _finish_checkpoint_reload()
     Engine->>Trace: finish()
-    Note over Trace: 校验完成状态并解除 loader 包装
-    Note over Engine: IPC 同时释放本轮 imported buffer
-    Note over Caller,Model: 调用方处理 KV/prefix cache 和调度后恢复推理
 ```
 
 NCCL packed 接收还负责跨 receive/load stream 的等待关系。

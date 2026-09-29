@@ -159,25 +159,19 @@ sequenceDiagram
     participant Model as model
     participant Loader as wrapped param.weight_loader
 
-    Note over Caller,Model: Pause inference and coordinate participating ranks
     Caller->>Engine: start_weight_update()
     Engine->>Engine: _start_checkpoint_reload()
     Engine->>Trace: begin_round(preserve_checkpoint=...)
-    Note over Trace: Validate runtime and prepare round state
     loop each transport chunk
         Caller->>Engine: update_weights(update_info)
         Engine->>Engine: parse_update_info() / receive_weights()
         Engine->>Model: load_weights(weights)
         Model->>Loader: weight_loader(param, loaded_weight, ...)
-        Note over Loader,Trace: A successful load updates slots and may finish the state
         Engine->>Engine: torch.accelerator.synchronize()
     end
     Caller->>Engine: finish_weight_update()
     Engine->>Engine: _finish_checkpoint_reload()
     Engine->>Trace: finish()
-    Note over Trace: Validate completion and remove loader wrappers
-    Note over Engine: IPC releases imported buffers for this round
-    Note over Caller,Model: handle KV/prefix cache and resume inference
 ```
 
 Packed NCCL reception also coordinates receive/load stream ordering. The tracer
