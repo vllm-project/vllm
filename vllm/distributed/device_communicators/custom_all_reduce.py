@@ -249,14 +249,20 @@ class CustomAllreduce:
         # test passes on such a box. QuickReduce pushes and works there.
         # TODO: replace the architecture test with a peer-read probe, so a
         # gfx11 pair that does sit behind one switch keeps this path.
+        # VLLM_RDNA3_CUSTOM_AR_CAP=<bytes> keeps it on for a box known to route
+        # peer reads, capped: above ~48 KB it loses to NCCL on gfx11.
         if current_platform.is_rocm() and "gfx11" in getattr(
             torch.cuda.get_device_properties(0), "gcnArchName", ""
         ):
-            logger.warning(
-                "Custom allreduce is disabled on gfx11: this collective reads "
-                "peer buffers, which a desktop root complex may not route."
-            )
-            return
+            if envs.VLLM_RDNA3_CUSTOM_AR_CAP <= 0:
+                logger.warning(
+                    "Custom allreduce is disabled on gfx11: this collective "
+                    "reads peer buffers, which a desktop root complex may not "
+                    "route. Set VLLM_RDNA3_CUSTOM_AR_CAP on a box that does."
+                )
+                return
+            max_size = min(max_size, envs.VLLM_RDNA3_CUSTOM_AR_CAP)
+            logger.info("Custom allreduce on gfx11, capped at %d bytes", max_size)
 
         # test P2P capability, this checks software/cudaruntime support
         # this is expensive to compute at the first time

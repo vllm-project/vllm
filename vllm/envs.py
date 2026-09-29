@@ -249,6 +249,8 @@ if TYPE_CHECKING:
     VLLM_SSM_CONV_STATE_LAYOUT: Literal["SD", "DS"] | None = None
     VLLM_COMPUTE_NANS_IN_LOGITS: bool = False
     VLLM_RAISE_ON_LOGIT_NANS: bool = False
+    VLLM_NAN_LOGITS_RECOMPUTE: bool = False
+    VLLM_RDNA3_CUSTOM_AR_CAP: int = 0
     VLLM_ROCM_QUICK_REDUCE_QUANTIZATION: Literal[
         "FP", "INT8", "INT6", "INT4", "INT3", "NONE"
     ] = "NONE"
@@ -1828,6 +1830,17 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_RAISE_ON_LOGIT_NANS": lambda: bool(
         int(os.getenv("VLLM_RAISE_ON_LOGIT_NANS", "0"))
     ),
+    # With VLLM_RAISE_ON_LOGIT_NANS, recompute instead of raising: the tokens
+    # sampled from a NaN logits row are dropped, and the next step resets the
+    # prefix cache and preempts every running request so it recomputes from
+    # its prompt. Keeps the engine alive instead of losing every request.
+    "VLLM_NAN_LOGITS_RECOMPUTE": lambda: bool(
+        int(os.getenv("VLLM_NAN_LOGITS_RECOMPUTE", "0"))
+    ),
+    # Bytes up to which the custom all-reduce stays on for gfx11 (0 = off).
+    # Only on a box whose PCIe fabric routes peer reads: on one that does not,
+    # the collective silently returns garbage.
+    "VLLM_RDNA3_CUSTOM_AR_CAP": lambda: int(os.getenv("VLLM_RDNA3_CUSTOM_AR_CAP", "0")),
     # Timeout (in seconds) for MooncakeConnector in PD disaggregated setup.
     "VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT": lambda: int(
         os.getenv("VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT", "480")

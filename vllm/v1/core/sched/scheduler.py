@@ -7,6 +7,7 @@ from collections.abc import Iterable
 from dataclasses import replace
 from typing import Any
 
+import vllm.envs as envs
 from vllm.compilation.cuda_graph import CUDAGraphStat
 from vllm.config import KVEventsConfig, VllmConfig
 from vllm.distributed.ec_transfer.ec_connector.base import (
@@ -78,6 +79,10 @@ logger = init_logger(__name__)
 
 
 class Scheduler(SchedulerInterface):
+    # VLLM_NAN_LOGITS_RECOMPUTE, read once in __init__. A class default keeps
+    # every check below a no-op when it is off.
+    _nan_recompute: bool = False
+
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -120,6 +125,11 @@ class Scheduler(SchedulerInterface):
         )
         # Track requests scheduled in prior step (MRV1-only).
         self.prev_step_scheduled_req_ids: set[str] = set()
+        self._nan_recompute = envs.VLLM_NAN_LOGITS_RECOMPUTE
+        # Requests whose logits held NaNs this step
+        # (their tokens are dropped) and those still waiting for the reset.
+        self._nan_this_step: set[str] = set()
+        self._nan_pending: set[str] = set()
 
         # Scheduling constraints.
         self.max_num_running_reqs = self.scheduler_config.max_num_seqs
@@ -561,6 +571,16 @@ class Scheduler(SchedulerInterface):
         return max(num_new_tokens, 0)
 
     def schedule(self, throttle_prefills: bool = False) -> SchedulerOutput:
+        if self._nan_recompute and self._nan_pending:
+            # Outside the output loop, so the reset cannot re-enter it.
+            logger.warning(
+                "NaN logits in %s: resetting the prefix cache and recomputing "
+                "every running request",
+                sorted(self._nan_pending),
+            )
+            self._nan_pending.clear()
+            if not self.reset_prefix_cache(reset_running_requests=True):
+                logger.error("Prefix cache reset after NaN logits failed")
         self.current_step += 1
         # NOTE(woosuk) on the scheduling algorithm:
         # There's no "decoding phase" nor "prefill phase" in the scheduler.
@@ -1878,6 +1898,11 @@ class Scheduler(SchedulerInterface):
         num_scheduled_tokens = scheduler_output.num_scheduled_tokens
         pooler_outputs = model_runner_output.pooler_output
         num_nans_in_logits = model_runner_output.num_nans_in_logits
+        if self._nan_recompute:
+            self._nan_this_step = {
+                req_id for req_id, n in (num_nans_in_logits or {}).items() if n
+            }
+            self._nan_pending.update(self._nan_this_step)
         kv_connector_output = model_runner_output.kv_connector_output
         ec_connector_output = model_runner_output.ec_connector_output
         cudagraph_stats = model_runner_output.cudagraph_stats
@@ -2356,6 +2381,10 @@ class Scheduler(SchedulerInterface):
         # Append generated tokens and check for stop. Note that if
         # a request is still being prefilled, we expect the model runner
         # to return empty token ids for the request.
+        if self._nan_recompute and request.request_id in self._nan_this_step:
+            # Sampled from a NaN logits row (argmax gives token 0): dropped,
+            # the request recomputes after the reset at the next schedule().
+            return [], False
         stopped = False
         for num_new, output_token_id in enumerate(new_token_ids, 1):
             request.append_output_token_ids(output_token_id)

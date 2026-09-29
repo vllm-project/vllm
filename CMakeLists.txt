@@ -387,6 +387,7 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
   list(APPEND VLLM_EXT_SRC
     "csrc/attention/pth_decode_int4_rdna3.cu"
     "csrc/attention/pth_decode_int8_rdna3.cu"
+    "csrc/attention/pth_decode_int8_rdna3_wmma.cu"
   )
 
   message(STATUS "Enabling C extension.")
