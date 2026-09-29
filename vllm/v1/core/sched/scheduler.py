@@ -2699,7 +2699,8 @@ class Scheduler(SchedulerInterface):
                 and sampling_params is not None
                 and (
                     sampling_params.prompt_logprobs is not None
-                    or sampling_params.prompt_logprob_token_ids is not None
+                    or getattr(sampling_params, "prompt_logprob_token_ids", None)
+                    is not None
                 )
             ):
                 raise ValueError(
