@@ -70,8 +70,8 @@ def _load():
 
 
 def _load_v7():
-    """WMMA kernel (pth_decode_int8_rdna3_wmma.cu), behind VLLM_RDNA3_ATTN_V7=18."""
-    if os.environ.get("VLLM_RDNA3_ATTN_V7") not in ("1", "18"):
+    """WMMA kernel (pth_decode_int8_rdna3_wmma.cu), behind VLLM_RDNA3_ATTN_V7=1."""
+    if os.environ.get("VLLM_RDNA3_ATTN_V7") not in ("1", "18", "63"):
         return None
     from torch.utils.cpp_extension import load
 
@@ -81,13 +81,13 @@ def _load_v7():
     build_dir = os.environ.get("VLLM_RDNA3_ATTN_V7_BUILD",
                                os.path.join(here, "build_wmma"))
     os.makedirs(build_dir, exist_ok=True)
-    e = load(name="pth_wmma", sources=[src], build_directory=build_dir,
+    e = load(name="pth_wmma_iw", sources=[src], build_directory=build_dir,
              extra_cuda_cflags=["-DUSE_ROCM", "-O3", "--offload-arch=gfx1100"],
              verbose=False)
     print("[gqa-decode] WMMA ACTIVO", file=sys.stderr, flush=True)
-    # cfg = splits * 1000 + minimum tokens per split: 240 splits = 5 resident
-    # blocks per WGP, 32 tokens (two WMMA tiles) at least per split.
-    return lambda *a: e.pth_decode_int8_v8(*a, 240032)
+    # cfg = splits per row group * 1000 + minimum tokens per split (measured:
+    # 192 per group at 284k, flat from 160 to 256 with 3 requests).
+    return lambda *a: e.pth_decode_int8_wmma(*a, 192064)
 
 
 def _heads_per_wave(num_q: int, num_q_heads: int, num_kv_heads: int, splits: int) -> int:
