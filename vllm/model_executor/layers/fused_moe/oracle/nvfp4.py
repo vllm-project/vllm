@@ -35,6 +35,7 @@ from vllm.model_executor.layers.quantization.utils.nvfp4_emulation_utils import 
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
 )
+from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
 
@@ -201,6 +202,16 @@ def select_nvfp4_moe_backend(
         NvFp4MoeBackend.HUMMING,
         NvFp4MoeBackend.EMULATION,
     ]
+
+    # Prefer CuTeDSL on SM107, retaining TRTLLM as a fallback.
+    if current_platform.is_cuda() and current_platform.is_device_capability(107):
+        cutedsl_backends = [
+            NvFp4MoeBackend.FLASHINFER_CUTEDSL,
+            NvFp4MoeBackend.FLASHINFER_CUTEDSL_BATCHED,
+        ]
+        AVAILABLE_BACKENDS = cutedsl_backends + [
+            backend for backend in AVAILABLE_BACKENDS if backend not in cutedsl_backends
+        ]
 
     NVFP4_BACKENDS_WITH_CLAMP = {
         NvFp4MoeBackend.B12X,
