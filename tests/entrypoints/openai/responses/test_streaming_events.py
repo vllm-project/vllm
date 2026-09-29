@@ -151,3 +151,17 @@ class TestProcessorCompoundDeltas:
         types = [e.type for e in events]
         assert "response.reasoning_text.delta" in types
         assert "response.output_text.delta" in types
+
+
+def test_zero_argument_tool_call_emits_arguments_done():
+    """arguments.done closes every function call, even with no deltas."""
+    processor = SimpleStreamingEventProcessor()
+    _run_through_processor(
+        processor, DeltaMessage(tool_calls=[_make_tool_call(0, name="get_time")])
+    )
+    done = [
+        e
+        for e in processor.close_current()
+        if e.type == "response.function_call_arguments.done"
+    ]
+    assert [e.arguments for e in done] == [""]

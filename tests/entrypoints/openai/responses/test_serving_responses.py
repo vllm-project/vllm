@@ -64,6 +64,7 @@ from vllm.entrypoints.openai.responses.streaming_events import (
 )
 from vllm.entrypoints.serve.engine.protocol import ErrorResponse
 from vllm.inputs import tokens_input
+from vllm.logprobs import Logprob as SampleLogprob
 from vllm.outputs import CompletionOutput, RequestOutput
 from vllm.parser.harmony import Segment
 from vllm.renderers import TokenizeParams
@@ -1977,3 +1978,60 @@ class TestAutoToolStreaming:
         assert len(function_done) == 1
         assert function_done[0].item.name == "get_weather"
         assert function_done[0].item.arguments == tool_args
+
+
+@pytest.mark.skip_global_cleanup
+@pytest.mark.asyncio
+async def test_stream_completed_response_reuses_streamed_items(monkeypatch):
+    """response.completed must carry the streamed items (same ids,
+    call_id, logprobs) rather than a reparse of the full output."""
+    monkeypatch.setattr(envs, "VLLM_USE_EXPERIMENTAL_PARSER_CONTEXT", False)
+    serving = _make_serving_instance_with_reasoning()
+    call = DeltaToolCall(
+        id="chatcmpl-tool-parser-id",
+        index=0,
+        function=DeltaFunctionCall(name="get_weather", arguments="{}"),
+    )
+    response_parser = _mock_parser_with_reasoning(
+        serving,
+        [
+            DeltaMessage(reasoning="think"),
+            DeltaMessage(content="Hi"),
+            DeltaMessage(tool_calls=[call]),
+        ],
+    )
+    response_parser.count_reasoning_tokens = MagicMock(return_value=1)
+    context = SimpleContext(response_parser=response_parser)
+
+    async def result_generator():
+        for token_id, text in [(10, "think"), (20, "Hi"), (30, "call")]:
+            output = _make_request_output(text, [token_id])
+            output.outputs[0].logprobs = [
+                {token_id: SampleLogprob(logprob=-0.5, decoded_token=text)}
+            ]
+            context.append_output(output)
+            yield context
+
+    events = [
+        event
+        async for event in serving.responses_stream_generator(
+            request=ResponsesRequest(
+                input="hi",
+                include=["message.output_text.logprobs"],
+                stream=True,
+                store=False,
+            ),
+            sampling_params=SamplingParams(max_tokens=16),
+            result_generator=result_generator(),
+            context=context,
+            model_name="test-model",
+            tokenizer=MagicMock(),
+            request_metadata=RequestResponseMetadata(request_id="req"),
+        )
+    ]
+
+    streamed = [e.item for e in events if e.type == "response.output_item.done"]
+    assert events[-1].response.output == streamed
+    _, message, function_call = streamed
+    assert [lp.token for lp in message.content[0].logprobs] == ["Hi"]
+    assert function_call.call_id == "chatcmpl-tool-parser-id"
