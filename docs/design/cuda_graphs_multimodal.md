@@ -21,6 +21,7 @@ For two-tower vision encoders (e.g., DeepSeek-OCR's SAM + CLIP with dynamic tili
 
 | Architecture | Models | CG for Image | CG for Video | Multi-Path Graph |
 | ------------ | ------ | ------------ | ------------ | --------------- |
+| `BailingMoeV3VLForConditionalGeneration` | `Ling-3.0-flash-VL` | ✅︎ | ❌︎ | ❌︎ |
 | `DeepseekOCRForCausalLM` | `DeepSeek-OCR` | ✅︎ | ❌︎ | ✅︎ |
 | `Ernie4_5_VLMoeForConditionalGeneration` | `ERNIE-4.5-VL` | ✅︎ | ❌︎ | ❌︎ |
 | `Gemma3ForConditionalGeneration` | `Gemma3` | ✅︎ | ❌︎ | ❌︎ |
@@ -42,6 +43,7 @@ For two-tower vision encoders (e.g., DeepSeek-OCR's SAM + CLIP with dynamic tili
 
 | Architecture | NV Blackwell | NV Ampere | AMD MI300X | AMD MI350X / MI355X |
 | ------------ | ---------------- | ------------- | -------------- | --------------------- |
+| `BailingMoeV3VLForConditionalGeneration` | ❔ | ❔ | ❔ | ❔ |
 | `DeepseekOCRForCausalLM` | ✅︎ | ✅︎ | ❔ | ✅︎ |
 | `Ernie4_5_VLMoeForConditionalGeneration` | ✅︎ | ✅︎ | ❔ | ✅︎ |
 | `Gemma3ForConditionalGeneration` | ✅︎ | ✅︎ | ❔ | ✅︎ |
