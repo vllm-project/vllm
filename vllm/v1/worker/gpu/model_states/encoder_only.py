@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import Any, cast
+from typing import Any
 
 import torch
 import torch.nn as nn
@@ -15,14 +15,11 @@ from vllm.v1.attention.backend import (
     CommonAttentionMetadata,
 )
 from vllm.v1.core.sched.output import NewRequestData
-from vllm.v1.kv_cache_interface import (
-    AttentionSpec,
-    EncoderOnlyAttentionSpec,
-    KVCacheConfig,
-)
+from vllm.v1.kv_cache_interface import EncoderOnlyAttentionSpec, KVCacheConfig
 from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
 from vllm.v1.worker.gpu.model_states.default import DefaultModelState
+from vllm.v1.worker.gpu.model_states.interface import ModelSpecificAttnMetadata
 from vllm.v1.worker.gpu.states import RequestState
 from vllm.v1.worker.utils import AttentionGroup
 
@@ -37,6 +34,9 @@ class EncoderOnlyModelState(DefaultModelState):
     builds their metadata. We build their (non-causal) metadata here, keeping
     the normal KV-backed path untouched.
     """
+
+    # The V2 pooling path is not wired for prompt embeds.
+    supports_prompt_embeds = False
 
     def __init__(
         self,
@@ -152,7 +152,7 @@ class EncoderOnlyModelState(DefaultModelState):
         for group in self.encoder_attn_groups:
             builder = group.get_metadata_builder(0)
             cg_support = builder.get_cudagraph_support(
-                self.vllm_config, cast(AttentionSpec, group.kv_cache_spec)
+                self.vllm_config, group.kv_cache_spec
             )
             if cg_support.value < support.value:
                 support = cg_support
@@ -168,7 +168,10 @@ class EncoderOnlyModelState(DefaultModelState):
         attn_groups: list[list[AttentionGroup]],
         kv_cache_config: KVCacheConfig,
         for_capture: bool = False,
+        ubatch_idx: int = 0,
+        model_specific_attn_metadata: ModelSpecificAttnMetadata | None = None,
     ) -> dict[str, Any]:
+        assert ubatch_idx == 0, "DBO is not supported"
         attn_metadata = super().prepare_attn(
             input_batch,
             cudagraph_mode,
@@ -177,6 +180,7 @@ class EncoderOnlyModelState(DefaultModelState):
             attn_groups,
             kv_cache_config,
             for_capture,
+            model_specific_attn_metadata=model_specific_attn_metadata,
         )
         attn_metadata.update(
             self._build_encoder_attn_metadata(input_batch, cudagraph_mode, for_capture)
@@ -184,10 +188,7 @@ class EncoderOnlyModelState(DefaultModelState):
         return attn_metadata
 
     def _build_encoder_attn_metadata(
-        self,
-        input_batch: InputBatch,
-        cudagraph_mode: CUDAGraphMode,
-        for_capture: bool,
+        self, input_batch: InputBatch, cudagraph_mode: CUDAGraphMode, for_capture: bool
     ) -> dict[str, Any]:
         if cudagraph_mode == CUDAGraphMode.FULL:
             num_reqs = input_batch.num_reqs_after_padding

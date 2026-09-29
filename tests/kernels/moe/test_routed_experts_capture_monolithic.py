@@ -51,7 +51,7 @@ if not has_flashinfer_trtllm_fused_moe() or not current_platform.is_cuda():
         allow_module_level=True,
     )
 
-if not current_platform.has_device_capability(100):
+if not current_platform.is_device_capability_family(100):
     pytest.skip(
         "TRT-LLM fused MoE kernels require SM100+",
         allow_module_level=True,
@@ -100,7 +100,7 @@ def _make_bf16_monolithic_experts(
         activation=MoEActivation.SILU,
         device=device,
         routing_method=routing_method,
-        max_num_tokens=max(8, 1),
+        max_num_tokens=16,
     )
     quant_config = FusedMoEQuantConfig.make(
         quant_dtype=None,
@@ -385,11 +385,9 @@ def test_routed_experts_capturer_e2e_via_monolithic_experts() -> None:
     on the monolithic experts and verify the captured rows land in the
     capturer's device buffer at the correct layer slot.
 
-    Mirrors the wiring done in ``GPUModelRunner._bind_routed_experts_capturer``
-    for the monolithic path: a single closure is installed on the monolithic
-    ``fused_experts`` (in addition to ``router.set_capture_fn`` on the
-    non-monolithic path) and the capturer routes per-layer based on the
-    closed-over ``layer_id``.
+    Mirrors the monolithic path in ``bind_routed_experts_capturer``: a single
+    closure is installed on ``fused_experts`` and routes per-layer based on
+    the closed-over ``layer_id``.
     """
     from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
         RoutedExpertsCapturer,
@@ -518,7 +516,7 @@ def _make_fp8_block_scale_monolithic_experts(
         activation=MoEActivation.SILU,
         device=device,
         routing_method=RoutingMethodType.DeepSeekV3,
-        max_num_tokens=max(8, 1),
+        max_num_tokens=16,
     )
 
     # Random fp8 weights + ones-block scales (the kernel decoder only cares
@@ -703,7 +701,7 @@ def _make_nvfp4_monolithic_experts(
         activation=MoEActivation.SILU,
         device=device,
         routing_method=RoutingMethodType.DeepSeekV3,
-        max_num_tokens=max(8, 1),
+        max_num_tokens=16,
     )
 
     gemm1 = torch.randn(

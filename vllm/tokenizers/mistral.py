@@ -21,7 +21,6 @@ from mistral_common.tokens.tokenizers.base import (
 )
 from mistral_common.tokens.tokenizers.instruct import (
     InstructTokenizerBase,
-    InstructTokenizerV13,
 )
 from mistral_common.tokens.tokenizers.mistral import (
     MistralTokenizer as MistralCommonTokenizer,
@@ -35,6 +34,7 @@ from transformers.tokenization_mistral_common import MistralCommonBackend
 
 from vllm.entrypoints.chat_utils import ChatCompletionMessageParam
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
+from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
 from vllm.tokenizers.protocol import TokenizerLike
 
@@ -145,15 +145,19 @@ def _validate_apply_chat_template_args(
 
 def validate_request_params(request: "ChatCompletionRequest"):
     if request.chat_template is not None or request.chat_template_kwargs is not None:
-        raise ValueError("chat_template is not supported for Mistral tokenizers.")
+        raise VLLMValidationError(
+            "chat_template is not supported for Mistral tokenizers.",
+            parameter="chat_template",
+        )
 
     if request.reasoning_effort and request.reasoning_effort not in list(
         ReasoningEffort
     ):
-        raise ValueError(
+        raise VLLMValidationError(
             f"reasoning_effort={request.reasoning_effort} is not supported by "
             "Mistral models. Supported values are: "
-            f"{[e.value for e in ReasoningEffort]}."
+            f"{[e.value for e in ReasoningEffort]}.",
+            parameter="reasoning_effort",
         )
 
 
@@ -350,22 +354,13 @@ class MistralTokenizer(TokenizerLike):
                 "`text_pair` is not supported by `MistralTokenizer.__call__`."
             )
 
-        encoded = self.transformers_tokenizer(
+        return self.transformers_tokenizer(
             text=text,
             text_pair=text_pair,
             add_special_tokens=add_special_tokens,
             truncation=truncation,
             max_length=max_length,
         )
-        # TODO(juliendenize): once https://github.com/huggingface/transformers/pull/41962
-        # is in, revert to only call self.transformers_tokenizer(...).
-        # Hack to fix wrongly added eos token, when fix will be supported the condition
-        # below will be False even before the revert is done.
-        if encoded["input_ids"] and encoded["input_ids"][-1] == self.eos_token_id:
-            encoded["input_ids"].pop(-1)
-            if attention_mask := encoded.get("attention_mask"):
-                attention_mask.pop(-1)
-        return encoded
 
     @property
     def vocab(self) -> list[str]:
@@ -385,8 +380,10 @@ class MistralTokenizer(TokenizerLike):
         max_length: int | None = None,
         add_special_tokens: bool = True,
     ) -> list[int]:
-        # TODO(juliendenize): once https://github.com/huggingface/transformers/pull/41962
-        # is in, directly call self.transformers_tokenizer.encode(...).
+        # NOTE: transformers guards truncation with `if max_length and ...`, so
+        # `max_length=0` returns the full sequence instead of an empty one. vLLM
+        # treats `truncate_prompt_tokens=0` as an empty prompt, so keep slicing
+        # here until that is fixed upstream.
         encoded = self.tokenizer.encode(text, bos=add_special_tokens, eos=False)
 
         if truncation is not False and max_length is not None:
@@ -433,11 +430,6 @@ class MistralTokenizer(TokenizerLike):
     def decode(
         self, ids: Sequence[int] | int, skip_special_tokens: bool = False
     ) -> str:
-        # TODO(juliendenize): once https://github.com/huggingface/transformers/pull/41962
-        # is in, directly call self.transformers_tokenizer.decode(...).
-        if isinstance(ids, int):
-            ids = [ids]
-
         return self.transformers_tokenizer.decode(
             ids, skip_special_tokens=skip_special_tokens
         )
@@ -461,6 +453,7 @@ class MistralTokenizer(TokenizerLike):
     def convert_tokens_to_string(self, tokens: list[str]) -> str:
         to_decode_special_tokens = {
             SpecialTokens.tool_calls,
+            SpecialTokens.args,
             SpecialTokens.begin_think,
             SpecialTokens.end_think,
         }
@@ -517,11 +510,20 @@ class MistralTokenizer(TokenizerLike):
         non_skip_special_tokens_ids = {
             self.tokenizer.get_special_token(SpecialTokens.tool_calls),
         }
-        if isinstance(self.instruct, InstructTokenizerV13):
-            if self.instruct.BEGIN_THINK:
-                non_skip_special_tokens_ids.add(self.instruct.BEGIN_THINK)
-            if self.instruct.END_THINK:
-                non_skip_special_tokens_ids.add(self.instruct.END_THINK)
+        # [ARGS] only exists in v11+ tool-call tokenizers; older tokenizers
+        # raise (Tekken) or return unk (SPM) for it.
+        if self.tokenizer.is_special(SpecialTokens.args):
+            non_skip_special_tokens_ids.add(
+                self.tokenizer.get_special_token(SpecialTokens.args)
+            )
+        # [THINK]/[/THINK] only exist in v13+ reasoning tokenizers; use the
+        # same is_special gate as [ARGS] above so newer versions are covered
+        # without an isinstance check on the instruct tokenizer.
+        for think_token in (SpecialTokens.begin_think, SpecialTokens.end_think):
+            if self.tokenizer.is_special(think_token):
+                non_skip_special_tokens_ids.add(
+                    self.tokenizer.get_special_token(think_token)
+                )
 
         ids_kept = [
             i

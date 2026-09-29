@@ -14,9 +14,10 @@ methods only.
 """
 
 import logging
+from typing import Literal
 
 import pytest
-from transformers import PretrainedConfig
+from transformers import PreTrainedConfig
 
 from vllm.config.model import ModelConfig
 from vllm.config.parallel import ParallelConfig
@@ -45,7 +46,7 @@ def _override_logged(caplog: pytest.LogCaptureFixture) -> bool:
 
 @pytest.mark.cpu_test
 def test_override_raises_smaller_value(vllm_caplog: pytest.LogCaptureFixture):
-    hf_config = PretrainedConfig(max_position_embeddings=2048)
+    hf_config = PreTrainedConfig(max_position_embeddings=2048)
     SpeculativeConfig._maybe_override_draft_max_position_embeddings(
         hf_config, target_max_model_len=8192
     )
@@ -55,7 +56,7 @@ def test_override_raises_smaller_value(vllm_caplog: pytest.LogCaptureFixture):
 
 @pytest.mark.cpu_test
 def test_override_keeps_sufficient_value(vllm_caplog: pytest.LogCaptureFixture):
-    hf_config = PretrainedConfig(max_position_embeddings=8192)
+    hf_config = PreTrainedConfig(max_position_embeddings=8192)
     SpeculativeConfig._maybe_override_draft_max_position_embeddings(
         hf_config, target_max_model_len=8192
     )
@@ -65,7 +66,7 @@ def test_override_keeps_sufficient_value(vllm_caplog: pytest.LogCaptureFixture):
 
 @pytest.mark.cpu_test
 def test_override_ignores_missing_attribute(vllm_caplog: pytest.LogCaptureFixture):
-    hf_config = PretrainedConfig()
+    hf_config = PreTrainedConfig()
     hf_config.__dict__.pop("max_position_embeddings", None)
     SpeculativeConfig._maybe_override_draft_max_position_embeddings(
         hf_config, target_max_model_len=8192
@@ -77,7 +78,7 @@ def test_override_ignores_missing_attribute(vllm_caplog: pytest.LogCaptureFixtur
 @pytest.mark.cpu_test
 @pytest.mark.parametrize("method", ["eagle", "eagle3"])
 def test_eagle_draft_inherits_target_max_model_len(
-    method: str, vllm_caplog: pytest.LogCaptureFixture
+    method: Literal["eagle", "eagle3"], vllm_caplog: pytest.LogCaptureFixture
 ):
     target_model_config = ModelConfig(LLAMA3_TARGET)
     assert target_model_config.max_model_len > 2048

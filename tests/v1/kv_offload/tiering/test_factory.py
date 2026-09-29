@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Unit tests for SecondaryTierFactory.
+"""Unit tests for SecondaryTierFactory.
 
 These tests verify:
 1. Pre-registration integrity — registered tier module paths can import
@@ -10,6 +9,7 @@ These tests verify:
 3. Error paths — missing tier_type, unknown tier_type, duplicate registration.
 """
 
+from importlib.util import find_spec
 from unittest.mock import MagicMock
 
 import pytest
@@ -42,8 +42,11 @@ def _make_mock_args():
 
 
 def test_pre_registered_tiers_can_be_imported():
-    """CI sentinel: example/fs/obj paths must import and yield SecondaryTierManager."""
+    """CI sentinel: registered tiers import and yield SecondaryTierManager."""
     for tier_type in SecondaryTierFactory._registry:
+        # KVCR is an optional external dependency and may not be installed.
+        if tier_type == "kvcr" and find_spec("kvcr") is None:
+            continue
         cls = SecondaryTierFactory._registry[tier_type]()
         assert issubclass(cls, SecondaryTierManager)
 
@@ -133,13 +136,13 @@ def test_missing_tier_type_raises():
 
 
 def test_unknown_tier_type_raises():
-    """Unrecognized tier_type → ValueError with supported types list."""
+    """Unrecognized tier_type without module_path → ValueError."""
     primary_kv_view, offloading_spec = _make_mock_args()
     tier_config = {"type": "nonexistent_tier"}
 
     with pytest.raises(
         ValueError,
-        match=r"Unknown secondary tier type.*Supported types:",
+        match=r"Unknown secondary tier type.*also set 'module_path'",
     ):
         SecondaryTierFactory.create_secondary_tier(
             tier_config, primary_kv_view, offloading_spec
@@ -150,3 +153,52 @@ def test_duplicate_registration_raises():
     """register_tier with existing type → ValueError."""
     with pytest.raises(ValueError, match="is already registered"):
         SecondaryTierFactory.register_tier("example", "some.module", "SomeClass")
+
+
+# ---------------------------------------------------------------------------
+# Out-of-tree dynamic loading via module_path
+# ---------------------------------------------------------------------------
+
+
+def test_create_tier_from_module_path():
+    """Full end-to-end: create_secondary_tier with module_path."""
+    assert "ExampleSecondaryTierManager" not in SecondaryTierFactory._registry
+
+    primary_kv_view, offloading_spec = _make_mock_args()
+    tier_config = {
+        "type": "ExampleSecondaryTierManager",
+        "module_path": "vllm.v1.kv_offload.tiering.example.manager",
+        "custom_param": 42,
+    }
+
+    tier = SecondaryTierFactory.create_secondary_tier(
+        tier_config, primary_kv_view, offloading_spec
+    )
+
+    assert isinstance(tier, ExampleSecondaryTierManager)
+    assert tier.tier_type == "ExampleSecondaryTierManager"
+
+
+def test_module_path_invalid_module_raises():
+    """Non-existent module_path → ModuleNotFoundError."""
+    primary_kv_view, offloading_spec = _make_mock_args()
+    tier_config = {
+        "type": "SomeTier",
+        "module_path": "nonexistent.module.path",
+    }
+
+    with pytest.raises(ModuleNotFoundError):
+        SecondaryTierFactory.create_secondary_tier(
+            tier_config, primary_kv_view, offloading_spec
+        )
+
+
+def test_module_path_not_subclass_raises():
+    """module_path resolving to a non-SecondaryTierManager → AssertionError."""
+    tier_config = {
+        "type": "MagicMock",
+        "module_path": "unittest.mock",
+    }
+
+    with pytest.raises(AssertionError):
+        SecondaryTierFactory.get_tier_class(tier_config)

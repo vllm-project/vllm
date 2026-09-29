@@ -1,8 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Test deepep dispatch-combine logic
-"""
+"""Test deepep dispatch-combine logic."""
 
 import dataclasses
 
@@ -11,7 +9,7 @@ import torch.distributed
 from torch.distributed import ProcessGroup
 
 import vllm.envs as envs
-from tests.kernels.moe.utils import check_accuracy, make_dummy_moe_config
+from tests.kernels.moe.utils import make_dummy_moe_config
 from vllm import _custom_ops as ops
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.model_executor.layers.activation import SiluAndMul
@@ -56,9 +54,7 @@ MAX_TOKENS_PER_RANK = 64
 def make_weights(
     e, n, k, dtype
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    """
-    Return weights w1, w2, w1_scale, w2_scale
-    """
+    """Return weights w1, w2, w1_scale, w2_scale."""
     if dtype in [torch.float16, torch.bfloat16]:
         w1 = torch.randn((e, 2 * n, k), device="cuda", dtype=dtype) / 10
         w2 = torch.randn((e, k, n), device="cuda", dtype=dtype) / 10
@@ -367,14 +363,6 @@ def assert_deepep_close(
     k: int,
     use_fp8_dispatch: bool,
 ) -> None:
-    if use_fp8_dispatch and current_platform.is_fp8_fnuz():
-        # ROCm e4m3fnuz rounds differently than the reference quant,
-        # so DeepEP's fp8 dispatch can yield a few outliers even with
-        # a correct kernel; allow a small fraction of mismatches here.
-        atol = rtol = 1.5e-1
-        check_accuracy(expected, actual, atol=atol, rtol=rtol, percent=0.95)
-        return
-
     torch.testing.assert_close(
         expected,
         actual,

@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Test:
+"""Test:
 
 * Tests for MMEncoderAttention layer
 """
@@ -27,9 +26,17 @@ from vllm.v1.attention.selector import _cached_get_attn_backend
 
 
 @pytest.fixture(autouse=True)
-def clear_cache():
-    """Clear lru cache to ensure each test case runs without caching."""
+def reset_test_state():
+    """Clear cached selectors and restore process-wide torch defaults."""
+    default_device = torch.get_default_device()
+    default_dtype = torch.get_default_dtype()
     _cached_get_attn_backend.cache_clear()
+    try:
+        yield
+    finally:
+        torch.set_default_device(default_device)
+        torch.set_default_dtype(default_dtype)
+        _cached_get_attn_backend.cache_clear()
 
 
 devices = ["cpu"]
@@ -41,9 +48,7 @@ if current_platform.is_rocm():
 
 @pytest.mark.parametrize("device", devices)
 def test_mha_attn_platform(default_vllm_config, device: str):
-    """
-    Test the attention selector between different platform and device.
-    """
+    """Test the attention selector between different platform and device."""
     torch.set_default_dtype(torch.float16)
 
     if device == "cpu":
@@ -105,8 +110,7 @@ def ref_attention(
     value: torch.Tensor,
     scale: float,
 ) -> torch.Tensor:
-    """
-    Native implementation of scaled dot product attention without mask:
+    """Native implementation of scaled dot product attention without mask:
     - query, key, value: [batch_size, seq_len, num_heads, head_size]
     - attn_mask: [batch_size, seq_len, seq_len]
     """

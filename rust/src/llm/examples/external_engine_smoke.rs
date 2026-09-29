@@ -59,7 +59,10 @@ fn build_request(request_id: String, max_tokens: u32) -> GenerateRequest {
         trace_headers: None,
         priority: 0,
         data_parallel_rank: None,
+        session_id: None,
+        kv_hints: None,
         reasoning_parser_kwargs: None,
+        reasoning_ended: None,
         lora_request: None,
     }
 }
@@ -119,6 +122,7 @@ async fn main() -> Result<()> {
         coordinator_mode: None,
         model_name: args.model.clone(),
         client_index: args.client_index,
+        engine_stats_enabled: true,
     })
     .await
     .context("failed to connect to external vLLM engine")?;
