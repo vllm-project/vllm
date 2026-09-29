@@ -209,6 +209,9 @@ class SamplerOutput:
     # PLACEHOLDER_TOKEN_ID (-1 by default) is used for padding.
     sampled_token_ids: torch.Tensor
     logprobs_tensors: LogprobsTensors | None
+    # [num_reqs] bool mask: True if every logit is -inf after all
+    # logit processors (i.e., no legal token can be sampled).
+    no_valid_token_mask: torch.Tensor | None = None
 
 
 @dataclass
@@ -309,6 +312,9 @@ class ModelRunnerOutput:
 
     # ``None`` when ``return_sampling_mask`` is off.
     sampling_masks: SamplingMaskLists | None = None
+
+    # req_id -> no legal token could be sampled after logit processors
+    no_valid_token_req_ids: set[str] | None = None
 
     @staticmethod
     def with_kv_conn_output_only(

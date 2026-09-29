@@ -151,7 +151,7 @@ class Sampler:
 
         logprobs_dims = self.get_logprobs_dims(idx_mapping_np)
 
-        sampled, processed_logits = self.sample(
+        sampled, processed_logits, no_valid_token_mask = self.sample(
             logits,
             expanded_idx_mapping,
             idx_mapping,
@@ -220,6 +220,7 @@ class Sampler:
             num_sampled=num_sampled,
             num_rejected=num_rejected,
             sampling_mask_tensors=sampling_mask_tensors,
+            no_valid_token_mask=no_valid_token_mask,
         )
         return sampler_output
 
@@ -286,7 +287,10 @@ class Sampler:
         expanded_local_pos: torch.Tensor,
         seq_lens_upper_bound_np: np.ndarray,
         return_logprobs: bool = False,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
+        needs_logits_processing = bool(
+            np.any(self.needs_logits_processing[idx_mapping_np])
+        )
         processed_logits = self.apply_sampling_params(
             logits,
             expanded_idx_mapping,
@@ -298,6 +302,15 @@ class Sampler:
             seq_lens_upper_bound_np,
             skip_top_k_top_p=True,
         )
+
+        # Neutralize rows where every logit is -inf after logit processors.
+        # Gated on CPU-side state, and device-side only: no host sync. An
+        # invalid row is given a single finite token; its sample is discarded.
+        no_valid_token_mask: torch.Tensor | None = None
+        if needs_logits_processing:
+            no_valid_token_mask = torch.isneginf(processed_logits.amax(dim=-1))
+            processed_logits[no_valid_token_mask, 0] = 0.0
+
         top_k, top_p, has_topp_only_rows = self.sampling_states.get_top_k_top_p(
             expanded_idx_mapping, idx_mapping_np, logits.shape[-1]
         )
@@ -314,7 +327,7 @@ class Sampler:
             self.use_flashinfer or self.use_xpu_sampler
         ) and fused_sampler_eligible
 
-        return self._sample_random(
+        sampled, processed_logits = self._sample_random(
             processed_logits,
             expanded_idx_mapping,
             idx_mapping_np,
@@ -324,6 +337,7 @@ class Sampler:
             has_topp_only_rows,
             use_fused_sampler,
         )
+        return sampled, processed_logits, no_valid_token_mask
 
     def _sample_random(
         self,

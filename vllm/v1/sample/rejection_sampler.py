@@ -26,7 +26,7 @@ from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.ops.bad_words import apply_bad_words_with_drafts
 from vllm.v1.sample.ops.penalties import apply_all_penalties
 from vllm.v1.sample.ops.topk_topp_sampler import apply_top_k_top_p
-from vllm.v1.sample.sampler import Sampler
+from vllm.v1.sample.sampler import Sampler, logits_may_be_masked
 from vllm.v1.spec_decode.fly import (
     apply_fly_greedy_acceptance_kernel,
     apply_fly_random_acceptance_kernel,
@@ -45,6 +45,45 @@ GREEDY_TEMPERATURE: tl.constexpr = 0
 # Maximum number of speculative draft tokens allowed per request in a single
 # step. This value is chosen to be large enough to handle typical use cases.
 MAX_SPEC_LEN = 128
+
+
+def _consumed_invalid_rows(
+    output_token_ids: torch.Tensor,
+    num_draft_tokens: list[int],
+    cu_num_draft_tokens: torch.Tensor,
+    invalid_target_positions: torch.Tensor,
+    bonus_invalid: torch.Tensor | None,
+) -> torch.Tensor:
+    """Map all-(-inf) target rows to the requests that consumed one.
+
+    ``output_token_ids`` is ``[batch_size, max_spec_len + 1]`` with rejected
+    slots set to ``PLACEHOLDER_TOKEN_ID``. Accepted draft rows cannot be
+    all--inf (acceptance needs a positive target probability) and rows past
+    the first rejection stay as placeholders, so a request is flagged iff its
+    recovered or bonus row was all--inf. Fully vectorized: no per-token host
+    reads.
+    """
+    device = output_token_ids.device
+    batch_size = len(num_draft_tokens)
+    num_draft = torch.as_tensor(num_draft_tokens, dtype=torch.long, device=device)
+    cu_draft = cu_num_draft_tokens.to(torch.long)
+    max_spec_len = output_token_ids.shape[1] - 1
+
+    consumed = torch.zeros(batch_size, dtype=torch.bool, device=device)
+    if invalid_target_positions.numel() > 0:
+        positions = torch.arange(max_spec_len, device=device)
+        in_range = positions.unsqueeze(0) < num_draft.unsqueeze(1)
+        target_indices = (cu_draft - num_draft).unsqueeze(1) + positions
+        target_indices.clamp_(max=invalid_target_positions.numel() - 1)
+        reached = output_token_ids[:, :max_spec_len] != PLACEHOLDER_TOKEN_ID
+        consumed = (invalid_target_positions[target_indices] & in_range & reached).any(
+            dim=1
+        )
+
+    if bonus_invalid is not None:
+        bonus_token = output_token_ids.gather(1, num_draft.unsqueeze(1)).squeeze(1)
+        consumed = consumed | ((bonus_token != PLACEHOLDER_TOKEN_ID) & bonus_invalid)
+    return consumed
 
 
 class RejectionSampler(nn.Module):
@@ -204,6 +243,15 @@ class RejectionSampler(nn.Module):
             sampling_metadata,
         )
 
+        # Neutralize target rows where every logit is -inf so the rejection
+        # sampling kernels stay well-defined. Gated on CPU-side state and
+        # device-side only, so no host sync is introduced. An invalid row is
+        # given a single finite token; its recovered token is discarded.
+        invalid_target_positions: torch.Tensor | None = None
+        if logits_may_be_masked(sampling_metadata):
+            invalid_target_positions = torch.isneginf(target_logits.amax(dim=-1))
+            target_logits[invalid_target_positions, 0] = 0.0
+
         output_token_ids = rejection_sample(
             metadata.draft_token_ids,
             metadata.num_draft_tokens,
@@ -221,6 +269,18 @@ class RejectionSampler(nn.Module):
             fly_entropy_top_k=self.fly_entropy_top_k,
         )
 
+        # After rejection sampling, determine which requests actually consumed
+        # an all--inf target row.
+        no_valid_token_mask = None
+        if invalid_target_positions is not None:
+            no_valid_token_mask = _consumed_invalid_rows(
+                output_token_ids,
+                metadata.num_draft_tokens,
+                metadata.cu_num_draft_tokens,
+                invalid_target_positions,
+                bonus_sampler_output.no_valid_token_mask,
+            )
+
         logprobs_tensors = None
         if sampling_metadata.max_num_logprobs is not None:
             logprobs_tensors = self._get_logprobs_tensors(
@@ -235,6 +295,7 @@ class RejectionSampler(nn.Module):
         return SamplerOutput(
             sampled_token_ids=output_token_ids,
             logprobs_tensors=logprobs_tensors,
+            no_valid_token_mask=no_valid_token_mask,
         )
 
     def _get_logprobs_tensors(

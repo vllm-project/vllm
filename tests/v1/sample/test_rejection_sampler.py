@@ -1372,3 +1372,64 @@ def test_placeholder_draft_token_rejected_random(rejection_sampler):
     assert sampled[0, 1].item() == vocab_size - 1
     recovered = sampled[0, 2].item()
     assert 0 <= recovered < vocab_size
+
+
+@pytest.mark.parametrize("seed", [0, 1, 2, 3])
+def test_consumed_invalid_rows_matches_reference(seed: int):
+    """Vectorized all--inf row mapping must match the naive per-token loop.
+
+    The rejection sampler can only be exercised end-to-end on GPU, so this
+    pins the CPU-checkable mapping logic against a reference implementation.
+    """
+    from vllm.v1.sample.rejection_sampler import _consumed_invalid_rows
+
+    rng = torch.Generator().manual_seed(seed)
+    batch_size = 5
+    num_draft_tokens = [
+        int(x) for x in torch.randint(0, 5, (batch_size,), generator=rng)
+    ]
+    max_spec_len = max(num_draft_tokens)
+    total_draft = sum(num_draft_tokens)
+
+    # Random recovered length per request: 1 + recovered position, clamped to
+    # num_draft + 1 (drafts + optional bonus), with the rest placeholders.
+    output_token_ids = torch.full(
+        (batch_size, max_spec_len + 1), PLACEHOLDER_TOKEN_ID, dtype=torch.int32
+    )
+    for r, nd in enumerate(num_draft_tokens):
+        recovered = int(torch.randint(0, nd + 1, (1,), generator=rng))
+        output_token_ids[r, :recovered] = torch.randint(
+            0, 100, (recovered,), generator=rng
+        )
+
+    cu_num_draft_tokens = torch.tensor(num_draft_tokens, dtype=torch.int32).cumsum(0)
+    invalid_target_positions = (
+        (torch.rand(total_draft, generator=rng) < 0.5)
+        if total_draft > 0
+        else torch.zeros(0, dtype=torch.bool)
+    )
+    bonus_invalid = torch.rand(batch_size, generator=rng) < 0.5
+
+    got = _consumed_invalid_rows(
+        output_token_ids,
+        num_draft_tokens,
+        cu_num_draft_tokens,
+        invalid_target_positions,
+        bonus_invalid,
+    )
+
+    ref = torch.zeros(batch_size, dtype=torch.bool)
+    for r, nd in enumerate(num_draft_tokens):
+        prev = 0 if r == 0 else int(cu_num_draft_tokens[r - 1])
+        flag = False
+        for p in range(nd):
+            if output_token_ids[r, p].item() == PLACEHOLDER_TOKEN_ID:
+                break
+            if bool(invalid_target_positions[prev + p]):
+                flag = True
+                break
+        if not flag and output_token_ids[r, nd].item() != PLACEHOLDER_TOKEN_ID:
+            flag = bool(bonus_invalid[r])
+        ref[r] = flag
+
+    assert torch.equal(got.cpu(), ref), f"got={got.tolist()} ref={ref.tolist()}"
