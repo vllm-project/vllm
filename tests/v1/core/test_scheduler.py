@@ -78,6 +78,119 @@ from .utils import EOS_TOKEN_ID, create_requests, create_scheduler, mock_kv
 pytestmark = pytest.mark.cpu_test
 
 
+def test_batch_invariant_mamba_prefill_uses_canonical_chunks() -> None:
+    scheduler = Mock(
+        mamba_prefill_alignment=64,
+        max_num_scheduled_tokens=256,
+        scheduler_config=Mock(long_prefill_token_threshold=0),
+        use_eagle=False,
+        needs_mamba_cache_alignment=False,
+        mamba_partial_cache_hit=False,
+        hash_block_size=16,
+    )
+    request = Mock(
+        num_computed_tokens=0,
+        num_prompt_tokens=193,
+        num_tokens=193,
+        shared_prefix_boundary=0,
+    )
+
+    assert Scheduler._mamba_block_aligned_split(scheduler, request, 73) == 64
+    request.num_computed_tokens = 64
+    assert Scheduler._mamba_block_aligned_split(scheduler, request, 73) == 64
+    request.num_computed_tokens = 128
+    assert Scheduler._mamba_block_aligned_split(scheduler, request, 65) == 64
+    request.num_computed_tokens = 192
+    assert Scheduler._mamba_block_aligned_split(scheduler, request, 1) == 1
+
+
+def test_batch_invariant_mamba_prefill_preserves_cache_checkpoints() -> None:
+    scheduler = Mock(
+        mamba_prefill_alignment=64,
+        needs_mamba_cache_alignment=True,
+        cache_config=Mock(block_size=832),
+        max_num_scheduled_tokens=512,
+        scheduler_config=Mock(long_prefill_token_threshold=0),
+        hash_block_size=832,
+        use_eagle_block_drop=False,
+        mamba_has_prefill_checkpoint_blocks=False,
+        mamba_prefill_checkpoint_alignment=None,
+        mamba_partial_cache_hit=False,
+        mamba_shared_prefix_checkpoint=False,
+    )
+    request = Mock(
+        num_computed_tokens=0,
+        num_prompt_tokens=1883,
+        num_tokens=1883,
+        shared_prefix_boundary=0,
+    )
+    # Intermediate calls stay on the arithmetic grid, but cannot skip the
+    # physical cache boundaries at 832 and 1664 tokens.
+    for start, budget, expected in (
+        (0, 509, 448),
+        (448, 512, 384),
+        (832, 511, 448),
+        (1280, 512, 384),
+        (1664, 219, 219),
+    ):
+        request.num_computed_tokens = start
+        assert (
+            Scheduler._mamba_block_aligned_split(scheduler, request, budget) == expected
+        )
+    request.num_computed_tokens = 0
+    assert (
+        Scheduler._mamba_block_aligned_split(
+            scheduler, request, 511, num_new_local_computed_tokens=832
+        )
+        == 448
+    )
+    request.num_prompt_tokens = request.num_tokens = 513
+    for max_budget in (512, 1024):
+        scheduler.max_num_scheduled_tokens = max_budget
+        request.num_computed_tokens = 448
+        assert Scheduler._mamba_block_aligned_split(scheduler, request, 65) == 64
+        request.num_computed_tokens = 512
+        assert Scheduler._mamba_block_aligned_split(scheduler, request, 1) == 1
+
+
+@pytest.mark.parametrize("cache_alignment", [False, True])
+def test_batch_invariant_mamba_replays_outputs_as_decode(cache_alignment: bool) -> None:
+    scheduler = Mock(
+        mamba_prefill_alignment=64,
+        needs_mamba_cache_alignment=cache_alignment,
+        cache_config=Mock(block_size=832),
+        max_num_scheduled_tokens=512,
+        scheduler_config=Mock(long_prefill_token_threshold=0),
+        hash_block_size=832,
+        use_eagle_block_drop=False,
+        mamba_has_prefill_checkpoint_blocks=False,
+        mamba_prefill_checkpoint_alignment=None,
+        mamba_partial_cache_hit=False,
+        mamba_shared_prefix_checkpoint=False,
+    )
+    request = Mock(
+        num_computed_tokens=0,
+        num_prompt_tokens=62,
+        num_tokens=103,
+        shared_prefix_boundary=0,
+    )
+    # A resumed request must not fold its 41 generated tokens into the prompt.
+    assert Scheduler._mamba_block_aligned_split(scheduler, request, 103) == 62
+    for start in (62, 63, 97):
+        request.num_computed_tokens = start
+        assert (
+            Scheduler._mamba_block_aligned_split(scheduler, request, 103 - start) == 1
+        )
+    # The waiting path supplies the cache-hit offset separately.
+    request.num_computed_tokens = 0
+    assert (
+        Scheduler._mamba_block_aligned_split(
+            scheduler, request, 40, num_new_local_computed_tokens=63
+        )
+        == 1
+    )
+
+
 def test_make_scheduled_encoder_input_stats_output_embeddings():
     scheduler = create_scheduler()
     mm_features = [
