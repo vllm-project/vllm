@@ -129,6 +129,20 @@ def test_unknown_model(server):
     assert response.status_code == 404
 
 
+TEMPLATE_BODY = {
+    "model": MODEL_NAME,
+    "state": "My card was charged twice for one order.",
+    "questions": {
+        "team": {
+            "type": "choice",
+            "instructions": "Which team?",
+            "criteria": {"billing": None, "shipping": None},
+        }
+    },
+    "chat_template_kwargs": {"enable_thinking": False},
+}
+
+
 def test_request_template(server):
     template = (
         "{% macro answer_prefix(question) %}{{ question.id }} ->{% endmacro %}"
@@ -138,24 +152,25 @@ def test_request_template(server):
         "{% endfor %}"
         "Reply as: id -> label"
     )
-    response = post(
-        server,
-        {
-            "model": MODEL_NAME,
-            "state": "My card was charged twice for one order.",
-            "decision_template": template,
-            "questions": {
-                "team": {
-                    "type": "choice",
-                    "instructions": "Which team?",
-                    "criteria": {"billing": None, "shipping": None},
-                }
-            },
-            "chat_template_kwargs": {"enable_thinking": False},
-        },
+    custom = post(server, dict(TEMPLATE_BODY, decision_template=template))
+    assert custom.status_code == 200, custom.text
+    default = post(server, TEMPLATE_BODY)
+    assert default.status_code == 200, default.text
+    custom, default = custom.json(), default.json()
+    # The macro's prefix puts the read where the model expects a label.
+    assert custom["diagnostics"]["team"]["label_mass"] > 0.5
+    # The request's template, not the server's, rendered the prompt.
+    assert custom["answers"]["team"]["probabilities"]["billing"] != pytest.approx(
+        default["answers"]["team"]["probabilities"]["billing"], abs=1e-3
     )
-    assert response.status_code == 200, response.text
-    assert response.json()["answers"]["team"]["choice"] == "billing"
+
+
+def test_request_template_that_does_not_compile(server):
+    response = post(
+        server, dict(TEMPLATE_BODY, decision_template="{% for q in questions %}")
+    )
+    assert response.status_code == 400
+    assert "decision template" in response.json()["error"]["message"]
 
 
 def test_too_many_questions(server):
