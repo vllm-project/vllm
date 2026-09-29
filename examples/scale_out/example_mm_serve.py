@@ -13,9 +13,9 @@ zero client-side transformation.
 
 Launch the server first:
 
-    VLLM_ENABLE_SCALE_OUT_ENDPOINTS=1 \
-        vllm serve Qwen/Qwen3-VL-2B-Instruct \
-        --dtype bfloat16 --max-model-len 4096 --enforce-eager
+    vllm serve Qwen/Qwen3-VL-2B-Instruct \
+        --dtype bfloat16 --max-model-len 4096 --enforce-eager \
+        --enable-scale-out
 
 Then run this script:
 

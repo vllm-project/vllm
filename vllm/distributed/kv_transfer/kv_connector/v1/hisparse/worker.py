@@ -15,10 +15,14 @@ import torch
 
 from vllm import _custom_ops as ops
 from vllm.config import VllmConfig
+from vllm.distributed.kv_transfer.kv_connector.v1.hisparse.stats import (
+    HiSparseKVConnectorStats,
+)
 from vllm.distributed.parallel_state import (
     get_tensor_model_parallel_rank,
     get_tp_group,
 )
+from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.torch_utils import current_stream
 from vllm.v1.core.kv_cache_utils import KVCacheBlockCopy
 from vllm.v1.hisparse.layout import HISPARSE_HOT_SUFFIX
@@ -66,6 +70,9 @@ def _allocate_dma_descriptors(size: int) -> _DMADescriptors:
         dst.numpy(),
         sizes.numpy(),
     )
+
+
+_METRICS_INTERVAL = 2000
 
 
 def _get_hisparse_cache(
@@ -141,6 +148,12 @@ def _select_written_row_mirrors(
     )
 
 
+def _is_hisparse_host_writer(
+    shared_host_region: SharedOffloadRegion | None,
+) -> bool:
+    return shared_host_region is None or get_tensor_model_parallel_rank() == 0
+
+
 def _create_hisparse_host_events(
     shared_host_region: SharedOffloadRegion | None,
     is_host_writer: bool,
@@ -194,15 +207,26 @@ class HiSparseConnectorWorker:
             raise RuntimeError("HiSparse connector found no hot-cache handles.")
         hot_backings: dict[int, torch.Tensor] = {}
         registered_host_pools: dict[int, torch.Tensor] = {}
+        shared_host_regions: dict[int, SharedOffloadRegion] = {}
         for cache in cache_handles:
             hot_backing = cache.runtime.hot_backing
             hot_backings[hot_backing.untyped_storage().data_ptr()] = hot_backing
             registered_pool = cache.runtime.registered_host_pool
             registered_host_pools[registered_pool.data_ptr()] = registered_pool
+            if (region := cache.runtime.shared_host_region) is not None:
+                shared_host_regions[id(region)] = region
         if len(hot_backings) != 1:
             raise RuntimeError("HiSparse hot tensors must share one GPU backing.")
         hot_backing = next(iter(hot_backings.values()))
-        pinned_host_pools = list(registered_host_pools.values())
+        if len(shared_host_regions) > 1:
+            raise RuntimeError("HiSparse caches must share one host region.")
+        shared_host_region = next(iter(shared_host_regions.values()), None)
+        pinned_host_pools = (
+            []
+            if shared_host_region is not None
+            else list(registered_host_pools.values())
+        )
+        is_host_writer = _is_hisparse_host_writer(shared_host_region)
 
         resident = cache_handles[0].view
         assert resident is not None
@@ -217,11 +241,14 @@ class HiSparseConnectorWorker:
                 host_num_blocks,
                 hot_backing.device,
                 pinned_host_pools,
+                shared_host_region=shared_host_region,
+                is_host_writer=is_host_writer,
             )
         except Exception:
             release_pinned_state(
                 [cache.runtime for cache in cache_handles],
                 pinned_host_pools,
+                shared_host_region,
             )
             raise
 
@@ -311,6 +338,9 @@ class HiSparseConnectorWorker:
         self._pending_transfer_events: deque[tuple[torch.Event, tuple[int, ...]]] = (
             deque()
         )
+        self._metrics_calls = 0
+        self._metrics_event = torch.Event()
+        self._metrics_pending = False
         self._init_dma()
         if self.is_host_writer:
             for layer_index, handle in enumerate(cache_handles):
@@ -385,11 +415,18 @@ class HiSparseConnectorWorker:
         transfers = (
             metadata.command.page_transfers if metadata.command is not None else []
         )
+        self._restore_pages([transfer for transfer in transfers if transfer.restore])
         self._post_forward_transfers = [
-            transfer for transfer in transfers if transfer.after_forward
+            transfer
+            for transfer in transfers
+            if not transfer.restore and transfer.after_forward
         ]
         self._submit_transfers(
-            [transfer for transfer in transfers if not transfer.after_forward]
+            [
+                transfer
+                for transfer in transfers
+                if not transfer.restore and not transfer.after_forward
+            ]
         )
         self._pending_invalid_block_ids.extend(metadata.source_block_ids)
         if request_state_indices is not None:
@@ -495,6 +532,36 @@ class HiSparseConnectorWorker:
     def reset_hot_state(self) -> None:
         for runtime in self.leader_runtimes:
             runtime.reset_hot_state()
+
+    def get_kv_connector_stats(self) -> HiSparseKVConnectorStats | None:
+        stats = None
+        if self._metrics_pending and self._metrics_event.query():
+            stats = HiSparseKVConnectorStats()
+            for runtime in self.leader_runtimes:
+                group = runtime.index_group
+                hits, misses = group.swap_stats_host.tolist()
+                if hits or misses:
+                    stats.record_snapshot(hits, misses, misses * group.stats_row_bytes)
+            self._metrics_pending = False
+            if stats.is_empty():
+                stats = None
+
+        self._metrics_calls += 1
+        if (
+            self._metrics_calls % _METRICS_INTERVAL == 0
+            and not self._metrics_pending
+            and not torch.cuda.is_current_stream_capturing()
+        ):
+            compute_stream = current_stream()
+            for runtime in self.leader_runtimes:
+                group = runtime.index_group
+                compute_stream.wait_stream(group.copy_stream)
+                group.swap_stats_host.copy_(group.swap_stats, non_blocking=True)
+                group.swap_stats.zero_()
+                group.copy_stream.wait_stream(compute_stream)
+            self._metrics_event.record()
+            self._metrics_pending = True
+        return stats
 
     def _release_completed_dma_descriptors(self) -> None:
         pending = self._pending_dma_descriptors
@@ -649,17 +716,47 @@ class HiSparseConnectorWorker:
         self._submitted_mirror_layers.update(pending_layers)
 
     def _record_transfer_completion(
-        self, transfers: list[SparseKVPageTransfer]
+        self,
+        transfers: list[SparseKVPageTransfer],
+        *,
+        stream: torch.Stream | None = None,
     ) -> None:
-        if not transfers or not self.is_host_writer:
+        if not transfers:
             return
-        stream = self.dma_stream
+        if stream is None:
+            if not self.is_host_writer:
+                return
+            stream = self.dma_stream
         assert stream is not None
         completion_event = torch.Event()
         completion_event.record(stream)
         transfer_ids = tuple(transfer.transfer_id for transfer in transfers)
         self._pending_transfer_events.append((completion_event, transfer_ids))
         self._enqueued_transfer_ids.extend(transfer_ids)
+
+    def _restore_pages(self, transfers: list[SparseKVPageTransfer]) -> None:
+        """Restore imported tails on every rank before its forward or graph replay."""
+        if not transfers:
+            return
+        for layer_index, cache in enumerate(self.cache_handles):
+            source_index = cache.runtime.resident_source_index
+            source = self.host_caches[layer_index]
+            destination = self.resident_caches[layer_index]
+            for transfer in transfers:
+                host_start = transfer.host_block_id * self.kernel_block_size
+                resident_block = transfer.resident_block_ids[source_index]
+                # Each import pays one H2D page copy and enqueue per layer/rank
+                # instead of tail prefill on D. Restore the prompt rows before
+                # decode appends to this page; unused rows do not extend the
+                # logical sequence.
+                # cudaHostRegister pins this pool outside PyTorch's allocator,
+                # so the sync checker cannot recognize it via is_pinned().
+                with gpu_sync_allowed():
+                    destination[resident_block].copy_(
+                        source[host_start : host_start + self.kernel_block_size],
+                        non_blocking=True,
+                    )
+        self._record_transfer_completion(transfers, stream=current_stream())
 
     def _submit_transfers(self, transfers: list[SparseKVPageTransfer]) -> None:
         if self.cache_handles[0].runtime.eager_host_mirror:
@@ -674,15 +771,12 @@ class HiSparseConnectorWorker:
         descriptor_count = len(transfers) * num_layers
         descriptors = self._acquire_dma_descriptors(descriptor_count)
         destination_rows = np.fromiter(
-            (
-                transfer.destination_block_id * self.kernel_block_size
-                for transfer in transfers
-            ),
+            (transfer.host_block_id * self.kernel_block_size for transfer in transfers),
             dtype=np.int64,
             count=len(transfers),
         )
         source_blocks_by_transfer = np.asarray(
-            [transfer.source_block_ids for transfer in transfers], dtype=np.int64
+            [transfer.resident_block_ids for transfer in transfers], dtype=np.int64
         )
         if source_blocks_by_transfer.ndim != 2:
             raise RuntimeError(
@@ -827,6 +921,8 @@ class HiSparseConnectorWorker:
         if self.dma_stream is not None:
             self.dma_stream.synchronize()
         release_pinned_state(
-            [cache.runtime for cache in self.cache_handles], self.pinned_host_pools
+            [cache.runtime for cache in self.cache_handles],
+            self.pinned_host_pools,
+            self.shared_host_region,
         )
         self._initialized = False

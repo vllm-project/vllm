@@ -43,7 +43,6 @@ headers = {"User-Agent": "vLLM Example Client"}
 
 def encode_base64_content_from_url(content_url: str) -> str:
     """Encode a content retrieved from a remote url to base64 format."""
-
     with requests.get(content_url, headers=headers) as response:
         response.raise_for_status()
         result = base64.b64encode(response.content).decode("utf-8")
@@ -53,7 +52,6 @@ def encode_base64_content_from_url(content_url: str) -> str:
 
 def encode_base64_content_from_file(file_path: str) -> str:
     """Encode a local file content to base64 format."""
-
     with open(file_path, "rb") as file:
         file_content = file.read()
         result = base64.b64encode(file_content).decode("utf-8")
