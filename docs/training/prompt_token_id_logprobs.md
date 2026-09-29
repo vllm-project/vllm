@@ -43,8 +43,8 @@ scores = np.load(io.BytesIO(base64.b64decode(response["prompt_token_id_logprobs"
 ```
 
 `prompt_logprob_token_ids` is an integer array or a list of lists with exactly
-`prompt_len - 1 - prompt_logprob_start` rows; shorter rows are padded with `-1`
-and score `-inf`. With a logits `--logprobs-mode`, the matrix holds logits
+`prompt_len - 1 - prompt_logprob_start` rows; shorter rows are padded with `-1`,
+and every `-1` entry scores `-inf`. With a logits `--logprobs-mode`, the matrix holds logits
 instead of log probabilities.
 
 ## Requirements

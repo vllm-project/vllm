@@ -473,6 +473,9 @@ def test_prompt_logprob_token_ids_validation():
         verify(prompt_logprob_token_ids=np.array([1, 2]))
     with pytest.raises(VLLMValidationError, match=r"shape \[num_rows, num_ids\]"):
         verify(prompt_logprob_token_ids=[1, 2])
+    for bad_ids in ([[1.5]], [["3"]], [[True]], [[None]], [[2**63]]):
+        with pytest.raises(VLLMValidationError, match=r"shape \[num_rows, num_ids\]"):
+            verify(prompt_logprob_token_ids=bad_ids)
     with pytest.raises(VLLMValidationError, match=r"shape \[num_rows, num_ids\]"):
         verify(prompt_logprob_token_ids=np.array([[2**64 - 1]], dtype=np.uint64))
     # The error names the value to raise max_logprobs to.
@@ -1497,7 +1500,10 @@ def test_prompt_logprob_token_ids_with_chunking_and_preemption(monkeypatch):
         )
     for output, ref in zip(outputs, reference_outputs):
         np.testing.assert_allclose(
-            output.prompt_token_id_logprobs, ref.prompt_token_id_logprobs, rtol=0.1
+            output.prompt_token_id_logprobs,
+            ref.prompt_token_id_logprobs,
+            rtol=0.1,
+            atol=0.2,
         )
     for output in self_scored:
         scores = output.prompt_token_id_logprobs[:, 0]

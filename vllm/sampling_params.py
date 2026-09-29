@@ -8,6 +8,7 @@ import math
 from dataclasses import field
 from enum import Enum, IntEnum
 from functools import cached_property
+from itertools import chain
 from typing import Annotated, Any
 
 import msgspec
@@ -21,7 +22,6 @@ from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
 from vllm.tokenizers import TokenizerLike
 from vllm.utils.mistral import is_mistral_tokenizer
-from vllm.utils.torch_utils import make_ndarray_with_pad
 from vllm.v1.serial_utils import PydanticMsgspecMixin
 
 logger = init_logger(__name__)
@@ -77,6 +77,11 @@ ThinkingTokenBudget = Annotated[
     int | None,
     BeforeValidator(validate_thinking_token_budget),
 ]
+
+
+def _fits_int64(dtype: np.dtype) -> bool:
+    return dtype.kind in "iu" and np.can_cast(dtype, np.int64)
+
 
 # JSON clients send nested lists; verify() pads them into an array.
 TokenIdTable = Annotated[
@@ -298,7 +303,7 @@ class SamplingParams(
     When set to -1, return all `vocab_size` log probabilities."""
     prompt_logprob_token_ids: TokenIdTable | None = None
     """Token IDs to score per causal prompt row: an integer array of shape
-    [num_rows, num_ids], -1 padding shorter rows; nested lists are padded.
+    [num_rows, num_ids] or nested lists; -1 entries (padding) score -inf.
     Row i scores its IDs as predictions of prompt token
     prompt_logprob_start + i + 1, so the last prompt row is excluded."""
     prompt_logprob_start: int | None = None
@@ -930,12 +935,11 @@ class SamplingParams(
         if ids is not None:
             shape: tuple[int, ...] = ()
             if isinstance(ids, list) and all(isinstance(row, list) for row in ids):
-                shape = (len(ids), max(map(len, ids), default=0))
-            elif (
-                isinstance(ids, np.ndarray)
-                and ids.dtype.kind in "iu"
-                and np.can_cast(ids.dtype, np.int64)
-            ):
+                lens = np.fromiter(map(len, ids), np.int64, len(ids))
+                values = np.array(list(chain.from_iterable(ids)))
+                if _fits_int64(values.dtype):
+                    shape = (len(ids), int(lens.max(initial=0)))
+            elif isinstance(ids, np.ndarray) and _fits_int64(ids.dtype):
                 shape = ids.shape
             if len(shape) != 2 or 0 in shape:
                 raise VLLMValidationError(
@@ -954,10 +958,11 @@ class SamplingParams(
                     value=n,
                 )
             # Pad only after the width check bounds the allocation.
-            ids = self.prompt_logprob_token_ids = (
-                make_ndarray_with_pad(ids, -1, np.int64)
-                if isinstance(ids, list)
-                else np.ascontiguousarray(ids, dtype=np.int64)
+            if isinstance(ids, list):
+                ids = np.full(shape, -1, dtype=np.int64)
+                ids[np.arange(n) < lens[:, None]] = values
+            ids = self.prompt_logprob_token_ids = np.ascontiguousarray(
+                ids, dtype=np.int64
             )
             vocab_size = model_config.get_vocab_size()
             if ids.min() < -1 or ids.max() >= vocab_size:
