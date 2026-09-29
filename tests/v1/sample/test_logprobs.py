@@ -497,7 +497,7 @@ def test_prompt_logprob_token_ids_validation():
     with pytest.raises(VLLMValidationError, match="non-empty"):
         verify(prompt_logprob_token_ids=[[], []])
     # Rows are bounded by max_model_len before the table is padded.
-    with pytest.raises(VLLMValidationError, match="max_model_len - 1 = 15"):
+    with pytest.raises(VLLMValidationError, match="at most 15 scored rows"):
         verify(prompt_logprob_token_ids=[[]] * 15 + [[1]])
     # prompt_logprob_start alone is a caller mistake, not a silent no-op.
     with pytest.raises(VLLMValidationError, match="requires prompt_logprob_token_ids"):

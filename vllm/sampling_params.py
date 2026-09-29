@@ -940,7 +940,7 @@ class SamplingParams(
             if shape[0] > max_rows:
                 raise VLLMValidationError(
                     f"prompt_logprob_token_ids has {shape[0]} rows, but a prompt "
-                    f"has at most max_model_len - 1 = {max_rows}.",
+                    f"has at most {max_rows} scored rows (max_model_len - 1).",
                     parameter="prompt_logprob_token_ids",
                     value=shape[0],
                 )

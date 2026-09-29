@@ -86,17 +86,17 @@ class PromptLogprobsWorker:
             prompt_len = int(prompt_lens[input_batch.idx_mapping_np[i]])
             chunk_start = int(input_batch.num_computed_prefill_tokens_np[i])
             chunk_end = chunk_start + int(input_batch.num_scheduled_tokens[i])
-            # Drop requests resumed after preemption, as compute_prompt_logprobs
-            # skips them: their scores were already emitted.
+            # Skip decode steps and, as compute_prompt_logprobs does, requests
+            # resumed after preemption: their scores were already emitted.
             if chunk_start >= prompt_len or prompt_len < input_batch.prefill_len_np[i]:
-                del self.token_id_scores[req_id]
+                self.token_id_scores.pop(req_id, None)
                 continue
             if req.scores is None:
                 if chunk_start > req.start:
                     # This prefill starts past the first scored row, so those
                     # rows will never be written; drop the request instead of
                     # emitting a buffer with unwritten rows.
-                    del self.token_id_scores[req_id]
+                    self.token_id_scores.pop(req_id, None)
                     continue
                 req.scores = torch.empty_like(req.token_ids, dtype=torch.float32)
             # The last prompt row predicts the first decode token; skip it.
@@ -115,7 +115,7 @@ class PromptLogprobsWorker:
             if chunk_end >= prompt_len:
                 req.scores.masked_fill_(req.pad, float("-inf"))
                 out[req_id] = req.scores
-                del self.token_id_scores[req_id]
+                self.token_id_scores.pop(req_id, None)
         return out
 
     def compute_prompt_logprobs(
