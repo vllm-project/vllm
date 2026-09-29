@@ -383,7 +383,13 @@ def select_common_block_size(
     for size in sorted(candidates, reverse=True):
         if block_size_is_supported(backends, size):
             return size
-    raise ValueError(f"No common block size for {kv_manager_block_size}.")
+    raise ValueError(
+        f"No common block size for {kv_manager_block_size} ("
+        + "; ".join(
+            f"{b.get_name()}: {b.get_supported_kernel_block_sizes()}" for b in backends
+        )
+        + ")."
+    )
 
 
 def allocate_kv_cache(
@@ -741,10 +747,12 @@ def is_uniform_query_len(num_reqs: int, num_tokens: int, max_query_len: int) -> 
 
 
 def get_uniform_decode_token_count(
-    num_reqs: int, num_tokens: int, max_query_len: int, has_prefill: bool
+    num_reqs: int, num_tokens: int, max_query_len: int, decode_graph_eligible: bool
 ) -> int | None:
     """Per-request token count of a uniform decode batch, or None."""
-    if not has_prefill and is_uniform_query_len(num_reqs, num_tokens, max_query_len):
+    if decode_graph_eligible and is_uniform_query_len(
+        num_reqs, num_tokens, max_query_len
+    ):
         return max_query_len
     return None
 
