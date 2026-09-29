@@ -4,9 +4,11 @@
 import pytest
 import torch
 
+from vllm.config.watermarking import WatermarkConfig
 from vllm.platforms import current_platform
 from vllm.v1.watermarking import (
     DualKeyGumbelWatermarkDetector,
+    DualKeyGumbelWatermarker,
     GumbelWatermarkDetector,
     GumbelWatermarker,
     derive_watermark_key,
@@ -39,6 +41,21 @@ def test_detector_deduplicates_context_even_when_target_differs():
     detection = GumbelWatermarkDetector(key=42, context_width=1).detect([1, 2, 1, 3])
 
     assert detection.num_scored_tokens == 3
+
+
+def test_watermarker_respects_filtered_token_support():
+    logits = torch.full((2, 8), -torch.inf)
+    logits[0, 3] = 0
+    logits[1, 6] = 0
+    contexts = torch.tensor([[1, 2, 3, 4], [4, 5, 6, 7]])
+
+    token_ids = (
+        GumbelWatermarker(key=42)
+        .sample(logits, contexts, lambda values: None)
+        .token_ids
+    )
+
+    assert torch.equal(token_ids, torch.tensor([3, 6]))
 
 
 def test_dual_key_detector_scores_each_token_against_both_keys():
@@ -98,8 +115,12 @@ def test_dual_key_detector_rejects_invalid_alpha():
         DualKeyGumbelWatermarkDetector(key=42, alpha=1.1)
 
 
-def test_dual_key_detector_default_alpha():
-    assert DualKeyGumbelWatermarkDetector(key=42).alpha == 0.2
+def test_dual_key_alpha_defaults_match():
+    config = WatermarkConfig(algorithm="dual_key_gumbel", key=42)
+    watermarker = DualKeyGumbelWatermarker(key=42)
+    detector = DualKeyGumbelWatermarkDetector(key=42)
+
+    assert detector.alpha == watermarker.alpha == config.alpha
 
 
 @pytest.mark.skipif(

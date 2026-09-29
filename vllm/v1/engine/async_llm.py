@@ -443,6 +443,13 @@ class AsyncLLM(EngineClient):
                     "does not match the EngineCoreRequest.request_id attribute. The "
                     "latter will be used, and the former will be ignored."
                 )
+            request_params = request.params
+            if isinstance(request_params, SamplingParams):
+                # This request object is owned by the engine from here on.
+                self.input_processor.apply_watermarking(
+                    request_params,
+                    self.input_processor.resolve_watermarking(request_params),
+                )
         else:
             if isinstance(prompt, dict) and "type" in prompt:
                 # Rendered EngineInput; no blocking preprocessing needed.
@@ -903,6 +910,7 @@ class AsyncLLM(EngineClient):
             sampling_params=SamplingParams(
                 max_tokens=1,
                 extra_args={"kv_transfer_params": dict(kv_transfer_params)},
+                watermarking=False,
             ),
             pooling_params=None,
             arrival_time=time.time(),
