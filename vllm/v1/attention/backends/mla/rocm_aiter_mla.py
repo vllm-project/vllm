@@ -53,6 +53,26 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
+def _supports_fused_dcp_prefill_config(
+    kv_cache_dtype: str | None,
+    query_dtype: torch.dtype,
+    kv_lora_rank: int,
+    qk_nope_head_dim: int,
+    qk_rope_head_dim: int,
+    v_head_dim: int,
+) -> bool:
+    """Whether the configuration supports fused DCP context expansion."""
+    return (
+        kv_cache_dtype in ("fp8", "fp8_e4m3")
+        and query_dtype == torch.bfloat16
+        and kv_lora_rank == 512
+        and qk_nope_head_dim == 128
+        and qk_rope_head_dim == 64
+        and v_head_dim == 128
+        and is_aiter_found_and_supported()
+    )
+
+
 def _segmented_mla_page_size(block_size: int) -> int:
     """Largest supported power-of-two subpage dividing a physical KV block.
 
@@ -651,6 +671,19 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
             self._mla_max_split_per_batch = torch.cuda.get_device_properties(
                 device
             ).multi_processor_count
+
+        # Use the group's original format: decode normalizes E5M2 to "fp8".
+        kv_cache_dtype = getattr(kv_cache_spec, "cache_dtype_str", None)
+        if kv_cache_dtype is None:
+            kv_cache_dtype = vllm_config.cache_config.cache_dtype
+        self._supports_fused_dcp_prefill = _supports_fused_dcp_prefill_config(
+            kv_cache_dtype,
+            self.q_data_type,
+            self.mla_dims.kv_lora_rank,
+            self.mla_dims.qk_nope_head_dim,
+            self.mla_dims.qk_rope_head_dim,
+            self.mla_dims.v_head_dim,
+        )
 
         self.compilation_config = vllm_config.compilation_config
         self.decode_attn_out_dtype = vllm_config.model_config.dtype
@@ -1525,9 +1558,8 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
             prefill is not None
             and prefill.chunked_context is not None
             and self.dcp_world_size > 1
+            and self._supports_fused_dcp_prefill
         ):
-            # Row mapping depends only on the DCP chunk layout. Keep all fused
-            # kernel eligibility checks in the implementation, per layer.
             attn_metadata.dcp_context_row_indices = [
                 context_row_indices(chunk, prefill.block_table.device)
                 for chunk in prefill.chunked_context.chunks
@@ -1930,14 +1962,15 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
         prefill = attn_metadata.prefill
         weight = getattr(self.kv_b_proj, "weight", None)
         eligible = (
-            is_aiter_found_and_supported()
-            and self.kv_cache_dtype in ("fp8", "fp8_e4m3")
-            and self.kv_lora_rank == 512
-            and self.qk_nope_head_dim == 128
-            and self.qk_rope_head_dim == 64
-            and self.v_head_dim == 128
+            _supports_fused_dcp_prefill_config(
+                self.kv_cache_dtype,
+                prefill.q_data_type,
+                self.kv_lora_rank,
+                self.qk_nope_head_dim,
+                self.qk_rope_head_dim,
+                self.v_head_dim,
+            )
             and q.dtype == torch.bfloat16
-            and prefill.q_data_type == torch.bfloat16
             and weight is not None
             and weight.dtype == torch.bfloat16
             and weight.shape == (self.num_heads * 256, 512)

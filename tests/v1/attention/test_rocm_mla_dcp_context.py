@@ -88,6 +88,7 @@ def test_compressed_gather_preserves_bytes_and_workspace_partition(monkeypatch):
     [
         "packed_cache",
         "e5m2",
+        "bf16_cache",
         "quantized_weight",
         "bias",
         "no_indices",
@@ -118,9 +119,11 @@ def test_dcp_prefill_unsupported_formats_use_original_path(monkeypatch, unsuppor
         )
 
     impl = object.__new__(AiterMLAImpl)
-    impl.kv_cache_dtype = {"packed_cache": "fp8_ds_mla", "e5m2": "fp8_e5m2"}.get(
-        unsupported, "fp8"
-    )
+    impl.kv_cache_dtype = {
+        "packed_cache": "fp8_ds_mla",
+        "e5m2": "fp8_e5m2",
+        "bf16_cache": "auto",
+    }.get(unsupported, "fp8")
     impl.kv_lora_rank = 512
     if unsupported == "dimensions":
         impl.kv_lora_rank = 256
