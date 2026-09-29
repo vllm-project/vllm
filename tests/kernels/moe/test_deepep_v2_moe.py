@@ -588,6 +588,19 @@ def _deep_ep_v2_moe_backends(
             fused_experts=fused_experts,
         )
 
+        def apply():
+            return mk_kernel.apply(
+                hidden_states=test_tensors.rank_tokens,
+                w1=w1_ep,
+                w2=w2_ep,
+                topk_weights=test_tensors.topk_weights,
+                topk_ids=test_tensors.topk,
+                activation=MoEActivation.SILU,
+                global_num_experts=config.num_experts,
+                expert_map=None,
+                apply_router_weight_on_input=False,
+            )
+
         for mode in (
             CUDAGraphMode.NONE,
             CUDAGraphMode.FULL,
@@ -595,17 +608,14 @@ def _deep_ep_v2_moe_backends(
             CUDAGraphMode.NONE,
         ):
             with set_forward_context(None, vllm_cfg, cudagraph_runtime_mode=mode):
-                out = mk_kernel.apply(
-                    hidden_states=test_tensors.rank_tokens,
-                    w1=w1_ep,
-                    w2=w2_ep,
-                    topk_weights=test_tensors.topk_weights,
-                    topk_ids=test_tensors.topk,
-                    activation=MoEActivation.SILU,
-                    global_num_experts=config.num_experts,
-                    expert_map=None,
-                    apply_router_weight_on_input=False,
-                )
+                out = apply()
+                if mode == CUDAGraphMode.FULL:
+                    torch.accelerator.synchronize()
+                    torch.distributed.barrier(group=pg)
+                    graph = torch.cuda.CUDAGraph()
+                    with torch.cuda.graph(graph):
+                        out = apply()
+                    graph.replay()
 
             torch.testing.assert_close(torch_combined, out, atol=atol, rtol=rtol)
 
