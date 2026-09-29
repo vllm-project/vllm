@@ -38,6 +38,48 @@ class InMemoryLookupManager(AsyncLookupManager):
 
 
 class TestAsyncLookupManager:
+    @pytest.mark.parametrize("yield_hit_before_error", [False, True])
+    def test_iterator_failure_returns_misses_and_worker_continues(
+        self, monkeypatch: pytest.MonkeyPatch, yield_hit_before_error: bool
+    ):
+        """Lazy lookup failures must not strand this or subsequent requests."""
+        mgr = InMemoryLookupManager(existing_keys={_key(3), _key(4)})
+        batch_lookup = mgr.batch_lookup
+        failed_ctx = _ctx("failed")
+        healthy_ctx = _ctx("healthy")
+
+        def failing_results():
+            if yield_hit_before_error:
+                yield True
+            raise OSError("lookup iterator failed")
+
+        def lookup_with_failure(keys, req_context):
+            if req_context.req_id == failed_ctx.req_id:
+                return failing_results()
+            return batch_lookup(keys, req_context)
+
+        monkeypatch.setattr(mgr, "batch_lookup", lookup_with_failure)
+        try:
+            for key in (_key(1), _key(2)):
+                assert mgr.lookup(key, failed_ctx) is None
+            assert mgr.lookup(_key(3), healthy_ctx) is None
+            mgr.flush()
+            results = mgr._pending_results.get(timeout=5)
+            mgr._pending_results.put(results)
+            mgr.drain_results()
+            assert mgr.lookup(_key(1), failed_ctx) is False
+            assert mgr.lookup(_key(2), failed_ctx) is False
+            assert mgr.lookup(_key(3), healthy_ctx) is True
+
+            assert mgr.lookup(_key(4), healthy_ctx) is None
+            mgr.flush()
+            results = mgr._pending_results.get(timeout=5)
+            mgr._pending_results.put(results)
+            mgr.drain_results()
+            assert mgr.lookup(_key(4), healthy_ctx) is True
+        finally:
+            mgr.shutdown()
+
     def test_new_key_returns_none(self):
         mgr = InMemoryLookupManager()
         assert mgr.lookup(_key(1), _ctx()) is None
