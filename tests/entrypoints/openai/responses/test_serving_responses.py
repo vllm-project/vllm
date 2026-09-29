@@ -748,6 +748,7 @@ class TestInitializeToolSessions:
         class ToolCallingHarmonyContext(HarmonyContext):
             def __init__(self):
                 self._messages = []
+                self.request = None
                 self._needs_tool_call = True
 
             def append_output(self, output) -> None:
@@ -803,6 +804,53 @@ class TestInitializeToolSessions:
         )
         assert followup_engine_input.get("cache_salt") == "request-salt"
         assert followup_engine_input["prompt_token_ids"] == [3, 4]
+
+    @pytest.mark.asyncio
+    async def test_harmony_tool_followup_respects_max_output_tokens(
+        self, serving_responses_instance
+    ):
+        class ToolCallingHarmonyContext(HarmonyContext):
+            def __init__(self, request):
+                self._messages = []
+                self.request = request
+                self._needs_tool_call = True
+
+            def append_output(self, output) -> None:
+                pass
+
+            def need_builtin_tool_call(self) -> bool:
+                return self._needs_tool_call
+
+            async def call_tool(self):
+                self._needs_tool_call = False
+                return []
+
+            def append_tool_output(self, output) -> None:
+                pass
+
+        max_tokens_per_turn = []
+
+        async def generate_output(engine_input, sampling_params, *args, **kwargs):
+            max_tokens_per_turn.append(sampling_params.max_tokens)
+            yield MagicMock()
+
+        serving_responses_instance.engine_client.generate.side_effect = generate_output
+        serving_responses_instance.online_renderer.render_responses_harmony_messages = (
+            MagicMock(return_value=tokens_input([1, 2, 3]))
+        )
+        context = ToolCallingHarmonyContext(
+            ResponsesRequest(input="test", max_output_tokens=10)
+        )
+
+        async for _ in serving_responses_instance._generate_with_builtin_tools(
+            request_id="req",
+            engine_input=tokens_input([1]),
+            sampling_params=SamplingParams(max_tokens=10),
+            context=context,
+        ):
+            pass
+
+        assert max_tokens_per_turn == [10, 10]
 
     @pytest.mark.asyncio
     async def test_initialize_tool_sessions(
@@ -912,24 +960,19 @@ class TestValidateGeneratorInput:
         assert isinstance(result, ErrorResponse)
 
 
-@pytest.mark.asyncio
-async def test_reasoning_tokens_counted_for_text_reasoning_model(monkeypatch):
-    """Ensure reasoning_tokens usage is derived from thinking token spans."""
+class _Qwen3FakeTokenizer:
+    def __init__(self):
+        self._vocab = {"<think>": 1, "</think>": 2, "reason": 3, "final": 4}
 
-    class FakeTokenizer:
-        def __init__(self):
-            self._vocab = {"<think>": 1, "</think>": 2, "reason": 3, "final": 4}
+    def get_vocab(self):
+        return self._vocab
 
-        def get_vocab(self):
-            return self._vocab
+    def decode(self, token_ids):
+        id_to_token = {v: k for k, v in self._vocab.items()}
+        return "".join(id_to_token.get(token_id, "x") for token_id in token_ids)
 
-        def decode(self, token_ids):
-            id_to_token = {v: k for k, v in self._vocab.items()}
-            return "".join(id_to_token.get(token_id, "x") for token_id in token_ids)
 
-    # Force non-harmony, SimpleContext path
-    monkeypatch.setattr(envs, "VLLM_USE_EXPERIMENTAL_PARSER_CONTEXT", False)
-
+def _make_qwen3_serving() -> tuple[OpenAIServingResponses, _Qwen3FakeTokenizer]:
     engine_client = MagicMock()
     model_config = MagicMock()
     model_config.hf_config.model_type = "test"
@@ -939,21 +982,66 @@ async def test_reasoning_tokens_counted_for_text_reasoning_model(monkeypatch):
     engine_client.input_processor = MagicMock()
     engine_client.renderer = MagicMock()
 
-    tokenizer = FakeTokenizer()
+    tokenizer = _Qwen3FakeTokenizer()
     engine_client.renderer.get_tokenizer.return_value = tokenizer
-
-    models = MagicMock()
 
     serving = OpenAIServingResponses(
         engine_client=engine_client,
-        models=models,
+        models=MagicMock(),
         online_renderer=MagicMock(),
         request_logger=None,
         chat_template=None,
         chat_template_content_format="auto",
         reasoning_parser="qwen3",
     )
+    return serving, tokenizer
 
+
+def _make_text_request_output(text: str, token_ids: list[int]) -> RequestOutput:
+    return RequestOutput(
+        request_id="req",
+        prompt="hi",
+        prompt_token_ids=[7, 8],
+        prompt_logprobs=None,
+        outputs=[
+            CompletionOutput(
+                index=0,
+                text=text,
+                token_ids=token_ids,
+                cumulative_logprob=0.0,
+                logprobs=None,
+                finish_reason="stop",
+                stop_reason=None,
+            )
+        ],
+        finished=True,
+        num_cached_tokens=0,
+        num_cache_creation_tokens=3,
+    )
+
+
+async def _run_full_generator(serving, request, context, tokenizer):
+    async def dummy_result_generator():
+        yield None
+
+    return await serving.responses_full_generator(
+        request=request,
+        sampling_params=SamplingParams(max_tokens=16),
+        result_generator=dummy_result_generator(),
+        context=context,
+        model_name="test-model",
+        tokenizer=tokenizer,
+        request_metadata=RequestResponseMetadata(request_id="req"),
+    )
+
+
+@pytest.mark.asyncio
+async def test_reasoning_tokens_counted_for_text_reasoning_model(monkeypatch):
+    """Ensure reasoning_tokens usage is derived from thinking token spans."""
+    # Force non-harmony, SimpleContext path
+    monkeypatch.setattr(envs, "VLLM_USE_EXPERIMENTAL_PARSER_CONTEXT", False)
+
+    serving, tokenizer = _make_qwen3_serving()
     request = ResponsesRequest(input="hi", tools=[], stream=False)
     response_parser = serving._make_response_parser(
         request,
@@ -963,43 +1051,12 @@ async def test_reasoning_tokens_counted_for_text_reasoning_model(monkeypatch):
 
     # Build a SimpleContext with thinking tokens in the output.
     context = SimpleContext(response_parser=response_parser)
-    token_ids = [1, 10, 2, 20]  # <think> 10 </think> 20 -> reasoning token count = 1
-    completion = CompletionOutput(
-        index=0,
-        text="<think>reason</think>final",
-        token_ids=token_ids,
-        cumulative_logprob=0.0,
-        logprobs=None,
-        finish_reason="stop",
-        stop_reason=None,
+    # <think> 10 </think> 20 -> reasoning token count = 1
+    context.append_output(
+        _make_text_request_output("<think>reason</think>final", [1, 10, 2, 20])
     )
-    req_output = RequestOutput(
-        request_id="req",
-        prompt="hi",
-        prompt_token_ids=[7, 8],
-        prompt_logprobs=None,
-        outputs=[completion],
-        finished=True,
-        num_cached_tokens=0,
-        num_cache_creation_tokens=3,
-    )
-    context.append_output(req_output)
 
-    async def dummy_result_generator():
-        yield None
-
-    sampling_params = SamplingParams(max_tokens=16)
-    metadata = RequestResponseMetadata(request_id="req")
-
-    response = await serving.responses_full_generator(
-        request=request,
-        sampling_params=sampling_params,
-        result_generator=dummy_result_generator(),
-        context=context,
-        model_name="test-model",
-        tokenizer=tokenizer,
-        request_metadata=metadata,
-    )
+    response = await _run_full_generator(serving, request, context, tokenizer)
 
     assert response.usage.output_tokens_details.reasoning_tokens == 1
     assert response.usage.input_tokens_details.cache_write_tokens == 3
