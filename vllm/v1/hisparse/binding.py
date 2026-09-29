@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Worker-side wiring of HiSparse caches to attention layers."""
 
-from collections.abc import Mapping
+from collections.abc import Collection, Mapping
 from copy import copy
 from typing import TYPE_CHECKING, Any
 
@@ -118,6 +118,7 @@ def init_hisparse_kv_cache(
     vllm_config: VllmConfig,
     forward_context: dict[str, Any],
     block_tables: "BlockTables",
+    draft_layer_names: Collection[str] = (),
 ) -> dict[str, torch.Tensor]:
     """Allocate and bind HiSparse caches within the caller's allocation context."""
     host_pool = HiSparseHostPool(vllm_config, kv_cache_config)
@@ -135,6 +136,7 @@ def init_hisparse_kv_cache(
             kv_caches=kv_caches,
             block_tables=block_tables,
             host_pool=host_pool,
+            draft_layer_names=draft_layer_names,
         )
         initialize_hisparse_runtime_buffers(
             cache_handles,
@@ -201,6 +203,7 @@ def bind_hisparse_kv_caches(
     kv_caches: dict[str, torch.Tensor],
     block_tables: "BlockTables",
     host_pool: HiSparseHostPool,
+    draft_layer_names: Collection[str] = (),
 ) -> list[HiSparseCacheHandle]:
     """Bind existing cache storage and block tables; return the bound handles."""
     assert host_pool.registered is not None
@@ -276,6 +279,7 @@ def bind_hisparse_kv_caches(
             assert source_cache.untyped_storage().data_ptr() == (
                 host_pool.registered.untyped_storage().data_ptr()
             )
+            cache_handle.draft_layer = layer_name in draft_layer_names
             cache_handle.runtime.shared_host_region = host_pool.shared_region
             cache_handle.runtime.bind_source_cache(
                 source_cache,

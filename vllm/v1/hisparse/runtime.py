@@ -1110,6 +1110,8 @@ class HiSparseCacheHandle:
         self.mirror_staging_cache: torch.Tensor | None = None
         self.mirror_staging_slots: torch.Tensor | None = None
         self.submit_layer_mirror: Callable[[], None] | None = None
+        # Speculator layers write their rows after the target forward.
+        self.draft_layer = False
         self.index_group_caches: list[HiSparseCacheHandle] = [self]
 
     def prepare_group_for_batch(self, attn_metadata: Any | None) -> None:

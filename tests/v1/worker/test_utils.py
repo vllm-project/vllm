@@ -44,6 +44,8 @@ def _make_hisparse_worker() -> HiSparseConnectorWorker:
     worker._row_mirror_num_rows = 0
     worker._per_layer_mirrored = set()
     worker._submitted_mirror_layers = set()
+    worker._draft_layers = ()
+    worker._draft_mirror_pending = False
     worker._pending_dma_descriptors = deque()
     worker._dma_free_descriptors = []
     worker.host_write_events = (MagicMock(), MagicMock())
@@ -805,8 +807,13 @@ def test_hisparse_finish_forward_submits_lazy_post_forward_transfer(monkeypatch)
     worker.finish_forward()
 
     worker._finish_mirror_phase.assert_called_once_with(worker._forward_ready_event)
-    worker._submit_transfers.assert_called_once_with([transfer])
     worker.host_write_event.record.assert_called_once_with(stream)
+    # Page transfers wait until the drafter's rows are mirrored.
+    worker._submit_transfers.assert_not_called()
+
+    worker.wait_for_save()
+
+    worker._submit_transfers.assert_called_once_with([transfer])
 
 
 def test_hisparse_prefill_mirrors_source_groups_and_flushes_partial_group():

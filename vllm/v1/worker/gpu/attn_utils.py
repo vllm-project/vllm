@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, cast
@@ -372,6 +372,7 @@ def init_kv_cache(
     kv_cache_allocation_context: AbstractContextManager | None = None,
     *,
     block_tables: "BlockTables | None" = None,
+    draft_layer_names: Collection[str] = (),
 ) -> dict[str, Any]:
     allocation_context = kv_cache_allocation_context or nullcontext()
     with allocation_context:
@@ -384,6 +385,7 @@ def init_kv_cache(
                 vllm_config,
                 forward_context,
                 block_tables,
+                draft_layer_names,
             )
         else:
             kv_caches = allocate_kv_cache(

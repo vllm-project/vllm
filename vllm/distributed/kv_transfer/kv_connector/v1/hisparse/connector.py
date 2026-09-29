@@ -314,7 +314,8 @@ class HiSparseConnector(KVConnectorBase_V1, SupportsHMA):
         return
 
     def wait_for_save(self) -> None:
-        return
+        assert self.connector_worker is not None
+        self.connector_worker.wait_for_save()
 
     def build_connector_worker_meta(self) -> KVConnectorWorkerMetadata | None:
         assert self.connector_worker is not None
