@@ -374,11 +374,16 @@ def test_tp_sp_generation_prompt_embeds(
 
 @create_new_process_for_each_test()
 def test_tp_sp_nvfp4_generation(num_gpus_available: int):
-    if (
-        not current_platform.is_cuda()
-        or not current_platform.is_device_capability_family(100)
-    ):
-        pytest.skip("NVFP4 requires Blackwell")
+    is_blackwell = current_platform.is_cuda() and (
+        current_platform.is_device_capability_family(100)
+    )
+    is_rocm_cdna = False
+    if current_platform.is_rocm():
+        from vllm.platforms.rocm import on_cdna
+
+        is_rocm_cdna = on_cdna()
+    if not (is_blackwell or is_rocm_cdna):
+        pytest.skip("NVFP4 sequence parallelism requires Blackwell or ROCm CDNA")
 
     comparison = _build_sp_args(
         NVFP4_MODEL_ID,
