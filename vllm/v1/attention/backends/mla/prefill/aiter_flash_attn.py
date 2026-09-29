@@ -207,7 +207,9 @@ class AiterFlashAttnPrefillBackend(MLAPrefillBackend):
                 cu_seqlens_kv=self._prefill_metadata.query_start_loc,
                 max_seqlen_q=self._prefill_metadata.max_query_len,
                 max_seqlen_kv=self._prefill_metadata.max_query_len,
-                cross_seqlen=False,
+                # Bit-identical to cross_seqlen=False for equal q/kv lengths,
+                # and covered by AITER's AOT-built FP8 FMHA variants.
+                cross_seqlen=True,
                 softmax_scale=self.scale,
                 q_descale=q_descale,
                 k_descale=k_descale,
