@@ -67,8 +67,6 @@ class EngramConfig:
 
     def verify_model_config(self, model_config: "ModelConfig | None") -> None:
         """Reject Engram configuration for models without n-gram embeddings."""
-        from vllm.platforms import current_platform
-
         field = (
             _NGRAM_LAYER_FIELDS.get(model_config.architecture)
             if model_config is not None
@@ -77,13 +75,11 @@ class EngramConfig:
         if (
             model_config is None
             or field is None
-            or not current_platform.supports_engram()
             or not getattr(model_config.hf_text_config, field, None)
         ):
             raise ValueError(
                 "EngramConfig requires a model with supported Engram "
-                "embeddings, non-empty n-gram layer ids, and a platform "
-                "that supports Engram."
+                "embeddings and non-empty n-gram layer ids."
             )
 
     def resolve_dp_shared_memory(self, parallel_config: "ParallelConfig") -> None:
