@@ -6,7 +6,8 @@ import deep_ep
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
-from vllm.forward_context import get_forward_context
+from vllm.config import CUDAGraphMode
+from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceContiguous,
@@ -70,9 +71,9 @@ def _unpack_mxfp8_scale(
 class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
     """Prepare/Finalize using DeepEP v2 ElasticBuffer (unified API).
 
-    Supports two modes controlled by the `use_cudagraph` constructor arg:
+    Selects the dispatch layout from the current forward's CUDA graph mode.
 
-    **Decode mode (use_cudagraph=True):**
+    **Graph mode (FULL or PIECEWISE):**
       - do_expand=False, do_cpu_sync=False
       - Tokens returned in original order with recv_topk_idx (global IDs)
       - Worst-case tensor allocation; padding rows zeroed via
@@ -80,12 +81,11 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
       - Fully cudagraph-capturable
       - Expert kernel sorts internally (expert_tokens_meta carries no counts)
 
-    **Prefill mode (use_cudagraph=False):**
+    **Eager mode (NONE, or no forward context):**
       - do_expand=True, do_cpu_sync=True
       - Per-expert-contiguous layout; exact memory allocation
       - Saves GPU memory (no worst-case allocation)
-      - Not cudagraph-capturable (CPU polling), but prefill doesn't
-        use cudagraphs anyway
+      - Not cudagraph-capturable (CPU polling)
       - Provides expert_tokens_meta for efficient batched expert kernels
 
     Dispatch always uses async_with_compute_stream=False. finalize_async
@@ -113,7 +113,6 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         num_experts: int,
         num_topk: int,
         use_fp8_dispatch: bool = False,
-        use_cudagraph: bool = False,
         sp_size: int = 1,
     ):
         super().__init__()
@@ -124,7 +123,6 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         self.num_experts = num_experts
         self.num_topk = num_topk
         self.use_fp8_dispatch = use_fp8_dispatch
-        self.use_cudagraph = use_cudagraph
         self.sp_size = sp_size
 
         # DBO microbatching: one handle slot per micro-batch.
@@ -177,10 +175,11 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         if has_scales:
             token_data = (tokens, token_scales)
 
-        # Decode: do_expand=False + do_cpu_sync=False (cudagraph-safe)
-        # Prefill: do_expand=True + do_cpu_sync=True (memory-efficient)
-        do_expand = not self.use_cudagraph
-        do_cpu_sync = not self.use_cudagraph
+        do_expand = (
+            not is_forward_context_available()
+            or get_forward_context().cudagraph_runtime_mode == CUDAGraphMode.NONE
+        )
+        do_cpu_sync = do_expand
 
         # In do_expand=False mode, the recv buffer is the worst case
         # R * num_max_tokens_per_rank. Defaulting to the buffer's init value
@@ -238,6 +237,7 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
             a1_scale,
             quant_config,
             defer_input_quant=defer_input_quant,
+            do_expand=do_expand,
         )
 
     def _receiver(
@@ -253,6 +253,7 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         a1_scale: torch.Tensor | None,
         quant_config: FusedMoEQuantConfig,
         defer_input_quant: bool,
+        do_expand: bool,
     ) -> mk.PrepareResultType:
         if event.event is not None:
             event.current_stream_wait()
@@ -268,15 +269,11 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
                 device=expert_x.device,
             )
         else:
-            # Decode/cudagraph path (do_cpu_sync=False) skips the CPU sync and
-            # leaves recv_expert_num_tokens empty. A present-but-empty
-            # ExpertTokensMetadata violates the decode-mode contract above
-            # (expert_tokens_meta must be None) and crashes DeepEP combine
-            # during profile_run when CUDA graphs are enabled.
+            # Graph dispatch skips the CPU sync and provides no expert counts.
             expert_tokens_meta = None
 
         if recv_topk_idx is None:
-            # do_expand=True (prefill mode): build topk_ids from
+            # do_expand=True (eager mode): build topk_ids from
             # per-expert token counts.
             assert expert_tokens_meta is not None
             total_tokens = sum(recv_expert_num_tokens)
@@ -296,7 +293,7 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
                 )
             recv_topk_idx = recv_topk_idx.unsqueeze(1)
         else:
-            # do_expand=False (decode/cudagraph mode): the dispatch only writes
+            # do_expand=False (graph mode): the dispatch only writes
             # rows [0, num_recv_tokens); the rest of the worst-case-allocated
             # buffer is left UNINITIALIZED. For valid rows, recv_topk_idx holds
             # LOCAL expert IDs (-1 for non-local slots). Convert valid local IDs
@@ -318,7 +315,7 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         if recv_topk_weights is not None and recv_topk_weights.ndim == 1:
             recv_topk_weights = recv_topk_weights.unsqueeze(1)
 
-        if self.use_cudagraph:
+        if not do_expand:
             # Carry the per-rank prefix sum so SiTU can skip padding rows.
             # expert_num_tokens stays None: count-based consumers (DeepGEMM,
             # Triton) must treat a None field as "no counts" and derive their

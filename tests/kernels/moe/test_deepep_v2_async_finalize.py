@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Contract tests for DeepEPV2PrepareAndFinalize.finalize_async.
+"""Contract tests for DeepEPV2PrepareAndFinalize.
 
 Hermetic: fake buffer/event, single process, no GPU collectives — only
 requires deep_ep to be importable.
@@ -14,9 +14,13 @@ requires deep_ep to be importable.
                         copied immediately.
 """
 
+from types import SimpleNamespace
+
 import pytest
 import torch
 
+from vllm.config import CUDAGraphMode
+from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
 from vllm.utils.import_utils import has_deep_ep_v2
 
 requires_deep_ep_v2 = pytest.mark.skipif(
@@ -49,6 +53,18 @@ class _FakeBuffer:
         self.out = out
         self.calls: list[dict] = []
         self.last_event: _FakeEvent | None = None
+
+    def dispatch(self, **kwargs):
+        self.calls.append(kwargs)
+        expanded = kwargs["do_expand"]
+        num_tokens = self.out.size(0)
+        handle = SimpleNamespace(
+            num_recv_tokens_per_expert_list=[num_tokens] + [0] * 7 if expanded else [],
+            psum_num_recv_tokens_per_scaleup_rank=torch.tensor([num_tokens]),
+        )
+        ids = None if expanded else torch.zeros(num_tokens, 2, dtype=torch.int64)
+        weights = torch.ones(num_tokens) if expanded else torch.ones(num_tokens, 2)
+        return self.out, ids, weights, handle, _FakeEvent(has_event=False)
 
     def combine(
         self,
@@ -83,6 +99,58 @@ def _run(pf, output: torch.Tensor, do_async: bool):
     ids = torch.empty(0, 2, dtype=torch.int64)
     fn = pf.finalize_async if do_async else pf.finalize
     return fn(output, empty, weights, ids, False, TopKWeightAndReduceContiguous())
+
+
+@requires_deep_ep_v2
+def test_prepare_switches_layout_and_preserves_deferred_receiver_mode(monkeypatch):
+    """One instance must follow each forward and retain its dispatch metadata."""
+    context = None
+    monkeypatch.setattr(
+        _dv2, "is_forward_context_available", lambda: context is not None
+    )
+    monkeypatch.setattr(_dv2, "get_forward_context", lambda: context)
+    monkeypatch.setattr(_dv2, "_globalize_recv_topk_idx", lambda ids, *args: ids)
+    tokens = torch.ones(3, 8, dtype=torch.bfloat16)
+    pf = _make_pf(tokens)
+    for mode in (
+        None,
+        CUDAGraphMode.NONE,
+        CUDAGraphMode.FULL,
+        CUDAGraphMode.PIECEWISE,
+        CUDAGraphMode.NONE,
+    ):
+        context = (
+            None
+            if mode is None
+            else SimpleNamespace(cudagraph_runtime_mode=mode, dp_metadata=None)
+        )
+        recv = pf.prepare_async(
+            tokens,
+            torch.ones(3, 2),
+            torch.zeros(3, 2, dtype=torch.int64),
+            8,
+            None,
+            False,
+            FusedMoEQuantConfig.make(None),
+            defer_input_quant=True,
+        )
+        expanded = mode in (None, CUDAGraphMode.NONE)
+        call = pf.buffer.calls[-1]
+        assert call["do_expand"] is expanded
+        assert call["do_cpu_sync"] is expanded
+        assert call["num_max_tokens_per_rank"] == (None if expanded else 4)
+
+        # The receiver may run after the forward context has changed.
+        context = SimpleNamespace(
+            cudagraph_runtime_mode=CUDAGraphMode.FULL
+            if expanded
+            else CUDAGraphMode.NONE
+        )
+        _, _, meta, ids, _ = recv()
+        assert meta is not None
+        assert ids.shape == (3, 1 if expanded else 2)
+        assert (meta.expert_num_tokens is not None) is expanded
+        assert (meta.psum_recv_per_rank is None) is expanded
 
 
 @requires_deep_ep_v2
