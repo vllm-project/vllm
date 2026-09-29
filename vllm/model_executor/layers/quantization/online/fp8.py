@@ -127,6 +127,7 @@ class OnlineLinearBase(LinearMethodBase):
         self.out_dtype = torch.get_default_dtype()
         self.input_dtype = get_current_vllm_config().model_config.dtype
         self.requantization_source: QuantizeMethodBase | None = None
+        self.requantization_source_parameters: dict[str, torch.nn.Parameter] = {}
 
     def set_requantization_source(self, source_method: QuantizeMethodBase) -> None:
         """Configure serialized-weight conversion before online quantization."""
@@ -144,6 +145,7 @@ class OnlineLinearBase(LinearMethodBase):
         **extra_weight_attrs,
     ):
         if self.requantization_source is not None:
+            existing_parameter_names = set(layer._parameters)
             self.requantization_source.create_weights(
                 layer,
                 input_size_per_partition,
@@ -153,6 +155,11 @@ class OnlineLinearBase(LinearMethodBase):
                 params_dtype,
                 **extra_weight_attrs,
             )
+            self.requantization_source_parameters = {
+                name: parameter
+                for name, parameter in layer._parameters.items()
+                if name not in existing_parameter_names and parameter is not None
+            }
             return
 
         output_size_per_partition = sum(output_partition_sizes)
@@ -177,6 +184,13 @@ class OnlineLinearBase(LinearMethodBase):
         layer.register_parameter("weight", weight)
 
         initialize_online_processing(layer)
+
+    def release_requantization_source_weights(self, layer: torch.nn.Module) -> None:
+        """Release checkpoint parameters after successful requantization."""
+        for name, source_parameter in self.requantization_source_parameters.items():
+            if layer._parameters.get(name) is source_parameter:
+                delattr(layer, name)
+        self.requantization_source_parameters.clear()
 
     def get_weight_for_quantization(self, layer: Module) -> torch.Tensor:
         """Return checkpoint weights materialized for online quantization."""
@@ -440,6 +454,7 @@ class Fp8PtpcOnlineLinearMethod(OnlineLinearBase):
 
         self.fp8_linear.process_weights_after_loading(layer)
         expose_input_quant_key(layer, self.fp8_linear)
+        self.release_requantization_source_weights(layer)
 
         layer._already_called_process_weights_after_loading = True
 
