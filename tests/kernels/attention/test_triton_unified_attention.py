@@ -370,25 +370,24 @@ SM120_SIX_QUERY_NATIVE = pytest.mark.skipif(
 )
 
 
-def _six_query_native_inputs(window=None, capture=False):
+def _native_graph_inputs(window, width, num_seqs):
     from tests.v1.attention.test_triton_attention_metadata import _builder, _metadata
 
     set_random_seed(0)
-    builder = _builder(5, max_num_seqs=1, capture_sizes=[6], device="cuda")
-    common = _metadata([6], [False])
+    num_tokens = width * num_seqs
+    builder = _builder(
+        width - 1, max_num_seqs=num_seqs, capture_sizes=[num_tokens], device="cuda"
+    )
+    common = _metadata([width] * num_seqs, [False] * num_seqs)
     common.query_start_loc = common.query_start_loc_cpu.to("cuda")
-    common.seq_lens = torch.tensor([129], dtype=torch.int32, device="cuda")
+    common.seq_lens = torch.full((num_seqs,), 129, dtype=torch.int32, device="cuda")
     common.max_seq_len = 4097
     common.block_table_tensor = torch.arange(
         64, dtype=torch.int32, device="cuda"
-    ).reshape(1, 64)
-    common.slot_mapping = torch.arange(6, dtype=torch.int64, device="cuda")
-    metadata = (
-        builder.build_for_cudagraph_capture(common)
-        if capture
-        else builder.build(0, common)
-    )
-    query = torch.randn((6, 8, 128), dtype=torch.bfloat16, device="cuda")
+    ).repeat(num_seqs, 1)
+    common.slot_mapping = torch.arange(num_tokens, dtype=torch.int64, device="cuda")
+    metadata = builder.build_for_cudagraph_capture(common)
+    query = torch.randn((num_tokens, 8, 128), dtype=torch.bfloat16, device="cuda")
     keys = torch.randn((64, 128, 1, 128), dtype=torch.bfloat16, device="cuda").to(
         FP8_DTYPE
     )
@@ -407,7 +406,7 @@ def _six_query_native_inputs(window=None, capture=False):
         v=values,
         out=output,
         cu_seqlens_q=metadata.query_start_loc,
-        max_seqlen_q=6,
+        max_seqlen_q=width,
         seqused_k=metadata.seq_lens,
         max_seqlen_k=4097,
         softmax_scale=128**-0.5,
@@ -429,15 +428,16 @@ def _six_query_native_inputs(window=None, capture=False):
     return args, scratch
 
 
-def _check_six_query_native(args, active, kv_len, window=None):
+def _check_native_graph(args, query_lens, kv_lens, window=None):
+    active = sum(query_lens)
     if active:
         with torch.device("cuda"):
             expected = ref_paged_attn(
                 args["q"][:active].float().clone(),
                 args["k"].float(),
                 args["v"].float(),
-                [active],
-                [kv_len],
+                query_lens,
+                kv_lens,
                 args["block_table"],
                 128**-0.5,
                 window,
@@ -450,12 +450,39 @@ def _check_six_query_native(args, active, kv_len, window=None):
     )
 
 
-@SM120_SIX_QUERY_NATIVE
+@pytest.mark.parametrize(
+    ("width", "replays"),
+    [
+        pytest.param(
+            6,
+            [
+                ([6], [129], False),
+                ([3], [33], False),
+                ([0], [0], False),
+                ([6], [4097], False),
+                ([6], [6], True),
+            ],
+            marks=SM120_SIX_QUERY_NATIVE,
+            id="width6",
+        ),
+        pytest.param(
+            5,
+            [
+                ([5, 0], [129, 0], False),
+                ([0, 5], [0, 129], False),
+                ([5, 0], [5, 0], True),
+            ],
+            id="width5",
+        ),
+    ],
+)
 @pytest.mark.parametrize("window", [None, 32])
 @torch.inference_mode()
-def test_six_query_native_graph_replay_preserves_buffers_and_padding(window):
-    args, scratch = _six_query_native_inputs(window, capture=True)
-    assert args["is_uniform_decode"] and all(buffer.shape[0] == 6 for buffer in scratch)
+def test_native_graph_replay_preserves_buffers_and_padding(window, width, replays):
+    num_seqs = len(replays[0][0])
+    args, scratch = _native_graph_inputs(window, width, num_seqs)
+    assert args["is_uniform_decode"]
+    assert all(buffer.shape[0] == width * num_seqs for buffer in scratch)
     pointers = [buffer.data_ptr() for buffer in scratch]
     stream = torch.cuda.Stream()
     stream.wait_stream(torch.cuda.current_stream())
@@ -467,23 +494,17 @@ def test_six_query_native_graph_replay_preserves_buffers_and_padding(window):
     graph = torch.cuda.CUDAGraph()
     with torch.cuda.graph(graph):
         unified_attention(**args)
-    for active, kv_len, negative in [
-        (6, 129, False),
-        (3, 33, False),
-        (0, 0, False),
-        (6, 4097, False),
-        (6, 6, True),
-    ]:
+    for query_lens, kv_lens, negative in replays:
         args["q"].normal_()
         if negative:
             args["q"].fill_(-100)
             args["k"].fill_(100)
-        args["cu_seqlens_q"][1] = active
-        args["seqused_k"][0] = kv_len
+        args["cu_seqlens_q"][1:] = torch.tensor(query_lens).cumsum(0)
+        args["seqused_k"][:] = torch.tensor(kv_lens)
         args["out"].fill_(37.0)
         graph.replay()
         torch.accelerator.synchronize()
-        _check_six_query_native(args, active, kv_len, window)
+        _check_native_graph(args, query_lens, kv_lens, window)
         assert [buffer.data_ptr() for buffer in scratch] == pointers
 
 
