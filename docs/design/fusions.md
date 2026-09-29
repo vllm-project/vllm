@@ -274,8 +274,8 @@ fused_qk_norm_rope(qkv, ...)
 ```
 
 **Multimodal RoPE (mRoPE).** A companion pass (`QKNormMRoPEFusionPass`, enabled by the
-same `enable_qk_norm_rope_fusion` flag) fuses the mRoPE variant used by Qwen3-VL-class models — per-head Q/K RMSNorm
-followed by 3-section `[t, h, w]` multimodal rotary embedding — into a single
+same `enable_qk_norm_rope_fusion` flag) fuses the mRoPE variant used by Qwen3-VL-class models, per-head Q/K RMSNorm
+followed by 3-section `[t, h, w]` multimodal rotary embedding, into a single
 `fused_qk_norm_mrope` kernel. Both the contiguous `[T..T H..H W..W]` and interleaved
 `[T H W ... T T]` (the Qwen3-VL default) mRoPE section layouts are supported.
 

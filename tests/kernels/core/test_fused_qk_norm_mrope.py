@@ -15,6 +15,8 @@ DTYPES = [torch.bfloat16, torch.float16]
 IS_NEOX = [True, False]
 MROPE_INTERLEAVED = [False, True]  # Qwen3-VL uses interleaved
 EPS_VALUES = [1e-5, 1e-6]
+# -1 auto-selects; 1 is the base kernel, 2/4/8 the multi-token-head kernel.
+TOKEN_HEADS_PER_WARP = [-1, 1, 2, 4, 8]
 SEEDS = [13]
 CUDA_DEVICES = ["cuda:0"]
 
@@ -65,6 +67,7 @@ def _apply_qk_norm_mrope(
 @pytest.mark.parametrize("is_neox", IS_NEOX)
 @pytest.mark.parametrize("mrope_interleaved", MROPE_INTERLEAVED)
 @pytest.mark.parametrize("eps", EPS_VALUES)
+@pytest.mark.parametrize("token_heads_per_warp", TOKEN_HEADS_PER_WARP)
 @pytest.mark.parametrize("seed", SEEDS)
 @pytest.mark.parametrize("num_heads,num_kv_heads,head_dim,mrope_section", HEAD_CONFIGS)
 @torch.inference_mode()
@@ -75,6 +78,7 @@ def test_fused_qk_norm_mrope_matches_reference(
     is_neox: bool,
     mrope_interleaved: bool,
     eps: float,
+    token_heads_per_warp: int,
     seed: int,
     num_heads: int,
     num_kv_heads: int,
@@ -83,7 +87,8 @@ def test_fused_qk_norm_mrope_matches_reference(
 ):
     torch.set_default_device(device)
     set_random_seed(seed)
-    num_tokens = 7
+    # Odd count spanning several blocks, so partial blocks and chunks are hit.
+    num_tokens = 67
 
     total_dim = (num_heads + 2 * num_kv_heads) * head_dim
     qkv_base = torch.randn(num_tokens, total_dim, dtype=dtype, device=device)
@@ -102,23 +107,33 @@ def test_fused_qk_norm_mrope_matches_reference(
     q_weight = q_norm.weight.data
     k_weight = k_norm.weight.data
 
-    rope = MRotaryEmbedding(
-        head_size=head_dim,
-        rotary_dim=head_dim,
-        max_position_embeddings=4096,
-        base=10000.0,
-        is_neox_style=is_neox,
-        dtype=dtype,
-        mrope_section=mrope_section,
-        mrope_interleaved=mrope_interleaved,
-    ).to(device)
+    def make_rope(rope_dtype: torch.dtype) -> MRotaryEmbedding:
+        return MRotaryEmbedding(
+            head_size=head_dim,
+            rotary_dim=head_dim,
+            max_position_embeddings=4096,
+            base=10000.0,
+            is_neox_style=is_neox,
+            dtype=rope_dtype,
+            mrope_section=mrope_section,
+            mrope_interleaved=mrope_interleaved,
+        ).to(device)
 
+    rope = make_rope(dtype)
+
+    # The reference runs in fp32: a half-precision reference rounds between
+    # the norm and the rotation and is itself off by more than the tolerance
+    # on a few elements once there are enough of them.
+    ref_q_norm = RMSNorm(head_dim, eps=eps).to(device=device, dtype=torch.float32)
+    ref_k_norm = RMSNorm(head_dim, eps=eps).to(device=device, dtype=torch.float32)
+    ref_q_norm.weight.data.copy_(q_weight)
+    ref_k_norm.weight.data.copy_(k_weight)
     ref_result = _apply_qk_norm_mrope(
-        qkv=qkv_base,
+        qkv=qkv_base.float(),
         positions=positions,
-        q_norm=q_norm,
-        k_norm=k_norm,
-        rope=rope,
+        q_norm=ref_q_norm,
+        k_norm=ref_k_norm,
+        rope=make_rope(torch.float32),
         num_heads_q=num_heads,
         num_heads_kv=num_kv_heads,
         head_dim=head_dim,
@@ -141,6 +156,7 @@ def test_fused_qk_norm_mrope_matches_reference(
             mrope_section[0],
             mrope_section[1],
             mrope_interleaved,
+            token_heads_per_warp,
         ),
     )
 
@@ -159,6 +175,7 @@ def test_fused_qk_norm_mrope_matches_reference(
         mrope_section[0],
         mrope_section[1],
         mrope_interleaved,
+        token_heads_per_warp,
     )
 
     if dtype == torch.float16:
@@ -167,8 +184,30 @@ def test_fused_qk_norm_mrope_matches_reference(
         ATOL, RTOL = (4e-2, 4e-2)
 
     torch.testing.assert_close(
-        qkv_fused,
+        qkv_fused.float(),
         ref_result,
         atol=ATOL,
         rtol=RTOL,
     )
+
+    # Every kernel variant must produce the same bits, so the output does not
+    # depend on which one the token count dispatches to.
+    qkv_base_kernel = qkv_base.clone()
+    ops.fused_qk_norm_mrope(
+        qkv_base_kernel,
+        num_heads,
+        num_kv_heads,
+        num_kv_heads,
+        head_dim,
+        eps,
+        q_weight,
+        k_weight,
+        rope.cos_sin_cache,
+        is_neox,
+        positions,
+        mrope_section[0],
+        mrope_section[1],
+        mrope_interleaved,
+        1,
+    )
+    assert torch.equal(qkv_fused, qkv_base_kernel)

@@ -426,13 +426,15 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
   // Fused per-head QK RMSNorm + multimodal RoPE (mRoPE) for Qwen3-VL-class
   // models. position_ids is [3, num_tokens] (time/height/width streams);
   // mrope_section_{t,h} are the section sizes in half-dims (w is implied).
+  // forced_token_heads_per_warp: -1 = auto-select, otherwise 1, 2, 4 or 8.
   ops.def(
       "fused_qk_norm_mrope(Tensor! qkv, int num_heads_q, "
       "int num_heads_k, int num_heads_v, int head_dim, float eps, "
       "Tensor q_weight, Tensor k_weight, Tensor cos_sin_cache, "
       "bool is_neox, Tensor position_ids, "
       "int mrope_section_t, int mrope_section_h, "
-      "bool mrope_interleaved) -> ()");
+      "bool mrope_interleaved, "
+      "int forced_token_heads_per_warp=-1) -> ()");
 
   ops.def(
       "fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert("

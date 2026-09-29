@@ -372,6 +372,7 @@ class QkNormMRopePattern:
                 mrope_section_t=self.mrope_section[0],
                 mrope_section_h=self.mrope_section[1],
                 mrope_interleaved=self.mrope_interleaved,
+                forced_token_heads_per_warp=-1,
             )
             result_qkv = result[1]
             return result_qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)  # type: ignore[no-any-return]

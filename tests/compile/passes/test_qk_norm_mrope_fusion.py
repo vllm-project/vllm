@@ -9,6 +9,10 @@ import vllm.compilation.passes.fusion.qk_norm_rope_fusion as mrope_fusion_mod
 from tests.compile.backend import TestBackend
 from vllm.compilation.passes.fusion.matcher_utils import MROPE_OP
 from vllm.compilation.passes.fusion.qk_norm_rope_fusion import QKNormMRoPEFusionPass
+from vllm.compilation.passes.fx_utils import find_auto_fn_maybe, find_op_nodes
+from vllm.compilation.passes.utility.fix_functionalization import (
+    FixFunctionalizationPass,
+)
 from vllm.compilation.passes.utility.noop_elimination import NoOpEliminationPass
 from vllm.compilation.passes.utility.post_cleanup import PostCleanupPass
 from vllm.compilation.passes.utility.split_coalescing import SplitCoalescingPass
@@ -96,11 +100,14 @@ class QKNormMRoPETestModel(torch.nn.Module):
 @pytest.mark.parametrize("eps", [1e-5, 1e-6])
 @pytest.mark.parametrize("mrope_interleaved", [False, True])
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
+@pytest.mark.parametrize("defunctionalize", [False, True])
 @pytest.mark.skipif(
     not current_platform.is_cuda_alike(),
     reason="Only test on cuda and rocm platform",
 )
-def test_qk_norm_mrope_fusion(monkeypatch, eps, mrope_interleaved, dtype):
+def test_qk_norm_mrope_fusion(
+    monkeypatch, eps, mrope_interleaved, dtype, defunctionalize
+):
     if not hasattr(torch.ops._C, "fused_qk_norm_mrope"):
         pytest.skip("fused_qk_norm_mrope custom op not available")
 
@@ -152,7 +159,10 @@ def test_qk_norm_mrope_fusion(monkeypatch, eps, mrope_interleaved, dtype):
         fusion_pass = QKNormMRoPEFusionPass(vllm_config)
         cleanup_pass = PostCleanupPass(vllm_config)
 
-        backend = TestBackend(noop_pass, coalesce_pass, fusion_pass, cleanup_pass)
+        passes = [noop_pass, coalesce_pass, fusion_pass, cleanup_pass]
+        if defunctionalize:
+            passes.append(FixFunctionalizationPass(vllm_config))
+        backend = TestBackend(*passes)
         backend_baseline = TestBackend(noop_pass, cleanup_pass)
 
         qkv = torch.randn(T, model.q_size + 2 * model.kv_size)
@@ -184,3 +194,11 @@ def test_qk_norm_mrope_fusion(monkeypatch, eps, mrope_interleaved, dtype):
 
         backend.check_before_ops(model.ops_in_model_before())
         backend.check_after_ops(model.ops_in_model_after())
+
+        if defunctionalize:
+            # The fused op must run in place: no functional wrapper, which
+            # would clone qkv on every call.
+            fused_op = torch.ops._C.fused_qk_norm_mrope.default
+            nodes = backend.graph_post_pass.nodes
+            assert find_auto_fn_maybe(nodes, fused_op) is None
+            assert len(list(find_op_nodes(fused_op, backend.graph_post_pass))) == 1
