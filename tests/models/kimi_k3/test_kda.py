@@ -59,6 +59,7 @@ from vllm.models.kimi_k3.nvidia.ops.third_party.kda import (
 )
 from vllm.platforms import current_platform
 from vllm.third_party.flash_linear_attention.ops.l2norm import l2norm_fwd
+from vllm.transformers_utils.configs.kimi_linear import KimiLinearConfig
 from vllm.utils.flashinfer import flashinfer_fused_kda_decode
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 
@@ -1792,7 +1793,7 @@ def test_flashkda_checkpoint_correctness(state_dtype: torch.dtype, tolerance: fl
     checkpoint_state_indices = torch.tensor(
         [1, NULL_BLOCK_ID], dtype=torch.int32, device=DEVICE
     )
-    FlashKDAPrefillCheckpointExporter().export(
+    FlashKDAPrefillCheckpointExporter(state_len=3).export(
         MambaPrefillCheckpointMetadata(checkpoint_offsets, checkpoint_state_indices),
         raw_qkv=conv_input,
         conv_state=conv_state,
@@ -1802,3 +1803,84 @@ def test_flashkda_checkpoint_correctness(state_dtype: torch.dtype, tolerance: fl
     )
     torch.testing.assert_close(conv_state[1], q[0, 13:16].flatten(1).transpose(0, 1))
     torch.testing.assert_close(recurrent_state[1], checkpoint_state[0])
+
+
+@pytest.mark.parametrize("num_spec", [0, 1, 4])
+@pytest.mark.parametrize("dim_first", [True, False])
+@torch.inference_mode()
+def test_checkpoint_conv_history_excludes_speculative_scratch(
+    num_spec, dim_first, dist_init, default_vllm_config
+):
+    """A cached checkpoint resumes convolution from its logical token boundary."""
+    _require_kda_prefill_backend("flashkda", torch.float32, -5.0)
+    config = KimiLinearConfig(
+        hidden_size=128,
+        num_hidden_layers=1,
+        num_attention_heads=1,
+        num_key_value_heads=1,
+        linear_attn_config={
+            "kda_layers": [1],
+            "full_attn_layers": [],
+            "head_dim": 128,
+            "num_heads": 1,
+            "short_conv_kernel_size": 4,
+            "gate_lower_bound": -5.0,
+            "use_full_rank_gate": True,
+        },
+    )
+    default_vllm_config.model_config = SimpleNamespace(dtype=torch.bfloat16)
+    default_vllm_config.speculative_config = (
+        SimpleNamespace(num_speculative_tokens=num_spec) if num_spec else None
+    )
+    default_vllm_config.additional_config = {
+        "kda_prefill_backend": "flashkda",
+        "kda_decode_backend": "triton",
+        "kda_spec_decode_backend": "native",
+    }
+    default_vllm_config.scheduler_config.max_num_batched_tokens = 32
+    default_vllm_config.scheduler_config.max_num_seqs = 2
+    with torch.device(DEVICE):
+        layer = KimiK3DeltaAttention(
+            config, default_vllm_config, prefix="model.layers.0.self_attn"
+        )
+    dim, width, boundary = 3 * layer.local_projection_size, layer.conv_size, 16
+    history_len = width - 1
+    capacity = history_len + num_spec
+    raw = torch.arange(20, dtype=torch.float32, device=DEVICE)
+    raw = raw[:, None].expand(-1, dim).contiguous()
+    shape = (2, dim, capacity) if dim_first else (2, capacity, dim)
+    conv_state = torch.full(shape, -73.0, device=DEVICE)
+    if not dim_first:
+        conv_state = conv_state.transpose(1, 2)
+    recurrent_state = torch.zeros(2, 1, 4, 4, device=DEVICE)
+    checkpoint_state = torch.ones(1, 1, 4, 4, device=DEVICE)
+    indices = torch.tensor([1], dtype=torch.int32, device=DEVICE)
+    assert layer._checkpoint_exporter is not None
+    layer._checkpoint_exporter.export(
+        MambaPrefillCheckpointMetadata(
+            torch.tensor([boundary], dtype=torch.int32, device=DEVICE), indices
+        ),
+        raw_qkv=raw,
+        conv_state=conv_state,
+        recurrent_checkpoint=checkpoint_state,
+        recurrent_state=recurrent_state,
+        cu_seqlens=torch.tensor([0, len(raw)], dtype=torch.int32, device=DEVICE),
+    )
+    torch.testing.assert_close(
+        conv_state[1, :, :history_len], raw[boundary - history_len : boundary].T
+    )
+    assert torch.all(conv_state[1, :, history_len:] == -73)
+    assert torch.all(conv_state[0] == -73)
+    torch.testing.assert_close(recurrent_state[1], checkpoint_state[0])
+
+    weight = torch.ones(dim, width, device=DEVICE)
+    actual = causal_conv1d_update(
+        raw[boundary].view(1, dim, 1).clone(),
+        conv_state,
+        weight,
+        None,
+        conv_state_indices=indices,
+        activation=None,
+    )
+    expected = raw[boundary - history_len : boundary + 1].sum(0).view(1, dim, 1)
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
