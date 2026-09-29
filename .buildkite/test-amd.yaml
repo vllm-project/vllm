@@ -4533,7 +4533,7 @@ steps:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-mi355-deepseek-r1-dp.txt
 
-- label: ":amd: (MI355) LM Eval DeepSeek V3.2 TP"
+- label: ":amd: (MI355) LM Eval DeepSeek V3_2 TP"
   timeout_in_minutes: 65
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
   dind: false
@@ -4566,7 +4566,7 @@ steps:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-mi355-deepseek-v32-tp.txt
 
-- label: ":amd: (MI355) LM Eval DeepSeek V3.2 DP"
+- label: ":amd: (MI355) LM Eval DeepSeek V3_2 DP"
   timeout_in_minutes: 65
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
   dind: false
