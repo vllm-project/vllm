@@ -48,6 +48,7 @@ from vllm.models.kimi_k3.amd.ops.kda_chunk import (
     is_fused_kda_chunk_supported,
 )
 from vllm.models.kimi_k3.amd.ops.kda_decode import (
+    is_aiter_spec_kda_decode_supported,
     is_fused_kda_decode_supported,
     make_decode_conv1d_weight_loader,
     make_decode_norm_weight_loader,
@@ -385,6 +386,7 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
 
         if (
             self.num_spec > 0
+            and is_aiter_spec_kda_decode_supported()
             and self.decode_conv1d_weight is not None
             and self.decode_norm_weight is not None
             and spec_sequence_masks is not None
@@ -407,9 +409,8 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
             conv_state_indices = spec_state_indices[:, 0]
             aiter_fused_kda_decode(
                 # FULL_DECODE_ONLY graph replay pads num_actual_tokens to the
-                # capture size. Narrow to real spec tokens so AITER selects
-                # its gfx950 spec-7 path (T == batch * 8), matching the
-                # varlen contract used by vLLM's existing three-op path.
+                # capture size. Narrow to the real speculative tokens:
+                # ssm_state_indices is only that wide.
                 mixed_qkv=mixed_qkv[:num_spec_tokens],
                 conv_state=conv_state,
                 conv_weight=self.decode_conv1d_weight,
