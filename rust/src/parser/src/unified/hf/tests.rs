@@ -665,7 +665,10 @@ fn tools_convert_string_arguments() {
                 "close": "</tool_call>",
                 "repeats": true,
                 "content": "xml-inline",
-                "content_args": {"tag_pattern": r"<parameter=(?P<key>\w+)>\s*(?P<value>.*?)\s*</parameter>"},
+                "content_args": {
+                    "tag_pattern": r"<parameter=(?P<key>\w+)>\s*(?P<value>.*?)\s*</parameter>",
+                    "merge_duplicates": true,
+                },
                 "transform": {"type": "function", "function": {"name": "{name}", "arguments": "{content}"}},
             },
         },
@@ -679,19 +682,20 @@ fn tools_convert_string_arguments() {
                 "hour": {"type": "integer"},
                 "enabled": {"type": "boolean"},
                 "label": {"type": "string"},
+                "weekday": {"type": "integer"},
             },
         }),
         strict: None,
     }];
-    let text = "<tool_call>\n<function=set_alarm>\n<parameter=hour>\n7\n</parameter>\n<parameter=enabled>\ntrue\n</parameter>\n<parameter=label>\nwake up\n</parameter>\n</function>\n</tool_call>";
+    let text = "<tool_call>\n<function=set_alarm>\n<parameter=hour>\n7\n</parameter>\n<parameter=enabled>\ntrue\n</parameter>\n<parameter=label>\nwake up\n</parameter>\n<parameter=weekday>1</parameter><parameter=weekday>2</parameter>\n</function>\n</tool_call>";
     assert_eq!(
         message(&parse_events(&template, &tools, "", &[text]).unwrap()),
-        json!({"tool_calls": [{"name": "set_alarm", "arguments": {"hour": 7, "enabled": true, "label": "wake up"}}]})
+        json!({"tool_calls": [{"name": "set_alarm", "arguments": {"hour": 7, "enabled": true, "label": "wake up", "weekday": [1, 2]}}]})
     );
     // Without tools, values stay strings.
     assert_eq!(
         message(&parse_events(&template, &[], "", &[text]).unwrap()),
-        json!({"tool_calls": [{"name": "set_alarm", "arguments": {"hour": "7", "enabled": "true", "label": "wake up"}}]})
+        json!({"tool_calls": [{"name": "set_alarm", "arguments": {"hour": "7", "enabled": "true", "label": "wake up", "weekday": ["1", "2"]}}]})
     );
 }
 

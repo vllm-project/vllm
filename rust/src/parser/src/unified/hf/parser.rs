@@ -549,12 +549,36 @@ fn call_parts(call: Value, tool_schemas: &ToolSchemas) -> Result<(String, String
         None => "{}".to_string(),
         Some(ArgumentsValue::Text(arguments)) => arguments,
         Some(ArgumentsValue::Object(mut arguments)) => {
-            tool_schemas.convert_json_arguments(&name, &mut arguments);
+            convert_text_arguments(tool_schemas, &name, &mut arguments);
             serialize_arguments(&arguments)?
         }
         Some(ArgumentsValue::Other(arguments)) => serialize_arguments(&arguments)?,
     };
     Ok((name, arguments))
+}
+
+/// Convert the argument values a content parser left as raw text by the tool
+/// schema: top-level strings, and string lists collected from duplicate keys
+/// (`merge_duplicates`).
+///
+/// Deeper values are the content parser's own JSON and are kept, as in
+/// Transformers' `_coerce_tool_calls`.
+fn convert_text_arguments(
+    tool_schemas: &ToolSchemas,
+    function_name: &str,
+    arguments: &mut Map<String, Value>,
+) {
+    for (name, value) in arguments.iter_mut() {
+        let values = match value {
+            Value::Array(items) => items.as_mut_slice(),
+            value => std::slice::from_mut(value),
+        };
+        for value in values {
+            if let Value::String(text) = value {
+                *value = tool_schemas.convert_param_with_schema(function_name, name, take(text));
+            }
+        }
+    }
 }
 
 /// Serialize tool-call arguments to JSON text.

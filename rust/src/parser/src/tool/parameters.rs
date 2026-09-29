@@ -28,7 +28,7 @@ pub(super) struct ToolSchema {
 ///
 /// It can be either a raw text string, or a structured input with named child elements.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) enum ParamInput {
+pub(crate) enum ParamInput {
     Text(String),
     #[allow(dead_code)]
     Elements(Vec<ParamElement>),
@@ -42,7 +42,7 @@ impl From<String> for ParamInput {
 
 /// One named structured parameter child.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct ParamElement {
+pub(crate) struct ParamElement {
     pub name: String,
     pub value: ParamInput,
 }
@@ -97,53 +97,8 @@ impl ToolSchemas {
         converted
     }
 
-    /// Convert the string values of an argument object that a parser has
-    /// already structured, for one named tool.
-    ///
-    /// String values of parameters with a schema are converted like raw
-    /// parameter text. Arrays of strings are converted element-wise, by `items`
-    /// for array parameters and by the parameter's own type otherwise (duplicate
-    /// keys collected into a list). Parameters without a schema, unknown tools,
-    /// and non-string values are kept.
-    pub(crate) fn convert_json_arguments(
-        &self,
-        function_name: &str,
-        arguments: &mut Map<String, Value>,
-    ) {
-        let Some(tool_schema) = self.tools.get(function_name) else {
-            return;
-        };
-        for (name, value) in arguments.iter_mut() {
-            let Some(param_type) = tool_schema.params.get(name) else {
-                continue;
-            };
-            match value {
-                Value::String(text) => {
-                    let input = ParamInput::Text(std::mem::take(text));
-                    *value = convert_with_optional_schema(Some(param_type), &input);
-                }
-                Value::Array(items) => {
-                    let item_type = match param_type {
-                        JsonParamType::Array { items } => items.as_deref(),
-                        param_type => Some(param_type),
-                    };
-                    let Some(item_type) = item_type else {
-                        continue;
-                    };
-                    for item in items {
-                        if let Value::String(text) = item {
-                            let input = ParamInput::Text(std::mem::take(text));
-                            *item = convert_with_optional_schema(Some(item_type), &input);
-                        }
-                    }
-                }
-                _ => {}
-            }
-        }
-    }
-
     /// Convert one parameter value for one named tool.
-    pub(super) fn convert_param_with_schema<P>(
+    pub(crate) fn convert_param_with_schema<P>(
         &self,
         function_name: &str,
         name: &str,
