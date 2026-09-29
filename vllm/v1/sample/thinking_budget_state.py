@@ -490,17 +490,29 @@ class ThinkingBudgetStateHolder:
         if self._state:
             n_layout = max(n_layout, max(self._state.keys()) + 1)
 
+        # The draft-token row layout only applies to the rejection
+        # sampler's target logits. A step with no drafts goes through the
+        # plain Sampler (spec_decode_metadata is None), whose logits have
+        # one row per request, as does the bonus-token pass.
+        use_spec_layout = (
+            self.in_spec_mode
+            and not predict_bonus_token
+            and any(spec_token_ids_for_layout)
+        )
+
         for index in range(n_layout):
-            self.cu_num_tokens[index] = cumulative_total
             spec_tokens = (
                 spec_token_ids_for_layout[index]
                 if index < len(spec_token_ids_for_layout)
                 else []
             )
-            if self.in_spec_mode:
-                cumulative_total += len(spec_tokens) if not predict_bonus_token else 1
-            else:
+            if not use_spec_layout:
+                self.cu_num_tokens[index] = cumulative_total
                 cumulative_total += 1
+            elif spec_tokens:
+                self.cu_num_tokens[index] = cumulative_total
+                cumulative_total += len(spec_tokens)
+            # else: this request owns no target-logits rows this step.
 
         # Build the active index / forced-token lists entirely on CPU so we
         # avoid per-iteration scalar sync writes to GPU tensors.
