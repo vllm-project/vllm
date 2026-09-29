@@ -473,7 +473,9 @@ def test_prompt_logprob_token_ids_validation():
     assert ids.tolist() == [[1, 2], [3, -1]]
     # The pydantic path (token-in/token-out API, /docs) takes strict integer lists.
     adapter = TypeAdapter(SamplingParams)
-    dumped = adapter.dump_json(SamplingParams(prompt_logprob_token_ids=[[1, 2]]))
+    dumped = adapter.dump_json(
+        SamplingParams(prompt_logprob_token_ids=np.array([[1, 2]]))
+    )
     assert b'"prompt_logprob_token_ids":[[1,2]]' in dumped
     for bad in ("[[1.5]]", '[["3"]]', "[[true]]", "[1, 2]"):
         with pytest.raises(ValidationError):
@@ -1475,9 +1477,7 @@ def test_prompt_logprob_token_ids_with_chunking_and_preemption(monkeypatch):
         # reproduce that prefix of the full scores, with -inf padding.
         ragged_params = make_params(lambda j: candidate_ids(j)[: 1 + j % 4])
         ragged_outputs = vllm_model.llm.generate(token_prompts, ragged_params)
-        for output, ragged_output, params in zip(
-            outputs, ragged_outputs, ragged_params
-        ):
+        for output, ragged_output in zip(outputs, ragged_outputs):
             expected = np.full_like(output.prompt_token_id_logprobs, -np.inf)
             for j in range(len(expected)):
                 n = 1 + j % 4

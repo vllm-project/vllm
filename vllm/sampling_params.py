@@ -955,14 +955,15 @@ class SamplingParams(
                     parameter="prompt_logprob_token_ids",
                     value=shape[0],
                 )
-            n = shape[1]
-            if n > max_logprobs:
+            num_ids = shape[1]
+            if num_ids > max_logprobs:
                 raise VLLMValidationError(
-                    f"Requested {n} token ids per row in prompt_logprob_token_ids, "
-                    f"which is greater than max allowed: {max_logprobs}. "
-                    f"Set max_logprobs (--max-logprobs) to at least {n}.",
+                    f"Requested {num_ids} token ids per row in "
+                    f"prompt_logprob_token_ids, which is greater than max allowed: "
+                    f"{max_logprobs}. "
+                    f"Set max_logprobs (--max-logprobs) to at least {num_ids}.",
                     parameter="prompt_logprob_token_ids",
-                    value=n,
+                    value=num_ids,
                 )
             # Rows and width are bounded; only now flatten and pad.
             if isinstance(ids, list):
@@ -977,7 +978,7 @@ class SamplingParams(
                 if not _fits_int64(values.dtype):
                     raise invalid
                 ids = np.full(shape, -1, dtype=np.int64)
-                ids[np.arange(n) < lens[:, None]] = values
+                ids[np.arange(num_ids) < lens[:, None]] = values
             ids = self.prompt_logprob_token_ids = np.ascontiguousarray(
                 ids, dtype=np.int64
             )
