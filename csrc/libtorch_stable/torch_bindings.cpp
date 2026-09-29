@@ -995,6 +995,7 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C_cache_ops, ops) {
       "                 Tensor! lru_slots,"
       "                 Tensor? request_state_indices,"
       "                 int region_stride,"
+      "                 int max_union_rows,"
       "                 Tensor(a!)? miss_mask=None,"
       "                 Tensor(b!)? stats=None,"
       "                 Tensor(c!)? attention_indices=None,"
@@ -1010,6 +1011,9 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C_cache_ops, ops) {
       "                 Tensor? resident_block_table=None,"
       "                 int resident_block_size=0,"
       "                 int resident_null_block=0) -> ()");
+  ops.def(
+      "hisparse_resolve_residency_smem_bytes(int hot_size, int max_union_rows)"
+      " -> int");
 
   ops.def(
       "hisparse_invalidate_written_slots(Tensor! device_global_indices,"
@@ -1165,5 +1169,13 @@ STABLE_TORCH_LIBRARY_IMPL(_C_cache_ops, CUDA, ops) {
   ops.impl("cp_gather_indexer_k_quant_cache",
            TORCH_BOX(&cp_gather_indexer_k_quant_cache));
 }
+
+#ifndef USE_ROCM
+// Takes only primitive args, so there is no device to dispatch on.
+STABLE_TORCH_LIBRARY_IMPL(_C_cache_ops, CompositeExplicitAutograd, ops) {
+  ops.impl("hisparse_resolve_residency_smem_bytes",
+           TORCH_BOX(&hisparse_resolve_residency_smem_bytes));
+}
+#endif  // !USE_ROCM
 
 REGISTER_EXTENSION(_C_stable_libtorch)

@@ -680,7 +680,7 @@ void hisparse_resolve_residency(
     torch::stable::Tensor& device_global_indices,
     torch::stable::Tensor& lru_slots,
     std::optional<torch::stable::Tensor> const& request_state_indices,
-    int64_t region_stride,
+    int64_t region_stride, int64_t max_union_rows,
     std::optional<torch::stable::Tensor> const& miss_mask,
     std::optional<torch::stable::Tensor> const& stats,
     std::optional<torch::stable::Tensor> const& attention_indices,
@@ -695,6 +695,9 @@ void hisparse_resolve_residency(
     std::optional<torch::stable::Tensor> const& swap_counts,
     std::optional<torch::stable::Tensor> const& resident_block_table,
     int64_t resident_block_size, int64_t resident_null_block);
+
+int64_t hisparse_resolve_residency_smem_bytes(int64_t hot_size,
+                                              int64_t max_union_rows);
 
 void hisparse_invalidate_written_slots(
     torch::stable::Tensor& device_global_indices,

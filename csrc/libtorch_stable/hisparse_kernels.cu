@@ -244,7 +244,8 @@ __device__ __forceinline__ void write_entry_index(
     const int64_t attention_row_stride, int32_t* __restrict__ miss_mask,
     const int32_t* __restrict__ hot_block_table, const int request_row,
     const int64_t hot_table_stride, const int32_t hot_block_size,
-    const int64_t attention_block_stride, int& hits, int& misses) {
+    const int64_t attention_block_stride, const bool first_reference, int& hits,
+    int& misses) {
   int32_t* row_out = hot_indices + static_cast<int64_t>(row) * top_k;
   int32_t* row_attention =
       attention_indices != nullptr
@@ -260,7 +261,9 @@ __device__ __forceinline__ void write_entry_index(
                       hot_block_table, request_row, hot_table_stride,
                       hot_block_size, entry & kEntrySlotMask)),
                   hot_block_size, attention_block_stride);
-  if (entry & kEntryMiss) {
+  // Only an entry's first reference loads it; later references reuse the
+  // slot like a hit.
+  if ((entry & kEntryMiss) && first_reference) {
     if (miss_mask != nullptr) {
       miss_mask[static_cast<int64_t>(row) * top_k + i] = 1;
     }
@@ -273,9 +276,10 @@ __device__ __forceinline__ void write_entry_index(
 // One block per request, launched per batch row. A request's rows (several
 // with speculative decoding) are contiguous and share its hot-buffer state, so
 // the block of its first row resolves the union of their host misses once and
-// maps every row onto it; the other blocks exit. The union always fits because
-// device_buffer_size covers every decode query's top-k. Misses take eviction
-// slots in (row, top-k) order of first reference, so the plan is deterministic.
+// maps every row onto it; the other blocks exit. The union is bounded by the
+// caller's max_union_rows (every decode query's top-k), which
+// device_buffer_size covers; a larger union traps. Misses take eviction slots
+// in (row, top-k) order of first reference, so the plan is deterministic.
 //
 // Shared memory layout (int32 region followed by int16 region):
 //   s_hash_keys[hash_size]   open addressing: union of the rows' host ids
@@ -374,10 +378,9 @@ __global__ __launch_bounds__(1024) void hisparse_resolve_residency_kernel(
       device_global_indices + static_cast<int64_t>(state_row) * region_stride;
   int16_t* row_lru = lru_slots + static_cast<int64_t>(state_row) * hot_size;
 
-  // The union (at most the rows' top-k, which hot_size covers) is smaller
-  // than hash_size, so every probe sequence reaches an empty slot. Use a
-  // slice sized to this request's rows so single-row requests initialize a
-  // small table.
+  // A union within max_union_rows (hash_size - 1) and within the rows' top-k
+  // leaves an empty slot, so every probe sequence ends. Use a slice sized to
+  // this request's rows so single-row requests initialize a small table.
   const int table_size =
       min(hash_size, kHashLoadInverse * (end_row - first_row) * top_k);
 
@@ -439,16 +442,27 @@ __global__ __launch_bounds__(1024) void hisparse_resolve_residency_kernel(
                         attention_block_stride);
       } else {
         int h = hash_slot(g, table_size);
-        while (true) {
+        bool inserted = false;
+        for (int probe = 0; probe < table_size; ++probe) {
           const int32_t old = atomicCAS(&s_hash_keys[h], kHashEmpty, g);
           if (old == kHashEmpty) {
             atomicAdd(&s_counters[1], 1);
+            inserted = true;
             break;
           }
-          if (old == g) break;
+          if (old == g) {
+            inserted = true;
+            break;
+          }
           h = next_slot(h, table_size);
         }
-        atomicMin(&s_hash_vals[h], (row - first_row) * top_k + i);
+        if (inserted) {
+          atomicMin(&s_hash_vals[h], (row - first_row) * top_k + i);
+        } else {
+          // A full table: push the union count past the cap so the check
+          // below traps.
+          atomicAdd(&s_counters[1], hash_size);
+        }
       }
     }
     __syncthreads();
@@ -460,6 +474,17 @@ __global__ __launch_bounds__(1024) void hisparse_resolve_residency_kernel(
       s_counters[2] = 0;
     }
     __syncthreads();
+  }
+  // The table and eviction slots are sized for max_union_rows (hash_size - 1);
+  // a larger union would never reach an empty probe slot or run past s_lru_out.
+  if (s_counters[1] >= hash_size) {
+    if (tid == 0) {
+      printf(
+          "HiSparse residency: request %d resolves %d host rows, above the "
+          "configured bound of %d\n",
+          request_row, s_counters[1], hash_size - 1);
+    }
+    __trap();
   }
   // Fully resident rows need only request-relative page translation. Avoid
   // scanning or rewriting the hot LRU when no selected row can consult it.
@@ -646,11 +671,11 @@ __global__ __launch_bounds__(1024) void hisparse_resolve_residency_kernel(
     const bool resolved =
         h >= 0 && (entry & (kEntryHit | kEntryMiss | kEntryInvalid));
     if (resolved) {
-      write_entry_index(entry, first_row + position / top_k, position % top_k,
-                        top_k, hot_indices, attention_indices,
-                        attention_row_stride, miss_mask, hot_block_table,
-                        request_row, hot_table_stride, hot_block_size,
-                        attention_block_stride, entry_hits, entry_misses);
+      write_entry_index(
+          entry, first_row + position / top_k, position % top_k, top_k,
+          hot_indices, attention_indices, attention_row_stride, miss_mask,
+          hot_block_table, request_row, hot_table_stride, hot_block_size,
+          attention_block_stride, is_miss, entry_hits, entry_misses);
     }
     if (has_valid_chunk) {
       const unsigned int done_bits = __ballot_sync(0xFFFFFFFF, resolved);
@@ -693,11 +718,11 @@ __global__ __launch_bounds__(1024) void hisparse_resolve_residency_kernel(
       while (s_hash_keys[h] != g) {
         h = next_slot(h, table_size);
       }
-      write_entry_index(s_hash_vals[h], row, position % top_k, top_k,
-                        hot_indices, attention_indices, attention_row_stride,
-                        miss_mask, hot_block_table, request_row,
-                        hot_table_stride, hot_block_size,
-                        attention_block_stride, entry_hits, entry_misses);
+      write_entry_index(
+          s_hash_vals[h], row, position % top_k, top_k, hot_indices,
+          attention_indices, attention_row_stride, miss_mask, hot_block_table,
+          request_row, hot_table_stride, hot_block_size, attention_block_stride,
+          false, entry_hits, entry_misses);
     }
   }
   if (stats != nullptr) {
@@ -927,6 +952,19 @@ void hisparse_invalidate_written_slots(
                   cudaGetErrorString(launch_error));
 }
 
+int64_t hisparse_resolve_residency_smem_bytes(int64_t hot_size,
+                                              int64_t max_union_rows) {
+  // hisparse_resolve_residency_kernel's layout: hash keys and values for the
+  // union bound plus a spare empty slot, per-chunk offsets, counters and done
+  // bits, then the int16 compacted LRU.
+  const int64_t hash_size = max_union_rows + 1;
+  const int64_t num_buffer_chunks = (hot_size + kWarpSize - 1) / kWarpSize;
+  return static_cast<int64_t>(sizeof(int32_t)) *
+             (2 * hash_size + 2 * (num_buffer_chunks + 1) + kResidencyCounters +
+              num_buffer_chunks) +
+         static_cast<int64_t>(sizeof(int16_t)) * hot_size;
+}
+
 void hisparse_resolve_residency(
     torch::stable::Tensor const& host_cache, torch::stable::Tensor& hot_cache,
     torch::stable::Tensor const& hot_block_table,
@@ -935,7 +973,7 @@ void hisparse_resolve_residency(
     torch::stable::Tensor& device_global_indices,
     torch::stable::Tensor& lru_slots,
     std::optional<torch::stable::Tensor> const& request_state_indices,
-    int64_t region_stride,
+    int64_t region_stride, int64_t max_union_rows,
     std::optional<torch::stable::Tensor> const& miss_mask,
     std::optional<torch::stable::Tensor> const& stats,
     std::optional<torch::stable::Tensor> const& attention_indices,
@@ -1186,27 +1224,21 @@ void hisparse_resolve_residency(
   }
 
   constexpr int kBlockSize = 1024;
-  // The union of a request's rows never exceeds hot_size, so one spare
-  // entry guarantees every probe sequence reaches an empty slot.
-  const int hash_size = hot_size + 1;
-  const int num_buffer_chunks = (hot_size + kWarpSize - 1) / kWarpSize;
-  const size_t smem_bytes =
-      sizeof(int32_t) * (2 * hash_size + 2 * (num_buffer_chunks + 1) +
-                         kResidencyCounters + num_buffer_chunks) +
-      sizeof(int16_t) * hot_size;
+  STD_TORCH_CHECK(max_union_rows > 0 && max_union_rows <= hot_size,
+                  "max_union_rows must be in [1, hot_size], got ",
+                  max_union_rows);
+  // One spare entry above the union bound keeps every probe sequence finite.
+  const int hash_size = static_cast<int>(max_union_rows) + 1;
+  const size_t smem_bytes = static_cast<size_t>(
+      hisparse_resolve_residency_smem_bytes(hot_size, max_union_rows));
 
   const torch::stable::accelerator::DeviceGuard device_guard(
       hot_cache.get_device_index());
   int max_smem_bytes = 0;
-  int sm_smem_bytes = 0;
-  STD_TORCH_CHECK(
-      cudaDeviceGetAttribute(&max_smem_bytes,
-                             cudaDevAttrMaxSharedMemoryPerBlockOptin,
-                             hot_cache.get_device_index()) == cudaSuccess &&
-          cudaDeviceGetAttribute(&sm_smem_bytes,
-                                 cudaDevAttrMaxSharedMemoryPerMultiprocessor,
-                                 hot_cache.get_device_index()) == cudaSuccess,
-      "failed to query shared memory limits");
+  STD_TORCH_CHECK(cudaDeviceGetAttribute(
+                      &max_smem_bytes, cudaDevAttrMaxSharedMemoryPerBlockOptin,
+                      hot_cache.get_device_index()) == cudaSuccess,
+                  "failed to query shared memory per block");
   STD_TORCH_CHECK(smem_bytes <= static_cast<size_t>(max_smem_bytes),
                   "HiSparse device_buffer_size=", hot_size, " needs ",
                   smem_bytes,
@@ -1215,25 +1247,20 @@ void hisparse_resolve_residency(
                   max_smem_bytes,
                   "; lower device_buffer_size or the number of speculative "
                   "tokens.");
-  // Keep one block per SM. Only a request's first row does work, so with two
-  // resident blocks per SM, leaders R rows apart can share an SM while others
-  // idle (64 MTP3 requests on H200: 128 vs 106 us).
-  const size_t launch_smem_bytes =
-      std::max(smem_bytes, static_cast<size_t>(sm_smem_bytes / 2 + 1));
   const cudaStream_t stream = get_current_cuda_stream();
   const int64_t attention_row_stride =
       attention_indices.has_value() ? attention_indices.value().stride(0) : 0;
   const int64_t valid_count_stride =
       valid_counts.has_value() ? valid_counts.value().stride(0) : 0;
   auto kernel = hisparse_resolve_residency_kernel;
-  if (launch_smem_bytes > 48 * 1024) {
+  if (smem_bytes > 48 * 1024) {
     const cudaError_t attribute_error = cudaFuncSetAttribute(
-        kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, launch_smem_bytes);
+        kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_bytes);
     STD_TORCH_CHECK(attribute_error == cudaSuccess,
                     "failed to configure HiSparse swap-in shared memory: ",
                     cudaGetErrorString(attribute_error));
   }
-  kernel<<<launch_rows, kBlockSize, launch_smem_bytes, stream>>>(
+  kernel<<<launch_rows, kBlockSize, smem_bytes, stream>>>(
       hot_block_table.const_data_ptr<int32_t>(),
       global_indices.const_data_ptr<int32_t>(), request_ids_ptr,
       source_block_table_ptr, resident_block_table_ptr,

@@ -1880,11 +1880,13 @@ def _make_hisparse_runtime(
     block_size: int = 64,
     max_swap_rows: int | None = None,
     index_group: hisparse_runtime.HiSparseIndexGroup | None = None,
+    max_union_rows: int | None = None,
 ) -> HiSparseRuntime:
     runtime = HiSparseRuntime(
         config=ResolvedHiSparseConfig(
             top_k=top_k,
             device_buffer_size=device_buffer_size,
+            max_union_rows=max_union_rows or device_buffer_size,
         ),
         max_num_reqs=max_num_reqs,
         row_width=row_width,
@@ -2080,6 +2082,100 @@ def test_hisparse_speculative_rows_resolve_host_misses_consistently(
             hot_indices.to(torch.long)
         ].cpu()
         torch.testing.assert_close(gathered, flat_pool[global_ref.cpu().to(torch.long)])
+
+
+@requires_hisparse_ops
+def test_hisparse_speculative_rows_count_a_shared_load_once():
+    """A host row two verification rows select loads once; the reuse is a hit."""
+    device = torch.device(DEVICE_TYPE)
+    block_size, row_width, top_k = 64, 64, 128
+    num_blocks = top_k // block_size
+    kv_pool = torch.randn(
+        (num_blocks + 1, block_size, row_width), dtype=torch.float32
+    ).pin_memory()
+    runtime = _make_hisparse_runtime(
+        top_k=top_k,
+        device_buffer_size=2 * top_k,
+        max_num_reqs=1,
+        row_width=row_width,
+        block_size=block_size,
+        max_swap_rows=2,
+    )
+    runtime.bind_source_cache(kv_pool)
+    cache = HiSparseCacheHandle(runtime)
+    cache.all_context_pages_resident = False
+    block_table = torch.arange(
+        1, num_blocks + 1, dtype=torch.int32, device=device
+    ).view(1, num_blocks)
+    topk = torch.arange(top_k, dtype=torch.int32, device=device).repeat(2, 1)
+
+    runtime.begin_forward()
+    cache.swap_in(
+        req_id_per_token=torch.zeros(2, dtype=torch.int32, device=device),
+        block_table=block_table,
+        logical_topk_indices=topk,
+        block_size=block_size,
+    )
+    torch.accelerator.synchronize()
+
+    assert runtime.index_group.swap_stats.cpu().tolist() == [top_k, top_k]
+
+
+@requires_hisparse_ops
+def test_hisparse_union_table_scales_with_union_bound():
+    """Shared memory follows the per-request union bound, not the hot buffer.
+
+    Sizing the table from device_buffer_size needs ~340 KB here and fails.
+    """
+    device = torch.device(DEVICE_TYPE)
+    block_size, row_width, top_k = 64, 64, 128
+    num_blocks = top_k // block_size
+    kv_pool = torch.randn(
+        (num_blocks + 1, block_size, row_width), dtype=torch.float32
+    ).pin_memory()
+    runtime = _make_hisparse_runtime(
+        top_k=top_k,
+        device_buffer_size=32768,
+        max_union_rows=top_k,
+        max_num_reqs=1,
+        row_width=row_width,
+        block_size=block_size,
+        max_swap_rows=1,
+    )
+    runtime.bind_source_cache(kv_pool)
+    cache = HiSparseCacheHandle(runtime)
+    cache.all_context_pages_resident = False
+    req_ids = torch.zeros(1, dtype=torch.int32, device=device)
+    block_table = torch.arange(
+        1, num_blocks + 1, dtype=torch.int32, device=device
+    ).view(1, num_blocks)
+    topk = torch.arange(top_k, dtype=torch.int32, device=device).view(1, top_k)
+
+    runtime.begin_forward()
+    hot_indices = cache.swap_in(
+        req_id_per_token=req_ids,
+        block_table=block_table,
+        logical_topk_indices=topk,
+        block_size=block_size,
+    )
+    torch.accelerator.synchronize()
+
+    global_ref = _triton_convert_reference_impl(
+        req_ids, block_table, topk, block_size, top_k
+    )
+    gathered = runtime.hot.attention_cache.reshape(-1, row_width)[
+        hot_indices.to(torch.long)
+    ].cpu()
+    torch.testing.assert_close(
+        gathered, kv_pool.reshape(-1, row_width)[global_ref.cpu().to(torch.long)]
+    )
+
+
+@requires_hisparse_ops
+def test_hisparse_rejects_union_bound_beyond_shared_memory():
+    """An oversized union bound fails at construction, not on the first forward."""
+    with pytest.raises(ValueError, match="shared memory"):
+        _make_hisparse_runtime(top_k=2048, device_buffer_size=32768)
 
 
 @requires_hisparse_ops
