@@ -241,6 +241,11 @@ def validate_structured_output_request_outlines(params: SamplingParams):
         choices = [regex_escape(str(choice)) for choice in so_params.choice]
         regex = "(" + "|".join(choices) + ")"
         validate_regex_is_buildable(regex)
+    elif so_params.json_object:
+        raise VLLMValidationError(
+            "Outlines structured outputs backend "
+            "does not support json_object specifications"
+        )
     elif so_params.grammar:
         raise VLLMValidationError(
             "Outlines structured outputs backend "
