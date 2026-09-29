@@ -716,8 +716,6 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         # batches use AITER's fused kernel, otherwise the eager fallback.
         self.rotary_emb: torch.nn.Module | None = None
         self.fused_qk_rope_cache_mla = False
-        self._fused_rope_cos: torch.Tensor | None = None
-        self._fused_rope_sin: torch.Tensor | None = None
 
     def attach_rotary_emb(self, rotary_emb: torch.nn.Module | None) -> None:
         """Enable the fused rope + KV-cache + fp8-query path when eligible."""
@@ -726,6 +724,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         self.fused_qk_rope_cache_mla = bool(
             rotary_emb is not None
             and hasattr(rotary_emb, "cos_sin_cache")
+            and hasattr(rotary_emb, "get_cos_sin_split")
             and rocm_aiter_ops.is_fused_qk_rope_cache_mla_enabled()
             and self.attn_backend.get_name() == "ROCM_AITER_MLA"
             and is_quantized_kv_cache(self.kv_cache_dtype)
@@ -742,19 +741,6 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 "decode-only batches (rope + KV-cache write + fp8 q assembly)."
             )
 
-    def _fused_rope_cos_sin(
-        self, dtype: torch.dtype
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        """AITER takes separate contiguous cos/sin tables; vLLM stores one
-        fused cos_sin_cache, so split and cache per layer."""
-        if self._fused_rope_cos is None or self._fused_rope_cos.dtype != dtype:
-            assert self.rotary_emb is not None
-            cos, sin = self.rotary_emb.cos_sin_cache.chunk(2, dim=-1)
-            self._fused_rope_cos = cos.to(dtype).contiguous()
-            self._fused_rope_sin = sin.to(dtype).contiguous()
-        assert self._fused_rope_sin is not None
-        return self._fused_rope_cos, self._fused_rope_sin
-
     def _fused_rope_unfused_fallback(
         self,
         q: torch.Tensor,
@@ -767,9 +753,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         rope+cache kernel the baseline compile pass produces. Rotates q_pe in
         place; returns the rotated k_pe."""
         assert self.rotary_emb is not None
-        _, _, raw_kv_cache, layer_slot_mapping = get_attention_context(
-            self.layer_name
-        )
+        _, _, raw_kv_cache, layer_slot_mapping = get_attention_context(self.layer_name)
         q_pe = q[..., self.qk_nope_head_dim :]
         if layer_slot_mapping is not None and raw_kv_cache.numel() > 0:
             # slot_mapping may be padded past num_actual_tokens (graph-size
@@ -818,7 +802,9 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         if layer_slot_mapping is not None and layer_slot_mapping.size(0) > B:
             # same padded-slot_mapping trim as the prefill fallback
             layer_slot_mapping = layer_slot_mapping[:B]
-        cos, sin = self._fused_rope_cos_sin(ql_nope.dtype)
+        # contiguous cos / sin tables, split once per model on the shared rope
+        assert self.rotary_emb is not None
+        cos, sin = self.rotary_emb.get_cos_sin_split(ql_nope.dtype)
         rocm_aiter_ops.fused_qk_rope_concat_and_cache_mla(
             ql_nope,
             q_pe,
@@ -1123,7 +1109,11 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             # Prefill or mixed batch: un-fused rope + cache write, then the
             # regular paths below see rotated q/k_pe exactly as before.
             k_pe = self._fused_rope_unfused_fallback(
-                q, k_c_normed, k_pe, kv_cache, positions  # type: ignore[arg-type]
+                q,
+                k_c_normed,
+                k_pe,
+                kv_cache,
+                positions,  # type: ignore[arg-type]
             )
             fused_rope_cache = False
 
