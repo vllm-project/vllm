@@ -43,7 +43,7 @@
 # SOFTWARE.
 
 import math
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Hashable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Annotated, Any, Literal
 
@@ -53,7 +53,7 @@ from transformers import BatchFeature
 from transformers.activations import GELUActivation
 
 from vllm.config import VllmConfig
-from vllm.config.multimodal import BaseDummyOptions
+from vllm.config.multimodal import MultiModalDummyOptions
 from vllm.inputs import MultiModalDataDict
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.models.interfaces import (
@@ -135,12 +135,11 @@ class KimiVLMultiModalProjector(nn.Module):
 
 
 class KimiVLImagePixelInputs(TensorSchema):
-    """
-    Dimensions:
-        - nc: Number of channels
-        - np: Number of patches
-        - ps: Patch size
-        - ni: Number of images
+    """Dimensions:
+    - nc: Number of channels
+    - np: Number of patches
+    - ps: Patch size
+    - ni: Number of images
     """
 
     type: Literal["pixel_values"] = "pixel_values"
@@ -220,24 +219,20 @@ class KimiVLDummyInputsBuilder(BaseDummyInputsBuilder[KimiVLProcessingInfo]):
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions],
+        mm_options: MultiModalDummyOptions,
     ) -> MultiModalDataDict:
-        num_images = mm_counts.get("image", 0)
-
-        image_overrides = mm_options.get("image")
-
         return {
             "image": self._get_dummy_images(
                 width=MaxImageTokenMeta.width,
                 height=MaxImageTokenMeta.height,
-                num_images=num_images,
-                overrides=image_overrides,
+                num_images=mm_counts.get("image", 0),
+                overrides=mm_options.get("image"),
             )
         }
 
 
 class KimiVLMultiModalProcessor(BaseMultiModalProcessor[KimiVLProcessingInfo]):
-    def _get_hf_processor_text(self, mm_counts: Mapping[str, int]) -> str:
+    def _get_hf_mm_text(self, mm_counts: Mapping[str, int]) -> str:
         return self.dummy_inputs.get_dummy_text(mm_counts)
 
     def _get_mm_fields_config(
@@ -450,6 +445,7 @@ class KimiVLForConditionalGeneration(
         device: torch.device,
         dtype: torch.dtype,
         path: str = "default",
+        axis_keys: tuple[Hashable, ...] | None = None,
     ):
         from vllm.v1.worker.encoder_cudagraph_defs import (
             EncoderCudaGraphCaptureInputs,
