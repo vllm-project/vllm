@@ -200,8 +200,11 @@ class OnlineDerenderer:
                     if chat_request is not None
                     else True
                 )
-                decoded_text = tokenizer.decode(
-                    choice.token_ids, skip_special_tokens=skip_special
+                decoded_text, _ = self._detokenize_delta(
+                    tokenizer,
+                    choice.token_ids,
+                    DerenderStreamState(),
+                    skip_special_tokens=skip_special,
                 )
                 message = ChatMessage(role="assistant", content=decoded_text)
 
@@ -640,8 +643,11 @@ class OnlineDerenderer:
                         "has empty or null token_ids"
                     )
 
-                decoded_text = tokenizer.decode(
-                    choice.token_ids, skip_special_tokens=skip_special
+                decoded_text, _ = self._detokenize_delta(
+                    tokenizer,
+                    choice.token_ids,
+                    DerenderStreamState(),
+                    skip_special_tokens=skip_special,
                 )
                 completion_logprobs = None
                 if choice.logprobs is not None:
