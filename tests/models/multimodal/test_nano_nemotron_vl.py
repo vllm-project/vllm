@@ -11,11 +11,11 @@ import torch.nn as nn
 from PIL import Image
 
 from vllm import envs
+from vllm.model_executor.layers.fusion.mm_input_norm import FusedMMInputNorm
 from vllm.model_executor.models.nano_nemotron_vl import (
     NanoNemotronVLMultiModalProcessor,
     NemotronH_Nano_VL_V2,
 )
-from vllm.model_executor.models.vision import FusedInputNorm
 from vllm.multimodal.parse import (
     MultiModalDataItems,
     MultiModalDataParser,
@@ -50,7 +50,9 @@ def test_bicubic_resize_preserves_uint8_for_device_normalization():
     torch.testing.assert_close(output, expected, rtol=0, atol=0)
 
 
-def test_nemotron_dynamic_device_normalization_matches_cpu_reference():
+def test_nemotron_dynamic_device_normalization_matches_cpu_reference(
+    default_vllm_config,
+):
     image_mean = [0.485, 0.456, 0.406]
     image_std = [0.229, 0.224, 0.225]
     shape = (1, 7, 3 * 16 * 16)
@@ -58,7 +60,7 @@ def test_nemotron_dynamic_device_normalization_matches_cpu_reference():
 
     model = object.__new__(NemotronH_Nano_VL_V2)
     nn.Module.__init__(model)
-    model.input_norm = FusedInputNorm(image_mean, image_std, 1.0 / 255.0)
+    model.input_norm = FusedMMInputNorm(image_mean, image_std, 1.0 / 255.0)
     model.llm_dtype = torch.bfloat16
 
     output = model._normalize_pixel_values(pixels)
@@ -73,7 +75,9 @@ def test_nemotron_dynamic_device_normalization_matches_cpu_reference():
 
 
 @pytest.mark.parametrize("modality", ["image", "video"])
-def test_nemotron_processor_defers_normalization_to_device(modality: str):
+def test_nemotron_processor_defers_normalization_to_device(
+    modality: str, default_vllm_config
+):
     config = SimpleNamespace(
         force_image_size=16,
         patch_size=4,
@@ -110,7 +114,7 @@ def test_nemotron_processor_defers_normalization_to_device(modality: str):
 
     model = object.__new__(NemotronH_Nano_VL_V2)
     nn.Module.__init__(model)
-    model.input_norm = FusedInputNorm(config.norm_mean, config.norm_std, 1.0 / 255.0)
+    model.input_norm = FusedMMInputNorm(config.norm_mean, config.norm_std, 1.0 / 255.0)
     model.llm_dtype = torch.bfloat16
     normalized = model._normalize_pixel_values(raw_values)
     torch.testing.assert_close(normalized, cpu_values, rtol=0, atol=0)

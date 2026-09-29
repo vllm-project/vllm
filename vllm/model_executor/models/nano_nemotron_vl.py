@@ -16,7 +16,7 @@ from typing import Annotated, Literal, TypeAlias, TypedDict, cast
 
 import torch
 import torch.nn as nn
-from transformers import BatchFeature, PretrainedConfig
+from transformers import BatchFeature, PreTrainedConfig
 
 from vllm import envs
 from vllm.config import VllmConfig
@@ -28,12 +28,17 @@ from vllm.inputs import MultiModalDataDict, MultiModalInput
 from vllm.logger import init_logger
 from vllm.lora.layers.base import BaseLayerWithLoRA
 from vllm.model_executor.layers.activation import ReLUSquaredActivation
+from vllm.model_executor.layers.fusion.mm_input_norm import (
+    FusedMMInputNorm,
+    IdentityInputNorm,
+)
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.interfaces import (
     HasInnerState,
     IsHybrid,
     MultiModalEmbeddings,
+    SupportsEagle3,
     SupportsLoRA,
     SupportsMultiModal,
     SupportsMultiModalPruning,
@@ -100,7 +105,6 @@ from vllm.transformers_utils.processors.nano_nemotron_vl import (
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from .utils import _merge_multimodal_embeddings
-from .vision import FusedInputNorm
 
 logger = init_logger(__name__)
 
@@ -239,7 +243,7 @@ class NanoNemotronVLProcessingInfo(BaseProcessingInfo):
         return self.ctx.get_mm_config().video_pruning_rate
 
     @property
-    def sound_config(self) -> PretrainedConfig | None:
+    def sound_config(self) -> PreTrainedConfig | None:
         return getattr(self.get_hf_config(), "sound_config", None)
 
     def get_default_tok_params(self) -> TokenizeParams:
@@ -929,6 +933,7 @@ class NemotronH_Nano_VL_V2(
     nn.Module,
     HasInnerState,
     IsHybrid,
+    SupportsEagle3,
     SupportsMultiModal,
     SupportsMultiModalPruning,
     SupportsLoRA,
@@ -993,13 +998,13 @@ class NemotronH_Nano_VL_V2(
         self.llm_dtype = llm_dtype
         with self._mark_tower_model(vllm_config, {"image", "video", "audio"}):
             self.input_norm = (
-                FusedInputNorm(
+                FusedMMInputNorm(
                     image_mean=config.norm_mean,
                     image_std=config.norm_std,
                     rescale_factor=1.0 / 255.0,
                 )
                 if multimodal_config.mm_device_do_normalize
-                else FusedInputNorm.identity()
+                else IdentityInputNorm()
             )
             self.vision_model = self.get_vit_model_from_radio_config(config).to(
                 llm_dtype
