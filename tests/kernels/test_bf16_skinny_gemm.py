@@ -269,6 +269,9 @@ def test_kda_overlap_configs_match_measured_table() -> None:
     }
 
 
+@pytest.mark.skipif(
+    not current_platform.is_cuda(), reason="KDA CuTeDSL helper requires CUDA"
+)
 @pytest.mark.parametrize(
     "compute_capability,supported",
     [((9, 0), False), ((10, 0), True), ((10, 3), True), ((12, 0), True)],
