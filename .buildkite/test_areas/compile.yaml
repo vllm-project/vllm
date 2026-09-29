@@ -23,6 +23,37 @@ steps:
   commands:
   - export VLLM_TEST_CLEAN_GPU_MEMORY=1
   - pytest -v -s tests/compile/correctness_e2e/test_async_tp.py
+- label: ":nvidia: (H100) RMS+Quant Fusion Correctness"
+  key: rms-quant-correctness-tests-h100
+  timeout_in_minutes: 30
+  working_dir: "/vllm-workspace/"
+  device: h100
+  num_devices: 1
+  source_file_dependencies:
+  - csrc/libtorch_stable/layernorm_quant_kernels.cu
+  - csrc/libtorch_stable/quantization/activation_kernels.cu
+  - vllm/compilation/passes/fusion/rms_quant_fusion.py
+  - vllm/compilation/passes/fusion/act_quant_fusion.py
+  - tests/compile/correctness_e2e/test_rms_quant.py
+  commands:
+  - export VLLM_TEST_CLEAN_GPU_MEMORY=1
+  - pytest -v -s tests/compile/correctness_e2e/test_rms_quant.py -k "not tp2"
+
+- label: ":nvidia: (2xH100) RMS+Quant Fusion Correctness"
+  key: rms-quant-correctness-tests-2xh100
+  timeout_in_minutes: 30
+  working_dir: "/vllm-workspace/"
+  device: h100
+  num_devices: 2
+  source_file_dependencies:
+  - csrc/libtorch_stable/layernorm_quant_kernels.cu
+  - csrc/libtorch_stable/quantization/activation_kernels.cu
+  - vllm/compilation/passes/fusion/rms_quant_fusion.py
+  - vllm/compilation/passes/fusion/act_quant_fusion.py
+  - tests/compile/correctness_e2e/test_rms_quant.py
+  commands:
+  - export VLLM_TEST_CLEAN_GPU_MEMORY=1
+  - pytest -v -s tests/compile/correctness_e2e/test_rms_quant.py -k "tp2"
 
 - label: ":nvidia: (H100) Distributed Compile"
   key: distributed-compile-unit-tests-2xh100
