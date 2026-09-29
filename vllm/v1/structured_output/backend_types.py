@@ -133,6 +133,15 @@ class StructuredOutputBackend(ABC):
 
         """
 
+    def fill_bitmask_batch(
+        self,
+        grammars: list[tuple[StructuredOutputGrammar, int]],
+        bitmask: "torch.Tensor",
+    ) -> None:
+        """Fill bitmasks for multiple grammars."""
+        for grammar, batch_index in grammars:
+            grammar.fill_bitmask(bitmask, batch_index)
+
     @abstractmethod
     def destroy(self):
         """Backend-specific cleanup."""

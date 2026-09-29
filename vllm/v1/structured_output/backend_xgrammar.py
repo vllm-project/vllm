@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import json
+import threading
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
@@ -35,6 +36,7 @@ logger = init_logger(__name__)
 @dataclass
 class XgrammarBackend(StructuredOutputBackend):
     def __post_init__(self):
+        self._batch_matcher_local = threading.local()
         self.disable_any_whitespace = (
             self.vllm_config.structured_outputs_config.disable_any_whitespace
         )
@@ -142,6 +144,26 @@ class XgrammarBackend(StructuredOutputBackend):
 
     def allocate_token_bitmask(self, max_num_seqs: int):
         return xgr.allocate_token_bitmask(max_num_seqs, self.vocab_size)
+
+    def fill_bitmask_batch(
+        self,
+        grammars: list[tuple[StructuredOutputGrammar, int]],
+        bitmask: torch.Tensor,
+    ) -> None:
+        xgrammar_grammars: list[tuple[XgrammarGrammar, int]] = []
+        for grammar, batch_index in grammars:
+            if not isinstance(grammar, XgrammarGrammar):
+                super().fill_bitmask_batch(grammars, bitmask)
+                return
+            xgrammar_grammars.append((grammar, batch_index))
+
+        matchers = [grammar.matcher for grammar, _ in xgrammar_grammars]
+        batch_indices = [batch_index for _, batch_index in xgrammar_grammars]
+        batch_matcher = getattr(self._batch_matcher_local, "matcher", None)
+        if batch_matcher is None:
+            batch_matcher = xgr.BatchGrammarMatcher(max_threads=1)
+            self._batch_matcher_local.matcher = batch_matcher
+        batch_matcher.batch_fill_next_token_bitmask(matchers, bitmask, batch_indices)
 
     def destroy(self):
         del self.compiler
