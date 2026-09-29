@@ -3283,6 +3283,38 @@ def test_dynamic_role_equality_is_treated_as_a_filter():
     assert roles_rendered_by_chat_template(template) == frozenset()
 
 
+def test_selectattr_role_filter_extracts_literals():
+    template = (
+        "{% for message in messages | selectattr('role', 'equalto', 'user') %}"
+        "{{ message.content }}{% endfor %}"
+    )
+    assert roles_rendered_by_chat_template(template) == frozenset({"user"})
+    eq_template = "{{ messages | selectattr('role', 'eq', 'assistant') }}"
+    assert roles_rendered_by_chat_template(eq_template) == frozenset({"assistant"})
+
+
+def test_selectattr_on_a_non_role_attribute_is_not_a_role_filter():
+    template = "{{ messages | selectattr('type', 'equalto', 'text') }}"
+    assert roles_rendered_by_chat_template(template) is None
+
+
+def test_rejectattr_role_filter_does_not_allow_the_rejected_role():
+    """``rejectattr`` drops the named role, so that name is not an allow-list."""
+    template = (
+        "{% for message in messages | rejectattr('role', 'equalto', 'tool') %}"
+        "{{ message.content }}{% endfor %}"
+    )
+    assert roles_rendered_by_chat_template(template) == frozenset()
+
+
+def test_selectattr_non_literal_role_is_a_filter():
+    template = (
+        "{% for message in messages | selectattr('role', 'equalto', allowed) %}"
+        "{{ message.content }}{% endfor %}"
+    )
+    assert roles_rendered_by_chat_template(template) == frozenset()
+
+
 @pytest.mark.parametrize(
     "message,expected",
     [
@@ -3662,6 +3694,187 @@ def test_batched_omission_keeps_a_rendered_tool_call():
     assert calls == 4
     assert "keeper" not in str(exc_info.value)
     assert exc_info.value.value[-1] == "drop11"
+
+
+def test_selectattr_template_rejects_an_unselected_role():
+    """A selectattr allow-list must not skip the drop check."""
+    template = (
+        "{% for message in messages | selectattr('role', 'equalto', 'user') %}"
+        "user:{{ message.content }}{% endfor %}"
+    )
+
+    def render_text(rendered_messages):
+        return "\n".join(
+            f"user:{message.get('content')}"
+            for message in rendered_messages
+            if message.get("role") == "user"
+        )
+
+    with pytest.raises(VLLMValidationError, match="'usr'") as exc_info:
+        assert_chat_template_rendered_messages(
+            [{"role": "usr", "content": "hello"}],
+            template,
+            render_text,
+        )
+    assert exc_info.value.parameter == "messages"
+
+
+def test_rejectattr_keeps_a_role_it_does_not_name():
+    template = (
+        "{% for message in messages | rejectattr('role', 'equalto', 'tool') %}"
+        "{{ message.role }}:{{ message.content }}{% endfor %}"
+    )
+
+    def render_text(rendered_messages):
+        return "\n".join(
+            f"{message.get('role')}:{message.get('content')}"
+            for message in rendered_messages
+            if message.get("role") != "tool"
+        )
+
+    assert_chat_template_rendered_messages(
+        [{"role": "usr", "content": "hello"}],
+        template,
+        render_text,
+    )
+    with pytest.raises(VLLMValidationError, match="'tool'"):
+        assert_chat_template_rendered_messages(
+            [{"role": "tool", "content": "result", "tool_call_id": "call_1"}],
+            template,
+            render_text,
+        )
+
+
+def test_echoed_text_does_not_hide_a_dropped_tool_call():
+    """Text and tool calls on one unhandled turn are checked separately."""
+
+    def render_text(rendered_messages):
+        parts = []
+        for message in rendered_messages:
+            content = message.get("content")
+            if isinstance(content, str) and content.strip():
+                parts.append(content)
+        return "\n".join(parts)
+
+    message = {
+        "role": "wizard",
+        "content": "hello",
+        "tool_calls": [
+            {
+                "id": "call_1",
+                "type": "function",
+                "function": {"name": "lookup", "arguments": "{}"},
+            }
+        ],
+    }
+    with pytest.raises(VLLMValidationError, match="'wizard'"):
+        assert_chat_template_rendered_messages(
+            [message],
+            _FILTERING_TEMPLATE,
+            render_text,
+        )
+
+
+def test_mixed_text_and_rendered_tool_call_is_kept():
+    def render_text(rendered_messages):
+        parts = []
+        for message in rendered_messages:
+            content = message.get("content")
+            if isinstance(content, str) and content.strip():
+                parts.append(content)
+            for call in message.get("tool_calls") or []:
+                function = call.get("function") or {}
+                name = function.get("name")
+                if isinstance(name, str):
+                    parts.append(name)
+        return "\n".join(parts)
+
+    assert_chat_template_rendered_messages(
+        [
+            {
+                "role": "wizard",
+                "content": "hello",
+                "tool_calls": [
+                    {
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {"name": "lookup", "arguments": "{}"},
+                    }
+                ],
+            }
+        ],
+        _FILTERING_TEMPLATE,
+        render_text,
+    )
+
+
+def test_many_mixed_messages_do_not_render_per_suspect():
+    """Echoed text plus a dropped tool call stays a constant number of renders."""
+    messages = [
+        {
+            "role": f"wizard{index}",
+            "content": "hello",
+            "tool_calls": [
+                {
+                    "id": f"call_{index}",
+                    "type": "function",
+                    "function": {"name": f"lookup{index}", "arguments": "{}"},
+                }
+            ],
+        }
+        for index in range(20)
+    ]
+    calls = 0
+
+    def render_text(rendered_messages):
+        nonlocal calls
+        calls += 1
+        parts = []
+        for message in rendered_messages:
+            content = message.get("content")
+            if isinstance(content, str) and content.strip():
+                parts.append(content)
+        return "\n".join(parts)
+
+    with pytest.raises(VLLMValidationError, match="'wizard0'"):
+        assert_chat_template_rendered_messages(
+            messages, _FILTERING_TEMPLATE, render_text
+        )
+    assert calls == 3
+    assert calls < len(messages)
+
+
+def test_structural_drop_ignores_index_shift():
+    """A dropped tool call is still a 400 when later turns are indexed by position."""
+
+    def render_text(rendered_messages):
+        parts = [f"n={len(rendered_messages)}"]
+        for index, message in enumerate(rendered_messages):
+            role = message.get("role")
+            if role in {"user", "assistant"}:
+                parts.append(f"{index}:{role}:{message.get('content')}")
+        return "\n".join(parts)
+
+    with pytest.raises(VLLMValidationError, match="'wizard'"):
+        assert_chat_template_rendered_messages(
+            [
+                {"role": "user", "content": "a"},
+                {
+                    "role": "wizard",
+                    "content": "",
+                    "tool_calls": [
+                        {
+                            "id": "call_1",
+                            "type": "function",
+                            "function": {"name": "lookup", "arguments": "{}"},
+                        }
+                    ],
+                },
+                {"role": "assistant", "content": "b"},
+            ],
+            _FILTERING_TEMPLATE,
+            render_text,
+        )
 
 
 def test_variable_role_equality_still_rejects_a_dropped_turn():

@@ -2322,6 +2322,47 @@ def _literal_role_names(node: jinja2.nodes.Node) -> list[str] | None:
     return None
 
 
+# Inclusion tests passed to selectattr/rejectattr. Exclusion tests (``ne``)
+# and rejectattr do not name roles the template keeps.
+_ROLE_INCLUDE_TESTS = frozenset({"equalto", "eq", "==", "sameas", "in"})
+
+
+def _roles_from_attr_filter(
+    node: jinja2.nodes.Filter,
+) -> tuple[Literal["ignore", "literal", "dynamic"], set[str]]:
+    """Classify a ``selectattr`` / ``rejectattr`` call on ``role``.
+
+    ``selectattr('role', 'equalto', 'user')`` keeps that literal role.
+    ``rejectattr``, a non-literal target, or a test that is not an
+    inclusion (``ne``) still means the template filters by role, but the
+    kept names are not a literal allow-list.
+
+    Returns:
+        ``("ignore", empty)`` when the filter does not test ``role``,
+        ``("literal", names)`` when ``selectattr`` names kept roles, or
+        ``("dynamic", empty)`` when the filter is real but the kept
+        roles are not literals.
+
+    """
+    if node.name not in {"selectattr", "rejectattr"} or not node.args:
+        return "ignore", set()
+    attr = node.args[0]
+    if not isinstance(attr, jinja2.nodes.Const) or attr.value != "role":
+        return "ignore", set()
+    if node.name != "selectattr" or len(node.args) < 3:
+        return "dynamic", set()
+    test = node.args[1]
+    if (
+        not isinstance(test, jinja2.nodes.Const)
+        or test.value not in _ROLE_INCLUDE_TESTS
+    ):
+        return "dynamic", set()
+    names = _literal_role_names(node.args[2])
+    if names is None:
+        return "dynamic", set()
+    return "literal", set(names)
+
+
 def _roles_from_compare(
     node: jinja2.nodes.Compare,
 ) -> tuple[Literal["ignore", "literal", "dynamic"], set[str]]:
@@ -2376,19 +2417,21 @@ def roles_rendered_by_chat_template(chat_template: str) -> frozenset[str] | None
     """Return roles a template explicitly dispatches on.
 
     The Jinja AST is walked for comparisons that read ``.role`` or
-    ``['role']``. ``None`` means the template does not filter by role, so
-    every role is emitted (ChatML-style ``{{ message['role'] }}``). A
-    frozenset, possibly empty, means unknown roles can be dropped and must
-    be checked after render.
+    ``['role']``, and for ``selectattr`` / ``rejectattr`` on ``role``.
+    ``None`` means the template does not filter by role, so every role is
+    emitted (ChatML-style ``{{ message['role'] }}``). A frozenset, possibly
+    empty, means unknown roles can be dropped and must be checked after
+    render.
 
     Args:
         chat_template: Resolved Jinja source.
 
     Returns:
-        Roles named by ``==`` / ``in`` tests. An empty set means the
-        template filters on role, but the allowed names are not literals
-        (``message.role in allowed_roles`` or ``message.role == some_var``).
-        ``None`` means there is no role filter.
+        Roles named by ``==`` / ``in`` tests or by ``selectattr`` on
+        ``role``. An empty set means the template filters on role, but the
+        allowed names are not literals (``message.role in allowed_roles``,
+        ``message.role == some_var``, or ``rejectattr``). ``None`` means
+        there is no role filter.
 
     """
     try:
@@ -2402,8 +2445,13 @@ def roles_rendered_by_chat_template(chat_template: str) -> frozenset[str] | None
 
     roles: set[str] = set()
     saw_role_filter = False
-    for compare in parsed.find_all(jinja2.nodes.Compare):
-        kind, found = _roles_from_compare(compare)
+    findings = [
+        _roles_from_compare(node) for node in parsed.find_all(jinja2.nodes.Compare)
+    ]
+    findings.extend(
+        _roles_from_attr_filter(node) for node in parsed.find_all(jinja2.nodes.Filter)
+    )
+    for kind, found in findings:
         if kind == "ignore":
             continue
         saw_role_filter = True
@@ -2438,6 +2486,11 @@ def message_has_nonempty_payload(message: Mapping[str, Any]) -> bool:
         return True
     if _has_nonempty_text(message.get("reasoning_content")):
         return True
+    return _has_structural_payload(message)
+
+
+def _has_structural_payload(message: Mapping[str, Any]) -> bool:
+    """Whether a message carries tool calls or non-text multimodal parts."""
     tool_calls = message.get("tool_calls")
     if isinstance(tool_calls, list) and len(tool_calls) > 0:
         return True
@@ -2449,6 +2502,30 @@ def message_has_nonempty_payload(message: Mapping[str, Any]) -> bool:
                 if part_type not in _TEXT_PART_TYPES and part_type is not None:
                     return True
     return False
+
+
+def _strip_structural_payload(message: Mapping[str, Any]) -> dict[str, Any]:
+    """Copy ``message`` without tool calls or multimodal parts.
+
+    Text stays, and the message keeps its index. Removing the whole turn
+    would hide a dropped tool call behind echoed text, and would also shift
+    later messages in templates that read neighbors by position.
+    """
+    updated = dict(message)
+    tool_calls = updated.get("tool_calls")
+    if isinstance(tool_calls, list) and tool_calls:
+        updated["tool_calls"] = []
+    content = updated.get("content")
+    if isinstance(content, list):
+        kept: list[Any] = []
+        for part in content:
+            if isinstance(part, dict):
+                part_type = part.get("type")
+                if part_type not in _TEXT_PART_TYPES and part_type is not None:
+                    continue
+            kept.append(part)
+        updated["content"] = kept
+    return updated
 
 
 def _inject_probe_token(message: dict[str, Any], token: str) -> bool:
@@ -2531,6 +2608,16 @@ def _messages_without(
     ]
 
 
+def _messages_without_structural_payload(
+    conversation: Sequence[Mapping[str, Any]],
+    indexes: set[int],
+) -> list[Mapping[str, Any]]:
+    return [
+        _strip_structural_payload(message) if index in indexes else message
+        for index, message in enumerate(conversation)
+    ]
+
+
 def _stamp_tool_call_probe(message: dict[str, Any], token: str) -> bool:
     """Append ``token`` to tool-call names this message already has.
 
@@ -2599,14 +2686,22 @@ def _roles_dropped_by_omission(
     conversation: Sequence[Mapping[str, Any]],
     suspects: Sequence[tuple[int, str]],
     render_text: Callable[[Sequence[Mapping[str, Any]]], str],
+    *,
+    strip_payload: bool = False,
 ) -> list[str]:
-    """Roles whose removal leaves the rendered prompt unchanged.
+    """Roles whose structural payload leaves the rendered prompt unchanged.
 
-    Every suspect is removed in one render. An unchanged prompt means each
+    Every suspect is covered by one render. An unchanged prompt means each
     of them was omitted. If the prompt changes, tool-call names are stamped
     and checked in a second render so messages the template actually prints
     are cleared together. Only a mixed remainder is split, and a fully
     omitted subgroup is still decided by one render.
+
+    When ``strip_payload`` is true, tool calls and multimodal parts are
+    removed but the message stays at the same index. That catches a tool
+    call dropped beside echoed text, and keeps neighbor lookups stable.
+    When false, the whole message is removed. The text-probe fallback uses
+    that to see whether the turn itself was omitted.
     """
     try:
         baseline = render_text(conversation)
@@ -2626,6 +2721,11 @@ def _roles_dropped_by_omission(
     if not group:
         return []
 
+    def without(indexes: set[int]) -> list[Mapping[str, Any]]:
+        if strip_payload:
+            return _messages_without_structural_payload(conversation, indexes)
+        return _messages_without(conversation, indexes)
+
     def dropped_in(
         subgroup: Sequence[tuple[int, str]],
         known_alternate: str | None = None,
@@ -2639,7 +2739,7 @@ def _roles_dropped_by_omission(
         else:
             alternate = _render_probe_text(
                 render_text,
-                _messages_without(conversation, {index for index, _role in subgroup}),
+                without({index for index, _role in subgroup}),
             )
         if isinstance(alternate, str) and alternate == baseline:
             return [role for _index, role in subgroup]
@@ -2653,7 +2753,7 @@ def _roles_dropped_by_omission(
 
     alternate = _render_probe_text(
         render_text,
-        _messages_without(conversation, {index for index, _role in group}),
+        without({index for index, _role in group}),
     )
     if isinstance(alternate, str) and alternate == baseline:
         return [role for _index, role in group]
@@ -2689,8 +2789,10 @@ def assert_chat_template_rendered_messages(
     names (``user``, ``assistant``, ``tool``, and template-specific roles)
     are trusted. Any other role is probed: a unique token is appended to
     its text and the conversation is rendered again. If the token is absent,
-    the message was dropped and the request is rejected. Templates that
-    pass every role through are not probed.
+    the message was dropped and the request is rejected. Tool calls and
+    multimodal parts on that same message are checked too, so echoed text
+    cannot hide a dropped tool call or image. Templates that pass every
+    role through are not probed.
 
     Empty and whitespace-only messages are not an error. There is no
     content to drop, including a tool message that only carries
@@ -2729,9 +2831,10 @@ def assert_chat_template_rendered_messages(
         or _has_nonempty_text(conversation[index].get("reasoning"))
         or _has_nonempty_text(conversation[index].get("reasoning_content"))
     ]
-    text_indexes = {index for index, _ in text_suspects}
     structural_suspects = [
-        (index, role) for index, role in suspects if index not in text_indexes
+        (index, role)
+        for index, role in suspects
+        if _has_structural_payload(conversation[index])
     ]
 
     dropped: list[str] = []
@@ -2741,7 +2844,12 @@ def assert_chat_template_rendered_messages(
         )
     if structural_suspects:
         dropped.extend(
-            _roles_dropped_by_omission(conversation, structural_suspects, render_text)
+            _roles_dropped_by_omission(
+                conversation,
+                structural_suspects,
+                render_text,
+                strip_payload=True,
+            )
         )
     dropped = _unique_roles(dropped)
     if dropped:
