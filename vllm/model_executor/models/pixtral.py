@@ -70,6 +70,11 @@ from vllm.transformers_utils.processors.pixtral import (
 )
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
+from vllm.v1.worker.encoder_cudagraph_defs import (
+    EncoderCudaGraphCaptureInputs,
+    EncoderCudaGraphConfig,
+    EncoderCudaGraphReplayBuffers,
+)
 
 from .interfaces import (
     MultiModalEmbeddings,
@@ -1470,6 +1475,12 @@ def pixtral_patch_embed(
     return projected.unsqueeze(0), embeddings
 
 
+def _pad_pixtral_graph_cu_seqlens(dst: torch.Tensor, src: torch.Tensor) -> None:
+    # Keep the final offset at capture capacity, isolating padding in one sequence.
+    dst[:-1].copy_(src[-1])
+    dst[: src.numel()].copy_(src)
+
+
 class PixtralHFVisionModel(nn.Module):
     def __init__(
         self,
@@ -1595,6 +1606,118 @@ class PixtralHFVisionModel(nn.Module):
 
         # squeeze dim 0 and split into separate tensors for each image
         return torch.split(out.squeeze(0), embed_sizes)
+
+    def get_encoder_cudagraph_config(
+        self, out_hidden_size: int
+    ) -> EncoderCudaGraphConfig:
+        backend = self.transformer.layers[0].attention.attn.attn_backend
+        if backend not in (
+            AttentionBackendEnum.FLASH_ATTN,
+            AttentionBackendEnum.TRITON_ATTN,
+        ):
+            raise NotImplementedError(
+                "HF Pixtral encoder CUDA graphs require FLASH_ATTN or TRITON_ATTN."
+            )
+        return EncoderCudaGraphConfig(
+            modalities=["image"],
+            buffer_keys=["pixel_patches", "rotary_cos", "rotary_sin", "cu_seqlens"],
+            out_hidden_size=out_hidden_size,
+            padding_logics={"cu_seqlens": _pad_pixtral_graph_cu_seqlens},
+        )
+
+    def prepare_encoder_cudagraph_capture_inputs(
+        self,
+        token_budget: int,
+        max_batch_size: int,
+        device: torch.device,
+        dtype: torch.dtype,
+    ) -> EncoderCudaGraphCaptureInputs:
+        patch_size = self.config.patch_size
+        pixel_patches = torch.zeros(
+            token_budget,
+            self.config.num_channels,
+            patch_size,
+            patch_size,
+            device=device,
+            dtype=dtype,
+        )
+        position_shape = (
+            (token_budget, 2) if TRANSFORMERS_WITH_AXIAL_ROPE else (token_budget,)
+        )
+        positions = torch.zeros(position_shape, dtype=torch.long, device=device)
+        rotary_cos, rotary_sin = self.patch_positional_embedding(
+            pixel_patches, positions
+        )
+        cu_seqlens = torch.full(
+            (max_batch_size + 2,), token_budget, dtype=torch.int32, device=device
+        )
+        cu_seqlens[0] = 0
+        return EncoderCudaGraphCaptureInputs(
+            values={
+                "pixel_patches": pixel_patches,
+                "rotary_cos": rotary_cos,
+                "rotary_sin": rotary_sin,
+                "cu_seqlens": cu_seqlens,
+                # Attention wrappers read this scalar during capture. It must stay
+                # on CPU and bound every real and padding sequence on replay.
+                "max_seqlen": torch.tensor(
+                    token_budget, dtype=torch.int32, device="cpu"
+                ),
+            }
+        )
+
+    def prepare_encoder_cudagraph_replay_buffers(
+        self, pixel_values: Sequence[torch.Tensor]
+    ) -> EncoderCudaGraphReplayBuffers:
+        patch_size = self.config.patch_size
+        patches = []
+        patch_grids = []
+        lengths = []
+        for image in pixel_values:
+            height, width = image.shape[-2:]
+            grid_height, grid_width = height // patch_size, width // patch_size
+            patches.append(
+                image.unfold(1, patch_size, patch_size)
+                .unfold(2, patch_size, patch_size)
+                .permute(1, 2, 0, 3, 4)
+                .reshape(-1, self.config.num_channels, patch_size, patch_size)
+            )
+            # The existing RoPE helper only reads these shapes; no feature
+            # storage is needed to recover the native per-image positions.
+            patch_grids.append(torch.empty(0, 0, grid_height, grid_width))
+            lengths.append(grid_height * grid_width)
+        pixel_patches = torch.cat(patches).to(self.dtype)
+        positions = position_ids_in_meshgrid(
+            patch_grids, self.config.image_size // patch_size
+        ).to(pixel_patches.device)
+        rotary_cos, rotary_sin = self.patch_positional_embedding(
+            pixel_patches, positions
+        )
+        cu_seqlens = torch.tensor(
+            [0, *np.cumsum(lengths)], dtype=torch.int32, device=pixel_patches.device
+        )
+        return EncoderCudaGraphReplayBuffers(
+            values={
+                "pixel_patches": pixel_patches,
+                "rotary_cos": rotary_cos,
+                "rotary_sin": rotary_sin,
+                "cu_seqlens": cu_seqlens,
+            }
+        )
+
+    def encoder_cudagraph_forward(
+        self, values: dict[str, torch.Tensor]
+    ) -> torch.Tensor:
+        patch_embeds = self.patch_conv(values["pixel_patches"])
+        patch_embeds = self.ln_pre(patch_embeds.flatten(1).unsqueeze(0))
+        return self.transformer(
+            patch_embeds,
+            (values["rotary_cos"], values["rotary_sin"]),
+            values["cu_seqlens"],
+            values["max_seqlen"],
+            None,
+            return_all_hidden_states=False,
+        ).squeeze(0)
 
     # (TODO) Add prefix argument for filtering out weights to be loaded
     #        ref: https://github.com/vllm-project/vllm/pull/7186#discussion_r1734163986
