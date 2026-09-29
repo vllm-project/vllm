@@ -649,23 +649,6 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
             # Disable indexer inner overlap.
             self.indexer.aux_stream = None
 
-    def _enable_multi_stream_overlap(self) -> bool:
-        """ROCm multi-stream gates: streams and capture region.
-
-        Dict metadata marks piecewise cudagraph, whose eager breaks rebuild
-        the attention inputs on the owning stream. Forking side streams
-        there would rely on runtime HIP event sync, which is unreliable in
-        this overlap on ROCm (event waits can hang), so multi-stream only
-        runs where the fork/join becomes static graph edges: inside capture,
-        or with non-dict metadata (full cudagraph or the profile run), which
-        has no eager breaks. Covers both the HCA and CSA forks.
-        """
-        attn_metadata = get_forward_context().attn_metadata
-        return self.aux_stream_list is not None and (
-            torch.cuda.is_current_stream_capturing()
-            or not isinstance(attn_metadata, dict)
-        )
-
     def _run_sequential_pipeline(
         self,
         hidden_states: torch.Tensor,
@@ -709,7 +692,9 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
             device=hidden_states.device,
         )
 
-        if self._enable_multi_stream_overlap():
+        if current_platform.enable_multi_stream_overlap(
+            self.aux_stream_list, get_forward_context().attn_metadata
+        ):
             # The ROCm override consumes these sentinels inside the capture
             # boundary, moving the stream fan-out ahead of the projections.
             self._prepare_and_attn_fn(
@@ -769,7 +754,9 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
 
         # Re-check: forward's gate ran inside a captured segment that
         # _prepare_and_attn_eager (MRV1) then broke, making this region eager.
-        if not self._enable_multi_stream_overlap():
+        if not current_platform.enable_multi_stream_overlap(
+            self.aux_stream_list, get_forward_context().attn_metadata
+        ):
             self._run_sequential_pipeline(hidden_states, positions, o_padded)
             return
 
