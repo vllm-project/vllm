@@ -37,6 +37,13 @@ engine drives on your behalf:
 | [sharded_rdt](sharded_rdt.md) | NIXL / Ray Direct Transport (pull-based) | Very large models where each worker needs only its own slice (MoE with expert parallelism) |
 | [nccl_m2n](m2n.md) | NCCL M2N reshard | Trainer and inference use different sharding layouts |
 
+!!! warning
+    Weight updates and `reload_weights` cannot target a model managed by Expert
+    Parallel Load Balancing (EPLB). Checkpoint loading uses the initial expert
+    placement, and pending rebalances can overwrite updated weights. Start the
+    engine with EPLB disabled for weight updates. Expert parallelism without
+    EPLB remains supported.
+
 ## Quickstart
 
 ### Inference Side
