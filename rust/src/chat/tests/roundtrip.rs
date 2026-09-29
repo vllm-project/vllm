@@ -134,16 +134,21 @@ enum ToolChoiceVariant {
     /// `required`, with tool calls only: builder grammars admit no content
     /// before the calls.
     Required,
+    /// Named `get_weather`, with a single call to it and no content.
+    Named,
 }
 
 impl ToolChoiceVariant {
     /// Every variant, for templates and parsers that support all of them.
-    const ALL: &[Self] = &[Self::Auto, Self::Required];
+    const ALL: &[Self] = &[Self::Auto, Self::Required, Self::Named];
 
     fn tool_choice(self) -> ChatToolChoice {
         match self {
             Self::Auto => ChatToolChoice::Auto,
             Self::Required => ChatToolChoice::Required,
+            Self::Named => ChatToolChoice::Function {
+                name: "get_weather".to_string(),
+            },
         }
     }
 }
@@ -580,9 +585,10 @@ async fn run_roundtrip_tool_call_mix_inner(
         case.thinking_behavior,
     );
     let expected_reasoning = "Need call the weather and add tools.";
-    let expected_text = match variant {
-        ToolChoiceVariant::Auto => Some("I will call the tools."),
-        ToolChoiceVariant::Required => None,
+    let (expected_text, tool_call_count) = match variant {
+        ToolChoiceVariant::Auto => (Some("I will call the tools."), 2),
+        ToolChoiceVariant::Required => (None, 2),
+        ToolChoiceVariant::Named => (None, 1),
     };
 
     let mut content = vec![AssistantContentBlock::Reasoning {
@@ -591,7 +597,7 @@ async fn run_roundtrip_tool_call_mix_inner(
     content.extend(expected_text.map(|text| AssistantContentBlock::Text {
         text: text.to_string(),
     }));
-    content.extend([
+    let tool_calls = [
         AssistantContentBlock::ToolCall(AssistantToolCall {
             id: "functions.get_weather:0".to_string(),
             name: "get_weather".to_string(),
@@ -605,7 +611,8 @@ async fn run_roundtrip_tool_call_mix_inner(
             // `items` key also exercises templates that call `arguments.items()`.
             arguments: r#"{"y":1.0,"x":2,"items":["left","right"]}"#.to_string(),
         }),
-    ]);
+    ];
+    content.extend(tool_calls.into_iter().take(tool_call_count));
     let result = run_roundtrip(case, backends, &request, AssistantMessage { content }).await?;
 
     assert_eq!(
@@ -622,7 +629,7 @@ async fn run_roundtrip_tool_call_mix_inner(
     let tool_calls = result.parsed_message.tool_calls().collect::<Vec<_>>();
     assert_eq!(
         tool_calls.len(),
-        2,
+        tool_call_count,
         "parsed message: {:#?}",
         result.parsed_message
     );
@@ -631,11 +638,13 @@ async fn run_roundtrip_tool_call_mix_inner(
         tool_calls[0].arguments,
         expected_arguments(case, r#"{"location": "Shanghai"}"#)?,
     );
-    assert_eq!(tool_calls[1].name, "add");
-    assert_eq!(
-        tool_calls[1].arguments,
-        expected_arguments(case, r#"{"y": 1.0, "x": 2, "items": ["left", "right"]}"#)?,
-    );
+    if let Some(add) = tool_calls.get(1) {
+        assert_eq!(add.name, "add");
+        assert_eq!(
+            add.arguments,
+            expected_arguments(case, r#"{"y": 1.0, "x": 2, "items": ["left", "right"]}"#)?,
+        );
+    }
 
     assert_eq!(
         result.rerendered_closed_completion,

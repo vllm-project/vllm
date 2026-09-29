@@ -206,6 +206,64 @@
       },
       "completion": "Need call the weather and add tools.</think>\n\n<｜DSML｜tool_calls>\n<｜DSML｜invoke name=\"get_weather\">\n<｜DSML｜parameter name=\"location\" string=\"true\">Shanghai</｜DSML｜parameter>\n</｜DSML｜invoke>\n<｜DSML｜invoke name=\"add\">\n<｜DSML｜parameter name=\"y\" string=\"false\">1.0</｜DSML｜parameter>\n<｜DSML｜parameter name=\"x\" string=\"false\">2</｜DSML｜parameter>\n<｜DSML｜parameter name=\"items\" string=\"false\">[\"left\", \"right\"]</｜DSML｜parameter>\n</｜DSML｜invoke>\n</｜DSML｜tool_calls>",
       "generation_token_ids": [50249, 1926, 270, 9670, 305, 1258, 6704, 16, 128822, 271, 30, 128825, 72461, 4941, 12548, 1018, 30, 128825, 40148, 5406, 2329, 1281, 1133, 65, 50219, 3816, 30, 128825, 41523, 2329, 1281, 33182, 4, 3418, 1281, 11476, 3320, 119606, 28011, 1718, 128825, 41523, 1018, 1718, 128825, 40148, 5406, 1018, 30, 128825, 40148, 5406, 2329, 1281, 3327, 3816, 30, 128825, 41523, 2329, 1281, 91, 4, 3418, 1281, 19836, 3320, 19, 16, 18, 1718, 128825, 41523, 1018, 30, 128825, 41523, 2329, 1281, 90, 4, 3418, 1281, 19836, 3320, 20, 1718, 128825, 41523, 1018, 30, 128825, 41523, 2329, 1281, 17173, 4, 3418, 1281, 19836, 3320, 10931, 4589, 1760, 582, 2459, 13747, 1718, 128825, 41523, 1018, 1718, 128825, 40148, 5406, 1018, 1718, 128825, 72461, 4941, 12548, 32, 1]
+    },
+    "named": {
+      "grammar": {
+        "format": {
+          "type": "sequence",
+          "elements": [
+            {
+              "type": "tag",
+              "begin": "",
+              "content": {
+                "type": "any_text",
+                "excludes": [],
+                "max_tokens": null,
+                "max_chars": null
+              },
+              "end": "</think>"
+            },
+            {
+              "type": "sequence",
+              "elements": [
+                {
+                  "type": "const_string",
+                  "value": "\n\n<｜DSML｜tool_calls>\n"
+                },
+                {
+                  "type": "tag",
+                  "begin": "<｜DSML｜invoke name=\"get_weather\">\n",
+                  "content": {
+                    "type": "json_schema",
+                    "json_schema": {
+                      "type": "object",
+                      "properties": {
+                        "location": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "location"
+                      ]
+                    },
+                    "style": "deepseek_xml",
+                    "any_order": false,
+                    "max_whitespace_cnt": null
+                  },
+                  "end": "</｜DSML｜invoke>\n"
+                },
+                {
+                  "type": "const_string",
+                  "value": "</｜DSML｜tool_calls>"
+                }
+              ]
+            }
+          ]
+        },
+        "coverage": "from_token_zero"
+      },
+      "completion": "Need call the weather and add tools.</think>\n\n<｜DSML｜tool_calls>\n<｜DSML｜invoke name=\"get_weather\">\n<｜DSML｜parameter name=\"location\" string=\"true\">Shanghai</｜DSML｜parameter>\n</｜DSML｜invoke>\n</｜DSML｜tool_calls>",
+      "generation_token_ids": [50249, 1926, 270, 9670, 305, 1258, 6704, 16, 128822, 271, 30, 128825, 72461, 4941, 12548, 1018, 30, 128825, 40148, 5406, 2329, 1281, 1133, 65, 50219, 3816, 30, 128825, 41523, 2329, 1281, 33182, 4, 3418, 1281, 11476, 3320, 119606, 28011, 1718, 128825, 41523, 1018, 1718, 128825, 40148, 5406, 1018, 1718, 128825, 72461, 4941, 12548, 32, 1]
     }
   }
 }
