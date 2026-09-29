@@ -13,8 +13,6 @@ from vllm.entrypoints.serve.engine.protocol import OpenAIBaseModel
 from vllm.renderers import ChatParams, TokenizeParams, merge_kwargs
 from vllm.utils import random_uuid
 
-MAX_QUESTIONS = 64
-
 
 class QuestionSpec(OpenAIBaseModel):
     type: str
@@ -30,6 +28,11 @@ class StructuredDecisionRequest(OpenAIBaseModel):
     )
     instructions: str | None = Field(
         default=None, description="Context placed ahead of the questions."
+    )
+    decision_template: str | None = Field(
+        default=None,
+        description="A Jinja decision template for this request. Needs the "
+        "server to run with --trust-request-chat-template.",
     )
     chat_template_kwargs: dict[str, Any] | None = None
     priority: int = Field(default=0, ge=-(2**63), le=2**63 - 1)

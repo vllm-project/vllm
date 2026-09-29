@@ -228,17 +228,31 @@ async def init_generate_state(
     )
 
     from .structured_decisions.serving import ServingStructuredDecisions
+    from .structured_decisions.strategies import ReadContext, select_read_strategy
 
+    strategy_cls = (
+        select_read_strategy(engine_client.model_config)
+        if "generate" in supported_tasks
+        else None
+    )
     state.serving_structured_decisions = (
         ServingStructuredDecisions(
-            engine_client,
             state.openai_serving_models,
-            state.online_renderer,
-            chat_template=resolved_chat_template,
-            chat_template_content_format=args.chat_template_content_format,
-            default_chat_template_kwargs=default_chat_template_kwargs,
+            strategy_cls(
+                ReadContext(
+                    engine_client=engine_client,
+                    online_renderer=state.online_renderer,
+                    chat_template=resolved_chat_template,
+                    chat_template_content_format=args.chat_template_content_format,
+                    default_chat_template_kwargs=default_chat_template_kwargs,
+                )
+            ),
+            decision_template=load_chat_template(
+                getattr(args, "decision_template", None)
+            ),
+            trust_request_template=args.trust_request_chat_template,
             request_logger=request_logger,
         )
-        if "generate" in supported_tasks
+        if strategy_cls is not None
         else None
     )

@@ -14,7 +14,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Any, ClassVar
 
-MAX_ALTERNATIVES = 26
+MAX_LETTER_LABELS = 26
 
 
 class StructuredDecisionError(ValueError):
@@ -49,15 +49,15 @@ class QuestionType(ABC):
         and sums to 1."""
 
     def labels(self, alternatives: list[Alternative]) -> list[str]:
-        # Capital letters are one token after a space in every tokenizer tried,
-        # and they carry no meaning of their own that could bias the read.
+        """The label the model answers with for each alternative. The default
+        is capital letters: one token after a space in every tokenizer tried,
+        with no meaning of their own to bias the read."""
+        if len(alternatives) > MAX_LETTER_LABELS:
+            raise StructuredDecisionError(
+                f"{self.name}: at most {MAX_LETTER_LABELS} alternatives with "
+                "letter labels"
+            )
         return list(string.ascii_uppercase[: len(alternatives)])
-
-    def describe(self, label: str, alternative: Alternative) -> str:
-        """One line of the system prompt listing an allowed answer."""
-        if alternative.description:
-            return f"{label}: {alternative.name} ({alternative.description.strip()})"
-        return f"{label}: {alternative.name}"
 
 
 QUESTION_TYPES: dict[str, QuestionType] = {}
@@ -88,14 +88,17 @@ def build_question(
         )
     qtype = get_question_type(type_name)
     alternatives = qtype.parse_alternatives(qid, criteria)
-    if not 2 <= len(alternatives) <= MAX_ALTERNATIVES:
+    if len(alternatives) < 2:
         raise StructuredDecisionError(
-            f"question {qid!r}: needs 2 to {MAX_ALTERNATIVES} alternatives, "
-            f"got {len(alternatives)}"
+            f"question {qid!r}: needs at least 2 alternatives, got {len(alternatives)}"
         )
     names = [a.name for a in alternatives]
     if len(set(names)) != len(names):
         raise StructuredDecisionError(f"question {qid!r}: duplicate alternative names")
+    try:
+        labels = qtype.labels(alternatives)
+    except StructuredDecisionError as e:
+        raise StructuredDecisionError(f"question {qid!r}: {e}") from None
     if not isinstance(instructions, str):
         instructions = "" if instructions is None else str(instructions)
     return Question(
@@ -103,7 +106,7 @@ def build_question(
         type=qtype,
         instructions=instructions,
         alternatives=tuple(alternatives),
-        labels=tuple(qtype.labels(alternatives)),
+        labels=tuple(labels),
     )
 
 

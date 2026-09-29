@@ -19,6 +19,7 @@ def server():
         "--max-num-seqs",
         "32",
         "--enable-prefix-caching",
+        "--trust-request-chat-template",
     ]
     with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
         yield remote_server
@@ -97,7 +98,7 @@ def test_answers_repeat(server):
             {"q": {"type": "nope", "criteria": {"a": None, "b": None}}},
             "unknown question type",
         ),
-        ({"q": {"type": "choice", "criteria": {"a": None}}}, "2 to 26"),
+        ({"q": {"type": "choice", "criteria": {"a": None}}}, "at least 2"),
         (
             {
                 "q": {
@@ -126,3 +127,42 @@ def test_unknown_model(server):
         },
     )
     assert response.status_code == 404
+
+
+def test_request_template(server):
+    template = (
+        "{% macro answer_prefix(question) %}{{ question.id }} ->{% endmacro %}"
+        "Classify the ticket.\n"
+        "{% for q in questions %}{{ q.instructions }}\n"
+        "{% for o in q.options %}{{ o.label }} = {{ o.name }}\n{% endfor %}"
+        "{% endfor %}"
+        "Reply as: id -> label"
+    )
+    response = post(
+        server,
+        {
+            "model": MODEL_NAME,
+            "state": "My card was charged twice for one order.",
+            "decision_template": template,
+            "questions": {
+                "team": {
+                    "type": "choice",
+                    "instructions": "Which team?",
+                    "criteria": {"billing": None, "shipping": None},
+                }
+            },
+            "chat_template_kwargs": {"enable_thinking": False},
+        },
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["answers"]["team"]["choice"] == "billing"
+
+
+def test_too_many_questions(server):
+    questions = {
+        f"q{i}": {"type": "choice", "criteria": {"a": None, "b": None}}
+        for i in range(65)
+    }
+    response = post(server, {"model": MODEL_NAME, "state": "x", "questions": questions})
+    assert response.status_code == 400
+    assert "at most 64" in response.json()["error"]["message"]
