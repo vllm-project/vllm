@@ -465,12 +465,6 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
                 to_return = (toks, load_async)
         return to_return
 
-    def get_sync_load_block_ids(self, request: "Request") -> list[int]:
-        chosen = self._requests_to_connector.get(request.request_id)
-        if chosen is None:
-            return []
-        return self._connectors[chosen].get_sync_load_block_ids(request)
-
     def update_state_after_alloc(
         self, request: "Request", blocks: "KVCacheBlocks", num_external_tokens: int
     ):

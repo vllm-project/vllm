@@ -553,18 +553,6 @@ def test_no_async_saves_release_tracking(async_saves):
     _assert_save_state_cleared(async_saves)
 
 
-def test_sync_load_zeroing_exclusion_uses_only_selected_connector(mc):
-    """An unselected child cannot suppress initialization of fresh pages."""
-    request = SimpleNamespace(request_id="r")
-    first, second = mc.sub_connectors
-    first.get_sync_load_block_ids.return_value = [1, 2]
-    second.get_sync_load_block_ids.return_value = [3]
-    assert mc.get_sync_load_block_ids(request) == []
-    mc._requests_to_connector["r"] = 1
-    assert mc.get_sync_load_block_ids(request) == [3]
-    first.get_sync_load_block_ids.assert_not_called()
-
-
 def test_worker_preserves_send_identity_and_receive_failures(async_saves, monkeypatch):
     from vllm.distributed.kv_transfer.kv_connector.v1 import multi_connector
 
