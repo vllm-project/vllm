@@ -714,7 +714,9 @@ def resolve_kv_cache_block_sizes(
       group's effective block size. Attention groups are scaled by DCP;
       Mamba groups keep their full per-rank state and are not scaled.
     - ``hash_block_size`` is the granularity at which ``Request.block_hashes``
-      is computed. Single group: equals scheduler block size. Multiple groups:
+      is computed. Single group: equals scheduler block size, and any other
+      ``cache_config.prefix_match_unit`` is rejected while block hashing is
+      active. Multiple groups:
       ``cache_config.prefix_match_unit`` override if set, else the GCD of
       group block sizes; every group's block size must be divisible by it.
       Returns the scheduler block size (i.e. disables finer hashing) if block
@@ -728,6 +730,21 @@ def resolve_kv_cache_block_sizes(
         if groups and not groups[0].kv_cache_spec.dcp_sharded:
             dcp = 1
         bs = cache_config.block_size * dcp
+        # The Mamba prefill checkpoint builder reads prefix_match_unit directly,
+        # so a value dropped here puts its checkpoints off the scheduler's grid.
+        if (
+            cache_config.prefix_match_unit not in (None, bs)
+            and len(groups) == 1
+            and (
+                cache_config.enable_prefix_caching
+                or vllm_config.kv_transfer_config is not None
+            )
+        ):
+            raise ValueError(
+                f"Invalid prefix_match_unit={cache_config.prefix_match_unit}; "
+                "with a single KV cache group, prefix-cache hits land on the "
+                f"block size ({bs}). Unset it or set it to {bs}."
+            )
         return bs, bs
 
     group_block_sizes = [
