@@ -1775,7 +1775,9 @@ class EngineArgs:
             dest="gdn_prefill_backend",
             choices=["flashinfer", "triton", "cutedsl", "sycl"],
             default=None,
-            help="Select GDN prefill backend. 'sycl' is XPU-only.",
+            help="Select GDN prefill backend. 'sycl' is XPU-only and selects "
+            "the fused whole-layer _xpu_C::gdn_attention kernel instead of "
+            "the Triton/FLA kernel chain.",
         )
         parser.add_argument(
             "--kda-prefill-backend",

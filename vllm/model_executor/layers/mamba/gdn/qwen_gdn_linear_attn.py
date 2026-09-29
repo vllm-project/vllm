@@ -91,10 +91,22 @@ MAX_FUSED_GDN_MTP_TOKENS = 8
 FUSED_GDN_STATE_DTYPES = (torch.float32, torch.bfloat16)
 
 
+def xpu_gdn_kernel_available() -> bool:
+    """Whether vllm-xpu-kernels was built with the fused SYCL GDN op."""
+    return hasattr(torch.ops._xpu_C, "gdn_attention")
+
+
 def _resolve_gdn_prefill_backend(
     vllm_config: VllmConfig,
+    supports_sycl: bool = False,
 ) -> tuple[str, Literal["triton", "flashinfer", "cutedsl", "sycl"]]:
     """Resolve GDN prefill backend.
+
+    The SYCL kernel is chosen when ``requested in ["sycl", "auto"]``, the
+    platform is XPU, the caller's layer ``supports_sycl`` and
+    ``_xpu_C::gdn_attention`` is built. Unlike the other backends it is a
+    fused whole-layer op, so selecting it also replaces the conv1d and decode
+    kernels, not just prefill.
 
     FlashInfer's GDN prefill kernel is chosen when:
     * ``requested in ["flashinfer", "auto"]``;
@@ -117,19 +129,17 @@ def _resolve_gdn_prefill_backend(
     backend = str(backend_cfg).strip().lower()
 
     if current_platform.is_xpu():
-        # Unlike the other backends here, the SYCL op covers the whole GDN
-        # core, not just prefill. Absent unless vllm-xpu-kernels was built
-        # with VLLM_GDN_ENABLED.
-        has_sycl = hasattr(torch.ops._xpu_C, "gdn_attention")
-        if backend == "sycl" and not has_sycl:
-            raise ValueError(
-                "--gdn-prefill-backend sycl was requested but "
-                "torch.ops._xpu_C.gdn_attention is not available. Rebuild "
-                "vllm-xpu-kernels with VLLM_GDN_ENABLED, or use "
-                "--gdn-prefill-backend triton."
-            )
-        if backend in ("sycl", "auto") and has_sycl:
+        if not supports_sycl:
+            return backend, "triton"
+        if backend in ("auto", "sycl") and xpu_gdn_kernel_available():
             return backend, "sycl"
+        if backend == "sycl":
+            logger.warning_once(
+                "GDN backend 'sycl' was requested but "
+                "torch.ops._xpu_C.gdn_attention is not available. Rebuild "
+                "vllm-xpu-kernels with VLLM_GDN_ENABLED. Falling back to "
+                "Triton/FLA."
+            )
         return backend, "triton"
 
     if not current_platform.is_cuda():
@@ -259,16 +269,22 @@ class ChunkGatedDeltaRule(CustomOp):
     def __init__(self) -> None:
         super().__init__()
         vllm_config = get_current_vllm_config()
-        backend, active_backend = _resolve_gdn_prefill_backend(vllm_config)
+        # Only instantiated by QwenGatedDeltaNetAttention, which has forward_xpu.
+        backend, active_backend = _resolve_gdn_prefill_backend(
+            vllm_config, supports_sycl=True
+        )
         self.gdn_prefill_backend = active_backend
 
-        if backend in ("flashinfer", "cutedsl", "sycl") and active_backend != backend:
+        if backend in ("flashinfer", "cutedsl") and active_backend != backend:
             logger.warning_once(
                 "GDN prefill backend '%s' is selected but cannot use this "
                 "kernel on the current platform. Falling back to Triton/FLA.",
                 backend,
             )
         _log_gdn_backend_decision(vllm_config, backend, active_backend)
+
+        # On XPU "sycl" bypasses this module entirely (fused whole-layer op),
+        # so the chunked prefill path stays on Triton/FLA.
 
         if active_backend == "flashinfer":
             self._forward_method = self.forward_cuda
@@ -418,7 +434,9 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         self.gqa_interleaved_layout = gqa_interleaved_layout
         self.gdn_xpu_backend: Literal["sycl", "triton"] | None = None
         if current_platform.is_xpu():
-            requested, self.gdn_xpu_backend = _resolve_gdn_prefill_backend(vllm_config)
+            requested, self.gdn_xpu_backend = _resolve_gdn_prefill_backend(
+                vllm_config, supports_sycl=True
+            )
             _log_gdn_backend_decision(vllm_config, requested, self.gdn_xpu_backend)
             self._forward_method = self.forward_xpu
         elif current_platform.is_cpu():
