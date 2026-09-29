@@ -396,9 +396,11 @@ class ROCMAiterMLASparseMetadataBuilder(
         attention_context = vllm_config.compilation_config.static_forward_context
         # Sink decode must use AITER's nonpersistent path. In particular,
         # gfx942 has no persistent+LSE kernel, and its metadata heuristic
-        # terminates for HY-V4's TP1 H64 shape.
+        # terminates for HY-V4's TP1 H64 shape. The Triton sparse MLA kernel
+        # never reads the persistent metadata either.
         self._use_persistent_metadata = all(
             getattr(attention_context[name].impl, "sinks", None) is None
+            and not getattr(attention_context[name].impl, "use_aiter_sparse_mla", False)
             for name in layer_names
         )
         # Bounds the KV-split heuristic (see `_sparse_decode_max_split`).
@@ -716,6 +718,7 @@ class ROCMAiterMLASparseImpl(
     is_sparse = True
     supports_dense_mha_prefill = False
     supports_dcp = False
+    use_aiter_sparse_mla = False
 
     def __init__(
         self,
@@ -765,6 +768,32 @@ class ROCMAiterMLASparseImpl(
         (self.q_concat_buffer,) = current_workspace_manager().get_simultaneous(
             (q_concat_shape, vllm_config.model_config.dtype),
         )
+        self.qk_rope_head_dim: int = mla_args["qk_rope_head_dim"]
+
+        if rocm_aiter_ops.is_triton_sparse_mla_enabled():
+            reason = self._aiter_sparse_mla_unsupported_reason(vllm_config)
+            if reason is None:
+                self.use_aiter_sparse_mla = True
+            else:
+                logger.warning_once(
+                    "VLLM_ROCM_USE_AITER_TRITON_SPARSE_MLA is set, but %s; "
+                    "using the default sparse MLA path instead.",
+                    reason,
+                )
+
+    def _aiter_sparse_mla_unsupported_reason(
+        self, vllm_config: VllmConfig
+    ) -> str | None:
+        model_dtype = vllm_config.model_config.dtype
+        if model_dtype != torch.bfloat16:
+            return f"the model dtype is {model_dtype}, not bfloat16"
+        cache_dtype = self.kv_cache_dtype
+        if cache_dtype not in ("auto", "bfloat16", "fp8", "fp8_e4m3"):
+            return f"kv-cache dtype {cache_dtype!r} is neither bfloat16 nor e4m3 fp8"
+        # Context parallelism merges each rank's partials with a per-token LSE.
+        if self.dcp_world_size > 1 or self.pcp_world_size > 1:
+            return "context parallelism is not supported"
+        return None
 
     def record_logical_topk_ready(self) -> None:
         # This impl shares the top-k indices buffer via SharedTopkIndicesBuffer
@@ -975,6 +1004,43 @@ class ROCMAiterMLASparseImpl(
 
         return output, lse
 
+    def _forward_mla_aiter(
+        self,
+        layer: AttentionLayer,
+        q: torch.Tensor,  # [sq, heads, d_qk], not head-padded
+        kv_c_and_k_pe_cache: torch.Tensor,
+        attn_metadata: ROCMAiterMLASparseMetadata,
+    ) -> torch.Tensor:
+        """_forward_mla on aiter's Triton sparse MLA kernel.
+
+        Reads the same index stream, but needs no q head padding and no
+        persistent metadata, and its launch depends on shapes only, so it is
+        CUDA-graph capturable.
+        """
+        num_actual_tokens = attn_metadata.num_actual_tokens
+        output = torch.empty(
+            [q.shape[0], self.num_heads, self.kv_lora_rank],
+            dtype=attn_metadata.attn_out_dtype,
+            device=q.device,
+        )
+        rocm_aiter_ops.triton_sparse_mla_fwd(
+            q[:num_actual_tokens],
+            kv_c_and_k_pe_cache.view(-1, 1, 1, q.shape[-1]),
+            output[:num_actual_tokens],
+            self.scale,
+            attn_metadata.paged_kv_indptr,
+            attn_metadata.paged_kv_indices,
+            kv_lora_rank=self.kv_lora_rank,
+            qk_rope_head_dim=self.qk_rope_head_dim,
+            q_scale=layer._q_scale,
+            kv_scale=layer._k_scale,
+            attn_sink=self.sinks,
+            # triton_convert_req_index_to_global_index writes 0, never -1,
+            # for an invalid top-k entry, so no slot in the stream is negative.
+            has_invalid=False,
+        )
+        return output
+
     def forward_mqa(
         self,
         q: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
@@ -1026,6 +1092,11 @@ class ROCMAiterMLASparseImpl(
                 original_q_shape = q.shape
                 q, _ = ops.scaled_fp8_quant(q.view(q.shape[0], -1), layer._q_scale)
                 q = q.view(original_q_shape)
+        if self.use_aiter_sparse_mla:
+            output = self._forward_mla_aiter(
+                layer, q, kv_c_and_k_pe_cache, attn_metadata
+            )
+            return output, None
         mla_padded_q = AiterMLAHelper.get_mla_padded_q(self.num_heads, q)
         return self._forward_mla(
             layer, mla_padded_q, kv_c_and_k_pe_cache, attn_metadata
