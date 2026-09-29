@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import sys
-from types import ModuleType
+from types import ModuleType, SimpleNamespace
 
 import pytest
 import torch
@@ -66,6 +66,9 @@ def test_aiter_flash_attn_omits_out_and_returns_contiguous_output(
 
     aiter.__dict__["flash_attn_varlen_func"] = flash_attn_varlen_func
     monkeypatch.setitem(sys.modules, "aiter", aiter)
+    monkeypatch.setattr(
+        vit_attn_wrappers, "current_platform", SimpleNamespace(is_rocm=lambda: True)
+    )
     q = _noncontiguous_bshd()
     assert not q.is_contiguous()
 
