@@ -187,16 +187,16 @@ fn list_loras_status(error: LoraDisabledError) -> Status {
 
 #[tonic::async_trait]
 impl pb::control_server::Control for ControlServiceImpl {
-    async fn shutdown_engine(
+    async fn shutdown(
         &self,
-        _request: Request<pb::ShutdownEngineRequest>,
-    ) -> Result<Response<pb::ShutdownEngineResponse>, Status> {
+        _request: Request<pb::ShutdownRequest>,
+    ) -> Result<Response<pb::ShutdownResponse>, Status> {
         let shutdown = self.engine_shutdown.as_ref().ok_or_else(|| {
             Status::failed_precondition("this frontend does not manage the engine process")
         })?;
         tracing::info!("engine shutdown requested via gRPC");
         shutdown.cancel();
-        Ok(Response::new(pb::ShutdownEngineResponse {}))
+        Ok(Response::new(pb::ShutdownResponse {}))
     }
 
     async fn get_server_info(

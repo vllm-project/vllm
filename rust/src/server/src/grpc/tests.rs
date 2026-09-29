@@ -2398,7 +2398,7 @@ async fn grpc_health_transitions_to_not_serving_when_engine_becomes_unhealthy() 
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
-async fn grpc_shutdown_engine_requires_managed_engine() {
+async fn grpc_shutdown_requires_managed_engine() {
     let (inference_service, control_service, engine_health, _engine_task) = setup_grpc_service(
         b"engine-grpc-external-shutdown",
         default_stream_output_specs(),
@@ -2415,7 +2415,7 @@ async fn grpc_shutdown_engine_requires_managed_engine() {
     let mut control_client = ControlClient::new(channel.clone());
 
     let status = control_client
-        .shutdown_engine(pb::ShutdownEngineRequest {})
+        .shutdown(pb::ShutdownRequest {})
         .await
         .expect_err("external engine shutdown must be rejected");
     assert_eq!(status.code(), tonic::Code::FailedPrecondition);
@@ -2434,7 +2434,7 @@ async fn grpc_shutdown_engine_requires_managed_engine() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
-async fn grpc_shutdown_engine_closes_health_watch_and_server() {
+async fn grpc_shutdown_closes_health_watch_and_server() {
     let shutdown = tokio_util::sync::CancellationToken::new();
     let (inference_service, control_service, engine_health, _engine_task) =
         setup_grpc_service_with_engine_script(
@@ -2474,7 +2474,7 @@ async fn grpc_shutdown_engine_closes_health_watch_and_server() {
     );
 
     control_client
-        .shutdown_engine(pb::ShutdownEngineRequest {})
+        .shutdown(pb::ShutdownRequest {})
         .await
         .expect("accept managed engine shutdown");
     assert!(

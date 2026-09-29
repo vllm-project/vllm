@@ -29,7 +29,7 @@ We currently support the following OpenAI APIs:
 
 ## Rust gRPC engine shutdown
 
-The Rust frontend's `vllm.Control/ShutdownEngine` RPC lets a trusted sidecar
+The Rust frontend's `vllm.Control/Shutdown` RPC lets a trusted sidecar
 request shutdown of a managed engine, for example when it cannot recover its
 cache index after restarting. It is available with `vllm-rs serve --grpc-port`.
 The request and response are empty.

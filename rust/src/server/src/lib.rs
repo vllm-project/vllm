@@ -187,7 +187,7 @@ pub async fn serve(config: Config, shutdown: CancellationToken) -> Result<()> {
     serve_with_router_extension(config, shutdown, |router| router).await
 }
 
-/// Serve with `ShutdownEngine` enabled; the caller must shut down its managed engine when cancelled.
+/// Serve with `Shutdown` enabled; the caller must shut down its managed engine when cancelled.
 pub async fn serve_with_engine_shutdown(config: Config, shutdown: CancellationToken) -> Result<()> {
     serve_inner(config, shutdown.clone(), Some(shutdown), |router| router).await
 }
