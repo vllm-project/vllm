@@ -108,6 +108,7 @@ class MooncakeBootstrapServer:
         logger.info("Mooncake Bootstrap Server started at %s:%d", self.host, self.port)
 
     def shutdown(self):
+        was_started = self.server is not None and self.server.started
         if self.server is not None:
             self.server.should_exit = True
         if self.server_thread is not None and self.server_thread.ident is not None:
@@ -120,6 +121,8 @@ class MooncakeBootstrapServer:
         else:
             self.server_thread = None
             self.server = None
+            if was_started:
+                logger.info("Mooncake Bootstrap Server stopped.")
 
     async def register_worker(self, payload: RegisterWorkerPayload):
         """Handles registration of a prefiller worker."""
