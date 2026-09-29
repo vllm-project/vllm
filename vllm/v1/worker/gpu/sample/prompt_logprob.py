@@ -53,7 +53,7 @@ class PromptLogprobsWorker:
         if uses_prompt_logprobs:
             self.in_progress_prompt_logprobs[req_id] = []
         if sampling_params.prompt_logprob_token_ids is not None:
-            # Small arrays decode read-only, which torch.from_numpy rejects.
+            # Decoded arrays may be read-only; torch.from_numpy warns on those.
             ids = np.require(sampling_params.prompt_logprob_token_ids, requirements="W")
             ids = async_tensor_h2d(ids, self.device, torch.int64)
             self.token_id_scores[req_id] = _TokenIdScores(
@@ -111,7 +111,7 @@ class PromptLogprobsWorker:
             if chunk_end >= prompt_len:
                 req.scores.masked_fill_(req.pad, float("-inf"))
                 out[req_id] = req.scores
-                req.scores = None
+                del self.token_id_scores[req_id]
         return out
 
     def compute_prompt_logprobs(

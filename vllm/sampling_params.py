@@ -12,7 +12,7 @@ from typing import Annotated, Any
 
 import msgspec
 import numpy as np
-from pydantic import BeforeValidator
+from pydantic import BeforeValidator, GetPydanticSchema, StrictInt
 from pydantic.dataclasses import dataclass
 
 import vllm.envs as envs
@@ -76,6 +76,11 @@ def validate_thinking_token_budget(value: int | float | bool | None) -> int | No
 ThinkingTokenBudget = Annotated[
     int | None,
     BeforeValidator(validate_thinking_token_budget),
+]
+
+# JSON clients send nested lists; verify() pads them into an array.
+TokenIdTable = Annotated[
+    np.ndarray, GetPydanticSchema(lambda _, handler: handler(list[list[StrictInt]]))
 ]
 
 
@@ -291,7 +296,7 @@ class SamplingParams(
     prompt_logprobs: int | None = None
     """Number of log probabilities to return per prompt token.
     When set to -1, return all `vocab_size` log probabilities."""
-    prompt_logprob_token_ids: np.ndarray | None = None
+    prompt_logprob_token_ids: TokenIdTable | None = None
     """Token IDs to score per causal prompt row: an integer array of shape
     [num_rows, num_ids], -1 padding shorter rows; nested lists are padded.
     Row i scores its IDs as predictions of prompt token
@@ -506,13 +511,6 @@ class SamplingParams(
 
         if self.seed == -1:
             self.seed = None
-
-        ids = self.prompt_logprob_token_ids
-        if isinstance(ids, list) and all(isinstance(row, list) for row in ids):
-            ids = make_ndarray_with_pad(ids, -1, np.int64)
-        if isinstance(ids, np.ndarray) and ids.dtype.kind in "iu":
-            ids = np.ascontiguousarray(ids, dtype=np.int64)
-        self.prompt_logprob_token_ids = ids
 
         self.thinking_token_budget = validate_thinking_token_budget(
             self.thinking_token_budget
@@ -843,7 +841,9 @@ class SamplingParams(
         if self.skip_clone:
             return copy.copy(self)
 
-        return copy.deepcopy(self)
+        # The token ID table is never mutated; share it.
+        ids = self.prompt_logprob_token_ids
+        return copy.deepcopy(self, {id(ids): ids})
 
     def verify(
         self,
@@ -928,19 +928,23 @@ class SamplingParams(
         # Validate prompt_logprob_token_ids.
         ids = self.prompt_logprob_token_ids
         if ids is not None:
-            if (
-                not isinstance(ids, np.ndarray)
-                or ids.ndim != 2
-                or 0 in ids.shape
-                or ids.dtype.kind not in "iu"
+            shape: tuple[int, ...] = ()
+            if isinstance(ids, list) and all(isinstance(row, list) for row in ids):
+                shape = (len(ids), max(map(len, ids), default=0))
+            elif (
+                isinstance(ids, np.ndarray)
+                and ids.dtype.kind in "iu"
+                and np.can_cast(ids.dtype, np.int64)
             ):
+                shape = ids.shape
+            if len(shape) != 2 or 0 in shape:
                 raise VLLMValidationError(
                     "prompt_logprob_token_ids must be a non-empty integer array "
                     "of shape [num_rows, num_ids].",
                     parameter="prompt_logprob_token_ids",
                     value=getattr(ids, "shape", type(ids).__name__),
                 )
-            n = ids.shape[1]
+            n = shape[1]
             if n > max_logprobs:
                 raise VLLMValidationError(
                     f"Requested {n} token ids per row in prompt_logprob_token_ids, "
@@ -949,6 +953,12 @@ class SamplingParams(
                     parameter="prompt_logprob_token_ids",
                     value=n,
                 )
+            # Pad only after the width check bounds the allocation.
+            ids = self.prompt_logprob_token_ids = (
+                make_ndarray_with_pad(ids, -1, np.int64)
+                if isinstance(ids, list)
+                else np.ascontiguousarray(ids, dtype=np.int64)
+            )
             vocab_size = model_config.get_vocab_size()
             if ids.min() < -1 or ids.max() >= vocab_size:
                 raise VLLMValidationError(

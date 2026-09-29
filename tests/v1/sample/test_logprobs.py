@@ -11,7 +11,7 @@ from unittest.mock import patch
 import numpy as np
 import pytest
 import torch
-from pydantic import TypeAdapter
+from pydantic import TypeAdapter, ValidationError
 
 from tests.utils import large_gpu_mark
 from tests.v1.sample.utils import (
@@ -441,32 +441,40 @@ def test_prompt_logprob_token_ids_validation():
     model_config = _model_config(vocab_size=100, max_logprobs=4)
 
     def verify(**kwargs):
-        SamplingParams(**kwargs).verify(
+        params = SamplingParams(**kwargs)
+        params.verify(
             model_config,
             speculative_config=None,
             structured_outputs_config=None,
             tokenizer=None,
         )
+        return params.prompt_logprob_token_ids
 
-    verify(prompt_logprob_token_ids=[[], [1], [4, 3, 2, 1]])
-    verify(prompt_logprob_token_ids=np.array([[1, -1], [2, 3]], dtype=np.int32))
-
-    # Any integer layout is normalized once, on construction, to what the
-    # worker uploads: C-contiguous native int64.
-    odd = np.asfortranarray(np.array([[1, 2], [3, 4]], dtype=">i4"))
-    ids = SamplingParams(prompt_logprob_token_ids=odd).prompt_logprob_token_ids
+    assert verify(prompt_logprob_token_ids=[[], [1], [4, 3, 2, 1]]).tolist() == [
+        [-1] * 4,
+        [1, -1, -1, -1],
+        [4, 3, 2, 1],
+    ]
+    # Any integer layout is normalized to what the worker uploads:
+    # C-contiguous native int64.
+    odd = np.asfortranarray(np.array([[1, 2], [3, -1]], dtype=">i4"))
+    ids = verify(prompt_logprob_token_ids=odd)
     assert ids.dtype == np.int64 and ids.flags.c_contiguous
-    assert ids.tolist() == [[1, 2], [3, 4]]
-    # The pydantic path (token-in/token-out API, /docs) serializes it as lists.
-    dumped = TypeAdapter(SamplingParams).dump_json(
-        SamplingParams(prompt_logprob_token_ids=[[1, 2]])
-    )
+    assert ids.tolist() == [[1, 2], [3, -1]]
+    # The pydantic path (token-in/token-out API, /docs) takes strict integer lists.
+    adapter = TypeAdapter(SamplingParams)
+    dumped = adapter.dump_json(SamplingParams(prompt_logprob_token_ids=[[1, 2]]))
     assert b'"prompt_logprob_token_ids":[[1,2]]' in dumped
+    for bad in ("[[1.5]]", '[["3"]]', "[[true]]", "[1, 2]"):
+        with pytest.raises(ValidationError):
+            adapter.validate_json(f'{{"prompt_logprob_token_ids": {bad}}}')
 
     with pytest.raises(VLLMValidationError, match=r"shape \[num_rows, num_ids\]"):
         verify(prompt_logprob_token_ids=np.array([1, 2]))
     with pytest.raises(VLLMValidationError, match=r"shape \[num_rows, num_ids\]"):
         verify(prompt_logprob_token_ids=[1, 2])
+    with pytest.raises(VLLMValidationError, match=r"shape \[num_rows, num_ids\]"):
+        verify(prompt_logprob_token_ids=np.array([[2**64 - 1]], dtype=np.uint64))
     # The error names the value to raise max_logprobs to.
     with pytest.raises(VLLMValidationError, match=r"max_logprobs.*at least 5"):
         verify(prompt_logprob_token_ids=[[1], [1, 2, 3, 4, 5]])
@@ -1387,7 +1395,9 @@ def test_prompt_logprob_token_ids_with_chunking_and_preemption(monkeypatch):
     ] + [f"Tell me about the number {i}: " for i in range(32)]
 
     start = 2
-    candidate_ids = [10, 100, 1000, 10000]
+
+    def candidate_ids(j):
+        return [10 + j, 100 + j, 1000 + j, 10000 + j]
 
     with VllmRunner(
         "Qwen/Qwen3-0.6B",
@@ -1419,11 +1429,9 @@ def test_prompt_logprob_token_ids_with_chunking_and_preemption(monkeypatch):
             ]
 
         metrics_before = vllm_model.llm.get_metrics()
-        full_params = make_params(lambda j: candidate_ids)
+        full_params = make_params(candidate_ids)
         for params in full_params:  # the array form, as a top-k tensor would be
-            params.prompt_logprob_token_ids = np.tile(
-                candidate_ids, (len(params.prompt_logprob_token_ids), 1)
-            )
+            params.prompt_logprob_token_ids = np.array(params.prompt_logprob_token_ids)
         outputs = vllm_model.llm.generate(token_prompts, full_params)
 
         for i, output in enumerate(outputs):
@@ -1431,7 +1439,7 @@ def test_prompt_logprob_token_ids_with_chunking_and_preemption(monkeypatch):
             assert scores is not None, f"Output {i} missing per-row scores"
             expected_shape = (
                 len(output.prompt_token_ids) - 1 - start,
-                len(candidate_ids),
+                4,
             )
             assert scores.shape == expected_shape, (
                 f"Output {i} scored {scores.shape}, expected {expected_shape}"
@@ -1441,14 +1449,14 @@ def test_prompt_logprob_token_ids_with_chunking_and_preemption(monkeypatch):
 
         # Ragged rows: each row keeps a prefix of the candidates and must
         # reproduce that prefix of the full scores, with -inf padding.
-        ragged_params = make_params(lambda j: candidate_ids[: 1 + j % 4])
+        ragged_params = make_params(lambda j: candidate_ids(j)[: 1 + j % 4])
         ragged_outputs = vllm_model.llm.generate(token_prompts, ragged_params)
         for output, ragged_output, params in zip(
             outputs, ragged_outputs, ragged_params
         ):
             expected = np.full_like(output.prompt_token_id_logprobs, -np.inf)
-            for j, row in enumerate(params.prompt_logprob_token_ids):
-                n = int((row >= 0).sum())
+            for j in range(len(expected)):
+                n = 1 + j % 4
                 expected[j, :n] = output.prompt_token_id_logprobs[j, :n]
             np.testing.assert_allclose(
                 ragged_output.prompt_token_id_logprobs, expected, atol=1e-2
