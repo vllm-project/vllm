@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import asyncio
+import re
 import warnings
 from collections.abc import Mapping
 from typing import Literal
@@ -21,9 +22,15 @@ from vllm.entrypoints.chat_utils import (
     _load_embeds_dict,
     _parse_metadata_array,
     _postprocess_messages,
+    assert_chat_template_rendered_messages,
+    message_has_nonempty_payload,
     parse_chat_messages,
     parse_chat_messages_async,
+    roles_rendered_by_chat_template,
     validate_chat_template,
+)
+from vllm.entrypoints.serve.exception_handling.error_response import (
+    create_error_response,
 )
 from vllm.exceptions import VLLMValidationError
 from vllm.inputs import MultiModalDataDict, MultiModalUUIDDict
@@ -3194,3 +3201,333 @@ def test_validate_chat_template_rejects_invalid_type():
     ) as exc_info:
         validate_chat_template(123)  # type: ignore[arg-type]
     assert exc_info.value.parameter == "chat_template"
+
+
+# Qwen-style dispatch: unknown roles fall through and emit nothing.
+_FILTERING_TEMPLATE = """
+{%- if messages[0]['role'] == 'system' -%}
+system:{{ messages[0]['content'] }}
+{%- endif -%}
+{%- for message in messages -%}
+{%- if message.role == "user" or message.role == "assistant"
+    or message.role == "tool" -%}
+{{ message.role }}:{{ message.content }}
+{%- elif message.role == "system" -%}
+system:{{ message.content }}
+{%- endif -%}
+{%- endfor -%}
+"""
+
+_CHATML_TEMPLATE = (
+    "{% for message in messages %}"
+    "{{ message['role'] + '\\n' + message['content'] }}"
+    "{% endfor %}"
+    "{% if messages[-1]['role'] != 'assistant' %}assistant{% endif %}"
+)
+
+_CUSTOM_ROLE_TEMPLATE = """
+{% for message in messages %}
+{% if message['role'] == 'user' %}
+user:{{ message['content'] }}
+{% else %}
+{{ message['role'] }}:{{ message['content'] }}
+{% endif %}
+{% endfor %}
+"""
+
+
+def _filtering_render(messages):
+    """Render only system/user/assistant/tool, matching ``_FILTERING_TEMPLATE``."""
+    handled = {"system", "user", "assistant", "tool"}
+    parts = []
+    for message in messages:
+        role = message.get("role")
+        if role not in handled:
+            continue
+        content = message.get("content")
+        if isinstance(content, list):
+            texts = []
+            for part in content:
+                if isinstance(part, str):
+                    texts.append(part)
+                elif isinstance(part, dict) and isinstance(part.get("text"), str):
+                    texts.append(part["text"])
+                elif isinstance(part, dict) and part.get("type") == "image":
+                    texts.append("<image>")
+            content = "".join(texts)
+        parts.append(f"{role}:{content}")
+        if message.get("tool_calls"):
+            parts.append(f"{role}:tool_calls")
+    return "\n".join(parts)
+
+
+def test_role_filter_extracts_qwen_style_roles():
+    assert roles_rendered_by_chat_template(_FILTERING_TEMPLATE) == frozenset(
+        {"system", "user", "assistant", "tool"}
+    )
+
+
+def test_chatml_template_does_not_filter_roles():
+    """ChatML prints ``message['role']`` for every turn, including typos."""
+    assert roles_rendered_by_chat_template(_CHATML_TEMPLATE) is None
+
+
+def test_dynamic_role_allow_list_is_treated_as_a_filter():
+    template = "{% if message.role in allowed %}{{ message.content }}{% endif %}"
+    assert roles_rendered_by_chat_template(template) == frozenset()
+
+
+@pytest.mark.parametrize(
+    "message,expected",
+    [
+        ({"role": "user", "content": "hello"}, True),
+        ({"role": "user", "content": ""}, False),
+        ({"role": "user", "content": "   \n"}, False),
+        ({"role": "user", "content": None}, False),
+        ({"role": "user"}, False),
+        ({"role": "tool", "content": "", "tool_call_id": "call_1"}, False),
+        (
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {"name": "lookup", "arguments": "{}"},
+                    }
+                ],
+            },
+            True,
+        ),
+        (
+            {
+                "role": "user",
+                "content": [{"type": "image", "image_url": "http://example.test/a"}],
+            },
+            True,
+        ),
+        (
+            {"role": "user", "content": [{"type": "text", "text": "  "}]},
+            False,
+        ),
+    ],
+)
+def test_message_payload_ignores_empty_text(message, expected):
+    """Empty and whitespace-only turns are not content that can be dropped."""
+    assert message_has_nonempty_payload(message) is expected
+
+
+def test_known_roles_are_not_probed():
+    calls = 0
+
+    def render_text(messages):
+        nonlocal calls
+        calls += 1
+        return _filtering_render(messages)
+
+    assert_chat_template_rendered_messages(
+        [
+            {"role": "system", "content": "You are terse."},
+            {"role": "user", "content": "hello"},
+            {"role": "assistant", "content": "hi"},
+            {"role": "tool", "content": "result", "tool_call_id": "call_1"},
+        ],
+        _FILTERING_TEMPLATE,
+        render_text,
+    )
+    assert calls == 0
+
+
+def test_chatml_custom_role_is_not_rejected():
+    """A template that emits every role must keep custom roles."""
+
+    def render_text(messages):
+        return "\n".join(
+            f"{message['role']}:{message.get('content')}" for message in messages
+        )
+
+    assert_chat_template_rendered_messages(
+        [{"role": "wizard", "content": "hello"}],
+        _CHATML_TEMPLATE,
+        render_text,
+    )
+
+
+@pytest.mark.parametrize("role", ["usr", "assistan", "USER", "wizard", "", " "])
+def test_unhandled_role_with_text_is_rejected(role):
+    with pytest.raises(VLLMValidationError, match=re.escape(repr(role))) as exc_info:
+        assert_chat_template_rendered_messages(
+            [{"role": role, "content": "hello"}],
+            _FILTERING_TEMPLATE,
+            _filtering_render,
+        )
+    assert exc_info.value.parameter == "messages"
+    assert exc_info.value.value == role
+
+
+def test_middle_turn_typo_names_that_role():
+    with pytest.raises(VLLMValidationError, match="'usr'"):
+        assert_chat_template_rendered_messages(
+            [
+                {"role": "system", "content": "You are terse."},
+                {"role": "usr", "content": "The launch code is TANGERINE-42."},
+                {"role": "user", "content": "What is the launch code?"},
+            ],
+            _FILTERING_TEMPLATE,
+            _filtering_render,
+        )
+
+
+def test_several_dropped_roles_are_all_named():
+    with pytest.raises(VLLMValidationError, match="'usr'") as exc_info:
+        assert_chat_template_rendered_messages(
+            [
+                {"role": "usr", "content": "one"},
+                {"role": "user", "content": "kept"},
+                {"role": "wizard", "content": "two"},
+            ],
+            _FILTERING_TEMPLATE,
+            _filtering_render,
+        )
+    assert exc_info.value.value == ["usr", "wizard"]
+    assert "wizard" in str(exc_info.value)
+
+
+def test_custom_role_that_template_renders_is_kept():
+    def render_text(messages):
+        return "\n".join(
+            f"{message.get('role')}:{message.get('content')}" for message in messages
+        )
+
+    assert_chat_template_rendered_messages(
+        [{"role": "wizard", "content": "hello from a custom role"}],
+        _CUSTOM_ROLE_TEMPLATE,
+        render_text,
+    )
+
+
+def test_role_header_without_content_is_rejected():
+    """Emitting the role token and dropping the text is still data loss."""
+
+    def render_text(messages):
+        return "\n".join(str(message.get("role")) for message in messages)
+
+    with pytest.raises(VLLMValidationError, match="'wizard'"):
+        assert_chat_template_rendered_messages(
+            [{"role": "wizard", "content": "secret"}],
+            _CUSTOM_ROLE_TEMPLATE,
+            render_text,
+        )
+
+
+@pytest.mark.parametrize("content", ["", "   ", None])
+def test_empty_content_unknown_role_is_allowed(content):
+    """No text to lose: an unknown role with empty content is not a 400."""
+
+    def render_text(messages):
+        raise AssertionError("empty messages must not be probed")
+
+    message = {"role": "wizard"}
+    if content is not None:
+        message["content"] = content
+    assert_chat_template_rendered_messages(
+        [message],
+        _FILTERING_TEMPLATE,
+        render_text,
+    )
+
+
+def test_whitespace_only_tool_id_is_allowed():
+    def render_text(messages):
+        raise AssertionError("empty tool results must not be probed")
+
+    assert_chat_template_rendered_messages(
+        [{"role": "tol", "content": " \n", "tool_call_id": "call_1"}],
+        _FILTERING_TEMPLATE,
+        render_text,
+    )
+
+
+def test_unhandled_role_with_only_tool_calls_is_rejected():
+    with pytest.raises(VLLMValidationError, match="'assistan'"):
+        assert_chat_template_rendered_messages(
+            [
+                {
+                    "role": "assistan",
+                    "content": "",
+                    "tool_calls": [
+                        {
+                            "id": "call_1",
+                            "type": "function",
+                            "function": {"name": "lookup", "arguments": "{}"},
+                        }
+                    ],
+                }
+            ],
+            _FILTERING_TEMPLATE,
+            _filtering_render,
+        )
+
+
+def test_unhandled_multimodal_message_is_rejected():
+    with pytest.raises(VLLMValidationError, match="'wizard'"):
+        assert_chat_template_rendered_messages(
+            [
+                {
+                    "role": "wizard",
+                    "content": [
+                        {
+                            "type": "image",
+                            "image_url": "http://example.test/a",
+                        }
+                    ],
+                }
+            ],
+            _FILTERING_TEMPLATE,
+            _filtering_render,
+        )
+
+
+def test_known_role_multimodal_message_is_kept():
+    def render_text(messages):
+        raise AssertionError("handled roles must not be probed")
+
+    assert_chat_template_rendered_messages(
+        [
+            {
+                "role": "user",
+                "content": [{"type": "image", "image_url": "http://example.test/a"}],
+            }
+        ],
+        _FILTERING_TEMPLATE,
+        render_text,
+    )
+
+
+def test_structured_text_unknown_role_is_rejected():
+    with pytest.raises(VLLMValidationError, match="'usr'"):
+        assert_chat_template_rendered_messages(
+            [
+                {
+                    "role": "usr",
+                    "content": [{"type": "text", "text": "hello"}],
+                }
+            ],
+            _FILTERING_TEMPLATE,
+            _filtering_render,
+        )
+
+
+def test_dropped_role_error_is_http_400():
+    with pytest.raises(VLLMValidationError) as exc_info:
+        assert_chat_template_rendered_messages(
+            [{"role": "usr", "content": "hello"}],
+            _FILTERING_TEMPLATE,
+            _filtering_render,
+        )
+    response = create_error_response(exc_info.value)
+    assert response.error.code == 400
+    assert response.error.type == "BadRequestError"
+    assert response.error.param == "messages"
+    assert "usr" in response.error.message
