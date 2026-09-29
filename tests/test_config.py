@@ -1495,19 +1495,40 @@ def test_engram_dp_shared_memory_requires_cpu_offload():
         EngramConfig(cpu_offload=False, dp_shared_memory=True)
 
 
+@pytest.mark.skip_global_cleanup
 @pytest.mark.parametrize(
-    "cpu_offload,dp_size,elastic_ep,expected",
-    [(True, 2, False, True), (False, 2, False, False), (True, 1, False, False)],
+    "cpu_offload,use_thp,dp_shared_memory,dp_size,elastic_ep,expected",
+    [
+        (True, False, None, 2, False, True),
+        (False, False, None, 2, False, False),
+        (True, False, None, 1, False, False),
+        (True, False, None, 2, True, False),
+        # use_thp backs private tables; sharing would silently ignore it.
+        (True, True, None, 2, False, False),
+        (True, True, False, 2, False, False),
+    ],
 )
 def test_engram_dp_shared_memory_defaults_when_supported(
-    cpu_offload, dp_size, elastic_ep, expected
+    cpu_offload, use_thp, dp_shared_memory, dp_size, elastic_ep, expected
 ):
-    """Unset dp_shared_memory enables sharing only for offloaded, non-elastic DP."""
+    """Resolve sharing only where supported, preserving an explicit false."""
     parallel = ParallelConfig(data_parallel_size=dp_size)
     parallel.enable_elastic_ep = elastic_ep
-    config = EngramConfig(cpu_offload=cpu_offload)
+    config = EngramConfig(
+        cpu_offload=cpu_offload,
+        use_thp=use_thp,
+        dp_shared_memory=dp_shared_memory,
+    )
     config.resolve_dp_shared_memory(parallel)
     assert config.dp_shared_memory is expected
+
+
+@pytest.mark.skip_global_cleanup
+def test_engram_thp_rejects_explicit_shared_memory():
+    with pytest.raises(
+        ValueError, match="use_thp requires cpu_offload=True and dp_shared_memory=False"
+    ):
+        EngramConfig(use_thp=True, dp_shared_memory=True)
 
 
 @pytest.mark.parametrize(
