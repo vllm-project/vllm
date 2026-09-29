@@ -909,7 +909,12 @@ class EngineCore:
         return None
 
     def resume_scheduler(self) -> None:
-        """Resume the scheduler and flush any requests queued while paused."""
+        """Resume the scheduler and flush any requests queued while paused.
+
+        A no-op while executor memory is not resident: wake_up resumes once it is.
+        """
+        if self.model_executor.is_sleeping:
+            return
         self.scheduler.set_pause_state(PauseState.UNPAUSED)
 
     def is_scheduler_paused(self) -> bool:
@@ -1602,7 +1607,7 @@ class EngineCoreProc(EngineCore):
             return
         elif request_type == EngineCoreRequestType.ADD:
             req, request_wave = request
-            if self._reject_add_in_shutdown(req):
+            if self._reject_add_in_shutdown(req) or self._reject_add_while_paused(req):
                 return
             self.add_request(req, request_wave)
         elif request_type == EngineCoreRequestType.ABORT:
@@ -1637,6 +1642,14 @@ class EngineCoreProc(EngineCore):
             request.request_id,
         )
         self._send_abort_outputs_to_client([request.request_id], request.client_index)
+        return True
+
+    def _reject_add_while_paused(self, request: Request) -> bool:
+        if self.scheduler.pause_state != PauseState.PAUSED_NEW:
+            return False
+        self._send_finish_outputs_to_client(
+            [request.request_id], request.client_index, FinishReason.PAUSED
+        )
         return True
 
     def _reject_utility_in_shutdown(
@@ -2171,6 +2184,8 @@ class DPEngineCoreProc(EngineCoreProc):
                 )
 
     def resume_scheduler(self):
+        if self.model_executor.is_sleeping:
+            return
         if self.pending_pause or (self.engines_running and self.ignore_start_dp_wave):
             raise RuntimeError(
                 "resume_scheduler called while pause is still in "

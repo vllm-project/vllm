@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Any, cast
 import numpy as np
 import torch
 
+from vllm.exceptions import EnginePausedError
 from vllm.lora.request import LoRARequest
 from vllm.outputs import (
     STREAM_FINISHED,
@@ -676,6 +677,12 @@ class OutputProcessor:
             req_state = self.request_states.get(req_id)
             if req_state is None:
                 # Ignore output for already-aborted request.
+                continue
+            if (
+                engine_core_output.finish_reason == FinishReason.PAUSED
+                and req_state.queue is not None
+            ):
+                req_state.queue.put(EnginePausedError())
                 continue
 
             # 1) Compute stats for this iteration.

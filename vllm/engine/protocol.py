@@ -71,7 +71,7 @@ class EngineClient(ABC):
     def check_admission(  # noqa: B027
         self, n: int = 1, request_id: str | None = None
     ) -> None:
-        """Reject the request up front if it cannot be admitted.
+        """Reject the request up front if it would exceed queue limits.
 
         Called before a response is started so that overload rejections can
         carry an HTTP status, which is not possible once a streaming response

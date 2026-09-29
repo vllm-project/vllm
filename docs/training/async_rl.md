@@ -27,14 +27,11 @@ new requests are admitted while paused:
 | `"wait"` | Allowed to finish before the pause completes | Rejected with HTTP 503 until resume |
 | `"keep"` | Frozen in the queue; they resume when `resume_generation` is called | Accepted and queued |
 
-`"abort"` and `"wait"` treat the pause as a generation boundary, so a request
-arriving while paused is rejected rather than silently carried across it.
-Clients should retry on 503, or on a different instance.
-
-Rejection is scoped to the API server process that received the pause. Where
-several API server processes share the same engine, requests arriving at the
-others are still queued engine-side, so pause every process that fronts the
-engine -- the same rule as the external load balancer note below.
+`"abort"` and `"wait"` treat the pause as a generation boundary: once
+`pause_generation` returns, the engine rejects new requests from every API server
+until `resume_generation` returns, rather than carrying them across the boundary.
+Clients should retry on 503. A request racing the pause call itself may instead be
+treated as in-flight.
 
 The `clear_cache` parameter controls whether to clear the KV cache and prefix cache after pausing.
 

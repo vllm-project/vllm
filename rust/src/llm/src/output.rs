@@ -136,7 +136,7 @@ fn finish_reason_from_engine(
     finish_reason.map(|reason| match reason {
         EngineCoreFinishReason::Stop => FinishReason::Stop(stop_reason),
         EngineCoreFinishReason::Length => FinishReason::Length,
-        EngineCoreFinishReason::Abort => FinishReason::Abort,
+        EngineCoreFinishReason::Abort | EngineCoreFinishReason::Paused => FinishReason::Abort,
         EngineCoreFinishReason::Error => FinishReason::Error,
         EngineCoreFinishReason::Repetition => FinishReason::Repetition(stop_reason),
     })

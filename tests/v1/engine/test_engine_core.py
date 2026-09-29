@@ -25,8 +25,13 @@ from vllm.engine.arg_utils import EngineArgs
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_default_torch_num_threads
 from vllm.v1.core.sched.interface import PauseState
-from vllm.v1.engine import EngineCoreRequest
-from vllm.v1.engine.core import DPEngineCoreProc, EngineCore, EngineCoreProc
+from vllm.v1.engine import EngineCoreRequest, EngineCoreRequestType, FinishReason
+from vllm.v1.engine.core import (
+    DPEngineCoreProc,
+    EngineCore,
+    EngineCoreProc,
+    EngineShutdownState,
+)
 from vllm.v1.executor.abstract import Executor
 from vllm.v1.executor.uniproc_executor import UniProcExecutor
 from vllm.v1.kv_cache_interface import KVCacheConfig
@@ -699,6 +704,49 @@ def _pausable_engine_core_proc() -> EngineCoreProc:
     core.engines_running = False
     core._idle_state_callbacks = []
     return core
+
+
+@pytest.mark.parametrize(
+    "pause_state,rejected",
+    [
+        pytest.param(PauseState.PAUSED_NEW, True, id="abort-or-wait"),
+        pytest.param(PauseState.PAUSED_ALL, False, id="keep"),
+        pytest.param(PauseState.UNPAUSED, False, id="running"),
+    ],
+)
+def test_add_rejected_while_paused_at_a_boundary(pause_state, rejected):
+    """A boundary pause rejects new requests before they reach the scheduler
+    or DP wave state; `keep` queues them across the pause."""
+    core = _pausable_engine_core_proc()
+    core.scheduler.pause_state = pause_state
+    core.shutdown_state = EngineShutdownState.RUNNING
+    core.add_request = MagicMock()
+    core._send_finish_outputs_to_client = MagicMock()
+    request = MagicMock(request_id="r", client_index=1)
+
+    core._handle_client_request(EngineCoreRequestType.ADD, (request, 0))
+
+    if rejected:
+        core.add_request.assert_not_called()
+        core._send_finish_outputs_to_client.assert_called_once_with(
+            ["r"], 1, FinishReason.PAUSED
+        )
+    else:
+        core.add_request.assert_called_once_with(request, 0)
+        core._send_finish_outputs_to_client.assert_not_called()
+
+
+@pytest.mark.parametrize("cls", [EngineCoreProc, DPEngineCoreProc])
+def test_resume_is_noop_while_memory_not_resident(cls):
+    """Unpausing would let the scheduler step against freed memory and admit
+    requests onto it; wake_up resumes once everything is resident."""
+    core = object.__new__(cls)
+    core.model_executor = MagicMock(is_sleeping=True)
+    core.scheduler = MagicMock()
+
+    core.resume_scheduler()
+
+    core.scheduler.set_pause_state.assert_not_called()
 
 
 @pytest.mark.parametrize(

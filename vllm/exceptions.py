@@ -182,8 +182,8 @@ class EnginePausedError(GracefulHTTPError):
     client SDKs retry the request once the engine resumes.
     """
 
-    def __init__(self, mode: str | None = None):
+    def __init__(self):
         super().__init__(
-            f"Generation is paused (mode={mode!r}); retry after resume.",
+            "Generation is paused. Please retry after it resumes.",
             HTTPStatus.SERVICE_UNAVAILABLE,
         )

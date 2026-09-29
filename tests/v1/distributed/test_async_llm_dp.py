@@ -14,6 +14,7 @@ from vllm import SamplingParams
 from vllm.config import VllmConfig
 from vllm.config.parallel import DataParallelBackend
 from vllm.engine.arg_utils import AsyncEngineArgs
+from vllm.exceptions import EnginePausedError
 from vllm.inputs import PromptType
 from vllm.outputs import RequestOutput
 from vllm.platforms import current_platform
@@ -325,8 +326,6 @@ async def test_dp_pause_late_request_does_not_block_drain():
 
     MoE only: wave coordination is enabled iff the model is MoE, so a dense
     model never reaches the coordinator state this exercises.
-
-    Uses `keep`: the only mode that still admits a late request.
     """
     with ExitStack() as after:
         engine_args = _get_dp_pause_engine_args(expert_parallel=True)
@@ -359,7 +358,7 @@ async def test_dp_pause_late_request_does_not_block_drain():
         await long_request
         assert await _poll_flag(engine, False, timeout=30)
 
-        await engine.pause_generation(mode="keep")
+        await engine.pause_generation(mode="abort")
         await engine.wait_for_requests_to_drain(drain_timeout=30)
 
         # Awaiting add_request guarantees the new-request notification has been
@@ -381,12 +380,10 @@ async def test_dp_pause_late_request_does_not_block_drain():
         # paused engines discard the wake and so never report wave completion.
         assert await _poll_flag(engine, False, timeout=60)
 
-        # The late request was held rather than dropped: it completes on resume.
+        # The engine rejected it rather than carrying it across the boundary.
+        with pytest.raises(EnginePausedError):
+            await asyncio.wait_for(collector.get(), timeout=60)
         await engine.resume_generation()
-        while True:
-            out = await asyncio.wait_for(collector.get(), timeout=60)
-            if out.finished:
-                break
 
 
 @pytest.mark.asyncio
@@ -399,8 +396,6 @@ async def test_dp_sleep_late_request_does_not_block_drain():
     the pause case because it is the shape that reaches
     `_drain_requests_for_elastic_ep`, which decides from the same signal
     whether it is safe to scale.
-
-    Uses `keep` for the same reason as the pause variant above.
     """
     with ExitStack() as after:
         engine_args = _get_dp_pause_engine_args(expert_parallel=True)
@@ -415,7 +410,7 @@ async def test_dp_sleep_late_request_does_not_block_drain():
             pass
         assert await _poll_flag(engine, False, timeout=30)
 
-        await engine.sleep(level=1, mode="keep")
+        await engine.sleep(level=1)
         assert await engine.is_sleeping()
 
         collector = await engine.add_request(
@@ -432,12 +427,10 @@ async def test_dp_sleep_late_request_does_not_block_drain():
         # marked them running when it forwarded the wake never hears otherwise.
         assert await _poll_flag(engine, False, timeout=60)
 
+        with pytest.raises(EnginePausedError):
+            await asyncio.wait_for(collector.get(), timeout=60)
         await engine.wake_up()
         assert not await engine.is_sleeping()
-        while True:
-            out = await asyncio.wait_for(collector.get(), timeout=60)
-            if out.finished:
-                break
 
 
 @pytest.mark.asyncio
