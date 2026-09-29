@@ -8,7 +8,7 @@ import pytest
 import torch
 
 from vllm.config import CUDAGraphMode, ParallelConfig
-from vllm.model_executor.layers.attention import pcp as attention_pcp
+from vllm.v1.attention.ops import pcp as attention_pcp
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID, get_dcp_local_seq_lens
 from vllm.v1.worker.gpu import cp_utils as gpu_cp_utils
 from vllm.v1.worker.gpu import pcp_manager as pcp_manager_module
