@@ -1427,11 +1427,20 @@ def test_online_int8_moe_w2_scale_matches_unsharded(monkeypatch) -> None:
     ),
     reason="NVFP4 weight quantization needs a Blackwell (SM100) GPU.",
 )
-@pytest.mark.parametrize("e4m3_max", [None, 256, 448])
-def test_online_nvfp4_quantizes_original_expert_weights(monkeypatch, e4m3_max) -> None:
+@pytest.mark.parametrize(
+    "four_over_six,e4m3_max", [(None, 448), ("0", 448), ("1", 256), ("1", 448)]
+)
+def test_online_nvfp4_quantizes_original_expert_weights(
+    monkeypatch, four_over_six, e4m3_max
+) -> None:
     from flashinfer import fp4_quantize
 
-    monkeypatch.setenv("FLASHINFER_NVFP4_4OVER6", "0" if e4m3_max is None else "1")
+    from vllm.model_executor.layers.quantization.online import nvfp4
+
+    if four_over_six is None:
+        monkeypatch.delenv("FLASHINFER_NVFP4_4OVER6", raising=False)
+    else:
+        monkeypatch.setenv("FLASHINFER_NVFP4_4OVER6", four_over_six)
     monkeypatch.setenv(
         "FLASHINFER_NVFP4_4OVER6_E4M3_USE_256", str(int(e4m3_max == 256))
     )
@@ -1439,13 +1448,22 @@ def test_online_nvfp4_quantizes_original_expert_weights(monkeypatch, e4m3_max) -
     monkeypatch.setenv("FLASHINFER_NVFP4_4OVER6_ERR_USE_FAST_MATH", "1")
     monkeypatch.setenv("FLASHINFER_DISABLE_FP4_QUANT_FAST_MATH", "0")
     monkeypatch.setenv("TRTLLM_DISABLE_FP4_QUANT_FAST_MATH", "0")
+    # Numerical agreement alone would not catch an unintended backend switch.
+    unexpected_quantizer = (
+        "scaled_fp4_quant" if four_over_six == "1" else "flashinfer_fp4_quantize"
+    )
+    monkeypatch.setattr(
+        nvfp4,
+        unexpected_quantizer,
+        Mock(side_effect=AssertionError(f"Unexpected call to {unexpected_quantizer}")),
+    )
     torch.manual_seed(0)
     weight = torch.randn(2, 32, 32, device="cuda", dtype=torch.bfloat16)
     weight[1, -1, -1] = 20.75
 
     quantized, block_scale, global_decode_scale = _quantize_moe_weight_to_nvfp4(weight)
     amax = weight.float().abs().amax((1, 2))
-    if e4m3_max is None:
+    if four_over_six != "1":
         global_encode_scale = (6.0 * 448) / amax
         expected_decode_scale = global_encode_scale.reciprocal()
     else:
@@ -1454,7 +1472,7 @@ def test_online_nvfp4_quantizes_original_expert_weights(monkeypatch, e4m3_max) -
     torch.testing.assert_close(
         global_decode_scale, expected_decode_scale, rtol=0, atol=0
     )
-    quantize = scaled_fp4_quant if e4m3_max is None else fp4_quantize
+    quantize = fp4_quantize if four_over_six == "1" else scaled_fp4_quant
     expected = [
         quantize(
             expert_weight,

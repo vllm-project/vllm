@@ -4,6 +4,7 @@
 import torch
 from torch.nn import Module
 
+from vllm._custom_ops import scaled_fp4_quant
 from vllm.model_executor.layers.fused_moe import RoutedExperts
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
@@ -69,7 +70,13 @@ def _quantize_moe_weight_to_nvfp4(
     # before the group-16 scale and E2M1 values are selected.
     weight = weight.contiguous()
     quantized_experts = [
-        flashinfer_fp4_quantize(
+        scaled_fp4_quant(
+            expert_weight,
+            expert_scale,
+            is_sf_swizzled_layout=False,
+        )
+        if four_over_six is None
+        else flashinfer_fp4_quantize(
             expert_weight,
             expert_scale,
             is_sf_swizzled_layout=False,

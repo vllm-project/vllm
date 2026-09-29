@@ -55,10 +55,10 @@ vllm serve Qwen/Qwen3.5-35B-A3B --quantization mxfp4 \
 
 ## NVFP4 quantization
 
-Online `nvfp4_per_token` uses FlashInfer quantization for MoE weights and
-per-token activations.
-It honors FlashInfer's quantization settings, including adaptive four-over-six
-block scaling:
+Online `nvfp4_per_token` keeps the native vLLM MoE weight quantizer by default.
+Setting `FLASHINFER_NVFP4_4OVER6=1` switches weight quantization to FlashInfer
+and enables adaptive four-over-six block scaling for weights and per-token
+activations:
 
 ```bash
 FLASHINFER_NVFP4_4OVER6=1 \
