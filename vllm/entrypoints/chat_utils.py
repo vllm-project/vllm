@@ -1810,6 +1810,11 @@ PART_TYPES_TO_SKIP_NONE_CONTENT = (
     "refusal",
 )
 
+# Content part types parsed as text rather than multimodal data.
+TEXT_PART_TYPES = frozenset(
+    {"text", "input_text", "output_text", "refusal", "thinking"}
+)
+
 
 def _parse_chat_message_content_parts(
     role: str,
@@ -1904,7 +1909,7 @@ def _parse_chat_message_content_part(
         )
         return None
 
-    if part_type in ("text", "input_text", "output_text", "refusal", "thinking"):
+    if part_type in TEXT_PART_TYPES:
         str_content = cast(str, content)
         _reject_reserved_placeholder_in_text(str_content, mm_parser.model_config)
         if wrap_dicts:
