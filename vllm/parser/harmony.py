@@ -116,6 +116,7 @@ class HarmonyParser(DelegatingParser):
 
         # For error recovery
         self._current_message_tokens: list[int] = []
+        self._parser_failed = False
 
     @property
     def _harmony_parser(self) -> StreamableParser:
@@ -162,6 +163,7 @@ class HarmonyParser(DelegatingParser):
         self._parser = None
         self._num_processed_messages = 0
         self._current_message_tokens.clear()
+        self._parser_failed = False
 
         if msg is None:
             return segments
@@ -335,7 +337,18 @@ class HarmonyParser(DelegatingParser):
         segments: list[Segment] = []
         reasoning_token_count = 0
         for token_id in token_ids:
-            self._harmony_parser.process(token_id)
+            if self._parser_failed:
+                break
+
+            try:
+                self._harmony_parser.process(token_id)
+            except HarmonyError:
+                self._parser_failed = True
+                logger.warning(
+                    "Harmony parser failed; ignoring the remaining output tokens."
+                )
+                break
+
             channel = self._harmony_parser.current_channel
             recipient = self._normalize_recipient(
                 self._harmony_parser.current_recipient
