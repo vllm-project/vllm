@@ -849,16 +849,9 @@ class Glm5NextModel(nn.Module):
                 ),
                 0,
             )
-            num_fused_shared = (
-                self.config.n_shared_experts
-                if self.is_fused_shared_expert_enabled
-                else 0
+            num_fused_shared = _num_fused_shared_experts(
+                self.config.n_shared_experts, self.is_fused_shared_expert_enabled
             )
-            if num_fused_shared > 1:
-                raise NotImplementedError(
-                    "Fused shared experts load one shared expert per layer; "
-                    f"the checkpoint has {num_fused_shared}."
-                )
             expert_params_mapping = fused_moe_make_expert_params_mapping(
                 self,
                 ckpt_gate_proj_name="gate_proj",
@@ -893,13 +886,8 @@ class Glm5NextModel(nn.Module):
                 # Models trained using ColossalAI may include these tensors in
                 # the checkpoint. Skip them.
                 continue
-            if self.is_fused_shared_expert_enabled and "mlp.shared_experts." in name:
-                # The fused MoE holds the shared expert in the slot after the
-                # routed ones.
-                name = name.replace(
-                    "mlp.shared_experts.",
-                    f"mlp.experts.{self.config.n_routed_experts}.",
-                )
+            if self.is_fused_shared_expert_enabled:
+                name = _fused_shared_expert_name(name, self.config.n_routed_experts)
 
             # Handle FP8 indexer WK: dequantize to BF16 for fusion with
             # weights_proj into wk_weights_proj.
@@ -1258,6 +1246,28 @@ def get_spec_layer_idx_from_weight_name(
             ) or weight_name.startswith(f"layers.{layer_idx + i}."):
                 return layer_idx + i
     return None
+
+
+def _num_fused_shared_experts(n_shared_experts: int | None, enabled: bool) -> int:
+    """Expert slots the fused MoE appends for the shared expert; must match the
+    ``num_fused_shared_experts`` that ``FusedMoE`` allocates."""
+    if not enabled or n_shared_experts is None:
+        return 0
+    if n_shared_experts > 1:
+        raise NotImplementedError(
+            "Fused shared-expert loading supports only 1 shared expert per "
+            f"layer, but config.n_shared_experts is {n_shared_experts}. Set "
+            "VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS=0 to run the shared "
+            "experts as a separate MLP."
+        )
+    return n_shared_experts
+
+
+def _fused_shared_expert_name(name: str, n_routed_experts: int) -> str:
+    """Point a checkpoint ``mlp.shared_experts.*`` tensor at the fused MoE's
+    shared-expert slot, which follows the routed experts; other names are
+    returned unchanged."""
+    return name.replace("mlp.shared_experts.", f"mlp.experts.{n_routed_experts}.", 1)
 
 
 def _try_load_fp8_indexer_wk(name, tensor, buf, params_dict, loaded_params):

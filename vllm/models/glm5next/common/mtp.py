@@ -33,6 +33,8 @@ from .model import (
     Glm5NextDecoderLayer,
     Glm5NextMLAAttention,
     Glm5NextMoE,
+    _fused_shared_expert_name,
+    _num_fused_shared_experts,
     _try_load_fp8_attn_proj,
     _try_load_fp8_indexer_wk,
     get_spec_layer_idx_from_weight_name,
@@ -304,14 +306,9 @@ class Glm5NextMTP(nn.Module, DeepseekV2MixtureOfExperts):
             ("wk_weights_proj", "wk", 0),
             ("wk_weights_proj", "weights_proj", 1),
         ]
-        num_fused_shared = (
-            self.config.n_shared_experts if self.is_fused_shared_expert_enabled else 0
+        num_fused_shared = _num_fused_shared_experts(
+            self.config.n_shared_experts, self.is_fused_shared_expert_enabled
         )
-        if num_fused_shared > 1:
-            raise NotImplementedError(
-                "Fused shared experts load one shared expert per layer; "
-                f"the checkpoint has {num_fused_shared}."
-            )
         expert_params_mapping = fused_moe_make_expert_params_mapping(
             self,
             ckpt_gate_proj_name="gate_proj",
@@ -342,13 +339,8 @@ class Glm5NextMTP(nn.Module, DeepseekV2MixtureOfExperts):
             if spec_layer is None:
                 continue
             name = self._rewrite_spec_layer_name(spec_layer, name)
-            if self.is_fused_shared_expert_enabled and "mlp.shared_experts." in name:
-                # The fused MoE holds the shared expert in the slot after the
-                # routed ones.
-                name = name.replace(
-                    "mlp.shared_experts.",
-                    f"mlp.experts.{self.config.n_routed_experts}.",
-                )
+            if self.is_fused_shared_expert_enabled:
+                name = _fused_shared_expert_name(name, self.config.n_routed_experts)
 
             if _try_load_fp8_indexer_wk(
                 name,
