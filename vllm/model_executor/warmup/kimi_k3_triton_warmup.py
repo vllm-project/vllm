@@ -20,11 +20,8 @@ logger = init_logger(__name__)
 
 
 def _get_kda_layer(worker: Worker) -> KimiK3DeltaAttention | None:
-    # Model construction (vllm/models/kimi_k3/nvidia/model.py) imports kda at
-    # module level for Kimi-K3 models, so it is already in sys.modules by the
-    # time warmup runs. Avoid importing it here so other models do not pull in
-    # the Kimi package, whose import has filesystem side effects (numba cache,
-    # #59250).
+    # Kimi model construction already imports kda. Avoid importing it here:
+    # the Kimi package initializes a numba cache even for non-Kimi models.
     kda = sys.modules.get("vllm.models.kimi_k3.nvidia.kda")
     if kda is None:
         return None

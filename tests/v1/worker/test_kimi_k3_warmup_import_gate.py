@@ -1,69 +1,86 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""The Kimi-K3 warmup must not import Kimi model code for non-Kimi models.
+"""Kimi warmup must avoid model imports and preserve dispatch for loaded layers."""
 
-kernel_warmup() runs kimi_k3_triton_warmup() for every model.
-_get_kda_layer() must gate on sys.modules instead of importing the Kimi
-package, whose import chain ends in a module-level numba @njit(cache=True)
-that requires a writable cache directory (#59250).
-"""
-
+import builtins
 import sys
 from types import SimpleNamespace
+from unittest.mock import Mock
 
-from vllm.model_executor.warmup.kimi_k3_triton_warmup import _get_kda_layer
+import pytest
+
+from vllm.model_executor.warmup import kimi_k3_triton_warmup as warmup
+
+pytestmark = pytest.mark.skip_global_cleanup
 
 _KDA_MODULE = "vllm.models.kimi_k3.nvidia.kda"
 
 
-def test_get_kda_layer_returns_none_without_importing_kimi():
-    """A non-Kimi worker must not trigger any Kimi import."""
-    saved = sys.modules.pop(_KDA_MODULE, None)
-    try:
-        worker = SimpleNamespace(
-            model_runner=SimpleNamespace(
-                compilation_config=SimpleNamespace(static_forward_context={})
-            )
-        )
-        modules_before = set(sys.modules)
-        assert _get_kda_layer(worker) is None
-        assert not set(sys.modules) - modules_before
-    finally:
-        if saved is not None:
-            sys.modules[_KDA_MODULE] = saved
+class FakeKda:
+    pass
 
 
-def test_get_kda_layer_returns_none_without_static_context(monkeypatch):
-    """Even with kda loaded (Kimi-K3 deployment), a non-dict static context
-    still yields None."""
+@pytest.fixture
+def warmup_calls(monkeypatch):
+    original_import = builtins.__import__
 
-    class FakeKda:
-        pass
+    def reject_kimi_import(name, *args, **kwargs):
+        if name.startswith("vllm.models.kimi_k3"):
+            pytest.fail(f"Warmup must not import Kimi model code: {name}")
+        return original_import(name, *args, **kwargs)
 
-    monkeypatch.setitem(
-        sys.modules, _KDA_MODULE, SimpleNamespace(KimiK3DeltaAttention=FakeKda)
-    )
-    worker = SimpleNamespace(
-        model_runner=SimpleNamespace(compilation_config=SimpleNamespace())
-    )
-    assert _get_kda_layer(worker) is None
+    monkeypatch.setattr(builtins, "__import__", reject_kimi_import)
+    monkeypatch.setattr(warmup.current_platform, "is_cuda", lambda: True)
+    attn_res, recurrent_kda = Mock(), Mock()
+    monkeypatch.setattr(warmup, "_warm_attn_res", attn_res)
+    monkeypatch.setattr(warmup, "_warm_recurrent_kda", recurrent_kda)
+    return attn_res, recurrent_kda
 
 
-def test_get_kda_layer_finds_kda_layer_when_module_loaded(monkeypatch):
-    """With kda loaded (Kimi-K3 deployment), the KDA layer is still found."""
-
-    class FakeKda:
-        pass
-
-    fake_layer = FakeKda()
-    monkeypatch.setitem(
-        sys.modules, _KDA_MODULE, SimpleNamespace(KimiK3DeltaAttention=FakeKda)
-    )
-    worker = SimpleNamespace(
+def _worker(static_context):
+    return SimpleNamespace(
         model_runner=SimpleNamespace(
-            compilation_config=SimpleNamespace(
-                static_forward_context={"kda": fake_layer, "other": object()}
-            )
-        )
+            compilation_config=SimpleNamespace(static_forward_context=static_context)
+        ),
+        model_config=SimpleNamespace(dtype=object()),
     )
-    assert _get_kda_layer(worker) is fake_layer
+
+
+def test_non_kimi_warmup_does_not_import_model_code(monkeypatch, warmup_calls):
+    """Non-Kimi startup must not trigger the import-time numba cache requirement."""
+    monkeypatch.delitem(sys.modules, _KDA_MODULE, raising=False)
+
+    warmup.kimi_k3_triton_warmup(_worker({}))
+
+    for callback in warmup_calls:
+        callback.assert_not_called()
+
+
+@pytest.mark.parametrize("static_context", [None, {"other": object()}])
+def test_loaded_module_without_kda_layer_skips_warmup(
+    monkeypatch, warmup_calls, static_context
+):
+    """A previously imported Kimi module alone must not trigger kernel warmup."""
+    monkeypatch.setitem(
+        sys.modules, _KDA_MODULE, SimpleNamespace(KimiK3DeltaAttention=FakeKda)
+    )
+
+    warmup.kimi_k3_triton_warmup(_worker(static_context))
+
+    for callback in warmup_calls:
+        callback.assert_not_called()
+
+
+def test_loaded_kda_layer_preserves_warmup_dispatch(monkeypatch, warmup_calls):
+    """Kimi models still warm both kernel families using the matching layer."""
+    layer = FakeKda()
+    monkeypatch.setitem(
+        sys.modules, _KDA_MODULE, SimpleNamespace(KimiK3DeltaAttention=FakeKda)
+    )
+    worker = _worker({"other": object(), "kda": layer})
+
+    warmup.kimi_k3_triton_warmup(worker)
+
+    attn_res, recurrent_kda = warmup_calls
+    attn_res.assert_called_once_with(worker)
+    recurrent_kda.assert_called_once_with(layer, worker.model_config.dtype)
