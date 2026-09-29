@@ -31,6 +31,22 @@ Then query the endpoint to get the latest metrics from the server:
     ...
     ```
 
+## Filtering Metrics
+
+The endpoint accepts repeated `name[]` query parameters to return only selected
+metric samples:
+
+```bash
+curl -sG http://localhost:8000/metrics \
+  --data-urlencode 'name[]=vllm:num_requests_waiting' \
+  --data-urlencode 'name[]=vllm:prompt_tokens_total'
+```
+
+The values must be sample names. Counters use the `_total` suffix. Histograms
+must request the desired `_bucket`, `_sum`, or `_count` samples individually.
+Requests without `name[]` continue to return all metrics, while unknown names
+return no metric samples with a `200 OK` response.
+
 The following metrics are exposed:
 
 ## General Metrics
