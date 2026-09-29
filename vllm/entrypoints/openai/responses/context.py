@@ -375,6 +375,7 @@ class ParsableContext(ConversationContext):
                         tool_calls or [], self.request
                     ),
                     tools=self.request.tools,
+                    incomplete=completion.finish_reason == "length",
                 )
             )
         elif completion.text:
@@ -382,7 +383,9 @@ class ParsableContext(ConversationContext):
                 ResponseOutputMessage(
                     type="message",
                     id=f"msg_{random_uuid()}",
-                    status="completed",
+                    status="incomplete"
+                    if completion.finish_reason == "length"
+                    else "completed",
                     role="assistant",
                     content=[
                         ResponseOutputText(

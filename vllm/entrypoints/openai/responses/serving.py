@@ -1034,6 +1034,7 @@ class OpenAIServingResponses(GenerateBaseServing):
                 tool_calls=maybe_filter_parallel_tool_calls(tool_calls or [], request),
                 logprobs=logprobs,
                 tools=request.tools,
+                incomplete=final_output.finish_reason == "length",
             )
 
         # Fallback when no parser is configured
@@ -1051,7 +1052,9 @@ class OpenAIServingResponses(GenerateBaseServing):
                 if final_output.text
                 else [],
                 role="assistant",
-                status="completed",
+                status="incomplete"
+                if final_output.finish_reason == "length"
+                else "completed",
                 type="message",
             )
         ]
@@ -1194,6 +1197,7 @@ class OpenAIServingResponses(GenerateBaseServing):
         ],
     ) -> AsyncGenerator[StreamingResponsesResponse, None]:
         processor = SimpleStreamingEventProcessor(tools=request.tools)
+        finish_reason = None
 
         hide_stream_metadata = not request.include_reasoning and self.parser is not None
 
@@ -1217,6 +1221,7 @@ class OpenAIServingResponses(GenerateBaseServing):
                 continue
 
             output = ctx.last_output.outputs[0]
+            finish_reason = output.finish_reason
             self._raise_if_error(output.finish_reason, request.request_id)
             delta_text = output.text
             delta_token_ids = as_list(output.token_ids)
@@ -1250,7 +1255,7 @@ class OpenAIServingResponses(GenerateBaseServing):
                 for event in processor.emit_delta(dm, output, _get_logprobs):
                     yield _increment_sequence_number_and_return(event)
 
-        for event in processor.close_current():
+        for event in processor.close_current(incomplete=finish_reason == "length"):
             yield _increment_sequence_number_and_return(event)
 
     async def _process_harmony_streaming_events(
