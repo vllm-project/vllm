@@ -605,32 +605,6 @@ def test_checkpoint_quantization_rejects_online_shorthand(tmp_path) -> None:
         ModelConfig(model=str(tmp_path), quantization="fp8_per_channel")
 
 
-def test_nvfp4_per_token_backend_contract() -> None:
-    from vllm.model_executor.layers.fused_moe.experts.flashinfer_cutedsl_moe import (
-        FlashInferCuteDSLExperts,
-    )
-    from vllm.model_executor.layers.fused_moe.experts.flashinfer_cutlass_moe import (
-        FlashInferExperts,
-    )
-    from vllm.model_executor.layers.fused_moe.experts.marlin_moe import MarlinExperts
-    from vllm.model_executor.layers.fused_moe.experts.trtllm_nvfp4_moe import (
-        TrtLlmNvFp4ExpertsModular,
-        TrtLlmNvFp4ExpertsMonolithic,
-    )
-    from vllm.model_executor.layers.quantization.utils.quant_utils import (
-        kNvfp4DynamicToken,
-        kNvfp4Static,
-    )
-
-    scheme = (kNvfp4Static, kNvfp4DynamicToken)
-    assert TrtLlmNvFp4ExpertsMonolithic._supports_quant_scheme(*scheme)
-    assert TrtLlmNvFp4ExpertsModular._supports_quant_scheme(*scheme)
-    assert FlashInferCuteDSLExperts._supports_quant_scheme(*scheme)
-    assert FlashInferCuteDSLExperts._supports_no_act_and_mul()
-    assert not FlashInferExperts._supports_quant_scheme(*scheme)
-    assert not MarlinExperts._supports_quant_scheme(*scheme)
-
-
 @pytest.mark.parametrize("per_token_activation", [False, True])
 @pytest.mark.parametrize("input_dtype", [torch.bfloat16, torch.float16])
 def test_nvfp4_one_sided_sizes_dispatched_activations(
@@ -1510,15 +1484,15 @@ def test_online_nvfp4_quantizes_original_expert_weights(monkeypatch, e4m3_max) -
     ),
     reason="Per-token NVFP4 quantization needs a Blackwell (SM100) GPU.",
 )
-@pytest.mark.parametrize("e4m3_max", [256, 448])
+@pytest.mark.parametrize("e4m3_max", [None, 256, 448])
 def test_online_nvfp4_per_token_4over6_scale(monkeypatch, e4m3_max):
     from flashinfer import SfLayout, nvfp4_quantize
 
-    from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
-        quantize_nvfp4_per_token_input,
+    from vllm.model_executor.layers.fused_moe.experts.trtllm_nvfp4_moe import (
+        TrtLlmNvFp4ExpertsBase,
     )
 
-    monkeypatch.setenv("FLASHINFER_NVFP4_4OVER6", "1")
+    monkeypatch.setenv("FLASHINFER_NVFP4_4OVER6", "0" if e4m3_max is None else "1")
     monkeypatch.setenv(
         "FLASHINFER_NVFP4_4OVER6_E4M3_USE_256", str(int(e4m3_max == 256))
     )
@@ -1528,10 +1502,11 @@ def test_online_nvfp4_per_token_4over6_scale(monkeypatch, e4m3_max):
     torch.manual_seed(0)
     x = torch.randn(17, 64, device="cuda", dtype=torch.bfloat16)
     x[0].zero_()
-    actual = quantize_nvfp4_per_token_input(x)
+    experts = object.__new__(TrtLlmNvFp4ExpertsBase)
+    actual = experts._quantize_per_token_input(x)
     expected = nvfp4_quantize(
         x,
-        1.0 / (6.0 * e4m3_max),
+        1.0 / (6.0 * (e4m3_max or 448)),
         sfLayout=SfLayout.layout_linear,
         per_token_activation=True,
     )

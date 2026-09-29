@@ -24,7 +24,6 @@ from vllm.model_executor.layers.fused_moe.utils import fi_moe_largest_bucket
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     activation_to_flashinfer_int,
     has_flashinfer_situ_activation,
-    quantize_nvfp4_per_token_input,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
@@ -256,6 +255,28 @@ class TrtLlmNvFp4ExpertsBase:
     def expects_unquantized_inputs(self) -> bool:
         return self.per_token_activation
 
+    def _quantize_per_token_input(
+        self, hidden_states: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """NVFP4-quantize activations with a per-token global scale.
+
+        Returns ``(packed_fp4, block_scale, per_token_scale)``.
+        """
+        from flashinfer import SfLayout, nvfp4_quantize
+        from flashinfer.quantization.nvfp4_quantization_utils import (
+            current_nvfp4_4over6_config,
+            nvfp4_e4m3_max,
+        )
+
+        e4m3_max = nvfp4_e4m3_max(current_nvfp4_4over6_config())
+        hs_fp4, hs_block_scale, per_token_scale = nvfp4_quantize(
+            hidden_states,
+            1.0 / (e4m3_max * 6.0),
+            sfLayout=SfLayout.layout_linear,
+            per_token_activation=True,
+        )
+        return hs_fp4, hs_block_scale, per_token_scale
+
     def _get_chunk_size(self) -> int:
         MAX_GRID_Y = 65535
         MAX_TILE_TOKENS_DIM = 128
@@ -341,9 +362,9 @@ class TrtLlmNvFp4ExpertsModular(TrtLlmNvFp4ExpertsBase, mk.FusedMoEExpertsModula
 
         # Per-token: input is unquantized, quantize it here. Otherwise it was
         # already quantized in prepare() with the static global scale.
-        if self.expects_unquantized_inputs:
+        if self.per_token_activation:
             hidden_states, block_scale, per_token_scale = (
-                quantize_nvfp4_per_token_input(hidden_states)
+                self._quantize_per_token_input(hidden_states)
             )
         else:
             block_scale, per_token_scale = a1q_scale, None
@@ -417,7 +438,7 @@ class TrtLlmNvFp4ExpertsModular(TrtLlmNvFp4ExpertsBase, mk.FusedMoEExpertsModula
     ) -> UnfinalizedMoEOutput | None:
         assert self._supports_activation(activation)
         # Per-token defers input quant to _invoke_kernel, so a1q_scale is None.
-        assert a1q_scale is not None or self.expects_unquantized_inputs
+        assert a1q_scale is not None or self.per_token_activation
 
         # DeepEP produces int64 indexes.
         topk_ids = topk_ids.to(dtype=torch.int32)
@@ -519,7 +540,7 @@ class TrtLlmNvFp4ExpertsMonolithic(
         import flashinfer
 
         assert self._supports_activation(activation)
-        assert a1q_scale is not None or self.expects_unquantized_inputs
+        assert a1q_scale is not None or self.per_token_activation
         assert self.quant_config.w1_scale is not None
         assert self.quant_config.w2_scale is not None
         assert (
@@ -531,9 +552,9 @@ class TrtLlmNvFp4ExpertsMonolithic(
         )
 
         # Per-token: input is unquantized, quantize it here (see modular apply).
-        if self.expects_unquantized_inputs:
+        if self.per_token_activation:
             hidden_states, block_scale, per_token_scale = (
-                quantize_nvfp4_per_token_input(hidden_states)
+                self._quantize_per_token_input(hidden_states)
             )
         else:
             block_scale, per_token_scale = a1q_scale, None

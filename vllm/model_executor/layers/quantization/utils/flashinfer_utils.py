@@ -14,16 +14,6 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
-def get_nvfp4_per_token_base_global_scale() -> float:
-    """Return the per-token base scale for FlashInfer's NVFP4 recipe."""
-    from flashinfer.quantization.nvfp4_quantization_utils import (
-        current_nvfp4_4over6_config,
-        nvfp4_e4m3_max,
-    )
-
-    return 1.0 / (nvfp4_e4m3_max(current_nvfp4_4over6_config()) * 6.0)
-
-
 def activation_to_flashinfer_int(activation: MoEActivation) -> int:
     return activation_to_flashinfer_type(activation).value
 
@@ -58,20 +48,6 @@ def activation_to_flashinfer_type(activation: MoEActivation) -> "ActivationType"
         MoEActivation.RELU2_NO_MUL: ActivationType.Relu2,
     }
     return ACTIVATION_TO_FI_ACTIVATION[activation]
-
-
-def quantize_nvfp4_per_token_input(
-    hidden_states: torch.Tensor,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Quantize NVFP4 activations with one FP32 decode scale per token."""
-    from flashinfer import SfLayout, nvfp4_quantize
-
-    return nvfp4_quantize(
-        hidden_states,
-        get_nvfp4_per_token_base_global_scale(),
-        sfLayout=SfLayout.layout_linear,
-        per_token_activation=True,
-    )
 
 
 def swap_w13_to_w31(x: torch.Tensor) -> torch.Tensor:
@@ -288,7 +264,7 @@ def align_fp4_moe_weights_for_fi(
     return padded_w13, padded_w13_scale, padded_w2, padded_w2_scale, padded_intermediate
 
 
-def align_fp4_moe_hidden_dim_for_fi(
+def align_trtllm_fp4_moe_hidden_dim_for_fi(
     w13: torch.Tensor,
     w13_scale: torch.Tensor,
     w2: torch.Tensor,
@@ -303,7 +279,7 @@ def align_fp4_moe_hidden_dim_for_fi(
         return w13, w13_scale, w2, w2_scale, hidden_size
 
     logger.warning_once(
-        "Padding hidden size from %d to %d for FlashInfer NVFP4 MoE weights. "
+        "Padding hidden size from %d to %d for TRTLLM NVFP4 MoE weights. "
         "This requires activation slicing at runtime and may cause "
         "performance degradation.",
         hidden_size,

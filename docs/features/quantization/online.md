@@ -71,8 +71,8 @@ vllm serve <model> --quantization nvfp4_per_token
 
 `FLASHINFER_NVFP4_4OVER6_E4M3_USE_256=1` selects 256 instead of 448 as the
 4/6 global-scale normalization bound. Weight quantization and both activation
-quantizations use the selected bound with the FlashInfer TRTLLM and CuTe MoE
-backends. With 4/6 disabled, they use standard NVFP4 scaling with the 448 bound.
+quantizations use the selected bound with the FlashInfer TRTLLM MoE backend.
+With 4/6 disabled, they use standard NVFP4 scaling with the 448 bound.
 
 These are FlashInfer process settings. Configure them consistently on all
 inference processes before model loading and CUDA graph capture. Ray workers
