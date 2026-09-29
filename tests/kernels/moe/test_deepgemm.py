@@ -168,10 +168,14 @@ def test_block_fp8_padding_on_graph_replay(num_tokens, with_metadata, monkeypatc
     import vllm.model_executor.layers.fused_moe.experts.deep_gemm_moe as impl
     from vllm.utils.deep_gemm import DeepGemmQuantScaleFMT
 
-    if not impl.current_platform.is_device_capability_family(100):
-        pytest.skip("Prefix-sum FP8 dispatch requires SM10.x")
-    if DeepGemmQuantScaleFMT.from_oracle() != DeepGemmQuantScaleFMT.UE8M0:
-        pytest.skip("Packed activation scales required")
+    if not (
+        impl.current_platform.is_device_capability_family(90)
+        or (
+            impl.current_platform.is_device_capability_family(100)
+            and DeepGemmQuantScaleFMT.from_oracle() == DeepGemmQuantScaleFMT.UE8M0
+        )
+    ):
+        pytest.skip("Prefix-sum FP8 dispatch requires SM90 or SM10.x")
 
     torch.manual_seed(0)
     e, n, k, topk = 8, 1024, 512, 2
@@ -256,6 +260,49 @@ def test_block_fp8_padding_on_graph_replay(num_tokens, with_metadata, monkeypatc
         torch.accelerator.synchronize()
         torch.testing.assert_close(variants[0][1], variants[1][1], rtol=0, atol=0)
         assert torch.isfinite(variants[1][1]).all()
+
+
+@pytest.mark.parametrize(("n", "k"), [(2048, 512), (512, 1024)])
+@pytest.mark.skipif(not is_deep_gemm_supported(), reason="Requires deep_gemm kernels")
+def test_deepgemm_prefix_sum_leaves_unused_capacity_untouched(n, k):
+    """Both projection shapes skip unused tiles as counts change on replay."""
+    from vllm.platforms import current_platform
+    from vllm.utils.deep_gemm import (
+        m_grouped_fp8_gemm_nt_contiguous,
+        mk_alignment_scope,
+    )
+
+    if not (
+        current_platform.is_device_capability_family(90)
+        or current_platform.is_device_capability_family(100)
+    ):
+        pytest.skip("Requires SM90 or SM10.x")
+
+    capacity, experts, alignment = 512, 4, 128
+    x = torch.randn(capacity, k, device="cuda", dtype=torch.bfloat16) / 10
+    aq, scales = per_token_group_quant_fp8(x, 128, use_ue8m0=True)
+    w, _, ws, _ = make_block_quant_fp8_weights(experts, n // 2, k, BLOCK_SIZE)
+    ends = torch.tensor([0, 1, 128, 129], device="cuda", dtype=torch.int32)
+    output = torch.empty(capacity, n, device="cuda", dtype=torch.bfloat16)
+
+    def invoke():
+        with mk_alignment_scope(alignment):
+            m_grouped_fp8_gemm_nt_contiguous(
+                (aq, scales), (w, ws), output, ends, use_psum_layout=True
+            )
+
+    invoke()
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        invoke()
+    for bounds, allocated_end in (([0, 1, 128, 129], 256), ([0] * 4, 0)):
+        ends.copy_(torch.tensor(bounds, device="cuda", dtype=torch.int32))
+        output.fill_(91)
+        graph.replay()
+        torch.accelerator.synchronize()
+        assert torch.all(output[allocated_end:] == 91)
+        if allocated_end:
+            assert torch.all(output[[0, 128]] != 91)
 
 
 def run_single_case(m, n, k, topk, num_experts, block_size):
