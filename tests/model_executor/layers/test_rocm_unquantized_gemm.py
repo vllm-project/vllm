@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import sys
+import types
 from unittest.mock import MagicMock
 
 import pytest
@@ -202,3 +204,114 @@ def test_rocm_unquantized_gemm_gfx950_wvsplitkrc_path(monkeypatch):
     x_view = wvsplitkrc_mock.call_args.args[0]
     assert x_view.is_contiguous()
     assert torch.allclose(out, ref, atol=1e-3, rtol=1e-3)
+
+
+def _patch_rocm_skinny_platform(monkeypatch):
+    monkeypatch.setattr(utils, "use_aiter_triton_gemm", lambda *args: False)
+    monkeypatch.setattr(utils.envs, "VLLM_ROCM_USE_SKINNY_GEMM", True)
+    monkeypatch.setattr("vllm.platforms.rocm.on_gfx1x", lambda: False)
+    monkeypatch.setattr("vllm.platforms.rocm.on_gfx9", lambda: True)
+    monkeypatch.setattr("vllm.platforms.rocm.on_gfx950", lambda: False)
+    monkeypatch.setattr("vllm.platforms.rocm.on_gfx1250", lambda: False)
+    monkeypatch.setattr(utils, "num_compute_units", lambda: 120)
+
+
+def _patch_fake_tuned_gemm(monkeypatch, **attrs):
+    """Install a stand-in `aiter.tuned_gemm` so no aiter build is needed."""
+    tuned_gemm = types.ModuleType("aiter.tuned_gemm")
+    for name, value in attrs.items():
+        setattr(tuned_gemm, name, value)
+    aiter_pkg = types.ModuleType("aiter")
+    aiter_pkg.tuned_gemm = tuned_gemm
+    monkeypatch.setitem(sys.modules, "aiter", aiter_pkg)
+    monkeypatch.setitem(sys.modules, "aiter.tuned_gemm", tuned_gemm)
+    return tuned_gemm
+
+
+def _decode_branch_mocks(monkeypatch, capturing: bool):
+    _patch_rocm_skinny_platform(monkeypatch)
+    monkeypatch.setattr(torch.cuda, "is_current_stream_capturing", lambda: capturing)
+    monkeypatch.setattr(utils, "use_aiter_decode_gemm", lambda *args: True)
+    tgemm = MagicMock()
+    tgemm.mm.side_effect = lambda x_view, w, b: torch.nn.functional.linear(x_view, w, b)
+    _patch_fake_tuned_gemm(monkeypatch, tgemm=tgemm)
+    wvsplitk_mock = MagicMock(side_effect=lambda w, x_view, _, __: x_view @ w.t())
+    monkeypatch.setattr(utils.ops, "wvSplitK", wvsplitk_mock)
+    return tgemm, wvsplitk_mock
+
+
+def test_rocm_unquantized_gemm_aiter_decode_under_capture(monkeypatch):
+    x = torch.randn(1, 4, 64, dtype=torch.bfloat16)
+    weight = torch.randn(128, 64, dtype=torch.bfloat16)
+    tgemm, wvsplitk_mock = _decode_branch_mocks(monkeypatch, capturing=True)
+
+    out = utils.rocm_unquantized_gemm_impl(x, weight, None)
+
+    tgemm.mm.assert_called_once()
+    wvsplitk_mock.assert_not_called()
+    assert out.shape == (1, 4, 128)
+    torch.testing.assert_close(out, torch.nn.functional.linear(x, weight))
+
+
+def test_rocm_unquantized_gemm_eager_keeps_wvsplitk(monkeypatch):
+    x = torch.randn(4, 64, dtype=torch.bfloat16)
+    weight = torch.randn(128, 64, dtype=torch.bfloat16)
+    tgemm, wvsplitk_mock = _decode_branch_mocks(monkeypatch, capturing=False)
+
+    utils.rocm_unquantized_gemm_impl(x, weight, None)
+
+    tgemm.mm.assert_not_called()
+    wvsplitk_mock.assert_called_once()
+
+
+def test_rocm_unquantized_gemm_aiter_decode_gets_contiguous_activation(monkeypatch):
+    x = torch.randn(64, 4, dtype=torch.bfloat16).t()
+    weight = torch.randn(128, 64, dtype=torch.bfloat16)
+    assert not x.is_contiguous()
+    tgemm, _ = _decode_branch_mocks(monkeypatch, capturing=True)
+
+    out = utils.rocm_unquantized_gemm_impl(x, weight, None)
+
+    x_view = tgemm.mm.call_args.args[0]
+    assert x_view.dim() == 2 and x_view.is_contiguous()
+    torch.testing.assert_close(out, torch.nn.functional.linear(x, weight))
+
+
+def test_rocm_unquantized_gemm_aiter_decode_skips_noncontiguous_weight(monkeypatch):
+    x = torch.randn(4, 64, dtype=torch.bfloat16)
+    weight = torch.randn(64, 128, dtype=torch.bfloat16).t()
+    monkeypatch.setattr(utils.rocm_aiter_ops, "is_tgemm_enabled", lambda: False)
+    tgemm, wvsplitk_mock = _decode_branch_mocks(monkeypatch, capturing=True)
+
+    out = utils.rocm_unquantized_gemm_impl(x, weight, None)
+
+    tgemm.mm.assert_not_called()
+    wvsplitk_mock.assert_not_called()
+    torch.testing.assert_close(out, torch.nn.functional.linear(x, weight))
+
+
+def test_use_aiter_decode_gemm_off_without_aiter_linear(monkeypatch):
+    monkeypatch.setattr(utils.rocm_aiter_ops, "is_linear_enabled", lambda: False)
+    _patch_fake_tuned_gemm(
+        monkeypatch,
+        get_GEMM_A16W16_config=MagicMock(return_value={"libtype": "flydsl"}),
+        is_flydsl_decode_config=lambda cfg: True,
+    )
+    assert not utils.use_aiter_decode_gemm(4, 128, 64, torch.bfloat16, None)
+
+
+def test_use_aiter_decode_gemm_off_when_aiter_import_fails(monkeypatch):
+    monkeypatch.setattr(utils.rocm_aiter_ops, "is_linear_enabled", lambda: True)
+    monkeypatch.setitem(sys.modules, "aiter.tuned_gemm", None)
+    assert not utils.use_aiter_decode_gemm(4, 128, 64, torch.bfloat16, None)
+
+
+def test_use_aiter_decode_gemm_asks_aiter(monkeypatch):
+    monkeypatch.setattr(utils.rocm_aiter_ops, "is_linear_enabled", lambda: True)
+    decode_row = {"libtype": "flydsl", "kernelName": "flydsl_decode_x"}
+    _patch_fake_tuned_gemm(
+        monkeypatch,
+        get_GEMM_A16W16_config=MagicMock(return_value=decode_row),
+        is_flydsl_decode_config=lambda cfg: cfg is decode_row,
+    )
+    assert utils.use_aiter_decode_gemm(4, 128, 64, torch.bfloat16, None)
