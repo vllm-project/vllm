@@ -15,7 +15,6 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     marlin_pad_scales,
     marlin_padded_nk,
     marlin_permute_bias,
-    marlin_permute_scales,
     marlin_quant_input,
     marlin_repacked_nk,
     marlin_unpad_output,
@@ -121,23 +120,6 @@ def nvfp4_marlin_process_scales(
     marlin_scales = marlin_scales[:, 1::2].contiguous()
 
     return marlin_scales, scale_factor
-
-
-def mxfp4_marlin_process_scales(marlin_scales, input_dtype=None):
-    # fit the layout of fp8 dequantization
-    if input_dtype is None or input_dtype.itemsize == 2:
-        marlin_scales = marlin_scales.view(-1, 4)[:, [0, 2, 1, 3]].view(
-            marlin_scales.size(0), -1
-        )
-
-    marlin_scales = marlin_scales.to(torch.float8_e8m0fnu)
-    if input_dtype == torch.float8_e4m3fn:
-        marlin_scales = marlin_scales.view(torch.uint8)
-        assert marlin_scales.max() <= 249
-        # exponent_bias (fp4->fp8) = 2 ** 3 - 2 ** 1 = 6
-        marlin_scales = marlin_scales + 6
-        marlin_scales = marlin_scales.view(torch.float8_e8m0fnu)
-    return marlin_scales
 
 
 def nvfp4_marlin_process_global_scale(global_scale, a_dtype: torch.dtype | None = None):
@@ -261,7 +243,7 @@ def prepare_fp4_layer_for_marlin(
     weight_scale = marlin_pad_scales(
         weight_scale, part_size_n, part_size_k, padded_n, padded_k, group_size
     )
-    weight_scale = marlin_permute_scales(
+    weight_scale = ops.marlin_permute_scales(
         s=weight_scale,
         size_k=padded_k,
         size_n=padded_n,
@@ -284,7 +266,7 @@ def prepare_fp4_layer_for_marlin(
             weight_global_scale, requires_grad=False
         )
     else:
-        weight_scale = mxfp4_marlin_process_scales(
+        weight_scale = ops.mxfp4_marlin_process_scales(
             weight_scale, input_dtype=input_dtype
         )
         layer.weight_scale = torch.nn.Parameter(weight_scale, requires_grad=False)
@@ -423,7 +405,7 @@ def prepare_nvfp4_moe_layer_for_marlin(
 
         for i in range(E):
             scale = scales[i].T
-            marlin_scales = marlin_permute_scales(
+            marlin_scales = ops.marlin_permute_scales(
                 s=scale,
                 size_k=size_k,
                 size_n=size_n,
@@ -509,7 +491,7 @@ def prepare_moe_fp4_layer_for_marlin(
         for i in range(e):
             scale = scales[i].T
 
-            marlin_scales = marlin_permute_scales(
+            marlin_scales = ops.marlin_permute_scales(
                 s=scale,
                 size_k=size_k,
                 size_n=size_n,
@@ -523,7 +505,7 @@ def prepare_moe_fp4_layer_for_marlin(
                     a_dtype=param_dtype,
                 )
             else:
-                marlin_scales = mxfp4_marlin_process_scales(
+                marlin_scales = ops.mxfp4_marlin_process_scales(
                     marlin_scales, input_dtype=input_dtype
                 )
             tensor_list.append(marlin_scales)
@@ -625,14 +607,14 @@ def prepare_moe_mxfp4_layer_for_marlin(
 
         for i in range(e):
             scale = scales[i].T
-            marlin_scales = marlin_permute_scales(
+            marlin_scales = ops.marlin_permute_scales(
                 s=scale,
                 size_k=size_k,
                 size_n=size_n,
                 group_size=group_size,
                 is_a_8bit=is_a_8bit,
             )
-            marlin_scales = mxfp4_marlin_process_scales(
+            marlin_scales = ops.mxfp4_marlin_process_scales(
                 marlin_scales, input_dtype=input_dtype
             )
             tensor_list.append(marlin_scales)
@@ -696,7 +678,7 @@ def rand_marlin_weight_nvfp4_like(weight, group_size, input_dtype=None):
         is_a_8bit=is_a_8bit,
     )
 
-    marlin_scales = marlin_permute_scales(
+    marlin_scales = ops.marlin_permute_scales(
         s=scales.T.to(weight.dtype),
         size_k=size_k,
         size_n=size_n,
@@ -755,7 +737,7 @@ def rand_marlin_weight_mxfp4_like(weight, group_size, input_dtype=None):
         is_a_8bit=is_a_8bit,
     )
 
-    marlin_scales = marlin_permute_scales(
+    marlin_scales = ops.marlin_permute_scales(
         s=scales.T.to(weight.dtype),
         size_k=size_k,
         size_n=size_n,
@@ -763,6 +745,8 @@ def rand_marlin_weight_mxfp4_like(weight, group_size, input_dtype=None):
         is_a_8bit=is_a_8bit,
     )
 
-    marlin_scales = mxfp4_marlin_process_scales(marlin_scales, input_dtype=input_dtype)
+    marlin_scales = ops.mxfp4_marlin_process_scales(
+        marlin_scales, input_dtype=input_dtype
+    )
 
     return weight_ref.T, marlin_qweight, marlin_scales.to(torch.float8_e8m0fnu)

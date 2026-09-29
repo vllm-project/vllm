@@ -1088,6 +1088,58 @@ def cutlass_mxfp4_moe_mm(
 
 
 # gptq_marlin
+def marlin_permute_scales(
+    s: torch.Tensor,
+    size_k: int,
+    size_n: int,
+    group_size: int,
+    is_a_8bit: bool = False,
+) -> torch.Tensor:
+    """Permute scales into Marlin's layout, returning a contiguous [G, N] tensor."""
+    s = s.reshape(-1, size_n)
+    out = torch.empty(s.shape, dtype=s.dtype, device=s.device)
+    single = group_size >= size_k or group_size == -1 or is_a_8bit
+    torch.ops._C.marlin_permute_scales_out(s, out, single)
+    return out
+
+
+def mxfp4_marlin_process_scales(
+    marlin_scales: torch.Tensor, input_dtype: torch.dtype | None = None
+) -> torch.Tensor:
+    """Encode permuted MXFP4 scales as E8M0 with Marlin's activation layout."""
+    if input_dtype not in (None, torch.float16, torch.bfloat16, torch.float8_e4m3fn):
+        raise ValueError("MXFP4 requires FP16/BF16 or FP8 E4M3 activations")
+    a8 = input_dtype == torch.float8_e4m3fn
+    out = torch.empty(
+        marlin_scales.shape, dtype=torch.float8_e8m0fnu, device=marlin_scales.device
+    )
+    invalid = torch.empty(
+        ((marlin_scales.numel() + 255) // 256 if a8 else 0,),
+        dtype=torch.bool,
+        device=marlin_scales.device,
+    )
+    torch.ops._C.mxfp4_marlin_process_scales_out(marlin_scales, out, invalid, a8)
+    if a8:
+        # Keep the existing FP8 range check at weight preparation.
+        assert not invalid.any(), "MXFP4 scales must have E8M0 exponent <= 249 for FP8"
+    return out
+
+
+if hasattr(torch.ops._C, "marlin_permute_scales_out"):
+
+    @register_fake("_C::marlin_permute_scales_out")
+    def _marlin_permute_scales_out_fake(
+        s: torch.Tensor, out: torch.Tensor, single: bool, tile_groups: int = 32
+    ) -> None:
+        return None
+
+    @register_fake("_C::mxfp4_marlin_process_scales_out")
+    def _mxfp4_marlin_process_scales_out_fake(
+        s: torch.Tensor, out: torch.Tensor, invalid: torch.Tensor, a8: bool
+    ) -> None:
+        return None
+
+
 def gptq_marlin_repack(
     b_q_weight: torch.Tensor,
     size_k: int,
