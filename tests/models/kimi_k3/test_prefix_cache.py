@@ -5,6 +5,7 @@
 import contextlib
 import json
 import random
+from collections.abc import Iterator
 from dataclasses import dataclass
 from math import lcm
 
@@ -19,7 +20,12 @@ from vllm.utils.network_utils import get_open_port
 
 # Official Kimi-K3 config with 8 layers and no weights.
 MODEL = "riverclouds/Kimi-K3-8L-dummy"
+
+# Conversation: the first prompt spans FIRST_PROMPT_BLOCKS blocks plus an
+# unaligned tail, and each later turn appends TURN_TOKENS random tokens.
 NUM_TURNS = 3
+FIRST_PROMPT_BLOCKS = 3
+UNALIGNED_TAIL = 37
 TURN_TOKENS = 777
 MAX_TOKENS = 8
 NUM_LOGPROBS = 5
@@ -213,19 +219,29 @@ def _reset_gpu_prefix_cache(url: str) -> None:
     response.raise_for_status()
 
 
-@pytest.mark.parametrize(
-    "prefix_match_unit",
-    [None, 128],
-    ids=["block", "partial"],
-)
-@pytest.mark.parametrize(
-    "name",
-    [pytest.param(name, marks=_marks(name)) for name in DEPLOYMENTS],
-)
-def test_turns_reuse_prefix_and_match_recompute(
-    name: str, prefix_match_unit: int | None
-) -> None:
-    deployment = DEPLOYMENTS[name]
+@dataclass(frozen=True)
+class Turn:
+    prompt_len: int
+    cached: int
+    expected_cached: int
+    recompute_cached: int
+    output: tuple
+    recompute: tuple
+
+    @property
+    def matches_recompute(self) -> bool:
+        return self.output[0] == self.recompute[0]
+
+
+def _expected_cached(prev_prompt_len: int, hit_unit: int) -> int:
+    """A turn must reuse the previous prompt up to its last checkpoint."""
+    return (prev_prompt_len - 1) // hit_unit * hit_unit if prev_prompt_len else 0
+
+
+@contextlib.contextmanager
+def _serve(
+    deployment: Deployment, prefix_match_unit: int | None
+) -> Iterator[list[RemoteOpenAIServer]]:
     with contextlib.ExitStack() as stack:
         # Sequential shutdown waits on memory still held by sibling servers.
         servers: list[RemoteOpenAIServer] = []
@@ -248,35 +264,81 @@ def test_turns_reuse_prefix_and_match_recompute(
                     max_wait_seconds=STARTUP_TIMEOUT,
                 )
             )
-        compute_url, decode_url = servers[0].url_root, servers[-1].url_root
-        block_size = _block_size(compute_url)
-        hit_unit = prefix_match_unit or block_size
-        # Dummy weights differ across TP sizes.
-        comparable = len({i.tp for i in deployment.instances}) == 1
+        yield servers
 
-        rng = random.Random(0)
-        prompt = [rng.randint(1000, 150000) for _ in range(3 * block_size + 37)]
-        prev_len = 0
-        for turn in range(NUM_TURNS):
-            if deployment.offload:
-                for server in servers:
-                    _reset_gpu_prefix_cache(server.url_root)
-            if deployment.prefill is not None:
-                computed, output = _pd_complete(compute_url, decode_url, prompt, "conv")
-            else:
-                computed = output = _complete(decode_url, prompt, "conv")
-            reference = _complete(decode_url, prompt, f"ref-{turn}")
-            assert _cached(reference) == 0
 
-            cached = _cached(computed)
-            expected = (prev_len - 1) // hit_unit * hit_unit if turn else 0
-            assert cached >= expected, f"{name=} {turn=} {cached=} {expected=}"
-            if comparable:
-                check_logprobs_close(
-                    outputs_0_lst=[_tokens_text_logprobs(reference)],
-                    outputs_1_lst=[_tokens_text_logprobs(output)],
-                    name_0="recompute",
-                    name_1=f"{name}-turn{turn}",
-                )
-            prev_len = len(prompt)
-            prompt = prompt + [rng.randint(1000, 150000) for _ in range(TURN_TOKENS)]
+def _run_conversation(
+    deployment: Deployment,
+    servers: list[RemoteOpenAIServer],
+    prefix_match_unit: int | None,
+) -> list[Turn]:
+    # Under P/D the prefiller computes the prompt, so hits are read from it.
+    compute_url, decode_url = servers[0].url_root, servers[-1].url_root
+    block_size = _block_size(compute_url)
+    hit_unit = prefix_match_unit or block_size
+    rng = random.Random(0)
+
+    def new_tokens(n: int) -> list[int]:
+        return [rng.randint(1000, 150000) for _ in range(n)]
+
+    prompt = new_tokens(FIRST_PROMPT_BLOCKS * block_size + UNALIGNED_TAIL)
+    prev_len = 0
+    turns = []
+    for turn in range(NUM_TURNS):
+        if deployment.offload:
+            for server in servers:
+                _reset_gpu_prefix_cache(server.url_root)
+        if deployment.prefill is not None:
+            computed, output = _pd_complete(compute_url, decode_url, prompt, "conv")
+        else:
+            computed = output = _complete(decode_url, prompt, "conv")
+        recompute = _complete(decode_url, prompt, f"recompute-{turn}")
+        turns.append(
+            Turn(
+                prompt_len=len(prompt),
+                cached=_cached(computed),
+                expected_cached=_expected_cached(prev_len, hit_unit),
+                recompute_cached=_cached(recompute),
+                output=_tokens_text_logprobs(output),
+                recompute=_tokens_text_logprobs(recompute),
+            )
+        )
+        prev_len = len(prompt)
+        prompt = prompt + new_tokens(TURN_TOKENS)
+    return turns
+
+
+def _format(turns: list[Turn]) -> str:
+    rows = ["turn  prompt  cached  expected  matches_recompute"]
+    rows += [
+        f"{i:>4}  {t.prompt_len:>6}  {t.cached:>6}  {t.expected_cached:>8}  "
+        f"{t.matches_recompute}"
+        for i, t in enumerate(turns)
+    ]
+    return "\n".join(rows)
+
+
+@pytest.mark.parametrize("prefix_match_unit", [None, 128], ids=["block", "partial"])
+@pytest.mark.parametrize(
+    "name", [pytest.param(name, marks=_marks(name)) for name in DEPLOYMENTS]
+)
+def test_turns_reuse_prefix_and_match_recompute(
+    name: str, prefix_match_unit: int | None
+) -> None:
+    deployment = DEPLOYMENTS[name]
+    with _serve(deployment, prefix_match_unit) as servers:
+        turns = _run_conversation(deployment, servers, prefix_match_unit)
+    table = _format(turns)
+    mode = "block" if prefix_match_unit is None else "partial"
+    print(f"\n{name}-{mode}\n{table}")
+
+    assert all(t.recompute_cached == 0 for t in turns), table
+    assert all(t.cached >= t.expected_cached for t in turns), table
+    # Dummy weights differ across TP sizes.
+    if len({i.tp for i in deployment.instances}) == 1:
+        check_logprobs_close(
+            outputs_0_lst=[t.recompute for t in turns],
+            outputs_1_lst=[t.output for t in turns],
+            name_0="recompute",
+            name_1=name,
+        )
