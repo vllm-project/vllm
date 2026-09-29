@@ -8,6 +8,7 @@ from unittest.mock import patch
 import pytest
 import torch
 
+from vllm.config import CacheConfig, ParallelConfig
 from vllm.config.speculative import SpeculativeConfig
 from vllm.model_executor.models.config import (
     Qwen3_5ForConditionalGenerationConfig,
@@ -81,33 +82,44 @@ def test_sp_parallel_modes(tp_size, pp_size, hc_sp, moe_sp, expected, error) -> 
 
 
 @pytest.mark.parametrize(
-    "dense_config", [{"num_experts": 0}, {"num_experts": 4, "mlp_only_layers": [0]}]
+    "sp_mode,layer_config,is_mtp,has_dense_layers",
+    [
+        ("hc", {"num_experts": 0}, False, True),
+        ("moe", {"mlp_only_layers": [0]}, False, True),
+        ("hc", {"decoder_sparse_step": 2}, False, True),
+        ("moe", {}, False, False),
+        ("off", {"num_experts": 0}, False, True),
+        ("hc", {"mlp_only_layers": [2]}, True, True),
+        ("moe", {"mlp_only_layers": [0]}, True, False),
+    ],
 )
-def test_sp_rejects_dense_layers(monkeypatch, dense_config) -> None:
-    """Reject both dense models and dense layers in an MoE model under HC SP."""
-    from vllm.models.qwen4_exp.nvidia import model as qwen4_model
-
+def test_sp_dense_layer_validation(
+    sp_mode, layer_config, is_mtp, has_dense_layers
+) -> None:
+    """Reject SP with active dense layers before constructing target or MTP modules."""
+    text_config = _text_config(ple_layer_ids=[], **({"num_experts": 4} | layer_config))
     config = SimpleNamespace(
         model_config=SimpleNamespace(
-            hf_text_config=_text_config(ple_layer_ids=[], **dense_config)
+            architecture="Qwen4ExpMTP" if is_mtp else "Qwen4ExpForCausalLM",
+            hf_text_config=text_config,
+            multimodal_config=None,
         ),
-        cache_config=None,
-        quant_config=None,
-        parallel_config=SimpleNamespace(
+        cache_config=CacheConfig(),
+        parallel_config=ParallelConfig(
             tensor_parallel_size=2,
-            pipeline_parallel_size=1,
-            use_sequence_parallel_moe=False,
-            enable_hc_sp=True,
+            data_parallel_size=2 if sp_mode == "moe" else 1,
+            enable_expert_parallel=sp_mode == "moe",
+            enable_hc_sp=sp_mode == "hc",
+            all2all_backend="allgather_reducescatter",
         ),
-        compilation_config=SimpleNamespace(
-            pass_config=SimpleNamespace(enable_sp=False)
-        ),
+        speculative_config=None,
     )
-    monkeypatch.setattr(
-        qwen4_model, "Qwen3NextAttention", lambda *args, **kwargs: torch.nn.Identity()
-    )
-    with pytest.raises(AssertionError, match="does not support dense MLP"):
-        qwen4_model.Qwen4ExpDecoderLayer(config, "full_attention", "model.layers.0")
+    with patch("vllm.platforms.current_platform.is_cuda", return_value=True):
+        if has_dense_layers and sp_mode != "off":
+            with pytest.raises(ValueError, match="does not support dense MLP"):
+                Qwen4ExpForConditionalGenerationConfig.verify_and_update_config(config)
+        else:
+            Qwen4ExpForConditionalGenerationConfig.verify_and_update_config(config)
 
 
 @pytest.mark.parametrize("use_sp", [False, True])
@@ -229,9 +241,7 @@ def test_qwen4_exp_rejects_pipeline_parallel_only_with_ple(ple_layer_ids) -> Non
             hf_text_config=_text_config(ple_layer_ids=ple_layer_ids),
             multimodal_config=None,
         ),
-        parallel_config=SimpleNamespace(
-            pipeline_parallel_size=2, enable_dbo=False, ubatch_size=1
-        ),
+        parallel_config=ParallelConfig(pipeline_parallel_size=2),
         speculative_config=None,
     )
     with patch.object(

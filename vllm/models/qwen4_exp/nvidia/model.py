@@ -285,16 +285,12 @@ class Qwen4ExpDecoderLayer(nn.Module):
                 reduce_results=not self.use_hc_sequence_parallel,
             )
         else:
-            assert not self.use_hc_sequence_parallel, (
-                "Qwen4Exp SP does not support dense MLP layers"
-            )
             self.mlp = Qwen3NextMLP(
                 hidden_size=config.hidden_size,
                 intermediate_size=config.intermediate_size,
                 hidden_act=config.hidden_act,
                 quant_config=quant_config,
                 prefix=f"{prefix}.mlp",
-                reduce_results=not self.use_hc_sequence_parallel,
             )
 
         hc_config = HyperConnectionConfig(
