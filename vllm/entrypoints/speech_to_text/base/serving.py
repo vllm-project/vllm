@@ -55,6 +55,7 @@ from ..translation.protocol import (
     TranslationSegment,
     TranslationStreamResponse,
 )
+from .subtitle_formats import segments_to_srt, segments_to_vtt
 
 SpeechToTextResponse: TypeAlias = (
     TranscriptionResponse | TranslationResponse | TranscriptionResponseDiarized
@@ -77,6 +78,9 @@ ResponseType: TypeAlias = (
 )
 
 logger = init_logger(__name__)
+
+# Response formats that require segment timestamps from the model.
+_SEGMENT_FORMATS: frozenset[str] = frozenset({"verbose_json", "srt", "vtt"})
 
 
 def asr_inter_chunk_separator(
@@ -302,7 +306,7 @@ class SpeechToTextBaseServing(GenerateBaseServing):
             prompt = self.model_cls.get_generation_prompt(stt_params)
 
             parsed_prompt: DictPrompt
-            if request.response_format == "verbose_json":
+            if request.response_format in _SEGMENT_FORMATS:
                 parsed_prompt = parse_enc_dec_prompt(prompt)
                 parsed_prompt = self._preprocess_verbose_prompt(parsed_prompt)
             else:
@@ -425,7 +429,7 @@ class SpeechToTextBaseServing(GenerateBaseServing):
         raw_request: Request,
         response_class: type[ResponseType],
         stream_generator_method: Callable[..., AsyncGenerator[str, None]],
-    ) -> T | V | AsyncGenerator[str, None] | ErrorResponse:
+    ) -> T | V | str | AsyncGenerator[str, None] | ErrorResponse:
         """Base method for speech-to-text operations like transcription and
         translation."""
         if request.stream and request.use_beam_search:
@@ -447,18 +451,21 @@ class SpeechToTextBaseServing(GenerateBaseServing):
             "json",
             "verbose_json",
             "diarized_json",
+            "srt",
+            "vtt",
         ]:
             return self.create_error_response(
                 "Currently only support response_format: "
-                "`text`, `json`, `verbose_json` or `diarized_json`"
+                "`text`, `json`, `verbose_json`, `diarized_json`, `srt` or `vtt`"
             )
 
         if (
-            request.response_format == "verbose_json"
+            request.response_format in _SEGMENT_FORMATS
             and not self.model_cls.supports_segment_timestamp
         ):
             return self.create_error_response(
-                f"Currently do not support verbose_json for {request.model}"
+                f"Currently do not support {request.response_format} for "
+                f"{request.model}"
             )
 
         if (
@@ -470,7 +477,7 @@ class SpeechToTextBaseServing(GenerateBaseServing):
             )
 
         if (
-            request.response_format in {"verbose_json", "diarized_json"}
+            request.response_format in _SEGMENT_FORMATS | {"diarized_json"}
             and request.stream
         ):
             return self.create_error_response(
@@ -525,7 +532,7 @@ class SpeechToTextBaseServing(GenerateBaseServing):
                 self.default_sampling_params,
             )
 
-        if request.response_format == "verbose_json":
+        if request.response_format in _SEGMENT_FORMATS:
             sampling_params.logprobs = 1
 
         engine_request_ids = [
@@ -612,7 +619,7 @@ class SpeechToTextBaseServing(GenerateBaseServing):
             result_generator = merge_async_iterators(*list_result_generator)
             async for idx, op in result_generator:
                 start_time = chunk_start_offsets[idx]
-                if request.response_format == "verbose_json":
+                if request.response_format in _SEGMENT_FORMATS:
                     assert op.outputs[0].logprobs
                     segments: list[SpeechToTextSegment] = self._get_verbose_segments(
                         tokens=tuple(op.outputs[0].token_ids),
@@ -636,6 +643,10 @@ class SpeechToTextBaseServing(GenerateBaseServing):
             ]
             text_parts = [text for text_part in chunk_text_parts for text in text_part]
             text = separator.join(text_parts)
+            if request.response_format == "srt":
+                return segments_to_srt(total_segments)
+            elif request.response_format == "vtt":
+                return segments_to_vtt(total_segments)
             if self.task_type == "transcribe":
                 final_response: ResponseType
                 # add usage in TranscriptionResponse.
