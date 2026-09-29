@@ -43,6 +43,7 @@ class DummyRequest(Request):
         prompt_token_ids=None,
         mm_features: list[MultiModalFeatureSpec] | None = None,
         max_tokens: int | None = 16,
+        first_chunk=True,
     ):
         super().__init__(
             request_id=request_id,
@@ -53,6 +54,10 @@ class DummyRequest(Request):
             pooling_params=None,
             mm_features=mm_features,
             resumable=resumable,
+            # The frontend stamps first_chunk on the first chunk of every
+            # session (async_llm.handle_inputs); these tests construct
+            # session-opening requests directly, so stamp it here.
+            first_chunk=first_chunk,
         )
 
 
@@ -264,6 +269,41 @@ class TestStreamingScheduler(unittest.TestCase):
         assert session.mm_features[0].mm_position.offset == 1
         # 2 + len([1, 2, 3])
         assert session.mm_features[1].mm_position.offset == 5
+
+    def test_non_first_chunk_for_unknown_session_is_dropped(self):
+        """Only a session's first chunk may create a session: a non-first
+        chunk for an id the scheduler does not know belongs to a finished
+        (or foreign) session, and admitting it would resurrect an
+        unabortable request."""
+        scheduler = create_scheduler()
+
+        # Cold scheduler: a mid-session chunk with no known session is dropped.
+        scheduler.add_request(
+            DummyRequest(
+                request_id="sess-x", prompt_token_ids=[7, 8], first_chunk=False
+            )
+        )
+        assert "sess-x" not in scheduler.requests
+        assert len(scheduler.waiting) == 0
+        assert scheduler.num_waiting_for_streaming_input == 0
+
+        # The race this guards: session finishes, its late chunk must not revive.
+        scheduler.add_request(
+            DummyRequest(request_id="sess-t", prompt_token_ids=[1, 2, 3])
+        )
+        scheduler.finish_requests("sess-t", RequestStatus.FINISHED_ABORTED)
+        scheduler.add_request(
+            DummyRequest(
+                request_id="sess-t", prompt_token_ids=[7, 8], first_chunk=False
+            )
+        )
+        assert "sess-t" not in scheduler.requests
+
+        # First chunks still open sessions.
+        scheduler.add_request(
+            DummyRequest(request_id="sess-b", prompt_token_ids=[4, 5, 6])
+        )
+        assert "sess-b" in scheduler.requests
 
     def test_process_streaming_requests_with_finish_session(self):
         """Test that a non-resumable request signals stream completion.
