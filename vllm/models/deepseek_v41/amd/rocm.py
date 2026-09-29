@@ -159,6 +159,10 @@ def _combine_topk_swa_indices_kernel(
         pos = start_pos + token_idx_in_query
         topk_len = tl.minimum((pos + 1) // COMPRESS_RATIO, TOP_K)
         swa_len = tl.minimum(pos + 1, WINDOW_SIZE)
+        # gather_len already excludes context below the request's replay
+        # start (SWA bounded replay), so the window cannot start before the
+        # gathered buffer does.
+        swa_len = tl.minimum(swa_len, pos + 1 - gather_start)
 
         topk_offset = tl.arange(0, PADDED_TOP_K)
         topk_mask = topk_offset < topk_len
@@ -252,13 +256,16 @@ def combine_topk_swa_indices(
         -1,
     )
 
+    gather_starts = seq_lens - gather_lens
+    # gather_lens already exclude context below each request's replay start
+    # (SWA bounded replay), so no window starts before its gathered buffer.
     swa_lens = torch.minimum(
-        positions + 1, torch.full_like(positions, window_size)
+        torch.minimum(positions + 1, torch.full_like(positions, window_size)),
+        positions + 1 - gather_starts[req_ids],
     ).clamp_min(0)
     swa_offsets = torch.arange(window_size, device=seq_lens.device)
     swa_mask = swa_offsets[None, :] < swa_lens[:, None]
     swa_columns = topk_lens[:, None] + swa_offsets[None, :]
-    gather_starts = seq_lens - gather_lens
     swa_values = (
         M * req_ids[:, None]
         + N
