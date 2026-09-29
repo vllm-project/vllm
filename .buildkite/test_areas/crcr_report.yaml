@@ -1,31 +1,30 @@
 group: CRCR Report
-# The report waits for the rest of the build (see crcr-report.sh), so gate it on
-# the long pole rather than letting it wait on an agent. A torch-nightly build
-# is tail-heavy: of 347 jobs in build 90830, 344 finished inside 3.5h and three
-# stragglers stretched it to 12.7h, with lm-eval-large-models-4xh100 last in
-# both 90830 (+760 min) and 90640 (+799 min) by a margin of hours.
+# Only image-build-cpu: this step must always run.
 #
-# Depending on it means Buildkite does not schedule this step until the build is
-# nearly over, so the agent polls briefly instead of idling ~13h. It is a
-# scheduling hint, not the correctness mechanism: the script still waits for
-# every job, so if this stops being the slowest step the report is late to start
-# but still correct.
+# It was briefly gated on the build's long pole (lm-eval-large-models-4xh100)
+# so the agent would not idle. That backfired on the first nightly to use it,
+# build 91191: the long pole OOMed, hung, and was cancelled -- and a cancelled
+# dependency propagates past `allow_dependency_failure`, so the step went
+# `waiting_failed` and that nightly got no CRCR row at all. Nothing in this
+# pipeline sets timeout_in_minutes (the pipeline default and org maximum are
+# both unset), so a hung job has no terminal state to reach either: gating on
+# any single job can suppress the report indefinitely.
+#
+# The bound now lives in the script, measured from the build's created_at, so
+# the report lands within CRCR_MAX_BUILD_AGE_S of the build starting whatever
+# else happens.
 depends_on:
   - image-build-cpu
-  - lm-eval-large-models-4xh100
 steps:
   - label: ":satellite: Report nightly results to CRCR"
     key: crcr-report
     if: build.env("TORCH_NIGHTLY") == "1"
     soft_fail: true
     allow_dependency_failure: true
-    # depends_on defers the start to near the end of the build, so in the normal
-    # case the script polls for minutes. This only has to cover the case where
-    # the long pole finishes early and something else is still running, so it is
-    # sized against the whole build rather than the expected wait. The script's
-    # own deadline (CRCR_MAX_WAIT_S, 13h) trips first and still sends a partial
-    # report; this is the backstop that stops the job outliving the build.
-    timeout_in_minutes: 840
+    # The script polls from the start of the build now, so this covers the whole
+    # wait. It sits above the script's own build-age deadline (7h) so the script
+    # sends its partial report rather than being killed with nothing sent.
+    timeout_in_minutes: 480
     device: cpu-small
     commands:
       - bash /vllm-workspace/.buildkite/scripts/crcr-report.sh
