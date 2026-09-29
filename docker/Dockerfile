@@ -518,20 +518,6 @@ ARG NVSHMEM_VER
 ARG NCCL_VERSION
 RUN --mount=type=cache,target=/opt/uv/cache \
     mkdir -p /tmp/ep_kernels_workspace/dist && \
-    if [ "${INSTALL_RUBIN_PRERELEASE}" = "true" ]; then \
-        # The Rubin CUDA builder provides NCCL in its architecture-specific \
-        # toolkit directory rather than as a Python package. Give DeepEP a \
-        # stable prefix that also exists in the Ubuntu runtime image. \
-        NCCL_HEADER=$(find /usr/local/cuda/targets -name nccl.h -print -quit) \
-        && test -n "${NCCL_HEADER}" \
-        && NCCL_LIBRARY=$(find -H /usr/local/cuda/targets \
-            -name libnccl.so.2 -print -quit) \
-        && test -n "${NCCL_LIBRARY}" \
-        && ln -sf "${NCCL_HEADER}" /usr/include/nccl.h \
-        && ln -sf "${NCCL_LIBRARY}" /usr/lib/libnccl.so.2 \
-        && ln -sf libnccl.so.2 /usr/lib/libnccl.so \
-        && export EP_NCCL_ROOT_DIR=/usr; \
-    fi && \
     CUDA_MAJOR=$(echo $CUDA_VERSION | cut -d. -f1) && \
     if [ -n "$NCCL_VERSION" ]; then \
         echo "nvidia-nccl-cu${CUDA_MAJOR}==${NCCL_VERSION}" \
@@ -661,7 +647,7 @@ RUN --mount=type=cache,target=/opt/uv/cache \
         python3 tools/use_existing_torch.py --prefix; \
     fi \
     && if [ "${INSTALL_RUBIN_PRERELEASE}" = "true" ]; then \
-        sed -Ei '/^[[:space:]]*(flashinfer-python|nvidia-cutlass-dsl\[cu13\]|quack-kernels)[[:space:]]*==/Id' \
+        sed -Ei '/^[[:space:]]*nvidia-cutlass-dsl\[cu13\][[:space:]]*==/Id' \
             requirements/cuda.txt; \
     fi
 
@@ -764,11 +750,6 @@ ARG DEADSNAKES_MIRROR_URL
 ARG DEADSNAKES_GPGKEY_URL
 ARG GET_PIP_URL
 
-# Keep the output image's CUDA metadata aligned with the selected toolkit.
-# This also normalizes prerelease base images with four-component metadata for
-# OCI runtimes that evaluate NVIDIA's CUDA driver requirement.
-ENV CUDA_VERSION=${CUDA_VERSION}
-
 ENV DEBIAN_FRONTEND=noninteractive
 WORKDIR /vllm-workspace
 
@@ -842,13 +823,7 @@ ENV PATH="${CUDA_HOME}/bin:${PATH}"
 ENV LD_LIBRARY_PATH="${CUDA_HOME}/lib64:${LD_LIBRARY_PATH}"
 
 # Apply the CUDA 13.4-only libcurand compatibility link described in the build
-# stage. CUDA 13.5 uses its native libcurand.so.11. DeepEP expects NCCL directly
-# under its configured /usr prefix, while Ubuntu installs it in a multiarch
-# subdirectory - but that symlink is only possible when NCCL is already
-# present (e.g. nvcr.io/nvidia/cuda-dl-base bundles it; a bare-CUDA image
-# doesn't, and gets it later via the standard nvidia-nccl-cu* pip package,
-# UV_OVERRIDE below). Check reality (whether libnccl.so.2 is actually found)
-# and tolerate not finding it instead of failing the build.
+# stage. CUDA 13.5 uses its native libcurand.so.11.
 RUN if [ "${INSTALL_RUBIN_PRERELEASE}" = "true" ]; then \
         CUDA_MAJOR_MINOR=$(echo "${CUDA_VERSION}" | cut -d. -f1,2) \
         && if [ "${CUDA_MAJOR_MINOR}" = "13.4" ]; then \
@@ -865,13 +840,6 @@ RUN if [ "${INSTALL_RUBIN_PRERELEASE}" = "true" ]; then \
         else \
             echo "Unsupported Rubin CUDA version: ${CUDA_MAJOR_MINOR}" >&2; \
             exit 1; \
-        fi \
-        && if NCCL_LIBRARY=$(find /usr/lib -name libnccl.so.2 -print -quit) \
-            && [ -n "${NCCL_LIBRARY}" ]; then \
-            if [ "${NCCL_LIBRARY}" != "/usr/lib/libnccl.so.2" ]; then \
-                ln -sf "${NCCL_LIBRARY}" /usr/lib/libnccl.so.2; \
-            fi \
-            && ln -sf libnccl.so.2 /usr/lib/libnccl.so; \
         fi \
         && ldconfig; \
     fi
@@ -1006,10 +974,8 @@ RUN --mount=type=cache,target=/opt/uv/cache \
 # From versions.json: .flashinfer.version
 ARG FLASHINFER_VERSION=0.7.0
 RUN --mount=type=cache,target=/opt/uv/cache \
-    if [ "${INSTALL_RUBIN_PRERELEASE}" != "true" ]; then \
-        uv pip install --system flashinfer-jit-cache==${FLASHINFER_VERSION} \
-            --index-url https://flashinfer.ai/whl/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.'); \
-    fi
+    uv pip install --system flashinfer-jit-cache==${FLASHINFER_VERSION} \
+        --index-url https://flashinfer.ai/whl/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')
 
 # ============================================================
 # OPENAI API SERVER DEPENDENCIES
@@ -1022,22 +988,13 @@ ARG GDRCOPY_CUDA_VERSION=12.8
 ARG GDRCOPY_OS_VERSION=Ubuntu24_04
 ARG TARGETPLATFORM
 COPY tools/install_gdrcopy.sh /tmp/install_gdrcopy.sh
-# Some Rubin FINAL_BASE_IMAGE choices (internal Rubin CUDA images,
-# nvcr.io/nvidia/cuda-dl-base) already provide GDRCopy; others don't, so it
-# falls through to the normal install below. Check reality (ldconfig) rather
-# than inferring from which FINAL_BASE_IMAGE flag is set.
 RUN set -eux; \
-    if [ "${INSTALL_RUBIN_PRERELEASE}" = "true" ] && ldconfig -p | grep -q 'libgdrapi\.so'; then \
-        true; \
-    else \
-        case "${TARGETPLATFORM}" in \
-          linux/arm64) UUARCH="aarch64" ;; \
-          linux/amd64) UUARCH="x64" ;; \
-          *) echo "Unsupported TARGETPLATFORM: ${TARGETPLATFORM}" >&2; exit 1 ;; \
-        esac; \
-        /tmp/install_gdrcopy.sh \
-            "${GDRCOPY_OS_VERSION}" "${GDRCOPY_CUDA_VERSION}" "${UUARCH}"; \
-    fi; \
+    case "${TARGETPLATFORM}" in \
+      linux/arm64) UUARCH="aarch64" ;; \
+      linux/amd64) UUARCH="x64" ;; \
+      *) echo "Unsupported TARGETPLATFORM: ${TARGETPLATFORM}" >&2; exit 1 ;; \
+    esac; \
+    /tmp/install_gdrcopy.sh "${GDRCOPY_OS_VERSION}" "${GDRCOPY_CUDA_VERSION}" "${UUARCH}" && \
     rm /tmp/install_gdrcopy.sh
 
 # Install vllm-openai dependencies (saves ~2.6s per build)
