@@ -4,6 +4,7 @@
 import pytest
 import torch
 
+import vllm._custom_ops as ops
 from tests.kernels.utils import opcheck
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.rotary_embedding.mrope import MRotaryEmbedding
@@ -43,10 +44,12 @@ def _apply_qk_norm_mrope(
 
     q_by_head = q.view(*q.shape[:-1], q.shape[-1] // head_dim, head_dim)
     q_by_head = q_norm.forward_native(q_by_head)
+    assert isinstance(q_by_head, torch.Tensor)
     q = q_by_head.view(q.shape)
 
     k_by_head = k.view(*k.shape[:-1], k.shape[-1] // head_dim, head_dim)
     k_by_head = k_norm.forward_native(k_by_head)
+    assert isinstance(k_by_head, torch.Tensor)
     k = k_by_head.view(k.shape)
 
     q, k = rope.forward_native(positions, q, k)
@@ -141,7 +144,7 @@ def test_fused_qk_norm_mrope_matches_reference(
         ),
     )
 
-    torch.ops._C.fused_qk_norm_mrope(
+    ops.fused_qk_norm_mrope(
         qkv_fused,
         num_heads,
         num_kv_heads,

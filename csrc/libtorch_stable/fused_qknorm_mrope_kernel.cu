@@ -25,7 +25,8 @@
 // half-dimension d selects which stream to use via the mrope_section [t, h, w]
 // boundaries (with t + h + w == rotary_dim / 2). We therefore look up
 // cos_sin_cache[position_ids[section(d), token], d] per half-dimension, with no
-// pre-gather of the cache.
+// pre-gather of the cache. position_ids is read through its strides, so the
+// runner's [3, N] slice of the [3, max_tokens] buffer needs no contiguous copy.
 //
 // v1 scope: base (one warp per token-head) kernel only, head dims 64/128/256,
 // both neox and gpt-j rotation styles, and both mRoPE section layouts --
@@ -103,36 +104,25 @@ inline __device__ __host__ T divUp(T m, T n) {
 namespace tensorrt_llm::kernels {
 
 // Select the mRoPE section (0=time, 1=height, 2=width) that owns half-dimension
-// `half_dim`, then return the token's position id for that section.
-// position_ids is laid out row-major as [3, num_tokens].
+// `half_dim`.
 //   - Contiguous layout (mrope_interleaved == false): [T..T H..H W..W].
 //   - Interleaved layout (mrope_interleaved == true, the Qwen3-VL default):
 //     [T H W T H W ... T T] -- half-dim d is H if d%3==1 and d<3*h, W if
 //     d%3==2 and d<3*w, else T. Matches apply_interleaved_rope /
 //     triton_mrope's is_interleaved branch in mrope.py.
-__device__ __forceinline__ int64_t mropePositionForHalfDim(
-    int64_t const* position_ids, int const num_tokens, int const tokenIdx,
-    int const half_dim, int const mrope_section_t, int const mrope_section_h,
-    int const mrope_section_w, bool const mrope_interleaved) {
-  int section;
+__device__ __forceinline__ int mropeSection(int const half_dim,
+                                            int const mrope_section_t,
+                                            int const mrope_section_h,
+                                            int const mrope_section_w,
+                                            bool const mrope_interleaved) {
   if (mrope_interleaved) {
-    if ((half_dim % 3 == 1) && (half_dim < 3 * mrope_section_h)) {
-      section = 1;
-    } else if ((half_dim % 3 == 2) && (half_dim < 3 * mrope_section_w)) {
-      section = 2;
-    } else {
-      section = 0;
-    }
-  } else {
-    if (half_dim < mrope_section_t) {
-      section = 0;
-    } else if (half_dim < mrope_section_t + mrope_section_h) {
-      section = 1;
-    } else {
-      section = 2;
-    }
+    if ((half_dim % 3 == 1) && (half_dim < 3 * mrope_section_h)) return 1;
+    if ((half_dim % 3 == 2) && (half_dim < 3 * mrope_section_w)) return 2;
+    return 0;
   }
-  return position_ids[section * num_tokens + tokenIdx];
+  if (half_dim < mrope_section_t) return 0;
+  if (half_dim < mrope_section_t + mrope_section_h) return 1;
+  return 2;
 }
 
 // Perform per-head QK Norm and mRoPE in a single kernel.
@@ -152,6 +142,8 @@ __global__ void fusedQKNormMRopeKernel(
     void const* k_weight_void,       // RMSNorm weights for key
     void const* cos_sin_cache_void,  // Pre-computed cos/sin cache
     int64_t const* position_ids,     // Position IDs for mRoPE [3, num_tokens]
+    int64_t const pos_stride_sec,    // position_ids stride over the 3 streams
+    int64_t const pos_stride_tok,    // position_ids stride over tokens
     int const num_tokens,            // Number of tokens
     int const rotary_dim,            // Dimension for RoPE
     int const mrope_section_t,       // mRoPE time-section size (half-dims)
@@ -214,14 +206,18 @@ __global__ void fusedQKNormMRopeKernel(
     constexpr int vecSize = elemSizeBytes / 4;
     using vec_T = typename tensorrt_llm::common::packed_as<uint, vecSize>::type;
 
-    int offsetWarp;
-    if (isQ) {
-      offsetWarp = tokenIdx * num_heads * head_dim + headIdx * head_dim;
-    } else {
-      offsetWarp = tokenIdx * num_heads * head_dim + num_heads_q * head_dim +
-                   headIdx * head_dim;
-    }
-    int offsetThread = offsetWarp + laneId * numElemsPerThread;
+    int64_t const rowOffset =
+        static_cast<int64_t>(tokenIdx) * num_heads * head_dim;
+    int64_t const offsetWarp =
+        isQ ? rowOffset + headIdx * head_dim
+            : rowOffset + num_heads_q * head_dim + headIdx * head_dim;
+    int64_t const offsetThread = offsetWarp + laneId * numElemsPerThread;
+
+    // PDL: wait for the predecessor kernel (the QKV projection that produces
+    // `qkv`) to complete before touching any global memory.
+#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
+    cudaGridDependencySynchronize();
+#endif
 
     // Sum of squares for RMSNorm
     float sumOfSquares = 0.0f;
@@ -260,6 +256,10 @@ __global__ void fusedQKNormMRopeKernel(
     int const embed_dim = rotary_dim / 2;
     int const mrope_section_w = embed_dim - mrope_section_t - mrope_section_h;
     int const rotary_lanes = rotary_dim / numElemsPerThread;
+    int64_t const tokOffset = tokenIdx * pos_stride_tok;
+    int64_t const pos_t = position_ids[tokOffset];
+    int64_t const pos_h = position_ids[pos_stride_sec + tokOffset];
+    int64_t const pos_w = position_ids[2 * pos_stride_sec + tokOffset];
     if (laneId < rotary_lanes) {
       if constexpr (interleave) {
         // gpt-j / interleaved rotation style.
@@ -273,9 +273,10 @@ __global__ void fusedQKNormMRopeKernel(
           float const val1 = elements[idx1];
 
           int const half_dim = dim_idx / 2;
-          int64_t const pos_id = mropePositionForHalfDim(
-              position_ids, num_tokens, tokenIdx, half_dim, mrope_section_t,
-              mrope_section_h, mrope_section_w, mrope_interleaved);
+          int const sec =
+              mropeSection(half_dim, mrope_section_t, mrope_section_h,
+                           mrope_section_w, mrope_interleaved);
+          int64_t const pos_id = sec == 0 ? pos_t : (sec == 1 ? pos_h : pos_w);
           T_cache const* cache_ptr = cos_sin_cache + pos_id * rotary_dim;
           float const cos_val =
               CacheConverter::convert(VLLM_LDG(cache_ptr + half_dim));
@@ -301,9 +302,10 @@ __global__ void fusedQKNormMRopeKernel(
 
           dim_idx = (dim_idx * 2) % rotary_dim;
           int half_dim = dim_idx / 2;
-          int64_t const pos_id = mropePositionForHalfDim(
-              position_ids, num_tokens, tokenIdx, half_dim, mrope_section_t,
-              mrope_section_h, mrope_section_w, mrope_interleaved);
+          int const sec =
+              mropeSection(half_dim, mrope_section_t, mrope_section_h,
+                           mrope_section_w, mrope_interleaved);
+          int64_t const pos_id = sec == 0 ? pos_t : (sec == 1 ? pos_h : pos_w);
           T_cache const* cache_ptr = cos_sin_cache + pos_id * rotary_dim;
           float cos_val =
               CacheConverter::convert(VLLM_LDG(cache_ptr + half_dim));
@@ -328,6 +330,11 @@ __global__ void fusedQKNormMRopeKernel(
       *reinterpret_cast<vec_T*>(&qkv[offsetThread]) = vec;
     }
 
+    // PDL: signal completion so a dependent successor may launch early.
+#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
+    cudaTriggerProgrammaticLaunchCompletion();
+#endif
+
 #if (!defined(__CUDA_ARCH__) || __CUDA_ARCH__ < 800) && !defined(USE_ROCM)
   }
 #endif
@@ -342,17 +349,52 @@ __global__ void fusedQKNormMRopeKernel(
     __VA_ARGS__                                          \
   }
 
+namespace {
+// Same threshold as fused_qknorm_rope_kernel.cu: overlapping with the
+// predecessor QKV projection only pays off while this kernel is launch-bound.
+constexpr int kPDLEnableTokens = 16;
+
+// Launch helper for PDL (programmatic dependent launch), which lets this
+// kernel start while the predecessor QKV projection is still draining.  The
+// launch attribute is the only switch: with it off, the kernels'
+// cudaGridDependencySynchronize() / cudaTriggerProgrammaticLaunchCompletion()
+// are no-ops.
+template <typename KernelFn, typename... Args>
+void launchWithPDL(KernelFn kernel, dim3 gridDim, dim3 blockDim,
+                   size_t smem_bytes, cudaStream_t stream, bool enable_pdl,
+                   Args... args) {
+#ifndef USE_ROCM
+  cudaLaunchConfig_t config;
+  config.gridDim = gridDim;
+  config.blockDim = blockDim;
+  config.dynamicSmemBytes = smem_bytes;
+  config.stream = stream;
+  cudaLaunchAttribute attrs[1];
+  attrs[0].id = cudaLaunchAttributeProgrammaticStreamSerialization;
+  attrs[0].val.programmaticStreamSerializationAllowed = enable_pdl;
+  config.numAttrs = 1;
+  config.attrs = attrs;
+  cudaLaunchKernelEx(&config, kernel, args...);
+#else
+  // ROCm: standard kernel launch syntax (no PDL/stream serialization).
+  (void)enable_pdl;
+  // clang-format off
+  kernel<<<gridDim, blockDim, smem_bytes, stream>>>(args...);
+  // clang-format on
+#endif
+}
+}  // namespace
+
 template <typename scalar_t_in, typename scalar_t_cache>
-void launchFusedQKNormMRope(void* qkv, int const num_tokens,
-                            int const num_heads_q, int const num_heads_k,
-                            int const num_heads_v, int const head_dim,
-                            int const rotary_dim, float const eps,
-                            void const* q_weight, void const* k_weight,
-                            void const* cos_sin_cache, bool const interleave,
-                            int64_t const* position_ids,
-                            int const mrope_section_t,
-                            int const mrope_section_h,
-                            bool const mrope_interleaved, cudaStream_t stream) {
+void launchFusedQKNormMRope(
+    void* qkv, int const num_tokens, int const num_heads_q,
+    int const num_heads_k, int const num_heads_v, int const head_dim,
+    int const rotary_dim, float const eps, void const* q_weight,
+    void const* k_weight, void const* cos_sin_cache, bool const interleave,
+    int64_t const* position_ids, int64_t const pos_stride_sec,
+    int64_t const pos_stride_tok, int const mrope_section_t,
+    int const mrope_section_h, bool const mrope_interleaved,
+    cudaStream_t stream) {
   constexpr int blockSize = 256;
   int const warpsPerBlock = blockSize / 32;
   int const totalQKHeads = num_heads_q + num_heads_k;
@@ -360,32 +402,38 @@ void launchFusedQKNormMRope(void* qkv, int const num_tokens,
   int const gridSize = common::divUp(totalWarps, warpsPerBlock);
   dim3 gridDim(gridSize);
   dim3 blockDim(blockSize);
+  bool const enable_pdl = num_tokens <= kPDLEnableTokens;
   switch (head_dim) {
     case 64:
       DISPATCH_INTERLEAVE(interleave, INTERLEAVE, {
-        fusedQKNormMRopeKernel<scalar_t_in, scalar_t_cache, 64, INTERLEAVE>
-            <<<gridDim, blockDim, 0, stream>>>(
-                qkv, num_heads_q, num_heads_k, num_heads_v, eps, q_weight,
-                k_weight, cos_sin_cache, position_ids, num_tokens, rotary_dim,
-                mrope_section_t, mrope_section_h, mrope_interleaved);
+        launchWithPDL(
+            fusedQKNormMRopeKernel<scalar_t_in, scalar_t_cache, 64, INTERLEAVE>,
+            gridDim, blockDim, 0, stream, enable_pdl, qkv, num_heads_q,
+            num_heads_k, num_heads_v, eps, q_weight, k_weight, cos_sin_cache,
+            position_ids, pos_stride_sec, pos_stride_tok, num_tokens,
+            rotary_dim, mrope_section_t, mrope_section_h, mrope_interleaved);
       });
       break;
     case 128:
       DISPATCH_INTERLEAVE(interleave, INTERLEAVE, {
-        fusedQKNormMRopeKernel<scalar_t_in, scalar_t_cache, 128, INTERLEAVE>
-            <<<gridDim, blockDim, 0, stream>>>(
-                qkv, num_heads_q, num_heads_k, num_heads_v, eps, q_weight,
-                k_weight, cos_sin_cache, position_ids, num_tokens, rotary_dim,
-                mrope_section_t, mrope_section_h, mrope_interleaved);
+        launchWithPDL(fusedQKNormMRopeKernel<scalar_t_in, scalar_t_cache, 128,
+                                             INTERLEAVE>,
+                      gridDim, blockDim, 0, stream, enable_pdl, qkv,
+                      num_heads_q, num_heads_k, num_heads_v, eps, q_weight,
+                      k_weight, cos_sin_cache, position_ids, pos_stride_sec,
+                      pos_stride_tok, num_tokens, rotary_dim, mrope_section_t,
+                      mrope_section_h, mrope_interleaved);
       });
       break;
     case 256:
       DISPATCH_INTERLEAVE(interleave, INTERLEAVE, {
-        fusedQKNormMRopeKernel<scalar_t_in, scalar_t_cache, 256, INTERLEAVE>
-            <<<gridDim, blockDim, 0, stream>>>(
-                qkv, num_heads_q, num_heads_k, num_heads_v, eps, q_weight,
-                k_weight, cos_sin_cache, position_ids, num_tokens, rotary_dim,
-                mrope_section_t, mrope_section_h, mrope_interleaved);
+        launchWithPDL(fusedQKNormMRopeKernel<scalar_t_in, scalar_t_cache, 256,
+                                             INTERLEAVE>,
+                      gridDim, blockDim, 0, stream, enable_pdl, qkv,
+                      num_heads_q, num_heads_k, num_heads_v, eps, q_weight,
+                      k_weight, cos_sin_cache, position_ids, pos_stride_sec,
+                      pos_stride_tok, num_tokens, rotary_dim, mrope_section_t,
+                      mrope_section_h, mrope_interleaved);
       });
       break;
     default:
@@ -418,9 +466,8 @@ void fused_qk_norm_mrope(
 ) {
   // Input validation
   CHECK_INPUT(qkv);
-  // position_ids may be a non-contiguous view (Qwen3-VL slices [3, N] out of a
-  // larger positions tensor); require only CUDA here and materialize a
-  // contiguous copy below for the row-major kernel index.
+  // position_ids may be a strided view (the runner slices [3, N] out of its
+  // [3, max_tokens] buffer); the kernel reads it through its strides.
   CHECK_TH_CUDA(position_ids);
   CHECK_INPUT(q_weight);
   CHECK_INPUT(k_weight);
@@ -467,12 +514,6 @@ void fused_qk_norm_mrope(
       qkv.get_device_index());
   auto stream = get_current_cuda_stream(qkv.get_device_index());
 
-  // Materialize a contiguous [3, num_tokens] copy so the kernel's row-major
-  // index (position_ids[section * num_tokens + tokenIdx]) is valid even when
-  // the caller passes a strided view (e.g. Qwen3-VL).
-  torch::stable::Tensor position_ids_contig =
-      torch::stable::contiguous(position_ids);
-
   VLLM_STABLE_DISPATCH_HALF_TYPES(
       qkv.scalar_type(), "fused_qk_norm_mrope_kernel", [&] {
         using qkv_scalar_t = scalar_t;
@@ -487,8 +528,8 @@ void fused_qk_norm_mrope(
                   static_cast<int>(cos_sin_cache.size(1)),
                   static_cast<float>(eps), q_weight.data_ptr(),
                   k_weight.data_ptr(), cos_sin_cache.data_ptr(), !is_neox,
-                  reinterpret_cast<int64_t const*>(
-                      position_ids_contig.data_ptr()),
+                  reinterpret_cast<int64_t const*>(position_ids.data_ptr()),
+                  position_ids.stride(0), position_ids.stride(1),
                   static_cast<int>(mrope_section_t),
                   static_cast<int>(mrope_section_h), mrope_interleaved, stream);
             });

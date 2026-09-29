@@ -8,10 +8,7 @@ from torch._ops import OpOverload, OpOverloadPacket
 import vllm.compilation.passes.fusion.qk_norm_rope_fusion as mrope_fusion_mod
 from tests.compile.backend import TestBackend
 from vllm.compilation.passes.fusion.matcher_utils import MROPE_OP
-from vllm.compilation.passes.fusion.qk_norm_rope_fusion import (
-    FUSED_QK_MROPE_OP,
-    QKNormMRoPEFusionPass,
-)
+from vllm.compilation.passes.fusion.qk_norm_rope_fusion import QKNormMRoPEFusionPass
 from vllm.compilation.passes.utility.noop_elimination import NoOpEliminationPass
 from vllm.compilation.passes.utility.post_cleanup import PostCleanupPass
 from vllm.compilation.passes.utility.split_coalescing import SplitCoalescingPass
@@ -66,7 +63,7 @@ class QKNormMRoPETestModel(torch.nn.Module):
 
         self.q_norm = RMSNorm(self.head_dim, eps=self.eps)
         self.k_norm = RMSNorm(self.head_dim, eps=self.eps)
-        # mRoPE rotation is neox-style; full rotary (rotary_dim == head_dim).
+        # Full rotary (rotary_dim == head_dim), as in Qwen3-VL.
         self.rotary_emb = MRotaryEmbedding(
             self.head_dim,
             rotary_dim=self.head_dim,
@@ -93,7 +90,7 @@ class QKNormMRoPETestModel(torch.nn.Module):
         return [torch.ops.vllm_ir.rms_norm, MROPE_OP]
 
     def ops_in_model_after(self) -> list[OpOverload | OpOverloadPacket]:
-        return [FUSED_QK_MROPE_OP]
+        return [torch.ops._C.fused_qk_norm_mrope.default]
 
 
 @pytest.mark.parametrize("eps", [1e-5, 1e-6])

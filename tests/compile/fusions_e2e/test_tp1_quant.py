@@ -211,6 +211,7 @@ def test_tp1_fp4_fusions(
 )
 @pytest.mark.parametrize("attn_backend", [TRITON_ATTN])
 @pytest.mark.parametrize("n_layers", [2])
+@pytest.mark.parametrize("custom_ops", custom_ops_combos("rms_norm"))
 @pytest.mark.parametrize("inductor_graph_partition", INDUCTOR_GRAPH_PARTITION)
 @pytest.mark.skipif(
     not current_platform.is_cuda_alike(),
@@ -223,6 +224,7 @@ def test_tp1_norm_mrope_fusion(
     hf_overrides: Callable[[int], dict],
     attn_backend: AttentionBackendCase,
     n_layers: int,
+    custom_ops: str,
     inductor_graph_partition: bool,
     run_e2e_fusion_test,
     monkeypatch,
@@ -238,8 +240,9 @@ def test_tp1_norm_mrope_fusion(
 
     compilation_config = dict(
         use_inductor_graph_partition=inductor_graph_partition,
-        # mRoPE fusion matches the rms_norm + rotary_embedding custom ops.
-        custom_ops=["+rms_norm", "+rotary_embedding"],
+        # The pass matches the rotary_embedding custom op; rms_norm is matched
+        # at the IR level in either mode.
+        custom_ops=custom_ops.split(",") + ["+rotary_embedding"],
         pass_config=PassConfig(enable_qk_norm_rope_fusion=True),
     )
 
