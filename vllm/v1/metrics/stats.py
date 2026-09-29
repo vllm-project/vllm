@@ -236,6 +236,7 @@ class RequestStateStats:
 
     # Track if this request is corrupted (NaNs in logits)
     is_corrupted: bool = False
+    num_computed_prefill_tokens: int | None = None
 
 
 @dataclass
@@ -256,6 +257,7 @@ class FinishedRequestStats:
     mean_time_per_output_token: float | None = None
     is_corrupted: bool = False
     num_cached_tokens: int = 0
+    num_computed_prefill_tokens: int | None = None
 
 
 @dataclass
@@ -468,6 +470,9 @@ class IterationStats:
         if is_prefilling:
             if output.prefill_stats is not None:
                 self.prompt_token_stats.update_from_output(output.prefill_stats)
+                req_stats.num_computed_prefill_tokens = (
+                    output.prefill_stats.num_computed_tokens
+                )
 
             first_token_latency = self._time_since(req_stats.arrival_time)
             self.time_to_first_tokens_iter.append(first_token_latency)
@@ -581,6 +586,7 @@ class IterationStats:
             mean_time_per_output_token=mean_time_per_output_token,
             is_corrupted=req_stats.is_corrupted,
             num_cached_tokens=num_cached_tokens,
+            num_computed_prefill_tokens=req_stats.num_computed_prefill_tokens,
         )
         self.finished_requests.append(finished_req)
 

@@ -217,6 +217,7 @@ class RequestState:
         self.prompt_len = len(self.prompt_token_ids)
         if self.stats is not None:
             self.stats.arrival_time = update.arrival_time
+            self.stats.num_computed_prefill_tokens = None
         self.is_prefilling = True
 
     @classmethod

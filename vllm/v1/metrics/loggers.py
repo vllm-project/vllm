@@ -754,7 +754,7 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
         #
         histogram_num_prompt_tokens_request = self._histogram_cls(
             name="vllm:request_prompt_tokens",
-            documentation="Number of prefill tokens processed.",
+            documentation="Input prompt length in tokens, including aborted requests.",
             buckets=request_tokens_buckets,
             labelnames=labelnames,
         )
@@ -1179,13 +1179,16 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             self.histogram_request_num_preemptions[engine_idx].observe(
                 finished_request.num_preemptions
             )
-            # Calculate prefill KV compute (excludes cached tokens)
-            prefill_kv_computed = finished_request.num_prompt_tokens - max(
-                finished_request.num_cached_tokens, 0
-            )
-            self.histogram_prefill_kv_computed_request[engine_idx].observe(
-                prefill_kv_computed
-            )
+            if finished_request.finish_reason == FinishReason.ABORT:
+                prefill_kv_computed = finished_request.num_computed_prefill_tokens
+            else:
+                prefill_kv_computed = finished_request.num_prompt_tokens - max(
+                    finished_request.num_cached_tokens, 0
+                )
+            if prefill_kv_computed is not None:
+                self.histogram_prefill_kv_computed_request[engine_idx].observe(
+                    prefill_kv_computed
+                )
             self.histogram_num_prompt_tokens_request[engine_idx].observe(
                 finished_request.num_prompt_tokens
             )

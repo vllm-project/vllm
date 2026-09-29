@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from unittest.mock import MagicMock, Mock, call
 
+import pytest
+
 from vllm.v1.core.sched.output import ScheduledEncoderInputStats, SchedulerOutput
 from vllm.v1.engine import EngineCoreOutputs, FinishReason
 from vllm.v1.engine.core_client import DPLBAsyncMPClient
@@ -19,7 +21,8 @@ from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
 from vllm.v1.utils import compute_iteration_details
 
 
-def test_abort_metrics_do_not_count_as_engine_iterations():
+@pytest.mark.parametrize("computed_prefill_tokens", [None, 0, 2])
+def test_abort_metrics_do_not_count_as_engine_iterations(computed_prefill_tokens):
     stat_logger = MagicMock(
         histogram_iteration_tokens={idx: Mock() for idx in (0, 1)},
         counter_request_success={FinishReason.ABORT: {idx: Mock() for idx in (0, 1)}},
@@ -27,8 +30,21 @@ def test_abort_metrics_do_not_count_as_engine_iterations():
         gauge_lora_info=None,
     )
     abort_stats = IterationStats()
-    abort_stats.finished_requests.append(FinishedRequestStats(FinishReason.ABORT))
+    abort_stats.finished_requests.append(
+        FinishedRequestStats(
+            FinishReason.ABORT,
+            num_prompt_tokens=3,
+            num_computed_prefill_tokens=computed_prefill_tokens,
+        )
+    )
     PrometheusStatLogger.record(stat_logger, None, abort_stats, engine_idx=1)
+    observed = stat_logger.histogram_prefill_kv_computed_request[1].observe
+    assert observed.call_args_list == (
+        [] if computed_prefill_tokens is None else [call(computed_prefill_tokens)]
+    )
+    stat_logger.histogram_num_prompt_tokens_request[1].observe.assert_called_once_with(
+        3
+    )
 
     for sched_stats, token_count in [(None, 3), (SchedulerStats(), 0)]:
         step_stats = IterationStats()
@@ -41,6 +57,22 @@ def test_abort_metrics_do_not_count_as_engine_iterations():
     histograms = stat_logger.histogram_iteration_tokens
     histograms[0].observe.assert_not_called()
     assert histograms[1].observe.call_args_list == [call(3), call(0)]
+
+
+@pytest.mark.parametrize("computed_prefill_tokens", [None, 0])
+def test_non_abort_prefill_histogram_keeps_existing_accounting(computed_prefill_tokens):
+    logger = MagicMock(kv_cache_metrics_enabled=False, gauge_lora_info=None)
+    stats = IterationStats()
+    stats.finished_requests.append(
+        FinishedRequestStats(
+            FinishReason.STOP,
+            num_prompt_tokens=3,
+            num_cached_tokens=1,
+            num_computed_prefill_tokens=computed_prefill_tokens,
+        )
+    )
+    PrometheusStatLogger.record(logger, None, stats)
+    logger.histogram_prefill_kv_computed_request[0].observe.assert_called_once_with(2)
 
 
 def test_abort_request_engine_ownership():
