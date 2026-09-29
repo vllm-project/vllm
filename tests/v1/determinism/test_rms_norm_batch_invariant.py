@@ -548,12 +548,12 @@ if __name__ == "__main__":
 
     # Batch-invariant implementation
     triton_output = rms_norm_batch_invariant(input_tensor, weight, eps=eps)
+    assert isinstance(triton_output, torch.Tensor)
 
     # Compare
     max_diff = (triton_output - reference_output).abs().max().item()
     mean_diff = (triton_output - reference_output).abs().mean().item()
 
-    assert isinstance(triton_output, torch.Tensor)
     print(f"Max difference: {max_diff:.6e}")
     print(f"Mean difference: {mean_diff:.6e}")
     print(f"Reference output sample: {reference_output[0, :5].tolist()}")

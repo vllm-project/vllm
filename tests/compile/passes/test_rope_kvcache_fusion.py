@@ -30,6 +30,7 @@ from vllm.config import (
     PassConfig,
     VllmConfig,
 )
+from vllm.config.cache import CacheDType
 from vllm.config.utils import Range
 from vllm.forward_context import get_forward_context, set_forward_context
 from vllm.model_executor.layers.attention import Attention
@@ -324,7 +325,7 @@ def test_rope_kvcache_fusion(
     block_size: int,
     is_neox: bool,
     dtype: torch.dtype,
-    kv_cache_dtype: str,
+    kv_cache_dtype: CacheDType,
     monkeypatch: pytest.MonkeyPatch,
 ):
     torch.set_default_device("cuda")
@@ -339,7 +340,7 @@ def test_rope_kvcache_fusion(
         model_config=ModelConfig(dtype=dtype),
         cache_config=CacheConfig(
             block_size=block_size,
-            cache_dtype=kv_cache_dtype,  # type: ignore[arg-type]
+            cache_dtype=kv_cache_dtype,
         ),
         compilation_config=CompilationConfig(
             mode=CompilationMode.VLLM_COMPILE,
@@ -468,7 +469,7 @@ def test_rope_static_qquant_kvcache_fusion(
     block_size: int,
     is_neox: bool,
     dtype: torch.dtype,
-    kv_cache_dtype: str,
+    kv_cache_dtype: CacheDType,
     monkeypatch: pytest.MonkeyPatch,
 ):
     torch.set_default_device("cuda")
@@ -483,7 +484,7 @@ def test_rope_static_qquant_kvcache_fusion(
         model_config=ModelConfig(dtype=dtype),
         cache_config=CacheConfig(
             block_size=block_size,
-            cache_dtype=kv_cache_dtype,  # type: ignore[arg-type]
+            cache_dtype=kv_cache_dtype,
         ),
         compilation_config=CompilationConfig(
             mode=CompilationMode.VLLM_COMPILE,

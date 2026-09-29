@@ -23,10 +23,7 @@ def test_stat_logger_plugin_is_discovered(monkeypatch: pytest.MonkeyPatch):
         # instantiate and confirm the right type
         vllm_config = VllmConfig()
         instance = factories[0](vllm_config)
-        # `assert factories[0] is DummyStatLogger` above narrows the name
-        # DummyStatLogger (from an untyped plugin package, so `Any`) to
-        # factories' declared element type, a `Callable`, which isinstance
-        # rejects as a second argument.
+        # The `is` check above narrows DummyStatLogger to a Callable
         assert isinstance(instance, DummyStatLogger)  # type: ignore[arg-type]
 
 

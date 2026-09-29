@@ -2322,7 +2322,7 @@ def v15_mistral_tokenizer() -> MistralTokenizer:
         return MistralTokenizer.from_pretrained("mistralai/Mistral-Small-4-119B-2603")
     except Exception:
         pytest.skip("v15 tokenizer unavailable")
-    raise AssertionError("unreachable")  # type: ignore[unreachable]
+    raise AssertionError("unreachable")
 
 
 @pytest.fixture(scope="module")
@@ -2332,7 +2332,7 @@ def v13_mistral_tokenizer() -> MistralTokenizer:
         return MistralTokenizer.from_pretrained("mistralai/Magistral-Small-2509")
     except Exception:
         pytest.skip("v13 tokenizer unavailable")
-    raise AssertionError("unreachable")  # type: ignore[unreachable]
+    raise AssertionError("unreachable")
 
 
 def test_v15_apply_chat_template_passes_reasoning_effort_high(

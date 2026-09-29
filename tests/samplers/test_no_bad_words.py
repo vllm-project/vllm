@@ -8,9 +8,8 @@ Run `pytest tests/samplers/test_no_bad_words.py`.
 
 from transformers import AutoTokenizer
 
+from tests.conftest import VllmRunner
 from vllm import SamplingParams
-
-from ..conftest import VllmRunner
 
 
 def _generate(

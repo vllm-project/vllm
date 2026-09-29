@@ -46,7 +46,7 @@ def test_sparse_attention_refreshes_batch_state_inside_eager_segment(
 
     with pytest.raises(BatchStateRefreshed):
         DeepseekV32Attention._sparse_indexer_and_attn(
-            layer,
+            layer,  # type: ignore[arg-type]
             torch.empty(1, dtype=torch.long),
             torch.empty(1, 1),
             torch.empty(1, 1, 1),
@@ -307,7 +307,7 @@ def test_deepseek_v32_dispatches_selected_mha(
     output = torch.empty(2, 2)
 
     DeepseekV32Attention._sparse_indexer_and_attn(
-        layer,
+        layer,  # type: ignore[arg-type]
         torch.arange(2),
         torch.empty(2, 2),
         q_nope,

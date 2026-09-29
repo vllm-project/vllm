@@ -62,8 +62,7 @@ PER_TOKEN_GROUP_SHAPE = (1, -1)
 PER_OUT_CH_GROUP_SHAPE = (-1, 1)
 
 capability = current_platform.get_device_capability()
-# test_cutlass_support_opcheck has no skip guard, so an unknown capability
-# deliberately falls back to 0 rather than failing at import time.
+# Fall back to 0 so import doesn't fail on unknown capability
 capability_int = (capability[0] * 10 + capability[1]) if capability is not None else 0
 
 

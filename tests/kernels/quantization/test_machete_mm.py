@@ -306,7 +306,7 @@ def test_machete_all_schedules(shape, types: TypeConfig):
     if types.group_scale_type is None:
         group_sizes = [None]
     else:
-        group_sizes = [*query_machete_supported_group_sizes(types.act_type)]
+        group_sizes = list(query_machete_supported_group_sizes(types.act_type))
 
     for group_size in group_sizes:
         if not group_size_valid(shape, group_size):
@@ -335,7 +335,7 @@ def test_machete_heuristic(shape, types: TypeConfig):
     if types.group_scale_type is None:
         group_sizes = [None]
     else:
-        group_sizes = [*query_machete_supported_group_sizes(types.act_type)]
+        group_sizes = list(query_machete_supported_group_sizes(types.act_type))
 
     for group_size in group_sizes:
         if not group_size_valid(shape, group_size):

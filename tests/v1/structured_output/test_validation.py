@@ -97,9 +97,9 @@ def test_regex_with_nul_byte_rejected(regex):
     # (which would otherwise catch the error and fall back to another backend).
     with pytest.raises(VLLMValidationError, match="NUL"):
         params._validate_structured_outputs(
-            _StubModelConfig(is_diffusion=False),
+            _StubModelConfig(is_diffusion=False),  # type: ignore[arg-type]
             StructuredOutputsConfig(),
-            tokenizer=object(),
+            tokenizer=object(),  # type: ignore[arg-type]
         )
 
     # The xgrammar backend also rejects it directly (defense in depth), before
@@ -133,9 +133,9 @@ def test_unsupported_grammar_is_a_client_error(backend, structured_outputs):
     params = SamplingParams(structured_outputs=structured_outputs)
     with pytest.raises(VLLMClientError):
         params._validate_structured_outputs(
-            _StubModelConfig(is_diffusion=False),
+            _StubModelConfig(is_diffusion=False),  # type: ignore[arg-type]
             StructuredOutputsConfig(backend=backend),
-            tokenizer=object(),
+            tokenizer=object(),  # type: ignore[arg-type]
         )
 
 
@@ -180,8 +180,9 @@ def test_auto_backend_falls_back_on_unsupported_schema(schema, expected_backend)
     """`auto` falls back on rejection, so it must catch what the validators raise."""
     params = SamplingParams(structured_outputs=StructuredOutputsParams(json=schema))
     params._validate_structured_outputs(
-        _StubModelConfig(is_diffusion=False),
+        _StubModelConfig(is_diffusion=False),  # type: ignore[arg-type]
         StructuredOutputsConfig(backend="auto"),
-        tokenizer=object(),
+        tokenizer=object(),  # type: ignore[arg-type]
     )
+    assert params.structured_outputs is not None
     assert params.structured_outputs._backend == expected_backend

@@ -3000,8 +3000,7 @@ async def test_resolve_items_runs_modalities_concurrently_and_preserves_order():
         finally:
             active_fetches -= 1
 
-    tracker = AsyncMultiModalItemTracker(MagicMock())
-    tracker._model_config.is_multimodal_model = True
+    tracker = AsyncMultiModalItemTracker(MagicMock(is_multimodal_model=True))
     tracker.__dict__["mm_processor"] = MagicMock()
     tracker._items_by_modality["video"] = [
         lambda: _fetch("video-0", 0.02),

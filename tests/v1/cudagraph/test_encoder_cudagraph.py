@@ -14,7 +14,7 @@ Test organization:
 
 from collections.abc import Hashable
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -116,6 +116,7 @@ class _MockModel(SupportsEncoderCudaGraph):
         device: torch.device,
         dtype: torch.dtype,
         path: str = "default",
+        axis_keys: tuple[Hashable, ...] | None = None,
     ) -> EncoderCudaGraphCaptureInputs:
         return EncoderCudaGraphCaptureInputs(values={})
 
@@ -637,6 +638,7 @@ def test_eonly_capture_preserves_outputs_across_replay_and_fallback(profile_only
         ECConnectorBase,
         ECConnectorMetadata,
     )
+    from vllm.v1.core.sched.output import SchedulerOutput
     from vllm.v1.worker.gpu.ec_connector import ActiveECConnector
     from vllm.v1.worker.gpu.mm.encoder_runner import EncoderRunner
     from vllm.v1.worker.mm_encoder_model_runner import MMEncoderModelRunner
@@ -650,7 +652,7 @@ def test_eonly_capture_preserves_outputs_across_replay_and_fallback(profile_only
     encoder.device = device
     encoder.cudagraph_manager = manager
     runner = object.__new__(MMEncoderModelRunner)
-    runner.model_state = SimpleNamespace(encoder_runner=encoder)
+    runner.model_state = SimpleNamespace(encoder_runner=encoder)  # type: ignore[assignment]
     # No decoder manager is installed: capture must be encoder-only.
     with patch(
         "vllm.v1.worker.mm_encoder_model_runner.lock_workspace", wraps=lock_workspace
@@ -671,9 +673,12 @@ def test_eonly_capture_preserves_outputs_across_replay_and_fallback(profile_only
     with patch(
         "vllm.v1.worker.gpu.ec_connector.get_ec_transfer", return_value=connector
     ):
-        ec = ActiveECConnector(SimpleNamespace(), cache)
-    scheduled = SimpleNamespace(
-        ec_connector_metadata=ECConnectorMetadata(), finished_req_ids=frozenset()
+        ec = ActiveECConnector(SimpleNamespace(), cache)  # type: ignore[arg-type]
+    scheduled = cast(
+        SchedulerOutput,
+        SimpleNamespace(
+            ec_connector_metadata=ECConnectorMetadata(), finished_req_ids=frozenset()
+        ),
     )
     saved_outputs: list[tuple[torch.Tensor, torch.Tensor]] = []
     # Mixed sizes exercise packing order; 64 is the boundary, 81 falls back.
@@ -686,6 +691,7 @@ def test_eonly_capture_preserves_outputs_across_replay_and_fallback(profile_only
             outputs = manager.execute(inputs)
             assert outputs is not None
             cache[str(len(cache))] = outputs[0]
+        assert ec_output is not None
         assert ec_output.finished_sending is None
         assert outputs is not None
         for actual, eager in zip(outputs, expected):
@@ -699,6 +705,7 @@ def test_eonly_capture_preserves_outputs_across_replay_and_fallback(profile_only
     connector.get_finished.return_value = (set(cache), None)
     with ec.maybe_get_output(scheduled) as ec_output:
         pass
+    assert ec_output is not None
     assert ec_output.finished_sending == set(cache)
 
 
@@ -709,7 +716,7 @@ def test_eonly_without_encoder_graph_skips_capture():
     encoder = object.__new__(EncoderRunner)
     encoder.cudagraph_manager = None
     runner = object.__new__(MMEncoderModelRunner)
-    runner.model_state = SimpleNamespace(encoder_runner=encoder)
+    runner.model_state = SimpleNamespace(encoder_runner=encoder)  # type: ignore[assignment]
     assert runner.capture_model() == 0
 
 

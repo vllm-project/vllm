@@ -15,6 +15,7 @@ from vllm.model_executor.layers.pooler.tokwise.heads import (
     TokenEmbeddingPoolerHead,
 )
 from vllm.pooling_params import PoolingParams
+from vllm.tasks import PoolingTask
 from vllm.v1.pool.metadata import PoolingMetadata, PoolingStates
 
 _HIDDEN = 16
@@ -24,12 +25,12 @@ _BATCH = 3
 def _make_params(
     n: int,
     *,
-    task: str = "embed",
+    task: PoolingTask = "embed",
     dimensions: int | None = None,
     use_activation: bool | None = None,
 ) -> list[PoolingParams]:
     return [
-        PoolingParams(task=task, dimensions=dimensions, use_activation=use_activation)  # type: ignore[arg-type]
+        PoolingParams(task=task, dimensions=dimensions, use_activation=use_activation)
         for _ in range(n)
     ]
 

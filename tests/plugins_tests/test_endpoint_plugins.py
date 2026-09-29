@@ -196,7 +196,7 @@ async def test_render_server_attaches_endpoint_plugins_with_no_engine_client(
         for route in app.routes
     )
 
-    await init_endpoint_plugins_state(None, app.state, args)  # type: ignore[arg-type]
+    await init_endpoint_plugins_state(None, app.state, args)
 
     assert app.state.dummy_engine_client is None
 
