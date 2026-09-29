@@ -417,6 +417,35 @@ class TestDetokenizeDelta:
         )
         assert full.endswith("🌈")
 
+    @pytest.mark.parametrize(
+        ("skip", "spaces", "preserve", "expected"),
+        [
+            (True, True, False, (True, True)),
+            (True, False, False, (True, True)),
+            (False, False, False, (False, False)),
+            (False, False, True, (False, False)),
+            (True, False, True, (False, False)),
+            (True, True, True, (False, True)),
+        ],
+    )
+    def test_decode_params_mirror_engine(self, skip, spaces, preserve, expected):
+        """spaces_between is forced on by skip_special_tokens, as in the engine."""
+        from vllm.entrypoints.openai.completion.protocol import CompletionRequest
+        from vllm.renderers.online_derenderer import _decode_params
+
+        request = CompletionRequest(
+            model=MODEL_NAME,
+            prompt="x",
+            skip_special_tokens=skip,
+            spaces_between_special_tokens=spaces,
+        )
+        assert _decode_params(request, preserve_special=preserve) == expected
+
+    def test_decode_params_default_without_request(self):
+        from vllm.renderers.online_derenderer import _decode_params
+
+        assert _decode_params(None) == (True, True)
+
     def test_n_independent_streams_same_result(self, derenderer, tokenizer):
         """N parallel streams with the same token sequence give the same text."""
         token_ids = tokenizer.encode("parallel streams")[:8]

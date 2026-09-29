@@ -134,8 +134,8 @@ class OnlineDerenderer:
         choices: list[ChatCompletionResponseChoice] = []
 
         has_parser = self.parser is not None and chat_request is not None
-        skip_special = (
-            chat_request.skip_special_tokens if chat_request is not None else True
+        skip_special, spaces_between = _decode_params(
+            chat_request, preserve_special=has_parser
         )
         seed_ids = (
             prompt_token_ids
@@ -146,7 +146,7 @@ class OnlineDerenderer:
         seed_state = _seed_stream_state(
             tokenizer,
             seed_ids,
-            skip_special_tokens=False if has_parser else skip_special,
+            skip_special_tokens=skip_special,
         )
 
         for choice in generate_response.choices:
@@ -165,7 +165,11 @@ class OnlineDerenderer:
                 # so the parser can see markers like </think>,
                 # <tool_call>, or Harmony channel tokens.
                 decoded_text, _ = self._detokenize_delta(
-                    tokenizer, choice.token_ids, seed_state, skip_special_tokens=False
+                    tokenizer,
+                    choice.token_ids,
+                    seed_state,
+                    skip_special_tokens=skip_special,
+                    spaces_between_special_tokens=spaces_between,
                 )
 
                 chat_template_kwargs: dict[str, Any] = {}
@@ -228,6 +232,7 @@ class OnlineDerenderer:
                     choice.token_ids,
                     seed_state,
                     skip_special_tokens=skip_special,
+                    spaces_between_special_tokens=spaces_between,
                 )
                 message = ChatMessage(role="assistant", content=decoded_text)
 
@@ -377,9 +382,7 @@ class OnlineDerenderer:
             )
 
         tokenizer = self.renderer.get_tokenizer()
-        skip_special = (
-            chat_request.skip_special_tokens if chat_request is not None else True
-        )
+        skip_special, spaces_between = _decode_params(chat_request)
         # Seed on the first chunk only. A carried state already has the prompt.
         if state is None:
             state = _seed_stream_state(
@@ -391,7 +394,11 @@ class OnlineDerenderer:
         for choice in generate_chunk.choices:
             delta_tids = choice.token_ids or []
             new_text, updated_state = await self._detokenize_delta_async(
-                tokenizer, delta_tids, updated_state, skip_special_tokens=skip_special
+                tokenizer,
+                delta_tids,
+                updated_state,
+                skip_special_tokens=skip_special,
+                spaces_between_special_tokens=spaces_between,
             )
 
             # NOTE: parser-configured servers dispatch to
@@ -503,8 +510,11 @@ class OnlineDerenderer:
         # across both the replay and current chunk phases (via `nonlocal`)
         # so multi-byte characters split across that boundary still decode
         # correctly. Discarded once the call returns.
+        skip_special, spaces_between = _decode_params(
+            chat_request, preserve_special=True
+        )
         detok_state = _seed_stream_state(
-            tokenizer, prompt_token_ids, skip_special_tokens=False
+            tokenizer, prompt_token_ids, skip_special_tokens=skip_special
         )
 
         def _replay(token_ids: list[int], chunk_lens: list[int]) -> None:
@@ -518,7 +528,11 @@ class OnlineDerenderer:
                 chunk = token_ids[start : start + chunk_len]
                 start += chunk_len
                 text, detok_state = self._detokenize_delta(
-                    tokenizer, chunk, detok_state, skip_special_tokens=False
+                    tokenizer,
+                    chunk,
+                    detok_state,
+                    skip_special_tokens=skip_special,
+                    spaces_between_special_tokens=spaces_between,
                 )
                 parser.parse_delta(
                     text,
@@ -555,7 +569,11 @@ class OnlineDerenderer:
                 # granularity), not one per token. See the granularity note
                 # in this method's docstring.
                 text, detok_state = self._detokenize_delta(
-                    tokenizer, delta_tids, detok_state, skip_special_tokens=False
+                    tokenizer,
+                    delta_tids,
+                    detok_state,
+                    skip_special_tokens=skip_special,
+                    spaces_between_special_tokens=spaces_between,
                 )
                 delta_message = parser.parse_delta(
                     text,
@@ -679,11 +697,7 @@ class OnlineDerenderer:
             prompt_token_ids if prompt_token_ids is not None else [None] * n
         )
 
-        skip_special = (
-            completion_request.skip_special_tokens
-            if completion_request is not None
-            else True
-        )
+        skip_special, spaces_between = _decode_params(completion_request)
         tokenizer = self.renderer.get_tokenizer()
         choices: list[CompletionResponseChoice] = []
         total_prompt_tokens = 0
@@ -713,6 +727,7 @@ class OnlineDerenderer:
                     choice.token_ids,
                     seed_state,
                     skip_special_tokens=skip_special,
+                    spaces_between_special_tokens=spaces_between,
                 )
                 completion_logprobs = None
                 if choice.logprobs is not None:
@@ -777,11 +792,7 @@ class OnlineDerenderer:
             )
 
         tokenizer = self.renderer.get_tokenizer()
-        skip_special = (
-            completion_request.skip_special_tokens
-            if completion_request is not None
-            else True
-        )
+        skip_special, spaces_between = _decode_params(completion_request)
         # Seed on the first chunk only. A carried state already has the prompt.
         if state is None:
             state = _seed_stream_state(
@@ -797,7 +808,11 @@ class OnlineDerenderer:
         for choice in generate_chunk.choices:
             delta_tids = choice.token_ids or []
             new_text, updated_state = await self._detokenize_delta_async(
-                tokenizer, delta_tids, updated_state, skip_special_tokens=skip_special
+                tokenizer,
+                delta_tids,
+                updated_state,
+                skip_special_tokens=skip_special,
+                spaces_between_special_tokens=spaces_between,
             )
 
             completion_logprobs = None
@@ -860,6 +875,30 @@ def _logprob_context_tail(
 ) -> list[int]:
     """Advance the carried logprob context by this chunk's sampled tokens."""
     return (list(context_token_ids) + list(delta_token_ids))[-_LOGPROB_CONTEXT_WINDOW:]
+
+
+def _decode_params(
+    request: ChatCompletionRequest | CompletionRequest | None,
+    preserve_special: bool = False,
+) -> tuple[bool, bool]:
+    """Derive `(skip_special_tokens, spaces_between_special_tokens)` the way
+    the engine does (`IncrementalDetokenizer`).
+
+    Args:
+        request: The original request, if the caller supplied one.
+        preserve_special: Keep special tokens so a parser can see markers.
+            The serving side does this via `adjust_request`.
+
+    """
+    skip_special = (
+        False
+        if preserve_special
+        else (request.skip_special_tokens if request is not None else True)
+    )
+    spaces_between = skip_special or (
+        request.spaces_between_special_tokens if request is not None else True
+    )
+    return skip_special, spaces_between
 
 
 def _seed_stream_state(
