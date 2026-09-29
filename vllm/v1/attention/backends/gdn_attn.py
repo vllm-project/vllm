@@ -357,7 +357,7 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
                 # rather than gather with the host mask (an H2D copy + a kernel).
                 spec_state_indices_tensor = block_table_tensor[
                     :num_spec_decodes, : self.num_spec + 1
-                ].contiguous()
+                ]
                 non_spec_state_indices_tensor = None
                 # Padded sequences are always at the back, so the first
                 # num_spec_decodes + 1 entries of query_start_loc already
@@ -616,9 +616,7 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
                 prefill_indices = non_spec_indices[m.num_decodes :]
         elif m.num_prefills == 0:
             # Same as build(): padded sequences trail the spec decodes.
-            spec_indices = blk_table[
-                : m.num_spec_decodes, : self.num_spec + 1
-            ].contiguous()
+            spec_indices = blk_table[: m.num_spec_decodes, : self.num_spec + 1]
         else:
             spec_indices = blk_table[masks, : self.num_spec + 1]
             non_spec_indices = prefill_indices = blk_table[~masks, 0]
