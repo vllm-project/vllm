@@ -12,6 +12,7 @@ from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.spec_decode.speculator import BaseSpeculator
 
 if TYPE_CHECKING:
+    from vllm.config.compilation import CUDAGraphMode
     from vllm.v1.worker.gpu.dp_utils import DPSyncState
     from vllm.v1.worker.gpu.states import RequestState
 
@@ -204,6 +205,12 @@ class NgramGPUSpeculator(BaseSpeculator):
             dtype=torch.int64,
             device=device,
         )
+
+    def init_cudagraph_manager(self, cudagraph_mode: CUDAGraphMode) -> None:
+        del cudagraph_mode
+
+    def capture(self) -> None:
+        return None
 
     @torch.inference_mode()
     def propose(

@@ -273,6 +273,6 @@ def test_construction_validates_speculative_config():
     assert spec.min_n == 2
     assert spec.max_n == 3
     assert spec.num_speculative_steps == 2
-    # Inherited no-op hooks must not raise.
+    # No-op hooks must not raise.
     spec.init_cudagraph_manager(None)
     spec.capture()

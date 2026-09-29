@@ -61,11 +61,13 @@ class BaseSpeculator(ABC):
     # Extra query slots reserved per request outside the regular queries.
     num_extra_query_per_req: int = 0
 
+    @abstractmethod
     def init_cudagraph_manager(self, cudagraph_mode: CUDAGraphMode) -> None:
-        return None
+        pass
 
+    @abstractmethod
     def capture(self) -> None:
-        return None
+        pass
 
     @abstractmethod
     def propose(
