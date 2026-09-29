@@ -21,6 +21,7 @@ from dataclasses import replace
 from typing import TYPE_CHECKING
 
 from vllm.entrypoints.generate.base.protocol import DeltaMessage
+from vllm.parser.abstract_parser import DelegatingParser
 from vllm.parser.engine.parser_engine import ParserEngine
 from vllm.parser.engine.parser_engine_config import (
     ParserEngineConfig,
@@ -272,23 +273,19 @@ class MiniCPMVParser(Qwen3Parser):
         thinking_enabled = chat_kwargs.get("enable_thinking", False)
         kwargs.setdefault("parser_engine_config", minicpmv_config(thinking_enabled))
         super().__init__(tokenizer, tools, **kwargs)
-        self._output_normalizer = MiniCPMVOutputNormalizer()
+        # ``Qwen3Parser.__init__`` reads the same key with a default of True,
+        # which does not apply here: MiniCPM-V defaults to thinking disabled.
+        # Keep the attribute in sync with the grammar built above.
+        self.thinking_enabled = thinking_enabled
 
     @property
     def reasoning_ended(self) -> bool:
+        # The engine derives this from the presence of THINK terminals, which
+        # both MiniCPM-V configs keep, so the base property stays False in
+        # non-thinking mode. There is no reasoning span to end there.
         if not self.thinking_enabled:
-            return False
+            return True
         return super().reasoning_ended
-
-    def is_reasoning_end(self, input_ids: list[int]) -> bool:
-        if not self.thinking_enabled:
-            return False
-        return super().is_reasoning_end(input_ids)
-
-    def extract_content_ids(self, input_ids: list[int]) -> list[int]:
-        if not self.thinking_enabled:
-            return input_ids
-        return super().extract_content_ids(input_ids)
 
     def extract_reasoning(
         self,
@@ -344,6 +341,26 @@ class MiniCPMVParser(Qwen3Parser):
             return super().get_streaming_fallback_content(text, request)
         delta = ParserEngine.finish_streaming(self)
         return delta.content if delta is not None else None
+
+
+class MiniCPMVUnifiedParser(DelegatingParser):
+    """MiniCPM-V serving parser: the adapters plus newline recovery.
+
+    Recovery cannot live in :class:`MiniCPMVParser`: the serving stack drives
+    the reasoning/tool adapters, never ``ParserEngine.parse`` /
+    ``ParserEngine.parse_delta``, so a rewrite applied there would only be
+    visible to callers that construct the engine directly.
+    """
+
+    def __init__(
+        self,
+        tokenizer: TokenizerLike,
+        tools: list[Tool] | None = None,
+        *args,
+        **kwargs,
+    ) -> None:
+        super().__init__(tokenizer, tools, *args, **kwargs)
+        self._output_normalizer = MiniCPMVOutputNormalizer()
 
     def parse(
         self,
