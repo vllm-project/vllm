@@ -41,7 +41,7 @@ models:
     base_flags: "--trust-remote-code --kv-cache-dtype fp8"
     prefill:
       tp: "--gpu-memory-utilization 0.85"
-      ep: "--gpu-memory-utilization 0.85 --enforce-eager"
+      ep: "--gpu-memory-utilization 0.75 --enforce-eager"
     decode:
       tp: "--gpu-memory-utilization 0.85"
       ep: '--gpu-memory-utilization 0.75 --compilation-config {"cudagraph_mode":"FULL_DECODE_ONLY","custom_ops":["+quant_fp8"]}'

@@ -92,6 +92,10 @@ export SHARED_MOUNT LOG_ROOT DRY_RUN MORIIO_READ_MODE
 # Pinned MoRI rebuild (install_mori.sh); only acts on WIDE_EP_MODE=1 xP=2 yD=2.
 export MORI_COMMIT MORI_REPO MORI_REINSTALL_FORCE MORI_SKIP_REINSTALL
 export ROUTER_TYPE ROUTER_PORT VLLM_ROUTER_IMAGE
+# Leave the image's own ionic userspace in place instead of mounting the host's.
+export SKIP_IONIC_MOUNTS
+# Bake a different repo.radeon.com ionic userspace channel into the run image.
+export AINIC_SWAP_CHANNEL
 
 # Model selection.
 [[ -n "${MODEL_NAME:-}" ]] && export MODEL_NAME
