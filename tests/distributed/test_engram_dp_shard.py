@@ -507,20 +507,22 @@ def _check_dummy_hash_model_forward(
                     assert torch.all(hashes == engram_ops.DEAD_ID)
                 output = engram.embed(hashes[:, 0])
             # Trailing None is previous_aux; this stub captures no aux states.
-            return output, None, None, None, None, None
+            return output, hidden, hidden, hidden, hidden, None
 
-    model = SimpleNamespace(
-        use_mega_moe=False,
-        use_sequence_parallel=False,
-        fuse_mhc_all_reduce=False,
-        engram_hash=state,
-        engram_swa_prefix="swa",
-        engram_dp_shared_memory=dp_shared_memory,
-        layers=[Decoder(engram=engram)],
-        start_layer=0,
-        end_layer=1,
-        aux_hidden_state_layers=(),
-    )
+    model = model_ops.DeepseekV4Model.__new__(model_ops.DeepseekV4Model)
+    torch.nn.Module.__init__(model)
+    model.use_mega_moe = False
+    model.use_sequence_parallel = False
+    model.fuse_mhc_all_reduce = False
+    model.engram_hash = state
+    model.engram_swa_prefix = "swa"
+    model.engram_dp_shared_memory = dp_shared_memory
+    model.layers = [Decoder(engram=engram)]
+    model.start_layer = 0
+    model.end_layer = 1
+    model.decoder_replay_start = model.end_layer
+    model.decoder_replay_layers = None
+    model.aux_hidden_state_layers = ()
     metadata = (
         None
         if dp_rank == 1
@@ -550,8 +552,7 @@ def _check_dummy_hash_model_forward(
                 dtype=torch.int32,
             ),
         ):
-            output = model_ops.DeepseekV4Model.forward(
-                model,
+            output = model(
                 torch.arange(tokens, device="cuda"),
                 torch.arange(tokens, device="cuda"),
                 intermediate_tensors=None,
