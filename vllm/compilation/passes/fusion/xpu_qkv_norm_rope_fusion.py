@@ -15,6 +15,11 @@ and replaces it with one ``_xpu_C.qkv_split_norm_rope`` kernel that writes
 q, k and the (pre-sigmoid) gate; v stays a view of ``qkv``. Every candidate
 pattern is traced from the same reference code as the model, so a graph that
 differs in any op (other norm, rotary layout, eps, ...) is left unchanged.
+
+Only applied for compile ranges ending at <= 8 tokens (decode). For large
+(prefill / memory-profiling) ranges the separate q / k / gate outputs raise
+the device memory held after profiling, which comes out of the KV cache,
+and the unfused inductor code is as fast there.
 """
 
 import inspect
@@ -30,6 +35,7 @@ from torch._inductor.pattern_matcher import PatternMatcherPass
 
 import vllm.ir.ops
 from vllm.config import VllmConfig, get_layers_from_vllm_config
+from vllm.config.utils import Range
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.rotary_embedding.common import ApplyRotaryEmb
@@ -42,6 +48,8 @@ from ..utility.noop_elimination import NoOpEliminationPass
 from ..vllm_inductor_pass import VllmInductorPass, VllmPatternMatcherPass
 
 logger = init_logger(__name__)
+
+MAX_TOKEN_NUM = 8
 
 P = ParamSpec("P")
 
@@ -385,15 +393,21 @@ class XpuQkvNormRopeFusionPass(VllmPatternMatcherPass):
         self._keys = tuple(keys)
         self.dump_patterns(config, self.patterns)
 
+    def is_applicable_for_range(self, compile_range: Range) -> bool:
+        return compile_range.end <= MAX_TOKEN_NUM
+
     @VllmInductorPass.time_and_log
     def __call__(self, graph: fx.Graph) -> None:
         self.matched_count = self.patterns.apply(graph)
         logger.debug("XPU QKV norm+RoPE fusion replaced %d sites", self.matched_count)
 
     def uuid(self) -> str:
-        return VllmInductorPass.hash_source(
-            self,
-            XpuGatedQkvNormRopePattern,
-            _RopeSpec,
-            repr(self._keys),
+        return (
+            VllmInductorPass.hash_source(
+                self,
+                XpuGatedQkvNormRopePattern,
+                _RopeSpec,
+                repr(self._keys),
+            )
+            + f"|{MAX_TOKEN_NUM}"
         )

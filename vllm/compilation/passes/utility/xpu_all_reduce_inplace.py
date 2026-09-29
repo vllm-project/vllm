@@ -15,6 +15,12 @@ to
 
 Inductor re-inplaces the mutation (x has no other user and is not a graph
 input), so no copy remains, and the op calls the process group directly.
+
+Only applied for compile ranges ending at <= 8 tokens (decode), where the
+copy and the Python wrapper are a noticeable part of the step. Larger ranges
+keep ``vllm::all_reduce``: in-place XCCL all-reduces on the large prefill /
+profiling intermediates leave XCCL holding extra device memory, which comes
+out of the KV cache.
 """
 
 import operator
@@ -24,12 +30,15 @@ from torch import fx
 from torch._higher_order_ops.auto_functionalize import auto_functionalized
 
 from vllm.config import VllmConfig
+from vllm.config.utils import Range
 from vllm.logger import init_logger
 
 from ..fx_utils import is_func
 from ..vllm_inductor_pass import VllmInductorPass
 
 logger = init_logger(__name__)
+
+MAX_TOKEN_NUM = 8
 
 
 def _xpu_all_reduce_inplace_available() -> bool:
@@ -72,6 +81,9 @@ class XpuAllReduceInplacePass(VllmInductorPass):
             )
         self.matched_count = 0
 
+    def is_applicable_for_range(self, compile_range: Range) -> bool:
+        return self.enabled and compile_range.end <= MAX_TOKEN_NUM
+
     @VllmInductorPass.time_and_log
     def __call__(self, graph: fx.Graph) -> None:
         self.matched_count = 0
@@ -102,6 +114,7 @@ class XpuAllReduceInplacePass(VllmInductorPass):
         )
 
     def uuid(self) -> str:
-        return VllmInductorPass.hash_source(
-            self, _is_fresh_tensor, _returns_fresh_tensors
+        return (
+            VllmInductorPass.hash_source(self, _is_fresh_tensor, _returns_fresh_tensors)
+            + f"|{MAX_TOKEN_NUM}"
         )

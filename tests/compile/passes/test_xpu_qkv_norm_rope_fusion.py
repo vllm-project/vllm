@@ -19,6 +19,7 @@ from vllm.config import (
     VllmConfig,
     set_current_vllm_config,
 )
+from vllm.config.utils import Range
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.layernorm import GemmaRMSNorm
 from vllm.model_executor.layers.rotary_embedding import get_rope
@@ -145,3 +146,20 @@ def test_xpu_qkv_norm_rope_fusion(mrope, num_tokens):
         assert _has_op(backend.graph_post_pass, "qkv_split_norm_rope")
         for a, b in zip(out, ref):
             torch.testing.assert_close(a, b, atol=2e-2, rtol=2e-2)
+
+
+@pytest.mark.skipif(not current_platform.is_xpu(), reason="XPU only")
+def test_xpu_qkv_norm_rope_fusion_decode_ranges_only():
+    vllm_config = VllmConfig(
+        model_config=ModelConfig(
+            model=MODEL, dtype=torch.float16, trust_remote_code=True
+        ),
+        compilation_config=CompilationConfig(
+            mode=CompilationMode.VLLM_COMPILE,
+            pass_config=PassConfig(fuse_xpu_qkv_norm_rope=True),
+        ),
+    )
+    with set_current_vllm_config(vllm_config):
+        fusion = XpuQkvNormRopeFusionPass(vllm_config)
+    assert fusion.is_applicable_for_range(Range(start=1, end=8))
+    assert not fusion.is_applicable_for_range(Range(start=9, end=4096))

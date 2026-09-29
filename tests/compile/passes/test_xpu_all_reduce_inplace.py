@@ -13,6 +13,7 @@ from vllm.compilation.passes.utility.xpu_all_reduce_inplace import (
     XpuAllReduceInplacePass,
 )
 from vllm.config import VllmConfig
+from vllm.config.utils import Range
 from vllm.platforms import current_platform
 
 pytestmark = pytest.mark.skipif(
@@ -100,3 +101,8 @@ def test_input_with_other_user_unchanged(ar_pass):
     ar_pass(g)
     assert ar_pass.matched_count == 0
     assert ALL_REDUCE in _targets(g)
+
+
+def test_decode_ranges_only(ar_pass):
+    assert ar_pass.is_applicable_for_range(Range(start=1, end=8))
+    assert not ar_pass.is_applicable_for_range(Range(start=9, end=4096))
