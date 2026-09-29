@@ -538,10 +538,9 @@ def create_and_prepopulate_kv_cache(
     if fp8_attention:
         if use_fp8_ds_mla:
             kv_lora_rank = kv_c_contexts[0].shape[-1]
-            rope_dim = k_pe_contexts[0].shape[-1]
             # 4 * 4: 4 float32 scale values for 128-element tiles
-            # 2 * rope_dim: 16-bit RoPE values
-            kv_entry_size = kv_lora_rank + 4 * 4 + 2 * rope_dim
+            # 2 * 64: 16-bit RoPE values (zero-filled for NoPE models)
+            kv_entry_size = kv_lora_rank + 4 * 4 + 2 * 64
         elif use_nvfp4_ds_mla:
             kv_lora_rank = kv_c_contexts[0].shape[-1]
             rope_dim = k_pe_contexts[0].shape[-1]
