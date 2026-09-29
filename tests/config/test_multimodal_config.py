@@ -188,6 +188,250 @@ def test_mm_processor_device_type_normalizes(device: object, expected: str | Non
     assert config.get_mm_processor_device_type() == expected
 
 
+def test_merge_mm_processor_kwargs_scoped_precedence():
+    configured = {
+        "size": {
+            "shortest_edge": 64,
+            "longest_edge": 512,
+        },
+        "do_resize": True,
+        "padding": False,
+        "images_kwargs": {
+            "size": {"longest_edge": 1024},
+            "do_resize": False,
+        },
+        "videos_kwargs": {
+            "size": {"longest_edge": 2048},
+        },
+    }
+    inference = {
+        "size": {"shortest_edge": 128},
+        "do_resize": True,
+        "images_kwargs": {
+            "size": {"shortest_edge": 256},
+        },
+    }
+
+    config = MultiModalConfig(
+        mm_processor_kwargs=configured,
+        mm_device_do_normalize=False,
+    )
+
+    assert config.merge_mm_processor_kwargs(inference) == {
+        "size": {
+            "shortest_edge": 128,
+            "longest_edge": 512,
+        },
+        "do_resize": True,
+        "padding": False,
+        "images_kwargs": {
+            "size": {
+                "shortest_edge": 256,
+                "longest_edge": 1024,
+            },
+            "do_resize": True,
+        },
+        "videos_kwargs": {
+            "size": {
+                "shortest_edge": 128,
+                "longest_edge": 2048,
+            },
+        },
+    }
+
+
+def test_merge_mm_processor_kwargs_mapping_vs_replacement():
+    config = MultiModalConfig(
+        mm_processor_kwargs={
+            "size": {"shortest_edge": 64},
+            "images_kwargs": {"size": {"longest_edge": 1024}},
+        },
+        mm_device_do_normalize=False,
+    )
+
+    assert config.merge_mm_processor_kwargs({"size": 7}) == {
+        "size": 7,
+        "images_kwargs": {"size": 7},
+    }
+    assert config.merge_mm_processor_kwargs({"size": {}}) == {
+        "size": {"shortest_edge": 64},
+        "images_kwargs": {
+            "size": {
+                "shortest_edge": 64,
+                "longest_edge": 1024,
+            },
+        },
+    }
+
+
+_EMPTY_IMAGE_SCOPE_KWARGS: tuple[dict[str, object], ...] = (
+    {},
+    {"images_kwargs": None},
+    {"images_kwargs": {}},
+)
+
+
+@pytest.mark.parametrize("configured", _EMPTY_IMAGE_SCOPE_KWARGS)
+@pytest.mark.parametrize("inference", _EMPTY_IMAGE_SCOPE_KWARGS)
+def test_merge_mm_processor_kwargs_empty_scopes_are_absent(
+    configured: dict[str, object],
+    inference: dict[str, object],
+):
+    config = MultiModalConfig(
+        mm_processor_kwargs=configured,
+        mm_device_do_normalize=False,
+    )
+
+    assert config.merge_mm_processor_kwargs(inference) == {}
+
+
+@pytest.mark.parametrize("empty_inference", _EMPTY_IMAGE_SCOPE_KWARGS)
+def test_merge_mm_processor_kwargs_empty_inference_scope_preserves_config_merge(
+    empty_inference: dict[str, object],
+):
+    config = MultiModalConfig(
+        mm_processor_kwargs={
+            "images_kwargs": {
+                "size": {
+                    "shortest_edge": 64,
+                    "longest_edge": 512,
+                },
+            },
+        },
+        mm_device_do_normalize=False,
+    )
+    inference = {
+        "size": {"shortest_edge": 128},
+        **empty_inference,
+    }
+
+    assert config.merge_mm_processor_kwargs(inference) == {
+        "size": {"shortest_edge": 128},
+        "images_kwargs": {
+            "size": {
+                "shortest_edge": 128,
+                "longest_edge": 512,
+            },
+        },
+    }
+
+
+@pytest.mark.parametrize("empty_config", _EMPTY_IMAGE_SCOPE_KWARGS)
+def test_merge_mm_processor_kwargs_empty_config_scope_allows_inference_merge(
+    empty_config: dict[str, object],
+):
+    config = MultiModalConfig(
+        mm_processor_kwargs={
+            "size": {"longest_edge": 512},
+            **empty_config,
+        },
+        mm_device_do_normalize=False,
+    )
+
+    assert config.merge_mm_processor_kwargs(
+        {
+            "size": {"shortest_edge": 128},
+            "images_kwargs": {"size": {"longest_edge": 1024}},
+        }
+    ) == {
+        "size": {
+            "shortest_edge": 128,
+            "longest_edge": 512,
+        },
+        "images_kwargs": {
+            "size": {
+                "shortest_edge": 128,
+                "longest_edge": 1024,
+            },
+        },
+    }
+
+
+@pytest.mark.parametrize("non_mapping_scope", [False, 0, "", [], 123])
+def test_merge_mm_processor_kwargs_falsey_non_mapping_scopes_are_not_empty(
+    non_mapping_scope: object,
+):
+    config = MultiModalConfig(
+        mm_processor_kwargs={"images_kwargs": non_mapping_scope},
+        mm_device_do_normalize=False,
+    )
+
+    for empty_inference in _EMPTY_IMAGE_SCOPE_KWARGS:
+        assert config.merge_mm_processor_kwargs(empty_inference) == {
+            "images_kwargs": non_mapping_scope
+        }
+
+
+@pytest.mark.parametrize(
+    ("configured_scope", "inference_scope", "expected_scope"),
+    [
+        (123, {"size": {"shortest_edge": 128}}, {"size": {"shortest_edge": 128}}),
+        ({"size": {"shortest_edge": 64}}, 123, 123),
+        (123, 456, 456),
+    ],
+)
+def test_merge_mm_processor_kwargs_non_mapping_scope_precedence(
+    configured_scope: object,
+    inference_scope: object,
+    expected_scope: object,
+):
+    config = MultiModalConfig(
+        mm_processor_kwargs={"images_kwargs": configured_scope},
+        mm_device_do_normalize=False,
+    )
+
+    merged = config.merge_mm_processor_kwargs({"images_kwargs": inference_scope})
+
+    assert merged["images_kwargs"] == expected_scope
+
+
+def test_merge_mm_processor_kwargs_none_leaf_is_explicit():
+    config = MultiModalConfig(mm_device_do_normalize=False)
+
+    assert config.merge_mm_processor_kwargs({"images_kwargs": {"do_resize": None}}) == {
+        "images_kwargs": {"do_resize": None}
+    }
+
+
+def test_merge_mm_processor_kwargs_normalize_and_ownership():
+    configured: dict[str, object] = {
+        "images_kwargs": {
+            "size": {"shortest_edge": 64},
+        },
+    }
+    inference: dict[str, object] = {
+        "do_normalize": True,
+        "do_rescale": True,
+        "images_kwargs": {
+            "size": {"longest_edge": 1024},
+        },
+    }
+    configured_before = copy.deepcopy(configured)
+    inference_before = copy.deepcopy(inference)
+
+    config = MultiModalConfig(
+        mm_processor_kwargs=configured,
+        mm_device_do_normalize=True,
+    )
+    merged = config.merge_mm_processor_kwargs(inference)
+
+    assert merged["do_normalize"] is False
+    assert merged["do_rescale"] is False
+    assert configured == configured_before
+    assert inference == inference_before
+    assert config.mm_processor_kwargs == configured_before
+
+    images_kwargs = merged["images_kwargs"]
+    assert isinstance(images_kwargs, dict)
+    size = images_kwargs["size"]
+    assert isinstance(size, dict)
+    size["shortest_edge"] = 999
+
+    assert configured == configured_before
+    assert inference == inference_before
+    assert config.mm_processor_kwargs == configured_before
+
+
 def _validate_mm_processor_device(*, device: str, ec_role: ECRole | None) -> None:
     ec_config = (
         None
