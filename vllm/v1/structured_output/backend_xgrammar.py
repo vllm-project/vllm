@@ -341,7 +341,7 @@ def has_xgrammar_unsupported_json_features(schema: dict[str, Any]) -> bool:
         # which is NOT what is expected.
         # Reported this issue to xgrammar team to track progress on resolving:
         # https://github.com/mlc-ai/xgrammar/issues/937
-        if isinstance(obj.get("allOf"), list) and len(obj["allOf"]) != 1:
+        if isinstance(obj.get("allOf"), list) and len(obj["allOf"]) >= 2:
             # FIXME(arpera):
             # There is a corner case that I want to pay your attention to:
             # {"type":"object","properties":{"allOf":{"type":"string"}}}
@@ -351,6 +351,15 @@ def has_xgrammar_unsupported_json_features(schema: dict[str, Any]) -> bool:
             # We definitely need to improve it in future.
             # The easiest way seems like to pass to check_object
             # some info about if current node is subschema or not.
+            #
+            # FIXME(arpera):
+            # There is a known limitation in current implementation
+            # that marks some schemas that xgrammar accepts as unsupported by xgrammar.
+            # Examples:
+            # {"const": {"allOf": [1, 2]}}       -> True (but xgrammar supports it)
+            # {"enum": [{"allOf": [1, 2]}, "x"]} -> True (but xgrammar supports it)
+            # Currently, I have no idea how to fix it in elegant way,
+            # so this needs to be addressed in future refactorings.
             return True
 
         # Recursively check all nested objects and arrays
@@ -366,53 +375,6 @@ def has_xgrammar_unsupported_json_features(schema: dict[str, Any]) -> bool:
         return False
 
     return check_object(schema)
-
-
-def _get_embedded_json_schemas_in_structural_tag(
-    s_tag: dict[str, Any],
-) -> list[dict[str, Any]]:
-    """Get JSON schemas embedded in structural tag (legacy and new format)"""
-
-    def append_schema(schema: Any) -> None:
-        if isinstance(schema, dict):
-            schemas.append(schema)
-        elif isinstance(schema, str):
-            schemas.append(json.loads(schema))
-
-    schemas: list[dict[str, Any]] = []
-
-    # FIXME(arpera):
-    # I definitely need to figure out what legacy and new formats come from
-    # Initially, I thought it comes from xgrammar side,
-    # but it looks like no, xgrammar does not declare legacy and new formats
-    # for structural tag.
-    # Then I discovered that we distinguish these formats on our side in vLLM:
-    # vllm/entrypoints/generate/base/protocol.py
-    # See LegacyStructuralTagResponseFormat and StructuralTagResponseFormat
-    # If it's only our invention then the question of removing legacy format
-    # needs to be discussed with maintainers
-
-    # Legacy format (uses "structures" field)
-    if "structures" in s_tag:
-        for entry in s_tag["structures"]:
-            if isinstance(entry, dict):
-                append_schema(entry.get("schema"))
-
-    # New format (used "format" field)
-    format_obj = s_tag.get("format")
-    if isinstance(format_obj, dict):
-        tags = format_obj.get("tags")
-        if isinstance(tags, list):
-            for tag in tags:
-                if not isinstance(tag, dict):
-                    continue
-                content = tag.get("content")
-                if not isinstance(content, dict):
-                    continue
-                if content.get("type") == "json_schema":
-                    append_schema(content.get("json_schema"))
-
-    return schemas
 
 
 def validate_xgrammar_grammar(sampling_params: SamplingParams) -> None:
@@ -496,12 +458,11 @@ def validate_xgrammar_grammar(sampling_params: SamplingParams) -> None:
 
             # IMPORTANT(arpera):
             # We need to validate json schemas inside structural tag
-            for schema in _get_embedded_json_schemas_in_structural_tag(s_tag):
-                if has_xgrammar_unsupported_json_features(schema):
-                    raise VLLMValidationError(
-                        "The provided JSON schema contains "
-                        "features not supported by xgrammar."
-                    )
+            if has_xgrammar_unsupported_json_features(s_tag):
+                raise VLLMValidationError(
+                    "The provided JSON schema contains "
+                    "features not supported by xgrammar."
+                )
 
             # Using the deprecated method of compiling structural tag
             if "structures" in s_tag:

@@ -191,10 +191,6 @@ def unsupported_multibranch_allof():
                 },
             },
         },
-        # Corner cases: empty allOf
-        {
-            "allOf": [],
-        },
     ]
 
 
@@ -292,6 +288,8 @@ def supported_allof_anyof_and_oneof():
                 {"type": "string"},
             ],
         },
+        # Corner cases: empty allOf, this is a valid schema
+        {"allOf": []},
         # multi-branch allOf:
         # is NOT supported yet, see vLLM issue #56556
         # single-branch anyOf:
@@ -540,6 +538,56 @@ class TestValidateXgrammarGrammar:
             },
         ]
 
+    @staticmethod
+    @pytest.fixture
+    def unsupported_json_schema_harmony():
+        """Example of structural tag that Harmony (gpt-oss) uses
+
+        Note(arpera):
+        The JSON schema is buried several levels inside the format tree, not
+        next to the usual top-level fields such as "structures" or "format.tags"
+        as all the other models do.
+        But Harmony is unique among them, so we MUST process this corner case.
+        """
+        embedded_schema = {
+            "allOf": [
+                {"type": "string"},
+                {"enum": ["a", "b"]},
+            ],
+        }
+        json_schema_content = {
+            "type": "json_schema",
+            "json_schema": embedded_schema,
+        }
+        return [
+            {
+                "format": {
+                    "type": "sequence",
+                    "elements": [
+                        {
+                            "type": "or",
+                            "elements": [
+                                {
+                                    "type": "tag",
+                                    "begin": "<|channel|>final json<|message|>",
+                                    "content": json_schema_content,
+                                    "end": "<|end|>",
+                                },
+                                {
+                                    "type": "tag",
+                                    "begin": (
+                                        "<|channel|>final <|constrain|>json<|message|>"
+                                    ),
+                                    "content": json_schema_content,
+                                    "end": ["<|end|>", ""],
+                                },
+                            ],
+                        },
+                    ],
+                },
+            },
+        ]
+
     # ================================================
     # Main interface
     # ================================================
@@ -548,6 +596,7 @@ class TestValidateXgrammarGrammar:
         "schema_type",
         [
             "unsupported_json_schema_embedded_in_structural_tag",
+            "unsupported_json_schema_harmony",
         ],
     )
     def test_unsupported_request(self, schema_type, request):
