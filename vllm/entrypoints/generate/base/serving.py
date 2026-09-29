@@ -151,9 +151,10 @@ class OutputTokenMetricsTracker:
     ) -> None:
         # Parsers can revise a provisional count when a boundary that was
         # buffered across decode batches becomes complete. Keep the latest
-        # count as authoritative and retain observations for timing recovery.
+        # count as authoritative and retain count changes for timing recovery.
         state.token_count = cumulative_count
-        state.observations.append((cumulative_count, batch_ts))
+        if not state.observations or state.observations[-1][0] != cumulative_count:
+            state.observations.append((cumulative_count, batch_ts))
 
     def build(self) -> OutputTokenMetrics | None:
         if not self.classification_available:

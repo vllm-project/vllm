@@ -1008,16 +1008,13 @@ class OpenAIServingChat(GenerateBaseServing):
                 elif collect_output_token_metrics:
                     final_res.add(res, aggregate=True)
                     final_res.metrics = res.metrics
-                    # DELTA outputs carry these request-wide values only on
-                    # their final chunk; RequestOutput.add merges token data
-                    # but intentionally does not copy these optional fields.
+                    # DELTA outputs carry these values only on their final
+                    # chunk; RequestOutput.add does not copy them.
                     outputs_by_index = {
                         output.index: output for output in final_res.outputs
                     }
                     for output in res.outputs:
                         aggregated = outputs_by_index[output.index]
-                        if output.routed_experts is not None:
-                            aggregated.routed_experts = output.routed_experts
                         if output.sampling_mask is not None:
                             aggregated.sampling_mask = output.sampling_mask
                         if output.spec_decode_metrics is not None:

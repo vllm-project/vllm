@@ -204,9 +204,10 @@ segments.
 `reasoning.token_count` uses the same parser classification as the endpoint's
 existing reasoning-token usage field. It therefore equals
 `usage.output_tokens_details.reasoning_tokens` for Responses and
-`usage.completion_tokens_details.reasoning_tokens` for Chat Completions. For
-Harmony, this follows the existing usage convention in which analysis and
-addressed commentary or tool-call tokens count as reasoning.
+`usage.completion_tokens_details.reasoning_tokens` for Chat Completions when
+that optional usage detail is enabled. For Harmony, non-special payload tokens
+in analysis and addressed commentary or tool calls count as reasoning; Harmony
+framing and control tokens remain unclassified.
 
 `content.token_count` represents final-answer payload tokens.
 `unclassified_token_count` contains remaining boundary, framing, and other
