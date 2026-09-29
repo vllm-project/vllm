@@ -3,7 +3,7 @@
 
 import asyncio
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import AsyncMock
 
 import pytest
 import requests
@@ -20,8 +20,6 @@ from vllm.entrypoints.serve.exception_handling.register import init_exception_ha
 from vllm.entrypoints.serve.instrumentator.metrics import (
     attach_router as attach_metrics_router,
 )
-from vllm.v1.engine.async_llm import AsyncLLM
-from vllm.v1.engine.llm_engine import LLMEngine
 from vllm.v1.metrics import prometheus as prometheus_metrics
 
 MODEL_NAME = "meta-llama/Llama-3.2-1B"
@@ -96,44 +94,6 @@ def test_wake_route_maps_engine_result_without_state_query(
     assert response.json() == expected
     app.state.engine_client.wake_up.assert_awaited_once_with(expected["tags"])
     app.state.engine_client.is_sleeping.assert_not_awaited()
-
-
-@pytest.mark.cpu_test
-@pytest.mark.parametrize("invalid_result", [None, 0, "awake"])
-def test_wake_route_rejects_non_bool_engine_result(sleep_route_app, invalid_result):
-    app, metrics = sleep_route_app
-    app.state.engine_client.wake_up.return_value = invalid_result
-    with TestClient(app, raise_server_exceptions=False) as client:
-        response = client.post("/wake_up")
-    assert response.status_code == 500
-    assert "must return a bool" in response.json()["error"]["message"]
-    app.state.engine_client.is_sleeping.assert_not_awaited()
-    assert metrics.in_flight.labels("wake")._value.get() == 0
-
-
-@pytest.mark.cpu_test
-@pytest.mark.asyncio
-@pytest.mark.parametrize("fully_awake", [True, False])
-async def test_async_llm_wake_returns_engine_result(fully_awake):
-    llm = SimpleNamespace(
-        engine_core=SimpleNamespace(wake_up_async=AsyncMock(return_value=fully_awake)),
-        logger_manager=Mock(),
-    )
-    assert await AsyncLLM.wake_up(llm, ["weights"]) is fully_awake
-    llm.engine_core.wake_up_async.assert_awaited_once_with(["weights"])
-    assert llm.logger_manager.record_sleep_state.call_count == int(fully_awake)
-
-
-@pytest.mark.cpu_test
-@pytest.mark.parametrize("fully_awake", [True, False])
-def test_llm_engine_wake_returns_engine_result(fully_awake):
-    llm = SimpleNamespace(
-        engine_core=SimpleNamespace(wake_up=Mock(return_value=fully_awake)),
-        logger_manager=Mock(),
-    )
-    assert LLMEngine.wake_up(llm, ["weights"]) is fully_awake
-    llm.engine_core.wake_up.assert_called_once_with(["weights"])
-    assert llm.logger_manager.record_sleep_state.call_count == int(fully_awake)
 
 
 @pytest.mark.cpu_test

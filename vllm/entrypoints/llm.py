@@ -852,8 +852,7 @@ class LLM(BeamSearchOfflineMixin, PoolingOfflineMixin, OfflineInferenceMixin):
                 Use tags=["scheduling"] to resume from level 0 sleep.
 
         Returns:
-            True if the engine is fully awake, False if some resources or
-            scheduling remain asleep after a partial wake.
+            Whether the engine is fully awake.
 
         """
         return self.llm_engine.wake_up(tags)

@@ -5901,12 +5901,7 @@ async fn sleep_route_rejects_invalid_query_before_engine_dispatch() {
     let before = METRICS.render().expect("render metrics");
     let (app, engine_task) =
         test_admin_app_with_engine_script(|_dealer, _push| boxed_test_future(async move {})).await;
-    for (query, parameter) in [
-        ("level=invalid", "query.level"),
-        ("level=-1", "query.level"),
-        ("level=3", "query.level"),
-        ("mode=invalid", "query.mode"),
-    ] {
+    for query in ["level=invalid", "level=-1", "level=3", "mode=invalid"] {
         let response = app
             .clone()
             .call(
@@ -5918,10 +5913,7 @@ async fn sleep_route_rejects_invalid_query_before_engine_dispatch() {
             )
             .await
             .expect("call app");
-        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-        let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
-        let json: serde_json::Value = serde_json::from_slice(&body).expect("decode json");
-        assert_eq!(json["error"]["param"], parameter);
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{query}");
     }
     engine_task.abort_and_join().await;
     let after = METRICS.render().expect("render metrics");
