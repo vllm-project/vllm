@@ -46,28 +46,37 @@ fn build_environment(template: String) -> Result<Environment<'static>> {
     Ok(env)
 }
 
-/// Error source attached by [`raise_exception`], so that a template rejecting
-/// its input can be told apart from a template that fails to render.
+/// Error source attached by [`raise_exception`], so that an exception thrown
+/// by the template can be told apart from a template that fails to render.
 #[derive(Debug, ThisError)]
 #[error("{message}")]
-struct RaisedTemplateException {
+struct ThrownTemplateException {
     message: String,
 }
 
-/// Abort rendering with the template's own message.
+/// Throw an exception with the template's own message, aborting rendering.
 fn raise_exception(message: Value) -> std::result::Result<Value, MinijinjaError> {
-    let message = message.to_string();
-    Err(
-        MinijinjaError::new(ErrorKind::InvalidOperation, message.clone())
-            .with_source(RaisedTemplateException { message }),
-    )
+    let thrown = ThrownTemplateException {
+        message: message.to_string(),
+    };
+    let error = MinijinjaError::new(
+        ErrorKind::InvalidOperation,
+        "chat template threw an exception",
+    );
+    Err(error.with_source(thrown))
 }
 
-/// Return the template's message if `error` came from [`raise_exception`].
-fn raised_exception_message(error: &MinijinjaError) -> Option<String> {
-    iter::successors(error.source(), |&error| error.source())
-        .find_map(|error| error.downcast_ref::<RaisedTemplateException>())
-        .map(|raised| raised.message.clone())
+impl TemplateError {
+    /// Return the template's own message if rendering was aborted by
+    /// [`raise_exception`].
+    pub(super) fn thrown_message(&self) -> Option<&str> {
+        let Self::Jinja(error) = self else {
+            return None;
+        };
+        iter::successors(error.source(), |&error| error.source())
+            .find_map(|error| error.downcast_ref::<ThrownTemplateException>())
+            .map(|thrown| thrown.message.as_str())
+    }
 }
 
 #[serde_with::skip_serializing_none]
@@ -154,10 +163,7 @@ impl CompiledChatTemplate {
     /// prompt.
     pub fn apply(&self, ctx: TemplateContext<'_>) -> Result<String> {
         let tmpl = self.env.get_template("chat")?;
-        tmpl.render(ctx).map_err(|error| match raised_exception_message(&error) {
-            Some(message) => TemplateError::Raised { message },
-            None => TemplateError::from(error),
-        })
+        tmpl.render(ctx).map_err(TemplateError::from)
     }
 
     pub fn content_format(&self) -> ChatTemplateContentFormat {
@@ -238,9 +244,10 @@ mod tests {
             })
             .unwrap_err();
 
-        assert!(
-            matches!(&error, TemplateError::Raised { message } if message == "Unexpected reasoning effort high."),
-            "expected a raised template exception, got: {error:?}"
+        assert_eq!(
+            error.thrown_message(),
+            Some("Unexpected reasoning effort high."),
+            "expected an exception thrown by the template, got: {error:?}"
         );
     }
 
@@ -256,7 +263,7 @@ mod tests {
     }
 
     #[test]
-    fn test_unknown_function_is_not_reported_as_raised() {
+    fn test_unknown_function_is_not_reported_as_thrown() {
         let template = CompiledChatTemplate::new(
             "{{ undefined_helper('not registered') }}".to_string(),
             ChatTemplateContentFormatOption::Auto,
@@ -265,8 +272,9 @@ mod tests {
 
         let error = template.apply(TemplateContext::default()).unwrap_err();
 
-        assert!(
-            matches!(error, TemplateError::Jinja(_)),
+        assert_eq!(
+            error.thrown_message(),
+            None,
             "expected a jinja render error, got: {error:?}"
         );
     }

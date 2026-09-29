@@ -194,8 +194,8 @@ mod tests {
     }
 
     #[test]
-    fn chat_template_rejection_maps_to_invalid_request() {
-        let error = vllm_chat::Error::ChatTemplateRejected {
+    fn chat_template_throw_maps_to_invalid_request() {
+        let error = vllm_chat::Error::ChatTemplateThrown {
             message: "Unexpected reasoning effort high.".to_string(),
         };
         let api_error = chat_submit_error("failed to submit chat request", error);

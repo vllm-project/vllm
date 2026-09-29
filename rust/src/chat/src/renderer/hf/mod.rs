@@ -12,7 +12,6 @@ use vllm_text::backend::hf::{
     HfSpecialTokens, HfTokenizerConfig, ResolvedModelFiles, load_tokenizer_config,
 };
 
-use self::error::TemplateError;
 use self::format::{
     ChatTemplateContentFormat, ChatTemplateContentFormatOption as ContentFormatOption,
 };
@@ -227,9 +226,11 @@ impl HfChatRenderer {
                 template_kwargs: Some(&effective_template_kwargs),
                 special_tokens: self.special_tokens.as_ref(),
             })
-            .map_err(|error| match error {
-                TemplateError::Raised { message } => Error::ChatTemplateRejected { message },
-                error => Error::ChatTemplate(error.to_report_string()),
+            .map_err(|error| match error.thrown_message() {
+                Some(message) => Error::ChatTemplateThrown {
+                    message: message.to_owned(),
+                },
+                None => Error::ChatTemplate(error.to_report_string()),
             })?;
 
         let prompt = match &final_message_text {
@@ -988,8 +989,8 @@ mod tests {
         .unwrap_err();
 
         assert!(
-            matches!(&error, Error::ChatTemplateRejected { message } if message == "No user query found in messages."),
-            "expected a template rejection, got: {error:?}"
+            matches!(&error, Error::ChatTemplateThrown { message } if message == "No user query found in messages."),
+            "expected an exception thrown by the template, got: {error:?}"
         );
         assert!(error.is_request_validation_error());
     }

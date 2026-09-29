@@ -18,7 +18,7 @@ pub enum Error {
     #[error("chat template error: {0}")]
     ChatTemplate(String),
     #[error("{message}")]
-    ChatTemplateRejected { message: String },
+    ChatTemplateThrown { message: String },
     #[error("{0}")]
     InvalidReasoningEffort(String),
     #[error("{message}")]
@@ -114,7 +114,7 @@ impl Error {
     pub fn is_request_validation_error(&self) -> bool {
         match self {
             Self::PromptTooLong { .. }
-            | Self::ChatTemplateRejected { .. }
+            | Self::ChatTemplateThrown { .. }
             | Self::InvalidReasoningEffort(_)
             | Self::InvalidReasoningControl { .. }
             | Self::DuplicateToolName { .. }
