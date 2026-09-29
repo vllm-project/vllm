@@ -396,6 +396,27 @@ class TestDetokenizeDelta:
         # Bounded by a small constant independent of len(token_ids)
         assert max_window <= 32
 
+    def test_truncated_multibyte_char_is_held_back(self, derenderer, tokenizer):
+        """Output ending mid-character emits no U+FFFD: batch == stream == engine."""
+        emoji_ids = tokenizer.encode("🌈", add_special_tokens=False)
+        byte_ids = emoji_ids[-4:]
+        assert len(byte_ids) == 4
+        output_ids = byte_ids[:-1]
+
+        batch, _ = derenderer._detokenize_delta(
+            tokenizer, output_ids, DerenderStreamState()
+        )
+        streamed = self._chunked(derenderer, tokenizer, [[t] for t in output_ids])
+        engine = _decode_stream_expected(tokenizer, [], output_ids)
+
+        assert "�" not in batch
+        assert batch == streamed == engine
+
+        full, _ = derenderer._detokenize_delta(
+            tokenizer, byte_ids, DerenderStreamState()
+        )
+        assert full.endswith("🌈")
+
     def test_n_independent_streams_same_result(self, derenderer, tokenizer):
         """N parallel streams with the same token sequence give the same text."""
         token_ids = tokenizer.encode("parallel streams")[:8]
