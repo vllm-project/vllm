@@ -224,6 +224,10 @@ class Proxy:
                             detail=f"Request failed with status {response.status}: "
                             f"{error_content}",
                         )
+            except HTTPException:
+                # Re-raise as-is: the generic handler below would re-wrap it as a
+                # 500 and lose the upstream status code raised just above.
+                raise
             except aiohttp.ClientError as e:
                 logger.error("ClientError occurred: %s", str(e))
                 raise HTTPException(
