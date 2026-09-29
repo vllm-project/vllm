@@ -166,6 +166,34 @@ def test_prefill_producer_runs_explicit_replay_before_sampling():
     assert request.status == RequestStatus.FINISHED_LENGTH_CAPPED
 
 
+@pytest.mark.parametrize(
+    ("prompt_logprobs", "prompt_logprob_token_ids"),
+    (
+        (1, None),
+        (0, None),
+        (None, [0]),
+    ),
+)
+def test_prefill_side_replay_rejects_prompt_logprobs(
+    prompt_logprobs, prompt_logprob_token_ids
+):
+    scheduler = _replay_scheduler()
+    scheduler.prefill_side_swa_replay = True
+    request = create_requests(
+        num_requests=1,
+        num_tokens=NUM_PROMPT_TOKENS,
+        block_size=BLOCK_SIZE,
+        prompt_logprobs=prompt_logprobs,
+    )[0]
+    assert request.sampling_params is not None
+    request.sampling_params.prompt_logprob_token_ids = prompt_logprob_token_ids
+
+    with pytest.raises(
+        ValueError, match="Prefill-side SWA replay does not support prompt logprobs"
+    ):
+        scheduler.add_request(request)
+
+
 def test_hit_replays_window_without_reallocating():
     scheduler = _replay_scheduler()
     expected_replay = WINDOW

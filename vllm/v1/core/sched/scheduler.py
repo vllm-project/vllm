@@ -308,6 +308,15 @@ class Scheduler(SchedulerInterface):
                 "Prefill-side SWA replay requires --no-async-scheduling on "
                 "the KV producer."
             )
+        if (
+            self.prefill_side_swa_replay
+            and speculative_config is not None
+            and self.parallel_config.data_parallel_size > 1
+        ):
+            raise ValueError(
+                "Prefill-side SWA replay with speculative decoding requires "
+                "data_parallel_size=1 on the KV producer."
+            )
         self.num_prefill_lookahead = vllm_config.num_prefill_lookahead_tokens
         self.dynamic_sd_lookup: list[int] | None = None
         replay_draft_slots = (
@@ -2684,6 +2693,18 @@ class Scheduler(SchedulerInterface):
                 # Streaming-input session finished.
                 self.finish_requests(request.request_id, RequestStatus.FINISHED_ABORTED)
         else:
+            sampling_params = request.sampling_params
+            if (
+                self.prefill_side_swa_replay
+                and sampling_params is not None
+                and (
+                    sampling_params.prompt_logprobs is not None
+                    or sampling_params.prompt_logprob_token_ids is not None
+                )
+            ):
+                raise ValueError(
+                    "Prefill-side SWA replay does not support prompt logprobs."
+                )
             if request.resumable:
                 request.streaming_queue = deque()
             self._enqueue_waiting_request(request)
