@@ -14,6 +14,7 @@ import statistics
 import tempfile
 import time
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from pathlib import Path
 
 import torch
@@ -25,6 +26,8 @@ from vllm.triton_utils import triton
 
 from .segmented_attention import (
     MAX_QUERY_LEN,
+    _segmented_attention_reduce,
+    _segmented_attention_stage,
     compile_segmented_attention,
     run_segmented_attention,
     segmented_query_capacity,
@@ -872,6 +875,29 @@ def _valid_record(record, heads, kv_heads, dim, fp8):
     )
 
 
+@contextmanager
+def _temporary_tuning_kernels(device):
+    """Release tuning-only HIP modules before profiling the KV-cache budget."""
+    device_index = torch.device(device).index
+    if device_index is None:
+        device_index = torch.accelerator.current_device_index()
+    caches = []
+    for kernel in (_segmented_attention_stage, _segmented_attention_reduce):
+        cache = kernel.device_caches[device_index][0]
+        caches.append((cache, set(cache)))
+    try:
+        yield
+    finally:
+        torch.accelerator.synchronize(device)
+        for cache, existing_keys in caches:
+            for key in cache.keys() - existing_keys:
+                del cache[key]
+        # CompiledKernel destruction unloads the HIP module. Keep pre-existing
+        # kernels alive, since an earlier graph capture may reference them.
+        gc.collect()
+        torch.accelerator.empty_cache()
+
+
 @torch.inference_mode()
 def warmup_segmented_attention(
     device,
@@ -1047,47 +1073,52 @@ def warmup_segmented_attention(
         local_failed = 0
         fatal = None
         try:
-            for workload in local_workloads:
-                try:
-                    record = _tune_workload(
-                        device,
-                        dtype,
-                        kv_dtype,
-                        heads,
-                        kv_heads,
-                        dim,
-                        page,
-                        scale,
-                        max_tokens,
-                        workload,
-                        sliding_window=sliding_window,
-                        causal=causal,
-                        has_sinks=has_sinks,
-                        physical_seq_len=(
-                            physical_max_len
-                            if has_sinks and sliding_window >= 0
-                            else None
-                        ),
-                    )
-                except (torch.OutOfMemoryError, RuntimeError, AssertionError) as error:
-                    local_failed += 1
-                    logger.warning(
-                        "Skipping segmented attention tuning workload %s: %s",
-                        workload,
-                        error,
-                    )
-                else:
-                    local_records[workload] = record
-                    _save(
-                        shard_path,
-                        {
-                            "identity": identity,
-                            "records": list(local_records.values()),
-                        },
-                    )
-                finally:
-                    gc.collect()
-                    torch.accelerator.empty_cache()
+            with _temporary_tuning_kernels(device):
+                for workload in local_workloads:
+                    try:
+                        record = _tune_workload(
+                            device,
+                            dtype,
+                            kv_dtype,
+                            heads,
+                            kv_heads,
+                            dim,
+                            page,
+                            scale,
+                            max_tokens,
+                            workload,
+                            sliding_window=sliding_window,
+                            causal=causal,
+                            has_sinks=has_sinks,
+                            physical_seq_len=(
+                                physical_max_len
+                                if has_sinks and sliding_window >= 0
+                                else None
+                            ),
+                        )
+                    except (
+                        torch.OutOfMemoryError,
+                        RuntimeError,
+                        AssertionError,
+                    ) as error:
+                        local_failed += 1
+                        logger.warning(
+                            "Skipping segmented attention tuning workload %s: %s",
+                            workload,
+                            error,
+                        )
+                    else:
+                        local_records[workload] = record
+                        _save(
+                            shard_path,
+                            {
+                                "identity": identity,
+                                "records": list(local_records.values()),
+                            },
+                        )
+                    finally:
+                        gc.collect()
+                        torch.accelerator.empty_cache()
         except BaseException as error:
             fatal = f"{type(error).__name__}: {error}"
 

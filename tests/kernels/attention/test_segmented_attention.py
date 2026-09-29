@@ -566,6 +566,96 @@ def segmented_tuner(tmp_path, monkeypatch):
     )
 
 
+@pytest.mark.parametrize("fail", [False, True])
+@pytest.mark.parametrize("device", ["cuda", "cuda:0"])
+def test_segmented_tuning_releases_only_new_kernel_modules(monkeypatch, fail, device):
+    """Tuning releases candidate modules even on failure without invalidating graphs."""
+    import weakref
+    from types import SimpleNamespace
+
+    from vllm.v1.attention.ops import segmented_attention_tuning as tuning
+
+    class Module:
+        pass
+
+    existing = Module()
+    other_device = Module()
+    caches = [{"existing": existing} for _ in range(2)]
+    for name, cache in zip(
+        ("_segmented_attention_stage", "_segmented_attention_reduce"), caches
+    ):
+        monkeypatch.setattr(
+            tuning,
+            name,
+            SimpleNamespace(device_caches={0: (cache,), 1: ({"other": other_device},)}),
+        )
+    monkeypatch.setattr(torch.accelerator, "synchronize", lambda _: None)
+    monkeypatch.setattr(torch.accelerator, "empty_cache", lambda: None)
+    monkeypatch.setattr(torch.accelerator, "current_device_index", lambda: 0)
+    references = []
+    try:
+        with tuning._temporary_tuning_kernels(torch.device(device)):
+            for cache in caches:
+                cache["candidate"] = Module()
+                references.append(weakref.ref(cache["candidate"]))
+            if fail:
+                raise RuntimeError("tuning failed")
+    except RuntimeError:
+        assert fail
+    assert all(reference() is None for reference in references)
+    assert all(cache == {"existing": existing} for cache in caches)
+    for kernel in (
+        tuning._segmented_attention_stage,
+        tuning._segmented_attention_reduce,
+    ):
+        assert kernel.device_caches[1][0] == {"other": other_device}
+
+
+def test_segmented_tuning_cleanup_preserves_graphs_and_reloads_kernels():
+    """Existing graphs survive cleanup, and released variants still run correctly."""
+    import weakref
+
+    from vllm.v1.attention.ops import segmented_attention_tuning as tuning
+
+    case = _make_paged_attention_case(
+        [3],
+        [11],
+        num_heads=10,
+        num_kv_heads=2,
+        head_size=128,
+        fp8=False,
+        block_size=16,
+    )
+    output = torch.empty_like(case["query"])
+    _run_segmented_case(case, output, 3, force_splits=1)
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        _run_segmented_case(case, output, 3, force_splits=1)
+    caches = [
+        kernel.device_caches[0][0]
+        for kernel in (
+            tuning._segmented_attention_stage,
+            tuning._segmented_attention_reduce,
+        )
+    ]
+    keys = [set(cache) for cache in caches]
+    with tuning._temporary_tuning_kernels(torch.device("cuda:0")):
+        _run_segmented_case(case, output, 3, force_splits=2)
+        references = [
+            weakref.ref(cache[key])
+            for cache, existing in zip(caches, keys)
+            for key in cache.keys() - existing
+        ]
+        assert references
+    assert all(reference() is None for reference in references)
+    output.fill_(float("nan"))
+    graph.replay()
+    torch.testing.assert_close(output.float(), case["reference"], atol=0.01, rtol=0.01)
+    output.fill_(float("nan"))
+    _run_segmented_case(case, output, 3, force_splits=2)
+    torch.testing.assert_close(output.float(), case["reference"], atol=0.01, rtol=0.01)
+
+
 @pytest.mark.parametrize(
     "mode",
     [
