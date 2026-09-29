@@ -303,6 +303,24 @@ class MoRIIOConnector(KVConnectorBase_V1, SupportsHMA):
         assert self.connector_scheduler is not None
         self.connector_scheduler.on_new_request(request)
 
+    def get_sync_load_block_ids(self, request: "Request") -> list[int]:
+        scheduler = self.connector_scheduler
+        if (
+            self.mode != MoRIIOMode.READ
+            or not self.kv_transfer_config.is_kv_consumer
+            or scheduler is None
+            or not scheduler._has_mamba
+            or self._vllm_config.cache_config.get_resolved_kv_cache_layout().name
+            not in ("LBHNC", "LBNHC")
+        ):
+            return []
+        pending = scheduler._reqs_need_recv.get(request.request_id)
+        if pending is None:
+            return []
+        # Hybrid READ fills these entire attention pages and aborts on failure.
+        # The destination list already excludes local hits and lookahead blocks.
+        return pending[1][0]
+
     def build_connector_meta(
         self,
         scheduler_output: SchedulerOutput,

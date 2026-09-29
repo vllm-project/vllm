@@ -553,6 +553,16 @@ class KVConnectorBase_V1(ABC):
         """
         pass
 
+    def get_sync_load_block_ids(self, request: "Request") -> list[int]:
+        """Return blocks whose synchronous load replaces worker zeroing.
+
+        Called after update_state_after_alloc. Each returned block must be
+        fully initialized before forward consumes it. A failed load must abort
+        forward instead of recomputing with uninitialized blocks.
+        Defaults to no blocks.
+        """
+        return []
+
     @abstractmethod
     def build_connector_meta(
         self, scheduler_output: SchedulerOutput

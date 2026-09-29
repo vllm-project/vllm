@@ -4,6 +4,7 @@ import filecmp
 import shutil
 import tempfile
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock
 
@@ -214,6 +215,18 @@ def test_loaded_groups_follow_the_connector_serving_the_request(mc, chosen):
     assert mc.get_num_new_matched_tokens(request, 0) == (16, True)
     assert mc.get_loaded_kv_cache_group_ids(request) == (chosen,)
     mc._connectors[1 - chosen].get_loaded_kv_cache_group_ids.assert_not_called()
+
+
+def test_sync_load_zeroing_exclusion_uses_only_selected_connector(mc):
+    """An unselected child cannot suppress initialization of fresh pages."""
+    request = SimpleNamespace(request_id="r")
+    first, second = mc.sub_connectors
+    first.get_sync_load_block_ids.return_value = [1, 2]
+    second.get_sync_load_block_ids.return_value = [3]
+    assert mc.get_sync_load_block_ids(request) == []
+    mc._requests_to_connector["r"] = 1
+    assert mc.get_sync_load_block_ids(request) == [3]
+    first.get_sync_load_block_ids.assert_not_called()
 
 
 def test_multi_connector_mem_pool_context_none(mc: MultiConnector):
