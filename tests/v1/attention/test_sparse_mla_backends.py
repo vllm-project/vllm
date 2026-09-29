@@ -2016,6 +2016,64 @@ def test_hisparse_maps_speculative_rows_through_request_state():
 
 
 @requires_hisparse_ops
+@pytest.mark.parametrize("num_rows", [2, 8])
+def test_hisparse_speculative_rows_resolve_host_misses_consistently(num_rows):
+    """Verification rows of one request must agree on its hot-buffer slots.
+
+    Each row resolved residency in its own thread block against the request's
+    shared slot ownership and LRU, so rows missing on different host rows could
+    claim the same free slot. One row's hot index then pointed at a slot holding
+    another row's KV.
+    """
+    device = torch.device(DEVICE_TYPE)
+    block_size, row_width, top_k = 64, 64, 128
+    num_blocks = 2 * num_rows * top_k // block_size
+
+    kv_pool = torch.randn(
+        (num_blocks + 1, block_size, row_width), dtype=torch.float32
+    ).pin_memory()
+    flat_pool = kv_pool.reshape(-1, row_width)
+    runtime = _make_hisparse_runtime(
+        top_k=top_k,
+        device_buffer_size=num_rows * top_k,
+        max_num_reqs=1,
+        row_width=row_width,
+        block_size=block_size,
+        max_swap_rows=num_rows,
+    )
+    runtime.bind_source_cache(kv_pool)
+    cache = HiSparseCacheHandle(runtime)
+    cache.all_context_pages_resident = False
+
+    block_table = torch.arange(
+        1, num_blocks + 1, dtype=torch.int32, device=device
+    ).view(1, num_blocks)
+    req_ids = torch.zeros(num_rows, dtype=torch.int32, device=device)
+    rows = torch.arange(num_rows, dtype=torch.int32, device=device)[:, None]
+    base = torch.arange(top_k, dtype=torch.int32, device=device)[None, :]
+    for step in range(4):
+        runtime.begin_forward()
+        # Disjoint rows shifted by half a top-k per step: all misses first,
+        # then half hits and half misses.
+        topk = (rows * top_k + base + step * (top_k // 2)) % (num_blocks * block_size)
+        hot_indices = cache.swap_in(
+            req_id_per_token=req_ids,
+            block_table=block_table,
+            logical_topk_indices=topk.clone(),
+            block_size=block_size,
+        )
+        torch.accelerator.synchronize()
+
+        global_ref = _triton_convert_reference_impl(
+            req_ids, block_table, topk, block_size, top_k
+        )
+        gathered = runtime.hot.attention_cache.reshape(-1, row_width)[
+            hot_indices.to(torch.long)
+        ].cpu()
+        torch.testing.assert_close(gathered, flat_pool[global_ref.cpu().to(torch.long)])
+
+
+@requires_hisparse_ops
 def test_hisparse_resident_rows_bypass_hot_lru():
     device = torch.device(DEVICE_TYPE)
     block_size, row_width = 64, 8
