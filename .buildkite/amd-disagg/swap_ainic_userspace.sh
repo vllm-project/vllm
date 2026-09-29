@@ -3,8 +3,8 @@
 # container to a different repo.radeon.com channel.
 #
 # Only libionic1 / libionic-dev / ionic-common exist in this image. The kernel
-# modules (ionic-dkms, pds-dkms, tawk-ipc-dkms) and NIC firmware live on the
-# host and are NOT touched here.
+# modules (ionic-dkms and required libraries) and the NIC firmware live on the host and are
+# NOT touched here.
 #
 #   ./swap_ainic_userspace.sh --list
 #   ./swap_ainic_userspace.sh 1.117.5-a-56

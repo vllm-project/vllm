@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, Any
 
 import torch
 from torch import nn
-from transformers import PretrainedConfig
+from transformers import PreTrainedConfig
 
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
@@ -54,7 +54,7 @@ from vllm.sequence import IntermediateTensors
 # Only used for type hinting.
 if TYPE_CHECKING:
 
-    class Plamo3Config(PretrainedConfig):  # type: ignore
+    class Plamo3Config(PreTrainedConfig):  # type: ignore
         model_type: str = "plamo3"
 
         hidden_size: int
@@ -218,10 +218,14 @@ class Plamo3AttentionMixer(nn.Module):
 
         q_shape = q.shape
         q = q.reshape(q_shape[:-1] + (q_shape[-1] // self.head_dim, self.head_dim))
-        q = self.q_norm.forward_native(q).reshape(q_shape)
+        normalized_q = self.q_norm.forward_native(q)
+        assert isinstance(normalized_q, torch.Tensor)
+        q = normalized_q.reshape(q_shape)
         k_shape = k.shape
         k = k.reshape(k_shape[:-1] + (k_shape[-1] // self.head_dim, self.head_dim))
-        k = self.k_norm.forward_native(k).reshape(k_shape)
+        normalized_k = self.k_norm.forward_native(k)
+        assert isinstance(normalized_k, torch.Tensor)
+        k = normalized_k.reshape(k_shape)
 
         q, k = self.rotary_emb(positions, q, k)
         attn_output = self.attn(q, k, v)

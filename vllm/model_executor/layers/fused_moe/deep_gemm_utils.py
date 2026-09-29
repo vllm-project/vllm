@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Taken from https://github.com/ModelTC/LightLLM/blob/8ed97c74c18f11505b048b1ba00ba5c0cef8bff6/lightllm/common/fused_moe/deepep_scatter_gather.py
+"""Taken from https://github.com/ModelTC/LightLLM/blob/8ed97c74c18f11505b048b1ba00ba5c0cef8bff6/lightllm/common/fused_moe/deepep_scatter_gather.py
 and updated to fit vllm needs and terminology.
 """
 
@@ -394,12 +393,13 @@ def _fwd_kernel_ep_gather(
                 source_token_index = tl.load(
                     input_index + cur_token * input_index_stride0 + topk_index
                 )
+                source_token_index_i64 = source_token_index.to(tl.int64)
                 acc_weight = tl.load(
                     recv_topk_weight + cur_token * recv_topk_weight_stride0 + topk_index
                 )
                 tmp = tl.load(
                     input_tensor
-                    + source_token_index * input_tensor_stride0
+                    + source_token_index_i64 * input_tensor_stride0
                     + cur_block * BLOCK_D
                     + off_d
                 )

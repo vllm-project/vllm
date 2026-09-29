@@ -12,12 +12,15 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
     RoutingMethodType,
 )
+from vllm.model_executor.layers.fused_moe.moe_output import (
+    UnfinalizedMoEOutput,
+    convert_flashinfer_moe_output,
+)
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceNoOP,
 )
 from vllm.model_executor.layers.fused_moe.utils import (
     fi_moe_largest_bucket,
-    trtllm_moe_pack_topk_ids_weights,
 )
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     activation_to_flashinfer_int,
@@ -59,8 +62,7 @@ def prepare_deepseek_fp8_x_sf(x: torch.Tensor, x_sf: torch.Tensor) -> torch.Tens
 
 
 class TrtLlmFp8ExpertsBase:
-    """
-    Fp8 TRTLLM-Gen MoE kernels. Shared base for modular and monolithic
+    """Fp8 TRTLLM-Gen MoE kernels. Shared base for modular and monolithic
     interfaces.
     """
 
@@ -81,18 +83,26 @@ class TrtLlmFp8ExpertsBase:
         )
         if not supported:
             return supported, reason
-        # FlashInfer accepts gemm1_alpha/beta/clamp_limit only for MXFP8; the
-        # DeepSeek-FP8 block-scale kernel rejects them and the per-tensor kernel
-        # has no clamp at all, so a model-requested SwiGLU clamp cannot be
-        # honored on those paths.
         if (
             moe_config.swiglu_limit is not None
             or moe_config.swiglu_alpha is not None
             or moe_config.swiglu_beta is not None
-        ) and (weight_key, activation_key) != (kMxfp8Static, kMxfp8Dynamic):
+        ) and (
+            (weight_key, activation_key)
+            not in (
+                (kMxfp8Static, kMxfp8Dynamic),
+                (kFp8Static128BlockSym, kFp8Dynamic128Sym),
+            )
+            or moe_config.activation
+            not in (
+                MoEActivation.SILU,
+                MoEActivation.SWIGLUOAI_UNINTERLEAVE,
+            )
+        ):
             return False, (
                 "the TRTLLM FP8 kernels apply the SwiGLU alpha/beta/clamp "
-                "parameters only for MXFP8 weights"
+                "parameters only for block-scaled weights with a SwiGLU "
+                f"activation, but got {weight_key} and {moe_config.activation}"
             )
         if moe_config.num_experts > 2048:
             return False, (
@@ -187,9 +197,7 @@ class TrtLlmFp8ExpertsBase:
 
 
 class TrtLlmFp8ExpertsModular(TrtLlmFp8ExpertsBase, mk.FusedMoEExpertsModular):
-    """
-    Fp8 TRTLLM-Gen MoE kernels. Supports modular interface.
-    """
+    """Fp8 TRTLLM-Gen MoE kernels. Supports modular interface."""
 
     @staticmethod
     def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
@@ -269,12 +277,11 @@ class TrtLlmFp8ExpertsModular(TrtLlmFp8ExpertsBase, mk.FusedMoEExpertsModular):
         workspace2: torch.Tensor,
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
         apply_router_weight_on_input: bool,
-    ):
+    ) -> UnfinalizedMoEOutput | None:
         import flashinfer
         from flashinfer.fused_moe import Fp8QuantizationType, WeightLayout
 
-        # Pack topk ids and weights into format expected by the kernel.
-        packed_topk_ids = trtllm_moe_pack_topk_ids_weights(topk_ids, topk_weights)
+        topk_ids = topk_ids.to(dtype=torch.int32)
 
         if a1q_scale is None:
             raise RuntimeError(
@@ -294,8 +301,10 @@ class TrtLlmFp8ExpertsModular(TrtLlmFp8ExpertsBase, mk.FusedMoEExpertsModular):
             weight_layout = WeightLayout.BlockMajorK
             hidden_states_scale = prepare_deepseek_fp8_x_sf(hidden_states, a1q_scale)
 
-        flashinfer.fused_moe.trtllm_fp8_block_scale_routed_moe(
-            topk_ids=packed_topk_ids,
+        num_tokens = hidden_states.shape[0]
+        defer = self.moe_config.should_defer_moe_finalize(num_tokens)
+        flashinfer_output = flashinfer.fused_moe.trtllm_fp8_block_scale_routed_moe(
+            topk_ids=(topk_ids, topk_weights),
             routing_bias=None,
             hidden_states=hidden_states,
             hidden_states_scale=hidden_states_scale,
@@ -318,15 +327,24 @@ class TrtLlmFp8ExpertsModular(TrtLlmFp8ExpertsBase, mk.FusedMoEExpertsModular):
             use_shuffled_weight=use_shuffled_weight,
             weight_layout=weight_layout,
             fp8_quantization_type=fp8_quant_type,
-            output=output,
+            do_finalize=not defer,
+            output=None if defer else output,
             tune_max_num_tokens=fi_moe_largest_bucket(self.moe_config),
         )
+        if not defer:
+            return None
+        routed_output = convert_flashinfer_moe_output(
+            flashinfer_output,
+            do_finalize=False,
+            num_tokens=num_tokens,
+            top_k=topk_ids.size(1),
+        )
+        assert isinstance(routed_output, UnfinalizedMoEOutput)
+        return routed_output
 
 
 class TrtLlmFp8ExpertsMonolithic(TrtLlmFp8ExpertsBase, mk.FusedMoEExpertsMonolithic):
-    """
-    Fp8 TRTLLM-Gen MoE kernels. Supports monolithic interface.
-    """
+    """Fp8 TRTLLM-Gen MoE kernels. Supports monolithic interface."""
 
     def supports_routing_replay_capture(self) -> bool:
         return True

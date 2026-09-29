@@ -66,7 +66,7 @@ from vllm.platforms import PlatformEnum
             "MarlinMxfp8LinearKernel",
             "EmulationMxfp8LinearKernel",
             init_mxfp8_linear_kernel,
-            {},
+            {"weight_shape": (2048, 2048)},
         ),
         (
             B12xTensorFP8ScaledMMLinearKernel,
@@ -115,7 +115,9 @@ def test_b12x_backend_registration_priority_and_selection(
     assert names.index(before) < names.index(kernel_cls.__name__) < names.index(after)
 
     monkeypatch.setattr(linear_mod.current_platform, "_enum", PlatformEnum.CUDA)
-    monkeypatch.setattr(linear_mod, "_get_linear_backend", lambda: "b12x")
+    monkeypatch.setattr(
+        linear_mod, "_get_linear_backend", lambda *, quantization: "b12x"
+    )
     monkeypatch.setattr(
         kernel_cls,
         "is_supported",
@@ -363,7 +365,7 @@ def test_b12x_tensor_fp8_apply_quantizes_and_uses_packed_weight(
 
 def test_b12x_mxfp8_can_implement_supported_config() -> None:
     can_implement, reason = B12xMxfp8LinearKernel.can_implement(
-        Mxfp8LinearLayerConfig()
+        Mxfp8LinearLayerConfig(weight_shape=(256, 512))
     )
 
     assert can_implement
@@ -784,7 +786,14 @@ def test_b12x_backend_preserves_w4a16_fallback(monkeypatch) -> None:
     import vllm.model_executor.kernels.linear as linear_mod
 
     monkeypatch.setattr(linear_mod.current_platform, "_enum", PlatformEnum.CUDA)
-    monkeypatch.setattr(linear_mod, "_get_linear_backend", lambda: "b12x")
+    monkeypatch.setattr(
+        linear_mod, "_get_linear_backend", lambda *, quantization: "b12x"
+    )
+    monkeypatch.setitem(
+        linear_mod._POSSIBLE_NVFP4_KERNELS,
+        PlatformEnum.CUDA,
+        [B12xNvFp4LinearKernel, MarlinNvFp4LinearKernel],
+    )
     monkeypatch.setattr(
         MarlinNvFp4LinearKernel,
         "is_supported",
