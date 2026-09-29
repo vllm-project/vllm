@@ -1638,11 +1638,6 @@ class FusedMoEKernelMonolithicImpl:
                     f"kernel {type(self.fused_experts).__name__}."
                 )
             routing_replay_out = routing_sink.buffer[: len(a1q)]
-        hash_kwargs = (
-            {"input_ids": input_ids, "hash_indices_table": hash_indices_table}
-            if hash_indices_table is not None
-            else {}
-        )
         fused_out = self.fused_experts.apply(
             hidden_states=a1q,
             w1=w1,
