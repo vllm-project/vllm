@@ -1,6 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import sys
+from types import ModuleType
+
 import pytest
 import torch
 from torch._subclasses.fake_tensor import FakeTensorMode
@@ -50,6 +53,26 @@ def test_registered_attention_wrapper_fake_layouts():
         )
 
         assert all(output.is_contiguous() for output in outputs)
+
+
+def test_aiter_flash_attn_omits_out_and_returns_contiguous_output(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    aiter = ModuleType("aiter")
+
+    def flash_attn_varlen_func(q, k, v, **kwargs):
+        assert "out" not in kwargs
+        return q
+
+    aiter.__dict__["flash_attn_varlen_func"] = flash_attn_varlen_func
+    monkeypatch.setitem(sys.modules, "aiter", aiter)
+    q = _noncontiguous_bshd()
+    assert not q.is_contiguous()
+
+    output = vit_attn_wrappers.flash_attn_maxseqlen_wrapper(q, q, q, 1, True, None)
+
+    assert torch.equal(output, q)
+    assert output.is_contiguous()
 
 
 @pytest.mark.skipif(not current_platform.is_cuda_alike(), reason="Requires GPU")
