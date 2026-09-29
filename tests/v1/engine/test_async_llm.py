@@ -50,6 +50,12 @@ SINGLE_SEQ_ENGINE_ARGS = AsyncEngineArgs(
     max_num_seqs=1,
 )
 
+SLEEP_ENGINE_ARGS = AsyncEngineArgs(
+    model="meta-llama/Llama-3.2-1B-Instruct",
+    enforce_eager=True,
+    enable_sleep_mode=True,
+)
+
 VISION_ENGINE_ARGS = AsyncEngineArgs(
     model="Qwen/Qwen2-VL-2B-Instruct", enforce_eager=True
 )
@@ -69,13 +75,16 @@ VISION_PROMPT = {
 
 
 async def _generate(engine: AsyncLLM, request_id: str, n: int = 1) -> RequestOutput:
-    async for out in engine.generate(
-        request_id=request_id,
-        prompt=TEXT_PROMPT,
-        sampling_params=SamplingParams(max_tokens=5, n=n),
-    ):
-        pass
-    return out
+    async def run() -> RequestOutput:
+        async for out in engine.generate(
+            request_id=request_id,
+            prompt=TEXT_PROMPT,
+            sampling_params=SamplingParams(max_tokens=5, n=n),
+        ):
+            pass
+        return out
+
+    return await asyncio.wait_for(run(), timeout=60)
 
 
 def _mock_async_llm_dependencies(monkeypatch: pytest.MonkeyPatch):
@@ -1102,25 +1111,33 @@ async def test_pause_keep_multi_request():
 @pytest.mark.parametrize("mode", ["abort", "wait", "keep"])
 async def test_pause_admission_policy_per_mode(mode: str):
     """`abort` and `wait` make the pause a generation boundary: a request
-    submitted while paused is rejected, leaving no residue. `keep` carries it
-    across the pause instead."""
+    submitted while paused is rejected, leaving no residue even for a caller
+    that reads the collector directly. `keep` carries it across the pause."""
     with ExitStack() as after:
         with set_default_torch_num_threads(1):
             engine = AsyncLLM.from_engine_args(TEXT_ENGINE_ARGS)
         after.callback(engine.shutdown)
 
         await engine.pause_generation(mode=mode)
-        if mode == "keep":
-            kept = asyncio.create_task(_generate(engine, "during-pause"))
-        else:
+        collector = await engine.add_request(
+            request_id="during-pause",
+            prompt=TEXT_PROMPT,
+            params=SamplingParams(
+                max_tokens=5, n=2, output_kind=RequestOutputKind.FINAL_ONLY
+            ),
+        )
+        # A utility call is handled after the add, so the paused engine saw it.
+        assert await engine.is_paused()
+        if mode != "keep":
             with pytest.raises(EnginePausedError):
-                await _generate(engine, "during-pause")
+                await asyncio.wait_for(collector.get(), timeout=60)
+            assert not engine.output_processor.has_unfinished_requests()
+            assert not engine.output_processor.parent_requests
 
         await engine.resume_generation()
         if mode == "keep":
-            assert (await asyncio.wait_for(kept, timeout=60)).finished
+            assert (await asyncio.wait_for(collector.get(), timeout=60)).finished
         assert (await _generate(engine, "during-pause")).finished
-        assert not engine.output_processor.has_unfinished_requests()
 
 
 @pytest.mark.asyncio
@@ -1129,7 +1146,7 @@ async def test_sleep_rejects_until_memory_is_resident():
     wake makes memory resident, so requests stay rejected until a full wake."""
     with ExitStack() as after:
         with set_default_torch_num_threads(1):
-            engine = AsyncLLM.from_engine_args(TEXT_ENGINE_ARGS)
+            engine = AsyncLLM.from_engine_args(SLEEP_ENGINE_ARGS)
         after.callback(engine.shutdown)
 
         await engine.sleep(level=1)
@@ -1173,7 +1190,9 @@ async def test_requests_racing_a_pause_never_hang():
 
 
 @pytest.mark.asyncio
-async def test_pause_mid_fanout_rejects_the_whole_request():
+async def test_pause_mid_fanout_rejects_the_whole_request(
+    monkeypatch: pytest.MonkeyPatch,
+):
     """A pause landing between n>1 child submissions fails the whole request
     and reclaims its siblings, so the id is reusable after resume."""
     with ExitStack() as after:
@@ -1191,10 +1210,12 @@ async def test_pause_mid_fanout_rejects_the_whole_request():
             if submitted == 1:
                 await engine.pause_generation(mode="abort")
 
-        engine.engine_core.add_request_async = pause_after_first_child
+        monkeypatch.setattr(
+            engine.engine_core, "add_request_async", pause_after_first_child
+        )
         with pytest.raises(EnginePausedError):
             await _generate(engine, "fanout", n=3)
-        engine.engine_core.add_request_async = original
+        monkeypatch.undo()
 
         assert not engine.output_processor.has_unfinished_requests()
         assert not engine.output_processor.parent_requests
@@ -1211,56 +1232,65 @@ async def test_wait_pause_drains_requests_admitted_before_it():
             engine = AsyncLLM.from_engine_args(SINGLE_SEQ_ENGINE_ARGS)
         after.callback(engine.shutdown)
 
+        max_tokens = {"running": 64, "queued": 5}
         collectors = [
             await engine.add_request(
                 request_id=request_id,
                 prompt=TEXT_PROMPT,
                 params=SamplingParams(
-                    max_tokens=max_tokens,
+                    max_tokens=n,
                     ignore_eos=True,
                     output_kind=RequestOutputKind.FINAL_ONLY,
                 ),
             )
-            for request_id, max_tokens in (("running", 64), ("queued", 5))
+            for request_id, n in max_tokens.items()
         ]
         await asyncio.wait_for(engine.pause_generation(mode="wait"), timeout=60)
 
-        for collector in collectors:
-            assert (await asyncio.wait_for(collector.get(), timeout=5)).finished
+        for collector, n in zip(collectors, max_tokens.values()):
+            out = (await asyncio.wait_for(collector.get(), timeout=5)).outputs[0]
+            assert out.finish_reason == "length"
+            assert len(out.token_ids) == n
         await engine.resume_generation()
 
 
 @pytest.mark.asyncio
 async def test_wait_pause_ends_open_streaming_session():
     """An open input stream cannot be drained, so a wait pause ends the session
-    rather than failing its cache reset, and the session's next input is
-    rejected."""
+    and tells its client, freeing the slot for a request queued behind it."""
     with ExitStack() as after:
         with set_default_torch_num_threads(1):
             engine = AsyncLLM.from_engine_args(SINGLE_SEQ_ENGINE_ARGS)
         after.callback(engine.shutdown)
 
         started = asyncio.Event()
-        more_input = asyncio.Event()
 
         async def inputs():
             yield StreamingInput(prompt=TEXT_PROMPT)
-            await more_input.wait()
-            yield StreamingInput(prompt=" and more")
+            await asyncio.Event().wait()
 
-        async def session():
-            async for _ in engine.generate(
+        async def session() -> RequestOutput:
+            async for out in engine.generate(
                 inputs(), SamplingParams(max_tokens=5), "session"
             ):
                 started.set()
+            return out
 
         task = asyncio.create_task(session())
         await asyncio.wait_for(started.wait(), timeout=60)
+        queued = await engine.add_request(
+            request_id="queued",
+            prompt=TEXT_PROMPT,
+            params=SamplingParams(
+                max_tokens=5, ignore_eos=True, output_kind=RequestOutputKind.FINAL_ONLY
+            ),
+        )
         await asyncio.wait_for(engine.pause_generation(mode="wait"), timeout=60)
 
-        more_input.set()
-        with pytest.raises(EnginePausedError):
-            await asyncio.wait_for(task, timeout=60)
+        ended = await asyncio.wait_for(task, timeout=5)
+        assert ended.outputs[0].finish_reason == "abort"
+        drained = await asyncio.wait_for(queued.get(), timeout=5)
+        assert drained.outputs[0].finish_reason == "length"
         assert not engine.output_processor.has_unfinished_requests()
 
         await engine.resume_generation()

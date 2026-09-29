@@ -3485,6 +3485,40 @@ async fn invalid_terminal_finish_reason_is_returned_as_openai_error_sse() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
+async fn request_rejected_by_paused_engine_returns_503() {
+    let (app, engine_task) =
+        test_app_with_stream_output_specs(vec![(vec![], Some(EngineCoreFinishReason::Paused))])
+            .await;
+    let response = app
+        .clone()
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/completions")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "model": "Qwen/Qwen1.5-0.5B-Chat",
+                        "prompt": "hello",
+                        "stream": false
+                    })
+                    .to_string(),
+                ))
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+    engine_task.await.expect("mock engine task");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("decode json");
+    assert_eq!(json["error"]["code"], "engine_paused");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
 async fn include_usage_adds_final_usage_chunk_before_done() {
     let (app, engine_task) = test_app_with_stream_output_specs(default_stream_output_specs()).await;
     let response = app

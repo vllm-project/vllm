@@ -383,6 +383,7 @@ async def test_dp_pause_late_request_does_not_block_drain():
         # The engine rejected it rather than carrying it across the boundary.
         with pytest.raises(EnginePausedError):
             await asyncio.wait_for(collector.get(), timeout=60)
+        assert not engine.output_processor.has_unfinished_requests()
         await engine.resume_generation()
 
 
@@ -415,6 +416,8 @@ async def test_dp_request_right_after_resume_does_not_hang():
             await asyncio.wait_for(collector.get(), timeout=60)
 
         await engine.resume_generation()
+        # Pin the stale belief, which the coordinator would otherwise correct in 5s.
+        engine.engine_core.engines_running = True
         await asyncio.wait_for(
             _consume(
                 engine.generate(
@@ -470,6 +473,7 @@ async def test_dp_sleep_late_request_does_not_block_drain():
 
         with pytest.raises(EnginePausedError):
             await asyncio.wait_for(collector.get(), timeout=60)
+        assert not engine.output_processor.has_unfinished_requests()
         await engine.wake_up()
         assert not await engine.is_sleeping()
 

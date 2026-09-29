@@ -890,9 +890,9 @@ class EngineCore:
         - ``abort``: Set PAUSED_NEW, abort all requests, wait for abort
           outputs to be sent (when running with output_queue), optionally
           clear caches, then complete the returned Future.
-        - ``wait``: Set PAUSED_NEW (reject adds, keep stepping); when drained,
-          end any open streaming-input session, optionally clear caches, then
-          complete the returned Future.
+        - ``wait``: Set PAUSED_NEW (reject adds, keep stepping, end open
+          streaming-input sessions); when drained, optionally clear caches,
+          then complete the returned Future.
         - ``keep``: Set PAUSED_ALL; return a Future that completes when the
           output queue is empty.
         """
@@ -1651,7 +1651,8 @@ class EngineCoreProc(EngineCore):
         return True
 
     def _reject_add_while_paused(self, request: Request) -> bool:
-        if not self.rejects_new_requests():
+        # A cleanup marker carries no work; it must still reach the KV connector.
+        if request.abort_immediately or not self.rejects_new_requests():
             return False
         self._send_finish_outputs_to_client(
             [request.request_id], request.client_index, FinishReason.PAUSED
@@ -2012,9 +2013,9 @@ class EngineCoreProc(EngineCore):
         - ``abort``: Set PAUSED_NEW, abort all requests, wait for abort
           outputs to be sent (when running with output_queue), optionally
           clear caches, then complete the returned Future.
-        - ``wait``: Set PAUSED_NEW (reject adds, keep stepping); when drained,
-          end any open streaming-input session, optionally clear caches, then
-          complete the returned Future.
+        - ``wait``: Set PAUSED_NEW (reject adds, keep stepping, end open
+          streaming-input sessions); when drained, optionally clear caches,
+          then complete the returned Future.
         - ``keep``: Set PAUSED_ALL; return a Future that completes when the
           output queue is empty.
         """
@@ -2045,14 +2046,6 @@ class EngineCoreProc(EngineCore):
         future = Future[Any]()
         self._idle_state_callbacks.append(partial(engine_idle_callback, future=future))
         return future
-
-    def _finish_pause(self, clear_cache: bool) -> None:
-        if self.rejects_new_requests():
-            # Only open streaming-input sessions remain; they can't cross the boundary.
-            self._send_abort_outputs(
-                self.scheduler.finish_requests(None, RequestStatus.FINISHED_ABORTED)
-            )
-        super()._finish_pause(clear_cache)
 
     def _pause_complete(self) -> bool:
         """Returns True if the pause has fully completed and the caller can

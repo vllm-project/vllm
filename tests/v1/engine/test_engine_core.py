@@ -36,7 +36,6 @@ from vllm.v1.executor.abstract import Executor
 from vllm.v1.executor.uniproc_executor import UniProcExecutor
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.outputs import ModelRunnerOutput
-from vllm.v1.request import RequestStatus
 
 from ...utils import create_new_process_for_each_test, multi_gpu_test
 
@@ -708,22 +707,26 @@ def _pausable_engine_core_proc() -> EngineCoreProc:
 
 
 @pytest.mark.parametrize(
-    "pause_state,rejected",
+    "pause_state,cleanup_marker,rejected",
     [
-        pytest.param(PauseState.PAUSED_NEW, True, id="abort-or-wait"),
-        pytest.param(PauseState.PAUSED_ALL, False, id="keep"),
-        pytest.param(PauseState.UNPAUSED, False, id="running"),
+        pytest.param(PauseState.PAUSED_NEW, False, True, id="abort-or-wait"),
+        pytest.param(PauseState.PAUSED_NEW, True, False, id="kv-cleanup-marker"),
+        pytest.param(PauseState.PAUSED_ALL, False, False, id="keep"),
+        pytest.param(PauseState.UNPAUSED, False, False, id="running"),
     ],
 )
-def test_add_rejected_while_paused_at_a_boundary(pause_state, rejected):
+def test_add_rejected_while_paused_at_a_boundary(pause_state, cleanup_marker, rejected):
     """A boundary pause rejects new requests before they reach the scheduler
-    or DP wave state; `keep` queues them across the pause."""
+    or DP wave state; `keep` queues them across the pause. A KV-transfer
+    cleanup marker is no work and must still reach the connector."""
     core = _pausable_engine_core_proc()
     core.scheduler.pause_state = pause_state
     core.shutdown_state = EngineShutdownState.RUNNING
     core.add_request = MagicMock()
     core._send_finish_outputs_to_client = MagicMock()
-    request = MagicMock(request_id="r", client_index=1)
+    request = MagicMock(
+        request_id="r", client_index=1, abort_immediately=cleanup_marker
+    )
 
     core._handle_client_request(EngineCoreRequestType.ADD, (request, 0))
 
@@ -735,31 +738,6 @@ def test_add_rejected_while_paused_at_a_boundary(pause_state, rejected):
     else:
         core.add_request.assert_called_once_with(request, 0)
         core._send_finish_outputs_to_client.assert_not_called()
-
-
-@pytest.mark.parametrize(
-    "pause_state,ends",
-    [(PauseState.PAUSED_NEW, True), (PauseState.PAUSED_ALL, False)],
-    ids=["abort-or-wait", "keep"],
-)
-def test_completed_boundary_pause_ends_open_sessions(pause_state, ends):
-    """Only open streaming-input sessions outlive a wait drain; they cannot cross
-    the boundary, so completing it ends them and frees their KV for the reset."""
-    core = _pausable_engine_core_proc()
-    core.scheduler.pause_state = pause_state
-    core._send_abort_outputs = MagicMock()
-
-    core._finish_pause(clear_cache=False)
-
-    if ends:
-        core.scheduler.finish_requests.assert_called_once_with(
-            None, RequestStatus.FINISHED_ABORTED
-        )
-        core._send_abort_outputs.assert_called_once_with(
-            core.scheduler.finish_requests.return_value
-        )
-    else:
-        core.scheduler.finish_requests.assert_not_called()
 
 
 @pytest.mark.parametrize(

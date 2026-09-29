@@ -2251,20 +2251,34 @@ class Scheduler(SchedulerInterface):
             # retryable: re-issuing the request re-runs the encode.
             error_req_ids.update(self.ec_connector.take_unavailable_requests())
 
+        ended_reqs: list[Request] = []
         if error_req_ids:
-            error_reqs = self.finish_requests(
+            ended_reqs = self.finish_requests(
                 error_req_ids, RequestStatus.FINISHED_ERROR
             )
-            for request in error_reqs:
-                outputs[request.client_index].append(
-                    EngineCoreOutput(
-                        request_id=request.request_id,
-                        new_token_ids=[],
-                        finish_reason=request.get_finished_reason(),
-                        events=request.take_events(),
-                        trace_headers=request.trace_headers,
-                    )
+        if (
+            self._pause_state == PauseState.PAUSED_NEW
+            and self.num_waiting_for_streaming_input
+        ):
+            # Admission is closed: an open streaming-input session gets no more input.
+            idle_sessions = [
+                request.request_id
+                for request in self.deferred_waiting
+                if request.status == RequestStatus.WAITING_FOR_STREAMING_REQ
+            ]
+            ended_reqs += self.finish_requests(
+                idle_sessions, RequestStatus.FINISHED_ABORTED
+            )
+        for request in ended_reqs:
+            outputs[request.client_index].append(
+                EngineCoreOutput(
+                    request_id=request.request_id,
+                    new_token_ids=[],
+                    finish_reason=request.get_finished_reason(),
+                    events=request.take_events(),
+                    trace_headers=request.trace_headers,
                 )
+            )
 
         # KV Connector: update state for finished KV Transfers.
         if kv_connector_output:
@@ -2739,7 +2753,9 @@ class Scheduler(SchedulerInterface):
         if self._pause_state == PauseState.PAUSED_ALL:
             return 0
         num_running, num_waiting = self.get_request_counts()
-        num_waiting -= self.num_waiting_for_streaming_input
+        if self._pause_state == PauseState.UNPAUSED:
+            # Under PAUSED_NEW, open sessions are work: the next update ends them.
+            num_waiting -= self.num_waiting_for_streaming_input
         return num_waiting + num_running
 
     def has_finished_requests(self) -> bool:

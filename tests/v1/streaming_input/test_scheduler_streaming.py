@@ -14,6 +14,7 @@ from vllm.multimodal.inputs import (
     PlaceholderRange,
 )
 from vllm.sampling_params import SamplingParams
+from vllm.v1.core.sched.interface import PauseState
 from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.engine import FinishReason
 from vllm.v1.kv_cache_interface import (
@@ -21,7 +22,11 @@ from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     KVCacheGroupSpec,
 )
-from vllm.v1.outputs import LogprobsLists, ModelRunnerOutput
+from vllm.v1.outputs import (
+    EMPTY_MODEL_RUNNER_OUTPUT,
+    LogprobsLists,
+    ModelRunnerOutput,
+)
 from vllm.v1.request import Request, RequestStatus, StreamingUpdate
 from vllm.v1.structured_output import StructuredOutputManager
 
@@ -139,6 +144,40 @@ class TestStreamingScheduler(unittest.TestCase):
                     output.new_logprobs.sampled_token_ranks,
                     logprobs.sampled_token_ranks,
                 )
+
+    def test_boundary_pause_ends_idle_session(self):
+        """A boundary pause rejects every input, so a session waiting for one
+        can never resume: it is ended, freeing its slot and KV, with an abort
+        its client sees. `keep` and running leave it open."""
+        for pause_state, ends in (
+            (PauseState.PAUSED_NEW, True),
+            (PauseState.PAUSED_ALL, False),
+            (PauseState.UNPAUSED, False),
+        ):
+            with self.subTest(pause_state=pause_state):
+                scheduler = create_scheduler()
+                session = DummyRequest("session", prompt_token_ids=[1, 2, 3])
+                scheduler.add_request(session)
+                runner_output = ModelRunnerOutput(
+                    req_ids=[session.request_id],
+                    req_id_to_index={session.request_id: 0},
+                    sampled_token_ids=[[STOP_TOKEN]],
+                )
+                scheduler.update_from_output(scheduler.schedule(), runner_output)
+                assert session.status == RequestStatus.WAITING_FOR_STREAMING_REQ
+
+                scheduler.set_pause_state(pause_state)
+                assert scheduler.has_unfinished_requests() == ends
+                outputs = scheduler.update_from_output(
+                    scheduler.schedule(), EMPTY_MODEL_RUNNER_OUTPUT
+                )
+
+                if ends:
+                    [output] = outputs[session.client_index].outputs
+                    assert output.finish_reason == FinishReason.ABORT
+                    assert session.request_id not in scheduler.requests
+                else:
+                    assert session.status == RequestStatus.WAITING_FOR_STREAMING_REQ
 
     def test_add_request(self):
         scheduler = create_scheduler()

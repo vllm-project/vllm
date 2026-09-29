@@ -8,6 +8,7 @@ from concurrent.futures import ThreadPoolExecutor
 import requests
 
 from tests.entrypoints.serve.dev.rlhf.conftest import pause, resume, server
+from vllm.utils.network_utils import get_open_port
 
 # Fresh connections, so the kernel spreads them across both API servers.
 NUM_REQUESTS = 32
@@ -27,7 +28,9 @@ def _statuses(url: str) -> list[int]:
 
 def test_pause_rejects_on_every_api_server():
     with server(
-        extra_args=["--api-server-count", "2"], port=8771, dummy_weights=True
+        extra_args=["--api-server-count", "2"],
+        port=get_open_port(),
+        dummy_weights=True,
     ) as url:
         assert pause(url, mode="abort") == 200
         assert _statuses(url) == [503] * NUM_REQUESTS
