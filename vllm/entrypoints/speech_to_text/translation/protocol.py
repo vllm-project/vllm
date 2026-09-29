@@ -3,9 +3,10 @@
 
 import json
 import time
+from http import HTTPStatus
 from typing import TYPE_CHECKING, Literal, TypeAlias
 
-from fastapi import UploadFile
+from fastapi import HTTPException, UploadFile
 from pydantic import (
     Field,
     model_validator,
@@ -270,6 +271,11 @@ class TranslationRequest(OpenAIBaseModel):
     def validate_stream_options(cls, data):
         if not isinstance(data, dict):
             return data
+        if isinstance(data.get("file"), str):
+            raise HTTPException(
+                status_code=HTTPStatus.UNPROCESSABLE_ENTITY,
+                detail="Expected 'file' to be a file-like object, not 'str'.",
+            )
         stream_opts = ["stream_include_usage", "stream_continuous_usage_stats"]
         stream = data.get("stream", False)
         if any(bool(data.get(so, False)) for so in stream_opts) and not stream:
