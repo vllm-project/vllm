@@ -251,33 +251,6 @@ RUN --mount=type=cache,target=/opt/uv/cache \
         --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.'); \
     fi
 
-# CUDA 13.4 Rubin images need a compatibility link for the prerelease
-# PyTorch wheel's libcurand.so.11 dependency. CUDA 13.5 must use its native
-# libcurand.so.11 instead.
-RUN if [ "${INSTALL_RUBIN_PRERELEASE}" = "true" ]; then \
-        CUDA_MAJOR_MINOR=$(echo "${CUDA_VERSION}" | cut -d. -f1,2) \
-        && if [ "${CUDA_MAJOR_MINOR}" = "13.4" ]; then \
-            CURAND_LIBRARY=$(find -H /usr/local/cuda -name libcurand.so.10 \
-                -print -quit) \
-            && test -n "${CURAND_LIBRARY}" \
-            && ln -sf "${CURAND_LIBRARY}" \
-                /usr/local/cuda/lib64/libcurand.so.11; \
-        elif [ "${CUDA_MAJOR_MINOR}" = "13.5" ]; then \
-            CURAND_LIBRARY=$(find -H /usr/local/cuda -name libcurand.so.11 \
-                -print -quit) \
-            && test -n "${CURAND_LIBRARY}" \
-            && ! readlink -f "${CURAND_LIBRARY}" | grep -q 'libcurand\.so\.10'; \
-        else \
-            echo "Unsupported Rubin CUDA version: ${CUDA_MAJOR_MINOR}" >&2; \
-            exit 1; \
-        fi \
-        && printf '%s\n' \
-            /opt/venv/lib \
-            "/opt/venv/lib/python${PYTHON_VERSION}/site-packages/nvpl/lib" \
-            > /etc/ld.so.conf.d/vllm-rubin-python.conf \
-        && ldconfig; \
-    fi
-
 # Track PyTorch lib versions used during build and match in downstream instances.
 # We do this for both nightly and release so we can strip dependencies/*.txt as needed.
 # Otherwise library dependencies can upgrade/downgrade torch incorrectly.
@@ -822,28 +795,6 @@ ENV CUDA_HOME=/usr/local/cuda
 ENV PATH="${CUDA_HOME}/bin:${PATH}"
 ENV LD_LIBRARY_PATH="${CUDA_HOME}/lib64:${LD_LIBRARY_PATH}"
 
-# Apply the CUDA 13.4-only libcurand compatibility link described in the build
-# stage. CUDA 13.5 uses its native libcurand.so.11.
-RUN if [ "${INSTALL_RUBIN_PRERELEASE}" = "true" ]; then \
-        CUDA_MAJOR_MINOR=$(echo "${CUDA_VERSION}" | cut -d. -f1,2) \
-        && if [ "${CUDA_MAJOR_MINOR}" = "13.4" ]; then \
-            CURAND_LIBRARY=$(find -H /usr/local/cuda -name libcurand.so.10 \
-                -print -quit) \
-            && test -n "${CURAND_LIBRARY}" \
-            && ln -sf "${CURAND_LIBRARY}" \
-                /usr/local/cuda/lib64/libcurand.so.11; \
-        elif [ "${CUDA_MAJOR_MINOR}" = "13.5" ]; then \
-            CURAND_LIBRARY=$(find -H /usr/local/cuda -name libcurand.so.11 \
-                -print -quit) \
-            && test -n "${CURAND_LIBRARY}" \
-            && ! readlink -f "${CURAND_LIBRARY}" | grep -q 'libcurand\.so\.10'; \
-        else \
-            echo "Unsupported Rubin CUDA version: ${CUDA_MAJOR_MINOR}" >&2; \
-            exit 1; \
-        fi \
-        && ldconfig; \
-    fi
-
 # Install the initialized-snapshot runtime on the architecture supported by
 # `vllm snapshot`. CRIU and its CUDA plugin are built from the same pinned
 # source. The `cuda-checkpoint`-compatible helper is built from NVIDIA Dynamo's
@@ -957,11 +908,7 @@ RUN --mount=type=cache,target=/opt/uv/cache \
         && uv pip install --system -r /tmp/requirements-cuda.txt \
         && uv pip install --system \
             --prerelease=allow --index-strategy unsafe-first-match \
-            -r /tmp/vllm-requirements/rubin-prerelease.txt \
-        && printf '%s\n' \
-            "/usr/local/lib/python${PYTHON_VERSION}/dist-packages/nvpl/lib" \
-            > /etc/ld.so.conf.d/vllm-rubin-python.conf \
-        && ldconfig; \
+            -r /tmp/vllm-requirements/rubin-prerelease.txt; \
     else \
         uv pip install --system \
             -r /tmp/requirements-cuda.txt \
