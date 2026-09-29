@@ -6,20 +6,29 @@
 //! The invariant under test is that a structured assistant message rendered as history can be
 //! parsed from the generated assistant completion and then rendered back to the exact same
 //! assistant completion.
+//!
+//! The tool-call fixture also snapshots the output grammar built by the initialized parser, with
+//! the rendered completion as its generation, under `tests/grammar_replay/`. `grammar_replay.rs`
+//! replays these cases through the real XGrammar.
 
+use std::collections::BTreeSet;
+use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
 
 use anyhow::{Context as _, Result, bail, ensure};
 use futures::{Stream, StreamExt as _, stream};
+use serde::ser::Error as _;
+use serde::{Serialize, Serializer};
 use serde_json_fmt::JsonFormat as JsonFmt;
 use serial_test::file_serial;
 use vllm_chat::{
     AssistantContentBlock, AssistantMessage, AssistantMessageExt as _, AssistantToolCall,
     ChatEvent, ChatMessage, ChatRequest, ChatRole, ChatTool, FinishReason, GenerationPromptMode,
     LoadModelBackendsOptions, NewChatOutputProcessorOptions, ParserSelection, RendererSelection,
-    load_model_backends,
+    ToolStrictLevel, load_model_backends,
 };
+use vllm_parser::output_grammar::BuiltOutputGrammar;
 use vllm_text::{DecodedTextEvent, Finished, Prompt};
 use vllm_tokenizer::Tokenizer;
 
@@ -568,6 +577,8 @@ async fn run_roundtrip_tool_call_mix(
         result.closed_completion
     );
 
+    check_grammar_replay_case(case, backends, "tool_call_mix", &result)?;
+
     Ok(())
 }
 
@@ -645,6 +656,9 @@ struct RoundtripResult {
     /// Assistant-completion suffix cut after rendering the parsed assistant
     /// back as history.
     rerendered_closed_completion: Prompt,
+    /// Output grammar built by the same initialized parser that parsed the
+    /// completion.
+    output_grammar: Option<BuiltOutputGrammar>,
 }
 
 /// Render, parse, and rerender one assistant turn through the production
@@ -658,13 +672,17 @@ async fn run_roundtrip(
     let renderer = backends.chat_backend.chat_renderer();
     let rendered = render_closed_completion(renderer.as_ref(), request, &assistant)?;
 
-    let parsed_message = parse_completion(case, backends, request, &rendered).await?;
+    let ParsedCompletion {
+        message: parsed_message,
+        output_grammar,
+    } = parse_completion(case, backends, request, &rendered).await?;
     let rerendered = render_closed_completion(renderer.as_ref(), request, &parsed_message)?;
 
     Ok(RoundtripResult {
         parsed_message,
         closed_completion: rendered.completion,
         rerendered_closed_completion: rerendered.completion,
+        output_grammar,
     })
 }
 
@@ -711,14 +729,23 @@ fn render_closed_completion(
     Ok(RenderedTurn { prompt, completion })
 }
 
+/// Output of one production output processor over a rendered completion.
+struct ParsedCompletion {
+    /// Terminal assistant message.
+    message: AssistantMessage,
+    /// Output grammar built by the processor after initialization.
+    output_grammar: Option<BuiltOutputGrammar>,
+}
+
 /// Feed one rendered assistant completion body into the real output processor
-/// and collect its terminal assistant message.
+/// and collect its terminal assistant message, along with the output grammar
+/// the initialized processor builds for the request.
 async fn parse_completion(
     case: &RoundtripCase,
     backends: &vllm_chat::LoadedModelBackends,
     base_request: &ChatRequest,
     rendered: &RenderedTurn,
-) -> Result<AssistantMessage> {
+) -> Result<ParsedCompletion> {
     let tokenizer = backends.text_backend.tokenizer();
     let prompt_token_ids = match &rendered.prompt {
         Prompt::Text(prompt) => tokenizer
@@ -731,12 +758,15 @@ async fn parse_completion(
     let mut processor = backends.chat_backend.new_chat_output_processor(
         &mut request,
         NewChatOutputProcessorOptions {
-            tool_strict_level: vllm_chat::ToolStrictLevel::Auto,
+            // Pin every tool schema so that builder-backed parsers build an
+            // output grammar for replay. The strict level does not affect parsing.
+            tool_strict_level: ToolStrictLevel::Parameter,
             tool_call_parser: &case.tool_call_parser,
             reasoning_parser: &case.reasoning_parser,
         },
     )?;
     processor.initialize(&prompt_token_ids)?;
+    let output_grammar = processor.build_output_grammar()?;
 
     let decoded = decoded_completion_stream(
         tokenizer.as_ref(),
@@ -748,7 +778,10 @@ async fn parse_completion(
 
     while let Some(event) = events.next().await {
         if let ChatEvent::Done { message, .. } = event? {
-            return Ok(message);
+            return Ok(ParsedCompletion {
+                message,
+                output_grammar,
+            });
         }
     }
 
@@ -772,14 +805,8 @@ fn decoded_completion_stream(
         prompt_logprobs: None,
     }];
 
-    let chunks = match completion {
-        Prompt::Text(text) => {
-            let body = text.strip_suffix(assistant_stop_suffix).with_context(|| {
-                format!(
-                    "closed assistant completion did not end with {:?}: {:?}",
-                    assistant_stop_suffix, text
-                )
-            })?;
+    let chunks = match completion_body(tokenizer, completion, assistant_stop_suffix)? {
+        CompletionBody::Text(body) => {
             // The engine returns token ids, so attribute the rendered text
             // through the production decoder, then split it into small char
             // chunks to exercise marker splits.
@@ -807,27 +834,12 @@ fn decoded_completion_stream(
                 })
                 .collect()
         }
-        Prompt::TokenIds(token_ids) => {
-            let body = if assistant_stop_suffix.is_empty() {
-                token_ids.as_slice()
-            } else {
-                let stop_token_ids = tokenizer
-                    .encode(assistant_stop_suffix, false)
-                    .context("failed to encode token-id completion stop suffix")?;
-                token_ids.strip_suffix(stop_token_ids.as_slice()).with_context(|| {
-                    format!(
-                        "token-id completion did not end with {:?}: {:?}",
-                        assistant_stop_suffix, token_ids
-                    )
-                })?
-            };
-            incremental_decode_chunks(
-                tokenizer,
-                &prompt_token_ids,
-                body,
-                TOKEN_COMPLETION_CHUNK_TOKENS,
-            )?
-        }
+        CompletionBody::TokenIds(body) => incremental_decode_chunks(
+            tokenizer,
+            &prompt_token_ids,
+            body,
+            TOKEN_COMPLETION_CHUNK_TOKENS,
+        )?,
     };
 
     if chunks.is_empty() {
@@ -866,6 +878,48 @@ fn decoded_completion_stream(
     }
 
     Ok(stream::iter(events).map(Ok).boxed())
+}
+
+/// Generated part of a closed assistant completion, without the rendered stop
+/// suffix.
+enum CompletionBody<'a> {
+    Text(&'a str),
+    TokenIds(&'a [u32]),
+}
+
+/// Strip the rendered stop suffix from a closed assistant completion.
+fn completion_body<'a>(
+    tokenizer: &dyn Tokenizer,
+    completion: &'a Prompt,
+    assistant_stop_suffix: &str,
+) -> Result<CompletionBody<'a>> {
+    match completion {
+        Prompt::Text(text) => {
+            let body = text.strip_suffix(assistant_stop_suffix).with_context(|| {
+                format!(
+                    "closed assistant completion did not end with {:?}: {:?}",
+                    assistant_stop_suffix, text
+                )
+            })?;
+            Ok(CompletionBody::Text(body))
+        }
+        Prompt::TokenIds(token_ids) => {
+            let body = if assistant_stop_suffix.is_empty() {
+                token_ids.as_slice()
+            } else {
+                let stop_token_ids = tokenizer
+                    .encode(assistant_stop_suffix, false)
+                    .context("failed to encode token-id completion stop suffix")?;
+                token_ids.strip_suffix(stop_token_ids.as_slice()).with_context(|| {
+                    format!(
+                        "token-id completion did not end with {:?}: {:?}",
+                        assistant_stop_suffix, token_ids
+                    )
+                })?
+            };
+            Ok(CompletionBody::TokenIds(body))
+        }
+    }
 }
 
 /// One decoded completion chunk fed into the output processor.
@@ -939,6 +993,106 @@ fn incremental_decode_chunks(
     }
 
     Ok(chunks)
+}
+
+/// One parser-built output grammar with the generation it must accept, replayed
+/// through the real XGrammar by `grammar_replay.py`.
+#[derive(Serialize)]
+struct GrammarReplayCase<'a> {
+    /// Hugging Face model id whose tokenizer the replay loads.
+    model_id: &'static str,
+    /// Model vocabulary size, which sizes the XGrammar token mask.
+    vocab_size: usize,
+    /// Parser-built grammar; only token-zero grammars are replayed from the
+    /// first generated token.
+    grammar: &'a BuiltOutputGrammar,
+    /// Generated completion text, without the stop token.
+    completion: String,
+    /// Generated token IDs presented to the matcher, ending with a stop token.
+    #[serde(serialize_with = "serialize_one_line")]
+    generation_token_ids: Vec<u32>,
+    /// Request stop set, passed to the matcher as `override_stop_tokens`.
+    #[serde(serialize_with = "serialize_one_line")]
+    all_stop_token_ids: BTreeSet<u32>,
+}
+
+/// Serialize a token ID list on one line inside the pretty-printed case.
+fn serialize_one_line<S: Serializer>(
+    token_ids: &impl Serialize,
+    serializer: S,
+) -> std::result::Result<S::Ok, S::Error> {
+    let json = spaced_json_fmt().format_to_string(token_ids).map_err(S::Error::custom)?;
+    serde_json::value::RawValue::from_string(json)
+        .map_err(S::Error::custom)?
+        .serialize(serializer)
+}
+
+/// Directory of checked-in grammar replay cases.
+fn grammar_replay_dir() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/grammar_replay")
+}
+
+/// Snapshot the output grammar of one roundtrip as a grammar replay case, or
+/// check that no stale case remains when the parser builds none.
+fn check_grammar_replay_case(
+    case: &RoundtripCase,
+    backends: &vllm_chat::LoadedModelBackends,
+    fixture: &str,
+    result: &RoundtripResult,
+) -> Result<()> {
+    let model_name = case.model_id.rsplit_once('/').map_or(case.model_id, |(_, name)| name);
+    let path = grammar_replay_dir().join(format!("{model_name}.{fixture}.json"));
+    let Some(grammar) = &result.output_grammar else {
+        ensure!(
+            !path.exists(),
+            "{} builds no output grammar, but grammar replay case {path:?} exists",
+            case.model_id
+        );
+        return Ok(());
+    };
+
+    let tokenizer = backends.text_backend.tokenizer();
+    let hints = backends.text_backend.sampling_hints()?;
+    // Lowered `_all_stop_token_ids` of a request without user stop tokens.
+    let mut all_stop_token_ids = hints.extra_eos_token_ids;
+    all_stop_token_ids.extend(hints.primary_eos_token_id);
+
+    // The generation ends with the first token of the rendered stop suffix, or
+    // with the primary EOS for templates that render none.
+    let stop_token_id = if case.assistant_stop_suffix.is_empty() {
+        hints.primary_eos_token_id.context("model has no primary EOS token")?
+    } else {
+        tokenizer.encode(case.assistant_stop_suffix, false)?[0]
+    };
+    ensure!(
+        all_stop_token_ids.contains(&stop_token_id),
+        "stop token {stop_token_id} of {:?} is not in the stop set {all_stop_token_ids:?}",
+        case.assistant_stop_suffix
+    );
+
+    let (completion, mut generation_token_ids) = match completion_body(
+        tokenizer.as_ref(),
+        &result.closed_completion,
+        case.assistant_stop_suffix,
+    )? {
+        CompletionBody::Text(body) => (body.to_string(), tokenizer.encode(body, false)?),
+        CompletionBody::TokenIds(body) => (tokenizer.decode(body, false)?, body.to_vec()),
+    };
+    generation_token_ids.push(stop_token_id);
+
+    let replay_case = GrammarReplayCase {
+        model_id: case.model_id,
+        vocab_size: backends.text_backend.model_vocab_size(),
+        grammar,
+        completion,
+        generation_token_ids,
+        all_stop_token_ids,
+    };
+    let mut json = serde_json::to_string_pretty(&replay_case)?;
+    json.push('\n');
+    expect_test::expect_file![path].assert_eq(&json);
+
+    Ok(())
 }
 
 /// Build a chat request fixture with parser-enabling tool-choice semantics.
