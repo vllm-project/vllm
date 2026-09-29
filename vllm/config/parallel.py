@@ -4,6 +4,7 @@
 import os
 import socket
 from collections.abc import Callable
+from datetime import timedelta
 from typing import TYPE_CHECKING, Any, Literal, overload
 
 import regex as re
@@ -613,6 +614,11 @@ class ParallelConfig:
         """
         return self.data_parallel_external_lb or self.data_parallel_hybrid_lb
 
+    @property
+    def cpu_distributed_timeout(self) -> timedelta | None:
+        seconds = self.cpu_distributed_timeout_seconds
+        return timedelta(seconds=seconds) if seconds is not None else None
+
     def get_next_dp_init_port(self) -> int:
         """We might need to initialize process groups in multiple
         processes that is related to data parallelism,
@@ -694,6 +700,7 @@ class ParallelConfig:
                     backend="gloo",
                     return_store=return_store,
                     listen_socket=listen_socket,
+                    timeout=self.cpu_distributed_timeout,
                 )
             except DistNetworkError as e:
                 # We only want to retry when the root cause is EADDRINUSE.
