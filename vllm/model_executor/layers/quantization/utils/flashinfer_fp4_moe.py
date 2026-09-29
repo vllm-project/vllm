@@ -146,7 +146,8 @@ def prepare_nvfp4_moe_layer_for_flashinfer_cutedsl(
             layer.activation, w13, w13_scale
         )
 
-    # CuTe DSL requires GEMM1's output dimension to be a multiple of 128.
+    # GEMM1's output dimension must be a multiple of 128: 2I for gated
+    # activations (also required by interleaving), but only I for non-gated.
     # Keep the checkpoint tensors unchanged and pad only the kernel's runtime
     # representation. Zero rows also make the padded GEMM2 contraction a no-op.
     w13, w13_scale, w2, w2_scale, padded_intermediate = align_fp4_moe_weights_for_fi(
@@ -155,7 +156,7 @@ def prepare_nvfp4_moe_layer_for_flashinfer_cutedsl(
         w2,
         w2_scale,
         is_act_and_mul=gated,
-        min_alignment=128,
+        min_alignment=64 if gated else 128,
     )
     layer.moe_config.intermediate_size_per_partition = padded_intermediate
 
