@@ -251,6 +251,39 @@ def _reasoning_has_ended(
     return thinking_disabled
 
 
+def _literal_ids(
+    tokenizer: TokenizerLike, vocab: dict[str, int], literals: Sequence[str]
+) -> list[list[int]] | None:
+    """Token ids of each literal, or `None` when one encodes to nothing."""
+    ids = [
+        [vocab[literal]]
+        if literal in vocab
+        else tokenizer.encode(literal, add_special_tokens=False)
+        for literal in literals
+    ]
+    return ids if all(ids) else None
+
+
+def _reasoning_end_ids(
+    tokenizer: TokenizerLike, vocab: dict[str, int], template: ResponseTemplate
+) -> list[list[int]] | None:
+    """Token ids of each thinking closer, or `None` when they are not all
+    literal."""
+    thinking = template.fields.get(THINKING_FIELD)
+    if thinking is None or thinking.repeats or not thinking.close_literals:
+        return None
+    return _literal_ids(tokenizer, vocab, thinking.close_literals)
+
+
+def _ends_within(token_ids: Sequence[int], end_ids: list[int], num_new: int) -> bool:
+    """Whether `end_ids` completes within the last `num_new` of `token_ids`."""
+    window = list(token_ids[max(0, len(token_ids) - num_new - len(end_ids) + 1) :])
+    return any(
+        window[index : index + len(end_ids)] == end_ids
+        for index in range(len(window) - len(end_ids) + 1)
+    )
+
+
 def _response_template_engine_config(
     template: ResponseTemplate,
 ) -> ParserEngineConfig:
@@ -338,6 +371,9 @@ class ResponseTemplateParser(ParserEngine):
             for literal in close_literals
             if (token_id := self.vocab.get(literal)) is not None
         }
+        self._reasoning_end_ids = _reasoning_end_ids(
+            tokenizer, self.vocab, self.response_template
+        )
         self._prompt_initialized = False
         self._stream_reasoning: list[str] | None = None
         self._stream_content: list[str] | None = None
@@ -438,6 +474,18 @@ class ResponseTemplateParser(ParserEngine):
             thinking_disabled=not self._chat_template_kwargs.get(
                 "enable_thinking", True
             ),
+        )
+
+    def is_reasoning_end_streaming(
+        self, input_ids: list[int], delta_ids: list[int]
+    ) -> bool:
+        if not self._parse_reasoning_enabled:
+            return True
+        if self._reasoning_end_ids is None:
+            return self.is_reasoning_end(input_ids)
+        return any(
+            _ends_within(input_ids, end_ids, len(delta_ids))
+            for end_ids in self._reasoning_end_ids
         )
 
     def parse(

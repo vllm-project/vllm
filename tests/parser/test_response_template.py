@@ -437,6 +437,24 @@ def test_reasoning_gate_ends_at_content_opener_held_by_prompt():
     assert parser.is_reasoning_end([1]) is True
 
 
+def streamed_reasoning_end(reasoner, output, prompt=PROMPT_TOKEN_IDS):
+    """Index of the output token where the per-step gate reports the end."""
+    for index, token in enumerate(output):
+        if reasoner.is_reasoning_end_streaming(prompt + output[: index + 1], [token]):
+            return index
+    return None
+
+
+def test_streaming_reasoning_gate_matches_thinking_closer_without_decoding():
+    tokenizer = FakeTokenizer(GEMMA4_RESPONSE_TEMPLATE)
+    reasoner = ResponseTemplateReasoningParser(tokenizer)
+    tokenizer.decode = lambda *_args, **_kwargs: pytest.fail("decoded")
+    output = [50, 101] + [102] * 100 + [51, 103]
+
+    assert streamed_reasoning_end(reasoner, output) == len(output) - 2
+    assert reasoner.is_reasoning_end_streaming(PROMPT_TOKEN_IDS + output, output[-3:])
+
+
 def test_reasoning_gate_honors_disabled_and_repeated_thinking():
     disabled = ResponseTemplateParser(
         FakeTokenizer(GEMMA4_RESPONSE_TEMPLATE),

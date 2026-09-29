@@ -693,6 +693,12 @@ class ParserEngine(Parser):
                 break
         return not wait_for_reasoning
 
+    def is_reasoning_end_streaming(
+        self, input_ids: list[int], delta_ids: list[int]
+    ) -> bool:
+        del delta_ids
+        return self.is_reasoning_end(input_ids)
+
     def extract_content_ids(self, input_ids: list[int]) -> list[int]:
         config = self.parser_engine_config
         wait_for_reasoning = config.wait_for_reasoning
