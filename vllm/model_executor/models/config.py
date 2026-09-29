@@ -1047,6 +1047,7 @@ MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
     "LlamaNemotronVLForSequenceClassification": LlamaNemotronVLConfig,
     "LlamaNemotronVLModel": LlamaNemotronVLConfig,
     "Mamba2ForCausalLM": MambaModelConfig,
+    "TransformersAttentionFreeForCausalLM": MambaModelConfig,
     "MambaForCausalLM": MambaModelConfig,
     "NemotronHForCausalLM": NemotronHForCausalLMConfig,
     "NemotronHPuzzleForCausalLM": NemotronHForCausalLMConfig,

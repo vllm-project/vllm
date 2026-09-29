@@ -17,6 +17,7 @@ from vllm.model_executor.models.transformers.fusers.moe import MoEBlockFuser
 from vllm.model_executor.models.transformers.fusers.packed_qkv import PackedQKVFuser
 from vllm.model_executor.models.transformers.fusers.qkv import QKVFuser
 from vllm.model_executor.models.transformers.fusers.rms_norm import RMSNormFuser
+from vllm.model_executor.models.transformers.fusers.ssd import SSDFuser
 
 __all__ = [
     "AttentionFuser",
@@ -30,4 +31,5 @@ __all__ = [
     "PackedQKVFuser",
     "QKVFuser",
     "RMSNormFuser",
+    "SSDFuser",
 ]

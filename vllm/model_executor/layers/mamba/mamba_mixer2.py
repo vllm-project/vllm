@@ -247,38 +247,34 @@ def mamba_v2_sharded_weight_loader(
     return loader
 
 
-# Adapted from transformers.models.mamba.modeling_mamba.MambaMixer
-# --8<-- [start:mamba_mixer2]
-@PluggableLayer.register("mamba_mixer2")
-class MambaMixer2(MambaBase, PluggableLayer):
-    """Compute ∆, A, B, C, and D the state space parameters and compute
-    the `contextualized_states`. A, D are input independent
-    (see Mamba paper [1] Section 3.5.2 "Interpretation of A"
-    for why A isn't selective) ∆, B, C are input-dependent
-    (this is a key difference between Mamba and the linear time
-    invariant S4, and is why Mamba is called
-    **selective** state spaces)
+class Mamba2SSM(MambaBase, nn.Module):
+    """The stateful core of a Mamba2 layer: causal convolution, SSD scan and
+    recurrent state handling.
+
+    It owns the layer's state but not its weights. Subclasses provide
+    `conv_weights`, `conv_bias`, `A`, `D` and `dt_bias`.
     """
 
-    # --8<-- [end:mamba_mixer2]
+    conv_weights: torch.Tensor
+    A: torch.Tensor
+    D: torch.Tensor
+    dt_bias: torch.Tensor
+
+    @property
+    def conv_bias(self) -> torch.Tensor | None:
+        raise NotImplementedError
 
     def __init__(
         self,
-        hidden_size: int,
         ssm_state_size: int,
         conv_kernel_size: int,
         intermediate_size: int,
-        use_conv_bias: bool,
-        use_bias: bool,
         n_groups: int = 1,
         num_heads: int = 128,
         head_dim: int = 64,
-        rms_norm_eps: float = 1e-5,
         activation: str = "silu",
-        use_rms_norm: bool = True,
         model_config: ModelConfig | None = None,
         cache_config: CacheConfig | None = None,
-        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ):
         super().__init__()
@@ -298,7 +294,6 @@ class MambaMixer2(MambaBase, PluggableLayer):
         # - NOTE: currently for the world size DOES NOT divide groups
         #   case, we only support the case when n_groups == 1
         self.tp_size = get_tensor_model_parallel_world_size()
-        tp_rank = get_tensor_model_parallel_rank()
 
         assert num_heads % self.tp_size == 0, (
             "Tensor parallel world size must divide num heads."
@@ -330,182 +325,7 @@ class MambaMixer2(MambaBase, PluggableLayer):
         self.groups_ssm_state_size = self.n_groups * self.ssm_state_size
         self.conv_dim = intermediate_size + 2 * self.groups_ssm_state_size
 
-        if n_groups % self.tp_size == 0:
-            self.conv1d = MergedColumnParallelLinear(
-                input_size=conv_kernel_size,
-                output_sizes=[
-                    intermediate_size,
-                    self.groups_ssm_state_size,
-                    self.groups_ssm_state_size,
-                ],
-                bias=use_conv_bias,
-                quant_config=None,
-                prefix=f"{prefix}.conv1d",
-            )
-
-            self.in_proj = MergedColumnParallelLinear(
-                input_size=hidden_size,
-                output_sizes=[
-                    intermediate_size,
-                    intermediate_size,
-                    self.groups_ssm_state_size,
-                    self.groups_ssm_state_size,
-                    self.num_heads,
-                ],
-                bias=use_bias,
-                quant_config=quant_config,
-                prefix=f"{prefix}.in_proj",
-            )
-        else:
-            # This is the n_groups == 1 case,
-            # where we need to duplicate groups if TP>1.
-
-            self.conv1d = ColumnParallelLinear(
-                input_size=conv_kernel_size,
-                output_size=self.conv_dim,
-                bias=use_conv_bias,
-                quant_config=None,
-                prefix=f"{prefix}.conv1d",
-            )
-
-            self.in_proj = ColumnParallelLinear(
-                input_size=hidden_size,
-                output_size=intermediate_size + self.conv_dim + self.num_heads,
-                bias=use_bias,
-                quant_config=quant_config,
-                prefix=f"{prefix}.in_proj",
-            )
-
-            # - because in_proj is a concatenation of 3 weights, we
-            #   need to interleave them before sharding
-            # - use the custom weight loader mamba_v2_sharded_weight_loader
-            #   for conv1d.bias, covn1d.weight and in_proj.weight
-            # - need to set these settings, to assign the groups
-            #   to the head shards
-            group_shard_settings = (
-                self.groups_ssm_state_size,  # expected model size
-                (self.n_groups - n_groups) * self.ssm_state_size,  # extra dims assigned
-                n_groups == 1,  # if there was only one group
-            )
-            intermediate_settings = (intermediate_size, 0, False)
-            head_settings = (self.num_heads, 0, False)
-
-            # - the weight already has a "weight_loader" attribute
-            #   which set_weight_attrs will raise if we do not
-            #   delete before trying to override it
-            # - ditto for the other two weights below
-            delattr(self.conv1d.bias, "weight_loader")
-            set_weight_attrs(
-                self.conv1d.bias,
-                {
-                    "weight_loader": mamba_v2_sharded_weight_loader(
-                        [
-                            intermediate_settings,
-                            group_shard_settings,
-                            group_shard_settings,
-                        ],
-                        self.tp_size,
-                        tp_rank,
-                    )
-                },
-            )
-
-            delattr(self.conv1d.weight, "weight_loader")
-            set_weight_attrs(
-                self.conv1d.weight,
-                {
-                    "weight_loader": mamba_v2_sharded_weight_loader(
-                        [
-                            intermediate_settings,
-                            group_shard_settings,
-                            group_shard_settings,
-                        ],
-                        self.tp_size,
-                        tp_rank,
-                    )
-                },
-            )
-
-            # Create the custom weight loader for Mamba sharding with group
-            # replication. This handles the interleaved projections correctly.
-            mamba_loader = mamba_v2_sharded_weight_loader(
-                [
-                    intermediate_settings,  # for gate
-                    intermediate_settings,
-                    group_shard_settings,
-                    group_shard_settings,
-                    head_settings,  # for dt
-                ],
-                self.tp_size,
-                tp_rank,
-            )
-
-            # Apply the custom weight loader to in_proj.weight
-            # Works for both non-quantized (Parameter) and quantized
-            # (ModelWeightParameter which extends BasevLLMParameter)
-            if isinstance(self.in_proj.weight, BasevLLMParameter):
-                # For BasevLLMParameter subclasses (quantized layers like FP8)
-                # These have a weight_loader property that can be directly set
-                self.in_proj.weight.weight_loader = mamba_loader
-            else:
-                # For standard Parameter (non-quantized layers)
-                delattr(self.in_proj.weight, "weight_loader")
-                set_weight_attrs(self.in_proj.weight, {"weight_loader": mamba_loader})
-
-        # unsqueeze to fit conv1d weights shape into the linear weights shape.
-        # Can't do this in `weight_loader` since it already exists in
-        # `ColumnParallelLinear` and `MergedColumnParallelLinear`,
-        # and `set_weight_attrs` doesn't allow to override it
-        self.conv1d.weight.data = self.conv1d.weight.data.unsqueeze(1)
-        conv_weights = self.conv1d.weight.view(
-            self.conv1d.weight.size(0), self.conv1d.weight.size(2)
-        )
-        self.register_buffer("conv_weights", conv_weights, persistent=False)
-
-        # - these are TPed by heads to reduce the size of the
-        #   temporal shape
-        self.A = nn.Parameter(
-            torch.empty(
-                divide(num_heads, self.tp_size),
-                dtype=torch.float32,
-            )
-        )
-        self.D = nn.Parameter(torch.ones(num_heads // self.tp_size))
-        self.dt_bias = nn.Parameter(torch.ones(num_heads // self.tp_size))
-        self.use_rms_norm = use_rms_norm
-
-        set_weight_attrs(self.D, {"weight_loader": sharded_weight_loader(0)})
-        a_weight_loader = composed_weight_loader(
-            sharded_weight_loader(0), lambda x: -torch.exp(x.float())
-        )
-        set_weight_attrs(self.A, {"weight_loader": a_weight_loader})
-        set_weight_attrs(self.dt_bias, {"weight_loader": sharded_weight_loader(0)})
-
-        self.out_proj = RowParallelLinear(
-            intermediate_size,
-            hidden_size,
-            bias=use_bias,
-            input_is_parallel=True,
-            quant_config=quant_config,
-            prefix=f"{prefix}.out_proj",
-        )
-
-        self.norm = Mixer2RMSNormGated(
-            intermediate_size, n_groups, self.use_rms_norm, eps=rms_norm_eps
-        )
-
         self._ssd_kernels_warmed_up = False
-
-        # - get hidden_states, B and C after depthwise convolution.
-        self.split_hidden_states_B_C_fn = lambda hidden_states_B_C: torch.split(
-            hidden_states_B_C,
-            [
-                self.intermediate_size // self.tp_size,
-                self.groups_ssm_state_size // self.tp_size,
-                self.groups_ssm_state_size // self.tp_size,
-            ],
-            dim=-1,
-        )
 
         vllm_config = get_current_vllm_config()
         compilation_config = vllm_config.compilation_config
@@ -562,48 +382,7 @@ class MambaMixer2(MambaBase, PluggableLayer):
         # Check if running on Blackwell (SM100+) for kernel tuning
         self.is_blackwell = current_platform.is_device_capability_family(100)
 
-    def forward(
-        self,
-        hidden_states: torch.Tensor,
-        mup_vector: torch.Tensor | None = None,
-    ):
-        # 1. Gated MLP's linear projection
-        projected_states, _ = self.in_proj(hidden_states)
-        if mup_vector is not None:
-            projected_states = projected_states * mup_vector
-
-        # 2. Prepare inputs for conv + SSM
-        ssm_output = torch.empty(
-            [
-                hidden_states.shape[0],
-                (self.num_heads // self.tp_size) * self.head_dim,
-            ],
-            dtype=hidden_states.dtype,
-            device=hidden_states.device,
-        )
-
-        # 3. conv + SSM
-        # (split `projected_states` into hidden_states_B_C, dt in the custom op to
-        # ensure it is not treated as an intermediate tensor by torch compile)
-        torch.ops.vllm.mamba_mixer2(
-            projected_states,
-            ssm_output,
-            _encode_layer_name(self.prefix),
-        )
-
-        # 4. gated MLP
-        # GatedRMSNorm internally applying SiLU to the gate
-        # SiLU is applied internally before normalization, unlike standard
-        # norm usage
-        gate = projected_states[..., : self.tped_intermediate_size]
-        hidden_states = self.norm(ssm_output, gate)
-
-        # 5. Final linear projection
-        output, _ = self.out_proj(hidden_states)
-
-        return output
-
-    def _warmup_ssd_kernels(self, projected_states: torch.Tensor) -> None:
+    def _warmup_ssd_kernels(self, hidden_states_B_C: torch.Tensor) -> None:
         """Run a minimal SSD forward pass to trigger Triton autotuning
         while GPU memory is still plentiful (before SSM cache allocation).
         """
@@ -612,8 +391,8 @@ class MambaMixer2(MambaBase, PluggableLayer):
         self._ssd_kernels_warmed_up = True
         logger.info_once("Warming up Mamba2 SSD Triton kernels...")
 
-        device = projected_states.device
-        dtype = projected_states.dtype
+        device = hidden_states_B_C.device
+        dtype = hidden_states_B_C.dtype
 
         nheads = self.num_heads // self.tp_size
         ngroups = self.n_groups // self.tp_size
@@ -701,6 +480,21 @@ class MambaMixer2(MambaBase, PluggableLayer):
         logger.debug("Mamba2 SSD kernel warmup completed for layer %s", self.prefix)
         torch.accelerator.empty_cache()
 
+    def forward_ssd(
+        self, hidden_states_B_C: torch.Tensor, dt: torch.Tensor
+    ) -> torch.Tensor:
+        """Run conv + SSM on already split inputs and return the scan output."""
+        output = torch.empty(
+            hidden_states_B_C.shape[0],
+            (self.num_heads // self.tp_size) * self.head_dim,
+            dtype=hidden_states_B_C.dtype,
+            device=hidden_states_B_C.device,
+        )
+        torch.ops.vllm.mamba2_ssd(
+            hidden_states_B_C, dt, output, _encode_layer_name(self.prefix)
+        )
+        return output
+
     def conv_ssm_forward(
         self,
         projected_states: torch.Tensor,
@@ -711,7 +505,14 @@ class MambaMixer2(MambaBase, PluggableLayer):
             [self.tped_conv_size, self.tped_dt_size],
             dim=-1,
         )
+        return self.ssd_forward(hidden_states_B_C, dt, output)
 
+    def ssd_forward(
+        self,
+        hidden_states_B_C: torch.Tensor,
+        dt: torch.Tensor,
+        output: torch.Tensor,
+    ):
         forward_context = get_forward_context()
         # attn_metadata contains metadata necessary for the mamba2 triton
         # kernels to operate in continuous batching and in chunked prefill
@@ -763,7 +564,7 @@ class MambaMixer2(MambaBase, PluggableLayer):
         if attn_metadata is None:
             # V1 profile run -- warm up SSD kernels so that autotuning
             # completes before SSM cache allocation.
-            self._warmup_ssd_kernels(projected_states)
+            self._warmup_ssd_kernels(hidden_states_B_C)
             hidden_states_B_C = (
                 hidden_states_B_C.transpose(0, 1).clone().transpose(0, 1)
             ).contiguous()
@@ -854,7 +655,7 @@ class MambaMixer2(MambaBase, PluggableLayer):
             hidden_states_B_C_p = causal_conv1d_fn(
                 x,
                 self.conv_weights,
-                self.conv1d.bias,
+                self.conv_bias,
                 activation=self.activation,
                 conv_states=conv_state,
                 has_initial_state=has_initial_states_p,
@@ -1034,7 +835,7 @@ class MambaMixer2(MambaBase, PluggableLayer):
                 hidden_states_B_C_d,
                 conv_state,
                 self.conv_weights,
-                self.conv1d.bias,
+                self.conv_bias,
                 self.activation,
                 conv_state_indices=state_indices_tensor_d,
                 block_idx_last_scheduled_token=block_idx_last_scheduled_token_d,
@@ -1193,6 +994,263 @@ class MambaMixer2(MambaBase, PluggableLayer):
         return MambaAttentionBackendEnum.MAMBA2
 
 
+# Adapted from transformers.models.mamba.modeling_mamba.MambaMixer
+# --8<-- [start:mamba_mixer2]
+@PluggableLayer.register("mamba_mixer2")
+class MambaMixer2(Mamba2SSM, PluggableLayer):
+    """Compute ∆, A, B, C, and D the state space parameters and compute
+    the `contextualized_states`. A, D are input independent
+    (see Mamba paper [1] Section 3.5.2 "Interpretation of A"
+    for why A isn't selective) ∆, B, C are input-dependent
+    (this is a key difference between Mamba and the linear time
+    invariant S4, and is why Mamba is called
+    **selective** state spaces)
+    """
+
+    # --8<-- [end:mamba_mixer2]
+
+    def __init__(
+        self,
+        hidden_size: int,
+        ssm_state_size: int,
+        conv_kernel_size: int,
+        intermediate_size: int,
+        use_conv_bias: bool,
+        use_bias: bool,
+        n_groups: int = 1,
+        num_heads: int = 128,
+        head_dim: int = 64,
+        rms_norm_eps: float = 1e-5,
+        activation: str = "silu",
+        use_rms_norm: bool = True,
+        model_config: ModelConfig | None = None,
+        cache_config: CacheConfig | None = None,
+        quant_config: QuantizationConfig | None = None,
+        prefix: str = "",
+    ):
+        super().__init__(
+            ssm_state_size=ssm_state_size,
+            conv_kernel_size=conv_kernel_size,
+            intermediate_size=intermediate_size,
+            n_groups=n_groups,
+            num_heads=num_heads,
+            head_dim=head_dim,
+            activation=activation,
+            model_config=model_config,
+            cache_config=cache_config,
+            prefix=prefix,
+        )
+        tp_rank = get_tensor_model_parallel_rank()
+        if n_groups % self.tp_size == 0:
+            self.conv1d = MergedColumnParallelLinear(
+                input_size=conv_kernel_size,
+                output_sizes=[
+                    intermediate_size,
+                    self.groups_ssm_state_size,
+                    self.groups_ssm_state_size,
+                ],
+                bias=use_conv_bias,
+                quant_config=None,
+                prefix=f"{prefix}.conv1d",
+            )
+
+            self.in_proj = MergedColumnParallelLinear(
+                input_size=hidden_size,
+                output_sizes=[
+                    intermediate_size,
+                    intermediate_size,
+                    self.groups_ssm_state_size,
+                    self.groups_ssm_state_size,
+                    self.num_heads,
+                ],
+                bias=use_bias,
+                quant_config=quant_config,
+                prefix=f"{prefix}.in_proj",
+            )
+        else:
+            # This is the n_groups == 1 case,
+            # where we need to duplicate groups if TP>1.
+
+            self.conv1d = ColumnParallelLinear(
+                input_size=conv_kernel_size,
+                output_size=self.conv_dim,
+                bias=use_conv_bias,
+                quant_config=None,
+                prefix=f"{prefix}.conv1d",
+            )
+
+            self.in_proj = ColumnParallelLinear(
+                input_size=hidden_size,
+                output_size=intermediate_size + self.conv_dim + self.num_heads,
+                bias=use_bias,
+                quant_config=quant_config,
+                prefix=f"{prefix}.in_proj",
+            )
+
+            # - because in_proj is a concatenation of 3 weights, we
+            #   need to interleave them before sharding
+            # - use the custom weight loader mamba_v2_sharded_weight_loader
+            #   for conv1d.bias, covn1d.weight and in_proj.weight
+            # - need to set these settings, to assign the groups
+            #   to the head shards
+            group_shard_settings = (
+                self.groups_ssm_state_size,  # expected model size
+                (self.n_groups - n_groups) * self.ssm_state_size,  # extra dims assigned
+                n_groups == 1,  # if there was only one group
+            )
+            intermediate_settings = (intermediate_size, 0, False)
+            head_settings = (self.num_heads, 0, False)
+
+            # - the weight already has a "weight_loader" attribute
+            #   which set_weight_attrs will raise if we do not
+            #   delete before trying to override it
+            # - ditto for the other two weights below
+            delattr(self.conv1d.bias, "weight_loader")
+            set_weight_attrs(
+                self.conv1d.bias,
+                {
+                    "weight_loader": mamba_v2_sharded_weight_loader(
+                        [
+                            intermediate_settings,
+                            group_shard_settings,
+                            group_shard_settings,
+                        ],
+                        self.tp_size,
+                        tp_rank,
+                    )
+                },
+            )
+
+            delattr(self.conv1d.weight, "weight_loader")
+            set_weight_attrs(
+                self.conv1d.weight,
+                {
+                    "weight_loader": mamba_v2_sharded_weight_loader(
+                        [
+                            intermediate_settings,
+                            group_shard_settings,
+                            group_shard_settings,
+                        ],
+                        self.tp_size,
+                        tp_rank,
+                    )
+                },
+            )
+
+            # Create the custom weight loader for Mamba sharding with group
+            # replication. This handles the interleaved projections correctly.
+            mamba_loader = mamba_v2_sharded_weight_loader(
+                [
+                    intermediate_settings,  # for gate
+                    intermediate_settings,
+                    group_shard_settings,
+                    group_shard_settings,
+                    head_settings,  # for dt
+                ],
+                self.tp_size,
+                tp_rank,
+            )
+
+            # Apply the custom weight loader to in_proj.weight
+            # Works for both non-quantized (Parameter) and quantized
+            # (ModelWeightParameter which extends BasevLLMParameter)
+            if isinstance(self.in_proj.weight, BasevLLMParameter):
+                # For BasevLLMParameter subclasses (quantized layers like FP8)
+                # These have a weight_loader property that can be directly set
+                self.in_proj.weight.weight_loader = mamba_loader
+            else:
+                # For standard Parameter (non-quantized layers)
+                delattr(self.in_proj.weight, "weight_loader")
+                set_weight_attrs(self.in_proj.weight, {"weight_loader": mamba_loader})
+
+        # unsqueeze to fit conv1d weights shape into the linear weights shape.
+        # Can't do this in `weight_loader` since it already exists in
+        # `ColumnParallelLinear` and `MergedColumnParallelLinear`,
+        # and `set_weight_attrs` doesn't allow to override it
+        self.conv1d.weight.data = self.conv1d.weight.data.unsqueeze(1)
+        conv_weights = self.conv1d.weight.view(
+            self.conv1d.weight.size(0), self.conv1d.weight.size(2)
+        )
+        self.register_buffer("conv_weights", conv_weights, persistent=False)
+
+        # - these are TPed by heads to reduce the size of the
+        #   temporal shape
+        self.A = nn.Parameter(
+            torch.empty(
+                divide(num_heads, self.tp_size),
+                dtype=torch.float32,
+            )
+        )
+        self.D = nn.Parameter(torch.ones(num_heads // self.tp_size))
+        self.dt_bias = nn.Parameter(torch.ones(num_heads // self.tp_size))
+        self.use_rms_norm = use_rms_norm
+
+        set_weight_attrs(self.D, {"weight_loader": sharded_weight_loader(0)})
+        a_weight_loader = composed_weight_loader(
+            sharded_weight_loader(0), lambda x: -torch.exp(x.float())
+        )
+        set_weight_attrs(self.A, {"weight_loader": a_weight_loader})
+        set_weight_attrs(self.dt_bias, {"weight_loader": sharded_weight_loader(0)})
+
+        self.out_proj = RowParallelLinear(
+            intermediate_size,
+            hidden_size,
+            bias=use_bias,
+            input_is_parallel=True,
+            quant_config=quant_config,
+            prefix=f"{prefix}.out_proj",
+        )
+
+        self.norm = Mixer2RMSNormGated(
+            intermediate_size, n_groups, self.use_rms_norm, eps=rms_norm_eps
+        )
+
+    @property
+    def conv_bias(self) -> torch.Tensor | None:
+        return self.conv1d.bias
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        mup_vector: torch.Tensor | None = None,
+    ):
+        # 1. Gated MLP's linear projection
+        projected_states, _ = self.in_proj(hidden_states)
+        if mup_vector is not None:
+            projected_states = projected_states * mup_vector
+
+        # 2. Prepare inputs for conv + SSM
+        ssm_output = torch.empty(
+            [
+                hidden_states.shape[0],
+                (self.num_heads // self.tp_size) * self.head_dim,
+            ],
+            dtype=hidden_states.dtype,
+            device=hidden_states.device,
+        )
+
+        # 3. conv + SSM
+        # (split `projected_states` into hidden_states_B_C, dt in the custom op to
+        # ensure it is not treated as an intermediate tensor by torch compile)
+        torch.ops.vllm.mamba_mixer2(
+            projected_states,
+            ssm_output,
+            _encode_layer_name(self.prefix),
+        )
+
+        # 4. gated MLP
+        # GatedRMSNorm internally applying SiLU to the gate
+        # SiLU is applied internally before normalization, unlike standard
+        # norm usage
+        gate = projected_states[..., : self.tped_intermediate_size]
+        hidden_states = self.norm(ssm_output, gate)
+
+        # 5. Final linear projection
+        output, _ = self.out_proj(hidden_states)
+
+        return output
+
+
 def share_replayssm_ring_trackers(
     ordered_layer_names: list[str],
     forward_context: dict[str, Attention],
@@ -1206,11 +1264,11 @@ def share_replayssm_ring_trackers(
     The final local layer in each group advances its cursors after every layer
     in that group has consumed the previous values.
     """
-    replayssm_mixers: dict[str, MambaMixer2] = {}
+    replayssm_mixers: dict[str, Mamba2SSM] = {}
     for layer_name in ordered_layer_names:
         layer = forward_context[layer_name]
         if (
-            isinstance(layer, MambaMixer2)
+            isinstance(layer, Mamba2SSM)
             and layer.use_replayssm
             and layer.mamba_config.backend == MambaBackendEnum.FLASHINFER
         ):
@@ -1265,5 +1323,24 @@ def mamba_mixer2(
 direct_register_custom_op(
     op_name="mamba_mixer2",
     op_func=mamba_mixer2,
+    mutates_args=["output"],
+)
+
+
+def mamba2_ssd(
+    hidden_states_B_C: torch.Tensor,
+    dt: torch.Tensor,
+    output: torch.Tensor,
+    layer_name: LayerNameType,
+) -> None:
+    layer_name = _resolve_layer_name(layer_name)
+    forward_context: ForwardContext = get_forward_context()
+    self = forward_context.no_compile_layers[layer_name]
+    self.ssd_forward(hidden_states_B_C=hidden_states_B_C, dt=dt, output=output)
+
+
+direct_register_custom_op(
+    op_name="mamba2_ssd",
+    op_func=mamba2_ssd,
     mutates_args=["output"],
 )

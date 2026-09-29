@@ -16,6 +16,7 @@
 # limitations under the License.
 """Transformers modeling backend base class."""
 
+import inspect
 import os
 from collections.abc import Callable, Iterable
 from contextlib import contextmanager
@@ -57,10 +58,19 @@ from vllm.model_executor.models.interfaces import (
 )
 from vllm.model_executor.models.interfaces_base import VllmModel
 from vllm.model_executor.models.transformers.fuser import BaseFuser, Fusers
-from vllm.model_executor.models.transformers.fusers import AttentionFuser, MLAFuser
+from vllm.model_executor.models.transformers.fusers import (
+    AttentionFuser,
+    MLAFuser,
+    SSDFuser,
+)
 from vllm.model_executor.models.transformers.fusers.attention import (
     VLLM_ATTN_IMPL,
     VLLM_MLA_ATTN_IMPL,
+)
+from vllm.model_executor.models.transformers.fusers.ssd import VLLM_LINEAR_ATTN_IMPL
+from vllm.model_executor.models.transformers.linear_attention import (
+    VLLM_SSD_ATTR,
+    TransformersMamba2SSM,
 )
 from vllm.model_executor.models.transformers.utils import (
     attrsetter,
@@ -144,10 +154,10 @@ class Base(
         self.fusers: dict[str, list[BaseFuser]] = {}
         """Module qualname -> the fusers applied to it, populated
         by `recursive_replace` for `_create_attention_instances`."""
-        self.attention_fusers: dict[int, tuple[str, AttentionFuser]] = {}
+        self.attention_fusers: dict[int, tuple[str, AttentionFuser | SSDFuser]] = {}
         """`layer_idx` -> the qualname and fuser of the module computing that
-        layer's attention, populated by `recursive_replace` for
-        `_create_attention_instances`."""
+        layer's attention (or linear attention), populated by `recursive_replace`
+        for `_create_attention_instances`."""
 
         # Attrs for Eagle3 (see self.set_aux_hidden_state_layers)
         self._target_class: type[nn.Module] = nn.Module
@@ -199,12 +209,13 @@ class Base(
     def _patch_config(self):
         """Patch the config to ensure that the model is created correctly:
 
-        - Sets the attention implementation to "vllm" so the attention instances from
-        `_create_attention_instances` are used
+        - Sets the attention and linear attention implementations to "vllm" so the
+        instances from `_create_attention_instances` are used
         - Sets the dtype to the default torch dtype set by vLLM because Transformers
         uses the config dtype when creating the model
         """
         self.text_config._attn_implementation = VLLM_ATTN_IMPL
+        self.text_config._linear_attn_implementation = VLLM_LINEAR_ATTN_IMPL
         self.config.dtype = torch.get_default_dtype()
 
     @contextmanager
@@ -285,14 +296,18 @@ class Base(
     def _decorate_for_torch_compile(self):
         """Decorate the model's decoder class to indicate to vLLM that it
         supports torch compile if `can_enable_torch_compile` is True."""
+        decoder = self._pre_trained_model_classes.decoder
+        # Applied to a PreTrainedModel so the batch dimension will exist
+        dynamic_arg_dims = DynamicArgDims(
+            input_ids=1,  # shape: [1, seq_len]
+            inputs_embeds=1,  # shape: [1, seq_len, hidden_size]
+            position_ids=-1,  # shape: [1, seq_len] or [3, 1, seq_len] for mrope
+        )
+        # Attention free decoders (e.g. Mamba2) take no `position_ids`
+        params = inspect.signature(decoder.forward).parameters
         self._decorate_cls_for_torch_compile(
-            cls=self._pre_trained_model_classes.decoder,
-            # Applied to a PreTrainedModel so the batch dimension will exist
-            dynamic_arg_dims=DynamicArgDims(
-                input_ids=1,  # shape: [1, seq_len]
-                inputs_embeds=1,  # shape: [1, seq_len, hidden_size]
-                position_ids=-1,  # shape: [1, seq_len] or [3, 1, seq_len] for mrope
-            ),
+            cls=decoder,
+            dynamic_arg_dims={k: v for k, v in dynamic_arg_dims.items() if k in params},
             enable_if=can_enable_torch_compile,
             is_encoder=False,
         )
@@ -496,7 +511,7 @@ class Base(
             self.fusers.setdefault(prefix, []).append(fuser)
 
             if (
-                isinstance(fuser, AttentionFuser)
+                isinstance(fuser, (AttentionFuser, SSDFuser))
                 and (index := fuser.layer_index(module)) is not None
             ):
                 if index in self.attention_fusers:
@@ -611,6 +626,13 @@ class Base(
                 )
             prefix, attn_fuser = self.attention_fusers[i]
             attn_module = self.get_submodule(prefix)
+
+            if isinstance(attn_fuser, SSDFuser):
+                ssd = TransformersMamba2SSM(
+                    attn_module, self.vllm_config, prefix=f"{i}.{VLLM_SSD_ATTR}"
+                )
+                setattr(attn_module, VLLM_SSD_ATTR, ssd)
+                continue
 
             # `[i]` is the whole-model config unless the checkpoint is
             # heterogeneous, in which case it is this layer's own geometry.

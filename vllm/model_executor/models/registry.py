@@ -739,6 +739,15 @@ _TRANSFORMERS_BACKEND_MODELS = {
     # Text generation models
     "TransformersForCausalLM": ("transformers", "TransformersForCausalLM"),
     "TransformersMoEForCausalLM": ("transformers", "TransformersMoEForCausalLM"),
+    "TransformersAttentionFreeForCausalLM": (
+        "transformers",
+        "TransformersAttentionFreeForCausalLM",
+    ),
+    "TransformersHybridForCausalLM": ("transformers", "TransformersHybridForCausalLM"),
+    "TransformersMoEHybridForCausalLM": (
+        "transformers",
+        "TransformersMoEHybridForCausalLM",
+    ),
     # Multimodal models
     "TransformersMultiModalForCausalLM": (
         "transformers",

@@ -19,6 +19,7 @@ from vllm.model_executor.models.transformers.fusers import (
     QKVFuser,
     RewriteFuser,
     RMSNormFuser,
+    SSDFuser,
 )
 from vllm.model_executor.models.transformers.fx_utils import trace
 
@@ -45,6 +46,7 @@ FUSERS: tuple[type[BaseFuser], ...] = (
     RMSNormFuser,
     # Put fusers that don't redefine forward after this comment
     AttentionFuser,
+    SSDFuser,
 )
 """Every fuser, in priority order: those that redefine the forward first, then those
 that leave it alone. A new fuser is added here."""

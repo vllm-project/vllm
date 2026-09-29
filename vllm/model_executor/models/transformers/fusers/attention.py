@@ -24,21 +24,21 @@ VLLM_ATTN_IMPL = "vllm"
 VLLM_MLA_ATTN_IMPL = "vllm_mla"
 
 
-def _is_interface_lookup(node: ast.expr | None) -> bool:
-    """Whether `node` reads an entry out of `ALL_ATTENTION_FUNCTIONS`."""
+def _is_interface_lookup(node: ast.expr | None, interface: str) -> bool:
+    """Whether `node` reads an entry out of the `interface` registry."""
     # ALL_ATTENTION_FUNCTIONS.get_interface(...) or ALL_ATTENTION_FUNCTIONS[...]
     if isinstance(node, ast.Call):
         node = node.func
     if not isinstance(node, (ast.Attribute, ast.Subscript)):
         return False
-    return (
-        isinstance(node.value, ast.Name) and node.value.id == "ALL_ATTENTION_FUNCTIONS"
-    )
+    return isinstance(node.value, ast.Name) and node.value.id == interface
 
 
 @cache
-def interface_call(forward: Callable) -> ast.Call | None:
-    """The attention interface call in `forward`, if it makes exactly one."""
+def interface_call(
+    forward: Callable, interface: str = "ALL_ATTENTION_FUNCTIONS"
+) -> ast.Call | None:
+    """The `interface` call in `forward`, if it makes exactly one."""
     try:
         source = inspect.getsource(inspect.unwrap(forward))
         tree = ast.parse(textwrap.dedent(source))
@@ -50,7 +50,7 @@ def interface_call(forward: Callable) -> ast.Call | None:
     for node in ast.walk(tree):
         if not isinstance(node, (ast.Assign, ast.AnnAssign)):
             continue
-        if not _is_interface_lookup(node.value):
+        if not _is_interface_lookup(node.value, interface):
             continue
         targets = node.targets if isinstance(node, ast.Assign) else [node.target]
         names.update(t.id for t in targets if isinstance(t, ast.Name))
