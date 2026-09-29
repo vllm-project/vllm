@@ -239,10 +239,44 @@ def test_receive_launch_is_idempotent_when_cpu_event_is_none(monkeypatch):
 def test_alloc_combined_keeps_unbind_views_16_byte_aligned():
     for num_reqs in range(1, 9):
         combined = pp_utils._alloc_combined(num_reqs, torch.device("cpu"))
-        num_sampled, num_rejected = combined.unbind(dim=0)
+        num_sampled, num_rejected = combined[:, :num_reqs].unbind(dim=0)
         assert num_sampled.data_ptr() % 16 == 0
         assert num_rejected.data_ptr() % 16 == 0
+        assert num_sampled.shape == (num_reqs,)
+        assert num_rejected.shape == (num_reqs,)
         assert combined.shape[1] >= num_reqs
+
+
+def test_receive_exposes_logical_views_of_padded_combined(monkeypatch):
+    handler = PPHandler.__new__(PPHandler)
+    handler.is_last_rank = False
+    handler.num_speculative_steps = 0
+    handler.max_sample_len = 1
+    handler.device = torch.device("cpu")
+    handler.broadcast_stream = Mock()
+    handler.recv_launch_delay = 1
+    handler.req_idx_gen_np = np.zeros(5, dtype=np.int32)
+    handler.queue = deque([None])
+    monkeypatch.setattr(torch.cuda, "stream", lambda _: nullcontext())
+
+    batch = _batch(
+        num_computed=[1] * 5,
+        prefill_len=[1] * 5,
+        num_scheduled=[1] * 5,
+    )
+    batch.idx_mapping_np = np.arange(5, dtype=np.int64)
+    batch.idx_mapping = torch.arange(5)
+
+    assert handler.receive(batch)
+    slot = handler.queue[-1]
+    assert slot is not None
+    assert slot.combined.shape == (2, 8)
+    assert slot.num_sampled.shape == (5,)
+    assert slot.num_rejected.shape == (5,)
+
+    slot.combined[:, :5] = torch.arange(10, dtype=torch.int32).view(2, 5)
+    assert slot.num_sampled.tolist() == [0, 1, 2, 3, 4]
+    assert slot.num_rejected.tolist() == [5, 6, 7, 8, 9]
 
 
 def test_warmup_pp_decode_update_matches_serving_specialization(monkeypatch):

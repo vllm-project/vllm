@@ -322,7 +322,7 @@ class PPHandler:
             # These are views of the broadcast target. Creating them before a
             # deferred broadcast is intentional: filling `combined` updates
             # both views in place.
-            num_sampled, num_rejected = combined.unbind(dim=0)
+            num_sampled, num_rejected = combined[:, :num_reqs].unbind(dim=0)
             draft_tokens = None
             if self.num_speculative_steps > 0:
                 draft_tokens = torch.empty(
