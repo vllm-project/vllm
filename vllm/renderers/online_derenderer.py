@@ -38,12 +38,42 @@ from vllm.entrypoints.serve.utils.tool_calls_utils import (
 from vllm.logger import init_logger
 from vllm.parser import Parser, ParserManager
 from vllm.renderers import BaseRenderer
-from vllm.tokenizers import TokenizerLike
 from vllm.tokenizers.detokenizer_utils import detokenize_incrementally
+
+# for development use
+from vllm.tokenizers.protocol import TokenizerLike
 from vllm.utils import random_uuid
 from vllm.utils.async_utils import make_async
 
 logger = init_logger(__name__)
+
+
+def _detokenize_full_sequence(
+    tokenizer: TokenizerLike,
+    token_ids: list[int],
+    skip_special_tokens: bool = False,
+) -> str:
+    """Incrementally decode token IDs to avoid emitting replacement characters
+    (U+FFFD) for unfinished trailing byte sequences."""
+    prev_tokens: list[str] = []
+    prefix_offset = 0
+    read_offset = 0
+    text_chunks: list[str] = []
+
+    for tok_id in token_ids:
+        new_toks, text, prefix_offset, read_offset = detokenize_incrementally(
+            tokenizer=tokenizer,
+            all_input_ids=[tok_id],
+            prev_tokens=prev_tokens,
+            prefix_offset=prefix_offset,
+            read_offset=read_offset,
+            skip_special_tokens=skip_special_tokens,
+        )
+        prev_tokens.extend(new_toks)
+        if text:
+            text_chunks.append(text)
+
+    return "".join(text_chunks)
 
 
 class OnlineDerenderer:
@@ -138,8 +168,8 @@ class OnlineDerenderer:
                 # Parser path: decode with special tokens preserved
                 # so the parser can see markers like </think>,
                 # <tool_call>, or Harmony channel tokens.
-                decoded_text = tokenizer.decode(
-                    choice.token_ids, skip_special_tokens=False
+                decoded_text = _detokenize_full_sequence(
+                    tokenizer, choice.token_ids, skip_special_tokens=False
                 )
 
                 chat_template_kwargs: dict[str, Any] = {}
@@ -202,8 +232,8 @@ class OnlineDerenderer:
                     if chat_request is not None
                     else True
                 )
-                decoded_text = tokenizer.decode(
-                    choice.token_ids, skip_special_tokens=skip_special
+                decoded_text = _detokenize_full_sequence(
+                    tokenizer, choice.token_ids, skip_special_tokens=skip_special
                 )
                 message = ChatMessage(role="assistant", content=decoded_text)
 
@@ -642,8 +672,8 @@ class OnlineDerenderer:
                         "has empty or null token_ids"
                     )
 
-                decoded_text = tokenizer.decode(
-                    choice.token_ids, skip_special_tokens=skip_special
+                decoded_text = _detokenize_full_sequence(
+                    tokenizer, choice.token_ids, skip_special_tokens=False
                 )
                 completion_logprobs = None
                 if choice.logprobs is not None:
