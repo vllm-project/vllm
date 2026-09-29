@@ -10,7 +10,8 @@ import os
 import sys
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Generator
+from concurrent.futures import Future
 from dataclasses import dataclass
 from typing import Any
 
@@ -74,6 +75,9 @@ _ENGINE_TIMEOUT_SPECULATIVE_CONFIG_FIELDS = (
 class EngineExecutionTimeoutSnapshot:
     scheduler_output_summary: dict[str, Any]
     scheduler_queue_summary: dict[str, Any]
+
+
+_EMPTY_ENGINE_EXECUTION_TIMEOUT_SNAPSHOT = EngineExecutionTimeoutSnapshot({}, {})
 
 
 def prepare_object_to_dump(obj) -> str:
@@ -719,3 +723,118 @@ class EngineExecutionTimeoutWatchdog:
                 return False
             self._last_dump_s_by_stage[stage] = now_s
             return True
+
+
+class EngineExecutionTimeoutDiagnostics:
+    """Owns slow-stage watchdog lifecycle and scheduler snapshots."""
+
+    def __init__(
+        self,
+        *,
+        config: VllmConfig,
+        timeout_s: float | None,
+        scheduler_state_fn: Callable[[], dict[str, Any]],
+    ) -> None:
+        self._watchdog = EngineExecutionTimeoutWatchdog(
+            config=config,
+            timeout_s=timeout_s,
+        )
+        self._scheduler_state_fn = scheduler_state_fn
+        self._sampling_params_by_request: dict[str, dict[str, Any] | None] = {}
+
+    def start(self) -> None:
+        self._watchdog.start()
+
+    def stop(self) -> None:
+        self._watchdog.stop()
+
+    @contextlib.contextmanager
+    def monitor(
+        self,
+        stage: str,
+        snapshot: EngineExecutionTimeoutSnapshot,
+    ) -> Generator[None, None, None]:
+        if not self._watchdog.enabled:
+            yield
+            return
+        generation = self._watchdog.arm(snapshot, stage)
+        try:
+            yield
+        finally:
+            self._watchdog.disarm(generation)
+
+    @contextlib.contextmanager
+    def monitor_future(
+        self,
+        future: Future[Any],
+        stage: str,
+        snapshot: EngineExecutionTimeoutSnapshot,
+    ) -> Generator[None, None, None]:
+        if not self._watchdog.enabled or future.done():
+            yield
+            return
+        with self.monitor(stage, snapshot):
+            yield
+
+    def make_snapshot(
+        self,
+        scheduler_output: SchedulerOutput,
+    ) -> EngineExecutionTimeoutSnapshot:
+        if not self._watchdog.enabled:
+            return _EMPTY_ENGINE_EXECUTION_TIMEOUT_SNAPSHOT
+        scheduler_state = self._make_scheduler_state(scheduler_output)
+        try:
+            return make_engine_execution_timeout_snapshot(
+                scheduler_output, scheduler_state
+            )
+        except Exception:
+            logger.warning_once(
+                "Failed to snapshot scheduler output for timeout diagnostics; "
+                "continuing with a minimal diagnostic"
+            )
+            return EngineExecutionTimeoutSnapshot(
+                scheduler_output_summary={"scheduler_output_summary_unavailable": True},
+                scheduler_queue_summary={},
+            )
+
+    def _make_scheduler_state(
+        self,
+        scheduler_output: SchedulerOutput,
+    ) -> dict[str, Any]:
+        cached_request_sampling_params: dict[str, dict[str, Any] | None] = {}
+        try:
+            for request_id in scheduler_output.finished_req_ids:
+                self._sampling_params_by_request.pop(request_id, None)
+            for request in scheduler_output.scheduled_new_reqs:
+                self._sampling_params_by_request[request.req_id] = (
+                    make_sampling_params_summary(request.sampling_params)
+                )
+            _, cached_request_indices = get_engine_timeout_request_sample_indices(
+                len(scheduler_output.scheduled_new_reqs),
+                scheduler_output.scheduled_cached_reqs.num_reqs,
+            )
+            cached_request_ids = (
+                scheduler_output.scheduled_cached_reqs.req_ids[index]
+                for index in cached_request_indices
+            )
+            cached_request_sampling_params = {
+                request_id: self._sampling_params_by_request[request_id]
+                for request_id in cached_request_ids
+                if request_id in self._sampling_params_by_request
+            }
+        except Exception:
+            logger.warning_once(
+                "Failed to maintain sampling parameters for timeout diagnostics; "
+                "continuing without the optional sampling snapshot"
+            )
+
+        try:
+            state = dict(self._scheduler_state_fn())
+        except Exception:
+            logger.warning_once(
+                "Failed to capture scheduler timeout diagnostics; continuing "
+                "without the optional scheduler snapshot"
+            )
+            state = {}
+        state["cached_request_sampling_params"] = cached_request_sampling_params
+        return state

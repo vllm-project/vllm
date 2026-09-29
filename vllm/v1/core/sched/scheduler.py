@@ -2555,11 +2555,12 @@ class Scheduler(SchedulerInterface):
         return self.kv_cache_manager.usage
 
     def make_timeout_diagnostic_state(self) -> dict[str, int | float]:
+        num_deferred = len(self.deferred_waiting)
         return {
             "kv_cache_usage": self.get_kv_cache_usage(),
             "num_running_reqs": len(self.running),
-            "num_skipped_waiting_reqs": len(self.skipped_waiting),
-            "num_waiting_reqs": len(self.waiting),
+            "num_skipped_waiting_reqs": num_deferred,
+            "num_waiting_reqs": len(self.waiting) - num_deferred,
         }
 
     def add_request(self, request: Request) -> None:
