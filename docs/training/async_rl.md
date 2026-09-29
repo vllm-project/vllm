@@ -31,10 +31,8 @@ new requests are admitted while paused:
 `pause_generation` returns, the engine rejects new requests from every API server
 until `resume_generation` returns, rather than carrying them across the boundary.
 Clients should retry on 503. A request racing the pause call itself may instead be
-treated as in-flight. If the engine was put to sleep in one of these modes,
-requests stay rejected until a full `wake_up()`, even if `resume_generation` is
-called first. A streaming-input session's next input is rejected the same way,
-which ends the session; closing an idle session's input just closes it.
+treated as in-flight. A streaming-input session's next input is rejected the
+same way, which ends the session; closing an idle session's input just closes it.
 
 The `clear_cache` parameter controls whether to clear the KV cache and prefix cache after pausing.
 

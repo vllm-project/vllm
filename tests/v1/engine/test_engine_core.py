@@ -708,31 +708,22 @@ def _pausable_engine_core_proc() -> EngineCoreProc:
 
 
 @pytest.mark.parametrize(
-    "pause_state,shutting_down,cleanup_marker,rejection",
+    "pause_state,cleanup_marker,rejected",
     [
-        pytest.param(
-            PauseState.PAUSED_NEW, False, False, FinishReason.PAUSED, id="abort-or-wait"
-        ),
-        pytest.param(PauseState.PAUSED_NEW, False, True, None, id="kv-cleanup-marker"),
-        pytest.param(PauseState.PAUSED_ALL, False, False, None, id="keep"),
-        pytest.param(PauseState.UNPAUSED, False, False, None, id="running"),
-        pytest.param(
-            PauseState.UNPAUSED, True, False, FinishReason.ABORT, id="shutting-down"
-        ),
+        pytest.param(PauseState.PAUSED_NEW, False, True, id="abort-or-wait"),
+        pytest.param(PauseState.PAUSED_NEW, True, False, id="kv-cleanup-marker"),
+        pytest.param(PauseState.PAUSED_ALL, False, False, id="keep"),
+        pytest.param(PauseState.UNPAUSED, False, False, id="running"),
     ],
 )
-def test_add_rejected_while_paused_at_a_boundary(
-    pause_state, shutting_down, cleanup_marker, rejection
-):
+def test_add_rejected_while_paused_at_a_boundary(pause_state, cleanup_marker, rejected):
     """A boundary pause rejects new requests before they reach the scheduler
     or DP wave state; `keep` queues them across the pause. A KV-transfer
     cleanup marker must still reach the connector. The client drops a rejected
-    id, so any open session under it is ended too, as during shutdown."""
+    id, so any open session under it is ended too."""
     core = _pausable_engine_core_proc()
     core.scheduler.pause_state = pause_state
-    core.shutdown_state = (
-        EngineShutdownState.REQUESTED if shutting_down else EngineShutdownState.RUNNING
-    )
+    core.shutdown_state = EngineShutdownState.RUNNING
     core.add_request = MagicMock()
     core._send_finish_outputs_to_client = MagicMock()
     request = MagicMock(
@@ -741,12 +732,14 @@ def test_add_rejected_while_paused_at_a_boundary(
 
     core._handle_client_request(EngineCoreRequestType.ADD, (request, 0))
 
-    if rejection is not None:
+    if rejected:
         core.add_request.assert_not_called()
         core.scheduler.finish_requests.assert_called_once_with(
             ["r"], RequestStatus.FINISHED_ABORTED
         )
-        core._send_finish_outputs_to_client.assert_called_once_with(["r"], 1, rejection)
+        core._send_finish_outputs_to_client.assert_called_once_with(
+            ["r"], 1, FinishReason.PAUSED
+        )
     else:
         core.add_request.assert_called_once_with(request, 0)
         core.scheduler.finish_requests.assert_not_called()
@@ -780,19 +773,6 @@ def test_idle_dp_rank_announces_wave_for_new_work(request_wave, pause_state, ann
         assert outputs.start_wave == 3
     else:
         core.output_queue.put_nowait.assert_not_called()
-
-
-@pytest.mark.parametrize("cls", [EngineCoreProc, DPEngineCoreProc])
-def test_resume_is_noop_while_memory_not_resident(cls):
-    """Unpausing would let the scheduler step against freed memory and admit
-    requests onto it; wake_up resumes once everything is resident."""
-    core = object.__new__(cls)
-    core.model_executor = MagicMock(is_sleeping=True)
-    core.scheduler = MagicMock()
-
-    core.resume_scheduler()
-
-    core.scheduler.set_pause_state.assert_not_called()
 
 
 @pytest.mark.parametrize(

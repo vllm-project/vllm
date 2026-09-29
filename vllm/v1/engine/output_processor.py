@@ -687,8 +687,8 @@ class OutputProcessor:
             new_token_ids = engine_core_output.new_token_ids
             pooling_output = engine_core_output.pooling_output
             finish_reason = engine_core_output.finish_reason
-            if finish_reason in (FinishReason.ABORT, FinishReason.PAUSED):
-                # Ended by the engine, so a streaming-input session takes no more input.
+            if finish_reason == FinishReason.PAUSED:
+                # Rejected, so a streaming-input session takes no more input.
                 req_state.streaming_input = False
                 if req_state.queue is not None:
                     req_state.queue.close()
