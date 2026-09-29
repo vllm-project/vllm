@@ -1,18 +1,25 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import threading
 import time
 from dataclasses import dataclass
+from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import pytest
+import torch
 from transformers import AutoTokenizer
 
+import vllm.v1.structured_output.backend_xgrammar as backend_xgrammar
 from vllm.config import DeviceConfig, StructuredOutputsConfig, VllmConfig
 from vllm.config.model import ModelConfig
 from vllm.config.speculative import SpeculativeConfig
 from vllm.sampling_params import SamplingParams, StructuredOutputsParams
 from vllm.v1.request import Request
 from vllm.v1.structured_output import StructuredOutputManager
+from vllm.v1.structured_output.backend_types import StructuredOutputGrammar
+from vllm.v1.structured_output.backend_xgrammar import XgrammarBackend, XgrammarGrammar
 
 TOKENIZER = "gpt2"
 THINK_END = "\n"  # reasoning-end marker (single GPT-2 token)
@@ -509,3 +516,55 @@ def test_outlines_termination(tokenizer):
     assert grammar.validate_tokens([eos]) == []
     assert grammar.accept_tokens(request.request_id, [one, eos, one])
     assert grammar.is_terminated()
+
+
+def test_fill_bitmasks_batches_xgrammar(monkeypatch):
+    manager = StructuredOutputManager.__new__(StructuredOutputManager)
+    manager._grammar_bitmask = torch.zeros((4, 2), dtype=torch.int32)
+    manager._full_mask = torch.tensor(-1, dtype=torch.int32)
+
+    backend = XgrammarBackend.__new__(XgrammarBackend)
+    backend._batch_matcher_local = threading.local()
+    manager.backend = backend
+
+    batch_filler = MagicMock()
+    batch_matcher_cls = MagicMock(return_value=batch_filler)
+    monkeypatch.setattr(
+        backend_xgrammar,
+        "xgr",
+        SimpleNamespace(BatchGrammarMatcher=batch_matcher_cls),
+    )
+
+    matcher0 = object()
+    matcher1 = object()
+    grammar0 = XgrammarGrammar(vocab_size=64, matcher=matcher0, ctx=object())
+    grammar1 = XgrammarGrammar(vocab_size=64, matcher=matcher1, ctx=object())
+    terminated = XgrammarGrammar(vocab_size=64, matcher=object(), ctx=object())
+    terminated._is_terminated = True
+
+    manager._fill_bitmasks(
+        [
+            (grammar0, 0, True),
+            (grammar1, 1, True),
+            (terminated, 2, True),
+            (grammar0, 3, False),
+        ]
+    )
+
+    batch_matcher_cls.assert_called_once_with(max_threads=1)
+    batch_filler.batch_fill_next_token_bitmask.assert_called_once_with(
+        [matcher0, matcher1], manager._grammar_bitmask, [0, 1]
+    )
+    assert manager._grammar_bitmask[2].tolist() == [-1, -1]
+    assert manager._grammar_bitmask[3].tolist() == [-1, -1]
+
+    manager._fill_bitmasks([(grammar0, 0, True), (grammar1, 1, True)])
+    batch_matcher_cls.assert_called_once_with(max_threads=1)
+    assert batch_filler.batch_fill_next_token_bitmask.call_count == 2
+
+    fallback = MagicMock(spec=StructuredOutputGrammar)
+    backend.fill_bitmask_batch(
+        [(grammar0, 0), (fallback, 1)], manager._grammar_bitmask
+    )
+    fallback.fill_bitmask.assert_called_once_with(manager._grammar_bitmask, 1)
+    assert batch_filler.batch_fill_next_token_bitmask.call_count == 2

@@ -203,14 +203,22 @@ class StructuredOutputManager:
         self, batch: Iterable[tuple[StructuredOutputGrammar, int, bool]]
     ) -> None:
         assert self._grammar_bitmask is not None
+        active_grammars: list[tuple[StructuredOutputGrammar, int]] = []
         for grammar, index, apply_bitmask in batch:
             if apply_bitmask and not grammar.is_terminated():
-                grammar.fill_bitmask(self._grammar_bitmask, index)
+                active_grammars.append((grammar, index))
             else:
                 # Note that for thinking support, we will need to
                 # reset the relevant part of the bitmask for consequent
                 # requests here.
                 self._grammar_bitmask[index].fill_(self._full_mask)
+
+        if len(active_grammars) == 1:
+            grammar, index = active_grammars[0]
+            grammar.fill_bitmask(self._grammar_bitmask, index)
+        elif active_grammars:
+            assert self.backend is not None
+            self.backend.fill_bitmask_batch(active_grammars, self._grammar_bitmask)
 
     def _async_submit_fill_bitmask(
         self, batch: list[tuple[StructuredOutputGrammar, int, bool]]
