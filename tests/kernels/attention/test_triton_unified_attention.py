@@ -948,67 +948,62 @@ def _patch_arch(
     monkeypatch.setattr(triton_ua, "_ON_GFX1151", gfx1151)
 
 
-@pytest.mark.parametrize("is_prefill", [True, False])
-@pytest.mark.parametrize("head_size", [64, 80, 128, 256, 512])
-@pytest.mark.parametrize("block_size", [16, 32, 1056])
-def test_get_tile_size_off_gfx11_is_unchanged(
-    monkeypatch: pytest.MonkeyPatch,
-    is_prefill: bool,
-    head_size: int,
-    block_size: int,
-) -> None:
-    """Off gfx1151 the tile selection must match the pre-existing behaviour."""
-    _patch_arch(monkeypatch)
-    tile = triton_ua._get_tile_size(
-        head_size, -1, element_size=2, is_prefill=is_prefill, block_size=block_size
-    )
-    assert tile == (32 if is_prefill else 16)
-
-
 @pytest.mark.parametrize("head_size", [128, 256, 512])
 @pytest.mark.parametrize("block_size", [16, 32, 1056])
-def test_get_tile_size_gfx11_fits_lds(
-    monkeypatch: pytest.MonkeyPatch, head_size: int, block_size: int
-) -> None:
+def test_gfx1151_tile_size_fits_lds(head_size: int, block_size: int) -> None:
     """One stage of K+V tiles must fit the 64KB gfx1151 LDS budget.
 
     Regression guard for ``OutOfResources: shared memory``: a KV cache
     ``block_size`` of 1056 rounds up to a 2048-deep tile, which overflows by
     a wide margin at every head size.
     """
-    _patch_arch(monkeypatch, gfx1151=True)
-    tile = triton_ua._get_tile_size(
-        head_size, -1, element_size=2, is_prefill=False, block_size=block_size
+    tile = triton_ua._gfx1151_tile_size(
+        head_size, -1, element_size=2, block_size=block_size
     )
     assert tile & (tile - 1) == 0, "AMD Triton requires a power-of-2 TILE_SIZE"
     assert 2 * tile * head_size * 2 <= triton_ua._GFX11_LDS_BUDGET
 
 
-def test_get_tile_size_gfx11_preserves_gemma3(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Gemma3's decode tile must survive the gfx1151 power-of-2 rewrite."""
-    _patch_arch(monkeypatch, gfx1151=True)
+def test_gfx1151_tile_size_preserves_gemma3() -> None:
+    """Gemma3's tile must survive the gfx1151 power-of-2 rewrite."""
     for head_size in (128, 256):
-        tile = triton_ua._get_tile_size(
-            head_size, 1024, element_size=2, is_prefill=False, block_size=16
+        tile = triton_ua._gfx1151_tile_size(
+            head_size, 1024, element_size=2, block_size=16
         )
         assert tile == 32
 
 
-def test_get_tile_size_gfx11_matches_block_size(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_gfx1151_tile_size_matches_block_size() -> None:
     """The tile must match the KV block, or every load straddles two blocks.
 
     A deeper tile than ``block_size`` spans blocks that are not contiguous in
     the paged cache; on Qwen3-8B at an 8k prefill that cost 21% of TTFT.
     """
-    _patch_arch(monkeypatch, gfx1151=True)
     for head_size in (80, 128, 256):
-        for is_prefill in (True, False):
-            tile = triton_ua._get_tile_size(
-                head_size, -1, element_size=2, is_prefill=is_prefill, block_size=16
-            )
-            assert tile == 16
+        tile = triton_ua._gfx1151_tile_size(
+            head_size, -1, element_size=2, block_size=16
+        )
+        assert tile == 16
+
+
+@pytest.mark.parametrize("head_size", [64, 128, 256])
+@pytest.mark.parametrize("block_size", [48, 96, 1056])
+def test_gfx1151_tile_size_divides_block_size(head_size: int, block_size: int) -> None:
+    """A tile must not cross the last block of a non-power-of-2 block size.
+
+    Rounding ``block_size`` 96 up to a 128-deep tile makes a 95-token
+    sequence read a second block-table entry the sequence does not own.
+    """
+    tile = triton_ua._gfx1151_tile_size(
+        head_size, -1, element_size=2, block_size=block_size
+    )
+    assert block_size % tile == 0
+
+
+def test_gfx1151_tile_size_fp8_floor() -> None:
+    """An fp8 query keeps the 32-deep minimum tile even on a 16-token block."""
+    tile = triton_ua._gfx1151_tile_size(128, -1, element_size=1, block_size=16)
+    assert tile == 32
 
 
 @pytest.mark.parametrize("head_size", [80, 128, 256, 512])
@@ -1024,7 +1019,7 @@ def test_cap_num_stages_for_gfx11_lds(head_size: int, block_m: int) -> None:
     s_bytes = block_m * tile_size * 4
     kv_bytes = capped * 2 * tile_size * head_size * element_size
     # A single stage is the floor, so the tightest shapes still exceed the
-    # budget on paper; the tile shrink in _get_tile_size is what keeps them
+    # budget on paper; the tile shrink in _gfx1151_tile_size is what keeps them
     # launchable.
     assert capped == 1 or q_bytes + s_bytes + kv_bytes <= triton_ua._GFX11_LDS_BUDGET
 
@@ -1063,25 +1058,21 @@ def test_select_query_block_untuned_arch_is_generic(
 
 
 @pytest.mark.parametrize(
-    ("gfx1151", "max_seqlen_q", "num_kv_heads", "head_size", "block_m", "tuned"),
+    ("max_seqlen_q", "num_kv_heads", "head_size", "block_m", "tuned"),
     [
         # Decode: only a narrow head can afford a deep pipeline.
-        (True, 1, 8, 64, 16, False),
-        (True, 1, 8, 128, 16, False),
+        (1, 8, 64, 16, False),
+        (1, 8, 128, 16, False),
         # Prefill on the generic query block stays shallow.
-        (True, 4096, 8, 128, 16, False),
+        (4096, 8, 128, 16, False),
         # Tuned gfx1151 prefill: wide head, then narrow head.
-        (True, 4096, 8, 128, 64, True),
-        (True, 4096, 8, 64, 128, True),
+        (4096, 8, 128, 64, True),
+        (4096, 8, 64, 128, True),
         # Gemma-2B style MQA opts back out of the deep pipeline.
-        (True, 4096, 1, 256, 64, True),
-        # A tuned query block on an unmeasured gfx1151 part keeps the defaults.
-        (False, 4096, 8, 128, 64, True),
+        (4096, 1, 256, 64, True),
     ],
 )
 def test_gfx1151_launch_config(
-    monkeypatch: pytest.MonkeyPatch,
-    gfx1151: bool,
     max_seqlen_q: int,
     num_kv_heads: int,
     head_size: int,
@@ -1089,7 +1080,6 @@ def test_gfx1151_launch_config(
     tuned: bool,
 ) -> None:
     """Every launch config must be 4 warps and fit the gfx1151 LDS budget."""
-    _patch_arch(monkeypatch, gfx1151=gfx1151)
     tile_size, element_size = 32, 2
     config = triton_ua._gfx1151_launch_config(
         max_seqlen_q,
@@ -1108,11 +1098,8 @@ def test_gfx1151_launch_config(
     )
 
 
-def test_gfx1151_launch_config_gfx1151_prefill_is_tuned(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_gfx1151_launch_config_gfx1151_prefill_is_tuned() -> None:
     """The tuned gfx1151 prefill path is where the speedup comes from."""
-    _patch_arch(monkeypatch, gfx1151=True)
     config = triton_ua._gfx1151_launch_config(4096, 8, 64, 2, 128, 32, True)
     assert config == {"num_warps": 4, "num_stages": 3, "waves_per_eu": 4}
 
