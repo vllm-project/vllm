@@ -729,6 +729,8 @@ class DeepseekV4MegaMoEExperts(nn.Module):
                 ]
                 if eplb_state.num_unpadded_tokens_tensors is not None
                 else None,
+                layer_state=eplb_state,
+                topk_weights=topk_weights,
             )
 
         shared_x_sf = None
