@@ -8,7 +8,7 @@ import pytest
 from tokenizers import Tokenizer
 from tokenizers.models import WordLevel
 from tokenizers.pre_tokenizers import WhitespaceSplit
-from transformers import PreTrainedTokenizerFast
+from transformers import TokenizersBackend
 
 from vllm.config import StructuredOutputsConfig
 from vllm.v1.structured_output.backend_types import StructuredOutputOptions
@@ -35,9 +35,10 @@ def _backend_config(generation_eos_token_id=None):
     model_config = None
     if generation_eos_token_id is not None:
         model_config = SimpleNamespace(
+            hf_config=SimpleNamespace(model_type="test"),
             try_get_generation_config=lambda: {
                 "eos_token_id": generation_eos_token_id,
-            }
+            },
         )
     return SimpleNamespace(
         model_config=model_config,
@@ -52,7 +53,7 @@ def _token_allowed(row, token_id: int) -> bool:
 
 
 @pytest.fixture(scope="module")
-def tokenizer() -> PreTrainedTokenizerFast:
+def tokenizer() -> TokenizersBackend:
     raw_tokenizer = Tokenizer(
         WordLevel(
             vocab={
@@ -70,7 +71,7 @@ def tokenizer() -> PreTrainedTokenizerFast:
         )
     )
     raw_tokenizer.pre_tokenizer = WhitespaceSplit()
-    return PreTrainedTokenizerFast(
+    return TokenizersBackend(
         tokenizer_object=raw_tokenizer,
         unk_token="<unk>",
         eos_token="<eos>",
@@ -78,7 +79,7 @@ def tokenizer() -> PreTrainedTokenizerFast:
 
 
 @pytest.fixture(scope="module")
-def backend(tokenizer: PreTrainedTokenizerFast) -> XgrammarBackend:
+def backend(tokenizer: TokenizersBackend) -> XgrammarBackend:
     return XgrammarBackend(
         _backend_config(),
         tokenizer=tokenizer,
@@ -87,7 +88,7 @@ def backend(tokenizer: PreTrainedTokenizerFast) -> XgrammarBackend:
 
 
 @pytest.fixture(scope="module")
-def backend_with_model_eos(tokenizer: PreTrainedTokenizerFast) -> XgrammarBackend:
+def backend_with_model_eos(tokenizer: TokenizersBackend) -> XgrammarBackend:
     return XgrammarBackend(
         _backend_config([EOS, LETTER]),
         tokenizer=tokenizer,
