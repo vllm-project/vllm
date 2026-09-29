@@ -567,7 +567,8 @@ def segmented_workspace_shapes(batch, query_cap, hq, hk, dim, splits):
     return partial, partial[:-1]
 
 
-def reserve_segmented_attention_workspace(
+@lru_cache(maxsize=128)
+def segmented_attention_workspace_size(
     max_batch,
     hq,
     hk,
@@ -577,14 +578,12 @@ def reserve_segmented_attention_workspace(
     max_tokens=None,
     fp8=False,
 ):
-    """Reserve the largest selected attention workspace before graph capture.
+    """Size the largest selected attention workspace before graph capture.
 
     ``max_tokens`` bounds reachable ``(batch, query_len)`` pairs using one
     longest query and one token for each remaining sequence. Omitting it keeps
     the legacy reservation behavior for callers without scheduler limits.
     """
-    if not is_workspace_manager_initialized():
-        return
     largest = 0
     previous_capacity = 0
     for query_capacity in _query_capacity_buckets():
@@ -618,10 +617,22 @@ def reserve_segmented_attention_workspace(
                         splits * batch * query_capacity * hq,
                     )
         previous_capacity = query_capacity
-    if largest:
-        current_workspace_manager()._reserve_simultaneous(
-            ((largest * dim,), torch.float32), ((largest,), torch.float32)
+    return largest * dim, largest
+
+
+def get_segmented_attention_workspace(device, sizes):
+    """Keep scratch storage stable and separate for each runtime lane/ubatch."""
+
+    def allocate():
+        return tuple(
+            torch.empty(size, device=device, dtype=torch.float32) for size in sizes
         )
+
+    if is_workspace_manager_initialized():
+        return current_workspace_manager().get_persistent_resource(
+            ("rocm_segmented_attention", device, sizes), allocate
+        )
+    return allocate()
 
 
 def can_use_segmented_attention(
@@ -721,7 +732,10 @@ def run_segmented_attention(
     if shapes is None:
         partial = lse = out
     elif workspace is not None:
-        partial, lse = workspace
+        partial, lse = (
+            buffer.view(-1)[: shape.numel()].view(shape)
+            for buffer, shape in zip(workspace, map(torch.Size, shapes))
+        )
     elif is_workspace_manager_initialized():
         partial, lse = current_workspace_manager().get_simultaneous(
             (shapes[0], torch.float32), (shapes[1], torch.float32)
@@ -941,6 +955,7 @@ def segmented_attention(
     sinks: torch.Tensor | None = None,
     causal: bool | torch.Tensor = True,
     softcap: float = 0.0,
+    workspace=None,
 ) -> None:
     """Run segmented attention when eligible, otherwise use unified Triton."""
     if kv_cache_dtype in ("fp8", "fp8_e4m3"):
@@ -1031,6 +1046,7 @@ def segmented_attention(
             causal=causal,
             sinks=sinks,
             config=config,
+            workspace=workspace,
         )
         return
 

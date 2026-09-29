@@ -1265,3 +1265,120 @@ def test_segmented_attention_cache_offsets_cross_int32_boundary():
     expected = torch.einsum("hqk,khd->qhd", scores.softmax(-1), full_v)
     error = ((out.float() - expected).norm(dim=-1) / expected.norm(dim=-1)).max()
     assert torch.isfinite(out).all() and error < 0.01
+
+
+@pytest.mark.parametrize("dim,hq,hk", [(128, 16, 1), (256, 12, 2)])
+@pytest.mark.parametrize("fp8", [False, True])
+def test_segmented_attention_reservation_covers_ragged_query_caps(
+    monkeypatch, dim, hq, hk, fp8
+):
+    """Every supported query bucket fits the startup buffer after locking."""
+    from vllm.v1.attention.ops import segmented_attention as segmented
+
+    sizes = segmented.segmented_attention_workspace_size(
+        32,
+        hq,
+        hk,
+        dim,
+        65536,
+        fp8=fp8,
+    )
+    workspace = tuple(torch.empty(size) for size in sizes)
+    query_lengths = {
+        query_len
+        for capacity in segmented._query_capacity_buckets()
+        for query_len in (max(1, capacity // 2 + 1), capacity)
+    }
+    for batch in range(1, 33):
+        for query_len in query_lengths:
+            qcap = segmented.segmented_query_capacity(query_len)
+            cfg = segmented.select_segmented_config(
+                batch, query_len, 65536, hq, hk, dim, fp8
+            )
+            shapes = segmented.segmented_workspace_shapes(
+                batch, qcap, hq, hk, dim, cfg["splits"]
+            )
+            if shapes is not None:
+                assert math.prod(shapes[0]) <= workspace[0].numel()
+                assert math.prod(shapes[1]) <= workspace[1].numel()
+
+
+def test_segmented_attention_reservation_respects_scheduler_token_limit(
+    monkeypatch,
+) -> None:
+    """Workspace planning excludes batch/query pairs the scheduler cannot form."""
+    from vllm.v1.attention.ops import segmented_attention as segmented
+
+    calls = []
+
+    def record_config(batch, query_len, *_args):
+        calls.append((batch, query_len))
+        return {"splits": 1}
+
+    monkeypatch.setattr(segmented, "select_segmented_config", record_config)
+    segmented.segmented_attention_workspace_size.cache_clear()
+    segmented.segmented_attention_workspace_size(
+        32,
+        16,
+        2,
+        128,
+        65536,
+        max_tokens=8,
+    )
+
+    assert calls
+    assert all(batch + query_len - 1 <= 8 for batch, query_len in calls)
+    assert (8, 1) in calls
+    assert (1, 8) in calls
+
+
+def test_segmented_attention_query_capacity_buckets() -> None:
+    from vllm.v1.attention.ops.segmented_attention import (
+        MAX_QUERY_LEN,
+        segmented_query_capacity,
+    )
+
+    assert [
+        segmented_query_capacity(query_len)
+        for query_len in (1, 2, 3, 33, 129, 1025, 2049, MAX_QUERY_LEN)
+    ] == [1, 2, 4, 64, 256, 2048, 4096, 8192]
+    with pytest.raises(ValueError, match="Query length"):
+        segmented_query_capacity(MAX_QUERY_LEN + 1)
+
+
+def test_segmented_scratch_is_stable_and_isolated_across_runtime_lanes(monkeypatch):
+    """Draft/DBO scratch never aliases target scratch or generic workspace."""
+    import vllm.v1.worker.workspace as workspace
+    from vllm.v1.attention.ops import segmented_attention as segmented
+
+    active_ubatch = [0]
+    monkeypatch.setattr(workspace, "dbo_current_ubatch_id", lambda: active_ubatch[0])
+    manager = workspace.WorkspaceManager(
+        torch.device("cpu"), num_ubatches=2, num_lanes=2
+    )
+    monkeypatch.setattr(segmented, "is_workspace_manager_initialized", lambda: True)
+    monkeypatch.setattr(segmented, "current_workspace_manager", lambda: manager)
+    buffers = {}
+    for ubatch in range(2):
+        active_ubatch[0] = ubatch
+        for lane in range(2):
+            with workspace.use_workspace_lane(lane):
+                buffers[ubatch, lane] = segmented.get_segmented_attention_workspace(
+                    torch.device("cpu"), (1024, 16)
+                )
+                manager.get_simultaneous(((2048,), torch.float32))
+    manager.lock()
+    pointers: set[int] = set()
+    for (ubatch, lane), expected in buffers.items():
+        active_ubatch[0] = ubatch
+        with workspace.use_workspace_lane(lane):
+            actual = segmented.get_segmented_attention_workspace(
+                torch.device("cpu"), (1024, 16)
+            )
+            assert actual is expected
+            pointers.update(t.data_ptr() for t in actual)
+            assert (
+                manager.get_simultaneous(((1,), torch.float32))[0].data_ptr()
+                not in pointers
+            )
+    assert len(pointers) == 8

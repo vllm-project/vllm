@@ -113,6 +113,49 @@ def test_segmented_attention_admits_unified_fallback_features(
     assert isinstance(impl, RocmSegmentedAttentionImpl)
 
 
+@pytest.mark.parametrize(
+    "platform,rdna",
+    [("cuda", False), ("cpu", False), ("xpu", False), ("rocm", False), ("rocm", True)],
+)
+def test_segmented_attention_requires_rocm_rdna(monkeypatch, platform, rdna):
+    """Reject unsupported platforms before probing ROCm or constructing kernels."""
+    from vllm.platforms import rocm
+    from vllm.platforms.interface import DeviceCapability
+    from vllm.v1.attention.backends import rocm_segmented_attn as segmented
+
+    monkeypatch.setattr(
+        segmented,
+        "current_platform",
+        SimpleNamespace(is_rocm=lambda: platform == "rocm"),
+    )
+
+    def on_rdna():
+        assert platform == "rocm", "Must not probe ROCm on another platform"
+        return rdna
+
+    monkeypatch.setattr(rocm, "on_gfx1x", on_rdna)
+    reason = segmented.RocmSegmentedAttentionBackend.supports_combination(
+        128,
+        torch.bfloat16,
+        "auto",
+        32,
+        False,
+        False,
+        False,
+        False,
+        DeviceCapability(12, 0),
+    )
+    if rdna:
+        assert reason is None
+        segmented.RocmSegmentedAttentionImpl(8, 128, 128**-0.5, 2, None, None, "auto")
+    else:
+        assert reason == "ROCM_SEGMENTED_ATTN requires AMD RDNA GPUs on ROCm"
+        with pytest.raises(ValueError, match="requires AMD RDNA GPUs on ROCm"):
+            segmented.RocmSegmentedAttentionImpl(
+                8, 128, 128**-0.5, 2, None, None, "auto"
+            )
+
+
 def test_segmented_attention_is_opt_in(monkeypatch):
     from vllm.platforms import rocm
     from vllm.platforms.rocm import RocmPlatform, _get_backend_priorities
@@ -182,15 +225,16 @@ def test_segmented_attention_autotune_is_default_on_and_opt_out(monkeypatch):
     layer.impl = impl
     layer.get_kv_cache_spec.return_value.block_size = 16
     layer.get_kv_cache_spec.return_value.dtype = torch.bfloat16
-    config.compilation_config.static_forward_context = {"attn": layer}
+    other_impl = RocmSegmentedAttentionImpl(8, 128, 128**-0.5, 2, None, None, "auto")
+    other_layer = MagicMock(impl=other_impl)
+    config.compilation_config.static_forward_context = {
+        "attn": layer,
+        "other_attn": other_layer,
+    }
 
     with patch(
         "vllm.v1.attention.ops.segmented_attention_tuning.warmup_segmented_attention"
     ) as warmup:
-        from vllm.v1.attention.ops.segmented_attention_tuning import (
-            warmup_rocm_segmented_attention,
-        )
-
         with (
             patch(
                 "vllm.v1.worker.gpu.attn_utils.get_kv_cache_spec",
@@ -200,10 +244,17 @@ def test_segmented_attention_autotune_is_default_on_and_opt_out(monkeypatch):
                 "vllm.v1.attention.ops.segmented_attention_tuning._memory_budget",
                 return_value=1024,
             ),
+            patch(
+                "vllm.v1.attention.backends.rocm_segmented_attn.get_current_vllm_config",
+                return_value=config,
+            ),
         ):
-            warmup_rocm_segmented_attention(config, torch.device("cuda:0"))
+            impl.process_weights_after_loading(torch.bfloat16)
         warmup.assert_called_once()
         assert impl._segmented_attention_warmed_up
+        # A shared forward context may also contain the other model's layers.
+        assert not other_impl._segmented_attention_warmed_up
+        assert other_impl._segmented_attention_config is None
 
         swa_impl = RocmSegmentedAttentionImpl(8, 128, 128**-0.5, 2, None, 8, "auto")
         swa_impl._segmented_attention_config = config
@@ -240,6 +291,10 @@ def test_segmented_attention_forward_uses_dedicated_dispatch(monkeypatch):
 
     monkeypatch.setattr(rocm, "on_gfx1x", lambda: True)
     impl = RocmSegmentedAttentionImpl(8, 128, 128**-0.5, 2, None, None, "auto")
+    impl._segmented_attention_config = SimpleNamespace(
+        scheduler_config=SimpleNamespace(max_num_seqs=1, max_num_batched_tokens=3),
+        model_config=SimpleNamespace(max_model_len=16),
+    )
     query = torch.empty(3, 8, 128, dtype=torch.bfloat16)
     key = torch.empty(3, 2, 128, dtype=torch.bfloat16)
     value = torch.empty_like(key)

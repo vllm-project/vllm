@@ -1236,7 +1236,7 @@ def get_segmented_config(
     return dict(winner["best"])
 
 
-def warmup_rocm_segmented_attention(config, device):
+def warmup_rocm_segmented_attention(config, device, *, impl_to_tune=None):
     """Tune the selected backend before KV-cache memory profiling."""
     if not envs.VLLM_ROCM_SEGMENTED_ATTN_AUTOTUNE:
         return
@@ -1251,6 +1251,8 @@ def warmup_rocm_segmented_attention(config, device):
         layer
         for layer in config.compilation_config.static_forward_context.values()
         if isinstance(getattr(layer, "impl", None), RocmSegmentedAttentionImpl)
+        and (impl_to_tune is None or layer.impl is impl_to_tune)
+        and not layer.impl._segmented_attention_warmed_up
     ]
     if not layers:
         return

@@ -8,9 +8,10 @@ import torch
 
 import vllm.envs as envs
 from vllm._aiter_ops import rocm_aiter_ops
-from vllm.config import VllmConfig
+from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.config.cache import CacheDType
 from vllm.logger import init_logger
+from vllm.platforms import current_platform
 from vllm.utils.torch_utils import is_quantized_kv_cache
 from vllm.v1.attention.backend import AttentionLayer, AttentionType
 from vllm.v1.attention.backends.rocm_attn import (
@@ -22,18 +23,27 @@ from vllm.v1.attention.backends.rocm_attn import (
 from vllm.v1.attention.backends.utils import get_num_attention_heads_from_layers
 from vllm.v1.attention.ops.segmented_attention import (
     MAX_QUERY_LEN,
-    reserve_segmented_attention_workspace,
+    get_segmented_attention_workspace,
     segmented_attention,
+    segmented_attention_workspace_size,
 )
 from vllm.v1.attention.ops.triton_reshape_and_cache_flash import (
     triton_reshape_and_cache_flash,
 )
-from vllm.v1.kv_cache_interface import AttentionSpec, KVQuantMode
+from vllm.v1.kv_cache_interface import AttentionSpec
 
 if TYPE_CHECKING:
     from vllm.platforms.interface import DeviceCapability
 
 logger = init_logger(__name__)
+
+
+def is_rdna() -> bool:
+    if not current_platform.is_rocm():
+        return False
+    from vllm.platforms.rocm import on_gfx1x
+
+    return on_gfx1x()
 
 
 class RocmSegmentedAttentionMetadataBuilder(RocmAttentionMetadataBuilder):
@@ -51,44 +61,6 @@ class RocmSegmentedAttentionMetadataBuilder(RocmAttentionMetadataBuilder):
         ) or model_config.get_num_attention_heads(vllm_config.parallel_config)
         self.num_heads_kv = kv_cache_spec.num_kv_heads
         self.headdim = kv_cache_spec.head_size
-        self._reserve_workspace(kv_cache_spec, vllm_config)
-
-    def _reserve_workspace(
-        self,
-        kv_cache_spec: AttentionSpec,
-        vllm_config: VllmConfig,
-    ) -> None:
-        """Reserve only the scratch used by segmented prefill."""
-        from vllm.platforms.rocm import on_gfx1x, on_gfx12x
-
-        model_config = vllm_config.model_config
-        fp8_kv_supported = (
-            kv_cache_spec.kv_quant_mode == KVQuantMode.FP8_PER_TENSOR
-            and kv_cache_spec.dtype.itemsize == 1
-            and vllm_config.cache_config.cache_dtype in ("fp8", "fp8_e4m3")
-            and on_gfx12x()
-        )
-        native_kv_supported = (
-            kv_cache_spec.kv_quant_mode == KVQuantMode.NONE
-            and kv_cache_spec.dtype == model_config.dtype
-        )
-        if (
-            on_gfx1x()
-            and (native_kv_supported or fp8_kv_supported)
-            and self.headdim in (64, 128, 256)
-            and self.num_heads_kv > 0
-            and self.num_heads_q % self.num_heads_kv == 0
-            and 1 <= self.num_heads_q // self.num_heads_kv <= 16
-        ):
-            reserve_segmented_attention_workspace(
-                vllm_config.scheduler_config.max_num_seqs,
-                self.num_heads_q,
-                self.num_heads_kv,
-                self.headdim,
-                model_config.max_model_len,
-                max_tokens=vllm_config.scheduler_config.max_num_batched_tokens,
-                fp8=fp8_kv_supported,
-            )
 
 
 class RocmSegmentedAttentionBackend(RocmAttentionBackend):
@@ -165,13 +137,13 @@ class RocmSegmentedAttentionBackend(RocmAttentionBackend):
             use_mm_prefix,
             device_capability,
         )
-        from vllm.platforms.rocm import on_gfx1x, on_gfx12x
+        if not is_rdna():
+            return "ROCM_SEGMENTED_ATTN requires AMD RDNA GPUs on ROCm"
 
-        if kv_cache_dtype in ("fp8", "fp8_e4m3"):
-            if not on_gfx12x():
-                return "FP8 segmented attention requires gfx12"
-        elif not on_gfx1x():
-            return "segmented attention requires gfx1x"
+        from vllm.platforms.rocm import on_gfx12x
+
+        if kv_cache_dtype in ("fp8", "fp8_e4m3") and not on_gfx12x():
+            return "FP8 segmented attention requires gfx12"
         return None
 
 
@@ -190,6 +162,9 @@ class RocmSegmentedAttentionImpl(RocmAttentionImpl):
         kv_sharing_target_layer_name: int | None = None,
         sinks: torch.Tensor | None = None,
     ) -> None:
+        if not is_rdna():
+            raise ValueError("ROCM_SEGMENTED_ATTN requires AMD RDNA GPUs on ROCm")
+
         super().__init__(
             num_heads,
             head_size,
@@ -228,6 +203,33 @@ class RocmSegmentedAttentionImpl(RocmAttentionImpl):
         logger.info_once("Using token-major ROCm segmented Triton attention")
         self._segmented_attention_warmed_up = False
         self._segmented_attention_config: VllmConfig | None = None
+
+    def process_weights_after_loading(self, act_dtype: torch.dtype):
+        super().process_weights_after_loading(act_dtype)
+        config = get_current_vllm_config()
+        self._segmented_attention_config = config
+        if envs.VLLM_ROCM_SEGMENTED_ATTN_AUTOTUNE:
+            from vllm.v1.attention.ops.segmented_attention_tuning import (
+                warmup_rocm_segmented_attention,
+            )
+
+            warmup_rocm_segmented_attention(
+                config, config.device_config.device, impl_to_tune=self
+            )
+
+    def _get_workspace(self, device):
+        config = self._segmented_attention_config
+        assert config is not None
+        sizes = segmented_attention_workspace_size(
+            config.scheduler_config.max_num_seqs,
+            self.num_heads,
+            self.num_kv_heads,
+            self.head_size,
+            config.model_config.max_model_len,
+            max_tokens=config.scheduler_config.max_num_batched_tokens,
+            fp8=self.kv_cache_dtype in ("fp8", "fp8_e4m3"),
+        )
+        return get_segmented_attention_workspace(device, sizes)
 
     def _warmup_segmented_attention(self, layer, device, dtype, **limits) -> None:
         if (
@@ -304,6 +306,8 @@ class RocmSegmentedAttentionImpl(RocmAttentionImpl):
             raise NotImplementedError(
                 "fused block_scale output quantization is not supported"
             )
+        # Profile runs allocate the same fixed scratch used during graph replay.
+        workspace = self._get_workspace(query.device)
         if attn_metadata is None:
             return output.fill_(0)
         assert not attn_metadata.use_cascade
@@ -339,6 +343,7 @@ class RocmSegmentedAttentionImpl(RocmAttentionImpl):
             sinks=self.sinks,
             causal=attn_metadata.causal,
             softcap=self.logits_soft_cap,
+            workspace=workspace,
         )
         return output
 
