@@ -33,6 +33,7 @@ from ..vllm_inductor_pass import (
     remove_noop_reshapes,
 )
 from .matcher_utils import (
+    MatcherGeluAndMul,
     MatcherQuantFP8,
     MatcherRMSNormGated,
     MatcherSiluAndMul,
@@ -754,6 +755,78 @@ class RocmAiterSiluMulFp8GroupQuantFusionPass(VllmFusionPatternMatcherPass):
         self.register(
             AiterSiluMulFp8GroupQuantPattern(match_aiter_quant_op=match_aiter_quant_op)
         )
+
+        self.dump_patterns(config, self.pm_pass)
+
+
+class AiterActMulMxfp4GemmPattern(VllmPatternReplacement):
+    """Folds act_and_mul into the AITER MXFP4 GEMM that consumes it.
+
+    The ASM MXFP4 linear quantizes its input inside gemm_with_dynamic_quant, a
+    custom op Inductor cannot fuse into. This pattern hands the op the
+    concatenated gate/up tensor plus the activation name instead, and the op
+    runs aiter's act_mul_and_mxfp4_quant: one kernel instead of an activation
+    kernel plus a quant kernel.
+    """
+
+    def __init__(
+        self,
+        act_matcher: MatcherGeluAndMul | MatcherSiluAndMul,
+        activation: str,
+        out_dtype: torch.dtype,
+    ) -> None:
+        # gemm_with_dynamic_quant is registered when the MXFP4 kernel module
+        # is imported, so resolve it here rather than at class definition.
+        import vllm.model_executor.kernels.linear.mxfp4.aiter  # noqa: F401
+
+        self.gemm_op = torch.ops.vllm.gemm_with_dynamic_quant.default
+        self.act_matcher = act_matcher
+        self.activation = activation
+        self.out_dtype = out_dtype
+
+    def get_inputs(self) -> list[torch.Tensor]:
+        x = self.act_matcher.inputs()[0]
+        weight = self.empty(8, 1, dtype=torch.uint8)
+        weight_scale = self.empty(8, 1, dtype=torch.uint8)
+        return [x, weight, weight_scale]
+
+    @property
+    def pattern(self):
+        def _pattern(
+            x: torch.Tensor, weight: torch.Tensor, weight_scale: torch.Tensor
+        ) -> torch.Tensor:
+            y = self.act_matcher(x)
+            return self.gemm_op(y, weight, weight_scale, True, self.out_dtype)
+
+        return _pattern
+
+    @property
+    def replacement(self):
+        def _replacement(
+            x: torch.Tensor, weight: torch.Tensor, weight_scale: torch.Tensor
+        ) -> torch.Tensor:
+            return self.gemm_op(
+                x, weight, weight_scale, True, self.out_dtype, None, self.activation
+            )
+
+        return _replacement
+
+
+class RocmAiterActMulMxfp4GemmFusionPass(VllmFusionPatternMatcherPass):
+    """Fuses SiLU/GELU-and-mul into the following AITER ASM MXFP4 GEMM."""
+
+    def __init__(self, config: VllmConfig) -> None:
+        super().__init__(config, "rocm_aiter_act_mul_mxfp4_gemm_fusion_pass")
+        out_dtype = config.model_config.dtype if config.model_config else torch.bfloat16
+        matchers: dict[tuple[bool, str], MatcherGeluAndMul | MatcherSiluAndMul] = {}
+        silu = MatcherSiluAndMul()
+        matchers[(silu.enabled, "silu")] = silu
+        for approximate in ("none", "tanh"):
+            gelu = MatcherGeluAndMul(approximate)
+            # On ROCm both approximations trace to the same native graph.
+            matchers.setdefault((gelu.enabled, gelu.activation), gelu)
+        for (_, activation), matcher in matchers.items():
+            self.register(AiterActMulMxfp4GemmPattern(matcher, activation, out_dtype))
 
         self.dump_patterns(config, self.pm_pass)
 

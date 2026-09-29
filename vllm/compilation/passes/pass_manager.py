@@ -24,6 +24,7 @@ if rocm_aiter_ops.is_enabled() or rocm_aiter_ops.is_rdna_aiter_enabled():
     )
     from .fusion.rocm_aiter_fusion import (
         MLADualRMSNormFusionPass,
+        RocmAiterActMulMxfp4GemmFusionPass,
         RocmAiterRMSNormQuantFusionPass,
         RocmAiterSiluMulFp8GroupQuantFusionPass,
         RocmAiterTritonAddRMSNormPadFusionPass,
@@ -192,6 +193,7 @@ class PostGradPassManager(CustomGraphPass):  # type: ignore[misc]
                     or rocm_aiter_ops.is_rdna_aiter_enabled()
                 ):
                     self.passes += [RocmAiterSiluMulFp8GroupQuantFusionPass(config)]
+                    self.passes += [RocmAiterActMulMxfp4GemmFusionPass(config)]
 
             if self.pass_config.fuse_qk_norm_rope_kvcache:
                 self.passes += [SplitCoalescingPass(config)]
