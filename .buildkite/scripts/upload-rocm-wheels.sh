@@ -4,18 +4,15 @@
 #
 # Upload ROCm wheels to S3 with proper index generation
 #
+# Usage: upload-rocm-wheels.sh <base-dockerfile>
+#   base-dockerfile  the ROCm stack, e.g. docker/Dockerfile.rocm_base (see rocm/stack.sh)
+#
 # Required environment variables:
 #   AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY (or IAM role)
 #   S3_BUCKET (default: vllm-wheels)
-# Optional:
-#   ROCM_WHEEL_DIRS      - local wheel dirs to upload
-#                          (default: artifacts/rocm-base-wheels artifacts/rocm-vllm-wheel)
-#   ROCM_WHEEL_SUBDIR    - store wheels under rocm/{commit}/<subdir>/ instead of
-#                          rocm/{commit}/, so several ROCm stacks can share a commit
-#   ROCM_EXTERNAL_LINKS  - file of absolute URLs to list in the index without hosting
 #
 # S3 path structure:
-#   s3://vllm-wheels/rocm/{commit}/[<subdir>/]  - All wheels for this commit
+#   s3://vllm-wheels/rocm/{commit}/<variant>-wheels/ - This stack's wheels for this commit
 #   s3://vllm-wheels/rocm/{commit}/<variant>/   - Index per ROCm variant (e.g. rocm100)
 #   s3://vllm-wheels/rocm/nightly/<variant>/    - Index pointing to latest nightly
 #   s3://vllm-wheels/rocm/{version}/<variant>/  - Index for release versions
@@ -26,9 +23,11 @@ set -ex
 
 # ======== Configuration ========
 BUCKET="${S3_BUCKET:-vllm-wheels}"
+# shellcheck source=.buildkite/scripts/rocm/stack.sh
+source "$(dirname "${BASH_SOURCE[0]}")/rocm/stack.sh" "${1:?Usage: $0 <base-dockerfile>}"
 ROCM_SUBPATH="rocm/${BUILDKITE_COMMIT}"
-WHEEL_DIRS="${ROCM_WHEEL_DIRS:-artifacts/rocm-base-wheels artifacts/rocm-vllm-wheel}"
-WHEEL_SUBPATH="$ROCM_SUBPATH${ROCM_WHEEL_SUBDIR:+/$ROCM_WHEEL_SUBDIR}"
+WHEEL_DIRS="$ROCM_STACK_BASE_WHEELS_DIR $ROCM_STACK_VLLM_WHEEL_DIR"
+WHEEL_SUBPATH="$ROCM_SUBPATH/${ROCM_STACK_VARIANT}-wheels"
 S3_WHEEL_PREFIX="s3://$BUCKET/$WHEEL_SUBPATH/"
 INDICES_OUTPUT_DIR="rocm-indices"
 
@@ -117,8 +116,12 @@ mkdir -p "$INDICES_OUTPUT_DIR"
 sed -i 's/import regex as re/import re/g' .buildkite/scripts/generate-nightly-index.py
 
 INDEX_ARGS=(--version "$ROCM_SUBPATH" --wheel-dir "${WHEEL_SUBPATH#rocm/}")
-if [[ -n "${ROCM_EXTERNAL_LINKS:-}" ]]; then
-    INDEX_ARGS+=(--external-links "$ROCM_EXTERNAL_LINKS")
+# TheRock's SDK, device kernels and torchvision/torchaudio are linked, not hosted
+if [[ "$ROCM_STACK_THEROCK" == "1" ]]; then
+    $PYTHON tools/vllm-rocm/therock_wheels.py external-links \
+        --dockerfile "$ROCM_STACK_BASE_DOCKERFILE" > therock-external-links.txt
+    cat therock-external-links.txt
+    INDEX_ARGS+=(--external-links therock-external-links.txt)
 fi
 $PYTHON .buildkite/scripts/generate-nightly-index.py \
     "${INDEX_ARGS[@]}" \
