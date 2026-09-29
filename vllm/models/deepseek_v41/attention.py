@@ -27,6 +27,7 @@ from vllm.model_executor.layers.sparse_attn_indexer import SparseAttnIndexer
 from vllm.model_executor.layers.sparse_mqa_indexer import SparseMQAIndexer
 from vllm.models.common.ops import fused_q_kv_rmsnorm
 from vllm.models.common.ops.sequence_parallel import sp_reduce_scatter
+from vllm.models.deepseek_v4.common.weight_loader import attn_sink_weight_loader
 from vllm.models.deepseek_v41.common.ops import (
     MXFP4_BLOCK_SIZE,
     fused_indexer_q_rope_quant,
@@ -350,6 +351,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
             torch.full((self.padded_heads,), -float("inf"), dtype=torch.float32),
             requires_grad=False,
         )
+        self.attn_sink.weight_loader = attn_sink_weight_loader
 
         self.fused_wqa_wkv = MergedColumnParallelLinear(
             self.hidden_size,
