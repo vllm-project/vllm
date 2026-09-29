@@ -5,6 +5,7 @@ use std::collections::HashMap;
 use std::num::NonZeroU32;
 use std::sync::Arc;
 
+use crate::routes::openai::utils::metrics::PerRequestMetrics;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use validator::Validate;
@@ -234,6 +235,7 @@ pub(super) struct CompletionResponse {
     pub model: String,
     pub choices: Vec<CompletionChoice>,
     pub usage: Option<Usage>,
+    pub metrics: Option<PerRequestMetrics>,
     pub system_fingerprint: Option<String>,
     pub kv_transfer_params: Option<Value>,
     pub ec_transfer_params: Option<Value>,
@@ -260,6 +262,7 @@ pub(super) struct CompletionStreamResponse {
     pub envelope: Arc<StreamResponseEnvelope>,
     pub choices: Vec<CompletionStreamChoice>,
     pub usage: Option<Usage>,
+    pub metrics: Option<PerRequestMetrics>,
 }
 
 impl CompletionStreamResponse {
@@ -269,6 +272,7 @@ impl CompletionStreamResponse {
             envelope: Arc::clone(envelope),
             choices: Vec::new(),
             usage: None,
+            metrics: None,
         }
     }
 }
