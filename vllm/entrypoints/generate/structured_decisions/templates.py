@@ -11,7 +11,7 @@ It may define a macro ``answer(question, label)`` that returns one question's
 answer as the model should write it, ``"<id>: <label>"`` by default. The
 server renders the answer once per label and compares the tokens to find
 where the label goes. The system prompt can call the same macro to show the
-reply format, so the prompt shows the model the format the server reads.
+model the exact reply format.
 """
 
 import string
@@ -88,9 +88,7 @@ class AnswerSlot:
     """Where a question's label goes in its rendered answer."""
 
     prefix_ids: list[int]
-    """The answer's tokens before the label."""
-    label_ids: list[int]
-    """The label token for each label, in label order."""
+    label_ids: list[int]  # in the order of question.labels
 
 
 class DecisionTemplate:
@@ -110,7 +108,7 @@ class DecisionTemplate:
         Each candidate must sit inside one token of its answer. Candidates are
         grouped by the tokens around the label and by what the label token
         holds besides the label, such as a fused space or colon. The largest
-        group wins, so every label reads the same way."""
+        group is kept, so every label is tokenized the same way."""
         key = id(tokenizer)
         if key not in self._alphabets:
             self._alphabets[key] = self._sweep_labels(tokenizer)
@@ -133,6 +131,8 @@ class DecisionTemplate:
             start = text.index(label)
             end = start + len(label)
             ids = tokenizer.encode(text, add_special_tokens=False)
+            # The token bounds below come from prefix decodes. The bounds only
+            # line up when the text round-trips.
             if tokenizer.decode(ids) != text:
                 continue
             bounds = [0] + [
@@ -182,7 +182,6 @@ class RenderedDecision:
             return str(self.answer_macro(question_vars(question), label))
 
     def slot(self, tokenizer: TokenizerLike, question: Question) -> AnswerSlot:
-        """Where the label goes in the question's answer."""
         variants = [
             tokenizer.encode(self.answer(question, label), add_special_tokens=False)
             for label in question.labels

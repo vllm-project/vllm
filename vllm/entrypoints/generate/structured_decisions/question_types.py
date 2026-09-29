@@ -2,8 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Question types for structured decisions.
 
-A question type turns a request's criteria into options, names the label the
-model answers with for each, and shapes the answer from the label
+A question type turns a request's criteria into options, picks the label the
+model answers with for each option, and builds the answer from the label
 probabilities.
 """
 
@@ -80,12 +80,10 @@ def build_question(
     max_options: int,
     seed: int | None = None,
 ) -> Question:
-    """Builds a question whose labels come from ``alphabet``, shortest first.
-    Labels of one length are shuffled with a seed from ``seed`` and the
-    question's content, so a repeated question gets the same labels and the
-    same prompt tokens.
-    Longer labels, such as two-letter codes, carry more meaning of their own,
-    so a question uses them only when it runs out of shorter ones."""
+    """Labels come from ``alphabet``, shortest first, shuffled with a seed from
+    ``seed`` and the question's content, so a repeated question keeps the same
+    prompt tokens. Two-letter labels carry meaning of their own, so a question
+    uses them only when it runs out of letters."""
     if not qid or ":" in qid or "\n" in qid:
         raise StructuredDecisionError(
             f"question id {qid!r} must be non-empty, without ':' or a newline"

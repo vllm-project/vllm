@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Request and response shapes of the decision API (Jev's /v1/systemone)."""
+"""Request and response models of the structured decisions API (/v1/systemone)."""
 
 import time
 from typing import Any, Literal
@@ -37,7 +37,7 @@ class StructuredDecisionRequest(OpenAIBaseModel):
     chat_template_kwargs: dict[str, Any] | None = None
     seed: int | None = Field(
         default=None,
-        description="Picks each question's label draw. Reading a question "
+        description="Changes which label each option gets. Reading a question "
         "under several seeds and averaging the answers cancels the model's "
         "preference for particular labels.",
     )
@@ -69,8 +69,8 @@ class StructuredDecisionResponse(OpenAIBaseModel):
 
 
 class ReadPromptRequest(OpenAIBaseModel):
-    """The chat render of one read: system and state, then an assistant reply
-    left open before the question's label."""
+    """Chat options for one read's prompt: system and state, then an assistant
+    reply left open before the question's label."""
 
     chat_template_kwargs: dict[str, Any] | None = None
 

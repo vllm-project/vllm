@@ -2,9 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Read strategies: how a model is asked for label probabilities.
 
-A model names the strategy it needs (``decision_read_strategy`` on the model
-class, ``"next_token"`` by default). When no strategy is registered under that
-name, the decision route answers 501.
+A model class sets the strategy it needs with a ``decision_read_strategy``
+class variable (``"next_token"`` by default). When no strategy is registered
+under that name, the decision route returns 501.
 """
 
 import math

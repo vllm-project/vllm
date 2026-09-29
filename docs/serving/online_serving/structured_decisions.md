@@ -1,8 +1,7 @@
 # Structured Decisions
 
 The `/v1/systemone` endpoint answers a set of typed questions about a state and
-returns a probability for every allowed answer. The endpoint follows the
-request and answer shapes of Jev's decision API.
+returns a probability for every allowed answer.
 
 The endpoint serves generative models (task `"generate"`) that have a chat
 template.
@@ -98,8 +97,7 @@ A template may define an `answer(question, label)` macro that returns one
 question's answer as the model should write it. The default is `id: label`.
 The server renders the answer once per label and compares the tokens to find
 where the label goes, then prefills each read up to that point. The system
-prompt can call the same macro to show the reply format, so the prompt shows
-the model the format the server reads.
+prompt can call the same macro to show the model the exact reply format.
 
 ```jinja
 {% macro answer(question, label) %}{{ question.id }} -> {{ label }}{% endmacro %}
@@ -121,10 +119,10 @@ a 400 naming the question.
 ## Labels
 
 The first time the server uses a template, it tries each label from `A` to
-`ZZ` in the template's answer and keeps those that are one token. The token around a label can hold
-more than the label, such as a leading space or the colon before it. The
-server groups the labels by what that token holds and keeps the largest group,
-so every label reads the same way. A question takes single letters first and
+`ZZ` in the template's answer and keeps those that are one token. The token
+around a label can hold more than the label, such as a leading space or the
+colon before it. The server groups the labels by the rest of that token's
+text and keeps the largest group, so every label is tokenized the same way. A question takes single letters first and
 two-letter labels only when it has more options than letters. Labels are
 shuffled with a seed from a hash of the question, so the options do not always
 get the labels the model favors, such as `A`, and a repeated question gets the

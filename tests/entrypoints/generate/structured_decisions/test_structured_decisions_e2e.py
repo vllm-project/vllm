@@ -177,7 +177,7 @@ def test_request_template(server):
     default = post(server, TEMPLATE_BODY)
     assert default.status_code == 200, default.text
     custom, default = custom.json(), default.json()
-    # The request's template rendered the prompt.
+    # Different probabilities show the request's template rendered the prompt.
     assert custom["answers"]["team"]["probabilities"]["billing"] != pytest.approx(
         default["answers"]["team"]["probabilities"]["billing"], abs=1e-3
     )

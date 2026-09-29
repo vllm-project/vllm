@@ -81,8 +81,8 @@ class ServingStructuredDecisions(BaseServing):
         self.limits = strategy.limits()
         self.decision_template = decision_template
         self.trust_request_template = trust_request_template
-        # Sweeping the server's template here makes a broken one, or one that
-        # leaves fewer than two labels for this tokenizer, stop startup.
+        # A broken server template, or one with fewer than two labels for this
+        # tokenizer, stops startup here.
         alphabet = select_template(decision_template, None, False).label_alphabet(
             self._tokenizer()
         )
