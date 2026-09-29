@@ -14,13 +14,17 @@ import torch
 
 from vllm.config import KernelConfig, VllmConfig, set_current_vllm_config
 from vllm.model_executor.kernels.linear import (
+    _POSSIBLE_FP8_BLOCK_KERNELS,
     AiterInt8ScaledMMLinearKernel,
     CPUInt8ScaledMMLinearKernel,
     HummingFP8ScaledMMLinearKernel,
     Int8ScaledMMLinearKernel,
     Int8ScaledMMLinearLayerConfig,
+    MarlinFP8ScaledMMLinearKernel,
     ScaledMMLinearKernel,
+    TritonFp8BlockScaledMMKernel,
     _get_linear_backend,
+    _possible_fp8_block_kernels,
     _resolve_backend_kernels,
     init_fp8_linear_kernel,
     init_int8_linear_kernel,
@@ -94,6 +98,42 @@ def test_fp8_linear_backend_override(platform_mock, _):
         )
 
     assert type(kernel) is HummingFP8ScaledMMLinearKernel
+
+
+@patch("vllm.model_executor.kernels.linear.current_platform")
+def test_fp8_block_kernel_prefers_triton_on_sm89(platform_mock):
+    """On SM89 (native FP8, but no SM90+ block-FP8 kernels) the Triton
+    block-FP8 kernel should be preferred over Marlin."""
+    platform_mock.is_cuda.return_value = True
+    platform_mock.is_device_capability.side_effect = lambda c, **_: c == 89
+
+    kernels = _possible_fp8_block_kernels()[PlatformEnum.CUDA]
+
+    assert kernels.index(TritonFp8BlockScaledMMKernel) < kernels.index(
+        MarlinFP8ScaledMMLinearKernel
+    )
+    # the shared kernel list must not be mutated
+    default_kernels = _POSSIBLE_FP8_BLOCK_KERNELS[PlatformEnum.CUDA]
+    assert default_kernels.index(MarlinFP8ScaledMMLinearKernel) < (
+        default_kernels.index(TritonFp8BlockScaledMMKernel)
+    )
+
+
+@patch("vllm.model_executor.kernels.linear.current_platform")
+def test_fp8_block_kernel_order_unchanged_off_sm89(platform_mock):
+    """Marlin stays ahead of Triton on non-SM89 CUDA GPUs, and non-CUDA
+    platform lists are never reordered."""
+    platform_mock.is_cuda.return_value = True
+    platform_mock.is_device_capability.return_value = False
+
+    kernels = _possible_fp8_block_kernels()
+
+    cuda_kernels = kernels[PlatformEnum.CUDA]
+    assert cuda_kernels.index(MarlinFP8ScaledMMLinearKernel) < (
+        cuda_kernels.index(TritonFp8BlockScaledMMKernel)
+    )
+    for platform in (PlatformEnum.ROCM, PlatformEnum.CPU, PlatformEnum.XPU):
+        assert kernels[platform] is _POSSIBLE_FP8_BLOCK_KERNELS[platform]
 
 
 def test_is_supported_is_abstract():
