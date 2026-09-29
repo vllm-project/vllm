@@ -440,7 +440,7 @@ ref changes. Use `--no-cache-filter extensions-build` to refresh an empty,
 branch, or tag revision.
 
 For `FINAL_BASE_IMAGE`, use the public, multi-arch
-`nvcr.io/nvidia/cuda-dl-base:26.08-cuda13.4-devel-ubuntu24.04` image.
+`nvcr.io/nvidia/cuda-dl-base:26.09-cuda13.4-devel-ubuntu24.04` image.
 For `BUILD_BASE_IMAGE`, use:
 
 - `pytorch/manylinux2_28-builder:cuda13.4` for x86_64 CPUs.
@@ -462,7 +462,7 @@ For `BUILD_BASE_IMAGE`, use:
       --build-arg TRITON_INSTALL_FROM_SOURCE_REVISION=3f6e41132b5edf639bfb872ad73d4688765e08b8 \
       --build-arg CUDA_VERSION=13.4 \
       --build-arg BUILD_BASE_IMAGE="pytorch/manylinuxaarch64-builder:cuda13.4" \
-      --build-arg FINAL_BASE_IMAGE="nvcr.io/nvidia/cuda-dl-base:26.08-cuda13.4-devel-ubuntu24.04" \
+      --build-arg FINAL_BASE_IMAGE="nvcr.io/nvidia/cuda-dl-base:26.09-cuda13.4-devel-ubuntu24.04" \
       .
     ```
 
@@ -482,7 +482,7 @@ For `BUILD_BASE_IMAGE`, use:
       --build-arg TRITON_INSTALL_FROM_SOURCE_REVISION=3f6e41132b5edf639bfb872ad73d4688765e08b8 \
       --build-arg CUDA_VERSION=13.4 \
       --build-arg BUILD_BASE_IMAGE="pytorch/manylinux2_28-builder:cuda13.4" \
-      --build-arg FINAL_BASE_IMAGE="nvcr.io/nvidia/cuda-dl-base:26.08-cuda13.4-devel-ubuntu24.04" \
+      --build-arg FINAL_BASE_IMAGE="nvcr.io/nvidia/cuda-dl-base:26.09-cuda13.4-devel-ubuntu24.04" \
       .
     ```
 
