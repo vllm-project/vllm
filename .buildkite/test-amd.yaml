@@ -3177,6 +3177,7 @@ steps:
   dind: false
   agent_pool: mi355_2
   num_gpus: 2
+  optional: true
   working_dir: "/vllm-workspace/"
   source_file_dependencies:
   - benchmarks/attention_benchmarks/
@@ -4363,6 +4364,7 @@ steps:
   dind: false
   agent_pool: mi355_2
   num_gpus: 2
+  optional: true
   working_dir: "/vllm-workspace"
   source_file_dependencies:
   - vllm/model_executor/models/
