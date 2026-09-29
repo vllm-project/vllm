@@ -1339,16 +1339,19 @@ class AsyncMPClient(MPClient):
         args: tuple = (),
         kwargs: dict[str, Any] | None = None,
     ) -> list[_R]:
-        # Like the Rust frontend: run on every engine and flatten the results.
+        return await self.call_utility_async(
+            "collective_rpc", method, timeout, args, kwargs
+        )
+
+    async def compute_weight_checksums_async(self) -> list[dict[str, str]]:
+        # Gather every engine: DP load balancing returns only the first result.
         per_engine = await asyncio.gather(
             *[
-                self._call_utility_async(
-                    "collective_rpc", method, timeout, args, kwargs, engine=engine
-                )
+                self._call_utility_async("compute_weight_checksums", engine=engine)
                 for engine in self.core_engines
             ]
         )
-        return [result for results in per_engine for result in results]
+        return [worker for workers in per_engine for worker in workers]
 
     async def handle_fault(
         self, ft_request: FaultToleranceRequest
