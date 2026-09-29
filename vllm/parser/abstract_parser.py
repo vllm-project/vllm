@@ -38,6 +38,7 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
 from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
+from vllm.parser.engine.adapters import ParserEngineToolAdapter
 from vllm.parser.metrics import record_tool_parser_invocation
 from vllm.parser.utils import count_history_tool_calls
 from vllm.reasoning.abs_reasoning_parsers import ReasoningParser
@@ -128,7 +129,15 @@ class Parser:
                 tokenizer, *args, model_config=model_config, **kwargs
             )
         if self.__class__.tool_parser_cls is not None:
-            self._tool_parser = self.__class__.tool_parser_cls(tokenizer, tools)
+            # Engine-based adapters take the same construction kwargs as
+            # the reasoning parser (e.g. chat_template_kwargs for per-request
+            # thinking toggles); legacy ToolParser classes take none.
+            if issubclass(self.__class__.tool_parser_cls, ParserEngineToolAdapter):
+                self._tool_parser = self.__class__.tool_parser_cls(
+                    tokenizer, tools, model_config=model_config, **kwargs
+                )
+            else:
+                self._tool_parser = self.__class__.tool_parser_cls(tokenizer, tools)
 
         self._engine_based = (
             self._reasoning_parser is None
