@@ -355,13 +355,13 @@ class FlashAttentionBackend(AttentionBackend):
     def get_supported_kernel_block_sizes(
         cls, kv_cache_spec: KVCacheSpec | None = None
     ) -> list[int | MultipleOf]:
+        if current_platform.is_xpu():
+            return [MultipleOf(64)]
         if block_size := cls._get_sm90_fa4_fp8_kv_block_size(kv_cache_spec):
             return [block_size]
         if block_size := cls._get_fa4_hd256_block_size(kv_cache_spec):
             # Sliding-window specs select the smallest advertised size.
             return [block_size]
-        if current_platform.is_xpu():
-            return [MultipleOf(16)]
         return [MultipleOf(16)]
 
     forward_includes_kv_cache_update: bool = False
