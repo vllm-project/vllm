@@ -27,6 +27,7 @@ from vllm.distributed import cleanup_dist_env_and_memory
 from vllm.exceptions import VLLMValidationError
 from vllm.platforms import current_platform
 from vllm.v1.engine.input_processor import InputProcessor
+from vllm.v1.worker.gpu.sample.prompt_logprob import PromptLogprobsWorker
 
 from ...conftest import HfRunner, VllmRunner
 
@@ -88,6 +89,7 @@ def hf_model(hf_runner) -> Generator[HfRunner, None, None]:
 def _model_config(vocab_size: int = 10, max_logprobs: int = 20):
     return SimpleNamespace(
         max_logprobs=max_logprobs,
+        max_model_len=16,
         logits_processors=None,
         is_diffusion=False,
         get_vocab_size=lambda: vocab_size,
@@ -487,6 +489,9 @@ def test_prompt_logprob_token_ids_validation():
         verify(prompt_logprob_token_ids=[[1], [-2]])
     with pytest.raises(VLLMValidationError, match="non-empty"):
         verify(prompt_logprob_token_ids=[[], []])
+    # Rows are bounded by max_model_len before the table is padded.
+    with pytest.raises(VLLMValidationError, match="max_model_len - 1 = 15"):
+        verify(prompt_logprob_token_ids=[[]] * 15 + [[1]])
     # prompt_logprob_start alone is a caller mistake, not a silent no-op.
     with pytest.raises(VLLMValidationError, match="requires prompt_logprob_token_ids"):
         verify(prompt_logprob_start=3)
@@ -1510,6 +1515,25 @@ def test_prompt_logprob_token_ids_with_chunking_and_preemption(monkeypatch):
         for row, target in enumerate(output.prompt_token_ids[1:]):
             expected = output.prompt_logprobs[row + 1][target].logprob
             assert scores[row] == pytest.approx(expected, abs=1e-3)
+
+
+def test_prompt_token_id_scores_are_dropped_after_resume():
+    """A request resumed after its prefill frees its table instead of keeping
+    it through decode; its scores were emitted before preemption."""
+    worker = PromptLogprobsWorker(max_num_reqs=1, device=torch.device("cpu"))
+    params = SamplingParams(prompt_logprob_token_ids=np.array([[1], [2]]))
+    worker.add_request("r", 0, params)
+    batch = SimpleNamespace(
+        req_ids=["r"],
+        idx_mapping_np=np.array([0]),
+        num_computed_prefill_tokens_np=np.array([0]),
+        num_scheduled_tokens=np.array([4]),
+        prefill_len_np=np.array([4]),
+    )
+    assert not worker.compute_prompt_token_id_logprobs(
+        None, None, batch, prompt_lens=np.array([3])
+    )
+    assert not worker.token_id_scores
 
 
 def test_prompt_logprob_token_ids_drop_partially_scored_prefills(monkeypatch):

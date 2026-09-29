@@ -948,6 +948,14 @@ class SamplingParams(
                     parameter="prompt_logprob_token_ids",
                     value=getattr(ids, "shape", type(ids).__name__),
                 )
+            max_rows = model_config.max_model_len - 1
+            if shape[0] > max_rows:
+                raise VLLMValidationError(
+                    f"prompt_logprob_token_ids has {shape[0]} rows, but a prompt "
+                    f"has at most max_model_len - 1 = {max_rows}.",
+                    parameter="prompt_logprob_token_ids",
+                    value=shape[0],
+                )
             n = shape[1]
             if n > max_logprobs:
                 raise VLLMValidationError(
