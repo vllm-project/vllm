@@ -549,6 +549,7 @@ async fn collect_output_rejects_partial_sampling_mask() {
         }),
         spec_decode_metrics: None,
         weight_versions: None,
+        timestamps: Default::default(),
     };
 
     let error = futures::stream::iter([Ok(output)]).collect_output().await.unwrap_err();

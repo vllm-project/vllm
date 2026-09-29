@@ -632,6 +632,7 @@ mod tests {
                         cached_token_count: 0,
                     },
                     reasoning_tokens: 3,
+                    timestamps: Default::default(),
                 },
                 finish_reason: FinishReason::stop_eos(),
                 kv_transfer_params: None,

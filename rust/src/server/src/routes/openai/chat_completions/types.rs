@@ -6,6 +6,7 @@ use std::fmt;
 use std::num::NonZeroU32;
 use std::sync::Arc;
 
+use crate::routes::openai::utils::metrics::PerRequestMetrics;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use serde_with::SerializeDisplay;
@@ -365,6 +366,7 @@ pub(super) struct ChatCompletionResponse {
     pub model: String,
     pub choices: Vec<ChatCompletionChoice>,
     pub usage: Option<Usage>,
+    pub metrics: Option<PerRequestMetrics>,
     pub system_fingerprint: Option<String>,
     pub prompt_logprobs: Option<PromptLogprobs>,
     pub prompt_token_ids: Option<Vec<u32>>,
@@ -412,6 +414,7 @@ pub(super) struct ChatCompletionStreamResponse {
     pub envelope: Arc<StreamResponseEnvelope>,
     pub choices: Vec<ChatCompletionStreamChoice>,
     pub usage: Option<Usage>,
+    pub metrics: Option<PerRequestMetrics>,
     pub prompt_token_ids: Option<Vec<u32>>,
 }
 
@@ -422,6 +425,7 @@ impl ChatCompletionStreamResponse {
             envelope: Arc::clone(envelope),
             choices: Vec::new(),
             usage: None,
+            metrics: None,
             prompt_token_ids: None,
         }
     }

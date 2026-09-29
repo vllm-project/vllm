@@ -276,6 +276,7 @@ pub(crate) async fn unified_event_stream(
                         usage: ChatTokenUsage {
                             engine: finished.usage,
                             reasoning_tokens: state.reasoning_tokens,
+                            timestamps: finished.timestamps,
                         },
                         finish_reason: finished.finish_reason,
                         kv_transfer_params: finished.kv_transfer_params,
@@ -419,6 +420,7 @@ mod tests {
                 kv_transfer_params: None,
                 ec_transfer_params: None,
                 sampling_mask: None,
+                timestamps: Default::default(),
             })),
         }
     }
@@ -500,6 +502,7 @@ mod tests {
         ChatTokenUsage {
             engine: vllm_llm::TokenUsage::default(),
             reasoning_tokens,
+            timestamps: Default::default(),
         }
     }
 
