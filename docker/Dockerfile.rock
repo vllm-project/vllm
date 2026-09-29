@@ -926,12 +926,15 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 
 # Install vLLM using uv (inherited from base stage)
 # Note: No -U flag to avoid upgrading PyTorch ROCm to CUDA version
+# Keep OpenTelemetry within LMCache's cap.
 RUN --mount=type=bind,from=export_vllm,src=/,target=/install \
     --mount=type=cache,target=/root/.cache/uv \
     cd /install \
-    && uv pip install --system -c /etc/rocm-constraints.txt -r requirements/rocm.txt \
+    && echo "opentelemetry-api<=1.40.0" > /tmp/otel-constraints.txt \
+    && uv pip install --system -c /etc/rocm-constraints.txt -c /tmp/otel-constraints.txt -r requirements/rocm.txt \
     && pip uninstall -y vllm \
-    && uv pip install --system -c /etc/rocm-constraints.txt *.whl
+    && uv pip install --system -c /etc/rocm-constraints.txt -c /tmp/otel-constraints.txt *.whl \
+    && rm /tmp/otel-constraints.txt
 
 # Install NIXL ROCm wheel
 RUN --mount=type=bind,from=build_nixl,src=/app/install,target=/nixl_install \
