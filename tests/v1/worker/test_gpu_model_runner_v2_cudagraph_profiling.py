@@ -5,9 +5,10 @@
 
 These exercise the orchestration of ``profile_cudagraph_memory`` on CPU by
 building a runner via ``__new__`` and faking the GPU-only helpers, so the
-control flow (bootstrap -> sample FULL graphs into a throwaway pool ->
-extrapolate -> teardown) is covered without a GPU.
-See https://github.com/vllm-project/vllm/issues/49224.
+control flow (bootstrap -> capture into a throwaway pool -> measure the pool
+and what the pass retained -> teardown) is covered without a GPU.
+See https://github.com/vllm-project/vllm/issues/49224 and
+https://github.com/vllm-project/vllm/issues/59318.
 """
 
 import contextlib
@@ -39,9 +40,6 @@ class _FakeCudaGraphManager:
             self._capture_descs = {CUDAGraphMode.PIECEWISE: descs}
         else:
             self._capture_descs = {CUDAGraphMode.FULL: descs} if needs_capture else {}
-        # Profiling hooks set by profile_cudagraph_memory.
-        self._max_full_descs_to_capture: int | None = None
-        self._capture_mem_samples: list[int] | None = None
         self.use_breakable_cg = False
 
     def needs_capture(self) -> bool:
@@ -55,7 +53,6 @@ def _make_profiling_runner(
     num_full_descs: int = 3,
     piecewise_only: bool = False,
     captured_bytes: int = 7 << 30,
-    mem_samples: list[int] | None = None,
 ) -> Any:
     runner: Any = mrv2.GPUModelRunner.__new__(mrv2.GPUModelRunner)
     runner.compilation_config = SimpleNamespace(cudagraph_mode=cudagraph_mode)
@@ -70,10 +67,6 @@ def _make_profiling_runner(
     def _capture_model(*, profile_only: bool = False) -> int:
         assert profile_only
         events.append("capture")
-        # Simulate the manager's per-FULL-graph memory sampling.
-        samples = runner.cudagraph_manager._capture_mem_samples
-        if samples is not None:
-            samples.extend(mem_samples or [])
         return captured_bytes
 
     runner.capture_model = _capture_model
@@ -89,6 +82,12 @@ class _FakePlatform:
     @staticmethod
     def graph_pool_handle() -> Any:
         return THROWAWAY_POOL
+
+    @staticmethod
+    def is_cuda_alike() -> bool:
+        # No allocator snapshot: graph_pool_bytes() returns None and the
+        # estimate falls back to the free-memory delta.
+        return False
 
     def get_global_graph_pool(self) -> Any:
         return type(self)._global_graph_pool
@@ -139,33 +138,49 @@ def test_profile_cudagraph_memory_no_graphs_tears_down(monkeypatch):
     assert runner.cudagraph_manager.pool == GLOBAL_POOL
 
 
-def test_profile_cudagraph_memory_samples_and_extrapolates(monkeypatch):
+def test_profile_cudagraph_memory_measures_pool_and_retained(monkeypatch):
+    """The estimate is the throwaway pool plus what the pass retained, not
+    the free-memory delta of the capture (which also counts cached
+    transients and first-use allocations the real capture never repeats)."""
     _patch_module(monkeypatch)
-    gib = 1 << 30
-    # Measured delta 1000 MiB includes the sampled FULL graphs (100 + 20 MiB).
-    # Extrapolated FULL cost for 3 graphs: 100 + 2 * 20 = 140 MiB.
-    runner = _make_profiling_runner(
-        CUDAGraphMode.FULL,
-        num_full_descs=3,
-        captured_bytes=1000 * gib,
-        mem_samples=[100 * gib, 20 * gib],
+    mib = 1 << 20
+    runner = _make_profiling_runner(CUDAGraphMode.FULL, captured_bytes=1000 * mib)
+    pools_measured: list[Any] = []
+
+    def _graph_pool_bytes(pool: Any) -> int:
+        pools_measured.append(pool)
+        return 300 * mib
+
+    monkeypatch.setattr(cgu, "graph_pool_bytes", _graph_pool_bytes)
+    # Free memory before the pass and after teardown: 50 MiB stayed allocated.
+    free_memory = iter([10 << 30, (10 << 30) - 50 * mib])
+    monkeypatch.setattr(
+        cgu.torch.accelerator, "get_memory_info", lambda: (next(free_memory), 1 << 40)
     )
 
     result = cgu.profile_cudagraph_memory(runner)
 
-    assert result == (1000 - (100 + 20) + (100 + 2 * 20)) * gib
+    assert result == (300 + 50) * mib
+    assert runner.cudagraph_profiling_retained_bytes == 50 * mib
+    assert pools_measured == [THROWAWAY_POOL]
     # Bootstrap, capture, and teardown run in order.
     assert runner.events == ["init", "capture", "teardown"]
     # Capture must use a throwaway pool, not the persistent global pool.
     assert runner.cudagraph_manager.pool == THROWAWAY_POOL
-    # FULL capture must be limited to the largest few graphs.
-    assert (
-        runner.cudagraph_manager._max_full_descs_to_capture
-        == cgu._FULL_GRAPH_PROFILING_SAMPLES
-    )
 
 
-def test_profile_cudagraph_memory_piecewise_only_returns_measured(monkeypatch):
+def test_profile_cudagraph_memory_captures_every_full_graph(monkeypatch):
+    """No FULL sample cap: every descriptor is captured, so nothing is
+    extrapolated from the largest graphs' deltas."""
+    _patch_module(monkeypatch)
+    runner = _make_profiling_runner(CUDAGraphMode.FULL, num_full_descs=17)
+
+    cgu.profile_cudagraph_memory(runner)
+
+    assert not hasattr(runner.cudagraph_manager, "_max_full_descs_to_capture")
+
+
+def test_profile_cudagraph_memory_falls_back_to_free_memory_delta(monkeypatch):
     _patch_module(monkeypatch)
     captured_bytes = 5 << 30
     runner = _make_profiling_runner(
@@ -176,8 +191,31 @@ def test_profile_cudagraph_memory_piecewise_only_returns_measured(monkeypatch):
 
     result = cgu.profile_cudagraph_memory(runner)
 
-    # No FULL graphs to sample or extrapolate: the measured delta is exact.
+    # Without an allocator snapshot the measured delta is the estimate; it
+    # already contains whatever the pass retained.
     assert result == captured_bytes
+    assert runner.cudagraph_profiling_retained_bytes == 0
+
+
+def test_graph_pool_bytes_sums_the_pool_segments(monkeypatch):
+    pool = (0, 7)
+    segments = [
+        {"segment_pool_id": (0, 7), "total_size": 3 << 20},
+        {"segment_pool_id": (0, 0), "total_size": 64 << 20},
+        {"segment_pool_id": [0, 7], "total_size": 5 << 20},
+        {"segment_pool_id": (0, 8), "total_size": 1 << 20},
+    ]
+    monkeypatch.setattr(cgu.torch.cuda, "memory_snapshot", lambda: segments)
+    monkeypatch.setattr(
+        cgu, "current_platform", SimpleNamespace(is_cuda_alike=lambda: True)
+    )
+
+    assert cgu.graph_pool_bytes(pool) == 8 << 20
+
+    monkeypatch.setattr(
+        cgu, "current_platform", SimpleNamespace(is_cuda_alike=lambda: False)
+    )
+    assert cgu.graph_pool_bytes(pool) is None
 
 
 def test_profile_cudagraph_memory_tears_down_on_capture_error(monkeypatch):
@@ -226,21 +264,6 @@ def test_model_runner_delegates_to_cudagraph_utils(monkeypatch):
     runner = mrv2.GPUModelRunner.__new__(mrv2.GPUModelRunner)
     monkeypatch.setattr(mrv2, "_profile_cudagraph_memory", lambda r: 42)
     assert runner.profile_cudagraph_memory() == 42
-
-
-def test_extrapolate_full_graph_memory():
-    mib = 1 << 20
-    # No samples (e.g. no FULL graphs): nothing to add.
-    assert cgu._extrapolate_full_graph_memory([], 0) == 0
-    # A single graph costs exactly its sample.
-    assert cgu._extrapolate_full_graph_memory([100 * mib], 1) == 100 * mib
-    # First capture + per-graph cost for the rest.
-    assert (
-        cgu._extrapolate_full_graph_memory([100 * mib, 20 * mib], 5)
-        == (100 + 4 * 20) * mib
-    )
-    # Per-graph cost is floored to account for driver overhead.
-    assert cgu._extrapolate_full_graph_memory([100 * mib, 0], 3) == (100 + 2 * 1) * mib
 
 
 def test_profile_cudagraph_memory_clears_captured_graphs(monkeypatch):
