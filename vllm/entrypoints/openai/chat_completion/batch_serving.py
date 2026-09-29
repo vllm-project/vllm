@@ -169,6 +169,22 @@ class OpenAIServingChatBatch(OpenAIServingChat):
                 else await self._get_trace_headers(raw_request.headers)
             )
             session_id = self._get_session_id(single_request, raw_request)
+
+            if not single_request.include_reasoning:
+                reasoning_ended = True
+            elif single_request._grammar_from_parser:
+                # The Mistral grammar already includes an optional
+                # `think?` rule that handles both reasoning and
+                # non-reasoning outputs.
+                reasoning_ended = True
+            elif parser is not None and parser.reasoning_parser is not None:
+                prompt_token_ids = self._extract_prompt_components(
+                    engine_prompt
+                ).token_ids
+                reasoning_ended = parser.is_reasoning_end(prompt_token_ids or [])
+            else:
+                reasoning_ended = None
+
             generators.append(
                 self.engine_client.generate(
                     engine_prompt,
@@ -179,7 +195,14 @@ class OpenAIServingChatBatch(OpenAIServingChat):
                     priority=request.priority,
                     data_parallel_rank=data_parallel_rank,
                     session_id=session_id,
-                    reasoning_ended=None,
+                    reasoning_ended=reasoning_ended,
+                    reasoning_parser_kwargs={
+                        "chat_template_kwargs": self._engine_chat_template_kwargs(
+                            chat_template_kwargs
+                        ),
+                    }
+                    if parser is not None and parser.reasoning_parser is not None
+                    else None,
                 )
             )
 
