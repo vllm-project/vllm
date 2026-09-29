@@ -812,10 +812,19 @@ class Worker(WorkerBase):
         if mem_pool_context is None:
             mem_pool_context = self._maybe_get_memory_pool_context(tag="kv_cache")
 
-        self.model_runner.initialize_kv_cache(
-            kv_cache_config,
-            kv_cache_allocation_context=mem_pool_context,
+        # Block tables and metadata built with the KV cache go to the offloaded
+        # "runtime" pool; the KV cache itself uses the nested pool above. Skipped
+        # with KV/aux-output connectors, whose registered buffers must stay put.
+        runtime_pool = (
+            nullcontext()
+            if has_kv_transfer_group() or self.vllm_config.aux_output_config.enabled
+            else self._maybe_get_memory_pool_context(tag="runtime")
         )
+        with runtime_pool:
+            self.model_runner.initialize_kv_cache(
+                kv_cache_config,
+                kv_cache_allocation_context=mem_pool_context,
+            )
 
         # Build KV-zero metadata outside the CuMem pool so the bookkeeping
         # GPU tensors (seg_addrs, block-id buffers) use the standard PyTorch

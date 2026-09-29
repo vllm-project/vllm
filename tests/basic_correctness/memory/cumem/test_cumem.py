@@ -235,6 +235,34 @@ def test_discard_tags():
 
 @create_new_process_for_each_test("fork" if current_platform.is_cuda() else "spawn")
 @pytest.mark.skipif(current_platform.is_xpu(), reason="Uses the CuMem allocator")
+def test_runtime_state_survives_level2_and_selective_wake():
+    """Runtime state is offloaded even at level 2 and restored by the first
+    selective wake; a nested kv_cache pool keeps its own tag."""
+    from vllm.device_allocator.sleep_mode_backend import CuMemBackend
+
+    allocator = get_mem_allocator_instance()
+    with allocator.use_memory_pool("runtime"):
+        state = torch.arange(1 << 20, device=DEVICE_TYPE)
+        with allocator.use_memory_pool("kv_cache"):
+            kv = torch.zeros(1 << 20, device=DEVICE_TYPE)
+    assert {d.tag for d in allocator.pointer_to_data.values()} == {
+        "runtime",
+        "kv_cache",
+    }
+
+    backend = CuMemBackend()
+    backend.suspend(level=2)
+    assert mapped_usage(allocator) == 0
+
+    backend.resume(tags=["weights"])
+    assert torch.equal(state, torch.arange(1 << 20, device=DEVICE_TYPE))
+    backend.resume(tags=["kv_cache"])
+    kv.fill_(1)
+    assert int(kv.sum()) == kv.numel()
+
+
+@create_new_process_for_each_test("fork" if current_platform.is_cuda() else "spawn")
+@pytest.mark.skipif(current_platform.is_xpu(), reason="Uses the CuMem allocator")
 def test_level2_discards_ordinary_tensor_with_weights_tag():
     """Reproduce the level-2 variant for an ordinary tensor in weights."""
     allocator = get_mem_allocator_instance()

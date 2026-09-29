@@ -118,6 +118,32 @@ def test_third_party_backend_registration_and_resolution():
         SleepModeBackendFactory._registry.pop(name, None)
 
 
+@pytest.mark.parametrize(
+    ("level", "offload_tags"),
+    [(1, ("weights", "runtime")), (2, ("runtime",))],
+)
+def test_cumem_suspend_offload_tags(monkeypatch, level, offload_tags):
+    """suspend() asks the allocator to back up runtime state at every level
+    and weights only at level 1; a selective resume() also restores runtime
+    state (GPU coverage is in test_cumem.py)."""
+    import vllm.device_allocator as device_allocator
+
+    calls = []
+
+    class Allocator:
+        def sleep(self, offload_tags):
+            calls.append(("sleep", offload_tags))
+
+        def wake_up(self, tags):
+            calls.append(("wake_up", tags))
+
+    monkeypatch.setattr(device_allocator, "get_mem_allocator_instance", Allocator)
+    backend = CuMemBackend()
+    backend.suspend(level=level)
+    backend.resume(tags=["weights"])
+    assert calls == [("sleep", offload_tags), ("wake_up", ["weights", "runtime"])]
+
+
 def test_suspend_resume_state_transitions():
     """Lifecycle state advances RUNNING -> SUSPENDED -> RUNNING without GPU."""
     backend = DummyBackend()

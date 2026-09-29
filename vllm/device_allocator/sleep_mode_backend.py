@@ -129,13 +129,18 @@ class CuMemBackend(SleepModeBackend):
 
         self._state = "SUSPENDED"
         allocator = get_mem_allocator_instance()
-        allocator.sleep(offload_tags=("weights",) if level == 1 else tuple())
+        # Runtime state is kept at every level; weights only at level 1.
+        offload_tags = ("weights", "runtime") if level == 1 else ("runtime",)
+        allocator.sleep(offload_tags=offload_tags)
 
     def resume(self, tags: list[str] | None = None) -> None:
         from vllm.device_allocator import get_mem_allocator_instance
 
         self._state = "RESUMING"
         allocator = get_mem_allocator_instance()
+        if tags is not None:
+            # Runtime state backs every forward pass: restore it with any wake.
+            tags = [*tags, "runtime"]
         allocator.wake_up(tags)
         self._state = "RUNNING"
 
