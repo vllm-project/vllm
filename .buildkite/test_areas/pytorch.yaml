@@ -5,8 +5,8 @@ steps:
 - label: ":nvidia: (H200 MIG 35GB) PyTorch Compilation"
   device: h200_35gb
   key: pytorch-compilation-unit-tests
-  timeout_in_minutes: 60
-  source_file_dependencies:
+  timeout_in_minutes: 30
+  source_file_dependencies: &pytorch-compilation-deps
     - vllm/__init__.py
     - vllm/_aiter_ops.py
     - vllm/_custom_ops.py
@@ -47,7 +47,26 @@ steps:
       label: ":amd: (MI300) PyTorch Compilation"
       dind: false
       device: mi300_1
-      timeout_in_minutes: 90
+      timeout_in_minutes: 45
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - csrc/
+      - vllm/platforms/rocm.py
+
+- label: ":nvidia: (H200 MIG 35GB) PyTorch Compilation / Dynamic Shapes"
+  device: h200_35gb
+  key: pytorch-compilation-dynamic-shapes
+  timeout_in_minutes: 30
+  source_file_dependencies: *pytorch-compilation-deps
+  commands:
+  - pytest -s -v compile/dynamic_shapes/
+  mirror:
+    amd:
+      label: ":amd: (MI300) PyTorch Compilation / Dynamic Shapes"
+      dind: false
+      device: mi300_1
+      timeout_in_minutes: 45
       depends_on:
       - image-build-amd
       source_file_dependencies:
@@ -89,9 +108,9 @@ steps:
   - "find compile/h100/ -name 'test_*.py' -print0 | xargs -0 -n1 -I{} pytest -s -v '{}'"
   mirror:
     amd:
-      label: ":amd: (MI355) PyTorch Compilation H100 Cases"
+      label: ":amd: (MI355 DPX) PyTorch Compilation H100 Cases"
       dind: false
-      device: mi355_1
+      device: mi355_dpx
       timeout_in_minutes: 45
       working_dir: "/vllm-workspace/tests"
       depends_on:
@@ -192,10 +211,14 @@ steps:
   - "find compile/fullgraph/ -name 'test_*.py' -not -name 'test_full_cudagraph.py' -print0 | xargs -0 -n1 -I{} pytest -s -v '{}'"
   mirror:
     amd:
-      label: ":amd: (MI355) PyTorch Fullgraph"
+      label: ":amd: (MI355 DPX) PyTorch Fullgraph"
       dind: false
-      device: mi355_1
+      device: mi355_dpx
       timeout_in_minutes: 90
+      # Remove once the ROCm Triton pin includes triton-lang/triton#11567.
+      # Avoid overlapping LLVM codegen/LLD by disabling background precompilation.
+      env:
+        TORCHINDUCTOR_PRECOMPILATION_TIMEOUT_SECONDS: "0"
       depends_on:
       - image-build-amd
 
