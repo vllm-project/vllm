@@ -277,6 +277,11 @@ impl RequestRegistry {
     /// routing state. Returns `false` if the engine is unknown to the
     /// client.
     pub fn apply_scheduler_stats(&mut self, engine_index: u32, stats: &SchedulerStats) -> bool {
+        if stats.sleep_state_only {
+            return u16::try_from(engine_index).ok().is_some_and(|index| {
+                self.routing_per_engine.contains_key(&EngineId::from_engine_index(index))
+            });
+        }
         self.apply_scheduler_counts(
             engine_index,
             EngineLoadSnapshot {

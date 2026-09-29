@@ -374,23 +374,41 @@ class LLMEngine:
     def sleep(self, level: int = 1, mode: PauseMode = "abort"):
         if level >= 1:
             self.renderer.clear_mm_cache()
-        self.engine_core.sleep(level, mode)
-
-        if self.logger_manager is not None:
-            self.logger_manager.record_sleep_state(1, level)
+        try:
+            self.engine_core.sleep(level, mode)
+        finally:
+            if self.logger_manager is not None:
+                self._record_sleep_snapshot()
 
     def release_kv_cache_memory(self) -> None:
         self.renderer.clear_mm_cache()
-        self.engine_core.release_kv_cache_memory()
+        try:
+            self.engine_core.release_kv_cache_memory()
+        finally:
+            if self.logger_manager is not None:
+                self._record_sleep_snapshot()
 
-        if self.logger_manager is not None:
-            self.logger_manager.record_sleep_state(1, 0)
+    def wake_up(self, tags: list[str] | None = None) -> bool:
+        try:
+            return self.engine_core.wake_up(tags)
+        finally:
+            if self.logger_manager is not None:
+                self._record_sleep_snapshot()
 
-    def wake_up(self, tags: list[str] | None = None):
-        fully_awake = self.engine_core.wake_up(tags)
+    def _record_sleep_snapshot(self) -> None:
+        from vllm.v1.metrics.stats import EngineSleepState
 
-        if self.logger_manager is not None and fully_awake:
-            self.logger_manager.record_sleep_state(0, 0)
+        try:
+            state = EngineSleepState(**self.engine_core.get_sleep_state())
+        except Exception:
+            logger.warning(
+                "Unable to refresh engine sleep-state metrics", exc_info=True
+            )
+            return
+        self.logger_manager.record_sleep_snapshot(
+            state,
+            self.vllm_config.parallel_config.data_parallel_index,
+        )
 
     def is_sleeping(self) -> bool:
         return self.engine_core.is_sleeping()

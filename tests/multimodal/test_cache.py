@@ -856,6 +856,7 @@ async def test_release_kv_cache_resends_mm_payload(use_async, release_error):
             ),
         ),
         logger_manager=Mock(),
+        _record_sleep_snapshot=Mock(),
     )
 
     async def call_release():
@@ -867,10 +868,16 @@ async def test_release_kv_cache_resends_mm_payload(use_async, release_error):
     if release_error:
         with pytest.raises(RuntimeError, match=release_error):
             await call_release()
-        engine.logger_manager.record_sleep_state.assert_not_called()
+        if not use_async:
+            engine._record_sleep_snapshot.assert_called_once_with()
+        else:
+            engine._record_sleep_snapshot.assert_not_called()
     else:
         await call_release()
-        engine.logger_manager.record_sleep_state.assert_called_once_with(1, 0)
+        if not use_async:
+            engine._record_sleep_snapshot.assert_called_once_with()
+        else:
+            engine._record_sleep_snapshot.assert_not_called()
 
     payload, _ = sender.get_and_update_item((item, []), mm_hash)
     assert payload is item
