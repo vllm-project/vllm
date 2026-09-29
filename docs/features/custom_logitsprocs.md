@@ -40,6 +40,7 @@ Custom logits processors must subclass `vllm.v1.worker.gpu.sample.logits_process
 
 * `apply(self, logits: torch.Tensor, ctx: LogitsContext) -> torch.Tensor`:
     * Consume a `(num_logits_rows) x (vocab_size)` logits tensor and the step's batch layout (`ctx`: row-to-slot mappings, `input_ids`, positions)
+    * The tensor is `float32`, except that speculative-decoding verification passes the logits in the LM head dtype (e.g. `bfloat16`), so do not assume a dtype
     * Apply logits processor transformation at batch granularity
     * Return a transformed logits tensor. You can modify the input logits in-place or out-of-place; in-place is more memory-efficient
 

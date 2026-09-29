@@ -151,7 +151,8 @@ class LogitsProcessor(ABC):
         via ``ctx.expanded_idx_mapping``.
 
         Args:
-            logits: [num_logits_rows, vocab_size] float32 tensor.
+            logits: [num_logits_rows, vocab_size] tensor. float32, except that
+                speculative-decoding verification passes the LM head dtype.
             ctx: this step's batch layout.
 
         """

@@ -266,6 +266,7 @@ def _thinking_budget_kernel(
     reasoning_start_token_ids_ptr,
     natural_reasoning_end_token_ids_ptr,
     reasoning_end_token_ids_ptr,
+    force_value,
     START_LEN: tl.constexpr,
     NATURAL_END_LEN: tl.constexpr,
     END_LEN: tl.constexpr,
@@ -362,7 +363,7 @@ def _thinking_budget_kernel(
                 end_prefix_len = prefix_len
 
     force_token_id = tl.load(reasoning_end_token_ids_ptr + end_prefix_len)
-    tl.store(logits_ptr + token_idx * logits_stride + force_token_id, 1.0e9)
+    tl.store(logits_ptr + token_idx * logits_stride + force_token_id, force_value)
 
 
 def apply_thinking_budget(
@@ -418,6 +419,7 @@ def apply_thinking_budget(
         reasoning_start_token_ids,
         natural_reasoning_end_token_ids,
         reasoning_end_token_ids,
+        min(1.0e9, torch.finfo(logits.dtype).max),
         START_LEN=start_len,
         NATURAL_END_LEN=natural_end_len,
         END_LEN=end_len,

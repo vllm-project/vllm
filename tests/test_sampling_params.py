@@ -56,6 +56,23 @@ def test_non_diffusion_models_unaffected():
     params.verify(MockModelConfig(), None, None, None)
 
 
+@dataclass
+class MockSpeculativeConfig:
+    enable_adaptive_verification: bool = False
+
+
+def test_spec_decode_rejects_nonzero_min_p():
+    params = SamplingParams(min_p=1e-6)
+    with pytest.raises(VLLMValidationError, match="speculative decoding"):
+        params.verify(MockModelConfig(), MockSpeculativeConfig(), None, None)
+
+
+def test_spec_decode_accepts_zero_min_p():
+    SamplingParams(min_p=0.0).verify(
+        MockModelConfig(), MockSpeculativeConfig(), None, None
+    )
+
+
 def test_verify_leaves_logits_processors_to_admission():
     """verify() is runner-agnostic; LP validation lives in the admission
     layer, so an unimportable FQCN must not fail verify()."""
