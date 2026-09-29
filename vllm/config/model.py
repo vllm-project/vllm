@@ -1088,22 +1088,23 @@ class ModelConfig:
         cls += "MoE" if self.is_moe else ""
         # Check if the architecture we're wrapping has defaults
         runner = None
-        task = None
+        convert = None
+        pooling_task = None
         # architectures is empty for with_hf_config() submodel views.
         if self.architectures and (
             defaults := try_match_architecture_defaults(self.architectures[0])
         ):
-            _, (runner, task) = defaults
+            _, (runner, convert, pooling_task) = defaults
         # User specified value take precedence
         if self.runner != "auto":
             runner = self.runner
         # Only consider Transformers modeling backend pooling classes if we're wrapping
         # an architecture that defaults to pooling. Otherwise, we return the LM class
         # and use adapters.
-        if runner == "pooling" and task in {"embed", "classify"}:
-            if task == "embed":
+        if runner == "pooling" and convert in {"embed", "classify"}:
+            if convert == "embed":
                 cls += "EmbeddingModel"
-            elif self.architectures[0].endswith("ForTokenClassification"):
+            elif pooling_task == "token_classify":
                 cls += "ForTokenClassification"
             else:
                 cls += "ForSequenceClassification"
@@ -1254,7 +1255,7 @@ class ModelConfig:
 
             match = try_match_architecture_defaults(arch)
             if match:
-                _, (runner_type, _) = match
+                _, (runner_type, _, _) = match
                 return runner_type
 
         return "generate"
@@ -1303,7 +1304,7 @@ class ModelConfig:
 
             match = try_match_architecture_defaults(arch, runner_type=runner_type)
             if match:
-                _, (_, convert_type) = match
+                _, (_, convert_type, _) = match
                 return convert_type
 
         # This is to handle Sentence Transformers models that use *ForCausalLM
@@ -1877,10 +1878,11 @@ class ModelConfig:
                     f"Supported tasks: {supported_tasks}"
                 )
 
-        if "token_classify" in supported_tasks:
-            for architecture in self.architectures:
-                if "ForTokenClassification" in architecture:
-                    return "token_classify"
+        for architecture in self.architectures:
+            if match := try_match_architecture_defaults(architecture):
+                _, (_, _, default_task) = match
+                if default_task in supported_tasks:
+                    return default_task
 
         priority: list[PoolingTask] = [
             "embed&token_classify",
@@ -2271,24 +2273,29 @@ def get_served_model_name(model: str, served_model_name: str | list[str] | None)
 # Some model suffixes are based on auto classes from Transformers:
 # https://huggingface.co/docs/transformers/en/model_doc/auto
 # NOTE: Items higher on this list priority over lower ones
-_SUFFIX_TO_DEFAULTS: list[tuple[str, tuple[RunnerType, ConvertType]]] = [
-    ("ForCausalLM", ("generate", "none")),
-    ("ForConditionalGeneration", ("generate", "none")),
-    ("ChatModel", ("generate", "none")),
-    ("LMHeadModel", ("generate", "none")),
-    ("ForTextEncoding", ("pooling", "embed")),
-    ("EmbeddingModel", ("pooling", "embed")),
-    ("ForSequenceClassification", ("pooling", "classify")),
-    ("ForTokenClassification", ("pooling", "classify")),
-    ("ForAudioClassification", ("pooling", "classify")),
-    ("ForImageClassification", ("pooling", "classify")),
-    ("ForVideoClassification", ("pooling", "classify")),
-    ("ClassificationModel", ("pooling", "classify")),
-    ("ForRewardModeling", ("pooling", "embed")),
-    ("RewardModel", ("pooling", "embed")),
+_SUFFIX_TO_DEFAULTS: list[
+    tuple[str, tuple[RunnerType, ConvertType, PoolingTask | None]]
+] = [
+    ("ForCausalLM", ("generate", "none", None)),
+    ("ForConditionalGeneration", ("generate", "none", None)),
+    ("ChatModel", ("generate", "none", None)),
+    ("LMHeadModel", ("generate", "none", None)),
+    ("ForTextEncoding", ("pooling", "embed", None)),
+    ("EmbeddingModel", ("pooling", "embed", None)),
+    ("ForSequenceClassification", ("pooling", "classify", None)),
+    ("ForTokenClassification", ("pooling", "classify", "token_classify")),
+    ("ForAudioClassification", ("pooling", "classify", None)),
+    ("ForImageClassification", ("pooling", "classify", None)),
+    ("ForVideoClassification", ("pooling", "classify", None)),
+    ("ClassificationModel", ("pooling", "classify", None)),
+    ("ForRewardModeling", ("pooling", "embed", None)),
+    ("RewardModel", ("pooling", "embed", None)),
     # Let other `*Model`s take priority
-    ("Model", ("pooling", "embed")),
+    ("Model", ("pooling", "embed", None)),
 ]
+"""Architecture suffix to its default runner, convert type and pooling task.
+
+A pooling task of `None` defers to the priority order in `get_pooling_task`."""
 
 
 def iter_architecture_defaults():
@@ -2300,17 +2307,15 @@ def try_match_architecture_defaults(
     *,
     runner_type: RunnerType | None = None,
     convert_type: ConvertType | None = None,
-) -> tuple[str, tuple[RunnerType, ConvertType]] | None:
-    for suffix, (
-        default_runner_type,
-        default_convert_type,
-    ) in iter_architecture_defaults():
+) -> tuple[str, tuple[RunnerType, ConvertType, PoolingTask | None]] | None:
+    for suffix, defaults in iter_architecture_defaults():
+        default_runner_type, default_convert_type, _ = defaults
         if (
             (runner_type is None or runner_type == default_runner_type)
             and (convert_type is None or convert_type == default_convert_type)
             and architecture.endswith(suffix)
         ):
-            return suffix, (default_runner_type, default_convert_type)
+            return suffix, defaults
 
     return None
 
