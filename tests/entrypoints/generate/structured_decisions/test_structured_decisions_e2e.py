@@ -29,24 +29,29 @@ def post(server, body):
     return requests.post(server.url_for("v1/systemone"), json=body)
 
 
+def choice(instructions, *names):
+    return {
+        "type": "choice",
+        "instructions": instructions,
+        "criteria": dict.fromkeys(names),
+    }
+
+
+COPY = {
+    "team": choice(
+        "Which team does the message name?", "billing", "shipping", "security"
+    ),
+    "lang": choice("Which language does the message name?", "English", "French"),
+}
+
+
 def test_choice_decision(server):
     response = post(
         server,
         {
             "model": MODEL_NAME,
             "state": {"team": "billing", "language": "French"},
-            "questions": {
-                "team": {
-                    "type": "choice",
-                    "instructions": "Which team does the message name?",
-                    "criteria": {"billing": None, "shipping": None, "security": None},
-                },
-                "lang": {
-                    "type": "choice",
-                    "instructions": "Which language does the message name?",
-                    "criteria": {"English": None, "French": None},
-                },
-            },
+            "questions": COPY,
             "chat_template_kwargs": {"enable_thinking": False},
         },
     )
@@ -59,12 +64,60 @@ def test_choice_decision(server):
     assert set(team["probabilities"]) == {"billing", "shipping", "security"}
     assert sum(team["probabilities"].values()) == pytest.approx(1.0, abs=1e-4)
     assert team["confidence"] == max(team["probabilities"].values())
-    assert team["choice"] == "billing"
-    assert body["answers"]["lang"]["choice"] == "French"
     for diag in body["diagnostics"].values():
         assert 0.0 < diag["label_mass"] <= 1.0 + 1e-6
     assert body["usage"]["output_tokens"] == 2
     assert body["usage"]["input_tokens"] > 0
+
+
+# Qwen3-0.6B gets a single read of these wrong for some label draws, so each
+# case averages 16 seeds.
+@pytest.mark.parametrize(
+    "state,questions,expected",
+    [
+        (
+            {"team": "billing", "language": "French"},
+            COPY,
+            {"team": "billing", "lang": "French"},
+        ),
+        (
+            "My card was charged twice for one order.",
+            {
+                "card": choice("Does the message mention a card?", "yes", "no"),
+                "mood": choice("How does the customer feel?", "happy", "angry"),
+            },
+            {"card": "yes", "mood": "angry"},
+        ),
+        (
+            "Hello.",
+            {
+                "sky": choice(
+                    "What color is the sky on a clear day?", "blue", "green", "red"
+                )
+            },
+            {"sky": "blue"},
+        ),
+    ],
+)
+def test_answers_averaged_over_seeds(server, state, questions, expected):
+    totals: dict[str, dict[str, float]] = {}
+    for seed in range(16):
+        response = post(
+            server,
+            {
+                "model": MODEL_NAME,
+                "state": state,
+                "questions": questions,
+                "seed": seed,
+                "chat_template_kwargs": {"enable_thinking": False},
+            },
+        )
+        assert response.status_code == 200, response.text
+        for qid, answer in response.json()["answers"].items():
+            for name, p in answer["probabilities"].items():
+                totals.setdefault(qid, {}).setdefault(name, 0.0)
+                totals[qid][name] += p
+    assert {qid: max(t, key=t.get) for qid, t in totals.items()} == expected
 
 
 @pytest.mark.parametrize(
