@@ -222,14 +222,23 @@ def is_aiter_found_and_supported() -> bool:
     return False
 
 
-def is_aiter_found_and_supported_on_rdna() -> bool:
-    """RDNA analog of `is_aiter_found_and_supported()`.
+def is_aiter_found_and_supported_on_rdna4() -> bool:
+    """RDNA4 (gfx12) analog of `is_aiter_found_and_supported()`.
 
-    RDNA has no aiter CK build, so this deliberately stays off the gfx9
-    `@if_aiter_supported` umbrella; it reports only that aiter's Triton kernels
-    are usable here. Like its gfx9 counterpart it checks platform + arch +
-    library availability and does not check environment variables.
+    gfx12 has no aiter CK build, so this deliberately stays off the gfx9
+    `@if_aiter_supported` umbrella; it reports only that aiter's Triton
+    kernels are usable here. Like its gfx9 counterpart it checks platform +
+    arch + library availability and does not check environment variables.
     """
+    if current_platform.is_rocm() and IS_AITER_FOUND:
+        from vllm.platforms.rocm import on_rdna4
+
+        return on_rdna4()
+    return False
+
+
+def is_aiter_found_and_supported_on_rdna() -> bool:
+    """RDNA (gfx11 + gfx12) analog of `is_aiter_found_and_supported()`."""
     if current_platform.is_rocm() and IS_AITER_FOUND:
         from vllm.platforms.rocm import on_rdna
 
