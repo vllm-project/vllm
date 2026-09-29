@@ -151,10 +151,10 @@ steps:
       - vllm/_aiter_ops.py
       - vllm/platforms/rocm.py
 
-- label: ":amd: (MI300) Qwen3-Next-80B-A3B-Instruct MTP Async EPLB Accuracy"
+- label: ":amd: (MI355) Qwen3-Next-80B-A3B-Instruct MTP Async EPLB Accuracy"
   key: amd-qwen3-next-mtp-async-eplb-accuracy
   dind: false
-  device: mi300_4
+  device: mi355_4
   timeout_in_minutes: 45
   depends_on:
   - image-build-amd

@@ -1293,10 +1293,10 @@ steps:
       - vllm/platforms/rocm.py
       - tests/evals/mrcr/
 
-- label: ":amd: (MI300) LM Eval Large Models Harness"
+- label: ":amd: (MI355) LM Eval Large Models Harness"
   key: amd-lm-eval-large-models-harness
   dind: false
-  device: mi300_4
+  device: mi355_4
   timeout_in_minutes: 85
   depends_on:
   - image-build-amd

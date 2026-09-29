@@ -327,9 +327,9 @@ steps:
   - pytest -v -s distributed/test_engram_dp_shard.py
   mirror:
     amd:
-      label: ':amd: (MI300) Distributed DP Extended'
+      label: ':amd: (MI355) Distributed DP Extended'
       dind: false
-      device: mi300_4
+      device: mi355_4
       timeout_in_minutes: 60
       working_dir: /vllm-workspace/tests
       depends_on:
@@ -374,9 +374,9 @@ steps:
   - pytest -v -s distributed/test_multiproc_executor.py::test_multiproc_executor_multi_node
   mirror:
     amd:
-      label: ':amd: (MI300) Distributed Compile + Comm'
+      label: ':amd: (MI355) Distributed Compile + Comm'
       dind: false
-      device: mi300_4
+      device: mi355_4
       timeout_in_minutes: 45
       working_dir: /vllm-workspace/tests
       depends_on:
@@ -450,9 +450,9 @@ steps:
   - pytest -v -s -x lora/test_mixtral.py
   mirror:
     amd:
-      label: ':amd: (MI300) Distributed'
+      label: ':amd: (MI355) Distributed'
       dind: false
-      device: mi300_4
+      device: mi355_4
       timeout_in_minutes: 40
       working_dir: /vllm-workspace/tests
       depends_on:
@@ -467,7 +467,7 @@ steps:
       commands:
       - pytest -v -s distributed/test_custom_all_reduce.py
       - torchrun --nproc_per_node=2 distributed/test_ca_buffer_sharing.py
-      - TARGET_TEST_SUITE=MI300 pytest basic_correctness/ -v -s -m 'distributed(num_gpus=2)'
+      - TARGET_TEST_SUITE=MI355 pytest basic_correctness/ -v -s -m 'distributed(num_gpus=2)'
       - pytest -v -s -x lora/test_mixtral.py
       - pytest -v -s models/test_vision.py -m 'distributed(num_gpus=4)'
 
@@ -696,9 +696,9 @@ steps:
   - TARGET_TEST_SUITE=L4 pytest -v -s basic_correctness/models/test_basic_correctness.py -k "ray"
   mirror:
     amd:
-      label: ':amd: (MI300) RayExecutorV2'
+      label: ':amd: (MI355) RayExecutorV2'
       dind: false
-      device: mi300_4
+      device: mi355_4
       timeout_in_minutes: 75
       working_dir: /vllm-workspace/tests
       depends_on:
@@ -717,4 +717,4 @@ steps:
       - pytest -v -s distributed/test_ray_v2_executor.py
       - pytest -v -s distributed/test_ray_v2_executor_e2e.py
       - pytest -v -s distributed/test_pipeline_parallel.py -k "ray"
-      - TARGET_TEST_SUITE=L4 pytest -v -s basic_correctness/models/test_basic_correctness.py -k "ray"
+      - TARGET_TEST_SUITE=MI355 pytest -v -s basic_correctness/models/test_basic_correctness.py -k "ray"
