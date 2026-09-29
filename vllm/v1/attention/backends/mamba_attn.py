@@ -86,6 +86,7 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
 
     # Will be disabled if speculative decoding is used
     supports_update_block_table: bool = True
+    needs_causal_conv1d_metadata: bool = True
 
     def __init__(
         self,
@@ -456,10 +457,6 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
         if num_prefills > 0:
             num_computed_tokens = common_attn_metadata.compute_num_computed_tokens()
 
-            query_start_loc_p_cpu = (
-                common_attn_metadata.query_start_loc_cpu[-num_prefills - 1 :]
-                - num_decode_tokens
-            )
             query_start_loc_p = (
                 common_attn_metadata.query_start_loc[-num_prefills - 1 :]
                 - num_decode_tokens
@@ -468,12 +465,17 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
                 num_computed_tokens[num_reqs - num_prefills : num_reqs] > 0
             )
 
-            nums_dict, batch_ptr, token_chunk_offset_ptr = (
-                compute_causal_conv1d_metadata(
-                    query_start_loc_p_cpu,
-                    device=common_attn_metadata.query_start_loc.device,
+            if self.needs_causal_conv1d_metadata:
+                query_start_loc_p_cpu = (
+                    common_attn_metadata.query_start_loc_cpu[-num_prefills - 1 :]
+                    - num_decode_tokens
                 )
-            )
+                nums_dict, batch_ptr, token_chunk_offset_ptr = (
+                    compute_causal_conv1d_metadata(
+                        query_start_loc_p_cpu,
+                        device=common_attn_metadata.query_start_loc.device,
+                    )
+                )
 
         if self.use_replayssm and not self.use_flashinfer_replayssm and num_decodes > 0:
             decode_base_cpu = common_attn_metadata.replayssm_decode_base_cpu

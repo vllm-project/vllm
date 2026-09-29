@@ -3067,8 +3067,6 @@ class VllmConfig:
                 # https://github.com/vllm-project/vllm/pull/40704
                 "ngram",
                 "ngram_gpu",
-                # https://github.com/vllm-project/vllm/pull/43091
-                "draft_model",
                 "suffix",
                 "medusa",
                 "mlp_speculator",
@@ -3087,9 +3085,6 @@ class VllmConfig:
 
         if self.parallel_config.use_ubatching:
             unsupported.extend(self._get_dbo_unsupported_features())
-
-        if self.parallel_config.enable_elastic_ep:
-            unsupported.append("elastic expert parallelism")
 
         return unsupported
 
