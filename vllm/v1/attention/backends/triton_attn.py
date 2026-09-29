@@ -262,8 +262,12 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
             softmax_segm_max=self.softmax_segm_max,
             softmax_segm_expsum=self.softmax_segm_expsum,
         )
-        if 0 < self.max_seqs_64_segments < seq_lens.shape[0]:
-            # The 16-segment grid fills the SMs: same scratch, 16-segment layout.
+        if self.max_seqs_64_segments > 0 and (
+            self.max_seqs_64_segments < seq_lens.shape[0]
+            or self.softmax_segm_max.shape[0] < num_actual_tokens
+        ):
+            # The 16-segment grid fills the SMs, or the 64-segment rows cannot
+            # hold every query token: same scratch, 16-segment layout.
             segments = NUM_PAR_SOFTMAX_SEGMENTS
             attn_metadata.num_par_softmax_segments = segments
             attn_metadata.softmax_segm_output = self.softmax_segm_output.view(

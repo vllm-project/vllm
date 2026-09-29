@@ -16,23 +16,26 @@ from vllm.v1.attention.backends.triton_attn_diffkv import (
 from vllm.v1.kv_cache_interface import FullAttentionSpec
 
 
-# 64 segments only while num_seqs * num_kv_heads * 16 < 188 SMs on SM12.0.
+# 64 segments only while num_seqs * num_kv_heads * 16 < 188 SMs on SM12.0 and
+# the 64-segment scratch holds every query token (e.g. multi-query verify).
 @pytest.mark.parametrize(
     "builder_cls",
     [TritonAttentionMetadataBuilder, TritonAttentionDiffKVMetadataBuilder],
 )
 @pytest.mark.parametrize(
-    "capability,num_kv_heads,num_seqs,segments",
+    "capability,num_kv_heads,num_seqs,query_len,segments",
     [
-        ((12, 0), 1, 11, 64),
-        ((12, 0), 1, 12, 16),
-        ((12, 0), 8, 1, 64),
-        ((12, 0), 8, 2, 16),
-        ((9, 0), 1, 1, 16),
+        ((12, 0), 1, 11, 1, 64),
+        ((12, 0), 1, 12, 1, 16),
+        ((12, 0), 8, 1, 1, 64),
+        ((12, 0), 8, 2, 1, 16),
+        ((9, 0), 1, 1, 1, 16),
+        ((12, 0), 1, 8, 4, 64),
+        ((12, 0), 1, 10, 4, 16),
     ],
 )
 def test_split_k_segments_follow_sm_occupancy(
-    monkeypatch, builder_cls, capability, num_kv_heads, num_seqs, segments
+    monkeypatch, builder_cls, capability, num_kv_heads, num_seqs, query_len, segments
 ):
     monkeypatch.setattr(current_platform, "is_cuda", lambda: True)
     monkeypatch.setattr(
@@ -48,6 +51,7 @@ def test_split_k_segments_follow_sm_occupancy(
         ),
         parallel_config=None,
         scheduler_config=SimpleNamespace(max_num_seqs=16),
+        speculative_config=None,
         compilation_config=SimpleNamespace(
             cudagraph_mode=CUDAGraphMode.NONE, static_forward_context={}
         ),
@@ -56,10 +60,11 @@ def test_split_k_segments_follow_sm_occupancy(
         block_size=16, num_kv_heads=num_kv_heads, head_size=128, dtype=torch.bfloat16
     )
     builder = builder_cls(spec, ["layer.0"], config, "cpu")
-    batch = BatchSpec(seq_lens=[128] * num_seqs, query_lens=[1] * num_seqs)
+    batch = BatchSpec(seq_lens=[128] * num_seqs, query_lens=[query_len] * num_seqs)
     metadata = builder.build(0, create_common_attn_metadata(batch, 16, "cpu"))
     assert metadata.num_par_softmax_segments == segments
     assert metadata.softmax_segm_output.shape[2] == segments
+    assert metadata.softmax_segm_max.shape[0] >= num_seqs * query_len
     # DiffKV re-allocates the output; it must stay sized like the base buffers.
     assert builder.softmax_segm_output.shape[0] == builder.softmax_segm_max.shape[0]
     assert (
