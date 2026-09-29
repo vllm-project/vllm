@@ -75,8 +75,8 @@ _TOOL_PARSERS_TO_REGISTER = {
         "Granite20bFCToolParser",
     ),
     "granite": (
-        "granite_tool_parser",
-        "GraniteToolParser",
+        "granite_engine_tool_parser",
+        "GraniteEngineToolParser",
     ),
     "granite4": (
         "granite4_tool_parser",
@@ -165,6 +165,10 @@ _TOOL_PARSERS_TO_REGISTER = {
     "olmo3": (
         "olmo3_tool_parser",
         "Olmo3PythonicToolParser",
+    ),
+    "plamo3": (
+        "plamo3_engine_tool_parser",
+        "Plamo3EngineToolParser",
     ),
     "muse_glimmer": (
         "muse_glimmer_tool_parser",

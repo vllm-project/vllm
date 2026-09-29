@@ -74,7 +74,7 @@ XGRAMMAR_BUILTIN_STRUCTURAL_TAG_MODELS = frozenset(
         "deepseek_v4_1",
     }
 )
-VLLM_BUILTIN_STRUCTURAL_TAG_MODELS = frozenset({"hermes", "hy_v4", "kimi_k3"})
+VLLM_BUILTIN_STRUCTURAL_TAG_MODELS = frozenset({"hermes", "hy_v4", "kimi_k3", "plamo3"})
 SUPPORTED_STRUCTURAL_TAG_MODELS = (
     XGRAMMAR_BUILTIN_STRUCTURAL_TAG_MODELS | VLLM_BUILTIN_STRUCTURAL_TAG_MODELS
 )
@@ -122,7 +122,7 @@ def _with_tool_strict(
     return tool
 
 
-def _resolve_tool_strictness(
+def resolve_tool_strictness(
     tools: Sequence[ChatCompletionToolsParam | ResponsesTool],
     tool_choice: ToolChoice,
     strict_level: ToolStrictLevel,
@@ -159,7 +159,7 @@ def get_model_structural_tag(
     if not tools or tool_choice == "none":
         return None
 
-    tools = _resolve_tool_strictness(tools, tool_choice, strict_level)
+    tools = resolve_tool_strictness(tools, tool_choice, strict_level)
     if tools is None:
         return None
 
@@ -406,6 +406,70 @@ def get_minimax_structural_tag(
         )
 
     return StructuralTag(format=suffix_tag)
+
+
+_PLAMO3_BEGIN_TOOL_REQUESTS = "<|plamo:begin_tool_requests:plamo|>"
+_PLAMO3_END_TOOL_REQUESTS = "<|plamo:end_tool_requests:plamo|>"
+_PLAMO3_BEGIN_TOOL_REQUEST = "<|plamo:begin_tool_request:plamo|>"
+_PLAMO3_END_TOOL_REQUEST = "<|plamo:end_tool_request:plamo|>"
+_PLAMO3_BEGIN_TOOL_NAME = "<|plamo:begin_tool_name:plamo|>"
+_PLAMO3_END_TOOL_NAME = "<|plamo:end_tool_name:plamo|>"
+_PLAMO3_BEGIN_TOOL_ARGUMENTS = (
+    "<|plamo:begin_tool_arguments:plamo|><|plamo:constrain|>json<|plamo:msg|>"
+)
+_PLAMO3_END_TOOL_ARGUMENTS = "<|plamo:end_tool_arguments:plamo|>"
+_PLAMO3_EOT = "<|plamo:tag|>"
+
+
+@register_vllm_structural_tag("plamo3")
+def get_plamo3_structural_tag(
+    tools: list[FunctionToolParam],
+    builtin_tools: list[BuiltinToolParam],
+    tool_choice: SimplifiedToolChoice,
+    reasoning: bool,
+    token_suffix: str = "",
+) -> StructuralTag:
+    """Build PLaMo3's explicit tool-request structural tag."""
+    del builtin_tools, reasoning, token_suffix
+
+    request_tags = [
+        TagFormat(
+            begin=(
+                _PLAMO3_BEGIN_TOOL_REQUEST
+                + _PLAMO3_BEGIN_TOOL_NAME
+                + tool.function.name
+                + _PLAMO3_END_TOOL_NAME
+                + _PLAMO3_BEGIN_TOOL_ARGUMENTS
+            ),
+            content=JSONSchemaFormat(
+                json_schema=get_function_parameters(tool.function)
+            ),
+            end=_PLAMO3_END_TOOL_ARGUMENTS + _PLAMO3_END_TOOL_REQUEST,
+        )
+        for tool in tools
+    ]
+    requests_tag = TagFormat(
+        begin=_PLAMO3_BEGIN_TOOL_REQUESTS,
+        content=TagsWithSeparatorFormat(
+            tags=request_tags,
+            separator="",
+            at_least_one=True,
+            stop_after_first=tool_choice == "forced",
+        ),
+        end=[
+            _PLAMO3_END_TOOL_REQUESTS,
+            _PLAMO3_END_TOOL_REQUESTS + _PLAMO3_EOT,
+        ],
+    )
+
+    if tool_choice == "auto":
+        return StructuralTag(
+            format=TriggeredTagsFormat(
+                triggers=[_PLAMO3_BEGIN_TOOL_REQUESTS],
+                tags=[requests_tag],
+            )
+        )
+    return StructuralTag(format=requests_tag)
 
 
 # ---------------------------------------------------------------------------

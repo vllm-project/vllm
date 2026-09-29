@@ -13,12 +13,15 @@ from vllm.parser.deepseek_v41 import DeepSeekV41Parser
 from vllm.parser.engine.adapters import make_adapters
 from vllm.parser.gemma4 import Gemma4Parser
 from vllm.parser.glm47_moe import Glm47MoeParser
+from vllm.parser.granite import GraniteParser
+from vllm.parser.granite_thinking import GraniteThinkingParser
 from vllm.parser.inkling import InklingParser
 from vllm.parser.kimi_k2 import KimiK2Parser
 from vllm.parser.mimo import MiMoParser
 from vllm.parser.minimax_m2 import MinimaxM2Parser
 from vllm.parser.mistral import MistralParser
 from vllm.parser.nemotron_v3 import NemotronV3Parser
+from vllm.parser.plamo3 import Plamo3Parser
 from vllm.parser.qwen3 import Qwen3Parser
 from vllm.parser.seed_oss import SeedOssParser
 
@@ -46,6 +49,16 @@ from vllm.parser.seed_oss import SeedOssParser
     Gemma4ParserReasoningAdapter,
     Gemma4ParserToolAdapter,
 ) = make_adapters(Gemma4Parser)
+
+(
+    GraniteParserReasoningAdapter,
+    GraniteParserToolAdapter,
+) = make_adapters(GraniteParser)
+
+(
+    GraniteThinkingParserReasoningAdapter,
+    GraniteThinkingParserToolAdapter,
+) = make_adapters(GraniteThinkingParser)
 
 (
     NemotronV3ParserReasoningAdapter,
@@ -86,3 +99,8 @@ from vllm.parser.seed_oss import SeedOssParser
     MistralParserReasoningAdapter,
     MistralParserToolAdapter,
 ) = make_adapters(MistralParser)
+
+(
+    Plamo3ParserReasoningAdapter,
+    Plamo3ParserToolAdapter,
+) = make_adapters(Plamo3Parser)
