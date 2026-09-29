@@ -141,7 +141,6 @@ if TYPE_CHECKING:
     VLLM_ROCM_USE_AITER_LINEAR_HIPBMM: bool = False
     VLLM_ROCM_USE_AITER_MOE: bool = True
     VLLM_ROCM_AITER_MOE_DISPATCH_POLICY: int = 0
-    VLLM_ROCM_USE_AITER_MOE_SITUV2: bool = False
     VLLM_ROCM_USE_AITER_MOE_A4W4_DSV4: bool | None = None
     VLLM_ROCM_USE_AITER_MOE_SITUV2: Literal["auto", "a4w4", "a8w4", "a16w4"] = "auto"
     VLLM_ROCM_USE_AITER_RMSNORM: bool = True
