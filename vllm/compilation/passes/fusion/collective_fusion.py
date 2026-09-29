@@ -921,8 +921,10 @@ class FlashInferAllGatherFP4Pattern(
 class AsyncTPPass(VllmFusionPatternMatcherPass):
     @staticmethod
     def is_topology_supported() -> bool:
-        topology = get_symmetric_memory_topology(get_tp_group().cpu_group)
-        if topology is SymmetricMemoryTopology.UNSUPPORTED:
+        if (
+            get_symmetric_memory_topology(get_tp_group().cpu_group)
+            is SymmetricMemoryTopology.UNSUPPORTED
+        ):
             logger.warning_once(
                 "Async TP is disabled because the TP ranks do not share a "
                 "symmetric-memory fabric."
@@ -934,8 +936,7 @@ class AsyncTPPass(VllmFusionPatternMatcherPass):
     def __init__(self, config: VllmConfig) -> None:
         super().__init__(config, pass_name="async_tp_pass")
 
-        tp_group = get_tp_group()
-        enable_symm_mem_for_group(tp_group.device_group.group_name)
+        enable_symm_mem_for_group(get_tp_group().device_group.group_name)
         GEMMReduceScatterPattern(self.model_dtype, self.device).register(self.pm_pass)
 
         AllGatherGEMMPattern(self.model_dtype, self.device).register(self.pm_pass)
