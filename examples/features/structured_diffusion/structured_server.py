@@ -107,7 +107,7 @@ TURN_CLOSE = 106
 PAD = 0
 TOPK = 20
 MAX_QUESTIONS = 64  # per request
-MAX_SAMPLES = 32  # reads per question, fixed or auto
+MAX_SAMPLES = 32  # cap on reads per question, set by --max-samples
 MAX_PARALLEL = 16  # question groups read at once
 # the empty thought block the chat template leaves to the model
 SCAFFOLD_TEXT = "<|channel>thought\n<channel|>"
@@ -407,10 +407,12 @@ def constrained_xargs():
     return {"diffusion_constrained": True} if ARGS.constrained else {}
 
 
-def pin_xargs(template, slots, steps):
+def pin_xargs(template, slots, steps, samples=1):
     """Past one denoise step the template must be held, or accept/renoise
-    rewrites it: pin every canvas position that is not an answer slot."""
-    if steps <= 1:
+    rewrites it: pin every canvas position that is not an answer slot. A
+    multi-sample request pins the same positions, which tells the engine
+    what to re-noise per sample."""
+    if steps <= 1 and samples <= 1:
         return {}
     free = {s["pos"] for s in slots}
     return {
@@ -533,11 +535,41 @@ def think_chat(sys_text, state_content, budget):
     }
 
 
+def read_xargs(schema, template, slots, seed, samples):
+    x = {
+        "diffusion_seed_canvas": build_canvas(template, slots, seed),
+        "diffusion_canvas_length": canvas_width(template),
+        "diffusion_max_steps": schema["steps"],
+        "diffusion_read_only": True,
+        **pin_xargs(template, slots, schema["steps"], samples),
+        **constrained_xargs(),
+    }
+    if samples > 1:
+        x["diffusion_samples"] = samples
+    return x
+
+
+def samples_body(seed, samples):
+    """The engine draws the noise of a multi-sample request from the request
+    seed, so the draws reproduce for a schema seed."""
+    return {"seed": seed} if samples > 1 else {}
+
+
 def one_read(
-    schema, template, slots, sys_text, state_content, seed, prefix=None, thinking=False
+    schema,
+    template,
+    slots,
+    sys_text,
+    state_content,
+    seed,
+    prefix=None,
+    thinking=False,
+    samples=1,
 ):
+    """One request, ``samples`` noise draws of the canvas: a list of one
+    distribution per question for each draw, and the usage."""
     if prefix is not None:
-        return one_read_continuation(schema, template, slots, prefix, seed)
+        return one_read_continuation(schema, template, slots, prefix, seed, samples)
     messages = [
         {"role": "system", "content": sys_text},
         {"role": "user", "content": state_content},
@@ -554,25 +586,22 @@ def one_read(
         "logprob_token_ids": label_id_union(slots),
         "return_tokens_as_token_ids": True,
         "chat_template_kwargs": {"enable_thinking": thinking},
-        "vllm_xargs": {
-            "diffusion_seed_canvas": build_canvas(template, slots, seed),
-            "diffusion_canvas_length": canvas_width(template),
-            "diffusion_max_steps": schema["steps"],
-            "diffusion_read_only": True,
-            **pin_xargs(template, slots, schema["steps"]),
-            **constrained_xargs(),
-        },
+        "vllm_xargs": read_xargs(schema, template, slots, seed, samples),
+        **samples_body(seed, samples),
     }
     d = upstream_chat(body)
-    content = d["choices"][0]["logprobs"]["content"]
-    out = []
-    for q, s in zip(schema["questions"], slots):
-        top = {
-            int(t["token"].split(":")[1]): t["logprob"]
-            for t in content[s["pos"]]["top_logprobs"]
-        }
-        out.append(slot_distribution(top, s["label_ids"]))
-    return out, d.get("usage", {})
+    draws = []
+    for choice in d["choices"]:
+        content = choice["logprobs"]["content"]
+        out = []
+        for q, s in zip(schema["questions"], slots):
+            top = {
+                int(t["token"].split(":")[1]): t["logprob"]
+                for t in content[s["pos"]]["top_logprobs"]
+            }
+            out.append(slot_distribution(top, s["label_ids"]))
+        draws.append(out)
+    return draws, d.get("usage", {})
 
 
 def slot_distribution(top, label_ids):
@@ -594,7 +623,7 @@ def slot_distribution(top, label_ids):
     }
 
 
-def one_read_continuation(schema, template, slots, prompt_ids, seed):
+def one_read_continuation(schema, template, slots, prompt_ids, seed, samples=1):
     """A read whose prompt already holds the thought scaffold and earlier
     answer lines, sent as token ids so the chat template cannot alter it."""
     body = {
@@ -604,22 +633,19 @@ def one_read_continuation(schema, template, slots, prompt_ids, seed):
         "logprobs": TOPK,
         "logprob_token_ids": label_id_union(slots),
         "return_tokens_as_token_ids": True,
-        "vllm_xargs": {
-            "diffusion_seed_canvas": build_canvas(template, slots, seed),
-            "diffusion_canvas_length": canvas_width(template),
-            "diffusion_max_steps": schema["steps"],
-            "diffusion_read_only": True,
-            **pin_xargs(template, slots, schema["steps"]),
-            **constrained_xargs(),
-        },
+        "vllm_xargs": read_xargs(schema, template, slots, seed, samples),
+        **samples_body(seed, samples),
     }
     d = upstream_completions(body)
-    rows = d["choices"][0]["logprobs"]["top_logprobs"]
-    out = []
-    for q, sl in zip(schema["questions"], slots):
-        top = {int(k.split(":")[1]): v for k, v in rows[sl["pos"]].items()}
-        out.append(slot_distribution(top, sl["label_ids"]))
-    return out, d.get("usage", {})
+    draws = []
+    for choice in d["choices"]:
+        rows = choice["logprobs"]["top_logprobs"]
+        out = []
+        for q, sl in zip(schema["questions"], slots):
+            top = {int(k.split(":")[1]): v for k, v in rows[sl["pos"]].items()}
+            out.append(slot_distribution(top, sl["label_ids"]))
+        draws.append(out)
+    return draws, d.get("usage", {})
 
 
 def read_many(
@@ -632,14 +658,22 @@ def read_many(
     n,
     prefix=None,
     thinking=False,
+    engine=False,
 ):
+    """``n`` noise draws of the read: one diffusion_samples request when
+    ``engine`` is set, otherwise one request per draw."""
+    if n > 1 and engine and not ARGS.no_engine_samples:
+        draws, usage = one_read(
+            schema, template, slots, sys_text, state_content, seed, prefix, thinking, n
+        )
+        return draws, [usage] + [None] * (len(draws) - 1)
     results = [None] * n
     errors = [None] * n
     usages = [None] * n
 
     def run(k):
         try:
-            results[k], usages[k] = one_read(
+            (results[k],), usages[k] = one_read(
                 schema,
                 template,
                 slots,
@@ -894,6 +928,7 @@ def decide(schema, state_content, seed):
         "timing": {
             "total_ms": (time.time() - started) * 1e3,
             "reads": sum(b["diagnostics"]["timing"]["reads"] for b, _ in parts),
+            "requests": sum(b["diagnostics"]["timing"]["requests"] for b, _ in parts),
         },
         "prompt_tokens": max(
             (b["diagnostics"].get("prompt_tokens") or 0) for b, _ in parts
@@ -952,6 +987,7 @@ def decide_group(schema, sys_text, state_content, seed, prefix=None, lead=""):
             policy["n"],
             prefix,
             thinking,
+            engine=True,
         )
         extended = None
         first_entropy = None
@@ -1041,7 +1077,11 @@ def decide_group(schema, sys_text, state_content, seed, prefix=None, lead=""):
                     policy, extended=extended, first_read_entropy=first_entropy
                 ),
             },
-            "timing": {"total_ms": elapsed_ms, "reads": n},
+            "timing": {
+                "total_ms": elapsed_ms,
+                "reads": n,
+                "requests": sum(1 for u in usages if u is not None),
+            },
             "thought": thought,
             "prompt_tokens": prompt_tokens,
             "questions": diag_q,
@@ -1494,7 +1534,7 @@ def serve_tls(host, port, cert_dir):
 
 
 def main():
-    global ARGS, CANVAS_LEN, CANVAS_STEP
+    global ARGS, CANVAS_LEN, CANVAS_STEP, MAX_SAMPLES
     p = argparse.ArgumentParser()
     p.add_argument("--upstream", default="http://127.0.0.1:8010")
     p.add_argument("--model", default="dgemma")
@@ -1515,6 +1555,19 @@ def main():
     p.add_argument("--host", default="0.0.0.0")
     p.add_argument("--port", type=int, default=8011)
     p.add_argument(
+        "--max-samples",
+        type=int,
+        default=32,
+        help="cap on reads per question. A fixed count must also fit the "
+        "engine's diffusion_config.max_samples",
+    )
+    p.add_argument(
+        "--no-engine-samples",
+        action="store_true",
+        help="send a fixed sample count as separate requests instead of one "
+        "diffusion_samples request",
+    )
+    p.add_argument(
         "--tls-port", type=int, default=0, help="also listen with HTTPS here (0 = off)"
     )
     p.add_argument(
@@ -1525,6 +1578,7 @@ def main():
     ARGS = p.parse_args()
     CANVAS_LEN = ARGS.canvas
     CANVAS_STEP = ARGS.canvas_step
+    MAX_SAMPLES = max(1, ARGS.max_samples)
     init_tokenizer(AutoTokenizer.from_pretrained(ARGS.tokenizer))
     if ARGS.tls_port:
         serve_tls(ARGS.host, ARGS.tls_port, ARGS.cert_dir)

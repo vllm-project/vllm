@@ -76,6 +76,131 @@ def test_apply_seed_canvases_leaves_unseeded_batches_alone():
     assert torch.equal(states.canvas[0], before)
 
 
+def test_renoised_slot_keeps_only_its_pinned_seed():
+    """A child of a diffusion_samples request takes the seed at its pinned
+    positions and fresh noise elsewhere. Siblings differ at the unpinned
+    positions."""
+    states = _states()
+    seed = list(range(CL))
+    pins = [0, 2, 3]
+    for slot in (0, 1):
+        states.add_request(slot)
+        states.set_seed_canvas(slot, seed)
+        states.set_pins(slot, pins)
+        states.set_renoise(slot)
+    states.add_request(2)
+    states.set_seed_canvas(2, seed)
+    states.set_pins(2, pins)
+    slots, slots_gpu = _slots(0, 1, 2)
+    torch.manual_seed(0)
+    states.init_canvas(slots_gpu)
+    noise = states.canvas[slots_gpu].clone()
+
+    states.apply_seed_canvases(slots, slots_gpu)
+
+    after = states.canvas[slots_gpu]
+    free = [p for p in range(CL) if p not in pins]
+    for slot in (0, 1):
+        assert after[slot, pins].tolist() == [seed[p] for p in pins]
+        assert torch.equal(after[slot, free], noise[slot, free])
+    assert after[2].tolist() == seed
+    assert not torch.equal(after[0, free], after[1, free])
+
+
+def test_renoise_seed_reproduces_the_draw():
+    """The same seed draws the same noise and another seed draws other
+    noise. An unseeded child takes the engine's RNG."""
+    seed = list(range(CL))
+    pins = [0, 1]
+    free = [p for p in range(CL) if p not in pins]
+
+    def draw(states, slot, request_seed):
+        states.add_request(slot)
+        states.set_seed_canvas(slot, seed)
+        states.set_pins(slot, pins)
+        states.set_renoise(slot, request_seed)
+        slots, slots_gpu = _slots(slot)
+        states.init_canvas(slots_gpu)
+        states.apply_seed_canvases(slots, slots_gpu)
+        return states.canvas[slot].clone()
+
+    a = draw(_states(), 0, 7)
+    b = draw(_states(), 3, 7)
+    c = draw(_states(), 0, 8)
+    assert torch.equal(a, b)
+    assert a[pins].tolist() == seed[: len(pins)]
+    assert not torch.equal(a[free], c[free])
+
+    states = _states()
+    torch.manual_seed(0)
+    unseeded = draw(states, 0, None)
+    assert unseeded[pins].tolist() == seed[: len(pins)]
+    assert not torch.equal(unseeded[free], a[free])
+
+
+def test_sampler_seeds_the_children_of_a_samples_request():
+    """Only a diffusion_samples child gets the request seed on its slot."""
+    from types import SimpleNamespace
+
+    from vllm.model_executor.models.diffusion_gemma import DiffusionSampler
+    from vllm.sampling_params import SamplingParams
+
+    state = object.__new__(DiffusionSampler)
+    state.sampling_states = SimpleNamespace(add_request=lambda *a: None)
+    state.logprob_token_ids_state = SimpleNamespace(add_request=lambda *a: None)
+    state.diffusion_states = _states()
+    state.canvas_length = CL
+    state._pending_logprobs = {}
+    for slot in range(3):
+        state.diffusion_states.add_request(slot)
+    canvas = list(range(CL))
+
+    state.add_request(
+        0,
+        SamplingParams(
+            seed=7,
+            extra_args={
+                "diffusion_seed_canvas": canvas,
+                "diffusion_pinned": [0],
+                "diffusion_samples": 4,
+            },
+        ),
+    )
+    state.add_request(
+        1,
+        SamplingParams(
+            extra_args={
+                "diffusion_seed_canvas": canvas,
+                "diffusion_pinned": [0],
+                "diffusion_samples": 4,
+            }
+        ),
+    )
+    state.add_request(
+        2,
+        SamplingParams(
+            seed=7,
+            extra_args={"diffusion_seed_canvas": canvas, "diffusion_pinned": [0]},
+        ),
+    )
+    states = state.diffusion_states
+    assert states.renoise_slots == {0, 1}
+    assert states.renoise_seed == {0: 7}
+    assert states.seeded_slots == {0, 1, 2}
+
+
+def test_add_request_clears_renoise():
+    states = _states()
+    states.add_request(0)
+    states.set_renoise(0, 5)
+    assert states.renoise_slots == {0}
+    assert states.renoise_seed == {0: 5}
+    states.add_request(0)
+    assert states.renoise_slots == set()
+    assert states.renoise_seed == {}
+    assert not states.renoise[0].item()
+
+
 def test_add_request_clears_seed_and_read_only():
     states = _states()
     states.add_request(0)

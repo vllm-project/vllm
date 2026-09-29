@@ -138,6 +138,9 @@ def test_narrow_diffusion_canvas_requires_async_scheduling(
         ({"diffusion_pinned": "0,1"}, "list of canvas positions"),
         ({"diffusion_pinned": [0, True]}, "list of canvas positions"),
         ({"diffusion_pinned": [0]}, "needs a diffusion_seed_canvas"),
+        ({"diffusion_samples": 0}, "positive integer"),
+        ({"diffusion_samples": True}, "positive integer"),
+        ({"diffusion_samples": 4, "diffusion_seed_canvas": [0, 1]}, "diffusion_pinned"),
     ],
 )
 def test_diffusion_rejects_bad_extra_args(extra_args: dict, match: str):
@@ -284,3 +287,79 @@ def test_extra_args_preserves_custom_objects_and_shared_containers():
     params = SamplingParams(extra_args=extra_args)
     assert params.extra_args["first"][0] is custom
     assert params.extra_args["first"] is params.extra_args["second"]
+
+
+def test_diffusion_samples_fan_out_as_n():
+    """diffusion_samples > 1 becomes n children of one seeded canvas."""
+    params = SamplingParams(
+        extra_args={
+            "diffusion_seed_canvas": [0, 1],
+            "diffusion_pinned": [0],
+            "diffusion_samples": 4,
+        }
+    )
+    _verify_diffusion(params, canvas_length=2)
+    assert params.n == 4
+
+    one = SamplingParams(
+        extra_args={"diffusion_seed_canvas": [0, 1], "diffusion_samples": 1}
+    )
+    _verify_diffusion(one, canvas_length=2)
+    assert one.n == 1
+
+    both = SamplingParams(
+        n=2,
+        extra_args={
+            "diffusion_seed_canvas": [0, 1],
+            "diffusion_pinned": [0],
+            "diffusion_samples": 4,
+        },
+    )
+    with pytest.raises(VLLMValidationError, match="cannot both be set"):
+        _verify_diffusion(both, canvas_length=2)
+
+
+def test_diffusion_samples_are_capped_by_the_served_limit():
+    model_config = MockModelConfig(is_diffusion=True)
+
+    def verify(samples: int, max_samples: int):
+        params = SamplingParams(
+            extra_args={
+                "diffusion_seed_canvas": [0, 1],
+                "diffusion_pinned": [0],
+                "diffusion_samples": samples,
+            }
+        )
+        validate_diffusion_sampling_params(
+            params,
+            canvas_length=2,
+            vocab_size=model_config.get_vocab_size(),
+            async_scheduling=True,
+            max_samples=max_samples,
+        )
+        return params
+
+    assert verify(8, 8).n == 8
+    with pytest.raises(VLLMValidationError, match="at most 8"):
+        verify(9, 8)
+
+
+def test_diffusion_seed_is_accepted_only_with_samples():
+    """A seed is accepted only with diffusion_samples, where the children
+    get seed + index."""
+    seeded = SamplingParams(
+        seed=7,
+        extra_args={
+            "diffusion_seed_canvas": [0, 1],
+            "diffusion_pinned": [0],
+            "diffusion_samples": 3,
+        },
+    )
+    _verify_diffusion(seeded, canvas_length=2)
+    assert seeded.n == 3 and seeded.seed == 7
+
+    with pytest.raises(VLLMValidationError, match="not yet supported"):
+        _verify_diffusion(
+            SamplingParams(seed=7, extra_args={"diffusion_samples": 1}),
+            canvas_length=2,
+        )

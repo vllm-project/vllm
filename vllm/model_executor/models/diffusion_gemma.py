@@ -746,6 +746,12 @@ class DiffusionGemmaRequestStates:
         self.step_allowed: torch.Tensor | None = None
         self._allowed_cache: dict[tuple[int, ...], torch.Tensor] = {}
         self.read_only_slots: set[int] = set()
+        # Slots that take the seed at pinned positions only: the children of
+        # a diffusion_samples request.
+        self.renoise = torch.zeros(max_num_reqs, dtype=torch.bool, device=device)
+        self.renoise_slots: set[int] = set()
+        # Noise generator seed per slot, from the request seed.
+        self.renoise_seed: dict[int, int] = {}
         # Slots capped at one denoise step never consume a soft embed.
         self.single_step_slots: set[int] = set()
         # Per-slot canvas width, at most canvas_length. The scheduler schedules
@@ -787,6 +793,9 @@ class DiffusionGemmaRequestStates:
         self.pin_mask[slot_idx].fill_(False)
         self.read_only[slot_idx].fill_(False)
         self.read_only_slots.discard(slot_idx)
+        self.renoise[slot_idx].fill_(False)
+        self.renoise_slots.discard(slot_idx)
+        self.renoise_seed.pop(slot_idx, None)
         self.single_step_slots.discard(slot_idx)
         self.constrained.pop(slot_idx, None)
         self.canvas_width_np[slot_idx] = self.canvas_length
@@ -799,6 +808,8 @@ class DiffusionGemmaRequestStates:
         self.self_conditioning_embeds[slot_idx] = 0
         self.seeded_slots.discard(slot_idx)
         self.read_only_slots.discard(slot_idx)
+        self.renoise_slots.discard(slot_idx)
+        self.renoise_seed.pop(slot_idx, None)
         self.single_step_slots.discard(slot_idx)
         self.constrained.pop(slot_idx, None)
 
@@ -847,16 +858,40 @@ class DiffusionGemmaRequestStates:
         self.read_only[slot_idx].fill_(True)
         self.read_only_slots.add(slot_idx)
 
+    def set_renoise(self, slot_idx: int, seed: int | None = None) -> None:
+        self.renoise[slot_idx].fill_(True)
+        self.renoise_slots.add(slot_idx)
+        if seed is not None:
+            self.renoise_seed[slot_idx] = seed
+
     def apply_seed_canvases(
         self, slots_np: np.ndarray, slots_gpu: torch.Tensor
     ) -> None:
-        """Replace the canvas of every seeded slot among ``slots_gpu``."""
-        if self.seeded_slots.isdisjoint(slots_np.tolist()):
+        """Replace the canvas of every seeded slot among ``slots_gpu``. A
+        re-noised slot takes the seed at its pinned positions only. Its other
+        positions keep the noise from init_canvas, or noise drawn from the
+        request seed if the slot has one."""
+        slots = slots_np.tolist()
+        if self.seeded_slots.isdisjoint(slots):
             return
+        for slot in slots:
+            seed = self.renoise_seed.get(slot)
+            if seed is None:
+                continue
+            gen = torch.Generator(device=self.device).manual_seed(seed)
+            self.canvas[slot] = torch.randint(
+                0,
+                self.vocab_size,
+                (self.canvas_length,),
+                generator=gen,
+                dtype=torch.int64,
+                device=self.device,
+            )
+        take_seed = self.has_seed[slots_gpu, None] & (
+            ~self.renoise[slots_gpu, None] | self.pin_mask[slots_gpu]
+        )
         self.canvas[slots_gpu] = torch.where(
-            self.has_seed[slots_gpu, None],
-            self.seed_canvas[slots_gpu],
-            self.canvas[slots_gpu],
+            take_seed, self.seed_canvas[slots_gpu], self.canvas[slots_gpu]
         )
 
 
@@ -1257,6 +1292,10 @@ class DiffusionSampler:
         pins = extra.get("diffusion_pinned")
         if pins and seed is not None:
             states.set_pins(req_idx, [int(p) for p in pins])
+            # Each diffusion_samples child re-noises the unpinned positions.
+            # Child seeds are seed + index, so a seeded request reproduces.
+            if int(extra.get("diffusion_samples") or 1) > 1:
+                states.set_renoise(req_idx, getattr(sampling_params, "seed", None))
         if extra.get("diffusion_read_only"):
             states.set_read_only(req_idx)
         if extra.get("diffusion_constrained"):
