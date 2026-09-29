@@ -289,6 +289,7 @@ class AsyncGPUModelRunnerOutput(AsyncModelRunnerOutput):
         vocab_size: int,
         check_ep_fault: bool = False,
         num_nans: torch.Tensor | None = None,
+        no_valid_token_mask: torch.Tensor | None = None,
     ):
         self._model_runner_output = model_runner_output
         self._invalid_req_indices = invalid_req_indices
@@ -303,6 +304,7 @@ class AsyncGPUModelRunnerOutput(AsyncModelRunnerOutput):
         self.vocab_size = vocab_size
         self._logprobs_tensors = logprobs_tensors
         self._num_nans = num_nans
+        self._no_valid_token_mask = no_valid_token_mask
         self._has_fault: torch.Tensor | None = None
 
         # Initiate the copy on a separate stream, but do not synchronize it.
@@ -320,6 +322,11 @@ class AsyncGPUModelRunnerOutput(AsyncModelRunnerOutput):
             self._num_nans_cpu = (
                 self._num_nans.to("cpu", non_blocking=True)
                 if self._num_nans is not None
+                else None
+            )
+            self._no_valid_token_mask_cpu = (
+                self._no_valid_token_mask.to("cpu", non_blocking=True)
+                if self._no_valid_token_mask is not None
                 else None
             )
             if check_ep_fault:
@@ -364,6 +371,15 @@ class AsyncGPUModelRunnerOutput(AsyncModelRunnerOutput):
             if envs.VLLM_RAISE_ON_LOGIT_NANS:
                 raise_if_nan_logits(output.num_nans_in_logits)
         del self._num_nans
+
+        if self._no_valid_token_mask_cpu is not None:
+            mask_np = self._no_valid_token_mask_cpu.numpy()
+            output.no_valid_token_req_ids = {
+                req_id
+                for i, req_id in enumerate(output.req_ids)
+                if mask_np[i]
+            }
+        del self._no_valid_token_mask
 
         if self._has_fault is not None and self._has_fault.item():
             mask = get_ep_all2all_manager().query_active_mask()
@@ -3680,6 +3696,7 @@ class GPUModelRunner(
         list[str],
         dict[str, int],
         list[int],
+        set[str],
     ]:
         num_nans: torch.Tensor | None = None
         num_nans_in_logits: dict[str, int] = {}
@@ -3690,6 +3707,19 @@ class GPUModelRunner(
                 num_nans = None if logits is None else count_nans_per_row(logits)
             else:
                 num_nans_in_logits = self._get_nans_in_logits(logits)
+
+        # Extract no_valid_token_mask from the sampler output.
+        no_valid_token_req_ids: set[str] = set()
+        if sampler_output.no_valid_token_mask is not None:
+            mask_data = sampler_output.no_valid_token_mask
+            if mask_data.device.type == "cuda":
+                mask_data = mask_data.cpu()
+            mask_np = mask_data.numpy()
+            for i in range(len(mask_np)):
+                if mask_np[i]:
+                    no_valid_token_req_ids.add(
+                        self.input_batch.req_ids[i]
+                    )
 
         num_reqs = self.input_batch.num_reqs
         discard_sampled_tokens_req_indices = np.nonzero(
@@ -3799,6 +3829,7 @@ class GPUModelRunner(
             req_ids_output_copy,
             req_id_to_index_output_copy,
             invalid_req_indices,
+            no_valid_token_req_ids,
         )
 
     @contextmanager
@@ -4700,6 +4731,7 @@ class GPUModelRunner(
                 req_ids_output_copy,
                 req_id_to_index_output_copy,
                 invalid_req_indices,
+                no_valid_token_req_ids,
             ) = self._bookkeeping_sync(
                 scheduler_output,
                 sampler_output,
@@ -4754,6 +4786,7 @@ class GPUModelRunner(
                 else None,
                 num_nans_in_logits=num_nans_in_logits,
                 cudagraph_stats=cudagraph_stats,
+                no_valid_token_req_ids=no_valid_token_req_ids,
             )
 
         if not self.use_async_scheduling:
@@ -4771,6 +4804,7 @@ class GPUModelRunner(
                 vocab_size=self.input_batch.vocab_size,
                 check_ep_fault=self.check_ep_fault,
                 num_nans=num_nans_device,
+                no_valid_token_mask=sampler_output.no_valid_token_mask,
             )
         with record_function_or_nullcontext(
             "gpu_model_runner: set_async_sampled_token_ids"

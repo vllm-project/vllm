@@ -185,6 +185,13 @@ class RejectionSampler(nn.Module):
             sampling_metadata,
         )
 
+        # Detect all--inf target rows before rejection sampling. All invalid
+        # rows are neutralized for kernel safety; after rejection sampling
+        # we check which ones were actually consumed.
+        invalid_target_positions = torch.isneginf(target_logits).all(dim=-1)
+        if invalid_target_positions.any():
+            target_logits[invalid_target_positions] = 0.0
+
         output_token_ids = rejection_sample(
             metadata.draft_token_ids,
             metadata.num_draft_tokens,
@@ -198,6 +205,47 @@ class RejectionSampler(nn.Module):
             synthetic_conditional_rates=self.synthetic_conditional_rates,
             use_fp64_gumbel=self.use_fp64_gumbel,
         )
+
+        # After rejection sampling, determine which target positions were
+        # actually consumed. A position is consumed if rejection sampling
+        # reached it (either accepted the draft or recovered a token there).
+        # Positions past the first rejection are untouched (-1) and must not
+        # cause a failure.
+        batch_size = len(metadata.num_draft_tokens)
+        num_draft = metadata.num_draft_tokens
+        cu_draft = metadata.cu_num_draft_tokens
+        no_valid_token_mask = torch.zeros(
+            batch_size, dtype=torch.bool, device=output_token_ids.device
+        )
+        for req_idx in range(batch_size):
+            nd = num_draft[req_idx]
+            prev = 0 if req_idx == 0 else cu_draft[req_idx - 1].item()
+            req_output = output_token_ids[req_idx]
+            for pos in range(nd):
+                if req_output[pos].item() == PLACEHOLDER_TOKEN_ID:
+                    break
+                target_idx = prev + pos
+                if invalid_target_positions[target_idx]:
+                    no_valid_token_mask[req_idx] = True
+                    break
+        # Bonus token: consumed only when all draft tokens were accepted.
+        # Check with the bonus sampler's no_valid_token_mask.
+        if bonus_sampler_output.no_valid_token_mask is not None:
+            for req_idx in range(batch_size):
+                if no_valid_token_mask[req_idx]:
+                    continue
+                nd = num_draft[req_idx]
+                # Bonus slot was filled only when all drafts accepted
+                # (no -1 before num_draft tokens).
+                req_output = output_token_ids[req_idx]
+                bonus_consumed = (
+                    nd == 0
+                    or req_output[nd].item() != PLACEHOLDER_TOKEN_ID
+                )
+                if bonus_consumed and bonus_sampler_output.no_valid_token_mask[
+                    req_idx
+                ].item():
+                    no_valid_token_mask[req_idx] = True
 
         logprobs_tensors = None
         if sampling_metadata.max_num_logprobs is not None:
@@ -213,6 +261,7 @@ class RejectionSampler(nn.Module):
         return SamplerOutput(
             sampled_token_ids=output_token_ids,
             logprobs_tensors=logprobs_tensors,
+            no_valid_token_mask=no_valid_token_mask,
         )
 
     def _get_logprobs_tensors(
