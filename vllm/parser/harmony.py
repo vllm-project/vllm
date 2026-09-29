@@ -16,14 +16,11 @@ from xgrammar.structural_tag import (
     AnyTextFormat,
     ConstStringFormat,
     Format,
-    GrammarFormat,
     JSONSchemaFormat,
     OptionalFormat,
     OrFormat,
-    RegexFormat,
     SequenceFormat,
     TagFormat,
-    TriggeredTagsFormat,
 )
 
 from vllm.entrypoints.chat_utils import make_tool_call_id
@@ -45,9 +42,8 @@ from vllm.entrypoints.openai.parser.harmony_utils import (
 )
 from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.logger import init_logger
-from vllm.parser.abstract_parser import DelegatingParser
+from vllm.parser.abstract_parser import DelegatingParser, structured_outputs_to_format
 from vllm.reasoning.gptoss_reasoning_parser import GptOssReasoningParser
-from vllm.sampling_params import StructuredOutputsParams
 from vllm.tool_parsers.gptoss_tool_parser import GptOssToolParser
 from vllm.tool_parsers.structural_tag_registry import (
     SimplifiedToolChoice,
@@ -120,13 +116,12 @@ class HarmonyParser(DelegatingParser):
         self._next_tool_call_index = 0
         self._num_processed_messages = 0
 
+        self._num_counted_tokens = 0
+        self._num_reasoning_tokens = 0
+        self._num_content_tokens = 0
+
         # For error recovery
         self._current_message_tokens: list[int] = []
-        # Reuse the existing usage reasoning count for output-token metrics so
-        # both API fields report the same reasoning-token count.
-        self._reasoning_token_count = 0
-        self._content_token_count = 0
-        self._processed_token_count = 0
 
     @property
     def _harmony_parser(self) -> StreamableParser:
@@ -347,7 +342,10 @@ class HarmonyParser(DelegatingParser):
         reasoning_token_count = 0
         encoding = get_encoding()
         for token_id in token_ids:
-            self._harmony_parser.process(token_id)
+            try:
+                self._harmony_parser.process(token_id)
+            except HarmonyError:
+                continue
             channel = self._harmony_parser.current_channel
             recipient = self._normalize_recipient(
                 self._harmony_parser.current_recipient
@@ -360,15 +358,13 @@ class HarmonyParser(DelegatingParser):
             else:
                 self._current_message_tokens.append(token_id)
 
-            if channel == "analysis" or (
-                channel == "commentary" and recipient is not None
-            ):
+            if self._is_reasoning_token(token_id, channel, recipient):
                 reasoning_token_count += 1
 
             segment_type = _SegmentType.from_channel_and_recipient(channel, recipient)
             is_payload_token = not encoding.is_special_token(token_id)
             if segment_type == _SegmentType.CONTENT and is_payload_token:
-                self._content_token_count += 1
+                self._num_content_tokens += 1
 
             segments.append(
                 Segment(
@@ -381,8 +377,8 @@ class HarmonyParser(DelegatingParser):
 
             # TODO: Optionally merge and suppress empty Segments
 
-        self._reasoning_token_count += reasoning_token_count
-        self._processed_token_count += len(token_ids)
+        self._num_counted_tokens += len(token_ids)
+        self._num_reasoning_tokens += reasoning_token_count
         return ChunkResult(
             segments=segments,
             reasoning_token_count=reasoning_token_count,
@@ -391,59 +387,61 @@ class HarmonyParser(DelegatingParser):
     def classify_token_phases(
         self, token_ids: Sequence[int]
     ) -> TokenPhaseCounts | None:
-        if self._processed_token_count != len(token_ids):
+        if self._num_counted_tokens != len(token_ids):
             return self._analyze_complete_output(token_ids)
         return TokenPhaseCounts(
-            reasoning=self._reasoning_token_count,
-            content=self._content_token_count,
+            reasoning=self._num_reasoning_tokens,
+            content=self._num_content_tokens,
             unclassified=max(
                 0,
-                self._processed_token_count
-                - self._reasoning_token_count
-                - self._content_token_count,
+                self._num_counted_tokens
+                - self._num_reasoning_tokens
+                - self._num_content_tokens,
             ),
         )
 
     def count_reasoning_tokens(self, token_ids: Sequence[int]) -> int:
-        """Return the reasoning count for a complete Harmony output.
-
-        In streaming paths, ``process_chunk`` has already classified exactly
-        these tokens, so reuse its incremental count. Some non-streaming
-        callers parse the complete output after collecting deltas; in that
-        case the parser state contains the same tokens twice, and the supplied
-        sequence must be classified independently.
-        """
-        if self._processed_token_count == len(token_ids):
-            return self._reasoning_token_count
+        if len(token_ids) == self._num_counted_tokens:
+            return self._num_reasoning_tokens
 
         return self._analyze_complete_output(token_ids).reasoning
 
     def _analyze_complete_output(self, token_ids: Sequence[int]) -> TokenPhaseCounts:
         """Analyze a complete output without changing streaming state."""
         parser = get_streamable_parser_for_assistant()
-        usage_reasoning_token_count = 0
+        reasoning_token_count = 0
         content_token_count = 0
         encoding = get_encoding()
         for token_id in token_ids:
-            parser.process(token_id)
+            try:
+                parser.process(token_id)
+            except HarmonyError:
+                continue
             channel = parser.current_channel
             recipient = self._normalize_recipient(parser.current_recipient)
-            if channel == "analysis" or (
-                channel == "commentary" and recipient is not None
-            ):
-                usage_reasoning_token_count += 1
+            if self._is_reasoning_token(token_id, channel, recipient):
+                reasoning_token_count += 1
             segment_type = _SegmentType.from_channel_and_recipient(channel, recipient)
             is_payload_token = not encoding.is_special_token(token_id)
             if segment_type == _SegmentType.CONTENT and is_payload_token:
                 content_token_count += 1
         return TokenPhaseCounts(
-            reasoning=usage_reasoning_token_count,
+            reasoning=reasoning_token_count,
             content=content_token_count,
             unclassified=max(
                 0,
-                len(token_ids) - usage_reasoning_token_count - content_token_count,
+                len(token_ids) - reasoning_token_count - content_token_count,
             ),
         )
+
+    @staticmethod
+    def _is_reasoning_token(
+        token_id: int, channel: str | None, recipient: str | None
+    ) -> bool:
+        is_reasoning_channel = channel == "analysis" or (
+            channel == "commentary" and recipient is not None
+        )
+        return is_reasoning_channel and not get_encoding().is_special_token(token_id)
 
     def adjust_request(
         self, request: ChatCompletionRequest | ResponsesRequest
@@ -478,7 +476,6 @@ _FUNCTION_CALL_BEGINS = [
     " to=functions.{name}{channel}{constrain}<|message|>",
     "{channel} to=functions.{name}{constrain}<|message|>",
 ]
-_JSON_CONTENT = JSONSchemaFormat(json_schema={"type": "object"})
 _ANY_CONTENT = AnyTextFormat()
 
 
@@ -581,43 +578,6 @@ def get_harmony_structural_tag(
     )
 
 
-def _params_to_final_content(params: StructuredOutputsParams) -> Format | None:
-    """Map StructuredOutputsParams in a XGrammar Format."""
-    if params.json_object:
-        return _JSON_CONTENT
-    if params.json is not None:
-        schema = params.json
-        if isinstance(schema, str):
-            schema = json.loads(schema)
-        return JSONSchemaFormat(json_schema=schema)
-    if params.regex is not None:
-        return RegexFormat(pattern=params.regex)
-    if params.choice is not None:
-        return OrFormat(
-            elements=[ConstStringFormat(value=choice) for choice in params.choice]
-        )
-    if params.grammar is not None:
-        return GrammarFormat(grammar=params.grammar)
-    if params.structural_tag is not None:
-        s_tag = json.loads(params.structural_tag)
-        if "structures" in s_tag:
-            # LegacyStructuralTagResponseFormat
-            return TriggeredTagsFormat(
-                triggers=s_tag["triggers"],
-                tags=[
-                    TagFormat(
-                        begin=structure["begin"],
-                        content=JSONSchemaFormat(json_schema=structure["schema"]),
-                        end=structure["end"],
-                    )
-                    for structure in s_tag["structures"]
-                ],
-            )
-        # StructuralTagResponseFormat
-        return StructuralTag.model_validate(s_tag).format
-    return None
-
-
 def _adjust_output_format(
     request: ChatCompletionRequest | ResponsesRequest,
 ) -> ChatCompletionRequest | ResponsesRequest:
@@ -626,7 +586,7 @@ def _adjust_output_format(
     if params is None:
         return request
 
-    final_content = _params_to_final_content(params)
+    final_content = structured_outputs_to_format(params)
     if final_content is None:
         return request
 
