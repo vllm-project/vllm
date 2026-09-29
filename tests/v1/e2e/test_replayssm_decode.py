@@ -10,10 +10,15 @@ from vllm.v1.metrics.reader import Counter
 from ...models.utils import check_logprobs_close
 from ...utils import large_gpu_mark, multi_gpu_test
 
-# Mamba2 (Nemotron-3.5) hybrid.
-MAMBA2_MODEL = "nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4"
+# Mamba2 (Nemotron-3) hybrids.
+MAMBA2_MODEL = "nvidia/NVIDIA-Nemotron-3-Nano-4B-BF16"
+# FlashInfer 0.7.0's standard SSU cannot compile Nano's DIM=80 configuration.
+MAMBA2_FLASHINFER_MODEL = "nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4"
 MODELS = [
     pytest.param(MAMBA2_MODEL, marks=large_gpu_mark(min_gb=40)),
+]
+FLASHINFER_MODELS = [
+    pytest.param(MAMBA2_FLASHINFER_MODEL, marks=large_gpu_mark(min_gb=40)),
 ]
 
 PROMPTS = [
@@ -87,7 +92,7 @@ def test_replayssm_decode_matches_baseline_tp2(vllm_runner, model_name):
     _check_replayssm_parity(vllm_runner, model_name, tensor_parallel_size=2)
 
 
-@pytest.mark.parametrize("model_name", MODELS)
+@pytest.mark.parametrize("model_name", FLASHINFER_MODELS)
 @pytest.mark.parametrize("use_v2_model_runner", [False, True], ids=["v1", "v2"])
 def test_replayssm_flashinfer_decode_matches_baseline(
     vllm_runner, model_name, monkeypatch, use_v2_model_runner
@@ -108,7 +113,7 @@ def test_replayssm_flashinfer_decode_matches_baseline(
         envs.disable_envs_cache()
 
 
-@pytest.mark.parametrize("model_name", MODELS)
+@pytest.mark.parametrize("model_name", FLASHINFER_MODELS)
 def test_replayssm_flashinfer_spec_decode_matches_baseline(vllm_runner, model_name):
     common = dict(
         max_model_len=1024,
@@ -159,7 +164,7 @@ def test_replayssm_flashinfer_mtp(vllm_runner, monkeypatch, use_v2_model_runner)
             patch.setenv("VLLM_USE_V2_MODEL_RUNNER", str(int(use_v2_model_runner)))
             envs.disable_envs_cache()
             with vllm_runner(
-                MAMBA2_MODEL,
+                MAMBA2_FLASHINFER_MODEL,
                 use_replayssm=True,
                 replayssm_buffer_len=16,
                 **common,
