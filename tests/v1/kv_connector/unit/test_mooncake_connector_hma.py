@@ -624,6 +624,49 @@ def test_prefix_replay_layout_fingerprint_ignores_tp_local_widths():
     ) == MooncakeConnectorWorker._prefix_replay_layout_fingerprint(tp8_worker)
 
 
+@pytest.mark.asyncio
+@pytest.mark.skip_global_cleanup
+async def test_prefix_replay_send_waits_for_current_forward_event():
+    metadata = MooncakeConnectorMetadata()
+    metadata.add_new_req(
+        request_id="p-req",
+        local_block_ids=[[1], [2]],
+        kv_transfer_params={"transfer_id": "tx-1"},
+        load_remote_cache=False,
+        prefix_replay_checkpoint=95,
+        prefix_replay_prompt_digest="prompt-digest",
+    )
+    send_meta = SendBlockMeta(
+        p_req_id="",
+        transfer_id="tx-1",
+        local_block_ids=[],
+        ready=asyncio.Event(),
+    )
+    worker = SimpleNamespace(
+        is_kv_producer=True,
+        is_kv_consumer=False,
+        _prefill_side_replay=True,
+        _pending_send_metadata=[],
+        reqs_need_send={"tx-1": send_meta},
+    )
+
+    async def record_send_reqs(metadata, producer_ready_event=None):
+        await MooncakeConnectorWorker.record_send_reqs(
+            worker, metadata, producer_ready_event
+        )
+
+    worker.record_send_reqs = record_send_reqs
+    MooncakeConnectorWorker.start_load_kv(worker, metadata)
+    assert worker._pending_send_metadata == [metadata]
+    assert not send_meta.ready.is_set()
+
+    ready_event = object()
+    await MooncakeConnectorWorker._record_pending_send_reqs(worker, ready_event)
+    assert not worker._pending_send_metadata
+    assert send_meta.producer_ready_event is ready_event
+    assert send_meta.ready.is_set()
+
+
 def test_worker_failed_recv_reports_request_level_failure_with_hma():
     """With HMA, load failures report the request, not ambiguous block IDs."""
     worker = _make_kv_consumer_worker(swa_enabled=True)

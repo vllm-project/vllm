@@ -1205,7 +1205,7 @@ class MooncakeConnectorWorker:
         self._prefill_side_replay = _prefill_side_replay_enabled(
             vllm_config, kv_cache_config
         )
-        self._last_producer_ready_event: Any | None = None
+        self._pending_send_metadata: list[MooncakeConnectorMetadata] = []
         self.num_sender_workers = kv_transfer_config.kv_connector_extra_config.get(
             "num_workers", 10
         )
@@ -1544,11 +1544,24 @@ class MooncakeConnectorWorker:
         ready_reqs: list[tuple[ReqId, SendBlockMeta]],
         meta: MooncakeXferMetadata,
     ) -> dict[ReqId, tuple[int, str]]:
-        if (
-            not self._prefill_side_replay
-            or meta.prefix_replay_protocol != _PREFIX_REPLAY_PROTOCOL_VERSION
-            or meta.prefix_replay_layout != self._prefix_replay_layout_fingerprint()
-        ):
+        if not self._prefill_side_replay:
+            return {}
+        if meta.prefix_replay_protocol != _PREFIX_REPLAY_PROTOCOL_VERSION:
+            logger.warning(
+                "Rejecting Prefill-side replay checkpoint: protocol mismatch "
+                "(remote=%s, local=%s).",
+                meta.prefix_replay_protocol,
+                _PREFIX_REPLAY_PROTOCOL_VERSION,
+            )
+            return {}
+        local_layout = self._prefix_replay_layout_fingerprint()
+        if meta.prefix_replay_layout != local_layout:
+            logger.warning(
+                "Rejecting Prefill-side replay checkpoint: layout mismatch "
+                "(remote=%s, local=%s).",
+                meta.prefix_replay_layout,
+                local_layout,
+            )
             return {}
 
         certified: dict[ReqId, tuple[int, str]] = {}
@@ -1559,16 +1572,29 @@ class MooncakeConnectorWorker:
                 continue
             checkpoint, local_hit_tokens, prompt_digest = requested
             remote_groups = meta.req_blocks[d_req_id][1]
-            if (
-                checkpoint != send_meta.prefix_replay_checkpoint
-                or prompt_digest != send_meta.prefix_replay_prompt_digest
-                or not 0 <= local_hit_tokens < checkpoint
-                or send_meta.producer_ready_event is None
-                or not send_meta.producer_ready_event_waited
-                or len(send_meta.local_block_ids) != len(remote_groups)
-                or len(remote_groups) != len(group_specs)
-                or any(not blocks for blocks in remote_groups)
-            ):
+            invalid_reason = None
+            if checkpoint != send_meta.prefix_replay_checkpoint:
+                invalid_reason = "checkpoint boundary mismatch"
+            elif prompt_digest != send_meta.prefix_replay_prompt_digest:
+                invalid_reason = "prompt digest mismatch"
+            elif not 0 <= local_hit_tokens < checkpoint:
+                invalid_reason = "invalid local-hit boundary"
+            elif send_meta.producer_ready_event is None:
+                invalid_reason = "missing producer-ready event"
+            elif not send_meta.producer_ready_event_waited:
+                invalid_reason = "producer-ready event was not synchronized"
+            elif len(send_meta.local_block_ids) != len(remote_groups):
+                invalid_reason = "producer/consumer group-count mismatch"
+            elif len(remote_groups) != len(group_specs):
+                invalid_reason = "consumer/cache-spec group-count mismatch"
+            elif any(not blocks for blocks in remote_groups):
+                invalid_reason = "empty consumer checkpoint group"
+            if invalid_reason is not None:
+                logger.warning(
+                    "Rejecting Prefill-side replay checkpoint for request %s: %s.",
+                    d_req_id,
+                    invalid_reason,
+                )
                 continue
 
             complete = True
@@ -1603,6 +1629,12 @@ class MooncakeConnectorWorker:
                     break
             if complete:
                 certified[d_req_id] = (checkpoint, prompt_digest)
+            else:
+                logger.warning(
+                    "Rejecting Prefill-side replay checkpoint for request %s: "
+                    "incomplete group coverage.",
+                    d_req_id,
+                )
         return certified
 
     async def send_kv_to_decode(
@@ -2619,7 +2651,11 @@ class MooncakeConnectorWorker:
             else:
                 self.receive_kv(remote_engine_id, pull_metas)
 
-    async def record_send_reqs(self, metadata: MooncakeConnectorMetadata):
+    async def record_send_reqs(
+        self,
+        metadata: MooncakeConnectorMetadata,
+        producer_ready_event: Any | None = None,
+    ):
         for p_req_id, (
             transfer_id,
             block_ids,
@@ -2633,7 +2669,7 @@ class MooncakeConnectorWorker:
                 send_meta.local_block_ids = block_ids
                 send_meta.prefix_replay_checkpoint = prefix_replay_checkpoint
                 send_meta.prefix_replay_prompt_digest = prefix_replay_prompt_digest
-                send_meta.producer_ready_event = self._last_producer_ready_event
+                send_meta.producer_ready_event = producer_ready_event
                 send_meta.producer_ready_event_waited = False
                 send_meta.expire_time = (
                     time.perf_counter() + envs.VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT
@@ -2656,12 +2692,26 @@ class MooncakeConnectorWorker:
             if send_meta:
                 assert not send_meta.ready.is_set()
 
+    async def _record_pending_send_reqs(self, producer_ready_event: Any) -> None:
+        pending_metadata = self._pending_send_metadata
+        self._pending_send_metadata = []
+        for metadata in pending_metadata:
+            await self.record_send_reqs(
+                metadata, producer_ready_event=producer_ready_event
+            )
+
     def wait_for_save(self) -> None:
-        if not self._prefill_side_replay or self.is_kv_consumer:
+        if (
+            not self._prefill_side_replay
+            or self.is_kv_consumer
+            or not self._pending_send_metadata
+        ):
             return
         event = torch.cuda.Event(blocking=True)
         event.record(torch.cuda.current_stream(self.device_id))
-        self._last_producer_ready_event = event
+        asyncio.run_coroutine_threadsafe(
+            self._record_pending_send_reqs(event), self.sender_loop
+        ).result()
 
     def start_load_kv(self, metadata: MooncakeConnectorMetadata):
         if not self.is_kv_producer and metadata.reqs_to_recv:
@@ -2672,9 +2722,12 @@ class MooncakeConnectorWorker:
         if not self.is_kv_consumer and (
             metadata.reqs_to_send or metadata.reqs_not_processed
         ):
-            asyncio.run_coroutine_threadsafe(
-                self.record_send_reqs(metadata), self.sender_loop
-            )
+            if self._prefill_side_replay:
+                self._pending_send_metadata.append(metadata)
+            else:
+                asyncio.run_coroutine_threadsafe(
+                    self.record_send_reqs(metadata), self.sender_loop
+                )
 
     def _producer_cache_is_replicated(self) -> bool:
         return self.transfer_topo.local_replicates_kv_cache
