@@ -283,7 +283,7 @@ def backend_to_kernel_cls(
         return [AiterW4A8ExpertsMonolithic]
 
     elif backend == Mxfp4MoeBackend.AITER_MXFP4_MXFP4:
-        from vllm.model_executor.layers.fused_moe.experts.aiter_mxfp4_w4a8_moe import (
+        from vllm.model_executor.layers.fused_moe.experts.aiter_mxfp4_w4a4_moe import (
             AiterW4A4ExpertsMonolithic,
         )
         from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
