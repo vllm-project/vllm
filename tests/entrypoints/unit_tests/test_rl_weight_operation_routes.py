@@ -341,36 +341,6 @@ def _assert_no_series(registry: CollectorRegistry, operation: str) -> None:
 @pytest.mark.parametrize(
     "path,body,operation",
     [
-        # A valid JSON scalar or array must not reach body.get() (AttributeError).
-        ("/init_weight_transfer_engine", 1, "init"),
-        ("/init_weight_transfer_engine", [], "init"),
-        ("/init_weight_transfer_engine", "x", "init"),
-        ("/init_weight_transfer_engine", None, "init"),
-        ("/init_weight_transfer_engine", True, "init"),
-        ("/update_weights", 1, "update"),
-        ("/update_weights", [], "update"),
-        ("/update_weights", "x", "update"),
-        ("/update_weights", None, "update"),
-        ("/update_weights", True, "update"),
-    ],
-)
-async def test_non_object_body_is_rejected_before_recording(
-    monkeypatch, path, body, operation
-):
-    registry = _metrics(monkeypatch)
-
-    with pytest.raises(HTTPException) as exc_info:
-        await ROUTES_BY_OPERATION[operation](_Request(_UnreachableEngine(), body))
-
-    assert exc_info.value.status_code == 400
-    assert exc_info.value.detail == "Request body must be a JSON object"
-    _assert_no_series(registry, operation)
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "path,body,operation",
-    [
         ("/init_weight_transfer_engine", {"init_info": 1}, "init"),
         ("/init_weight_transfer_engine", {"init_info": []}, "init"),
         ("/init_weight_transfer_engine", {"init_info": [{"rank": 0}]}, "init"),

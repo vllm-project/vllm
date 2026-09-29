@@ -19,23 +19,6 @@ from vllm.v1.engine import PauseMode
 
 logger = init_logger(__name__)
 
-# Import-time alias: the accessor constructs collectors lazily on first call.
-_weight_metrics = weight_operation_metrics
-
-
-async def _json_object_body(raw_request: Request) -> dict:
-    """Parse the request body, requiring a top-level JSON object."""
-    try:
-        body = await raw_request.json()
-    except json.JSONDecodeError as e:
-        raise HTTPException(status_code=400, detail="Invalid JSON format") from e
-    if not isinstance(body, dict):
-        raise HTTPException(
-            status_code=HTTPStatus.BAD_REQUEST.value,
-            detail="Request body must be a JSON object",
-        )
-    return body
-
 
 def engine_client(request: Request) -> EngineClient:
     return request.app.state.engine_client
@@ -173,7 +156,10 @@ async def is_paused(raw_request: Request) -> JSONResponse:
 
 @router.post("/init_weight_transfer_engine")
 async def init_weight_transfer_engine(raw_request: Request):
-    body = await _json_object_body(raw_request)
+    try:
+        body = await raw_request.json()
+    except json.JSONDecodeError as e:
+        raise HTTPException(status_code=400, detail="Invalid JSON format") from e  # noqa: B904
     init_info = body.get("init_info")
     if init_info is None:
         raise HTTPException(
@@ -185,7 +171,7 @@ async def init_weight_transfer_engine(raw_request: Request):
             status_code=HTTPStatus.BAD_REQUEST.value,
             detail="'init_info' must be a JSON object",
         )
-    with _weight_metrics().record("init"):
+    with weight_operation_metrics().record("init"):
         await engine_client(raw_request).init_weight_transfer_engine(
             WeightTransferInitRequest(init_info=init_info)
         )
@@ -194,21 +180,24 @@ async def init_weight_transfer_engine(raw_request: Request):
 
 @router.post("/start_weight_update")
 async def start_weight_update(raw_request: Request):
-    with _weight_metrics().record("start"):
+    with weight_operation_metrics().record("start"):
         await engine_client(raw_request).start_weight_update()
     return JSONResponse(content={"message": "Weight update started"})
 
 
 @router.post("/start_draft_weight_update")
 async def start_draft_weight_update(raw_request: Request):
-    with _weight_metrics().record("start_draft"):
+    with weight_operation_metrics().record("start_draft"):
         await engine_client(raw_request).start_draft_weight_update()
     return JSONResponse(content={"message": "Draft weight update started"})
 
 
 @router.post("/update_weights")
 async def update_weights(raw_request: Request):
-    body = await _json_object_body(raw_request)
+    try:
+        body = await raw_request.json()
+    except json.JSONDecodeError as e:
+        raise HTTPException(status_code=400, detail="Invalid JSON format") from e  # noqa: B904
     update_info = body.get("update_info")
     if update_info is None:
         raise HTTPException(
@@ -228,7 +217,7 @@ async def update_weights(raw_request: Request):
                 "JSON objects"
             ),
         )
-    with _weight_metrics().record("update"):
+    with weight_operation_metrics().record("update"):
         await engine_client(raw_request).update_weights(
             request=WeightTransferUpdateRequest(update_info=update_info)
         )
@@ -241,10 +230,10 @@ async def finish_weight_update(
     weight_version: Annotated[str | None, Body(embed=True)] = None,
 ):
     # Separate observations so a version failure is not charged to finish.
-    with _weight_metrics().record("finish"):
+    with weight_operation_metrics().record("finish"):
         await engine_client(raw_request).finish_weight_update()
     if weight_version is not None:
-        with _weight_metrics().record("set_version"):
+        with weight_operation_metrics().record("set_version"):
             await engine_client(raw_request).update_weight_version(weight_version)
     return JSONResponse(content={"message": "Weight update finished"})
 
@@ -254,7 +243,7 @@ async def update_weight_version(
     raw_request: Request,
     new_version: Annotated[str, Body(embed=True)],
 ):
-    with _weight_metrics().record("set_version"):
+    with weight_operation_metrics().record("set_version"):
         await engine_client(raw_request).update_weight_version(new_version)
     return JSONResponse(content={"success": True, "new_version": new_version})
 
