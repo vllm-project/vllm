@@ -146,6 +146,7 @@ def _load_norm_params(model_config: ModelConfig) -> NormParams:
     """Resolve the per-channel affine parameters ``(image_mean, image_std,
     rescale_factor)`` from the processor config."""
     config = get_processor_config(model_config.model, revision=model_config.revision)
+    config = config.get("image_processor", config)
 
     has_norm_params = "image_mean" in config and "image_std" in config
     do_normalize = bool(config.get("do_normalize", has_norm_params))
