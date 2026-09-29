@@ -844,7 +844,7 @@ def convert_gpt_oss_weight_to_mxfp4_moe_kernel_format(
     sf_block_size = 32  # mxfp4 block size
 
     if mxfp4_backend == Mxfp4MoeBackend.HUMMING:
-        from vllm.model_executor.layers.quantization.utils.humming_utils import (
+        from vllm.model_executor.layers.quantization.utils.humming import (
             convert_to_humming_moe_kernel_format,
         )
 
@@ -1428,7 +1428,7 @@ def convert_weight_to_mxfp4_moe_kernel_format(
         )
 
     if mxfp4_backend == Mxfp4MoeBackend.HUMMING:
-        from vllm.model_executor.layers.quantization.utils.humming_utils import (
+        from vllm.model_executor.layers.quantization.utils.humming import (
             convert_to_humming_moe_kernel_format,
         )
 
@@ -1596,8 +1596,7 @@ def convert_weight_to_mxfp4_moe_kernel_format(
 
             fp4_dtype = torch.float4_e2m1fn_x2
             e8m0_dtype = torch.float8_e8m0fnu
-            # SiTUv2 flydsl uses separated gate/up layout (a4w4).
-            guinterleave = False
+            guinterleave = rocm_aiter_ops.is_fused_moe_situv2_gate_up_interleaved()
             w13 = rocm_aiter_ops.shuffle_weight_a16w4(
                 w13_weight.data.view(fp4_dtype), 16, guinterleave
             )
@@ -1966,7 +1965,7 @@ def make_mxfp4_moe_quant_config(
             gemm1_clamp_limit=swiglu_limit,
         )
     elif mxfp4_backend == Mxfp4MoeBackend.HUMMING:
-        from vllm.model_executor.layers.quantization.utils.humming_utils import (
+        from vllm.model_executor.layers.quantization.utils.humming import (
             get_humming_moe_quant_config,
         )
 

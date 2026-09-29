@@ -34,6 +34,7 @@ from vllm.models.glm5next.sparse_indexer import SparseAttnIndexerKpool
 from vllm.platforms import current_platform
 from vllm.transformers_utils.configs.glm5_next import Glm5NextConfig
 from vllm.utils.deep_gemm import PAGED_MQA_PAGE_SIZES
+from vllm.utils.math_utils import cdiv, next_power_of_2
 from vllm.v1.kv_cache_interface import KpoolTailSpec, MLAAttentionSpec
 
 logger = init_logger(__name__)
@@ -160,7 +161,7 @@ class Glm5NextTailCache(DeepseekV32IndexerCache):
     """Paged circular buffer for the kpool indexer's in-progress (tail) pool.
 
     Holds the trailing incomplete pool's raw K + gate score: one block of
-    ``index_kpool`` slots per request, overwritten in place by ``pos % kpool``
+    ``ring`` slots per request, overwritten in place by ``pos % ring``
     as decode/spec-decode advances. Prefill seeds it (instead of discarding the
     tail raw K+gate); the connector transfers it across PD; decode reads it to
     compress the boundary pool correctly. ``KpoolTailSpec`` /
@@ -190,13 +191,24 @@ class Glm5NextTailCache(DeepseekV32IndexerCache):
     def get_kv_cache_spec(self, vllm_config: VllmConfig):
         # The two head slots form [K, gate score] in the generic
         # [block, head, state, content] cache view.
+        # Drafts are stashed before acceptance. With a one-pool ring, the
+        # drafts behind a rejected pool-completing draft overwrite the keys
+        # read by its redo.
+        span = self._index_kpool + vllm_config.num_speculative_tokens
+        ring = self._index_kpool * next_power_of_2(cdiv(span, self._index_kpool))
+        # ring must divide the attention block size (a multiple of 128).
+        assert self.cache_config.block_size % ring == 0, (
+            f"Glm5NextTailCache: cache_config.block_size "
+            f"({self.cache_config.block_size}) must be a multiple of the "
+            f"tail ring ({ring})"
+        )
         return KpoolTailSpec(
-            block_size=self._index_kpool,
+            block_size=ring,
             num_kv_heads=2,
             head_size=self.head_dim,
             head_size_v=0,
             dtype=torch.bfloat16,
-            sliding_window=self._index_kpool,
+            sliding_window=ring,
         )
 
     def get_attn_backend(self):
@@ -296,7 +308,7 @@ class Indexer(nn.Module):
             cache_config=cache_config,
             index_kpool=self.index_kpool,
         )
-        self.max_model_len = vllm_config.model_config.max_model_len
+        self.max_pool_len = vllm_config.model_config.max_model_len // self.index_kpool
         self.prefix = prefix
         from vllm.v1.attention.backends.mla.indexer import get_max_prefill_buffer_size
 
@@ -307,7 +319,7 @@ class Indexer(nn.Module):
             self.scale_fmt,
             self.topk_tokens,
             self.head_dim,
-            self.max_model_len,
+            self.max_pool_len,
             self.max_total_seq_len,
             self.topk_indices_buffer,
             tail_cache=self.tail_cache,
@@ -496,9 +508,9 @@ class Glm5NextMLAAttention(nn.Module):
             assert config.rope_parameters is not None
             if config.rope_parameters["rope_type"] != "default":
                 config.rope_parameters["rope_type"] = (
-                    "deepseek_yarn"
-                    if config.rope_parameters.get("apply_yarn_scaling", True)
-                    else "deepseek_llama_scaling"
+                    "deepseek_llama_scaling"
+                    if config.rope_parameters.get("attention_factor") == 1.0
+                    else "deepseek_yarn"
                 )
 
             self.rotary_emb: RotaryEmbedding | None = get_rope(
