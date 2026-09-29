@@ -60,8 +60,6 @@ with:
 
 The kernel accepts `uint8`, `float16`, `bfloat16` and `float32` inputs. The `uint8` path is the primary fast path: raw bytes travel to the device unprocessed, and the rescale factor is folded into `weight` — no separate divide-by-255 step. Compute is always done in fp32 inside the kernel.
 
-Mistral3 passes individual unpadded CHW images to the Pixtral vision tower. On CUDA, `FusedMMInputNorm` uses a stride-aware Triton kernel for these images, including cropped views, without copying them into a contiguous buffer first.
-
 #### Optimized Data Path
 
     Before: CPU decode → CPU resize → CPU rescale (÷255) → CPU normalize
