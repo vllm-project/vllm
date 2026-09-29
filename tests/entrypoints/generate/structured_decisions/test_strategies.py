@@ -8,8 +8,10 @@ from vllm.entrypoints.generate.structured_decisions.strategies import (
 )
 
 
+def model_naming(strategy: str) -> SimpleNamespace:
+    return SimpleNamespace(_model_info=SimpleNamespace(decision_read_strategy=strategy))
+
+
 def test_strategy_selection():
-    assert select_read_strategy(SimpleNamespace(is_diffusion=False)) is (
-        NextTokenStrategy
-    )
-    assert select_read_strategy(SimpleNamespace(is_diffusion=True)) is None
+    assert select_read_strategy(model_naming("next_token")) is NextTokenStrategy
+    assert select_read_strategy(model_naming("not_registered")) is None

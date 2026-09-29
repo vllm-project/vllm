@@ -70,7 +70,7 @@ class ServingStructuredDecisions(BaseServing):
             models=models, model_config=model_config, request_logger=request_logger
         )
         self.strategy = strategy
-        self.limits = strategy.limits(model_config)
+        self.limits = strategy.limits()
         self.decision_template = decision_template
         self.trust_request_template = trust_request_template
         # Compiling the server's template here makes a broken one stop startup.

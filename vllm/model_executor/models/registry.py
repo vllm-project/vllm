@@ -44,6 +44,7 @@ else:
 
 
 from .interfaces import (
+    decision_read_strategy,
     has_inner_state,
     has_noops,
     is_attention_free,
@@ -877,6 +878,7 @@ class _ModelInfo:
     supports_transcription_only: bool
     supported_video_pruning_methods: tuple[str, ...]
     supports_mm_device_do_normalize: bool
+    decision_read_strategy: str = "next_token"
 
     @staticmethod
     def from_model_cls(model: type[nn.Module]) -> "_ModelInfo":
@@ -913,6 +915,7 @@ class _ModelInfo:
             supports_mm_device_do_normalize=getattr(
                 model, "supports_mm_device_do_normalize", False
             ),
+            decision_read_strategy=decision_read_strategy(model),
         )
 
 

@@ -2,9 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Read strategies: how a model is asked for label probabilities.
 
-The server picks a strategy per model at startup: the first registered strategy
-whose ``supports`` accepts the model serves every decision on that server. When
-no strategy supports the model, the decision route answers 501.
+A model names the strategy it needs (``decision_read_strategy`` on the model
+class, ``"next_token"`` by default). When no strategy is registered under that
+name, the decision route answers 501.
 """
 
 import math
@@ -56,13 +56,8 @@ class ReadStrategy(ABC):
     def __init__(self, context: ReadContext):
         self.context = context
 
-    @classmethod
     @abstractmethod
-    def supports(cls, model_config: ModelConfig) -> bool: ...
-
-    @classmethod
-    @abstractmethod
-    def limits(cls, model_config: ModelConfig) -> DecisionLimits: ...
+    def limits(self) -> DecisionLimits: ...
 
     @abstractmethod
     async def read(
@@ -81,31 +76,31 @@ class ReadStrategy(ABC):
         a request the model cannot answer."""
 
 
-READ_STRATEGIES: list[type[ReadStrategy]] = []
+READ_STRATEGIES: dict[str, type[ReadStrategy]] = {}
 
 
-def register_read_strategy(cls: type[ReadStrategy]) -> type[ReadStrategy]:
-    READ_STRATEGIES.append(cls)
-    return cls
+def register_read_strategy(name: str):
+    def register(cls: type[ReadStrategy]) -> type[ReadStrategy]:
+        if name in READ_STRATEGIES:
+            raise ValueError(f"read strategy {name!r} is already registered")
+        READ_STRATEGIES[name] = cls
+        return cls
+
+    return register
 
 
 def select_read_strategy(model_config: ModelConfig) -> type[ReadStrategy] | None:
-    return next((s for s in READ_STRATEGIES if s.supports(model_config)), None)
+    return READ_STRATEGIES.get(model_config._model_info.decision_read_strategy)
 
 
-@register_read_strategy
+@register_read_strategy("next_token")
 class NextTokenStrategy(ReadStrategy):
     """Autoregressive models. Each question is one request: the chat prompt with
     the reply prefilled up to the question's label, one generated token, and the
     logprobs of the label tokens. The requests share the system prompt
     and the state, so prefix caching prefills them once."""
 
-    @classmethod
-    def supports(cls, model_config: ModelConfig) -> bool:
-        return not model_config.is_diffusion
-
-    @classmethod
-    def limits(cls, model_config: ModelConfig) -> DecisionLimits:
+    def limits(self) -> DecisionLimits:
         return DecisionLimits(max_questions=64, max_options=MAX_LOGPROB_TOKEN_IDS)
 
     async def read(
