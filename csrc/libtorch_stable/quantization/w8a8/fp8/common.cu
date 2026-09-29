@@ -1,10 +1,59 @@
 #include "../../../../quantization/w8a8/fp8/common.cuh"
+#include "../../../../cuda_compat.h"
 #include "../../../dispatch_utils.h"
 #include "../../../cub_helpers.h"
 #include "../../vectorization_utils.cuh"
 #include "../../../torch_utils.h"
 #include <torch/csrc/stable/macros.h>
+
+#include <algorithm>
+
 namespace vllm {
+
+namespace {
+
+// 16 fp8 outputs form one 16-byte store; the matching 16-element input load
+// is 32 B for 16-bit types and 64 B for fp32.
+constexpr int kFp8QuantVecSize = 16;
+constexpr int kFp8QuantBlockSize = 256;
+
+template <typename T>
+using fp8_quant_vec_t = vec_n_t<T, kFp8QuantVecSize>;
+
+template <typename T>
+bool ptr_vec_aligned(const T* ptr) {
+  return reinterpret_cast<uintptr_t>(ptr) % alignof(fp8_quant_vec_t<T>) == 0;
+}
+
+__device__ __forceinline__ float warp_reduce_max(float v) {
+#pragma unroll
+  for (int offset = WARP_SIZE / 2; offset > 0; offset >>= 1) {
+    v = fmaxf(v, VLLM_SHFL_XOR_SYNC(v, offset));
+  }
+  return v;
+}
+
+// Block-wide max, returned to every thread. Warp partials go through one
+// shared-memory exchange, so the whole reduction costs a single
+// __syncthreads. blockDim.x must be a multiple of WARP_SIZE and at most
+// kFp8QuantBlockSize.
+__device__ __forceinline__ float block_reduce_max(float v, float* warp_max) {
+  const int lane = threadIdx.x % WARP_SIZE;
+  const int warp = threadIdx.x / WARP_SIZE;
+  const int num_warps = blockDim.x / WARP_SIZE;
+  v = warp_reduce_max(v);
+  if (lane == 0) {
+    warp_max[warp] = v;
+  }
+  __syncthreads();
+  v = warp_max[0];
+  for (int w = 1; w < num_warps; ++w) {
+    v = fmaxf(v, warp_max[w]);
+  }
+  return v;
+}
+
+}  // namespace
 
 // STRIDE_I_ZERO: true if scale_stride_i == 0 (per-tensor or per-channel)
 // STRIDE_J_ZERO: true if scale_stride_j == 0 (per-tensor or per-token)
@@ -75,42 +124,59 @@ __global__ void scaled_fp8_quant_kernel_strided_group_shape(
   }
 }
 
+// Per-tensor abs-max of a contiguous tensor viewed as a flat array of
+// 16-element vectors: grid-stride loop, one atomic per block.
 template <typename scalar_t, typename fp8_type>
-__global__ void segmented_max_reduction_strided(
-    float* __restrict__ scale, const scalar_t* __restrict__ input,
-    int hidden_size, int64_t in_row_stride, int64_t num_tokens) {
-  __shared__ float cache[256];
-  const int tid = threadIdx.x;
-  int64_t token_idx = blockIdx.x;
+__global__ void __launch_bounds__(kFp8QuantBlockSize)
+    absmax_reduction_flat(float* __restrict__ scale,
+                          const scalar_t* __restrict__ input,
+                          int64_t num_vecs) {
+  using in_vec_t = fp8_quant_vec_t<scalar_t>;
+  const auto* v_in = reinterpret_cast<const in_vec_t*>(input);
+  const int64_t stride = static_cast<int64_t>(gridDim.x) * blockDim.x;
 
-  // one block per token. Guard in case gridDim.x > num_tokens.
+  float thread_max = 0.0f;
+#pragma unroll 4
+  for (int64_t v = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+       v < num_vecs; v += stride) {
+    const in_vec_t vec = v_in[v];
+#pragma unroll
+    for (int i = 0; i < kFp8QuantVecSize; ++i) {
+      thread_max = fmaxf(thread_max, fabsf(static_cast<float>(vec.val[i])));
+    }
+  }
+
+  __shared__ float warp_max[kFp8QuantBlockSize / 32];
+  const float block_max = block_reduce_max(thread_max, warp_max);
+  if (threadIdx.x == 0) {
+    atomicMaxFloat(scale, block_max / quant_type_max_v<fp8_type>);
+  }
+}
+
+// Per-tensor abs-max for strided or unaligned rows: one block per token.
+template <typename scalar_t, typename fp8_type>
+__global__ void __launch_bounds__(kFp8QuantBlockSize)
+    segmented_max_reduction_strided(float* __restrict__ scale,
+                                    const scalar_t* __restrict__ input,
+                                    int hidden_size, int64_t in_row_stride,
+                                    int64_t num_tokens) {
+  const int64_t token_idx = blockIdx.x;
   if (token_idx >= num_tokens) {
     return;
   }
-
   const scalar_t* row_ptr = input + token_idx * in_row_stride;
 
-  // each thread scans elements of the row in a strided fashion.
   float thread_max = 0.0f;
-  for (int e = tid; e < hidden_size; e += blockDim.x) {
-    float v = fabsf(static_cast<float>(row_ptr[e]));
-    thread_max = fmaxf(thread_max, v);
-  }
+  vectorize_read_with_alignment<kFp8QuantVecSize>(
+      row_ptr, hidden_size, threadIdx.x, blockDim.x,
+      [&] __device__(const scalar_t& v) {
+        thread_max = fmaxf(thread_max, fabsf(static_cast<float>(v)));
+      });
 
-  cache[tid] = thread_max;
-  __syncthreads();
-
-  // parallel reduction to find row max.
-  for (int offset = blockDim.x / 2; offset > 0; offset >>= 1) {
-    if (tid < offset) {
-      cache[tid] = fmaxf(cache[tid], cache[tid + offset]);
-    }
-    __syncthreads();
-  }
-
-  // thread 0 updates global scale (per-tensor) atomically.
-  if (tid == 0) {
-    atomicMaxFloat(scale, cache[0] / quant_type_max_v<fp8_type>);
+  __shared__ float warp_max[kFp8QuantBlockSize / 32];
+  const float block_max = block_reduce_max(thread_max, warp_max);
+  if (threadIdx.x == 0) {
+    atomicMaxFloat(scale, block_max / quant_type_max_v<fp8_type>);
   }
 }
 
@@ -345,7 +411,7 @@ void dynamic_scaled_fp8_quant(torch::stable::Tensor& out,          // [..., d]
 
   const int hidden_size = input.size(-1);
   const int num_tokens = input.numel() / hidden_size;
-  const int block_size = 256;
+  const int block_size = vllm::kFp8QuantBlockSize;
   dim3 grid(num_tokens);
   dim3 block(block_size);
 
@@ -364,11 +430,29 @@ void dynamic_scaled_fp8_quant(torch::stable::Tensor& out,          // [..., d]
       input.scalar_type(), "scaled_fp8_quant_kernel_scalar_type", [&] {
         VLLM_STABLE_DISPATCH_FP8_TYPES(
             out.scalar_type(), "scaled_fp8_quant_kernel_fp8_type", [&] {
-              vllm::segmented_max_reduction_strided<scalar_t, fp8_t>
-                  <<<grid, block, 0, stream>>>(
-                      scale.mutable_data_ptr<float>(),
-                      input.const_data_ptr<scalar_t>(), hidden_size,
-                      in_row_stride, static_cast<int64_t>(num_tokens));
+              const scalar_t* in_ptr = input.const_data_ptr<scalar_t>();
+              const bool flat = in_row_stride == hidden_size &&
+                                hidden_size % vllm::kFp8QuantVecSize == 0 &&
+                                vllm::ptr_vec_aligned(in_ptr);
+              if (flat) {
+                const int64_t num_vecs = input.numel() / vllm::kFp8QuantVecSize;
+                const int64_t max_blocks =
+                    static_cast<int64_t>(
+                        get_device_prop()->multiProcessorCount) *
+                    8;
+                const int64_t num_blocks = std::max<int64_t>(
+                    1,
+                    std::min<int64_t>(
+                        max_blocks, (num_vecs + block_size - 1) / block_size));
+                vllm::absmax_reduction_flat<scalar_t, fp8_t>
+                    <<<num_blocks, block, 0, stream>>>(
+                        scale.mutable_data_ptr<float>(), in_ptr, num_vecs);
+              } else {
+                vllm::segmented_max_reduction_strided<scalar_t, fp8_t>
+                    <<<grid, block, 0, stream>>>(
+                        scale.mutable_data_ptr<float>(), in_ptr, hidden_size,
+                        in_row_stride, static_cast<int64_t>(num_tokens));
+              }
 
               vllm::scaled_fp8_quant_kernel_strided_dynamic<scalar_t, fp8_t>
                   <<<grid, block, 0, stream>>>(out.mutable_data_ptr<fp8_t>(),

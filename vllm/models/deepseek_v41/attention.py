@@ -26,6 +26,7 @@ from vllm.model_executor.layers.linear import (
 from vllm.model_executor.layers.sparse_attn_indexer import SparseAttnIndexer
 from vllm.model_executor.layers.sparse_mqa_indexer import SparseMQAIndexer
 from vllm.models.common.ops import fused_q_kv_rmsnorm
+from vllm.models.common.ops.sequence_parallel import sp_reduce_scatter
 from vllm.models.deepseek_v41.common.ops import (
     MXFP4_BLOCK_SIZE,
     fused_indexer_q_rope_quant,
@@ -33,6 +34,10 @@ from vllm.models.deepseek_v41.common.ops import (
 )
 
 if TYPE_CHECKING:
+    from vllm.model_executor.kernels.linear.cute_dsl.gemm_rs_ar import GemmRsAr
+    from vllm.model_executor.layers.rocm_paged_mxfp4_indexer import (
+        RocmSparseMQAIndexer,
+    )
     from vllm.v1.attention.backends.mla.sparse_swa import (
         DeepseekSparseSWAMetadata,
     )
@@ -259,6 +264,13 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         """Return whether this instance stores fp8 KV in fp8_ds_mla layout."""
         return self.use_fp8_ds_mla_layout
 
+    def _indexer_cls(
+        self, k_cache: "DeepseekV4IndexerCache | None"
+    ) -> type["DeepseekV4Indexer"]:
+        """The indexer for this layer's index K cache. A platform subclass
+        returns one that writes and scores its own cache layout."""
+        return DeepseekV4Indexer
+
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -389,6 +401,9 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
             return_bias=False,
             prefix=f"{prefix}.wo_b",
         )
+        # Set by ``bind_gemm_rs`` when the decoder layer runs sequence
+        # parallel and the fused GEMM + reduce-scatter kernel accepts wo_b.
+        self.gemm_rs: GemmRsAr | None = None
 
         # Initialize rotary embedding before the indexer/compressor consume it.
         self.rotary_emb = build_deepseek_v4_rope(
@@ -444,7 +459,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
                     )
             is_candidate_source = layer_id == self.candidate_source_layer
             uses_candidates = 0 <= self.candidate_source_layer < layer_id
-            self.indexer = DeepseekV4Indexer(
+            self.indexer = self._indexer_cls(index_k_cache)(
                 vllm_config,
                 config=config,
                 hidden_size=self.hidden_size,
@@ -473,7 +488,6 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
             # graph and MRV1 produces garbage (#51430).
             self._prepare_and_attn_fn = self._prepare_and_attn_eager
 
-        # Will be None on ROCm for now.
         self.aux_stream_list = aux_stream_list
         # [0]: GEMM start / post-GEMM event0. [1..3]: GEMM done events;
         # [1] doubles as post-GEMM event1. Reuse is safe: GEMM fully joins
@@ -529,6 +543,15 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
                 "(the replayed tokens' slot padding knows the rank-local batch "
                 "only); the sliding-window cache takes part in prefix caching "
                 "instead."
+            )
+            swa_bounded_replay = False
+        if swa_bounded_replay and current_platform.is_rocm():
+            logger.warning_once(
+                "SWA bounded replay is off on ROCm (the sparse SWA metadata "
+                "builders forward replay_start, but the window clamp it relies "
+                "on lives in the FlashInfer and FlashMLA prefill kernels, so "
+                "the padded slots fault); the sliding-window cache takes part "
+                "in prefix caching instead."
             )
             swa_bounded_replay = False
         self.swa_cache_layer = DeepseekV4SWACache(
@@ -662,6 +685,41 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
             attn_out,
         )
         return self._o_proj(attn_out, positions)
+
+    def bind_gemm_rs(self) -> None:
+        """Fuse ``wo_b`` with the sequence-parallel TP reduce-scatter.
+
+        The decoder layer calls this after the model initialized the
+        process-wide GEMM-RS workspace and before weights load: the
+        eligibility check inspects the projection's linear kernel and weight
+        shape, which online quantization may later re-layout.
+        """
+        from vllm.model_executor.kernels.linear.cute_dsl.gemm_rs_ar import (
+            get_gemm_rs_ar,
+        )
+
+        # The layer owns the reduction under sequence parallel.
+        assert not self.wo_b.reduce_results
+        gemm_rs = get_gemm_rs_ar()
+        if gemm_rs.can_run(self.wo_b):
+            self.gemm_rs = gemm_rs
+        else:
+            gemm_rs.warn_incompatible_projection()
+
+    def _wo_b_proj(self, z: torch.Tensor | QuantizedActivation) -> torch.Tensor:
+        """Apply ``wo_b``; with GEMM-RS bound, also reduce-scatter the result.
+
+        Every ``_o_proj`` implementation projects through this so the decoder
+        layer sees one contract: when ``gemm_rs`` is bound the output is
+        already the local sequence-parallel shard, otherwise it is the
+        unreduced TP partial.
+        """
+        if self.gemm_rs is None:
+            return self.wo_b(z)
+        if isinstance(z, torch.Tensor) and self.gemm_rs.should_run(z):
+            return self.gemm_rs.apply(z, self.wo_b)
+        # Small batches stay on the unfused path, which is faster there.
+        return sp_reduce_scatter(self.wo_b(z))
 
     def _alloc_attn_out(
         self, num_tokens: int, hidden_states: torch.Tensor
@@ -1104,6 +1162,10 @@ class DeepseekV4IndexerCache(torch.nn.Module, AttentionLayerBase):
         self.compress_ratio = compress_ratio
         vllm_config = get_current_vllm_config()
         self.sparse_logits = vllm_config.attention_config.indexer_sparse_logits
+        # aiter's paged MXFP4 kernels write this cache and read it in place.
+        self.rocm_mxfp4 = current_platform.is_rocm() and dsa_indexer_uses_fp4(
+            vllm_config
+        )
         compilation_config = vllm_config.compilation_config
         if prefix in compilation_config.static_forward_context:
             raise ValueError(f"Duplicate layer name: {prefix}")
@@ -1142,13 +1204,21 @@ class DeepseekV4IndexerCache(torch.nn.Module, AttentionLayerBase):
             # it 512B-aligned; the main KV record read from the same blocks
             # needs its own TMA stride, so keep both.
             block_stride_alignment=(
-                math.lcm(512, page_alignment) if self.sparse_logits else None
+                math.lcm(512, page_alignment)
+                if self.sparse_logits and not self.rocm_mxfp4
+                else None
             ),
         )
 
     def forward(self): ...
 
     def get_attn_backend(self) -> type[AttentionBackend]:
+        if self.rocm_mxfp4:
+            from vllm.v1.attention.backends.mla.rocm_paged_mxfp4_indexer import (
+                DeepseekV41RocmMxfp4IndexerBackend,
+            )
+
+            return DeepseekV41RocmMxfp4IndexerBackend
         if self.sparse_logits:
             return DeepseekV41SparseIndexerBackend
         return DeepseekV41IndexerBackend
@@ -1169,6 +1239,12 @@ class DeepseekV4Indexer(nn.Module):
     ``candidate_block_size`` compressed positions (``candidate_write``);
     later indexers mask their scores to those blocks before their own top-k.
     """
+
+    # The scoring layers; a platform subclass swaps in its own.
+    mqa_cls: ClassVar[type["SparseMQAIndexer | RocmSparseMQAIndexer"]] = (
+        SparseMQAIndexer
+    )
+    attn_cls: ClassVar[type[SparseAttnIndexer]] = SparseAttnIndexer
 
     def __init__(
         self,
@@ -1257,7 +1333,7 @@ class DeepseekV4Indexer(nn.Module):
             and candidate_block_buffer is not None
             and not candidate_write
         )
-        self.indexer_op: SparseAttnIndexer | SparseMQAIndexer
+        self.indexer_op: SparseAttnIndexer | SparseMQAIndexer | RocmSparseMQAIndexer
         if use_sparse_logits:
             if not self.use_fp4_kv:
                 raise ValueError(
@@ -1266,7 +1342,7 @@ class DeepseekV4Indexer(nn.Module):
                 )
             assert candidate_block_buffer is not None
             assert topk_indices_buffer is not None
-            self.indexer_op = SparseMQAIndexer(
+            self.indexer_op = self.mqa_cls(
                 self.k_cache,
                 self.topk_tokens,
                 self.head_dim,
@@ -1276,7 +1352,7 @@ class DeepseekV4Indexer(nn.Module):
                 candidate_block_size,
             )
         else:
-            self.indexer_op = SparseAttnIndexer(
+            self.indexer_op = self.attn_cls(
                 self.k_cache,
                 self.quant_block_size,
                 self.scale_fmt,
@@ -1295,7 +1371,7 @@ class DeepseekV4Indexer(nn.Module):
         # The fused Q kernel writes the per-head weights in the dtype the
         # scoring kernels take, so no cast runs per step.
         self.indexer_weights_dtype = (
-            SparseMQAIndexer.weights_dtype if use_sparse_logits else torch.float32
+            self.mqa_cls.weights_dtype if use_sparse_logits else torch.float32
         )
 
     def _produce_k(
@@ -1331,6 +1407,37 @@ class DeepseekV4Indexer(nn.Module):
             self.compress_ratio,
             self.use_fp4_kv,
         )
+
+    def forward_q(
+        self,
+        qr: torch.Tensor | QuantizedActivation,
+        qr_scale: torch.Tensor | None,
+        indexer_weights: torch.Tensor,
+        positions: torch.Tensor,
+        rotary_emb: nn.Module,
+    ) -> tuple[torch.Tensor | None, torch.Tensor | None, torch.Tensor | None]:
+        """Build the indexer queries: wq_b over qr plus fused RoPE/quant.
+
+        Split out so the ROCm layer can schedule it apart from
+        ``_produce_k`` (e.g. on an aux stream once ``qr`` is ready).
+        """
+        q = self._wq_b_proj(qr, qr_scale)
+        q = q.view(-1, self.n_head, self.head_dim)
+        q_quant, weights = fused_indexer_q_rope_quant(
+            positions,
+            q,
+            rotary_emb.cos_sin_cache,
+            indexer_weights,
+            self.softmax_scale,
+            self.n_head**-0.5,
+            use_fp4=self.use_fp4_kv,
+            weights_out_dtype=self.indexer_weights_dtype,
+        )
+        if isinstance(q_quant, tuple):
+            q, q_scale = q_quant
+        else:
+            q, q_scale = q_quant, None
+        return q, q_scale, weights
 
     def forward(
         self,
@@ -1373,23 +1480,7 @@ class DeepseekV4Indexer(nn.Module):
             # (skip_k_cache_insert=True).
             self._produce_k(latent, positions, rotary_emb)
 
-        q = self._wq_b_proj(qr, qr_scale)
-        q = q.view(-1, self.n_head, self.head_dim)
-        q_quant, weights = fused_indexer_q_rope_quant(
-            positions,
-            q,
-            rotary_emb.cos_sin_cache,
-            indexer_weights,
-            self.softmax_scale,
-            self.n_head**-0.5,
-            use_fp4=self.use_fp4_kv,
-            weights_out_dtype=self.indexer_weights_dtype,
-        )
-        if isinstance(q_quant, tuple):
-            q, q_scale = q_quant
-        else:
-            q, q_scale = q_quant, None
-        return q, q_scale, weights
+        return self.forward_q(qr, qr_scale, indexer_weights, positions, rotary_emb)
 
     def _wq_b_proj(
         self,

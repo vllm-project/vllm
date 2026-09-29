@@ -21,7 +21,12 @@ from vllm.config.cache import _layout_from_name
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import PIN_MEMORY, async_tensor_h2d, np_to_pinned_tensor
-from vllm.v1.kv_cache_interface import KVCacheLayout, KVCacheSpec, MambaSpec
+from vllm.v1.kv_cache_interface import (
+    AttentionSpec,
+    KVCacheLayout,
+    KVCacheSpec,
+    MambaSpec,
+)
 
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import SchedulerOutput
@@ -286,9 +291,10 @@ def resolve_kv_cache_layout(
     # specs can re-interpret HNC with different sizes as long as the total number of
     # bytes is the same. If not block-compact, each spec must agree on HNC to alias
     # the same page (this aliasing is done by the Hybrid Memory Allocator, HMA).
+    kv_cache_specs = tuple(kv_cache_specs or ())
     hnc_shapes = {
         (spec.num_heads, spec.num_states, spec.page_size_bytes)
-        for spec in kv_cache_specs or ()
+        for spec in kv_cache_specs
     }
     if len(hnc_shapes) > 1:
         candidates = [m for m in candidates if m.is_block_compact]
@@ -296,6 +302,20 @@ def resolve_kv_cache_layout(
             raise ValueError(
                 "Specs with mixed HNC shapes need a block-compact layout, but "
                 f"none is in every supported set: {supported_layouts}."
+            )
+
+    dcp_sharding = {
+        spec.dcp_sharded for spec in kv_cache_specs if isinstance(spec, AttentionSpec)
+    }
+    page_sizes = {spec.page_size_bytes for spec in kv_cache_specs}
+    if len(dcp_sharding) > 1 and len(page_sizes) > 1:
+        # Sharded target and replicated draft caches need independent groups.
+        # Block-outer layouts can pack those groups without equalizing pages.
+        candidates = [layout for layout in candidates if layout.is_block_outermost]
+        if not candidates:
+            raise ValueError(
+                "DCP with a replicated draft and mixed KV page sizes requires "
+                f"a block-outer KV cache layout; supported sets: {supported_layouts}."
             )
 
     if (requested := envs.VLLM_KV_CACHE_LAYOUT) is not None:
@@ -828,7 +848,7 @@ def split_decodes_and_prefills(
             (query_lens == query_lens[0]) | (query_lens == 0)
         ):
             return num_reqs, 0, num_tokens, 0  # all decodes
-        is_prefill = query_lens != query_lens[0]
+        is_prefill = (query_lens != query_lens[0]) & (query_lens != 0)
     else:
         is_prefill = query_lens > decode_threshold
 
@@ -1096,6 +1116,7 @@ def get_dcp_local_seq_lens(
     Only consider dcp now, we can extend the case of cp based on this.
     """
     seq_lens_i32 = seq_lens.to(torch.int32)
+    rank_offsets: int | torch.Tensor
     if dcp_rank is None:
         rank_offsets = torch.arange(
             dcp_size,
@@ -1113,7 +1134,8 @@ def get_dcp_local_seq_lens(
         rank_offsets = dcp_rank
         seq_lens_tiled = seq_lens_i32
     else:
-        rank_offsets = torch.tensor(dcp_rank, dtype=torch.int32, device=seq_lens.device)
+        # Use the Python scalar directly to avoid a synchronizing H2D copy.
+        rank_offsets = dcp_rank
         seq_lens_tiled = seq_lens_i32
     base = (
         seq_lens_tiled
