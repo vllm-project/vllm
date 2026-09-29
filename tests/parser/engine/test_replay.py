@@ -74,9 +74,10 @@ def _discover_parsers() -> list[_ParserInfo]:
         if cfg.name not in _BUILDERS:
             missing_builders.append(f"{obj.__name__} (config.name={cfg.name!r})")
             continue
-        if cfg.name == "inkling":
-            # Inkling opts out of token-id terminal matching and has typed
-            # structural blocks; its replay coverage lives in test_inkling.py.
+        if cfg.name in ("inkling", "plamo3"):
+            # Inkling uses typed structural blocks. PLaMo markers can span
+            # several token IDs. Neither fits this TOOL_END-token harness;
+            # their direct and delegating coverage lives in dedicated tests.
             continue
         if cfg.name == "granite":
             # Granite has a JSON-array tool body with no TOOL_END terminal, so

@@ -136,6 +136,10 @@ _REASONING_PARSERS_TO_REGISTER = {
         "olmo3_reasoning_parser",
         "Olmo3ReasoningParser",
     ),
+    "plamo3": (
+        "plamo3_engine_reasoning_parser",
+        "Plamo3ParserReasoningAdapter",
+    ),
     "muse_glimmer": (
         "muse_glimmer_reasoning_parser",
         "MuseGlimmerReasoningParser",
