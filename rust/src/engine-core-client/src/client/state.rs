@@ -68,15 +68,18 @@ struct EngineRoutingState {
     /// The latest real scheduler snapshot received from this engine, if any.
     last_scheduler_stats: Option<EngineLoadSnapshot>,
     /// Requests admitted since the last scheduler snapshot was received.
+    ///
+    /// Added to the snapshot so each admission raises the routing score before
+    /// the next snapshot arrives. Only tracked once a snapshot exists.
     admitted_since_stats: usize,
 }
 
 impl EngineRoutingState {
     /// Compute the routing score used to pick the least-loaded engine.
     ///
-    /// Scheduler stats can raise the load estimate above the frontend-local
-    /// view, but they should not lower it below requests this frontend has
-    /// already admitted.
+    /// Scheduler stats, plus admissions not yet reflected in them, can raise
+    /// the load estimate above the frontend-local view, but they should not
+    /// lower it below requests this frontend has already admitted.
     fn routing_score(&self) -> usize {
         let Some(stats) = self.last_scheduler_stats else {
             return self.inflight;
@@ -85,7 +88,16 @@ impl EngineRoutingState {
         self.inflight.max(stats.running + stats.waiting + self.admitted_since_stats)
     }
 
-    /// Replace the local routing view with a fresh real scheduler snapshot.
+    /// Record one request admitted to this engine.
+    fn record_admission(&mut self) {
+        self.inflight += 1;
+        if self.last_scheduler_stats.is_some() {
+            self.admitted_since_stats += 1;
+        }
+    }
+
+    /// Replace the local routing view with a fresh real scheduler snapshot,
+    /// resetting the admissions counted on top of the previous one.
     fn apply_scheduler_counts(&mut self, next: EngineLoadSnapshot) {
         self.last_scheduler_stats = Some(next);
         self.admitted_since_stats = 0;
@@ -157,8 +169,7 @@ impl RequestRegistry {
             .routing_per_engine
             .get_mut(&engine_id)
             .expect("request registry must track all known engines");
-        state.inflight += 1;
-        state.admitted_since_stats += 1;
+        state.record_admission();
 
         Ok((engine_id, rx))
     }
