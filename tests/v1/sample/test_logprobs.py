@@ -452,9 +452,7 @@ def test_prompt_logprob_token_ids_validation():
     verify(prompt_logprob_token_ids=np.array([[1, -1], [2, 3]], dtype=np.int32))
     # The pydantic path (token-in/token-out API, /docs) takes strict integer lists.
     adapter = TypeAdapter(SamplingParams)
-    dumped = adapter.dump_json(
-        SamplingParams(prompt_logprob_token_ids=np.array([[1, 2]]))
-    )
+    dumped = adapter.dump_json(SamplingParams(prompt_logprob_token_ids=[[1, 2]]))
     assert b'"prompt_logprob_token_ids":[[1,2]]' in dumped
     for bad in ("[[1.5]]", '[["3"]]', "[[true]]", "[1, 2]"):
         with pytest.raises(ValidationError):

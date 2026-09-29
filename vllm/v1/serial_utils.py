@@ -508,13 +508,6 @@ def run_method(
     return func(*args, **kwargs)
 
 
-def _builtins_enc_hook(obj: Any) -> Any:
-    """JSON form of array-typed Struct fields, e.g. prompt_logprob_token_ids."""
-    if isinstance(obj, np.ndarray):
-        return obj.tolist()
-    raise NotImplementedError(f"Objects of type {type(obj)} are not supported")
-
-
 class PydanticMsgspecMixin:
     """Make a ``msgspec.Struct`` compatible with Pydantic for both
     **validation** (JSON/dict -> Struct) and **serialization**
@@ -617,7 +610,7 @@ class PydanticMsgspecMixin:
         Uses ``msgspec.to_builtins`` which respects ``omit_defaults=True``,
         so only fields that differ from their declared defaults are included.
         """
-        raw = msgspec.to_builtins(value, enc_hook=_builtins_enc_hook)
+        raw = msgspec.to_builtins(value)
         if not isinstance(raw, dict):
             return raw
 
