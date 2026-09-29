@@ -20,7 +20,7 @@ This endpoint does not serve diffusion models yet.
 
 Every read of a request shares the system prompt and the state, so with
 `--enable-prefix-caching` the state is prefilled once and each further
-question costs about one token.
+question prefills only its answer prefix and reads one token.
 
 ## Question types
 
@@ -78,8 +78,8 @@ Response, with probabilities that depend on the model:
 ```
 
 `diagnostics.label_mass` is the probability the model put on the labels across
-its whole vocabulary. A low value means the model wanted to reply with
-something other than a label, so the answer deserves less trust.
+its whole vocabulary. A low value means most of the probability went to tokens
+that are not labels.
 
 ## Decision templates
 
@@ -112,20 +112,19 @@ Reply with one line per question, as: {{ answer({"id": "id"}, "label") }}
 ```
 
 The answers of all the labels must differ in exactly one token for the model's
-tokenizer, with some text before it. A request whose template breaks that gets
-a 400 naming the question.
+tokenizer, with some text before it. If the template breaks that, each request
+gets a 400 naming the question.
 
 ## Labels
 
 The first time the server uses a template, it tries each label from `A` to
-`ZZ` in the template's answer and keeps those that are one token. The token
-around a label can hold more than the label, such as a leading space or the
-colon before it. The server groups the labels by the rest of that token's
-text and keeps the largest group, so every label is tokenized the same way. A question takes single letters first and
-two-letter labels only when it has more options than letters. Labels are
-shuffled with a seed from a hash of the question, so the options do not always
-get the labels the model favors, such as `A`, and a repeated question gets the
-same prompt.
+`ZZ` in the template's answer and keeps those that are one token. The label's
+token can include a leading space or the colon before it. The server groups
+the labels by the rest of that token's text and keeps the largest group, so
+every label is tokenized the same way. A question takes single letters first
+and two-letter labels only when it has more options than letters. Labels are
+shuffled with a seed from a hash of the question, so the first option is not
+always `A`, and a repeated question gets the same prompt.
 
 ## Limits
 
@@ -142,7 +141,7 @@ same prompt.
 | `questions` | question id to `{type, instructions, criteria}`, asked in this order |
 | `instructions` | optional context placed ahead of the questions |
 | `chat_template_kwargs` | passed to the chat template, for example `{"enable_thinking": false}` |
-| `seed` | optional, mixed into each question's label shuffle; average the answers over several seeds to cancel label bias |
+| `seed` | optional, changes each question's label shuffle. Averaging answers over several seeds reduces label bias. |
 
 A question with any field other than `type`, `instructions` and `criteria` is
 rejected with a 400.

@@ -96,8 +96,8 @@ def select_read_strategy(model_config: ModelConfig) -> type[ReadStrategy] | None
 class NextTokenStrategy(ReadStrategy):
     """Autoregressive models. Each question is one request: the chat prompt with
     the reply prefilled up to the question's label, one generated token, and the
-    logprobs of the label tokens. The requests share the system prompt
-    and the state, so prefix caching prefills them once."""
+    logprobs of the label tokens. The requests share the system prompt and the
+    state. With prefix caching, the shared part is prefilled once."""
 
     def limits(self) -> DecisionLimits:
         return DecisionLimits(max_questions=64, max_options=MAX_LOGPROB_TOKEN_IDS)

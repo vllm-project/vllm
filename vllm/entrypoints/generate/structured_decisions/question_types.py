@@ -17,7 +17,7 @@ from typing import Any, ClassVar
 
 
 class StructuredDecisionError(ValueError):
-    """A request the decision API cannot serve. Reported as a 400."""
+    """An invalid request. Returned as a 400."""
 
 
 @dataclass(frozen=True)
@@ -43,8 +43,8 @@ class QuestionType(ABC):
 
     @abstractmethod
     def answer(self, question: Question, probs: list[float]) -> dict[str, Any]:
-        """The answer for ``question``. ``probs`` follows ``question.labels``
-        and sums to 1."""
+        """The answer for ``question``. ``probs[i]`` is the probability of
+        ``question.labels[i]``, and the list sums to 1."""
 
     def labels(self, options: list[Option], alphabet: list[str]) -> list[str]:
         """The label the model answers with for each option. ``alphabet`` holds
@@ -80,10 +80,10 @@ def build_question(
     max_options: int,
     seed: int | None = None,
 ) -> Question:
-    """Labels come from ``alphabet``, shortest first, shuffled with a seed from
-    ``seed`` and the question's content, so a repeated question keeps the same
-    prompt tokens. Two-letter labels carry meaning of their own, so a question
-    uses them only when it runs out of letters."""
+    """Labels come from ``alphabet``, shuffled with a seed from ``seed`` and
+    the question's content, so a repeated question gets the same labels and
+    prompt. Single letters are used first, and two-letter labels only for
+    options past the 26th."""
     if not qid or ":" in qid or "\n" in qid:
         raise StructuredDecisionError(
             f"question id {qid!r} must be non-empty, without ':' or a newline"
@@ -133,7 +133,7 @@ def argmax(values: list[float]) -> int:
 
 
 def label_softmax(logprobs: list[float]) -> list[float]:
-    """Probabilities over the labels alone from their full-vocabulary logprobs."""
+    """Softmax of the label logprobs."""
     top = max(logprobs)
     weights = [math.exp(lp - top) for lp in logprobs]
     total = sum(weights)
@@ -151,7 +151,7 @@ class ChoiceQuestion(QuestionType):
         if not isinstance(criteria, dict) or not criteria:
             raise StructuredDecisionError(
                 f"question {qid!r}: choice criteria must map option names to "
-                "descriptions"
+                "a description or null"
             )
         return [
             Option(str(name), None if desc is None else str(desc))

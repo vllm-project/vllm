@@ -32,9 +32,8 @@ class StructuredDecisionRequest(OpenAIBaseModel):
     chat_template_kwargs: dict[str, Any] | None = None
     seed: int | None = Field(
         default=None,
-        description="Changes which label each option gets. Reading a question "
-        "under several seeds and averaging the answers cancels the model's "
-        "preference for particular labels.",
+        description="Changes which label each option gets. Averaging answers "
+        "over several seeds reduces label bias.",
     )
     priority: int = Field(default=0, ge=-(2**63), le=2**63 - 1)
     request_id: str = Field(default_factory=random_uuid)
@@ -48,7 +47,8 @@ class DecisionUsage(OpenAIBaseModel):
 class QuestionDiagnostics(OpenAIBaseModel):
     label_mass: float = Field(
         description="Probability the model put on the labels, over the full "
-        "vocabulary. Low values mean it wanted to say something else."
+        "vocabulary. A low value means most of the probability went to tokens "
+        "that are not labels."
     )
     argmax_is_label: bool
 
@@ -64,8 +64,8 @@ class StructuredDecisionResponse(OpenAIBaseModel):
 
 
 class ReadPromptRequest(OpenAIBaseModel):
-    """Chat options for one read's prompt: system and state, then an assistant
-    reply left open before the question's label."""
+    """Chat options for one read's prompt: system and state, then the assistant
+    turn, ending just before the question's label."""
 
     chat_template_kwargs: dict[str, Any] | None = None
 

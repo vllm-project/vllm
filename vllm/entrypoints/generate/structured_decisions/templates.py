@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Decision templates: Jinja that renders a decision's system prompt and says
-how an answer is written.
+"""Decision templates: Jinja that renders a decision's system prompt and
+defines the answer format.
 
 The template receives ``instructions`` (a string or None) and ``questions``,
 each with ``id``, ``type``, ``instructions`` and ``options`` (``label``,
@@ -84,7 +84,7 @@ def template_errors() -> Iterator[None]:
 
 @dataclass(frozen=True)
 class AnswerSlot:
-    """Where a question's label goes in its rendered answer."""
+    """Token ids of the answer before the label, and each label's token id."""
 
     prefix_ids: list[int]
     label_ids: list[int]  # in the order of question.labels
@@ -104,10 +104,10 @@ class DecisionTemplate:
     def label_alphabet(self, tokenizer: TokenizerLike) -> tuple[str, ...]:
         """The labels this template can use with ``tokenizer``.
 
-        Each candidate must sit inside one token of its answer. Candidates are
-        grouped by the tokens around the label and by what the label token
-        holds besides the label, such as a fused space or colon. The largest
-        group is kept, so every label is tokenized the same way."""
+        Each candidate must be contained in one token of its rendered answer.
+        Candidates are grouped by the surrounding token ids and by the label
+        token's text other than the label (a leading space, a colon). Returns
+        the largest group."""
         key = id(tokenizer)
         if key not in self._alphabets:
             self._alphabets[key] = self._sweep_labels(tokenizer)
@@ -130,8 +130,8 @@ class DecisionTemplate:
             start = text.index(label)
             end = start + len(label)
             ids = tokenizer.encode(text, add_special_tokens=False)
-            # The token bounds below come from prefix decodes. The bounds only
-            # line up when the text round-trips.
+            # Prefix-decode bounds are only valid when
+            # decode(encode(text)) == text.
             if tokenizer.decode(ids) != text:
                 continue
             bounds = [0] + [
@@ -156,8 +156,8 @@ class DecisionTemplate:
         self, instructions: str | None, questions: list[Question]
     ) -> "RenderedDecision":
         with template_errors():
-            # The module's text is the rendered template, and its macros see
-            # the same variables as the template body.
+            # make_module renders the body and exposes the macros, both with
+            # these variables.
             module = self._template.make_module(
                 vars={
                     "instructions": instructions,

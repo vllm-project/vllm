@@ -69,8 +69,8 @@ def test_choice_decision(server):
     assert body["usage"]["input_tokens"] > 0
 
 
-# Qwen3-0.6B gets a single read of these wrong for some label draws, so each
-# case averages 16 seeds.
+# Qwen3-0.6B gets a single read of these wrong for some label shuffles, so
+# each case averages 16 seeds.
 @pytest.mark.parametrize(
     "state,questions,expected",
     [
