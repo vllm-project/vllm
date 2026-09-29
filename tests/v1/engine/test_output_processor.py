@@ -1572,6 +1572,7 @@ def test_request_rejected_while_paused(
         data_parallel_rank=None,
         sampling_params=SamplingParams() if runner == "generate" else None,
         pooling_params=PoolingParams(task="embed") if runner == "pooling" else None,
+        resumable=runner == "generate",
     )
     queue = (
         RequestOutputCollector(RequestOutputKind.FINAL_ONLY, request.request_id)

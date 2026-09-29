@@ -1123,7 +1123,7 @@ async def test_pause_mid_fanout_rejects_the_whole_request(
     monkeypatch: pytest.MonkeyPatch,
 ):
     """A pause landing between n>1 child submissions fails the whole request
-    and reclaims its siblings, so the id is reusable after resume."""
+    and reclaims a sibling the pause left queued, so the id is reusable."""
     with ExitStack() as after:
         with set_default_torch_num_threads(1):
             engine = AsyncLLM.from_engine_args(TEXT_ENGINE_ARGS)
@@ -1134,10 +1134,13 @@ async def test_pause_mid_fanout_rejects_the_whole_request(
 
         async def pause_after_first_child(request):
             nonlocal submitted
+            if submitted == 0:
+                # Keep the first child queued, where a wait pause leaves it.
+                await engine.pause_generation(mode="keep")
             await original(request)
             submitted += 1
             if submitted == 1:
-                await engine.pause_generation(mode="abort")
+                await engine.pause_generation(mode="wait")
 
         monkeypatch.setattr(
             engine.engine_core, "add_request_async", pause_after_first_child
