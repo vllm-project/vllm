@@ -12,9 +12,11 @@ from multiprocessing.synchronize import Lock as LockType
 from typing import Any
 from unittest.mock import patch
 
+import numpy as np
 import torch
 
 from vllm.logger import init_logger
+from vllm.utils.memcpy_utils import _NUMPY_COPY_MAX_BYTES, memcpy_mt
 
 logger = init_logger(__name__)
 
@@ -509,17 +511,41 @@ class SingleWriterShmObjectStorage:
         md_bytes: int,
         data_view: memoryview,
     ) -> None:
-        data_view[self.flag_bytes : self.flag_bytes + md_bytes] = metadata
+        if md_bytes:
+            data_view[self.flag_bytes : self.flag_bytes + md_bytes] = metadata
+        payload_offset = self.flag_bytes + md_bytes
+
         if isinstance(data, bytes):
-            data_view[-data_bytes:] = data
+            if data_bytes:
+                self._copy_payload(data, data_view, payload_offset)
         elif isinstance(data, list):
-            start_idx = self.flag_bytes + md_bytes
+            start_idx = payload_offset
             for item_bytes in data:
                 item_size = len(item_bytes)
-                data_view[start_idx : start_idx + item_size] = item_bytes
-                start_idx += item_size
+                if item_size:
+                    self._copy_payload(item_bytes, data_view, start_idx)
+                    start_idx += item_size
         else:
-            raise ValueError(f"Unsupported data type for serialization: {type(data)}")
+            raise ValueError(
+                f"Unsupported data type for serialization: {type(data)}"
+            )
+
+    @staticmethod
+    def _copy_payload(
+        src: bytes,
+        dst_view: memoryview,
+        offset: int,
+    ) -> None:
+        """Copy one fragment of ``src`` into ``dst_view[offset:]``."""
+        n = len(src)
+        if n < _NUMPY_COPY_MAX_BYTES:
+            # Direct slice assignment: no numpy objects, no dispatch.
+            dst_view[offset : offset + n] = src
+            return
+
+        src_arr = np.frombuffer(src, dtype=np.uint8)
+        dst_arr = np.frombuffer(dst_view, dtype=np.uint8)
+        memcpy_mt(src_arr, dst_arr[offset : offset + n], n)
 
     def increment_writer_flag(self, id: int) -> None:
         """Set the in-use flag for the writer."""
