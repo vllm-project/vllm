@@ -21,6 +21,7 @@ from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
 from vllm.tokenizers import TokenizerLike
 from vllm.utils.mistral import is_mistral_tokenizer
+from vllm.utils.torch_utils import make_ndarray_with_pad
 from vllm.v1.serial_utils import PydanticMsgspecMixin
 
 logger = init_logger(__name__)
@@ -935,6 +936,14 @@ class SamplingParams(
                     parameter="prompt_logprob_token_ids",
                     value=getattr(ids, "shape", type(ids).__name__),
                 )
+            max_rows = model_config.max_model_len - 1
+            if shape[0] > max_rows:
+                raise VLLMValidationError(
+                    f"prompt_logprob_token_ids has {shape[0]} rows, but a prompt "
+                    f"has at most max_model_len - 1 = {max_rows}.",
+                    parameter="prompt_logprob_token_ids",
+                    value=shape[0],
+                )
             num_ids = shape[1]
             if num_ids > max_logprobs:
                 raise VLLMValidationError(
@@ -945,6 +954,25 @@ class SamplingParams(
                     parameter="prompt_logprob_token_ids",
                     value=num_ids,
                 )
+            if isinstance(ids, list):
+                # Pad only after the checks above bound the allocation.
+                try:
+                    ids = make_ndarray_with_pad(ids, -1, np.int64, max_len=num_ids)
+                except (TypeError, ValueError, OverflowError) as e:
+                    raise VLLMValidationError(
+                        "prompt_logprob_token_ids must contain integer token ids.",
+                        parameter="prompt_logprob_token_ids",
+                    ) from e
+            vocab_size = model_config.get_vocab_size()
+            if ids.min() < -1 or ids.max() >= vocab_size:
+                raise VLLMValidationError(
+                    "prompt_logprob_token_ids contain out-of-vocab token ids "
+                    f"(-1 pads a row). Vocabulary size: {vocab_size}",
+                    parameter="prompt_logprob_token_ids",
+                    value=[int(ids.min()), int(ids.max())],
+                )
+            # In-vocab IDs fit int32, like the runner's other token ID buffers.
+            self.prompt_logprob_token_ids = np.ascontiguousarray(ids, dtype=np.int32)
             if self.prompt_logprob_start is not None and self.prompt_logprob_start < 0:
                 raise VLLMValidationError(
                     "prompt_logprob_start must be non-negative.",

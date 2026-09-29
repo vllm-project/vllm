@@ -6,8 +6,6 @@ from collections.abc import Callable, Mapping
 from functools import partial
 from typing import Any, Literal
 
-import numpy as np
-
 import vllm.envs as envs
 from vllm.config import VllmConfig
 from vllm.exceptions import VLLMValidationError
@@ -34,7 +32,6 @@ from vllm.utils import length_from_prompt_token_ids_or_embeds, random_uuid
 from vllm.utils.async_utils import make_async
 from vllm.utils.diffusion import validate_diffusion_sampling_params
 from vllm.utils.jsontree import json_iter_leaves
-from vllm.utils.torch_utils import make_ndarray_with_pad
 from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.kv_hints import KvHintsEnvelope
 
@@ -439,30 +436,6 @@ class InputProcessor:
                         parameter="prompt_logprob_token_ids",
                         value=len(rows),
                     )
-                # Pad only now that the row count bounds the allocation.
-                try:
-                    ids = (
-                        make_ndarray_with_pad(rows, -1, np.int64)
-                        if isinstance(rows, list)
-                        else rows
-                    )
-                except (TypeError, ValueError, OverflowError) as e:
-                    raise VLLMValidationError(
-                        "prompt_logprob_token_ids must contain integer token ids.",
-                        parameter="prompt_logprob_token_ids",
-                    ) from e
-                vocab_size = self.model_config.get_vocab_size()
-                if ids.min() < -1 or ids.max() >= vocab_size:
-                    raise VLLMValidationError(
-                        "prompt_logprob_token_ids contain out-of-vocab token ids "
-                        f"(-1 pads a row). Vocabulary size: {vocab_size}",
-                        parameter="prompt_logprob_token_ids",
-                        value=[int(ids.min()), int(ids.max())],
-                    )
-                # In-vocab IDs fit int32, like the runner's other token ID buffers.
-                sampling_params.prompt_logprob_token_ids = np.ascontiguousarray(
-                    ids, dtype=np.int32
-                )
             # If unset max tokens, then generate up to the max_model_len.
             if sampling_params.max_tokens is None:
                 sampling_params.max_tokens = (
