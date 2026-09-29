@@ -2,8 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Unit tests for the generate -> OpenAI logprob conversion in derender.
 
-These exercise `_resolve_logprobs` directly with a stub tokenizer, so they
-cover the byte-fallback correction path without needing a model.
+These exercise `_resolve_logprobs` directly. A stub tokenizer covers the
+byte-fallback correction path; a real SentencePiece tokenizer covers the
+leading-space restoration.
 """
 
 from vllm.entrypoints.scale_out.token_in_token_out.protocol import (
@@ -11,7 +12,12 @@ from vllm.entrypoints.scale_out.token_in_token_out.protocol import (
     GenerateLogProbs,
     GenerateLogProbsContent,
 )
-from vllm.renderers.online_derenderer import _resolve_logprobs
+from vllm.renderers.online_derenderer import (
+    _convert_chat_logprobs_to_completion_logprobs,
+    _resolve_logprobs,
+)
+from vllm.tokenizers import get_tokenizer
+from vllm.tokenizers.detokenizer_utils import convert_ids_list_to_tokens
 
 # A two-byte character split across two byte-fallback tokens: neither decodes
 # to anything printable on its own, but the pair decodes to "é".
@@ -99,3 +105,39 @@ def test_byte_fallback_second_half_uses_preceding_token_as_context():
 def test_content_none_is_not_an_error():
     resolved = _resolve_logprobs(GenerateLogProbs(), _StubTokenizer())
     assert resolved.content is None
+
+
+def test_sentencepiece_leading_space_matches_engine():
+    """`▁true` and `true` are distinct tokens and must stay distinct: the
+    strings match the engine's per-token detokenization (leading space
+    restored), so `/v1/completions/derender` top_logprobs keys do not collide.
+    Regression test for #59241."""
+    tokenizer = get_tokenizer("hmellor/tiny-random-LlamaForCausalLM")
+    spaced = tokenizer.convert_tokens_to_ids("▁true")
+    bare = tokenizer.convert_tokens_to_ids("true")
+    assert spaced != bare
+    logprobs = GenerateLogProbs(
+        content=[
+            GenerateLogProbsContent(
+                token_id=spaced,
+                logprob=-0.5,
+                rank=1,
+                top_logprobs=[
+                    GenerateLogProb(token_id=spaced, logprob=-0.5, rank=1),
+                    GenerateLogProb(token_id=bare, logprob=-1.5, rank=2),
+                ],
+            )
+        ]
+    )
+
+    resolved = _resolve_logprobs(logprobs, tokenizer)
+
+    assert resolved.content is not None
+    entry = resolved.content[0]
+    assert entry.token == " true"
+    assert entry.bytes == list(b" true")
+    assert [t.token for t in entry.top_logprobs] == convert_ids_list_to_tokens(
+        tokenizer, [spaced, bare]
+    )
+    completion = _convert_chat_logprobs_to_completion_logprobs(resolved)
+    assert completion.top_logprobs == [{" true": -0.5, "true": -1.5}]

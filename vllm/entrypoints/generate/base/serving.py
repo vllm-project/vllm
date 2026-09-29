@@ -32,6 +32,7 @@ from vllm.logger import init_logger
 from vllm.logprobs import Logprob, PromptLogprobs
 from vllm.lora.request import LoRARequest
 from vllm.tokenizers import TokenizerLike
+from vllm.tokenizers.detokenizer_utils import convert_ids_list_to_tokens
 from vllm.tracing import (
     contains_trace_headers,
     extract_trace_headers,
@@ -351,17 +352,19 @@ def decode_token_id(
 ) -> tuple[str, list[int] | None]:
     """Decode a single token id to its token string and UTF-8 bytes.
 
-    Returns ("", None) if the id has no vocab entry.
+    Uses the engine's per-token detokenization, which restores the
+    SentencePiece leading space that `convert_tokens_to_string` drops, so the
+    strings match the coupled endpoints. Returns ("", None) if the id has no
+    vocab entry.
     """
-    token_repr = tokenizer.convert_ids_to_tokens([token_id])[0]
-    if token_repr is None:
+    if tokenizer.convert_ids_to_tokens([token_id])[0] is None:
         logger.warning_once(
             "decode_token_id: token_id %d has no vocab entry; "
             "substituting empty string",
             token_id,
         )
         return "", None
-    token_str = tokenizer.convert_tokens_to_string([token_repr])
+    token_str = convert_ids_list_to_tokens(tokenizer, [token_id])[0]
     return token_str, list(token_str.encode("utf-8", errors="replace"))
 
 
