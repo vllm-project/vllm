@@ -256,8 +256,6 @@ class ServingTokens(GenerateBaseServing):
         sampling_params.output_kind = (
             RequestOutputKind.DELTA if request.stream else RequestOutputKind.FINAL_ONLY
         )
-        # Created fresh per request, safe to skip clone.
-        sampling_params.skip_clone = True
 
         self._log_inputs(
             request_id,
