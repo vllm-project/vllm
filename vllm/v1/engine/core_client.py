@@ -1239,6 +1239,15 @@ class AsyncMPClient(MPClient):
     async def call_utility_async(self, method: str, *args) -> Any:
         return await self._call_utility_async(method, *args, engine=self.core_engine)
 
+    async def call_utility_all_async(self, method: str, *args) -> list[Any]:
+        # Like the Rust client's call_utility: one result per managed engine.
+        return await asyncio.gather(
+            *[
+                self._call_utility_async(method, *args, engine=engine)
+                for engine in self.core_engines
+            ]
+        )
+
     async def _call_utility_async(
         self, method: str, *args, engine: EngineIdentity
     ) -> Any:
@@ -1301,7 +1310,7 @@ class AsyncMPClient(MPClient):
         await self.call_utility_async("release_kv_cache_memory")
 
     async def wake_up_async(self, tags: list[str] | None = None) -> bool:
-        return await self.call_utility_async("wake_up", tags)
+        return all(await self.call_utility_all_async("wake_up", tags))
 
     async def is_sleeping_async(self) -> bool:
         return await self.call_utility_async("is_sleeping")
@@ -1645,24 +1654,7 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
 
     async def call_utility_async(self, method: str, *args) -> Any:
         # Only the result from the first engine is returned.
-        return (
-            await asyncio.gather(
-                *[
-                    self._call_utility_async(method, *args, engine=engine)
-                    for engine in self.core_engines
-                ]
-            )
-        )[0]
-
-    async def wake_up_async(self, tags: list[str] | None = None) -> bool:
-        # Fully awake only if every engine is; call_utility_async keeps engine 0.
-        results = await asyncio.gather(
-            *[
-                self._call_utility_async("wake_up", tags, engine=engine)
-                for engine in self.core_engines
-            ]
-        )
-        return all(results)
+        return (await self.call_utility_all_async(method, *args))[0]
 
     @staticmethod
     async def process_engine_outputs(
