@@ -6,7 +6,6 @@ from typing import Any
 from xml.parsers.expat import ParserCreate
 
 import regex as re
-from openai.types.responses import ToolChoiceFunction
 
 from vllm.entrypoints.chat_utils import make_tool_call_id
 from vllm.entrypoints.generate.base.protocol import (
@@ -18,10 +17,8 @@ from vllm.entrypoints.generate.base.protocol import (
     ToolCall,
 )
 from vllm.entrypoints.openai.chat_completion.protocol import (
-    ChatCompletionNamedToolChoiceParam,
     ChatCompletionRequest,
 )
-from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.logger import init_logger
 from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers.abstract_tool_parser import Tool, ToolParser
@@ -1360,19 +1357,8 @@ class StreamingXMLToolCallParser:
 
 
 class Step3p5ToolParser(ToolParser):
-    supports_required_and_named = False
-
-    def adjust_request(
-        self, request: ChatCompletionRequest | ResponsesRequest
-    ) -> ChatCompletionRequest | ResponsesRequest:
-        if request.tools:
-            tool_choice = request.tool_choice
-            if tool_choice == "required" or isinstance(
-                tool_choice,
-                (ChatCompletionNamedToolChoiceParam, ToolChoiceFunction),
-            ):
-                return request
-        return super().adjust_request(request)
+    # Step-3.5/3.7 chat templates use the Qwen3-Coder XML tool-call format.
+    structural_tag_model = "qwen_3_coder"
 
     def __init__(self, tokenizer: TokenizerLike, tools: list[Tool] | None = None):
         super().__init__(tokenizer, tools)
