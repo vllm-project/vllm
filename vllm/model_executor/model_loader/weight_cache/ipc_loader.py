@@ -6,7 +6,9 @@ daemon via CUDA IPC instead of loading from disk."""
 import dataclasses
 import socket
 import time
+from collections.abc import Callable
 from copy import copy
+from typing import TypeVar
 
 import torch
 import torch.nn as nn
@@ -53,6 +55,8 @@ logger = init_logger(__name__)
 _CONNECT_TIMEOUT_S = 5.0
 _STATE_TIMEOUT_S = 300.0
 _STARTUP_RETRY_INTERVAL_S = 0.5
+
+_T = TypeVar("_T")
 
 
 class IpcModelLoader(BaseModelLoader):
@@ -124,48 +128,41 @@ class IpcModelLoader(BaseModelLoader):
             # would load the draft with.
             draft_config = get_draft_load_config(vllm_config)
             if draft_config.load_format == "ipc_cache":
-                total += IpcModelLoader(draft_config)._daemon_memory()
+                draft_loader = IpcModelLoader(draft_config)
+                # Only a zero-copy draft-group daemon holds external weights;
+                # an explicit draft_load_config without is_draft would resolve
+                # back to the target socket and double-count it.
+                if draft_loader.is_draft and draft_loader.mode == "zero_copy":
+                    total += draft_loader._daemon_memory()
         return total
 
     def _daemon_memory(self) -> int:
-        deadline = time.monotonic() + self.state_timeout_s
-        while True:
-            try:
-                with self._connect(self.connect_timeout_s) as conn:
-                    send_msg(conn, {"cmd": "get_memory"})
-                    response = recv_msg(conn)
-                if response.get("status") != "ok":
-                    raise WeightCacheUnavailableError(
-                        "Weight cache daemon rejected the memory query: "
-                        f"{response.get('message')}"
-                    )
-                return int(response.get("memory_bytes", 0))
-            except (WeightCacheUnavailableError, ConnectionError, OSError) as e:
-                # Mirror the loader: with fallback off it waits for the daemon
-                # at load time, so wait here too; with fallback on an
-                # unreachable daemon means a disk load, i.e. nothing external.
-                if self.fallback:
-                    logger.warning(
-                        "Cannot query weight cache daemon memory (%s); "
-                        "assuming the weights are not externally held",
-                        e,
-                    )
-                    return 0
-                if time.monotonic() >= deadline:
-                    raise WeightCacheUnavailableError(
-                        "Weight cache daemon did not become ready within "
-                        f"{self.state_timeout_s:.1f}s"
-                    ) from e
-                logger.info_once(
-                    "Waiting up to %.1fs for the weight cache daemon to start",
-                    self.state_timeout_s,
-                )
-                time.sleep(
-                    max(
-                        0.0,
-                        min(_STARTUP_RETRY_INTERVAL_S, deadline - time.monotonic()),
-                    )
-                )
+        if not self.fallback:
+            # The loader waits for the daemon at load time, so the weights
+            # will be zero-copy mapped for sure; mirror that wait here since
+            # returning 0 would over-grant the memory budget.
+            return self._with_startup_wait(self._query_daemon_memory)
+        # An unreachable daemon means a disk load, i.e. nothing external.
+        try:
+            return self._query_daemon_memory()
+        except (WeightCacheUnavailableError, ConnectionError, OSError) as e:
+            logger.warning(
+                "Cannot query weight cache daemon memory (%s); "
+                "assuming the weights are not externally held",
+                e,
+            )
+            return 0
+
+    def _query_daemon_memory(self) -> int:
+        with self._connect(self.connect_timeout_s) as conn:
+            send_msg(conn, {"cmd": "get_memory"})
+            response = recv_msg(conn)
+        if response.get("status") != "ok":
+            raise WeightCacheUnavailableError(
+                "Weight cache daemon rejected the memory query: "
+                f"{response.get('message')}"
+            )
+        return int(response.get("memory_bytes", 0))
 
     def download_model(self, model_config: ModelConfig) -> None:
         DefaultModelLoader(self._fallback_load_config()).download_model(model_config)
@@ -365,23 +362,25 @@ class IpcModelLoader(BaseModelLoader):
     def _request_state_with_startup_wait(
         self, cache_config: WeightCacheKey
     ) -> WeightCacheState:
+        return self._with_startup_wait(lambda: self._request_state(cache_config))
+
+    def _with_startup_wait(self, op: Callable[[], _T]) -> _T:
+        """Retry op until the daemon answers or the state timeout elapses;
+        the daemon may still be loading the model when the engine starts."""
         deadline = time.monotonic() + self.state_timeout_s
-        waiting_logged = False
         while True:
             try:
-                return self._request_state(cache_config)
-            except WeightCacheUnavailableError as e:
+                return op()
+            except (WeightCacheUnavailableError, ConnectionError, OSError) as e:
                 if time.monotonic() >= deadline:
                     raise WeightCacheUnavailableError(
                         "Weight cache daemon did not become ready within "
-                        f"{self.state_timeout_s:.1f}s"
+                        f"{self.state_timeout_s:.1f}s: {e}"
                     ) from e
-                if not waiting_logged:
-                    logger.info(
-                        "Waiting up to %.1fs for the weight cache daemon to start",
-                        self.state_timeout_s,
-                    )
-                    waiting_logged = True
+                logger.info_once(
+                    "Waiting up to %.1fs for the weight cache daemon to start",
+                    self.state_timeout_s,
+                )
                 time.sleep(
                     max(
                         0.0,

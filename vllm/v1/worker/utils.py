@@ -543,16 +543,12 @@ def request_memory(
 ) -> int:
     """Calculate the amount of memory required by vLLM, then validate
     that the current amount of free memory is sufficient for that.
-
-    external_weight_memory is the bytes of weights held outside this process
-    (e.g. zero-copy mapped from a daemon); they are charged against the
-    budget, so the engine is granted only the remainder.
     """
     requested_memory = math.ceil(
         init_snapshot.total_memory * cache_config.gpu_memory_utilization
     )
 
-    if external_weight_memory:
+    if external_weight_memory > 0:
         engine_memory = requested_memory - external_weight_memory
         if engine_memory <= 0:
             raise ValueError(
