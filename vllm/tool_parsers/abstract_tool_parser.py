@@ -136,7 +136,7 @@ class ToolParser:
         json_schema_from_tool = get_json_schema_from_tools(
             tool_choice=request.tool_choice,
             tools=request.tools,
-            parallel_tool_calls=getattr(request, "parallel_tool_calls", None),
+            parallel_tool_calls=request.parallel_tool_calls,
         )
         # Set structured output params for tool calling
         if json_schema_from_tool is not None:
