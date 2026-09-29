@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Hybrid W4A16 kernel: Triton for prefill, HIP skinny for decode.
+"""Hybrid W4A16 kernel: Triton for prefill, HIP skinny for decode.
 
 Routes based on the activation shape:
   M <= MAX_SKINNY_BATCH_SIZE and K*M <= MEDIUM_SKINNY_LIMIT_ELEMENTS:
@@ -96,8 +95,7 @@ def _triton_w4a16_skinny_fmt_kernel(
     BLOCK_N: tl.constexpr,
     BLOCK_K: tl.constexpr,
 ):
-    """
-    Fused W4A16 GEMM reading weights from skinny format [N, K//8].
+    """Fused W4A16 GEMM reading weights from skinny format [N, K//8].
 
     B is stored as [N, K//8] int32 using ExLlama shuffle packing:
       each int32 packs 8 K-values with interleave [0,2,4,6,1,3,5,7]:
@@ -198,8 +196,7 @@ def triton_w4a16_skinny_fmt_gemm(
     zp_bias: int = 8,
     zp: torch.Tensor | None = None,  # [N//8, K//G] int32 zero-points
 ) -> torch.Tensor:
-    """
-    Fused W4A16 GEMM reading from skinny weight format [N, K//8].
+    """Fused W4A16 GEMM reading from skinny weight format [N, K//8].
 
     Args:
         a:          Activation matrix [M, K], float16 or bfloat16.
@@ -213,6 +210,7 @@ def triton_w4a16_skinny_fmt_gemm(
 
     Returns:
         Output matrix [M, N], same dtype as a.
+
     """
     assert a.is_contiguous(), "Activation matrix must be contiguous"
     assert b_q.is_contiguous(), "Weight matrix must be contiguous"

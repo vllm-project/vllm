@@ -152,8 +152,7 @@ def test_video_loader_consistency(
     fps: int,
     backend: str,
 ):
-    """
-    Ensure dynamic video loader (pre-sampled by loader) and normal video
+    """Ensure dynamic video loader (pre-sampled by loader) and normal video
     loader (post-sampled by processor) produce same video processing outputs.
     """
     ctx = build_model_context(

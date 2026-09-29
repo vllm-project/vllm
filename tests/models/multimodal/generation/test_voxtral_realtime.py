@@ -16,12 +16,14 @@ from vllm import LLM, SamplingParams
 from vllm.assets.audio import AudioAsset
 from vllm.config import CUDAGraphMode
 from vllm.engine.arg_utils import AsyncEngineArgs
+from vllm.engine.protocol import StreamingInput
 from vllm.platforms import current_platform
+from vllm.renderers.inputs.preprocess import parse_model_prompt
 from vllm.utils.math_utils import cdiv
 from vllm.v1.engine.async_llm import AsyncLLM
 from vllm.v1.kv_cache_interface import SlidingWindowSpec
 
-from ....utils import ROCM_ENGINE_KWARGS
+from ....utils import ROCM_ENGINE_KWARGS, create_new_process_for_each_test
 
 MODEL_NAME = "mistralai/Voxtral-Mini-4B-Realtime-2602"
 AUDIO_LAYER_NAME = "whisper_encoder.whisper_encoder.layers.0.layers.self_attn.attn"
@@ -192,6 +194,7 @@ def test_voxtral_realtime_forward(audio_assets, tokenizer, vllm_runner, monkeypa
     "cudagraph_mode",
     [CUDAGraphMode.FULL_DECODE_ONLY, CUDAGraphMode.FULL_AND_PIECEWISE],
 )
+@create_new_process_for_each_test(method="spawn")
 def test_voxtral_realtime_cudagraph(
     audio_assets, tokenizer, vllm_runner, monkeypatch, cudagraph_mode
 ):
@@ -221,6 +224,14 @@ async def test_voxtral_realtime_generator(audio_assets, tokenizer, async_engine)
     sampling_params = SamplingParams(temperature=0.0, max_tokens=1)
     audio_config = tokenizer.instruct_tokenizer.audio_encoder.audio_config
 
+    async def input_stream(audio_buffer):
+        async for prompt in audio_buffer.get_input_stream():
+            parsed_prompt = parse_model_prompt(async_engine.model_config, prompt)
+            (engine_input,) = await async_engine.renderer.render_cmpl_async(
+                [parsed_prompt]
+            )
+            yield StreamingInput(prompt=engine_input)
+
     output_tokens_list = []
     for i, audio_asset in enumerate(audio_assets):
         output_tokens = []
@@ -240,7 +251,7 @@ async def test_voxtral_realtime_generator(audio_assets, tokenizer, async_engine)
         request_id = f"session-{i}"
 
         async for resp in async_engine.generate(
-            prompt=buffer.get_input_stream(),
+            prompt=input_stream(buffer),
             sampling_params=sampling_params,
             request_id=request_id,
         ):

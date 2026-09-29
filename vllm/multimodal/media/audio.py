@@ -92,6 +92,10 @@ def load_audio_pyav(
     Args:
         path: A :class:`~io.BytesIO` buffer, a filesystem
             :class:`~pathlib.Path`, or a string path.
+        sr: Target sample rate, or None to keep the native rate.
+        mono: Whether to average the channels down to mono.
+        max_decode_bytes: If set, abort decoding once this many bytes have
+            been read from the source.
         max_duration_s: If set, abort decoding once the accumulated
             sample count exceeds this many seconds of audio.  Prevents
             decompression-bomb attacks where a small compressed file
@@ -100,6 +104,7 @@ def load_audio_pyav(
     Returns:
         ``(waveform, sample_rate)`` where *waveform* is a 1-D float32
         NumPy array and *sample_rate* is the native sample rate in Hz.
+
     """
     try:
         container = av.open(path)
@@ -209,7 +214,7 @@ def load_audio_soundfile(
     max_duration_s: float | None = None,
     max_decode_bytes: int | None = None,
 ) -> tuple[np.ndarray, int]:
-    """Load audio via soundfile"""
+    """Load audio via soundfile."""
     with soundfile.SoundFile(path) as f:
         native_sr = f.samplerate
         if max_duration_s is not None:
@@ -274,6 +279,7 @@ def load_audio_torchcodec(
         ``(waveform, sample_rate)`` where *waveform* is a float32 NumPy
         array (1-D when ``mono=True``) and *sample_rate* is the output
         sample rate in Hz.
+
     """
     if AudioDecoder is None:
         # Unify "torchcodec not installed" and "system ffmpeg missing" into
@@ -412,10 +418,17 @@ def load_audio(
     """Load audio using the selected decoding backend.
 
     Args:
+        path: Audio file path or in-memory buffer.
+        sr: Target sample rate, or None to keep the native rate.
+        mono: Whether to downmix to a single channel.
+        max_duration_s: Reject audio longer than this many seconds.
+        max_decode_bytes: Reject audio that would decode to more than this
+            many bytes.
         backend: One of ``AUDIO_BACKENDS``. ``None`` (default) selects
             ``"auto"``, which tries soundfile, then torchcodec, then PyAV;
             the other values select a single
             backend with no fallback.
+
     """
     backend = backend or "auto"
     if backend not in AUDIO_BACKENDS:
