@@ -13,6 +13,11 @@ from vllm.model_executor.kernels.linear.mixed_precision.cpu import (  # noqa: E4
     _get_isa_hint,
 )
 
+# Isolated runs of cpu_gemm_wna16 can hang unless AMX tiles are initialized.
+# Guard so non-AMX hosts still take the vec/rvv path.
+if torch.cpu._is_amx_tile_supported():
+    torch.cpu._init_amx()
+
 
 @pytest.mark.cpu_test
 def test_cpu_gemm_wna16_3d_input():
