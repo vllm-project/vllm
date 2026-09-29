@@ -8,11 +8,7 @@ from tests.models.utils import GenerateModelInfo
 from .ppl_utils import vqa_ppl_test
 
 MODELS = [
-    (
-        GenerateModelInfo("zai-org/GLM-OCR", hf_ppl=13.885052680969238),
-        28,
-        {},
-    ),
+    (GenerateModelInfo("zai-org/GLM-OCR", hf_ppl=13.885052680969238), 28),
 ]
 
 
@@ -26,23 +22,19 @@ def _pixel_size(factor: int):
     }
 
 
-@pytest.mark.parametrize("model_info,factor,extra_kwargs", MODELS)
+@pytest.mark.parametrize("model_info,factor", MODELS)
 @pytest.mark.parametrize("mm_device_do_normalize", [True, False])
 def test_ppl(
     hf_runner,
     vllm_runner,
     model_info: GenerateModelInfo,
     factor: int,
-    extra_kwargs: dict,
     mm_device_do_normalize: bool,
 ):
     vqa_ppl_test(
         hf_runner,
         vllm_runner,
         model_info,
-        vllm_extra_kwargs={
-            "mm_device_do_normalize": mm_device_do_normalize,
-            **extra_kwargs,
-        },
+        vllm_extra_kwargs={"mm_device_do_normalize": mm_device_do_normalize},
         mm_processor_kwargs=_pixel_size(factor),
     )
