@@ -1175,3 +1175,114 @@ class TestNestedSchemaCoercion:
         assert questions[0]["question"] == "Pick a color"
         assert questions[0]["multiSelect"] is False
         assert questions[0]["answer"] is None
+
+
+class TestMalformedParameterElements:
+    """A parameter element the model wrote slightly off must not leak.
+
+    Measured on vLLM 0.28.0 with Qwen3.5 (vllm-project/vllm#55495): elements
+    such as ``<parameter=\n...\n</parameter>`` (name missing),
+    ``<parameter=>...</parameter>`` (name empty),
+    ``<parameter=ids: [...]\n</parameter>`` (``>`` missing) and
+    ``<parameter=note=\n</parameter>`` (empty value, stray ``=``) made the
+    partial converter emit everything up to the closing tag's ``>`` as a key.
+    The final conversion did not, the streamed prefix could not be extended,
+    and the client was left with an unterminated JSON object. Streaming and
+    non-streaming must agree, and both must be valid JSON.
+    """
+
+    MALFORMED_BODIES = [
+        # name missing: the model put the value straight after ``=``
+        (
+            "<function=exec_command>\n"
+            "<parameter=cmd>timeout 7 bash -lc 'echo hi'</parameter>\n"
+            "<parameter=\necho SAC_NAME=$SAC_NAME; echo CCA=$SCITEX_CARDS_AGENT_ID\n"
+            "</parameter>\n"
+            "</function>\n"
+        ),
+        # ``>`` missing after the name
+        (
+            "<function=ack_notifications>\n"
+            "<parameter=agent>handyman-01</parameter>\n"
+            '<parameter=ids: ["n_77fe30340532", "n_6b9520e4bc2e"]\n'
+            "</parameter>\n"
+            "</function>\n"
+        ),
+        # stray ``=`` and an empty value
+        (
+            "<function=add_task>\n"
+            "<parameter=agent>handyman-01</parameter>\n"
+            "<parameter=id>hm01-cla-callee-pin-bump-20260905</parameter>\n"
+            "<parameter=note=\n</parameter>\n"
+            "</function>\n"
+        ),
+        # name empty but the element otherwise well formed
+        (
+            "<function=exec_command>\n"
+            "<parameter=cmd>ls</parameter>\n"
+            "<parameter=>stray value</parameter>\n"
+            "</function>\n"
+        ),
+    ]
+
+    @staticmethod
+    def _chunks(body: str) -> list[str]:
+        # Mimic token-sized deltas: the malformed element arrives in pieces.
+        pieces = ["<tool_call>\n"]
+        step = 7
+        pieces.extend(body[i : i + step] for i in range(0, len(body), step))
+        pieces.append("</tool_call>")
+        return pieces
+
+    @pytest.mark.parametrize("body", MALFORMED_BODIES)
+    def test_streamed_arguments_are_valid_json(self, parser, mock_request, body):
+        results = simulate_tool_streaming(parser, mock_request, self._chunks(body))
+
+        args_text = collect_tool_arguments(results)
+        parsed = json.loads(args_text)  # must not raise
+
+        assert isinstance(parsed, dict)
+
+    @pytest.mark.parametrize("body", MALFORMED_BODIES)
+    def test_streaming_agrees_with_non_streaming(self, parser, mock_request, body):
+        streamed = json.loads(
+            collect_tool_arguments(
+                simulate_tool_streaming(parser, mock_request, self._chunks(body))
+            )
+        )
+
+        result = parser.extract_tool_calls(
+            "<tool_call>\n" + body + "</tool_call>", mock_request
+        )
+        assert result.tools_called is True
+        final = json.loads(result.tool_calls[0].function.arguments)
+
+        assert streamed == final
+
+    def test_empty_parameter_name_is_dropped(self, parser, mock_request):
+        body = self.MALFORMED_BODIES[3]
+
+        result = parser.extract_tool_calls(
+            "<tool_call>\n" + body + "</tool_call>", mock_request
+        )
+
+        assert json.loads(result.tool_calls[0].function.arguments) == {"cmd": "ls"}
+
+    def test_well_formed_parameters_still_parse(self, parser, mock_request):
+        body = (
+            "<function=exec_command>\n"
+            "<parameter=cmd>timeout 7 bash -lc 'echo SAC_NAME=$SAC_NAME; "
+            "echo CCA=$SCITEX_CARDS_AGENT_ID'</parameter>\n"
+            "<parameter=cwd>/work</parameter>\n"
+            "</function>\n"
+        )
+
+        result = parser.extract_tool_calls(
+            "<tool_call>\n" + body + "</tool_call>", mock_request
+        )
+
+        assert json.loads(result.tool_calls[0].function.arguments) == {
+            "cmd": "timeout 7 bash -lc 'echo SAC_NAME=$SAC_NAME; "
+            "echo CCA=$SCITEX_CARDS_AGENT_ID'",
+            "cwd": "/work",
+        }
