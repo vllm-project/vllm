@@ -398,34 +398,44 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
     def _pop_matching_registration(self, request_id: str) -> dict[str, Any] | None:
         """Pop the D-side registration matching *request_id*.
 
-        Exact key first, then a match after stripping the random suffix from
-        both sides. No match leaves the request unmatched (push not started).
+        See ``_pop_matching`` for the lookup. No match leaves the request
+        unmatched (push not started).
         """
-        data = self._pending_d_registrations.pop(request_id, None)
-        if data is not None:
-            return data
-        base_id = get_base_request_id(request_id)
-        for reg_id in list(self._pending_d_registrations):
-            if get_base_request_id(reg_id) == base_id:
-                return self._pending_d_registrations.pop(reg_id)
-        return None
+        match = self._pop_matching(self._pending_d_registrations, request_id)
+        return match[1] if match is not None else None
 
     def _pop_matching_finished_blocks(
         self, request_id: str
     ) -> tuple[str, BlockIds] | None:
-        """Pop the P-side finished blocks matching *request_id*.
+        """Pop the P-side finished blocks matching *request_id*."""
+        return self._pop_matching(self._push_finished_blocks, request_id)
 
-        Same lookup as ``_pop_matching_registration``: exact key, then a
-        match after stripping the random suffix from both sides.
+    @staticmethod
+    def _pop_matching(
+        pending: dict[ReqId, Any], request_id: str
+    ) -> tuple[ReqId, Any] | None:
+        """Get the matching entry by:
+        - looking for an exact match in request id
+        - or a match in the base id
+
+        If the base id matches multiple requests, the newest one is returned
+        and the rest are dropped.
         """
-        blocks = self._push_finished_blocks.pop(request_id, None)
-        if blocks is not None:
-            return request_id, blocks
-        base_id = get_base_request_id(request_id)
-        for fin_id in list(self._push_finished_blocks):
-            if get_base_request_id(fin_id) == base_id:
-                return fin_id, self._push_finished_blocks.pop(fin_id)
-        return None
+        if request_id in pending:
+            return request_id, pending.pop(request_id)
+        base_request_id = get_base_request_id(request_id)
+        matches = [
+            rid for rid in pending if get_base_request_id(rid) == base_request_id
+        ]
+        if len(matches) == 0:
+            return None
+
+        # Keep newest and drop the remaining stale requests
+        newest = matches.pop()
+        for stale in matches:
+            logger.warning("Dropping push entry %s superseded by %s", stale, newest)
+            del pending[stale]
+        return newest, pending.pop(newest)
 
     # --- WRITE transfer logic (writer thread) ------------------------- #
 

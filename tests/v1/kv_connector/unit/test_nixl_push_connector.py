@@ -576,6 +576,63 @@ class TestPushWriterMatching:
         assert w.start_push_calls[0][0] == p_id
         assert p_id not in w._push_finished_blocks
 
+    def test_retry_pushes_to_newest_registration(self):
+        # Given
+        base_id = "cmpl-12345678-aaaa-bbbb-cccc-1234567890ab-0"
+        d_1, d_2 = f"{base_id}-ddddddd1", f"{base_id}-ddddddd2"
+        p_2 = f"{base_id}-aaaaaaa2"
+        w = _StubWriterWorker.fresh()
+        for d_id in (d_1, d_2):
+            w._handle_push_reg_notif(
+                PUSH_REG_NOTIF_PREFIX + msgspec.msgpack.encode(_registration_data(d_id))
+            )
+
+        # When
+        registration = w._pop_matching_registration(p_2)
+
+        # Then
+        assert registration is not None
+        assert registration["request_id"] == d_2
+
+    def test_retry_drops_stale_registration(self):
+        # Given
+        base_id = "cmpl-12345678-aaaa-bbbb-cccc-1234567890ab-0"
+        d_1, d_2 = f"{base_id}-ddddddd1", f"{base_id}-ddddddd2"
+        p_2, p_3 = f"{base_id}-aaaaaaa2", f"{base_id}-aaaaaaa3"
+        w = _StubWriterWorker.fresh()
+        for d_id in (d_1, d_2):
+            w._handle_push_reg_notif(
+                PUSH_REG_NOTIF_PREFIX + msgspec.msgpack.encode(_registration_data(d_id))
+            )
+        w._pop_matching_registration(p_2)
+
+        # When
+        registration = w._pop_matching_registration(p_3)
+
+        # Then
+        assert registration is None
+
+    def test_retry_pushes_newest_finished_blocks(self):
+        # Given
+        base_id = "cmpl-12345678-aaaa-bbbb-cccc-1234567890ab-0"
+        p_1, p_2 = f"{base_id}-aaaaaaa1", f"{base_id}-aaaaaaa2"
+        d_2 = f"{base_id}-ddddddd2"
+        w = _StubWriterWorker.fresh()
+        w._push_finished_blocks[p_1] = ([1, 2],)
+        w._push_finished_blocks[p_2] = ([3, 4],)
+
+        # When
+        w._handle_push_reg_notif(
+            PUSH_REG_NOTIF_PREFIX + msgspec.msgpack.encode(_registration_data(d_2))
+        )
+
+        # Then
+        assert len(w.start_push_calls) == 1
+        rid, blocks, registration = w.start_push_calls[0]
+        assert rid == p_2
+        assert blocks == ([3, 4],)
+        assert registration["request_id"] == d_2
+
     def test_handle_push_reg_drops_malformed(self, caplog):
         # The writer logs WARNING/ERROR when it sees these bad payloads;
         # that's the desired behavior, so suppress the noise from test
