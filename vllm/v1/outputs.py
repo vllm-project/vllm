@@ -225,11 +225,18 @@ class KVConnectorOutput:
     # It captures a static setup info and should almost always remain constant
     # for a given connector after discovery. Default value entails no change.
     expected_finished_count: int = 0
+    # Request ID -> (transfer ID, exclusive token boundary, prompt digest).
+    # Present only when every worker certifies that a remote load restored
+    # replay-managed state at the same boundary.
+    prefix_replay_checkpoints: dict[str, tuple[str, int, str]] = field(
+        default_factory=dict
+    )
 
     def is_empty(self):
         return (
             not self.finished_sending
             and not self.finished_recving
+            and not self.prefix_replay_checkpoints
             and not self.kv_connector_stats
             and not self.kv_cache_events
             and not self.invalid_block_ids

@@ -17,6 +17,7 @@ from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
 from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorRole
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1,
+    KVConnectorTransferResults,
     SupportsHMA,
     supports_hma,
 )
@@ -230,6 +231,33 @@ def test_multi_connector_rejects_multiple_mem_pool_contexts(mc: MultiConnector):
         match="Multiple connectors provide a KV cache memory pool",
     ):
         mc.get_mem_pool_context()
+
+
+def test_multi_connector_routes_prefix_replay_checkpoint(mc: MultiConnector):
+    request = MagicMock(request_id="req")
+    mc._requests_to_connector[request.request_id] = 1
+    mc._connectors[1].consume_prefix_replay_checkpoint.return_value = True
+
+    assert mc.consume_prefix_replay_checkpoint(request, 4096)
+    mc._connectors[0].consume_prefix_replay_checkpoint.assert_not_called()
+    mc._connectors[1].consume_prefix_replay_checkpoint.assert_called_once_with(
+        request, 4096
+    )
+
+
+def test_multi_connector_drops_conflicting_prefix_replay_checkpoints(
+    mc: MultiConnector,
+):
+    checkpoint = ("transfer", 4096, "prompt")
+    mc._connectors[0].get_transfer_results.return_value = KVConnectorTransferResults(
+        prefix_replay_checkpoints={"req": checkpoint}
+    )
+    mc._connectors[1].get_transfer_results.return_value = KVConnectorTransferResults(
+        prefix_replay_checkpoints={"req": ("transfer", 4032, "prompt")}
+    )
+
+    results = mc.get_transfer_results(set())
+    assert not results.prefix_replay_checkpoints
 
 
 # Helper function to compare directories recursively

@@ -4,6 +4,8 @@
 the hit to rebuild the non-cacheable sliding-window group, keeps the hit's
 blocks, and hands the worker the replay start."""
 
+from unittest.mock import MagicMock
+
 import pytest
 import torch
 
@@ -217,6 +219,58 @@ def test_async_remote_kv_hit_replays_after_load():
         out.num_scheduled_tokens[request.request_id]
         == NUM_PROMPT_TOKENS - matched + WINDOW
     )
+
+
+@pytest.mark.parametrize("matched_tokens", [HIT_TOKENS - 1, HIT_TOKENS])
+def test_certified_remote_checkpoint_only_recomputes_last_token(matched_tokens):
+    """A complete remote replay checkpoint keeps its SWA tail."""
+    prompt_tokens = HIT_TOKENS
+    scheduler = _replay_scheduler(
+        use_kv_connector=MockKVConfig(
+            matched_tokens=matched_tokens,
+            is_async=True,
+            certifies_prefix_replay=True,
+        )
+    )
+    request = create_requests(
+        num_requests=1, num_tokens=prompt_tokens, block_size=BLOCK_SIZE
+    )[0]
+    scheduler.add_request(request)
+    out = scheduler.schedule()
+    scheduler.update_from_output(
+        out, create_model_runner_output([], finished_recving={request.request_id})
+    )
+
+    out = scheduler.schedule()
+    new_req = _new_req_data(out, request)
+    assert new_req.replay_start == matched_tokens - WINDOW
+    assert new_req.num_computed_tokens == prompt_tokens - 1
+    assert out.num_scheduled_tokens[request.request_id] == 1
+
+
+def test_uncertified_partial_checkpoint_falls_back_to_aligned_replay():
+    matched_tokens = HIT_TOKENS - 1
+    scheduler = _replay_scheduler(
+        use_kv_connector=MockKVConfig(
+            matched_tokens=matched_tokens,
+            is_async=True,
+        )
+    )
+    scheduler.connector.can_load_prefix_replay_checkpoint = MagicMock(return_value=True)
+    request = create_requests(
+        num_requests=1, num_tokens=HIT_TOKENS, block_size=BLOCK_SIZE
+    )[0]
+    scheduler.add_request(request)
+    out = scheduler.schedule()
+    scheduler.update_from_output(
+        out, create_model_runner_output([], finished_recving={request.request_id})
+    )
+
+    out = scheduler.schedule()
+    new_req = _new_req_data(out, request)
+    aligned_hit = matched_tokens // BLOCK_SIZE * BLOCK_SIZE
+    assert new_req.replay_start == aligned_hit - WINDOW
+    assert new_req.num_computed_tokens == aligned_hit - WINDOW
 
 
 def test_remote_kv_hit_is_taken_in_whole_blocks():

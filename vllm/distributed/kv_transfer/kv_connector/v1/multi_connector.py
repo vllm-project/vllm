@@ -358,10 +358,20 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
         self, finished_req_ids: set[str]
     ) -> KVConnectorTransferResults:
         results = KVConnectorTransferResults()
+        conflicting_checkpoints: set[str] = set()
         for connector in self._connectors:
             child_results = connector.get_transfer_results(finished_req_ids)
             results.finished_recving.update(child_results.finished_recving)
             results.failed_recving.update(child_results.failed_recving)
+            for req_id, checkpoint in child_results.prefix_replay_checkpoints.items():
+                if req_id in conflicting_checkpoints:
+                    continue
+                existing = results.prefix_replay_checkpoints.get(req_id)
+                if existing is None:
+                    results.prefix_replay_checkpoints[req_id] = checkpoint
+                elif existing != checkpoint:
+                    results.prefix_replay_checkpoints.pop(req_id)
+                    conflicting_checkpoints.add(req_id)
             for req_id in child_results.finished_sending:
                 extra_pending = self._extra_async_saves.get(req_id)
                 if extra_pending is None:
@@ -459,6 +469,19 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
                 # Other connectors still receive the request's real blocks
                 c.update_state_after_alloc(request, blocks, 0)
 
+    def can_load_prefix_replay_checkpoint(
+        self,
+        request: "Request",
+        num_local_tokens: int,
+        num_external_tokens: int,
+    ) -> bool:
+        connector_index = self._requests_to_connector.get(request.request_id)
+        if connector_index is None:
+            return False
+        return self._connectors[connector_index].can_load_prefix_replay_checkpoint(
+            request, num_local_tokens, num_external_tokens
+        )
+
     def on_new_request(self, request: "Request") -> None:
         for c in self._connectors:
             c.on_new_request(request)
@@ -496,6 +519,18 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
         finally:
             # restore kv_connector_worker_meta
             connector_output.kv_connector_worker_meta = multi_connector_worker_meta
+
+    def consume_prefix_replay_checkpoint(
+        self,
+        request: "Request",
+        num_hit_tokens: int,
+    ) -> bool:
+        connector_index = self._requests_to_connector.get(request.request_id)
+        if connector_index is None:
+            return False
+        return self._connectors[connector_index].consume_prefix_replay_checkpoint(
+            request, num_hit_tokens
+        )
 
     def get_handshake_metadata(self) -> KVConnectorHandshakeMetadata | None:
         """Get the KVConnector handshake metadata from sub-connectors.

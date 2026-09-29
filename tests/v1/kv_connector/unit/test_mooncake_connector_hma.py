@@ -7,7 +7,7 @@ send trimming, and group-count invariant checking in _build_transfer_params.
 """
 
 import asyncio
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
@@ -19,6 +19,8 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_connector im
     MooncakeConnectorMetadata,
     MooncakeConnectorScheduler,
     MooncakeXferMetadata,
+    MooncakeXferResponse,
+    MooncakeXferResponseStatus,
     PullReqMeta,
     SendBlockMeta,
     TransferRegion,
@@ -27,7 +29,10 @@ from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
+    MambaSpec,
+    SlidingWindowMLASpec,
 )
+from vllm.v1.outputs import KVConnectorOutput
 
 from .test_mooncake_connector import FakeMooncakeWrapper, patch_worker_dependencies
 from .utils import create_request, create_vllm_config, make_kv_cache_config
@@ -205,11 +210,71 @@ def test_metadata_hma_block_ids():
     )
 
     assert "send-req" in metadata.reqs_to_send
-    transfer_id, stored_blocks = metadata.reqs_to_send["send-req"]
+    transfer_id, stored_blocks, replay_checkpoint, prompt_digest = (
+        metadata.reqs_to_send["send-req"]
+    )
     assert transfer_id == "send-req"
     assert len(stored_blocks) == 2
     assert stored_blocks[0] == fa_blocks
     assert stored_blocks[1] == sw_blocks
+    assert replay_checkpoint is None
+    assert prompt_digest is None
+
+
+@pytest.mark.cpu_test
+def test_late_prefix_replay_checkpoint_is_ignored():
+    vllm_config = create_vllm_config(
+        kv_connector="MooncakeConnector",
+        kv_role="kv_consumer",
+        block_size=16,
+    )
+    scheduler = MooncakeConnectorScheduler(
+        vllm_config=vllm_config,
+        engine_id="test-engine",
+        kv_cache_config=make_kv_cache_config(
+            block_size=16, swa_enabled=True, sw_size=128
+        ),
+    )
+    scheduler._prefill_side_replay = True
+    checkpoint = ("transfer", 4096, "prompt")
+
+    scheduler.update_connector_output(
+        KVConnectorOutput(prefix_replay_checkpoints={"req": checkpoint})
+    )
+    assert not scheduler._loaded_prefix_replay_checkpoints
+
+    scheduler._expected_prefix_replay_checkpoints["req"] = checkpoint
+    scheduler.update_connector_output(
+        KVConnectorOutput(prefix_replay_checkpoints={"req": checkpoint})
+    )
+    assert scheduler._loaded_prefix_replay_checkpoints == {"req": checkpoint}
+
+
+@pytest.mark.cpu_test
+def test_gdn_consumer_checkpoint_ends_before_last_prompt_token():
+    vllm_config = create_vllm_config(
+        kv_connector="MooncakeConnector",
+        kv_role="kv_consumer",
+        block_size=16,
+    )
+    scheduler = MooncakeConnectorScheduler(
+        vllm_config=vllm_config,
+        engine_id="test-engine",
+        kv_cache_config=make_kv_cache_config(
+            block_size=16, swa_enabled=True, sw_size=32
+        ),
+    )
+    scheduler._prefill_side_replay = True
+    scheduler._has_mamba = True
+    scheduler.prefix_replay_tokens = 32
+    request = create_request(
+        num_tokens=96,
+        do_remote_prefill=True,
+        block_size=16,
+    )
+
+    assert scheduler._get_prefix_replay_checkpoint(request) == 95
+    assert scheduler.can_load_prefix_replay_checkpoint(request, 0, 95)
 
 
 # ---------------------------------------------------------------------------
@@ -543,3 +608,127 @@ def test_worker_failed_recv_reports_block_ids_without_hma():
     results = worker.get_transfer_results()
     assert results.failed_recving == set()
     assert results.finished_recving == {"d-req-1"}
+
+
+def test_prefix_replay_checkpoint_requires_complete_group_coverage():
+    kv_cache_config = KVCacheConfig(
+        num_blocks=100,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                ["full"],
+                FullAttentionSpec(
+                    block_size=16,
+                    num_kv_heads=4,
+                    head_size=16,
+                    dtype=torch.float16,
+                ),
+            ),
+            KVCacheGroupSpec(
+                ["swa"],
+                SlidingWindowMLASpec(
+                    block_size=16,
+                    num_kv_heads=4,
+                    head_size=64,
+                    dtype=torch.float16,
+                    sliding_window=32,
+                    bounded_replay=True,
+                ),
+            ),
+            KVCacheGroupSpec(
+                ["gdn"],
+                MambaSpec(
+                    block_size=16,
+                    shapes=((16,),),
+                    dtypes=(torch.float16,),
+                ),
+            ),
+        ],
+    )
+    worker = _make_kv_consumer_worker(kv_cache_config=kv_cache_config)
+    worker._prefill_side_replay = True
+    send_meta = SendBlockMeta(
+        p_req_id="p-req",
+        transfer_id="tx-1",
+        local_block_ids=[[0, 1, 2, 3, 4, 5], [10, 11, 12], [20]],
+        ready=asyncio.Event(),
+        prefix_replay_checkpoint=96,
+        prefix_replay_prompt_digest="prompt-digest",
+        producer_ready_event=MagicMock(),
+        producer_ready_event_waited=True,
+    )
+    metadata = MooncakeXferMetadata(
+        remote_hostname="consumer-host",
+        remote_port=54321,
+        remote_tp_size=1,
+        remote_tp_rank=0,
+        req_blocks={"d-req": ("tx-1", [[100, 101], [110, 111, 112], [120]])},
+        kv_caches_base_addr=[],
+        block_lens=[],
+        kv_block_lens=[],
+        prefix_replay_protocol=1,
+        prefix_replay_layout=worker._prefix_replay_layout_fingerprint(),
+        prefix_replay_checkpoints={"d-req": (96, 64, "prompt-digest")},
+    )
+
+    assert worker._certify_prefix_replay_checkpoints(
+        [("d-req", send_meta)], metadata
+    ) == {"d-req": (96, "prompt-digest")}
+
+    metadata.prefix_replay_checkpoints["d-req"] = (96, 64, "other-prompt")
+    assert not worker._certify_prefix_replay_checkpoints(
+        [("d-req", send_meta)], metadata
+    )
+    metadata.prefix_replay_checkpoints["d-req"] = (96, 64, "prompt-digest")
+    metadata.req_blocks["d-req"][1][1].pop()
+    assert not worker._certify_prefix_replay_checkpoints(
+        [("d-req", send_meta)], metadata
+    )
+    worker.shutdown()
+
+
+def test_prefix_replay_checkpoint_requires_every_remote_worker():
+    worker = _make_kv_consumer_worker(swa_enabled=True)
+    pull_meta = _make_pull_meta("d-req", [[1], [2]])
+    pull_meta.prefix_replay_checkpoint = 96
+    pull_meta.prefix_replay_prompt_digest = "prompt-digest"
+    pull_meta.pull_tasks_count = 2
+    pull_meta.pull_tasks_total = 2
+    pull_metas = {"d-req": pull_meta}
+    response = MooncakeXferResponse(
+        status=MooncakeXferResponseStatus.CONTINUE,
+        ok_reqs=["d-req"],
+        prefix_replay_checkpoints={"d-req": (96, "prompt-digest")},
+    )
+
+    worker.process_pulling_result(response, pull_metas)
+    assert not worker.get_transfer_results().prefix_replay_checkpoints
+
+    response.status = MooncakeXferResponseStatus.FINISH
+    worker.process_pulling_result(response, pull_metas)
+    results = worker.get_transfer_results()
+    assert results.finished_recving == {"d-req"}
+    assert results.prefix_replay_checkpoints == {"d-req": ("tx-1", 96, "prompt-digest")}
+    worker.shutdown()
+
+
+def test_missing_prefix_replay_checkpoint_fails_receive():
+    worker = _make_kv_consumer_worker(swa_enabled=True)
+    pull_meta = _make_pull_meta("d-req", [[1], [2]])
+    pull_meta.prefix_replay_checkpoint = 95
+    pull_meta.prefix_replay_prompt_digest = "prompt-digest"
+    pull_meta.pull_tasks_count = 1
+    pull_meta.pull_tasks_total = 1
+
+    worker.process_pulling_result(
+        MooncakeXferResponse(
+            status=MooncakeXferResponseStatus.FINISH,
+            ok_reqs=["d-req"],
+        ),
+        {"d-req": pull_meta},
+    )
+    results = worker.get_transfer_results()
+    assert results.finished_recving == {"d-req"}
+    assert results.failed_recving == {"d-req"}
+    assert not results.prefix_replay_checkpoints
+    worker.shutdown()

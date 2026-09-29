@@ -146,6 +146,7 @@ def create_scheduler(
                 "num_defers_before_matching": (
                     use_kv_connector.num_defers_before_matching
                 ),
+                "certifies_prefix_replay": (use_kv_connector.certifies_prefix_replay),
             },
         )
     elif isinstance(use_kv_connector, str):

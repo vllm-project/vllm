@@ -16,11 +16,13 @@ class DummyModelRunnerOutput(ModelRunnerOutput):
         finished_recving: set[str] | None = None,
         invalid_block_ids: set[int] | None = None,
         failed_recving: set[str] | None = None,
+        prefix_replay_checkpoints: dict[str, tuple[str, int, str]] | None = None,
         expected_finished_count: int = 0,
     ):
         self.kv_connector_output = KVConnectorOutput(
             finished_sending=finished_sending,
             finished_recving=finished_recving,
+            prefix_replay_checkpoints=prefix_replay_checkpoints or {},
             invalid_block_ids=invalid_block_ids or set(),
             failed_recving=failed_recving or set(),
             expected_finished_count=expected_finished_count,
@@ -95,6 +97,14 @@ def test_aggregate_workers_output():
     assert aggregated.kv_connector_output.failed_recving == {"req3"}
 
 
+def test_prefix_replay_field_preserves_positional_constructor_order():
+    stats = object()
+    output = KVConnectorOutput({"sent"}, {"received"}, stats)  # type: ignore[arg-type]
+
+    assert output.kv_connector_stats is stats
+    assert not output.prefix_replay_checkpoints
+
+
 def test_aggregate_workers_output_with_expected_finished_count():
     # We create the aggregator expecting to collect from 4 workers
     aggregator = KVOutputAggregator(expected_finished_count=4)
@@ -130,3 +140,57 @@ def test_aggregate_workers_output_with_expected_finished_count():
     # NOTE: This is to showcase dynamic update. Workers are responsible for
     # ensuring "req1" termination in this case
     assert aggregator._send_remaining_count["req1"] == 2
+
+
+def test_prefix_replay_checkpoint_requires_all_workers_to_agree():
+    aggregator = KVOutputAggregator(expected_finished_count=2)
+    checkpoint = ("transfer-1", 4096, "prompt-digest")
+
+    aggregated = aggregator.aggregate(
+        [
+            DummyModelRunnerOutput(
+                finished_recving={"req"},
+                prefix_replay_checkpoints={"req": checkpoint},
+            ),
+            DummyModelRunnerOutput(),
+        ]
+    )
+    assert not aggregated.kv_connector_output.finished_recving
+    assert not aggregated.kv_connector_output.prefix_replay_checkpoints
+
+    aggregated = aggregator.aggregate(
+        [
+            DummyModelRunnerOutput(),
+            DummyModelRunnerOutput(
+                finished_recving={"req"},
+                prefix_replay_checkpoints={"req": checkpoint},
+            ),
+        ]
+    )
+    assert aggregated.kv_connector_output.finished_recving == {"req"}
+    assert aggregated.kv_connector_output.prefix_replay_checkpoints == {
+        "req": checkpoint
+    }
+
+
+def test_prefix_replay_checkpoint_disagreement_fails_closed():
+    aggregator = KVOutputAggregator(expected_finished_count=2)
+    aggregated = aggregator.aggregate(
+        [
+            DummyModelRunnerOutput(
+                finished_recving={"req"},
+                prefix_replay_checkpoints={
+                    "req": ("transfer-1", 4096, "prompt-digest")
+                },
+            ),
+            DummyModelRunnerOutput(
+                finished_recving={"req"},
+                prefix_replay_checkpoints={
+                    "req": ("transfer-1", 4032, "prompt-digest")
+                },
+            ),
+        ]
+    )
+
+    assert aggregated.kv_connector_output.finished_recving == {"req"}
+    assert not aggregated.kv_connector_output.prefix_replay_checkpoints

@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import asyncio
+import hashlib
 import logging
 import queue
 import threading
@@ -71,6 +72,7 @@ from vllm.v1.worker.utils import select_common_block_size
 logger = init_logger(__name__)
 
 _BOOTSTRAP_MAX_ATTEMPTS: Final[int] = 3
+_PREFIX_REPLAY_PROTOCOL_VERSION: Final[int] = 1
 
 try:
     from mooncake.engine import TransferEngine
@@ -85,10 +87,38 @@ except ImportError:
 if TYPE_CHECKING:
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
     from vllm.v1.kv_cache_interface import KVCacheConfig
+    from vllm.v1.outputs import KVConnectorOutput
     from vllm.v1.request import Request
 
 ReqId = str  # Internal scheduler request ID
 TransferId = str  # KV transfer coordination ID (shared by P/D)
+
+
+def _prefill_side_replay_enabled(
+    vllm_config: VllmConfig,
+    kv_cache_config: "KVCacheConfig",
+) -> bool:
+    kv_config = vllm_config.kv_transfer_config
+    if kv_config is None or not kv_config.kv_connector_extra_config.get(
+        "prefill_side_swa_replay", False
+    ):
+        return False
+    parallel_config = vllm_config.parallel_config
+    model_type = getattr(vllm_config.model_config.hf_config, "model_type", None)
+    has_replay_group = any(
+        group.kv_cache_spec.prefix_replay_tokens > 0
+        for group in kv_cache_config.transfer_groups
+    )
+    return (
+        kv_config.kv_connector == "MooncakeConnector"
+        and kv_config.kv_role in ("kv_producer", "kv_consumer")
+        and model_type == "deepseek_v41"
+        and vllm_config.use_v2_model_runner
+        and parallel_config.pipeline_parallel_size == 1
+        and parallel_config.prefill_context_parallel_size == 1
+        and parallel_config.decode_context_parallel_size == 1
+        and has_replay_group
+    )
 
 
 @dataclass(frozen=True)
@@ -406,6 +436,12 @@ class MooncakeXferMetadata(
     registered_layer_indices: list[int] = msgspec.field(default_factory=list)
     registered_group_indices: list[int] = msgspec.field(default_factory=list)
     remote_pp_size: int = 1
+    prefix_replay_protocol: int = 0
+    prefix_replay_layout: str | None = None
+    # Request ID -> (exclusive boundary, local-hit token count, prompt digest).
+    prefix_replay_checkpoints: dict[ReqId, tuple[int, int, str]] = msgspec.field(
+        default_factory=dict
+    )
 
 
 class MooncakeXferResponseStatus(IntEnum):
@@ -425,6 +461,8 @@ class MooncakeXferResponse(
     ok_reqs: list[ReqId] | None = None
     err_reqs: list[ReqId] | None = None
     err_msg: str | None = None
+    # Request ID -> (exclusive checkpoint boundary, prompt digest).
+    prefix_replay_checkpoints: dict[ReqId, tuple[int, str]] | None = None
 
 
 @dataclass
@@ -438,9 +476,15 @@ class PullReqMeta:
     expire_time: float = float("inf")
     # Designed for one D pairing to multiple P
     pull_tasks_count: int = 0
+    pull_tasks_total: int = 0
     # Set once any worker reports a failure, so a success from another worker
     # for the same request is not counted afterwards.
     failed: bool = False
+    prefix_replay_checkpoint: int | None = None
+    prefix_replay_local_tokens: int = 0
+    prefix_replay_prompt_digest: str | None = None
+    prefix_replay_confirmations: int = 0
+    prefix_replay_failed: bool = False
 
 
 @dataclass
@@ -453,6 +497,10 @@ class SendBlockMeta:
     need_send: int = 0
     sent: int = 0
     sending: int = 0
+    prefix_replay_checkpoint: int | None = None
+    prefix_replay_prompt_digest: str | None = None
+    producer_ready_event: Any | None = None
+    producer_ready_event_waited: bool = False
 
 
 class MooncakeConnectorMetadata(KVConnectorMetadata):
@@ -460,7 +508,9 @@ class MooncakeConnectorMetadata(KVConnectorMetadata):
         # Use (engine_id, dp_rank) to group reqs with same dp.
         # See comments in MooncakeBootstrapServer.
         self.reqs_to_recv: dict[EngineId, dict[ReqId, PullReqMeta]] = defaultdict(dict)
-        self.reqs_to_send: dict[ReqId, tuple[TransferId, list[list[int]]]] = {}
+        self.reqs_to_send: dict[
+            ReqId, tuple[TransferId, list[list[int]], int | None, str | None]
+        ] = {}
         self.reqs_not_processed: set[TransferId] = set()
 
     def add_new_req(
@@ -469,6 +519,9 @@ class MooncakeConnectorMetadata(KVConnectorMetadata):
         local_block_ids: list[list[int]],
         kv_transfer_params: dict[str, Any],
         load_remote_cache: bool = True,
+        prefix_replay_checkpoint: int | None = None,
+        prefix_replay_local_tokens: int = 0,
+        prefix_replay_prompt_digest: str | None = None,
     ):
         transfer_id = kv_transfer_params["transfer_id"]
         if load_remote_cache:
@@ -479,9 +532,17 @@ class MooncakeConnectorMetadata(KVConnectorMetadata):
                 remote_engine_id=remote_engine_id,
                 remote_bootstrap_addr=kv_transfer_params["remote_bootstrap_addr"],
                 transfer_id=transfer_id,
+                prefix_replay_checkpoint=prefix_replay_checkpoint,
+                prefix_replay_local_tokens=prefix_replay_local_tokens,
+                prefix_replay_prompt_digest=prefix_replay_prompt_digest,
             )
         else:
-            self.reqs_to_send[request_id] = (transfer_id, local_block_ids)
+            self.reqs_to_send[request_id] = (
+                transfer_id,
+                local_block_ids,
+                prefix_replay_checkpoint,
+                prefix_replay_prompt_digest,
+            )
 
 
 class MooncakeConnector(KVConnectorBase_V1, SupportsHMA):
@@ -622,7 +683,33 @@ class MooncakeConnector(KVConnectorBase_V1, SupportsHMA):
         pass
 
     def wait_for_save(self):
-        pass
+        assert self.connector_worker is not None
+        self.connector_worker.wait_for_save()
+
+    def update_connector_output(self, connector_output: "KVConnectorOutput"):
+        assert self.connector_scheduler is not None
+        self.connector_scheduler.update_connector_output(connector_output)
+
+    def can_load_prefix_replay_checkpoint(
+        self,
+        request: "Request",
+        num_local_tokens: int,
+        num_external_tokens: int,
+    ) -> bool:
+        assert self.connector_scheduler is not None
+        return self.connector_scheduler.can_load_prefix_replay_checkpoint(
+            request, num_local_tokens, num_external_tokens
+        )
+
+    def consume_prefix_replay_checkpoint(
+        self,
+        request: "Request",
+        num_hit_tokens: int,
+    ) -> bool:
+        assert self.connector_scheduler is not None
+        return self.connector_scheduler.consume_prefix_replay_checkpoint(
+            request, num_hit_tokens
+        )
 
     def get_kv_connector_stats(self) -> KVConnectorStats | None:
         """Return worker-local transfer stats since the last call.
@@ -682,6 +769,13 @@ class MooncakeConnectorScheduler:
         # the scheduler. Used to make metadata passed to Worker.
         self._reqs_need_recv: dict[ReqId, tuple[Request, list[list[int]]]] = {}
         self._reqs_need_send: dict[ReqId, tuple[Request, list[list[int]]]] = {}
+        self._reqs_need_replay_checkpoint: dict[ReqId, tuple[int, int, str]] = {}
+        self._expected_prefix_replay_checkpoints: dict[
+            ReqId, tuple[TransferId, int, str]
+        ] = {}
+        self._loaded_prefix_replay_checkpoints: dict[
+            ReqId, tuple[TransferId, int, str]
+        ] = {}
         # Reqs to remove from processed set because they're not to send after
         # remote prefill or aborted.
         self._reqs_not_processed: set[TransferId] = set()
@@ -699,6 +793,76 @@ class MooncakeConnectorScheduler:
             cdiv(n_tokens, block_size) + 1 if n_tokens else 0
             for n_tokens, block_size in sw_sizes_tokens
         ]
+        self.prefix_replay_tokens = max(
+            (
+                group.kv_cache_spec.prefix_replay_tokens
+                for group in kv_cache_config.transfer_groups
+            ),
+            default=0,
+        )
+        self._prefill_side_replay = _prefill_side_replay_enabled(
+            vllm_config, kv_cache_config
+        )
+        requested_prefill_side_replay = bool(
+            vllm_config.kv_transfer_config.kv_connector_extra_config.get(
+                "prefill_side_swa_replay", False
+            )
+        )
+        if requested_prefill_side_replay and not self._prefill_side_replay:
+            logger.warning(
+                "Mooncake prefill-side SWA replay is disabled because it requires "
+                "DeepSeek-V4.1, model runner V2, direct Mooncake, PP=PCP=DCP=1, "
+                "and at least one bounded-replay cache group."
+            )
+
+    def _get_prefix_replay_checkpoint(self, request: "Request") -> int | None:
+        if (
+            not self._prefill_side_replay
+            or request.num_preemptions
+            or request.prompt_token_ids is None
+            or request.prompt_embeds is not None
+            or request.mm_features
+            or request.lora_request is not None
+        ):
+            return None
+        sampling_params = request.sampling_params
+        if sampling_params is not None and sampling_params.prompt_logprobs is not None:
+            return None
+        checkpoint = (
+            self._get_remote_prefill_token_count(request.num_prompt_tokens)
+            if not self.is_kv_producer
+            else request.num_prompt_tokens
+        )
+        if checkpoint <= self.prefix_replay_tokens or (
+            not self._has_mamba
+            and any(
+                checkpoint % group.kv_cache_spec.block_size
+                for group in self.kv_cache_config.transfer_groups
+            )
+        ):
+            return None
+        return checkpoint
+
+    @staticmethod
+    def _get_prompt_digest(request: "Request", checkpoint: int) -> str:
+        assert request.prompt_token_ids is not None
+        token_bytes = np.asarray(
+            request.prompt_token_ids[:checkpoint], dtype=np.int64
+        ).tobytes()
+        return hashlib.sha256(token_bytes).hexdigest()
+
+    def can_load_prefix_replay_checkpoint(
+        self,
+        request: "Request",
+        num_local_tokens: int,
+        num_external_tokens: int,
+    ) -> bool:
+        checkpoint = self._get_prefix_replay_checkpoint(request)
+        return (
+            checkpoint is not None
+            and num_external_tokens > 0
+            and num_local_tokens + num_external_tokens == checkpoint
+        )
 
     def get_sw_clipped_blocks(
         self,
@@ -828,6 +992,26 @@ class MooncakeConnectorScheduler:
                 local_block_ids = self.get_sw_clipped_blocks(unhashed_block_ids)
                 # Get unhashed blocks to pull from remote.
                 self._reqs_need_recv[request.request_id] = (request, local_block_ids)
+                checkpoint = self._get_prefix_replay_checkpoint(request)
+                prefill_stats = request.prefill_stats
+                if (
+                    checkpoint is not None
+                    and num_external_tokens > 0
+                    and prefill_stats is not None
+                    and prefill_stats.num_local_cached_tokens + num_external_tokens
+                    == checkpoint
+                ):
+                    prompt_digest = self._get_prompt_digest(request, checkpoint)
+                    self._reqs_need_replay_checkpoint[request.request_id] = (
+                        checkpoint,
+                        prefill_stats.num_local_cached_tokens,
+                        prompt_digest,
+                    )
+                    self._expected_prefix_replay_checkpoints[request.request_id] = (
+                        params["transfer_id"],
+                        checkpoint,
+                        prompt_digest,
+                    )
             else:
                 logger.warning(
                     "Got invalid KVTransferParams: %s. This "
@@ -855,27 +1039,84 @@ class MooncakeConnectorScheduler:
         if not self.is_kv_producer:
             for req_id, (req, block_ids) in self._reqs_need_recv.items():
                 assert req.kv_transfer_params is not None
+                checkpoint_request = self._reqs_need_replay_checkpoint.pop(req_id, None)
                 meta.add_new_req(
                     request_id=req_id,
                     local_block_ids=block_ids,
                     kv_transfer_params=req.kv_transfer_params,
+                    prefix_replay_checkpoint=(
+                        checkpoint_request[0] if checkpoint_request else None
+                    ),
+                    prefix_replay_local_tokens=(
+                        checkpoint_request[1] if checkpoint_request else 0
+                    ),
+                    prefix_replay_prompt_digest=(
+                        checkpoint_request[2] if checkpoint_request else None
+                    ),
                 )
             self._reqs_need_recv.clear()
+            self._reqs_need_replay_checkpoint.clear()
 
         if not self.is_kv_consumer:
             for req_id, (req, block_ids) in self._reqs_need_send.items():
                 assert req.kv_transfer_params is not None
+                checkpoint_tokens = self._get_prefix_replay_checkpoint(req)
+                if (
+                    checkpoint_tokens is not None
+                    and req.num_computed_tokens != checkpoint_tokens
+                ):
+                    checkpoint_tokens = None
                 meta.add_new_req(
                     request_id=req_id,
                     local_block_ids=block_ids,
                     kv_transfer_params=req.kv_transfer_params,
                     load_remote_cache=False,
+                    prefix_replay_checkpoint=checkpoint_tokens,
+                    prefix_replay_prompt_digest=(
+                        self._get_prompt_digest(req, checkpoint_tokens)
+                        if checkpoint_tokens is not None
+                        else None
+                    ),
                 )
             self._reqs_need_send.clear()
             meta.reqs_not_processed = self._reqs_not_processed
             self._reqs_not_processed = set()
 
         return meta
+
+    def update_connector_output(self, connector_output: "KVConnectorOutput") -> None:
+        if not self._prefill_side_replay:
+            return
+        for req_id, checkpoint in connector_output.prefix_replay_checkpoints.items():
+            if self._expected_prefix_replay_checkpoints.get(req_id) == checkpoint:
+                self._loaded_prefix_replay_checkpoints[req_id] = checkpoint
+
+    def consume_prefix_replay_checkpoint(
+        self,
+        request: "Request",
+        num_hit_tokens: int,
+    ) -> bool:
+        checkpoint = self._loaded_prefix_replay_checkpoints.pop(
+            request.request_id, None
+        )
+        expected = self._expected_prefix_replay_checkpoints.pop(
+            request.request_id, None
+        )
+        params = request.kv_transfer_params
+        valid = (
+            checkpoint is not None
+            and checkpoint == expected
+            and params is not None
+            and checkpoint[:2] == (params.get("transfer_id"), num_hit_tokens)
+            and checkpoint[2] == self._get_prompt_digest(request, num_hit_tokens)
+            and self._get_prefix_replay_checkpoint(request) == num_hit_tokens
+        )
+        if valid:
+            logger.info_once(
+                "Mooncake loaded a certified Prefill-side SWA replay checkpoint; "
+                "Decode-side bounded replay will be skipped."
+            )
+        return valid
 
     def request_finished(
         self,
@@ -893,6 +1134,9 @@ class MooncakeConnectorScheduler:
             request.status,
             params,
         )
+        self._reqs_need_replay_checkpoint.pop(request.request_id, None)
+        self._expected_prefix_replay_checkpoints.pop(request.request_id, None)
+        self._loaded_prefix_replay_checkpoints.pop(request.request_id, None)
         if not params or not params.get("transfer_id"):
             return False, None
 
@@ -958,6 +1202,10 @@ class MooncakeConnectorWorker:
         assert (kv_transfer_config := vllm_config.kv_transfer_config)
         self.is_kv_producer: bool = kv_transfer_config.kv_role == "kv_producer"
         self.is_kv_consumer: bool = kv_transfer_config.kv_role == "kv_consumer"
+        self._prefill_side_replay = _prefill_side_replay_enabled(
+            vllm_config, kv_cache_config
+        )
+        self._last_producer_ready_event: Any | None = None
         self.num_sender_workers = kv_transfer_config.kv_connector_extra_config.get(
             "num_workers", 10
         )
@@ -1051,6 +1299,9 @@ class MooncakeConnectorWorker:
 
         self.finished_sending_reqs: set[ReqId] = set()
         self.finished_recving_reqs: set[ReqId] = set()
+        self._completed_prefix_replay_checkpoints: queue.Queue[
+            tuple[ReqId, TransferId, int, str]
+        ] = queue.Queue()
         # Written from the receiver loop, drained from the worker thread.
         self._invalid_block_ids: queue.Queue[set[int]] = queue.Queue()
         self._is_hma_required = len(kv_cache_config.kv_cache_groups) > 1
@@ -1098,6 +1349,36 @@ class MooncakeConnectorWorker:
         self._encoder = msgspec.msgpack.Encoder()
         self._xfer_meta_decoder = msgspec.msgpack.Decoder(MooncakeXferMetadata)
         self._xfer_resp_decoder = msgspec.msgpack.Decoder(MooncakeXferResponse)
+
+    def _prefix_replay_layout_fingerprint(self) -> str:
+        model_config = self.vllm_config.model_config
+        model_identity = (
+            model_config.model,
+            model_config.revision,
+            str(model_config.dtype),
+            getattr(model_config.hf_config, "model_type", None),
+        )
+        groups = tuple(
+            (
+                type(group.kv_cache_spec).__qualname__,
+                tuple(group.layer_names),
+                group.kv_cache_spec.block_size,
+                group.kv_cache_spec.page_size_bytes,
+                group.kv_cache_spec.prefix_cacheable,
+                group.kv_cache_spec.prefix_replay_tokens,
+            )
+            for group in self.kv_cache_config.transfer_groups
+        )
+        registration = (
+            tuple(self.registered_layer_names),
+            tuple(self.registered_layer_indices),
+            tuple(self.registered_group_indices),
+            tuple(self.block_len_per_layer),
+            tuple(self.kv_block_len_per_layer),
+        )
+        return hashlib.sha256(
+            repr((model_identity, groups, registration)).encode()
+        ).hexdigest()
 
     def _sync_block_size_with_kernel(self) -> None:
         # When speculative decoding (e.g. Eagle) is enabled, the main model
@@ -1247,6 +1528,86 @@ class MooncakeConnectorWorker:
             except Exception as e:
                 logger.error("Error in _sender_worker: %s", e)
 
+    def _wait_for_producer_ready_events(
+        self, send_metas: Collection[SendBlockMeta]
+    ) -> None:
+        seen: set[int] = set()
+        for send_meta in send_metas:
+            event = send_meta.producer_ready_event
+            if event is None or send_meta.producer_ready_event_waited:
+                continue
+            event_id = id(event)
+            if event_id not in seen:
+                event.synchronize()
+                seen.add(event_id)
+            send_meta.producer_ready_event_waited = True
+
+    def _certify_prefix_replay_checkpoints(
+        self,
+        ready_reqs: list[tuple[ReqId, SendBlockMeta]],
+        meta: MooncakeXferMetadata,
+    ) -> dict[ReqId, tuple[int, str]]:
+        if (
+            not self._prefill_side_replay
+            or meta.prefix_replay_protocol != _PREFIX_REPLAY_PROTOCOL_VERSION
+            or meta.prefix_replay_layout != self._prefix_replay_layout_fingerprint()
+        ):
+            return {}
+
+        certified: dict[ReqId, tuple[int, str]] = {}
+        group_specs = self.kv_cache_config.transfer_groups
+        for d_req_id, send_meta in ready_reqs:
+            requested = meta.prefix_replay_checkpoints.get(d_req_id)
+            if requested is None:
+                continue
+            checkpoint, local_hit_tokens, prompt_digest = requested
+            remote_groups = meta.req_blocks[d_req_id][1]
+            if (
+                checkpoint != send_meta.prefix_replay_checkpoint
+                or prompt_digest != send_meta.prefix_replay_prompt_digest
+                or not 0 <= local_hit_tokens < checkpoint
+                or send_meta.producer_ready_event is None
+                or not send_meta.producer_ready_event_waited
+                or len(send_meta.local_block_ids) != len(remote_groups)
+                or len(remote_groups) != len(group_specs)
+                or any(not blocks for blocks in remote_groups)
+            ):
+                continue
+
+            complete = True
+            for local_blocks, remote_blocks, group in zip(
+                send_meta.local_block_ids, remote_groups, group_specs
+            ):
+                spec = group.kv_cache_spec
+                if isinstance(spec, MambaSpec):
+                    local_blocks = [
+                        block_id
+                        for block_id in local_blocks
+                        if block_id != NULL_BLOCK_ID
+                    ]
+                    remote_blocks = [
+                        block_id
+                        for block_id in remote_blocks
+                        if block_id != NULL_BLOCK_ID
+                    ]
+                    if not local_blocks or len(local_blocks) != len(remote_blocks):
+                        complete = False
+                        break
+                elif spec.prefix_cacheable:
+                    if (
+                        local_hit_tokens % spec.block_size
+                        or len(local_blocks) - len(remote_blocks)
+                        != local_hit_tokens // spec.block_size
+                    ):
+                        complete = False
+                        break
+                elif len(local_blocks) != len(remote_blocks):
+                    complete = False
+                    break
+            if complete:
+                certified[d_req_id] = (checkpoint, prompt_digest)
+        return certified
+
     async def send_kv_to_decode(
         self, identity: bytes, sock: zmq.asyncio.Socket, meta: MooncakeXferMetadata
     ):
@@ -1387,6 +1748,35 @@ class MooncakeConnectorWorker:
                         "Request %s expired before sending on P side.", d_req_id
                     )
 
+            checkpoint_send_metas = [
+                send_meta
+                for d_req_id, send_meta in ready_reqs
+                if d_req_id in meta.prefix_replay_checkpoints
+                and send_meta.producer_ready_event is not None
+            ]
+            if checkpoint_send_metas:
+                try:
+                    await self.sender_loop.run_in_executor(
+                        self._sender_executor,
+                        self._wait_for_producer_ready_events,
+                        checkpoint_send_metas,
+                    )
+                except Exception as e:
+                    for task in wait_tasks:
+                        task.cancel()
+                    for _, send_meta in ready_reqs:
+                        send_meta.sending -= 1
+                    logger.error("Producer readiness fence failed: %s", e)
+                    response = MooncakeXferResponse(
+                        status=MooncakeXferResponseStatus.ERROR,
+                        err_reqs=[req_id for req_id, _ in ready_reqs],
+                        err_msg=f"Producer readiness fence failed: {e}",
+                    )
+                    await sock.send_multipart(
+                        (identity, self._encoder.encode(response))
+                    )
+                    return
+
             (
                 src_ptrs,
                 dst_ptrs,
@@ -1430,6 +1820,9 @@ class MooncakeConnectorWorker:
                         err_req_set.add(d_req_id)
                     ok_ready_reqs = []
 
+            prefix_replay_checkpoints = self._certify_prefix_replay_checkpoints(
+                ok_ready_reqs, meta
+            )
             for d_req_id, send_meta in ready_reqs:
                 send_meta.sending -= 1
 
@@ -1448,6 +1841,7 @@ class MooncakeConnectorWorker:
                 ok_reqs=[d_req_id for d_req_id, _ in ok_ready_reqs] or None,
                 err_reqs=err_reqs or None,
                 err_msg=err_msg,
+                prefix_replay_checkpoints=prefix_replay_checkpoints or None,
             )
             await sock.send_multipart((identity, self._encoder.encode(response)))
 
@@ -1927,10 +2321,25 @@ class MooncakeConnectorWorker:
             except queue.Empty:
                 break
 
+        prefix_replay_checkpoints: dict[ReqId, tuple[TransferId, int, str]] = {}
+        while True:
+            try:
+                req_id, transfer_id, checkpoint, prompt_digest = (
+                    self._completed_prefix_replay_checkpoints.get_nowait()
+                )
+                prefix_replay_checkpoints[req_id] = (
+                    transfer_id,
+                    checkpoint,
+                    prompt_digest,
+                )
+            except queue.Empty:
+                break
+
         return KVConnectorTransferResults(
             finished_sending=set(finished_sending_reqs or ()),
             finished_recving=set(finished_recving_reqs or ()),
             failed_recving=failed_recving_reqs,
+            prefix_replay_checkpoints=prefix_replay_checkpoints,
         )
 
     def get_kv_connector_stats(self) -> KVConnectorStats | None:
@@ -1962,6 +2371,24 @@ class MooncakeConnectorWorker:
             registered_layer_names=self.registered_layer_names,
             registered_layer_indices=self.registered_layer_indices,
             registered_group_indices=self.registered_group_indices,
+            prefix_replay_protocol=(
+                _PREFIX_REPLAY_PROTOCOL_VERSION if self._prefill_side_replay else 0
+            ),
+            prefix_replay_layout=(
+                self._prefix_replay_layout_fingerprint()
+                if self._prefill_side_replay
+                else None
+            ),
+            prefix_replay_checkpoints={
+                req_id: (
+                    pull_meta.prefix_replay_checkpoint,
+                    pull_meta.prefix_replay_local_tokens,
+                    pull_meta.prefix_replay_prompt_digest,
+                )
+                for req_id, pull_meta in pull_metas.items()
+                if pull_meta.prefix_replay_checkpoint is not None
+                and pull_meta.prefix_replay_prompt_digest is not None
+            },
         )
 
         encoded_data = self._encoder.encode(metadata)
@@ -2014,6 +2441,7 @@ class MooncakeConnectorWorker:
             if pull_meta is None or pull_meta.failed:
                 continue
             pull_meta.failed = True
+            pull_meta.prefix_replay_failed = True
             failed.append(req_id)
             self.xfer_stats.record_failed_recv()
 
@@ -2051,14 +2479,42 @@ class MooncakeConnectorWorker:
         pull_metas: dict[ReqId, PullReqMeta],
     ):
         ok_reqs: list[ReqId] = response.ok_reqs or []
+        response_checkpoints = response.prefix_replay_checkpoints or {}
 
         for req_id in ok_reqs:
             pull_meta = pull_metas[req_id]
             if pull_meta.failed:
                 continue
+            if pull_meta.prefix_replay_checkpoint is not None:
+                if response_checkpoints.get(req_id) == (
+                    pull_meta.prefix_replay_checkpoint,
+                    pull_meta.prefix_replay_prompt_digest,
+                ):
+                    pull_meta.prefix_replay_confirmations += 1
+                else:
+                    pull_meta.prefix_replay_failed = True
             # No race because we are in async loop.
             pull_meta.pull_tasks_count -= 1
             if pull_meta.pull_tasks_count == 0:
+                if (
+                    pull_meta.prefix_replay_checkpoint is not None
+                    and pull_meta.prefix_replay_prompt_digest is not None
+                    and not pull_meta.prefix_replay_failed
+                    and pull_meta.prefix_replay_confirmations
+                    == pull_meta.pull_tasks_total
+                ):
+                    self._completed_prefix_replay_checkpoints.put(
+                        (
+                            pull_meta.d_req_id,
+                            pull_meta.transfer_id,
+                            pull_meta.prefix_replay_checkpoint,
+                            pull_meta.prefix_replay_prompt_digest,
+                        )
+                    )
+                elif pull_meta.prefix_replay_checkpoint is not None:
+                    pull_meta.failed = True
+                    self.xfer_stats.record_failed_recv()
+                    self._failed_recv_reqs.put(pull_meta.d_req_id)
                 self.finished_recving_reqs.add(pull_meta.d_req_id)
 
         if ok_reqs:
@@ -2126,6 +2582,7 @@ class MooncakeConnectorWorker:
         )
         for pull_meta in pull_metas.values():
             pull_meta.pull_tasks_count = count
+            pull_meta.pull_tasks_total = count
         for worker_addr in worker_addrs:
             asyncio.create_task(
                 self.receive_kv_from_single_worker(worker_addr, pull_metas)
@@ -2166,12 +2623,21 @@ class MooncakeConnectorWorker:
                 self.receive_kv(remote_engine_id, pull_metas)
 
     async def record_send_reqs(self, metadata: MooncakeConnectorMetadata):
-        for p_req_id, (transfer_id, block_ids) in metadata.reqs_to_send.items():
+        for p_req_id, (
+            transfer_id,
+            block_ids,
+            prefix_replay_checkpoint,
+            prefix_replay_prompt_digest,
+        ) in metadata.reqs_to_send.items():
             if block_ids:
                 # Already gone through request_finished()
                 send_meta = self.reqs_need_send[transfer_id]
                 send_meta.p_req_id = p_req_id
                 send_meta.local_block_ids = block_ids
+                send_meta.prefix_replay_checkpoint = prefix_replay_checkpoint
+                send_meta.prefix_replay_prompt_digest = prefix_replay_prompt_digest
+                send_meta.producer_ready_event = self._last_producer_ready_event
+                send_meta.producer_ready_event_waited = False
                 send_meta.expire_time = (
                     time.perf_counter() + envs.VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT
                 )
@@ -2192,6 +2658,13 @@ class MooncakeConnectorWorker:
             send_meta = self.reqs_need_send.pop(transfer_id)
             if send_meta:
                 assert not send_meta.ready.is_set()
+
+    def wait_for_save(self) -> None:
+        if not self._prefill_side_replay or self.is_kv_consumer:
+            return
+        event = torch.cuda.Event(blocking=True)
+        event.record(torch.cuda.current_stream(self.device_id))
+        self._last_producer_ready_event = event
 
     def start_load_kv(self, metadata: MooncakeConnectorMetadata):
         if not self.is_kv_producer and metadata.reqs_to_recv:

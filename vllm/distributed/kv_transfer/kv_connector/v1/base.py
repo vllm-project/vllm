@@ -94,6 +94,10 @@ class KVConnectorTransferResults:
     finished_sending: set[str] = field(default_factory=set)
     finished_recving: set[str] = field(default_factory=set)
     failed_recving: set[str] = field(default_factory=set)
+    # Request ID -> (transfer ID, exclusive token boundary, prompt digest).
+    prefix_replay_checkpoints: dict[str, tuple[str, int, str]] = field(
+        default_factory=dict
+    )
 
 
 class SupportsHMA(ABC):
@@ -575,6 +579,27 @@ class KVConnectorBase_V1(ABC):
 
         """
         return
+
+    def can_load_prefix_replay_checkpoint(
+        self,
+        request: "Request",
+        num_local_tokens: int,
+        num_external_tokens: int,
+    ) -> bool:
+        """Whether an unaligned external hit may restore replay-managed state."""
+        return False
+
+    def consume_prefix_replay_checkpoint(
+        self,
+        request: "Request",
+        num_hit_tokens: int,
+    ) -> bool:
+        """Consume proof that a remote load restored replay-managed state.
+
+        Connectors return True only when the completed load restored all state
+        needed at ``num_hit_tokens``. The default keeps scheduler-side replay.
+        """
+        return False
 
     def request_finished(
         self,

@@ -968,7 +968,15 @@ class Scheduler(SchedulerInterface):
                             # next token. Hits end on a block boundary, or
                             # a hit ending one token short of one would
                             # retire the block the replay starts in.
-                            ext_tokens -= ext_tokens % self.block_size
+                            can_load_replay_checkpoint = (
+                                self.connector.can_load_prefix_replay_checkpoint(
+                                    request,
+                                    block_aligned_local,
+                                    ext_tokens,
+                                )
+                            )
+                            if not can_load_replay_checkpoint:
+                                ext_tokens -= ext_tokens % self.block_size
                             load_kv_async = load_kv_async and ext_tokens > 0
 
                         if partial_tail and ext_tokens > partial_tail:
@@ -3047,6 +3055,7 @@ class Scheduler(SchedulerInterface):
         """
         assert self.connector is not None
 
+        loaded_replay_checkpoint = False
         if request.request_id in self.failed_recving_kv_req_ids:
             # Request had KV load failures; num_computed_tokens was already
             # updated in _update_requests_with_invalid_blocks
@@ -3072,14 +3081,34 @@ class Scheduler(SchedulerInterface):
             # Now that the blocks are ready, actually cache them.
             # This will cache the blocks iff caching is enabled.
             self.kv_cache_manager.cache_blocks(request, request.num_computed_tokens)
+            loaded_replay_checkpoint = self.connector.consume_prefix_replay_checkpoint(
+                request, request.num_computed_tokens
+            )
+
+        if (
+            not loaded_replay_checkpoint
+            and self.prefix_replay_tokens
+            and request.num_computed_tokens % self.block_size
+        ):
+            # A connector may preserve a partial final block while attempting
+            # to load a complete replay checkpoint. If certification fails,
+            # fall back to the block-aligned hit required by bounded replay.
+            request.num_computed_tokens -= request.num_computed_tokens % self.block_size
 
         # SWA bounded replay recomputes the tail of the hit, which covers the
-        # last token; otherwise a full prompt hit re-computes that token so the
-        # next one can be sampled.
+        # last token. A certified remote checkpoint already contains that tail,
+        # but replay_start still protects cached full-attention state while the
+        # final prompt token is recomputed to produce logits.
         num_replay_tokens = self._mark_prefix_replay(
             request, request.num_computed_tokens
         )
-        if num_replay_tokens > 0:
+        if loaded_replay_checkpoint:
+            assert request.num_computed_tokens in (
+                request.num_tokens - 1,
+                request.num_tokens,
+            )
+            request.num_computed_tokens = request.num_tokens - 1
+        elif num_replay_tokens > 0:
             request.num_computed_tokens -= num_replay_tokens
         elif request.num_computed_tokens == request.num_tokens:
             request.num_computed_tokens = request.num_tokens - 1

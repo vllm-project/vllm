@@ -375,6 +375,7 @@ class MockKVConfig:
     is_async: bool = False
     num_defers_before_matching: int = 0
     supports_divergent_local_hybrid_hits: bool = False
+    certifies_prefix_replay: bool = False
 
 
 class MockKVConnectorMetadata(KVConnectorMetadata):
@@ -403,6 +404,7 @@ class MockKVConnector(KVConnectorBase_V1):
             supports_divergent_local_hybrid_hits=extra_config.get(
                 "supports_divergent_local_hybrid_hits", False
             ),
+            certifies_prefix_replay=extra_config.get("certifies_prefix_replay", False),
         )
         self._defers_left: defaultdict[str, int] = defaultdict(
             lambda: self.config.num_defers_before_matching
@@ -457,6 +459,21 @@ class MockKVConnector(KVConnectorBase_V1):
 
     def wait_for_save(self):
         pass
+
+    def can_load_prefix_replay_checkpoint(
+        self,
+        request: Request,
+        num_local_tokens: int,
+        num_external_tokens: int,
+    ) -> bool:
+        return self.config.certifies_prefix_replay
+
+    def consume_prefix_replay_checkpoint(
+        self,
+        request: Request,
+        num_hit_tokens: int,
+    ) -> bool:
+        return self.config.certifies_prefix_replay
 
 
 KVConnectorFactory.register_connector(
