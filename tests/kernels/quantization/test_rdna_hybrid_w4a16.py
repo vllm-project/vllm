@@ -567,6 +567,7 @@ def test_wvsplitk_int4_g_rejects_unpacked_zero_points():
         ops.wvSplitK_int4_g(w, a, scales, num_compute_units(), G, zp_unpacked, None)
 
 
+@pytest.mark.skipif(not on_gfx1x(), reason="Hybrid path is gfx11/gfx12 only")
 @pytest.mark.parametrize(
     "M,K,expected_path",
     [
