@@ -15,6 +15,7 @@ from vllm.model_executor.layers.attention.mm_encoder_attention import (
     MMEncoderAttention,
 )
 from vllm.model_executor.layers.conv import Conv3dLayer
+from vllm.model_executor.layers.fusion.mm_input_norm import IdentityInputNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     QKVParallelLinear,
@@ -303,6 +304,7 @@ class MiniMaxVLVisionTransformer(nn.Module):
         num_hidden_layers_override: int | None = None,
         require_post_norm: bool | None = None,
         quant_config: QuantizationConfig | None = None,
+        input_norm: nn.Module | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
@@ -355,6 +357,7 @@ class MiniMaxVLVisionTransformer(nn.Module):
 
         self.embeddings = MiniMaxVLPatchEmbed(config)
         self.pre_layrnorm = nn.LayerNorm(embed_dim, eps=config.layer_norm_eps)
+        self.input_norm = input_norm if input_norm is not None else IdentityInputNorm()
 
         n_layers = config.num_hidden_layers
         if num_hidden_layers_override is None:
@@ -376,6 +379,14 @@ class MiniMaxVLVisionTransformer(nn.Module):
 
         # out_hidden_size needed by run_dp_sharded_mrope_vision_model
         self.out_hidden_size = embed_dim
+
+    @property
+    def dtype(self) -> torch.dtype:
+        return self.embeddings.patch_embedding.weight.dtype
+
+    @property
+    def device(self) -> torch.device:
+        return self.embeddings.patch_embedding.weight.device
 
     # ── Frame-limit helper (mirrors the reference) ───────────────────────
 
@@ -484,6 +495,7 @@ class MiniMaxVLVisionTransformer(nn.Module):
         # pixel_values: (total_N, C * temporal_patch_size * patch_size²)
         # Output:       (total_N, hidden_size)
 
+        pixel_values = self.input_norm(pixel_values.to(device=self.device), self.dtype)
         hidden = self.embeddings(pixel_values)  # (total_N, hidden_size)
         hidden = self.pre_layrnorm(hidden)
 
@@ -615,6 +627,7 @@ class MiniMaxVLVisionModel(nn.Module):
         text_hidden_size: int,
         projector_hidden_size: int | None = None,
         quant_config: QuantizationConfig | None = None,
+        input_norm: nn.Module | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
@@ -632,6 +645,7 @@ class MiniMaxVLVisionModel(nn.Module):
             config=config,
             require_post_norm=False,
             quant_config=quant_config,
+            input_norm=input_norm,
             prefix=maybe_prefix(prefix, "vision_model"),
         )
         self.multi_modal_projector = MiniMaxVLMultiModalProjector(

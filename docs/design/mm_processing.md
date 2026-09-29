@@ -82,6 +82,7 @@ GPU-side fusion is controlled by `multimodal_config.mm_device_do_normalize`:
 |--------------------|------------------------------------------|----------------------------------------|
 | `intern-s1-pro`    | `InternS1ProForConditionalGeneration`    | `internlm/Intern-S1-Pro`               |
 | `intern-s2-mobius` | `InternS2MobiusForConditionalGeneration` | `internlm/Intern-S2-Mobius`            |
+| `minimax-m3`       | `MiniMaxM3SparseForConditionalGeneration`| `MiniMaxAI/MiniMax-M3`, etc.           |
 | `qwen2-vl`         | `Qwen2VLForConditionalGeneration`        | `Qwen/Qwen2-VL-2B-Instruct`, etc.      |
 | `qwen2.5-vl`       | `Qwen2_5_VLForConditionalGeneration`     | `Qwen/Qwen2.5-VL-3B-Instruct`, etc.    |
 | `qwen3-vl`         | `Qwen3VLForConditionalGeneration`        | `Qwen/Qwen3-VL-4B-Instruct`, etc.      |
