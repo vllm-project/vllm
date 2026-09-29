@@ -98,7 +98,7 @@ from vllm.v1.worker.worker_base import CompilationTimes, WorkerBase
 from vllm.v1.worker.workspace import init_workspace_manager
 
 from ...model_executor.model_loader import TensorizerLoader
-from .gpu.cudagraph_utils import has_compiled_submodule
+from .gpu.cudagraph_utils import graph_pool_bytes, has_compiled_submodule
 from .gpu.warmup import warmup_kernels
 from .utils import request_memory
 
@@ -884,20 +884,30 @@ class Worker(WorkerBase):
             with self._get_cudagraph_capture_context():
                 cuda_graph_memory_bytes = self.model_runner.capture_model()
 
-        # Compare actual vs estimated CUDA graph memory (if we did profiling)
+        # Compare actual vs estimated CUDA graph memory (if we did profiling).
+        # The pool is measured the same way the estimate was; the free-memory
+        # delta of capture_model() also counts allocator-cached transients.
         if (
             hasattr(self, "cudagraph_memory_estimate")
             and self.cudagraph_memory_estimate > 0
         ):
             GiB = lambda b: round(b / GiB_bytes, 2)
-            diff = abs(cuda_graph_memory_bytes - self.cudagraph_memory_estimate)
+            pool_bytes = graph_pool_bytes(current_platform.get_global_graph_pool())
+            actual = cuda_graph_memory_bytes if pool_bytes is None else pool_bytes
+            retained = getattr(
+                self.model_runner, "cudagraph_profiling_retained_bytes", 0
+            )
+            estimated = self.cudagraph_memory_estimate - retained
+            diff = abs(actual - estimated)
             logger.info(
                 "CUDA graph pool memory: %s GiB (actual), %s GiB (estimated), "
-                "difference: %s GiB (%.1f%%).",
-                GiB(cuda_graph_memory_bytes),
-                GiB(self.cudagraph_memory_estimate),
+                "difference: %s GiB (%.1f%%); %s GiB retained by the profiling "
+                "pass was reserved on top of the estimate.",
+                GiB(actual),
+                GiB(estimated),
                 GiB(diff),
-                100 * diff / max(cuda_graph_memory_bytes, 1),
+                100 * diff / max(actual, 1),
+                GiB(retained),
             )
 
         if self.cache_config.kv_cache_memory_bytes is None and hasattr(

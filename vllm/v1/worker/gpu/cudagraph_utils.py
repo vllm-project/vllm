@@ -34,6 +34,7 @@ from vllm.model_executor.offloader.base import get_offloader
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.utils.math_utils import round_up
+from vllm.utils.mem_constants import GiB_bytes
 from vllm.utils.torch_utils import current_stream
 from vllm.v1.hisparse.binding import release_hisparse_profiling_cache
 from vllm.v1.kv_cache_interface import KVCacheConfig
@@ -173,12 +174,6 @@ class CudaGraphManager:
         self.pool = current_platform.get_global_graph_pool() if cudagraph_mode else None
 
         self._graphs_captured = False
-
-        # Profiling hooks, set only by profile_cudagraph_memory() below: cap
-        # FULL-mode capture at the N largest descriptors and record each
-        # captured FULL graph's memory delta for extrapolation.
-        self._max_full_descs_to_capture: int | None = None
-        self._capture_mem_samples: list[int] | None = None
 
         self._candidates: dict[tuple[int, int], list[BatchExecutionDescriptor]] = {}
         self._capture_descs: dict[CUDAGraphMode, list[BatchExecutionDescriptor]] = {}
@@ -440,14 +435,6 @@ class CudaGraphManager:
                     continue
 
                 descs = self._capture_descs[mode]
-                if (
-                    mode == CUDAGraphMode.FULL
-                    and self._max_full_descs_to_capture is not None
-                ):
-                    # Profiling only: capture a sample of the largest FULL
-                    # graphs; the total cost is extrapolated from their
-                    # per-graph memory deltas.
-                    descs = descs[: self._max_full_descs_to_capture]
                 if is_global_first_rank():
                     descs = tqdm(descs, desc=f"{progress_bar_desc} ({mode.name})")
                 for desc in descs:
@@ -485,9 +472,6 @@ class CudaGraphManager:
                             set_graph_pool_id(self.pool)
                         else:
                             set_graph_pool_id(current_platform.graph_pool_handle())
-                        if self._capture_mem_samples is not None:
-                            torch.accelerator.synchronize()
-                            free_before = torch.accelerator.get_memory_info()[0]
                         with torch.cuda.graph(
                             graph, self.pool, stream=self._capture_stream(desc)
                         ):
@@ -497,10 +481,6 @@ class CudaGraphManager:
                             # forks copy_stream, but wait_prefetch only happens in
                             # the next forward pass.
                             get_offloader().join_after_forward()
-                        if self._capture_mem_samples is not None:
-                            torch.accelerator.synchronize()
-                            free_after = torch.accelerator.get_memory_info()[0]
-                            self._capture_mem_samples.append(free_before - free_after)
                         self.graphs[desc] = graph
                         compilation_counter.num_cudagraph_captured += 1
 
@@ -859,11 +839,19 @@ def prepare_inputs_to_capture(
 # CUDA graph memory profiling
 # ---------------------------------------------------------------------------
 
-# Number of FULL graphs captured during profiling; the total FULL capture
-# cost is extrapolated from this sample to avoid a second full capture.
-_FULL_GRAPH_PROFILING_SAMPLES = 2
-# Floor for the extrapolated per-graph cost (driver overhead per graph).
-_MIN_PER_GRAPH_BYTES = 1 << 20
+
+def graph_pool_bytes(pool: Any) -> int | None:
+    """Bytes the caching allocator holds for the graph pool ``pool``: the
+    segments the allocator snapshot attributes to it, cached free blocks
+    included. ``None`` where the allocator has no snapshot."""
+    if not current_platform.is_cuda_alike():
+        return None
+    pool_id = tuple(pool)
+    return sum(
+        segment["total_size"]
+        for segment in torch.cuda.memory_snapshot()
+        if tuple(segment["segment_pool_id"]) == pool_id
+    )
 
 
 @torch.inference_mode()
@@ -873,21 +861,28 @@ def profile_cudagraph_memory(runner: "GPUModelRunner") -> int:
     Called during memory profiling, *before* the real KV cache is allocated,
     so that ``Worker.determine_available_memory`` can reserve headroom for
     graph capture. Bootstraps a minimal KV cache, runs ``capture_model()``
-    once, then releases everything so the real init/capture path starts clean.
+    once into a throwaway graph pool, then releases everything so the real
+    init/capture path starts clean.
 
-    FULL graphs bake in KV cache pointers, so only the largest few are
-    captured (into a throwaway pool) and their total cost is extrapolated.
-    PIECEWISE, encoder and speculator graphs are measured in full. All
-    profiling captures are discarded afterwards: replaying graphs recorded
-    against the throwaway profiling state is unsafe (e.g. inductor graph
-    partition reclaims the storages of earlier cudagraph recordings once the
-    real capture records new ones, leading to use-after-free crashes).
+    The estimate is the size of the throwaway pool after the capture plus
+    what the profiling pass still holds after teardown: first-use
+    allocations outside the pool (kernel workspaces, communicator buffers)
+    that the profile run before this did not make and that the real capture
+    no longer pays for. The free-memory delta of the capture itself is only
+    a fallback: it also counts transients the allocator caches. Every
+    descriptor is captured; FULL graphs bake in the profiling KV cache
+    pointers, so all profiling captures are discarded afterwards: replaying
+    graphs recorded against the throwaway profiling state is unsafe (e.g.
+    inductor graph partition reclaims the storages of earlier cudagraph
+    recordings once the real capture records new ones, leading to
+    use-after-free crashes).
     """
     if runner.compilation_config.cudagraph_mode == CUDAGraphMode.NONE:
         return 0
 
     gc.collect()
     torch.accelerator.empty_cache()
+    free_before = torch.accelerator.get_memory_info()[0]
 
     # Run the whole profiling phase against a throwaway CUDA graph pool by
     # pointing the global graph pool singleton at it: objects that bind the
@@ -937,20 +932,9 @@ def profile_cudagraph_memory(runner: "GPUModelRunner") -> int:
                     for name, value in vars(speculator).items()
                     if isinstance(value, CudaGraphManager)
                 ]
-            manager._max_full_descs_to_capture = _FULL_GRAPH_PROFILING_SAMPLES
-            mem_samples: list[int] = []
-            manager._capture_mem_samples = mem_samples
 
             measured = int(runner.capture_model(profile_only=True))
-
-            # The measured delta covers PIECEWISE, encoder and speculator graphs
-            # plus the sampled FULL graphs; swap the sampled FULL cost for the
-            # extrapolated total. FULL and PIECEWISE share one pool here just as
-            # they share the global pool at runtime, so the overlap is not
-            # double-counted.
-            num_full_graphs = len(manager._capture_descs.get(CUDAGraphMode.FULL, []))
-            full_estimate = _extrapolate_full_graph_memory(mem_samples, num_full_graphs)
-            return max(measured - sum(mem_samples) + full_estimate, 0)
+            pool_bytes = graph_pool_bytes(throwaway_pool)
         finally:
             compilation_counter.num_cudagraph_captured = saved_num_cudagraph_captured
             compilation_counter.num_gpu_runner_capture_triggers = saved_capture_triggers
@@ -971,16 +955,24 @@ def profile_cudagraph_memory(runner: "GPUModelRunner") -> int:
     finally:
         platform_cls._global_graph_pool = saved_global_pool
 
-
-def _extrapolate_full_graph_memory(mem_samples: list[int], total_graphs: int) -> int:
-    """Extrapolate the total FULL capture cost from samples of the largest
-    graphs. The first capture allocates the pool baseline; later graphs mostly
-    reuse it, so the second sample is taken as the per-graph cost."""
-    if not mem_samples:
-        return 0
-    first_capture = mem_samples[0]
-    per_graph = max(mem_samples[1], _MIN_PER_GRAPH_BYTES) if len(mem_samples) > 1 else 0
-    return first_capture + (total_graphs - 1) * per_graph
+    retained = max(free_before - torch.accelerator.get_memory_info()[0], 0)
+    if pool_bytes is None:
+        # No allocator snapshot: the free-memory delta stands in, and it
+        # already includes what the pass retained.
+        estimate, retained = measured, 0
+    else:
+        estimate = pool_bytes + retained
+    runner.cudagraph_profiling_retained_bytes = retained
+    logger.info(
+        "CUDA graph memory estimate: %.2f GiB (graph pool %s GiB, %.2f GiB "
+        "retained by the profiling pass outside the pool; the profiling "
+        "capture's free-memory delta was %.2f GiB).",
+        estimate / GiB_bytes,
+        "n/a" if pool_bytes is None else f"{pool_bytes / GiB_bytes:.2f}",
+        retained / GiB_bytes,
+        measured / GiB_bytes,
+    )
+    return estimate
 
 
 def _init_minimal_kv_cache_for_profiling(runner: "GPUModelRunner") -> None:
