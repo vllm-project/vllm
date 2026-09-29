@@ -179,7 +179,7 @@ class XPUPlatform(Platform):
                 logger.info_once(
                     "FlashAttnMLA on XPU is not valid for this configuration "
                     "(%s); falling back to Triton MLA backend.",
-                    invalid_reasons,
+                    tuple(invalid_reasons),
                 )
                 return AttentionBackendEnum.TRITON_MLA.get_path()
             logger.info_once("Using Flash Attention MLA backend on XPU.")
