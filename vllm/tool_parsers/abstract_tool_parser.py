@@ -133,6 +133,13 @@ class ToolParser:
         ):
             return request
 
+        # Parsers that extract required/named tool calls from their native
+        # format (supports_required_and_named=False) must not be forced into
+        # the JSON tool-call format below: they would never find a call in
+        # the JSON output and would return it as content instead.
+        if not self.supports_required_and_named:
+            return request
+
         json_schema_from_tool = get_json_schema_from_tools(
             tool_choice=request.tool_choice, tools=request.tools
         )
