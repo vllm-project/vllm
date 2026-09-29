@@ -907,7 +907,8 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
             assert isinstance(self.kv_cache_spec.tokens_per_state, int)
             self.compress_ratio = self.kv_cache_spec.tokens_per_state
         # NOTE(Chen):an estimated max size of flattened_kv. Need to double check.
-        # In compressed rows, like the chunker's seq_lens and the workspace.
+        # Counted in compressed rows, like the chunker's seq_lens and the
+        # workspace.
         self.max_prefill_buffer_size = (
             get_max_prefill_buffer_size(self.vllm_config) // self.compress_ratio
         )

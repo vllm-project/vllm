@@ -262,19 +262,6 @@ def test_plan_uses_state_params(monkeypatch, kv_dtype):
     assert state._lens_cpu.tolist() == [0, 0, 0, 0]
 
 
-@pytest.mark.parametrize(
-    "spec_dtype,expected",
-    [
-        (torch.uint8, torch.float8_e4m3fn),
-        (torch.float8_e4m3fn, torch.float8_e4m3fn),
-        (torch.bfloat16, torch.bfloat16),
-    ],
-)
-def test_plan_dtype_translates_fp8_storage(spec_dtype, expected):
-    """uint8 fp8 storage is planned as float8_e4m3fn; others pass through."""
-    assert FlashInferMLASparseSM90Builder._plan_dtype(spec_dtype) == expected
-
-
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="Requires CUDA")
 @pytest.mark.parametrize("width", [128, 2048, 2176])
 def test_pack_indices_replays_with_updated_offsets(width):
@@ -355,6 +342,14 @@ _NO_KPOOL = object()
 
 
 @pytest.mark.parametrize(
+    "spec_dtype,expected_kv_dtype",
+    [
+        (torch.bfloat16, torch.bfloat16),
+        (torch.uint8, torch.float8_e4m3fn),
+    ],
+    ids=["bf16", "fp8"],
+)
+@pytest.mark.parametrize(
     "index_kpool,prefill_lens",
     [
         (4, [2048, 2049, 2050, 2051]),
@@ -363,9 +358,12 @@ _NO_KPOOL = object()
     ],
     ids=["kpool4", "kpool_none", "no_kpool_attr"],
 )
-def test_builder_kpool_from_model_config(monkeypatch, index_kpool, prefill_lens):
+def test_builder_kpool_from_model_config(
+    monkeypatch, index_kpool, prefill_lens, spec_dtype, expected_kv_dtype
+):
     """The builder took kpool from the KV cache spec, whose tokens_per_state is
-    1, so the tail pool was never read."""
+    1, so the tail pool was never read. The state plans the cache's logical
+    dtype: uint8 fp8 storage becomes float8_e4m3fn."""
     monkeypatch.setattr(
         sm90_mod.FlashInferMLASparseMetadataBuilder,
         "__init__",
@@ -373,14 +371,15 @@ def test_builder_kpool_from_model_config(monkeypatch, index_kpool, prefill_lens)
     )
 
     class _RecordingState:
-        def __init__(self, *_args, **kwargs):
+        def __init__(self, *args, **kwargs):
+            self.kv_dtype = args[2]
             self.index_topk = kwargs["index_topk"]
             self.index_kpool = kwargs["index_kpool"]
 
     monkeypatch.setattr(sm90_mod, "_SM90State", _RecordingState)
     impl, _ = make_impl(64)
     spec = MLAAttentionSpec(
-        block_size=BLOCK_SIZE, num_kv_heads=1, head_size=576, dtype=torch.bfloat16
+        block_size=BLOCK_SIZE, num_kv_heads=1, head_size=576, dtype=spec_dtype
     )
     assert spec.tokens_per_state == 1
     hf_config = SimpleNamespace(index_topk=2048)
@@ -399,6 +398,7 @@ def test_builder_kpool_from_model_config(monkeypatch, index_kpool, prefill_lens)
     builder = FlashInferMLASparseSM90Builder(
         spec, ["attn"], vllm_config, torch.device("cpu")
     )
+    assert builder.state.kv_dtype == expected_kv_dtype
     # req0: prefill chunk ending at context 42295; req1: context <= topk.
     cam = SimpleNamespace(
         num_reqs=2,
