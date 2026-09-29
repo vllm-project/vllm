@@ -93,12 +93,14 @@ from vllm.model_executor.layers.quantization.quark.quark import (
 )
 from vllm.model_executor.layers.quantization.utils import quant_utils
 from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
+    MXFP8_SCALE_DTYPE,
     MXFP8_VALUE_DTYPE,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     amax_for_moe_weight_quant,
     amax_for_tp_weight_quant,
     kMxfp8Dynamic,
+    kMxfp8Static,
     weight_amax,
 )
 from vllm.model_executor.layers.vocab_parallel_embedding import (
@@ -890,8 +892,8 @@ def test_nvfp4_one_sided_rejects_unsupported_input_dtype(input_dtype: torch.dtyp
             None,
             {"linear": "fp8_per_channel"},
             Fp8PtpcOnlineLinearMethod,
-            {},
             None,
+            {},
             id="requantization_mxfp8_ptcp_fp8",
         ),
     ],
@@ -1427,6 +1429,48 @@ def test_online_linear_tp_weight_quant_matches_unsharded(
         assert torch.equal(tp_scale, full_scale.narrow(0, 0, shard_size))
     else:
         assert torch.equal(tp_scale, full_scale)
+
+
+@pytest.mark.skipif(
+    not is_quant_method_supported("fp8"),
+    reason="FP8 is not supported on this GPU type.",
+)
+def test_modelopt_mxfp8_requantized_ptpc_tp_shards_match_unsharded() -> None:
+    """MXFP8 source shards convert to slices of the unsharded PTPC weight."""
+    torch.manual_seed(0)
+    serialized_weight = torch.randn(16, 64, device=DEVICE, dtype=torch.bfloat16).to(
+        MXFP8_VALUE_DTYPE
+    )
+    serialized_scale = torch.randint(
+        124,
+        131,
+        (16, 2),
+        device=DEVICE,
+        dtype=MXFP8_SCALE_DTYPE,
+    )
+
+    source = ModelOptLinearMethod.__new__(ModelOptLinearMethod)
+    source.wkey = SimpleNamespace(key=kMxfp8Static)
+
+    def dequantize(weight: torch.Tensor, scale: torch.Tensor) -> torch.Tensor:
+        layer = SimpleNamespace(weight=weight, weight_scale=scale)
+        return source.dequantize_weight(layer)
+
+    full_weight = dequantize(serialized_weight, serialized_scale)
+    full_scale = _fp8_channel_scale(weight_amax(full_weight, dim=-1, keepdim=True))
+    full_qweight = _fp8_quant_per_channel(full_weight, full_scale)
+
+    # Mimic the two K-dimension shards of a row-parallel layer. PTPC's global
+    # per-output-channel scale is the same on both ranks after its MAX reduce.
+    for rank in range(2):
+        start = rank * 32
+        shard_weight = serialized_weight[:, start : start + 32].contiguous()
+        shard_scale = serialized_scale[:, rank : rank + 1].contiguous()
+        weight = dequantize(shard_weight, shard_scale)
+        qweight = _fp8_quant_per_channel(weight, full_scale)
+
+        assert torch.equal(weight, full_weight[:, start : start + 32])
+        assert torch.equal(qweight, full_qweight[:, start : start + 32])
 
 
 def _quantize_moe(weight, scheme, moe_tp_size):
