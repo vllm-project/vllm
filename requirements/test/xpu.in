@@ -16,6 +16,7 @@ absl-py
 accelerate
 arctic-inference
 lm_eval[api]>=0.4.12
+nltk>=3.10.3 # pin transitive rouge-score/lm-eval dep for known GHSAs
 modelscope<1.38
 runai-model-streamer[s3,gcs,azure]>=0.15.7
 tensorizer==2.10.1
