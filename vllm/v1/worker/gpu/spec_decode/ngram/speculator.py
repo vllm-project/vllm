@@ -96,8 +96,7 @@ def _ngram_finalize_kernel(
     last_sampled_ptr,  # *int64  [max_num_reqs]
     scratch_ptr,  # *int64  [B, scratch_stride]
     scratch_stride,
-    drafts_ptr,  # *int64  [B, K]           (output, batch indexed)
-    num_valid_ptr,  # *int32  [max_num_reqs]   (output, req-slot indexed)
+    drafts_ptr,  # *int64  [B, K]  (output)
     L,
     N_BLOCKS,
     K: tl.constexpr,
@@ -131,8 +130,6 @@ def _ngram_finalize_kernel(
 
     tokens_avail = tl.maximum(seq_len - draft_start, 0)
     write_ok = (num_sampled > 0) & has_match
-    nv = tl.where(write_ok, tl.minimum(tl.cast(K, tl.int64), tokens_avail), 0)
-    tl.store(num_valid_ptr + req_state_idx, nv.to(tl.int32))
 
     row_off = req_state_idx * token_ids_stride
     k_iota = tl.arange(0, K_PO2).to(tl.int64)
@@ -144,9 +141,8 @@ def _ngram_finalize_kernel(
         mask=slot_valid,
         other=0,
     ).to(tl.int64)
-    # Invalid slots fall back to the last sampled token; they are either
-    # trimmed from the verification batch on GPU or verified as ordinary
-    # (rejectable) drafts, so the fill value only affects efficiency.
+    # Invalid slots fall back to the last sampled token; they are verified as
+    # ordinary (rejectable) drafts, so the fill value only affects efficiency.
     out = tl.where(slot_valid, gathered, last_tok)
     tl.store(drafts_ptr + b * K + k_iota, out, mask=k_in_range)
 
@@ -201,11 +197,6 @@ class NgramGPUSpeculator(BaseSpeculator):
         self.scratch = torch.zeros(
             (self.max_num_reqs, self.n_blocks), dtype=torch.int64, device=device
         )
-        # Per request-slot count of usable drafts from the latest proposal,
-        # consumed by the model runner's GPU draft trimmer.
-        self.num_valid_drafts_for_trim = torch.zeros(
-            self.max_num_reqs, dtype=torch.int32, device=device
-        )
         # Batch-ordered draft output, scattered into RequestState.draft_tokens
         # by the model runner (same contract as the model-based speculators).
         self.drafts = torch.zeros(
@@ -236,7 +227,6 @@ class NgramGPUSpeculator(BaseSpeculator):
     ) -> torch.Tensor:
         num_reqs = input_batch.num_reqs
         if dummy_run:
-            # No persistent request state may be touched during dummy runs.
             return self.drafts[:num_reqs]
 
         req_states = self.req_states
@@ -270,7 +260,6 @@ class NgramGPUSpeculator(BaseSpeculator):
             self.scratch,
             self.scratch.stride(0),
             self.drafts,
-            self.num_valid_drafts_for_trim,
             self.max_model_len,
             self.n_blocks,
             self.num_speculative_steps,

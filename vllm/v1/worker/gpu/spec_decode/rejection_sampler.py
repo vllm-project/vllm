@@ -74,6 +74,76 @@ def _flatten_sampled_kernel(
         tl.store(flat_sampled_ptr + start_idx + i, token_id)
 
 
+@triton.jit
+def _gather_draft_sampled_kernel(
+    # [num_logits]
+    draft_sampled_ptr,
+    # [num_logits]
+    pos_ptr,
+    # [num_tokens]
+    input_ids_ptr,
+    # [num_tokens]
+    positions_ptr,
+    # [num_logits]
+    logits_indices_ptr,
+    # [num_logits]
+    expanded_idx_mapping_ptr,
+    # [num_logits]
+    expanded_local_pos_ptr,
+    # [max_num_reqs]
+    prefill_len_ptr,
+    num_logits,
+    BLOCK_SIZE: tl.constexpr,
+):
+    block = tl.program_id(0) * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    mask = block < num_logits
+    token_idx = tl.load(logits_indices_ptr + block, mask=mask)
+    token_id = tl.load(input_ids_ptr + token_idx, mask=mask)
+    pos = tl.load(positions_ptr + token_idx, mask=mask)
+    req_state_idx = tl.load(expanded_idx_mapping_ptr + block, mask=mask)
+    local_pos = tl.load(expanded_local_pos_ptr + block, mask=mask)
+    prefill_len = tl.load(prefill_len_ptr + req_state_idx, mask=mask)
+    # Drafts are only proposed after sampling past the prefill, so any draft
+    # slots in a step starting within the prefill are placeholders (e.g. the
+    # padded first step after a P/D remote KV load).
+    is_placeholder = (local_pos > 0) & (pos - local_pos < prefill_len)
+    token_id = tl.where(is_placeholder, -1, token_id)
+    tl.store(draft_sampled_ptr + block, token_id, mask=mask)
+    tl.store(pos_ptr + block, pos, mask=mask)
+
+
+def gather_draft_sampled(
+    input_ids: torch.Tensor,
+    positions: torch.Tensor,
+    logits_indices: torch.Tensor,
+    expanded_idx_mapping: torch.Tensor,
+    expanded_local_pos: torch.Tensor,
+    prefill_len: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Gather the input token and position of each logits row.
+
+    Draft rows of requests that have not yet sampled past their prefill are
+    set to -1 so that the rejection kernels reject them.
+    """
+    num_logits = logits_indices.shape[0]
+    draft_sampled = input_ids.new_empty(num_logits)
+    pos = positions.new_empty(num_logits)
+    BLOCK_SIZE = 1024
+    _gather_draft_sampled_kernel[(triton.cdiv(num_logits, BLOCK_SIZE),)](
+        draft_sampled,
+        pos,
+        input_ids,
+        positions,
+        logits_indices,
+        expanded_idx_mapping,
+        expanded_local_pos,
+        prefill_len,
+        num_logits,
+        BLOCK_SIZE=BLOCK_SIZE,
+    )
+    return draft_sampled, pos
+
+
 class RejectionSampler:
     def __init__(
         self,
@@ -110,7 +180,7 @@ class RejectionSampler:
         num_sampled: torch.Tensor,
         logits: torch.Tensor,
         cu_num_logits: torch.Tensor,
-        cu_num_logits_np: np.ndarray | None,
+        cu_num_logits_np: np.ndarray,
         max_num_logprobs: int,
     ) -> LogprobsTensors | None:
         if max_num_logprobs == NO_LOGPROBS:
@@ -132,7 +202,9 @@ class RejectionSampler:
         expanded_logits = num_logits != num_reqs
         cu_num_generated_tokens: list[int] | torch.Tensor | None = None
         if expanded_logits:
-            if cu_num_logits_np is None:
+            if self.enable_adaptive_verification:
+                # Adaptive verification keeps the true per-request boundaries
+                # on device only; cu_num_logits_np holds the pre-compacted layout.
                 cu_num_generated_tokens = cu_num_logits.clone()
             else:
                 cu_num_generated_tokens = cu_num_logits_np.tolist()
@@ -173,6 +245,7 @@ class RejectionSampler:
         idx_mapping_np: np.ndarray,
         expanded_idx_mapping: torch.Tensor,
         expanded_local_pos: torch.Tensor,
+        seq_lens_upper_bound_np: np.ndarray,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         processed_logits = self.sampler.apply_sampling_params(
             logits,
@@ -182,6 +255,7 @@ class RejectionSampler:
             pos,
             draft_sampled,
             expanded_local_pos,
+            seq_lens_upper_bound_np,
         )
         sampled, num_sampled = rejection_sample(
             processed_logits,
@@ -219,8 +293,10 @@ class RejectionSampler:
         num_reqs = input_batch.num_reqs
 
         if logits.shape[0] <= max_chunk_logits:
-            # GPU trimming can leave the CPU boundaries stale.
-            # Trimmed batches fit in one chunk.
+            # One chunk covers the batch. Adaptive verification compacts the logits
+            # without updating cu_num_logits_np (it keeps the pre-compacted layout),
+            # so the stale sums must not pick chunk boundaries; its budget cap
+            # guarantees the compacted batch always lands here.
             request_chunks: Iterable[tuple[int, int]] = ((0, num_reqs),)
         else:
             assert not self.enable_adaptive_verification
@@ -246,17 +322,14 @@ class RejectionSampler:
                 input_batch.idx_mapping_np[start:end],
                 input_batch.expanded_idx_mapping[lo:hi],
                 input_batch.expanded_local_pos[lo:hi],
+                input_batch.seq_lens_cpu_upper_bound.numpy()[start:end],
             )
             chunk_logprobs = self._get_logprobs_tensors(
                 sampled,
                 num_sampled,
                 processed_logits if use_processed_logits else logits[lo:hi],
                 chunk_cu_num_logits,
-                (
-                    chunk_cu_num_logits_np
-                    if logits.shape[0] > max_chunk_logits
-                    else None
-                ),
+                chunk_cu_num_logits_np,
                 max_num_logprobs,
             )
             if chunk_logprobs is not None:
@@ -293,8 +366,14 @@ class RejectionSampler:
         # that num_nans is computed before applying penalties and temperature.
         num_nans = get_num_nans(logits) if self.sampler.compute_nans else None
 
-        draft_sampled = input_batch.input_ids[input_batch.logits_indices]
-        pos = input_batch.positions[input_batch.logits_indices]
+        draft_sampled, pos = gather_draft_sampled(
+            input_batch.input_ids,
+            input_batch.positions,
+            input_batch.logits_indices,
+            input_batch.expanded_idx_mapping,
+            input_batch.expanded_local_pos,
+            self.sampler.req_states.prefill_len.gpu,
+        )
 
         max_num_logprobs = self.sampler.sampling_states.max_num_logprobs(
             input_batch.idx_mapping_np

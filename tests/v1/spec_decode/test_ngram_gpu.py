@@ -9,16 +9,12 @@ slightly different policy than the CPU one: when multiple n-gram matches of
 the same length exist, the GPU kernel picks the right-most (most recent)
 match inside the active context, whereas the CPU implementation returns the
 left-most. The expectations below reflect the GPU behavior.
-
-Also covers the GPU draft-trimming layout helpers in
-``adaptive_verification`` that ngram_gpu shares with DSpark.
 """
 
 from __future__ import annotations
 
 from types import SimpleNamespace
 
-import numpy as np
 import pytest
 import torch
 
@@ -27,12 +23,6 @@ from vllm.config import (
     SchedulerConfig,
     SpeculativeConfig,
     VllmConfig,
-)
-from vllm.v1.worker.gpu.attn_utils import AttentionCGSupportInfo
-from vllm.v1.worker.gpu.spec_decode.adaptive_verification import (
-    VariableDraftTrimmer,
-    build_verification_layout,
-    maybe_create_draft_trimmer,
 )
 from vllm.v1.worker.gpu.spec_decode.ngram.speculator import NgramGPUSpeculator
 from vllm.v1.worker.gpu.states import RequestState
@@ -112,10 +102,10 @@ def _propose(
     num_sampled: list[int] | None = None,
     last_sampled: list[int] | None = None,
     slots: list[int] | None = None,
-) -> tuple[list[list[int]], list[int]]:
+) -> list[list[int]]:
     """Place each batch row at a request slot and run propose().
 
-    Returns (drafts, num_valid) as python lists in batch order.
+    Returns the drafts as python lists in batch order.
     """
     B = len(rows)
     if seq_lens is None:
@@ -158,56 +148,43 @@ def _propose(
         seeds=torch.zeros(B, dtype=torch.int64, device=DEVICE),
         dp_sync=None,
     )
-    num_valid = spec.num_valid_drafts_for_trim[idx_mapping]
-    return drafts.cpu().tolist(), num_valid.cpu().tolist()
-
-
-# ---------------------------------------------------------------------------
-# Proposal behavior
-# ---------------------------------------------------------------------------
+    return drafts.cpu().tolist()
 
 
 @pytest.mark.parametrize("max_model_len", [32, 300])
 def test_no_match_clears_previous_proposal(max_model_len):
     spec = _make_speculator(min_n=2, max_n=2, k=2, max_model_len=max_model_len)
     row = [0] * (max_model_len - 5) + [1, 2, 3, 1, 2]
-    assert _propose(spec, [row]) == ([[3, 1]], [2])
-    drafts, num_valid = _propose(spec, [[1, 2, 3, 4, 5]], last_sampled=[42])
-    assert num_valid == [0]
+    assert _propose(spec, [row]) == [[3, 1]]
+    drafts = _propose(spec, [[1, 2, 3, 4, 5]], last_sampled=[42])
     assert drafts == [[42, 42]]
 
 
 def test_no_4gram_match_only():
     """No 4-gram match in [1,2,3,4,1,2,3] → 0 valid drafts."""
     spec = _make_speculator(min_n=4, max_n=4, k=2)
-    drafts, num_valid = _propose(spec, [[1, 2, 3, 4, 1, 2, 3]], last_sampled=[7])
-    assert num_valid == [0]
+    drafts = _propose(spec, [[1, 2, 3, 4, 1, 2, 3]], last_sampled=[7])
     assert drafts == [[7, 7]]
 
 
 def test_falls_back_to_3gram_when_4gram_missing():
     """No 4-gram match but a 3-gram match exists → propose [4, 1]."""
     spec = _make_speculator(min_n=3, max_n=4, k=2)
-    drafts, num_valid = _propose(spec, [[1, 2, 3, 4, 1, 2, 3]])
-    assert num_valid == [2]
+    drafts = _propose(spec, [[1, 2, 3, 4, 1, 2, 3]])
     assert drafts == [[4, 1]]
 
 
 def test_prefers_longer_ngram():
     """Prefer a 4-gram match over a more recent 3-gram match."""
     spec = _make_speculator(min_n=3, max_n=4, k=2)
-    drafts, num_valid = _propose(
-        spec, [[1, 2, 3, 4, 50, 51, 2, 3, 4, 60, 61, 1, 2, 3, 4]]
-    )
-    assert num_valid == [2]
+    drafts = _propose(spec, [[1, 2, 3, 4, 50, 51, 2, 3, 4, 60, 61, 1, 2, 3, 4]])
     assert drafts == [[50, 51]]
 
 
 def test_picks_longest_match_among_2_3_4_grams():
     """Prefer a 3-gram match over a more recent 2-gram match."""
     spec = _make_speculator(min_n=2, max_n=4, k=2)
-    drafts, num_valid = _propose(spec, [[2, 3, 4, 50, 51, 3, 4, 60, 61, 1, 2, 3, 4]])
-    assert num_valid == [2]
+    drafts = _propose(spec, [[2, 3, 4, 50, 51, 3, 4, 60, 61, 1, 2, 3, 4]])
     assert drafts == [[50, 51]]
 
 
@@ -217,54 +194,44 @@ def test_picks_rightmost_when_multiple_matches(max_model_len):
     spec = _make_speculator(min_n=3, max_n=3, k=2, max_model_len=max_model_len)
     padding = [0] * (spec.block_l - 5) if spec.n_blocks > 1 else []
     row = [1, 2, 3, 100] + padding + [1, 2, 3, 200, 1, 2, 3, 300, 1, 2, 3]
-    drafts, num_valid = _propose(
-        spec, [row + [1, 2, 3, 999, 1, 2, 3]], seq_lens=[len(row)]
-    )
-    assert num_valid == [2]
+    drafts = _propose(spec, [row + [1, 2, 3, 999, 1, 2, 3]], seq_lens=[len(row)])
     assert drafts == [[300, 1]]
 
 
 def test_short_context_yields_zero_valid():
     """The only length-2 window overlaps the suffix itself → no match."""
     spec = _make_speculator(min_n=2, max_n=2, k=2)
-    drafts, num_valid = _propose(spec, [[5, 6]], last_sampled=[99])
-    assert num_valid == [0]
+    drafts = _propose(spec, [[5, 6]], last_sampled=[99])
     assert drafts == [[99, 99]]
 
 
 def test_zero_sampled_disables_proposal():
     """num_sampled==0 disables proposals for that request regardless of match."""
     spec = _make_speculator(min_n=2, max_n=2, k=2)
-    drafts, num_valid = _propose(
-        spec, [[1, 2, 3, 1, 2]], num_sampled=[0], last_sampled=[77]
-    )
-    assert num_valid == [0]
+    drafts = _propose(spec, [[1, 2, 3, 1, 2]], num_sampled=[0], last_sampled=[77])
     assert drafts == [[77, 77]]
 
 
-def test_truncates_num_valid_when_few_tokens_after_match():
-    """Fewer than k tokens after the match → num_valid < k, tail falls back.
+def test_tail_falls_back_when_few_tokens_after_match():
+    """Fewer than k tokens after the match → the tail falls back.
 
     Tokens: [1, 2, 1, 2] (seq_len=4). Suffix (1, 2) matches at position 0
     (the match at position 2 is the suffix itself and is excluded). With
     k=3, only 2 slots map to tokens inside the context.
     """
     spec = _make_speculator(min_n=2, max_n=2, k=3)
-    drafts, num_valid = _propose(spec, [[1, 2, 1, 2]], last_sampled=[55])
-    assert num_valid == [2]
-    assert drafts[0][:2] == [1, 2]
-    assert drafts[0][2] == 55
+    drafts = _propose(spec, [[1, 2, 1, 2]], last_sampled=[55])
+    assert drafts == [[1, 2, 55]]
 
 
 def test_multibatch_mixed():
     """Mixed batch: row 0 matches, row 1 has no match."""
     spec = _make_speculator(min_n=2, max_n=2, k=2)
-    drafts, num_valid = _propose(
+    drafts = _propose(
         spec,
         [[1, 2, 3, 1, 2], [4, 5, 6]],
         last_sampled=[10, 20],
     )
-    assert num_valid == [2, 0]
     assert drafts[0] == [3, 1]
     assert drafts[1] == [20, 20]
 
@@ -272,14 +239,13 @@ def test_multibatch_mixed():
 def test_multibatch_independent_choice_of_n():
     """Each row independently picks its longest matched n."""
     spec = _make_speculator(min_n=2, max_n=3, k=2)
-    drafts, num_valid = _propose(
+    drafts = _propose(
         spec,
         [
             [9, 1, 2, 3, 8, 1, 2, 3],  # 3-gram (1,2,3) at idx 1 → [8, 1]
             [7, 1, 2, 9, 1, 2],  # 2-gram (1,2) at idx 1 → [9, 1]
         ],
     )
-    assert num_valid == [2, 2]
     assert drafts[0] == [8, 1]
     assert drafts[1] == [9, 1]
 
@@ -287,63 +253,19 @@ def test_multibatch_independent_choice_of_n():
 def test_min_n_eq_1():
     """min_n=max_n=1 — single-token n-grams always match if context > 1."""
     spec = _make_speculator(min_n=1, max_n=1, k=2)
-    drafts, num_valid = _propose(spec, [[1, 2, 3, 4, 1]])
-    assert num_valid == [2]
+    drafts = _propose(spec, [[1, 2, 3, 4, 1]])
     assert drafts == [[2, 3]]
 
 
 def test_noncontiguous_idx_mapping():
     """propose() reads token rows in place via idx_mapping (non-contiguous)."""
     spec = _make_speculator(min_n=2, max_n=2, k=2)
-    drafts, num_valid = _propose(
+    drafts = _propose(
         spec,
         [[7, 8, 9, 7, 8], [1, 2, 3, 1, 2]],
         slots=[3, 0],
     )
     assert drafts == [[9, 7], [3, 1]]
-    assert num_valid == [2, 2]
-
-
-def test_num_valid_written_to_request_slots():
-    """num_valid_drafts_for_trim is req-slot indexed for the draft trimmer."""
-    spec = _make_speculator(min_n=2, max_n=2, k=2)
-    _propose(
-        spec,
-        [[7, 8, 9, 7, 8], [1, 2, 3, 4, 5]],
-        slots=[5, 2],
-    )
-    nv = spec.num_valid_drafts_for_trim.cpu()
-    assert nv[5].item() == 2  # match
-    assert nv[2].item() == 0  # no match
-
-
-def test_dummy_run_does_not_touch_state():
-    """Dummy runs must not mutate persistent request or drafter state."""
-    spec = _make_speculator(min_n=2, max_n=2, k=2)
-    _propose(spec, [[1, 2, 3, 1, 2]], slots=[1])
-    before = spec.num_valid_drafts_for_trim.clone()
-
-    input_batch = SimpleNamespace(
-        num_reqs=1,
-        idx_mapping=torch.tensor([1], dtype=torch.int64, device=DEVICE),
-    )
-    drafts = spec.propose(
-        input_batch=input_batch,
-        attn_metadata=None,
-        slot_mappings=None,
-        last_hidden_states=torch.empty(0, device=DEVICE),
-        aux_hidden_states=None,
-        num_sampled=torch.ones(1, dtype=torch.int32, device=DEVICE),
-        num_rejected=torch.zeros(1, dtype=torch.int32, device=DEVICE),
-        last_sampled=torch.zeros((8, 1), dtype=torch.int64, device=DEVICE),
-        next_prefill_tokens=torch.zeros(1, dtype=torch.int32, device=DEVICE),
-        temperature=torch.zeros(1, dtype=torch.float32, device=DEVICE),
-        seeds=torch.zeros(1, dtype=torch.int64, device=DEVICE),
-        dp_sync=None,
-        dummy_run=True,
-    )
-    assert drafts.shape == (1, 2)
-    assert torch.equal(spec.num_valid_drafts_for_trim.cpu(), before.cpu())
 
 
 def test_construction_validates_speculative_config():
@@ -354,84 +276,3 @@ def test_construction_validates_speculative_config():
     # Inherited no-op hooks must not raise.
     spec.init_cudagraph_manager(None)
     spec.capture()
-
-
-# ---------------------------------------------------------------------------
-# GPU draft trimming (shared verification-layout machinery)
-# ---------------------------------------------------------------------------
-
-
-def test_build_verification_layout_exact_and_gpu_tail():
-    """Layout cumsums match a numpy reference; padding tail equals the total."""
-    capacities = torch.tensor([2, 0, 1], dtype=torch.int32, device=DEVICE)
-    non_draft = torch.tensor([1, 5, 1], dtype=torch.int32, device=DEVICE)
-    num_bonus = 1
-    max_num_reqs = 6
-    cu_num_logits = torch.empty(max_num_reqs + 1, dtype=torch.int32, device=DEVICE)
-    qsl = torch.empty(max_num_reqs + 1, dtype=torch.int32, device=DEVICE)
-
-    for num_tokens in (10, None):  # exact CPU total vs GPU cumsum tail
-        cnl, out_qsl = build_verification_layout(
-            capacities, non_draft, num_bonus, cu_num_logits, qsl, num_tokens
-        )
-        assert cnl.cpu().tolist() == [0, 3, 4, 6]
-        assert out_qsl.cpu().tolist()[:4] == [0, 3, 8, 10]
-        # Trailing (padding) entries hold the batch total.
-        assert out_qsl.cpu().tolist()[4:] == [10, 10, 10]
-
-
-def test_variable_draft_trimmer_clamps_to_num_valid():
-    """Scheduled draft slots are clamped per request to the drafter's counts."""
-    max_num_reqs = 8
-    num_valid_drafts = torch.zeros(max_num_reqs, dtype=torch.int32, device=DEVICE)
-    num_valid_drafts[4] = 1  # drafter produced 1 valid draft for slot 4
-    num_valid_drafts[2] = 3  # more than scheduled for slot 2
-    qsl_buf = torch.empty(max_num_reqs + 1, dtype=torch.int32, device=DEVICE)
-
-    trimmer = VariableDraftTrimmer(
-        num_valid_drafts,
-        qsl_buf,
-        num_bonus_tokens=1,
-        max_num_reqs=max_num_reqs,
-        max_total_logits=1024,
-        device=DEVICE,
-    )
-    # Batch: [slot 4 (2 drafts scheduled), slot 2 (2 drafts), slot 0 (prefill)].
-    idx_mapping = torch.tensor([4, 2, 0], dtype=torch.int64, device=DEVICE)
-    num_draft_tokens_per_req = np.array([2, 2, 0], dtype=np.int32)
-    num_scheduled_tokens = np.array([3, 3, 7], dtype=np.int32)
-
-    cu_num_logits, qsl = trimmer.trim(
-        idx_mapping, num_draft_tokens_per_req, num_scheduled_tokens
-    )
-    # capacities = min(scheduled, num_valid) = [1, 2, 0]
-    assert cu_num_logits.cpu().tolist() == [0, 2, 5, 6]
-    # query lens = non-draft + capacities = [1+1, 1+2, 7+0]
-    assert qsl.cpu().tolist()[:4] == [0, 2, 5, 12]
-    # Padding tail equals the (GPU) batch total.
-    assert qsl.cpu().tolist()[4:] == [12] * (max_num_reqs - 3)
-
-
-@pytest.mark.parametrize("batch_sharded_sampling", [False, True])
-def test_draft_trimmer_disabled_with_batch_sharded_sampling(batch_sharded_sampling):
-    """The sharder plans from CPU logits boundaries, so GPU trimming must stay off."""
-    cfg = _make_vllm_config(min_n=2, max_n=2, k=2)
-    cfg.parallel_config.enable_batch_sharded_sampling = batch_sharded_sampling
-    backend = SimpleNamespace(
-        __name__="FakeBackend",
-        supports_device_cpu_query_lens_mismatch=lambda: True,
-    )
-    trimmer = maybe_create_draft_trimmer(
-        vllm_config=cfg,
-        speculator=SimpleNamespace(
-            num_valid_drafts_for_trim=torch.zeros(8, dtype=torch.int32, device=DEVICE)
-        ),
-        attn_groups=[[SimpleNamespace(backend=backend, layer_names=set())]],
-        attn_cg_support=AttentionCGSupportInfo(),
-        req_states=SimpleNamespace(max_num_reqs=8, vocab_size=32, device=DEVICE),
-        query_start_loc=torch.empty(9, dtype=torch.int32, device=DEVICE),
-        num_bonus_tokens=1,
-    )
-    assert (trimmer is None) == batch_sharded_sampling
-    if trimmer is not None:
-        assert isinstance(trimmer, VariableDraftTrimmer)
