@@ -39,6 +39,9 @@ engine drives on your behalf:
 
 ## Quickstart
 
+For an experimental offline TP change on a fixed two-GPU pool, see
+[Dynamic TP with IPC refit](dynamic_tp.md).
+
 ### Inference Side
 
 The inference side takes only a backend name. Everything else about the transfer

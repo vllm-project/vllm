@@ -70,8 +70,19 @@ def _make_core(rank: int) -> tuple[EngineCore, Worker]:
         dtype=torch.bfloat16,
         quantization=None,
         enable_sleep_mode=False,
+        enable_cumem_allocator=False,
         multimodal_config=None,
         model_arch_config=SimpleNamespace(total_num_attention_heads=4),
+        hf_config=SimpleNamespace(
+            model_type="llama",
+            hidden_size=8,
+            num_attention_heads=4,
+            num_key_value_heads=1,
+            intermediate_size=16,
+            vocab_size=32,
+            num_hidden_layers=0,
+            tie_word_embeddings=False,
+        ),
     )
     config.weight_transfer_config = SimpleNamespace(backend="ipc")
     config.scheduler_config.async_scheduling = False
@@ -160,6 +171,24 @@ def _run_rank(rank: int, init_method: str, scenario: str):
         elif scenario == "fault_tolerance":
             worker.vllm_config.parallel_config.enable_fault_tolerance = rank == 1
             expected_error = "rank 1: microbatching and worker fault tolerance"
+        elif scenario == "kv_partition":
+            if rank == 1:
+                mc = worker.vllm_config.model_config
+                mc.model_arch_config.total_num_attention_heads = 6
+                mc.hf_config.num_attention_heads = 6
+                mc.hf_config.num_key_value_heads = 3
+                mc.hf_config.hidden_size = 384
+            expected_error = "KV heads"
+        elif scenario == "mlp_partition":
+            if rank == 1:
+                worker.vllm_config.model_config.hf_config.intermediate_size = 17
+            expected_error = "intermediate_size"
+        elif scenario == "cumem_allocator":
+            worker.vllm_config.model_config.enable_cumem_allocator = rank == 1
+            expected_error = "CuMem"
+        elif scenario == "launcher_env":
+            os.environ["VLLM_DP_SIZE"] = "2"
+            os.environ["VLLM_DP_RANK"] = str(rank)
 
         previous_pause = core.scheduler.pause_state
         if scenario.startswith("refit_"):
@@ -202,6 +231,10 @@ def _run_rank(rank: int, init_method: str, scenario: str):
             assert core.scheduler.pause_state == PauseState.PAUSED_ALL
             assert worker._layout_transition_target.tensor_parallel_size == 2
             assert worker._layout_transition_target.rank == rank
+            assert worker._layout_transition_target.data_parallel_size == 1
+            assert worker._layout_transition_target.data_parallel_rank == 0
+            assert worker._layout_transition_target.data_parallel_index == 0
+            assert worker._layout_transition_target.world_size == 2
 
             if scenario == "duplicate_prepare":
                 with pytest.raises(LayoutTransitionRejected, match="already active"):
@@ -251,6 +284,9 @@ def _run_rank(rank: int, init_method: str, scenario: str):
         "target_mismatch",
         "ubatching",
         "fault_tolerance",
+        "kv_partition",
+        "mlp_partition",
+        "cumem_allocator",
     ],
 )
 def test_collective_rejection_preserves_each_rank(tmp_path, monkeypatch, scenario):
@@ -265,7 +301,7 @@ def test_collective_rejection_preserves_each_rank(tmp_path, monkeypatch, scenari
     )
 
 
-@pytest.mark.parametrize("scenario", ["accepted", "duplicate_prepare"])
+@pytest.mark.parametrize("scenario", ["accepted", "duplicate_prepare", "launcher_env"])
 def test_reservation_blocks_execution_until_cancel(tmp_path, monkeypatch, scenario):
     """Collective preparation excludes work; cancellation restores the old model."""
     monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "")
@@ -378,6 +414,14 @@ def _exercise_refit(core, worker, request, rank, scenario):
             "shapes": [[32, 8], [32, 8]],
             "ipc_handles": [{}, {}],
         }
+        if scenario == "refit_metadata_retry":
+            invalid = {**payload, "extra": 1} if rank == 1 else payload
+            with pytest.raises(LayoutTransitionRejected, match="Unexpected IPC"):
+                core.update_layout_weights(request, invalid)
+            assert worker._layout_transition_phase == LayoutTransitionPhase.REFITTING
+            assert core._layout_transition_phase == LayoutTransitionPhase.REFITTING
+            assert not worker._layout_checkpoint.received
+            assert not hasattr(worker.weight_transfer_engine, "payload")
         core.update_layout_weights(request, payload)
         with pytest.raises(LayoutTransitionRejected, match="Duplicate"):
             core.update_layout_weights(request, payload)
@@ -413,7 +457,13 @@ def _exercise_refit(core, worker, request, rank, scenario):
 
 
 @pytest.mark.parametrize(
-    "scenario", ["refit_success", "refit_release_failure", "refit_warmup_failure"]
+    "scenario",
+    [
+        "refit_success",
+        "refit_metadata_retry",
+        "refit_release_failure",
+        "refit_warmup_failure",
+    ],
 )
 def test_refit_requires_complete_weights_and_collective_readiness(
     tmp_path, monkeypatch, scenario
@@ -427,3 +477,83 @@ def test_refit_requires_complete_weights_and_collective_readiness(
         join=True,
         start_method="fork",
     )
+
+
+@pytest.mark.parametrize("extra_options", [False, True])
+@pytest.mark.parametrize("load_fails", [False, True])
+def test_transition_dummy_load_preserves_original_loader_config(
+    monkeypatch, extra_options, load_fails
+):
+    """A temporary dummy load accepts disk-loader options and never poisons reload."""
+    import vllm.v1.worker.gpu_worker as worker_module
+    from vllm.model_executor.model_loader import get_model_loader
+    from vllm.model_executor.model_loader.dummy_loader import DummyModelLoader
+
+    worker = object.__new__(Worker)
+    worker.vllm_config = VllmConfig(device_config=DeviceConfig(device="cpu"))
+    load_config = worker.vllm_config.load_config
+    load_config.load_format = "auto"
+    original_extra = {"enable_multithread_load": True} if extra_options else {}
+    load_config.model_loader_extra_config = original_extra
+    worker.cache_config = worker.vllm_config.cache_config
+    worker.device = torch.device("cpu")
+    worker._init_model_runner = lambda: None
+    worker.weight_transfer_engine = SimpleNamespace(
+        parse_init_info=lambda payload: payload,
+        init_transfer_engine=lambda info: None,
+        start_weight_update=lambda: None,
+    )
+    monkeypatch.setattr(worker_module, "MemorySnapshot", lambda **kwargs: object())
+    monkeypatch.setattr(worker_module, "request_memory", lambda *args: 0)
+
+    def load_model(load_dummy_weights):
+        assert load_dummy_weights
+        # MRV2 selects the dummy loader by mutating this shared field.
+        load_config.load_format = "dummy"
+        assert isinstance(get_model_loader(load_config), DummyModelLoader)
+        if load_fails:
+            raise RuntimeError("injected model-load failure")
+
+    worker.load_model = load_model
+    if load_fails:
+        with pytest.raises(RuntimeError, match="injected model-load failure"):
+            worker._load_layout_model()
+    else:
+        worker._load_layout_model()
+        assert worker._weight_update_active
+    assert worker.vllm_config.load_config is load_config
+    assert load_config.load_format == "auto"
+    assert load_config.model_loader_extra_config is original_extra
+
+
+def test_reserved_shutdown_continues_after_retirement_error(monkeypatch):
+    """A diagnostic retirement failure must not skip the remaining cleanup."""
+    import vllm.v1.worker.gpu_worker as worker_module
+    from vllm.device_allocator.cumem import CuMemAllocator
+
+    calls = []
+    worker = object.__new__(Worker)
+    worker.profiler = None
+    worker._layout_transition = LayoutTransitionRequest("failed", 2, "next")
+    worker.weight_transfer_engine = SimpleNamespace(
+        shutdown=lambda: calls.append("receiver")
+    )
+    worker.model_runner = SimpleNamespace(shutdown=lambda: calls.append("runner"))
+    worker.elastic_ep_executor = SimpleNamespace(
+        shutdown=lambda: calls.append("executor")
+    )
+
+    def fail_retirement():
+        raise RuntimeError("injected retained layer")
+
+    worker._release_layout_model = fail_retirement
+    monkeypatch.setattr(worker_module, "ensure_kv_transfer_shutdown", lambda: None)
+    monkeypatch.setattr(worker_module, "ensure_ec_transfer_shutdown", lambda: None)
+    monkeypatch.setattr(worker_module.current_platform, "is_cuda_alike", lambda: True)
+    monkeypatch.setattr(
+        CuMemAllocator,
+        "instance",
+        SimpleNamespace(release_pools=lambda: calls.append("pools")),
+    )
+    worker.shutdown()
+    assert calls == ["receiver", "executor", "runner", "pools"]

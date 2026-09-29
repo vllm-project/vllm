@@ -48,6 +48,25 @@ def chunk(names):
 
 
 class TestLayoutCheckpoint(unittest.TestCase):
+    def test_unknown_metadata_is_rejected_without_consuming_coverage(self):
+        checkpoint = LayoutCheckpoint(SimpleNamespace(**CONFIG))
+        payload = chunk(list(WIRE_SHAPES))
+        with self.assertRaisesRegex(ValueError, "Unexpected IPC"):
+            checkpoint.validate_chunk({**payload, "extra": 1})
+        self.assertEqual(checkpoint.received, set())
+        checkpoint.commit_chunk(checkpoint.validate_chunk(payload))
+        checkpoint.require_complete()
+
+    def test_unused_native_optional_fields_remain_accepted(self):
+        checkpoint = LayoutCheckpoint(SimpleNamespace(**CONFIG))
+        payload = {
+            **chunk(list(WIRE_SHAPES)),
+            "ipc_handles_pickled": None,
+            "tensor_sizes": [],
+        }
+        checkpoint.commit_chunk(checkpoint.validate_chunk(payload))
+        checkpoint.require_complete()
+
     def test_all_fused_inputs_must_arrive_before_completion(self):
         for missing in (
             "model.layers.0.self_attn.k_proj.weight",
