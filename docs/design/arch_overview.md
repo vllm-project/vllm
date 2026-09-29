@@ -62,20 +62,6 @@ vllm serve <model>
 
 The code for the `vllm` CLI can be found in [vllm/entrypoints/cli/main.py](../../vllm/entrypoints/cli/main.py).
 
-Sometimes you may see the API server entrypoint used directly instead of via the
-`vllm` CLI command. For example:
-
-```bash
-python -m vllm.entrypoints.openai.api_server --model <model>
-```
-
-!!! warning
-
-    `python -m vllm.entrypoints.openai.api_server` is deprecated
-    and may become unsupported in a future release.
-
-That code can be found in [vllm/entrypoints/openai/api_server.py](../../vllm/entrypoints/openai/api_server.py).
-
 More details on the API server can be found in the [Online Serving](../serving/online_serving/README.md) document.
 
 ## V1 Process Architecture
@@ -88,7 +74,7 @@ The API server process handles HTTP requests (e.g., the OpenAI-compatible API), 
 
 By default, there is **1 API server process**, but when data parallelism is used, the API server count automatically scales to match the data parallel size. This can also be manually configured with the `--api-server-count` flag. Each API server connects to **all** engine cores via ZMQ in a many-to-many topology, enabling any API server to route requests to any engine core. Each API server process uses multiple CPU threads for media loading (controlled by `VLLM_MEDIA_LOADING_THREAD_COUNT`, default 8).
 
-The code can be found in [vllm/entrypoints/openai/api_server.py](../../vllm/entrypoints/openai/api_server.py) and [vllm/v1/utils.py](../../vllm/v1/utils.py).
+The code can be found in [vllm/entrypoints/launchers/api_server](../../vllm/entrypoints/launchers/api_server) and [vllm/v1/utils.py](../../vllm/v1/utils.py).
 
 ### Engine Core Process
 

@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Hybrid W4A16 kernel: Triton for prefill, HIP skinny for decode.
+"""Hybrid W4A16 kernel: Triton for prefill, HIP skinny for decode.
 
 Routes based on batch size M:
   M <= MAX_SKINNY_BATCH_SIZE: HIP skinny GEMM (wvSplitK_int4_g)
@@ -77,7 +76,7 @@ def _triton_w4a16_skinny_fmt_kernel(
     a_ptr,  # [M, K]  fp16/bf16 activations
     b_ptr,  # [N, K//8]  int32 packed (ExLlama shuffle, K is packed dim)
     scales_ptr,  # [N, K//G]  fp16/bf16 scales (skinny layout)
-    zp_ptr,  # [N, K//G]  fp16/bf16 raw zero-points (when HAS_ZP=True)
+    zp_ptr,  # [N//8, K//G]  int32 zero-points (when HAS_ZP=True)
     c_ptr,  # [M, N]  fp16/bf16 output
     # Dimensions
     M,
@@ -94,8 +93,7 @@ def _triton_w4a16_skinny_fmt_kernel(
     BLOCK_N: tl.constexpr,
     BLOCK_K: tl.constexpr,
 ):
-    """
-    Fused W4A16 GEMM reading weights from skinny format [N, K//8].
+    """Fused W4A16 GEMM reading weights from skinny format [N, K//8].
 
     B is stored as [N, K//8] int32 using ExLlama shuffle packing:
       each int32 packs 8 K-values with interleave [0,2,4,6,1,3,5,7]:
@@ -103,8 +101,9 @@ def _triton_w4a16_skinny_fmt_kernel(
                | (val[1]<<16) | (val[3]<<20) | (val[5]<<24) | (val[7]<<28)
 
     Scales are [N, K//G] (skinny layout, NOT transposed).
-    When HAS_ZP=True, raw zero-points zp_raw are loaded from zp_ptr [N, K//G]
-    and subtracted directly: (nibble - zp_raw) * scale.
+    When HAS_ZP=True, zp_ptr holds [N//8, K//G] int32 with row n's raw
+    zero-point at word[n//8] bits 4*(n%8), and dequant is
+    (nibble - zp_raw) * scale.
     When HAS_ZP=False, only the constant ZP_BIAS is subtracted (symmetric).
     """
     pid_m = tl.program_id(0)
@@ -142,15 +141,16 @@ def _triton_w4a16_skinny_fmt_kernel(
         b = tl.interleave(b, b)
         b = (b >> shifts_full) & 0xF
 
-        g_idx = (k_start * BLOCK_K) // group_size
-        scale_ptrs = scales_ptr + offs_n * num_groups + g_idx
+        group_idx = (k_start * BLOCK_K) // group_size
+        scale_ptrs = scales_ptr + offs_n * num_groups + group_idx
         scale_mask = offs_n < N
         scales = tl.load(scale_ptrs, mask=scale_mask, other=1.0)
 
         if HAS_ZP:
-            zp_ptrs = zp_ptr + offs_n * num_groups + g_idx
-            zp_raw = tl.load(zp_ptrs, mask=scale_mask, other=0.0)
-            b_fp = (b.to(scales.dtype) - zp_raw[:, None]) * scales[:, None]
+            zp_ptrs = zp_ptr + (offs_n // 8) * num_groups + group_idx
+            zp_word = tl.load(zp_ptrs, mask=scale_mask, other=0)
+            zp_raw = (zp_word >> (4 * (offs_n % 8))) & 0xF
+            b_fp = (b - zp_raw[:, None]).to(scales.dtype) * scales[:, None]
         else:
             b_fp = (b - ZP_BIAS).to(scales.dtype) * scales[:, None]
 
@@ -192,10 +192,9 @@ def triton_w4a16_skinny_fmt_gemm(
     scales: torch.Tensor,  # [N, K//G] fp16/bf16
     group_size: int,
     zp_bias: int = 8,
-    zp: torch.Tensor | None = None,  # [N, K//G] per-group zero-points
+    zp: torch.Tensor | None = None,  # [N//8, K//G] int32 zero-points
 ) -> torch.Tensor:
-    """
-    Fused W4A16 GEMM reading from skinny weight format [N, K//8].
+    """Fused W4A16 GEMM reading from skinny weight format [N, K//8].
 
     Args:
         a:          Activation matrix [M, K], float16 or bfloat16.
@@ -203,12 +202,13 @@ def triton_w4a16_skinny_fmt_gemm(
         scales:     Per-group scales [N, K//G], same dtype as a.
         group_size: Quantization group size (resolved from -1 to K by caller).
         zp_bias:    Constant zero bias (default 8 for unsigned int4).
-        zp:         Raw per-group zero-points [N, K//G] (asymmetric),
-                    stored as zp_raw in activation dtype. When provided,
+        zp:         Raw per-group zero-points [N//8, K//G] int32, row n at
+                    word[n//8] bits 4*(n%8) (asymmetric). When provided,
                     dequant is (nibble - zp_raw) * scale.
 
     Returns:
         Output matrix [M, N], same dtype as a.
+
     """
     assert a.is_contiguous(), "Activation matrix must be contiguous"
     assert b_q.is_contiguous(), "Weight matrix must be contiguous"
@@ -225,8 +225,9 @@ def triton_w4a16_skinny_fmt_gemm(
     )
     if zp is not None:
         assert zp.is_contiguous(), "Zero-points must be contiguous"
-        assert zp.shape == (N, num_groups), (
-            f"zp shape mismatch: {zp.shape} vs ({N}, {num_groups})"
+        assert N % 8 == 0, f"N must be divisible by 8 for packed zp, got {N}"
+        assert zp.shape == (N // 8, num_groups), (
+            f"zp shape mismatch: {zp.shape} vs ({N // 8}, {num_groups})"
         )
     has_zp = zp is not None
 
@@ -381,7 +382,10 @@ def _rdna_hybrid_w4a16_apply_impl(
     cu_count: int,
     group_size: int,
 ) -> torch.Tensor:
-    """Dispatch between skinny GEMM and Triton based on batch size M."""
+    """Dispatch between skinny GEMM and Triton based on batch size M.
+
+    ``w_zp`` is [N//8, K//G] int32 for asymmetric layers, None for symmetric.
+    """
     import vllm._custom_ops as ops
 
     M = x_2d.shape[0]
@@ -476,9 +480,6 @@ class RDNAHybridW4A16LinearKernel(MPLinearKernel):
         if c.act_type not in (torch.float16, torch.bfloat16):
             return False, "requires float16 or bfloat16 activations"
 
-        if c.has_g_idx:
-            return False, "does not support g_idx reordering"
-
         gs = c.group_size
         if gs not in SUPPORTED_GROUP_SIZES:
             return (
@@ -523,10 +524,7 @@ class RDNAHybridW4A16LinearKernel(MPLinearKernel):
             assert self.w_zp_name is not None
             w_zp_raw = getattr(layer, self.w_zp_name)
             permute_param_layout_(w_zp_raw, input_dim=1, output_dim=0, packed_dim=0)
-            zp_unpacked = unpack_quantized_values_into_int32(
-                w_zp_raw.data, c.weight_type, packed_dim=0
-            )
-            w_zp = zp_unpacked.to(c.act_type).contiguous()
+            w_zp = w_zp_raw.data.contiguous()
             self._transform_param(layer, self.w_zp_name, lambda x: w_zp)
 
         self._transform_param(layer, self.w_q_name, lambda x: w_q_skinny)
@@ -541,7 +539,7 @@ class RDNAHybridW4A16LinearKernel(MPLinearKernel):
         from vllm.utils.platform_utils import num_compute_units
 
         c = self.config
-        w_q, w_s, w_zp, _ = self._get_weight_params(layer)
+        w_q, w_s, w_zp = self._get_weight_params(layer)
 
         x_2d = x.reshape(-1, x.shape[-1])
         N = w_q.shape[0]

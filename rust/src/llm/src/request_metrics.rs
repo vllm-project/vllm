@@ -45,6 +45,7 @@ pub(crate) struct RequestMetricsTracker {
     last_token_ts: f64,
     first_token_latency: f64,
     num_generation_tokens: u32,
+    num_preemptions: u64,
     latest_num_cached_tokens: u32,
 }
 
@@ -69,6 +70,7 @@ struct RequestMetricHandles {
     request_max_num_generation_tokens: HistogramMetric,
     request_params_max_tokens: HistogramMetric,
     request_params_n: HistogramMetric,
+    request_num_preemptions: HistogramMetric,
     request_prefill_kv_computed_tokens: HistogramMetric,
     time_to_first_token_seconds: HistogramMetric,
     inter_token_latency_seconds: HistogramMetric,
@@ -104,6 +106,7 @@ impl RequestMetricsTracker {
             last_token_ts: 0.0,
             first_token_latency: 0.0,
             num_generation_tokens: 0,
+            num_preemptions: 0,
             latest_num_cached_tokens: 0,
         }
     }
@@ -184,6 +187,7 @@ impl RequestMetricsTracker {
             self.handles.request_params_max_tokens.observe(max_tokens_param as f64);
         }
         self.handles.request_params_n.observe(self.n_param as f64);
+        self.handles.request_num_preemptions.observe(self.num_preemptions as f64);
         self.handles
             .request_prefill_kv_computed_tokens
             .observe(prefill_kv_computed_tokens as f64);
@@ -223,6 +227,7 @@ impl RequestMetricsTracker {
                     }
                 }
                 EngineCoreEventType::Preempted => {
+                    self.num_preemptions += 1;
                     self.handles.num_preemptions.inc();
                 }
             }
@@ -276,6 +281,7 @@ fn resolve_request_metric_handles(model_name: &str, engine: u32) -> RequestMetri
             .get_or_create_owned(&labels),
         request_params_max_tokens: metrics.request_params_max_tokens.get_or_create_owned(&labels),
         request_params_n: metrics.request_params_n.get_or_create_owned(&labels),
+        request_num_preemptions: metrics.request_num_preemptions.get_or_create_owned(&labels),
         request_prefill_kv_computed_tokens: metrics
             .request_prefill_kv_computed_tokens
             .get_or_create_owned(&labels),
