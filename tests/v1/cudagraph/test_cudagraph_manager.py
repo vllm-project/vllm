@@ -224,7 +224,9 @@ def test_speculator_capture_preserves_decode_query_bounds(
     )
     manager = SpeculatorCudaGraphManager.__new__(SpeculatorCudaGraphManager)
     manager.max_num_reqs = num_reqs
-    manager.dp_size = 1
+    manager.vllm_config = SimpleNamespace(
+        parallel_config=SimpleNamespace(data_parallel_size=1)
+    )
     buffers = InputBuffers(num_reqs, num_tokens, torch.device("cpu"))
     block_tables = MagicMock()
     block_tables.cp_size = 1
