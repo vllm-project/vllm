@@ -533,7 +533,7 @@ networkx==3.2.1
     #   torch
 ninja==1.13.0
     # via -r requirements/test/../common.txt
-nltk==3.9.1
+nltk==3.10.3
     # via rouge-score
 num2words==0.5.14
     # via -r requirements/test/cuda.in
