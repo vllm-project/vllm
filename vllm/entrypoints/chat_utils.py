@@ -4,7 +4,6 @@
 import asyncio
 import copy
 import json
-import re
 import types
 from abc import ABC, abstractmethod
 from collections import Counter, defaultdict
@@ -27,6 +26,10 @@ from typing import (
     get_origin,
 )
 
+import jinja2.ext
+import jinja2.nodes
+import jinja2.parser
+import jinja2.sandbox
 from openai.types.chat import (
     ChatCompletionAssistantMessageParam,
     ChatCompletionContentPartImageParam,
@@ -2266,18 +2269,22 @@ def make_tool_call_id(id_type: str = "random", func_name=None, idx=None):
         return f"chatcmpl-tool-{random_uuid()}"
 
 
-# Role inclusion tests in a chat template, e.g. `message.role == "user"` or
-# `message['role'] in ['user', 'assistant']`. Inequality checks (the ChatML
-# generation-prompt guard) are not inclusion filters.
-_ROLE_INCLUSION_RE = re.compile(
-    r"""(?:\.role|\[['"]role['"]\])"""
-    r"""\s*(?:==|in)\s*"""
-    r"""(\[[^\]]*\]|(['"])([^'"\n]*)\2)"""
-)
-# `message.role in allowed_roles` filters roles, but the names are not
-# visible in the template. Callers then probe every non-empty message.
-_ROLE_DYNAMIC_FILTER_RE = re.compile(
-    r"""(?:\.role|\[['"]role['"]\])\s*in\s*[A-Za-z_]"""
+class _ChatTemplateParseExtension(jinja2.ext.Extension):
+    """Accept HF ``{% generation %}`` blocks while parsing a chat template."""
+
+    tags = {"generation"}
+
+    def parse(self, parser: jinja2.parser.Parser) -> jinja2.nodes.Node:
+        lineno = next(parser.stream).lineno
+        body = parser.parse_statements(("name:endgeneration",), drop_needle=True)
+        return jinja2.nodes.Scope(body).set_lineno(lineno)
+
+
+# Same sandbox + loop/generation extensions used when a template is rendered.
+_CHAT_TEMPLATE_JINJA_ENV = jinja2.sandbox.ImmutableSandboxedEnvironment(
+    trim_blocks=True,
+    lstrip_blocks=True,
+    extensions=[_ChatTemplateParseExtension, jinja2.ext.loopcontrols],
 )
 _TEXT_PART_TYPES = frozenset(
     {
@@ -2290,14 +2297,85 @@ _TEXT_PART_TYPES = frozenset(
 )
 
 
+def _is_role_access(node: jinja2.nodes.Node) -> bool:
+    """Whether ``node`` reads ``.role`` or ``['role']``."""
+    if isinstance(node, jinja2.nodes.Getattr):
+        return node.attr == "role"
+    if isinstance(node, jinja2.nodes.Getitem):
+        return isinstance(node.arg, jinja2.nodes.Const) and node.arg.value == "role"
+    return False
+
+
+def _literal_role_names(node: jinja2.nodes.Node) -> list[str] | None:
+    """String literal, or a list/tuple of them. ``None`` if not pure literals."""
+    if isinstance(node, jinja2.nodes.Const) and isinstance(node.value, str):
+        return [node.value]
+    if isinstance(node, (jinja2.nodes.List, jinja2.nodes.Tuple)):
+        names: list[str] = []
+        for item in node.items:
+            if not isinstance(item, jinja2.nodes.Const) or not isinstance(
+                item.value, str
+            ):
+                return None
+            names.append(item.value)
+        return names
+    return None
+
+
+def _roles_from_compare(
+    node: jinja2.nodes.Compare,
+) -> tuple[Literal["ignore", "literal", "dynamic"], set[str]]:
+    """Classify one comparison that might select rendered roles.
+
+    Only ``==`` and ``in`` count. ``!=`` and ``not in`` are generation-prompt
+    guards (ChatML checks ``messages[-1]['role'] != 'assistant'``) and do not
+    select which roles are rendered. A non-literal ``in`` target such as
+    ``message.role in allowed_roles`` is dynamic.
+
+    Returns:
+        ``("ignore", empty)`` when the node is not a role inclusion test,
+        ``("literal", names)`` when the accepted roles are string literals
+        (an empty list is a literal filter that names nothing), or
+        ``("dynamic", empty)`` when the allow-list is not a literal.
+
+    """
+    if not node.ops:
+        return "ignore", set()
+    # Chained comparisons compare later operands with each other, not with
+    # the role expression.
+    operand = node.ops[0]
+    op = operand.op
+    if op not in {"eq", "in"}:
+        return "ignore", set()
+
+    left_is_role = _is_role_access(node.expr)
+    right_is_role = _is_role_access(operand.expr)
+    if op == "eq":
+        if not left_is_role and not right_is_role:
+            return "ignore", set()
+        literal_node = operand.expr if left_is_role else node.expr
+        names = _literal_role_names(literal_node)
+        if names is None:
+            return "ignore", set()
+        return "literal", set(names)
+
+    if not left_is_role:
+        return "ignore", set()
+    names = _literal_role_names(operand.expr)
+    if names is None:
+        return "dynamic", set()
+    return "literal", set(names)
+
+
 @lru_cache(maxsize=32)
 def roles_rendered_by_chat_template(chat_template: str) -> frozenset[str] | None:
     """Return roles a template explicitly dispatches on.
 
-    ``None`` means the template does not filter by role, so every role is
-    emitted (ChatML-style ``{{ message['role'] }}``). A frozenset, possibly
-    empty, means unknown roles can be dropped and must be checked after
-    render.
+    The Jinja AST is walked for comparisons that read ``.role`` or
+    ``['role']``. ``None`` means the template does not filter by role, so
+    every role is emitted (ChatML-style ``{{ message['role'] }}``). A
+    frozenset, possibly empty, means unknown roles can be dropped and must
+    be checked after render.
 
     Args:
         chat_template: Resolved Jinja source.
@@ -2309,17 +2387,25 @@ def roles_rendered_by_chat_template(chat_template: str) -> frozenset[str] | None
         role filter.
 
     """
+    try:
+        parsed = _CHAT_TEMPLATE_JINJA_ENV.parse(chat_template)
+    except Exception:
+        logger.warning(
+            "Could not parse the chat template while checking message roles.",
+            exc_info=True,
+        )
+        return None
+
     roles: set[str] = set()
-    matched = False
-    for match in _ROLE_INCLUSION_RE.finditer(chat_template):
-        matched = True
-        role = match.group(3)
-        if role is not None:
-            roles.add(role)
-        else:
-            roles.update(re.findall(r"""['"]([^'"]*)['"]""", match.group(1)))
-    dynamic = _ROLE_DYNAMIC_FILTER_RE.search(chat_template) is not None
-    if not matched and not dynamic:
+    saw_role_filter = False
+    for compare in parsed.find_all(jinja2.nodes.Compare):
+        kind, found = _roles_from_compare(compare)
+        if kind == "ignore":
+            continue
+        saw_role_filter = True
+        if kind == "literal":
+            roles.update(found)
+    if not saw_role_filter:
         return None
     return frozenset(roles)
 
