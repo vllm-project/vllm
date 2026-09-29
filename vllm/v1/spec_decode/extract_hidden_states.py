@@ -9,13 +9,11 @@ import torch
 import torch.nn as nn
 
 from vllm.config import CUDAGraphMode, VllmConfig, get_layers_from_vllm_config
-from vllm.distributed.eplb.eplb_state import EplbState
 from vllm.forward_context import set_forward_context
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.model_loader import get_model
 from vllm.v1.attention.backend import AttentionMetadataBuilder, CommonAttentionMetadata
 from vllm.v1.cudagraph_dispatcher import CudagraphDispatcher
-from vllm.v1.utils import CpuGpuBuffer
 from vllm.v1.worker.dp_utils import coordinate_batch_across_dp
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 
@@ -29,10 +27,7 @@ class ExtractHiddenStatesProposer:
     def __init__(self, vllm_config: VllmConfig, device):
         assert vllm_config.speculative_config is not None
 
-        self.num_speculative_tokens = (
-            vllm_config.speculative_config.num_speculative_tokens
-        )
-        assert self.num_speculative_tokens == 1
+        assert vllm_config.speculative_config.num_speculative_tokens == 1
         if vllm_config.speculative_config.disable_padded_drafter_batch:
             raise ValueError(
                 "disable_padded_drafter_batch is not supported with "
@@ -43,22 +38,15 @@ class ExtractHiddenStatesProposer:
         self.dtype = vllm_config.model_config.dtype
         self.dp_rank = vllm_config.parallel_config.data_parallel_rank
 
-        self.eplb_state: EplbState | None = None
-
         # Model and attention layer tracking (initialized in load_model)
         self.model: nn.Module | None = None
         self.attn_layer_names: list[str] = []
         self.attn_metadata_builder: AttentionMetadataBuilder | None = None
-        self.kv_cache_gid: int = -1
 
         # Maximum number of tokens for buffers
         max_batch_size = vllm_config.scheduler_config.max_num_seqs
         self.max_num_tokens = (
             vllm_config.scheduler_config.max_num_batched_tokens + max_batch_size
-        )
-
-        self.backup_next_token_ids = CpuGpuBuffer(
-            max_batch_size, dtype=torch.int32, device=device
         )
 
         self.hf_config = vllm_config.speculative_config.draft_model_config.hf_config
@@ -81,13 +69,8 @@ class ExtractHiddenStatesProposer:
             self.max_num_tokens, dtype=torch.int64, device=device
         )
 
-    def set_eplb_state(self, eplb_state: EplbState) -> None:
-        """Inject EPLB state after construction."""
-        self.eplb_state = eplb_state
-
     def propose(
         self,
-        num_speculative_tokens: int,
         sampled_token_ids: torch.Tensor,
         target_hidden_states: list[torch.Tensor],
         common_attn_metadata: CommonAttentionMetadata,
@@ -118,7 +101,6 @@ class ExtractHiddenStatesProposer:
                 - Draft tokens matching sampled tokens, shape [batch_size, 1]
                 - KV connector output (if KV transfer is active), else None
         """
-        assert num_speculative_tokens == self.num_speculative_tokens
         assert self.model is not None and isinstance(target_hidden_states, list)
 
         # target_hidden_states is a list of tensors (one per layer)
@@ -135,6 +117,25 @@ class ExtractHiddenStatesProposer:
             common_attn_metadata=common_attn_metadata, draft_index=0
         )
 
+        draft_slot_mappings = slot_mappings
+        assert isinstance(draft_slot_mappings, dict)
+
+        layer_name = self.attn_layer_names[0]
+        attn_metadata.slot_mapping = draft_slot_mappings[layer_name]
+        print(
+            "[DRAFT ATTN META SLOT]",
+            "layer=", layer_name,
+            "shape=", tuple(attn_metadata.slot_mapping.shape),
+            "min=", attn_metadata.slot_mapping.min().item(),
+            "max=", attn_metadata.slot_mapping.max().item(),
+            "first=", attn_metadata.slot_mapping[:20].tolist(),
+            flush=True,
+        )
+
+        per_layer_attn_metadata = {
+            layer_name: attn_metadata,
+        }
+
         # We assume all cache-only layers belong to the same KV cache group,
         # thus using the same attention metadata.
         per_layer_attn_metadata = {}
@@ -147,21 +148,23 @@ class ExtractHiddenStatesProposer:
         if num_tokens_across_dp is not None:
             num_tokens_across_dp[self.dp_rank] = num_input_tokens
 
-        if self.eplb_state is not None:
-            assert self.vllm_config.speculative_config is not None
-            self.eplb_state.prepare_forward(
-                self.vllm_config.speculative_config.draft_model_config,
-                num_tokens,
-            )
+        print(
+            "[DRAFT META DEBUG]",
+            "type=", type(per_layer_attn_metadata),
+            "keys=", (
+                list(per_layer_attn_metadata.keys())
+                if isinstance(per_layer_attn_metadata, dict)
+                else "NOT_DICT"
+            ),
+        )
+
         with set_forward_context(
             per_layer_attn_metadata,
             self.vllm_config,
             num_tokens=num_input_tokens,
             num_tokens_across_dp=num_tokens_across_dp,
             cudagraph_runtime_mode=cudagraph_runtime_mode,
-            slot_mapping=self._get_slot_mapping(
-                num_input_tokens, common_attn_metadata.slot_mapping
-            ),
+            slot_mapping=slot_mappings,
         ):
             self.model(
                 hidden_states=self.hidden_states[:num_input_tokens],
@@ -184,6 +187,15 @@ class ExtractHiddenStatesProposer:
         If slot_mapping is provided, copies it into the buffer first.
         """
         if slot_mapping is not None:
+            if slot_mapping.numel() > 0:
+                print(
+                    "[PROPOSER SLOT INPUT]",
+                    "num_tokens=", num_tokens,
+                    "shape=", tuple(slot_mapping.shape),
+                    "min=", slot_mapping.min().item(),
+                    "max=", slot_mapping.max().item(),
+                    "first=", slot_mapping[:20].tolist(),
+                )
             num_actual = slot_mapping.shape[0]
             self._slot_mapping_buffer[:num_actual].copy_(slot_mapping)
             if num_tokens > num_actual:
@@ -325,15 +337,19 @@ class ExtractHiddenStatesProposer:
         (batch_size, 1). For each request we either use the sampled token
         (if valid and not discarded) or a backup token from the request state.
         """
-
-        # Precompute backup token IDs for discarded requests.
         num_reqs = gpu_input_batch.num_reqs
-        for i in range(num_reqs):
-            self.backup_next_token_ids.np[i] = requests[
-                gpu_input_batch.req_ids[i]
-            ].get_token_id(gpu_input_batch.num_tokens_no_spec[i] - 1)
-        self.backup_next_token_ids.copy_to_gpu(num_reqs)
-        backup_tokens_gpu = self.backup_next_token_ids.gpu[:num_reqs]
+        device = sampled_token_ids.device
+
+        # Compute backup tokens for discarded / invalid requests
+        seq_lens_list = (gpu_input_batch.num_tokens_no_spec[:num_reqs] - 1).tolist()
+        backup_tokens_gpu = torch.tensor(
+            [
+                requests[gpu_input_batch.req_ids[i]].get_token_id(seq_lens_list[i])
+                for i in range(num_reqs)
+            ],
+            dtype=torch.int32,
+            device=device,
+        )
 
         assert discard_request_mask.dtype == torch.bool
 
@@ -394,12 +410,9 @@ class ExtractHiddenStatesProposer:
         )
 
     def validate_same_kv_cache_group(self, kv_cache_config: KVCacheConfig) -> None:
-        """Validate all drafting layers belong to the same KV cache group
-        and record the group index for common_attn_metadata selection."""
+        """Validate all drafting layers belong to the same KV cache group.
+
+        With exactly one attention layer (asserted in load_model), this is
+        trivially satisfied.
+        """
         assert len(self.attn_layer_names) == 1
-        layer = self.attn_layer_names[0]
-        for gid, group in enumerate(kv_cache_config.kv_cache_groups):
-            if layer in group.layer_names:
-                self.kv_cache_gid = gid
-                return
-        raise ValueError(f"Cache-only layer {layer!r} not in any KV cache group")
