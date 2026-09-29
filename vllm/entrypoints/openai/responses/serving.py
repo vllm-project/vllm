@@ -73,6 +73,9 @@ from vllm.entrypoints.openai.responses.utils import (
 from vllm.entrypoints.serve.engine.protocol import ErrorResponse
 from vllm.entrypoints.serve.utils.api_utils import get_max_tokens
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
+from vllm.entrypoints.serve.utils.tool_calls_utils import (
+    maybe_filter_parallel_tool_calls,
+)
 from vllm.exceptions import GenerationError, VLLMValidationError
 from vllm.inputs import EngineInput
 from vllm.logger import init_logger
@@ -443,6 +446,7 @@ class OpenAIServingResponses(GenerateBaseServing):
                     available_tools,
                     function_tool_names,
                     response_parser=response_parser,
+                    request=request,
                 )
             else:
                 if envs.VLLM_USE_EXPERIMENTAL_PARSER_CONTEXT:
@@ -678,8 +682,12 @@ class OpenAIServingResponses(GenerateBaseServing):
                     tok_params=tok_params,
                 )
 
-                sampling_params.max_tokens = max_model_len - self._extract_prompt_len(
-                    engine_input
+                sampling_params.max_tokens = get_max_tokens(
+                    max_model_len,
+                    context.request.max_output_tokens if context.request else None,
+                    self._extract_prompt_len(engine_input),
+                    self.default_sampling_params,
+                    self.override_max_tokens,
                 )
             elif isinstance(context, ParsableContext):
                 (engine_input,) = await self._render_next_turn(
@@ -827,18 +835,12 @@ class OpenAIServingResponses(GenerateBaseServing):
         num_generated_tokens = context.num_output_tokens
         num_cached_tokens = context.num_cached_tokens
         num_reasoning_tokens = context.num_reasoning_tokens
-        # For text-based reasoning parsers (e.g., <think>...</think>),
-        # HarmonyContext already counts reasoning tokens via channels.
-        # For Simple/Parsable contexts, derive reasoning_tokens from
-        # accumulated output token IDs using the parser if not already set.
-        if (
-            num_reasoning_tokens == 0
-            and isinstance(context, (SimpleContext, ParsableContext))
-            and context.response_parser is not None
-        ):
-            accumulated = getattr(context, "_accumulated_token_ids", []) or []
+        # HarmonyContext and ParsableContext count reasoning tokens as each
+        # round is appended. SimpleContext is single-round but accumulates
+        # streaming deltas, so count its full output once here.
+        if isinstance(context, SimpleContext) and context.response_parser is not None:
             num_reasoning_tokens = context.response_parser.count_reasoning_tokens(
-                accumulated
+                context._accumulated_token_ids
             )
 
         usage = ResponseUsage(
@@ -1029,7 +1031,7 @@ class OpenAIServingResponses(GenerateBaseServing):
             return build_response_output_items(
                 reasoning=reasoning,
                 content=content,
-                tool_calls=tool_calls,
+                tool_calls=maybe_filter_parallel_tool_calls(tool_calls or [], request),
                 logprobs=logprobs,
                 tools=request.tools,
             )
@@ -1232,6 +1234,7 @@ class OpenAIServingResponses(GenerateBaseServing):
 
             if not delta_message:
                 continue
+            delta_message = maybe_filter_parallel_tool_calls(delta_message, request)
 
             for dm in split_delta(delta_message):
                 target_state, tool_call = processor.resolve_target_state(dm)
