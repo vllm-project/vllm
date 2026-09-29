@@ -10,9 +10,6 @@ from vllm._aiter_ops import rocm_aiter_ops
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.mla import MultiHeadLatentAttentionWrapper
 
-if rocm_aiter_ops.is_enabled():
-    from aiter.ops.triton.fusions.fused_sigmoid_mul import fused_sigmoid_mul
-
 
 class KimiK3MultiHeadLatentAttentionWrapper(MultiHeadLatentAttentionWrapper):
     """Kimi-K3 MLA wrapper with eager AITER q/kv RMSNorm and output gate fusions."""
@@ -120,6 +117,8 @@ class KimiK3MultiHeadLatentAttentionWrapper(MultiHeadLatentAttentionWrapper):
         if self.g_proj is not None:
             gate = self.g_proj(hidden_states)[0]
             if rocm_aiter_ops.is_enabled():
+                from aiter.ops.triton.fusions.fused_sigmoid_mul import fused_sigmoid_mul
+
                 attn_out = fused_sigmoid_mul(attn_out, gate)
             else:
                 attn_out = attn_out * gate.sigmoid()
