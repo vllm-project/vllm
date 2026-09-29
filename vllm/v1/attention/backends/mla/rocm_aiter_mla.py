@@ -38,10 +38,10 @@ from vllm.v1.attention.backend import (
     MultipleOf,
     max_decode_query_len,
 )
-from vllm.v1.attention.backends.mla.triton_mla import _compute_num_kv_splits
-from vllm.v1.attention.backends.mla.prefill.aiter_flash_attn import (
-    AiterFlashAttnPrefillBackend,
+from vllm.v1.attention.backends.mla.prefill.aiter_flydsl_fp8 import (
+    AiterFlyDSLFP8PrefillBackend,
 )
+from vllm.v1.attention.backends.mla.triton_mla import _compute_num_kv_splits
 from vllm.v1.attention.backends.utils import (
     get_dcp_local_seq_lens,
 )
@@ -1111,16 +1111,13 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
         # heads. It writes bf16 through a raw output pointer, so fp16 must use
         # the standard prefill path. Head counts that are not a multiple of 16
         # are replicate-padded up to one in _mla_fp8_prefill_attn.
-        # FlyDSL FP8 prefill attention, when active, also serves context-free
-        # prefills; without PS metadata the impl skips the assembly kernel.
+        # The FlyDSL FP8 prefill backend also serves context-free prefills;
+        # without PS metadata the impl skips the assembly kernel.
         self._fp8_prefill_enabled = _fp8_mla_prefill_supported() and (
             kv_cache_dtype_str == "fp8"
             and vllm_config.model_config.dtype == torch.bfloat16
             and AiterMLAHelper.is_valid_fp8_prefill_num_heads(self.num_heads)
-            and not (
-                isinstance(self._prefill_backend, AiterFlashAttnPrefillBackend)
-                and self._prefill_backend.use_flydsl_fp8
-            )
+            and not isinstance(self._prefill_backend, AiterFlyDSLFP8PrefillBackend)
         )
         if self._fp8_prefill_enabled:
             max_prefill_qlen = min(
