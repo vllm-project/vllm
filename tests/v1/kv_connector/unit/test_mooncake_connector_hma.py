@@ -735,7 +735,7 @@ def test_prefix_replay_checkpoint_requires_complete_group_coverage():
     send_meta = SendBlockMeta(
         p_req_id="p-req",
         transfer_id="tx-1",
-        local_block_ids=[[0, 1, 2, 3, 4, 5], [10, 11, 12], [20]],
+        local_block_ids=[[0, 1, 2, 3, 4, 5], [10, 11, 12, 13], [20]],
         ready=asyncio.Event(),
         prefix_replay_checkpoint=96,
         prefix_replay_prompt_digest="prompt-digest",
@@ -765,7 +765,7 @@ def test_prefix_replay_checkpoint_requires_complete_group_coverage():
         [("d-req", send_meta)], metadata
     )
     metadata.prefix_replay_checkpoints["d-req"] = (96, 64, "prompt-digest")
-    metadata.req_blocks["d-req"][1][1].pop()
+    metadata.req_blocks["d-req"][1][1].extend([113, 114])
     assert not worker._certify_prefix_replay_checkpoints(
         [("d-req", send_meta)], metadata
     )

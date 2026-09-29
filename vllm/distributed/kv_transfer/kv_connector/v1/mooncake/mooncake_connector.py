@@ -1640,7 +1640,7 @@ class MooncakeConnectorWorker:
                             f"block_size={spec.block_size}"
                         )
                         break
-                elif len(local_blocks) != len(remote_blocks):
+                elif len(local_blocks) < len(remote_blocks):
                     complete = False
                     failure_detail = (
                         f"group={group_index} type={type(spec).__qualname__} "
