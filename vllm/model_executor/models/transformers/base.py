@@ -183,7 +183,7 @@ class Base(
         # Substitute remaining layers with vLLM's layers as needed
         self.recursive_replace()
         # Create attention instances for KV cache allocation
-        self._create_attention_instances()
+        self._create_attention_instances(prefix)
 
         # Initialize any parameters that have not had their modules replaced
         self.init_parameters(self.model)
@@ -575,8 +575,12 @@ class Base(
 
         self.hf_to_vllm_mapper |= WeightsMapper(orig_to_new_stacked=orig_to_new_stacked)
 
-    def _create_attention_instances(self):
-        """Create `Attention` instances to inform KV cache allocation."""
+    def _create_attention_instances(self, model_prefix: str = ""):
+        """Create `Attention` instances to inform KV cache allocation.
+
+        Layer names are qualified by `model_prefix` so that two models in one
+        engine, e.g. a target and its `draft_model` drafter, do not register the
+        same attention layer name."""
         text_config = self.text_config
         attn_cls = self._get_attn_cls()
 
@@ -628,7 +632,7 @@ class Base(
                 scale=scale,
                 cache_config=self.cache_config,
                 quant_config=self.quant_config,
-                prefix=f"{i}.attn",
+                prefix=maybe_prefix(model_prefix, f"{i}.attn"),
             )
 
             if attn_cls is MLAAttention:

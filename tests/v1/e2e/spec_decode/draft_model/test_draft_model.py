@@ -150,6 +150,24 @@ def test_draft_model_quantization(
     assert_draft_model_correctness(sd_case, vllm_runner)
 
 
+@single_gpu_only
+def test_draft_model_transformers_backend(vllm_runner):
+    """Target and drafter both run on the Transformers modeling backend.
+
+    OLMo-2 has no native vLLM implementation, so this only works if the
+    drafter's attention layers are named under its `draft_model` prefix instead
+    of colliding with the target's (`Duplicate layer name: 0.attn`)."""
+    sd_case = ArgsTest(
+        target_model="allenai/OLMo-2-0425-1B-Instruct",
+        draft_model="allenai/OLMo-2-0425-1B-Instruct",
+        sampling_config=greedy_sampling(),
+        num_speculative_tokens=3,
+        expected_acceptance_len=0.98 * (3 + 1),  # epsilon discount of K + 1
+        expected_acceptance_rate=0.98,  # slight epsilon
+    )
+    assert_draft_model_correctness(sd_case, vllm_runner)
+
+
 @multi_gpu_only(num_gpus=2)
 def test_draft_model_tensor_parallelism(vllm_runner):
     """Ensure spec decode works when running with TP > 1."""
