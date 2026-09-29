@@ -3455,23 +3455,22 @@ class VllmConfig:
             return self
         from vllm.platforms import current_platform
 
-        if current_platform.is_rocm():
-            # ROCm Kimi-K3 KDA uses ReplaySSM via --use-replayssm, not RecoverSSM.
-            self.cache_config.use_kda_recoverssm = False
-        else:
-            self.cache_config.use_kda_recoverssm = self.num_speculative_tokens > 0
+        # RecoverSSM is CUDA-only Kimi-K3/KimiLinear speculative decode.
+        # ROCm Kimi uses ReplaySSM instead; other mamba models never use it.
+        kimi_kda = self.model_config is not None and self.model_config.architecture in (
+            "KimiLinearForCausalLM",
+            "KimiK3ForConditionalGeneration",
+        )
+        self.cache_config.use_kda_recoverssm = (
+            kimi_kda
+            and not current_platform.is_rocm()
+            and self.num_speculative_tokens > 0
+        )
 
         # ROCm Kimi-K3 ReplaySSM is the only path that runs on Model Runner
         # V2 and with MLA CPU offload. Keep every other ReplaySSM backend on
         # the upstream V1 / no-connector rules.
-        kimi_kda_rocm = current_platform.is_rocm() and (
-            self.model_config is not None
-            and self.model_config.architecture
-            in (
-                "KimiLinearForCausalLM",
-                "KimiK3ForConditionalGeneration",
-            )
-        )
+        kimi_kda_rocm = current_platform.is_rocm() and kimi_kda
 
         if self.model_config is not None and not self.model_config.supports_replayssm:
             raise ValueError(

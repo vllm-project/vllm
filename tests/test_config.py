@@ -171,7 +171,8 @@ def test_kda_recoverssm_derivation_is_revalidated():
     VllmConfig.validate_mamba_cached_kernel(config)
     assert config.cache_config.use_replayssm
     if current_platform.is_rocm():
-        # ROCm Kimi-K3 ReplaySSM; RecoverSSM stays off.
+        # This test uses KimiLinear; on ROCm that architecture takes ReplaySSM
+        # and RecoverSSM is never auto-enabled (CUDA-only).
         assert not config.cache_config.use_kda_recoverssm
         return
     assert config.cache_config.use_kda_recoverssm
@@ -198,8 +199,11 @@ def test_kda_recoverssm_derivation_is_revalidated():
 
 
 def test_rocm_v2_runner_skip_is_limited_to_kimi_kda(monkeypatch):
-    """ROCm Kimi-K3 ReplaySSM may use MRV2; other ROCm ReplaySSM backends
-    still require Model Runner V1."""
+    """Only ROCm Kimi-K3/KimiLinear ReplaySSM may use MRV2.
+
+    Other ROCm ReplaySSM backends (e.g. NemotronH) still require Model Runner
+    V1; the exemption is architecture-gated, not a blanket ROCm skip.
+    """
     from vllm.platforms import current_platform
 
     monkeypatch.setattr(current_platform, "is_rocm", lambda: True)
@@ -224,6 +228,7 @@ def test_rocm_v2_runner_skip_is_limited_to_kimi_kda(monkeypatch):
     )
     VllmConfig.validate_mamba_cached_kernel(config)
 
+    # Non-Kimi ROCm mamba models are not covered by the MRV2 exemption.
     config.model_config.architecture = "NemotronHForCausalLM"
     with pytest.raises(ValueError, match="Triton ReplaySSM requires Model Runner V1"):
         VllmConfig.validate_mamba_cached_kernel(config)

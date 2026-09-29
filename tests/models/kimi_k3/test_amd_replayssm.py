@@ -6,6 +6,7 @@ import pytest
 import torch
 
 from vllm.platforms import current_platform
+from vllm.utils.torch_utils import set_random_seed
 
 pytestmark = pytest.mark.skipif(
     not current_platform.is_rocm(),
@@ -19,11 +20,11 @@ LOWER_BOUND = -5.0
 
 
 def _inputs(num_seqs: int, seq_len: int, seed: int):
-    gen = torch.Generator(device=DEVICE).manual_seed(seed)
+    set_random_seed(seed)
     total = num_seqs * seq_len
 
     def randn(*shape):
-        return torch.randn(*shape, generator=gen, device=DEVICE, dtype=torch.float32)
+        return torch.randn(*shape, device=DEVICE, dtype=torch.float32)
 
     return (
         randn(1, total, NUM_HEADS, HEAD_DIM),
@@ -113,11 +114,11 @@ def test_replayssm_verify_window_matches_recurrence(cache_len: int) -> None:
     num_seqs, window, repeats = 2, 8, 50
     seq_len = 2 * window
     q, k, v, a, b = _inputs(num_seqs, seq_len, seed=0)
-    gen = torch.Generator(device=DEVICE).manual_seed(1)
-    A_log = torch.randn(NUM_HEADS, generator=gen, device=DEVICE)
-    dt_bias = torch.randn(NUM_HEADS, HEAD_DIM, generator=gen, device=DEVICE)
+    set_random_seed(1)
+    A_log = torch.randn(NUM_HEADS, device=DEVICE)
+    dt_bias = torch.randn(NUM_HEADS, HEAD_DIM, device=DEVICE)
     state0 = 0.1 * torch.randn(
-        num_seqs, NUM_HEADS, HEAD_DIM, HEAD_DIM, generator=gen, device=DEVICE
+        num_seqs, NUM_HEADS, HEAD_DIM, HEAD_DIM, device=DEVICE
     )
     ref_out, _ = _reference(q, k, v, a, b, A_log, dt_bias, state0, num_seqs, seq_len)
     ref_second = _split(ref_out, num_seqs, seq_len, window, seq_len)
@@ -254,12 +255,10 @@ def test_replayssm_mixed_batch_folds_pending_plain_decode_record() -> None:
     assert prefill.num_prefills == 2
     slots = prefill.prefill_state_indices.to(torch.int64)
 
-    gen = torch.Generator(device=DEVICE).manual_seed(2)
-    A_log = torch.randn(NUM_HEADS, generator=gen, device=DEVICE)
-    dt_bias = torch.randn(NUM_HEADS, HEAD_DIM, generator=gen, device=DEVICE)
-    state0 = 0.1 * torch.randn(
-        2, NUM_HEADS, HEAD_DIM, HEAD_DIM, generator=gen, device=DEVICE
-    )
+    set_random_seed(2)
+    A_log = torch.randn(NUM_HEADS, device=DEVICE)
+    dt_bias = torch.randn(NUM_HEADS, HEAD_DIM, device=DEVICE)
+    state0 = 0.1 * torch.randn(2, NUM_HEADS, HEAD_DIM, HEAD_DIM, device=DEVICE)
     ckpt = torch.zeros(num_slots, NUM_HEADS, HEAD_DIM, HEAD_DIM, device=DEVICE)
     ckpt[slots] = state0
     bufs = tuple(

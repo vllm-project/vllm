@@ -13,10 +13,11 @@ import torch
 import torch.nn.functional as F
 
 from vllm.platforms import current_platform
+from vllm.utils.torch_utils import set_random_seed
 
 pytestmark = pytest.mark.skipif(
-    not current_platform.is_cuda_alike(),
-    reason="Kimi-K3 sigmoid-gating kernel requires a CUDA/ROCm GPU",
+    not current_platform.is_rocm(),
+    reason="Kimi-K3 sigmoid-gating kernel is ROCm-only",
 )
 
 DEVICE = current_platform.device_type
@@ -80,7 +81,7 @@ def test_amd_fused_sigmoid_gating_matches_recurrence(
         fused_sigmoid_gating_delta_rule_update,
     )
 
-    torch.manual_seed(0)
+    set_random_seed(0)
     num_seqs, seq_len, num_heads, head_dim = 2, 3, 4, 128
     total = num_seqs * seq_len
     q = torch.randn(1, total, num_heads, head_dim, device=DEVICE, dtype=dtype)
