@@ -49,7 +49,10 @@ from vllm.tool_parsers.streaming import (
     extract_named_tool_call_streaming,
     extract_required_tool_call_streaming,
 )
-from vllm.tool_parsers.structural_tag_registry import resolve_tool_strictness
+from vllm.tool_parsers.structural_tag_registry import (
+    limit_to_single_tool_call,
+    resolve_tool_strictness,
+)
 from vllm.tool_parsers.tool_strict_level import ToolStrictLevel
 
 logger = init_logger(__name__)
@@ -496,13 +499,20 @@ class DelegatingParser(Parser):
 
         structured_outputs = request.extract_structured_outputs()
         is_auto = request.tool_choice == "auto"
+        single_call = request.parallel_tool_calls is False
+        strict_level = self.tool_strict_level
+        if single_call and not (is_auto and structured_outputs is not None):
+            # Limiting the call count needs the call envelope in the grammar.
+            # Auto with structured outputs keeps its format-only grammar, so the
+            # flag never makes calls possible that are impossible without it.
+            strict_level = max(strict_level, ToolStrictLevel.FUNCTION)
 
         resolved_tools = None
         if tool_parser.structural_tag_model is not None:
             resolved_tools = resolve_tool_strictness(
                 request.tools,
                 request.tool_choice,
-                self.tool_strict_level,
+                strict_level,
             )
 
         output_format = None
@@ -529,7 +539,7 @@ class DelegatingParser(Parser):
             tools_structural_tag = tool_parser.get_structural_tag(
                 tag_request,
                 reasoning=False,
-                strict_level=self.tool_strict_level,
+                strict_level=strict_level,
             )
         else:
             tools_structural_tag = None
@@ -544,6 +554,8 @@ class DelegatingParser(Parser):
                 )
             return request
 
+        if single_call:
+            limit_to_single_tool_call(tools_structural_tag)
         structural_tag = tools_structural_tag
         if output_format is not None:
             structural_tag = StructuralTag(
