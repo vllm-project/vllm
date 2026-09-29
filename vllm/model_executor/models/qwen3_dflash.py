@@ -269,6 +269,17 @@ class DFlashQwen3Attention(nn.Module):
             sinks=self.attention_sink_bias,
         )
         self.causal = causal
+        # Startup segmented tuning needs the draft's actual attention mode.
+        # Causality is normally supplied later through attention metadata.
+        self.attn.segmented_causal = causal
+        speculative_config = get_current_vllm_config().speculative_config
+        if (
+            speculative_config is not None
+            and speculative_config.num_speculative_tokens is not None
+        ):
+            self.attn.segmented_query_limit = (
+                speculative_config.num_speculative_tokens + 1
+            )
         self.q_norm = RMSNorm(self.head_dim, eps=rms_norm_eps)
         self.k_norm = RMSNorm(self.head_dim, eps=rms_norm_eps)
 

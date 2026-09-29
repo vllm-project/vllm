@@ -107,6 +107,38 @@ def test_workspace_lock_blocks_growth_and_unlock_restores(monkeypatch) -> None:
     assert grown.numel() == 512
 
 
+def test_reserve_simultaneous_sizes_every_ubatch_in_current_lane(
+    monkeypatch,
+) -> None:
+    active_ubatch = [0]
+    monkeypatch.setattr(workspace, "dbo_current_ubatch_id", lambda: active_ubatch[0])
+    manager = workspace.WorkspaceManager(
+        torch.device("cpu"), num_ubatches=2, num_lanes=2
+    )
+
+    manager._reserve_simultaneous(
+        ((64,), torch.float32),
+        ((16,), torch.float32),
+    )
+    assert manager._current_workspaces[0] is not None
+    assert manager._current_workspaces[2] is not None
+    assert manager._current_workspaces[1] is None
+    assert manager._current_workspaces[3] is None
+
+    manager.lock()
+    for ubatch_id in range(2):
+        active_ubatch[0] = ubatch_id
+        first, second = manager.get_simultaneous(
+            ((64,), torch.float32),
+            ((16,), torch.float32),
+        )
+        assert first.numel() == 64
+        assert second.numel() == 16
+
+    with pytest.raises(RuntimeError, match="initialization-only"):
+        manager._reserve_simultaneous(((64,), torch.float32))
+
+
 def test_workspace_lane_validation(monkeypatch) -> None:
     monkeypatch.setattr(workspace, "dbo_current_ubatch_id", lambda: 0)
     manager = workspace.WorkspaceManager(torch.device("cpu"), num_lanes=1)
@@ -125,6 +157,94 @@ def test_workspace_lane_validation(monkeypatch) -> None:
 
     with pytest.raises(ValueError, match="at least one"):
         workspace.WorkspaceManager(torch.device("cpu"), num_lanes=0)
+
+
+@pytest.mark.parametrize("dim,hq,hk", [(128, 16, 1), (256, 12, 2)])
+@pytest.mark.parametrize("fp8", [False, True])
+def test_segmented_attention_reservation_covers_ragged_query_caps(
+    monkeypatch, dim, hq, hk, fp8
+):
+    """Every supported query bucket fits the startup buffer after locking."""
+    from vllm.v1.attention.ops import segmented_attention as segmented
+
+    monkeypatch.setattr(workspace, "dbo_current_ubatch_id", lambda: 0)
+    manager = workspace.WorkspaceManager(torch.device("cpu"), num_lanes=1)
+    monkeypatch.setattr(segmented, "is_workspace_manager_initialized", lambda: True)
+    monkeypatch.setattr(segmented, "current_workspace_manager", lambda: manager)
+    segmented.reserve_segmented_attention_workspace(
+        32,
+        hq,
+        hk,
+        dim,
+        65536,
+        fp8=fp8,
+    )
+    manager.lock()
+    pointers = set()
+    query_lengths = {
+        query_len
+        for capacity in segmented._query_capacity_buckets()
+        for query_len in (max(1, capacity // 2 + 1), capacity)
+    }
+    for batch in range(1, 33):
+        for query_len in query_lengths:
+            qcap = segmented.segmented_query_capacity(query_len)
+            cfg = segmented.select_segmented_config(
+                batch, query_len, 65536, hq, hk, dim, fp8
+            )
+            shapes = segmented.segmented_workspace_shapes(
+                batch, qcap, hq, hk, dim, cfg["splits"]
+            )
+            if shapes is not None:
+                partial, lse = manager.get_simultaneous(
+                    (shapes[0], torch.float32), (shapes[1], torch.float32)
+                )
+                pointers.add(partial.untyped_storage().data_ptr())
+                assert partial.data_ptr() != lse.data_ptr()
+    assert len(pointers) == 1
+
+
+def test_segmented_attention_reservation_respects_scheduler_token_limit(
+    monkeypatch,
+) -> None:
+    """Workspace planning excludes batch/query pairs the scheduler cannot form."""
+    from vllm.v1.attention.ops import segmented_attention as segmented
+
+    calls = []
+
+    def record_config(batch, query_len, *_args):
+        calls.append((batch, query_len))
+        return {"splits": 1}
+
+    monkeypatch.setattr(segmented, "is_workspace_manager_initialized", lambda: True)
+    monkeypatch.setattr(segmented, "select_segmented_config", record_config)
+    segmented.reserve_segmented_attention_workspace(
+        32,
+        16,
+        2,
+        128,
+        65536,
+        max_tokens=8,
+    )
+
+    assert calls
+    assert all(batch + query_len - 1 <= 8 for batch, query_len in calls)
+    assert (8, 1) in calls
+    assert (1, 8) in calls
+
+
+def test_segmented_attention_query_capacity_buckets() -> None:
+    from vllm.v1.attention.ops.segmented_attention import (
+        MAX_QUERY_LEN,
+        segmented_query_capacity,
+    )
+
+    assert [
+        segmented_query_capacity(query_len)
+        for query_len in (1, 2, 3, 33, 129, 1025, 2049, MAX_QUERY_LEN)
+    ] == [1, 2, 4, 64, 256, 2048, 4096, 8192]
+    with pytest.raises(ValueError, match="Query length"):
+        segmented_query_capacity(MAX_QUERY_LEN + 1)
 
 
 def test_persistent_resources_are_lazy_and_isolated(monkeypatch) -> None:

@@ -1402,10 +1402,27 @@ class VllmConfig:
         self.engram_config.verify_parallel_config(self.parallel_config)
         logger.info_once("Resolved Engram configuration: %s", str(self.engram_config))
 
+    def setup_segmented_attention_cache(self) -> str | None:
+        """Keep startup tuning and target/draft compilation in one Triton cache."""
+        from vllm.v1.attention.backends.registry import AttentionBackendEnum
+
+        backends = [self.attention_config.backend]
+        if self.speculative_config is not None:
+            backends.append(self.speculative_config.attention_backend)
+        if AttentionBackendEnum.ROCM_SEGMENTED_ATTN not in backends:
+            return None
+        cache_dir = os.environ.setdefault(
+            "TRITON_CACHE_DIR",
+            str(Path(envs.VLLM_CACHE_ROOT) / "rocm_segmented_attention" / "triton"),
+        )
+        Path(cache_dir).mkdir(parents=True, exist_ok=True)
+        return cache_dir
+
     def __post_init__(self):
         """Verify configs are valid & consistent with each other."""
         # To give each torch profile run a unique instance name.
         self.instance_id = f"{time.time_ns()}"
+        self.setup_segmented_attention_cache()
 
         if self.model_config is not None and self.model_config.is_submodel_config:
             # with_hf_config() view: the parent config was already validated,
