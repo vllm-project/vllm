@@ -79,6 +79,10 @@ ThinkingTokenBudget = Annotated[
 ]
 
 
+def _fits_int64(dtype: np.dtype) -> bool:
+    return dtype.kind in "iu" and np.can_cast(dtype, np.int64)
+
+
 # JSON clients send nested lists; verify() pads them into an array.
 TokenIdTable = Annotated[
     np.ndarray, GetPydanticSchema(lambda _, handler: handler(list[list[StrictInt]]))
@@ -939,11 +943,7 @@ class SamplingParams(
             if isinstance(ids, list) and all(isinstance(row, list) for row in ids):
                 lens = np.fromiter(map(len, ids), np.int64, len(ids))
                 shape = (len(ids), int(lens.max(initial=0)))
-            elif (
-                isinstance(ids, np.ndarray)
-                and ids.dtype.kind in "iu"
-                and np.can_cast(ids.dtype, np.int64)
-            ):
+            elif isinstance(ids, np.ndarray) and _fits_int64(ids.dtype):
                 shape = ids.shape
             if len(shape) != 2 or 0 in shape:
                 raise invalid
@@ -967,9 +967,14 @@ class SamplingParams(
             # Rows and width are bounded; only now flatten and pad.
             if isinstance(ids, list):
                 flat = list(chain.from_iterable(ids))
-                # Plain ints only, as the API's StrictInt schema: no bools or floats.
-                values = np.array(flat) if set(map(type, flat)) == {int} else None
-                if values is None or values.dtype != np.int64:
+                # Integer scalars only, as the API's StrictInt schema: no bools.
+                types = set(map(type, flat))
+                if not all(
+                    t is not bool and issubclass(t, int | np.integer) for t in types
+                ):
+                    raise invalid
+                values = np.array(flat)
+                if not _fits_int64(values.dtype):
                     raise invalid
                 ids = np.full(shape, -1, dtype=np.int64)
                 ids[np.arange(n) < lens[:, None]] = values

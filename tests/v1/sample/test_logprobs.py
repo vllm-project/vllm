@@ -457,6 +457,14 @@ def test_prompt_logprob_token_ids_validation():
         [1, -1, -1, -1],
         [4, 3, 2, 1],
     ]
+    # Rows sliced from a top-k array hold NumPy integer scalars.
+    topk = np.array([[4, 3, 2], [1, 5, 6]])
+    assert verify(
+        prompt_logprob_token_ids=[list(topk[0][:1]), list(topk[1])]
+    ).tolist() == [
+        [4, -1, -1],
+        [1, 5, 6],
+    ]
     # Any integer layout is normalized to what the worker uploads:
     # C-contiguous native int64.
     odd = np.asfortranarray(np.array([[1, 2], [3, -1]], dtype=">i4"))
