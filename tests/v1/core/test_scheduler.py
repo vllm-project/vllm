@@ -1562,9 +1562,7 @@ def test_scheduler_reset_prefix_cache():
     assert not scheduler.reset_prefix_cache()
     scheduler.aux_output_connector.reset.assert_not_called()
 
-    # Reset requires drained model outputs, not a particular pause mode.
-    with pytest.raises(RuntimeError, match="model output is in flight"):
-        scheduler.reset_prefix_cache(reset_running_requests=True)
+    # EngineCore consumes pending model outputs before resetting the scheduler.
     for request in requests:
         request.num_in_flight_tokens = 0
 
