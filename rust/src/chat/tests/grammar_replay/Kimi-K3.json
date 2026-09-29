@@ -235,6 +235,353 @@
       },
       "completion": "Need call the weather and add tools.<|close|>think<|sep|><|open|>response<|sep|>I will call the tools.<|close|>response<|sep|><|open|>tools<|sep|><|open|>call tool=\"get_weather\" index=\"1\"<|sep|><|open|>argument key=\"location\" type=\"string\"<|sep|>Shanghai<|close|>argument<|sep|><|close|>call<|sep|><|open|>call tool=\"add\" index=\"2\"<|sep|><|open|>argument key=\"y\" type=\"number\"<|sep|>1.0<|close|>argument<|sep|><|open|>argument key=\"x\" type=\"number\"<|sep|>2<|close|>argument<|sep|><|open|>argument key=\"items\" type=\"array\"<|sep|>[\"left\",\"right\"]<|close|>argument<|sep|><|close|>call<|sep|><|close|>tools<|sep|><|close|>message<|sep|>",
       "generation_token_ids": [20082, 2390, 276, 10666, 316, 1239, 7697, 13, 163588, 39964, 163589, 163587, 12092, 163589, 40, 748, 2390, 276, 7697, 13, 163588, 12092, 163589, 163587, 25385, 163589, 163587, 10257, 4453, 878, 618, 21055, 2800, 1, 4002, 878, 16, 1, 163589, 163587, 47185, 2355, 878, 5791, 1, 1798, 878, 2033, 1, 163589, 2797, 31231, 163588, 47185, 163589, 163588, 10257, 163589, 163587, 10257, 4453, 878, 1210, 1, 4002, 878, 17, 1, 163589, 163587, 47185, 2355, 878, 88, 1, 1798, 878, 10006, 1, 163589, 16, 13, 15, 163588, 47185, 163589, 163587, 47185, 2355, 878, 87, 1, 1798, 878, 10006, 1, 163589, 17, 163588, 47185, 163589, 163587, 47185, 2355, 878, 7989, 1, 1798, 878, 4392, 1, 163589, 3530, 3794, 3923, 2277, 3956, 163588, 47185, 163589, 163588, 10257, 163589, 163588, 25385, 163589, 163588, 2778, 163589, 163586]
+    },
+    "required": {
+      "grammar": {
+        "format": {
+          "type": "sequence",
+          "elements": [
+            {
+              "type": "optional",
+              "content": {
+                "type": "const_string",
+                "value": "<|open|>response<|sep|>"
+              }
+            },
+            {
+              "type": "tag",
+              "begin": "",
+              "content": {
+                "type": "any_text",
+                "excludes": [
+                  "<|open|>",
+                  "<|close|>",
+                  "<|end_of_msg|>"
+                ],
+                "max_tokens": null,
+                "max_chars": null
+              },
+              "end": "<|close|>response<|sep|>"
+            },
+            {
+              "type": "tag",
+              "begin": "<|open|>tools<|sep|>",
+              "content": {
+                "type": "tags_with_separator",
+                "tags": [
+                  {
+                    "type": "tag",
+                    "begin": "<|open|>call tool=\"get_weather\" index=\"",
+                    "content": {
+                      "type": "sequence",
+                      "elements": [
+                        {
+                          "type": "regex",
+                          "pattern": "[1-9][0-9]*"
+                        },
+                        {
+                          "type": "const_string",
+                          "value": "\"<|sep|>"
+                        },
+                        {
+                          "type": "or",
+                          "elements": [
+                            {
+                              "type": "plus",
+                              "content": {
+                                "type": "tag",
+                                "begin": "<|open|>argument key=\"location\" type=\"string\"<|sep|>",
+                                "content": {
+                                  "type": "any_text",
+                                  "excludes": [
+                                    "<|close|>argument<|sep|>",
+                                    "<|close|>call<|sep|>"
+                                  ],
+                                  "max_tokens": null,
+                                  "max_chars": null
+                                },
+                                "end": "<|close|>argument<|sep|>"
+                              }
+                            },
+                            {
+                              "type": "tag",
+                              "begin": "<|open|>json type=\"object\"<|sep|>",
+                              "content": {
+                                "type": "json_schema",
+                                "json_schema": {
+                                  "type": "object",
+                                  "properties": {
+                                    "location": {
+                                      "type": "string"
+                                    }
+                                  },
+                                  "required": [
+                                    "location"
+                                  ]
+                                },
+                                "style": "json",
+                                "any_order": false,
+                                "max_whitespace_cnt": null,
+                                "excludes": []
+                              },
+                              "end": "<|close|>json<|sep|>"
+                            }
+                          ]
+                        }
+                      ]
+                    },
+                    "end": "<|close|>call<|sep|>"
+                  },
+                  {
+                    "type": "tag",
+                    "begin": "<|open|>call tool=\"add\" index=\"",
+                    "content": {
+                      "type": "sequence",
+                      "elements": [
+                        {
+                          "type": "regex",
+                          "pattern": "[1-9][0-9]*"
+                        },
+                        {
+                          "type": "const_string",
+                          "value": "\"<|sep|>"
+                        },
+                        {
+                          "type": "or",
+                          "elements": [
+                            {
+                              "type": "plus",
+                              "content": {
+                                "type": "or",
+                                "elements": [
+                                  {
+                                    "type": "tag",
+                                    "begin": "<|open|>argument key=\"y\" type=\"number\"<|sep|>",
+                                    "content": {
+                                      "type": "json_schema",
+                                      "json_schema": {
+                                        "type": "number"
+                                      },
+                                      "style": "json",
+                                      "any_order": false,
+                                      "max_whitespace_cnt": null,
+                                      "excludes": []
+                                    },
+                                    "end": "<|close|>argument<|sep|>"
+                                  },
+                                  {
+                                    "type": "tag",
+                                    "begin": "<|open|>argument key=\"x\" type=\"number\"<|sep|>",
+                                    "content": {
+                                      "type": "json_schema",
+                                      "json_schema": {
+                                        "type": "number"
+                                      },
+                                      "style": "json",
+                                      "any_order": false,
+                                      "max_whitespace_cnt": null,
+                                      "excludes": []
+                                    },
+                                    "end": "<|close|>argument<|sep|>"
+                                  },
+                                  {
+                                    "type": "tag",
+                                    "begin": "<|open|>argument key=\"items\" type=\"array\"<|sep|>",
+                                    "content": {
+                                      "type": "json_schema",
+                                      "json_schema": {
+                                        "type": "array",
+                                        "items": {
+                                          "type": "string"
+                                        }
+                                      },
+                                      "style": "json",
+                                      "any_order": false,
+                                      "max_whitespace_cnt": null,
+                                      "excludes": []
+                                    },
+                                    "end": "<|close|>argument<|sep|>"
+                                  }
+                                ]
+                              }
+                            },
+                            {
+                              "type": "tag",
+                              "begin": "<|open|>json type=\"object\"<|sep|>",
+                              "content": {
+                                "type": "json_schema",
+                                "json_schema": {
+                                  "type": "object",
+                                  "properties": {
+                                    "y": {
+                                      "type": "number"
+                                    },
+                                    "x": {
+                                      "type": "number"
+                                    },
+                                    "items": {
+                                      "type": "array",
+                                      "items": {
+                                        "type": "string"
+                                      }
+                                    }
+                                  },
+                                  "required": [
+                                    "y",
+                                    "x",
+                                    "items"
+                                  ]
+                                },
+                                "style": "json",
+                                "any_order": false,
+                                "max_whitespace_cnt": null,
+                                "excludes": []
+                              },
+                              "end": "<|close|>json<|sep|>"
+                            }
+                          ]
+                        }
+                      ]
+                    },
+                    "end": "<|close|>call<|sep|>"
+                  }
+                ],
+                "separator": "",
+                "at_least_one": true,
+                "stop_after_first": false
+              },
+              "end": "<|close|>tools<|sep|>"
+            },
+            {
+              "type": "optional",
+              "content": {
+                "type": "const_string",
+                "value": "<|close|>message<|sep|>"
+              }
+            }
+          ]
+        },
+        "coverage": "final_output_only"
+      },
+      "completion": "Need call the weather and add tools.<|close|>think<|sep|><|open|>response<|sep|><|close|>response<|sep|><|open|>tools<|sep|><|open|>call tool=\"get_weather\" index=\"1\"<|sep|><|open|>argument key=\"location\" type=\"string\"<|sep|>Shanghai<|close|>argument<|sep|><|close|>call<|sep|><|open|>call tool=\"add\" index=\"2\"<|sep|><|open|>argument key=\"y\" type=\"number\"<|sep|>1.0<|close|>argument<|sep|><|open|>argument key=\"x\" type=\"number\"<|sep|>2<|close|>argument<|sep|><|open|>argument key=\"items\" type=\"array\"<|sep|>[\"left\",\"right\"]<|close|>argument<|sep|><|close|>call<|sep|><|close|>tools<|sep|><|close|>message<|sep|>",
+      "generation_token_ids": [20082, 2390, 276, 10666, 316, 1239, 7697, 13, 163588, 39964, 163589, 163587, 12092, 163589, 163588, 12092, 163589, 163587, 25385, 163589, 163587, 10257, 4453, 878, 618, 21055, 2800, 1, 4002, 878, 16, 1, 163589, 163587, 47185, 2355, 878, 5791, 1, 1798, 878, 2033, 1, 163589, 2797, 31231, 163588, 47185, 163589, 163588, 10257, 163589, 163587, 10257, 4453, 878, 1210, 1, 4002, 878, 17, 1, 163589, 163587, 47185, 2355, 878, 88, 1, 1798, 878, 10006, 1, 163589, 16, 13, 15, 163588, 47185, 163589, 163587, 47185, 2355, 878, 87, 1, 1798, 878, 10006, 1, 163589, 17, 163588, 47185, 163589, 163587, 47185, 2355, 878, 7989, 1, 1798, 878, 4392, 1, 163589, 3530, 3794, 3923, 2277, 3956, 163588, 47185, 163589, 163588, 10257, 163589, 163588, 25385, 163589, 163588, 2778, 163589, 163586]
+    },
+    "named": {
+      "grammar": {
+        "format": {
+          "type": "sequence",
+          "elements": [
+            {
+              "type": "optional",
+              "content": {
+                "type": "const_string",
+                "value": "<|open|>response<|sep|>"
+              }
+            },
+            {
+              "type": "tag",
+              "begin": "",
+              "content": {
+                "type": "any_text",
+                "excludes": [
+                  "<|open|>",
+                  "<|close|>",
+                  "<|end_of_msg|>"
+                ],
+                "max_tokens": null,
+                "max_chars": null
+              },
+              "end": "<|close|>response<|sep|>"
+            },
+            {
+              "type": "tag",
+              "begin": "<|open|>tools<|sep|>",
+              "content": {
+                "type": "tags_with_separator",
+                "tags": [
+                  {
+                    "type": "tag",
+                    "begin": "<|open|>call tool=\"get_weather\" index=\"",
+                    "content": {
+                      "type": "sequence",
+                      "elements": [
+                        {
+                          "type": "regex",
+                          "pattern": "[1-9][0-9]*"
+                        },
+                        {
+                          "type": "const_string",
+                          "value": "\"<|sep|>"
+                        },
+                        {
+                          "type": "or",
+                          "elements": [
+                            {
+                              "type": "plus",
+                              "content": {
+                                "type": "tag",
+                                "begin": "<|open|>argument key=\"location\" type=\"string\"<|sep|>",
+                                "content": {
+                                  "type": "any_text",
+                                  "excludes": [
+                                    "<|close|>argument<|sep|>",
+                                    "<|close|>call<|sep|>"
+                                  ],
+                                  "max_tokens": null,
+                                  "max_chars": null
+                                },
+                                "end": "<|close|>argument<|sep|>"
+                              }
+                            },
+                            {
+                              "type": "tag",
+                              "begin": "<|open|>json type=\"object\"<|sep|>",
+                              "content": {
+                                "type": "json_schema",
+                                "json_schema": {
+                                  "type": "object",
+                                  "properties": {
+                                    "location": {
+                                      "type": "string"
+                                    }
+                                  },
+                                  "required": [
+                                    "location"
+                                  ]
+                                },
+                                "style": "json",
+                                "any_order": false,
+                                "max_whitespace_cnt": null,
+                                "excludes": []
+                              },
+                              "end": "<|close|>json<|sep|>"
+                            }
+                          ]
+                        }
+                      ]
+                    },
+                    "end": "<|close|>call<|sep|>"
+                  }
+                ],
+                "separator": "",
+                "at_least_one": true,
+                "stop_after_first": false
+              },
+              "end": "<|close|>tools<|sep|>"
+            },
+            {
+              "type": "optional",
+              "content": {
+                "type": "const_string",
+                "value": "<|close|>message<|sep|>"
+              }
+            }
+          ]
+        },
+        "coverage": "final_output_only"
+      },
+      "completion": "Need call the weather and add tools.<|close|>think<|sep|><|open|>response<|sep|><|close|>response<|sep|><|open|>tools<|sep|><|open|>call tool=\"get_weather\" index=\"1\"<|sep|><|open|>argument key=\"location\" type=\"string\"<|sep|>Shanghai<|close|>argument<|sep|><|close|>call<|sep|><|close|>tools<|sep|><|close|>message<|sep|>",
+      "generation_token_ids": [20082, 2390, 276, 10666, 316, 1239, 7697, 13, 163588, 39964, 163589, 163587, 12092, 163589, 163588, 12092, 163589, 163587, 25385, 163589, 163587, 10257, 4453, 878, 618, 21055, 2800, 1, 4002, 878, 16, 1, 163589, 163587, 47185, 2355, 878, 5791, 1, 1798, 878, 2033, 1, 163589, 2797, 31231, 163588, 47185, 163589, 163588, 10257, 163589, 163588, 25385, 163589, 163588, 2778, 163589, 163586]
     }
   }
 }

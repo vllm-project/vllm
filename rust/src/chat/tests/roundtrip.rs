@@ -12,6 +12,8 @@
 //! `tests/grammar_replay/`. `grammar_replay.rs` replays these cases through the real XGrammar.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::fmt::Debug;
+use std::ops::Range;
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -55,8 +57,6 @@ struct RoundtripCase {
     json_fmt: JsonFmt,
     /// Whether the template renders tool-call argument object keys in sorted order.
     sort_json_keys: bool,
-    /// Tool-choice variants run by the tool-call fixture.
-    tool_choice_variants: &'static [ToolChoiceVariant],
 }
 
 #[derive(Clone, Copy)]
@@ -139,8 +139,7 @@ enum ToolChoiceVariant {
 }
 
 impl ToolChoiceVariant {
-    /// Every variant, for templates and parsers that support all of them.
-    const ALL: &[Self] = &[Self::Auto, Self::Required, Self::Named];
+    const ALL: [Self; 3] = [Self::Auto, Self::Required, Self::Named];
 
     fn tool_choice(self) -> ChatToolChoice {
         match self {
@@ -164,7 +163,6 @@ impl RoundtripCase {
             thinking_behavior: ThinkingBehavior::Toggleable { default: true },
             json_fmt: spaced_json_fmt(),
             sort_json_keys: false,
-            tool_choice_variants: ToolChoiceVariant::ALL,
         }
     }
 
@@ -178,7 +176,6 @@ impl RoundtripCase {
             thinking_behavior: ThinkingBehavior::Toggleable { default: true },
             json_fmt: compact_json_fmt(),
             sort_json_keys: false,
-            tool_choice_variants: ToolChoiceVariant::ALL,
         }
     }
 
@@ -192,7 +189,6 @@ impl RoundtripCase {
             thinking_behavior: ThinkingBehavior::Toggleable { default: true },
             json_fmt: compact_json_fmt(),
             sort_json_keys: false,
-            tool_choice_variants: ToolChoiceVariant::ALL,
         }
     }
 
@@ -206,7 +202,6 @@ impl RoundtripCase {
             thinking_behavior: ThinkingBehavior::Always { value: true },
             json_fmt: compact_json_fmt(),
             sort_json_keys: false,
-            tool_choice_variants: ToolChoiceVariant::ALL,
         }
     }
 
@@ -220,7 +215,6 @@ impl RoundtripCase {
             thinking_behavior: ThinkingBehavior::Always { value: true },
             json_fmt: compact_json_fmt(),
             sort_json_keys: false,
-            tool_choice_variants: ToolChoiceVariant::ALL,
         }
     }
 
@@ -234,7 +228,6 @@ impl RoundtripCase {
             thinking_behavior: ThinkingBehavior::Toggleable { default: false },
             json_fmt: compact_json_fmt(),
             sort_json_keys: false,
-            tool_choice_variants: ToolChoiceVariant::ALL,
         }
     }
 
@@ -248,7 +241,6 @@ impl RoundtripCase {
             thinking_behavior: ThinkingBehavior::Toggleable { default: true },
             json_fmt: compact_json_fmt(),
             sort_json_keys: false,
-            tool_choice_variants: ToolChoiceVariant::ALL,
         }
     }
 
@@ -262,7 +254,6 @@ impl RoundtripCase {
             thinking_behavior: ThinkingBehavior::Toggleable { default: false },
             json_fmt: compact_json_fmt(),
             sort_json_keys: false,
-            tool_choice_variants: ToolChoiceVariant::ALL,
         }
     }
 
@@ -276,7 +267,6 @@ impl RoundtripCase {
             thinking_behavior: ThinkingBehavior::Toggleable { default: true },
             json_fmt: compact_json_fmt(),
             sort_json_keys: false,
-            tool_choice_variants: ToolChoiceVariant::ALL,
         }
     }
 
@@ -290,7 +280,6 @@ impl RoundtripCase {
             thinking_behavior: ThinkingBehavior::Toggleable { default: true },
             json_fmt: compact_json_fmt(),
             sort_json_keys: false,
-            tool_choice_variants: ToolChoiceVariant::ALL,
         }
     }
 
@@ -304,7 +293,6 @@ impl RoundtripCase {
             thinking_behavior: ThinkingBehavior::Toggleable { default: true },
             json_fmt: compact_json_fmt(),
             sort_json_keys: false,
-            tool_choice_variants: ToolChoiceVariant::ALL,
         }
     }
 
@@ -318,7 +306,6 @@ impl RoundtripCase {
             thinking_behavior: ThinkingBehavior::Always { value: true },
             json_fmt: compact_json_fmt(),
             sort_json_keys: true,
-            tool_choice_variants: ToolChoiceVariant::ALL,
         }
     }
 
@@ -333,7 +320,6 @@ impl RoundtripCase {
             thinking_behavior: ThinkingBehavior::Toggleable { default: true },
             json_fmt: spaced_json_fmt(),
             sort_json_keys: false,
-            tool_choice_variants: ToolChoiceVariant::ALL,
         }
     }
 
@@ -351,9 +337,6 @@ impl RoundtripCase {
             thinking_behavior: ThinkingBehavior::Toggleable { default: true },
             json_fmt: compact_json_fmt(),
             sort_json_keys: false,
-            // The renderer appends a `tool_choice=required` system message after the
-            // history, so the completion is not a suffix of the full render.
-            tool_choice_variants: &[ToolChoiceVariant::Auto],
         }
     }
 
@@ -371,7 +354,6 @@ impl RoundtripCase {
             },
             json_fmt: compact_json_fmt(),
             sort_json_keys: false,
-            tool_choice_variants: ToolChoiceVariant::ALL,
         }
     }
 
@@ -385,7 +367,6 @@ impl RoundtripCase {
             thinking_behavior: ThinkingBehavior::Always { value: true },
             json_fmt: compact_json_fmt(),
             sort_json_keys: false,
-            tool_choice_variants: ToolChoiceVariant::ALL,
         }
     }
 
@@ -399,7 +380,6 @@ impl RoundtripCase {
             thinking_behavior: ThinkingBehavior::Always { value: true },
             json_fmt: compact_json_fmt(),
             sort_json_keys: false,
-            tool_choice_variants: ToolChoiceVariant::ALL,
         }
     }
 
@@ -413,7 +393,6 @@ impl RoundtripCase {
             thinking_behavior: ThinkingBehavior::Always { value: true },
             json_fmt: compact_json_fmt(),
             sort_json_keys: false,
-            tool_choice_variants: ToolChoiceVariant::ALL,
         }
     }
 
@@ -427,7 +406,6 @@ impl RoundtripCase {
             thinking_behavior: ThinkingBehavior::Always { value: true },
             json_fmt: compact_json_fmt(),
             sort_json_keys: false,
-            tool_choice_variants: ToolChoiceVariant::ALL,
         }
     }
 
@@ -441,7 +419,6 @@ impl RoundtripCase {
             thinking_behavior: ThinkingBehavior::Always { value: true },
             json_fmt: compact_json_fmt(),
             sort_json_keys: true,
-            tool_choice_variants: ToolChoiceVariant::ALL,
         }
     }
 }
@@ -558,7 +535,7 @@ async fn run_roundtrip_tool_call_mix(
     backends: &vllm_chat::LoadedModelBackends,
 ) -> Result<()> {
     let mut results = Vec::new();
-    for &variant in case.tool_choice_variants {
+    for variant in ToolChoiceVariant::ALL {
         let result = run_roundtrip_tool_call_mix_inner(case, backends, variant).await?;
         results.push((variant, result));
     }
@@ -762,7 +739,7 @@ struct RenderedTurn {
 }
 
 /// Render `history` as a production prompt and `history + assistant` as closed
-/// history, then return the production prompt and assistant-completion suffix.
+/// history, then return the production prompt and the assistant completion.
 fn render_closed_completion(
     renderer: &dyn vllm_chat::ChatRenderer,
     base_request: &ChatRequest,
@@ -779,23 +756,78 @@ fn render_closed_completion(
 
     let completion = match (&prompt, full) {
         (Prompt::Text(prompt), Prompt::Text(full)) => {
-            ensure!(
-                full.starts_with(prompt),
-                "full prompt must extend production prompt\nprompt: {prompt:?}\nfull: {full:?}"
-            );
-            Prompt::Text(full[prompt.len()..].to_string())
+            let range = completion_range(prompt.as_bytes(), full.as_bytes())
+                .with_context(|| format!("prompt: {prompt:?}\nfull: {full:?}"))?;
+            let completion = full.get(range).context("completion splits a UTF-8 character")?;
+            Prompt::Text(completion.to_string())
         }
         (Prompt::TokenIds(prompt), Prompt::TokenIds(full)) => {
-            ensure!(
-                full.starts_with(prompt),
-                "full prompt must extend production prompt\nprompt: {prompt:?}\nfull: {full:?}"
-            );
-            Prompt::TokenIds(full[prompt.len()..].to_vec())
+            let range = completion_range(prompt, &full)
+                .with_context(|| format!("prompt: {prompt:?}\nfull: {full:?}"))?;
+            Prompt::TokenIds(full[range].to_vec())
         }
         (prompt, full) => bail!("prompt kind changed between renders: {prompt:?} vs {full:?}"),
     };
 
     Ok(RenderedTurn { prompt, completion })
+}
+
+/// Locate the assistant completion in `full`, the history rendered with the
+/// assistant message, given `prompt`, the same history rendered for generation.
+///
+/// Some templates render request-scoped control messages after the whole
+/// history, such as Kimi K3's `tool_choice=required` message. With history `A`,
+/// control messages `C`, generation prompt `G`, and completion `B`, the renders
+/// are `prompt = A + C + G` and `full = A + G + B + C`. `C` is empty for most
+/// templates, which makes `prompt` a prefix of `full`.
+fn completion_range<T: PartialEq + Debug>(prompt: &[T], full: &[T]) -> Result<Range<usize>> {
+    if full.starts_with(prompt) {
+        return Ok(prompt.len()..full.len());
+    }
+    ensure!(
+        full.len() >= prompt.len(),
+        "full prompt is shorter than production prompt"
+    );
+
+    // `A` is a common prefix of both renders; try every split of the remaining
+    // `prompt` into `C + G` and require exactly one to fit `full`.
+    let common_prefix_len = prompt.iter().zip(full).take_while(|(p, f)| p == f).count();
+    let mut control_lens = Vec::new();
+    for history_len in 0..=common_prefix_len {
+        let rest = &prompt[history_len..];
+        for control_len in 1..=rest.len() {
+            let (control, generation) = rest.split_at(control_len);
+            if full[history_len..].starts_with(generation) && full.ends_with(control) {
+                control_lens.push(control_len);
+            }
+        }
+    }
+    let [control_len] = control_lens[..] else {
+        bail!(
+            "full prompt must be `A + G + B + C` for production prompt `A + C + G`; found {} splits",
+            control_lens.len()
+        );
+    };
+
+    Ok(prompt.len() - control_len..full.len() - control_len)
+}
+
+#[test]
+fn completion_range_skips_trailing_control_messages() {
+    let history = "<user>hi</user>";
+    let control = "<system>call tools</system>";
+    let generation = "<assistant>";
+    let completion = "call()</assistant>";
+
+    let prompt = format!("{history}{generation}");
+    let full = format!("{history}{generation}{completion}");
+    let range = completion_range(prompt.as_bytes(), full.as_bytes()).unwrap();
+    assert_eq!(&full[range], completion);
+
+    let prompt = format!("{history}{control}{generation}");
+    let full = format!("{history}{generation}{completion}{control}");
+    let range = completion_range(prompt.as_bytes(), full.as_bytes()).unwrap();
+    assert_eq!(&full[range], completion);
 }
 
 /// Output of one production output processor over a rendered completion.
