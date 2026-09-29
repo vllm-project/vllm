@@ -119,6 +119,35 @@ class ParserManager:
             HarmonyParser.tool_strict_level = strict_level
             return HarmonyParser
 
+        # MuseGlimmer first: the composite validates its parser pairing, so a
+        # muse-involving mix must never reach the kimi/cohere composites. Test
+        # the resolved classes, not the names: with auto tools off the tool
+        # parser resolves to None and there is nothing to pair. (The harmony
+        # branch above still wins for a gpt_oss model; that combination is a
+        # contradictory config, not a pairing to validate.)
+        from vllm.parser.muse_glimmer import MuseGlimmerParser
+        from vllm.reasoning.muse_glimmer_reasoning_parser import (
+            MuseGlimmerReasoningParser,
+        )
+        from vllm.tool_parsers.muse_glimmer_tool_parser import MuseGlimmerToolParser
+
+        if (
+            reasoning_parser_cls is not None
+            and issubclass(reasoning_parser_cls, MuseGlimmerReasoningParser)
+        ) or (
+            tool_parser_cls is not None
+            and issubclass(tool_parser_cls, MuseGlimmerToolParser)
+        ):
+            r_cls = reasoning_parser_cls
+            t_cls = tool_parser_cls
+
+            class _MuseGlimmerParser(MuseGlimmerParser):
+                reasoning_parser_cls = r_cls
+                tool_parser_cls = t_cls
+                tool_strict_level = strict_level
+
+            return _MuseGlimmerParser
+
         if reasoning_parser_name == "kimi_k3" or tool_parser_name == "kimi_k3":
             from vllm.parser.kimi_k3 import KimiK3Parser
 
