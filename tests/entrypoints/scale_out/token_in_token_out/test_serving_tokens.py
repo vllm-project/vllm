@@ -1,9 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import io
 import json
 
 import httpx
+import numpy as np
+import pybase64 as base64
 import pytest
 import pytest_asyncio
 from transformers import AutoTokenizer
@@ -110,6 +113,29 @@ async def test_generate_endpoint(client):
     data = resp.json()
     assert "choices" in data
     assert data["choices"][0].get("sampling_mask") is None
+
+
+@pytest.mark.asyncio
+async def test_generate_rejects_min_tokens_above_filled_max_tokens(client):
+    """Explicit null max_tokens must not skip the min_tokens bound."""
+    payload = {
+        "model": MODEL_NAME,
+        "token_ids": [1, 2, 3],
+        "sampling_params": {"max_tokens": None, "min_tokens": 2147483648},
+        "stream": False,
+    }
+    resp = await client.post(GEN_ENDPOINT, json=payload)
+    assert resp.status_code == 400
+    assert "min_tokens" in resp.json()["error"]["message"]
+
+    followup = {
+        "model": MODEL_NAME,
+        "token_ids": [1, 2, 3],
+        "sampling_params": {"max_tokens": 4},
+        "stream": False,
+    }
+    resp = await client.post(GEN_ENDPOINT, json=followup)
+    resp.raise_for_status()
 
 
 @pytest.mark.asyncio
@@ -289,6 +315,52 @@ async def test_generate_logprobs(client, logprobs_value):
 
 
 @pytest.mark.asyncio
+async def test_generate_prompt_token_id_logprobs(client):
+    token_ids = [11, 22, 33, 44, 55]
+    candidates = [22, 33, 44, 55]
+    sampling_params = {
+        "max_tokens": 1,
+        "prompt_logprobs": 0,
+        "prompt_logprob_token_ids": candidates,
+        "prompt_logprob_start": 1,
+    }
+    payload = {
+        "model": MODEL_NAME,
+        "token_ids": token_ids,
+        "sampling_params": sampling_params,
+    }
+    resp = await client.post(GEN_ENDPOINT, json=payload)
+    resp.raise_for_status()
+    data = resp.json()
+
+    scores = np.load(io.BytesIO(base64.b64decode(data["prompt_token_id_logprobs"])))
+    assert scores.shape == (len(token_ids) - 2, len(candidates))
+    for row, target in enumerate(token_ids[2:]):
+        expected = data["prompt_logprobs"][row + 2][str(target)]["logprob"]
+        assert scores[row, candidates.index(target)] == pytest.approx(
+            expected, abs=1e-3
+        )
+
+    stream_only_ids = {"prompt_logprob_token_ids": candidates}
+    resp = await client.post(
+        GEN_ENDPOINT,
+        json={**payload, "sampling_params": stream_only_ids, "stream": True},
+    )
+    assert resp.status_code == 400
+    assert "prompt_logprob_token_ids" in resp.text
+
+    past_end = {**sampling_params, "prompt_logprob_start": len(token_ids)}
+    resp = await client.post(
+        GEN_ENDPOINT, json={**payload, "sampling_params": past_end}
+    )
+    resp.raise_for_status()
+    empty = np.load(
+        io.BytesIO(base64.b64decode(resp.json()["prompt_token_id_logprobs"]))
+    )
+    assert empty.shape == (0, len(candidates))
+
+
+@pytest.mark.asyncio
 async def test_same_response_as_chat_completions(client, tokenizer, messages):
     token_ids = tokenizer.apply_chat_template(
         messages,
@@ -420,6 +492,31 @@ async def test_stop_string_workflow(client, tokenizer, messages):
     completions_data = completions_resp.json()
     completions_res = completions_data["choices"][0]["message"]["content"]
     assert generate_res == completions_res
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(
+    envs.VLLM_USE_RUST_FRONTEND,
+    reason="--tokens-only is not supported by the Rust frontend",
+)
+@pytest.mark.parametrize("server", [["--tokens-only"]], indirect=True)
+async def test_stop_strings_rejected_when_tokens_only(client):
+    """--tokens-only forces detokenize=False after request validation, so
+    stop strings must be rejected explicitly rather than silently ignored."""
+    sampling_params = {"max_tokens": 5, "stop": ["never"]}
+    payload = {
+        "model": MODEL_NAME,
+        "token_ids": [1, 2, 3],
+        "sampling_params": sampling_params,
+        "stream": False,
+    }
+    resp = await client.post(GEN_ENDPOINT, json=payload)
+    assert resp.status_code == 400
+    assert "stop strings" in resp.json()["error"]["message"]
+
+    sampling_params["stop"] = None
+    resp = await client.post(GEN_ENDPOINT, json=payload)
+    resp.raise_for_status()
 
 
 @pytest.mark.asyncio

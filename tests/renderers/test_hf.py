@@ -123,7 +123,7 @@ def test_no_load_chat_template_literallike():
 )
 @pytest.mark.parametrize("use_tools", [True, False])
 def test_resolve_chat_template(sample_json_schema, model, use_tools):
-    """checks that chat_template is a dict type for HF models."""
+    """Checks that chat_template is a dict type for HF models."""
     model_info = HF_EXAMPLE_MODELS.find_hf_info(model)
     model_info.check_available_online(on_fail="skip")
 
@@ -196,7 +196,7 @@ def test_resolve_chat_template(sample_json_schema, model, use_tools):
     ],
 )
 def test_resolve_chat_template_kwargs(sample_json_schema, model, expected_kwargs):
-    """checks that chat_template is a dict type for HF models."""
+    """Checks that chat_template is a dict type for HF models."""
     model_info = HF_EXAMPLE_MODELS.find_hf_info(model)
     model_info.check_available_online(on_fail="skip")
 

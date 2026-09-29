@@ -20,6 +20,8 @@ from pydantic import (
 
 from vllm.config import ModelConfig
 from vllm.entrypoints.chat_utils import (
+    MM_PARSER_MAP,
+    TEXT_PART_TYPES,
     ChatCompletionMessageParam,
     ChatTemplateContentFormatOption,
 )
@@ -57,6 +59,11 @@ logger = init_logger(__name__)
 
 _INT64_MIN = -(2**63)
 _INT64_MAX = 2**63 - 1
+
+# Content part types that carry no multimodal data.
+_TEXT_CONTENT_PART_TYPES = TEXT_PART_TYPES | {"tool_reference"}
+# Keys that mark a content part as multimodal, whatever its ``type``.
+_MEDIA_CONTENT_PART_KEYS = frozenset(MM_PARSER_MAP) - _TEXT_CONTENT_PART_TYPES
 
 
 class ChatMessage(OpenAIBaseModel):
@@ -215,7 +222,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
     # https://platform.openai.com/docs/api-reference/chat/create
     messages: list[ChatCompletionMessageParam]
     model: str | None = None
-    frequency_penalty: float | None = 0.0
+    frequency_penalty: float | None = None
     logit_bias: dict[str, float] | None = None
     logprobs: bool | None = False
     top_logprobs: int | None = 0
@@ -226,7 +233,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
     )
     max_completion_tokens: int | None = None
     n: int | None = 1
-    presence_penalty: float | None = 0.0
+    presence_penalty: float | None = None
     response_format: AnyResponseFormat | None = None
     seed: int | None = Field(None, ge=_INT64_MIN, le=_INT64_MAX)
     stop: StopParam = []
@@ -453,18 +460,6 @@ class ChatCompletionRequest(OpenAIBaseModel):
         ),
     )
 
-    return_assistant_tokens_mask: bool = Field(
-        default=False,
-        description=(
-            "If true, the /render response will include an "
-            "``assistant_tokens_mask`` field — a per-token list of 0/1 "
-            "values indicating which tokens were assistant-generated. "
-            "Requires the chat template to use ``{% generation %}`` "
-            "tags.  When the template does not support it, "
-            "``assistant_tokens_mask`` will be ``null``."
-        ),
-    )
-
     cache_salt: str | None = Field(
         default=None,
         min_length=1,
@@ -605,7 +600,6 @@ class ChatCompletionRequest(OpenAIBaseModel):
                 extra_kwargs,
             ),
             media_io_kwargs=self.media_io_kwargs,
-            return_assistant_tokens_mask=bool(self.return_assistant_tokens_mask),
             # No-tools requests default to tool_choice="none" at the API
             # layer. Collapse that default before rendering, so K3 emits a
             # model-visible tool-choice instruction only for requests with a
@@ -637,6 +631,8 @@ class ChatCompletionRequest(OpenAIBaseModel):
     # Default sampling parameters for chat completion requests
     _DEFAULT_SAMPLING_PARAMS: dict = {
         "repetition_penalty": 1.0,
+        "presence_penalty": 0.0,
+        "frequency_penalty": 0.0,
         "temperature": 1.0,
         "top_p": 1.0,
         "top_k": 0,
@@ -674,28 +670,15 @@ class ChatCompletionRequest(OpenAIBaseModel):
         max_tokens: int,
         default_sampling_params: dict,
     ) -> SamplingParams:
-        # Default parameters
-        if (repetition_penalty := self.repetition_penalty) is None:
-            repetition_penalty = default_sampling_params.get(
-                "repetition_penalty",
-                self._DEFAULT_SAMPLING_PARAMS["repetition_penalty"],
+        # Priority: user -> server default -> OpenAI default
+        sampling_params = {
+            name: (
+                value
+                if (value := getattr(self, name)) is not None
+                else default_sampling_params.get(name, default)
             )
-        if (temperature := self.temperature) is None:
-            temperature = default_sampling_params.get(
-                "temperature", self._DEFAULT_SAMPLING_PARAMS["temperature"]
-            )
-        if (top_p := self.top_p) is None:
-            top_p = default_sampling_params.get(
-                "top_p", self._DEFAULT_SAMPLING_PARAMS["top_p"]
-            )
-        if (top_k := self.top_k) is None:
-            top_k = default_sampling_params.get(
-                "top_k", self._DEFAULT_SAMPLING_PARAMS["top_k"]
-            )
-        if (min_p := self.min_p) is None:
-            min_p = default_sampling_params.get(
-                "min_p", self._DEFAULT_SAMPLING_PARAMS["min_p"]
-            )
+            for name, default in self._DEFAULT_SAMPLING_PARAMS.items()
+        }
 
         # Merge server-default stop_token_ids (e.g., model-specific tokens
         # like </call> for gpt-oss) with any request-specified ones
@@ -722,14 +705,8 @@ class ChatCompletionRequest(OpenAIBaseModel):
             extra_args["ec_transfer_params"] = self.ec_transfer_params
         return SamplingParams.from_optional(
             n=self.n,
-            presence_penalty=self.presence_penalty,
-            frequency_penalty=self.frequency_penalty,
-            repetition_penalty=repetition_penalty,
-            temperature=temperature,
+            **sampling_params,
             watermarking=self.watermarking,
-            top_p=top_p,
-            top_k=top_k,
-            min_p=min_p,
             seed=self.seed,
             stop=self.stop,
             stop_token_ids=stop_token_ids,
@@ -1008,6 +985,39 @@ class ChatCompletionRequest(OpenAIBaseModel):
 
     @model_validator(mode="before")
     @classmethod
+    def drop_prompt_token_ids_with_media(cls, data):
+        # The forwarded ids would drop media in ``messages``, so ignore them. Runs
+        # before validation, which can turn content into a one-shot iterator.
+        if not isinstance(data, dict):
+            return data
+        kv_transfer_params = data.get("kv_transfer_params")
+        messages = data.get("messages")
+        if (
+            not isinstance(kv_transfer_params, dict)
+            or kv_transfer_params.get("prompt_token_ids") is None
+            or not isinstance(messages, list)
+        ):
+            return data
+        for msg in messages:
+            content = msg.get("content") if isinstance(msg, dict) else None
+            if not isinstance(content, list):
+                continue
+            for part in content:
+                if isinstance(part, dict) and (
+                    any(key in part for key in _MEDIA_CONTENT_PART_KEYS)
+                    or not isinstance(part_type := part.get("type", "text"), str)
+                    or part_type not in _TEXT_CONTENT_PART_TYPES
+                ):
+                    logger.debug(
+                        "Ignoring kv_transfer_params['prompt_token_ids']: "
+                        "messages have non-text content and are rendered instead."
+                    )
+                    kv_transfer_params.pop("prompt_token_ids")
+                    return data
+        return data
+
+    @model_validator(mode="before")
+    @classmethod
     def check_system_message_content_type(cls, data):
         """Warn if system messages contain non-text content.
 
@@ -1146,6 +1156,17 @@ class BatchChatCompletionRequest(OpenAIBaseModel):
             raise VLLMValidationError(
                 "when using `logprob_token_ids`, `logprobs` must be set to true.",
                 parameter="logprob_token_ids",
+            )
+        kv_transfer_params = data.get("kv_transfer_params")
+        if (
+            isinstance(kv_transfer_params, dict)
+            and kv_transfer_params.get("prompt_token_ids") is not None
+        ):
+            raise VLLMValidationError(
+                "Batch chat completions do not support "
+                "`kv_transfer_params['prompt_token_ids']`: one pre-tokenized "
+                "prompt cannot serve several conversations.",
+                parameter="kv_transfer_params.prompt_token_ids",
             )
         response_format = data.get("response_format")
         if response_format is not None:

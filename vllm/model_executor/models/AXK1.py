@@ -44,6 +44,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import (
     FusedMoEFactory,
+    GateLinear,
     fused_moe_make_expert_params_mapping,
 )
 from vllm.model_executor.layers.fused_moe.utils import (
@@ -128,11 +129,9 @@ class AXK1MoE(nn.Module):
                 "Only silu is supported for now."
             )
 
-        self.gate = ReplicatedLinear(
+        self.gate = GateLinear(
             config.hidden_size,
             config.n_routed_experts,
-            bias=False,
-            quant_config=None,
             prefix=f"{prefix}.gate",
         )
         if config.topk_method == "noaux_tc":
@@ -324,9 +323,9 @@ class AXK1Attention(nn.Module):
         assert config.rope_parameters is not None
         if config.rope_parameters["rope_type"] != "default":
             config.rope_parameters["rope_type"] = (
-                "deepseek_yarn"
-                if config.rope_parameters.get("apply_yarn_scaling", True)
-                else "deepseek_llama_scaling"
+                "deepseek_llama_scaling"
+                if config.rope_parameters.get("attention_factor") == 1.0
+                else "deepseek_yarn"
             )
 
         self.rotary_emb = get_rope(
@@ -400,8 +399,7 @@ class AXK1Attention(nn.Module):
 
 
 class AXK1MLAAttention(nn.Module):
-    """
-    Main reference: DeepseekV2 paper, and FlashInfer Implementation
+    """Main reference: DeepseekV2 paper, and FlashInfer Implementation
     (https://arxiv.org/abs/2405.04434 and https://github.com/flashinfer-ai/flashinfer/pull/551).
 
         For more info see MLACommonImpl in:
@@ -497,9 +495,9 @@ class AXK1MLAAttention(nn.Module):
         assert config.rope_parameters is not None
         if config.rope_parameters["rope_type"] != "default":
             config.rope_parameters["rope_type"] = (
-                "deepseek_yarn"
-                if config.rope_parameters.get("apply_yarn_scaling", True)
-                else "deepseek_llama_scaling"
+                "deepseek_llama_scaling"
+                if config.rope_parameters.get("attention_factor") == 1.0
+                else "deepseek_yarn"
             )
 
         self.rotary_emb = get_rope(

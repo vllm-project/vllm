@@ -68,8 +68,7 @@ class RayPrometheusMetric:
 
     @staticmethod
     def _get_sanitized_opentelemetry_name(name: str) -> str:
-        """
-        For compatibility with Ray + OpenTelemetry, the metric name must be
+        """For compatibility with Ray + OpenTelemetry, the metric name must be
         sanitized. In particular, this replaces disallowed character (e.g., ':')
         with '_' in the metric name.
         Allowed characters: a-z, A-Z, 0-9, _
@@ -78,7 +77,6 @@ class RayPrometheusMetric:
         Ref: https://github.com/open-telemetry/opentelemetry-cpp/blob/main/sdk/src/metrics/instrument_metadata_validator.cc#L22-L23
         Ref: https://github.com/ray-project/ray/blob/master/src/ray/stats/metric.cc#L107
         """
-
         return re.sub(r"[^a-zA-Z0-9_]", "_", name)
 
 
@@ -169,8 +167,7 @@ class RayHistogramWrapper(RayPrometheusMetric):
 
 
 class RaySpecDecodingProm(SpecDecodingProm):
-    """
-    RaySpecDecodingProm is used by RayMetrics to log to Ray metrics.
+    """RaySpecDecodingProm is used by RayMetrics to log to Ray metrics.
     Provides the same metrics as SpecDecodingProm but uses Ray's
     util.metrics library.
     """
@@ -179,8 +176,7 @@ class RaySpecDecodingProm(SpecDecodingProm):
 
 
 class RayKVConnectorProm(KVConnectorProm):
-    """
-    RayKVConnectorProm is used by RayMetrics to log Ray
+    """RayKVConnectorProm is used by RayMetrics to log Ray
     metrics. Provides the same metrics as KV connectors but
     uses Ray's util.metrics library.
     """
@@ -191,8 +187,7 @@ class RayKVConnectorProm(KVConnectorProm):
 
 
 class RayPerfMetricsProm(PerfMetricsProm):
-    """
-    RayPerfMetricsProm is used by RayMetrics to log Ray
+    """RayPerfMetricsProm is used by RayMetrics to log Ray
     metrics. Provides the same MFU metrics as PerfMetricsProm
     uses Ray's util.metrics library.
     """
