@@ -529,7 +529,7 @@ class FunAudioChatProcessingInfo(BaseProcessingInfo):
         return TokenizersBackend.from_pretrained(
             self.model_id,
             subfolder="speech_tokenizer",
-            revision=self.ctx.model_config.tokenizer_revision,
+            revision=self.ctx.model_config.revision,
         )
 
     def get_feature_extractor(self) -> WhisperFeatureExtractor:
