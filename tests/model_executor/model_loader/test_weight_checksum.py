@@ -96,26 +96,19 @@ def test_dense_dp_replicas_get_distinct_key_prefixes(monkeypatch):
     assert prefixes == ["dp0:pp0:pcp0:tp0:ep0:", "dp1:pp0:pcp0:tp0:ep0:"]
 
 
-def test_checksums_are_gathered_from_every_engine():
-    """DP load balancing would return only the first engine's result."""
+def test_collective_rpc_returns_every_engines_workers():
+    """DP load balancing used to return only the first engine's result."""
     client = object.__new__(AsyncMPClient)
     client.core_engines = [b"e0", b"e1"]
 
     async def call_utility(method, *args, engine):
-        assert (method, *args) == (
-            "collective_rpc",
-            "compute_weight_checksums",
-            None,
-            (),
-            None,
-        )
-        return [{f"{engine.decode()}:tp{tp}:w": "x"} for tp in (0, 1)]
+        assert (method, *args) == ("collective_rpc", "m", None, (), None)
+        return [f"{engine.decode()}:tp{tp}" for tp in (0, 1)]
 
     client._call_utility_async = call_utility
-    workers = asyncio.run(client.compute_weight_checksums_async())
-    assert [next(iter(w)) for w in workers] == [
-        "e0:tp0:w",
-        "e0:tp1:w",
-        "e1:tp0:w",
-        "e1:tp1:w",
+    assert asyncio.run(client.collective_rpc_async("m")) == [
+        "e0:tp0",
+        "e0:tp1",
+        "e1:tp0",
+        "e1:tp1",
     ]

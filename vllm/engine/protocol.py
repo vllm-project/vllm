@@ -268,10 +268,6 @@ class EngineClient(ABC):
         """Perform a collective RPC call to the given path."""
         raise NotImplementedError
 
-    async def compute_weight_checksums(self) -> list[dict[str, str]]:
-        """Return rank-qualified weight digests from every worker."""
-        raise NotImplementedError
-
     async def handle_fault(
         self, fault_tolerance_request: FaultToleranceRequest
     ) -> FaultToleranceResult:

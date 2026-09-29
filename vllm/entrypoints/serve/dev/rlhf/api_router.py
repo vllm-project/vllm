@@ -243,7 +243,7 @@ async def weight_checker(
         )
 
     checksums: dict[str, str] = {}
-    for worker_checksums in await client.compute_weight_checksums():
+    for worker_checksums in await client.collective_rpc("compute_weight_checksums"):
         if duplicates := checksums.keys() & worker_checksums.keys():
             raise HTTPException(
                 status_code=HTTPStatus.INTERNAL_SERVER_ERROR.value,
