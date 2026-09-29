@@ -13,7 +13,7 @@ Enable it with `VLLM_SERVER_DEV_MODE=1`. All operations use
 | `{"action": "reset"}` | `{"status": "reset"}` |
 | `{"action": "compare", "baseline": {key: sha256_hex}}` | `{"match": bool, "mismatches": [key]}` |
 
-Keys have the form `dp{dp}:pp{pp}:pcp{pcp}:tp{tp}:ep{ep}:{tensor_name}`, so each
+Keys have the form `dp{dp}:pp{pp}:pcp{pcp}:tp{tp}:{tensor_name}`, so each
 shard is checked separately. All actions cover the target model's parameters,
 which is what weight loading writes; `reset` zeroes them. The endpoint keeps no
 state, so the caller holds the baseline. Invalid requests return HTTP 400.

@@ -45,7 +45,6 @@ from vllm.distributed.parallel_state import (
     Handle,
     checkpoint_prepare_distributed_state,
     checkpoint_restore_distributed_state,
-    get_ep_group,
     get_pcp_group,
     get_pp_group,
     get_tp_group,
@@ -352,8 +351,7 @@ class Worker(WorkerBase):
         pp = get_pp_group().rank_in_group
         pcp = get_pcp_group().rank_in_group
         tp = get_tp_group().rank_in_group
-        ep = get_ep_group().rank_in_group if self.model_config.is_moe else 0
-        return f"dp{dp}:pp{pp}:pcp{pcp}:tp{tp}:ep{ep}:"
+        return f"dp{dp}:pp{pp}:pcp{pcp}:tp{tp}:"
 
     def compute_weight_checksums(self) -> dict[str, str]:
         prefix = self._weight_checksum_prefix()

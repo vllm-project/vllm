@@ -86,14 +86,13 @@ def test_dense_dp_replicas_get_distinct_key_prefixes(monkeypatch):
     prefixes = []
     for dp_rank in (0, 1):
         worker = object.__new__(Worker)
-        worker.model_config = SimpleNamespace(is_moe=False)
         worker.parallel_config = ParallelConfig(
             data_parallel_size=2, data_parallel_rank=dp_rank
         )
         # Dense DP resets data_parallel_rank to 0 in each engine.
         worker.parallel_config.reconfigure_for_independent_dp_rank()
         prefixes.append(worker._weight_checksum_prefix())
-    assert prefixes == ["dp0:pp0:pcp0:tp0:ep0:", "dp1:pp0:pcp0:tp0:ep0:"]
+    assert prefixes == ["dp0:pp0:pcp0:tp0:", "dp1:pp0:pcp0:tp0:"]
 
 
 def test_collective_rpc_returns_every_engines_workers():
