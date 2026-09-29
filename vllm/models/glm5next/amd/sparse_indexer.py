@@ -664,6 +664,11 @@ class SparseAttnIndexerKpool(CustomOp):
         self.topk_indices_buffer = topk_indices_buffer
         self.skip_k_cache_insert = skip_k_cache_insert
         self.use_fp4_cache = use_fp4_cache
+        cfg = get_current_vllm_config_or_none()
+        if cfg is not None and cfg.parallel_config.decode_context_parallel_size > 1:
+            raise NotImplementedError(
+                "SparseAttnIndexerKpool on ROCm does not support DCP."
+            )
 
     def forward_hip(
         self,
