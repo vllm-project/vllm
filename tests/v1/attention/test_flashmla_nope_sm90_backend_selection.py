@@ -141,6 +141,7 @@ def _sparse_order(kv_cache_dtype, head_size, num_heads=32, capability=SM100):
     )
     sparse = {
         "FLASH_ATTN_MLA_SPARSE",
+        "FLASH_ATTN_MLA_SPARSE_FA4",
         "FLASHMLA_SPARSE",
         "FLASHINFER_MLA_SPARSE",
         "FLASHINFER_MLA_SPARSE_SM90",
@@ -179,3 +180,11 @@ def test_sm90_nope_fp8_ds_mla_resolves_to_flashmla():
     for name in order[: order.index("FLASHMLA_SPARSE")]:
         backend_cls = AttentionBackendEnum[name].get_class()
         assert not backend_cls.supports_kv_cache_dtype("fp8_ds_mla"), name
+
+
+def test_sm100_576_bf16_low_heads_prefers_fa4():
+    assert _sparse_order("auto", 576, num_heads=16)[:3] == [
+        "FLASH_ATTN_MLA_SPARSE_FA4",
+        "FLASHINFER_MLA_SPARSE",
+        "FLASHMLA_SPARSE",
+    ]
