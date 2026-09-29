@@ -690,6 +690,31 @@ def test_free_kv_cache_block_queue_append_n():
     )
 
 
+def test_free_kv_cache_block_queue_last_resort_stays_behind():
+    """Later appends stay ahead of the last-resort segment even after the
+    segment's first block leaves the queue by removal or popping."""
+    blocks = [KVCacheBlock(block_id=i) for i in range(7)]
+    queue = FreeKVCacheBlockQueue(blocks[0:1])
+
+    def order() -> list[int]:
+        return [block.block_id for block in queue.get_all_free_blocks()]
+
+    queue.append_last_resort_n(blocks[1:3])
+    queue.append(blocks[3])
+    assert order() == [0, 3, 1, 2]
+
+    queue.remove(blocks[1])
+    queue.append_n(blocks[4:5])
+    assert order() == [0, 3, 4, 2]
+
+    assert [block.block_id for block in queue.popleft_n(4)] == [0, 3, 4, 2]
+    queue.append_n(blocks[5:6])
+    queue.append_last_resort_n(blocks[6:7])
+    queue.append(blocks[1])
+    assert order() == [5, 1, 6]
+    assert queue.num_free_blocks == 3
+
+
 def test_free_kv_cache_block_queue_prepend_n():
     # Seed the queue with one block so prepend has an existing head to splice
     # in front of (fake_head->b0->fake_tail).

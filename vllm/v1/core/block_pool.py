@@ -715,7 +715,7 @@ class BlockPool:
         """Release references to blocks that stay readable until reused.
 
         The blocks become last-resort eviction candidates regardless of prefix
-        caching: they join the tail of the free queue and count as free.
+        caching: they stay behind every later-freed block and count as free.
         ``on_reuse`` fires when ``get_new_blocks`` hands a block out (or the
         cache is reset), so the caller can stop reading it.
         """
@@ -726,7 +726,7 @@ class BlockPool:
             self._reuse_watchers[block.block_id] = on_reuse
             if block.ref_cnt == 0:
                 released.append(block)
-        self.free_block_queue.append_n(released)
+        self.free_block_queue.append_last_resort_n(released)
 
     def _maybe_evict_cached_block(self, block: KVCacheBlock) -> bool:
         """If a block is cached in `cached_block_hash_to_block`, we reset its hash
