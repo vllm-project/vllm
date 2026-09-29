@@ -64,7 +64,7 @@ steps:
   - vllm/distributed/
   - "!vllm/distributed/kv_transfer/"
   - vllm/engine/
-  - vllm/executor/
+  - vllm/v1/executor/
   - vllm/compilation/
   - tests/distributed/
   commands:
@@ -82,7 +82,7 @@ steps:
       source_file_dependencies:
       - vllm/distributed/
       - vllm/engine/
-      - vllm/executor/
+      - vllm/v1/executor/
       - vllm/compilation/
       - tests/distributed/
       - vllm/platforms/rocm.py
