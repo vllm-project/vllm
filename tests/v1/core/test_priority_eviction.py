@@ -1570,3 +1570,63 @@ class TestSlidingWindowGroupNarrowing:
         meta = pool.priority_eviction_queue._meta
         assert all(meta.get(b.block_id) is None for b in blocks[:11])
         assert all(meta.get(b.block_id) is not None for b in blocks[11:])
+
+
+class TestStaleCopyDrop:
+    """Caching a full block whose hash is already held by a FREE block means the
+    request recomputed content it could not reach (the chain broke), so the old
+    copy is a zombie: it is unprotected, unhashed and put at the free-list head."""
+
+    def test_free_duplicate_is_dropped_when_new_copy_is_cached(self):
+        from vllm.v1.core.block_pool import BlockPool
+        from vllm.v1.core.kv_cache_utils import BlockHashWithGroupId
+
+        pool = BlockPool(
+            num_gpu_blocks=8,
+            enable_caching=True,
+            hash_block_size=16,
+            enable_kv_cache_events=False,
+        )
+        key = BlockHashWithGroupId(b"h\x00")
+        old = pool.blocks[1]
+        pool.free_block_queue.remove(old)
+        pool._insert_block_hash(key, old, num_tokens=16)
+        # protect the old copy and free it into the priority queue
+        pool.priority_eviction_queue.apply_directives(
+            [old], [_d(start=0, end=None, priority=70)], "s", 16
+        )
+        assert pool.priority_eviction_queue.try_insert(old)
+        assert old in pool.priority_eviction_queue
+
+        new = pool.blocks[2]
+        pool.free_block_queue.remove(new)
+        new.ref_cnt = 1
+        pool._insert_block_hash(key, new, num_tokens=16)
+
+        assert old not in pool.priority_eviction_queue
+        assert old.block_hash is None
+        assert pool.cached_block_hash_to_block.get_one_block(key) is new
+        assert pool.free_block_queue.popleft() is old, "zombie is reused first"
+
+    def test_referenced_duplicate_is_left_alone(self):
+        from vllm.v1.core.block_pool import BlockPool
+        from vllm.v1.core.kv_cache_utils import BlockHashWithGroupId
+
+        pool = BlockPool(
+            num_gpu_blocks=8,
+            enable_caching=True,
+            hash_block_size=16,
+            enable_kv_cache_events=False,
+        )
+        key = BlockHashWithGroupId(b"h\x00")
+        old = pool.blocks[1]
+        pool.free_block_queue.remove(old)
+        old.ref_cnt = 1  # still read by a running request
+        pool._insert_block_hash(key, old, num_tokens=16)
+        new = pool.blocks[2]
+        pool.free_block_queue.remove(new)
+        new.ref_cnt = 1
+        pool._insert_block_hash(key, new, num_tokens=16)
+        assert old.block_hash == key
+        assert pool.cached_block_hash_to_block.contain(key, old.block_id)
+        assert pool.cached_block_hash_to_block.contain(key, new.block_id)

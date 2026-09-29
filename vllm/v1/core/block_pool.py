@@ -656,6 +656,12 @@ class BlockPool:
         ):
             return
 
+        # A free block already holding this hash is a stale copy: the request
+        # recomputed the content because that copy was unreachable (its chain
+        # broke). It can never serve a hit again, so drop it now instead of
+        # letting it sit protected in the queue until eviction gets to it.
+        self._drop_stale_copies(block_hash_with_group_id, block)
+
         if block.block_hash is None:
             block.set_block_hash(block_hash_with_group_id, num_tokens=num_tokens)
         else:
@@ -663,6 +669,29 @@ class BlockPool:
                 block_hash_with_group_id
             )
         self.cached_block_hash_to_block.insert(block_hash_with_group_id, block)
+
+    def _drop_stale_copies(
+        self, key: BlockHashWithGroupId, new_block: KVCacheBlock
+    ) -> None:
+        existing = self.cached_block_hash_to_block._cache.get(key)
+        if existing is None:
+            return
+        olds = (
+            [existing]
+            if isinstance(existing, KVCacheBlock)
+            else list(existing.values())
+        )
+        for old in olds:
+            if old is new_block or old.is_null or old.ref_cnt != 0:
+                continue
+            if old in self.priority_eviction_queue:
+                self.priority_eviction_queue.unprotect(old.block_id)
+            elif old.prev_free_block is not None or old.next_free_block is not None:
+                self.free_block_queue.remove(old)
+            else:
+                continue  # not in either free structure: leave it alone
+            self._maybe_evict_cached_block(old)
+            self.free_block_queue.prepend_n([old])
 
     def move_block_hashes(
         self,
