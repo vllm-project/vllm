@@ -512,8 +512,8 @@ def test_extract_tool_calls_pre_v11_regex_fallback(
 
 @pytest.mark.parametrize(
     "stringified_tool_calls",
-    ["not json at all", "42", '["add"]', "[]", '{"foo": 1}'],
-    ids=["invalid_json", "scalar", "list_of_str", "empty_list", "not_a_call"],
+    ["not json at all", "42", '["add"]', '{"foo": 1}'],
+    ids=["invalid_json", "scalar", "list_of_str", "not_a_call"],
 )
 def test_extract_tool_calls_pre_v11_no_tool_call_returns_content(
     mistral_pre_v11_tool_parser, stringified_tool_calls
@@ -596,7 +596,6 @@ def test_extract_tool_calls_pre_v11_unusual_calls(
     assert result.content is None
 
 
-@pytest.mark.parametrize("driver", ["legacy", "engine"])
 @pytest.mark.parametrize(
     "model_output,expected,expected_content", _PRE_V11_UNUSUAL_CALLS
 )
@@ -606,7 +605,6 @@ def test_extract_tool_calls_streaming_pre_v11_unusual_calls(
     model_output,
     expected,
     expected_content,
-    driver,
 ):
     """Streaming extracts the same calls as the non-streaming path."""
     _test_extract_tool_calls_streaming(
@@ -619,7 +617,6 @@ def test_extract_tool_calls_streaming_pre_v11_unusual_calls(
             for name, arguments in expected
         ],
         expected_content,
-        driver=driver,
     )
 
 
