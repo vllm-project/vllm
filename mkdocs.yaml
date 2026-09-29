@@ -91,9 +91,6 @@ plugins:
             summary: true
           inventories:
           - https://docs.python.org/3/objects.inv
-          - https://typing-extensions.readthedocs.io/en/latest/objects.inv
-          - https://docs.aiohttp.org/en/stable/objects.inv
-          - https://pillow.readthedocs.io/en/stable/objects.inv
           - https://numpy.org/doc/stable/objects.inv
           - https://pytorch.org/docs/stable/objects.inv
   - redirects:
