@@ -10,6 +10,9 @@ from vllm.config import VllmConfig
 from vllm.model_executor.layers.fused_moe import (
     fused_moe_make_expert_params_mapping,
 )
+from vllm.model_executor.layers.fused_moe.utils import (
+    is_model_fused_shared_expert_compatible,
+)
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.vocab_parallel_embedding import (
@@ -217,6 +220,9 @@ class Glm5NextMTP(nn.Module, DeepseekV2MixtureOfExperts):
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
         )
         self.set_moe_parameters()
+        self.is_fused_shared_expert_enabled = is_model_fused_shared_expert_compatible(
+            self.model.layers.values(), Glm5NextMoE, "mtp_block.mlp"
+        )
 
     def set_moe_parameters(self):
         self.num_moe_layers = self.config.num_nextn_predict_layers
@@ -298,12 +304,20 @@ class Glm5NextMTP(nn.Module, DeepseekV2MixtureOfExperts):
             ("wk_weights_proj", "wk", 0),
             ("wk_weights_proj", "weights_proj", 1),
         ]
+        num_fused_shared = (
+            self.config.n_shared_experts if self.is_fused_shared_expert_enabled else 0
+        )
+        if num_fused_shared > 1:
+            raise NotImplementedError(
+                "Fused shared experts load one shared expert per layer; "
+                f"the checkpoint has {num_fused_shared}."
+            )
         expert_params_mapping = fused_moe_make_expert_params_mapping(
             self,
             ckpt_gate_proj_name="gate_proj",
             ckpt_down_proj_name="down_proj",
             ckpt_up_proj_name="up_proj",
-            num_experts=self.config.n_routed_experts,
+            num_experts=self.config.n_routed_experts + num_fused_shared,
             num_redundant_experts=self.num_redundant_experts,
         )
 
@@ -328,6 +342,13 @@ class Glm5NextMTP(nn.Module, DeepseekV2MixtureOfExperts):
             if spec_layer is None:
                 continue
             name = self._rewrite_spec_layer_name(spec_layer, name)
+            if self.is_fused_shared_expert_enabled and "mlp.shared_experts." in name:
+                # The fused MoE holds the shared expert in the slot after the
+                # routed ones.
+                name = name.replace(
+                    "mlp.shared_experts.",
+                    f"mlp.experts.{self.config.n_routed_experts}.",
+                )
 
             if _try_load_fp8_indexer_wk(
                 name,

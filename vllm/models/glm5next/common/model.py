@@ -23,6 +23,10 @@ from vllm.model_executor.layers.fused_moe import (
     GateLinear,
     fused_moe_make_expert_params_mapping,
 )
+from vllm.model_executor.layers.fused_moe.utils import (
+    is_model_fused_shared_expert_compatible,
+    resolve_layer_fused_shared_expert,
+)
 from vllm.model_executor.layers.fusion.mm_input_norm import build_mm_input_norm
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
@@ -258,7 +262,12 @@ class Glm5NextMoE(nn.Module):
         )
 
         swiglu_limit = config.swiglu_limit
-        if config.n_shared_experts is None:
+        self.is_fused_shared_expert_enabled = False
+        if config.n_shared_experts is not None:
+            self.is_fused_shared_expert_enabled = resolve_layer_fused_shared_expert(
+                quant_config, prefix
+            )
+        if config.n_shared_experts is None or self.is_fused_shared_expert_enabled:
             self.shared_experts = None
         else:
             intermediate_size = config.moe_intermediate_size * config.n_shared_experts
@@ -294,7 +303,10 @@ class Glm5NextMoE(nn.Module):
             enable_eplb=self.enable_eplb,
             num_redundant_experts=self.n_redundant_experts,
             is_sequence_parallel=self.is_sequence_parallel,
-            n_shared_experts=None,
+            n_shared_experts=config.n_shared_experts
+            if self.is_fused_shared_expert_enabled
+            else None,
+            fuse_shared_experts=self.is_fused_shared_expert_enabled,
             router_logits_dtype=self.gate.out_dtype,
             swiglu_limit=swiglu_limit,
         )
@@ -733,6 +745,9 @@ class Glm5NextModel(nn.Module):
         # The active slice is fixed after construction; cache it so forward
         # doesn't rebuild the slice (a fresh list) every step.
         self._active_layers = self.layers[self.start_layer : self.end_layer]
+        self.is_fused_shared_expert_enabled = is_model_fused_shared_expert_compatible(
+            self.layers, Glm5NextMoE, "mlp"
+        )
 
         if get_pp_group().is_last_rank:
             self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
@@ -834,12 +849,22 @@ class Glm5NextModel(nn.Module):
                 ),
                 0,
             )
+            num_fused_shared = (
+                self.config.n_shared_experts
+                if self.is_fused_shared_expert_enabled
+                else 0
+            )
+            if num_fused_shared > 1:
+                raise NotImplementedError(
+                    "Fused shared experts load one shared expert per layer; "
+                    f"the checkpoint has {num_fused_shared}."
+                )
             expert_params_mapping = fused_moe_make_expert_params_mapping(
                 self,
                 ckpt_gate_proj_name="gate_proj",
                 ckpt_down_proj_name="down_proj",
                 ckpt_up_proj_name="up_proj",
-                num_experts=self.config.n_routed_experts,
+                num_experts=self.config.n_routed_experts + num_fused_shared,
                 num_redundant_experts=num_redundant_experts,
             )
         else:
@@ -868,6 +893,13 @@ class Glm5NextModel(nn.Module):
                 # Models trained using ColossalAI may include these tensors in
                 # the checkpoint. Skip them.
                 continue
+            if self.is_fused_shared_expert_enabled and "mlp.shared_experts." in name:
+                # The fused MoE holds the shared expert in the slot after the
+                # routed ones.
+                name = name.replace(
+                    "mlp.shared_experts.",
+                    f"mlp.experts.{self.config.n_routed_experts}.",
+                )
 
             # Handle FP8 indexer WK: dequantize to BF16 for fusion with
             # weights_proj into wk_weights_proj.
