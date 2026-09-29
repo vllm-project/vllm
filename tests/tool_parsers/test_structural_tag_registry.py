@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import json
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -15,6 +16,17 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionToolsParam,
 )
 from vllm.parser.abstract_parser import DelegatingParser
+from vllm.parser.plamo3 import (
+    BEGIN_TOOL_ARGUMENTS,
+    BEGIN_TOOL_NAME,
+    BEGIN_TOOL_REQUEST,
+    BEGIN_TOOL_REQUESTS,
+    END_TOOL_ARGUMENTS,
+    END_TOOL_NAME,
+    END_TOOL_REQUEST,
+    END_TOOL_REQUESTS,
+    EOT,
+)
 from vllm.tool_parsers.abstract_tool_parser import ToolParser
 from vllm.tool_parsers.deepseekv3_tool_parser import DeepSeekV3ToolParser
 from vllm.tool_parsers.deepseekv4_engine_tool_parser import DeepSeekV4EngineToolParser
@@ -22,20 +34,24 @@ from vllm.tool_parsers.deepseekv31_tool_parser import DeepSeekV31ToolParser
 from vllm.tool_parsers.deepseekv32_engine_tool_parser import (
     DeepSeekV32EngineToolParser,
 )
+from vllm.tool_parsers.deepseekv41_engine_tool_parser import DeepSeekV41EngineToolParser
 from vllm.tool_parsers.glm47_moe_tool_parser import Glm47MoeModelToolParser
 from vllm.tool_parsers.hermes_tool_parser import Hermes2ProToolParser
 from vllm.tool_parsers.kimi_k2_tool_parser import KimiK2ToolParser
 from vllm.tool_parsers.kimi_k3_tool_parser import KimiK3ToolParser
 from vllm.tool_parsers.llama_tool_parser import Llama3JsonToolParser
 from vllm.tool_parsers.minimax_m2_tool_parser import MinimaxM2ToolParser
+from vllm.tool_parsers.plamo3_engine_tool_parser import Plamo3EngineToolParser
 from vllm.tool_parsers.qwen3_engine_tool_parser import Qwen3EngineToolParser
 from vllm.tool_parsers.structural_tag_registry import (
     SUPPORTED_STRUCTURAL_TAG_MODELS,
     VLLM_BUILTIN_STRUCTURAL_TAG_MODELS,
     XGRAMMAR_BUILTIN_STRUCTURAL_TAG_MODELS,
+    ToolChoice,
     get_function_parameters,
     get_model_structural_tag,
 )
+from vllm.tool_parsers.tool_strict_level import ToolStrictLevel
 
 
 @pytest.fixture
@@ -80,6 +96,90 @@ def test_supported_structural_tag_models_include_vllm_builtins():
     assert "hermes" in VLLM_BUILTIN_STRUCTURAL_TAG_MODELS
 
 
+def test_deepseek_v41_named_choice_emits_one_call(sample_tools):
+    tag = get_model_structural_tag(
+        "deepseek_v4_1",
+        sample_tools,
+        ChatCompletionNamedToolChoiceParam(
+            function=ChatCompletionNamedFunction(name="get_weather")
+        ),
+        reasoning=False,
+    )
+    grammar = Grammar.from_structural_tag(tag)
+    call = (
+        '<｜DSML｜ invoke name="get_weather">\n'
+        '<｜DSML｜ parameter name="city" string="true">Paris</｜DSML｜ parameter>\n'
+        "</｜DSML｜ invoke>\n"
+    )
+    assert _is_grammar_accept_string(
+        grammar, "\n\n<｜DSML｜ calls>\n" + call + "</｜DSML｜ calls>"
+    )
+    assert not _is_grammar_accept_string(
+        grammar, "\n\n<｜DSML｜ calls>\n" + call * 2 + "</｜DSML｜ calls>"
+    )
+    assert (
+        get_model_structural_tag("deepseek_v4_1", sample_tools, "auto", reasoning=False)
+        is None
+    )
+
+
+@pytest.mark.parametrize("choice", ["auto", "required", "get_weather"])
+def test_deepseek_v41_constrains_parameters_after_reasoning(
+    sample_tools_strict, choice
+):
+    """Strict calls must enforce the schema without requiring another think close."""
+    tool_choice = (
+        ChatCompletionNamedToolChoiceParam(
+            function=ChatCompletionNamedFunction(name=choice)
+        )
+        if choice == "get_weather"
+        else choice
+    )
+    sample_tools_strict[0].function.parameters["additionalProperties"] = False
+    tag = get_model_structural_tag(
+        "deepseek_v4_1", sample_tools_strict, tool_choice, reasoning=False
+    )
+    grammar = Grammar.from_structural_tag(tag)
+    begin = '\n\n<｜DSML｜ calls>\n<｜DSML｜ invoke name="get_weather">\n'
+    end = "</｜DSML｜ invoke>\n</｜DSML｜ calls>"
+    parameter = (
+        '<｜DSML｜ parameter name="city" string="true">Paris</｜DSML｜ parameter>\n'
+    )
+    assert _is_grammar_accept_string(grammar, begin + parameter + end)
+    for invalid in (
+        "",  # missing required city
+        parameter * 2,
+        parameter.replace('name="city"', 'name="unknown"'),
+        parameter.replace('string="true">Paris', 'string="false">42'),
+        parameter.replace("｜ parameter", "｜parameter"),
+        '{"city":"Paris"}',  # the encoder emits DSML parameters, not a JSON body
+    ):
+        assert not _is_grammar_accept_string(grammar, begin + invalid + end)
+    assert not _is_grammar_accept_string(
+        grammar, "reason</think>" + begin + parameter + end
+    )
+    assert _is_grammar_accept_string(grammar, "Hello") == (choice == "auto")
+
+
+def test_deepseek_v41_non_strict_parallel_calls_keep_typed_dsml(sample_tools):
+    sample_tools[0].function.strict = False
+    tag = get_model_structural_tag(
+        "deepseek_v4_1", sample_tools, "required", reasoning=False
+    )
+    grammar = Grammar.from_structural_tag(tag)
+    call = (
+        '<｜DSML｜ invoke name="get_weather">\n'
+        '<｜DSML｜ parameter name="extra" string="false">'
+        '{"nested":[true,null,1.5]}</｜DSML｜ parameter>\n'
+        "</｜DSML｜ invoke>\n"
+    )
+    output = "\n\n<｜DSML｜ calls>\n" + call * 2 + "</｜DSML｜ calls>"
+    assert _is_grammar_accept_string(grammar, output)
+    assert not _is_grammar_accept_string(
+        grammar, output.replace('{"nested":[true,null,1.5]}', "invalid")
+    )
+
+
 @pytest.mark.parametrize("model", sorted(XGRAMMAR_BUILTIN_STRUCTURAL_TAG_MODELS))
 def test_get_model_structural_tag_supports_all_xgrammar_builtins(
     model: str,
@@ -96,11 +196,11 @@ def test_get_model_structural_tag_supports_all_xgrammar_builtins(
 
 
 def test_get_model_structural_tag_supports_vllm_hermes(
-    sample_tools: list[ChatCompletionToolsParam],
+    sample_tools_strict: list[ChatCompletionToolsParam],
 ):
     tag = get_model_structural_tag(
         model="hermes",
-        tools=sample_tools,
+        tools=sample_tools_strict,
         tool_choice="required",
         reasoning=False,
     )
@@ -138,6 +238,22 @@ def test_get_model_structural_tag_supports_vllm_hermes(
         assert content["json_schema"] == expected_schema
 
 
+def test_hermes_required_without_strict_leaves_arguments_free(
+    sample_tools: list[ChatCompletionToolsParam],
+):
+    tag = get_model_structural_tag(
+        model="hermes",
+        tools=sample_tools,
+        tool_choice="required",
+        reasoning=False,
+    )
+
+    assert isinstance(tag, StructuralTag)
+    tags = tag.model_dump()["format"]["tags"]
+    assert tags
+    assert all(tag_dump["content"]["json_schema"] is True for tag_dump in tags)
+
+
 def test_hermes_required_tool_calls_use_empty_separator():
     tools = [
         ChatCompletionToolsParam(
@@ -165,6 +281,131 @@ def test_hermes_required_tool_calls_use_empty_separator():
 
     assert tag is not None
     assert tag.format.separator == ""
+
+
+def _plamo3_call(name: str, arguments: str) -> str:
+    return (
+        BEGIN_TOOL_REQUEST
+        + BEGIN_TOOL_NAME
+        + name
+        + END_TOOL_NAME
+        + BEGIN_TOOL_ARGUMENTS
+        + arguments
+        + END_TOOL_ARGUMENTS
+        + END_TOOL_REQUEST
+    )
+
+
+def _plamo3_requests(*calls: str, eot: bool = False) -> str:
+    return (
+        BEGIN_TOOL_REQUESTS + "".join(calls) + END_TOOL_REQUESTS + (EOT if eot else "")
+    )
+
+
+def _plamo3_grammar(tool_choice, tools):
+    tag = get_model_structural_tag(
+        model="plamo3",
+        tools=tools,
+        tool_choice=tool_choice,
+        reasoning=False,
+    )
+    assert isinstance(tag, StructuralTag)
+    return Grammar.from_structural_tag(tag)
+
+
+def _plamo3_tools() -> list[ChatCompletionToolsParam]:
+    return [
+        ChatCompletionToolsParam(
+            type="function",
+            function={
+                "name": "get_weather",
+                "strict": True,
+                "parameters": {
+                    "type": "object",
+                    "properties": {"city": {"type": "string"}},
+                    "required": ["city"],
+                },
+            },
+        ),
+        ChatCompletionToolsParam(
+            type="function",
+            function={
+                "name": "get_time",
+                "strict": True,
+                "parameters": {
+                    "type": "object",
+                    "properties": {"timezone": {"type": "string"}},
+                    "required": ["timezone"],
+                },
+            },
+        ),
+    ]
+
+
+def test_plamo3_registered_as_vllm_structural_tag_model():
+    assert "plamo3" in VLLM_BUILTIN_STRUCTURAL_TAG_MODELS
+    assert Plamo3EngineToolParser.structural_tag_model == "plamo3"
+    assert Plamo3EngineToolParser.supports_required_and_named is False
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        _plamo3_requests(_plamo3_call("get_weather", '{"city":"Tokyo"}')),
+        _plamo3_requests(
+            _plamo3_call("get_weather", '{"city":"Tokyo"}'),
+            _plamo3_call("get_time", '{"timezone":"Asia/Tokyo"}'),
+            eot=True,
+        ),
+    ],
+)
+def test_plamo3_required_accepts_complete_request_blocks(body: str):
+    assert _is_grammar_accept_string(_plamo3_grammar("required", _plamo3_tools()), body)
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        _plamo3_requests(_plamo3_call("unknown", '{"city":"Tokyo"}')),
+        _plamo3_requests(_plamo3_call("get_weather", "{}")),
+        BEGIN_TOOL_REQUESTS + _plamo3_call("get_weather", '{"city":"Tokyo"}'),
+    ],
+)
+def test_plamo3_required_rejects_invalid_request_blocks(body: str):
+    assert not _is_grammar_accept_string(
+        _plamo3_grammar("required", _plamo3_tools()),
+        body,
+    )
+
+
+def test_plamo3_auto_allows_text_or_a_tool_request_block(sample_tools_strict):
+    grammar = _plamo3_grammar("auto", sample_tools_strict)
+
+    assert _is_grammar_accept_string(grammar, "Plain response")
+    assert _is_grammar_accept_string(
+        grammar,
+        _plamo3_requests(_plamo3_call("get_weather", '{"city":"Tokyo"}')),
+    )
+
+
+def test_plamo3_forced_stops_after_the_named_tool_call():
+    tools = _plamo3_tools()
+    tool_choice = ChatCompletionNamedToolChoiceParam(
+        function=ChatCompletionNamedFunction(name="get_weather")
+    )
+    grammar = _plamo3_grammar(tool_choice, tools)
+
+    assert _is_grammar_accept_string(
+        grammar,
+        _plamo3_requests(_plamo3_call("get_weather", '{"city":"Tokyo"}')),
+    )
+    assert not _is_grammar_accept_string(
+        grammar,
+        _plamo3_requests(
+            _plamo3_call("get_weather", '{"city":"Tokyo"}'),
+            _plamo3_call("get_time", '{"timezone":"Asia/Tokyo"}'),
+        ),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -226,10 +467,19 @@ def _k3_tools(*calls: str) -> str:
     return f"{_K3_TOOLS_OPEN}{''.join(calls)}{_K3_TOOLS_CLOSE}"
 
 
-def _k3_grammar(tool_choice, tools=None):
+def _as_strict(tools: list[ChatCompletionToolsParam]) -> list[ChatCompletionToolsParam]:
+    for tool in tools:
+        tool.function.strict = True
+    return tools
+
+
+def _k3_grammar(tool_choice, tools=None, *, strict: bool = True):
+    """Build the K3 grammar; tools are strict by default so the typed
+    argument channel is exercised (an unset ``strict`` leaves arguments free)."""
+    tools = tools if tools is not None else _k3_tools_by_name()
     tag = get_model_structural_tag(
         model="kimi_k3",
-        tools=tools if tools is not None else _k3_tools_by_name(),
+        tools=_as_strict(tools) if strict else tools,
         tool_choice=tool_choice,
         reasoning=False,
     )
@@ -332,6 +582,18 @@ def test_kimi_k3_required_rejects_invalid(body: str):
     assert not _is_grammar_accept_string(_k3_grammar("required"), body)
 
 
+def test_kimi_k3_required_without_strict_leaves_arguments_free():
+    # An unset ``strict`` pins the call envelope only: a value the schema
+    # would reject is accepted, and the declared-required argument may be
+    # omitted.
+    grammar = _k3_grammar("required", strict=False)
+    body = _k3_response() + _k3_tools(
+        _k3_call("get_weather", _k3_arg("days", "number", "abc"))
+    )
+    assert _is_grammar_accept_string(grammar, body)
+    assert not _is_grammar_accept_string(_k3_grammar("required"), body)
+
+
 def test_kimi_k3_schema_without_required_accepts_empty_call():
     tools = [
         ChatCompletionToolsParam(
@@ -396,6 +658,7 @@ def test_get_model_structural_tag_supports_named_tool_choice(
         (DeepSeekV31ToolParser, "deepseek_v3_1"),
         (DeepSeekV32EngineToolParser, "deepseek_v3_2"),
         (DeepSeekV4EngineToolParser, "deepseek_v4"),
+        (DeepSeekV41EngineToolParser, "deepseek_v4_1"),
         (Glm47MoeModelToolParser, "glm_4_7"),
         (Hermes2ProToolParser, "hermes"),
         (KimiK2ToolParser, "kimi"),
@@ -463,7 +726,11 @@ def test_get_structural_tag_disables_reasoning(
     assert captured == [False]
 
 
+@pytest.mark.parametrize(
+    "parser_cls", [Qwen3EngineToolParser, DeepSeekV41EngineToolParser]
+)
 def test_unified_parser_get_structural_tag_disables_reasoning(
+    parser_cls,
     monkeypatch: pytest.MonkeyPatch,
     sample_tools_strict: list[ChatCompletionToolsParam],
 ):
@@ -479,7 +746,7 @@ def test_unified_parser_get_structural_tag_disables_reasoning(
     )
 
     class TestParser(DelegatingParser):
-        tool_parser_cls = Qwen3EngineToolParser
+        tool_parser_cls = parser_cls
 
     request = ChatCompletionRequest(
         messages=[],
@@ -488,7 +755,7 @@ def test_unified_parser_get_structural_tag_disables_reasoning(
         tool_choice="auto",
     )
     parser = TestParser(MagicMock(), tools=sample_tools_strict)
-    parser.reasoning_parser = MagicMock(adjust_request=lambda request: request)
+    parser._reasoning_parser = MagicMock(adjust_request=lambda request: request)
 
     parser.adjust_request(request)
 
@@ -694,3 +961,209 @@ def test_kimi_k3_forced_tool_choice_builds_single_mandatory_call():
     response_only = _k3_response("no call here")
     assert _is_grammar_accept_string(grammar, ok)
     assert not _is_grammar_accept_string(grammar, response_only)
+
+
+def _pins_argument_schema(tag: StructuralTag) -> bool:
+    return '"json_schema": {' in json.dumps(tag.model_dump(), ensure_ascii=False)
+
+
+def _dumped(tag: StructuralTag) -> str:
+    return json.dumps(tag.model_dump(), ensure_ascii=False)
+
+
+def test_tool_strict_level_auto_is_the_default(
+    sample_tools: list[ChatCompletionToolsParam],
+):
+    """Auto + no strict tool gets no tag unless the operator raises the floor."""
+    assert (
+        get_model_structural_tag(
+            model="deepseek_v4",
+            tools=sample_tools,
+            tool_choice="auto",
+            reasoning=False,
+        )
+        is None
+    )
+
+
+@pytest.mark.parametrize("model", sorted(SUPPORTED_STRUCTURAL_TAG_MODELS))
+def test_tool_strict_level_function_lifts_auto_gate(
+    model: str,
+    sample_tools: list[ChatCompletionToolsParam],
+):
+    tag = get_model_structural_tag(
+        model=model,
+        tools=sample_tools,
+        tool_choice="auto",
+        reasoning=False,
+        strict_level=ToolStrictLevel.FUNCTION,
+    )
+
+    assert tag is not None
+
+
+@pytest.mark.parametrize("model", sorted(XGRAMMAR_BUILTIN_STRUCTURAL_TAG_MODELS))
+def test_tool_strict_level_function_pins_envelope_only(
+    model: str,
+    sample_tools: list[ChatCompletionToolsParam],
+):
+    """The request's own tools stay untouched; unset ``strict`` stays free."""
+    tag = get_model_structural_tag(
+        model=model,
+        tools=sample_tools,
+        tool_choice="auto",
+        reasoning=False,
+        strict_level=ToolStrictLevel.FUNCTION,
+    )
+
+    assert tag is not None
+    assert not _pins_argument_schema(tag)
+    assert all(tool.function.strict is None for tool in sample_tools)
+
+
+@pytest.mark.parametrize("model", sorted(XGRAMMAR_BUILTIN_STRUCTURAL_TAG_MODELS))
+def test_tool_strict_level_parameter_pins_argument_schemas(
+    model: str,
+    sample_tools: list[ChatCompletionToolsParam],
+):
+    tag = get_model_structural_tag(
+        model=model,
+        tools=sample_tools,
+        tool_choice="auto",
+        reasoning=False,
+        strict_level=ToolStrictLevel.PARAMETER,
+    )
+
+    assert tag is not None
+    assert _pins_argument_schema(tag)
+
+
+def test_tool_strict_level_function_keeps_client_strict_tools_strict(
+    sample_tools_strict: list[ChatCompletionToolsParam],
+):
+    tag = get_model_structural_tag(
+        model="deepseek_v4",
+        tools=sample_tools_strict,
+        tool_choice="auto",
+        reasoning=False,
+        strict_level=ToolStrictLevel.FUNCTION,
+    )
+
+    assert tag is not None
+    assert _pins_argument_schema(tag)
+
+
+@pytest.mark.parametrize("model", sorted(XGRAMMAR_BUILTIN_STRUCTURAL_TAG_MODELS))
+def test_absent_strict_is_not_pinned_next_to_a_strict_tool(model: str):
+    """A strict tool must not drag a neighbour with unset ``strict`` into
+    schema enforcement."""
+    weather = ChatCompletionToolsParam(
+        type="function",
+        function={
+            "name": "get_weather",
+            "strict": True,
+            "parameters": {
+                "type": "object",
+                "properties": {"city": {"type": "string"}},
+                "required": ["city"],
+            },
+        },
+    )
+    search = ChatCompletionToolsParam(
+        type="function",
+        function={
+            "name": "search",
+            "parameters": {
+                "type": "object",
+                "properties": {"query": {"type": "string"}},
+                "required": ["query"],
+            },
+        },
+    )
+    tag = get_model_structural_tag(
+        model=model,
+        tools=[weather, search],
+        tool_choice="auto",
+        reasoning=False,
+    )
+
+    assert tag is not None
+    dumped = _dumped(tag)
+    assert '"city"' in dumped
+    assert '"query"' not in dumped
+
+
+@pytest.mark.parametrize(
+    "tool_choice",
+    [
+        "required",
+        ChatCompletionNamedToolChoiceParam(
+            function=ChatCompletionNamedFunction(name="get_weather")
+        ),
+    ],
+)
+@pytest.mark.parametrize("model", sorted(XGRAMMAR_BUILTIN_STRUCTURAL_TAG_MODELS))
+def test_forced_tool_choice_pins_schema_only_for_strict_tools(
+    model: str,
+    tool_choice: ToolChoice,
+    sample_tools: list[ChatCompletionToolsParam],
+    sample_tools_strict: list[ChatCompletionToolsParam],
+):
+    """Required / named always constrain the call; the argument schema
+    follows the per-tool ``strict`` (or the parameter level)."""
+    free = get_model_structural_tag(
+        model=model,
+        tools=sample_tools,
+        tool_choice=tool_choice,
+        reasoning=False,
+        strict_level=ToolStrictLevel.FUNCTION,
+    )
+    pinned = get_model_structural_tag(
+        model=model,
+        tools=sample_tools_strict,
+        tool_choice=tool_choice,
+        reasoning=False,
+    )
+    floored = get_model_structural_tag(
+        model=model,
+        tools=sample_tools,
+        tool_choice=tool_choice,
+        reasoning=False,
+        strict_level=ToolStrictLevel.PARAMETER,
+    )
+
+    assert free is not None and not _pins_argument_schema(free)
+    assert pinned is not None and _pins_argument_schema(pinned)
+    assert floored is not None and _pins_argument_schema(floored)
+
+
+def test_tool_strict_level_parameter_overrides_client_strict_false():
+    tools = [
+        ChatCompletionToolsParam(
+            type="function",
+            function={
+                "name": "get_weather",
+                "parameters": {"type": "object", "properties": {}},
+                "strict": False,
+            },
+        )
+    ]
+    tag = get_model_structural_tag(
+        model="deepseek_v4",
+        tools=tools,
+        tool_choice="required",
+        reasoning=False,
+        strict_level=ToolStrictLevel.PARAMETER,
+    )
+
+    assert tag is not None
+    assert _pins_argument_schema(tag)
+
+
+def test_tool_strict_level_from_name():
+    assert ToolStrictLevel.from_name("AUTO") is ToolStrictLevel.AUTO
+    assert ToolStrictLevel.from_name("Parameter") is ToolStrictLevel.PARAMETER
+    with pytest.raises(ValueError, match="expected one of auto, function, parameter"):
+        ToolStrictLevel.from_name("strict")
+    with pytest.raises(ValueError, match="expected one of auto, function, parameter"):
+        ToolStrictLevel.from_name("off")

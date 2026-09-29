@@ -109,18 +109,22 @@ vLLM supports the `tool_choice='none'` option in the chat completion API. When t
 
 ## Constrained Decoding Behavior
 
-Whether vLLM enforces the tool parameter schema during generation depends on the `tool_choice` mode and the per-tool `strict` field:
+Structural-tag parsers resolve call obligation, grammar activation, and argument-schema enforcement separately. With structural-tag enforcement enabled:
 
-| `tool_choice` value | Schema-constrained decoding | Behavior |
+| `tool_choice` value | Call obligation | Structural-tag activation |
 | --- | --- | --- |
-| Named function | Yes (via structured outputs backend) | Arguments are guaranteed to be valid JSON conforming to the function's parameter schema. |
-| `"required"` | Yes (via structured outputs backend) | Same as named function. The model must produce at least one tool call. |
-| `"auto"` | Only when `strict: true` is set on at least one tool | Structural-tag parsers constrain tool-call arguments when a tool opts in with `strict: true`. Without it, the model generates freely and tool calls are extracted from raw text. |
-| `"none"` | N/A | No tool calls are produced. |
+| Named function | Call the selected function | Always |
+| `"required"` | Produce at least one tool call | Always |
+| `"auto"` | Tool calls are optional | When at least one tool sets `strict: true`, or `--tool-strict-level` is `function` or `parameter` |
+| `"none"` | Tool calling is disabled | Disabled |
+
+When a structural tag applies, each tool's declared parameter schema is enforced only when that tool sets `strict: true` or the server uses `--tool-strict-level parameter`. Tools with omitted or false `strict` receive broad argument-syntax constraints at levels `auto` and `function`, including for required and named calls.
+
+For parsers using schema-derived JSON constraints, required and named calls continue to enforce the declared parameter schemas.
 
 ### Strict Mode
 
-For `tool_choice="required"` or named function calling, structural-tag constraints are always applied regardless of the `strict` field. For `tool_choice="auto"`, setting `strict: true` on at least one tool opts in to structural-tag constraints; without it, the model generates freely and tool calls are extracted from raw text. The `strict` field is supported across all three API surfaces: Chat Completion, Responses, and Anthropic Messages.
+Structural-tag constraints have two layers. The tool-call *envelope* (markup and function name) is constrained whenever a structural tag applies: always for `tool_choice="required"` and named function calling, and for `tool_choice="auto"` once at least one tool sets `strict: true` or the server raises the floor. The *argument schema* of an individual tool is pinned only when that tool sets `strict: true` (or under `--tool-strict-level parameter`); a tool that omits `strict` keeps its arguments unconstrained, even when another tool in the same request is strict. The `strict` field is supported across all three API surfaces: Chat Completion, Responses, and Anthropic Messages.
 
 For best compatibility with strict schema enforcement, define tool parameter schemas in the OpenAI strict-schema style:
 
@@ -133,6 +137,22 @@ vLLM also provides a global toggle via the `VLLM_ENFORCE_STRICT_TOOL_CALLING` en
 ```bash
 VLLM_ENFORCE_STRICT_TOOL_CALLING=false vllm serve ...
 ```
+
+### Server-Side Strictness Floor
+
+Most OpenAI-compatible clients and agent frameworks never set `strict` on their tools, so with `tool_choice="auto"` the model generates tool calls without any grammar and malformed markup can leak into the response. The `--tool-strict-level` option lets the server operator raise the floor for every request that carries tools, independently of what the client declares:
+
+| Value | Behavior |
+| --- | --- |
+| `auto` (default) | Follow the request's tool choice and per-tool strictness. Required/named choices activate structural tags; `tool_choice="auto"` activates them when at least one tool sets `strict: true`. |
+| `function` | Constrain the tool-call envelope (markup and the function name) for every request with tools, leaving argument contents free unless the client marked the tool `strict: true`. |
+| `parameter` | Additionally pin argument schemas for every tool, as if every tool had `strict: true`. |
+
+```bash
+vllm serve ... --tool-strict-level function
+```
+
+The floor never relaxes a constraint the request would already receive: tools the client marked `strict: true` keep their schemas at every level. With `tool_choice="auto"`, the grammar does not force a tool call; a plain text response stays valid. `VLLM_ENFORCE_STRICT_TOOL_CALLING=false` disables structural tags entirely and takes precedence over this option.
 
 ## Automatic Function Calling
 
@@ -152,7 +172,7 @@ from HuggingFace; and you can find an example of this in a `tokenizer_config.jso
 If your favorite tool-calling model is not supported, please feel free to contribute a parser & tool use chat template!
 
 !!! note
-    With `tool_choice="auto"`, schema-level constraint requires both `VLLM_ENFORCE_STRICT_TOOL_CALLING=true` (the default) and at least one tool with `strict: true`. When these conditions are met and the selected parser supports structural tags, vLLM constrains tool-call arguments. Otherwise, vLLM extracts tool calls from raw text, so arguments may occasionally be malformed or violate the function's parameter schema.
+    With `tool_choice="auto"`, structural-tag constraints require both `VLLM_ENFORCE_STRICT_TOOL_CALLING=true` (the default) and at least one tool with `strict: true`, or a server-side floor set via `--tool-strict-level`. When these conditions are met and the selected parser supports structural tags, vLLM constrains the tool-call envelope and pins the argument schema of each tool that sets `strict: true` (or of every tool under `--tool-strict-level parameter`). Otherwise, vLLM extracts tool calls from raw text, so arguments may occasionally be malformed or violate the function's parameter schema.
 
 ### Hermes Models (`hermes`)
 
@@ -162,8 +182,8 @@ All Nous Research Hermes-series models newer than Hermes 2 Pro should be support
 * `NousResearch/Hermes-2-Theta-*`
 * `NousResearch/Hermes-3-*`
 
-_Note that the Hermes 2 **Theta** models are known to have degraded tool call quality and capabilities due to the merge
-step in their creation_.
+*Note that the Hermes 2 **Theta** models are known to have degraded tool call quality and capabilities due to the merge
+step in their creation*.
 
 Flags: `--tool-call-parser hermes`
 
@@ -366,15 +386,16 @@ Flags:
 * For non-reasoning: `--tool-call-parser hunyuan_a13b`
 * For reasoning: `--tool-call-parser hunyuan_a13b --reasoning-parser hunyuan_a13b`
 
-### Cohere Command A Reasoning (`cohere_command3`)
+### Cohere Command (`cohere_command3` / `cohere_command4`)
 
 Supported models:
 
-* [`CohereLabs/command-a-reasoning-08-2025`](https://huggingface.co/CohereLabs/command-a-reasoning-08-2025)
+* [`CohereLabs/command-a-reasoning-08-2025`](https://huggingface.co/CohereLabs/command-a-reasoning-08-2025) (`cohere_command3`)
+* [`CohereLabs/command-a-plus-05-2026`](https://huggingface.co/CohereLabs/command-a-plus-05-2026-bf16) and [`CohereLabs/North-Mini-Code-1.0`](https://huggingface.co/CohereLabs/North-Mini-Code-1.0) (`cohere_command4`)
 
-Flags: `--tool-call-parser cohere_command3 --reasoning-parser cohere_command3`
+Flags: `--tool-call-parser cohere_command4 --reasoning-parser cohere_command4`.
 
-Note: the Cohere tool parser requires the `cohere_melody` package, which is not installed by default. Before using this parser please install the [cohere_melody](https://pypi.org/project/cohere-melody/) package.
+Note: the Cohere parser requires the `cohere_melody` package, which is not installed by default. Before using this parser please install the [cohere_melody](https://pypi.org/project/cohere-melody/) package.
 
 ### LongCat-Flash-Chat Models (`longcat`)
 

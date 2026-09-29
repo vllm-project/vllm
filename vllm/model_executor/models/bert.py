@@ -25,7 +25,6 @@ from vllm.model_executor.layers.pooler import (
     Pooler,
     PoolingParamsUpdate,
 )
-from vllm.model_executor.layers.pooler.activations import LambdaPoolerActivation
 from vllm.model_executor.layers.pooler.seqwise import (
     EmbeddingPoolerHead,
     SequencePooler,
@@ -116,11 +115,11 @@ class BertPooler(SequencePooler):
         )
         self.act_fn = nn.Tanh()
 
+        # Keep the model's head layers even when output activation is disabled.
         # Use lambdas so that weights are not registered under `self.head`
         self.head = EmbeddingPoolerHead(
             head_dtype=head_dtype,
-            projector=lambda x: self.dense(x),
-            activation=LambdaPoolerActivation(self.act_fn),
+            projector=lambda x: self.act_fn(self.dense(x)),
         )
 
 
@@ -458,6 +457,7 @@ class BertEmbeddingModel(nn.Module, SupportsQuant):
     Attributes:
         model: An instance of BertModel used for forward operations.
         _pooler: An instance of Pooler used for pooling operations.
+
     """
 
     is_pooling_model = True
@@ -575,8 +575,7 @@ class BertMLMHead(nn.Module):
 
 
 class SPLADESparsePooler(Pooler):
-    """
-    SPLADE sparse pooling:
+    """SPLADE sparse pooling:
     logits = mlm_head(hidden_states)
             -> log1p(relu(logits))
             -> (max|sum over L)
@@ -664,8 +663,7 @@ class SPLADESparsePooler(Pooler):
 
 @default_pooling_type(seq_pooling_type="CLS")
 class BertSpladeSparseEmbeddingModel(BertEmbeddingModel):
-    """
-    BertEmbeddingModel + SPLADE sparse embedding.
+    """BertEmbeddingModel + SPLADE sparse embedding.
     - Make logits by self.mlm_head
     - pooler: SPLADESparsePooler(mlm_head...)
     """
@@ -779,6 +777,7 @@ class BertForSequenceClassification(nn.Module, SupportsCrossEncoding, SupportsQu
     Attributes:
         model: An instance of BertModel used for forward operations.
         _pooler: An instance of Pooler used for pooling operations.
+
     """
 
     is_pooling_model = True

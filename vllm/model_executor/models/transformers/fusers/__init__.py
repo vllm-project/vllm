@@ -9,6 +9,9 @@ from vllm.model_executor.models.transformers.fusers.base import (
     StackedFuser,
 )
 from vllm.model_executor.models.transformers.fusers.glu import GLUFuser
+from vllm.model_executor.models.transformers.fusers.merged_column import (
+    MergedColumnParallelFuser,
+)
 from vllm.model_executor.models.transformers.fusers.mla import MLAFuser
 from vllm.model_executor.models.transformers.fusers.moe import MoEBlockFuser
 from vllm.model_executor.models.transformers.fusers.packed_qkv import PackedQKVFuser
@@ -21,6 +24,7 @@ __all__ = [
     "RewriteFuser",
     "StackedFuser",
     "GLUFuser",
+    "MergedColumnParallelFuser",
     "MLAFuser",
     "MoEBlockFuser",
     "PackedQKVFuser",
