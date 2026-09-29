@@ -5,11 +5,9 @@
 Run `pytest tests/quantization/test_fp8.py --forked`.
 """
 
-import logging
 from types import SimpleNamespace
 
 import pytest
-import regex as re
 import torch
 
 from tests.quantization.utils import (
@@ -22,9 +20,6 @@ from vllm.config.cache import CacheConfig
 from vllm.config.kernel import KernelConfig
 from vllm.config.model import ModelConfig
 from vllm.forward_context import set_forward_context
-from vllm.model_executor.kernels.linear.scaled_mm import (
-    MarlinFP8ScaledMMLinearKernel,
-)
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.attention.attention import (
     set_default_quant_scales,
@@ -32,15 +27,11 @@ from vllm.model_executor.layers.attention.attention import (
 from vllm.model_executor.layers.fused_moe import FusedMoEFactory
 from vllm.model_executor.layers.quantization.fp8 import (
     Fp8Config,
-    Fp8KVCacheMethod,
     Fp8LinearMethod,
     Fp8MoEMethod,
 )
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
 from vllm.model_executor.layers.quantization.modelopt import ModelOptLinearMethod
-from vllm.model_executor.layers.quantization.online.fp8 import (
-    Fp8PerTensorOnlineLinearMethod,
-)
 from vllm.model_executor.layers.quantization.utils import flashinfer_utils
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     prepare_fp8_moe_layer_for_fi,
@@ -77,8 +68,8 @@ def test_deepseek_v41_mxfp8_scale_loading(
         MergedColumnParallelLinear,
         RowParallelLinear,
     )
-    from vllm.models.deepseek_v4_1 import quant_config as quant_module
-    from vllm.models.deepseek_v4_1.nvidia import model as model_module
+    from vllm.models.deepseek_v41 import quant_config as quant_module
+    from vllm.models.deepseek_v41.nvidia import model as model_module
 
     default_vllm_config.model_config = SimpleNamespace(dtype=torch.bfloat16)
     quant_config = quant_module.DeepseekV4FP8Config(
@@ -214,8 +205,8 @@ def test_deepseek_v41_vl_mapper_routes_linear_scales(
     """The VL wrapper must map ``.scale`` keys to the parameter the linear
     quant method registers, as the text model does. A hardcoded
     ``weight_scale_inv`` raised KeyError for native MXFP8 checkpoints."""
-    from vllm.models.deepseek_v4_1.nvidia import model as model_module
-    from vllm.models.deepseek_v4_1.nvidia import vl_model as vl_module
+    from vllm.models.deepseek_v41.nvidia import model as model_module
+    from vllm.models.deepseek_v41.nvidia import vl_model as vl_module
 
     vllm_config = SimpleNamespace(
         quant_config=SimpleNamespace(weight_block_size=weight_block_size)
@@ -235,6 +226,85 @@ def test_deepseek_v41_vl_mapper_routes_linear_scales(
         f"language_model.model.layers.0.attn.wq_a.{scale_name}",
         "language_model.model.layers.0.attn.wkv.weight",
     ]
+
+
+def test_deepseek_v41_vl_exposes_quant_mappings_on_class():
+    """``configure_quant_config`` reads both mappings off the class, before
+    ``__init__`` builds the instance mapper. Without them a Quark config's
+    per-layer keys never match this wrapper's ``language_model.``-rooted
+    prefixes and every attention shard falls back to the global spec."""
+    from vllm.models.deepseek_v41.amd.vl_model import DeepseekV41ForCausalLM
+
+    assert "fused_wqa_wkv" in DeepseekV41ForCausalLM.packed_modules_mapping
+    mapper = DeepseekV41ForCausalLM.hf_to_vllm_mapper.get_rename_mapper()
+    assert mapper.apply_list(["layers.0.attn.wq_a"]) == [
+        "language_model.model.layers.0.attn.wq_a"
+    ]
+
+
+def test_deepseek_v41_engram_scale_accepts_quark_name():
+    """Quark exports name the engram scale ``embed.weight_scale``; the
+    ``\\.scale$`` rules only match a literal ``.scale`` suffix, so without an
+    explicit rule the tensor is never routed and loading fails."""
+    from vllm.models.deepseek_v41.amd import model as model_module
+
+    mapper = model_module._make_deepseek_v4_weights_mapper("fp4", "weight_scale")
+    weight = torch.empty(0)
+    mapped = [
+        name
+        for name, _ in mapper.apply(
+            [
+                ("layers.1.engram.embed.weight_scale", weight),
+                ("layers.1.engram.embed.scale", weight),
+            ]
+        )
+    ]
+    assert mapped == [
+        "model.layers.1.engram.embed_tokens.weight_scale_inv",
+        "model.layers.1.engram.embed_tokens.weight_scale_inv",
+    ]
+
+
+def test_deepseek_v41_declines_quark_configs():
+    """``from_config`` rewrites a Quark config into a single global FP8 scheme,
+    which would discard the per-layer specs of a mixed-precision export (MXFP4
+    experts + 2-D block MXFP8 attention in DeepSeek-V4.1-Flash). QuarkConfig
+    knows how to dispatch each scheme, so it must handle every Quark export."""
+    from vllm.models.deepseek_v41.quant_config import DeepseekV4FP8Config
+
+    hf_config = SimpleNamespace(model_type="deepseek_v41")
+    mxfp4_global = {
+        "global_quant_config": {
+            "weight": {"dtype": "fp4", "qscheme": "per_group", "group_size": 32}
+        },
+        "quant_method": "quark",
+    }
+
+    assert (
+        DeepseekV4FP8Config.override_quantization_method(
+            mxfp4_global, None, hf_config=hf_config
+        )
+        is None
+    )
+
+    mixed = {
+        **mxfp4_global,
+        "layer_quant_config": {
+            "layers.0.attn.wkv": {
+                "weight": {
+                    "dtype": "fp8_e4m3",
+                    "qscheme": "per_block",
+                    "block_size": [32, 32],
+                }
+            }
+        },
+    }
+    assert (
+        DeepseekV4FP8Config.override_quantization_method(
+            mixed, None, hf_config=hf_config
+        )
+        is None
+    )
 
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="DeepGEMM requires CUDA")
@@ -318,8 +388,8 @@ def test_mxfp8_bmm_loads_and_projects_grouped_weights(
         compute_fp8_einsum_recipe,
         deep_gemm_fp8_o_proj,
     )
-    from vllm.models.deepseek_v4_1.nvidia.model import DeepseekV4Model
-    from vllm.models.deepseek_v4_1.quant_config import DeepseekV4FP8Config
+    from vllm.models.deepseek_v41.nvidia.model import DeepseekV4Model
+    from vllm.models.deepseek_v41.quant_config import DeepseekV4FP8Config
     from vllm.utils.deep_gemm import is_deep_gemm_supported
 
     if not is_deep_gemm_supported() or not current_platform.is_device_capability_family(
@@ -535,187 +605,6 @@ def test_model_load_and_run(
     not is_quant_method_supported("fp8"),
     reason="FP8 is not supported on this GPU type.",
 )
-@pytest.mark.parametrize("kv_cache_dtype", ["auto", "fp8"])
-@pytest.mark.parametrize(
-    "force_marlin", [True, False] if current_platform.is_cuda() else [False]
-)
-@pytest.mark.parametrize(
-    "use_rocm_aiter", [True, False] if current_platform.is_rocm() else [False]
-)
-def test_online_quantization(
-    vllm_runner,
-    kv_cache_dtype: str,
-    force_marlin: bool,
-    use_rocm_aiter: bool,
-    monkeypatch,
-) -> None:
-    if use_rocm_aiter:
-        monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1")
-
-    # `LLM.apply_model` requires pickling a function.
-    monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
-
-    kwargs = {}
-    if force_marlin:
-        kwargs["linear_backend"] = "marlin"
-        kwargs["moe_backend"] = "marlin"
-
-    model_dtype = "auto"
-    if kv_cache_dtype == "fp8" and current_platform.is_device_capability_family(90):
-        # FA3 requires BF16 output when the query input is FP8.
-        model_dtype = "bfloat16"
-
-    with vllm_runner(
-        "facebook/opt-125m",
-        quantization="fp8",
-        dtype=model_dtype,
-        enforce_eager=True,
-        kv_cache_dtype=kv_cache_dtype,
-        **kwargs,
-    ) as llm:
-
-        def check_model(model):
-            fc1 = model.model.decoder.layers[0].fc1
-            assert isinstance(fc1.quant_method, Fp8PerTensorOnlineLinearMethod)
-            if kv_cache_dtype == "fp8":
-                attn = model.model.decoder.layers[0].self_attn.attn
-                assert isinstance(attn.quant_method, Fp8KVCacheMethod)
-                assert attn._k_scale == 1.0
-                assert attn._v_scale == 1.0
-
-            if current_platform.is_cuda() or current_platform.is_xpu():
-                if current_platform.supports_fp8() and not force_marlin:
-                    # For GPUs with hardware support, we keep weights in fp8
-                    assert fc1.weight.dtype == torch.float8_e4m3fn
-                    assert not isinstance(
-                        fc1.quant_method.fp8_linear, MarlinFP8ScaledMMLinearKernel
-                    )
-                else:
-                    # For GPUs without hardware support, we pack the fp8 weights
-                    # for weight-only quantization using Marlin kernels
-                    assert fc1.weight.dtype == torch.int32
-                    assert isinstance(
-                        fc1.quant_method.fp8_linear, MarlinFP8ScaledMMLinearKernel
-                    )
-            elif current_platform.is_rocm():
-                if current_platform.supports_fp8() and not force_marlin:
-                    # For GPUs with hardware support, we keep weights in fp8
-                    assert fc1.weight.dtype == current_platform.fp8_dtype()
-                else:  # unsupported ROCm platform
-                    pytest.skip(
-                        "Skip `test_load_fp16_model`. "
-                        "It only runs on ROCm platform with FP8 compute."
-                        " e.g. MI300X and above."
-                    )
-            else:  # unsupported platform
-                pytest.skip(
-                    "Skip `test_load_fp16_model`. "
-                    "It only runs on CUDA and ROCm platform."
-                )
-
-        llm.apply_model(check_model)
-
-        outputs = llm.generate_greedy(["Hello my name is"], max_tokens=4)
-        print(outputs[0][1])
-
-
-@pytest.mark.skipif(
-    not is_quant_method_supported("fp8"),
-    reason="FP8 is not supported on this GPU type.",
-)
-def test_online_quant_peak_mem(
-    vllm_runner,
-    caplog_mp_spawn,
-    monkeypatch,
-) -> None:
-    # Note: `allenai/OLMoE-1B-7B-0125-Instruct` was selected because:
-    # 1. it covers both Linear and MoE paths
-    # 2. it is already used by other tests in CI, so adding it here
-    #    does not increase disk space for CI runners
-    # I really wanted to use `ibm-granite/granite-3.0-1b-a400m-base`
-    # which I think is the smallest MoE model in vLLM (2.5 GiB bf16,
-    # 1.3 GiB fp8), but could not as adding one more model makes CI
-    # run out of disk space.
-    model_name = "allenai/OLMoE-1B-7B-0125-Instruct"
-
-    # Force spawn to ensure caplog_mp_spawn works consistently
-    # (it relies on VLLM_LOGGING_CONFIG_PATH which spawn reads but fork ignores)
-    monkeypatch.setenv("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
-
-    with (
-        caplog_mp_spawn(logging.DEBUG) as log_holder,
-        vllm_runner(
-            model_name,
-            quantization="fp8",
-            enforce_eager=True,
-        ) as llm,
-    ):
-        outputs = llm.generate_greedy(["The future of AI is"], max_tokens=4)
-        print(outputs[0][1])
-
-    log_text = log_holder.text
-
-    # Parse memory usage from captured logs
-    model_memory_gib = None
-    peak_memory_gib = None
-    for line in log_text.splitlines():
-        if model_memory_gib is None:
-            match = re.search(r"Model loading took ([\d.]+) GiB memory", line)
-            if match:
-                model_memory_gib = float(match.group(1))
-        if peak_memory_gib is None:
-            match = re.search(
-                r"Peak GPU memory after loading weights: ([\d.]+) GiB", line
-            )
-            if match:
-                peak_memory_gib = float(match.group(1))
-
-    assert model_memory_gib is not None, "Could not find model loading memory log"
-    assert peak_memory_gib is not None, "Could not find peak memory log"
-    print(f"GPU memory used after loading weights: {model_memory_gib} GiB")
-    print(f"Peak GPU memory usage while loading weights: {peak_memory_gib} GiB")
-
-    # model specific, allenai/OLMoE-1B-7B-0125-Instruct fp8 online quant
-    # uses 6.65 GiB for weight loading (bf16 checkpoint is ~12.89 GiB)
-    expected_model_memory_gib = 6.7
-
-    # for allenai/OLMoE-1B-7B-0125-Instruct the number we see today is 9.06
-    # GiB, which is 1.36x above model_memory_gib. A slightly higher number is
-    # expected as when we load and quantize weights in a streaming fashion we
-    # need to have individual weights in bf16 + fp8 alive at the same time.
-    expected_peak_memory_gib = expected_model_memory_gib * 1.4
-
-    assert model_memory_gib < expected_model_memory_gib, (
-        f"{model_memory_gib=} higher than {expected_model_memory_gib}"
-    )
-    assert peak_memory_gib < expected_peak_memory_gib, (
-        f"{peak_memory_gib=} higher than {expected_peak_memory_gib}"
-    )
-
-
-@pytest.mark.skipif(
-    not is_quant_method_supported("fp8"),
-    reason="FP8 is not supported on this GPU type.",
-)
-def test_online_quant_load_format_dummy(
-    vllm_runner,
-    monkeypatch,
-    caplog,
-) -> None:
-    with vllm_runner(
-        "ibm-granite/granite-3.0-1b-a400m-base",
-        quantization="fp8",
-        enforce_eager=True,
-        load_format="dummy",
-    ) as llm:
-        outputs = llm.generate_greedy(["The future of AI is"], max_tokens=4)
-        print(outputs[0][1])
-
-
-@pytest.mark.skipif(
-    not is_quant_method_supported("fp8"),
-    reason="FP8 is not supported on this GPU type.",
-)
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 def test_scaled_fp8_quant(dtype) -> None:
     def quantize_ref(tensor, inv_scale):
@@ -799,7 +688,6 @@ def test_scaled_fp8_quant(dtype) -> None:
 )
 @pytest.mark.parametrize("method_cls", [Fp8LinearMethod, Fp8MoEMethod])
 # FP8 weight reloading does not support online quantization
-@pytest.mark.parametrize("is_checkpoint_fp8_serialized", [True])  # skip False
 @pytest.mark.parametrize("weight_block_size", [None, [128, 128]])
 # any postprocessing that is applied to the weights such as padding and repacking
 # (excluding device sharding) must also be applied to the reloaded weights
@@ -809,7 +697,6 @@ def test_scaled_fp8_quant(dtype) -> None:
 def test_fp8_reloading(
     default_vllm_config,
     method_cls,
-    is_checkpoint_fp8_serialized,
     weight_block_size,
     use_marlin,
     dist_init,
@@ -819,9 +706,6 @@ def test_fp8_reloading(
     # shapes are invalid. Previously the test was passing because
     # we set fp8_backend to None, which sidestepped the issue.
     monkeypatch.setenv("VLLM_USE_DEEP_GEMM", "0")
-
-    if is_checkpoint_fp8_serialized is False:
-        pytest.skip("FP8 weight reloading does not support online quantization")
 
     if method_cls is Fp8MoEMethod and weight_block_size is None:
         pytest.skip(
@@ -835,7 +719,6 @@ def test_fp8_reloading(
     layer_size = 128 if weight_block_size is not None else 1
     with torch.device(f"{DEVICE_TYPE}:0"):
         config = Fp8Config(
-            is_checkpoint_fp8_serialized=is_checkpoint_fp8_serialized,
             weight_block_size=weight_block_size,
         )
 

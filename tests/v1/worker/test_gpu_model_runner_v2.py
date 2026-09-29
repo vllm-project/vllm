@@ -8,6 +8,7 @@ import pytest
 import torch
 
 import vllm.v1.worker.gpu.model_runner as model_runner_module
+from vllm.model_executor.warmup.jit_warmup import JitWarmupRegistry
 from vllm.v1.kv_cache_interface import (
     CircularBufferSpec,
     FullAttentionSpec,
@@ -37,6 +38,7 @@ def test_qsa_circular_group_uses_custom_slot_mapping(monkeypatch):
         parallel_config=parallel_config,
         cache_config=SimpleNamespace(mamba_cache_mode="none"),
     )
+    runner.jit_warmup_registry = JitWarmupRegistry(runner.vllm_config)
     runner.model_state = SimpleNamespace(
         get_additional_cg_support=lambda: (),
         num_new_sampled_tokens_per_step=1,
@@ -124,7 +126,6 @@ def test_initialize_kv_cache_does_not_dcp_shard_mamba_block_table(
     expected: int,
 ):
     """Mamba/GDN block-table rows index global positions, unlike DCP KV."""
-
     max_model_len = 1_048_576
     attention_block_size = 1_536
     mamba_block_size = 16

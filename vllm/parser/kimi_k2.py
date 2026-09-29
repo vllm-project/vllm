@@ -81,6 +81,7 @@ def kimi_k2_config(thinking: bool = True) -> ParserEngineConfig:
     return ParserEngineConfig(
         name="kimi_k2",
         initial_state=ParserState.REASONING if thinking else ParserState.CONTENT,
+        wait_for_reasoning=thinking,
         terminals={
             **reasoning_terminals,
             "TOOL_SECTION_START": TOOL_SECTION_START,
@@ -235,24 +236,6 @@ class KimiK2Parser(ParserEngine):
 
     def _extract_args_json(self, raw_args: str, func_name: str) -> str:
         return raw_args.strip() or "{}"
-
-    def is_reasoning_end(self, input_ids: list[int]) -> bool:
-        if not self.thinking_enabled:
-            return True
-
-        start_id = self._start_token_id
-        end_id = self._end_token_id
-        tool_section_id = self._tool_section_start_token_id
-
-        for i in range(len(input_ids) - 1, -1, -1):
-            token_id = input_ids[i]
-            if start_id is not None and token_id == start_id:
-                return False
-            if end_id is not None and token_id == end_id:
-                return True
-            if tool_section_id is not None and token_id == tool_section_id:
-                return True
-        return False
 
     def extract_content_ids(self, input_ids: list[int]) -> list[int]:
         if not self.thinking_enabled:
