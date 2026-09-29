@@ -30,7 +30,7 @@ vllm serve mistralai/Mistral-7B-v0.1 \
 ```
 
 The built-in `text` formatter is selected by default. To emit one JSON object
-per vLLM log record, select the built-in `json` formatter:
+per vLLM and Uvicorn log record, select the built-in `json` formatter:
 
 ```bash
 vllm serve mistralai/Mistral-7B-v0.1 \
@@ -43,9 +43,10 @@ Python's process name, `vllm_process_name` identifies vLLM's logical process
 (including worker ranks where applicable), and `process` is the
 operating-system PID.
 
-The built-in profile formats records emitted through vLLM's Python loggers. It
-does not reconfigure Uvicorn or convert direct writes to `stdout` or `stderr`.
-Use a custom configuration when those sources must also emit JSON.
+The built-in profile formats records emitted through vLLM's Python loggers and
+Uvicorn's server and access loggers when using `vllm serve`. It does not convert
+direct writes to `stdout` or `stderr`. Use a custom configuration to format
+other loggers.
 
 `--log-level` is a shortcut for `--logging-config.log_level` and takes
 precedence if both are supplied. It sets the level of vLLM's built-in logging
@@ -81,10 +82,11 @@ for those settings.
 
 ### Example 1: Customize vLLM root logger
 
-For more control over fields and handlers, customize the vLLM root logger with
+For more control over fields and handlers, configure the vLLM root logger and
+Uvicorn's server and access loggers with
 [`python-json-logger`](https://github.com/nhairs/python-json-logger)
-(which is part of the container image) to log to
-STDOUT of the console in JSON format with a log level of `INFO`.
+(which is part of the container image) to log to STDOUT in JSON format at
+`INFO` level.
 
 To begin, first, create an appropriate JSON logging configuration file:
 
@@ -111,8 +113,24 @@ To begin, first, create an appropriate JSON logging configuration file:
           "handlers": ["console"],
           "level": "INFO",
           "propagate": false
+        },
+        "uvicorn": {
+          "handlers": ["console"],
+          "level": "INFO",
+          "propagate": false
+        },
+        "uvicorn.error": {
+          "handlers": ["console"],
+          "level": "INFO",
+          "propagate": false
+        },
+        "uvicorn.access": {
+          "handlers": ["console"],
+          "level": "INFO",
+          "propagate": false
         }
       },
+      "disable_existing_loggers": false,
       "version": 1
     }
     ```
@@ -124,20 +142,20 @@ vllm serve mistralai/Mistral-7B-v0.1 --max-model-len 2048 \
     --logging-config.pylogging_config_file /path/to/logging_config.json
 ```
 
-With this custom configuration, each vLLM log record is one JSON object. The
-example selects `vllm_process_name` and `process` explicitly; both fields are
-also present in the built-in JSON output described above. vLLM avoids altering
-`stdout` or `stderr`, so no text is prepended to JSON log records.
+With this custom configuration, each vLLM and Uvicorn log record is one JSON
+object. The example selects `vllm_process_name` and `process` explicitly; both
+fields are also present in the built-in JSON output described above. vLLM
+avoids altering `stdout` or `stderr`, so no text is prepended to JSON log
+records.
 
 This applies to records emitted through the configured Python loggers. A JSON
 formatter cannot convert unrelated output into JSON, such as a third-party
 library writing directly to `stdout` or `stderr`; configure or route such
 output separately when a consumer requires every collected line to be JSON.
 
-When serving, `VLLM_LOGGING_CONFIG_PATH` is also used as Uvicorn's logging
-configuration. This example configures only `vllm`; configure `uvicorn`,
-`uvicorn.error`, and `uvicorn.access` with a JSON handler when those server
-logs must also be structured.
+When serving, vLLM also passes this file to Uvicorn as its logging
+configuration. The `uvicorn`, `uvicorn.error`, and `uvicorn.access` entries
+format its server and access logs as JSON.
 
 ### Example 2: Silence a particular vLLM logger
 

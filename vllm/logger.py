@@ -20,6 +20,7 @@ from typing import TYPE_CHECKING, Any, Literal, cast
 
 import vllm.envs as envs
 from vllm.logging_utils import ColoredFormatter, NewLineFormatter
+from vllm.logging_utils.formatter import JSON_FORMAT as _JSON_FORMAT
 
 if TYPE_CHECKING:
     from vllm.config.logging import LoggingConfig
@@ -30,11 +31,6 @@ _FORMAT = (
     "[%(fileinfo)s:%(lineno)d] %(message)s"
 )
 _DATE_FORMAT = "%m-%d %H:%M:%S"
-_JSON_FORMAT = (
-    "%(asctime)s %(levelname)s %(name)s %(processName)s %(process)d %(message)s"
-)
-
-
 _vllm_process_info: tuple[str, int] | None = None
 
 
