@@ -972,6 +972,156 @@ def test_aiter_moe_padding_matrix_mxfp4(mode: str):
     pytest.skip("MXFP4 AiterExperts padding requires MI350/gfx950 hardware.")
 
 
+# --- 4c: HIP-graph token padding -- inf/nan garbage rows (topk_ids=-1) ------
+
+# Simulates the runtime's padding-token contract for garbage/padding rows
+# (grouped_topk_router.py: `topk_ids.masked_fill(is_padding, -1)`,
+# `topk_weights.masked_fill(is_padding, 0)`), without needing real HIP-graph
+# capture. Empirically confirmed (see
+# https://github.com/vllm-project/vllm/issues/54966 discussion) that
+# AiterExperts safely isolates these rows under both the default ("opus")
+# and FlyDSL AITER sorting backends: garbage rows' inf/nan hidden_states
+# never leak NaN/Inf into real rows' output. reference_moe_impl's dispatch
+# (`mask = topk_ids == i`, tests/kernels/utils.py) is likewise row-local, so
+# comparing real rows against it is a valid check. AiterExperts's per-tensor
+# a1 quant scale (when applicable) is fixed once in run_modular_kernel()'s
+# FusedMoEQuantConfig construction, from hidden_states_scale computed inside
+# RankTensors.make() *before* garbage rows are injected, so it cannot be
+# inflated by a garbage row's magnitude either.
+
+_TOKEN_PADDING_M = 16
+_TOKEN_PADDING_K = 1024
+_TOKEN_PADDING_N = 512
+
+# {mode name -> {row index: fill value}}. Covers multiple garbage-row counts
+# and positions, and both inf and nan.
+_TOKEN_PADDING_GARBAGE_MODES: dict[str, dict[int, float]] = {
+    "single_inf": {3: float("inf")},
+    "single_nan": {5: float("nan")},
+    "multiple_mixed": {
+        1: float("inf"),
+        4: float("-inf"),
+        7: float("nan"),
+        12: float("inf"),
+    },
+}
+
+
+def _apply_token_padding_garbage_rows(
+    rank_tensors: RankTensors, garbage_rows: dict[int, float]
+) -> None:
+    """Simulate the HIP-graph padding-token contract in-place: garbage rows
+    get inf/nan hidden_states and their routing masked to topk_ids=-1 /
+    topk_weights=0, mirroring grouped_topk_router.py's `is_padding` masking.
+    """
+    for row, fill in garbage_rows.items():
+        rank_tensors.hidden_states[row].fill_(fill)
+        rank_tensors.topk_ids[row].fill_(-1)
+        rank_tensors.topk_weights[row].fill_(0.0)
+
+
+def _aiter_token_padding_worker(
+    pgi: ProcessGroupInfo,
+    vllm_config: VllmConfig,
+    cpu_group,
+    config: Config,
+    weights: WeightTensors,
+    verbose: bool,
+    garbage_rows: dict[int, float],
+):
+    device = torch.device(f"cuda:{pgi.local_rank}")
+    init_workspace_manager(device)
+    set_random_seed(pgi.rank)
+
+    weights = copy.deepcopy(weights)
+    weights.to_current_device()
+
+    rank_tensors = RankTensors.make(config, pgi)
+    _apply_token_padding_garbage_rows(rank_tensors, garbage_rows)
+
+    with set_current_vllm_config(vllm_config):
+        mk_out = run_modular_kernel(pgi, vllm_config, config, weights, rank_tensors)
+        ref_out = reference_moe_impl(config, weights, rank_tensors)
+
+    real_rows = [i for i in range(config.Ms) if i not in garbage_rows]
+
+    assert torch.isfinite(mk_out[real_rows]).all(), (
+        "Garbage (padding) token rows leaked NaN/Inf into real rows' output "
+        "through AiterExperts."
+    )
+
+    if config.quant_config is not None:
+        check_accuracy(
+            ref_out[real_rows], mk_out[real_rows], atol=3e-2, rtol=3e-2, percent=0.9
+        )
+    else:
+        torch.testing.assert_close(
+            ref_out[real_rows], mk_out[real_rows], atol=3e-2, rtol=3e-2
+        )
+
+
+@require_aiter_moe
+@pytest.mark.parametrize("quant_config", _PADDING_QUANT_CONFIGS, ids=_PADDING_QUANT_IDS)
+@pytest.mark.parametrize("garbage_mode", list(_TOKEN_PADDING_GARBAGE_MODES))
+def test_aiter_moe_token_padding_garbage_rows(
+    garbage_mode: str, quant_config: TestMoEQuantConfig | None
+):
+    """See https://github.com/vllm-project/vllm/issues/54966 ("Test padding").
+
+    Simulates HIP-graph token padding: a subset of rows get inf/nan
+    hidden_states with topk_ids=-1 / topk_weights=0, mirroring the router's
+    padding-token masking contract (grouped_topk_router.py). Verifies the
+    real (non-garbage) rows' output through AiterExperts remains finite and
+    matches reference_moe_impl, across multiple garbage-row counts/positions
+    and both inf and nan fill values, for unquantized + the 4 fp8 quant
+    schemes AiterExperts supports.
+    """
+    from vllm.model_executor.layers.fused_moe.prepare_finalize import (
+        MoEPrepareAndFinalizeNoDPEPModular,
+    )
+
+    garbage_rows = _TOKEN_PADDING_GARBAGE_MODES[garbage_mode]
+
+    config = Config(
+        Ms=_TOKEN_PADDING_M,
+        K=_TOKEN_PADDING_K,
+        N=_TOKEN_PADDING_N,
+        E=_PADDING_E,
+        topks=_PADDING_TOPK,
+        dtype=torch.bfloat16,
+        quant_config=quant_config,
+        prepare_finalize_type=MoEPrepareAndFinalizeNoDPEPModular,
+        fused_experts_type=AiterExperts,
+        world_size=1,
+    )
+    assert config.is_valid()[0]
+    assert config.fe_supports_quant_scheme(), (
+        f"AiterExperts does not support quant scheme {quant_config}."
+    )
+
+    weights = WeightTensors.make(config)
+    vllm_config, env_dict = config.make_env_data()
+
+    parallel_launch_with_config(
+        config.world_size,
+        _aiter_token_padding_worker,
+        vllm_config,
+        env_dict,
+        config,
+        weights,
+        False,
+        garbage_rows,
+    )
+
+
+@pytest.mark.skip(
+    reason="MXFP4 AiterExperts token padding requires MI350/gfx950 hardware. "
+    'See https://github.com/vllm-project/vllm/issues/54966 ("Test padding").'
+)
+def test_aiter_moe_token_padding_garbage_rows_mxfp4():
+    pytest.skip("MXFP4 AiterExperts token padding requires MI350/gfx950 hardware.")
+
+
 if __name__ == "__main__":
     # Ability to test individual PrepareAndFinalize and FusedExperts combination
     from .modular_kernel_tools.cli_args import make_config, make_config_arg_parser
