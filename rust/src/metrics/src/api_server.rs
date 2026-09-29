@@ -45,16 +45,9 @@ pub struct WeightOperationLabels {
     pub operation: &'static str,
 }
 
-#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
-pub struct WeightOperationResultLabels {
-    pub operation: &'static str,
-    pub status: &'static str,
-}
-
 pub(crate) type HttpRequestCounterFamily = Family<HttpRequestLabels, U64Counter>;
 pub(crate) type HttpHandlerHistogramFamily =
     Family<HttpHandlerLabels, Histogram, fn() -> Histogram>;
-pub(crate) type WeightOperationCounterFamily = Family<WeightOperationResultLabels, U64Counter>;
 pub(crate) type WeightOperationHistogramFamily =
     Family<WeightOperationLabels, Histogram, fn() -> Histogram>;
 pub(crate) type WeightOperationGaugeFamily = Family<WeightOperationLabels, U64Gauge>;
@@ -64,7 +57,6 @@ pub struct ApiServerMetrics {
     pub http_requests: HttpRequestCounterFamily,
     pub http_request_duration_seconds: HttpHandlerHistogramFamily,
     pub http_request_duration_highr_seconds: Histogram,
-    pub weight_operations: WeightOperationCounterFamily,
     pub weight_operation_duration_seconds: WeightOperationHistogramFamily,
     pub weight_operations_in_flight: WeightOperationGaugeFamily,
 }
@@ -95,27 +87,18 @@ impl ApiServerMetrics {
             http_request_duration_highr_seconds.clone(),
         );
 
-        let weight_operations = WeightOperationCounterFamily::default();
-        registry.register(
-            "vllm:rl_weight_update_operations",
-            "Logical frontend weight operations by outcome, one observation per \
-             dispatched engine call. 'finish' covers only finish_weight_update(); the \
-             weight-version handshake is counted separately as 'set_version'.",
-            weight_operations.clone(),
-        );
-
         let weight_operation_duration_seconds =
             Family::new_with_constructor(weight_operation_duration_histogram as fn() -> Histogram);
         registry.register(
             "vllm:rl_weight_update_operation_duration_seconds",
-            "Duration of one logical frontend weight operation.",
+            "Duration of one weight-transfer operation.",
             weight_operation_duration_seconds.clone(),
         );
 
         let weight_operations_in_flight = WeightOperationGaugeFamily::default();
         registry.register(
             "vllm:rl_weight_update_operations_in_flight",
-            "Logical frontend weight operations currently awaited.",
+            "Weight-transfer operations currently awaited.",
             weight_operations_in_flight.clone(),
         );
 
@@ -123,56 +106,34 @@ impl ApiServerMetrics {
             http_requests,
             http_request_duration_seconds,
             http_request_duration_highr_seconds,
-            weight_operations,
             weight_operation_duration_seconds,
             weight_operations_in_flight,
         }
     }
 
-    /// Record one dispatched logical frontend weight operation.
+    /// Track one weight-transfer operation until the returned guard is dropped.
     pub fn record_weight_operation(&self, operation: &'static str) -> WeightOperationRecorder {
         let labels = WeightOperationLabels { operation };
         let in_flight = self.weight_operations_in_flight.get_or_create_owned(&labels);
         in_flight.inc();
         WeightOperationRecorder {
-            operation,
             started_at: Instant::now(),
-            operations: self.weight_operations.clone(),
             duration: self.weight_operation_duration_seconds.get_or_create_owned(&labels),
             in_flight,
-            status: "error",
         }
     }
 }
 
-/// Completes a weight-operation observation when it succeeds or is dropped.
 pub struct WeightOperationRecorder {
-    operation: &'static str,
     started_at: Instant,
-    operations: WeightOperationCounterFamily,
     duration: Histogram,
     in_flight: U64Gauge,
-    status: &'static str,
-}
-
-impl WeightOperationRecorder {
-    /// Mark the observed operation as successful.
-    pub fn success(mut self) {
-        // `self` is dropped when this method returns, which records the outcome.
-        self.status = "success";
-    }
 }
 
 impl Drop for WeightOperationRecorder {
     fn drop(&mut self) {
         self.in_flight.dec();
         self.duration.observe(self.started_at.elapsed().as_secs_f64());
-        self.operations
-            .get_or_create(&WeightOperationResultLabels {
-                operation: self.operation,
-                status: self.status,
-            })
-            .inc();
     }
 }
 
@@ -183,24 +144,30 @@ mod tests {
 
     use super::ApiServerMetrics;
 
+    fn rendered(registry: &Registry) -> String {
+        let mut rendered = String::new();
+        encode(&mut rendered, registry).expect("encode metrics");
+        rendered
+    }
+
     #[test]
-    fn weight_operation_recorder_tracks_success_and_error() {
+    fn weight_operation_recorder_tracks_in_flight_and_duration() {
         let mut registry = Registry::default();
         let metrics = ApiServerMetrics::register(&mut registry);
 
-        metrics.record_weight_operation("update").success();
-        drop(metrics.record_weight_operation("update"));
-
-        let mut rendered = String::new();
-        encode(&mut rendered, &registry).expect("encode metrics");
-        assert!(rendered.contains(
-            "vllm:rl_weight_update_operations_total{operation=\"update\",status=\"success\"} 1"
-        ));
-        assert!(rendered.contains(
-            "vllm:rl_weight_update_operations_total{operation=\"update\",status=\"error\"} 1"
-        ));
+        let recorder = metrics.record_weight_operation("update");
         assert!(
-            rendered.contains("vllm:rl_weight_update_operations_in_flight{operation=\"update\"} 0")
+            rendered(&registry)
+                .contains("vllm:rl_weight_update_operations_in_flight{operation=\"update\"} 1")
         );
+        drop(recorder);
+
+        let after = rendered(&registry);
+        assert!(
+            after.contains("vllm:rl_weight_update_operations_in_flight{operation=\"update\"} 0")
+        );
+        assert!(after.contains(
+            "vllm:rl_weight_update_operation_duration_seconds_count{operation=\"update\"} 1"
+        ));
     }
 }

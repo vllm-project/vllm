@@ -166,11 +166,6 @@ async def init_weight_transfer_engine(raw_request: Request):
             status_code=HTTPStatus.BAD_REQUEST.value,
             detail="Missing 'init_info' in request body",
         )
-    if not isinstance(init_info, dict):
-        raise HTTPException(
-            status_code=HTTPStatus.BAD_REQUEST.value,
-            detail="'init_info' must be a JSON object",
-        )
     with weight_operation_metrics().record("init"):
         await engine_client(raw_request).init_weight_transfer_engine(
             WeightTransferInitRequest(init_info=init_info)
@@ -204,19 +199,6 @@ async def update_weights(raw_request: Request):
             status_code=HTTPStatus.BAD_REQUEST.value,
             detail="Missing 'update_info' in request body",
         )
-    # Same accepted shapes as the Rust frontend: an object, or a list of objects.
-    valid_update_info = isinstance(update_info, dict) or (
-        isinstance(update_info, list)
-        and all(isinstance(item, dict) for item in update_info)
-    )
-    if not valid_update_info:
-        raise HTTPException(
-            status_code=HTTPStatus.BAD_REQUEST.value,
-            detail=(
-                "'update_info' must be a JSON object or a list of per-worker "
-                "JSON objects"
-            ),
-        )
     with weight_operation_metrics().record("update"):
         await engine_client(raw_request).update_weights(
             request=WeightTransferUpdateRequest(update_info=update_info)
@@ -229,12 +211,8 @@ async def finish_weight_update(
     raw_request: Request,
     weight_version: Annotated[str | None, Body(embed=True)] = None,
 ):
-    # Separate observations so a version failure is not charged to finish.
     with weight_operation_metrics().record("finish"):
-        await engine_client(raw_request).finish_weight_update()
-    if weight_version is not None:
-        with weight_operation_metrics().record("set_version"):
-            await engine_client(raw_request).update_weight_version(weight_version)
+        await engine_client(raw_request).finish_weight_update(weight_version)
     return JSONResponse(content={"message": "Weight update finished"})
 
 
@@ -243,8 +221,7 @@ async def update_weight_version(
     raw_request: Request,
     new_version: Annotated[str, Body(embed=True)],
 ):
-    with weight_operation_metrics().record("set_version"):
-        await engine_client(raw_request).update_weight_version(new_version)
+    await engine_client(raw_request).update_weight_version(new_version)
     return JSONResponse(content={"success": True, "new_version": new_version})
 
 
