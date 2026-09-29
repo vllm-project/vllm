@@ -363,6 +363,17 @@ def has_xgrammar_unsupported_json_features(schema: dict[str, Any]) -> bool:
             return True
 
         # Recursively check all nested objects and arrays
+        # FIXME(arpera):
+        # In current impl we visit recursively ONLY dict list elements from schema
+        # So, for example, nested lists are skipped.
+        # The problem is that we use this function for validation not only json schemas
+        # but also for iterating over structural tag in search of embedded json schemas.
+        # But structural tag uses nested lists as well in contrast to json schema.
+        # For example, dispatch.rules is a list of [template, format] pairs,
+        # so json_schema in the second element is never checked.
+        # Example that represents this problem (multi-branch allOf is not supported):
+        # {"format": {"type": "dispatch", "rules": [["<t>", {"type": "json_schema",
+        # "json_schema": {"allOf": [{"type": "string"}, {"enum": ["a"]}]}}]]}}
         for value in obj.values():
             if isinstance(value, dict):
                 if check_object(value):
