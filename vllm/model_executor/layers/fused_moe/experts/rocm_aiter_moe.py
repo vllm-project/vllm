@@ -385,10 +385,11 @@ def rocm_aiter_fused_experts(
 
         gate_mode = ""
         if activation == MoEActivation.SITU:
-            # SiTUv2 flydsl (VLLM_ROCM_USE_AITER_MOE_SITUV2=1) uses a4w4
-            # fp4 activations with separated gate/up weights (AITER #4463);
-            # default a16w4 SiTU also stays separated.
-            gate_mode = GateMode.SEPARATED.value
+            gate_mode = (
+                GateMode.INTERLEAVE.value
+                if rocm_aiter_ops.is_fused_moe_situv2_gate_up_interleaved()
+                else GateMode.SEPARATED.value
+            )
         elif quant_config.use_mxfp4_w4a16:
             gate_mode = GateMode.INTERLEAVE.value
         elif activation_interleave is not None:
