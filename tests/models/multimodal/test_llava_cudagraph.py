@@ -35,10 +35,17 @@ def _model(vision_config, strategy):
     return model
 
 
-def test_pixtral_encoder_graph_is_rejected():
-    model = _model(PixtralVisionConfig(), "full")
-    with pytest.raises(NotImplementedError, match="Pixtral"):
-        model.get_encoder_cudagraph_config()
+def test_pixtral_encoder_graph_variable_resolution_contract():
+    model = _model(PixtralVisionConfig(image_size=64, patch_size=8), "full")
+    images = [torch.randn(3, 16, 32), torch.randn(3, 32, 8)]
+    specs = model.get_encoder_cudagraph_item_specs({"pixel_values": images})
+    assert [(s.input_size, s.output_tokens) for s in specs] == [(8, 8), (4, 4)]
+    selected = model.select_encoder_cudagraph_items({"pixel_values": images}, [1, 0])
+    assert selected["pixel_values"][0] is images[1]
+    assert selected["pixel_values"][1] is images[0]
+    assert model.select_encoder_cudagraph_items({"pixel_values": images}, []) == {
+        "pixel_values": []
+    }
 
 
 def test_chunked_prefill_budget_fits_one_image():
@@ -153,3 +160,80 @@ def test_llava_encoder_graph_matches_eager(vision_type, strategy, fallback):
         retained.extend((output, output.clone()) for output in actual)
     assert manager.graph_hits == (0 if fallback else 7)
     assert manager.graph_misses == (7 if fallback else 0)
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="Requires CUDA")
+@pytest.mark.usefixtures("default_vllm_config", "dist_init")
+@pytest.mark.parametrize("backend", ["FLASH_ATTN", "TRITON_ATTN"])
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@torch.inference_mode()
+def test_pixtral_encoder_graph_matches_eager(backend, dtype, monkeypatch):
+    from vllm.model_executor.layers.attention import mm_encoder_attention
+    from vllm.utils.torch_utils import set_default_torch_dtype
+    from vllm.v1.attention.backends.registry import AttentionBackendEnum
+
+    monkeypatch.setattr(
+        mm_encoder_attention,
+        "get_vit_attn_backend",
+        lambda **kwargs: AttentionBackendEnum[backend],
+    )
+    torch.manual_seed(0)
+    vision = PixtralVisionConfig(
+        hidden_size=64,
+        intermediate_size=128,
+        num_hidden_layers=2,
+        num_attention_heads=4,
+        head_dim=16,
+        image_size=64,
+        patch_size=8,
+    )
+    model = _model(vision, "full")
+    with set_default_torch_dtype(dtype), torch.device("cuda"):
+        model.vision_tower = init_vision_tower_for_llava(
+            model.config,
+            quant_config=None,
+            require_post_norm=False,
+        )
+        model.multi_modal_projector = LlavaMultiModalProjector(
+            vision_hidden_size=64,
+            text_hidden_size=64,
+            projector_hidden_act="gelu",
+            multimodal_projector_bias=True,
+        )
+    for name, parameter in model.named_parameters():
+        if "norm" in name and name.endswith("weight"):
+            parameter.fill_(1)
+        else:
+            parameter.normal_(std=0.02)
+    config = SimpleNamespace(
+        compilation_config=SimpleNamespace(
+            encoder_cudagraph_token_budgets=[16],
+            encoder_cudagraph_max_vision_items_per_batch=2,
+            encoder_cudagraph_max_frames_per_batch=None,
+        ),
+        model_config=SimpleNamespace(
+            multimodal_config=SimpleNamespace(
+                mm_encoder_tp_mode="replicate",
+                get_limit_per_prompt=lambda modality: int(modality == "image"),
+            )
+        ),
+        parallel_config=SimpleNamespace(tensor_parallel_size=1),
+    )
+    manager = EncoderCudaGraphManager(config, torch.device("cuda"), dtype, model)
+    manager.capture(graph_pool=current_platform.graph_pool_handle())
+    a, b, oversized, same_tokens_other_shape = [
+        torch.randn(3, h, w, device="cuda", dtype=dtype)
+        for h, w in [(16, 32), (32, 8), (48, 32), (32, 16)]
+    ]
+    retained: list[tuple[torch.Tensor, torch.Tensor]] = []
+    for images in ([a, b], [b], [oversized, a, b], [a, same_tokens_other_shape]):
+        expected = model.embed_multimodal(pixel_values=images)
+        actual = manager.execute({"pixel_values": images})
+        assert len(actual) == len(expected)
+        for out, ref in zip(actual, expected):
+            torch.testing.assert_close(out, ref, rtol=1e-2, atol=1e-3)
+        for out, snapshot in retained:
+            torch.testing.assert_close(out, snapshot, rtol=0, atol=0)
+        retained.extend((out, out.clone()) for out in actual)
+    assert manager.graph_hits == 7
+    assert manager.graph_misses == 1

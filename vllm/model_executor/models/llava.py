@@ -676,12 +676,19 @@ class LlavaForConditionalGeneration(
         )
 
     def get_encoder_cudagraph_config(self) -> EncoderCudaGraphConfig:
+        if isinstance(self.config.vision_config, PixtralVisionConfig):
+            if self.config.vision_feature_select_strategy != "full":
+                raise NotImplementedError(
+                    "Pixtral encoder CUDA graphs require full vision features."
+                )
+            return self.vision_tower.get_encoder_cudagraph_config(
+                self.config.text_config.hidden_size
+            )
         if not isinstance(
             self.config.vision_config, (CLIPVisionConfig, SiglipVisionConfig)
         ):
             raise NotImplementedError(
-                "LLaVA encoder CUDA graphs support CLIP and SigLIP vision towers; "
-                "Pixtral is not supported."
+                f"Unsupported vision config: {type(self.config.vision_config)}"
             )
         return EncoderCudaGraphConfig(
             modalities=["image"],
@@ -692,6 +699,12 @@ class LlavaForConditionalGeneration(
     def get_encoder_cudagraph_budget_range(
         self, vllm_config: VllmConfig
     ) -> tuple[int, int]:
+        if isinstance(self.config.vision_config, PixtralVisionConfig):
+            max_budget = min(
+                vllm_config.scheduler_config.max_num_batched_tokens,
+                vllm_config.model_config.max_model_len,
+            )
+            return min(256, max_budget), max_budget
         return (
             self._encoder_tokens_per_image,
             max(
@@ -706,6 +719,13 @@ class LlavaForConditionalGeneration(
     def get_encoder_cudagraph_item_specs(
         self, mm_kwargs: dict[str, Any]
     ) -> list[EncoderItemSpec]:
+        if isinstance(self.config.vision_config, PixtralVisionConfig):
+            patch = self.config.vision_config.patch_size
+            sizes = [
+                (image.shape[-2] // patch) * (image.shape[-1] // patch)
+                for image in mm_kwargs["pixel_values"]
+            ]
+            return [EncoderItemSpec(input_size=n, output_tokens=n) for n in sizes]
         return [
             EncoderItemSpec(input_size=1, output_tokens=self._encoder_tokens_per_image)
             for _ in range(len(mm_kwargs["pixel_values"]))
@@ -714,6 +734,8 @@ class LlavaForConditionalGeneration(
     def select_encoder_cudagraph_items(
         self, mm_kwargs: dict[str, Any], indices: list[int]
     ) -> dict[str, Any]:
+        if isinstance(self.config.vision_config, PixtralVisionConfig):
+            return {"pixel_values": [mm_kwargs["pixel_values"][i] for i in indices]}
         return {"pixel_values": mm_kwargs["pixel_values"][indices]}
 
     def prepare_encoder_cudagraph_capture_inputs(
@@ -726,6 +748,10 @@ class LlavaForConditionalGeneration(
         path: str = "default",
         axis_keys: tuple[Hashable, ...] | None = None,
     ) -> EncoderCudaGraphCaptureInputs:
+        if isinstance(self.config.vision_config, PixtralVisionConfig):
+            return self.vision_tower.prepare_encoder_cudagraph_capture_inputs(
+                token_budget, max_batch_size, device, dtype
+            )
         num_images = min(
             max_batch_size, max(token_budget // self._encoder_tokens_per_image, 1)
         )
@@ -745,6 +771,10 @@ class LlavaForConditionalGeneration(
         max_frames_per_batch: int,
         path: str = "default",
     ) -> EncoderCudaGraphReplayBuffers:
+        if isinstance(self.config.vision_config, PixtralVisionConfig):
+            return self.vision_tower.prepare_encoder_cudagraph_replay_buffers(
+                mm_kwargs["pixel_values"]
+            )
         return EncoderCudaGraphReplayBuffers(
             values={"pixel_values": mm_kwargs["pixel_values"]}
         )
@@ -752,6 +782,9 @@ class LlavaForConditionalGeneration(
     def encoder_cudagraph_forward(
         self, values: dict[str, torch.Tensor], path: str = "default"
     ) -> torch.Tensor:
+        if isinstance(self.config.vision_config, PixtralVisionConfig):
+            features = self.vision_tower.encoder_cudagraph_forward(values)
+            return self.multi_modal_projector(features)
         features = self._image_pixels_to_features(
             self.vision_tower, values["pixel_values"]
         )
@@ -760,6 +793,8 @@ class LlavaForConditionalGeneration(
     def encoder_eager_forward(
         self, mm_kwargs: dict[str, Any], path: str = "default"
     ) -> torch.Tensor:
+        if isinstance(self.config.vision_config, PixtralVisionConfig):
+            return torch.cat(self.embed_multimodal(**mm_kwargs))
         return self.encoder_cudagraph_forward(mm_kwargs, path=path)
 
     def forward(
