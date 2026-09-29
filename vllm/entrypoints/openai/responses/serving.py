@@ -73,6 +73,9 @@ from vllm.entrypoints.openai.responses.utils import (
 from vllm.entrypoints.serve.engine.protocol import ErrorResponse
 from vllm.entrypoints.serve.utils.api_utils import get_max_tokens
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
+from vllm.entrypoints.serve.utils.tool_calls_utils import (
+    maybe_filter_parallel_tool_calls,
+)
 from vllm.exceptions import GenerationError, VLLMValidationError
 from vllm.inputs import EngineInput
 from vllm.logger import init_logger
@@ -1028,7 +1031,7 @@ class OpenAIServingResponses(GenerateBaseServing):
             return build_response_output_items(
                 reasoning=reasoning,
                 content=content,
-                tool_calls=tool_calls,
+                tool_calls=maybe_filter_parallel_tool_calls(tool_calls or [], request),
                 logprobs=logprobs,
                 tools=request.tools,
             )
@@ -1231,6 +1234,7 @@ class OpenAIServingResponses(GenerateBaseServing):
 
             if not delta_message:
                 continue
+            delta_message = maybe_filter_parallel_tool_calls(delta_message, request)
 
             for dm in split_delta(delta_message):
                 target_state, tool_call = processor.resolve_target_state(dm)

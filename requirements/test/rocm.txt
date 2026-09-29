@@ -6,7 +6,7 @@ accelerate==1.13.0
     # via peft
 aiohappyeyeballs==2.6.1
     # via aiohttp
-aiohttp==3.13.3
+aiohttp==3.14.3
     # via
     #   -c requirements/common.txt
     #   -r requirements/test/../common.txt
@@ -43,7 +43,7 @@ anyio==4.13.0
     #   sse-starlette
     #   starlette
     #   watchfiles
-apache-tvm-ffi==0.1.10
+apache-tvm-ffi==0.1.11
     # via
     #   -c requirements/rocm.txt
     #   tilelang
@@ -165,7 +165,7 @@ cryptography==46.0.0
     #   pyjwt
 cycler==0.12.1
     # via matplotlib
-datamodel-code-generator==0.55.0
+datamodel-code-generator==0.79.0
     # via -r requirements/test/rocm.in
 dataproperty==1.1.0
     # via
@@ -181,6 +181,8 @@ decorator==5.2.1
     # via librosa
 decord==0.6.0
     # via -r requirements/test/rocm.in
+defusedxml==0.7.1
+    # via nltk
 depyf==0.20.0
     # via
     #   -c requirements/common.txt
@@ -569,8 +571,10 @@ networkx==3.6.1
     #   torch
 ninja==1.13.0
     # via -r requirements/test/../common.txt
-nltk==3.9.3
-    # via rouge-score
+nltk==3.10.3
+    # via
+    #   -r requirements/test/rocm.in
+    #   rouge-score
 num2words==0.5.14
     # via -r requirements/test/rocm.in
 numba==0.65.0
@@ -758,8 +762,9 @@ perceptron==0.1.4
     # via -r requirements/test/rocm.in
 perf-analyzer==0.1.0
     # via genai-perf
-pillow==12.1.1
+pillow==12.3.0
     # via
+    #   -c requirements/common.txt
     #   -r requirements/test/../common.txt
     #   genai-perf
     #   imagehash
@@ -1291,6 +1296,7 @@ typing-extensions==4.15.0
     # via
     #   -c requirements/common.txt
     #   -r requirements/test/../common.txt
+    #   aiohttp
     #   aiosignal
     #   albumentations
     #   alembic
@@ -1380,7 +1386,7 @@ word2number==1.1
     # via lm-eval
 wrapt==2.1.2
     # via smart-open
-xgrammar==0.2.7
+xgrammar==0.2.8
     # via
     #   -c requirements/common.txt
     #   -r requirements/test/../common.txt
