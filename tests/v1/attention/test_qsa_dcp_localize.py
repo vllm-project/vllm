@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""QSA DCP localization against independent ownership and slot references."""
+"""QSA DCP selection localization and empty-owner behavior."""
 
 import pytest
 import torch
@@ -131,7 +131,7 @@ def test_localize_leaves_the_source_alone_without_dcp():
 
 
 def test_the_kernel_wrapper_rejects_a_gate_with_return_lse():
-    """Guards the one error that has no symptom: sigmoid applied twice."""
+    """The output gate must be applied after DCP merging, not by the kernel."""
     from vllm.models.qwen4_exp.nvidia.ops import qsa as qsa_ops
 
     query = torch.zeros(2, 4, 64, dtype=torch.bfloat16)

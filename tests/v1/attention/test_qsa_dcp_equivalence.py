@@ -1,14 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Two DCP ranks must reproduce what one rank computes over the whole cache.
+"""Compare sharded QSA attention with a full-cache result on one GPU.
 
-This runs both ranks in one process against separately built caches, so it
-tests the part that a collective cannot hide: whether a localized id still
-addresses the key its global id named, and whether merging the two partial
-softmaxes by their LSE reconstructs the single-rank answer.
-
-The merge here is the arithmetic of correct_attn_out, transcribed. Running the
-real collective needs two GPUs and adds nothing to what is being checked.
+The two-rank model path, including its collective, is tested separately.
 """
 
 import pytest
