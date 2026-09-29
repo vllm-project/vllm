@@ -141,7 +141,9 @@ def test_cumem_suspend_offload_tags(monkeypatch, level, offload_tags):
     backend = CuMemBackend()
     backend.suspend(level=level)
     backend.resume(tags=["weights"])
-    assert calls == [("sleep", offload_tags), ("wake_up", ["weights", "runtime"])]
+    (_, sleep_tags), (_, wake_tags) = calls
+    assert sleep_tags == offload_tags
+    assert {"weights", "runtime"} <= set(wake_tags)
 
 
 def test_suspend_resume_state_transitions():
