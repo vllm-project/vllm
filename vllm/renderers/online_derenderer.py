@@ -47,6 +47,7 @@ from vllm.tokenizers.detokenizer_utils import (
 )
 from vllm.utils import random_uuid
 from vllm.utils.async_utils import make_async
+from vllm.v1.engine.detokenizer import uses_fast_detokenizer
 
 logger = init_logger(__name__)
 
@@ -135,7 +136,7 @@ class OnlineDerenderer:
 
         has_parser = self.parser is not None and chat_request is not None
         skip_special, spaces_between = _decode_params(
-            chat_request, preserve_special=has_parser
+            tokenizer, chat_request, preserve_special=has_parser
         )
         seed_ids = (
             prompt_token_ids
@@ -382,7 +383,7 @@ class OnlineDerenderer:
             )
 
         tokenizer = self.renderer.get_tokenizer()
-        skip_special, spaces_between = _decode_params(chat_request)
+        skip_special, spaces_between = _decode_params(tokenizer, chat_request)
         # Seed on the first chunk only. A carried state already has the prompt.
         if state is None:
             state = _seed_stream_state(
@@ -511,7 +512,7 @@ class OnlineDerenderer:
         # so multi-byte characters split across that boundary still decode
         # correctly. Discarded once the call returns.
         skip_special, spaces_between = _decode_params(
-            chat_request, preserve_special=True
+            tokenizer, chat_request, preserve_special=True
         )
         detok_state = _seed_stream_state(
             tokenizer, prompt_token_ids, skip_special_tokens=skip_special
@@ -697,8 +698,8 @@ class OnlineDerenderer:
             prompt_token_ids if prompt_token_ids is not None else [None] * n
         )
 
-        skip_special, spaces_between = _decode_params(completion_request)
         tokenizer = self.renderer.get_tokenizer()
+        skip_special, spaces_between = _decode_params(tokenizer, completion_request)
         choices: list[CompletionResponseChoice] = []
         total_prompt_tokens = 0
         total_completion_tokens = 0
@@ -792,7 +793,7 @@ class OnlineDerenderer:
             )
 
         tokenizer = self.renderer.get_tokenizer()
-        skip_special, spaces_between = _decode_params(completion_request)
+        skip_special, spaces_between = _decode_params(tokenizer, completion_request)
         # Seed on the first chunk only. A carried state already has the prompt.
         if state is None:
             state = _seed_stream_state(
@@ -878,6 +879,7 @@ def _logprob_context_tail(
 
 
 def _decode_params(
+    tokenizer: TokenizerLike,
     request: ChatCompletionRequest | CompletionRequest | None,
     preserve_special: bool = False,
 ) -> tuple[bool, bool]:
@@ -885,6 +887,7 @@ def _decode_params(
     the engine does (`IncrementalDetokenizer`).
 
     Args:
+        tokenizer: Picks the engine's fast or slow detokenizer rules.
         request: The original request, if the caller supplied one.
         preserve_special: Keep special tokens so a parser can see markers.
             The serving side does this via `adjust_request`.
@@ -895,9 +898,12 @@ def _decode_params(
         if preserve_special
         else (request.skip_special_tokens if request is not None else True)
     )
-    spaces_between = skip_special or (
+    spaces_between = (
         request.spaces_between_special_tokens if request is not None else True
     )
+    # Only the fast detokenizer forces spaces on when skipping special tokens.
+    if skip_special and uses_fast_detokenizer(tokenizer):
+        spaces_between = True
     return skip_special, spaces_between
 
 

@@ -28,6 +28,11 @@ USE_FAST_DETOKENIZER = version.parse(tokenizers.__version__) >= version.parse("0
 INVALID_PREFIX_ERR_MSG = "Invalid prefix encountered"
 
 
+def uses_fast_detokenizer(tokenizer: TokenizerLike) -> bool:
+    """Whether the engine detokenizes with `FastIncrementalDetokenizer`."""
+    return USE_FAST_DETOKENIZER and isinstance(tokenizer, TokenizersBackend)
+
+
 class IncrementalDetokenizer:
     def __init__(self):
         self.token_ids: list[int] = []
@@ -58,7 +63,7 @@ class IncrementalDetokenizer:
             # No tokenizer => skipping detokenization.
             return IncrementalDetokenizer()
 
-        if USE_FAST_DETOKENIZER and isinstance(tokenizer, TokenizersBackend):
+        if uses_fast_detokenizer(tokenizer):
             # Fast tokenizer => use tokenizers library DecodeStream.
             return FastIncrementalDetokenizer(tokenizer, request)
 
