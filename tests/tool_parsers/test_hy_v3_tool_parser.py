@@ -4,10 +4,11 @@
 """Tests for the HYV3 tool call parser."""
 
 import json
-from unittest.mock import Mock
+from unittest.mock import MagicMock, Mock, patch
 
 import pytest
 
+import vllm.envs as envs
 from vllm.entrypoints.generate.base.protocol import DeltaMessage
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
@@ -272,3 +273,71 @@ class TestHYV3ExtractToolCallsStreaming:
         tc = _collect_streaming_tool_calls(results)
         assert len(tc) == 1 and tc[0]["name"] == "get_current_date"
         assert json.loads(tc[0]["arguments"]) == {}
+
+
+def _hy_v3_parser_with_mock_tokenizer() -> HYV3ToolParser:
+    vocab = {
+        "<tool_calls>": 1,
+        "</tool_calls>": 2,
+        "<tool_call>": 3,
+        "</tool_call>": 4,
+        "<tool_sep>": 5,
+        "<arg_key>": 6,
+        "</arg_key>": 7,
+        "<arg_value>": 8,
+        "</arg_value>": 9,
+    }
+    tokenizer = MagicMock()
+    tokenizer.get_vocab.return_value = vocab
+    tokenizer.init_kwargs = {}
+    return HYV3ToolParser(tokenizer)
+
+
+def test_regex_timeout_treated_as_no_tool_call():
+    parser = _hy_v3_parser_with_mock_tokenizer()
+    model_output = "<tool_calls><tool_call>" + "c" * 100
+    mock_regex = MagicMock()
+    mock_regex.findall.side_effect = TimeoutError("Regex timeout")
+    request = ChatCompletionRequest(messages=[], model="test-model")
+
+    with patch.object(parser, "tool_call_regex", mock_regex):
+        result = parser.extract_tool_calls(model_output, request)
+
+    assert result.tools_called is False
+    assert result.tool_calls == []
+    assert result.content == model_output
+    mock_regex.findall.assert_called_once()
+    assert (
+        mock_regex.findall.call_args.kwargs["timeout"]
+        == envs.VLLM_TOOL_PARSE_REGEX_TIMEOUT_SECONDS
+    )
+
+
+def test_streaming_args_regex_timeout_skips_later_deltas():
+    parser = _hy_v3_parser_with_mock_tokenizer()
+    parser._streaming_tool_name = "get_weather"
+    parser.current_tool_id = 0
+    parser._buffer = "<arg_key>" + "c" * 100
+    mock_regex = MagicMock()
+    mock_regex.findall.side_effect = TimeoutError("Regex timeout")
+    request = ChatCompletionRequest(messages=[], model="test-model")
+
+    with patch.object(parser, "func_args_regex", mock_regex):
+        first = parser._extract_streaming_incremental(None, request)
+        second = parser.extract_tool_calls_streaming(
+            "prev",
+            "prevx",
+            "x",
+            [1],
+            [1, 3],
+            [3],
+            request,
+        )
+
+    assert first is None
+    assert second is None
+    mock_regex.findall.assert_called_once()
+    assert (
+        mock_regex.findall.call_args.kwargs["timeout"]
+        == envs.VLLM_TOOL_PARSE_REGEX_TIMEOUT_SECONDS
+    )

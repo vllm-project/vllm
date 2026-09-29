@@ -425,6 +425,7 @@ class HYV4ToolExtractor:
         self.tool_call_start_token_id = vocab.get(self.tool_call_start_token)
         self.tool_call_end_token_id = vocab.get(self.tool_call_end_token)
         self._buffer = ""
+        self._stream_regex_timed_out = False
 
         if (
             self.tool_calls_start_token_id is None
@@ -442,7 +443,9 @@ class HYV4ToolExtractor:
     ) -> list[ToolCallDict]:
         try:
             tool_calls: list[ToolCallDict] = []
-            function_calls = self.tool_call_regex.findall(model_output)
+            function_calls = self.tool_call_regex.findall(
+                model_output, timeout=envs.VLLM_TOOL_PARSE_REGEX_TIMEOUT_SECONDS
+            )
             for tool_call_body in function_calls:
                 arg_start = tool_call_body.find(self.arg_key_start_token)
                 if arg_start == -1:
@@ -452,7 +455,10 @@ class HYV4ToolExtractor:
                     function_name = tool_call_body[:arg_start].strip()
                     function_args = tool_call_body[arg_start:].strip()
 
-                arg_pairs = self.func_args_regex.findall(function_args)
+                arg_pairs = self.func_args_regex.findall(
+                    function_args,
+                    timeout=envs.VLLM_TOOL_PARSE_REGEX_TIMEOUT_SECONDS,
+                )
                 arg_dict = {}
                 for key, value in arg_pairs:
                     arg_dict[key] = _parse_value(value, function_name, key, tools)
@@ -463,6 +469,8 @@ class HYV4ToolExtractor:
                     )
                 )
             return tool_calls
+        except TimeoutError:
+            raise
         except Exception:
             logger.exception("Error in extracting tool call from response.")
             return []
@@ -486,7 +494,9 @@ class HYV4ToolExtractor:
             raise ValueError("Malformed tool_call wrapper count.")
 
         tool_calls: list[ToolCallDict] = []
-        function_calls = self.tool_call_regex.findall(tool_block)
+        function_calls = self.tool_call_regex.findall(
+            tool_block, timeout=envs.VLLM_TOOL_PARSE_REGEX_TIMEOUT_SECONDS
+        )
         if tool_block.count(self.tool_call_start_token) != len(function_calls):
             raise ValueError("Malformed tool_call body.")
 
@@ -509,8 +519,14 @@ class HYV4ToolExtractor:
             ):
                 raise ValueError("Malformed argument tag count.")
 
-            arg_pairs = self.func_args_regex.findall(function_args)
-            remainder = self.func_args_regex.sub("", function_args)
+            arg_pairs = self.func_args_regex.findall(
+                function_args, timeout=envs.VLLM_TOOL_PARSE_REGEX_TIMEOUT_SECONDS
+            )
+            remainder = self.func_args_regex.sub(
+                "",
+                function_args,
+                timeout=envs.VLLM_TOOL_PARSE_REGEX_TIMEOUT_SECONDS,
+            )
             if remainder.strip():
                 raise ValueError("Unparsed argument payload remains.")
 
@@ -557,6 +573,20 @@ class HYV4ToolExtractor:
                     tool_calls=tool_calls,
                 )
 
+            except TimeoutError:
+                self._stream_regex_timed_out = True
+                logger.warning(
+                    "Regex timeout occurred when matching tool call pattern."
+                )
+                logger.debug(
+                    "Regex timeout occurred when matching user input: %s",
+                    model_output,
+                )
+                return ExtractResult(
+                    tools_called=False,
+                    content=model_output,
+                    tool_calls=[],
+                )
             except Exception:
                 logger.warning(
                     "HYV4ToolExtractor detected malformed tool output; "
@@ -614,6 +644,8 @@ class HYV4ToolExtractor:
             from the buffer, or None when nothing can be emitted yet.
 
         """
+        if self._stream_regex_timed_out:
+            return None
         content_delta: str | None = None
         tool_calls: list[StreamToolCall] = []
 
@@ -806,7 +838,14 @@ class HYV4ToolExtractor:
             remaining = ""
 
         # --- scan all fully closed kv pairs ---
-        arg_pairs = self.func_args_regex.findall(args_text)
+        try:
+            arg_pairs = self.func_args_regex.findall(
+                args_text, timeout=envs.VLLM_TOOL_PARSE_REGEX_TIMEOUT_SECONDS
+            )
+        except TimeoutError:
+            self._stream_regex_timed_out = True
+            logger.warning("Regex timeout occurred when matching tool call pattern.")
+            return None
         for key, value in arg_pairs:
             key = key.strip()
             if key not in self._completed_args:
@@ -816,8 +855,15 @@ class HYV4ToolExtractor:
 
         # --- detect partial (unclosed) kv at the tail ---
         last_closed_end = 0
-        for m in self.func_args_regex.finditer(args_text):
-            last_closed_end = m.end()
+        try:
+            for m in self.func_args_regex.finditer(
+                args_text, timeout=envs.VLLM_TOOL_PARSE_REGEX_TIMEOUT_SECONDS
+            ):
+                last_closed_end = m.end()
+        except TimeoutError:
+            self._stream_regex_timed_out = True
+            logger.warning("Regex timeout occurred when matching tool call pattern.")
+            return None
         tail = args_text[last_closed_end:]
 
         partial_key: str | None = None

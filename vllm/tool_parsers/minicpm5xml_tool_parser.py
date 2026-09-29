@@ -7,6 +7,7 @@ from typing import Any
 
 import regex as re
 
+import vllm.envs as envs
 from vllm.entrypoints.chat_utils import make_tool_call_id
 from vllm.entrypoints.generate.base.protocol import (
     DeltaFunctionCall,
@@ -381,13 +382,21 @@ def _parse_function_block(
 
     if not parsed_ok:
         try:
-            m_fn = _FUNC_NAME_V1_REGEX.search(block)
+            m_fn = _FUNC_NAME_V1_REGEX.search(
+                block, timeout=envs.VLLM_TOOL_PARSE_REGEX_TIMEOUT_SECONDS
+            )
             if m_fn:
                 func_name = (m_fn.group(1) or "").strip()
-            has_invalid_param = bool(_PARAM_MISSING_NAME_REGEX.search(block))
+            has_invalid_param = bool(
+                _PARAM_MISSING_NAME_REGEX.search(
+                    block, timeout=envs.VLLM_TOOL_PARSE_REGEX_TIMEOUT_SECONDS
+                )
+            )
             seen_keys = set()
             allowed_props = name_to_allowed_props.get(func_name or "", set())
-            for pm in _PARAM_WITH_NAME_REGEX.finditer(block):
+            for pm in _PARAM_WITH_NAME_REGEX.finditer(
+                block, timeout=envs.VLLM_TOOL_PARSE_REGEX_TIMEOUT_SECONDS
+            ):
                 key = pm.group(1).strip()
                 val_text = pm.group(2) or ""
                 if val_text.startswith("<![CDATA[") and val_text.endswith("]]>"):
@@ -439,7 +448,9 @@ def _parse_partial_params(
     arguments: dict[str, Any] = {}
     seen_keys: set[str] = set()
     allowed_props = name_to_allowed_props.get(func_name, set())
-    for pm in _PARAM_WITH_NAME_REGEX.finditer(block):
+    for pm in _PARAM_WITH_NAME_REGEX.finditer(
+        block, timeout=envs.VLLM_TOOL_PARSE_REGEX_TIMEOUT_SECONDS
+    ):
         key = pm.group(1).strip()
         if not key or key in seen_keys:
             continue
@@ -472,6 +483,7 @@ class MiniCPM5XMLToolParser(ToolParser):
         self.tool_call_start_token = "<function"
         self.tool_call_end_token = "</function>"
         self._processed_len = 0
+        self._stream_regex_timed_out = False
 
     def _reset_stream_state(self) -> None:
         self._processed_len = 0
@@ -479,6 +491,7 @@ class MiniCPM5XMLToolParser(ToolParser):
         self.current_tool_name_sent = False
         self.prev_tool_call_arr = []
         self.streamed_args_for_tool = []
+        self._stream_regex_timed_out = False
 
     def adjust_request(
         self, request: ChatCompletionRequest | ResponsesRequest
@@ -513,7 +526,9 @@ class MiniCPM5XMLToolParser(ToolParser):
         last_end = 0
 
         try:
-            for match in _FUNC_BLOCK_REGEX.finditer(model_output):
+            for match in _FUNC_BLOCK_REGEX.finditer(
+                model_output, timeout=envs.VLLM_TOOL_PARSE_REGEX_TIMEOUT_SECONDS
+            ):
                 if match.start() > last_end:
                     normal_parts.append(model_output[last_end : match.start()])
 
@@ -559,6 +574,17 @@ class MiniCPM5XMLToolParser(ToolParser):
                 tools_called=tools_called,
                 tool_calls=tool_calls,
                 content=None if tools_called else content,
+            )
+        except TimeoutError:
+            logger.warning("Regex timeout occurred when matching tool call pattern.")
+            logger.debug(
+                "Regex timeout occurred when matching user input: %s",
+                model_output,
+            )
+            return ExtractedToolCallInformation(
+                tools_called=False,
+                tool_calls=[],
+                content=model_output,
             )
         except Exception as e:
             logger.error("Error in MiniCPM5XMLToolParser.extract_tool_calls: %s", e)
@@ -693,10 +719,14 @@ class MiniCPM5XMLToolParser(ToolParser):
         tool_names, name_to_allowed_props, _, name_to_tool = _build_tool_maps(
             request.tools
         )
-        if _PARAM_MISSING_NAME_REGEX.search(block):
+        if _PARAM_MISSING_NAME_REGEX.search(
+            block, timeout=envs.VLLM_TOOL_PARSE_REGEX_TIMEOUT_SECONDS
+        ):
             return None
 
-        match = _FUNC_NAME_V1_REGEX.search(block)
+        match = _FUNC_NAME_V1_REGEX.search(
+            block, timeout=envs.VLLM_TOOL_PARSE_REGEX_TIMEOUT_SECONDS
+        )
         if not match:
             return None
         func_name = (match.group(1) or "").strip()
@@ -740,6 +770,8 @@ class MiniCPM5XMLToolParser(ToolParser):
             current_text = _normalize_model_output(current_text)
             if not previous_text:
                 self._reset_stream_state()
+            if self._stream_regex_timed_out:
+                return None
 
             if self.tool_call_start_token not in current_text:
                 if self._processed_len < len(current_text):
@@ -748,7 +780,9 @@ class MiniCPM5XMLToolParser(ToolParser):
                     return DeltaMessage(content=content) if content else None
                 return None
 
-            for match in _FUNC_BLOCK_REGEX.finditer(current_text):
+            for match in _FUNC_BLOCK_REGEX.finditer(
+                current_text, timeout=envs.VLLM_TOOL_PARSE_REGEX_TIMEOUT_SECONDS
+            ):
                 if match.end() <= self._processed_len:
                     continue
 
@@ -808,6 +842,10 @@ class MiniCPM5XMLToolParser(ToolParser):
                 partial_block = partial_block[func_idx:]
 
             return self._process_partial_block_streaming(partial_block, request)
+        except TimeoutError:
+            self._stream_regex_timed_out = True
+            logger.warning("Regex timeout occurred when matching tool call pattern.")
+            return None
         except Exception:
             logger.exception(
                 "Error in MiniCPM5XMLToolParser.extract_tool_calls_streaming"
