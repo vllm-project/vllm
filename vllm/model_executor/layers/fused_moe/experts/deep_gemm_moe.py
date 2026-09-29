@@ -301,8 +301,6 @@ class DeepGemmExperts(mk.FusedMoEExpertsModular):
                 group_size=block_k,
                 alpha=self.gemm1_alpha,
                 beta=self.gemm1_beta,
-                expert_ends=expert_ends,
-                expert_alignment=expert_alignment,
             )
 
         # 3. fallback path for non-SiLU activations in non‑UE8M0 cases.
@@ -361,14 +359,8 @@ class DeepGemmExperts(mk.FusedMoEExpertsModular):
         # Both GEMMs and quantization must agree on the live expert ranges.
         use_psum_layout = (
             not self.mxfp8
-            and (
-                current_platform.is_device_capability_family(90)
-                or (
-                    current_platform.is_device_capability_family(100)
-                    and DeepGemmQuantScaleFMT.from_oracle()
-                    == DeepGemmQuantScaleFMT.UE8M0
-                )
-            )
+            and current_platform.is_device_capability_family(100)
+            and DeepGemmQuantScaleFMT.from_oracle() == DeepGemmQuantScaleFMT.UE8M0
             and activation in (MoEActivation.SILU, MoEActivation.SWIGLUOAI_UNINTERLEAVE)
         )
         a1q, a1q_scale, grouped_layout, inv_perm, align_used = deepgemm_moe_permute(

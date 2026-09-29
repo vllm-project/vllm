@@ -113,16 +113,11 @@ def test_silu_mul_fp8_quant_deep_gemm(T: int, N: int):
     "counts", [[0, 1, 127, 128, 129, 0, 257, 13], [128] * 8, [0] * 8]
 )
 @pytest.mark.parametrize("group_size", [32, 128])
-@pytest.mark.parametrize("scale_format", ["packed", "float32", "ceil_ue8m0"])
 @pytest.mark.parametrize("hidden_size", [256, 2048])
 @pytest.mark.parametrize("clamp_limit", [None, 10.0])
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA graph test")
-def test_silu_quant_skips_expert_padding_on_graph_replay(
-    counts: list[int],
-    group_size: int,
-    scale_format: str,
-    hidden_size: int,
-    clamp_limit: float | None,
+def test_packed_silu_quant_skips_expert_padding_on_graph_replay(
+    counts: list[int], group_size: int, hidden_size: int, clamp_limit: float | None
 ):
     """Live rows match dense quantization; gaps stay untouched as counts change."""
     alignment = 128
@@ -148,28 +143,12 @@ def test_silu_quant_skips_expert_padding_on_graph_replay(
         ends.copy_(torch.tensor(positions, device=DEVICE, dtype=torch.int32))
         return mask
 
-    def quantize(x, output=None, **kwargs):
-        if scale_format == "packed":
-            return silu_mul_quant_fp8_packed_triton(
-                x,
-                group_size=group_size,
-                output_q=output,
-                clamp_limit=clamp_limit,
-                **kwargs,
-            )
-        return silu_mul_per_token_group_quant_fp8_colmajor(
+    def invoke():
+        return silu_mul_quant_fp8_packed_triton(
             x,
             group_size=group_size,
-            output=output,
+            output_q=output,
             clamp_limit=clamp_limit,
-            use_ue8m0=scale_format == "ceil_ue8m0",
-            **kwargs,
-        )
-
-    def invoke():
-        return quantize(
-            x,
-            output=output,
             expert_ends=ends,
             expert_alignment=alignment,
         )
@@ -186,7 +165,9 @@ def test_silu_quant_skips_expert_padding_on_graph_replay(
         x[~live] = float("nan")
         output.view(torch.uint8).fill_(91)
         graph.replay()
-        reference_q, reference_s = quantize(x)
+        reference_q, reference_s = silu_mul_quant_fp8_packed_triton(
+            x, group_size=group_size, clamp_limit=clamp_limit
+        )
         torch.testing.assert_close(
             actual_q.view(torch.uint8)[live],
             reference_q.view(torch.uint8)[live],
