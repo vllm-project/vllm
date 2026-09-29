@@ -33,22 +33,48 @@ class OpenAIModelRegistry:
 
     Suitable for CPU-only / render-only contexts that have no engine client
     and no LoRA support.
+
+    Supports multi-model configurations: a single registry can host multiple
+    `ModelConfig`s keyed by their served name. The primary model — the one
+    passed via `--model` — remains accessible as `self.model_config` for
+    backwards compatibility with call sites that predate multi-model support.
     """
 
     def __init__(
         self,
         model_config: ModelConfig,
         base_model_paths: list[BaseModelPath],
+        extra_model_configs: dict[str, ModelConfig] | None = None,
     ) -> None:
         self.model_config = model_config
         self.base_model_paths = base_model_paths
+        # Primary served-model-names all resolve to `model_config`; keys in
+        # `extra_model_configs` are additional served-model-names loaded via
+        # `--extra-served-model`. Precomputed as a merged lookup table so
+        # `get_model_config` is a single dict hit on the hot path.
+        primary_names = [p.name for p in base_model_paths]
+        self._model_configs: dict[str, ModelConfig] = {
+            **{name: model_config for name in primary_names},
+            **(extra_model_configs or {}),
+        }
         self.lora_requests: dict[str, LoRARequest] = {}
 
     def model_name(self, lora_request: LoRARequest | None = None) -> str:
         return self.base_model_paths[0].name
 
     def is_base_model(self, model_name: str) -> bool:
-        return any(model.name == model_name for model in self.base_model_paths)
+        return model_name in self._model_configs
+
+    def get_model_config(self, model_name: str | None) -> ModelConfig:
+        """Return the `ModelConfig` matching `model_name`, or the primary one.
+
+        Callers on paths that predate multi-model support pass `None` and get
+        the primary config; per-request dispatch on multi-model servers passes
+        the request's `model` field.
+        """
+        if model_name and model_name in self._model_configs:
+            return self._model_configs[model_name]
+        return self.model_config
 
     async def check_model(self, model_name: str | None) -> ErrorResponse | None:
         """Return an ErrorResponse if model_name is not served, else None."""
@@ -62,19 +88,34 @@ class OpenAIModelRegistry:
         )
 
     async def show_available_models(self) -> ModelList:
-        """Show available models (base models only)."""
-        max_model_len = self.model_config.max_model_len
-        return ModelList(
-            data=[
+        """Show every served model with its own `max_model_len`."""
+        seen: set[str] = set()
+        cards: list[ModelCard] = []
+        for base_model in self.base_model_paths:
+            if base_model.name in seen:
+                continue
+            seen.add(base_model.name)
+            cards.append(
                 ModelCard(
                     id=base_model.name,
-                    max_model_len=max_model_len,
+                    max_model_len=self.model_config.max_model_len,
                     root=base_model.model_path,
                     permission=[ModelPermission()],
                 )
-                for base_model in self.base_model_paths
-            ]
-        )
+            )
+        for name, cfg in self._model_configs.items():
+            if name in seen:
+                continue
+            seen.add(name)
+            cards.append(
+                ModelCard(
+                    id=name,
+                    max_model_len=cfg.max_model_len,
+                    root=cfg.model,
+                    permission=[ModelPermission()],
+                )
+            )
+        return ModelList(data=cards)
 
     async def resolve_lora(self, lora_name: str):
         raise RuntimeError("The OpenAIModelRegistry has no LoRA support.")

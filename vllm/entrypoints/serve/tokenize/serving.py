@@ -5,6 +5,7 @@ from typing import Any, Final
 
 from fastapi import Request
 
+from vllm.config import ModelConfig
 from vllm.entrypoints.chat_utils import ChatTemplateContentFormatOption
 from vllm.entrypoints.openai.models.serving import (
     OpenAIModelRegistry,
@@ -23,6 +24,8 @@ from vllm.entrypoints.serve.tokenize.protocol import (
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.inputs import TokensPrompt, tokens_input
 from vllm.logger import init_logger
+from vllm.renderers.inputs.preprocess import extract_prompt_components
+from vllm.renderers.multi_model import MultiModelOnlineRenderer
 from vllm.renderers.online_renderer import OnlineRenderer
 from vllm.tokenizers import TokenizerLike
 
@@ -33,7 +36,7 @@ class ServingTokenization(BaseServing):
     def __init__(
         self,
         models: OpenAIServingModels | OpenAIModelRegistry,
-        online_renderer: OnlineRenderer,
+        online_renderer: OnlineRenderer | MultiModelOnlineRenderer,
         *,
         chat_template: str | None,
         chat_template_content_format: ChatTemplateContentFormatOption,
@@ -41,18 +44,46 @@ class ServingTokenization(BaseServing):
         trust_request_chat_template: bool = False,
         request_logger: RequestLogger | None = None,
     ) -> None:
+        # `online_renderer` can be a single-model `OnlineRenderer` (legacy
+        # single-model servers) or a `MultiModelOnlineRenderer` dispatcher.
+        # We always wrap in a dispatcher internally so per-request routing
+        # is a uniform `.resolve(request.model)` call on the hot path.
+        if isinstance(online_renderer, MultiModelOnlineRenderer):
+            self._dispatcher = online_renderer
+        else:
+            primary_name = models.model_name()
+            self._dispatcher = MultiModelOnlineRenderer(
+                primary_name, {primary_name: online_renderer}
+            )
+
         super().__init__(
             models=models,
-            model_config=online_renderer.model_config,
+            model_config=self._dispatcher.primary.model_config,
             request_logger=request_logger,
         )
 
-        self.renderer = online_renderer.renderer
-        self.online_renderer = online_renderer
         self.chat_template = chat_template
         self.chat_template_content_format: Final = chat_template_content_format
         self.default_chat_template_kwargs = default_chat_template_kwargs or {}
         self.trust_request_chat_template = trust_request_chat_template
+
+    @property
+    def online_renderer(self) -> OnlineRenderer:
+        """Legacy accessor: the primary-model renderer.
+
+        Kept so any external caller poking at `serving_tokenization.online_renderer`
+        keeps working; per-request paths inside this class use `_dispatcher`.
+        """
+        return self._dispatcher.primary
+
+    @property
+    def renderer(self):
+        """Legacy accessor: the primary-model base renderer."""
+        return self._dispatcher.primary.renderer
+
+    def _resolve(self, model_name: str | None) -> tuple[OnlineRenderer, ModelConfig]:
+        online_renderer = self._dispatcher.resolve(model_name)
+        return online_renderer, online_renderer.model_config
 
     async def create_tokenize(
         self,
@@ -67,13 +98,15 @@ class ServingTokenization(BaseServing):
 
         lora_request = self._maybe_get_adapters(request)
 
+        online_renderer, model_config = self._resolve(request.model)
+
         if isinstance(request, TokenizeChatRequest):
             tool_dicts = (
                 None
                 if request.tools is None
                 else [tool.model_dump() for tool in request.tools]
             )
-            error_check_ret = self.online_renderer.validate_chat_template(
+            error_check_ret = online_renderer.validate_chat_template(
                 request_chat_template=request.chat_template,
                 chat_template_kwargs=request.chat_template_kwargs,
                 trust_request_chat_template=self.trust_request_chat_template,
@@ -81,7 +114,7 @@ class ServingTokenization(BaseServing):
             if error_check_ret is not None:
                 return error_check_ret
 
-            _, engine_inputs = await self.online_renderer.preprocess_chat(
+            _, engine_inputs = await online_renderer.preprocess_chat(
                 request,
                 request.messages,
                 default_template=self.chat_template,
@@ -91,7 +124,7 @@ class ServingTokenization(BaseServing):
                 skip_mm_cache=True,
             )
         else:
-            engine_inputs = await self.online_renderer.preprocess_completion(
+            engine_inputs = await online_renderer.preprocess_completion(
                 request,
                 prompt_input=request.prompt,
                 prompt_embeds=None,
@@ -107,20 +140,20 @@ class ServingTokenization(BaseServing):
                 lora_request=lora_request,
             )
 
-            prompt_components = self._extract_prompt_components(engine_input)
+            prompt_components = extract_prompt_components(model_config, engine_input)
             if prompt_components.token_ids is not None:
                 input_ids.extend(prompt_components.token_ids)
 
         token_strs = None
         if request.return_token_strs:
-            tokenizer = self.renderer.get_tokenizer()
+            tokenizer = online_renderer.renderer.get_tokenizer()
             token_strs = tokenizer.convert_ids_to_tokens(input_ids)
 
         return TokenizeResponse(
             tokens=input_ids,
             token_strs=token_strs,
             count=len(input_ids),
-            max_model_len=self.model_config.max_model_len,
+            max_model_len=model_config.max_model_len,
         )
 
     async def create_detokenize(
@@ -136,6 +169,8 @@ class ServingTokenization(BaseServing):
 
         lora_request = self._maybe_get_adapters(request)
 
+        online_renderer, model_config = self._resolve(request.model)
+
         self._log_inputs(
             request_id,
             tokens_input(request.tokens),
@@ -143,9 +178,9 @@ class ServingTokenization(BaseServing):
             lora_request=lora_request,
         )
 
-        tok_prompt = await self.renderer.tokenize_prompt_async(
+        tok_prompt = await online_renderer.renderer.tokenize_prompt_async(
             TokensPrompt(prompt_token_ids=request.tokens),
-            request.build_tok_params(self.model_config),
+            request.build_tok_params(model_config),
         )
         prompt_text = tok_prompt["prompt"]  # type: ignore[typeddict-item]
 
@@ -154,8 +189,14 @@ class ServingTokenization(BaseServing):
     async def get_tokenizer_info(
         self,
     ) -> TokenizerInfoResponse | ErrorResponse:
-        """Get comprehensive tokenizer information."""
-        tokenizer = self.renderer.get_tokenizer()
+        """Get comprehensive tokenizer information for the primary model.
+
+        This endpoint does not accept a `model` parameter today; multi-model
+        servers only expose the primary tokenizer here. Follow-up: extend the
+        endpoint schema with `?model=NAME` to allow lookup of extras.
+        """
+        primary = self._dispatcher.primary
+        tokenizer = primary.renderer.get_tokenizer()
         info = TokenizerInfo(tokenizer, self.chat_template).to_dict()
         return TokenizerInfoResponse(**info)
 
