@@ -1927,6 +1927,7 @@ class rocm_aiter_ops:
         VLLM_ROCM_USE_AITER_FP8BMM: Controls FP8 batched matrix multiply.
         VLLM_ROCM_USE_AITER_FP4_ASM_GEMM: Controls FP4 assembly GEMM.
         VLLM_ROCM_USE_AITER_TRITON_ROPE: Controls Triton rotary embeddings.
+        VLLM_ROCM_USE_AITER_TRITON_SPARSE_MLA: Controls Triton sparse MLA (gfx950).
         VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS: Controls shared expert fusion.
         VLLM_ROCM_USE_AITER_MOE_SITUV2: SiTUv2 FlyDSL MoE activation
             dtype (a16w4 | a8w4 | a4w4).
@@ -1998,6 +1999,7 @@ class rocm_aiter_ops:
     _FP4_GEMM_DYNAMIC_QUANT_ASM = envs.VLLM_ROCM_USE_AITER_FP4_ASM_GEMM
     # TODO: Consolidate under VLLM_ROCM_USE_AITER_ROPE
     _TRITON_ROTARY_EMBED = envs.VLLM_ROCM_USE_AITER_TRITON_ROPE
+    _TRITON_SPARSE_MLA = envs.VLLM_ROCM_USE_AITER_TRITON_SPARSE_MLA
     _MOE_SHARED_EXPERTS_ENABLED = envs.VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS
     _MOE_SITUV2 = _resolve_situv2_activation()
     # TODO: Consolidate under _LINEAR_ENABLED
@@ -2027,6 +2029,7 @@ class rocm_aiter_ops:
         cls._LINEAR_HIPBMM_ENABLED = envs.VLLM_ROCM_USE_AITER_LINEAR_HIPBMM
         cls._FP4_GEMM_DYNAMIC_QUANT_ASM = envs.VLLM_ROCM_USE_AITER_FP4_ASM_GEMM
         cls._TRITON_ROTARY_EMBED = envs.VLLM_ROCM_USE_AITER_TRITON_ROPE
+        cls._TRITON_SPARSE_MLA = envs.VLLM_ROCM_USE_AITER_TRITON_SPARSE_MLA
         cls._MOE_SHARED_EXPERTS_ENABLED = envs.VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS
         cls._MOE_SITUV2 = _resolve_situv2_activation()
         _sync_aiter_situv2_moe_env()
@@ -2390,6 +2393,25 @@ class rocm_aiter_ops:
     @if_aiter_supported
     def is_triton_rotary_embed_enabled(cls) -> bool:
         return cls._AITER_ENABLED and cls._TRITON_ROTARY_EMBED
+
+    @classmethod
+    @if_aiter_supported
+    def is_triton_sparse_mla_enabled(cls) -> bool:
+        if not cls._TRITON_SPARSE_MLA:
+            return False
+        from vllm.platforms.rocm import on_gfx950
+
+        if not cls._AITER_ENABLED:
+            reason = "VLLM_ROCM_USE_AITER is off"
+        elif not on_gfx950():
+            reason = "the kernel is gfx950-only"
+        else:
+            return True
+        logger.warning_once(
+            "VLLM_ROCM_USE_AITER_TRITON_SPARSE_MLA is set, but %s; ignoring it.",
+            reason,
+        )
+        return False
 
     @classmethod
     @if_aiter_supported
@@ -3136,6 +3158,57 @@ class rocm_aiter_ops:
         gate_up: bool,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         return torch.ops.vllm.rocm_aiter_fused_topk(x, router_logits, top_k, gate_up)
+
+    @staticmethod
+    def triton_sparse_mla_fwd(
+        q: torch.Tensor,
+        kv_buffer: torch.Tensor,
+        o: torch.Tensor,
+        sm_scale: float,
+        kv_indptr: torch.Tensor,
+        kv_indices: torch.Tensor,
+        kv_lora_rank: int = 512,
+        qk_rope_head_dim: int = 64,
+        q_scale: torch.Tensor | None = None,
+        kv_scale: torch.Tensor | None = None,
+        attn_sink: torch.Tensor | None = None,
+        extra_kv_buffer: torch.Tensor | None = None,
+        extra_kv_indptr: torch.Tensor | None = None,
+        extra_kv_indices: torch.Tensor | None = None,
+        has_invalid: bool = True,
+    ) -> None:
+        """Sparse MLA read straight from the KV cache, for prefill and decode.
+
+        kv_indices are ragged global slot ids. With has_invalid they may hold
+        -1, which the kernel masks; a caller whose stream never holds a
+        negative slot passes False, which lets the fp8 kernel stage K straight
+        into LDS. The cache format (bf16, per-tensor fp8, or DeepSeek V4's
+        paged fp8_ds_mla) is inferred from kv_buffer and kv_scale. An fp8 q
+        must come with its q_scale and runs both dots in fp8. The extra segment
+        is DeepSeek V4's second cache: SWA window in kv_buffer, top-k
+        compressed tokens here.
+        """
+        from aiter.ops.triton.attention.sparse_mla import sparse_mla_fwd
+
+        fp8_q = q.dtype == FP8_DTYPE
+        sparse_mla_fwd(
+            q,
+            kv_buffer,
+            kv_indptr,
+            kv_indices,
+            sm_scale,
+            kv_scale=kv_scale,
+            kv_lora_rank=kv_lora_rank,
+            qk_rope_head_dim=qk_rope_head_dim,
+            has_invalid=has_invalid,
+            dot_precision="fp8" if fp8_q else "bf16",
+            q_scale=q_scale if fp8_q else None,
+            out=o,
+            attn_sink=attn_sink,
+            extra_kv=extra_kv_buffer,
+            extra_indptr=extra_kv_indptr,
+            extra_indices=extra_kv_indices,
+        )
 
     @staticmethod
     def mla_decode_fwd(
@@ -4161,6 +4234,57 @@ class rocm_aiter_ops:
             layer_input.view(*outer_shape, hidden_size),
             next_pre_mix.view(*outer_shape, hc_mult),
         )
+
+    @staticmethod
+    def mhc_fused_post_pre_delayed_rms_norm(
+        residual: torch.Tensor,
+        fn: torch.Tensor,
+        hc_scale: torch.Tensor,
+        hc_base: torch.Tensor,
+        rms_eps: float,
+        hc_pre_eps: float,
+        hc_sinkhorn_eps: float,
+        hc_post_mult_value: float,
+        sinkhorn_repeat: int,
+        pre_mix: torch.Tensor | None,
+        sublayer_out: torch.Tensor | None,
+        post_layer_mix: torch.Tensor | None,
+        comb_res_mix: torch.Tensor | None,
+        norm_weight: torch.Tensor,
+        norm_eps: float,
+        residual_out: torch.Tensor | None,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """:meth:`mhc_pre_delayed` with the RMSNorm of the collapse folded in.
+
+        Runs aiter's fused Triton kernel ``mhc_fused_post_pre_delayed_rmsnorm``;
+        the returned ``layer_input`` is already normalised with ``norm_weight`` /
+        ``norm_eps``.
+        """
+        from aiter.ops.triton.fusions.mhc_fused_post_pre_delayed_rmsnorm import (
+            mhc_fused_post_pre_delayed_rmsnorm,
+        )
+
+        _, post_mix, comb_mix, layer_input, next_pre_mix = (
+            mhc_fused_post_pre_delayed_rmsnorm(
+                residual,
+                fn,
+                hc_scale,
+                hc_base,
+                rms_eps,
+                hc_pre_eps,
+                hc_sinkhorn_eps,
+                hc_post_mult_value,
+                sinkhorn_repeat,
+                pre_mix,
+                sublayer_out,
+                post_layer_mix,
+                comb_res_mix,
+                norm_weight,
+                norm_eps,
+                residual_out=residual_out,
+            )
+        )
+        return post_mix, comb_mix, layer_input, next_pre_mix
 
     @staticmethod
     def mhc_fused_post_pre_delayed_prefers_unfused(num_tokens: int) -> bool:
