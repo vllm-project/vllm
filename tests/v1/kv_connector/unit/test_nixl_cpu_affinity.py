@@ -1,29 +1,31 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Unit tests for NIXL CPU KV-transfer core reservation vs cgroup cpuset."""
+"""Unit tests for NUMA topology filtering vs cgroup cpuset."""
 
-from vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker import (
-    _cpu_kv_transfer_cores,
-)
+from vllm.platforms.cpu import filter_numa_topology_by_affinity
 
 
-def test_cpu_kv_transfer_cores_intersects_cgroup_cpuset():
+def test_filter_numa_topology_intersects_cgroup_cpuset():
     # Host sysfs: two NUMA nodes 0-23 and 24-47; container only 1-4,25-28.
     numa_core_list = [list(range(24)), list(range(24, 48))]
     allowed = frozenset({1, 2, 3, 4, 25, 26, 27, 28})
 
-    assert _cpu_kv_transfer_cores(numa_core_list, allowed) == [4, 28]
+    filtered = filter_numa_topology_by_affinity(numa_core_list, allowed)
+    assert filtered == [[1, 2, 3, 4], [25, 26, 27, 28]]
+    assert [max(cores) for cores in filtered] == [4, 28]
 
 
-def test_cpu_kv_transfer_cores_skips_nodes_with_no_overlap():
+def test_filter_numa_topology_skips_nodes_with_no_overlap():
     numa_core_list = [list(range(24)), list(range(24, 48))]
     allowed = frozenset({1, 2, 3, 4})
 
-    assert _cpu_kv_transfer_cores(numa_core_list, allowed) == [4]
+    filtered = filter_numa_topology_by_affinity(numa_core_list, allowed)
+    assert filtered == [[1, 2, 3, 4]]
+    assert [max(cores) for cores in filtered] == [4]
 
 
-def test_cpu_kv_transfer_cores_empty_when_disjoint():
+def test_filter_numa_topology_empty_when_disjoint():
     numa_core_list = [list(range(24)), list(range(24, 48))]
     allowed = frozenset({100, 101})
 
-    assert _cpu_kv_transfer_cores(numa_core_list, allowed) == []
+    assert filter_numa_topology_by_affinity(numa_core_list, allowed) == []
