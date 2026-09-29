@@ -119,10 +119,14 @@ def test_hidden_state_group_isolated_from_packed_mla_groups():
     }
     vllm_config = SimpleNamespace(
         cache_config=SimpleNamespace(
-            get_resolved_kv_cache_layout=lambda: KVCacheLayout.BLHNC
+            get_resolved_kv_cache_layout=lambda: KVCacheLayout.BLHNC,
+            min_kv_cache_group_layers=3,
         ),
         scheduler_config=SimpleNamespace(disable_hybrid_kv_cache_manager=False),
         speculative_config=None,
+        model_config=SimpleNamespace(max_model_len=4096),
+        parallel_config=SimpleNamespace(decode_context_parallel_size=1),
+        max_in_flight_tokens=256,
     )
     groups = get_kv_cache_groups(vllm_config, spec)
     hidden_group_ids = [
@@ -150,10 +154,14 @@ def test_hidden_state_group_isolated_from_packed_mixed_page_groups():
     }
     vllm_config = SimpleNamespace(
         cache_config=SimpleNamespace(
-            get_resolved_kv_cache_layout=lambda: KVCacheLayout.BLHNC
+            get_resolved_kv_cache_layout=lambda: KVCacheLayout.BLHNC,
+            min_kv_cache_group_layers=3,
         ),
         scheduler_config=SimpleNamespace(disable_hybrid_kv_cache_manager=False),
         speculative_config=None,
+        model_config=SimpleNamespace(max_model_len=4096),
+        parallel_config=SimpleNamespace(decode_context_parallel_size=1),
+        max_in_flight_tokens=256,
     )
     groups = get_kv_cache_groups(vllm_config, spec)
     page_sizes = {g.kv_cache_spec.page_size_bytes for g in groups}
