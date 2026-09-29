@@ -50,13 +50,11 @@ from vllm.models.minimax_m3.amd.sparse_attention_msa import (  # noqa: E402
 )
 from vllm.models.minimax_m3.common.sparse_attention import (  # noqa: E402
     MiniMaxM3SparseBackend,
+    MiniMaxM3SparseTritonImpl,
     minimax_m3_use_aiter_sparse_pa,
     select_main_backend_and_impl_cls,
 )
-from vllm.v1.attention.backends.utils import set_kv_cache_layout  # noqa: E402
-
-_BLOCK_SIZE = 128
-_HEAD_DIM = 128
+from vllm.v1.kv_cache_interface import KVCacheLayout  # noqa: E402
 
 
 def _enable_aiter_sparse_pa(monkeypatch, *, speculative: bool) -> None:
@@ -80,18 +78,12 @@ def test_aiter_sparse_pa_used_without_speculative_decoding(monkeypatch):
     _enable_aiter_sparse_pa(monkeypatch, speculative=False)
 
     assert minimax_m3_use_aiter_sparse_pa(1) is True
-    nb, bs, h, d = 7, _BLOCK_SIZE, 1, _HEAD_DIM
-    assert MiniMaxM3SparseBackend.get_kv_cache_shape(nb, bs, h, d) == (
-        nb,
-        2,
-        bs,
-        h,
-        d,
+    assert MiniMaxM3SparseBackend.supported_kv_cache_layouts() == (
+        KVCacheLayout.LBHNC,
+        KVCacheLayout.LHBNC,
     )
-    assert MiniMaxM3SparseBackend.get_kv_cache_stride_order() == (1, 0, 2, 3, 4)
-
     with pytest.raises(ValueError, match="num_kv_heads == 1"):
-        MiniMaxM3SparseBackend.get_kv_cache_shape(nb, bs, 2, d)
+        minimax_m3_use_aiter_sparse_pa(2)
 
     _, impl_cls = select_main_backend_and_impl_cls(
         topk_blocks=16,
@@ -110,29 +102,14 @@ def test_aiter_sparse_pa_skipped_under_speculative_decoding(monkeypatch):
     _enable_aiter_sparse_pa(monkeypatch, speculative=True)
 
     assert minimax_m3_use_aiter_sparse_pa(1) is False
+    assert MiniMaxM3SparseBackend.supported_kv_cache_layouts() is None
+    # Triton supports GQA; do not inherit the AITER num_kv_heads == 1 check.
+    assert minimax_m3_use_aiter_sparse_pa(2) is False
 
-    nb, bs, h, d = 7, _BLOCK_SIZE, 1, _HEAD_DIM
-    logical = MiniMaxM3SparseBackend.get_kv_cache_shape(nb, bs, h, d)
-    try:
-        set_kv_cache_layout("NHD")
-        order = MiniMaxM3SparseBackend.get_kv_cache_stride_order()
-    finally:
-        set_kv_cache_layout(None)
-    assert logical == (nb, h, bs, 2 * d)
-    assert order == (0, 2, 1, 3)
-
-    # Fallback is Triton, which supports GQA; do not inherit the AITER
-    # num_kv_heads == 1 restriction.
-    assert MiniMaxM3SparseBackend.get_kv_cache_shape(nb, bs, 2, d) == (
-        nb,
-        2,
-        bs,
-        2 * d,
-    )
-
-    _, impl_cls = select_main_backend_and_impl_cls(
+    backend, impl_cls = select_main_backend_and_impl_cls(
         topk_blocks=16,
         kv_cache_dtype="fp8",
         num_kv_heads=1,
     )
-    assert impl_cls is not MiniMaxM3SparseAiterPAImpl
+    assert backend is MiniMaxM3SparseBackend
+    assert impl_cls is MiniMaxM3SparseTritonImpl
