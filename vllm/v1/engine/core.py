@@ -21,7 +21,7 @@ import msgspec
 import zmq
 
 import vllm.envs as envs
-from vllm.config import ParallelConfig, VllmConfig
+from vllm.config import ParallelConfig, VllmConfig, set_current_vllm_config
 from vllm.config.pooler import POOLER_CONFIG_LOG_FIELDS
 from vllm.distributed import (
     cleanup_dist_env_and_memory,
@@ -73,6 +73,12 @@ from vllm.v1.engine import (
     ReconfigureRankType,
     UtilityOutput,
     UtilityResult,
+)
+from vllm.v1.engine.layout_transition import (
+    LayoutTransitionPhase,
+    LayoutTransitionRejected,
+    LayoutTransitionRequest,
+    run_layout_stage,
 )
 from vllm.v1.engine.tensor_ipc import TensorIpcReceiver
 from vllm.v1.engine.utils import (
@@ -133,8 +139,11 @@ class EngineCore:
             )
 
         self.log_stats = log_stats
+        self._include_finished_set = include_finished_set
         # Opaque weight version supplied by the caller.
         self._weight_version = "default"
+        self._layout_transition: LayoutTransitionRequest | None = None
+        self._layout_transition_phase: LayoutTransitionPhase | None = None
 
         # Setup Model.
         self.model_executor = executor_class(vllm_config)
@@ -151,29 +160,7 @@ class EngineCore:
         kv_cache_config = self._initialize_kv_caches(vllm_config)
         self.structured_output_manager = StructuredOutputManager(vllm_config)
 
-        # Setup scheduler.
-        Scheduler = vllm_config.scheduler_config.get_scheduler_cls()
-
-        if len(kv_cache_config.kv_cache_groups) == 0:  # noqa: SIM102
-            # Encoder models without KV cache don't support
-            # chunked prefill. But do SSM models?
-            if vllm_config.scheduler_config.enable_chunked_prefill:
-                logger.warning("Disabling chunked prefill for model without KVCache")
-                vllm_config.scheduler_config.enable_chunked_prefill = False
-
-        scheduler_block_size, hash_block_size = resolve_kv_cache_block_sizes(
-            kv_cache_config, vllm_config
-        )
-
-        self.scheduler: SchedulerInterface = Scheduler(
-            vllm_config=vllm_config,
-            kv_cache_config=kv_cache_config,
-            structured_output_manager=self.structured_output_manager,
-            include_finished_set=include_finished_set,
-            log_stats=self.log_stats,
-            block_size=scheduler_block_size,
-            hash_block_size=hash_block_size,
-        )
+        self.scheduler, hash_block_size = self._create_scheduler(kv_cache_config)
         self._initialize_effective_attention_block_size()
         self.use_spec_decode = vllm_config.speculative_config is not None
         self.check_for_draft_tokens = (
@@ -250,6 +237,34 @@ class EngineCore:
         # Enable environment variable cache (e.g. assume no more
         # environment variable overrides after this point)
         enable_envs_cache()
+
+    def _create_scheduler(
+        self, kv_cache_config: KVCacheConfig
+    ) -> tuple[SchedulerInterface, int]:
+        """Construct empty scheduler state and resolve the request hash block size."""
+        vllm_config = self.vllm_config
+        Scheduler = vllm_config.scheduler_config.get_scheduler_cls()
+
+        if len(kv_cache_config.kv_cache_groups) == 0:  # noqa: SIM102
+            # Encoder models without KV cache don't support
+            # chunked prefill. But do SSM models?
+            if vllm_config.scheduler_config.enable_chunked_prefill:
+                logger.warning("Disabling chunked prefill for model without KVCache")
+                vllm_config.scheduler_config.enable_chunked_prefill = False
+
+        scheduler_block_size, hash_block_size = resolve_kv_cache_block_sizes(
+            kv_cache_config, vllm_config
+        )
+        scheduler = Scheduler(
+            vllm_config=vllm_config,
+            kv_cache_config=kv_cache_config,
+            structured_output_manager=self.structured_output_manager,
+            include_finished_set=self._include_finished_set,
+            log_stats=self.log_stats,
+            block_size=scheduler_block_size,
+            hash_block_size=hash_block_size,
+        )
+        return scheduler, hash_block_size
 
     @instrument(span_name="Prepare model")
     def _initialize_kv_caches(self, vllm_config: VllmConfig) -> KVCacheConfig:
@@ -489,6 +504,7 @@ class EngineCore:
         `request_wave`: indicate which wave of requests this is expected to
         belong to in DP case
         """
+        self._require_no_layout_transition()
         # Validate the request_id type.
         if not isinstance(request.request_id, str):
             raise TypeError(
@@ -633,6 +649,7 @@ class EngineCore:
         Returns tuple of outputs and a flag indicating whether the model
         was executed.
         """
+        self._require_no_layout_transition()
         # Check for any requests remaining in the scheduler - unfinished,
         # or finished and not yet removed from the batch.
         if not self.scheduler.has_requests():
@@ -683,6 +700,7 @@ class EngineCore:
         batch in the job queue is finished.
         3. Update the scheduler from the output.
         """
+        self._require_no_layout_transition()
         batch_queue = self.batch_queue
         assert batch_queue is not None
 
@@ -910,6 +928,7 @@ class EngineCore:
 
     def resume_scheduler(self) -> None:
         """Resume the scheduler and flush any requests queued while paused."""
+        self._require_no_layout_transition()
         self.scheduler.set_pause_state(PauseState.UNPAUSED)
 
     def is_scheduler_paused(self) -> bool:
@@ -1003,7 +1022,180 @@ class EngineCore:
         return self.is_scheduler_paused() or self.model_executor.is_sleeping
 
     def execute_dummy_batch(self):
+        self._require_no_layout_transition()
         self.model_executor.execute_dummy_batch()
+
+    def _require_no_layout_transition(self) -> None:
+        if getattr(self, "_layout_transition", None) is not None:
+            raise RuntimeError("A layout transition has reserved this engine")
+
+    def prepare_layout_transition(
+        self,
+        request: LayoutTransitionRequest,
+        frontend_reasons: list[str] | None = None,
+    ) -> None:
+        """Reserve a drained engine on every external-launcher physical rank.
+
+        Call after synchronous generation has returned on all ranks, using the
+        same request and serialized calls, as required by offline SPMD. This
+        prepares a future full IPC refit; it does not rebuild or load weights.
+        A collective rejection leaves the old layout and pause state intact.
+        Transport failures keep admission closed because consensus is unknown.
+        """
+        previous = self._layout_transition
+        reasons = list(frontend_reasons or ())
+        if previous is not None:
+            reasons.append("a layout transition is already active")
+        else:
+            self._layout_transition_previous_pause = self.scheduler.pause_state
+            self._layout_transition = request
+        try:
+            if type(self) is not EngineCore:
+                reasons.append("requires an in-process EngineCore")
+            if (
+                any(self.scheduler.get_request_counts())
+                or self.scheduler.has_requests()
+            ):
+                reasons.append("scheduler still has requests or pending completions")
+            if self.batch_queue:
+                reasons.append("batch queue is not empty")
+            if self.vllm_config.scheduler_config.async_scheduling:
+                reasons.append("requires synchronous scheduling")
+            if self.model_executor.is_sleeping:
+                reasons.append("executor is sleeping")
+        except Exception as error:
+            reasons.append(f"engine preflight failed: {type(error).__name__}: {error}")
+        try:
+            self.model_executor.collective_rpc(
+                "prepare_layout_transition", args=(request, reasons)
+            )
+        except LayoutTransitionRejected:
+            self._layout_transition = previous
+            raise
+        # Only reversible admission state changes before collective agreement.
+        self.scheduler.set_pause_state(PauseState.PAUSED_ALL)
+
+        self._layout_transition_phase = LayoutTransitionPhase.PREPARED
+
+    def cancel_layout_transition(self, request: LayoutTransitionRequest) -> None:
+        """Collectively release a preparation reservation before any teardown."""
+        reasons = []
+        if self._layout_transition != request:
+            reasons.append("engine does not own this transition")
+        if (
+            getattr(self, "_layout_transition_phase", None)
+            != LayoutTransitionPhase.PREPARED
+        ):
+            reasons.append("engine is not in the cancellable preparation phase")
+        self.model_executor.collective_rpc(
+            "cancel_layout_transition", args=(request, reasons)
+        )
+        self.scheduler.set_pause_state(self._layout_transition_previous_pause)
+        self._layout_transition = None
+        self._layout_transition_phase = None
+
+    def _layout_phase_reasons(
+        self, request: LayoutTransitionRequest, phase: LayoutTransitionPhase
+    ) -> list[str]:
+        reasons = []
+        if self._layout_transition != request:
+            reasons.append("engine does not own this transition")
+        if self._layout_transition_phase != phase:
+            reasons.append(f"engine requires transition phase {phase.value}")
+        return reasons
+
+    def install_layout_transition(
+        self,
+        request: LayoutTransitionRequest,
+        release_frontend: Callable[[], None] | None = None,
+    ) -> None:
+        """Install the target model and begin a reserved full-checkpoint refit."""
+        reasons = self._layout_phase_reasons(request, LayoutTransitionPhase.PREPARED)
+        self.model_executor.collective_rpc(
+            "begin_layout_install", args=(request, reasons)
+        )
+        self._layout_transition_phase = LayoutTransitionPhase.INSTALLING
+
+        def release() -> None:
+            if release_frontend is not None:
+                release_frontend()
+            self.scheduler.shutdown()
+
+        try:
+            run_layout_stage(request, "release scheduler and frontend", release)
+            self.model_executor.collective_rpc(
+                "install_layout_transition", args=(request,)
+            )
+            self.model_executor.parallel_config = self.vllm_config.parallel_config
+        except Exception:
+            self._layout_transition_phase = LayoutTransitionPhase.FAILED
+            raise
+        self._layout_transition_phase = LayoutTransitionPhase.REFITTING
+
+    def update_layout_weights(
+        self, request: LayoutTransitionRequest, update_info: dict
+    ) -> None:
+        reasons = self._layout_phase_reasons(request, LayoutTransitionPhase.REFITTING)
+        try:
+            self.model_executor.collective_rpc(
+                "update_layout_weights", args=(request, update_info, reasons)
+            )
+        except LayoutTransitionRejected:
+            raise
+        except Exception:
+            self._layout_transition_phase = LayoutTransitionPhase.FAILED
+            raise
+
+    def finish_layout_transition(
+        self,
+        request: LayoutTransitionRequest,
+        rebind_frontend: Callable[[], None] | None = None,
+    ) -> None:
+        """Finalize complete weights, rebuild execution state, then open admission."""
+        reasons = self._layout_phase_reasons(request, LayoutTransitionPhase.REFITTING)
+        try:
+            self.model_executor.collective_rpc(
+                "finish_layout_refit", args=(request, reasons)
+            )
+        except LayoutTransitionRejected:
+            raise
+        except Exception:
+            self._layout_transition_phase = LayoutTransitionPhase.FAILED
+            raise
+        self._layout_transition_phase = LayoutTransitionPhase.WEIGHTS_READY
+
+        def rebuild() -> None:
+            with set_current_vllm_config(self.vllm_config):
+                self.available_gpu_memory_for_kv_cache = -1
+                kv_config = self._initialize_kv_caches(self.vllm_config)
+                self.scheduler, hash_size = self._create_scheduler(kv_config)
+                self.scheduler.set_pause_state(PauseState.PAUSED_ALL)
+                self._initialize_effective_attention_block_size()
+                self.request_block_hasher = None
+                if self.vllm_config.cache_config.enable_prefix_caching:
+                    hashing = get_hash_fn_by_name(
+                        self.vllm_config.cache_config.prefix_caching_hash_algo
+                    )
+                    init_none_hash(hashing)
+                    self.request_block_hasher = get_request_block_hasher(
+                        hash_size, hashing
+                    )
+                if rebind_frontend is not None:
+                    rebind_frontend()
+                freeze_gc_heap()
+
+        try:
+            run_layout_stage(request, "rebuild execution state", rebuild)
+            self.model_executor.collective_rpc(
+                "complete_layout_transition", args=(request, [])
+            )
+        except Exception:
+            self._layout_transition_phase = LayoutTransitionPhase.FAILED
+            raise
+        self.scheduler.set_pause_state(self._layout_transition_previous_pause)
+        self._weight_version = request.weight_version
+        self._layout_transition = None
+        self._layout_transition_phase = None
 
     def add_lora(self, lora_request: LoRARequest) -> bool:
         return self.model_executor.add_lora(lora_request)

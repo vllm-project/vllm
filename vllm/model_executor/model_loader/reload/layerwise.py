@@ -37,6 +37,7 @@ __all__ = [
     "initialize_layerwise_reload",
     "finalize_layerwise_processing",
     "finalize_layerwise_reload",
+    "discard_layerwise_reload",
 ]
 
 
@@ -64,6 +65,17 @@ def get_layerwise_info(layer: torch.nn.Module) -> LayerReloadingInfo:
         )
 
     return LAYERWISE_INFO[layer]
+
+
+def discard_layerwise_reload(model: torch.nn.Module) -> None:
+    """Release reload bookkeeping for a model being permanently destroyed.
+
+    An unfinished reload may retain IPC inputs and kernel tensors. Discarding
+    this state does not complete the checkpoint or make the model executable.
+    """
+    for layer in model.modules():
+        LAYERWISE_INFO.pop(layer, None)
+        LOADING_LAYERS.discard(layer)
 
 
 def record_metadata_for_reloading(model: torch.nn.Module):
