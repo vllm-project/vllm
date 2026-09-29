@@ -71,9 +71,11 @@ if [[ -z "${BK_TOKEN}" ]]; then
 fi
 
 AUDIENCE="pytorch-cross-repo-ci-relay"
+# Pre-flight only; the token minted here is discarded. Checking now means an
+# unusable OIDC setup costs seconds rather than being discovered after hours of
+# polling. The token that is actually sent is minted after the wait, below.
 # OIDC redaction also requires the unavailable Job API socket.
-OIDC_TOKEN="$(buildkite-agent oidc request-token --skip-redaction --audience "${AUDIENCE}" 2>/dev/null)"
-if [[ -z "${OIDC_TOKEN}" ]]; then
+if [[ -z "$(buildkite-agent oidc request-token --skip-redaction --audience "${AUDIENCE}" 2>/dev/null)" ]]; then
     echo "could not mint a Buildkite OIDC token -- skipping report"
     exit 0
 fi
@@ -142,7 +144,7 @@ POLL_INTERVAL_S="${CRCR_POLL_INTERVAL_S:-900}"
 # meaningless whenever the step was itself delayed.
 #
 # Resolved after the first fetch, from the build's own created_at.
-MAX_BUILD_AGE_S="${CRCR_MAX_BUILD_AGE_S:-25200}"
+MAX_BUILD_AGE_S="${CRCR_MAX_BUILD_AGE_S:-14400}"
 WAIT_DEADLINE=""
 # Used until created_at is known. Without it, an API outage on the very first
 # request leaves the deadline unresolved and the loop spins to the step timeout.
@@ -220,6 +222,17 @@ done
 # Resolved from this script's location: the pipeline runs it from
 # /vllm-workspace/tests, so a repo-relative path would not resolve.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Minted here, not before the poll loop: a Buildkite OIDC token defaults to a
+# five-minute lifetime and the loop above can run to the build-age deadline.
+# Build 91827 waited 6h48m and then took a 401 on all 360 callbacks from a
+# token that had expired hours earlier.
+OIDC_TOKEN="$(buildkite-agent oidc request-token --skip-redaction --audience "${AUDIENCE}" 2>/dev/null)"
+if [[ -z "${OIDC_TOKEN}" ]]; then
+    echo "could not mint a Buildkite OIDC token after the wait -- skipping report"
+    exit 0
+fi
+
 python3 "${SCRIPT_DIR}/crcr_report.py" \
     --build-json "${BUILD_JSON}" \
     --callback-url "${CALLBACK_URL}" \
