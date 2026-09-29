@@ -90,13 +90,16 @@ def test_modernbert_models(
         "flaky tolerance enabled due to numerical precision variance."
     )
 
-    with vllm_runner(model, max_model_len=None, dtype=dtype) as vllm_model:
+    with vllm_runner(
+        model, max_model_len=None, dtype=dtype, trust_remote_code=False
+    ) as vllm_model:
         vllm_outputs = vllm_model.token_classify(example_prompts)
 
     with hf_runner(
         model,
         dtype=dtype,
         auto_cls=AutoModelForTokenClassification,
+        trust_remote_code=False,
     ) as hf_model:
         tokenizer = hf_model.tokenizer
         hf_outputs = []
