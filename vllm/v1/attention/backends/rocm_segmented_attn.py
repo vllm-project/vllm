@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """ROCm attention backend for token-major segmented Triton attention."""
 
+import os
+from pathlib import Path
 from typing import TYPE_CHECKING, ClassVar
 
 import torch
@@ -200,6 +202,12 @@ class RocmSegmentedAttentionImpl(RocmAttentionImpl):
                 "(gfx12 for FP8), head size 64, 128 or 256, GQA ratio 1-16, and "
                 "does not support ALiBi."
             )
+        # Startup tuning and target/draft compilation must share a Triton cache.
+        cache_dir = os.environ.setdefault(
+            "TRITON_CACHE_DIR",
+            str(Path(envs.VLLM_CACHE_ROOT) / "rocm_segmented_attention" / "triton"),
+        )
+        Path(cache_dir).mkdir(parents=True, exist_ok=True)
         logger.info_once("Using token-major ROCm segmented Triton attention")
         self._segmented_attention_warmed_up = False
         self._segmented_attention_config: VllmConfig | None = None

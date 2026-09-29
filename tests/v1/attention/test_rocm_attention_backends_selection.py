@@ -156,6 +156,35 @@ def test_segmented_attention_requires_rocm_rdna(monkeypatch, platform, rdna):
             )
 
 
+@pytest.mark.parametrize("explicit_cache", [False, True])
+def test_segmented_triton_cache_survives_standalone_compilation(
+    monkeypatch, tmp_path, explicit_cache
+):
+    """Backend initialization preserves one cache across model compilations."""
+    import os
+
+    from vllm.compilation.compiler_interface import InductorStandaloneAdaptor
+    from vllm.platforms import rocm
+    from vllm.v1.attention.backends.rocm_segmented_attn import (
+        RocmSegmentedAttentionImpl,
+    )
+
+    monkeypatch.setattr(rocm, "on_gfx1x", lambda: True)
+    monkeypatch.setenv("VLLM_CACHE_ROOT", str(tmp_path))
+    monkeypatch.delenv("TRITON_CACHE_DIR", raising=False)
+    monkeypatch.delenv("TORCHINDUCTOR_CACHE_DIR", raising=False)
+    expected = tmp_path / "rocm_segmented_attention" / "triton"
+    if explicit_cache:
+        expected = tmp_path / "custom"
+        monkeypatch.setenv("TRITON_CACHE_DIR", str(expected))
+    for model in ("target", "draft", "restart_target"):
+        RocmSegmentedAttentionImpl(8, 128, 128**-0.5, 2, None, None, "auto")
+        assert os.environ["TRITON_CACHE_DIR"] == str(expected)
+        assert expected.is_dir()
+        InductorStandaloneAdaptor("binary").initialize_cache(str(tmp_path / model))
+        assert os.environ["TRITON_CACHE_DIR"] == str(expected)
+
+
 def test_segmented_attention_is_opt_in(monkeypatch):
     from vllm.platforms import rocm
     from vllm.platforms.rocm import RocmPlatform, _get_backend_priorities

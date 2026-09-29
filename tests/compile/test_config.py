@@ -1366,35 +1366,3 @@ def test_inductor_asserts_user_override(monkeypatch):
     assert config.inductor_compile_config.get("size_asserts") is True
     if not _is_torch_equal_or_newer(torch.__version__, "2.12.0.dev"):
         assert config.inductor_compile_config.get("alignment_asserts") is False
-
-
-@pytest.mark.parametrize("draft_only", [False, True])
-@pytest.mark.parametrize("explicit_cache", [False, True])
-def test_segmented_triton_cache_survives_standalone_compilation(
-    monkeypatch, tmp_path, draft_only, explicit_cache
-):
-    """Startup kernels and both compiled models must share a persistent cache."""
-    import os
-
-    from vllm.compilation.compiler_interface import InductorStandaloneAdaptor
-    from vllm.config import AttentionConfig
-    from vllm.v1.attention.backends.registry import AttentionBackendEnum
-
-    monkeypatch.setenv("VLLM_CACHE_ROOT", str(tmp_path))
-    monkeypatch.delenv("TRITON_CACHE_DIR", raising=False)
-    monkeypatch.delenv("TORCHINDUCTOR_CACHE_DIR", raising=False)
-    expected = tmp_path / "rocm_segmented_attention" / "triton"
-    if explicit_cache:
-        expected = tmp_path / "custom"
-        monkeypatch.setenv("TRITON_CACHE_DIR", str(expected))
-    backend = AttentionBackendEnum.ROCM_SEGMENTED_ATTN
-    config = VllmConfig.__new__(VllmConfig)
-    config.attention_config = AttentionConfig(backend=None if draft_only else backend)
-    config.speculative_config = (
-        SimpleNamespace(attention_backend=backend) if draft_only else None
-    )
-    assert config.setup_segmented_attention_cache() == str(expected)
-    for model in ("target", "draft", "restart_target"):
-        InductorStandaloneAdaptor("binary").initialize_cache(str(tmp_path / model))
-        assert os.environ["TRITON_CACHE_DIR"] == str(expected)
-    assert expected.is_dir()
