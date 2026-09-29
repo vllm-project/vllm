@@ -2781,16 +2781,14 @@ class Scheduler(SchedulerInterface):
         Otherwise, this method will only reset the KV prefix cache when there
         is no running requests taking KV cache.
         """
-        if reset_running_requests and self.aux_output_connector is not None:
-            if self.running and self._pause_state != PauseState.PAUSED_ALL:
-                raise RuntimeError(
-                    "AuxOutput Connector only supports resetting running requests "
-                    "after pause(mode='keep')."
-                )
-            if any(request.num_in_flight_tokens for request in self.requests.values()):
-                raise RuntimeError(
-                    "AuxOutput Connector cannot reset while model output is in flight."
-                )
+        if (
+            reset_running_requests
+            and self.aux_output_connector is not None
+            and any(request.num_in_flight_tokens for request in self.requests.values())
+        ):
+            raise RuntimeError(
+                "AuxOutput Connector cannot reset while model output is in flight."
+            )
         if reset_running_requests:
             # For logging.
             timestamp = time.monotonic()

@@ -1562,11 +1562,7 @@ def test_scheduler_reset_prefix_cache():
     assert not scheduler.reset_prefix_cache()
     scheduler.aux_output_connector.reset.assert_not_called()
 
-    with pytest.raises(RuntimeError, match=r"pause\(mode='keep'\)"):
-        scheduler.reset_prefix_cache(reset_running_requests=True)
-
-    # pause(mode="keep") also waits for scheduled model outputs to drain.
-    scheduler.set_pause_state(PauseState.PAUSED_ALL)
+    # Reset requires drained model outputs, not a particular pause mode.
     with pytest.raises(RuntimeError, match="model output is in flight"):
         scheduler.reset_prefix_cache(reset_running_requests=True)
     for request in requests:
