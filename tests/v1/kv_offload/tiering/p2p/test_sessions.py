@@ -1695,6 +1695,36 @@ class TestServerFlows:
             f"unexpected duplicate StoreResult after timeout: {stores}"
         )
 
+    def test_fetch_after_symmetric_supply_timed_out_reads_nothing(self):
+        """A lookup pin whose store job timed out has been reported failed,
+        so the engine unpinned the primary slot. A late FetchMsg must not
+        read that slot: the round fails fast instead."""
+        parent = FakeParent(stored={b"hA": 7})
+        session, conn, transport = _make_session()
+        _activate(session, conn)
+        _send_lookup(conn, "req-1", [b"hA"])
+        session.poll()
+        _serve(session, parent)
+        (job_id,) = session._server._store_jobs
+
+        session._server._store_jobs[job_id] = time.monotonic() - 60.0
+        assert StoreResult(job_id=job_id, success=False) in session.poll().stores
+
+        conn.enqueue(
+            {
+                TYPE_KEY: FetchMsg.TYPE,
+                FetchMsg.ROUND_SEQ: 0,
+                FetchMsg.KV_REQUEST_ID: "req-1",
+                FetchMsg.KEYS: [b"hA"],
+                FetchMsg.BLOCK_INDEXES: [20],
+            }
+        )
+        session.poll()
+
+        assert transport._transfers == {}
+        dones = [m for m in conn._sent if m[TYPE_KEY] == TransferDoneMsg.TYPE]
+        assert dones and dones[-1][TransferDoneMsg.SUCCESS] is False
+
 
 # ---------------------------------------------------------------------------
 # finish_request server-role early-fail flow
