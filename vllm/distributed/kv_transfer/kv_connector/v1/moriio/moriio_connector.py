@@ -318,7 +318,7 @@ class MoRIIOConnector(KVConnectorBase_V1, SupportsHMA):
         if pending is None:
             return []
         # Hybrid READ fills these entire attention pages and aborts on failure.
-        # The destination list already excludes local hits and lookahead blocks.
+        # The scheduler excludes these IDs only from newly allocated page zeroing.
         return pending[1][0]
 
     def build_connector_meta(

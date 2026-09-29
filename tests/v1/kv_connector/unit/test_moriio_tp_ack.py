@@ -3,6 +3,7 @@
 
 import threading
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 
@@ -13,6 +14,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_common import (
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_connector import (
     MoRIIOConnector,
+    MoRIIOConnectorScheduler,
     MoRIIOConnectorWorker,
     get_moriio_expected_ack_count,
     get_moriio_remote_tp_rank,
@@ -66,6 +68,63 @@ def test_remote_tp_rank_same_tp_maps_to_self():
         2,
         3,
     ]
+
+
+@pytest.mark.parametrize("layout", ["LBHNC", "LBNHC"])
+def test_sync_read_partial_prefix_hit_keeps_local_tail_zeroing(layout):
+    """Pending READs may include a hit; the local tail must still be zeroed."""
+    from vllm.v1.core.sched.scheduler import Scheduler
+
+    read_scheduler = MoRIIOConnectorScheduler.__new__(MoRIIOConnectorScheduler)
+    read_scheduler.mode = MoRIIOMode.READ
+    read_scheduler._has_mamba = True
+    read_scheduler._attn_group_ids = [0]
+    read_scheduler._mamba_group_ids = [1]
+    read_scheduler._ssm_state_slots_are_positional = False
+    read_scheduler._max_decode_tail_blocks = 1
+    read_scheduler.request_id_to_transfer_id = {}
+    read_scheduler.transfer_id_to_request_id = {}
+    read_scheduler._reqs_need_recv = {}
+    read_scheduler._req_kv_params = {}
+    read_scheduler.kv_cache_config = SimpleNamespace(
+        select_transfer_block_ids=lambda block_ids: block_ids,
+    )
+    request = SimpleNamespace(
+        request_id="req",
+        num_prompt_tokens=33,
+        num_computed_tokens=16,
+        kv_transfer_params={
+            "do_remote_prefill": True,
+            "remote_engine_id": "prefill",
+            "remote_block_ids": [[70, 80], [900]],
+        },
+    )
+    connector = MoRIIOConnector.__new__(MoRIIOConnector)
+    connector.mode = MoRIIOMode.READ
+    connector.kv_transfer_config = SimpleNamespace(is_kv_consumer=True)
+    connector._vllm_config = SimpleNamespace(
+        cache_config=SimpleNamespace(
+            get_resolved_kv_cache_layout=lambda: SimpleNamespace(name=layout)
+        )
+    )
+    connector.connector_scheduler = read_scheduler
+    connector.connector_worker = None
+    # With 16-token blocks, page 7 is a local hit, 8 is a new READ
+    # destination, and 9 holds the locally recomputed final token.
+    blocks = SimpleNamespace(get_block_ids=lambda: ([7, 8, 9], [90]))
+    connector.update_state_after_alloc(request, blocks, num_external_tokens=16)
+    pending = connector.get_sync_load_block_ids(request)
+    assert pending == [7, 8]
+
+    scheduler = Scheduler.__new__(Scheduler)
+    scheduler.needs_kv_cache_zeroing = True
+    scheduler._skip_zero_block_ids = set(pending)
+    scheduler.kv_cache_manager = SimpleNamespace(
+        take_new_block_ids=Mock(side_effect=[[8, 9, 90], [7]]),
+    )
+    assert scheduler._get_new_block_ids_to_zero() == [9, 90]
+    # Exclusions are scoped to this step, including any non-new hit IDs.
+    assert scheduler._get_new_block_ids_to_zero() == [7]
 
 
 def test_remote_tp_rank_p4_d8_floor_maps_decode_to_prefill():
