@@ -99,6 +99,17 @@ vllm serve openai/gpt-oss-20b --quantization-config.moe.activation mxfp8
 
 Combine with `--moe-backend` to pin a specific kernel family.
 
+For ModelOpt NVFP4 W4A4 checkpoints, enable per-token activation scaling for
+MoE experts on Blackwell (SM100) with the FlashInfer TRTLLM backend:
+
+```bash
+vllm serve nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4 \
+    --moe-backend flashinfer_trtllm \
+    --quantization-config '{"moe":{"activation":"nvfp4_per_token"}}'
+```
+
+This keeps the checkpoint weights and dense linear quantization unchanged.
+
 ### Re-quantizing layers to a different precision
 
 An online target can re-quantize a checkpoint-quantized (prequantized) layer at load time.
