@@ -7,11 +7,11 @@
 //! parsed from the generated assistant completion and then rendered back to the exact same
 //! assistant completion.
 //!
-//! The tool-call fixture also snapshots the output grammar built by the initialized parser, with
-//! the rendered completion as its generation, under `tests/grammar_replay/`. `grammar_replay.rs`
-//! replays these cases through the real XGrammar.
+//! The tool-call fixture also snapshots the output grammar built by the initialized parser for each
+//! tool-choice variant, with the rendered completion as its generation, as one file per model under
+//! `tests/grammar_replay/`. `grammar_replay.rs` replays these cases through the real XGrammar.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -24,9 +24,9 @@ use serde_json_fmt::JsonFormat as JsonFmt;
 use serial_test::file_serial;
 use vllm_chat::{
     AssistantContentBlock, AssistantMessage, AssistantMessageExt as _, AssistantToolCall,
-    ChatEvent, ChatMessage, ChatRequest, ChatRole, ChatTool, FinishReason, GenerationPromptMode,
-    LoadModelBackendsOptions, NewChatOutputProcessorOptions, ParserSelection, RendererSelection,
-    ToolStrictLevel, load_model_backends,
+    ChatEvent, ChatMessage, ChatRequest, ChatRole, ChatTool, ChatToolChoice, FinishReason,
+    GenerationPromptMode, LoadModelBackendsOptions, NewChatOutputProcessorOptions, ParserSelection,
+    RendererSelection, ToolStrictLevel, load_model_backends,
 };
 use vllm_parser::output_grammar::BuiltOutputGrammar;
 use vllm_text::{DecodedTextEvent, Finished, Prompt};
@@ -55,6 +55,8 @@ struct RoundtripCase {
     json_fmt: JsonFmt,
     /// Whether the template renders tool-call argument object keys in sorted order.
     sort_json_keys: bool,
+    /// Tool-choice variants run by the tool-call fixture.
+    tool_choice_variants: &'static [ToolChoiceVariant],
 }
 
 #[derive(Clone, Copy)]
@@ -123,6 +125,29 @@ impl ThinkingBehavior {
     }
 }
 
+/// Tool-choice variant of the tool-call fixture.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum ToolChoiceVariant {
+    /// `auto`, with content before the tool calls.
+    Auto,
+    /// `required`, with tool calls only: builder grammars admit no content
+    /// before the calls.
+    Required,
+}
+
+impl ToolChoiceVariant {
+    /// Every variant, for templates and parsers that support all of them.
+    const ALL: &[Self] = &[Self::Auto, Self::Required];
+
+    fn tool_choice(self) -> ChatToolChoice {
+        match self {
+            Self::Auto => ChatToolChoice::Auto,
+            Self::Required => ChatToolChoice::Required,
+        }
+    }
+}
+
 impl RoundtripCase {
     /// Qwen3 XML tool-call format with `qwen3` reasoning tags.
     fn qwen3() -> Self {
@@ -134,6 +159,7 @@ impl RoundtripCase {
             thinking_behavior: ThinkingBehavior::Toggleable { default: true },
             json_fmt: spaced_json_fmt(),
             sort_json_keys: false,
+            tool_choice_variants: ToolChoiceVariant::ALL,
         }
     }
 
@@ -147,6 +173,7 @@ impl RoundtripCase {
             thinking_behavior: ThinkingBehavior::Toggleable { default: true },
             json_fmt: compact_json_fmt(),
             sort_json_keys: false,
+            tool_choice_variants: ToolChoiceVariant::ALL,
         }
     }
 
@@ -160,6 +187,10 @@ impl RoundtripCase {
             thinking_behavior: ThinkingBehavior::Toggleable { default: true },
             json_fmt: compact_json_fmt(),
             sort_json_keys: false,
+            // TODO: MiMo renders compact `<tool_call><function=...>` calls, but its
+            // tool parser reuses the Qwen3-Coder builder with newline-delimited tags:
+            // `required` rejects the calls, and the `auto` trigger never fires.
+            tool_choice_variants: &[ToolChoiceVariant::Auto],
         }
     }
 
@@ -173,6 +204,7 @@ impl RoundtripCase {
             thinking_behavior: ThinkingBehavior::Always { value: true },
             json_fmt: compact_json_fmt(),
             sort_json_keys: false,
+            tool_choice_variants: ToolChoiceVariant::ALL,
         }
     }
 
@@ -186,6 +218,7 @@ impl RoundtripCase {
             thinking_behavior: ThinkingBehavior::Always { value: true },
             json_fmt: compact_json_fmt(),
             sort_json_keys: false,
+            tool_choice_variants: ToolChoiceVariant::ALL,
         }
     }
 
@@ -199,6 +232,7 @@ impl RoundtripCase {
             thinking_behavior: ThinkingBehavior::Toggleable { default: false },
             json_fmt: compact_json_fmt(),
             sort_json_keys: false,
+            tool_choice_variants: ToolChoiceVariant::ALL,
         }
     }
 
@@ -212,6 +246,7 @@ impl RoundtripCase {
             thinking_behavior: ThinkingBehavior::Toggleable { default: true },
             json_fmt: compact_json_fmt(),
             sort_json_keys: false,
+            tool_choice_variants: ToolChoiceVariant::ALL,
         }
     }
 
@@ -225,6 +260,7 @@ impl RoundtripCase {
             thinking_behavior: ThinkingBehavior::Toggleable { default: false },
             json_fmt: compact_json_fmt(),
             sort_json_keys: false,
+            tool_choice_variants: ToolChoiceVariant::ALL,
         }
     }
 
@@ -238,6 +274,7 @@ impl RoundtripCase {
             thinking_behavior: ThinkingBehavior::Toggleable { default: true },
             json_fmt: compact_json_fmt(),
             sort_json_keys: false,
+            tool_choice_variants: ToolChoiceVariant::ALL,
         }
     }
 
@@ -251,6 +288,7 @@ impl RoundtripCase {
             thinking_behavior: ThinkingBehavior::Toggleable { default: true },
             json_fmt: compact_json_fmt(),
             sort_json_keys: false,
+            tool_choice_variants: ToolChoiceVariant::ALL,
         }
     }
 
@@ -264,6 +302,7 @@ impl RoundtripCase {
             thinking_behavior: ThinkingBehavior::Toggleable { default: true },
             json_fmt: compact_json_fmt(),
             sort_json_keys: false,
+            tool_choice_variants: ToolChoiceVariant::ALL,
         }
     }
 
@@ -277,6 +316,7 @@ impl RoundtripCase {
             thinking_behavior: ThinkingBehavior::Always { value: true },
             json_fmt: compact_json_fmt(),
             sort_json_keys: true,
+            tool_choice_variants: ToolChoiceVariant::ALL,
         }
     }
 
@@ -291,6 +331,7 @@ impl RoundtripCase {
             thinking_behavior: ThinkingBehavior::Toggleable { default: true },
             json_fmt: spaced_json_fmt(),
             sort_json_keys: false,
+            tool_choice_variants: ToolChoiceVariant::ALL,
         }
     }
 
@@ -308,6 +349,9 @@ impl RoundtripCase {
             thinking_behavior: ThinkingBehavior::Toggleable { default: true },
             json_fmt: compact_json_fmt(),
             sort_json_keys: false,
+            // The renderer appends a `tool_choice=required` system message after the
+            // history, so the completion is not a suffix of the full render.
+            tool_choice_variants: &[ToolChoiceVariant::Auto],
         }
     }
 
@@ -325,6 +369,7 @@ impl RoundtripCase {
             },
             json_fmt: compact_json_fmt(),
             sort_json_keys: false,
+            tool_choice_variants: ToolChoiceVariant::ALL,
         }
     }
 
@@ -338,6 +383,7 @@ impl RoundtripCase {
             thinking_behavior: ThinkingBehavior::Always { value: true },
             json_fmt: compact_json_fmt(),
             sort_json_keys: false,
+            tool_choice_variants: ToolChoiceVariant::ALL,
         }
     }
 
@@ -351,6 +397,7 @@ impl RoundtripCase {
             thinking_behavior: ThinkingBehavior::Always { value: true },
             json_fmt: compact_json_fmt(),
             sort_json_keys: false,
+            tool_choice_variants: ToolChoiceVariant::ALL,
         }
     }
 
@@ -364,6 +411,7 @@ impl RoundtripCase {
             thinking_behavior: ThinkingBehavior::Always { value: true },
             json_fmt: compact_json_fmt(),
             sort_json_keys: false,
+            tool_choice_variants: ToolChoiceVariant::ALL,
         }
     }
 
@@ -377,6 +425,7 @@ impl RoundtripCase {
             thinking_behavior: ThinkingBehavior::Always { value: true },
             json_fmt: compact_json_fmt(),
             sort_json_keys: false,
+            tool_choice_variants: ToolChoiceVariant::ALL,
         }
     }
 
@@ -390,6 +439,7 @@ impl RoundtripCase {
             thinking_behavior: ThinkingBehavior::Always { value: true },
             json_fmt: compact_json_fmt(),
             sort_json_keys: true,
+            tool_choice_variants: ToolChoiceVariant::ALL,
         }
     }
 }
@@ -460,6 +510,7 @@ async fn run_roundtrip_reasoning_and_content_inner(
         "roundtrip-reasoning-content",
         vec![ChatMessage::text(ChatRole::User, "What is 2 + 2?")],
         Vec::new(),
+        None,
         thinking,
         case.thinking_behavior,
     );
@@ -498,11 +549,25 @@ async fn run_roundtrip_reasoning_and_content_inner(
     Ok(())
 }
 
-/// Run the fixed reasoning+multiple-tools fixture for one model/parser case.
+/// Run the fixed reasoning+multiple-tools fixture for one model/parser case,
+/// once per tool-choice variant.
 async fn run_roundtrip_tool_call_mix(
     case: &RoundtripCase,
     backends: &vllm_chat::LoadedModelBackends,
 ) -> Result<()> {
+    let mut results = Vec::new();
+    for &variant in case.tool_choice_variants {
+        let result = run_roundtrip_tool_call_mix_inner(case, backends, variant).await?;
+        results.push((variant, result));
+    }
+    check_grammar_replay_file(case, backends, results)
+}
+
+async fn run_roundtrip_tool_call_mix_inner(
+    case: &RoundtripCase,
+    backends: &vllm_chat::LoadedModelBackends,
+    variant: ToolChoiceVariant,
+) -> Result<RoundtripResult> {
     let request = roundtrip_request(
         "roundtrip-reasoning-tools",
         vec![ChatMessage::text(
@@ -510,41 +575,38 @@ async fn run_roundtrip_tool_call_mix(
             "Check Shanghai weather and add 1.0 plus 2.",
         )],
         test_tools(),
+        Some(variant.tool_choice()),
         Some(true), // always enable thinking in this fixture
         case.thinking_behavior,
     );
     let expected_reasoning = "Need call the weather and add tools.";
-    let expected_text = "I will call the tools.";
+    let expected_text = match variant {
+        ToolChoiceVariant::Auto => Some("I will call the tools."),
+        ToolChoiceVariant::Required => None,
+    };
 
-    let result = run_roundtrip(
-        case,
-        backends,
-        &request,
-        AssistantMessage {
-            content: vec![
-                AssistantContentBlock::Reasoning {
-                    text: expected_reasoning.to_string(),
-                },
-                AssistantContentBlock::Text {
-                    text: expected_text.to_string(),
-                },
-                AssistantContentBlock::ToolCall(AssistantToolCall {
-                    id: "functions.get_weather:0".to_string(),
-                    name: "get_weather".to_string(),
-                    arguments: r#"{"location":"Shanghai"}"#.to_string(),
-                }),
-                AssistantContentBlock::ToolCall(AssistantToolCall {
-                    id: "functions.add:1".to_string(),
-                    name: "add".to_string(),
-                    // Intentionally use a non-lexical order of keys to verify text-level
-                    // fidelity of the roundtrip where JSON formatting remains stable. The
-                    // `items` key also exercises templates that call `arguments.items()`.
-                    arguments: r#"{"y":1.0,"x":2,"items":["left","right"]}"#.to_string(),
-                }),
-            ],
-        },
-    )
-    .await?;
+    let mut content = vec![AssistantContentBlock::Reasoning {
+        text: expected_reasoning.to_string(),
+    }];
+    content.extend(expected_text.map(|text| AssistantContentBlock::Text {
+        text: text.to_string(),
+    }));
+    content.extend([
+        AssistantContentBlock::ToolCall(AssistantToolCall {
+            id: "functions.get_weather:0".to_string(),
+            name: "get_weather".to_string(),
+            arguments: r#"{"location":"Shanghai"}"#.to_string(),
+        }),
+        AssistantContentBlock::ToolCall(AssistantToolCall {
+            id: "functions.add:1".to_string(),
+            name: "add".to_string(),
+            // Intentionally use a non-lexical order of keys to verify text-level
+            // fidelity of the roundtrip where JSON formatting remains stable. The
+            // `items` key also exercises templates that call `arguments.items()`.
+            arguments: r#"{"y":1.0,"x":2,"items":["left","right"]}"#.to_string(),
+        }),
+    ]);
+    let result = run_roundtrip(case, backends, &request, AssistantMessage { content }).await?;
 
     assert_eq!(
         result.parsed_message.reasoning().as_deref(),
@@ -552,7 +614,10 @@ async fn run_roundtrip_tool_call_mix(
         "parsed message: {:#?}",
         result.parsed_message
     );
-    assert_eq!(result.parsed_message.text(), expected_text);
+    assert_eq!(
+        result.parsed_message.text(),
+        expected_text.unwrap_or_default()
+    );
 
     let tool_calls = result.parsed_message.tool_calls().collect::<Vec<_>>();
     assert_eq!(
@@ -577,9 +642,7 @@ async fn run_roundtrip_tool_call_mix(
         result.closed_completion
     );
 
-    check_grammar_replay_case(case, backends, "tool_call_mix", &result)?;
-
-    Ok(())
+    Ok(result)
 }
 
 /// Compact JSON argument formatting used by JSON-native parsers/renderers.
@@ -995,28 +1058,35 @@ fn incremental_decode_chunks(
     Ok(chunks)
 }
 
-/// One parser-built output grammar with the generation it must accept, replayed
-/// through the real XGrammar by `grammar_replay.py`.
+/// Grammar replay cases of one model, replayed through the real XGrammar by
+/// `grammar_replay.py`.
 #[derive(Serialize)]
-struct GrammarReplayCase<'a> {
+struct GrammarReplayFile {
     /// Hugging Face model id whose tokenizer the replay loads.
     model_id: &'static str,
     /// Model vocabulary size, which sizes the XGrammar token mask.
     vocab_size: usize,
+    /// Request stop set, passed to the matcher as `override_stop_tokens`.
+    #[serde(serialize_with = "serialize_one_line")]
+    all_stop_token_ids: BTreeSet<u32>,
+    /// Cases keyed by tool-choice variant.
+    cases: BTreeMap<ToolChoiceVariant, GrammarReplayCase>,
+}
+
+/// One parser-built output grammar with the generation it must accept.
+#[derive(Serialize)]
+struct GrammarReplayCase {
     /// Parser-built grammar; only token-zero grammars are replayed from the
     /// first generated token.
-    grammar: &'a BuiltOutputGrammar,
+    grammar: BuiltOutputGrammar,
     /// Generated completion text, without the stop token.
     completion: String,
     /// Generated token IDs presented to the matcher, ending with a stop token.
     #[serde(serialize_with = "serialize_one_line")]
     generation_token_ids: Vec<u32>,
-    /// Request stop set, passed to the matcher as `override_stop_tokens`.
-    #[serde(serialize_with = "serialize_one_line")]
-    all_stop_token_ids: BTreeSet<u32>,
 }
 
-/// Serialize a token ID list on one line inside the pretty-printed case.
+/// Serialize a token ID list on one line inside the pretty-printed file.
 fn serialize_one_line<S: Serializer>(
     token_ids: &impl Serialize,
     serializer: S,
@@ -1027,29 +1097,35 @@ fn serialize_one_line<S: Serializer>(
         .serialize(serializer)
 }
 
-/// Directory of checked-in grammar replay cases.
+/// Directory of checked-in grammar replay files.
 fn grammar_replay_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/grammar_replay")
 }
 
-/// Snapshot the output grammar of one roundtrip as a grammar replay case, or
-/// check that no stale case remains when the parser builds none.
-fn check_grammar_replay_case(
+/// Snapshot the output grammars of one model's roundtrips, keyed by variant,
+/// as its grammar replay file, or check that no stale file remains when the
+/// parser builds none.
+fn check_grammar_replay_file(
     case: &RoundtripCase,
     backends: &vllm_chat::LoadedModelBackends,
-    fixture: &str,
-    result: &RoundtripResult,
+    results: Vec<(ToolChoiceVariant, RoundtripResult)>,
 ) -> Result<()> {
     let model_name = case.model_id.rsplit_once('/').map_or(case.model_id, |(_, name)| name);
-    let path = grammar_replay_dir().join(format!("{model_name}.{fixture}.json"));
-    let Some(grammar) = &result.output_grammar else {
+    let path = grammar_replay_dir().join(format!("{model_name}.json"));
+    let results = results
+        .into_iter()
+        .filter_map(|(variant, result)| {
+            Some((variant, result.output_grammar?, result.closed_completion))
+        })
+        .collect::<Vec<_>>();
+    if results.is_empty() {
         ensure!(
             !path.exists(),
-            "{} builds no output grammar, but grammar replay case {path:?} exists",
+            "{} builds no output grammar, but grammar replay file {path:?} exists",
             case.model_id
         );
         return Ok(());
-    };
+    }
 
     let tokenizer = backends.text_backend.tokenizer();
     let hints = backends.text_backend.sampling_hints()?;
@@ -1070,25 +1146,34 @@ fn check_grammar_replay_case(
         case.assistant_stop_suffix
     );
 
-    let (completion, mut generation_token_ids) = match completion_body(
-        tokenizer.as_ref(),
-        &result.closed_completion,
-        case.assistant_stop_suffix,
-    )? {
-        CompletionBody::Text(body) => (body.to_string(), tokenizer.encode(body, false)?),
-        CompletionBody::TokenIds(body) => (tokenizer.decode(body, false)?, body.to_vec()),
-    };
-    generation_token_ids.push(stop_token_id);
+    let mut cases = BTreeMap::new();
+    for (variant, grammar, closed_completion) in results {
+        let (completion, mut generation_token_ids) = match completion_body(
+            tokenizer.as_ref(),
+            &closed_completion,
+            case.assistant_stop_suffix,
+        )? {
+            CompletionBody::Text(body) => (body.to_string(), tokenizer.encode(body, false)?),
+            CompletionBody::TokenIds(body) => (tokenizer.decode(body, false)?, body.to_vec()),
+        };
+        generation_token_ids.push(stop_token_id);
+        cases.insert(
+            variant,
+            GrammarReplayCase {
+                grammar,
+                completion,
+                generation_token_ids,
+            },
+        );
+    }
 
-    let replay_case = GrammarReplayCase {
+    let file = GrammarReplayFile {
         model_id: case.model_id,
         vocab_size: backends.text_backend.model_vocab_size(),
-        grammar,
-        completion,
-        generation_token_ids,
         all_stop_token_ids,
+        cases,
     };
-    let mut json = serde_json::to_string_pretty(&replay_case)?;
+    let mut json = serde_json::to_string_pretty(&file)?;
     json.push('\n');
     expect_test::expect_file![path].assert_eq(&json);
 
@@ -1100,10 +1185,11 @@ fn roundtrip_request(
     request_id: impl Into<String>,
     messages: Vec<ChatMessage>,
     tools: Vec<ChatTool>,
+    tool_choice: Option<ChatToolChoice>,
     thinking: Option<bool>,
     thinking_behavior: ThinkingBehavior,
 ) -> ChatRequest {
-    let tool_context = vllm_chat::ResolvedToolContext::new(&messages, tools, None, true)
+    let tool_context = vllm_chat::ResolvedToolContext::new(&messages, tools, tool_choice, true)
         .expect("tool context should resolve");
     let mut request = ChatRequest {
         request_id: request_id.into(),

@@ -22,7 +22,8 @@
 # ///
 """Replay the grammar cases exported by the roundtrip tests through XGrammar.
 
-Every case is compiled against the model tokenizer the same way as
+Each file holds one model's cases, keyed by tool-choice variant. Every case is
+compiled against the model tokenizer the same way as
 `vllm/v1/structured_output/backend_xgrammar.py`. Token-zero cases are then
 replayed from the first generated token: each token must be allowed by the
 bitmask and accepted by the matcher, and the final stop token must terminate it.
@@ -48,9 +49,9 @@ def load_tokenizer(model_id: str, vocab_size: int):
     return tokenizer, xgr.GrammarCompiler(tokenizer_info)
 
 
-def replay(case: dict) -> str:
-    """Check one case and return a summary of what was checked."""
-    tokenizer, compiler = load_tokenizer(case["model_id"], case["vocab_size"])
+def replay(model: dict, case: dict) -> str:
+    """Check one case of a model and return a summary of what was checked."""
+    tokenizer, compiler = load_tokenizer(model["model_id"], model["vocab_size"])
     generation = case["generation_token_ids"]
 
     # The case token IDs come from the Rust tokenizer; the runner must load the
@@ -69,9 +70,9 @@ def replay(case: dict) -> str:
         return f"compiled only ({grammar['coverage']} is gated by the engine)"
 
     matcher = xgr.GrammarMatcher(
-        compiled, override_stop_tokens=case["all_stop_token_ids"]
+        compiled, override_stop_tokens=model["all_stop_token_ids"]
     )
-    bitmask = xgr.allocate_token_bitmask(1, case["vocab_size"])
+    bitmask = xgr.allocate_token_bitmask(1, model["vocab_size"])
     for index, token_id in enumerate(generation):
         matcher.fill_next_token_bitmask(bitmask)
         allowed = (bitmask[0, token_id // 32].item() >> (token_id % 32)) & 1
@@ -94,15 +95,16 @@ def main() -> int:
 
     failures = 0
     for path in paths:
-        case = json.loads(path.read_text())
-        try:
-            summary = replay(case)
-        except Exception as error:
-            failures += 1
-            coverage = case["grammar"]["coverage"]
-            print(f"FAIL {path.name} [{coverage}]: {error}", file=sys.stderr)
-        else:
-            print(f"PASS {path.name}: {summary}")
+        model = json.loads(path.read_text())
+        for name, case in model["cases"].items():
+            try:
+                summary = replay(model, case)
+            except Exception as error:
+                failures += 1
+                coverage = case["grammar"]["coverage"]
+                print(f"FAIL {path.name} {name} [{coverage}]: {error}", file=sys.stderr)
+            else:
+                print(f"PASS {path.name} {name}: {summary}")
 
     return 1 if failures else 0
 
