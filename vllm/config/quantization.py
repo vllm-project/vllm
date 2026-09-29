@@ -26,6 +26,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kMxfp4Dynamic,
     kMxfp4Static,
     kMxfp8Dynamic,
+    kNvfp4DynamicToken,
     kNvfp4Static,
 )
 
@@ -39,6 +40,7 @@ QUANT_KEY_NAMES: dict[str, QuantKey] = {
     "fp8_per_block_dynamic": kFp8Dynamic128Sym,
     "mxfp8": kMxfp8Dynamic,
     "mxfp4": kMxfp4Dynamic,
+    "nvfp4_per_token": kNvfp4DynamicToken,
     "int8_per_channel_static": kInt8StaticChannelSym,
 }
 

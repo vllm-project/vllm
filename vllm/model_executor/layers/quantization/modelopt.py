@@ -12,7 +12,7 @@ from torch.nn.parameter import Parameter
 
 import vllm.envs as envs
 from vllm.config import get_current_vllm_config_or_none
-from vllm.config.quantization import QuantSpec
+from vllm.config.quantization import QuantizationConfigArgs, QuantSpec
 from vllm.logger import init_logger
 from vllm.model_executor.kernels.linear import (
     init_fp8_linear_kernel,
@@ -92,6 +92,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kMxfp8Dynamic,
     kMxfp8Static,
     kNvfp4Dynamic,
+    kNvfp4DynamicToken,
     kNvfp4Static,
 )
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
@@ -836,33 +837,40 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
     ) -> None:
         super().__init__(moe_config)
         self.quant_config = quant_config
-        # W4A16 mode fires for W4A16_NVFP4 on-disk checkpoints. With
-        # activation_key=None every W4A4 backend's _supports_quant_scheme
-        # rejects itself (they all require (kNvfp4Static, kNvfp4Dynamic)
-        # exactly); only Marlin survives. Marlin's MoE path drops
-        # activation scales in convert_to_nvfp4_moe_kernel_format, so no
-        # other change is needed.
         self.use_a16 = quant_config.quant_method == "W4A16_NVFP4"
+        activation_key = None if self.use_a16 else kNvfp4Dynamic
         model_config = getattr(get_current_vllm_config_or_none(), "model_config", None)
-        hf_config = model_config.hf_config if model_config is not None else None
-        self.per_token_activation = bool(
-            getattr(hf_config, "nvfp4_per_token_activation", False)
-        )
+        args = getattr(model_config, "quantization_config", None)
+        if (
+            isinstance(args, QuantizationConfigArgs)
+            and args.moe is not None
+            and args.moe.activation is not None
+        ):
+            if self.use_a16:
+                raise ValueError(
+                    "NVFP4 activation overrides require a W4A4 checkpoint."
+                )
+            activation_key = args.moe.activation
+            if activation_key not in (kNvfp4Dynamic, kNvfp4DynamicToken):
+                raise ValueError(
+                    "Unsupported ModelOpt NVFP4 MoE activation override: "
+                    f"{activation_key}. Use quantization_config.moe.activation="
+                    "'nvfp4_per_token' or omit the override."
+                )
+        self.per_token_activation = activation_key == kNvfp4DynamicToken
         self.nvfp4_backend, self.experts_cls = select_nvfp4_moe_backend(
             config=self.moe,
             weight_key=kNvfp4Static,
-            activation_key=None if self.use_a16 else kNvfp4Dynamic,
+            activation_key=activation_key,
         )
-        if self.per_token_activation:
-            if self.use_a16:
-                raise ValueError(
-                    "Per-token NVFP4 activation requires a W4A4 checkpoint."
-                )
-            if self.nvfp4_backend != NvFp4MoeBackend.FLASHINFER_TRTLLM:
-                raise ValueError(
-                    "Per-token NVFP4 activation for pre-quantized weights "
-                    "requires the FlashInfer TRTLLM MoE backend."
-                )
+        if (
+            self.per_token_activation
+            and self.nvfp4_backend != NvFp4MoeBackend.FLASHINFER_TRTLLM
+        ):
+            raise ValueError(
+                "Per-token NVFP4 activation for pre-quantized weights "
+                "requires the FlashInfer TRTLLM MoE backend."
+            )
 
         self.use_global_sf = is_global_sf_supported_for_nvfp4_backend(
             self.nvfp4_backend
