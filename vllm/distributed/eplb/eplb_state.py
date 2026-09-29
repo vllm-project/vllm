@@ -183,6 +183,8 @@ class EplbModelState:
     See:
     https://github.com/vllm-project/vllm/pull/22167#pullrequestreview-3086143856
     """
+    last_expert_load: torch.Tensor
+    """Global logical-expert totals from the last reshuffle; equal demand initially."""
     model_name: str
     model: MixtureOfExperts
     expert_buffer: list[torch.Tensor]
@@ -500,6 +502,11 @@ class EplbState:
             expert_load_pass=expert_load_pass,
             expert_load_pass_buffer=expert_load_pass_buffer,
             expert_load_window=expert_load_window,
+            last_expert_load=torch.ones(
+                (model.num_moe_layers, model.num_logical_experts),
+                dtype=torch.int64,
+                device=self.device,
+            ),
             model_name=model_name or model_config.model,
             model=model,
             expert_buffer=expert_buffer,
@@ -745,6 +752,7 @@ class EplbState:
         self,
         is_profile: bool = False,
         rank_mapping: dict[int, int] | None = None,
+        use_last_expert_load: bool = False,
     ) -> torch.Tensor | None:
         """Rearrange the experts according to the current load.
 
@@ -754,6 +762,7 @@ class EplbState:
                 no memory movement will be performed. Default is False.
             rank_mapping (dict[int, int] | None): The rank mapping
                 when scaling is done in EEP.
+            use_last_expert_load: Use the last reshuffle's logical-expert totals.
 
         """
         ep_group = get_ep_group().device_group
@@ -776,6 +785,13 @@ class EplbState:
         # Map the physical expert load to global logical experts
         global_expert_load_windows = []
         for eplb_model_state in self.model_states.values():
+            if use_last_expert_load:
+                # Distribute rank 0's saved counts through the existing all-reduce.
+                saved_load = eplb_model_state.last_expert_load
+                global_expert_load_windows.append(
+                    saved_load.clone() if is_main_rank else torch.zeros_like(saved_load)
+                )
+                continue
             expert_load_window = eplb_model_state.expert_load_window
             physical_to_logical = eplb_model_state.physical_to_logical_map
             invalid_idx = eplb_model_state.model.num_logical_experts
@@ -836,6 +852,8 @@ class EplbState:
         for eplb_model_state, global_expert_load_window in zip(
             self.model_states.values(), global_expert_load_windows
         ):
+            if not is_profile:
+                eplb_model_state.last_expert_load = global_expert_load_window
             if not self.is_async or is_profile:
                 # Get new expert mappings for the model. The policy runs on the
                 # host, so the load window and current map have to come back.

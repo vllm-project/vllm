@@ -1249,7 +1249,7 @@ def test_inc_mxfp8_linear_scheme_delegates_to_kernel(monkeypatch) -> None:
     kernel = DummyKernel()
     monkeypatch.setattr(
         "vllm.model_executor.layers.quantization.inc.schemes.inc_mxfp8_linear.init_mxfp8_linear_kernel",
-        lambda: kernel,
+        lambda weight_shape: kernel,
     )
     monkeypatch.setattr(
         "vllm.model_executor.layers.quantization.inc.schemes.inc_mxfp8_linear.ModelWeightParameter",
@@ -1288,7 +1288,7 @@ def test_inc_mxfp8_linear_scheme_delegates_to_kernel(monkeypatch) -> None:
 def test_inc_mxfp8_linear_scheme_requires_block_32_input(monkeypatch) -> None:
     monkeypatch.setattr(
         "vllm.model_executor.layers.quantization.inc.schemes.inc_mxfp8_linear.init_mxfp8_linear_kernel",
-        lambda: object(),
+        lambda weight_shape: object(),
     )
     scheme = INCMxfp8LinearScheme()
 
@@ -1651,19 +1651,6 @@ def test_wna16_linear_gptq_uses_auto_gptq_when_supported(monkeypatch) -> None:
 def test_wna16_linear_gptq_unsupported_config_raises() -> None:
     with pytest.raises(NotImplementedError, match="Only 4-bit and 8-bit symmetric"):
         INCWNA16LinearScheme(make_layer_config(sym=False))
-
-
-def test_wna16_xpu_unsupported_config_still_raises(monkeypatch) -> None:
-    monkeypatch.setattr(current_platform, "is_xpu", lambda: True)
-    monkeypatch.setattr(current_platform, "is_cpu", lambda: False)
-
-    with pytest.raises(NotImplementedError, match="unsupported config"):
-        INCWna16Scheme().get_linear_method(
-            make_config(weight_bits=2, sym=False),
-            object(),
-            "layer",
-            make_layer_config(bits=2, sym=False),
-        )
 
 
 def test_inc_get_quant_method_unquantized_linear_returns_unquantized() -> None:

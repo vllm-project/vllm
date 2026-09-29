@@ -74,7 +74,7 @@ class ConfigSet:
                 f"If your GPU is a variant of a supported platform, "
                 f"consider adding a mapping in _GPU_NAME_ALIASES in "
                 f"vllm/kernels/helion/utils.py, or run "
-                f"scripts/autotune_helion_kernels.py to generate configs "
+                f"tools/autotune_helion_kernels.py to generate configs "
                 f"for your platform."
             )
 
