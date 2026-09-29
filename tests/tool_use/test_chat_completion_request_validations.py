@@ -182,3 +182,88 @@ def test_multiple_structured_outputs_rejected():
                 },
             }
         )
+
+
+def _retain_envelope(directives, scope="alice", action_type="kv.retain"):
+    return {
+        "protocol_version": "0.1",
+        "message_id": "m1",
+        "actions": [
+            {
+                "action_id": "a1",
+                "action_type": action_type,
+                "action_version": "1.0",
+                "payload": {"scope": scope, "directives": directives},
+            }
+        ],
+    }
+
+
+def _build_request_with_kv_hints(kv_hints):
+    return ChatCompletionRequest(
+        model="dummy",
+        messages=[{"role": "user", "content": "hi"}],
+        kv_hints=kv_hints,
+    )
+
+
+def test_kv_hints_absent_is_none():
+    req = _build_request_with_kv_hints(None)
+    assert req.kv_hints_envelope is None
+
+
+def test_kv_hints_round_trips_to_envelope():
+    req = _build_request_with_kv_hints(
+        _retain_envelope([{"start": 0, "end": 16, "priority": 80}])
+    )
+    env = req.kv_hints_envelope
+    assert env is not None
+    assert env.message_id == "m1"
+    assert env.actions[0].action_type == "kv.retain"
+    assert env.actions[0].payload["scope"] == "alice"
+
+
+def test_kv_hints_other_action_types_pass_through():
+    req = _build_request_with_kv_hints(_retain_envelope([], action_type="kv.fetch"))
+    assert req.kv_hints_envelope is not None
+
+
+def test_kv_hints_malformed_envelope_rejected():
+    with pytest.raises(VLLMValidationError, match="kv_hints"):
+        _build_request_with_kv_hints({"actions": []})
+
+
+def test_kv_hints_monotonic_priorities_valid():
+    _build_request_with_kv_hints(
+        _retain_envelope(
+            [
+                {"start": 0, "end": 100, "priority": 90},
+                {"start": 100, "end": 200, "priority": 60},
+                {"start": 200, "end": 300, "priority": 60},
+            ]
+        )
+    )
+
+
+def test_kv_hints_increasing_priority_rejected():
+    with pytest.raises(VLLMValidationError, match="non-increasing"):
+        _build_request_with_kv_hints(
+            _retain_envelope(
+                [
+                    {"start": 0, "end": 100, "priority": 30},
+                    {"start": 100, "end": 200, "priority": 80},
+                ]
+            )
+        )
+
+
+def test_kv_hints_unsorted_input_still_validated():
+    with pytest.raises(VLLMValidationError, match="non-increasing"):
+        _build_request_with_kv_hints(
+            _retain_envelope(
+                [
+                    {"start": 100, "end": 200, "priority": 80},
+                    {"start": 0, "end": 100, "priority": 30},
+                ]
+            )
+        )

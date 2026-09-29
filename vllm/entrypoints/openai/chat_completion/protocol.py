@@ -6,6 +6,7 @@
 import time
 from typing import Annotated, Any, ClassVar, Literal
 
+import msgspec
 from openai.types.chat.chat_completion_audio import (
     ChatCompletionAudio as OpenAIChatCompletionAudio,
 )
@@ -51,6 +52,8 @@ from vllm.sampling_params import (
     ThinkingTokenBudget,
 )
 from vllm.utils import random_uuid
+from vllm.v1.kv_hints import KvHintsEnvelope
+from vllm.v1.kv_hints.retain import parse_retain_actions
 
 logger = init_logger(__name__)
 
@@ -487,6 +490,22 @@ class ChatCompletionRequest(OpenAIBaseModel):
         ),
     )
 
+    kv_hints: dict[str, Any] | None = Field(
+        default=None,
+        description=(
+            "Orchestrator KV hints envelope: {protocol_version, message_id, "
+            "actions: [{action_id, action_type, action_version, payload}]}. "
+            "A `kv.retain` action carries retention directives for "
+            "priority-based KV-cache eviction; its payload is {scope: str|null, "
+            "directives: [{start, end|null, priority 0-100, duration|null} | "
+            "{covers_output: true, priority, duration}]}. Priority 1-100 "
+            "protects the range and 0 releases it; ranges no directive covers "
+            "are left as they are, so protection is dropped only by an "
+            "explicit release or by expiry. `scope` is not authenticated; "
+            "deploy behind a trusted gateway if clients are untrusted."
+        ),
+    )
+
     repetition_detection: RepetitionDetectionParams | None = Field(
         default=None,
         description="Parameters for detecting repetitive N-gram patterns "
@@ -564,6 +583,8 @@ class ChatCompletionRequest(OpenAIBaseModel):
 
     _grammar_from_parser: bool = PrivateAttr(default=False)
     """CAUTION: Should only be set by the parser-engine adapter's adjust_request."""
+
+    _kv_hints_envelope: KvHintsEnvelope | None = PrivateAttr(default=None)
 
     def build_chat_params(
         self,
@@ -1024,6 +1045,24 @@ class ChatCompletionRequest(OpenAIBaseModel):
                                 )
 
         return data
+
+    @model_validator(mode="after")
+    def validate_kv_hints(self):
+        if self.kv_hints is None:
+            return self
+        try:
+            envelope = msgspec.convert(self.kv_hints, KvHintsEnvelope)
+            parse_retain_actions(envelope, strict=True)
+        except (msgspec.ValidationError, ValueError) as exc:
+            raise VLLMValidationError(
+                f"Invalid `kv_hints`: {exc}", parameter="kv_hints"
+            ) from exc
+        self._kv_hints_envelope = envelope
+        return self
+
+    @property
+    def kv_hints_envelope(self) -> KvHintsEnvelope | None:
+        return self._kv_hints_envelope
 
 
 class BatchChatCompletionRequest(OpenAIBaseModel):
