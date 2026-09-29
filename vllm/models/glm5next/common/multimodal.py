@@ -10,6 +10,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 from einops import rearrange
+from transformers.video_utils import VideoMetadata
 
 from vllm.distributed import (
     get_tensor_model_parallel_world_size,
@@ -43,7 +44,6 @@ from vllm.model_executor.models.vision import (
 )
 from vllm.models.common.ops import fused_q_kv_rmsnorm
 from vllm.multimodal.parse import ImageSize, MultiModalDataItems
-from vllm.transformers_utils.processors.glm5next import glm_sample_frame_indices
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 
@@ -683,19 +683,20 @@ class Glm5NextProcessingInfo(Glm4vProcessingInfo):
         else:
             frame_indices = [
                 int(idx)
-                for idx in glm_sample_frame_indices(
-                    int(metadata.get("total_num_frames", total_frames)),
-                    video_fps,
-                    float(metadata.get("duration") or 0),
-                    target_fps=video_processor.fps_interval,
-                    max_frame_count=video_processor.max_frame_count_dynamic,
-                    temporal_patch_size=temporal_patch_size,
+                for idx in video_processor.sample_frames(
+                    VideoMetadata(
+                        total_num_frames=int(
+                            metadata.get("total_num_frames", total_frames)
+                        ),
+                        fps=video_fps,
+                        duration=metadata.get("duration"),
+                    )
                 )
             ]
             num_frames = len(frame_indices)
 
         if not frame_indices or num_frames <= 0:
-            # ``duration * fps_interval < 1`` selects no frames at all; the
+            # ``duration * fps < 1`` selects no frames at all; the
             # pixel path raises an opaque IndexError on the same input a moment
             # later, so say what happened while there is still a request.
             raise ValueError(
