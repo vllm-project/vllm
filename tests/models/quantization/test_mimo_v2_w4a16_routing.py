@@ -46,7 +46,6 @@ def mimo_routing_method() -> RoutingMethodType:
         renormalize=True,
         num_expert_group=1,
         has_e_score_bias=True,
-        routed_scaling_factor=None,
     )
 
 
