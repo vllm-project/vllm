@@ -3,22 +3,12 @@
 """Compressed DCP context preparation for ROCm MLA."""
 
 from collections.abc import Callable
-from functools import lru_cache
 
 import torch
 
 from vllm import _custom_ops as ops
+from vllm._aiter_ops import rocm_aiter_ops
 from vllm.model_executor.layers.attention.mla_attention import MLACommonPrefillMetadata
-
-
-@lru_cache(maxsize=1)
-def get_gather_kv_b_proj() -> Callable | None:
-    """Older AITER builds retain the unfused context path."""
-    try:
-        from aiter.ops.triton.gather_kv_b_proj import gather_kv_b_proj
-    except ImportError:
-        return None
-    return gather_kv_b_proj
 
 
 def context_row_indices(
@@ -91,9 +81,6 @@ def expand_context(
     v_head_dim: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Fuse row reorganization, dequantization, projection and K/V packing."""
-    gather_kv_b_proj = get_gather_kv_b_proj()
-    assert gather_kv_b_proj is not None
-
     k = torch.empty(
         (row_indices.numel(), num_heads, qk_nope_head_dim + qk_rope_head_dim),
         device=gathered.device,
@@ -105,14 +92,13 @@ def expand_context(
         dtype=weight.dtype,
     )
     if row_indices.numel():
-        gather_kv_b_proj(
+        rocm_aiter_ops.gather_kv_b_proj(
             gathered.unsqueeze(1),
             scale,
             cu_seq_lens,
             row_indices,
             cu_seq_lens,
             weight,
-            None,
             k,
             v,
         )
