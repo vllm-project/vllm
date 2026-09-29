@@ -130,6 +130,7 @@ async fn build_state(config: &Config) -> Result<Arc<AppState>> {
         coordinator_mode,
         model_name: metrics_model_name,
         client_index: 0,
+        engine_stats_enabled: !config.disable_log_stats,
     })
     .await
     .context("failed to connect to engine core")?;

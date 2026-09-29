@@ -299,6 +299,7 @@ fn handshake_test_config(
         coordinator_mode,
         model_name: model_name.to_string(),
         client_index,
+        engine_stats_enabled: true,
     }
 }
 
@@ -322,6 +323,7 @@ fn bootstrapped_test_config(
         coordinator_mode,
         model_name: "test-model".to_string(),
         client_index,
+        engine_stats_enabled: true,
     }
 }
 

@@ -380,7 +380,9 @@ pub struct SharedRuntimeArgs {
     pub api_key: Vec<String>,
 
     /// Disable periodic logging of engine statistics (throughput, queue depth,
-    /// cache usage).
+    /// cache usage). Engines also stop recording stats, so metrics derived from
+    /// engine-reported scheduler stats and request lifecycle events are not
+    /// exported.
     #[arg(long)]
     #[serde(default)]
     pub disable_log_stats: bool,

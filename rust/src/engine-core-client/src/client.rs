@@ -155,6 +155,11 @@ pub struct EngineCoreClientConfig {
     pub model_name: String,
     /// Frontend client index stamped onto every request.
     pub client_index: u32,
+    /// Whether the connected engines record stats, i.e. were not started with
+    /// `--disable-log-stats`. When `false`, engines emit neither
+    /// `SchedulerStats` nor request lifecycle events, so frontend metrics
+    /// derived from them are not exported.
+    pub engine_stats_enabled: bool,
 }
 
 impl EngineCoreClientConfig {
@@ -173,6 +178,7 @@ impl EngineCoreClientConfig {
             coordinator_mode: None,
             model_name: String::new(),
             client_index: 0,
+            engine_stats_enabled: true,
         }
     }
 
@@ -190,6 +196,12 @@ impl EngineCoreClientConfig {
     /// Override the client index stamped onto every outgoing request.
     pub fn with_client_index(mut self, client_index: u32) -> Self {
         self.client_index = client_index;
+        self
+    }
+
+    /// Set whether the connected engines record stats.
+    pub fn with_engine_stats_enabled(mut self, engine_stats_enabled: bool) -> Self {
+        self.engine_stats_enabled = engine_stats_enabled;
         self
     }
 
@@ -361,6 +373,7 @@ impl EngineCoreClient {
             connected.input_send,
             runtime.handle().clone(),
             config.model_name.clone(),
+            config.engine_stats_enabled,
             &engines,
         ));
         let output_task = AbortOnDropHandle::new(runtime.spawn(transport::run_output_loop(
@@ -544,6 +557,11 @@ impl EngineCoreClient {
     /// labeling.
     pub fn model_name(&self) -> &str {
         self.inner.model_name()
+    }
+
+    /// Return whether the connected engines record stats.
+    pub fn engine_stats_enabled(&self) -> bool {
+        self.config.engine_stats_enabled
     }
 
     /// Return whether the client still considers the engine healthy.

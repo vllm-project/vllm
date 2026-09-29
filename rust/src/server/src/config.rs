@@ -268,7 +268,9 @@ pub struct Config {
     #[educe(Debug(method(fmt_redacted_api_keys)))]
     pub api_keys: Vec<String>,
     /// When `true`, suppress periodic stats logging (throughput, queue depth,
-    /// cache usage).
+    /// cache usage). Engines also stop recording stats, so metrics derived from
+    /// engine-reported scheduler stats and request lifecycle events are not
+    /// exported.
     pub disable_log_stats: bool,
     /// TCP port for the gRPC Inference service. When `None`, no gRPC server is
     /// started.
