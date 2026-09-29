@@ -494,7 +494,9 @@ def qsa_pre_indexer(
     assert len(section) == 3
 
     # Tuned on 32-lane warps. A ROCm wavefront is 64 lanes, so the same tile is
-    # half the work per lane there; correct either way, not yet retuned.
+    # half the work per lane there; correct either way. Not retuned, because
+    # there is very little to win: on MI355X the kernel already runs against
+    # the launch floor. It is launch bound rather than tile bound.
     if num_tokens <= 4096:
         TILE_T_Q, TILE_H_Q = 2, 2
     else:
