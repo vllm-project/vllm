@@ -213,6 +213,9 @@ class KVCacheManager:
             )
             for group in kv_cache_config.kv_cache_groups
         )
+        self.block_pool.retention_group_windows = tuple(
+            window for _, window in self.kv_cache_event_metadata
+        )
 
         # Pre-constructed KVCacheBlocks with no blocks, callers should use this
         # via create_kv_cache_blocks instead of creating new ones to avoid GC

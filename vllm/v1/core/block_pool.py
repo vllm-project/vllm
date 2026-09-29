@@ -197,6 +197,12 @@ class BlockPool:
         # Callbacks for blocks released with ``unpin_blocks`` whose contents
         # are still being read until the pool reuses them.
         self._reuse_watchers: dict[int, Callable[[KVCacheBlock], None]] = {}
+        # Per KV-cache-group sliding window in tokens (None for full attention),
+        # set by KVCacheManager. A sliding-window layer can only ever serve a
+        # hit from the window that precedes the reuse point, so a directive
+        # over a longer range is narrowed to that tail for such a group; the
+        # rest of the range would be protected for nothing.
+        self.retention_group_windows: tuple[int | None, ...] = ()
         # Sidecar storage for priority-based KV-cache eviction (empty until a
         # kv.retain hint is applied).
         self.priority_eviction_queue = PriorityEvictionQueue()
@@ -306,7 +312,9 @@ class BlockPool:
             if new_hashes is not None:
                 new_hashes.append(maybe_convert_block_hash(block_hash))
 
-        self._apply_retention_hook(request, blocks, num_full_blocks, block_size)
+        self._apply_retention_hook(
+            request, blocks, num_full_blocks, block_size, kv_cache_group_id
+        )
 
         if self.enable_kv_cache_events:
             if num_cached_blocks == 0:
@@ -683,6 +691,7 @@ class BlockPool:
         blocks: list[KVCacheBlock],
         num_full_blocks: int,
         block_size: int,
+        kv_cache_group_id: int = 0,
     ) -> None:
         """Apply the request's kv.retain directives to its full blocks.
 
@@ -701,6 +710,15 @@ class BlockPool:
             else d
             for d in parsed.directives
         ]
+        window = (
+            self.retention_group_windows[kv_cache_group_id]
+            if kv_cache_group_id < len(self.retention_group_windows)
+            else None
+        )
+        if directives and window is not None:
+            directives = self._narrow_to_window(
+                directives, window, num_full_blocks, block_size
+            )
         full_blocks = blocks[:num_full_blocks]
         if any(not self._owns(block) for block in full_blocks):
             # Another pool's blocks (a HiSparse host group) are not this pool's
@@ -719,6 +737,32 @@ class BlockPool:
             self.free_block_queue.append_n(
                 [self.blocks[block_id] for block_id in released]
             )
+
+    @staticmethod
+    def _narrow_to_window(
+        directives: list[RetainDirective],
+        window: int,
+        num_full_blocks: int,
+        block_size: int,
+    ) -> list[RetainDirective]:
+        """Sliding-window group: keep each protecting range's last window (the
+        blocks a hit at the range end needs; one extra block for alignment)
+        and release the rest of the range. Overlaps resolve by the queue's
+        highest-priority rule, so a release never clobbers another range's
+        window."""
+        keep_tokens = ((window - 1 + block_size - 1) // block_size + 1) * block_size
+        end_cap = num_full_blocks * block_size
+        out: list[RetainDirective] = []
+        for d in directives:
+            if d.priority <= 0:
+                out.append(d)
+                continue
+            end = end_cap if d.end is None else min(d.end, end_cap)
+            keep_from = max(d.start, end - keep_tokens)
+            out.append(replace(d, start=keep_from, end=end))
+            if keep_from > d.start:
+                out.append(RetainDirective(priority=0, start=d.start, end=keep_from))
+        return out
 
     def get_new_blocks(self, num_blocks: int) -> list[KVCacheBlock]:
         """Get new blocks from the free block pool.

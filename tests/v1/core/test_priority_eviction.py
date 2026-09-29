@@ -1518,3 +1518,55 @@ def test_retention_hook_skips_another_pools_blocks():
 
     assert foreign.block_id not in pool.priority_eviction_queue._meta
     assert own.block_id in pool.priority_eviction_queue._meta
+
+
+class TestSlidingWindowGroupNarrowing:
+    """A sliding-window group serves a hit only from the window preceding the
+    reuse point, so a directive over a whole prompt is narrowed to that tail
+    for such a group and the rest of the range is released. Full-attention
+    groups keep the range as given."""
+
+    def _pool_and_request(self, window):
+        from vllm.v1.core.block_pool import BlockPool
+
+        pool = BlockPool(
+            num_gpu_blocks=64,
+            enable_caching=True,
+            hash_block_size=16,
+            enable_kv_cache_events=False,
+        )
+        pool.retention_group_windows = (None, window)
+        blocks = pool.blocks[1:21]  # 20 full blocks = 320 tokens
+        request = _HintedRequest(
+            [_d(start=0, end=None, priority=60, duration=600.0)], "s"
+        )
+        return pool, blocks, request
+
+    def test_full_attention_group_keeps_whole_range(self):
+        pool, blocks, request = self._pool_and_request(window=128)
+        pool._apply_retention_hook(request, blocks, 20, 16, kv_cache_group_id=0)
+        meta = pool.priority_eviction_queue._meta
+        assert all(meta.get(b.block_id) is not None for b in blocks)
+
+    def test_sliding_window_group_protects_only_the_tail(self):
+        pool, blocks, request = self._pool_and_request(window=128)
+        pool._apply_retention_hook(request, blocks, 20, 16, kv_cache_group_id=1)
+        meta = pool.priority_eviction_queue._meta
+        # window 128 -> cdiv(127, 16) + 1 = 9 blocks kept: indices 11..19
+        kept = [b for b in blocks[11:]]
+        dropped = [b for b in blocks[:11]]
+        assert all(meta.get(b.block_id) is not None for b in kept)
+        assert all(meta.get(b.block_id) is None for b in dropped)
+        assert meta[kept[0].block_id].priority == 60
+
+    def test_narrowing_releases_a_previously_protected_head(self):
+        pool, blocks, request = self._pool_and_request(window=128)
+        # Protect everything first as if it were a full-attention group, then
+        # apply as the sliding-window group: the head must be released.
+        pool._apply_retention_hook(request, blocks, 20, 16, kv_cache_group_id=0)
+        for b in blocks:
+            pool.free_block_queue.remove(b)
+        pool._apply_retention_hook(request, blocks, 20, 16, kv_cache_group_id=1)
+        meta = pool.priority_eviction_queue._meta
+        assert all(meta.get(b.block_id) is None for b in blocks[:11])
+        assert all(meta.get(b.block_id) is not None for b in blocks[11:])
