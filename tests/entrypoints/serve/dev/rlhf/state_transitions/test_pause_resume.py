@@ -135,7 +135,7 @@ class TestPauseResume:
                 assert new_done.wait(timeout=30), (
                     "new request was not rejected while generation was paused"
                 )
-                assert not ok(new_result["response"])
+                assert new_result["response"]["error"]["code"] == 503
         finally:
             assert resume(server_url) == 200
             inflight_thread.join(timeout=30)

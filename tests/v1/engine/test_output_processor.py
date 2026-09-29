@@ -1559,7 +1559,7 @@ def test_request_rejected_while_paused(
 ):
     """A paused engine rejects a request with no output of any kind: it still
     finishes cleanly, as a retryable error for AsyncLLM and as a "paused"
-    result for LLMEngine."""
+    result for LLMEngine, and a streaming-input session stops taking input."""
     output_processor = OutputProcessor(dummy_test_vectors.tokenizer, log_stats=True)
     request = EngineCoreRequest(
         request_id="request-0",
@@ -1579,6 +1579,9 @@ def test_request_rejected_while_paused(
         else None
     )
     output_processor.add_request(request, None, queue=queue)
+    input_task = MagicMock()
+    if queue is not None:
+        queue._input_stream_task = input_task
 
     result = output_processor.process_outputs(
         [EngineCoreOutput(request.request_id, [], finish_reason=FinishReason.PAUSED)]
@@ -1588,6 +1591,7 @@ def test_request_rejected_while_paused(
     if queue is not None:
         with pytest.raises(EnginePausedError):
             queue.get_nowait()
+        input_task.cancel.assert_called_once()
     else:
         [output] = result.request_outputs
         assert output.finished

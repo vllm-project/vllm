@@ -1610,6 +1610,8 @@ class EngineCoreProc(EngineCore):
         elif request_type == EngineCoreRequestType.ADD:
             req, request_wave = request
             if self._reject_add_in_shutdown(req) or self._reject_add_while_paused(req):
+                # The client drops a rejected id, so end any open session under it.
+                self.abort_requests([req.request_id])
                 return
             self.add_request(req, request_wave)
         elif request_type == EngineCoreRequestType.ABORT:
@@ -1650,8 +1652,6 @@ class EngineCoreProc(EngineCore):
         # A cleanup marker carries no work; it must still reach the KV connector.
         if request.abort_immediately or not self.rejects_new_requests():
             return False
-        # Rejecting an open session's next input ends the session.
-        self.abort_requests([request.request_id])
         self._send_finish_outputs_to_client(
             [request.request_id], request.client_index, FinishReason.PAUSED
         )
@@ -2176,19 +2176,19 @@ class DPEngineCoreProc(EngineCoreProc):
 
     def add_request(self, request: Request, request_wave: int = 0):
         super().add_request(request, request_wave)
-        if not self.has_coordinator:
-            return
-        if request_wave > self.current_wave:
-            self.current_wave = request_wave
-        if (
-            not self.engines_running
-            and self.scheduler.pause_state == PauseState.UNPAUSED
-        ):
-            # Idle rank given work: announce the wave, don't trust the front-end to.
-            self.engines_running = True
-            self.output_queue.put_nowait(
-                (-1, EngineCoreOutputs(start_wave=self.current_wave))
-            )
+        if self.has_coordinator:
+            if request_wave > self.current_wave:
+                self.current_wave = request_wave
+            if (
+                not self.engines_running
+                and self.scheduler.pause_state == PauseState.UNPAUSED
+            ):
+                # Idle rank given work: announce the wave, don't trust the
+                # front-end to.
+                self.engines_running = True
+                self.output_queue.put_nowait(
+                    (-1, EngineCoreOutputs(start_wave=self.current_wave))
+                )
 
     def resume_scheduler(self):
         if self.model_executor.is_sleeping:

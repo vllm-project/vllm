@@ -708,22 +708,31 @@ def _pausable_engine_core_proc() -> EngineCoreProc:
 
 
 @pytest.mark.parametrize(
-    "pause_state,cleanup_marker,rejected",
+    "pause_state,shutting_down,cleanup_marker,rejection",
     [
-        pytest.param(PauseState.PAUSED_NEW, False, True, id="abort-or-wait"),
-        pytest.param(PauseState.PAUSED_NEW, True, False, id="kv-cleanup-marker"),
-        pytest.param(PauseState.PAUSED_ALL, False, False, id="keep"),
-        pytest.param(PauseState.UNPAUSED, False, False, id="running"),
+        pytest.param(
+            PauseState.PAUSED_NEW, False, False, FinishReason.PAUSED, id="abort-or-wait"
+        ),
+        pytest.param(PauseState.PAUSED_NEW, False, True, None, id="kv-cleanup-marker"),
+        pytest.param(PauseState.PAUSED_ALL, False, False, None, id="keep"),
+        pytest.param(PauseState.UNPAUSED, False, False, None, id="running"),
+        pytest.param(
+            PauseState.UNPAUSED, True, False, FinishReason.ABORT, id="shutting-down"
+        ),
     ],
 )
-def test_add_rejected_while_paused_at_a_boundary(pause_state, cleanup_marker, rejected):
+def test_add_rejected_while_paused_at_a_boundary(
+    pause_state, shutting_down, cleanup_marker, rejection
+):
     """A boundary pause rejects new requests before they reach the scheduler
-    or DP wave state, ending any open session with that id; `keep` queues them
-    across the pause. A KV-transfer cleanup marker must still reach the
-    connector."""
+    or DP wave state; `keep` queues them across the pause. A KV-transfer
+    cleanup marker must still reach the connector. The client drops a rejected
+    id, so any open session under it is ended too, as during shutdown."""
     core = _pausable_engine_core_proc()
     core.scheduler.pause_state = pause_state
-    core.shutdown_state = EngineShutdownState.RUNNING
+    core.shutdown_state = (
+        EngineShutdownState.REQUESTED if shutting_down else EngineShutdownState.RUNNING
+    )
     core.add_request = MagicMock()
     core._send_finish_outputs_to_client = MagicMock()
     request = MagicMock(
@@ -732,14 +741,12 @@ def test_add_rejected_while_paused_at_a_boundary(pause_state, cleanup_marker, re
 
     core._handle_client_request(EngineCoreRequestType.ADD, (request, 0))
 
-    if rejected:
+    if rejection is not None:
         core.add_request.assert_not_called()
         core.scheduler.finish_requests.assert_called_once_with(
             ["r"], RequestStatus.FINISHED_ABORTED
         )
-        core._send_finish_outputs_to_client.assert_called_once_with(
-            ["r"], 1, FinishReason.PAUSED
-        )
+        core._send_finish_outputs_to_client.assert_called_once_with(["r"], 1, rejection)
     else:
         core.add_request.assert_called_once_with(request, 0)
         core.scheduler.finish_requests.assert_not_called()
