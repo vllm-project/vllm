@@ -277,8 +277,12 @@ def resolve_chat_template(
     if tools is None:
         chat_template = _try_get_processor_chat_template(
             tokenizer,
-            revision=model_config.revision,
-            code_revision=model_config.code_revision,
+            revision=model_config.tokenizer_revision,
+            code_revision=(
+                model_config.code_revision
+                if model_config.tokenizer == model_config.model
+                else None
+            ),
             trust_remote_code=model_config.trust_remote_code,
         )
         if chat_template is not None:
@@ -966,8 +970,7 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
             )
 
     def _can_produce_offsets(self) -> bool:
-        # HF tokenizers may be slow (use_fast=False); only fast tokenizers
-        # expose offset_mapping.
+        # Only fast tokenizers expose offset_mapping.
         return self.tokenizer is not None and self.tokenizer.is_fast
 
     def render_messages(
