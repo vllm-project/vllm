@@ -20,6 +20,7 @@ from vllm.entrypoints.serve.utils.api_utils import (
     validate_json_request,
     with_cancellation,
 )
+from vllm.entrypoints.serve.utils.fingerprint import dump_response_with_fingerprint
 from vllm.entrypoints.serve.utils.orca_metrics import metrics_header
 from vllm.entrypoints.serve.utils.sse_keep_alive import with_sse_keep_alive
 from vllm.logger import init_logger
@@ -68,7 +69,7 @@ async def create_chat_completion(request: ChatCompletionRequest, raw_request: Re
 
     elif isinstance(generator, ChatCompletionResponse):
         return JSONResponse(
-            content=generator.model_dump(),
+            content=dump_response_with_fingerprint(generator),
             headers=metrics_header(metrics_header_format),
         )
 
@@ -105,7 +106,7 @@ async def create_batch_chat_completion(
     if isinstance(result, ErrorResponse):
         return JSONResponse(content=result.model_dump(), status_code=result.error.code)
 
-    return JSONResponse(content=result.model_dump())
+    return JSONResponse(content=dump_response_with_fingerprint(result))
 
 
 def attach_router(app: FastAPI):

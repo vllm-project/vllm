@@ -18,6 +18,7 @@ from vllm.entrypoints.serve.utils.api_utils import (
     validate_json_request,
     with_cancellation,
 )
+from vllm.entrypoints.serve.utils.fingerprint import dump_response_with_fingerprint
 from vllm.entrypoints.serve.utils.orca_metrics import metrics_header
 from vllm.entrypoints.serve.utils.sse_keep_alive import with_sse_keep_alive
 from vllm.logger import init_logger
@@ -60,7 +61,7 @@ async def create_completion(request: CompletionRequest, raw_request: Request):
         )
     elif isinstance(generator, CompletionResponse):
         return JSONResponse(
-            content=generator.model_dump(),
+            content=dump_response_with_fingerprint(generator),
             headers=metrics_header(metrics_header_format),
         )
 
