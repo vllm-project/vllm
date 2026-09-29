@@ -38,8 +38,8 @@ def checksums(url: str) -> dict[str, str]:
     return response.json()["checksums"]
 
 
-def dp_ranks(keys) -> set[str]:
-    return {key.split(":", 1)[0] for key in keys}
+def ranks(keys) -> set[str]:
+    return {key.rsplit(":", 1)[0] for key in keys}
 
 
 def reset_reload_and_compare(url: str) -> None:
@@ -47,7 +47,7 @@ def reset_reload_and_compare(url: str) -> None:
     try:
         weight_checker(url, "reset").raise_for_status()
         comparison = weight_checker(url, "compare", baseline).json()
-        assert dp_ranks(comparison["mismatches"]) == dp_ranks(baseline)
+        assert ranks(comparison["mismatches"]) == ranks(baseline)
     finally:
         requests.post(
             f"{url}/collective_rpc", json={"method": "reload_weights"}, timeout=300
@@ -120,8 +120,14 @@ def test_ipc_weight_transfer_restores_reset_weights():
 
 
 @multi_gpu_test(num_gpus=2)
-def test_checksum_and_reset_cover_every_dp_engine():
-    args = ["--data-parallel-size", "2"]
+@pytest.mark.parametrize(
+    "args, expected",
+    [
+        (["--data-parallel-size", "2"], {"dp0:pp0:pcp0:tp0", "dp1:pp0:pcp0:tp0"}),
+        (["--tensor-parallel-size", "2"], {"dp0:pp0:pcp0:tp0", "dp0:pp0:pcp0:tp1"}),
+    ],
+)
+def test_checksum_and_reset_cover_every_worker(args, expected):
     with server(extra_args=args, port=8771, timeout=600) as url:
-        assert dp_ranks(checksums(url)) == {"dp0", "dp1"}
+        assert ranks(checksums(url)) == expected
         reset_reload_and_compare(url)
