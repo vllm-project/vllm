@@ -6,7 +6,6 @@ import time
 import uuid
 from collections import deque
 from concurrent.futures import Future, ThreadPoolExecutor
-from typing import Any
 from unittest.mock import MagicMock, PropertyMock, patch
 
 import pytest
@@ -700,51 +699,6 @@ def _pausable_engine_core_proc() -> EngineCoreProc:
     core.engines_running = False
     core._idle_state_callbacks = []
     return core
-
-
-@pytest.mark.parametrize("num_batches", [0, 1, 2])
-@pytest.mark.parametrize("reset_running_requests", [False, True])
-def test_reset_prefix_cache_consumes_outputs_before_reset(
-    num_batches, reset_running_requests
-):
-    """Reset drains queued results in order without scheduling or losing outputs."""
-    core = _pausable_engine_core_proc()
-    core.batch_queue = deque()
-    core.batch_queue_size = 3
-    core.output_queue = MagicMock()
-    core.log_error_detail = MagicMock()
-    core.capture_iteration_details = MagicMock()
-    core._attach_iteration_details = MagicMock()
-    core._process_aborts_queue = MagicMock()
-    core.scheduler.has_requests.return_value = True
-    consumed: list[int] = []
-    for index in range(num_batches):
-        future: Future[Any] = Future()
-        future.set_result(index)
-        core.batch_queue.appendleft((future, index, future))
-
-    def consume(scheduled, output):
-        assert scheduled == output == len(consumed)
-        consumed.append(output)
-        return {0: output}
-
-    def reset(*args):
-        assert len(consumed) == num_batches
-        assert not core.batch_queue
-        assert core.output_queue.put_nowait.call_count == num_batches
-        return True
-
-    core.scheduler.update_from_output.side_effect = consume
-    core.scheduler.reset_prefix_cache.side_effect = reset
-    assert core.reset_prefix_cache(reset_running_requests, reset_connector=True)
-    core.scheduler.reset_prefix_cache.assert_called_once_with(
-        reset_running_requests, True
-    )
-    core.scheduler.schedule.assert_not_called()
-    core.model_executor.execute_model.assert_not_called()
-    assert [call.args[0] for call in core.output_queue.put_nowait.call_args_list] == [
-        (0, index) for index in range(num_batches)
-    ]
 
 
 @pytest.mark.parametrize(

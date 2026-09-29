@@ -668,7 +668,7 @@ class EngineCore:
                 self.scheduler.update_draft_token_ids(draft_token_ids)
 
     def step_with_batch_queue(
-        self, *, schedule_new_batch: bool = True
+        self,
     ) -> tuple[dict[int, EngineCoreOutputs] | None, bool]:
         """Schedule and execute batches with the batch queue.
         Note that if nothing to output in this step, None is returned.
@@ -693,7 +693,7 @@ class EngineCore:
 
         model_executed = False
         deferred_scheduler_output = None
-        if schedule_new_batch and self.scheduler.has_requests():
+        if self.scheduler.has_requests():
             scheduler_output = self.scheduler.schedule(self._should_throttle_prefills())
             with self.log_error_detail(scheduler_output):
                 exec_future = self.model_executor.execute_model(
@@ -1540,16 +1540,6 @@ class EngineCoreProc(EngineCore):
             time.sleep(0.001)
 
         return model_executed
-
-    def reset_prefix_cache(
-        self, reset_running_requests: bool = False, reset_connector: bool = False
-    ) -> bool:
-        # Consume old outputs before resetting request state or cache generations.
-        while self.batch_queue:
-            outputs, _ = self.step_with_batch_queue(schedule_new_batch=False)
-            for output in outputs.items() if outputs else ():
-                self.output_queue.put_nowait(output)
-        return super().reset_prefix_cache(reset_running_requests, reset_connector)
 
     def _notify_idle_state_callbacks(self) -> None:
         while self._idle_state_callbacks:

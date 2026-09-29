@@ -1562,7 +1562,7 @@ def test_scheduler_reset_prefix_cache():
     assert not scheduler.reset_prefix_cache()
     scheduler.aux_output_connector.reset.assert_not_called()
 
-    # EngineCore consumes pending model outputs before resetting the scheduler.
+    # Pause completes pending model outputs before the caller resets the scheduler.
     for request in requests:
         request.num_in_flight_tokens = 0
 
