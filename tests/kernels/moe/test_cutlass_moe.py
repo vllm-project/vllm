@@ -197,6 +197,14 @@ def test_remap_topk_ids_to_local():
     torch.testing.assert_close(actual, expected)
 
 
+def test_remap_topk_ids_to_local_requires_contiguous_topk_ids():
+    expert_map = torch.tensor([0, 1], dtype=torch.int32)
+    topk_ids = torch.tensor([[0, 1], [1, 0]], dtype=torch.int32).t()
+    assert not topk_ids.is_contiguous()
+    with pytest.raises(AssertionError):
+        remap_topk_to_local(topk_ids, expert_map)
+
+
 def test_cutlass_fp4_moe_supports_expert_parallel_config():
     ep_config = FusedMoEParallelConfig(
         tp_size=1,

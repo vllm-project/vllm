@@ -241,7 +241,8 @@ def remap_topk_to_local(
     ``topk_ids`` as ``global_topk_ids``, so this must not write in place.
 
     Args:
-        topk_ids: Global expert ids; -1 marks invalid slots.
+        topk_ids: Global expert ids; -1 marks invalid slots. Must be contiguous;
+            the Triton kernel indexes by flat ``numel()`` offsets.
         expert_map: Global-to-local mapping; -1 marks non-local experts.
         out_dtype: Output dtype, ``torch.int32`` or ``torch.int64``.
 
@@ -251,7 +252,8 @@ def remap_topk_to_local(
     """
     if out_dtype not in (torch.int32, torch.int64):
         raise ValueError(f"out_dtype must be int32 or int64, got {out_dtype}")
-    out = torch.empty_like(topk_ids, dtype=out_dtype)
+    assert topk_ids.is_contiguous()
+    out = torch.empty(topk_ids.shape, dtype=out_dtype, device=topk_ids.device)
     n = topk_ids.numel()
     BLOCK = 1024
     grid = (triton.cdiv(n, BLOCK),)
