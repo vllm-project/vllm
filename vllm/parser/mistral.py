@@ -117,6 +117,29 @@ def _is_pre_v11_tokeniser(model_tokenizer: TokenizerLike) -> bool:
     return _ARGS not in vocab
 
 
+def _normalize_pre_v11_tool_calls(parsed: Any) -> list[tuple[str, str]] | None:
+    """Return ``(name, arguments)`` pairs, or ``None`` if `parsed` is malformed.
+
+    Matches the streaming path: a bare object is a single call, a missing name
+    becomes ``""`` (as in the v11+ path), and string arguments are assumed to
+    already be JSON-encoded.
+    """
+    if isinstance(parsed, dict):
+        parsed = [parsed]
+    if not isinstance(parsed, list) or not parsed:
+        return None
+    tool_calls: list[tuple[str, str]] = []
+    for tool_call in parsed:
+        if not isinstance(tool_call, dict):
+            return None
+        name = tool_call.get("name")
+        arguments = tool_call.get("arguments", {})
+        if not isinstance(arguments, str):
+            arguments = json.dumps(arguments, ensure_ascii=False)
+        tool_calls.append((name if isinstance(name, str) else "", arguments))
+    return tool_calls
+
+
 @functools.cache
 def mistral_config(
     *,
@@ -301,6 +324,7 @@ class MistralParser(ParserEngine):
         self.starting_new_tool: bool = False
         self.streamed_args_for_tool: list[str] = []
         self._is_pre_v11: bool = _is_pre_v11_tokeniser(tokenizer)
+        self.string_arguments: str | None = None
         self.parse_coro = None
         if self._is_pre_v11:
             self.parse_coro = ijson.parse_coro(
@@ -574,21 +598,11 @@ class MistralParser(ParserEngine):
             # Use raw_decode to parse the first valid JSON value,
             # ignoring trailing tokens the model may emit after
             # the tool call array.
-            tool_calls, _ = json.JSONDecoder().raw_decode(stringified_tool_calls)
+            parsed, _ = json.JSONDecoder().raw_decode(stringified_tool_calls)
         except json.JSONDecodeError:
             try:
                 raw_tool_call = self.tool_call_regex.findall(stringified_tool_calls)[0]
-                tool_calls = json.loads(raw_tool_call)
-                tool_calls = [
-                    {
-                        "name": tool_call["name"],
-                        "arguments": json.dumps(
-                            tool_call.get("arguments", {}),
-                            ensure_ascii=False,
-                        ),
-                    }
-                    for tool_call in tool_calls
-                ]
+                parsed = json.loads(raw_tool_call)
             except (IndexError, json.JSONDecodeError):
                 logger.exception("Error in extracting tool call from response.")
                 return ExtractedToolCallInformation(
@@ -596,27 +610,26 @@ class MistralParser(ParserEngine):
                     tool_calls=[],
                     content=stringified_tool_calls,
                 )
-        else:
-            tool_calls = [
-                {
-                    "name": tool_call["name"],
-                    "arguments": json.dumps(
-                        tool_call.get("arguments", {}),
-                        ensure_ascii=False,
-                    ),
-                }
-                for tool_call in tool_calls
-            ]
+
+        tool_calls = _normalize_pre_v11_tool_calls(parsed)
+        if tool_calls is None:
+            logger.warning(
+                "Model output after %s is not a list of tool calls; "
+                "returning it as content.",
+                self.bot_token,
+            )
+            return ExtractedToolCallInformation(
+                tools_called=False,
+                tool_calls=[],
+                content=stringified_tool_calls,
+            )
 
         mistral_tool_calls: list[MistralToolCall] = [
             MistralToolCall(
                 type="function",
-                function=FunctionCall(
-                    name=tool_call["name"],
-                    arguments=tool_call.get("arguments", "{}"),
-                ),
+                function=FunctionCall(name=name, arguments=arguments),
             )
-            for tool_call in tool_calls
+            for name, arguments in tool_calls
         ]
 
         return ExtractedToolCallInformation(
@@ -668,8 +681,15 @@ class MistralParser(ParserEngine):
 
     @ijson.coroutine
     def update_stream_state_pre_v11_tokenizer(self):
+        bare_object = False
         while True:
             (prefix, event, value) = yield
+
+            # A bare object is handled like a one-element array.
+            if prefix == "" and event == "start_map":
+                bare_object = True
+            if bare_object:
+                prefix = f"item.{prefix}" if prefix else "item"
 
             if prefix == "item" and event == "start_map":
                 self.streaming_state = StreamingState.WAITING_FOR_TOOL_KEY
@@ -685,8 +705,14 @@ class MistralParser(ParserEngine):
                 self.streaming_state = StreamingState.PARSING_ARGUMENTS
             if prefix == "item.arguments" and event == "end_map":
                 self.streaming_state = StreamingState.PARSING_ARGUMENTS_COMPLETED
+            if prefix == "item.arguments" and event == "string":
+                self.string_arguments = value
             if prefix == "item" and event == "end_map":
-                self.streaming_state = StreamingState.TOOL_COMPLETE
+                self.streaming_state = (
+                    StreamingState.ALL_TOOLS_COMPLETE
+                    if bare_object
+                    else StreamingState.TOOL_COMPLETE
+                )
             if prefix == "" and event == "end_array":
                 self.streaming_state = StreamingState.ALL_TOOLS_COMPLETE
 
@@ -768,6 +794,15 @@ class MistralParser(ParserEngine):
 
             if self.streaming_state != StreamingState.ALL_TOOLS_COMPLETE:
                 self.parse_coro.send(delta_to_be_parsed.encode("utf-8"))
+
+            # Attach string arguments before a new tool can start in the
+            # same chunk (`..."}, {"name": ...`).
+            if self.string_arguments is not None:
+                if current_tool_call.function is None:
+                    current_tool_call.function = DeltaFunctionCall()
+                current_tool_call.function.arguments = self.string_arguments
+                current_tool_call_modified = True
+                self.string_arguments = None
 
             # start_map is the authoritative new-tool signal and survives
             # batched deltas, unlike comparing pre/post streaming states.

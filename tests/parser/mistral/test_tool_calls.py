@@ -518,6 +518,86 @@ def test_extract_tool_calls_pre_v11_regex_fallback_fails(
 
 
 @pytest.mark.parametrize(
+    "stringified_tool_calls",
+    ['["add"]', "42", "[]"],
+    ids=["list_of_str", "scalar", "empty_list"],
+)
+def test_extract_tool_calls_pre_v11_not_tool_calls_returns_content(
+    mistral_pre_v11_tool_parser, stringified_tool_calls
+):
+    """Valid JSON that is not a tool call must not fail the whole request."""
+    result = mistral_pre_v11_tool_parser.extract_tool_calls(
+        f"[TOOL_CALLS] {stringified_tool_calls}", request=_DUMMY_REQUEST
+    )
+    assert result == ExtractedToolCallInformation(
+        tools_called=False, tool_calls=[], content=stringified_tool_calls
+    )
+
+
+_PRE_V11_UNUSUAL_SHAPES = [
+    pytest.param(
+        '[TOOL_CALLS] {"name": "add", "arguments": {"a": 1}}',
+        [("add", {"a": 1})],
+        id="single_object",
+    ),
+    pytest.param(
+        '[TOOL_CALLS] [{"arguments": {"a": 1}}]',
+        [("", {"a": 1})],
+        id="missing_name",
+    ),
+    pytest.param(
+        '[TOOL_CALLS] [{"name": "add", "arguments": "{\\"a\\": 1}"}]',
+        [("add", {"a": 1})],
+        id="string_arguments",
+    ),
+    pytest.param(
+        '[TOOL_CALLS] [{"name": "add", "arguments": "{\\"a\\": 1}"}, '
+        '{"name": "sub", "arguments": {"b": 2}}]',
+        [("add", {"a": 1}), ("sub", {"b": 2})],
+        id="string_arguments_then_object",
+    ),
+]
+
+
+@pytest.mark.parametrize("model_output,expected", _PRE_V11_UNUSUAL_SHAPES)
+def test_extract_tool_calls_pre_v11_unusual_shapes(
+    mistral_pre_v11_tool_parser, model_output, expected
+):
+    result = mistral_pre_v11_tool_parser.extract_tool_calls(
+        model_output, request=_DUMMY_REQUEST
+    )
+    assert result.tools_called
+    assert [
+        (tc.function.name, json.loads(tc.function.arguments))
+        for tc in result.tool_calls
+    ] == expected
+
+
+@pytest.mark.parametrize("driver", ["legacy", "engine"])
+@pytest.mark.parametrize("model_output,expected", _PRE_V11_UNUSUAL_SHAPES)
+def test_extract_tool_calls_streaming_pre_v11_unusual_shapes(
+    mistral_pre_v11_tool_parser,
+    mistral_pre_v11_tokenizer,
+    model_output,
+    expected,
+    driver,
+):
+    """Streaming must return the same calls as the non-streaming path."""
+    _test_extract_tool_calls_streaming(
+        mistral_pre_v11_tool_parser,
+        mistral_pre_v11_tokenizer,
+        model_output,
+        None,
+        [
+            ToolCall(function=FunctionCall(name=name, arguments=json.dumps(args)))
+            for name, args in expected
+        ],
+        "",
+        driver=driver,
+    )
+
+
+@pytest.mark.parametrize(
     ids=[
         "single_tool_add",
         "single_tool_weather",
@@ -882,6 +962,7 @@ def _test_extract_tool_calls_streaming(
             if tool_call.index != tool_call_idx:
                 tool_call_idx = tool_call.index
                 function_args_strs.append("")
+                function_names.append("")
                 tool_call_ids.append(None)
 
             # if a tool call ID is streamed, make sure one hasn't been already
@@ -894,7 +975,7 @@ def _test_extract_tool_calls_streaming(
                 # IN ENTIRETY, exactly one time.
                 if tool_call.function.name:
                     assert isinstance(tool_call.function.name, str)
-                    function_names.append(tool_call.function.name)
+                    function_names[tool_call.index] = tool_call.function.name
 
                 if tool_call.function.arguments:
                     # make sure they're a string and then add them to the list
