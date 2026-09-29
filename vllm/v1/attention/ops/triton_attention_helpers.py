@@ -166,9 +166,11 @@ def compute_tile_loop_bounds(
     MAX_MM_RANGES: tl.constexpr = 0,
     mm_prefix_range_ptr=None,
     seq_idx=0,
+    USE_TD: tl.constexpr = False,
+    SHIFT_TILE_BASE: tl.constexpr = False,
 ):
-    """Compute the tile-loop bounds ``(loop_lo, loop_hi)`` and the
-    derived ``max_seq_prefix_len`` used for per-tile masking.
+    """Compute the tile-loop bounds ``(loop_lo, loop_hi)``, the derived
+    ``max_seq_prefix_len`` used for per-tile masking, and ``tile_base``.
 
     Combines three concerns into one helper:
 
@@ -184,6 +186,10 @@ def compute_tile_loop_bounds(
     3. 3D scoping: when ``IS_3D`` is True, further narrows to the
        segment's slice via ``(segm_idx * tiles_per_segment,
        (segm_idx + 1) * tiles_per_segment)``.
+
+    ``tile_base`` is the KV position the loop starts from. With
+    ``SHIFT_TILE_BASE`` (2D, non-TD only), the SWA/chunked path starts at
+    the window's first key instead of a floor-rounded tile boundary.
     """
     # compute the length of the longest sequence prefix spanned by any
     # query token in the current q_block (q_block_local_idx)
@@ -206,7 +212,7 @@ def compute_tile_loop_bounds(
     num_tiles = cdiv_fn(max_seq_prefix_len, TILE_SIZE)
 
     # ---- Sliding-window tile pruning --------------------
-    # Default: keep previous global behavior
+    tile_base: tl.int32 = 0
     tile_start = 0
     tile_end = num_tiles
     # Prefix ranges normally override the sliding window, so they require the
@@ -268,9 +274,15 @@ def compute_tile_loop_bounds(
                     tl.where(intersects_query_block, range_end, last_allowed_key),
                 )
         last_allowed_key = tl.minimum(last_allowed_key, seq_len - 1)
-        # Convert to tile indices and clamp
-        tile_start = tl.maximum(0, first_allowed_key // TILE_SIZE)
-        tile_end = tl.minimum((last_allowed_key // TILE_SIZE) + 1, num_tiles)
+        if not SHIFT_TILE_BASE or IS_3D or USE_TD:
+            tile_start = tl.maximum(0, first_allowed_key // TILE_SIZE)
+            tile_end = tl.minimum((last_allowed_key // TILE_SIZE) + 1, num_tiles)
+        else:
+            tile_base = tl.maximum(0, first_allowed_key)
+            tile_start = 0
+            tile_end = cdiv_fn(
+                tl.maximum(0, last_allowed_key + 1 - tile_base), TILE_SIZE
+            )
 
     if IS_3D:
         loop_lo = max(segm_idx_or_0 * tiles_per_segment_or_0, tile_start)
@@ -279,7 +291,7 @@ def compute_tile_loop_bounds(
         loop_lo = tile_start
         loop_hi = tile_end
 
-    return loop_lo, loop_hi, max_seq_prefix_len
+    return loop_lo, loop_hi, max_seq_prefix_len, tile_base
 
 
 @triton.jit
