@@ -22,9 +22,6 @@ import torch
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.platforms import current_platform
 
-# Register torch.ops.vllm.rocm_aiter_router_gemm.
-import vllm.model_executor.layers.fused_moe.router.gate_linear  # noqa: F401  isort: skip
-
 # (hidden_size, num_experts): GLM-5/5.2, DeepSeek-V3 and Kimi-K2 routers.
 SHAPES = [(6144, 256), (7168, 256), (7168, 384)]
 NUM_TOKENS = [1, 2, 4, 8, 16, 32, 64, 128]

@@ -536,6 +536,26 @@ def _rocm_aiter_topk_sigmoid_impl(
     topk_sigmoid(topk_weights, topk_indices, gating_output)
 
 
+def _rocm_aiter_router_gemm_impl(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    out_dtype: torch.dtype,
+) -> torch.Tensor:
+    # AITER only has bf16-output tuned configs for router shapes: run bf16, cast.
+    from aiter.tuned_gemm import tgemm
+
+    out = tgemm.mm(x, weight, None)
+    return out if out.dtype == out_dtype else out.to(out_dtype)
+
+
+def _rocm_aiter_router_gemm_fake(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    out_dtype: torch.dtype,
+) -> torch.Tensor:
+    return x.new_empty((x.shape[0], weight.shape[0]), dtype=out_dtype)
+
+
 def _rocm_aiter_biased_grouped_topk_impl(
     gating_output: torch.Tensor,
     correction_bias: torch.Tensor,
@@ -2814,6 +2834,14 @@ class rocm_aiter_ops:
                 op_name="rocm_aiter_topk_sigmoid",
                 op_func=_rocm_aiter_topk_sigmoid_impl,
                 mutates_args=["topk_weights", "topk_indices"],
+                dispatch_key=current_platform.dispatch_key,
+            )
+
+            direct_register_custom_op(
+                op_name="rocm_aiter_router_gemm",
+                op_func=_rocm_aiter_router_gemm_impl,
+                mutates_args=[],
+                fake_impl=_rocm_aiter_router_gemm_fake,
                 dispatch_key=current_platform.dispatch_key,
             )
 

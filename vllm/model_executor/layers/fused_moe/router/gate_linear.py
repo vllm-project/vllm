@@ -198,8 +198,6 @@ class GateLinear(ReplicatedLinear):
         self.allow_aiter_router_gemm = (
             can_use_aiter_tuned_gemm and self.weight.dtype == torch.bfloat16
         )
-        if self.allow_aiter_router_gemm:
-            logger.info_once("Enabled the AITER tuned GEMM router gate.")
 
     def set_out_dtype(self, out_dtype: torch.dtype) -> None:
         """Set output dtype for the router logits after init.
@@ -457,41 +455,4 @@ direct_register_custom_op(
     op_name="fp32_router_gemm_dispatch",
     op_func=fp32_router_gemm_dispatch_impl,
     fake_impl=fp32_router_gemm_dispatch_fake,
-)
-
-
-def rocm_aiter_router_gemm_impl(
-    x: torch.Tensor,
-    weight: torch.Tensor,
-    out_dtype: torch.dtype,
-) -> torch.Tensor:
-    """AITER tuned GEMM for the MoE router gate on ROCm.
-
-    Wrapped in a custom op so torch.compile treats the AITER tuned-config
-    lookup as opaque instead of specializing on it.
-
-    AITER keys its tuned configs on the output dtype as well as the shape, and
-    only ships bf16-output entries for the gate's shapes. Asking for out_dtype
-    directly would miss the table whenever the router runs in fp32 and fall back
-    to an untuned solution, so take the tuned bf16 kernel and cast the tiny
-    num_tokens x num_experts output instead.
-    """
-    from aiter.tuned_gemm import tgemm
-
-    out = tgemm.mm(x, weight, None)
-    return out if out.dtype == out_dtype else out.to(out_dtype)
-
-
-def rocm_aiter_router_gemm_fake(
-    x: torch.Tensor,
-    weight: torch.Tensor,
-    out_dtype: torch.dtype,
-) -> torch.Tensor:
-    return x.new_empty((x.shape[0], weight.shape[0]), dtype=out_dtype)
-
-
-direct_register_custom_op(
-    op_name="rocm_aiter_router_gemm",
-    op_func=rocm_aiter_router_gemm_impl,
-    fake_impl=rocm_aiter_router_gemm_fake,
 )
