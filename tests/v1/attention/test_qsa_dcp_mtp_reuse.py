@@ -44,10 +44,9 @@ def _globalize(local_ids, world, rank, interleave):
     ]
 
 
-# Prior lengths chosen to straddle compression-group boundaries at 32 and 48.
 STEP0 = [
     list(range(0, 31)),  # a prefill row ending just before 32
-    list(range(0, 46, 2)),  # a prefill row straddling 48
+    list(range(0, 46, 2)),
     [3, 9, 17, 40],  # a decode row
 ]
 
