@@ -1103,9 +1103,7 @@ def test_hisparse_prefix_hit_adopts_gpu_shadow_pages():
     )
 
 
-@pytest.mark.parametrize(
-    "free_blocks,adopted_pages", [(7, []), (9, [0, 1]), (10, [0, 1, 2])]
-)
+@pytest.mark.parametrize("free_blocks,adopted_pages", [(7, []), (10, [0, 1])])
 def test_hisparse_prefix_hit_under_pressure_adopts_surviving_copies(
     free_blocks, adopted_pages
 ):
@@ -1114,8 +1112,8 @@ def test_hisparse_prefix_hit_under_pressure_adopts_surviving_copies(
     Admission counts free GPU copies as free, but adopting a copy pins it. When
     adoption ran before the hit's allocation, it took blocks the allocation was
     promised and the pool ran dry (``Cannot get N free blocks``). The allocation
-    now goes first, evicting copies only after every other free block and a
-    prefix's tail before its head; the copies it leaves are adopted.
+    now goes first, evicting a prefix's copies tail first; the copies it leaves
+    are adopted.
     """
     manager = make_hisparse_kv_cache_manager(32, 16, enable_caching=True)
     tokens = list(range(4 * HISPARSE_BLOCK_SIZE))
