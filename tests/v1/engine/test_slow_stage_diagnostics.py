@@ -117,25 +117,6 @@ def make_timeout_snapshot(
     )
 
 
-def test_engine_execution_timeout_watchdog_disabled_is_lazy():
-    watchdog = dump_input.EngineExecutionTimeoutWatchdog(
-        config=make_timeout_config(),
-        timeout_s=0,
-    )
-
-    watchdog.start()
-    generation = watchdog.arm(
-        make_timeout_snapshot(),
-        engine_core_module.EXECUTE_MODEL_WAIT_STAGE,
-    )
-    watchdog.disarm(generation)
-    watchdog.stop()
-
-    assert generation is None
-    assert watchdog._thread is None
-    assert not watchdog.enabled
-
-
 def test_engine_execution_timeout_watchdog_fails_open_on_thread_start_error(
     monkeypatch,
 ):
@@ -528,7 +509,7 @@ def test_timeout_diagnostics_monitors_only_incomplete_futures():
     ]
 
 
-def test_timeout_diagnostics_disabled_skips_snapshot():
+def test_timeout_diagnostics_disabled_is_lazy():
     def fail_snapshot():
         raise AssertionError("disabled watchdog must not collect a snapshot")
 
@@ -536,14 +517,18 @@ def test_timeout_diagnostics_disabled_skips_snapshot():
         config=make_timeout_config(), timeout_s=0, scheduler_state_fn=fail_snapshot
     )
 
+    diagnostics.start()
     scheduler_state = diagnostics.make_snapshot(SimpleNamespace())
     with diagnostics.monitor(
         engine_core_module.EXECUTE_MODEL_WAIT_STAGE,
         scheduler_state,
     ):
         pass
+    diagnostics.stop()
 
     assert scheduler_state.scheduler_output_summary == {}
+    assert diagnostics._watchdog._thread is None
+    assert not diagnostics._watchdog.enabled
 
 
 def test_timeout_diagnostics_snapshot_fails_open(monkeypatch):
@@ -646,6 +631,33 @@ def test_timeout_diagnostics_snapshot_is_rich_and_prunes_finished_requests():
 
     cached_sample = snapshot.scheduler_output_summary["request_samples"][0]
     assert cached_sample["sampling_params"] is None
+
+
+def test_timeout_diagnostics_only_summarizes_sampled_requests(monkeypatch):
+    scheduler_output = make_timeout_scheduler_output()
+    template_request = scheduler_output.scheduled_new_reqs[0]
+    requests = [SimpleNamespace(**vars(template_request)) for _ in range(100)]
+    for index, request in enumerate(requests):
+        request.req_id = f"request-{index}"
+    scheduler_output.scheduled_new_reqs = requests
+    scheduler_output.scheduled_cached_reqs.num_reqs = 0
+    scheduler_output.scheduled_cached_reqs.req_ids = []
+    diagnostics = dump_input.EngineExecutionTimeoutDiagnostics(
+        config=make_timeout_config(), timeout_s=1, scheduler_state_fn=lambda: {}
+    )
+    original_make_summary = dump_input.make_sampling_params_summary
+    summarized_sampling_params = []
+
+    def record_summary(sampling_params):
+        summarized_sampling_params.append(sampling_params)
+        return original_make_summary(sampling_params)
+
+    monkeypatch.setattr(dump_input, "make_sampling_params_summary", record_summary)
+
+    snapshot = diagnostics.make_snapshot(scheduler_output)
+
+    assert len(snapshot.scheduler_output_summary["request_samples"]) == 20
+    assert len(summarized_sampling_params) == 20
 
 
 def test_scheduler_timeout_diagnostic_state_supports_builtin_and_custom_schedulers():

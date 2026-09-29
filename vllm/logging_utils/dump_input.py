@@ -740,7 +740,7 @@ class EngineExecutionTimeoutDiagnostics:
             timeout_s=timeout_s,
         )
         self._scheduler_state_fn = scheduler_state_fn
-        self._sampling_params_by_request: dict[str, dict[str, Any] | None] = {}
+        self._sampling_params_by_request: dict[str, Any] = {}
 
     def start(self) -> None:
         self._watchdog.start()
@@ -807,7 +807,7 @@ class EngineExecutionTimeoutDiagnostics:
                 self._sampling_params_by_request.pop(request_id, None)
             for request in scheduler_output.scheduled_new_reqs:
                 self._sampling_params_by_request[request.req_id] = (
-                    make_sampling_params_summary(request.sampling_params)
+                    request.sampling_params
                 )
             _, cached_request_indices = get_engine_timeout_request_sample_indices(
                 len(scheduler_output.scheduled_new_reqs),
@@ -818,7 +818,9 @@ class EngineExecutionTimeoutDiagnostics:
                 for index in cached_request_indices
             )
             cached_request_sampling_params = {
-                request_id: self._sampling_params_by_request[request_id]
+                request_id: make_sampling_params_summary(
+                    self._sampling_params_by_request[request_id]
+                )
                 for request_id in cached_request_ids
                 if request_id in self._sampling_params_by_request
             }
