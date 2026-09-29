@@ -27,7 +27,6 @@ from transformers import (
 
 from vllm.config.utils import getattr_iter
 from vllm.model_executor.layers.pooler import DispatchPooler
-from vllm.model_executor.layers.pooler.seqwise import get_seq_pooling_method
 from vllm.model_executor.layers.pooler.tokwise import pooler_for_token_classify
 from vllm.model_executor.models.interfaces import SupportsCrossEncoding
 from vllm.model_executor.models.interfaces_base import VllmModelForPooling
@@ -65,6 +64,12 @@ class EmbeddingMixin(VllmModelForPooling, Base):
         assert pooler_config is not None
 
         self.pooler = DispatchPooler.for_embedding(pooler_config)
+
+
+# Shape-preserving modules applied between the base model and the classifier, keyed
+# by `model_type`. Other heads can't be adopted safely because their `forward` may
+# apply more than their modules (e.g. DistilBERT's ReLU, DeBERTa's CLS slicing).
+_CLASSIFIER_HEADS: dict[str, tuple[str, ...]] = {"modernbert": ("head",)}
 
 
 class ClassificationMixin(VllmModelForPooling, Base):
@@ -109,15 +114,9 @@ class ClassificationMixin(VllmModelForPooling, Base):
                 {},
             )
 
-        # Modules between the base model and `classifier` (e.g. ModernBERT's `head`)
         heads = []
-        for name, module in cls_model.named_children():
-            if module is cls_model.base_model:
-                continue
-            if module is self.classifier:
-                break
-            if isinstance(module, nn.Dropout):
-                continue
+        for name in _CLASSIFIER_HEADS.get(self.config.model_type, ()):
+            module = getattr(cls_model, name)
             self.init_parameters(module, dtype=self.model_config.head_dtype)
             setattr(self, name, module)
             heads.append(module)
@@ -138,19 +137,7 @@ class SequenceClassificationMixin(SupportsCrossEncoding, ClassificationMixin):
             AutoModelForSequenceClassification, reshape=True
         )
 
-        pooling = None
-        sources = getattr(self.model_config, "_pooler_config_sources", {})
-        classifier_pooling = getattr(self.config, "classifier_pooling", None)
-        if sources.get(
-            "seq_pooling_type"
-        ) == "model_default" and classifier_pooling in ("cls", "mean"):
-            pooling = get_seq_pooling_method(classifier_pooling.upper())
-
-        self.pooler = DispatchPooler.for_seq_cls(
-            pooler_config,
-            pooling=pooling,
-            classifier=classifier,
-        )
+        self.pooler = DispatchPooler.for_seq_cls(pooler_config, classifier=classifier)
 
 
 class TokenClassificationMixin(ClassificationMixin):
