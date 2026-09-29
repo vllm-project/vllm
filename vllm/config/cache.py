@@ -107,7 +107,19 @@ class CacheConfig:
     per-instance limit, and only applies to the current vLLM instance. It does
     not matter if you have another vLLM instance running on the same GPU. For
     example, if you have two vLLM instances running on the same GPU, you can
-    set the GPU memory utilization to 0.5 for each instance."""
+    set the GPU memory utilization to 0.5 for each instance. On non-GPU
+    installs, this value controls the corresponding device memory utilization.
+    """
+
+    @property
+    def device_memory_utilization(self) -> float:
+        """Device-neutral alias for ``gpu_memory_utilization``."""
+        return self.gpu_memory_utilization
+
+    @device_memory_utilization.setter
+    def device_memory_utilization(self, value: float) -> None:
+        self.gpu_memory_utilization = value
+
     cache_dtype: CacheDType = "auto"
     """Data type for kv cache storage. If "auto", will use model data type.
     CUDA 11.8+ supports fp8 (=fp8_e4m3) and fp8_e5m2. ROCm (AMD GPU) supports
@@ -230,7 +242,9 @@ class CacheConfig:
     swa_bounded_replay: bool = True
     """Keep the sliding-window KV of models that support it (DeepSeek-V4.1)
     out of prefix caching and rebuild it after a prefix hit by recomputing the
-    hit's last window. Requires model runner V2."""
+    hit's last window. The layers past the last KV-source layer then also run
+    eager prefill steps on each request's trailing window only. Requires model
+    runner V2."""
 
     kv_cache_memory_bytes: int | None = None
     """Size of KV Cache per GPU in bytes. By default, this is set to None

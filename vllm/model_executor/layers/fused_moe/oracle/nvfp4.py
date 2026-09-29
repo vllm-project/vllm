@@ -598,11 +598,6 @@ def make_nvfp4_moe_kernel(
     routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
     per_token_activation: bool = False,
 ) -> mk.FusedMoEKernel:
-    if per_token_activation and moe_config.use_fi_nvl_one_sided_kernels:
-        raise NotImplementedError(
-            "Per-token NVFP4 requires unquantized dispatch, which is not supported "
-            "with flashinfer_nvlink_one_sided."
-        )
     # Create Prepare/Finalize.
     prepare_finalize = maybe_make_prepare_finalize(
         moe=moe_config,
@@ -610,6 +605,7 @@ def make_nvfp4_moe_kernel(
         routing_tables=routing_tables,
         allow_new_interface=True,
         use_monolithic=issubclass(experts_cls, mk.FusedMoEExpertsMonolithic),
+        input_dtype=moe_config.in_dtype if per_token_activation else None,
     )
     assert prepare_finalize is not None
 

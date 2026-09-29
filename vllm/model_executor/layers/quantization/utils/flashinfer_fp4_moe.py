@@ -9,8 +9,8 @@ import torch
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
+    align_fp4_moe_hidden_dim_for_fi,
     align_fp4_moe_weights_for_fi,
-    align_trtllm_fp4_moe_hidden_dim_for_fi,
 )
 from vllm.model_executor.layers.quantization.utils.nvfp4_utils import (
     swizzle_blockscale,
@@ -146,7 +146,8 @@ def prepare_nvfp4_moe_layer_for_flashinfer_cutedsl(
             layer.activation, w13, w13_scale
         )
 
-    # CuTe DSL requires GEMM1's output dimension to be a multiple of 128.
+    # GEMM1's output dimension must be a multiple of 128: 2I for gated
+    # activations (also required by interleaving), but only I for non-gated.
     # Keep the checkpoint tensors unchanged and pad only the kernel's runtime
     # representation. Zero rows also make the padded GEMM2 contraction a no-op.
     w13, w13_scale, w2, w2_scale, padded_intermediate = align_fp4_moe_weights_for_fi(
@@ -155,9 +156,19 @@ def prepare_nvfp4_moe_layer_for_flashinfer_cutedsl(
         w2,
         w2_scale,
         is_act_and_mul=gated,
-        min_alignment=128,
+        min_alignment=64 if gated else 128,
     )
     layer.moe_config.intermediate_size_per_partition = padded_intermediate
+
+    # GEMM1 gathers full 256-element K tiles of activations and their scales
+    # without a K-tail predicate. Pad runtime weights to match; the MoE runner
+    # pads activations and trims the output using the original hidden size.
+    w13, w13_scale, w2, w2_scale, padded_hidden = align_fp4_moe_hidden_dim_for_fi(
+        w13, w13_scale, w2, w2_scale
+    )
+    if layer.moe_config.hidden_dim_unpadded is None:
+        layer.moe_config.hidden_dim_unpadded = layer.moe_config.hidden_dim
+    layer.moe_config.hidden_dim = padded_hidden
 
     if gated:
         # Interleave up/gate rows for the fused gated activation.
@@ -386,8 +397,8 @@ def prepare_nvfp4_moe_layer_for_fi_or_cutlass(
 
     # Shuffle weights and scales for FI TRTLLM NVFP4 MoE kernels.
     if backend == NvFp4MoeBackend.FLASHINFER_TRTLLM:
-        w13, w13_scale, w2, w2_scale, padded_hidden = (
-            align_trtllm_fp4_moe_hidden_dim_for_fi(w13, w13_scale, w2, w2_scale)
+        w13, w13_scale, w2, w2_scale, padded_hidden = align_fp4_moe_hidden_dim_for_fi(
+            w13, w13_scale, w2, w2_scale
         )
         if layer.moe_config.hidden_dim_unpadded is None:
             layer.moe_config.hidden_dim_unpadded = layer.moe_config.hidden_dim

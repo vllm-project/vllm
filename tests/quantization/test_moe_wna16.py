@@ -149,7 +149,11 @@ def test_wna16_oracle_rejects_incompatible_quant_structures(
     assert expected in reason
 
 
-def test_compressed_tensors_weights_are_transposed_for_triton():
+def test_compressed_tensors_nfirst_weights_pass_through_for_triton():
+    """CT provides N-first [E, N, K_packed] int32; Triton expects N-first uint8.
+
+    No transpose needed — just a view from int32 to uint8.
+    """
     quant_config = QuantizationArgs(
         num_bits=4,
         type=QuantizationType.INT,
@@ -158,10 +162,11 @@ def test_compressed_tensors_weights_are_transposed_for_triton():
         dynamic=False,
         group_size=32,
     )
-    w13 = torch.arange(16, dtype=torch.int32).reshape(1, 2, 8)
-    w2 = torch.arange(12, dtype=torch.int32).reshape(1, 2, 6)
-    w13_scale = torch.arange(32, dtype=torch.float16).reshape(1, 4, 8)
-    w2_scale = torch.arange(18, dtype=torch.float16).reshape(1, 3, 6)
+    # N-first layout: [E, N, K_packed]
+    w13 = torch.arange(16, dtype=torch.int32).reshape(1, 8, 2)
+    w2 = torch.arange(12, dtype=torch.int32).reshape(1, 6, 2)
+    w13_scale = torch.arange(32, dtype=torch.float16).reshape(1, 8, 4)
+    w2_scale = torch.arange(18, dtype=torch.float16).reshape(1, 6, 3)
 
     converted = convert_to_wna16_moe_kernel_format(
         backend=WNA16MoEBackend.TRITON,
@@ -175,10 +180,40 @@ def test_compressed_tensors_weights_are_transposed_for_triton():
     )
 
     assert converted is not None
-    assert torch.equal(converted[0], w13.transpose(1, 2).contiguous().view(torch.uint8))
-    assert torch.equal(converted[1], w2.transpose(1, 2).contiguous().view(torch.uint8))
-    assert torch.equal(converted[2], w13_scale.transpose(1, 2).contiguous())
-    assert torch.equal(converted[3], w2_scale.transpose(1, 2).contiguous())
+    assert torch.equal(converted[0], w13.contiguous().view(torch.uint8))
+    assert torch.equal(converted[1], w2.contiguous().view(torch.uint8))
+    assert torch.equal(converted[2], w13_scale)
+    assert torch.equal(converted[3], w2_scale)
+
+
+def test_gptq_nfirst_weights_pass_through_for_triton():
+    """GPTQ frontend normalizes to N-first before calling oracle.
+
+    Verifies the oracle handles N-first GPTQ inputs the same way as CT.
+    """
+    quant_config = AutoGPTQConfig(4, 128, False, True, False, {}, {})
+    # N-first layout (after GPTQ frontend transpose): [E, N, K_packed]
+    w13 = torch.arange(16, dtype=torch.int32).reshape(1, 8, 2)
+    w2 = torch.arange(12, dtype=torch.int32).reshape(1, 6, 2)
+    w13_scale = torch.arange(32, dtype=torch.float16).reshape(1, 8, 4)
+    w2_scale = torch.arange(18, dtype=torch.float16).reshape(1, 6, 3)
+
+    converted = convert_to_wna16_moe_kernel_format(
+        backend=WNA16MoEBackend.TRITON,
+        layer=torch.nn.Module(),
+        quant_config=quant_config,
+        input_dtype=None,
+        w13=w13,
+        w2=w2,
+        w13_scale=w13_scale,
+        w2_scale=w2_scale,
+    )
+
+    assert converted is not None
+    assert torch.equal(converted[0], w13.contiguous().view(torch.uint8))
+    assert torch.equal(converted[1], w2.contiguous().view(torch.uint8))
+    assert torch.equal(converted[2], w13_scale)
+    assert torch.equal(converted[3], w2_scale)
 
 
 def test_moe_wna16_setup_forwards_selected_backend(monkeypatch):
@@ -511,3 +546,246 @@ def test_compressed_tensors_wna16_moe_marlin_prep_with_unset_group_size():
     )
     assert layer.w13_weight_scale.shape == (num_experts, 1, 2 * intermediate_size)
     assert layer.w2_weight_scale.shape == (num_experts, 1, hidden_size)
+
+
+def _weight_only_moe_config(moe_backend="auto"):
+    from tests.kernels.moe.utils import make_dummy_moe_config
+
+    config = make_dummy_moe_config(
+        num_experts=8,
+        experts_per_token=2,
+        hidden_dim=256,
+        intermediate_size=256,
+    )
+    config.moe_backend = moe_backend
+    return config
+
+
+@pytest.mark.parametrize("backend", ["marlin", "batched_marlin", "triton"])
+@pytest.mark.parametrize(
+    "activation_name",
+    [None, "kNvfp4Dynamic", "kMxfp4Dynamic", "kFp8DynamicTokenSym"],
+)
+def test_weight_only_experts_require_unquantized_activations(
+    monkeypatch, backend, activation_name
+):
+    """Weight-only experts must not claim an activation-quantized recipe."""
+    from vllm.model_executor.layers.fused_moe.experts.marlin_moe import (
+        BatchedMarlinExperts,
+        MarlinExperts,
+    )
+    from vllm.model_executor.layers.fused_moe.experts.triton_moe import (
+        TritonWNA16Experts,
+    )
+    from vllm.model_executor.layers.quantization.utils import quant_utils as q
+
+    experts = {
+        "marlin": MarlinExperts,
+        "batched_marlin": BatchedMarlinExperts,
+        "triton": TritonWNA16Experts,
+    }[backend]
+    monkeypatch.setattr(experts, "_supports_current_device", staticmethod(lambda: True))
+    weights = [
+        q.kInt4Static,
+        q.kInt8Static,
+        q.kInt4Static32,
+        q.kInt4StaticAsym,
+        q.kInt4Static32Asym,
+    ]
+    if backend != "triton":
+        weights += [
+            q.kFp8Static128BlockSym,
+            q.kFp8StaticChannelSym,
+            q.kFp8StaticTensorSym,
+            q.kMxfp4Static,
+            q.kMxfp8Static,
+            q.kNvfp4Static,
+        ]
+    activation = getattr(q, activation_name) if activation_name else None
+    config = _weight_only_moe_config()
+    for weight in weights:
+        supported, reason = experts.is_supported_config(
+            experts, config, weight, activation, experts.activation_format()
+        )
+        assert supported == (activation is None), (weight, activation, reason)
+        if activation is not None:
+            assert "quantization scheme" in reason
+
+
+@pytest.mark.parametrize("moe_backend", ["auto", "marlin"])
+@pytest.mark.parametrize(
+    "weight_name,activation_name",
+    [
+        ("kFp8Static128BlockSym", "kFp8Dynamic128Sym"),
+        ("kFp8StaticChannelSym", "kFp8DynamicTokenSym"),
+        ("kFp8StaticTensorSym", "kFp8StaticTensorSym"),
+    ],
+)
+def test_fp8_oracle_preserves_marlin_weight_only_fallback(
+    monkeypatch, moe_backend, weight_name, activation_name
+):
+    """FP8's intentional W8A16 fallback must survive strict expert checks."""
+    from vllm.model_executor.layers.fused_moe.experts.marlin_moe import MarlinExperts
+    from vllm.model_executor.layers.fused_moe.oracle import fp8
+    from vllm.model_executor.layers.quantization.utils import quant_utils as q
+
+    monkeypatch.setattr(
+        fp8, "_get_priority_backends", lambda *args: [fp8.Fp8MoeBackend.MARLIN]
+    )
+    monkeypatch.setattr(
+        MarlinExperts, "_supports_current_device", staticmethod(lambda: True)
+    )
+    backend, experts = fp8.select_fp8_moe_backend(
+        _weight_only_moe_config(moe_backend),
+        getattr(q, weight_name),
+        getattr(q, activation_name),
+        allow_vllm_cutlass=True,
+    )
+    assert backend == fp8.Fp8MoeBackend.MARLIN
+    assert experts is MarlinExperts
+
+
+@pytest.mark.parametrize("moe_backend", ["auto", "marlin"])
+@pytest.mark.parametrize("quantized_activation", [False, True])
+def test_nvfp4_oracle_does_not_substitute_weight_only_marlin(
+    monkeypatch, moe_backend, quantized_activation
+):
+    """When only Marlin is available, W4A16 works but W4A4 is rejected."""
+    from vllm.model_executor.layers.fused_moe.experts.marlin_moe import MarlinExperts
+    from vllm.model_executor.layers.fused_moe.oracle import nvfp4
+    from vllm.model_executor.layers.quantization.utils.quant_utils import (
+        kNvfp4Dynamic,
+        kNvfp4Static,
+    )
+
+    monkeypatch.setattr(
+        nvfp4,
+        "backend_to_kernel_cls",
+        lambda backend: [MarlinExperts]
+        if backend == nvfp4.NvFp4MoeBackend.MARLIN
+        else [],
+    )
+    monkeypatch.setattr(
+        MarlinExperts, "_supports_current_device", staticmethod(lambda: True)
+    )
+    config = _weight_only_moe_config(moe_backend)
+    if quantized_activation:
+        error = NotImplementedError if moe_backend == "auto" else ValueError
+        with pytest.raises(error, match="supports|does not support"):
+            nvfp4.select_nvfp4_moe_backend(config, kNvfp4Static, kNvfp4Dynamic)
+    else:
+        backend, experts = nvfp4.select_nvfp4_moe_backend(config, kNvfp4Static, None)
+        assert backend == nvfp4.NvFp4MoeBackend.MARLIN
+        assert experts is MarlinExperts
+
+
+@pytest.mark.parametrize("batched", [False, True])
+@pytest.mark.parametrize("input_mode", ["int8", "fp8"])
+@pytest.mark.usefixtures("default_vllm_config")
+def test_marlin_internal_a8_mode_survives_activation_contract(
+    monkeypatch, batched, input_mode
+):
+    """Marlin's internal A8 mode still accepts the WNA16 input contract."""
+    from vllm.model_executor.layers.fused_moe.config import int4_w4a16_moe_quant_config
+    from vllm.model_executor.layers.fused_moe.experts.marlin_moe import (
+        BatchedMarlinExperts,
+        MarlinExperts,
+    )
+    from vllm.model_executor.layers.quantization.utils import marlin_utils
+    from vllm.model_executor.layers.quantization.utils.quant_utils import kInt4Static
+
+    monkeypatch.setenv("VLLM_MARLIN_INPUT_DTYPE", input_mode)
+    monkeypatch.setattr(marlin_utils, "_quant_fp8_method", None)
+    # Exercise FP8 configuration eligibility on hosts other than SM89/SM12x;
+    # this test does not launch a GEMM or claim FP8 execution support there.
+    monkeypatch.setattr(
+        marlin_utils.current_platform, "is_device_capability", lambda cap: cap == 89
+    )
+    experts = BatchedMarlinExperts if batched else MarlinExperts
+    monkeypatch.setattr(experts, "_supports_current_device", staticmethod(lambda: True))
+    config = _weight_only_moe_config()
+    supported, reason = experts.is_supported_config(
+        experts, config, kInt4Static, None, experts.activation_format()
+    )
+    assert supported, reason
+    scale = torch.ones(1)
+    quant_config = int4_w4a16_moe_quant_config(scale, scale)
+    kwargs = {"max_num_tokens": 16, "num_dispatchers": 1} if batched else {}
+    instance = experts(config, quant_config, **kwargs)
+    expected_dtype = torch.int8 if input_mode == "int8" else torch.float8_e4m3fn
+    assert instance.input_dtype == expected_dtype
+    assert instance.quant_dtype is None
+
+
+def test_moe_wna16_w13_qzeros_shard_split_int8_asym_gptq(monkeypatch):
+    """8-bit asymmetric GPTQ MoE must split w13 zero-points by pack factor.
+
+    ``w13_qzeros`` is packed along the intermediate dim by ``bit8_pack_factor``,
+    so the gate/up (w1/w3) boundary in the weight loader is
+    ``shard_size // bit8_pack_factor``. Hardcoding ``shard_size // 2`` only
+    holds for 4-bit and raises a shape mismatch when loading an 8-bit
+    (unpacked) checkpoint.
+    """
+    from tests.kernels.moe.utils import make_dummy_moe_config
+
+    monkeypatch.setattr(
+        moe_wna16, "get_tp_group", lambda: SimpleNamespace(device="cpu")
+    )
+    monkeypatch.setattr(moe_wna16, "get_tensor_model_parallel_rank", lambda: 0)
+
+    num_experts, hidden, intermediate, group_size = 2, 256, 512, 128
+    moe_config = make_dummy_moe_config(
+        num_experts=num_experts,
+        hidden_dim=hidden,
+        intermediate_size=intermediate,
+    )
+    quant_config = MoeWNA16Config(
+        linear_quant_method="gptq",
+        weight_bits=8,
+        group_size=group_size,
+        has_zp=True,
+        lm_head_quantized=False,
+        modules_to_not_convert=[],
+        full_config={},
+    )
+    method = object.__new__(MoeWNA16Method)
+    method.quant_config = quant_config
+    method.moe = moe_config
+
+    layer = torch.nn.Module()
+    layer.intermediate_size_per_partition = intermediate
+    layer.moe_config = moe_config
+    method.create_weights(
+        layer,
+        num_experts=num_experts,
+        hidden_size=hidden,
+        intermediate_size_per_partition=intermediate,
+        params_dtype=torch.float16,
+        weight_loader=lambda *a, **k: True,
+    )
+
+    # 8-bit is unpacked along the intermediate dim: dim1 == 2 * intermediate.
+    assert layer.w13_qzeros.shape == (
+        num_experts,
+        2 * intermediate,
+        hidden // group_size,
+    )
+    loader = layer.w13_qzeros.weight_loader
+
+    # Raw GPTQ 8-bit qzeros per shard: int32 (num_groups, intermediate // 4);
+    # the loader views them as uint8 -> (num_groups, intermediate), then
+    # transposes and offsets by 1.
+    num_groups = hidden // group_size
+    raw_w1 = torch.arange(num_groups * (intermediate // 4), dtype=torch.int32).reshape(
+        num_groups, intermediate // 4
+    )
+    raw_w3 = raw_w1 + 1000
+
+    # Must not raise (old code raised a shape mismatch here for 8-bit).
+    loader(layer.w13_qzeros, raw_w1, "w13_qzeros", "w1", 0, False)
+    loader(layer.w13_qzeros, raw_w3, "w13_qzeros", "w3", 0, False)
+
+    expected_w1 = raw_w1.view(torch.uint8).T + 1
+    expected_w3 = raw_w3.view(torch.uint8).T + 1
+    assert torch.equal(layer.w13_qzeros[0, :intermediate].cpu(), expected_w1)
+    assert torch.equal(layer.w13_qzeros[0, intermediate:].cpu(), expected_w3)
