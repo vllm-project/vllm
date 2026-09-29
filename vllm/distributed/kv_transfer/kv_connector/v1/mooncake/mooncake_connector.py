@@ -2329,6 +2329,10 @@ def _async_loop(loop: asyncio.AbstractEventLoop):
 
 
 def should_launch_bootstrap_server(vllm_config: VllmConfig) -> bool:
+    if (kv_config := vllm_config.kv_transfer_config) is not None and (
+        kv_config.get_from_extra_config("bootstrap_server_address", None) is not None
+    ):
+        return False
     assert (parallel_config := vllm_config.parallel_config)
     # Only the TP=0, PP=0 worker of the designated engine should launch it.
     if get_tensor_model_parallel_rank() != 0:
@@ -2351,6 +2355,17 @@ def get_mooncake_bootstrap_addr(vllm_config: VllmConfig) -> tuple[str, int]:
     This is only used by prefillers to register workers.
     Decoders should get addr from kv_transfer_params.
     """
+    if (kv_config := vllm_config.kv_transfer_config) is not None:
+        address = kv_config.get_from_extra_config("bootstrap_server_address", None)
+        if address is not None:
+            from vllm.utils.network_utils import split_host_port
+
+            host, port = split_host_port(address)
+            if not host or not 1 <= port <= 65535:
+                raise ValueError(
+                    "bootstrap_server_address must specify a host and port"
+                )
+            return host, port
     assert (parallel_config := vllm_config.parallel_config)
     if parallel_config.local_engines_only:
         # In hybrid or external LB mode, connect to local server.
