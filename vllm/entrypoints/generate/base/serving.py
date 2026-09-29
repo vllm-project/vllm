@@ -32,6 +32,7 @@ from vllm.logger import init_logger
 from vllm.logprobs import Logprob, PromptLogprobs
 from vllm.lora.request import LoRARequest
 from vllm.tokenizers import TokenizerLike
+from vllm.tokenizers.detokenizer_utils import convert_ids_list_to_tokens
 from vllm.tracing import (
     contains_trace_headers,
     extract_trace_headers,
@@ -362,15 +363,7 @@ def resolve_token_id_placeholder(
         token_id = int(suffix)
     except ValueError:
         return token, None
-    token_repr = tokenizer.convert_ids_to_tokens([token_id])[0]
-    if token_repr is None:
-        logger.warning_once(
-            "resolve_token_id_placeholder: token_id %d has no vocab entry; "
-            "substituting empty string",
-            token_id,
-        )
-        return "", None
-    token_str = tokenizer.convert_tokens_to_string([token_repr])
+    token_str = convert_ids_list_to_tokens(tokenizer, [token_id])[0]
     return token_str, list(token_str.encode("utf-8", errors="replace"))
 
 
