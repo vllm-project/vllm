@@ -17,7 +17,7 @@ case "${test_suite}" in
     python3 examples/basic/offline_inference/generate.py --model facebook/opt-125m --block-size 64 -O3 -cc.cudagraph_mode=NONE
     python3 examples/basic/offline_inference/generate.py --model facebook/opt-125m --block-size 64 --enforce-eager -tp 2 --distributed-executor-backend mp
     python3 examples/basic/offline_inference/generate.py --model facebook/opt-125m --block-size 64 --enforce-eager --attention-backend=TRITON_ATTN
-    python3 examples/basic/offline_inference/generate.py --model facebook/opt-125m --block-size 64 --enforce-eager --quantization fp8
+    python3 examples/basic/offline_inference/generate.py --model facebook/opt-125m --block-size 64 --enforce-eager --quantization fp8_per_tensor
     python3 examples/basic/offline_inference/generate.py --model facebook/opt-125m --block-size 64 --enforce-eager --kv-cache-dtype fp8
     python3 examples/basic/offline_inference/generate.py --model nvidia/Llama-3.1-8B-Instruct-FP8 --block-size 64 --enforce-eager --quantization modelopt --kv-cache-dtype fp8 --attention-backend TRITON_ATTN --max-model-len 4096
     python3 examples/basic/offline_inference/generate.py --model superjob/Qwen3-4B-Instruct-2507-GPTQ-Int4 --block-size 64 --enforce-eager --max-model-len 8192
@@ -30,8 +30,8 @@ case "${test_suite}" in
     python3 examples/basic/offline_inference/generate.py --linear-backend xpu --model RedHatAI/Meta-Llama-3.1-8B-Instruct-FP8 --enforce-eager --max-model-len 4096
     python3 examples/basic/offline_inference/generate.py --linear-backend torch --model RedHatAI/Meta-Llama-3.1-8B-Instruct-FP8 --enforce-eager --max-model-len 4096
     python3 examples/basic/offline_inference/generate.py --linear-backend xpu --model neuralmagic/Llama-3.2-1B-Instruct-FP8-dynamic --enforce-eager --max-model-len 4096
-    python3 examples/basic/offline_inference/generate.py --linear-backend xpu --model meta-llama/Llama-3.2-1B-Instruct --quantization fp8 --enforce-eager --max-model-len 4096
-    python3 examples/basic/offline_inference/generate.py --linear-backend torch --model meta-llama/Llama-3.2-1B-Instruct --quantization fp8 --enforce-eager --max-model-len 4096
+    python3 examples/basic/offline_inference/generate.py --linear-backend xpu --model meta-llama/Llama-3.2-1B-Instruct --quantization fp8_per_tensor --enforce-eager --max-model-len 4096
+    python3 examples/basic/offline_inference/generate.py --linear-backend torch --model meta-llama/Llama-3.2-1B-Instruct --quantization fp8_per_tensor --enforce-eager --max-model-len 4096
     ;;
   v1)
     cd tests
@@ -65,8 +65,6 @@ case "${test_suite}" in
     pytest -v -s quantization/test_compressed_tensors.py::test_compressed_tensors_fp8
     ;;
   graph)
-    export VLLM_XPU_ENABLE_XPU_GRAPH=1
-
     python3 examples/basic/offline_inference/generate.py --model Qwen/Qwen3-0.6B
     python3 examples/basic/offline_inference/generate.py --model Qwen/Qwen3-0.6B --kv-cache-dtype fp8
     python3 examples/basic/offline_inference/generate.py --model INCModel/Qwen3-30B-A3B-Instruct-2507-MXFP4-CT-AutoRound --max-model-len 4096
