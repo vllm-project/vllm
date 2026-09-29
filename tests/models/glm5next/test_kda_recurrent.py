@@ -17,7 +17,10 @@ from vllm.platforms import current_platform
 if current_platform.is_rocm():
     from vllm.models.glm5next.amd.ops.third_party.kda import fused_recurrent_kda
 else:
-    from vllm.models.glm5next.nvidia.ops.third_party.kda import fused_recurrent_kda
+    from vllm.models.glm5next.nvidia.ops.third_party.kda import (
+        fused_recurrent_kda,
+        kernels,
+    )
 
 pytestmark = pytest.mark.skipif(
     not current_platform.is_cuda_alike(), reason="Requires CUDA or ROCm"
@@ -160,6 +163,32 @@ def test_fused_recurrent_kda_strided_inputs_bit_identical_to_contiguous(
     }
     state_ref = state.clone()
     out_ref = run_kernel(contiguous, state_ref)
+    out = run_kernel(inputs, state)
+    torch.testing.assert_close(out, out_ref, rtol=0, atol=0)
+    torch.testing.assert_close(state, state_ref, rtol=0, atol=0)
+
+
+@pytest.mark.skipif(
+    current_platform.is_rocm(),
+    reason="The SM90 launch dispatch only exists in the NVIDIA implementation",
+)
+@pytest.mark.parametrize(
+    ("num_seqs", "query_len"), [(1, 1), (7, 1), (3, 3)], ids=["1x1", "7x1", "3x3"]
+)
+@torch.inference_mode()
+def test_fused_recurrent_kda_sm90_launch_config_bit_identical(
+    monkeypatch, num_seqs: int, query_len: int
+):
+    """The SM90 dispatch (BV=16, small-grid num_stages=2) must be bit-identical
+    to the default configuration: num_warps stays 1, so the per-element
+    reduction order is unchanged."""
+    torch.manual_seed(0)
+    device = torch.device("cuda")
+    inputs, state = make_inputs(num_seqs, query_len, device)
+    state_ref = state.clone()
+    monkeypatch.setattr(kernels, "_IS_SM90", False)
+    out_ref = run_kernel(inputs, state_ref)
+    monkeypatch.setattr(kernels, "_IS_SM90", True)
     out = run_kernel(inputs, state)
     torch.testing.assert_close(out, out_ref, rtol=0, atol=0)
     torch.testing.assert_close(state, state_ref, rtol=0, atol=0)
