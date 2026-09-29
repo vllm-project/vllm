@@ -290,9 +290,7 @@ def test_daemon_places_tp_and_dp_ranks_on_local_gpus():
 
     # DP + nnodes: several DP replicas per node (TP4 x DP4 on 2 nodes)
     dp_multi_node0 = _parallel(tensor_parallel_size=4, data_parallel_size=4, nnodes=2)
-    assert plan_local_ranks(dp_multi_node0) == [
-        (i, i // 4, 0, i % 4) for i in range(8)
-    ]
+    assert plan_local_ranks(dp_multi_node0) == [(i, i // 4, 0, i % 4) for i in range(8)]
 
     # PP adds one daemon placement per stage while preserving TP rank order.
     pp_tp = _parallel(tensor_parallel_size=2, pipeline_parallel_size=2)

@@ -235,9 +235,7 @@ class PreloadSubcommand(CLISubcommand):
         expected_ready = {
             (
                 format_daemon_role(is_draft),
-                dp_rank * pp_size * tp_size
-                + pp_rank * tp_size
-                + tp_rank,
+                dp_rank * pp_size * tp_size + pp_rank * tp_size + tp_rank,
             )
             for (is_draft, _, _), (_, dp_rank, pp_rank, tp_rank) in product(
                 groups, placements
@@ -247,9 +245,7 @@ class PreloadSubcommand(CLISubcommand):
             ctx.Process(
                 target=_run_daemon,
                 args=(
-                    dp_rank * pp_size * tp_size
-                    + pp_rank * tp_size
-                    + tp_rank,
+                    dp_rank * pp_size * tp_size + pp_rank * tp_size + tp_rank,
                     local_rank,
                     config,
                     init_method,
@@ -261,8 +257,7 @@ class PreloadSubcommand(CLISubcommand):
                 ),
                 name=(
                     f"vllm-weight-cache-{format_daemon_role(is_draft)}-"
-                    f"{(dp_rank * pp_size * tp_size
-                        + pp_rank * tp_size + tp_rank)}"
+                    f"{(dp_rank * pp_size * tp_size + pp_rank * tp_size + tp_rank)}"
                 ),
             )
             for (is_draft, config, init_method), (
