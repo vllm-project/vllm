@@ -36,6 +36,7 @@ from vllm.v1.executor.abstract import Executor
 from vllm.v1.executor.uniproc_executor import UniProcExecutor
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.outputs import ModelRunnerOutput
+from vllm.v1.request import RequestStatus
 
 from ...utils import create_new_process_for_each_test, multi_gpu_test
 
@@ -734,6 +735,60 @@ def test_add_rejected_while_paused_at_a_boundary(pause_state, rejected):
     else:
         core.add_request.assert_called_once_with(request, 0)
         core._send_finish_outputs_to_client.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "pause_state,ends",
+    [(PauseState.PAUSED_NEW, True), (PauseState.PAUSED_ALL, False)],
+    ids=["abort-or-wait", "keep"],
+)
+def test_completed_boundary_pause_ends_open_sessions(pause_state, ends):
+    """Only open streaming-input sessions outlive a wait drain; they cannot cross
+    the boundary, so completing it ends them and frees their KV for the reset."""
+    core = _pausable_engine_core_proc()
+    core.scheduler.pause_state = pause_state
+    core._send_abort_outputs = MagicMock()
+
+    core._finish_pause(clear_cache=False)
+
+    if ends:
+        core.scheduler.finish_requests.assert_called_once_with(
+            None, RequestStatus.FINISHED_ABORTED
+        )
+        core._send_abort_outputs.assert_called_once_with(
+            core.scheduler.finish_requests.return_value
+        )
+    else:
+        core.scheduler.finish_requests.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "request_wave,pause_state,announces",
+    [
+        pytest.param(3, PauseState.UNPAUSED, True, id="current-wave"),
+        pytest.param(2, PauseState.UNPAUSED, True, id="stale-wave"),
+        pytest.param(3, PauseState.PAUSED_ALL, False, id="keep"),
+    ],
+)
+def test_idle_dp_rank_announces_wave_for_new_work(request_wave, pause_state, announces):
+    """A front-end that still believes a wave is running skips its wake-up, so an
+    idle rank handed work must announce the wave or its peers never join it."""
+    core = object.__new__(DPEngineCoreProc)
+    core.has_coordinator = True
+    core.current_wave = 3
+    core.engines_running = False
+    core.scheduler = MagicMock(pause_state=pause_state)
+    core.output_queue = MagicMock()
+
+    with patch.object(EngineCore, "add_request"):
+        core.add_request(MagicMock(), request_wave)
+
+    assert core.engines_running == announces
+    if announces:
+        _, outputs = core.output_queue.put_nowait.call_args.args[0]
+        assert outputs.start_wave == 3
+    else:
+        core.output_queue.put_nowait.assert_not_called()
 
 
 @pytest.mark.parametrize("cls", [EngineCoreProc, DPEngineCoreProc])

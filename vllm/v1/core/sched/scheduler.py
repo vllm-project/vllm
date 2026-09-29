@@ -870,7 +870,7 @@ class Scheduler(SchedulerInterface):
             assert len(scheduled_loras) <= self.lora_config.max_loras
 
         # Next, schedule the WAITING requests.
-        if not preempted_reqs and self._pause_state == PauseState.UNPAUSED:
+        if not preempted_reqs and self._pause_state != PauseState.PAUSED_ALL:
             step_skipped_waiting: deque[Request] = deque()
             step_skipped_kv_holding: deque[Request] = deque()
 
@@ -2739,8 +2739,6 @@ class Scheduler(SchedulerInterface):
         if self._pause_state == PauseState.PAUSED_ALL:
             return 0
         num_running, num_waiting = self.get_request_counts()
-        if self._pause_state == PauseState.PAUSED_NEW:
-            return num_running
         num_waiting -= self.num_waiting_for_streaming_input
         return num_waiting + num_running
 

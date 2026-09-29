@@ -24,6 +24,7 @@ from tests.utils import multi_gpu_test
 from vllm import SamplingParams
 from vllm.distributed.kv_events import BlockStored, KVEventBatch, ZmqEventPublisher
 from vllm.engine.arg_utils import EngineArgs
+from vllm.exceptions import EnginePausedError
 from vllm.platforms import current_platform
 from vllm.pooling_params import LateInteractionParams, PoolingParams
 from vllm.usage.usage_lib import UsageContext
@@ -38,6 +39,7 @@ from vllm.v1.engine.core_client import (
     AsyncMPClient,
     DPLBAsyncMPClient,
     EngineCoreClient,
+    InprocClient,
     MPClient,
     SyncMPClient,
 )
@@ -220,6 +222,18 @@ def _make_dplb_client(num_engines: int = 3, client_count: int = 1) -> DPLBAsyncM
         parallel_config=SimpleNamespace(all2all_backend="allgather_reducescatter"),
     )
     return client
+
+
+def test_inproc_client_rejects_adds_while_paused():
+    """The in-process engine has no output channel to reject through, so the
+    client raises before the request can reach the scheduler."""
+    client = object.__new__(InprocClient)
+    client.engine_core = MagicMock()
+    client.engine_core.rejects_new_requests.return_value = True
+
+    with pytest.raises(EnginePausedError):
+        client.add_request(MagicMock())
+    client.engine_core.add_request.assert_not_called()
 
 
 def test_dplb_late_interaction_sticky_routing():

@@ -46,7 +46,7 @@ class EEPNotificationType(enum.Enum):
 
 
 class FinishReason(enum.IntEnum):
-    """Reason a request finished - stop, length, abort, error, or repetition.
+    """Reason a request finished - stop, length, abort, error, repetition, or paused.
 
     Int rather than Str for more compact serialization.
 

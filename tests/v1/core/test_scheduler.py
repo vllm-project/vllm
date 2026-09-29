@@ -1583,6 +1583,24 @@ def test_scheduler_reset_prefix_cache():
         assert scheduler.waiting[i] == request
 
 
+@pytest.mark.parametrize(
+    "pause_state,drains",
+    [(PauseState.PAUSED_NEW, True), (PauseState.PAUSED_ALL, False)],
+    ids=["abort-or-wait", "keep"],
+)
+def test_boundary_pause_drains_admitted_waiting_requests(pause_state, drains):
+    """New requests never reach a PAUSED_NEW scheduler, so a waiting request was
+    admitted before the pause and must still run; `keep` freezes it."""
+    scheduler = create_scheduler()
+    (request,) = create_requests(num_requests=1)
+    scheduler.add_request(request)
+    scheduler.set_pause_state(pause_state)
+
+    assert scheduler.has_unfinished_requests() == drains
+    output = scheduler.schedule()
+    assert (request.request_id in output.num_scheduled_tokens) == drains
+
+
 @pytest.mark.parametrize("reset_successful", [False, True])
 def test_aux_output_reset_follows_kv_reset_result(reset_successful: bool):
     scheduler = create_scheduler(enable_prefix_caching=True)

@@ -883,14 +883,16 @@ class EngineCore:
     ) -> Future | None:
         """Pause generation; behavior depends on mode.
 
-        All pause modes queue new adds -- "abort" and "keep" skip step();
-        "wait" allows step() so in-flight requests can drain.
+        "abort" and "wait" reject new adds; "keep" queues them. "abort" and
+        "keep" skip step(); "wait" allows step() so everything already
+        admitted can drain.
 
         - ``abort``: Set PAUSED_NEW, abort all requests, wait for abort
           outputs to be sent (when running with output_queue), optionally
           clear caches, then complete the returned Future.
-        - ``wait``: Set PAUSED_NEW (queue adds, keep stepping); when drained,
-          optionally clear caches, then complete the returned Future.
+        - ``wait``: Set PAUSED_NEW (reject adds, keep stepping); when drained,
+          end any open streaming-input session, optionally clear caches, then
+          complete the returned Future.
         - ``keep``: Set PAUSED_ALL; return a Future that completes when the
           output queue is empty.
         """
@@ -916,6 +918,10 @@ class EngineCore:
         if self.model_executor.is_sleeping:
             return
         self.scheduler.set_pause_state(PauseState.UNPAUSED)
+
+    def rejects_new_requests(self) -> bool:
+        """Whether a boundary pause (abort/wait) has closed admission."""
+        return self.scheduler.pause_state == PauseState.PAUSED_NEW
 
     def is_scheduler_paused(self) -> bool:
         """Return whether the scheduler is in any pause state."""
@@ -1645,7 +1651,7 @@ class EngineCoreProc(EngineCore):
         return True
 
     def _reject_add_while_paused(self, request: Request) -> bool:
-        if self.scheduler.pause_state != PauseState.PAUSED_NEW:
+        if not self.rejects_new_requests():
             return False
         self._send_finish_outputs_to_client(
             [request.request_id], request.client_index, FinishReason.PAUSED
@@ -1999,14 +2005,16 @@ class EngineCoreProc(EngineCore):
     ) -> Future | None:
         """Pause generation; behavior depends on mode.
 
-        All pause modes queue new adds -- "abort" and "keep" skip step();
-        "wait" allows step() so in-flight requests can drain.
+        "abort" and "wait" reject new adds; "keep" queues them. "abort" and
+        "keep" skip step(); "wait" allows step() so everything already
+        admitted can drain.
 
         - ``abort``: Set PAUSED_NEW, abort all requests, wait for abort
           outputs to be sent (when running with output_queue), optionally
           clear caches, then complete the returned Future.
-        - ``wait``: Set PAUSED_NEW (queue adds, keep stepping); when drained,
-          optionally clear caches, then complete the returned Future.
+        - ``wait``: Set PAUSED_NEW (reject adds, keep stepping); when drained,
+          end any open streaming-input session, optionally clear caches, then
+          complete the returned Future.
         - ``keep``: Set PAUSED_ALL; return a Future that completes when the
           output queue is empty.
         """
@@ -2037,6 +2045,14 @@ class EngineCoreProc(EngineCore):
         future = Future[Any]()
         self._idle_state_callbacks.append(partial(engine_idle_callback, future=future))
         return future
+
+    def _finish_pause(self, clear_cache: bool) -> None:
+        if self.rejects_new_requests():
+            # Only open streaming-input sessions remain; they can't cross the boundary.
+            self._send_abort_outputs(
+                self.scheduler.finish_requests(None, RequestStatus.FINISHED_ABORTED)
+            )
+        super()._finish_pause(clear_cache)
 
     def _pause_complete(self) -> bool:
         """Returns True if the pause has fully completed and the caller can
@@ -2169,19 +2185,19 @@ class DPEngineCoreProc(EngineCoreProc):
 
     def add_request(self, request: Request, request_wave: int = 0):
         super().add_request(request, request_wave)
-        if self.has_coordinator and request_wave != self.current_wave:
-            if request_wave > self.current_wave:
-                self.current_wave = request_wave
-            elif (
-                not self.engines_running
-                and self.scheduler.pause_state == PauseState.UNPAUSED
-            ):
-                # Request received for an already-completed wave, notify
-                # front-end that we need to start the next one.
-                self.engines_running = True
-                self.output_queue.put_nowait(
-                    (-1, EngineCoreOutputs(start_wave=self.current_wave))
-                )
+        if not self.has_coordinator:
+            return
+        if request_wave > self.current_wave:
+            self.current_wave = request_wave
+        if (
+            not self.engines_running
+            and self.scheduler.pause_state == PauseState.UNPAUSED
+        ):
+            # Idle rank given work: announce the wave, don't trust the front-end to.
+            self.engines_running = True
+            self.output_queue.put_nowait(
+                (-1, EngineCoreOutputs(start_wave=self.current_wave))
+            )
 
     def resume_scheduler(self):
         if self.model_executor.is_sleeping:

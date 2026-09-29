@@ -682,6 +682,7 @@ class OutputProcessor:
                 engine_core_output.finish_reason == FinishReason.PAUSED
                 and req_state.queue is not None
             ):
+                # Rejected by a paused engine; the caller's abort cleans up the state.
                 req_state.queue.put(EnginePausedError())
                 continue
 
