@@ -2,9 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Read strategies: how a model is asked for label probabilities.
 
-A strategy is chosen per model at startup. The first registered strategy whose
-``supports`` accepts the model serves every decision on that server. A model no
-strategy supports gets no decision route.
+The server picks a strategy per model at startup: the first registered strategy
+whose ``supports`` accepts the model serves every decision on that server. When
+no strategy supports the model, the decision route answers 501.
 """
 
 import math
@@ -25,7 +25,7 @@ from vllm.utils.async_utils import merge_async_iterators
 
 from .protocol import ReadPromptRequest
 from .question_types import Question, StructuredDecisionError, label_softmax
-from .templates import DecisionTemplate, label_token_ids
+from .templates import DecisionTemplate
 
 
 @dataclass
@@ -42,7 +42,7 @@ class ReadContext:
 @dataclass(frozen=True)
 class DecisionLimits:
     max_questions: int
-    max_choices: int
+    max_options: int
 
 
 @dataclass
@@ -66,7 +66,7 @@ class ReadStrategy(ABC):
     @classmethod
     @abstractmethod
     def limits(cls, model_config: ModelConfig) -> DecisionLimits:
-        """The most questions per request and choices per question this
+        """The most questions per request and options per question this
         strategy can read from the model."""
 
     @abstractmethod
@@ -101,21 +101,20 @@ def select_read_strategy(model_config: ModelConfig) -> type[ReadStrategy] | None
 @register_read_strategy
 class NextTokenStrategy(ReadStrategy):
     """Autoregressive models. Each question is one request: the chat prompt with
-    the reply prefilled up to the question's answer prefix, one generated token,
-    and the logprobs of the label tokens. The requests share the system prompt
+    the reply prefilled up to the question's label, one generated token, and the
+    logprobs of the label tokens. The requests share the system prompt
     and the state, so prefix caching prefills them once."""
 
     @classmethod
     def supports(cls, model_config: ModelConfig) -> bool:
-        # A diffusion model denoises a canvas; one next-token read of it does
-        # not mean what it means for an autoregressive model.
+        # Diffusion models denoise a canvas and need a canvas strategy.
         return not model_config.is_diffusion
 
     @classmethod
     def limits(cls, model_config: ModelConfig) -> DecisionLimits:
-        # Each question is its own request, so the question count is bounded by
-        # response size, and choices by the engine's logprob_token_ids cap.
-        return DecisionLimits(max_questions=64, max_choices=MAX_LOGPROB_TOKEN_IDS)
+        # A decision submits one request per question, up to 64. The engine's
+        # logprob_token_ids cap bounds a question's options.
+        return DecisionLimits(max_questions=64, max_options=MAX_LOGPROB_TOKEN_IDS)
 
     async def read(
         self,
@@ -131,18 +130,16 @@ class NextTokenStrategy(ReadStrategy):
     ) -> list[QuestionRead]:
         ctx = self.context
         tokenizer = ctx.online_renderer.renderer.get_tokenizer()
-        system = template.system_text(instructions, questions)
+        rendered = template.render(instructions, questions)
         read_request = ReadPromptRequest(chat_template_kwargs=chat_template_kwargs)
 
-        generators: list[AsyncGenerator[RequestOutput, None]] = []
-        label_ids: list[list[int]] = []
-        for i, q in enumerate(questions):
-            prefix = template.answer_prefix(q)
-            ids = label_token_ids(tokenizer, q, prefix)
+        slots, engine_inputs = [], []
+        for q in questions:
+            slot = rendered.slot(tokenizer, q)
             messages = [
-                {"role": "system", "content": system},
+                {"role": "system", "content": rendered.system_text},
                 {"role": "user", "content": state},
-                {"role": "assistant", "content": prefix},
+                {"role": "assistant", "content": tokenizer.decode(slot.prefix_ids)},
             ]
             _, (engine_input,) = await ctx.online_renderer.preprocess_chat(
                 read_request,
@@ -154,42 +151,44 @@ class NextTokenStrategy(ReadStrategy):
             prompt_ids = extract_prompt_components(
                 ctx.engine_client.model_config, engine_input
             ).token_ids
-            prefix_ids = tokenizer.encode(prefix, add_special_tokens=False)
-            if not prompt_ids or list(prompt_ids[-len(prefix_ids) :]) != prefix_ids:
+            n = len(slot.prefix_ids)
+            if not prompt_ids or list(prompt_ids[-n:]) != slot.prefix_ids:
                 raise StructuredDecisionError(
-                    f"question {q.id!r}: the chat template did not end the prompt "
-                    f"with the answer prefix {prefix!r}"
+                    f"question {q.id!r}: the chat template changed the answer "
+                    "text before the label"
                 )
-            label_ids.append(ids)
-            generators.append(
-                ctx.engine_client.generate(
-                    engine_input,
-                    SamplingParams(
-                        max_tokens=1, temperature=0.0, logprob_token_ids=ids
-                    ),
-                    f"{request_id}-{i}",
-                    lora_request=lora_request,
-                    priority=priority,
-                )
-            )
+            slots.append(slot)
+            engine_inputs.append(engine_input)
 
+        generators: list[AsyncGenerator[RequestOutput, None]] = [
+            ctx.engine_client.generate(
+                engine_input,
+                SamplingParams(
+                    max_tokens=1, temperature=0.0, logprob_token_ids=slot.label_ids
+                ),
+                f"{request_id}-{i}",
+                lora_request=lora_request,
+                priority=priority,
+            )
+            for i, (slot, engine_input) in enumerate(zip(slots, engine_inputs))
+        ]
         results: list[RequestOutput | None] = [None] * len(generators)
         async for i, res in merge_async_iterators(*generators):
             results[i] = res
 
         reads = []
-        for q, ids, result in zip(questions, label_ids, results):
+        for q, slot, result in zip(questions, slots, results):
             if result is None or not result.outputs or not result.outputs[0].logprobs:
                 raise RuntimeError(f"question {q.id!r}: the read returned no logprobs")
             output = result.outputs[0]
             logprobs = output.logprobs[0]
-            label_logprobs = [logprobs[t].logprob for t in ids]
+            label_logprobs = [logprobs[t].logprob for t in slot.label_ids]
             reads.append(
                 QuestionRead(
                     probs=label_softmax(label_logprobs),
                     label_mass=sum(math.exp(lp) for lp in label_logprobs),
                     argmax_is_label=bool(output.token_ids)
-                    and output.token_ids[0] in ids,
+                    and output.token_ids[0] in slot.label_ids,
                     input_tokens=len(result.prompt_token_ids or ()),
                     output_tokens=len(output.token_ids),
                 )

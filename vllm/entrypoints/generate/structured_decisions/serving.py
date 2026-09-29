@@ -4,6 +4,7 @@
 strategy, and shape the answers."""
 
 import asyncio
+import json
 from typing import Any
 
 from fastapi import Request
@@ -22,9 +23,13 @@ from .protocol import (
 )
 from .question_types import Question, StructuredDecisionError, build_question
 from .strategies import DecisionLimits, ReadStrategy
-from .templates import select_template, state_text
+from .templates import select_template
 
 logger = init_logger(__name__)
+
+
+def state_text(state: Any) -> str:
+    return state if isinstance(state, str) else json.dumps(state)
 
 
 def parse_questions(
@@ -45,10 +50,9 @@ def parse_questions(
                 f"question {qid!r}: unknown field(s) {sorted(spec.model_extra)}"
             )
         q = build_question(qid, spec.type, spec.instructions, spec.criteria)
-        if len(q.alternatives) > limits.max_choices:
+        if len(q.options) > limits.max_options:
             raise StructuredDecisionError(
-                f"question {qid!r}: at most {limits.max_choices} alternatives "
-                "for this model"
+                f"question {qid!r}: at most {limits.max_options} options for this model"
             )
         questions.append(q)
     return questions
@@ -72,8 +76,7 @@ class ServingStructuredDecisions(BaseServing):
         self.limits = strategy.limits(model_config)
         self.decision_template = decision_template
         self.trust_request_template = trust_request_template
-        # Fail at startup, not on the first request, if the server's template
-        # does not compile.
+        # Compiling the server's template here makes a broken one stop startup.
         select_template(decision_template, None, False)
 
     async def create_decision(
@@ -108,7 +111,7 @@ class ServingStructuredDecisions(BaseServing):
                 lora_request=lora_request,
                 priority=request.priority,
             )
-        except (StructuredDecisionError, ValueError, TypeError) as e:
+        except StructuredDecisionError as e:
             return self.create_error_response(e)
         except asyncio.CancelledError:
             return self.create_error_response("Client disconnected")

@@ -64,7 +64,7 @@ class StructuredDecisionResponse(OpenAIBaseModel):
 
 class ReadPromptRequest(OpenAIBaseModel):
     """The chat render of one read: system and state, then an assistant reply
-    left open at the question's answer prefix."""
+    left open before the question's label."""
 
     chat_template_kwargs: dict[str, Any] | None = None
 

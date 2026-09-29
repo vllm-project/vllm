@@ -11,7 +11,6 @@ from vllm.entrypoints.generate.structured_decisions.question_types import (
 from vllm.entrypoints.generate.structured_decisions.templates import (
     DEFAULT_DECISION_TEMPLATE,
     DecisionTemplate,
-    label_token_ids,
     select_template,
 )
 from vllm.tokenizers import get_tokenizer
@@ -29,8 +28,10 @@ def questions():
 
 
 def test_default_template_text():
-    text = DecisionTemplate(DEFAULT_DECISION_TEMPLATE).system_text(
-        "Support inbox.", questions()
+    text = (
+        DecisionTemplate(DEFAULT_DECISION_TEMPLATE)
+        .render("Support inbox.", questions())
+        .system_text
     )
     assert text == (
         "Answer a fixed set of questions about the state the user provides. Each "
@@ -48,27 +49,36 @@ def test_default_template_text():
 
 
 def test_default_template_without_instructions():
-    text = DecisionTemplate(DEFAULT_DECISION_TEMPLATE).system_text(None, questions())
+    text = (
+        DecisionTemplate(DEFAULT_DECISION_TEMPLATE)
+        .render(None, questions())
+        .system_text
+    )
     assert "\n\nQuestion bucket: Which team?\n" in text
     assert "None" not in text
 
 
-def test_default_answer_prefix():
+def test_default_answer():
     q = questions()[0]
-    assert DecisionTemplate(DEFAULT_DECISION_TEMPLATE).answer_prefix(q) == "bucket:"
-    assert DecisionTemplate("Just the questions.").answer_prefix(q) == "bucket:"
+    default = DecisionTemplate(DEFAULT_DECISION_TEMPLATE).render(None, [q])
+    bare = DecisionTemplate("Just the questions.").render(None, [q])
+    assert default.answer(q, "B") == "bucket: B"
+    assert bare.answer(q, "B") == "bucket: B"
 
 
-def test_custom_template_and_prefix():
+def test_custom_template_and_answer():
     template = DecisionTemplate(
-        "{% macro answer_prefix(question) %}[{{ question.id }}] ->{% endmacro %}"
+        "{% macro answer(question, label) %}[{{ question.id }}] ({{ label }})"
+        "{% endmacro %}"
         "{% for q in questions %}{{ q.id }}={{ q.type }}"
         "{% for o in q.options %} {{ o.label }}/{{ o.name }}{% endfor %};{% endfor %}"
+        'Write "{{ answer(questions[0], "A") }}".'
     )
-    assert template.system_text(None, questions()) == (
-        "bucket=choice A/billing B/outage;lang=choice A/en B/fr;"
+    rendered = template.render(None, questions())
+    assert rendered.system_text == (
+        'bucket=choice A/billing B/outage;lang=choice A/en B/fr;Write "[bucket] (A)".'
     )
-    assert template.answer_prefix(questions()[1]) == "[lang] ->"
+    assert rendered.answer(questions()[1], "B") == "[lang] (B)"
 
 
 def test_bad_template_is_a_request_error():
@@ -77,27 +87,70 @@ def test_bad_template_is_a_request_error():
 
 
 def test_select_template_trust_gate():
-    assert select_template(None, None, False).answer_prefix(questions()[0]) == "bucket:"
+    qs = questions()
+    assert select_template(None, None, False).render(None, qs).answer(qs[0], "A") == (
+        "bucket: A"
+    )
     with pytest.raises(StructuredDecisionError, match="trust-request-chat-template"):
         select_template(None, "custom", False)
-    assert select_template(None, "custom", True).system_text(None, []) == "custom"
-    assert select_template("server", None, False).system_text(None, []) == "server"
+    assert select_template(None, "custom", True).render(None, []).system_text == (
+        "custom"
+    )
+    assert select_template("server", None, False).render(None, []).system_text == (
+        "server"
+    )
 
 
-def test_label_token_ids_are_single_distinct_tokens():
+def test_slot_on_default_answer():
     tokenizer = get_tokenizer(MODEL_NAME)
     q = build_question("q", "choice", "", {chr(ord("a") + i): None for i in range(26)})
-    ids = label_token_ids(tokenizer, q, "q:")
-    assert len(ids) == 26 and len(set(ids)) == 26
-    prefix = tokenizer.encode("q:", add_special_tokens=False)
-    for label, token in zip(q.labels, ids):
+    slot = (
+        DecisionTemplate(DEFAULT_DECISION_TEMPLATE).render(None, [q]).slot(tokenizer, q)
+    )
+    assert len(slot.label_ids) == 26 and len(set(slot.label_ids)) == 26
+    for label, token in zip(q.labels, slot.label_ids):
         assert tokenizer.encode(f"q: {label}", add_special_tokens=False) == (
-            prefix + [token]
+            slot.prefix_ids + [token]
         )
 
 
-def test_label_token_ids_rejects_multi_token_labels():
+def test_slot_with_text_after_the_label():
+    tokenizer = get_tokenizer(MODEL_NAME)
+    template = DecisionTemplate(
+        "{% macro answer(question, label) %}{{ question.id }} ({{ label }})"
+        "{% endmacro %}"
+    )
+    q = build_question("team", "choice", "", {"a": None, "b": None, "c": None})
+    slot = template.render(None, [q]).slot(tokenizer, q)
+    for label, token in zip(q.labels, slot.label_ids):
+        full = tokenizer.encode(f"team ({label})", add_special_tokens=False)
+        assert full[: len(slot.prefix_ids)] == slot.prefix_ids
+        assert full[len(slot.prefix_ids)] == token
+
+
+def test_slot_rejects_multi_token_labels():
     q = build_question("q", "choice", "", {"a": None, "b": None})
     q = dataclasses.replace(q, labels=("antidisestablishmentarianism", "B"))
-    with pytest.raises(StructuredDecisionError, match="is not one token"):
-        label_token_ids(get_tokenizer(MODEL_NAME), q, "q:")
+    with pytest.raises(StructuredDecisionError, match="not all one token"):
+        DecisionTemplate(DEFAULT_DECISION_TEMPLATE).render(None, [q]).slot(
+            get_tokenizer(MODEL_NAME), q
+        )
+
+
+def test_slot_needs_text_before_the_label():
+    template = DecisionTemplate(
+        "{% macro answer(question, label) %}{{ label }}{% endmacro %}"
+    )
+    q = build_question("q", "choice", "", {"a": None, "b": None})
+    with pytest.raises(StructuredDecisionError, match="text before the label"):
+        template.render(None, [q]).slot(get_tokenizer(MODEL_NAME), q)
+
+
+def test_slot_rejects_labels_that_change_other_tokens():
+    template = DecisionTemplate(
+        "{% macro answer(question, label) %}{{ question.id }}: {{ label }} "
+        "{{ label }}{% endmacro %}"
+    )
+    q = build_question("q", "choice", "", {"a": None, "b": None})
+    with pytest.raises(StructuredDecisionError, match="change 2 tokens"):
+        template.render(None, [q]).slot(get_tokenizer(MODEL_NAME), q)

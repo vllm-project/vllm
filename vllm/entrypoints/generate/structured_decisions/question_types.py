@@ -2,10 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Question types for structured decisions.
 
-A question type turns a request's criteria into alternatives, names the label
-the model answers with for each, and shapes the answer from the label
-probabilities. Everything else (prompts, slot resolution, reads) is shared, so
-a new type is one registered subclass.
+A question type turns a request's criteria into options, names the label the
+model answers with for each, and shapes the answer from the label
+probabilities. The decision template writes the prompt and the read strategy
+asks the model, so a new type is one registered subclass.
 """
 
 import math
@@ -22,7 +22,7 @@ class StructuredDecisionError(ValueError):
 
 
 @dataclass(frozen=True)
-class Alternative:
+class Option:
     name: str
     description: str | None = None
 
@@ -32,7 +32,7 @@ class Question:
     id: str
     type: "QuestionType"
     instructions: str
-    alternatives: tuple[Alternative, ...]
+    options: tuple[Option, ...]
     labels: tuple[str, ...]
 
 
@@ -40,24 +40,22 @@ class QuestionType(ABC):
     name: ClassVar[str]
 
     @abstractmethod
-    def parse_alternatives(self, qid: str, criteria: Any) -> list[Alternative]:
-        """The alternatives described by the request's ``criteria``."""
+    def parse_options(self, qid: str, criteria: Any) -> list[Option]:
+        """The options described by the request's ``criteria``."""
 
     @abstractmethod
     def answer(self, question: Question, probs: list[float]) -> dict[str, Any]:
         """The answer for ``question``. ``probs`` follows ``question.labels``
         and sums to 1."""
 
-    def labels(self, alternatives: list[Alternative]) -> list[str]:
-        """The label the model answers with for each alternative. The default
-        is capital letters: one token after a space in every tokenizer tried,
-        with no meaning of their own to bias the read."""
-        if len(alternatives) > MAX_LETTER_LABELS:
+    def labels(self, options: list[Option]) -> list[str]:
+        """The label the model answers with for each option. The default is
+        capital letters, which carry no meaning of their own to bias the read."""
+        if len(options) > MAX_LETTER_LABELS:
             raise StructuredDecisionError(
-                f"{self.name}: at most {MAX_LETTER_LABELS} alternatives with "
-                "letter labels"
+                f"{self.name}: at most {MAX_LETTER_LABELS} options with letter labels"
             )
-        return list(string.ascii_uppercase[: len(alternatives)])
+        return list(string.ascii_uppercase[: len(options)])
 
 
 QUESTION_TYPES: dict[str, QuestionType] = {}
@@ -87,16 +85,16 @@ def build_question(
             f"question id {qid!r} must be non-empty, without ':' or a newline"
         )
     qtype = get_question_type(type_name)
-    alternatives = qtype.parse_alternatives(qid, criteria)
-    if len(alternatives) < 2:
+    options = qtype.parse_options(qid, criteria)
+    if len(options) < 2:
         raise StructuredDecisionError(
-            f"question {qid!r}: needs at least 2 alternatives, got {len(alternatives)}"
+            f"question {qid!r}: needs at least 2 options, got {len(options)}"
         )
-    names = [a.name for a in alternatives]
+    names = [o.name for o in options]
     if len(set(names)) != len(names):
-        raise StructuredDecisionError(f"question {qid!r}: duplicate alternative names")
+        raise StructuredDecisionError(f"question {qid!r}: duplicate option names")
     try:
-        labels = qtype.labels(alternatives)
+        labels = qtype.labels(options)
     except StructuredDecisionError as e:
         raise StructuredDecisionError(f"question {qid!r}: {e}") from None
     if not isinstance(instructions, str):
@@ -105,7 +103,7 @@ def build_question(
         id=qid,
         type=qtype,
         instructions=instructions,
-        alternatives=tuple(alternatives),
+        options=tuple(options),
         labels=tuple(labels),
     )
 
@@ -129,14 +127,14 @@ class ChoiceQuestion(QuestionType):
 
     name = "choice"
 
-    def parse_alternatives(self, qid: str, criteria: Any) -> list[Alternative]:
+    def parse_options(self, qid: str, criteria: Any) -> list[Option]:
         if not isinstance(criteria, dict) or not criteria:
             raise StructuredDecisionError(
                 f"question {qid!r}: choice criteria must map option names to "
                 "descriptions"
             )
         return [
-            Alternative(str(name), None if desc is None else str(desc))
+            Option(str(name), None if desc is None else str(desc))
             for name, desc in criteria.items()
         ]
 
@@ -144,7 +142,7 @@ class ChoiceQuestion(QuestionType):
         top = argmax(probs)
         return {
             "type": self.name,
-            "choice": question.alternatives[top].name,
-            "probabilities": {a.name: p for a, p in zip(question.alternatives, probs)},
+            "choice": question.options[top].name,
+            "probabilities": {a.name: p for a, p in zip(question.options, probs)},
             "confidence": probs[top],
         }

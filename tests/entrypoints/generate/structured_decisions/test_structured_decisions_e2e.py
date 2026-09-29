@@ -145,7 +145,8 @@ TEMPLATE_BODY = {
 
 def test_request_template(server):
     template = (
-        "{% macro answer_prefix(question) %}{{ question.id }} ->{% endmacro %}"
+        "{% macro answer(question, label) %}{{ question.id }} -> {{ label }}"
+        "{% endmacro %}"
         "Classify the ticket.\n"
         "{% for q in questions %}{{ q.instructions }}\n"
         "{% for o in q.options %}{{ o.label }} = {{ o.name }}\n{% endfor %}"
@@ -157,9 +158,9 @@ def test_request_template(server):
     default = post(server, TEMPLATE_BODY)
     assert default.status_code == 200, default.text
     custom, default = custom.json(), default.json()
-    # The macro's prefix puts the read where the model expects a label.
+    # The macro's answer format puts the read where the model expects a label.
     assert custom["diagnostics"]["team"]["label_mass"] > 0.5
-    # The request's template, not the server's, rendered the prompt.
+    # The request's template rendered the prompt.
     assert custom["answers"]["team"]["probabilities"]["billing"] != pytest.approx(
         default["answers"]["team"]["probabilities"]["billing"], abs=1e-3
     )

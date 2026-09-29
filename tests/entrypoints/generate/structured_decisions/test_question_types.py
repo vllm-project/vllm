@@ -7,7 +7,7 @@ import pytest
 
 from vllm.entrypoints.generate.structured_decisions.question_types import (
     QUESTION_TYPES,
-    Alternative,
+    Option,
     Question,
     QuestionType,
     StructuredDecisionError,
@@ -26,11 +26,11 @@ def choice(qid="bucket", criteria=None, instructions="Which team?"):
     )
 
 
-def test_choice_labels_and_alternatives():
+def test_choice_labels_and_options():
     q = choice()
     assert q.labels == ("A", "B", "C")
-    assert [a.name for a in q.alternatives] == ["billing", "outage", "other"]
-    assert q.alternatives[0].description == "money"
+    assert [a.name for a in q.options] == ["billing", "outage", "other"]
+    assert q.options[0].description == "money"
 
 
 def test_choice_answer_shape():
@@ -64,10 +64,10 @@ def test_registered_type_plugs_in():
     class BinaryQuestion(QuestionType):
         name = "test_binary"
 
-        def parse_alternatives(self, qid: str, criteria: Any) -> list[Alternative]:
-            return [Alternative("yes"), Alternative("no")]
+        def parse_options(self, qid: str, criteria: Any) -> list[Option]:
+            return [Option("yes"), Option("no")]
 
-        def labels(self, alternatives: list[Alternative]) -> list[str]:
+        def labels(self, options: list[Option]) -> list[str]:
             return ["yes", "no"]
 
         def answer(self, question: Question, probs: list[float]) -> dict[str, Any]:
