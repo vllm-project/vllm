@@ -128,9 +128,22 @@ class PPHandler:
         )
         self.aux_hidden_state_relay_keys: tuple[str, ...] = ()
 
-    def enable_deferred_collectives(self) -> None:
-        """Enable the automatic receive delay after worker warmup."""
-        self.recv_launch_delay = self.deferred_recv_launch_delay
+    def enable_deferred_collectives(
+        self, *, jit_warmup_complete: bool, runtime_device_syncs: bool
+    ) -> None:
+        """Enable the receive delay only when runtime execution is sync-free.
+
+        A first-use JIT compilation can synchronize the device. If the last PP
+        rank has already posted a send whose delayed receiver is not yet posted,
+        that synchronization can deadlock. Keep upstream's immediate receive
+        behavior when JIT warmup is disabled (for example, under enforce-eager)
+        or a configured runtime feature may synchronize the device.
+        """
+        self.recv_launch_delay = (
+            self.deferred_recv_launch_delay
+            if jit_warmup_complete and not runtime_device_syncs
+            else 0
+        )
 
     def on_req_idx_freed(self, req_idx: int) -> None:
         self.req_idx_gen_np[req_idx] += 1

@@ -448,11 +448,11 @@ def _warmup_kernels(
 
         for step_indices, step_spec_flags in decode_steps:
             _run_decode_step(step_indices, step_spec_flags)
-
-    # The deferred PP post-update path only runs on real steps, so the steps
-    # above never JIT-compile its kernels on non-last ranks.
-    if not model_runner.is_last_pp_rank and model_runner.pp_handler is not None:
-        model_runner.warmup_pp_decode_update()
+            # Non-last PP ranks consume each sampled result several scheduler
+            # steps later. Warm the post-update kernels against the metadata for
+            # every decode shape now, while receives still launch immediately.
+            if not model_runner.is_last_pp_rank and model_runner.pp_handler is not None:
+                model_runner.warmup_pp_decode_update(len(step_indices))
 
     # Clean up - process finish_req_ids.
     cleanup_output = SchedulerOutput.make_empty()

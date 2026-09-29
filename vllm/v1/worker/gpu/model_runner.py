@@ -1155,7 +1155,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             if outputs is not None:
                 self.postprocess_sampled(**outputs)
 
-    def warmup_pp_decode_update(self) -> None:
+    def warmup_pp_decode_update(self, num_reqs: int = 1) -> None:
         """JIT-compile kernels behind ``update_pp_decode_requests``.
 
         This path only runs on real steps, so non-last PP ranks otherwise hit
@@ -1164,20 +1164,20 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         updating request state.
         """
         assert self.pp_handler is not None
-        idx_mapping = torch.full((1,), -1, dtype=torch.int32, device=self.device)
-        num_sampled = torch.zeros(1, dtype=torch.int32, device=self.device)
+        idx_mapping = torch.full((num_reqs,), -1, dtype=torch.int32, device=self.device)
+        num_sampled = torch.zeros(num_reqs, dtype=torch.int32, device=self.device)
         post_update(
             idx_mapping,
             self.req_states.num_computed_tokens.gpu,
             self.req_states.last_sampled_tokens,
             None,
             torch.zeros(
-                (1, self.pp_handler.max_sample_len),
+                (num_reqs, self.pp_handler.max_sample_len),
                 dtype=torch.int64,
                 device=self.device,
             ),
             num_sampled,
-            torch.zeros(1, dtype=torch.int32, device=self.device),
+            torch.zeros(num_reqs, dtype=torch.int32, device=self.device),
             None,
             self.req_states.all_token_ids.gpu,
             self.req_states.total_len.gpu,

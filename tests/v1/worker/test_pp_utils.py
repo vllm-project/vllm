@@ -211,6 +211,35 @@ def test_deferred_receive_cadence_fifo_and_flush():
     ]
 
 
+@pytest.mark.parametrize(
+    (
+        "deferred_delay",
+        "jit_warmup_complete",
+        "runtime_device_syncs",
+        "expected_delay",
+    ),
+    [
+        (3, True, False, 3),
+        (3, False, False, 0),
+        (3, True, True, 0),
+        (0, True, False, 0),
+    ],
+)
+def test_deferred_receive_requires_sync_free_warmed_runtime(
+    deferred_delay, jit_warmup_complete, runtime_device_syncs, expected_delay
+):
+    handler = PPHandler.__new__(PPHandler)
+    handler.deferred_recv_launch_delay = deferred_delay
+    handler.recv_launch_delay = 0
+
+    handler.enable_deferred_collectives(
+        jit_warmup_complete=jit_warmup_complete,
+        runtime_device_syncs=runtime_device_syncs,
+    )
+
+    assert handler.recv_launch_delay == expected_delay
+
+
 def test_receive_launch_is_idempotent_when_cpu_event_is_none(monkeypatch):
     handler = PPHandler.__new__(PPHandler)
     handler.main_stream, handler.broadcast_stream = Mock(), Mock()
@@ -355,17 +384,17 @@ def test_warmup_pp_decode_update_matches_serving_specialization(monkeypatch):
     runner.req_states = Mock()
     runner.model_state = Mock()
 
-    runner.warmup_pp_decode_update()
+    runner.warmup_pp_decode_update(num_reqs=2)
 
     assert len(calls) == 1
     args = calls[0]
     idx_mapping, _, _, output_bin_counts = args[:4]
     sampled_tokens, num_sampled, num_rejected, query_start_loc = args[4:8]
     assert len(args) == 10
-    assert idx_mapping.tolist() == [-1] and idx_mapping.dtype == torch.int32
+    assert idx_mapping.tolist() == [-1, -1] and idx_mapping.dtype == torch.int32
     assert output_bin_counts is None
     assert query_start_loc is None
-    assert sampled_tokens.shape == (1, 3) and sampled_tokens.dtype == torch.int64
+    assert sampled_tokens.shape == (2, 3) and sampled_tokens.dtype == torch.int64
     assert num_sampled.dtype == torch.int32
     assert num_rejected.dtype == torch.int32
     runner.model_state.warmup_postprocess_state.assert_called_once_with(

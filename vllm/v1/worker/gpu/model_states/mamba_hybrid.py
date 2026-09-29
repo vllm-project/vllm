@@ -405,6 +405,16 @@ class MambaHybridModelState(DefaultModelState):
             num_sampled,
             self.num_accepted_tokens_gpu,
         )
+        if self.recoverssm is not None:
+            # The scheduler-realistic warmup leaves this step's RecoverSSM
+            # metadata recorded. Zero accepted tokens compile its commit kernels
+            # while making every state update a no-op.
+            self.recoverssm.commit_step(
+                num_sampled,
+                idx_mapping,
+                state_indices=(self._mamba_state_idx_gpu if self._align_mode else None),
+                num_accepted_tokens=self.num_accepted_tokens_gpu,
+            )
         if self._align_mode:
             assert self._mamba_ctx is not None
             self._mamba_ctx.run_fused_postprocess_align(

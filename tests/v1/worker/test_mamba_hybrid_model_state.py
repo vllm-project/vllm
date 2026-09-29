@@ -197,6 +197,7 @@ def test_pp_warmup_postprocess_is_state_neutral() -> None:
     state._align_mode = True
     state._mamba_ctx = ctx
     state._mamba_state_idx_gpu = tensor([0, 0, 0, 0], torch.int32)
+    state.recoverssm = None
 
     accepted_before = state.num_accepted_tokens_gpu.clone()
     recurrent_before = recurrent_state.clone()
@@ -208,6 +209,36 @@ def test_pp_warmup_postprocess_is_state_neutral() -> None:
 
     torch.testing.assert_close(state.num_accepted_tokens_gpu, accepted_before)
     torch.testing.assert_close(recurrent_state, recurrent_before)
+
+
+def test_pp_warmup_commits_recoverssm_with_zero_accepted_tokens(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class NoopKernel:
+        def __getitem__(self, _grid):
+            return lambda *_args: None
+
+    monkeypatch.setattr(mamba_hybrid, "_scatter_num_accepted_kernel", NoopKernel())
+    state = object.__new__(MambaHybridModelState)
+    state.num_accepted_tokens_gpu = torch.ones(4, dtype=torch.int32)
+    state._align_mode = False
+    state._mamba_ctx = None
+    state.recoverssm = Mock(spec=RecoverSSMState)
+    idx_mapping = torch.full((2,), -1, dtype=torch.int32)
+    num_sampled = torch.zeros(2, dtype=torch.int32)
+
+    state.warmup_postprocess_state(
+        idx_mapping,
+        num_sampled,
+        torch.zeros(4, dtype=torch.int32),
+    )
+
+    state.recoverssm.commit_step.assert_called_once_with(
+        num_sampled,
+        idx_mapping,
+        state_indices=None,
+        num_accepted_tokens=state.num_accepted_tokens_gpu,
+    )
 
 
 def test_recoverssm_commits_accepted_window_after_v2_sampling() -> None:
