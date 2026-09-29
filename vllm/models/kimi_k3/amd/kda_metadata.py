@@ -25,11 +25,13 @@ from vllm.v1.attention.backends.gdn_attn import (
     GDNAttentionMetadata,
     GDNAttentionMetadataBuilder,
 )
+from vllm.v1.attention.backends.utils import mamba_get_block_table_tensor
 
 logger = init_logger(__name__)
 
 _BLOCK_T = 256
 _MIN_BLOCK_N = 128
+PENDING_SPEC_WINDOW = -1
 
 
 @triton.jit(do_not_specialize=["N"])
@@ -136,7 +138,11 @@ class KimiK3ROCmKDAMetadataBuilder(GDNAttentionMetadataBuilder):
         )
         self.replayssm_max_query_len = self.num_spec + 1
         self.replayssm_cache_len = 0
-        self.replayssm_pending_reset: torch.Tensor | None = None
+        # Per slot: records the slot's last forward appended to its ring and
+        # has not yet committed to write_pos. PENDING_SPEC_WINDOW means a
+        # verify window, whose accepted count arrives with the next step.
+        self.replayssm_pending_append: torch.Tensor | None = None
+        self._replayssm_capturing = False
         self._replayssm_committed_this_step = False
         # Strong reference, not an id(): a freed metadata object's id can be
         # reused by the next step's object, which would suppress that commit.
@@ -160,8 +166,8 @@ class KimiK3ROCmKDAMetadataBuilder(GDNAttentionMetadataBuilder):
             # let unrelated blocks collide on the same cursor entry.
             # Nightly constructs builders during CUDA-graph profiling *before*
             # cache_config.num_gpu_blocks is published; defer until it is.
-            self.replayssm_write_pos = None
-            self.replayssm_slot_buf = None
+            self.replayssm_write_pos: torch.Tensor | None = None
+            self.replayssm_slot_buf: torch.Tensor | None = None
             self._ensure_replayssm_slots()
         else:
             self.replayssm_write_pos = None
@@ -184,7 +190,7 @@ class KimiK3ROCmKDAMetadataBuilder(GDNAttentionMetadataBuilder):
         device = self.device
         write_pos = torch.zeros(num_slots, dtype=torch.int32, device=device)
         self.replayssm_write_pos = write_pos
-        self.replayssm_pending_reset = torch.zeros(
+        self.replayssm_pending_append = torch.zeros(
             num_slots, dtype=torch.int32, device=device
         )
         self.replayssm_slot_buf = torch.zeros(
@@ -220,6 +226,9 @@ class KimiK3ROCmKDAMetadataBuilder(GDNAttentionMetadataBuilder):
         common_attn_metadata = (
             args[1] if len(args) > 1 else kwargs["common_attn_metadata"]
         )
+        num_accepted_tokens = (
+            args[2] if len(args) > 2 else kwargs.get("num_accepted_tokens")
+        )
         if self._replayssm_step_marker is not common_attn_metadata:
             self._replayssm_step_marker = common_attn_metadata
             self._replayssm_committed_this_step = False
@@ -232,15 +241,28 @@ class KimiK3ROCmKDAMetadataBuilder(GDNAttentionMetadataBuilder):
                 "metadata for this step (typical during CUDA-graph profiling)."
             )
             return metadata
-        self._attach_kda_replayssm(metadata)
+        self._attach_kda_replayssm(metadata, common_attn_metadata, num_accepted_tokens)
         return metadata
 
-    def _attach_kda_replayssm(self, md: KimiK3ROCmKDAMetadata) -> None:
-        from vllm.models.kimi_k3.amd.ops.third_party.replayssm import replayssm_commit
+    def build_for_cudagraph_capture(self, common_attn_metadata):
+        # Capture and DP dummy batches run on placeholder rows. Their cursor
+        # bookkeeping would advance real slots by work that never happened.
+        self._replayssm_capturing = True
+        try:
+            return super().build_for_cudagraph_capture(common_attn_metadata)
+        finally:
+            self._replayssm_capturing = False
 
+    def _attach_kda_replayssm(
+        self,
+        md: KimiK3ROCmKDAMetadata,
+        common_attn_metadata,
+        num_accepted_tokens: torch.Tensor | None,
+    ) -> None:
         write_pos = self.replayssm_write_pos
-        pending_reset = self.replayssm_pending_reset
-        assert write_pos is not None and pending_reset is not None
+        pending = self.replayssm_pending_append
+        slot_buf = self.replayssm_slot_buf
+        assert write_pos is not None and pending is not None and slot_buf is not None
 
         md.replayssm = True
         md.write_pos = write_pos
@@ -253,7 +275,7 @@ class KimiK3ROCmKDAMetadataBuilder(GDNAttentionMetadataBuilder):
         # would hand each captured cudagraph a pointer that dies after capture.
         spec_buf: torch.Tensor | None = None
         if md.spec_state_indices_tensor is not None:
-            spec_buf = self.replayssm_slot_buf[: md.spec_state_indices_tensor.shape[0]]
+            spec_buf = slot_buf[: md.spec_state_indices_tensor.shape[0]]
             spec_buf.copy_(md.spec_state_indices_tensor[:, 0])
             md.replayssm_spec_slot_idx = spec_buf
         if md.non_spec_state_indices_tensor is not None:
@@ -279,61 +301,90 @@ class KimiK3ROCmKDAMetadataBuilder(GDNAttentionMetadataBuilder):
             # fixed across cudagraph replays.
             md.slot_idx = slot_idx
 
+        if self._replayssm_capturing:
+            md.replayssm_fold_slots = None
+            md.replayssm_fold_len = None
+            return
+
         # This group's cursors advance once per step, no matter how many layers
         # in the group later read the metadata.
         if not self._replayssm_committed_this_step:
             self._replayssm_committed_this_step = True
-            self._advance_replayssm_cursors(
-                md, write_pos, pending_reset, slot_idx, num_reqs, replayssm_commit
+            # Commit before choosing each row's path: a row that appended on the
+            # decode path last step may be a prefill row now (the GDN builder
+            # reclassifies plain decodes whenever spec decodes are present), and
+            # the fold below can only absorb records the cursor already counts.
+            self._commit_pending_records(
+                common_attn_metadata, num_accepted_tokens, write_pos, pending
             )
-            self._stage_replayssm_fold(md, write_pos, pending_reset)
+            self._mark_step_appends(md, pending)
+            self._stage_replayssm_fold(md, write_pos)
 
         md.replayssm_fold_slots = self._step_fold_slots
         md.replayssm_fold_len = self._step_fold_len
 
-    def _advance_replayssm_cursors(
+    def _commit_pending_records(
         self,
-        md: KimiK3ROCmKDAMetadata,
+        common_attn_metadata,
+        num_accepted_tokens: torch.Tensor | None,
         write_pos: torch.Tensor,
-        pending_reset: torch.Tensor,
-        slot_idx: torch.Tensor | None,
-        num_reqs: int,
-        replayssm_commit,
+        pending: torch.Tensor,
     ) -> None:
-        """Advance each row's cursor by the records the previous step wrote."""
-        if slot_idx is None:
-            return
-
-        if md.num_spec_decodes == 0:
-            # A plain decode still appends one record per row, so its cursor
-            # must advance too, otherwise the next step overwrites the token.
-            accepted = torch.ones(num_reqs, dtype=torch.int32, device=write_pos.device)
-        elif md.num_accepted_tokens is not None:
-            accepted = md.num_accepted_tokens[:num_reqs].to(torch.int32)
-        else:
-            return
-
-        # Rows whose ring was emptied by a prefill have nothing to commit; the
-        # accepted count from that step refers to tokens already folded into
-        # the checkpoint.
-        slots = slot_idx.to(torch.int64)
-        accepted = torch.where(
-            pending_reset[slots] != 0, torch.zeros_like(accepted), accepted
+        """Advance every live row's cursor by what its last forward appended."""
+        from vllm.models.kimi_k3.amd.ops.third_party.replayssm import (
+            PAD_SLOT_ID,
+            replayssm_commit,
         )
+
+        m = common_attn_metadata
+        num_reqs = m.num_reqs
+        if num_reqs == 0:
+            return
+        block_table = mamba_get_block_table_tensor(
+            m.block_table_tensor,
+            m.seq_lens,
+            self.kv_cache_spec,
+            self.vllm_config.cache_config.mamba_cache_mode,
+        )
+        slots = block_table[:num_reqs, 0].to(torch.int64)
+        live = m.query_start_loc[1 : num_reqs + 1] > m.query_start_loc[:num_reqs]
+        pending_rows = pending[slots]
+        if num_accepted_tokens is None:
+            accepted = torch.ones_like(pending_rows)
+        else:
+            accepted = num_accepted_tokens[:num_reqs].to(pending_rows)
+        amount = torch.where(
+            pending_rows == PENDING_SPEC_WINDOW, accepted, pending_rows
+        )
+        commit_slots = torch.where(
+            live & (pending_rows != 0), slots, torch.full_like(slots, PAD_SLOT_ID)
+        ).to(torch.int32)
         replayssm_commit(
             write_pos,
-            slot_idx,
-            accepted,
+            commit_slots,
+            amount,
             self.replayssm_max_query_len,
             self.replayssm_cache_len,
         )
-        pending_reset.index_fill_(0, slots, 0)
+        pending.index_fill_(0, slots, 0)
+
+    def _mark_step_appends(
+        self, md: KimiK3ROCmKDAMetadata, pending: torch.Tensor
+    ) -> None:
+        """Record what this step's decode-path rows will append."""
+        if md.num_decodes > 0:
+            assert md.non_spec_state_indices_tensor is not None
+            decode_slots = md.non_spec_state_indices_tensor[: md.num_decodes]
+            pending.index_fill_(0, decode_slots.to(torch.int64), 1)
+        if md.num_spec_decodes > 0:
+            assert md.replayssm_spec_slot_idx is not None
+            spec_slots = md.replayssm_spec_slot_idx[: md.num_spec_decodes]
+            pending.index_fill_(0, spec_slots.to(torch.int64), PENDING_SPEC_WINDOW)
 
     def _stage_replayssm_fold(
         self,
         md: KimiK3ROCmKDAMetadata,
         write_pos: torch.Tensor,
-        pending_reset: torch.Tensor,
     ) -> None:
         """Snapshot the records that the chunk/prefill path has to absorb.
 
@@ -359,7 +410,6 @@ class KimiK3ROCmKDAMetadataBuilder(GDNAttentionMetadataBuilder):
         self._step_fold_slots = md.prefill_state_indices
         self._step_fold_len = fold_len
         write_pos.index_fill_(0, slots, 0)
-        pending_reset.index_fill_(0, slots, 1)
 
 
 class KimiK3ROCmKDABackend(GDNAttentionBackend):

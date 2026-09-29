@@ -624,6 +624,24 @@ class LlamaNemotronVLConfig(VerifyAndUpdateConfig):
         model_config.pooler_config.seq_pooling_type = pooling_type
 
 
+def _reject_rocm_kimi_replayssm_align(vllm_config: "VllmConfig") -> None:
+    # Align-mode block migration copies only the conv state and checkpoint, so
+    # ROCm Kimi-K3 ReplaySSM would lose its ring records and cursors.
+    from vllm.platforms import current_platform
+
+    if (
+        vllm_config.cache_config.use_replayssm
+        and current_platform.is_rocm()
+        and vllm_config.model_config.architecture
+        in ("KimiLinearForCausalLM", "KimiK3ForConditionalGeneration")
+    ):
+        raise ValueError(
+            "ROCm Kimi-K3 --use-replayssm does not support "
+            "--mamba-cache-mode align yet, which prefix caching selects by "
+            "default; pass --no-enable-prefix-caching"
+        )
+
+
 class MambaModelConfig(VerifyAndUpdateConfig):
     @classmethod
     def verify_and_update_config(cls, vllm_config: "VllmConfig") -> None:
@@ -660,6 +678,7 @@ class MambaModelConfig(VerifyAndUpdateConfig):
                 assert vllm_config.scheduler_config.enable_chunked_prefill, (
                     "Chunked prefill is required for mamba cache mode 'align'."
                 )
+                _reject_rocm_kimi_replayssm_align(vllm_config)
             # By default, mamba block size will be set to max_model_len (see
             # below). When enabling prefix caching, we align mamba block size
             # to the block size as the basic granularity for prefix caching.

@@ -478,9 +478,12 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
         if not is_conv_state_dim_first():
             conv_state = conv_state.transpose(-1, -2)
 
+        # The fused decode kernel treats the recurrent state as current, which
+        # under ReplaySSM is only the checkpoint: it would skip the ring.
         if (
             self.decode_conv1d_weight is not None
             and self.decode_norm_weight is not None
+            and not m.replayssm
             and spec_sequence_masks is None
             and m.num_prefills == 0
             and m.num_decodes > 0
@@ -538,6 +541,7 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
         if spec_sequence_masks is not None:
             assert spec_state_indices_tensor is not None
             assert spec_query_start_loc is not None
+            assert beta_spec is not None
             spec_conv_indices = spec_state_indices_tensor[:, 0][: m.num_spec_decodes]
             spec_max_query_len = (
                 m.replayssm_max_query_len

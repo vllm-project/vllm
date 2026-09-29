@@ -218,6 +218,79 @@ def test_rocm_v2_runner_skip_is_limited_to_kimi_kda(monkeypatch):
         VllmConfig.validate_mamba_cached_kernel(config)
 
 
+def _rocm_kimi_replayssm_config(monkeypatch, **cache_overrides):
+    from vllm.platforms import current_platform
+
+    monkeypatch.setattr(current_platform, "is_rocm", lambda: True)
+    return SimpleNamespace(
+        cache_config=SimpleNamespace(
+            use_replayssm=True,
+            use_kda_recoverssm=False,
+            mamba_cache_mode="none",
+            **cache_overrides,
+        ),
+        num_speculative_tokens=3,
+        model_config=SimpleNamespace(
+            supports_replayssm=True,
+            architecture="KimiK3ForConditionalGeneration",
+        ),
+        mamba_config=SimpleNamespace(
+            backend=MambaBackendEnum.TRITON,
+            enable_stochastic_rounding=False,
+        ),
+        parallel_config=SimpleNamespace(pipeline_parallel_size=1),
+        kv_transfer_config=None,
+        use_v2_model_runner=False,
+    )
+
+
+def test_rocm_kimi_replayssm_rejects_align_mode(monkeypatch):
+    """Block migration would drop the ring records and cursors."""
+    config = _rocm_kimi_replayssm_config(monkeypatch)
+    VllmConfig.validate_mamba_cached_kernel(config)
+
+    config.cache_config.mamba_cache_mode = "align"
+    with pytest.raises(ValueError, match="does not support --mamba-cache-mode align"):
+        VllmConfig.validate_mamba_cached_kernel(config)
+
+
+def test_rocm_kimi_replayssm_rejects_prefix_caching_default_align(monkeypatch):
+    """Prefix caching switches hybrid models to align mode on its own."""
+    from vllm.model_executor.models.config import MambaModelConfig
+
+    config = _rocm_kimi_replayssm_config(monkeypatch, enable_prefix_caching=True)
+    config.scheduler_config = SimpleNamespace(enable_chunked_prefill=True)
+    with pytest.raises(ValueError, match="--no-enable-prefix-caching"):
+        MambaModelConfig.verify_and_update_config(config)
+    assert config.cache_config.mamba_cache_mode == "align"
+
+
+@pytest.mark.parametrize(
+    ("architecture", "connector", "allowed"),
+    [
+        ("KimiK3ForConditionalGeneration", "SimpleCPUOffloadConnector", True),
+        ("KimiLinearForCausalLM", "SimpleCPUOffloadConnector", True),
+        ("KimiK3ForConditionalGeneration", "NixlConnector", False),
+        ("KimiK3ForConditionalGeneration", "LMCacheMPConnector", False),
+        ("KimiK3ForConditionalGeneration", "MultiConnector", False),
+        ("NemotronHForCausalLM", "SimpleCPUOffloadConnector", False),
+    ],
+)
+def test_rocm_replayssm_kv_connector_exemption_is_cpu_offload_only(
+    monkeypatch, architecture: str, connector: str, allowed: bool
+):
+    config = _rocm_kimi_replayssm_config(monkeypatch)
+    config.model_config.architecture = architecture
+    config.kv_transfer_config = SimpleNamespace(
+        kv_connector=connector, is_kv_transfer_instance=True
+    )
+    if allowed:
+        VllmConfig.validate_mamba_cached_kernel(config)
+        return
+    with pytest.raises(ValueError, match="incompatible with KV connectors"):
+        VllmConfig.validate_mamba_cached_kernel(config)
+
+
 def test_per_request_spec_decode_metrics_requires_spec_decode():
     # The flag only makes sense with speculative decoding configured; enabling
     # it without --speculative-config should fail fast rather than silently

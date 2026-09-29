@@ -86,7 +86,7 @@ def replayssm_buffer_shapes(
 
 def append_kda_replayssm_dtypes(
     base_dtypes: tuple[torch.dtype, ...],
-    model_dtype: torch.dtype,
+    model_dtype: str | torch.dtype,
 ) -> tuple[torch.dtype, ...]:
     """Append KDA ReplaySSM record-buffer dtypes (k, u, g)."""
     activation_dtype = get_kv_cache_torch_dtype("auto", model_dtype)
@@ -648,7 +648,12 @@ def _replayssm_kda_fwd_kernel(
             + o_v
         )
         tl.store(p_bu, b_v.to(p_bu.dtype.element_ty), mask=mask_v)
+        # K/G rows are shared by every V tile of this head. A flush rewrites
+        # them from row 0 while sibling tiles may still be replaying the old
+        # rows, so flushing rows leave them to _replayssm_kda_flush_kg_kernel,
+        # which runs after this launch. U is per-V-tile and safe to write here.
         if i_v == 0:
+            kg_mask = mask_k & (do_flush == 0)
             p_bk = (
                 buf_k
                 + slot * stride_bufk_slot
@@ -656,7 +661,7 @@ def _replayssm_kda_fwd_kernel(
                 + i_hv * stride_bufk_hv
                 + o_k
             )
-            tl.store(p_bk, b_k.to(p_bk.dtype.element_ty), mask=mask_k)
+            tl.store(p_bk, b_k.to(p_bk.dtype.element_ty), mask=kg_mask)
             p_bg = (
                 buf_g
                 + slot * stride_bufg_slot
@@ -664,7 +669,7 @@ def _replayssm_kda_fwd_kernel(
                 + i_hv * stride_bufg_hv
                 + o_k
             )
-            tl.store(p_bg, b_g.to(p_bg.dtype.element_ty), mask=mask_k)
+            tl.store(p_bg, b_g.to(p_bg.dtype.element_ty), mask=kg_mask)
 
         p_q += H * K
         p_k += H * K
@@ -672,6 +677,82 @@ def _replayssm_kda_fwd_kernel(
         p_o += HV * V
         p_a += stride_a_token
         p_b += stride_b_token
+
+
+@triton.jit(do_not_specialize=["N", "T_MAX", "CAP"])
+def _replayssm_kda_flush_kg_kernel(
+    k,
+    a,
+    A_log,
+    dt_bias,
+    buf_k,
+    buf_g,
+    write_pos,
+    slot_idx,
+    cu_seqlens,
+    LOWER_BOUND,
+    N,
+    T_MAX,
+    CAP,
+    H: tl.constexpr,
+    HV: tl.constexpr,
+    K: tl.constexpr,
+    BK: tl.constexpr,
+    stride_bufk_slot: tl.constexpr,
+    stride_bufk_pos: tl.constexpr,
+    stride_bufk_hv: tl.constexpr,
+    stride_bufg_slot: tl.constexpr,
+    stride_bufg_pos: tl.constexpr,
+    stride_bufg_hv: tl.constexpr,
+    stride_a_token: tl.constexpr,
+    USE_QK_L2NORM_IN_KERNEL: tl.constexpr,
+    USE_LOWER_BOUND: tl.constexpr,
+):
+    """K/G appends for rows that flushed in the preceding forward launch."""
+    i_nh = tl.program_id(0)
+    i_n, i_hv = i_nh // HV, i_nh % HV
+    if i_n >= N:
+        return
+    i_h = i_hv // (HV // H)
+
+    bos = tl.load(cu_seqlens + i_n).to(tl.int64)
+    eos = tl.load(cu_seqlens + i_n + 1).to(tl.int64)
+    T = eos - bos
+    if T == 0:
+        return
+    slot = tl.load(slot_idx + i_n).to(tl.int64)
+    if slot < 0:
+        return
+    h = tl.maximum(tl.load(write_pos + slot).to(tl.int32), 0)
+    if h + 2 * T_MAX <= CAP:
+        return
+
+    o_k = tl.arange(0, BK)
+    mask_k = o_k < K
+    p_k = k + (bos * H + i_h) * K + o_k
+    p_a = a + (bos * HV + i_hv) * K + o_k
+    p_A_log = A_log + i_hv
+    p_dt_bias = dt_bias + i_hv * K + o_k
+    p_bk = buf_k + slot * stride_bufk_slot + i_hv * stride_bufk_hv + o_k
+    p_bg = buf_g + slot * stride_bufg_slot + i_hv * stride_bufg_hv + o_k
+
+    for i_t in range(T):
+        b_k = tl.load(p_k, mask=mask_k, other=0.0).to(tl.float32)
+        if USE_QK_L2NORM_IN_KERNEL:
+            b_k = b_k * tl.rsqrt(tl.sum(b_k * b_k) + 1e-6)
+        b_g = _kda_gate(p_A_log, p_a, p_dt_bias, mask_k, LOWER_BOUND, USE_LOWER_BOUND)
+        tl.store(
+            p_bk + i_t * stride_bufk_pos,
+            b_k.to(p_bk.dtype.element_ty),
+            mask=mask_k,
+        )
+        tl.store(
+            p_bg + i_t * stride_bufg_pos,
+            b_g.to(p_bg.dtype.element_ty),
+            mask=mask_k,
+        )
+        p_k += H * K
+        p_a += stride_a_token
 
 
 def replayssm_sigmoid_gating_delta_rule(
@@ -778,5 +859,34 @@ def replayssm_sigmoid_gating_delta_rule(
         DOT_MODE=_replay_dot_mode(buf_u.dtype),
         num_warps=1,
         num_stages=3,
+    )
+    _replayssm_kda_flush_kg_kernel[(N * HV,)](
+        k=k,
+        a=a,
+        A_log=A_log,
+        dt_bias=dt_bias,
+        buf_k=buf_k,
+        buf_g=buf_g,
+        write_pos=write_pos,
+        slot_idx=slot_idx,
+        cu_seqlens=cu_seqlens,
+        LOWER_BOUND=0.0 if lower_bound is None else lower_bound,
+        N=N,
+        T_MAX=max_query_len,
+        CAP=cap,
+        H=H,
+        HV=HV,
+        K=K,
+        BK=BK,
+        stride_bufk_slot=buf_k.stride(0),
+        stride_bufk_pos=buf_k.stride(2),
+        stride_bufk_hv=buf_k.stride(1),
+        stride_bufg_slot=buf_g.stride(0),
+        stride_bufg_pos=buf_g.stride(2),
+        stride_bufg_hv=buf_g.stride(1),
+        stride_a_token=a.stride(-3),
+        USE_QK_L2NORM_IN_KERNEL=use_qk_l2norm_in_kernel,
+        USE_LOWER_BOUND=lower_bound is not None,
+        num_warps=1,
     )
     return out

@@ -3424,8 +3424,8 @@ class VllmConfig:
             self.cache_config.use_kda_recoverssm = self.num_speculative_tokens > 0
 
         # ROCm Kimi-K3 ReplaySSM is the only path that runs on Model Runner
-        # V2 and with KV connectors / MLA CPU offload. Keep every other
-        # ReplaySSM backend on the upstream V1 / no-connector rules.
+        # V2 and with MLA CPU offload. Keep every other ReplaySSM backend on
+        # the upstream V1 / no-connector rules.
         kimi_kda_rocm = current_platform.is_rocm() and (
             self.model_config is not None
             and self.model_config.architecture
@@ -3439,6 +3439,14 @@ class VllmConfig:
             raise ValueError(
                 "--use-replayssm is not supported for architecture "
                 f"{self.model_config.architecture!r}"
+            )
+        if kimi_kda_rocm and self.cache_config.mamba_cache_mode == "align":
+            # Block migration copies only the conv state and checkpoint; the
+            # ring records and per-slot cursors would be left behind.
+            raise ValueError(
+                "ROCm Kimi-K3 --use-replayssm does not support "
+                "--mamba-cache-mode align yet, which prefix caching selects by "
+                "default; pass --no-enable-prefix-caching"
             )
         if self.cache_config.use_kda_recoverssm:
             if self.model_config is not None and self.model_config.architecture not in (
@@ -3489,10 +3497,17 @@ class VllmConfig:
                 "Triton ReplaySSM requires Model Runner V1; use "
                 "--mamba-backend flashinfer or Model Runner V1"
             )
+        # ReplaySSM cursors and ring records live in the metadata builder and
+        # have no transfer path, so only the CPU offload tier the MLA layers
+        # use is allowed.
         if (
-            not kimi_kda_rocm
-            and self.kv_transfer_config is not None
+            self.kv_transfer_config is not None
             and self.kv_transfer_config.is_kv_transfer_instance
+            and not (
+                kimi_kda_rocm
+                and self.kv_transfer_config.kv_connector
+                == "SimpleCPUOffloadConnector"
+            )
         ):
             raise ValueError(
                 "--use-replayssm is incompatible with KV connectors "
