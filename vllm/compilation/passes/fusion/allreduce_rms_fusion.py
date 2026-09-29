@@ -1185,11 +1185,10 @@ class AiterAllreduceFusedRMSNormPattern(BasePattern, VllmPatternReplacement):
             input: torch.Tensor, weight: torch.Tensor
         ) -> tuple[torch.Tensor, torch.Tensor]:
             residual = torch.zeros_like(input)
-            norm_weight = weight if self.gemma_norm else weight.to(input.dtype)
             allreduce = self.FUSED_AR_RMSNORM_OP(
                 input_=input,
                 residual=residual,
-                weight=norm_weight,
+                weight=weight.to(input.dtype),
                 epsilon=self.epsilon,
                 gemma_norm=self.gemma_norm,
             )
@@ -1242,11 +1241,10 @@ class AiterAllreduceFusedAddRMSNormPattern(BasePattern, VllmPatternReplacement):
         def _replacement(
             residual: torch.Tensor, input: torch.Tensor, weight: torch.Tensor
         ) -> tuple[torch.Tensor, torch.Tensor]:
-            norm_weight = weight if self.gemma_norm else weight.to(input.dtype)
             allreduce = self.FUSED_AR_RMSNORM_OP(
                 input_=input,
                 residual=residual,
-                weight=norm_weight,
+                weight=weight.to(input.dtype),
                 epsilon=self.epsilon,
                 gemma_norm=self.gemma_norm,
             )
