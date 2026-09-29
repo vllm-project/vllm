@@ -32,7 +32,8 @@ pub struct ReleaseKvCacheMemoryResponse {
 #[derive(Serialize)]
 pub struct WakeUpResponse {
     status: &'static str,
-    tags_woken: Option<Vec<String>>,
+    /// Tags requested by the caller; null means wake all resources.
+    tags: Option<Vec<String>>,
 }
 
 fn sleep_params(query: Option<String>) -> Result<(u32, PauseMode), ApiError> {
@@ -78,24 +79,25 @@ pub async fn sleep(
         .await
         .map_err(|error| utility_call_error("sleep", error))?;
 
-    recorder.success();
-    Ok(Json(SleepResponse { status: "sleeping", level }))
+    drop(recorder);
+    Ok(Json(SleepResponse {
+        status: "sleeping",
+        level,
+    }))
 }
 
 /// Release KV cache memory while keeping model weights resident.
 pub async fn release_kv_cache_memory(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<ReleaseKvCacheMemoryResponse>, ApiError> {
-    let recorder = METRICS
-        .api_server
-        .record_sleep_mode_operation("release_kv_cache_memory");
+    let recorder = METRICS.api_server.record_sleep_mode_operation("release_kv_cache_memory");
     state
         .engine_core_client()
         .release_kv_cache_memory()
         .await
         .map_err(|error| utility_call_error("release_kv_cache_memory", error))?;
 
-    recorder.success();
+    drop(recorder);
     Ok(Json(ReleaseKvCacheMemoryResponse {
         status: "kv_cache_released",
     }))
@@ -121,10 +123,10 @@ pub async fn wake_up(
         .await
         .map_err(|error| utility_call_error("wake_up", error))?;
 
-    recorder.success();
+    drop(recorder);
     Ok(Json(WakeUpResponse {
         status: if fully_awake { "awake" } else { "sleeping" },
-        tags_woken: tags,
+        tags,
     }))
 }
 
@@ -150,8 +152,8 @@ mod tests {
     #[test]
     fn sleep_query_validates_level_and_mode_before_dispatch() {
         for level in 0..=2 {
-            let (parsed, _) = sleep_params(Some(format!("level={level}&mode=wait")))
-                .expect("valid sleep query");
+            let (parsed, _) =
+                sleep_params(Some(format!("level={level}&mode=wait"))).expect("valid sleep query");
             assert_eq!(parsed, level);
         }
         for (query, parameter) in [
@@ -162,7 +164,10 @@ mod tests {
         ] {
             let error = sleep_params(Some(query.to_owned())).expect_err("invalid sleep query");
             assert_eq!(error.status_code(), StatusCode::BAD_REQUEST);
-            assert_eq!(error.to_error_response().error.param.as_deref(), Some(parameter));
+            assert_eq!(
+                error.to_error_response().error.param.as_deref(),
+                Some(parameter)
+            );
         }
     }
 }

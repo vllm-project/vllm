@@ -77,6 +77,15 @@ _R = TypeVar("_R")  # Return type for collective_rpc
 EngineIdentity = bytes
 
 
+def _validate_wake_up_result(result: Any) -> bool:
+    if not isinstance(result, bool):
+        raise RuntimeError(
+            "wake_up must return a bool indicating whether the engine is fully "
+            f"awake, got {type(result).__name__}"
+        )
+    return result
+
+
 class EngineCoreClient(ABC):
     """EngineCoreClient: subclasses handle different methods for pushing
         and pulling from the EngineCore for asyncio / multiprocessing.
@@ -1301,7 +1310,7 @@ class AsyncMPClient(MPClient):
         await self.call_utility_async("release_kv_cache_memory")
 
     async def wake_up_async(self, tags: list[str] | None = None) -> bool:
-        return await self.call_utility_async("wake_up", tags)
+        return _validate_wake_up_result(await self.call_utility_async("wake_up", tags))
 
     async def is_sleeping_async(self) -> bool:
         return await self.call_utility_async("is_sleeping")
@@ -1653,6 +1662,19 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
                 ]
             )
         )[0]
+
+    async def wake_up_async(self, tags: list[str] | None = None) -> bool:
+        # A partial wake on any rank means the DP engine is still sleeping.
+        results = await asyncio.gather(
+            *[
+                self._call_utility_async("wake_up", tags, engine=engine)
+                for engine in self.core_engines
+            ]
+        )
+        # Validate every rank before reducing: all() would otherwise hide an
+        # invalid result after the first sleeping rank.
+        fully_awake = [_validate_wake_up_result(result) for result in results]
+        return all(fully_awake)
 
     @staticmethod
     async def process_engine_outputs(

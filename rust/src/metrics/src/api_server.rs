@@ -45,17 +45,9 @@ pub struct SleepModeOperationLabels {
     pub operation: &'static str,
 }
 
-#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
-pub struct SleepModeOperationResultLabels {
-    pub operation: &'static str,
-    pub status: &'static str,
-}
-
 pub(crate) type HttpRequestCounterFamily = Family<HttpRequestLabels, U64Counter>;
 pub(crate) type HttpHandlerHistogramFamily =
     Family<HttpHandlerLabels, Histogram, fn() -> Histogram>;
-pub(crate) type SleepModeOperationCounterFamily =
-    Family<SleepModeOperationResultLabels, U64Counter>;
 pub(crate) type SleepModeOperationHistogramFamily =
     Family<SleepModeOperationLabels, Histogram, fn() -> Histogram>;
 pub(crate) type SleepModeOperationGaugeFamily = Family<SleepModeOperationLabels, U64Gauge>;
@@ -65,7 +57,6 @@ pub struct ApiServerMetrics {
     pub http_requests: HttpRequestCounterFamily,
     pub http_request_duration_seconds: HttpHandlerHistogramFamily,
     pub http_request_duration_highr_seconds: Histogram,
-    pub sleep_mode_operations: SleepModeOperationCounterFamily,
     pub sleep_mode_operation_duration_seconds: SleepModeOperationHistogramFamily,
     pub sleep_mode_operations_in_flight: SleepModeOperationGaugeFamily,
 }
@@ -96,25 +87,18 @@ impl ApiServerMetrics {
             http_request_duration_highr_seconds.clone(),
         );
 
-        let sleep_mode_operations = SleepModeOperationCounterFamily::default();
-        registry.register(
-            "vllm:rl_sleep_mode_operations",
-            "Dispatched sleep-mode operations by outcome.",
-            sleep_mode_operations.clone(),
-        );
-
         let sleep_mode_operation_duration_seconds = Family::new_with_constructor(
             sleep_mode_operation_duration_histogram as fn() -> Histogram,
         );
         registry.register(
-            "vllm:rl_sleep_mode_operation_duration_seconds",
+            "vllm:sleep_mode_operation_duration_seconds",
             "Duration of one sleep-mode operation.",
             sleep_mode_operation_duration_seconds.clone(),
         );
 
         let sleep_mode_operations_in_flight = SleepModeOperationGaugeFamily::default();
         registry.register(
-            "vllm:rl_sleep_mode_operations_in_flight",
+            "vllm:sleep_mode_operations_in_flight",
             "Sleep-mode operations currently awaited.",
             sleep_mode_operations_in_flight.clone(),
         );
@@ -123,7 +107,6 @@ impl ApiServerMetrics {
             http_requests,
             http_request_duration_seconds,
             http_request_duration_highr_seconds,
-            sleep_mode_operations,
             sleep_mode_operation_duration_seconds,
             sleep_mode_operations_in_flight,
         }
@@ -138,44 +121,24 @@ impl ApiServerMetrics {
         let in_flight = self.sleep_mode_operations_in_flight.get_or_create_owned(&labels);
         in_flight.inc();
         SleepModeOperationRecorder {
-            operation,
             started_at: Instant::now(),
-            operations: self.sleep_mode_operations.clone(),
-            duration: self
-                .sleep_mode_operation_duration_seconds
-                .get_or_create_owned(&labels),
+            duration: self.sleep_mode_operation_duration_seconds.get_or_create_owned(&labels),
             in_flight,
-            status: "error",
         }
     }
 }
 
-/// Records the outcome when the operation completes or its future is dropped.
+/// Records duration and clears in-flight tracking on completion or cancellation.
 pub struct SleepModeOperationRecorder {
-    operation: &'static str,
     started_at: Instant,
-    operations: SleepModeOperationCounterFamily,
     duration: Histogram,
     in_flight: U64Gauge,
-    status: &'static str,
-}
-
-impl SleepModeOperationRecorder {
-    pub fn success(mut self) {
-        self.status = "success";
-    }
 }
 
 impl Drop for SleepModeOperationRecorder {
     fn drop(&mut self) {
         self.in_flight.dec();
         self.duration.observe(self.started_at.elapsed().as_secs_f64());
-        self.operations
-            .get_or_create(&SleepModeOperationResultLabels {
-                operation: self.operation,
-                status: self.status,
-            })
-            .inc();
     }
 }
 
@@ -193,39 +156,41 @@ mod tests {
     }
 
     #[test]
-    fn sleep_mode_recorder_tracks_outcomes_and_concurrency() {
+    fn sleep_mode_recorder_tracks_duration_and_concurrency() {
         let mut registry = Registry::default();
         let metrics = ApiServerMetrics::register(&mut registry);
         for operation in ["sleep", "release_kv_cache_memory", "wake"] {
             let recorder = metrics.record_sleep_mode_operation(operation);
             let active = rendered_metrics(&registry);
             assert!(active.contains(&format!(
-                "vllm:rl_sleep_mode_operations_in_flight{{operation=\"{operation}\"}} 1"
+                "vllm:sleep_mode_operations_in_flight{{operation=\"{operation}\"}} 1"
             )));
 
-            recorder.success();
+            drop(recorder);
             let succeeded = rendered_metrics(&registry);
             assert!(succeeded.contains(&format!(
-                "vllm:rl_sleep_mode_operations_in_flight{{operation=\"{operation}\"}} 0"
+                "vllm:sleep_mode_operations_in_flight{{operation=\"{operation}\"}} 0"
             )));
             assert!(succeeded.contains(&format!(
-                "vllm:rl_sleep_mode_operation_duration_seconds_count{{operation=\"{operation}\"}} 1"
-            )));
-            assert!(succeeded.contains(&format!(
-                "vllm:rl_sleep_mode_operations_total{{operation=\"{operation}\",status=\"success\"}} 1"
+                "vllm:sleep_mode_operation_duration_seconds_count{{operation=\"{operation}\"}} 1"
             )));
 
-            let recorder = metrics.record_sleep_mode_operation(operation);
-            drop(recorder);
+            let first = metrics.record_sleep_mode_operation(operation);
+            let second = metrics.record_sleep_mode_operation(operation);
+            assert!(rendered_metrics(&registry).contains(&format!(
+                "vllm:sleep_mode_operations_in_flight{{operation=\"{operation}\"}} 2"
+            )));
+            drop(first);
+            assert!(rendered_metrics(&registry).contains(&format!(
+                "vllm:sleep_mode_operations_in_flight{{operation=\"{operation}\"}} 1"
+            )));
+            drop(second);
             let rendered = rendered_metrics(&registry);
             assert!(rendered.contains(&format!(
-                "vllm:rl_sleep_mode_operations_total{{operation=\"{operation}\",status=\"error\"}} 1"
+                "vllm:sleep_mode_operations_in_flight{{operation=\"{operation}\"}} 0"
             )));
             assert!(rendered.contains(&format!(
-                "vllm:rl_sleep_mode_operations_in_flight{{operation=\"{operation}\"}} 0"
-            )));
-            assert!(rendered.contains(&format!(
-                "vllm:rl_sleep_mode_operation_duration_seconds_count{{operation=\"{operation}\"}} 2"
+                "vllm:sleep_mode_operation_duration_seconds_count{{operation=\"{operation}\"}} 3"
             )));
         }
     }

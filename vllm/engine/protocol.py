@@ -200,7 +200,12 @@ class EngineClient(ABC):
 
     @abstractmethod
     async def wake_up(self, tags: list[str] | None = None) -> bool:
-        """Wake up the engine."""
+        """Wake requested resources and return whether all engines are fully awake.
+
+        ``tags=None`` wakes all resources. Partial wake returns False while any
+        resource or scheduling remains asleep. All implementations, including
+        out-of-tree clients, must return bool; returning None is invalid.
+        """
         ...
 
     @abstractmethod

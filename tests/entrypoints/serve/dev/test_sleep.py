@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
@@ -72,7 +73,6 @@ def test_sleep_route_rejects_invalid_query_before_dispatch(
     assert response.status_code == 400
     assert response.json()["error"]["param"] == expected_param
     app.state.engine_client.sleep.assert_not_awaited()
-    assert list(metrics.operations.collect()[0].samples) == []
     assert list(metrics.duration.collect()[0].samples) == []
     assert list(metrics.in_flight.collect()[0].samples) == []
 
@@ -81,8 +81,8 @@ def test_sleep_route_rejects_invalid_query_before_dispatch(
 @pytest.mark.parametrize(
     ("fully_awake", "tags", "expected"),
     [
-        (True, "", {"status": "awake", "tags_woken": None}),
-        (False, "?tags=weights", {"status": "sleeping", "tags_woken": ["weights"]}),
+        (True, "", {"status": "awake", "tags": None}),
+        (False, "?tags=weights", {"status": "sleeping", "tags": ["weights"]}),
     ],
 )
 def test_wake_route_maps_engine_result_without_state_query(
@@ -94,8 +94,21 @@ def test_wake_route_maps_engine_result_without_state_query(
         response = client.post(f"/wake_up{tags}")
     assert response.status_code == 200
     assert response.json() == expected
-    app.state.engine_client.wake_up.assert_awaited_once_with(expected["tags_woken"])
+    app.state.engine_client.wake_up.assert_awaited_once_with(expected["tags"])
     app.state.engine_client.is_sleeping.assert_not_awaited()
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize("invalid_result", [None, 0, "awake"])
+def test_wake_route_rejects_non_bool_engine_result(sleep_route_app, invalid_result):
+    app, metrics = sleep_route_app
+    app.state.engine_client.wake_up.return_value = invalid_result
+    with TestClient(app, raise_server_exceptions=False) as client:
+        response = client.post("/wake_up")
+    assert response.status_code == 500
+    assert "must return a bool" in response.json()["error"]["message"]
+    app.state.engine_client.is_sleeping.assert_not_awaited()
+    assert metrics.in_flight.labels("wake")._value.get() == 0
 
 
 @pytest.mark.cpu_test
@@ -137,37 +150,47 @@ def test_release_kv_cache_memory_route(sleep_route_app, fails):
     if not fails:
         assert response.json() == {"status": "kv_cache_released"}
     release.assert_awaited_once_with()
-    assert (
-        metrics.operations.labels(
-            "release_kv_cache_memory", "error" if fails else "success"
-        )._value.get()
-        == 1
-    )
     assert metrics.in_flight.labels("release_kv_cache_memory")._value.get() == 0
+    assert _duration_count(metrics, "release_kv_cache_memory") == 1
 
 
 @pytest.mark.cpu_test
 @pytest.mark.parametrize("operation", ["sleep", "release_kv_cache_memory", "wake"])
-def test_sleep_mode_recorder_tracks_success_error_and_in_flight(operation):
+@pytest.mark.parametrize("exception", [RuntimeError, asyncio.CancelledError])
+def test_sleep_mode_recorder_tracks_duration_and_cleans_up(operation, exception):
     metrics = SleepModeOperationMetrics(CollectorRegistry())
     with metrics.record(operation):
         assert metrics.in_flight.labels(operation)._value.get() == 1
-    with pytest.raises(RuntimeError), metrics.record(operation):
-        raise RuntimeError("engine failed")
+    with pytest.raises(exception), metrics.record(operation):
+        raise exception()
     assert metrics.in_flight.labels(operation)._value.get() == 0
-    assert metrics.operations.labels(operation, "success")._value.get() == 1
-    assert metrics.operations.labels(operation, "error")._value.get() == 1
     assert metrics.duration.labels(operation)._sum.get() >= 0
-    count = next(
+    assert _duration_count(metrics, operation) == 2
+
+
+def _duration_count(metrics, operation):
+    return next(
         sample.value
         for sample in metrics.duration.collect()[0].samples
         if sample.name.endswith("_count") and sample.labels == {"operation": operation}
     )
-    assert count == 2
 
 
 @pytest.mark.cpu_test
-def test_sleep_operation_visible_on_production_metrics_endpoint(monkeypatch):
+@pytest.mark.parametrize(
+    ("path", "method", "operation", "status", "fails"),
+    [
+        ("/sleep", "POST", "sleep", 200, False),
+        ("/release_kv_cache_memory", "POST", "release_kv_cache_memory", 200, False),
+        ("/wake_up", "POST", "wake", 200, False),
+        ("/is_sleeping", "GET", None, 200, False),
+        ("/sleep?level=3", "POST", None, 400, False),
+        ("/release_kv_cache_memory", "POST", "release_kv_cache_memory", 500, True),
+    ],
+)
+def test_sleep_routes_visible_on_production_metrics_endpoint(
+    monkeypatch, path, method, operation, status, fails
+):
     registry = CollectorRegistry()
     monkeypatch.delenv("PROMETHEUS_MULTIPROC_DIR", raising=False)
     monkeypatch.setattr(sleep_metrics, "REGISTRY", registry)
@@ -175,12 +198,20 @@ def test_sleep_operation_visible_on_production_metrics_endpoint(monkeypatch):
     monkeypatch.setattr(prometheus_metrics, "REGISTRY", registry)
 
     app = FastAPI()
+    app.state.args = SimpleNamespace(log_error_stack=False)
     app.state.engine_client = AsyncMock()
+    app.state.engine_client.wake_up.return_value = True
+    app.state.engine_client.is_sleeping.return_value = False
+    if fails:
+        app.state.engine_client.release_kv_cache_memory.side_effect = RuntimeError(
+            "engine failed"
+        )
     attach_router(app)
+    init_exception_handler(app)
     attach_metrics_router(app)
 
-    with TestClient(app) as client:
-        assert client.post("/sleep").status_code == 200
+    with TestClient(app, raise_server_exceptions=False) as client:
+        assert client.request(method, path).status_code == status
         response = client.get("/metrics")
 
     assert response.status_code == 200
@@ -190,17 +221,29 @@ def test_sleep_operation_visible_on_production_metrics_endpoint(monkeypatch):
         for sample in family.samples
     ]
     assert any(
-        sample.name == "vllm:rl_sleep_mode_operations_total"
-        and sample.labels == {"operation": "sleep", "status": "success"}
+        sample.name == "http_requests_total"
+        and sample.labels
+        == {
+            "handler": path.split("?")[0],
+            "method": method,
+            "status": f"{status // 100}xx",
+        }
         and sample.value == 1
         for sample in samples
     )
+    assert not any("sleep_mode_operations_total" in sample.name for sample in samples)
     assert any(
-        sample.name == "vllm:rl_sleep_mode_operations_in_flight"
-        and sample.labels == {"operation": "sleep"}
+        sample.name == "vllm:sleep_mode_operations_in_flight"
+        and sample.labels == {"operation": operation}
         and sample.value == 0
         for sample in samples
-    )
+    ) == (operation is not None)
+    assert any(
+        sample.name == "vllm:sleep_mode_operation_duration_seconds_count"
+        and sample.labels == {"operation": operation}
+        and sample.value == 1
+        for sample in samples
+    ) == (operation is not None)
 
 
 def test_sleep_mode():

@@ -43,6 +43,7 @@ async def release_kv_cache_memory(raw_request: Request) -> JSONResponse:
 
 @router.post("/wake_up")
 async def wake_up(raw_request: Request) -> JSONResponse:
+    """Wake the requested tags; omitted tags (JSON null) mean wake all."""
     tags = raw_request.query_params.getlist("tags")
     if tags == []:
         # set to None to wake up all tags if no tags are provided
@@ -50,8 +51,10 @@ async def wake_up(raw_request: Request) -> JSONResponse:
     logger.info("wake up the engine with tags: %s", tags)
     with sleep_mode_operation_metrics().record("wake"):
         fully_awake = await engine_client(raw_request).wake_up(tags)
+        if not isinstance(fully_awake, bool):
+            raise RuntimeError("EngineClient.wake_up() must return a bool")
     return JSONResponse(
-        content={"status": "awake" if fully_awake else "sleeping", "tags_woken": tags}
+        content={"status": "awake" if fully_awake else "sleeping", "tags": tags}
     )
 
 
