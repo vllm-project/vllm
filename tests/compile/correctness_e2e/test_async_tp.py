@@ -3,6 +3,7 @@
 
 import json
 import logging
+from contextlib import nullcontext
 
 import pytest
 
@@ -174,13 +175,18 @@ def test_async_tp_pass_correctness(
 
 
 @create_new_process_for_each_test()
-def test_async_tp_pass_nvfp4_correctness(num_gpus_available: int):
-    if (
-        not current_platform.is_cuda()
-        or not current_platform.is_device_capability_family(100)
-    ):
-        pytest.skip("NVFP4 requires Blackwell")
-    if not has_flashinfer():
+def test_async_tp_pass_nvfp4_correctness(num_gpus_available: int, caplog_mp_spawn):
+    is_blackwell = current_platform.is_cuda() and (
+        current_platform.is_device_capability_family(100)
+    )
+    is_rocm_cdna = False
+    if current_platform.is_rocm():
+        from vllm.platforms.rocm import on_cdna
+
+        is_rocm_cdna = on_cdna()
+    if not (is_blackwell or is_rocm_cdna):
+        pytest.skip("NVFP4 AsyncTP requires Blackwell or ROCm CDNA")
+    if is_blackwell and not has_flashinfer():
         pytest.skip("FlashInfer is required for the NVFP4 AsyncTP path")
 
     tp_size = 2
@@ -196,8 +202,7 @@ def test_async_tp_pass_nvfp4_correctness(num_gpus_available: int):
         "8",
         "--load-format",
         "dummy",
-        "--linear-backend",
-        "flashinfer_cutlass",
+        *(["--linear-backend", "flashinfer_cutlass"] if is_blackwell else []),
         "--hf-overrides",
         json.dumps(NVFP4_HF_OVERRIDES),
     ]
@@ -213,6 +218,8 @@ def test_async_tp_pass_nvfp4_correctness(num_gpus_available: int):
             "sp_min_token_num": 1,
         },
     }
+    if is_rocm_cdna:
+        compilation_config["inductor_compile_config"] = {"force_disable_caches": True}
 
     async_tp_args = [
         *common_args,
@@ -232,10 +239,32 @@ def test_async_tp_pass_nvfp4_correctness(num_gpus_available: int):
         "mp",
     ]
 
-    compare_two_settings(
-        NVFP4_MODEL_ID,
-        async_tp_args,
-        tp_args,
-        method="generate",
-        force_v1_runner=True,
-    )
+    env = {"VLLM_DISABLE_COMPILE_CACHE": "1"} if is_rocm_cdna else None
+    log_context = caplog_mp_spawn(logging.DEBUG) if is_rocm_cdna else nullcontext()
+    with log_context as logs:
+        compare_two_settings(
+            NVFP4_MODEL_ID,
+            async_tp_args,
+            tp_args,
+            env1=env,
+            env2=env,
+            method="generate",
+            force_v1_runner=True,
+        )
+    if is_rocm_cdna:
+        assert logs is not None
+        matches_by_rank = {
+            rank: [
+                int(count)
+                for line in logs.text.splitlines()
+                if line.startswith(f"(Worker_TP{rank} pid=")
+                for count in FUSION_LOG_PATTERNS["async_tp"].findall(line)
+            ]
+            for rank in range(tp_size)
+        }
+        assert all(
+            any(count > 0 for count in matches) for matches in matches_by_rank.values()
+        ), (
+            "Expected positive NVFP4 AsyncTP rewrites on both TP workers, "
+            f"found {matches_by_rank}"
+        )
