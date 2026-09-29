@@ -22,6 +22,9 @@ steps:
       timeout_in_minutes: 60
       depends_on:
       - image-build-amd
+      commands:
+      - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+      - VLLM_TARGET_TEST_SUITE=MI355 pytest -v -s basic_correctness/models --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
 
 - label: ":nvidia: (H200 MIG 18GB) Basic Correctness CuMem"
   key: basic-correctness-cumem
