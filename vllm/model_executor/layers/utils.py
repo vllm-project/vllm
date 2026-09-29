@@ -347,7 +347,9 @@ def rocm_unquantized_gemm_impl(
         # The skinny kernels assume contiguous K elements. A shape-preserving
         # reshape can retain a transposed activation's non-contiguous strides.
         x_view = x.reshape(-1, x.size(-1)).contiguous()
-        if m > 8 and 0 < n <= 5:
+        # N = 9..16 only for tall weights: with in_proj_ba (24x5120) at N=16
+        # wvSplitK is 5.7x slower than rocBLAS on gfx1100.
+        if m > 8 and (0 < n <= 8 or (n <= 16 and m >= 4096)):
             cu_count = num_compute_units()
             out = ops.wvSplitK(weight, x_view, cu_count, bias)
             return out.reshape(*x.shape[:-1], weight.shape[0])

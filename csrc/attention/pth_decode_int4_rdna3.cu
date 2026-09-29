@@ -15,21 +15,25 @@
 #include <ATen/cuda/CUDAContext.h>
 
 #if defined(USE_ROCM)
-#include <hip/hip_runtime.h>
-#include <hip/hip_bf16.h>
+  #include <hip/hip_runtime.h>
+  #include <hip/hip_bf16.h>
 
 // Templated load/store helpers for fp16 and bf16 query/output dtypes.
 // Both __half and __hip_bfloat16 are implicitly convertible to/from float.
-template <typename T> __device__ __forceinline__ float to_float(T x) {
+template <typename T>
+__device__ __forceinline__ float to_float(T x) {
   return (float)x;
 }
-template <> __device__ __forceinline__ float to_float<half>(half x) {
+template <>
+__device__ __forceinline__ float to_float<half>(half x) {
   return __half2float(x);
 }
-template <typename T> __device__ __forceinline__ T from_float(float x) {
+template <typename T>
+__device__ __forceinline__ T from_float(float x) {
   return (T)x;
 }
-template <> __device__ __forceinline__ half from_float<half>(float x) {
+template <>
+__device__ __forceinline__ half from_float<half>(float x) {
   return __float2half(x);
 }
 
@@ -41,26 +45,21 @@ template <> __device__ __forceinline__ half from_float<half>(float x) {
 
 template <int HEAD_SIZE, int BLOCK_KV, typename QT>
 __global__ void decode_int4_stage1(
-    const QT* __restrict__ Q,            // [num_q, num_q_heads, HEAD_SIZE]
-    const uint8_t* __restrict__ K_cache, // [blocks, block_size, kv_heads, HEAD_SIZE/2]
+    const QT* __restrict__ Q,             // [num_q, num_q_heads, HEAD_SIZE]
+    const uint8_t* __restrict__ K_cache,  // [blocks, block_size, kv_heads,
+                                          // HEAD_SIZE/2]
     const uint8_t* __restrict__ V_cache,
-    const float* __restrict__ K_scale,   // [blocks, block_size, kv_heads] stego
+    const float* __restrict__ K_scale,  // [blocks, block_size, kv_heads] stego
     const float* __restrict__ V_scale,
-    const float* __restrict__ rht_signs, // [HEAD_SIZE] D₁ signs
-    const int* __restrict__ block_table, // [num_reqs, max_blocks]
-    const int* __restrict__ q_to_req,
-    const int* __restrict__ q_to_klen,
-    float* __restrict__ mid_o,           // [num_q, num_q_heads, NUM_SPLITS, HEAD_SIZE+2]
-    float sm_scale,
-    int num_q_heads, int num_kv_heads, int block_size, int max_blocks,
-    int num_splits,
-    int64_t sq0, int64_t sq1,
-    int64_t skb, int64_t sks, int64_t skh,
-    int64_t svb, int64_t svs, int64_t svh,
-    int64_t ssb, int64_t sss, int64_t ssh,
-    int64_t svsb, int64_t svss, int64_t svsh,
-    int64_t smo, int64_t smh, int64_t sms) {
-
+    const float* __restrict__ rht_signs,  // [HEAD_SIZE] D₁ signs
+    const int* __restrict__ block_table,  // [num_reqs, max_blocks]
+    const int* __restrict__ q_to_req, const int* __restrict__ q_to_klen,
+    float* __restrict__ mid_o,  // [num_q, num_q_heads, NUM_SPLITS, HEAD_SIZE+2]
+    float sm_scale, int num_q_heads, int num_kv_heads, int block_size,
+    int max_blocks, int num_splits, int64_t sq0, int64_t sq1, int64_t skb,
+    int64_t sks, int64_t skh, int64_t svb, int64_t svs, int64_t svh,
+    int64_t ssb, int64_t sss, int64_t ssh, int64_t svsb, int64_t svss,
+    int64_t svsh, int64_t smo, int64_t smh, int64_t sms) {
   const int qi = blockIdx.x;
   const int hi = blockIdx.y;
   const int si = blockIdx.z;
@@ -123,10 +122,12 @@ __global__ void decode_int4_stage1(
 
     // Extract scale + zp from steganographed float
     float k_raw = K_scale[pb * ssb + slot * sss + kvh * ssh];
-    int k_bits; __builtin_memcpy(&k_bits, &k_raw, 4);
+    int k_bits;
+    __builtin_memcpy(&k_bits, &k_raw, 4);
     int k_zp = k_bits & 0xF;
     int k_sb = k_bits & ~0xF;
-    float k_sc; __builtin_memcpy(&k_sc, &k_sb, 4);
+    float k_sc;
+    __builtin_memcpy(&k_sc, &k_sb, 4);
 
     float k_val = (float)(k_nib - k_zp);
 
@@ -145,7 +146,7 @@ __global__ void decode_int4_stage1(
     // Combine NW waves via tree reduction in first NW threads
     float score = 0;
     if (tid < NW) score = dot_lds[tid];
-    #pragma unroll
+  #pragma unroll
     for (int s = 1; s < NW; s *= 2)
       if (tid < NW) score += __shfl_xor(score, s);
     // Broadcast score to all threads via LDS
@@ -165,10 +166,12 @@ __global__ void decode_int4_stage1(
     uint8_t v_byte = V_cache[pb * svb + slot * svs + kvh * svh + packed_idx];
     int v_nib = (tid & 1) ? ((v_byte >> 4) & 0xF) : (v_byte & 0xF);
     float v_raw = V_scale[pb * svsb + slot * svss + kvh * svsh];
-    int v_bits; __builtin_memcpy(&v_bits, &v_raw, 4);
+    int v_bits;
+    __builtin_memcpy(&v_bits, &v_raw, 4);
     int v_zp = v_bits & 0xF;
     int v_sb = v_bits & ~0xF;
-    float v_sc; __builtin_memcpy(&v_sc, &v_sb, 4);
+    float v_sc;
+    __builtin_memcpy(&v_sc, &v_sb, 4);
     float v_val = (float)(v_nib - v_zp) * v_sc;
 
     o_acc += p * v_val;
@@ -191,25 +194,16 @@ __global__ void decode_int4_stage1(
 
 template <int HEAD_SIZE, typename QT>
 __global__ void decode_int4_stage1_v2(
-    const QT* __restrict__ Q,            // [num_q, num_q_heads, HEAD_SIZE] PRE-ROTATED
-    const uint8_t* __restrict__ K_cache,
-    const uint8_t* __restrict__ V_cache,
-    const float* __restrict__ K_scale,
-    const float* __restrict__ V_scale,
-    const int* __restrict__ block_table,
-    const int* __restrict__ q_to_req,
-    const int* __restrict__ q_to_klen,
-    float* __restrict__ mid_o,
-    float sm_scale,
-    int num_q_heads, int num_kv_heads, int block_size, int max_blocks,
-    int num_splits,
-    int64_t sq0, int64_t sq1,
-    int64_t skb, int64_t sks, int64_t skh,
-    int64_t svb, int64_t svs, int64_t svh,
-    int64_t ssb, int64_t sss, int64_t ssh,
-    int64_t svsb, int64_t svss, int64_t svsh,
-    int64_t smo, int64_t smh, int64_t sms) {
-
+    const QT* __restrict__ Q,  // [num_q, num_q_heads, HEAD_SIZE] PRE-ROTATED
+    const uint8_t* __restrict__ K_cache, const uint8_t* __restrict__ V_cache,
+    const float* __restrict__ K_scale, const float* __restrict__ V_scale,
+    const int* __restrict__ block_table, const int* __restrict__ q_to_req,
+    const int* __restrict__ q_to_klen, float* __restrict__ mid_o,
+    float sm_scale, int num_q_heads, int num_kv_heads, int block_size,
+    int max_blocks, int num_splits, int64_t sq0, int64_t sq1, int64_t skb,
+    int64_t sks, int64_t skh, int64_t svb, int64_t svs, int64_t svh,
+    int64_t ssb, int64_t sss, int64_t ssh, int64_t svsb, int64_t svss,
+    int64_t svsh, int64_t smo, int64_t smh, int64_t sms) {
   constexpr int THREADS = HEAD_SIZE / 2;  // 128 for HS=256
   constexpr int NW = THREADS / 32;        // 4 waves
 
@@ -255,7 +249,8 @@ __global__ void decode_int4_stage1_v2(
 
     // Each thread loads 1 packed byte = 2 nibbles (dim 2*tid, 2*tid+1)
     uint8_t k_byte = K_cache[pb * skb + slot * sks + kvh * skh + tid];
-    // Symmetric format: nibbles stored as offset-8 binary. Subtract 8 (constant).
+    // Symmetric format: nibbles stored as offset-8 binary. Subtract 8
+    // (constant).
     float k0 = (float)((int)(k_byte & 0xF) - 8);
     float k1 = (float)((int)((k_byte >> 4) & 0xF) - 8);
 
@@ -274,7 +269,7 @@ __global__ void decode_int4_stage1_v2(
 
     float score = 0;
     if (tid < NW) score = dot_lds[tid];
-    #pragma unroll
+  #pragma unroll
     for (int s = 1; s < NW; s *= 2)
       if (tid < NW) score += __shfl_xor(score, s);
     if (tid == 0) dot_lds[0] = score * k_sc * sm_scale;
@@ -285,7 +280,8 @@ __global__ void decode_int4_stage1_v2(
     float alpha = (m_state == -INFINITY) ? 0.0f : __expf(m_state - m_new);
     float p = (m_new == -INFINITY) ? 0.0f : __expf(score - m_new);
     l_state = l_state * alpha + p;
-    o0 = o0 * alpha; o1 = o1 * alpha;
+    o0 = o0 * alpha;
+    o1 = o1 * alpha;
     m_state = m_new;
 
     uint8_t v_byte = V_cache[pb * svb + slot * svs + kvh * svh + tid];
@@ -318,26 +314,18 @@ __global__ void decode_int4_stage1_v2(
 
 template <int HEAD_SIZE, typename QT>
 __global__ void decode_int4_stage1_v3(
-    const QT* __restrict__ Q,            // [num_q, num_q_heads, HEAD_SIZE] PRE-ROTATED
-    const uint8_t* __restrict__ K_cache,
-    const uint8_t* __restrict__ V_cache,
-    const float* __restrict__ K_scale,   // plain float (symmetric)
-    const float* __restrict__ V_scale,
-    const int* __restrict__ block_table,
-    const int* __restrict__ q_to_req,
-    const int* __restrict__ q_to_klen,
-    float* __restrict__ mid_o,
-    float sm_scale,
-    int num_q_heads, int num_kv_heads, int block_size, int max_blocks,
-    int num_splits,
-    int64_t sq0, int64_t sq1,
-    int64_t skb, int64_t sks, int64_t skh,
-    int64_t svb, int64_t svs, int64_t svh,
-    int64_t ssb, int64_t sss, int64_t ssh,
-    int64_t svsb, int64_t svss, int64_t svsh,
-    int64_t smo, int64_t smh, int64_t sms) {
-
-  constexpr int DIMS_PER_THREAD = HEAD_SIZE / 32;  // 8 for HS=256
+    const QT* __restrict__ Q,  // [num_q, num_q_heads, HEAD_SIZE] PRE-ROTATED
+    const uint8_t* __restrict__ K_cache, const uint8_t* __restrict__ V_cache,
+    const float* __restrict__ K_scale,  // plain float (symmetric)
+    const float* __restrict__ V_scale, const int* __restrict__ block_table,
+    const int* __restrict__ q_to_req, const int* __restrict__ q_to_klen,
+    float* __restrict__ mid_o, float sm_scale, int num_q_heads,
+    int num_kv_heads, int block_size, int max_blocks, int num_splits,
+    int64_t sq0, int64_t sq1, int64_t skb, int64_t sks, int64_t skh,
+    int64_t svb, int64_t svs, int64_t svh, int64_t ssb, int64_t sss,
+    int64_t ssh, int64_t svsb, int64_t svss, int64_t svsh, int64_t smo,
+    int64_t smh, int64_t sms) {
+  constexpr int DIMS_PER_THREAD = HEAD_SIZE / 32;        // 8 for HS=256
   constexpr int BYTES_PER_THREAD = DIMS_PER_THREAD / 2;  // 4 packed bytes
 
   const int qi = blockIdx.x;
@@ -383,7 +371,10 @@ __global__ void decode_int4_stage1_v3(
   for (int kv = start; kv < end; ++kv) {
     const int lb = kv / block_size;
     const int slot = kv - lb * block_size;
-    if (lb != prev_lb) { pb = block_table[req * max_blocks + lb]; prev_lb = lb; }
+    if (lb != prev_lb) {
+      pb = block_table[req * max_blocks + lb];
+      prev_lb = lb;
+    }
 
     // Vectorized load: 1 dword = 4 packed bytes = 8 nibbles for K
     uint32_t k_dw = *reinterpret_cast<const uint32_t*>(
@@ -391,13 +382,15 @@ __global__ void decode_int4_stage1_v3(
 
     // Extract scale + zp from steganographed float
     float k_raw = K_scale[pb * ssb + slot * sss + kvh * ssh];
-    int k_bits; __builtin_memcpy(&k_bits, &k_raw, 4);
+    int k_bits;
+    __builtin_memcpy(&k_bits, &k_raw, 4);
     int k_zp = k_bits & 0xF;
     int k_sb = k_bits & ~0xF;
-    float k_sc; __builtin_memcpy(&k_sc, &k_sb, 4);
+    float k_sc;
+    __builtin_memcpy(&k_sc, &k_sb, 4);
 
     float partial = 0.0f;
-    #pragma unroll
+  #pragma unroll
     for (int b = 0; b < BYTES_PER_THREAD; ++b) {
       int kb = (k_dw >> (b * 8)) & 0xFF;
       float k0 = (float)((kb & 0xF) - k_zp);
@@ -405,10 +398,9 @@ __global__ void decode_int4_stage1_v3(
       partial += q_vals[b * 2] * k0 + q_vals[b * 2 + 1] * k1;
     }
 
-    // Wave-wide reduction (no sync needed — single wave)
-    #pragma unroll
-    for (int s = 16; s > 0; s >>= 1)
-      partial += __shfl_xor(partial, s);
+  // Wave-wide reduction (no sync needed — single wave)
+  #pragma unroll
+    for (int s = 16; s > 0; s >>= 1) partial += __shfl_xor(partial, s);
 
     float score = partial * k_sc * sm_scale_log2;
 
@@ -418,21 +410,22 @@ __global__ void decode_int4_stage1_v3(
     float alpha = exp2f(m_state - m_new);
     float p = exp2f(score - m_new);
     l_state = l_state * alpha + p;
-    #pragma unroll
-    for (int d = 0; d < DIMS_PER_THREAD; ++d)
-      o_vals[d] *= alpha;
+  #pragma unroll
+    for (int d = 0; d < DIMS_PER_THREAD; ++d) o_vals[d] *= alpha;
     m_state = m_new;
 
     // V accumulation — vectorized dword load, same thread owns output dims
     uint32_t v_dw = *reinterpret_cast<const uint32_t*>(
         V_cache + pb * svb + slot * svs + kvh * svh + tid * BYTES_PER_THREAD);
     float v_raw = V_scale[pb * svsb + slot * svss + kvh * svsh];
-    int v_bits; __builtin_memcpy(&v_bits, &v_raw, 4);
+    int v_bits;
+    __builtin_memcpy(&v_bits, &v_raw, 4);
     int v_zp = v_bits & 0xF;
     int v_sb = v_bits & ~0xF;
-    float v_sc; __builtin_memcpy(&v_sc, &v_sb, 4);
+    float v_sc;
+    __builtin_memcpy(&v_sc, &v_sb, 4);
     float p_vs = p * v_sc;
-    #pragma unroll
+  #pragma unroll
     for (int b = 0; b < BYTES_PER_THREAD; ++b) {
       int vb = (v_dw >> (b * 8)) & 0xFF;
       o_vals[b * 2] += p_vs * (float)((vb & 0xF) - v_zp);
@@ -454,13 +447,10 @@ __global__ void decode_int4_stage1_v3(
 // ---------------------------------------------------------------------------
 
 template <int HEAD_SIZE, typename OT>
-__global__ void decode_int4_reduce_v2(
-    const float* __restrict__ mid_o,
-    OT* __restrict__ out,
-    int num_splits,
-    int64_t smo, int64_t smh, int64_t sms,
-    int64_t soo, int64_t soh) {
-
+__global__ void decode_int4_reduce_v2(const float* __restrict__ mid_o,
+                                      OT* __restrict__ out, int num_splits,
+                                      int64_t smo, int64_t smh, int64_t sms,
+                                      int64_t soo, int64_t soh) {
   const int qi = blockIdx.x;
   const int hi = blockIdx.y;
   const int tid = threadIdx.x;  // 0..HEAD_SIZE/2-1
@@ -479,9 +469,9 @@ __global__ void decode_int4_reduce_v2(
     // ms / m_global come from v3 stage1, which pre-scales scores by log2(e)
     // and stores m_state in log2 space. The correct rescale is exp2(delta),
     // NOT __expf(delta): __expf would compute e^(log2_delta) and shrink
-    // non-max splits by a factor of e^(delta*(1 - 1/log2(e))) ≈ e^(-0.307*|delta|),
-    // biasing attention toward the max split and inducing repetition loops on
-    // long generations.
+    // non-max splits by a factor of e^(delta*(1 - 1/log2(e))) ≈
+    // e^(-0.307*|delta|), biasing attention toward the max split and inducing
+    // repetition loops on long generations.
     float alpha = (ms == -INFINITY) ? 0.0f : exp2f(ms - m_global);
     o0 += sp[2 * tid] * alpha;
     o1 += sp[2 * tid + 1] * alpha;
@@ -501,13 +491,11 @@ __global__ void decode_int4_reduce_v2(
 
 template <int HEAD_SIZE, typename OT>
 __global__ void decode_int4_reduce(
-    const float* __restrict__ mid_o,     // [num_q, num_q_heads, NUM_SPLITS, HEAD_SIZE+2]
-    OT* __restrict__ out,                // [num_q, num_q_heads, HEAD_SIZE]
-    const float* __restrict__ rht_signs,
-    int num_splits, float inv_head_size,
-    int64_t smo, int64_t smh, int64_t sms,
-    int64_t soo, int64_t soh) {
-
+    const float* __restrict__ mid_o,  // [num_q, num_q_heads, NUM_SPLITS,
+                                      // HEAD_SIZE+2]
+    OT* __restrict__ out,             // [num_q, num_q_heads, HEAD_SIZE]
+    const float* __restrict__ rht_signs, int num_splits, float inv_head_size,
+    int64_t smo, int64_t smh, int64_t sms, int64_t soo, int64_t soh) {
   const int qi = blockIdx.x;
   const int hi = blockIdx.y;
   const int tid = threadIdx.x;
@@ -560,17 +548,12 @@ void pth_decode_int4_rdna3(
     torch::Tensor out,        // [num_q, num_q_heads, HEAD_SIZE]
     torch::Tensor query,      // [num_q, num_q_heads, HEAD_SIZE]
     torch::Tensor key_cache,  // [blocks, block_size, kv_heads, HEAD_SIZE/2]
-    torch::Tensor value_cache,
-    torch::Tensor k_scale_cache,
+    torch::Tensor value_cache, torch::Tensor k_scale_cache,
     torch::Tensor v_scale_cache,
     torch::Tensor rht_signs,  // [HEAD_SIZE]
-    torch::Tensor block_table,
-    torch::Tensor q_to_req,
-    torch::Tensor q_to_klen,
+    torch::Tensor block_table, torch::Tensor q_to_req, torch::Tensor q_to_klen,
     torch::Tensor mid_o_buf,  // [num_q, num_q_heads, NUM_SPLITS, HEAD_SIZE+2]
-    double sm_scale,
-    int64_t num_kv_splits) {
-
+    double sm_scale, int64_t num_kv_splits) {
   const int num_q = query.size(0);
   const int num_q_heads = query.size(1);
   const int head_size = query.size(2);
@@ -580,7 +563,8 @@ void pth_decode_int4_rdna3(
   auto stream = at::cuda::getCurrentCUDAStream().stream();
 
   TORCH_CHECK(head_size == 128 || head_size == 256,
-              "pth_decode_int4_rdna3: head_size must be 128 or 256, got ", head_size);
+              "pth_decode_int4_rdna3: head_size must be 128 or 256, got ",
+              head_size);
   TORCH_CHECK(query.dtype() == at::kHalf || query.dtype() == at::kBFloat16,
               "pth_decode_int4_rdna3: query must be fp16 or bf16");
   TORCH_CHECK(out.dtype() == query.dtype(),
@@ -591,69 +575,61 @@ void pth_decode_int4_rdna3(
   TORCH_CHECK(mid_o_buf.size(2) >= ns);
   TORCH_CHECK(mid_o_buf.size(3) >= head_size + 2);
 
-  #define LAUNCH_HS128(QT, OT) do { \
-    constexpr int HS = 128; \
-    dim3 grid1(num_q, num_q_heads, ns); \
-    decode_int4_stage1<HS, BKV, QT><<<grid1, dim3(HS), 0, stream>>>( \
-        (const QT*)query.data_ptr(), \
-        (const uint8_t*)key_cache.data_ptr(), \
-        (const uint8_t*)value_cache.data_ptr(), \
-        (const float*)k_scale_cache.data_ptr(), \
-        (const float*)v_scale_cache.data_ptr(), \
-        (const float*)rht_signs.data_ptr(), \
-        (const int*)block_table.data_ptr(), \
-        (const int*)q_to_req.data_ptr(), \
-        (const int*)q_to_klen.data_ptr(), \
-        (float*)mid_o_buf.data_ptr(), \
-        (float)sm_scale, \
-        num_q_heads, num_kv_heads, block_size, max_blocks, ns, \
-        query.stride(0), query.stride(1), \
-        key_cache.stride(0), key_cache.stride(1), key_cache.stride(2), \
-        value_cache.stride(0), value_cache.stride(1), value_cache.stride(2), \
-        k_scale_cache.stride(0), k_scale_cache.stride(1), k_scale_cache.stride(2), \
-        v_scale_cache.stride(0), v_scale_cache.stride(1), v_scale_cache.stride(2), \
-        mid_o_buf.stride(0), mid_o_buf.stride(1), mid_o_buf.stride(2)); \
-    dim3 grid2(num_q, num_q_heads); \
-    constexpr float inv_hs = 1.0f / (float)HS; \
-    decode_int4_reduce<HS, OT><<<grid2, dim3(HS), 0, stream>>>( \
-        (const float*)mid_o_buf.data_ptr(), \
-        (OT*)out.data_ptr(), \
-        (const float*)rht_signs.data_ptr(), \
-        ns, inv_hs, \
-        mid_o_buf.stride(0), mid_o_buf.stride(1), mid_o_buf.stride(2), \
-        out.stride(0), out.stride(1)); \
-  } while(0)
+  #define LAUNCH_HS128(QT, OT)                                                 \
+    do {                                                                       \
+      constexpr int HS = 128;                                                  \
+      dim3 grid1(num_q, num_q_heads, ns);                                      \
+      decode_int4_stage1<HS, BKV, QT><<<grid1, dim3(HS), 0, stream>>>(         \
+          (const QT*)query.data_ptr(), (const uint8_t*)key_cache.data_ptr(),   \
+          (const uint8_t*)value_cache.data_ptr(),                              \
+          (const float*)k_scale_cache.data_ptr(),                              \
+          (const float*)v_scale_cache.data_ptr(),                              \
+          (const float*)rht_signs.data_ptr(),                                  \
+          (const int*)block_table.data_ptr(), (const int*)q_to_req.data_ptr(), \
+          (const int*)q_to_klen.data_ptr(), (float*)mid_o_buf.data_ptr(),      \
+          (float)sm_scale, num_q_heads, num_kv_heads, block_size, max_blocks,  \
+          ns, query.stride(0), query.stride(1), key_cache.stride(0),           \
+          key_cache.stride(1), key_cache.stride(2), value_cache.stride(0),     \
+          value_cache.stride(1), value_cache.stride(2),                        \
+          k_scale_cache.stride(0), k_scale_cache.stride(1),                    \
+          k_scale_cache.stride(2), v_scale_cache.stride(0),                    \
+          v_scale_cache.stride(1), v_scale_cache.stride(2),                    \
+          mid_o_buf.stride(0), mid_o_buf.stride(1), mid_o_buf.stride(2));      \
+      dim3 grid2(num_q, num_q_heads);                                          \
+      constexpr float inv_hs = 1.0f / (float)HS;                               \
+      decode_int4_reduce<HS, OT><<<grid2, dim3(HS), 0, stream>>>(              \
+          (const float*)mid_o_buf.data_ptr(), (OT*)out.data_ptr(),             \
+          (const float*)rht_signs.data_ptr(), ns, inv_hs, mid_o_buf.stride(0), \
+          mid_o_buf.stride(1), mid_o_buf.stride(2), out.stride(0),             \
+          out.stride(1));                                                      \
+    } while (0)
 
-  #define LAUNCH_HS256_V3(QT, OT) do { \
-    constexpr int HS = 256; \
-    constexpr int TH = HS / 2; \
-    dim3 grid1(num_q, num_q_heads, ns); \
-    decode_int4_stage1_v3<HS, QT><<<grid1, dim3(32), 0, stream>>>( \
-        (const QT*)query.data_ptr(), \
-        (const uint8_t*)key_cache.data_ptr(), \
-        (const uint8_t*)value_cache.data_ptr(), \
-        (const float*)k_scale_cache.data_ptr(), \
-        (const float*)v_scale_cache.data_ptr(), \
-        (const int*)block_table.data_ptr(), \
-        (const int*)q_to_req.data_ptr(), \
-        (const int*)q_to_klen.data_ptr(), \
-        (float*)mid_o_buf.data_ptr(), \
-        (float)sm_scale, \
-        num_q_heads, num_kv_heads, block_size, max_blocks, ns, \
-        query.stride(0), query.stride(1), \
-        key_cache.stride(0), key_cache.stride(1), key_cache.stride(2), \
-        value_cache.stride(0), value_cache.stride(1), value_cache.stride(2), \
-        k_scale_cache.stride(0), k_scale_cache.stride(1), k_scale_cache.stride(2), \
-        v_scale_cache.stride(0), v_scale_cache.stride(1), v_scale_cache.stride(2), \
-        mid_o_buf.stride(0), mid_o_buf.stride(1), mid_o_buf.stride(2)); \
-    dim3 grid2(num_q, num_q_heads); \
-    decode_int4_reduce_v2<HS, OT><<<grid2, dim3(TH), 0, stream>>>( \
-        (const float*)mid_o_buf.data_ptr(), \
-        (OT*)out.data_ptr(), \
-        ns, \
-        mid_o_buf.stride(0), mid_o_buf.stride(1), mid_o_buf.stride(2), \
-        out.stride(0), out.stride(1)); \
-  } while(0)
+  #define LAUNCH_HS256_V3(QT, OT)                                              \
+    do {                                                                       \
+      constexpr int HS = 256;                                                  \
+      constexpr int TH = HS / 2;                                               \
+      dim3 grid1(num_q, num_q_heads, ns);                                      \
+      decode_int4_stage1_v3<HS, QT><<<grid1, dim3(32), 0, stream>>>(           \
+          (const QT*)query.data_ptr(), (const uint8_t*)key_cache.data_ptr(),   \
+          (const uint8_t*)value_cache.data_ptr(),                              \
+          (const float*)k_scale_cache.data_ptr(),                              \
+          (const float*)v_scale_cache.data_ptr(),                              \
+          (const int*)block_table.data_ptr(), (const int*)q_to_req.data_ptr(), \
+          (const int*)q_to_klen.data_ptr(), (float*)mid_o_buf.data_ptr(),      \
+          (float)sm_scale, num_q_heads, num_kv_heads, block_size, max_blocks,  \
+          ns, query.stride(0), query.stride(1), key_cache.stride(0),           \
+          key_cache.stride(1), key_cache.stride(2), value_cache.stride(0),     \
+          value_cache.stride(1), value_cache.stride(2),                        \
+          k_scale_cache.stride(0), k_scale_cache.stride(1),                    \
+          k_scale_cache.stride(2), v_scale_cache.stride(0),                    \
+          v_scale_cache.stride(1), v_scale_cache.stride(2),                    \
+          mid_o_buf.stride(0), mid_o_buf.stride(1), mid_o_buf.stride(2));      \
+      dim3 grid2(num_q, num_q_heads);                                          \
+      decode_int4_reduce_v2<HS, OT><<<grid2, dim3(TH), 0, stream>>>(           \
+          (const float*)mid_o_buf.data_ptr(), (OT*)out.data_ptr(), ns,         \
+          mid_o_buf.stride(0), mid_o_buf.stride(1), mid_o_buf.stride(2),       \
+          out.stride(0), out.stride(1));                                       \
+    } while (0)
 
   const bool is_bf16 = (query.dtype() == at::kBFloat16);
   if (head_size == 128) {
@@ -674,13 +650,13 @@ void pth_decode_int4_rdna3(
 }
 
 #else
-void pth_decode_int4_rdna3(
-    torch::Tensor out, torch::Tensor query,
-    torch::Tensor key_cache, torch::Tensor value_cache,
-    torch::Tensor k_scale_cache, torch::Tensor v_scale_cache,
-    torch::Tensor rht_signs, torch::Tensor block_table,
-    torch::Tensor q_to_req, torch::Tensor q_to_klen,
-    torch::Tensor mid_o_buf, double sm_scale, int64_t num_kv_splits) {
+void pth_decode_int4_rdna3(torch::Tensor out, torch::Tensor query,
+                           torch::Tensor key_cache, torch::Tensor value_cache,
+                           torch::Tensor k_scale_cache,
+                           torch::Tensor v_scale_cache, torch::Tensor rht_signs,
+                           torch::Tensor block_table, torch::Tensor q_to_req,
+                           torch::Tensor q_to_klen, torch::Tensor mid_o_buf,
+                           double sm_scale, int64_t num_kv_splits) {
   TORCH_CHECK(false, "requires ROCm");
 }
 #endif

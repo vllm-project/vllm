@@ -186,8 +186,9 @@ class Int4PerTokenHeadFactory(_PackedFactory):
     _rdna3_reshape_ready: bool | None = None
 
     @classmethod
-    def _get_hd1t(cls, d: int, device: torch.device,
-                  dtype: torch.dtype) -> torch.Tensor:
+    def _get_hd1t(
+        cls, d: int, device: torch.device, dtype: torch.dtype
+    ) -> torch.Tensor:
         """HD1^T for forward RHT: x_rot = x @ HD1^T."""
         key = (d, str(device), dtype)
         if key not in cls._hd1t_cache:
@@ -195,16 +196,16 @@ class Int4PerTokenHeadFactory(_PackedFactory):
                 _get_hadamard_matrix,
                 _get_rht_signs,
             )
+
             H = _get_hadamard_matrix(d, dtype, device)
             D1 = _get_rht_signs(d, 0, device, dtype)
-            hd1 = (H * D1[None, :])
+            hd1 = H * D1[None, :]
             cls._hd1t_cache[key] = hd1.T.contiguous()
             cls._hd1_cache[key] = hd1.contiguous()
         return cls._hd1t_cache[key]
 
     @classmethod
-    def _get_hd1(cls, d: int, device: torch.device,
-                 dtype: torch.dtype) -> torch.Tensor:
+    def _get_hd1(cls, d: int, device: torch.device, dtype: torch.dtype) -> torch.Tensor:
         """HD1 for inverse RHT: x_unrot = x @ HD1."""
         key = (d, str(device), dtype)
         if key not in cls._hd1_cache:
@@ -215,6 +216,7 @@ class Int4PerTokenHeadFactory(_PackedFactory):
     def _check_rdna3_reshape(cls) -> bool:
         if cls._rdna3_reshape_ready is None:
             from vllm.platforms import current_platform
+
             cls._rdna3_reshape_ready = (
                 current_platform.is_rocm()
                 and hasattr(torch.ops, "_C")
@@ -240,18 +242,27 @@ class Int4PerTokenHeadFactory(_PackedFactory):
             and key.dtype == torch.float16
             and key.shape[2] == 128
         ):
-            rht_signs = _get_rht_signs(
-                key.shape[2], 0, key.device, torch.float32
-            )
+            rht_signs = _get_rht_signs(key.shape[2], 0, key.device, torch.float32)
             torch.ops._C.reshape_cache_int4_rdna3(
-                key, value, key_cache, value_cache,
-                k_scale_cache, v_scale_cache, rht_signs, slot_mapping,
+                key,
+                value,
+                key_cache,
+                value_cache,
+                k_scale_cache,
+                v_scale_cache,
+                rht_signs,
+                slot_mapping,
             )
             return
         # Fallback: matmul RHT + Triton quantize
         super().reshape_and_cache(
-            key, value, key_cache, value_cache, slot_mapping,
-            k_scale_cache=k_scale_cache, v_scale_cache=v_scale_cache,
+            key,
+            value,
+            key_cache,
+            value_cache,
+            slot_mapping,
+            k_scale_cache=k_scale_cache,
+            v_scale_cache=v_scale_cache,
         )
 
     def _rotate_kv(self, x: torch.Tensor) -> torch.Tensor:
@@ -260,10 +271,8 @@ class Int4PerTokenHeadFactory(_PackedFactory):
     def _rotate_q(self, q: torch.Tensor) -> torch.Tensor:
         return q @ self._get_hd1t(q.shape[-1], q.device, q.dtype)
 
-    def _unrotate_out(self, out: torch.Tensor,
-                      head_size: int) -> torch.Tensor:
-        return (out @ self._get_hd1(head_size, out.device, out.dtype)
-                ) / head_size
+    def _unrotate_out(self, out: torch.Tensor, head_size: int) -> torch.Tensor:
+        return (out @ self._get_hd1(head_size, out.device, out.dtype)) / head_size
 
     @staticmethod
     def _transform_softmax_scale(scale: float, head_size: int) -> float:

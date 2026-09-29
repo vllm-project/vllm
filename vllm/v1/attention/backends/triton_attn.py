@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """High-Performance Triton-only Attention layer."""
 
+import contextlib
 import os
 from dataclasses import dataclass, replace
 from typing import ClassVar
@@ -116,6 +117,7 @@ class TritonAttentionMetadata:
     # capture/replay. Slices into the builder-owned buffers.
     q_to_req: torch.Tensor | None = None
     q_to_klen: torch.Tensor | None = None
+
 
 class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMetadata]):
     _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.ALWAYS
@@ -527,9 +529,8 @@ class TritonAttentionImpl(AttentionImpl):
             from vllm.v1.attention.ops.triton_quant_kv._hadamard import (
                 _get_rht_signs,
             )
-            self._rht_signs = _get_rht_signs(
-                self.head_size, 0, device
-            )
+
+            self._rht_signs = _get_rht_signs(self.head_size, 0, device)
         return self._rht_signs
 
     def _ensure_scale_caches(self, kv_cache: torch.Tensor) -> None:
@@ -819,14 +820,19 @@ class TritonAttentionImpl(AttentionImpl):
             mid_o_buf = getattr(layer, "_pth_mid_o_buf", None)
             if mid_o_buf is None:
                 mid_o_buf = torch.zeros(
-                    self._max_cudagraph_capture_size, self.num_heads,
-                    self.max_num_kv_splits, self.head_size + 2,
-                    dtype=torch.float32, device=query.device)
+                    self._max_cudagraph_capture_size,
+                    self.num_heads,
+                    self.max_num_kv_splits,
+                    self.head_size + 2,
+                    dtype=torch.float32,
+                    device=query.device,
+                )
                 layer._pth_mid_o_buf = mid_o_buf
             num_kv_splits = self.max_num_kv_splits
             if mid_o_buf.shape[0] < query.size(0):
                 mid_o_buf, num_kv_splits = self._transient_mid_o(
-                    query.size(0), query.device)
+                    query.size(0), query.device
+                )
             # FIX (RDNA3 int8 decode use-after-free): under async scheduling the
             # caching allocator can free + REUSE a transient input's memory
             # before this async kernel reads it. Symptoms (both confirmed via
@@ -839,18 +845,25 @@ class TritonAttentionImpl(AttentionImpl):
             # Confirmed by control: same loop with data_ptr() (no record_stream)
             # hangs in ~20s; with record_stream it soaks 22min / 2000+ reqs.
             _s = torch.cuda.current_stream()
-            for _t in (query, output, attn_metadata.block_table,
-                       attn_metadata.q_to_req, attn_metadata.q_to_klen,
-                       self._k_scale_cache, self._v_scale_cache, mid_o_buf):
-                try:
+            for _t in (
+                query,
+                output,
+                attn_metadata.block_table,
+                attn_metadata.q_to_req,
+                attn_metadata.q_to_klen,
+                self._k_scale_cache,
+                self._v_scale_cache,
+                mid_o_buf,
+            ):
+                with contextlib.suppress(Exception):
                     _t.record_stream(_s)
-                except Exception:  # noqa: BLE001
-                    pass
             torch.ops._C.pth_decode_int8_rdna3(
                 output[:num_actual_tokens],
                 query[:num_actual_tokens],
-                key_cache, value_cache,
-                self._k_scale_cache, self._v_scale_cache,
+                key_cache,
+                value_cache,
+                self._k_scale_cache,
+                self._v_scale_cache,
                 attn_metadata.block_table,
                 attn_metadata.q_to_req,
                 attn_metadata.q_to_klen,
@@ -878,14 +891,19 @@ class TritonAttentionImpl(AttentionImpl):
             mid_o_buf = getattr(layer, "_pth_mid_o_buf", None)
             if mid_o_buf is None:
                 mid_o_buf = torch.zeros(
-                    self._max_cudagraph_capture_size, self.num_heads,
-                    self.max_num_kv_splits, self.head_size + 2,
-                    dtype=torch.float32, device=query.device)
+                    self._max_cudagraph_capture_size,
+                    self.num_heads,
+                    self.max_num_kv_splits,
+                    self.head_size + 2,
+                    dtype=torch.float32,
+                    device=query.device,
+                )
                 layer._pth_mid_o_buf = mid_o_buf
             num_kv_splits = self.max_num_kv_splits
             if mid_o_buf.shape[0] < query.size(0):
                 mid_o_buf, num_kv_splits = self._transient_mid_o(
-                    query.size(0), query.device)
+                    query.size(0), query.device
+                )
             q_slice = query[:num_actual_tokens]
             o_slice = output[:num_actual_tokens]
             # HS=256 v2 kernel: Q pre-rotated externally, output post-rotated.
@@ -895,21 +913,33 @@ class TritonAttentionImpl(AttentionImpl):
                 q_rot = getattr(layer, "_pth_q_rot_buf", None)
                 if q_rot is None:
                     q_rot = torch.empty(
-                        self._max_cudagraph_capture_size, self.num_heads,
-                        self.head_size, dtype=query.dtype, device=query.device)
+                        self._max_cudagraph_capture_size,
+                        self.num_heads,
+                        self.head_size,
+                        dtype=query.dtype,
+                        device=query.device,
+                    )
                     layer._pth_q_rot_buf = q_rot
                 if q_rot.shape[0] < query.size(0):
                     q_rot = torch.empty(
-                        query.size(0), self.num_heads, self.head_size,
-                        dtype=query.dtype, device=query.device)
+                        query.size(0),
+                        self.num_heads,
+                        self.head_size,
+                        dtype=query.dtype,
+                        device=query.device,
+                    )
                 q_rot[:num_actual_tokens].copy_(q_slice)
                 q_slice = q_rot[:num_actual_tokens]
                 torch.ops._C.rht_rotate_inplace_rdna3(
-                    q_slice, self._rht_signs, False, 1.0)
+                    q_slice, self._rht_signs, False, 1.0
+                )
             torch.ops._C.pth_decode_int4_rdna3(
-                o_slice, q_slice,
-                key_cache, value_cache,
-                self._k_scale_cache, self._v_scale_cache,
+                o_slice,
+                q_slice,
+                key_cache,
+                value_cache,
+                self._k_scale_cache,
+                self._v_scale_cache,
                 self._rht_signs,
                 attn_metadata.block_table,
                 attn_metadata.q_to_req,
@@ -920,8 +950,8 @@ class TritonAttentionImpl(AttentionImpl):
             )
             if self.head_size > 128:
                 torch.ops._C.rht_rotate_inplace_rdna3(
-                    o_slice, self._rht_signs, True,
-                    1.0 / self.head_size)
+                    o_slice, self._rht_signs, True, 1.0 / self.head_size
+                )
             return output
 
         # ---- RDNA3 INT4 fast-path: short-circuit for continuation prefill ----
@@ -939,7 +969,8 @@ class TritonAttentionImpl(AttentionImpl):
                 query[:num_actual_tokens],
                 key_cache,
                 value_cache,
-                self._k_scale_cache, self._v_scale_cache,
+                self._k_scale_cache,
+                self._v_scale_cache,
                 rht_signs,
                 attn_metadata.block_table,
                 attn_metadata.query_start_loc,
@@ -1200,8 +1231,10 @@ class TritonAttentionImpl(AttentionImpl):
                     torch.ops._C.paged_prefill_attn_rdna3_int4(
                         output[num_dec_tok:num_actual_tokens],
                         query[num_dec_tok:num_actual_tokens],
-                        key_cache, value_cache,
-                        k_scale_cache, v_scale_cache,
+                        key_cache,
+                        value_cache,
+                        k_scale_cache,
+                        v_scale_cache,
                         self._get_rht_signs(query.device),
                         attn_metadata.block_table[num_dec:],
                         pref_qsl,
@@ -1211,12 +1244,9 @@ class TritonAttentionImpl(AttentionImpl):
                         True,
                     )
                 else:
-                    num_reqs_pref = (
-                        attn_metadata.query_start_loc.shape[0] - 1 - num_dec
-                    )
+                    num_reqs_pref = attn_metadata.query_start_loc.shape[0] - 1 - num_dec
                     use_qk_int8_wmma = (
-                        key_cache.dtype == torch.int8
-                        and current_platform.is_rocm()
+                        key_cache.dtype == torch.int8 and current_platform.is_rocm()
                     )
                     triton_per_token_head_prefill(
                         query=query[num_dec_tok:num_actual_tokens],
@@ -1273,14 +1303,19 @@ class TritonAttentionImpl(AttentionImpl):
                     mid_o_buf = getattr(layer, "_pth_mid_o_buf", None)
                     if mid_o_buf is None:
                         mid_o_buf = torch.zeros(
-                            self._max_cudagraph_capture_size, self.num_heads,
-                            self.max_num_kv_splits, self.head_size + 2,
-                            dtype=torch.float32, device=query.device)
+                            self._max_cudagraph_capture_size,
+                            self.num_heads,
+                            self.max_num_kv_splits,
+                            self.head_size + 2,
+                            dtype=torch.float32,
+                            device=query.device,
+                        )
                         layer._pth_mid_o_buf = mid_o_buf
                     num_kv_splits = self.max_num_kv_splits
                     if mid_o_buf.shape[0] < query.size(0):
                         mid_o_buf, num_kv_splits = self._transient_mid_o(
-                            query.size(0), query.device)
+                            query.size(0), query.device
+                        )
                     rht_signs = self._get_rht_signs(query.device)
                     q_slice = query[:num_actual_tokens]
                     o_slice = output[:num_actual_tokens]
@@ -1288,22 +1323,33 @@ class TritonAttentionImpl(AttentionImpl):
                         q_rot = getattr(layer, "_pth_q_rot_buf", None)
                         if q_rot is None:
                             q_rot = torch.empty(
-                                self._max_cudagraph_capture_size, self.num_heads,
+                                self._max_cudagraph_capture_size,
+                                self.num_heads,
                                 self.head_size,
-                                dtype=query.dtype, device=query.device)
+                                dtype=query.dtype,
+                                device=query.device,
+                            )
                             layer._pth_q_rot_buf = q_rot
                         if q_rot.shape[0] < query.size(0):
                             q_rot = torch.empty(
-                                query.size(0), self.num_heads, self.head_size,
-                                dtype=query.dtype, device=query.device)
+                                query.size(0),
+                                self.num_heads,
+                                self.head_size,
+                                dtype=query.dtype,
+                                device=query.device,
+                            )
                         q_rot[:num_actual_tokens].copy_(q_slice)
                         q_slice = q_rot[:num_actual_tokens]
                         torch.ops._C.rht_rotate_inplace_rdna3(
-                            q_slice, rht_signs, False, 1.0)
+                            q_slice, rht_signs, False, 1.0
+                        )
                     torch.ops._C.pth_decode_int4_rdna3(
-                        o_slice, q_slice,
-                        key_cache, value_cache,
-                        k_scale_cache, v_scale_cache,
+                        o_slice,
+                        q_slice,
+                        key_cache,
+                        value_cache,
+                        k_scale_cache,
+                        v_scale_cache,
                         rht_signs,
                         attn_metadata.block_table,
                         attn_metadata.q_to_req,
@@ -1314,8 +1360,8 @@ class TritonAttentionImpl(AttentionImpl):
                     )
                     if self.head_size > 128:
                         torch.ops._C.rht_rotate_inplace_rdna3(
-                            o_slice, rht_signs, True,
-                            1.0 / self.head_size)
+                            o_slice, rht_signs, True, 1.0 / self.head_size
+                        )
                     return output
 
                 mid_o_buf = getattr(layer, "_pth_mid_o_buf", None)
@@ -1335,7 +1381,9 @@ class TritonAttentionImpl(AttentionImpl):
                     q_to_klen=attn_metadata.q_to_klen,
                     scale=self.scale,
                     max_num_kv_splits=self.max_num_kv_splits,
-                    block_kv=32 if self._kv_quant_mode == KVQuantMode.INT4_PER_TOKEN_HEAD else 16,
+                    block_kv=32
+                    if self._kv_quant_mode == KVQuantMode.INT4_PER_TOKEN_HEAD
+                    else 16,
                     output=output[:num_actual_tokens],
                     mid_o_buf=mid_o_buf,
                     output_buf=output_buf,
@@ -1387,18 +1435,26 @@ class TritonAttentionImpl(AttentionImpl):
                     if mid_o_buf is None or mid_o_buf.shape[0] < num_dec_tok:
                         mid_o_buf = torch.zeros(
                             max(num_dec_tok, self._max_cudagraph_capture_size),
-                            self.num_heads, self.max_num_kv_splits,
+                            self.num_heads,
+                            self.max_num_kv_splits,
                             self.head_size + 2,
-                            dtype=torch.float32, device=query.device)
+                            dtype=torch.float32,
+                            device=query.device,
+                        )
                         layer._pth_mid_o_buf_mixed = mid_o_buf
                     torch.ops._C.pth_decode_int8_rdna3(
-                        output[:num_dec_tok], query[:num_dec_tok],
-                        key_cache, value_cache,
-                        k_scale_cache, v_scale_cache,
+                        output[:num_dec_tok],
+                        query[:num_dec_tok],
+                        key_cache,
+                        value_cache,
+                        k_scale_cache,
+                        v_scale_cache,
                         attn_metadata.block_table[:num_dec],
                         attn_metadata.q_to_req[:num_dec_tok],
                         attn_metadata.q_to_klen[:num_dec_tok],
-                        mid_o_buf, self.scale, self.max_num_kv_splits,
+                        mid_o_buf,
+                        self.scale,
+                        self.max_num_kv_splits,
                     )
                 # Prefill continuation chunk: re-base cu_seqlens to 0.
                 pref_qsl = attn_metadata.query_start_loc[num_dec:] - num_dec_tok
@@ -1407,13 +1463,16 @@ class TritonAttentionImpl(AttentionImpl):
                     query[num_dec_tok:num_actual_tokens],
                     key[num_dec_tok:num_actual_tokens],
                     value[num_dec_tok:num_actual_tokens],
-                    key_cache, value_cache,
-                    k_scale_cache, v_scale_cache,
+                    key_cache,
+                    value_cache,
+                    k_scale_cache,
+                    v_scale_cache,
                     attn_metadata.block_table[num_dec:],
                     pref_qsl,
                     attn_metadata.seq_lens[num_dec:],
                     attn_metadata.max_query_len,
-                    self.scale, True,
+                    self.scale,
+                    True,
                 )
                 return output
         # FP8 per-tensor / INT8 per-tensor / auto path (original flow).
@@ -1627,9 +1686,7 @@ class TritonAttentionImpl(AttentionImpl):
             )
             return
         # For decoder and cross-attention, use KV cache as before.
-        key_cache, value_cache = kv_cache.transpose(1, 2).split(
-            self.head_size, dim=-1
-        )
+        key_cache, value_cache = kv_cache.transpose(1, 2).split(self.head_size, dim=-1)
         if self.kv_cache_dtype.startswith("fp8"):
             key_cache = key_cache.view(self.fp8_dtype)
             value_cache = value_cache.view(self.fp8_dtype)
@@ -1661,9 +1718,7 @@ class TritonAttentionImpl(AttentionImpl):
         kv_cache: torch.Tensor,
         layer_slot_mapping: torch.Tensor,
     ):
-        key_cache, value_cache = kv_cache.transpose(1, 2).split(
-            self.head_size, dim=-1
-        )
+        key_cache, value_cache = kv_cache.transpose(1, 2).split(self.head_size, dim=-1)
         flash_layout = True
 
         is_fp8_kv_cache = is_quantized_kv_cache(self.kv_cache_dtype)

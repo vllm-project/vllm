@@ -19,7 +19,8 @@
 
 // RDNA3 HIP kernels stay on the legacy _C extension (they use the full torch
 // API, not the stable ABI). get_cuda_view_from_cpu_tensor and the CUDA/CPU ops
-// migrated to the stable _C fragment in csrc/libtorch_stable/torch_bindings.cpp.
+// migrated to the stable _C fragment in
+// csrc/libtorch_stable/torch_bindings.cpp.
 TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   // RDNA3 INT8 per-token-head paged prefill attention (gfx1100).
   ops.def(
@@ -48,15 +49,13 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "Tensor key_cache, Tensor value_cache, "
       "Tensor k_scale_cache, Tensor v_scale_cache, "
       "Tensor rht_signs, Tensor slot_mapping) -> ()");
-  ops.impl("reshape_cache_int4_rdna3", torch::kCUDA,
-           &reshape_cache_int4_rdna3);
+  ops.impl("reshape_cache_int4_rdna3", torch::kCUDA, &reshape_cache_int4_rdna3);
 
   // Inplace RHT butterfly for INT4 decode Q rotation / output unrotation.
   ops.def(
       "rht_rotate_inplace_rdna3(Tensor! data, Tensor rht_signs, "
       "bool inverse, float post_scale) -> ()");
-  ops.impl("rht_rotate_inplace_rdna3", torch::kCUDA,
-           &rht_rotate_inplace_rdna3);
+  ops.impl("rht_rotate_inplace_rdna3", torch::kCUDA, &rht_rotate_inplace_rdna3);
 
   // HIP split-KV decode attention for INT4 per-token-head (RDNA3).
   ops.def(
@@ -66,8 +65,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "Tensor rht_signs, Tensor block_table, "
       "Tensor q_to_req, Tensor q_to_klen, "
       "Tensor! mid_o_buf, float sm_scale, int num_kv_splits) -> ()");
-  ops.impl("pth_decode_int4_rdna3", torch::kCUDA,
-           &pth_decode_int4_rdna3);
+  ops.impl("pth_decode_int4_rdna3", torch::kCUDA, &pth_decode_int4_rdna3);
 
   // INT8 per-token-head decode for RDNA3.
   ops.def(
@@ -77,8 +75,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "Tensor block_table, "
       "Tensor q_to_req, Tensor q_to_klen, "
       "Tensor! mid_o_buf, float sm_scale, int num_kv_splits) -> ()");
-  ops.impl("pth_decode_int8_rdna3", torch::kCUDA,
-           &pth_decode_int8_rdna3);
+  ops.impl("pth_decode_int8_rdna3", torch::kCUDA, &pth_decode_int8_rdna3);
 }
 
 #ifdef USE_ROCM

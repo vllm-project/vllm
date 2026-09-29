@@ -154,8 +154,14 @@ def plan(
     plan_slot: torch.Tensor,
 ) -> None:
     _mod().ec_plan(
-        topk_ids, slot_of_expert, expert_of_slot, lru_last, clk,
-        cache_size, plan_expert, plan_slot,
+        topk_ids,
+        slot_of_expert,
+        expert_of_slot,
+        lru_last,
+        clk,
+        cache_size,
+        plan_expert,
+        plan_slot,
     )
 
 
@@ -179,23 +185,27 @@ class ExpertOffloadCache:
     returns ``topk_ids`` remapped to slot space ``[0, C)`` for the GEMM.
     """
 
-    def __init__(self, num_experts: int, cache_size: int, max_sel: int,
-                 device: torch.device):
+    def __init__(
+        self, num_experts: int, cache_size: int, max_sel: int, device: torch.device
+    ):
         self.E = num_experts
         self.C = min(cache_size, num_experts)
         self.device = device
         self.planes: dict[str, dict] = {}  # name -> {master, cache, dptr, row_u4}
-        self.slot_of_expert = torch.full((self.E,), -1, dtype=torch.int32,
-                                         device=device)
-        self.expert_of_slot = torch.full((self.C,), -1, dtype=torch.int32,
-                                         device=device)
+        self.slot_of_expert = torch.full(
+            (self.E,), -1, dtype=torch.int32, device=device
+        )
+        self.expert_of_slot = torch.full(
+            (self.C,), -1, dtype=torch.int32, device=device
+        )
         self.lru_last = torch.zeros(self.C, dtype=torch.int64, device=device)
         self.clk = torch.ones(1, dtype=torch.int64, device=device)
         self.plan_e = torch.full((max_sel,), -1, dtype=torch.int32, device=device)
         self.plan_s = torch.full((max_sel,), -1, dtype=torch.int32, device=device)
 
-    def add_plane(self, name: str, master_pinned: torch.Tensor,
-                  cache_gpu: torch.Tensor) -> None:
+    def add_plane(
+        self, name: str, master_pinned: torch.Tensor, cache_gpu: torch.Tensor
+    ) -> None:
         """master_pinned [E, *shape] (pinned), cache_gpu [C, *shape] (device).
         Both must be contiguous and uint4 (16B) aligned per expert row."""
         row_bytes = master_pinned[0].numel() * master_pinned.element_size()
@@ -222,8 +232,16 @@ class ExpertOffloadCache:
     def ensure(self, topk_ids: torch.Tensor) -> torch.Tensor:
         """Make the step's experts resident; return slot-space topk_ids."""
         flat = topk_ids.reshape(-1).to(torch.int32)
-        plan(flat, self.slot_of_expert, self.expert_of_slot, self.lru_last,
-             self.clk, self.C, self.plan_e, self.plan_s)
+        plan(
+            flat,
+            self.slot_of_expert,
+            self.expert_of_slot,
+            self.lru_last,
+            self.clk,
+            self.C,
+            self.plan_e,
+            self.plan_s,
+        )
         for p in self.planes.values():
             copy(self.plan_e, self.plan_s, p["dptr"], p["cache"], p["row_u4"])
         return self.slot_of_expert[topk_ids.long()].to(topk_ids.dtype)

@@ -336,15 +336,20 @@ def _rdna3_lora_table(device, dtype):
         inter = b_gu.shape[0] // 2
         ish = inter // wd
         b_gu = torch.cat(
-            [b_gu[:inter][rk * ish : (rk + 1) * ish],
-             b_gu[inter:][rk * ish : (rk + 1) * ish]],
+            [
+                b_gu[:inter][rk * ish : (rk + 1) * ish],
+                b_gu[inter:][rk * ish : (rk + 1) * ish],
+            ],
             dim=0,
         )
         ash = a_dn.shape[1] // wd
         a_dn = a_dn[:, rk * ash : (rk + 1) * ash]
         table[i] = (
-            a_gu.to(device, dtype), b_gu.to(device, dtype),
-            a_dn.to(device, dtype), b_dn.to(device, dtype), scale,
+            a_gu.to(device, dtype),
+            b_gu.to(device, dtype),
+            a_dn.to(device, dtype),
+            b_dn.to(device, dtype),
+            scale,
         )
     _RDNA3_LORA = table
     return _RDNA3_LORA

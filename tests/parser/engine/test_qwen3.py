@@ -698,7 +698,6 @@ class TestArgConverter:
         assert result == {"city": "Tokyo", "expr": "x<5"}
 
 
-
 class TestParamBoundaryTerminators:
     """A `<parameter=` left unclosed must stop at the surrounding structure.
 
@@ -743,7 +742,9 @@ class TestParamBoundaryTerminators:
     def test_last_param_closed_by_tool_call_end_is_kept(self):
         from vllm.parser.qwen3 import _qwen3_arg_converter
 
-        raw = "<parameter=path>\n/tmp/x.py\n</parameter>\n<parameter=b>\nhi\n</tool_call>"
+        raw = (
+            "<parameter=path>\n/tmp/x.py\n</parameter>\n<parameter=b>\nhi\n</tool_call>"
+        )
         result = json.loads(_qwen3_arg_converter(raw, partial=False))
         assert result == {"path": "/tmp/x.py", "b": "hi"}
 
@@ -781,6 +782,7 @@ class TestParamBoundaryTerminators:
         raw = "<parameter=path>\n/tmp/half_writ"
         result = json.loads(_qwen3_arg_converter(raw, partial=True))
         assert result == {"path": "/tmp/half_writ"}
+
 
 class TestSchemaAwareTypeCoercion:
     """Verify that _fix_arg_types corrects miscoerced values using the

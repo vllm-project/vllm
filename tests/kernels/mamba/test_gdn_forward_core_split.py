@@ -47,17 +47,18 @@ if not (
         allow_module_level=True,
     )
 
+from vllm.model_executor.layers.fla.ops.index import (  # noqa: E402
+    prepare_chunk_indices,
+    prepare_chunk_offsets,
+)
+from vllm.model_executor.layers.fla.ops.utils import FLA_CHUNK_SIZE  # noqa: E402
+
 from tests.v1.attention.utils import (  # noqa: E402
     BatchSpec,
     create_common_attn_metadata,
     create_vllm_config,
 )
 from vllm.config import set_current_vllm_config  # noqa: E402
-from vllm.model_executor.layers.fla.ops.index import (  # noqa: E402
-    prepare_chunk_indices,
-    prepare_chunk_offsets,
-)
-from vllm.model_executor.layers.fla.ops.utils import FLA_CHUNK_SIZE  # noqa: E402
 from vllm.model_executor.layers.mamba.gdn import qwen_gdn_linear_attn  # noqa: E402
 from vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn import (  # noqa: E402
     ChunkGatedDeltaRule,

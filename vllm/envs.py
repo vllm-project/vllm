@@ -251,6 +251,10 @@ if TYPE_CHECKING:
     VLLM_RAISE_ON_LOGIT_NANS: bool = False
     VLLM_NAN_LOGITS_RECOMPUTE: bool = False
     VLLM_RDNA3_CUSTOM_AR_CAP: int = 0
+    VLLM_JART_AR: bool = False
+    VLLM_JART_AR_ALGO: int = 6
+    VLLM_JART_AR_FUSE: bool = False
+    VLLM_JART_AR_MAX_NUMEL: int = 131072
     VLLM_ROCM_QUICK_REDUCE_QUANTIZATION: Literal[
         "FP", "INT8", "INT6", "INT4", "INT3", "NONE"
     ] = "NONE"
@@ -1841,6 +1845,17 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Only on a box whose PCIe fabric routes peer reads: on one that does not,
     # the collective silently returns garbage.
     "VLLM_RDNA3_CUSTOM_AR_CAP": lambda: int(os.getenv("VLLM_RDNA3_CUSTOM_AR_CAP", "0")),
+    # LL-protocol all-reduce for gfx11 at TP4, used only under graph capture
+    # (csrc/rocm/jart_ar.cu). Needs a PCIe fabric that routes peer traffic.
+    "VLLM_JART_AR": lambda: bool(int(os.getenv("VLLM_JART_AR", "0"))),
+    # 0 oneshot, 1 reduce-scatter+all-gather LL, 3 LL128-lite, 6 auto (1 then 3).
+    "VLLM_JART_AR_ALGO": lambda: int(os.getenv("VLLM_JART_AR_ALGO", "6")),
+    # Also fuse all-reduce + residual add + Gemma RMSNorm (Inductor pass).
+    "VLLM_JART_AR_FUSE": lambda: bool(int(os.getenv("VLLM_JART_AR_FUSE", "0"))),
+    # Messages below this many elements take the jart all-reduce.
+    "VLLM_JART_AR_MAX_NUMEL": lambda: int(
+        os.getenv("VLLM_JART_AR_MAX_NUMEL", "131072")
+    ),
     # Timeout (in seconds) for MooncakeConnector in PD disaggregated setup.
     "VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT": lambda: int(
         os.getenv("VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT", "480")

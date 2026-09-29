@@ -742,9 +742,7 @@ def _pth_attn_stage1_packed_gqa(
         # K_s0/K_s1 are already fp16; cast Q to fp16 for WMMA.
         qk = tl.dot(Q_s0.to(tl.float16), K_s0)
         qk = tl.dot(Q_s1.to(tl.float16), K_s1, qk)
-        qk = (qk - Q_sum[:, None] * k_zp[None, :]) * (
-            ATTN_SCALE * k_scales[None, :]
-        )
+        qk = (qk - Q_sum[:, None] * k_zp[None, :]) * (ATTN_SCALE * k_scales[None, :])
 
         # Mask padded K columns and padded Q-head rows to -inf.
         qk = tl.where(kv_mask[None, :] & h_mask[:, None], qk, -float("inf"))
@@ -1064,11 +1062,15 @@ def triton_per_token_head_attention(
             PACKING_FACTOR=packing_factor,
             num_warps=4,
             num_stages=1 if _rocm else 2,
-            **({
-                "waves_per_eu": 1,
-                "matrix_instr_nonkdim": 16,
-                "kpack": 2,
-            } if _rocm else {}),
+            **(
+                {
+                    "waves_per_eu": 1,
+                    "matrix_instr_nonkdim": 16,
+                    "kpack": 2,
+                }
+                if _rocm
+                else {}
+            ),
         )
     elif packing_factor > 1:
         # Pad to >=16 so the prefill kernel's tl.dot also compiles for the
@@ -1112,11 +1114,15 @@ def triton_per_token_head_attention(
             PACKING_FACTOR=packing_factor,
             num_warps=4,
             num_stages=1 if current_platform.is_rocm() else 2,
-            **({
-                "waves_per_eu": 1,
-                "matrix_instr_nonkdim": 16,
-                "kpack": 2,
-            } if current_platform.is_rocm() else {}),
+            **(
+                {
+                    "waves_per_eu": 1,
+                    "matrix_instr_nonkdim": 16,
+                    "kpack": 2,
+                }
+                if current_platform.is_rocm()
+                else {}
+            ),
         )
     else:
         _pth_attn_stage1[(total_q, Hq, NUM_KV_SPLITS)](
@@ -1543,9 +1549,7 @@ def _pth_prefill_kernel_packed(
         k_scales = (ks_bits & -16).to(tl.float32, bitcast=True)
 
         raw_dot = tl.dot(Q_s0, K_s0) + tl.dot(Q_s1, K_s1)
-        qk = (raw_dot - Q_sum[:, None] * k_zp[None, :]) * (
-            SM_SCALE * k_scales[None, :]
-        )
+        qk = (raw_dot - Q_sum[:, None] * k_zp[None, :]) * (SM_SCALE * k_scales[None, :])
 
         causal = k_pos[None, :] <= q_pos[:, None]
         full_mask = causal & valid_k[None, :]
@@ -1632,9 +1636,8 @@ _HAS_RHT_ROTATE: bool | None = None
 def _has_rht_rotate_inplace() -> bool:
     global _HAS_RHT_ROTATE
     if _HAS_RHT_ROTATE is None:
-        _HAS_RHT_ROTATE = (
-            hasattr(torch.ops, "_C")
-            and hasattr(torch.ops._C, "rht_rotate_inplace_rdna3")
+        _HAS_RHT_ROTATE = hasattr(torch.ops, "_C") and hasattr(
+            torch.ops._C, "rht_rotate_inplace_rdna3"
         )
     return _HAS_RHT_ROTATE
 
@@ -1646,8 +1649,8 @@ def _get_rht_signs_f32(d: int, device: torch.device) -> torch.Tensor:
         from vllm.v1.attention.ops.triton_quant_kv._hadamard import (
             _get_rht_signs,
         )
-        _RHT_SIGNS_F32_CACHE[key] = _get_rht_signs(d, 0, device,
-                                                     torch.float32)
+
+        _RHT_SIGNS_F32_CACHE[key] = _get_rht_signs(d, 0, device, torch.float32)
     return _RHT_SIGNS_F32_CACHE[key]
 
 
@@ -1677,8 +1680,7 @@ def _maybe_unrotate_out(
             and _has_rht_rotate_inplace()
         ):
             signs = _get_rht_signs_f32(head_size, out.device)
-            torch.ops._C.rht_rotate_inplace_rdna3(
-                out, signs, True, 1.0 / head_size)
+            torch.ops._C.rht_rotate_inplace_rdna3(out, signs, True, 1.0 / head_size)
             return out
         out_f = single_rht(out, inverse=True) / head_size
         out.copy_(out_f)
