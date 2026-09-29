@@ -17,22 +17,22 @@
 # limitations under the License.
 """Nemotron model configuration."""
 
-from transformers import PretrainedConfig
+from transformers import PreTrainedConfig
 from transformers.utils import logging
 
 logger = logging.get_logger(__name__)
 
 
-class NemotronConfig(PretrainedConfig):
+class NemotronConfig(PreTrainedConfig):
     r"""This is the configuration class to store the configuration of a
     [`NemotronModel`]. It is used to instantiate a Nemotron model
     according to the specified arguments, defining the model architecture.
     Instantiating a configuration with the defaults will yield a similar
     configuration to that of the Nemotron-8B.
 
-    Configuration objects inherit from [`PretrainedConfig`] and can be
+    Configuration objects inherit from [`PreTrainedConfig`] and can be
     used to control the model outputs. Read the documentation from
-    [`PretrainedConfig`] for more information.
+    [`PreTrainedConfig`] for more information.
 
 
     Args:
