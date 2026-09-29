@@ -209,7 +209,7 @@ class _FakeScheduler:
             "decode": SimpleNamespace(num_prompt_tokens=32),
         }
         self.waiting = []
-        self.skipped_waiting = []
+        self.kv_holding_waiting = []
 
 
 def _make_scheduler_output(
@@ -524,7 +524,7 @@ def test_shutdown_timing_grace_is_bounded(monkeypatch):
     assert len(polls) == 2
 
 
-@pytest.mark.parametrize("missing", ["requests", "waiting", "skipped_waiting", None])
+@pytest.mark.parametrize("missing", ["requests", "waiting", "kv_holding_waiting", None])
 def test_fpm_checks_optional_scheduler_state_before_starting_publisher(
     missing, monkeypatch
 ):
@@ -668,7 +668,7 @@ def test_engine_idle_metrics_require_global_quiescence_and_drained_timing(blocke
     # Paused/streaming state can retain a queue while the engine stops stepping.
     scheduler = SimpleNamespace(
         requests={},
-        skipped_waiting=[],
+        kv_holding_waiting=[],
         waiting=[SimpleNamespace(status=RequestStatus.WAITING, num_tokens=12)],
         has_requests=lambda: blocker == "scheduler",
     )
@@ -854,24 +854,36 @@ def test_emitter_joins_delayed_timing_with_original_snapshots():
     assert metrics.queued_requests.sum_prefill_tokens == 12
 
 
-def test_emitter_classifies_chunked_prefill_and_queued_decode_states():
+@pytest.mark.parametrize("scheduling_policy", ["fcfs", "priority"])
+@pytest.mark.parametrize("async_scheduling", [False, True])
+def test_emitter_classifies_chunked_prefill_and_queued_decode_states(
+    scheduling_policy, async_scheduling
+):
+    from tests.v1.core.utils import create_requests, create_scheduler
+
     publisher = _FakeMetricsPublisher()
     emitter = ForwardPassMetricsEmitter("worker", 0, publisher)
-    scheduler = _FakeScheduler()
-    scheduler.waiting = [
-        SimpleNamespace(
-            status=RequestStatus.PREEMPTED,
-            num_tokens=100,
-            num_computed_tokens=70,
-        )
+    scheduler = create_scheduler(
+        scheduling_policy=scheduling_policy, async_scheduling=async_scheduling
+    )
+    states = [
+        (RequestStatus.WAITING, 0),
+        (RequestStatus.WAITING_FOR_STRUCTURED_OUTPUT_GRAMMAR, 0),
+        (RequestStatus.WAITING, 32),
+        (RequestStatus.PREEMPTED, 70),
+        (RequestStatus.WAITING_FOR_REMOTE_KVS, 80),
+        (RequestStatus.WAITING_FOR_STREAMING_REQ, 96),
     ]
-    scheduler.skipped_waiting = [
-        SimpleNamespace(
-            status=RequestStatus.WAITING_FOR_REMOTE_KVS,
-            num_tokens=200,
-            num_computed_tokens=80,
-        )
-    ]
+    for request, (status, computed) in zip(
+        create_requests(num_requests=len(states), num_tokens=100), states
+    ):
+        request.status = status
+        request.num_computed_tokens = computed
+        scheduler.add_request(request)
+    assert len(scheduler.waiting) == 2
+    assert len(scheduler.kv_holding_waiting) == 4
+    # Deferred requests are already in the queues, not a third source to count.
+    assert len(scheduler.deferred_waiting) == 3
     output = _make_scheduler_output("prefill", computed_tokens=4, context_phase=True)
     # Odd query sizes exercise half-token attention lengths, not prompt lengths.
     new = _make_scheduler_output("new", prompt_tokens=3, computed_tokens=2)
@@ -901,6 +913,10 @@ def test_emitter_classifies_chunked_prefill_and_queued_decode_states():
     assert metrics.scheduled_requests.var_prefill_length == 0.25
     assert metrics.queued_requests.num_decode_requests == 2
     assert metrics.queued_requests.sum_decode_kv_tokens == 150
+    assert metrics.queued_requests.var_decode_kv_tokens == 25
+    assert metrics.queued_requests.num_prefill_requests == 4
+    assert metrics.queued_requests.sum_prefill_tokens == 400
+    assert metrics.queued_requests.var_prefill_length == 0
 
 
 def test_async_sd_rejections_correct_only_later_iteration_lengths():

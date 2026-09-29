@@ -39,7 +39,7 @@ class SchedulerInterface(ABC):
     # Optional request state; None means the scheduler does not expose it.
     requests: Mapping[str, "Request"] | None = None
     waiting: Iterable["Request"] | None = None
-    skipped_waiting: Iterable["Request"] | None = None
+    kv_holding_waiting: Iterable["Request"] | None = None
 
     @abstractmethod
     def __init__(

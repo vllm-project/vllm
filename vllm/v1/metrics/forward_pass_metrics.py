@@ -28,7 +28,7 @@ from collections.abc import Callable, Iterable
 from contextlib import suppress
 from copy import copy
 from dataclasses import dataclass
-from itertools import count
+from itertools import chain, count
 from typing import TYPE_CHECKING, Any, Protocol
 
 import msgspec
@@ -409,8 +409,8 @@ class ForwardPassMetricsEmitter:
             return None
         assert scheduler.requests is not None, "FPM requires scheduler.requests"
         assert scheduler.waiting is not None, "FPM requires scheduler.waiting"
-        assert scheduler.skipped_waiting is not None, (
-            "FPM requires scheduler.skipped_waiting"
+        assert scheduler.kv_holding_waiting is not None, (
+            "FPM requires scheduler.kv_holding_waiting"
         )
 
         dp_rank = getattr(vllm_config.parallel_config, "data_parallel_index", None)
@@ -661,17 +661,15 @@ def _extract_queued_metrics(scheduler: SchedulerInterface) -> QueuedRequestMetri
     decode_kv = WelfordAccumulator()
 
     waiting = scheduler.waiting
-    skipped_waiting = scheduler.skipped_waiting
+    kv_holding_waiting = scheduler.kv_holding_waiting
     assert waiting is not None
-    assert skipped_waiting is not None
-    for request in waiting:
-        if request.status == RequestStatus.PREEMPTED:
-            decode_kv.add(request.num_computed_tokens)
-        else:
-            prefill.add(request.num_tokens)
-
-    for request in skipped_waiting:
-        if request.status == RequestStatus.WAITING_FOR_REMOTE_KVS:
+    assert kv_holding_waiting is not None
+    # Deferred requests are a subset of these two disjoint queues.
+    for request in chain(waiting, kv_holding_waiting):
+        if request.status in (
+            RequestStatus.PREEMPTED,
+            RequestStatus.WAITING_FOR_REMOTE_KVS,
+        ):
             decode_kv.add(request.num_computed_tokens)
         else:
             prefill.add(request.num_tokens)
