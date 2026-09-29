@@ -30,8 +30,7 @@
 namespace {
 
 constexpr int kWarpSize = 32;
-// Sentinel in the shared top-k scratch: entry already resolved (hit /
-// newest / invalid), no miss handling needed.
+// Empty key in the shared open-addressing table of host rows.
 constexpr int32_t kHashEmpty = -1;
 
 bool is_pinned_cpu_tensor(const torch::stable::Tensor& tensor) {
@@ -45,11 +44,15 @@ bool is_pinned_cpu_tensor(const torch::stable::Tensor& tensor) {
   return attributes.type == cudaMemoryTypeHost;
 }
 
-__device__ __forceinline__ int32_t hash_slot(int32_t key, int log2_size) {
-  // Fibonacci hashing: the top bits of a Knuth multiplicative hash index a
-  // power-of-two open-addressing table, so probing needs no division.
-  return static_cast<int32_t>((static_cast<uint32_t>(key) * 2654435761u) >>
-                              (32 - log2_size));
+__device__ __forceinline__ int32_t hash_slot(int32_t key, int size) {
+  // Knuth multiplicative hash scaled onto [0, size) by a multiply-high, so
+  // the table can take any size without a division.
+  return static_cast<int32_t>(
+      __umulhi(static_cast<uint32_t>(key) * 2654435761u, size));
+}
+
+__device__ __forceinline__ int next_slot(int h, int size) {
+  return h + 1 == size ? 0 : h + 1;
 }
 
 // Copy one row of `row_bytes` bytes with a single warp. MLA rows take the
@@ -183,7 +186,8 @@ constexpr int32_t kEntryMiss = 1 << 29;
 constexpr int32_t kEntryInvalid = 1 << 28;
 constexpr int32_t kEntrySlotMask = 0xFFFF;
 constexpr int kResidencyCounters = 5;
-// Per-request table entries per referenced top-k position (load <= 1/4).
+// Per-request table entries per referenced top-k position (load <= 1/4
+// until the hash_size cap).
 constexpr int kHashLoadInverse = 4;
 
 // Translate a request-relative top-k position to its resident GPU row (-1 when
@@ -315,6 +319,10 @@ __global__ __launch_bounds__(1024) void hisparse_resolve_residency_kernel(
   const int NUM_WARPS = blockDim.x / kWarpSize;
   const int num_buffer_chunks = (hot_size + kWarpSize - 1) / kWarpSize;
 
+  // The first row of each contiguous run of a request's rows leads it. FULL
+  // CUDA-graph padding rows map to request 0 after the real rows, forming a
+  // second run, but carry no valid top-k: that run returns before phase 2
+  // touches the request's shared state.
   const int first_row = blockIdx.x;
   const int request_row =
       request_ids != nullptr ? request_ids[first_row] : first_row;
@@ -366,15 +374,12 @@ __global__ __launch_bounds__(1024) void hisparse_resolve_residency_kernel(
       device_global_indices + static_cast<int64_t>(state_row) * region_stride;
   int16_t* row_lru = lru_slots + static_cast<int64_t>(state_row) * hot_size;
 
-  // hash_size is a power of two above hot_size, so the union (at most the
-  // rows' top-k, which hot_size covers) always leaves an empty slot. Use a
-  // power-of-two slice sized to this request's rows so single-row requests
-  // initialize a small table.
-  const int log2_table =
-      min(31 - __clz(hash_size),
-          32 - __clz(kHashLoadInverse * (end_row - first_row) * top_k - 1));
-  const int table_size = 1 << log2_table;
-  const int table_mask = table_size - 1;
+  // The union (at most the rows' top-k, which hot_size covers) is smaller
+  // than hash_size, so every probe sequence reaches an empty slot. Use a
+  // slice sized to this request's rows so single-row requests initialize a
+  // small table.
+  const int table_size =
+      min(hash_size, kHashLoadInverse * (end_row - first_row) * top_k);
 
   extern __shared__ char smem_raw[];
   int32_t* s_hash_keys = reinterpret_cast<int32_t*>(smem_raw);
@@ -433,7 +438,7 @@ __global__ __launch_bounds__(1024) void hisparse_resolve_residency_kernel(
         store_hot_index(row_out, row_attention, i, -1, hot_block_size,
                         attention_block_stride);
       } else {
-        int h = hash_slot(g, log2_table);
+        int h = hash_slot(g, table_size);
         while (true) {
           const int32_t old = atomicCAS(&s_hash_keys[h], kHashEmpty, g);
           if (old == kHashEmpty) {
@@ -441,7 +446,7 @@ __global__ __launch_bounds__(1024) void hisparse_resolve_residency_kernel(
             break;
           }
           if (old == g) break;
-          h = (h + 1) & table_mask;
+          h = next_slot(h, table_size);
         }
         atomicMin(&s_hash_vals[h], (row - first_row) * top_k + i);
       }
@@ -488,7 +493,7 @@ __global__ __launch_bounds__(1024) void hisparse_resolve_residency_kernel(
 
     bool is_hit = false;
     if (cached_g >= 0) {
-      int h = hash_slot(cached_g, log2_table);
+      int h = hash_slot(cached_g, table_size);
       while (true) {
         const int32_t k = s_hash_keys[h];
         if (k == cached_g) {
@@ -497,7 +502,7 @@ __global__ __launch_bounds__(1024) void hisparse_resolve_residency_kernel(
           break;
         }
         if (k == kHashEmpty) break;
-        h = (h + 1) & table_mask;
+        h = next_slot(h, table_size);
       }
     }
     const bool is_evictable = has_valid_pos && !is_hit;
@@ -578,9 +583,9 @@ __global__ __launch_bounds__(1024) void hisparse_resolve_residency_kernel(
           resident_num_blocks, resident_block_size, resident_null_block,
           resident_row);
       if (resident_row < 0 && g >= 0) {
-        h = hash_slot(g, log2_table);
+        h = hash_slot(g, table_size);
         while (s_hash_keys[h] != g) {
-          h = (h + 1) & table_mask;
+          h = next_slot(h, table_size);
         }
         entry = s_hash_vals[h];
         is_miss = entry == position;
@@ -684,9 +689,9 @@ __global__ __launch_bounds__(1024) void hisparse_resolve_residency_kernel(
           resident_num_blocks, resident_block_size, resident_null_block,
           resident_row);
       if (resident_row >= 0 || g < 0) continue;
-      int h = hash_slot(g, log2_table);
+      int h = hash_slot(g, table_size);
       while (s_hash_keys[h] != g) {
-        h = (h + 1) & table_mask;
+        h = next_slot(h, table_size);
       }
       write_entry_index(s_hash_vals[h], row, position % top_k, top_k,
                         hot_indices, attention_indices, attention_row_stride,
@@ -1181,12 +1186,9 @@ void hisparse_resolve_residency(
   }
 
   constexpr int kBlockSize = 1024;
-  // A power of two above hot_size: the union of a request's rows never
-  // exceeds hot_size, so every probe sequence reaches an empty slot.
-  int hash_size = 1;
-  while (hash_size <= hot_size) {
-    hash_size <<= 1;
-  }
+  // The union of a request's rows never exceeds hot_size, so one spare
+  // entry guarantees every probe sequence reaches an empty slot.
+  const int hash_size = hot_size + 1;
   const int num_buffer_chunks = (hot_size + kWarpSize - 1) / kWarpSize;
   const size_t smem_bytes =
       sizeof(int32_t) * (2 * hash_size + 2 * (num_buffer_chunks + 1) +
@@ -1196,10 +1198,15 @@ void hisparse_resolve_residency(
   const torch::stable::accelerator::DeviceGuard device_guard(
       hot_cache.get_device_index());
   int max_smem_bytes = 0;
-  STD_TORCH_CHECK(cudaDeviceGetAttribute(
-                      &max_smem_bytes, cudaDevAttrMaxSharedMemoryPerBlockOptin,
-                      hot_cache.get_device_index()) == cudaSuccess,
-                  "failed to query shared memory per block");
+  int sm_smem_bytes = 0;
+  STD_TORCH_CHECK(
+      cudaDeviceGetAttribute(&max_smem_bytes,
+                             cudaDevAttrMaxSharedMemoryPerBlockOptin,
+                             hot_cache.get_device_index()) == cudaSuccess &&
+          cudaDeviceGetAttribute(&sm_smem_bytes,
+                                 cudaDevAttrMaxSharedMemoryPerMultiprocessor,
+                                 hot_cache.get_device_index()) == cudaSuccess,
+      "failed to query shared memory limits");
   STD_TORCH_CHECK(smem_bytes <= static_cast<size_t>(max_smem_bytes),
                   "HiSparse device_buffer_size=", hot_size, " needs ",
                   smem_bytes,
@@ -1208,20 +1215,25 @@ void hisparse_resolve_residency(
                   max_smem_bytes,
                   "; lower device_buffer_size or the number of speculative "
                   "tokens.");
+  // Keep one block per SM. Only a request's first row does work, so with two
+  // resident blocks per SM, leaders R rows apart can share an SM while others
+  // idle (64 MTP3 requests on H200: 128 vs 106 us).
+  const size_t launch_smem_bytes =
+      std::max(smem_bytes, static_cast<size_t>(sm_smem_bytes / 2 + 1));
   const cudaStream_t stream = get_current_cuda_stream();
   const int64_t attention_row_stride =
       attention_indices.has_value() ? attention_indices.value().stride(0) : 0;
   const int64_t valid_count_stride =
       valid_counts.has_value() ? valid_counts.value().stride(0) : 0;
   auto kernel = hisparse_resolve_residency_kernel;
-  if (smem_bytes > 48 * 1024) {
+  if (launch_smem_bytes > 48 * 1024) {
     const cudaError_t attribute_error = cudaFuncSetAttribute(
-        kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_bytes);
+        kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, launch_smem_bytes);
     STD_TORCH_CHECK(attribute_error == cudaSuccess,
                     "failed to configure HiSparse swap-in shared memory: ",
                     cudaGetErrorString(attribute_error));
   }
-  kernel<<<launch_rows, kBlockSize, smem_bytes, stream>>>(
+  kernel<<<launch_rows, kBlockSize, launch_smem_bytes, stream>>>(
       hot_block_table.const_data_ptr<int32_t>(),
       global_indices.const_data_ptr<int32_t>(), request_ids_ptr,
       source_block_table_ptr, resident_block_table_ptr,
