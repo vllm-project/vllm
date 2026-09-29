@@ -93,7 +93,10 @@ class AttentionConfig:
     an SM100-class GPU, DeepGEMM >= 2.8 and the DeepSelect top-k extension
     (the top-k runs on the kernels' bf16 logits). The sparse path costs
     O(candidate blocks) per query regardless of context length, so it pays off
-    for long contexts (roughly 32K tokens and beyond) and is slower below."""
+    for long contexts (roughly 32K tokens and beyond) and is slower below.
+    On ROCm gfx950 it runs aiter's paged MXFP4 MQA-logits kernel over the
+    candidate pool instead, with fp32 logits, and keeps the masked dense walk
+    for steps whose contexts are too short for the pool to pay."""
 
     hisparse_config: HiSparseConfig | None = None
     """HiSparse host-resident KV configuration. Setting this enables experimental

@@ -2,8 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import functools
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import cast
+from typing import Any, cast
 
 import torch
 
@@ -15,8 +16,14 @@ from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fusion.quant_activation import QuantizedActivation
 from vllm.model_executor.layers.quantization.utils.quant_utils import kMxfp8Dynamic
+from vllm.model_executor.layers.rocm_paged_mxfp4_indexer import (
+    RocmSparseAttnIndexer,
+    RocmSparseMQAIndexer,
+)
 from vllm.models.deepseek_v41.attention import (
     DeepseekV4Attention,
+    DeepseekV4Indexer,
+    DeepseekV4IndexerCache,
     _replace_layer_index,
 )
 from vllm.models.deepseek_v41.common.ops import dequantize_and_gather_k_cache
@@ -32,6 +39,7 @@ from vllm.triton_utils import tl, triton
 from vllm.utils.multi_stream_utils import execute_in_parallel
 from vllm.v1.attention.backend import (
     CommonAttentionMetadata,
+    MultipleOf,
 )
 from vllm.v1.attention.backends.mla.sparse_swa import (
     DeepseekSparseSWABackend,
@@ -46,6 +54,9 @@ from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
     rocm_mxfp8_wo_a_bmm,
     rocm_sparse_attn_decode,
     rocm_sparse_attn_prefill,
+)
+from vllm.v1.attention.ops.rocm_paged_mxfp4_indexer import (
+    rocm_paged_mxfp4_cache_layout,
 )
 from vllm.v1.worker.workspace import current_workspace_manager
 
@@ -517,10 +528,140 @@ class DeepseekV4ROCMAiterSparseSWAMetadataBuilder(DeepseekV41SparseSWAMetadataBu
         )
 
 
+@functools.cache
+def _aiter_indexer_cache_ops() -> tuple[Callable[..., None], Callable[..., tuple]]:
+    """The aiter indexer key writer and query quantizer."""
+    from aiter.ops.triton.fusions.k_norm_rope_mxfp4_cache import (
+        k_norm_rope_mxfp4_cache,
+    )
+    from aiter.ops.triton.rope.q_rope_mxfp4_quant import q_rope_mxfp4_quant
+
+    return k_norm_rope_mxfp4_cache, q_rope_mxfp4_quant
+
+
+def rocm_mxfp4_indexer_k_store(
+    k_pre: torch.Tensor,
+    positions: torch.Tensor,
+    cos_sin_cache: torch.Tensor,
+    rms_norm_weight: torch.Tensor,
+    rms_norm_eps: float,
+    k_cache: torch.Tensor,
+    kv_slot_mapping: torch.Tensor,
+    compress_ratio: int,
+    use_fp4_cache: bool,
+    *,
+    num_heads: int,
+) -> None:
+    """`indexer_k_norm_rope_store` for the ROCm MXFP4 cache: aiter's cache op
+    writes the key in the order its MQA-logits kernel reads with ``num_heads``
+    query heads."""
+    assert use_fp4_cache, "the ROCm indexer cache op writes MXFP4 only"
+    layout = rocm_paged_mxfp4_cache_layout(num_heads, k_pre.shape[1], k_cache.shape[1])
+    k_norm_rope_mxfp4_cache, _ = _aiter_indexer_cache_ops()
+    k_norm_rope_mxfp4_cache(
+        k_pre,
+        positions,
+        cos_sin_cache,
+        rms_norm_weight,
+        rms_norm_eps,
+        k_cache,
+        kv_slot_mapping,
+        compress_ratio,
+        shuffle=layout,
+    )
+
+
+def rocm_mxfp4_indexer_q_quant(
+    positions: torch.Tensor,
+    index_q: torch.Tensor,
+    index_q_cos_sin_cache: torch.Tensor,
+    index_weights: torch.Tensor,
+    index_weights_softmax_scale: float,
+    index_weights_head_scale: float,
+    use_fp4: bool = True,
+    weights_out_dtype: torch.dtype = torch.float32,
+) -> tuple[tuple[torch.Tensor, torch.Tensor], torch.Tensor]:
+    """`fused_indexer_q_rope_quant` for the ROCm MXFP4 indexer, on aiter's op:
+    ((packed [T, H, D // 2], e8m0 as one int32 per head [T, H]), fp32
+    weights)."""
+    assert use_fp4 and weights_out_dtype == torch.float32, (
+        "the ROCm indexer quantizes Q to MXFP4 and scores with fp32 weights"
+    )
+    _, q_rope_mxfp4_quant = _aiter_indexer_cache_ops()
+    q_packed, q_scale, weights_out = q_rope_mxfp4_quant(
+        index_q,
+        positions,
+        index_q_cos_sin_cache,
+        index_weights,
+        index_weights_softmax_scale * index_weights_head_scale,
+    )
+    return (q_packed, q_scale.view(torch.int32).squeeze(-1)), weights_out
+
+
+class DeepseekV41RocmMxfp4Indexer(DeepseekV4Indexer):
+    """The indexer on aiter's paged MXFP4 cache: its K store and Q quant write
+    in the order aiter's MQA-logits kernel reads, and its layers score with it.
+    ``_produce_k`` and ``forward_q`` mirror ``DeepseekV4Indexer``'s except for
+    those two calls."""
+
+    mqa_cls = RocmSparseMQAIndexer
+    attn_cls = RocmSparseAttnIndexer
+
+    def _produce_k(
+        self,
+        latent: torch.Tensor | None,
+        positions: torch.Tensor,
+        rotary_emb: torch.nn.Module,
+    ) -> None:
+        attn_metadata = get_forward_context().attn_metadata
+        if not isinstance(attn_metadata, dict) or latent is None:
+            return
+        assert self.owns_k
+        indexer_metadata = cast(Any, attn_metadata[self.k_cache.prefix])
+        k_pre, _ = self.wk(latent)
+        rocm_mxfp4_indexer_k_store(
+            k_pre,
+            positions,
+            rotary_emb.cos_sin_cache,
+            self.k_norm.weight,
+            self.k_norm.variance_epsilon,
+            self.k_cache.kv_cache,
+            indexer_metadata.slot_mapping,
+            self.compress_ratio,
+            self.use_fp4_kv,
+            num_heads=self.n_head,
+        )
+
+    def forward_q(
+        self,
+        qr: torch.Tensor | QuantizedActivation,
+        qr_scale: torch.Tensor | None,
+        indexer_weights: torch.Tensor,
+        positions: torch.Tensor,
+        rotary_emb: torch.nn.Module,
+    ) -> tuple[torch.Tensor | None, torch.Tensor | None, torch.Tensor | None]:
+        q = self._wq_b_proj(qr, qr_scale).view(-1, self.n_head, self.head_dim)
+        (q, q_scale), weights = rocm_mxfp4_indexer_q_quant(
+            positions,
+            q,
+            rotary_emb.cos_sin_cache,
+            indexer_weights,
+            self.softmax_scale,
+            self.n_head**-0.5,
+            use_fp4=self.use_fp4_kv,
+            weights_out_dtype=self.indexer_weights_dtype,
+        )
+        return q, q_scale, weights
+
+
 class DeepseekV4ROCMAiterMLASparseBackend(DeepseekV4SparseMLABackend):
     @staticmethod
     def get_name() -> str:
         return "ROCM_FLASHMLA_SPARSE_DSV4"
+
+    @staticmethod
+    def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int | MultipleOf]:
+        return [64, 128]
 
     @staticmethod
     def get_builder_cls() -> type[DeepseekV4SparseMLAMetadataBuilder]:
@@ -539,6 +680,13 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
     backend_cls = DeepseekV4ROCMAiterMLASparseBackend
     swa_backend_cls = DeepseekV41ROCMAiterSparseSWABackend
     _use_aiter_sparse_mla = False
+
+    def _indexer_cls(
+        self, k_cache: DeepseekV4IndexerCache | None
+    ) -> type[DeepseekV4Indexer]:
+        if k_cache is not None and k_cache.rocm_mxfp4:
+            return DeepseekV41RocmMxfp4Indexer
+        return super()._indexer_cls(k_cache)
 
     def __init__(self, *args, **kwargs):
         vllm_config = args[0] if args else kwargs["vllm_config"]
