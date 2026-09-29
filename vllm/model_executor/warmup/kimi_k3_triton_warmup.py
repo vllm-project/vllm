@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import sys
 from typing import TYPE_CHECKING
 
 import torch
@@ -19,7 +20,14 @@ logger = init_logger(__name__)
 
 
 def _get_kda_layer(worker: Worker) -> KimiK3DeltaAttention | None:
-    from vllm.models.kimi_k3.nvidia.kda import KimiK3DeltaAttention
+    # Model construction (vllm/models/kimi_k3/nvidia/model.py) imports kda at
+    # module level for Kimi-K3 models, so it is already in sys.modules by the
+    # time warmup runs. Avoid importing it here so other models do not pull in
+    # the Kimi package, whose import has filesystem side effects (numba cache,
+    # #59250).
+    kda = sys.modules.get("vllm.models.kimi_k3.nvidia.kda")
+    if kda is None:
+        return None
 
     compilation_config = getattr(
         worker.model_runner,
@@ -33,7 +41,7 @@ def _get_kda_layer(worker: Worker) -> KimiK3DeltaAttention | None:
         (
             layer
             for layer in static_context.values()
-            if isinstance(layer, KimiK3DeltaAttention)
+            if isinstance(layer, kda.KimiK3DeltaAttention)
         ),
         None,
     )
