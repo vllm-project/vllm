@@ -187,6 +187,11 @@ pub async fn serve(config: Config, shutdown: CancellationToken) -> Result<()> {
     serve_with_router_extension(config, shutdown, |router| router).await
 }
 
+/// Serve with `ShutdownEngine` enabled; the caller must shut down its managed engine when cancelled.
+pub async fn serve_with_engine_shutdown(config: Config, shutdown: CancellationToken) -> Result<()> {
+    serve_inner(config, shutdown.clone(), Some(shutdown), |router| router).await
+}
+
 /// Run the OpenAI-compatible HTTP server with an opt-in router extension.
 ///
 /// The extension receives the finalized vLLM router and can merge additional
@@ -194,6 +199,18 @@ pub async fn serve(config: Config, shutdown: CancellationToken) -> Result<()> {
 pub async fn serve_with_router_extension<F>(
     config: Config,
     shutdown: CancellationToken,
+    extend_router: F,
+) -> Result<()>
+where
+    F: FnOnce(Router) -> Router,
+{
+    serve_inner(config, shutdown, None, extend_router).await
+}
+
+async fn serve_inner<F>(
+    config: Config,
+    shutdown: CancellationToken,
+    engine_shutdown: Option<CancellationToken>,
     extend_router: F,
 ) -> Result<()>
 where
@@ -247,9 +264,10 @@ where
         let engine_health = state.engine_core_client().subscribe_health();
         health_reporter.set_serving::<grpc::InferenceGrpcService>().await;
         health_reporter.set_serving::<grpc::ControlGrpcService>().await;
-        let control_service =
-            grpc::ControlGrpcService::new(grpc::ControlServiceImpl::new(state.clone()))
-                .max_decoding_message_size(DEFAULT_REQUEST_BODY_LIMIT_BYTES);
+        let control_service = grpc::ControlGrpcService::new(
+            grpc::ControlServiceImpl::new(state.clone()).with_engine_shutdown(engine_shutdown),
+        )
+        .max_decoding_message_size(DEFAULT_REQUEST_BODY_LIMIT_BYTES);
         let inference_service =
             grpc::InferenceGrpcService::new(grpc::InferenceServiceImpl::new(state.clone()))
                 .max_decoding_message_size(DEFAULT_REQUEST_BODY_LIMIT_BYTES);
