@@ -6,7 +6,7 @@ from typing import Any
 
 import torch
 from safetensors.torch import _TYPES as _SAFETENSORS_TO_TORCH_DTYPE
-from transformers import PretrainedConfig
+from transformers import PreTrainedConfig
 
 import vllm.model_executor.layers.fused_moe  # noqa
 from vllm.logger import init_logger
@@ -273,7 +273,7 @@ class AutoGPTQConfig(QuantizationConfig):
     def maybe_update_config(
         self,
         model_name: str,
-        hf_config: PretrainedConfig | None = None,
+        hf_config: PreTrainedConfig | None = None,
         revision: str | None = None,
     ):
         if self.modules_in_block_to_quantize:
@@ -689,7 +689,7 @@ class AutoGPTQMoEMethod(FusedMoEMethodBase):
 
     def get_fused_moe_quant_config(self, layer: RoutedExperts) -> FusedMoEQuantConfig:
         if self.wna16_moe_backend == WNA16MoEBackend.HUMMING:
-            from vllm.model_executor.layers.quantization.utils.humming_utils import (
+            from vllm.model_executor.layers.quantization.utils.humming import (
                 get_humming_moe_quant_config,
             )
 

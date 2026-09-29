@@ -9,6 +9,7 @@ from typing import Any
 
 from vllm.compilation.cuda_graph import CUDAGraphStat
 from vllm.config import KVEventsConfig, VllmConfig
+from vllm.distributed.aux_output_connector.connector import AuxOutputSchedulerConnector
 from vllm.distributed.ec_transfer.ec_connector.base import (
     ECConnectorBase,
     ECConnectorMetadata,
@@ -26,9 +27,6 @@ from vllm.distributed.kv_transfer.kv_connector.v1 import (
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadata
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorStats
 from vllm.logger import init_logger
-from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
-    RoutedExpertsManager,
-)
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.multimodal.encoder_budget import MultiModalBudget
 from vllm.multimodal.utils import get_mm_features_in_window
@@ -136,6 +134,9 @@ class Scheduler(SchedulerInterface):
             if self.scheduler_config.max_num_scheduled_tokens is not None
             else self.scheduler_config.max_num_batched_tokens
         )
+        self.adaptive_long_prefill_threshold = (
+            self.scheduler_config.long_prefill_token_threshold_adaptive
+        )
         self.max_model_len = vllm_config.model_config.max_model_len
         self.enable_kv_cache_events = (
             self.kv_events_config is not None
@@ -233,12 +234,11 @@ class Scheduler(SchedulerInterface):
         # Grammar compilation failures to finish as per-request errors in
         # update_from_output.
         self.grammar_compile_error_reqs: set[str] = set()
+        self.encoder_cache_mismatch_reqs: set[str] = set()
 
         # Encoder-related.
         # Calculate encoder cache size if applicable
-        supports_mm_inputs = mm_registry.supports_multimodal_inputs(
-            vllm_config.model_config
-        )
+        supports_mm_inputs = vllm_config.model_config.supports_multimodal_inputs
         mm_budget = (
             MultiModalBudget(vllm_config, mm_registry) if supports_mm_inputs else None
         )
@@ -320,8 +320,8 @@ class Scheduler(SchedulerInterface):
             hash_block_size=hash_block_size,
             metrics_collector=self.kv_metrics_collector,
             watermark=self.scheduler_config.watermark,
-            enable_mamba_fine_grained_prefix_cache=(
-                self.cache_config.enable_mamba_fine_grained_prefix_cache
+            enable_mamba_shared_prefix_checkpoint=(
+                self.cache_config.enable_mamba_shared_prefix_checkpoint
             ),
         )
         # Bind after construction so connectors can access the cache manager.
@@ -376,9 +376,9 @@ class Scheduler(SchedulerInterface):
         # manager decides whether it can check-point there (per-group eagle bit,
         # no MTP re-prefill tail); splitting for a stop it would refuse costs a
         # forward pass and displaces the block-boundary stop.
-        self.mamba_fine_grained_prefix_cache = (
+        self.mamba_shared_prefix_checkpoint = (
             self.mamba_partial_cache_hit
-            and self.kv_cache_manager.mamba_fine_grained_prefix_cache
+            and self.kv_cache_manager.mamba_shared_prefix_checkpoint
         )
 
         # Counts of non-empty steps scheduled / processed. update_from_output
@@ -393,25 +393,12 @@ class Scheduler(SchedulerInterface):
         if self.log_stats and vllm_config.observability_config.enable_mfu_metrics:
             self.perf_metrics = ModelMetrics(vllm_config)
 
-        self.enable_return_routed_experts = (
-            vllm_config.model_config.enable_return_routed_experts
+        self.aux_output_connector = (
+            AuxOutputSchedulerConnector()
+            if vllm_config.aux_output_config.enabled
+            else None
         )
         self.return_sampling_mask = vllm_config.model_config.return_sampling_mask
-
-        if self.enable_return_routed_experts:
-            assert self.dcp_world_size == 1 and self.pcp_world_size == 1, (
-                "enable_return_routed_experts does not support context parallelism "
-                "(dcp_world_size > 1 or pcp_world_size > 1)"
-            )
-
-            self.routed_experts_mgr = RoutedExpertsManager(
-                vllm_config=vllm_config,
-                kv_cache_config=kv_cache_config,
-            )
-            # Block-ID snapshot taken at schedule time (before forward),
-            # so update_from_output can read slot data even if a later
-            # schedule() frees the blocks (async scheduling race).
-            self._re_block_ids: dict[str, list[int]] = {}
 
         self._pause_state: PauseState = PauseState.UNPAUSED
 
@@ -509,7 +496,7 @@ class Scheduler(SchedulerInterface):
         # output tokens can still observe a junction there.
         junction_stop = (
             junction
-            if self.mamba_fine_grained_prefix_cache
+            if self.mamba_shared_prefix_checkpoint
             and junction <= request.num_prompt_tokens
             else block_floored
         )
@@ -616,6 +603,24 @@ class Scheduler(SchedulerInterface):
             throttle_prefills and not self.prefill_capacity_bound
         ) and any(not r.is_prefill_chunk for r in self.running)
 
+        # `long_prefill_token_threshold` exists to stop a long prefill from
+        # starving other requests of the token budget. When it is the only
+        # request there is nobody to starve, so let it use the whole budget.
+        num_eligible_reqs = (
+            len(self.running) + len(self.waiting) + len(self.skipped_waiting)
+        )
+        long_prefill_token_threshold = (
+            self.scheduler_config.long_prefill_token_threshold
+            if num_eligible_reqs > 1
+            else 0
+        )
+        if long_prefill_token_threshold > 0 and self.adaptive_long_prefill_threshold:
+            # Floor the cap at a fair share of the input budget so it never
+            # cuts a request below max_num_batched_tokens / num requests.
+            long_prefill_token_threshold = max(
+                long_prefill_token_threshold, input_budget // num_eligible_reqs
+            )
+
         # First, schedule the RUNNING requests.
         req_index = 0
         while req_index < len(self.running) and token_budget > 0:
@@ -667,8 +672,8 @@ class Scheduler(SchedulerInterface):
                 + request.num_output_placeholders
                 - request.num_computed_tokens
             )
-            if 0 < self.scheduler_config.long_prefill_token_threshold < num_new_tokens:
-                num_new_tokens = self.scheduler_config.long_prefill_token_threshold
+            if 0 < long_prefill_token_threshold < num_new_tokens:
+                num_new_tokens = long_prefill_token_threshold
             num_new_tokens = min(
                 num_new_tokens, token_budget, input_budget - draft_slots
             )
@@ -1107,9 +1112,8 @@ class Scheduler(SchedulerInterface):
                             num_new_tokens = padded_num_tokens
                             pad_spec_decode = True
 
-                    threshold = self.scheduler_config.long_prefill_token_threshold
-                    if 0 < threshold < num_new_tokens:
-                        num_new_tokens = threshold
+                    if 0 < long_prefill_token_threshold < num_new_tokens:
+                        num_new_tokens = long_prefill_token_threshold
 
                     # chunked prefill has to be enabled explicitly to allow
                     # pooling requests to be chunked
@@ -1487,6 +1491,13 @@ class Scheduler(SchedulerInterface):
             meta = self._build_kv_connector_meta(self.connector, scheduler_output)
             scheduler_output.kv_connector_metadata = meta
 
+        if self.aux_output_connector is not None:
+            scheduler_output.aux_output_connector_metadata = (
+                self.aux_output_connector.build_connector_meta(
+                    scheduler_output, self.requests
+                )
+            )
+
         # Build the connector meta for ECConnector
         if self.ec_connector is not None:
             ec_meta: ECConnectorMetadata = self.ec_connector.build_connector_meta(
@@ -1541,6 +1552,8 @@ class Scheduler(SchedulerInterface):
         assert request.status == RequestStatus.RUNNING, (
             "Only running requests can be preempted"
         )
+        if self.aux_output_connector is not None:
+            self.aux_output_connector.request_finished(request)
         self._free_request_blocks(request)
         self.encoder_cache_manager.free(request)
         self._inflight_prefills.discard(request)
@@ -1595,22 +1608,6 @@ class Scheduler(SchedulerInterface):
             # Drop from the in-flight-prefill set once it's no longer prefilling.
             if not request.is_prefill_chunk:
                 self._inflight_prefills.discard(request)
-
-        # Snapshot block IDs for routed experts before forward starts.
-        # A concurrent schedule() may preempt requests and free blocks
-        # before update_from_output runs; the snapshot survives that.
-        # Use update() to preserve entries from the previous step that
-        # have not yet been consumed by update_from_output (async
-        # scheduling may call _update_after_schedule again before the
-        # prior update_from_output runs).
-        if self.enable_return_routed_experts:
-            gid = self.routed_experts_mgr.attn_gid
-            self._re_block_ids.update(
-                {
-                    rid: self.kv_cache_manager.get_blocks(rid).get_block_ids()[gid]
-                    for rid in num_scheduled_tokens
-                }
-            )
 
         # Clear the finished and preempted request IDs.
         # NOTE: We shouldn't just clear() here because it will also affect
@@ -1718,6 +1715,29 @@ class Scheduler(SchedulerInterface):
             num_output_tokens=num_output_tokens,
         )
 
+    def _reject_on_encoder_cache_embed_mismatch(
+        self,
+        request: Request,
+        input_id: int,
+        identifier: str,
+        cached_num_encoder_embeds: int,
+        requested_num_encoder_embeds: int,
+    ) -> bool:
+        if cached_num_encoder_embeds == requested_num_encoder_embeds:
+            return False
+        logger.warning(
+            "Encoder cache entry for multimodal identifier %r holds %d "
+            "embeddings, but request %s input %d expects %d. A client-provided "
+            "multimodal UUID may have been reused for different content.",
+            identifier,
+            cached_num_encoder_embeds,
+            request.request_id,
+            input_id,
+            requested_num_encoder_embeds,
+        )
+        self.encoder_cache_mismatch_reqs.add(request.request_id)
+        return True
+
     def _try_schedule_encoder_inputs(
         self,
         request: Request,
@@ -1756,7 +1776,7 @@ class Scheduler(SchedulerInterface):
         # NOTE: since scheduler operates on the request level (possibly with
         # multiple encoder inputs per request), we need to create temporary
         # trackers for accounting at the encoder input level.
-        mm_hashes_to_schedule = set()
+        mm_hashes_to_schedule: dict[str, int] = {}
         num_embeds_to_schedule = 0
 
         encoder_window_end = (
@@ -1798,9 +1818,34 @@ class Scheduler(SchedulerInterface):
                 # We are not using the encoder cache for encoder-decoder models,
                 # yet.
                 if item_identifier in mm_hashes_to_schedule:
+                    scheduled_num_encoder_embeds = mm_hashes_to_schedule[
+                        item_identifier
+                    ]
+                    if self._reject_on_encoder_cache_embed_mismatch(
+                        request,
+                        i,
+                        item_identifier,
+                        scheduled_num_encoder_embeds,
+                        num_encoder_embeds,
+                    ):
+                        return [], 0, encoder_compute_budget, []
                     # The same encoder input has already been scheduled in the
                     # current step.
                     continue
+
+                cached_num_encoder_embeds = (
+                    self.encoder_cache_manager.get_cached_num_encoder_embeds(request, i)
+                )
+                if cached_num_encoder_embeds is not None and (
+                    self._reject_on_encoder_cache_embed_mismatch(
+                        request,
+                        i,
+                        item_identifier,
+                        cached_num_encoder_embeds,
+                        num_encoder_embeds,
+                    )
+                ):
+                    return [], 0, encoder_compute_budget, []
 
                 if self.encoder_cache_manager.check_and_update_cache(request, i):
                     # The encoder input is already computed and cached from a
@@ -1861,14 +1906,14 @@ class Scheduler(SchedulerInterface):
             if self.ec_connector is not None and self.ec_connector.has_cache_item(
                 item_identifier
             ):
-                mm_hashes_to_schedule.add(item_identifier)
+                mm_hashes_to_schedule[item_identifier] = num_encoder_embeds
                 external_load_encoder_input.append(i)
                 num_embeds_to_schedule += num_encoder_embeds
                 continue
 
             num_embeds_to_schedule += num_encoder_embeds
             encoder_compute_budget -= num_encoder_embeds
-            mm_hashes_to_schedule.add(item_identifier)
+            mm_hashes_to_schedule[item_identifier] = num_encoder_embeds
             encoder_inputs_to_schedule.append(i)
 
         return (
@@ -1962,28 +2007,6 @@ class Scheduler(SchedulerInterface):
                     num_scheduled_tokens,
                 )
             )
-
-        # Persist per-step routed experts into the scheduler-side slot
-        # buffer (CPU->CPU fancy-index assign; ~few MB per step).
-        # MUST precede the per-request routing reads below: stopped
-        # requests may terminate on tokens generated in this very step,
-        # whose routing was just D2H'd into model_runner_output.
-        routing_data = None
-        routing_offsets: dict[str, int] = {}
-        if model_runner_output.routed_experts is not None:
-            re = model_runner_output.routed_experts
-            self.routed_experts_mgr.store_batch(re.routing_data, re.slot_mapping)
-            routing_data = re.routing_data.astype(
-                self.routed_experts_mgr.routed_experts_by_slot.dtype,
-                copy=False,
-            )
-            # Build offset map using model runner's request order
-            # (input_batch ordering), NOT scheduler dict order.
-            offset = 0
-            for rid in model_runner_output.req_ids:
-                routing_offsets[rid] = offset
-                offset += num_scheduled_tokens[rid]
-
         # NOTE(woosuk): As len(num_scheduled_tokens) can be up to 1K or more,
         # the below loop can be a performance bottleneck. We should do our best
         # to avoid expensive operations inside the loop.
@@ -2076,7 +2099,6 @@ class Scheduler(SchedulerInterface):
             ec_transfer_params = None
             prefill_stats = None
             status_before_stop = request.status
-            num_output_tokens_before = len(request._output_token_ids)
 
             # Check for stop and update request status.
             if new_token_ids:
@@ -2113,48 +2135,13 @@ class Scheduler(SchedulerInterface):
                 stopped = True
 
             routed_experts = None
-            if (
-                self.enable_return_routed_experts
-                and routing_data is not None
-                and new_token_ids
-            ):
-                req_offset = routing_offsets[req_id]
-                end = req_offset + num_tokens_scheduled
-                block_ids = self._re_block_ids.pop(req_id, [])
-                if num_output_tokens_before == 0:
-                    # Prefill completed: read full prompt routing from
-                    # slot buffer using the block-ID snapshot taken at
-                    # schedule time (immune to async preemption).
-                    if (
-                        request.sampling_params is not None
-                        and request.sampling_params.routed_experts_prompt_start
-                        is not None
-                    ):
-                        prompt_start = (
-                            request.sampling_params.routed_experts_prompt_start
-                        )
-                        assert prompt_start <= request.num_prompt_tokens
-                    else:
-                        prompt_start = 0
-                    routed_experts = self.routed_experts_mgr.get(
-                        block_ids,
-                        request.num_prompt_tokens,
-                        token_start=prompt_start,
-                    )
-                else:
-                    if scheduled_spec_token_ids:
-                        # Spec decode: accepted tokens at the START of
-                        # the scheduled range, rejected at the end.
-                        routed_experts = routing_data[
-                            req_offset : req_offset + len(new_token_ids)
-                        ]
-                    else:
-                        # Normal decode / re-prefill: token(s) at the END.
-                        routed_experts = routing_data[end - len(new_token_ids) : end]
-
             should_emit_output = bool(
                 new_token_ids or pooler_output is not None or stopped
             )
+            if self.aux_output_connector is not None and should_emit_output:
+                routed_experts = self.aux_output_connector.take_output(
+                    request, model_runner_output.aux_output_connector_output
+                )
             if should_emit_output:
                 prefill_stats = request.take_prefill_stats()
                 if prefill_stats is not None:
@@ -2247,6 +2234,8 @@ class Scheduler(SchedulerInterface):
 
         error_req_ids = set(self.grammar_compile_error_reqs)
         self.grammar_compile_error_reqs.clear()
+        error_req_ids.update(self.encoder_cache_mismatch_reqs)
+        self.encoder_cache_mismatch_reqs.clear()
         if failed_kv_load_req_ids and not self.recompute_kv_load_failures:
             error_req_ids.update(failed_kv_load_req_ids)
         if self.ec_connector is not None:
@@ -2641,6 +2630,8 @@ class Scheduler(SchedulerInterface):
     ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
         assert request.is_finished()
 
+        if self.aux_output_connector is not None:
+            self.aux_output_connector.request_finished(request)
         self._inflight_prefills.discard(request)
         connector_delay_free_blocks, kv_xfer_params = self._connector_finished(request)
 
@@ -2773,6 +2764,16 @@ class Scheduler(SchedulerInterface):
         Otherwise, this method will only reset the KV prefix cache when there
         is no running requests taking KV cache.
         """
+        if reset_running_requests and self.aux_output_connector is not None:
+            if self._pause_state != PauseState.PAUSED_ALL:
+                raise RuntimeError(
+                    "AuxOutput Connector only supports resetting running requests "
+                    "after pause(mode='keep')."
+                )
+            if any(request.num_in_flight_tokens for request in self.requests.values()):
+                raise RuntimeError(
+                    "AuxOutput Connector cannot reset while model output is in flight."
+                )
         if reset_running_requests:
             # For logging.
             timestamp = time.monotonic()
@@ -2802,6 +2803,9 @@ class Scheduler(SchedulerInterface):
 
         if reset_connector:
             reset_successful = self.reset_connector_cache() and reset_successful
+
+        if reset_successful and self.aux_output_connector is not None:
+            self.aux_output_connector.reset()
 
         return reset_successful
 
@@ -3266,8 +3270,8 @@ class Scheduler(SchedulerInterface):
             # invalid block IDs cannot be mapped back to requests.
             raise RuntimeError(
                 "A KV connector reported block-level load failures "
-                "(invalid_block_ids) on a layout with multiple KV cache "
-                "groups, where block IDs are only unique within a group. "
+                "(invalid_block_ids) which is not supported for models "
+                "with multiple KV cache groups. "
                 "Connectors must report failed requests via "
                 "KVConnectorTransferResults.failed_recving instead."
             )
