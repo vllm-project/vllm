@@ -288,21 +288,28 @@ class PPHandler:
         )
 
     def broadcast_drafts(
-        self, draft_tokens: torch.Tensor, input_batch: InputBatch
+        self, draft_token_table: torch.Tensor, input_batch: InputBatch
     ) -> None:
-        """Broadcast draft proposals so non-last ranks can embed real token ids."""
+        """Broadcast the speculator's freshly proposed draft tokens.
+
+        Snapshot the persistent draft table on the main stream. The broadcast
+        stream may be stalled behind sampled-token sends whose delayed receivers
+        have not posted yet, while a later model step can overwrite the table.
+        """
         assert self.is_last_rank
         if compute_need_sampled_mask(input_batch) is None:
             return
+
+        # Advanced indexing produces owned storage. Run it on the main stream so
+        # it is ordered after this step's table update and before a later one.
+        send = draft_token_table[input_batch.idx_mapping]
+        assert send.shape[0] == input_batch.num_reqs
         with torch.cuda.stream(self.broadcast_stream):
             self.broadcast_stream.wait_stream(self.main_stream)
-            send = draft_tokens[input_batch.idx_mapping].contiguous()
-            # Must record the idx_mapping tensor since it was allocated
-            # on the main stream.
-            input_batch.idx_mapping.record_stream(self.broadcast_stream)
             torch.distributed.broadcast(
                 send, src=self.last_rank, group=self.broadcast_group
             )
+            send.record_stream(self.broadcast_stream)
 
     def receive(self, input_batch: InputBatch) -> bool:
         """Returns True iff sampled tokens need to be gathered from *all*

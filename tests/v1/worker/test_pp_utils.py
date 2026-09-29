@@ -279,6 +279,43 @@ def test_receive_exposes_logical_views_of_padded_combined(monkeypatch):
     assert slot.num_rejected.tolist() == [5, 6, 7, 8, 9]
 
 
+def test_broadcast_drafts_snapshots_table_before_side_stream_can_stall(monkeypatch):
+    handler = PPHandler.__new__(PPHandler)
+    handler.is_last_rank = True
+    handler.last_rank = 3
+    handler.broadcast_group = Mock()
+    handler.main_stream = Mock()
+    handler.broadcast_stream = Mock()
+
+    draft_table = torch.tensor([[10, 11], [20, 21]], dtype=torch.int64)
+    batch = _batch(
+        num_computed=[1, 1],
+        prefill_len=[1, 1],
+        num_scheduled=[1, 1],
+    )
+    batch.idx_mapping = torch.tensor([1, 0], dtype=torch.int32)
+
+    class _StalledSideStream:
+        def __enter__(self):
+            # Model a later main-stream step overwriting the persistent table
+            # before a backlogged broadcast stream can execute new work.
+            draft_table.fill_(99)
+
+        def __exit__(self, *args):
+            return False
+
+    sent = []
+    monkeypatch.setattr(torch.cuda, "stream", lambda _: _StalledSideStream())
+    monkeypatch.setattr(
+        torch.distributed, "broadcast", lambda tensor, **_: sent.append(tensor.clone())
+    )
+    monkeypatch.setattr(torch.Tensor, "record_stream", lambda *_: None)
+
+    handler.broadcast_drafts(draft_table, batch)
+
+    assert sent[0].tolist() == [[20, 21], [10, 11]]
+
+
 def test_filtered_receive_mapping_keeps_serving_int32_specialization():
     handler = PPHandler.__new__(PPHandler)
     handler.queue = deque(
