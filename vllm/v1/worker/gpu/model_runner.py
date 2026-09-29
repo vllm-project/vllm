@@ -1164,7 +1164,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         updating request state.
         """
         assert self.pp_handler is not None
-        idx_mapping = torch.full((1,), -1, dtype=torch.int64, device=self.device)
+        idx_mapping = torch.full((1,), -1, dtype=torch.int32, device=self.device)
         num_sampled = torch.zeros(1, dtype=torch.int32, device=self.device)
         post_update(
             idx_mapping,

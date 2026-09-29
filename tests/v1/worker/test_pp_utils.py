@@ -279,6 +279,35 @@ def test_receive_exposes_logical_views_of_padded_combined(monkeypatch):
     assert slot.num_rejected.tolist() == [5, 6, 7, 8, 9]
 
 
+def test_filtered_receive_mapping_keeps_serving_int32_specialization():
+    handler = PPHandler.__new__(PPHandler)
+    handler.queue = deque(
+        [
+            pp_utils.PendingRecv(
+                event=None,
+                sampled_tokens=torch.empty(2, 1, dtype=torch.int64),
+                combined=torch.empty(2, 2, dtype=torch.int32),
+                num_sampled=torch.empty(2, dtype=torch.int32),
+                num_rejected=torch.empty(2, dtype=torch.int32),
+                idx_mapping=torch.tensor([0, 1], dtype=torch.int32),
+                idx_mapping_np=np.array([0, 1], dtype=np.intp),
+                need_sampled_mask=np.array([True, True]),
+                gen_at_receive_np=np.array([0, 0], dtype=np.int32),
+                launched=True,
+            )
+        ]
+    )
+    handler.recv_launch_delay = 0
+    handler.req_idx_gen_np = np.array([1, 0], dtype=np.int32)
+    handler.device = torch.device("cpu")
+
+    outputs = handler.get_prev_sampled_outputs()
+
+    assert outputs is not None
+    assert outputs["idx_mapping"].dtype == torch.int32
+    assert outputs["idx_mapping"].tolist() == [-1, 1]
+
+
 def test_warmup_pp_decode_update_matches_serving_specialization(monkeypatch):
     calls = []
     monkeypatch.setattr(model_runner, "post_update", lambda *args: calls.append(args))
@@ -296,7 +325,7 @@ def test_warmup_pp_decode_update_matches_serving_specialization(monkeypatch):
     idx_mapping, _, _, output_bin_counts = args[:4]
     sampled_tokens, num_sampled, num_rejected, query_start_loc = args[4:8]
     assert len(args) == 10
-    assert idx_mapping.tolist() == [-1] and idx_mapping.dtype == torch.int64
+    assert idx_mapping.tolist() == [-1] and idx_mapping.dtype == torch.int32
     assert output_bin_counts is None
     assert query_start_loc is None
     assert sampled_tokens.shape == (1, 3) and sampled_tokens.dtype == torch.int64

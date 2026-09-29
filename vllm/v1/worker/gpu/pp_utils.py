@@ -260,7 +260,9 @@ class PPHandler:
                 return None
             # Filter excluded request indices.
             idx_mapping_np = np.where(exclude_mask, -1, slot.idx_mapping_np)
-            idx_mapping = async_tensor_h2d(idx_mapping_np, device=self.device)
+            idx_mapping = async_tensor_h2d(
+                idx_mapping_np, device=self.device, dtype=torch.int32
+            )
 
         if slot.event is not None:
             self.main_stream.wait_event(slot.event)
@@ -272,7 +274,9 @@ class PPHandler:
                 keep_t = torch.as_tensor(keep, device=self.device)
                 draft_tokens = draft_tokens[keep_t]
                 draft_idx_mapping = async_tensor_h2d(
-                    slot.idx_mapping_np[keep], device=self.device
+                    slot.idx_mapping_np[keep],
+                    device=self.device,
+                    dtype=torch.int32,
                 )
             draft_tokens_to_update[draft_idx_mapping] = draft_tokens
 

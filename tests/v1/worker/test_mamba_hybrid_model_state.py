@@ -201,7 +201,7 @@ def test_pp_warmup_postprocess_is_state_neutral() -> None:
     accepted_before = state.num_accepted_tokens_gpu.clone()
     recurrent_before = recurrent_state.clone()
     state.warmup_postprocess_state(
-        tensor([-1], torch.int64),
+        tensor([-1], torch.int32),
         tensor([3], torch.int32),
         tensor([8, 8, 8, 8], torch.int32),
     )
