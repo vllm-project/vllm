@@ -1589,6 +1589,9 @@ def test_engram_dp_shared_memory_config_validation(
         ("DeepseekV41ForCausalLM", [1], "rocm", True),
         ("DeepseekV41ForCausalLM", [], "cuda", False),
         ("DeepseekV41ForCausalLM", [1], "cpu", False),
+        ("DeepseekV41ForCausalLM", [1], "oot", True),
+        ("DeepseekV41ForCausalLM", [], "oot", False),
+        ("LlamaForCausalLM", [1], "oot", False),
         ("Qwen4ExpForCausalLM", [1], "cuda", True),
         ("Qwen4ExpForCausalLM", [1], "rocm", True),
         ("Qwen4ExpForConditionalGeneration", [1], "cuda", True),
@@ -1609,6 +1612,8 @@ def test_engram_model_support(
     monkeypatch.setattr(
         current_platform, "is_cuda_alike", lambda: platform in ("cuda", "rocm")
     )
+    if platform == "oot":
+        monkeypatch.setattr(current_platform, "supports_engram", lambda: True)
     model = (
         cast(
             ModelConfig,

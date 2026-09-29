@@ -77,13 +77,13 @@ class EngramConfig:
         if (
             model_config is None
             or field is None
-            or not current_platform.is_cuda_alike()
+            or not current_platform.supports_engram()
             or not getattr(model_config.hf_text_config, field, None)
         ):
             raise ValueError(
                 "EngramConfig requires a model with supported Engram "
-                "embeddings, non-empty n-gram layer ids, and a CUDA-alike "
-                "device (CUDA or ROCm)."
+                "embeddings, non-empty n-gram layer ids, and a platform "
+                "that supports Engram."
             )
 
     def resolve_dp_shared_memory(self, parallel_config: "ParallelConfig") -> None:
