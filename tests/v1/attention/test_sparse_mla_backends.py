@@ -2016,14 +2016,18 @@ def test_hisparse_maps_speculative_rows_through_request_state():
 
 
 @requires_hisparse_ops
-@pytest.mark.parametrize("num_rows", [2, 8])
-def test_hisparse_speculative_rows_resolve_host_misses_consistently(num_rows):
+@pytest.mark.parametrize(
+    "num_rows,row_stride", [(2, 128), (8, 128), (4, 32)], ids=["2", "8", "overlap"]
+)
+def test_hisparse_speculative_rows_resolve_host_misses_consistently(
+    num_rows, row_stride
+):
     """Verification rows of one request must agree on its hot-buffer slots.
 
     Each row resolved residency in its own thread block against the request's
     shared slot ownership and LRU, so rows missing on different host rows could
     claim the same free slot. One row's hot index then pointed at a slot holding
-    another row's KV.
+    another row's KV. Overlapping rows must share one slot per host row.
     """
     device = torch.device(DEVICE_TYPE)
     block_size, row_width, top_k = 64, 64, 128
@@ -2053,9 +2057,11 @@ def test_hisparse_speculative_rows_resolve_host_misses_consistently(num_rows):
     base = torch.arange(top_k, dtype=torch.int32, device=device)[None, :]
     for step in range(4):
         runtime.begin_forward()
-        # Disjoint rows shifted by half a top-k per step: all misses first,
-        # then half hits and half misses.
-        topk = (rows * top_k + base + step * (top_k // 2)) % (num_blocks * block_size)
+        # Rows start row_stride apart (disjoint at row_stride == top_k) and
+        # shift by half a top-k per step: all misses first, then a mix.
+        topk = (rows * row_stride + base + step * (top_k // 2)) % (
+            num_blocks * block_size
+        )
         hot_indices = cache.swap_in(
             req_id_per_token=req_ids,
             block_table=block_table,
