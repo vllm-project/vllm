@@ -5,15 +5,13 @@
 Same vision/LLM stack as MiniCPM-V 4.6, plus canvas 3D M-RoPE.
 """
 
-import logging
 import math
-from collections.abc import Iterable
+from typing import Any
 
 import torch
 
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
-from vllm.model_executor.models.utils import AutoWeightsLoader
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import MultiModalFeatureSpec
 
@@ -22,7 +20,6 @@ from .minicpmv4_6 import (
     MiniCPMV4_6ForConditionalGeneration,
     MiniCPMV4_6MultiModalProcessor,
     MiniCPMV4_6ProcessingInfo,
-    _stack_vit_merger_qkv,
 )
 
 logger = init_logger(__name__)
@@ -92,6 +89,11 @@ def _as_hw_pairs(tensor: torch.Tensor) -> torch.Tensor:
     return data.reshape(-1, 2)
 
 
+def _sequential_positions(seq_len: int) -> torch.Tensor:
+    """Positions for the fallback where canvas M-RoPE cannot be computed."""
+    return torch.arange(seq_len).unsqueeze(0).expand(3, -1)
+
+
 @MULTIMODAL_REGISTRY.register_processor(
     MiniCPMV4_7MultiModalProcessor,
     info=MiniCPMV4_7ProcessingInfo,
@@ -118,7 +120,7 @@ class MiniCPMV4_7ForConditionalGeneration(MiniCPMV4_6ForConditionalGeneration):
         # conversion script resolves them from the tokenizer. Prefer them so the
         # canvas matches training, and fall back to the tokenizer for checkpoints
         # whose config predates these fields.
-        configured_ids = {
+        configured_ids: dict[str, int | None] = {
             "im_start_id": getattr(config, "image_start_id", None),
             "im_end_id": getattr(config, "image_end_id", None),
             "slice_start_id": getattr(config, "slice_start_id", None),
@@ -127,41 +129,35 @@ class MiniCPMV4_7ForConditionalGeneration(MiniCPMV4_6ForConditionalGeneration):
         }
         if all(value is not None for value in configured_ids.values()):
             self._canvas_special_ids = {
-                name: int(value) for name, value in configured_ids.items()
+                name: int(value)
+                for name, value in configured_ids.items()
+                if value is not None
             }
             return
 
-        try:
-            from vllm.tokenizers.registry import get_tokenizer
+        from vllm.tokenizers.registry import get_tokenizer
 
-            model_config = vllm_config.model_config
-            tokenizer = get_tokenizer(
-                model_config.tokenizer,
-                revision=model_config.tokenizer_revision,
-                trust_remote_code=model_config.trust_remote_code,
-            )
-            self._canvas_special_ids = {
-                "im_start_id": tokenizer.convert_tokens_to_ids(
-                    getattr(tokenizer, "image_start_token", "<image>")
-                ),
-                "im_end_id": tokenizer.convert_tokens_to_ids(
-                    getattr(tokenizer, "image_end_token", "</image>")
-                ),
-                "slice_start_id": tokenizer.convert_tokens_to_ids(
-                    getattr(tokenizer, "slice_start_token", "<slice>")
-                ),
-                "slice_end_id": tokenizer.convert_tokens_to_ids(
-                    getattr(tokenizer, "slice_end_token", "</slice>")
-                ),
-                "newline_id": tokenizer.encode("\n", add_special_tokens=False)[0],
-            }
-        except Exception:
-            logger.warning(
-                "Failed to resolve MiniCPM-V 4.7 canvas M-RoPE token IDs; "
-                "falling back to sequential positions.",
-                exc_info=True,
-            )
-            self._uses_canvas_mrope = False
+        model_config = vllm_config.model_config
+        tokenizer = get_tokenizer(
+            model_config.tokenizer,
+            revision=model_config.tokenizer_revision,
+            trust_remote_code=model_config.trust_remote_code,
+        )
+        self._canvas_special_ids = {
+            "im_start_id": tokenizer.convert_tokens_to_ids(
+                getattr(tokenizer, "image_start_token", "<image>")
+            ),
+            "im_end_id": tokenizer.convert_tokens_to_ids(
+                getattr(tokenizer, "image_end_token", "</image>")
+            ),
+            "slice_start_id": tokenizer.convert_tokens_to_ids(
+                getattr(tokenizer, "slice_start_token", "<slice>")
+            ),
+            "slice_end_id": tokenizer.convert_tokens_to_ids(
+                getattr(tokenizer, "slice_end_token", "</slice>")
+            ),
+            "newline_id": tokenizer.encode("\n", add_special_tokens=False)[0],
+        }
 
     def get_mrope_input_positions(
         self,
@@ -174,33 +170,25 @@ class MiniCPMV4_7ForConditionalGeneration(MiniCPMV4_6ForConditionalGeneration):
             or self._canvas_special_ids is None
             or not mm_features
         ):
-            positions = torch.arange(seq_len).unsqueeze(0).expand(3, -1)
-            return positions, 0
+            return _sequential_positions(seq_len), 0
 
         input_ids = torch.tensor(input_tokens, dtype=torch.long)
         image_bounds = build_image_bounds(input_ids, self._canvas_special_ids)
 
         target_sizes_list: list[torch.Tensor] = []
-        debug_shapes = logger.isEnabledFor(logging.DEBUG)
-        raw_tgt_shapes: list[list[int]] = []
         for mm_feature in sorted(mm_features, key=lambda f: f.mm_position.offset):
             if mm_feature.data is None:
                 continue
             for key in ("tgt_sizes", "video_tgt_sizes"):
                 tgt = mm_feature.data.get(key)
-                if tgt is None or tgt.data is None:
+                if tgt is None or not isinstance(tgt.data, torch.Tensor):
                     continue
-                if debug_shapes:
-                    raw_tgt_shapes.append(list(tgt.data.shape))
                 try:
                     target_sizes_list.append(_as_hw_pairs(tgt.data))
-                except ValueError as exc:
-                    logger.warning(
-                        "MiniCPM-V 4.7 canvas M-RoPE bad %s shape %s: %s",
-                        key,
-                        tuple(tgt.data.shape),
-                        exc,
-                    )
+                except ValueError:
+                    # Not an (N, 2) size table. The bounds/sizes match below
+                    # turns this into a sequential fallback.
+                    continue
 
         if not target_sizes_list or image_bounds.numel() == 0:
             logger.warning(
@@ -209,8 +197,7 @@ class MiniCPMV4_7ForConditionalGeneration(MiniCPMV4_6ForConditionalGeneration):
                 len(target_sizes_list),
                 tuple(image_bounds.shape) if image_bounds is not None else None,
             )
-            positions = torch.arange(seq_len).unsqueeze(0).expand(3, -1)
-            return positions, 0
+            return _sequential_positions(seq_len), 0
 
         target_sizes = torch.cat(target_sizes_list, dim=0)
         if target_sizes.ndim != 2 or target_sizes.shape[-1] != 2:
@@ -219,8 +206,7 @@ class MiniCPMV4_7ForConditionalGeneration(MiniCPMV4_6ForConditionalGeneration):
                 "using sequential positions.",
                 tuple(target_sizes.shape),
             )
-            positions = torch.arange(seq_len).unsqueeze(0).expand(3, -1)
-            return positions, 0
+            return _sequential_positions(seq_len), 0
         if image_bounds.shape[0] != target_sizes.shape[0]:
             logger.warning(
                 "MiniCPM-V 4.7 canvas M-RoPE size mismatch: "
@@ -228,8 +214,7 @@ class MiniCPMV4_7ForConditionalGeneration(MiniCPMV4_6ForConditionalGeneration):
                 tuple(image_bounds.shape),
                 tuple(target_sizes.shape),
             )
-            positions = torch.arange(seq_len).unsqueeze(0).expand(3, -1)
-            return positions, 0
+            return _sequential_positions(seq_len), 0
 
         try:
             pos3d = _compute_canvas_single(
@@ -245,29 +230,8 @@ class MiniCPMV4_7ForConditionalGeneration(MiniCPMV4_6ForConditionalGeneration):
                 "falling back to sequential positions.",
                 exc_info=True,
             )
-            positions = torch.arange(seq_len).unsqueeze(0).expand(3, -1)
-            return positions, 0
-        if debug_shapes:
-            logger.debug(
-                "MiniCPM-V 4.7 canvas M-RoPE: seq=%s bounds=%s tgt=%s raw_tgt=%s "
-                "pos_max=%s",
-                seq_len,
-                tuple(image_bounds.shape),
-                tuple(target_sizes.shape),
-                raw_tgt_shapes,
-                [int(pos3d[d].max()) for d in range(3)],
-            )
+            return _sequential_positions(seq_len), 0
         return pos3d, canvas_rope_delta(pos3d, seq_len)
-
-    def load_weights(
-        self,
-        weights: Iterable[tuple[str, torch.Tensor]],
-    ) -> set[str]:
-        loader = AutoWeightsLoader(self)
-        return loader.load_weights(
-            _stack_vit_merger_qkv(weights),
-            mapper=self.hf_to_vllm_mapper,
-        )
 
 
 # Canvas 3D M-RoPE: position ids for the slice canvas.
@@ -336,6 +300,9 @@ def build_image_bounds(
 def _compute_canvas_single(
     input_ids, position_ids_2d, image_bound, target_sizes, special_token_ids
 ):
+    # Inference always handles one unpadded sequence. The packed (cu_seqlens)
+    # form below is kept only to mirror the transformers reference
+    # implementation of its canvas position computation.
     seq_len = input_ids.shape[0]
     cu_seqlens = torch.tensor([0, seq_len], device=input_ids.device, dtype=torch.long)
     return _compute_canvas_packed(
@@ -393,7 +360,7 @@ def _compute_canvas_packed(
     gap_ok_ids = structural_ids | ({newline_id} if newline_id is not None else set())
 
     def _group_end_pos(g, s_end):
-        """Compute the group_end for a raw_group (same logic as main loop)."""
+        """First position after a group's trailing structural tokens."""
         le = g["slices"][-1][1] if g["slices"] else g["thumbnail"][1]
         ge = le
         while ge < s_end and ids_flat[ge].item() in structural_ids:
@@ -427,7 +394,7 @@ def _compute_canvas_packed(
         # ---- group images: thumbnail + following slices ----
         # merge consecutive no-slice frames into one video group
         raw_groups = []
-        cur_group = None
+        cur_group: dict[str, Any] | None = None
         for bs_, be_, gi in seq_imgs:
             marker_pos = bs_ - 1
             is_slice = (
@@ -485,16 +452,7 @@ def _compute_canvas_packed(
                 # group_start = <im_start> of first frame
                 group_start = first_frame["thumbnail"][0] - 1
                 # group_end = after last structural token of last frame
-                if last_frame["slices"]:
-                    last_visual_end = last_frame["slices"][-1][1]
-                else:
-                    last_visual_end = last_frame["thumbnail"][1]
-                group_end = last_visual_end
-                while (
-                    group_end < s_end and ids_flat[group_end].item() in structural_ids
-                ):
-                    group_end += 1
-                group_end = min(group_end, s_end)
+                group_end = _group_end_pos(last_frame, s_end)
 
                 # text before video group
                 text_len = group_start - cursor
@@ -560,14 +518,7 @@ def _compute_canvas_packed(
                         canvas_W = max(llm_tw, 1)
 
                     # find per-frame end (after structural tokens)
-                    f_vis_end = vf_slices[-1][1] if vf_slices else t_be
-                    frame_end = f_vis_end
-                    while (
-                        frame_end < group_end
-                        and ids_flat[frame_end].item() in structural_ids
-                    ):
-                        frame_end += 1
-                    frame_end = min(frame_end, group_end)
+                    frame_end = _group_end_pos(vf, group_end)
 
                     # base coat for this frame's span
                     pos3d[0, 0, im_start_pos:frame_end] = base_f
@@ -705,13 +656,7 @@ def _compute_canvas_packed(
                 slices = group["slices"]
 
                 group_start = t_bs - 1
-                last_visual_end = slices[-1][1] if slices else t_be
-                group_end = last_visual_end
-                while (
-                    group_end < s_end and ids_flat[group_end].item() in structural_ids
-                ):
-                    group_end += 1
-                group_end = min(group_end, s_end)
+                group_end = _group_end_pos(group, s_end)
 
                 # text before group
                 text_len = group_start - cursor

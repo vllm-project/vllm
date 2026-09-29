@@ -128,10 +128,10 @@ def _vision_downsample_mode(flag: bool | None) -> str | None:
 
 
 def _select_vision_items(
-    image_input: Mapping[str, object],
+    image_input: MiniCPMVImagePixelInputs,
     item_indices: list[int],
     num_slices: list[int],
-):
+) -> MiniCPMVImagePixelInputs:
     """Slice a vision input down to the given items, keeping their order."""
     offsets = [0]
     for n in num_slices:
@@ -588,13 +588,13 @@ class MiniCPMV4_6MultiModalProcessor(MiniCPMVMultiModalProcessor):
         new_update = super()._recompute_cached_prompt_update(
             cached_update, new_item_idx
         )
-        # MiniCPM-V 4.6 prefixes video placeholders with `<image_id>{idx}</image_id>`
-        # (the base class only rewrites the image modality). 4.7 emits no such
-        # prefix, so there is nothing to renumber.
+        # Video placeholders carry an `<image_id>{idx}</image_id>` prefix that
+        # the base class does not rewrite. 4.7 has no prefix, so this is a
+        # no-op there.
         if cached_update.modality == "video":
             old_prefix = self._video_local_id_prefix(cached_update.item_idx)
             new_prefix = self._video_local_id_prefix(new_item_idx)
-            if old_prefix and old_prefix != new_prefix:
+            if old_prefix != new_prefix:
                 tokenizer = self.info.get_tokenizer()
                 video_token = getattr(tokenizer, "video_token", "<|video_pad|>")
 
