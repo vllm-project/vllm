@@ -2182,7 +2182,9 @@ def test_v41_rocm_csa2_full_pipeline():
         )
 
     q_out, kv_out, index_q_out, index_q_scale_out, index_weights_out_out = result
-    assert torch.equal(q_out, q)
+    assert torch.equal(
+        q_out, q.view(num_tokens, attention.n_local_heads, attention.head_dim)
+    )
     assert torch.equal(kv_out, kv)
     assert torch.equal(index_q_out, index_q)
     assert torch.equal(index_q_scale_out, index_q_scale)
@@ -2273,7 +2275,9 @@ def test_v41_rocm_csa2_reindex_pipeline():
         )
 
     q_out, kv_out, index_q_out, index_q_scale_out, index_weights_out_out = result
-    assert torch.equal(q_out, q)
+    assert torch.equal(
+        q_out, q.view(num_tokens, attention.n_local_heads, attention.head_dim)
+    )
     assert torch.equal(kv_out, kv)
     assert torch.equal(index_q_out, index_q)
     assert torch.equal(index_q_scale_out, index_q_scale)
