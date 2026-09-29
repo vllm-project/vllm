@@ -393,6 +393,9 @@ class HfRunner:
         # Set this to avoid hanging issue
         default_torch_num_threads: int | None = None,
     ) -> None:
+        if current_platform.is_xpu():
+            torch.backends.mkldnn.deterministic = True
+
         init_ctx = (
             nullcontext()
             if default_torch_num_threads is None
