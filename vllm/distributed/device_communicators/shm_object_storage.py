@@ -511,24 +511,20 @@ class SingleWriterShmObjectStorage:
         md_bytes: int,
         data_view: memoryview,
     ) -> None:
-        if md_bytes:
-            data_view[self.flag_bytes : self.flag_bytes + md_bytes] = metadata
+        data_view[self.flag_bytes : self.flag_bytes + md_bytes] = metadata
+
         payload_offset = self.flag_bytes + md_bytes
 
         if isinstance(data, bytes):
-            if data_bytes:
-                self._copy_payload(data, data_view, payload_offset)
+            self._copy_payload(data, data_view, payload_offset)
         elif isinstance(data, list):
             start_idx = payload_offset
             for item_bytes in data:
                 item_size = len(item_bytes)
-                if item_size:
-                    self._copy_payload(item_bytes, data_view, start_idx)
-                    start_idx += item_size
+                self._copy_payload(item_bytes, data_view, start_idx)
+                start_idx += item_size
         else:
-            raise ValueError(
-                f"Unsupported data type for serialization: {type(data)}"
-            )
+            raise ValueError(f"Unsupported data type for serialization: {type(data)}")
 
     @staticmethod
     def _copy_payload(
