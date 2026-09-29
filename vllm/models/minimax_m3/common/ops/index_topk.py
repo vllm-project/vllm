@@ -24,6 +24,16 @@ from vllm.utils.math_utils import round_up
 SPARSE_BLOCK_SIZE = 128
 
 
+def _use_fp8_dot(q: torch.Tensor, k: torch.Tensor) -> bool:
+    """Feed FP8 q/k straight to tl.dot when the device has FP8 MMA."""
+    return (
+        q.dtype == k.dtype
+        and q.dtype in (torch.float8_e4m3fn, torch.float8_e5m2)
+        and current_platform.is_cuda()
+        and current_platform.has_device_capability(89)
+    )
+
+
 # ---------------------------------------------------------------------------
 # Bitonic top-k helpers (layout-agnostic).
 # ---------------------------------------------------------------------------
@@ -101,6 +111,7 @@ def _index_block_score_kernel(
     stride_bt_b,
     BLOCK_SIZE_Q: tl.constexpr,
     BLOCK_SIZE_K: tl.constexpr,  # == SPARSE_BLOCK_SIZE (128)
+    FP8_DOT: tl.constexpr,
 ):
     pid_q = tl.program_id(0)
     pid_bh = tl.program_id(1)
@@ -125,7 +136,7 @@ def _index_block_score_kernel(
     q = tl.load(q_ptrs, boundary_check=(0,), padding_option="zero")
     # FP8 has no mixed-dtype dot with bf16/fp32. Leave bf16 and fp32 loads
     # in their stored dtype so fp32 pipeline tests keep full precision.
-    if q.dtype.is_fp8():
+    if q.dtype.is_fp8() and not FP8_DOT:
         q = q.to(tl.bfloat16)
     q_start = prefix_len + pid_q * BLOCK_SIZE_Q
 
@@ -150,9 +161,9 @@ def _index_block_score_kernel(
             + off_k[None, :] * stride_ik_pos
             + off_d[:, None] * stride_ik_d,
         )
-        if k.dtype.is_fp8():
+        if k.dtype.is_fp8() and not FP8_DOT:
             k = k.to(tl.bfloat16)
-        qk = tl.dot(q, k, out_dtype=tl.float32)
+        qk = tl.dot(q, k, out_dtype=tl.float32, max_num_imprecise_acc=0)
         # apply causal mask as needed
         if q_start < i + BLOCK_SIZE_K:
             qk = tl.where(off_q[:, None] >= pos[None, :], qk, float("-inf"))
@@ -323,6 +334,7 @@ def _decode_index_score_kernel(
     BLOCK_SIZE_Q: tl.constexpr,
     num_kv_chunks,
     USE_PDL: tl.constexpr,
+    FP8_DOT: tl.constexpr,
 ):
     BLOCK_SIZE_HQ: tl.constexpr = num_idx_heads * BLOCK_SIZE_Q
     pid_r = tl.program_id(0)
@@ -366,7 +378,7 @@ def _decode_index_score_kernel(
         mask=q_mask[None, :],
         other=0.0,
     )  # [D,HQ]
-    if q.dtype.is_fp8():
+    if q.dtype.is_fp8() and not FP8_DOT:
         q = q.to(tl.bfloat16)
     for blk in tl.range(chunk_start_block, chunk_end_block):
         page = tl.load(bt_row + blk).to(tl.int64)
@@ -381,12 +393,11 @@ def _decode_index_score_kernel(
             + off_k[:, None] * stride_ik_pos
             + off_d * stride_ik_d,
         )  # [N,D]
-        # Upcast only FP8 cache loads. BF16 operands keep FP8 dot
-        # instructions out of the fallback path; FP32 accumulation
+        # Without FP8 MMA, upcast FP8 cache loads to BF16; FP32 accumulation
         # preserves score accuracy. BF16/FP32 loads stay as stored.
-        if k.dtype.is_fp8():
+        if k.dtype.is_fp8() and not FP8_DOT:
             k = k.to(tl.bfloat16)
-        kq = tl.dot(k, q, out_dtype=tl.float32)  # [N,HQ]
+        kq = tl.dot(k, q, out_dtype=tl.float32, max_num_imprecise_acc=0)  # [N,HQ]
         kq = tl.where(pos_mask & q_mask[None, :], kq, float("-inf"))
         score = tl.max(kq, axis=0)  # [HQ]
         is_visible_block = blk < num_blocks_q
@@ -709,6 +720,7 @@ def minimax_m3_index_score(
         block_table.stride(0),
         BLOCK_SIZE_Q=BLOCK_SIZE_Q,
         BLOCK_SIZE_K=SPARSE_BLOCK_SIZE,
+        FP8_DOT=_use_fp8_dot(idx_q, index_kv_cache),
     )
     return score
 
@@ -859,6 +871,7 @@ def minimax_m3_index_decode_score(
         BLOCK_SIZE_Q=BLOCK_SIZE_Q,
         num_kv_chunks=num_kv_chunks,
         USE_PDL=use_pdl,
+        FP8_DOT=_use_fp8_dot(idx_q, index_kv_cache),
         **score_kwargs,
     )
     return score
