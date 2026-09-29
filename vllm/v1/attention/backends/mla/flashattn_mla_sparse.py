@@ -1,7 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import math
 from dataclasses import dataclass
+from functools import cache
 from typing import Any, ClassVar
 
 import torch
@@ -22,6 +24,11 @@ from vllm.v1.attention.backend import (
     MultipleOf,
 )
 from vllm.v1.attention.backends.fa_utils import flash_attn_supports_mla
+from vllm.v1.attention.backends.mla.flashinfer_mla_sparse import (
+    FlashInferMLASparseImpl,
+    FlashInferMLASparseTRTLLMBackend,
+    FlashInferMLASparseTRTLLMMetadataBuilder,
+)
 from vllm.v1.attention.backends.mla.sparse_utils import flat_kv_row_view
 from vllm.v1.kv_cache_interface import AttentionSpec
 from vllm.vllm_flash_attn.flash_attn_interface import flash_attn_varlen_func
@@ -226,3 +233,181 @@ class FlashAttnMLASparseImpl(SparseMLACommonImpl[FlashAttnMLASparseMetadata]):
             fa_version=3,
         )
         return out, None
+
+
+def _fa4_cute_mla_available() -> str | None:
+    """Reason the FA4 cute-DSL MLA entry point is unusable, or None."""
+    from vllm.vllm_flash_attn import flash_attn_interface as fa
+
+    if not fa.is_fa_version_supported(4):
+        return f"FA4 unavailable: {fa.fa_version_unsupported_reason(4)}"
+    try:
+        from vllm.vllm_flash_attn.cute.interface import _flash_attn_fwd  # noqa: F401
+    except Exception as e:  # cute-DSL / cutlass import chain
+        return f"FA4 cute-DSL entry point failed to import: {e!r}"
+    return None
+
+
+class FlashAttnMLASparseFA4Backend(FlashInferMLASparseTRTLLMBackend):
+    """Decode-only batches on FA4; every other batch on the trtllm-gen kernel."""
+
+    supported_dtypes: ClassVar[list[torch.dtype]] = [torch.bfloat16]
+    # The qv kernel asserts every descale is None: BF16 KV cache only.
+    supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = ["auto", "bfloat16"]
+
+    @staticmethod
+    def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int | MultipleOf]:
+        return [64]
+
+    @staticmethod
+    def get_name() -> str:
+        return "FLASH_ATTN_MLA_SPARSE_FA4"
+
+    @staticmethod
+    def get_builder_cls() -> type["FlashAttnMLASparseFA4MetadataBuilder"]:
+        return FlashAttnMLASparseFA4MetadataBuilder
+
+    @staticmethod
+    def get_impl_cls() -> type[MLAAttentionImpl[Any]]:
+        return FlashAttnMLASparseFA4Impl
+
+    @classmethod
+    def get_supported_head_sizes(cls) -> list[int]:
+        # 512 latent + 64 RoPE; split back apart for the qv kernel.
+        return [576]
+
+    @classmethod
+    def supports_combination(cls, *args: Any, **kwargs: Any) -> str | None:
+        from vllm.config import get_current_vllm_config_or_none
+        from vllm.utils.flashinfer import has_flashinfer
+
+        if not has_flashinfer():
+            return "FA4 sparse MLA runs its prefill batches on FlashInfer's kernel"
+        if (reason := _fa4_cute_mla_available()) is not None:
+            return reason
+        vllm_config = get_current_vllm_config_or_none()
+        if vllm_config is None:
+            # No engine context, so only the static gates above can be applied.
+            return None
+        if vllm_config.model_config is not None:
+            hf_config = vllm_config.model_config.hf_text_config
+            topk = getattr(hf_config, "index_topk", None)
+            # gather_kv_indices' last dim must be a whole number of n-tiles.
+            if topk is None or topk % 128 != 0:
+                return f"FA4 sparse MLA requires index_topk % 128 == 0, got {topk}"
+            dims = (
+                getattr(hf_config, "kv_lora_rank", None),
+                getattr(hf_config, "qk_rope_head_dim", None),
+            )
+            if dims != (512, 64):
+                return (
+                    "FA4 sparse MLA requires (kv_lora_rank, qk_rope_head_dim) "
+                    f"== (512, 64), got {dims}"
+                )
+            # Under DCP the query is all-gathered: the kernel sees heads * dcp_size.
+            dcp_size = vllm_config.parallel_config.decode_context_parallel_size
+            num_heads = vllm_config.model_config.get_num_attention_heads(
+                vllm_config.parallel_config
+            )
+            # 128 gathered heads take FA's prefill kernel, unvalidated under DCP.
+            head_counts = (8, 16, 32, 64) if dcp_size > 1 else (8, 16, 32, 64, 128)
+            if num_heads * dcp_size not in head_counts:
+                return (
+                    f"FA4 sparse MLA requires {head_counts} gathered query heads, "
+                    f"got num_heads={num_heads} * dcp_size={dcp_size}"
+                )
+        # The prefill lane's own gates: PCP+DCP, qk_nope_head_dim, index_topk.
+        # Those reasons name ``cls``, so they name this backend. Pinned by test.
+        return super().supports_combination(*args, **kwargs)
+
+
+class FlashAttnMLASparseFA4MetadataBuilder(FlashInferMLASparseTRTLLMMetadataBuilder):
+    """The trtllm-gen builder, for the prefill lane's DCP workspace pre-size."""
+
+    # FA4 bakes the decode batch's row count into its varlen scalars.
+    _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.UNIFORM_BATCH
+
+
+@cache
+def _fa4_varlen_scalars(
+    num_tokens: int, num_kv_rows: int, device: torch.device
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Per-token varlen scalars; never evict, CUDA graphs bake in the pointers."""
+    cu_seqlens_q = torch.arange(num_tokens + 1, dtype=torch.int32, device=device)
+    cu_seqlens_k = torch.zeros(num_tokens + 1, dtype=torch.int32, device=device)
+    seqused_k = torch.full((num_tokens,), num_kv_rows, dtype=torch.int32, device=device)
+    return cu_seqlens_q, cu_seqlens_k, seqused_k
+
+
+class FlashAttnMLASparseFA4Impl(FlashInferMLASparseImpl):
+    """FA4 for decode rows; FlashInfer's trtllm-gen kernel for prefill rows."""
+
+    # FA4 emits a natural-log LSE; prefill converts trtllm-gen's log2 LSE.
+    lse_base_on_e: bool = True
+
+    def _forward_mqa_kernel(
+        self,
+        q: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
+        kv_cache: torch.Tensor,
+        topk_indices: torch.Tensor,
+        valid_counts: torch.Tensor,
+        *,
+        layer: AttentionLayer,
+        block_size: int,
+        is_decode: bool,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        if not is_decode:
+            out, lse = super()._forward_mqa_kernel(
+                q,
+                kv_cache,
+                topk_indices,
+                valid_counts,
+                layer=layer,
+                block_size=block_size,
+                is_decode=is_decode,
+            )
+            return out, None if lse is None else lse * math.log(2.0)
+        if isinstance(q, tuple):
+            ql_nope, q_pe = q
+        else:
+            # 16B-aligned halves of the fused query; FA4 reads them in place.
+            assert q.shape[-1] == self.kv_lora_rank + self.qk_rope_head_dim
+            ql_nope, q_pe = q[..., : self.kv_lora_rank], q[..., self.kv_lora_rank :]
+        kv_rows, _ = flat_kv_row_view(kv_cache, block_size)
+        return self._decode(ql_nope, q_pe, kv_rows, topk_indices, valid_counts)
+
+    def _decode(
+        self,
+        ql_nope: torch.Tensor,
+        q_pe: torch.Tensor,
+        kv_rows: torch.Tensor,
+        topk_indices: torch.Tensor,
+        valid_counts: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        num_tokens = q_pe.shape[0]
+        num_kv_rows = kv_rows.shape[0]
+        assert self.topk_indices_buffer is not None
+        cu_seqlens_q, cu_seqlens_k, seqused_k = _fa4_varlen_scalars(
+            self.topk_indices_buffer.shape[0], num_kv_rows, kv_rows.device
+        )
+        # An all-sentinel row yields (0, -inf), the DCP merge identity; no masking.
+        kernel_out = flash_attn_varlen_func(
+            q=q_pe,
+            k=kv_rows[:, self.kv_lora_rank :].unsqueeze(1),
+            v=kv_rows[:, : self.kv_lora_rank].unsqueeze(1),
+            q_v=ql_nope,
+            max_seqlen_q=1,
+            cu_seqlens_q=cu_seqlens_q[: num_tokens + 1],
+            max_seqlen_k=num_kv_rows,
+            cu_seqlens_k=cu_seqlens_k[: num_tokens + 1],
+            seqused_k=seqused_k[:num_tokens],
+            gather_kv_indices=topk_indices,
+            # Part of FA4's compile key: pass it unconditionally.
+            gather_kv_valid_length=valid_counts,
+            softmax_scale=self.scale,
+            # Causality is in the top-k list; causal=True would clamp flat rows.
+            causal=False,
+            fa_version=4,
+            return_softmax_lse=self.need_to_return_lse_for_decode,
+        )
+        return kernel_out if self.need_to_return_lse_for_decode else (kernel_out, None)
