@@ -1343,17 +1343,23 @@ class AsyncMPClient(MPClient):
             "collective_rpc", method, timeout, args, kwargs
         )
 
-    async def collective_rpc_all_engines_async(self, method: str) -> list[Any]:
-        # collective_rpc reaches only core_engine unless DP load balancing is on.
+    async def compute_weight_checksums_async(self) -> list[dict[str, str]]:
+        # DP load balancing broadcasts utilities but returns only the first
+        # engine's result, and every engine holds different weight shards.
         per_engine = await asyncio.gather(
             *[
                 self._call_utility_async(
-                    "collective_rpc", method, None, (), None, engine=engine
+                    "collective_rpc",
+                    "compute_weight_checksums",
+                    None,
+                    (),
+                    None,
+                    engine=engine,
                 )
                 for engine in self.core_engines
             ]
         )
-        return [result for results in per_engine for result in results]
+        return [worker for workers in per_engine for worker in workers]
 
     async def handle_fault(
         self, ft_request: FaultToleranceRequest

@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import asyncio
 from types import SimpleNamespace
 
 import pytest
@@ -13,6 +14,7 @@ from vllm.model_executor.model_loader.weight_checksum import (
     compute_tensor_digests,
     zero_weights,
 )
+from vllm.v1.engine.core_client import AsyncMPClient
 from vllm.v1.worker import gpu_worker
 from vllm.v1.worker.gpu_worker import Worker
 
@@ -92,3 +94,28 @@ def test_dense_dp_replicas_get_distinct_key_prefixes(monkeypatch):
         worker.parallel_config.reconfigure_for_independent_dp_rank()
         prefixes.append(worker._weight_checksum_prefix())
     assert prefixes == ["dp0:pp0:pcp0:tp0:ep0:", "dp1:pp0:pcp0:tp0:ep0:"]
+
+
+def test_checksums_are_gathered_from_every_engine():
+    """DP load balancing would return only the first engine's result."""
+    client = object.__new__(AsyncMPClient)
+    client.core_engines = [b"e0", b"e1"]
+
+    async def call_utility(method, *args, engine):
+        assert (method, *args) == (
+            "collective_rpc",
+            "compute_weight_checksums",
+            None,
+            (),
+            None,
+        )
+        return [{f"{engine.decode()}:tp{tp}:w": "x"} for tp in (0, 1)]
+
+    client._call_utility_async = call_utility
+    workers = asyncio.run(client.compute_weight_checksums_async())
+    assert [next(iter(w)) for w in workers] == [
+        "e0:tp0:w",
+        "e0:tp1:w",
+        "e1:tp0:w",
+        "e1:tp1:w",
+    ]

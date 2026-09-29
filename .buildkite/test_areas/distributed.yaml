@@ -73,8 +73,6 @@ steps:
   - vllm/v1/worker/
   - tests/v1/distributed
   - tests/entrypoints/launchers/api_server/test_multi_api_servers.py
-  - vllm/entrypoints/serve/dev/rlhf/
-  - tests/entrypoints/serve/dev/rlhf/state_transitions/test_weight_checker.py
   - tests/v1/e2e/general/test_sharded_sampling.py
   - tests/v1/e2e/spec_decode/test_sharded_sampling.py
   - tests/v1/e2e/spec_decode/utils.py
@@ -85,7 +83,6 @@ steps:
   - TP_SIZE=1 DP_SIZE=2 pytest -v -s v1/distributed/test_eagle_dp.py
   - TP_SIZE=1 DP_SIZE=2 pytest -v -s v1/distributed/test_external_lb_dp.py
   - DP_SIZE=2 pytest -v -s entrypoints/launchers/api_server/test_multi_api_servers.py
-  - pytest -v -s entrypoints/serve/dev/rlhf/state_transitions/test_weight_checker.py -k dp_engine
   # Batch-sharded sampling requires TP=2
   - pytest -v -s v1/e2e/general/test_sharded_sampling.py
   - pytest -v -s v1/e2e/spec_decode/test_sharded_sampling.py

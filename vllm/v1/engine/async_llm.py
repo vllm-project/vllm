@@ -1125,8 +1125,8 @@ class AsyncLLM(EngineClient):
     async def is_sleeping(self) -> bool:
         return await self.engine_core.is_sleeping_async()
 
-    async def collective_rpc_all_engines(self, method: str) -> list[Any]:
-        return await self.engine_core.collective_rpc_all_engines_async(method)
+    async def compute_weight_checksums(self) -> list[dict[str, str]]:
+        return await self.engine_core.compute_weight_checksums_async()
 
     async def add_lora(self, lora_request: LoRARequest) -> bool:
         """Load a new LoRA adapter into the engine for future requests."""

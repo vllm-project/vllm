@@ -50,6 +50,8 @@ curl -X POST $URL/resume
   each one.
 - Buffers, draft models and LoRA adapters are not checked.
 - CPU backends that repack linear weights hide them from the checker.
+- compressed-tensors online transforms are not supported: their Hadamard
+  weights are normalized once per storage, so restored copies differ.
 - MoE weights padded beyond the checkpoint shape (DeepEP hidden size, MXFP4)
   keep uninitialized padding, so `compare` reports them as mismatches.
 - The engine must be awake: sleep levels 1 and 2 release the weight memory.
