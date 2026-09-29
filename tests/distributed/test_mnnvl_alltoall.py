@@ -8,6 +8,7 @@ Run: pytest tests/distributed/test_mnnvl_alltoall.py -v
 
 import os
 import traceback
+from contextlib import contextmanager
 
 import pytest
 import torch
@@ -148,16 +149,17 @@ def _init_dp_environment(world_size, rank, port, dp_size, dp_port):
         ensure_model_parallel_initialized(1, 1)
 
 
+@contextmanager
 def _make_forward_context(rank, world_size, num_tokens_per_rank):
-    """Create a forward context with mock DP metadata for AgRs tests.
+    """Keep the vLLM config and mock-DP forward context active together.
 
     Returns a context manager suitable for ``with`` statements.
     The real DPMetadata (with sp_local_sizes etc.) is created internally
     by set_forward_context from num_tokens_across_dp; the attn_metadata
     placeholder just satisfies the "attn_metadata is not None" guard.
     """
+    from vllm.config import VllmConfig, set_current_vllm_config
     from vllm.config.parallel import ParallelConfig
-    from vllm.config.vllm import VllmConfig
     from vllm.forward_context import set_forward_context
 
     class _AttnMeta:
@@ -173,14 +175,18 @@ def _make_forward_context(rank, world_size, num_tokens_per_rank):
         is_moe_model=True,
         data_parallel_rank=rank,
     )
-    return set_forward_context(
-        _AttnMeta(),
-        vllm_config,
-        num_tokens=num_tokens_per_rank,
-        num_tokens_across_dp=torch.tensor(
-            [num_tokens_per_rank] * world_size, dtype=torch.int
+    with (
+        set_current_vllm_config(vllm_config),
+        set_forward_context(
+            _AttnMeta(),
+            vllm_config,
+            num_tokens=num_tokens_per_rank,
+            num_tokens_across_dp=torch.tensor(
+                [num_tokens_per_rank] * world_size, dtype=torch.int
+            ),
         ),
-    )
+    ):
+        yield
 
 
 # ---------------------------------------------------------------------------
