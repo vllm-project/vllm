@@ -49,9 +49,6 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl import (
     NixlHandshakePayload,
     NixlKVConnectorStats,
 )
-from vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker import (
-    NixlBaseConnectorWorker,
-)
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
     RemoteMeta,
     ReqMeta,
@@ -146,6 +143,7 @@ class FakeNixlWrapper:
     def __init__(self, agent_name: str, *args, **kwargs):
         self._cycles_before_xfer_done = 0
         self._check_xfer_state_cycles: defaultdict[int, int] = defaultdict(lambda: 0)
+        self.invalid_remote_agents: set[str] = set()
 
     def get_reg_descs(self, caches_data, memory_type: str) -> list:
         return [str(uuid.uuid4()) for _ in caches_data]
@@ -166,6 +164,7 @@ class FakeNixlWrapper:
         return self.AGENT_METADATA
 
     def add_remote_agent(self, agent_metadata: bytes) -> str:
+        self.invalid_remote_agents.discard(self.REMOTE_AGENT_NAME)
         return self.REMOTE_AGENT_NAME
 
     def get_new_notifs(self) -> dict[str, list[bytes]]:
@@ -188,7 +187,7 @@ class FakeNixlWrapper:
         pass
 
     def check_remote_metadata(self, agent: str) -> bool:
-        return True
+        return agent not in self.invalid_remote_agents
 
     def send_notif(self, agent_name: str, notif_msg: bytes) -> None:
         pass
@@ -2100,6 +2099,8 @@ def recv_worker():
     worker._handshake_futures = {}
     worker._remote_agents = {}
     worker._engine_by_address = {}
+    worker._failed_remote_engines = set()
+    worker._invalid_remote_engines = set()
     worker._replicated_pcp_done_sending = set()
     worker._invalid_block_ids = queue.Queue()
     worker._pending_recv_notifs = {}
@@ -2737,9 +2738,9 @@ class TestPeerReplacement:
         self.nixl.REMOTE_AGENT_NAME = engine_id
         future.set_result(self.worker._nixl_handshake(host, port, 1, engine_id))
 
-    def _request(self, engine_id="new", blocks=(1,), awaiting_kvs=True):
+    def _request(self, engine_id="new", blocks=(1,), awaiting_kvs=True, req_id=None):
         metadata = NixlConnectorMetadata()
-        metadata.reqs_to_recv[f"{engine_id}-req"] = ReqMeta(
+        metadata.reqs_to_recv[req_id or f"{engine_id}-req"] = ReqMeta(
             local_block_ids=(blocks,),
             local_physical_block_ids=(blocks,),
             tp_size=1,
@@ -2749,6 +2750,11 @@ class TestPeerReplacement:
             awaiting_kvs=awaiting_kvs,
         )
         return metadata
+
+    def _fail_old_peer(self):
+        self.worker.start_load_kv(self._request("old"))
+        self.nixl.invalid_remote_agents.add("old")
+        self.transport.check_xfer_state.return_value = "ERR"
 
     def test_cleans_old_peer_after_confirmed_handshake(self):
         self._connect("healthy", host="other-host")
@@ -2799,7 +2805,12 @@ class TestPeerReplacement:
         ],
         ids=["healthy", "failed-sibling-completes", "failed-sibling-fails"],
     )
-    def test_waits_for_reads_before_cleanup_and_failure_reporting(self, states, failed):
+    @pytest.mark.parametrize("invalidated", [False, True])
+    def test_waits_for_reads_before_cleanup_and_failure_reporting(
+        self, states, failed, invalidated
+    ):
+        if invalidated:
+            self.nixl.invalid_remote_agents.add("old")
         self.worker._recving_metadata.update(self._request("old").reqs_to_recv)
         self.worker._recving_transfers["old-req"] = [1, 2] if failed else [1]
         self.transport.check_xfer_state.side_effect = states
@@ -2818,6 +2829,7 @@ class TestPeerReplacement:
         )
         assert self.transport.release_xfer_handle.call_count == (2 if failed else 1)
         self.transport.remove_remote_agent.assert_called_once_with("old")
+        assert not self.worker._invalid_remote_engines
 
     def test_waits_for_queued_notification(self):
         metadata = self._request("old", blocks=())
@@ -2838,22 +2850,31 @@ class TestPeerReplacement:
         assert result.failed_recving == set()
         self.transport.remove_remote_agent.assert_called_once_with("old")
 
-    def test_waits_for_other_handshakes(self):
+    @pytest.mark.parametrize("invalidated", [False, True])
+    def test_waits_for_other_handshakes(self, invalidated):
+        if invalidated:
+            self._fail_old_peer()
+        else:
+            self._connect()
         self.worker._ensure_handshake("other", "other-host", 1234, 1)
-        self._connect()
         self.worker.get_transfer_results()
         self.transport.remove_remote_agent.assert_not_called()
+        self.transport.check_remote_metadata.assert_not_called()
 
         self._connect("other", host="other-host")
         self.worker.get_transfer_results()
         self.transport.remove_remote_agent.assert_called_once_with("old")
 
-    def test_rehandshakes_queued_request_for_released_engine(self):
+    @pytest.mark.parametrize("invalidated", [False, True])
+    def test_rehandshakes_queued_request_for_released_engine(self, invalidated):
         # A request queued after its engine's handshake, but drained only after
         # that engine was replaced and released, must not read from it.
+        if invalidated:
+            self._fail_old_peer()
         metadata = self._request("old", blocks=(), awaiting_kvs=False)
         self.worker._ready_requests.put(("old-req", metadata.reqs_to_recv["old-req"]))
-        self._connect()
+        if not invalidated:
+            self._connect()
         self.worker.get_transfer_results()
         self.transport.remove_remote_agent.assert_called_once_with("old")
 
@@ -2861,419 +2882,184 @@ class TestPeerReplacement:
         assert "old" in self.worker._handshake_futures
         self.transport.send_notif.assert_not_called()
 
+    @pytest.mark.parametrize("missing", [False, True, RuntimeError("probe failed")])
+    def test_recovery_requires_confirmed_missing_metadata(self, missing):
+        self._fail_old_peer()
+        # A missing rank suffices even if another rank still has metadata.
+        self.worker._remote_agents["old"][(0, 1)] = "old-other-rank"
+        self.nixl.invalid_remote_agents.clear()
+        if missing is True:
+            self.nixl.invalid_remote_agents.add("old-other-rank")
+        elif isinstance(missing, Exception):
+            self.transport.check_remote_metadata.side_effect = missing
 
-@pytest.fixture
-def peer_recovery_worker():
-    # Exercise the worker lifecycle without initializing devices or NIXL.
-    with patch.object(NixlBaseConnectorWorker, "__init__", return_value=None):
-        worker = NixlConnectorWorker(None, "local", None)
-    worker._failed_remote_engines = set()
-    worker._invalid_remote_engines = set()
-    worker._handshake_lock = threading.RLock()
-    worker._handshake_futures = {}
-    worker._handshake_initiation_executor = MagicMock()
-    worker._handshake_initiation_executor.submit.return_value = Future()
-    worker._ready_requests = queue.Queue()
-    worker._recving_transfers = {}
-    worker._recving_metadata = {}
-    worker._failed_recv_reqs = queue.Queue()
-    worker._invalid_block_ids = queue.Queue()
-    worker._recv_failures = set()
-    worker._replicated_pcp_done_sending = set()
-    worker._pending_recv_notifs = {}
-    worker._reqs_to_send = {}
-    worker._engine_ttl = 0
-    worker._engine_last_active = {"peer": time.perf_counter()}
-    worker._engine_clock_offset = {"peer": 0.0}
-    worker._remote_agents = {"peer": {(0, 0): "agent0", (0, 1): "agent1"}}
-    worker._engine_by_address = {("localhost", 1234): "peer"}
-    worker.dst_xfer_side_handles = {"peer": {0: 100, 1: 101}}
-    worker.kv_caches_base_addr = {"peer": {0: [1024]}}
-    worker.dst_num_blocks = {"peer": 16}
-    worker.dst_region_num_blocks = {"peer": [16]}
-    worker.dst_region_group_ids = {"peer": [0]}
-    worker.dst_uses_region_group_mapping = {"peer": False}
-    worker.dst_region_mem_types = {"peer": ["VRAM"]}
-    worker.region_group_ids = [0]
-    worker.tp_mappings = {
-        "peer": SimpleNamespace(
-            all_source_ranks=[0, 1], source_ranks_per_group=[{0, 1}], local_consumers=1
+        result = self.worker.get_transfer_results()
+        assert result.finished_recving == result.failed_recving == {"old-req"}
+        assert self.worker.get_block_ids_with_load_errors() == {1}
+        assert ("old" not in self.worker._remote_agents) is (missing is True)
+        assert self.transport.release_dlist_handle.call_count == (missing is True)
+
+    @pytest.mark.parametrize("handshake_fails", [False, True])
+    def test_recovery_rehandshakes_same_id_with_fresh_descriptors(
+        self, handshake_fails
+    ):
+        old_handle = self.worker.dst_xfer_side_handles["old"][0]
+        self._fail_old_peer()
+        self.worker.get_transfer_results()
+        self.transport.release_dlist_handle.assert_called_once_with(old_handle)
+        assert not self.worker._engine_by_address
+        with pytest.raises(KeyError):
+            self.worker.transfer_topo.get_engine_info("old")
+        self.transport.make_prepped_xfer.reset_mock()
+
+        self.worker.start_load_kv(self._request("old", req_id="next"))
+        self.transport.make_prepped_xfer.assert_not_called()
+        if handshake_fails:
+            self.worker._handshake_futures["old"].set_exception(
+                RuntimeError("handshake failed")
+            )
+            result = self.worker.get_transfer_results()
+            assert result.failed_recving == result.finished_recving == {"next"}
+            assert "old" not in self.worker._remote_agents
+            assert self.worker._ready_requests.empty()
+            return
+
+        self._connect("old")
+        fresh_handle = self.worker.dst_xfer_side_handles["old"][0]
+        assert fresh_handle != old_handle
+        assert self.worker._engine_by_address == {("localhost", 1234): "old"}
+        self.transport.check_xfer_state.return_value = "DONE"
+        self.worker.start_load_kv(NixlConnectorMetadata())
+        assert self.transport.make_prepped_xfer.call_args.args[3] == fresh_handle
+        result = self.worker.get_transfer_results()
+        assert result.finished_recving == {"next"} and not result.failed_recving
+        self.transport.release_dlist_handle.assert_called_once_with(old_handle)
+
+    def test_recovery_drains_reads_and_rejects_new_ones_without_harming_other_peers(
+        self,
+    ):
+        self._connect("healthy", host="other-host")
+        self.worker._recving_metadata.update(self._request("old").reqs_to_recv)
+        self.worker._recving_metadata.update(self._request("healthy").reqs_to_recv)
+        self.worker._recving_transfers.update(
+            {"old-req": [10, 11], "healthy-req": [12]}
         )
-    }
-    worker.src_xfer_handles_by_block_size = {16: 99}
-    worker.src_xfer_handles_by_tp_ratio = {}
-    worker._dram_src_handles_by_tp_ratio = {}
-    worker._dram_src_handles_by_block_size = {}
-    worker._mixed_mem_types = False
-    worker._registered_descs = []
-    worker.transfer_topo = MagicMock()
-    worker.transfer_topo.block_size_ratio.return_value = 1
-    worker.transfer_topo.tp_ratio.return_value = 1
-    worker.transfer_topo.get_engine_info.return_value = SimpleNamespace(
-        remote_block_size=16,
-        remote_physical_blocks_per_logical=1,
-        remote_tp_size=2,
-        remote_dcp_size=1,
-    )
-    worker._physical_blocks_per_logical_kv_block = 1
-    worker._is_hma_required = False
-    worker._bidirectional_kv_xfer_enabled = False
-    worker.use_host_buffer = False
-    worker.enable_permute_local_kv = False
-    worker.enable_heterogeneous_attn_post_process = False
-    worker.use_mla = False
-    worker.dcp_size = 1
-    worker.tp_rank = 0
-    worker.nixl_wrapper = MagicMock(spec=FakeNixlWrapper)
-    worker.nixl_wrapper.get_new_notifs.return_value = {}
-    worker.nixl_wrapper.check_remote_metadata.return_value = True
-    worker.xfer_stats = MagicMock()
-    worker._sync_device_after_direct_recv = MagicMock()
-    worker._log_failure = MagicMock()
-    yield worker
-    worker.shutdown()
+        self.nixl.invalid_remote_agents.add("old")
+        self.transport.check_xfer_state.side_effect = (
+            lambda h: "ERR" if h == 10 else "PROC"
+        )
+        old_handle = self.worker.dst_xfer_side_handles["old"][0]
 
+        result = self.worker.get_transfer_results()
+        assert not result.finished_recving and not result.failed_recving
+        self.transport.release_dlist_handle.assert_not_called()
+        self.worker.start_load_kv(self._request("old", req_id="blocked"))
+        self.transport.make_prepped_xfer.assert_not_called()
 
-def _peer_recovery_request(worker, req_id="req", engine_id="peer", handles=()):
-    meta = ReqMeta(
-        local_block_ids=([1],),
-        local_physical_block_ids=([1],),
-        tp_size=2,
-        remote=RemoteMeta(([2],), "localhost", 1234, engine_id, f"p-{req_id}"),
-    )
-    worker._recving_metadata[req_id] = meta
-    if handles:
-        worker._recving_transfers[req_id] = list(handles)
-    return meta
+        self.transport.check_xfer_state.side_effect = (
+            lambda h: "DONE" if h == 11 else "PROC"
+        )
+        result = self.worker.get_transfer_results()
+        assert (
+            result.finished_recving == result.failed_recving == {"old-req", "blocked"}
+        )
+        assert set(self.worker._remote_agents) == {"healthy"}
+        assert self.worker._recving_transfers == {"healthy-req": [12]}
+        self.transport.remove_remote_agent.assert_called_once_with("old")
+        calls = self.transport.mock_calls
+        assert calls.index(call.release_xfer_handle(11)) < calls.index(
+            call.release_dlist_handle(old_handle)
+        )
 
+    def test_recovery_waits_until_failed_handle_can_be_released(self):
+        self._fail_old_peer()
+        with patch.object(
+            self.transport, "release_xfer_handle", side_effect=RuntimeError("in use")
+        ):
+            result = self.worker.get_transfer_results()
+            assert not result.finished_recving and not result.failed_recving
+            assert self.worker._recving_transfers["old-req"]
+            self.transport.release_dlist_handle.assert_not_called()
 
-@pytest.mark.parametrize(
-    "metadata_present", [True, False, RuntimeError("query failed")]
-)
-@pytest.mark.cpu_test
-def test_peer_recovery_requires_missing_metadata(
-    peer_recovery_worker, metadata_present
-):
-    w = peer_recovery_worker
-    _peer_recovery_request(w)
-    if isinstance(metadata_present, Exception):
-        w.nixl_wrapper.check_remote_metadata.side_effect = metadata_present
-    else:
-        w.nixl_wrapper.check_remote_metadata.return_value = metadata_present
-    assert w._handle_failed_transfer("req", None, w._recv_failures)
-    results = w.get_transfer_results()
-    assert results.finished_sending == set()
-    assert results.finished_recving == results.failed_recving == {"req"}
-    assert w._invalid_block_ids.get_nowait() == {1}
-    assert ("peer" in w._remote_agents) is (metadata_present is not False)
-    assert w.nixl_wrapper.release_dlist_handle.call_count == (
-        2 if metadata_present is False else 0
-    )
+        result = self.worker.get_transfer_results()
+        assert result.finished_recving == result.failed_recving == {"old-req"}
+        self.transport.remove_remote_agent.assert_called_once_with("old")
 
+    def test_recovery_cleanup_errors_propagate(self):
+        self._fail_old_peer()
+        with (
+            patch.object(
+                self.transport,
+                "release_dlist_handle",
+                side_effect=RuntimeError("in use"),
+            ),
+            pytest.raises(RuntimeError, match="in use"),
+        ):
+            self.worker.get_transfer_results()
+        assert self.worker._invalid_remote_engines == {"old"}
+        self.transport.remove_remote_agent.assert_not_called()
 
-@pytest.mark.cpu_test
-def test_peer_recovery_rehandshakes_unchanged_engine_id(peer_recovery_worker):
-    w = peer_recovery_worker
-    plan = w.tp_mappings["peer"]
-    _peer_recovery_request(w)
-    w.nixl_wrapper.check_remote_metadata.side_effect = [True, False]
-    w._handle_failed_transfer("req", None, w._recv_failures)
-    w.get_finished()
-    for mapping in (
-        w._remote_agents,
-        w.dst_xfer_side_handles,
-        w.kv_caches_base_addr,
-        w.dst_num_blocks,
-        w.dst_region_num_blocks,
-        w.dst_region_group_ids,
-        w.dst_uses_region_group_mapping,
-        w.dst_region_mem_types,
-        w.tp_mappings,
-        w._engine_clock_offset,
-        w._engine_last_active,
-    ):
-        assert "peer" not in mapping
-    w.transfer_topo.unregister_remote_engine.assert_called_once_with("peer")
-    assert not w._engine_by_address
-    meta = _peer_recovery_request(w, "next")
-    w._read_blocks_for_req("next", meta)
-    w._handshake_initiation_executor.submit.assert_called_once_with(
-        w._nixl_handshake, "localhost", 1234, 2, "peer", 1, 1, False
-    )
-    w.nixl_wrapper.make_prepped_xfer.assert_not_called()
-    future = w._handshake_futures["peer"]
-    # Simulate the descriptors prepared by the new background handshake.
-    w.dst_xfer_side_handles["peer"] = {0: 200, 1: 201}
-    w.dst_region_group_ids["peer"] = [0]
-    w.tp_mappings["peer"] = plan
-    fresh_agents = {(0, 0): "fresh0", (0, 1): "fresh1"}
-    future.set_result((fresh_agents, 0.5))
-    assert w._remote_agents["peer"] == fresh_agents
-    assert w._engine_by_address == {("localhost", 1234): "peer"}
-    with patch.object(w, "_read_blocks") as reads:
-        w._read_blocks_for_req(*w._ready_requests.get_nowait())
-        assert [c.kwargs["remote_xfer_side_handle"] for c in reads.call_args_list] == [
-            200,
-            201,
-        ]
-    assert w.get_finished() == (set(), {"next"})
-    assert w.nixl_wrapper.release_dlist_handle.call_count == 2
+    @pytest.mark.parametrize("expired", [False, True])
+    def test_success_and_expiry_do_not_probe_metadata(self, expired):
+        metadata = self._request("old")
+        if expired:
+            metadata.reqs_to_recv["old-req"].remote.blocks_expiry_time = 0.0
+            self.worker._bidirectional_kv_xfer_enabled = True
+        with (
+            patch.object(self.worker.xfer_stats, "record_failed_transfer") as failure,
+            patch.object(self.worker.xfer_stats, "record_kv_expired_req") as expiry,
+        ):
+            self.worker.start_load_kv(metadata)
+            result = self.worker.get_transfer_results()
+            assert result.finished_recving == {"old-req"}
+            assert result.failed_recving == ({"old-req"} if expired else set())
+            assert expiry.call_count == int(expired)
+            failure.assert_not_called()
+        self.transport.check_remote_metadata.assert_not_called()
+        self.transport.remove_remote_agent.assert_not_called()
 
+    @pytest.mark.parametrize("awaiting_kvs", [False, True])
+    def test_invalid_peer_empty_recv_is_reported_only_when_awaited(self, awaiting_kvs):
+        self._fail_old_peer()
+        self.worker._recving_transfers["old-req"].append(11)
+        self.transport.check_xfer_state.side_effect = (
+            lambda h: "PROC" if h == 11 else "ERR"
+        )
+        self.worker.get_transfer_results()
+        self.transport.make_prepped_xfer.reset_mock()
 
-@pytest.mark.cpu_test
-def test_peer_recovery_waits_for_remaining_reads(peer_recovery_worker):
-    w = peer_recovery_worker
-    _peer_recovery_request(w, handles=(10, 11))
-    _peer_recovery_request(w, "other", "healthy", (12,))
-    w._remote_agents["healthy"] = {(0, 0): "healthy-agent"}
-    w._engine_by_address[("other-host", 1234)] = "healthy"
-    w.nixl_wrapper.check_remote_metadata.return_value = False
-    w.nixl_wrapper.check_xfer_state.side_effect = lambda h: "ERR" if h == 10 else "PROC"
-    assert w.get_finished() == (set(), set())
-    assert "req" in w._recving_metadata
-    assert w._recving_transfers["req"] == [11]
-    w.nixl_wrapper.release_dlist_handle.assert_not_called()
+        self.worker.start_load_kv(
+            self._request("old", blocks=(), awaiting_kvs=awaiting_kvs, req_id="empty")
+        )
+        result = self.worker.get_transfer_results()
+        expected = {"empty"} if awaiting_kvs else set()
+        assert result.finished_recving == result.failed_recving == expected
+        self.transport.make_prepped_xfer.assert_not_called()
+        self.transport.send_notif.assert_not_called()
+        self.transport.remove_remote_agent.assert_not_called()
 
-    meta = _peer_recovery_request(w, "blocked")
-    w._read_blocks_for_req("blocked", meta)
-    w.nixl_wrapper.make_prepped_xfer.assert_not_called()
-    w.nixl_wrapper.check_xfer_state.side_effect = lambda h: (
-        "DONE" if h == 11 else "PROC"
-    )
-    results = w.get_transfer_results()
-    assert results.finished_recving == results.failed_recving == {"req", "blocked"}
-    assert "peer" not in w._remote_agents
-    assert "healthy" in w._remote_agents
-    assert w._recving_transfers == {"other": [12]}
-    assert w.nixl_wrapper.release_dlist_handle.call_count == 2
-    w.nixl_wrapper.remove_remote_agent.assert_any_call("agent0")
-    w.nixl_wrapper.remove_remote_agent.assert_any_call("agent1")
-    calls = w.nixl_wrapper.mock_calls
-    assert calls.index(call.release_xfer_handle(11)) < calls.index(
-        call.release_dlist_handle(100)
-    )
+    def test_recovery_shutdown_releases_pending_handles_once(self):
+        self._fail_old_peer()
+        self.worker._recving_transfers["old-req"] = [10, 11]
+        self.transport.check_xfer_state.side_effect = (
+            lambda h: "ERR" if h == 10 else "PROC"
+        )
+        self.worker.get_transfer_results()
+        self.worker.shutdown()
+        self.worker.shutdown()
+        assert self.transport.release_xfer_handle.call_args_list == [call(10), call(11)]
+        self.transport.remove_remote_agent.assert_called_once_with("old")
 
-
-@pytest.mark.cpu_test
-def test_peer_recovery_replaced_invalid_peer_is_released_once(peer_recovery_worker):
-    w = peer_recovery_worker
-    _peer_recovery_request(w, handles=(10, 11))
-    w._remote_agents["replacement"] = {(0, 0): "replacement-agent"}
-    w._track_remote_engine_replacement("replacement", "localhost", 1234)
-    w.nixl_wrapper.check_remote_metadata.return_value = False
-    w.nixl_wrapper.check_xfer_state.side_effect = ["ERR", "PROC", "DONE"]
-
-    results = w.get_transfer_results()
-    assert not results.finished_recving and not results.failed_recving
-    assert w._invalid_remote_engines == {"peer"}
-    w.nixl_wrapper.remove_remote_agent.assert_not_called()
-
-    results = w.get_transfer_results()
-    assert results.finished_recving == results.failed_recving == {"req"}
-    assert w._remote_agents == {"replacement": {(0, 0): "replacement-agent"}}
-    assert w._engine_by_address == {("localhost", 1234): "replacement"}
-    assert not w._failed_remote_engines and not w._invalid_remote_engines
-    assert w.nixl_wrapper.release_dlist_handle.call_args_list == [call(100), call(101)]
-    assert w.nixl_wrapper.remove_remote_agent.call_args_list == [
-        call("agent0"),
-        call("agent1"),
-    ]
-    calls = w.nixl_wrapper.mock_calls
-    assert calls.index(call.release_xfer_handle(11)) < calls.index(
-        call.release_dlist_handle(100)
-    )
-
-
-@pytest.mark.parametrize("invalidated", [False, True], ids=["replaced", "invalidated"])
-@pytest.mark.cpu_test
-def test_peer_recovery_rehandshakes_queued_request_after_cleanup(
-    peer_recovery_worker, invalidated
-):
-    w = peer_recovery_worker
-    meta = _peer_recovery_request(w, "queued")
-    meta.local_block_ids = ()
-    meta.awaiting_kvs = False
-    w._recving_metadata.clear()
-    w._ready_requests.put(("queued", meta))
-    if invalidated:
-        _peer_recovery_request(w, "failed")
-        w.nixl_wrapper.check_remote_metadata.return_value = False
-        w._handle_failed_transfer("failed", None, w._recv_failures)
-    else:
-        w._remote_agents["replacement"] = {(0, 0): "replacement-agent"}
-        w._track_remote_engine_replacement("replacement", "localhost", 1234)
-    w.get_transfer_results()
-    assert "peer" not in w._remote_agents
-
-    w.pcp_rank = 0
-    w._reqs_to_process = set()
-    w.start_load_kv(NixlConnectorMetadata())
-    assert "peer" in w._handshake_futures
-    w._handshake_initiation_executor.submit.assert_called_once_with(
-        w._nixl_handshake, "localhost", 1234, 2, "peer", 1, 1, False
-    )
-    w.nixl_wrapper.make_prepped_xfer.assert_not_called()
-    w.nixl_wrapper.send_notif.assert_not_called()
-    if not invalidated:
-        w.nixl_wrapper.check_remote_metadata.assert_not_called()
-
-
-@pytest.mark.cpu_test
-def test_peer_recovery_defers_cleanup_during_handshake(peer_recovery_worker):
-    w = peer_recovery_worker
-    _peer_recovery_request(w)
-    w.nixl_wrapper.check_remote_metadata.return_value = False
-    w._handle_failed_transfer("req", None, w._recv_failures)
-    w._handshake_futures["other"] = Future()
-    w.get_finished()
-    w.nixl_wrapper.check_remote_metadata.assert_not_called()
-    w.nixl_wrapper.release_dlist_handle.assert_not_called()
-    w._handshake_futures.clear()
-    w.get_finished()
-    assert "peer" not in w._remote_agents
-
-
-@pytest.mark.cpu_test
-def test_peer_recovery_does_not_probe_partial_handshake(peer_recovery_worker):
-    w = peer_recovery_worker
-    _peer_recovery_request(w)
-    w._handshake_futures["peer"] = Future()
-    w._handle_failed_transfer("req", None, w._recv_failures)
-    w.nixl_wrapper.check_remote_metadata.assert_not_called()
-    assert w.get_finished() == (set(), {"req"})
-    w.nixl_wrapper.release_dlist_handle.assert_not_called()
-
-
-@pytest.mark.cpu_test
-def test_peer_recovery_success_does_not_probe(peer_recovery_worker):
-    w = peer_recovery_worker
-    _peer_recovery_request(w, handles=(10,))
-    w.nixl_wrapper.check_xfer_state.return_value = "DONE"
-    assert w.get_finished() == (set(), {"req"})
-    w.nixl_wrapper.check_remote_metadata.assert_not_called()
-    w.nixl_wrapper.release_dlist_handle.assert_not_called()
-
-
-@pytest.mark.cpu_test
-def test_peer_recovery_cleanup_failure_is_not_swallowed(peer_recovery_worker):
-    w = peer_recovery_worker
-    _peer_recovery_request(w)
-    w.nixl_wrapper.check_remote_metadata.return_value = False
-    w._handle_failed_transfer("req", None, w._recv_failures)
-    w.nixl_wrapper.release_dlist_handle.side_effect = RuntimeError("release failed")
-    with pytest.raises(RuntimeError, match="release failed"):
-        w.get_finished()
-    assert "peer" in w._invalid_remote_engines
-    w.nixl_wrapper.remove_remote_agent.assert_not_called()
-    w.nixl_wrapper.release_dlist_handle.side_effect = None
-
-
-@pytest.mark.parametrize("invalidated", [False, True])
-@pytest.mark.cpu_test
-def test_peer_recovery_tracks_reads_through_failure(peer_recovery_worker, invalidated):
-    w = peer_recovery_worker
-    meta = _peer_recovery_request(w)
-
-    def read(**kwargs):
-        if invalidated:
-            w._handle_failed_transfer(kwargs["request_id"], None, w._recv_failures)
-        return not invalidated
-
-    w.nixl_wrapper.check_remote_metadata.return_value = not invalidated
-    with patch.object(w, "_read_blocks", side_effect=read) as reads:
-        w._read_blocks_for_req("req", meta)
-        assert reads.call_count == (1 if invalidated else 2)
-    assert w.get_finished() == (set(), {"req"})
-    assert ("peer" not in w._remote_agents) is invalidated
-    if not invalidated:
-        w.nixl_wrapper.check_remote_metadata.assert_not_called()
-
-
-@pytest.mark.cpu_test
-def test_peer_recovery_rehandshake_failure_reports_request(peer_recovery_worker):
-    w = peer_recovery_worker
-    _peer_recovery_request(w)
-    w.nixl_wrapper.check_remote_metadata.return_value = False
-    w._handle_failed_transfer("req", None, w._recv_failures)
-    w.get_finished()
-    meta = _peer_recovery_request(w, "next")
-    w._read_blocks_for_req("next", meta)
-    w._handshake_futures["peer"].set_exception(RuntimeError("handshake failed"))
-    assert w.get_finished() == (set(), {"next"})
-    assert "peer" not in w._remote_agents
-    assert w._ready_requests.empty()
-    w.nixl_wrapper.make_prepped_xfer.assert_not_called()
-
-
-@pytest.mark.cpu_test
-def test_peer_recovery_shutdown_releases_pending_handles_once(peer_recovery_worker):
-    w = peer_recovery_worker
-    _peer_recovery_request(w, handles=(10, 11))
-    w.nixl_wrapper.check_remote_metadata.return_value = False
-    w.nixl_wrapper.check_xfer_state.side_effect = lambda h: "ERR" if h == 10 else "PROC"
-    w.get_finished()
-    w.shutdown()
-    w.shutdown()
-    assert w.nixl_wrapper.release_xfer_handle.call_args_list == [call(10), call(11)]
-    assert w.nixl_wrapper.remove_remote_agent.call_count == 2
-
-
-@pytest.mark.cpu_test
-def test_peer_recovery_waits_for_failed_handle_release(peer_recovery_worker):
-    w = peer_recovery_worker
-    _peer_recovery_request(w, handles=(10,))
-    w.nixl_wrapper.check_remote_metadata.return_value = False
-    w.nixl_wrapper.check_xfer_state.return_value = "ERR"
-    with patch.object(
-        w.nixl_wrapper, "release_xfer_handle", side_effect=RuntimeError("still in use")
-    ):
-        results = w.get_transfer_results()
-        assert not results.finished_recving and not results.failed_recving
-        assert w._recving_transfers == {"req": [10]}
-        assert w._invalid_remote_engines == {"peer"}
-        w.nixl_wrapper.release_dlist_handle.assert_not_called()
-
-    results = w.get_transfer_results()
-    assert results.finished_recving == results.failed_recving == {"req"}
-    assert "peer" not in w._remote_agents
-
-
-@pytest.mark.cpu_test
-def test_peer_recovery_preserves_expiry_failure_metrics(peer_recovery_worker):
-    w = peer_recovery_worker
-    meta = _peer_recovery_request(w)
-    meta.remote.blocks_expiry_time = 0.0
-    w._bidirectional_kv_xfer_enabled = True
-    w._read_blocks_for_req("req", meta)
-    results = w.get_transfer_results()
-    assert results.finished_recving == results.failed_recving == {"req"}
-    w.xfer_stats.record_kv_expired_req.assert_called_once()
-    w.xfer_stats.record_failed_transfer.assert_not_called()
-    assert "peer" in w._remote_agents
-    w.nixl_wrapper.release_dlist_handle.assert_not_called()
-
-
-@pytest.mark.parametrize("invalidated", [False, True])
-@pytest.mark.cpu_test
-def test_peer_recovery_notify_only_never_reports_receive(
-    peer_recovery_worker, invalidated
-):
-    w = peer_recovery_worker
-    meta = _peer_recovery_request(w)
-    meta.local_block_ids = ()
-    meta.awaiting_kvs = False
-    w._recving_metadata.clear()
-    w.pcp_rank = 0
-    w._reqs_to_process = set()
-    if invalidated:
-        w._invalid_remote_engines.add("peer")
-    metadata = NixlConnectorMetadata()
-    metadata.reqs_to_recv["req"] = meta
-    w.start_load_kv(metadata)
-    results = w.get_transfer_results()
-    assert not results.finished_recving and not results.failed_recving
-    assert not w._recving_metadata and not w._recv_failures
-    w.nixl_wrapper.make_prepped_xfer.assert_not_called()
+    def test_eviction_clears_pending_recovery(self):
+        self.worker._failed_remote_engines.add("old")
+        self.worker._invalid_remote_engines.add("old")
+        self.worker._engine_ttl = 1
+        self.worker._engine_last_active["old"] = time.perf_counter() - 10
+        self.worker._evict_stale_engines()
+        self.worker.get_transfer_results()
+        self.transport.remove_remote_agent.assert_called_once_with("old")
+        assert not self.worker._failed_remote_engines
+        assert not self.worker._invalid_remote_engines
 
 
 def test_transfer_topology_unregister():
