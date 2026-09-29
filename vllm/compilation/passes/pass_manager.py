@@ -24,6 +24,7 @@ if rocm_aiter_ops.is_enabled() or rocm_aiter_ops.is_rdna_aiter_enabled():
     )
     from .fusion.rocm_aiter_fusion import (
         MLADualRMSNormFusionPass,
+        RocmAiterActMulMxfp4GemmFusionPass,
         RocmAiterRMSNormQuantFusionPass,
         RocmAiterSiluMulFp8GroupQuantFusionPass,
         RocmAiterTritonAddRMSNormPadFusionPass,
@@ -206,6 +207,7 @@ class PostGradPassManager(CustomGraphPass):  # type: ignore[misc]
                     or rocm_aiter_ops.is_rdna_aiter_enabled()
                 ):
                     self.passes += [RocmAiterSiluMulFp8GroupQuantFusionPass(config)]
+                    self.passes += [RocmAiterActMulMxfp4GemmFusionPass(config)]
 
             muse_sandwich_norm = (
                 current_platform.is_rocm()
