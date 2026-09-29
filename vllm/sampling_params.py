@@ -929,15 +929,16 @@ class SamplingParams(
         # Validate prompt_logprob_token_ids.
         ids = self.prompt_logprob_token_ids
         if ids is not None:
+            invalid = VLLMValidationError(
+                "prompt_logprob_token_ids must be a non-empty integer array "
+                "of shape [num_rows, num_ids].",
+                parameter="prompt_logprob_token_ids",
+                value=getattr(ids, "shape", type(ids).__name__),
+            )
             shape: tuple[int, ...] = ()
             if isinstance(ids, list) and all(isinstance(row, list) for row in ids):
                 lens = np.fromiter(map(len, ids), np.int64, len(ids))
-                flat = list(chain.from_iterable(ids))
-                # Plain ints only, as the API's StrictInt schema: no bools or floats.
-                if set(map(type, flat)) == {int}:
-                    values = np.array(flat)
-                    if values.dtype == np.int64:
-                        shape = (len(ids), int(lens.max()))
+                shape = (len(ids), int(lens.max(initial=0)))
             elif (
                 isinstance(ids, np.ndarray)
                 and ids.dtype.kind in "iu"
@@ -945,12 +946,7 @@ class SamplingParams(
             ):
                 shape = ids.shape
             if len(shape) != 2 or 0 in shape:
-                raise VLLMValidationError(
-                    "prompt_logprob_token_ids must be a non-empty integer array "
-                    "of shape [num_rows, num_ids].",
-                    parameter="prompt_logprob_token_ids",
-                    value=getattr(ids, "shape", type(ids).__name__),
-                )
+                raise invalid
             max_rows = model_config.max_model_len - 1
             if shape[0] > max_rows:
                 raise VLLMValidationError(
@@ -968,8 +964,13 @@ class SamplingParams(
                     parameter="prompt_logprob_token_ids",
                     value=n,
                 )
-            # Pad only after the width check bounds the allocation.
+            # Rows and width are bounded; only now flatten and pad.
             if isinstance(ids, list):
+                flat = list(chain.from_iterable(ids))
+                # Plain ints only, as the API's StrictInt schema: no bools or floats.
+                values = np.array(flat) if set(map(type, flat)) == {int} else None
+                if values is None or values.dtype != np.int64:
+                    raise invalid
                 ids = np.full(shape, -1, dtype=np.int64)
                 ids[np.arange(n) < lens[:, None]] = values
             ids = self.prompt_logprob_token_ids = np.ascontiguousarray(
