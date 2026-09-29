@@ -143,42 +143,35 @@ if target_enabled cuda-12-9-ubuntu-24-04; then
 fi
 
 # ---- ROCm ----
-# ROCm 10.0 (TheRock) is the default: :latest / :v<ver> plus -rocm100 aliases.
-# The legacy ROCm 7.2 stack is published only under -rocm72 tags.
+# Each ROCm stack is identified by its base Dockerfile (see rocm/stack.sh). The
+# default stack also owns the plain :latest / :v<ver> tags.
 
-publish_rocm_variant() {
-  local ecr_image="$1" ecr_base="$2"
-  shift 2
-  docker pull "${ecr_image}"
-  docker pull "${ecr_base}"
-  for flavor in "$@"; do
-    docker tag "${ecr_image}" "vllm/vllm-openai-rocm:latest${flavor}"
-    docker tag "${ecr_image}" "vllm/vllm-openai-rocm:v${RELEASE_VERSION}${flavor}"
-    docker tag "${ecr_base}" "vllm/vllm-openai-rocm:latest${flavor}-base"
-    docker tag "${ecr_base}" "vllm/vllm-openai-rocm:v${RELEASE_VERSION}${flavor}-base"
-    docker push "vllm/vllm-openai-rocm:latest${flavor}"
-    docker push "vllm/vllm-openai-rocm:v${RELEASE_VERSION}${flavor}"
-    docker push "vllm/vllm-openai-rocm:latest${flavor}-base"
-    docker push "vllm/vllm-openai-rocm:v${RELEASE_VERSION}${flavor}-base"
-  done
+publish_rocm_stack() {
+  local base_dockerfile="$1" default="$2" flavor
+  (
+    # shellcheck source=.buildkite/scripts/rocm/stack.sh
+    source .buildkite/scripts/rocm/stack.sh "$base_dockerfile"
+    local flavors=("-${ROCM_STACK_FLAVOR}")
+    [[ "$default" == "1" ]] && flavors=("" "-${ROCM_STACK_FLAVOR}")
+    docker pull "$ROCM_STACK_ECR_IMAGE"
+    docker pull "$ROCM_STACK_ECR_BASE"
+    for flavor in "${flavors[@]}"; do
+      for tag in "latest${flavor}" "v${RELEASE_VERSION}${flavor}"; do
+        docker tag "$ROCM_STACK_ECR_IMAGE" "vllm/vllm-openai-rocm:${tag}"
+        docker tag "$ROCM_STACK_ECR_BASE" "vllm/vllm-openai-rocm:${tag}-base"
+        docker push "vllm/vllm-openai-rocm:${tag}"
+        docker push "vllm/vllm-openai-rocm:${tag}-base"
+      done
+    done
+  )
 }
 
 if target_enabled rocm; then
-  ROCM_BASE_CACHE_KEY=$(sha256sum docker/Dockerfile.rocm_base | cut -c1-16)
-  echo "ROCm 10.0 base cache key: ${ROCM_BASE_CACHE_KEY}"
-  publish_rocm_variant \
-    "public.ecr.aws/q9t5s3a7/vllm-release-repo:${COMMIT}-rock" \
-    "public.ecr.aws/q9t5s3a7/vllm-release-repo:${ROCM_BASE_CACHE_KEY}-rock-base" \
-    "" "-rocm100"
+  publish_rocm_stack docker/Dockerfile.rocm_base 1
 fi
 
 if target_enabled rocm72; then
-  ROCM72_BASE_CACHE_KEY=$(.buildkite/scripts/cache-rocm-base-wheels.sh key)
-  echo "ROCm 7.2 base cache key: ${ROCM72_BASE_CACHE_KEY}"
-  publish_rocm_variant \
-    "public.ecr.aws/q9t5s3a7/vllm-release-repo:${COMMIT}-rocm" \
-    "public.ecr.aws/q9t5s3a7/vllm-release-repo:${ROCM72_BASE_CACHE_KEY}-rocm-base" \
-    "-rocm72"
+  publish_rocm_stack docker/Dockerfile.rocm_72_base 0
 fi
 
 # ---- XPU ----
