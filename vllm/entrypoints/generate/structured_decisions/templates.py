@@ -3,10 +3,6 @@
 """Decision templates: Jinja that renders a decision's system prompt and says
 how an answer is written.
 
-A template works like a chat template. It is rendered in the same sandboxed
-environment, loaded from a file or given inline with --decision-template, and
-a request may carry its own when the server trusts request templates.
-
 The template receives ``instructions`` (a string or None) and ``questions``,
 each with ``id``, ``type``, ``instructions`` and ``options`` (``label``,
 ``name``, ``description``).
@@ -87,8 +83,6 @@ class AnswerSlot:
 
 
 class DecisionTemplate:
-    """A compiled decision template. ``render`` binds it to one request."""
-
     def __init__(self, source: str):
         env = jinja2.sandbox.ImmutableSandboxedEnvironment(
             trim_blocks=True,

@@ -30,8 +30,6 @@ from .templates import DecisionTemplate
 
 @dataclass
 class ReadContext:
-    """What a strategy needs from the server to run reads."""
-
     engine_client: EngineClient
     online_renderer: OnlineRenderer
     chat_template: str | None
@@ -60,14 +58,11 @@ class ReadStrategy(ABC):
 
     @classmethod
     @abstractmethod
-    def supports(cls, model_config: ModelConfig) -> bool:
-        """Whether this strategy can read decisions from the model."""
+    def supports(cls, model_config: ModelConfig) -> bool: ...
 
     @classmethod
     @abstractmethod
-    def limits(cls, model_config: ModelConfig) -> DecisionLimits:
-        """The most questions per request and options per question this
-        strategy can read from the model."""
+    def limits(cls, model_config: ModelConfig) -> DecisionLimits: ...
 
     @abstractmethod
     async def read(
@@ -107,13 +102,10 @@ class NextTokenStrategy(ReadStrategy):
 
     @classmethod
     def supports(cls, model_config: ModelConfig) -> bool:
-        # Diffusion models denoise a canvas and need a canvas strategy.
         return not model_config.is_diffusion
 
     @classmethod
     def limits(cls, model_config: ModelConfig) -> DecisionLimits:
-        # A decision submits one request per question, up to 64. The engine's
-        # logprob_token_ids cap bounds a question's options.
         return DecisionLimits(max_questions=64, max_options=MAX_LOGPROB_TOKEN_IDS)
 
     async def read(

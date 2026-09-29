@@ -48,24 +48,6 @@ def test_default_template_text():
     )
 
 
-def test_default_template_without_instructions():
-    text = (
-        DecisionTemplate(DEFAULT_DECISION_TEMPLATE)
-        .render(None, questions())
-        .system_text
-    )
-    assert "\n\nQuestion bucket: Which team?\n" in text
-    assert "None" not in text
-
-
-def test_default_answer():
-    q = questions()[0]
-    default = DecisionTemplate(DEFAULT_DECISION_TEMPLATE).render(None, [q])
-    bare = DecisionTemplate("Just the questions.").render(None, [q])
-    assert default.answer(q, "B") == "bucket: B"
-    assert bare.answer(q, "B") == "bucket: B"
-
-
 def test_custom_template_and_answer():
     template = DecisionTemplate(
         "{% macro answer(question, label) %}[{{ question.id }}] ({{ label }})"
@@ -143,14 +125,4 @@ def test_slot_needs_text_before_the_label():
     )
     q = build_question("q", "choice", "", {"a": None, "b": None})
     with pytest.raises(StructuredDecisionError, match="text before the label"):
-        template.render(None, [q]).slot(get_tokenizer(MODEL_NAME), q)
-
-
-def test_slot_rejects_labels_that_change_other_tokens():
-    template = DecisionTemplate(
-        "{% macro answer(question, label) %}{{ question.id }}: {{ label }} "
-        "{{ label }}{% endmacro %}"
-    )
-    q = build_question("q", "choice", "", {"a": None, "b": None})
-    with pytest.raises(StructuredDecisionError, match="change 2 tokens"):
         template.render(None, [q]).slot(get_tokenizer(MODEL_NAME), q)

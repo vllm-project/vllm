@@ -8,11 +8,8 @@ from vllm.entrypoints.generate.structured_decisions.strategies import (
 )
 
 
-def test_autoregressive_models_read_next_token():
+def test_strategy_selection():
     assert select_read_strategy(SimpleNamespace(is_diffusion=False)) is (
         NextTokenStrategy
     )
-
-
-def test_diffusion_models_get_no_strategy_yet():
     assert select_read_strategy(SimpleNamespace(is_diffusion=True)) is None

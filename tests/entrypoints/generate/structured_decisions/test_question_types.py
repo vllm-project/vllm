@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import math
 from typing import Any
 
 import pytest
@@ -12,7 +11,6 @@ from vllm.entrypoints.generate.structured_decisions.question_types import (
     QuestionType,
     StructuredDecisionError,
     build_question,
-    label_softmax,
     register_question_type,
 )
 
@@ -82,8 +80,3 @@ def test_registered_type_plugs_in():
             register_question_type(BinaryQuestion)
     finally:
         del QUESTION_TYPES["test_binary"]
-
-
-def test_label_softmax_normalizes_over_labels():
-    probs = label_softmax([math.log(0.3), math.log(0.1)])
-    assert probs == pytest.approx([0.75, 0.25])

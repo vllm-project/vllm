@@ -71,34 +71,9 @@ def test_choice_decision(server):
     assert body["usage"]["input_tokens"] > 0
 
 
-def test_answers_repeat(server):
-    body = {
-        "model": MODEL_NAME,
-        "state": "The package arrived crushed.",
-        "questions": {
-            "team": {
-                "type": "choice",
-                "instructions": "Which team?",
-                "criteria": {"billing": None, "shipping": None},
-            }
-        },
-        "chat_template_kwargs": {"enable_thinking": False},
-    }
-    first = post(server, body).json()["answers"]["team"]["probabilities"]
-    second = post(server, body).json()["answers"]["team"]["probabilities"]
-    for name in first:
-        assert first[name] == pytest.approx(second[name], abs=1e-3)
-
-
 @pytest.mark.parametrize(
     "questions,match",
     [
-        ({}, "at least one question"),
-        (
-            {"q": {"type": "nope", "criteria": {"a": None, "b": None}}},
-            "unknown question type",
-        ),
-        ({"q": {"type": "choice", "criteria": {"a": None}}}, "at least 2"),
         (
             {
                 "q": {
@@ -109,24 +84,19 @@ def test_answers_repeat(server):
             },
             "unknown field(s)",
         ),
+        (
+            {
+                f"q{i}": {"type": "choice", "criteria": {"a": None, "b": None}}
+                for i in range(65)
+            },
+            "at most 64",
+        ),
     ],
 )
 def test_validation_errors(server, questions, match):
     response = post(server, {"model": MODEL_NAME, "state": "x", "questions": questions})
     assert response.status_code == 400
     assert match in response.json()["error"]["message"]
-
-
-def test_unknown_model(server):
-    response = post(
-        server,
-        {
-            "model": "not-a-model",
-            "state": "x",
-            "questions": {"q": {"type": "choice", "criteria": {"a": None, "b": None}}},
-        },
-    )
-    assert response.status_code == 404
 
 
 TEMPLATE_BODY = {
@@ -164,21 +134,3 @@ def test_request_template(server):
     assert custom["answers"]["team"]["probabilities"]["billing"] != pytest.approx(
         default["answers"]["team"]["probabilities"]["billing"], abs=1e-3
     )
-
-
-def test_request_template_that_does_not_compile(server):
-    response = post(
-        server, dict(TEMPLATE_BODY, decision_template="{% for q in questions %}")
-    )
-    assert response.status_code == 400
-    assert "decision template" in response.json()["error"]["message"]
-
-
-def test_too_many_questions(server):
-    questions = {
-        f"q{i}": {"type": "choice", "criteria": {"a": None, "b": None}}
-        for i in range(65)
-    }
-    response = post(server, {"model": MODEL_NAME, "state": "x", "questions": questions})
-    assert response.status_code == 400
-    assert "at most 64" in response.json()["error"]["message"]

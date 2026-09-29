@@ -4,8 +4,7 @@
 
 A question type turns a request's criteria into options, names the label the
 model answers with for each, and shapes the answer from the label
-probabilities. The decision template writes the prompt and the read strategy
-asks the model, so a new type is one registered subclass.
+probabilities.
 """
 
 import math
@@ -40,8 +39,7 @@ class QuestionType(ABC):
     name: ClassVar[str]
 
     @abstractmethod
-    def parse_options(self, qid: str, criteria: Any) -> list[Option]:
-        """The options described by the request's ``criteria``."""
+    def parse_options(self, qid: str, criteria: Any) -> list[Option]: ...
 
     @abstractmethod
     def answer(self, question: Question, probs: list[float]) -> dict[str, Any]:

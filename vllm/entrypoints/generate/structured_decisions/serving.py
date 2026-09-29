@@ -1,8 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""The decision API: parse questions, pick the template, read with the model's
-strategy, and shape the answers."""
-
 import asyncio
 import json
 from typing import Any
