@@ -226,7 +226,12 @@ impl HfChatRenderer {
                 template_kwargs: Some(&effective_template_kwargs),
                 special_tokens: self.special_tokens.as_ref(),
             })
-            .map_err(|error| Error::ChatTemplate(error.to_report_string()))?;
+            .map_err(|error| match error.thrown_message() {
+                Some(message) => Error::ChatTemplateThrown {
+                    message: message.to_owned(),
+                },
+                None => Error::ChatTemplate(error.to_report_string()),
+            })?;
 
         let prompt = match &final_message_text {
             Some(final_message_text) => {
@@ -971,6 +976,23 @@ mod tests {
         .unwrap_err();
 
         assert!(matches!(error, Error::ChatTemplate(_)));
+    }
+
+    #[test]
+    fn raise_exception_in_template_is_a_request_validation_error() {
+        let request = sample_request(vec![ChatMessage::text(ChatRole::User, "hi")]);
+
+        let error = render(
+            Some("{{- raise_exception('No user query found in messages.') }}"),
+            &request,
+        )
+        .unwrap_err();
+
+        assert!(
+            matches!(&error, Error::ChatTemplateThrown { message } if message == "No user query found in messages."),
+            "expected an exception thrown by the template, got: {error:?}"
+        );
+        assert!(error.is_request_validation_error());
     }
 
     #[test]
