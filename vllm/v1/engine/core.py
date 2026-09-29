@@ -2005,15 +2005,13 @@ class EngineCoreProc(EngineCore):
         """Pause generation; behavior depends on mode.
 
         "abort" and "wait" reject new adds; "keep" queues them. "abort" and
-        "keep" skip step(); "wait" allows step() so everything already
-        admitted can drain.
+        "keep" skip step(); "wait" allows step() so in-flight requests can drain.
 
         - ``abort``: Set PAUSED_NEW, abort all requests, wait for abort
           outputs to be sent (when running with output_queue), optionally
           clear caches, then complete the returned Future.
-        - ``wait``: Set PAUSED_NEW (reject adds, keep stepping, end open
-          streaming-input sessions); when drained, optionally clear caches,
-          then complete the returned Future.
+        - ``wait``: Set PAUSED_NEW (reject adds, keep stepping); when drained,
+          optionally clear caches, then complete the returned Future.
         - ``keep``: Set PAUSED_ALL; return a Future that completes when the
           output queue is empty.
         """

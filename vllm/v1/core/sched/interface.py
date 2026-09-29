@@ -25,8 +25,8 @@ class PauseState(enum.IntEnum):
     """Scheduler pause state.
 
     - UNPAUSED: Normal operation
-    - PAUSE_NEW: New requests are rejected on arrival; requests already
-                 admitted (running or waiting) are still scheduled.
+    - PAUSE_NEW: No new requests are scheduled, requests already in
+                 running state are scheduled.
     - PAUSE_ALL: No requests are scheduled
     """
 

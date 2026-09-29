@@ -7,7 +7,6 @@ from unittest.mock import Mock
 import pytest
 
 from vllm.v1.core.sched.async_scheduler import AsyncScheduler
-from vllm.v1.core.sched.interface import PauseState
 from vllm.v1.core.sched.output import CachedRequestData, SchedulerOutput
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import RequestStatus
@@ -319,7 +318,6 @@ def test_abort_request_when_structured_output_fsm_cannot_advance():
     scheduler.finished_req_ids_dict = None
     scheduler.grammar_compile_error_reqs = set()
     scheduler.encoder_cache_mismatch_reqs = set()
-    scheduler._pause_state = PauseState.UNPAUSED
     scheduler.vllm_config = Mock()
     scheduler.aux_output_connector = None
     scheduler.return_sampling_mask = False

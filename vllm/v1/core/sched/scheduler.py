@@ -870,7 +870,7 @@ class Scheduler(SchedulerInterface):
             assert len(scheduled_loras) <= self.lora_config.max_loras
 
         # Next, schedule the WAITING requests.
-        if not preempted_reqs and self._pause_state != PauseState.PAUSED_ALL:
+        if not preempted_reqs and self._pause_state == PauseState.UNPAUSED:
             step_skipped_waiting: deque[Request] = deque()
             step_skipped_kv_holding: deque[Request] = deque()
 
@@ -2251,34 +2251,20 @@ class Scheduler(SchedulerInterface):
             # retryable: re-issuing the request re-runs the encode.
             error_req_ids.update(self.ec_connector.take_unavailable_requests())
 
-        ended_reqs: list[Request] = []
         if error_req_ids:
-            ended_reqs = self.finish_requests(
+            error_reqs = self.finish_requests(
                 error_req_ids, RequestStatus.FINISHED_ERROR
             )
-        if (
-            self._pause_state == PauseState.PAUSED_NEW
-            and self.num_waiting_for_streaming_input
-        ):
-            # Admission is closed: an open streaming-input session gets no more input.
-            idle_sessions = [
-                request.request_id
-                for request in self.requests.values()
-                if request.status == RequestStatus.WAITING_FOR_STREAMING_REQ
-            ]
-            ended_reqs += self.finish_requests(
-                idle_sessions, RequestStatus.FINISHED_ABORTED
-            )
-        for request in ended_reqs:
-            outputs[request.client_index].append(
-                EngineCoreOutput(
-                    request_id=request.request_id,
-                    new_token_ids=[],
-                    finish_reason=request.get_finished_reason(),
-                    events=request.take_events(),
-                    trace_headers=request.trace_headers,
+            for request in error_reqs:
+                outputs[request.client_index].append(
+                    EngineCoreOutput(
+                        request_id=request.request_id,
+                        new_token_ids=[],
+                        finish_reason=request.get_finished_reason(),
+                        events=request.take_events(),
+                        trace_headers=request.trace_headers,
+                    )
                 )
-            )
 
         # KV Connector: update state for finished KV Transfers.
         if kv_connector_output:
@@ -2753,9 +2739,9 @@ class Scheduler(SchedulerInterface):
         if self._pause_state == PauseState.PAUSED_ALL:
             return 0
         num_running, num_waiting = self.get_request_counts()
-        if self._pause_state == PauseState.UNPAUSED:
-            # Under PAUSED_NEW, open sessions are work: the next update ends them.
-            num_waiting -= self.num_waiting_for_streaming_input
+        if self._pause_state == PauseState.PAUSED_NEW:
+            return num_running
+        num_waiting -= self.num_waiting_for_streaming_input
         return num_waiting + num_running
 
     def has_finished_requests(self) -> bool:

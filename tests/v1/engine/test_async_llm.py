@@ -13,7 +13,6 @@ from vllm import SamplingParams
 from vllm.assets.image import ImageAsset
 from vllm.config import LoggingConfig, VllmConfig
 from vllm.engine.arg_utils import AsyncEngineArgs
-from vllm.engine.protocol import StreamingInput
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
     ChatCompletionResponse,
@@ -41,13 +40,6 @@ if not current_platform.is_cuda():
 TEXT_ENGINE_ARGS = AsyncEngineArgs(
     model="meta-llama/Llama-3.2-1B-Instruct",
     enforce_eager=True,
-)
-
-# One running sequence at a time, so a second request has to wait in the queue.
-SINGLE_SEQ_ENGINE_ARGS = AsyncEngineArgs(
-    model="meta-llama/Llama-3.2-1B-Instruct",
-    enforce_eager=True,
-    max_num_seqs=1,
 )
 
 VISION_ENGINE_ARGS = AsyncEngineArgs(
@@ -1158,47 +1150,3 @@ async def test_pause_mid_fanout_rejects_the_whole_request(
         assert not engine.output_processor.parent_requests
         await engine.resume_generation()
         assert (await _generate(engine, "fanout", n=3)).finished
-
-
-@pytest.mark.asyncio
-async def test_wait_pause_ends_open_streaming_session():
-    """An open input stream cannot be drained, so a wait pause ends the session
-    and tells its client, freeing the slot for a request queued behind it."""
-    with ExitStack() as after:
-        with set_default_torch_num_threads(1):
-            engine = AsyncLLM.from_engine_args(SINGLE_SEQ_ENGINE_ARGS)
-        after.callback(engine.shutdown)
-
-        started = asyncio.Event()
-
-        async def inputs():
-            yield StreamingInput(prompt=TEXT_PROMPT)
-            await asyncio.Event().wait()
-
-        async def session() -> RequestOutput:
-            async for out in engine.generate(
-                inputs(), SamplingParams(max_tokens=5), "session"
-            ):
-                started.set()
-            return out
-
-        task = asyncio.create_task(session())
-        after.callback(task.cancel)
-        await asyncio.wait_for(started.wait(), timeout=60)
-        queued = await engine.add_request(
-            request_id="queued",
-            prompt=TEXT_PROMPT,
-            params=SamplingParams(
-                max_tokens=5, ignore_eos=True, output_kind=RequestOutputKind.FINAL_ONLY
-            ),
-        )
-        await asyncio.wait_for(engine.pause_generation(mode="wait"), timeout=60)
-
-        ended = await asyncio.wait_for(task, timeout=5)
-        assert ended.outputs[0].finish_reason == "abort"
-        drained = await asyncio.wait_for(queued.get(), timeout=5)
-        assert drained.outputs[0].finish_reason == "length"
-        assert not engine.output_processor.has_unfinished_requests()
-
-        await engine.resume_generation()
-        assert (await _generate(engine, "session")).finished

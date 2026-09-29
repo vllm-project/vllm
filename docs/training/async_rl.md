@@ -32,9 +32,8 @@ new requests are admitted while paused:
 until `resume_generation` returns, rather than carrying them across the boundary.
 Clients should retry on 503. A request racing the pause call itself may instead be
 treated as in-flight. After `sleep()`, requests stay rejected until a full
-`wake_up()`, even if `resume_generation` is called first. A streaming-input session can take no more input while
-paused, so these modes end it with `finish_reason="abort"` once it is waiting
-for input.
+`wake_up()`, even if `resume_generation` is called first. A streaming-input
+session's next input is rejected the same way, which ends the session.
 
 The `clear_cache` parameter controls whether to clear the KV cache and prefix cache after pausing.
 
