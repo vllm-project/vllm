@@ -144,10 +144,7 @@ QWEN4_EXP_SM90_GEMM_PLANS: dict[tuple[int, int], dict[int, SkinnyGemmConfig]] = 
 }
 
 
-# B200 plans, measured separately from the B300 table because the winning
-# configurations differ between the two parts. Selected by CUDA graph replay over
-# M={1, 2, 4, 8, 16}; a point is kept only if it beats the standard linear
-# implementation by at least 5% in both hot-cache and L2-flush measurements.
+# B200 plans; the winning configs differ from the B300 table.
 QWEN4_EXP_SM100_GEMM_PLANS: dict[tuple[int, int], dict[int, SkinnyGemmConfig]] = {
     # GDN fused B/A projection, TP=4.
     (24, 2560): {

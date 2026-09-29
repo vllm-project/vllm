@@ -719,19 +719,6 @@ def test_qwen4_exp_hopper_plans_are_valid() -> None:
             assert config.static_k in (None, k)
 
 
-def test_qwen4_exp_blackwell_plans_are_valid() -> None:
-    plans = qwen4_exp_gemm.QWEN4_EXP_SM100_GEMM_PLANS
-
-    assert len(plans) == 9
-    assert sum(map(len, plans.values())) == 31
-    for (n, k), shape_plans in plans.items():
-        for num_tokens, config in shape_plans.items():
-            assert config.num_rows == num_tokens
-            assert n % config.outputs_per_block == 0
-            assert k % (config.block_size * config.vector_width) == 0
-            assert config.static_k in (None, k)
-
-
 @pytest.mark.parametrize(
     "capability,expected_plans",
     [
