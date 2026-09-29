@@ -275,6 +275,7 @@ def test_modelopt_mixed_precision_dispatches_every_linear_algo(algo):
 def test_modelopt_mixed_precision_routes_q8_0_and_rejects_other_block_layouts():
     from vllm.model_executor.layers.linear import LinearBase
     from vllm.model_executor.layers.quantization.modelopt_q8_0 import (
+        ModelOptQ80EmbeddingMethod,
         ModelOptQ80LinearMethod,
     )
 
@@ -299,6 +300,27 @@ def test_modelopt_mixed_precision_routes_q8_0_and_rejects_other_block_layouts():
     assert isinstance(
         config.get_quant_method(MagicMock(spec=LinearBase), "model.layers.0.q_proj"),
         ModelOptQ80LinearMethod,
+    )
+    embedding_config = _mixed_precision_config({"model.embed_tokens": recipe})
+    embedding = MagicMock(spec=VocabParallelEmbedding)
+    embedding.__class__ = VocabParallelEmbedding
+    assert isinstance(
+        embedding_config.get_quant_method(embedding, "model.embed_tokens"),
+        ModelOptQ80EmbeddingMethod,
+    )
+    wrapped_config = _mixed_precision_config(
+        {"language_model.model.layers.0.norm": recipe}
+    )
+    assert wrapped_config._resolve_quant_algo("model.layers.0.norm") == "Q8_0"
+    from vllm.model_executor.models.nemotron_h import NemotronHForCausalLM
+
+    checkpoint_config = _mixed_precision_config(
+        {"language_model.model.embeddings": recipe}
+    )
+    checkpoint_config.apply_vllm_mapper(NemotronHForCausalLM.hf_to_vllm_mapper)
+    assert (
+        checkpoint_config._resolve_quant_algo("language_model.model.embed_tokens")
+        == "Q8_0"
     )
     with pytest.raises(ValueError, match="Unsupported Q8_0 block layout"):
         config_for({**recipe, "group_size": 64})
@@ -357,6 +379,156 @@ def test_modelopt_q8_0_loader_preserves_codes_and_fp16_scales(monkeypatch):
             params_dtype=torch.bfloat16,
             weight_loader=lambda param, value: param.data.copy_(value),
         )
+
+
+def test_modelopt_q8_0_embedding_decodes_only_gathered_rows(monkeypatch):
+    from vllm.model_executor.layers.quantization import modelopt_q8_0 as q8
+
+    monkeypatch.setattr(q8, "get_tensor_model_parallel_world_size", lambda: 1)
+    monkeypatch.setattr(
+        "vllm.model_executor.parameter.get_tensor_model_parallel_rank", lambda: 0
+    )
+    monkeypatch.setattr(
+        "vllm.model_executor.parameter.get_tensor_model_parallel_world_size",
+        lambda: 1,
+    )
+    method = q8.ModelOptQ80EmbeddingMethod()
+    layer = torch.nn.Module()
+    layer.embedding_dim = 64
+    layer.params_dtype = torch.bfloat16
+    method.create_weights(
+        layer,
+        input_size_per_partition=64,
+        output_partition_sizes=[3],
+        input_size=64,
+        output_size=3,
+        params_dtype=torch.bfloat16,
+        weight_loader=lambda param, value: param.data.copy_(value),
+    )
+    scales = torch.tensor([[0.5, 1.0], [1.0, 0.5], [0.25, 0.5]], dtype=torch.float16)
+    codes = torch.arange(192, dtype=torch.int16).reshape(3, 64) - 96
+    blocks = torch.empty((3, 2, 34), dtype=torch.uint8)
+    blocks[..., :2] = scales.unsqueeze(-1).contiguous().view(torch.uint8)
+    blocks[..., 2:] = codes.to(torch.int8).reshape(3, 2, 32).view(torch.uint8)
+    layer.weight.weight_loader(layer.weight, blocks)
+    method.process_weights_after_loading(layer)
+
+    indices = torch.tensor([[2, 0, 2]])
+    actual = method.embedding(layer, indices)
+    expected = codes.float().reshape(3, 2, 32) * scales.float().unsqueeze(-1)
+    assert torch.equal(actual, expected.reshape(3, 64)[indices].to(torch.bfloat16))
+    assert actual.shape == (1, 3, 64)
+
+
+def test_modelopt_q8_0_vocab_embedding_loads_packed_rows(monkeypatch):
+    from vllm.model_executor.layers.quantization import modelopt_q8_0 as q8
+
+    monkeypatch.setattr(q8, "get_tensor_model_parallel_world_size", lambda: 1)
+    monkeypatch.setattr(
+        "vllm.model_executor.parameter.get_tensor_model_parallel_rank", lambda: 0
+    )
+    monkeypatch.setattr(
+        "vllm.model_executor.parameter.get_tensor_model_parallel_world_size",
+        lambda: 1,
+    )
+    monkeypatch.setattr(
+        "vllm.model_executor.layers.vocab_parallel_embedding"
+        ".get_tensor_model_parallel_rank",
+        lambda: 0,
+    )
+    monkeypatch.setattr(
+        "vllm.model_executor.layers.vocab_parallel_embedding"
+        ".get_tensor_model_parallel_world_size",
+        lambda: 1,
+    )
+    config = _mixed_precision_config(
+        {
+            "model.embed_tokens": {
+                "quant_algo": "Q8_0",
+                "group_size": 32,
+                "block_payload_bytes": 34,
+                "packing": "ggml",
+            }
+        }
+    )
+    embedding = VocabParallelEmbedding(
+        3,
+        64,
+        params_dtype=torch.bfloat16,
+        padding_size=1,
+        quant_config=config,
+        prefix="model.embed_tokens",
+    )
+    blocks = torch.zeros((3, 2, 34), dtype=torch.uint8)
+    blocks[..., :2] = torch.tensor([1.0], dtype=torch.float16).view(torch.uint8)
+    blocks[..., 2:] = 1
+    embedding.weight.weight_loader(embedding.weight, blocks)
+    embedding.quant_method.process_weights_after_loading(embedding)
+
+    assert torch.equal(embedding(torch.tensor([0, 2])), torch.ones((2, 64)).bfloat16())
+
+
+def test_modelopt_q8_0_vector_loader_requires_metadata(monkeypatch):
+    from vllm.model_executor.models.utils import AutoWeightsLoader
+
+    monkeypatch.setattr(
+        "vllm.model_executor.models.utils.get_tensor_model_parallel_world_size",
+        lambda: 1,
+    )
+    recipe = {
+        "quant_algo": "Q8_0",
+        "group_size": 32,
+        "block_payload_bytes": 34,
+        "packing": "ggml",
+    }
+    model = torch.nn.Module()
+    model.quant_config = _mixed_precision_config({"norm": recipe})
+    model.norm = torch.nn.Module()
+    model.norm.weight = torch.nn.Parameter(torch.empty(64, dtype=torch.bfloat16))
+    scales = torch.tensor([0.5, 1.0], dtype=torch.float16)
+    codes = torch.arange(64, dtype=torch.int16).to(torch.int8) - 32
+    blocks = torch.empty((2, 34), dtype=torch.uint8)
+    blocks[:, :2] = scales[:, None].contiguous().view(torch.uint8)
+    blocks[:, 2:] = codes.view(2, 32).view(torch.uint8)
+
+    loaded = AutoWeightsLoader(model).load_weights([("norm.weight", blocks)])
+    expected = (codes.float().view(2, 32) * scales.float()[:, None]).flatten()
+    assert loaded == {"norm.weight"}
+    assert torch.equal(model.norm.weight, expected.to(torch.bfloat16))
+
+    model.quant_config = _mixed_precision_config({"other": recipe})
+    with pytest.raises(AssertionError, match="Attempted to load weight"):
+        AutoWeightsLoader(model).load_weights([("norm.weight", blocks)])
+
+
+def test_modelopt_q8_0_gate_keeps_unpacked_expert_bias(monkeypatch):
+    from vllm.model_executor.models.utils import AutoWeightsLoader
+
+    monkeypatch.setattr(
+        "vllm.model_executor.models.utils.get_tensor_model_parallel_world_size",
+        lambda: 1,
+    )
+    model = torch.nn.Module()
+    model.quant_config = _mixed_precision_config(
+        {
+            "gate": {
+                "quant_algo": "Q8_0",
+                "group_size": 32,
+                "block_payload_bytes": 34,
+                "packing": "ggml",
+            }
+        }
+    )
+    model.gate = torch.nn.Module()
+    model.gate.e_score_correction_bias = torch.nn.Parameter(
+        torch.zeros(3, dtype=torch.float32)
+    )
+    bias = torch.tensor([0.25, -0.5, 1.0], dtype=torch.float32)
+    loaded = AutoWeightsLoader(model).load_weights(
+        [("gate.e_score_correction_bias", bias)]
+    )
+    assert loaded == {"gate.e_score_correction_bias"}
+    assert torch.equal(model.gate.e_score_correction_bias, bias)
 
 
 @pytest.mark.parametrize("algo", ["FP8_PB_WO", "FP8_BLOCK_SCALES"])

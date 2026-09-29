@@ -322,6 +322,34 @@ class AutoWeightsLoader:
                 )
 
             weight_loader = getattr(param, "weight_loader", default_weight_loader)
+            quant_config = getattr(self.module, "quant_config", None)
+            if (
+                param.ndim == 1
+                and weight_qualname.endswith(".weight")
+                and quant_config is not None
+            ):
+                from vllm.model_executor.layers.quantization.modelopt import (
+                    ModelOptMixedPrecisionConfig,
+                )
+
+                layer_prefix = weight_qualname.rsplit(".", 1)[0]
+                if (
+                    isinstance(quant_config, ModelOptMixedPrecisionConfig)
+                    and quant_config._resolve_quant_algo(layer_prefix) == "Q8_0"
+                ):
+                    from vllm.model_executor.layers.quantization.modelopt_q8_0 import (
+                        dequantize_q8_0,
+                    )
+
+                    if get_tensor_model_parallel_world_size() != 1:
+                        raise NotImplementedError("Q8_0 vectors are limited to TP=1")
+                    weight_data = dequantize_q8_0(
+                        weight_data, tuple(param.shape), param.dtype
+                    )
+                    if param.is_meta and not weight_data.is_meta:
+                        param.data = torch.empty(
+                            param.shape, dtype=param.dtype, device=weight_data.device
+                        )
             weight_loader(param, weight_data)
 
             logger.debug("Loaded weight %s with shape %s", weight_qualname, param.shape)

@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Run canonical ModelOpt Q8_0 linear weights with Humming."""
+"""Load canonical ModelOpt Q8_0 weights for Humming and embeddings."""
 
 import torch
+import torch.nn.functional as F
 from torch.nn import Parameter
 
 from vllm.distributed import get_tensor_model_parallel_world_size
@@ -16,7 +17,97 @@ from vllm.model_executor.layers.quantization.utils.humming import (
     get_humming_linear_compute_config,
     prepare_humming_linear_layer_config,
 )
+from vllm.model_executor.layers.vocab_parallel_embedding import (
+    UnquantizedEmbeddingMethod,
+)
 from vllm.model_executor.parameter import ModelWeightParameter
+
+
+def _check_q8_0_shape(blocks: torch.Tensor, shape: tuple[int, ...]) -> None:
+    if (
+        blocks.dtype != torch.uint8
+        or blocks.shape != (*shape[:-1], shape[-1] // 32, 34)
+        or shape[-1] % 32
+    ):
+        raise ValueError("Q8_0 weights must be uint8 [..., K/32, 34] blocks")
+
+
+def _validate_q8_0_blocks(blocks: torch.Tensor, shape: tuple[int, ...]) -> None:
+    _check_q8_0_shape(blocks, shape)
+    scales = blocks[..., :2].contiguous().view(torch.float16)
+    if not (torch.isfinite(scales) & (scales >= 0)).all():
+        raise ValueError("Q8_0 weights contain invalid FP16 scales")
+    if blocks[..., 2:].view(torch.int8).amin() < -127:
+        raise ValueError("Q8_0 codes must be within [-127, 127]")
+
+
+def dequantize_q8_0(
+    blocks: torch.Tensor,
+    shape: tuple[int, ...],
+    dtype: torch.dtype,
+    *,
+    validate: bool = True,
+) -> torch.Tensor:
+    """Decode canonical Q8_0 blocks without changing their stored codes."""
+    if validate:
+        _validate_q8_0_blocks(blocks, shape)
+    else:
+        _check_q8_0_shape(blocks, shape)
+    scales = blocks[..., :2].contiguous().view(torch.float16).squeeze(-1).float()
+    codes = blocks[..., 2:].contiguous().view(torch.int8)
+    return (codes.float() * scales.unsqueeze(-1)).reshape(shape).to(dtype)
+
+
+class ModelOptQ80EmbeddingMethod(UnquantizedEmbeddingMethod):
+    """Gather Q8_0 token rows, then decode only the selected rows."""
+
+    supports_pre_processed_weights = False
+
+    def create_weights(
+        self,
+        layer,
+        input_size_per_partition,
+        output_partition_sizes,
+        input_size,
+        output_size,
+        params_dtype,
+        **extra_weight_attrs,
+    ):
+        if get_tensor_model_parallel_world_size() != 1:
+            raise NotImplementedError("Q8_0 embeddings are limited to TP=1")
+        if input_size_per_partition % 32 or params_dtype != torch.bfloat16:
+            raise ValueError("Q8_0 embeddings require K divisible by 32 and BF16")
+        layer.register_parameter(
+            "weight",
+            ModelWeightParameter(
+                data=torch.zeros(
+                    (sum(output_partition_sizes), input_size_per_partition // 32, 34),
+                    dtype=torch.uint8,
+                ),
+                input_dim=1,
+                output_dim=0,
+                weight_loader=extra_weight_attrs["weight_loader"],
+            ),
+        )
+
+    def process_weights_after_loading(self, layer):
+        blocks = layer.weight
+        _validate_q8_0_blocks(blocks, (blocks.shape[0], layer.embedding_dim))
+
+    def embedding(self, layer, input_):
+        packed_rows = layer.weight.view(layer.weight.shape[0], -1)
+        selected = F.embedding(input_, packed_rows).view(
+            *input_.shape, layer.embedding_dim // 32, 34
+        )
+        return dequantize_q8_0(
+            selected,
+            (*input_.shape, layer.embedding_dim),
+            layer.params_dtype,
+            validate=False,
+        )
+
+    def apply(self, layer, x, bias=None):
+        raise NotImplementedError("Q8_0 embedding weights are not a linear GEMM")
 
 
 @register_weight_loader_v2_supported_method

@@ -36,6 +36,34 @@ def test_nemotron_h_lm_head_receives_quant_config():
         assert call_kwargs["quant_config"] is mock_quant_config
 
 
+def test_nemotron_h_only_routes_q8_gate_and_embedding_through_modelopt():
+    from vllm.model_executor.layers.quantization.modelopt import (
+        ModelOptMixedPrecisionConfig,
+    )
+    from vllm.model_executor.models.nemotron_h import _q8_quant_config_for_prefix
+
+    recipe = {
+        "quant_algo": "Q8_0",
+        "group_size": 32,
+        "block_payload_bytes": 34,
+        "packing": "ggml",
+    }
+    config = ModelOptMixedPrecisionConfig.from_config(
+        {
+            "quantization": {
+                "quant_algo": "MIXED_PRECISION",
+                "quantized_layers": {
+                    "model.layers.1.mixer.gate": recipe,
+                    "model.embed_tokens": recipe,
+                },
+            }
+        }
+    )
+    assert _q8_quant_config_for_prefix(config, "model.layers.1.mixer.gate") is config
+    assert _q8_quant_config_for_prefix(config, "model.embed_tokens") is config
+    assert _q8_quant_config_for_prefix(config, "model.layers.2.mixer.gate") is None
+
+
 def test_relu2_fp8_fusion_uses_registry():
     from vllm.model_executor.models.nemotron_h import NemotronHMLP
 

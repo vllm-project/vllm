@@ -94,7 +94,10 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     requantize_with_max_scale,
 )
-from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
+from vllm.model_executor.layers.vocab_parallel_embedding import (
+    ParallelLMHead,
+    VocabParallelEmbedding,
+)
 from vllm.model_executor.parameter import (
     BlockQuantScaleParameter,
     ChannelQuantScaleParameter,
@@ -1749,6 +1752,9 @@ class ModelOptMixedPrecisionConfig(ModelOptQuantConfigBase):
         if prefix.endswith(".lm_head"):
             candidates.append("lm_head")
 
+        if prefix.startswith("model."):
+            candidates.append("language_model." + prefix)
+
         if prefix.startswith("language_model.model."):
             candidates.append(
                 "model.language_model." + prefix[len("language_model.model.") :]
@@ -1779,13 +1785,18 @@ class ModelOptMixedPrecisionConfig(ModelOptQuantConfigBase):
         quant_algo = self._resolve_quant_algo(prefix)
 
         if quant_algo == "Q8_0":
-            if not isinstance(layer, (LinearBase, ParallelLMHead)):
-                raise ValueError(f"Q8_0 requires a dense linear or LM head: {prefix}")
             from vllm.model_executor.layers.quantization.modelopt_q8_0 import (
+                ModelOptQ80EmbeddingMethod,
                 ModelOptQ80LinearMethod,
             )
 
-            return ModelOptQ80LinearMethod()
+            if isinstance(layer, VocabParallelEmbedding) and not isinstance(
+                layer, ParallelLMHead
+            ):
+                return ModelOptQ80EmbeddingMethod()
+            if isinstance(layer, (LinearBase, ParallelLMHead)):
+                return ModelOptQ80LinearMethod()
+            raise ValueError(f"Q8_0 requires a linear, LM head, or embedding: {prefix}")
 
         if isinstance(layer, (LinearBase, ParallelLMHead)):
             # Per-prefix algo -> its sub-config, then the generic linear method.

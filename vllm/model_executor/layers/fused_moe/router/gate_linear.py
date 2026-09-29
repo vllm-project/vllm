@@ -78,7 +78,11 @@ class GateLinear(ReplicatedLinear):
 
         # If fp32 compute is required and no specialized kernel is available,
         # store weights in fp32 so the fallback linear path computes in fp32.
-        if force_fp32_compute and not can_use_specialized_kernels:
+        if (
+            force_fp32_compute
+            and not can_use_specialized_kernels
+            and quant_config is None
+        ):
             params_dtype = torch.float32
 
         super().__init__(

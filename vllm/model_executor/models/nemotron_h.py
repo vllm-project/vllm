@@ -60,6 +60,9 @@ from vllm.model_executor.layers.mamba.mamba_utils import (
     MambaStateShapeCalculator,
 )
 from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.model_executor.layers.quantization.modelopt import (
+    ModelOptMixedPrecisionConfig,
+)
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
@@ -88,6 +91,17 @@ from vllm.model_executor.models.utils import (
 )
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.nemotron_h import NemotronHConfig
+
+
+def _q8_quant_config_for_prefix(
+    quant_config: QuantizationConfig | None, prefix: str
+) -> QuantizationConfig | None:
+    if (
+        isinstance(quant_config, ModelOptMixedPrecisionConfig)
+        and quant_config._resolve_quant_algo(prefix) == "Q8_0"
+    ):
+        return quant_config
+    return None
 
 
 class NemotronHMLP(nn.Module):
@@ -162,6 +176,9 @@ class NemotronHMoE(nn.Module):
             config.n_routed_experts,
             out_dtype=torch.float32,
             force_fp32_compute=True,
+            quant_config=_q8_quant_config_for_prefix(
+                quant_config, maybe_prefix(prefix, "gate")
+            ),
             prefix=f"{prefix}.gate",
         )
 
@@ -585,6 +602,10 @@ class NemotronHModel(nn.Module, EagleModelMixin):
         self.embed_tokens = VocabParallelEmbedding(
             self.vocab_size,
             config.hidden_size,
+            quant_config=_q8_quant_config_for_prefix(
+                quant_config, maybe_prefix(prefix, "embed_tokens")
+            ),
+            prefix=maybe_prefix(prefix, "embed_tokens"),
         )
 
         self.has_moe = "E" in config.hybrid_override_pattern
