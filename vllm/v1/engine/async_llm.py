@@ -524,6 +524,10 @@ class AsyncLLM(EngineClient):
                 if self.log_requests:
                     logger.info("Added request %s.", child_request.request_id)
         except BaseException:
+            # Drop children whose frontend registration did not complete.
+            parent_request.child_requests.intersection_update(
+                self.output_processor.request_states
+            )
             await self.abort(parent_request.request_id, internal=True)
             raise
         return queue
@@ -888,7 +892,10 @@ class AsyncLLM(EngineClient):
         stats_by_engine: dict[int, IterationStats] = {}
         all_request_ids = []
         # Remove all frontend state before yielding to the output handler.
-        for engine_idx, engine_request_ids in requests_by_engine.items():
+        # Finish unsubmitted children first so parent metrics have an engine.
+        for engine_idx, engine_request_ids in sorted(
+            requests_by_engine.items(), key=lambda item: item[0] is not None
+        ):
             iteration_stats = (
                 IterationStats() if self.log_stats and engine_idx is not None else None
             )
