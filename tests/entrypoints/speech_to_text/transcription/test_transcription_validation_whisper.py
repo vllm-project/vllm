@@ -10,6 +10,7 @@ import numpy as np
 import openai
 import pytest
 import pytest_asyncio
+import regex as re
 import soundfile as sf
 
 from tests.utils import RemoteOpenAIServer
@@ -419,6 +420,58 @@ async def test_whisper_beam_search_multibeam(mary_had_lamb, whisper_client):
     assert text is not None
     assert len(text) > 0
     assert "mary had a little lamb" in text.lower()
+
+
+@pytest.mark.asyncio
+async def test_audio_srt_format(mary_had_lamb, whisper_client):
+    """Test SRT subtitle output format."""
+    transcription = await whisper_client.audio.transcriptions.create(
+        model=MODEL_NAME,
+        file=mary_had_lamb,
+        language="en",
+        response_format="srt",
+        temperature=0.0,
+    )
+    # SRT format: cue number, "HH:MM:SS,mmm --> HH:MM:SS,mmm", text
+    assert transcription.startswith("1\n")
+    assert re.search(
+        r"\d{2}:\d{2}:\d{2},\d{3} --> \d{2}:\d{2}:\d{2},\d{3}", transcription
+    )
+    assert "mary" in transcription.lower()
+
+
+@pytest.mark.asyncio
+async def test_audio_vtt_format(mary_had_lamb, whisper_client):
+    """Test WebVTT subtitle output format."""
+    transcription = await whisper_client.audio.transcriptions.create(
+        model=MODEL_NAME,
+        file=mary_had_lamb,
+        language="en",
+        response_format="vtt",
+        temperature=0.0,
+    )
+    # VTT format: WEBVTT header, "HH:MM:SS.mmm --> HH:MM:SS.mmm", text
+    assert transcription.startswith("WEBVTT\n")
+    assert re.search(
+        r"\d{2}:\d{2}:\d{2}\.\d{3} --> \d{2}:\d{2}:\d{2}\.\d{3}", transcription
+    )
+    assert "mary" in transcription.lower()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("response_format", ["srt", "vtt"])
+async def test_subtitle_streaming_raises(
+    mary_had_lamb, whisper_client, response_format
+):
+    """Test that streaming is not supported with srt/vtt formats."""
+    with pytest.raises(openai.BadRequestError):
+        await whisper_client.audio.transcriptions.create(
+            model=MODEL_NAME,
+            file=mary_had_lamb,
+            language="en",
+            response_format=response_format,
+            stream=True,
+        )
 
 
 @pytest.mark.asyncio

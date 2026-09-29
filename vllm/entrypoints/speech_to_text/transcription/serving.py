@@ -55,6 +55,7 @@ class OpenAIServingTranscription(SpeechToTextBaseServing):
         TranscriptionResponse
         | TranscriptionResponseVerbose
         | TranscriptionResponseDiarized
+        | str
         | AsyncGenerator[str, None]
         | ErrorResponse
     ):
