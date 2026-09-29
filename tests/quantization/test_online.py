@@ -40,7 +40,6 @@ from vllm.model_executor.kernels.linear.scaled_mm import (
     MarlinFP8ScaledMMLinearKernel,
 )
 from vllm.model_executor.layers.attention import Attention
-from vllm.model_executor.layers.fused_moe import FusedMoEFactory
 from vllm.model_executor.layers.fused_moe.oracle import nvfp4 as nvfp4_oracle
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
@@ -132,6 +131,7 @@ GRANITE_MODEL_NAME = "ibm-granite/granite-3.0-1b-a400m-base"
 PARTIALLY_PREQUANTIZED_MODEL_NAME = (
     "nm-testing/tinysmokeqwen3moe-W4A16-first-only-CTstable"
 )
+NVFP4_MOE_MODEL_NAME = "RedHatAI/Qwen3-30B-A3B-NVFP4"
 
 
 @pytest.mark.parametrize(
@@ -486,37 +486,6 @@ def test_online_ignore_keeps_checkpoint_quantization_linear(
     )
 
     assert isinstance(layer.quant_method, QuarkLinearMethod)
-
-
-def test_online_quantization_rejects_prequantized_moe(
-    default_vllm_config, dist_init, monkeypatch
-) -> None:
-    """Reject pre-quantized MoE before constructing an online target backend."""
-    default_vllm_config.model_config = ModelConfig()
-    prefix = "model.layers.0.mlp.experts"
-    quant_config = _fully_quantized_quark_config()
-    quant_config.online_quantization_config = OnlineQuantizationConfig(
-        QuantizationConfigArgs(linear="mxfp4", moe="mxfp4")
-    )
-    monkeypatch.setattr(
-        quant_config.online_quantization_config,
-        "get_quant_method",
-        lambda *args: pytest.fail("unsupported online backend must not be constructed"),
-    )
-
-    with pytest.raises(
-        NotImplementedError,
-        match="Requantizing checkpoint-quantized MoE layers is not supported",
-    ):
-        FusedMoEFactory(
-            num_experts=4,
-            top_k=2,
-            hidden_size=32,
-            intermediate_size=64,
-            params_dtype=torch.bfloat16,
-            quant_config=quant_config,
-            prefix=prefix,
-        )
 
 
 def test_activation_only_override_applies_to_checkpoint_method(
@@ -896,6 +865,15 @@ def test_nvfp4_one_sided_rejects_unsupported_input_dtype(input_dtype: torch.dtyp
             {},
             id="requantization_mxfp8_ptcp_fp8",
         ),
+        pytest.param(
+            NVFP4_MOE_MODEL_NAME,
+            None,
+            {"targets": {"*mlp.experts*": "mxfp4"}},
+            CompressedTensorsLinearMethod,
+            Mxfp4OnlineMoEMethod,
+            {},
+            id="requantization_nvfp4_mxfp4_moe",
+        ),
     ],
 )
 @pytest.mark.parametrize(
@@ -921,7 +899,9 @@ def test_online_quantization(
     """
     # TODO: Relax this condition once there is a native MXFP4_MXFP4
     # linear/moe backend supported on cuda.
-    if quant_scheme == "mxfp4" and not (on_gfx950() or on_gfx942()):
+    if (quant_scheme == "mxfp4" or expected_moe_cls is Mxfp4OnlineMoEMethod) and not (
+        on_gfx950() or on_gfx942()
+    ):
         pytest.skip("mxfp4 online quantization is only tested on AMD gfx942, gfx950.")
 
     if current_platform.is_rocm():
@@ -948,6 +928,32 @@ def test_online_quantization(
             moe_backend=runner_kwargs.get("moe_backend", "auto"),
         ),
     }
+    if model_name == NVFP4_MOE_MODEL_NAME:
+        original_process = Mxfp4OnlineMoEMethod.process_weights_after_loading
+        source_parameter_names = (
+            "w13_weight_packed",
+            "w13_weight_scale",
+            "w13_weight_global_scale",
+            "w13_input_global_scale",
+            "w2_weight_packed",
+            "w2_weight_scale",
+            "w2_weight_global_scale",
+            "w2_input_global_scale",
+        )
+
+        def assert_source_weights_released(method, layer) -> None:
+            original_process(method, layer)
+            for name in source_parameter_names:
+                assert not hasattr(layer, name), (
+                    "Serialized NVFP4 source weights must be released after "
+                    "requantization"
+                )
+
+        monkeypatch.setattr(
+            Mxfp4OnlineMoEMethod,
+            "process_weights_after_loading",
+            assert_source_weights_released,
+        )
 
     if model_name == PARTIALLY_PREQUANTIZED_MODEL_NAME:
         model, vllm_config = load_model_without_vllm_runner(
@@ -1006,6 +1012,9 @@ def test_online_quantization(
     elif model_name == "mgoin/Qwen3-0.6B-MXFP8":
         o_proj = model.model.layers[0].self_attn.o_proj
         moe = None
+    elif model_name == NVFP4_MOE_MODEL_NAME:
+        o_proj = model.model.layers[0].self_attn.o_proj
+        moe = model.model.layers[0].mlp.experts
     else:
         o_proj = model.model.layers[0].self_attn.o_proj
         moe = model.model.layers[0].block_sparse_moe.experts
@@ -1025,7 +1034,7 @@ def test_online_quantization(
         assert o_proj.weight.dtype == torch.bfloat16
     elif model_name == PARTIALLY_PREQUANTIZED_MODEL_NAME:
         assert o_proj.weight.dtype == MXFP8_VALUE_DTYPE
-    elif quant_scheme == "mxfp4":
+    elif model_name == NVFP4_MOE_MODEL_NAME or quant_scheme == "mxfp4":
         assert o_proj.weight.dtype == torch.uint8
     elif current_platform.is_cuda() or current_platform.is_xpu():
         if current_platform.supports_fp8() and not force_marlin:

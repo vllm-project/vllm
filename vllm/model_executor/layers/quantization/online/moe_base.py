@@ -10,6 +10,7 @@ from vllm.model_executor.layers.fused_moe import (
     RoutedExperts,
     SharedExperts,
 )
+from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig
 from vllm.model_executor.layers.fused_moe.moe_output import UnfinalizedMoEOutput
 from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase
 from vllm.model_executor.model_loader.reload.layerwise import (
@@ -25,11 +26,15 @@ class OnlineMoEMethodBase(FusedMoEMethodBase):
 
     uses_meta_device: bool = True
 
+    def __init__(self, moe: FusedMoEConfig):
+        super().__init__(moe)
+        self.requantization_source: QuantizeMethodBase | None = None
+        self.requantization_source_parameter_names: tuple[str, ...] = ()
+
     def set_requantization_source(self, source_method: QuantizeMethodBase) -> None:
-        """Reject requantization from a checkpoint-quantized MoE method."""
-        raise NotImplementedError(
-            "Requantizing checkpoint-quantized MoE layers is not supported."
-        )
+        """Configure serialized-weight conversion before online quantization."""
+        self.requantization_source = source_method
+        self.uses_meta_device = False
 
     def create_weights(
         self,
@@ -40,6 +45,23 @@ class OnlineMoEMethodBase(FusedMoEMethodBase):
         params_dtype: torch.dtype,
         **extra_weight_attrs,
     ):
+        if self.requantization_source is not None:
+            existing_parameter_names = set(layer._parameters)
+            self.requantization_source.create_weights(
+                layer,
+                num_experts,
+                hidden_size,
+                intermediate_size_per_partition,
+                params_dtype,
+                **extra_weight_attrs,
+            )
+            self.requantization_source_parameter_names = tuple(
+                name
+                for name in layer._parameters
+                if name not in existing_parameter_names
+            )
+            return
+
         layer.num_experts = num_experts
         layer.orig_dtype = params_dtype
         layer.weight_block_size = None
@@ -103,22 +125,35 @@ class OnlineMoEMethodBase(FusedMoEMethodBase):
 
         initialize_online_processing(layer)
 
-    def _zero_padding(self, layer: torch.nn.Module) -> None:
+    def release_requantization_source_weights(self, layer: torch.nn.Module) -> None:
+        """Release checkpoint parameters after successful requantization."""
+        for name in self.requantization_source_parameter_names:
+            if name in layer._parameters:
+                delattr(layer, name)
+
+    def _zero_padding(
+        self,
+        layer: torch.nn.Module,
+        w13_weight: torch.Tensor | None = None,
+        w2_weight: torch.Tensor | None = None,
+    ) -> None:
+        w13_weight = layer.w13_weight if w13_weight is None else w13_weight
+        w2_weight = layer.w2_weight if w2_weight is None else w2_weight
         hidden_size = layer.moe_config.hidden_dim_unpadded
         intermediate_size = layer.moe_config.intermediate_size_per_partition_unpadded
 
-        w13_shard = layer.w13_weight.shape[1] // self.moe.w13_num_shards
+        w13_shard = w13_weight.shape[1] // self.moe.w13_num_shards
         if w13_shard > intermediate_size:
             for shard in range(self.moe.w13_num_shards):
                 start = shard * w13_shard + intermediate_size
-                layer.w13_weight[:, start : (shard + 1) * w13_shard, :] = 0
-        if layer.w13_weight.shape[2] > hidden_size:
-            layer.w13_weight[:, :, hidden_size:] = 0
+                w13_weight[:, start : (shard + 1) * w13_shard, :] = 0
+        if w13_weight.shape[2] > hidden_size:
+            w13_weight[:, :, hidden_size:] = 0
 
-        if layer.w2_weight.shape[1] > hidden_size:
-            layer.w2_weight[:, hidden_size:, :] = 0
-        if layer.w2_weight.shape[2] > intermediate_size:
-            layer.w2_weight[:, :, intermediate_size:] = 0
+        if w2_weight.shape[1] > hidden_size:
+            w2_weight[:, hidden_size:, :] = 0
+        if w2_weight.shape[2] > intermediate_size:
+            w2_weight[:, :, intermediate_size:] = 0
 
         if getattr(layer, "w13_bias", None) is not None:
             w13_bias_shard = layer.w13_bias.shape[1] // self.moe.w13_num_shards
@@ -136,6 +171,16 @@ class OnlineMoEMethodBase(FusedMoEMethodBase):
     @abstractmethod
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         pass
+
+    def get_weights_for_quantization(
+        self, layer: torch.nn.Module
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Return checkpoint weights materialized for online quantization."""
+        if self.requantization_source is None:
+            return layer.w13_weight, layer.w2_weight
+        weights = self.requantization_source.dequantize_weight(layer)
+        assert isinstance(weights, tuple)
+        return weights
 
     @property
     def supports_eplb(self) -> bool:

@@ -182,7 +182,9 @@ class OnlineLinearBase(LinearMethodBase):
         """Return checkpoint weights materialized for online quantization."""
         if self.requantization_source is None:
             return layer.weight
-        return self.requantization_source.dequantize_weight(layer)
+        weight = self.requantization_source.dequantize_weight(layer)
+        assert isinstance(weight, torch.Tensor)
+        return weight
 
 
 class Fp8PerTensorOnlineLinearMethod(OnlineLinearBase):
