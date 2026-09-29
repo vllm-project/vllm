@@ -81,5 +81,10 @@ name = "granite4"
 harness = false
 required-features = ["test-util"]
 
+[[bench]]
+name = "kimi_k3"
+harness = false
+required-features = ["test-util"]
+
 [lints]
 workspace = true
