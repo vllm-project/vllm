@@ -147,7 +147,6 @@ if TYPE_CHECKING:
     VLLM_ROCM_AITER_MLA_ASM_PADDING: Literal["auto", "gluon", "asm"] = "auto"
     VLLM_ROCM_AITER_MLA_DCP_VERIFY: Literal["asm", "segmented"] = "segmented"
     VLLM_ROCM_USE_AITER_MHA: bool = True
-    VLLM_ROCM_USE_AITER_FLYDSL_FP8_PREFILL: bool = False
     VLLM_ROCM_USE_AITER_FP4_ASM_GEMM: bool = False
     VLLM_ROCM_USE_AITER_TRITON_SPARSE_MLA: bool = False
     VLLM_ROCM_USE_AITER_TRITON_ROPE: bool = False
@@ -1339,15 +1338,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # By default is enabled.
     "VLLM_ROCM_USE_AITER_MHA": lambda: (
         os.getenv("VLLM_ROCM_USE_AITER_MHA", "True").lower() in ("true", "1")
-    ),
-    # Whether to run MLA prefill attention (ROCM_AITER_FA prefill backend) with
-    # dynamically per-tensor quantized FP8 Q/K/V through AITER's FlyDSL FP8
-    # attention kernel. Unsupported devices or configurations, as reported by
-    # AITER, fall back to BF16 attention.
-    # By default is disabled.
-    "VLLM_ROCM_USE_AITER_FLYDSL_FP8_PREFILL": lambda: (
-        os.getenv("VLLM_ROCM_USE_AITER_FLYDSL_FP8_PREFILL", "False").lower()
-        in ("true", "1")
     ),
     # Whether to use aiter fp4 gemm asm.
     # By default is disabled.
