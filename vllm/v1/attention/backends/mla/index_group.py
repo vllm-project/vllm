@@ -269,96 +269,26 @@ class HiSparseMLAIndexGroup(SparseMLAIndexGroup):
         *,
         return_valid_counts: bool,
         num_decodes: int | None = None,
-        decode_query_len: int | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         num_tokens = logical_topk_indices.shape[0]
         if num_decodes is None:
             num_decodes = attn_metadata.num_decodes
-        if decode_query_len is None:
-            decode_query_len = attn_metadata.decode_max_query_len
-        if decode_query_len == 1:
-            return self.convert_logical_to_physical_topk(
-                layer_index,
-                logical_topk_indices,
-                attn_metadata,
-                block_stride_rows=None,
-                return_valid_counts=return_valid_counts,
-                req_id_per_token=self.request_ids[:num_decodes],
-            )
-
-        if num_tokens != num_decodes * decode_query_len:
-            query_start_loc = attn_metadata.query_start_loc[: num_decodes + 1]
-            physical_topk_indices = self.physical_topk_indices[: num_tokens + 1]
-            valid_topk_counts = self.valid_topk_counts[: num_tokens + 1]
-            request_ids = self.request_ids[:num_decodes]
-            cache = self.cache(layer_index)
-            source_block_table = cache.source_block_table
-            assert source_block_table is not None
-            for step in range(decode_query_len):
-                token_indices = query_start_loc[:-1] + step
-                active = (token_indices < query_start_loc[1:]) & (
-                    token_indices < num_tokens
-                )
-                output_indices = torch.where(
-                    active, token_indices, torch.full_like(token_indices, num_tokens)
-                ).long()
-                token_indices = token_indices.clamp(0, num_tokens - 1).long()
-                step_topk = logical_topk_indices.index_select(
-                    0, token_indices
-                ).masked_fill(~active.unsqueeze(1), -1)
-                step_result = cache.swap_in(
-                    request_ids,
-                    block_table=source_block_table,
-                    logical_topk_indices=step_topk,
-                    block_size=attn_metadata.block_size,
-                    return_valid_counts=return_valid_counts,
-                )
-                if layer_index == 0:
-                    if return_valid_counts:
-                        step_indices, step_counts = step_result
-                        valid_topk_counts.index_copy_(0, output_indices, step_counts)
-                    else:
-                        step_indices = step_result
-                    physical_topk_indices.index_copy_(0, output_indices, step_indices)
-            physical_topk_indices = physical_topk_indices[:num_tokens]
-            if return_valid_counts:
-                return physical_topk_indices, valid_topk_counts[:num_tokens]
-            return physical_topk_indices
-
-        assert num_tokens == num_decodes * decode_query_len
-        logical_topk_by_request = logical_topk_indices.view(
-            num_decodes, decode_query_len, -1
+        # CUDA-graph padding rows past the decode tokens map to request 0;
+        # mark them -1 so residency resolution skips them.
+        num_decode_tokens = attn_metadata.query_start_loc[num_decodes]
+        req_id_per_token = torch.where(
+            self.request_ids[:num_tokens] < num_decode_tokens,
+            attn_metadata.req_id_per_token[:num_tokens],
+            -1,
         )
-        physical_topk_by_request = self.physical_topk_indices[:num_tokens].view(
-            num_decodes, decode_query_len, -1
+        return self.convert_logical_to_physical_topk(
+            layer_index,
+            logical_topk_indices,
+            attn_metadata,
+            block_stride_rows=None,
+            return_valid_counts=return_valid_counts,
+            req_id_per_token=req_id_per_token,
         )
-        valid_topk_by_request = self.valid_topk_counts[:num_tokens].view(
-            num_decodes, decode_query_len
-        )
-        request_ids = self.request_ids[:num_decodes]
-        for step in range(decode_query_len):
-            cache = self.cache(layer_index)
-            source_block_table = cache.source_block_table
-            assert source_block_table is not None
-            cache.swap_in(
-                request_ids,
-                block_table=source_block_table,
-                logical_topk_indices=logical_topk_by_request[:, step],
-                block_size=attn_metadata.block_size,
-                return_valid_counts=return_valid_counts,
-                attention_indices_out=(
-                    physical_topk_by_request[:, step] if layer_index == 0 else None
-                ),
-                valid_counts_out=(
-                    valid_topk_by_request[:, step]
-                    if layer_index == 0 and return_valid_counts
-                    else None
-                ),
-            )
-        physical_topk_indices = physical_topk_by_request.view(num_tokens, -1)
-        if return_valid_counts:
-            return physical_topk_indices, valid_topk_by_request.view(num_tokens)
-        return physical_topk_indices
 
     def stage_prefill_rows(
         self, layer_index: int, kv_cache: torch.Tensor, attn_metadata: Any

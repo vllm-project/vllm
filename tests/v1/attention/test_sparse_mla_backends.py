@@ -68,10 +68,10 @@ from vllm.utils.torch_utils import current_stream
 from vllm.v1.attention.backends.mla import index_group as index_group_module
 from vllm.v1.attention.backends.mla.flashattn_mla_sparse import (
     FlashAttnMLASparseImpl,
+    FlashAttnMLASparseMetadataBuilder,
 )
 from vllm.v1.attention.backends.mla.flashinfer_mla_sparse import (
     FlashInferMLASparseImpl,
-    FlashInferMLASparseMetadataBuilder,
     FlashInferMLASparseTRTLLMBackend,
 )
 from vllm.v1.attention.backends.mla.flashinfer_mla_sparse_sm120 import (
@@ -3068,8 +3068,8 @@ def test_hisparse_gather_prefill_cache_prefers_resident_rows():
         torch.testing.assert_close(staged_flat[i], expected)
 
 
-def test_hisparse_fp8_decode_resolves_steps_then_runs_batched_attention(monkeypatch):
-    """FP8 decode must use active dimensions when common metadata is padded."""
+def test_hisparse_fp8_decode_resolves_rows_once_then_runs_batched_attention():
+    """Verification rows resolve in one swap_in; FP8 attention sees them batched."""
     device = torch.device("cpu")
     num_decodes = 2
     query_len = 3
@@ -3080,48 +3080,30 @@ def test_hisparse_fp8_decode_resolves_steps_then_runs_batched_attention(monkeypa
         .view(-1, 1)
         .expand(-1, 4)
     )
-    steps: list[int] = []
     kernel_shapes: list[torch.Size] = []
 
     def swap_in(req_ids, *, logical_topk_indices, **kwargs):  # noqa: ARG001
-        steps.append(int(logical_topk_indices[0, 0]))
-        output = kwargs["attention_indices_out"]
-        if output is not None:
-            output.copy_(logical_topk_indices + 10)
-        return topk[:num_decodes]
+        return logical_topk_indices + 10
 
     def run_kernel(self, *, q, **kwargs):  # noqa: ARG001
         kernel_shapes.append(q.shape)
         return q[..., :1], None
 
-    runtime = SimpleNamespace(
-        hot=SimpleNamespace(attention_cache=torch.empty(1, device=device))
-    )
-    leader_cache = SimpleNamespace(
-        runtime=runtime,
-        source_block_table=torch.empty(
-            num_decodes, 1, dtype=torch.int32, device=device
+    cache = SimpleNamespace(
+        runtime=SimpleNamespace(
+            hot=SimpleNamespace(attention_cache=torch.empty(1, device=device))
         ),
-        swap_in=MagicMock(side_effect=swap_in),
-    )
-    follower_cache = SimpleNamespace(
-        runtime=runtime,
         source_block_table=torch.empty(
             num_decodes, 1, dtype=torch.int32, device=device
         ),
         swap_in=MagicMock(side_effect=swap_in),
     )
     index_group = object.__new__(HiSparseMLAIndexGroup)
-    index_group.caches = [leader_cache, follower_cache]
+    index_group.caches = [cache]
     index_group.physical_topk_indices = torch.empty(
         (num_tokens + 1, 4), dtype=torch.int32, device=device
     )
-    index_group.valid_topk_counts = torch.empty(
-        num_tokens + 1, dtype=torch.int32, device=device
-    )
-    index_group.request_ids = torch.arange(
-        num_decodes, dtype=torch.int32, device=device
-    )
+    index_group.request_ids = torch.arange(num_tokens, dtype=torch.int32, device=device)
     impl = SimpleNamespace(
         kv_lora_rank=1,
         index_group=index_group,
@@ -3129,84 +3111,79 @@ def test_hisparse_fp8_decode_resolves_steps_then_runs_batched_attention(monkeypa
     )
     impl._fp8_flash_mla_kernel = MethodType(run_kernel, impl)
     metadata = SimpleNamespace(
-        num_decodes=num_tokens,
-        num_decode_tokens=num_tokens,
-        decode_max_query_len=1,
+        num_decodes=num_decodes,
         query_start_loc=torch.arange(
-            0,
-            num_tokens + 1,
-            query_len,
-            dtype=torch.int32,
-            device=device,
+            0, num_tokens + 1, query_len, dtype=torch.int32, device=device
         ),
-        block_table=torch.empty(num_decodes, 1, dtype=torch.int32, device=device),
+        req_id_per_token=torch.arange(
+            num_decodes, dtype=torch.int32, device=device
+        ).repeat_interleave(query_len),
         block_size=64,
     )
 
     output = FlashMLASparseImpl._host_backed_fp8_decode(
-        impl,
-        q,
-        topk,
-        metadata,
-        SimpleNamespace(),
-        num_decodes,
-        query_len,
+        impl, q, topk, metadata, SimpleNamespace(), num_decodes
     )
 
-    assert steps == [0, 1, 2]
+    cache.swap_in.assert_called_once()
+    torch.testing.assert_close(
+        cache.swap_in.call_args.args[0], metadata.req_id_per_token
+    )
+    torch.testing.assert_close(
+        cache.swap_in.call_args.kwargs["logical_topk_indices"], topk
+    )
     assert kernel_shapes == [(num_decodes, query_len, 2, 4)]
     assert output.shape == (num_tokens, 2, 1)
-    torch.testing.assert_close(
-        index_group.physical_topk_indices[:num_tokens], topk + 10
+
+
+def test_hisparse_keeps_speculative_rows_as_decodes():
+    """HiSparse limits decodes to verification requests, not short extends.
+
+    FlashAttn sparse MLA used to classify MTP verification as prefill under
+    HiSparse, whose residency-dependent route a FULL CUDA graph freezes at
+    capture.
+    """
+    builder = object.__new__(FlashAttnMLASparseMetadataBuilder)
+    builder.vllm_config = SimpleNamespace(
+        attention_config=SimpleNamespace(hisparse_config=object()),
+        speculative_config=SimpleNamespace(
+            num_speculative_tokens=3, parallel_drafting=False
+        ),
+        parallel_config=SimpleNamespace(decode_context_parallel_size=1),
+        use_v2_model_runner=True,
     )
 
-    follower_indices = index_group.convert_decode_logical_to_physical_topk(
-        1,
-        topk,
-        metadata,
-        return_valid_counts=False,
-        num_decodes=num_decodes,
-        decode_query_len=query_len,
-    )
-    assert steps == [0, 1, 2, 0, 1, 2]
-    torch.testing.assert_close(follower_indices, topk + 10)
+    builder._init_reorder_batch_threshold(256, supports_spec_as_decode=True)
+
+    assert builder.reorder_batch_threshold == 4
 
 
-def test_hisparse_varlen_decode_uses_canonical_request_rows():
-    """Graph metadata's query upper bound must preserve packed token rows."""
-    num_decodes = 2
-    topk = torch.arange(18, dtype=torch.int32).view(9, 2)
-
-    def swap_in(_request_ids, *, logical_topk_indices, **_kwargs):
-        return logical_topk_indices + 10
-
+def test_hisparse_decode_skips_padding_rows():
+    """CUDA-graph padding rows map to request 0 and must not resolve against it."""
+    topk = torch.arange(20, dtype=torch.int32).view(10, 2)
     cache = SimpleNamespace(
-        source_block_table=torch.zeros((num_decodes, 1), dtype=torch.int32),
-        swap_in=MagicMock(side_effect=swap_in),
+        source_block_table=torch.zeros((2, 1), dtype=torch.int32),
+        swap_in=MagicMock(return_value=topk),
     )
     index_group = object.__new__(HiSparseMLAIndexGroup)
     index_group.caches = [cache]
-    index_group.physical_topk_indices = torch.empty((10, 2), dtype=torch.int32)
-    index_group.valid_topk_counts = torch.empty(10, dtype=torch.int32)
-    index_group.request_ids = torch.arange(num_decodes, dtype=torch.int32)
+    index_group.physical_topk_indices = torch.empty((11, 2), dtype=torch.int32)
+    index_group.request_ids = torch.arange(10, dtype=torch.int32)
     metadata = SimpleNamespace(
-        num_decodes=num_decodes,
-        num_decode_tokens=topk.shape[0],
-        decode_max_query_len=15,
+        num_decodes=2,
         query_start_loc=torch.tensor([0, 8, 9], dtype=torch.int32),
+        req_id_per_token=torch.tensor([0] * 8 + [1, 0], dtype=torch.int32),
         block_size=64,
     )
 
-    physical_topk = index_group.convert_decode_logical_to_physical_topk(
-        0,
-        topk,
-        metadata,
-        return_valid_counts=False,
+    index_group.convert_decode_logical_to_physical_topk(
+        0, topk, metadata, return_valid_counts=False
     )
 
-    torch.testing.assert_close(physical_topk, topk + 10)
-    request_rows = cache.swap_in.call_args_list[0].args[0]
-    torch.testing.assert_close(request_rows, index_group.request_ids)
+    torch.testing.assert_close(
+        cache.swap_in.call_args.args[0],
+        torch.tensor([0] * 8 + [1, -1], dtype=torch.int32),
+    )
 
 
 def test_flashinfer_hisparse_decode_runs_batched_attention():
@@ -3356,27 +3333,6 @@ def test_hisparse_resident_prefill_uses_attention_block_stride():
 
     assert result is expected
     assert index_group._convert_once.call_args.kwargs["block_stride_rows"] == 832
-
-
-def test_hisparse_shared_sparse_builder_routes_multi_token_chunks_to_prefill():
-    """Default sparse backends must route multi-token chunks to prefill."""
-    builder = object.__new__(FlashInferMLASparseMetadataBuilder)
-    builder.vllm_config = SimpleNamespace(
-        attention_config=SimpleNamespace(hisparse_config=object()),
-        speculative_config=SimpleNamespace(
-            num_speculative_tokens=4,
-            parallel_drafting=False,
-        ),
-        parallel_config=SimpleNamespace(decode_context_parallel_size=1),
-    )
-
-    builder._init_reorder_batch_threshold(
-        1024,
-        supports_spec_as_decode=True,
-        supports_dcp_with_varlen=True,
-    )
-
-    assert builder.reorder_batch_threshold == 1
 
 
 def test_hisparse_flashmla_reorders_full_speculative_window_as_decode():
