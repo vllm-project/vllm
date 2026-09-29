@@ -1150,7 +1150,7 @@ mod tests {
 
     #[test]
     fn lower_sampling_params_validates_prompt_logprob_token_ids() {
-        let lower = |ids: Option<Vec<Vec<i64>>>, start: Option<u32>| {
+        let lower = |ids: Option<Vec<Vec<i32>>>, start: Option<u32>| {
             lower_sampling_params_with_limits(
                 SamplingParams {
                     prompt_logprob_token_ids: ids,

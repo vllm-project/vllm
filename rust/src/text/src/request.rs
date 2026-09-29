@@ -99,7 +99,7 @@ pub struct SamplingParams {
     pub prompt_logprobs: Option<i32>,
     /// Candidate token IDs per scored causal prompt row, where row `i` scores
     /// its IDs as predictions of prompt token `prompt_logprob_start + i + 1`.
-    pub prompt_logprob_token_ids: Option<Vec<Vec<i64>>>,
+    pub prompt_logprob_token_ids: Option<Vec<Vec<i32>>>,
     /// First causal prompt row to score; `None` scores from the first row.
     pub prompt_logprob_start: Option<u32>,
     /// Minimum probability threshold for token sampling. `None` means no

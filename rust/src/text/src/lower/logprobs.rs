@@ -74,7 +74,7 @@ pub(super) fn validate_logprobs(
 /// Validate per-row candidates as Python `SamplingParams` and `InputProcessor`
 /// do, and pad them with `-1` into the engine's `[num_rows, num_ids]` array.
 pub(super) fn lower_prompt_logprob_token_ids(
-    rows: Option<Vec<Vec<i64>>>,
+    rows: Option<Vec<Vec<i32>>>,
     start: Option<u32>,
     prompt_len: u32,
     sampling_limits: SamplingLimits,
@@ -106,17 +106,12 @@ pub(super) fn lower_prompt_logprob_token_ids(
             expected,
         });
     }
-    if rows.iter().flatten().any(|&id| id < -1 || id >= vocab_size as i64) {
+    if rows.iter().flatten().any(|&id| id < -1 || i64::from(id) >= vocab_size as i64) {
         return Err(LogprobsError::PromptLogprobTokenIdsOutOfVocab { vocab_size });
     }
     let data = rows
         .iter()
-        // IDs are in-vocab, so they fit int32 like the runner's token ID buffers.
-        .flat_map(|row| {
-            row.iter()
-                .map(|&id| id as i32)
-                .chain(std::iter::repeat_n(-1, width - row.len()))
-        })
+        .flat_map(|row| row.iter().copied().chain(std::iter::repeat_n(-1, width - row.len())))
         .collect();
     Ok(Some(
         WireNdArray::from_i32(vec![rows.len(), width], data).expect("padded rows are rectangular"),
