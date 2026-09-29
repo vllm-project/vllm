@@ -966,6 +966,7 @@ class SamplingParams(
                     value=num_ids,
                 )
             # Rows and width are bounded; only now flatten and pad.
+            values = ids
             if isinstance(ids, list):
                 flat = list(chain.from_iterable(ids))
                 # Integer scalars only, as the API's StrictInt schema: no bools.
@@ -977,19 +978,22 @@ class SamplingParams(
                 values = np.array(flat)
                 if not _fits_int64(values.dtype):
                     raise invalid
-                ids = np.full(shape, -1, dtype=np.int64)
-                ids[np.arange(num_ids) < lens[:, None]] = values
-            ids = self.prompt_logprob_token_ids = np.ascontiguousarray(
-                ids, dtype=np.int64
-            )
             vocab_size = model_config.get_vocab_size()
-            if ids.min() < -1 or ids.max() >= vocab_size:
+            lo, hi = int(values.min()), int(values.max())
+            if lo < -1 or hi >= vocab_size:
                 raise VLLMValidationError(
                     "prompt_logprob_token_ids contain out-of-vocab token ids "
                     f"(-1 pads a row). Vocabulary size: {vocab_size}",
                     parameter="prompt_logprob_token_ids",
-                    value=[int(ids.min()), int(ids.max())],
+                    value=[lo, hi],
                 )
+            # In-vocab IDs fit int32, like the runner's other token ID buffers.
+            if isinstance(ids, list):
+                table = np.full(shape, -1, dtype=np.int32)
+                table[np.arange(num_ids) < lens[:, None]] = values
+            else:
+                table = np.ascontiguousarray(ids, dtype=np.int32)
+            self.prompt_logprob_token_ids = table
             if self.prompt_logprob_start is not None and self.prompt_logprob_start < 0:
                 raise VLLMValidationError(
                     "prompt_logprob_start must be non-negative.",

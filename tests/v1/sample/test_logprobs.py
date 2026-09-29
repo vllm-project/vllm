@@ -466,10 +466,10 @@ def test_prompt_logprob_token_ids_validation():
         [1, 5, 6],
     ]
     # Any integer layout is normalized to what the worker uploads:
-    # C-contiguous native int64.
-    odd = np.asfortranarray(np.array([[1, 2], [3, -1]], dtype=">i4"))
+    # C-contiguous native int32.
+    odd = np.asfortranarray(np.array([[1, 2], [3, -1]], dtype=">i8"))
     ids = verify(prompt_logprob_token_ids=odd)
-    assert ids.dtype == np.int64 and ids.flags.c_contiguous
+    assert ids.dtype == np.int32 and ids.flags.c_contiguous
     assert ids.tolist() == [[1, 2], [3, -1]]
     # The pydantic path (token-in/token-out API, /docs) takes strict integer lists.
     adapter = TypeAdapter(SamplingParams)

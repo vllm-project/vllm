@@ -111,10 +111,15 @@ pub(super) fn lower_prompt_logprob_token_ids(
     }
     let data = rows
         .iter()
-        .flat_map(|row| row.iter().copied().chain(std::iter::repeat_n(-1, width - row.len())))
+        // IDs are in-vocab, so they fit int32 like the runner's token ID buffers.
+        .flat_map(|row| {
+            row.iter()
+                .map(|&id| id as i32)
+                .chain(std::iter::repeat_n(-1, width - row.len()))
+        })
         .collect();
     Ok(Some(
-        WireNdArray::from_i64(vec![rows.len(), width], data).expect("padded rows are rectangular"),
+        WireNdArray::from_i32(vec![rows.len(), width], data).expect("padded rows are rectangular"),
     ))
 }
 

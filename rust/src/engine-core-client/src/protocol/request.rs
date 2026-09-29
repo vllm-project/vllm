@@ -304,7 +304,7 @@ mod tests {
 
     #[test]
     fn engine_core_request_extracts_large_prompt_logprob_token_ids() {
-        let ids = WireNdArray::from_i64(vec![AUX_FRAME_THRESHOLD, 1], vec![5; AUX_FRAME_THRESHOLD])
+        let ids = WireNdArray::from_i32(vec![AUX_FRAME_THRESHOLD, 1], vec![5; AUX_FRAME_THRESHOLD])
             .unwrap();
         let mut request = EngineCoreRequest {
             sampling_params: Some(EngineCoreSamplingParams {
@@ -317,7 +317,7 @@ mod tests {
         let aux_frames = request.extract_aux_frames(AUX_FRAME_THRESHOLD);
 
         assert_eq!(aux_frames.len(), 1);
-        assert_eq!(aux_frames[0].len(), AUX_FRAME_THRESHOLD * 8);
+        assert_eq!(aux_frames[0].len(), AUX_FRAME_THRESHOLD * 4);
         let params = request.sampling_params.unwrap();
         assert_eq!(
             params.prompt_logprob_token_ids.unwrap().data,

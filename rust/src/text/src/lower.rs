@@ -1168,7 +1168,7 @@ mod tests {
         let params = lower(Some(vec![vec![1, 2], vec![3]]), None).unwrap();
         assert_eq!(
             params.prompt_logprob_token_ids,
-            Some(WireNdArray::from_i64(vec![2, 2], vec![1, 2, 3, -1]).unwrap())
+            Some(WireNdArray::from_i32(vec![2, 2], vec![1, 2, 3, -1]).unwrap())
         );
         assert_eq!(
             lower(Some(vec![vec![5]]), Some(1)).unwrap().prompt_logprob_start,
