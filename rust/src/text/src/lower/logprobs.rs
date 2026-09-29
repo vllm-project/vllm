@@ -99,15 +99,15 @@ pub(super) fn lower_prompt_logprob_token_ids(
             max_allowed: max_logprobs,
         });
     }
-    if rows.iter().flatten().any(|&id| id < -1 || id >= vocab_size as i64) {
-        return Err(LogprobsError::PromptLogprobTokenIdsOutOfVocab { vocab_size });
-    }
     let expected = (prompt_len as usize).saturating_sub(1 + start.unwrap_or(0) as usize);
     if rows.len() != expected {
         return Err(LogprobsError::PromptLogprobRowsMismatch {
             rows: rows.len(),
             expected,
         });
+    }
+    if rows.iter().flatten().any(|&id| id < -1 || id >= vocab_size as i64) {
+        return Err(LogprobsError::PromptLogprobTokenIdsOutOfVocab { vocab_size });
     }
     let data = rows
         .iter()

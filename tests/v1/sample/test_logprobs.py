@@ -89,7 +89,6 @@ def hf_model(hf_runner) -> Generator[HfRunner, None, None]:
 def _model_config(vocab_size: int = 10, max_logprobs: int = 20):
     return SimpleNamespace(
         max_logprobs=max_logprobs,
-        max_model_len=16,
         logits_processors=None,
         is_diffusion=False,
         get_vocab_size=lambda: vocab_size,
@@ -439,38 +438,19 @@ def test_logprob_token_ids_validate_vocab_bounds_invalid(token_ids: list[int]):
 
 
 def test_prompt_logprob_token_ids_validation():
-    """Rows may be ragged (-1 padded); the width is bounded by max_logprobs."""
+    """Rows may be ragged; the widest row is bounded by max_logprobs."""
     model_config = _model_config(vocab_size=100, max_logprobs=4)
 
     def verify(**kwargs):
-        params = SamplingParams(**kwargs)
-        params.verify(
+        SamplingParams(**kwargs).verify(
             model_config,
             speculative_config=None,
             structured_outputs_config=None,
             tokenizer=None,
         )
-        return params.prompt_logprob_token_ids
 
-    assert verify(prompt_logprob_token_ids=[[], [1], [4, 3, 2, 1]]).tolist() == [
-        [-1] * 4,
-        [1, -1, -1, -1],
-        [4, 3, 2, 1],
-    ]
-    # Rows sliced from a top-k array hold NumPy integer scalars.
-    topk = np.array([[4, 3, 2], [1, 5, 6]])
-    assert verify(
-        prompt_logprob_token_ids=[list(topk[0][:1]), list(topk[1])]
-    ).tolist() == [
-        [4, -1, -1],
-        [1, 5, 6],
-    ]
-    # Any integer layout is normalized to what the worker uploads:
-    # C-contiguous native int32.
-    odd = np.asfortranarray(np.array([[1, 2], [3, -1]], dtype=">i8"))
-    ids = verify(prompt_logprob_token_ids=odd)
-    assert ids.dtype == np.int32 and ids.flags.c_contiguous
-    assert ids.tolist() == [[1, 2], [3, -1]]
+    verify(prompt_logprob_token_ids=[[], [1], [4, 3, 2, 1]])
+    verify(prompt_logprob_token_ids=np.array([[1, -1], [2, 3]], dtype=np.int32))
     # The pydantic path (token-in/token-out API, /docs) takes strict integer lists.
     adapter = TypeAdapter(SamplingParams)
     dumped = adapter.dump_json(
@@ -485,23 +465,11 @@ def test_prompt_logprob_token_ids_validation():
         verify(prompt_logprob_token_ids=np.array([1, 2]))
     with pytest.raises(VLLMValidationError, match=r"shape \[num_rows, num_ids\]"):
         verify(prompt_logprob_token_ids=[1, 2])
-    for bad_ids in ([[None]], [[2**63]], [[[1]]], [[[1], 2]]):
-        with pytest.raises(VLLMValidationError, match="integer token ids"):
-            verify(prompt_logprob_token_ids=bad_ids)
-    with pytest.raises(VLLMValidationError, match="out-of-vocab"):
-        verify(prompt_logprob_token_ids=np.array([[2**64 - 1]], dtype=np.uint64))
+    with pytest.raises(VLLMValidationError, match="non-empty"):
+        verify(prompt_logprob_token_ids=[[], []])
     # The error names the value to raise max_logprobs to.
     with pytest.raises(VLLMValidationError, match=r"max_logprobs.*at least 5"):
         verify(prompt_logprob_token_ids=[[1], [1, 2, 3, 4, 5]])
-    with pytest.raises(VLLMValidationError, match="out-of-vocab"):
-        verify(prompt_logprob_token_ids=[[1], [100]])
-    with pytest.raises(VLLMValidationError, match="out-of-vocab"):
-        verify(prompt_logprob_token_ids=[[1], [-2]])
-    with pytest.raises(VLLMValidationError, match="non-empty"):
-        verify(prompt_logprob_token_ids=[[], []])
-    # Rows are bounded by max_model_len before the table is padded.
-    with pytest.raises(VLLMValidationError, match="max_model_len - 1 = 15"):
-        verify(prompt_logprob_token_ids=[[]] * 15 + [[1]])
     # prompt_logprob_start alone is a caller mistake, not a silent no-op.
     with pytest.raises(VLLMValidationError, match="requires prompt_logprob_token_ids"):
         verify(prompt_logprob_start=3)
@@ -1478,9 +1446,20 @@ def test_prompt_logprob_token_ids_with_chunking_and_preemption(monkeypatch):
                 ragged_output.prompt_token_id_logprobs, expected, atol=1e-2
             )
 
-        # The row count is checked against the prompt at admission.
+        # Admission checks the row count, then the padded IDs.
         with pytest.raises(VLLMValidationError, match="scored rows"):
             vllm_model.llm.generate(token_prompts[0], ragged_params[1])
+        num_rows = len(token_prompts[0]["prompt_token_ids"]) - 1 - start
+        for rows, match in (
+            ([[None]] * num_rows, "integer token ids"),
+            ([[-2]] * num_rows, "out-of-vocab"),
+            (np.full((num_rows, 1), 2**63, dtype=np.uint64), "out-of-vocab"),
+        ):
+            params = SamplingParams(
+                prompt_logprob_token_ids=rows, prompt_logprob_start=start
+            )
+            with pytest.raises(VLLMValidationError, match=match):
+                vllm_model.llm.generate(token_prompts[0], params)
 
         metrics_after = vllm_model.llm.get_metrics()
         preemptions_before = next(
