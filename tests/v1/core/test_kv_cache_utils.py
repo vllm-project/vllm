@@ -984,6 +984,25 @@ def test_generate_block_hash_extra_keys_lora():
 
 
 @pytest.mark.parametrize("hash_fn", [sha256, sha256_cbor])
+def test_lora_name_and_cache_salt_block_hashes_do_not_collide(hash_fn):
+    """A cache_salt equal to a LoRA name must not share that LoRA's blocks."""
+    lora_request = LoRARequest(
+        lora_name="foo", lora_int_id=1, lora_path="/path/to/lora"
+    )
+    lora_req = Request(
+        request_id="lora",
+        prompt_token_ids=[0, 1, 2],
+        sampling_params=SamplingParams(max_tokens=1),
+        pooling_params=None,
+        lora_request=lora_request,
+        block_hasher=get_request_block_hasher(3, hash_fn),
+    )
+    salted_req = make_request("salted", [0, 1, 2], hash_fn=hash_fn, cache_salt="foo")
+
+    assert lora_req.block_hashes[0] != salted_req.block_hashes[0]
+
+
+@pytest.mark.parametrize("hash_fn", [sha256, sha256_cbor])
 def test_hash_block_tokens(hash_fn):
     parent_block_hash = BlockHash(b"123")
     curr_block_token_ids = (1, 2, 3)
@@ -1045,7 +1064,7 @@ def test_request_block_hasher_incremental_append_with_multiple_mm_features(hash_
     )
 
     expected_second_hash = hash_fn(
-        (incremental.block_hashes[0], (4, 5, 6, 7), (("A", 0), ("B", 2)))
+        (incremental.block_hashes[0], (4, 5, 6, 7), (("mm", "A", 0), ("mm", "B", 2)))
     )
     assert incremental.block_hashes[1] == expected_second_hash
     assert incremental.block_hashes == fresh.block_hashes

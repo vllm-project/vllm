@@ -239,7 +239,7 @@ def test_cache_partial_block_event_keeps_every_mm_feature():
     events = pool.take_events()
     assert len(events) == 1
     assert isinstance(events[0], BlockStored)
-    assert events[0].extra_keys == [(("A", -2), ("B", 2))]
+    assert events[0].extra_keys == [(("mm", "A", -2), ("mm", "B", 2))]
 
 
 def test_partial_block_replacement_emits_remove_then_store_events():
