@@ -10,6 +10,7 @@ from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backends.mla import rocm_aiter_mla_sparse as sparse_mod
 from vllm.v1.attention.backends.mla.rocm_aiter_mla_sparse import (
+    ROCMAiterMLASparseBackend,
     _use_rocm_sparse_triton,
     fit_kpool_indices_to_aiter,
 )
@@ -18,6 +19,7 @@ from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
     _validate_dsv4_sparse_dims,
     _validate_sparse_dims,
 )
+from vllm.v1.kv_cache_interface import KVCacheLayout
 
 
 @triton.jit
@@ -58,6 +60,10 @@ def test_fit_kpool_indices_rejects_narrow_input():
         fit_kpool_indices_to_aiter(
             torch.zeros((1, 3), dtype=torch.int32), topk_tokens=4
         )
+
+
+def test_rocm_sparse_mla_supports_glm_packed_layout():
+    assert KVCacheLayout.BLHNC in ROCMAiterMLASparseBackend.supported_kv_cache_layouts()
 
 
 @pytest.mark.parametrize(

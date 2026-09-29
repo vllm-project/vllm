@@ -12,6 +12,9 @@ from vllm.config import CacheConfig
 from vllm.model_executor.layers.attention.mla_attention import MLAAttention
 from vllm.model_executor.models.deepseek_v2 import DeepseekV32IndexerCache
 from vllm.platforms import current_platform
+from vllm.v1.attention.backends.mla.flashattn_mla_sparse import (
+    FlashAttnMLASparseBackend,
+)
 from vllm.v1.attention.backends.mla.flashinfer_mla_sparse import (
     FlashInferMLASparseTRTLLMBackend,
 )
@@ -48,8 +51,9 @@ pytestmark = pytest.mark.skip_global_cleanup
 @pytest.mark.parametrize(
     "backend,cache_dtype,sm100,stride_alignment",
     [
-        (FlashInferMLASparseTRTLLMBackend, "auto", True, 1152),
-        (FlashInferMLASparseTRTLLMBackend, "fp8", True, 576),
+        (FlashInferMLASparseTRTLLMBackend, "auto", True, 32 * 1152),
+        (FlashInferMLASparseTRTLLMBackend, "fp8", True, 32 * 576),
+        (FlashAttnMLASparseBackend, "auto", True, 1152),
         (FlashMLASparseBackend, "auto", True, 1152),
         (FlashMLASparseBackend, "fp8_ds_mla", False, None),
         (FlashMLASparseBackend, "fp8_ds_mla", True, 656),

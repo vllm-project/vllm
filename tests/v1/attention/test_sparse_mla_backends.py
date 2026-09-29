@@ -137,7 +137,7 @@ def test_nope_flashinfer_sparse_mla_uses_model_scale(monkeypatch):
     metadata = SimpleNamespace(
         req_id_per_token=torch.zeros(1, dtype=torch.int32),
         block_table=torch.zeros((1, 1), dtype=torch.int32),
-        block_size=1,
+        block_size=32,
     )
     recorded_scale = None
 
@@ -175,7 +175,7 @@ def test_nope_flashinfer_sparse_mla_uses_model_scale(monkeypatch):
     )
     impl.forward_mqa(
         torch.zeros(1, 1, kv_lora_rank),
-        torch.zeros(1, 1, kv_lora_rank),
+        torch.zeros(1, 32, kv_lora_rank),
         metadata,
         SimpleNamespace(),
     )
@@ -422,6 +422,7 @@ def test_sparse_backend_decode_correctness(
     q_scale: float,
     k_scale: float,
     monkeypatch,
+    block_stride_rows: int | None = None,
 ):
     if (
         batch_name == "large_q_pure_prefill"
@@ -457,8 +458,7 @@ def test_sparse_backend_decode_correctness(
         if device_capability is None or device_capability.major != 10:
             pytest.skip("The NVFP4 DS-MLA kv-cache dtype requires SM 10.x")
 
-    supported_block_sizes = backend_cls.get_supported_kernel_block_sizes()
-    if block_size not in supported_block_sizes:
+    if not backend_cls.supports_block_size(block_size):
         pytest.skip(
             f"{backend_cls.get_name()} does not support block_size={block_size}"
         )
@@ -703,6 +703,11 @@ def test_sparse_backend_decode_correctness(
         kv_cache_dtype=kv_cache_dtype,
         scale=kv_cache_scale,
     )
+    if block_stride_rows is not None:
+        pad = (0, 0, 0, block_stride_rows - block_size)
+        kv_cache = torch.nn.functional.pad(kv_cache, pad)[:, :, :block_size]
+        slot = int(common_attn_metadata.slot_mapping[-1])
+        query_row = kv_cache[slot // block_size, 0, slot % block_size].zero_()
 
     # The sparse builder clones the layer's dense-MHA prefill backend from
     # static_forward_context; register a mock layer carrying one.
@@ -798,6 +803,10 @@ def test_sparse_backend_decode_correctness(
             out_buffer,
         )
 
+    if block_stride_rows is not None:
+        expected_row = torch.cat((kv_c_vllm[-1], k_pe_vllm[-1, 0]))
+        torch.testing.assert_close(query_row, expected_row, rtol=0, atol=0)
+
     assert backend_output.shape == sdpa_reference.shape
     assert backend_output.dtype == sdpa_reference.dtype
     assert torch.isfinite(backend_output).all()
@@ -810,6 +819,25 @@ def test_sparse_backend_decode_correctness(
         )
     else:
         torch.testing.assert_close(backend_output, sdpa_reference, rtol=0.01, atol=0.01)
+
+
+def test_flashinfer_sparse_mla_packed_stride(
+    default_vllm_config, dist_init, workspace_init, monkeypatch
+):
+    test_sparse_backend_decode_correctness(
+        default_vllm_config,
+        dist_init,
+        FlashInferMLASparseTRTLLMBackend,
+        "mixed_small",
+        "auto",
+        1,
+        256,
+        workspace_init,
+        1.0,
+        1.0,
+        monkeypatch,
+        block_stride_rows=320,
+    )
 
 
 def _triton_convert_reference_impl(
