@@ -98,7 +98,7 @@ def _to_mistral_tool_call_id(tool_call_id: str) -> str:
     """
     if len(tool_call_id) == 9 and tool_call_id.isascii() and tool_call_id.isalnum():
         return tool_call_id
-    digest = int.from_bytes(hashlib.sha256(tool_call_id.encode()).digest()[:8])
+    digest = int.from_bytes(hashlib.sha256(tool_call_id.encode()).digest()[:8], "big")
     return "".join(_BASE62[(digest // 62**i) % 62] for i in range(9))
 
 
