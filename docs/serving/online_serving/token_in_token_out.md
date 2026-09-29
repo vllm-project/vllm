@@ -42,28 +42,17 @@ print(response["choices"][0]["token_ids"])
 
 ### Logprobs
 
-At `tokens` the logprob entries carry `token_id:N` placeholders. At `text` they carry the decoded token strings and their UTF-8 `bytes`, for the sampled token and every entry in `top_logprobs`. A server started with `--return-tokens-as-token-ids` keeps the placeholders at every `output_mode`, as `/v1/completions` does.
+With `output_mode: "tokens"`, logprob entries carry `token_id:N` placeholders. With `output_mode: "text"`, they carry the decoded token strings and their UTF-8 `bytes` for the sampled token and every entry in `top_logprobs`. A server started with `--return-tokens-as-token-ids` always returns the placeholders, as `/v1/completions` does.
 
-On a server with a tokenizer, the engine already decodes every top-k token whenever `sampling_params.detokenize` is true, at every `output_mode`. Wide logprobs (for example `top_logprobs=20`) are the expensive case for the API server CPU. If you want them without that cost on a server that has a tokenizer, either:
+### Errors
 
-- send `output_mode: "tokens"` with `sampling_params.detokenize: false`, which rules out `stop` strings, or
-- send the request to a `--tokens-only` server.
+The server returns a 400 for:
 
-### Validation
+- `output_mode: "text"` on a server without a tokenizer (`--tokens-only` or `--skip-tokenizer-init`).
+- `output_mode: "text"` with `sampling_params.detokenize: false`.
+- An unsupported `output_mode` value.
 
-These requests fail with a 400 instead of returning empty or misleading output:
-
-| Request | Why |
-| --- | --- |
-| `output_mode` other than `tokens` on a server without a tokenizer (`--tokens-only` or `--skip-tokenizer-init`) | Without a tokenizer, the text would be empty |
-| `output_mode: "text"` with `sampling_params.detokenize: false` | The request asks for text and forbids producing it |
-| An unsupported `output_mode` value | The response shape depends on it |
-
-## Prefill and decode pools
-
-`output_mode` has no behavior tied to the server's role or to `kv_transfer_params`. Only the output of the last leg reaches the client, so set `output_mode` on that leg only. A proxy that reuses the client's request body for the prefill leg has to reset `output_mode` to `tokens` there. A tokenizer free prefill pool rejects anything else with a 400, which surfaces the misconfiguration.
-
-A decode pool that returns text runs `--enable-scale-out` with a tokenizer and without `--tokens-only`. Prefill pools can stay `--tokens-only`.
+For using `output_mode` with separate prefill and decode pools, see [Disaggregated Prefilling](../../features/disagg_prefill.md#generate-api-output-modes).
 
 ## Aborting requests
 

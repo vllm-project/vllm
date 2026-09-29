@@ -424,7 +424,7 @@ class GenerateTokensStreamResponse(GenerateStreamResponseBase):
 
 
 class GenerateTextStreamResponse(GenerateStreamResponseBase):
-    output_mode: Literal["text"]
+    output_mode: Literal["text"] = "text"
     choices: list[GenerateTextStreamChoice]
 
 
@@ -464,7 +464,7 @@ class GenerateTokensResponse(GenerateResponseBase):
 
 
 class GenerateTextResponse(GenerateResponseBase):
-    output_mode: Literal["text"]
+    output_mode: Literal["text"] = "text"
     choices: list[GenerateTextChoice]
 
 

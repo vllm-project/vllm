@@ -482,9 +482,7 @@ class ServingTokens(GenerateBaseServing):
         )
         response: GenerateTokensResponse | GenerateTextResponse
         if text_mode:
-            response = GenerateTextResponse(
-                output_mode="text", choices=text_choices, **response_fields
-            )
+            response = GenerateTextResponse(choices=text_choices, **response_fields)
         else:
             response = GenerateTokensResponse(choices=tokens_choices, **response_fields)
 
@@ -602,7 +600,6 @@ class ServingTokens(GenerateBaseServing):
                     chunk: GenerateTokensStreamResponse | GenerateTextStreamResponse
                     if text_mode:
                         chunk = GenerateTextStreamResponse(
-                            output_mode="text",
                             request_id=request_id,
                             choices=[
                                 GenerateTextStreamChoice(
@@ -658,7 +655,6 @@ class ServingTokens(GenerateBaseServing):
                 final_chunk: GenerateTokensStreamResponse | GenerateTextStreamResponse
                 if text_mode:
                     final_chunk = GenerateTextStreamResponse(
-                        output_mode="text",
                         request_id=request_id,
                         choices=[],
                         usage=final_usage_info,
