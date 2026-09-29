@@ -150,7 +150,33 @@ impl ToolSchema {
 
 impl JsonParamType {
     /// Normalize one parameter property schema.
+    ///
+    /// `"nullable": true` (the OpenAPI spelling of an optional parameter) adds
+    /// `null` to the accepted types.
     fn from_schema(schema: &Value) -> Option<Self> {
+        let param_type = Self::from_schema_ignoring_nullable(schema)?;
+        let nullable = schema.get("nullable").and_then(Value::as_bool) == Some(true);
+        Some(match param_type {
+            _ if !nullable || param_type.accepts_null() => param_type,
+            Self::OneOf(mut types) => {
+                types.push(Self::Null);
+                Self::OneOf(types)
+            }
+            param_type => Self::OneOf(vec![param_type, Self::Null]),
+        })
+    }
+
+    /// Return whether `null` is one of the accepted types.
+    fn accepts_null(&self) -> bool {
+        match self {
+            Self::Null => true,
+            Self::OneOf(types) => types.iter().any(Self::accepts_null),
+            _ => false,
+        }
+    }
+
+    /// Normalize one parameter property schema, without `nullable`.
+    fn from_schema_ignoring_nullable(schema: &Value) -> Option<Self> {
         let schema = schema.as_object()?;
 
         if let Some(type_value) = schema.get("type") {
@@ -284,8 +310,10 @@ impl JsonParamType {
     }
 }
 
-/// Recognize JSON and Python null spellings emitted by chat templates.
+/// Recognize JSON and Python null spellings emitted by chat templates,
+/// ignoring surrounding whitespace.
 fn is_null_literal(value: &str) -> bool {
+    let value = value.trim();
     value.eq_ignore_ascii_case("null") || value.eq_ignore_ascii_case("none")
 }
 
@@ -327,18 +355,24 @@ fn try_convert_value(param_type: &JsonParamType, input: &ParamInput) -> Option<V
 }
 
 /// Convert one raw string value to a normalized JSON type.
+///
+/// Only `string` keeps the value verbatim; the other types ignore surrounding
+/// whitespace.
 fn try_convert_text_value(param_type: &JsonParamType, value: &str) -> Option<Value> {
     match param_type {
         JsonParamType::String => Some(Value::String(value.to_string())),
-        JsonParamType::Integer => value.parse::<i64>().ok().map(Number::from).map(Value::Number),
-        JsonParamType::Number => try_convert_number(value),
+        JsonParamType::Integer => without_digit_separators(value.trim())?
+            .parse::<i64>()
+            .ok()
+            .map(Number::from)
+            .map(Value::Number),
+        JsonParamType::Number => try_convert_number(&without_digit_separators(value.trim())?),
         JsonParamType::Boolean => try_convert_boolean(value),
-        JsonParamType::Object { .. } if value.is_empty() => Some(Value::Object(Map::new())),
-        JsonParamType::Array { .. } if value.is_empty() => Some(Value::Array(Vec::new())),
-        JsonParamType::Object { .. } | JsonParamType::Array { .. } => {
-            // For composite types with string input, simply interpret the string as JSON.
-            serde_json::from_str(value).ok()
-        }
+        JsonParamType::Object { .. } if value.trim().is_empty() => Some(Value::Object(Map::new())),
+        JsonParamType::Array { .. } if value.trim().is_empty() => Some(Value::Array(Vec::new())),
+        // For composite types with string input, interpret the string as JSON of that type.
+        JsonParamType::Object { .. } => serde_json::from_str(value).ok().filter(Value::is_object),
+        JsonParamType::Array { .. } => serde_json::from_str(value).ok().filter(Value::is_array),
         JsonParamType::Null => is_null_literal(value).then_some(Value::Null),
         JsonParamType::OneOf(types) => {
             types.iter().find_map(|param_type| try_convert_text_value(param_type, value))
@@ -409,6 +443,22 @@ fn insert_object_value(object: &mut Map<String, Value>, key: String, value: Valu
     } else {
         object.insert(key, value);
     }
+}
+
+/// Remove single underscores between digits (`1_000`), as Python numeric
+/// literals allow; any other underscore makes the value invalid.
+fn without_digit_separators(value: &str) -> Option<std::borrow::Cow<'_, str>> {
+    if !value.contains('_') {
+        return Some(value.into());
+    }
+    let bytes = value.as_bytes();
+    let valid = bytes.iter().enumerate().all(|(index, byte)| {
+        *byte != b'_'
+            || (index > 0
+                && bytes[index - 1].is_ascii_digit()
+                && bytes.get(index + 1).is_some_and(u8::is_ascii_digit))
+    });
+    valid.then(|| value.replace('_', "").into())
 }
 
 /// Convert one raw string value to a JSON number.
@@ -553,6 +603,83 @@ mod tests {
 
     fn elements(elements: Vec<ParamElement>) -> ParamInput {
         ParamInput::Elements(elements)
+    }
+
+    #[test]
+    fn non_string_values_ignore_surrounding_whitespace() {
+        let params = ToolSchema::from_schema(&json!({
+            "type": "object",
+            "properties": {
+                "text": { "type": "string" },
+                "count": { "type": "integer" },
+                "size": { "type": "number" },
+                "enabled": { "type": "boolean" },
+                "payload": { "type": "object" },
+                "items": { "type": "array" }
+            }
+        }));
+
+        assert_eq!(params.convert("text", text(" 7 ")), json!(" 7 "));
+        assert_eq!(params.convert("count", text(" 7\n")), json!(7));
+        assert_eq!(params.convert("size", text("\t2.5 ")), json!(2.5));
+        assert_eq!(params.convert("enabled", text(" false ")), json!(false));
+        assert_eq!(params.convert("count", text(" None ")), json!(null));
+        assert_eq!(params.convert("payload", text(" \n")), json!({}));
+        assert_eq!(params.convert("items", text(" [1] ")), json!([1]));
+    }
+
+    #[test]
+    fn numbers_accept_digit_separators() {
+        let params = ToolSchema::from_schema(&json!({
+            "type": "object",
+            "properties": {
+                "count": { "type": "integer" },
+                "size": { "type": "number" }
+            }
+        }));
+
+        assert_eq!(params.convert("count", text("1_000")), json!(1000));
+        assert_eq!(params.convert("size", text("1_000.5")), json!(1000.5));
+        for invalid in ["_1", "1_", "1__0", "1_.5"] {
+            assert_eq!(params.convert("size", text(invalid)), json!(invalid));
+        }
+    }
+
+    #[test]
+    fn nullable_schemas_accept_null() {
+        let params = ToolSchema::from_schema(&json!({
+            "type": "object",
+            "properties": {
+                "text": { "type": "string", "nullable": true },
+                "count": { "type": ["integer", "string"], "nullable": true }
+            }
+        }));
+
+        // Without `nullable`, a string parameter keeps the literal text "null".
+        assert_eq!(params.convert("text", text("null")), json!(null));
+        assert_eq!(params.convert("text", text("x")), json!("x"));
+        assert_eq!(params.convert("count", text("None")), json!(null));
+        assert_eq!(params.convert("count", text("7")), json!(7));
+    }
+
+    #[test]
+    fn composite_values_must_decode_to_their_type() {
+        let params = ToolSchema::from_schema(&json!({
+            "type": "object",
+            "properties": {
+                "payload": { "type": "object" },
+                "items": { "type": "array" },
+                "either": { "type": ["object", "array"] }
+            }
+        }));
+
+        assert_eq!(params.convert("payload", text("[1]")), json!("[1]"));
+        assert_eq!(params.convert("payload", text("5")), json!("5"));
+        assert_eq!(
+            params.convert("items", text(r#"{"k":1}"#)),
+            json!(r#"{"k":1}"#)
+        );
+        assert_eq!(params.convert("either", text("[1]")), json!([1]));
     }
 
     #[test]
