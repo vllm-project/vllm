@@ -208,7 +208,7 @@ def test_load_audio_default_preserves_vorbis_length(dummy_audio_bytes):
 
 
 def test_load_audio_torchcodec_preserves_vorbis_length(dummy_audio_bytes):
-    """torchcodec must trim Vorbis trailing padding even on FFmpeg < 5.0,
+    """Torchcodec must trim Vorbis trailing padding even on FFmpeg < 5.0,
     matching the soundfile reference exactly."""
     pytest.importorskip("torchcodec")
     expected, expected_sr = load_audio_soundfile(BytesIO(dummy_audio_bytes), sr=None)
