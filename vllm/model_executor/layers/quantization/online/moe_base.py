@@ -29,7 +29,7 @@ class OnlineMoEMethodBase(FusedMoEMethodBase):
     def __init__(self, moe: FusedMoEConfig):
         super().__init__(moe)
         self.requantization_source: QuantizeMethodBase | None = None
-        self.requantization_source_parameter_names: tuple[str, ...] = ()
+        self.requantization_source_parameters: dict[str, torch.nn.Parameter] = {}
 
     def set_requantization_source(self, source_method: QuantizeMethodBase) -> None:
         """Configure serialized-weight conversion before online quantization."""
@@ -55,11 +55,11 @@ class OnlineMoEMethodBase(FusedMoEMethodBase):
                 params_dtype,
                 **extra_weight_attrs,
             )
-            self.requantization_source_parameter_names = tuple(
-                name
-                for name in layer._parameters
-                if name not in existing_parameter_names
-            )
+            self.requantization_source_parameters = {
+                name: parameter
+                for name, parameter in layer._parameters.items()
+                if name not in existing_parameter_names and parameter is not None
+            }
             return
 
         layer.num_experts = num_experts
@@ -127,9 +127,10 @@ class OnlineMoEMethodBase(FusedMoEMethodBase):
 
     def release_requantization_source_weights(self, layer: torch.nn.Module) -> None:
         """Release checkpoint parameters after successful requantization."""
-        for name in self.requantization_source_parameter_names:
-            if name in layer._parameters:
+        for name, source_parameter in self.requantization_source_parameters.items():
+            if layer._parameters.get(name) is source_parameter:
                 delattr(layer, name)
+        self.requantization_source_parameters.clear()
 
     def _zero_padding(
         self,

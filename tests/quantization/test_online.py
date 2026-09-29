@@ -932,11 +932,9 @@ def test_online_quantization(
         original_process = Mxfp4OnlineMoEMethod.process_weights_after_loading
         source_parameter_names = (
             "w13_weight_packed",
-            "w13_weight_scale",
             "w13_weight_global_scale",
             "w13_input_global_scale",
             "w2_weight_packed",
-            "w2_weight_scale",
             "w2_weight_global_scale",
             "w2_input_global_scale",
         )
@@ -948,6 +946,8 @@ def test_online_quantization(
                     "Serialized NVFP4 source weights must be released after "
                     "requantization"
                 )
+            assert layer.w13_weight_scale.dtype == torch.uint8
+            assert layer.w2_weight_scale.dtype == torch.uint8
 
         monkeypatch.setattr(
             Mxfp4OnlineMoEMethod,
