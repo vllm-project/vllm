@@ -50,7 +50,11 @@ pub fn lower_text_request(
         // multimodal tensor payloads.
         mm_features: request.mm_features.take(),
         sampling_params: lower_sampling_params(
-            request.sampling_params.clone(),
+            SamplingParams {
+                // Move the candidate table rather than cloning it; only lowering reads it.
+                prompt_logprob_token_ids: request.sampling_params.prompt_logprob_token_ids.take(),
+                ..request.sampling_params.clone()
+            },
             sampling_hints,
             sampling_limits,
             prompt_len,
@@ -127,12 +131,6 @@ pub fn lower_sampling_params(
         logprob_token_ids.as_deref(),
         sampling_limits,
     )?;
-    let prompt_logprob_token_ids = lower_prompt_logprob_token_ids(
-        prompt_logprob_token_ids,
-        prompt_logprob_start,
-        prompt_len,
-        sampling_limits,
-    )?;
     validate_repetition_detection(repetition_detection.as_ref())?;
 
     // Mirrors the model-generation-config inheritance used by vLLM's OpenAI chat
@@ -150,6 +148,13 @@ pub fn lower_sampling_params(
         default_max_tokens,
         sampling_limits.max_model_len,
         prompt_len,
+    )?;
+    // After the prompt-length check, which bounds the padded table's rows.
+    let prompt_logprob_token_ids = lower_prompt_logprob_token_ids(
+        prompt_logprob_token_ids,
+        prompt_logprob_start,
+        prompt_len,
+        sampling_limits,
     )?;
     let min_tokens = min_tokens.unwrap_or(0);
     if min_tokens > max_tokens {

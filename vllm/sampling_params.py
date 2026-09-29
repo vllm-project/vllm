@@ -79,10 +79,6 @@ ThinkingTokenBudget = Annotated[
 ]
 
 
-def _fits_int64(dtype: np.dtype) -> bool:
-    return dtype.kind in "iu" and np.can_cast(dtype, np.int64)
-
-
 # JSON clients send nested lists; verify() pads them into an array.
 TokenIdTable = Annotated[
     np.ndarray, GetPydanticSchema(lambda _, handler: handler(list[list[StrictInt]]))
@@ -936,10 +932,17 @@ class SamplingParams(
             shape: tuple[int, ...] = ()
             if isinstance(ids, list) and all(isinstance(row, list) for row in ids):
                 lens = np.fromiter(map(len, ids), np.int64, len(ids))
-                values = np.array(list(chain.from_iterable(ids)))
-                if _fits_int64(values.dtype):
-                    shape = (len(ids), int(lens.max(initial=0)))
-            elif isinstance(ids, np.ndarray) and _fits_int64(ids.dtype):
+                flat = list(chain.from_iterable(ids))
+                # Plain ints only, as the API's StrictInt schema: no bools or floats.
+                if set(map(type, flat)) == {int}:
+                    values = np.array(flat)
+                    if values.dtype == np.int64:
+                        shape = (len(ids), int(lens.max()))
+            elif (
+                isinstance(ids, np.ndarray)
+                and ids.dtype.kind in "iu"
+                and np.can_cast(ids.dtype, np.int64)
+            ):
                 shape = ids.shape
             if len(shape) != 2 or 0 in shape:
                 raise VLLMValidationError(

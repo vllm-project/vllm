@@ -475,7 +475,15 @@ def test_prompt_logprob_token_ids_validation():
         verify(prompt_logprob_token_ids=np.array([1, 2]))
     with pytest.raises(VLLMValidationError, match=r"shape \[num_rows, num_ids\]"):
         verify(prompt_logprob_token_ids=[1, 2])
-    for bad_ids in ([[1.5]], [["3"]], [[True]], [[None]], [[2**63]]):
+    for bad_ids in (
+        [[1.5]],
+        [["3"]],
+        [[True, 2]],
+        [[None]],
+        [[2**63]],
+        [[[1]]],
+        [[[1], 2]],
+    ):
         with pytest.raises(VLLMValidationError, match=r"shape \[num_rows, num_ids\]"):
             verify(prompt_logprob_token_ids=bad_ids)
     with pytest.raises(VLLMValidationError, match=r"shape \[num_rows, num_ids\]"):
