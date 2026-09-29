@@ -2055,6 +2055,15 @@ def test_exchange_clipped_blocks_ssm_single_state():
     # Scratch slots not allocated: the state slot still survives.
     assert sched.get_exchange_clipped_blocks(([1], [5]))[1] == [5]
 
+    assert sched.get_exchange_clipped_blocks(([1], [])) == ([1], [])
+    # Per-step partial lists must not be interpreted as state + scratch slots.
+    assert sched.get_exchange_clipped_blocks(([1], [7, 8]), clip_ssm=False) == (
+        [1],
+        [7, 8],
+    )
+    sched.blocks_per_sw = [2, 0]
+    assert sched.get_exchange_clipped_blocks(([1, 2, 3], [7, 8, 9])) == ([2, 3], [7])
+
     # Non-mamba models pass through unchanged.
     fa_sched = make_nixl_scheduler(has_mamba=False)
     assert fa_sched.get_exchange_clipped_blocks(([1, 2],)) == ([1, 2],)
