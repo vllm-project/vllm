@@ -1598,11 +1598,14 @@ class MooncakeConnectorWorker:
                 continue
 
             complete = True
-            for local_blocks, remote_blocks, group in zip(
-                send_meta.local_block_ids, remote_groups, group_specs
+            failure_detail = None
+            for group_index, (local_blocks, remote_blocks, group) in enumerate(
+                zip(send_meta.local_block_ids, remote_groups, group_specs)
             ):
                 spec = group.kv_cache_spec
                 if isinstance(spec, MambaSpec):
+                    raw_local_count = len(local_blocks)
+                    raw_remote_count = len(remote_blocks)
                     local_blocks = [
                         block_id
                         for block_id in local_blocks
@@ -1615,6 +1618,13 @@ class MooncakeConnectorWorker:
                     ]
                     if not local_blocks or len(local_blocks) != len(remote_blocks):
                         complete = False
+                        failure_detail = (
+                            f"group={group_index} type={type(spec).__qualname__} "
+                            f"raw_local={raw_local_count} "
+                            f"raw_remote={raw_remote_count} "
+                            f"non_null_local={len(local_blocks)} "
+                            f"non_null_remote={len(remote_blocks)}"
+                        )
                         break
                 elif spec.prefix_cacheable:
                     if (
@@ -1623,17 +1633,28 @@ class MooncakeConnectorWorker:
                         != local_hit_tokens // spec.block_size
                     ):
                         complete = False
+                        failure_detail = (
+                            f"group={group_index} type={type(spec).__qualname__} "
+                            f"local={len(local_blocks)} remote={len(remote_blocks)} "
+                            f"local_hit_tokens={local_hit_tokens} "
+                            f"block_size={spec.block_size}"
+                        )
                         break
                 elif len(local_blocks) != len(remote_blocks):
                     complete = False
+                    failure_detail = (
+                        f"group={group_index} type={type(spec).__qualname__} "
+                        f"local={len(local_blocks)} remote={len(remote_blocks)}"
+                    )
                     break
             if complete:
                 certified[d_req_id] = (checkpoint, prompt_digest)
             else:
                 logger.warning(
                     "Rejecting Prefill-side replay checkpoint for request %s: "
-                    "incomplete group coverage.",
+                    "incomplete group coverage (%s).",
                     d_req_id,
+                    failure_detail,
                 )
         return certified
 
