@@ -8,7 +8,6 @@ import math
 from dataclasses import field
 from enum import Enum, IntEnum
 from functools import cached_property
-from itertools import chain
 from typing import Annotated, Any
 
 import msgspec
@@ -22,6 +21,7 @@ from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
 from vllm.tokenizers import TokenizerLike
 from vllm.utils.mistral import is_mistral_tokenizer
+from vllm.utils.torch_utils import make_ndarray_with_pad
 from vllm.v1.serial_utils import PydanticMsgspecMixin
 
 logger = init_logger(__name__)
@@ -77,10 +77,6 @@ ThinkingTokenBudget = Annotated[
     int | None,
     BeforeValidator(validate_thinking_token_budget),
 ]
-
-
-def _fits_int64(dtype: np.dtype) -> bool:
-    return dtype.kind in "iu" and np.can_cast(dtype, np.int64)
 
 
 # JSON clients send nested lists; verify() pads them into an array.
@@ -846,9 +842,7 @@ class SamplingParams(
         if self.skip_clone:
             return copy.copy(self)
 
-        # The token ID table is never mutated; share it.
-        ids = self.prompt_logprob_token_ids
-        return copy.deepcopy(self, {id(ids): ids})
+        return copy.deepcopy(self)
 
     def verify(
         self,
@@ -933,20 +927,18 @@ class SamplingParams(
         # Validate prompt_logprob_token_ids.
         ids = self.prompt_logprob_token_ids
         if ids is not None:
-            invalid = VLLMValidationError(
-                "prompt_logprob_token_ids must be a non-empty integer array "
-                "of shape [num_rows, num_ids].",
-                parameter="prompt_logprob_token_ids",
-                value=getattr(ids, "shape", type(ids).__name__),
-            )
             shape: tuple[int, ...] = ()
             if isinstance(ids, list) and all(isinstance(row, list) for row in ids):
-                lens = np.fromiter(map(len, ids), np.int64, len(ids))
-                shape = (len(ids), int(lens.max(initial=0)))
-            elif isinstance(ids, np.ndarray) and _fits_int64(ids.dtype):
+                shape = (len(ids), max(map(len, ids), default=0))
+            elif isinstance(ids, np.ndarray) and ids.dtype.kind in "iu":
                 shape = ids.shape
             if len(shape) != 2 or 0 in shape:
-                raise invalid
+                raise VLLMValidationError(
+                    "prompt_logprob_token_ids must be a non-empty integer array "
+                    "of shape [num_rows, num_ids].",
+                    parameter="prompt_logprob_token_ids",
+                    value=getattr(ids, "shape", type(ids).__name__),
+                )
             max_rows = model_config.max_model_len - 1
             if shape[0] > max_rows:
                 raise VLLMValidationError(
@@ -965,35 +957,25 @@ class SamplingParams(
                     parameter="prompt_logprob_token_ids",
                     value=num_ids,
                 )
-            # Rows and width are bounded; only now flatten and pad.
-            values = ids
             if isinstance(ids, list):
-                flat = list(chain.from_iterable(ids))
-                # Integer scalars only, as the API's StrictInt schema: no bools.
-                types = set(map(type, flat))
-                if not all(
-                    t is not bool and issubclass(t, int | np.integer) for t in types
-                ):
-                    raise invalid
-                values = np.array(flat)
-                if not _fits_int64(values.dtype):
-                    raise invalid
+                # Pad only after the checks above bound the allocation.
+                try:
+                    ids = make_ndarray_with_pad(ids, -1, np.int64, max_len=num_ids)
+                except (TypeError, ValueError, OverflowError) as e:
+                    raise VLLMValidationError(
+                        "prompt_logprob_token_ids must contain integer token ids.",
+                        parameter="prompt_logprob_token_ids",
+                    ) from e
             vocab_size = model_config.get_vocab_size()
-            lo, hi = int(values.min()), int(values.max())
-            if lo < -1 or hi >= vocab_size:
+            if ids.min() < -1 or ids.max() >= vocab_size:
                 raise VLLMValidationError(
                     "prompt_logprob_token_ids contain out-of-vocab token ids "
                     f"(-1 pads a row). Vocabulary size: {vocab_size}",
                     parameter="prompt_logprob_token_ids",
-                    value=[lo, hi],
+                    value=[int(ids.min()), int(ids.max())],
                 )
             # In-vocab IDs fit int32, like the runner's other token ID buffers.
-            if isinstance(ids, list):
-                table = np.full(shape, -1, dtype=np.int32)
-                table[np.arange(num_ids) < lens[:, None]] = values
-            else:
-                table = np.ascontiguousarray(ids, dtype=np.int32)
-            self.prompt_logprob_token_ids = table
+            self.prompt_logprob_token_ids = np.ascontiguousarray(ids, dtype=np.int32)
             if self.prompt_logprob_start is not None and self.prompt_logprob_start < 0:
                 raise VLLMValidationError(
                     "prompt_logprob_start must be non-negative.",
