@@ -454,7 +454,7 @@ steps:
     - pytest -v -s tests/kernels/test_gemm_rs_ar.py
   mirror:
     amd:
-      label: ":amd: (MI355) GEMM-RS/AR"
+      label: ":amd: (MI355) GEMM-RS-AR"
       dind: false
       device: mi355_4
       num_devices: 4

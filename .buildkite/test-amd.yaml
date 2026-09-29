@@ -3290,7 +3290,7 @@ steps:
   - pytest -v -s distributed/test_sharded_rdt_producer.py
   - pytest -v -s distributed/test_sharded_rdt_trainer.py
 
-- label: ":amd: (MI355) GEMM-RS/AR"
+- label: ":amd: (MI355) GEMM-RS-AR"
   timeout_in_minutes: 20
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
   dind: false
