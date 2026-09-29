@@ -8,6 +8,7 @@ Run: pytest tests/distributed/test_mnnvl_alltoall.py -v
 
 import os
 import traceback
+from contextlib import contextmanager
 
 import pytest
 import torch
@@ -22,7 +23,7 @@ from vllm.utils.flashinfer import (
 from vllm.utils.import_utils import has_deep_ep_v2
 from vllm.utils.network_utils import get_open_port
 
-from ..utils import ensure_current_vllm_config, init_test_distributed_environment
+from ..utils import init_test_distributed_environment
 
 DEVICE = current_platform.device_type
 
@@ -148,18 +149,19 @@ def _init_dp_environment(world_size, rank, port, dp_size, dp_port):
         ensure_model_parallel_initialized(1, 1)
 
 
+@contextmanager
 def _make_forward_context(
     rank, world_size, num_tokens_per_rank, num_tokens_across_dp=None
 ):
-    """Create a forward context with mock DP metadata for AgRs tests.
+    """Keep the vLLM config and mock-DP forward context active together.
 
     Returns a context manager suitable for ``with`` statements.
     The real DPMetadata (with sp_local_sizes etc.) is created internally
     by set_forward_context from num_tokens_across_dp; the attn_metadata
     placeholder just satisfies the "attn_metadata is not None" guard.
     """
+    from vllm.config import VllmConfig, set_current_vllm_config
     from vllm.config.parallel import ParallelConfig
-    from vllm.config.vllm import VllmConfig
     from vllm.forward_context import set_forward_context
 
     class _AttnMeta:
@@ -177,12 +179,16 @@ def _make_forward_context(
     )
     if num_tokens_across_dp is None:
         num_tokens_across_dp = [num_tokens_per_rank] * world_size
-    return set_forward_context(
-        _AttnMeta(),
-        vllm_config,
-        num_tokens=num_tokens_per_rank,
-        num_tokens_across_dp=torch.tensor(num_tokens_across_dp, dtype=torch.int),
-    )
+    with (
+        set_current_vllm_config(vllm_config),
+        set_forward_context(
+            _AttnMeta(),
+            vllm_config,
+            num_tokens=num_tokens_per_rank,
+            num_tokens_across_dp=torch.tensor(num_tokens_across_dp, dtype=torch.int),
+        ),
+    ):
+        yield
 
 
 # ---------------------------------------------------------------------------
@@ -638,8 +644,7 @@ def _args_dispatch_combine_worker(rank, world_size):
     )
 
     with _make_forward_context(rank, world_size, tokens_per_rank):
-        with ensure_current_vllm_config():
-            manager = AgRsAll2AllManager(cpu_group)
+        manager = AgRsAll2AllManager(cpu_group)
         dp_metadata = get_forward_context().dp_metadata
 
         with dp_metadata.sp_local_sizes(sequence_parallel_size=1):
