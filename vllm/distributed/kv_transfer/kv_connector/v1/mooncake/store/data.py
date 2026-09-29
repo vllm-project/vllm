@@ -184,8 +184,10 @@ class ChunkedTokenDatabase:
             )
         self.kv_caches_base_addr: list[int] = []
         self.block_len: list[int] = []
+        self.block_stride: list[int] = []  # per-segment stride (may differ from block_len on padded layouts)
         self._key_prefix = PoolKey.build_prefix(metadata)
-        self.num_layers: int = 0  # total layers, used to slice block_len per layer
+        self.num_layers: int = 0  # total model layers
+        self.layer_segment_ranges: list[tuple[int, int]] = []  # (start, count) per layer into flat lists
 
     def key_for(self, chunk_hash: BlockHash) -> str:
         return PoolKey.build_key_string(self._key_prefix, chunk_hash.hex())
@@ -195,6 +197,28 @@ class ChunkedTokenDatabase:
 
     def set_block_len(self, block_len: list[int]):
         self.block_len = block_len
+
+    def set_block_stride(self, block_stride: list[int]):
+        self.block_stride = block_stride
+
+    def set_layer_segment_ranges(self, ranges: list[tuple[int, int]]):
+        self.layer_segment_ranges = ranges
+
+    def compute_page_size_bytes(self) -> int:
+        """Return the per-layer stride for Session-API object offsets.
+
+        With heterogeneous layers the per-layer byte size varies; the
+        object layout reserves a fixed slot per layer, so the stride
+        must be the largest layer size.  Save and load both use this
+        same value, so the exact packing only needs to be
+        self-consistent.
+        """
+        if not self.layer_segment_ranges or not self.block_len:
+            return 0
+        return max(
+            sum(self.block_len[start : start + count])
+            for start, count in self.layer_segment_ranges
+        )
 
     def prepare_value(
         self, start: int, end: int, block_ids: list[int]
@@ -348,6 +372,40 @@ class ChunkedTokenDatabase:
         if not chunks:
             return [], [], []
 
+        # Primary path: per-layer segment ranges (populated when layerwise is
+        # enabled with per-group per-layer tracking).  This handles
+        # heterogeneous groups where different layers have different numbers
+        # of segments.
+        if (
+            self.layer_segment_ranges
+            and layer_id < len(self.layer_segment_ranges)
+        ):
+            layer_start, caches_per_layer = self.layer_segment_ranges[layer_id]
+            if caches_per_layer > 0:
+                layer_end = layer_start + caches_per_layer
+                base = np.asarray(self.kv_caches_base_addr, dtype=np.int64)
+                length = len(self.block_len)
+                blen = np.asarray(
+                    [self.block_len[i % length] for i in range(base.shape[0])],
+                    dtype=np.int64,
+                )
+                layer_base = base[layer_start:layer_end]
+                layer_blen = blen[layer_start:layer_end]
+
+                n = len(chunks)
+                starts = np.fromiter((c[0] for c in chunks), dtype=np.int64, count=n)
+                spans = np.fromiter((c[1] for c in chunks), dtype=np.int64, count=n) - starts
+                assert not (spans % self.block_size).any()
+                bids = np.fromiter(
+                    (block_ids[i] for i in (starts // self.block_size).tolist()),
+                    dtype=np.int64,
+                    count=n,
+                )
+                addrs = layer_base[None, :] + bids[:, None] * layer_blen[None, :]
+                sizes = layer_blen[None, :] * (spans // self.block_size)[:, None]
+                return addrs.tolist(), sizes.tolist(), bids.tolist()
+
+        # Fallback: uniform slice (backward-compatible with non-hybrid models).
         if self.num_layers > 0 and self.block_len:
             caches_per_layer = len(self.block_len) // max(1, self.num_layers)
             if (caches_per_layer > 0
@@ -412,7 +470,13 @@ class ChunkedTokenDatabase:
             return [], [], [], []
 
         offset_lists: list[list[int]] = []
-        if self.num_layers > 0 and self.block_len:
+        seg_start = 0  # start index for this layer's segments
+        if (
+            self.layer_segment_ranges
+            and layer_id < len(self.layer_segment_ranges)
+        ):
+            seg_start, caches_per_layer = self.layer_segment_ranges[layer_id]
+        elif self.num_layers > 0 and self.block_len:
             caches_per_layer = len(self.block_len) // max(1, self.num_layers)
             if not (caches_per_layer > 0
                     and caches_per_layer * self.num_layers == len(self.block_len)
@@ -421,13 +485,13 @@ class ChunkedTokenDatabase:
         else:
             caches_per_layer = len(self.block_len)
 
-        page_size_bytes = sum(self.block_len[:caches_per_layer]) if caches_per_layer > 0 else 0
+        page_size_bytes = self.compute_page_size_bytes()
         layer_base_offset = layer_id * page_size_bytes
 
         # Per-segment relative offsets (cumulative within one layer)
         segment_offsets: list[int] = []
         cumulative = 0
-        for blen in self.block_len[:caches_per_layer]:
+        for blen in self.block_len[seg_start : seg_start + caches_per_layer]:
             segment_offsets.append(cumulative)
             cumulative += blen
 

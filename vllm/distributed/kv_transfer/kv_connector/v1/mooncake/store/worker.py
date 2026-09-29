@@ -1086,8 +1086,21 @@ class KVCacheStoreSendingThread(KVTransferThread):
                     sync_event.synchronize()
 
                 batch_put_start = time.perf_counter()
+                put_replicate_config = None
+                if self.enable_group_semantics and self.supports_group_ids:
+                    db = self.token_databases[task.group_id]
+                    group_ids = [
+                        _make_mooncake_group_id(
+                            db.metadata, key.rsplit("@", 1)[-1]
+                        )
+                        for key in actual_keys
+                    ]
+                    self.replicate_config.group_ids = group_ids
+                    put_replicate_config = self.replicate_config
+
                 res = self.store.batch_put_from_multi_buffers(
-                    actual_keys, actual_addrs, actual_sizes
+                    actual_keys, actual_addrs, actual_sizes,
+                    put_replicate_config,
                 )
 
                 self._record_operation(
@@ -2330,6 +2343,31 @@ class MooncakeStoreWorker:
 
         self._num_layers = self.num_layers  # Already set from model_config
 
+        # Map each group to the physical layer indices it owns.
+        # Used by _build_layer_tasks_from_requests to iterate only the
+        # layers that actually belong to a group (hybrid models have
+        # disjoint layer assignments across groups).
+        self._group_physical_layers: dict[int, list[int]] = {}
+        for g_idx, group in enumerate(self._kv_cache_groups):
+            layers = []
+            for layer_name in group.layer_names:
+                try:
+                    import re
+                    m = re.search(r"\.layers\.(\d+)", layer_name)
+                    if m:
+                        layers.append(int(m.group(1)))
+                        continue
+                    from vllm.model_executor.models.utils import (
+                        extract_layer_index,
+                    )
+                    layers.append(extract_layer_index(layer_name))
+                except Exception:
+                    pass
+            self._group_physical_layers[g_idx] = layers
+            logger.info(
+                "Group %d physical layers: %s", g_idx, layers
+            )
+
         self._layer_save_finished_events = {}
         self._layer_load_finished_events = {}
         self._layer_sync_save_events: dict[int, torch.cuda.Event] = {}
@@ -2365,19 +2403,14 @@ class MooncakeStoreWorker:
     def _compute_page_size_bytes(self) -> int:
         """Compute the per-layer page size in bytes for Session API offset.
 
-        Uses the first group's ChunkedTokenDatabase.  When num_layers is set,
-        block_len is sliced by ``caches_per_layer = len(block_len) // num_layers``.
+        Delegates to the first group's ChunkedTokenDatabase, which returns the
+        largest per-layer byte size (see
+        ``ChunkedTokenDatabase.compute_page_size_bytes``).  With heterogeneous
+        layers the fixed per-layer stride must fit the largest layer.
         """
         if not self.token_dbs:
             return 0
-        db = self.token_dbs[0]
-        caches_per_layer = (
-            len(db.block_len) // max(1, db.num_layers) if db.num_layers > 0
-            else len(db.block_len)
-        )
-        if caches_per_layer == 0:
-            caches_per_layer = len(db.block_len)
-        return sum(db.block_len[:caches_per_layer])
+        return self.token_dbs[0].compute_page_size_bytes()
 
     def _start_layerwise_sessions(self, requests: list[ReqMeta]) -> None:
         """Start put/get sessions before per-layer tasks are built."""
@@ -2400,28 +2433,57 @@ class MooncakeStoreWorker:
         self._current_mooncake_last_chunk_req_ids = last_chunk_req_ids
 
         # ---- Collect save keys (incremental, this chunk only) ----
+        # Pre-compute store_masks + save_start for every can_save request so
+        # we can pass per-group chunk_mask to process_tokens. Mamba groups get
+        # all-False from exclude_mamba=True; we skip them explicitly to avoid
+        # PutStart'ing keys that will never be range-put'd by
+        # _build_layer_tasks_from_requests.
+        save_masks: dict[str, tuple[list[bool] | None, ...]] = {}
+        save_starts: dict[str, int] = {}
+        for req_meta in requests:
+            if not req_meta.can_save:
+                continue
+            if self.kv_send_thread is not None and hasattr(
+                    self.kv_send_thread, "_saved_offset"):
+                ss = self.kv_send_thread._saved_offset.get(
+                    req_meta.req_id, 0
+                )
+            else:
+                ss = 0
+            save_starts[req_meta.req_id] = ss
+            lcm_bs = self.coord.lcm_block_size
+            aligned = req_meta.token_len_chunk // lcm_bs * lcm_bs
+            save_masks[req_meta.req_id] = self.coord.store_mask(
+                aligned, ss,
+                num_prompt_tokens=req_meta.num_prompt_tokens,
+            )
+
         save_keys: list[str] = []
         save_keys_set: set[str] = set()
         save_entries_by_req: dict[str, list[tuple[str, int]]] = {}
         for req_meta in requests:
             if not req_meta.can_save:
                 continue
+            store_masks = save_masks[req_meta.req_id]
+            req_save_start = save_starts[req_meta.req_id]
             entries: list[tuple[str, int]] = []
-            for group_id in range(len(req_meta.block_ids)):
+            for group_id, block_ids in enumerate(req_meta.block_ids):
+                if group_id in self.coord.mamba_group_ids:
+                    continue  # Mamba state persisted via boundary task
                 db = self.token_dbs[group_id]
                 put_step = self._group_tp_replication_factors[group_id]
                 put_step_rank = (self.tp_rank + group_id) % put_step
-                save_start = req_meta.token_ids_start
                 save_end = req_meta.token_len_chunk
                 for start_idx, _, block_hash in db.process_tokens(
                     save_end,
                     req_meta.block_hashes,
-                    mask_num=save_start,
+                    mask_num=req_save_start,
+                    chunk_mask=store_masks[group_id],
                     put_step=put_step,
                     put_step_rank=put_step_rank,
                 ):
                     key = db.key_for(block_hash)
-                    entries.append((key, start_idx // self.block_size))
+                    entries.append((key, start_idx // db.block_size))
                     if key not in save_keys_set:
                         save_keys.append(key)
                         save_keys_set.add(key)
@@ -2437,8 +2499,12 @@ class MooncakeStoreWorker:
                 self._session_tracker.register_put_keys(req_id, entries)
 
         # ---- Collect load keys (merge with prior-chunk committed keys) ----
-        load_keys: list[str] = []
-        load_keys_set: set[str] = set()
+        # Build load masks + tail_key_boundaries upfront (needed by all groups
+        # including Mamba; load paths use the same logic as the non-layerwise
+        # receive path which does NOT skip Mamba groups — Mamba KV is loaded
+        # positionally via tail_key_boundaries, just like attention KV).
+        load_info: dict[str, tuple[int, tuple[list[bool] | None, ...],
+                                    tuple[tuple[int, int], ...]]] = {}  # req_id -> (mask_num, load_masks, tail_key_bnd)
         for req_meta in requests:
             load_spec = req_meta.load_spec
             if load_spec is None or not load_spec.can_load:
@@ -2447,16 +2513,44 @@ class MooncakeStoreWorker:
                 load_spec.vllm_cached_tokens
                 // self.block_size * self.block_size
             )
+            load_masks = self.coord.load_mask(
+                req_meta.block_hashes, load_spec.token_len
+            )
+            tail_key_bnd: dict[int, Any] = {}
+            if load_spec.can_load:
+                for boundary in load_spec.tail_key_boundaries:
+                    tail_key_bnd[boundary.group_id] = boundary.num_tokens
+            load_info[req_meta.req_id] = (mask_num, load_masks, tuple(tail_key_bnd.items()))
+
+        load_keys: list[str] = []
+        load_keys_set: set[str] = set()
+        for req_meta in requests:
+            load_spec = req_meta.load_spec
+            if load_spec is None or not load_spec.can_load:
+                continue
+            mask_num, load_masks, tail_key_bnd_items = load_info[req_meta.req_id]
             current_entries: list[tuple[str, int]] = []
-            for group_id in range(len(req_meta.block_ids)):
+            for group_id, block_ids in enumerate(req_meta.block_ids):
                 db = self.token_dbs[group_id]
-                for start_idx, _, block_hash in db.process_tokens(
+                boundary_tokens = None
+                for gid, btkn in tail_key_bnd_items:
+                    if gid == group_id:
+                        boundary_tokens = btkn
+                        break
+                tail_block_size = db.hash_block_size
+                for start_idx, end_idx, block_hash in db.process_tokens(
                     load_spec.token_len,
                     req_meta.block_hashes,
                     mask_num,
                 ):
                     key = db.key_for(block_hash)
-                    current_entries.append((key, start_idx // self.block_size))
+                    if end_idx == load_spec.token_len and boundary_tokens is not None:
+                        key = db.key_for(
+                            req_meta.block_hashes[
+                                boundary_tokens // tail_block_size - 1
+                            ]
+                        )
+                    current_entries.append((key, start_idx // db.block_size))
             if self._session_tracker is not None and current_entries:
                 current_entries = self._session_tracker.prepare_load_entries(
                     req_meta.req_id, current_entries
@@ -2547,6 +2641,59 @@ class MooncakeStoreWorker:
             for g_idx, db in enumerate(self.token_dbs)
         )
 
+    @staticmethod
+    def _as_cache_tuple(cache_or_caches):
+        """Normalize a kv-cache entry to a tuple of tensors.
+
+        On CUDA attention layers the value is a single tensor (K/V merged);
+        in some configurations it may be a tuple of separate tensors.
+        """
+        if isinstance(cache_or_caches, torch.Tensor):
+            return (cache_or_caches,)
+        return tuple(cache_or_caches)
+
+    def _cache_segments(
+        self, cache: torch.Tensor
+    ) -> list[tuple[int, int, int]]:
+        """Return (base_addr, block_len, block_stride) segments for one layer
+        cache tensor.
+
+        Reuses the same three-branch layout logic as ``register_kv_caches``:
+        * Branch ① (per-head regions): split into per-head segments.
+        * Branch ② (block-outer / storage base): single segment, ``block_stride
+          == block_len``.
+        * Branch ③ (layer-outer / per-layer data_ptr): single segment,
+          ``block_stride == block_len``.
+        """
+        cache = group_kernel_blocks(cache, self.num_blocks)
+        el = cache.element_size()
+        region_len = cache.untyped_storage().nbytes()
+
+        if not is_non_overlapping_and_dense(cache[0]):
+            # Branch ①: per-head regions.
+            segs: list[tuple[int, int, int]] = []
+            for head_idx in range(cache.shape[1]):
+                head_cache = cache[:, head_idx]
+                assert is_non_overlapping_and_dense(head_cache[0])
+                seg_addr = head_cache.data_ptr()
+                seg_len = head_cache.stride(0) * el
+                segs.append((seg_addr, seg_len, seg_len))
+            return segs
+        elif cache.stride(0) * el * self.num_blocks == region_len:
+            # Branch ②: block-outer — single segment whose *data_ptr* already
+            # points into this layer's share of the per-block window (the view
+            # carries the storage offset).  block_len is this layer's own
+            # per-block stride, NOT region_len // num_blocks (which spans
+            # every layer).
+            seg_addr = cache.data_ptr()
+            seg_len = cache.stride(0) * el
+            return [(seg_addr, seg_len, seg_len)]
+        else:
+            # Branch ③: layer-outer — per-layer data_ptr.
+            seg_addr = cache.data_ptr()
+            seg_len = cache.stride(0) * el
+            return [(seg_addr, seg_len, seg_len)]
+
     def register_kv_caches(
         self,
         kv_caches: dict[str, torch.Tensor],
@@ -2622,30 +2769,68 @@ class MooncakeStoreWorker:
             self.num_blocks,
         )
 
+        # ---- Uniﬁed assignment (non-layerwise path) ----
         for db in self.token_dbs:
             db.set_kv_caches_base_addr(addrs)
             db.set_block_len(block_lens)
 
-        # ============================================================
-        # Layerwise: set num_layers on each ChunkedTokenDatabase so
-        # prepare_values_for_layer() can extract the target layer's
-        # segment via block_len slicing.
-        # ============================================================
+        # ---- Per-group per-layer tracking (layerwise path) ----
         if self._layerwise_enabled and addrs and block_lens:
-            for db in self.token_dbs:
+            # Build per-group independent addrs / block_lens / block_strides /
+            # layer_ranges so each ChunkedTokenDatabase knows its own layers.
+            group_addrs: list[list[int]] = [[] for _ in self.token_dbs]
+            group_block_lens: list[list[int]] = [[] for _ in self.token_dbs]
+            group_block_strides: list[list[int]] = [[] for _ in self.token_dbs]
+            group_layer_ranges: list[list[tuple[int, int]]] = [
+                [] for _ in self.token_dbs
+            ]
+
+            for g_idx, group in enumerate(self._kv_cache_groups):
+                addrs_g = group_addrs[g_idx]
+                block_lens_g = group_block_lens[g_idx]
+                block_strides_g = group_block_strides[g_idx]
+                layer_ranges_g = group_layer_ranges[g_idx]
+                for layer_name in group.layer_names:
+                    if layer_name not in kv_caches:
+                        layer_ranges_g.append((len(addrs_g), 0))
+                        continue
+                    start = len(addrs_g)
+                    for cache in self._as_cache_tuple(kv_caches[layer_name]):
+                        for seg_addr, seg_len, seg_stride in self._cache_segments(cache):
+                            addrs_g.append(seg_addr)
+                            block_lens_g.append(seg_len)
+                            block_strides_g.append(seg_stride)
+                    layer_ranges_g.append((start, len(addrs_g) - start))
+
+            # Override each db with its per-group data.
+            for db, addrs_g, block_lens_g, block_strides_g, layer_ranges_g in zip(
+                self.token_dbs,
+                group_addrs,
+                group_block_lens,
+                group_block_strides,
+                group_layer_ranges,
+                strict=True,
+            ):
+                db.set_kv_caches_base_addr(addrs_g)
+                db.set_block_len(block_lens_g)
+                db.set_block_stride(block_strides_g)
+                db.set_layer_segment_ranges(layer_ranges_g)
                 db.num_layers = self.num_layers
+
+            seg_counts = [c for _, c in group_layer_ranges[0]]
             logger.info(
-                "Layerwise mode enabled with %d layers, %d segments, "
-                "using per-layer slicing for address calculation",
+                "Layerwise mode enabled: num_layers=%d, groups=%d, "
+                "segments_per_group=%s, segments_per_layer=%s",
                 self.num_layers,
-                len(addrs),
+                len(group_addrs),
+                [len(a) for a in group_addrs],
+                {n: seg_counts.count(n) for n in sorted(set(seg_counts))},
             )
-            # block_len is only populated here, so the Session-API page size
-            # cannot be computed in __init__. Recompute it now that the kv-cache
-            # layout is known; otherwise object_size stays 0 and every
-            # batch_put_session_start fails (rc=-600).
             if self._use_session_api:
                 self._page_size_bytes = self._compute_page_size_bytes()
+                logger.info(
+                    "Layerwise session API: page_size_bytes=%d", self._page_size_bytes
+                )
 
         # Start transfer threads
         if self.can_put:
@@ -2809,6 +2994,81 @@ class MooncakeStoreWorker:
     # Layerwise KV Cache Methods (Phase 1)
     # ============================================================
 
+    def _compute_last_mamba_layer_id(self) -> int | None:
+        """Return the last physical layer index belonging to a Mamba group.
+
+        Used to place the Mamba boundary offload task — it must wait for
+        all Mamba-layer CUDA kernels to finish before the DMA read.
+        Falls back to ``_num_layers - 1`` when no Mamba group exists.
+        """
+        last = None
+        for g_idx in self.coord.mamba_group_ids:
+            if g_idx < len(self._kv_cache_groups):
+                group = self._kv_cache_groups[g_idx]
+                for _i, _lname in enumerate(group.layer_names):
+                    last = max(last, _i) if last is not None else _i
+        return last if last is not None else self._num_layers - 1
+
+    def _build_mamba_boundary_save_task(
+        self,
+        req_meta: ReqMeta,
+        group_id: int,
+        db: ChunkedTokenDatabase,
+    ) -> "LayerTransferTask | None":
+        """Build a single atomic Mamba boundary save task (non-session).
+
+        Reuses the same address derivation as
+        ``KVCacheStoreSendingThread._boundary_snapshot_puts`` but packages the
+        result as a ``LayerTransferTask`` that flows through
+        ``_handle_layer_task`` in the send thread.
+        """
+        offloads = req_meta.boundary_state_offloads
+        if not offloads:
+            return None
+        group_offloads = [e for e in offloads if e[0] == group_id]
+        if not group_offloads:
+            return None
+
+        hash_block_size = self.coord.hash_block_size
+        key_list: list[str] = []
+        addr_list: list[list[int]] = []
+        size_list: list[list[int]] = []
+        block_ids_out: list[int] = []
+
+        for _g, block_id, boundary in group_offloads:
+            if boundary == 0 or block_id == NULL_BLOCK_ID:
+                continue
+            hash_idx = boundary // hash_block_size - 1
+            if hash_idx >= len(req_meta.block_hashes):
+                continue
+            put_step = self._group_tp_replication_factors[group_id]
+            put_step_rank = (self.tp_rank + group_id) % put_step
+            if (boundary // db.block_size - 1) % put_step != put_step_rank:
+                continue
+            addr, size = db.prepare_value_for_block(block_id)
+            key_list.append(db.key_for(req_meta.block_hashes[hash_idx]))
+            addr_list.append(addr)
+            size_list.append(size)
+            block_ids_out.append(block_id)
+
+        if not key_list:
+            return None
+
+        last_mamba_layer_id = self._compute_last_mamba_layer_id()
+        return LayerTransferTask(
+            req_id=req_meta.req_id,
+            group_id=group_id,
+            layer_idx_in_group=0,
+            physical_layer_id=last_mamba_layer_id,
+            key_list=key_list,
+            addr_list=addr_list,
+            size_list=size_list,
+            block_ids=block_ids_out,
+            is_save=True,
+            use_key_major_ranges=False,  # non-session → _handle_layer_task
+            store_job_id=req_meta.store_job_id,
+        )
+
     def _build_layer_tasks_from_requests(
         self, requests: list[ReqMeta]
     ) -> None:
@@ -2846,6 +3106,8 @@ class MooncakeStoreWorker:
                 )
 
                 for group_id, block_ids in enumerate(req_meta.block_ids):
+                    if group_id in self.coord.mamba_group_ids:
+                        continue  # Mamba state persisted via boundary task
                     db = self.token_dbs[group_id]
                     # Offset each group's chunk start so TP ranks spread evenly.
                     put_step = self._group_tp_replication_factors[group_id]
@@ -2864,8 +3126,11 @@ class MooncakeStoreWorker:
                     if not chunks:
                         continue
 
-                    # Create one task per physical layer.
-                    for physical_layer_id in range(self._num_layers):
+                    # Create one task per physical layer this group owns.
+                    group_layers = self._group_physical_layers.get(group_id, [])
+                    if not group_layers:
+                        group_layers = list(range(self._num_layers))
+                    for layer_idx_in_g, physical_layer_id in enumerate(group_layers):
                         if self._use_session_api:
                             # Session API: block-level keys + per-layer offsets
                             keys = [db.key_for_block(bh) for bh in chunk_hashes]
@@ -2885,7 +3150,7 @@ class MooncakeStoreWorker:
                         task = LayerTransferTask(
                             req_id=req_meta.req_id,
                             group_id=group_id,
-                            layer_idx_in_group=physical_layer_id,
+                            layer_idx_in_group=layer_idx_in_g,
                             physical_layer_id=physical_layer_id,
                             key_list=keys,
                             addr_list=addrs,
@@ -2897,6 +3162,20 @@ class MooncakeStoreWorker:
                             store_job_id=req_meta.store_job_id,
                         )
                         self._layer_save_tasks[physical_layer_id].append(task)
+
+                # ---- Mamba boundary offload ----
+                if (req_meta.boundary_state_offloads
+                        and self.coord.mamba_group_ids):
+                    last_mamba_layer_id = self._compute_last_mamba_layer_id()
+                    for g_idx in self.coord.mamba_group_ids:
+                        if g_idx >= len(req_meta.block_ids):
+                            continue
+                        db = self.token_dbs[g_idx]
+                        mamba_task = self._build_mamba_boundary_save_task(
+                            req_meta, g_idx, db)
+                        if mamba_task is not None:
+                            self._layer_save_tasks[last_mamba_layer_id].append(
+                                mamba_task)
 
             # Load path.
             if req_meta.load_spec and req_meta.load_spec.can_load:
@@ -2915,6 +3194,14 @@ class MooncakeStoreWorker:
                 load_mask_per_group = self.coord.load_mask(
                     req_meta.block_hashes, req_meta.load_spec.token_len
                 )
+                # Build tail_key_boundaries lookup: used to correct the hash key
+                # for the last (tail) chunk of each group, including Mamba groups.
+                # This mirrors the non-layerwise receive path which does NOT skip
+                # Mamba groups for loading — Mamba KV is loaded positionally with
+                # tail_key_boundaries, just like attention KV.
+                tail_key_bnd: dict[int, int] = {}
+                for bnd in req_meta.load_spec.tail_key_boundaries:
+                    tail_key_bnd[bnd.group_id] = bnd.num_tokens
 
                 for group_id, block_ids in enumerate(req_meta.block_ids):
                     db = self.token_dbs[group_id]
@@ -2923,24 +3210,39 @@ class MooncakeStoreWorker:
                     chunk_hashes: list[BlockHash] = []
                     # actual_block_ids: per-chunk block ID for address calculation
                     actual_block_ids: list[int] = []
+
+                    # For Mamba boundary tail: if this is the last chunk for
+                    # this group and a tail_key_boundary exists, the store key
+                    # must use the boundary hash, not the chunk-end hash.
+                    bnd_tokens = tail_key_bnd.get(group_id)
+
                     for start, end, block_hash in db.process_tokens(
                         req_meta.load_spec.token_len,
                         req_meta.block_hashes,
                         mask_num,
+                        chunk_mask=mask,
                     ):
-                        chunk_idx = start // db.block_size
-                        if chunk_idx >= len(mask) or not mask[chunk_idx]:
-                            continue
+                        load_hash = block_hash
+                        if (end == req_meta.load_spec.token_len
+                                and bnd_tokens is not None):
+                            load_hash = req_meta.block_hashes[
+                                bnd_tokens // db.hash_block_size - 1
+                            ]
                         chunks.append((start, end))
-                        chunk_hashes.append(block_hash)
+                        chunk_hashes.append(load_hash)
                         actual_block_ids.append(
-                            block_ids[chunk_idx] if chunk_idx < len(block_ids) else -1
+                            block_ids[start // db.block_size]
+                            if start // db.block_size < len(block_ids)
+                            else -1
                         )
 
                     if not chunks:
                         continue
 
-                    for physical_layer_id in range(self._num_layers):
+                    group_layers = self._group_physical_layers.get(group_id, [])
+                    if not group_layers:
+                        group_layers = list(range(self._num_layers))
+                    for layer_idx_in_g, physical_layer_id in enumerate(group_layers):
                         if self._use_session_api:
                             # Session API: block-level keys + per-layer offsets
                             keys = [db.key_for_block(bh) for bh in chunk_hashes]
@@ -2963,7 +3265,7 @@ class MooncakeStoreWorker:
                         task = LayerTransferTask(
                             req_id=req_meta.req_id,
                             group_id=group_id,
-                            layer_idx_in_group=physical_layer_id,
+                            layer_idx_in_group=layer_idx_in_g,
                             physical_layer_id=physical_layer_id,
                             key_list=keys,
                             addr_list=addrs,
