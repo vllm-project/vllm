@@ -34,8 +34,8 @@ from vllm.v1.attention.backend import (
 )
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
-    HiddenStateCacheSpec,
     KVCacheSpec,
+    MLAAttentionSpec,
 )
 
 ########## Custom Ops ########
@@ -58,6 +58,17 @@ def unified_kv_cache_update(
         f"Expected slot_mapping to be a dict, got {type(slot_mapping)}. "
     )
     layer_slot_mapping = slot_mapping.get(layer_name)
+    if layer_name == "cache_only_layers.64" and layer_slot_mapping is not None:
+        sm = layer_slot_mapping
+        print(
+            "[DRAFT SLOT SOURCE]",
+            "layer=", layer_name,
+            "shape=", tuple(sm.shape),
+            "min=", sm.min().item(),
+            "max=", sm.max().item(),
+            "first=", sm[:20].tolist(),
+            "slot_mapping_type=", type(slot_mapping),
+        )
     if layer_slot_mapping is not None:
         assert hasattr(attn_layer.impl, "do_kv_cache_update"), (
             f"{attn_layer.impl.__class__.__name__} does not support kv cache update"
@@ -79,15 +90,42 @@ def dummy_attention(layer_name, _placeholder):
 
 
 def basic_cache(
-    to_cache: torch.Tensor,  # shape: [seq_len, num_heads, head_size]
-    kv_cache: torch.Tensor,  # shape: [num_blocks, num_heads, block_size, head_size]
+    to_cache: torch.Tensor,  # shape: [num_blocks, block_size, num_heads, head_size]
+    kv_cache: torch.Tensor,  # shape: [seq_len, num_heads, head_size]
     slot_mapping: torch.Tensor,  # shape: [seq_len]
 ):
-    # Padding slots are -1; redirect them to the null block (block 0, never
-    # allocated to a request) so the scatter stays branch-free and sync-free.
-    block_size = kv_cache.shape[2]
-    slot_mapping = slot_mapping.clamp_min(0)
-    kv_cache[slot_mapping // block_size, :, slot_mapping % block_size] = to_cache
+    num_blocks, block_size, num_heads, head_size = kv_cache.shape
+    slot_cpu = slot_mapping.detach().cpu()
+
+    print(
+        "\n"
+        "========== BASIC CACHE DEBUG ==========\n"
+        f"to_cache.shape       = {tuple(to_cache.shape)}\n"
+        f"kv_cache.shape       = {tuple(kv_cache.shape)}\n"
+        f"slot_mapping.shape   = {tuple(slot_mapping.shape)}\n"
+        f"slot_mapping.numel   = {slot_mapping.numel()}\n"
+        f"slot_mapping.min     = {slot_cpu.min().item() if slot_cpu.numel() else 'EMPTY'}\n"
+        f"slot_mapping.max     = {slot_cpu.max().item() if slot_cpu.numel() else 'EMPTY'}\n"
+        f"cache_capacity       = {num_blocks * block_size}\n"
+        f"num_blocks           = {num_blocks}\n"
+        f"block_size           = {block_size}\n"
+        f"num_heads            = {num_heads}\n"
+        f"head_size            = {head_size}\n"
+        "=======================================\n"
+    )
+
+    assert slot_cpu.numel() == to_cache.shape[0], (
+        f"slot_mapping length mismatch: "
+        f"{slot_cpu.numel()} vs to_cache {to_cache.shape[0]}"
+    )
+
+    assert slot_cpu.min().item() >= 0
+    assert slot_cpu.max().item() < num_blocks * block_size, (
+        f"SLOT OOB: max={slot_cpu.max().item()}, "
+        f"capacity={num_blocks * block_size}"
+    )
+    token_kv_cache = kv_cache.view(num_blocks * block_size, num_heads, head_size)
+    token_kv_cache[slot_mapping] = to_cache
 
 
 ######### CacheOnlyAttentionBackend ########
@@ -124,6 +162,18 @@ class CacheOnlyAttentionBackend(AttentionBackend):
         return CacheOnlyAttentionImpl
 
     @staticmethod
+    def get_kv_cache_shape(
+        num_blocks: int,
+        block_size: int,
+        num_kv_heads: int,
+        head_size: int,
+        cache_dtype_str: str = "auto",
+    ) -> tuple[int, ...]:
+        # We set `num_kv_heads = num_hidden_layers` and `head_size = hidden_size`
+        # We also don't use a k/v (2) dim
+        return (num_blocks, block_size, num_kv_heads, head_size)
+
+    @staticmethod
     def get_builder_cls() -> type["CacheOnlyAttentionMetadataBuilder"]:
         return CacheOnlyAttentionMetadataBuilder
 
@@ -137,8 +187,15 @@ class CacheOnlyAttentionBackend(AttentionBackend):
 
 
 class CacheOnlyAttentionMetadata:
-    def __init__(self, slot_mapping: torch.Tensor):
+    def __init__(
+        self,
+        slot_mapping: torch.Tensor,
+        query_start_loc: torch.Tensor,
+        req_ids: list[str],
+    ):
         self.slot_mapping = slot_mapping
+        self.query_start_loc = query_start_loc
+        self.req_ids = req_ids
 
 
 class CacheOnlyAttentionMetadataBuilder(
@@ -158,6 +215,7 @@ class CacheOnlyAttentionMetadataBuilder(
         common_prefix_len: int,
         common_attn_metadata: CommonAttentionMetadata,
         fast_build: bool = False,
+        req_ids: list[str] | None = None,
     ) -> CacheOnlyAttentionMetadata:
         use_cascade = common_prefix_len > 0
         if use_cascade:
@@ -172,6 +230,12 @@ class CacheOnlyAttentionMetadataBuilder(
 
         return CacheOnlyAttentionMetadata(
             slot_mapping=common_attn_metadata.slot_mapping,
+            query_start_loc=common_attn_metadata.query_start_loc,
+            req_ids=(
+                    req_ids
+                    if req_ids is not None
+                    else (common_attn_metadata.req_ids or [])
+                ),
         )
 
 
@@ -231,7 +295,7 @@ class CacheOnlyAttentionLayer(nn.Module, AttentionLayerBase):
         head_size: int,
         cache_config: CacheConfig | None = None,
         prefix: str = "",
-        attn_type: AttentionType = AttentionType.DECODER,
+        attn_type: str = AttentionType.DECODER,
     ):
         super().__init__()
 
@@ -312,9 +376,11 @@ class CacheOnlyAttentionLayer(nn.Module, AttentionLayerBase):
         return self.attn_backend
 
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
-        # Re-read block_size: hybrid models may bump it after __init__.
-        return HiddenStateCacheSpec(
-            block_size=vllm_config.cache_config.block_size,
+        # Note: we use MLAAttentionSpec here to because it will
+        # produce page sizes of (block_size * num_kv_heads * head_size * dtype_size)
+        # whereas FullAttentionSpec will add an additional factor of 2
+        return MLAAttentionSpec(
+            block_size=self.block_size,
             num_kv_heads=self.num_heads,
             head_size=self.head_size,
             dtype=self.kv_cache_torch_dtype,
@@ -329,9 +395,7 @@ class ExtractHiddenStatesModel(nn.Module):
         super().__init__()
 
         self.vllm_config = vllm_config
-        speculative_config = vllm_config.speculative_config
-        assert speculative_config is not None
-        self.hf_config = speculative_config.draft_model_config.hf_config
+        self.hf_config = vllm_config.speculative_config.draft_model_config.hf_config
         self.hidden_size = vllm_config.model_config.get_hidden_size()
         self.target_num_hidden_layers = (
             vllm_config.model_config.get_total_num_hidden_layers()
