@@ -4487,6 +4487,77 @@ steps:
 
 #----------------------------------------------------------  mi355 · kernels  ----------------------------------------------------------#
 
+- label: ":amd: (MI355) mHC Kernels"
+  timeout_in_minutes: 50
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
+  dind: false
+  agent_pool: mi355_1
+  optional: true
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - csrc/
+  - vllm/
+  - tests/kernels/
+  - vllm/platforms/rocm.py
+  commands:
+  - pytest -v -s kernels/mhc
+
+- label: ":amd: (MI355) FLA Ops Kernels"
+  timeout_in_minutes: 50
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
+  dind: false
+  agent_pool: mi355_1
+  optional: true
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - csrc/
+  - vllm/
+  - tests/kernels/
+  - vllm/platforms/rocm.py
+  commands:
+  - pytest -v -s kernels/fla
+
+- label: ":amd: (MI355) Miscellaneous Kernels"
+  timeout_in_minutes: 55
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
+  dind: false
+  agent_pool: mi355_1
+  optional: true
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - csrc/
+  - vllm/
+  - tests/kernels/
+  - vllm/platforms/rocm.py
+  commands:
+  - pytest -v -s
+      kernels/test_apply_repetition_penalties.py
+      kernels/test_awq_int4_to_int8.py
+      kernels/test_bf16_skinny_gemm.py
+      kernels/test_cache_kernels.py
+      kernels/test_compressor_kv_cache.py
+      kernels/test_cp_gather_fp8.py
+      kernels/test_deepseek_v4_cpu_kernels.py
+      kernels/test_dsv41_mega_attn_layouts.py
+      kernels/test_engram.py
+      kernels/test_flashinfer_bf16_gemm.py
+      kernels/test_flex_attention.py
+      kernels/test_fp32_router_gemm.py
+      kernels/test_fused_deepseek_v32_norm_rope.py
+      kernels/test_fused_indexer_q_rope_quant.py
+      kernels/test_fused_inv_rope_fp8_quant.py
+      kernels/test_fused_minimax_m3_qknorm_rope_kv_insert.py
+      kernels/test_fused_quant_activation.py
+      kernels/test_gate_linear_rocm_dispatch.py
+      kernels/test_gemm_rs_ar.py
+      kernels/test_kpool_decode_update_batched.py
+      kernels/test_minimax_m3_amd_ops.py
+      kernels/test_minimax_m3_sparse_attn_fp8_scale.py
+      kernels/test_onednn.py
+      kernels/test_relu2_fp8_quant.py
+      kernels/test_rocm_fp32_router_gemm.py
+      --deselect=tests/kernels/test_bf16_skinny_gemm.py::test_every_dsv3_routed_shape_is_instantiated
+
 - label: ":amd: (MI355 DPX) Attention DiffKV Kernels"
   timeout_in_minutes: 35
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
@@ -5191,35 +5262,8 @@ steps:
   - unset VLLM_USE_V2_MODEL_RUNNER
   - uv pip install --system torchao==0.17.0
   - uv pip install --system conch-triton-kernels
-  - VLLM_TEST_FORCE_LOAD_FORMAT=auto pytest -v -s quantization/ --ignore quantization/test_blackwell_moe.py --ignore quantization/test_rocm_moe.py --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
+  - VLLM_TEST_FORCE_LOAD_FORMAT=auto pytest -v -s quantization/ --ignore quantization/test_blackwell_moe.py --ignore quantization/test_rocm_moe.py --ignore quantization/test_gfx950_moe.py --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
   - if [ "$$BUILDKITE_PARALLEL_JOB" = "0" ]; then pytest -v -s rocm/test_moe_weight_replay.py; fi
-
-# - label: Quantized MoE Test (B200-MI355) # TBD
-#   timeout_in_minutes: 180
-#   mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
-#   dind: false
-#   agent_pool: mi355_1
-#   working_dir: "/vllm-workspace/"
-#   source_file_dependencies:
-#   - tests/quantization/test_gfx950_moe.py
-#   - vllm/model_executor/models/deepseek_v2.py
-#   - vllm/model_executor/models/gpt_oss.py
-#   - vllm/model_executor/models/llama4.py
-#   - vllm/model_executor/layers/fused_moe
-#   - vllm/model_executor/layers/quantization/compressed_tensors
-#   - vllm/model_executor/layers/quantization/modelopt.py
-#   - vllm/model_executor/layers/quantization/mxfp4.py
-#   - vllm/v1/attention/backends/triton_attn.py
-#   - vllm/v1/attention/backends/rocm_attn.py
-#   - vllm/v1/attention/backends/rocm_aiter_fa.py
-#   - vllm/v1/attention/backends/mla/
-#   - vllm/v1/attention/selector.py
-#   - vllm/model_executor/layers/layernorm.py
-#   - vllm/_aiter_ops.py
-#   - vllm/platforms/rocm.py
-#   - vllm/model_executor/model_loader/
-#   commands:
-#   - pytest -s -v tests/quantization/test_gfx950_moe.py
 
 #---------------------------------------------------------  mi355 · samplers  ----------------------------------------------------------#
 
@@ -6078,6 +6122,7 @@ steps:
   timeout_in_minutes: 45
   working_dir: /vllm-workspace/
   source_file_dependencies:
+  - tests/quantization/test_gfx950_moe.py
   - tests/quantization/test_rocm_moe.py
   - tests/utils.py
   - vllm/model_executor/models/deepseek_v2.py
@@ -6094,6 +6139,7 @@ steps:
   - vllm/envs.py
   commands:
   - pytest -v -s tests/quantization/test_rocm_moe.py
+  - pytest -v -s tests/quantization/test_gfx950_moe.py
   dind: false
   agent_pool: mi355_1
   num_gpus: 1
