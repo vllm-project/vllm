@@ -79,6 +79,7 @@ class RecordingKVCR:
         self.stats: OffloadingConnectorStats | None = None
         self.submit_hint_calls: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
         self.discard_hint_calls: list[str] = []
+        self.align_sequence_calls: list[tuple[list[BlockKey], bool]] = []
         self.deliver_calls: list[
             tuple[OpHandle, dict[BlockKey, list[MemoryRef]], str | None]
         ] = []
@@ -91,6 +92,11 @@ class RecordingKVCR:
 
     def discard_hint(self, request_id: str) -> None:
         self.discard_hint_calls.append(request_id)
+
+    def align_sequence(
+        self, keys: list[BlockKey], use_current_time: bool = False
+    ) -> None:
+        self.align_sequence_calls.append((list(keys), use_current_time))
 
     def query(
         self,
@@ -336,14 +342,64 @@ def test_kvcr_tier_adapts_request_and_load(monkeypatch, backpressure):
     assert kvcr.discard_hint_calls == ["req"]
 
 
-def test_kvcr_tier_allows_request_without_router_hint(monkeypatch):
-    """Keep router hints optional for requests from non-hint-aware routers."""
+@pytest.mark.parametrize(
+    ("computed", "in_flight", "num_tokens", "expected_keys"),
+    [
+        (None, None, None, 5),
+        (32, 16, 64, 1),
+        (16, 16, 64, 0),
+        (64, 0, 64, 4),
+        (80, 0, 80, 4),
+    ],
+)
+def test_kvcr_tier_refreshes_processed_prefix(
+    monkeypatch, computed, in_flight, num_tokens, expected_keys
+):
+    """Refresh only processed keys on request completion."""
     kvcr = RecordingKVCR()
     tier = _make_tier(monkeypatch, kvcr)
 
-    tier.on_new_request(ReqContext(req_id="req"))
+    ctx = ReqContext(req_id="req")
+    if computed is not None:
+        ctx._request = SimpleNamespace(
+            num_computed_tokens=computed,
+            num_in_flight_tokens=in_flight,
+            num_prompt_tokens=64,
+            num_tokens=num_tokens,
+        )
+    keys = [make_offload_key(bytes([index]), 0) for index in range(5)]
+    for position, key in enumerate(keys):
+        ctx.set_offload_key_position(key, (position + 1) * 16)
+    tier.on_new_request(ctx)
+    tier.on_request_finished(ctx)
 
     assert kvcr.submit_hint_calls == []
+    assert kvcr.align_sequence_calls == (
+        [(keys[:expected_keys], True)] if expected_keys else []
+    )
+    assert list(ctx._offload_key_positions) == keys
+
+
+@pytest.mark.parametrize("operation", ["submit_load", "submit_store"])
+def test_kvcr_tier_aligns_full_prefix_around_transfer_completion(
+    monkeypatch, operation
+):
+    """Align completed prefixes even when the request has already finished."""
+    kvcr = RecordingKVCR()
+    tier = _make_tier(monkeypatch, kvcr)
+    ctx = ReqContext(req_id="req")
+    head, tail, future_tail = (OffloadKey(key) for key in (b"head", b"tail", b"future"))
+    for key, end_token in ((tail, 32), (head, 16), (future_tail, 48)):
+        ctx.set_offload_key_position(key, end_token)
+    getattr(tier, operation)(_job(7, ctx, key=tail))
+    assert kvcr.align_sequence_calls == []
+
+    tier.on_request_finished(ctx)
+    assert list(tier.get_finished_jobs()) == [JobResult(7, True)]
+    assert kvcr.align_sequence_calls == [
+        ([head, tail, future_tail], True),
+        ([head, tail], False),
+    ]
 
 
 @pytest.mark.parametrize(
