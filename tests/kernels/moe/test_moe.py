@@ -975,6 +975,35 @@ class MarlinMoEWeightData:
         )
 
 
+
+@pytest.mark.skipif(current_platform.is_rocm(), reason="moe_wna16 CUDA kernel needs CUDA")
+def test_moe_wna16_cuda_disabled_for_batch_invariant(monkeypatch):
+    """VLLM_BATCH_INVARIANT must disable the nondeterministic split-K CUDA kernel
+    and fall through to the existing Triton WNA16 path.
+    """
+    from vllm.model_executor.layers.fused_moe.fused_moe import (
+        should_moe_wna16_use_cuda,
+    )
+    import vllm.envs as envs
+
+    monkeypatch.setattr(current_platform, "is_cuda", lambda: True)
+
+    monkeypatch.setattr(envs, "VLLM_BATCH_INVARIANT", False)
+    assert should_moe_wna16_use_cuda(
+        num_valid_tokens=32,
+        group_size=128,
+        num_experts=8,
+        bit=4,
+    ), "CUDA WNA16 kernel should be selected in normal mode"
+
+    monkeypatch.setattr(envs, "VLLM_BATCH_INVARIANT", True)
+    assert not should_moe_wna16_use_cuda(
+        num_valid_tokens=32,
+        group_size=128,
+        num_experts=8,
+        bit=4,
+    ), "CUDA WNA16 kernel must NOT be selected when VLLM_BATCH_INVARIANT=1"
+
 @pytest.mark.flaky(reruns=2)
 @pytest.mark.parametrize(
     ("a_type, b_type, c_type, group_blocks,m, n, k, e, topk, ep_size"),
