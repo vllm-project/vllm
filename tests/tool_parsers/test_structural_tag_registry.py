@@ -1324,6 +1324,26 @@ def test_parallel_tool_calls_default_keeps_grammar_unlimited(
     assert _is_grammar_accept_string(grammar, prefix + call * 2 + suffix)
 
 
+def test_parallel_tool_calls_false_does_not_enable_calls_with_response_format(
+    sample_tools,
+):
+    # With the flag unset, auto + response_format + non-strict tools is
+    # format-only. Setting the flag to false must not make tool calls possible.
+    request = ChatCompletionRequest(
+        model="m",
+        messages=[],
+        tools=[t.model_dump() for t in sample_tools],
+        tool_choice="auto",
+        parallel_tool_calls=False,
+        response_format={
+            "type": "json_schema",
+            "json_schema": {"name": "answer", "schema": {"type": "object"}},
+        },
+    )
+
+    assert _tool_calling_grammar("hermes", sample_tools, request) is None
+
+
 def test_responses_parallel_tool_calls_false_limits_grammar_to_one_call():
     # The Responses API has no post-hoc filter, so the grammar is the only limit.
     request = ResponsesRequest.model_validate(
