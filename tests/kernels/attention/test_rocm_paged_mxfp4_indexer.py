@@ -25,7 +25,7 @@ from vllm.models.deepseek_v41.amd.rocm import (
     rocm_mxfp4_indexer_k_store,
     rocm_mxfp4_indexer_q_quant,
 )
-from vllm.platforms.rocm import on_gfx950
+from vllm.platforms.rocm import get_cdna_version
 from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import set_random_seed
 from vllm.v1.attention.backends.mla.indexer import (
@@ -40,8 +40,8 @@ from vllm.v1.attention.backends.mla.rocm_paged_mxfp4_indexer import (
 from vllm.v1.attention.ops import rocm_paged_mxfp4_indexer as ops
 from vllm.v1.worker.workspace import init_workspace_manager, reset_workspace_manager
 
-if not on_gfx950():
-    pytest.skip("gfx950-only", allow_module_level=True)
+if get_cdna_version() != 4:
+    pytest.skip("CDNA4-only", allow_module_level=True)
 
 HEADS, HEAD_DIM = 32, 128
 WIDTH = HEAD_DIM // 2 + HEAD_DIM // 32

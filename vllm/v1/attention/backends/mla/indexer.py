@@ -66,7 +66,7 @@ def dsa_indexer_uses_fp4(vllm_config: VllmConfig) -> bool:
     use_fp4 = kv_dtype == "mxfp4"
     if use_fp4 and current_platform.is_rocm():
         from vllm._aiter_ops import rocm_aiter_ops
-        from vllm.platforms.rocm import on_gfx950
+        from vllm.platforms.rocm import get_cdna_version
 
         # Only DeepSeek-V4.1 is wired to the ROCm MXFP4 cache; other DSA models
         # would silently keep their FP8 one.
@@ -76,9 +76,9 @@ def dsa_indexer_uses_fp4(vllm_config: VllmConfig) -> bool:
                 "indexer_kv_dtype='mxfp4' on ROCm is only supported for "
                 "DeepSeek-V4.1-Flash."
             )
-        if not on_gfx950():
+        if get_cdna_version() != 4:
             raise ValueError(
-                "indexer_kv_dtype='mxfp4' on ROCm requires gfx950 (MI350X/MI355X)."
+                "indexer_kv_dtype='mxfp4' on ROCm requires CDNA4 (MI350X/MI355X)."
             )
         if not rocm_aiter_ops.is_enabled():
             raise ValueError(

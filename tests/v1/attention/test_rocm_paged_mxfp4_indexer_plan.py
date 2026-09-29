@@ -7,7 +7,13 @@ long request, and both have to come back with the right rows and the right
 block-table rows.
 """
 
+import pytest
 import torch
+
+from vllm.platforms import current_platform
+
+if not current_platform.is_rocm():
+    pytest.skip("ROCm-only", allow_module_level=True)
 
 from vllm.v1.attention.backends.mla.indexer import (
     DeepseekV32IndexerPrefillChunkMetadata,
