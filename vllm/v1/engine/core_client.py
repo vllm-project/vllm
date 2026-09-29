@@ -1335,16 +1335,16 @@ class AsyncMPClient(MPClient):
         return await self.call_utility_consensus_async("get_weight_version")
 
     async def add_lora_async(self, lora_request: LoRARequest) -> bool:
-        return all(await self.call_utility_all_async("add_lora", lora_request))
+        return await self.call_utility_async("add_lora", lora_request)
 
     async def remove_lora_async(self, lora_id: int) -> bool:
-        return all(await self.call_utility_all_async("remove_lora", lora_id))
+        return await self.call_utility_async("remove_lora", lora_id)
 
     async def list_loras_async(self) -> set[int]:
         return await self.call_utility_async("list_loras")
 
     async def pin_lora_async(self, lora_id: int) -> bool:
-        return all(await self.call_utility_all_async("pin_lora", lora_id))
+        return await self.call_utility_async("pin_lora", lora_id)
 
     async def save_sharded_state_async(
         self, path: str, pattern: str | None = None, max_size: int | None = None
