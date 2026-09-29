@@ -1964,7 +1964,7 @@ class MooncakeConnectorWorker:
         self.registered_layer_names = []
         self.registered_layer_indices = []
         self.registered_group_indices = []
-        self.region_shared_groups: list[tuple[int, ...]] = []
+        self.region_shared_groups = []
         self.region_row_offsets = []
         self.opaque_packed_storages = set()
         self._prepared_transfer_regions.clear()
@@ -2591,8 +2591,8 @@ class MooncakeConnectorWorker:
             self._prepared_transfer_regions[cache_key] = prepared
             return prepared
 
-        shared_groups = self.region_shared_groups
-        if len(shared_groups) != len(self.registered_layer_names):
+        shared_groups: list[tuple[int, ...]] | None = self.region_shared_groups
+        if len(self.region_shared_groups) != len(self.registered_layer_names):
             if _SHARED_REGION_GROUP_ID in self.registered_group_indices:
                 return finish(
                     [],
@@ -2604,8 +2604,8 @@ class MooncakeConnectorWorker:
                     ),
                 )
             shared_groups = None
-        local_rows = self.region_row_offsets
-        if len(local_rows) != len(self.registered_layer_names):
+        local_rows: list[int] | None = self.region_row_offsets
+        if len(self.region_row_offsets) != len(self.registered_layer_names):
             local_rows = None
         local_regions = self._get_transfer_regions(
             self.kv_caches_base_addr,
@@ -2617,11 +2617,15 @@ class MooncakeConnectorWorker:
             shared_groups,
             local_rows,
         )
-        remote_shared = [tuple(groups) for groups in meta.registered_shared_group_ids]
-        if len(remote_shared) != len(meta.registered_layer_names):
+        remote_shared_groups = [
+            tuple(groups) for groups in meta.registered_shared_group_ids
+        ]
+        remote_shared: list[tuple[int, ...]] | None = remote_shared_groups
+        if len(remote_shared_groups) != len(meta.registered_layer_names):
             remote_shared = None
-        remote_row_offsets = meta.registered_row_offsets
-        if len(remote_row_offsets) != len(meta.registered_layer_names):
+        remote_rows = meta.registered_row_offsets
+        remote_row_offsets: list[int] | None = remote_rows
+        if len(remote_rows) != len(meta.registered_layer_names):
             remote_row_offsets = None
         remote_regions = self._get_transfer_regions(
             meta.kv_caches_base_addr,
