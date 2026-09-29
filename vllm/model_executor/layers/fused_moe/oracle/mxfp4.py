@@ -1627,14 +1627,10 @@ def convert_weight_to_mxfp4_moe_kernel_format(
         from aiter.ops.shuffle import shuffle_scale as _shuf_s
         from aiter.ops.shuffle import shuffle_weight as _shuf_w
 
-        # DeepSeek V4.1 a4w4 (VLLM_ROCM_USE_AITER_MOE_A4W4_DSV4): match
-        # ATOM's SEPARATED gate/up weight layout instead of the default
-        # GateMode.INTERLEAVE shuffle. AITER's INTERLEAVE + fp4x2 activation
-        # combination has no tuned kernel config and produces degenerate
-        # output end-to-end (confirmed via real-model GSM8K); SEPARATED +
-        # fp4x2 is the combination ATOM validates on this same checkpoint, so
-        # rocm_aiter_fused_experts selects GateMode.SEPARATED to match
-        # whenever this shuffle is used (see rocm_aiter_moe.py).
+        # DeepSeek V4.1 a4w4 uses ATOM's SEPARATED gate/up layout instead of
+        # the default INTERLEAVE shuffle (INTERLEAVE + fp4x2 has no tuned
+        # kernel and produces garbage output). Must match GateMode.SEPARATED
+        # in rocm_aiter_moe.py.
         is_guinterleave = not use_separated_a4w4
 
         w13_weight = torch.nn.Parameter(

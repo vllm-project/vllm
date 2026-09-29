@@ -1290,10 +1290,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
         ["auto", "a4w4", "a8w4", "a16w4", "0", "1"],
         case_sensitive=False,
     ),
-    # Override the a4w4 (FP4 activation) default for DeepSeek V4.1's AITER
-    # MXFP4 MoE (see _use_mxfp4_w4a4_moe_activation in rocm_aiter_moe.py).
-    # Unset (default) auto-detects by hf_config.model_type; "0"/"false" forces
-    # the previous a8w4 (FP8 activation) behavior back on as a rollback lever.
+    # Opt-in switch for a4w4 (FP4 activation) MoE on DeepSeek V4.1, AITER
+    # MXFP4 backend. Default is a8w4 (FP8); set to "1"/"true" to enable
+    # a4w4. Raises if set for other models.
     "VLLM_ROCM_USE_AITER_MOE_A4W4_DSV4": lambda: maybe_convert_bool(
         os.getenv("VLLM_ROCM_USE_AITER_MOE_A4W4_DSV4")
     ),

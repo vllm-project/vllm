@@ -6,7 +6,6 @@ from typing import TYPE_CHECKING
 
 import torch
 
-import vllm.envs as envs
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
@@ -56,66 +55,6 @@ class ActivationMethod(IntEnum):
     # without importing the ActivationType enum from AITER globally.
     SILU = 0
     GELU = 1
-
-
-_DEEPSEEK_V41_MODEL_TYPES = (
-    "deepseek_v41",
-    "deepseek_v41_text",
-)
-
-
-def _use_mxfp4_w4a4_moe_activation() -> bool:
-    """Force MXFP4 (a4w4) MoE activations for DeepSeek V4.1 on ROCm.
-
-    Scoped to DeepSeek V4.1 only: this has been validated (GSM8K parity +
-    AgentX perf sweep) on V4.1-Flash. DeepSeek V4 shares the same MoE shape
-    and AITER dispatch path but has not been benchmarked or accuracy-tested
-    with this override yet, so it is intentionally excluded here; see the
-    separate DeepSeek V4 follow-up PR once that validation is done.
-
-    AITER's generic ``fused_moe`` heuristic ties activation dtype to
-    ``gate_mode``: DeepSeek V4.1's MoE weights are gate/up-interleaved
-    (``quant_config.use_mxfp4_w4a16`` below forces
-    ``GateMode.INTERLEAVE``), which routes the heuristic into a BF16-vs-FP8
-    branch that never reaches FP4 activations — see
-    ``aiter/fused_moe.py``'s ``q_dtype_a`` heuristic. ATOM's MoE weights use
-    the separated gate/up layout instead, which falls through to FP4
-    activations unconditionally, and its server logs confirm the resulting
-    ``afp4_wfp4`` (a4w4) kernel dispatch for this model's shape.
-
-    Benchmarking AITER's own a8w4-vs-a4w4 kernels at DeepSeek-V4.1-Flash's
-    production shape (hidden=5120, inter=640/1152, experts=384, topk=6) shows
-    a4w4 ~18-21% faster at prefill-scale token counts (4096-8192) and roughly
-    on par at decode scale, with correctness verified via aiter's own
-    cosine-similarity check (logits_diff ~7-8e-6) across every token count
-    from 1 to 16384. This overrides the activation dtype via aiter's private
-    ``_q_dtype_a`` hook rather than switching to the separated gate/up
-    layout, so the existing interleaved weight shuffle/loading path (and its
-    weight-scale layout) is unchanged.
-
-    Set ``VLLM_ROCM_USE_AITER_MOE_A4W4_DSV4=0`` to force the previous a8w4
-    behavior back on (rollback lever / A-B comparison); unset (default)
-    auto-detects by ``hf_config.model_type``.
-
-    Called once from ``FusedMoEConfig.__post_init__`` (layer-construction
-    time, inside vLLM's ``set_current_vllm_config`` context) and cached on
-    the resulting ``FusedMoEConfig.use_mxfp4_w4a4_dsv4``. Forward-pass code
-    (``rocm_aiter_fused_experts``) must *not* call this directly:
-    ``get_current_vllm_config()`` is not set during profiling or serving
-    forward passes, so a direct call there would silently and permanently
-    resolve to the a8w4 fallback.
-    """
-    if envs.VLLM_ROCM_USE_AITER_MOE_A4W4_DSV4 is not None:
-        return envs.VLLM_ROCM_USE_AITER_MOE_A4W4_DSV4
-    try:
-        from vllm.config import get_current_vllm_config
-
-        model_type = getattr(
-            get_current_vllm_config().model_config.hf_config, "model_type", None
-        )
-    except Exception:
-        return False
-    return model_type in _DEEPSEEK_V41_MODEL_TYPES
 
 
 aiter_topK_meta_data: tuple[torch.Tensor, torch.Tensor] | None = None
@@ -436,19 +375,9 @@ def rocm_aiter_fused_experts(
                 intermediate_pad // 64 * 64 * (2 if moe_config.tp_size == 1 else 1)
             )
 
-        # https://github.com/ROCm/aiter/pull/3123 specialized the AITER stage1 GEMMs
-        # for interleaved vs separated gate and up weights.
-        # For gpt-oss i.e. use_mxfp4_w4a16=True, the weights are shuffled by
-        # `rocm_aiter_ops.shuffle_weight_a16w4` in `oracle/mxfp4.py`,
-        # which always sets `is_guinterleave=True`.
-        # Hence, we pass in GateMode.INTERLEAVE to match the weight shuffling.
-        #
-        # DeepSeek V4.1 a4w4 (moe_config.use_mxfp4_w4a4_dsv4) is the one
-        # exception: `convert_weight_to_mxfp4_moe_kernel_format` shuffles its
-        # weights with `is_guinterleave=False` to match ATOM's SEPARATED
-        # gate/up layout, since AITER's INTERLEAVE stage1 GEMM has no tuned
-        # config for fp4x2 activations on this shape and produces garbage
-        # output. GateMode.SEPARATED must be passed here to match.
+        # AITER's stage1 GEMM needs gate_mode to match how weights were
+        # shuffled at load time (oracle/mxfp4.py). gpt-oss uses INTERLEAVE;
+        # DeepSeek V4.1 a4w4 uses SEPARATED (see below).
         from aiter.ops.flydsl.moe_common import GateMode
 
         gate_mode = ""
@@ -461,9 +390,8 @@ def rocm_aiter_fused_experts(
             )
         elif quant_config.use_mxfp4_w4a16:
             if moe_config.use_mxfp4_w4a4_dsv4:
-                # See _use_mxfp4_w4a4_moe_activation: force a4w4 instead of
-                # the default heuristic's BF16/FP8 choice for this model,
-                # matching the SEPARATED weight shuffle applied at load time.
+                # Opt-in a4w4 for DeepSeek V4.1 (VLLM_ROCM_USE_AITER_MOE_A4W4_DSV4=1).
+                # Must match the SEPARATED weight shuffle from load time.
                 from aiter import dtypes
 
                 gate_mode = GateMode.SEPARATED.value

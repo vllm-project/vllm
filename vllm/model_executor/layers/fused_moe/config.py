@@ -6,6 +6,7 @@ from typing import Union
 
 import torch
 
+import vllm.envs as envs
 from vllm.config import ParallelConfig, SchedulerConfig
 from vllm.config.kernel import MoEBackend
 from vllm.distributed import get_dp_group, get_pcp_group, get_tensor_model_parallel_rank
@@ -1247,6 +1248,12 @@ class FusedMoEParallelConfig:
         )
 
 
+# Model types validated for VLLM_ROCM_USE_AITER_MOE_A4W4_DSV4=1. This flag
+# also changes the MXFP4 weight shuffle layout, so using it on other models
+# can produce garbled output.
+_AITER_MOE_A4W4_DSV4_VALIDATED_MODEL_TYPES = ("deepseek_v41", "deepseek_v41_text")
+
+
 # Adapted from pplx-kernels tests/all_to_all_utils.py
 @dataclass
 class FusedMoEConfig:
@@ -1315,9 +1322,9 @@ class FusedMoEConfig:
     rocm_aiter_fmoe_enabled: bool = False
     aiter_fmoe_shared_expert_enabled: bool = False
     # Whether to force MXFP4 (a4w4) MoE activations for DeepSeek V4.1 on
-    # ROCm/AITER. Resolved once here (construction time, when
-    # get_current_vllm_config() is reliably available) rather than in the
-    # fused-experts forward path, where the vLLM config context is not set.
+    # ROCm/AITER. Opt-in via VLLM_ROCM_USE_AITER_MOE_A4W4_DSV4=1; rejected
+    # for any other model type. Resolved here, not in the forward path,
+    # because get_current_vllm_config() isn't set there.
     use_mxfp4_w4a4_dsv4: bool = False
 
     def __post_init__(self):
@@ -1350,12 +1357,22 @@ class FusedMoEConfig:
                 rocm_aiter_ops.is_fusion_moe_shared_experts_enabled()
             )
 
-        if self.rocm_aiter_fmoe_enabled:
-            from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
-                _use_mxfp4_w4a4_moe_activation,
-            )
+        if self.rocm_aiter_fmoe_enabled and envs.VLLM_ROCM_USE_AITER_MOE_A4W4_DSV4:
+            from vllm.config import get_current_vllm_config_or_none
 
-            self.use_mxfp4_w4a4_dsv4 = _use_mxfp4_w4a4_moe_activation()
+            vllm_config = get_current_vllm_config_or_none()
+            model_type = (
+                getattr(vllm_config.model_config.hf_config, "model_type", None)
+                if vllm_config is not None
+                else None
+            )
+            if model_type not in _AITER_MOE_A4W4_DSV4_VALIDATED_MODEL_TYPES:
+                raise ValueError(
+                    f"VLLM_ROCM_USE_AITER_MOE_A4W4_DSV4=1 only supports "
+                    f"model_type in {_AITER_MOE_A4W4_DSV4_VALIDATED_MODEL_TYPES}, "
+                    f"got {model_type!r}. Unset this env var for this model."
+                )
+            self.use_mxfp4_w4a4_dsv4 = True
 
         if self.use_mori_kernels:
             assert self.rocm_aiter_fmoe_enabled, (

@@ -361,20 +361,12 @@ def _rocm_aiter_fused_moe_impl(
     activation = ActivationType(activation_method)
     quant_type = QuantType(quant_method)
 
-    # ``fused_moe()``'s public signature has no hook to override the
-    # activation quant dtype it picks internally, and aiter's own
-    # ``fused_moe_`` custom op (``torch.ops.aiter.fused_moe_``) has a fixed
-    # schema that drops the ``_q_dtype_a`` kwarg entirely. The only reachable
-    # override point is aiter's private, un-registered ``_fused_moe_impl``
-    # Python function, which is what both of the above ultimately call. This
-    # is depended-on internal API, not aiter's public surface — see
-    # ``_use_mxfp4_w4a4_moe_activation`` in ``rocm_aiter_moe.py`` for why this
-    # override exists and https://github.com/ROCm/aiter/blob/v0.1.13.post1
-    # (the version this file is already pinned to elsewhere) for the pin this
-    # relies on. vLLM's own ``rocm_aiter_fused_moe`` custom op already forms
-    # the opaque torch.compile/CUDA-graph boundary here, so calling aiter's
-    # internal function directly instead of its own custom op is safe: the
-    # underlying kernel launches are identical either way.
+    # aiter's public fused_moe()/fused_moe_ custom op can't override the
+    # activation quant dtype, so we call its private _fused_moe_impl
+    # directly (see use_mxfp4_w4a4_dsv4 in rocm_aiter_moe.py). Depends on
+    # aiter's internals, pinned to v0.1.13.post1. Safe to call directly:
+    # vLLM's own custom op already forms the torch.compile/CUDA-graph
+    # boundary, so the kernel launches are identical either way.
     _fused_moe_call = fused_moe
     if q_dtype_a is not None:
         from aiter.fused_moe import _fused_moe_impl
