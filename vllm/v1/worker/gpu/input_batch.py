@@ -120,6 +120,8 @@ class InputBatch:
     # None if there are no prefills.
     prefill_runs_as_decode_np: np.ndarray | None = None
 
+    is_dummy: bool = False
+
     @classmethod
     def make_dummy(
         cls,
@@ -181,6 +183,7 @@ class InputBatch:
         # num_scheduled_tokens.
         seq_lens_cpu_upper_bound = torch.from_numpy(num_scheduled_tokens.copy())
         return cls(
+            is_dummy=True,
             req_ids=req_ids,
             num_reqs=num_reqs,
             num_reqs_after_padding=num_reqs,

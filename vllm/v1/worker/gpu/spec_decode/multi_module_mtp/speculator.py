@@ -233,6 +233,7 @@ class MultiModuleMTPSpeculator(DraftModelSpeculator):
                 query_start_loc_np=input_batch.query_start_loc_np,
                 seq_lens_cpu_upper_bound=seq_lens_cpu_upper_bound,
                 step=0,
+                is_dummy=input_batch.is_dummy,
             )
             assert draft_attn_metadata is not None
             attn_metadata = draft_attn_metadata

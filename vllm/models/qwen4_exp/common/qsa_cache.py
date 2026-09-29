@@ -205,7 +205,6 @@ def _metadata_launch_pdl() -> bool:
 def _build_qsa_metadata_kernel(
     query_start_loc_ptr,
     seq_lens_ptr,
-    common_slot_mapping_ptr,
     block_table_ptr,
     token_to_req_ptr,
     logical_positions_ptr,
@@ -309,9 +308,6 @@ def _build_qsa_metadata_kernel(
             other=-1,
         )
         valid &= physical_block >= 0
-        valid &= (
-            tl.load(common_slot_mapping_ptr + token_idx, mask=mapped, other=-1) >= 0
-        )
         slot = physical_block * storage_block_size + (
             compressed_position % storage_block_size
         )
@@ -431,7 +427,6 @@ def build_qsa_metadata_triton(
     _build_qsa_metadata_kernel[(max(num_token_blocks, num_work_blocks, 1),)](
         common_attn_metadata.query_start_loc,
         common_attn_metadata.seq_lens,
-        common_attn_metadata.slot_mapping,
         block_table,
         token_to_req,
         logical_positions,
@@ -458,6 +453,8 @@ def build_qsa_metadata_triton(
     )
     if circular_buffer_size == 0 and compress_ratio == 1:
         slot_mapping = common_attn_metadata.slot_mapping[:num_tokens]
+    elif common_attn_metadata.is_dummy_batch:
+        slot_mapping.fill_(PAD_SLOT_ID)
     return token_to_req, logical_positions, visible_blocks, slot_mapping
 
 
@@ -522,9 +519,6 @@ def _build_qsa_metadata_torch(
             compress_ratio,
             slot_mapping_buffer,
         )
-        slot_mapping.masked_fill_(
-            common_attn_metadata.slot_mapping[:num_tokens] < 0, -1
-        )
     if k_work_metadata_buffer is not None:
         query_lens = (
             common_attn_metadata.query_start_loc[1:]
@@ -560,6 +554,10 @@ def _build_qsa_metadata_torch(
         k_work_metadata_buffer[:, 1].copy_(
             torch.where(active, work_in_request, -1).to(torch.int32)
         )
+    if (
+        circular_buffer_size > 0 or compress_ratio != 1
+    ) and common_attn_metadata.is_dummy_batch:
+        slot_mapping.fill_(PAD_SLOT_ID)
     return token_to_req, logical_positions, visible_blocks, slot_mapping
 
 
@@ -852,6 +850,7 @@ class QSAKeyStateCache(_QSAStateCache):
         )
         return CircularBufferSpec(
             block_size=capacity,
+            dcp_sharded=False,
             num_kv_heads=1,
             head_size=self.head_size,
             head_size_v=0,
@@ -859,17 +858,26 @@ class QSAKeyStateCache(_QSAStateCache):
         )
 
 
+class _QSACompressedKeySpec(MLAAttentionSpec):
+    @property
+    def has_independent_slot_mapping(self) -> bool:
+        return True
+
+
 class QSACompressedKeyCache(_QSAStateCache):
     """Normed, group-first-RoPE key at one row per complete group."""
 
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
-        del vllm_config
-        return MLAAttentionSpec(
-            block_size=self.cache_config.block_size,
+        dcp_world_size = vllm_config.parallel_config.decode_context_parallel_size
+        block_size = self.cache_config.block_size * dcp_world_size
+        return _QSACompressedKeySpec(
+            block_size=block_size,
             num_kv_heads=1,
             head_size=self.head_size,
             dtype=self.dtype,
             tokens_per_state=self.compress_ratio,
+            dcp_sharded=dcp_world_size == 1,
+            storage_block_size=block_size,
         )
 
 
