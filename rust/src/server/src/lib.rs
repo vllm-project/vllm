@@ -99,6 +99,7 @@ async fn build_state(config: &Config) -> Result<Arc<AppState>> {
         &config.model,
         LoadModelBackendsOptions {
             revision: config.revision.clone(),
+            hf_overrides: config.hf_overrides.clone(),
             generation_config: config.generation_config,
             renderer: config.renderer,
             language_model_only: config.language_model_only,
@@ -129,6 +130,7 @@ async fn build_state(config: &Config) -> Result<Arc<AppState>> {
         coordinator_mode,
         model_name: metrics_model_name,
         client_index: 0,
+        engine_stats_enabled: !config.disable_log_stats,
     })
     .await
     .context("failed to connect to engine core")?;
@@ -138,7 +140,8 @@ async fn build_state(config: &Config) -> Result<Arc<AppState>> {
 
     let chat = ChatLlm::new(text, chat_backend)
         .with_tool_call_parser(config.tool_call_parser.clone())
-        .with_reasoning_parser(config.reasoning_parser.clone());
+        .with_reasoning_parser(config.reasoning_parser.clone())
+        .with_tool_strict_level(config.tool_strict_level);
 
     let state = Arc::new(
         AppState::new(served_model_names, chat)

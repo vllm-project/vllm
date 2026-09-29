@@ -30,6 +30,7 @@ from vllm.sampling_params import (
     StructuredOutputsParams,
 )
 from vllm.tokenizers import TokenizerLike
+from vllm.tool_parsers.tool_strict_level import ToolStrictLevel
 from vllm.tool_parsers.utils import Tool, get_json_schema_from_tools
 from vllm.utils.collection_utils import is_list_of
 from vllm.utils.import_utils import import_plugin
@@ -40,8 +41,7 @@ logger = init_logger(__name__)
 
 
 class ToolParser:
-    """
-    Abstract ToolParser class that should not be used directly. Provided
+    """Abstract ToolParser class that should not be used directly. Provided
     properties and methods should be used in
     derived classes.
     """
@@ -133,6 +133,13 @@ class ToolParser:
         ):
             return request
 
+        # Parsers that extract required/named tool calls from their native
+        # format (supports_required_and_named=False) must not be forced into
+        # the JSON tool-call format below: they would never find a call in
+        # the JSON output and would return it as content instead.
+        if not self.supports_required_and_named:
+            return request
+
         json_schema_from_tool = get_json_schema_from_tools(
             tool_choice=request.tool_choice, tools=request.tools
         )
@@ -169,6 +176,7 @@ class ToolParser:
         request: ChatCompletionRequest | ResponsesRequest,
         *,
         reasoning: bool = False,
+        strict_level: ToolStrictLevel = ToolStrictLevel.AUTO,
     ):
         if self.structural_tag_model is None:
             return None
@@ -181,13 +189,13 @@ class ToolParser:
             tools=request.tools,
             tool_choice=request.tool_choice,
             reasoning=reasoning,
+            strict_level=strict_level,
         )
 
     def extract_tool_calls(
         self, model_output: str, request: ChatCompletionRequest
     ) -> ExtractedToolCallInformation:
-        """
-        Static method that should be implemented for extracting tool calls from
+        """Static method that should be implemented for extracting tool calls from
         a complete model-generated string.
         Used for non-streaming responses where we have the entire model response
         available before sending to the client.
@@ -207,8 +215,7 @@ class ToolParser:
         delta_token_ids: Sequence[int],
         request: ChatCompletionRequest,
     ) -> DeltaMessage | None:
-        """
-        Instance method that should be implemented for extracting tool calls
+        """Instance method that should be implemented for extracting tool calls
         from an incomplete response; for use when handling tool calls and
         streaming. Has to be an instance method because  it requires state -
         the current tokens/diffs, but also the information about what has
@@ -220,8 +227,7 @@ class ToolParser:
 
 
 class ToolParserManager:
-    """
-    Central registry for ToolParser implementations.
+    """Central registry for ToolParser implementations.
 
     Supports two modes:
       - Eager (immediate) registration via `register_module`
@@ -233,8 +239,7 @@ class ToolParserManager:
 
     @classmethod
     def get_tool_parser(cls, name: str) -> type[ToolParser]:
-        """
-        Retrieve a registered or lazily registered ToolParser class.
+        """Retrieve a registered or lazily registered ToolParser class.
 
         If the parser is lazily registered,
         it will be imported and cached on first access.
@@ -301,8 +306,7 @@ class ToolParserManager:
 
     @classmethod
     def register_lazy_module(cls, name: str, module_path: str, class_name: str) -> None:
-        """
-        Register a lazy module mapping.
+        """Register a lazy module mapping.
 
         Example:
             ToolParserManager.register_lazy_module(
@@ -310,6 +314,7 @@ class ToolParserManager:
                 module_path="vllm.tool_parsers.kimi_k2_parser",
                 class_name="KimiK2ToolParser",
             )
+
         """
         cls.lazy_parsers[name] = (module_path, class_name)
 
@@ -320,8 +325,7 @@ class ToolParserManager:
         force: bool = True,
         module: type[ToolParser] | None = None,
     ) -> type[ToolParser] | Callable[[type[ToolParser]], type[ToolParser]]:
-        """
-        Register module immediately or lazily (as a decorator).
+        """Register module immediately or lazily (as a decorator).
 
         Usage:
             @ToolParserManager.register_module("kimi_k2")

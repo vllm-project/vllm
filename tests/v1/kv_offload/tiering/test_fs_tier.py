@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Unit tests for FileSystemTierManager.
+"""Unit tests for FileSystemTierManager.
 
 These tests use real disk I/O to verify the filesystem tier implementation.
 The tier manager writes KV cache blocks to disk and reads them back, verifying
