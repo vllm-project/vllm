@@ -37,6 +37,21 @@ memory consumption is therefore topology- and implementation-dependent. The
 realized capacity may be slightly smaller because the budget is rounded down
 to complete host blocks.
 
+Startup logs report two concurrency bounds at `max_model_len`: the existing
+worst-case `Maximum concurrency` line charges every resident page to the GPU
+pool, while `HiSparse steady-state KV cache size` assumes decoding requests
+read from host and pin only their active tail pages. The steady-state bound
+is the admission headroom a warmed server actually has; the worst case holds
+while pages wait to spill or before hot regions are granted.
+
+Host-tier observability flows through the KV-connector stats path: the
+scheduler samples the host block pool once per step and Prometheus exposes
+`vllm:hisparse_host_blocks_usage` (and its used/total companions) plus
+`vllm:hisparse_pending_spills`, alongside the worker's hot-buffer hit/miss
+counters. Used host blocks include published cached prefixes, which eviction
+reclaims on demand, so sustained 100% usage means the prefix working set
+fills the pool, not that admissions are blocked.
+
 ## Ownership
 
 | Thing | Owner | What “owner” means |
