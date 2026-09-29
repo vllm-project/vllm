@@ -1525,9 +1525,11 @@ def test_prompt_logprob_token_ids_with_chunking_and_preemption(monkeypatch):
             assert scores[row] == pytest.approx(expected, abs=1e-3)
 
 
-def test_prompt_token_id_scores_are_dropped_after_resume():
+def test_prompt_token_id_scores_are_dropped_after_resume(monkeypatch):
     """A request resumed after its prefill frees its table instead of keeping
     it through decode; its scores were emitted before preemption."""
+    # Pinning would initialize CUDA here and break later forked engines.
+    monkeypatch.setattr("vllm.utils.torch_utils.PIN_MEMORY", False)
     worker = PromptLogprobsWorker(max_num_reqs=1, device=torch.device("cpu"))
     params = SamplingParams(prompt_logprob_token_ids=np.array([[1], [2]]))
     worker.add_request("r", 0, params)
