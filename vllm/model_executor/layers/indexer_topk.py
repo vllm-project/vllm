@@ -15,9 +15,8 @@ from vllm.v1.worker.workspace import current_workspace_manager
 RADIX_TOPK_WORKSPACE_SIZE = 1024 * 1024
 
 # cooperative_topk's hard row limit: one cluster wave covers at most this many
-# rows. "auto" uses cooperative_topk for every batch within the limit and falls
-# back to persistent_topk past it; explicit ``cooperative`` requests are
-# validated against the same bound.
+# rows. The default chain falls back to persistent_topk past this limit;
+# explicit ``cooperative`` requests are validated against the same bound.
 AUTO_COOPERATIVE_MAX_ROWS = 64
 
 # ---------------------------------------------------------------------------
@@ -43,12 +42,29 @@ def get_deep_select_stride_requirement() -> tuple[int, int]:
     return torch.ops.deep_select.get_alignment_requirement()
 
 
+def is_deep_select_available() -> bool:
+    """Whether the DeepSelect extension supports the current GPU."""
+    return (
+        current_platform.is_cuda()
+        and (
+            current_platform.is_device_capability_family(100)
+            or current_platform.is_device_capability(90)
+        )
+        and hasattr(torch.ops.deep_select, "topk")
+    )
+
+
 def is_deep_select_supported(input: torch.Tensor, topk: int) -> bool:
     """Whether the kernel accepts this input (dtype/stride/topk constraints)."""
     return (
-        topk <= 4096
+        0 < topk <= 4096
+        and (
+            not current_platform.is_device_capability(90)
+            or input.dtype == torch.float32
+        )
         and input.shape[1] < 2**23
         and input.dtype in (torch.float32, torch.bfloat16)
+        and input.data_ptr() % 128 == 0
         and input.stride(1) == 1
         and input.stride(0)
         * input.element_size()
@@ -77,12 +93,14 @@ def deep_select_topk(
     end: torch.Tensor | None = None,
     output_idx: torch.Tensor | None = None,
     indices_dtype: torch.dtype = torch.int32,
+    *,
+    sorted_index: bool = False,
 ) -> torch.Tensor:
     """Select the top-k indices per row of `input` with DeepSelect.
 
     Args:
         input: (num_rows, vocab_size), bf16 or fp32. stride(1) must be 1 and
-            stride(0) must be 1024B-aligned.
+            stride(0) must be 1024B-aligned. Hopper supports fp32 only.
         topk: Number of elements to select per row; must be <= 4096.
         end: Optional (num_rows,) int32 tensor with the exclusive right
             boundary of each row. Rows with `end[i] < topk` get their
@@ -90,16 +108,14 @@ def deep_select_topk(
         output_idx: Optional preallocated (num_rows, topk) output tensor whose
             stride(0) is 32B-aligned (e.g. a slice of a wider buffer).
         indices_dtype: Output dtype when `output_idx` is not provided.
+        sorted_index: Sort selected logical positions in ascending order.
 
     Returns:
         The (num_rows, topk) indices tensor.
 
     """
     assert input.dim() == 2 and input.stride(1) == 1
-    assert (
-        input.stride(0) * input.element_size() % get_deep_select_stride_requirement()[0]
-        == 0
-    )
+    assert is_deep_select_supported(input, topk)
 
     num_rows = input.shape[0]
     if output_idx is None:
@@ -109,6 +125,10 @@ def deep_select_topk(
     else:
         assert output_idx.dtype == indices_dtype
         assert output_idx.shape[0] >= num_rows and output_idx.shape[1] >= topk
+    output_alignment = get_deep_select_stride_requirement()[1]
+    assert output_idx.data_ptr() % output_alignment == 0
+    assert output_idx.stride(1) == 1
+    assert output_idx.stride(0) * output_idx.element_size() % output_alignment == 0
 
     torch.ops.deep_select.topk(
         input,
@@ -116,7 +136,7 @@ def deep_select_topk(
         None,  # begin is not supported
         end,
         False,  # sorted_value
-        False,  # sorted_index
+        sorted_index,
         None,  # output_value
         output_idx,
         None,  # output_idx_offset
@@ -155,9 +175,7 @@ class SparseIndexerTopk(torch.nn.Module):
             )
         self._backend = backend
         self._is_cuda = current_platform.is_cuda()
-        self._has_deep_select = self._is_cuda and (
-            current_platform.is_device_capability_family(100)
-        )
+        self._has_deep_select = is_deep_select_available()
         self._has_flashinfer_topk = has_flashinfer()
         self._cooperative_capable = self._is_cuda and (
             current_platform.has_device_capability(90)
@@ -168,8 +186,8 @@ class SparseIndexerTopk(torch.nn.Module):
         self, logits: torch.Tensor, topk_tokens: int, num_rows: int
     ) -> str:
         """Resolve the decode top-k implementation from the configured
-        backend ("auto" = the pre-existing chain, or a validated explicit
-        value)."""
+        backend ("auto" uses DeepSelect on compatible Hopper inputs, or a
+        validated explicit value)."""
         if self._backend == "auto":
             return self._resolve_auto(logits, topk_tokens, num_rows)
 
@@ -187,7 +205,9 @@ class SparseIndexerTopk(torch.nn.Module):
             if not self._is_cuda:
                 failures.append("requires a CUDA platform")
             elif not self._has_deep_select:
-                failures.append("requires SM100a/SM103a (10.x device family)")
+                failures.append(
+                    "requires the DeepSelect extension and SM90/SM100/SM103"
+                )
             elif not is_deep_select_supported(logits, topk_tokens):
                 failures.append(
                     f"inputs violate DeepSelect's constraints: dtype={logits.dtype},"
@@ -215,13 +235,13 @@ class SparseIndexerTopk(torch.nn.Module):
     def _resolve_auto(
         self, logits: torch.Tensor, topk_tokens: int, num_rows: int
     ) -> str:
-        """The priority chain: cooperative -> persistent -> per_row.
-        deep_select/flashinfer/torch are opt-in only.
-
-        cooperative_topk is preferred whenever it is applicable, i.e. within
-        its AUTO_COOPERATIVE_MAX_ROWS row limit; larger batches go to
-        persistent_topk.
-        """
+        """The priority chain: DeepSelect -> cooperative -> persistent -> per_row."""
+        if (
+            self._has_deep_select
+            and current_platform.is_device_capability(90)
+            and is_deep_select_supported(logits, topk_tokens)
+        ):
+            return "deep_select"
         if not self._cooperative_constraints(logits, topk_tokens, num_rows):
             return "cooperative"
         if self._is_cuda and topk_tokens in (512, 1024, 2048):
@@ -289,7 +309,13 @@ class SparseIndexerTopk(torch.nn.Module):
         backend = self.resolve_backend(logits, topk_tokens, logits.shape[0])
         if backend == "deep_select":
             row_ends = self._row_ends(seq_lens, next_n, logits.shape[0])
-            deep_select_topk(logits, topk_tokens, end=row_ends, output_idx=topk_indices)
+            deep_select_topk(
+                logits,
+                topk_tokens,
+                end=row_ends,
+                output_idx=topk_indices,
+                sorted_index=True,
+            )
         elif backend == "cooperative":
             (topk_workspace,) = current_workspace_manager().get_simultaneous(
                 ((RADIX_TOPK_WORKSPACE_SIZE,), torch.uint8),

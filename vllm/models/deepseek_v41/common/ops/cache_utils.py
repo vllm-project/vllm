@@ -742,6 +742,7 @@ def compute_global_topk_indices_and_lens(
         token_to_req_indices,
         block_table,
         block_table.stride(0),
+        block_table.shape[1],
         block_size,
         is_valid_token,
         TRITON_BLOCK_SIZE=1024,
@@ -760,6 +761,7 @@ def _compute_global_topk_indices_and_lens_kernel(
     token_to_req_indices_ptr,
     block_table_ptr,
     block_table_stride: tl.constexpr,
+    block_table_width: tl.constexpr,
     block_size: tl.constexpr,
     is_valid_token_ptr,
     TRITON_BLOCK_SIZE: tl.constexpr,
@@ -778,7 +780,7 @@ def _compute_global_topk_indices_and_lens_kernel(
             mask=mask,
             other=-1,
         )
-        is_valid = local_idx >= 0
+        is_valid = (local_idx >= 0) & (local_idx < block_table_width * block_size)
 
         block_indices = local_idx // block_size
         block_numbers = tl.load(

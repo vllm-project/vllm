@@ -41,3 +41,33 @@ def test_kpool_indexer_dispatches_through_shared_topk_backend(backend: str) -> N
             topk_indices_buffer=torch.empty(8, 2176, dtype=torch.int32, device="cuda"),
         )
     assert op.topk_backend == backend
+
+
+@pytest.mark.skipif(
+    not current_platform.is_device_capability(90), reason="requires Hopper"
+)
+@torch.inference_mode()
+def test_kpool_auto_uses_deep_select_on_hopper() -> None:
+    """GLM pool-level top-k uses the shared Hopper DeepSelect dispatch."""
+    _require_deep_gemm()
+    from vllm.model_executor.layers.indexer_topk import SparseIndexerTopk
+
+    logits = torch.randn(4, 262144, dtype=torch.float32, device="cuda")
+    pool_lens = torch.tensor([511, 512, 777, 2048], dtype=torch.int32, device="cuda")
+    output = torch.empty(4, 512, dtype=torch.int32, device="cuda")
+    selector = SparseIndexerTopk("auto")
+
+    assert selector.resolve_backend(logits, 512, 4) == "deep_select"
+    selector(logits, pool_lens, 1, output, 512, 2048)
+
+    for row, length in enumerate(pool_lens.tolist()):
+        count = min(length, 512)
+        picked = output[row, :count].long()
+        assert torch.all(picked[1:] > picked[:-1])
+        torch.testing.assert_close(
+            logits[row, picked].sort().values,
+            logits[row, :length].topk(count).values.sort().values,
+            rtol=0,
+            atol=0,
+        )
+        assert torch.all(output[row, count:] == -1)
