@@ -15,12 +15,15 @@ from transformers.image_processing_utils import BaseImageProcessor, BatchFeature
 from transformers.utils import TensorType
 
 from vllm.utils.import_utils import is_numba_available
-from vllm.utils.jit_monitor import numba_workqueue_threading_layer
+from vllm.utils.jit_monitor import (
+    njit_cache_if_possible,
+    numba_workqueue_threading_layer,
+)
 
 if is_numba_available():
     from numba import njit, prange
 
-    @njit(parallel=True, cache=True)
+    @njit_cache_if_possible(parallel=True)
     def _write_fused_patches(
         frames: np.ndarray,
         out: np.ndarray,

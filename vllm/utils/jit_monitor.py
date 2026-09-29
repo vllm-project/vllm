@@ -24,7 +24,7 @@ import contextlib
 import functools
 import importlib
 import os
-from collections.abc import Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from contextlib import suppress
 from typing import Any, Literal, cast
 
@@ -556,3 +556,24 @@ def numba_workqueue_threading_layer() -> Iterator[None]:
         else:
             os.environ[key] = previous_env
         numba.config.THREADING_LAYER = previous_config
+
+
+def njit_cache_if_possible(**options: Any) -> Callable[[Callable], Any]:
+    """`numba.njit(cache=True)`, but no cache instead of an import error when
+    numba has no writable cache directory."""
+    from numba import njit
+
+    def decorator(func: Callable) -> Any:
+        try:
+            return njit(cache=True, **options)(func)
+        except RuntimeError as e:
+            if "no locator available" not in str(e):
+                raise
+            logger.warning(
+                "%s; compiling without the on-disk cache. Set NUMBA_CACHE_DIR "
+                "to a writable directory to enable it.",
+                e,
+            )
+            return njit(**options)(func)
+
+    return decorator

@@ -454,3 +454,26 @@ def test_tilelang_error_mode_raises():
         jit_monitor.activate(mode="error")
         with pytest.raises(RuntimeError, match="TileLang JIT compilation"):
             JITKernel(func=func)
+
+
+def test_njit_cache_if_possible_without_cache_dir():
+    # A function without a source file has no numba cache directory.
+    namespace: dict[str, Any] = {}
+    exec("def square(x):\n    return x * x\n", namespace)
+
+    with mock.patch.object(jit_monitor.logger, "warning") as warning:
+        square = jit_monitor.njit_cache_if_possible()(namespace["square"])
+
+    assert square(3) == 9
+    warning.assert_called_once()
+
+
+def test_njit_cache_if_possible_reraises_other_errors(monkeypatch):
+    import numba
+
+    def failing_njit(**options):
+        raise RuntimeError("unrelated numba failure")
+
+    monkeypatch.setattr(numba, "njit", failing_njit)
+    with pytest.raises(RuntimeError, match="unrelated numba failure"):
+        jit_monitor.njit_cache_if_possible()(lambda x: x)

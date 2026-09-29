@@ -19,13 +19,14 @@ from dataclasses import dataclass
 import numpy as np
 import torch
 import torch.nn.functional as F
-from numba import njit
 from transformers.feature_extraction_utils import (
     BatchFeature,
     FeatureExtractionMixin,
 )
 from transformers.image_processing_utils import BaseImageProcessor
 from transformers.image_utils import ImageInput
+
+from vllm.utils.jit_monitor import njit_cache_if_possible
 
 # ---------------------------------------------------------------------------
 # MM token-id constants
@@ -120,7 +121,7 @@ def _load_image_bytes(image) -> bytes:
     return buf.getvalue()
 
 
-@njit(cache=True)
+@njit_cache_if_possible()
 def _fill_patches_numba(
     arr: np.ndarray,
     patch_size: int,
