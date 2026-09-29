@@ -19,6 +19,7 @@
 
 mod arguments;
 
+use xgrammar_structural_tag::NormalizedToolChoice;
 use xgrammar_structural_tag::format::Format;
 use xgrammar_structural_tag::tool::BuilderToolChoice;
 
@@ -28,7 +29,7 @@ use super::{
     THINK_OPEN, TOOLS_CLOSE, TOOLS_OPEN,
 };
 use crate::output_grammar::{
-    self, BuiltOutputGrammar, NormalizedToolChoice, OutputGrammarContext, normalize_tool_choice,
+    self, BuiltOutputGrammar, OutputGrammarContext, normalize_tool_choice,
 };
 
 /// Build the grammar of everything generated after a prompt that left the
@@ -39,13 +40,14 @@ pub(super) fn build_output_grammar(
 ) -> output_grammar::Result<Option<BuiltOutputGrammar>> {
     let Some(NormalizedToolChoice {
         function_tools,
-        tool_choice,
+        choice,
+        ..
     }) = normalize_tool_choice(ctx)?
     else {
         return Ok(None);
     };
 
-    let single_call = tool_choice == BuilderToolChoice::Forced || !ctx.parallel_tool_calls;
+    let single_call = choice == BuilderToolChoice::Forced || !ctx.parallel_tool_calls;
     let tools = Format::tag(
         TOOLS_OPEN,
         Format::tags_with_separator(
@@ -58,11 +60,11 @@ pub(super) fn build_output_grammar(
     );
 
     let mut elements = match mode {
-        KimiK3Mode::Reasoning => vec![think_body(), after_reasoning(tool_choice, tools)],
-        KimiK3Mode::Response => vec![response_body(), after_response(tool_choice, tools)],
+        KimiK3Mode::Reasoning => vec![think_body(), after_reasoning(choice, tools)],
+        KimiK3Mode::Response => vec![response_body(), after_response(choice, tools)],
         KimiK3Mode::Idle => vec![
             Format::optional(Format::tag(THINK_OPEN, think_text(), THINK_CLOSE)),
-            after_reasoning(tool_choice, tools),
+            after_reasoning(choice, tools),
         ],
         KimiK3Mode::Epilogue | KimiK3Mode::Tools | KimiK3Mode::Call { .. } | KimiK3Mode::Done => {
             unreachable!("initialization leaves the parser idle or inside `think` or `response`")
