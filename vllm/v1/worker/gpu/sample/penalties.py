@@ -119,7 +119,7 @@ def _penalties_kernel(
     BLOCK_SIZE: tl.constexpr,
 ):
     token_idx = tl.program_id(0).to(tl.int64)
-    req_state_idx = tl.load(expanded_idx_mapping_ptr + token_idx)
+    req_state_idx = tl.load(expanded_idx_mapping_ptr + token_idx).to(tl.int64)
     rep_penalty = tl.load(repetition_penalty_ptr + req_state_idx)
     freq_penalty = tl.load(frequency_penalty_ptr + req_state_idx)
     pres_penalty = tl.load(presence_penalty_ptr + req_state_idx)
@@ -228,7 +228,10 @@ def _bincount_kernel(
 ):
     token_idx = tl.program_id(0)
     block_idx = tl.program_id(1)
-    req_state_idx = tl.load(expanded_idx_mapping_ptr + token_idx)
+    # NOTE: req_state_idx * all_token_ids_stride can exceed int32 for wide
+    # staged tensors (e.g. all_token_ids with max_model_len=1M), causing a
+    # wrapped offset and an out-of-bounds access. Promote to int64.
+    req_state_idx = tl.load(expanded_idx_mapping_ptr + token_idx).to(tl.int64)
 
     prefill_len = tl.load(prefill_len_ptr + req_state_idx)
     if block_idx * BLOCK_SIZE >= prefill_len:
