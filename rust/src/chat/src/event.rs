@@ -5,7 +5,7 @@ use std::ops::Deref;
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
-use vllm_llm::TokenUsage;
+use vllm_llm::{RequestTimestamps, TokenUsage};
 use vllm_text::{DecodedLogprobs, DecodedPromptLogprobs};
 
 use crate::FinishReason;
@@ -128,13 +128,15 @@ impl [AssistantContentBlock] {
 /// Extends the engine-level [`TokenUsage`] with reasoning attribution measured
 /// by the chat output pipeline. [`TokenUsage`] itself stays engine-level and
 /// is not touched by parsing.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct ChatTokenUsage {
     /// Engine-level token usage.
     pub engine: TokenUsage,
     /// Number of generated tokens attributed to reasoning; 0 when the
     /// configured parser has no reasoning channel.
     pub reasoning_tokens: usize,
+    /// Engine lifecycle times used by frontend response metrics.
+    pub timestamps: RequestTimestamps,
 }
 
 impl From<TokenUsage> for ChatTokenUsage {
@@ -142,6 +144,7 @@ impl From<TokenUsage> for ChatTokenUsage {
         Self {
             engine,
             reasoning_tokens: 0,
+            timestamps: RequestTimestamps::default(),
         }
     }
 }

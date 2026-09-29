@@ -534,6 +534,7 @@ mod tests {
                 ec_transfer_params: None,
                 sampling_mask: None,
                 spec_decode_metrics: None,
+                timestamps: Default::default(),
             }),
             Ok(GenerateOutput {
                 request_id: String::new(),
@@ -550,6 +551,7 @@ mod tests {
                 ec_transfer_params: None,
                 sampling_mask: None,
                 spec_decode_metrics: None,
+                timestamps: Default::default(),
             }),
         ]);
 
@@ -634,6 +636,7 @@ mod tests {
             ec_transfer_params: None,
             sampling_mask: None,
             spec_decode_metrics: None,
+            timestamps: Default::default(),
         }
     }
 
