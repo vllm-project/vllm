@@ -657,7 +657,7 @@ def test_log_online_quantization_for_composable_config(monkeypatch) -> None:
 
     assert log_args == [
         (
-            "Quantized %d layers of types: %s",
+            "Quantizing %d layers of types: %s",
             2,
             "; ".join(online_config.quantized_layer_summaries),
         )
@@ -948,6 +948,25 @@ def test_online_quantization(
             moe_backend=runner_kwargs.get("moe_backend", "auto"),
         ),
     }
+    if model_name == "mgoin/Qwen3-0.6B-MXFP8":
+        original_process = Fp8PtpcOnlineLinearMethod.process_weights_after_loading
+
+        def assert_source_weights_released(method, layer) -> None:
+            source_parameters = dict(method.requantization_source_parameters)
+            assert set(source_parameters) == {"weight", "weight_scale"}
+
+            original_process(method, layer)
+
+            assert not method.requantization_source_parameters
+            assert layer.weight is not source_parameters["weight"]
+            assert layer.weight_scale is not source_parameters["weight_scale"]
+            assert layer.weight_scale.shape[-1] == 1
+
+        monkeypatch.setattr(
+            Fp8PtpcOnlineLinearMethod,
+            "process_weights_after_loading",
+            assert_source_weights_released,
+        )
 
     if model_name == PARTIALLY_PREQUANTIZED_MODEL_NAME:
         model, vllm_config = load_model_without_vllm_runner(
@@ -1308,7 +1327,7 @@ def test_log_online_quantization(default_vllm_config, monkeypatch) -> None:
     log_online_quantization(default_vllm_config)
 
     assert logged_messages == [
-        "Quantized 3 layers of types: mlp.down_proj: 2 (from linear: "
+        "Quantizing 3 layers of types: mlp.down_proj: 2 (from linear: "
         "fp8_per_tensor); self_attn.qkv_proj: 1 (from targets: "
         "re:.*qkv_proj.*, mxfp4)"
     ]
