@@ -296,19 +296,16 @@ class LoggingStatLogger(StatLoggerBase):
             log_parts.append("Preemptions: %d")
             log_args.append(self.num_preemptions)
 
-        log_parts.extend(
-            [
-                "%s KV cache usage: %.1f%%",
-                "Prefix cache hit rate: %.1f%%",
-            ]
-        )
+        log_parts.append("%s KV cache usage: %.1f%%")
         log_args.extend(
             [
                 self.kv_cache_device,
                 self.last_scheduler_stats.kv_cache_usage * 100,
-                self.prefix_caching_metrics.hit_rate * 100,
             ]
         )
+        if not self.prefix_caching_metrics.empty:
+            log_parts.append("Prefix cache hit rate: %.1f%%")
+            log_args.append(self.prefix_caching_metrics.hit_rate * 100)
 
         if envs.VLLM_COMPUTE_NANS_IN_LOGITS:
             log_parts.append("Corrupted: %d reqs")

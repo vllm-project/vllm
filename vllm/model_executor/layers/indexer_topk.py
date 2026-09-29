@@ -14,6 +14,12 @@ from vllm.v1.worker.workspace import current_workspace_manager
 
 RADIX_TOPK_WORKSPACE_SIZE = 1024 * 1024
 
+# cooperative_topk's hard row limit: one cluster wave covers at most this many
+# rows. "auto" uses cooperative_topk for every batch within the limit and falls
+# back to persistent_topk past it; explicit ``cooperative`` requests are
+# validated against the same bound.
+AUTO_COOPERATIVE_MAX_ROWS = 64
+
 # ---------------------------------------------------------------------------
 # DeepSelect (vllm._deepselect_C)
 # ---------------------------------------------------------------------------
@@ -209,8 +215,13 @@ class SparseIndexerTopk(torch.nn.Module):
     def _resolve_auto(
         self, logits: torch.Tensor, topk_tokens: int, num_rows: int
     ) -> str:
-        """The pre-existing priority chain: cooperative -> persistent ->
-        per_row. deep_select/flashinfer/torch are opt-in only."""
+        """The priority chain: cooperative -> persistent -> per_row.
+        deep_select/flashinfer/torch are opt-in only.
+
+        cooperative_topk is preferred whenever it is applicable, i.e. within
+        its AUTO_COOPERATIVE_MAX_ROWS row limit; larger batches go to
+        persistent_topk.
+        """
         if not self._cooperative_constraints(logits, topk_tokens, num_rows):
             return "cooperative"
         if self._is_cuda and topk_tokens in (512, 1024, 2048):
@@ -228,8 +239,10 @@ class SparseIndexerTopk(torch.nn.Module):
             failures.append(
                 f"topk_tokens must be in (512, 1024, 2048), got {topk_tokens}"
             )
-        if num_rows > 64:
-            failures.append(f"num_rows must be <= 64, got {num_rows}")
+        if num_rows > AUTO_COOPERATIVE_MAX_ROWS:
+            failures.append(
+                f"num_rows must be <= {AUTO_COOPERATIVE_MAX_ROWS}, got {num_rows}"
+            )
         if logits.stride(0) % 4 != 0:
             failures.append(
                 f"logits.stride(0) must be divisible by 4, got {logits.stride(0)}"
@@ -293,13 +306,18 @@ class SparseIndexerTopk(torch.nn.Module):
             (topk_workspace,) = current_workspace_manager().get_simultaneous(
                 ((RADIX_TOPK_WORKSPACE_SIZE,), torch.uint8),
             )
+            # persistent_topk's last argument is the host-side "max seq_len
+            # across rows" bound (it gates the sampled_topk path and clamps
+            # per-row lengths), not the padded row width: logits is sized to
+            # max_model_len, so passing its width would incorrectly enable the
+            # long-row kernels on short-context batches.
             torch.ops._C.persistent_topk(
                 logits,
                 seq_lens,
                 topk_indices,
                 topk_workspace,
                 topk_tokens,
-                logits.shape[1],
+                max_seq_len,
             )
         elif backend == "flashinfer":
             # Deferred: importing flashinfer initializes CUDA at import time.

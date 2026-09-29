@@ -7,6 +7,9 @@ import pytest
 import torch
 
 from tests.v1.attention.utils import create_vllm_config
+from vllm.model_executor.layers.attention.sparse_mla_attention import (
+    SparseMLACommonMetadataBuilder,
+)
 from vllm.models.deepseek_v4.sparse_mla import DeepseekV4SparseMLABackend
 from vllm.models.deepseek_v41.sparse_mla import (
     DeepseekV4SparseMLABackend as DeepseekV41SparseMLABackend,
@@ -14,6 +17,7 @@ from vllm.models.deepseek_v41.sparse_mla import (
 from vllm.v1.attention.backend import CommonAttentionMetadata
 from vllm.v1.attention.backends.mla.compressor_utils import (
     CompressedSlotMappingKernel,
+    get_compressed_slot_mapping,
 )
 from vllm.v1.attention.backends.mla.indexer import (
     BuildPrefillChunkMetadataKernel,
@@ -94,8 +98,11 @@ def test_fused_indexer_decode_metadata(query_lens, padding):
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
-@pytest.mark.parametrize("query_lens", [[1], [0, 257, 1, 0, 3], [6] * 64, [2, 6, 4, 0]])
-def test_device_token_request_mapping(query_lens):
+@pytest.mark.parametrize(
+    "query_lens", [[1], [0, 257, 1, 0, 3], [6] * 64, [2, 6, 4, 0], [0, 0, 0]]
+)
+@pytest.mark.parametrize("use_sparse_mla_builder", [False, True])
+def test_device_token_request_mapping(query_lens, use_sparse_mla_builder):
     """Graph replay follows device boundaries even when CPU lengths are stale."""
     lengths = torch.tensor(query_lens, device="cuda", dtype=torch.int32)
     qsl = torch.cat(
@@ -116,7 +123,16 @@ def test_device_token_request_mapping(query_lens):
         ),
         slot_mapping=torch.full((n + 7,), -1, device="cuda", dtype=torch.int64),
     )
-    result = common.token_to_req_indices(output)
+
+    def build_mapping():
+        if use_sparse_mla_builder:
+            builder = SimpleNamespace(req_id_per_token_buffer=output)
+            return SparseMLACommonMetadataBuilder._build_req_id_per_token(
+                builder, common
+            )
+        return common.token_to_req_indices(output)
+
+    result = build_mapping()
     assert result.data_ptr() == output.data_ptr()
     expected = torch.repeat_interleave(
         torch.arange(len(query_lens), device="cuda", dtype=torch.int32), lengths
@@ -126,7 +142,7 @@ def test_device_token_request_mapping(query_lens):
     graph = torch.cuda.CUDAGraph()
     common._token_to_req_indices_cache = None
     with torch.cuda.graph(graph):
-        common.token_to_req_indices(output)
+        build_mapping()
     reversed_lens = lengths.flip(0)
     qsl[1:].copy_(reversed_lens.cumsum(0))
     graph.replay()
@@ -233,6 +249,28 @@ def test_compressed_slot_mapping_warmup_includes_index_kpool():
 
     keys = CompressedSlotMappingKernel().get_warmup_keys(config)
     assert {(key.compress_ratio, key.block_size) for key in keys} == {(32, 2)}
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+def test_compressed_slot_mapping_inherits_padded_token_slots():
+    """A token whose own slot is padded (SWA bounded replay) closes no
+    compressed state either."""
+    device = torch.device("cuda")
+    query_start_loc = torch.tensor([0, 8], dtype=torch.int32, device=device)
+    seq_lens = torch.tensor([8], dtype=torch.int32, device=device)
+    block_table = torch.tensor([[3]], dtype=torch.int32, device=device)
+    slot_mapping = torch.arange(8, dtype=torch.int64, device=device)
+    slot_mapping[:4] = -1
+    compressed = get_compressed_slot_mapping(
+        8,
+        slot_mapping,
+        query_start_loc,
+        seq_lens,
+        block_table,
+        block_size=4,
+        compress_ratio=2,
+    )
+    assert compressed.tolist() == [-1, -1, -1, -1, -1, 3 * 4 + 2, -1, 3 * 4 + 3]
 
 
 def test_index_conversion_warmup_uses_physical_block_stride():

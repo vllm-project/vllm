@@ -332,3 +332,77 @@ def test_event_publisher_factory(random_port):
     publisher = EventPublisherFactory.create(config, DP_RANK)
     assert isinstance(publisher, ZmqEventPublisher)
     publisher.shutdown()
+
+
+@pytest.mark.parametrize(
+    ("endpoint", "expected"),
+    [("tcp://*:5557", "tcp://*:5558"), ("tcp://*:0", "tcp://*:0")],
+)
+def test_offset_endpoint_port_keeps_port_zero(endpoint, expected):
+    """Port 0 is not offset: every rank asks the OS for its own port."""
+    from vllm.distributed.kv_events import ZmqEventPublisher
+
+    assert ZmqEventPublisher.offset_endpoint_port(endpoint, 1) == expected
+
+
+@pytest.mark.parametrize("node_ip", ["127.0.0.1", "::1"])
+def test_ephemeral_publishers_report_bound_endpoints(monkeypatch, node_ip):
+    """Two ranks binding tcp://*:0 get distinct OS-assigned ports on this
+    node's IP and report endpoints a subscriber can use for events and replay."""
+    from vllm.config.kv_events import KVEventsConfig
+    from vllm.distributed import kv_events
+    from vllm.utils.network_utils import split_zmq_path
+
+    from .conftest import MockSubscriber
+
+    monkeypatch.setattr(kv_events, "get_ip", lambda: node_ip)
+    config = KVEventsConfig(
+        enable_kv_cache_events=True,
+        publisher="zmq",
+        endpoint="tcp://*:0",
+        replay_endpoint="tcp://*:0",
+        topic="kv",
+    )
+    pubs = [EventPublisherFactory.create(config, rank) for rank in range(2)]
+    try:
+        resolved = [pub.get_publisher_config() for pub in pubs]
+        endpoints = [e for c in resolved for e in (c.endpoint, c.replay_endpoint)]
+        hosts_ports = {split_zmq_path(e)[1:] for e in endpoints}
+        assert {h for h, _ in hosts_ports} == {node_ip}
+        assert len(hosts_ports) == 4 and "0" not in {p for _, p in hosts_ports}
+        assert config.endpoint == "tcp://*:0"
+
+        sub = MockSubscriber(endpoints[::2], endpoints[1::2], topic="kv")
+        try:
+            # PUB/SUB drops messages sent before the subscription lands, so
+            # keep publishing until both ranks are heard.
+            ranks: set[int] = set()
+            deadline = time.time() + 10
+            while ranks != {0, 1} and time.time() < deadline:
+                for pub in pubs:
+                    pub.publish(create_test_events(1))
+                while (result := sub.receive_one(timeout=100)) is not None:
+                    ranks.add(result[1].data_parallel_rank)
+            assert ranks == {0, 1}
+            sub.request_replay(0, socket_idx=1)
+            assert sub.receive_replay(socket_idx=1)
+        finally:
+            sub.close()
+    finally:
+        for pub in pubs:
+            pub.shutdown()
+
+
+@pytest.mark.parametrize("node_ip", ["0.0.0.0", "::"])
+def test_ephemeral_bind_needs_a_node_ip(monkeypatch, node_ip):
+    """tcp://*:0 is advertised as this node's IP; with no usable IP the
+    publisher refuses instead of reporting a wildcard."""
+    from vllm.config.kv_events import KVEventsConfig
+    from vllm.distributed import kv_events
+
+    monkeypatch.setattr(kv_events, "get_ip", lambda: node_ip)
+    config = KVEventsConfig(
+        enable_kv_cache_events=True, publisher="zmq", endpoint="tcp://*:0"
+    )
+    with pytest.raises(ValueError, match="VLLM_HOST_IP"):
+        EventPublisherFactory.create(config, DP_RANK)

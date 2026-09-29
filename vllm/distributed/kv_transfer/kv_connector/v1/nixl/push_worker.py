@@ -103,6 +103,7 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
         # (``_pop_done_transfers``); guarded by
         # ``_sending_transfers_lock``.
         self._sending_transfers = defaultdict[ReqId, list[TransferHandle]](list)
+        self._send_failures: set[ReqId] = set()
         self._sending_transfers_lock = threading.Lock()
 
         # Writer-thread owned matching state.
@@ -162,6 +163,7 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
                 for handle in handles:
                     self.nixl_wrapper.release_xfer_handle(handle)
             self._sending_transfers.clear()
+            self._send_failures.clear()
         super().shutdown()
 
     # --- Engine-main-thread entry point -------------------------------- #
@@ -178,6 +180,12 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
             )
             assert meta.remote is not None
             remote_engine_id = meta.remote.engine_id
+            # Update last activity from this remote (same as pull), but only for
+            # an already-connected engine so we never leave an _engine_last_active
+            # entry without a _remote_agents entry (breaks _cleanup_remote_engine).
+            if remote_engine_id in self._remote_agents:
+                self._engine_last_active[remote_engine_id] = time.perf_counter()
+
             logger.debug(
                 "start_load_kv (push) for request %s from remote engine %s. "
                 "Num local_block_ids: %s. Num remote_block_ids: %s. ",
@@ -365,6 +373,7 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
                 engine_id,
                 req_id,
             )
+            self.xfer_stats.record_failed_notification()
             self._failed_recv_reqs.put(req_id)
             return
         for rank, agent_name in agents.items():
@@ -377,6 +386,9 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
                     error=e,
                     remote_rank=rank,
                 )
+                self.xfer_stats.record_failed_notification()
+                # Earlier registrations may still trigger WRITEs into D's blocks.
+                # Keep the receive pending until those writes are finished.
         logger.debug(
             "Sent PUSH_REG for %s to engine %s (%dB)", req_id, engine_id, len(notif_msg)
         )
@@ -724,6 +736,8 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
             # don't have a ``_recving_metadata`` entry to invalidate, so
             # we just release the handle and let the engine reschedule
             # via the lease / watchdog.
+            with self._sending_transfers_lock:
+                self._send_failures.add(request_id)
             if not self._handle_failed_transfer(request_id, handle):
                 return handle
             return None
@@ -807,13 +821,16 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
             done_pushing, failed_pushing = self._pop_done_transfers(
                 self._sending_transfers
             )
-        # A failed send must never be reported as done: its blocks
-        # are freed via the lease / watchdog instead.
-        done_pushing = {
-            req_id
-            for req_id in done_pushing - failed_pushing
-            if req_id in self._recving_metadata
-        }
+            # Remember failures until the final sibling WRITE completes.
+            self._send_failures.update(failed_pushing)
+            successful = {
+                req_id
+                for req_id in done_pushing - self._send_failures
+                if req_id in self._reqs_to_send or req_id in self._reqs_to_process
+            }
+            self._send_failures.difference_update(done_pushing | done_sending)
+        # Expired requests were already reported, even if their WRITEs finish later.
+        done_pushing = successful
         for req_id in done_pushing:
             self._reqs_to_send.pop(req_id, None)
             self._reqs_to_process.discard(req_id)
