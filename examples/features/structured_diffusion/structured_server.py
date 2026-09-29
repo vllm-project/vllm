@@ -1085,16 +1085,6 @@ def upstream_pooling(body, timeout=600):
     return json.load(urllib.request.urlopen(req, timeout=timeout))
 
 
-def laya_question(q):
-    if q["type"] == "noul":
-        crit = {"true": q["choices"][0][1], "false": q["choices"][1][1]}
-    elif q["type"] == "choice":
-        crit = dict(q["choices"])
-    else:
-        crit = [name for name, _ in q["choices"]]
-    return {"t": q["type"], "ins": q["instructions"], "crit": crit, "labels": None}
-
-
 def laya_state(state, instructions, earlier):
     """The state with the schema's context ahead of it and the answers so far
     after it. A conversation keeps its list shape, so that truncation still
@@ -1120,10 +1110,22 @@ def laya_read(qs, state):
     -> (label probabilities per question in choice order, prompt tokens)"""
     prompts = []
     for q in qs:
+        if q["type"] == "noul":
+            crit = {"true": q["choices"][0][1], "false": q["choices"][1][1]}
+        elif q["type"] == "choice":
+            crit = dict(q["choices"])
+        else:
+            crit = [name for name, _ in q["choices"]]
+        laya_q = {
+            "t": q["type"],
+            "ins": q["instructions"],
+            "crit": crit,
+            "labels": None,
+        }
         try:
             prompts.append(
                 laya_prompts.build_prompt(
-                    TOK, state, laya_question(q), LAYA["max_len"], LAYA["head_max_len"]
+                    TOK, state, laya_q, LAYA["max_len"], LAYA["head_max_len"]
                 )
             )
         except ValueError as e:

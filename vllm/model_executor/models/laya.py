@@ -51,11 +51,6 @@ def _clamp_temperature(t: object) -> float:
     return min(TEMP_MAX, max(TEMP_MIN, t))
 
 
-def _temperature_bucket(qtype: int, k: int) -> str:
-    size = "2" if k <= 2 else "3-5" if k <= 5 else "6-10" if k <= 10 else "11+"
-    return f"{QTYPES[qtype]}:{size}"
-
-
 class LayaHeadSelfAttention(nn.Module):
     """`nn.MultiheadAttention` without a mask, over each whole sequence."""
 
@@ -128,11 +123,6 @@ class LayaDecisionPooler(Pooler):
     def get_pooling_updates(self, task: PoolingTask) -> PoolingParamsUpdate:
         return PoolingParamsUpdate(requires_token_ids=True)
 
-    def _temperature(self, qtype: int, k: int) -> float:
-        return self.temperature_by_options.get(
-            _temperature_bucket(qtype, k), self.temperature[qtype]
-        )
-
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -153,8 +143,14 @@ class LayaDecisionPooler(Pooler):
                 if type_tok in self.qtype_token_ids
                 else 0
             )
+            k = len(idx)
+            size = "2" if k <= 2 else "3-5" if k <= 5 else "6-10" if k <= 10 else "11+"
             marker_idx.append(idx)
-            temperatures.append(self._temperature(qtype, len(idx)))
+            temperatures.append(
+                self.temperature_by_options.get(
+                    f"{QTYPES[qtype]}:{size}", self.temperature[qtype]
+                )
+            )
             num_markers.append(len(idx))
 
         # Gather each request's markers from the flattened batch into
