@@ -357,16 +357,22 @@ def test_large_front_workspace_is_shared_within_one_worker() -> None:
         (129, False),
         (192, True),
         (193, False),
-        # 256 is a cudagraph capture size but not a tuned front shape; it must
-        # not be inferred as supported from the capture list.
-        (256, False),
-        (511, False),
+        # Prefill uses the merged front continuously through the range covered
+        # by the validated AITER dispatch buckets.
+        (255, False),
+        (256, True),
+        (257, True),
+        (383, True),
+        (384, True),
+        (385, True),
+        (511, True),
         (512, True),
-        (513, False),
+        (513, True),
         (1024, True),
         (1536, True),
-        (1537, False),
+        (1537, True),
         (2048, True),
+        (2049, False),
         (3072, False),
         (4096, False),
         (6144, False),

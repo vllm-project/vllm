@@ -73,7 +73,7 @@ from vllm.utils.math_utils import cdiv
 
 logger = init_logger(__name__)
 
-_KIMI_K3_MERGED_FRONT_TOKEN_COUNTS = frozenset(
+_KIMI_K3_MERGED_FRONT_DECODE_TOKEN_COUNTS = frozenset(
     (
         1,
         2,
@@ -99,13 +99,10 @@ _KIMI_K3_MERGED_FRONT_TOKEN_COUNTS = frozenset(
         112,
         128,
         192,
-        512,
-        1024,
-        1536,
-        2048,
     )
 )
-_KIMI_K3_MERGED_FRONT_MAX_TOKENS = max(_KIMI_K3_MERGED_FRONT_TOKEN_COUNTS)
+_KIMI_K3_MERGED_FRONT_PREFILL_MIN_TOKENS = 256
+_KIMI_K3_MERGED_FRONT_MAX_TOKENS = 2048
 
 
 @dataclass
@@ -377,7 +374,9 @@ class KimiMoE(nn.Module):
         self._kimi_k3_large_front_initialized = False
         self._kimi_k3_large_front_available = False
         self._kimi_k3_large_front_weight: torch.Tensor | None = None
-        self._kimi_k3_large_front_op = None
+        self._kimi_k3_large_front_gemm_op = None
+        self._kimi_k3_large_front_gemm_config = None
+        self._kimi_k3_large_front_epilogue_op = None
         self._kimi_k3_large_front_workspace: _KimiK3LargeFrontWorkspace | None = None
         self._logged_kimi_k3_large_front = False
         if isinstance(self.experts, ROCmLatentMoERunner):
@@ -424,10 +423,12 @@ class KimiMoE(nn.Module):
         assert isinstance(routed_weight, torch.Tensor)
 
         try:
-            from aiter.ops.triton.kimi_k3_moe_front import (
-                kimi_k3_moe_front_large_m_bf16,
-                merge_kimi_k3_moe_front_weights,
+            from aiter import hipb_create_extension
+            from aiter.ops.gradlib import _hipb_mm
+            from aiter.ops.triton.moe.moe_situ_epilogue import (
+                moe_situ_epilogue,
             )
+            from aiter.tuned_gemm import get_GEMM_A16W16_config
         except ImportError:
             logger.warning_once(
                 "Kimi-K3 large-M front was requested, but this AITER build "
@@ -436,14 +437,15 @@ class KimiMoE(nn.Module):
             )
             return False
 
-        try:
-            merged = merge_kimi_k3_moe_front_weights(
+        merged = torch.cat(
+            (
                 shared_weight.detach(),
                 router_weight.detach(),
                 routed_weight.detach(),
-            )
-        except ValueError:
-            return False
+            ),
+            dim=0,
+        ).contiguous()
+        hipb_create_extension()
 
         shared_rows = shared_weight.shape[0]
         router_rows = router_weight.shape[0]
@@ -465,7 +467,9 @@ class KimiMoE(nn.Module):
             )
 
         self._kimi_k3_large_front_weight = merged
-        self._kimi_k3_large_front_op = kimi_k3_moe_front_large_m_bf16
+        self._kimi_k3_large_front_gemm_op = _hipb_mm
+        self._kimi_k3_large_front_gemm_config = get_GEMM_A16W16_config
+        self._kimi_k3_large_front_epilogue_op = moe_situ_epilogue
         self._kimi_k3_large_front_workspace = _get_kimi_k3_large_front_workspace(
             shared_weight.device
         )
@@ -480,9 +484,11 @@ class KimiMoE(nn.Module):
         )
 
     def _supports_kimi_k3_large_front(self, num_tokens: int) -> bool:
-        return (
-            self._kimi_k3_large_front_available
-            and num_tokens in _KIMI_K3_MERGED_FRONT_TOKEN_COUNTS
+        return self._kimi_k3_large_front_available and (
+            num_tokens in _KIMI_K3_MERGED_FRONT_DECODE_TOKEN_COUNTS
+            or _KIMI_K3_MERGED_FRONT_PREFILL_MIN_TOKENS
+            <= num_tokens
+            <= _KIMI_K3_MERGED_FRONT_MAX_TOKENS
         )
 
     def _project_kimi_k3_large_front(
@@ -491,18 +497,52 @@ class KimiMoE(nn.Module):
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         num_tokens = hidden_states.shape[0]
         assert self._kimi_k3_large_front_weight is not None
-        assert self._kimi_k3_large_front_op is not None
+        assert self._kimi_k3_large_front_gemm_op is not None
+        assert self._kimi_k3_large_front_gemm_config is not None
+        assert self._kimi_k3_large_front_epilogue_op is not None
         assert self._kimi_k3_large_front_workspace is not None
         workspace = self._kimi_k3_large_front_workspace
-        shared_intermediate, router_logits, routed_input = self._kimi_k3_large_front_op(
-            hidden_states,
-            self._kimi_k3_large_front_weight,
-            front_out=workspace.front[:num_tokens],
-            shared_out=workspace.shared[:num_tokens],
-            router_out=workspace.router[:num_tokens],
-            routed_out=workspace.routed[:num_tokens],
-            situ_beta=4.0,
-            situ_linear_beta=25.0,
+        front = workspace.front[:num_tokens]
+        config = self._kimi_k3_large_front_gemm_config(
+            num_tokens,
+            6016,
+            7168,
+            False,
+            str(torch.bfloat16),
+            str(torch.float32),
+        )
+        if config["libtype"] == "hipblaslt":
+            self._kimi_k3_large_front_gemm_op(
+                hidden_states,
+                self._kimi_k3_large_front_weight.t(),
+                int(config["solidx"]),
+                front,
+                None,
+                None,
+                None,
+                None,
+                False,
+                False,
+            )
+        else:
+            torch.mm(
+                hidden_states,
+                self._kimi_k3_large_front_weight.t(),
+                out=front,
+                out_dtype=torch.float32,
+            )
+        shared_intermediate, router_logits, routed_input = (
+            self._kimi_k3_large_front_epilogue_op(
+                front,
+                shared_intermediate_size=768,
+                num_experts=896,
+                routed_latent_size=3584,
+                shared_out=workspace.shared[:num_tokens],
+                router_out=workspace.router[:num_tokens],
+                routed_out=workspace.routed[:num_tokens],
+                situ_beta=4.0,
+                situ_linear_beta=25.0,
+            )
         )
         return routed_input, router_logits, shared_intermediate
 
