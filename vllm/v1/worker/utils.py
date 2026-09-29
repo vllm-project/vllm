@@ -399,14 +399,15 @@ def select_common_block_size_for_layout(
             and backend.get_strided_block_page_rows(spec) is not None
         )
     ]
-    if (
-        select_common_block_size(kv_manager_block_size, native_backends)
-        == kv_manager_block_size
-    ):
+    native_size = select_common_block_size(kv_manager_block_size, native_backends)
+    if native_size == kv_manager_block_size:
         return kv_manager_block_size
-    return select_common_block_size(
-        kv_manager_block_size, [backend for backend, _, _ in backend_layouts]
-    )
+    if any(is_strided for _, _, is_strided in backend_layouts):
+        raise ValueError(
+            "A strided KV cache cannot share a group with a backend that "
+            "requires splitting manager blocks."
+        )
+    return native_size
 
 
 def allocate_kv_cache(
@@ -525,14 +526,19 @@ def prepare_kernel_block_sizes(
             # This is an attention backend that supports virtual block splitting.
             kv_manager_block_size = kv_cache_group.kv_cache_spec.block_size
             groups = attn_groups[kv_cache_gid]
-            is_strided = all(
-                block_strides[name] > group.kv_cache_spec.page_size_bytes
-                for group in groups
-                for name in group.layer_names
-            )
             selected_kernel_size = select_common_block_size_for_layout(
                 kv_manager_block_size,
-                [(group.backend, group.kv_cache_spec, is_strided) for group in groups],
+                [
+                    (
+                        group.backend,
+                        group.kv_cache_spec,
+                        all(
+                            block_strides[name] > group.kv_cache_spec.page_size_bytes
+                            for name in group.layer_names
+                        ),
+                    )
+                    for group in groups
+                ],
             )
             kernel_block_sizes.append(selected_kernel_size)
         elif isinstance(kv_cache_spec, MambaSpec):

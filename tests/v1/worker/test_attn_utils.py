@@ -551,10 +551,10 @@ def test_group_block_stride_bytes_targets_attention_group_layers():
 
 @pytest.mark.parametrize(
     ("stride_pages", "page_rows", "expected"),
-    [(1, 1, 64), (2, None, 64), (2, 1, 256)],
+    [(1, 1, 64), (2, None, None), (2, 1, 256)],
 )
 def test_strided_capability_controls_manager_block_retention(
-    stride_pages: int, page_rows: int | None, expected: int
+    stride_pages: int, page_rows: int | None, expected: int | None
 ):
     spec = MLAAttentionSpec(
         block_size=256,
@@ -581,10 +581,17 @@ def test_strided_capability_controls_manager_block_retention(
     )
     groups = [[AttentionGroup(backend, ["layer.0"], spec, 0)]]
 
-    assert prepare_kernel_block_sizes(config, groups) == [expected]
+    if expected is None:
+        with pytest.raises(ValueError, match="strided KV cache cannot share"):
+            prepare_kernel_block_sizes(config, groups)
+    else:
+        assert prepare_kernel_block_sizes(config, groups) == [expected]
 
 
-def test_all_strided_backends_must_support_manager_blocks():
+@pytest.mark.parametrize("other_stride_pages", [1, 2])
+def test_strided_group_rejects_backend_requiring_virtual_split(
+    other_stride_pages: int,
+):
     spec = MLAAttentionSpec(
         block_size=256,
         num_kv_heads=1,
@@ -597,9 +604,13 @@ def test_all_strided_backends_must_support_manager_blocks():
         kv_cache_tensors=[
             KVCacheTensor(
                 size=4 * page_size,
-                layers=["layer.0", "layer.1"],
-                layer_stride=page_size,
-                block_stride=2 * page_size,
+                layers=[layer_name],
+                layer_stride=4 * page_size,
+                block_stride=stride_pages * page_size,
+            )
+            for layer_name, stride_pages in (
+                ("layer.0", 2),
+                ("layer.1", other_stride_pages),
             )
         ],
         kv_cache_groups=[KVCacheGroupSpec(["layer.0", "layer.1"], spec)],
@@ -619,7 +630,8 @@ def test_all_strided_backends_must_support_manager_blocks():
         ]
     ]
 
-    assert prepare_kernel_block_sizes(config, groups) == [64]
+    with pytest.raises(ValueError, match="strided KV cache cannot share"):
+        prepare_kernel_block_sizes(config, groups)
 
 
 def test_strided_backends_need_no_common_native_block_size():

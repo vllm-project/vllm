@@ -409,9 +409,9 @@ def get_current_attn_backend_layouts(
             attention_spec is not None
             and layer_strides[layer_name] > attention_spec.page_size_bytes
         )
-        for index, (existing_backend, existing_spec, all_strided) in enumerate(pairs):
+        for index, (existing_backend, existing_spec, any_strided) in enumerate(pairs):
             if existing_backend is backend and existing_spec == attention_spec:
-                pairs[index] = (backend, attention_spec, all_strided and is_strided)
+                pairs[index] = (backend, attention_spec, any_strided or is_strided)
                 break
         else:
             pairs.append((backend, attention_spec, is_strided))

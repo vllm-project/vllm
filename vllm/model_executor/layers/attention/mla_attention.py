@@ -1372,6 +1372,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             non_causal_multi_token_decode=self.non_causal_multi_token_decode,
         )
         page_rows = self.attn_backend.get_strided_block_page_rows(spec)
+        # SM100 FlashMLA paged kernels also express TMA coordinates in token rows.
         uses_tma_rows = (
             self.attn_backend.get_name() == "FLASHMLA_SPARSE"
             and self.kv_cache_dtype in ("fp8_ds_mla", "nvfp4_ds_mla")

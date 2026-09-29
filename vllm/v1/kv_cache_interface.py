@@ -742,17 +742,14 @@ def get_cache_view_spec(
     kernel_block_size: int | None,
     block_stride_bytes: int | None,
 ) -> KVCacheSpec:
+    """Select the cache view shared by allocation and metadata builders."""
     if (
         isinstance(spec, MLAAttentionSpec)
         and spec.kernel_page_size is not None
         and block_stride_bytes == spec.page_size_bytes
         and (kernel_block_size is None or kernel_block_size < spec.block_size)
     ):
-        return replace(
-            spec,
-            block_size=spec.kernel_page_size,
-            kernel_page_size=None,
-        )
+        return spec.copy_with_new_block_size(spec.kernel_page_size)
     if kernel_block_size is None:
         return spec
     return spec.copy_with_new_block_size(kernel_block_size)

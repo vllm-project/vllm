@@ -308,6 +308,21 @@ def test_pack_indices_replays_with_updated_offsets(width):
         assert (state.kv_indices[expected.numel() :] == -99).all()
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="Requires CUDA")
+def test_pack_indices_padding_uses_valid_slot():
+    """Planned rows may read padding; it must not point at unrelated cache rows."""
+    state = sm90_mod._SM90State.__new__(sm90_mod._SM90State)
+    state.kv_indptr = torch.tensor([0, 6, 10], dtype=torch.int32, device="cuda")
+    state.kv_indices = torch.empty(10, dtype=torch.int32, device="cuda")
+    slots = torch.full((2, TOPK), -1, dtype=torch.int32, device="cuda")
+    slots[0, :2] = torch.tensor([7, 3], device="cuda")
+    slots[1, 0] = 13
+
+    state.pack_indices(slots)
+
+    assert state.kv_indices.tolist() == [7, 3, 7, 7, 7, 7, 13, 13, 13, 13]
+
+
 @pytest.mark.parametrize("adaptive", [False, True])
 def test_kv_lens_host_formula(adaptive):
     """Per-row host lengths: context == position + 1; capped at

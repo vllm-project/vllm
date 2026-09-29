@@ -154,12 +154,19 @@ class Glm5NextIndexerCache(DeepseekV32IndexerCache):
 
 
 class Glm5NextTailCache(DeepseekV32IndexerCache):
-    """Paged ring for the kpool indexer's uncompressed tail rows.
+    """Paged circular buffer for the kpool indexer's in-progress (tail) pool.
 
-    Its capacity is rounded to whole pools to hold the committed incomplete
-    pool plus speculative rows, addressed by ``pos % capacity``. Each request
-    owns one block of raw bf16 K and gate scores so the tail survives decode
-    steps and PD transfer; compressed entries live in ``Glm5NextIndexerCache``.
+    Holds the trailing incomplete pool's raw K + gate score: one block of
+    ``ring`` slots per request, overwritten in place by ``pos % ring``
+    as decode/spec-decode advances. Prefill seeds it (instead of discarding the
+    tail raw K+gate); the connector transfers it across PD; decode reads it to
+    compress the boundary pool correctly. ``CircularBufferSpec`` /
+    ``CircularBufferManager`` provide the no-prune, 1-block/req allocation that
+    lets the in-progress pool survive across steps and across transfer.
+
+    Stores raw bf16 K (``head_dim``) as the "K" half of each block and the
+    bf16 gate score (``head_dim``) as the "V" half -- not the fp8-compressed
+    entry, which lives in ``Glm5NextIndexerCache``.
     """
 
     def __init__(
@@ -180,17 +187,19 @@ class Glm5NextTailCache(DeepseekV32IndexerCache):
     def get_kv_cache_spec(self, vllm_config: VllmConfig):
         # The two head slots form [K, gate score] in the generic
         # [block, head, state, content] cache view.
-        # The open pool's committed keys plus a speculative step's rows, in
-        # whole pools (QSA rule): a rejected draft must not overwrite them.
+        # Drafts are stashed before acceptance. With a one-pool ring, the
+        # drafts behind a rejected pool-completing draft overwrite the keys
+        # read by its redo.
         span = self._index_kpool + vllm_config.num_speculative_tokens
-        capacity = self._index_kpool * next_power_of_2(cdiv(span, self._index_kpool))
-        assert self.cache_config.block_size % capacity == 0, (
+        ring = self._index_kpool * next_power_of_2(cdiv(span, self._index_kpool))
+        # ring must divide the attention block size (a multiple of 128).
+        assert self.cache_config.block_size % ring == 0, (
             f"Glm5NextTailCache: cache_config.block_size "
             f"({self.cache_config.block_size}) must be a multiple of the "
-            f"tail ring ({capacity})"
+            f"tail ring ({ring})"
         )
         return CircularBufferSpec(
-            block_size=capacity,
+            block_size=ring,
             num_kv_heads=2,
             head_size=self.head_dim,
             head_size_v=0,

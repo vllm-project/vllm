@@ -804,11 +804,10 @@ def test_glm_packed_backends_preserve_manager_blocks_for_nixl():
 
 @pytest.mark.cpu_test
 @pytest.mark.parametrize(
-    ("stride_pages", "expected"), [((2, 2), True), ((1, 2), False)]
+    ("stride_pages", "expected"),
+    [((2, 2), True), ((1, 2), True), ((1, 1), False)],
 )
-def test_connector_layout_requires_every_matching_layer_to_be_strided(
-    stride_pages, expected
-):
+def test_connector_layout_tracks_any_strided_layer(stride_pages, expected):
     from vllm.distributed.kv_transfer.kv_connector import utils as connector_utils
     from vllm.v1.attention.backends.mla.flashmla_sparse import FlashMLASparseBackend
     from vllm.v1.kv_cache_interface import (
@@ -817,6 +816,7 @@ def test_connector_layout_requires_every_matching_layer_to_be_strided(
         KVCacheTensor,
         MLAAttentionSpec,
     )
+    from vllm.v1.worker.utils import select_common_block_size_for_layout
 
     spec = MLAAttentionSpec(
         block_size=256, num_kv_heads=1, head_size=512, dtype=torch.bfloat16
@@ -846,6 +846,9 @@ def test_connector_layout_requires_every_matching_layer_to_be_strided(
         layouts = connector_utils.get_current_attn_backend_layouts(MagicMock(), config)
 
     assert layouts == [(FlashMLASparseBackend, spec, expected)]
+    assert select_common_block_size_for_layout(256, layouts) == (
+        256 if expected else 64
+    )
 
 
 @pytest.mark.cpu_test
