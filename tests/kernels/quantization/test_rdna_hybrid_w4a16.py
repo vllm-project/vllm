@@ -746,6 +746,7 @@ def test_process_weights_pads_cliff_rows(K, expected_weight_stride, dist_init):
     assert layer.weight_scale.is_contiguous()
 
 
+@pytest.mark.skipif(not on_gfx1x(), reason="Hybrid path is gfx11/gfx12 only")
 @pytest.mark.parametrize(
     "M,K,expected_path",
     [
