@@ -517,6 +517,7 @@ impl ChatBackend for FakeChatBackend {
             self.tokenizer(),
             options.tool_call_parser,
             options.reasoning_parser,
+            options.tool_strict_level,
         )?))
     }
 }
@@ -554,7 +555,8 @@ fn render_fake_message_content(
         ChatMessage::System { content }
         | ChatMessage::Developer { content, .. }
         | ChatMessage::User { content }
-        | ChatMessage::ToolResponse { content, .. } => render_fake_content(content, placeholder),
+        | ChatMessage::ToolResponse { content, .. }
+        | ChatMessage::Custom { content, .. } => render_fake_content(content, placeholder),
         ChatMessage::Assistant { .. } => message.text_content(),
     }
 }
@@ -2055,6 +2057,56 @@ async fn version_returns_engine_vllm_version() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
+async fn kv_event_sources_reports_each_ready_engine() {
+    let ready = vllm_engine_core_client::protocol::handshake::EngineCoreReadyResponse {
+        data_parallel_rank: 1,
+        kv_events_config: Some(
+            vllm_engine_core_client::protocol::handshake::KvEventsConfig {
+                enable_kv_cache_events: true,
+                publisher: "zmq".to_string(),
+                endpoint: "tcp://10.0.0.2:41233".to_string(),
+                replay_endpoint: None,
+                buffer_steps: 10_000,
+                hwm: 100_000,
+                max_queue_size: 100_000,
+                topic: "kv".to_string(),
+            },
+        ),
+        ..default_ready_response()
+    };
+    let (mut app, _engine_task) = test_dev_mode_app_with_ready(ready).await;
+    let response = app
+        .call(
+            Request::builder()
+                .uri("/kv_event_sources")
+                .body(Body::empty())
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("decode json");
+    assert_eq!(
+        json,
+        json!({
+            "1": {
+                "enable_kv_cache_events": true,
+                "publisher": "zmq",
+                "endpoint": "tcp://10.0.0.2:41233",
+                "replay_endpoint": null,
+                "buffer_steps": 10000,
+                "hwm": 100000,
+                "max_queue_size": 100000,
+                "topic": "kv",
+            }
+        })
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
 async fn server_info_endpoint_is_dev_mode_only() {
     let mut app = test_app().await;
     let response = app
@@ -2734,6 +2786,49 @@ async fn non_stream_chat_returns_json_response() {
     }
     // ...except `tool_calls`, which Python pops from the payload when empty.
     assert!(!message.contains_key("tool_calls"), "{json}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn openai_watermarking_defaults_and_opt_out_reach_engine_core() {
+    for endpoint in ["/v1/chat/completions", "/v1/completions"] {
+        for stream in [false, true] {
+            for watermarking in [None, Some(true), Some(false)] {
+                let (mut app, engine_task) = test_app_with_backend_and_engine_request_check(
+                    Arc::new(FakeChatBackend::new()),
+                    move |request| {
+                        let params = request.sampling_params.as_ref().expect("sampling params");
+                        assert_eq!(params.watermarking, watermarking.unwrap_or(true));
+                    },
+                )
+                .await;
+
+                let mut body = json!({"stream": stream, "max_tokens": 2});
+                if endpoint == "/v1/chat/completions" {
+                    body["messages"] = json!([{"role": "user", "content": "hi"}]);
+                } else {
+                    body["prompt"] = json!("hi");
+                }
+                if let Some(watermarking) = watermarking {
+                    body["watermarking"] = json!(watermarking);
+                }
+                let response = app
+                    .call(
+                        Request::builder()
+                            .method("POST")
+                            .uri(endpoint)
+                            .header("content-type", "application/json")
+                            .body(Body::from(body.to_string()))
+                            .expect("build request"),
+                    )
+                    .await
+                    .expect("call app");
+                assert_eq!(response.status(), StatusCode::OK);
+                to_bytes(response.into_body(), usize::MAX).await.expect("drain response");
+                engine_task.await.expect("mock engine task");
+            }
+        }
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -5762,7 +5857,46 @@ async fn sleep_route_uses_python_compatible_default_query_values() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
-async fn wake_up_route_without_tags_sends_none() {
+async fn release_kv_cache_memory_route_sends_expected_utility_call() {
+    let (app, engine_task) = test_admin_app_with_engine_script(|dealer, push| {
+        boxed_test_future(async move {
+            let utility = recv_engine_message(dealer).await;
+            assert_eq!(utility[0].as_ref(), &[0x03]);
+
+            let payload = decode_value(&utility[1]).expect("decode utility payload");
+            let array = payload.as_array().expect("utility payload array");
+            let call_id = array[1].as_u64().expect("call id");
+
+            assert_eq!(array[2], Value::from("release_kv_cache_memory"));
+            assert_eq!(array[3], Value::Array(Vec::new()));
+
+            send_outputs(push, utility_outputs(call_id, utility_none_result())).await;
+        })
+    })
+    .await;
+
+    let response = app
+        .clone()
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/release_kv_cache_memory")
+                .body(Body::empty())
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    let status = response.status();
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+    assert!(body.is_empty());
+    engine_task.await.expect("mock engine task");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn wake_up_route_without_tags_accepts_bool_result() {
     let (app, engine_task) = test_admin_app_with_engine_script(|dealer, push| {
         boxed_test_future(async move {
             let utility = recv_engine_message(dealer).await;
@@ -5775,7 +5909,7 @@ async fn wake_up_route_without_tags_sends_none() {
             assert_eq!(array[2], Value::from("wake_up"));
             assert_eq!(array[3], Value::Array(vec![Value::Nil]));
 
-            send_outputs(push, utility_outputs(call_id, utility_none_result())).await;
+            send_outputs(push, utility_outputs(call_id, utility_result_value(true))).await;
         })
     })
     .await;
@@ -5786,6 +5920,51 @@ async fn wake_up_route_without_tags_sends_none() {
             Request::builder()
                 .method("POST")
                 .uri("/wake_up")
+                .body(Body::empty())
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    let status = response.status();
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+    assert!(body.is_empty());
+    engine_task.await.expect("mock engine task");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn wake_up_route_accepts_repeated_tags() {
+    let (app, engine_task) = test_admin_app_with_engine_script(|dealer, push| {
+        boxed_test_future(async move {
+            let utility = recv_engine_message(dealer).await;
+            assert_eq!(utility[0].as_ref(), &[0x03]);
+
+            let payload = decode_value(&utility[1]).expect("decode utility payload");
+            let array = payload.as_array().expect("utility payload array");
+            let call_id = array[1].as_u64().expect("call id");
+
+            assert_eq!(array[2], Value::from("wake_up"));
+            assert_eq!(
+                array[3],
+                Value::Array(vec![Value::Array(vec![
+                    Value::from("weights"),
+                    Value::from("kv_cache"),
+                ])])
+            );
+
+            send_outputs(push, utility_outputs(call_id, utility_result_value(true))).await;
+        })
+    })
+    .await;
+
+    let response = app
+        .clone()
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/wake_up?tags=weights&tags%5B%5D=ignored&tags=kv_cache")
                 .body(Body::empty())
                 .expect("build request"),
         )
@@ -6117,6 +6296,7 @@ async fn admin_routes_are_hidden_when_dev_mode_is_disabled() {
     for (method, uri) in [
         ("GET", "/is_sleeping"),
         ("POST", "/sleep"),
+        ("POST", "/release_kv_cache_memory"),
         ("POST", "/wake_up"),
         ("GET", "/is_paused"),
         ("POST", "/pause"),

@@ -170,7 +170,7 @@ When `--api-key` is configured, the following endpoints require Bearer token aut
 - `/v1/messages/render` - Render Anthropic-compatible messages (available on `vllm serve` only when `--enable-scale-out` is set, or on `vllm launch render`)
 - `/v1/messages/count_tokens` - Count tokens for Anthropic messages
 - `/v1/responses` - Create a response
-- `/v1/responses/render` - Render a self-contained response request (available on `vllm serve` only when `VLLM_ENABLE_SCALE_OUT_ENDPOINTS=1`, or on `vllm launch render` unless explicitly disabled)
+- `/v1/responses/render` - Render a self-contained response request (available on `vllm serve` only when `--enable-scale-out` is set, or on `vllm launch render` unless explicitly disabled)
 - `/v1/responses/{response_id}` - Retrieve a response
 - `/v1/responses/{response_id}/cancel` - Cancel a response
 - `/v1/score` - Scoring API
@@ -288,6 +288,19 @@ To mitigate this, vLLM enforces a configurable upper bound on the `n` parameter 
 - **Public-facing deployments:** Consider setting `VLLM_MAX_N_SEQUENCES` to a value appropriate for your workload (e.g., `64` or `128`) to limit the blast radius of a single request.
 - **Reverse proxy layer:** In addition to vLLM's built-in limit, consider enforcing request body validation and rate limiting at your reverse proxy to further constrain abusive payloads.
 - **Monitoring:** Monitor per-request resource consumption to detect anomalous patterns that may indicate abuse.
+
+### Per-request multimodal arguments
+
+API server endpoints reject non-empty per-request `mm_processor_kwargs` and
+`media_io_kwargs` by default. These arguments can change image, video, or audio
+loading, sizing, sampling, and preprocessing behavior, causing excessive CPU,
+GPU, or memory use when controlled by an untrusted client. Server-level
+`--mm-processor-kwargs` and `--media-io-kwargs` remain available for deployment
+configuration.
+
+Only deployments whose API clients are trusted should start the server with
+`--trust-request-mm-kwargs` to restore per-request overrides. Do not enable
+this option on an endpoint exposed to untrusted clients.
 
 ## Tool Server and MCP Security
 
