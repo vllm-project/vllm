@@ -218,7 +218,7 @@ class AnthropicServingMessages(OpenAIServingChat):
                 for tools in tool_variants
             )
         if merge:
-            logger.warning(
+            logger.warning_once(
                 "The chat template requires system-first ordering, so inline "
                 "system messages in /v1/messages requests (e.g. Claude Code's "
                 "per-turn reminders) are merged into the leading system prompt. "
