@@ -16,6 +16,17 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionToolsParam,
 )
 from vllm.parser.abstract_parser import DelegatingParser
+from vllm.parser.plamo3 import (
+    BEGIN_TOOL_ARGUMENTS,
+    BEGIN_TOOL_NAME,
+    BEGIN_TOOL_REQUEST,
+    BEGIN_TOOL_REQUESTS,
+    END_TOOL_ARGUMENTS,
+    END_TOOL_NAME,
+    END_TOOL_REQUEST,
+    END_TOOL_REQUESTS,
+    EOT,
+)
 from vllm.tool_parsers.abstract_tool_parser import ToolParser
 from vllm.tool_parsers.deepseekv3_tool_parser import DeepSeekV3ToolParser
 from vllm.tool_parsers.deepseekv4_engine_tool_parser import DeepSeekV4EngineToolParser
@@ -29,7 +40,9 @@ from vllm.tool_parsers.hermes_tool_parser import Hermes2ProToolParser
 from vllm.tool_parsers.kimi_k2_tool_parser import KimiK2ToolParser
 from vllm.tool_parsers.kimi_k3_tool_parser import KimiK3ToolParser
 from vllm.tool_parsers.llama_tool_parser import Llama3JsonToolParser
+from vllm.tool_parsers.mimo_tool_parser import MiMoToolParser
 from vllm.tool_parsers.minimax_m2_tool_parser import MinimaxM2ToolParser
+from vllm.tool_parsers.plamo3_engine_tool_parser import Plamo3EngineToolParser
 from vllm.tool_parsers.qwen3_engine_tool_parser import Qwen3EngineToolParser
 from vllm.tool_parsers.structural_tag_registry import (
     SUPPORTED_STRUCTURAL_TAG_MODELS,
@@ -269,6 +282,131 @@ def test_hermes_required_tool_calls_use_empty_separator():
 
     assert tag is not None
     assert tag.format.separator == ""
+
+
+def _plamo3_call(name: str, arguments: str) -> str:
+    return (
+        BEGIN_TOOL_REQUEST
+        + BEGIN_TOOL_NAME
+        + name
+        + END_TOOL_NAME
+        + BEGIN_TOOL_ARGUMENTS
+        + arguments
+        + END_TOOL_ARGUMENTS
+        + END_TOOL_REQUEST
+    )
+
+
+def _plamo3_requests(*calls: str, eot: bool = False) -> str:
+    return (
+        BEGIN_TOOL_REQUESTS + "".join(calls) + END_TOOL_REQUESTS + (EOT if eot else "")
+    )
+
+
+def _plamo3_grammar(tool_choice, tools):
+    tag = get_model_structural_tag(
+        model="plamo3",
+        tools=tools,
+        tool_choice=tool_choice,
+        reasoning=False,
+    )
+    assert isinstance(tag, StructuralTag)
+    return Grammar.from_structural_tag(tag)
+
+
+def _plamo3_tools() -> list[ChatCompletionToolsParam]:
+    return [
+        ChatCompletionToolsParam(
+            type="function",
+            function={
+                "name": "get_weather",
+                "strict": True,
+                "parameters": {
+                    "type": "object",
+                    "properties": {"city": {"type": "string"}},
+                    "required": ["city"],
+                },
+            },
+        ),
+        ChatCompletionToolsParam(
+            type="function",
+            function={
+                "name": "get_time",
+                "strict": True,
+                "parameters": {
+                    "type": "object",
+                    "properties": {"timezone": {"type": "string"}},
+                    "required": ["timezone"],
+                },
+            },
+        ),
+    ]
+
+
+def test_plamo3_registered_as_vllm_structural_tag_model():
+    assert "plamo3" in VLLM_BUILTIN_STRUCTURAL_TAG_MODELS
+    assert Plamo3EngineToolParser.structural_tag_model == "plamo3"
+    assert Plamo3EngineToolParser.supports_required_and_named is False
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        _plamo3_requests(_plamo3_call("get_weather", '{"city":"Tokyo"}')),
+        _plamo3_requests(
+            _plamo3_call("get_weather", '{"city":"Tokyo"}'),
+            _plamo3_call("get_time", '{"timezone":"Asia/Tokyo"}'),
+            eot=True,
+        ),
+    ],
+)
+def test_plamo3_required_accepts_complete_request_blocks(body: str):
+    assert _is_grammar_accept_string(_plamo3_grammar("required", _plamo3_tools()), body)
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        _plamo3_requests(_plamo3_call("unknown", '{"city":"Tokyo"}')),
+        _plamo3_requests(_plamo3_call("get_weather", "{}")),
+        BEGIN_TOOL_REQUESTS + _plamo3_call("get_weather", '{"city":"Tokyo"}'),
+    ],
+)
+def test_plamo3_required_rejects_invalid_request_blocks(body: str):
+    assert not _is_grammar_accept_string(
+        _plamo3_grammar("required", _plamo3_tools()),
+        body,
+    )
+
+
+def test_plamo3_auto_allows_text_or_a_tool_request_block(sample_tools_strict):
+    grammar = _plamo3_grammar("auto", sample_tools_strict)
+
+    assert _is_grammar_accept_string(grammar, "Plain response")
+    assert _is_grammar_accept_string(
+        grammar,
+        _plamo3_requests(_plamo3_call("get_weather", '{"city":"Tokyo"}')),
+    )
+
+
+def test_plamo3_forced_stops_after_the_named_tool_call():
+    tools = _plamo3_tools()
+    tool_choice = ChatCompletionNamedToolChoiceParam(
+        function=ChatCompletionNamedFunction(name="get_weather")
+    )
+    grammar = _plamo3_grammar(tool_choice, tools)
+
+    assert _is_grammar_accept_string(
+        grammar,
+        _plamo3_requests(_plamo3_call("get_weather", '{"city":"Tokyo"}')),
+    )
+    assert not _is_grammar_accept_string(
+        grammar,
+        _plamo3_requests(
+            _plamo3_call("get_weather", '{"city":"Tokyo"}'),
+            _plamo3_call("get_time", '{"timezone":"Asia/Tokyo"}'),
+        ),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -528,6 +666,7 @@ def test_get_model_structural_tag_supports_named_tool_choice(
         (Llama3JsonToolParser, "llama"),
         (MinimaxM2ToolParser, "minimax"),
         (Qwen3EngineToolParser, "qwen_3_coder"),
+        (MiMoToolParser, "mimo"),
     ],
 )
 def test_tool_parsers_declare_matching_xgrammar_builtin_model(parser_cls, model):
@@ -590,7 +729,7 @@ def test_get_structural_tag_disables_reasoning(
 
 
 @pytest.mark.parametrize(
-    "parser_cls", [Qwen3EngineToolParser, DeepSeekV41EngineToolParser]
+    "parser_cls", [Qwen3EngineToolParser, DeepSeekV41EngineToolParser, MiMoToolParser]
 )
 def test_unified_parser_get_structural_tag_disables_reasoning(
     parser_cls,
@@ -1030,3 +1169,78 @@ def test_tool_strict_level_from_name():
         ToolStrictLevel.from_name("strict")
     with pytest.raises(ValueError, match="expected one of auto, function, parameter"):
         ToolStrictLevel.from_name("off")
+
+
+@pytest.mark.parametrize("policy", ["auto", "required", "named"])
+def test_mimo_strict_compact_xml(policy):
+    tools = [
+        ChatCompletionToolsParam(
+            type="function",
+            function={
+                "name": "run",
+                "strict": True,
+                "parameters": {
+                    "type": "object",
+                    "properties": {"n": {"type": "integer", "minimum": 1}},
+                    "required": ["n"],
+                    "additionalProperties": False,
+                },
+            },
+        )
+    ]
+    choice = (
+        ChatCompletionNamedToolChoiceParam(
+            function=ChatCompletionNamedFunction(name="run")
+        )
+        if policy == "named"
+        else policy
+    )
+    tag = get_model_structural_tag("mimo", tools, choice, reasoning=False)
+    grammar = Grammar.from_structural_tag(tag)
+    call = "<tool_call><function=run><parameter=n>2</parameter></function></tool_call>"
+    assert _is_grammar_accept_string(grammar, call)
+    assert _is_grammar_accept_string(grammar, call * 2) == (policy != "named")
+    assert _is_grammar_accept_string(grammar, "answer") == (policy == "auto")
+    for invalid in [
+        call.replace("function=run", "function=unknown"),
+        call.replace("<parameter=n>2</parameter>", ""),
+        call.replace(">2</parameter>", ">bad</parameter>"),
+        call.replace(">2</parameter>", ">0</parameter>"),
+        call.replace("<parameter=n>", "<parameter=other>"),
+        call.replace("</function>", "<parameter=n>3</parameter></function>"),
+        "<think>plan</think>" + call,
+    ]:
+        assert not _is_grammar_accept_string(grammar, invalid)
+    tools[0].function.strict = False
+    relaxed = Grammar.from_structural_tag(
+        get_model_structural_tag("mimo", tools, "required", reasoning=False)
+    )
+    assert _is_grammar_accept_string(
+        relaxed, call.replace("<parameter=n>", "<parameter=other>")
+    )
+
+
+@pytest.mark.parametrize("policy", ["auto", "required"])
+def test_mimo_request_limits_parallel_calls(sample_tools_strict, policy):
+    from vllm.parser.parser_manager import ParserManager
+
+    request = ChatCompletionRequest(
+        model="mimo",
+        messages=[],
+        tools=[t.model_dump() for t in sample_tools_strict],
+        tool_choice=policy,
+        parallel_tool_calls=False,
+    )
+    parser_cls = ParserManager.get_parser(
+        tool_parser_name="mimo", enable_auto_tools=True
+    )
+    parser = parser_cls(MagicMock(), tools=sample_tools_strict)
+    adjusted = parser.adjust_request(request)
+    grammar = Grammar.from_structural_tag(adjusted.structured_outputs.structural_tag)
+    call = (
+        "<tool_call><function=get_weather><parameter=city>北京</parameter>"
+        "</function></tool_call>"
+    )
+    assert _is_grammar_accept_string(grammar, call)
+    assert not _is_grammar_accept_string(grammar, call * 2)
+    assert not _is_grammar_accept_string(grammar, call + "extra text")
