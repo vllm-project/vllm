@@ -11,6 +11,8 @@ defined `process_weights_after_loading` had every one of its parameters marked
 as loaded. Nearly every quantization method defines it, so the check covered
 nothing on the models the flag is enabled for. These tests pin both halves of
 the narrowed behaviour: what must now be reported, and what must keep passing.
+The narrowing applies to quantized models; an unquantized model, where the
+check is on by default, keeps the module-wide exemption.
 """
 
 import pytest
@@ -19,6 +21,7 @@ from torch import nn
 
 from vllm.config.load import LoadConfig
 from vllm.model_executor.layers.fused_moe.runner.moe_runner import MoERunner
+from vllm.model_executor.layers.linear import UnquantizedLinearMethod
 from vllm.model_executor.model_loader.default_loader import DefaultModelLoader
 from vllm.model_executor.models.utils import AutoWeightsLoader
 
@@ -60,11 +63,11 @@ def _model(children: dict[str, nn.Module]) -> nn.Module:
     return model
 
 
-def _track(model: nn.Module, loaded: set[str]) -> str | None:
+def _track(model: nn.Module, loaded: set[str], quantized: bool = True) -> str | None:
     """Return the raised message, or None when the load was accepted."""
     loader = DefaultModelLoader(LoadConfig())
     try:
-        loader.track_weights_loading(model, set(loaded))
+        loader.track_weights_loading(model, set(loaded), quantized=quantized)
     except ValueError as exc:
         return str(exc)
     return None
@@ -136,8 +139,29 @@ def test_a_fully_loaded_quantized_layer_passes():
 def test_unquantized_layers_are_unaffected():
     """The default path (`quantization is None`) must behave exactly as before."""
     model = _model({"lin": _module({"weight": _param(4, 4)})})
-    assert _track(model, {"lin.weight"}) is None
-    assert "lin.weight" in (_track(model, set()) or "")
+    assert _track(model, {"lin.weight"}, quantized=False) is None
+    assert "lin.weight" in (_track(model, set(), quantized=False) or "")
+
+
+def test_unquantized_models_keep_the_module_wide_exemption():
+    """Their linear and MoE layers still carry a quant_method, and some of those
+    parameters are never reported: the Transformers backend aliases shared
+    experts, and a classification head can be filled outside the checkpoint."""
+    model = _model(
+        {
+            "score": _module({"weight": _param(2, 4)}, UnquantizedLinearMethod()),
+            "experts": _module(
+                {"w13_weight": _param(2, 8, 4)}, _SerializedQuantMethod()
+            ),
+            "norm": _module({"weight": _param(4)}),
+        }
+    )
+    assert _track(model, {"norm.weight"}, quantized=False) is None
+    message = _track(model, set(), quantized=False)
+    assert message is not None
+    assert "norm.weight" in message
+    for exempt in ("score.weight", "experts.w13_weight"):
+        assert exempt not in message
 
 
 def test_loaded_weights_none_is_a_no_op():

@@ -514,10 +514,15 @@ class DefaultModelLoader(BaseModelLoader):
             else default_enable_weights_track
         )
         if enable_weights_track:
-            self.track_weights_loading(model, loaded_weights)
+            self.track_weights_loading(
+                model, loaded_weights, quantized=model_config.quantization is not None
+            )
 
     def track_weights_loading(
-        self, model: nn.Module, loaded_weights: set[str] | None
+        self,
+        model: nn.Module,
+        loaded_weights: set[str] | None,
+        quantized: bool = False,
     ) -> None:
         weights_to_load = {name for name, _ in model.named_parameters()}
         if loaded_weights is None:
@@ -539,9 +544,14 @@ class DefaultModelLoader(BaseModelLoader):
             # serialized checkpoint, rather than every parameter of any
             # module whose quant_method defines process_weights_after_loading
             # -- which is nearly all of them, and left this check covering
-            # nothing on a quantized model.
+            # nothing on a quantized model. Unquantized models, where the check
+            # is on by default, keep the module-wide exemption: some alias a
+            # parameter or fill it outside the checkpoint.
             for param_name, _ in module.named_parameters():
-                if param_name.rsplit(".", 1)[-1] in OPTIONAL_QUANT_PARAM_NAMES:
+                if (
+                    not quantized
+                    or param_name.rsplit(".", 1)[-1] in OPTIONAL_QUANT_PARAM_NAMES
+                ):
                     loaded_weights.add(f"{prefix}{param_name}")
         weights_not_loaded = weights_to_load - loaded_weights
         if weights_not_loaded:
