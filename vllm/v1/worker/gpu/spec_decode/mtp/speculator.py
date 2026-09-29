@@ -12,12 +12,15 @@ from vllm.v1.worker.gpu.spec_decode.eagle.utils import load_eagle_model
 class MTPSpeculator(AutoRegressiveSpeculator):
     share_mtp_topk_indices: bool = False
 
+    def _load_draft_model(self, target_model: nn.Module) -> nn.Module:
+        return load_eagle_model(target_model, self.vllm_config)
+
     def load_draft_model(
         self,
         target_model: nn.Module,
         target_attn_layer_names: set[str],
     ) -> nn.Module:
-        draft_model = load_eagle_model(target_model, self.vllm_config)
+        draft_model = self._load_draft_model(target_model)
         spec_config = self.vllm_config.speculative_config
         draft_hf_config = (
             spec_config.draft_model_config.hf_config

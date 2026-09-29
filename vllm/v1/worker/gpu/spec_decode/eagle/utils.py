@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from collections.abc import Callable
+
 import torch
 import torch.nn as nn
 
@@ -70,7 +72,12 @@ def maybe_share_target_embed(
         draft_inner.embed_tokens = target_embed
 
 
-def load_eagle_model(target_model: nn.Module, vllm_config: VllmConfig) -> nn.Module:
+def load_eagle_model(
+    target_model: nn.Module,
+    vllm_config: VllmConfig,
+    *,
+    config_transform: Callable[[VllmConfig], VllmConfig] | None = None,
+) -> nn.Module:
     from vllm.compilation.backends import set_model_tag
 
     speculative_config = vllm_config.speculative_config
@@ -82,6 +89,9 @@ def load_eagle_model(target_model: nn.Module, vllm_config: VllmConfig) -> nn.Mod
     )
     if draft_load_config is not vllm_config.load_config:
         vllm_config = replace(vllm_config, load_config=draft_load_config)
+    # Derive execution-only settings after all validated config reconstruction.
+    if config_transform is not None:
+        vllm_config = config_transform(vllm_config)
     with set_model_tag("eagle_head"):
         eagle_model = get_model(
             vllm_config=vllm_config, model_config=draft_model_config
