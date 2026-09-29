@@ -3103,7 +3103,7 @@ def test_hisparse_fp8_decode_resolves_rows_once_then_runs_batched_attention():
     index_group.physical_topk_indices = torch.empty(
         (num_tokens + 1, 4), dtype=torch.int32, device=device
     )
-    index_group.request_ids = torch.arange(num_tokens, dtype=torch.int32, device=device)
+    index_group.row_indices = torch.arange(num_tokens, dtype=torch.int32, device=device)
     impl = SimpleNamespace(
         kv_lora_rank=1,
         index_group=index_group,
@@ -3111,7 +3111,6 @@ def test_hisparse_fp8_decode_resolves_rows_once_then_runs_batched_attention():
     )
     impl._fp8_flash_mla_kernel = MethodType(run_kernel, impl)
     metadata = SimpleNamespace(
-        num_decodes=num_decodes,
         query_start_loc=torch.arange(
             0, num_tokens + 1, query_len, dtype=torch.int32, device=device
         ),
@@ -3168,16 +3167,15 @@ def test_hisparse_decode_skips_padding_rows():
     index_group = object.__new__(HiSparseMLAIndexGroup)
     index_group.caches = [cache]
     index_group.physical_topk_indices = torch.empty((11, 2), dtype=torch.int32)
-    index_group.request_ids = torch.arange(10, dtype=torch.int32)
+    index_group.row_indices = torch.arange(10, dtype=torch.int32)
     metadata = SimpleNamespace(
-        num_decodes=2,
         query_start_loc=torch.tensor([0, 8, 9], dtype=torch.int32),
         req_id_per_token=torch.tensor([0] * 8 + [1, 0], dtype=torch.int32),
         block_size=64,
     )
 
-    index_group.convert_decode_logical_to_physical_topk(
-        0, topk, metadata, return_valid_counts=False
+    index_group.convert_logical_to_physical_topk(
+        0, topk, metadata, block_stride_rows=None, return_valid_counts=False
     )
 
     torch.testing.assert_close(
@@ -3212,7 +3210,7 @@ def test_flashinfer_hisparse_decode_runs_batched_attention():
     )
     index_group = object.__new__(HiSparseMLAIndexGroup)
     index_group.caches = [cache_handle]
-    index_group.convert_decode_logical_to_physical_topk = MethodType(
+    index_group.convert_logical_to_physical_topk = MethodType(
         convert_decode, index_group
     )
     impl = object.__new__(FlashInferMLASparseImpl)
@@ -3244,7 +3242,7 @@ def test_flashattn_hisparse_decode_uses_index_group():
     physical = topk.clone()
     counts = torch.full((num_tokens,), 4, dtype=torch.int32, device=DEVICE_TYPE)
     index_group = object.__new__(HiSparseMLAIndexGroup)
-    index_group.convert_decode_logical_to_physical_topk = MagicMock(
+    index_group.convert_logical_to_physical_topk = MagicMock(
         return_value=(physical, counts)
     )
     index_group.physical_kv_cache = MagicMock(
@@ -3267,7 +3265,7 @@ def test_flashattn_hisparse_decode_uses_index_group():
 
     assert output.shape == (num_tokens, 2, 1)
     assert lse is None
-    index_group.convert_decode_logical_to_physical_topk.assert_called_once()
+    index_group.convert_logical_to_physical_topk.assert_called_once()
     impl._run_mqa_kernel.assert_called_once()
 
 
@@ -3277,9 +3275,7 @@ def test_flashinfer_sm120_hisparse_decode_uses_index_group():
     topk = torch.zeros(num_tokens, 4, dtype=torch.int32, device=DEVICE_TYPE)
     physical = topk.clone()
     index_group = object.__new__(HiSparseMLAIndexGroup)
-    index_group.convert_decode_logical_to_physical_topk = MagicMock(
-        return_value=physical
-    )
+    index_group.convert_logical_to_physical_topk = MagicMock(return_value=physical)
     index_group.physical_kv_cache = MagicMock(
         return_value=torch.empty(1, device=DEVICE_TYPE)
     )
@@ -3303,7 +3299,7 @@ def test_flashinfer_sm120_hisparse_decode_uses_index_group():
 
     assert output.shape == (num_tokens, 2, 1)
     assert lse is None
-    index_group.convert_decode_logical_to_physical_topk.assert_called_once()
+    index_group.convert_logical_to_physical_topk.assert_called_once()
     impl._run_mqa_kernel.assert_called_once()
 
 

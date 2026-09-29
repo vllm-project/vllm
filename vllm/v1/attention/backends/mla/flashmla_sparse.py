@@ -817,10 +817,11 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
             num_decode_tokens = attn_metadata.num_decode_tokens
             if num_decode_tokens > 0:
                 decode_topk, decode_lengths = (
-                    index_group.convert_decode_logical_to_physical_topk(
+                    index_group.convert_logical_to_physical_topk(
                         self.index_group_index,
                         topk_indices[:num_decode_tokens],
                         attn_metadata,
+                        block_stride_rows=None,
                         return_valid_counts=True,
                     )
                 )
@@ -1267,12 +1268,12 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
         num_decodes: int,
     ) -> torch.Tensor:
         assert isinstance(self.index_group, HiSparseMLAIndexGroup)
-        physical_topk = self.index_group.convert_decode_logical_to_physical_topk(
+        physical_topk = self.index_group.convert_logical_to_physical_topk(
             self.index_group_index,
             topk_indices,
             attn_metadata,
+            block_stride_rows=None,
             return_valid_counts=False,
-            num_decodes=num_decodes,
         )
         assert isinstance(physical_topk, torch.Tensor)
         q = reshape_query_for_spec_decode(q, num_decodes)

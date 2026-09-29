@@ -39,7 +39,7 @@ class SparseMLAIndexGroup:
     logical_topk_indices: torch.Tensor
     physical_topk_indices: torch.Tensor
     valid_topk_counts: torch.Tensor
-    request_ids: torch.Tensor
+    row_indices: torch.Tensor
     side_stream: torch.Stream
     logical_topk_ready: torch.Event
     physical_topk_ready: torch.Event
@@ -230,12 +230,10 @@ class HiSparseMLAIndexGroup(SparseMLAIndexGroup):
         *,
         block_stride_rows: int | None,
         return_valid_counts: bool,
-        req_id_per_token: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         cache = self.cache(layer_index)
         num_tokens = logical_topk_indices.shape[0]
-        if req_id_per_token is None:
-            req_id_per_token = attn_metadata.req_id_per_token[:num_tokens]
+        req_id_per_token = attn_metadata.req_id_per_token[:num_tokens]
         if num_tokens > self.physical_topk_indices.shape[0]:
             # Prefill-sized batches do not fit the decode residency workspace.
             # Non-resident prefills are staged before reaching this path.
@@ -253,41 +251,19 @@ class HiSparseMLAIndexGroup(SparseMLAIndexGroup):
             )
         source_block_table = cache.source_block_table
         assert source_block_table is not None
+        # CUDA-graph padding rows past the batch's tokens map to request 0;
+        # mark them -1 so residency resolution skips them.
+        req_id_per_token = torch.where(
+            self.row_indices[:num_tokens] < attn_metadata.query_start_loc[-1],
+            req_id_per_token,
+            -1,
+        )
         return cache.swap_in(
             req_id_per_token,
             block_table=source_block_table,
             logical_topk_indices=logical_topk_indices,
             block_size=attn_metadata.block_size,
             return_valid_counts=return_valid_counts,
-        )
-
-    def convert_decode_logical_to_physical_topk(
-        self,
-        layer_index: int,
-        logical_topk_indices: torch.Tensor,
-        attn_metadata: Any,
-        *,
-        return_valid_counts: bool,
-        num_decodes: int | None = None,
-    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        num_tokens = logical_topk_indices.shape[0]
-        if num_decodes is None:
-            num_decodes = attn_metadata.num_decodes
-        # CUDA-graph padding rows past the decode tokens map to request 0;
-        # mark them -1 so residency resolution skips them.
-        num_decode_tokens = attn_metadata.query_start_loc[num_decodes]
-        req_id_per_token = torch.where(
-            self.request_ids[:num_tokens] < num_decode_tokens,
-            attn_metadata.req_id_per_token[:num_tokens],
-            -1,
-        )
-        return self.convert_logical_to_physical_topk(
-            layer_index,
-            logical_topk_indices,
-            attn_metadata,
-            block_stride_rows=None,
-            return_valid_counts=return_valid_counts,
-            req_id_per_token=req_id_per_token,
         )
 
     def stage_prefill_rows(
@@ -407,7 +383,7 @@ class SparseMLAIndexGroupBuilder:
                     dtype=torch.int32,
                     device=self.logical_topk_indices.device,
                 ),
-                request_ids=torch.arange(
+                row_indices=torch.arange(
                     workspace_rows,
                     dtype=torch.int32,
                     device=self.logical_topk_indices.device,
