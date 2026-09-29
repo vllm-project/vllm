@@ -281,7 +281,7 @@ def align_fp4_moe_weights_for_fi(
     return padded_w13, padded_w13_scale, padded_w2, padded_w2_scale, padded_intermediate
 
 
-def align_trtllm_fp4_moe_hidden_dim_for_fi(
+def align_fp4_moe_hidden_dim_for_fi(
     w13: torch.Tensor,
     w13_scale: torch.Tensor,
     w2: torch.Tensor,
@@ -296,7 +296,7 @@ def align_trtllm_fp4_moe_hidden_dim_for_fi(
         return w13, w13_scale, w2, w2_scale, hidden_size
 
     logger.warning_once(
-        "Padding hidden size from %d to %d for TRTLLM NVFP4 MoE weights. "
+        "Padding hidden size from %d to %d for FlashInfer NVFP4 MoE weights. "
         "This requires activation slicing at runtime and may cause "
         "performance degradation.",
         hidden_size,

@@ -165,7 +165,10 @@ def _dequantize_nvfp4_linear(
     return (tensor_f32 * tensor_sf.unsqueeze(-1)).reshape(m, k).to(dtype)
 
 
-@pytest.mark.parametrize("m,n,k,e,topk", [(16, 128, 512, 4, 2), (16, 192, 512, 4, 2)])
+@pytest.mark.parametrize(
+    "m,n,k,e,topk",
+    [(16, 128, 512, 4, 2), (16, 192, 512, 4, 2), (16, 192, 2688, 4, 2)],
+)
 @pytest.mark.parametrize("activation,alpha,beta,limit", _ACT_CASES)
 @pytest.mark.parametrize("per_token_activation", [False, True])
 @pytest.mark.parametrize("dtype", [torch.bfloat16])
@@ -244,6 +247,11 @@ def test_flashinfer_cutedsl_fp4_moe(
         assert moe_config.intermediate_size_per_partition == expected_n
         assert w1_cutedsl.shape[1] == expected_n * (2 if activation.is_gated else 1)
         assert w2_cutedsl.shape[2] * 2 == expected_n
+        expected_k = (k + 255) // 256 * 256
+        assert moe_config.hidden_dim == expected_k
+        assert moe_config.hidden_dim_unpadded == k
+        assert w1_cutedsl.shape[2] * 2 == expected_k
+        assert w2_cutedsl.shape[1] == expected_k
         quant_config = make_nvfp4_moe_quant_config(
             backend=NvFp4MoeBackend.FLASHINFER_CUTEDSL,
             w13_scale_2=w1_alpha,
@@ -274,7 +282,8 @@ def test_flashinfer_cutedsl_fp4_moe(
         )
 
         cutedsl_output = cutedsl_experts.apply(
-            hidden_states=hidden_states,
+            # The model runner pads inputs and trims outputs around this kernel.
+            hidden_states=torch.nn.functional.pad(hidden_states, (0, expected_k - k)),
             w1=w1_cutedsl,
             w2=w2_cutedsl,
             topk_weights=topk_weights,
@@ -284,6 +293,7 @@ def test_flashinfer_cutedsl_fp4_moe(
             expert_map=None,
             apply_router_weight_on_input=False,
         )
+        cutedsl_output = cutedsl_output[:, :k]
 
         a_global_scale = torch.ones(1, device="cuda", dtype=torch.float32)
         if per_token_activation:
