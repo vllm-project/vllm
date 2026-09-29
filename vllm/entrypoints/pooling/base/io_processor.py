@@ -207,7 +207,7 @@ class PoolingIOProcessor:
         else:
             pooling_params = ctx.pooling_params
 
-        # Clone before assigning the internal task so callers can reuse their params.
+        # Clone to avoid modifying the caller's pooling parameters.
         params_seq = [
             param.clone() for param in self._params_to_seq(pooling_params, num_requests)
         ]
