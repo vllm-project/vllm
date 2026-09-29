@@ -51,7 +51,7 @@ from vllm.v1.kv_cache_interface import (
 logger = init_logger(__name__)
 
 # The DSA indexer K cache is always quantized; "auto" means fp8 (V3.2 layout)
-# and mxfp4 is the opt-in Blackwell path.
+# and mxfp4 is the opt-in Blackwell and gfx950 path.
 DSA_INDEXER_KV_DTYPES = ("fp8", "mxfp4")
 
 
@@ -64,6 +64,28 @@ def dsa_indexer_uses_fp4(vllm_config: VllmConfig) -> bool:
             f"sparse indexer (expected one of {DSA_INDEXER_KV_DTYPES})."
         )
     use_fp4 = kv_dtype == "mxfp4"
+    if use_fp4 and current_platform.is_rocm():
+        from vllm._aiter_ops import rocm_aiter_ops
+        from vllm.platforms.rocm import get_cdna_version
+
+        # Only DeepSeek-V4.1 is wired to the ROCm MXFP4 cache; other DSA models
+        # would silently keep their FP8 one.
+        model_config = vllm_config.model_config
+        if model_config is None or model_config.hf_config.model_type != "deepseek_v41":
+            raise ValueError(
+                "indexer_kv_dtype='mxfp4' on ROCm is only supported for "
+                "DeepSeek-V4.1-Flash."
+            )
+        if get_cdna_version() != 4:
+            raise ValueError(
+                "indexer_kv_dtype='mxfp4' on ROCm requires CDNA4 (MI350X/MI355X)."
+            )
+        if not rocm_aiter_ops.is_enabled():
+            raise ValueError(
+                "indexer_kv_dtype='mxfp4' on ROCm runs on aiter's kernels; enable "
+                "aiter with VLLM_ROCM_USE_AITER=1."
+            )
+        return True
     if use_fp4 and not current_platform.is_device_capability_family(100):
         raise ValueError(
             "indexer_kv_dtype='mxfp4' requires Blackwell datacenter GPUs "
@@ -200,7 +222,7 @@ class DeepseekV32IndexerBackend(AttentionBackend):
         return "DEEPSEEK_V32_INDEXER"
 
     @staticmethod
-    def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
+    def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int | MultipleOf]:
         return [1, MultipleOf(16)] if current_platform.is_rocm() else [64]
 
     @classmethod
@@ -228,7 +250,7 @@ class KpoolTailBackend(DeepseekV32IndexerBackend):
         return []
 
     @staticmethod
-    def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
+    def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int | MultipleOf]:
         return [MultipleOf(1)]
 
     @staticmethod
@@ -237,6 +259,15 @@ class KpoolTailBackend(DeepseekV32IndexerBackend):
 
 
 class DeepseekV4IndexerBackend(DeepseekV32IndexerBackend):
+    @classmethod
+    def supports_device_cpu_query_lens_mismatch(cls) -> bool:
+        # ROCm runs adaptive verification through the per-token flattened
+        # indexer path, which derives row ownership from device decode lengths.
+        return (
+            current_platform.is_rocm()
+            or super().supports_device_cpu_query_lens_mismatch()
+        )
+
     @staticmethod
     def get_name() -> str:
         return "DEEPSEEK_V4_INDEXER"
@@ -248,18 +279,24 @@ class DeepseekV4IndexerBackend(DeepseekV32IndexerBackend):
         return (KVCacheLayout.BLHNC, KVCacheLayout.BLNHC)
 
     @staticmethod
-    def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
+    def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int | MultipleOf]:
         # Block sizes count uncompressed tokens: C4 indexer pages hold 64 rows.
         return [256]
 
 
 class DeepseekV41IndexerBackend(DeepseekV4IndexerBackend):
+    @classmethod
+    def supports_device_cpu_query_lens_mismatch(cls) -> bool:
+        # The ROCm flattened-query support above is validated for the
+        # DeepSeek-V4 adaptive DSpark path only.
+        return DeepseekV32IndexerBackend.supports_device_cpu_query_lens_mismatch()
+
     @staticmethod
     def get_name() -> str:
         return "DEEPSEEK_V41_INDEXER"
 
     @staticmethod
-    def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
+    def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int | MultipleOf]:
         return [64 if current_platform.is_device_capability_family(90) else 128]
 
 
@@ -802,6 +839,15 @@ def _supports_flattened_device_query_lens() -> bool:
     )
 
 
+def _rocm_supports_flattened_device_query_lens(vllm_config: VllmConfig) -> bool:
+    model_config = vllm_config.model_config
+    return (
+        current_platform.is_rocm()
+        and model_config is not None
+        and "DeepseekV4ForCausalLM" in model_config.architectures
+    )
+
+
 def _supports_native_decode(next_n: int) -> bool:
     """Whether decode can pass `next_n` Q rows per request to the kernel
     instead of flattening to one single-token row per query, which re-reads
@@ -822,7 +868,10 @@ def _use_flattening(vllm_config: VllmConfig) -> bool:
     return not _supports_native_decode(next_n) or (
         speculative_config is not None
         and speculative_config.enable_adaptive_verification
-        and _supports_flattened_device_query_lens()
+        and (
+            _supports_flattened_device_query_lens()
+            or _rocm_supports_flattened_device_query_lens(vllm_config)
+        )
     )
 
 
@@ -1261,7 +1310,6 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
         assert num_decode_tokens + num_prefill_tokens == num_tokens
 
         compressed_slot_mapping = slot_mapping
-        compressed_seq_lens = seq_lens
         indexer_block_table = block_table
         if self.compress_ratio > 1:
             kernel_block_size = self.kernel_block_size
@@ -1297,10 +1345,12 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                     self.compressed_slot_mapping_buffer[:padded_num_tokens],
                     dim=0,
                 )
-            compressed_seq_lens = seq_lens // self.compress_ratio
 
         prefill_metadata = None
         if num_prefills > 0:
+            compressed_seq_lens = (
+                seq_lens // self.compress_ratio if self.compress_ratio > 1 else seq_lens
+            )
             # This CPU value is an upper bound for async-spec extend rows.  It
             # is safe for chunking/allocation because CUDA metadata below is
             # built from exact device seq_lens and gather ignores the tail.

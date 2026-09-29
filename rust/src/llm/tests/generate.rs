@@ -167,7 +167,9 @@ fn sample_generate_request(request_id: &str, max_tokens: u32) -> GenerateRequest
         priority: 0,
         data_parallel_rank: None,
         session_id: None,
+        kv_hints: None,
         reasoning_parser_kwargs: None,
+        reasoning_ended: None,
         lora_request: None,
     }
 }
@@ -275,6 +277,7 @@ async fn generate_streams_outputs() {
         Some(GeneratePromptInfo {
             prompt_token_ids: vec![11, 22].into(),
             prompt_logprobs: Some(prompt_logprobs()),
+            prompt_token_id_logprobs: None,
         })
     );
     assert_eq!(first.token_ids, vec![1, 2]);
@@ -403,6 +406,7 @@ async fn collect_output_rejects_partial_sampling_mask() {
         prompt_info: Some(GeneratePromptInfo {
             prompt_token_ids: Arc::from([11_u32, 22]),
             prompt_logprobs: None,
+            prompt_token_id_logprobs: None,
         }),
         token_ids: vec![33, 44],
         logprobs: None,
@@ -413,6 +417,7 @@ async fn collect_output_rejects_partial_sampling_mask() {
         sampling_mask: Some(SamplingMask {
             rows: vec![vec![1, 33, 99]],
         }),
+        spec_decode_metrics: None,
     };
 
     let error = futures::stream::iter([Ok(output)]).collect_output().await.unwrap_err();

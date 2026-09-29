@@ -37,8 +37,8 @@ class PromptEmbedsState:
 
         # Indexed by req_state index. Stale entries after removal are
         # harmless: add_request rewrites all fields for every index it claims.
-        self.embeds_ptrs = UvaBackedTensor(max_num_reqs, dtype=torch.int64)
-        self.mask_ptrs = UvaBackedTensor(max_num_reqs, dtype=torch.int64)
+        self.embeds_ptrs = UvaBackedTensor(max_num_reqs, dtype=torch.uint64)
+        self.mask_ptrs = UvaBackedTensor(max_num_reqs, dtype=torch.uint64)
         self.embeds_lens = UvaBackedTensor(max_num_reqs, dtype=torch.int32)
 
     def add_request(self, req_index: int, new_req_data: NewRequestData) -> None:
@@ -100,8 +100,8 @@ class PromptEmbedsState:
 def _apply_prompt_embeds_kernel(
     inputs_embeds_ptr,
     inputs_embeds_stride,
-    embeds_ptrs_ptr,  # int64 [max_num_reqs], device pointers (0-len = unused)
-    mask_ptrs_ptr,  # int64 [max_num_reqs], 0 = no is-token-ids mask
+    embeds_ptrs_ptr,  # uint64 [max_num_reqs], device pointers (0-len = unused)
+    mask_ptrs_ptr,  # uint64 [max_num_reqs], 0 = no is-token-ids mask
     embeds_lens_ptr,  # int32 [max_num_reqs]
     idx_mapping_ptr,
     query_start_loc_ptr,
