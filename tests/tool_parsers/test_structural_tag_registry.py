@@ -6,15 +6,18 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
+from openai.types.responses import ToolChoiceFunction
 from xgrammar import Grammar, StructuralTag
 from xgrammar.testing import _is_grammar_accept_string
 
+import vllm.envs as envs
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionNamedFunction,
     ChatCompletionNamedToolChoiceParam,
     ChatCompletionRequest,
     ChatCompletionToolsParam,
 )
+from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.parser.abstract_parser import DelegatingParser
 from vllm.parser.plamo3 import (
     BEGIN_TOOL_ARGUMENTS,
@@ -741,6 +744,100 @@ def test_non_structural_tag_parser_uses_schema_constraints(
     assert out.structured_outputs is not None
     assert out.structured_outputs.json is not None
     assert out.structured_outputs.structural_tag is None
+
+
+_NAMED_CHAT_TOOL_CHOICE = {"type": "function", "function": {"name": "get_weather"}}
+
+
+def _responses_request(tool_choice) -> ResponsesRequest:
+    return ResponsesRequest.model_validate(
+        {
+            "input": "hi",
+            "tools": [
+                {
+                    "type": "function",
+                    "name": "get_weather",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"city": {"type": "string"}},
+                    },
+                }
+            ],
+            "tool_choice": tool_choice,
+        }
+    )
+
+
+@pytest.mark.parametrize("tool_choice", ["required", _NAMED_CHAT_TOOL_CHOICE])
+def test_native_format_parser_skips_json_schema_constraint(
+    sample_tools: list[ChatCompletionToolsParam],
+    tool_choice,
+):
+    # Parsers that extract required/named calls from their native format must
+    # not be forced into JSON, which their extractor cannot parse.
+    class NativeFormatToolParser(ToolParser):
+        supports_required_and_named = False
+
+    parser = NativeFormatToolParser(MagicMock())
+    request = ChatCompletionRequest(
+        messages=[],
+        model="m",
+        # Named tool choice validation reads tools in their JSON form.
+        tools=[tool.model_dump(exclude_none=True) for tool in sample_tools],
+        tool_choice=tool_choice,
+    )
+
+    out = parser.adjust_request(request)
+
+    assert out.structured_outputs is None
+
+
+@pytest.mark.parametrize(
+    "tool_choice",
+    ["required", ToolChoiceFunction(type="function", name="get_weather")],
+)
+def test_native_format_parser_skips_json_schema_constraint_responses(
+    tool_choice,
+):
+    class NativeFormatToolParser(ToolParser):
+        supports_required_and_named = False
+
+    parser = NativeFormatToolParser(MagicMock())
+    request = _responses_request(tool_choice)
+
+    out = parser.adjust_request(request)
+
+    assert out.structured_outputs is None
+    assert out.text is None
+
+
+@pytest.mark.parametrize("tool_choice", ["required", _NAMED_CHAT_TOOL_CHOICE])
+def test_glm47_without_strict_tool_calling_skips_json_schema_constraint(
+    monkeypatch: pytest.MonkeyPatch,
+    sample_tools: list[ChatCompletionToolsParam],
+    tool_choice,
+):
+    # With strict tool calling off, no structural tag is attached, so GLM-4.7
+    # must decode its native XML instead of a JSON tool-call list.
+    monkeypatch.setattr(envs, "VLLM_ENFORCE_STRICT_TOOL_CALLING", False)
+
+    class TestParser(DelegatingParser):
+        tool_parser_cls = Glm47MoeModelToolParser
+
+    request = ChatCompletionRequest(
+        messages=[],
+        model="m",
+        # Named tool choice validation reads tools in their JSON form.
+        tools=[tool.model_dump(exclude_none=True) for tool in sample_tools],
+        tool_choice=tool_choice,
+    )
+    parser = TestParser(MagicMock(), tools=sample_tools)
+    parser._reasoning_parser = MagicMock(adjust_request=lambda request: request)
+
+    out = parser.adjust_request(request)
+
+    assert out.structured_outputs is None
+    assert out.skip_special_tokens is False
 
 
 def test_get_structural_tag_disables_reasoning(
