@@ -8,7 +8,6 @@ from typing import cast
 
 import torch
 
-from vllm.config import get_current_vllm_config
 from vllm.distributed import (
     get_tensor_model_parallel_world_size,
     tensor_model_parallel_all_reduce,
@@ -36,7 +35,6 @@ from vllm.v1.attention.backend import (
     CommonAttentionMetadata,
     MultipleOf,
 )
-from vllm.v1.attention.backends.mla.indexer import dsa_indexer_uses_fp4
 from vllm.v1.attention.backends.mla.sparse_swa import (
     DeepseekSparseSWABackend,
     DeepseekSparseSWAMetadata,
@@ -616,14 +614,6 @@ class DeepseekV4ROCMAiterMLASparseBackend(DeepseekV4SparseMLABackend):
     @staticmethod
     def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int | MultipleOf]:
         return [64, 128]
-
-    @classmethod
-    def get_preferred_block_size(cls, default_block_size: int) -> int:
-        # aiter's paged MXFP4 indexer kernel wants 128-token pages: a ratio-2
-        # page then fills its 64-entry tile instead of halving it.
-        if dsa_indexer_uses_fp4(get_current_vllm_config()):
-            return 128
-        return super().get_preferred_block_size(default_block_size)
 
     @staticmethod
     def get_builder_cls() -> type[DeepseekV4SparseMLAMetadataBuilder]:
