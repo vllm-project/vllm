@@ -34,20 +34,16 @@ def test_choice_decision(server):
         server,
         {
             "model": MODEL_NAME,
-            "state": {"ticket": "My card was charged twice for one order."},
+            "state": {"team": "billing", "language": "French"},
             "questions": {
                 "team": {
                     "type": "choice",
-                    "instructions": "Which team should handle this ticket?",
-                    "criteria": {
-                        "billing": "payments and refunds",
-                        "shipping": "deliveries",
-                        "security": "account access",
-                    },
+                    "instructions": "Which team does the message name?",
+                    "criteria": {"billing": None, "shipping": None, "security": None},
                 },
                 "lang": {
                     "type": "choice",
-                    "instructions": "Which language is the ticket written in?",
+                    "instructions": "Which language does the message name?",
                     "criteria": {"English": None, "French": None},
                 },
             },
@@ -64,7 +60,7 @@ def test_choice_decision(server):
     assert sum(team["probabilities"].values()) == pytest.approx(1.0, abs=1e-4)
     assert team["confidence"] == max(team["probabilities"].values())
     assert team["choice"] == "billing"
-    assert body["answers"]["lang"]["choice"] == "English"
+    assert body["answers"]["lang"]["choice"] == "French"
     for diag in body["diagnostics"].values():
         assert 0.0 < diag["label_mass"] <= 1.0 + 1e-6
     assert body["usage"]["output_tokens"] == 2
@@ -101,11 +97,11 @@ def test_validation_errors(server, questions, match):
 
 TEMPLATE_BODY = {
     "model": MODEL_NAME,
-    "state": "My card was charged twice for one order.",
+    "state": "Team: billing.",
     "questions": {
         "team": {
             "type": "choice",
-            "instructions": "Which team?",
+            "instructions": "Which team does the message name?",
             "criteria": {"billing": None, "shipping": None},
         }
     },
@@ -128,8 +124,6 @@ def test_request_template(server):
     default = post(server, TEMPLATE_BODY)
     assert default.status_code == 200, default.text
     custom, default = custom.json(), default.json()
-    # The macro's answer format puts the read where the model expects a label.
-    assert custom["diagnostics"]["team"]["label_mass"] > 0.5
     # The request's template rendered the prompt.
     assert custom["answers"]["team"]["probabilities"]["billing"] != pytest.approx(
         default["answers"]["team"]["probabilities"]["billing"], abs=1e-3

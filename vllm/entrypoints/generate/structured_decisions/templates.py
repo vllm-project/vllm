@@ -14,6 +14,7 @@ where the label goes. The system prompt can call the same macro to show the
 reply format, so the prompt shows the model the format the server reads.
 """
 
+import string
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -26,12 +27,22 @@ import jinja2.sandbox
 
 from vllm.tokenizers import TokenizerLike
 
-from .question_types import Question, StructuredDecisionError
+from .question_types import (
+    Option,
+    Question,
+    StructuredDecisionError,
+    get_question_type,
+)
+
+LABEL_CANDIDATES = tuple(string.ascii_uppercase) + tuple(
+    a + b for a in string.ascii_uppercase for b in string.ascii_uppercase
+)
 
 DEFAULT_DECISION_TEMPLATE = """\
 {%- macro answer(question, label) -%}{{ question.id }}: {{ label }}{%- endmacro -%}
 Answer a fixed set of questions about the state the user provides. Each \
-question lists its allowed answers; reply with exactly one label per question.
+question lists its allowed answers; reply with exactly one label per question. \
+Labels are chosen randomly.
 {% if instructions %}
 
 {{ instructions | trim }}
@@ -91,6 +102,56 @@ class DecisionTemplate:
         )
         with template_errors():
             self._template = env.from_string(source)
+        self._alphabets: dict[int, tuple[str, ...]] = {}
+
+    def label_alphabet(self, tokenizer: TokenizerLike) -> tuple[str, ...]:
+        """The labels this template can use with ``tokenizer``.
+
+        Each candidate must sit inside one token of its answer. Candidates are
+        grouped by the tokens around the label and by what the label token
+        holds besides the label, such as a fused space or colon. The largest
+        group wins, so every label reads the same way."""
+        key = id(tokenizer)
+        if key not in self._alphabets:
+            self._alphabets[key] = self._sweep_labels(tokenizer)
+        return self._alphabets[key]
+
+    def _sweep_labels(self, tokenizer: TokenizerLike) -> tuple[str, ...]:
+        probe = Question(
+            id="q",
+            type=get_question_type("choice"),
+            instructions="",
+            options=(Option("a"), Option("b")),
+            labels=("A", "B"),
+        )
+        rendered = self.render(None, [probe])
+        groups: dict[tuple, dict[int, str]] = {}
+        for label in LABEL_CANDIDATES:
+            text = rendered.answer(probe, label)
+            if text.count(label) != 1:
+                continue
+            start = text.index(label)
+            end = start + len(label)
+            ids = tokenizer.encode(text, add_special_tokens=False)
+            if tokenizer.decode(ids) != text:
+                continue
+            bounds = [0] + [
+                len(tokenizer.decode(ids[: i + 1])) for i in range(len(ids))
+            ]
+            hits = [
+                i
+                for i in range(len(ids))
+                if bounds[i] <= start and end <= bounds[i + 1]
+            ]
+            if not hits:
+                continue
+            (i,) = hits
+            fused = text[bounds[i] : start] + "{}" + text[end : bounds[i + 1]]
+            group = groups.setdefault((tuple(ids[:i]), tuple(ids[i + 1 :]), fused), {})
+            group.setdefault(ids[i], label)
+        if not groups:
+            return ()
+        return tuple(max(groups.values(), key=len).values())
 
     def render(
         self, instructions: str | None, questions: list[Question]
@@ -121,42 +182,49 @@ class RenderedDecision:
             return str(self.answer_macro(question_vars(question), label))
 
     def slot(self, tokenizer: TokenizerLike, question: Question) -> AnswerSlot:
-        """Render the answer once per label and find the one token where the
-        labels differ. Every label must be one token there, the rest of the
-        answer must not change with the label, and no two labels may share a
-        token."""
-        rendered = [
+        """Where the label goes in the question's answer."""
+        variants = [
             tokenizer.encode(self.answer(question, label), add_special_tokens=False)
             for label in question.labels
         ]
-        if any(len(ids) != len(rendered[0]) for ids in rendered):
-            raise StructuredDecisionError(
-                f"question {question.id!r}: its labels are not all one token in "
-                f"the answer {self.answer(question, question.labels[0])!r}"
-            )
-        diffs = {
-            i
-            for ids in rendered[1:]
-            for i, (a, b) in enumerate(zip(rendered[0], ids))
-            if a != b
-        }
-        if len(diffs) != 1:
-            raise StructuredDecisionError(
-                f"question {question.id!r}: the labels change {len(diffs)} tokens "
-                "of the answer, and must change exactly one"
-            )
-        (pos,) = diffs
+        pos, label_ids = label_position(question, variants)
         if pos == 0:
             raise StructuredDecisionError(
                 f"question {question.id!r}: the answer must have text before the "
                 "label, such as the question id"
             )
-        label_ids = [ids[pos] for ids in rendered]
-        if len(set(label_ids)) != len(label_ids):
-            raise StructuredDecisionError(
-                f"question {question.id!r}: two labels share a token"
-            )
-        return AnswerSlot(prefix_ids=rendered[0][:pos], label_ids=label_ids)
+        return AnswerSlot(prefix_ids=variants[0][:pos], label_ids=label_ids)
+
+
+def label_position(
+    question: Question, variants: list[list[int]]
+) -> tuple[int, list[int]]:
+    """``variants`` holds one tokenization per label of the same text. Returns
+    the one position where they differ and each label's token there. Every
+    label must be one token, the rest of the text must not change with the
+    label, and no two labels may share a token."""
+    if any(len(ids) != len(variants[0]) for ids in variants):
+        raise StructuredDecisionError(
+            f"question {question.id!r}: its labels are not all one token in the answer"
+        )
+    diffs = {
+        i
+        for ids in variants[1:]
+        for i, (a, b) in enumerate(zip(variants[0], ids))
+        if a != b
+    }
+    if len(diffs) != 1:
+        raise StructuredDecisionError(
+            f"question {question.id!r}: the labels change {len(diffs)} tokens of "
+            "the answer, and must change exactly one"
+        )
+    (pos,) = diffs
+    label_ids = [ids[pos] for ids in variants]
+    if len(set(label_ids)) != len(label_ids):
+        raise StructuredDecisionError(
+            f"question {question.id!r}: two labels share a token"
+        )
+    return pos, label_ids
 
 
 @lru_cache(maxsize=16)

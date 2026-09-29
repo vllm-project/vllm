@@ -11,6 +11,7 @@ from vllm.entrypoints.serve.engine.protocol import ErrorResponse
 from vllm.entrypoints.serve.engine.serving import BaseServing
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.logger import init_logger
+from vllm.tokenizers import TokenizerLike
 
 from .protocol import (
     DecisionUsage,
@@ -30,7 +31,9 @@ def state_text(state: Any) -> str:
 
 
 def parse_questions(
-    request: StructuredDecisionRequest, limits: DecisionLimits
+    request: StructuredDecisionRequest,
+    limits: DecisionLimits,
+    alphabet: tuple[str, ...],
 ) -> list[Question]:
     if not request.questions:
         raise StructuredDecisionError("questions: needs at least one question")
@@ -46,12 +49,16 @@ def parse_questions(
             raise StructuredDecisionError(
                 f"question {qid!r}: unknown field(s) {sorted(spec.model_extra)}"
             )
-        q = build_question(qid, spec.type, spec.instructions, spec.criteria)
-        if len(q.options) > limits.max_options:
-            raise StructuredDecisionError(
-                f"question {qid!r}: at most {limits.max_options} options for this model"
+        questions.append(
+            build_question(
+                qid,
+                spec.type,
+                spec.instructions,
+                spec.criteria,
+                alphabet,
+                limits.max_options,
             )
-        questions.append(q)
+        )
     return questions
 
 
@@ -73,8 +80,19 @@ class ServingStructuredDecisions(BaseServing):
         self.limits = strategy.limits()
         self.decision_template = decision_template
         self.trust_request_template = trust_request_template
-        # Compiling the server's template here makes a broken one stop startup.
-        select_template(decision_template, None, False)
+        # Sweeping the server's template here makes a broken one, or one that
+        # leaves fewer than two labels for this tokenizer, stop startup.
+        alphabet = select_template(decision_template, None, False).label_alphabet(
+            self._tokenizer()
+        )
+        if len(alphabet) < 2:
+            raise ValueError(
+                "--decision-template: fewer than two labels read cleanly with "
+                "this model's tokenizer"
+            )
+
+    def _tokenizer(self) -> TokenizerLike:
+        return self.strategy.context.online_renderer.renderer.get_tokenizer()
 
     async def create_decision(
         self,
@@ -90,11 +108,13 @@ class ServingStructuredDecisions(BaseServing):
         base_id = self._base_request_id(raw_request, default=request.request_id)
         request_id = f"decision-{base_id}"
         try:
-            questions = parse_questions(request, self.limits)
             template = select_template(
                 self.decision_template,
                 request.decision_template,
                 self.trust_request_template,
+            )
+            questions = parse_questions(
+                request, self.limits, template.label_alphabet(self._tokenizer())
             )
             lora_request = self._maybe_get_adapters(request)
             engine_client.check_admission(len(questions))

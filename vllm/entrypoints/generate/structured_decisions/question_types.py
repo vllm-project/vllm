@@ -7,13 +7,13 @@ model answers with for each, and shapes the answer from the label
 probabilities.
 """
 
+import hashlib
+import json
 import math
-import string
+import random
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Any, ClassVar
-
-MAX_LETTER_LABELS = 26
 
 
 class StructuredDecisionError(ValueError):
@@ -46,14 +46,10 @@ class QuestionType(ABC):
         """The answer for ``question``. ``probs`` follows ``question.labels``
         and sums to 1."""
 
-    def labels(self, options: list[Option]) -> list[str]:
-        """The label the model answers with for each option. The default is
-        capital letters, which carry no meaning of their own to bias the read."""
-        if len(options) > MAX_LETTER_LABELS:
-            raise StructuredDecisionError(
-                f"{self.name}: at most {MAX_LETTER_LABELS} options with letter labels"
-            )
-        return list(string.ascii_uppercase[: len(options)])
+    def labels(self, options: list[Option], alphabet: list[str]) -> list[str]:
+        """The label the model answers with for each option. ``alphabet`` holds
+        at least one label per option, shuffled for this question."""
+        return alphabet[: len(options)]
 
 
 QUESTION_TYPES: dict[str, QuestionType] = {}
@@ -76,8 +72,18 @@ def get_question_type(name: str) -> QuestionType:
 
 
 def build_question(
-    qid: str, type_name: str, instructions: Any, criteria: Any
+    qid: str,
+    type_name: str,
+    instructions: Any,
+    criteria: Any,
+    alphabet: tuple[str, ...],
+    max_options: int,
 ) -> Question:
+    """Builds a question whose labels come from ``alphabet``, shortest first.
+    Labels of one length are shuffled with a seed from the question's content,
+    so a repeated question gets the same labels and the same prompt tokens.
+    Longer labels, such as two-letter codes, carry more meaning of their own,
+    so a question uses them only when it runs out of shorter ones."""
     if not qid or ":" in qid or "\n" in qid:
         raise StructuredDecisionError(
             f"question id {qid!r} must be non-empty, without ':' or a newline"
@@ -91,12 +97,22 @@ def build_question(
     names = [o.name for o in options]
     if len(set(names)) != len(names):
         raise StructuredDecisionError(f"question {qid!r}: duplicate option names")
-    try:
-        labels = qtype.labels(options)
-    except StructuredDecisionError as e:
-        raise StructuredDecisionError(f"question {qid!r}: {e}") from None
+    limit = min(len(alphabet), max_options)
+    if len(options) > limit:
+        raise StructuredDecisionError(
+            f"question {qid!r}: at most {limit} options for this model"
+        )
     if not isinstance(instructions, str):
         instructions = "" if instructions is None else str(instructions)
+    content = [qid, type_name, instructions, [(o.name, o.description) for o in options]]
+    digest = hashlib.sha256(json.dumps(content).encode()).digest()
+    rng = random.Random(digest)
+    shuffled = []
+    for size in sorted({len(label) for label in alphabet}):
+        tier = [label for label in alphabet if len(label) == size]
+        rng.shuffle(tier)
+        shuffled += tier
+    labels = qtype.labels(options, shuffled)
     return Question(
         id=qid,
         type=qtype,

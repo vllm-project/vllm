@@ -10,8 +10,8 @@ template.
 ## How it works
 
 1. A decision template renders the system prompt: every question and its
-   allowed answers, each with a single-token label (`A`, `B`, ...). The user
-   message is the state.
+   allowed answers, each with a single-token label such as `K`. The
+   user message is the state.
 2. Each question is one read: the prompt with the assistant reply prefilled up
    to that question's label (`id:` by default), and one generated token.
 3. The read returns the logprobs of that question's label tokens. Softmax over
@@ -29,7 +29,7 @@ question costs about one token.
 | --- | --- | --- |
 | `choice` | map of option name to a description or `null` | `choice`, `probabilities` by option name, `confidence` |
 
-A choice has 2 to 26 options. A question id is a non-empty string made of any
+A choice has at least 2 options. A question id is a non-empty string made of any
 characters except `:` and newline.
 
 ## Example
@@ -118,12 +118,24 @@ The answers of all the labels must differ in exactly one token for the model's
 tokenizer, with some text before it. A request whose template breaks that gets
 a 400 naming the question.
 
+## Labels
+
+The first time the server uses a template, it tries each label from `A` to
+`ZZ` in the template's answer and keeps those that are one token. The token around a label can hold
+more than the label, such as a leading space or the colon before it. The
+server groups the labels by what that token holds and keeps the largest group,
+so every label reads the same way. A question takes single letters first and
+two-letter labels only when it has more options than letters. Labels are
+shuffled with a seed from a hash of the question, so the options do not always
+get the labels the model favors, such as `A`, and a repeated question gets the
+same prompt.
+
 ## Limits
 
 | limit | value |
 | --- | --- |
 | questions per request | 64 |
-| options per `choice` | 26, one letter label each |
+| options per `choice` | the number of labels the server keeps, at most 128 |
 
 ## Request fields
 

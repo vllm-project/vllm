@@ -1,29 +1,39 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import dataclasses
-
 import pytest
 
 from vllm.entrypoints.generate.structured_decisions.question_types import (
+    Option,
+    Question,
     StructuredDecisionError,
-    build_question,
+    get_question_type,
 )
 from vllm.entrypoints.generate.structured_decisions.templates import (
     DEFAULT_DECISION_TEMPLATE,
+    LABEL_CANDIDATES,
     DecisionTemplate,
     select_template,
 )
 from vllm.tokenizers import get_tokenizer
 
 MODEL_NAME = "Qwen/Qwen3-0.6B"
+LETTERS = LABEL_CANDIDATES[:26]
+
+
+def choice(qid, instructions, options, labels=None):
+    return Question(
+        id=qid,
+        type=get_question_type("choice"),
+        instructions=instructions,
+        options=tuple(Option(name, desc) for name, desc in options.items()),
+        labels=labels or LETTERS[: len(options)],
+    )
 
 
 def questions():
     return [
-        build_question(
-            "bucket", "choice", "Which team?", {"billing": "money", "outage": None}
-        ),
-        build_question("lang", "choice", " Which language? ", {"en": None, "fr": None}),
+        choice("bucket", "Which team?", {"billing": "money", "outage": None}),
+        choice("lang", " Which language? ", {"en": None, "fr": None}),
     ]
 
 
@@ -36,7 +46,7 @@ def test_default_template_text():
     assert text == (
         "Answer a fixed set of questions about the state the user provides. Each "
         "question lists its allowed answers; reply with exactly one label per "
-        "question.\n"
+        "question. Labels are chosen randomly.\n"
         "\nSupport inbox.\n"
         "\nQuestion bucket: Which team?\n"
         "  A: billing (money)\n"
@@ -85,7 +95,7 @@ def test_select_template_trust_gate():
 
 def test_slot_on_default_answer():
     tokenizer = get_tokenizer(MODEL_NAME)
-    q = build_question("q", "choice", "", {chr(ord("a") + i): None for i in range(26)})
+    q = choice("q", "", {chr(ord("a") + i): None for i in range(26)})
     slot = (
         DecisionTemplate(DEFAULT_DECISION_TEMPLATE).render(None, [q]).slot(tokenizer, q)
     )
@@ -102,7 +112,7 @@ def test_slot_with_text_after_the_label():
         "{% macro answer(question, label) %}{{ question.id }} ({{ label }})"
         "{% endmacro %}"
     )
-    q = build_question("team", "choice", "", {"a": None, "b": None, "c": None})
+    q = choice("team", "", {"a": None, "b": None, "c": None})
     slot = template.render(None, [q]).slot(tokenizer, q)
     for label, token in zip(q.labels, slot.label_ids):
         full = tokenizer.encode(f"team ({label})", add_special_tokens=False)
@@ -111,8 +121,7 @@ def test_slot_with_text_after_the_label():
 
 
 def test_slot_rejects_multi_token_labels():
-    q = build_question("q", "choice", "", {"a": None, "b": None})
-    q = dataclasses.replace(q, labels=("antidisestablishmentarianism", "B"))
+    q = choice("q", "", {"a": None, "b": None}, ("antidisestablishmentarianism", "B"))
     with pytest.raises(StructuredDecisionError, match="not all one token"):
         DecisionTemplate(DEFAULT_DECISION_TEMPLATE).render(None, [q]).slot(
             get_tokenizer(MODEL_NAME), q
@@ -123,6 +132,30 @@ def test_slot_needs_text_before_the_label():
     template = DecisionTemplate(
         "{% macro answer(question, label) %}{{ label }}{% endmacro %}"
     )
-    q = build_question("q", "choice", "", {"a": None, "b": None})
+    q = choice("q", "", {"a": None, "b": None})
     with pytest.raises(StructuredDecisionError, match="text before the label"):
         template.render(None, [q]).slot(get_tokenizer(MODEL_NAME), q)
+
+
+def test_label_alphabet_on_default_template():
+    tokenizer = get_tokenizer(MODEL_NAME)
+    alphabet = DecisionTemplate(DEFAULT_DECISION_TEMPLATE).label_alphabet(tokenizer)
+    assert set(LETTERS) < set(alphabet)
+    for label in alphabet:
+        ids = tokenizer.encode(f"q: {label}", add_special_tokens=False)
+        assert tokenizer.decode(ids[-1:]) == f" {label}"
+
+
+def test_label_alphabet_keeps_one_fusion_pattern():
+    # Qwen3 fuses the colon into some labels written right after it.
+    tokenizer = get_tokenizer(MODEL_NAME)
+    template = DecisionTemplate(
+        "{% macro answer(question, label) %}{{ question.id }}:{{ label }}{% endmacro %}"
+    )
+    alphabet = template.label_alphabet(tokenizer)
+    assert 2 <= len(alphabet) < len(LABEL_CANDIDATES)
+    patterns = set()
+    for label in alphabet:
+        ids = tokenizer.encode(f"q:{label}", add_special_tokens=False)
+        patterns.add(tokenizer.decode(ids[-1:]).replace(label, "{}"))
+    assert len(patterns) == 1
