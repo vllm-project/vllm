@@ -925,6 +925,18 @@ class CompilationConfig:
         if KEY not in self.inductor_compile_config:
             self.inductor_compile_config[KEY] = False
 
+        if envs.VLLM_BATCH_INVARIANT and self.backend in ("", "inductor"):
+            from torch._inductor import config as inductor_config
+
+            if hasattr(inductor_config, "batch_invariant"):
+                if self.inductor_compile_config.get("batch_invariant") is False:
+                    raise ValueError(
+                        "VLLM_BATCH_INVARIANT requires Inductor batch_invariant=True"
+                    )
+                # Keep compiled reductions stable across batch-size hints and
+                # include this policy in the compilation cache key.
+                self.inductor_compile_config["batch_invariant"] = True
+
         # Tie inductor runtime assertions to debug logging mode.
         # These assertions add ~2ms overhead per forward pass on large
         # models (e.g., DeepSeek-R1 671B: ~340 assert_size_stride + ~60
