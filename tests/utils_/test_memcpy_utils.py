@@ -10,8 +10,8 @@ import pytest
 
 from vllm.utils import memcpy_utils as mod
 
-class TestMemcpyMt:
 
+class TestMemcpyMt:
     def test_zero_size_is_noop(self):
         src = np.arange(16, dtype=np.uint8)
         dst = np.zeros_like(src)
@@ -167,8 +167,7 @@ class TestMemcpyMt:
         src = np.arange(n, dtype=np.uint8)
         dst = np.empty_like(src)
         prev = mod.get_num_threads()
-        with mock.patch.object(mod, "_copy_kernel",
-                               side_effect=RuntimeError("boom")):
-            with pytest.raises(RuntimeError, match="boom"):   # noqa: SIM117
+        with mock.patch.object(mod, "_copy_kernel", side_effect=RuntimeError("boom")):
+            with pytest.raises(RuntimeError, match="boom"):  # noqa: SIM117
                 mod.memcpy_mt(src, dst, n, max_copy_threads=2)
         assert mod.get_num_threads() == prev
