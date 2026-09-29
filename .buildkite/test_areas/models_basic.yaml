@@ -95,6 +95,23 @@ steps:
   commands:
     # FA4 kernel tests require SM100; the suite skips them elsewhere.
     - pytest -v -s models/inkling
+  mirror:
+    amd:
+      label: ":amd: (MI355) Inkling"
+      dind: false
+      device: mi355_1
+      timeout_in_minutes: 65
+      working_dir: "/vllm-workspace/tests"
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - vllm/models/inkling/
+      - vllm/cute_utils/
+      - cmake/external_projects/tml_fa4.cmake
+      - tests/models/inkling/
+      - vllm/platforms/rocm.py
+      commands:
+      - pytest -v -s models/inkling/rocm
 
 - label: ":nvidia: (B200) Kimi K3"
   key: kimi-k3-unit-tests-b200
