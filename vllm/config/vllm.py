@@ -3505,8 +3505,7 @@ class VllmConfig:
             and self.kv_transfer_config.is_kv_transfer_instance
             and not (
                 kimi_kda_rocm
-                and self.kv_transfer_config.kv_connector
-                == "SimpleCPUOffloadConnector"
+                and self.kv_transfer_config.kv_connector == "SimpleCPUOffloadConnector"
             )
         ):
             raise ValueError(
