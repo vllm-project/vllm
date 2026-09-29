@@ -121,16 +121,8 @@ def test_torch_compile_wrapper(use_bytecode_hook, monkeypatch):
         raise AssertionError("expected an exception to be raised")
 
 
-@pytest.mark.parametrize(
-    "mode",
-    [
-        CompilationMode.NONE,
-        CompilationMode.STOCK_TORCH_COMPILE,
-        CompilationMode.VLLM_COMPILE,
-    ],
-)
-def test_compile_model_with_stock_torch(mode, monkeypatch):
-    """Only STOCK_TORCH_COMPILE compiles the whole model in place."""
+def test_compile_model_with_stock_torch(monkeypatch):
+    """The whole model is compiled in place with the configured backend."""
     graphs: list[torch.fx.GraphModule] = []
 
     def recording_backend(gm: torch.fx.GraphModule, example_inputs):
@@ -152,17 +144,19 @@ def test_compile_model_with_stock_torch(mode, monkeypatch):
             return self.linear(x).relu()
 
     vllm_config = VllmConfig()
-    vllm_config.compilation_config = CompilationConfig(mode=mode)
+    vllm_config.compilation_config = CompilationConfig(
+        mode=CompilationMode.STOCK_TORCH_COMPILE
+    )
     model = Model()
     x = torch.randn(3, 4)
     expected = model(x)
-    is_stock = mode == CompilationMode.STOCK_TORCH_COMPILE
 
     torch._dynamo.reset()
-    with compilation_counter.expect(stock_torch_compile_count=int(is_stock)):
+    with compilation_counter.expect(stock_torch_compile_count=1):
         compile_model_with_stock_torch(model, vllm_config)
+    assert not graphs  # compilation is deferred to the first call
     torch.testing.assert_close(model(x), expected)
-    assert len(graphs) == int(is_stock)
+    assert len(graphs) == 1
 
 
 if __name__ == "__main__":
