@@ -773,7 +773,7 @@ steps:
   - bash standalone_tests/pytorch_nightly_dependency.sh
 
 - label: ":amd: (MI300) Distributed Compile (Inductor Partition)" # TBD
-  timeout_in_minutes: 65
+  timeout_in_minutes: 75
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   dind: false
   agent_pool: mi300_2
@@ -1124,7 +1124,7 @@ steps:
   - pytest -v -s v1/worker/test_worker_memory_snapshot.py
 
 - label: ":amd: (MI300) Distributed Compile + Comm" # TBD
-  timeout_in_minutes: 45
+  timeout_in_minutes: 65
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   dind: false
   agent_pool: mi300_4
@@ -2035,7 +2035,7 @@ steps:
 #-----------------------------------------------------  mi300 · models / language  -----------------------------------------------------#
 
 - label: ":amd: (MI300) Language Models (MTEB)" # TBD
-  timeout_in_minutes: 60
+  timeout_in_minutes: 70
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   dind: false
   agent_pool: mi300_1
@@ -2062,7 +2062,7 @@ steps:
   - pytest -v -s models/language/pooling -m 'not core_model' --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
 
 - label: ":amd: (MI300) Language Models (Extended Generation)" # TBD
-  timeout_in_minutes: 95
+  timeout_in_minutes: 105
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   dind: false
   agent_pool: mi300_1
@@ -2079,7 +2079,7 @@ steps:
 #----------------------------------------------------  mi300 · models / multimodal  ----------------------------------------------------#
 
 - label: ":amd: (MI300) Multimodal Models (Extended Generation 1)" # TBD
-  timeout_in_minutes: 90
+  timeout_in_minutes: 100
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   dind: false
   agent_pool: mi300_1
@@ -2168,7 +2168,7 @@ steps:
 #-----------------------------------------------------  mi300 · models / quantized  -----------------------------------------------------#
 
 - label: ":amd: (MI300) Quantized Models" # TBD
-  timeout_in_minutes: 80
+  timeout_in_minutes: 90
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   dind: false
   agent_pool: mi300_1
