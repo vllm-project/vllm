@@ -21,6 +21,8 @@ pub enum Error {
     InvalidReasoningEffort(String),
     #[error("{message}")]
     InvalidReasoningControl { message: String },
+    #[error("chat role `{role}` is not supported by this chat renderer")]
+    UnsupportedChatRole { role: String },
     #[error("multimodal input is not supported by this chat renderer")]
     UnsupportedMultimodalRenderer,
     #[error("unsupported multimodal content: {0}")]
@@ -114,7 +116,8 @@ impl Error {
             | Self::InvalidReasoningControl { .. }
             | Self::DuplicateToolName { .. }
             | Self::ToolChoiceRequiresTools
-            | Self::ToolChoiceFunctionNotFound { .. } => true,
+            | Self::ToolChoiceFunctionNotFound { .. }
+            | Self::UnsupportedChatRole { .. } => true,
             Self::Text(error) => error.is_request_validation_error(),
             Self::UnsupportedMultimodalRenderer
             | Self::UnsupportedMultimodalContent(_)

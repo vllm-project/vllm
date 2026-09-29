@@ -124,6 +124,8 @@ pub(super) fn prepare_completion_request(
             thinking_token_budget: request.thinking_token_budget,
             logprobs,
             prompt_logprobs,
+            prompt_logprob_token_ids: None,
+            prompt_logprob_start: None,
             min_p: request.min_p,
             frequency_penalty: request.frequency_penalty,
             presence_penalty: request.presence_penalty,
