@@ -426,6 +426,17 @@ MODEL_CONFIGS: dict[str, VitCudagraphTestConfig] = {
         vllm_runner_kwargs={"trust_remote_code": True},
         marks=[pytest.mark.core_model],
     ),
+    "blip2": VitCudagraphTestConfig(
+        model="Salesforce/blip2-opt-2.7b",
+        modalities=["image"],
+        image_prompt="Question: What is in this image? Answer:",
+        max_model_len=2048,
+        compilation_config_overrides={
+            "encoder_cudagraph_token_budgets": [64],
+            "encoder_cudagraph_max_vision_items_per_batch": 2,
+        },
+        vllm_runner_kwargs={"load_format": "dummy"},
+    ),
 }
 
 

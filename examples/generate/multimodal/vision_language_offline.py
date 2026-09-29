@@ -2262,6 +2262,7 @@ MODELS_NEED_VIDEO_METADATA = [
 
 MODELS_SUPPORT_VIT_CUDA_GRAPH = [
     "llama4",
+    "blip-2",
     "gemma4",
     "qwen2_vl",
     "qwen2_5_vl",
