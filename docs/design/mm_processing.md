@@ -78,10 +78,20 @@ GPU-side fusion is controlled by `multimodal_config.mm_device_do_normalize`:
 - The flag is **enabled by default** for all models that support it.
 - Currently, it’s on by default for these architectures:
 
-| name         | Architecture                         | Example HF Models                   |
-|--------------|--------------------------------------|-------------------------------------|
-| `qwen2-vl`   | `Qwen2VLForConditionalGeneration`    | `Qwen/Qwen2-VL-2B-Instruct`, etc.   |
-| `qwen2.5-vl` | `Qwen2_5_VLForConditionalGeneration` | `Qwen/Qwen2.5-VL-3B-Instruct`, etc. |
+| name                       | Architecture                               | Example HF Models                                     |
+| -------------------------- | ------------------------------------------ | ----------------------------------------------------- |
+| `intern-s1-pro`            | `InternS1ProForConditionalGeneration`      | `internlm/Intern-S1-Pro`                              |
+| `intern-s2-mobius`         | `InternS2MobiusForConditionalGeneration`   | `internlm/Intern-S2-Mobius`                           |
+| `llama-nemotron-vl-embed`  | `LlamaNemotronVLForEmbedding`              | `nvidia/llama-nemotron-embed-vl-1b-v2`                |
+| `llama-nemotron-vl-rerank` | `LlamaNemotronVLForSequenceClassification` | `nvidia/llama-nemotron-rerank-vl-1b-v2`               |
+| `mistral3`                 | `Mistral3ForConditionalGeneration`         | `mistralai/Mistral-Small-3.2-24B-Instruct-2506`, etc. |
+| `qwen2-vl`                 | `Qwen2VLForConditionalGeneration`          | `Qwen/Qwen2-VL-2B-Instruct`, etc.                     |
+| `qwen2.5-vl`               | `Qwen2_5_VLForConditionalGeneration`       | `Qwen/Qwen2.5-VL-3B-Instruct`, etc.                   |
+| `qwen3-vl`                 | `Qwen3VLForConditionalGeneration`          | `Qwen/Qwen3-VL-4B-Instruct`, etc.                     |
+| `qwen3-vl-moe`             | `Qwen3VLMoeForConditionalGeneration`       | `Qwen/Qwen3-VL-30B-A3B-Instruct`, etc.                |
+| `qwen3.5`                  | `Qwen3_5ForConditionalGeneration`          | `Qwen/Qwen3.5-0.8B`, etc.                             |
+| `qwen3.5-moe`              | `Qwen3_5MoeForConditionalGeneration`       | `Qwen/Qwen3.5-35B-A3B`, etc.                          |
+| `qwen4-exp`                | `Qwen4ExpForConditionalGeneration`         | `Qwen/Qwen3.8-Flash-Next`                             |
 
 #### Key Properties and Gains
 
