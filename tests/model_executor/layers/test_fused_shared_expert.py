@@ -808,7 +808,6 @@ def test_models_fse_init(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Model construction resolves FSE consistently with Quark quantization."""
-
     quantization_config: dict[str, Any] = (
         get_deepseek_v4_quark_config(["layers.0.ffn.shared_experts"] if exclude else [])
         if model_type == "deepseek_v4"
@@ -832,6 +831,7 @@ def test_models_fse_init(
         runner_type="generate",
         is_moe=True,
         logits_processors=None,
+        rswa_window=None,
     )
     vllm_config.parallel_config.enable_expert_parallel = False
     if model_type == "deepseek_v4":
@@ -1227,7 +1227,6 @@ def test_non_quark_shared_expert_fse_is_incompatible() -> None:
 
 def _fp8_config(**kwargs: Any) -> Fp8Config:
     return Fp8Config(
-        is_checkpoint_fp8_serialized=True,
         activation_scheme="dynamic",
         weight_block_size=[128, 128],
         **kwargs,
@@ -1248,7 +1247,7 @@ def test_block_fp8_shared_expert_fse_is_compatible() -> None:
 def test_per_tensor_fp8_shared_expert_fse_is_incompatible() -> None:
     """Per-tensor scales are 0-D, so the shared-expert chunker cannot slice them."""
     compatible, reason = is_shared_expert_quant_fse_compatible(
-        Fp8Config(is_checkpoint_fp8_serialized=True, activation_scheme="dynamic"),
+        Fp8Config(activation_scheme="dynamic"),
         "model.layers.0.mlp.experts",
         "model.layers.0.mlp.shared_experts",
     )

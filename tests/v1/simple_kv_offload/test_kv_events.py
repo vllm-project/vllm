@@ -19,8 +19,10 @@ from tests.v1.simple_kv_offload.test_scheduler import (
     SchedulerFixture,
     _alloc_and_register,
     _allocate_cp_gpu_blocks,
+    _allocate_gpu_blocks,
     _make_cp_request,
     _make_kv_cache_config,
+    _make_scratch_kv_cache_config,
     _make_vllm_config,
     make_request,
     make_scheduler_output,
@@ -714,17 +716,8 @@ def test_disk_mode_block_removed_relabeled_storage() -> None:
         assert ev.medium == MEDIUM_STORAGE
 
 
-def test_mamba_dcp_metadata_guard() -> None:
-    """Mamba+DCP: token_ids guard emits [] when capture and emission sizes differ.
-
-    The metadata capture at _prepare_eager_store_specs uses
-    g_block_size = spec.block_size * cp_world_size = 32 * 2 = 64 to slice
-    tokens. The event emission uses block_size = spec.block_size * 1 = 32
-    for Mamba (SSM state is not CP-sharded). The guard in
-    _process_store_completion detects len(token_ids) != block_size and emits
-    token_ids=[] instead of misleading data. When #49962 fixes the capture
-    path, the guard stops triggering and correct token_ids flow through.
-    """
+def test_mamba_align_skips_positional_event_metadata() -> None:
+    """Mamba align emits events only from explicit boundary handoffs."""
     vbs = BLOCK_SIZE * 2
     kv_cfg = _make_mixed_kv_cache_config(
         num_blocks=16, with_mamba=True, mamba_block_size=32
@@ -739,8 +732,6 @@ def test_mamba_dcp_metadata_guard() -> None:
     sched = fix.scheduler
     gpu_pool = fix.gpu_block_pool
 
-    # Mamba g_block_size = 32 * 2 = 64, so 2 Mamba blocks need 128 computed
-    # tokens to be "ready"; FA g_block_size = 16 * 2 = 32 needs only 64.
     req = _make_cp_request(num_blocks=4, virtual_block_size=vbs)
     fa_blocks = _allocate_cp_gpu_blocks(gpu_pool, req, 2, vbs, group_id=0)
     mamba_blocks = _allocate_cp_gpu_blocks(gpu_pool, req, 2, vbs, group_id=1)
@@ -759,32 +750,46 @@ def test_mamba_dcp_metadata_guard() -> None:
 
     events = list(sched.take_events())
     stored = [e for e in events if isinstance(e, BlockStored)]
-    assert len(stored) == 4, (
-        f"expected 4 BlockStored (2 FA + 2 Mamba), got {len(stored)}"
-    )
-
-    by_group: dict[int, list[BlockStored]] = {}
-    for ev in stored:
-        by_group.setdefault(ev.group_idx, []).append(ev)
-
-    # FA group: capture size (64) == emission size (64) → token_ids present.
-    fa_events = by_group[0]
-    assert len(fa_events) == 2
-    for ev in fa_events:
+    assert len(stored) == 2
+    assert {ev.group_idx for ev in stored} == {0}
+    for idx, ev in enumerate(stored):
         assert ev.block_size == vbs
-        assert len(ev.token_ids) == vbs, (
-            f"FA token_ids should be {vbs}, got {len(ev.token_ids)}"
+        assert ev.token_ids == req.prompt_token_ids[idx * vbs : (idx + 1) * vbs]
+        expected_hash = maybe_convert_block_hash(
+            get_block_hash(make_block_hash_with_group_id(req.block_hashes[idx], 0))
         )
+        assert ev.block_hashes == [expected_hash]
 
-    # Mamba group: capture size (64) != emission size (32) → guard emits [].
-    mamba_events = by_group[1]
-    assert len(mamba_events) == 2
-    for ev in mamba_events:
-        assert ev.block_size == 32
-        assert ev.token_ids == [], (
-            f"Mamba token_ids should be [] (guard), got {ev.token_ids}"
-        )
-        assert ev.parent_block_hash is None, (
-            "Mamba parent_block_hash should be None (guard)"
-        )
-        assert ev.extra_keys is None, "Mamba extra_keys should be None (guard)"
+
+def test_scratch_group_store_emits_events_for_cacheable_groups_only() -> None:
+    """Event metadata is resolved only for prefix-cacheable groups.
+
+    A scratch group (GLM-5.3-Flash kpool tail) has a block size that does not
+    divide the hash block size, so viewing the request hashes at its block
+    size is impossible; the store must skip it and still emit BlockStored
+    for the attention blocks.
+    """
+    fix = make_events_scheduler(kv_cache_config=_make_scratch_kv_cache_config(16))
+    sched = fix.scheduler
+    gpu_pool = fix.gpu_block_pool
+    num_blocks = 2
+
+    req = make_request(num_blocks=num_blocks)
+    fa_blocks = _allocate_gpu_blocks(gpu_pool, req, num_blocks, group_id=0)
+    scratch_block = gpu_pool.get_new_blocks(1)
+    kv_blocks = KVCacheBlocks(blocks=(fa_blocks, scratch_block))
+    req.num_computed_tokens = num_blocks * BLOCK_SIZE
+    sched.update_state_after_alloc(req, kv_blocks, num_external_tokens=0)
+    sched_out = make_scheduler_output(
+        {req.request_id: num_blocks * BLOCK_SIZE},
+        new_reqs={req.request_id: kv_blocks.get_block_ids()},
+    )
+    meta = sched.build_connector_meta(sched_out)
+    assert sorted(meta.store_gpu_blocks) == sorted(b.block_id for b in fa_blocks)
+    simulate_store_completion(sched, meta.store_event)
+
+    events = list(sched.take_events())
+    assert len(events) == num_blocks
+    assert all(isinstance(e, BlockStored) for e in events)
+    assert {e.group_idx for e in events} == {0}
+    assert all(len(e.token_ids) == BLOCK_SIZE for e in events)
