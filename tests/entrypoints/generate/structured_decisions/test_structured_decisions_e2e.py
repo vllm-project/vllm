@@ -106,7 +106,7 @@ def test_answers_repeat(server):
                     "depends_on": ["x"],
                 }
             },
-            "not supported yet",
+            "unknown field(s)",
         ),
     ],
 )

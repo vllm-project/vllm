@@ -30,7 +30,6 @@ from vllm.utils.async_utils import merge_async_iterators
 from .prompts import answer_prefix, label_token_ids, state_text, system_text
 from .protocol import (
     MAX_QUESTIONS,
-    UNSUPPORTED_QUESTION_FIELDS,
     DecisionUsage,
     QuestionDiagnostics,
     ReadPromptRequest,
@@ -54,10 +53,11 @@ def parse_questions(request: StructuredDecisionRequest) -> list[Question]:
         raise StructuredDecisionError(f"questions: at most {MAX_QUESTIONS}")
     questions = []
     for qid, spec in request.questions.items():
-        extra = spec.model_extra or {}
-        if unsupported := [f for f in UNSUPPORTED_QUESTION_FIELDS if f in extra]:
+        # Unknown fields are refused: a field this server ignores could be one
+        # that changes the answer.
+        if spec.model_extra:
             raise StructuredDecisionError(
-                f"question {qid!r}: {', '.join(unsupported)} not supported yet"
+                f"question {qid!r}: unknown field(s) {sorted(spec.model_extra)}"
             )
         questions.append(
             build_question(qid, spec.type, spec.instructions, spec.criteria)

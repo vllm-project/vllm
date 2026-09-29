@@ -88,5 +88,5 @@ something other than a label, so the answer deserves less trust.
 | `instructions` | optional context placed ahead of the questions |
 | `chat_template_kwargs` | passed to the chat template, for example `{"enable_thinking": false}` |
 
-`depends_on`, `ask_if` and `alone` on a question are rejected with a 400 until
-they are implemented.
+A question with any field other than `type`, `instructions` and `criteria` is
+rejected with a 400.

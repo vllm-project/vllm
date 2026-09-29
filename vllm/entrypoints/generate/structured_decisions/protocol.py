@@ -15,11 +15,6 @@ from vllm.utils import random_uuid
 
 MAX_QUESTIONS = 64
 
-# Question fields from the full decision API that are not implemented yet. A
-# request that uses one gets a 400, because dropping the field would change
-# the answers.
-UNSUPPORTED_QUESTION_FIELDS = ("depends_on", "ask_if", "alone")
-
 
 class QuestionSpec(OpenAIBaseModel):
     type: str
