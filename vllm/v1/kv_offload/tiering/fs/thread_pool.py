@@ -138,13 +138,17 @@ class DualQueueThreadPool:
     def wait_idle(self) -> None:
         """Block until there are no in-flight jobs.
 
-        After this returns, every submitted job has had its last task
-        finish, so no worker thread is still copying data. Note:
+        After this returns, every submitted task has finished or been
+        cancelled by shutdown, so no worker thread is still copying data. Note:
         completed jobs may still be sitting in ``_finished_q`` waiting
         for ``get_finished()`` to drain them.
         """
         with self._condition:
             self._condition.wait_for(lambda: self._inflight_jobs == 0)
+        # Shutdown clears the job count but lets active I/O finish.
+        if self._stop:
+            for t in self._threads:
+                t.join()
 
     def shutdown(self, wait: bool = True) -> None:
         with self._condition:
@@ -190,5 +194,6 @@ class DualQueueThreadPool:
             if job_finished:
                 with self._condition:
                     self._finished_q.append((state.job_id, success, total_time))
-                    self._inflight_jobs -= 1
+                    if not self._stop:
+                        self._inflight_jobs -= 1
                     self._condition.notify_all()
