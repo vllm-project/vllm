@@ -78,6 +78,7 @@ cached and keep loading from disk in the engine.
 
 import contextlib
 import fcntl
+import gc
 import multiprocessing
 import os
 import socket
@@ -116,6 +117,7 @@ from vllm.model_executor.model_loader.weight_cache.utils import (
     is_draft_model_cacheable,
 )
 from vllm.platforms import current_platform
+from vllm.utils.mem_utils import format_gib
 from vllm.utils.torch_utils import set_default_torch_dtype
 from vllm.v1.worker.workspace import init_workspace_manager
 
@@ -249,10 +251,17 @@ class WeightCacheDaemon:
         with set_current_vllm_config(self.vllm_config):
             ensure_model_parallel_initialized(self.tp_size, self.pp_size)
             self.model = self.get_model()
+        # Loading and post-processing leave freed transients in the caching
+        # allocator; return them so engines sharing the GPU can use them.
+        gc.collect()
+        torch.accelerator.empty_cache()
         logger.info(
-            "Weight cache %s daemon rank %d loaded model",
+            "Weight cache %s daemon rank %d loaded model (%s GiB allocated, "
+            "%s GiB reserved)",
             self.role,
             self.global_rank,
+            format_gib(torch.accelerator.memory_allocated()),
+            format_gib(torch.accelerator.memory_reserved()),
         )
 
     def get_model(self) -> torch.nn.Module:
@@ -369,6 +378,14 @@ class WeightCacheDaemon:
         cmd = request.get("cmd")
         if cmd == "get_state":
             self._handle_get_state(conn, request)
+        elif cmd == "get_memory":
+            send_msg(
+                conn,
+                {
+                    "status": "ok",
+                    "memory_bytes": torch.accelerator.memory_allocated(),
+                },
+            )
         elif cmd == "release":
             self._handle_release(conn)
         else:

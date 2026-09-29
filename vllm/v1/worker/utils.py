@@ -536,13 +536,50 @@ def sanity_check_mm_encoder_outputs(
     )
 
 
-def request_memory(init_snapshot: MemorySnapshot, cache_config: CacheConfig) -> int:
+def request_memory(
+    init_snapshot: MemorySnapshot,
+    cache_config: CacheConfig,
+    external_weight_memory: int = 0,
+) -> int:
     """Calculate the amount of memory required by vLLM, then validate
     that the current amount of free memory is sufficient for that.
     """
     requested_memory = math.ceil(
         init_snapshot.total_memory * cache_config.gpu_memory_utilization
     )
+
+    if external_weight_memory > 0:
+        engine_memory = requested_memory - external_weight_memory
+        if engine_memory <= 0:
+            raise ValueError(
+                f"Externally held weights on device {init_snapshot.device_} "
+                f"({format_gib(external_weight_memory)}/"
+                f"{format_gib(init_snapshot.total_memory)} GiB) exceed the "
+                "desired GPU memory utilization "
+                f"({cache_config.gpu_memory_utilization}, "
+                f"{format_gib(requested_memory)} GiB). Increase GPU memory "
+                "utilization or reduce GPU memory used by other processes."
+            )
+        if init_snapshot.free_memory < engine_memory:
+            raise ValueError(
+                f"Free memory on device {init_snapshot.device_} "
+                f"({format_gib(init_snapshot.free_memory)}/"
+                f"{format_gib(init_snapshot.total_memory)} GiB) on startup "
+                "is less than the engine's budget after excluding "
+                "external process's weights "
+                f"({cache_config.gpu_memory_utilization}, "
+                f"{format_gib(engine_memory)} GiB). Decrease GPU memory "
+                "utilization or reduce GPU memory used by other processes."
+            )
+        logger.info_once(
+            "Weights are held outside this process: of the %s GiB "
+            "utilization budget, %s GiB is externally held and "
+            "%s GiB remains for the engine's own allocations.",
+            format_gib(requested_memory),
+            format_gib(external_weight_memory),
+            format_gib(engine_memory),
+        )
+        return engine_memory
 
     if init_snapshot.free_memory < requested_memory:
         raise ValueError(

@@ -13,7 +13,7 @@ import torch
 
 import vllm.v1.attention.backends.mla.index_group as index_group_module
 import vllm.v1.hisparse.runtime as hisparse_runtime_module
-from vllm.config import CUDAGraphMode
+from vllm.config import CacheConfig, CUDAGraphMode
 from vllm.config.mamba import MambaBackendEnum, MambaConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.hisparse import (
     worker as hisparse_worker_module,
@@ -25,12 +25,15 @@ from vllm.distributed.kv_transfer.kv_connector.v1.hisparse.worker import (
     _SlotMappingStaging,
 )
 from vllm.model_executor.layers.mamba.mamba_mixer2 import MambaMixer2
+from vllm.utils.mem_constants import GiB_bytes
+from vllm.utils.mem_utils import MemorySnapshot
 from vllm.v1.core.kv_cache_utils import KVCacheBlockCopy
 from vllm.v1.hisparse.types import SparseKVPageTransfer, SparseKVRowMirror
 from vllm.v1.worker.utils import (
     bind_kv_cache,
     bind_kv_cache_to_layers,
     copy_kv_cache_blocks_inplace,
+    request_memory,
 )
 
 
@@ -1390,3 +1393,36 @@ def test_bind_kv_cache_draft_model(default_vllm_config):
     assert runner_kv_caches[1] is kv_cache["draft_model.layers.0.attn"]
     assert runner_kv_caches[2] is kv_cache["model.layers.1.attn"]
     assert runner_kv_caches[3] is kv_cache["draft_model.layers.1.attn"]
+
+
+def _memory_snapshot(total_gib: int, free_gib: int) -> MemorySnapshot:
+    return MemorySnapshot(
+        free_memory=free_gib * GiB_bytes,
+        total_memory=total_gib * GiB_bytes,
+        device="cpu",
+        auto_measure=False,
+    )
+
+
+def test_request_memory_charges_external_weights():
+    """Externally held weights are charged against the utilization budget;
+    the engine is granted only the remainder."""
+    cache_config = CacheConfig(gpu_memory_utilization=0.9)
+    # 70 GiB of a 100 GiB device is held externally before the worker starts.
+    snapshot = _memory_snapshot(total_gib=100, free_gib=30)
+
+    with pytest.raises(ValueError, match="less than desired"):
+        request_memory(snapshot, cache_config)
+
+    # 90 GiB budget - 70 GiB external = 20 GiB for the engine.
+    assert request_memory(snapshot, cache_config, 70 * GiB_bytes) == 20 * GiB_bytes
+
+    # The external weights alone exceed the utilization budget.
+    with pytest.raises(ValueError, match="exceed the desired"):
+        request_memory(snapshot, cache_config, 95 * GiB_bytes)
+
+    # Other tenants squeeze free memory below the engine's remainder.
+    with pytest.raises(ValueError, match="less than the engine's budget"):
+        request_memory(
+            _memory_snapshot(total_gib=100, free_gib=10), cache_config, 70 * GiB_bytes
+        )
