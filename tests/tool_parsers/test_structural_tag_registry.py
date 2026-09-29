@@ -1317,27 +1317,153 @@ def test_mimo_strict_compact_xml(policy):
     )
 
 
-@pytest.mark.parametrize("policy", ["auto", "required"])
-def test_mimo_request_limits_parallel_calls(sample_tools_strict, policy):
+_DS_CALLS_BEGIN = "<\uff5ctool\u2581calls\u2581begin\uff5c>"
+_DS_CALL_BEGIN = "<\uff5ctool\u2581call\u2581begin\uff5c>"
+_DS_SEP = "<\uff5ctool\u2581sep\uff5c>"
+_DS_CALL_END = "<\uff5ctool\u2581call\u2581end\uff5c>"
+_DS_CALLS_END = "<\uff5ctool\u2581calls\u2581end\uff5c>"
+
+# One entry per tool-call list shape: top-level triggered tags (mimo, qwen3),
+# tags with a separator (hermes required), and a calls block wrapping the list
+# (deepseek). Each is (tool_parser, list prefix, one call, list suffix).
+_SINGLE_CALL_CASES = [
+    (
+        "mimo",
+        "",
+        "<tool_call><function=get_weather><parameter=city>Paris</parameter>"
+        "</function></tool_call>",
+        "",
+    ),
+    (
+        "hermes",
+        "",
+        '<tool_call>\n{"name": "get_weather", "arguments": {"city": "Paris"}}'
+        "\n</tool_call>",
+        "",
+    ),
+    (
+        "qwen3_xml",
+        "",
+        "<tool_call>\n<function=get_weather>\n<parameter=city>\nParis\n"
+        "</parameter>\n</function>\n</tool_call>",
+        "",
+    ),
+    (
+        "deepseek_v31",
+        _DS_CALLS_BEGIN,
+        f'{_DS_CALL_BEGIN}get_weather{_DS_SEP}{{"city": "Paris"}}{_DS_CALL_END}',
+        _DS_CALLS_END,
+    ),
+]
+
+_SINGLE_CALL_IDS = [case[0] for case in _SINGLE_CALL_CASES]
+
+
+def _tool_calling_grammar(
+    tool_parser: str,
+    tools: list[ChatCompletionToolsParam],
+    request: ChatCompletionRequest | ResponsesRequest,
+) -> Grammar | None:
     from vllm.parser.parser_manager import ParserManager
 
+    parser_cls = ParserManager.get_parser(
+        tool_parser_name=tool_parser, enable_auto_tools=True
+    )
+    adjusted = parser_cls(MagicMock(), tools=tools).adjust_request(request)
+    structured_outputs = adjusted.structured_outputs
+    if structured_outputs is None or structured_outputs.structural_tag is None:
+        return None
+    return Grammar.from_structural_tag(structured_outputs.structural_tag)
+
+
+@pytest.mark.parametrize("policy", ["auto", "required"])
+@pytest.mark.parametrize(
+    "tool_parser,prefix,call,suffix", _SINGLE_CALL_CASES, ids=_SINGLE_CALL_IDS
+)
+def test_parallel_tool_calls_false_limits_grammar_to_one_call(
+    sample_tools, tool_parser, prefix, call, suffix, policy
+):
+    # Tools are not strict, so auto gets a grammar only because of the limit.
     request = ChatCompletionRequest(
-        model="mimo",
+        model="m",
         messages=[],
-        tools=[t.model_dump() for t in sample_tools_strict],
+        tools=[t.model_dump() for t in sample_tools],
         tool_choice=policy,
         parallel_tool_calls=False,
     )
-    parser_cls = ParserManager.get_parser(
-        tool_parser_name="mimo", enable_auto_tools=True
+
+    grammar = _tool_calling_grammar(tool_parser, sample_tools, request)
+
+    assert grammar is not None
+    assert _is_grammar_accept_string(grammar, prefix + call + suffix)
+    assert not _is_grammar_accept_string(grammar, prefix + call * 2 + suffix)
+    assert not _is_grammar_accept_string(grammar, prefix + call + suffix + "text")
+
+
+@pytest.mark.parametrize(
+    "tool_parser,prefix,call,suffix", _SINGLE_CALL_CASES, ids=_SINGLE_CALL_IDS
+)
+def test_parallel_tool_calls_default_keeps_grammar_unlimited(
+    sample_tools, tool_parser, prefix, call, suffix
+):
+    def request(policy: str) -> ChatCompletionRequest:
+        return ChatCompletionRequest(
+            model="m",
+            messages=[],
+            tools=[t.model_dump() for t in sample_tools],
+            tool_choice=policy,
+        )
+
+    assert _tool_calling_grammar(tool_parser, sample_tools, request("auto")) is None
+    grammar = _tool_calling_grammar(tool_parser, sample_tools, request("required"))
+    assert grammar is not None
+    assert _is_grammar_accept_string(grammar, prefix + call * 2 + suffix)
+
+
+def test_parallel_tool_calls_false_does_not_enable_calls_with_response_format(
+    sample_tools,
+):
+    # With the flag unset, auto + response_format + non-strict tools is
+    # format-only. Setting the flag to false must not make tool calls possible.
+    request = ChatCompletionRequest(
+        model="m",
+        messages=[],
+        tools=[t.model_dump() for t in sample_tools],
+        tool_choice="auto",
+        parallel_tool_calls=False,
+        response_format={
+            "type": "json_schema",
+            "json_schema": {"name": "answer", "schema": {"type": "object"}},
+        },
     )
-    parser = parser_cls(MagicMock(), tools=sample_tools_strict)
-    adjusted = parser.adjust_request(request)
-    grammar = Grammar.from_structural_tag(adjusted.structured_outputs.structural_tag)
-    call = (
-        "<tool_call><function=get_weather><parameter=city>北京</parameter>"
-        "</function></tool_call>"
+
+    assert _tool_calling_grammar("hermes", sample_tools, request) is None
+
+
+def test_responses_parallel_tool_calls_false_limits_grammar_to_one_call():
+    # The Responses API has no post-hoc filter, so the grammar is the only limit.
+    request = ResponsesRequest.model_validate(
+        {
+            "input": "hi",
+            "tools": [
+                {
+                    "type": "function",
+                    "name": "get_weather",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"city": {"type": "string"}},
+                        "required": ["city"],
+                    },
+                }
+            ],
+            "tool_choice": "required",
+            "parallel_tool_calls": False,
+        }
     )
+    _, _, call, _ = _SINGLE_CALL_CASES[1]
+
+    grammar = _tool_calling_grammar("hermes", request.tools, request)
+
+    assert grammar is not None
     assert _is_grammar_accept_string(grammar, call)
     assert not _is_grammar_accept_string(grammar, call * 2)
-    assert not _is_grammar_accept_string(grammar, call + "extra text")
