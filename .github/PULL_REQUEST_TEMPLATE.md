@@ -2,11 +2,11 @@
 
 ## Overview
 
-<!-- Include a brief summary of the change. Link relevant issues and PRs -->
+<!-- Summarize the change in 1-2 lines. Link relevant issues and PRs. -->
 
 ## Claims
 
-<!-- State the accomplishments. Speedups, feature support, bug fix, etc. -->
+<!-- State the accomplishments in a few concrete bullets: speedups, feature support, bug fixes, etc. -->
 
 ## Validation
 
@@ -14,7 +14,7 @@
 
 ## Details
 
-<!-- Share detailed notes about the PR. Design considerations, issue root-cause, performance analysis, etc. -->
+<!-- Explain motivation, design decisions, root cause, tradeoffs, and limitations concisely. Link or collapse lengthy supporting material. -->
 
 ---
 
@@ -25,7 +25,7 @@
 - [ ] AI assistance was used during the creation of this PR.
 
 - [ ] **Design Fit:** Minimizes impact on core components, reuses existing functionality, and justifies added complexity.
-- [ ] **Testing and Validation:** Validates the change and ensures any added tests are meaningful, reliable, and integrated into CI.
+- [ ] **Testing and Validation:** Validates the change and ensures any added tests are meaningful and reliable, with CI coverage or documented CI resource constraints and validation performed outside CI.
 - [ ] **Code Quality and Style:** Keeps code and comments clear and concise, and updates relevant documentation and examples.
 - [ ] **Pull Request Contents:** Includes a brief summary and relevant links, supports claims with evidence, explains root causes and implementation trade-offs, and follows the contributing guide.
 </details>
