@@ -492,12 +492,17 @@ def _hip_skinny_reference(
         (3, 4096, 256, 64),
         (4, 2560, 256, 128),
         (5, 4096, 256, 32),
-        # K * batch beyond what LDS holds (32768 fp16 elements): on gfx115x the
-        # medium kernel reads the overflow rows from global memory; elsewhere
-        # the op rejects these, as the layer routes them to Triton.
+        # K * batch beyond what LDS holds (32768 fp16 elements), so gfx115x
+        # walks K in chunks; elsewhere the op rejects these, as the layer
+        # routes them to Triton. The per-row window shrinks as the batch grows,
+        # so these cover a single reload and several, with and without a short
+        # final chunk. 20992 is not a multiple of the K step either, so it
+        # crosses a chunk boundary *and* has a ragged K tail.
+        (2, 20480, 512, 64),
         (3, 16384, 512, 32),
         (4, 16384, 512, 128),
         (5, 21504, 512, 32),
+        (5, 20992, 512, 128),
     ],
 )
 def test_hip_skinny_wvSplitK_int4_g(dtype, M, K, N, G, has_zp):

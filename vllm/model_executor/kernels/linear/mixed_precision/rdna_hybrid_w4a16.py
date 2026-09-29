@@ -67,8 +67,9 @@ def _on_gfx115x() -> bool:
 # Maximum batch size M for the HIP skinny kernel path (C++ supports N_in
 # up to 5).  When M is at or below this AND K*M fits in LDS, the skinny kernel
 # is used; otherwise the Triton prefill path handles the GEMM.  On gfx115x the
-# LDS term is dropped: the medium kernel stages the activation rows that fit in
-# LDS and reads the rest from global memory.
+# LDS term is dropped: deep-K shapes stage every activation row in LDS one K
+# chunk at a time, and only when N is not a multiple of the kernel's row tile
+# does the medium kernel read the rows that do not fit from global memory.
 MAX_SKINNY_BATCH_SIZE = 5
 # 64 KiB per-workgroup LDS limit expressed in fp16 elements.
 # (AMD RDNA has 128 KiB total LDS per CU, but 64 KiB per workgroup.)
