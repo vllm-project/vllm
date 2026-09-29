@@ -1085,8 +1085,7 @@ class MLADualRMSGroupQuantPattern(
         ],
     ]
 ):
-    """
-    Fuse the MLA FP8 *block-scale* attention path -- q-latent RMSNorm + FP8
+    """Fuse the MLA FP8 *block-scale* attention path -- q-latent RMSNorm + FP8
     group quant plus kv-latent RMSNorm -- into AITER's
     ``fused_qk_rmsnorm_group_quant``.
 
@@ -1213,8 +1212,8 @@ class MLADualRMSNormFusionPass(VllmFusionPatternMatcherPass):
     ``fused_qk_rmsnorm`` HIP kernel.
 
     The FP8 attention path is also handled via
-    :class:`MLADualRMSPerTokenQuantPattern` or :class:`MLADualRMSGroupQuantPattern`, 
-    which fuse the q-latent RMSNorm + FP8 per-token/group quant together with 
+    :class:`MLADualRMSPerTokenQuantPattern` or :class:`MLADualRMSGroupQuantPattern`,
+    which fuse the q-latent RMSNorm + FP8 per-token/group quant together with
     the kv-latent RMSNorm into ``fused_mla_dual_rms_norm_<per_token|group>_quant``
     backed by aiter's ``fused_qk_rmsnorm_<per_token|group>_quant`` HIP kernel.
     """
@@ -1225,6 +1224,4 @@ class MLADualRMSNormFusionPass(VllmFusionPatternMatcherPass):
         for epsilon in [1e-5, 1e-6]:
             self.register(MLADualRMSNormPattern(epsilon))
             self.register(MLADualRMSPerTokenQuantPattern(epsilon))
-            self.register(
-                MLADualRMSGroupQuantPattern(epsilon)
-            )
+            self.register(MLADualRMSGroupQuantPattern(epsilon))
