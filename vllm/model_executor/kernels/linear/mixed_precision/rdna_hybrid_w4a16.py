@@ -68,8 +68,10 @@ def _on_gfx115x() -> bool:
 # Maximum activation rows supported by HIP skinny (Python M maps to C++ N_in).
 # When K*M exceeds regular LDS capacity, the C++ medium kernel caches the
 # prefix in LDS and reads the remaining activation elements from global memory.
-# On gfx115x the K*M term is dropped entirely: the medium kernel reads whatever
-# does not fit straight from global memory, so no bound is needed.
+# On gfx115x the K*M term is dropped entirely: deep-K shapes stage every
+# activation row in LDS one K chunk at a time, and only when N is not a
+# multiple of the kernel's row tile does the medium kernel fall back to reading
+# the rows that do not fit from global memory.
 MAX_SKINNY_BATCH_SIZE = 5
 # 64 KiB per-workgroup LDS limit expressed in fp16 elements.
 # (AMD RDNA has 128 KiB total LDS per CU, but 64 KiB per workgroup.)
