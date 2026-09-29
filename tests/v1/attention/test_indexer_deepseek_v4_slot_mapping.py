@@ -11,9 +11,15 @@ from vllm.model_executor.layers.attention.sparse_mla_attention import (
     SparseMLACommonMetadataBuilder,
 )
 from vllm.models.deepseek_v4.sparse_mla import DeepseekV4SparseMLABackend
+from vllm.models.deepseek_v41.attention import _swa_cache_block_size
+from vllm.models.deepseek_v41.nvidia.flashinfer_sparse import (
+    DeepseekV4FlashInferMLASparseBackend,
+)
 from vllm.models.deepseek_v41.sparse_mla import (
     DeepseekV4SparseMLABackend as DeepseekV41SparseMLABackend,
 )
+from vllm.platforms import current_platform
+from vllm.platforms.interface import DeviceCapability
 from vllm.v1.attention.backend import CommonAttentionMetadata
 from vllm.v1.attention.backends.mla.compressor_utils import (
     CompressedSlotMappingKernel,
@@ -183,6 +189,54 @@ def test_indexer_preserves_deepseek_v41_mla_block_size():
         )
         == block_size
     )
+
+
+@pytest.mark.parametrize(
+    ("capability", "page_size"),
+    [
+        pytest.param(DeviceCapability(9, 0), 64, id="sm90"),
+        pytest.param(DeviceCapability(10, 0), 128, id="sm100"),
+        pytest.param(DeviceCapability(12, 0), 64, id="sm120"),
+        pytest.param(DeviceCapability(12, 1), 64, id="sm121"),
+    ],
+)
+def test_deepseek_v41_sparse_mla_kernel_page_size(monkeypatch, capability, page_size):
+    """SM120 FlashInfer and DeepGEMM kernels only instantiate 64-token pages.
+
+    The MLA and indexer groups share a manager block, so every V4.1 backend
+    must agree on the page size or ``select_common_block_size`` finds no
+    common size at startup.
+    """
+    monkeypatch.setattr(
+        type(current_platform), "get_device_capability", lambda *_, **__: capability
+    )
+    backends = [
+        backend
+        for backend in (
+            DeepseekV41SparseMLABackend,
+            DeepseekV4FlashInferMLASparseBackend,
+            DeepseekV41IndexerBackend,
+        )
+        if backend.supports_compute_capability(capability)
+    ]
+    for backend in backends:
+        assert backend.get_supported_kernel_block_sizes() == [page_size]
+    assert select_common_block_size(page_size, backends) == page_size
+
+
+@pytest.mark.parametrize(
+    ("capability", "swa_block_size"),
+    [
+        pytest.param(DeviceCapability(9, 0), 32, id="sm90"),
+        pytest.param(DeviceCapability(10, 0), 32, id="sm100"),
+        pytest.param(DeviceCapability(12, 0), 64, id="sm120"),
+    ],
+)
+def test_deepseek_v41_swa_cache_block_size(monkeypatch, capability, swa_block_size):
+    monkeypatch.setattr(
+        type(current_platform), "get_device_capability", lambda *_, **__: capability
+    )
+    assert _swa_cache_block_size() == swa_block_size
 
 
 def test_indexer_warmup_normalizes_zero_compress_ratios():

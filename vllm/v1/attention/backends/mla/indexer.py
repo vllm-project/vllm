@@ -297,10 +297,10 @@ class DeepseekV41IndexerBackend(DeepseekV4IndexerBackend):
 
     @staticmethod
     def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int | MultipleOf]:
-        is_page_64_family = current_platform.is_device_capability_family(
-            90
-        ) or current_platform.is_device_capability_family(120)
-        return [64 if is_page_64_family else 128]
+        uses_64_token_pages = any(
+            current_platform.is_device_capability_family(family) for family in (90, 120)
+        )
+        return [64 if uses_64_token_pages else 128]
 
 
 @dataclass(frozen=True)
