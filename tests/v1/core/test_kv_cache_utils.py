@@ -54,6 +54,7 @@ from vllm.v1.core.kv_cache_utils import (
     is_kv_cache_spec_uniform,
     make_block_hash_with_group_id,
     tensor_data,
+    to_event_extra_keys,
 )
 from vllm.v1.hisparse.layout import (
     create_hisparse_layout,
@@ -1000,6 +1001,32 @@ def test_lora_name_and_cache_salt_block_hashes_do_not_collide(hash_fn):
     salted_req = make_request("salted", [0, 1, 2], hash_fn=hash_fn, cache_salt="foo")
 
     assert lora_req.block_hashes[0] != salted_req.block_hashes[0]
+
+
+def test_to_event_extra_keys_keeps_untagged_event_format():
+    """KV events keep publishing the extra-key shapes consumers already parse."""
+    request = make_request(
+        "0",
+        list(range(10)),
+        mm_positions=[PlaceholderRange(offset=2, length=3)],
+        mm_hashes=["hash1"],
+        cache_salt="salt",
+    )
+    request.lora_request = LoRARequest(
+        lora_name="adapter", lora_int_id=1, lora_path="/path/to/lora"
+    )
+
+    extra_keys, _ = generate_block_hash_extra_keys(request, 0, 5, 0)
+
+    assert extra_keys == (
+        ("lora", "adapter"),
+        ("mm", "hash1", 2),
+        ("cache_salt", "salt"),
+    )
+    event_keys = ("adapter", ("hash1", 2), "salt")
+    assert to_event_extra_keys([extra_keys, None]) == [event_keys, None]
+    assert to_event_extra_keys([]) is None
+    assert to_event_extra_keys(None) is None
 
 
 @pytest.mark.parametrize("hash_fn", [sha256, sha256_cbor])
