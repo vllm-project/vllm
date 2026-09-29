@@ -1363,7 +1363,6 @@ class MooncakeConnectorWorker:
                 type(group.kv_cache_spec).__qualname__,
                 tuple(group.layer_names),
                 group.kv_cache_spec.block_size,
-                group.kv_cache_spec.page_size_bytes,
                 group.kv_cache_spec.prefix_cacheable,
                 group.kv_cache_spec.prefix_replay_tokens,
             )
@@ -1373,8 +1372,6 @@ class MooncakeConnectorWorker:
             tuple(self.registered_layer_names),
             tuple(self.registered_layer_indices),
             tuple(self.registered_group_indices),
-            tuple(self.block_len_per_layer),
-            tuple(self.kv_block_len_per_layer),
         )
         return hashlib.sha256(
             repr((model_identity, groups, registration)).encode()

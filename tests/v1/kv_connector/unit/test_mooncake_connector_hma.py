@@ -7,6 +7,7 @@ send trimming, and group-count invariant checking in _build_transfer_params.
 """
 
 import asyncio
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -18,6 +19,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_connector im
     MooncakeConnector,
     MooncakeConnectorMetadata,
     MooncakeConnectorScheduler,
+    MooncakeConnectorWorker,
     MooncakeXferMetadata,
     MooncakeXferResponse,
     MooncakeXferResponseStatus,
@@ -580,6 +582,46 @@ def test_worker_is_hma_required_multiple_full_attention_groups():
     )
     worker = _make_kv_consumer_worker(kv_cache_config=kv_cache_config)
     assert worker._is_hma_required
+
+
+@pytest.mark.skip_global_cleanup
+def test_prefix_replay_layout_fingerprint_ignores_tp_local_widths():
+    vllm_config = create_vllm_config(
+        kv_connector="MooncakeConnector",
+        kv_role="kv_consumer",
+        block_size=16,
+    )
+
+    def make_worker(num_kv_heads: int, block_len: int) -> SimpleNamespace:
+        spec = FullAttentionSpec(
+            block_size=16,
+            num_kv_heads=num_kv_heads,
+            head_size=16,
+            dtype=torch.float16,
+        )
+        return SimpleNamespace(
+            vllm_config=vllm_config,
+            kv_cache_config=KVCacheConfig(
+                num_blocks=100,
+                kv_cache_tensors=[],
+                kv_cache_groups=[KVCacheGroupSpec(["layer0", "layer2"], spec)],
+            ),
+            registered_layer_names=["layer0", "layer2"],
+            registered_layer_indices=[0, 2],
+            registered_group_indices=[0, 0],
+            block_len_per_layer=[block_len, block_len],
+            kv_block_len_per_layer=[block_len // 2, block_len // 2],
+        )
+
+    tp1_worker = make_worker(num_kv_heads=32, block_len=8192)
+    tp8_worker = make_worker(num_kv_heads=4, block_len=1024)
+    assert (
+        tp1_worker.kv_cache_config.transfer_groups[0].kv_cache_spec.page_size_bytes
+        != tp8_worker.kv_cache_config.transfer_groups[0].kv_cache_spec.page_size_bytes
+    )
+    assert MooncakeConnectorWorker._prefix_replay_layout_fingerprint(
+        tp1_worker
+    ) == MooncakeConnectorWorker._prefix_replay_layout_fingerprint(tp8_worker)
 
 
 def test_worker_failed_recv_reports_request_level_failure_with_hma():
