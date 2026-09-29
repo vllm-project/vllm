@@ -24,7 +24,6 @@ class FakeMemoryProfiler:
 
 class FakeEplbState:
     instances: list["FakeEplbState"] = []
-    from_mapping_kwargs: dict[str, Any] | None = None
 
     def __init__(self, parallel_config: Any, device: torch.device):
         self.parallel_config = parallel_config
@@ -33,7 +32,7 @@ class FakeEplbState:
         self.step_calls: list[tuple[bool, bool, bool]] = []
         self.async_started = False
         self.is_async = True
-        self.built_from_mapping = False
+        self.update_mapping_calls: list[tuple[Any, torch.Tensor]] = []
         FakeEplbState.instances.append(self)
 
     def add_model(self, model: Any, model_config: Any) -> None:
@@ -45,18 +44,23 @@ class FakeEplbState:
     def start_async_loop(self) -> None:
         self.async_started = True
 
-    @classmethod
-    def from_mapping(cls, **kwargs: Any) -> "FakeEplbState":
-        cls.from_mapping_kwargs = kwargs
-        state = cls(kwargs["parallel_config"], kwargs["device"])
-        state.built_from_mapping = True
-        return state
+    def update_mapping(self, model_config: Any, mapping: torch.Tensor) -> None:
+        self.update_mapping_calls.append((model_config, mapping))
 
 
 def _make_runner(**overrides: Any) -> Any:
     runner: Any = mrv2.GPUModelRunner.__new__(mrv2.GPUModelRunner)
     runner.device = torch.device("cpu")
-    runner.model_config = SimpleNamespace(model="test-model")
+    runner.model_config = SimpleNamespace(model="test-model", logits_processors=None)
+    runner.req_states = SimpleNamespace(
+        device=runner.device,
+        max_num_reqs=8,
+        vocab_size=0,
+        all_token_ids=None,
+        prompt_len=None,
+        prefill_len=None,
+        total_len=None,
+    )
     runner.load_config = SimpleNamespace(load_format="hf")
     runner.parallel_config = SimpleNamespace(
         enable_eplb=True,
@@ -127,7 +131,7 @@ def test_v2_load_model_registers_moe_with_eplb(monkeypatch):
     assert runner.eplb_state.async_started is True
 
 
-def test_v2_load_model_with_dummy_weights_skips_eplb_registration(monkeypatch):
+def test_v2_load_model_with_dummy_weights_defers_eplb_async_loop(monkeypatch):
     FakeEplbState.instances.clear()
     model = SimpleNamespace(is_moe=True)
 
@@ -150,24 +154,20 @@ def test_v2_load_model_with_dummy_weights_skips_eplb_registration(monkeypatch):
 
     assert runner.load_config.load_format == "dummy"
     assert runner.eplb_state is not None
-    assert runner.eplb_state.add_model_calls == []
+    # A scaling-up worker registers so it can join the EPLB communicator.
+    assert runner.eplb_state.add_model_calls == [(model, runner.model_config)]
     assert runner.eplb_state.async_started is False
 
 
-def test_v2_setup_eplb_from_mapping_rebuilds_state(monkeypatch):
-    FakeEplbState.instances.clear()
-    FakeEplbState.from_mapping_kwargs = None
-    monkeypatch.setattr(eplb, "EplbState", FakeEplbState)
-    monkeypatch.setattr(eplb, "get_mixture_of_experts_model", lambda model: model)
-
-    runner = _make_runner(model=SimpleNamespace(is_moe=True))
+def test_v2_setup_eplb_from_mapping_updates_state_in_place():
+    runner = _make_runner()
+    state = FakeEplbState(runner.parallel_config, runner.device)
+    runner.eplb_state = state
     mapping = torch.tensor([[0, 1, 2, 3]], dtype=torch.int64)
     mrv2.GPUModelRunner.setup_eplb_from_mapping(runner, mapping)
 
-    assert runner.eplb_state is not None
-    assert runner.eplb_state.built_from_mapping is True
-    assert FakeEplbState.from_mapping_kwargs is not None
-    assert FakeEplbState.from_mapping_kwargs["expanded_physical_to_logical"] is mapping
+    assert runner.eplb_state is state
+    assert state.update_mapping_calls == [(runner.model_config, mapping)]
 
 
 def test_v2_sample_tokens_runs_eplb_on_non_last_pp_rank(monkeypatch):
