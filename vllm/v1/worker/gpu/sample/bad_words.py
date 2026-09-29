@@ -118,7 +118,7 @@ def _bad_words_kernel(
     token_idx = tl.program_id(0).to(tl.int64)
     bw_idx = tl.program_id(1)
 
-    req_state_idx = tl.load(expanded_idx_mapping_ptr + token_idx)
+    req_state_idx = tl.load(expanded_idx_mapping_ptr + token_idx).to(tl.int64)
     num_bad_words = tl.load(num_bad_words_ptr + req_state_idx)
 
     if bw_idx >= num_bad_words:

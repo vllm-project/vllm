@@ -237,7 +237,7 @@ def _prompt_logprobs_token_ids_kernel(
     BLOCK_SIZE: tl.constexpr,
 ):
     batch_idx = tl.program_id(0)
-    req_state_idx = tl.load(idx_mapping_ptr + batch_idx)
+    req_state_idx = tl.load(idx_mapping_ptr + batch_idx).to(tl.int64)
 
     query_start = tl.load(query_start_loc_ptr + batch_idx)
     query_end = tl.load(query_start_loc_ptr + batch_idx + 1)

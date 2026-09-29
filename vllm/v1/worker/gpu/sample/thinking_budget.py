@@ -169,7 +169,7 @@ def _update_committed_marker_cache_kernel(
     MAX_LEN: tl.constexpr,
     BLOCK: tl.constexpr,
 ):
-    req_state_idx = tl.load(req_ids_ptr + tl.program_id(0))
+    req_state_idx = tl.load(req_ids_ptr + tl.program_id(0)).to(tl.int64)
     budget = tl.load(thinking_token_budget_ptr + req_state_idx)
     if budget < 0:
         return
@@ -271,7 +271,7 @@ def _thinking_budget_kernel(
     END_LEN: tl.constexpr,
 ):
     token_idx = tl.program_id(0).to(tl.int64)
-    req_state_idx = tl.load(expanded_idx_mapping_ptr + token_idx)
+    req_state_idx = tl.load(expanded_idx_mapping_ptr + token_idx).to(tl.int64)
     budget = tl.load(thinking_token_budget_ptr + req_state_idx)
     if budget < 0:
         return

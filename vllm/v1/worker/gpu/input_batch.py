@@ -282,7 +282,7 @@ def _prepare_prefill_inputs_kernel(
     LOOKAHEAD_BLOCK: tl.constexpr,
 ):
     batch_idx = tl.program_id(0)
-    req_state_idx = tl.load(idx_mapping_ptr + batch_idx)
+    req_state_idx = tl.load(idx_mapping_ptr + batch_idx).to(tl.int64)
     prefill_len = tl.load(prefill_lens_ptr + req_state_idx)
     num_computed = tl.load(num_computed_tokens_ptr + req_state_idx)
     if num_computed >= prefill_len:
@@ -569,7 +569,7 @@ def _post_update_kernel(
     total_len_ptr,
 ):
     req_id = tl.program_id(0)
-    req_state_idx = tl.load(idx_mapping_ptr + req_id)
+    req_state_idx = tl.load(idx_mapping_ptr + req_id).to(tl.int64)
     if req_state_idx < 0:
         # Filter rows with negative index entries.
         return

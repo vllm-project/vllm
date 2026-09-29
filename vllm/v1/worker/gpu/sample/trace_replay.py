@@ -69,7 +69,7 @@ def _trace_replay_kernel(
     prompt_len_ptr,  # [max_num_reqs], int32
 ):
     batch_idx = tl.program_id(0)
-    req_state_idx = tl.load(idx_mapping_ptr + batch_idx)
+    req_state_idx = tl.load(idx_mapping_ptr + batch_idx).to(tl.int64)
     if req_state_idx < 0:
         return
 

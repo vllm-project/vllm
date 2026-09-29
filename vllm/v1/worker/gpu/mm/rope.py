@@ -157,7 +157,7 @@ def _prepare_rope_positions_kernel(
     NUM_DIMS: tl.constexpr,
 ):
     batch_idx = tl.program_id(0)
-    req_state_idx = tl.load(idx_mapping_ptr + batch_idx)
+    req_state_idx = tl.load(idx_mapping_ptr + batch_idx).to(tl.int64)
 
     prefill_len = tl.load(prefill_lens_ptr + req_state_idx)
     num_computed = tl.load(num_computed_tokens_ptr + req_state_idx)
