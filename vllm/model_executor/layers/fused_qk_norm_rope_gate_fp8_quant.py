@@ -176,8 +176,8 @@ def _fused_qk_norm_rope_gate_fp8_quant_impl(
         fused_qk_rmsnorm_rope_gate(
             q_gate,
             key,
-            query_norm_weight.float() + 1.0,
-            key_norm_weight.float() + 1.0,
+            query_norm_weight,
+            key_norm_weight,
             cos_sin_cache,
             positions,
             eps,
@@ -185,6 +185,7 @@ def _fused_qk_norm_rope_gate_fp8_quant_impl(
             num_kv_heads,
             head_dim,
             rotary_dim,
+            norm_beta=1.0,
             query_out=query_out,
             key_out=key_out,
             gate_out=gate_out,

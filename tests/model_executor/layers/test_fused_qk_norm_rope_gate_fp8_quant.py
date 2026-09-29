@@ -318,9 +318,10 @@ def test_fused_qk_norm_rope_gate_fp8_quant_pure_decode_uses_bf16_fallback(monkey
     torch.testing.assert_close(outputs[1], expected_key)
     torch.testing.assert_close(outputs[2], expected_gate)
     assert recorded_weights is not None
-    torch.testing.assert_close(recorded_weights[0], inputs[3].float() + 1.0)
-    torch.testing.assert_close(recorded_weights[1], inputs[4].float() + 1.0)
+    assert recorded_weights[0] is inputs[3]
+    assert recorded_weights[1] is inputs[4]
     assert recorded_kwargs is not None
+    assert recorded_kwargs["norm_beta"] == 1.0
     assert recorded_kwargs["query_out"] is outputs[0]
     assert recorded_kwargs["key_out"] is outputs[1]
     assert recorded_kwargs["gate_out"] is outputs[2]
