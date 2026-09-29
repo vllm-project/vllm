@@ -1,7 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from multiprocessing import connection
+import os
+import signal
+from multiprocessing import connection, get_context
 from threading import Event
 from types import SimpleNamespace
 
@@ -21,6 +23,89 @@ from vllm.v1.engine.utils import (
 )
 
 pytestmark = pytest.mark.skip_global_cleanup
+
+
+def _run_core_cleanup(conn: connection.Connection) -> None:
+    config = SimpleNamespace(
+        shutdown_timeout=0,
+        parallel_config=SimpleNamespace(
+            data_parallel_size=1,
+            numa_bind=False,
+            reconfigure_for_independent_dp_rank=lambda: None,
+        ),
+    )
+
+    def run_busy_loop() -> None:
+        raise RuntimeError("injected engine failure")
+
+    def cleanup() -> None:
+        conn.send("cleanup started")
+        conn.recv()
+        conn.send("cleanup finished")
+
+    proc = SimpleNamespace(
+        vllm_config=config,
+        shutdown_state=EngineShutdownState.RUNNING,
+        run_busy_loop=run_busy_loop,
+        _send_engine_dead=lambda: None,
+        shutdown=cleanup,
+    )
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        for name in (
+            "maybe_register_config_serialize_by_value",
+            "set_process_title",
+            "maybe_init_worker_tracer",
+            "decorate_logs",
+        ):
+            monkeypatch.setattr(core_module, name, lambda *args, **kwargs: None)
+        monkeypatch.setattr(core_module, "EngineCoreProc", lambda **kwargs: proc)
+        monkeypatch.setattr(
+            core_module,
+            "SignalCallback",
+            lambda callback: SimpleNamespace(trigger=lambda: None, stop=lambda: None),
+        )
+        try:
+            with pytest.raises(RuntimeError, match="injected engine failure"):
+                EngineCoreProc.run_engine_core(vllm_config=config)
+        finally:
+            conn.close()
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize(
+    "signum",
+    [signal.SIGTERM, signal.SIGINT, None],
+    ids=["sigterm", "sigint", "manager-timeout"],
+)
+def test_engine_core_cleanup_survives_signals_but_respects_deadline(
+    signum: int | None,
+) -> None:
+    """Finish cleanup on termination requests; permit the manager's forced kill."""
+    ctx = get_context("spawn")
+    parent_conn, child_conn = ctx.Pipe()
+    proc = ctx.Process(target=_run_core_cleanup, args=(child_conn,))
+    proc.start()
+    child_conn.close()
+    try:
+        assert parent_conn.poll(60)
+        assert parent_conn.recv() == "cleanup started"
+        if signum is None:
+            engine_utils.shutdown([proc], timeout=0.1)
+            proc.join(5)
+            assert proc.exitcode == -signal.SIGKILL
+        else:
+            assert proc.pid is not None
+            os.kill(proc.pid, signum)
+            parent_conn.send(None)
+            assert parent_conn.poll(5)
+            assert parent_conn.recv() == "cleanup finished"
+            proc.join(5)
+            assert proc.exitcode == 0
+    finally:
+        if proc.is_alive():
+            proc.kill()
+        proc.join(5)
+        parent_conn.close()
 
 
 @pytest.mark.parametrize(

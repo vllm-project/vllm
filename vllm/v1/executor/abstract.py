@@ -349,9 +349,12 @@ class Executor(ABC):
             logger.warning("Executor is already sleeping.")
             return
         time_before_sleep = time.perf_counter()
-        self.collective_rpc("sleep", kwargs=dict(level=level))
+        try:
+            self.collective_rpc("sleep", kwargs=dict(level=level))
+        finally:
+            # A worker may have released memory before reporting an error.
+            self.sleeping_tags |= SLEEP_TAGS
         time_after_sleep = time.perf_counter()
-        self.sleeping_tags |= SLEEP_TAGS
         logger.info(
             "It took %.6f seconds to fall asleep.", time_after_sleep - time_before_sleep
         )
