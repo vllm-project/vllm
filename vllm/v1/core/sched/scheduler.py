@@ -2263,7 +2263,7 @@ class Scheduler(SchedulerInterface):
             # Admission is closed: an open streaming-input session gets no more input.
             idle_sessions = [
                 request.request_id
-                for request in self.deferred_waiting
+                for request in self.requests.values()
                 if request.status == RequestStatus.WAITING_FOR_STREAMING_REQ
             ]
             ended_reqs += self.finish_requests(

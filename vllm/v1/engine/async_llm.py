@@ -759,6 +759,9 @@ class AsyncLLM(EngineClient):
 
         # Request validation error or admission control rejection.
         except (VLLMClientError, GracefulHTTPError) as e:
+            if q is not None:
+                # E.g. a paused engine rejected one child: reclaim its n>1 siblings.
+                await self.abort(q.request_id, internal=True)
             if self.log_requests:
                 logger.info("Request %s failed (bad request): %s.", request_id, e)
             raise

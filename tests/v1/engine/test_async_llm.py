@@ -1127,7 +1127,7 @@ async def test_pause_admission_policy_per_mode(mode: str):
             ),
         )
         # A utility call is handled after the add, so the paused engine saw it.
-        assert await engine.is_paused()
+        assert await asyncio.wait_for(engine.is_paused(), timeout=60)
         if mode != "keep":
             with pytest.raises(EnginePausedError):
                 await asyncio.wait_for(collector.get(), timeout=60)
@@ -1277,6 +1277,7 @@ async def test_wait_pause_ends_open_streaming_session():
             return out
 
         task = asyncio.create_task(session())
+        after.callback(task.cancel)
         await asyncio.wait_for(started.wait(), timeout=60)
         queued = await engine.add_request(
             request_id="queued",
@@ -1295,3 +1296,33 @@ async def test_wait_pause_ends_open_streaming_session():
 
         await engine.resume_generation()
         assert (await _generate(engine, "session")).finished
+
+
+@pytest.mark.asyncio
+async def test_rejected_streaming_session_stops_taking_input():
+    """A session rejected while paused must not keep submitting its input,
+    which would resume as untracked engine work, even if the caller reads the
+    collector directly and never closes it."""
+    with ExitStack() as after:
+        with set_default_torch_num_threads(1):
+            engine = AsyncLLM.from_engine_args(TEXT_ENGINE_ARGS)
+        after.callback(engine.shutdown)
+
+        input_closed = asyncio.Event()
+
+        async def inputs():
+            try:
+                yield StreamingInput(prompt=TEXT_PROMPT)
+                await asyncio.Event().wait()
+            finally:
+                input_closed.set()
+
+        await engine.pause_generation(mode="abort")
+        collector = await engine.add_request(
+            "session", inputs(), SamplingParams(max_tokens=5)
+        )
+        with pytest.raises(EnginePausedError):
+            await asyncio.wait_for(collector.get(), timeout=60)
+        await asyncio.wait_for(input_closed.wait(), timeout=5)
+        assert not engine.output_processor.has_unfinished_requests()
+        await engine.resume_generation()

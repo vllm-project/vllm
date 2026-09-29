@@ -678,17 +678,6 @@ class OutputProcessor:
             if req_state is None:
                 # Ignore output for already-aborted request.
                 continue
-            if (
-                engine_core_output.finish_reason == FinishReason.PAUSED
-                and req_state.queue is not None
-            ):
-                # Rejected by a paused engine: fail the request, n>1 siblings included.
-                parent = req_state.parent_req
-                reqs_to_abort += self.abort_requests(
-                    [parent.request_id if parent else req_id], internal=True
-                )
-                req_state.queue.put(EnginePausedError())
-                continue
 
             # 1) Compute stats for this iteration.
             self._update_stats_from_output(
@@ -698,9 +687,13 @@ class OutputProcessor:
             new_token_ids = engine_core_output.new_token_ids
             pooling_output = engine_core_output.pooling_output
             finish_reason = engine_core_output.finish_reason
-            if finish_reason == FinishReason.ABORT:
-                # The engine ended the whole streaming-input session, not one input.
+            if finish_reason in (FinishReason.ABORT, FinishReason.PAUSED):
+                # Ended by the engine, so a streaming-input session takes no more input.
                 req_state.streaming_input = False
+                if req_state.queue is not None:
+                    req_state.queue.close()
+                if pooling_output is None and req_state.detokenizer is None:
+                    pooling_output = EMPTY_CPU_TENSOR
             stop_reason = engine_core_output.stop_reason
             kv_transfer_params = engine_core_output.kv_transfer_params
             ec_transfer_params = engine_core_output.ec_transfer_params
@@ -761,6 +754,9 @@ class OutputProcessor:
                 else:
                     # LLMEngine: return list of RequestOutputs.
                     request_outputs.append(request_output)
+            if finish_reason == FinishReason.PAUSED and req_state.queue is not None:
+                # Retryable rejection; overrides any output still to be consumed.
+                req_state.queue.put(EnginePausedError())
 
             # Free completed requests.
             if finish_reason is not None:

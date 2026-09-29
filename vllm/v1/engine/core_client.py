@@ -382,7 +382,7 @@ class InprocClient(EngineCoreClient):
         return self.engine_core.get_supported_tasks()
 
     def add_request(self, request: EngineCoreRequest) -> None:
-        if self.engine_core.rejects_new_requests():
+        if self.engine_core.rejects_new_requests() and not request.abort_immediately:
             raise EnginePausedError()
         req, request_wave = self.engine_core.preprocess_add_request(request)
         self.engine_core.add_request(req, request_wave)

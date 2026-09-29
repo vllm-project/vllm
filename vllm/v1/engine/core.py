@@ -890,9 +890,7 @@ class EngineCore:
         - ``abort``: Set PAUSED_NEW, abort all requests, wait for abort
           outputs to be sent (when running with output_queue), optionally
           clear caches, then complete the returned Future.
-        - ``wait``: Set PAUSED_NEW (reject adds, keep stepping, end open
-          streaming-input sessions); when drained, optionally clear caches,
-          then complete the returned Future.
+        - ``wait``: Not supported in-process; see ``EngineCoreProc``.
         - ``keep``: Set PAUSED_ALL; return a Future that completes when the
           output queue is empty.
         """
