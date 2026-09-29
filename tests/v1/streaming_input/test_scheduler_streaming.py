@@ -171,8 +171,7 @@ class TestStreamingScheduler(unittest.TestCase):
             prompt_token_ids=[1, 2, 3],
         )
         session.num_computed_tokens = len(session.prompt_token_ids)
-        session.max_tokens = 10  # Initial max_tokens
-        session._output_token_ids = [1] * 10  # reach max_tokens
+        session.max_tokens = 2
 
         new_request = DummyRequest(
             request_id="session",
@@ -185,26 +184,21 @@ class TestStreamingScheduler(unittest.TestCase):
         scheduler._update_request_as_session(session, update)
 
         assert session.sampling_params.max_tokens == 10
-        # _update_request_as_session clears output tokens first, so
-        # max_tokens = num_output_tokens (0) + update.max_tokens (10) = 10
         assert session.max_tokens == 10
 
         session.num_computed_tokens = len(session.prompt_token_ids)
 
-        # Simulate generating 5 more output tokens
-        session._output_token_ids = [1] * 5
         new_request2 = DummyRequest(
             request_id="session",
             prompt_token_ids=[7, 8, 9],
         )
-        new_request2.sampling_params = SamplingParams(max_tokens=10)
-        new_request2.max_tokens = 10
+        new_request2.sampling_params = SamplingParams(max_tokens=4)
+        new_request2.max_tokens = 4
         update2 = StreamingUpdate.from_request(new_request2)
         scheduler._update_request_as_session(session, update2)
 
-        assert session.sampling_params.max_tokens == 10
-        # Again, output tokens are cleared first, so max_tokens = 0 + 10 = 10
-        assert session.max_tokens == 10
+        assert session.sampling_params.max_tokens == 4
+        assert session.max_tokens == 4
 
     def test_update_request_as_session(self):
         scheduler = create_scheduler()
@@ -554,9 +548,9 @@ class TestStreamingScheduler(unittest.TestCase):
         eco_cycle2 = eco_dict_cycle2[session.client_index].outputs[0]
         assert eco_cycle2.finish_reason == FinishReason.STOP
         assert session.status == RequestStatus.WAITING_FOR_STREAMING_REQ
-        # Sessions paused for streaming input are blocked-waiting, so they
-        # live in the skipped_waiting queue rather than the main waiting queue.
-        assert session in scheduler.skipped_waiting
+        # Sessions paused for streaming input keep their KV blocks, so they
+        # live in the kv_holding_waiting queue.
+        assert session in scheduler.kv_holding_waiting
         assert session._all_token_ids == [1, 2, 3, 10, STOP_TOKEN]
 
         # CRITICAL ASSERTION: Cached prompt_token_ids STILL must not have changed
