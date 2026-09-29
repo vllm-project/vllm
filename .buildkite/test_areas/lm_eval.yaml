@@ -578,7 +578,7 @@ steps:
     - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-h200-deepseek-v32-tp.txt
   mirror:
     amd:
-      label: ":amd: (MI355) LM Eval DeepSeek V3.2 TP"
+      label: ":amd: (MI355) LM Eval DeepSeek V3-2 TP"
       dind: false
       device: mi355_4
       num_devices: 4
@@ -621,7 +621,7 @@ steps:
     - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-h200-deepseek-v32-dp.txt
   mirror:
     amd:
-      label: ":amd: (MI355) LM Eval DeepSeek V3.2 DP"
+      label: ":amd: (MI355) LM Eval DeepSeek V3-2 DP"
       dind: false
       device: mi355_4
       num_devices: 4
