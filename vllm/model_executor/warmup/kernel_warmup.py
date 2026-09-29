@@ -309,6 +309,15 @@ def _flashinfer_autotune_skip_ops(runner: "GPUModelRunner") -> set[str] | None:
 
 
 _FLASHINFER_BF16_AUTOTUNE_MAX_TOKENS = 32
+_FLASHINFER_BF16_LINEAR_BACKENDS = frozenset({"flashinfer_cutedsl", "flashinfer_cudnn"})
+
+
+def _flashinfer_bf16_linear_backend_active(runner: "GPUModelRunner") -> bool:
+    kernel_config = runner.vllm_config.kernel_config
+    return (
+        kernel_config.linear_backend in _FLASHINFER_BF16_LINEAR_BACKENDS
+        or kernel_config.unquantized_linear_backend in _FLASHINFER_BF16_LINEAR_BACKENDS
+    )
 
 
 def _flashinfer_deferred_moe_token_counts(
@@ -337,10 +346,9 @@ def _flashinfer_autotune_token_counts(
     max_tokens = runner.scheduler_config.max_num_batched_tokens
     # Tune the widest bucket set first so bounded passes reuse its configs.
     token_counts = [max_tokens]
-    linear_backend = runner.vllm_config.kernel_config.linear_backend
     if (
         include_bf16
-        and linear_backend == "flashinfer_cutedsl"
+        and _flashinfer_bf16_linear_backend_active(runner)
         and max_tokens > _FLASHINFER_BF16_AUTOTUNE_MAX_TOKENS
     ):
         token_counts.append(_FLASHINFER_BF16_AUTOTUNE_MAX_TOKENS)
@@ -380,7 +388,7 @@ def _run_flashinfer_bf16_autotune_dummy_run(
     import vllm.utils.flashinfer as fi_utils
 
     if (
-        runner.vllm_config.kernel_config.linear_backend != "flashinfer_cutedsl"
+        not _flashinfer_bf16_linear_backend_active(runner)
         or runner.scheduler_config.max_num_batched_tokens
         <= _FLASHINFER_BF16_AUTOTUNE_MAX_TOKENS
     ):
