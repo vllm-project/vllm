@@ -964,12 +964,13 @@ class SamplingParams(
                         parameter="prompt_logprob_token_ids",
                     ) from e
             vocab_size = model_config.get_vocab_size()
-            if ids.min() < -1 or ids.max() >= vocab_size:
+            lo, hi = int(ids.min()), int(ids.max())
+            if lo < -1 or hi >= vocab_size:
                 raise VLLMValidationError(
                     "prompt_logprob_token_ids contain out-of-vocab token ids "
                     f"(-1 pads a row). Vocabulary size: {vocab_size}",
                     parameter="prompt_logprob_token_ids",
-                    value=[int(ids.min()), int(ids.max())],
+                    value=[lo, hi],
                 )
             # In-vocab IDs fit int32, like the runner's other token ID buffers.
             self.prompt_logprob_token_ids = np.ascontiguousarray(ids, dtype=np.int32)

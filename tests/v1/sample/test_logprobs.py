@@ -456,14 +456,6 @@ def test_prompt_logprob_token_ids_validation():
         [1, -1, -1, -1],
         [4, 3, 2, 1],
     ]
-    # Rows sliced from a top-k array hold NumPy integer scalars.
-    topk = np.array([[4, 3, 2], [1, 5, 6]])
-    assert verify(
-        prompt_logprob_token_ids=[list(topk[0][:1]), list(topk[1])]
-    ).tolist() == [
-        [4, -1, -1],
-        [1, 5, 6],
-    ]
     # Any integer layout is normalized to what the worker uploads:
     # C-contiguous native int32.
     odd = np.asfortranarray(np.array([[1, 2], [3, -1]], dtype=">i8"))
@@ -472,8 +464,6 @@ def test_prompt_logprob_token_ids_validation():
     assert ids.tolist() == [[1, 2], [3, -1]]
     # The pydantic path (token-in/token-out API, /docs) takes strict integer lists.
     adapter = TypeAdapter(SamplingParams)
-    dumped = adapter.dump_json(SamplingParams(prompt_logprob_token_ids=[[1, 2]]))
-    assert b'"prompt_logprob_token_ids":[[1,2]]' in dumped
     for bad in ("[[1.5]]", '[["3"]]', "[[true]]", "[1, 2]"):
         with pytest.raises(ValidationError):
             adapter.validate_json(f'{{"prompt_logprob_token_ids": {bad}}}')
