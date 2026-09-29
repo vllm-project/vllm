@@ -657,6 +657,8 @@ class DeepseekV41RocmMxfp4Indexer(DeepseekV4Indexer):
 class DeepseekV41ROCMAiterMLASparseBackend(DeepseekV4SparseMLABackend):
     @staticmethod
     def get_name() -> str:
+        # Keep the existing DSV4 selector for backward compatibility with
+        # user configurations.
         return "ROCM_FLASHMLA_SPARSE_DSV4"
 
     @staticmethod
