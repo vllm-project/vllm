@@ -262,6 +262,10 @@ class FreeKVCacheBlockQueue:
     Note that we maintain this order by reversing the block order when free
     blocks of a request. This operation is outside of this class.
 
+    Blocks added with ``append_last_resort_n`` form a segment at the tail that
+    later ``append``/``append_n`` calls stay in front of, so they are evicted
+    only after every other free block.
+
     Args:
         blocks: A list of KVCacheBlock objects.
 
@@ -297,6 +301,17 @@ class FreeKVCacheBlockQueue:
             self.fake_free_list_head.next_free_block = self.fake_free_list_tail
             self.fake_free_list_tail.prev_free_block = self.fake_free_list_head
 
+        # First block of the last-resort tail segment, if any.
+        self.last_resort_head: KVCacheBlock | None = None
+
+    def _unlink_last_resort_head(self, block: KVCacheBlock) -> None:
+        """Advance the last-resort segment past a block leaving the list."""
+        if block is self.last_resort_head:
+            next_block = block.next_free_block
+            self.last_resort_head = (
+                None if next_block is self.fake_free_list_tail else next_block
+            )
+
     def popleft(self) -> KVCacheBlock:
         """Pop the first free block and reduce num_free_blocks by 1.
 
@@ -323,6 +338,7 @@ class FreeKVCacheBlockQueue:
                 "Invalid block found in popleft() "
                 "which doesn't have a valid next_free_block"
             )
+        self._unlink_last_resort_head(first_block)
 
         # Connect fake_head and the next block of first_block (i.e. second block
         # or fake tail).
@@ -355,6 +371,7 @@ class FreeKVCacheBlockQueue:
         ret = []
         for _ in range(n):
             assert curr_block is not None
+            self._unlink_last_resort_head(curr_block)
             ret.append(curr_block)
             last_block = curr_block
             curr_block = curr_block.next_free_block
@@ -380,6 +397,7 @@ class FreeKVCacheBlockQueue:
             # This should not happen if the block is from the free list.
             # It indicates a bug in the caller's logic.
             raise RuntimeError(f"remove() called on an invalid block: {block}")
+        self._unlink_last_resort_head(block)
 
         # Link the previous block to the next block.
         block.prev_free_block.next_free_block = block.next_free_block
@@ -391,28 +409,14 @@ class FreeKVCacheBlockQueue:
         self.num_free_blocks -= 1
 
     def append(self, block: KVCacheBlock) -> None:
-        """Put a block back into the free list and increase
-        num_free_blocks by 1.
+        """Put a block back into the free list, ahead of any last-resort
+        blocks, and increase num_free_blocks by 1.
 
         Args:
             block: The block to append.
 
         """
-        if self.fake_free_list_tail.prev_free_block is None:
-            raise RuntimeError(
-                "prev_free_block of fake_free_list_tail should always exist"
-            )
-        last_block: KVCacheBlock = self.fake_free_list_tail.prev_free_block
-
-        # Connect the new block after the last block.
-        last_block.next_free_block = block
-        block.prev_free_block = last_block
-
-        # Connect the fake tail after the new block.
-        block.next_free_block = self.fake_free_list_tail
-        self.fake_free_list_tail.prev_free_block = block
-
-        self.num_free_blocks += 1
+        self.append_n([block])
 
     def prepend_n(self, blocks: list[KVCacheBlock]) -> None:
         """Put a list of blocks at the front of the free list."""
@@ -436,28 +440,43 @@ class FreeKVCacheBlockQueue:
         self.num_free_blocks += len(blocks)
 
     def append_n(self, blocks: list[KVCacheBlock]) -> None:
-        """Put a list of blocks back into the free list
+        """Put a list of blocks back into the free list, ahead of any
+        last-resort blocks.
 
         Args:
             blocks: The blocks to append.
 
         """
+        self._insert_before(self.last_resort_head or self.fake_free_list_tail, blocks)
+
+    def append_last_resort_n(self, blocks: list[KVCacheBlock]) -> None:
+        """Put a list of blocks at the tail, behind every block appended later.
+
+        Args:
+            blocks: The blocks to append, in eviction order.
+
+        """
+        if len(blocks) == 0:
+            return
+        self._insert_before(self.fake_free_list_tail, blocks)
+        if self.last_resort_head is None:
+            self.last_resort_head = blocks[0]
+
+    def _insert_before(self, anchor: KVCacheBlock, blocks: list[KVCacheBlock]) -> None:
         if len(blocks) == 0:
             return
 
-        last_block = self.fake_free_list_tail.prev_free_block
-        assert last_block is not None, (
-            "prev_free_block of fake_free_list_tail should always exist"
-        )
+        last_block = anchor.prev_free_block
+        assert last_block is not None, "free list anchors always have a predecessor"
         # Add inter-connections between consecutive blocks
         for block in blocks:
             block.prev_free_block = last_block
             last_block.next_free_block = block
             last_block = block
 
-        # Connect the last block of <blocks> to the fake tail
-        last_block.next_free_block = self.fake_free_list_tail
-        self.fake_free_list_tail.prev_free_block = last_block
+        # Connect the last block of <blocks> to the anchor
+        last_block.next_free_block = anchor
+        anchor.prev_free_block = last_block
 
         self.num_free_blocks += len(blocks)
 
