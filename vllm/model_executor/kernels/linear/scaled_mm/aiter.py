@@ -184,25 +184,62 @@ class AiterPreshuffledPerTokenFp8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
             )
 
         # Aiter's shuffled per-token Gemm performs better than torch only when its
-        # tuned.
-        if not rocm_aiter_ops.is_shuffled_per_token_w8a8_gemm_tuned(N, K, fp8_dtype):
+        # tuned. N is looked up after padding to a multiple of
+        # PADDED_N_ALIGNMENT, the shape the Gemm actually runs with.
+        N_padded = N + cls._n_padding(N)
+        if not rocm_aiter_ops.is_shuffled_per_token_w8a8_gemm_tuned(
+            N_padded, K, fp8_dtype
+        ):
             return (
                 False,
-                f"requires a tuned configuration for N: {N} and K: {K} "
+                f"requires a tuned configuration for N: {N_padded} and K: {K} "
                 f"and fp8 dtype {fp8_dtype}.",
             )
 
         return True, None
 
+    # Pad N up to a multiple of this so that e.g. N=6288 / N=2112 can use the
+    # tuned (FlyDSL) configs for N=6400 / N=2176. Mirrors ATOM's
+    # _maybe_pad_a8w8_preshuffle_output.
+    PADDED_N_ALIGNMENT = 128
+
+    @classmethod
+    def _n_padding(cls, N: int) -> int:
+        return -N % cls.PADDED_N_ALIGNMENT
+
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        w_name, *_ = self.layer_param_names
-        w, *_ = self._get_layer_params(layer)
+        w_name, w_s_name, *_ = self.layer_param_names
+        w, w_s, *_ = self._get_layer_params(layer)
+
+        # w is (K, N); w_s is per output channel, (N, 1) or (N,).
+        N = w.shape[1]
+        n_padding = self._n_padding(N)
+        # Only pad if the unpadded N is not tuned itself.
+        if n_padding and rocm_aiter_ops.is_shuffled_per_token_w8a8_gemm_tuned(
+            N, w.shape[0], current_platform.fp8_dtype()
+        ):
+            n_padding = 0
+        self.n_before_padding = N if n_padding else None
+
+        w_nk = w.t()
+        if n_padding:
+            w_nk = torch.nn.functional.pad(w_nk, (0, 0, 0, n_padding))
+            # Pad scales with ones; padded weight rows are zero anyway.
+            if w_s.numel() > 1:
+                replace_parameter(
+                    layer,
+                    w_s_name,
+                    torch.cat(
+                        [w_s.data, w_s.data.new_ones((n_padding, *w_s.shape[1:]))],
+                        dim=0,
+                    ),
+                )
 
         replace_parameter(
             layer,
             w_name,
             torch.nn.Parameter(
-                rocm_aiter_ops.shuffle_weight(w.t().contiguous()).data,
+                rocm_aiter_ops.shuffle_weight(w_nk.contiguous()).data,
                 requires_grad=False,
             ),
         )
@@ -218,9 +255,17 @@ class AiterPreshuffledPerTokenFp8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
         bias: torch.Tensor | None,
         output_shape: list,
     ) -> torch.Tensor:
-        return rocm_aiter_ops.preshuffled_per_token_w8a8_gemm(
-            A, B, As, Bs, bias, out_dtype
-        )
+        n_before_padding = getattr(self, "n_before_padding", None)
+        if n_before_padding is None:
+            return rocm_aiter_ops.preshuffled_per_token_w8a8_gemm(
+                A, B, As, Bs, bias, out_dtype
+            )
+        out = rocm_aiter_ops.preshuffled_per_token_w8a8_gemm(
+            A, B, As, Bs, None, out_dtype
+        )[:, :n_before_padding]
+        if bias is not None:
+            out = out + bias
+        return out
 
 
 class AiterHipbMMPerTokenFp8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
