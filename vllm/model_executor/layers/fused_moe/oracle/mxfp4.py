@@ -31,6 +31,9 @@ from vllm.model_executor.layers.fused_moe.config import (
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     swap_w13_to_w31,
 )
+from vllm.model_executor.layers.quantization.utils.marlin_utils import (
+    get_marlin_input_dtype,
+)
 from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
     _swizzle_mxfp4,
 )
@@ -733,6 +736,7 @@ def mxfp4_round_up_hidden_size_and_intermediate_size(
     hidden_size: int,
     intermediate_size: int,
     activation: MoEActivation | None = None,
+    act_dtype: torch.dtype | None = None,
 ) -> tuple[int, int]:
     """Round up hidden_size and intermediate_size based on backend requirements."""
     if backend in B12X_BACKENDS:
@@ -750,7 +754,18 @@ def mxfp4_round_up_hidden_size_and_intermediate_size(
         intermediate_size = round_up(intermediate_size, 128)
         hidden_size = round_up(hidden_size, 128)
     elif backend in (Mxfp4MoeBackend.MARLIN, Mxfp4MoeBackend.BATCHED_MARLIN):
-        intermediate_size = round_up(intermediate_size, 128)
+        intermediate_alignment = 128
+        if (
+            backend == Mxfp4MoeBackend.MARLIN
+            and current_platform.is_cuda()
+            and current_platform.is_device_capability(90)
+            and act_dtype == torch.bfloat16
+            and get_marlin_input_dtype() is None
+        ):
+            # With hidden_size padded to 256, SM90 W4A16-BF16 supports both
+            # w13 and w2 with a 64-aligned intermediate dimension.
+            intermediate_alignment = 64
+        intermediate_size = round_up(intermediate_size, intermediate_alignment)
         if current_platform.is_xpu():
             hidden_size = round_up(hidden_size, 128)
         else:

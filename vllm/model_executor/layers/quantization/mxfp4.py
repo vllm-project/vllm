@@ -188,7 +188,10 @@ class GptOssMxfp4MoEMethod(FusedMoEMethodBase):
             moe_parallel_config=moe_parallel_config,
         )
         return mxfp4_round_up_hidden_size_and_intermediate_size(
-            self.mxfp4_backend, hidden_size, intermediate_size_per_partition
+            self.mxfp4_backend,
+            hidden_size,
+            intermediate_size_per_partition,
+            act_dtype=act_dtype,
         )
 
     def create_weights(
@@ -531,6 +534,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             hidden_size,
             intermediate_size_per_partition,
             activation=self.moe.activation,
+            act_dtype=act_dtype,
         )
 
     @staticmethod
