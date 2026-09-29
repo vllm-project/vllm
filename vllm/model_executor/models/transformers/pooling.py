@@ -24,6 +24,7 @@ from transformers import AutoModelForSequenceClassification
 
 from vllm.config.utils import getattr_iter
 from vllm.model_executor.layers.pooler import DispatchPooler
+from vllm.model_executor.layers.pooler.seqwise import get_seq_pooling_method
 from vllm.model_executor.models.interfaces import SupportsCrossEncoding
 from vllm.model_executor.models.interfaces_base import VllmModelForPooling
 
@@ -106,7 +107,32 @@ class SequenceClassificationMixin(SupportsCrossEncoding, VllmModelForPooling, Ba
             {},
         )
 
+        # Modules applied between pooling and `classifier` (e.g. ModernBERT's `head`)
+        heads = []
+        for name, module in seq_cls_model.named_children():
+            if module is seq_cls_model.base_model:
+                continue
+            if module is self.classifier:
+                break
+            if isinstance(module, nn.Dropout):
+                continue
+            self.init_parameters(module, dtype=self.model_config.head_dtype)
+            setattr(self, name, module)
+            heads.append(module)
+        classifier = (
+            nn.Sequential(*heads, self.classifier) if heads else self.classifier
+        )
+
+        pooling = None
+        sources = getattr(self.model_config, "_pooler_config_sources", {})
+        classifier_pooling = getattr(self.config, "classifier_pooling", None)
+        if sources.get(
+            "seq_pooling_type"
+        ) == "model_default" and classifier_pooling in ("cls", "mean"):
+            pooling = get_seq_pooling_method(classifier_pooling.upper())
+
         self.pooler = DispatchPooler.for_seq_cls(
             pooler_config,
-            classifier=self.classifier,
+            pooling=pooling,
+            classifier=classifier,
         )

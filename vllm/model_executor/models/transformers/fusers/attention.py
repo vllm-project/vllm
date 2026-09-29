@@ -4,6 +4,7 @@
 
 import ast
 import inspect
+import operator
 import textwrap
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -65,8 +66,15 @@ def interface_call(forward: Callable) -> ast.Call | None:
     return calls[0] if len(calls) == 1 else None
 
 
+_BINARY_OPS = {
+    ast.Pow: operator.pow,
+    ast.Mult: operator.mul,
+    ast.Div: operator.truediv,
+}
+
+
 def _resolve(node: ast.expr, module: nn.Module) -> object:
-    """The value of `node` on `module`, for literals and `self.<attr>`."""
+    """The value of `node` on `module`, for literals, `self.<attr>` and arithmetic."""
     if isinstance(node, ast.Constant):
         return node.value
     if (
@@ -75,6 +83,14 @@ def _resolve(node: ast.expr, module: nn.Module) -> object:
         and node.value.id == "self"
     ):
         return getattr(module, node.attr, None)
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.USub):
+        operand = _resolve(node.operand, module)
+        return -operand if isinstance(operand, (int, float)) else None
+    if isinstance(node, ast.BinOp) and (op := _BINARY_OPS.get(type(node.op))):
+        left = _resolve(node.left, module)
+        right = _resolve(node.right, module)
+        if isinstance(left, (int, float)) and isinstance(right, (int, float)):
+            return op(left, right)
     return None
 
 

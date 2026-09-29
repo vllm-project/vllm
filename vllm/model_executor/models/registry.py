@@ -239,7 +239,6 @@ _EMBEDDING_MODELS = {
         if arch == "LlamaForCausalLM"
     },
     "MistralModel": ("llama", "LlamaForCausalLM"),
-    "ModernBertModel": ("modernbert", "ModernBertModel"),
     "NomicBertModel": ("bert_with_rope", "NomicBertModel"),
     "Phi3ForCausalLM": ("phi3", "Phi3ForCausalLM"),
     "Qwen2Model": ("qwen2", "Qwen2ForCausalLM"),
@@ -323,10 +322,6 @@ _SEQUENCE_CLASSIFICATION_MODELS = {
     "LlamaBidirectionalForSequenceClassification": (
         "llama",
         "LlamaBidirectionalForSequenceClassification",
-    ),
-    "ModernBertForSequenceClassification": (
-        "modernbert",
-        "ModernBertForSequenceClassification",
     ),
     "RobertaForSequenceClassification": ("roberta", "RobertaForSequenceClassification"),
     "XLMRobertaForSequenceClassification": (
@@ -720,6 +715,13 @@ _TRANSFORMERS_SUPPORTED_MODELS = {
     "SmolLM3ForCausalLM": ("transformers", "TransformersForCausalLM"),
     "Starcoder2ForCausalLM": ("transformers", "TransformersForCausalLM"),
     "VaultGemmaForCausalLM": ("transformers", "TransformersForCausalLM"),
+    # Embedding models
+    "ModernBertModel": ("transformers", "TransformersEmbeddingModel"),
+    # Sequence classification models
+    "ModernBertForSequenceClassification": (
+        "transformers",
+        "TransformersForSequenceClassification",
+    ),
     # Multimodal models
     "Emu3ForConditionalGeneration": (
         "transformers",
