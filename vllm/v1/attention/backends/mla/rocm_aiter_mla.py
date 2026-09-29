@@ -32,6 +32,9 @@ from vllm.v1.attention.backend import (
     CommonAttentionMetadata,
     MultipleOf,
 )
+from vllm.v1.attention.backends.mla.prefill.aiter_flash_attn import (
+    AiterFlashAttnPrefillBackend,
+)
 from vllm.v1.attention.backends.utils import (
     get_dcp_local_seq_lens,
 )
@@ -780,10 +783,16 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
         # the standard prefill path. Head counts that are not a multiple of 16
         # are replicate-padded up to one in _mla_fp8_prefill_attn, so the gate
         # is the same head-count predicate the decode path uses.
+        # FlyDSL FP8 prefill attention, when active, also serves context-free
+        # prefills; without PS metadata the impl skips the assembly kernel.
         self._fp8_prefill_enabled = _fp8_mla_prefill_supported() and (
             kv_cache_dtype_str == "fp8"
             and vllm_config.model_config.dtype == torch.bfloat16
             and AiterMLAHelper.is_valid_num_heads(self.num_heads)
+            and not (
+                isinstance(self._prefill_backend, AiterFlashAttnPrefillBackend)
+                and self._prefill_backend.use_flydsl_fp8
+            )
         )
         if self._fp8_prefill_enabled:
             max_prefill_qlen = min(
