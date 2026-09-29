@@ -23,8 +23,14 @@ import multiprocessing
 import queue
 import signal
 import sys
+import threading
 import typing
+from collections.abc import Sequence
 from itertools import product
+from multiprocessing.process import BaseProcess
+
+from fastapi import FastAPI
+from fastapi.responses import Response
 
 from vllm.engine.arg_utils import EngineArgs
 from vllm.entrypoints.cli.types import CLISubcommand
@@ -42,6 +48,55 @@ else:
     FlexibleArgumentParser = argparse.ArgumentParser
 
 logger = init_logger(__name__)
+
+
+class _HealthState:
+    def __init__(self, processes: Sequence[BaseProcess]) -> None:
+        self.processes = processes
+        self._ready = False
+        self._lock = threading.Lock()
+
+    def mark_ready(self) -> None:
+        with self._lock:
+            self._ready = True
+
+    @property
+    def is_ready(self) -> bool:
+        with self._lock:
+            ready = self._ready
+        return ready and not any(proc.exitcode is not None for proc in self.processes)
+
+
+def _build_health_app(state: _HealthState) -> FastAPI:
+    app = FastAPI(openapi_url=None, docs_url=None, redoc_url=None)
+
+    @app.get("/health", include_in_schema=False)
+    async def health() -> Response:
+        return Response(status_code=200 if state.is_ready else 503)
+
+    return app
+
+
+def _start_health_server(
+    host: str, port: int, state: _HealthState
+) -> tuple[typing.Any, threading.Thread]:
+    import uvicorn
+
+    config = uvicorn.Config(
+        _build_health_app(state),
+        host=host,
+        port=port,
+        log_level="error",
+        access_log=False,
+    )
+    server = uvicorn.Server(config)
+    thread = threading.Thread(
+        target=server.run,
+        name="vllm-weight-cache-health",
+        daemon=True,
+    )
+    thread.start()
+    return server, thread
 
 
 class PreloadSubcommand(CLISubcommand):
@@ -74,6 +129,18 @@ class PreloadSubcommand(CLISubcommand):
             help="Rendezvous port for the MTP draft daemon group. Defaults to "
             "--weight-cache-master-port + 1 for multi-node, or a free port "
             "for single-node.",
+        )
+        parser.add_argument(
+            "--weight-cache-health-port",
+            type=int,
+            default=None,
+            help="Port for the parent /health endpoint; disabled by default.",
+        )
+        parser.add_argument(
+            "--weight-cache-health-host",
+            type=str,
+            default="0.0.0.0",
+            help="Host for the parent /health endpoint (default: 0.0.0.0).",
         )
 
     @staticmethod
@@ -190,10 +257,21 @@ class PreloadSubcommand(CLISubcommand):
                 tp_rank,
             ) in product(groups, placements)
         ]
+        health_state = _HealthState(procs)
+        health_server = None
+        health_thread = None
+        if args.weight_cache_health_port is not None:
+            health_server, health_thread = _start_health_server(
+                args.weight_cache_health_host,
+                args.weight_cache_health_port,
+                health_state,
+            )
         for proc in procs:
             proc.start()
 
         def _shutdown(signum, frame):
+            if health_server is not None:
+                health_server.should_exit = True
             for proc in procs:
                 proc.terminate()
 
@@ -216,7 +294,12 @@ class PreloadSubcommand(CLISubcommand):
                         proc.terminate()
                     for proc in procs:
                         proc.join()
+                    if health_server is not None:
+                        health_server.should_exit = True
+                    if health_thread is not None:
+                        health_thread.join()
                     sys.exit(max((p.exitcode or 0) for p in procs))
+        health_state.mark_ready()
         socket_dir_msg = args.weight_cache_socket_dir or "the default socket dir"
         logger.info_once(
             "===== Weight cache daemon READY: node %d/%d serving %d local "
@@ -230,6 +313,10 @@ class PreloadSubcommand(CLISubcommand):
 
         for proc in procs:
             proc.join()
+        if health_server is not None:
+            health_server.should_exit = True
+        if health_thread is not None:
+            health_thread.join()
         sys.exit(max(proc.exitcode or 0 for proc in procs))
 
     def subparser_init(
