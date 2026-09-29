@@ -1652,6 +1652,8 @@ class EngineCoreProc(EngineCore):
         # A cleanup marker carries no work; it must still reach the KV connector.
         if request.abort_immediately or not self.rejects_new_requests():
             return False
+        # Rejecting an open session's next input ends the session.
+        self.abort_requests([request.request_id])
         self._send_finish_outputs_to_client(
             [request.request_id], request.client_index, FinishReason.PAUSED
         )

@@ -36,6 +36,7 @@ from vllm.v1.executor.abstract import Executor
 from vllm.v1.executor.uniproc_executor import UniProcExecutor
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.outputs import ModelRunnerOutput
+from vllm.v1.request import RequestStatus
 
 from ...utils import create_new_process_for_each_test, multi_gpu_test
 
@@ -717,8 +718,9 @@ def _pausable_engine_core_proc() -> EngineCoreProc:
 )
 def test_add_rejected_while_paused_at_a_boundary(pause_state, cleanup_marker, rejected):
     """A boundary pause rejects new requests before they reach the scheduler
-    or DP wave state; `keep` queues them across the pause. A KV-transfer
-    cleanup marker is no work and must still reach the connector."""
+    or DP wave state, ending any open session with that id; `keep` queues them
+    across the pause. A KV-transfer cleanup marker must still reach the
+    connector."""
     core = _pausable_engine_core_proc()
     core.scheduler.pause_state = pause_state
     core.shutdown_state = EngineShutdownState.RUNNING
@@ -732,11 +734,15 @@ def test_add_rejected_while_paused_at_a_boundary(pause_state, cleanup_marker, re
 
     if rejected:
         core.add_request.assert_not_called()
+        core.scheduler.finish_requests.assert_called_once_with(
+            ["r"], RequestStatus.FINISHED_ABORTED
+        )
         core._send_finish_outputs_to_client.assert_called_once_with(
             ["r"], 1, FinishReason.PAUSED
         )
     else:
         core.add_request.assert_called_once_with(request, 0)
+        core.scheduler.finish_requests.assert_not_called()
         core._send_finish_outputs_to_client.assert_not_called()
 
 
