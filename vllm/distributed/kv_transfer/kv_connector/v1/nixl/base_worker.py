@@ -424,9 +424,29 @@ class NixlBaseConnectorWorker:
         return draft_config.get_total_num_kv_heads()
 
     def _is_head_sharded_draft_region(self, region_idx: int) -> bool:
-        return self._head_sharded_draft_kv_heads is not None and (
-            not self._is_region_replicated(region_idx)
+        if self._head_sharded_draft_kv_heads is None or self._is_region_replicated(
+            region_idx
+        ):
+            return False
+        # Verify against the region's own recorded KV head count instead of
+        # inferring "SPLIT under a fully-MLA target" implies draft purely by
+        # exclusion. `_resolve_head_sharded_draft_kv_heads` already returns
+        # None for the other constructs that can produce a SPLIT region here
+        # (mamba, CSA-linear), so every SPLIT region left should genuinely be
+        # this draft -- this assertion is what actually confirms that, tied to
+        # a real per-layer model property rather than the absence of one.
+        region_kv_heads = self._region_num_kv_heads[region_idx]
+        assert (
+            region_kv_heads is not None
+            and region_kv_heads <= self._head_sharded_draft_kv_heads
+        ), (
+            f"Region {region_idx} is SPLIT under a fully-MLA target but its "
+            f"recorded KV head count ({region_kv_heads}) is not consistent "
+            "with the resolved head-sharded draft "
+            f"({self._head_sharded_draft_kv_heads} total KV heads); expected "
+            "every SPLIT region here to belong to that draft."
         )
+        return True
 
     def _has_head_sharded_draft_regions(self) -> bool:
         return any(
@@ -908,6 +928,12 @@ class NixlBaseConnectorWorker:
         # (MLA), False -> SPLIT (head-sharded full-attn). Mixed only for models
         # combining both (e.g. GQA main + MLA Eagle-3 draft).
         self._region_is_mla = list[bool]()
+        # Per-region KV head count for non-MLA (SPLIT) regions, 1:1 with
+        # block_len_per_layer; None where not tracked (MLA regions, or a
+        # layer_spec without num_kv_heads). Lets a head-sharded draft region be
+        # verified by an actual model property instead of inferred purely from
+        # "not MLA" -- see `_is_head_sharded_draft_region`.
+        self._region_num_kv_heads = list[int | None]()
         self._ssm_region_indices = list[int]()
         # Regions holding a scratch cache (the CSA compressor circular buffer).
         # Tracked explicitly because a scratch page shares its address with the
@@ -1524,6 +1550,9 @@ class NixlBaseConnectorWorker:
             is_mla_region = isinstance(
                 layer_spec, (MLAAttentionSpec, SlidingWindowMLASpec)
             )
+            region_num_kv_heads = (
+                None if is_mla_region else getattr(layer_spec, "num_kv_heads", None)
+            )
             logger.debug(
                 "Registering layer %s with cache shape: %s", layer_name, cache.shape
             )
@@ -1656,6 +1685,8 @@ class NixlBaseConnectorWorker:
                     region_index = seen_base_addresses.index(base_addr)
                     assert region_mem_types[region_index] == mem_type
                     self._region_is_mla[region_index] |= is_mla_region
+                    if not is_mla_region:
+                        self._region_num_kv_heads[region_index] = region_num_kv_heads
                     if is_mla_region:
                         self.block_len_per_layer[region_index] = block_len
                         self.block_stride_per_layer[region_index] = block_stride
@@ -1671,6 +1702,7 @@ class NixlBaseConnectorWorker:
                     self.region_names.append(layer_name)
                     self.region_num_blocks.append(num_blocks)
                     self._region_is_mla.append(is_mla_region)
+                    self._region_num_kv_heads.append(region_num_kv_heads)
                     region_mem_types.append(mem_type)
 
                 if track_region_layers:
@@ -1721,6 +1753,7 @@ class NixlBaseConnectorWorker:
             == len(self.block_stride_per_layer)
             == len(self.region_group_ids)
             == len(self.region_names)
+            == len(self._region_num_kv_heads)
             == len(self.region_num_blocks)
         )
         # Descriptor ids must be region-ordered, matching the remote side.
@@ -2469,15 +2502,28 @@ class NixlBaseConnectorWorker:
                 tp_ratio < 0 and self.transfer_topo.is_kv_replicated(remote_engine_id)
             )
         has_draft_regions = self._has_head_sharded_draft_regions()
-        if has_draft_regions and (
-            tp_ratio < 0 or self.dcp_size > 1 or remote_dcp_size > 1
-        ):
-            raise NotImplementedError(
-                "NIXL cannot transfer a head-sharded draft's KV under an MLA "
-                "target when prefill TP exceeds decode TP or with DCP: "
-                f"local TP={self.transfer_topo.tp_size}, remote TP={remote_tp_size}, "
-                f"local DCP={self.dcp_size}, remote DCP={remote_dcp_size}."
-            )
+        if has_draft_regions:
+            # tp_ratio is local-vs-remote, and which side is local flips between
+            # pull (local=decode, since decode calls the handshake to read from
+            # prefill) and push (local=prefill, since prefill calls it to learn
+            # where to write into decode). The condition this guards against is
+            # always "prefill TP > decode TP", not "tp_ratio < 0" itself, so it
+            # has to be derived per direction rather than read off the sign
+            # directly -- reusing the pull-mode sign check here would reject
+            # ordinary push topologies (P_TP < D_TP is the common case) instead
+            # of the one this is meant to catch.
+            if self._TRANSFER_MODE == "push":
+                prefill_tp_above_decode = tp_ratio > 1
+            else:
+                prefill_tp_above_decode = tp_ratio < 0
+            if prefill_tp_above_decode or self.dcp_size > 1 or remote_dcp_size > 1:
+                raise NotImplementedError(
+                    "NIXL cannot transfer a head-sharded draft's KV under an MLA "
+                    "target when prefill TP exceeds decode TP or with DCP: "
+                    f"local TP={self.transfer_topo.tp_size}, remote TP={remote_tp_size}, "
+                    f"local DCP={self.dcp_size}, remote DCP={remote_dcp_size}, "
+                    f"transfer_mode={self._TRANSFER_MODE}."
+                )
 
         remote_physical_per_logical = (
             nixl_agent_meta.physical_blocks_per_logical_kv_block

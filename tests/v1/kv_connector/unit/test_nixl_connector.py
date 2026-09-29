@@ -1431,6 +1431,7 @@ class TestNixlHandshake:
         worker.block_len_per_layer = [mla_len, draft_len]
         worker.block_stride_per_layer = [mla_len, draft_len]
         worker._region_is_mla = [True, False]
+        worker._region_num_kv_heads = [None, max(1, 8 // tp_size)]
         worker.num_blocks = 1
         worker.dst_num_blocks[worker.engine_id] = worker.num_blocks
         worker.src_blocks_data = np.array(
