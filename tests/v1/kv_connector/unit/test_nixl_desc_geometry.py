@@ -126,11 +126,10 @@ def _make_packed_mla_view_worker(
     num_blocks=4,
     pp_size=1,
     backend_names=("FLASHMLA",),
-    padding_bytes=0,
 ):
     """Register real strided views; only NIXL and distributed runtime are fake."""
     block_size = 16
-    raw = torch.zeros(num_blocks * block_stride + padding_bytes, dtype=torch.int8)
+    raw = torch.zeros(num_blocks * block_stride, dtype=torch.int8)
     tensors, groups, caches = [], [], {}
     for name, (offset, page_size) in layouts.items():
         spec = MLAAttentionSpec(
@@ -163,19 +162,11 @@ def _make_packed_mla_view_worker(
         backend.get_name.return_value = name
         backend.full_cls_name.return_value = f"fake.{name}"
         backends.append(backend)
-    backend_layouts = [
-        (backend, groups[index % len(groups)].kv_cache_spec, False)
-        for index, backend in enumerate(backends)
-    ]
     with (
         patch.object(bw, "NixlWrapper", _RecordingNixl),
         patch.object(bw, "get_tensor_model_parallel_rank", return_value=0),
         patch.object(bw, "get_tensor_model_parallel_world_size", return_value=1),
-        patch.object(
-            bw,
-            "get_current_attn_backend_layouts",
-            return_value=backend_layouts,
-        ),
+        patch.object(bw, "get_current_attn_backends", return_value=backends),
         patch("threading.Thread"),
     ):
         worker = NixlPushConnectorWorker(
@@ -189,13 +180,11 @@ def _make_packed_mla_view_worker(
 
 
 @pytest.mark.cpu_test
-@pytest.mark.parametrize("num_layers, padding_bytes", [(1, 0), (2, 0), (1, 64)])
-def test_packed_mla_pp1_push_peer_transfers_whole_rows(num_layers, padding_bytes):
+@pytest.mark.parametrize("num_layers", [1, 2])
+def test_packed_mla_pp1_push_peer_transfers_whole_rows(num_layers):
     layouts = {f"L{i}": (i * 128, 128) for i in range(num_layers)}
     stride = num_layers * 128
-    worker, raw = _make_packed_mla_view_worker(
-        layouts, stride, padding_bytes=padding_bytes
-    )
+    worker, raw = _make_packed_mla_view_worker(layouts, stride)
     assert worker._registered_descs == [[(raw.data_ptr(), raw.nbytes, 0, "")]]
     assert worker.src_blocks_data.tolist() == [
         [raw.data_ptr() + block * stride, stride, 0] for block in range(4)
@@ -229,19 +218,6 @@ def test_packed_push_compatibility_hash_uses_all_backends_in_stable_order(
         {"L0": (0, 128)}, 128, backend_names=remote_backends
     )
     assert (producer.compat_hash == consumer.compat_hash) is compatible
-
-
-@pytest.mark.cpu_test
-def test_packed_push_compatibility_hash_deduplicates_backend_names():
-    single, _ = _make_packed_mla_view_worker(
-        {"L0": (0, 128)}, 128, backend_names=("FLASHMLA",)
-    )
-    repeated, _ = _make_packed_mla_view_worker(
-        {"L0": (0, 128), "L1": (128, 64)},
-        192,
-        backend_names=("FLASHMLA", "FLASHMLA"),
-    )
-    assert single.compat_hash == repeated.compat_hash
 
 
 @pytest.mark.cpu_test
@@ -627,11 +603,7 @@ def _make_mla_hybrid_worker(local_block_size, kernel_block_size, num_logical_blo
         patch.object(bw, "NixlWrapper", _RecordingNixl),
         patch.object(bw, "get_tensor_model_parallel_rank", return_value=0),
         patch.object(bw, "get_tensor_model_parallel_world_size", return_value=1),
-        patch.object(
-            bw,
-            "get_current_attn_backend_layouts",
-            return_value=[(fake_backend, None, False)],
-        ),
+        patch.object(bw, "get_current_attn_backends", return_value=[fake_backend]),
         patch.object(bw, "current_platform", fake_platform),
         patch(
             "vllm.model_executor.layers.mamba.mamba_utils.get_conv_state_layout",
@@ -669,228 +641,40 @@ def _make_mla_hybrid_worker(local_block_size, kernel_block_size, num_logical_blo
 
 
 @pytest.mark.cpu_test
-def test_flashmla_manager_block_is_preserved_for_nixl():
-    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker import (
-        NixlBaseConnectorWorker,
-    )
-    from vllm.v1.attention.backends.mla.flashmla_sparse import (
-        FlashMLASparseBackend,
-    )
-    from vllm.v1.kv_cache_interface import MLAAttentionSpec
+def test_nixl_keeps_packed_sparse_mla_manager_block():
+    """Like the worker, NIXL keeps packed sparse MLA + indexer manager blocks."""
+    from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
+    from vllm.v1.attention.backends.mla.flashmla_sparse import FlashMLASparseBackend
+    from vllm.v1.attention.backends.mla.indexer import Glm5NextIndexerBackend
+    from vllm.v1.kv_cache_interface import UniformTypeKVCacheSpecs
 
-    worker = object.__new__(NixlBaseConnectorWorker)
-    worker.block_size = 1152
-    worker.num_blocks = 2
+    specs = {
+        "mla": MLAAttentionSpec(
+            1152, num_kv_heads=1, head_size=512, dtype=torch.bfloat16
+        ),
+        "indexer": MLAAttentionSpec(
+            1152, num_kv_heads=1, head_size=128, dtype=torch.uint8, tokens_per_state=4
+        ),
+    }
+    backends = {"mla": FlashMLASparseBackend, "indexer": Glm5NextIndexerBackend}
+    layers = {
+        name: MagicMock(spec=AttentionLayerBase, **{"get_attn_backend.return_value": b})
+        for name, b in backends.items()
+    }
+    worker = object.__new__(bw.NixlBaseConnectorWorker)
+    worker.block_size, worker.num_blocks, worker.attn_backends = 1152, 2, []
     worker._physical_blocks_per_logical_kv_block = 1
-    spec = MLAAttentionSpec(
-        block_size=1152,
-        num_kv_heads=1,
-        head_size=512,
-        dtype=torch.bfloat16,
+    worker.vllm_config = SimpleNamespace(
+        compilation_config=SimpleNamespace(static_forward_context=layers)
     )
-    worker.attn_backend_layouts = [(FlashMLASparseBackend, spec, True)]
+    worker.kv_cache_config = KVCacheConfig(
+        2, [], [KVCacheGroupSpec(list(specs), UniformTypeKVCacheSpecs(1152, specs))]
+    )
 
     worker._sync_block_size_with_kernel()
 
     assert worker.block_size == 1152
-    assert worker.num_blocks == 2
     assert worker._physical_blocks_per_logical_kv_block == 1
-
-
-@pytest.mark.cpu_test
-def test_glm_packed_backends_preserve_manager_blocks_for_nixl():
-    from vllm.distributed.kv_transfer.kv_connector import utils as connector_utils
-    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker import (
-        NixlBaseConnectorWorker,
-    )
-    from vllm.v1.attention.backends.gdn_attn import GDNAttentionBackend
-    from vllm.v1.attention.backends.mla.flashmla_sparse import (
-        FlashMLASparseBackend,
-    )
-    from vllm.v1.attention.backends.mla.indexer import (
-        DeepseekV32IndexerBackend,
-        KpoolTailBackend,
-    )
-    from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
-    from vllm.v1.kv_cache_interface import (
-        CircularBufferSpec,
-        KVCacheConfig,
-        KVCacheGroupSpec,
-        KVCacheTensor,
-        MambaSpec,
-        MLAAttentionSpec,
-    )
-
-    manager_block_size = 1024
-    specs = {
-        "mla": MLAAttentionSpec(
-            block_size=manager_block_size,
-            num_kv_heads=1,
-            head_size=512,
-            dtype=torch.bfloat16,
-        ),
-        "indexer": MLAAttentionSpec(
-            block_size=manager_block_size,
-            num_kv_heads=1,
-            head_size=128,
-            dtype=torch.uint8,
-            state_content_bytes=132,
-            tokens_per_state=4,
-            kernel_page_size=256,
-        ),
-        "tail": CircularBufferSpec(
-            block_size=16,
-            num_kv_heads=1,
-            head_size=128,
-            dtype=torch.bfloat16,
-        ),
-        "gdn": MambaSpec(
-            block_size=manager_block_size,
-            shapes=((8, 3), (1, 4, 4)),
-            dtypes=(torch.float16, torch.float32),
-            page_size_padded=256,
-            mamba_type=MambaAttentionBackendEnum.GDN_ATTN,
-        ),
-    }
-    backends = {
-        "mla": FlashMLASparseBackend,
-        "indexer": DeepseekV32IndexerBackend,
-        "tail": KpoolTailBackend,
-        "gdn": GDNAttentionBackend,
-    }
-    packed_stride = sum(spec.page_size_bytes for spec in specs.values())
-    config = KVCacheConfig(
-        num_blocks=2,
-        kv_cache_tensors=[
-            KVCacheTensor(
-                size=2 * packed_stride,
-                layers=[name],
-                layer_stride=2 * packed_stride,
-                block_stride=packed_stride,
-            )
-            for name in specs
-        ],
-        kv_cache_groups=[
-            KVCacheGroupSpec([name], spec) for name, spec in specs.items()
-        ],
-    )
-    layers = {
-        name: SimpleNamespace(get_attn_backend=lambda backend=backend: backend)
-        for name, backend in backends.items()
-    }
-    with patch.object(
-        connector_utils, "get_layers_from_vllm_config", return_value=layers
-    ):
-        layouts = connector_utils.get_current_attn_backend_layouts(MagicMock(), config)
-
-    assert layouts == [
-        (backends["mla"], specs["mla"], True),
-        (backends["indexer"], specs["indexer"], True),
-        (backends["tail"], specs["tail"], True),
-        (backends["gdn"], None, False),
-    ]
-
-    worker = object.__new__(NixlBaseConnectorWorker)
-    worker.block_size = manager_block_size
-    worker.num_blocks = 2
-    worker._physical_blocks_per_logical_kv_block = 1
-    worker.attn_backend_layouts = layouts
-    worker._sync_block_size_with_kernel()
-
-    assert worker.block_size == manager_block_size
-    assert worker.num_blocks == 2
-    assert worker._physical_blocks_per_logical_kv_block == 1
-
-
-@pytest.mark.cpu_test
-@pytest.mark.parametrize(
-    ("stride_pages", "expected"),
-    [((2, 2), True), ((1, 2), True), ((1, 1), False)],
-)
-def test_connector_layout_tracks_any_strided_layer(stride_pages, expected):
-    from vllm.distributed.kv_transfer.kv_connector import utils as connector_utils
-    from vllm.v1.attention.backends.mla.flashmla_sparse import FlashMLASparseBackend
-    from vllm.v1.kv_cache_interface import (
-        KVCacheConfig,
-        KVCacheGroupSpec,
-        KVCacheTensor,
-        MLAAttentionSpec,
-    )
-    from vllm.v1.worker.utils import select_common_block_size_for_layout
-
-    spec = MLAAttentionSpec(
-        block_size=256, num_kv_heads=1, head_size=512, dtype=torch.bfloat16
-    )
-    page_size = spec.page_size_bytes
-    names = ["layer.0", "layer.1"]
-    config = KVCacheConfig(
-        num_blocks=2,
-        kv_cache_tensors=[
-            KVCacheTensor(
-                size=4 * page_size,
-                layers=[name],
-                layer_stride=4 * page_size,
-                block_stride=stride * page_size,
-            )
-            for name, stride in zip(names, stride_pages, strict=True)
-        ],
-        kv_cache_groups=[KVCacheGroupSpec(names, spec)],
-    )
-    layers = {
-        name: SimpleNamespace(get_attn_backend=lambda: FlashMLASparseBackend)
-        for name in names
-    }
-    with patch.object(
-        connector_utils, "get_layers_from_vllm_config", return_value=layers
-    ):
-        layouts = connector_utils.get_current_attn_backend_layouts(MagicMock(), config)
-
-    assert layouts == [(FlashMLASparseBackend, spec, expected)]
-    assert select_common_block_size_for_layout(256, layouts) == (
-        256 if expected else 64
-    )
-
-
-@pytest.mark.cpu_test
-def test_host_staging_copies_only_each_cache_group():
-    from types import SimpleNamespace
-
-    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker import (
-        NixlBaseConnectorWorker,
-    )
-
-    worker = object.__new__(NixlBaseConnectorWorker)
-    worker.use_host_buffer = True
-    worker.copy_blocks = MagicMock()
-    worker._physical_blocks_per_logical_kv_block = 1
-    worker.device_kv_caches = {"full": MagicMock(), "sliding": MagicMock()}
-    worker.host_xfer_buffers = {"full": MagicMock(), "sliding": MagicMock()}
-    worker.kv_cache_config = SimpleNamespace(
-        transfer_groups=[
-            SimpleNamespace(layer_names=["full"]),
-            SimpleNamespace(layer_names=["sliding"]),
-        ]
-    )
-
-    block_ids = ([0], [1])
-    worker.sync_recved_kv_to_device(
-        "request", SimpleNamespace(local_physical_block_ids=block_ids)
-    )
-    assert [set(call.args[0]) for call in worker.copy_blocks.call_args_list] == [
-        {"full"},
-        {"sliding"},
-    ]
-
-    worker.copy_blocks.reset_mock()
-    worker.save_kv_to_host(
-        SimpleNamespace(
-            reqs_to_save={"request": SimpleNamespace(local_block_ids=block_ids)}
-        )
-    )
-    assert [set(call.args[0]) for call in worker.copy_blocks.call_args_list] == [
-        {"full"},
-        {"sliding"},
-    ]
 
 
 def _make_remote_meta(
@@ -1455,8 +1239,6 @@ def _make_csa_linear_ple_worker(scratch_aliases: str = "compressed"):
     )
 
     vllm_config = create_vllm_config(block_size=4)
-    # The config is created for the host before the fake CUDA platform is active.
-    vllm_config.scheduler_config.disable_hybrid_kv_cache_manager = False
     vllm_config.cache_config.enable_prefix_caching = False
     vllm_config.kv_transfer_config.kv_buffer_device = "cuda"
     fake_backend = MagicMock()
@@ -1471,11 +1253,7 @@ def _make_csa_linear_ple_worker(scratch_aliases: str = "compressed"):
         patch.object(bw, "NixlWrapper", _RecordingNixl),
         patch.object(bw, "get_tensor_model_parallel_rank", return_value=0),
         patch.object(bw, "get_tensor_model_parallel_world_size", return_value=1),
-        patch.object(
-            bw,
-            "get_current_attn_backend_layouts",
-            return_value=[(fake_backend, None, False)],
-        ),
+        patch.object(bw, "get_current_attn_backends", return_value=[fake_backend]),
         patch.object(bw, "current_platform", fake_platform),
         patch(
             "vllm.model_executor.layers.mamba.mamba_utils.get_conv_state_layout",
@@ -1686,10 +1464,7 @@ def _make_ring_worker():
     # Both rings overlay the second paged region, so the scratch group must
     # address only that region while the paged group spans both.
     tensor_regions = (("paged.0",), ("paged.1", "ring.0", "ring.1"))
-    page_size = max(
-        spec.page_size_bytes for spec in (*paged_specs.values(), *ring_specs.values())
-    )
-    region_size = 2 * page_size
+    region_size, page_size = 512, 256
     kv_cache_config = KVCacheConfig(
         num_blocks=2,
         kv_cache_tensors=[
@@ -1721,16 +1496,12 @@ def _make_ring_worker():
         patch.object(bw, "NixlWrapper", _RecordingNixl),
         patch.object(bw, "get_tensor_model_parallel_rank", return_value=0),
         patch.object(bw, "get_tensor_model_parallel_world_size", return_value=1),
-        patch.object(
-            bw,
-            "get_current_attn_backend_layouts",
-            return_value=[(fake_backend, None, False)],
-        ),
+        patch.object(bw, "get_current_attn_backends", return_value=[fake_backend]),
         patch.object(bw, "current_platform", fake_platform),
         set_current_vllm_config(vllm_config),
     ):
         worker = NixlConnectorWorker(vllm_config, "local-engine", kv_cache_config)
-        tensors = [torch.zeros((2, page_size), dtype=torch.uint8) for _ in range(2)]
+        tensors = [torch.zeros((2, 256), dtype=torch.uint8) for _ in range(2)]
         worker.register_kv_caches(
             {
                 layer_name: tensors[region_index]

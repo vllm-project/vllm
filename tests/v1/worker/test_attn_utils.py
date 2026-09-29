@@ -15,7 +15,11 @@ import pytest
 import torch
 
 import vllm.v1.hisparse.binding as attn_utils_module
-from tests.v1.attention.utils import dense_kv_cache_views
+from tests.v1.attention.utils import (
+    BatchSpec,
+    create_common_attn_metadata,
+    dense_kv_cache_views,
+)
 from vllm.config.compilation import CUDAGraphMode
 from vllm.v1.attention.backend import AttentionBackend, AttentionCGSupport, MultipleOf
 from vllm.v1.core.kv_cache_utils import KVCacheBlockCopy
@@ -29,7 +33,6 @@ from vllm.v1.kv_cache_interface import (
     KVCacheTensor,
     MLAAttentionSpec,
     SparseCacheRole,
-    UniformTypeKVCacheSpecs,
     compute_layout_strides,
 )
 from vllm.v1.worker.gpu import attn_utils
@@ -43,9 +46,8 @@ from vllm.v1.worker.utils import (
     AttentionGroup,
     allocate_kv_cache,
     copy_kv_cache_blocks_inplace,
-    group_block_stride_bytes,
-    prepare_kernel_block_sizes,
-    select_common_block_size_for_layout,
+    customize_attention_spec,
+    map_kv_caches_to_kernel_blocks,
 )
 
 
@@ -83,7 +85,7 @@ def test_get_kv_cache_spec_resolves_hisparse_block_size(
         backend = SimpleNamespace(
             get_name=lambda name=name: name,
             customize_spec=AttentionBackend.customize_spec,
-            get_supported_kernel_block_sizes=lambda _spec=None, sizes=sizes: sizes,
+            get_supported_kernel_block_sizes=lambda _=None, sizes=sizes: sizes,
         )
         layers[name] = SimpleNamespace(
             get_kv_cache_spec=lambda _, spec=specs[name]: spec,
@@ -455,21 +457,17 @@ def test_reshape_padded_kv_cache_strides_by_padded_page():
 @pytest.mark.parametrize(
     (
         "kernel_block_sizes",
-        "kernel_page_size",
         "expected_num_blocks",
         "expected_num_states",
     ),
     [
-        (None, None, 4, 64),
-        ([256], None, 4, 64),
-        ([128], 128, 8, 32),
-        ([256], 256, 4, 64),
-        ([64], None, 16, 16),
+        (None, 4, 64),
+        ([256], 4, 64),
+        ([64], 16, 16),
     ],
 )
 def test_allocate_compressed_mla_cache(
     kernel_block_sizes: list[int] | None,
-    kernel_page_size: int | None,
     expected_num_blocks: int,
     expected_num_states: int,
 ):
@@ -479,7 +477,6 @@ def test_allocate_compressed_mla_cache(
         head_size=128,
         dtype=torch.bfloat16,
         tokens_per_state=4,
-        kernel_page_size=kernel_page_size,
     )
     num_pages = 4
     config = KVCacheConfig(
@@ -500,157 +497,6 @@ def test_allocate_compressed_mla_cache(
     )
 
     assert caches["layer.0"].shape == (expected_num_blocks, 1, expected_num_states, 128)
-    assert group_block_stride_bytes(config, ["layer.0"]) == spec.page_size_bytes
-
-
-def test_group_block_stride_bytes_targets_attention_group_layers():
-    narrow_spec = FullAttentionSpec(
-        block_size=16,
-        num_kv_heads=1,
-        head_size=64,
-        dtype=torch.bfloat16,
-    )
-    wide_spec = FullAttentionSpec(
-        block_size=16,
-        num_kv_heads=1,
-        head_size=128,
-        dtype=torch.bfloat16,
-    )
-    manager_spec = UniformTypeKVCacheSpecs(
-        block_size=16,
-        kv_cache_specs={"narrow": narrow_spec, "wide": wide_spec},
-    )
-    allocation_size = 2 * (narrow_spec.page_size_bytes + wide_spec.page_size_bytes)
-    config = KVCacheConfig(
-        num_blocks=2,
-        kv_cache_tensors=[
-            KVCacheTensor(
-                size=allocation_size,
-                layers=["narrow"],
-                layer_stride=2 * narrow_spec.page_size_bytes,
-                block_stride=narrow_spec.page_size_bytes,
-            ),
-            KVCacheTensor(
-                size=allocation_size,
-                layers=["wide"],
-                layer_stride=2 * wide_spec.page_size_bytes,
-                block_stride=wide_spec.page_size_bytes,
-            ),
-        ],
-        kv_cache_groups=[KVCacheGroupSpec(["narrow", "wide"], manager_spec)],
-    )
-    groups = [
-        AttentionGroup(AttentionBackend, ["narrow"], narrow_spec, 0),
-        AttentionGroup(AttentionBackend, ["wide"], wide_spec, 0),
-    ]
-
-    assert [
-        group_block_stride_bytes(config, group.layer_names) for group in groups
-    ] == [narrow_spec.page_size_bytes, wide_spec.page_size_bytes]
-
-
-@pytest.mark.parametrize(
-    ("stride_pages", "page_rows", "expected"),
-    [(1, 1, 64), (2, None, None), (2, 1, 256)],
-)
-def test_strided_capability_controls_manager_block_retention(
-    stride_pages: int, page_rows: int | None, expected: int | None
-):
-    spec = MLAAttentionSpec(
-        block_size=256,
-        num_kv_heads=1,
-        head_size=128,
-        dtype=torch.bfloat16,
-    )
-    backend = SimpleNamespace(
-        get_supported_kernel_block_sizes=lambda: [64],
-        get_strided_block_page_rows=lambda _spec: page_rows,
-    )
-    page_size = spec.page_size_bytes
-    config = KVCacheConfig(
-        num_blocks=2,
-        kv_cache_tensors=[
-            KVCacheTensor(
-                size=2 * stride_pages * page_size,
-                layers=["layer.0"],
-                layer_stride=2 * stride_pages * page_size,
-                block_stride=stride_pages * page_size,
-            )
-        ],
-        kv_cache_groups=[KVCacheGroupSpec(["layer.0"], spec)],
-    )
-    groups = [[AttentionGroup(backend, ["layer.0"], spec, 0)]]
-
-    if expected is None:
-        with pytest.raises(ValueError, match="strided KV cache cannot share"):
-            prepare_kernel_block_sizes(config, groups)
-    else:
-        assert prepare_kernel_block_sizes(config, groups) == [expected]
-
-
-@pytest.mark.parametrize("other_stride_pages", [1, 2])
-def test_strided_group_rejects_backend_requiring_virtual_split(
-    other_stride_pages: int,
-):
-    spec = MLAAttentionSpec(
-        block_size=256,
-        num_kv_heads=1,
-        head_size=128,
-        dtype=torch.bfloat16,
-    )
-    page_size = spec.page_size_bytes
-    config = KVCacheConfig(
-        num_blocks=2,
-        kv_cache_tensors=[
-            KVCacheTensor(
-                size=4 * page_size,
-                layers=[layer_name],
-                layer_stride=4 * page_size,
-                block_stride=stride_pages * page_size,
-            )
-            for layer_name, stride_pages in (
-                ("layer.0", 2),
-                ("layer.1", other_stride_pages),
-            )
-        ],
-        kv_cache_groups=[KVCacheGroupSpec(["layer.0", "layer.1"], spec)],
-    )
-    capable = SimpleNamespace(
-        get_supported_kernel_block_sizes=lambda: [64],
-        get_strided_block_page_rows=lambda _spec: 1,
-    )
-    incapable = SimpleNamespace(
-        get_supported_kernel_block_sizes=lambda: [64],
-        get_strided_block_page_rows=lambda _spec: None,
-    )
-    groups = [
-        [
-            AttentionGroup(capable, ["layer.0"], spec, 0),
-            AttentionGroup(incapable, ["layer.1"], spec, 0),
-        ]
-    ]
-
-    with pytest.raises(ValueError, match="strided KV cache cannot share"):
-        prepare_kernel_block_sizes(config, groups)
-
-
-def test_strided_backends_need_no_common_native_block_size():
-    spec = MLAAttentionSpec(
-        block_size=256, num_kv_heads=1, head_size=128, dtype=torch.bfloat16
-    )
-    layouts = [
-        (
-            SimpleNamespace(
-                get_supported_kernel_block_sizes=lambda size=size: [size],
-                get_strided_block_page_rows=lambda _spec: 1,
-            ),
-            spec,
-            True,
-        )
-        for size in (32, 64)
-    ]
-
-    assert select_common_block_size_for_layout(256, layouts) == 256
 
 
 @pytest.mark.parametrize("layout", list(KVCacheLayout))
@@ -791,12 +637,12 @@ def test_copy_kv_cache_blocks_with_virtual_block_splitting(
 
 
 def test_allocate_hisparse_kv_caches_host_pool_and_view_less_specs():
-    """Host views use kernel blocks; view-less specs keep the raw backing."""
-    spec = MLAAttentionSpec(
-        block_size=4, num_kv_heads=1, head_size=4, dtype=torch.float32
+    """Host tensors get their own backing; view-less specs keep the raw one."""
+    spec = FullAttentionSpec(
+        block_size=2, num_kv_heads=1, head_size=4, dtype=torch.float32
     )
     page = spec.page_size_bytes
-    resident_spec = HiSparseResidentSpec(block_size=4, page_size=page)
+    resident_spec = HiSparseResidentSpec(block_size=2, page_size=page)
     device_size = 4 * page
     config = KVCacheConfig(
         num_blocks=4,
@@ -844,15 +690,101 @@ def test_allocate_hisparse_kv_caches_host_pool_and_view_less_specs():
     assert len(config.kv_cache_tensors) == 3
 
     assert [buf.numel() for buf in host_buffers] == [3 * page]
-    assert caches["source"].shape[0] == 6
+    assert caches["source"].shape[0] == 3
     assert (
         caches["source"].untyped_storage().data_ptr()
         == host_buffers[0].untyped_storage().data_ptr()
     )
-    assert caches["indexer"].shape[0] == 8
+    assert caches["indexer"].shape[0] == 4
     backing = caches["resident"]
     assert backing.dtype == torch.int8 and backing.numel() >= device_size
     assert (
         backing.untyped_storage().data_ptr()
         == caches["indexer"].untyped_storage().data_ptr()
     )
+
+
+class _TableBuilder:
+    requires_block_table_width = False
+    supports_update_block_table = False
+
+    def __init__(self, kv_cache_spec, layer_names, vllm_config, device):
+        self.kv_cache_spec = kv_cache_spec
+
+    def set_kernel_block_size(self, kernel_block_size):
+        pass
+
+    def build(self, common_prefix_len, common_attn_metadata, fast_build=False):
+        return common_attn_metadata.block_table_tensor
+
+
+def _packed_group(tokens_per_state, row_bytes, supported_sizes):
+    spec = MLAAttentionSpec(
+        block_size=1024,
+        num_kv_heads=1,
+        head_size=128,
+        dtype=torch.uint8,
+        state_content_bytes=row_bytes,
+        tokens_per_state=tokens_per_state,
+    )
+    backend = SimpleNamespace(
+        get_builder_cls=lambda: _TableBuilder,
+        get_supported_kernel_block_sizes=lambda _=None: supported_sizes,
+        get_name=lambda: "FAKE",
+        customize_spec=lambda spec: spec,
+    )
+    return AttentionGroup(backend, ["layer.0"], spec, 0)
+
+
+def test_packed_compressed_group_gets_kernel_block_table():
+    """A packed indexer cache whose kernel needs 64-state pages gets a table and
+    a bound view in kernel blocks that address the same packed-block rows."""
+    row, stride_rows = 132, 5 * 64
+    group = _packed_group(4, row, [128, 256])
+    vllm_config = SimpleNamespace(scheduler_config=SimpleNamespace(max_num_seqs=4))
+    group.create_metadata_builders(vllm_config, "cpu", kernel_block_size=1024)
+    assert group.get_metadata_builder().kv_cache_spec.block_size == 256
+
+    backing = torch.arange(3 * stride_rows).repeat_interleave(row)
+    manager = backing.view(3, 1, stride_rows, row)[:, :, :256]
+    pages = map_kv_caches_to_kernel_blocks({"layer.0": manager}, [group])["layer.0"]
+    metadata = create_common_attn_metadata(BatchSpec([2048], [1]), 1024, "cpu")
+    metadata.block_table_tensor = torch.tensor([[0, 2]], dtype=torch.int32)
+    table = group.build_metadata(metadata)
+    assert table.tolist() == [[0, 1, 2, 3, 10, 11, 12, 13]]
+    assert torch.equal(pages[table[0, 4:], 0].flatten(0, 1), manager[2, 0])
+
+
+def test_split_group_maps_manager_block_table():
+    """Groups split in a dense layout keep manager block tables; builders get
+    b * blocks_per_kv_block + j against the view allocated in kernel blocks."""
+    group = _packed_group(4, 132, [128, 256])
+    group.create_metadata_builders(SimpleNamespace(), "cpu", kernel_block_size=256)
+    kernel_view = torch.zeros(12, 1, 64, 132)
+    bound = map_kv_caches_to_kernel_blocks({"layer.0": kernel_view}, [group])
+    assert bound["layer.0"] is kernel_view
+
+    metadata = create_common_attn_metadata(BatchSpec([2048], [1]), 1024, "cpu")
+    metadata.block_table_tensor = torch.tensor([[0, 2]], dtype=torch.int32)
+    table = group.build_metadata(metadata)
+    assert table.tolist() == [[0, 1, 2, 3, 8, 9, 10, 11]]
+
+
+@pytest.mark.parametrize(
+    ("block_size", "page_states"), [(1024, 64), (384, 32), (256, 0)]
+)
+def test_split_blocks_align_to_kernel_blocks(block_size, page_states):
+    """Backends taking only fixed kernel blocks align packed blocks to the kernel
+    block the final block size is split into, and not at all when unsplit."""
+    group = _packed_group(4, 132, [128, 256])
+    spec = customize_attention_spec(group.backend, group.kv_cache_spec)
+    spec = spec.copy_with_new_block_size(block_size)
+    assert spec.get_block_stride_alignment() == max(page_states * 132, 1)
+
+
+def test_packed_token_cache_cannot_be_split():
+    group = _packed_group(1, 1152, [64])
+    group.create_metadata_builders(SimpleNamespace(), "cpu", kernel_block_size=1024)
+    packed = torch.zeros(3, 1, 2048, 1152, dtype=torch.uint8)[:, :, :1024]
+    with pytest.raises(ValueError, match="cannot be split"):
+        map_kv_caches_to_kernel_blocks({"layer.0": packed}, [group])

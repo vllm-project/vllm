@@ -40,7 +40,7 @@ from vllm.v1.attention.backends.utils import split_decodes_and_prefills
 from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
     rocm_sparse_attn_prefill,
 )
-from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheLayout, KVCacheSpec
+from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheLayout
 from vllm.v1.worker.workspace import current_workspace_manager
 
 if TYPE_CHECKING:
@@ -148,11 +148,8 @@ def _convert_req_index_to_global_index_kernel(
     bt_ptr = block_table_ptr + req * bt_stride0 + block_id * bt_stride1
     base = tl.load(bt_ptr, mask=valid_block, other=0)
 
-    # Invalid slots map to zero; valid slots use the physical block stride.
     out_val = tl.where(
-        is_invalid_tok | (~valid_block),
-        0,
-        base * BLOCK_STRIDE_ROWS + inblock_off,
+        is_invalid_tok | (~valid_block), 0, base * BLOCK_STRIDE_ROWS + inblock_off
     )
     out_ptr_ij = out_ptr + seq_start + indice_id
     out_ptr_ij_mask = (seq_start + indice_id) < seq_end
@@ -167,9 +164,8 @@ def triton_convert_req_index_to_global_index(
     token_indices: torch.Tensor,  # int32 [num_tokens, NUM_TOPK_TOKENS]
     cu_seqlens: torch.Tensor,  # int32 [num_tokens + 1]
     paged_kv_indices: torch.Tensor,  # int32 [num_tokens * topk] out_buffer
-    *,
-    BLOCK_SIZE: int = 64,
     BLOCK_STRIDE_ROWS: int,
+    BLOCK_SIZE: int = 64,
     NUM_TOPK_TOKENS: int = 2048,
     BLOCK_N: int = 128,  # tile width along columns
 ):
@@ -296,10 +292,6 @@ class ROCMAiterMLASparseBackend(AttentionBackend):
     @staticmethod
     def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int | MultipleOf]:
         return [1, MultipleOf(16)]
-
-    @staticmethod
-    def get_strided_block_page_rows(kv_cache_spec: KVCacheSpec) -> int:
-        return 1
 
     @staticmethod
     def get_name() -> str:
@@ -1085,10 +1077,9 @@ class ROCMAiterMLASparseImpl(
             self.topk_indices_buffer[:num_actual_toks], attn_metadata.topk_tokens
         )
 
-        kv_rows, block_stride_rows = flat_kv_row_view(
+        kv_c_and_k_pe_cache, block_stride_rows = flat_kv_row_view(
             kv_c_and_k_pe_cache, attn_metadata.block_size
         )
-
         triton_convert_req_index_to_global_index(
             attn_metadata.req_id_per_token,
             attn_metadata.block_table,
@@ -1102,7 +1093,7 @@ class ROCMAiterMLASparseImpl(
 
         # write the latent and rope to kv cache
         if fp8_attention:
-            kv_rows = kv_rows.view(current_platform.fp8_dtype())
+            kv_c_and_k_pe_cache = kv_c_and_k_pe_cache.view(current_platform.fp8_dtype())
             if q.dtype != current_platform.fp8_dtype():
                 original_q_shape = q.shape
                 q, _ = ops.scaled_fp8_quant(q.view(q.shape[0], -1), layer._q_scale)
@@ -1114,5 +1105,5 @@ class ROCMAiterMLASparseImpl(
             return output, None
         mla_padded_q = AiterMLAHelper.get_mla_padded_q(self.num_heads, q)
         return self._forward_mla(
-            layer, mla_padded_q, kv_rows.unsqueeze(1), attn_metadata
+            layer, mla_padded_q, kv_c_and_k_pe_cache.unsqueeze(1), attn_metadata
         )

@@ -455,8 +455,7 @@ def test_sparse_mla_sink_forward_mqa_preserves_split_query(dtype):
     set_random_seed(412)
     num_tokens, num_heads, block_size = 2, 8, 16
     q = torch.randn(num_tokens, num_heads, Q_HEAD_DIM, device="cuda").to(dtype)
-    backing = torch.randn(2, 2, block_size, Q_HEAD_DIM, device="cuda").to(dtype)
-    kv = backing[:, 1]
+    kv = torch.randn(2, 2, block_size, Q_HEAD_DIM, device="cuda").to(dtype)[:, 1]
     selected = torch.tensor([[1, 7, 18], [0, 3, 20]], dtype=torch.int32, device="cuda")
     sinks = torch.linspace(-3.0, 5.0, num_heads, device="cuda")
     impl = object.__new__(ROCMAiterMLASparseImpl)

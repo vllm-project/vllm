@@ -48,11 +48,9 @@ class AttentionType(str, Enum):
     """Attention between dec. Q and enc. K/V for encoder-decoder."""
 
 
+@dataclass(frozen=True)
 class MultipleOf:
     base: int
-
-    def __init__(self, base: int):
-        self.base = base
 
     def __repr__(self) -> str:
         return f"MultipleOf({self.base})"
@@ -76,13 +74,6 @@ class AttentionBackend(ABC):
         kv_cache_spec: "KVCacheSpec | None" = None,
     ) -> list[int | MultipleOf]:
         return [MultipleOf(1)]
-
-    @staticmethod
-    def get_strided_block_page_rows(
-        kv_cache_spec: "KVCacheSpec",
-    ) -> int | None:
-        """Kernel page rows used to view a larger strided manager block."""
-        return None
 
     @staticmethod
     @abstractmethod
@@ -616,8 +607,6 @@ class AttentionMetadataBuilder(ABC, Generic[M]):
     supports_update_block_table: bool = False
     # Whether the builder constructor requires the block-table width.
     requires_block_table_width: ClassVar[bool] = False
-    # Whether the builder constructor requires the cache block stride.
-    requires_block_stride_bytes: ClassVar[bool] = False
     # Whether all step-dependent draft decode metadata can be updated in place,
     # allowing one metadata build to be reused across autoregressive draft steps.
     supports_draft_decode_metadata_update: bool = False

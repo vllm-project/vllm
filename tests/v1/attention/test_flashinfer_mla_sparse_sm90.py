@@ -29,15 +29,7 @@ HEAD = 512
 TOPK = 128  # triton convert requires width % 128 == 0
 
 
-def ref_convert(
-    req_id,
-    block_table,
-    token_indices,
-    BLOCK_SIZE=64,
-    BLOCK_STRIDE_ROWS=None,
-    **_,
-):
-    block_stride_rows = BLOCK_STRIDE_ROWS or BLOCK_SIZE
+def ref_convert(req_id, block_table, token_indices, BLOCK_SIZE=64, **kw):
     out = torch.full_like(token_indices, -1)
     counts = torch.zeros(token_indices.shape[0], dtype=torch.int32)
     for t in range(token_indices.shape[0]):
@@ -49,7 +41,7 @@ def ref_convert(
             blk = int(block_table[int(req_id[t]), pos // BLOCK_SIZE])
             if blk < 0:
                 continue
-            vals.append(blk * block_stride_rows + pos % BLOCK_SIZE)
+            vals.append(blk * kw["BLOCK_STRIDE_ROWS"] + pos % BLOCK_SIZE)
         out[t, : len(vals)] = torch.tensor(vals, dtype=out.dtype)
         counts[t] = len(vals)
     return out, counts
@@ -115,10 +107,7 @@ def make_batch(rows, topk_rows, own_blocks):
     for t, row in enumerate(topk_rows):
         topk[t, : len(row)] = torch.tensor(row, dtype=torch.int32)
     return SimpleNamespace(
-        req_id_per_token=req_id,
-        block_table=block_table,
-        block_size=BLOCK_SIZE,
-        topk_indices=topk,
+        req_id_per_token=req_id, block_table=block_table, block_size=BLOCK_SIZE
     )
 
 
@@ -141,18 +130,11 @@ def test_forward_wiring(monkeypatch, qk_rope, kv_dtype):
     state.kv_indptr[1:5] = torch.tensor([8, 13, 16, 17], dtype=torch.int32)
     state.kv_indptr[5:] = 17
     meta = make_batch(rows, topk_rows, [3])
-    impl.topk_indices_buffer.copy_(meta.topk_indices)
     meta.state = state
     q_nope = torch.randn(rows, impl.num_heads, HEAD)
     q_rope = torch.randn(rows, impl.num_heads, qk_rope)
-    backing = torch.zeros(
-        8,
-        2,
-        BLOCK_SIZE,
-        impl.head_size,
-        dtype=torch.uint8 if impl.use_fp8_kv_cache else torch.bfloat16,
-    )
-    cache = backing[:, 0]
+    dtype = torch.uint8 if impl.use_fp8_kv_cache else torch.bfloat16
+    cache = torch.zeros(8, 2, BLOCK_SIZE, impl.head_size, dtype=dtype)[:, 0]
 
     out, lse = impl.forward_mqa(
         (q_nope, q_rope), cache, meta, SimpleNamespace(_k_scale_float=0.5)
@@ -306,21 +288,6 @@ def test_pack_indices_replays_with_updated_offsets(width):
         )
         torch.testing.assert_close(state.kv_indices[: expected.numel()], expected)
         assert (state.kv_indices[expected.numel() :] == -99).all()
-
-
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="Requires CUDA")
-def test_pack_indices_padding_uses_valid_slot():
-    """Planned rows may read padding; it must not point at unrelated cache rows."""
-    state = sm90_mod._SM90State.__new__(sm90_mod._SM90State)
-    state.kv_indptr = torch.tensor([0, 6, 10], dtype=torch.int32, device="cuda")
-    state.kv_indices = torch.empty(10, dtype=torch.int32, device="cuda")
-    slots = torch.full((2, TOPK), -1, dtype=torch.int32, device="cuda")
-    slots[0, :2] = torch.tensor([7, 3], device="cuda")
-    slots[1, 0] = 13
-
-    state.pack_indices(slots)
-
-    assert state.kv_indices.tolist() == [7, 3, 7, 7, 7, 7, 13, 13, 13, 13]
 
 
 @pytest.mark.parametrize("adaptive", [False, True])

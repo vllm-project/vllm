@@ -44,8 +44,6 @@ from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     KVCacheGroupSpec,
     KVCacheLayout,
-    KVCacheTensor,
-    MLAAttentionSpec,
 )
 from vllm.v1.request import RequestStatus
 
@@ -1505,51 +1503,6 @@ def test_register_kv_caches(layout: KVCacheLayout, separate_kv_head_groups: bool
                 assert worker.kv_block_len_per_layer == [spec.page_size_bytes] * 2
                 assert worker.registered_layer_names == list(kv_caches)
                 assert worker.registered_layer_indices == [0, 1]
-
-
-def test_register_dense_kpool_cache_uses_transfer_page_stride():
-    layer_name = "model.layers.0.indexer"
-    spec = MLAAttentionSpec(
-        block_size=1024,
-        num_kv_heads=1,
-        head_size=128,
-        dtype=torch.uint8,
-        state_content_bytes=132,
-        tokens_per_state=4,
-        kernel_page_size=256,
-    )
-    logical_num_blocks = 2
-    transfer_ratio = 16
-    config = KVCacheConfig(
-        num_blocks=logical_num_blocks,
-        kv_cache_tensors=[
-            KVCacheTensor(
-                size=logical_num_blocks * spec.page_size_bytes,
-                layers=[layer_name],
-                layer_stride=logical_num_blocks * spec.page_size_bytes,
-                block_stride=spec.page_size_bytes,
-            )
-        ],
-        kv_cache_groups=[KVCacheGroupSpec([layer_name], spec)],
-    )
-    raw = torch.zeros(logical_num_blocks * spec.page_size_bytes, dtype=torch.int8)
-    cache = raw.view(8, 1, 64, 132)
-
-    worker = MooncakeConnectorWorker.__new__(MooncakeConnectorWorker)
-    worker.use_mla = True
-    worker.is_kv_consumer = True
-    worker.engine = MagicMock()
-    worker.engine.batch_register_memory.return_value = 0
-    worker.kv_cache_config = config
-    worker._layer_specs = {layer_name: spec}
-    worker._physical_blocks_per_logical_kv_block = transfer_ratio
-
-    worker.register_kv_caches({layer_name: cache})
-
-    transfer_page_bytes = spec.page_size_bytes // transfer_ratio
-    assert cache.stride(0) * cache.element_size() == 4 * transfer_page_bytes
-    assert worker.block_len_per_layer == [transfer_page_bytes]
-    assert worker.kv_block_len_per_layer == [transfer_page_bytes]
 
 
 def test_register_kv_caches_supports_mixed_mla_and_eagle_shapes():

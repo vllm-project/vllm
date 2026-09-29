@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import copy
+import math
 from collections import Counter
 from collections.abc import Collection, Sequence
 from dataclasses import dataclass, field, fields, replace
@@ -25,6 +26,7 @@ from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
+    from vllm.v1.attention.backend import MultipleOf
 
 logger = init_logger(__name__)
 
@@ -161,12 +163,27 @@ class KVCacheSpec:
     dcp_sharded: bool = field(default=False, kw_only=True)
     """Whether DCP shards this cache's token positions across ranks."""
 
-    block_stride_alignment: int | None = field(default=None, kw_only=True)
-    """Required byte alignment between physical blocks, including packed layers."""
+    block_stride_alignment: int | MultipleOf | None = field(default=None, kw_only=True)
+    """Required byte alignment between physical blocks, including packed layers.
+    ``MultipleOf(n)``: whole kernel blocks, when blocks are split into kernel
+    blocks of up to ``n`` tokens."""
 
     def __post_init__(self):
-        if self.block_stride_alignment is not None and self.block_stride_alignment <= 0:
+        alignment = self.block_stride_alignment
+        if isinstance(alignment, int) and alignment <= 0:
             raise ValueError("block_stride_alignment must be positive")
+
+    def get_block_stride_alignment(self) -> int:
+        """Bytes the stride between physical blocks must be a multiple of."""
+        from vllm.v1.attention.backend import MultipleOf
+
+        alignment = self.block_stride_alignment
+        if not isinstance(alignment, MultipleOf):
+            return alignment or 1
+        kernel_block_size = math.gcd(alignment.base, self.block_size)
+        if kernel_block_size == self.block_size:
+            return 1
+        return self.copy_with_new_block_size(kernel_block_size).page_size_bytes
 
     @property
     def prefix_cacheable(self) -> bool:
@@ -661,8 +678,6 @@ class MLAAttentionSpec(FullAttentionSpec):
     model_version: str | None = None
     cache_role: SparseCacheRole = SparseCacheRole.SPARSE
     is_index_group_leader: bool = False
-    kernel_page_size: int | None = None
-    """Token width of a virtual kernel page inside a manager block."""
     # Group capability enabled when any member flattens a non-causal query block
     # into decode rows. Runtime metadata still selects causal vs. non-causal mode.
     non_causal_multi_token_decode: bool = False
@@ -672,15 +687,6 @@ class MLAAttentionSpec(FullAttentionSpec):
     def __post_init__(self):
         super().__post_init__()
         _apply_alignment_padding(self)
-
-    def copy_with_new_block_size(self, block_size: int) -> Self:
-        return replace(
-            self,
-            block_size=block_size,
-            kernel_page_size=(
-                self.kernel_page_size if block_size == self.block_size else None
-            ),
-        )
 
     @classmethod
     def merge(cls, specs: list[Self]) -> Self:
@@ -692,7 +698,6 @@ class MLAAttentionSpec(FullAttentionSpec):
         model_version_set = set(spec.model_version for spec in specs)
         cache_role_set = {spec.cache_role for spec in specs}
         index_group_leader_set = {spec.is_index_group_leader for spec in specs}
-        kernel_page_size_set = {spec.kernel_page_size for spec in specs}
         block_stride_alignment_set = {spec.block_stride_alignment for spec in specs}
         assert (
             len(cache_dtype_str_set) == 1
@@ -700,12 +705,11 @@ class MLAAttentionSpec(FullAttentionSpec):
             and len(model_version_set) == 1
             and len(cache_role_set) == 1
             and len(index_group_leader_set) == 1
-            and len(kernel_page_size_set) == 1
             and len(block_stride_alignment_set) == 1
         ), (
             "All attention layers in the same KV cache group must use the same "
             "quantization method, tokens per state, model version, cache role, "
-            "index-sharing role, kernel page size and block stride alignment."
+            "index-sharing role, and block stride alignment."
         )
         merged_spec = cls(
             block_size=specs[0].block_size,
@@ -722,7 +726,6 @@ class MLAAttentionSpec(FullAttentionSpec):
             model_version=model_version_set.pop(),
             cache_role=cache_role_set.pop(),
             is_index_group_leader=index_group_leader_set.pop(),
-            kernel_page_size=kernel_page_size_set.pop(),
             block_stride_alignment=block_stride_alignment_set.pop(),
             non_causal_multi_token_decode=any(
                 spec.non_causal_multi_token_decode for spec in specs
@@ -735,24 +738,6 @@ class MLAAttentionSpec(FullAttentionSpec):
                     "the same attention spec."
                 )
         return merged_spec
-
-
-def get_cache_view_spec(
-    spec: KVCacheSpec,
-    kernel_block_size: int | None,
-    block_stride_bytes: int | None,
-) -> KVCacheSpec:
-    """Select the cache view shared by allocation and metadata builders."""
-    if (
-        isinstance(spec, MLAAttentionSpec)
-        and spec.kernel_page_size is not None
-        and block_stride_bytes == spec.page_size_bytes
-        and (kernel_block_size is None or kernel_block_size < spec.block_size)
-    ):
-        return spec.copy_with_new_block_size(spec.kernel_page_size)
-    if kernel_block_size is None:
-        return spec
-    return spec.copy_with_new_block_size(kernel_block_size)
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -1027,32 +1012,6 @@ class SlidingWindowMLASpec(SlidingWindowSpec):
             and spec.bounded_replay == self.bounded_replay
             for spec in kv_cache_specs.values()
         )
-
-
-@dataclass(frozen=True, kw_only=True)
-class KpoolTailSpec(SlidingWindowSpec):
-    """One-block circular scratch cache for a kpool indexer's raw tail."""
-
-    def max_admission_blocks_per_request(
-        self, max_in_flight_tokens: int, max_model_len: int
-    ) -> int:
-        return 1
-
-    def max_num_blocks_per_req(self, vllm_config: VllmConfig, max_len: int) -> int:
-        return 1
-
-    def is_uniform_with_collection(
-        self, kv_cache_specs: dict[str, KVCacheSpec]
-    ) -> bool:
-        return all(isinstance(spec, KpoolTailSpec) for spec in kv_cache_specs.values())
-
-    @property
-    def prefix_cacheable(self) -> bool:
-        return False
-
-    @property
-    def uses_slot_mapping(self) -> bool:
-        return False
 
 
 @dataclass(frozen=True)

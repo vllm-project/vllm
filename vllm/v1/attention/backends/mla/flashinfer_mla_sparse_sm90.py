@@ -60,7 +60,7 @@ from vllm.v1.attention.backends.mla.sparse_utils import (
     flat_kv_row_view,
     triton_convert_req_index_to_global_index,
 )
-from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheSpec
+from vllm.v1.kv_cache_interface import AttentionSpec
 
 _FP8_KV_DTYPES = ("fp8", "fp8_e4m3")
 _WORKSPACE_BYTES = 128 * 1024 * 1024
@@ -225,11 +225,6 @@ class FlashInferMLASparseSM90Backend(AttentionBackend):
         cache_dtype_str: str = "auto",
     ) -> tuple[int, ...]:
         return (num_blocks, block_size, head_size)
-
-    @staticmethod
-    def get_strided_block_page_rows(kv_cache_spec: KVCacheSpec) -> int:
-        # Rows are the page table; only whole-row block stride alignment is needed.
-        return 1
 
 
 class _SM90State:
@@ -601,12 +596,12 @@ class FlashInferMLASparseSM90Impl(SparseMLACommonImpl[FlashInferMLASparseSM90Met
 
         assert self.topk_indices_buffer is not None
         topk_indices = self.topk_indices_buffer[:num_tokens]
+        kv_c_and_k_pe_cache, block_stride_rows = flat_kv_row_view(
+            kv_c_and_k_pe_cache, attn_metadata.block_size
+        )
         # return_valid_counts=True keeps the compacted-prefix layout: valid
         # entries at [0, valid_count), -1 past it — exactly the prefix the
         # planned per-row lengths address.
-        kv_rows, block_stride_rows = flat_kv_row_view(
-            kv_c_and_k_pe_cache, attn_metadata.block_size
-        )
         topk_slots, _ = triton_convert_req_index_to_global_index(
             attn_metadata.req_id_per_token[:num_tokens],
             attn_metadata.block_table,
@@ -621,11 +616,11 @@ class FlashInferMLASparseSM90Impl(SparseMLACommonImpl[FlashInferMLASparseSM90Met
         # Pack valid prefixes at the offsets refreshed by plan() before replay.
         state.pack_indices(topk_slots)
 
-        # Row ids index the flat row view; under packed layouts the rows of
-        # other layers sit between blocks and are never referenced.
         flat = (
-            kv_rows.view(torch.float8_e4m3fn) if self.use_fp8_kv_cache else kv_rows
-        ).unsqueeze(1)
+            kv_c_and_k_pe_cache.view(torch.float8_e4m3fn)
+            if self.use_fp8_kv_cache
+            else kv_c_and_k_pe_cache
+        ).reshape(-1, 1, self.head_size)
         ckv = flat[..., : self.kv_lora_rank]
         kpe = flat[..., self.kv_lora_rank :]
 

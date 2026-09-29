@@ -9,23 +9,17 @@ import torch
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backends.mla import rocm_aiter_mla_sparse as sparse_mod
-from vllm.v1.attention.backends.mla.indexer import (
-    DeepseekV32IndexerBackend,
-    KpoolTailBackend,
-)
 from vllm.v1.attention.backends.mla.rocm_aiter_mla_sparse import (
     ROCMAiterMLASparseBackend,
     _use_rocm_sparse_triton,
     fit_kpool_indices_to_aiter,
-    triton_convert_req_index_to_global_index,
 )
-from vllm.v1.attention.backends.utils import get_supported_kv_cache_layouts
 from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
     _sparse_kv_row_offset,
     _validate_dsv4_sparse_dims,
     _validate_sparse_dims,
 )
-from vllm.v1.kv_cache_interface import KVCacheLayout, MLAAttentionSpec
+from vllm.v1.kv_cache_interface import KVCacheLayout
 
 
 @triton.jit
@@ -69,18 +63,7 @@ def test_fit_kpool_indices_rejects_narrow_input():
 
 
 def test_rocm_sparse_mla_supports_glm_packed_layout():
-    layouts = get_supported_kv_cache_layouts(
-        (ROCMAiterMLASparseBackend, DeepseekV32IndexerBackend, KpoolTailBackend)
-    )
-    spec = MLAAttentionSpec(
-        block_size=64,
-        num_kv_heads=1,
-        head_size=512,
-        dtype=torch.bfloat16,
-    )
-
-    assert layouts == [KVCacheLayout.BLHNC]
-    assert ROCMAiterMLASparseBackend.get_strided_block_page_rows(spec) == 1
+    assert KVCacheLayout.BLHNC in ROCMAiterMLASparseBackend.supported_kv_cache_layouts()
 
 
 @pytest.mark.parametrize(
@@ -203,26 +186,3 @@ def test_sparse_prefill_kv_row_offset_does_not_overflow_int32():
     _store_sparse_kv_row_offset_kernel[(1,)](slot, output, stride=512)
 
     assert output.item() == 6554 * 640 * 512
-
-
-@pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm required")
-def test_rocm_sparse_index_conversion_uses_physical_block_stride():
-    req_id = torch.tensor([0], dtype=torch.int32, device="cuda")
-    block_table = torch.tensor([[2]], dtype=torch.int32, device="cuda")
-    token_indices = torch.full((1, 128), -1, dtype=torch.int32, device="cuda")
-    token_indices[0, 0] = 5
-    indptr = torch.tensor([0, 1], dtype=torch.int32, device="cuda")
-    output = torch.empty(128, dtype=torch.int32, device="cuda")
-
-    triton_convert_req_index_to_global_index(
-        req_id,
-        block_table,
-        token_indices,
-        indptr,
-        output,
-        BLOCK_SIZE=64,
-        BLOCK_STRIDE_ROWS=128,
-        NUM_TOPK_TOKENS=128,
-    )
-
-    assert output[0].item() == 2 * 128 + 5

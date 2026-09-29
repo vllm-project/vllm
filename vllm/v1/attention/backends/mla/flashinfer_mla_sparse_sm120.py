@@ -11,6 +11,7 @@ from vllm.model_executor.layers.attention.sparse_mla_attention import (
 )
 from vllm.v1.attention.backend import AttentionLayer, AttentionType
 from vllm.v1.attention.backends.mla.flashinfer_mla_sparse import (
+    SM120_PAGE_ROWS,
     FlashInferMLASparseMetadata,
     _get_workspace_buffer,
 )
@@ -187,8 +188,6 @@ class FlashInferMLASparseSM120Impl(SparseMLACommonImpl[FlashInferMLASparseMetada
         kv_rows, block_stride_rows = flat_kv_row_view(
             kv_c_and_k_pe_cache, attn_metadata.block_size
         )
-        kv_rows_bytes = kv_rows.view(torch.uint8)
-        kernel_kv_cache = kv_rows_bytes.view(-1, 64, kv_rows_bytes.shape[-1])
         topk_indices_physical = cast(
             torch.Tensor,
             triton_convert_req_index_to_global_index(
@@ -203,7 +202,13 @@ class FlashInferMLASparseSM120Impl(SparseMLACommonImpl[FlashInferMLASparseMetada
         return (
             self._run_mqa_kernel(
                 q,
-                kernel_kv_cache,
+                kv_rows.view(
+                    -1,
+                    256
+                    if block_stride_rows % 256 == attn_metadata.block_size % 256 == 0
+                    else SM120_PAGE_ROWS,
+                    kv_rows.shape[-1],
+                ),
                 topk_indices_physical,
             ),
             None,

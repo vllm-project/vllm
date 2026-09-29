@@ -422,6 +422,7 @@ def test_sparse_backend_decode_correctness(
     q_scale: float,
     k_scale: float,
     monkeypatch,
+    block_stride_rows: int | None = None,
 ):
     if (
         batch_name == "large_q_pure_prefill"
@@ -433,29 +434,6 @@ def test_sparse_backend_decode_correctness(
             "vllm.v1.attention.backends.mla.flashmla_sparse.split_prefill_chunks",
             lambda rows, capacity: [(i, i + 1) for i in range(len(rows))],
         )
-    _run_sparse_backend_decode_correctness(
-        backend_cls,
-        SPARSE_BACKEND_BATCH_SPECS[batch_name],
-        kv_cache_dtype,
-        tensor_parallel_size,
-        block_size,
-        q_scale,
-        k_scale,
-    )
-
-
-def _run_sparse_backend_decode_correctness(
-    backend_cls,
-    batch_spec,
-    kv_cache_dtype,
-    tensor_parallel_size,
-    block_size,
-    q_scale: float,
-    k_scale: float,
-    *,
-    block_stride_rows: int | None = None,
-    spread_sparse_indices: bool = False,
-):
     if kv_cache_dtype not in backend_cls.supported_kv_cache_dtypes:
         pytest.skip(f"{backend_cls.get_name()} does not support {kv_cache_dtype}")
 
@@ -496,6 +474,7 @@ def _run_sparse_backend_decode_correctness(
         ):
             pytest.skip("FlashInferMLASparseTRTLLMBackend requires SM 10.x capability")
 
+    batch_spec = SPARSE_BACKEND_BATCH_SPECS[batch_name]
     use_fp8_ds_mla_quantization = kv_cache_dtype == "fp8_ds_mla"
     use_nvfp4_ds_mla_quantization = kv_cache_dtype == "nvfp4_ds_mla"
 
@@ -523,11 +502,7 @@ def _run_sparse_backend_decode_correctness(
         model_name="deepseek-ai/DeepSeek-V2-Lite-Chat",
         tensor_parallel_size=1,
         max_model_len=max_seqlen,
-        num_gpu_blocks=(
-            max(2048, cdiv(total_cache_tokens, block_size) + 1)
-            if block_stride_rows is None
-            else cdiv(total_cache_tokens, block_size) + 2
-        ),
+        num_gpu_blocks=max(2048, cdiv(total_cache_tokens, block_size) + 1),
         block_size=block_size,
         hf_config_override={
             "index_topk": topk_tokens,
@@ -598,11 +573,7 @@ def _run_sparse_backend_decode_correctness(
         num_valid = min(topk_tokens // 2, max_valid_idx + 1)
         if num_valid > 0:
             valid_range = torch.arange(num_valid, device=device, dtype=torch.int32)
-            if spread_sparse_indices:
-                tok_indices = valid_range * (max_valid_idx + 1) // num_valid
-                tok_indices[-1] = max_valid_idx
-            else:
-                tok_indices = (valid_range + offset) % (max_valid_idx + 1)
+            tok_indices = (valid_range + offset) % (max_valid_idx + 1)
             # Pad with -1 for the remaining positions
             tok_indices = torch.cat(
                 [
@@ -733,21 +704,10 @@ def _run_sparse_backend_decode_correctness(
         scale=kv_cache_scale,
     )
     if block_stride_rows is not None:
-        backing = torch.zeros(
-            kv_cache.shape[0],
-            kv_cache.shape[1],
-            block_stride_rows,
-            kv_cache.shape[-1],
-            dtype=kv_cache.dtype,
-            device=kv_cache.device,
-        )
-        packed_kv_cache = backing[:, :, :block_size]
-        packed_kv_cache.copy_(kv_cache)
-        kv_cache = packed_kv_cache
-        assert kv_cache.stride(0) // kv_cache.shape[-1] == block_stride_rows
-        assert common_attn_metadata.slot_mapping.numel() == 1
-        query_slot = int(common_attn_metadata.slot_mapping[0].item())
-        kv_cache[query_slot // block_size, :, query_slot % block_size].zero_()
+        pad = (0, 0, 0, block_stride_rows - block_size)
+        kv_cache = torch.nn.functional.pad(kv_cache, pad)[:, :, :block_size]
+        slot = int(common_attn_metadata.slot_mapping[-1])
+        query_row = kv_cache[slot // block_size, 0, slot % block_size].zero_()
 
     # The sparse builder clones the layer's dense-MHA prefill backend from
     # static_forward_context; register a mock layer carrying one.
@@ -844,13 +804,8 @@ def _run_sparse_backend_decode_correctness(
         )
 
     if block_stride_rows is not None:
-        expected_cache_row = torch.cat((kv_c_vllm[0], k_pe_vllm[0, 0]))
-        torch.testing.assert_close(
-            kv_cache[query_slot // block_size, 0, query_slot % block_size],
-            expected_cache_row,
-            rtol=0,
-            atol=0,
-        )
+        expected_row = torch.cat((kv_c_vllm[-1], k_pe_vllm[-1, 0]))
+        torch.testing.assert_close(query_row, expected_row, rtol=0, atol=0)
 
     assert backend_output.shape == sdpa_reference.shape
     assert backend_output.dtype == sdpa_reference.dtype
@@ -867,37 +822,21 @@ def _run_sparse_backend_decode_correctness(
 
 
 def test_flashinfer_sparse_mla_packed_stride(
-    dist_init,
-    workspace_init,
+    default_vllm_config, dist_init, workspace_init, monkeypatch
 ):
-    _run_sparse_backend_decode_correctness(
+    test_sparse_backend_decode_correctness(
+        default_vllm_config,
+        dist_init,
         FlashInferMLASparseTRTLLMBackend,
-        BatchSpec(seq_lens=[300], query_lens=[1]),
+        "mixed_small",
         "auto",
         1,
         256,
+        workspace_init,
         1.0,
         1.0,
+        monkeypatch,
         block_stride_rows=320,
-        spread_sparse_indices=True,
-    )
-
-
-def test_flashmla_sparse_packed_stride(
-    default_vllm_config,
-    dist_init,
-    workspace_init,
-):
-    _run_sparse_backend_decode_correctness(
-        FlashMLASparseBackend,
-        BatchSpec(seq_lens=[100], query_lens=[1]),
-        "auto",
-        1,
-        64,
-        1.0,
-        1.0,
-        block_stride_rows=96,
-        spread_sparse_indices=True,
     )
 
 

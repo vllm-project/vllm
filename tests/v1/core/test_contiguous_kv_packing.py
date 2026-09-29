@@ -21,6 +21,7 @@ from vllm.v1.core.kv_cache_manager import KVCacheManager
 from vllm.v1.core.kv_cache_utils import (
     _get_kv_cache_bytes_per_block,
     _get_packed_kv_cache_groups,
+    _pool_bytes_per_block,
     generate_scheduler_kv_cache_config,
     get_kv_cache_config_from_groups,
     get_kv_cache_groups,
@@ -87,7 +88,7 @@ def test_packed_alignment_preserves_hot_pages_and_generic_stride():
     hot = HiSparseHotSpec(block_size=16, page_size=5120, blocks_per_request=2)
     groups = [KVCacheGroupSpec(["attention"], spec), KVCacheGroupSpec(["hot"], hot)]
     alignment = lcm(1152, hot.page_size_bytes)
-    stride = _get_kv_cache_bytes_per_block(groups)
+    stride = _pool_bytes_per_block(groups)
     assert stride == alignment
     layout = KVCacheLayout.BLHNC
     tensors = _build_hisparse_kv_cache_tensors(groups, 3, 3 * stride, layout, stride)
@@ -561,9 +562,7 @@ class TestDensePacking:
             _mock_vllm_config("BLNHC"), groups, MEMORY
         )
         assert config.num_blocks == MEMORY // _expected_bytes_per_block(groups)
-        assert _get_kv_cache_bytes_per_block(groups) == _expected_bytes_per_block(
-            groups
-        )
+        assert _pool_bytes_per_block(groups) == _expected_bytes_per_block(groups)
 
         views = _bind(config, "BLNHC")
         assert set(views) == set(g1) | set(g2)

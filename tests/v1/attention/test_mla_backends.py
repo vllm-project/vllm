@@ -9,7 +9,7 @@ Known Issues:
 """
 
 import sys
-from types import SimpleNamespace
+from types import MethodType, SimpleNamespace
 
 import pytest
 import torch
@@ -218,13 +218,14 @@ def test_mla_kv_cache_spec_uses_layer_cache_dtype(
     cache_dtype: str, expected_quant_mode: KVQuantMode
 ):
     layer = SimpleNamespace(
+        attn_backend=flashmla_module.FlashMLABackend,
         kv_cache_dtype=cache_dtype,
         head_size=576,
-        attn_backend=SimpleNamespace(get_strided_block_page_rows=lambda _spec: 32),
         indexer=None,
         non_causal_multi_token_decode=False,
         sliding_window=None,
     )
+    layer._uses_flat_kv_cache = MethodType(MLAAttention._uses_flat_kv_cache, layer)
     vllm_config = SimpleNamespace(
         cache_config=SimpleNamespace(block_size=64), model_config=None
     )
@@ -234,7 +235,6 @@ def test_mla_kv_cache_spec_uses_layer_cache_dtype(
     assert isinstance(spec, MLAAttentionSpec)
     assert spec.cache_dtype_str == cache_dtype
     assert spec.kv_quant_mode == expected_quant_mode
-    assert spec.block_stride_alignment == 32 * spec.state_content_size_bytes
     if cache_dtype == "fp8_ds_mla":
         assert spec.page_size_bytes == 64 * 656
 

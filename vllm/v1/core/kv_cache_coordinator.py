@@ -646,7 +646,8 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
         self.hash_block_size = hash_block_size
         self.dcp_world_size = dcp_world_size
         # Only groups that participate in prefix caching must satisfy the
-        # divisibility constraint; scratch groups are excluded.
+        # divisibility constraint; groups that opt out (e.g. GLM-5.3-Flash kpool
+        # tail, block_size=kpool) are scratch buffers and excluded.
         cacheable_block_sizes = [
             manager.block_size
             for manager, group in zip(

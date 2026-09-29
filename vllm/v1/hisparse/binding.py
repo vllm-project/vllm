@@ -55,8 +55,9 @@ def resolve_hisparse_block_size(
     if len(block_sizes) != 1:
         raise ValueError("HiSparse requires one scheduler block size.")
     backends = [attn_layers[name].get_attn_backend() for name in mla_specs]
+    specs = list(mla_specs.values())
     try:
-        block_size = select_common_block_size(block_sizes.pop(), backends)
+        block_size = select_common_block_size(block_sizes.pop(), backends, specs)
     except ValueError as error:
         raise ValueError(
             "HiSparse requires a GPU block size supported by every sparse "

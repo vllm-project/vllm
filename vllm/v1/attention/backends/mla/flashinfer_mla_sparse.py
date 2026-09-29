@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """FlashInfer sparse MLA attention backend."""
 
+import math
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, ClassVar
 
@@ -34,12 +35,15 @@ from vllm.v1.attention.backends.mla.sparse_utils import (
     triton_convert_req_index_to_global_index,
     triton_filter_and_convert_dcp_index,
 )
-from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheSpec
+from vllm.v1.kv_cache_interface import AttentionSpec
 
 if TYPE_CHECKING:
     from vllm.model_executor.models.deepseek_v2 import Indexer
 
 logger = init_logger(__name__)
+
+
+SM120_PAGE_ROWS = 64
 
 
 class _FlashInferMLASparseBackendBase(AttentionBackend):
@@ -83,12 +87,7 @@ class FlashInferMLASparseTRTLLMBackend(_FlashInferMLASparseBackendBase):
 
     @staticmethod
     def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int | MultipleOf]:
-        return [32, 64]
-
-    @staticmethod
-    def get_strided_block_page_rows(kv_cache_spec: KVCacheSpec) -> int:
-        # The smallest native page reduces packed-stride alignment requirements.
-        return 32
+        return [MultipleOf(32)]
 
     @staticmethod
     def get_impl_cls() -> type[MLAAttentionImpl]:
@@ -177,11 +176,7 @@ class FlashInferMLASparseSM120Backend(_FlashInferMLASparseBackendBase):
 
     @staticmethod
     def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int | MultipleOf]:
-        return [64, 256]
-
-    @staticmethod
-    def get_strided_block_page_rows(kv_cache_spec: KVCacheSpec) -> int:
-        return 64
+        return [MultipleOf(64)]
 
     @staticmethod
     def get_impl_cls() -> type[MLAAttentionImpl]:
@@ -577,11 +572,6 @@ class FlashInferMLASparseImpl(SparseMLACommonImpl[FlashInferMLASparseMetadata]):
         kv_rows, block_stride_rows = flat_kv_row_view(
             kv_c_and_k_pe_cache, attn_metadata.block_size
         )
-        kernel_kv_cache = (
-            kv_c_and_k_pe_cache
-            if block_stride_rows == attn_metadata.block_size
-            else kv_rows.view(-1, 32, kv_rows.shape[-1])
-        )
 
         if self.dcp_world_size > 1:
             topk_indices_physical, seq_lens = triton_filter_and_convert_dcp_index(
@@ -606,7 +596,12 @@ class FlashInferMLASparseImpl(SparseMLACommonImpl[FlashInferMLASparseMetadata]):
 
         return self._run_mqa_kernel(
             q,
-            kernel_kv_cache,
+            # Top-k ids are flat row ids, so the rows can be re-paged freely.
+            kv_rows.view(
+                -1,
+                math.gcd(block_stride_rows, attn_metadata.block_size, 64),
+                kv_rows.shape[-1],
+            ),
             topk_indices_physical,
             seq_lens,
         )

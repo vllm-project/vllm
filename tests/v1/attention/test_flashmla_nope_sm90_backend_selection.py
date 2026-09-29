@@ -20,6 +20,10 @@ import pytest
 import torch
 
 from vllm.platforms.interface import DeviceCapability
+from vllm.v1.attention.backend import MultipleOf
+from vllm.v1.attention.backends.mla.flashattn_mla_sparse import (
+    FlashAttnMLASparseBackend,
+)
 from vllm.v1.attention.backends.mla.flashmla_sparse import (
     QUANTIZED_DS_MLA_CACHE_FORMATS,
     FlashMLASparseBackend,
@@ -96,6 +100,12 @@ def test_supported_head_sizes_include_512():
     assert FlashMLASparseBackend.get_supported_head_sizes() == [576, 512]
 
 
+def test_flash_attn_sparse_accepts_manager_blocks():
+    (supported,) = FlashAttnMLASparseBackend.get_supported_kernel_block_sizes()
+    assert isinstance(supported, MultipleOf)
+    assert supported.base == 64
+
+
 def test_flashmla_bf16_nope_accepts_packed_manager_blocks():
     spec = MLAAttentionSpec(
         block_size=1152,
@@ -105,8 +115,6 @@ def test_flashmla_bf16_nope_accepts_packed_manager_blocks():
         cache_dtype_str="bfloat16",
         block_stride_alignment=1024,
     )
-    assert FlashMLASparseBackend.get_supported_kernel_block_sizes() == [64]
-    assert FlashMLASparseBackend.get_strided_block_page_rows(spec) == 1
     num_blocks = 2
     layers = ["layer.0", "layer.1"]
     page_size = spec.page_size_bytes
@@ -147,10 +155,8 @@ def test_flashmla_quantized_cache_keeps_fixed_kernel_pages():
         state_content_bytes=656,
     )
 
-    assert FlashMLASparseBackend.get_supported_kernel_block_sizes() == [64]
     assert FlashMLASparseBackend.get_supported_kernel_block_sizes(spec) == [64]
-    assert FlashMLASparseBackend.get_strided_block_page_rows(spec) is None
-    assert select_common_block_size(1152, [FlashMLASparseBackend]) == 64
+    assert select_common_block_size(1152, [FlashMLASparseBackend], [spec]) == 64
 
 
 def test_quantized_ds_mla_formats_are_the_envelope_set():
