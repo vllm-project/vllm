@@ -265,7 +265,7 @@ class GptOssRoutedExperts(RoutedExperts):
     ) -> None:
         tp_rank = self.moe_config.moe_parallel_config.tp_rank
         is_w13 = shard_id == "gpt_oss_w13"
-        is_weight = weight_name.endswith("_weight")
+        is_weight = weight_name.endswith(("_weight", "_weight_packed"))
         is_partitioned_scale = weight_name.endswith("_weight_scale")
 
         if is_weight:
@@ -349,6 +349,7 @@ class GptOssRoutedExperts(RoutedExperts):
         ) or quant_method_name in (
             "CompressedTensorsW4A4Nvfp4MoEMethod",
             "Nvfp4OnlineMoEMethod",
+            "CompressedTensorsWNA16MoEMethod",
         ):
             self._load_packed_expert(expert_data, loaded_weight, weight_name, shard_id)
         else:

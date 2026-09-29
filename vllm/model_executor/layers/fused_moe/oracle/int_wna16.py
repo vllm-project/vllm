@@ -1069,20 +1069,20 @@ def _process_weights_cpu(
 
 
 def _zen_repack_s4(packed: torch.Tensor, in_features: int) -> torch.Tensor:
-    """Repack CT int4 ``[E, K//8, N]`` into zentorch s4 ``[E, N, K//8]``."""
+    """Repack CT int4 ``[E, N, K//8]`` into zentorch s4 ``[E, N, K//8]``."""
     from vllm.model_executor.kernels.linear.mixed_precision.zentorch import (
         _import_unpack_from_int32,
     )
 
-    num_experts, _, out_features = packed.shape
+    num_experts, out_features, _ = packed.shape
+    # packed_dim indexes the 2D expert slice, which is N-first, so K is dim 1.
     unpacked = _import_unpack_from_int32()(
         packed,
         4,
-        torch.Size([num_experts, in_features, out_features]),
-        packed_dim=0,
+        torch.Size([num_experts, out_features, in_features]),
+        packed_dim=1,
     )
-    # CT stores [K, N] per expert; the repack consumes [N, K].
-    unpacked = unpacked.transpose(1, 2).contiguous()
+    # CT is already N-first, which is what the repack consumes.
     repack_op = torch.ops.zentorch.zentorch_woq_repack_weight.default
     return torch.stack([repack_op(w) for w in unpacked])
 
@@ -1107,15 +1107,16 @@ def _process_weights_zen_cpu(
     torch.Tensor | None,  # w2_bias
 ]:
     """Zen CPU INT4 DA8W4 (W4A8) weight post-processing."""
-    hidden_size = w2_scale.shape[2]
-    intermediate_size = w13_scale.shape[2] // 2
+    # CT WNA16 buffers are N-first, so the scales are [E, N, G].
+    hidden_size = w2_scale.shape[1]
+    intermediate_size = w13_scale.shape[1] // 2
 
-    # Per-group scales already arrive as [E, G, N], the layout the kernel wants.
+    # The kernel reads per-group scales as [E, G, N], so N-first needs a swap.
     return (
         _zen_repack_s4(w13.data, hidden_size),
         _zen_repack_s4(w2.data, intermediate_size),
-        w13_scale.data.to(torch.bfloat16).contiguous(),
-        w2_scale.data.to(torch.bfloat16).contiguous(),
+        w13_scale.data.transpose(1, 2).to(torch.bfloat16).contiguous(),
+        w2_scale.data.transpose(1, 2).to(torch.bfloat16).contiguous(),
         None,  # w13_qzeros (symmetric)
         None,  # w2_qzeros (symmetric)
         None,  # w13_input_global_scale

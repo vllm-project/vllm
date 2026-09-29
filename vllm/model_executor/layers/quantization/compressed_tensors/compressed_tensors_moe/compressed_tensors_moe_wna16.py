@@ -382,24 +382,24 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
         )
 
         # Reorder before the conversion below, which repacks w13 for the kernel.
-        # 2I is the last, unpacked dim of both the transposed weights and their
-        # group scales, so this stays a plain gather.
+        # The CT WNA16 buffers are N-first, so 2I is dim 1 of the packed weight
+        # [E, 2I, K/pack] and of its group scales [E, 2I, G], as for the bias.
         perm = swigluoai_w13_interleave_perm(
             self.experts_cls,
             self.moe.activation,
-            layer.w13_weight_packed.size(2),
+            layer.w13_weight_packed.size(1),
             layer.w13_weight_packed.device,
         )
         if perm is not None:
             replace_parameter(
                 layer,
                 "w13_weight_packed",
-                layer.w13_weight_packed.data[..., perm].contiguous(),
+                layer.w13_weight_packed.data[:, perm].contiguous(),
             )
             replace_parameter(
                 layer,
                 "w13_weight_scale",
-                layer.w13_weight_scale.data[..., perm].contiguous(),
+                layer.w13_weight_scale.data[:, perm].contiguous(),
             )
             if self.moe.has_bias:
                 replace_parameter(
