@@ -1,14 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Cross-node NVLink fabric detection via ``nvidia-smi``.
+"""Cross-node NVLink fabric detection via NVML."""
 
-The Python NVML fabric API can return an all-zero structure on GB300 systems,
-while ``nvidia-smi -q -x`` reports the fabric state and identifiers correctly.
-"""
-
+import ctypes
 import functools
-import subprocess
-import xml.etree.ElementTree as ElementTree
 from enum import Enum, auto
 from typing import TYPE_CHECKING
 
@@ -18,14 +13,15 @@ import torch.distributed as dist
 from vllm.distributed.parallel_state import in_the_same_node_as
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
+from vllm.utils.import_utils import import_pynvml
 
 if TYPE_CHECKING:
     from torch.distributed import ProcessGroup
 
 logger = init_logger(__name__)
+pynvml = import_pynvml()
 
-_NULL_CLUSTER_UUID_HEX = "0" * 32
-_HEX_CHARS = frozenset("0123456789abcdefABCDEF")
+_NULL_CLUSTER_UUID = bytes(pynvml.NVML_GPU_FABRIC_UUID_LEN)
 _NvlinkFabricKey = tuple[str, int]
 
 
@@ -35,68 +31,42 @@ class SymmetricMemoryTopology(Enum):
     UNSUPPORTED = auto()
 
 
-def _local_gpu_id_for_nvidia_smi() -> str:
+def _local_physical_device_id() -> int:
     visible_device_id = torch.accelerator.current_device_index()
-    return str(
-        current_platform.visible_device_id_to_physical_device_id(visible_device_id)
+    return current_platform.visible_device_id_to_physical_device_id(visible_device_id)
+
+
+def _fabric_uuid_bytes(fabric: ctypes.Structure) -> bytes:
+    offset = type(fabric).clusterUuid.offset
+    return ctypes.string_at(
+        ctypes.addressof(fabric) + offset,
+        pynvml.NVML_GPU_FABRIC_UUID_LEN,
     )
-
-
-def _parse_nvidia_smi_fabric_key(output: str) -> _NvlinkFabricKey | None:
-    """Parse one healthy Fabric record from ``nvidia-smi -q -x``."""
-    try:
-        fabric = ElementTree.fromstring(output).find("./gpu/fabric")
-    except ElementTree.ParseError:
-        return None
-    if fabric is None:
-        return None
-
-    state = fabric.findtext("state")
-    status = fabric.findtext("status")
-    cluster_uuid = fabric.findtext("clusterUuid")
-    clique_id = fabric.findtext("cliqueId")
-
-    if state is None or state.strip().lower() != "completed":
-        return None
-    if status is None or status.strip().lower() != "success":
-        return None
-    if cluster_uuid is None or clique_id is None:
-        return None
-
-    uuid_hex = cluster_uuid.strip().replace("-", "").lower()
-    if len(uuid_hex) != 32 or any(char not in _HEX_CHARS for char in uuid_hex):
-        return None
-    if uuid_hex == _NULL_CLUSTER_UUID_HEX:
-        return None
-
-    try:
-        clique = int(clique_id.strip(), 0)
-    except ValueError:
-        return None
-    if clique < 0:
-        return None
-
-    return (uuid_hex, clique)
 
 
 def _get_local_nvlink_fabric_key() -> _NvlinkFabricKey | None:
     try:
-        result = subprocess.run(
-            ["nvidia-smi", "-q", "-x", "-i", _local_gpu_id_for_nvidia_smi()],
-            capture_output=True,
-            text=True,
-            timeout=10,
-            check=False,
-        )
+        pynvml.nvmlInit()
+        try:
+            handle = pynvml.nvmlDeviceGetHandleByIndex(_local_physical_device_id())
+            fabric = pynvml.c_nvmlGpuFabricInfoV_t()
+            pynvml.nvmlDeviceGetGpuFabricInfoV(handle, ctypes.byref(fabric))
+        finally:
+            pynvml.nvmlShutdown()
     except Exception as error:
-        logger.debug("nvidia-smi fabric detection failed: %s", error)
+        logger.debug("NVML fabric detection failed: %s", error)
         return None
 
-    if result.returncode != 0:
-        logger.debug("nvidia-smi failed: %s", result.stderr.strip())
+    if (
+        fabric.state != pynvml.NVML_GPU_FABRIC_STATE_COMPLETED
+        or fabric.status != pynvml.NVML_SUCCESS
+    ):
         return None
 
-    return _parse_nvidia_smi_fabric_key(result.stdout)
+    cluster_uuid = _fabric_uuid_bytes(fabric)
+    if cluster_uuid == _NULL_CLUSTER_UUID:
+        return None
+    return (cluster_uuid.hex(), int(fabric.cliqueId))
 
 
 def has_cross_node_nvlink(group: "ProcessGroup") -> bool:
