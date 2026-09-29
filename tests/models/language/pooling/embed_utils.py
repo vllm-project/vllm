@@ -48,7 +48,6 @@ def correctness_test_embed_models(
 
     vllm_extra_kwargs = vllm_extra_kwargs or {}
     vllm_extra_kwargs["dtype"] = model_info.dtype
-    vllm_extra_kwargs.setdefault("trust_remote_code", model_info.trust_remote_code)
 
     if model_info.hf_overrides is not None:
         vllm_extra_kwargs["hf_overrides"] = model_info.hf_overrides
@@ -61,7 +60,6 @@ def correctness_test_embed_models(
     with hf_runner(
         model_info.name,
         dtype=model_info.hf_dtype,
-        trust_remote_code=model_info.trust_remote_code,
         is_sentence_transformer=True,
     ) as hf_model:
         if hf_model_callback is not None:

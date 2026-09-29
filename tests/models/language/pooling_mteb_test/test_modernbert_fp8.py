@@ -30,7 +30,6 @@ MODEL_INFO = EmbedModelInfo(
     "Alibaba-NLP/gte-modernbert-base",
     mteb_score=0.748193353,
     architecture="ModernBertModel",
-    trust_remote_code=False,
     seq_pooling_type="CLS",
     attn_type="encoder_only",
     is_prefix_caching_supported=False,

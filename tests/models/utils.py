@@ -385,7 +385,6 @@ class ModelInfo:
     max_model_len: int | None = None
     hf_dtype: str = "float32"
     hf_overrides: dict[str, Any] | None = None
-    trust_remote_code: bool = True
     seq_pooling_type: SequencePoolingType | None = None
     tok_pooling_type: TokenPoolingType | None = None
     attn_type: AttnTypeStr | None = None
@@ -428,8 +427,6 @@ def get_vllm_extra_kwargs(model_info: ModelInfo, vllm_extra_kwargs):
     # Allow vllm to test using the given dtype, such as float32
     vllm_extra_kwargs = vllm_extra_kwargs or {}
     vllm_extra_kwargs["dtype"] = ci_envs.VLLM_CI_DTYPE or model_info.dtype
-
-    vllm_extra_kwargs.setdefault("trust_remote_code", model_info.trust_remote_code)
 
     # Allow vllm to test using hf_overrides
     if model_info.hf_overrides is not None:

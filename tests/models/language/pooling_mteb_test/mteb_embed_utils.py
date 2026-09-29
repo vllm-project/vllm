@@ -240,7 +240,6 @@ def mteb_test_embed_models(
         with hf_runner(
             model_info.name,
             revision=model_info.revision,
-            trust_remote_code=model_info.trust_remote_code,
             is_sentence_transformer=True,
             dtype=ci_envs.VLLM_CI_HF_DTYPE or model_info.hf_dtype,
         ) as hf_model:
