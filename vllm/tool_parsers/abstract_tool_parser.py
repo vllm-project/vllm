@@ -10,7 +10,6 @@ from typing import Any
 from openai.types.responses import (
     ResponseFormatTextJSONSchemaConfig,
     ResponseTextConfig,
-    ToolChoiceFunction,
 )
 from openai.types.responses.function_tool import FunctionTool
 
@@ -20,7 +19,6 @@ from vllm.entrypoints.generate.base.protocol import (
     ExtractedToolCallInformation,
 )
 from vllm.entrypoints.openai.chat_completion.protocol import (
-    ChatCompletionNamedToolChoiceParam,
     ChatCompletionRequest,
     ChatCompletionToolsParam,
 )
@@ -125,16 +123,6 @@ class ToolParser:
         if not request.tools:
             return request
 
-        tool_choice = request.tool_choice
-        is_named_tool_choice = isinstance(
-            tool_choice, (ChatCompletionNamedToolChoiceParam, ToolChoiceFunction)
-        )
-        if (
-            not self.supports_required_and_named
-            and (tool_choice == "required" or is_named_tool_choice)
-        ):
-            return request
-
         # Set structured output params when tool constraints are derived from
         # the tool schema. Unified parsers handle model-specific structural
         # tags before calling into the tool parser.
@@ -143,6 +131,13 @@ class ToolParser:
             structured_outputs is not None
             and structured_outputs.structural_tag is not None
         ):
+            return request
+
+        # Parsers that extract required/named tool calls from their native
+        # format (supports_required_and_named=False) must not be forced into
+        # the JSON tool-call format below: they would never find a call in
+        # the JSON output and would return it as content instead.
+        if not self.supports_required_and_named:
             return request
 
         json_schema_from_tool = get_json_schema_from_tools(
