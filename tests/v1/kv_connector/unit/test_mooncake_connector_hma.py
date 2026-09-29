@@ -279,6 +279,33 @@ def test_gdn_consumer_checkpoint_ends_before_last_prompt_token():
     assert scheduler.can_load_prefix_replay_checkpoint(request, 0, 95)
 
 
+@pytest.mark.cpu_test
+def test_producer_checkpoint_requires_explicit_replay_completion():
+    vllm_config = create_vllm_config(
+        kv_connector="MooncakeConnector",
+        kv_role="kv_producer",
+        block_size=16,
+    )
+    scheduler = MooncakeConnectorScheduler(
+        vllm_config=vllm_config,
+        engine_id="test-engine",
+        kv_cache_config=make_kv_cache_config(
+            block_size=16, swa_enabled=True, sw_size=32
+        ),
+    )
+    scheduler._prefill_side_replay = True
+    scheduler.prefix_replay_tokens = 32
+    request = create_request(
+        num_tokens=96,
+        do_remote_decode=True,
+        block_size=16,
+    )
+
+    assert scheduler._get_prefix_replay_checkpoint(request) is None
+    request.prefill_side_replay_done = True
+    assert scheduler._get_prefix_replay_checkpoint(request) == 96
+
+
 # ---------------------------------------------------------------------------
 #  test_build_transfer_params_multi_group_trimming
 # ---------------------------------------------------------------------------
@@ -751,7 +778,7 @@ def test_prefix_replay_checkpoint_requires_complete_group_coverage():
         kv_caches_base_addr=[],
         block_lens=[],
         kv_block_lens=[],
-        prefix_replay_protocol=1,
+        prefix_replay_protocol=2,
         prefix_replay_layout=worker._prefix_replay_layout_fingerprint(),
         prefix_replay_checkpoints={"d-req": (96, 64, "prompt-digest")},
     )

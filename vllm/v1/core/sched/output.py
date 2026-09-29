@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import cached_property
 from typing import TYPE_CHECKING
 
@@ -150,6 +150,8 @@ class CachedRequestData:
     new_block_ids: list[tuple[list[int], ...] | None]
     num_computed_tokens: list[int]
     num_output_tokens: list[int]
+    # DeepSeek-V4.1 producer-side replay requests and their inclusive start.
+    prefill_side_replay_starts: dict[str, int] = field(default_factory=dict)
 
     # Version of dataclass repr with token IDs obfuscated.
     def anon_repr(self) -> str:
@@ -165,7 +167,8 @@ class CachedRequestData:
             f"all_token_ids_lens={all_token_ids_lens},"
             f"new_block_ids={self.new_block_ids},"
             f"num_computed_tokens={self.num_computed_tokens},"
-            f"num_output_tokens={self.num_output_tokens}"
+            f"num_output_tokens={self.num_output_tokens},"
+            f"prefill_side_replay_starts={self.prefill_side_replay_starts}"
             f")"
         )
 
@@ -313,6 +316,10 @@ class SchedulerOutput:
     # Dynamic speculative decoding: optimal K chosen by scheduler.
     # Number of spec tokens to schedule for the next step.
     num_spec_tokens_to_schedule: int = 0
+
+    # A KV producer is still building the ordinary Prefill state. Sampling is
+    # deferred until its explicit bounded-replay pass.
+    defer_prefill_sampling: bool = False
 
     @classmethod
     def make_empty(cls) -> "SchedulerOutput":

@@ -1206,15 +1206,23 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             if (idx := self.req_states.req_id_to_index.get(req_id)) is not None:
                 self.block_tables.append_block_ids(idx, block_ids, overwrite=True)
         num_computed_tokens_np = self.req_states.num_computed_tokens_np
+        replay_starts = reqs.prefill_side_replay_starts
         for req_id, num_computed_tokens, req_new_block_ids in zip(
             reqs.req_ids, reqs.num_computed_tokens, reqs.new_block_ids
         ):
             req_index = self.req_states.req_id_to_index[req_id]
             num_computed_tokens_np[req_index] = num_computed_tokens
+            if req_id in replay_starts:
+                self.req_states.num_computed_tokens.stage_write_elem(
+                    req_index, num_computed_tokens
+                )
+                self.model_state.update_prefix_replay(req_index, replay_starts[req_id])
             if req_new_block_ids is not None and req_id not in table_updates:
                 self.block_tables.append_block_ids(
                     req_index, req_new_block_ids, overwrite=False
                 )
+        if replay_starts:
+            self.req_states.num_computed_tokens.apply_write()
 
         # Update CPU num_computed_prefill_tokens.
         np.minimum(
@@ -1260,6 +1268,18 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         req_ids = sort_batch_req_ids(
             num_tokens_per_req, draft_tokens, self.decode_query_len
         )
+        replay_req_ids = set(
+            scheduler_output.scheduled_cached_reqs.prefill_side_replay_starts
+        )
+        is_prefill_side_replay = bool(replay_req_ids)
+        assert not replay_req_ids or replay_req_ids == set(req_ids), (
+            "Producer-side replay requests must run in an isolated batch."
+        )
+        if is_prefill_side_replay:
+            logger.info(
+                "Executing explicit Prefill-side SWA replay for %d requests.",
+                num_reqs,
+            )
 
         numtoks_iter = map(num_tokens_per_req.__getitem__, req_ids)
         num_scheduled_tokens = np.fromiter(numtoks_iter, dtype=np.int32, count=num_reqs)
@@ -1310,6 +1330,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             has_prefill=has_prefill,
             prefill_runs_as_decode_np=prefill_runs_as_decode_np,
             decode_graph_eligible=decode_graph_eligible,
+            is_prefill_side_replay=is_prefill_side_replay,
         )
         return batch_state, get_uniform_decode_token_count(
             num_reqs, num_toks, max_query_len, decode_graph_eligible
@@ -1511,6 +1532,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 if adaptive_verification is not None
                 else None
             ),
+            is_prefill_side_replay=batch_req_state.is_prefill_side_replay,
+            defer_prefill_sampling=scheduler_output.defer_prefill_sampling,
         )
         if self.pcp_manager is not None:
             input_batch = self.pcp_manager.partition_batch(input_batch, batch_desc)
@@ -2080,6 +2103,21 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             output = ModelRunnerOutput.with_kv_conn_output_only(kv_connector_output)
             return ModelRunnerOutput.with_ec_conn_output(output, ec_connector_output)
 
+        if input_batch.defer_prefill_sampling:
+            self.postprocess_num_computed_tokens(input_batch)
+            self.model_state.postprocess_state(input_batch.idx_mapping, 0)
+            kv_connector_output = self.kv_connector.post_forward(finished_req_ids)
+            return ModelRunnerOutput(
+                req_ids=input_batch.req_ids,
+                req_id_to_index={
+                    req_id: i for i, req_id in enumerate(input_batch.req_ids)
+                },
+                sampled_token_ids=[[] for _ in input_batch.req_ids],
+                kv_connector_output=kv_connector_output,
+                ec_connector_output=ec_connector_output,
+                cudagraph_stats=cudagraph_stats,
+            )
+
         # Last rank: sample tokens
         assert hidden_states is not None
         draft_hidden_states = hidden_states
@@ -2385,6 +2423,7 @@ class BatchReqState(NamedTuple):
     has_prefill: bool
     prefill_runs_as_decode_np: np.ndarray | None  # [num_reqs]
     decode_graph_eligible: bool
+    is_prefill_side_replay: bool
 
 
 def sort_batch_req_ids(

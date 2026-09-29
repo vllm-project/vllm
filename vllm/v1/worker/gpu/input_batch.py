@@ -120,6 +120,12 @@ class InputBatch:
     # None if there are no prefills.
     prefill_runs_as_decode_np: np.ndarray | None = None
 
+    # True only for an isolated producer-side bounded-replay batch.
+    is_prefill_side_replay: bool = False
+
+    # Suppress sampling while the producer builds the ordinary Prefill state.
+    defer_prefill_sampling: bool = False
+
     @classmethod
     def make_dummy(
         cls,

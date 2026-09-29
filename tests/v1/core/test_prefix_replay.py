@@ -113,6 +113,59 @@ def _new_req_data(out, request):
     return next(r for r in out.scheduled_new_reqs if r.req_id == request.request_id)
 
 
+def test_prefill_producer_runs_explicit_replay_before_sampling():
+    scheduler = _replay_scheduler()
+    scheduler.prefill_side_swa_replay = True
+    request = create_requests(
+        num_requests=1,
+        num_tokens=NUM_PROMPT_TOKENS,
+        max_tokens=1,
+        block_size=BLOCK_SIZE,
+    )[0]
+    scheduler.add_request(request)
+
+    prefill = scheduler.schedule()
+    assert prefill.defer_prefill_sampling
+    blocks_before_replay = tuple(
+        len(group)
+        for group in scheduler.kv_cache_manager.get_blocks(request.request_id).blocks
+    )
+    scheduler.update_from_output(
+        prefill,
+        ModelRunnerOutput(
+            req_ids=[request.request_id],
+            req_id_to_index={request.request_id: 0},
+            sampled_token_ids=[[]],
+        ),
+    )
+
+    assert request.prefill_side_replay_active
+    assert not request.prefill_side_replay_done
+    assert request.replay_start == NUM_PROMPT_TOKENS - WINDOW
+    assert request.num_computed_tokens == NUM_PROMPT_TOKENS - WINDOW
+
+    replay = scheduler.schedule()
+    assert not replay.defer_prefill_sampling
+    assert replay.num_scheduled_tokens == {request.request_id: WINDOW}
+    assert replay.scheduled_cached_reqs.prefill_side_replay_starts == {
+        request.request_id: NUM_PROMPT_TOKENS - WINDOW
+    }
+    assert (
+        tuple(
+            len(group)
+            for group in scheduler.kv_cache_manager.get_blocks(
+                request.request_id
+            ).blocks
+        )
+        == blocks_before_replay
+    )
+
+    scheduler.update_from_output(replay, _step_output(replay, [request]))
+    assert not request.prefill_side_replay_active
+    assert request.prefill_side_replay_done
+    assert request.status == RequestStatus.FINISHED_LENGTH_CAPPED
+
+
 def test_hit_replays_window_without_reallocating():
     scheduler = _replay_scheduler()
     expected_replay = WINDOW

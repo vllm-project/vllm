@@ -207,6 +207,10 @@ class Request:
         # DeepSeek-V4.1 only: SWA bounded replay. The request holds no
         # sliding-window KV below this position; 0 when nothing replays.
         self.replay_start = 0
+        # A producer-side replay is scheduled after its ordinary Prefill. The
+        # second pass rebuilds the trailing local state before KV handoff.
+        self.prefill_side_replay_active = False
+        self.prefill_side_replay_done = False
 
         # The number of NaNs in logits. A value greater than 0
         # indicates that the output is corrupted

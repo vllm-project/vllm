@@ -72,7 +72,7 @@ from vllm.v1.worker.utils import select_common_block_size
 logger = init_logger(__name__)
 
 _BOOTSTRAP_MAX_ATTEMPTS: Final[int] = 3
-_PREFIX_REPLAY_PROTOCOL_VERSION: Final[int] = 1
+_PREFIX_REPLAY_PROTOCOL_VERSION: Final[int] = 2
 
 try:
     from mooncake.engine import TransferEngine
@@ -823,6 +823,10 @@ class MooncakeConnectorScheduler:
             or request.prompt_embeds is not None
             or request.mm_features
             or request.lora_request is not None
+        ):
+            return None
+        if self.is_kv_producer and not getattr(
+            request, "prefill_side_replay_done", False
         ):
             return None
         sampling_params = request.sampling_params

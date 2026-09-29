@@ -240,6 +240,9 @@ class DeepseekV41ModelState(DefaultModelState):
                 params is not None and params.prompt_logprobs is not None
             )
 
+    def update_prefix_replay(self, req_index: int, replay_start: int) -> None:
+        self._replay_start_np[req_index] = replay_start
+
     def prepare_inputs(
         self, input_batch: InputBatch, req_states: RequestState
     ) -> dict[str, torch.Tensor | None]:

@@ -288,8 +288,42 @@ class Scheduler(SchedulerInterface):
             f"Prefix replay windows should agree: {sorted(replay_windows)}"
         )
         self.prefix_replay_tokens = replay_windows.pop() if replay_windows else 0
+        self.prefill_side_swa_replay = bool(
+            kv_transfer_config
+            and kv_transfer_config.is_kv_producer
+            and kv_transfer_config.kv_connector == "MooncakeConnector"
+            and kv_transfer_config.kv_connector_extra_config.get(
+                "prefill_side_swa_replay", False
+            )
+            and getattr(vllm_config.model_config.hf_config, "model_type", None)
+            == "deepseek_v41"
+            and vllm_config.use_v2_model_runner
+            and self.parallel_config.pipeline_parallel_size == 1
+            and self.parallel_config.prefill_context_parallel_size == 1
+            and self.parallel_config.decode_context_parallel_size == 1
+            and self.prefix_replay_tokens
+        )
+        if self.prefill_side_swa_replay and self.scheduler_config.async_scheduling:
+            raise ValueError(
+                "Prefill-side SWA replay requires --no-async-scheduling on "
+                "the KV producer."
+            )
         self.num_prefill_lookahead = vllm_config.num_prefill_lookahead_tokens
         self.dynamic_sd_lookup: list[int] | None = None
+        replay_draft_slots = (
+            speculative_config.max_num_new_slots_for_drafting
+            if speculative_config is not None
+            else 0
+        )
+        if self.prefill_side_swa_replay and (
+            self.max_num_scheduled_tokens < self.prefix_replay_tokens
+            or self.scheduler_config.max_num_batched_tokens
+            < self.prefix_replay_tokens + replay_draft_slots
+        ):
+            raise ValueError(
+                "Prefill-side SWA replay requires token budgets large enough "
+                "for one complete replay window."
+            )
         if speculative_config is not None:
             if speculative_config.num_speculative_tokens_per_batch_size:
                 self.dynamic_sd_lookup = build_dynamic_sd_schedule_lookup(
@@ -625,12 +659,22 @@ class Scheduler(SchedulerInterface):
                 long_prefill_token_threshold, input_budget // num_eligible_reqs
             )
 
+        # A replay batch must contain only replay requests: producer sampling
+        # resumes on this pass, while ordinary Prefill requests must remain
+        # sample-free until their own replay has run.
+        replay_only = self.prefill_side_swa_replay and any(
+            request.prefill_side_replay_active for request in self.running
+        )
+
         # First, schedule the RUNNING requests.
         req_index = 0
         while req_index < len(self.running) and token_budget > 0:
             request = self.running[req_index]
             if input_budget <= draft_slots:
                 break
+            if replay_only and not request.prefill_side_replay_active:
+                req_index += 1
+                continue
 
             if (
                 request.num_output_placeholders > 0
@@ -654,7 +698,11 @@ class Scheduler(SchedulerInterface):
                 req_index += 1
                 continue
 
-            if defer_prefills and request.is_prefill_chunk:
+            if (
+                defer_prefills
+                and request.is_prefill_chunk
+                and not request.prefill_side_replay_active
+            ):
                 # DP prefill balancing: defer this in-progress prefill chunk to a
                 # cadence-aligned step; decodes still run to fill this step.
                 req_index += 1
@@ -720,6 +768,15 @@ class Scheduler(SchedulerInterface):
             num_new_tokens = self._reserve_prefill_lookahead(
                 request, request.num_computed_tokens, num_new_tokens
             )
+            if request.prefill_side_replay_active:
+                replay_tokens = request.num_prompt_tokens - request.num_computed_tokens
+                if (
+                    replay_tokens > token_budget
+                    or replay_tokens > input_budget - draft_slots
+                ):
+                    req_index += 1
+                    continue
+                num_new_tokens = replay_tokens
 
             if num_new_tokens == 0:
                 # The request cannot be scheduled because one of the following
@@ -743,7 +800,12 @@ class Scheduler(SchedulerInterface):
 
             # Schedule newly needed KV blocks for the request.
             with record_function_or_nullcontext("schedule: allocate_slots"):
-                while True:
+                new_blocks = (
+                    self.kv_cache_manager.empty_kv_cache_blocks
+                    if request.prefill_side_replay_active
+                    else None
+                )
+                while new_blocks is None:
                     new_blocks = self.kv_cache_manager.allocate_slots(
                         request,
                         num_new_tokens,
@@ -870,7 +932,11 @@ class Scheduler(SchedulerInterface):
             assert len(scheduled_loras) <= self.lora_config.max_loras
 
         # Next, schedule the WAITING requests.
-        if not preempted_reqs and self._pause_state == PauseState.UNPAUSED:
+        if (
+            not replay_only
+            and not preempted_reqs
+            and self._pause_state == PauseState.UNPAUSED
+        ):
             step_skipped_waiting: deque[Request] = deque()
             step_skipped_kv_holding: deque[Request] = deque()
 
@@ -1488,6 +1554,11 @@ class Scheduler(SchedulerInterface):
             kv_connector_block_state=kv_connector_block_state,
             num_spec_tokens_to_schedule=num_spec_tokens_to_schedule,
             ec_manager_metadata=self.encoder_cache_manager.get_manager_metadata(),
+            defer_prefill_sampling=(
+                self.prefill_side_swa_replay
+                and not replay_only
+                and bool(num_scheduled_tokens)
+            ),
         )
 
         # NOTE(Kuntai): this function is designed for multiple purposes:
@@ -1566,6 +1637,9 @@ class Scheduler(SchedulerInterface):
         self._inflight_prefills.discard(request)
         request.status = RequestStatus.PREEMPTED
         request.num_computed_tokens = 0
+        request.prefill_side_replay_active = False
+        request.prefill_side_replay_done = False
+        request.replay_start = 0
         if request.spec_token_ids:
             request.spec_token_ids = []
         # Async scheduling: mark all in-flight output as stale. Its tokens are
@@ -1678,6 +1752,7 @@ class Scheduler(SchedulerInterface):
         all_token_ids: dict[str, list[int]] = {}
         num_computed_tokens: list[int] = []
         num_output_tokens: list[int] = []
+        prefill_side_replay_starts: dict[str, int] = {}
         resumed_req_ids = set()
 
         num_running_reqs = len(running_reqs)
@@ -1712,6 +1787,8 @@ class Scheduler(SchedulerInterface):
             num_output_tokens.append(
                 req.num_output_tokens + req.num_output_placeholders
             )
+            if req.prefill_side_replay_active:
+                prefill_side_replay_starts[req_id] = req.replay_start
 
         return CachedRequestData(
             req_ids=req_ids,
@@ -1721,6 +1798,7 @@ class Scheduler(SchedulerInterface):
             new_block_ids=new_block_ids,
             num_computed_tokens=num_computed_tokens,
             num_output_tokens=num_output_tokens,
+            prefill_side_replay_starts=prefill_side_replay_starts,
         )
 
     def _reject_on_encoder_cache_embed_mismatch(
@@ -2112,7 +2190,36 @@ class Scheduler(SchedulerInterface):
             status_before_stop = request.status
 
             # Check for stop and update request status.
-            if new_token_ids:
+            if request.prefill_side_replay_active:
+                assert new_token_ids, (
+                    "A producer-side SWA replay must finish with the normal "
+                    "Prefill sample."
+                )
+                request.prefill_side_replay_active = False
+                request.prefill_side_replay_done = True
+
+            if (
+                self.prefill_side_swa_replay
+                and not request.prefill_side_replay_done
+                and not new_token_ids
+                and request.num_computed_tokens >= request.num_prompt_tokens
+            ):
+                num_replay_tokens = min(
+                    self.prefix_replay_tokens, request.num_prompt_tokens
+                )
+                request.replay_start = request.num_prompt_tokens - num_replay_tokens
+                request.num_computed_tokens -= num_replay_tokens
+                request.prefill_side_replay_active = True
+                request.is_prefill_chunk = True
+                self._inflight_prefills.add(request)
+                logger.info(
+                    "Scheduling explicit Prefill-side SWA replay for request "
+                    "%s: [%d, %d).",
+                    request.request_id,
+                    request.replay_start,
+                    request.num_prompt_tokens,
+                )
+            elif new_token_ids:
                 new_token_ids, stopped = self._update_request_with_output(
                     request, new_token_ids, is_stale=output_is_stale
                 )
