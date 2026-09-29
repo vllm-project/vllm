@@ -78,12 +78,6 @@ ThinkingTokenBudget = Annotated[
 ]
 
 
-# JSON clients send nested lists; the input processor pads them into an array.
-TokenIdTable = Annotated[
-    np.ndarray, GetPydanticSchema(lambda _, handler: handler(list[list[StrictInt]]))
-]
-
-
 class SamplingType(IntEnum):
     GREEDY = 0
     RANDOM = 1
@@ -296,7 +290,10 @@ class SamplingParams(
     prompt_logprobs: int | None = None
     """Number of log probabilities to return per prompt token.
     When set to -1, return all `vocab_size` log probabilities."""
-    prompt_logprob_token_ids: TokenIdTable | None = None
+    prompt_logprob_token_ids: (
+        Annotated[np.ndarray, GetPydanticSchema(lambda _, h: h(list[list[StrictInt]]))]
+        | None
+    ) = None
     """Token IDs to score per causal prompt row: an integer array of shape
     [num_rows, num_ids] or nested lists; -1 entries (padding) score -inf.
     Row i scores its IDs as predictions of prompt token
