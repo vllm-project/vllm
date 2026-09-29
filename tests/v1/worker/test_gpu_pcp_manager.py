@@ -461,6 +461,22 @@ def test_sharded_decode_layout_selects_owner_kv_for_replication(monkeypatch):
     assert torch.equal(cache_slot_mapping, torch.tensor([123, 789, 456, PAD_SLOT_ID]))
 
 
+def test_replicated_draft_cache_inputs_keep_unexpanded_slot_mapping(monkeypatch):
+    def unexpected_gather():
+        pytest.fail("replicated draft decode must not gather PCP cache inputs")
+
+    monkeypatch.setattr(attention_pcp, "get_pcp_group", unexpected_gather)
+    kv = torch.tensor([[11.0], [22.0], [0.0]])
+    slot_mapping = torch.tensor([123, 456])
+
+    (cache_kv,), cache_slot_mapping = attention_pcp._gather_prefill_cache_inputs(
+        (kv,), slot_mapping, num_decode_tokens=2, shard_decode_requests=True
+    )
+
+    assert torch.equal(cache_kv, kv[:2])
+    assert torch.equal(cache_slot_mapping, slot_mapping)
+
+
 def _rank_rows(
     pcp_rank: int,
     pcp_world_size: int,
