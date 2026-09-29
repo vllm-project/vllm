@@ -169,6 +169,17 @@ class UMBPStoreConnectorScheduler:
         assert transfer_config is not None
         extra = transfer_config.kv_connector_extra_config
         self.load_async = bool(extra.get("load_async", True))
+        if not self.load_async and any(
+            isinstance(group.kv_cache_spec, MambaSpec)
+            for group in kv_cache_config.kv_cache_groups
+        ):
+            # vLLM copies a restored Mamba state into the running slot while
+            # preparing inputs, before a synchronous load can have landed.
+            logger.warning(
+                "UMBP loads asynchronously for models with Mamba-style layers; "
+                "load_async=false is ignored"
+            )
+            self.load_async = True
         self.enable_lookup = bool(extra.get("enable_lookup", True))
         self.lookup_async = bool(extra.get("lookup_async", False))
         self.save_decode_cache = bool(extra.get("save_decode_cache", False))

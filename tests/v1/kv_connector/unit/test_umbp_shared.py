@@ -1277,6 +1277,28 @@ def test_lazy_target_matches_cache_group_geometry():
     )
 
 
+def test_hybrid_model_loads_asynchronously_even_when_sync_is_requested():
+    codec = BlockIdentityCodec(UMBPNamespace("hybrid-sync"))
+    block_hashes = [b"a", b"b"]
+    hits = {
+        codec.key(block_hashes[0], 0): True,
+        codec.key(block_hashes[1], 0): True,
+        codec.key(block_hashes[1], 1): True,
+    }
+    scheduler = UMBPStoreConnectorScheduler(
+        _vllm_config({"mode": "embedded", "load_async": False}),
+        _hybrid_kv_cache_config(),
+        _SchedulerHandle(hits),
+        codec,
+    )
+    request = SimpleNamespace(
+        request_id="hybrid-sync", block_hashes=block_hashes, num_tokens=33
+    )
+
+    assert scheduler.get_num_new_matched_tokens(request, 0) == (32, True)
+    scheduler.close()
+
+
 @pytest.mark.parametrize("lookup_async", [False, True])
 def test_hybrid_lookup_uses_latest_mamba_checkpoint(lookup_async, monkeypatch):
     codec = BlockIdentityCodec(UMBPNamespace("hybrid-hit-window"))
@@ -2839,7 +2861,8 @@ def test_hybrid_fine_hash_lookup_is_not_limited_by_gpu_page_count():
         block_hashes=[bytes([index]) for index in range(32)],
     )
     for _ in range(2):
-        assert scheduler.get_num_new_matched_tokens(request, 0) == (124, False)
+        # Mamba-style groups always load asynchronously.
+        assert scheduler.get_num_new_matched_tokens(request, 0) == (124, True)
     scheduler.close()
 
 
