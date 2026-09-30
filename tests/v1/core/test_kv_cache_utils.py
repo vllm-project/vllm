@@ -52,6 +52,7 @@ from vllm.v1.core.kv_cache_utils import (
     hash_block_tokens,
     init_none_hash,
     is_kv_cache_spec_uniform,
+    kv_cache_groups_tp_replicas,
     make_block_hash_with_group_id,
     tensor_data,
     to_event_extra_keys,
@@ -203,6 +204,50 @@ def test_hisparse_hma_uses_resolved_gpu_block_size(
         ),
     )
     assert scheduler_block_size == hash_block_size == gpu_block_size
+
+
+@pytest.mark.parametrize("extra_blocks,ok", [(1, False), (2, True)])
+def test_hisparse_host_pool_must_fit_max_model_len(monkeypatch, extra_blocks, ok):
+    """Every page needs a host block, so one max_model_len request must fit."""
+    monkeypatch.setattr(
+        hisparse_runtime_module.current_platform, "is_cuda_alike", lambda: True
+    )
+    specs = {
+        "model.layers.0.self_attn": MLAAttentionSpec(
+            block_size=64,
+            num_kv_heads=1,
+            head_size=576,
+            dtype=torch.bfloat16,
+            is_index_group_leader=True,
+        ),
+        "model.layers.0.self_attn.indexer": MLAAttentionSpec(
+            block_size=64,
+            num_kv_heads=1,
+            head_size=128,
+            dtype=torch.bfloat16,
+            cache_role=SparseCacheRole.INDEXER,
+        ),
+    }
+    group_spec = UniformTypeKVCacheSpecs.from_specs(specs)
+    assert group_spec is not None
+    config = SimpleNamespace(
+        attention_config=SimpleNamespace(hisparse_config=HiSparseConfig()),
+        model_config=SimpleNamespace(
+            hf_config=SimpleNamespace(index_topk=128), max_model_len=64 * 4
+        ),
+        parallel_config=SimpleNamespace(tensor_parallel_size=1, world_size=1),
+        cache_config=SimpleNamespace(num_gpu_blocks_override=7),
+    )
+    host_page = specs["model.layers.0.self_attn"].page_size_bytes
+    host_budget = (4 + extra_blocks) * host_page
+    group = KVCacheGroupSpec(list(specs), group_spec)
+
+    if ok:
+        layout = create_hisparse_layout(config, [group], host_budget=host_budget)
+        assert layout.host_num_blocks == 4 + extra_blocks
+    else:
+        with pytest.raises(ValueError, match="increase host_pool_gib"):
+            create_hisparse_layout(config, [group], host_budget=host_budget)
 
 
 def test_hisparse_rejects_deepseek_v4():
@@ -3230,6 +3275,7 @@ def new_mla_spec(cache_dtype_str=None, block_size: int = 16):
     return MLAAttentionSpec(
         block_size=block_size,
         num_kv_heads=1,
+        max_tp_shards=1,
         head_size=576,
         dtype=torch.float32,
         cache_dtype_str=cache_dtype_str,
@@ -3240,6 +3286,7 @@ def new_swa_mla_spec(head_size=576, sliding_window=128, model_version=None):
     return SlidingWindowMLASpec(
         block_size=16,
         num_kv_heads=1,
+        max_tp_shards=1,
         head_size=head_size,
         dtype=torch.float32,
         sliding_window=sliding_window,
@@ -4593,3 +4640,97 @@ def test_trailing_layer_fallback_requires_exact_partition():
     _annotate_eagle_groups(config, specs, trimmed, use_trailing_layer_fallback=True)
 
     assert not any(g.is_eagle_group for g in trimmed)
+
+
+_GQA_SPEC = FullAttentionSpec(
+    block_size=16, num_kv_heads=8, head_size=64, dtype=torch.float32
+)
+_GQA_SWA_SPEC = SlidingWindowSpec(
+    block_size=16, num_kv_heads=8, head_size=64, dtype=torch.float32, sliding_window=128
+)
+
+
+@pytest.mark.parametrize(
+    "specs,expected",
+    [
+        pytest.param({"l.0": new_mla_spec(), "l.1": new_mla_spec()}, 4, id="mla"),
+        pytest.param(
+            {
+                "l.0": new_mla_spec(),
+                "l.1": new_mla_spec(),
+                "s.0": new_swa_mla_spec(),
+                "s.1": new_swa_mla_spec(),
+            },
+            4,
+            id="mla-and-swa-mla",
+        ),
+        pytest.param({"l.0": _GQA_SPEC, "l.1": _GQA_SPEC}, 1, id="gqa"),
+        pytest.param(
+            {"l.0": new_mla_spec(), "l.1": _GQA_SPEC},
+            1,
+            id="mla-and-gqa-uniform-group",
+        ),
+        pytest.param(
+            {
+                "l.0": new_mla_spec(),
+                "l.1": new_mla_spec(),
+                "s.0": _GQA_SWA_SPEC,
+                "s.1": _GQA_SWA_SPEC,
+            },
+            1,
+            id="mla-and-gqa-swa",
+        ),
+    ],
+)
+def test_kv_tp_replicas(monkeypatch, specs, expected):
+    """Resolved per layer before scheduler flattening hides mixed groups."""
+    from vllm.config import ParallelConfig
+    from vllm.platforms import current_platform
+
+    monkeypatch.setattr(current_platform, "device_count", lambda: 4)
+    parallel_config = ParallelConfig(tensor_parallel_size=4)
+    vllm_config = VllmConfig(
+        model_config=ModelConfig(max_model_len=16), parallel_config=parallel_config
+    )
+    vllm_config.cache_config.kv_cache_layout = "LBNHC"
+    mem = sum(s.page_size_bytes for s in specs.values()) * 10
+    configs = get_kv_cache_configs(vllm_config, [specs], [mem])
+    assert configs[0].kv_tp_replicas == expected
+    scheduler = generate_scheduler_kv_cache_config(configs)
+    assert scheduler.kv_tp_replicas == expected
+
+
+@pytest.mark.parametrize(
+    "specs,tp_size,dcp_size,expected",
+    [
+        pytest.param([new_mla_spec()], 8, 1, 8, id="mla"),
+        pytest.param([new_mla_spec()], 8, 2, 1, id="mla-dcp"),
+        pytest.param(
+            [replace(new_mla_spec(), max_tp_shards=None)], 8, 1, 1, id="mla-unset"
+        ),
+        pytest.param([replace(_GQA_SPEC, max_tp_shards=2)], 8, 1, 4, id="gqa-partial"),
+        pytest.param([replace(_GQA_SPEC, max_tp_shards=8)], 4, 1, 1, id="gqa-sharded"),
+        pytest.param(
+            [new_mla_spec(), replace(_GQA_SWA_SPEC, max_tp_shards=4)],
+            8,
+            1,
+            2,
+            id="mla-and-gqa-partial",
+        ),
+        pytest.param(
+            [
+                HiddenStateCacheSpec(
+                    block_size=16, num_kv_heads=1, head_size=64, dtype=torch.float32
+                )
+            ],
+            8,
+            1,
+            1,
+            id="hidden-state",
+        ),
+    ],
+)
+def test_kv_cache_groups_tp_replicas(specs, tp_size, dcp_size, expected):
+    """Replicas are the gcd of each layer's tp_size // max_tp_shards."""
+    groups = [KVCacheGroupSpec([f"l.{i}"], spec) for i, spec in enumerate(specs)]
+    assert kv_cache_groups_tp_replicas(groups, tp_size, dcp_size) == expected

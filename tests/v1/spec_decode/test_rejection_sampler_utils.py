@@ -168,7 +168,7 @@ def test_watermarked_bonus_uses_target_key():
         watermarker=GumbelWatermarker(key=42, context_width=2),
     )
     expected = GumbelWatermarker(key=42, context_width=2).sample(
-        target_logits.unsqueeze(0), contexts[1:], lambda _: None
+        target_logits.unsqueeze(0), contexts[1:]
     )
 
     assert num_sampled.item() == 2
@@ -196,7 +196,7 @@ def test_watermarked_recovery_uses_target_key():
         watermarker=GumbelWatermarker(key=42, context_width=2),
     )
     expected = GumbelWatermarker(key=42, context_width=2).sample(
-        target_logits.unsqueeze(0), contexts[:1], lambda _: None
+        target_logits.unsqueeze(0), contexts[:1]
     )
 
     assert num_sampled.item() == 1
@@ -225,9 +225,7 @@ def test_watermarked_recovery_supports_smaller_draft_vocabulary():
         watermarking=torch.tensor([True], device="cuda"),
         watermarker=watermarker,
     )
-    expected = watermarker.sample(
-        target_logits[:4].unsqueeze(0), contexts[:1], lambda _: None
-    )
+    expected = watermarker.sample(target_logits[:4].unsqueeze(0), contexts[:1])
 
     assert num_sampled.item() == 1
     assert sampled[0, 0] == expected.token_ids[0]
