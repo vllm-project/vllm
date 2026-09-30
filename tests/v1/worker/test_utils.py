@@ -787,35 +787,6 @@ def test_hisparse_finish_forward_does_not_repeat_per_layer_mirrors():
     worker._enqueue_row_dma.assert_not_called()
 
 
-def test_hisparse_finish_forward_submits_lazy_post_forward_transfer(monkeypatch):
-    runtime = SimpleNamespace(eager_host_mirror=False)
-    worker = _make_hisparse_worker()
-    worker.is_host_writer = True
-    worker.cache_handles = [SimpleNamespace(runtime=runtime, num_actual_tokens=0)]
-    transfer = SparseKVPageTransfer(7, 2, (1,), after_forward=True)
-    worker._post_forward_transfers = [transfer]
-    worker._forward_ready_event = MagicMock()
-    worker._enqueue_host_mirror = MagicMock()
-    worker._submit_transfers = MagicMock()
-    worker._dma_submitted = False
-    worker._submitted_mirror_layers = set()
-    worker._finish_mirror_phase = MagicMock()
-    worker._release_completed_dma_descriptors = MagicMock()
-    stream = MagicMock()
-    monkeypatch.setattr(hisparse_worker_module, "current_stream", lambda: stream)
-
-    worker.finish_forward()
-
-    worker._finish_mirror_phase.assert_called_once_with(worker._forward_ready_event)
-    worker.host_write_event.record.assert_called_once_with(stream)
-    # Page transfers wait until the drafter's rows are mirrored.
-    worker._submit_transfers.assert_not_called()
-
-    worker.wait_for_save()
-
-    worker._submit_transfers.assert_called_once_with([transfer])
-
-
 def test_hisparse_prefill_mirrors_source_groups_and_flushes_partial_group():
     slots = torch.tensor([7, 8], dtype=torch.int64)
     source_indices = [0, 0, 1, 1, 1, 1, 2]

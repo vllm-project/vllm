@@ -413,6 +413,7 @@ class HiSparseConnectorWorker:
             self._slot_mapping_staging.candidates = mirrors
         self._set_row_mirrors(mirrors)
         self._dma_submitted = False
+        self._draft_mirror_pending = False
         self._clear_forward_mirror_state()
         for handle in self.cache_handles:
             handle.all_context_pages_resident = metadata.all_context_pages_resident
