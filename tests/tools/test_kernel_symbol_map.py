@@ -5,6 +5,8 @@
 import importlib.util
 import json
 import os
+import shutil
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -110,10 +112,13 @@ def compilation(tmp_path, monkeypatch):
     monkeypatch.setattr(
         producer,
         "device_symbols",
-        lambda obj, tools: ([SYMBOL], ["hipv4-amdgcn-amd-amdhsa--gfx942"])
-        if obj == objects[0]
-        else ([], []),
+        lambda obj, tools: (
+            ([SYMBOL], ["hipv4-amdgcn-amd-amdhsa--gfx942"])
+            if obj == objects[0]
+            else ([], [])
+        ),
     )
+    monkeypatch.setattr(producer, "device_dependencies", lambda *args: set())
     return {
         "build_root": build,
         "source_root": source,
@@ -308,3 +313,250 @@ def test_cyclic_generated_provenance_is_rejected(tmp_path):
     first, second = tmp_path / "first.h", tmp_path / "second.h"
     with pytest.raises(ValueError, match="cyclic"):
         producer.expand_dependencies(first, {first: {second}, second: {first}})
+
+
+def test_device_depfile_preserves_escaped_file_names():
+    assert producer.parse_depfile(
+        "kernrec_device_deps: source.hip \\\n"
+        "  path\\ with\\ spaces.h hash\\#dollar$$.h\n"
+    ) == ["source.hip", "path with spaces.h", "hash#dollar$.h"]
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "",
+        "other: file.h",
+        "kernrec_device_deps:",
+        "kernrec_device_deps: file.h\nother: more.h",
+    ],
+)
+def test_missing_or_ambiguous_device_depfile_is_rejected(text):
+    with pytest.raises(ValueError):
+        producer.parse_depfile(text)
+
+
+def test_compiler_response_files_expand_relative_to_working_directory(tmp_path):
+    (tmp_path / "flags.rsp").write_text('@nested.rsp -o "object file.o"')
+    (tmp_path / "nested.rsp").write_text('-I"./include dir" -DDEVICE_HEADER=1')
+    command = {"directory": str(tmp_path), "arguments": ["clang++", "@flags.rsp"]}
+    assert producer.compilation_output(command) == tmp_path / "object file.o"
+    assert producer.compilation_arguments(command) == [
+        "clang++",
+        "-I./include dir",
+        "-DDEVICE_HEADER=1",
+        "-o",
+        "object file.o",
+    ]
+    (tmp_path / "nested.rsp").write_text("@flags.rsp")
+    with pytest.raises(ValueError, match="cyclic"):
+        producer.compilation_arguments(command)
+
+
+def test_response_quotes_follow_compiler_backslash_rules():
+    assert producer.response_arguments(r'''"-DNAME=foo\q" '-DOTHER=bar\x' ""''') == [
+        "-DNAME=fooq",
+        "-DOTHER=barx",
+        "",
+    ]
+
+
+def test_compiler_frontend_diagnostics_unescape_shell_metacharacters():
+    assert producer.response_arguments(
+        r'''"clang" "-D" "HEADER=\"dollar\$name.h\""'''
+    ) == ["clang", "-D", 'HEADER="dollar$name.h"']
+
+
+@pytest.mark.parametrize(
+    "error",
+    [ValueError("missing device target"), subprocess.TimeoutExpired("clang++", 180)],
+)
+def test_device_dependency_failure_invalidates_every_object(
+    compilation, monkeypatch, error
+):
+    options, _ = compilation
+
+    def fail(*args):
+        raise error
+
+    monkeypatch.setattr(producer, "device_dependencies", fail)
+    result = producer.build_map(**options)
+    assert result["incomplete"] and result["objects"] == []
+
+
+@pytest.mark.parametrize("response_files", [False, True])
+def test_real_hip_device_headers_reach_all_dependent_kernels(tmp_path, response_files):
+    """Host depfiles omit device-only includes even when another TU includes them."""
+    rocm = Path(os.environ.get("ROCM_PATH", "/opt/rocm"))
+    compiler = rocm / "llvm/bin/clang++"
+    tools = {
+        name: str(rocm / "llvm/bin" / name)
+        for name in ("llvm-readelf", "llvm-objcopy", "clang-offload-bundler")
+    }
+    ninja, cmake = shutil.which("ninja"), shutil.which("cmake")
+    if (
+        not compiler.is_file()
+        or not all(Path(p).is_file() for p in tools.values())
+        or not ninja
+        or not cmake
+    ):
+        pytest.skip("requires ROCm's HIP compiler and CMake/Ninja")
+    assert ninja is not None and cmake is not None
+    tools["ninja"] = ninja
+    source, build = tmp_path / "source with spaces", tmp_path / "build"
+    source.mkdir()
+    (source / "device only.h").write_text("constexpr int device_bias = 2;\n")
+    for arch in ("gfx942", "gfx950"):
+        (source / f"{arch}.h").write_text(f"constexpr int arch_bias = {arch[3:]};\n")
+    (source / "first.hip").write_text("""#include <hip/hip_runtime.h>
+#if defined(__HIP_DEVICE_COMPILE__) && ENABLE_DEVICE_HEADER
+#include "device only.h"
+#if defined(__gfx942__)
+#include "gfx942.h"
+#elif defined(__gfx950__)
+#include "gfx950.h"
+#endif
+#endif
+__global__ void first(int* output) {
+#if defined(__HIP_DEVICE_COMPILE__)
+  output[0] = device_bias + arch_bias;
+#endif
+}
+""")
+    (source / "second.hip").write_text("""#include <hip/hip_runtime.h>
+#include "device only.h"
+__global__ void second(int* output) { output[0] = device_bias; }
+""")
+    (source / "host.cpp").write_text("int host_only() { return 0; }\n")
+    (source / "CMakeLists.txt").write_text("""cmake_minimum_required(VERSION 3.26)
+project(device_dependencies LANGUAGES CXX HIP)
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+add_library(probe OBJECT first.hip second.hip host.cpp)
+target_compile_definitions(probe PRIVATE ENABLE_DEVICE_HEADER=1)
+""")
+    if response_files:
+        cmake_file = source / "CMakeLists.txt"
+        cmake_file.write_text(
+            cmake_file.read_text().replace(
+                "target_compile_definitions(probe PRIVATE ENABLE_DEVICE_HEADER=1)",
+                """file(WRITE ${CMAKE_CURRENT_BINARY_DIR}/nested.rsp
+  "-DENABLE_DEVICE_HEADER=1")
+file(WRITE ${CMAKE_CURRENT_BINARY_DIR}/flags.rsp "@nested.rsp")
+target_compile_options(probe PRIVATE @flags.rsp)""",
+            )
+        )
+    subprocess.run(
+        [
+            cmake,
+            "-S",
+            str(source),
+            "-B",
+            str(build),
+            "-G",
+            "Ninja",
+            f"-DCMAKE_HIP_COMPILER={compiler}",
+            "-DCMAKE_HIP_ARCHITECTURES=gfx942:sramecc+:xnack-;gfx950:sramecc+:xnack-",
+            *(["-DCMAKE_NINJA_FORCE_RESPONSE_FILE=ON"] if response_files else []),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    subprocess.run(
+        [cmake, "--build", str(build)], check=True, capture_output=True, text=True
+    )
+    objects = {p: p.read_bytes() for p in build.rglob("*.o")}
+    result = producer.build_map(build, source, tools)
+    assert not result["incomplete"], result.get("reason")
+    by_source = {obj["source"]: obj for obj in result["objects"]}
+    assert {"device only.h", "gfx942.h", "gfx950.h"} <= set(
+        by_source["first.hip"]["deps"]
+    )
+    assert "device only.h" in by_source["second.hip"]["deps"]
+    assert by_source["first.hip"]["symbols"] == ["_Z5firstPi"]
+    assert by_source["second.hip"]["symbols"] == ["_Z6secondPi"]
+    assert not by_source["host.cpp"]["device"]
+    assert all(p.read_bytes() == before for p, before in objects.items())
+
+    later = max(p.stat().st_mtime_ns for p in objects) + 1_000_000_000
+    os.utime(source / "gfx942.h", ns=(later, later))
+    stale = producer.build_map(build, source, tools)
+    assert stale["incomplete"] and stale["objects"] == []
+    assert "newer than object" in stale["reason"]
+
+
+@pytest.mark.parametrize("header", [r"a\b.h", "dollar$name.h"])
+def test_real_device_scan_preserves_outputs_and_response_header_choice(
+    tmp_path, header
+):
+    compiler = Path(os.environ.get("ROCM_PATH", "/opt/rocm")) / "llvm/bin/clang++"
+    if not compiler.is_file():
+        pytest.skip("requires ROCm's HIP compiler")
+    source = tmp_path / "probe.hip"
+    source.write_text("""#include <hip/hip_runtime.h>
+#ifdef __HIP_DEVICE_COMPILE__
+#include HEADER
+#endif
+__global__ void probe(int* output) {
+#ifdef __HIP_DEVICE_COMPILE__
+  output[0] = selected_value;
+#endif
+}
+""")
+    (tmp_path / "ab.h").write_text("constexpr int selected_value = 7;\n")
+    (tmp_path / "dollar$name.h").write_text("constexpr int selected_value = 13;\n")
+    (tmp_path / "a").mkdir()
+    (tmp_path / "a/b.h").write_text("constexpr int selected_value = 11;\n")
+    (tmp_path / "flags.rsp").write_text(f'"-DHEADER=\\"{header}\\""')
+    args = [
+        str(compiler),
+        "--offload-arch=gfx950",
+        "-c",
+        str(source),
+        "@flags.rsp",
+        "-o",
+        "probe.o",
+        "-MD",
+        "-MF",
+        "probe.d",
+        "-MT",
+        "probe.o",
+        "-MJ",
+        "fragment.json",
+        "-serialize-diagnostics",
+        "diagnostics.dia",
+        "-Xclang",
+        "-dependency-dot",
+        "-Xclang",
+        "dependencies.dot",
+        "-Xclang",
+        "-header-include-file",
+        "-Xclang",
+        "includes.txt",
+        "-Xclang",
+        "-diagnostic-log-file",
+        "-Xclang",
+        "diagnostics.log",
+        "-Xclang",
+        "-stats-file=stats.json",
+    ]
+    subprocess.run(args, cwd=tmp_path, check=True, capture_output=True, text=True)
+    before = {
+        p: (p.read_bytes(), p.stat().st_mtime_ns)
+        for p in tmp_path.rglob("*")
+        if p.is_file()
+    }
+    expanded = producer.compilation_arguments(
+        {"directory": str(tmp_path), "arguments": args}
+    )
+    dependencies = producer.device_dependencies(
+        expanded, tmp_path, source, ["hipv4-amdgcn-amd-amdhsa--gfx950"]
+    )
+    assert tmp_path / header.replace("\\", "") in dependencies
+    assert tmp_path / "a/b.h" not in dependencies
+    after = {
+        p: (p.read_bytes(), p.stat().st_mtime_ns)
+        for p in tmp_path.rglob("*")
+        if p.is_file()
+    }
+    assert after == before

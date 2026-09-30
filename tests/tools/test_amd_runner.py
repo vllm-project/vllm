@@ -48,6 +48,8 @@ def test_recorder_mount_and_identity_reach_the_inner_container(tmp_path):
         "BUILDKITE_BUILD_NUMBER",
         "BUILDKITE_COMMIT",
         "KERNREC_PYTHON",
+        "VLLM_WORKER_MULTIPROC_METHOD",
+        "VLLM_WORKER_SHUTDOWN_TIMEOUT_SECONDS",
     }
     assert (checkout / ".kernrec").stat().st_mode & 0o777 == 0o777
 

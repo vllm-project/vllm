@@ -9,6 +9,8 @@ sources and copied headers use the generated-to-original manifests written
 by the build, or an explicit --hipify-map. Relative paths use --source-root.
 Provenance is recorded during generation, never guessed from path names.
 
+Device dependencies are collected by preprocessing every GPU target with
+the original compiler's frontend arguments; Ninja only records host includes.
 All compilation units are inspected, including host-only units. Missing
 objects, dependency information, provenance, or unreadable device code
 invalidate the entire map. This is an ahead-of-time map; an AITER JIT cache
@@ -35,14 +37,16 @@ DEPS_HEADER = re.compile(r"^(.+): #deps (\d+), deps mtime \d+ \((VALID|STALE)\)$
 TARGET = re.compile(r"(?:^|/)CMakeFiles/([^/]+)\.dir/")
 
 
-def run(command: list[str]) -> str:
-    result = subprocess.run(command, capture_output=True, text=True, timeout=180)
+def run(command: list[str], *, cwd: Path | None = None, diagnostics=False) -> str:
+    result = subprocess.run(
+        command, cwd=cwd, capture_output=True, text=True, timeout=180
+    )
     if result.returncode:
         detail = (result.stderr or result.stdout).strip()[-2000:]
         raise ValueError(
             f"{Path(command[0]).name} exited {result.returncode}: {detail}"
         )
-    return result.stdout
+    return result.stdout + result.stderr if diagnostics else result.stdout
 
 
 def parse_deps(text: str) -> dict[str, list[str]]:
@@ -267,12 +271,75 @@ def expand_dependencies(
     }
 
 
-def compilation_output(command: dict) -> Path:
-    directory = Path(command["directory"]).resolve()
-    output = command.get("output")
+def response_arguments(text: str) -> list[str]:
+    """Clang's GNU response syntax escapes the next character in either quote."""
+    arguments, word = [], []
+    quote = None
+    started = False
+    chars = iter(text)
+    for char in chars:
+        if char == "\\":
+            escaped = next(chars, None)
+            if escaped is None:
+                raise ValueError("unfinished compiler response escape")
+            word.append(escaped)
+            started = True
+        elif quote:
+            if char == quote:
+                quote = None
+            else:
+                word.append(char)
+        elif char in ("'", '"'):
+            quote = char
+            started = True
+        elif char in " \t\r\n\v\f":
+            if started:
+                arguments.append("".join(word))
+                word, started = [], False
+        else:
+            word.append(char)
+            started = True
+    if quote:
+        raise ValueError("unfinished compiler response quote")
+    if started:
+        arguments.append("".join(word))
+    return arguments
+
+
+def compilation_arguments(
+    command: dict, response_files: set[Path] | None = None
+) -> list[str]:
     args = command.get("arguments") or shlex.split(command.get("command", ""))
     if not isinstance(args, list) or not all(isinstance(a, str) for a in args):
         raise ValueError("invalid compiler arguments")
+    directory = Path(command["directory"]).resolve()
+
+    def expand(arguments, active=()):
+        expanded = []
+        for arg in arguments:
+            if not arg.startswith("@"):
+                expanded.append(arg)
+                continue
+            response = absolute(arg[1:], directory)
+            if response in active or len(active) >= 16:
+                raise ValueError(f"cyclic or deeply nested response file: {response}")
+            if response_files is not None:
+                response_files.add(response)
+            expanded.extend(
+                expand(response_arguments(response.read_text()), (*active, response))
+            )
+        return expanded
+
+    expanded = expand(args)
+    if any(arg.startswith("--rsp-quoting") for arg in expanded):
+        raise ValueError("explicit compiler response quoting is unsupported")
+    return expanded
+
+
+def compilation_output(command: dict) -> Path:
+    directory = Path(command["directory"]).resolve()
+    output = command.get("output")
+    args = compilation_arguments(command)
     if "-fgpu-rdc" in args or any(a.startswith("-flto") for a in args):
         raise ValueError("RDC/LTO needs linked-code provenance")
     if not output:
@@ -283,6 +350,157 @@ def compilation_output(command: dict) -> Path:
     if not output:
         raise ValueError(f"compilation has no object output: {command.get('file')}")
     return absolute(output, directory)
+
+
+def parse_depfile(text: str) -> list[str]:
+    """Read Clang's single-rule Make depfile, including escaped file names."""
+    text = text.replace("\\\r\n", "").replace("\\\n", "")
+    prefix = "kernrec_device_deps:"
+    if not text.startswith(prefix):
+        raise ValueError("unexpected device dependency target")
+    paths, word = [], []
+    chars = iter(text[len(prefix) :])
+    for char in chars:
+        if char == "\\":
+            escaped = next(chars, "")
+            if escaped not in (" ", "\t", "#", ":", "\\"):
+                raise ValueError("unsupported device dependency escape")
+            word.append(escaped)
+        elif char == "$":
+            if next(chars, "") != "$":
+                raise ValueError("unsupported device dependency variable")
+            word.append("$")
+        elif char in "#:;\0":
+            raise ValueError("unexpected device dependency rule")
+        elif char.isspace():
+            if word:
+                paths.append("".join(word))
+                word = []
+        else:
+            word.append(char)
+    if word:
+        paths.append("".join(word))
+    if not paths:
+        raise ValueError("empty device dependencies")
+    return paths
+
+
+def device_dependencies(
+    args: list[str], directory: Path, source: Path, targets: list[str]
+) -> set[Path]:
+    """Preprocess the actual AMDGPU frontends without writing build outputs."""
+    if not targets:
+        return set()
+    if not args:
+        raise ValueError(f"missing compiler command for device source: {source}")
+    expected = set()
+    for target in targets:
+        match = re.fullmatch(
+            r"hipv4-amdgcn-amd-amdhsa--(gfx[0-9a-z]+)((?::(?:sramecc|xnack)[+-])*)",
+            target,
+        )
+        if not match:
+            raise ValueError(f"unsupported device dependency target: {target}")
+        expected.add((match[1], tuple(sorted(filter(None, match[2].split(":"))))))
+
+    def option(frontend, name):
+        if name not in frontend or frontend.index(name) + 1 == len(frontend):
+            raise ValueError(f"missing device compiler argument: {name}")
+        return frontend[frontend.index(name) + 1]
+
+    # Clang creates/removes driver output files even with -###.
+    driver = []
+    arguments = iter(args)
+    for arg in arguments:
+        if arg in ("-MJ", "-gen-cdb-fragment-path", "-serialize-diagnostics"):
+            if next(arguments, None) is None:
+                raise ValueError(f"missing compiler output argument: {arg}")
+        elif arg.startswith(
+            ("-MJ", "-gen-cdb-fragment-path=", "-serialize-diagnostics=")
+        ):
+            continue
+        else:
+            driver.append(arg)
+    frontends = {}
+    for line in run([*driver, "-###"], cwd=directory, diagnostics=True).splitlines():
+        if '"-cc1"' not in line:
+            continue
+        frontend = response_arguments(line)
+        if "-fcuda-is-device" not in frontend:
+            continue
+
+        if (
+            option(frontend, "-triple") != "amdgcn-amd-amdhsa"
+            or "-emit-obj" not in frontend
+        ):
+            raise ValueError("unsupported device compiler frontend")
+        features = []
+        for index, arg in enumerate(frontend[:-1]):
+            if arg == "-target-feature":
+                feature = frontend[index + 1]
+                if feature.startswith(("+", "-")) and feature[1:] in (
+                    "sramecc",
+                    "xnack",
+                ):
+                    features.append(feature[1:] + feature[0])
+        arch = (
+            option(frontend, "-target-cpu"),
+            tuple(sorted(features)),
+        )
+        if arch in frontends:
+            raise ValueError(f"duplicate device compiler frontend: {arch}")
+        frontends[arch] = frontend
+    if set(frontends) != expected:
+        raise ValueError("compiler device targets do not match object offload targets")
+
+    dependencies = set()
+    with tempfile.TemporaryDirectory(prefix="rocm-device-deps-") as temporary:
+        for index, frontend in enumerate(frontends.values()):
+            command = []
+            arguments = iter(frontend)
+            for arg in arguments:
+                if arg in (
+                    "-o",
+                    "-dependency-file",
+                    "-MT",
+                    "-MQ",
+                    "-serialize-diagnostic-file",
+                    "-coverage-notes-file",
+                    "-coverage-data-file",
+                    "-split-dwarf-output",
+                    "-opt-record-file",
+                    "-dependency-dot",
+                    "-diagnostic-log-file",
+                    "-header-include-file",
+                ):
+                    if next(arguments, None) is None:
+                        raise ValueError(f"missing compiler output argument: {arg}")
+                elif arg in ("-emit-obj", "-MP") or arg.startswith(
+                    ("-ftime-trace", "-stats-file=")
+                ):
+                    continue
+                elif arg.startswith(("-fmodule", "-include-pch")):
+                    raise ValueError("device PCH/modules need expanded dependencies")
+                else:
+                    command.append(arg)
+            depfile = Path(temporary) / f"device-{index}.d"
+            run(
+                [
+                    *command,
+                    "-Eonly",
+                    "-dependency-file",
+                    str(depfile),
+                    "-MT",
+                    "kernrec_device_deps",
+                    "-sys-header-deps",
+                ],
+                cwd=directory,
+            )
+            paths = {absolute(p, directory) for p in parse_depfile(depfile.read_text())}
+            if source not in paths:
+                raise ValueError(f"device dependencies omit compiled source: {source}")
+            dependencies.update(paths)
+    return dependencies
 
 
 def build_map(
@@ -350,9 +568,8 @@ def build_map(
                 obj = compilation_output(command)
                 directory = Path(command["directory"]).resolve()
                 source = absolute(command["file"], directory)
-                args = command.get("arguments") or shlex.split(
-                    command.get("command", "")
-                )
+                response_files: set[Path] = set()
+                args = compilation_arguments(command, response_files)
                 identity = (source, directory, tuple(args))
                 if obj in seen:
                     if seen[obj] != identity:
@@ -367,6 +584,8 @@ def build_map(
                 deps = {absolute(p, build_dir) for p in paths}
                 if source not in deps:
                     raise ValueError(f"dependency log omits compiled source: {obj}")
+                symbols, targets = device_symbols(obj, tools)
+                deps.update(device_dependencies(args, directory, source, targets))
                 original_deps = {
                     original
                     for path in deps
@@ -375,6 +594,7 @@ def build_map(
                 for path in (
                     deps
                     | original_deps
+                    | response_files
                     | {provenance[p] for p in original_deps if p in provenance}
                 ):
                     if not path.is_file():
@@ -388,7 +608,6 @@ def build_map(
                     }
                 )
                 mapped_source = source_path(source, source_root, build_dirs, provenance)
-                symbols, targets = device_symbols(obj, tools)
                 target = TARGET.search(obj.as_posix())
                 result["objects"].append(
                     {
