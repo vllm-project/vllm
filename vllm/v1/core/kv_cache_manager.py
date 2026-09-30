@@ -398,7 +398,9 @@ class KVCacheManager:
                 KV caches are not cached by vLLM but cached by the connector.
             delay_cache_blocks: Whether to skip caching the blocks. This is
                 used by P/D when allocating blocks used in a KV transfer
-                which will complete in a future step.
+                which will complete in a future step. The blocks for external
+                tokens are then not zeroed either, which would race the
+                transfer.
             num_encoder_tokens: The number of encoder tokens to allocate for
                 cross-attention in encoder-decoder models(e.g., Whisper).
                 For decoder-only models, this should be 0.
@@ -580,6 +582,7 @@ class KVCacheManager:
                 new_computed_blocks=new_computed_block_list,
                 num_local_computed_tokens=num_local_computed_tokens,
                 num_external_computed_tokens=num_external_computed_tokens,
+                record_for_zeroing=not delay_cache_blocks,
             )
 
         new_blocks = self.coordinator.allocate_new_blocks(
@@ -855,20 +858,6 @@ class KVCacheManager:
         ids: list[int] = []
         for mgr in self.coordinator.single_type_managers:
             ids.extend(mgr.take_new_block_ids())
-        return ids
-
-    def get_zeroing_block_ids_in_range(
-        self, request_id: str, start_token: int, end_token: int
-    ) -> list[int]:
-        """The request's block ids covering [start_token, end_token), from
-        the groups whose new blocks are zeroed by the worker."""
-        ids: list[int] = []
-        for mgr in self.coordinator.single_type_managers:
-            if mgr.records_new_block_ids:
-                start_idx = start_token // mgr.block_size
-                end_idx = cdiv(end_token, mgr.block_size)
-                blocks = mgr.req_to_blocks[request_id]
-                ids.extend(blk.block_id for blk in blocks[start_idx:end_idx])
         return ids
 
     def record_blocks_for_zeroing(self, request_id: str, start_token: int) -> None:

@@ -4,6 +4,8 @@
 the hit to rebuild the non-cacheable sliding-window group, keeps the hit's
 blocks, and hands the worker the replay start."""
 
+import dataclasses
+
 import pytest
 import torch
 
@@ -277,3 +279,53 @@ def test_hit_no_longer_than_window_is_ignored(via_connector):
     assert new_req.num_computed_tokens == 0
     assert new_req.replay_start == 0
     assert out.num_scheduled_tokens[request.request_id] == NUM_PROMPT_TOKENS
+
+
+@pytest.mark.parametrize("is_async", [True, False])
+def test_kv_load_blocks_not_zeroed_under_async_load(is_async):
+    """The blocks allocated for an async KV load are written by the connector
+    after this step, so zeroing them would race the write. That includes the
+    window blocks below the local hit, which the replayed group never caches.
+    A sync load writes after the zeroing, so its blocks are still zeroed."""
+    local = 5 * BLOCK_SIZE
+    scheduler = _replay_scheduler(use_kv_connector=MockKVConfig())
+    assert scheduler.needs_kv_cache_zeroing
+    first = create_requests(
+        num_requests=1, num_tokens=local, same_prompt=True, block_size=BLOCK_SIZE
+    )[0]
+    _prefill(scheduler, first)
+    scheduler.connector.config = dataclasses.replace(
+        scheduler.connector.config,
+        matched_tokens=NUM_PROMPT_TOKENS - 1 - local,
+        is_async=is_async,
+    )
+    request = create_requests(
+        num_requests=1,
+        num_tokens=NUM_PROMPT_TOKENS,
+        same_prompt=True,
+        block_size=BLOCK_SIZE,
+        req_ids=["load"],
+    )[0]
+    scheduler.add_request(request)
+    out = scheduler.schedule()
+
+    manager = scheduler.kv_cache_manager
+    hit_ids = {
+        b.block_id for g in manager.get_blocks(first.request_id).blocks for b in g
+    }
+    swa_blocks = manager.get_blocks(request.request_id).blocks[SWA]
+    assert any(
+        not b.is_null and b.block_id not in hit_ids
+        for b in swa_blocks[: local // BLOCK_SIZE]
+    )
+    new_ids = {
+        b.block_id
+        for g in manager.get_blocks(request.request_id).blocks
+        for b in g
+        if not b.is_null and b.block_id not in hit_ids
+    }
+    zeroed = set(out.new_block_ids_to_zero or ())
+    if is_async:
+        assert not new_ids & zeroed
+    else:
+        assert new_ids <= zeroed
