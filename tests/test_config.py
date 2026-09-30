@@ -419,6 +419,19 @@ def test_hisparse_rejects_disabled_hybrid_kv_cache_manager(monkeypatch):
         )
 
 
+def test_hisparse_rejects_disabled_full_isl_reservation(monkeypatch):
+    monkeypatch.setattr(current_platform, "is_cuda", lambda: True)
+    with pytest.raises(ValueError, match="requires --scheduler-reserve-full-isl"):
+        VllmConfig(
+            attention_config=AttentionConfig(hisparse_config=HiSparseConfig()),
+            scheduler_config=SchedulerConfig(
+                max_model_len=2048,
+                is_encoder_decoder=False,
+                scheduler_reserve_full_isl=False,
+            ),
+        )
+
+
 def test_hisparse_rejects_non_cuda(monkeypatch):
     monkeypatch.setattr(current_platform, "is_cuda", lambda: False)
     with pytest.raises(ValueError, match="requires NVIDIA CUDA"):
