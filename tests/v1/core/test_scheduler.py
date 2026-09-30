@@ -437,6 +437,52 @@ def test_schedule_partial_requests():
     assert requests[2].request_id not in output.num_scheduled_tokens
 
 
+def test_encoder_only_prompt_longer_than_budget_is_chunked():
+    """The engine switches chunked prefill off for an encoder-only instance,
+    but the token budget must still split its prompt across steps instead of
+    leaving the request waiting forever."""
+    scheduler = create_scheduler(
+        model="llava-hf/llava-1.5-7b-hf",
+        max_num_batched_tokens=1024,
+        max_model_len=4096,
+        mm_encoder_only=True,
+    )
+    # EngineCore turns this off after config validation whenever the instance
+    # holds no KV cache, which is every encoder-only instance.
+    scheduler.scheduler_config.enable_chunked_prefill = False
+    (request,) = create_requests(
+        num_requests=1,
+        num_tokens=2500,
+        mm_positions=[[PlaceholderRange(offset=100, length=600)]],
+    )
+    scheduler.add_request(request)
+
+    def advance(output):
+        scheduler.update_from_output(
+            output,
+            ModelRunnerOutput(
+                req_ids=[request.request_id],
+                req_id_to_index={request.request_id: 0},
+                sampled_token_ids=[[]],
+                logprobs=None,
+                prompt_logprobs_dict={},
+                pooler_output=[],
+            ),
+        )
+
+    first = scheduler.schedule()
+    assert first.num_scheduled_tokens[request.request_id] == 1024
+    assert request.request_id in first.scheduled_encoder_inputs
+    advance(first)
+
+    second = scheduler.schedule()
+    assert second.num_scheduled_tokens[request.request_id] == 1024
+    advance(second)
+
+    third = scheduler.schedule()
+    assert third.num_scheduled_tokens[request.request_id] == 452
+
+
 @pytest.mark.parametrize("has_running", [True, False])
 def test_schedule_prefills_gating(has_running: bool):
     """DP prefill-balancing gate: when `throttle_prefills` is True, a new
