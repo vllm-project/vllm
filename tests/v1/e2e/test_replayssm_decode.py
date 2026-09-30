@@ -10,10 +10,15 @@ from vllm.v1.metrics.reader import Counter
 from ...models.utils import check_logprobs_close
 from ...utils import large_gpu_mark, multi_gpu_test
 
-# Mamba2 (Nemotron-3) hybrid.
+# Mamba2 (Nemotron) and GDN (Qwen3.5) hybrids.
 MAMBA2_MODEL = "nvidia/NVIDIA-Nemotron-3-Nano-4B-BF16"
-MODELS = [
+GDN_MODEL = "Qwen/Qwen3.5-4B"
+MAMBA2_MODELS = [
     pytest.param(MAMBA2_MODEL, marks=large_gpu_mark(min_gb=40)),
+]
+MODELS = [
+    *MAMBA2_MODELS,
+    pytest.param(GDN_MODEL, marks=large_gpu_mark(min_gb=40)),
 ]
 
 PROMPTS = [
@@ -26,19 +31,17 @@ def _check_replayssm_parity(
     vllm_runner,
     model_name,
     *,
+    monkeypatch: pytest.MonkeyPatch,
     tensor_parallel_size=1,
     mamba_backend: str = "triton",
     name_1: str = "replayssm",
     require_v2: bool = False,
-    monkeypatch: pytest.MonkeyPatch | None = None,
 ):
     # Compare logprobs, not greedy ids: ReplaySSM's fp arithmetic can flip a
     # near-tie. Baseline and ReplaySSM run at the same TP, so TP numerics are
     # common-mode and only ReplaySSM varies.
-    if require_v2:
-        assert monkeypatch is not None
-        monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
-        envs.disable_envs_cache()
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1" if require_v2 else "0")
+    envs.disable_envs_cache()
 
     common = dict(
         max_model_len=1024,
@@ -47,6 +50,7 @@ def _check_replayssm_parity(
         mamba_cache_mode="none",
         tensor_parallel_size=tensor_parallel_size,
         mamba_backend=mamba_backend,
+        additional_config={"gdn_prefill_backend": "triton"},
     )
     with vllm_runner(model_name, **common) as llm:
         if require_v2:
@@ -68,19 +72,21 @@ def _check_replayssm_parity(
 
 
 @pytest.mark.parametrize("model_name", MODELS)
-def test_replayssm_decode_matches_baseline(vllm_runner, model_name):
-    _check_replayssm_parity(vllm_runner, model_name)
+def test_replayssm_decode_matches_baseline(vllm_runner, model_name, monkeypatch):
+    _check_replayssm_parity(vllm_runner, model_name, monkeypatch=monkeypatch)
 
 
 @multi_gpu_test(num_gpus=2)
-@pytest.mark.parametrize("model_name", [MAMBA2_MODEL])
-def test_replayssm_decode_matches_baseline_tp2(vllm_runner, model_name):
+@pytest.mark.parametrize("model_name", [MAMBA2_MODEL, GDN_MODEL])
+def test_replayssm_decode_matches_baseline_tp2(vllm_runner, model_name, monkeypatch):
     # Tensor-parallel correctness: ReplaySSM's caches and checkpoint state are
     # sharded per rank, so TP2 decode must still match the baseline at TP2.
-    _check_replayssm_parity(vllm_runner, model_name, tensor_parallel_size=2)
+    _check_replayssm_parity(
+        vllm_runner, model_name, tensor_parallel_size=2, monkeypatch=monkeypatch
+    )
 
 
-@pytest.mark.parametrize("model_name", MODELS)
+@pytest.mark.parametrize("model_name", MAMBA2_MODELS)
 def test_replayssm_flashinfer_decode_matches_baseline_v2(
     vllm_runner, model_name, monkeypatch
 ):
@@ -118,10 +124,12 @@ def _prefix_cache_hits(llm) -> int:
 
 
 def _check_replayssm_prefix_caching_parity(
-    vllm_runner, model_name, *, tensor_parallel_size=1
+    vllm_runner, model_name, *, monkeypatch, tensor_parallel_size=1
 ):
     # align mode materializes the exact SSM state at each block boundary, so
     # ReplaySSM's cached prefixes must match the always-materialized baseline.
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "0")
+    envs.disable_envs_cache()
     common = dict(
         max_model_len=8192,
         trust_remote_code=True,
@@ -130,6 +138,10 @@ def _check_replayssm_prefix_caching_parity(
         mamba_cache_mode="align",
         disable_log_stats=False,  # required for llm.get_metrics()
         tensor_parallel_size=tensor_parallel_size,
+        mamba_backend="triton",
+        # GDN prefill JIT-compiles under FlashInfer; the backend is irrelevant
+        # to the decode parity measured here and Triton avoids the JIT.
+        additional_config={"gdn_prefill_backend": "triton"},
     )
     with vllm_runner(model_name, **common) as llm:
         baseline = llm.generate_greedy_logprobs(
@@ -161,13 +173,19 @@ def _check_replayssm_prefix_caching_parity(
 
 
 @pytest.mark.parametrize("model_name", MODELS)
-def test_replayssm_prefix_caching_matches_baseline(vllm_runner, model_name):
-    _check_replayssm_prefix_caching_parity(vllm_runner, model_name)
+def test_replayssm_prefix_caching_matches_baseline(
+    vllm_runner, model_name, monkeypatch
+):
+    _check_replayssm_prefix_caching_parity(
+        vllm_runner, model_name, monkeypatch=monkeypatch
+    )
 
 
 @multi_gpu_test(num_gpus=2)
-@pytest.mark.parametrize("model_name", [MAMBA2_MODEL])
-def test_replayssm_prefix_caching_matches_baseline_tp2(vllm_runner, model_name):
+@pytest.mark.parametrize("model_name", [MAMBA2_MODEL, GDN_MODEL])
+def test_replayssm_prefix_caching_matches_baseline_tp2(
+    vllm_runner, model_name, monkeypatch
+):
     _check_replayssm_prefix_caching_parity(
-        vllm_runner, model_name, tensor_parallel_size=2
+        vllm_runner, model_name, tensor_parallel_size=2, monkeypatch=monkeypatch
     )

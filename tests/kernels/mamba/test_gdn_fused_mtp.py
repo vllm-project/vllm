@@ -56,6 +56,25 @@ PREFIX = "model.layers.0.linear_attn"
 EPS = 1e-6
 
 
+def test_fused_decode_support_check_accepts_replayssm_ring_dtypes():
+    """Ring storage must not change the convolution/recurrent dtype checks."""
+    state_dtypes = (torch.bfloat16, torch.float32)
+    layer = types.SimpleNamespace(
+        get_state_dtype=lambda: state_dtypes,
+        gqa_interleaved_layout=False,
+        head_k_dim=128,
+        head_v_dim=128,
+        norm=types.SimpleNamespace(activation="silu"),
+    )
+    config = types.SimpleNamespace(
+        model_config=types.SimpleNamespace(dtype=torch.bfloat16)
+    )
+    check = QwenGatedDeltaNetAttention._fused_gdn_decode_unsupported_reason
+    expected = check(layer, config)
+    state_dtypes += (torch.float16, torch.float16, torch.float32)
+    assert check(layer, config) == expected
+
+
 class _TestGatedNorm:
     def __init__(self, weight: torch.Tensor, activation: str) -> None:
         self.weight = weight
@@ -104,6 +123,7 @@ def _build_layer(
     layer = types.SimpleNamespace(
         prefix=PREFIX,
         enable_packed_recurrent_decode=False,
+        use_replayssm=False,
         disable_tp_for_ba_proj=False,
         tp_size=1,
         num_k_heads=H,
