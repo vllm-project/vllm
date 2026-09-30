@@ -295,6 +295,9 @@ class _BlockLoadLayout(NamedTuple):
 
 
 _LoadArgs = tuple[list[str], list[list[int]], list[list[int]], list[list[int]]]
+_StoreArgs = tuple[
+    list[str], list[int], list[list[int]], list[list[int]], list[list[int]]
+]
 
 
 class _MoriWorkerHandle(UMBPWorkerHandle):
@@ -563,9 +566,30 @@ class _MoriWorkerHandle(UMBPWorkerHandle):
             job.fail(failed, "MORI UMBP range load failed")
         return job
 
+    def store_blocks(
+        self, plans: Sequence[BlockTransferPlan]
+    ) -> TransferJobState | None:
+        """Store whole blocks from registered layouts; None requests ranges."""
+        prepared = self._bulk_load_args(plans)
+        if prepared is None:
+            return None
+        (keys, pointers, sizes, offsets), plan_bytes = prepared
+        return self._submit_store(
+            tuple(plans),
+            (keys, list(plan_bytes), pointers, sizes, offsets),
+            plan_bytes,
+        )
+
     def store(self, plans: Sequence[BlockTransferPlan]) -> TransferJobState:
-        plans = tuple(plans)
-        job = TransferJobState(plans)
+        return self._submit_store(tuple(plans))
+
+    def _submit_store(
+        self,
+        plans: tuple[BlockTransferPlan, ...],
+        range_args: _StoreArgs | None = None,
+        plan_bytes: tuple[int, ...] | None = None,
+    ) -> TransferJobState:
+        job = TransferJobState(plans, plan_bytes=plan_bytes)
         job.start()
         ready_events: list[torch.Event] = []
         for device in self._gpu_devices:
@@ -575,7 +599,7 @@ class _MoriWorkerHandle(UMBPWorkerHandle):
                 ready_events.append(event)
         self._store_deadlines[id(job)] = time.monotonic() + self._timeout_s
         self._futures[id(job)] = self._executor.submit(
-            self._store_sync, job, plans, ready_events
+            self._store_sync, job, plans, ready_events, range_args
         )
         return job
 
@@ -584,13 +608,16 @@ class _MoriWorkerHandle(UMBPWorkerHandle):
         job: TransferJobState,
         plans: tuple[BlockTransferPlan, ...],
         ready_events: list[torch.Event],
+        range_args: _StoreArgs | None = None,
     ) -> TransferJobState:
         for event in ready_events:
             event.synchronize()
         if not plans:
             job.complete()
             return job
-        keys, object_sizes, pointers, sizes, offsets = self._range_args(plans)
+        keys, object_sizes, pointers, sizes, offsets = (
+            self._range_args(plans) if range_args is None else range_args
+        )
         results = self.client.batch_put_ranges_from_ptr(
             keys, object_sizes, pointers, sizes, offsets
         )

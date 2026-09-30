@@ -397,6 +397,13 @@ class UMBPStoreConnectorWorker:
     ) -> None:
         if not plans:
             return
+        store_blocks = getattr(self.runtime, "store_blocks", None)
+        if store_blocks is not None:
+            job = store_blocks([self._localize_plan(plan) for plan in plans])
+            if job is not None:
+                self._stats.record("store", submitted=len(plans))
+                self._store_jobs[request_id] = job
+                return
         materialized = self._materialize_plans(plans)
         self._stats.record(
             "store",

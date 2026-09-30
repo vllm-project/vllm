@@ -112,6 +112,10 @@ def bulk_worker(monkeypatch, tmp_path):
         calls.append((keys, [], pointers, sizes, offsets))
         return [key != "missing" for key in keys]
 
+    def put(keys, object_sizes, pointers, sizes, offsets):
+        calls.append((keys, object_sizes, pointers, sizes, offsets))
+        return [True] * len(keys)
+
     monkeypatch.setitem(
         sys.modules,
         "mori.cpp",
@@ -121,6 +125,8 @@ def bulk_worker(monkeypatch, tmp_path):
         register_memory=lambda *a: True,
         deregister_memory=lambda *a: True,
         batch_get_ranges_into_ptr=get,
+        batch_put_ranges_from_ptr=put,
+        flush=lambda: True,
         close=lambda: None,
     )
     planner = KVLayoutPlanner(
@@ -190,6 +196,47 @@ def test_bulk_load_preserves_group_order_failures_and_new_buffers(
         assert result.completed_bytes == 112
     assert len(calls) == 2
     assert calls[0][2] != calls[1][2]
+
+
+def test_bulk_store_matches_materialized_ranges(bulk_worker, monkeypatch):
+    worker, _, calls = bulk_worker
+    plans = [
+        BlockTransferPlan("group1", 3, group_id=1, request_id="r", generation=9),
+        BlockTransferPlan("group0", 6, group_id=0, request_id="r", generation=9),
+    ]
+    expected = _MoriWorkerHandle._range_args(
+        [worker.layout.materialize(p) for p in plans]
+    )
+    monkeypatch.setattr(
+        worker.layout,
+        "materialize",
+        lambda *a: pytest.fail("bulk stores must not materialize per-block plans"),
+    )
+
+    worker.enqueue_stores(UMBPConnectorMetadata(store_requests={"r": plans}))
+    (job,) = worker._store_jobs.values()
+    result = worker.runtime.wait(job)
+
+    assert calls == [expected]
+    assert result.plans == tuple(plans)
+    assert result.completed_keys == {"group0", "group1"}
+    assert result.completed_bytes == 112
+
+
+def test_store_falls_back_to_ranges_for_partial_blocks(bulk_worker):
+    worker, _, calls = bulk_worker
+    plans = [
+        BlockTransferPlan("full", 1, group_id=0),
+        BlockTransferPlan("tail", 2, group_id=0, token_start=0, token_end=8),
+    ]
+    assert worker.runtime.store_blocks(plans) is None
+
+    worker.enqueue_stores(UMBPConnectorMetadata(store_requests={"r": plans}))
+    worker.runtime.wait(next(iter(worker._store_jobs.values())))
+
+    assert calls == [
+        _MoriWorkerHandle._range_args([worker.layout.materialize(p) for p in plans])
+    ]
 
 
 @pytest.mark.parametrize(
