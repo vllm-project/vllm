@@ -3,8 +3,6 @@
 
 import pytest
 import torch
-from packaging.version import Version
-from transformers import __version__ as TRANSFORMERS_VERSION
 
 from vllm.platforms import current_platform
 
@@ -160,17 +158,9 @@ def test_models(
                 hf_model.model.device
             )
             if prompt_embeds is not None:
-                embed = hf_model.model.get_input_embeddings()(token_ids)
-
-                if "gemma" in model.lower() and (
-                    Version(TRANSFORMERS_VERSION) < Version("5.3.0.dev0")
-                ):
-                    # For Gemma 1/2 models with Transformers 5.4.0+, the prompt
-                    # embeddings are normalised in `get_prompt_embeddings`,
-                    # like Gemma 3. For older versions, we need to manually normalise.
-                    embed_scale = hf_model.config.hidden_size**0.5
-                    normalizer = torch.tensor(embed_scale, dtype=embed.dtype)
-                    embed *= normalizer
+                # Retained prompt values must not keep reference weights alive.
+                with torch.no_grad():
+                    embed = hf_model.model.get_input_embeddings()(token_ids)
 
                 # MiniCPM models apply scale_emb to embeddings internally.
                 # vLLM expects pre-scaled embeddings when using inputs_embeds.

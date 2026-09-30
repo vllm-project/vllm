@@ -53,8 +53,7 @@ from vllm.entrypoints.serve.engine.protocol import (
 )
 from vllm.entrypoints.speech_to_text.transcription.protocol import (
     TranscriptionRequest,
-    TranscriptionResponse,
-    TranscriptionResponseVerbose,
+    TranscriptionResponseVariant,
 )
 from vllm.entrypoints.speech_to_text.translation.protocol import (
     TranslationRequest,
@@ -62,7 +61,7 @@ from vllm.entrypoints.speech_to_text.translation.protocol import (
     TranslationResponseVerbose,
 )
 from vllm.exceptions import VLLMValidationError
-from vllm.logger import init_logger
+from vllm.logger import configure_logging_from_args, init_logger
 from vllm.reasoning import ReasoningParserManager
 from vllm.utils import random_uuid
 from vllm.utils.argparse_utils import FlexibleArgumentParser
@@ -203,8 +202,7 @@ AllResponse: TypeAlias = (
     | EmbeddingResponse
     | ScoreResponse
     | RerankResponse
-    | TranscriptionResponse
-    | TranscriptionResponseVerbose
+    | TranscriptionResponseVariant
     | TranslationResponse
     | TranslationResponseVerbose
 )
@@ -291,6 +289,7 @@ def make_arg_parser(parser: FlexibleArgumentParser):
 def parse_args():
     parser = FlexibleArgumentParser(description="vLLM OpenAI-Compatible batch runner.")
     args = make_arg_parser(parser).parse_args()
+    configure_logging_from_args(args)
 
     # Backward compatibility: If --url is set, use it for host
     url_explicit = any(arg == "--url" or arg.startswith("--url=") for arg in sys.argv)
@@ -660,8 +659,7 @@ def make_transcription_wrapper(
         async def transcription_wrapper(
             batch_request_body: (BatchTranscriptionRequest | BatchTranslationRequest),
         ) -> (
-            TranscriptionResponse
-            | TranscriptionResponseVerbose
+            TranscriptionResponseVariant
             | TranslationResponse
             | TranslationResponseVerbose
             | ErrorResponse
