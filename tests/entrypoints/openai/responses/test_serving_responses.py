@@ -34,6 +34,7 @@ from openai_harmony import Message as OpenAIHarmonyMessage
 from openai_harmony import Role
 
 import vllm.envs as envs
+from tests.entrypoints.openai.chat_completion.test_serving_chat import MockModelConfig
 from vllm.entrypoints.generate.base.protocol import (
     DeltaFunctionCall,
     DeltaMessage,
@@ -125,14 +126,6 @@ def test_serialize_message_pydantic_model_returns_dict() -> None:
     assert isinstance(serialized, dict)
     assert serialized["type"] == "raw_message_tokens"
     assert serialized["message"] == "hello"
-
-
-@pytest.fixture
-def mock_serving_responses():
-    """Create a mock OpenAIServingResponses instance."""
-    serving_responses = MagicMock(spec=OpenAIServingResponses)
-    serving_responses.tool_server = MagicMock(spec=ToolServer)
-    return serving_responses
 
 
 @pytest.fixture
@@ -300,6 +293,102 @@ async def test_online_renderer_renders_non_harmony_responses_with_explicit_histo
     assert preprocess_kwargs["default_template_content_format"] == "string"
     assert preprocess_kwargs["default_template_kwargs"]["server_default"] == "kept"
     assert preprocess_kwargs["default_template_kwargs"]["request_default"] == "kept"
+
+
+_REUSED_IDS = [10, 20, 30]
+_IMAGE_PART = {
+    "type": "input_image",
+    "image_url": "https://example.com/a.png",
+    "detail": "auto",
+}
+
+
+async def _render_responses_with_reuse(request, previous_messages=None):
+    online_renderer = OnlineRenderer(
+        model_config=MockModelConfig(),
+        renderer=MagicMock(),
+        request_logger=None,
+        chat_template=None,
+        chat_template_content_format="auto",
+    )
+    render_chat = AsyncMock(return_value=([[]], [tokens_input([1, 2])]))
+    online_renderer.renderer.render_chat_async = render_chat
+
+    result = await online_renderer.render_responses(
+        request, previous_messages=previous_messages
+    )
+
+    assert not isinstance(result, ErrorResponse)
+    return render_chat, result.engine_input
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("ids", [_REUSED_IDS, [1.5]])
+@pytest.mark.parametrize(
+    "request_input",
+    [
+        [
+            {
+                "role": "user",
+                "content": [{"type": "input_text", "text": "look"}, _IMAGE_PART],
+            }
+        ],
+        [
+            {
+                "type": "function_call",
+                "call_id": "call_1",
+                "name": "shot",
+                "arguments": "{}",
+            },
+            {
+                "type": "function_call_output",
+                "call_id": "call_1",
+                "output": [_IMAGE_PART],
+            },
+        ],
+    ],
+    ids=["input_image", "tool_output_image"],
+)
+async def test_responses_kv_transfer_prompt_token_ids_ignored_with_non_text_input(
+    request_input, ids
+):
+    request = ResponsesRequest(
+        input=request_input,
+        kv_transfer_params={"do_remote_prefill": True, "prompt_token_ids": ids},
+    )
+
+    render_chat, _ = await _render_responses_with_reuse(request)
+
+    render_chat.assert_awaited_once()
+    assert request.kv_transfer_params == {"do_remote_prefill": True}
+
+
+@pytest.mark.asyncio
+async def test_responses_kv_transfer_prompt_token_ids_ignored_with_media_in_history():
+    request = ResponsesRequest(
+        input="next", kv_transfer_params={"prompt_token_ids": _REUSED_IDS}
+    )
+
+    render_chat, _ = await _render_responses_with_reuse(
+        request, previous_messages=[{"role": "user", "content": [_IMAGE_PART]}]
+    )
+
+    render_chat.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_responses_kv_transfer_prompt_token_ids_kept_with_text_input():
+    request = ResponsesRequest(
+        input=[
+            {"role": "user", "content": [{"type": "input_text", "text": "hi"}]},
+            {"role": "assistant", "content": "ok"},
+        ],
+        kv_transfer_params={"prompt_token_ids": _REUSED_IDS},
+    )
+
+    _, engine_input = await _render_responses_with_reuse(request)
+
+    assert engine_input["prompt_token_ids"] == _REUSED_IDS
 
 
 @pytest.mark.asyncio
