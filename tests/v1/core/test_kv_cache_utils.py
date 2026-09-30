@@ -54,6 +54,7 @@ from vllm.v1.core.kv_cache_utils import (
     is_kv_cache_spec_uniform,
     make_block_hash_with_group_id,
     tensor_data,
+    to_event_extra_keys,
 )
 from vllm.v1.hisparse.layout import (
     create_hisparse_layout,
@@ -202,6 +203,50 @@ def test_hisparse_hma_uses_resolved_gpu_block_size(
         ),
     )
     assert scheduler_block_size == hash_block_size == gpu_block_size
+
+
+@pytest.mark.parametrize("extra_blocks,ok", [(1, False), (2, True)])
+def test_hisparse_host_pool_must_fit_max_model_len(monkeypatch, extra_blocks, ok):
+    """Every page needs a host block, so one max_model_len request must fit."""
+    monkeypatch.setattr(
+        hisparse_runtime_module.current_platform, "is_cuda_alike", lambda: True
+    )
+    specs = {
+        "model.layers.0.self_attn": MLAAttentionSpec(
+            block_size=64,
+            num_kv_heads=1,
+            head_size=576,
+            dtype=torch.bfloat16,
+            is_index_group_leader=True,
+        ),
+        "model.layers.0.self_attn.indexer": MLAAttentionSpec(
+            block_size=64,
+            num_kv_heads=1,
+            head_size=128,
+            dtype=torch.bfloat16,
+            cache_role=SparseCacheRole.INDEXER,
+        ),
+    }
+    group_spec = UniformTypeKVCacheSpecs.from_specs(specs)
+    assert group_spec is not None
+    config = SimpleNamespace(
+        attention_config=SimpleNamespace(hisparse_config=HiSparseConfig()),
+        model_config=SimpleNamespace(
+            hf_config=SimpleNamespace(index_topk=128), max_model_len=64 * 4
+        ),
+        parallel_config=SimpleNamespace(tensor_parallel_size=1, world_size=1),
+        cache_config=SimpleNamespace(num_gpu_blocks_override=7),
+    )
+    host_page = specs["model.layers.0.self_attn"].page_size_bytes
+    host_budget = (4 + extra_blocks) * host_page
+    group = KVCacheGroupSpec(list(specs), group_spec)
+
+    if ok:
+        layout = create_hisparse_layout(config, [group], host_budget=host_budget)
+        assert layout.host_num_blocks == 4 + extra_blocks
+    else:
+        with pytest.raises(ValueError, match="increase host_pool_gib"):
+            create_hisparse_layout(config, [group], host_budget=host_budget)
 
 
 def test_hisparse_rejects_deepseek_v4():
@@ -822,12 +867,12 @@ def test_generate_block_hash_extra_keys():
 
     # Test with no extra keys
     extra_keys, next_mm_idx = generate_block_hash_extra_keys(request, 0, 5, 0)
-    assert extra_keys == (("hash1", 0),)
+    assert extra_keys == (("mm", "hash1", 0),)
     assert next_mm_idx == 1
 
     # Test with partial overlap
     extra_keys, next_mm_idx = generate_block_hash_extra_keys(request, 3, 8, 0)
-    assert extra_keys == (("hash1", -3),)
+    assert extra_keys == (("mm", "hash1", -3),)
     assert next_mm_idx == 1
 
     # Test with no overlap
@@ -837,7 +882,7 @@ def test_generate_block_hash_extra_keys():
 
     # Test with multiple extra keys
     extra_keys, next_mm_idx = generate_block_hash_extra_keys(request, 0, 15, 0)
-    assert extra_keys == (("hash1", 0), ("hash2", 10))
+    assert extra_keys == (("mm", "hash1", 0), ("mm", "hash2", 10))
     assert next_mm_idx == 2
 
 
@@ -865,9 +910,9 @@ def test_generate_block_hash_extra_keys_cache_salt():
 
     # salt is added for the first token
     extra_keys, _ = generate_block_hash_extra_keys(request, 0, 1, 0)
-    assert extra_keys == ("salt",)
+    assert extra_keys == (("cache_salt", "salt"),)
     extra_keys, _ = generate_block_hash_extra_keys(request, 0, 10, 0)
-    assert extra_keys == ("salt",)
+    assert extra_keys == (("cache_salt", "salt"),)
 
     # no salt added for other tokens
     extra_keys, _ = generate_block_hash_extra_keys(request, 1, 2, 0)
@@ -888,7 +933,7 @@ def test_generate_block_hash_extra_keys_cache_salt():
 
     # Test with no extra keys
     extra_keys, next_mm_idx = generate_block_hash_extra_keys(request_mm, 0, 5, 0)
-    assert extra_keys == (("hash1", 0), "salt")
+    assert extra_keys == (("mm", "hash1", 0), ("cache_salt", "salt"))
     assert next_mm_idx == 1
 
 
@@ -906,13 +951,13 @@ def test_generate_block_hash_extra_keys_prompt_embeds():
     extra_keys, _ = generate_block_hash_extra_keys(request, 0, 5, 0)
     expected_embeds = prompt_embeds[0:5]
     expected_hash = hashlib.sha256(kv_cache_utils.tensor_data(expected_embeds)).digest()
-    assert extra_keys == (expected_hash,)
+    assert extra_keys == (("prompt_embeds", expected_hash),)
 
     # Test with prompt embeds for the second block
     extra_keys, _ = generate_block_hash_extra_keys(request, 5, 10, 0)
     expected_embeds = prompt_embeds[5:10]
     expected_hash = hashlib.sha256(kv_cache_utils.tensor_data(expected_embeds)).digest()
-    assert extra_keys == (expected_hash,)
+    assert extra_keys == (("prompt_embeds", expected_hash),)
 
 
 def test_generate_block_hash_extra_keys_prompt_embeds_cached(monkeypatch):
@@ -976,11 +1021,56 @@ def test_generate_block_hash_extra_keys_lora():
     )
 
     extra_keys, _ = generate_block_hash_extra_keys(request, 0, 3, 0)
-    assert extra_keys == ("test_lora_adapter",)
+    assert extra_keys == (("lora", "test_lora_adapter"),)
 
     request.lora_request = None
     extra_keys, _ = generate_block_hash_extra_keys(request, 0, 3, 0)
     assert extra_keys is None
+
+
+@pytest.mark.parametrize("hash_fn", [sha256, sha256_cbor])
+def test_lora_name_and_cache_salt_block_hashes_do_not_collide(hash_fn):
+    """A cache_salt equal to a LoRA name must not share that LoRA's blocks."""
+    lora_request = LoRARequest(
+        lora_name="foo", lora_int_id=1, lora_path="/path/to/lora"
+    )
+    lora_req = Request(
+        request_id="lora",
+        prompt_token_ids=[0, 1, 2],
+        sampling_params=SamplingParams(max_tokens=1),
+        pooling_params=None,
+        lora_request=lora_request,
+        block_hasher=get_request_block_hasher(3, hash_fn),
+    )
+    salted_req = make_request("salted", [0, 1, 2], hash_fn=hash_fn, cache_salt="foo")
+
+    assert lora_req.block_hashes[0] != salted_req.block_hashes[0]
+
+
+def test_to_event_extra_keys_keeps_untagged_event_format():
+    """KV events keep publishing the extra-key shapes consumers already parse."""
+    request = make_request(
+        "0",
+        list(range(10)),
+        mm_positions=[PlaceholderRange(offset=2, length=3)],
+        mm_hashes=["hash1"],
+        cache_salt="salt",
+    )
+    request.lora_request = LoRARequest(
+        lora_name="adapter", lora_int_id=1, lora_path="/path/to/lora"
+    )
+
+    extra_keys, _ = generate_block_hash_extra_keys(request, 0, 5, 0)
+
+    assert extra_keys == (
+        ("lora", "adapter"),
+        ("mm", "hash1", 2),
+        ("cache_salt", "salt"),
+    )
+    event_keys = ("adapter", ("hash1", 2), "salt")
+    assert to_event_extra_keys([extra_keys, None]) == [event_keys, None]
+    assert to_event_extra_keys([]) is None
+    assert to_event_extra_keys(None) is None
 
 
 @pytest.mark.parametrize("hash_fn", [sha256, sha256_cbor])
@@ -1013,9 +1103,11 @@ def test_request_block_hasher(hash_fn):
     block_hashes = request.block_hashes
     assert len(block_hashes) == 2
     assert block_hashes[0] == hash_fn(
-        (kv_cache_utils.NONE_HASH, (0, 1, 2), (("hash1", 0),))
+        (kv_cache_utils.NONE_HASH, (0, 1, 2), (("mm", "hash1", 0),))
     )
-    assert block_hashes[1] == hash_fn((block_hashes[0], (3, 4, 5), (("hash2", 0),)))
+    assert block_hashes[1] == hash_fn(
+        (block_hashes[0], (3, 4, 5), (("mm", "hash2", 0),))
+    )
 
 
 @pytest.mark.parametrize("hash_fn", [sha256, sha256_cbor])
@@ -1043,7 +1135,7 @@ def test_request_block_hasher_incremental_append_with_multiple_mm_features(hash_
     )
 
     expected_second_hash = hash_fn(
-        (incremental.block_hashes[0], (4, 5, 6, 7), (("A", 0), ("B", 2)))
+        (incremental.block_hashes[0], (4, 5, 6, 7), (("mm", "A", 0), ("mm", "B", 2)))
     )
     assert incremental.block_hashes[1] == expected_second_hash
     assert incremental.block_hashes == fresh.block_hashes
@@ -3657,7 +3749,7 @@ def test_request_block_hasher_with_prompt_embeds(hash_fn: Callable[[Any], bytes]
         (
             kv_cache_utils.NONE_HASH,
             tuple(prompt_token_ids[:block_size]),
-            (block1_embeds_hash,),
+            (("prompt_embeds", block1_embeds_hash),),
         )
     )
     assert block_hashes[0] == expected_hash1
@@ -3669,7 +3761,7 @@ def test_request_block_hasher_with_prompt_embeds(hash_fn: Callable[[Any], bytes]
         (
             block_hashes[0],
             tuple(prompt_token_ids[block_size:num_tokens]),
-            (block2_embeds_hash,),
+            (("prompt_embeds", block2_embeds_hash),),
         )
     )
     assert block_hashes[1] == expected_hash2
@@ -3706,7 +3798,7 @@ def test_request_with_prompt_embeds_and_mm_inputs(hash_fn: Callable[[Any], bytes
         (
             kv_cache_utils.NONE_HASH,
             tuple(prompt_token_ids[:block_size]),
-            (("hash1", 0), block1_embeds_hash),
+            (("mm", "hash1", 0), ("prompt_embeds", block1_embeds_hash)),
         )
     )
     assert block_hashes[0] == expected_hash1
@@ -3718,7 +3810,7 @@ def test_request_with_prompt_embeds_and_mm_inputs(hash_fn: Callable[[Any], bytes
         (
             block_hashes[0],
             tuple(prompt_token_ids[block_size:num_tokens]),
-            (("hash2", 0), block2_embeds_hash),
+            (("mm", "hash2", 0), ("prompt_embeds", block2_embeds_hash)),
         )
     )
     assert block_hashes[1] == expected_hash2
