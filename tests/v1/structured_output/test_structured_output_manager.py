@@ -10,9 +10,11 @@ from transformers import AutoTokenizer
 from vllm.config import DeviceConfig, StructuredOutputsConfig, VllmConfig
 from vllm.config.model import ModelConfig
 from vllm.config.speculative import SpeculativeConfig
+from vllm.config.structured_outputs import StructuredOutputsBackend
 from vllm.sampling_params import SamplingParams, StructuredOutputsParams
 from vllm.v1.request import Request
 from vllm.v1.structured_output import StructuredOutputManager
+from vllm.v1.structured_output.backend_outlines import OutlinesGrammar
 
 TOKENIZER = "gpt2"
 THINK_END = "\n"  # reasoning-end marker (single GPT-2 token)
@@ -84,7 +86,7 @@ def _wait_for_grammar(request: Request) -> None:
 
 def _build_harness(
     tokenizer,
-    backend: str,
+    backend: StructuredOutputsBackend,
     prefix: str = "",
     use_reasoner: bool = True,
     reasoning_ended: bool | None = None,
@@ -112,7 +114,7 @@ def _build_harness(
         structured_outputs=structured_outputs
         or StructuredOutputsParams(json=JSON_SCHEMA)
     )
-    sampling_params.structured_outputs._backend = backend
+    sampling_params.structured_outputs._backend = backend  # type: ignore[union-attr]
     sampling_params.update_from_generation_config({}, tokenizer.eos_token_id)
 
     prompt_ids = tokenizer.encode(prefix) if prefix else []
@@ -130,9 +132,10 @@ def _build_harness(
     structured_req = request.structured_output_request
     assert request.prompt_token_ids is not None
     assert structured_req is not None
-    assert structured_req.grammar is not None
+    grammar = structured_req.grammar
+    assert grammar is not None and not isinstance(grammar, Exception)
     if prompt_ids:
-        assert structured_req.grammar.accept_tokens(
+        assert grammar.accept_tokens(
             request.request_id,
             prompt_ids,
         )
@@ -173,7 +176,7 @@ def _run_real_flow(
     structured_req = request.structured_output_request
     assert structured_req is not None
     grammar = structured_req.grammar
-    assert grammar is not None
+    assert grammar is not None and not isinstance(grammar, Exception)
     assert not grammar.is_terminated()
     # `bitmask[i]` is the grammar state after the first `i` scheduled tokens.
     # These tests commit the validated prefix, so the matching post-accept
@@ -335,7 +338,7 @@ FLOW_CASES = [
 @pytest.mark.parametrize("case", FLOW_CASES)
 def test_real_flow(
     tokenizer,
-    backend: str,
+    backend: StructuredOutputsBackend,
     case: FlowCase,
 ):
     if backend == "guidance" and case.xfail_guidance:
@@ -379,7 +382,7 @@ def test_real_flow(
 )
 def test_initial_constraint_activation(
     tokenizer,
-    backend: str,
+    backend: StructuredOutputsBackend,
     use_reasoner: bool,
     reasoning_ended: bool | None,
     enable_in_reasoning: bool,
@@ -431,7 +434,7 @@ def test_initial_constraint_activation(
 )
 def test_regex_flow(
     tokenizer,
-    backend: str,
+    backend: StructuredOutputsBackend,
     raw_drafts: tuple[str, ...],
     expected_validated: tuple[str, ...] | None,
     expected_row_pattern: str,
@@ -459,7 +462,9 @@ def test_regex_flow(
 
 
 @pytest.mark.parametrize("backend", REGEX_BACKENDS)
-def test_rejected_draft_keeps_later_rows_constrained(tokenizer, backend: str):
+def test_rejected_draft_keeps_later_rows_constrained(
+    tokenizer, backend: StructuredOutputsBackend
+):
     """A draft the grammar rejects during bitmask fill must not unconstrain
     the remaining rows or the bonus row."""
     manager, request = _build_harness(
@@ -492,7 +497,7 @@ def test_outlines_termination(tokenizer):
     structured_req = request.structured_output_request
     assert structured_req is not None
     grammar = structured_req.grammar
-    assert grammar is not None
+    assert isinstance(grammar, OutlinesGrammar)
     one, eos = _to_token_ids(tokenizer, ("1", EOS))
 
     assert not grammar.accept_tokens(request.request_id, [eos])
