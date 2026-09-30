@@ -10,7 +10,9 @@ import torch
 from vllm.distributed.kv_transfer.kv_connector.v1.example_hidden_states_connector import (  # noqa: E501
     ExampleHiddenStatesConnector,
 )
-from vllm.v1.core.kv_cache_utils import get_kv_cache_groups
+from vllm.v1.core.kv_cache_planning import (
+    DefaultKVCacheConfigBuilder,
+)
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     HiddenStateCacheSpec,
@@ -20,6 +22,8 @@ from vllm.v1.kv_cache_interface import (
     MLAAttentionSpec,
     SlidingWindowMLASpec,
 )
+
+_default_builder = DefaultKVCacheConfigBuilder()
 
 
 def _full(block_size: int) -> FullAttentionSpec:
@@ -124,7 +128,7 @@ def test_hidden_state_group_isolated_from_packed_mla_groups():
         scheduler_config=SimpleNamespace(disable_hybrid_kv_cache_manager=False),
         speculative_config=None,
     )
-    groups = get_kv_cache_groups(vllm_config, spec)
+    groups = _default_builder.get_kv_cache_groups(vllm_config, spec)
     hidden_group_ids = [
         i
         for i, group in enumerate(groups)
@@ -155,7 +159,7 @@ def test_hidden_state_group_isolated_from_packed_mixed_page_groups():
         scheduler_config=SimpleNamespace(disable_hybrid_kv_cache_manager=False),
         speculative_config=None,
     )
-    groups = get_kv_cache_groups(vllm_config, spec)
+    groups = _default_builder.get_kv_cache_groups(vllm_config, spec)
     page_sizes = {g.kv_cache_spec.page_size_bytes for g in groups}
     assert len(page_sizes) > 1, "spec must exercise the packed grouping path"
     hidden_group_ids = [
