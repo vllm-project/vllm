@@ -124,7 +124,7 @@ RDMA when an HCA is present.
 Producer and consumer must use the same `mooncake_protocol`.
 
 | Setting | Where | Default | Notes |
-|---------|-------|---------|-------|
+| --------- | ------- | --------- | ------- |
 | `mooncake_protocol` | `ec_connector_extra_config` | `rdma` | Set `tcp` when no verbs device is available. With TCP, also export `MC_FORCE_TCP=1`. |
 | `ec_ip` / `ec_port` | consumer `ECTransferConfig` | `127.0.0.1` / `14579` | First ZMQ control port. Tensor-parallel rank `r` listens on `ec_port + dp_index * tp_size + r`. |
 | `ec_buffer_size` | `ECTransferConfig` | `1e9` | Registered receive arena on the consumer, in bytes. |
@@ -149,7 +149,7 @@ consumer as described in
 ## Troubleshooting
 
 | Symptom | Likely cause |
-|---------|----------------|
+| --------- | ---------------- |
 | `Install mooncake-transfer-engine` / `libcudart.so.*` | Wrong or missing Mooncake wheel for this CUDA major. |
 | `Failed to register memory ... Bad address [14]` | GPUDirect registration failed. Set `WITH_NVIDIA_PEERMEM=0`. |
 | Proxy startup error about E+PD only | `--ec-consumer-zmq-addrs` used with a real `--prefill-servers-urls`. |
