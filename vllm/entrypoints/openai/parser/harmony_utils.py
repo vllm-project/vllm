@@ -387,9 +387,7 @@ def parse_chat_input_to_harmony_message(
             msg = Message.from_role_and_content(Role.ASSISTANT, arguments)
             msg = msg.with_channel("commentary")
             msg = msg.with_recipient(f"functions.{name}")
-            # Officially, this should be `<|constrain|>json` but there is not clear
-            # evidence that improves accuracy over `json` and some anecdotes to the
-            # contrary. Further testing of the different content_types is needed.
+            # oss-harmony adds the `<|constrain|>` marker when rendering this type.
             msg = msg.with_content_type("json")
             msgs.append(msg)
         return msgs

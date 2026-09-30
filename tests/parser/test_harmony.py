@@ -133,6 +133,16 @@ def get_text(msg: Message) -> str:
     return msg.content[0].text if msg.content else ""
 
 
+def completed_message_rows(
+    segments: Sequence[Any],
+) -> list[tuple[str | None, str | None, str | None, str]]:
+    return [
+        (msg.channel, msg.recipient, msg.content_type, get_text(msg))
+        for segment in segments
+        if (msg := segment.completed_message) is not None
+    ]
+
+
 def tool_call_tuples(tool_calls: list[FunctionCall] | None) -> list[tuple[str, str]]:
     return [] if tool_calls is None else [(tc.name, tc.arguments) for tc in tool_calls]
 
@@ -314,6 +324,34 @@ class TestParse:
             ("not_json_no_content_type", "foo"),
             ("empty_args", json.dumps({})),
             ("no_args", ""),
+        ]
+
+    def test_alternating_valid_and_repaired_messages(
+        self, harmony_parser, chat_request
+    ):
+        output = encode_output(
+            "<|channel|>analysis<|message|>think-1<|end|>"
+            "<|start|>assistant<|channel|>commentary to=functions.one "
+            '<|constrain|>analysis json<|message|>{"value":1}<|call|>'
+            "<|start|>assistant<|channel|>final<|message|>answer-1<|end|>"
+            "<|start|>assistant<|channel|>commentary to=functions.two "
+            "<|constrain|>final code<|message|>raw-two<|call|>"
+            "<|start|>assistant<|channel|>analysis<|message|>think-2<|end|>"
+            "<|start|>assistant<|channel|>commentary to=functions.three "
+            '<|constrain|>commentary json<|message|>{"value":3}<|call|>'
+            "<|start|>assistant<|channel|>final<|message|>answer-2<|end|>"
+        )
+
+        reasoning, content, tool_calls = harmony_parser.parse(
+            "", chat_request, model_output_token_ids=output
+        )
+
+        assert reasoning == "think-1\nthink-2"
+        assert content == "answer-1\nanswer-2"
+        assert tool_call_tuples(tool_calls) == [
+            ("one", json.dumps({"value": 1})),
+            ("two", "raw-two"),
+            ("three", json.dumps({"value": 3})),
         ]
 
     def test_tool_call_bare_recipient(self, harmony_parser, chat_request):
@@ -945,6 +983,101 @@ class TestProcessChunk:
         ]
         assert get_text(messages[0]) == "print(6 * 7)"
 
+    @pytest.mark.parametrize(
+        "duplicate_markers",
+        [
+            "<|constrain|>",
+            "<|channel|><|constrain|>",
+            "<|constrain|><|channel|><|constrain|>",
+        ],
+    )
+    def test_malformed_header_drops_repeated_bare_markers(
+        self, harmony_parser, duplicate_markers
+    ):
+        malformed = encode_output(
+            "<|channel|>commentary to=python "
+            f"<|constrain|>{duplicate_markers}code"
+            "<|message|>print(6 * 7)<|call|>"
+        )
+
+        result = harmony_parser.process_chunk(malformed)
+
+        assert completed_message_rows(result.segments) == [
+            ("commentary", "python", "<|constrain|>code", "print(6 * 7)")
+        ]
+
+    def test_alternating_valid_and_repaired_messages_are_delivered_once(
+        self, harmony_parser
+    ):
+        output = encode_output(
+            "<|channel|>analysis<|message|>valid-1<|end|>"
+            "<|start|>assistant<|channel|>commentary to=python "
+            "<|constrain|>analysis code<|message|>repair-1<|call|>"
+            "<|start|>assistant<|channel|>final<|message|>valid-2<|end|>"
+            "<|start|>assistant<|channel|>commentary to=functions.second "
+            '<|constrain|>final json<|message|>{"repair":2}<|call|>'
+            "<|start|>assistant<|channel|>commentary<|message|>valid-3<|end|>"
+            "<|start|>assistant<|channel|>commentary to=assistant "
+            "<|constrain|>commentary to=assistant "
+            "<|constrain|>analysis to=assistant code"
+            "<|message|>repair-3<|call|>"
+            "<|start|>assistant<|channel|>final<|message|>valid-4<|end|>"
+        )
+
+        result = harmony_parser.process_chunk(output)
+        messages = completed_message_rows(result.segments)
+
+        assert len(messages) == 7
+        assert messages == [
+            ("analysis", None, None, "valid-1"),
+            ("commentary", "python", "<|constrain|>code", "repair-1"),
+            ("final", None, None, "valid-2"),
+            (
+                "commentary",
+                "functions.second",
+                "<|constrain|>json",
+                '{"repair":2}',
+            ),
+            ("commentary", None, None, "valid-3"),
+            ("commentary", "assistant", "<|constrain|>code", "repair-3"),
+            ("final", None, None, "valid-4"),
+        ]
+
+    def test_unrepairable_headers_preserve_cursor_across_repair_and_flush(
+        self, harmony_parser
+    ):
+        output = encode_output(
+            "<|channel|>analysis<|message|>valid-before<|end|>"
+            "<|start|>assistant<|channel|>commentary to=python "
+            "<|constrain|>analysis code<|message|>repair-before<|call|>"
+            "<|start|>assistant<|channel|>commentary to=python "
+            "<|constrain|>analysis authored code<|message|>ignored-1<|call|>"
+            "<|start|>assistant<|channel|>final<|message|>valid-middle<|end|>"
+            "<|start|>assistant<|channel|>commentary to=functions.after "
+            '<|constrain|>final json<|message|>{"repair":"after"}<|call|>'
+            "<|start|>assistant<|channel|>commentary to=python "
+            "<|constrain|>analysis yaml<|message|>ignored-2<|call|>"
+            "<|start|>assistant<|channel|>final<|message|>flush-tail"
+        )
+
+        result = harmony_parser.process_chunk(output)
+        flushed = harmony_parser.flush()
+        messages = completed_message_rows([*result.segments, *flushed])
+
+        assert len(messages) == 5
+        assert messages == [
+            ("analysis", None, None, "valid-before"),
+            ("commentary", "python", "<|constrain|>code", "repair-before"),
+            ("final", None, None, "valid-middle"),
+            (
+                "commentary",
+                "functions.after",
+                "<|constrain|>json",
+                '{"repair":"after"}',
+            ),
+            ("final", None, None, "flush-tail"),
+        ]
+
     def test_malformed_header_on_second_message_preserves_both(self, harmony_parser):
         output = encode_output(
             "<|channel|>analysis<|message|>First<|end|>"
@@ -1010,7 +1143,7 @@ class TestProcessChunk:
 
     @pytest.mark.parametrize(
         "malformed_section",
-        ["analysis yaml", "analysis authored code"],
+        ["<|constrain|>", "analysis yaml", "analysis authored code"],
     )
     def test_repair_does_not_drop_unrecognized_header_text(
         self, harmony_parser, malformed_section
