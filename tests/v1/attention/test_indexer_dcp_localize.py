@@ -700,9 +700,8 @@ def test_dcp_filter_compacts_valid_slots_for_sparse_kernel(
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="This test requires CUDA")
 @pytest.mark.parametrize("interleave", [1, 2])
 @pytest.mark.parametrize("dcp_rank", [0, 1])
-# 384 is not a power of two, so it exercises the multi-tile atomic allocator
-# rather than the single-tile path 1024 takes.
-@pytest.mark.parametrize("num_topk", [1024, 384])
+# Include padded single-tile compaction and the multi-tile atomic fallback.
+@pytest.mark.parametrize("num_topk", [1024, 2176, 4224])
 def test_dcp_filter_compaction_matches_reference(
     interleave: int, dcp_rank: int, num_topk: int
 ):
@@ -729,7 +728,7 @@ def test_dcp_filter_compaction_matches_reference(
     for r in range(num_rows):
         # Ids are distinct, so a row holds at most `seq` valid entries.
         hi = min(num_topk * 3 // 4, seq)
-        n_valid = int(torch.randint(num_topk // 4, hi, (1,)).item())
+        n_valid = int(torch.randint(hi // 3, hi, (1,)).item())
         perm = torch.randperm(seq, device=device)[:n_valid].to(torch.int32)
         token_indices[r, :n_valid] = perm
 
@@ -996,7 +995,7 @@ def test_pcp_plan_deinterleave_restores_global_order(
 
     monkeypatch.setattr("vllm.v1.attention.backends.mla.indexer.PIN_MEMORY", False)
     monkeypatch.setattr(
-        "vllm.v1.attention.backends.mla.indexer.async_copy_to_gpu",
+        "vllm.v1.attention.backends.mla.indexer.async_tensor_h2d",
         lambda x, device: x.to(device),
     )
     scheduled = np.array(req_lens, dtype=np.int64)

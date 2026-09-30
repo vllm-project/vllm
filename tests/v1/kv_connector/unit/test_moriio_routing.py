@@ -28,6 +28,7 @@ def _producer(global_dp_rank: int, dp_size: int, dp_size_local: int):
     s = SimpleNamespace(
         is_producer=True,
         _is_hma_required=False,
+        _has_mamba=False,
         blocks_per_sw=[0],
         _global_dp_rank=global_dp_rank,
         engine_id="engine-abc",

@@ -11,7 +11,8 @@ import importlib
 import importlib.util
 import os
 import shutil
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextvars import ContextVar
 from typing import Any, NoReturn
 
 import requests
@@ -26,6 +27,24 @@ from vllm.utils.torch_utils import PIN_MEMORY
 logger = init_logger(__name__)
 
 
+_bf16_autotune_buckets: ContextVar[tuple[int, ...] | None] = ContextVar(
+    "flashinfer_bf16_autotune_buckets", default=None
+)
+
+
+@contextlib.contextmanager
+def autotune_bf16_only(
+    tuning_buckets: tuple[int, ...], *, skip_ops: set[str] | None = None
+) -> Iterator[None]:
+    """Tune BF16 calls with bounded buckets, outside full-model autotuning."""
+    token = _bf16_autotune_buckets.set(tuning_buckets)
+    try:
+        with autotune(tune_mode=False, skip_ops=skip_ops):
+            yield
+    finally:
+        _bf16_autotune_buckets.reset(token)
+
+
 def flashinfer_bf16_mm(
     a: torch.Tensor,
     b: torch.Tensor,
@@ -35,14 +54,21 @@ def flashinfer_bf16_mm(
 ) -> torch.Tensor:
     from flashinfer import mm_bf16
 
-    return mm_bf16(
-        a,
-        b,
-        bias=bias,
-        pdl=pdl,
-        out_dtype=torch.bfloat16,
-        backend=backend,
+    tuning_buckets = _bf16_autotune_buckets.get()
+    tuning = (
+        autotune(tune_mode=True, tuning_buckets=tuning_buckets)
+        if tuning_buckets is not None
+        else contextlib.nullcontext()
     )
+    with tuning:
+        return mm_bf16(
+            a,
+            b,
+            bias=bias,
+            pdl=pdl,
+            out_dtype=torch.bfloat16,
+            backend=backend,
+        )
 
 
 # This is the storage path for the cubins, it can be replaced
@@ -52,6 +78,23 @@ FLASHINFER_CUBINS_REPOSITORY = os.environ.get(
     "FLASHINFER_CUBINS_REPOSITORY",
     "https://edge.urm.nvidia.com/artifactory/sw-kernelinferencelibrary-public-generic-local/",  # noqa: E501
 )
+
+_DEFAULT_CUDA_HOME = "/usr/local/cuda"
+
+
+def _flashinfer_nvcc_path() -> str | None:
+    """Return the nvcc FlashInfer's JIT would run, or None if it is missing.
+
+    Mirrors ``flashinfer.jit.cpp_ext.get_cuda_path()`` without importing
+    FlashInfer, whose import initializes CUDA.
+    """
+    cuda_home = os.environ.get("CUDA_HOME") or os.environ.get("CUDA_PATH")
+    if not cuda_home:
+        nvcc = shutil.which("nvcc")
+        cuda_home = (
+            os.path.dirname(os.path.dirname(nvcc)) if nvcc else _DEFAULT_CUDA_HOME
+        )
+    return shutil.which(os.path.join(cuda_home, "bin", "nvcc"))
 
 
 @functools.cache
@@ -73,12 +116,15 @@ def has_flashinfer() -> bool:
     if importlib.util.find_spec("flashinfer") is None:
         logger.debug_once("FlashInfer unavailable since package was not found")
         return False
-    # When not using flashinfer cubin,
-    # Also check if nvcc is available since it's required to JIT compile flashinfer
-    if not has_flashinfer_cubin() and shutil.which("nvcc") is None:
-        logger.debug_once(
-            "FlashInfer unavailable since nvcc was not found "
-            "and not using pre-downloaded cubins"
+    # FlashInfer's JIT runs nvcc and `ninja` (from PATH).
+    if not has_flashinfer_cubin() and (
+        _flashinfer_nvcc_path() is None or shutil.which("ninja") is None
+    ):
+        logger.warning_once(
+            "FlashInfer kernels are disabled: flashinfer-cubin is not installed "
+            "and nvcc (CUDA_HOME, CUDA_PATH, PATH or /usr/local/cuda) or ninja "
+            "(PATH) is missing. Set CUDA_HOME to a CUDA toolkit and put ninja on "
+            "PATH, or run `flashinfer download-kernels`."
         )
         return False
     return True
@@ -599,8 +645,7 @@ def supports_trtllm_attention(is_prefill: bool = False) -> bool:
 
 
 def force_use_trtllm_attention() -> bool | None:
-    """
-    This function should only be called during initialization stage when vllm config
+    """This function should only be called during initialization stage when vllm config
     is set.
     Return `None` if --attention-config.use_trtllm_attention is not set,
     return `True` if TRTLLM attention is forced to be used,
@@ -638,7 +683,6 @@ def use_trtllm_attention(
     has_spec: bool = False,
 ) -> bool:
     """Return `True` if TRTLLM attention is used."""
-
     # CLI argument is set to 0 - respect it
     if force_use_trtllm is not None and not force_use_trtllm:
         return False
@@ -746,6 +790,7 @@ if has_flashinfer():
             k_nope: The nope part of k, shape [num_tokens, num_heads, nope_dim].
             k_pe: The rope part of k (shared), shape [num_tokens, 1, rope_dim].
                   This is broadcast to all heads.
+
         """
         from flashinfer.concat_ops import concat_mla_k
 
@@ -1248,6 +1293,7 @@ def is_flashinfer_cudnn_fp8_prefill_attn_supported() -> bool:
 __all__ = [
     "has_flashinfer",
     "flashinfer_bf16_mm",
+    "autotune_bf16_only",
     "has_flashinfer_bf16_gemm",
     "is_flashinfer_bf16_gemm_supported",
     "is_flashinfer_cutedsl_bf16_gemm_supported",

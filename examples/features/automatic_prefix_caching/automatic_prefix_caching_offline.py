@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Demonstration script for Automatic Prefix Caching (APC) in vLLM.
+"""Demonstration script for Automatic Prefix Caching (APC) in vLLM.
 
 Automatic Prefix Caching (APC) allows the vLLM engine to reuse cached
 KV (key-value) pairs from previous prompts if a new query shares the same
