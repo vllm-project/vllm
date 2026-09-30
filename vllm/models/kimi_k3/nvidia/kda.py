@@ -960,6 +960,7 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
             assert spec_query_start_loc is not None
             assert num_accepted_tokens is not None
             assert self.gate_lower_bound is not None
+            # "Packed" is FlashInfer's name for the varlen T>1 speculative path.
             flashinfer_packed_fused_kda_decode(
                 x=mixed_qkv,
                 weight=self.decode_conv1d_weight,
@@ -984,7 +985,6 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
             self.kda_decode_backend != "triton"
             and self.decode_conv1d_weight is not None
             and self.decode_norm_weight is not None
-            and self.num_spec == 0
             and not has_spec_decode
             and m.num_prefills == 0
             and m.num_decodes > 0
