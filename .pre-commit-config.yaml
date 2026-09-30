@@ -40,6 +40,11 @@ repos:
   hooks:
   - id: shellcheck
     args: ["-s", "bash", "--format=gcc", "--rcfile=tools/pre_commit/.shellcheckrc"]
+- repo: https://github.com/astral-sh/ty-pre-commit
+  rev: v0.0.84
+  hooks:
+  - id: ty
+    args: [--no-project] # Don't build vLLM to resolve its dynamic dependencies
 - repo: https://github.com/astral-sh/uv-pre-commit
   rev: 0.11.1
   hooks:
@@ -192,13 +197,6 @@ repos:
     additional_dependencies: [PyYAML, regex]
     verbose: true # full-scan `note:` lines are advisory, so the hook passes
     require_serial: true # one full scan, not one per pre-commit file batch
-  - id: ty-check
-    name: ty check
-    entry: bash -c 'ty check ${CI:+--no-progress --output-format github} "$@"' --
-    language: python
-    types: [python]
-    require_serial: true
-    additional_dependencies: [ty==0.0.2, pandas-stubs, scipy-stubs, types-cachetools, types-PyYAML, types-requests, types-setuptools, types-torch]
   - id: png-lint
     name: Lint PNG exports from excalidraw
     entry: tools/pre_commit/png-lint.sh
