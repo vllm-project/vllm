@@ -346,7 +346,13 @@ def test_fusion_silu_and_mul_quant(
 
         # Check that it gives the same answer
         if isinstance(model, TestSiluMulFp8QuantModel):
-            atol, rtol = 1e-3, 1e-3
+            if current_platform.is_rocm():
+                atol, rtol = 1e-3, 1e-3
+            else:
+                # CUDA fused kernel computes silu*mul in fp32 while the reference
+                # goes through bf16/fp16 storage, so quantized values can shift
+                # by one FP8-e4m3 code (~1/8 relative step).
+                atol, rtol = 5e-2, 5e-2
         elif isinstance(model, TestSiluMulNvfp4QuantModel):
             atol, rtol = 1e-1, 1e-1
         elif isinstance(model, TestSiluMulGroupFp8QuantModel):

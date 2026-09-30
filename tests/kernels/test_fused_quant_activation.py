@@ -32,9 +32,24 @@ CUDA_DEVICES = [
 def ref_impl(
     silu_and_mul: SiluAndMul, x: torch.Tensor, scale: torch.Tensor
 ) -> torch.Tensor:
-    silu_and_mul_out = silu_and_mul.forward_native(x)
+    """fp32 reference: activation, product and scale without intermediate
+    rounding, one round-to-nearest at the fp8 cast (what Inductor generates
+    for the unfused path)."""
+    silu_and_mul_out = silu_and_mul.forward_native(x.to(torch.float32))
     out, scales = ops.scaled_fp8_quant(silu_and_mul_out, scale)
     return out
+
+
+def assert_fp8_close(actual: torch.Tensor, expected: torch.Tensor) -> None:
+    """Within one fp8 e4m3 ulp: relative spacing is 2^-3, the smallest
+    subnormal is 2^-9. The kernel uses the fast exp and divide intrinsics,
+    which can move a value across a rounding boundary."""
+    torch.testing.assert_close(
+        actual.to(torch.float32),
+        expected.to(torch.float32),
+        rtol=2**-3,
+        atol=2**-9,
+    )
 
 
 def ops_impl(x: torch.Tensor, scale: torch.Tensor) -> torch.Tensor:
@@ -75,9 +90,7 @@ def test_silu_and_mul(
     assert ref_out.dtype == quant_dtype
     assert ops_out.dtype == quant_dtype
     assert ref_out.shape == ops_out.shape
-    assert torch.allclose(
-        ref_out.to(dtype=torch.float32), ops_out.to(dtype=torch.float32)
-    )
+    assert_fp8_close(ops_out, ref_out)
     opcheck(torch.ops._C.silu_and_mul_quant, (ops_out, x, scale))
 
 
@@ -184,7 +197,7 @@ def test_maybe_fused_act_quant_fp8_static(
     ref_out = ref_impl(act_fn, x.reshape(-1, hidden_size * 2), scale).reshape(
         result.orig_shape
     )
-    torch.testing.assert_close(result.data.to(torch.float32), ref_out.to(torch.float32))
+    assert_fp8_close(result.data, ref_out)
 
 
 @pytest.mark.parametrize("token_shape", [(1,), (16,), (128,), (1, 17), (2, 17)])
