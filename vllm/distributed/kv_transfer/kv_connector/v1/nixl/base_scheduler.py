@@ -13,6 +13,7 @@ from vllm import envs
 from vllm.distributed.kv_transfer.kv_connector.utils import (
     BlockIds,
     EngineId,
+    clip_ssm_state_blocks,
     yield_req_data,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
@@ -281,10 +282,7 @@ class NixlBaseConnectorScheduler:
                 and blocks
                 and (n_spec_blocks := self._ssm_spec_blocks[i]) is not None
             ):
-                if n_spec := min(n_spec_blocks, len(blocks) - 1):
-                    blocks = blocks[:-n_spec]
-                # Never empty: downstream reads that as a full prefix hit.
-                blocks = blocks[-1:]
+                blocks = clip_ssm_state_blocks(blocks, n_spec_blocks)
             clipped.append(blocks)
         return tuple(clipped)
 
