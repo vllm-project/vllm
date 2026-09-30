@@ -533,6 +533,15 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
       "Tensor! state, Tensor output_gate, Tensor norm_weight, Tensor! out, "
       "float scale, float norm_eps=1e-5, "
       "str output_gate_activation='silu') -> ()");
+  // RecoverSSM verify: the windows start from the (read-only) checkpoints in
+  // state_indices[:, 0] and write per-token replay records instead of states.
+  ops.def(
+      "fused_gdn_decode_post_conv_mtp_replay("
+      "Tensor mixed_qkv, Tensor a, Tensor b, Tensor A_log, Tensor dt_bias, "
+      "Tensor state_indices, Tensor cu_seqlens, Tensor state, Tensor! replay, "
+      "Tensor output_gate, Tensor norm_weight, Tensor! out, "
+      "float scale, float norm_eps=1e-5, "
+      "str output_gate_activation='silu') -> ()");
 #endif
 
 #ifdef VLLM_ENABLE_FUSED_KDA_CHUNK
@@ -840,6 +849,8 @@ STABLE_TORCH_LIBRARY_IMPL(_C, CUDA, ops) {
 #ifdef VLLM_ENABLE_FUSED_GDN_DECODE
   ops.impl("fused_gdn_decode_post_conv_mtp",
            TORCH_BOX(&fused_gdn_decode_post_conv_mtp));
+  ops.impl("fused_gdn_decode_post_conv_mtp_replay",
+           TORCH_BOX(&fused_gdn_decode_post_conv_mtp_replay));
 #endif
 
 #ifdef VLLM_ENABLE_FUSED_KDA_CHUNK
