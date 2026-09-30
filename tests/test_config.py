@@ -1881,8 +1881,7 @@ def test_engram_draft_config_validates_target(monkeypatch, target_has_ple, expli
 def test_engram_host_file_gather_requires_cuda_qwen4exp(
     monkeypatch, architecture, layer_field, rocm, expect_error
 ):
-    monkeypatch.setattr(current_platform, "is_cuda_alike", lambda: True)
-    monkeypatch.setattr(current_platform, "is_rocm", lambda: rocm)
+    monkeypatch.setattr(current_platform, "is_cuda", lambda: not rocm)
     model = cast(
         ModelConfig,
         SimpleNamespace(

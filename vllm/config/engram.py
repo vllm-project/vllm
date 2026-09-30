@@ -86,10 +86,11 @@ class EngramConfig:
                 "EngramConfig requires a model with supported Engram "
                 "embeddings and non-empty n-gram layer ids."
             )
-        if self.host_file_gather and (
-            field != "ple_layer_ids" or current_platform.is_rocm()
-        ):
-            raise ValueError("host_file_gather requires a Qwen4Exp model on CUDA")
+        if self.host_file_gather:
+            from vllm.platforms import current_platform
+
+            if field != "ple_layer_ids" or not current_platform.is_cuda():
+                raise ValueError("host_file_gather requires a Qwen4Exp model on CUDA")
 
     def resolve_dp_shared_memory(self, parallel_config: "ParallelConfig") -> None:
         """Share host tables by default wherever the configuration permits."""
