@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import math
 from dataclasses import dataclass
 from typing import Any
 
@@ -151,7 +152,15 @@ def get_beam_search_score(
     https://github.com/huggingface/transformers/blob/09a71e5b32a747dbc7805599457e67c956ef212f/src/transformers/generation/utils.py#L3531
     """
     # An aborted beam may not have generated any tokens.
-    return cumulative_logprob / (max(num_generated_tokens, 1) ** length_penalty)
+    # A large |length_penalty| overflows or underflows the power. Saturate
+    # instead of raising, so the request still returns its beams.
+    try:
+        denominator = max(num_generated_tokens, 1) ** length_penalty
+    except OverflowError:
+        denominator = math.inf
+    if denominator == 0.0:
+        return -math.inf if cumulative_logprob < 0 else 0.0
+    return cumulative_logprob / denominator
 
 
 def create_sort_beams_key_function(length_penalty: float):

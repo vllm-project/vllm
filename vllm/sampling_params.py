@@ -1520,6 +1520,12 @@ class BeamSearchParams(
 
     def __post_init__(self) -> None:
         _verify_num_sequences(self.beam_width, "beam_width")
+        if not math.isfinite(self.length_penalty):
+            raise VLLMValidationError(
+                f"length_penalty must be finite, got {self.length_penalty}.",
+                parameter="length_penalty",
+                value=self.length_penalty,
+            )
 
     def configure_logprobs(
         self, sampling_params: SamplingParams, config: "VllmConfig"
