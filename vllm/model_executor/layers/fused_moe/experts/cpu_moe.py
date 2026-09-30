@@ -454,7 +454,7 @@ class CPUExpertsFp8(mk.FusedMoEExpertsModular):
         activation_key: QuantKey | None,
     ) -> bool:
         SUPPORTED_W_A = [
-            (kFp8Static128BlockSym, kFp8Dynamic128Sym),
+            (kFp8Static128BlockSym, None),
         ]
         return (weight_key, activation_key) in SUPPORTED_W_A
 

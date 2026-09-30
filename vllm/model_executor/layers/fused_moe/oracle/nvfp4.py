@@ -17,6 +17,9 @@ from vllm.model_executor.layers.fused_moe.config import (
     nvfp4_moe_quant_config,
     nvfp4_w4a16_moe_quant_config,
 )
+from vllm.model_executor.layers.fused_moe.oracle.base import (
+    is_supported_backend_config,
+)
 from vllm.model_executor.layers.fused_moe.routed_experts import RoutedExperts
 from vllm.model_executor.layers.quantization.utils.b12x_moe import (
     prepare_nvfp4_moe_layer_for_b12x,
@@ -179,6 +182,25 @@ def _use_a16(backend: NvFp4MoeBackend, checkpoint_uses_a16: bool) -> bool:
     )
 
 
+def executed_activation_key(
+    backend: NvFp4MoeBackend, activation_key: QuantKey | None
+) -> QuantKey | None:
+    """The activation quantization `backend` runs for a layer requesting
+    `activation_key`."""
+    # Marlin is W4A16, as is B12X with VLLM_B12X_MOE_FP4_FORCE_A16. Humming
+    # quantizes activations only as configured by VLLM_HUMMING_INPUT_QUANT_CONFIG.
+    if (
+        backend == NvFp4MoeBackend.MARLIN
+        or _use_a16(backend, False)
+        or (
+            backend == NvFp4MoeBackend.HUMMING
+            and not envs.VLLM_HUMMING_INPUT_QUANT_CONFIG
+        )
+    ):
+        return None
+    return activation_key
+
+
 def select_nvfp4_moe_backend(
     config: FusedMoEConfig,
     weight_key: QuantKey | None,
@@ -252,8 +274,14 @@ def select_nvfp4_moe_backend(
         activation_format: mk.FusedMoEActivationFormat,
     ) -> tuple[NvFp4MoeBackend, type[mk.FusedMoEExperts]]:
         for k_cls in backend_to_kernel_cls(backend):
-            supported, reason = k_cls.is_supported_config(
-                k_cls, config, weight_key, activation_key, activation_format
+            supported, reason = is_supported_backend_config(
+                backend,
+                k_cls,
+                config,
+                weight_key,
+                activation_key,
+                executed_activation_key(backend, activation_key),
+                activation_format,
             )
             if supported:
                 logger.info_once(_make_log_backend(backend))
@@ -265,8 +293,6 @@ def select_nvfp4_moe_backend(
     runner_backend = config.moe_backend
     if runner_backend != "auto":
         requested_backend = map_nvfp4_backend(runner_backend)
-        if _use_a16(requested_backend, False):
-            activation_key = None
         # For batched activation format, use batched variant if available.
         if (
             activation_format == mk.FusedMoEActivationFormat.BatchedExperts
@@ -291,11 +317,13 @@ def select_nvfp4_moe_backend(
     # Select kernels in order of backend.
     for backend in AVAILABLE_BACKENDS:
         for k_cls in backend_to_kernel_cls(backend):
-            supported, reason = k_cls.is_supported_config(
+            supported, reason = is_supported_backend_config(
+                backend,
                 k_cls,
                 config,
                 weight_key,
                 activation_key,
+                executed_activation_key(backend, activation_key),
                 activation_format,
             )
             if supported:

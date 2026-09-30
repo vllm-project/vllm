@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any
 import regex as re
 import torch
 
+from vllm import envs
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     FP4_DTYPE,
@@ -258,6 +259,20 @@ def quant_key_to_input_schema(key: QuantKey | None) -> "HummingInputSchema":
     )
 
 
+def _warn_input_fallback(
+    requested: "humming_dtypes.DataType | None",
+    executed: "humming_dtypes.DataType | None",
+) -> None:
+    if requested is None or requested.num_bits >= 16 or executed == requested:
+        return
+    logger.warning_once(
+        "Humming runs %s activations as %s. Set VLLM_STRICT_QUANT_SCHEME=1 "
+        "to raise an error instead.",
+        requested,
+        "unquantized" if executed is None or executed.num_bits >= 16 else executed,
+    )
+
+
 def check_and_fallback_input_schema(
     weight_schema: "BaseWeightSchema",
     input_schema: "BaseInputSchema",
@@ -266,6 +281,7 @@ def check_and_fallback_input_schema(
 ) -> "HummingInputSchema":
     from vllm.utils.humming import HummingInputSchema, InputQuantizationMode
 
+    allow_fallback = allow_fallback and not envs.VLLM_STRICT_QUANT_SCHEME
     capability = current_platform.get_device_capability()
     assert capability is not None
     sm_version = capability.to_int()
@@ -354,6 +370,7 @@ def check_and_fallback_input_schema(
             is_groupwise = input_group_size > 0 or weight_group_size > 0
             if input_bits == 8 and is_groupwise and not is_mxfp8:
                 # prefer wna16 for groupwise weight or groupwise input
+                _warn_input_fallback(a_dtype, None)
                 return HummingInputSchema()
 
             return input_schema
@@ -391,6 +408,7 @@ def check_and_fallback_input_schema(
                 input_quant_mode=quant_mode,
             )
             if candidate.is_compatible_with(weight_schema, param_dtype):
+                _warn_input_fallback(a_dtype, dtype)
                 return candidate
 
     raise ValueError(

@@ -196,6 +196,7 @@ if TYPE_CHECKING:
     VLLM_HUMMING_USE_F16_ACCUM: bool = False
     VLLM_HUMMING_MOE_GEMM_TYPE: Literal["indexed", "grouped", "auto"] | None = None
     VLLM_B12X_MOE_FP4_FORCE_A16: bool = False
+    VLLM_STRICT_QUANT_SCHEME: bool = False
     VLLM_DEEPEPLL_NVFP4_DISPATCH: bool = False
     VLLM_V1_USE_OUTLINES_CACHE: bool = False
     VLLM_TPU_USING_PATHWAYS: bool = False
@@ -1668,6 +1669,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Force b12x FP4 MoE to use BF16 activations.
     "VLLM_B12X_MOE_FP4_FORCE_A16": lambda: bool(
         int(os.getenv("VLLM_B12X_MOE_FP4_FORCE_A16", "0"))
+    ),
+    # Error instead of warning when a kernel would run with a different
+    # activation quantization than the checkpoint or quantization config
+    # requests (e.g. Marlin running FP8 W8A8 layers as W8A16).
+    "VLLM_STRICT_QUANT_SCHEME": lambda: bool(
+        int(os.getenv("VLLM_STRICT_QUANT_SCHEME", "0"))
     ),
     # Allow use of FlashInfer MxInt4 MoE kernels for fused moe ops.
     "VLLM_USE_FLASHINFER_MOE_INT4": lambda: bool(

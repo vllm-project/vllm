@@ -7,6 +7,7 @@ from typing import Any
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
+from vllm import envs
 from vllm.config.kernel import MoEBackend
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.all2all_utils import (
@@ -17,6 +18,9 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
     int8_w8a8_moe_quant_config,
     int8_w8a16_moe_quant_config,
+)
+from vllm.model_executor.layers.fused_moe.oracle.base import (
+    is_supported_backend_config,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
@@ -99,6 +103,18 @@ def map_int8_backend(runner_backend: MoEBackend) -> Int8MoeBackend:
     )
 
 
+def executed_activation_key(
+    backend: Int8MoeBackend, activation_key: QuantKey | None
+) -> QuantKey | None:
+    """The activation quantization `backend` runs for a layer requesting
+    `activation_key`."""
+    # Humming quantizes activations only as configured by
+    # VLLM_HUMMING_INPUT_QUANT_CONFIG.
+    if backend == Int8MoeBackend.HUMMING and not envs.VLLM_HUMMING_INPUT_QUANT_CONFIG:
+        return None
+    return activation_key
+
+
 def select_int8_moe_backend(
     config: FusedMoEConfig,
     weight_key: QuantKey | None = kInt8StaticChannelSym,
@@ -138,8 +154,14 @@ def select_int8_moe_backend(
         backend: Int8MoeBackend,
     ) -> tuple[Int8MoeBackend, type[mk.FusedMoEExperts]]:
         for k_cls in backend_to_kernel_cls(backend):
-            supported, reason = k_cls.is_supported_config(
-                k_cls, config, weight_key, activation_key, activation_format
+            supported, reason = is_supported_backend_config(
+                backend,
+                k_cls,
+                config,
+                weight_key,
+                activation_key,
+                executed_activation_key(backend, activation_key),
+                activation_format,
             )
             if supported:
                 logger.info_once(_make_log_backend(backend))
@@ -155,11 +177,13 @@ def select_int8_moe_backend(
     # Select kernels in order of backend.
     for backend in AVAILABLE_BACKENDS:
         for k_cls in backend_to_kernel_cls(backend):
-            supported, reason = k_cls.is_supported_config(
+            supported, reason = is_supported_backend_config(
+                backend,
                 k_cls,
                 config,
                 weight_key,
                 activation_key,
+                executed_activation_key(backend, activation_key),
                 activation_format,
             )
             if supported:
