@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Based on:
+"""Based on:
 Chen, L., Ye, Z., Wu, Y., Zhuo, D., Ceze, L., & Krishnamurthy, A. (2023).
 Punica: Multi-Tenant LoRA Serving.
 https://arxiv.org/abs/2310.18547
@@ -20,9 +19,7 @@ if TYPE_CHECKING:
 
 
 class PunicaWrapperABC(ABC):
-    """
-    PunicaWrapper ABC.
-    """
+    """PunicaWrapper ABC."""
 
     @abstractmethod
     def update_metadata(
@@ -33,9 +30,7 @@ class PunicaWrapperABC(ABC):
         vocab_size: int,
         **kwargs,
     ) -> None:
-        """
-        Update the lora-related metadata
-        """
+        """Update the lora-related metadata"""
         raise NotImplementedError
 
     @abstractmethod
@@ -47,10 +42,7 @@ class PunicaWrapperABC(ABC):
         scale: float,
         **kwargs,
     ) -> torch.Tensor | None:
-        """
-        Performs GEMM  for multiple slices of lora_a.
-        """
-
+        """Performs GEMM  for multiple slices of lora_a."""
         raise NotImplementedError
 
     @abstractmethod
@@ -64,9 +56,7 @@ class PunicaWrapperABC(ABC):
         add_inputs=True,
         **kwargs,
     ) -> torch.Tensor | None:
-        """
-        Performs GEMM for multiple slices of lora_b.
-        """
+        """Performs GEMM for multiple slices of lora_b."""
         raise NotImplementedError
 
     @abstractmethod
@@ -78,8 +68,7 @@ class PunicaWrapperABC(ABC):
         add_inputs: bool = True,
         **kwargs,
     ) -> torch.Tensor | None:
-        """
-        Applies lora  specifically for VocabParallelEmbeddingWithLoRA,
+        """Applies lora  specifically for VocabParallelEmbeddingWithLoRA,
         and this layer only requires the expand operation.
         """
         raise NotImplementedError
@@ -97,10 +86,7 @@ class PunicaWrapperABC(ABC):
         buffer: tuple[torch.Tensor, ...] | None = None,
         **kwargs,
     ) -> torch.Tensor | None:
-        """
-        Applicable to linear-related lora.
-        """
-
+        """Applicable to linear-related lora."""
         raise NotImplementedError
 
     @abstractmethod
@@ -115,15 +101,24 @@ class PunicaWrapperABC(ABC):
         buffer: torch.Tensor | None = None,
         **kwargs,
     ) -> torch.Tensor | None:
-        """
-        Applies lora  specifically for LogitsProcessorWithLoRA.
-        """
+        """Applies lora  specifically for LogitsProcessorWithLoRA."""
+        raise NotImplementedError
+
+    @abstractmethod
+    def apply_lora_full_linear(
+        self,
+        y: torch.Tensor,
+        x: torch.Tensor,
+        weight_stacked: torch.Tensor,
+        bias_stacked: torch.Tensor,
+        module_enabled: torch.Tensor,
+    ) -> torch.Tensor | None:
+        """Apply request-routed full linear weights to selected rows."""
         raise NotImplementedError
 
 
 class PunicaWrapperBase(PunicaWrapperABC):
-    """
-    PunicaWrapperBase is designed to manage and provide metadata for the punica
+    """PunicaWrapperBase is designed to manage and provide metadata for the punica
     kernel. The main function is to maintain the state information for
     Multi-LoRA, and to provide the interface for the punica.
     """
@@ -145,7 +140,7 @@ class PunicaWrapperBase(PunicaWrapperABC):
             max_num_batched_tokens, dtype=torch.long, device=device
         )
         self._embeddings_indices = torch.empty(
-            2, max_num_batched_tokens, dtype=torch.long, device=device
+            max_num_batched_tokens, dtype=torch.long, device=device
         )
 
         # 4 is the number of indices tensors.
@@ -172,10 +167,6 @@ class PunicaWrapperBase(PunicaWrapperABC):
         max_loras: int,
         vocab_size: int,
     ):
-        # NOTE We have remove lora extra vocab support for now. So we set
-        # extra_vocab_size always to 0, and extra_vocab_size will be removed.
-
-        extra_vocab_size = 0
         (
             base_indices,
             sampler_indices,
@@ -187,7 +178,6 @@ class PunicaWrapperBase(PunicaWrapperABC):
             lora_index_to_id,
             max_loras,
             vocab_size,
-            extra_vocab_size,
             self.device,
         )
         self._token_lora_indices[: base_indices.shape[0]].copy_(base_indices)
@@ -195,9 +185,9 @@ class PunicaWrapperBase(PunicaWrapperABC):
         self._sampler_indices_padded[: sampler_indices_padded.shape[0]].copy_(
             sampler_indices_padded
         )
-        self._embeddings_indices[
-            : embeddings_indices.shape[0], : embeddings_indices.shape[1]
-        ].copy_(embeddings_indices)
+        self._embeddings_indices[: embeddings_indices.shape[0]].copy_(
+            embeddings_indices
+        )
 
         self.indices_len[:] = indices_len
 
@@ -222,12 +212,27 @@ class PunicaWrapperBase(PunicaWrapperABC):
         self.token_nums = token_nums
         self.no_lora = no_lora
 
+    def _select_full_linear_output(
+        self,
+        y: torch.Tensor,
+        adapter_y: torch.Tensor,
+        bias_stacked: torch.Tensor,
+        module_enabled: torch.Tensor,
+    ) -> torch.Tensor:
+        indices = self.sampler_indices
+        assert indices.size(0) == y.size(0), (
+            "Full linear rows do not match LoRA request mapping"
+        )
+        safe_indices = indices.clamp_min(0)
+        use_full = (indices >= 0) & module_enabled[safe_indices]
+        adapter_y = adapter_y.to(y.dtype) + bias_stacked[safe_indices].to(y.dtype)
+        return torch.where(use_full.unsqueeze(-1), adapter_y, y)
+
     @property
     def prefill_metadata(
         self,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, int, int, int]:
-        """
-        This property provides a convenient way to access the necessary
+        """This property provides a convenient way to access the necessary
         metadata for prefill-related  kernel computations.
             1. seq_start_locs: Tensor of sequence start positions.
             2. seq_lengths: Tensor of sequence lengths.
@@ -248,8 +253,7 @@ class PunicaWrapperBase(PunicaWrapperABC):
 
     @property
     def token_lora_indices(self) -> torch.Tensor:
-        """
-        This property provides the lora indices corresponding to each token
+        """This property provides the lora indices corresponding to each token
         in the batch. An index of -1 means no lora should be applied.
         """
         token_lora_len = self.indices_len[0]
@@ -257,8 +261,7 @@ class PunicaWrapperBase(PunicaWrapperABC):
 
     @property
     def sampler_indices(self) -> torch.Tensor:
-        """
-        This property is used to access the lora indices specifically for
+        """This property is used to access the lora indices specifically for
         LogitsProcessorWithLoRA.
         """
         sampler_indices_len = self.indices_len[1]
@@ -266,20 +269,9 @@ class PunicaWrapperBase(PunicaWrapperABC):
 
     @property
     def sampler_indices_padded(self) -> torch.Tensor:
-        """
-        This property provides access to padded sampler indices.
-        """
+        """This property provides access to padded sampler indices."""
         indices_padded_len = self.indices_len[2]
         return self._sampler_indices_padded[:indices_padded_len]
-
-    @property
-    def embeddings_indices(self) -> torch.Tensor:
-        """
-        This property provides access to the indices used for lora embeddings,
-        specifically for VocabParallelEmbeddingWithLoRA.
-        """
-        embeddings_indices_len = self.indices_len[3]
-        return self._embeddings_indices[:, :embeddings_indices_len]
 
     def update_metadata(
         self,
@@ -307,8 +299,7 @@ class PunicaWrapperBase(PunicaWrapperABC):
         scale: float,
         **kwargs,
     ) -> torch.Tensor | None:
-        """
-        Performs GEMM  for multiple slices of lora_a.
+        """Performs GEMM  for multiple slices of lora_a.
 
         Semantics:
         for i in range(len(lora_a_stacked)):
@@ -335,8 +326,7 @@ class PunicaWrapperBase(PunicaWrapperABC):
         add_inputs=True,
         **kwargs,
     ) -> torch.Tensor | None:
-        """
-        Performs GEMM for multiple slices of lora_b.
+        """Performs GEMM for multiple slices of lora_b.
 
         Semantics:
             offset = offset_start
@@ -366,8 +356,7 @@ class PunicaWrapperBase(PunicaWrapperABC):
         add_inputs: bool = True,
         **kwargs,
     ) -> torch.Tensor | None:
-        """
-        Applies lora  specifically for VocabParallelEmbeddingWithLoRA.
+        """Applies lora  specifically for VocabParallelEmbeddingWithLoRA.
         and this layer only requires the expand operation.
         Semantics:
             y += x @ lora_b_stacked
@@ -377,6 +366,7 @@ class PunicaWrapperBase(PunicaWrapperABC):
             x (torch.Tensor): Input tensor.
             lora_b_stacked (torch.Tensor): lora_b's weights.
             add_inputs (bool): Default to True.
+
         """
         # TODO: implement it based on torch ops
         raise NotImplementedError
@@ -394,8 +384,7 @@ class PunicaWrapperBase(PunicaWrapperABC):
         buffer: tuple[torch.Tensor, ...] | None = None,
         **kwargs,
     ) -> torch.Tensor | None:
-        """
-        Applicable to linear-related lora.
+        """Applicable to linear-related lora.
 
         Semantics:
             for i in range(len(lora_a_stacked)):
@@ -414,6 +403,7 @@ class PunicaWrapperBase(PunicaWrapperABC):
             scale (float): Scaling factor.
             output_slices (tuple[int, ...]): Every slice's size.
             buffer (Optional[tuple[torch.Tensor, ...]]): Defaults to None.
+
         """
         # TODO: implement it based on torch ops
         raise NotImplementedError
@@ -430,8 +420,7 @@ class PunicaWrapperBase(PunicaWrapperABC):
         buffer: torch.Tensor | None = None,
         **kwargs,
     ) -> torch.Tensor | None:
-        """
-        Applies lora  specifically for LogitsProcessorWithLoRA.
+        """Applies lora  specifically for LogitsProcessorWithLoRA.
 
         Semantics:
             buffer = (x @ lora_a_stacked) * scale
@@ -444,6 +433,7 @@ class PunicaWrapperBase(PunicaWrapperABC):
             lora_b_stacked (torch.Tensor):lora_b's weights.
             scale (float): Scaling factor.
             buffer (Optional[torch.Tensor]):Default to None.
+
         """
         # TODO: implement it based on torch ops
         raise NotImplementedError
@@ -460,8 +450,7 @@ class PunicaWrapperBase(PunicaWrapperABC):
         pad_sorted_ids: bool = False,
         naive_block_assignment: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        """
-        Aligns tokens and experts into block-sized chunks for LoRA-based
+        """Aligns tokens and experts into block-sized chunks for LoRA-based
         mixture-of-experts (MoE) execution.
         """
         # TODO: implement it based on torch ops
@@ -487,8 +476,7 @@ class PunicaWrapperBase(PunicaWrapperABC):
         offset: int = 0,
         token_lora_mapping: torch.Tensor | None = None,
     ):
-        """
-        Performs a fused forward computation for LoRA of
+        """Performs a fused forward computation for LoRA of
         Mixture-of-Experts (MoE) layer.
         """
         # TODO: implement it based on torch ops

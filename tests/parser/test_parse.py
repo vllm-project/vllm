@@ -2,34 +2,24 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import json
-import os
 from types import SimpleNamespace
 
 import pytest
 
-_STRICT_TOOL_CALLING_ENV = "VLLM_ENFORCE_STRICT_TOOL_CALLING"
-_STRICT_TOOL_CALLING_ENV_VALUE = os.environ.get(_STRICT_TOOL_CALLING_ENV)
-os.environ[_STRICT_TOOL_CALLING_ENV] = "0"
-
-from vllm.entrypoints.openai.chat_completion.protocol import (  # noqa: E402
-    ChatCompletionRequest,
-)
-from vllm.entrypoints.openai.responses.protocol import ResponsesRequest  # noqa: E402
-from vllm.parser.abstract_parser import DelegatingParser  # noqa: E402
-from vllm.parser.utils import count_history_tool_calls  # noqa: E402
-from vllm.reasoning.basic_parsers import (  # noqa: E402
-    BaseThinkingReasoningParser,
-)
-from vllm.tool_parsers.hermes_tool_parser import Hermes2ProToolParser  # noqa: E402
+from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
+from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
+from vllm.parser.abstract_parser import DelegatingParser
+from vllm.parser.utils import count_history_tool_calls
+from vllm.reasoning.basic_parsers import BaseThinkingReasoningParser
+from vllm.tool_parsers.hermes_tool_parser import Hermes2ProToolParser
 
 
-@pytest.fixture(scope="module", autouse=True)
-def restore_strict_tool_calling_env():
-    yield
-    if _STRICT_TOOL_CALLING_ENV_VALUE is None:
-        os.environ.pop(_STRICT_TOOL_CALLING_ENV, None)
-    else:
-        os.environ[_STRICT_TOOL_CALLING_ENV] = _STRICT_TOOL_CALLING_ENV_VALUE
+@pytest.fixture(autouse=True)
+def enable_hermes_required_named_parsing(monkeypatch):
+    # With VLLM_ENFORCE_STRICT_TOOL_CALLING (default on), Hermes sets
+    # supports_required_and_named=False and uses structural-tag guided tool
+    # calling. Force it True to test the non-guided JSON required/named parse path.
+    monkeypatch.setattr(Hermes2ProToolParser, "supports_required_and_named", True)
 
 
 class ThinkReasoningParser(BaseThinkingReasoningParser):

@@ -5,6 +5,7 @@ from contextlib import contextmanager
 from typing import Any
 
 from vllm.model_executor.layers.fused_moe.activation import (
+    ApplyMoEActivationConfig,
     MoEActivation,
     activation_without_mul,
     apply_moe_activation,
@@ -19,7 +20,7 @@ from vllm.model_executor.layers.fused_moe.fused_moe_method_base import (
     FusedMoEMethodBase,
 )
 from vllm.model_executor.layers.fused_moe.layer import (
-    FusedMoE,
+    FusedMoEFactory,
     fused_moe_make_expert_params_mapping,
 )
 from vllm.model_executor.layers.fused_moe.modular_kernel import (
@@ -63,7 +64,8 @@ def get_config() -> dict[str, Any] | None:
 
 
 __all__ = [
-    "FusedMoE",
+    "ApplyMoEActivationConfig",
+    "FusedMoEFactory",
     "FusedMoERouter",
     "FusedMoEConfig",
     "FusedMoEQuantConfig",

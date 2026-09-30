@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""
-Unit test for the RoPE re-anchoring core math (config-free, matches vLLM's
+"""Unit test for the RoPE re-anchoring core math (config-free, matches vLLM's
 rotary convention in vllm/model_executor/layers/rotary_embedding/common.py).
 
 Property proved: a POST-rotation cached key that was rotated at absolute position

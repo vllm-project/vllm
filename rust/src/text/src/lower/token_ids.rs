@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 use std::result::Result;
 
 use thiserror::Error;
@@ -10,7 +13,7 @@ pub enum TokenIdsError {
     #[error("allowed_token_ids should not be empty")]
     EmptyAllowedTokenIds,
     #[error(
-        "token_id(s) {token_ids:?} in {parameter} contain out-of-vocab token ids. \
+        "token_id(s) {token_ids:?} in {parameter} are out of vocabulary. \
          Vocabulary size: {vocab_size}"
     )]
     OutOfVocab {
@@ -87,6 +90,14 @@ pub(crate) fn validate_vocab_range(
     if let Some(token_ids) = params.logprob_token_ids.as_deref() {
         validate_param(
             "logprob_token_ids",
+            token_ids.iter().copied(),
+            limits.model_vocab_size,
+        )?;
+    }
+
+    if let Some(token_ids) = params.prompt_logprob_token_ids.as_deref() {
+        validate_param(
+            "prompt_logprob_token_ids",
             token_ids.iter().copied(),
             limits.model_vocab_size,
         )?;

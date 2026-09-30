@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-ws_load.py: N concurrent real-time-paced /v1/realtime websocket streams.
+"""ws_load.py: N concurrent real-time-paced /v1/realtime websocket streams.
 
 Protocol mirrored from examples/speech_to_text/realtime/openai_realtime_client.py:
     recv session.created -> send session.update {model} -> send commit (ready)
@@ -43,8 +42,16 @@ def load_pcm16(audio_path: str, loops: int = 1) -> bytes:
 
 
 async def run_one(
-    idx, uri, model, pcm, frame_bytes, frame_dt, duration_cap, collect_text,
-    pace=True, start_byte=0
+    idx,
+    uri,
+    model,
+    pcm,
+    frame_bytes,
+    frame_dt,
+    duration_cap,
+    collect_text,
+    pace=True,
+    start_byte=0,
 ):
     res = {
         "stream": idx,
@@ -56,8 +63,8 @@ async def run_one(
         "first_partial_latency_s": None,
         "final_text": None,
         "wall_seconds": None,
-        "audio_sent_wall_s": None,   # wall time when the last audio frame was sent
-        "flush_latency_s": None,     # transcription.done arrival - last audio frame
+        "audio_sent_wall_s": None,  # wall time when the last audio frame was sent
+        "flush_latency_s": None,  # transcription.done arrival - last audio frame
         # (elapsed_s, cumulative_words) per partial: raw transcription-progress
         # timeline, for offline inspection of how output tracks the audio clock.
         "lat_timeline": [],

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 //! Shared Harmony encoding helper for the GPT-OSS renderer and output parser.
 
 use std::sync::LazyLock;

@@ -44,6 +44,15 @@ ROCM_AITER_UNIFIED_ATTN = pytest.param(
     ),
 )
 
+ROCM_AITER_MLA_ATTN = pytest.param(
+    AttentionBackendCase(backend=AttentionBackendEnum.ROCM_AITER_MLA),
+    id="ROCM_AITER_MLA",
+    marks=pytest.mark.skipif(
+        not is_aiter_found_and_supported(),
+        reason="ROCM_AITER_MLA only for AMD when AITER is installed",
+    ),
+)
+
 FLASHINFER_MLA_ATTN = pytest.param(
     AttentionBackendCase(backend=AttentionBackendEnum.FLASHINFER_MLA),
     id="FLASHINFER_MLA",
@@ -58,24 +67,12 @@ TRITON_MLA_ATTN = pytest.param(
     id="TRITON_MLA",
 )
 
-FLASHMLA_SPARSE_ATTN = pytest.param(
-    AttentionBackendCase(
-        backend=AttentionBackendEnum.FLASHMLA_SPARSE,
-        model_kwargs=dict(kv_cache_dtype="fp8_ds_mla"),
-    ),
-    id="FLASHMLA_SPARSE",
-    marks=pytest.mark.skipif(
-        not is_blackwell(),
-        reason="FlashMLA Sparse requires Blackwell",
-    ),
-)
-
 # Models
 llama3_8b = ModelFusionInfo(
     model_name="meta-llama/Llama-3.1-8B-Instruct",
     matches=lambda n_layers: Matches(
         ar_rms_fusion=n_layers * 2 + 1,
-        aiter_ar_rms_fusion=n_layers * 2,
+        aiter_ar_rms_fusion=n_layers * 2 + 1,
         sequence_parallel=n_layers * 2 + 1,
         async_tp=n_layers * 4,
     ),
@@ -137,7 +134,7 @@ qwen3_a3b = ModelFusionInfo(
     matches=lambda n_layers: Matches(
         norm_rope_fusion=n_layers,
         ar_rms_fusion=n_layers * 2 + 1,
-        aiter_ar_rms_fusion=n_layers * 2,
+        aiter_ar_rms_fusion=n_layers * 2 + 1,
         sequence_parallel=n_layers * 2 + 1,
         async_tp=n_layers * 2,
     ),
@@ -192,18 +189,6 @@ deepseek_r1_fp4 = ModelFusionInfo(
     matches=lambda n_layers: Matches(
         rms_quant_fusion=0,
         act_quant_fusion=min(3, n_layers),
-        attn_quant_fusion=n_layers,
-        ar_rms_fusion=n_layers * 2 + 1,
-    ),
-)
-
-deepseek_v32_fp4 = ModelFusionInfo(
-    model_name="nvidia/DeepSeek-V3.2-NVFP4",
-    matches=lambda n_layers: Matches(
-        rms_quant_fusion=0,
-        # silu+quant on dense layers only; MoE hides the act+quant site
-        act_quant_fusion=min(3, n_layers),
-        # MLA attn + NVFP4 output quant fuses on sparse MLA output path
         attn_quant_fusion=n_layers,
         ar_rms_fusion=n_layers * 2 + 1,
     ),
