@@ -87,9 +87,6 @@ def test_mixed_head_counts_in_one_group_are_rejected():
 
 
 @requires_cpu
-@pytest.mark.skipif(
-    not torch.cpu._is_amx_tile_supported(), reason="requires AMX support"
-)
 @pytest.mark.parametrize(
     ("is_cross_attention", "speculative_method", "expected_group"),
     [
@@ -101,7 +98,8 @@ def test_mixed_head_counts_in_one_group_are_rejected():
 def test_cpu_builder_schedules_short_query_without_phase_marker(
     is_cross_attention, speculative_method, expected_group
 ):
-    builder = _build([32], block_size=32)
+    with patch("torch.cpu._is_amx_tile_supported", return_value=True):
+        builder = _build([32], block_size=32)
     builder.is_cross_attention = is_cross_attention
     if speculative_method is not None:
         builder.vllm_config.speculative_config = SimpleNamespace(

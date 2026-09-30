@@ -10,7 +10,10 @@ import torch
 
 from vllm.model_executor.kernels.linear.zentorch_utils import has_zentorch_op
 from vllm.platforms import CpuArchEnum, current_platform
-from vllm.utils.torch_utils import set_random_seed
+from vllm.utils.torch_utils import (
+    set_default_torch_num_threads,
+    set_random_seed,
+)
 from vllm.v1.attention.backend import AttentionType
 from vllm.v1.attention.backends.cpu_attn import _get_attn_isa
 from vllm.v1.attention.backends.zentorch_sdpa import (
@@ -1373,6 +1376,7 @@ def test_varlen_with_paged_kv_dynamic_causal(
 
 @pytest.mark.parametrize("kv_cache_dtype", ["auto", "fp8_e4m3", "fp8_e5m2"])
 @pytest.mark.skipif(not torch.cpu._is_amx_tile_supported(), reason="no AMX support.")
+@set_default_torch_num_threads(4)
 def test_amx_spec_decode_gqa_mixed_request_correctness(kv_cache_dtype: str) -> None:
     varlen_with_paged_kv(
         seq_lens=[(5, 513), (1, 193), (4, 1025)],
@@ -1392,6 +1396,7 @@ def test_amx_spec_decode_gqa_mixed_request_correctness(kv_cache_dtype: str) -> N
 
 @pytest.mark.parametrize("kv_cache_dtype", ["auto", "fp8_e4m3", "fp8_e5m2"])
 @pytest.mark.skipif(not torch.cpu._is_amx_tile_supported(), reason="no AMX support.")
+@set_default_torch_num_threads(4)
 def test_amx_gqa_mixed_prefill_boundary(kv_cache_dtype: str) -> None:
     # At a Q:KV-head ratio of 32, q=33 exceeds the grouped work bound.
     varlen_with_paged_kv(
@@ -1413,6 +1418,7 @@ def test_amx_gqa_mixed_prefill_boundary(kv_cache_dtype: str) -> None:
 
 
 @pytest.mark.skipif(not torch.cpu._is_amx_tile_supported(), reason="no AMX support.")
+@set_default_torch_num_threads(4)
 def test_amx_gqa_causal_q4_long_context() -> None:
     varlen_with_paged_kv(
         seq_lens=[(4, 8192)],
@@ -1474,6 +1480,7 @@ def _scheduler_metadata_for_test(
 
 
 @pytest.mark.skipif(not torch.cpu._is_amx_tile_supported(), reason="no AMX support.")
+@set_default_torch_num_threads(4)
 def test_amx_scheduler_keeps_noncausal_request_on_mha() -> None:
     metadata = _scheduler_metadata_for_test(
         [4, 4], [8192, 8192], dynamic_causal=[True, False]
