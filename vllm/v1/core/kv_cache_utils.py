@@ -2800,7 +2800,9 @@ def get_kv_cache_configs(
             adjusted_memory.append(override * bytes_per_block)
         available_memory = adjusted_memory
 
-    if vllm_config.attention_config.hisparse_config is not None:
+    if vllm_config.attention_config.hisparse_config is not None and override is None:
+        # An override already gives every worker the same number of blocks, of
+        # its own size; the min would shrink workers with larger blocks.
         available_memory = [min(available_memory)] * len(available_memory)
 
     # Reserve the null block BlockPool permanently holds back, so auto-fit and

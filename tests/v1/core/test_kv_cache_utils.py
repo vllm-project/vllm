@@ -289,6 +289,53 @@ def test_hisparse_pool_must_fit_max_model_len(
             kv_cache_utils.get_kv_cache_configs(config, [specs], [2**34])
 
 
+@pytest.mark.parametrize("num_gpu_blocks,ok", [(788, False), (789, True)])
+def test_hisparse_override_fits_uneven_workers(monkeypatch, num_gpu_blocks, ok):
+    """Workers with different layer counts pack into different HiSparse block
+    sizes. An override gives each the same block count, so the worker with
+    larger blocks must be checked against its own pool (788 blocks plus the
+    null block), not the smallest worker's bytes."""
+    monkeypatch.setattr(
+        hisparse_runtime_module.current_platform, "is_cuda_alike", lambda: True
+    )
+    monkeypatch.setattr(kv_cache_utils, "get_hisparse_host_pool_bytes", lambda _: 2**30)
+
+    def worker_specs(layers: range) -> dict[str, KVCacheSpec]:
+        specs: dict[str, KVCacheSpec] = {}
+        for i in layers:
+            specs[f"model.layers.{i}.self_attn"] = MLAAttentionSpec(
+                block_size=64,
+                num_kv_heads=1,
+                head_size=576,
+                dtype=torch.bfloat16,
+                is_index_group_leader=True,
+            )
+            specs[f"model.layers.{i}.self_attn.indexer"] = MLAAttentionSpec(
+                block_size=64,
+                num_kv_heads=1,
+                head_size=128,
+                dtype=torch.bfloat16,
+                cache_role=SparseCacheRole.INDEXER,
+            )
+        return specs
+
+    config = VllmConfig(model_config=ModelConfig(max_model_len=8192))
+    config.attention_config.hisparse_config = HiSparseConfig()
+    config.model_config.hf_config.index_topk = 128
+    config.cache_config.num_gpu_blocks_override = num_gpu_blocks
+    config.cache_config.kv_cache_layout = "BLHNC"
+    kv_cache_specs = [worker_specs(range(0, 5)), worker_specs(range(5, 8))]
+
+    if ok:
+        configs = kv_cache_utils.get_kv_cache_configs(
+            config, kv_cache_specs, [2**34, 2**34]
+        )
+        assert [c.num_blocks for c in configs] == [num_gpu_blocks] * 2
+    else:
+        with pytest.raises(ValueError, match="max seq len"):
+            kv_cache_utils.get_kv_cache_configs(config, kv_cache_specs, [2**34, 2**34])
+
+
 def test_hisparse_rejects_deepseek_v4():
     full_specs = {
         "model.layers.0.attn": MLAAttentionSpec(
