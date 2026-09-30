@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-End-to-end tests for the streaming input feature in AsyncLLM.
+"""End-to-end tests for the streaming input feature in AsyncLLM.
 
 These tests verify that:
 1. Streaming inputs work correctly with bunched inputs (queued)

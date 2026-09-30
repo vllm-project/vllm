@@ -39,10 +39,10 @@ def _make_builder():
     topk_tokens = 4
 
     builder.device = torch.device("cpu")
-    builder.kv_cache_spec = SimpleNamespace(block_size=1)
+    builder.kv_cache_spec = SimpleNamespace(block_size=1)  # type: ignore[assignment]
     builder.model_dtype = torch.bfloat16
     builder.kv_cache_dtype = "fp8"
-    builder.mla_dims = SimpleNamespace(kv_lora_rank=512, qk_rope_head_dim=64)
+    builder.mla_dims = SimpleNamespace(kv_lora_rank=512, qk_rope_head_dim=64)  # type: ignore[assignment]
     builder.topk_tokens = topk_tokens
     builder.req_id_per_token_buffer = torch.zeros(
         max_num_batched_tokens, dtype=torch.int32, device="cpu"
@@ -81,7 +81,7 @@ def _make_common_metadata():
         query_start_loc=query_start_loc,
         query_start_loc_cpu=query_start_loc,
         seq_lens=seq_lens,
-        _seq_lens_cpu=seq_lens,
+        seq_lens_cpu_upper_bound=seq_lens,
         num_reqs=2,
         num_actual_tokens=2,
         max_query_len=1,
@@ -99,7 +99,7 @@ def _make_mixed_common_metadata():
         query_start_loc=query_start_loc,
         query_start_loc_cpu=query_start_loc,
         seq_lens=seq_lens,
-        _seq_lens_cpu=seq_lens,
+        seq_lens_cpu_upper_bound=seq_lens,
         num_reqs=2,
         num_actual_tokens=5,
         max_query_len=4,
