@@ -110,7 +110,12 @@ def is_shared_expert_quant_fse_compatible(
             for projection_name in projection_names
         ]
 
-        # TODO: Extend with use at your own risk.
+        # NOTE: online shared experts quantization check is only implemented for quark
+        # quant method at the moment. This can be extended here for other quant methods.
+        # Requirement is:
+        # - Retrieve routed weight quant key
+        # - Retrieve routed activation quant key
+        # and ensure the online quantization set on shared expert match them.
         if isinstance(quant_config, QuarkConfig):
             routed_weight_key, routed_activation_key, routed_method_cls = (
                 quant_config.get_quant_method_target(expert_prefix, RoutedExperts)
