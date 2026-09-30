@@ -21,6 +21,7 @@ from vllm.model_executor.kernels.linear import (
     B12xMxFp4LinearKernel,
     B12xMxfp8LinearKernel,
     B12xNvFp4LinearKernel,
+    B12xNvFp4W4A16LinearKernel,
     B12xTensorFP8ScaledMMLinearKernel,
     FP8ScaledMMLinearLayerConfig,
     Mxfp8LinearLayerConfig,
@@ -782,7 +783,7 @@ def test_b12x_nvfp4_can_implement_supported_config() -> None:
     assert reason is None
 
 
-def test_b12x_backend_preserves_w4a16_fallback(monkeypatch) -> None:
+def test_b12x_backend_selects_w4a16(monkeypatch) -> None:
     import vllm.model_executor.kernels.linear as linear_mod
 
     monkeypatch.setattr(linear_mod.current_platform, "_enum", PlatformEnum.CUDA)
@@ -792,17 +793,17 @@ def test_b12x_backend_preserves_w4a16_fallback(monkeypatch) -> None:
     monkeypatch.setitem(
         linear_mod._POSSIBLE_NVFP4_KERNELS,
         PlatformEnum.CUDA,
-        [B12xNvFp4LinearKernel, MarlinNvFp4LinearKernel],
+        [B12xNvFp4LinearKernel, B12xNvFp4W4A16LinearKernel, MarlinNvFp4LinearKernel],
     )
     monkeypatch.setattr(
-        MarlinNvFp4LinearKernel,
+        B12xNvFp4W4A16LinearKernel,
         "is_supported",
         classmethod(lambda cls, compute_capability=None: (True, None)),
     )
 
     kernel = init_nvfp4_linear_kernel(use_a16=True)
 
-    assert isinstance(kernel, MarlinNvFp4LinearKernel)
+    assert isinstance(kernel, B12xNvFp4W4A16LinearKernel)
 
 
 def test_b12x_nvfp4_apply_calls_native_blockscaled_gemm(monkeypatch) -> None:
@@ -859,3 +860,65 @@ def test_b12x_nvfp4_apply_calls_native_blockscaled_gemm(monkeypatch) -> None:
         layer.alpha,
     )
     assert kwargs == {"out_dtype": torch.bfloat16}
+
+
+@pytest.mark.parametrize("m,n,k", [(2, 136, 96), (17, 256, 256)])
+@torch.inference_mode()
+def test_b12x_nvfp4_w4a16_preserves_bf16_activations_under_graph_replay(
+    monkeypatch, default_vllm_config, m, n, k
+) -> None:
+    import vllm.model_executor.kernels.linear.nvfp4.b12x as b12x_mod
+
+    supported, reason = B12xNvFp4W4A16LinearKernel.is_supported()
+    if not supported:
+        pytest.skip(reason)
+
+    def reject_activation_quantization(*args, **kwargs):
+        pytest.fail("W4A16 must not quantize activations")
+
+    monkeypatch.setattr(b12x_mod, "scaled_fp4_quant", reject_activation_quantization)
+    default_vllm_config.scheduler_config.max_num_batched_tokens = 32
+    default_vllm_config.scheduler_config.max_num_scheduled_tokens = 32
+    default_vllm_config.compilation_config.cudagraph_capture_sizes = [1, 2, 4]
+    torch.manual_seed(17)
+    codes = torch.randint(0, 16, (n, k), device="cuda")
+    scales = (2.0 ** torch.randint(-2, 2, (n, k // 16), device="cuda")).to(
+        torch.float8_e4m3fn
+    )
+    layer = torch.nn.Module()
+    layer.weight = torch.nn.Parameter(
+        (codes[:, ::2] | codes[:, 1::2] << 4).to(torch.uint8), requires_grad=False
+    )
+    layer.weight_scale = torch.nn.Parameter(scales, requires_grad=False)
+    layer.weight_global_scale = torch.nn.Parameter(
+        torch.tensor([0.125], device="cuda"), requires_grad=False
+    )
+    lut = torch.tensor(
+        [0, 0.5, 1, 1.5, 2, 3, 4, 6, 0, -0.5, -1, -1.5, -2, -3, -4, -6],
+        device="cuda",
+    )
+    decoded = lut[codes] * scales.float().repeat_interleave(16, dim=1) * 0.125
+    x_storage = torch.randn(1, m, k * 2, device="cuda", dtype=torch.bfloat16)
+    x = x_storage[..., ::2]
+    bias = torch.randn(n, device="cuda", dtype=torch.bfloat16)
+    kernel = B12xNvFp4W4A16LinearKernel(None)
+    kernel.process_weights_after_loading(layer)
+    try:
+        kernel.get_b12x_warmup_unit(layer, (1, 2, 4, 32), x.dtype).compile()
+        run = torch.compile(
+            lambda inputs: kernel.apply_weights(layer, inputs, bias),
+            fullgraph=True,
+            dynamic=True,
+        )
+        run(x)
+        torch.cuda.synchronize()
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            actual = run(x)
+        for _ in range(2):
+            x_storage.normal_()
+            graph.replay()
+            expected = (x.double() @ decoded.double().T).bfloat16() + bias
+            torch.testing.assert_close(actual, expected, atol=0.005, rtol=0.01)
+    finally:
+        layer.b12x_nvfp4_a16_finalizer()

@@ -3,9 +3,12 @@
 
 from __future__ import annotations
 
+import weakref
+
 import torch
 
 from vllm._custom_ops import scaled_fp4_quant
+from vllm.config import get_current_vllm_config
 from vllm.model_executor.utils import replace_parameter
 from vllm.platforms import current_platform
 from vllm.utils.b12x import B12xWarmupUnit
@@ -138,4 +141,117 @@ class B12xNvFp4LinearKernel(NvFp4LinearKernel):
         )
 
 
-__all__ = ["B12xNvFp4LinearKernel"]
+class B12xNvFp4W4A16LinearKernel(B12xNvFp4LinearKernel):
+    """BF16 x NVFP4 GEMM with prepared b12x A16 execution plans."""
+
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        from b12x.preparation import PreparationSession, PreparedCall
+
+        super().process_weights_after_loading(layer)
+        blockscaled = _import_b12x_blockscaled()
+        assert blockscaled is not None
+        config = get_current_vllm_config()
+        scheduler = config.scheduler_config
+        capture_sizes = config.compilation_config.cudagraph_capture_sizes or []
+        capacity = max(
+            scheduler.max_num_batched_tokens,
+            scheduler.max_num_scheduled_tokens or 0,
+            *capture_sizes,
+        )
+        weight = layer.weight
+        scales = layer.weight_scale
+        global_scale = layer.weight_global_scale
+        n, packed_k = weight.shape
+        query = blockscaled.BlockscaledQuery(
+            recipe="nvfp4",
+            num_tokens=capacity,
+            in_features=packed_k * 2,
+            padded_in_features=packed_k * 2,
+            out_features=n,
+            activation_mode="a16",
+        )
+        plan = blockscaled.plan_regimes(
+            query, exact_m=tuple(sorted({m for m in capture_sizes if 0 < m < capacity}))
+        )
+        source = torch.zeros(
+            (capacity, packed_k * 2), dtype=torch.bfloat16, device=weight.device
+        )
+
+        def prepare_call(state):
+            return PreparedCall(
+                run=lambda: state.run(
+                    source[: state.query.num_tokens], weight, scales, global_scale
+                )
+            )
+
+        session = PreparationSession(
+            device=weight.device, autotune=False, compile_workers=0
+        )
+        try:
+            session.prepare(
+                (
+                    plan.request(
+                        name="nvfp4_w4a16",
+                        prepare_calls={m: prepare_call for m in plan.token_counts},
+                    ),
+                )
+            )
+        except BaseException:
+            session.close()
+            raise
+        previous_finalizer = getattr(layer, "b12x_nvfp4_a16_finalizer", None)
+        if previous_finalizer is not None:
+            previous_finalizer()
+        layer.b12x_nvfp4_a16_plan = plan
+        layer.b12x_nvfp4_a16_finalizer = weakref.finalize(layer, session.close)
+        layer.b12x_nvfp4_a16_finalizer.atexit = False
+
+    def get_b12x_warmup_unit(
+        self,
+        layer: torch.nn.Module,
+        token_counts: tuple[int, ...],
+        output_dtype: torch.dtype,
+    ) -> B12xWarmupUnit:
+        def compile() -> None:
+            for tokens in token_counts:
+                source = torch.zeros(
+                    (tokens, layer.weight.shape[1] * 2),
+                    dtype=output_dtype,
+                    device=layer.weight.device,
+                )
+                self.apply_weights(layer, source)
+
+        return B12xWarmupUnit(
+            name="NVFP4 W4A16",
+            key=(
+                type(self),
+                layer.weight.device,
+                tuple(layer.weight.shape),
+                output_dtype,
+            ),
+            compile=compile,
+        )
+
+    def apply_weights(
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor,
+        bias: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        if x.dtype != torch.bfloat16:
+            raise ValueError(f"b12x NVFP4 W4A16 requires BF16 input, got {x.dtype}")
+        blockscaled = _import_b12x_blockscaled()
+        assert blockscaled is not None
+        output = blockscaled.w4a16(
+            x.reshape(-1, x.shape[-1]).contiguous(),
+            layer.weight,
+            layer.weight_scale,
+            layer.weight_global_scale,
+            plan=layer.b12x_nvfp4_a16_plan,
+        )
+        if bias is not None:
+            output = output + bias
+        return output.view(*x.shape[:-1], layer.weight.shape[0])
+
+
+__all__ = ["B12xNvFp4LinearKernel", "B12xNvFp4W4A16LinearKernel"]
