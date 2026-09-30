@@ -13,11 +13,17 @@ import torch
 
 import vllm.envs as envs
 from vllm.logger import init_logger
+from vllm.model_executor.model_loader.weight_cache.artifact_cache import (
+    DaemonArtifactCache,
+)
 from vllm.model_executor.warmup.b12x_warmup import b12x_warmup
 from vllm.model_executor.warmup.cutedsl_warmup import cutedsl_warmup
 from vllm.model_executor.warmup.deep_gemm_warmup import deep_gemm_warmup
 from vllm.model_executor.warmup.flashinfer_autotune_cache import (
+    dump_flashinfer_autotune_configs,
+    flashinfer_autotune_artifact_key,
     resolve_flashinfer_autotune_file,
+    try_load_flashinfer_autotune_configs,
     write_flashinfer_autotune_cache,
 )
 from vllm.model_executor.warmup.flashinfer_sparse_mla_warmup import (
@@ -45,6 +51,10 @@ from vllm.utils.deep_gemm import is_deep_gemm_supported
 from vllm.utils.flashinfer import has_flashinfer
 
 if TYPE_CHECKING:
+    from vllm.distributed.parallel_state import GroupCoordinator
+    from vllm.model_executor.model_loader.weight_cache.protocol import (
+        ArtifactCacheKey,
+    )
     from vllm.v1.worker.gpu_model_runner import GPUModelRunner
     from vllm.v1.worker.gpu_worker import Worker
 
@@ -425,7 +435,8 @@ def flashinfer_autotune(runner: "GPUModelRunner") -> None:
     )
 
     world = get_world_group()
-    pp_size = get_pp_group().world_size
+    pp_group = get_pp_group()
+    pp_size = pp_group.world_size
     tune_group = get_tp_group() if pp_size > 1 else world
     is_leader = tune_group.rank_in_group == 0
     tuner = AutoTuner.get()
@@ -438,6 +449,21 @@ def flashinfer_autotune(runner: "GPUModelRunner") -> None:
             tuple(sorted(skip_ops)),
         )
         autotune_kwargs["skip_ops"] = skip_ops
+
+    daemon_cache = DaemonArtifactCache.from_vllm_config(runner.vllm_config)
+    artifact_key = (
+        flashinfer_autotune_artifact_key(runner, skip_ops, pp_group.rank_in_group)
+        if daemon_cache is not None
+        else None
+    )
+    if _load_preloaded_autotune_table(
+        daemon_cache, artifact_key, tune_group, is_leader
+    ):
+        # Stages hit or miss independently, so match the world barrier that
+        # stages still tuning wait on below.
+        if world.world_size > 1:
+            world.barrier()
+        return
 
     cache_path = resolve_flashinfer_autotune_file(runner)
     if pp_size > 1:
@@ -492,3 +518,77 @@ def flashinfer_autotune(runner: "GPUModelRunner") -> None:
         world.barrier()
     if is_leader:
         tuner.save_configs(str(cache_path))
+    _publish_autotune_table(daemon_cache, artifact_key, tune_group, is_leader)
+
+
+def _load_preloaded_autotune_table(
+    daemon_cache: DaemonArtifactCache | None,
+    artifact_key: "ArtifactCacheKey | None",
+    tune_group: "GroupCoordinator",
+    is_leader: bool,
+) -> bool:
+    """Adopt a weight cache daemon's tuned table, skipping the whole pass.
+
+    A daemon only holds a table that a full pass produced for this exact key,
+    so a hit means every tactic this engine would profile is already chosen.
+    Only the leader is consulted, and its table is broadcast: the pass
+    averages its timings over the tuning group, so the tactics are the same
+    on every rank of it, and one collective keeps them on the same branch. A
+    rank that runs the pass while another skips it would deadlock on the
+    tuner's timing all-reduce.
+    """
+    if daemon_cache is None or artifact_key is None:
+        return False
+    table: bytes | None = None
+    if is_leader:
+        table = daemon_cache.get(artifact_key)
+        # Validate on the leader so a table from a foreign environment costs
+        # a full pass rather than a failed start. A rejected table leaves the
+        # tuner untouched, so falling through is safe.
+        if table is not None and not try_load_flashinfer_autotune_configs(table):
+            table = None
+    table = tune_group.broadcast_object(table, src=0)
+    if table is None:
+        return False
+    if not is_leader and not try_load_flashinfer_autotune_configs(table):
+        raise RuntimeError(
+            "The weight cache daemon's FlashInfer autotune table loaded on "
+            f"rank 0 but not on rank {tune_group.rank_in_group}; the ranks disagree "
+            "on their FlashInfer/CUDA environment or GPU model"
+        )
+    logger.info_once(
+        "Adopted the preloaded FlashInfer autotune table from the weight "
+        "cache daemon (%d bytes); skipping the autotune pass.",
+        len(table),
+    )
+    return True
+
+
+def _publish_autotune_table(
+    daemon_cache: DaemonArtifactCache | None,
+    artifact_key: "ArtifactCacheKey | None",
+    tune_group: "GroupCoordinator",
+    is_leader: bool,
+) -> None:
+    """Hand the freshly tuned table to every rank's weight cache daemon.
+
+    The daemons outlive the engine, so the next restart skips the pass
+    instead of repeating it. Each rank stores the leader's table on its own
+    daemon, so any of them can later serve it to a process that does not own
+    that GPU.
+    """
+    if daemon_cache is None or artifact_key is None:
+        return
+    table: bytes | None = None
+    if is_leader:
+        try:
+            table = dump_flashinfer_autotune_configs()
+        except Exception:
+            logger.exception("Failed to serialize the FlashInfer autotune table")
+    table = tune_group.broadcast_object(table, src=0)
+    if table is not None and daemon_cache.put(artifact_key, table):
+        logger.info_once(
+            "Handed the FlashInfer autotune table (%d bytes) to the weight "
+            "cache daemon; engine restarts will skip the autotune pass.",
+            len(table),
+        )

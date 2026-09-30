@@ -44,6 +44,7 @@ def _make_runner(modules, *, max_tokens: int = 8192, linear_backend: str = "auto
     return SimpleNamespace(
         scheduler_config=SimpleNamespace(max_num_batched_tokens=max_tokens),
         vllm_config=SimpleNamespace(
+            load_config=SimpleNamespace(load_format="auto"),
             kernel_config=SimpleNamespace(linear_backend=linear_backend),
             attention_config=SimpleNamespace(hisparse_config=None),
         ),
@@ -149,9 +150,11 @@ class _AutotuneGroup:
     def broadcast_object(self, obj, src=0):
         assert src == 0
         self.record(("broadcast", src))
+        trace = self.run.collectives[self.ranks][self.run.rank]
+        values = self.run.broadcasts[self.ranks]
         if self.rank_in_group == src:
-            self.run.broadcasts[self.ranks] = obj
-        return self.run.broadcasts[self.ranks]
+            values.append(obj)
+        return values[trace.count(("broadcast", src)) - 1]
 
     def barrier(self):
         self.record(("barrier",))
@@ -192,7 +195,7 @@ class _AutotuneRun:
         self.collectives: dict[tuple[int, ...], dict[int, list[tuple[Any, ...]]]] = (
             defaultdict(lambda: defaultdict(list))
         )
-        self.broadcasts = {}
+        self.broadcasts: dict[tuple[int, ...], list[Any]] = defaultdict(list)
         self.tuners = {}
         self.saves = []
         self.profile_groups = defaultdict(list)
@@ -205,7 +208,7 @@ class _AutotuneRun:
         return _AutotuneGroup(self, range(start, start + self.tp))
 
     def pipeline_group(self):
-        return SimpleNamespace(world_size=self.pp)
+        return SimpleNamespace(world_size=self.pp, rank_in_group=self.rank // self.tp)
 
     def set_group(self, group):
         self.tuning_group = group
@@ -313,3 +316,72 @@ def test_pp1_retains_world_synchronization_and_existing_cache_name(autotune_run)
         (0, "autotune_configs.json")
     ]
     assert all(groups == [(0, 1, 2, 3)] for groups in run.profile_groups.values())
+
+
+def test_pp_stages_adopt_daemon_tables_independently(autotune_run, monkeypatch):
+    """A stage adopting its table from the weight cache daemon while another
+    stage tunes must still meet it at the world barrier, and each stage must
+    only ever see the table tuned for it."""
+    run = autotune_run()
+    daemon = {1: json.dumps({"shared_gemm": 1}).encode()}
+
+    def put(key, table):
+        daemon[key] = table
+        return True
+
+    def load(table):
+        run.tuners[run.rank].cache.update(json.loads(table))
+        return True
+
+    monkeypatch.setattr(
+        warmup.DaemonArtifactCache,
+        "from_vllm_config",
+        lambda config: SimpleNamespace(get=daemon.get, put=put),
+    )
+    monkeypatch.setattr(
+        warmup,
+        "flashinfer_autotune_artifact_key",
+        lambda runner, skip_ops, pp_rank: pp_rank,
+    )
+    monkeypatch.setattr(warmup, "try_load_flashinfer_autotune_configs", load)
+    monkeypatch.setattr(
+        warmup,
+        "dump_flashinfer_autotune_configs",
+        lambda: json.dumps(run.tuners[run.rank].cache).encode(),
+    )
+
+    run.execute()
+    run.assert_collectives_match()
+    assert set(run.profile_groups) == {0, 1, 2, 3}
+    assert all(run.tuners[rank].cache == {"shared_gemm": 1} for rank in range(4, 8))
+    assert json.loads(daemon[0]) == {"shared_gemm": 0, "pp0_extra_gemm": 0}
+
+
+def _autotune_key(skip_ops=None, *, config_hash="cfg", workspace="ws"):
+    from vllm.model_executor.warmup.flashinfer_autotune_cache import (
+        flashinfer_autotune_artifact_key,
+    )
+
+    runner = SimpleNamespace(
+        vllm_config=SimpleNamespace(compute_hash=lambda include_version: config_hash)
+    )
+    with patch(
+        "vllm.model_executor.warmup.flashinfer_autotune_cache._flashinfer_workspace_id",
+        return_value=workspace,
+    ):
+        return flashinfer_autotune_artifact_key(runner, skip_ops)
+
+
+def test_flashinfer_autotune_key_distinguishes_skipped_ops():
+    """A hit lets an engine skip the autotune pass outright, so a table tuned
+    with ops skipped must not be adopted by an engine that tunes them -- those
+    ops would silently stay on their heuristics."""
+    assert _autotune_key() != _autotune_key({"fp4_gemm"})
+    assert _autotune_key({"fp4_gemm"}) == _autotune_key(["fp4_gemm"])
+
+
+def test_flashinfer_autotune_key_tracks_config_and_flashinfer_build():
+    """Tactics are only valid for the graph they were measured on and the
+    build that measured them."""
+    assert _autotune_key() != _autotune_key(config_hash="other")
+    assert _autotune_key() != _autotune_key(workspace="other")

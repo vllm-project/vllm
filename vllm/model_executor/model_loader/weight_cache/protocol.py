@@ -45,6 +45,10 @@ _LEN_STRUCT = struct.Struct("!Q")
 # Sanity bound for a single message. IPC handles are tiny; only small
 # non-CUDA tensors are ever shipped by value.
 MAX_MSG_SIZE = 1 << 34
+# Host-side artifacts are configuration tables (the FlashInfer autotune table
+# is JSON in the kilobyte range), so cap them far below MAX_MSG_SIZE: unlike
+# the weights they are copied into the daemon's host memory and kept there.
+MAX_ARTIFACT_SIZE = 64 << 20
 
 
 def _current_uid() -> int:
@@ -349,6 +353,26 @@ class WeightCacheKey:
         ]
 
 
+@dataclass(frozen=True)
+class ArtifactCacheKey:
+    """Identifies a host-side artifact the daemon caches for engines.
+
+    Unlike the weights, these artifacts are plain bytes rather than GPU
+    allocations, so the daemon can hand one to any local process that reaches
+    its socket instead of only to the engine that owns the GPU.
+
+    The daemon treats the key as opaque and only ever returns bytes stored
+    under the exact key requested, so the producer must fold everything the
+    contents depend on into ``content_hash``.
+    """
+
+    kind: str
+    """Artifact type, e.g. "flashinfer_autotune"."""
+    content_hash: str
+    """Hash of every input the artifact's contents depend on."""
+    vllm_version: str = vllm.version.__version__
+
+
 @dataclass
 class TensorEntry:
     """A single cached tensor.
@@ -391,6 +415,39 @@ class WeightCacheState(NamedTuple):
     """Duplicate (tied) weight names aliased to their canonical entry."""
     attrs: dict[str, bool]
     """Python-side flags set by load_weights, e.g. EAGLE ownership flags."""
+
+
+def connect_daemon(
+    socket_path: str, timeout: float, *, strict_perms: bool = True
+) -> socket.socket:
+    """Connect to a daemon socket after verifying it is safe to trust.
+
+    The auto-derived per-user directory is locked to 0700 and checked
+    strictly. When the operator explicitly configures a path they own the
+    trust decision, so ``strict_perms=False`` enforces only ownership and
+    symlink safety.
+
+    Raises:
+        WeightCacheUnavailableError: If the socket is missing, untrusted or
+            not accepting connections.
+
+    """
+    try:
+        verify_socket_owner(socket_path, strict_perms=strict_perms)
+    except OSError as e:
+        raise WeightCacheUnavailableError(
+            f"Weight cache socket {socket_path} is unavailable: {e}"
+        ) from e
+    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    sock.settimeout(timeout)
+    try:
+        sock.connect(socket_path)
+    except OSError as e:
+        sock.close()
+        raise WeightCacheUnavailableError(
+            f"Cannot connect to weight cache daemon at {socket_path}: {e}"
+        ) from e
+    return sock
 
 
 def send_msg(sock: socket.socket, obj: Any) -> None:
