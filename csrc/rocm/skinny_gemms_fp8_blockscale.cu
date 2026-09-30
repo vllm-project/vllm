@@ -75,15 +75,37 @@ LogicalScaleStrides resolve_weight_scale_strides(const at::Tensor& scale,
                                                  int64_t n_groups,
                                                  int64_t k_groups) {
   TORCH_CHECK(scale.dim() == 2, "weight_scale must be rank-2");
-  if (scale.size(0) == n_groups && scale.size(1) == k_groups) {
-    return {scale.stride(0), scale.stride(1)};
-  }
-  if (scale.size(0) == k_groups && scale.size(1) == n_groups) {
-    return {scale.stride(1), scale.stride(0)};
-  }
-  TORCH_CHECK(false,
+  const int64_t s0 = scale.stride(0);
+  const int64_t s1 = scale.stride(1);
+  const bool shape_canonical =
+      scale.size(0) == n_groups && scale.size(1) == k_groups;
+  const bool shape_transposed =
+      scale.size(0) == k_groups && scale.size(1) == n_groups;
+  TORCH_CHECK(shape_canonical || shape_transposed,
               "weight_scale must be [N/128, K/128] or [K/128, N/128], got ",
               scale.sizes());
+
+  // When n_groups == k_groups (e.g. the wo_b case with N == K == 4096) the two
+  // legal shapes are identical, so shape alone cannot tell a canonical
+  // [N/128, K/128] tensor from a transposed [K/128, N/128] view. Disambiguate
+  // from the contiguous (unit-stride) dimension instead of silently trusting
+  // the shape-order match, which would otherwise read the transposed element
+  // scale[k_group, n_group] in place of scale[n_group, k_group].
+  if (n_groups == k_groups) {
+    const bool k_contiguous = (s1 == 1);
+    const bool n_contiguous = (s0 == 1);
+    TORCH_CHECK(k_contiguous != n_contiguous,
+                "square weight_scale layout is ambiguous; expected exactly one "
+                "contiguous dimension, got strides ",
+                scale.strides());
+    // k_contiguous  -> row-major [n_groups, k_groups]
+    // n_contiguous  -> transposed view of [n_groups, k_groups]
+    return k_contiguous ? LogicalScaleStrides{s0, s1}
+                        : LogicalScaleStrides{s1, s0};
+  }
+
+  return shape_canonical ? LogicalScaleStrides{s0, s1}
+                         : LogicalScaleStrides{s1, s0};
 }
 
 __device__ __forceinline__ const uint8_t* bpreshuffle_ptr(const uint8_t* base,
