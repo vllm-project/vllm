@@ -25,6 +25,7 @@ from vllm.v1.hisparse.layout import (
     get_hisparse_host_pool_bytes,
     get_hisparse_kv_cache_config,
     get_hisparse_kv_cache_groups,
+    get_hisparse_pool_bytes_per_block,
 )
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
@@ -1152,6 +1153,16 @@ def _pool_bytes_per_block(kv_cache_groups: list[KVCacheGroupSpec]) -> int:
     capacity once `num_gpu_blocks_override` is applied.
     """
     return _get_kv_cache_bytes_per_block(kv_cache_groups)
+
+
+def _projected_pool_bytes_per_block(
+    vllm_config: VllmConfig, kv_cache_groups: list[KVCacheGroupSpec]
+) -> int:
+    """`_pool_bytes_per_block` for projected groups. HiSparse replaces them with
+    its own device groups, so its pool's block size differs."""
+    if vllm_config.attention_config.hisparse_config is not None:
+        return get_hisparse_pool_bytes_per_block(vllm_config, kv_cache_groups)
+    return _pool_bytes_per_block(kv_cache_groups)
 
 
 def get_uniform_page_size(kv_cache_specs: Iterable[KVCacheSpec]) -> int:
@@ -2780,7 +2791,7 @@ def get_kv_cache_configs(
             if not groups:
                 adjusted_memory.append(avail_mem)
                 continue
-            bytes_per_block = _pool_bytes_per_block(groups)
+            bytes_per_block = _projected_pool_bytes_per_block(vllm_config, groups)
             logger.info(
                 "Overriding num_gpu_blocks=%d with num_gpu_blocks_override=%d",
                 avail_mem // bytes_per_block,
@@ -2796,7 +2807,9 @@ def get_kv_cache_configs(
     # the capacity check both plan against usable blocks. Allocation below
     # still uses the full memory.
     check_memory = [
-        avail_mem - _pool_bytes_per_block(groups) if groups else avail_mem
+        avail_mem - _projected_pool_bytes_per_block(vllm_config, groups)
+        if groups
+        else avail_mem
         for groups, avail_mem in zip(projected_groups_per_worker, available_memory)
     ]
 

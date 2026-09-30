@@ -112,24 +112,39 @@ def _partition_hisparse_specs(
     return source_specs, indexer_specs
 
 
+def get_hisparse_pool_bytes_per_block(
+    vllm_config: VllmConfig, kv_cache_groups: list[KVCacheGroupSpec]
+) -> int:
+    """Bytes per block of the GPU pool HiSparse builds from these groups."""
+    from vllm.v1.core.kv_cache_utils import _get_kv_cache_bytes_per_block
+
+    _, device_groups = _create_hisparse_groups(vllm_config, kv_cache_groups)
+    return _get_kv_cache_bytes_per_block(device_groups)
+
+
 def get_hisparse_gpu_memory_usage(
     vllm_config: VllmConfig,
     kv_cache_groups: list[KVCacheGroupSpec],
 ) -> int:
-    _, indexer_specs = _partition_hisparse_specs(kv_cache_groups)
-    return sum(
-        spec.max_memory_usage_bytes(vllm_config) for spec in indexer_specs.values()
-    ) + sum(
-        group.kv_cache_spec.max_memory_usage_bytes(vllm_config)
-        for group in kv_cache_groups[1:]
+    """GPU pool bytes one request at max_model_len draws: every device group
+    (indexer, resident and hot) takes its own blocks from the shared pool."""
+    from vllm.v1.core.kv_cache_utils import _get_kv_cache_bytes_per_block
+
+    _, device_groups = _create_hisparse_groups(vllm_config, kv_cache_groups)
+    num_blocks = sum(
+        cdiv(
+            group.kv_cache_spec.max_memory_usage_bytes(vllm_config),
+            group.kv_cache_spec.page_size_bytes,
+        )
+        for group in device_groups
     )
+    return num_blocks * _get_kv_cache_bytes_per_block(device_groups)
 
 
-def create_hisparse_layout(
-    vllm_config: VllmConfig,
-    groups: list[KVCacheGroupSpec],
-    host_budget: int,
-) -> HiSparseLayout:
+def _create_hisparse_groups(
+    vllm_config: VllmConfig, groups: list[KVCacheGroupSpec]
+) -> tuple[KVCacheGroupSpec, list[KVCacheGroupSpec]]:
+    """The host source group and the GPU groups sharing HiSparse's device pool."""
     source_specs, indexer_specs = _partition_hisparse_specs(groups)
     block_sizes = {
         spec.block_size for spec in (*source_specs.values(), *indexer_specs.values())
@@ -225,11 +240,18 @@ def create_hisparse_layout(
         enable_kv_transfer=True,
     )
     regular_groups = groups[1:]
-    gpu_groups = [indexer_group, *resident_groups, *hot_groups, *regular_groups]
+    return source_group, [indexer_group, *resident_groups, *hot_groups, *regular_groups]
 
+
+def create_hisparse_layout(
+    vllm_config: VllmConfig,
+    groups: list[KVCacheGroupSpec],
+    host_budget: int,
+) -> HiSparseLayout:
+    source_group, gpu_groups = _create_hisparse_groups(vllm_config, groups)
     shared_host_pool = use_shared_hisparse_host_pool(vllm_config)
     host_block_stride = get_hisparse_host_block_stride(
-        sum(spec.page_size_bytes for spec in source_specs.values()),
+        source_group.kv_cache_spec.page_size_bytes,
         use_shared_host_pool=shared_host_pool,
     )
     host_num_blocks = host_budget // host_block_stride
@@ -237,7 +259,13 @@ def create_hisparse_layout(
         raise ValueError("HiSparse has no allocatable host blocks.")
     # Every computed page needs a host block, so one request at max_model_len
     # must fit alongside the pool's null block and a copy-on-write tail.
-    min_host_blocks = cdiv(vllm_config.model_config.max_model_len, gpu_block_size) + 2
+    min_host_blocks = (
+        cdiv(
+            vllm_config.model_config.max_model_len,
+            source_group.kv_cache_spec.block_size,
+        )
+        + 2
+    )
     if host_num_blocks < min_host_blocks:
         raise ValueError(
             f"HiSparse host pool has {host_num_blocks} blocks but max_model_len "

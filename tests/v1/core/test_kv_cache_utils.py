@@ -59,7 +59,6 @@ from vllm.v1.core.kv_cache_utils import (
 )
 from vllm.v1.hisparse.layout import (
     create_hisparse_layout,
-    get_hisparse_gpu_memory_usage,
 )
 from vllm.v1.kv_cache_interface import (
     ChunkedLocalAttentionSpec,
@@ -142,11 +141,6 @@ def test_hisparse_hma_uses_resolved_gpu_block_size(
             get_resolved_kv_cache_layout=lambda: KVCacheLayout.BLHNC,
         ),
     )
-    indexer_spec = specs["model.layers.0.self_attn.indexer"]
-    assert get_hisparse_gpu_memory_usage(config, [group]) == (
-        indexer_spec.max_memory_usage_bytes(config)
-    )
-
     monkeypatch.setattr(kv_cache_utils, "get_hisparse_host_pool_bytes", lambda _: 2**30)
     cache_config = kv_cache_utils.get_kv_cache_config_from_groups(
         config, [group], available_memory=2**30
@@ -248,6 +242,43 @@ def test_hisparse_host_pool_must_fit_max_model_len(monkeypatch, extra_blocks, ok
     else:
         with pytest.raises(ValueError, match="increase host_pool_gib"):
             create_hisparse_layout(config, [group], host_budget=host_budget)
+
+
+@pytest.mark.parametrize("num_gpu_blocks,ok", [(160, False), (1000, True)])
+def test_hisparse_pool_must_fit_max_model_len(monkeypatch, num_gpu_blocks, ok):
+    """Each resident group takes its own blocks from HiSparse's shared GPU pool,
+    so a pool that fits only the indexer pages must be rejected at startup."""
+    monkeypatch.setattr(
+        hisparse_runtime_module.current_platform, "is_cuda_alike", lambda: True
+    )
+    monkeypatch.setattr(kv_cache_utils, "get_hisparse_host_pool_bytes", lambda _: 2**30)
+    specs: dict[str, KVCacheSpec] = {}
+    for i in range(4):
+        specs[f"model.layers.{i}.self_attn"] = MLAAttentionSpec(
+            block_size=64,
+            num_kv_heads=1,
+            head_size=576,
+            dtype=torch.bfloat16,
+            is_index_group_leader=True,
+        )
+        specs[f"model.layers.{i}.self_attn.indexer"] = MLAAttentionSpec(
+            block_size=64,
+            num_kv_heads=1,
+            head_size=128,
+            dtype=torch.bfloat16,
+            cache_role=SparseCacheRole.INDEXER,
+        )
+    config = VllmConfig(model_config=ModelConfig(max_model_len=8192))
+    config.attention_config.hisparse_config = HiSparseConfig()
+    config.model_config.hf_config.index_topk = 128
+    config.cache_config.num_gpu_blocks_override = num_gpu_blocks
+    config.cache_config.kv_cache_layout = "BLHNC"
+
+    if ok:
+        kv_cache_utils.get_kv_cache_configs(config, [specs], [2**34])
+    else:
+        with pytest.raises(ValueError, match="max seq len"):
+            kv_cache_utils.get_kv_cache_configs(config, [specs], [2**34])
 
 
 def test_hisparse_rejects_deepseek_v4():
