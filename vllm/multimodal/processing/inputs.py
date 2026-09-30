@@ -37,13 +37,9 @@ class ProcessorInputs:
         owned_items = MultiModalDataItems()
         for modality, items in self.mm_data_items.items():
             if isinstance(items, ProcessorBatchItems):
-                items = items.select(range(items.get_count()))
-                items.data = [
-                    MediaRef(item.decode, item.data, item.spec, key=item.key)
-                    if isinstance(item, MediaRef)
-                    else item
-                    for item in items.get_all_raw()
-                ]
+                items = items.map_raw(
+                    lambda item: item.fork() if isinstance(item, MediaRef) else item
+                )
             owned_items[modality] = items
         return replace(self, mm_data_items=owned_items)
 

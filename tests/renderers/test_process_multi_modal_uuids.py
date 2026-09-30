@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-
 import asyncio
 import threading
 from concurrent.futures import Future, ThreadPoolExecutor
@@ -18,6 +17,7 @@ from vllm.multimodal.media import MediaRef
 from vllm.multimodal.parse import MultiModalDataParser, parse_mm_uuids
 from vllm.multimodal.processing import MultiModalApplyState, ProcessorInputs
 from vllm.multimodal.processing.context import TimingContext
+from vllm.multimodal.processing.processor import MediaDecodeJob
 from vllm.renderers.base import BaseRenderer
 from vllm.renderers.hf import HfRenderer
 from vllm.tokenizers.registry import cached_tokenizer_from_config
@@ -319,7 +319,10 @@ async def test_multimodal_cancellation_drains_executor_work(stage, monkeypatch):
     owned = inputs.mm_data_items["image"].get_raw(0)
     decoded: Future[Image.Image] = Future()
     state = MultiModalApplyState(
-        inputs, TimingContext(enabled=False), None, [("image", 0, decoded)]
+        inputs,
+        TimingContext(enabled=False),
+        None,
+        [MediaDecodeJob("image", 0, decoded)],
     )
     entered = threading.Event()
     proceed = threading.Event()

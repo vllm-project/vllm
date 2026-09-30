@@ -6,7 +6,7 @@ import json
 import threading
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
 from typing import Any, Generic, TypeVar, cast
@@ -19,39 +19,33 @@ _U = TypeVar("_U")
 _LENGTH_BYTES = 8
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, init=False)
 class DecodeSpec:
-    """The resolved decode configuration behind a [`MediaRef`][].
+    """Canonical snapshot of the decode settings included in a media key."""
 
-    Every setting that parameterizes the decode, or that mutates the media
-    relative to its encoded bytes (e.g. an RGBA->RGB conversion), belongs
-    here: the spec is folded into the ref's cache key, so items that decode
-    differently can never share a processor cache entry. Because the spec
-    covers the whole resolved decode configuration, `media_io_kwargs` does not
-    have to be hashed separately for a ref -- one place decides what media
-    identity means, and it cannot drift from the key.
-    """
+    _canonical: bytes
 
-    settings: Mapping[str, Any] = field(default_factory=dict)
+    def __init__(self, settings: Mapping[str, Any] | None = None) -> None:
+        canonical = json.dumps(
+            dict(settings) if settings is not None else {},
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+        object.__setattr__(self, "_canonical", canonical)
+
+    @property
+    def settings(self) -> Mapping[str, Any]:
+        """Return a fresh copy of the settings without exposing mutable state."""
+        return json.loads(self._canonical)
 
     def extend(self, **settings: Any) -> "DecodeSpec":
         """Return a copy with `settings` merged over the current ones."""
         return DecodeSpec({**self.settings, **settings})
 
     def digest(self) -> bytes:
-        """The canonical byte form of this spec, for key derivation.
-
-        Keys are sorted so that two requests supplying the same options in a
-        different order derive the same key. Settings come from JSON-sourced
-        kwargs (`--media-io-kwargs`, the `media_io_kwargs` API field), so they
-        are JSON-native in practice; `repr` only catches exotic values.
-        """
-        return json.dumps(
-            self.settings,
-            sort_keys=True,
-            separators=(",", ":"),
-            default=repr,
-        ).encode("utf-8")
+        """Return the canonical JSON bytes used for key derivation."""
+        return self._canonical
 
 
 def derive_media_key(data: bytes, spec: DecodeSpec) -> bytes:
@@ -154,6 +148,10 @@ class MediaRef(Generic[_T]):
                 if media is _UNDECODED:
                     media = self._media = decoder()
         return cast(_T, media)
+
+    def fork(self) -> "MediaRef[_T]":
+        """Borrow this ref through an independently releasable wrapper."""
+        return MediaRef(self.decode, self._data, self.spec, key=self.key)
 
     def map(
         self,

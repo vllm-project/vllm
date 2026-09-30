@@ -31,6 +31,7 @@ from vllm.multimodal.processing.context import (
 from vllm.multimodal.processing.inputs import ProcessorInputs
 from vllm.multimodal.processing.processor import (
     BaseMultiModalProcessor,
+    MediaDecodeJob,
     MultiModalApplyState,
     PlaceholderFeaturesInfo,
     PromptIndexTargets,
@@ -2002,7 +2003,7 @@ def test_lazy_cancellation_drains_decodes_before_release():
         _lazy_inputs(_LazyTestProcessor(), [ref], None),
         TimingContext(enabled=False),
         None,
-        [("image", 0, future)],
+        [MediaDecodeJob("image", 0, future)],
     )
 
     async def cancel_decode_wait():

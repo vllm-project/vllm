@@ -24,6 +24,29 @@ def cancel_task_threadsafe(task: Task):
         run_in_loop(task.get_loop(), task.cancel)
 
 
+async def await_with_cancellation_drain(
+    future: Future[T],
+    *,
+    on_cancel: Callable[[], None] | None = None,
+) -> T:
+    """Shield work and drain it before propagating caller cancellation."""
+    try:
+        return await asyncio.shield(future)
+    except asyncio.CancelledError:
+        if on_cancel is not None:
+            on_cancel()
+        while not future.done():
+            try:
+                await asyncio.shield(future)
+            except asyncio.CancelledError:
+                continue
+            except Exception:
+                break
+        if not future.cancelled():
+            future.exception()
+        raise
+
+
 def make_async(
     func: Callable[P, T],
     executor: Executor | None = None,

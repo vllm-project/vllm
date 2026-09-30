@@ -48,7 +48,7 @@ from vllm.multimodal.processing import BaseMultiModalProcessor, MultiModalApplyS
 from vllm.multimodal.processing import ProcessorInputs as MMProcessorInputs
 from vllm.multimodal.registry import MultiModalTimingRegistry
 from vllm.tokenizers import TokenizerLike
-from vllm.utils.async_utils import make_async
+from vllm.utils.async_utils import await_with_cancellation_drain, make_async
 from vllm.utils.counter import AtomicCounter
 from vllm.utils.torch_utils import set_default_torch_num_threads
 from vllm.v1.metrics.stats import MultiModalCacheStats
@@ -1005,21 +1005,14 @@ class BaseRenderer(ABC, Generic[_T]):
                 if state is not None:
                     state.release()
 
-        operation = asyncio.create_task(run_phases())
-        try:
-            result = await asyncio.shield(operation)
-        except asyncio.CancelledError:
+        def mark_cancelled() -> None:
+            nonlocal cancelled
             cancelled = True
-            while not operation.done():
-                try:
-                    await asyncio.shield(operation)
-                except asyncio.CancelledError:
-                    continue
-                except Exception:
-                    break
-            if not operation.cancelled():
-                operation.exception()
-            raise
+
+        operation = asyncio.create_task(run_phases())
+        result = await await_with_cancellation_drain(
+            operation, on_cancel=mark_cancelled
+        )
         assert result is not None
         return result
 

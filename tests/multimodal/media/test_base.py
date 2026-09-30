@@ -267,3 +267,32 @@ def test_media_ref_pickle_after_release_before_decode_raises():
 
     with pytest.raises(RuntimeError, match="released"):
         pickle.dumps(ref)
+
+
+def test_media_ref_fork_release_preserves_borrowed_ref():
+    decoder = _CountingDecoder("decoded")
+    parent = MediaRef(decoder, b"payload", DecodeSpec({"backend": "test"}))
+    borrowed = parent.fork()
+    assert borrowed.key == parent.key
+    assert borrowed.spec == parent.spec
+    borrowed.release()
+    assert parent.data == b"payload"
+    assert parent.decode() == "decoded"
+    assert decoder.calls == 1
+
+
+def test_decode_spec_snapshots_nested_settings():
+    settings = {"nested": {"values": [1, 2]}}
+    spec = DecodeSpec(settings)
+    digest = spec.digest()
+    settings["nested"]["values"].append(3)
+    spec.settings["nested"]["values"].append(4)
+    assert spec.settings == {"nested": {"values": [1, 2]}}
+    assert spec.digest() == digest
+    assert pickle.loads(pickle.dumps(spec)) == spec
+
+
+@pytest.mark.parametrize("value", [object(), float("nan"), float("inf")])
+def test_decode_spec_rejects_noncanonical_values(value):
+    with pytest.raises((TypeError, ValueError)):
+        DecodeSpec({"value": value})

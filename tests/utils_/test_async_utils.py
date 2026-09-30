@@ -5,7 +5,10 @@ from collections.abc import AsyncIterator
 
 import pytest
 
-from vllm.utils.async_utils import merge_async_iterators
+from vllm.utils.async_utils import (
+    await_with_cancellation_drain,
+    merge_async_iterators,
+)
 
 
 async def _mock_async_iterator(idx: int):
@@ -62,3 +65,37 @@ async def test_merge_async_iterators_single_closes_underlying():
     assert await anext(merged) == (0, "x")
     await merged.aclose()
     assert closed
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fail", [False, True])
+async def test_cancellation_drain_preserves_cancellation_until_work_finishes(fail):
+    pending = asyncio.get_running_loop().create_future()
+    cancelled = asyncio.Event()
+    task = asyncio.create_task(
+        await_with_cancellation_drain(pending, on_cancel=cancelled.set)
+    )
+    await asyncio.sleep(0)
+    task.cancel()
+    await asyncio.wait_for(cancelled.wait(), timeout=5)
+    task.cancel()
+    await asyncio.sleep(0)
+    assert not task.done()
+    assert not pending.cancelled()
+    if fail:
+        pending.set_exception(RuntimeError("work failed"))
+    else:
+        pending.set_result("finished")
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(task, timeout=5)
+
+
+@pytest.mark.asyncio
+async def test_cancellation_drain_returns_result_and_propagates_work_errors():
+    pending = asyncio.get_running_loop().create_future()
+    pending.set_result("finished")
+    assert await await_with_cancellation_drain(pending) == "finished"
+    failed = asyncio.get_running_loop().create_future()
+    failed.set_exception(RuntimeError("work failed"))
+    with pytest.raises(RuntimeError, match="work failed"):
+        await await_with_cancellation_drain(failed)

@@ -97,18 +97,21 @@ class ImageMediaIO(MediaIO[Image.Image]):
         """
         try:
             image = Image.open(BytesIO(data))
-            w, h = image.size
-            max_pixels = envs.VLLM_MAX_IMAGE_PIXELS
-            if max_pixels > 0 and w * h > max_pixels:
-                raise ValueError(
-                    f"Image dimensions {w}x{h} ({w * h} pixels) exceed "
-                    f"the maximum of {max_pixels} pixels. Set "
-                    f"VLLM_MAX_IMAGE_PIXELS to increase this limit."
-                )
         except (OSError, Image.UnidentifiedImageError) as e:
             raise ValueError(f"Failed to load image: {e}") from e
 
+        self._validate_dimensions(image)
         return image
+
+    def _validate_dimensions(self, image: Image.Image) -> None:
+        w, h = image.size
+        max_pixels = envs.VLLM_MAX_IMAGE_PIXELS
+        if max_pixels > 0 and w * h > max_pixels:
+            raise ValueError(
+                f"Image dimensions {w}x{h} ({w * h} pixels) exceed "
+                f"the maximum of {max_pixels} pixels. Set "
+                f"VLLM_MAX_IMAGE_PIXELS to increase this limit."
+            )
 
     def _exif_key(self, header_image: Image.Image) -> bytes | None:
         """The EXIF `ImageID` cache key of a header-opened image, if it has one.
@@ -149,13 +152,10 @@ class ImageMediaIO(MediaIO[Image.Image]):
         """
         spec = self.get_decode_spec()
         try:
-            header_image = self.open_header(data)
-        except ValueError as e:
-            # The max-pixels ValueError has no __cause__ and stays eager;
-            # header parse failures (wrapping OSError) are deferred.
-            if e.__cause__ is None:
-                raise
+            header_image = Image.open(BytesIO(data))
+        except (OSError, Image.UnidentifiedImageError):
             return MediaRef(partial(self._decode_from_bytes, data), data, spec)
+        self._validate_dimensions(header_image)
         return MediaRef(
             partial(self._decode_pixels, header_image),
             data,

@@ -10,6 +10,7 @@ from enum import Enum
 from functools import lru_cache
 from typing import (
     TYPE_CHECKING,
+    Any,
     ClassVar,
     Generic,
     NamedTuple,
@@ -31,6 +32,7 @@ from vllm.inputs import (
 )
 from vllm.logger import init_logger
 from vllm.tokenizers import TokenizerLike
+from vllm.utils.async_utils import await_with_cancellation_drain
 from vllm.utils.collection_utils import flatten_2d_lists, full_groupby
 
 from ..inputs import (
@@ -1050,15 +1052,23 @@ def _decode_error(
     )
 
 
+class MediaDecodeJob(NamedTuple):
+    """A submitted decode and its location in the original request."""
+
+    modality: str
+    original_index: int
+    future: Future[Any]
+
+
 def _submit_ref_decodes(
     mm_data_items: MultiModalDataItems,
-) -> list[tuple[str, int, Future]]:
+) -> list[MediaDecodeJob]:
     """Submit decodes of all not-yet-decoded media refs to the media thread
     pool, without waiting for them.
 
     Selected items retain their original request indices.
     """
-    decodes = list[tuple[str, int, Future]]()
+    decodes = list[MediaDecodeJob]()
     for modality, items in mm_data_items.items():
         if not isinstance(items, ProcessorBatchItems):
             continue
@@ -1066,7 +1076,7 @@ def _submit_ref_decodes(
             item = items.get_raw(idx)
             if isinstance(item, MediaRef) and not item.is_decoded:
                 decodes.append(
-                    (
+                    MediaDecodeJob(
                         modality,
                         items.get_original_index(idx),
                         global_thread_pool.submit(item.decode),
@@ -1075,17 +1085,17 @@ def _submit_ref_decodes(
     return decodes
 
 
-def _collect_ref_decodes(decodes: list[tuple[str, int, Future]]) -> None:
+def _collect_ref_decodes(decodes: list[MediaDecodeJob]) -> None:
     """Join all submitted decodes (in-flight work is never abandoned), then
     raise the first failure as VLLMUnprocessableEntityError so corrupt media
     surfaces as a client error (422) instead of a server error."""
     first_error: tuple[str, int, Exception] | None = None
-    for modality, idx, future in decodes:
+    for job in decodes:
         try:
-            future.result()
+            job.future.result()
         except Exception as error:
             if first_error is None:
-                first_error = (modality, idx, error)
+                first_error = (job.modality, job.original_index, error)
 
     if first_error is not None:
         modality, idx, cause = first_error
@@ -1108,16 +1118,20 @@ class MultiModalApplyState:
     mm_hashes: MultiModalHashes | None
     """None on the no-cache path, where hashes are computed in phase 2."""
 
-    decodes: list[tuple[str, int, Future]]
-    """(modality, index, future) triples for each media ref whose decode was
-    submitted to the media thread pool."""
+    decodes: list[MediaDecodeJob]
+    """Submitted decodes, with their original request locations."""
+
+    _released: bool = field(default=False, init=False, repr=False)
 
     def release(self) -> None:
-        """Release owned refs after decoding and processing have finished.
+        """Release owned refs once, after decoding and processing have finished.
 
         Selected cache misses share the state's wrappers. Borrowed input refs
         and their mapped parents remain caller-owned and reusable.
         """
+        if self._released:
+            return
+        self._released = True
         for items in self.inputs.mm_data_items.values():
             if isinstance(items, ProcessorBatchItems):
                 for item in items.get_all_raw():
@@ -1147,23 +1161,17 @@ class MultiModalApplyState:
         if not self.decodes:
             return
         pending = asyncio.gather(
-            *(asyncio.wrap_future(future) for _, _, future in self.decodes),
+            *(asyncio.wrap_future(job.future) for job in self.decodes),
             return_exceptions=True,
         )
         try:
             with self.timing_ctx.record("decode_mm_items"):
-                try:
-                    results = await asyncio.shield(pending)
-                except asyncio.CancelledError:
-                    while not pending.done():
-                        try:
-                            await asyncio.shield(pending)
-                        except asyncio.CancelledError:
-                            continue
-                    raise
-            for (modality, idx, _), result in zip(self.decodes, results):
+                results = await await_with_cancellation_drain(pending)
+            for job, result in zip(self.decodes, results):
                 if isinstance(result, Exception):
-                    raise _decode_error(modality, idx, result) from result
+                    raise _decode_error(
+                        job.modality, job.original_index, result
+                    ) from result
                 if isinstance(result, BaseException):
                     raise result
         except BaseException:

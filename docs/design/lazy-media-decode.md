@@ -22,7 +22,7 @@ The digest is sha256 rather than the configurable `MMHasherAlgorithm`. The key i
 
 Derivation is linear in the payload, so building refs on an event loop is offloaded to the media thread pool, in `MediaConnector._load_refs_async`.
 
-`DecodeSpec` holds every setting that parameterizes the decode or that mutates the media relative to its bytes: target image mode and RGBA background, audio backend, video backend and frame count, and so on. Each `MediaIO` subclass reports its own through `get_decode_spec()`. Because the whole resolved configuration sits inside the key, one place decides what media identity means and it cannot drift from the key.
+`DecodeSpec` holds every setting that parameterizes the decode or that mutates the media relative to its bytes: target image mode and RGBA background, audio backend, video backend and frame count, and so on. Each `MediaIO` subclass reports its own through `get_decode_spec()`. The spec snapshots settings as canonical JSON bytes; reading `settings` returns a fresh copy. Unsupported values and non-finite numbers are rejected. Because the whole resolved configuration sits inside the key, one place decides what media identity means and it cannot drift from the key.
 
 ### Decoding, mapping and release
 
@@ -31,6 +31,8 @@ Derivation is linear in the payload, so building refs on an event loop is offloa
 `map(transform, **settings)` takes a transform from `_T` to `_U` and returns a `MediaRef[_U]` decoding to `transform(self.decode())`. It shares the parent's bytes rather than copying them. Supplied `settings` extend the spec and derive a new key from the parent's *key*, without re-digesting the payload; with no settings, the spec and key are preserved. The parse layer uses this to defer resampling, channel normalization and video metadata validation to the parallel decode phase.
 
 `release()` clears this ref's `data` and drops its decode closure, after any in-flight decode has finished. The closure can pin the bytes and, for images, the header-opened PIL image whose `fp` holds a second copy. Decoded media remains readable after release; an undecoded ref raises `RuntimeError` from `decode()` after release.
+
+`fork()` creates an independently releasable wrapper that borrows the parent's decode operation, bytes, spec and key. Processing owns these wrappers and leaves caller-supplied refs reusable.
 
 Release affects this ref's ownership of the payload. A mapped ref does not release a separately retained parent, because another consumer may still need that parent. Decoded results can also retain encoded bytes, such as a video's `original_video_bytes` metadata or a raw-bytes decoder's result. Those owners control the remaining lifetime of the payload.
 

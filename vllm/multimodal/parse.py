@@ -140,6 +140,14 @@ class ModalityDataItems(ABC, Generic[_T, _I]):
 class ProcessorBatchItems(ModalityDataItems[Sequence[_T | MediaRef[_T]], _T]):
     """Base class for data items that are arranged in a list."""
 
+    def map_raw(
+        self, transform: Callable[[_T | MediaRef[_T]], _T | MediaRef[_T]]
+    ) -> Self:
+        """Replace raw items in a copy, preserving their request indices."""
+        mapped = copy(self)
+        mapped.data = [transform(item) for item in self.data]
+        return mapped
+
     def get_count(self) -> int:
         return len(self.data)
 
