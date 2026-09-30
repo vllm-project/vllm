@@ -260,7 +260,21 @@ class QSAIndexer(nn.Module):
         out: torch.Tensor | None,
     ) -> torch.Tensor:
         from .ops.qsa import qsa_select_paged_tokens
+        from .ops.qsa_flydsl import flydsl_select_paged_tokens
 
+        selected = flydsl_select_paged_tokens(
+            q,
+            self.compressed_key_cache.kv_cache,
+            metadata.block_table,
+            metadata.token_to_req,
+            metadata.logical_positions,
+            metadata.seq_lens,
+            self.token_topk,
+            self.compress_ratio,
+            out,
+        )
+        if selected is not None:
+            return selected
         return qsa_select_paged_tokens(
             q,
             self.compressed_key_cache.kv_cache,
