@@ -32,13 +32,29 @@ curl -X POST $URL/weight_checker -H 'Content-Type: application/json' \
 curl -X POST $URL/weight_checker -H 'Content-Type: application/json' \
   -d '{"action":"reset"}'
 
-# 3. Transfer the original weights with start/update/finish_weight_update.
+# 3. Transfer the original weights with start_weight_update and update_weights.
 
-# 4. Compare against the baseline; expect {"match": true, "mismatches": []}.
-curl -X POST $URL/weight_checker -H 'Content-Type: application/json' \
-  -d "{\"action\":\"compare\",\"baseline\":$(jq .checksums baseline.json)}"
+# 4. Finish with the baseline; expect "match": true and empty "mismatches".
+curl -X POST $URL/finish_weight_update -H 'Content-Type: application/json' \
+  -d "{\"baseline\":$(jq .checksums baseline.json)}"
 
 curl -X POST $URL/resume
+```
+
+`POST /weight_checker` with `{"action": "compare", "baseline": ...}` runs the
+same comparison without finishing an update.
+
+With a trainer-side weight transfer engine, which finishes the update inside
+`send_weights()`, bind the baseline to the HTTP client. `finish_weight_update`
+then raises `RuntimeError` on a mismatch:
+
+```python
+from functools import partial
+
+client = HTTPVLLMWeightSyncClient(URL)
+client.finish_weight_update = partial(client.finish_weight_update, baseline=baseline)
+trainer = WeightTransferTrainerFactory.trainer_init(init_info, client=client, source=source)
+trainer.send_weights()
 ```
 
 ## Limitations

@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import os
+from functools import partial
 from unittest.mock import patch
 
 import pytest
@@ -108,15 +109,22 @@ def test_ipc_weight_transfer_restores_reset_weights():
         trainer_model = AutoModelForCausalLM.from_pretrained(
             MODEL_NAME, torch_dtype=torch.bfloat16
         ).cuda()
-        WeightTransferTrainerFactory.trainer_init(
+        client = HTTPVLLMWeightSyncClient(url)
+        # send_weights() finishes the update itself; this makes it verify too.
+        client.finish_weight_update = partial(  # type: ignore[method-assign]
+            client.finish_weight_update, baseline=baseline
+        )
+        trainer = WeightTransferTrainerFactory.trainer_init(
             IPCTrainerInitInfo(rank=0),
-            client=HTTPVLLMWeightSyncClient(url),
+            client=client,
             source=ModuleSource(trainer_model),
-        ).send_weights()
-        assert weight_checker(url, "compare", baseline).json() == {
-            "match": True,
-            "mismatches": [],
-        }
+        )
+        trainer.send_weights()
+
+        with torch.no_grad():
+            trainer_model.model.norm.weight.add_(1)
+        with pytest.raises(RuntimeError, match="model.norm.weight"):
+            trainer.send_weights()
 
 
 @multi_gpu_test(num_gpus=2)
