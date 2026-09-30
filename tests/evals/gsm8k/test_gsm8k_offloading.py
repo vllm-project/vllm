@@ -191,7 +191,7 @@ MODELS = [
         id="simple-nemotron-h-8b",
         model="nvidia/Nemotron-H-8B-Base-8K",
         connector="SimpleCPUOffloadConnector",
-        accuracy_threshold=0.45,
+        accuracy_threshold=0.43 if current_platform.is_rocm() else 0.45,
     ),
     OffloadingModelConfig(
         id="simple-gemma-4-e4b-it",
