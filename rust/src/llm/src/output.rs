@@ -11,8 +11,11 @@ use futures::stream::FusedStream;
 use futures::{Stream, StreamExt as _, pin_mut};
 use serde::{Deserialize, Serialize};
 use vllm_engine_core_client::protocol::logprobs::Logprobs;
-use vllm_engine_core_client::protocol::output::{EngineCoreFinishReason, StopReason};
+use vllm_engine_core_client::protocol::output::{
+    EngineCoreFinishReason, RequestSpecDecodeMetrics, StopReason,
+};
 use vllm_engine_core_client::protocol::sampling_mask::SamplingMask;
+use vllm_engine_core_client::protocol::tensor::WireNdArray;
 use vllm_engine_core_client::{AbortCause, EngineCoreOutputStream};
 
 use crate::error::Result;
@@ -36,6 +39,7 @@ pub struct CollectedGenerateOutput {
     pub request_id: String,
     pub prompt_token_ids: Vec<u32>,
     pub prompt_logprobs: Option<Logprobs>,
+    pub prompt_token_id_logprobs: Option<WireNdArray>,
     pub token_ids: Vec<u32>,
     pub logprobs: Option<Logprobs>,
     pub finish_reason: FinishReason,
@@ -47,6 +51,8 @@ pub struct CollectedGenerateOutput {
     pub ec_transfer_params: Option<serde_json::Value>,
     /// Sampling support sets aligned one-to-one with generated token positions.
     pub sampling_mask: Option<SamplingMask>,
+    /// Per-request speculative-decoding metrics from the terminal output.
+    pub spec_decode_metrics: Option<RequestSpecDecodeMetrics>,
 }
 
 /// Prompt-scoped metadata emitted only once on the first [`GenerateOutput`] for
@@ -58,6 +64,8 @@ pub struct GeneratePromptInfo {
     /// Prompt logprobs returned by engine-core for scored prompt positions,
     /// when requested.
     pub prompt_logprobs: Option<Logprobs>,
+    /// Log probabilities of `prompt_logprob_token_ids`, when requested.
+    pub prompt_token_id_logprobs: Option<WireNdArray>,
 }
 
 /// The reason a request finished.
@@ -160,6 +168,8 @@ pub struct GenerateOutput {
     pub ec_transfer_params: Option<serde_json::Value>,
     /// Sampling support sets aligned one-to-one with `token_ids`.
     pub sampling_mask: Option<SamplingMask>,
+    /// Per-request speculative-decoding metrics, present on terminal outputs.
+    pub spec_decode_metrics: Option<RequestSpecDecodeMetrics>,
 }
 
 impl GenerateOutput {
@@ -200,6 +210,7 @@ impl GenerateOutput {
             prompt_info: prompt_token_ids.map(|ids| GeneratePromptInfo {
                 prompt_token_ids: ids,
                 prompt_logprobs: None,
+                prompt_token_id_logprobs: None,
             }),
             token_ids,
             logprobs: None,
@@ -208,6 +219,7 @@ impl GenerateOutput {
             kv_transfer_params: None,
             ec_transfer_params: None,
             sampling_mask: None,
+            spec_decode_metrics: None,
         }
     }
 }
@@ -240,6 +252,7 @@ impl GenerateOutputStream {
             pending_prompt_info: Some(GeneratePromptInfo {
                 prompt_token_ids,
                 prompt_logprobs: None,
+                prompt_token_id_logprobs: None,
             }),
             raw_stream,
             request_metrics,
@@ -275,6 +288,11 @@ impl Stream for GenerateOutputStream {
             info.prompt_logprobs =
                 raw.new_prompt_logprobs_tensors.map(|value| value.into_direct().unwrap());
         }
+        if let Some(info) = &mut self.pending_prompt_info
+            && info.prompt_token_id_logprobs.is_none()
+        {
+            info.prompt_token_id_logprobs = raw.prompt_token_id_logprobs;
+        }
 
         let logprobs = raw.new_logprobs.map(|value| value.into_direct().unwrap());
         let sampling_mask = raw.new_sampling_mask.map(|value| value.into_direct().unwrap());
@@ -308,6 +326,7 @@ impl Stream for GenerateOutputStream {
             kv_transfer_params: raw.kv_transfer_params,
             ec_transfer_params: raw.ec_transfer_params,
             sampling_mask,
+            spec_decode_metrics: raw.spec_decode_metrics,
         };
 
         Poll::Ready(Some(Ok(output)))
@@ -353,6 +372,7 @@ impl<T: Stream<Item = Result<GenerateOutput>> + Send> T {
             pin_mut!(stream);
             let mut prompt_token_ids = None;
             let mut prompt_logprobs = None;
+            let mut prompt_token_id_logprobs = None;
             let mut cached_token_count = 0;
             let mut collected: Option<CollectedGenerateOutput> = None;
 
@@ -365,6 +385,9 @@ impl<T: Stream<Item = Result<GenerateOutput>> + Send> T {
                     }
                     if prompt_logprobs.is_none() {
                         prompt_logprobs = info.prompt_logprobs;
+                    }
+                    if prompt_token_id_logprobs.is_none() {
+                        prompt_token_id_logprobs = info.prompt_token_id_logprobs;
                     }
                 }
 
@@ -385,6 +408,7 @@ impl<T: Stream<Item = Result<GenerateOutput>> + Send> T {
                         request_id: output.request_id,
                         prompt_token_ids: prompt_token_ids.take().unwrap_or_default(),
                         prompt_logprobs: prompt_logprobs.take(),
+                        prompt_token_id_logprobs: prompt_token_id_logprobs.take(),
                         token_ids: output.token_ids,
                         logprobs: output.logprobs,
                         finish_reason: FinishReason::Error,
@@ -396,6 +420,7 @@ impl<T: Stream<Item = Result<GenerateOutput>> + Send> T {
                         kv_transfer_params: None,
                         ec_transfer_params: None,
                         sampling_mask,
+                        spec_decode_metrics: None,
                     });
                 }
 
@@ -409,6 +434,7 @@ impl<T: Stream<Item = Result<GenerateOutput>> + Send> T {
                     };
                     collected.kv_transfer_params = output.kv_transfer_params;
                     collected.ec_transfer_params = output.ec_transfer_params;
+                    collected.spec_decode_metrics = output.spec_decode_metrics;
                     if let Some(mask) = collected.sampling_mask.as_ref()
                         && mask.rows.len() != collected.token_ids.len()
                     {

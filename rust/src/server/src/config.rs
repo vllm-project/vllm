@@ -59,6 +59,9 @@ pub struct ApiServerOptions {
     pub enable_request_id_headers: bool,
     /// When `true`, register the scale-out `/inference/v1/generate` route.
     pub enable_scale_out: bool,
+    /// Idle interval after which streaming SSE responses send a keep-alive
+    /// comment. `None` disables keep-alive comments.
+    pub sse_keep_alive_interval: Option<Duration>,
 }
 
 /// CORS settings mirroring Python's `CORSMiddleware`; the default is permissive.
@@ -265,13 +268,18 @@ pub struct Config {
     #[educe(Debug(method(fmt_redacted_api_keys)))]
     pub api_keys: Vec<String>,
     /// When `true`, suppress periodic stats logging (throughput, queue depth,
-    /// cache usage).
+    /// cache usage). Engines also stop recording stats, so metrics derived from
+    /// engine-reported scheduler stats and request lifecycle events are not
+    /// exported.
     pub disable_log_stats: bool,
     /// TCP port for the gRPC Inference service. When `None`, no gRPC server is
     /// started.
     pub grpc_port: Option<u16>,
     /// Maximum time to wait for active HTTP/gRPC requests to drain on shutdown.
     pub shutdown_timeout: Duration,
+    /// Whether the caller manages the engine process and shuts it down when
+    /// the shutdown token is cancelled. Enables the gRPC `Control.Shutdown` RPC.
+    pub manages_engine: bool,
     /// Maximum idle time on a keep-alive HTTP connection before the server
     /// closes it (`VLLM_HTTP_TIMEOUT_KEEP_ALIVE`, default 5s).
     pub keep_alive_timeout: Duration,

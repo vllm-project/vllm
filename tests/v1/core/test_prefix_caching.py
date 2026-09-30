@@ -3,6 +3,7 @@
 """Compare the with and without prefix caching."""
 
 import copy
+import hashlib
 from collections.abc import Callable
 from dataclasses import replace
 from math import lcm
@@ -786,14 +787,15 @@ def test_hisparse_inflight_host_import_reserves_remaining_gpu_pages():
     assert required == 4
 
 
-@pytest.mark.parametrize(
-    "full_sequence_must_fit,host_num_blocks,admitted",
-    [(True, 2, False), (True, 3, True), (False, 2, False), (False, 3, True)],
-)
-def test_hisparse_async_admission_requires_only_import_destinations(
-    full_sequence_must_fit, host_num_blocks, admitted, tmp_path
+@pytest.mark.parametrize("host_num_blocks,admitted", [(5, False), (6, True)])
+def test_hisparse_async_admission_requires_full_prompt_host_pages(
+    host_num_blocks, admitted, tmp_path
 ):
-    """Imports need host destinations, but do not reserve future prefill pages."""
+    """An async load is admitted only if its whole prompt's host pages fit.
+
+    The in-flight prefill's host page is not free, so the waiting request's
+    four prompt pages need six host blocks including the null block.
+    """
     from .utils import create_scheduler, mock_kv
 
     (tmp_path / "config.json").write_text(
@@ -808,7 +810,7 @@ def test_hisparse_async_admission_requires_only_import_destinations(
     manager = make_hisparse_kv_cache_manager(32, host_num_blocks)
     scheduler.kv_cache_manager = manager
     scheduler.kv_cache_config = manager.kv_cache_config
-    scheduler.scheduler_reserve_full_isl = full_sequence_must_fit
+    assert scheduler.scheduler_reserve_full_isl
     inflight = make_request(
         "inflight", list(range(3 * HISPARSE_BLOCK_SIZE)), HISPARSE_BLOCK_SIZE, sha256
     )
@@ -824,6 +826,52 @@ def test_hisparse_async_admission_requires_only_import_destinations(
 
     assert (request in scheduler._inflight_prefills) == admitted
     assert bool(manager.get_blocks(request.request_id).blocks[0]) == admitted
+
+
+def test_hisparse_admitted_async_loads_can_finish_with_nothing_running(tmp_path):
+    """Admitted async loads must not strand each other on host capacity.
+
+    Waiting requests keep their blocks and are never preempted, so two imports
+    that each hold a host page while together needing more than the pool has
+    left would never be scheduled again. HiSparse relies on full-ISL admission:
+    a load is admitted only if its whole prompt's host pages fit, so the newest
+    admitted load can always finish and free host blocks for the others.
+    """
+    from .utils import create_scheduler, mock_kv
+
+    (tmp_path / "config.json").write_text(
+        '{"architectures": ["OPTForCausalLM"], "model_type": "opt"}'
+    )
+    scheduler = create_scheduler(
+        model=str(tmp_path),
+        skip_tokenizer_init=True,
+        max_model_len=128,
+        use_kv_connector=mock_kv(matched_tokens=HISPARSE_BLOCK_SIZE, is_async=True),
+    )
+    # One null block plus three usable host blocks.
+    manager = make_hisparse_kv_cache_manager(32, 4)
+    scheduler.kv_cache_manager = manager
+    scheduler.kv_cache_config = manager.kv_cache_config
+    assert scheduler.scheduler_reserve_full_isl
+    first = make_request(
+        "first", list(range(3 * HISPARSE_BLOCK_SIZE)), HISPARSE_BLOCK_SIZE, sha256
+    )
+    second = make_request(
+        "second",
+        list(range(1000, 1000 + 3 * HISPARSE_BLOCK_SIZE)),
+        HISPARSE_BLOCK_SIZE,
+        sha256,
+    )
+    for request in (first, second):
+        scheduler.add_request(request)
+        scheduler.schedule()
+    admitted = {r.request_id for r in scheduler._inflight_prefills}
+
+    scheduler.finished_recving_kv_req_ids.update(admitted)
+    num_scheduled_tokens = 0
+    for _ in range(4):
+        num_scheduled_tokens += scheduler.schedule().total_num_scheduled_tokens
+    assert num_scheduled_tokens > 0
 
 
 @pytest.mark.parametrize(
@@ -849,58 +897,47 @@ def test_hisparse_import_capacity_includes_hits_and_cow(
     assert host_pool.get_num_free_blocks() == free_blocks
     assert (
         coordinator.host_manager.get_num_blocks_to_allocate(
-            "waiting", 64, [hit], 32, local_tokens, 64
+            "waiting", 32, [hit], 32, local_tokens, 32
         )
         <= host_pool.get_num_free_blocks()
     ) == admitted
 
 
 @pytest.mark.parametrize("enable_caching", [False, True])
-def test_hisparse_host_exhaustion_keeps_gpu_pages_readable(enable_caching):
-    """Pages without a host destination must survive GPU cache reclamation."""
-    manager = make_hisparse_kv_cache_manager(32, 2, enable_caching=enable_caching)
+def test_hisparse_host_exhaustion_defers_allocation(enable_caching):
+    """Pages are only allocated with host backing, so every one can be reclaimed."""
+    manager = make_hisparse_kv_cache_manager(32, 5, enable_caching=enable_caching)
+    donor = make_request("donor", [99] * 16, HISPARSE_BLOCK_SIZE, sha256)
+    assert manager.allocate_slots(donor, 16) is not None
     request = make_request("resident", list(range(64)), HISPARSE_BLOCK_SIZE, sha256)
-    assert manager.allocate_slots(request, 64) is not None
+    free_gpu = manager.block_pool.get_num_free_blocks()
+    assert manager.allocate_slots(request, 64) is None
+    assert manager.block_pool.get_num_free_blocks() == free_gpu
+
+    # The donor's in-flight write-back holds its host block until acked.
+    manager.free(donor)
     coordinator = get_hisparse_coordinator(manager)
+    assert coordinator.has_pending_reclamation()
+    assert manager.allocate_slots(request, 64) is None
+    _publish_hisparse_pages(manager)
+    assert not coordinator.has_pending_reclamation()
+    assert manager.allocate_slots(request, 64) is not None
     host = coordinator.host_manager
     assert host is not None
-    assert [b.is_null for b in host.req_to_blocks[request.request_id]] == [
-        False,
-        True,
-        True,
-        True,
-    ]
+    assert not any(b.is_null for b in host.req_to_blocks[request.request_id])
     _publish_hisparse_pages(manager)
     for hot in coordinator.hot_managers:
         hot.require_hot(request.request_id)
         hot.allocate_new_blocks(request.request_id, 64, 64)
     coordinator.update_residency(request.request_id)
+    assert coordinator.request_states[request.request_id].unpinned_pages == {0, 1}
     for resident in coordinator.resident_managers:
-        for block in resident.req_to_blocks[request.request_id][1:]:
-            assert not block.is_null and block.ref_cnt > 0
-    assert coordinator.request_states[request.request_id].valid_pages == {0}
-    pool = coordinator.get_host_block_pool()
-    assert pool is not None
-    manager.free(request)
-    assert pool.get_num_free_blocks() == 1
-
-
-def test_hisparse_host_cow_takes_priority_over_new_pages():
-    """The last host block must hold the private tail, not a fresh page."""
-    manager = make_hisparse_kv_cache_manager(32, 3)
-    coordinator = get_hisparse_coordinator(manager)
-    host = coordinator.host_manager
-    assert host is not None
-    source = host.block_pool.get_new_blocks(1)[0]
-    host.req_to_blocks["cow"] = [source]
-    host._partial_hit_reqs["cow"] = (0, source)
-
-    host.allocate_new_blocks("cow", 32, 32)
-
-    private, missing = host.req_to_blocks["cow"]
-    assert not private.is_null and private is not source
-    assert missing.is_null
-    assert host.take_host_cow_copies() == [(source, private)]
+        assert [b.ref_cnt for b in resident.req_to_blocks[request.request_id]] == [
+            0,
+            0,
+            1,
+            1,
+        ]
 
 
 @pytest.mark.parametrize("failed", [False, True])
@@ -1340,12 +1377,12 @@ def make_kv_cache_config_three_types(
     )
 
 
-def test_prefix_cache_hit_uses_per_group_dcp_geometry():
+@pytest.mark.parametrize("draft_sharded", [True, False])
+def test_prefix_cache_hit_uses_per_group_dcp_geometry(draft_sharded):
     """Prefix lookup must use each group's DCP size, not the process-wide one.
 
-    Target and draft MLA are both sharded (DCP=8); Mamba stays replicated
-    (DCP=1). Hits then align to the sharded full-attention block, not the
-    unsharded page size.
+    Target MLA is sharded; draft MLA can opt out and Mamba stays replicated.
+    Hits must align to the target block in either case.
     """
     block_size = 16
     dcp = 8
@@ -1366,6 +1403,7 @@ def test_prefix_cache_hit_uses_per_group_dcp_geometry():
             KVCacheGroupSpec(
                 ["draft_mla"],
                 MLAAttentionSpec(
+                    dcp_sharded=draft_sharded,
                     block_size=block_size,
                     num_kv_heads=1,
                     head_size=1,
@@ -1392,10 +1430,10 @@ def test_prefix_cache_hit_uses_per_group_dcp_geometry():
     )
     target_mgr, draft_mgr, mamba_mgr = manager.coordinator.single_type_managers
     assert target_mgr.dcp_world_size == dcp
-    assert draft_mgr.dcp_world_size == dcp
+    assert draft_mgr.dcp_world_size == (dcp if draft_sharded else 1)
     assert mamba_mgr.dcp_world_size == 1
     assert target_mgr.block_size == sharded_block
-    assert draft_mgr.block_size == sharded_block
+    assert draft_mgr.block_size == (sharded_block if draft_sharded else block_size)
     assert mamba_mgr.block_size == block_size
 
     hash_fn = sha256
@@ -1411,7 +1449,11 @@ def test_prefix_cache_hit_uses_per_group_dcp_geometry():
     req1 = make_request("1", common_token_ids + [100] * 5, block_size, hash_fn)
     computed_blocks, num_computed_tokens, _ = manager.get_computed_blocks(req1)
     assert num_computed_tokens == 2 * sharded_block
-    assert [len(group) for group in computed_blocks.blocks] == [2, 2, 16]
+    assert [len(group) for group in computed_blocks.blocks] == [
+        2,
+        2 if draft_sharded else 16,
+        16,
+    ]
 
     manager.free(req0)
     manager.free(req1)
@@ -2273,7 +2315,7 @@ def test_hybrid_cache_mamba_align_shared_prefix_detection():
         use_eagle_block_drop=False,
         hash_block_size=block_size,
         mamba_partial_cache_hit=False,
-        mamba_fine_grained_prefix_cache=False,
+        mamba_shared_prefix_checkpoint=False,
         mamba_has_prefill_checkpoint_blocks=False,
     )
     req_2.shared_prefix_boundary = shared_prefix_boundary
@@ -2900,21 +2942,21 @@ def test_mm_prefix_caching():
         (
             kv_cache_utils.NONE_HASH,
             tuple(all_token_ids[:block_size]),
-            (("aaa", 11),),
+            (("mm", "aaa", 11),),
         )
     )
     assert block_hashes[1] == sha256(
         (
             block_hashes[0],
             tuple(all_token_ids[block_size : block_size * 2]),
-            (("aaa", -5), ("bbb", 14)),
+            (("mm", "aaa", -5), ("mm", "bbb", 14)),
         )
     )
     assert block_hashes[2] == sha256(
         (
             block_hashes[1],
             tuple(all_token_ids[block_size * 2 : block_size * 3]),
-            (("bbb", -2),),
+            (("mm", "bbb", -2),),
         )
     )
 
@@ -2937,7 +2979,7 @@ def test_mm_prefix_caching():
         (
             block_hashes[2],
             tuple(all_token_ids[3 * block_size :] + [8] * 5),
-            (("ccc", 0),),
+            (("mm", "ccc", 0),),
         )
     )
 
@@ -3063,6 +3105,24 @@ def test_mixed_prompt_embeds_mask_is_separate_from_embedding_bytes():
     assert manager.get_computed_blocks(pure)[1] == 0
 
 
+@pytest.mark.parametrize("mask", [None, [False] * 4, [True, False, True, False]])
+def test_mixed_prompt_embeds_event_keys_preserve_mask(mask):
+    """KV events must retain the full mask bytes after removing key tags."""
+    prompt_embeds = torch.zeros(4, 3)
+    request = make_request(
+        "event",
+        [0] * 4,
+        4,
+        sha256,
+        prompt_embeds=prompt_embeds,
+        prompt_is_token_ids=mask,
+    )
+    extra_keys, _ = kv_cache_utils.generate_block_hash_extra_keys(request, 0, 4, 0)
+    embeds_hash = hashlib.sha256(kv_cache_utils.tensor_data(prompt_embeds)).digest()
+    expected = (embeds_hash, bytes(mask)) if mask and any(mask) else (embeds_hash,)
+    assert kv_cache_utils.to_event_extra_keys([extra_keys, None]) == [expected, None]
+
+
 def test_cache_key_salting():
     """This tests that cache salts are applied during hashing and the cache
     is separated cache as expected.
@@ -3087,7 +3147,11 @@ def test_cache_key_salting():
     block_hashes = req0.block_hashes
     assert len(block_hashes) == 3
     assert block_hashes[0] == sha256(
-        (kv_cache_utils.NONE_HASH, tuple(token_ids[:block_size]), ("salt1",))
+        (
+            kv_cache_utils.NONE_HASH,
+            tuple(token_ids[:block_size]),
+            (("cache_salt", "salt1"),),
+        )
     )
     assert block_hashes[1] == sha256(
         (block_hashes[0], tuple(token_ids[block_size : block_size * 2]), None)
@@ -3132,7 +3196,11 @@ def test_cache_key_salting():
     block_hashes = req2.block_hashes
     assert len(block_hashes) == 3
     assert block_hashes[0] == sha256(
-        (kv_cache_utils.NONE_HASH, tuple(token_ids[:block_size]), ("salt2",))
+        (
+            kv_cache_utils.NONE_HASH,
+            tuple(token_ids[:block_size]),
+            (("cache_salt", "salt2"),),
+        )
     )
     assert block_hashes[1] == sha256(
         (block_hashes[0], tuple(token_ids[block_size : block_size * 2]), None)
@@ -6045,3 +6113,29 @@ def test_device_eviction_keeps_host_prefix():
     assert host_block.block_hash is not None, (
         "Device eviction invalidated unrelated host KV"
     )
+
+
+def test_get_unhashed_block_ids_all_groups():
+    """Unhashed, non-null block ids are reported per KV cache group.
+    A group with no unhashed blocks reports an empty list, not a missing entry.
+    """
+
+    def hashed(block_id: int, group_id: int) -> KVCacheBlock:
+        block = KVCacheBlock(block_id=block_id)
+        block.set_block_hash(make_block_hash_with_group_id(BlockHash(b"h"), group_id))
+        return block
+
+    blocks = KVCacheBlocks(
+        (
+            [
+                KVCacheBlock(block_id=1),  # unhashed
+                hashed(2, group_id=0),  # cached
+                KVCacheBlock(block_id=3, is_null=True),  # null padding
+                KVCacheBlock(block_id=4),  # unhashed
+            ],
+            # No unhashed blocks in this group.
+            [hashed(5, group_id=1), KVCacheBlock(block_id=6, is_null=True)],
+        )
+    )
+
+    assert blocks.get_unhashed_block_ids_all_groups() == [[1, 4], []]

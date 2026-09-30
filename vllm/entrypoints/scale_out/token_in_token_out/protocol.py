@@ -11,7 +11,11 @@ from pydantic import (
 )
 
 from vllm.config import ModelConfig
-from vllm.entrypoints.generate.base.protocol import StreamOptions, validate_cache_salt
+from vllm.entrypoints.generate.base.protocol import (
+    PerRequestMetrics,
+    StreamOptions,
+    validate_cache_salt,
+)
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionLogProbs,
     ChatCompletionRequest,
@@ -360,6 +364,7 @@ class GenerateStreamResponse(BaseModel):
     usage: UsageInfo | None = Field(default=None)
     prompt_token_ids: list[int] | None = None
     mm_placeholders: dict[str, list[PlaceholderRangeInfo]] | None = None
+    metrics: PerRequestMetrics | None = None
 
 
 class GenerateResponse(BaseModel):
@@ -376,8 +381,10 @@ class GenerateResponse(BaseModel):
     choices: list[GenerateResponseChoice]
     usage: UsageInfo | None = Field(default=None)
     prompt_logprobs: list[dict[int, Logprob] | None] | None = None
+    prompt_token_id_logprobs: str | None = None
     prompt_token_ids: list[int] | None = None
     mm_placeholders: dict[str, list[PlaceholderRangeInfo]] | None = None
+    metrics: PerRequestMetrics | None = None
 
     kv_transfer_params: dict[str, Any] | None = Field(
         default=None,
@@ -539,6 +546,17 @@ class DerenderStreamState(BaseModel):
     window is transiently empty (e.g. usage only final chunk).
     """
 
+    logprob_context_token_ids: list[int] = Field(default_factory=list, max_length=4)
+    """Trailing sampled token IDs carried across chunks so byte-fallback
+    (U+FFFD) correction during logprob placeholder resolution has context
+    at chunk boundaries. Bounded to the 4-token window that
+    ``_correct_decoded_token`` reads."""
+
+    logprob_text_offset: int = Field(default=0, ge=0)
+    """Cumulative emitted text length. Seeds ``text_offset`` for completion
+    streaming logprobs so offsets stay absolute across chunks, mirroring
+    ``initial_text_offset`` in the generate streaming path."""
+
     output_token_ids: list[int] = Field(default_factory=list)
     """All output tokens seen so far. Parser path only.
 
@@ -596,6 +614,7 @@ class DerenderChatStreamRequest(BaseModel):
     the client carried ``stream_state``.
     """
 
+    # --8<-- [start:derender-chat-stream-request]
     stream: Literal[True]
 
     model: str | None = None
@@ -623,6 +642,7 @@ class DerenderChatStreamRequest(BaseModel):
 
     chat_request: ChatCompletionRequest | None = None
     """The original (post adjust_request) ChatCompletionRequest from /render."""
+    # --8<-- [end:derender-chat-stream-request]
 
 
 class DerenderCompletionStreamRequest(BaseModel):
@@ -633,6 +653,7 @@ class DerenderCompletionStreamRequest(BaseModel):
     returns the derendered chunk plus updated state.
     """
 
+    # --8<-- [start:derender-completion-stream-request]
     stream: Literal[True]
 
     model: str | None = None
@@ -647,6 +668,7 @@ class DerenderCompletionStreamRequest(BaseModel):
 
     completion_request: CompletionRequest | None = None
     """The original (post adjust_request) CompletionRequest from /render."""
+    # --8<-- [end:derender-completion-stream-request]
 
 
 class DerenderChatStreamResponse(BaseModel):
