@@ -25,10 +25,13 @@
 //! - `minProperties` and `maxProperties` are not enforced.
 //! - `allOf` with more than one schema accepts any value.
 
+use std::collections::HashSet;
+
 use serde_json::{Map, Value, json};
 use xgrammar_structural_tag::format::{Format, JsonSchemaFormat};
 
-/// Bound on `$ref` and combinator nesting at the parameter level.
+/// Bound on `$ref` and combinator nesting within one value, which keeps a long
+/// chain of references from overflowing the stack.
 const MAX_SCHEMA_DEPTH: usize = 32;
 
 /// The schema accepting any value.
@@ -213,6 +216,14 @@ pub struct ArgumentOptions {
     pub excludes: Vec<String>,
 }
 
+/// Reference targets expanded while collecting one value's options.
+#[derive(Default)]
+struct Expansion {
+    expanded: HashSet<*const Value>,
+    /// Whether a reference was skipped because its target already expanded.
+    skipped: bool,
+}
+
 /// Request state shared by the value options of one call.
 struct ArgumentContext<'a> {
     options: &'a ArgumentOptions,
@@ -261,7 +272,27 @@ impl ArgumentContext<'_> {
     }
 
     /// Every option of a value under `schema`.
-    fn value_options(&self, schema: &Value, depth: usize) -> Vec<ValueOption<'_>> {
+    ///
+    /// Each reference target expands at most once. A union gains no values
+    /// from a repeated alternative, and a definition shared by several
+    /// alternatives would otherwise expand once per path to it, exponentially
+    /// in the nesting. A schema whose references only lead back into it
+    /// accepts any value.
+    fn value_options(&self, schema: &Value) -> Vec<ValueOption<'_>> {
+        let mut expansion = Expansion::default();
+        let options = self.value_options_at(schema, 0, &mut expansion);
+        if options.is_empty() && expansion.skipped {
+            return self.any_value();
+        }
+        options
+    }
+
+    fn value_options_at(
+        &self,
+        schema: &Value,
+        depth: usize,
+        expansion: &mut Expansion,
+    ) -> Vec<ValueOption<'_>> {
         let schema = match schema {
             _ if depth > MAX_SCHEMA_DEPTH => return self.any_value(),
             Value::Bool(false) => return vec![],
@@ -269,10 +300,14 @@ impl ArgumentContext<'_> {
             _ => return self.any_value(),
         };
         if let Some(reference) = schema.get("$ref").and_then(Value::as_str) {
-            return match self.resolve_ref(reference) {
-                Some(target) => self.value_options(target, depth + 1),
-                None => self.any_value(),
+            let Some(target) = self.resolve_ref(reference) else {
+                return self.any_value();
             };
+            if !expansion.expanded.insert(std::ptr::from_ref(target)) {
+                expansion.skipped = true;
+                return vec![];
+            }
+            return self.value_options_at(target, depth + 1, expansion);
         }
         if let Some(value) = schema.get("const") {
             return vec![self.literal(value)];
@@ -285,12 +320,12 @@ impl ArgumentContext<'_> {
         {
             return options
                 .iter()
-                .flat_map(|option| self.value_options(option, depth + 1))
+                .flat_map(|option| self.value_options_at(option, depth + 1, expansion))
                 .collect();
         }
         if let Some(schemas) = schema.get("allOf").and_then(Value::as_array) {
             return match schemas.as_slice() {
-                [schema] => self.value_options(schema, depth + 1),
+                [schema] => self.value_options_at(schema, depth + 1, expansion),
                 _ => self.any_value(),
             };
         }
@@ -345,7 +380,7 @@ pub fn arguments(schema: &Value, syntax: &dyn ArgumentSyntax, options: &Argument
         root: schema,
     };
     let parameter =
-        |key: ParameterKey<'_>, schema: &Value| syntax.parameter(key, &cx.value_options(schema, 0));
+        |key: ParameterKey<'_>, schema: &Value| syntax.parameter(key, &cx.value_options(schema));
 
     let schema = cx.resolve(schema, 0);
     let (properties, additional) = match schema {
@@ -644,6 +679,64 @@ mod tests {
         assert_eq!(
             serialized["elements"][0]["content"]["json_schema"]["$defs"],
             schema["$defs"]
+        );
+    }
+
+    #[test]
+    fn shared_definitions_expand_once() {
+        // Each level unions four references to the next, so expanding every
+        // path would yield 4^12 options.
+        let mut definitions = Map::new();
+        for level in 0..12 {
+            let next = json!({ "$ref": format!("#/$defs/level{}", level + 1) });
+            definitions.insert(format!("level{level}"), json!({ "anyOf": vec![next; 4] }));
+        }
+        definitions.insert("level12".to_string(), json!({ "type": "string" }));
+        check(
+            json!({
+                "$defs": definitions,
+                "type": "object",
+                "properties": { "p": { "$ref": "#/$defs/level0" } },
+                "required": ["p"]
+            }),
+            &Untyped,
+            expect![[r#"
+                sequence
+                  `\n`
+                  sequence
+                    tag `<parameter=p>` text excluding [`</parameter>`] `</parameter>`
+                    `\n`
+            "#]],
+        );
+    }
+
+    #[test]
+    fn references_that_only_cycle_accept_any_value() {
+        check(
+            json!({
+                "$defs": {
+                    "a": { "anyOf": [{ "$ref": "#/$defs/b" }] },
+                    "b": { "$ref": "#/$defs/a" }
+                },
+                "type": "object",
+                "properties": { "p": { "$ref": "#/$defs/a" } },
+                "required": ["p"]
+            }),
+            &Untyped,
+            expect![[r#"
+                sequence
+                  `\n`
+                  sequence
+                    tag `<parameter=p>` .. `</parameter>`
+                      or
+                        text excluding [`</parameter>`]
+                        json(number where a = b, b = a)
+                        json(boolean where a = b, b = a)
+                        json(null where a = b, b = a)
+                        json({ ... } where a = b, b = a)
+                        json(any[] where a = b, b = a)
+                    `\n`
+            "#]],
         );
     }
 
