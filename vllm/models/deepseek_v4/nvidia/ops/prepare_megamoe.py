@@ -9,7 +9,14 @@ MegaMoE kernels consume.
 
 import torch
 
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    FP8_DTYPE,
+    QuantKey,
+    kMxfp8Dynamic,
+)
 from vllm.triton_utils import tl, triton
+
+_E8M0_SCALE_DTYPES = (torch.uint8, torch.float8_e8m0fnu)
 
 
 @triton.jit(do_not_specialize=["num_tokens"])
@@ -175,6 +182,27 @@ def _prepare_megamoe_inputs_kernel(
         )
 
 
+def _resolve_hidden_quant(hidden_quant: QuantKey, block_k: int) -> tuple[int, bool]:
+    """Map a hidden-state ``QuantKey`` to the kernel's ``(GROUP_K, USE_UE8M0)``."""
+    scale = hidden_quant.scale
+    group_shape = scale.group_shape
+    if (
+        hidden_quant.dtype != FP8_DTYPE
+        or not hidden_quant.symmetric
+        or hidden_quant.scale2 is not None
+        or scale.static
+        or not group_shape.is_per_group()
+        or block_k % group_shape.col != 0
+        or scale.dtype not in (*_E8M0_SCALE_DTYPES, torch.float32)
+    ):
+        raise ValueError(
+            "DeepSeek V4 MegaMoE input staging requires symmetric dynamic fp8 "
+            f"per-group quantization with a group size dividing {block_k} and "
+            f"E8M0 or fp32 scales, got {hidden_quant}."
+        )
+    return group_shape.col, scale.dtype in _E8M0_SCALE_DTYPES
+
+
 def prepare_megamoe_inputs(
     hidden_states: torch.Tensor,
     topk_weights: torch.Tensor,
@@ -186,9 +214,14 @@ def prepare_megamoe_inputs(
     is_padding: torch.Tensor | None = None,
     shared_x_sf: torch.Tensor | None = None,
     shared_block_m: int | None = None,
-    hidden_quant_group_k: int = 32,
-    hidden_quant_scale_ue8m0: bool = True,
+    hidden_quant: QuantKey = kMxfp8Dynamic,
 ) -> None:
+    """Quantize hidden states and repack top-k routing for DeepGEMM MegaMoE.
+
+    Args:
+        hidden_quant: Hidden-state quantization scheme. E8M0 scales are packed
+            four per int32 into ``x_sf``; fp32 scales are stored directly.
+    """
     num_tokens, hidden_size = hidden_states.shape
     if num_tokens == 0:
         return
@@ -198,12 +231,7 @@ def prepare_megamoe_inputs(
             "a multiple of 128."
         )
     block_k = 128
-    if block_k % hidden_quant_group_k != 0:
-        raise ValueError(
-            "DeepSeek V4 MegaMoE input staging requires block_k (128) to be "
-            "an integer multiple of hidden_quant_group_k, got "
-            f"hidden_quant_group_k={hidden_quant_group_k}."
-        )
+    group_k, use_ue8m0 = _resolve_hidden_quant(hidden_quant, block_k)
     top_k = topk_ids.shape[1]
     if topk_weights.shape != topk_ids.shape:
         raise ValueError(
@@ -215,7 +243,7 @@ def prepare_megamoe_inputs(
             "DeepSeek V4 MegaMoE shared input staging requires both "
             "shared_x_sf and shared_block_m."
         )
-    if shared_x_sf is not None and not hidden_quant_scale_ue8m0:
+    if shared_x_sf is not None and not use_ue8m0:
         raise ValueError(
             "DeepSeek V4 MegaMoE shared input staging currently requires "
             "UE8M0-packed hidden scales."
@@ -275,9 +303,9 @@ def prepare_megamoe_inputs(
         top_k,
         BLOCK_M=block_m,
         BLOCK_K=block_k,
-        GROUP_K=hidden_quant_group_k,
+        GROUP_K=group_k,
         BLOCK_TOPK=block_topk,
         SHARED_BLOCK_M=shared_block_m or 1,
-        USE_UE8M0=hidden_quant_scale_ue8m0,
+        USE_UE8M0=use_ue8m0,
         num_warps=4,
     )
