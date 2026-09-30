@@ -53,8 +53,8 @@ def test_rejects_mismatched_lora_requests(processor: PoolingIOProcessor):
 
 
 def test_rejects_conflicting_pooling_task(processor: PoolingIOProcessor):
-    processor.model_config = SimpleNamespace(is_encoder_decoder=False)
-    processor.renderer = SimpleNamespace(
+    processor.model_config = SimpleNamespace(is_encoder_decoder=False)  # type: ignore[assignment]
+    processor.renderer = SimpleNamespace(  # type: ignore[assignment]  # Tokenization defaults only.
         default_cmpl_tok_params=TokenizeParams(max_total_tokens=None)
     )
     ctx = OfflineEncodeInputsContext(
