@@ -299,6 +299,7 @@ fn handshake_test_config(
         coordinator_mode,
         model_name: model_name.to_string(),
         client_index,
+        engine_stats_enabled: true,
     }
 }
 
@@ -322,6 +323,7 @@ fn bootstrapped_test_config(
         coordinator_mode,
         model_name: "test-model".to_string(),
         client_index,
+        engine_stats_enabled: true,
     }
 }
 
@@ -2684,6 +2686,8 @@ fn python_msgpack_fixtures_match_rust_encoding() {
             thinking_token_budget: None,
             logprobs: None,
             prompt_logprobs: None,
+            prompt_logprob_token_ids: None,
+            prompt_logprob_start: None,
             min_p: 0.0,
             frequency_penalty: 0.0,
             presence_penalty: 0.0,
@@ -2770,6 +2774,7 @@ fn python_msgpack_fixtures_match_rust_encoding() {
                         mm_cache_miss_hashes: None,
                         new_sampling_mask: None,
                         spec_decode_metrics: None,
+                        prompt_token_id_logprobs: None,
                     },
                 ],
                 scheduler_stats: None,
