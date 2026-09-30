@@ -145,8 +145,10 @@ if TYPE_CHECKING:
     VLLM_ROCM_USE_AITER_RMSNORM: bool = True
     VLLM_ROCM_USE_AITER_MLA: bool = True
     VLLM_ROCM_AITER_MLA_ASM_PADDING: Literal["auto", "gluon", "asm"] = "auto"
+    VLLM_ROCM_AITER_MLA_DCP_VERIFY: Literal["asm", "segmented"] = "segmented"
     VLLM_ROCM_USE_AITER_MHA: bool = True
     VLLM_ROCM_USE_AITER_FP4_ASM_GEMM: bool = False
+    VLLM_ROCM_USE_AITER_TRITON_SPARSE_MLA: bool = False
     VLLM_ROCM_USE_AITER_TRITON_ROPE: bool = False
     VLLM_ROCM_USE_AITER_FP8BMM: bool = True
     VLLM_ROCM_USE_AITER_FP4BMM: bool = True
@@ -1309,6 +1311,15 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ROCM_USE_AITER_MLA": lambda: (
         os.getenv("VLLM_ROCM_USE_AITER_MLA", "True").lower() in ("true", "1")
     ),
+    # Kernel for causal multi-token (spec-decode) verify steps under decode
+    # context parallelism on gfx950: "asm" uses AITER's round-robin ASM
+    # decode, "segmented" the Triton segmented MLA path.
+    "VLLM_ROCM_AITER_MLA_DCP_VERIFY": env_with_choices(
+        "VLLM_ROCM_AITER_MLA_DCP_VERIFY",
+        "segmented",
+        ["asm", "segmented"],
+        case_sensitive=False,
+    ),
     # Small-head (<16) AITER MLA decode kernel selection. Small head counts
     # (e.g. Kimi-K3: 12 heads/rank at TP8, 6 at TP16) can decode either through
     # the Gluon small-head kernel or through the padded persistent-scheduling
@@ -1332,6 +1343,14 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # By default is disabled.
     "VLLM_ROCM_USE_AITER_FP4_ASM_GEMM": lambda: (
         os.getenv("VLLM_ROCM_USE_AITER_FP4_ASM_GEMM", "False").lower() in ("true", "1")
+    ),
+    # Whether sparse MLA prefill and decode run on aiter's Triton kernel, which
+    # reads the KV cache as stored (bf16 or fp8, paged or flat). Used by the
+    # ROCM_AITER_MLA_SPARSE backend (DeepSeek V3.2, GLM-5.x) and DeepSeek
+    # V4 / V4.1. gfx950 only. By default is disabled.
+    "VLLM_ROCM_USE_AITER_TRITON_SPARSE_MLA": lambda: (
+        os.getenv("VLLM_ROCM_USE_AITER_TRITON_SPARSE_MLA", "False").lower()
+        in ("true", "1")
     ),
     # Whether to use aiter rope.
     # By default is disabled.
@@ -1990,9 +2009,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_DEEPEP_LOW_LATENCY_USE_MNNVL": lambda: bool(
         int(os.getenv("VLLM_DEEPEP_LOW_LATENCY_USE_MNNVL", "0"))
     ),
-    # DeepEP v2: enable two-tier NVLink+RDMA hybrid mode
+    # DeepEP v2: use NVLink+RDMA hybrid communication across NVLink domains.
+    #   * hybrid mode = multi-node RDMA
+    #   * non hybrid mode = nvlink
+    # Set to 1 (the default) to allow DeepEP to autoselect hybrid vs non-hybrid.
+    # Set to 0 to disable hybrid mode.
     "VLLM_DEEPEP_V2_ALLOW_HYBRID_MODE": lambda: bool(
-        int(os.getenv("VLLM_DEEPEP_V2_ALLOW_HYBRID_MODE", "0"))
+        int(os.getenv("VLLM_DEEPEP_V2_ALLOW_HYBRID_MODE", "1"))
     ),
     # DeepEP v2: use fewer SMs at slight throughput cost
     "VLLM_DEEPEP_V2_PREFER_OVERLAP": lambda: bool(
