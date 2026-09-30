@@ -46,6 +46,14 @@ def test_build_run_plans_preserves_structured_mapping():
     assert _build_run_plans(_ref(mapping)) == mapping.runs
 
 
+def test_build_run_plans_uses_whole_page_for_direct_layout():
+    mapping = _nhd_mapping()
+    ref = _ref(mapping)
+    page_size = mapping.local_page_size_bytes
+    expected = (CopyRun(0, 0, page_size, 1, page_size, page_size),)
+    assert _build_run_plans(ref, canonical_layout=False) == expected
+
+
 def test_writer_rotation_matches_is_writer():
     # Replicas take turns writing shared canonical pages, keyed by the
     # CPU-side canonical page id; the enumeration must agree with is_writer
