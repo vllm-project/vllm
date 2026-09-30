@@ -7,16 +7,26 @@ The request classification and cudagraph staging intentionally mirror
 differently on device rather than on the host.
 """
 
+from dataclasses import replace
+
 import torch
 
+from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.third_party.flash_linear_attention.ops.utils import FLA_CHUNK_SIZE
 from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import next_power_of_2
+from vllm.v1.attention.backend import (
+    AttentionCGSupport,
+    CommonAttentionMetadata,
+    max_decode_query_len,
+)
 from vllm.v1.attention.backends.gdn_attn import (
     GDNAttentionBackend,
+    GDNAttentionMetadata,
     GDNAttentionMetadataBuilder,
 )
+from vllm.v1.kv_cache_interface import KVCacheSpec
 
 logger = init_logger(__name__)
 
@@ -85,7 +95,60 @@ def prepare_chunk_metadata_device(
     return chunk_indices, chunk_offsets
 
 
+def _adaptive_verification_enabled(vllm_config: VllmConfig) -> bool:
+    speculative_config = vllm_config.speculative_config
+    return speculative_config is not None and bool(
+        getattr(speculative_config, "enable_adaptive_verification", False)
+    )
+
+
 class KimiK3ROCmKDAMetadataBuilder(GDNAttentionMetadataBuilder):
+    @classmethod
+    def get_varlen_cudagraph_max_query_len(
+        cls: type["KimiK3ROCmKDAMetadataBuilder"],
+        vllm_config: VllmConfig,
+        kv_cache_spec: KVCacheSpec,
+    ) -> int | None:
+        # The spec path reads per-request offsets and accepted counts off device
+        # within a fixed num_spec + 1 window (spec_state_indices_tensor, conv
+        # max_query_len), so a graph captured at that width replays any 1..k+1
+        # mix. Keep UNIFORM_BATCH rather than claiming ALWAYS: FULL capture here
+        # is decode-only (build_for_cudagraph_capture asserts it).
+        if not _adaptive_verification_enabled(vllm_config):
+            return None
+        if (
+            cls.get_cudagraph_support(vllm_config, kv_cache_spec)
+            != AttentionCGSupport.UNIFORM_BATCH
+        ):
+            return None
+        return max_decode_query_len(vllm_config)
+
+    def build(  # type: ignore[override]
+        self,
+        common_prefix_len: int,
+        common_attn_metadata: CommonAttentionMetadata,
+        num_accepted_tokens: torch.Tensor | None = None,
+        num_decode_draft_tokens_cpu: torch.Tensor | None = None,
+        fast_build: bool = False,
+    ) -> GDNAttentionMetadata:
+        metadata = super().build(
+            common_prefix_len,
+            common_attn_metadata,
+            num_accepted_tokens,
+            num_decode_draft_tokens_cpu,
+            fast_build,
+        )
+        if (
+            metadata.uniform_spec_sequence_length is not None
+            and _adaptive_verification_enabled(self.vllm_config)
+        ):
+            # Adaptive verification trims drafts on device after the CPU split
+            # was made, so equal CPU lengths do not mean equal device lengths.
+            # The fixed-length recurrent kernel places sequence i at i * L and
+            # never reads cu_seqlens; force the cu_seqlens-driven kernel.
+            metadata = replace(metadata, uniform_spec_sequence_length=None)
+        return metadata
+
     def _build_chunk_metadata(
         self,
         prefill_query_start_loc: torch.Tensor,
@@ -107,3 +170,11 @@ class KimiK3ROCmKDABackend(GDNAttentionBackend):
     @staticmethod
     def get_builder_cls() -> type[KimiK3ROCmKDAMetadataBuilder]:
         return KimiK3ROCmKDAMetadataBuilder
+
+    @classmethod
+    def supports_device_cpu_query_lens_mismatch(cls) -> bool:
+        # Pure spec-decode batches take their plan from DEVICE offsets
+        # (spec_query_start_loc, num_accepted_tokens) once the builder drops the
+        # CPU-derived uniform length under adaptive verification. Mixed batches
+        # only need the CPU totals, which adaptive verification preserves.
+        return True
