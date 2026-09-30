@@ -220,3 +220,29 @@ format, and separate forced-recomputation/prefix-cache passes. An initial
 direct-answer chat prompt was rejected: its 621–729-token prompts did not exercise
 784-token reuse boundaries and scored only 55.47%. The evaluation now asserts a
 sufficient shared prefix before generation; the accuracy threshold was not lowered.
+
+The first full-rationale run at 256 output tokens was also rejected: 48/128
+recomputation samples and 49/128 cached samples hit the length limit. The limit
+was increased to 1,024 without changing the 80% minimum accuracy or 1% allowed
+accuracy-drop thresholds. Both modes then scored **125/128 (97.66%)**, with zero
+length-limited outputs and zero differences in final numeric answers. There are
+27 token-sequence differences. The cache-enabled pass recorded **99,568 cached
+tokens**, versus zero when cache reads were disabled.
+
+The reproducible script, command and compressed per-question results are in
+`benchmarks/programmable_kv_cache/`. This is a feature-disabled model/cache
+baseline; it does not complete the hint-to-worker, policy or cross-engine serving
+evaluation tasks. The external GPT-OSS/DeepSeek evaluations remain unexecuted.
+
+## Next implementation dependency
+
+The user's continuation-rewrite choice remains pending: require a new
+continuation ID for changed prefixes, or support explicit replacement while
+freezing older following declarations. Settle this before request-lifecycle
+binding and stale-update integration. Existing DP utility calls broadcast, so the
+control ingress must also add explicit engine selection rather than reuse the
+broadcast helper. Startup/serving wiring, independent CPU/Mooncake execution,
+policy composition and workload integrations are still pending.
+
+The selected verl Agent Loop source is cloned at `../verl`, revision
+`fbb4b3a8bf636f290c9c59fc346f756849e9c241`; it has not been modified or validated.
