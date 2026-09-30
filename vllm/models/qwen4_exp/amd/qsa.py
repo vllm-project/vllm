@@ -364,7 +364,18 @@ class Qwen4ExpQSAImpl(AttentionImplBase[Qwen4ExpQSAMetadata]):
             )
 
         from .ops.qsa import qsa_sparse_paged_attention
+        from .ops.qsa_flydsl import flydsl_sparse_paged_attention
 
+        if flydsl_sparse_paged_attention(
+            query[:num_tokens],
+            key_cache,
+            value_cache,
+            logical_indices,
+            attn_metadata.block_table,
+            token_to_req,
+            output[:num_tokens],
+        ):
+            return output
         qsa_sparse_paged_attention(
             query[:num_tokens],
             key_cache,
