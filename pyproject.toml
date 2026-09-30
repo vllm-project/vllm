@@ -111,12 +111,6 @@ ignore-var-parameters = true
 [tool.ruff.format]
 docstring-code-format = true
 
-[tool.mypy]
-plugins = ['pydantic.mypy']
-ignore_missing_imports = true
-check_untyped_defs = true
-follow_imports = "silent"
-
 [tool.pytest.ini_options]
 markers = [
     "slow_test",
@@ -178,11 +172,18 @@ directory = "htmlcov"
 [tool.coverage.xml]
 output = "coverage.xml"
 
-[tool.ty.src]
-respect-ignore-files = true
+[tool.ty.rules]
+# Minimize noise from optional/extra dependencies not installed in pre-commit environment
+unresolved-import = "ignore"
+unresolved-attribute = "ignore"
 
-[tool.ty.environment]
-python = "./.venv"
+[[tool.ty.overrides]]
+# Tests deliberately pass mocks and stand-ins where real types are expected
+include = ["tests/**"]
+
+[tool.ty.overrides.rules]
+invalid-argument-type = "ignore"
+invalid-assignment = "ignore"
 
 [tool.typos.files]
 # these files may be written in non english words
