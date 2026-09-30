@@ -156,14 +156,21 @@ def test_flat_sigmoid_routing_matches_mimo_reference(num_experts: int) -> None:
         return ids, out
 
     got_ids, got_weights = routed("sigmoid")
-    assert torch.equal(
-        torch.sort(got_ids, dim=-1).values, torch.sort(ref_ids.cpu(), dim=-1).values
-    )
-    assert torch.allclose(got_weights, ref_weights.cpu(), atol=1e-3)
+
+    # aiter's triton top-k emits each token's selection sorted by *ascending
+    # expert id*, while the reference is in descending ``sigmoid(logits)+bias``
+    # rank order — align both sides on the expert id so the weight check
+    # becomes elementwise and still validates the expert<->weight pairing.
+    def align(ids: torch.Tensor, w: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        order = torch.argsort(ids, dim=-1)
+        return ids.gather(1, order), w.gather(1, order)
+
+    got_ids, got_weights = align(got_ids, got_weights)
+    ref_ids, ref_weights = align(ref_ids.cpu(), ref_weights.cpu())
+    assert torch.equal(got_ids, ref_ids)
+    assert torch.allclose(got_weights, ref_weights, atol=1e-3)
 
     # Control: the correction bias must steer selection only. Ignoring it would
     # pick from the plain sigmoid scores instead.
     plain_ids = scores.topk(top_k, dim=-1).indices
-    assert not torch.equal(
-        torch.sort(plain_ids, dim=-1).values, torch.sort(ref_ids.cpu(), dim=-1).values
-    )
+    assert not torch.equal(torch.sort(plain_ids.cpu(), dim=-1).values, ref_ids)
