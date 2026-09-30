@@ -46,6 +46,13 @@ Now you can send requests to the proxy server through port 8000.
     - For headless instances, must be the same as the master instance
     - Each instance needs a unique port on its host; using the same port number across different hosts is fine
 
+- `VLLM_MOONCAKE_CONNECTOR_TIMEOUT`: Per-request timeout (in seconds) for MooncakeConnector HTTP calls to the bootstrap server, including prefiller worker registration at startup. (Optional)
+    - Default: 30.0
+    - Global rank 0 hosts the bootstrap server in the same process that mounts the Mooncake transfer engine's host segment, so a large `MOONCAKE_GLOBAL_SEGMENT_SIZE` can delay responses for several seconds during startup
+    - Raise this if bootstrap server timeout warnings appear on hosts with very large host-memory segments
+    - Bootstrap registration uses up to 3 attempts internally, with exponential backoff capped at 10 seconds; connection errors and timeouts are both retried
+    - Once the attempts are exhausted the caller raises instead of blocking, so failures surface rather than hanging
+
 - `WITH_NVIDIA_PEERMEM`: Selects how mooncake registers GPU memory for RDMA. Read by mooncake, not vLLM.
     - Default: 1, which uses `ibv_reg_mr()` and requires the `nvidia-peermem` kernel module to be loaded
     - Set to 0 to use the DMA-BUF path, which does not need that module. Required on hosts where `nvidia-peermem` is not loaded, such as GB200
@@ -69,6 +76,7 @@ Now you can send requests to the proxy server through port 8000.
 - **num_workers**: Size of thread pool for one prefiller worker to transfer KV caches by mooncake. (default 10)
 - **mooncake_protocol**: Mooncake connector protocol. (default "rdma")
 - **device_name**: Comma-separated whitelist of RDMA devices (e.g. `"mlx5_0,mlx5_1"`) to restrict topology discovery to. Empty discovers every device. Useful on hosts exposing a mix of InfiniBand and RoCE ports, where both peers must settle on the same link layer.
+- **bootstrap_server_address**: Optional `"host:port"` of an already running Mooncake bootstrap server. All prefiller ranks register with this endpoint instead of launching an embedded server. The caller owns the server lifetime and must configure the proxy to use the same endpoint. The example proxy assumes the bootstrap server is on the prefiller API host; a different host requires a proxy that supplies that address in `remote_bootstrap_addr`. Omit this option to use the embedded server and `VLLM_MOONCAKE_BOOTSTRAP_PORT`.
 
 ## Example Scripts/Code
 

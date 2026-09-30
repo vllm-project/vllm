@@ -72,8 +72,6 @@ class EngramConfig:
 
     def verify_model_config(self, model_config: "ModelConfig | None") -> None:
         """Reject Engram configuration for models without n-gram embeddings."""
-        from vllm.platforms import current_platform
-
         field = (
             _NGRAM_LAYER_FIELDS.get(model_config.architecture)
             if model_config is not None
@@ -82,13 +80,11 @@ class EngramConfig:
         if (
             model_config is None
             or field is None
-            or not current_platform.is_cuda_alike()
             or not getattr(model_config.hf_text_config, field, None)
         ):
             raise ValueError(
                 "EngramConfig requires a model with supported Engram "
-                "embeddings, non-empty n-gram layer ids, and a CUDA-alike "
-                "device (CUDA or ROCm)."
+                "embeddings and non-empty n-gram layer ids."
             )
         if self.host_file_gather and (
             field != "ple_layer_ids" or current_platform.is_rocm()
@@ -100,6 +96,7 @@ class EngramConfig:
         if self.dp_shared_memory is None:
             self.dp_shared_memory = (
                 self.cpu_offload
+                and not self.use_thp
                 and parallel_config.data_parallel_size > 1
                 and not parallel_config.enable_elastic_ep
             )
