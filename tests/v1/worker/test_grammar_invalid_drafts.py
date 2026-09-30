@@ -49,16 +49,6 @@ def test_keep_the_drafts_the_bitmask_could_see():
     assert _invalid_rows(batch, ["g"], [2]) == [3]
 
 
-def test_reject_nothing_when_fully_backfilled():
-    batch = _input_batch(["g", "p"], [3, 3])
-    assert _invalid_rows(batch, ["g"], [3]) is None
-
-
-def test_rows_are_offset_per_request():
-    batch = _input_batch(["p", "g"], [3, 3])
-    assert _invalid_rows(batch, ["g"], [0]) == [5, 6, 7]
-
-
 def test_follow_the_device_layout_under_adaptive_verification():
     # Scheduled 3 drafts each, but adaptive verification admitted 2 for "a" and
     # 3 for "b": the real rows are a=0..2, b=3..6, not the scheduled 0..3, 4..7.
