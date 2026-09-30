@@ -945,6 +945,91 @@ class TestProcessChunk:
         ]
         assert get_text(messages[0]) == "print(6 * 7)"
 
+    def test_malformed_header_on_second_message_preserves_both(self, harmony_parser):
+        output = encode_output(
+            "<|channel|>analysis<|message|>First<|end|>"
+            "<|start|>assistant<|channel|>commentary to=python "
+            "<|constrain|>commentary to=assistant "
+            "<|constrain|>analysis to=python code"
+            "<|message|>print(6 * 7)<|call|>"
+        )
+
+        result = harmony_parser.process_chunk(output)
+        messages = [
+            segment.completed_message
+            for segment in result.segments
+            if segment.completed_message is not None
+        ]
+
+        assert [
+            (msg.channel, msg.recipient, msg.content_type, get_text(msg))
+            for msg in messages
+        ] == [
+            ("analysis", None, None, "First"),
+            ("commentary", "python", "<|constrain|>code", "print(6 * 7)"),
+        ]
+
+    def test_repair_uses_latest_start_after_rejected_header(self, harmony_parser):
+        output = encode_output(
+            "<|channel|>analysis<|message|>First<|end|>"
+            "<|start|>assistant<|channel|>commentary to=python "
+            "<|constrain|>analysis authored code<|message|>ignored<|call|>"
+            "<|start|>assistant<|channel|>commentary to=python "
+            "<|constrain|>analysis code<|message|>print(42)<|call|>"
+        )
+
+        result = harmony_parser.process_chunk(output)
+        messages = [
+            segment.completed_message
+            for segment in result.segments
+            if segment.completed_message is not None
+        ]
+
+        assert [get_text(msg) for msg in messages] == ["First", "print(42)"]
+
+    def test_malformed_initial_header_uses_first_channel(self, harmony_parser):
+        output = encode_output(
+            "<|channel|>commentary to=python "
+            "<|constrain|><|channel|>analysis code"
+            "<|message|>print(42)<|call|>"
+        )
+
+        result = harmony_parser.process_chunk(output)
+        messages = [
+            segment.completed_message
+            for segment in result.segments
+            if segment.completed_message is not None
+        ]
+
+        assert [
+            (msg.channel, msg.recipient, msg.content_type, get_text(msg))
+            for msg in messages
+        ] == [
+            ("commentary", "python", "<|constrain|>code", "print(42)"),
+        ]
+
+    @pytest.mark.parametrize(
+        "malformed_section",
+        ["analysis yaml", "analysis authored code"],
+    )
+    def test_repair_does_not_drop_unrecognized_header_text(
+        self, harmony_parser, malformed_section
+    ):
+        output = encode_output(
+            "<|channel|>commentary to=python "
+            f"<|constrain|>{malformed_section}<|message|>ignored<|call|>"
+            "<|start|>assistant<|channel|>final<|message|>Kept<|end|>"
+        )
+
+        result = harmony_parser.process_chunk(output)
+        messages = [
+            segment.completed_message
+            for segment in result.segments
+            if segment.completed_message is not None
+        ]
+
+        assert [(msg.channel, get_text(msg)) for msg in messages] == [("final", "Kept")]
+
 
 class TestCountReasoningTokens:
     def test_matches_process_chunk(self, harmony_parser, gpt_oss_tokenizer):
