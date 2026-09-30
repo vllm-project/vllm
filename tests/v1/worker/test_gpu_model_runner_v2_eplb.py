@@ -173,7 +173,7 @@ def test_v2_load_model_with_dummy_weights_defers_eplb_async_loop(monkeypatch):
     assert runner.load_config.load_format == "dummy"
     assert runner.eplb_state is not None
     # A scaling-up worker registers so it can join the EPLB communicator.
-    assert runner.eplb_state.add_model_calls == [(model, runner.model_config)]
+    assert runner.eplb_state.add_model_calls == [(model, runner.model_config, None)]
     assert runner.eplb_state.async_started is False
 
 
