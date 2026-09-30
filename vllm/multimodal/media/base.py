@@ -173,6 +173,10 @@ class MediaRef(Generic[_T]):
         extend the spec -- and therefore the key -- so the transform's own
         parameters stay part of the cache identity. The new key is derived
         from this ref's key rather than by re-digesting the payload.
+
+        With no settings, the key is preserved: use this only for transforms
+        that preserve cache identity. Output-changing transforms must supply
+        settings identifying the transform and every output-affecting parameter.
         """
         if not settings:
             spec, key = self.spec, self.key

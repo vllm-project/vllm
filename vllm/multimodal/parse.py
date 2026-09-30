@@ -37,7 +37,6 @@ from .inputs import (
     VideoItem,
 )
 from .media import MediaRef
-from .video import DecodedFrames
 
 _T = TypeVar("_T")
 _I = TypeVar("_I")
@@ -385,8 +384,13 @@ class DictEmbeddingItems(
         return self.data
 
 
+NormalizedAudio: TypeAlias = np.ndarray
+
+
 class AudioProcessorItems(ProcessorBatchItems[HfAudioItem | None]):
-    def __init__(self, data: Sequence[HfAudioItem | None]) -> None:
+    def __init__(
+        self, data: Sequence[HfAudioItem | MediaRef[NormalizedAudio] | None]
+    ) -> None:
         super().__init__(data, "audio")
 
     def get_audio_length(self, item_idx: int) -> int:
@@ -444,7 +448,7 @@ class ImageEmbeddingItems(EmbeddingItems):
         super().__init__(data, "image", expected_hidden_size)
 
 
-DecodedVideo: TypeAlias = HfVideoItem | tuple[HfVideoItem, dict[str, Any]]
+DecodedVideo: TypeAlias = HfVideoItem | tuple[HfVideoItem, dict[str, Any] | None]
 
 
 class VideoProcessorItems(ProcessorBatchItems[DecodedVideo | None]):
@@ -735,10 +739,10 @@ class MultiModalDataParser:
     def _get_video_with_metadata(
         self,
         video: VideoItem,
-    ) -> tuple[DecodedFrames | MediaRef[Any], dict[str, Any] | None]:
+    ) -> tuple[HfVideoItem | MediaRef[DecodedVideo], dict[str, Any] | None]:
         if isinstance(video, MediaRef):
             # Keep metadata in the raw ref so cache miss reparsing preserves it.
-            def unpack(decoded: Any) -> Any:
+            def unpack(decoded: DecodedVideo) -> DecodedVideo:
                 if isinstance(decoded, tuple):
                     frames, metadata = decoded
                 else:
@@ -763,7 +767,7 @@ class MultiModalDataParser:
 
         assert_never(video)
 
-    def _resample_normalize_audio(self, loaded: AudioItem) -> np.ndarray:
+    def _resample_normalize_audio(self, loaded: AudioItem) -> NormalizedAudio:
         audio, orig_sr = self._get_audio_with_sr(loaded)
         if orig_sr is None:
             new_audio = audio
@@ -841,7 +845,7 @@ class MultiModalDataParser:
         else:
             data_items = data  # type: ignore[assignment]
 
-        new_audios = list[np.ndarray | MediaRef[Any] | None]()
+        new_audios = list[NormalizedAudio | MediaRef[NormalizedAudio] | None]()
         for data_item in data_items:
             # Requests can omit audio samples when reusing a cached UUID.
             if data_item is None:
@@ -924,7 +928,10 @@ class MultiModalDataParser:
             data_items = data  # type: ignore[assignment]
 
         new_videos = list[
-            DecodedFrames | MediaRef[Any] | tuple[DecodedFrames, dict[str, Any]] | None
+            HfVideoItem
+            | MediaRef[DecodedVideo]
+            | tuple[HfVideoItem, dict[str, Any]]
+            | None
         ]()
         metadata_lst: list[dict[str, Any] | None] = []
         for data_item in data_items:

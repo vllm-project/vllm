@@ -3115,6 +3115,51 @@ async def test_resolve_items_decodes_lazy_vision_chunk_off_event_loop():
 
 
 @pytest.mark.asyncio
+async def test_resolve_items_drains_vision_chunk_decode_on_cancellation():
+    """Cancellation waits for the media worker before returning to the caller."""
+    loop = asyncio.get_running_loop()
+    started = asyncio.Event()
+    finish = threading.Event()
+    completed = threading.Event()
+
+    def decode():
+        loop.call_soon_threadsafe(started.set)
+        assert finish.wait(timeout=10)
+        completed.set()
+        return "decoded-image"
+
+    ref = MediaRef(decode, b"image")
+
+    async def fetch():
+        return ref, "uuid-0"
+
+    tracker = AsyncMultiModalItemTracker(
+        MagicMock(
+            is_multimodal_model=True,
+            hf_config=MagicMock(use_unified_vision_chunk=True),
+        )
+    )
+    tracker.__dict__["mm_processor"] = MagicMock()
+    tracker._items_by_modality["vision_chunk"] = [fetch]
+    tracker._modality_order["vision_chunk"] = ["image"]
+
+    task = asyncio.create_task(tracker.resolve_items())
+    try:
+        await asyncio.wait_for(started.wait(), timeout=10)
+        task.cancel()
+        # Let the cancellation handler run while the worker is still blocked.
+        await asyncio.sleep(0)
+        assert not task.done()
+    finally:
+        finish.set()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, timeout=10)
+
+    assert completed.is_set()
+    assert ref.is_decoded
+
+
+@pytest.mark.asyncio
 async def test_resolve_items_lazy_vision_chunk_decode_error_propagates_async():
     """A MediaRef decode failure in a vision_chunk item must raise
     VLLMUnprocessableEntityError, not be logged and swallowed."""

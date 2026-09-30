@@ -22,6 +22,7 @@ from vllm.multimodal.cache import MultiModalProcessorOnlyCache
 from vllm.multimodal.hasher import MultiModalHasher
 from vllm.multimodal.inputs import MultiModalFieldConfig
 from vllm.multimodal.media import MediaRef
+from vllm.multimodal.media.decode import MediaDecodeJob
 from vllm.multimodal.parse import MultiModalDataParser, ProcessorBatchItems
 from vllm.multimodal.processing.context import (
     BaseProcessingInfo,
@@ -32,7 +33,6 @@ from vllm.multimodal.processing.context import (
 from vllm.multimodal.processing.inputs import ProcessorInputs
 from vllm.multimodal.processing.processor import (
     BaseMultiModalProcessor,
-    MediaDecodeJob,
     MultiModalApplyState,
     PlaceholderFeaturesInfo,
     PromptIndexTargets,
@@ -1879,13 +1879,18 @@ def test_lazy_decode_error_becomes_unprocessable(use_cache):
     processor = _LazyTestProcessor()
     cache = _lazy_cache() if use_cache else None
 
-    def bad_decode():
-        raise ValueError("corrupt media")
-
+    slow_started = threading.Event()
+    bad_failed = threading.Event()
     slow_completed = threading.Event()
 
+    def bad_decode():
+        assert slow_started.wait(timeout=10)
+        bad_failed.set()
+        raise ValueError("corrupt media")
+
     def slow_decode():
-        time.sleep(0.2)
+        slow_started.set()
+        assert bad_failed.wait(timeout=10)
         slow_completed.set()
         return Image.new("RGB", (4, 4))
 

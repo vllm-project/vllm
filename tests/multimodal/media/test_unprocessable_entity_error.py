@@ -199,7 +199,7 @@ class TestErrorResponse:
             # `_decode_ref_items` uses no instance state; call it unbound to
             # exercise the real decode-and-wrap path without a full processor.
             BaseMultiModalProcessor._decode_ref_items(
-                cast("BaseMultiModalProcessor", None), mm_items
+                cast("BaseMultiModalProcessor", None), mm_items, decodes=[]
             )
 
         assert exc_info.value.parameter is None
@@ -225,7 +225,7 @@ class TestErrorResponse:
 
         with pytest.raises(VLLMUnprocessableEntityError) as exc_info:
             BaseMultiModalProcessor._decode_ref_items(
-                cast("BaseMultiModalProcessor", None), mm_items
+                cast("BaseMultiModalProcessor", None), mm_items, decodes=[]
             )
 
         assert "audio media at index 1" in str(exc_info.value)

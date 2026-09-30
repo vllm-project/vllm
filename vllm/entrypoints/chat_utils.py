@@ -7,6 +7,7 @@ import types
 from abc import ABC, abstractmethod
 from collections import Counter, defaultdict
 from collections.abc import Awaitable, Callable, Iterable, Iterator
+from contextlib import suppress
 from dataclasses import dataclass
 from functools import cached_property, lru_cache, partial
 from itertools import accumulate
@@ -72,6 +73,11 @@ from vllm.multimodal.media import (
     MediaRef,
 )
 from vllm.multimodal.media.connector import global_thread_pool
+from vllm.multimodal.media.decode import (
+    MediaDecodeJob,
+    collect_media_decodes_async,
+    submit_media_decodes,
+)
 from vllm.multimodal.processing import BaseMultiModalProcessor
 from vllm.renderers.embed_utils import (
     safe_load_prompt_embeds,
@@ -759,6 +765,15 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
         raise NotImplementedError
 
 
+def _vision_chunk_decode_error(
+    modality: str, index: int, cause: Exception
+) -> VLLMUnprocessableEntityError:
+    return VLLMUnprocessableEntityError(
+        f"Failed to decode {modality} media at index {index}: {cause}",
+        parameter=f"{modality}_url",
+    )
+
+
 def _decode_media_ref(data: object, modality: str, index: int) -> None:
     """Trigger decoding of a media ref.
 
@@ -775,10 +790,7 @@ def _decode_media_ref(data: object, modality: str, index: int) -> None:
     try:
         data.decode()
     except Exception as error:
-        raise VLLMUnprocessableEntityError(
-            f"Failed to decode {modality} media at index {index}: {error}",
-            parameter=f"{modality}_url",
-        ) from error
+        raise _vision_chunk_decode_error(modality, index, error) from error
 
 
 def _indexed_vision_chunks(
@@ -883,19 +895,19 @@ async def _predecode_vision_chunk_items(
     if not lazy_items:
         return
 
-    loop = asyncio.get_running_loop()
-    results = await asyncio.gather(
-        *(
-            loop.run_in_executor(
-                global_thread_pool, _decode_media_ref, data, inner_modality, index
-            )
-            for index, inner_modality, data in lazy_items
-        ),
-        return_exceptions=True,
-    )
-    for result in results:
-        if isinstance(result, BaseException):
-            raise result
+    jobs: list[MediaDecodeJob] = []
+    try:
+        submit_media_decodes(
+            ((modality, index, data) for index, modality, data in lazy_items),
+            global_thread_pool,
+            jobs,
+        )
+    except BaseException:
+        # Preserve submission errors after draining already submitted work.
+        with suppress(BaseException):
+            await collect_media_decodes_async(jobs, _vision_chunk_decode_error)
+        raise
+    await collect_media_decodes_async(jobs, _vision_chunk_decode_error)
 
 
 def _resolve_items(

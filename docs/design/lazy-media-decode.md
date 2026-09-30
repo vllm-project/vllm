@@ -28,7 +28,7 @@ Derivation is linear in the payload, so building refs on an event loop is offloa
 
 `decode()` is memoized and lock-guarded, so concurrent callers decode exactly once. Exceptions from the decoder propagate unchanged; wrapping them is the caller's job.
 
-`map(transform, **settings)` takes a transform from `_T` to `_U` and returns a `MediaRef[_U]` decoding to `transform(self.decode())`. It shares the parent's bytes rather than copying them. Supplied `settings` extend the spec and derive a new key from the parent's *key*, without re-digesting the payload; with no settings, the spec and key are preserved. The parse layer uses this to defer resampling, channel normalization and video metadata validation to the parallel decode phase.
+`map(transform, **settings)` takes a transform from `_T` to `_U` and returns a `MediaRef[_U]` decoding to `transform(self.decode())`. It shares the parent's bytes rather than copying them. Supplied `settings` extend the spec and derive a new key from the parent's *key*, without re-digesting the payload; with no settings, the spec and key are preserved. Transforms with no settings must preserve cache identity. Output-changing transforms must supply settings identifying the transform and every output-affecting parameter. The parse layer uses this to defer resampling, channel normalization and video metadata validation to the parallel decode phase.
 
 `release()` clears this ref's `data` and drops its decode closure, after any in-flight decode has finished. The closure can pin the bytes and, for images, the header-opened PIL image whose `fp` holds a second copy. Decoded media remains readable after release; an undecoded ref raises `RuntimeError` from `decode()` after release.
 
@@ -97,11 +97,11 @@ Keeping the raw tuple and exposing these views separately lets cache-miss select
 
 ## Decode orchestration
 
-Two module-level functions and a processor method in `vllm/multimodal/processing/processor.py` handle decode submission and waiting.
+`vllm/multimodal/media/decode.py` shares decode submission and collection between the processor and the vision-chunk parser. Callers supply an error factory to preserve their own request context.
 
-- `_submit_ref_decodes` walks the raw items of every `ProcessorBatchItems` modality, submits each undecoded ref's `decode()` to the shared media thread pool (`global_thread_pool`, sized by `VLLM_MEDIA_LOADING_THREAD_COUNT`), and records `(modality, original_index, future)` triples. It does not wait.
-- `_collect_ref_decodes` joins every future — in-flight work is never abandoned — and raises the first failure.
-- `_decode_ref_items` composes the two, and is the blocking fallback for items that turn out to need decoding late.
+- `submit_media_decodes` appends each submitted future immediately to the caller-owned job list, so partial submission failures can drain work already running.
+- `collect_media_decodes` drains every submitted future before raising the first failure in request order. `collect_media_decodes_async` does the same off the event loop and drains through caller cancellation.
+- The processor's `_submit_ref_decodes` selects raw refs and preserves original request indices. `_decode_ref_items` collects only newly submitted late decodes, while retaining all jobs for state cleanup.
 
 ### Two-phase apply
 

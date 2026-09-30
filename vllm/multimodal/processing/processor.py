@@ -1,17 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import asyncio
 from abc import ABC, abstractmethod
 from collections import defaultdict, deque
 from collections.abc import Callable, Generator, ItemsView, Iterable, Mapping, Sequence
-from concurrent.futures import Future
 from contextlib import suppress
 from dataclasses import dataclass, field, replace
 from enum import Enum
 from functools import lru_cache
 from typing import (
     TYPE_CHECKING,
-    Any,
     ClassVar,
     Generic,
     NamedTuple,
@@ -33,7 +30,6 @@ from vllm.inputs import (
 )
 from vllm.logger import init_logger
 from vllm.tokenizers import TokenizerLike
-from vllm.utils.async_utils import await_with_cancellation_drain
 from vllm.utils.collection_utils import flatten_2d_lists, full_groupby
 
 from ..inputs import (
@@ -45,6 +41,12 @@ from ..inputs import (
 )
 from ..media import MediaRef
 from ..media.connector import global_thread_pool
+from ..media.decode import (
+    MediaDecodeJob,
+    collect_media_decodes,
+    collect_media_decodes_async,
+    submit_media_decodes,
+)
 from ..parse import MultiModalDataItems, MultiModalUUIDItems, ProcessorBatchItems
 from .context import BaseProcessingInfo, TimingContext
 from .dummy_inputs import BaseDummyInputsBuilder, MultiModalDummyOptions
@@ -1053,54 +1055,19 @@ def _decode_error(
     )
 
 
-class MediaDecodeJob(NamedTuple):
-    """A submitted decode and its location in the original request."""
-
-    modality: str
-    original_index: int
-    future: Future[Any]
-
-
 def _submit_ref_decodes(
     mm_data_items: MultiModalDataItems,
     decodes: list[MediaDecodeJob],
-) -> list[MediaDecodeJob]:
-    """Submit decodes of all not-yet-decoded media refs to the media thread
-    pool, without waiting for them.
-
-    Selected items retain their original request indices.
-    """
-    for modality, items in mm_data_items.items():
-        if not isinstance(items, ProcessorBatchItems):
-            continue
-        for idx in range(items.get_count()):
-            item = items.get_raw(idx)
-            if isinstance(item, MediaRef) and not item.is_decoded:
-                decodes.append(
-                    MediaDecodeJob(
-                        modality,
-                        items.get_original_index(idx),
-                        global_thread_pool.submit(item.decode),
-                    )
-                )
-    return decodes
-
-
-def _collect_ref_decodes(decodes: list[MediaDecodeJob]) -> None:
-    """Join all submitted decodes (in-flight work is never abandoned), then
-    raise the first failure as VLLMUnprocessableEntityError so corrupt media
-    surfaces as a client error (422) instead of a server error."""
-    first_error: tuple[str, int, Exception] | None = None
-    for job in decodes:
-        try:
-            job.future.result()
-        except Exception as error:
-            if first_error is None:
-                first_error = (job.modality, job.original_index, error)
-
-    if first_error is not None:
-        modality, idx, cause = first_error
-        raise _decode_error(modality, idx, cause) from cause
+) -> None:
+    """Submit raw refs, preserving their original request indices."""
+    refs = (
+        (modality, items.get_original_index(idx), item)
+        for modality, items in mm_data_items.items()
+        if isinstance(items, ProcessorBatchItems)
+        for idx in range(items.get_count())
+        if isinstance(item := items.get_raw(idx), MediaRef)
+    )
+    submit_media_decodes(refs, global_thread_pool, decodes)
 
 
 @dataclass
@@ -1165,7 +1132,7 @@ class MultiModalApplyState:
         if not self.decodes:
             return
         with self.timing_ctx.record("decode_mm_items"):
-            _collect_ref_decodes(self.decodes)
+            collect_media_decodes(self.decodes, _decode_error)
 
     async def wait_decodes_async(self) -> None:
         """Await all submitted decodes without blocking the event loop.
@@ -1174,19 +1141,8 @@ class MultiModalApplyState:
         """
         if not self.decodes:
             return
-        pending = asyncio.gather(
-            *(asyncio.wrap_future(job.future) for job in self.decodes),
-            return_exceptions=True,
-        )
         with self.timing_ctx.record("decode_mm_items"):
-            results = await await_with_cancellation_drain(pending)
-        for job, result in zip(self.decodes, results):
-            if isinstance(result, Exception):
-                raise _decode_error(
-                    job.modality, job.original_index, result
-                ) from result
-            if isinstance(result, BaseException):
-                raise result
+            await collect_media_decodes_async(self.decodes, _decode_error)
 
 
 class BaseMultiModalProcessor(ABC, Generic[_I]):
@@ -1550,7 +1506,9 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         VLLMUnprocessableEntityError so corrupt media surfaces as a client
         error (422) instead of a server error.
         """
-        _collect_ref_decodes(_submit_ref_decodes(mm_data_items, decodes))
+        start = len(decodes)
+        _submit_ref_decodes(mm_data_items, decodes)
+        collect_media_decodes(decodes[start:], _decode_error)
 
     def _recompute_cached_prompt_update(
         self,
