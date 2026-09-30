@@ -361,6 +361,8 @@ def kernel_reduce_segments_diffkv(
     )
     segm_max = tl.load(segm_max_ptr + segm_offset, mask=segm_mask, other=float("-inf"))
     overall_max = tl.max(segm_max)
+    # Graph-capture dummy lengths can leave a query with no causal keys.
+    overall_max = tl.where(overall_max > float("-inf"), overall_max, 0.0)
 
     segm_expsum = tl.load(segm_expsum_ptr + segm_offset, mask=segm_mask, other=0.0)
     segm_expsum = segm_expsum * tl.exp(segm_max - overall_max)
