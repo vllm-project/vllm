@@ -4,10 +4,9 @@
 
 from fastapi import APIRouter, FastAPI, Request
 from fastapi.responses import Response
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict
 
 from vllm.config import ProfilerConfig
-from vllm.config.profiler import validate_profile_prefix
 from vllm.engine.protocol import EngineClient
 from vllm.logger import init_logger
 
@@ -17,29 +16,16 @@ router = APIRouter()
 
 
 class StartProfileRequest(BaseModel):
-    """Optional overrides for one profiling session."""
+    """Optional overrides for one profiling session.
+
+    Values are validated by the engine client.
+    """
 
     model_config = ConfigDict(extra="ignore", strict=True)
 
     profile_prefix: str | None = None
-    delay_iterations: int | None = Field(default=None, ge=0)
-    max_iterations: int | None = Field(default=None, ge=0)
-
-    @field_validator("profile_prefix")
-    @classmethod
-    def validate_prefix(cls, value: str | None) -> str | None:
-        return validate_profile_prefix(value)
-
-    @property
-    def has_overrides(self) -> bool:
-        return any(
-            value is not None
-            for value in (
-                self.profile_prefix,
-                self.delay_iterations,
-                self.max_iterations,
-            )
-        )
+    delay_iterations: int | None = None
+    max_iterations: int | None = None
 
 
 def engine_client(request: Request) -> EngineClient:
@@ -51,14 +37,10 @@ async def start_profile(
     raw_request: Request, profile_request: StartProfileRequest | None = None
 ):
     logger.info("Starting profiler...")
-    if profile_request is None or not profile_request.has_overrides:
-        await engine_client(raw_request).start_profile()
-    else:
-        await engine_client(raw_request).start_profile(
-            profile_prefix=profile_request.profile_prefix,
-            delay_iterations=profile_request.delay_iterations,
-            max_iterations=profile_request.max_iterations,
-        )
+    # Only pass supplied overrides so clients without them keep the
+    # zero-argument call.
+    overrides = profile_request.model_dump(exclude_none=True) if profile_request else {}
+    await engine_client(raw_request).start_profile(**overrides)
     logger.info("Profiler started.")
     return Response(status_code=200)
 
