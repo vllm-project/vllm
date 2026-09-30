@@ -345,22 +345,21 @@ def _aiter_mla_small_head_mode() -> str:
     return mode
 
 
-def _adaptive_varlen_verify_enabled(
-    vllm_config: VllmConfig, kv_cache_spec: KVCacheSpec
-) -> bool:
+def _adaptive_varlen_verify_enabled(vllm_config: VllmConfig) -> bool:
     """Whether causal verify batches may carry 1..k+1 tokens per request.
 
     Adaptive verification trims each verify request on device after the CPU
-    split was made. Only the plain causal route is supported: DCP routes plan
-    per-row windows from host lengths, and non-causal draft blocks are never
-    trimmed.
+    split was made. Only the plain route is supported: DCP routes plan per-row
+    windows from host lengths. A group's spec is not consulted for causality:
+    Kimi-K3 DSpark draft layers share the target's MLA group, whose merged spec
+    then reports non_causal_multi_token_decode. Non-causal draft batches are
+    never trimmed and keep the uniform path (see _build_decode).
     """
     speculative_config = vllm_config.speculative_config
     return (
         speculative_config is not None
         and bool(getattr(speculative_config, "enable_adaptive_verification", False))
         and vllm_config.parallel_config.decode_context_parallel_size == 1
-        and not getattr(kv_cache_spec, "non_causal_multi_token_decode", False)
         and max_decode_query_len(vllm_config) > 1
     )
 
@@ -637,7 +636,7 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
         # Under adaptive verification every decode batch is padded to the
         # captured k+1 width (see _fill_varlen_rows), so one graph replays any
         # 1..k+1 mix. Mixed batches still take the UNIFORM_BATCH rules.
-        if not _adaptive_varlen_verify_enabled(vllm_config, kv_cache_spec):
+        if not _adaptive_varlen_verify_enabled(vllm_config):
             return None
         if (
             cls.get_cudagraph_support(vllm_config, kv_cache_spec)
@@ -725,7 +724,7 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
         # fixed by this width at capture, so it must not follow per-step
         # lengths.
         self._varlen_decode_qlen = 0
-        if _adaptive_varlen_verify_enabled(vllm_config, kv_cache_spec):
+        if _adaptive_varlen_verify_enabled(vllm_config):
             assert self._mtp_decode_qlen == max_decode_query_len(vllm_config), (
                 self._mtp_decode_qlen,
                 max_decode_query_len(vllm_config),
@@ -761,7 +760,7 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
         max_num_reqs = vllm_config.scheduler_config.max_num_seqs
         max_num_pages = max_num_reqs * max_num_pages_per_req
         speculative_config = vllm_config.speculative_config
-        if _adaptive_varlen_verify_enabled(vllm_config, kv_cache_spec):
+        if _adaptive_varlen_verify_enabled(vllm_config):
             # Varlen verify pads each request's page list by up to k pages.
             assert speculative_config is not None
             max_num_pages += max_num_reqs * (
