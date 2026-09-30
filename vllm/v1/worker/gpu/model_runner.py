@@ -135,6 +135,7 @@ from vllm.v1.worker.gpu.lora_utils import (
 from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
 from vllm.v1.worker.gpu.mm.lora import set_active_mm_loras
 from vllm.v1.worker.gpu.model_states import init_model_state
+from vllm.v1.worker.gpu.model_states.mamba_hybrid import MambaHybridModelState
 from vllm.v1.worker.gpu.pool.pooling_runner import PoolingRunner
 from vllm.v1.worker.gpu.pp_utils import PPHandler
 from vllm.v1.worker.gpu.sample.batch_shard import (
@@ -703,6 +704,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         )
         if self.speculator is not None:
             self.speculator.pcp_manager = self.pcp_manager
+        if isinstance(self.model_state, MambaHybridModelState):
+            self.model_state.pcp_manager = self.pcp_manager
         initialize_mamba_ssu_backend(
             self.vllm_config.mamba_config,
             self.kv_cache_config,

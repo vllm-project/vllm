@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import threading
 from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from weakref import WeakValueDictionary
 
 import torch
@@ -276,6 +276,30 @@ class DeviceCommunicatorBase:
         sizes: list[int] | None = None,
     ) -> torch.Tensor | list[torch.Tensor]:
         raise NotImplementedError
+
+    def all_gather_buffer(
+        self,
+        shape: tuple[int, ...],
+        dtype: torch.dtype,
+        device: torch.device,
+        parts: int = 1,
+        key: str = "ag_buffer",
+    ) -> torch.Tensor:
+        """Output of ``parts`` dim-0 in-place all-gathers of ``shape`` per rank.
+
+        Buffers of one ``key`` may be reused by the next such request.
+        """
+        return torch.empty(
+            (parts * self.world_size * shape[0], *shape[1:]), dtype=dtype, device=device
+        )
+
+    def all_gather_in_place(
+        self, output: torch.Tensor, stream: torch.cuda.Stream | None = None
+    ) -> None:
+        """All-gather dim-0 rank chunks of ``output``; this rank's is filled."""
+        local = output.chunk(self.world_size)[self.rank_in_group]
+        with torch.cuda.stream(stream) if stream is not None else nullcontext():
+            dist.all_gather_into_tensor(output, local, group=self.device_group)
 
     def reduce_scatter(self, input_: torch.Tensor, dim: int = -1) -> torch.Tensor:
         world_size = self.world_size

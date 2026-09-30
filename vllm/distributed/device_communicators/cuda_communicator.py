@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 
+import math
+
 import torch
 from torch.distributed import ProcessGroup
 
@@ -798,6 +800,40 @@ class CudaCommunicator(DeviceCommunicatorBase):
         pynccl_comm.group_end()
 
         return output_list
+
+    def all_gather_buffer(
+        self,
+        shape: tuple[int, ...],
+        dtype: torch.dtype,
+        device: torch.device,
+        parts: int = 1,
+        key: str = "ag_buffer",
+    ) -> torch.Tensor:
+        if should_nccl_symm_mem_ag_rs() and self.pynccl_comm is not None:
+            rows = parts * shape[0] * self.world_size
+            numel = rows * math.prod(shape[1:])
+            # Callers vary shape[0] per step: reuse the key's largest buffer when
+            # it fits, else grow to the next power of two. Outgrown buffers stay
+            # allocated (a queued collective may still use them), so a key holds
+            # under twice its peak.
+            largest = self.__dict__.setdefault("_ag_buffer_largest", {})
+            flat = largest.get((key, dtype))
+            if flat is None or flat.numel() < numel:
+                capacity = 1 << max(numel - 1, 0).bit_length()
+                flat = self._get_symm_scratch(key, (capacity,), dtype, device)
+                largest[(key, dtype)] = flat
+            return flat[:numel].view(rows, *shape[1:])
+        return super().all_gather_buffer(shape, dtype, device, parts, key)
+
+    def all_gather_in_place(
+        self, output: torch.Tensor, stream: torch.cuda.Stream | None = None
+    ) -> None:
+        pynccl_comm = self.pynccl_comm
+        if pynccl_comm is None or pynccl_comm.disabled:
+            return super().all_gather_in_place(output, stream)
+        # In place, NCCL skips copying the local chunk into the output.
+        local = output.chunk(self.world_size)[self.rank_in_group]
+        pynccl_comm.all_gather(output, local, stream=stream)
 
     def _all_gather_symm_mem(self, input_: torch.Tensor) -> torch.Tensor:
         """AllGather a single tensor using NCCL symmetric memory (NVLS).

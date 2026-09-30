@@ -221,3 +221,30 @@ def test_nccl_symm_mem_reduce_scatter(monkeypatch: pytest.MonkeyPatch, world_siz
 
     mp.spawn(nccl_symm_mem_reduce_scatter_worker, args=(world_size,), nprocs=world_size)
     cleanup_dist_env_and_memory()
+
+
+def test_all_gather_buffer_reuses_the_largest_buffer(monkeypatch):
+    """A key keeps one symmetric buffer while requests fit, and grows only to
+    the next power of two."""
+    from vllm.distributed.device_communicators import cuda_communicator
+
+    comm = object.__new__(CudaCommunicator)
+    comm.world_size = 2
+    comm.pynccl_comm = object()
+    allocated = []
+
+    def scratch(key, shape, dtype, device):
+        allocated.append((key, shape[0]))
+        return torch.zeros(shape, dtype=dtype)
+
+    monkeypatch.setattr(comm, "_get_symm_scratch", scratch)
+    monkeypatch.setattr(cuda_communicator, "should_nccl_symm_mem_ag_rs", lambda: True)
+    cpu = torch.device("cpu")
+    small = comm.all_gather_buffer((3, 4), torch.float32, cpu, key="k")
+    large = comm.all_gather_buffer((20, 4), torch.float32, cpu, key="k")
+    again = comm.all_gather_buffer((5, 4), torch.float32, cpu, key="k")
+    other = comm.all_gather_buffer((5, 4), torch.float32, cpu, key="other")
+    assert allocated == [("k", 32), ("k", 256), ("other", 64)]
+    assert small.shape == (6, 4) and large.shape == (40, 4)
+    assert again.shape == (10, 4) and again.data_ptr() == large.data_ptr()
+    assert other.data_ptr() != large.data_ptr()

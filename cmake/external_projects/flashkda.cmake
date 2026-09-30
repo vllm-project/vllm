@@ -12,8 +12,10 @@ if(FLASH_KDA_SRC_DIR)
 else()
   FetchContent_Declare(
     flashkda
-    GIT_REPOSITORY https://github.com/vllm-project/FlashKDA.git
-    GIT_TAG 17a037d98da546deb4591e967cf961a43c034d8b
+    # TODO: re-pin to vllm-project/FlashKDA once vllm-project/FlashKDA#14
+    # (K2 over a listed subset of sequences) merges.
+    GIT_REPOSITORY https://github.com/GirasoleY/FlashKDA.git
+    GIT_TAG 6cca5443d0522da29d69f27131f800133c604e14
     GIT_PROGRESS TRUE
     GIT_SUBMODULES cutlass
   )
@@ -42,6 +44,9 @@ if(FLASH_KDA_ARCHS)
     csrc/flashkda_registration.cpp
     ${flashkda_SOURCE_DIR}/csrc/flash_kda.cpp
     ${flashkda_SOURCE_DIR}/csrc/smxx/fwd_launch.cu)
+  # The registration translation unit includes KCP's kernels and launchers.
+  set_source_files_properties(csrc/flashkda_registration.cpp
+    PROPERTIES LANGUAGE CUDA)
   set(FLASH_KDA_INCLUDES
     ${flashkda_SOURCE_DIR}/csrc
     ${flashkda_SOURCE_DIR}/cutlass/include
