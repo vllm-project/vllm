@@ -158,6 +158,7 @@ mkdocs.yaml @hmellor
 # Qwen-specific files
 /vllm/model_executor/models/qwen* @sighingnow @vadiklyutiy
 /vllm/transformers_utils/configs/qwen* @sighingnow @vadiklyutiy
+/vllm/models/qwen4_exp @gau-nernst
 
 # MTP-specific files
 /vllm/model_executor/models/deepseek_mtp.py @luccafong
@@ -165,6 +166,9 @@ mkdocs.yaml @hmellor
 # DeepseekV4-specific files
 /vllm/models/deepseek_v4 @zyongye
 /vllm/model_executor/layers/sparse_attn_indexer.py @zyongye
+
+# Kimi-K3-specific files
+/vllm/models/kimi_k3/nvidia/kda.py @gau-nernst
 
 # Mistral-specific files
 /vllm/model_executor/models/mistral*.py @patrickvonplaten
@@ -178,6 +182,10 @@ mkdocs.yaml @hmellor
 /vllm/v1/attention/ops/chunked_prefill_paged_decode.py @tdoublep
 /vllm/v1/attention/ops/triton_unified_attention.py @tdoublep
 /vllm/third_party/flash_linear_attention @ZJY0516 @vadiklyutiy
+/vllm/model_executor/layers/mamba/ops/gdn_chunk_cutedsl @gau-nernst
+/vllm/model_executor/layers/fused_moe/router/bf16x3_router_gemm_cutedsl.py @gau-nernst
+/vllm/model_executor/kernels/linear/cute_dsl/gemm_rs_ar.py @gau-nernst
+/vllm/cute_utils @gau-nernst
 
 # ROCm related: specify owner with write access to notify AMD folks for careful code review
 /vllm/**/*rocm* @tjtanaa @dllehr-amd @shen-shanshan
