@@ -246,6 +246,10 @@ class FusedMMInputNorm(CustomOp):
         self.register_buffer("weight", (rescale_factor / std).to(device))
         self.register_buffer("bias", (-mean / std).to(device))
 
+    @classmethod
+    def enabled(cls) -> bool:
+        return True
+
     @property
     def input_dtype(self) -> torch.dtype | None:
         return torch.uint8
