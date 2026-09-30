@@ -80,6 +80,7 @@ from vllm.model_executor.models.interfaces import (
     SupportsEagle3,
     SupportsPP,
 )
+from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.model_executor.models.utils import (
     AutoWeightsLoader,
     PPMissingLayer,
@@ -1390,6 +1391,8 @@ class Glm5NextForConditionalGeneration(
         "qkv": ["qkv"],
     }
 
+    embedding_modules = {"lm_head": "output_embeddings"}
+
     # Weight prefixes follow the GLM-OCR / GLM-4V serialization convention
     # (``model.visual.`` -> ``visual.``, ``model.language_model.`` ->
     # ``language_model.model.``, ``lm_head.`` -> ``language_model.lm_head.``).
@@ -1406,6 +1409,13 @@ class Glm5NextForConditionalGeneration(
             }
         )
     )
+
+    def get_mm_mapping(self) -> MultiModelKeys:
+        return MultiModelKeys.from_string_field(
+            language_model="language_model",
+            connector="visual.merger.",
+            tower_model="visual.",
+        )
 
     @classmethod
     def get_mamba_state_dtype_from_config(cls, vllm_config: VllmConfig):
