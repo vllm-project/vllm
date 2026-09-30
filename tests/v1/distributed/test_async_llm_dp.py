@@ -386,37 +386,7 @@ async def test_dp_pause_late_request_does_not_block_drain():
         assert not engine.output_processor.has_unfinished_requests()
         await engine.resume_generation()
 
-
-@pytest.mark.asyncio
-async def test_dp_request_right_after_resume_does_not_hang():
-    """A request rejected while paused leaves the front-end briefly believing a
-    wave is running, so it skips the wake-up for the next request; the rank
-    that receives that request must wake its peers itself."""
-    with ExitStack() as after:
-        engine_args = _get_dp_pause_engine_args(expert_parallel=True)
-        engine = AsyncLLM.from_engine_args(engine_args)
-        after.callback(engine.shutdown)
-
-        await _consume(
-            engine.generate(
-                request_id="warmup",
-                prompt=DP_PAUSE_PROMPT,
-                sampling_params=SamplingParams(max_tokens=5),
-            )
-        )
-        assert await _poll_flag(engine, False, timeout=30)
-
-        await engine.pause_generation(mode="abort")
-        collector = await engine.add_request(
-            request_id="late",
-            prompt=DP_PAUSE_PROMPT,
-            params=SamplingParams(max_tokens=5),
-        )
-        with pytest.raises(EnginePausedError):
-            await asyncio.wait_for(collector.get(), timeout=60)
-
-        await engine.resume_generation()
-        # Pin the stale belief, which the coordinator would otherwise correct in 5s.
+        # Pin the stale belief the rejection left; the rank must wake its peers.
         engine.engine_core.engines_running = True
         await asyncio.wait_for(
             _consume(
