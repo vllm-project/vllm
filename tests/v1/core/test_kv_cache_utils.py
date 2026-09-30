@@ -244,10 +244,17 @@ def test_hisparse_host_pool_must_fit_max_model_len(monkeypatch, extra_blocks, ok
             create_hisparse_layout(config, [group], host_budget=host_budget)
 
 
-@pytest.mark.parametrize("num_gpu_blocks,ok", [(160, False), (1000, True)])
-def test_hisparse_pool_must_fit_max_model_len(monkeypatch, num_gpu_blocks, ok):
+@pytest.mark.parametrize(
+    "max_model_len,num_gpu_blocks,ok",
+    [(8192, 160, False), (8192, 1000, True), (32768, 2576, False), (32768, 2577, True)],
+)
+def test_hisparse_pool_must_fit_max_model_len(
+    monkeypatch, max_model_len, num_gpu_blocks, ok
+):
     """Each resident group takes its own blocks from HiSparse's shared GPU pool,
-    so a pool that fits only the indexer pages must be rejected at startup."""
+    so a pool that fits only the indexer pages must be rejected at startup.
+    Resident pages stay pinned through prefill, so at 32768 tokens one request
+    needs 2576 blocks plus the null block, although only 2048 are in flight."""
     monkeypatch.setattr(
         hisparse_runtime_module.current_platform, "is_cuda_alike", lambda: True
     )
@@ -268,7 +275,8 @@ def test_hisparse_pool_must_fit_max_model_len(monkeypatch, num_gpu_blocks, ok):
             dtype=torch.bfloat16,
             cache_role=SparseCacheRole.INDEXER,
         )
-    config = VllmConfig(model_config=ModelConfig(max_model_len=8192))
+    config = VllmConfig(model_config=ModelConfig(max_model_len=max_model_len))
+    config.scheduler_config.max_num_batched_tokens = 2048
     config.attention_config.hisparse_config = HiSparseConfig()
     config.model_config.hf_config.index_topk = 128
     config.cache_config.num_gpu_blocks_override = num_gpu_blocks
