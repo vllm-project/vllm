@@ -178,9 +178,6 @@ directory = "htmlcov"
 [tool.coverage.xml]
 output = "coverage.xml"
 
-[tool.ty.src]
-respect-ignore-files = true
-
 [tool.ty.rules]
 # Minimize noise from optional/extra dependencies not installed in pre-commit environment
 unresolved-import = "ignore"
