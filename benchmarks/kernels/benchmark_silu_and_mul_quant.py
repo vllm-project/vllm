@@ -43,6 +43,10 @@ def benchmark(num_tokens: int, intermediate_size: int, provider: str, dtype):
         def native(x):
             return quant.forward_native(act.forward_native(x), scale)[0]
 
+        # One static-shape compile per config, as the model's compiled graph
+        # specializes on the hidden size; without the reset Dynamo falls back
+        # to a dynamic-shape kernel after the first recompile.
+        torch._dynamo.reset()
         compiled = torch.compile(native)
         compiled(x)
 
