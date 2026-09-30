@@ -385,7 +385,7 @@ def test_pynvvideocodec_unrelated_error_propagates(
         PyNvVideoCodecVideoBackendMixin.decode_frames_pynvvideocodec(
             None,
             b"video",
-            None,  # type: ignore[arg-type]  # Fails before target metadata is used.
+            None,
         )
 
     assert exc_info.value is original_error
