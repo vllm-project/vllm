@@ -336,6 +336,7 @@ class FlashAttnMLAImpl(MLACommonImpl[FlashAttnMLAMetadata]):
         kv_c_and_k_pe_cache: torch.Tensor,
         attn_metadata: FlashAttnMLAMetadata,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        assert attn_metadata.decode is not None
         num_decodes = attn_metadata.num_decodes
         decode_cu_seqlens_q = attn_metadata.query_start_loc[: num_decodes + 1]
 
@@ -347,13 +348,15 @@ class FlashAttnMLAImpl(MLACommonImpl[FlashAttnMLAMetadata]):
             "(num_heads_kv=1)?, kv_lora_rank+qk_rope_head_dim]"
         )
 
-        if type(q) is tuple:
-            q = torch.cat(q, dim=-1)
-        if not q.is_contiguous():
-            q = q.contiguous()
+        if type(q) is tuple:  # noqa: SIM108
+            q_in = torch.cat(q, dim=-1)
+        else:
+            q_in = q
+        if not q_in.is_contiguous():
+            q_in = q_in.contiguous()
 
         attn_out = flash_attn_varlen_func(
-            q,
+            q_in,
             cache,
             cache.narrow(-1, 0, self.kv_lora_rank),
             max_seqlen_q=1,
