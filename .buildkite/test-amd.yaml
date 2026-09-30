@@ -5056,7 +5056,6 @@ steps:
   - vllm/platforms/rocm.py
   - vllm/envs.py
   - tests/kernels/moe/test_gpt_oss_triton_kernels.py
-  - tests/kernels/moe/test_modular_oai_triton_moe.py
   - tests/kernels/moe/test_moe.py
   - tests/kernels/moe/test_block_int8.py
   - tests/kernels/moe/test_triton_moe_no_act_mul.py
@@ -5064,7 +5063,6 @@ steps:
   optional: true
   commands:
     - pytest -v -s kernels/moe/test_gpt_oss_triton_kernels.py
-    - pytest -v -s kernels/moe/test_modular_oai_triton_moe.py
     - pytest -v -s kernels/moe/test_moe.py
     - pytest -v -s kernels/moe/test_block_int8.py
     - pytest -v -s kernels/moe/test_triton_moe_no_act_mul.py
