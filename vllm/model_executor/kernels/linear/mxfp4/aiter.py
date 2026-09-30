@@ -41,6 +41,7 @@ class AiterMxfp4LinearKernel(MxFp4LinearKernel):
         self.use_asm_gemm = False
         self.is_hadamard_fused = False
         self.out_dtype = torch.get_default_dtype()
+        self.split_act_quant = False
 
     @classmethod
     def is_supported(
@@ -99,6 +100,12 @@ class AiterMxfp4LinearKernel(MxFp4LinearKernel):
             )
             self.use_asm_gemm = False
 
+        # the MXFP4 quant fusions only cover the Triton afp4wfp4 path
+        self.split_act_quant = not self.use_asm_gemm and (
+            bool(rocm_aiter_ops.is_mxfp4_silu_quant_fusion_enabled())
+            or bool(rocm_aiter_ops.is_mxfp4_rmsnorm_quant_fusion_enabled())
+        )
+
         if self.use_asm_gemm:
             from aiter.ops.shuffle import shuffle_weight
 
@@ -128,14 +135,28 @@ class AiterMxfp4LinearKernel(MxFp4LinearKernel):
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        y = rocm_aiter_ops.mxfp4_gemm_dynamic_quant(
-            x,
-            layer.weight,
-            layer.weight_scale,
-            self.use_asm_gemm,
-            self.out_dtype,
-            hadamard_rotate=self.is_hadamard_fused,
-        )
+        if self.split_act_quant:
+            # Emit the activation quant as its own op so the aiter fusion
+            # passes can fold it into the producing SiLU-mul / RMSNorm. Left
+            # unfused it is the same dynamic_mxfp4_quant + gemm_afp4wfp4.
+            x_q, x_s = torch.ops.vllm.rocm_aiter_dynamic_mxfp4_quant(x)
+            y = rocm_aiter_ops.mxfp4_gemm_dynamic_quant(
+                x_q,
+                layer.weight,
+                layer.weight_scale,
+                False,
+                self.out_dtype,
+                x_s,
+            )
+        else:
+            y = rocm_aiter_ops.mxfp4_gemm_dynamic_quant(
+                x,
+                layer.weight,
+                layer.weight_scale,
+                self.use_asm_gemm,
+                self.out_dtype,
+                hadamard_rotate=self.is_hadamard_fused,
+            )
         if bias is not None:
             y = y + bias
         return y
