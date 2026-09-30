@@ -796,6 +796,7 @@ def test_shm_receiver_requires_sender_handle_for_current_cache_key():
 
     try:
         sender_item, _ = sender_cache.get_and_update_item((item, []), mm_hash)
+        assert sender_item is not None
 
         valid_feature = MultiModalFeatureSpec(
             data=sender_item,
@@ -897,12 +898,16 @@ def test_shm_sender_validates_client_supplied_handles():
         handle, _ = sender_cache.get_and_update_item(
             (MultiModalKwargsItem.dummy(1024), []), mm_hash
         )
+        assert handle is not None
         sender_cache.validate_input_item(handle, mm_hash)
         sender_cache.validate_input_item(MultiModalKwargsItem.dummy(16), mm_hash)
 
         signature = handle["signature"].data
+        assert isinstance(signature, list) and signature
+        first_byte = signature[0]
+        assert isinstance(first_byte, int)
         forged = [
-            _with_elem(handle, "signature", [signature[0] ^ 1, *signature[1:]]),
+            _with_elem(handle, "signature", [first_byte ^ 1, *signature[1:]]),
             _with_elem(handle, "signature", [signature]),
             _with_elem(handle, "address", True),
             _with_elem(handle, "address", -1),
@@ -934,6 +939,7 @@ def test_shm_receiver_rejects_out_of_range_handle_fields():
         handle, _ = sender_cache.get_and_update_item(
             (MultiModalKwargsItem.dummy(1024), []), mm_hash
         )
+        assert handle is not None and "signature" in handle
         for key, value in [
             ("address", -1),
             ("address", 2**64),
@@ -967,6 +973,7 @@ def test_shm_handle_issued_before_cache_clear():
 
     try:
         stale_item, _ = sender_cache.get_and_update_item((item, []), mm_hash)
+        assert stale_item is not None and "signature" in stale_item
         sender_cache.clear_cache()
 
         # A request still draining after the clear resolves to its own data.
