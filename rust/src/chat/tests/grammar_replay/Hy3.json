@@ -1,0 +1,625 @@
+{
+  "model_id": "tencent/Hy3",
+  "vocab_size": 120832,
+  "all_stop_token_ids": [120025],
+  "cases": {
+    "auto": {
+      "grammar": {
+        "format": {
+          "type": "sequence",
+          "elements": [
+            {
+              "type": "tag",
+              "begin": "",
+              "content": {
+                "type": "any_text",
+                "excludes": [],
+                "max_tokens": null,
+                "max_chars": null
+              },
+              "end": "</think:opensource>"
+            },
+            {
+              "type": "triggered_tags",
+              "triggers": [
+                "<tool_calls:opensource>"
+              ],
+              "tags": [
+                {
+                  "type": "tag",
+                  "begin": "<tool_calls:opensource>\n",
+                  "content": {
+                    "type": "tags_with_separator",
+                    "tags": [
+                      {
+                        "type": "tag",
+                        "begin": "<tool_call:opensource>get_weather<tool_sep:opensource>\n",
+                        "content": {
+                          "type": "sequence",
+                          "elements": [
+                            {
+                              "type": "sequence",
+                              "elements": [
+                                {
+                                  "type": "const_string",
+                                  "value": "<arg_key:opensource>"
+                                },
+                                {
+                                  "type": "const_string",
+                                  "value": "location"
+                                },
+                                {
+                                  "type": "const_string",
+                                  "value": "</arg_key:opensource>"
+                                },
+                                {
+                                  "type": "const_string",
+                                  "value": "\n"
+                                },
+                                {
+                                  "type": "const_string",
+                                  "value": "<arg_value:opensource>"
+                                },
+                                {
+                                  "type": "any_text",
+                                  "excludes": [
+                                    "<tool_calls:opensource>",
+                                    "</tool_calls:opensource>",
+                                    "<tool_call:opensource>",
+                                    "</tool_call:opensource>",
+                                    "<tool_sep:opensource>",
+                                    "<arg_key:opensource>",
+                                    "</arg_key:opensource>",
+                                    "<arg_value:opensource>",
+                                    "</arg_value:opensource>"
+                                  ],
+                                  "max_tokens": null,
+                                  "max_chars": null
+                                },
+                                {
+                                  "type": "const_string",
+                                  "value": "</arg_value:opensource>"
+                                },
+                                {
+                                  "type": "const_string",
+                                  "value": "\n"
+                                }
+                              ]
+                            }
+                          ]
+                        },
+                        "end": "</tool_call:opensource>"
+                      },
+                      {
+                        "type": "tag",
+                        "begin": "<tool_call:opensource>add<tool_sep:opensource>\n",
+                        "content": {
+                          "type": "sequence",
+                          "elements": [
+                            {
+                              "type": "sequence",
+                              "elements": [
+                                {
+                                  "type": "const_string",
+                                  "value": "<arg_key:opensource>"
+                                },
+                                {
+                                  "type": "const_string",
+                                  "value": "y"
+                                },
+                                {
+                                  "type": "const_string",
+                                  "value": "</arg_key:opensource>"
+                                },
+                                {
+                                  "type": "const_string",
+                                  "value": "\n"
+                                },
+                                {
+                                  "type": "const_string",
+                                  "value": "<arg_value:opensource>"
+                                },
+                                {
+                                  "type": "any_text",
+                                  "excludes": [
+                                    "<tool_calls:opensource>",
+                                    "</tool_calls:opensource>",
+                                    "<tool_call:opensource>",
+                                    "</tool_call:opensource>",
+                                    "<tool_sep:opensource>",
+                                    "<arg_key:opensource>",
+                                    "</arg_key:opensource>",
+                                    "<arg_value:opensource>",
+                                    "</arg_value:opensource>"
+                                  ],
+                                  "max_tokens": null,
+                                  "max_chars": null
+                                },
+                                {
+                                  "type": "const_string",
+                                  "value": "</arg_value:opensource>"
+                                },
+                                {
+                                  "type": "const_string",
+                                  "value": "\n"
+                                }
+                              ]
+                            },
+                            {
+                              "type": "sequence",
+                              "elements": [
+                                {
+                                  "type": "const_string",
+                                  "value": "<arg_key:opensource>"
+                                },
+                                {
+                                  "type": "const_string",
+                                  "value": "x"
+                                },
+                                {
+                                  "type": "const_string",
+                                  "value": "</arg_key:opensource>"
+                                },
+                                {
+                                  "type": "const_string",
+                                  "value": "\n"
+                                },
+                                {
+                                  "type": "const_string",
+                                  "value": "<arg_value:opensource>"
+                                },
+                                {
+                                  "type": "any_text",
+                                  "excludes": [
+                                    "<tool_calls:opensource>",
+                                    "</tool_calls:opensource>",
+                                    "<tool_call:opensource>",
+                                    "</tool_call:opensource>",
+                                    "<tool_sep:opensource>",
+                                    "<arg_key:opensource>",
+                                    "</arg_key:opensource>",
+                                    "<arg_value:opensource>",
+                                    "</arg_value:opensource>"
+                                  ],
+                                  "max_tokens": null,
+                                  "max_chars": null
+                                },
+                                {
+                                  "type": "const_string",
+                                  "value": "</arg_value:opensource>"
+                                },
+                                {
+                                  "type": "const_string",
+                                  "value": "\n"
+                                }
+                              ]
+                            },
+                            {
+                              "type": "sequence",
+                              "elements": [
+                                {
+                                  "type": "const_string",
+                                  "value": "<arg_key:opensource>"
+                                },
+                                {
+                                  "type": "const_string",
+                                  "value": "items"
+                                },
+                                {
+                                  "type": "const_string",
+                                  "value": "</arg_key:opensource>"
+                                },
+                                {
+                                  "type": "const_string",
+                                  "value": "\n"
+                                },
+                                {
+                                  "type": "const_string",
+                                  "value": "<arg_value:opensource>"
+                                },
+                                {
+                                  "type": "any_text",
+                                  "excludes": [
+                                    "<tool_calls:opensource>",
+                                    "</tool_calls:opensource>",
+                                    "<tool_call:opensource>",
+                                    "</tool_call:opensource>",
+                                    "<tool_sep:opensource>",
+                                    "<arg_key:opensource>",
+                                    "</arg_key:opensource>",
+                                    "<arg_value:opensource>",
+                                    "</arg_value:opensource>"
+                                  ],
+                                  "max_tokens": null,
+                                  "max_chars": null
+                                },
+                                {
+                                  "type": "const_string",
+                                  "value": "</arg_value:opensource>"
+                                },
+                                {
+                                  "type": "const_string",
+                                  "value": "\n"
+                                }
+                              ]
+                            }
+                          ]
+                        },
+                        "end": "</tool_call:opensource>"
+                      }
+                    ],
+                    "separator": "\n",
+                    "at_least_one": true,
+                    "stop_after_first": false
+                  },
+                  "end": "\n</tool_calls:opensource>"
+                }
+              ],
+              "at_least_one": false,
+              "stop_after_first": false,
+              "excludes": []
+            }
+          ]
+        },
+        "coverage": "from_token_zero"
+      },
+      "completion": "Need call the weather and add tools.</think:opensource>I will call the tools.<tool_calls:opensource>\n<tool_call:opensource>get_weather<tool_sep:opensource>\n<arg_key:opensource>location</arg_key:opensource>\n<arg_value:opensource>Shanghai</arg_value:opensource>\n</tool_call:opensource>\n<tool_call:opensource>add<tool_sep:opensource>\n<arg_key:opensource>y</arg_key:opensource>\n<arg_value:opensource>1.0</arg_value:opensource>\n<arg_key:opensource>x</arg_key:opensource>\n<arg_value:opensource>2</arg_value:opensource>\n<arg_key:opensource>items</arg_key:opensource>\n<arg_value:opensource>[\"left\", \"right\"]</arg_value:opensource>\n</tool_call:opensource>\n</tool_calls:opensource>",
+      "generation_token_ids": [47893, 1609, 252, 9969, 289, 1189, 7106, 13, 120030, 40, 823, 1609, 252, 7106, 13, 120035, 185, 120033, 874, 62, 39899, 120043, 185, 120066, 24806, 120067, 185, 120068, 4169, 768, 32381, 120069, 185, 120034, 185, 120033, 2176, 120043, 185, 120066, 88, 120067, 185, 120068, 16, 13, 15, 120069, 185, 120066, 87, 120067, 185, 120068, 17, 120069, 185, 120066, 12792, 120067, 185, 120068, 5831, 1639, 1221, 478, 1331, 7029, 120069, 185, 120034, 185, 120036, 120025]
+    },
+    "required": {
+      "grammar": {
+        "format": {
+          "type": "sequence",
+          "elements": [
+            {
+              "type": "tag",
+              "begin": "",
+              "content": {
+                "type": "any_text",
+                "excludes": [],
+                "max_tokens": null,
+                "max_chars": null
+              },
+              "end": "</think:opensource>"
+            },
+            {
+              "type": "sequence",
+              "elements": [
+                {
+                  "type": "const_string",
+                  "value": "<tool_calls:opensource>\n"
+                },
+                {
+                  "type": "tags_with_separator",
+                  "tags": [
+                    {
+                      "type": "tag",
+                      "begin": "<tool_call:opensource>get_weather<tool_sep:opensource>\n",
+                      "content": {
+                        "type": "sequence",
+                        "elements": [
+                          {
+                            "type": "sequence",
+                            "elements": [
+                              {
+                                "type": "const_string",
+                                "value": "<arg_key:opensource>"
+                              },
+                              {
+                                "type": "const_string",
+                                "value": "location"
+                              },
+                              {
+                                "type": "const_string",
+                                "value": "</arg_key:opensource>"
+                              },
+                              {
+                                "type": "const_string",
+                                "value": "\n"
+                              },
+                              {
+                                "type": "const_string",
+                                "value": "<arg_value:opensource>"
+                              },
+                              {
+                                "type": "any_text",
+                                "excludes": [
+                                  "<tool_calls:opensource>",
+                                  "</tool_calls:opensource>",
+                                  "<tool_call:opensource>",
+                                  "</tool_call:opensource>",
+                                  "<tool_sep:opensource>",
+                                  "<arg_key:opensource>",
+                                  "</arg_key:opensource>",
+                                  "<arg_value:opensource>",
+                                  "</arg_value:opensource>"
+                                ],
+                                "max_tokens": null,
+                                "max_chars": null
+                              },
+                              {
+                                "type": "const_string",
+                                "value": "</arg_value:opensource>"
+                              },
+                              {
+                                "type": "const_string",
+                                "value": "\n"
+                              }
+                            ]
+                          }
+                        ]
+                      },
+                      "end": "</tool_call:opensource>"
+                    },
+                    {
+                      "type": "tag",
+                      "begin": "<tool_call:opensource>add<tool_sep:opensource>\n",
+                      "content": {
+                        "type": "sequence",
+                        "elements": [
+                          {
+                            "type": "sequence",
+                            "elements": [
+                              {
+                                "type": "const_string",
+                                "value": "<arg_key:opensource>"
+                              },
+                              {
+                                "type": "const_string",
+                                "value": "y"
+                              },
+                              {
+                                "type": "const_string",
+                                "value": "</arg_key:opensource>"
+                              },
+                              {
+                                "type": "const_string",
+                                "value": "\n"
+                              },
+                              {
+                                "type": "const_string",
+                                "value": "<arg_value:opensource>"
+                              },
+                              {
+                                "type": "any_text",
+                                "excludes": [
+                                  "<tool_calls:opensource>",
+                                  "</tool_calls:opensource>",
+                                  "<tool_call:opensource>",
+                                  "</tool_call:opensource>",
+                                  "<tool_sep:opensource>",
+                                  "<arg_key:opensource>",
+                                  "</arg_key:opensource>",
+                                  "<arg_value:opensource>",
+                                  "</arg_value:opensource>"
+                                ],
+                                "max_tokens": null,
+                                "max_chars": null
+                              },
+                              {
+                                "type": "const_string",
+                                "value": "</arg_value:opensource>"
+                              },
+                              {
+                                "type": "const_string",
+                                "value": "\n"
+                              }
+                            ]
+                          },
+                          {
+                            "type": "sequence",
+                            "elements": [
+                              {
+                                "type": "const_string",
+                                "value": "<arg_key:opensource>"
+                              },
+                              {
+                                "type": "const_string",
+                                "value": "x"
+                              },
+                              {
+                                "type": "const_string",
+                                "value": "</arg_key:opensource>"
+                              },
+                              {
+                                "type": "const_string",
+                                "value": "\n"
+                              },
+                              {
+                                "type": "const_string",
+                                "value": "<arg_value:opensource>"
+                              },
+                              {
+                                "type": "any_text",
+                                "excludes": [
+                                  "<tool_calls:opensource>",
+                                  "</tool_calls:opensource>",
+                                  "<tool_call:opensource>",
+                                  "</tool_call:opensource>",
+                                  "<tool_sep:opensource>",
+                                  "<arg_key:opensource>",
+                                  "</arg_key:opensource>",
+                                  "<arg_value:opensource>",
+                                  "</arg_value:opensource>"
+                                ],
+                                "max_tokens": null,
+                                "max_chars": null
+                              },
+                              {
+                                "type": "const_string",
+                                "value": "</arg_value:opensource>"
+                              },
+                              {
+                                "type": "const_string",
+                                "value": "\n"
+                              }
+                            ]
+                          },
+                          {
+                            "type": "sequence",
+                            "elements": [
+                              {
+                                "type": "const_string",
+                                "value": "<arg_key:opensource>"
+                              },
+                              {
+                                "type": "const_string",
+                                "value": "items"
+                              },
+                              {
+                                "type": "const_string",
+                                "value": "</arg_key:opensource>"
+                              },
+                              {
+                                "type": "const_string",
+                                "value": "\n"
+                              },
+                              {
+                                "type": "const_string",
+                                "value": "<arg_value:opensource>"
+                              },
+                              {
+                                "type": "any_text",
+                                "excludes": [
+                                  "<tool_calls:opensource>",
+                                  "</tool_calls:opensource>",
+                                  "<tool_call:opensource>",
+                                  "</tool_call:opensource>",
+                                  "<tool_sep:opensource>",
+                                  "<arg_key:opensource>",
+                                  "</arg_key:opensource>",
+                                  "<arg_value:opensource>",
+                                  "</arg_value:opensource>"
+                                ],
+                                "max_tokens": null,
+                                "max_chars": null
+                              },
+                              {
+                                "type": "const_string",
+                                "value": "</arg_value:opensource>"
+                              },
+                              {
+                                "type": "const_string",
+                                "value": "\n"
+                              }
+                            ]
+                          }
+                        ]
+                      },
+                      "end": "</tool_call:opensource>"
+                    }
+                  ],
+                  "separator": "\n",
+                  "at_least_one": true,
+                  "stop_after_first": false
+                },
+                {
+                  "type": "const_string",
+                  "value": "\n</tool_calls:opensource>"
+                }
+              ]
+            }
+          ]
+        },
+        "coverage": "from_token_zero"
+      },
+      "completion": "Need call the weather and add tools.</think:opensource><tool_calls:opensource>\n<tool_call:opensource>get_weather<tool_sep:opensource>\n<arg_key:opensource>location</arg_key:opensource>\n<arg_value:opensource>Shanghai</arg_value:opensource>\n</tool_call:opensource>\n<tool_call:opensource>add<tool_sep:opensource>\n<arg_key:opensource>y</arg_key:opensource>\n<arg_value:opensource>1.0</arg_value:opensource>\n<arg_key:opensource>x</arg_key:opensource>\n<arg_value:opensource>2</arg_value:opensource>\n<arg_key:opensource>items</arg_key:opensource>\n<arg_value:opensource>[\"left\", \"right\"]</arg_value:opensource>\n</tool_call:opensource>\n</tool_calls:opensource>",
+      "generation_token_ids": [47893, 1609, 252, 9969, 289, 1189, 7106, 13, 120030, 120035, 185, 120033, 874, 62, 39899, 120043, 185, 120066, 24806, 120067, 185, 120068, 4169, 768, 32381, 120069, 185, 120034, 185, 120033, 2176, 120043, 185, 120066, 88, 120067, 185, 120068, 16, 13, 15, 120069, 185, 120066, 87, 120067, 185, 120068, 17, 120069, 185, 120066, 12792, 120067, 185, 120068, 5831, 1639, 1221, 478, 1331, 7029, 120069, 185, 120034, 185, 120036, 120025]
+    },
+    "named": {
+      "grammar": {
+        "format": {
+          "type": "sequence",
+          "elements": [
+            {
+              "type": "tag",
+              "begin": "",
+              "content": {
+                "type": "any_text",
+                "excludes": [],
+                "max_tokens": null,
+                "max_chars": null
+              },
+              "end": "</think:opensource>"
+            },
+            {
+              "type": "sequence",
+              "elements": [
+                {
+                  "type": "const_string",
+                  "value": "<tool_calls:opensource>\n"
+                },
+                {
+                  "type": "tag",
+                  "begin": "<tool_call:opensource>get_weather<tool_sep:opensource>\n",
+                  "content": {
+                    "type": "sequence",
+                    "elements": [
+                      {
+                        "type": "sequence",
+                        "elements": [
+                          {
+                            "type": "const_string",
+                            "value": "<arg_key:opensource>"
+                          },
+                          {
+                            "type": "const_string",
+                            "value": "location"
+                          },
+                          {
+                            "type": "const_string",
+                            "value": "</arg_key:opensource>"
+                          },
+                          {
+                            "type": "const_string",
+                            "value": "\n"
+                          },
+                          {
+                            "type": "const_string",
+                            "value": "<arg_value:opensource>"
+                          },
+                          {
+                            "type": "any_text",
+                            "excludes": [
+                              "<tool_calls:opensource>",
+                              "</tool_calls:opensource>",
+                              "<tool_call:opensource>",
+                              "</tool_call:opensource>",
+                              "<tool_sep:opensource>",
+                              "<arg_key:opensource>",
+                              "</arg_key:opensource>",
+                              "<arg_value:opensource>",
+                              "</arg_value:opensource>"
+                            ],
+                            "max_tokens": null,
+                            "max_chars": null
+                          },
+                          {
+                            "type": "const_string",
+                            "value": "</arg_value:opensource>"
+                          },
+                          {
+                            "type": "const_string",
+                            "value": "\n"
+                          }
+                        ]
+                      }
+                    ]
+                  },
+                  "end": "</tool_call:opensource>"
+                },
+                {
+                  "type": "const_string",
+                  "value": "\n</tool_calls:opensource>"
+                }
+              ]
+            }
+          ]
+        },
+        "coverage": "from_token_zero"
+      },
+      "completion": "Need call the weather and add tools.</think:opensource><tool_calls:opensource>\n<tool_call:opensource>get_weather<tool_sep:opensource>\n<arg_key:opensource>location</arg_key:opensource>\n<arg_value:opensource>Shanghai</arg_value:opensource>\n</tool_call:opensource>\n</tool_calls:opensource>",
+      "generation_token_ids": [47893, 1609, 252, 9969, 289, 1189, 7106, 13, 120030, 120035, 185, 120033, 874, 62, 39899, 120043, 185, 120066, 24806, 120067, 185, 120068, 4169, 768, 32381, 120069, 185, 120034, 185, 120036, 120025]
+    }
+  }
+}
