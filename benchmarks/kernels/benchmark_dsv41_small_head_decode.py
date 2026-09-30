@@ -138,7 +138,9 @@ def benchmark(tokens: int, heads: int, topk: int, rounds: int) -> list:
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--tokens", type=int, nargs="+", default=[1, 4, 8, 16, 32])
+    parser.add_argument(
+        "--tokens", type=int, nargs="+", default=[*range(1, 17), 24, 32]
+    )
     parser.add_argument(
         "--heads", type=int, nargs="+", choices=[8, 16], default=[8, 16]
     )

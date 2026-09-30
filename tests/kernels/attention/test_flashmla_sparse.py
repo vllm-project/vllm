@@ -1079,7 +1079,7 @@ def test_small_head_sparse_decode_opt_in_gate(small_head_decode, monkeypatch, he
     assert not mod.small_head_decode_enabled(heads)
 
 
-@pytest.mark.parametrize("tokens", [1, 8, 9])
+@pytest.mark.parametrize("tokens", [1, 16, 17])
 @pytest.mark.parametrize("enabled", [False, True])
 def test_small_head_sparse_decode_dispatch_and_fallback(
     small_head_decode, monkeypatch, tokens, enabled
@@ -1121,7 +1121,7 @@ def test_small_head_sparse_decode_dispatch_and_fallback(
     mod.DeepseekV4FlashMLAAttention._forward_decode(
         attn, q, None, metadata, None, True, out
     )
-    use_native = enabled and tokens <= mod.SMALL_HEAD_DECODE_MAX_TOKENS
+    use_native = enabled and mod.small_head_decode_supported(tokens, swa_i.shape[-1])
     assert native.call_count == int(use_native)
     assert fallback.call_count == int(not use_native)
     expected, _ = flashmla(

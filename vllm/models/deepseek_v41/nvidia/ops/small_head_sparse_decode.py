@@ -213,14 +213,24 @@ def _merge_splits_kernel(
     )
 
 
-SMALL_HEAD_DECODE_MAX_TOKENS = 8
+# Tuned on H20. Beyond these token counts FlashMLA is as fast or faster.
+_SHORT_KEYS = 256
+_SHORT_KEYS_MAX_TOKENS = 16
+_LONG_KEYS_MAX_TOKENS = 12
+
+
+def small_head_decode_supported(num_tokens: int, max_keys: int) -> bool:
+    if max_keys <= _SHORT_KEYS:
+        return num_tokens <= _SHORT_KEYS_MAX_TOKENS
+    return num_tokens <= _LONG_KEYS_MAX_TOKENS
 
 
 def _pick_config(num_tokens: int, max_keys: int) -> tuple[int, int, int, int]:
-    if num_tokens <= 4:
-        if max_keys <= 256:
+    if max_keys > _SHORT_KEYS:
+        if num_tokens <= 3:
+            return 32, 32, 4, 2
+        if num_tokens <= 7:
             return 16, 32, 8, 2
-        return 32, 32, 4, 2
     return 8, 32, 8, 2
 
 
