@@ -476,10 +476,10 @@ async def test_allowed_media_domains(video_url: str, num_frames: int):
 
     disallowed_url = "https://upload.wikimedia.org/wikipedia/commons/4/47/PNG_transparency_demonstration_1.png"
     with pytest.raises(ValueError):
-        _, _ = connector.fetch_video(disallowed_url, video_io)
+        connector.fetch_video(disallowed_url, video_io)
 
     with pytest.raises(ValueError):
-        _, _ = await connector.fetch_video_async(disallowed_url, video_io)
+        await connector.fetch_video_async(disallowed_url, video_io)
 
 
 @pytest.mark.asyncio
@@ -583,20 +583,24 @@ def test_info_resolves_the_video_backend_from_the_model(
     )
     info = _processing_info()
 
-    assert info.get_media_io("video").video_loader_backend == "qwen2_vl"
+    video_io = info.get_media_io("video")
+    assert isinstance(video_io, VideoMediaIO)
+    assert video_io.video_loader_backend == "qwen2_vl"
 
     # An explicitly requested backend still wins over the model's default.
     override = {"video": {"video_backend": "opencv"}}
-    assert info.get_media_io("video", override).video_loader_backend == "opencv"
+    video_io = info.get_media_io("video", override)
+    assert isinstance(video_io, VideoMediaIO)
+    assert video_io.video_loader_backend == "opencv"
 
     # No binding for the model: fall back to the configured default backend.
     monkeypatch.setattr(
         "vllm.multimodal.processing.context.get_video_processor_cls_name",
         lambda model_config: None,
     )
-    assert info.get_media_io("video").video_loader_backend == (
-        envs.VLLM_VIDEO_LOADER_BACKEND
-    )
+    video_io = info.get_media_io("video")
+    assert isinstance(video_io, VideoMediaIO)
+    assert video_io.video_loader_backend == envs.VLLM_VIDEO_LOADER_BACKEND
 
 
 def test_fetched_ref_carries_the_spec_info_declares():

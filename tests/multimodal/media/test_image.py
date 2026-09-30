@@ -1,6 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import gc
+import sys
 import uuid
+import weakref
+from functools import partial
 from io import BytesIO
 from pathlib import Path
 
@@ -445,14 +449,11 @@ def test_load_bytes_ref_png_key_does_not_decode(monkeypatch):
 def test_load_bytes_ref_release_frees_the_header_image():
     """release() must drop the header-opened image, whose `fp` holds a second
     copy of the payload in a BytesIO buffer."""
-    import gc
-    import sys
-    import weakref
-
     data = _png_bytes(Image.new("RGB", (8, 8), (1, 2, 3)))
     baseline = sys.getrefcount(data)
 
     ref = ImageMediaIO().load_bytes_ref(data)
+    assert isinstance(ref._decoder, partial)
     header = ref._decoder.args[0]
     assert isinstance(header, Image.Image)
     header_ref = weakref.ref(header)

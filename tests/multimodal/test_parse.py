@@ -210,7 +210,9 @@ def test_parse_audio_lazy_item_key_covers_resample_settings():
         items = parser.parse_mm_data(
             {"audio": [MediaRef(lambda: None, b"audio-bytes")]}
         )["audio"]
-        return items.get_raw(0).key
+        ref = items.get_raw(0)
+        assert isinstance(ref, MediaRef)
+        return ref.key
 
     assert parsed_key(16000) == parsed_key(16000)
     assert parsed_key(16000) != parsed_key(8000)
@@ -269,12 +271,16 @@ def test_lazy_video_metadata_available_before_frames(video_needs_metadata, singl
 
     assert decoder.calls == 0
     index = 0 if single_item else 2
-    assert items.get_raw(index).key
+    assert isinstance(items, VideoProcessorItems)
+    raw = items.get_raw(index)
+    assert isinstance(raw, MediaRef)
+    assert raw.key
     assert decoder.calls == 0
     expected = [metadata] if single_item else [None, {"fps": 1.0}, metadata]
     assert items.metadata == expected
     assert items.metadata == expected
     video = items.get(index)
+    assert video is not None
     np.testing.assert_array_equal(video[0] if video_needs_metadata else video, frames)
     assert decoder.calls == 1
 
@@ -294,10 +300,17 @@ def test_reparse_video_preserves_metadata(video_needs_metadata, lazy):
     reparsed = parser.parse_mm_data({"video": items.get_all_raw()})["video"]
 
     assert decoder.calls == 0
+    assert isinstance(items, VideoProcessorItems)
+    assert isinstance(reparsed, VideoProcessorItems)
     if lazy:
-        assert reparsed.get_raw(1).key == items.get_raw(1).key
+        original_ref = items.get_raw(1)
+        assert isinstance(original_ref, MediaRef)
+        reparsed_ref = reparsed.get_raw(1)
+        assert isinstance(reparsed_ref, MediaRef)
+        assert reparsed_ref.key == original_ref.key
     assert reparsed.metadata == items.metadata == [None, metadata]
     result = reparsed.get(1)
+    assert result is not None
     np.testing.assert_array_equal(result[0] if video_needs_metadata else result, frames)
     assert decoder.calls == int(lazy)
 
@@ -325,6 +338,7 @@ def test_select_video_preserves_lazy_refs_and_metadata(video_needs_metadata):
     assert selected.get_frame_size(0) == (12, 8)
     np.testing.assert_array_equal(selected.get_frames(0), frames)
     result = selected.get(0)
+    assert result is not None
     np.testing.assert_array_equal(result[0] if video_needs_metadata else result, frames)
 
 
@@ -339,4 +353,6 @@ def test_select_audio_metadata_preserves_passthrough_fields():
     assert selected.get_count() == 1
     assert selected.get_original_index(0) == 1
     assert selected.get(0)["audio_num_tokens"].item() == 5
-    assert selected.get_passthrough_data()["audio_num_tokens"].numel() == 1
+    token_counts = selected.get_passthrough_data()["audio_num_tokens"]
+    assert isinstance(token_counts, torch.Tensor)
+    assert token_counts.numel() == 1
