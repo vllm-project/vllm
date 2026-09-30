@@ -426,6 +426,8 @@ class DerenderChatRequest(BaseModel):
     detokenization from the prompt tail so the first output token keeps its
     leading space on SentencePiece tokenizers. Falls back to
     `generate_response.prompt_token_ids`, then to unseeded decoding.
+
+    Only the last few IDs are read, so a suffix of the prompt is enough.
     """
 
     chat_request: ChatCompletionRequest | None = None
@@ -661,6 +663,11 @@ class DerenderChatStreamRequest(BaseModel):
     misclassify reasoning content as plain content. On all paths it also
     seeds detokenization on the first chunk (see
     `DerenderChatRequest.prompt_token_ids`).
+
+    With a parser configured, send the full list. Parsers look back to the
+    last reasoning marker which can be anywhere in the prompt, so a suffix
+    can flip the initial reasoning state. Without a parser, a suffix is
+    enough.
     """
 
     chat_request: ChatCompletionRequest | None = None
