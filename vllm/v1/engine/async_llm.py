@@ -1107,26 +1107,25 @@ class AsyncLLM(EngineClient):
 
             if self._profile_session_guard_enabled:
                 self._profile_session_active = True
-            coros = [
-                self.engine_core.profile_async(
+            # A cancelled start may still take effect, so only a reported
+            # engine failure clears the session; otherwise /stop_profile is needed.
+            try:
+                await self.engine_core.profile_async(
                     True,
                     profile_prefix,
                     delay_iterations,
                     max_iterations,
                 )
-            ]
+            except Exception:
+                self._profile_session_active = False
+                raise
             if self.profiler is not None:
                 if not self._frontend_profiler_injected:
                     worker_name = self._frontend_profiler_worker_name
                     if profile_prefix is not None:
                         worker_name = f"{profile_prefix}_{worker_name}"
                     self.profiler.set_output_name(worker_name)
-                coros.append(asyncio.to_thread(self.profiler.start))
-            try:
-                await asyncio.gather(*coros)
-            except BaseException:
-                self._profile_session_active = False
-                raise
+                await asyncio.to_thread(self.profiler.start)
 
     async def stop_profile(self) -> None:
         async with self._profile_lock:

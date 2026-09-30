@@ -137,6 +137,7 @@ def test_profile_forwards_overrides_rejects_duplicate_and_allows_restart(
     monkeypatch: pytest.MonkeyPatch,
 ):
     vllm_config = MagicMock()
+    vllm_config.logging_config = LoggingConfig()
     vllm_config.observability_config.otlp_traces_endpoint = None
     vllm_config.scheduler_config.stream_interval = 1
     vllm_config.profiler_config.should_profile_frontend = False
@@ -177,6 +178,7 @@ def test_profile_forwards_overrides_rejects_duplicate_and_allows_restart(
 
 def test_stop_profile_waits_for_inflight_start(monkeypatch: pytest.MonkeyPatch):
     vllm_config = MagicMock()
+    vllm_config.logging_config = LoggingConfig()
     vllm_config.observability_config.otlp_traces_endpoint = None
     vllm_config.scheduler_config.stream_interval = 1
     engine_core = _mock_async_llm_dependencies(monkeypatch)
@@ -192,8 +194,6 @@ def test_stop_profile_waits_for_inflight_start(monkeypatch: pytest.MonkeyPatch):
     async def profile():
         start_rpc_entered = asyncio.Event()
         release_start_rpc = asyncio.Event()
-        frontend_started = asyncio.Event()
-        loop = asyncio.get_running_loop()
 
         async def profile_async(is_start, *args):
             if is_start:
@@ -201,12 +201,9 @@ def test_stop_profile_waits_for_inflight_start(monkeypatch: pytest.MonkeyPatch):
                 await release_start_rpc.wait()
 
         engine_core.profile_async.side_effect = profile_async
-        frontend_profiler.start.side_effect = lambda: loop.call_soon_threadsafe(
-            frontend_started.set
-        )
 
         start_task = asyncio.create_task(engine.start_profile())
-        await asyncio.gather(start_rpc_entered.wait(), frontend_started.wait())
+        await start_rpc_entered.wait()
 
         stop_task = asyncio.create_task(engine.stop_profile())
         await asyncio.sleep(0)
@@ -220,20 +217,19 @@ def test_stop_profile_waits_for_inflight_start(monkeypatch: pytest.MonkeyPatch):
     assert engine._profile_session_active is False
 
 
-def test_engine_profile_start_failure_allows_explicit_cleanup(
-    monkeypatch: pytest.MonkeyPatch,
+@pytest.mark.parametrize("failure", ["error", "cancel"])
+def test_interrupted_engine_profile_start_skips_frontend_profiler(
+    monkeypatch: pytest.MonkeyPatch, failure: str
 ):
+    """The frontend trace starts only after the engine start succeeds. A
+    cancelled start may still reach the engine, so it keeps the session active
+    until /stop_profile."""
     vllm_config = MagicMock()
+    vllm_config.logging_config = LoggingConfig()
     vllm_config.observability_config.otlp_traces_endpoint = None
     vllm_config.scheduler_config.stream_interval = 1
     engine_core = _mock_async_llm_dependencies(monkeypatch)
     frontend_profiler = MagicMock()
-
-    async def profile_async(is_start, *args):
-        if is_start:
-            raise RuntimeError("engine profiler failed to start")
-
-    engine_core.profile_async.side_effect = profile_async
     engine = AsyncLLM(
         vllm_config,
         MagicMock(),
@@ -242,25 +238,40 @@ def test_engine_profile_start_failure_allows_explicit_cleanup(
     )
 
     async def profile():
-        with pytest.raises(RuntimeError, match="failed to start"):
-            await engine.start_profile()
-        assert engine._profile_session_active is False
+        start_rpc_entered = asyncio.Event()
+
+        async def profile_async(is_start, *args):
+            if not is_start:
+                return
+            start_rpc_entered.set()
+            if failure == "error":
+                raise RuntimeError("engine profiler failed to start")
+            await asyncio.Event().wait()
+
+        engine_core.profile_async.side_effect = profile_async
+
+        start_task = asyncio.create_task(engine.start_profile())
+        await start_rpc_entered.wait()
+        if failure == "cancel":
+            start_task.cancel()
+        expected = RuntimeError if failure == "error" else asyncio.CancelledError
+        with pytest.raises(expected):
+            await start_task
+
+        assert engine._profile_session_active is (failure == "cancel")
         await engine.stop_profile()
+        assert engine._profile_session_active is False
 
     asyncio.run(profile())
 
-    engine_core.profile_async.assert_has_awaits(
-        [call(True, None, None, None), call(False)]
-    )
-    frontend_profiler.start.assert_called_once_with()
-    frontend_profiler.stop.assert_called_once_with()
-    assert engine._profile_session_active is False
+    frontend_profiler.start.assert_not_called()
 
 
 def test_multi_client_profile_uses_idempotent_engine_requests(
     monkeypatch: pytest.MonkeyPatch, tmp_path
 ):
     vllm_config = MagicMock()
+    vllm_config.logging_config = LoggingConfig()
     vllm_config.observability_config.otlp_traces_endpoint = None
     vllm_config.scheduler_config.stream_interval = 1
     vllm_config.profiler_config = ProfilerConfig(
@@ -307,6 +318,7 @@ def test_frontend_profiler_ignores_worker_iteration_bounds(
     monkeypatch: pytest.MonkeyPatch, tmp_path
 ):
     vllm_config = MagicMock()
+    vllm_config.logging_config = LoggingConfig()
     vllm_config.observability_config.otlp_traces_endpoint = None
     vllm_config.scheduler_config.stream_interval = 1
     vllm_config.profiler_config = ProfilerConfig(

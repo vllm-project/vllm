@@ -5,6 +5,7 @@ import importlib
 import inspect
 import json
 import os
+import threading
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import AbstractContextManager, contextmanager, nullcontext, suppress
@@ -49,6 +50,9 @@ class WorkerProfiler(ABC):
                 f"after {self._max_iters} worker steps, "
                 "or when stop_profile is received."
             )
+
+        # Serializes start()/stop(), which AsyncLLM may call from different threads.
+        self._lifecycle_lock = threading.Lock()
 
         # Track when the profiler gets triggered by start_profile
         self._active_iteration_count = 0
@@ -102,22 +106,25 @@ class WorkerProfiler(ABC):
         max_iterations: int | None = None,
     ) -> None:
         """Attempt to start the profiler, accounting for delayed starts."""
-        if self._active:
-            logger.debug(
-                "start_profile received when profiler is already active. "
-                "Ignoring request."
+        with self._lifecycle_lock:
+            if self._active:
+                logger.debug(
+                    "start_profile received when profiler is already active. "
+                    "Ignoring request."
+                )
+                return
+            validate_profile_iteration_bounds(delay_iterations, max_iterations)
+            self._delay_iters = (
+                self._default_delay_iters
+                if delay_iterations is None
+                else delay_iterations
             )
-            return
-        validate_profile_iteration_bounds(delay_iterations, max_iterations)
-        self._delay_iters = (
-            self._default_delay_iters if delay_iterations is None else delay_iterations
-        )
-        self._max_iters = (
-            self._default_max_iters if max_iterations is None else max_iterations
-        )
-        self._active = True
-        if self._delay_iters == 0:
-            self._call_start()
+            self._max_iters = (
+                self._default_max_iters if max_iterations is None else max_iterations
+            )
+            self._active = True
+            if self._delay_iters == 0:
+                self._call_start()
 
     def step(self) -> None:
         """Update the profiler state at each worker step,
@@ -167,17 +174,19 @@ class WorkerProfiler(ABC):
 
     def stop(self) -> None:
         """Attempt to stop the profiler, accounting for overlapped calls."""
-        if not self._active:
-            logger.debug(
-                "stop_profile received when profiler is not active. Ignoring request."
-            )
-            return
-        self._active = False
-        self._active_iteration_count = 0
-        self._profiling_for_iters = 0
+        with self._lifecycle_lock:
+            if not self._active:
+                logger.debug(
+                    "stop_profile received when profiler is not active. "
+                    "Ignoring request."
+                )
+                return
+            self._active = False
+            self._active_iteration_count = 0
+            self._profiling_for_iters = 0
 
-        if self._running:
-            self._call_stop()
+            if self._running:
+                self._call_stop()
 
     def shutdown(self) -> None:
         """Ensure profiler is stopped when shutting down."""
