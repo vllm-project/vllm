@@ -432,6 +432,19 @@ def _compute_local_residual_mass_kernel(
         # first and last (bonus) positions aren't needed for this computation.
         return
 
+    if logit_idx + 1 >= tl.num_programs(0):
+        # Last expanded logit: draft_sampled has only num_logits entries, so
+        # reading logit_idx + 1 would go out of bounds. The residual mass of
+        # this position is unused (the rejection kernel treats the preceding
+        # token as the end of the block); store a defined 0.0.
+        tl.store(
+            local_residual_mass_ptr
+            + logit_idx * local_residual_mass_stride
+            + tl.program_id(1),
+            0.0,
+        )
+        return
+
     if tl.load(draft_sampled_ptr + logit_idx + 1) < 0:
         # -1 placeholder token. The rejection kernel treats the preceding token
         # as the end of the block, so this position's residual mass is unused.
