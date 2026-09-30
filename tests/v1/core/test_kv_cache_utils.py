@@ -291,6 +291,44 @@ def test_hisparse_pool_must_fit_max_model_len(
             kv_cache_utils.get_kv_cache_configs(config, [specs], [2**34])
 
 
+def test_hisparse_workers_share_the_smallest_pool(monkeypatch):
+    """Workers with less free memory shrink every worker's HiSparse pool to
+    theirs, by re-planning from the laid-out groups."""
+    monkeypatch.setattr(
+        hisparse_runtime_module.current_platform, "is_cuda_alike", lambda: True
+    )
+    monkeypatch.setattr(kv_cache_utils, "get_hisparse_host_pool_bytes", lambda _: 2**30)
+    specs: dict[str, KVCacheSpec] = {}
+    for i in range(4):
+        specs[f"model.layers.{i}.self_attn"] = MLAAttentionSpec(
+            block_size=64,
+            num_kv_heads=1,
+            head_size=576,
+            dtype=torch.bfloat16,
+            is_index_group_leader=True,
+        )
+        specs[f"model.layers.{i}.self_attn.indexer"] = MLAAttentionSpec(
+            block_size=64,
+            num_kv_heads=1,
+            head_size=128,
+            dtype=torch.bfloat16,
+            cache_role=SparseCacheRole.INDEXER,
+        )
+    config = VllmConfig(model_config=ModelConfig(max_model_len=8192))
+    config.attention_config.hisparse_config = HiSparseConfig()
+    config.model_config.hf_config.index_topk = 128
+    config.cache_config.kv_cache_layout = "BLHNC"
+
+    configs = kv_cache_utils.get_kv_cache_configs(
+        config, [dict(specs), dict(specs)], [2**30, 2**29]
+    )
+
+    smaller = kv_cache_utils.get_kv_cache_configs(config, [dict(specs)], [2**29])[0]
+    assert [c.num_blocks for c in configs] == [smaller.num_blocks] * 2
+    assert configs[0].kv_cache_groups == smaller.kv_cache_groups
+    assert configs[0].kv_cache_tensors == smaller.kv_cache_tensors
+
+
 def test_hisparse_rejects_uneven_workers(monkeypatch):
     """Workers with different layer counts get different HiSparse layouts,
     which one scheduler config cannot describe."""
