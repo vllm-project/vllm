@@ -42,6 +42,7 @@ from vllm.v1.core.kv_cache_coordinator import HybridKVCacheCoordinator
 from vllm.v1.core.kv_cache_utils import get_request_block_hasher, init_none_hash
 from vllm.v1.core.sched.diffusion_scheduler import (
     DiffusionAsyncScheduler,
+    DiffusionScheduler,
     diffusion_canvas_width,
 )
 from vllm.v1.core.sched.interface import PauseState
@@ -7109,14 +7110,15 @@ def diffusion_model_runner(monkeypatch):
     monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
 
 
-def _diffusion_scheduler(**kwargs) -> DiffusionAsyncScheduler:
+def _diffusion_scheduler(async_scheduling: bool = True, **kwargs) -> DiffusionScheduler:
+    scheduler_cls = DiffusionAsyncScheduler if async_scheduling else DiffusionScheduler
     scheduler = create_scheduler(
-        async_scheduling=True,
+        async_scheduling=async_scheduling,
         diffusion_canvas_length=8,
-        scheduler_cls=DiffusionAsyncScheduler,
+        scheduler_cls=scheduler_cls,
         **kwargs,
     )
-    assert isinstance(scheduler, DiffusionAsyncScheduler)
+    assert isinstance(scheduler, scheduler_cls)
     return scheduler
 
 
@@ -7127,7 +7129,7 @@ def test_diffusion_scheduler_is_selected_by_default(async_scheduling):
         async_scheduling=async_scheduling, diffusion_canvas_length=8
     ).vllm_config.scheduler_config
     assert config.get_scheduler_cls() is (
-        DiffusionAsyncScheduler if config.async_scheduling else Scheduler
+        DiffusionAsyncScheduler if config.async_scheduling else DiffusionScheduler
     )
 
 
@@ -7149,10 +7151,13 @@ def test_diffusion_scheduler_narrows_the_canvas_per_request():
 
 
 @pytest.mark.parametrize("structured", [False, True])
+@pytest.mark.parametrize("async_scheduling", [False, True])
 @pytest.mark.usefixtures("diffusion_model_runner")
-def test_diffusion_scheduler_trims_full_width_worker_drafts(structured):
+def test_diffusion_scheduler_trims_full_width_worker_drafts(
+    structured, async_scheduling
+):
     """Padded worker drafts must be narrowed before scheduling or grammar validation."""
-    scheduler = _diffusion_scheduler()
+    scheduler = _diffusion_scheduler(async_scheduling=async_scheduling)
     wide = _diffusion_request("wide", {})
     narrow = _diffusion_request("narrow", {"diffusion_canvas_length": 4})
     for request in (wide, narrow):
@@ -7167,8 +7172,12 @@ def test_diffusion_scheduler_trims_full_width_worker_drafts(structured):
             )
     tokens = list(range(8)) if structured else [-1] * 8
     drafts = DraftTokenIds(["wide", "narrow"], [tokens.copy(), tokens.copy()])
-    output = scheduler.schedule()
-    scheduler.update_draft_token_ids_in_output(drafts, output)
+    if async_scheduling:
+        output = scheduler.schedule()
+        scheduler.update_draft_token_ids_in_output(drafts, output)
+    else:
+        scheduler.update_draft_token_ids(drafts)
+        output = scheduler.schedule()
 
     assert output.scheduled_spec_decode_tokens == {
         "wide": tokens,
@@ -7178,6 +7187,36 @@ def test_diffusion_scheduler_trims_full_width_worker_drafts(structured):
     if structured:
         assert wide.structured_output_request.grammar.seen == [tokens]
         assert narrow.structured_output_request.grammar.seen == [tokens[:4]]
+
+
+@pytest.mark.parametrize(
+    "sampled, expected_status",
+    [
+        pytest.param([], RequestStatus.RUNNING, id="denoising"),
+        pytest.param([1] * 4, RequestStatus.FINISHED_LENGTH_CAPPED, id="final"),
+    ],
+)
+@pytest.mark.usefixtures("diffusion_model_runner")
+def test_sync_diffusion_step_commits_only_emitted_tokens(sampled, expected_status):
+    """An empty denoising step reuses the canvas; a completed read emits it."""
+    scheduler = _diffusion_scheduler(async_scheduling=False)
+    request = _diffusion_request(
+        "read", {"diffusion_canvas_length": 4, "diffusion_read_only": True}
+    )
+    request.max_tokens = request.sampling_params.max_tokens = 4
+    scheduler.add_request(request)
+    _model_output(scheduler, scheduler.schedule(), [[]])
+
+    scheduler.update_draft_token_ids(
+        DraftTokenIds([request.request_id], [list(range(8))])
+    )
+    output = scheduler.schedule()
+    assert output.num_scheduled_tokens == {request.request_id: 4}
+    _model_output(scheduler, output, [sampled])
+
+    assert request.num_computed_tokens == request.num_prompt_tokens + len(sampled)
+    assert list(request.output_token_ids) == sampled
+    assert request.status == expected_status
 
 
 @pytest.mark.usefixtures("diffusion_model_runner")
