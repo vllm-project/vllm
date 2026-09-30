@@ -522,6 +522,10 @@ class Worker(WorkerBase):
         else:
             raise RuntimeError(f"Unsupported device type: {self.device_config.device}")
 
+        self._init_workspace_and_model_runner()
+
+    def _init_workspace_and_model_runner(self) -> None:
+        """Set up the workspace manager, build the model runner, report usage."""
         # DSpark target and draft CUDA graphs retain workspace views concurrently.
         num_ubatches = 2 if self.vllm_config.parallel_config.enable_dbo else 1
         init_workspace_manager(
@@ -529,8 +533,13 @@ class Worker(WorkerBase):
             num_ubatches,
             _num_workspace_lanes(self.vllm_config, self.use_v2_model_runner),
         )
+        self.model_runner: GPUModelRunner = self._make_model_runner()
+        if self.rank == 0:
+            # If usage stat is enabled, collect relevant info.
+            report_usage_stats(self.vllm_config)
 
-        # Construct the model runner
+    def _make_model_runner(self) -> "GPUModelRunner":
+        """Construct the platform's model runner; subclasses override this."""
         if self.use_v2_model_runner:
             if self.vllm_config.is_mm_encoder_only:
                 from vllm.v1.worker.mm_encoder_model_runner import (
@@ -542,19 +551,10 @@ class Worker(WorkerBase):
                 )
 
             # HACK(woosuk): This is a temporary fix to avoid type errors.
-            self.model_runner: GPUModelRunner = GPUModelRunnerV2(  # type: ignore
-                self.vllm_config, self.device
-            )
-        else:
-            from vllm.v1.worker.gpu_model_runner import (
-                GPUModelRunner as GPUModelRunnerV1,
-            )
+            return GPUModelRunnerV2(self.vllm_config, self.device)  # type: ignore
+        from vllm.v1.worker.gpu_model_runner import GPUModelRunner as GPUModelRunnerV1
 
-            self.model_runner = GPUModelRunnerV1(self.vllm_config, self.device)
-
-        if self.rank == 0:
-            # If usage stat is enabled, collect relevant info.
-            report_usage_stats(self.vllm_config)
+        return GPUModelRunnerV1(self.vllm_config, self.device)
 
     def handle_ft_command(self, ft_request):
         assert self.worker_sentinel is not None
