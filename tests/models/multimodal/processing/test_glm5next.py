@@ -68,12 +68,12 @@ def _pixel_path_grid(
         # 4 s at 8 fps: the GLM-4.6V sampler asks for 3x as many timestamps.
         (32, 8.0, 4.0, 480, 640, (4, 36, 46)),
         # 1080p, 20 s: same factor of 3 at a full-size canvas.
-        (600, 30.0, 20.0, 1080, 1920, (20, 78, 138)),
+        (600, 30.0, 20.0, 1080, 1920, (20, 58, 102)),
         # 1080p, 60 s: the one duration window where the two samplers agree
         # anyway -- a regression guard, the count must not move.
-        (1800, 30.0, 60.0, 1080, 1920, (60, 78, 138)),
+        (1800, 30.0, 60.0, 1080, 1920, (60, 34, 58)),
         # Past 300 s the GLM-4.6V sampler asks for half as many instead.
-        (9030, 30.0, 301.0, 720, 1280, (301, 42, 74)),
+        (9030, 30.0, 301.0, 720, 1280, (301, 14, 26)),
     ],
 )
 def test_video_placeholders_match_encoder_rows(

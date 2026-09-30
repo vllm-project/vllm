@@ -613,6 +613,9 @@ class Glm5NextVisionTransformer(nn.Module):
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
 
+_MAX_VIDEO_TOKENS = 30000
+
+
 class Glm5NextProcessingInfo(Glm4vProcessingInfo):
     """Token-budget geometry for the multimodal checkpoint.
 
@@ -620,6 +623,15 @@ class Glm5NextProcessingInfo(Glm4vProcessingInfo):
     (``min_image_tokens`` / ``max_image_tokens``) with no ``size`` key, so the
     inherited Glm4v ``size.longest_edge`` path does not apply.
     """
+
+    def get_hf_processor(self, **kwargs: object):
+        processor = super().get_hf_processor(**kwargs)
+        # Cap video inputs to keep encoder profiling from starving the KV cache.
+        video_processor = processor.video_processor
+        video_processor.max_image_tokens = min(
+            video_processor.max_image_tokens, _MAX_VIDEO_TOKENS
+        )
+        return processor
 
     @staticmethod
     def _alignment_factor(proc) -> int:
