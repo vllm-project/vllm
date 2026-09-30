@@ -403,13 +403,14 @@ class HarmonyParser(DelegatingParser):
         final ``code`` or ``json`` token.
 
         Dropping sampled tokens is destructive, so the discarded section must
-        contain at least one recognizable duplicate of channel or recipient
-        metadata and no possible authored content. Replaying the corrected
-        header through a fresh assistant parser is necessary because Harmony
-        moves the failed parser out of its header state before raising. The new
-        parser resets its token and message history, stream state, current
-        metadata, and content delta. Earlier completed messages have already
-        been emitted, so only the corrected current header is replayed.
+        contain at least one recognizable duplicate of channel, recipient, or
+        formatting-marker metadata and no possible authored content. Replaying
+        the corrected header through a fresh assistant parser is necessary
+        because Harmony moves the failed parser out of its header state before
+        raising. The new parser resets its token and message history, stream
+        state, current metadata, and content delta. Earlier completed messages
+        have already been emitted, so only the corrected current header is
+        replayed.
 
         Args:
             token_id: The token that Harmony rejected.
@@ -457,24 +458,34 @@ class HarmonyParser(DelegatingParser):
         except ValueError:
             return False
 
-        header_prefix = encoding.decode(channel_section_tokens[:constrain_index])
+        channel_and_recipient = encoding.decode(
+            channel_section_tokens[:constrain_index]
+        )
         malformed_section = encoding.decode(
             channel_section_tokens[constrain_index + 1 :]
         )
         channels = ("analysis", "commentary", "final")
         recipient_marker = " to="
         recipient = (
-            header_prefix.rsplit(recipient_marker, 1)[1].strip()
-            if recipient_marker in header_prefix
+            channel_and_recipient.rsplit(recipient_marker, 1)[1].strip()
+            if recipient_marker in channel_and_recipient
             else None
+        )
+        metadata_markers = ("<|channel|>", "<|constrain|>")
+        has_duplicate_marker = any(
+            marker in malformed_section for marker in metadata_markers
         )
         parts = (
             malformed_section.replace("<|channel|>", " ")
             .replace("<|constrain|>", " ")
             .split()
         )
-        # A lone `code` is already valid and has no duplicate metadata to drop.
-        if len(parts) < 2:
+        if not parts:
+            return False
+        # A marker-free lone `code` is already valid. If stripping special
+        # markers leaves only `code`, those bare markers are the duplicated
+        # metadata Harmony rejected and are safe to discard.
+        if len(parts) < 2 and not has_duplicate_marker:
             return False
         # In every observed corruption the real type is last; `analysis text`
         # is rejected because only the observed tool types are safe to restore.
@@ -508,6 +519,8 @@ class HarmonyParser(DelegatingParser):
             "Harmony rejected a malformed message header; retrying after "
             "removing metadata from its content type."
         )
+        # The parser and cursor are one state pair. Every message on the old
+        # parser was already polled; the replacement parser's list is empty.
         self._parser = parser
         self._num_processed_messages = 0
         self._current_message_tokens = [*corrected_tokens, token_id]
