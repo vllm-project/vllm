@@ -7,6 +7,7 @@ n-gram embedding table can be kept in pinned host memory and looked up through
 Unified Virtual Addressing on any CUDA-alike platform.
 """
 
+import threading
 from abc import ABC, abstractmethod
 from typing import ClassVar
 
@@ -415,14 +416,11 @@ class Qwen4ExpPLEPinnedHostEmbedding(Qwen4ExpPLEEmbedding):
         )
         self._uva_weight = get_accelerator_view_from_cpu_tensor(self.weight)
         self._block_d = triton.next_power_of_2(self.embedding_dim)
-        self._prefetch_stream = torch.cuda.Stream(device=self._uva_weight.device)
-        self._prefetch_buffer = torch.empty(
-            max_total_tokens * self.etp_data_parallel_size,
-            num_ngram_heads,
-            self.embedding_dim,
-            dtype=self.weight.dtype,
-            device=self._uva_weight.device,
-        )
+        self._prefetch_stream: torch.cuda.Stream | None = None
+        self._prefetch_buffer: torch.Tensor | None = None
+        self._prefetch_alloc_lock = threading.Lock()
+        self._prefetch_rows = max_total_tokens * self.etp_data_parallel_size
+        self._num_ngram_heads = num_ngram_heads
         self._output_dim = num_ngram_heads * self.embedding_dim
 
     def allocate_embedding_weight(
@@ -506,10 +504,42 @@ class Qwen4ExpPLEPinnedHostEmbedding(Qwen4ExpPLEEmbedding):
         ngram_ids: torch.Tensor,
     ) -> None:
         """Gather ETP IDs and launch their UVA lookup on the side stream."""
+        buffer = self._prefetch_buffer
+        if buffer is None:
+            # First use allocates. The eager profile run always precedes
+            # cudagraph capture, so allocation never happens mid-capture;
+            # the lock keeps concurrent first callers from tearing the
+            # stream/buffer pair.
+            with self._prefetch_alloc_lock:
+                buffer = self._prefetch_buffer
+                if buffer is None:
+                    if torch.cuda.is_current_stream_capturing():
+                        raise RuntimeError(
+                            "pinned PLE prefetch buffer must be allocated "
+                            "eagerly, before cudagraph capture"
+                        )
+                    self._prefetch_stream = torch.cuda.Stream(
+                        device=self._uva_weight.device
+                    )
+                    buffer = torch.empty(
+                        self._prefetch_rows,
+                        self._num_ngram_heads,
+                        self.embedding_dim,
+                        dtype=self.weight.dtype,
+                        device=self._uva_weight.device,
+                    )
+                    self._prefetch_buffer = buffer
+        prefetch_stream = self._prefetch_stream
+        if prefetch_stream is None:
+            raise RuntimeError("pinned PLE prefetch stream was not allocated")
         slot_size, _ = self._get_dp_gather_slot(ngram_ids.shape[0])
         gathered_ids = self._gather_dp_ids(ngram_ids, slot_size)
-        active_output = self._prefetch_buffer[: gathered_ids.shape[0]]
-        prefetch_stream = self._prefetch_stream
+        if gathered_ids.shape[0] > buffer.shape[0]:
+            raise ValueError(
+                f"pinned PLE prefetch buffer holds {buffer.shape[0]} rows, "
+                f"but the batch needs {gathered_ids.shape[0]}"
+            )
+        active_output = buffer[: gathered_ids.shape[0]]
         prefetch_stream.wait_stream(torch.cuda.current_stream())
         gathered_ids.record_stream(prefetch_stream)
         with torch.cuda.stream(prefetch_stream):
@@ -522,7 +552,10 @@ class Qwen4ExpPLEPinnedHostEmbedding(Qwen4ExpPLEEmbedding):
         output: torch.Tensor,
     ) -> None:
         """Join the side stream, reduce ETP shards, and select local rows."""
-        torch.cuda.current_stream().wait_stream(self._prefetch_stream)
+        prefetch_stream = self._prefetch_stream
+        if prefetch_stream is None:
+            raise RuntimeError("pinned PLE finalize requires a prior start_prefetch")
+        torch.cuda.current_stream().wait_stream(prefetch_stream)
         slot_size, slot_offset = self._get_dp_gather_slot(output.shape[0])
         active_output = prefetch_output[: slot_size * self.etp_data_parallel_size]
         embeddings = self._reduce_etp_embeddings(active_output)
@@ -535,8 +568,9 @@ class Qwen4ExpPLEPinnedHostEmbedding(Qwen4ExpPLEEmbedding):
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         """Finish the pinned lookup into graph-owned output storage."""
-        output = self._prefetch_buffer.new_empty(
-            (hidden_states.shape[0], self._output_dim)
-        )
-        self._finalize_prefetch(self._prefetch_buffer, output)
+        buffer = self._prefetch_buffer
+        if buffer is None:
+            raise RuntimeError("pinned PLE lookup requires a prior start_prefetch")
+        output = buffer.new_empty((hidden_states.shape[0], self._output_dim))
+        self._finalize_prefetch(buffer, output)
         return output
