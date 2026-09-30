@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from vllm.engine.protocol import StreamingInput
+from vllm.exceptions import VLLMValidationError
 from vllm.outputs import STREAM_FINISHED, RequestOutput
 from vllm.sampling_params import RequestOutputKind, SamplingParams
 from vllm.v1.engine.async_llm import AsyncLLM
@@ -104,6 +105,25 @@ def make_output(request_id: str, finished: bool) -> RequestOutput:
         outputs=[],
         finished=finished,
     )
+
+
+@pytest.mark.parametrize(
+    ("is_mm_encoder_only", "is_diffusion"),
+    [(True, False), (False, True)],
+    ids=["encoder-only", "diffusion"],
+)
+def test_resumable_requests_rejected_for_non_decoder_models(
+    is_mm_encoder_only: bool, is_diffusion: bool
+):
+    llm = MagicMock()
+    llm.vllm_config.is_mm_encoder_only = is_mm_encoder_only
+    llm.model_config.is_diffusion = is_diffusion
+
+    with pytest.raises(
+        VLLMValidationError,
+        match="Resumable requests are not supported",
+    ):
+        AsyncLLM._validate_resumable_request(llm)
 
 
 @pytest.mark.asyncio
