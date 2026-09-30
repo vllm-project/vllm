@@ -228,7 +228,6 @@ class CPUWorker(Worker):
                 "Encoder-only / pooling model detected; "
                 f"KV cache size set to 0 GiB on node {cpu_core.numa_node}."
             )
-            logger.info(msg)
         elif explicit_kv_cache_size is not None:
             if explicit_kv_cache_size > available_memory:
                 raise ValueError(
@@ -246,7 +245,6 @@ class CPUWorker(Worker):
                 f"{format_gib(memory_status.total_memory)}) GiB for KV cache "
                 f"on node {cpu_core.numa_node}."
             )
-            logger.debug(msg)
         else:
             consumed_memory = psutil.Process(os.getpid()).memory_info().rss
             requested_memory_for_kv = int(self.requested_cpu_memory - consumed_memory)
@@ -274,15 +272,6 @@ class CPUWorker(Worker):
             )
 
         logger.info(msg)
-        # Emit a detailed debug log for later nmon analysis
-        logger.debug(
-            "KV cache size=%s GiB, available_memory=%s GiB, "
-            "requested_cpu_memory=%s GiB",
-            format_gib(kv_cache_size),
-            format_gib(available_memory),
-            format_gib(self.requested_cpu_memory),
-        )
-
         return kv_cache_size
 
     def compile_or_warm_up_model(self) -> CompilationTimes:
