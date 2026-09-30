@@ -337,6 +337,73 @@ def test_embedded_connector_rejects_pipeline_parallelism():
         )
 
 
+def test_data_parallel_ranks_get_separate_lookup_sockets(tmp_path):
+    topology = RankTopology()
+    handles = [
+        EmbeddedRuntime.from_config(
+            replace(
+                UMBPRuntimeConfig.from_vllm(
+                    _vllm_config({"mode": "embedded", "lookup_dir": str(tmp_path)})
+                ),
+                dp_index=dp_index,
+            )
+        ).create_scheduler_handle("dp-shared", topology, None)
+        for dp_index in (0, 1)
+    ]
+
+    paths = [handle._paths[topology.local_namespace] for handle in handles]
+    assert paths[0] != paths[1]
+    for handle in handles:
+        handle.close()
+
+
+def test_lookup_instance_separates_engines_on_one_host(tmp_path):
+    def path(options):
+        runtime = EmbeddedRuntime.from_config(
+            UMBPRuntimeConfig("embedded", {"lookup_dir": str(tmp_path), **options})
+        )
+        handle = runtime.create_scheduler_handle("same-model", RankTopology(), None)
+        return handle._paths[RankTopology().local_namespace]
+
+    assert path({"lookup_instance": "a"}) != path({"lookup_instance": "b"})
+    assert path({}) == path({})
+    with pytest.raises(ValueError, match="lookup_instance"):
+        path({"lookup_instance": 1})
+
+
+def test_lookup_server_refuses_a_socket_another_engine_serves(tmp_path):
+    client = SimpleNamespace(batch_exists=lambda keys: [False] * len(keys))
+    path = _lookup_socket_path("taken", (0, 0, 0, 0), str(tmp_path), "dp0")
+    first = _MoriLookupServer(path, client)
+    first.start()
+    try:
+        with pytest.raises(RuntimeError, match="another live engine"):
+            _MoriLookupServer(path, client).start()
+        scheduler = _MoriSchedulerHandle("taken", RankTopology(), str(tmp_path), "dp0")
+        # The first engine's pool still answers its own scheduler.
+        assert scheduler.lookup(["k"]) == [False]
+    finally:
+        first.close()
+
+
+def test_lookup_server_replaces_a_stale_socket_file(tmp_path):
+    import socket
+
+    path = _lookup_socket_path("stale", (0, 0, 0, 0), str(tmp_path), "dp0")
+    dead = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    dead.bind(path)
+    dead.close()
+    server = _MoriLookupServer(
+        path, SimpleNamespace(batch_exists=lambda keys: [True] * len(keys))
+    )
+    server.start()
+    try:
+        scheduler = _MoriSchedulerHandle("stale", RankTopology(), str(tmp_path), "dp0")
+        assert scheduler.lookup(["k"]) == [True]
+    finally:
+        server.close()
+
+
 @pytest.mark.parametrize("close_rank", [None, 0, 1])
 def test_mori_scheduler_routes_lookup_and_clear_to_all_ranks(tmp_path, close_rank):
     _rank_namespace_from_key_prefix.cache_clear()

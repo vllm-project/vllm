@@ -20,6 +20,7 @@ class UMBPRuntimeConfig:
     mode: str
     options: dict[str, Any]
     rank_count: int = 1
+    dp_index: int = 0
 
     @classmethod
     def from_vllm(cls, vllm_config: VllmConfig) -> UMBPRuntimeConfig:
@@ -33,7 +34,13 @@ class UMBPRuntimeConfig:
         namespace = options.get("key_namespace", "auto")
         if namespace != "auto" and (not isinstance(namespace, str) or not namespace):
             raise ValueError("key_namespace must be a non-empty string or 'auto'")
-        return cls(mode=mode, options=options)
+        return cls(
+            mode=mode,
+            options=options,
+            dp_index=int(
+                getattr(vllm_config.parallel_config, "data_parallel_index", 0) or 0
+            ),
+        )
 
     def resolve_for_rank_count(self, rank_count: int) -> UMBPRuntimeConfig:
         """Pass topology to the adapter without interpreting its capacity options."""

@@ -75,9 +75,28 @@ def _lookup_socket_path(
     namespace: str,
     rank_namespace: tuple[int, int, int, int],
     lookup_dir: str,
+    instance: str = "",
 ) -> str:
-    digest = hashlib.sha256(f"{namespace}:{rank_namespace}".encode()).hexdigest()[:24]
+    # The namespace identifies the model and layout, not the engine: DP ranks
+    # and independent engines serving one model share it, so the engine's own
+    # identity must separate their private pools.
+    identity = f"{namespace}:{rank_namespace}"
+    if instance:
+        identity = f"{namespace}:{instance}:{rank_namespace}"
+    digest = hashlib.sha256(identity.encode()).hexdigest()[:24]
     return str(Path(lookup_dir) / f"vllm-umbp-{digest}.sock")
+
+
+def _socket_has_listener(path: str) -> bool:
+    probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    probe.settimeout(0.5)
+    try:
+        probe.connect(path)
+    except OSError:
+        return False
+    finally:
+        probe.close()
+    return True
 
 
 class _MoriLookupServer:
@@ -92,6 +111,12 @@ class _MoriLookupServer:
 
     def start(self) -> None:
         Path(self.path).parent.mkdir(parents=True, exist_ok=True)
+        if os.path.exists(self.path) and _socket_has_listener(self.path):
+            raise RuntimeError(
+                f"UMBP lookup socket {self.path} is served by another live "
+                "engine; set lookup_instance to a distinct value for each "
+                "engine that serves this model on this host"
+            )
         with contextlib.suppress(FileNotFoundError):
             os.unlink(self.path)
         self._socket = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -152,9 +177,10 @@ class _MoriSchedulerHandle(UMBPSchedulerHandle):
         namespace: str,
         topology: RankTopology,
         lookup_dir: str,
+        instance: str = "",
     ) -> None:
         self._paths = {
-            rank: _lookup_socket_path(namespace, rank, lookup_dir)
+            rank: _lookup_socket_path(namespace, rank, lookup_dir, instance)
             for rank in topology.all_namespaces()
         }
         self.last_lookup_diagnostics: dict[str, tuple[Any, ...]] = {}
@@ -281,11 +307,13 @@ class _MoriWorkerHandle(UMBPWorkerHandle):
         max_workers: int,
         timeout_s: float,
         layout: KVLayoutDescriptor | None = None,
+        lookup_instance: str = "",
     ) -> None:
         self.client = client
         self._namespace = namespace
         self._topology = topology
         self._lookup_dir = lookup_dir
+        self._lookup_instance = lookup_instance
         self._lookup_server: _MoriLookupServer | None = None
         self._registered_storages: set[int] = set()
         self._gpu_devices: set[int] = set()
@@ -338,6 +366,7 @@ class _MoriWorkerHandle(UMBPWorkerHandle):
                     self._namespace,
                     self._topology.local_namespace,
                     self._lookup_dir,
+                    self._lookup_instance,
                 ),
                 self,
             )
@@ -766,6 +795,10 @@ class EmbeddedRuntime(IUMBPRuntime):
             )
         self.options = _resolve_embedded_options(config)
         self.lookup_dir = self.options.get("lookup_dir", "/tmp")
+        instance = self.options.get("lookup_instance", "")
+        if not isinstance(instance, str):
+            raise ValueError("lookup_instance must be a string")
+        self.lookup_instance = f"{instance}:dp{config.dp_index}"
 
     def create_scheduler_handle(
         self,
@@ -774,7 +807,9 @@ class EmbeddedRuntime(IUMBPRuntime):
         layout: KVLayoutDescriptor,
     ) -> UMBPSchedulerHandle:
         del layout
-        return _MoriSchedulerHandle(namespace, topology, self.lookup_dir)
+        return _MoriSchedulerHandle(
+            namespace, topology, self.lookup_dir, self.lookup_instance
+        )
 
     def create_worker_handle(
         self,
@@ -811,6 +846,7 @@ class EmbeddedRuntime(IUMBPRuntime):
             int(self.options.get("num_workers", 4)),
             float(self.options.get("timeout_ms", 30000)) / 1000,
             layout,
+            lookup_instance=self.lookup_instance,
         )
 
     @classmethod
