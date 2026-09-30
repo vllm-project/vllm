@@ -329,15 +329,15 @@ def rocm_aiter_fused_experts(
         # AITER tkw1 kernel for FP8 models with `apply_router_weight_on_input`
         # This applies topk_weights on the GEMM output of the first FC layer
         #  rather than the second FC.
-        assert topk_weights.dim() == 2, (
-            "`topk_weights` should be in shape (num_tokens, topk)"
-        )
-        assert topk_weights.shape[-1] == 1, (
-            "Only support topk=1 when `apply_router_weight_on_input` is True"
-        )
-        assert num_local_tokens is None, (
-            "AITER tkw1 kernel does not support `num_local_tokens`"
-        )
+        assert (
+            topk_weights.dim() == 2
+        ), "`topk_weights` should be in shape (num_tokens, topk)"
+        assert (
+            topk_weights.shape[-1] == 1
+        ), "Only support topk=1 when `apply_router_weight_on_input` is True"
+        assert (
+            num_local_tokens is None
+        ), "AITER tkw1 kernel does not support `num_local_tokens`"
 
         return rocm_aiter_ops.asm_moe_tkw1(
             hidden_states,
@@ -363,9 +363,9 @@ def rocm_aiter_fused_experts(
             quant_method = QuantMethod.BLOCK_1X32.value
         # w8a8 block-scaled
         if quant_config.block_shape is not None and quant_config.use_fp8_w8a8:
-            assert not apply_router_weight_on_input, (
-                "apply_router_weight_on_input is not supported for block scaled moe"
-            )
+            assert (
+                not apply_router_weight_on_input
+            ), "apply_router_weight_on_input is not supported for block scaled moe"
             assert quant_config.w1_scale is not None
             assert quant_config.w2_scale is not None
             quant_method = QuantMethod.BLOCK_128x128.value
@@ -376,13 +376,13 @@ def rocm_aiter_fused_experts(
             quant_method = QuantMethod.PER_TENSOR.value
 
         if apply_router_weight_on_input:
-            assert topk_weights.dim() == 2, (
-                "`topk_weights` should be in shape (num_tokens, topk)"
-            )
+            assert (
+                topk_weights.dim() == 2
+            ), "`topk_weights` should be in shape (num_tokens, topk)"
             _, topk = topk_weights.shape
-            assert topk == 1, (
-                "Only support topk=1 when `apply_router_weight_on_input` is True"
-            )
+            assert (
+                topk == 1
+            ), "Only support topk=1 when `apply_router_weight_on_input` is True"
 
         # Compute padding on-the-fly for CK MXFP4 kernels
         hidden_pad = 0
@@ -428,10 +428,7 @@ def rocm_aiter_fused_experts(
             gate_mode = GateMode.SEPARATED.value
         elif quant_config.use_mxfp4_w4a16:
             if moe_config.use_mxfp4_w4a4_dsv4:
-                # Opt-in a4w4 for DeepSeek V4.1 (VLLM_ROCM_USE_AITER_MOE_A4W4_DSV4=1).
-                # Must match the SEPARATED weight shuffle from load time.
                 from aiter import dtypes
-
                 gate_mode = GateMode.SEPARATED.value
                 q_dtype_a = dtypes.fp4x2
             else:
