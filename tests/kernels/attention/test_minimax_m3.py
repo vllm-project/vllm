@@ -1689,8 +1689,10 @@ def test_aiter_sparse_pa_layout_contract(monkeypatch, layout):
     )
 
     backend = sparse_attn_mod.MiniMaxM3SparseBackend
-    assert KVCacheLayout.LHBNC in backend.supported_kv_cache_layouts()
-    assert KVCacheLayout.LBHNC in backend.supported_kv_cache_layouts()
+    layouts = backend.supported_kv_cache_layouts()
+    assert layouts is not None
+    assert KVCacheLayout.LHBNC in layouts
+    assert KVCacheLayout.LBHNC in layouts
 
     nb, h = 3, 1
     cache_dtype = current_platform.fp8_dtype()
@@ -1772,19 +1774,22 @@ def test_aiter_indexer_requires_the_aiter_attend(monkeypatch):
     import vllm.models.minimax_m3.amd.indexer_aiter as indexer_aiter_mod
 
     monkeypatch.setattr(indexer_aiter_mod.current_platform, "is_rocm", lambda: True)
-    kwargs = dict(
-        topk_blocks=TOPK,
-        sparse_block_size=BLOCK_SIZE,
-        num_index_heads=1,
-        index_head_dim=HEAD_DIM,
-        indexer_kv_dtype="fp8_e4m3",
-        max_model_len=8192,
-    )
+
+    def unsupported_reason() -> str | None:
+        return indexer_aiter_mod.aiter_indexer_unsupported_reason(
+            topk_blocks=TOPK,
+            sparse_block_size=BLOCK_SIZE,
+            num_index_heads=1,
+            index_head_dim=HEAD_DIM,
+            # The implementation also accepts this legacy fp8 alias.
+            indexer_kv_dtype="fp8_e4m3",  # type: ignore[arg-type]
+            max_model_len=8192,
+        )
 
     monkeypatch.setattr(
         indexer_aiter_mod, "_minimax_m3_aiter_sparse_pa_requested", lambda: False
     )
-    reason = indexer_aiter_mod.aiter_indexer_unsupported_reason(**kwargs)
+    reason = unsupported_reason()
     assert reason is not None and "AITER sparse PA attend" in reason
 
     # With the attend asked for, the gate moves on to the kernel-contract
@@ -1792,7 +1797,7 @@ def test_aiter_indexer_requires_the_aiter_attend(monkeypatch):
     monkeypatch.setattr(
         indexer_aiter_mod, "_minimax_m3_aiter_sparse_pa_requested", lambda: True
     )
-    reason = indexer_aiter_mod.aiter_indexer_unsupported_reason(**kwargs)
+    reason = unsupported_reason()
     assert reason is None or "AITER sparse PA attend" not in reason
 
 
