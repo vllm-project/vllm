@@ -97,7 +97,14 @@ def _get_backend_priorities(
             # Sparse MLA backend priorities
             # See https://github.com/vllm-project/vllm/issues/35807 for
             # benchmark results
-            if kv_cache_dtype is not None and is_quantized_kv_cache(kv_cache_dtype):
+            if kv_cache_dtype == "nvfp4_ds_mla":
+                # FlashInfer serves this dtype through FP8 staging: opt in with
+                # --attention-backend, otherwise it is only the fallback.
+                sparse_backends = [
+                    AttentionBackendEnum.FLASHMLA_SPARSE,
+                    AttentionBackendEnum.FLASHINFER_MLA_SPARSE,
+                ]
+            elif kv_cache_dtype is not None and is_quantized_kv_cache(kv_cache_dtype):
                 # Prefer FlashInfer for fp8 kv cache
                 sparse_backends = [
                     AttentionBackendEnum.FLASHINFER_MLA_SPARSE,
