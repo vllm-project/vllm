@@ -4,7 +4,7 @@
 
 - [x] 1.1 Record the user's scheduler-cooperation scope and RL workload choice; update design and affected specs before implementing dependent behavior.
 - [ ] 1.2 Agree on the control transport/profile, explicit engine routing, target coverage, CPU adapter, and per-backend capability matrix.
-- [ ] 1.3 Specify operation statuses, deduplication/retry limits, declaration timing, task cleanup ordering, and bounded index/result storage. Result/lifetime contract is in implementation.md; index bounds remain to implement and validate.
+- [x] 1.3 Specify operation statuses, deduplication/retry limits, declaration timing, task cleanup ordering, and bounded index/result storage.
 - [x] 1.4 Specify reference policies, composer conflict rules, and any optional admission/score behavior without allowing cache plugins to mutate queues directly.
 - [ ] 1.5 Identify the model, usable GPU allocation, Mooncake deployment, and open-source rollout example for reproducible validation.
 - [x] 1.6 Confirm application control through the merged hints, explicit state commands separate from policy signals, and incremental association events with queries.
@@ -21,8 +21,8 @@
 ## 3. Control contracts and logical state
 
 - [x] 3.1 Implement validated action payloads, target/capability records, and bounded correlated operation results using the existing envelope.
-- [ ] 3.2 Implement the logical session/continuation index and hash/group-aware resolution, including cache-hit associations and reported coverage.
-- [ ] 3.3 Implement independent Retain declarations, expiry, Release, and explicit task-tree cleanup.
+- [ ] 3.2 Implement the logical session/continuation index and hash/group-aware resolution, including cache-hit associations and reported coverage. Logical index/resolution implemented; engine request/cache hooks and physical group validation remain.
+- [x] 3.3 Implement independent Retain declarations, expiry, Release, and explicit task-tree cleanup.
 - [ ] 3.4 Verify shared-prefix lifetimes, branch selection, missing content, duplicate control, and unconsumed signals.
 - [ ] 3.5 Implement consumption of the merged hint contract for supported cache/state actions, with shared request-attached/request-free validation and action/version capability discovery.
 - [ ] 3.6 Implement the agreed explicit association/continuation/task management commands separately from optional policy signals.

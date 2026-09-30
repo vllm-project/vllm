@@ -91,3 +91,42 @@ the presence of `config.json`.
 
 Pending: real Mooncake deployment/transfer, native control execution, model output
 evaluation, full workload comparisons and the external large-model matrix.
+
+## October 1: logical state and independent retention
+
+Added a bounded session/continuation index with captured parent prefixes,
+group-aware range resolution, reverse membership, revision-checked mutation,
+task-tree cleanup, explicit history pruning, paginated queries and association
+events. Known empty content remains distinguishable from unavailable history.
+These records contain no reusable physical block IDs.
+
+Added independent priority/TTL declarations, snapshot and explicit follow-growth
+scope, release and coordinated logical task cleanup. Closing a followed prefix
+preserves another owner's final scope and original expiry. Following declarations
+cannot attach to a reused continuation identity. These modules still await engine
+request/cache hooks and the common command executor.
+
+The new state suite tests independent shared-prefix lifetimes, branch stability,
+group boundaries, stale writes/cleanup, atomic capacity refusal, revision-safe
+pagination, event gaps, explicit pruning and seeded declaration interleavings.
+Existing full prefix-cache, KV-manager, deferred-free and scheduler suites run
+alongside the control/state suites:
+
+```bash
+CUDA_VISIBLE_DEVICES=0,3 .venv/bin/python -m pytest \
+  tests/v1/test_kv_hint_control.py tests/v1/test_kv_hint_state.py \
+  tests/v1/core/test_prefix_caching.py \
+  tests/v1/core/test_single_type_kv_cache_manager.py \
+  tests/v1/core/test_deferred_block_free.py \
+  tests/v1/core/test_scheduler.py -q
+```
+
+Initial result: **503 passed, 1 failed**, 354.74 seconds. The existing CPU-marked
+`test_diffusion_read_deferral_keeps_a_longer_pp_wait` constructs PP=3 without
+workers, but the real platform count sees only the two allocated GPUs. Corrected
+that test's hardware isolation by supplying a mocked device count of three;
+kept all PP scheduling assertions intact and did not expose additional GPUs.
+The complete suite is rerun after this fixture correction.
+
+Final result: **504 passed**, 324.09 seconds. Normal pre-commit hooks and mypy
+3.10/3.12 checks passed for the changed state/retention and test files.

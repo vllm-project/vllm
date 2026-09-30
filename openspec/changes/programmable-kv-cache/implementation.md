@@ -67,6 +67,25 @@ named declaration. Task completion removes that task tree's associations and
 declarations, abandons its operation interests, and leaves shared or in-flight
 physical references intact until the ordinary completion path releases them.
 
+The logical index defaults to 4,096 sessions, 16,384 continuations, 262,144 content
+associations, 4,096 replayable association events and 16,384 pruning tombstones.
+Exhaustion rejects the logical update atomically. History is pruned explicitly
+after checking active interests; unknown/pruned state is distinct from a known
+empty continuation. Query cursors carry the index revision, so pagination cannot
+silently combine different snapshots. Revisions and continuation incarnations are
+not reused within an engine epoch. Child changes also invalidate ancestor cleanup
+revisions. Parent-prefix inheritance is captured at branch creation.
+
+Declarations default to 4,096 entries and 262,144 retained snapshot entries.
+Following declarations query the shared index rather than copy its growth into
+another ownership map. Snapshot accounting includes repeated branch references,
+partial coverage and empty-prefix records. Expiry bookkeeping is compacted after
+updates, so repeatedly replacing one TTL cannot grow an unbounded timer heap.
+When task cleanup closes a continuation still followed by another owner, preserve
+that owner's final scope as a snapshot with its original priority/expiry. Refuse
+cleanup atomically if preserving this independent lifetime would exhaust snapshot
+capacity. An old following declaration never attaches to a recreated continuation.
+
 ## Policy examples
 
 The user selected retention priority, tool-wait demotion/predicted-resume prefetch,

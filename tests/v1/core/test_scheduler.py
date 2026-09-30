@@ -7210,7 +7210,9 @@ def test_diffusion_scheduler_defers_a_read_with_every_step_in_flight():
 
 
 @pytest.mark.usefixtures("diffusion_model_runner")
-def test_diffusion_read_deferral_keeps_a_longer_pp_wait():
+def test_diffusion_read_deferral_keeps_a_longer_pp_wait(monkeypatch):
+    """PP scheduling cadence does not require real pipeline workers or GPUs."""
+    monkeypatch.setattr("vllm.config.parallel.current_platform.device_count", lambda: 3)
     scheduler = _diffusion_scheduler(pipeline_parallel_size=3, use_v2_model_runner=True)
     read = _diffusion_request(
         "read", {"diffusion_read_only": True, "diffusion_max_steps": 1}
