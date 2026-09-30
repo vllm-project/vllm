@@ -2215,7 +2215,12 @@ def test_mhc_pre_unfused_applies_norm_once(
         norm_eps=norm_eps,
     )
     # Without a norm weight the raw mix comes back untouched.
-    _, _, raw_mix = op.forward_native(*args, norm_weight=None, **kwargs)
+    raw_outputs = op.forward_native(*args, norm_weight=None, **kwargs)
+    raw_mix = raw_outputs[-1]
+    if path == "hip_fallback":
+        actual = _forward(op, path, monkeypatch, *args, norm_weight=None, **kwargs)
+        torch.testing.assert_close(actual, raw_outputs)
+
     _, _, layer_input = _forward(
         op, path, monkeypatch, *args, norm_weight=norm_weight, **kwargs
     )
@@ -2257,7 +2262,12 @@ def test_mhc_fused_post_pre_unfused_applies_norm_once(
         tile_n=1,
         norm_eps=norm_eps,
     )
-    *_, raw_mix = op.forward_native(*args, norm_weight=None, **kwargs)
+    raw_outputs = op.forward_native(*args, norm_weight=None, **kwargs)
+    raw_mix = raw_outputs[-1]
+    if path == "hip_fallback":
+        actual = _forward(op, path, monkeypatch, *args, norm_weight=None, **kwargs)
+        torch.testing.assert_close(actual, raw_outputs)
+
     *_, layer_input = _forward(
         op, path, monkeypatch, *args, norm_weight=norm_weight, **kwargs
     )
