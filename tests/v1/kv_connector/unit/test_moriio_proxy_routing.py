@@ -22,14 +22,20 @@ Role shapes below are exactly those in the RFC (#46107) deployments:
 """
 
 import contextlib
+import ctypes
 import importlib.util
+import os
+import subprocess
 import sys
+import time
 import types
 from collections import Counter
 from pathlib import Path
 from typing import cast
 
+import msgpack
 import pytest
+import zmq
 
 _MISSING = object()
 
@@ -203,3 +209,93 @@ def test_consecutive_requests_alternate_instances(route):
     # than filling one instance's ranks before moving on.
     insts = [inst for inst, _ in _route_n(route, _instances(3, 8), 3)]
     assert insts == [0, 1, 2]
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="GIL probe uses libc.usleep")
+def test_discovery_heartbeat_progresses_while_worker_holds_gil():
+    from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_heartbeat import (
+        MoRIIOHeartbeat,
+    )
+
+    payload = {
+        "type": "P",
+        "http_address": "127.0.0.1:8000",
+        "zmq_address": "host:127.0.0.1,handshake:6301,notify:61005",
+        "dp_size": 1,
+        "tp_size": 8,
+        "transfer_mode": "READ",
+    }
+    with zmq.Context() as context, context.socket(zmq.ROUTER) as socket:
+        port = socket.bind_to_random_port("tcp://127.0.0.1")
+        heartbeat = MoRIIOHeartbeat(f"tcp://127.0.0.1:{port}", payload, 0.02)
+        try:
+            assert socket.poll(5000), "Discovery did not register"
+            assert msgpack.unpackb(socket.recv_multipart()[1]) == payload
+            # PyDLL retains the GIL throughout the native call.
+            ctypes.PyDLL(None).usleep(300_000)
+            received = 0
+            while socket.poll(0):
+                assert msgpack.unpackb(socket.recv_multipart()[1]) == payload
+                received += 1
+            assert received >= 3, "Discovery stalled while the worker held the GIL"
+        finally:
+            heartbeat.shutdown()
+            heartbeat.shutdown()
+        while socket.poll(0):
+            socket.recv_multipart()
+        assert not socket.poll(100), "Heartbeats continued after shutdown"
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="Checks child exit via procfs")
+def test_discovery_heartbeat_exits_when_worker_dies():
+    from vllm.distributed.kv_transfer.kv_connector.v1.moriio import moriio_heartbeat
+
+    owner_code = """
+import runpy
+import sys
+Heartbeat = runpy.run_path(sys.argv[1])["MoRIIOHeartbeat"]
+heartbeat = Heartbeat(sys.argv[2], {"type": "D"}, 0.02)
+print(heartbeat._process.pid, flush=True)
+sys.stdin.read()
+"""
+    with zmq.Context() as context, context.socket(zmq.ROUTER) as socket:
+        port = socket.bind_to_random_port("tcp://127.0.0.1")
+        owner = subprocess.Popen(
+            [
+                sys.executable,
+                "-c",
+                owner_code,
+                moriio_heartbeat.__file__,
+                f"tcp://127.0.0.1:{port}",
+            ],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            text=True,
+        )
+        child_pid = None
+        child_exited = False
+        try:
+            assert socket.poll(5000), "Discovery did not register"
+            assert owner.stdout is not None
+            child_pid = int(owner.stdout.readline())
+            owner.kill()
+            owner.wait(timeout=5)
+            stat = Path(f"/proc/{child_pid}/stat")
+            deadline = time.monotonic() + 5
+            while stat.exists():
+                # A terminated child may await reaping by the container's init.
+                try:
+                    if stat.read_text().split(") ")[1].startswith("Z "):
+                        break
+                except FileNotFoundError:
+                    break
+                assert time.monotonic() < deadline, "Orphan heartbeat survived worker"
+                time.sleep(0.01)
+            child_exited = True
+        finally:
+            if owner.poll() is None:
+                owner.kill()
+            owner.communicate(timeout=5)
+            if child_pid is not None and not child_exited:
+                with contextlib.suppress(ProcessLookupError):
+                    os.kill(child_pid, 9)
