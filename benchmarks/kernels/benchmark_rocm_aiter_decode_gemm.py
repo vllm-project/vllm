@@ -129,7 +129,7 @@ def bench_shape(m: int, n: int, k: int, pairs: int) -> dict:
     for graph in (graph_a, graph_b, graph_null):
         for _ in range(WARMUP):
             graph.replay()
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
 
     times_a, times_b = [], []
     for p in range(pairs):

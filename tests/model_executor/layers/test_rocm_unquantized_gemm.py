@@ -222,7 +222,7 @@ def _patch_fake_tuned_gemm(monkeypatch, **attrs):
     for name, value in attrs.items():
         setattr(tuned_gemm, name, value)
     aiter_pkg = types.ModuleType("aiter")
-    aiter_pkg.tuned_gemm = tuned_gemm
+    monkeypatch.setattr(aiter_pkg, "tuned_gemm", tuned_gemm, raising=False)
     monkeypatch.setitem(sys.modules, "aiter", aiter_pkg)
     monkeypatch.setitem(sys.modules, "aiter.tuned_gemm", tuned_gemm)
     return tuned_gemm
