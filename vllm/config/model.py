@@ -1106,8 +1106,22 @@ class ModelConfig:
             elif task == "classify":
                 cls += "ForSequenceClassification"
         else:
+            cls += self._get_transformers_backend_linear_attention_suffix()
             cls += "ForCausalLM"
         return cls
+
+    def _get_transformers_backend_linear_attention_suffix(self) -> str:
+        """The `AttentionFree` or `Hybrid` suffix for models with linear attention."""
+        layer_types = getattr(self.hf_text_config, "layer_types", None) or []
+        # "hybrid" layers contain both linear attention and attention
+        if not any(t in ("linear_attention", "hybrid") for t in layer_types):
+            return ""
+        if any(
+            t != "linear_attention" and t.endswith(("attention", "hybrid"))
+            for t in layer_types
+        ):
+            return "Hybrid"
+        return "AttentionFree"
 
     def using_transformers_backend(self) -> bool:
         """Check if the model is using the Transformers modeling backend class."""

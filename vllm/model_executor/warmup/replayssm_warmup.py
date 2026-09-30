@@ -68,7 +68,7 @@ def _replayssm_autotune_kwargs(
 def _temporary_replayssm_autotune_state(
     runner: "GPUModelRunner", max_num_reqs: int
 ) -> Iterator[None]:
-    from vllm.model_executor.layers.mamba.mamba_mixer2 import MambaMixer2
+    from vllm.model_executor.layers.mamba.mamba_mixer2 import Mamba2SSM
     from vllm.model_executor.layers.mamba.ops.ssu_dispatch import (
         reset_replayssm_ring_trackers,
         update_replayssm_ring_trackers,
@@ -77,7 +77,7 @@ def _temporary_replayssm_autotune_state(
     reset_tensors: dict[int, torch.Tensor] = {}
     tracker_specs: dict[int, tuple[torch.Tensor, torch.Tensor, int, int]] = {}
     for module in runner.get_model().modules():
-        if not isinstance(module, MambaMixer2) or not module.use_replayssm:
+        if not isinstance(module, Mamba2SSM) or not module.use_replayssm:
             continue
         assert module.replayssm_buffer_len is not None
         ring_start = module._replayssm_ring_start

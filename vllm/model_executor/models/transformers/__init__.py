@@ -21,9 +21,19 @@ from typing import TYPE_CHECKING
 import torch.nn.functional as F
 from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
 
+try:
+    from transformers.integrations.linear_attention import ALL_SSD_FUNCTIONS
+except ImportError:
+    ALL_SSD_FUNCTIONS = None
+
+from vllm.model_executor.models.interfaces import IsAttentionFree, IsHybrid
 from vllm.model_executor.models.transformers.base import VLLM_ATTN_ATTR
 from vllm.model_executor.models.transformers.causal import CausalMixin
 from vllm.model_executor.models.transformers.legacy import LegacyMixin
+from vllm.model_executor.models.transformers.linear_attention import (
+    VLLM_SSD_ATTR,
+    LinearAttentionMixin,
+)
 from vllm.model_executor.models.transformers.moe import MoEMixin
 from vllm.model_executor.models.transformers.multimodal import (
     MultiModalDummyInputsBuilder,
@@ -41,6 +51,7 @@ if TYPE_CHECKING:
     import torch
 
     from vllm.model_executor.layers.attention import Attention, MLAAttention
+    from vllm.model_executor.layers.mamba.mamba_mixer2 import Mamba2SSM
 
 
 def check_sinks(
@@ -121,8 +132,22 @@ def vllm_mla_attention_forward(
     return attn_output, None
 
 
+def vllm_ssd_forward(
+    # Transformers args
+    module: "torch.nn.Module",
+    hidden_states_B_C: "torch.Tensor",
+    dt: "torch.Tensor",
+    **kwargs,
+):
+    ssd: Mamba2SSM = getattr(module, VLLM_SSD_ATTR)
+    # [batch=1, num_tokens, dim] -> [num_tokens, dim] and back
+    return ssd.forward_ssd(hidden_states_B_C[0], dt[0])[None]
+
+
 ALL_ATTENTION_FUNCTIONS.register("vllm", vllm_attention_forward)
 ALL_ATTENTION_FUNCTIONS.register("vllm_mla", vllm_mla_attention_forward)
+if ALL_SSD_FUNCTIONS is not None:
+    ALL_SSD_FUNCTIONS.register("vllm", vllm_ssd_forward)
 
 
 # Text only models
@@ -130,6 +155,19 @@ class TransformersForCausalLM(CausalMixin): ...
 
 
 class TransformersMoEForCausalLM(MoEMixin, CausalMixin): ...
+
+
+class TransformersAttentionFreeForCausalLM(
+    CausalMixin, LinearAttentionMixin, IsAttentionFree
+): ...
+
+
+class TransformersHybridForCausalLM(CausalMixin, LinearAttentionMixin, IsHybrid): ...
+
+
+class TransformersMoEHybridForCausalLM(
+    MoEMixin, CausalMixin, LinearAttentionMixin, IsHybrid
+): ...
 
 
 # Multimodal models
