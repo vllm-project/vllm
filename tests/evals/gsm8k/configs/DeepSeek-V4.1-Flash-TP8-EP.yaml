@@ -1,0 +1,12 @@
+model_name: "deepseek-ai/DeepSeek-V4.1-Flash"
+accuracy_threshold: 0.92
+num_questions: 1319
+num_fewshot: 5
+startup_max_wait_seconds: 3600
+server_args: >-
+  --tensor-parallel-size 8
+  --enable-expert-parallel
+  --max-model-len 4096
+  --kv-cache-dtype fp8
+  --block-size 64
+  --language-model-only

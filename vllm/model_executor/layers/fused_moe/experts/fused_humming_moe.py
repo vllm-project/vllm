@@ -105,7 +105,14 @@ def _is_supported_wna16_weight_key(weight_key: QuantKey | None) -> bool:
     )
 
 
-def get_humming_moe_gemm_type(moe_config: FusedMoEConfig | None = None) -> str:
+def get_humming_moe_gemm_type(
+    moe_config: FusedMoEConfig | None = None,
+    weight_key: QuantKey | None = None,
+) -> str:
+    from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
+        use_deepseek_v41_hopper_humming,
+    )
+
     env_gemm_type: str | None = envs.VLLM_HUMMING_MOE_GEMM_TYPE
     if env_gemm_type is not None and env_gemm_type.lower() != "auto":
         env_gemm_type = env_gemm_type.lower()
@@ -113,6 +120,12 @@ def get_humming_moe_gemm_type(moe_config: FusedMoEConfig | None = None) -> str:
             gemm_type = "grouped_contiguous"
         else:
             gemm_type = env_gemm_type
+    elif (
+        moe_config is not None
+        and weight_key == kMxfp4Static
+        and use_deepseek_v41_hopper_humming(moe_config)
+    ):
+        gemm_type = "indexed"
     elif moe_config is not None and moe_config.moe_parallel_config.use_ep:
         gemm_type = "grouped_contiguous"
     else:
@@ -646,7 +659,7 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
         if supported:
             assert hasattr(cls, "humming_gemm_type")
             gemm_type = cls.humming_gemm_type().value.lower()
-            preferred_gemm_type = get_humming_moe_gemm_type(moe_config)
+            preferred_gemm_type = get_humming_moe_gemm_type(moe_config, weight_key)
             supported = preferred_gemm_type.lower() == gemm_type
             if not supported:
                 reason = (

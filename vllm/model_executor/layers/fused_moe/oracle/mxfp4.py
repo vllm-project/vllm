@@ -7,7 +7,7 @@ import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm import envs
-from vllm.config import get_current_vllm_config
+from vllm.config import get_current_vllm_config, get_current_vllm_config_or_none
 from vllm.config.kernel import MoEBackend
 from vllm.config.quantization import QuantizationConfigArgs
 from vllm.logger import init_logger
@@ -43,6 +43,7 @@ from vllm.model_executor.layers.quantization.utils.ocp_mx_utils import (
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     kFp8Dynamic128Sym,
+    kFp8DynamicTokenSym,
     kFp8StaticTensorSym,
     kMxfp4Dynamic,
     kMxfp4Static,
@@ -654,12 +655,47 @@ def select_mxfp4_moe_backend(
     )
 
 
+def use_deepseek_v41_hopper_humming(config: FusedMoEConfig) -> bool:
+    """DeepSeek V4.1 on SM90 defaults its MXFP4 experts to Humming with the
+    indexed GEMM, unless an all2all backend other than allgather_reducescatter
+    is used."""
+    parallel_config = config.moe_parallel_config
+    if not (
+        config.routing_method == RoutingMethodType.DeepseekV4
+        and current_platform.is_cuda()
+        and current_platform.is_device_capability(90)
+        and (
+            not parallel_config.use_all2all_kernels
+            or parallel_config.all2all_backend == "allgather_reducescatter"
+        )
+    ):
+        return False
+    vllm_config = get_current_vllm_config_or_none()
+    model_config = vllm_config.model_config if vllm_config is not None else None
+    model_type = getattr(getattr(model_config, "hf_config", None), "model_type", None)
+    return model_type in ("deepseek_v41", "deepseek_v41_text")
+
+
+def deepseek_v41_humming_activation_key(config: FusedMoEConfig) -> QuantKey | None:
+    """Per-token FP8 activations for the DeepSeek V4.1 Humming default, unless
+    VLLM_HUMMING_INPUT_QUANT_CONFIG is set."""
+    if envs.is_set("VLLM_HUMMING_INPUT_QUANT_CONFIG"):
+        return None
+    return kFp8DynamicTokenSym if use_deepseek_v41_hopper_humming(config) else None
+
+
 def select_deepseek_v4_mxfp4_moe_backend(
     config: FusedMoEConfig,
 ) -> tuple[Mxfp4MoeBackend, type[mk.FusedMoEExperts] | None]:
     """Select the MXFP4 MoE backend with MXFP8 activation as top priority.
     Falls back through BF16 and other backends.
     """
+
+    def activation_key_for(backend: Mxfp4MoeBackend) -> QuantKey | None:
+        if backend == Mxfp4MoeBackend.HUMMING:
+            return deepseek_v41_humming_activation_key(config)
+        return _backend_activation_key(backend)
+
     activation_format = (
         mk.FusedMoEActivationFormat.BatchedExperts
         if config.moe_parallel_config.use_batched_activation_format
@@ -689,7 +725,7 @@ def select_deepseek_v4_mxfp4_moe_backend(
                     requested_backend,
                     config,
                     kMxfp4Static,
-                    _backend_activation_key(requested_backend),
+                    activation_key_for(requested_backend),
                     activation_format,
                 )
             except ValueError as e:
@@ -709,10 +745,15 @@ def select_deepseek_v4_mxfp4_moe_backend(
         ]
     else:
         priority_backends = _get_priority_backends()
+        if use_deepseek_v41_hopper_humming(config):
+            priority_backends.insert(
+                priority_backends.index(Mxfp4MoeBackend.MARLIN),
+                Mxfp4MoeBackend.HUMMING,
+            )
 
     # Iterate priority backends: TRTLLM MXFP8, then Triton.
     for backend in priority_backends:
-        activation_key = _backend_activation_key(backend)
+        activation_key = activation_key_for(backend)
         for k_cls in backend_to_kernel_cls(backend):
             supported, reason = k_cls.is_supported_config(
                 k_cls, config, kMxfp4Static, activation_key, activation_format
@@ -1383,6 +1424,7 @@ def convert_weight_to_mxfp4_moe_kernel_format(
     _cache_permute_indices: dict[torch.Size, torch.Tensor] | None = None,
     activation: MoEActivation | None = None,
     use_separated_a4w4: bool = False,
+    humming_activation_key: QuantKey | None = None,
 ) -> tuple[
     torch.Tensor,
     torch.Tensor,
@@ -1431,11 +1473,22 @@ def convert_weight_to_mxfp4_moe_kernel_format(
     if mxfp4_backend == Mxfp4MoeBackend.HUMMING:
         from vllm.model_executor.layers.quantization.utils.humming import (
             convert_to_humming_moe_kernel_format,
+            quant_key_to_input_schema,
         )
 
-        convert_to_humming_moe_kernel_format(
-            layer, quant_config={"quant_method": "mxfp4"}
-        )
+        if humming_activation_key is None:
+            convert_to_humming_moe_kernel_format(
+                layer, quant_config={"quant_method": "mxfp4"}
+            )
+        else:
+            # Fallback off: an unsupported schema must fail, not silently
+            # downgrade the activations.
+            convert_to_humming_moe_kernel_format(
+                layer,
+                quant_config={"quant_method": "mxfp4"},
+                input_schema=quant_key_to_input_schema(humming_activation_key),
+                allow_input_schema_fallback=False,
+            )
         return (
             layer.w13_weight,
             layer.w2_weight,

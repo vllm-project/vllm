@@ -7,8 +7,9 @@ Run `pytest tests/kernels/test_moe.py`.
 
 import functools
 from collections.abc import Callable
-from dataclasses import dataclass
-from typing import Any
+from dataclasses import dataclass, replace
+from types import SimpleNamespace
+from typing import Any, get_args
 
 import pytest
 import torch
@@ -17,6 +18,7 @@ from torch.nn import functional as F
 
 import vllm.model_executor.layers.fused_moe  # noqa
 import vllm.model_executor.layers.fused_moe.fused_moe as fused_moe_module
+import vllm.model_executor.layers.fused_moe.oracle.mxfp4 as mxfp4_oracle
 from tests.kernels.moe.utils import (
     fused_moe,
     make_dummy_moe_config,
@@ -24,6 +26,7 @@ from tests.kernels.moe.utils import (
 )
 from tests.kernels.utils import opcheck, stack_and_dev, torch_experts, torch_moe
 from vllm.config import VllmConfig, set_current_vllm_config
+from vllm.config.parallel import All2AllBackend
 from vllm.model_executor.layers.fused_moe import (
     MoEActivation,
     fused_topk,
@@ -35,13 +38,17 @@ from vllm.model_executor.layers.fused_moe.activation import (
 )
 from vllm.model_executor.layers.fused_moe.config import (
     FUSED_MOE_UNQUANTIZED_CONFIG,
+    RoutingMethodType,
     int4_w4a16_moe_quant_config,
     int8_w8a16_moe_quant_config,
 )
 from vllm.model_executor.layers.fused_moe.experts.marlin_moe import (
+    BatchedMarlinExperts,
+    MarlinExperts,
     batched_fused_marlin_moe,
     fused_marlin_moe,
 )
+from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import Mxfp4MoeBackend
 from vllm.model_executor.layers.fused_moe.utils import (
     moe_use_td_hw_supported,
 )
@@ -59,7 +66,13 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils_test import (
     awq_marlin_quantize,
     marlin_quantize,
 )
-from vllm.model_executor.layers.quantization.utils.quant_utils import quantize_weights
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    QuantKey,
+    kFp8DynamicTokenSym,
+    kFp8Static128BlockSym,
+    kMxfp4Static,
+    quantize_weights,
+)
 from vllm.platforms import current_platform
 from vllm.scalar_type import ScalarType, scalar_types
 from vllm.triton_utils import tl
@@ -1368,19 +1381,25 @@ def test_humming_activation_metadata_tracks_shared_apply(activation: MoEActivati
 
 
 @pytest.mark.parametrize(
-    ("env_override", "use_ep", "expected"),
+    ("env_override", "use_ep", "v41_hopper", "weight_key", "expected"),
     [
-        (None, False, "indexed"),
-        (None, True, "grouped_contiguous"),
-        ("auto", True, "grouped_contiguous"),
-        ("indexed", True, "indexed"),
-        ("grouped", False, "grouped_contiguous"),
+        (None, False, False, kMxfp4Static, "indexed"),
+        (None, True, False, kMxfp4Static, "grouped_contiguous"),
+        ("auto", True, False, kMxfp4Static, "grouped_contiguous"),
+        ("indexed", True, False, kMxfp4Static, "indexed"),
+        ("grouped", False, False, kMxfp4Static, "grouped_contiguous"),
+        (None, True, True, kMxfp4Static, "indexed"),
+        ("auto", True, True, kMxfp4Static, "indexed"),
+        ("grouped", True, True, kMxfp4Static, "grouped_contiguous"),
+        (None, True, True, kFp8Static128BlockSym, "grouped_contiguous"),
     ],
 )
 def test_humming_selects_gemm_from_parallelism_and_override(
     monkeypatch: pytest.MonkeyPatch,
     env_override: str | None,
     use_ep: bool,
+    v41_hopper: bool,
+    weight_key: QuantKey,
     expected: str,
 ):
     from vllm.model_executor.layers.fused_moe.experts.fused_humming_moe import (
@@ -1391,10 +1410,163 @@ def test_humming_selects_gemm_from_parallelism_and_override(
         monkeypatch.delenv("VLLM_HUMMING_MOE_GEMM_TYPE", raising=False)
     else:
         monkeypatch.setenv("VLLM_HUMMING_MOE_GEMM_TYPE", env_override)
+    monkeypatch.setattr(
+        mxfp4_oracle, "use_deepseek_v41_hopper_humming", lambda config: v41_hopper
+    )
     moe_config = make_dummy_moe_config()
     moe_config.moe_parallel_config.use_ep = use_ep
 
-    assert get_humming_moe_gemm_type(moe_config) == expected
+    assert get_humming_moe_gemm_type(moe_config, weight_key) == expected
+
+
+def _make_deepseek_moe_method(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    model_type: str = "deepseek_v41",
+    capability: int = 90,
+    humming_available: bool = True,
+    moe_backend: str = "auto",
+    use_ep: bool = False,
+    dp_size: int = 1,
+    all2all_backend: str = "allgather_reducescatter",
+):
+    """Build the DeepSeek V4 MXFP4 MoE method on a simulated CUDA device, with
+    Marlin as the only generic candidate."""
+    from vllm.model_executor.layers.fused_moe.experts.fused_humming_moe import (
+        HummingExpertsBase,
+    )
+    from vllm.model_executor.layers.quantization.mxfp4 import Mxfp4MoEMethod
+
+    monkeypatch.setattr(mxfp4_oracle.current_platform, "is_cuda", lambda: True)
+    monkeypatch.setattr(
+        mxfp4_oracle.current_platform,
+        "is_device_capability",
+        lambda cap, device_id=0: cap == capability,
+    )
+    monkeypatch.setattr(
+        mxfp4_oracle,
+        "_get_priority_backends",
+        lambda: [Mxfp4MoeBackend.MARLIN, Mxfp4MoeBackend.BATCHED_MARLIN],
+    )
+    hf_config = SimpleNamespace(model_type=model_type)
+    monkeypatch.setattr(
+        mxfp4_oracle,
+        "get_current_vllm_config_or_none",
+        lambda: SimpleNamespace(model_config=SimpleNamespace(hf_config=hf_config)),
+    )
+    monkeypatch.setattr(
+        HummingExpertsBase, "_supports_current_device", lambda: humming_available
+    )
+    monkeypatch.setattr(MarlinExperts, "_supports_current_device", lambda: True)
+    monkeypatch.setattr(BatchedMarlinExperts, "_supports_current_device", lambda: True)
+
+    moe_config = make_dummy_moe_config()
+    moe_config.routing_method = RoutingMethodType.DeepseekV4
+    moe_config.moe_backend = moe_backend
+    moe_config.moe_parallel_config = replace(
+        moe_config.moe_parallel_config,
+        use_ep=use_ep,
+        dp_size=dp_size,
+        all2all_backend=all2all_backend,
+    )
+    return Mxfp4MoEMethod(moe_config)
+
+
+@pytest.mark.parametrize(
+    ("layout", "moe_backend", "env", "expected_experts", "expected_key"),
+    [
+        ("tp", "auto", {}, "HummingIndexedExperts", kFp8DynamicTokenSym),
+        ("tp_ep", "auto", {}, "HummingIndexedExperts", kFp8DynamicTokenSym),
+        ("dp_ep", "auto", {}, "HummingIndexedExperts", kFp8DynamicTokenSym),
+        ("tp_ep", "humming", {}, "HummingIndexedExperts", kFp8DynamicTokenSym),
+        (
+            "tp_ep",
+            "auto",
+            {"VLLM_HUMMING_INPUT_QUANT_CONFIG": "{}"},
+            "HummingIndexedExperts",
+            None,
+        ),
+        (
+            "tp_ep",
+            "auto",
+            {"VLLM_HUMMING_MOE_GEMM_TYPE": "grouped"},
+            "HummingGroupedExperts",
+            kFp8DynamicTokenSym,
+        ),
+    ],
+)
+def test_deepseek_v41_hopper_defaults_to_humming_fp8_indexed(
+    monkeypatch: pytest.MonkeyPatch,
+    layout: str,
+    moe_backend: str,
+    env: dict[str, str],
+    expected_experts: str,
+    expected_key: QuantKey | None,
+):
+    from vllm.model_executor.layers.fused_moe.experts.fused_humming_moe import (
+        HummingExpertsBase,
+    )
+
+    for name in ("VLLM_HUMMING_INPUT_QUANT_CONFIG", "VLLM_HUMMING_MOE_GEMM_TYPE"):
+        monkeypatch.delenv(name, raising=False)
+    for name, value in env.items():
+        monkeypatch.setenv(name, value)
+    # The selector must validate Humming with the key it will run.
+    checked_keys = []
+    supports_quant_scheme = HummingExpertsBase._supports_quant_scheme
+    monkeypatch.setattr(
+        HummingExpertsBase,
+        "_supports_quant_scheme",
+        staticmethod(
+            lambda w, a: checked_keys.append(a) or supports_quant_scheme(w, a)
+        ),
+    )
+    method = _make_deepseek_moe_method(
+        monkeypatch,
+        moe_backend=moe_backend,
+        use_ep=layout != "tp",
+        dp_size=2 if layout == "dp_ep" else 1,
+    )
+
+    assert method.mxfp4_backend == Mxfp4MoeBackend.HUMMING
+    assert method.experts_cls.__name__ == expected_experts
+    assert method.humming_activation_key == expected_key
+    assert set(checked_keys) == {expected_key}
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"model_type": "deepseek_v4"},
+        {"capability": 100},
+        {"humming_available": False},
+        {"moe_backend": "marlin"},
+    ]
+    + [
+        {"use_ep": True, "dp_size": 2, "all2all_backend": backend}
+        for backend in sorted(get_args(All2AllBackend))
+        if backend not in ("naive", "pplx", "allgather_reducescatter")
+    ],
+    ids=str,
+)
+def test_deepseek_mxfp4_selection_unchanged_outside_v41_hopper_default(
+    monkeypatch: pytest.MonkeyPatch, kwargs: dict[str, Any]
+):
+    """Outside the V4.1 SM90 default, selection matches DeepSeek V4."""
+    monkeypatch.delenv("VLLM_HUMMING_INPUT_QUANT_CONFIG", raising=False)
+
+    def select(model_type: str):
+        try:
+            method = _make_deepseek_moe_method(
+                monkeypatch, **{"model_type": model_type, **kwargs}
+            )
+        except NotImplementedError:
+            return None
+        return method.mxfp4_backend, method.humming_activation_key
+
+    selected = select("deepseek_v41")
+    assert selected == select("deepseek_v4")
+    assert selected is None or selected[0] != Mxfp4MoeBackend.HUMMING
 
 
 @pytest.mark.parametrize(
