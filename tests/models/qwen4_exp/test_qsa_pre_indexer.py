@@ -15,7 +15,7 @@ from vllm.models.qwen4_exp.nvidia.ops.qsa import (
     qsa_compress_groups_with_ratio,
     qsa_store_cache_rows,
 )
-from vllm.models.qwen4_exp.nvidia.ops.qsa_pre_indexer import qsa_pre_indexer
+from vllm.models.qwen4_exp.nvidia.ops.qsa_prepare import qsa_prepare
 from vllm.platforms import current_platform
 from vllm.triton_utils import HAS_TRITON
 
@@ -73,9 +73,6 @@ def _make_main_inputs(num_tokens: int, fp8_cache: bool) -> dict:
     ).transpose(1, 2)
     slots = torch.randperm(num_blocks * MAIN_PAGE, device="cuda")[:num_tokens]
     slots[-1] = -1
-    q_out = torch.empty(
-        num_tokens, MAIN_HQ, MAIN_D, dtype=torch.bfloat16, device="cuda"
-    )
     norm_weights = torch.randn(2, MAIN_D, dtype=torch.bfloat16, device="cuda") * 0.2
     return dict(
         main_qkv=torch.randn(
@@ -87,16 +84,14 @@ def _make_main_inputs(num_tokens: int, fp8_cache: bool) -> dict:
         main_q_norm_weight=norm_weights[0],
         main_k_norm_weight=norm_weights[1],
         main_eps=EPS,
-        main_q_out=q_out,
-        main_gate_out=torch.empty_like(q_out),
         main_kv_cache=cache.view(torch.float8_e4m3fn) if fp8_cache else cache,
         main_slot_mapping=slots,
-        main_k_scale=torch.tensor(0.5, device="cuda"),
-        main_v_scale=torch.tensor(2.0, device="cuda"),
+        main_k_scale=0.5,
+        main_v_scale=2.0,
     )
 
 
-def _check_main_outputs(main: dict, rope, positions) -> None:
+def _check_main_outputs(main: dict, q_out, gate_out, rope, positions) -> None:
     """Compare with fused_qk_rmsnorm_rope_gate + reshape_and_cache_flash."""
     from vllm._custom_ops import reshape_and_cache_flash
     from vllm.model_executor.layers.fused_qk_norm_rope import (
@@ -132,11 +127,11 @@ def _check_main_outputs(main: dict, rope, positions) -> None:
         value_cache,
         main["main_slot_mapping"],
         "fp8" if fp8_cache else "auto",
-        main["main_k_scale"],
-        main["main_v_scale"],
+        torch.tensor(main["main_k_scale"], device="cuda"),
+        torch.tensor(main["main_v_scale"], device="cuda"),
     )
-    torch.testing.assert_close(main["main_q_out"].flatten(1), q, rtol=RTOL, atol=ATOL)
-    assert torch.equal(main["main_gate_out"].flatten(1), gate)
+    torch.testing.assert_close(q_out.flatten(1), q, rtol=RTOL, atol=ATOL)
+    assert torch.equal(gate_out.flatten(1), gate)
     if fp8_cache:
         assert_fp8_within_one_ulp(kv_cache, cache.view(torch.float8_e4m3fn))
     else:
@@ -182,6 +177,7 @@ def test_qsa_fused_pre_indexer_matches_unfused(
 
     from vllm.model_executor.layers.rotary_embedding import get_rope
 
+    torch.manual_seed(0)
     device = "cuda"
     rope_params = {
         "partial_rotary_factor": 0.25,
@@ -330,7 +326,7 @@ def test_qsa_fused_pre_indexer_matches_unfused(
     fused_query = torch.empty(num_tokens, HQ, D, dtype=indexer_dtype, device=device)
     # The main-attention cache follows the recipe's pairing with the indexer.
     main = _make_main_inputs(num_tokens, indexer_dtype == torch.float8_e4m3fn)
-    qsa_pre_indexer(
+    main_q_out, main_gate_out = qsa_prepare(
         projected_qk[:, : HQ * D],
         projected_qk[:, HQ * D :],
         positions,
@@ -352,7 +348,7 @@ def test_qsa_fused_pre_indexer_matches_unfused(
         rope_pos_offset=ROPE_POS_OFFSET if cache_rope_positions else None,
         **main,
     )
-    _check_main_outputs(main, rope, positions)
+    _check_main_outputs(main, main_q_out, main_gate_out, rope, positions)
 
     unfused_query = projected_qk[:, : HQ * D].reshape(num_tokens, HQ, D)
     unfused_query = gemma_rmsnorm(

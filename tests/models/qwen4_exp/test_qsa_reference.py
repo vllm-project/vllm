@@ -67,13 +67,13 @@ def test_qsa_mtp_index_share_updates_cache_but_skips_selection(
         kv_cache_dtype="auto",
         q_norm=SimpleNamespace(weight=torch.ones(1), variance_epsilon=1e-6),
         k_norm=SimpleNamespace(weight=torch.ones(1)),
-        _k_scale=torch.ones(()),
-        _v_scale=torch.ones(()),
+        _k_scale_float=1.0,
+        _v_scale_float=1.0,
     )
 
     monkeypatch.setattr(
         indexer_qsa,
-        "qsa_pre_indexer",
+        "qsa_prepare",
         lambda *args, **kwargs: updates.append((args, kwargs)),
     )
     monkeypatch.setattr(
@@ -87,15 +87,13 @@ def test_qsa_mtp_index_share_updates_cache_but_skips_selection(
         lambda *args, **kwargs: selections.append((args, kwargs)),
     )
 
-    actual = indexer_qsa.QSAIndexer.forward(
+    actual, _ = indexer_qsa.QSAIndexer.forward(
         indexer,
         torch.zeros(2, 2),
         torch.tensor([7, 8]),
         rows,
         attn=attn,
         qkv=torch.zeros(2, 4),
-        query=torch.zeros(2, 1, 1),
-        gate=torch.zeros(2, 1, 1),
         slot_mapping=torch.arange(2),
     )
 
@@ -550,8 +548,6 @@ def test_qsa_unfused_cache_update_ignores_padded_qk() -> None:
         torch.full((5, 5), -1, dtype=torch.int32, device=device),
         attn=SimpleNamespace(use_fused_qsa_prepare=False),
         qkv=unused,
-        query=unused,
-        gate=unused,
         slot_mapping=unused,
     )
     torch.testing.assert_close(raw_cache[0, :, 0], keys[[4, 1, 2, 3]])

@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Fused QSA pre-indexer kernel for Qwen4Exp."""
+"""Fused QSA prepare kernel for Qwen4Exp."""
 
 import torch
 
@@ -81,24 +81,24 @@ def _norm_rope(
 
 
 @triton.jit
-def _to_dst_dtype(x, dst, scale_ptr):
+def _to_dst_dtype(x, dst, scale):
     """Round to BF16 like the unfused path, then scale for an FP8 destination."""
     out_ty = dst.dtype.element_ty
     x = x.to(tl.bfloat16)
     if out_ty == tl.float8e4nv:
-        x = x.to(tl.float32) / tl.load(scale_ptr)
+        x = x.to(tl.float32) / scale
     return x.to(out_ty)
 
 
 @triton.jit
-def _store_rotated(dst, y, o1, o2, scale_ptr):
+def _store_rotated(dst, y, o1, o2, scale):
     """Store a normalized head whose first ``2 * len(o1)`` dims are rotated."""
     HALF: tl.constexpr = o1.shape[0]
     dims = tl.arange(0, y.shape[0])
     rot = tl.arange(0, HALF)
-    tl.store(dst + dims, _to_dst_dtype(y, dst, scale_ptr), mask=dims >= 2 * HALF)
-    tl.store(dst + rot, _to_dst_dtype(o1, dst, scale_ptr))
-    tl.store(dst + HALF + rot, _to_dst_dtype(o2, dst, scale_ptr))
+    tl.store(dst + dims, _to_dst_dtype(y, dst, scale), mask=dims >= 2 * HALF)
+    tl.store(dst + rot, _to_dst_dtype(o1, dst, scale))
+    tl.store(dst + HALF + rot, _to_dst_dtype(o2, dst, scale))
 
 
 @triton.jit(
@@ -109,7 +109,7 @@ def _store_rotated(dst, y, o1, o2, scale_ptr):
         "num_k_work",
     ]
 )
-def _qsa_pre_indexer_kernel(
+def _qsa_prepare_kernel(
     q_ptr,
     q_stride_token,
     k_ptr,
@@ -164,8 +164,8 @@ def _qsa_pre_indexer_kernel(
     main_cache_stride_token,
     main_cache_stride_head,
     main_slots_ptr,
-    main_k_scale_ptr,
-    main_v_scale_ptr,
+    main_k_scale,
+    main_v_scale,
     MAIN_HQ: tl.constexpr,
     MAIN_HK: tl.constexpr,
     MAIN_D: tl.constexpr,
@@ -224,9 +224,9 @@ def _qsa_pre_indexer_kernel(
                     + (slot % MAIN_PAGE_SIZE) * main_cache_stride_token
                     + kv_head * main_cache_stride_head
                 )
-                _store_rotated(dst, y, o1, o2, main_k_scale_ptr)
+                _store_rotated(dst, y, o1, o2, main_k_scale)
                 v = tl.load(src + MAIN_HK * MAIN_D + dims)
-                tl.store(dst + MAIN_D + dims, _to_dst_dtype(v, dst, main_v_scale_ptr))
+                tl.store(dst + MAIN_D + dims, _to_dst_dtype(v, dst, main_v_scale))
         else:
             out = (token * MAIN_HQ + head) * MAIN_D
             _store_rotated(main_q_out_ptr + out, y, o1, o2, None)
@@ -499,7 +499,7 @@ def _qsa_pre_indexer_kernel(
                     tl.store(tail + 2, pos_w.to(tl.int64), mask=valid_slot)
 
 
-def qsa_pre_indexer(
+def qsa_prepare(
     q: torch.Tensor,
     k: torch.Tensor,
     positions: torch.Tensor,
@@ -524,24 +524,24 @@ def qsa_pre_indexer(
     main_q_norm_weight: torch.Tensor,
     main_k_norm_weight: torch.Tensor,
     main_eps: float,
-    main_q_out: torch.Tensor,
-    main_gate_out: torch.Tensor,
     main_kv_cache: torch.Tensor,
     main_slot_mapping: torch.Tensor,
-    main_k_scale: torch.Tensor,
-    main_v_scale: torch.Tensor,
-) -> None:
+    main_k_scale: float,
+    main_v_scale: float,
+) -> tuple[torch.Tensor, torch.Tensor]:
     """Normalize Q, compress K, then update the circular raw state.
 
-    The same launch prepares the main attention: RMSNorm and RoPE of the Q/K
-    heads in ``main_qkv`` ([tokens, (2 * q_heads + 2 * kv_heads) * head_dim]),
-    the gate copy, and the K/V write into ``main_kv_cache``
-    ([blocks, page_size, kv_heads, 2 * head_dim]), BF16 or FP8 scaled by
-    ``main_k_scale``/``main_v_scale`` like ``reshape_and_cache_flash``.
+    Also prepares the main attention (QK-norm/RoPE, gate copy, K/V cache write)
+    and returns its Q and gate.
     """
     num_tokens = q.shape[0]
+    main_head_dim = main_kv_cache.shape[-1] // 2
+    num_main_kv_heads = main_kv_cache.shape[2]
+    num_main_q_heads = main_qkv.shape[1] // (2 * main_head_dim) - num_main_kv_heads
+    main_q_out = main_qkv.new_empty(num_tokens, num_main_q_heads, main_head_dim)
+    main_gate_out = torch.empty_like(main_q_out)
     if num_tokens == 0:
-        return
+        return main_q_out, main_gate_out
     num_q_heads, head_dim = q_out.shape[1:]
     assert cos_sin_cache.shape[-1] * 2 == head_dim
     assert q.shape == (num_tokens, num_q_heads * head_dim)
@@ -566,12 +566,8 @@ def qsa_pre_indexer(
         pos_stride_axis, pos_stride_token = 0, positions.stride(0)
     section = mrope_section if mrope_section is not None else (0, 0, 0)
     assert len(section) == 3
-    _, num_main_q_heads, main_head_dim = main_q_out.shape
-    num_main_kv_heads = main_kv_cache.shape[2]
     qkv_width = 2 * (num_main_q_heads + num_main_kv_heads) * main_head_dim
     assert main_qkv.shape == (num_tokens, qkv_width) and main_qkv.is_contiguous()
-    assert main_q_out.is_contiguous() and main_gate_out.is_contiguous()
-    assert main_kv_cache.shape[-1] == 2 * main_head_dim
     assert main_slot_mapping.shape == (num_tokens,)
 
     if num_tokens <= 4096:
@@ -581,7 +577,7 @@ def qsa_pre_indexer(
     num_k_work = k_work_metadata.shape[0]
     num_q_work = triton.cdiv(num_tokens, TILE_T_Q) * triton.cdiv(num_q_heads, TILE_H_Q)
     num_main_work = num_tokens * (num_main_q_heads + num_main_kv_heads)
-    _qsa_pre_indexer_kernel[(num_k_work + num_q_work + num_main_work,)](
+    _qsa_prepare_kernel[(num_k_work + num_q_work + num_main_work,)](
         q,
         q.stride(0),
         k,
@@ -636,14 +632,15 @@ def qsa_pre_indexer(
         main_cache_stride_token=main_kv_cache.stride(1),
         main_cache_stride_head=main_kv_cache.stride(2),
         main_slots_ptr=main_slot_mapping,
-        main_k_scale_ptr=main_k_scale,
-        main_v_scale_ptr=main_v_scale,
+        main_k_scale=main_k_scale,
+        main_v_scale=main_v_scale,
         MAIN_HQ=num_main_q_heads,
         MAIN_HK=num_main_kv_heads,
         MAIN_D=main_head_dim,
         MAIN_PAGE_SIZE=main_kv_cache.shape[1],
         num_warps=1,
     )
+    return main_q_out, main_gate_out
 
 
-__all__ = ["qsa_pre_indexer"]
+__all__ = ["qsa_prepare"]
