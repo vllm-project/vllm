@@ -55,6 +55,10 @@ tensor-parallel ranks; the hot-buffer counters are sampled from the device
 every 2000 worker steps. Note that `vllm:hisparse_host_blocks_used` counts
 blocks backing live or cached prefixes — evictable cached blocks are
 included, since eviction reclaims them on demand.
+With `--kv-cache-metrics`, the `vllm:hisparse_host_block_*_seconds`
+histograms sample host-pool block residency (lifetime, idle time before
+eviction, reuse gaps), mirroring the device `vllm:kv_block_*_seconds`
+histograms, which cover only the GPU pool.
 
 --8<-- "gen:metrics-hisparse"
 

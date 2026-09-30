@@ -103,7 +103,7 @@ class HiSparseConnectorScheduler:
         self.coordinator = coordinator
 
     def get_kv_connector_stats(self) -> HiSparseKVConnectorStats:
-        """Sample the host tier's level gauges for this stats interval."""
+        """Sample the host tier's gauges and residency for this stats interval."""
         if self.coordinator is not None:
             usage = self.coordinator.host_usage()
             if usage is not None:
@@ -111,6 +111,9 @@ class HiSparseConnectorScheduler:
                 self.stats.record_host_usage(
                     used, total, self.coordinator.num_pending_spills()
                 )
+            self.stats.record_host_evictions(
+                self.coordinator.drain_host_eviction_events()
+            )
         stats = self.stats
         self.stats = HiSparseKVConnectorStats()
         return stats

@@ -27,6 +27,7 @@ from vllm.v1.kv_cache_interface import (
     HiSparseResidentSpec,
     KVCacheConfig,
 )
+from vllm.v1.metrics.stats import KVCacheEvictionEvent
 from vllm.v1.request import Request
 
 if TYPE_CHECKING:
@@ -244,6 +245,13 @@ class HiSparseCoordinator:
             return None
         total = pool.num_gpu_blocks - 1  # Exclude the null block.
         return pool.num_gpu_blocks - pool.get_num_free_blocks() - 1, total
+
+    def drain_host_eviction_events(self) -> list[KVCacheEvictionEvent]:
+        """Residency samples of host blocks evicted since the last drain."""
+        pool = self.get_host_block_pool()
+        if pool is None or pool.metrics_collector is None:
+            return []
+        return pool.metrics_collector.drain_events()
 
     def num_pending_spills(self) -> int:
         return len(self.pending_spills)

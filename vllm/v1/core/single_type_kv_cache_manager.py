@@ -10,6 +10,7 @@ from vllm.distributed.kv_events import MEDIUM_CPU
 from vllm.logger import init_logger
 from vllm.utils.math_utils import cdiv
 from vllm.v1.core.block_pool import BlockPool
+from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
 from vllm.v1.core.kv_cache_utils import (
     BlockHashList,
     BlockHashListWithBlockSize,
@@ -2235,7 +2236,13 @@ class HiSparseSourceManager(FullAttentionManager):
             enable_caching=self.enable_caching and self.kv_cache_spec.prefix_cacheable,
             hash_block_size=device_pool.hash_block_size,
             enable_kv_cache_events=device_pool.enable_kv_cache_events,
-            metrics_collector=device_pool.metrics_collector,
+            # Host blocks are numbered independently of device ones, so they
+            # sample into their own collector, reported as HiSparse metrics.
+            metrics_collector=(
+                KVCacheMetricsCollector(device_pool.metrics_collector.sample_rate)
+                if device_pool.metrics_collector is not None
+                else None
+            ),
             medium=MEDIUM_CPU,
             event_owner=device_pool,
         )

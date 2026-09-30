@@ -12,6 +12,8 @@ from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
     PromMetric,
     PromMetricT,
 )
+from vllm.v1.metrics.buckets import histogram_buckets
+from vllm.v1.metrics.stats import KVCacheEvictionEvent
 from vllm.v1.metrics.utils import create_metric_per_engine
 
 _HISPARSE_LEVEL_KEYS = frozenset(
@@ -44,6 +46,9 @@ class HiSparseKVConnectorStats(KVConnectorStats):
             "host_blocks_total": [],
             "host_blocks_usage": [],
             "pending_spills": [],
+            "host_block_lifetime_seconds": [],
+            "host_block_idle_before_evict_seconds": [],
+            "host_block_reuse_gap_seconds": [],
         }
 
     def record_snapshot(self, hits: int, misses: int, host_to_device_bytes: int):
@@ -57,6 +62,13 @@ class HiSparseKVConnectorStats(KVConnectorStats):
         self.data["host_blocks_total"].append(total)
         self.data["host_blocks_usage"].append(used / total if total else 0.0)
         self.data["pending_spills"].append(pending_spills)
+
+    def record_host_evictions(self, events: list[KVCacheEvictionEvent]):
+        """Record residency samples of evicted host blocks."""
+        for event in events:
+            self.data["host_block_lifetime_seconds"].append(event.lifetime_seconds)
+            self.data["host_block_idle_before_evict_seconds"].append(event.idle_seconds)
+            self.data["host_block_reuse_gap_seconds"].extend(event.reuse_gaps_seconds)
 
     def aggregate(self, other: KVConnectorStats) -> KVConnectorStats:
         if not other.is_empty():
@@ -171,6 +183,48 @@ class HiSparsePromMetrics(KVConnectorPromMetrics):
             ),
         }
 
+        # Host-pool counterparts of the device vllm:kv_block_*_seconds
+        # histograms, sampled only with --kv-cache-metrics.
+        residency_buckets = histogram_buckets("kv_cache_residency")
+        histogram_host_block_lifetime = self._histogram_cls(
+            name="vllm:hisparse_host_block_lifetime_seconds",
+            documentation=(
+                "Histogram of HiSparse host KV block lifetime from allocation to "
+                "eviction. Sampled metrics (controlled by --kv-cache-metrics-sample)."
+            ),
+            buckets=residency_buckets,
+            labelnames=labelnames,
+        )
+        histogram_host_block_idle_before_evict = self._histogram_cls(
+            name="vllm:hisparse_host_block_idle_before_evict_seconds",
+            documentation=(
+                "Histogram of HiSparse host KV block idle time before eviction. "
+                "Sampled metrics (controlled by --kv-cache-metrics-sample)."
+            ),
+            buckets=residency_buckets,
+            labelnames=labelnames,
+        )
+        histogram_host_block_reuse_gap = self._histogram_cls(
+            name="vllm:hisparse_host_block_reuse_gap_seconds",
+            documentation=(
+                "Histogram of time gaps between consecutive HiSparse host KV block "
+                "accesses. Sampled metrics (controlled by --kv-cache-metrics-sample)."
+            ),
+            buckets=residency_buckets,
+            labelnames=labelnames,
+        )
+        self.hisparse_histograms: dict[str, Any] = {
+            "host_block_lifetime_seconds": create_metric_per_engine(
+                histogram_host_block_lifetime, self.per_engine_labelvalues
+            ),
+            "host_block_idle_before_evict_seconds": create_metric_per_engine(
+                histogram_host_block_idle_before_evict, self.per_engine_labelvalues
+            ),
+            "host_block_reuse_gap_seconds": create_metric_per_engine(
+                histogram_host_block_reuse_gap, self.per_engine_labelvalues
+            ),
+        }
+
     def observe(self, transfer_stats_data: dict[str, Any], engine_idx: int = 0):
         for name, counter in self.hisparse_counters.items():
             for value in transfer_stats_data.get(name, []):
@@ -180,3 +234,6 @@ class HiSparsePromMetrics(KVConnectorPromMetrics):
             if values:
                 # Level values: each observation replaces the previous one.
                 gauge[engine_idx].set(values[-1])
+        for name, histogram in self.hisparse_histograms.items():
+            for value in transfer_stats_data.get(name, []):
+                histogram[engine_idx].observe(value)

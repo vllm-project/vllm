@@ -156,3 +156,47 @@ def test_prom_metrics_observe_host_usage_gauges():
     assert created["vllm:hisparse_host_blocks_total"].set_values == [8]
     assert created["vllm:hisparse_host_blocks_usage"].set_values == [0.75]
     assert created["vllm:hisparse_pending_spills"].set_values == [3]
+
+
+def test_prom_metrics_observe_host_residency_histograms():
+    from types import SimpleNamespace
+    from typing import Any
+
+    from prometheus_client import Counter, Gauge, Histogram
+
+    from vllm.distributed.kv_transfer.kv_connector.v1.hisparse.stats import (
+        HiSparsePromMetrics,
+    )
+    from vllm.v1.metrics.stats import KVCacheEvictionEvent
+
+    created: dict[str, Any] = {}
+
+    class _FakeMetric:
+        def __init__(self, **kwargs: Any):
+            self.observed: list[float] = []
+            created[kwargs["name"]] = self
+
+        def labels(self, *labelvalues: object) -> "_FakeMetric":
+            return self
+
+        def observe(self, value: float) -> None:
+            self.observed.append(value)
+
+    prom = HiSparsePromMetrics(
+        vllm_config=SimpleNamespace(kv_transfer_config=None),
+        metric_types={Gauge: _FakeMetric, Counter: _FakeMetric, Histogram: _FakeMetric},
+        labelnames=["model_name"],
+        per_engine_labelvalues={0: ["model"]},
+    )
+    first = HiSparseKVConnectorStats()
+    first.record_host_evictions([KVCacheEvictionEvent(5.0, 2.0, (1.0, 2.0))])
+    second = HiSparseKVConnectorStats()
+    second.record_host_evictions([KVCacheEvictionEvent(3.0, 3.0, ())])
+    prom.observe(first.aggregate(second).to_dict())
+
+    assert created["vllm:hisparse_host_block_lifetime_seconds"].observed == [5.0, 3.0]
+    assert created["vllm:hisparse_host_block_idle_before_evict_seconds"].observed == [
+        2.0,
+        3.0,
+    ]
+    assert created["vllm:hisparse_host_block_reuse_gap_seconds"].observed == [1.0, 2.0]
