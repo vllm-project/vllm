@@ -660,10 +660,13 @@ class HiSparseCoordinator:
         return command
 
     def has_pending_reclamation(self) -> bool:
-        """Whether an in-flight spill will free GPU blocks on completion."""
+        """Whether an in-flight spill will free GPU or host blocks on completion."""
         return any(
-            pending.page[0] in self.request_states
-            and self._can_read_from_host(pending.page[0])
+            pending.host_block.ref_cnt == 1
+            or (
+                pending.page[0] in self.request_states
+                and self._can_read_from_host(pending.page[0])
+            )
             for pending in self.pending_spills.values()
         )
 
