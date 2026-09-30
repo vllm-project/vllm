@@ -58,7 +58,7 @@ from vllm.v1.core.kv_cache_utils import (
     to_event_extra_keys,
 )
 from vllm.v1.hisparse.layout import (
-    _size_hisparse_host_pool,
+    create_hisparse_layout,
     get_hisparse_kv_cache_groups,
 )
 from vllm.v1.kv_cache_interface import (
@@ -230,16 +230,14 @@ def test_hisparse_host_pool_must_fit_max_model_len(monkeypatch, extra_blocks, ok
     )
     host_page = specs["model.layers.0.self_attn"].page_size_bytes
     host_budget = (4 + extra_blocks) * host_page
-    source_group = get_hisparse_kv_cache_groups(config, specs)[0]
+    groups = get_hisparse_kv_cache_groups(config, specs)
 
     if ok:
-        host_num_blocks, _, _ = _size_hisparse_host_pool(
-            config, source_group, host_budget
-        )
-        assert host_num_blocks == 4 + extra_blocks
+        layout = create_hisparse_layout(config, groups, host_budget=host_budget)
+        assert layout.host_num_blocks == 4 + extra_blocks
     else:
         with pytest.raises(ValueError, match="increase host_pool_gib"):
-            _size_hisparse_host_pool(config, source_group, host_budget)
+            create_hisparse_layout(config, groups, host_budget=host_budget)
 
 
 @pytest.mark.parametrize(
