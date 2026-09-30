@@ -25,6 +25,11 @@ source selection, transfer, and installation.
 4. After a successful update, `finish_weight_update` releases the staged handle.
    The orchestrator can then resume inference.
 
+Initialize the backend before starting an update session, and send exactly one
+version per session. Invalid transitions must raise; an orchestrator must keep
+inference paused after an update error and retry with a new session only after
+cleanup. An error does not roll back weights that were already applied.
+
 `ModelExpressTrainerClient` is an optional publisher. Custom integrations can
 manage weight-version resources directly through the ModelExpress server's
 Refit API. For S3, create a STAGING version with the correct model, payload
@@ -43,8 +48,14 @@ vLLM's `WeightTransferEngine` interface.
 
 ## Inference Side
 
-Install the ModelExpress Python package with `modelexpress_rl` support on every
-worker. The backend is registered natively and loaded only when selected;
+Install ModelExpress commit `3dc4974f95de157c3ec8c1a31899e4685baa8826` on
+every worker:
+
+```bash
+uv pip install "modelexpress @ git+https://github.com/ai-dynamo/modelexpress.git@3dc4974f95de157c3ec8c1a31899e4685baa8826#subdirectory=modelexpress_client/python"
+```
+
+The backend is registered natively and loaded only when selected;
 `VLLM_PLUGINS=modelexpress` is not required for weight transfer. If the plugin
 is enabled, it preserves the native registration and uses the same engine
 implementation.

@@ -6,10 +6,13 @@ Unit tests for engine classes (parsing, validation, registry).
 Integration tests for NCCL and IPC weight transfer between processes using Ray.
 """
 
+import builtins
 import pickle
+import runpy
 import threading
 import time
 from contextlib import nullcontext
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -2012,6 +2015,59 @@ def test_sparse_nccl_trainer_non_sender_skips_client():
 # --- Optional ModelExpress Client Lifecycle ---
 
 
+def _import_modelexpress_shim():
+    path = (
+        Path(__file__).parents[2]
+        / "vllm/distributed/weight_transfer/modelexpress_engine.py"
+    )
+    runpy.run_path(str(path), run_name="_test_modelexpress_shim")
+
+
+@pytest.mark.parametrize(
+    "missing_module",
+    [
+        "modelexpress",
+        "modelexpress_rl",
+        "modelexpress_rl.inference",
+        "modelexpress_rl.inference.engines",
+        "modelexpress_rl.inference.engines.vllm",
+        "modelexpress_rl.inference.engines.vllm.weight_transfer_engine",
+    ],
+)
+def test_modelexpress_missing_backend_explains_source_install(
+    monkeypatch, missing_module
+):
+    original_import = builtins.__import__
+    error = ModuleNotFoundError(name=missing_module)
+
+    def import_without_backend(name, *args, **kwargs):
+        if name == "modelexpress":
+            raise error
+        return original_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", import_without_backend)
+    with pytest.raises(ImportError, match="modelexpress_client/python") as exc_info:
+        _import_modelexpress_shim()
+    assert exc_info.value.__cause__ is error
+    assert "uv pip install" in str(exc_info.value)
+
+
+@pytest.mark.parametrize("missing_module", ["grpc", "modelexpress.internal_dependency"])
+def test_modelexpress_preserves_transitive_import_errors(monkeypatch, missing_module):
+    original_import = builtins.__import__
+    error = ModuleNotFoundError(name=missing_module)
+
+    def import_without_dependency(name, *args, **kwargs):
+        if name == "modelexpress":
+            raise error
+        return original_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", import_without_dependency)
+    with pytest.raises(ModuleNotFoundError) as exc_info:
+        _import_modelexpress_shim()
+    assert exc_info.value is error
+
+
 @pytest.fixture
 def mx_client(monkeypatch):
     client_module = pytest.importorskip("modelexpress_rl.inference.client")
@@ -2035,6 +2091,91 @@ def _make_modelexpress_engine():
         torch.device("cpu"),
         torch.nn.Linear(2, 2),
     )
+
+
+@pytest.fixture
+def mx_worker(mx_client, monkeypatch):
+    from vllm.v1.worker import gpu_worker
+
+    monkeypatch.setattr(gpu_worker, "set_current_vllm_config", lambda _: nullcontext())
+    worker = object.__new__(gpu_worker.Worker)
+    worker.weight_transfer_engine = _make_modelexpress_engine()
+    worker.vllm_config = worker.weight_transfer_engine.vllm_config
+    worker._weight_update_active = False
+    worker._weight_update_is_draft = False
+    worker.model_runner = MagicMock()
+    return worker
+
+
+def test_modelexpress_worker_rejects_updates_before_initialization(
+    mx_worker, mx_client
+):
+    with pytest.raises(RuntimeError, match="not initialized"):
+        mx_worker.start_weight_update()
+    with pytest.raises(RuntimeError, match="start_weight_update must be called"):
+        mx_worker.update_weights({"version_id": "version-a"})
+    with pytest.raises(RuntimeError, match="without a matching"):
+        mx_worker.finish_weight_update()
+    mx_client.stage_weight.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "second_update, error_type",
+    [
+        ({"version_id": "version-a"}, RuntimeError),
+        ({"version_id": "version-b"}, RuntimeError),
+        ({"version_id": ""}, ValueError),
+        ({"version_id": None}, ValueError),
+        ({}, ValueError),
+    ],
+)
+def test_modelexpress_worker_recovers_after_rejected_update(
+    mx_worker, mx_client, second_update, error_type
+):
+    """A rejected payload must release A so a fresh session can actually install B."""
+    mx_worker.weight_transfer_engine.init_transfer_engine(
+        mx_worker.weight_transfer_engine.parse_init_info({})
+    )
+    staged_a = SimpleNamespace(version_id="version-a", metrics={}, release=MagicMock())
+    staged_b = SimpleNamespace(version_id="version-b", metrics={}, release=MagicMock())
+    mx_client.stage_weight.side_effect = [staged_a, staged_b]
+    mx_client.apply_weight.return_value = {}
+    mx_worker.start_weight_update()
+    mx_worker.update_weights({"version_id": "version-a"})
+
+    with pytest.raises(error_type):
+        mx_worker.update_weights(second_update)
+    staged_a.release.assert_called_once_with()
+    mx_client.apply_weight.assert_called_once_with(staged_a)
+
+    mx_worker.start_weight_update()
+    mx_worker.update_weights({"version_id": "version-b"})
+    mx_worker.finish_weight_update()
+
+    assert [
+        call.kwargs["version"].version_id
+        for call in mx_client.stage_weight.call_args_list
+    ] == ["version-a", "version-b"]
+    mx_client.apply_weight.assert_called_with(staged_b)
+    staged_b.release.assert_called_once_with()
+
+
+def test_modelexpress_worker_can_retry_failed_finish(mx_worker, mx_client):
+    mx_worker.weight_transfer_engine.init_transfer_engine(
+        mx_worker.weight_transfer_engine.parse_init_info({})
+    )
+    staged = mx_client.stage_weight.return_value
+    staged.release.side_effect = [RuntimeError("release failed"), None]
+    mx_worker.start_weight_update()
+    mx_worker.update_weights({"version_id": "version-a"})
+
+    with pytest.raises(RuntimeError, match="release failed"):
+        mx_worker.finish_weight_update()
+    mx_worker.finish_weight_update()
+
+    assert staged.release.call_count == 2
+    assert not mx_worker._weight_update_active
+    mx_worker.start_weight_update()
 
 
 def test_native_engine_applies_and_releases_exact_versions(mx_client):
