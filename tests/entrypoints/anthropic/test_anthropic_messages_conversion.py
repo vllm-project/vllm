@@ -359,7 +359,7 @@ class TestToolResultContent:
         assert isinstance(content, list)
         image = content[0]
         assert image["type"] == "image_url"
-        assert image["image_url"]["url"] == ("data:image/jpeg;base64,QUFB")
+        assert image["image_url"]["url"] == "data:image/jpeg;base64,QUFB"
 
     def test_tool_result_with_multiple_images(self):
         request = self._make_tool_result_request(

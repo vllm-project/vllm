@@ -77,7 +77,7 @@ def test_chat_forwards_mm_processor_kwargs(monkeypatch: pytest.MonkeyPatch) -> N
     )
 
     assert outputs == ["ok"]
-    assert _run_chat.call_args.kwargs["mm_processor_kwargs"] == (mm_processor_kwargs)
+    assert _run_chat.call_args.kwargs["mm_processor_kwargs"] == mm_processor_kwargs
 
 
 def test_enqueue_chat_forwards_mm_processor_kwargs(

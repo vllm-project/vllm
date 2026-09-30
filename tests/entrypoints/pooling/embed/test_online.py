@@ -12,7 +12,10 @@ import requests
 import torch
 import torch.nn.functional as F
 
-from tests.models.language.pooling.embed_utils import run_embedding_correctness_test
+from tests.models.language.pooling.embed_utils import (
+    float_embeddings,
+    run_embedding_correctness_test,
+)
 from tests.models.utils import check_embeddings_close
 from tests.utils import RemoteOpenAIServer
 from vllm.entrypoints.chat_utils import ChatCompletionMessageParam
@@ -146,10 +149,7 @@ async def test_completion_request(
     assert embeddings.usage.prompt_tokens == len(input_tokens)
     assert embeddings.usage.total_tokens == len(input_tokens)
 
-    vllm_outputs = []
-    for d in embeddings.data:
-        assert isinstance(d.embedding, list)
-        vllm_outputs.append(d.embedding)
+    vllm_outputs = float_embeddings(embeddings)
     run_embedding_correctness_test(hf_model, [input_text], vllm_outputs)
 
     # test input: list[int]
@@ -169,10 +169,7 @@ async def test_completion_request(
     assert embeddings.usage.prompt_tokens == len(input_tokens)
     assert embeddings.usage.total_tokens == len(input_tokens)
 
-    vllm_outputs = []
-    for d in embeddings.data:
-        assert isinstance(d.embedding, list)
-        vllm_outputs.append(d.embedding)
+    vllm_outputs = float_embeddings(embeddings)
     run_embedding_correctness_test(hf_model, [input_text], vllm_outputs)
 
 
@@ -201,10 +198,7 @@ async def test_completion_request_batched(
     assert embeddings.usage.prompt_tokens == len(input_tokens) * N
     assert embeddings.usage.total_tokens == len(input_tokens) * N
 
-    vllm_outputs = []
-    for d in embeddings.data:
-        assert isinstance(d.embedding, list)
-        vllm_outputs.append(d.embedding)
+    vllm_outputs = float_embeddings(embeddings)
     run_embedding_correctness_test(hf_model, input_texts, vllm_outputs)
 
     # test list[list[int]]
@@ -224,10 +218,7 @@ async def test_completion_request_batched(
     assert embeddings.usage.prompt_tokens == len(input_tokens) * N
     assert embeddings.usage.total_tokens == len(input_tokens) * N
 
-    vllm_outputs = []
-    for d in embeddings.data:
-        assert isinstance(d.embedding, list)
-        vllm_outputs.append(d.embedding)
+    vllm_outputs = float_embeddings(embeddings)
     run_embedding_correctness_test(hf_model, input_texts, vllm_outputs)
 
 
@@ -394,17 +385,9 @@ async def test_chat_request(
     assert completion_embeddings.id is not None
     assert chat_embeddings.created <= completion_embeddings.created
     # Use tolerance-based comparison for embeddings
-    chat_vectors = []
-    for d in chat_embeddings.data:
-        assert isinstance(d.embedding, list)
-        chat_vectors.append(d.embedding)
-    completion_vectors = []
-    for d in completion_embeddings.data:
-        assert isinstance(d.embedding, list)
-        completion_vectors.append(d.embedding)
     check_embeddings_close(
-        embeddings_0_lst=chat_vectors,
-        embeddings_1_lst=completion_vectors,
+        embeddings_0_lst=float_embeddings(chat_embeddings),
+        embeddings_1_lst=float_embeddings(completion_embeddings),
         name_0="chat",
         name_1="completion",
     )
