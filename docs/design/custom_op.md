@@ -50,9 +50,7 @@ RotaryEmbedding -> existing CustomOp dispatch -> spec.rope(...) -> existing kern
 an inheritance hierarchy. CPU and CUDA bind the existing custom op; ROCm
 selects AITER or the existing custom op when the layer is constructed.
 Existing layers keep their selection if AITER settings are refreshed.
-XPU retains its native fallback for `key=None` and reports the effective
-implementation and reason once during eager execution. Logging is kept out
-of compiled graphs.
+XPU retains its native fallback for `key=None`.
 Platform policy stays in the existing `platforms/{cpu,cuda,rocm,xpu}.py` files.
 
 The existing `CustomOp` enable/disable behavior, per-device entry points,

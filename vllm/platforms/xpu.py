@@ -146,11 +146,6 @@ class XPUPlatform(Platform):
         is_neox_style: bool,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         if key is None:
-            if not torch.compiler.is_compiling():
-                logger.warning_once(
-                    "rotary_embedding: using native RoPE because the XPU custom "
-                    "kernel does not support key=None."
-                )
             return native_rope(
                 positions,
                 query,

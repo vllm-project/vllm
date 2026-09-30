@@ -32,15 +32,14 @@ class RotaryEmbeddingCompileModule(torch.nn.Module):
         )
 
     def forward(
-        self, positions: torch.Tensor, query: torch.Tensor, key: torch.Tensor | None
+        self, positions: torch.Tensor, query: torch.Tensor, key: torch.Tensor
     ) -> torch.Tensor:
         q_rot, k_rot = self.rotary_emb(positions, query, key)
-        return q_rot if k_rot is None else q_rot + k_rot
+        return q_rot + k_rot
 
 
 @pytest.mark.skipif(current_platform.is_cpu(), reason="Requires GPU for torch.compile")
-@pytest.mark.parametrize("use_key", [True, False])
-def test_rotary_embedding_torch_compile_with_custom_op(monkeypatch, use_key):
+def test_rotary_embedding_torch_compile_with_custom_op(monkeypatch):
     # Ensure env toggles take effect for this test only.
     # The bytecode hook is required to detect buffer mutation in compiled code,
     # and AOT compile bypasses that hook entirely.
@@ -51,7 +50,7 @@ def test_rotary_embedding_torch_compile_with_custom_op(monkeypatch, use_key):
     device = DEVICE_TYPE
     positions = torch.arange(16, device=device)
     query = torch.randn(16, 32, device=device, dtype=torch.bfloat16)
-    key = torch.randn(16, 32, device=device, dtype=torch.bfloat16) if use_key else None
+    key = torch.randn(16, 32, device=device, dtype=torch.bfloat16)
 
     vllm_config = VllmConfig(
         model_config=ModelConfig(dtype=torch.bfloat16),
