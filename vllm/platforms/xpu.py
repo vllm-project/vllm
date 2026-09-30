@@ -17,6 +17,8 @@ from vllm.logger import init_logger
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 from .interface import DeviceCapability, Platform, PlatformEnum
+from .spec import PlatformSpec
+from .spec.rotary_embedding import custom_rope, native_rope
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -128,6 +130,48 @@ class XPUPlatform(Platform):
         "modelopt",
         "compressed-tensors",
     ]
+
+    @property
+    def spec(self) -> PlatformSpec:
+        return PlatformSpec(rope=self._rope)
+
+    @staticmethod
+    def _rope(
+        positions: torch.Tensor,
+        query: torch.Tensor,
+        key: torch.Tensor | None,
+        head_size: int,
+        rotary_dim: int,
+        cos_sin_cache: torch.Tensor,
+        is_neox_style: bool,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        if key is None:
+            if not torch.compiler.is_compiling():
+                logger.warning_once(
+                    "rotary_embedding: using native RoPE because the XPU custom "
+                    "kernel does not support key=None."
+                )
+            return native_rope(
+                positions,
+                query,
+                key,
+                head_size,
+                rotary_dim,
+                cos_sin_cache,
+                is_neox_style,
+            )
+        from vllm import _custom_ops as ops
+
+        return custom_rope(
+            ops.rotary_embedding,
+            positions,
+            query,
+            key,
+            head_size,
+            rotary_dim,
+            cos_sin_cache,
+            is_neox_style,
+        )
 
     @classmethod
     def import_kernels(cls) -> None:

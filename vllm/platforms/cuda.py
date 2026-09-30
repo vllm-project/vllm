@@ -11,7 +11,7 @@ import os
 import platform
 from collections.abc import Callable
 from datetime import timedelta
-from functools import cache, lru_cache, wraps
+from functools import cache, lru_cache, partial, wraps
 from typing import TYPE_CHECKING, NamedTuple, TypeVar
 
 import torch
@@ -30,6 +30,8 @@ from vllm.utils.import_utils import import_pynvml
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 from .interface import DeviceCapability, Platform, PlatformEnum, in_wsl
+from .spec import PlatformSpec
+from .spec.rotary_embedding import custom_rope
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -232,6 +234,12 @@ class CudaPlatformBase(Platform):
     ray_noset_device_env_vars: list[str] = [
         "RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES",
     ]
+
+    @property
+    def spec(self) -> PlatformSpec:
+        from vllm import _custom_ops as ops
+
+        return PlatformSpec(rope=partial(custom_rope, ops.rotary_embedding))
 
     @classmethod
     def import_kernels(cls) -> None:

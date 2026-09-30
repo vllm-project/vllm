@@ -13,7 +13,7 @@ from vllm.config import (
     set_current_vllm_config,
 )
 from vllm.config.compilation import CompilationMode, CUDAGraphMode
-from vllm.model_executor.layers.rotary_embedding import get_rope
+from vllm.model_executor.layers.rotary_embedding import RotaryEmbedding, get_rope
 from vllm.platforms import current_platform
 
 DEVICE_TYPE = current_platform.device_type
@@ -68,3 +68,19 @@ def test_rotary_embedding_torch_compile_with_custom_op(monkeypatch):
         model(positions, query, key)
         assert model._compiled_bytecode is not None
         assert "update" not in model._compiled_bytecode.co_names
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+@pytest.mark.parametrize("use_key", [False, True])
+def test_rope_spec_fullgraph(default_vllm_config, enabled, use_key):
+    """Spec calls, including the Q-only fallback, must not introduce graph breaks."""
+    default_vllm_config.compilation_config.custom_ops = (
+        ["none", "+rotary_embedding"] if enabled else ["none"]
+    )
+    rope = RotaryEmbedding(64, 32, 16, 10000, True, torch.float32).to(DEVICE_TYPE)
+    positions = torch.tensor([1, 2], device=DEVICE_TYPE)
+    query = torch.randn(2, 128, device=DEVICE_TYPE)
+    key = torch.randn_like(query) if use_key else None
+    expected = rope.forward_native(positions, query, key)
+    compiled = torch.compile(rope, backend="inductor", fullgraph=True)
+    torch.testing.assert_close(compiled(positions, query, key), expected)

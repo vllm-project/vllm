@@ -35,6 +35,37 @@ By default, if `compilation_config.backend == "inductor"` and `compilation_confi
 
     Note that this `enforce_enable` mechanism will be removed after we add a separate `compilation_config` for multi-modal part.
 
+### Platform policy: standard RoPE
+
+Standard cached RoPE demonstrates the boundary proposed in
+[the platform specification RFC](https://github.com/vllm-project/vllm/issues/57649).
+The layer owns frequencies and cache buffers; `platform.spec` supplies the
+operation and any alternate cache dtype needed for compilation.
+
+```text
+RotaryEmbedding -> existing CustomOp dispatch -> spec.rope(...) -> existing kernel
+```
+
+`PlatformSpec` is a small immutable value, not an implementation registry or
+an inheritance hierarchy. CPU and CUDA bind the existing custom op; ROCm
+selects AITER or the existing custom op when the layer is constructed.
+Existing layers keep their selection if AITER settings are refreshed.
+XPU retains its native fallback for `key=None` and reports the effective
+implementation and reason once during eager execution. Logging is kept out
+of compiled graphs.
+Platform policy stays in the existing `platforms/{cpu,cuda,rocm,xpu}.py` files.
+
+The existing `CustomOp` enable/disable behavior, per-device entry points,
+`forward_static` reference, and OOT `forward_oot` overrides are retained.
+Disabled operations use `forward_native`, including for OOT replacements.
+Specialized RoPE variants and their legacy FlashInfer paths are not migrated.
+
+This is not a replacement for [vLLM IR](vllm_ir.md): spec owns platform
+compatibility policy, while IR owns operator representation and compiler
+integration. This slice reuses the current RoPE custom ops and fusion patterns;
+it adds neither another kernel registry nor a general configuration-reporting
+framework.
+
 ## How to Customise Your Configuration for CustomOp
 
 vLLM also offers fine-grained control over which custom ops to enable or disable for users, by manually passing a `--compilation_config.custom_ops '["..."]'` when launching a server.
