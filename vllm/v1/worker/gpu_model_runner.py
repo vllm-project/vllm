@@ -4430,7 +4430,6 @@ class GPUModelRunner(
             self.maybe_get_kv_connector_output(
                 scheduler_output,
                 defer_finalize=defer_kv_connector_finalize,
-                model_runner=self,
             ) as kv_connector_output,
         ):
             model_output = self._model_forward(
