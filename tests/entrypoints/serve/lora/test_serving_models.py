@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from http import HTTPStatus
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -97,6 +97,23 @@ async def test_load_lora_adapter_duplicate():
     assert response.error.type == "InvalidUserInput"
     assert response.error.code == HTTPStatus.BAD_REQUEST
     assert len(serving_models.lora_requests) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("load_inplace", [False, True])
+async def test_load_lora_adapter_base_model_name(load_inplace: bool):
+    """A LoRA named after a served model would shadow it for all requests."""
+    serving_models = await _async_serving_models_init()
+    request = LoadLoRAAdapterRequest(
+        lora_name=MODEL_NAME, lora_path="/path/to/adapter", load_inplace=load_inplace
+    )
+    response = await serving_models.load_lora_adapter(request)
+    assert isinstance(response, ErrorResponse)
+    assert response.error.type == "InvalidUserInput"
+    assert response.error.code == HTTPStatus.BAD_REQUEST
+    assert len(serving_models.lora_requests) == 0
+    assert isinstance(serving_models.engine_client.add_lora, AsyncMock)
+    serving_models.engine_client.add_lora.assert_not_called()
 
 
 @pytest.mark.asyncio
