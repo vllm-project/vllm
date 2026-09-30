@@ -138,6 +138,7 @@ impl InProcCoordinatorRunner {
                         );
                         state.current_wave = wave + 1;
                         state.engines_running = false;
+                        state.wake_pending = false;
                     }
                 }
                 // An engine requests to start the wave.
@@ -150,6 +151,7 @@ impl InProcCoordinatorRunner {
                         {
                             state.current_wave = wave;
                             state.engines_running = true;
+                            state.wake_pending = false;
                             true
                         } else {
                             false
@@ -225,13 +227,17 @@ mod tests {
         let mut state = CoordinatorStateSnapshot {
             current_wave: 3,
             engines_running: false,
+            wake_pending: true,
         };
 
         let (wave, exclude) = state.start_wave_for_first_request(3, 2);
 
         assert_eq!(wave, 3);
         assert_eq!(exclude, Some(2));
-        assert!(state.engines_running);
+        assert!(
+            !state.engines_running,
+            "a paused engine may discard the wake; only engines report running"
+        );
         assert_eq!(state.current_wave, 3);
     }
 
@@ -244,6 +250,7 @@ mod tests {
         let mut state = CoordinatorStateSnapshot {
             current_wave: 4,
             engines_running: false,
+            wake_pending: true,
         };
 
         // Request stamped with wave 3 while the coordinator already advanced to 4.
@@ -254,7 +261,7 @@ mod tests {
             "must broadcast the current wave, not the stale one"
         );
         assert_eq!(exclude, None, "a stale request must wake every engine");
-        assert!(state.engines_running);
+        assert!(!state.engines_running);
         assert_eq!(state.current_wave, 4, "wave must not be rewound");
     }
 }

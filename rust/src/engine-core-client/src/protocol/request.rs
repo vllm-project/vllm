@@ -130,6 +130,9 @@ pub struct EngineCoreRequest {
     pub session_id: Option<String>,
     #[serde(default)]
     pub kv_hints: Option<KvHintsEnvelope>,
+    /// In DP mode, whether the frontend sent the wave wake for this request.
+    #[serde(default)]
+    pub wake_sent: bool,
 }
 
 impl EngineCoreRequest {
@@ -205,7 +208,7 @@ mod tests {
             other => panic!("expected array, got {other:?}"),
         };
 
-        assert_eq!(array.len(), 22);
+        assert_eq!(array.len(), 23);
         assert_eq!(array[0], Value::from("req-1"));
         assert_eq!(array[2], Value::Nil);
         assert_eq!(array[4], Value::Nil);
@@ -213,6 +216,7 @@ mod tests {
         assert_eq!(array[11], Value::from(7));
         assert_eq!(array[20], Value::from("session-1"));
         assert!(matches!(&array[21], Value::Map(_)));
+        assert_eq!(array[22], Value::from(false));
     }
 
     #[test]

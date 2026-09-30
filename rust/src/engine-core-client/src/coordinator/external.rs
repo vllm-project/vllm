@@ -126,6 +126,7 @@ impl ExternalCoordinatorService {
         let previous_engines_running = state.engines_running;
         state.current_wave = update.wave;
         state.engines_running = update.engines_running;
+        state.wake_pending = false;
         debug!(
             previous_wave,
             wave = update.wave,
