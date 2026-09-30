@@ -107,7 +107,7 @@ async def test_tokenize_chat(
                     conversation=conversation,
                     tokenize=False,
                 )
-                tokens = tokenizer.encode(prompt, add_special_tokens=add_special)  # type: ignore[arg-type]
+                tokens = tokenizer.encode(prompt, add_special_tokens=add_special)
 
                 response = requests.post(
                     server.url_for("tokenize"),
@@ -176,7 +176,7 @@ async def test_tokenize_chat_with_tools(
                     tools=tools,
                     tokenize=False,
                 )
-                tokens = tokenizer.encode(prompt, add_special_tokens=add_special)  # type: ignore[arg-type]
+                tokens = tokenizer.encode(prompt, add_special_tokens=add_special)
 
                 response = requests.post(
                     server.url_for("tokenize"),
