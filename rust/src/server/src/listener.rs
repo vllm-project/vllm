@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 //! Unified listener wrapper for the Rust frontend.
 //!
 //! This module hides the difference between TCP and Unix-domain listeners so

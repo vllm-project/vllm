@@ -4,6 +4,7 @@
 import pytest
 
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
+from vllm.exceptions import VLLMValidationError
 
 
 def test_chat_completion_request_with_no_tools():
@@ -27,7 +28,7 @@ def test_chat_completion_request_with_no_tools():
     assert request.tool_choice == "none"
 
     # tools key present but empty -- should be rejected
-    with pytest.raises(ValueError, match="must not be an empty array"):
+    with pytest.raises(VLLMValidationError, match="must not be an empty array"):
         ChatCompletionRequest.model_validate(
             {
                 "messages": [{"role": "user", "content": "Hello"}],
@@ -40,7 +41,7 @@ def test_chat_completion_request_with_no_tools():
 @pytest.mark.parametrize("tool_choice", ["auto", "required"])
 def test_chat_completion_request_with_tool_choice_but_no_tools(tool_choice):
     with pytest.raises(
-        ValueError, match="When using `tool_choice`, `tools` must be set."
+        VLLMValidationError, match="When using `tool_choice`, `tools` must be set."
     ):
         ChatCompletionRequest.model_validate(
             {
@@ -51,7 +52,7 @@ def test_chat_completion_request_with_tool_choice_but_no_tools(tool_choice):
         )
 
     with pytest.raises(
-        ValueError, match="When using `tool_choice`, `tools` must be set."
+        VLLMValidationError, match="When using `tool_choice`, `tools` must be set."
     ):
         ChatCompletionRequest.model_validate(
             {
@@ -134,7 +135,7 @@ SAMPLE_TOOL = {
 def test_structured_outputs_with_named_tool_choice_rejected():
     """structured_outputs cannot be combined with a named tool_choice."""
     with pytest.raises(
-        ValueError,
+        VLLMValidationError,
         match="structured outputs or tools, not both",
     ):
         ChatCompletionRequest.model_validate(
@@ -168,7 +169,7 @@ def test_structured_outputs_with_auto_tool_choice_allowed():
 def test_multiple_structured_outputs_rejected():
     """Only one kind of structured output constraint is allowed."""
     with pytest.raises(
-        ValueError,
+        VLLMValidationError,
         match="You can only use one kind of constraints",
     ):
         ChatCompletionRequest.model_validate(

@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import asyncio
+import contextlib
 import json
 from collections.abc import AsyncGenerator
 from http import HTTPStatus
@@ -13,8 +14,8 @@ from fastapi import WebSocket
 from starlette.websockets import WebSocketDisconnect
 
 from vllm import envs
-from vllm.entrypoints.openai.engine.protocol import ErrorResponse, UsageInfo
-from vllm.entrypoints.serve.utils.api_utils import sanitize_message
+from vllm.entrypoints.serve.engine.protocol import ErrorResponse, UsageInfo
+from vllm.entrypoints.serve.exception_handling.utils import sanitize_message
 from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
 
@@ -265,11 +266,9 @@ class RealtimeConnection:
 
         except Exception as e:
             logger.exception("Error in generation: %s", e)
-            try:
+            # The socket may already be closed; nothing more we can do.
+            with contextlib.suppress(Exception):
                 await self.send_error(sanitize_message(str(e)), "processing_error")
-            except Exception:
-                # The socket may already be closed; nothing more we can do.
-                pass
 
     async def send(
         self, event: SessionCreated | TranscriptionDelta | TranscriptionDone

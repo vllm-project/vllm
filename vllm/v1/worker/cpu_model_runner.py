@@ -1,14 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import sys
-from contextlib import contextmanager
+from contextlib import AbstractContextManager, contextmanager
 from typing import Any
 
 import torch
 import torch.nn as nn
 
-import vllm.utils.cpu_triton_utils as cpu_tl
-from vllm.config import VllmConfig
+from vllm.config import (
+    CompilationMode,
+    VllmConfig,
+)
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader import get_model
 from vllm.tracing import instrument
@@ -34,7 +35,6 @@ class CPUModelRunner(GPUModelRunner):
         self.cascade_attn_enabled = False
 
         self._postprocess_tensors()
-        self._postprocess_triton()
 
     def _postprocess_tensors(self) -> None:
         # Note: replace device tensors with cpu tensors
@@ -58,65 +58,6 @@ class CPUModelRunner(GPUModelRunner):
             for v in vars(block_table).values():
                 if isinstance(v, CpuGpuBuffer):
                     v.gpu = v.cpu
-
-    def _postprocess_triton(self) -> None:
-        from vllm.triton_utils import HAS_TRITON
-
-        if HAS_TRITON:
-            logger.info(
-                "Triton-CPU backend is available; skipping C++ monkey-patches "
-                "for Triton kernels."
-            )
-            return
-
-        import vllm.v1.worker.block_table
-
-        vllm.v1.worker.block_table._compute_slot_mapping_kernel = (
-            cpu_tl.compute_slot_mapping_kernel
-        )
-
-        # Speculative decoding fallbacks
-        import vllm.v1.sample.rejection_sampler
-        import vllm.v1.spec_decode.llm_base_proposer
-        import vllm.v1.spec_decode.utils as spec_decode_utils
-
-        vllm.v1.spec_decode.llm_base_proposer.eagle_prepare_inputs_padded_kernel = (
-            cpu_tl.eagle_prepare_inputs_padded_kernel
-        )
-        vllm.v1.spec_decode.llm_base_proposer.eagle_prepare_next_token_padded_kernel = (
-            cpu_tl.eagle_prepare_next_token_padded_kernel
-        )
-        vllm.v1.spec_decode.llm_base_proposer.copy_and_expand_eagle_inputs_kernel = (
-            cpu_tl.copy_and_expand_eagle_inputs_kernel
-        )
-        spec_decode_utils.copy_and_expand_dflash_inputs_kernel = (
-            cpu_tl.copy_and_expand_dflash_inputs_kernel
-        )
-        dflash_module = sys.modules.get("vllm.v1.spec_decode.dflash")
-        if dflash_module is not None:
-            dflash_kernel_name = "copy_and_expand_dflash_inputs_kernel"
-            setattr(
-                dflash_module,
-                dflash_kernel_name,
-                cpu_tl.copy_and_expand_dflash_inputs_kernel,
-            )
-        spec_decode_utils.eagle_step_slot_mapping_metadata_kernel = (
-            cpu_tl.eagle_step_slot_mapping_metadata_kernel
-        )
-        vllm.v1.sample.rejection_sampler.rejection_greedy_sample_kernel = (
-            cpu_tl.rejection_greedy_sample_kernel
-        )
-        vllm.v1.sample.rejection_sampler.rejection_random_sample_kernel = (
-            cpu_tl.rejection_random_sample_kernel
-        )
-        vllm.v1.sample.rejection_sampler.expand_kernel = cpu_tl.expand_kernel
-        vllm.v1.sample.rejection_sampler.sample_recovered_tokens_kernel = (
-            cpu_tl.sample_recovered_tokens_kernel
-        )
-
-        import vllm.v1.worker.mamba_utils
-
-        vllm.v1.worker.mamba_utils.batch_memcpy_kernel = cpu_tl.batch_memcpy_kernel
 
     @instrument(span_name="Loading (CPU)")
     def load_model(self, load_dummy_weights: bool = False) -> None:
@@ -142,6 +83,8 @@ class CPUModelRunner(GPUModelRunner):
 
     @instrument(span_name="Warmup (CPU)")
     def warming_up_model(self) -> None:
+        if self.vllm_config.compilation_config.mode == CompilationMode.NONE:
+            return
         logger.info("Warming up model for the compilation...")
         # Only generate graph for the generic shape
         with _set_global_compilation_settings(self.vllm_config):
@@ -152,8 +95,13 @@ class CPUModelRunner(GPUModelRunner):
         self,
         kv_cache_config: KVCacheConfig,
         is_profiling: bool = False,
+        kv_cache_allocation_context: AbstractContextManager | None = None,
     ) -> None:
-        super().initialize_kv_cache(kv_cache_config, is_profiling)
+        super().initialize_kv_cache(
+            kv_cache_config,
+            is_profiling,
+            kv_cache_allocation_context=kv_cache_allocation_context,
+        )
 
         if self.speculative_config:
             if self.speculative_config.use_eagle():
@@ -235,5 +183,10 @@ def _set_torch_accelerator_to_noop() -> None:
     def noop(*args: Any, **kwargs: Any) -> None:
         pass
 
+    # Distinct no-op so empty_cache does not alias synchronize: Dynamo's
+    # handle_synchronize is keyed on that object and asserts on CPU-only hosts.
+    def empty_cache_noop(*args: Any, **kwargs: Any) -> None:
+        pass
+
     torch.accelerator.synchronize = noop
-    torch.accelerator.empty_cache = noop
+    torch.accelerator.empty_cache = empty_cache_noop

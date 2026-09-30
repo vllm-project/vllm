@@ -17,7 +17,8 @@ if [ "$#" -eq 0 ]; then
          | grep -oE '>=3\.[0-9]+,<3\.[0-9]+')
   lo=${spec#>=3.}; lo=${lo%%,*}
   hi=${spec##*<3.}
-  set -- $(seq "$lo" $((hi - 1)) | sed 's/^/3./')
+  readarray -t versions < <(seq "$lo" $((hi - 1)) | sed 's/^/3./')
+  set -- "${versions[@]}"
 fi
 
 prefix="${DEEPGEMM_VENV_PREFIX:-/tmp/dgenv}"

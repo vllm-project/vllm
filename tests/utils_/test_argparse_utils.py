@@ -4,6 +4,7 @@
 
 import json
 import os
+from argparse import BooleanOptionalAction
 
 import pytest
 import yaml
@@ -379,6 +380,27 @@ def test_load_config_file(tmp_path):
     os.remove(str(config_file_path))
 
 
+def test_load_config_file_false_store_true_dropped(tmp_path):
+    """False values for store_true flags are silently dropped (correct)."""
+    config_data = {
+        "enable-feature": False,
+        "port": 8000,
+    }
+
+    config_file_path = tmp_path / "config.yaml"
+    with open(config_file_path, "w") as config_file:
+        yaml.dump(config_data, config_file)
+
+    parser = FlexibleArgumentParser()
+    parser.add_argument("--enable-feature", action=BooleanOptionalAction)
+    parser.add_argument("--port", type=int)
+
+    processed_args = parser.load_config_file(str(config_file_path))
+
+    assert "--enable-feature" not in processed_args
+    assert "--no-enable-feature" in processed_args
+
+
 def test_load_config_file_nested(tmp_path):
     """Test that nested dicts in YAML config are converted to JSON strings."""
     config_data = {
@@ -454,32 +476,32 @@ def test_compilation_config_mode_validator():
     """Test that CompilationConfig.mode field validator converts strings to integers."""
     from vllm.config.compilation import CompilationConfig, CompilationMode
 
-    config = CompilationConfig(mode=0)
+    config = CompilationConfig(mode=0)  # type: ignore[arg-type]
     assert config.mode == CompilationMode.NONE
 
-    config = CompilationConfig(mode=3)
+    config = CompilationConfig(mode=3)  # type: ignore[arg-type]
     assert config.mode == CompilationMode.VLLM_COMPILE
 
-    config = CompilationConfig(mode="NONE")
+    config = CompilationConfig(mode="NONE")  # type: ignore[arg-type]
     assert config.mode == CompilationMode.NONE
 
-    config = CompilationConfig(mode="STOCK_TORCH_COMPILE")
+    config = CompilationConfig(mode="STOCK_TORCH_COMPILE")  # type: ignore[arg-type]
     assert config.mode == CompilationMode.STOCK_TORCH_COMPILE
 
-    config = CompilationConfig(mode="DYNAMO_TRACE_ONCE")
+    config = CompilationConfig(mode="DYNAMO_TRACE_ONCE")  # type: ignore[arg-type]
     assert config.mode == CompilationMode.DYNAMO_TRACE_ONCE
 
-    config = CompilationConfig(mode="VLLM_COMPILE")
+    config = CompilationConfig(mode="VLLM_COMPILE")  # type: ignore[arg-type]
     assert config.mode == CompilationMode.VLLM_COMPILE
 
-    config = CompilationConfig(mode="none")
+    config = CompilationConfig(mode="none")  # type: ignore[arg-type]
     assert config.mode == CompilationMode.NONE
 
-    config = CompilationConfig(mode="vllm_compile")
+    config = CompilationConfig(mode="vllm_compile")  # type: ignore[arg-type]
     assert config.mode == CompilationMode.VLLM_COMPILE
 
     with pytest.raises(ValidationError, match="Invalid compilation mode"):
-        CompilationConfig(mode="INVALID_MODE")
+        CompilationConfig(mode="INVALID_MODE")  # type: ignore[arg-type]
 
 
 def test_flat_product():
@@ -502,3 +524,20 @@ def test_flat_product():
         (3, 4, "a", 5, 6),
         (3, 4, "b", 5, 6),
     ]
+
+
+def test_group_description_is_summary_only():
+    """Group descriptions are config docstrings, too long for the terminal."""
+    parser = FlexibleArgumentParser()
+    group = parser.add_argument_group(
+        title="MyConfig",
+        description="Summary line.\n\nDetails which only belong in the docs.",
+    )
+    group.add_argument("--my-arg")
+
+    assert "Summary line." in parser.format_help()
+    assert "only belong in the docs" not in parser.format_help()
+
+    parser._search_keyword = "myconfig"
+    assert "Summary line." in parser.format_help()
+    assert "only belong in the docs" not in parser.format_help()

@@ -23,7 +23,8 @@ def test_stat_logger_plugin_is_discovered(monkeypatch: pytest.MonkeyPatch):
         # instantiate and confirm the right type
         vllm_config = VllmConfig()
         instance = factories[0](vllm_config)
-        assert isinstance(instance, DummyStatLogger)
+        # The `is` check above narrows DummyStatLogger to a Callable
+        assert isinstance(instance, DummyStatLogger)  # type: ignore[arg-type]
 
 
 def test_no_plugins_loaded_if_env_empty(monkeypatch: pytest.MonkeyPatch):
@@ -66,10 +67,11 @@ async def test_stat_logger_plugin_integration_with_engine(
 
         engine = AsyncLLM.from_engine_args(engine_args=engine_args)
 
+        assert engine.logger_manager is not None
         assert len(engine.logger_manager.stat_loggers) == 2
-        assert len(engine.logger_manager.stat_loggers[0].per_engine_stat_loggers) == 1
+        assert len(engine.logger_manager.stat_loggers[0].per_engine_stat_loggers) == 1  # type: ignore[attr-defined]
         assert isinstance(
-            engine.logger_manager.stat_loggers[0].per_engine_stat_loggers[0],
+            engine.logger_manager.stat_loggers[0].per_engine_stat_loggers[0],  # type: ignore[attr-defined]
             DummyStatLogger,
         )
 
