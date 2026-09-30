@@ -18,6 +18,7 @@ from utils import (
 
 import vllm.envs as envs
 from vllm import LLM, SamplingParams
+from vllm.inputs import TokensPrompt
 
 
 @skip_unsupported
@@ -801,7 +802,7 @@ def test_decode_logprobs_match_prefill_logprobs(
                 f"(num_tokens={len(prefix_token_ids)})..."
             )
             prefill_output = llm.generate(
-                [{"prompt_token_ids": prefix_token_ids}],
+                [TokensPrompt(prompt_token_ids=prefix_token_ids)],
                 prefill_sp,
                 use_tqdm=False,
             )[0]
