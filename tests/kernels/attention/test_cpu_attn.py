@@ -1417,6 +1417,26 @@ def test_amx_gqa_q17_grouped_q33_falls_back() -> None:
 
 @pytest.mark.skipif(not torch.cpu._is_amx_tile_supported(), reason="no AMX support.")
 @set_default_torch_num_threads(4)
+@pytest.mark.parametrize("kv_cache_dtype", ["auto", "fp8_e4m3"])
+def test_amx_gqa_q16_with_few_heads(kv_cache_dtype: str) -> None:
+    varlen_with_paged_kv(
+        seq_lens=[(16, 8192)] * 4,
+        num_heads=(8, 1),
+        head_size=256,
+        sliding_window=None,
+        dtype=torch.bfloat16,
+        block_size=32,
+        soft_cap=None,
+        num_blocks=512,
+        use_alibi=False,
+        use_sink=False,
+        isa="amx",
+        kv_cache_dtype=kv_cache_dtype,
+    )
+
+
+@pytest.mark.skipif(not torch.cpu._is_amx_tile_supported(), reason="no AMX support.")
+@set_default_torch_num_threads(4)
 def test_amx_gqa_causal_q4_long_context() -> None:
     varlen_with_paged_kv(
         seq_lens=[(4, 8192)],

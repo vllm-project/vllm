@@ -434,6 +434,7 @@ class AttentionScheduler {
     int32_t kv_block_alignment;  // context length alignment requirement
     bool enable_kv_split;
     bool* dynamic_causal;
+    bool fp8_kv_cache;
   };
 
   static constexpr int32_t MaxQTileIterNum = 128;
@@ -971,7 +972,8 @@ class AttentionScheduler {
     };
 
     MaterializedPlan plan;
-    if (batch_plan.grouped) {
+    if (input.isa == ISA::AMX &&
+        (!input.fp8_kv_cache || has_multi_token_request)) {
       auto [workitems, reductions] = materialize_plan(batch_plan);
       plan.workitems = std::move(workitems);
       plan.reduction_items = std::move(reductions);

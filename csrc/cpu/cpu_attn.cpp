@@ -92,6 +92,7 @@ torch::Tensor get_scheduler_metadata(
           sizeof(attn_impl::partial_output_buffer_t);
       input.max_num_q_per_iter = attn_impl::MaxQHeadNumPerIteration;
       input.kv_block_alignment = attn_impl::BlockSizeAlignment;
+      input.fp8_kv_cache = kv_cache_idx != 0;
     });
   });
 
