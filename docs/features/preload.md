@@ -101,6 +101,71 @@ engine match despite differing there.
     ops it exercised are loaded from the on-disk FlashInfer JIT cache on their
     first real use instead. The chosen tactics are unaffected.
 
+## Seeding a replica from another
+
+A second replica's daemons can fill their shards from a replica that is
+already loaded, instead of reading the checkpoint again. The weights travel
+directly between the daemons, and the source's FlashInfer autotune table
+travels with them, so the new replica's first engine also skips the autotune
+pass.
+
+Two movers are available. `peer_ipc` (the default) copies through CUDA IPC on
+one host:
+
+```bash
+# source replica on GPUs 0-3, already serving
+vllm preload --model /path/to/model --tensor-parallel-size 4 \
+    --weight-cache-socket-dir /run/vllm-a --preload-autotune
+
+# mirror replica on GPUs 4-7, filled from the source
+CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 \
+vllm preload --model /path/to/model --tensor-parallel-size 4 \
+    --weight-cache-socket-dir /run/vllm-b \
+    --weight-cache-seed /run/vllm-a/sock0,/run/vllm-a/sock1,/run/vllm-a/sock2,/run/vllm-a/sock3 \
+    --weight-cache-device-offset 4
+```
+
+`--weight-cache-seed` takes one source socket per local GPU, in device order,
+and rank *i* of the mirror is filled from rank *i* of the source — the cache
+fingerprints are compared first, so a mismatched pairing is rejected rather
+than silently mirroring the wrong shard.
+
+`--weight-cache-device-offset` is required for a same-host mirror: a CUDA IPC
+handle names its device by index, so the mirror has to keep every GPU visible
+for the source's indices to resolve, and move its own ranks past the source's
+block instead of remapping with `CUDA_VISIBLE_DEVICES`. Without it the mirror
+refuses to open a handle that would land on the wrong physical GPU.
+
+`rdma` pulls through the Mooncake TransferEngine and is the mover for a
+source on another host. The source has to expose a seed listener, and both
+sides need the same shared token:
+
+```bash
+# source host
+vllm preload --model /path/to/model --tensor-parallel-size 8 \
+    --weight-cache-listen 0.0.0.0:29700 --weight-cache-seed-token "$TOKEN" \
+    --preload-autotune
+
+# mirror host
+vllm preload --model /path/to/model --tensor-parallel-size 8 \
+    --weight-cache-seed 10.0.0.1:29700 --weight-cache-seed-backend rdma \
+    --weight-cache-seed-token "$TOKEN"
+```
+
+Each rank binds and dials `base_port + its global rank`, so one flag covers a
+whole replica; the draft daemon group's listeners sit past the target group's
+block. With speculative decoding, pass `--weight-cache-draft-seed` for the
+draft group.
+
+!!! warning
+    The seed listener is a network service. It is JSON only and
+    authenticates before it decodes a payload, so an unauthenticated peer
+    cannot reach the daemon's pickle protocol, but it is **unencrypted and
+    unauthenticated beyond the shared token**. Only the two read-only seed
+    commands are served remotely; exporting IPC handles and releasing weights
+    stay on the local, owner-verified Unix socket. Keep the listener on a
+    trusted network and treat the token as a secret.
+
 ## How it works
 
 1. `vllm preload` spawns one daemon process per GPU. Each daemon loads its
@@ -222,6 +287,16 @@ Socket paths are derived from the GPU UUID, so they are stable regardless of
   deployments let their first engine tune and publish instead. The table lives
   only in the daemons' memory, so restarting them drops it — the engine's own
   on-disk autotune cache still saves the profiling work in that case.
+- **Seeding**: `peer_ipc` cannot cross hosts, because a CUDA IPC handle is
+  node-local; `rdma` requires Mooncake on both sides. A mirror copies the
+  weights into its own memory, so it does not depend on the source staying
+  alive afterwards.
+- **Autotuning cannot overlap the load**: autotuning picks a tactic by timing
+  candidates, so running it while a daemon is still copying weights onto the
+  same GPU would measure the wrong thing and cache the wrong choice. To pay
+  the download once per machine instead, prefetch FlashInfer's kernels
+  separately with `python -m flashinfer download-cubin` (it fetches the whole
+  cubin set, so do it when building an image, not on a serving node).
 - **Quantization**: every quantization method in the model must declare
   support for pre-processed weights (the daemon transfers weights *after*
   quantization post-processing). Unsupported methods raise
