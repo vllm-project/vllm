@@ -30,6 +30,7 @@ from .models import (
     llama3_8b_fp8,
     llama4_scout_fp4,
     llama4_scout_fp8,
+    qwen3_8_27b_mixed_fp4,
     qwen3_a3b_fp8,
 )
 
@@ -201,4 +202,41 @@ def test_tp1_fp4_fusions(
         attn_backend,
         compilation_config,
         matches_check,
+    )
+
+
+@pytest.mark.parametrize(
+    "model_name, matches_fn, model_kwargs, hf_overrides", [qwen3_8_27b_mixed_fp4]
+)
+@pytest.mark.parametrize("attn_backend", [TRITON_ATTN])
+@pytest.mark.parametrize("n_layers", [4])
+@pytest.mark.parametrize("inductor_graph_partition", INDUCTOR_GRAPH_PARTITION)
+@pytest.mark.skipif(not is_blackwell(), reason="Blackwell required for fp4")
+def test_tp1_fp4_mixed_precision_default_act_fusion(
+    model_name: str,
+    matches_fn: Callable[[int], Matches],
+    model_kwargs: dict,
+    hf_overrides: Callable[[int], dict],
+    attn_backend: AttentionBackendCase,
+    n_layers: int,
+    inductor_graph_partition: bool,
+    run_e2e_fusion_test,
+):
+    """A MIXED_PRECISION NVFP4 checkpoint gets act+quant fusion by default.
+
+    The pass config is left unset so fuse_act_quant comes from the
+    optimization level, which only enables it when NVFP4 is detected.
+    """
+    model_kwargs["hf_overrides"] = hf_overrides(n_layers)
+    model_kwargs["load_format"] = "dummy"
+    model_kwargs["max_model_len"] = 1024
+    model_kwargs["kernel_config"] = {"enable_flashinfer_autotune": False}
+
+    run_e2e_fusion_test(
+        model_name,
+        matches_fn(n_layers),
+        model_kwargs,
+        attn_backend,
+        dict(use_inductor_graph_partition=inductor_graph_partition),
+        ["act_quant_fusion"],
     )
