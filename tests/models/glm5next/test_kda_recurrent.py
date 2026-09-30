@@ -5,8 +5,7 @@
 The decode path hands the kernel column slices of the merged ``q|k|v`` conv
 output and of the fused ``qkvbfg_a`` projection (beta), so q/k/v/beta are
 token-strided rather than contiguous. Both backends must match a pure-PyTorch
-recurrence. CUDA reads these slices in place and rejects unsupported layouts;
-the ROCm wrapper makes contiguous copies before launching its kernel.
+recurrence, read these slices in place and reject unsupported layouts.
 """
 
 import pytest
@@ -166,8 +165,8 @@ def test_fused_recurrent_kda_strided_inputs_bit_identical_to_contiguous(
 
 
 @pytest.mark.skipif(
-    not current_platform.is_cuda(),
-    reason="Only the CUDA implementation requires zero-copy token-strided layouts",
+    not current_platform.is_cuda_alike(),
+    reason="Both implementations require zero-copy token-strided layouts",
 )
 @torch.inference_mode()
 def test_fused_recurrent_kda_rejects_unaddressable_layouts():
