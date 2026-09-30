@@ -5108,11 +5108,11 @@ steps:
 
 #------------------------------------------------------  mi355 · models / basic  -------------------------------------------------------#
 
-- label: ":amd: (MI355 DPX) Basic Models (Other)" # TBD
+- label: ":amd: (MI355) Basic Models (Other)" # TBD
   timeout_in_minutes: 65
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
   dind: false
-  agent_pool: mi355_dpx
+  agent_pool: mi355_1
   optional: true
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
