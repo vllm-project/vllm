@@ -1,3 +1,4 @@
+# shellcheck disable=SC2317  # code after the exit/exit-183 gate below is intentionally dead pending re-enablement (see line comment)
 if [ "$READTHEDOCS_VERSION_TYPE" != "external" ]; then
   echo "Not a PR build (version type=$READTHEDOCS_VERSION_TYPE); skipping pre-run-check gate."
   exit 0

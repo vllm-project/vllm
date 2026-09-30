@@ -6,6 +6,7 @@ import weakref
 import pytest
 
 from vllm import LLM, SamplingParams
+from vllm.exceptions import VLLMValidationError
 
 MODEL_NAME = "distilbert/distilgpt2"
 
@@ -52,7 +53,7 @@ def test_multiple_sampling_params(llm: LLM):
     assert len(PROMPTS) == len(outputs)
 
     # Exception raised, if the size of params does not match the size of prompts
-    with pytest.raises(ValueError):
+    with pytest.raises(VLLMValidationError):
         outputs = llm.generate(PROMPTS, sampling_params=sampling_params[:3])
 
     # Single SamplingParams should be applied to every prompt
@@ -75,13 +76,13 @@ def test_multiple_priority(llm: LLM):
     assert len(PROMPTS) == len(outputs)
 
     # Exception raised, if the length of priority does not match the length of prompts
-    with pytest.raises(ValueError):
+    with pytest.raises(VLLMValidationError):
         outputs = llm.generate(
             PROMPTS, sampling_params=None, priority=[0] * (len(PROMPTS) - 1)
         )
 
     # Exception raised, if the priority list is empty
-    with pytest.raises(ValueError):
+    with pytest.raises(VLLMValidationError):
         outputs = llm.generate(PROMPTS, sampling_params=None, priority=[])
 
 

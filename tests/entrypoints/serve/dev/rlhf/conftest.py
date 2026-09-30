@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Shared fixtures and helpers for the RL lifecycle test suite.
+"""Shared fixtures and helpers for the RL lifecycle test suite.
 
 All test modules under this directory import from here to avoid duplication.
 
@@ -16,7 +15,6 @@ import subprocess
 import sys
 import threading
 import time
-from collections.abc import Callable
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Any
@@ -68,6 +66,16 @@ _DUMMY_ARGS = [
 # ---------------------------------------------------------------------------
 
 
+def _warm_up(url: str) -> None:
+    """Put one request through the engine before tests start timing things.
+
+    /health turns green before any request has travelled the request path, and
+    that first pass costs seconds on a loaded machine.
+    """
+    response = gen(url, max_tokens=4, timeout=120)
+    assert ok(response), f"warm-up generation failed: {response}"
+
+
 @contextmanager
 def server(
     extra_args=None,
@@ -82,6 +90,7 @@ def server(
         port:            HTTP port to bind (caller is responsible for uniqueness).
         timeout:         Seconds to wait for /health before giving up.
         dummy_weights:   If True, use --load-format dummy (fast, no real weights).
+
     """
     env = {**os.environ, "VLLM_SERVER_DEV_MODE": "1"}
     base = _DUMMY_ARGS if dummy_weights else _BASE_ARGS
@@ -118,6 +127,7 @@ def server(
         else:
             proc.terminate()
             raise RuntimeError("vllm server did not start in time")
+        _warm_up(url)
         yield url
     finally:
         proc.terminate()
@@ -125,36 +135,6 @@ def server(
             proc.wait(timeout=10)
         if proc.poll() is None:
             proc.kill()
-
-
-# ---------------------------------------------------------------------------
-# Polling helper (200-lie workaround)
-# ---------------------------------------------------------------------------
-
-
-def poll_until(
-    predicate: Callable[[], bool],
-    timeout: float = 10.0,
-    interval: float = 0.5,
-) -> bool:
-    """Poll predicate() until it returns True or timeout expires.
-
-    Workaround for the vLLM sleep/wake "200-lie" — the HTTP endpoints may
-    return 200 before the underlying operation is complete, so callers that
-    need to verify state *after* an operation can use this helper instead of
-    assuming the 200 means completion.
-
-    Returns True if predicate became true within timeout, False otherwise.
-    """
-    deadline = time.time() + timeout
-    while time.time() < deadline:
-        try:
-            if predicate():
-                return True
-        except Exception:
-            pass
-        time.sleep(interval)
-    return False
 
 
 # ---------------------------------------------------------------------------
@@ -180,27 +160,6 @@ def gen(url, prompt="The capital of France is", max_tokens=8, timeout=30):
         return None
 
 
-def gen_with_logprobs(
-    url, prompt="The capital of France is", max_tokens=8, logprobs=5, timeout=30
-):
-    """Fire a /v1/completions request with logprobs; return JSON or None."""
-    try:
-        r = requests.post(
-            f"{url}/v1/completions",
-            json={
-                "model": "m",
-                "prompt": prompt,
-                "max_tokens": max_tokens,
-                "temperature": 0,
-                "logprobs": logprobs,
-            },
-            timeout=timeout,
-        )
-        return r.json()
-    except Exception:
-        return None
-
-
 def ok(resp) -> bool:
     """True iff resp is a successful completion (has choices, no error key)."""
     return (
@@ -214,6 +173,10 @@ def ok(resp) -> bool:
 # ---------------------------------------------------------------------------
 # HTTP helpers — stream generation
 # ---------------------------------------------------------------------------
+
+
+# First-token wait for a streaming request; loaded machines need the slack.
+STREAM_START_TIMEOUT = 20.0
 
 
 @dataclass
@@ -265,12 +228,18 @@ def start_stream(url: str, max_tokens: int) -> tuple[StreamResult, threading.Thr
         args=(url, result, max_tokens),
     )
     thread.start()
-    started = result.started.wait(timeout=10)
+    started = result.started.wait(timeout=STREAM_START_TIMEOUT)
     if not started or result.done.is_set():
-        pause(url, mode="abort")
-        resume(url)
+        # Best-effort: on a stalled server these time out too, and would then
+        # mask the assertions below.
+        with contextlib.suppress(requests.RequestException):
+            pause(url, mode="abort")
+            resume(url)
         thread.join(timeout=10)
-    assert started, "request did not start generating"
+    assert started, (
+        f"request did not start generating within {STREAM_START_TIMEOUT}s "
+        f"(stream error: {result.error})"
+    )
     assert not result.done.is_set(), "request completed before it could be paused"
     return result, thread
 
@@ -378,37 +347,3 @@ def get_world_size(url, include_dp=True):
         params={"include_dp": include_dp},
         timeout=5,
     )
-
-
-# ---------------------------------------------------------------------------
-# GPU / metrics helpers
-# ---------------------------------------------------------------------------
-
-
-def gpu_free_bytes(device: int = 0) -> int:
-    """Read GPU free bytes via subprocess to avoid import-time torch init."""
-    out = subprocess.check_output(
-        [
-            sys.executable,
-            "-c",
-            f"import torch; f,_=torch.accelerator.get_memory_info({device}); print(f)",
-        ],
-        timeout=10,
-    )
-    return int(out.strip())
-
-
-def sleep_metrics(url):
-    """Return (awake, weights_offloaded, discard_all) from /metrics."""
-    try:
-        from prometheus_client.parser import text_string_to_metric_families
-    except ImportError:
-        return None, None, None
-
-    r = requests.get(f"{url}/metrics", timeout=5)
-    vals: dict = {}
-    for family in text_string_to_metric_families(r.text):
-        if family.name == "vllm:engine_sleep_state":
-            for s in family.samples:
-                vals[s.labels.get("sleep_state", "")] = s.value
-    return vals.get("awake"), vals.get("weights_offloaded"), vals.get("discard_all")

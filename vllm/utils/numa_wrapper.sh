@@ -15,6 +15,7 @@ if ! command -v numactl >/dev/null 2>&1; then
     exit 1
 fi
 
+# shellcheck disable=SC1001  # verified equivalent behavior; TODO: revisit escaping in a follow-up cleanup PR
 case "${_VLLM_INTERNAL_NUMACTL_ARGS}" in
     *[![:alnum:]\ \-\_=,./]*)
         echo "Invalid characters in _VLLM_INTERNAL_NUMACTL_ARGS" >&2
@@ -22,4 +23,5 @@ case "${_VLLM_INTERNAL_NUMACTL_ARGS}" in
         ;;
 esac
 
+# shellcheck disable=SC2086  # word splitting is intentional: this expands into multiple numactl flags
 exec numactl ${_VLLM_INTERNAL_NUMACTL_ARGS} "${_VLLM_INTERNAL_NUMACTL_PYTHON_EXECUTABLE}" "$@"
