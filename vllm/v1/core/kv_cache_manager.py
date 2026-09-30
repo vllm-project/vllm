@@ -512,6 +512,10 @@ class KVCacheManager:
         ):
             watermark_blocks = self.watermark_blocks
 
+        # Matches the scheduler's own prefill boundary: `num_tokens - 1`
+        # extends it to resumed requests replaying their output tokens.
+        prefill_end = max(request.num_prompt_tokens, request.num_tokens - 1)
+
         if full_sequence_must_fit:
             # First check and fail if the full request sequence won't fit.
             full_num_tokens = min(request.num_tokens, self.max_model_len)
@@ -525,6 +529,7 @@ class KVCacheManager:
                 num_local_computed_tokens=num_local_computed_tokens,
                 num_tokens_main_model=full_num_tokens,
                 apply_admission_cap=True,
+                prefill_end=prefill_end,
             )
             required_blocks = num_blocks_to_allocate + watermark_blocks
             if required_blocks > self.block_pool.get_num_free_blocks():
@@ -559,6 +564,7 @@ class KVCacheManager:
             + num_external_computed_tokens,
             num_local_computed_tokens=num_local_computed_tokens,
             num_tokens_main_model=num_tokens_main_model,
+            prefill_end=prefill_end,
         )
 
         # Keep `reserved_blocks` free for other in-flight sequences, and an
