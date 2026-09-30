@@ -64,6 +64,7 @@ from vllm.entrypoints.openai.responses.streaming_events import (
 )
 from vllm.entrypoints.serve.engine.protocol import ErrorResponse
 from vllm.inputs import tokens_input
+from vllm.logprobs import Logprob as SampleLogprob
 from vllm.outputs import CompletionOutput, RequestOutput
 from vllm.parser.harmony import Segment
 from vllm.renderers import TokenizeParams
@@ -1359,6 +1360,7 @@ def _make_simple_context_with_output(
 def _make_serving_instance(
     *,
     reasoning_parser: str = "",
+    tool_parser: str | None = None,
     enable_per_request_metrics: bool = False,
 ) -> OpenAIServingResponses:
     engine_client = MagicMock()
@@ -1379,6 +1381,8 @@ def _make_serving_instance(
         chat_template=None,
         chat_template_content_format="auto",
         reasoning_parser=reasoning_parser,
+        enable_auto_tools=tool_parser is not None,
+        tool_parser=tool_parser,
         enable_per_request_metrics=enable_per_request_metrics,
     )
 
@@ -1977,3 +1981,113 @@ class TestAutoToolStreaming:
         assert len(function_done) == 1
         assert function_done[0].item.name == "get_weather"
         assert function_done[0].item.arguments == tool_args
+
+
+@pytest.mark.skip_global_cleanup
+@pytest.mark.asyncio
+async def test_stream_completed_response_reuses_streamed_items(monkeypatch):
+    """response.completed must carry the streamed items (same ids,
+    call_id, logprobs) rather than a reparse of the full output."""
+    monkeypatch.setattr(envs, "VLLM_USE_EXPERIMENTAL_PARSER_CONTEXT", False)
+    serving = _make_serving_instance_with_reasoning()
+    call = DeltaToolCall(
+        id="chatcmpl-tool-parser-id",
+        index=0,
+        function=DeltaFunctionCall(name="get_weather", arguments="{}"),
+    )
+    response_parser = _mock_parser_with_reasoning(
+        serving,
+        [
+            DeltaMessage(reasoning="think"),
+            DeltaMessage(content="Hi"),
+            DeltaMessage(tool_calls=[call]),
+        ],
+    )
+    response_parser.count_reasoning_tokens = MagicMock(return_value=1)
+    context = SimpleContext(response_parser=response_parser)
+
+    async def result_generator():
+        for token_id, text in [(10, "think"), (20, "Hi"), (30, "call")]:
+            output = _make_request_output(text, [token_id])
+            output.outputs[0].logprobs = [
+                {token_id: SampleLogprob(logprob=-0.5, decoded_token=text)}
+            ]
+            context.append_output(output)
+            yield context
+
+    events = [
+        event
+        async for event in serving.responses_stream_generator(
+            request=ResponsesRequest(
+                input="hi",
+                include=["message.output_text.logprobs"],
+                stream=True,
+                store=False,
+            ),
+            sampling_params=SamplingParams(max_tokens=16),
+            result_generator=result_generator(),
+            context=context,
+            model_name="test-model",
+            tokenizer=MagicMock(),
+            request_metadata=RequestResponseMetadata(request_id="req"),
+        )
+    ]
+
+    streamed = [e.item for e in events if e.type == "response.output_item.done"]
+    assert events[-1].response.output == streamed
+    _, message, function_call = streamed
+    assert [lp.token for lp in message.content[0].logprobs] == ["Hi"]
+    assert function_call.call_id == "chatcmpl-tool-parser-id"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("parallel_tool_calls", "num_calls"), [(False, 1), (None, 3)])
+async def test_streaming_parallel_tool_calls(
+    monkeypatch, parallel_tool_calls, num_calls
+):
+    """parallel_tool_calls=False keeps only the first call even when the grammar
+    does not limit the model; None keeps every call."""
+    monkeypatch.setattr(envs, "VLLM_USE_EXPERIMENTAL_PARSER_CONTEXT", False)
+    serving = _make_serving_instance(tool_parser="hermes")
+    request = ResponsesRequest(
+        input="hi",
+        tools=[{"type": "function", "name": "get_weather", "parameters": {}}],
+        parallel_tool_calls=parallel_tool_calls,
+        stream=True,
+    )
+    context = SimpleContext(
+        response_parser=serving._make_response_parser(request, MagicMock(), {})
+    )
+    args = [f'{{"city": "{city}"}}' for city in ("Paris", "Berlin", "Tokyo")]
+
+    async def result_generator():
+        for i, arg in enumerate(args):
+            text = f'<tool_call>\n{{"name": "get_weather", "arguments": {arg}}}'
+            context.append_output(_make_request_output(f"{text}\n</tool_call>\n", [i]))
+            yield context
+
+    events = [
+        event
+        async for event in serving.responses_stream_generator(
+            request=request,
+            sampling_params=SamplingParams(max_tokens=64),
+            result_generator=result_generator(),
+            context=context,
+            model_name="test-model",
+            tokenizer=MagicMock(),
+            request_metadata=RequestResponseMetadata(request_id="req"),
+        )
+    ]
+
+    assert [
+        event.output_index
+        for event in events
+        if event.type == "response.output_item.added"
+    ] == list(range(num_calls))
+    assert all(getattr(event, "output_index", 0) < num_calls for event in events)
+    assert [
+        event.item.arguments
+        for event in events
+        if event.type == "response.output_item.done"
+    ] == args[:num_calls]
+    assert [item.arguments for item in events[-1].response.output] == args[:num_calls]
