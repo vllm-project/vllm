@@ -29,12 +29,87 @@ from vllm.utils.mem_constants import GiB_bytes
 from vllm.utils.mem_utils import MemorySnapshot
 from vllm.v1.core.kv_cache_utils import KVCacheBlockCopy
 from vllm.v1.hisparse.types import SparseKVPageTransfer, SparseKVRowMirror
+from vllm.v1.kv_cache_interface import (
+    FullAttentionSpec,
+    KVCacheConfig,
+    KVCacheGroupSpec,
+    KVCacheLayout,
+    KVCacheTensor,
+)
 from vllm.v1.worker.utils import (
+    allocate_kv_cache,
     bind_kv_cache,
     bind_kv_cache_to_layers,
     copy_kv_cache_blocks_inplace,
     request_memory,
 )
+
+
+def _uniform_kv_cache_config(
+    num_blocks: int = 4, layers: tuple[str, ...] = ("k0", "k1")
+):
+    """A two-layer uniform cache: every layer views one shared backing store."""
+    spec = FullAttentionSpec(
+        block_size=16, num_kv_heads=2, head_size=32, dtype=torch.float16
+    )
+    page = spec.page_size_bytes
+    return KVCacheConfig(
+        num_blocks=num_blocks,
+        kv_cache_groups=[
+            KVCacheGroupSpec(layer_names=list(layers), kv_cache_spec=spec)
+        ],
+        kv_cache_tensors=[
+            KVCacheTensor(
+                size=len(layers) * num_blocks * page,
+                layers=list(layers),
+                layer_stride=num_blocks * page,
+                block_stride=page,
+            )
+        ],
+        kv_cache_layout="LBNHC",
+    )
+
+
+def test_allocate_kv_cache_zero_fill_can_be_skipped(monkeypatch):
+    """``zero_fill=False`` keeps the layout and skips the fill.
+
+    Unified-memory platforms use it to avoid committing every page of the pool
+    at startup. The layout has to stay identical, because block ids address the
+    same bytes either way.
+    """
+    config = _uniform_kv_cache_config()
+    layout = KVCacheLayout[config.kv_cache_layout]
+
+    fills: list[tuple] = []
+    real_zeros = torch.zeros
+
+    def counting_zeros(*args, **kwargs):
+        fills.append(args)
+        return real_zeros(*args, **kwargs)
+
+    monkeypatch.setattr(torch, "zeros", counting_zeros)
+
+    zeroed = allocate_kv_cache(config, torch.device("cpu"), layout)
+    assert fills, "the default must zero-fill the backing store"
+
+    before = len(fills)
+    unfilled = allocate_kv_cache(config, torch.device("cpu"), layout, zero_fill=False)
+    assert len(fills) == before, "zero_fill=False must not zero-fill"
+
+    assert set(unfilled) == set(zeroed)
+    assert next(iter(zeroed.values())).untyped_storage().nbytes() == (
+        next(iter(unfilled.values())).untyped_storage().nbytes()
+    )
+    base = min(tensor.storage_offset() for tensor in zeroed.values())
+    for name, expected in zeroed.items():
+        actual = unfilled[name]
+        assert actual.shape == expected.shape
+        assert actual.stride() == expected.stride()
+        assert actual.dtype == expected.dtype
+        assert actual.storage_offset() - base == expected.storage_offset() - base
+
+    assert not zeroed["k0"].any()
+    assert not zeroed["k1"].any()
 
 
 def _make_hisparse_worker() -> HiSparseConnectorWorker:
