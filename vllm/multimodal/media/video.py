@@ -219,10 +219,14 @@ class VideoMediaIO(MediaIO[tuple[DecodedFrames, dict[str, Any]]]):
     ) -> MediaRef[tuple[DecodedFrames, dict[str, Any]]]:
         if media_type.lower() == "video/jpeg":
             decode_frames, metadata = self._prepare_jpeg_sequence(data)
+            spec = self.get_decode_spec().extend(
+                video_backend="jpeg_sequence",
+                image_decode=dict(self.image_io.get_decode_spec().settings),
+            )
             return MediaRef(
                 lambda: (decode_frames(), metadata),
                 data.encode(),
-                self.get_decode_spec(),
+                spec,
             )
         return super().load_base64_ref(media_type, data)
 

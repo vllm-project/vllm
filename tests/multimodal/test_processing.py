@@ -1698,6 +1698,7 @@ class _LazyTestProcessor(BaseMultiModalProcessor):
         # Encoded bytes visible to byte-consuming models (see dots3_note) at
         # HF-processing time, one entry per media ref.
         self.seen_encoded_bytes = list[bytes]()
+        self.seen_media_refs = list[MediaRef]()
         self.fail_hf_processor = False
         self.hf_calls = 0
 
@@ -1709,6 +1710,7 @@ class _LazyTestProcessor(BaseMultiModalProcessor):
                 raw = items.get_raw(idx)
                 if isinstance(raw, MediaRef):
                     self.seen_encoded_bytes.append(raw.data)
+                    self.seen_media_refs.append(raw)
         return super()._get_hf_mm_inputs(mm_items, hf_kwargs)
 
     def _call_hf_processor(self, hf_data, hf_kwargs):
@@ -1770,27 +1772,70 @@ def _lazy_apply(processor, lazy_items, cache=None, timing_ctx=None):
 
 
 def test_lazy_cache_hit_skips_decode():
-    """A cache hit must not decode; a miss decodes once and releases bytes."""
+    """A cache hit skips decode and leaves the borrowed ref reusable."""
     processor = _LazyTestProcessor()
     cache = _lazy_cache()
     data = b"fake-image-bytes"
 
-    # First request (miss): the item is decoded once and its bytes released.
+    # A miss decodes once and releases only the processing wrapper.
     decoder_1 = _CountingDecoder(Image.new("RGB", (4, 4)))
     lazy_1 = MediaRef(decoder_1, data)
     timing_ctx = TimingContext(enabled=True)
     _lazy_apply(processor, [lazy_1], cache, timing_ctx)
     assert decoder_1.calls == 1
-    assert lazy_1.data == b""
+    assert lazy_1.data == data
+    assert processor.seen_media_refs[0].data == b""
     assert "decode_mm_items" in timing_ctx.stage_secs
 
-    # Second request with identical bytes (hit): no decode, bytes released
-    # right after hashing.
+    # A borrowed hit can be reused after eviction without reconstructing it.
     decoder_2 = _CountingDecoder(Image.new("RGB", (4, 4)))
     lazy_2 = MediaRef(decoder_2, data)
     _lazy_apply(processor, [lazy_2], cache)
     assert decoder_2.calls == 0
-    assert lazy_2.data == b""
+    assert lazy_2.data == data
+    cache.clear_cache()
+    _lazy_apply(processor, [lazy_2], cache)
+    assert decoder_2.calls == 1
+    assert lazy_2.decode() is decoder_2.value
+
+
+@pytest.mark.parametrize("passthrough", [False, True])
+def test_uncached_apply_preserves_processor_override(passthrough, monkeypatch):
+    """No-cache and passthrough inputs must dispatch through the model hook."""
+
+    class OverrideProcessor(_LazyTestProcessor):
+        def _apply_hf_processor(self, inputs, timing_ctx):
+            self.override_called = True
+            return super()._apply_hf_processor(inputs, timing_ctx)
+
+    processor = OverrideProcessor()
+    ref = MediaRef(lambda: Image.new("RGB", (4, 4)), b"image")
+    inputs = _lazy_inputs(processor, [ref], _lazy_cache() if passthrough else None)
+    if passthrough:
+        monkeypatch.setattr(
+            inputs.mm_data_items["image"],
+            "get_passthrough_data",
+            lambda: {"dummy": torch.zeros(1)},
+        )
+    processor.apply(inputs, TimingContext(enabled=False))
+    assert processor.override_called
+
+
+def test_processing_preserves_borrowed_mapped_ref():
+    """Releasing a processing wrapper must not consume its mapped source."""
+    processor = _LazyTestProcessor()
+    parent = MediaRef(lambda: Image.new("RGB", (4, 4)), b"image")
+    mapped = parent.map(lambda image: image.copy(), copy=True)
+    inputs = _lazy_inputs(processor, [mapped], None)
+    state = processor.apply_phase1(inputs, TimingContext(enabled=False))
+    owned = state.inputs.mm_data_items["image"].get_raw(0)
+    assert owned is not mapped
+    state.wait_decodes()
+    processor.apply_phase2(state)
+
+    assert owned.data == b""
+    assert mapped.data == parent.data == b"image"
+    assert mapped.decode().size == parent.decode().size == (4, 4)
 
 
 def test_lazy_cache_miss_decodes_in_parallel():
@@ -1847,7 +1892,7 @@ def test_lazy_decode_error_becomes_unprocessable(use_cache):
     assert exc_info.value.parameter is None
     assert "image media at index 0" in str(exc_info.value)
     assert slow_completed.is_set()
-    assert all(ref.data == b"" for ref in refs)
+    assert [ref.data for ref in refs] == [b"broken", b"good"]
 
 
 def test_cache_missing_items_selects_existing_refs(monkeypatch):
@@ -1910,7 +1955,8 @@ def test_lazy_decode_error_keeps_request_index_with_cache_hits(phase, monkeypatc
         else:
             processor.apply_phase2(state)
 
-    assert all(ref.data == b"" for ref in refs)
+    assert [ref.data for ref in refs] == payloads
+    assert all(ref.data == b"" for ref in state.inputs.mm_data_items["image"].data)
 
 
 @pytest.mark.parametrize("use_cache", [False, True])
@@ -1925,8 +1971,9 @@ def test_lazy_miss_bytes_available_during_hf_processing(use_cache):
 
     # The HF-facing layer saw the raw bytes for the miss item...
     assert processor.seen_encoded_bytes == [b"image-bytes"]
-    # ...and the bytes are released by the time processing returns.
-    assert lazy.data == b""
+    # Processing wrappers are released; borrowed inputs remain reusable.
+    assert processor.seen_media_refs[0].data == b""
+    assert lazy.data == b"image-bytes"
 
 
 @pytest.mark.parametrize("use_cache", [False, True])
@@ -1941,7 +1988,8 @@ def test_lazy_miss_bytes_released_on_hf_processor_error(use_cache):
         _lazy_apply(processor, [lazy], cache)
 
     assert processor.seen_encoded_bytes == [b"image-bytes"]
-    assert lazy.data == b""
+    assert processor.seen_media_refs[0].data == b""
+    assert lazy.data == b"image-bytes"
 
 
 def test_lazy_cancellation_drains_decodes_before_release():
@@ -2094,7 +2142,8 @@ def test_lazy_phase2_handles_hit_eviction():
 
     assert processor.hf_calls == 2
     assert result["mm_kwargs"]["image"][0] is not None
-    assert lazy2.data == b""
+    assert lazy2.data == data
+    assert state.inputs.mm_data_items["image"].get_raw(0).data == b""
 
 
 @pytest.mark.parametrize(

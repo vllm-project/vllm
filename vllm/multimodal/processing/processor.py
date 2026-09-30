@@ -1115,8 +1115,8 @@ class MultiModalApplyState:
     def release(self) -> None:
         """Release owned refs after decoding and processing have finished.
 
-        Selected cache misses share refs with the original inputs. Other
-        retained refs, including parents of mapped refs, remain caller-owned.
+        Selected cache misses share the state's wrappers. Borrowed input refs
+        and their mapped parents remain caller-owned and reusable.
         """
         for items in self.inputs.mm_data_items.values():
             if isinstance(items, ProcessorBatchItems):
@@ -1618,6 +1618,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         decodes. The caller must drain `state.decodes` (off the mm worker)
         before calling `_apply_hf_processor_phase2`.
         """
+        inputs = inputs.fork_media_refs()
         if not use_cache:
             with timing_ctx.record("decode_mm_items"):
                 decodes = _submit_ref_decodes(inputs.mm_data_items)
@@ -1713,6 +1714,8 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
 
         Synchronous composition of phase 1 + decode join + phase 2.
         """
+        if not inputs.can_use_cache:
+            return self._apply_hf_processor(inputs, timing_ctx)
         state = self._apply_hf_processor_phase1(
             inputs, timing_ctx, use_cache=inputs.can_use_cache
         )

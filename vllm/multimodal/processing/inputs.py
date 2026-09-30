@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 from vllm.config.multimodal import MMHasherAlgorithm
 from vllm.inputs import MultiModalHashes
@@ -9,7 +9,7 @@ from vllm.inputs import MultiModalHashes
 from ..cache import BaseMultiModalProcessorCache
 from ..hasher import MultiModalHasher
 from ..media import MediaRef
-from ..parse import MultiModalDataItems, MultiModalUUIDItems
+from ..parse import MultiModalDataItems, MultiModalUUIDItems, ProcessorBatchItems
 
 _HF_MODALITY_PROCESSOR_KWARGS = {
     "image": "images_kwargs",
@@ -31,6 +31,21 @@ class ProcessorInputs:
     media_io_kwargs: Mapping[str, Mapping[str, object]] = field(default_factory=dict)
 
     cache: BaseMultiModalProcessorCache | None = None
+
+    def fork_media_refs(self) -> "ProcessorInputs":
+        """Give processing releasable wrappers around borrowed media refs."""
+        owned_items = MultiModalDataItems()
+        for modality, items in self.mm_data_items.items():
+            if isinstance(items, ProcessorBatchItems):
+                items = items.select(range(items.get_count()))
+                items.data = [
+                    MediaRef(item.decode, item.data, item.spec, key=item.key)
+                    if isinstance(item, MediaRef)
+                    else item
+                    for item in items.get_all_raw()
+                ]
+            owned_items[modality] = items
+        return replace(self, mm_data_items=owned_items)
 
     @property
     def can_use_cache(self) -> bool:

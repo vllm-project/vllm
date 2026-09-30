@@ -668,6 +668,20 @@ def test_load_bytes_ref_matches_load_bytes(tmp_path, codec_backend: str):
     assert lazy.data == data
 
 
+def test_jpeg_sequence_key_covers_image_decoder_settings():
+    """Different frame decoders must not reuse the same processor output."""
+    data = ",".join(_make_jpeg_b64_frames(1))
+    rgb_io = VideoMediaIO(ImageMediaIO(image_mode="RGB"), num_frames=1)
+    gray_io = VideoMediaIO(ImageMediaIO(image_mode="L"), num_frames=1)
+    rgb = rgb_io.load_base64_ref("video/jpeg", data)
+    gray = gray_io.load_base64_ref("video/jpeg", data)
+
+    assert rgb.key != gray.key
+    assert rgb.decode()[0].shape == (1, 8, 8, 3)
+    assert gray.decode()[0].shape == (1, 8, 8)
+    assert rgb.key != rgb_io.load_bytes_ref(data.encode()).key
+
+
 def test_load_base64_ref_jpeg_defers_decode(monkeypatch: pytest.MonkeyPatch):
     """The jpeg_sequence lazy path defers per-frame decoding (not just the
     stack) until first access, and decodes to the same result as load_base64."""

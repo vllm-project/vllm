@@ -974,22 +974,54 @@ class BaseRenderer(ABC, Generic[_T]):
             )
 
         loop = asyncio.get_running_loop()
-        mm_processor, state = await loop.run_in_executor(
-            self._mm_executor,
-            partial(
-                self._process_multimodal_phase1,
-                prompt,
-                mm_data,
-                mm_uuids,
-                mm_processor_kwargs,
-                media_io_kwargs=media_io_kwargs,
-                skip_mm_cache=skip_mm_cache,
-            ),
-        )
-        await state.wait_decodes_async()
-        return await loop.run_in_executor(
-            self._mm_executor, self._process_multimodal_phase2, mm_processor, state
-        )
+        cancelled = False
+
+        async def run_phases() -> "MultiModalInput | None":
+            state = None
+            try:
+                processor, state = await loop.run_in_executor(
+                    self._mm_executor,
+                    partial(
+                        self._process_multimodal_phase1,
+                        prompt,
+                        mm_data,
+                        mm_uuids,
+                        mm_processor_kwargs,
+                        media_io_kwargs=media_io_kwargs,
+                        skip_mm_cache=skip_mm_cache,
+                    ),
+                )
+                await state.wait_decodes_async()
+                if cancelled:
+                    return None
+
+                def finish_processing() -> "MultiModalInput | None":
+                    if cancelled:
+                        return None
+                    return self._process_multimodal_phase2(processor, state)
+
+                return await loop.run_in_executor(self._mm_executor, finish_processing)
+            finally:
+                if state is not None:
+                    state.release()
+
+        operation = asyncio.create_task(run_phases())
+        try:
+            result = await asyncio.shield(operation)
+        except asyncio.CancelledError:
+            cancelled = True
+            while not operation.done():
+                try:
+                    await asyncio.shield(operation)
+                except asyncio.CancelledError:
+                    continue
+                except Exception:
+                    break
+            if not operation.cancelled():
+                operation.exception()
+            raise
+        assert result is not None
+        return result
 
     def _process_tokens(
         self,

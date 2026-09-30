@@ -3,16 +3,22 @@
 
 import asyncio
 import threading
+from concurrent.futures import Future, ThreadPoolExecutor
 from http import HTTPStatus
+from types import SimpleNamespace
 
 import pytest
+from PIL import Image
 
 from vllm.assets.image import ImageAsset
 from vllm.assets.video import VideoAsset
 from vllm.config import CacheConfig, ModelConfig, VllmConfig
 from vllm.entrypoints.serve import create_error_response
 from vllm.multimodal.media import MediaRef
-from vllm.multimodal.parse import parse_mm_uuids
+from vllm.multimodal.parse import MultiModalDataParser, parse_mm_uuids
+from vllm.multimodal.processing import MultiModalApplyState, ProcessorInputs
+from vllm.multimodal.processing.context import TimingContext
+from vllm.renderers.base import BaseRenderer
 from vllm.renderers.hf import HfRenderer
 from vllm.tokenizers.registry import cached_tokenizer_from_config
 
@@ -297,3 +303,108 @@ async def test_process_multimodal_async_does_not_block_mm_worker_on_decode():
         assert result_a["mm_kwargs"]["image"][0] is not None
     finally:
         release_decode.set()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "stage",
+    ["phase1", "decode", "decode_error", "phase2_queued", "phase2_running"],
+)
+async def test_multimodal_cancellation_drains_executor_work(stage, monkeypatch):
+    """Cancellation must drain running work and release even queued phase 2."""
+    source = MediaRef(lambda: stop_pil_image, b"payload")
+    inputs = ProcessorInputs(
+        [], MultiModalDataParser().parse_mm_data({"image": source})
+    ).fork_media_refs()
+    owned = inputs.mm_data_items["image"].get_raw(0)
+    decoded: Future[Image.Image] = Future()
+    state = MultiModalApplyState(
+        inputs, TimingContext(enabled=False), None, [("image", 0, decoded)]
+    )
+    entered = threading.Event()
+    proceed = threading.Event()
+    decode_waiting = asyncio.Event()
+    phase2_submitted = asyncio.Event()
+    phase2_called = False
+
+    def block_worker():
+        entered.set()
+        assert proceed.wait(timeout=10)
+
+    def phase1(*args, **kwargs):
+        if stage == "phase1":
+            block_worker()
+        return processor, state
+
+    def phase2(*args):
+        nonlocal phase2_called
+        phase2_called = True
+        if stage == "phase2_running":
+            block_worker()
+        return {"prompt_token_ids": []}
+
+    wait_decodes = state.wait_decodes_async
+
+    async def tracked_wait():
+        decode_waiting.set()
+        await wait_decodes()
+
+    monkeypatch.setattr(state, "wait_decodes_async", tracked_wait)
+    loop = asyncio.get_running_loop()
+    run_in_executor = loop.run_in_executor
+
+    def tracked_submit(executor, func, *args):
+        future = run_in_executor(executor, func, *args)
+        if getattr(func, "__name__", None) == "finish_processing":
+            phase2_submitted.set()
+        return future
+
+    monkeypatch.setattr(loop, "run_in_executor", tracked_submit)
+    processor = SimpleNamespace(supports_two_phase_apply=True)
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        renderer = SimpleNamespace(
+            get_mm_processor=lambda: processor,
+            _mm_executor=executor,
+            _process_multimodal_phase1=phase1,
+            _process_multimodal_phase2=phase2,
+        )
+        task = asyncio.create_task(
+            BaseRenderer._process_multimodal_async(renderer, [], {}, None, None)
+        )
+        try:
+            if stage == "phase1":
+                assert await asyncio.to_thread(entered.wait, 10)
+            else:
+                await asyncio.wait_for(decode_waiting.wait(), timeout=10)
+                if stage == "phase2_queued":
+                    executor.submit(block_worker)
+                    assert await asyncio.to_thread(entered.wait, 10)
+                if stage.startswith("phase2"):
+                    decoded.set_result(owned.decode())
+                    await asyncio.wait_for(phase2_submitted.wait(), timeout=10)
+                    if stage == "phase2_running":
+                        assert await asyncio.to_thread(entered.wait, 10)
+
+            for _ in range(2):
+                task.cancel()
+                await asyncio.sleep(0)
+            assert not task.done()
+            assert owned.data == b"payload"
+            proceed.set()
+            if not decoded.done():
+                if stage == "decode_error":
+                    decoded.set_exception(ValueError("corrupt media"))
+                else:
+                    decoded.set_result(owned.decode())
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(task, timeout=10)
+            assert owned.data == b""
+            assert source.data == b"payload"
+            assert phase2_called == (stage == "phase2_running")
+        finally:
+            proceed.set()
+            if not decoded.done():
+                decoded.set_result(source.decode())
+            if not task.done():
+                task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
