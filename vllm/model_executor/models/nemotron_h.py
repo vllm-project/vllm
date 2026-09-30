@@ -42,7 +42,10 @@ from vllm.model_executor.layers.fused_moe import (
     activation_without_mul,
     fused_moe_make_expert_params_mapping,
 )
-from vllm.model_executor.layers.fusion.fused_act_quant import maybe_fused_act_quant
+from vllm.model_executor.layers.fusion.fused_act_quant import (
+    maybe_fused_act_quant,
+    register_relu_squared_nvfp4_quant_warmup,
+)
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
@@ -125,6 +128,7 @@ class NemotronHMLP(nn.Module):
             prefix=f"{prefix}.down_proj",
         )
         self.act_fn = get_act_fn(hidden_act)
+        register_relu_squared_nvfp4_quant_warmup(self)
 
     def forward(self, x: torch.Tensor):
         x, _ = self.up_proj(x)
