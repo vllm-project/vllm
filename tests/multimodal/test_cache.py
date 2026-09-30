@@ -11,7 +11,6 @@ import torch
 from vllm.config import ModelConfig, ParallelConfig, VllmConfig
 from vllm.config.multimodal import MultiModalConfig
 from vllm.multimodal.cache import (
-    BaseMultiModalProcessorCache,
     BaseMultiModalReceiverCache,
     LruKeyReplicatedReceiverCache,
     LruKeyReplicatedSenderCache,
@@ -145,6 +144,8 @@ def _compare_caches(
     cache_1_p0 = processor_cache_from_config(config_1)
     cache_1_p1 = engine_receiver_cache_from_config(config_1)
 
+    assert config_0.model_config.multimodal_config is not None
+    assert config_1.model_config.multimodal_config is not None
     cache_size_gb = max(
         config_0.model_config.multimodal_config.mm_processor_cache_gb,
         config_1.model_config.multimodal_config.mm_processor_cache_gb,
@@ -280,6 +281,7 @@ def test_oversized_item_is_served_uncached():
 
     p0 = LruKeyReplicatedSenderCache(model_config)  # type: ignore[arg-type]
     p1 = LruKeyReplicatedReceiverCache(model_config)  # type: ignore[arg-type]
+    assert item is not None
     assert p0.get_and_update_item((item, []), "big")[0] is item
     assert not p0.is_cached_item("big")
     assert p1.get_and_update_item(item, "big") is item
@@ -318,6 +320,7 @@ def test_mm_cache_miss_raises_and_recovers():
     assert p0.is_cached_item(mm_hash)
     # On the next request P0 short-circuits to data=None -- the drift bug when
     # P1 lacks the item.
+    assert item is not None
     hit = p0.get_and_update_item((item, []), mm_hash)
     assert hit[0] is None
 
@@ -326,6 +329,7 @@ def test_mm_cache_miss_raises_and_recovers():
     p0.invalidate(mm_hash)
     assert not p0.is_cached_item(mm_hash)
 
+    assert item is not None
     resent = p0.get_and_update_item((item, []), mm_hash)
     assert resent[0] is item  # MISS again -> data is resent
     assert p1.get_and_update_item(item, mm_hash) == item  # P1 now caches it
@@ -459,6 +463,7 @@ def test_shm_receiver_handles_prefix_covered_items(monkeypatch):
         address_item, _ = p0.get_and_update_item((item, []), mm_hash)
         first = _feature(mm_hash, address_item)
         p1.get_and_update_features([first])
+        assert first.data is not None
         assert torch.equal(first.data["dummy"].data, item["dummy"].data)
 
         # Request 2 (identical, fully prefix-covered): the sender hit takes
@@ -476,6 +481,7 @@ def test_shm_receiver_handles_prefix_covered_items(monkeypatch):
 
         assert covered_uncached.data is None
         # The address item is resolved to the cached payload.
+        assert covered_cached.data is not None
         assert torch.equal(covered_cached.data["dummy"].data, item["dummy"].data)
 
         # The hit's writer references were acknowledged by the worker, so the
@@ -488,7 +494,7 @@ def test_shm_receiver_handles_prefix_covered_items(monkeypatch):
 
 
 def _run_test_cache_eviction_lru(
-    p0_cache: BaseMultiModalProcessorCache,
+    p0_cache: LruKeyReplicatedSenderCache,
     p1_cache: BaseMultiModalReceiverCache,
     base_item_size: int,
 ):
@@ -603,7 +609,7 @@ def test_cache_eviction_lru_cache():
 #    image_B is protected from eviction then image_i cannot be added.
 #    This proving normal eviction and reuse behavior.
 def _run_test_cache_eviction_shm(
-    p0_cache: BaseMultiModalProcessorCache,
+    p0_cache: ShmObjectStoreSenderCache,
     p1_cache: BaseMultiModalReceiverCache,
     base_item_size: int,
 ):
@@ -860,9 +866,9 @@ async def test_release_kv_cache_resends_mm_payload(use_async, release_error):
 
     async def call_release():
         if use_async:
-            await AsyncLLM.release_kv_cache_memory(engine)
+            await AsyncLLM.release_kv_cache_memory(engine)  # type: ignore[arg-type]
         else:
-            LLMEngine.release_kv_cache_memory(engine)
+            LLMEngine.release_kv_cache_memory(engine)  # type: ignore[arg-type]
 
     if release_error:
         with pytest.raises(RuntimeError, match=release_error):
@@ -894,9 +900,10 @@ def test_sleep_wake_preserves_mm_cache_consistency():
     """Regression for vllm-project/vllm#42995."""
     from vllm import LLM, SamplingParams
     from vllm.assets.image import ImageAsset
+    from vllm.inputs import TextPrompt
 
     image = ImageAsset("stop_sign").pil_image
-    prompt = {
+    prompt: TextPrompt = {
         "prompt": _SLEEP_VISION_PROMPT,
         "multi_modal_data": {"image": image},
     }

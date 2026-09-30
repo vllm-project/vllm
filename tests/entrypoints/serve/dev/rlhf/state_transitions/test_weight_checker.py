@@ -23,6 +23,7 @@ from vllm.distributed.weight_transfer import (
     WeightTransferTrainerFactory,
 )
 from vllm.distributed.weight_transfer.ipc_engine import IPCTrainerInitInfo
+from vllm.platforms import current_platform
 
 
 def weight_checker(url: str, action: str, baseline=None) -> requests.Response:
@@ -96,6 +97,9 @@ class TestSingleGPU:
         assert ok(gen(server_url))
 
 
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="IPC weight transfer uses CUDA IPC."
+)
 def test_ipc_weight_transfer_restores_reset_weights():
     """The documented RL flow: reset, then transfer the checkpoint back."""
     args = ["--weight-transfer-config", '{"backend": "ipc"}']
