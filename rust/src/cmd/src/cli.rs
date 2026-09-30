@@ -557,6 +557,8 @@ impl SharedRuntimeArgs {
             disable_log_stats: self.disable_log_stats,
             grpc_port: self.grpc_port,
             shutdown_timeout,
+            // The engine is launched and supervised by another process.
+            manages_engine: false,
             keep_alive_timeout,
             profiler,
         }
@@ -572,6 +574,7 @@ impl SharedRuntimeArgs {
         engine_count: usize,
         local_input_address: Option<String>,
         local_output_address: Option<String>,
+        manages_engine: bool,
     ) -> Config {
         let ready_timeout = self.ready_timeout();
         let shutdown_timeout = self.shutdown_timeout();
@@ -615,6 +618,7 @@ impl SharedRuntimeArgs {
             disable_log_stats: self.disable_log_stats,
             grpc_port: self.grpc_port,
             shutdown_timeout,
+            manages_engine,
             keep_alive_timeout,
             profiler,
         }
@@ -793,6 +797,8 @@ impl ServeArgs {
             self.managed_engine.data_parallel_size,
             local_input_address,
             local_output_address,
+            // `--data-parallel-size-local 0` runs the frontend without a local engine.
+            self.managed_engine.data_parallel_size_local != Some(0),
         )
     }
 

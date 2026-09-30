@@ -375,7 +375,7 @@ An attacker who can reach the gRPC port can:
 1. **Run arbitrary inference** via the `Generate` and `GenerateStream` RPCs without any credentials
 2. **Mutate engine state** by pausing generation, sleeping the engine, or initiating configured RL weight updates through the `Control` service
 3. **Consume GPU and compute resources** by submitting unbounded generation requests
-4. **Cause Denial of Service** by exploiting bugs in the gRPC interface that can crash vLLM.
+4. **Stop a managed engine** through `Control.Shutdown`, or cause denial of service by exploiting bugs in the gRPC interface.
 
 ### Recommendations
 

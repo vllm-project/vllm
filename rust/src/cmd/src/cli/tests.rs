@@ -1889,6 +1889,7 @@ fn serve_frontend_config_uses_dp_address_as_advertised_host() {
             disable_log_stats: false,
             grpc_port: None,
             shutdown_timeout: 0ns,
+            manages_engine: true,
             keep_alive_timeout: 5s,
             profiler: None,
         }
@@ -1983,6 +1984,7 @@ fn serve_frontend_config_keeps_tcp_transport_for_non_local_only_topology() {
             disable_log_stats: false,
             grpc_port: None,
             shutdown_timeout: 0ns,
+            manages_engine: true,
             keep_alive_timeout: 5s,
             profiler: None,
         }
@@ -2009,6 +2011,29 @@ fn frontend_args_reject_legacy_handshake_flags() {
     .unwrap_err();
 
     assert!(error.to_string().contains("--handshake-address"));
+}
+
+#[test]
+fn serve_frontend_config_does_not_manage_engine_without_local_engines() {
+    let cli = Cli::try_parse_from([
+        "vllm-rs",
+        "serve",
+        "Qwen/Qwen3-0.6B",
+        "--data-parallel-address",
+        "10.99.48.128",
+        "--data-parallel-size",
+        "2",
+        "--data-parallel-size-local",
+        "0",
+    ])
+    .unwrap();
+
+    let Command::Serve(args) = cli.command else {
+        panic!("expected serve args");
+    };
+    let config = args.to_frontend_config("tcp://10.99.48.128:29550".to_string());
+
+    assert!(!config.manages_engine);
 }
 
 #[test]
@@ -2098,6 +2123,7 @@ fn frontend_config_uses_external_coordinator_when_coordinator_address_is_present
             disable_log_stats: false,
             grpc_port: None,
             shutdown_timeout: 0ns,
+            manages_engine: false,
             keep_alive_timeout: 5s,
             profiler: None,
         }
