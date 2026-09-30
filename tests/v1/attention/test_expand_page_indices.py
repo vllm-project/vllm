@@ -21,7 +21,6 @@ import torch
 from vllm.v1.attention.backends.mla.rocm_aiter_mla import (
     _expand_page_indices_kernel,
 )
-from vllm.triton_utils import triton
 
 
 def _reference(block_table, cu_num_tokens, kernel_block_size, out_len, device):
@@ -60,8 +59,10 @@ def _run(block_table, cu_num_tokens, kernel_block_size, out_len, device):
 
 def _make(seq_lens, kernel_block_size, device, noncontig=False):
     num_reqs = len(seq_lens)
-    max_blocks = max(1, max((s + kernel_block_size - 1) // kernel_block_size
-                            for s in seq_lens)) + 2
+    max_blocks = (
+        max(1, max((s + kernel_block_size - 1) // kernel_block_size for s in seq_lens))
+        + 2
+    )
     width = max_blocks * 2 if noncontig else max_blocks
     torch.manual_seed(0)
     bt = torch.randint(0, 10_000, (num_reqs, width), dtype=torch.int64, device=device)
@@ -74,8 +75,9 @@ def _make(seq_lens, kernel_block_size, device, noncontig=False):
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a GPU")
-@pytest.mark.parametrize("seq_lens", [[1], [128], [4096], [1, 1], [4096, 7],
-                                      [37, 4096, 1], [1024] * 8])
+@pytest.mark.parametrize(
+    "seq_lens", [[1], [128], [4096], [1, 1], [4096, 7], [37, 4096, 1], [1024] * 8]
+)
 @pytest.mark.parametrize("kernel_block_size", [1, 16, 64])
 def test_matches_reference(seq_lens, kernel_block_size):
     bt, cu, total = _make(seq_lens, kernel_block_size, "cuda")
@@ -102,8 +104,13 @@ def test_ragged_batch_leaves_other_rows_untouched():
     out = torch.full((total + 8,), -999, dtype=torch.int64, device="cuda")
     num_chunks = max(1, -(-(bt.shape[1] * kbs) // 1024))
     _expand_page_indices_kernel[(3, num_chunks)](
-        out, bt, bt.stride(0), bt.stride(1), cu,
-        KERNEL_BLOCK_SIZE=kbs, BLOCK_SIZE=1024,
+        out,
+        bt,
+        bt.stride(0),
+        bt.stride(1),
+        cu,
+        KERNEL_BLOCK_SIZE=kbs,
+        BLOCK_SIZE=1024,
     )
     want = _reference(bt, cu, kbs, total, "cuda")
     torch.testing.assert_close(out[:total], want, atol=0, rtol=0)
@@ -141,7 +148,12 @@ def test_over_provisioned_chunks_do_not_change_result():
     for num_chunks in (required, required * 2, required * 8):
         out = torch.full((total,), -1, dtype=torch.int64, device="cuda")
         _expand_page_indices_kernel[(1, num_chunks)](
-            out, bt, bt.stride(0), bt.stride(1), cu,
-            KERNEL_BLOCK_SIZE=kbs, BLOCK_SIZE=1024,
+            out,
+            bt,
+            bt.stride(0),
+            bt.stride(1),
+            cu,
+            KERNEL_BLOCK_SIZE=kbs,
+            BLOCK_SIZE=1024,
         )
         torch.testing.assert_close(out, ref, atol=0, rtol=0)
