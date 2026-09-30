@@ -1,8 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import gc
-
 import pytest
 import torch
 
@@ -252,12 +250,9 @@ def test_free_while_asleep(offload, monkeypatch):
 
     remaps: list[HandleType] = []
     monkeypatch.setattr(cumem, "create_and_map", remaps.append)
-    # Drop the pool as engine shutdown does, keeping its allocator alive, so
-    # ~MemPool empties the cache and the C++ free runs while asleep.
-    pool, pluggable_allocator = allocator.allocator_and_pools.pop("freed")
-    del freed, pool
-    gc.collect()
-    torch.accelerator.empty_cache()
+    # Release the pools as engine shutdown does, so the C++ free runs asleep.
+    del freed
+    allocator.release_pools()
     monkeypatch.undo()
 
     assert ptr not in allocator.pointer_to_data
