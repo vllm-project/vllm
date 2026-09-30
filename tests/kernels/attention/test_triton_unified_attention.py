@@ -991,8 +991,10 @@ def _spec_verify_3d(seq_len, q_len, block_size, kv_dtype, negative):
     scores = torch.einsum("qhd,khd->hqk", q.float(), keys) * d**-0.5
     visible = seq_len - q_len + torch.arange(q_len, device=DEVICE_TYPE)[:, None]
     pos = torch.arange(seq_len, device=DEVICE_TYPE)[None, :]
-    scores = scores.masked_fill(pos > visible, float("-inf"))
-    ref = torch.einsum("hqk,khd->qhd", scores.softmax(-1), vals)
+    masked = pos > visible
+    probs = scores.masked_fill(masked, float("-inf")).softmax(-1).nan_to_num(0.0)
+    # Rows that see no key at all (seq_len < q_len) must come out as 0, not NaN.
+    ref = torch.einsum("hqk,khd->qhd", probs, vals)
     assert not torch.isnan(out).any()
     torch.testing.assert_close(out.float(), ref, atol=2e-2, rtol=2e-2)
 
@@ -1014,10 +1016,14 @@ def test_spec_verify_3d_matches_reference(
 
 @torch.inference_mode()
 def test_spec_verify_3d_fully_masked_segment_rows(monkeypatch):
-    """Some lengths put a segment boundary right before the last query tokens."""
+    """Rows with no visible key in a segment (epilogue guard) or at all (reducer).
+
+    Some lengths put a segment boundary right before the last query tokens;
+    lengths below q_len leave the first query rows without any visible key.
+    """
     import vllm.v1.attention.ops.triton_unified_attention as ua
 
     monkeypatch.setattr(ua, "_TRITON_3D_MAX_Q", 4)
     set_random_seed(0)
-    for seq_len in range(8, 200):
+    for seq_len in range(1, 200):
         _spec_verify_3d(seq_len, 4, 16, None, negative=True)
