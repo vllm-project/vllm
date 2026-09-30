@@ -240,6 +240,43 @@ def test_merge_mm_processor_kwargs_scoped_precedence():
     }
 
 
+def test_merge_mm_processor_kwargs_preserves_scoped_siblings_and_precedence():
+    config = MultiModalConfig(
+        mm_processor_kwargs={
+            "size": {
+                "shortest_edge": 100,
+                "longest_edge": 1000,
+            },
+            "videos_kwargs": {
+                "fps": 2,
+                "size": {"longest_edge": 1200},
+            },
+        },
+        mm_device_do_normalize=False,
+    )
+
+    assert config.merge_mm_processor_kwargs(
+        {
+            "size": {"longest_edge": 1800},
+            "videos_kwargs": {
+                "size": {"shortest_edge": 200},
+            },
+        }
+    ) == {
+        "size": {
+            "shortest_edge": 100,
+            "longest_edge": 1800,
+        },
+        "videos_kwargs": {
+            "fps": 2,
+            "size": {
+                "shortest_edge": 200,
+                "longest_edge": 1800,
+            },
+        },
+    }
+
+
 def test_merge_mm_processor_kwargs_mapping_vs_replacement():
     config = MultiModalConfig(
         mm_processor_kwargs={
