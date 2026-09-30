@@ -21,6 +21,7 @@ from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.linear import QKVParallelLinear
 from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase
 from vllm.model_executor.model_loader.reload.layerwise import (
+    discard_layerwise_reload,
     finalize_layerwise_reload,
     initialize_layerwise_reload,
     initialize_online_processing,
@@ -489,6 +490,43 @@ def test_model_cleanup(dist_init, default_vllm_config):
     assert len(mock_info_dict) == 0
 
 
+@pytest.mark.parametrize("as_buffer", [False, True])
+def test_restored_reload_metadata_does_not_keep_layer_alive(monkeypatch, as_buffer):
+    """Completed reloads must not pin layers through cached loader attributes."""
+
+    class BoundLoaderLayer(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            value = torch.ones(2, device="cpu")
+            if as_buffer:
+                self.register_buffer("weight", value)
+            else:
+                self.register_parameter("weight", torch.nn.Parameter(value))
+            self.weight.weight_loader = self.load
+
+        def load(self, param, loaded_weight):
+            default_weight_loader(param, loaded_weight)
+
+    registry: WeakKeyDictionary[torch.nn.Module, LayerReloadingInfo] = (
+        WeakKeyDictionary()
+    )
+    monkeypatch.setattr(reload_layerwise, "LAYERWISE_INFO", registry)
+    layer = BoundLoaderLayer()
+    model = torch.nn.Sequential(layer)
+    record_metadata_for_reloading(model)
+    for generation in (2.0, 3.0):
+        initialize_layerwise_reload(model)
+        expected = torch.full((2,), generation, device="cpu")
+        layer.weight.weight_loader(layer.weight, expected)
+        finalize_layerwise_reload(model, model_config=None)
+        assert torch.equal(layer.weight, expected)
+    layer_ref = ref(layer)
+    del layer, model
+    gc.collect()
+    assert layer_ref() is None
+    assert not registry
+
+
 @pytest.mark.parametrize("is_gated", [False, True])
 @pytest.mark.parametrize("has_bias", [False, True])
 @pytest.mark.parametrize("tp_rank", [0, 1])
@@ -669,6 +707,29 @@ class _ComposedLoaderLayer(torch.nn.Module):
         )
         self.D.weight_loader = default_weight_loader
         self.dt_bias.weight_loader = default_weight_loader
+
+
+def test_discard_incomplete_reload_releases_layer_and_checkpoint(monkeypatch):
+    registry: WeakKeyDictionary[torch.nn.Module, LayerReloadingInfo] = (
+        WeakKeyDictionary()
+    )
+    monkeypatch.setattr(reload_layerwise, "LAYERWISE_INFO", registry)
+    layer = _ComposedLoaderLayer()
+    record_metadata_for_reloading(layer)
+    initialize_layerwise_reload(layer)
+    checkpoint = torch.ones(4)
+    checkpoint_ref = ref(checkpoint)
+    layer.A.weight_loader(layer.A, checkpoint)
+    del checkpoint
+    assert checkpoint_ref() is not None
+
+    discard_layerwise_reload(layer)
+    layer_ref = ref(layer)
+    del layer
+    gc.collect()
+    assert layer_ref() is None
+    assert checkpoint_ref() is None
+    assert not registry
 
 
 def test_layerwise_reload_composed_loader_does_not_drop_params(monkeypatch):
