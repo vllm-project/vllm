@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from typing import Any, cast
+
 from vllm.config import VllmConfig
 from vllm.entrypoints.chat_utils import (
     ChatCompletionMessageParam,
@@ -18,6 +20,83 @@ from .inputs.preprocess import parse_dec_only_prompt
 from .params import ChatParams
 
 logger = init_logger(__name__)
+
+
+def _adapt_tool_images_for_mistral(
+    messages: list[ChatCompletionMessageParam], tokenizer_version: int
+) -> list[ChatCompletionMessageParam]:
+    """Keep tool results consecutive for Mistral tokenizers before v15.
+
+    Mistral Common accepts multimodal tool content starting with tokenizer v15.
+    Older tokenizers reject image chunks on `role=tool`. Move those images to
+    the following user turn only at the renderer boundary, after every
+    consecutive tool result has been emitted. This avoids reintroducing a user
+    message between parallel tool results while preserving the image input.
+    """
+    if tokenizer_version >= 15:
+        return messages
+
+    adapted: list[ChatCompletionMessageParam] = []
+    pending_images: list[dict[str, Any]] = []
+
+    for message in messages:
+        content = message.get("content")
+        if message.get("role") == "tool":
+            if isinstance(content, list):
+                tool_content = []
+                for part in content:
+                    if isinstance(part, dict) and part.get("type") == "image_url":
+                        pending_images.append(part)
+                    else:
+                        tool_content.append(part)
+                adapted.append(
+                    cast(
+                        ChatCompletionMessageParam,
+                        {**message, "content": tool_content},
+                    )
+                )
+            else:
+                adapted.append(message)
+            continue
+
+        if pending_images:
+            if message.get("role") == "user":
+                if isinstance(content, list):
+                    user_content = [*pending_images, *content]
+                elif isinstance(content, str):
+                    user_content = [
+                        *pending_images,
+                        {"type": "text", "text": content},
+                    ]
+                else:
+                    user_content = pending_images.copy()
+                adapted.append(
+                    cast(
+                        ChatCompletionMessageParam,
+                        {**message, "content": user_content},
+                    )
+                )
+            else:
+                adapted.append(
+                    cast(
+                        ChatCompletionMessageParam,
+                        {"role": "user", "content": pending_images.copy()},
+                    )
+                )
+                adapted.append(message)
+            pending_images.clear()
+        else:
+            adapted.append(message)
+
+    if pending_images:
+        adapted.append(
+            cast(
+                ChatCompletionMessageParam,
+                {"role": "user", "content": pending_images},
+            )
+        )
+
+    return adapted
 
 
 def safe_apply_chat_template(
@@ -65,6 +144,7 @@ class MistralRenderer(BaseRenderer[MistralTokenizer]):
         params: ChatParams,
     ) -> tuple[list[ConversationMessage], DictPrompt]:
         tokenizer = self.get_tokenizer()
+        messages = _adapt_tool_images_for_mistral(messages, tokenizer.version)
         conversation, mm_data, mm_uuids = parse_chat_messages(
             messages,
             self.model_config,
@@ -93,6 +173,7 @@ class MistralRenderer(BaseRenderer[MistralTokenizer]):
         params: ChatParams,
     ) -> tuple[list[ConversationMessage], DictPrompt]:
         tokenizer = self.get_tokenizer()
+        messages = _adapt_tool_images_for_mistral(messages, tokenizer.version)
         conversation, mm_data, mm_uuids = await parse_chat_messages_async(
             messages,
             self.model_config,
