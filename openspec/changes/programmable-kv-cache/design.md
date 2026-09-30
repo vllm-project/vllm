@@ -1,8 +1,11 @@
+# Programmable KV cache design
+
 ## Context
 
-This is a discussion draft. The confirmed scope comes from RFC #57103, the
-author's September 24 comment, and the October 1 discussion. Implementation must
-not treat the open questions below as settled defaults.
+The confirmed scope comes from RFC #57103, the author's September 24 comment,
+and the October 1 discussion. `implementation.md` records the subsequent user
+answers and concrete implementation contract; `test-plan.md` defines phase gates.
+Unresolved deployment/model capabilities remain subject to actual validation.
 
 The working tree already contains `KvHintsEnvelope` in the Python engine/request
 path and Rust protocol, as well as the merged KVCR secondary-tier adapter. The
@@ -360,16 +363,16 @@ mechanisms, and existing KVCR compatibility checks remain first-release work.
 
 ## References
 
-- https://github.com/vllm-project/vllm/issues/57103#issuecomment-5814964446
-- https://github.com/vllm-project/vllm/issues/51428
-- https://github.com/vllm-project/vllm/issues/48501
-- https://github.com/vllm-project/vllm/pull/53423
-- https://github.com/vllm-project/vllm/pull/53624
-- https://github.com/vllm-project/vllm/pull/38514
-- https://github.com/vllm-project/agentic-api/issues/364
-- https://github.com/vllm-project/agentic-api/issues/367
-- https://verl.readthedocs.io/en/latest/advance/agent_loop.html
-- https://github.com/verl-project/verl/blob/main/docs/start/agentic_rl.rst
+- <https://github.com/vllm-project/vllm/issues/57103#issuecomment-5814964446>
+- <https://github.com/vllm-project/vllm/issues/51428>
+- <https://github.com/vllm-project/vllm/issues/48501>
+- <https://github.com/vllm-project/vllm/pull/53423>
+- <https://github.com/vllm-project/vllm/pull/53624>
+- <https://github.com/vllm-project/vllm/pull/38514>
+- <https://github.com/vllm-project/agentic-api/issues/364>
+- <https://github.com/vllm-project/agentic-api/issues/367>
+- <https://verl.readthedocs.io/en/latest/advance/agent_loop.html>
+- <https://github.com/verl-project/verl/blob/main/docs/start/agentic_rl.rst>
 - Local source: `docs/programmable-kvc/chats.md`, especially sections on
   SessionPrefixIndex, KVEvents, request-independent retention, and envelopes.
 - Local source: `docs/programmable-kvc/notes.md`.

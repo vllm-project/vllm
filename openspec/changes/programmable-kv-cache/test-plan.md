@@ -1,0 +1,55 @@
+# Validation plan
+
+Each implementation phase runs the complete relevant suites before its commit.
+Smoke tests are not acceptance evidence. Record commands, versions, counts,
+failures and skipped capabilities; distinguish mocks from real transfers.
+
+## Contracts and cheapest effective checks
+
+| Module purpose | Input/output contract | Failure guarded against | Test level and existing suite |
+| --- | --- | --- | --- |
+| Hint validation/results | Merged envelope plus context → correlated, bounded results | Duplicate effects, conflicting retries, false completion, result loss | New `tests/v1/test_kv_hint_control.py`; existing `test_request.py` only tests request transport and has no control lifecycle suite |
+| Logical index/declarations | Session/continuation updates → group-aware resolution, independent expiry | Branch confusion, cache-hit membership loss, shared-prefix cleanup, stale writes | New `tests/v1/test_kv_hint_state.py` for the new pure state module; cache hooks in existing prefix-cache suites |
+| GPU resource authority | Resolved content/current refs → approved buffers or explicit refusal | Double allocation, stale registration, releasing active memory | `tests/v1/core/test_prefix_caching.py`, `test_deferred_block_free.py`, `test_single_type_kv_cache_manager.py` |
+| Policy and scheduler | Read-only observations/proposals → bounded guidance | Rewriting directives, starvation, double-counted quota, changed preemption | `tests/v1/core/test_scheduler.py`, `test_async_scheduler.py`, `test_priority_scheduler_random.py` |
+| CPU adapter | Approved transfer → real bytes and completion | Buffer lifetime, races, failed-load registration | `tests/v1/kv_offload/cpu/test_manager.py`, `test_gpu_worker.py`, `tests/v1/kv_connector/unit/offloading_connector/` |
+| Mooncake adapter | Group/rank metadata → storage/load outcomes | Missing shards, incompatible boundaries, reset and completion races | Complete `tests/v1/kv_connector/unit/test_mooncake_store_*.py` suites, then real Store/GPU integration |
+| KVCR compatibility | Opaque envelope/request → forwarding/query/deliver/cleanup | Native double consumption, payload mutation, premature readiness | `tests/v1/kv_offload/tiering/test_kvcr_tier.py` |
+| Serving | Python/HTTP targeting → same engine records | Wrong engine/epoch, version errors, ingress mismatch | Existing engine and OpenAI serving suites plus control endpoint integration |
+
+State tests use a fake monotonic clock, bounded capacities, and observable queries.
+Use seeded interleavings for shared declarations, retries, cancellation and reset;
+do not replace real worker/engine integration with a simulated operation loop.
+
+## Real execution acceptance
+
+1. Run existing CPU worker transfer correctness on allocated GPUs, including both
+   copy directions, layouts and failure/reference cleanup.
+2. Run real Mooncake Store Put/Get with actual GPU buffers and per-rank completion.
+   Existing `test_mooncake_store_hma_e2e.py` uses a dict-backed mock and cannot satisfy
+   this requirement despite its filename.
+3. Run lightweight orchestrator → HTTP/Python → native hint semantics → Store.
+   Verify no inference request is required for operation progress; only report
+   prefetch ready after registration and subsequent actual prefix-cache reuse.
+4. Compare deterministic outputs/logprobs with no-feature baselines; exercise TP=2,
+   shared prefixes, hybrid groups, branches, partial ranges and weight invalidation.
+5. Run failures: one failed rank, missing object, reset during transfer, duplicate
+   commands, partial demotion, resume racing prefetch, capacity deferral and restart.
+6. Run native/router-directed/individual-policy/composed-policy workloads and
+   separately labeled oracle schedules. Include all branches and delayed requests.
+   Save raw timings, transfer volume, displacement, admission delay, throughput,
+   TTFT/tails, recomputation, index memory and CPU overhead.
+7. Run the external large-model matrix when the machines become available. Keep
+   unexecuted results explicitly incomplete in `tasks.md`.
+
+## Initial environment observations
+
+- Source baseline: `0ee724bb7a` (upstream code ancestor `30f5c01d4e`).
+- New uv-managed CPython 3.12 environment; pre-commit and commit-msg hooks installed.
+- Local uv upgraded inside `.venv` because the host uv cannot parse this project's
+  `exclude-dependencies` configuration. No global Python environment modification.
+- GPUs 0/3: A100 PCIe 80GB; driver 595.71.05. GPU 2 excluded by allocation.
+- Editable precompiled installation and full test dependencies: pending completion.
+- GitHub CLI is unauthenticated. Public REST checks found request-free prefetch
+  PR #58198 and retention PR #38514. Preserve their execution/reuse boundaries;
+  repeat required authenticated CLI checks before PR publication. No PR created.

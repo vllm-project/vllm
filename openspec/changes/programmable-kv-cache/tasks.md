@@ -1,9 +1,11 @@
+# Programmable KV cache tasks
+
 ## 1. Resolve remaining design questions
 
 - [x] 1.1 Record the user's scheduler-cooperation scope and RL workload choice; update design and affected specs before implementing dependent behavior.
 - [ ] 1.2 Agree on the control transport/profile, explicit engine routing, target coverage, CPU adapter, and per-backend capability matrix.
-- [ ] 1.3 Specify operation statuses, deduplication/retry limits, declaration timing, task cleanup ordering, and bounded index/result storage.
-- [ ] 1.4 Specify reference policies, composer conflict rules, and any optional admission/score behavior without allowing cache plugins to mutate queues directly.
+- [ ] 1.3 Specify operation statuses, deduplication/retry limits, declaration timing, task cleanup ordering, and bounded index/result storage. Result/lifetime contract is in implementation.md; index bounds remain to implement and validate.
+- [x] 1.4 Specify reference policies, composer conflict rules, and any optional admission/score behavior without allowing cache plugins to mutate queues directly.
 - [ ] 1.5 Identify the model, usable GPU allocation, Mooncake deployment, and open-source rollout example for reproducible validation.
 - [x] 1.6 Confirm application control through the merged hints, explicit state commands separate from policy signals, and incremental association events with queries.
 - [ ] 1.7 Define snapshot/follow-growth target scope, derived-plan outcomes, and stale/retried logical-state updates.
@@ -12,13 +14,13 @@
 
 ## 2. Environment and test design
 
-- [ ] 2.1 Set up the uv-managed Python environment, editable vLLM dependencies, and required pre-commit hooks.
-- [ ] 2.2 Map behavior checks to existing nearby suites; document module contracts, guarded failure modes, and the cheapest effective test level before adding tests.
-- [ ] 2.3 Record baseline versions/configurations and smoke-test the unchanged CPU and Mooncake paths in the chosen environment.
+- [x] 2.1 Set up the uv-managed Python environment, editable vLLM dependencies, and required pre-commit hooks.
+- [x] 2.2 Map behavior checks to existing nearby suites; document module contracts, guarded failure modes, and the cheapest effective test level before adding tests.
+- [ ] 2.3 Record baseline versions/configurations and run complete relevant CPU and Mooncake correctness suites plus real-transfer integration in the chosen environment; smoke tests do not satisfy acceptance.
 
 ## 3. Control contracts and logical state
 
-- [ ] 3.1 Implement validated action payloads, target/capability records, and bounded correlated operation results using the existing envelope.
+- [x] 3.1 Implement validated action payloads, target/capability records, and bounded correlated operation results using the existing envelope.
 - [ ] 3.2 Implement the logical session/continuation index and hash/group-aware resolution, including cache-hit associations and reported coverage.
 - [ ] 3.3 Implement independent Retain declarations, expiry, Release, and explicit task-tree cleanup.
 - [ ] 3.4 Verify shared-prefix lifetimes, branch selection, missing content, duplicate control, and unconsumed signals.
