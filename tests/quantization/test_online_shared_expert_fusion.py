@@ -17,6 +17,7 @@ from vllm.config.quantization import (
     resolve_quantization_config,
 )
 from vllm.model_executor.layers.fused_moe import FusedMoEFactory
+from vllm.model_executor.layers.fused_moe.experts import rocm_aiter_moe
 from vllm.model_executor.layers.quantization.online.base import OnlineQuantizationConfig
 from vllm.model_executor.layers.quantization.online.moe_shared_expert import (
     OnlineMxfp4SharedExpertLoader,
@@ -31,6 +32,11 @@ from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
 from vllm.model_executor.model_loader.dummy_loader import DummyModelLoader
 from vllm.model_executor.model_loader.utils import get_model_architecture
 from vllm.platforms import current_platform
+
+pytestmark = pytest.mark.skipif(
+    not current_platform.is_rocm(),
+    reason="ROCm AITER shared-expert tests require ROCm.",
+)
 
 _QUARK_MXFP4_CONFIG: dict[str, Any] = {
     "global_quant_config": {
@@ -107,6 +113,15 @@ _QUARK_MXFP4_CONFIG = {
 }
 
 
+@pytest.fixture(autouse=True)
+def reset_aiter_shared_expert_topk_metadata(monkeypatch: pytest.MonkeyPatch):
+    """Isolate AITER's process-global shared-expert routing buffer."""
+    monkeypatch.setattr(rocm_aiter_moe, "aiter_topK_meta_data", None)
+    rocm_aiter_moe.init_aiter_topK_meta_data.cache_clear()
+    yield
+    rocm_aiter_moe.init_aiter_topK_meta_data.cache_clear()
+
+
 def _write_minimal_moe_config(model_path: Path, architecture: str) -> None:
     """Write a compact MoE config with one shared expert."""
     config = {
@@ -179,10 +194,6 @@ def test_online_shared_expert_quantization_fusion_tp() -> None:
     assert torch.equal(loader._tp_shard(w2, "w2", tp_size=2, tp_rank=1), w2[:, 4:])
 
 
-@pytest.mark.skipif(
-    not current_platform.is_rocm(),
-    reason="MXFP4 shared-expert loading requires ROCm.",
-)
 def test_online_shared_expert_loads_bf16_weights_into_mxfp4_slot(
     default_vllm_config,
     dist_init,
@@ -252,10 +263,6 @@ def test_online_shared_expert_loads_bf16_weights_into_mxfp4_slot(
     assert torch.equal(layer.w2_weight_scale[2], expected_down_scale)
 
 
-@pytest.mark.skipif(
-    not current_platform.is_rocm(),
-    reason="Fused shared-expert online quantization is a ROCm AITER feature.",
-)
 @pytest.mark.parametrize(
     "architecture",
     [
