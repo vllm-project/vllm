@@ -1139,7 +1139,7 @@ def subclass_attention_backend(
     builder_cls: type[AttentionMetadataBuilder[M]],
 ) -> type[AttentionBackend]:
     """Return a new subclass where `get_builder_cls` returns `builder_cls`."""
-    name: str = name_prefix + attention_backend_cls.__name__
+    name: str = name_prefix + attention_backend_cls.__name__  # type: ignore
 
     return type(
         name, (attention_backend_cls,), {"get_builder_cls": lambda: builder_cls}
@@ -1151,5 +1151,5 @@ def subclass_attention_backend_with_overrides(
     attention_backend_cls: type[AttentionBackend],
     overrides: dict[str, Any],
 ) -> type[AttentionBackend]:
-    name: str = name_prefix + attention_backend_cls.__name__
+    name: str = name_prefix + attention_backend_cls.__name__  # type: ignore
     return type(name, (attention_backend_cls,), overrides)

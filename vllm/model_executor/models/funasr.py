@@ -709,7 +709,7 @@ class FunASRProcessingInfo(BaseProcessingInfo):
 
     def get_feature_extractor(self, **kwargs: object) -> FunASRFeatureExtractor:
         hf_processor = self.get_hf_processor(**kwargs)
-        feature_extractor = hf_processor.feature_extractor
+        feature_extractor = hf_processor.feature_extractor  # type: ignore
         assert isinstance(feature_extractor, FunASRFeatureExtractor)
         return feature_extractor
 

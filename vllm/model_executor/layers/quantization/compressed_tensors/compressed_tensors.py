@@ -937,7 +937,7 @@ class CompressedTensorsConfig(QuantizationConfig):
 
         else:
             # Find the quant_scheme
-            scheme = self._get_scheme_from_parts(
+            scheme = self._get_scheme_from_parts(  # type: ignore
                 weight_quant=weight_quant,
                 input_quant=input_quant,
                 output_quant=output_quant,

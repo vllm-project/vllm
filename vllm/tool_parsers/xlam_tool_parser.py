@@ -260,7 +260,10 @@ class xLAMToolParser(ToolParser):
 
             # Check for test-specific state setup (current_tools_sent)
             # This handles the case where tests manually set current_tools_sent
-            if hasattr(self, "current_tools_sent") and len(self.current_tools_sent) > 0:
+            if (
+                hasattr(self, "current_tools_sent")  # type: ignore
+                and len(self.current_tools_sent) > 0
+            ):
                 # If current_tools_sent is set to [False], it means the test wants us to send the name
                 if (
                     len(self.current_tools_sent) == 1
@@ -282,7 +285,7 @@ class xLAMToolParser(ToolParser):
                                     id=tool_id,
                                     function=DeltaFunctionCall(
                                         name=function_name
-                                    ).model_dump(exclude_none=True),
+                                    ).model_dump(exclude_none=True),  # type: ignore
                                 )
                             ]
                         )
@@ -385,7 +388,7 @@ class xLAMToolParser(ToolParser):
                                 id=tool_id,
                                 function=DeltaFunctionCall(name=tool_name).model_dump(
                                     exclude_none=True
-                                ),
+                                ),  # type: ignore
                             )
                         ]
                     )
@@ -436,7 +439,7 @@ class xLAMToolParser(ToolParser):
                                             index=current_idx,
                                             function=DeltaFunctionCall(
                                                 arguments="{}"
-                                            ).model_dump(exclude_none=True),
+                                            ).model_dump(exclude_none=True),  # type: ignore
                                         )
                                     ]
                                 )
@@ -506,7 +509,7 @@ class xLAMToolParser(ToolParser):
                                     index=current_idx,
                                     function=DeltaFunctionCall(
                                         arguments="{"
-                                    ).model_dump(exclude_none=True),
+                                    ).model_dump(exclude_none=True),  # type: ignore
                                 )
                             ]
                         )
@@ -534,7 +537,7 @@ class xLAMToolParser(ToolParser):
                                         index=current_idx,
                                         function=DeltaFunctionCall(
                                             arguments=args_diff
-                                        ).model_dump(exclude_none=True),
+                                        ).model_dump(exclude_none=True),  # type: ignore
                                     )
                                 ]
                             )

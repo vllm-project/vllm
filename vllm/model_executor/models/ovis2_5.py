@@ -203,7 +203,7 @@ class Ovis2_5ProcessingInfo(BaseProcessingInfo):
         return super().get_default_tok_params().with_kwargs(add_special_tokens=False)
 
     def get_image_processor(self) -> BaseImageProcessor:
-        return self.get_hf_processor().image_processor
+        return self.get_hf_processor().image_processor  # type: ignore
 
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
         return {"image": None, "video": 1}

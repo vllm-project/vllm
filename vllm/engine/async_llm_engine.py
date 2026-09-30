@@ -3,5 +3,5 @@
 
 from vllm.v1.engine.async_llm import AsyncLLM
 
-AsyncLLMEngine = AsyncLLM
+AsyncLLMEngine = AsyncLLM  # type: ignore
 """The `AsyncLLMEngine` class is an alias of [vllm.v1.engine.async_llm.AsyncLLM][]."""

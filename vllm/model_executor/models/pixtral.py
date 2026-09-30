@@ -1207,7 +1207,7 @@ class PixtralHFEncoderInfo(VisionEncoderInfo[PixtralVisionConfig]):
         nrows, ncols = _get_pixtral_hf_num_image_tokens(
             (image_height, image_width),
             (patch_height, patch_width),
-        )
+        )  # type: ignore
 
         return ncols, nrows
 

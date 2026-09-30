@@ -33,7 +33,7 @@ def _topk_log_softmax_kernel(
         block = i + tl.arange(0, BLOCK_SIZE)
         logits = tl.load(row_ptr + block, mask=block < vocab_size, other=float("-inf"))
         max_val = tl.max(tl.maximum(logits, max_val))
-    max_val = max_val.to(tl.float32)
+    max_val = max_val.to(tl.float32)  # type: ignore
 
     se = 0.0
     for i in range(0, vocab_size, BLOCK_SIZE):
@@ -102,7 +102,7 @@ def compute_token_logprobs(
         token_ids.stride(0),
         num_logprobs,
         vocab_size,
-        BLOCK_SIZE=1024,
+        BLOCK_SIZE=1024,  # type: ignore
         TOPK_BLOCK_SIZE=topk_block_size,
     )
     return logprobs
@@ -177,7 +177,7 @@ def compute_topk_scores(
         logits.stride(0),
         sampled_token_ids,
         vocab_size,
-        BLOCK_SIZE=8192,
+        BLOCK_SIZE=8192,  # type: ignore
     )
     is_tensor = isinstance(cu_num_logits, torch.Tensor)
     return LogprobsTensors(

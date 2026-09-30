@@ -237,7 +237,7 @@ _RENDERER_CONSUMED_KEYS = frozenset(
 
 def _try_import_melody():
     try:
-        import cohere_melody
+        import cohere_melody  # type: ignore
 
         return cohere_melody
     except ImportError as e:  # pragma: no cover - exercised at runtime

@@ -13,7 +13,7 @@ try:
 
     HAS_ORJSON = True
 except ImportError:
-    import json as orjson
+    import json as orjson  # type: ignore
 
     HAS_ORJSON = False
 

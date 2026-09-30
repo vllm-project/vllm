@@ -49,7 +49,7 @@ def test_preprocess_error_handling(monkeypatch: pytest.MonkeyPatch):
     # This should raise an exception due to the preprocessing failure
     # Special token id to trigger the failure
     failing_prompt = TokensPrompt(prompt_token_ids=[333])
-    outputs = llm.generate(failing_prompt, SamplingParams(max_tokens=10))
+    outputs = llm.generate(failing_prompt, SamplingParams(max_tokens=10))  # type: ignore
     assert len(outputs) == 1
     assert len(outputs[0].outputs[0].token_ids) == 0
     assert outputs[0].finished

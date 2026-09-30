@@ -135,7 +135,7 @@ class RayPPCommunicator(Communicator):
         actor_id_str = actor._actor_id.hex()
 
         if actor_id_str in self._actor_id_to_rank:
-            return self._actor_id_to_rank[actor_id_str]
+            return self._actor_id_to_rank[actor_id_str]  # type: ignore
         else:
             raise ValueError(f"Actor {actor} not found in communicator group")
 

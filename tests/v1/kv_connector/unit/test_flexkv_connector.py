@@ -60,11 +60,11 @@ def _make_flexkv_module(
     # The "# type: ignore" markers below are needed because ModuleType does
     # not declare these attributes statically; they are set dynamically.
     FlexKVConnectorV1ImplCls = MagicMock(return_value=impl_mock)
-    adapter_mod.FlexKVConnectorV1Impl = FlexKVConnectorV1ImplCls
+    adapter_mod.FlexKVConnectorV1Impl = FlexKVConnectorV1ImplCls  # type: ignore
 
-    flexkv_mod.integration = integration_mod
-    integration_mod.vllm = vllm_mod
-    vllm_mod.vllm_v1_adapter = adapter_mod
+    flexkv_mod.integration = integration_mod  # type: ignore
+    integration_mod.vllm = vllm_mod  # type: ignore
+    vllm_mod.vllm_v1_adapter = adapter_mod  # type: ignore
 
     return flexkv_mod, adapter_mod
 

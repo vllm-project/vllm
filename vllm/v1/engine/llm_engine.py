@@ -129,7 +129,7 @@ class LLMEngine:
 
         if not multiprocess_mode:
             # for v0 compatibility
-            self.model_executor = self.engine_core.engine_core.model_executor
+            self.model_executor = self.engine_core.engine_core.model_executor  # type: ignore
 
             # Capture the model while reachable so the finalizer can drop the
             # bytecode hooks pinning it (frees GPU memory on engine deletion).

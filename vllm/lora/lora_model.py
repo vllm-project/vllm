@@ -305,7 +305,7 @@ class LoRAModel:
             # loraified. C won’t exist in the safetensor but it will exist in
             # the target_modules of the adapter_config.json.
             unexpected_modules = []
-            with safetensors.safe_open(lora_tensor_path, framework="pt") as f:
+            with safetensors.safe_open(lora_tensor_path, framework="pt") as f:  # type: ignore
                 # Load tensors if there are only expected modules.
                 check_unexpected_modules(f)
                 for module in f.keys():  # noqa

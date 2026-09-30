@@ -535,7 +535,7 @@ def generate():
     # For now we use the same heuristic for all types
     # Heuristic is currently tuned for H100s
     default_heuristic = [
-        (cond, ScheduleConfig(*tile_config, **sch_common_params))
+        (cond, ScheduleConfig(*tile_config, **sch_common_params))  # type: ignore
         for cond, tile_config in default_tile_heuristic_config.items()
     ]
 
@@ -639,7 +639,7 @@ def generate():
     # # Heuristic is currently tuned for H100s
     # qqq_heuristic = [
     #     (cond, ScheduleConfig(*tile_config,
-    #                           **sch_common_params))
+    #                           **sch_common_params))  # type: ignore
     #     for cond, tile_config in qqq_tile_heuristic_config.items()
     # ]
 

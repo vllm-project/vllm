@@ -131,7 +131,7 @@ def create_whisper_attention_backend_with_block_pooling(
     underlying_builder = underlying_attn_backend.get_builder_cls()
     underlying_impl = underlying_attn_backend.get_impl_cls()
 
-    class WhisperCausalAttentionWithBlockPoolingBuilder(underlying_builder):
+    class WhisperCausalAttentionWithBlockPoolingBuilder(underlying_builder):  # type: ignore
         # Full cudagraphs only for uniform single-token decode: capture bakes in
         # tensor addresses, so `build` writes metadata into persistent buffers
         # (below). Prefill/mixed batches fall back to piecewise.

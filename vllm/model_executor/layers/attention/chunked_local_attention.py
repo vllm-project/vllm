@@ -36,7 +36,7 @@ def create_chunked_local_attention_backend(
     underlying_builder = underlying_attn_backend.get_builder_cls()
     assert issubclass(underlying_builder, AttentionMetadataBuilder)
 
-    class ChunkedLocalAttentionBuilder(underlying_builder):
+    class ChunkedLocalAttentionBuilder(underlying_builder):  # type: ignore
         @classmethod
         def get_cudagraph_support(
             cls: type["AttentionMetadataBuilder"],

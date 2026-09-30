@@ -253,7 +253,7 @@ class PunicaWrapperGPU(PunicaWrapperBase):
         )
         add_inputs = kwargs.pop("add_inputs", True)
         self.add_shrink(
-            buffer,
+            buffer,  # type: ignore
             x,
             lora_a_stacked,
             scale,
@@ -261,7 +261,7 @@ class PunicaWrapperGPU(PunicaWrapperBase):
         )
         self.add_expand(
             y,
-            buffer,
+            buffer,  # type: ignore
             lora_b_stacked,
             output_slices,
             add_inputs=add_inputs,

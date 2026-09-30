@@ -435,7 +435,7 @@ class InputProcessingContext:
 
         if isinstance(output, BatchFeature):
             output_ = self._postprocess_output(output.data)
-            return BatchFeature(output_)
+            return BatchFeature(output_)  # type: ignore
 
         logger.warning_once(
             "%s did not return `BatchFeature`. "
@@ -444,7 +444,7 @@ class InputProcessingContext:
             type(hf_processor).__name__,
         )
 
-        return self._postprocess_output(output)
+        return self._postprocess_output(output)  # type: ignore
 
 
 class BaseProcessingInfo:

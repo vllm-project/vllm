@@ -579,10 +579,10 @@ class Attention(nn.Module, AttentionLayerBase):
         return output.view(-1, hidden_size)
 
     def extra_repr(self) -> str:
-        s = f"head_size={self.impl.head_size}"
-        s += f", num_heads={self.impl.num_heads}"
-        s += f", num_kv_heads={self.impl.num_kv_heads}"
-        s += f", scale={self.impl.scale}"
+        s = f"head_size={self.impl.head_size}"  # type: ignore
+        s += f", num_heads={self.impl.num_heads}"  # type: ignore
+        s += f", num_kv_heads={self.impl.num_kv_heads}"  # type: ignore
+        s += f", scale={self.impl.scale}"  # type: ignore
         s += f", backend={self.impl.__class__.__name__}"
         return s
 

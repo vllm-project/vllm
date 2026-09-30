@@ -20,8 +20,8 @@ import torch
 import torch.distributed as dist
 import zmq
 from torch.distributed import ProcessGroup
-from zmq import (
-    IPV6,
+from zmq import (  # type: ignore
+    IPV6,  # type: ignore
     PUB,
     SUB,
     SUBSCRIBE,
@@ -164,7 +164,7 @@ class SpinCondition:
             self.poller.register(self.local_notify_socket, zmq.POLLIN)
         else:
             # Writer side publishes write notifications
-            self.local_notify_socket: zmq.Socket = context.socket(PUB)
+            self.local_notify_socket: zmq.Socket = context.socket(PUB)  # type: ignore
             # Set high water mark to 1 - we don't need to send a massive amount of
             # pings during busy operation. PUB sockets will silently drop subsequent
             # messages after the high water mark is reached.
@@ -520,12 +520,12 @@ class MessageQueue:
                 is_reader=False, context=context, notify_address=local_notify_addr
             )
         else:
-            self.buffer = None
+            self.buffer = None  # type: ignore
             local_subscribe_addr = None
             self.local_socket = None
             self.current_idx = -1
             local_notify_addr = None
-            self._spin_condition = None
+            self._spin_condition = None  # type: ignore
 
         remote_addr_ipv6 = False
         if n_remote_reader > 0:
@@ -595,7 +595,7 @@ class MessageQueue:
                 is_reader=True, context=context, notify_address=handle.local_notify_addr
             )
         else:
-            self.buffer = None
+            self.buffer = None  # type: ignore
             self.current_idx = -1
             self.local_reader_rank = -1
             self._is_local_reader = False
@@ -610,7 +610,7 @@ class MessageQueue:
             socket_addr = handle.remote_subscribe_addr
             logger.debug("Connecting to %s", socket_addr)
             self.remote_socket.connect(socket_addr)
-            self._spin_condition = None
+            self._spin_condition = None  # type: ignore
 
         self.shutting_down = False
         return self
@@ -1059,7 +1059,7 @@ class MessageQueue:
                 dist.broadcast_object_list(
                     recv, src=global_ranks[writer_rank], group=pg
                 )
-                handle = recv[0]
+                handle = recv[0]  # type: ignore
             else:
                 handle = pg.broadcast_obj(None, writer_rank)
             buffer_io = MessageQueue.create_from_handle(handle, group_rank)

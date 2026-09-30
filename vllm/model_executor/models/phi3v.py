@@ -348,7 +348,7 @@ class Phi3VProcessingInfo(BaseProcessingInfo):
         image_height: int,
         processor: ProcessorMixin,
     ) -> int:
-        return processor.calc_num_image_tokens_from_image_size(
+        return processor.calc_num_image_tokens_from_image_size(  # type: ignore
             width=image_width,
             height=image_height,
         )
@@ -363,7 +363,7 @@ class Phi3VDummyInputsBuilder(BaseDummyInputsBuilder[Phi3VProcessingInfo]):
         num_images = mm_counts.get("image", 0)
 
         hf_processor = self.info.get_hf_processor()
-        image_tokens: list[str] = hf_processor.img_tokens
+        image_tokens: list[str] = hf_processor.img_tokens  # type: ignore
 
         return "".join(image_tokens[:num_images])
 
@@ -408,7 +408,7 @@ class Phi3VMultiModalProcessor(BaseMultiModalProcessor[Phi3VProcessingInfo]):
     ) -> Sequence[PromptUpdate]:
         hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
         tokenizer = self.info.get_tokenizer()
-        image_tokens: list[str] = hf_processor.img_tokens
+        image_tokens: list[str] = hf_processor.img_tokens  # type: ignore
 
         def get_image_token_ids(item_idx: int) -> list[int]:
             return cached_encode(
@@ -454,7 +454,7 @@ class Phi3VMultiModalProcessor(BaseMultiModalProcessor[Phi3VProcessingInfo]):
         if cached_update.modality == "image":
             hf_processor = self.info.get_hf_processor()
             tokenizer = self.info.get_tokenizer()
-            image_tokens: list[str] = hf_processor.img_tokens
+            image_tokens: list[str] = hf_processor.img_tokens  # type: ignore
             new_update = new_update.with_target(
                 cached_encode(
                     tokenizer, image_tokens[new_item_idx], add_special_tokens=False

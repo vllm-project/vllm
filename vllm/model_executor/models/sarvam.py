@@ -149,7 +149,7 @@ class SarvamMLAAttention(nn.Module):
                 quant_config=quant_config,
                 prefix=f"{prefix}.q_b_proj",
             )
-            self.q_proj = None
+            self.q_proj = None  # type: ignore
         else:
             self.q_proj = ColumnParallelLinear(
                 self.hidden_size,
@@ -158,9 +158,9 @@ class SarvamMLAAttention(nn.Module):
                 quant_config=quant_config,
                 prefix=f"{prefix}.q_proj",
             )
-            self.q_a_proj = None
-            self.q_a_layernorm = None
-            self.q_b_proj = None
+            self.q_a_proj = None  # type: ignore
+            self.q_a_layernorm = None  # type: ignore
+            self.q_b_proj = None  # type: ignore
 
         # KV latent (MQA-style) A-proj
         self.kv_a_proj_with_mqa = ReplicatedLinear(
@@ -680,7 +680,7 @@ class SarvamMLAForCausalLM(
             self.logits_processor = LogitsProcessor(config.vocab_size)
         else:
             self.lm_head = PPMissingLayer()
-            self.logits_processor = None
+            self.logits_processor = None  # type: ignore
 
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors

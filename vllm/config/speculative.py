@@ -483,9 +483,9 @@ class SpeculativeConfig:
     Only compatible with EAGLE and draft model methods."""
 
     # required configuration params passed from engine
-    target_model_config: SkipValidation[ModelConfig] = None
+    target_model_config: SkipValidation[ModelConfig] = None  # type: ignore
     """The configuration of the target model."""
-    target_parallel_config: SkipValidation[ParallelConfig] = None
+    target_parallel_config: SkipValidation[ParallelConfig] = None  # type: ignore
     """The parallel configuration for the target model."""
 
     # dynamic speculative decoding control
@@ -497,9 +497,9 @@ class SpeculativeConfig:
     """
 
     # params generated in the post-init stage
-    draft_model_config: SkipValidation[ModelConfig] = None
+    draft_model_config: SkipValidation[ModelConfig] = None  # type: ignore
     """The configuration of the draft model initialized internal."""
-    draft_parallel_config: SkipValidation[ParallelConfig] = None
+    draft_parallel_config: SkipValidation[ParallelConfig] = None  # type: ignore
     """The parallel configuration for the draft model initialized internal."""
 
     # Suffix decoding configuration

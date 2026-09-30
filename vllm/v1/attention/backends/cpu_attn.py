@@ -177,7 +177,7 @@ class CPUAttentionMetadataBuilder(AttentionMetadataBuilder[CPUAttentionMetadata]
             layer_names,
         )
         for layer in attn_layers.values():
-            layer.isa = self.isa
+            layer.isa = self.isa  # type: ignore
 
     def _group_sliding_window(self) -> int:
         """The window shared by every layer in this group, else -1 (no window).
@@ -426,7 +426,7 @@ class CPUAttentionBackendImpl(AttentionImpl):
                 key_cache,
                 value_cache,
                 attn_metadata.slot_mapping,
-                layer.isa,
+                layer.isa,  # type: ignore
                 k_scale=layer._k_scale_float,
                 v_scale=layer._v_scale_float,
                 kv_cache_dtype=self.kv_cache_dtype,
@@ -445,12 +445,12 @@ class CPUAttentionBackendImpl(AttentionImpl):
             query=query[:num_actual_tokens],
             key_cache=key_cache,
             value_cache=value_cache,
-            output=output[:num_actual_tokens],
+            output=output[:num_actual_tokens],  # type: ignore
             query_start_loc=attn_metadata.query_start_loc,
             seq_lens=attn_metadata.seq_lens,
             scale=self.scale,
             causal=attn_metadata.causal,
-            alibi_slopes=self.alibi_slopes,
+            alibi_slopes=self.alibi_slopes,  # type: ignore
             sliding_window=self.sliding_window,
             block_table=attn_metadata.block_table,
             softcap=self.logits_soft_cap,
@@ -484,7 +484,7 @@ class CPUAttentionBackendImpl(AttentionImpl):
             key_cache,
             value_cache,
             slot_mapping,
-            layer.isa,
+            layer.isa,  # type: ignore
             k_scale=layer._k_scale_float,
             v_scale=layer._v_scale_float,
             kv_cache_dtype=self.kv_cache_dtype,

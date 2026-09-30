@@ -424,7 +424,7 @@ class LoRAModelManager:
         raise NotImplementedError(
             "Pinning is not supported in LoRAModelManager. "
             "Use LRUCacheLoRAModelManager for pinning"
-        )
+        )  # type: ignore
 
     def _set_adapter_mapping(self, mapping: LoRAMapping) -> None:
         # Default to the main language model wrapper

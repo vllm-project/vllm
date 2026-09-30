@@ -30,7 +30,7 @@ def _min_p_kernel(
             other=float("-inf"),
         )
         max_val = tl.max(tl.maximum(logits, max_val))
-    max_val = max_val.to(tl.float32)
+    max_val = max_val.to(tl.float32)  # type: ignore
 
     threshold = max_val + tl.log(min_p)
     for i in range(0, vocab_size, BLOCK_SIZE):

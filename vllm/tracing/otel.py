@@ -45,12 +45,12 @@ try:
 except ImportError:
     _IS_OTEL_AVAILABLE = False
     otel_import_error_traceback = traceback.format_exc()
-    trace = None
-    Context = Any
-    Tracer = Any
-    inject = None
-    Resource = None
-    SpanKind = Any
+    trace = None  # type: ignore
+    Context = Any  # type: ignore
+    Tracer = Any  # type: ignore
+    inject = None  # type: ignore
+    Resource = None  # type: ignore
+    SpanKind = Any  # type: ignore
 
 
 def is_otel_available() -> bool:

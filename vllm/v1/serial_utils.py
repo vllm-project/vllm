@@ -504,7 +504,7 @@ def run_method(
                 f"Method {method!r} is not implemented."
             ) from None
     else:
-        func = partial(method, obj)
+        func = partial(method, obj)  # type: ignore
     return func(*args, **kwargs)
 
 

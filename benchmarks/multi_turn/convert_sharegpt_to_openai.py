@@ -14,9 +14,9 @@ import random
 from statistics import mean
 from typing import Any
 
-import pandas as pd
-import tqdm
-from transformers import AutoTokenizer
+import pandas as pd  # type: ignore
+import tqdm  # type: ignore
+from transformers import AutoTokenizer  # type: ignore
 
 
 def has_non_english_chars(text: str) -> bool:

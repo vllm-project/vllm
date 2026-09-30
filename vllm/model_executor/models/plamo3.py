@@ -54,7 +54,7 @@ from vllm.sequence import IntermediateTensors
 # Only used for type hinting.
 if TYPE_CHECKING:
 
-    class Plamo3Config(PreTrainedConfig):
+    class Plamo3Config(PreTrainedConfig):  # type: ignore
         model_type: str = "plamo3"
 
         hidden_size: int

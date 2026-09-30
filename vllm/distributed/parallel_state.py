@@ -694,7 +694,7 @@ class GroupCoordinator:
             )
             ca_comm = self.device_communicator.ca_comm
             if ca_comm is not None:
-                maybe_ca_context = ca_comm.capture()
+                maybe_ca_context = ca_comm.capture()  # type: ignore
             if isinstance(self.device_communicator, CudaCommunicator):
                 fi_pcie_ipc_ar_comm = self.device_communicator.fi_pcie_ipc_ar_comm
                 if fi_pcie_ipc_ar_comm is not None:
@@ -703,7 +703,7 @@ class GroupCoordinator:
             # Capture each group's own comm. A global lookup would double-capture
             aiter_ar_comm = getattr(self.device_communicator, "aiter_ar_comm", None)
             if aiter_ar_comm is not None:
-                maybe_aiter_ar_context = aiter_ar_comm.capture()
+                maybe_aiter_ar_context = aiter_ar_comm.capture()  # type: ignore
 
         # ensure all initialization operations complete before attempting to
         # capture the graph on another stream
@@ -1172,7 +1172,9 @@ class GroupCoordinator:
             if self.device_communicator is None:
                 raise ValueError("No device communicator found")
             # custom device communicator path is synchronous
-            self.device_communicator.send_tensor_dict(tensor_dict, dst)
+            self.device_communicator.send_tensor_dict(  # type: ignore
+                tensor_dict, dst
+            )
             return []
 
         all_gather_size = 1 if all_gather_group is None else all_gather_group.world_size
@@ -1285,7 +1287,9 @@ class GroupCoordinator:
             if self.device_communicator is None:
                 raise ValueError("No device communicator found")
             # custom device communicator path is synchronous
-            sync_tensor_dict = self.device_communicator.recv_tensor_dict(src)
+            sync_tensor_dict = self.device_communicator.recv_tensor_dict(  # type: ignore
+                src
+            )
             return sync_tensor_dict, [], []
 
         all_gather_size = 1 if all_gather_group is None else all_gather_group.world_size

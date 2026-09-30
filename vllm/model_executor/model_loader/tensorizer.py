@@ -304,7 +304,7 @@ class TensorizerConfig(MutableMapping):
         return tc_dict
 
     def _construct_tensorizer_args(self) -> "TensorizerArgs":
-        return TensorizerArgs(self)
+        return TensorizerArgs(self)  # type: ignore
 
     def verify_with_parallel_config(
         self,

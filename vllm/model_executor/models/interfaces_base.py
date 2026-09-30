@@ -240,8 +240,8 @@ def default_pooling_type(
     """Decorator to set `VllmModelForPooling.default_*_pooling_type`."""
 
     def func(model: _T) -> _T:
-        model.default_seq_pooling_type = seq_pooling_type
-        model.default_tok_pooling_type = tok_pooling_type
+        model.default_seq_pooling_type = seq_pooling_type  # type: ignore
+        model.default_tok_pooling_type = tok_pooling_type  # type: ignore
         return model
 
     return func
@@ -263,7 +263,7 @@ def attn_type(attn_type: AttnTypeStr):
     """Decorator to set `VllmModelForPooling.attn_type`."""
 
     def func(model: _T) -> _T:
-        model.attn_type = attn_type
+        model.attn_type = attn_type  # type: ignore
         return model
 
     return func

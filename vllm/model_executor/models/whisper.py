@@ -703,7 +703,7 @@ class WhisperProcessingInfo(BaseProcessingInfo):
 
     def get_feature_extractor(self, **kwargs: object) -> WhisperFeatureExtractor:
         hf_processor = self.get_hf_processor(**kwargs)
-        feature_extractor = hf_processor.feature_extractor
+        feature_extractor = hf_processor.feature_extractor  # type: ignore
         assert isinstance(feature_extractor, WhisperFeatureExtractor)
         return feature_extractor
 

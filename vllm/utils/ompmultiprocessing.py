@@ -113,7 +113,7 @@ class OMPProcessManager:
             yield
         finally:
             # restore old envs
-            for k, v in old_envs_dict.items():
+            for k, v in old_envs_dict.items():  # type: ignore
                 if v is None:
                     os.environ.pop(k, None)
                 else:

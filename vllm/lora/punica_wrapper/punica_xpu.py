@@ -266,14 +266,14 @@ class PunicaWrapperXPU(PunicaWrapperBase):
             ".add_lora_linear() instead of being passed in."
         )
         r = lora_b_stacked[0].size(-1)
-        buffer = torch.zeros(
+        buffer = torch.zeros(  # type: ignore
             (len(output_slices), x.size(0), r),
             dtype=x.dtype,
             device=x.device,
         )
         add_inputs = kwargs.pop("add_inputs", True)
         self.add_shrink(
-            buffer,
+            buffer,  # type: ignore
             x,
             lora_a_stacked,
             scale,
@@ -281,7 +281,7 @@ class PunicaWrapperXPU(PunicaWrapperBase):
         )
         self.add_expand(
             y,
-            buffer,
+            buffer,  # type: ignore
             lora_b_stacked,
             output_slices,
             add_inputs=add_inputs,

@@ -114,7 +114,7 @@ def worker_fn():
     else:
         recv = [None, None]
         dist.broadcast_object_list(recv, src=0)
-        ip, port = recv
+        ip, port = recv  # type: ignore
 
     stateless_pg = StatelessProcessGroup.create(ip, port, rank, dist.get_world_size())
 
@@ -129,7 +129,7 @@ def worker_fn():
         else:
             recv = [None]
             dist.broadcast_object_list(recv, writer_rank)
-            seed = recv[0]
+            seed = recv[0]  # type: ignore
 
         if pg == dist.group.WORLD:
             dist.barrier()

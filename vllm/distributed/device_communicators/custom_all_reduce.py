@@ -724,7 +724,7 @@ class CustomAllreduce:
         pointers: list[int] = []
         for i, h in enumerate(handles):
             if i == rank:
-                pointers.append(pointer)
+                pointers.append(pointer)  # type: ignore
             else:
                 pointers.append(ops.open_mem_handle(h))
         return pointers

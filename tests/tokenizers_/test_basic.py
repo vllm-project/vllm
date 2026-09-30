@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import _get_protocol_attrs
+from typing import _get_protocol_attrs  # type: ignore
 
 import pytest
 from transformers import (

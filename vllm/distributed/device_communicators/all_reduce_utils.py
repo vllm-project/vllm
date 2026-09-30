@@ -216,7 +216,7 @@ def consumer(
         handle = producer_queue.get()
         open_success = False
         try:
-            pointer = lib.cudaIpcOpenMemHandle(handle)
+            pointer = lib.cudaIpcOpenMemHandle(handle)  # type: ignore
             open_success = True
         except RuntimeError:
             # cannot error out here, because the producer process

@@ -180,7 +180,7 @@ class BlockTables:
             self.num_blocks.gpu,
             self.num_blocks.gpu.stride(0),
             num_reqs,
-            BLOCK_SIZE=1024,
+            BLOCK_SIZE=1024,  # type: ignore
         )
         return tuple(bt[:num_reqs_padded] for bt in out)
 
@@ -227,7 +227,7 @@ class BlockTables:
             CP_SIZE=self.cp_size,
             CP_INTERLEAVE=self.cp_interleave,
             PAD_ID=PAD_SLOT_ID,
-            TRITON_BLOCK_SIZE=1024,
+            TRITON_BLOCK_SIZE=1024,  # type: ignore
         )
         return slot_mappings[:, :num_tokens_padded]
 

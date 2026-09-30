@@ -38,7 +38,7 @@ async def requests_processing_time(llm, lora_requests: list[LoRARequest]) -> flo
     for lora_request in lora_requests:
         lora_int_id = lora_request.lora_int_id
         generator = llm.generate(
-            prompt=TextPrompt(prompt=f"hello {lora_int_id}", multi_modal_data=None),
+            prompt=TextPrompt(prompt=f"hello {lora_int_id}", multi_modal_data=None),  # type: ignore
             sampling_params=sampling_params,
             lora_request=lora_request,
             request_id=f"test{lora_int_id}",
