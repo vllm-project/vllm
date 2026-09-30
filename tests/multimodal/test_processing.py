@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import asyncio
 import threading
 import time
 from contextlib import nullcontext
@@ -1843,6 +1844,44 @@ def test_lazy_decode_error_becomes_unprocessable():
     assert exc_info.value.parameter is None
     assert "image media at index 0" in str(exc_info.value)
     assert slow_completed.is_set()
+
+
+@pytest.mark.parametrize("phase", ["sync", "async", "eviction"])
+def test_lazy_decode_error_keeps_request_index_with_cache_hits(phase, monkeypatch):
+    """Compacting misses must not change the corrupt item's reported index."""
+    processor = _LazyTestProcessor()
+    cache = _lazy_cache()
+    payloads = [b"cached-first", b"good-miss", b"corrupt-miss", b"cached-last"]
+    cached_payloads = payloads if phase == "eviction" else [payloads[0], payloads[3]]
+    _lazy_apply(
+        processor,
+        [MediaRef(lambda: Image.new("RGB", (4, 4)), data) for data in cached_payloads],
+        cache,
+    )
+
+    def bad_decode():
+        raise ValueError("corrupt media")
+
+    refs = [
+        MediaRef(bad_decode if index == 2 else lambda: Image.new("RGB", (4, 4)), data)
+        for index, data in enumerate(payloads)
+    ]
+    state = processor.apply_phase1(
+        _lazy_inputs(processor, refs, cache), TimingContext(enabled=False)
+    )
+    if phase == "eviction":
+        assert not state.decodes
+        monkeypatch.setattr(
+            cache, "is_cached", lambda hashes: [True, False, False, True]
+        )
+
+    with pytest.raises(VLLMUnprocessableEntityError, match="image media at index 2"):
+        if phase == "sync":
+            state.wait_decodes()
+        elif phase == "async":
+            asyncio.run(state.wait_decodes_async())
+        else:
+            processor.apply_phase2(state)
 
 
 def test_lazy_miss_bytes_available_during_hf_processing():

@@ -1052,17 +1052,28 @@ def _decode_error(
 
 def _submit_ref_decodes(
     mm_data_items: MultiModalDataItems,
+    mm_is_cached: MultiModalIsCached | None = None,
 ) -> list[tuple[str, int, Future]]:
     """Submit decodes of all not-yet-decoded media refs to the media thread
-    pool, without waiting for them."""
+    pool, without waiting for them.
+
+    For compacted cache misses, `mm_is_cached` restores request item indices.
+    """
     decodes = list[tuple[str, int, Future]]()
     for modality, items in mm_data_items.items():
         if not isinstance(items, ProcessorBatchItems):
             continue
+        indices = (
+            [idx for idx, cached in enumerate(mm_is_cached[modality]) if not cached]
+            if mm_is_cached is not None
+            else range(items.get_count())
+        )
         for idx in range(items.get_count()):
             item = items.get_raw(idx)
             if isinstance(item, MediaRef) and not item.is_decoded:
-                decodes.append((modality, idx, global_thread_pool.submit(item.decode)))
+                decodes.append(
+                    (modality, indices[idx], global_thread_pool.submit(item.decode))
+                )
     return decodes
 
 
@@ -1496,6 +1507,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
     def _decode_ref_items(
         self,
         mm_data_items: MultiModalDataItems,
+        mm_is_cached: MultiModalIsCached | None = None,
     ) -> None:
         """Decode all undecoded media refs in parallel on the media thread
         pool.
@@ -1504,7 +1516,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         VLLMUnprocessableEntityError so corrupt media surfaces as a client
         error (422) instead of a server error.
         """
-        _collect_ref_decodes(_submit_ref_decodes(mm_data_items))
+        _collect_ref_decodes(_submit_ref_decodes(mm_data_items, mm_is_cached))
 
     def _release_ref_bytes(
         self,
@@ -1627,7 +1639,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
             )
 
         with timing_ctx.record("get_cache_missing_items"):
-            _, mm_missing_data_items = self._get_cache_missing_items(
+            mm_is_cached, mm_missing_data_items = self._get_cache_missing_items(
                 cache=cache,
                 mm_data_items=inputs.mm_data_items,
                 mm_hashes=mm_hashes,
@@ -1640,7 +1652,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
             # wastes a redundant decode. Nothing is released here: a hit can
             # still be evicted before phase 2, which then has to reprocess it
             # from the very bytes a release would drop.
-            decodes = _submit_ref_decodes(mm_missing_data_items)
+            decodes = _submit_ref_decodes(mm_missing_data_items, mm_is_cached)
 
         return MultiModalApplyState(inputs, timing_ctx, mm_hashes, decodes)
 
@@ -1743,7 +1755,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
             # Normally a no-op: phase-1 decodes were drained before phase 2.
             # Only items that flipped hit->miss (evicted between the phases)
             # decode here, from the bytes phase 1 deliberately kept.
-            self._decode_ref_items(mm_missing_data_items)
+            self._decode_ref_items(mm_missing_data_items, mm_is_cached)
 
         # NOTE: The prompt does not correspond to `mm_missing_data_items`,
         # so we can't apply prompt updates until the new multimodal
