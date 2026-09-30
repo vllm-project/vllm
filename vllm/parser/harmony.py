@@ -335,20 +335,25 @@ class HarmonyParser(DelegatingParser):
         segments: list[Segment] = []
         reasoning_token_count = 0
         for token_id in token_ids:
+            repaired_header = False
             try:
                 self._harmony_parser.process(token_id)
-            except HarmonyError:
-                continue
+            except HarmonyError as error:
+                repaired_header = self._repair_malformed_header(error, token_id)
+                if not repaired_header:
+                    continue
             channel = self._harmony_parser.current_channel
             recipient = self._normalize_recipient(
                 self._harmony_parser.current_recipient
             )
-            delta = self._harmony_parser.last_content_delta or ""
+            delta = (
+                "" if repaired_header else self._harmony_parser.last_content_delta or ""
+            )
             completed_message = self._poll_completed_message()
 
             if completed_message is not None:
                 self._current_message_tokens.clear()
-            else:
+            elif not repaired_header:
                 self._current_message_tokens.append(token_id)
 
             if self._is_reasoning_token(token_id, channel, recipient):
@@ -371,6 +376,92 @@ class HarmonyParser(DelegatingParser):
             segments=segments,
             reasoning_token_count=reasoning_token_count,
         )
+
+    def _repair_malformed_header(self, error: HarmonyError, token_id: int) -> bool:
+        if (
+            not str(error)
+            .lower()
+            .startswith("unexpected tokens remaining in message header")
+        ):
+            return False
+
+        encoding = get_encoding()
+        message_token = encoding.encode("<|message|>", allowed_special="all")[0]
+        if token_id != message_token:
+            return False
+
+        header_tokens = self._current_message_tokens.copy()
+        start_token = encoding.encode("<|start|>", allowed_special="all")[0]
+        channel_token = encoding.encode("<|channel|>", allowed_special="all")[0]
+        if start_token in header_tokens:
+            start_index = (
+                len(header_tokens) - 1 - header_tokens[::-1].index(start_token)
+            )
+            try:
+                channel_index = header_tokens.index(channel_token, start_index + 1)
+            except ValueError:
+                return False
+        else:
+            try:
+                channel_index = (
+                    len(header_tokens) - 1 - header_tokens[::-1].index(channel_token)
+                )
+            except ValueError:
+                return False
+        header_tokens = header_tokens[channel_index:]
+
+        constrain_token = encoding.encode("<|constrain|>", allowed_special="all")[0]
+        try:
+            constrain_index = header_tokens.index(constrain_token)
+        except ValueError:
+            return False
+
+        header_prefix = encoding.decode(header_tokens[:constrain_index])
+        content_type = encoding.decode(header_tokens[constrain_index + 1 :])
+        channels = ("analysis", "commentary", "final")
+        recipient_marker = " to="
+        recipient = (
+            header_prefix.rsplit(recipient_marker, 1)[1].strip()
+            if recipient_marker in header_prefix
+            else None
+        )
+        parts = (
+            content_type.replace("<|channel|>", " ")
+            .replace("<|constrain|>", " ")
+            .split()
+        )
+        if (
+            len(parts) < 2
+            or parts[-1] not in ("code", "json")
+            or any(
+                part not in channels
+                and part != recipient
+                and not part.startswith("to=")
+                for part in parts[:-1]
+            )
+        ):
+            return False
+        content_type = parts[-1]
+        corrected_tokens = [
+            *header_tokens[: constrain_index + 1],
+            *encoding.encode(content_type),
+        ]
+
+        parser = get_streamable_parser_for_assistant()
+        try:
+            for replay_token in (*corrected_tokens, token_id):
+                parser.process(replay_token)
+        except HarmonyError:
+            return False
+
+        logger.warning(
+            "Harmony rejected a malformed message header; retrying after "
+            "removing metadata from its content type."
+        )
+        self._parser = parser
+        self._num_processed_messages = 0
+        self._current_message_tokens = [*corrected_tokens, token_id]
+        return True
 
     def count_reasoning_tokens(self, token_ids: Sequence[int]) -> int:
         if len(token_ids) == self._num_counted_tokens:

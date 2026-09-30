@@ -881,6 +881,70 @@ class TestProcessChunk:
         result = harmony_parser.process_chunk(malformed)
         assert "".join(s.delta for s in result.segments if s.delta) == "thinkanswer"
 
+    @pytest.mark.parametrize("recipient", ["python", "assistant"])
+    def test_malformed_header_drops_channel_from_content_type(
+        self, harmony_parser, recipient
+    ):
+        malformed = encode_output(
+            f"<|channel|>commentary to={recipient} "
+            "<|constrain|>analysis code<|message|>print(6 * 7)<|call|>"
+            "<|start|>assistant<|channel|>final<|message|>Done<|end|>"
+        )
+
+        result = harmony_parser.process_chunk(malformed)
+        messages = [
+            segment.completed_message
+            for segment in result.segments
+            if segment.completed_message is not None
+        ]
+
+        assert [(msg.channel, msg.recipient, msg.content_type) for msg in messages] == [
+            ("commentary", recipient, "<|constrain|>code"),
+            ("final", None, None),
+        ]
+        assert get_text(messages[0]) == "print(6 * 7)"
+        assert get_text(messages[1]) == "Done"
+
+    def test_malformed_header_drops_recipient_from_content_type(self, harmony_parser):
+        malformed = encode_output(
+            "<|channel|>commentary to=python "
+            "<|constrain|>python code<|message|>print(6 * 7)<|call|>"
+        )
+
+        result = harmony_parser.process_chunk(malformed)
+        messages = [
+            segment.completed_message
+            for segment in result.segments
+            if segment.completed_message is not None
+        ]
+
+        assert [(msg.channel, msg.recipient, msg.content_type) for msg in messages] == [
+            ("commentary", "python", "<|constrain|>code")
+        ]
+        assert get_text(messages[0]) == "print(6 * 7)"
+
+    def test_malformed_header_drops_spliced_metadata_from_content_type(
+        self, harmony_parser
+    ):
+        malformed = encode_output(
+            "<|start|>assistant<|channel|>commentary to=python "
+            "<|constrain|>commentary to=assistant "
+            "<|constrain|>analysis to=python code"
+            "<|message|>print(6 * 7)<|call|>"
+        )
+
+        result = harmony_parser.process_chunk(malformed)
+        messages = [
+            segment.completed_message
+            for segment in result.segments
+            if segment.completed_message is not None
+        ]
+
+        assert [(msg.channel, msg.recipient, msg.content_type) for msg in messages] == [
+            ("commentary", "python", "<|constrain|>code")
+        ]
+        assert get_text(messages[0]) == "print(6 * 7)"
+
 
 class TestCountReasoningTokens:
     def test_matches_process_chunk(self, harmony_parser, gpt_oss_tokenizer):
