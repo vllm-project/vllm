@@ -166,7 +166,10 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
             # build() views the scratch as 4x the rows at 16 segments.
             max_num_tokens_3d = max(
                 min(self.max_seqs_64_segments, max_num_tokens_3d),
-                cdiv(max_num_tokens_3d, 4),
+                cdiv(
+                    max_num_tokens_3d,
+                    self.num_par_softmax_segments // NUM_PAR_SOFTMAX_SEGMENTS,
+                ),
             )
         headdim_padded = next_power_of_2(self.headdim)
         self.softmax_segm_output = torch.empty(
