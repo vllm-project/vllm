@@ -53,7 +53,6 @@ from vllm.v1.kv_cache_interface import (
 from ..common.qsa_cache import QSAForwardMetadata
 from . import model
 from .indexer_qsa import QSAIndexer
-from .ops.qsa_pre_indexer import QSAMainPrepare
 
 
 class Qwen4ExpQSAMetadataBuilder(FlashAttentionMetadataBuilder):
@@ -408,8 +407,9 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
             quant_config=quant_config,
             prefix=f"{prefix}.indexer",
         )
-        # Fuse the main QK-norm/RoPE/gate and the K/V cache write into the
-        # indexer prepare launch; see _run_qsa.
+        # One launch does the indexer prepare, the main QK-norm/RoPE/gate and
+        # the main K/V cache write (see QSAIndexer.forward); otherwise all of
+        # them take the separate kernels.
         self.use_fused_qsa_prepare = (
             self.use_fused_qk_norm_rope_gate and self.indexer.use_fused_pre_indexer
         )
@@ -476,33 +476,20 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
         )
         if side_metadata.num_actual_tokens != num_tokens:
             raise RuntimeError("QSA main and side metadata token counts disagree")
-        main_prepare = None
-        if self.use_fused_qsa_prepare:
-            kv_cache = self.kv_cache.transpose(1, 2)
-            if self.kv_cache_dtype in ("fp8", "fp8_e4m3"):
-                kv_cache = kv_cache.view(torch.float8_e4m3fn)
-            main_prepare = QSAMainPrepare(
-                qkv=qkv[:num_tokens],
-                q_norm_weight=self.q_norm.weight,
-                k_norm_weight=self.k_norm.weight,
-                eps=self.q_norm.variance_epsilon,
-                q_out=query[:num_tokens],
-                gate_out=output_gate[:num_tokens],
-                kv_cache=kv_cache,
-                slot_mapping=main_metadata.slot_mapping[:num_tokens],
-                k_scale=self._k_scale,
-                v_scale=self._v_scale,
-            )
         selected = self.indexer(
             projected_qk,
             positions,
             self.topk_indices_buffer[:num_tokens],
-            main_prepare=main_prepare,
+            attn=self,
+            qkv=qkv,
+            query=query,
+            gate=output_gate,
+            slot_mapping=main_metadata.slot_mapping,
         )
         if selected.shape != (num_tokens, self.indexer.packed_output_width):
             raise RuntimeError("QSA indexer returned an invalid selection shape")
         impl = cast(Qwen4ExpQSAFlashAttentionImpl, self.impl)
-        if main_prepare is None:
+        if not self.use_fused_qsa_prepare:
             impl.do_kv_cache_update(
                 self,
                 key,
@@ -530,18 +517,17 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
         num_tokens = hidden_states.shape[0]
-        if self.use_fused_qsa_prepare:
+        if not self.use_fused_qsa_prepare:
+            q, k, v, gate = self._project_qkv_gate(qkv, positions)
+            assert gate is not None
+            query = q.view(num_tokens, self.num_heads, self.head_dim)
+            key = k.view(num_tokens, self.num_kv_heads, self.head_dim)
+            value = v.view(num_tokens, self.num_kv_heads, self.head_dim)
+        else:
             # Norm/RoPE/gate and the K/V cache write happen inside _run_qsa.
             query = qkv.new_empty(num_tokens, self.num_heads, self.head_dim)
             gate = torch.empty_like(query)
             key = value = qkv.new_empty(0)
-        else:
-            q, k, v, maybe_gate = self._project_qkv_gate(qkv, positions)
-            assert maybe_gate is not None
-            gate = maybe_gate
-            query = q.view(num_tokens, self.num_heads, self.head_dim)
-            key = k.view(num_tokens, self.num_kv_heads, self.head_dim)
-            value = v.view(num_tokens, self.num_kv_heads, self.head_dim)
         attn_output = torch.empty_like(query)
         # Keep the index projection outside the eager break.
         projected_qk, _ = self.indexer.index_qk_proj(hidden_states)

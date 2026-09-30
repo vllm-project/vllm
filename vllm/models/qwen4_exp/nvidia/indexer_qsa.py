@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Qwen4Exp weight-free QSA indexer."""
 
-from typing import cast
+from typing import TYPE_CHECKING, cast
 
 import torch
 from torch import nn
@@ -23,7 +23,10 @@ from ..common.qsa_cache import (
     QSAKeyStateCache,
     canonical_qsa_rope_positions,
 )
-from .ops.qsa_pre_indexer import QSAMainPrepare, qsa_pre_indexer
+from .ops.qsa_pre_indexer import qsa_pre_indexer
+
+if TYPE_CHECKING:
+    from .qsa import Qwen4ExpQSAAttention
 
 
 def apply_qsa_rope(
@@ -235,7 +238,12 @@ class QSAIndexer(nn.Module):
         projected_qk: torch.Tensor,
         positions: torch.Tensor,
         out: torch.Tensor | None = None,
-        main_prepare: QSAMainPrepare | None = None,
+        *,
+        attn: "Qwen4ExpQSAAttention",
+        qkv: torch.Tensor,
+        query: torch.Tensor,
+        gate: torch.Tensor,
+        slot_mapping: torch.Tensor,
     ) -> torch.Tensor:
         """Update side caches and select token indices from pre-projected Q/K.
 
@@ -245,7 +253,9 @@ class QSAIndexer(nn.Module):
         valid-entry count (the attention kernel's loop bound, never a token
         index).
 
-        ``main_prepare`` is handed to the fused pre-indexer launch.
+        With ``attn.use_fused_qsa_prepare``, the same launch also normalizes
+        and rotates ``attn``'s Q/K from ``qkv`` into ``query``, copies the gate
+        into ``gate`` and writes K/V into ``attn.kv_cache`` at ``slot_mapping``.
         """
         metadata = self._metadata()
         if metadata is None:
@@ -287,13 +297,16 @@ class QSAIndexer(nn.Module):
         raw_key_state_cache = self.raw_key_cache
         compressed_key_cache = self.compressed_key_cache.kv_cache
 
-        if self.use_fused_pre_indexer:
+        if attn.use_fused_qsa_prepare:
             q = projected_q.new_empty(
                 num_tokens,
                 self.index_n_heads,
                 self.index_head_dim,
                 dtype=self.indexer_dtype,
             )
+            main_kv_cache = attn.kv_cache.transpose(1, 2)
+            if attn.kv_cache_dtype in ("fp8", "fp8_e4m3"):
+                main_kv_cache = main_kv_cache.view(torch.float8_e4m3fn)
             qsa_pre_indexer(
                 projected_q,
                 raw_keys,
@@ -318,7 +331,16 @@ class QSAIndexer(nn.Module):
                     if raw_key_state_cache.rope_position_cache is not None
                     else None
                 ),
-                main=main_prepare,
+                main_qkv=qkv[:num_tokens],
+                main_q_norm_weight=attn.q_norm.weight,
+                main_k_norm_weight=attn.k_norm.weight,
+                main_eps=attn.q_norm.variance_epsilon,
+                main_q_out=query[:num_tokens],
+                main_gate_out=gate[:num_tokens],
+                main_kv_cache=main_kv_cache,
+                main_slot_mapping=slot_mapping[:num_tokens],
+                main_k_scale=attn._k_scale,
+                main_v_scale=attn._v_scale,
             )
         else:
             # Unfused reference path
