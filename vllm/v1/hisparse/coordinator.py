@@ -318,14 +318,16 @@ class HiSparseCoordinator:
             manager.has_hot(request_id) for manager in self.hot_managers
         )
 
-    def _remaining_prompt_blocks(self, request_id: str, num_prompt_tokens: int) -> int:
-        """Resident blocks the rest of the prompt would pin."""
-        return sum(
-            max(
-                cdiv(num_prompt_tokens, manager.block_size)
-                - len(manager.req_to_blocks.get(request_id, ())),
-                0,
-            )
+    def _fills_admission_window(self, request_id: str) -> bool:
+        """Whether the request holds the resident pages admission reserved.
+
+        Admission caps a request's resident pages at the in-flight window,
+        assuming older pages move to host; keeping them pinned past it lets a
+        chunked prefill outgrow the pool it was admitted into.
+        """
+        return any(
+            len(manager.req_to_blocks.get(request_id, ()))
+            >= manager.max_admission_blocks_per_request
             for manager in self.resident_managers
         )
 
@@ -396,14 +398,14 @@ class HiSparseCoordinator:
         for hot_manager in self.hot_managers:
             hot_manager.require_hot(request_id)
 
-    def update_residency(self, request_id: str, num_prompt_tokens: int = 0) -> None:
+    def update_residency(self, request_id: str) -> None:
         """Per-step residency policy for a scheduled request.
 
         A request that can read from host releases every clean sealed page to
         the pool. One that cannot keeps its pages pinned until the shared pool
-        runs low, or can no longer hold the rest of its prompt, then asks for a
-        hot region. Pages remain pinned until that region is allocated on a
-        subsequent scheduling pass.
+        runs low, or until it holds the resident pages admission reserved for
+        it, then asks for a hot region. Pages remain pinned until that region is
+        allocated on a subsequent scheduling pass.
         """
         if not self.resident_managers:
             return
@@ -415,9 +417,9 @@ class HiSparseCoordinator:
             state.pages_to_adopt = 0
         if not self._can_read_from_host(request_id):
             assert self.gpu_pool is not None
-            if self.gpu_pool.get_num_free_blocks() >= max(
-                self.transition_watermark,
-                self._remaining_prompt_blocks(request_id, num_prompt_tokens),
+            if (
+                self.gpu_pool.get_num_free_blocks() >= self.transition_watermark
+                and not self._fills_admission_window(request_id)
             ):
                 return
             for manager in self.hot_managers:

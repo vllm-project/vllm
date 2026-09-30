@@ -2470,6 +2470,11 @@ class HiSparseHotManager(_HiSparseAuxiliaryManager):
 class HiSparseResidentManager(_HiSparseAuxiliaryManager):
     """Track GPU-resident pages for otherwise host-backed KV."""
 
+    @property
+    def max_admission_blocks_per_request(self) -> int:
+        assert self._max_admission_blocks_per_request is not None
+        return self._max_admission_blocks_per_request
+
     def get_num_blocks_to_allocate(
         self,
         request_id: str,
@@ -2541,7 +2546,7 @@ class HiSparseResidentManager(_HiSparseAuxiliaryManager):
     ) -> None:
         assert self.coordinator is not None
         self.coordinator.plan_prefix_materialization(request.request_id, num_tokens)
-        self.coordinator.update_residency(request.request_id, request.num_prompt_tokens)
+        self.coordinator.update_residency(request.request_id)
 
     def allocate_new_blocks(
         self, request_id: str, num_tokens: int, num_tokens_main_model: int
