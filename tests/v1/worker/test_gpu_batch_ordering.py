@@ -247,6 +247,7 @@ def test_uniform_decode_uses_state_index_not_batch_position():
     runner.decode_query_len = 8
     runner.adaptive_verification = None
     runner.pcp_manager = None
+    runner.use_pp = False
     # State arrays in state-index order: a prefilling request, then two decodes.
     runner.req_states = SimpleNamespace(
         req_id_to_index={"prefilling": 0, "decode_a": 1, "decode_b": 2},
