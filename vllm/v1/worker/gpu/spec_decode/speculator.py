@@ -62,6 +62,10 @@ class BaseSpeculator(ABC):
     # Extra query slots reserved per request outside the regular queries.
     num_extra_query_per_req: int = 0
 
+    def reset_request(self, req_idx: int) -> None:
+        """Reset cached draft state before a worker slot starts a request."""
+        return
+
     @abstractmethod
     def init_cudagraph_manager(self, cudagraph_mode: CUDAGraphMode) -> None:
         pass
@@ -376,6 +380,12 @@ class DraftModelSpeculator(BaseSpeculator):
             is_prefilling=self.draft_is_prefilling[:num_reqs_padded],
         )
         return attn_metadata
+
+    def reset_request(self, req_idx: int) -> None:
+        if self.draft_logits is not None:
+            # Match the zero draft IDs initialized by RequestState.add_request.
+            self.draft_logits[req_idx].fill_(float("-inf"))
+            self.draft_logits[req_idx, :, 0] = 0.0
 
     def draft_logits_spec(self, vllm_config: VllmConfig) -> tuple[torch.dtype, float]:
         """Dtype and fill for the cached proposal distribution.

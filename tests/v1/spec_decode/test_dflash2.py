@@ -12,7 +12,10 @@ from vllm.model_executor.models.qwen3_dflash import (
 from vllm.model_executor.models.qwen3_dflash2 import _grouped_conv, _score_edges
 from vllm.platforms import current_platform
 from vllm.v1.worker.gpu.spec_decode.dflash.speculator import DFlashSpeculator
-from vllm.v1.worker.gpu.spec_decode.dflash2.speculator import DFlash2Speculator
+from vllm.v1.worker.gpu.spec_decode.dflash2.speculator import (
+    CandidateSampler,
+    DFlash2Speculator,
+)
 
 
 @pytest.mark.parametrize("block_size", [5, 8])
@@ -459,3 +462,51 @@ def test_context_kv_uses_quantized_projection_fallback(monkeypatch):
     torch.testing.assert_close(actual_k, expected_k)
     torch.testing.assert_close(actual_v, expected_v)
     assert [projection.calls for projection in projections] == [1, 1]
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+@torch.inference_mode()
+def test_next_sparse_draft_removes_zero_placeholder():
+    """The next real sparse draft must remove the temporary zero placeholder."""
+    # Slot 1 previously tracked candidate 128; slot 0 is an unrelated request.
+    steps, top_k = 3, 2
+    vocab = 256
+    slot = 1
+    spec = object.__new__(DFlash2Speculator)
+    spec.draft_logits = torch.full((2, steps, vocab), -float("inf"), device="cuda")
+    spec.candidate_sampler = CandidateSampler(2, steps, top_k, torch.device("cuda"))
+    spec.candidate_sampler.cached_candidate_ids.fill_(128)
+    spec.draft_logits[slot, :, 128] = 2.0
+    untouched = spec.draft_logits[0].clone()
+    # A new request installs zero placeholders. Candidate tracking must let the
+    # next sparse write clear that temporary zero entry as well as old candidates.
+    spec.reset_request(slot)
+    assert torch.equal(spec.draft_logits[0], untouched)
+    # Exclude zero: including it would overwrite the stale entry and allow a
+    # broken candidate-list reset to pass this test.
+    candidates = (
+        torch.arange(1, top_k + 1, device="cuda")
+        .view(1, top_k)
+        .expand(steps, top_k)
+        .contiguous()
+    )
+    scores = (
+        torch.linspace(-1, 1, top_k, device="cuda")
+        .view(1, top_k)
+        .expand(steps, top_k)
+        .contiguous()
+    )
+    request_rows = torch.full((steps,), slot, device="cuda", dtype=torch.int32)
+    spec.candidate_sampler.scores[0].copy_(scores)
+    # Exercise the actual next-proposal cache update.
+    spec.candidate_sampler._cache_draft_logits(
+        candidates, steps, request_rows, spec.draft_logits
+    )
+    torch.accelerator.synchronize()
+    # Only the new candidate scores may remain. A finite score at zero means
+    # the placeholder survived because its candidate tracking was not reset.
+    torch.testing.assert_close(
+        spec.draft_logits[slot, :, 1 : top_k + 1], scores, rtol=0, atol=0
+    )
+    assert torch.isneginf(spec.draft_logits[slot, :, 0]).all()
+    assert torch.isneginf(spec.draft_logits[slot, :, top_k + 1 :]).all()

@@ -197,6 +197,11 @@ class DFlash2Speculator(DFlashSpeculator):
             self.max_num_reqs, self.num_speculative_steps, self.top_k, device
         )
 
+    def reset_request(self, req_idx: int) -> None:
+        super().reset_request(req_idx)
+        # The next draft must also clear the temporary token-zero entry.
+        self.candidate_sampler.cached_candidate_ids[req_idx].zero_()
+
     def draft_logits_spec(self, vllm_config: VllmConfig) -> tuple[torch.dtype, float]:
         # fp32 so the walk and the rejection that checks it read the same
         # distribution; -inf because the cache kernel writes only the K
