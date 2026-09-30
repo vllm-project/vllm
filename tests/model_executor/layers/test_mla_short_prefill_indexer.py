@@ -46,7 +46,7 @@ def test_sparse_attention_refreshes_batch_state_inside_eager_segment(
 
     with pytest.raises(BatchStateRefreshed):
         DeepseekV32Attention._sparse_indexer_and_attn(
-            layer,
+            layer,  # type: ignore[arg-type]
             torch.empty(1, dtype=torch.long),
             torch.empty(1, 1),
             torch.empty(1, 1, 1),
@@ -80,7 +80,7 @@ def make_indexer_metadata(
         num_decode_tokens=num_decode_tokens,
         num_prefills=num_prefills,
         num_prefill_tokens=num_prefill_tokens,
-        prefill=SimpleNamespace(chunks=[]) if num_prefills else None,
+        prefill=SimpleNamespace(chunks=[]) if num_prefills else None,  # type: ignore[arg-type]
     )
 
 
@@ -129,7 +129,7 @@ def test_short_prefill_updates_k_cache_before_scoring_decision(
         slot_mapping=slot_mapping,
     )
     if indexer_metadata.num_decodes:
-        indexer_metadata.decode = object()
+        indexer_metadata.decode = object()  # type: ignore[assignment]
     mla_metadata = make_mla_metadata(
         use_dense_mha=batch_kind != "force_mqa",
         num_decode_tokens=mla_num_decode_tokens,
@@ -307,7 +307,7 @@ def test_deepseek_v32_dispatches_selected_mha(
     output = torch.empty(2, 2)
 
     DeepseekV32Attention._sparse_indexer_and_attn(
-        layer,
+        layer,  # type: ignore[arg-type]
         torch.arange(2),
         torch.empty(2, 2),
         q_nope,
@@ -675,6 +675,40 @@ def test_candidate_blocks_to_sparse_indices_matches_reference(
     )
     assert not si_buf[:, num_candidates * ratio :].any()
     assert not end_buf[1 - end_offset :: 2].any()
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+def test_sparse_topk_remap_bounds_nan_rows():
+    """DeepSelect writes an out-of-range sentinel to slot 0 of NaN rows (the
+    rest is left untouched); the remap turns it into -1."""
+    from vllm.model_executor.kernels.attention.dsa.sparse_mqa_logits import (
+        has_deep_select,
+        sparse_topk_remap,
+    )
+
+    if not has_deep_select():
+        pytest.skip("DeepSelect extension (vllm._deepselect_C) required")
+    rows, num_sparse, sbk, topk = 4, 128, 8, 512
+    width = num_sparse * sbk
+    logits = torch.randn(rows, width, dtype=torch.bfloat16, device="cuda")
+    logits[1:, :16] = float("nan")
+    sparse_indices = torch.arange(num_sparse, dtype=torch.int32, device="cuda")
+    end = torch.full((rows,), width, dtype=torch.int32, device="cuda")
+    out = torch.empty(rows, topk, dtype=torch.int32, device="cuda")
+    cols = torch.zeros_like(out)
+
+    sparse_topk_remap(
+        logits,
+        sparse_indices.repeat(rows, 1),
+        end,
+        torch.zeros_like(end),
+        sbk,
+        topk,
+        out,
+        col_indices=cols,
+    )
+    assert (cols[1:, 0] >= width).all() and (out[1:, 0] == -1).all()
+    assert (out[0] >= 0).all()
 
 
 def _skip_unless_sm100_sparse_kernels():
