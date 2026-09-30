@@ -598,7 +598,7 @@ def test_sparse_attn_prefill_ragged_kernel() -> None:
 
 def _sparse_prefill_ragged_inputs(nope_dim: int, rope_dim: int) -> dict:
     device = torch.device("cuda")
-    torch.manual_seed(7)
+    set_random_seed(7)
     head_dim = nope_dim + rope_dim
     return dict(
         q=torch.randn(3, 3, head_dim, dtype=torch.bfloat16, device=device) * 0.125,
