@@ -51,6 +51,20 @@ from vllm.platforms import CpuArchEnum, current_platform
 from vllm.utils.math_utils import round_up
 
 logger = init_logger(__name__)
+
+
+def _supports_x86_grouped_gemm() -> bool:
+    """The x86 grouped-gemm MoE kernels ship in the `_C` extension, which the
+    CPU platform loads whenever AVX-512 BF16 is available."""
+    return (
+        current_platform.is_cpu()
+        and current_platform.get_cpu_architecture() == CpuArchEnum.X86
+        and (
+            torch.cpu._is_amx_tile_supported() or torch.cpu._is_avx512_bf16_supported()
+        )
+    )
+
+
 # ===========================================================================
 # Unquantized (BF16/FP16/FP32) MoE
 # ===========================================================================
@@ -298,11 +312,7 @@ class X86CPUUnquantizedExperts(CPUUnquantizedExperts):
 
     @staticmethod
     def _supports_current_device() -> bool:
-        return (
-            current_platform.is_cpu()
-            and current_platform.get_cpu_architecture() == CpuArchEnum.X86
-            and torch.cpu._is_amx_tile_supported()
-        )
+        return _supports_x86_grouped_gemm()
 
     @staticmethod
     def is_supported_config(
@@ -812,11 +822,7 @@ class CPUExpertsInt4(mk.FusedMoEExpertsModular):
 
     @staticmethod
     def _supports_current_device() -> bool:
-        return (
-            current_platform.is_cpu()
-            and current_platform.get_cpu_architecture() == CpuArchEnum.X86
-            and torch.cpu._is_amx_tile_supported()
-        )
+        return _supports_x86_grouped_gemm()
 
     @staticmethod
     def _supports_no_act_and_mul() -> bool:
@@ -999,11 +1005,7 @@ class CPUExpertsInt8(mk.FusedMoEExpertsModular):
 
     @staticmethod
     def _supports_current_device() -> bool:
-        return (
-            current_platform.is_cpu()
-            and current_platform.get_cpu_architecture() == CpuArchEnum.X86
-            and torch.cpu._is_amx_tile_supported()
-        )
+        return _supports_x86_grouped_gemm()
 
     @staticmethod
     def is_supported_config(
