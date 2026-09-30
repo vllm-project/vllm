@@ -7,6 +7,7 @@
 
 #include "libtorch_stable/core/math.hpp"
 #include "cuda_compat.h"
+#include "libtorch_stable/cuda_vec_utils.cuh"
 #include "libtorch_stable/dispatch_utils.h"
 #include "quantization/w8a8/fp8/common.cuh"
 
@@ -585,11 +586,6 @@ __global__ void silu_mul_fp8_quant_deep_gemm_kernel(
 
 }  // namespace vllm
 
-template <typename T>
-static bool ptr_int4_aligned(const T* ptr) {
-  return reinterpret_cast<uintptr_t>(ptr) % sizeof(int4) == 0;
-}
-
 // Grid: min(chunks / block, SMs * kActQuantMaxBlocksPerSm) blocks with a
 // stride loop. Chunk indices are 32-bit inside the kernel, so inputs with
 // more than 2^32 chunks are split into launches of whole rows.
@@ -645,8 +641,8 @@ void silu_and_mul_quant(torch::stable::Tensor& out,    // [..., d]
               fp8_t* out_ptr = out.mutable_data_ptr<fp8_t>();
               const float* scale_ptr = scale.const_data_ptr<float>();
               const bool vectorized = d % vllm::kActQuantVecSize == 0 &&
-                                      ptr_int4_aligned(in_ptr) &&
-                                      ptr_int4_aligned(out_ptr);
+                                      is_16byte_aligned(in_ptr) &&
+                                      is_16byte_aligned(out_ptr);
               if (vectorized) {
                 launch_act_and_mul_quant<scalar_t, vllm::silu_fast, fp8_t,
                                          vllm::kActQuantVecSize>(
