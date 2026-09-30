@@ -453,47 +453,47 @@ class HiSparseCoordinator:
         *,
         replay_boundaries: Sequence[int],
     ) -> None:
-        """Publish host-source hashes only after their pages are durable."""
+        """Publish host-source hashes of the pages that are already durable."""
         manager = self.host_manager
         if manager is None:
             return
-        num_pages = num_computed_tokens // manager.block_size
         request_id = request.request_id
-        state = self._get_request_state(request_id)
-        if state.ready_prefix_pages >= num_pages:
-            manager.publish_blocks(
-                request,
-                num_computed_tokens,
-                retention_interval=retention_interval,
-                replay_boundaries=replay_boundaries,
-            )
-            self._record_copies(request_id, num_computed_tokens)
-            state.publication = None
-            return
-        state.publication = _PendingPublication(
+        self._get_request_state(request_id).publication = _PendingPublication(
             request=request,
             num_computed_tokens=num_computed_tokens,
-            num_pages=num_pages,
+            num_pages=num_computed_tokens // manager.block_size,
             retention_interval=retention_interval,
             replay_boundaries=replay_boundaries,
         )
+        self._publish_host_blocks_if_ready(request_id)
 
     def _publish_host_blocks_if_ready(self, request_id: str) -> None:
+        """Publish the durable prefix of the pending publication.
+
+        Host writes trail a long prefill by about a chunk, so waiting for the
+        whole computed prefix would publish nothing until the prefill ends, and
+        a prefill preempted before then would recompute from the start.
+        """
         state = self.request_states.get(request_id)
         if state is None:
             return
         publication = state.publication
-        if publication is None or state.ready_prefix_pages < publication.num_pages:
+        if publication is None:
             return
         assert self.host_manager is not None
+        num_tokens = min(
+            publication.num_computed_tokens,
+            state.ready_prefix_pages * self.host_manager.block_size,
+        )
         self.host_manager.publish_blocks(
             publication.request,
-            publication.num_computed_tokens,
+            num_tokens,
             retention_interval=publication.retention_interval,
             replay_boundaries=publication.replay_boundaries,
         )
-        self._record_copies(request_id, publication.num_computed_tokens)
-        state.publication = None
+        self._record_copies(request_id, num_tokens)
+        if state.ready_prefix_pages >= publication.num_pages:
+            state.publication = None
 
     def record_pending_host_import(self, request_id: str, num_tokens: int) -> None:
         """Note a prefix an external load is populating in host pages."""

@@ -1259,6 +1259,33 @@ def test_hisparse_cleanup_publishes_only_finalized_terminal_pages(
     assert not coordinator.has_pending_work()
 
 
+def test_hisparse_preempted_prefill_resumes_from_durable_prefix():
+    """A prefill preempted mid-way must resume from the pages already on host.
+
+    Host writes trail a chunked prefill by a chunk, and host pages were only
+    published once the whole computed prefix was durable. Each chunk moved
+    that target past the finished writes, so nothing was published before the
+    prefill ended: a prefill preempted each time it outgrew the GPU pool
+    recomputed from the start forever.
+    """
+    manager = make_hisparse_kv_cache_manager(32, 16, enable_caching=True)
+    coordinator = get_hisparse_coordinator(manager)
+    chunk = 2 * HISPARSE_BLOCK_SIZE
+    tokens = list(range(3 * chunk))
+    request = make_request("long", tokens, HISPARSE_BLOCK_SIZE, sha256)
+    assert manager.allocate_slots(request, chunk) is not None
+    request.num_computed_tokens = chunk
+    first_chunk_writes = coordinator.build_offload_command().page_transfers
+    assert manager.allocate_slots(request, chunk) is not None
+    request.num_computed_tokens = 2 * chunk
+    acks = {transfer.transfer_id: 1 for transfer in first_chunk_writes}
+    coordinator.update_spills(acks, acks)
+    manager.free(request)
+
+    resumed = make_request("resumed", tokens, HISPARSE_BLOCK_SIZE, sha256)
+    assert manager.get_computed_blocks(resumed)[1] == chunk
+
+
 def test_hisparse_terminal_prefix_waits_for_all_workers_and_preserves_identity():
     """Old completions retain their pages through pressure and request-ID reuse."""
     manager = make_hisparse_kv_cache_manager(32, 8, enable_caching=True)
@@ -1285,7 +1312,9 @@ def test_hisparse_terminal_prefix_waits_for_all_workers_and_preserves_identity()
     assert not {block.block_id for block in old_blocks[:2]} & {
         block.block_id for block in pressure + new_blocks
     }
-    assert all(block.block_hash is None for block in old_blocks)
+    # Only the page every worker finished writing is published.
+    assert old_blocks[0].block_hash is not None
+    assert all(block.block_hash is None for block in old_blocks[1:])
     coordinator.update_spills({}, partial)
     repeated = make_request("probe", tokens, HISPARSE_BLOCK_SIZE, sha256)
     assert manager.get_computed_blocks(repeated)[1] == 2 * HISPARSE_BLOCK_SIZE
