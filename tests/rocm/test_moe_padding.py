@@ -2,31 +2,41 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Tests for the `VLLM_ROCM_MOE_PADDING` weight memory-layout padding trick.
 
-`VLLM_ROCM_MOE_PADDING` (see `UnquantizedFusedMoEMethod._maybe_pad_weight` in
-`vllm/model_executor/layers/fused_moe/unquantized_fused_moe_method.py`) is a
-memory-stride trick, not a logical-shape one: when eligible, it enlarges a
-weight tensor's underlying storage (via `F.pad(...)[..., :-num_pad]`) so
-per-expert allocations land farther apart in HBM, but the tensor's visible
-shape, stride, and values are unaffected. `RoutedExperts.process_weights_after_
-loading` immediately copies the padded view's values back into the original
-(unpadded-storage) parameter via `.data.copy_()` -- to preserve the parameter's
-storage address for CUDA-graph capture -- so the padding never persists on
-`w13_weight`/`w2_weight` themselves. This file verifies:
+`VLLM_ROCM_MOE_PADDING` (see `UnquantizedFusedMoEMethod._maybe_pad_weight`)
+is a memory-stride trick, not a logical-shape one: when eligible, it enlarges
+a weight tensor's storage so per-expert allocations land farther apart in
+HBM. Shape and values are unaffected, but `stride(-2)` increases by
+`num_pad` elements -- that's the whole mechanism. For the **AITER** path
+tested here, the padded storage never persists on `w13_weight`/`w2_weight`:
+`convert_to_unquantized_kernel_format` reallocates via
+`rocm_aiter_ops.shuffle_weights`. This is AITER-specific -- on TRITON-on-ROCm,
+`.contiguous()` is skipped specifically to keep this same padding, so its
+persisted parameters *do* stay padded.
 
-1. `_maybe_pad_weight` in isolation: it only grows storage when the tensor's
-   last-but-one dim is 512-byte aligned and the flag is on, and never changes
-   the tensor's shape or values either way.
-2. End to end: `AiterExperts.apply()` produces numerically identical output
-   whether `VLLM_ROCM_MOE_PADDING` is enabled or disabled, for weight shapes
-   that are eligible for the padding trick.
+This file verifies, for AITER only:
+1. `_maybe_pad_weight` in isolation: grows storage/`stride(-2)` only when
+   eligible (512-byte-aligned, unit inner stride, EPLB off, flag on); a
+   true no-op (identical object) otherwise.
+2. End to end: `AiterExperts.apply()` matches an independent reference
+   regardless of the flag, and persisted parameter storage size is
+   unaffected by it.
+3. Weight reload (e.g. RL weight-update) preserves parameter storage
+   addresses regardless of the flag (`replace_parameter`'s
+   `prefer_copy=True` contract).
+
+Logical `hidden_dim_unpadded`/`intermediate_size_per_partition_unpadded`
+padding and HIP-graph token-padding are separate mechanisms, covered in
+#59333 and #59334.
 
 See https://github.com/vllm-project/vllm/issues/54966 ("Test padding").
 """
 
+import dataclasses
 import importlib.util
 
 import pytest
 import torch
+import torch.nn.functional as F
 
 import vllm.envs as envs
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
@@ -37,6 +47,9 @@ from vllm.model_executor.layers.fused_moe.config import (
 )
 from vllm.model_executor.layers.fused_moe.expert_map_manager import (
     ExpertMapManager,
+)
+from vllm.model_executor.layers.fused_moe.oracle.unquantized import (
+    UnquantizedMoeBackend,
 )
 from vllm.model_executor.layers.fused_moe.routed_experts import RoutedExperts
 from vllm.model_executor.layers.fused_moe.unquantized_fused_moe_method import (
@@ -56,8 +69,8 @@ DTYPE = torch.bfloat16
 NUM_EXPERTS = 4
 TOPK = 2
 NUM_TOKENS = 16
-# 256 bf16 elements * 2 bytes = 512 bytes: eligible for `_maybe_pad_weight`
-# on both w13 (stride(-2) == HIDDEN_SIZE) and w2 (stride(-2) == INTERMEDIATE_SIZE).
+# 256 bf16 elems * 2 bytes = 512 bytes: eligible for `_maybe_pad_weight` on
+# both w13 and w2.
 HIDDEN_SIZE = 256
 INTERMEDIATE_SIZE = 256
 
@@ -72,7 +85,15 @@ def _set_padding_env(monkeypatch: pytest.MonkeyPatch, padding: bool) -> None:
     rocm_aiter_ops.refresh_env_variables()
 
 
-def _make_moe_config(hidden_size: int, intermediate_size: int) -> FusedMoEConfig:
+def _make_moe_config(
+    hidden_size: int,
+    intermediate_size: int,
+    dtype: torch.dtype = DTYPE,
+    enable_eplb: bool = False,
+) -> FusedMoEConfig:
+    parallel_config = FusedMoEParallelConfig.make_no_parallel()
+    if enable_eplb:
+        parallel_config = dataclasses.replace(parallel_config, enable_eplb=True)
     return FusedMoEConfig(
         num_experts=NUM_EXPERTS,
         experts_per_token=TOPK,
@@ -80,9 +101,9 @@ def _make_moe_config(hidden_size: int, intermediate_size: int) -> FusedMoEConfig
         intermediate_size=intermediate_size,
         num_local_experts=NUM_EXPERTS,
         num_logical_experts=NUM_EXPERTS,
-        moe_parallel_config=FusedMoEParallelConfig.make_no_parallel(),
+        moe_parallel_config=parallel_config,
         activation=MoEActivation.SILU,
-        in_dtype=DTYPE,
+        in_dtype=dtype,
         device=DEVICE,
         routing_method=RoutingMethodType.TopK,
         max_num_tokens=NUM_TOKENS,
@@ -201,14 +222,8 @@ def _forward(
 
 
 def _assert_backend_is_aiter(layer: RoutedExperts) -> None:
-    selected = str(
-        getattr(
-            layer.quant_method.unquantized_backend,
-            "value",
-            layer.quant_method.unquantized_backend,
-        )
-    )
-    assert selected == "ROCm AITER", (
+    selected = layer.quant_method.unquantized_backend
+    assert selected is UnquantizedMoeBackend.AITER, (
         f"expected AiterExperts to be selected, got backend={selected!r}"
     )
 
@@ -217,17 +232,18 @@ def _assert_backend_is_aiter(layer: RoutedExperts) -> None:
 
 
 @pytest.mark.parametrize(
-    "padding,hidden_size,intermediate_size,expect_padded",
+    "padding,hidden_size,intermediate_size,dtype,expect_padded",
     [
-        # eligible shape (256 bf16 elems * 2 bytes == 512): padding fires iff
-        # the env var is on.
-        (True, HIDDEN_SIZE, INTERMEDIATE_SIZE, True),
-        (False, HIDDEN_SIZE, INTERMEDIATE_SIZE, False),
-        # ineligible shape (200 bf16 elems * 2 bytes == 400, not 512-aligned):
-        # padding never fires regardless of the env var.
-        (True, 200, 200, False),
+        # eligible shape (512 bytes): padding fires iff the env var is on.
+        (True, HIDDEN_SIZE, INTERMEDIATE_SIZE, DTYPE, True),
+        (False, HIDDEN_SIZE, INTERMEDIATE_SIZE, DTYPE, False),
+        # ineligible shape (400 bytes, not 512-aligned): never fires.
+        (True, 200, 200, DTYPE, False),
+        # fp32: alignment threshold and num_pad both scale with
+        # element_size() (128 fp32 elems * 4 bytes == 512).
+        (True, 128, 128, torch.float32, True),
     ],
-    ids=["eligible-on", "eligible-off", "ineligible-on"],
+    ids=["eligible-on", "eligible-off", "ineligible-on", "eligible-on-fp32"],
 )
 def test_maybe_pad_weight_transparent(
     monkeypatch: pytest.MonkeyPatch,
@@ -235,16 +251,17 @@ def test_maybe_pad_weight_transparent(
     padding: bool,
     hidden_size: int,
     intermediate_size: int,
+    dtype: torch.dtype,
     expect_padded: bool,
 ) -> None:
-    """`_maybe_pad_weight` must never change a weight's shape or values, and
-    must only grow the tensor's storage when the flag is on AND the tensor's
-    last-but-one-dim stride is 512-byte aligned."""
+    """Shape/values never change; storage only grows (`stride(-2) += num_pad`)
+    when eligible and the flag is on. Otherwise it's a true no-op (identical
+    object)."""
     assert default_vllm_config is not None
     _set_padding_env(monkeypatch, padding)
     assert envs.VLLM_ROCM_MOE_PADDING is padding
 
-    moe_config = _make_moe_config(hidden_size, intermediate_size)
+    moe_config = _make_moe_config(hidden_size, intermediate_size, dtype=dtype)
     method = UnquantizedFusedMoEMethod(moe_config)
 
     original = torch.randn(
@@ -252,24 +269,139 @@ def test_maybe_pad_weight_transparent(
         2 * intermediate_size,
         hidden_size,
         device=DEVICE,
-        dtype=DTYPE,
+        dtype=dtype,
     )
     result = method._maybe_pad_weight(original)
 
     assert result.shape == original.shape
     assert torch.equal(result, original), "padding must not alter weight values"
 
-    original_nbytes = original.untyped_storage().nbytes()
-    result_nbytes = result.untyped_storage().nbytes()
     if expect_padded:
-        assert result_nbytes > original_nbytes, (
-            "expected `_maybe_pad_weight` to grow storage for an eligible "
-            "shape with VLLM_ROCM_MOE_PADDING enabled"
-        )
+        num_pad = 256 // original.element_size()
+        assert result.stride(-1) == 1
+        assert result.stride(-2) == original.stride(-2) + num_pad
+        assert result.untyped_storage().nbytes() > original.untyped_storage().nbytes()
         assert result.data_ptr() != original.data_ptr()
     else:
-        assert result_nbytes == original_nbytes
-        assert result.data_ptr() == original.data_ptr()
+        assert result is original
+
+
+def test_maybe_pad_weight_eplb_blocks_padding(
+    monkeypatch: pytest.MonkeyPatch,
+    default_vllm_config,
+) -> None:
+    """EPLB rebalancing swaps expert weight buffers directly, so padding
+    must be disabled whenever it's enabled, even for an eligible shape."""
+    assert default_vllm_config is not None
+    _set_padding_env(monkeypatch, True)
+
+    moe_config = _make_moe_config(HIDDEN_SIZE, INTERMEDIATE_SIZE, enable_eplb=True)
+    method = UnquantizedFusedMoEMethod(moe_config)
+
+    original = torch.randn(
+        NUM_EXPERTS,
+        2 * INTERMEDIATE_SIZE,
+        HIDDEN_SIZE,
+        device=DEVICE,
+        dtype=DTYPE,
+    )
+    result = method._maybe_pad_weight(original)
+    assert result is original
+
+
+def test_maybe_pad_weight_non_unit_inner_stride_blocks_padding(
+    monkeypatch: pytest.MonkeyPatch,
+    default_vllm_config,
+) -> None:
+    """Requires `stride(-1) == 1`; a transposed (non-contiguous inner dim)
+    view with an otherwise-eligible outer stride must not be padded."""
+    assert default_vllm_config is not None
+    _set_padding_env(monkeypatch, True)
+
+    moe_config = _make_moe_config(HIDDEN_SIZE, INTERMEDIATE_SIZE)
+    method = UnquantizedFusedMoEMethod(moe_config)
+
+    base = torch.randn(
+        NUM_EXPERTS,
+        HIDDEN_SIZE,
+        2 * INTERMEDIATE_SIZE,
+        device=DEVICE,
+        dtype=DTYPE,
+    )
+    original = base.transpose(-1, -2)
+    assert original.stride(-1) != 1
+
+    result = method._maybe_pad_weight(original)
+    assert result is original
+
+
+@pytest.mark.parametrize(
+    "hidden_size,intermediate_size,expect_w13_padded,expect_w2_padded",
+    [
+        # only hidden_size aligned: only w13 (last dim hidden_size) eligible.
+        (HIDDEN_SIZE, 200, True, False),
+        # only intermediate_size aligned: only w2 (last dim
+        # intermediate_size) eligible.
+        (200, HIDDEN_SIZE, False, True),
+    ],
+    ids=["only-w13-eligible", "only-w2-eligible"],
+)
+def test_maybe_pad_weight_asymmetric_w13_w2_eligibility(
+    monkeypatch: pytest.MonkeyPatch,
+    default_vllm_config,
+    hidden_size: int,
+    intermediate_size: int,
+    expect_w13_padded: bool,
+    expect_w2_padded: bool,
+) -> None:
+    """w13 and w2 key their alignment gate off different dims (hidden_size
+    vs. intermediate_size), so they're independently eligible."""
+    assert default_vllm_config is not None
+    _set_padding_env(monkeypatch, True)
+
+    moe_config = _make_moe_config(hidden_size, intermediate_size)
+    method = UnquantizedFusedMoEMethod(moe_config)
+
+    w13 = torch.randn(
+        NUM_EXPERTS, 2 * intermediate_size, hidden_size, device=DEVICE, dtype=DTYPE
+    )
+    w2 = torch.randn(
+        NUM_EXPERTS, hidden_size, intermediate_size, device=DEVICE, dtype=DTYPE
+    )
+
+    w13_result = method._maybe_pad_weight(w13)
+    w2_result = method._maybe_pad_weight(w2)
+
+    assert (w13_result is not w13) == expect_w13_padded
+    assert (w2_result is not w2) == expect_w2_padded
+
+
+def _reference_moe_forward(
+    seed: int,
+    hidden_size: int,
+    intermediate_size: int,
+    x: torch.Tensor,
+    topk_weights: torch.Tensor,
+    topk_ids: torch.Tensor,
+) -> torch.Tensor:
+    """A minimal, independent (no AITER) reference MoE forward, so the E2E
+    test below can't pass merely because both flag settings are wrong the
+    same way."""
+    weights: dict[int, dict[str, torch.Tensor]] = {}
+    for name, tensor in _expert_weight_iterator(seed, hidden_size, intermediate_size):
+        expert_id_str, proj_name = name.split(".", 1)
+        weights.setdefault(int(expert_id_str), {})[proj_name] = tensor
+
+    output = torch.zeros_like(x)
+    for expert_id, proj in weights.items():
+        gate = F.silu(x @ proj["gate_proj.weight"].T)
+        up = x @ proj["up_proj.weight"].T
+        expert_out = (gate * up) @ proj["down_proj.weight"].T
+
+        mask = topk_ids == expert_id
+        weight = (topk_weights * mask).sum(dim=1, keepdim=True)
+        output = output + weight * expert_out
+    return output
 
 
 # --- 2. End-to-end numerical transparency through AiterExperts -------------
@@ -281,14 +413,15 @@ def test_aiter_moe_padding_numerically_transparent(
     default_vllm_config,
     workspace_init,
 ) -> None:
-    """`AiterExperts.apply()` must produce the same output regardless of
-    `VLLM_ROCM_MOE_PADDING`, for a weight shape that is eligible for the
-    padding trick -- the flag only changes an intermediate tensor's storage
-    layout, never the values a real `RoutedExperts` layer ends up loading."""
+    """`AiterExperts.apply()` output must match an independent reference
+    (not just itself across flag settings) for an eligible weight shape,
+    regardless of `VLLM_ROCM_MOE_PADDING`. Persisted parameter storage size
+    must also be unaffected by the flag (see module docstring)."""
     assert default_vllm_config is not None
     assert workspace_init is None
 
     outputs: dict[bool, torch.Tensor] = {}
+    storage_nbytes: dict[bool, tuple[int, int]] = {}
     for padding in (True, False):
         _set_padding_env(monkeypatch, padding)
 
@@ -301,8 +434,84 @@ def test_aiter_moe_padding_numerically_transparent(
                 intermediate_size=INTERMEDIATE_SIZE,
             )
         _assert_backend_is_aiter(layer)
+        storage_nbytes[padding] = (
+            layer.w13_weight.data.untyped_storage().nbytes(),
+            layer.w2_weight.data.untyped_storage().nbytes(),
+        )
 
         x, topk_weights, topk_ids = _make_static_inputs(HIDDEN_SIZE)
         outputs[padding] = _forward(layer, x, topk_weights, topk_ids).clone()
 
+    assert storage_nbytes[True] == storage_nbytes[False], (
+        "VLLM_ROCM_MOE_PADDING must not change the persisted parameters' "
+        "storage size for the AITER path"
+    )
+
+    reference = _reference_moe_forward(
+        seed=1,
+        hidden_size=HIDDEN_SIZE,
+        intermediate_size=INTERMEDIATE_SIZE,
+        x=x,
+        topk_weights=topk_weights,
+        topk_ids=topk_ids,
+    )
     torch.testing.assert_close(outputs[True], outputs[False], rtol=2e-2, atol=2e-2)
+
+    # Cosine similarity, not elementwise assert_close, for the reference
+    # comparison: two independently computed bf16 GEMM chains can have
+    # near-zero elements where rounding noise blows up elementwise relative
+    # error. Same pattern as test_b12x.py / test_mxfp4_moe.py.
+    for padded, output in outputs.items():
+        cos_sim = F.cosine_similarity(
+            output.flatten().float(), reference.flatten().float(), dim=0
+        )
+        assert cos_sim > 0.99, (
+            f"padding={padded} output diverged from reference "
+            f"(cosine similarity {cos_sim:.4f})"
+        )
+
+
+# --- 3. Weight-update reload preserves parameter storage address -----------
+
+
+@torch.inference_mode()
+@pytest.mark.parametrize("padding", [True, False], ids=["padding-on", "padding-off"])
+def test_aiter_moe_padding_weight_update_preserves_address(
+    monkeypatch: pytest.MonkeyPatch,
+    default_vllm_config,
+    workspace_init,
+    padding: bool,
+) -> None:
+    """Reloading weights (e.g. an RL weight-update) must preserve
+    `w13_weight`/`w2_weight`'s storage address, regardless of
+    `VLLM_ROCM_MOE_PADDING` (`replace_parameter`'s `prefer_copy=True`
+    contract)."""
+    assert default_vllm_config is not None
+    assert workspace_init is None
+    _set_padding_env(monkeypatch, padding)
+
+    with torch.device(DEVICE):
+        layer = _make_routed_experts(HIDDEN_SIZE, INTERMEDIATE_SIZE)
+        _load_and_process_weights(
+            layer, seed=1, hidden_size=HIDDEN_SIZE, intermediate_size=INTERMEDIATE_SIZE
+        )
+    _assert_backend_is_aiter(layer)
+    w13_ptr_before = layer.w13_weight.data_ptr()
+    w2_ptr_before = layer.w2_weight.data_ptr()
+
+    with torch.device(DEVICE):
+        _load_and_process_weights(
+            layer, seed=2, hidden_size=HIDDEN_SIZE, intermediate_size=INTERMEDIATE_SIZE
+        )
+    _assert_backend_is_aiter(layer)
+
+    assert layer.w13_weight.data_ptr() == w13_ptr_before, (
+        "reloading weights must preserve w13_weight's storage address"
+    )
+    assert layer.w2_weight.data_ptr() == w2_ptr_before, (
+        "reloading weights must preserve w2_weight's storage address"
+    )
+
+    x, topk_weights, topk_ids = _make_static_inputs(HIDDEN_SIZE)
+    output = _forward(layer, x, topk_weights, topk_ids)
+    assert torch.isfinite(output).all()
