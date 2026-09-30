@@ -203,12 +203,15 @@ FROM base AS build_mori
 ARG MORI_BRANCH
 ARG MORI_REPO
 RUN git clone ${MORI_REPO}
+# hsakmt needs TheRock's bundled NUMA CMake package.
 RUN cd mori \
     && git checkout ${MORI_BRANCH} \
     && git submodule update --init --recursive \
     && ln -sfn ${ROCM_PATH} /opt/rocm \
     && mkdir -p /usr/lib64 && ln -sf /usr/lib/x86_64-linux-gnu/libc.so /usr/lib64/libc.so \
-    && python3 setup.py bdist_wheel --dist-dir=dist && ls /app/mori/dist/*.whl
+    && CMAKE_PREFIX_PATH="${ROCM_PATH}:${ROCM_PATH}/lib/rocm_sysdeps${CMAKE_PREFIX_PATH:+:${CMAKE_PREFIX_PATH}}" \
+        python3 setup.py bdist_wheel --dist-dir=dist \
+    && ls /app/mori/dist/*.whl
 RUN mkdir -p /app/install && cp /app/mori/dist/*.whl /app/install
 
 ###
