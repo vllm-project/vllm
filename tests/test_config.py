@@ -5,6 +5,7 @@ import json
 import logging
 import os
 from dataclasses import MISSING, Field, asdict, dataclass, field
+from datetime import timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from typing import cast
@@ -415,6 +416,19 @@ def test_hisparse_rejects_disabled_hybrid_kv_cache_manager(monkeypatch):
                 max_model_len=2048,
                 is_encoder_decoder=False,
                 disable_hybrid_kv_cache_manager=True,
+            ),
+        )
+
+
+def test_hisparse_rejects_disabled_full_isl_reservation(monkeypatch):
+    monkeypatch.setattr(current_platform, "is_cuda", lambda: True)
+    with pytest.raises(ValueError, match="requires --scheduler-reserve-full-isl"):
+        VllmConfig(
+            attention_config=AttentionConfig(hisparse_config=HiSparseConfig()),
+            scheduler_config=SchedulerConfig(
+                max_model_len=2048,
+                is_encoder_decoder=False,
+                scheduler_reserve_full_isl=False,
             ),
         )
 
@@ -1464,6 +1478,20 @@ def test_all2all_backend_has_portable_default():
     assert ParallelConfig().all2all_backend == "allgather_reducescatter"
 
 
+def test_dp_group_uses_configured_timeout_without_current_config(monkeypatch):
+    monkeypatch.setattr(vllm_config_module, "_current_vllm_config", None)
+    config = ParallelConfig(cpu_distributed_timeout_seconds=30)
+    with (
+        patch(
+            "vllm.distributed.utils.rendezvous",
+            return_value=iter([(torch.distributed.HashStore(), 0, 1)]),
+        ),
+        patch("vllm.distributed.utils.init_gloo_process_group") as init_group,
+    ):
+        config.stateless_init_dp_group()
+    assert init_group.call_args.kwargs["timeout"] == timedelta(seconds=30)
+
+
 @pytest.mark.parametrize(
     "dp_size, across_dp, expected",
     [(1, False, 4), (1, True, 4), (2, False, 4), (2, True, 8)],
@@ -1495,19 +1523,40 @@ def test_engram_dp_shared_memory_requires_cpu_offload():
         EngramConfig(cpu_offload=False, dp_shared_memory=True)
 
 
+@pytest.mark.skip_global_cleanup
 @pytest.mark.parametrize(
-    "cpu_offload,dp_size,elastic_ep,expected",
-    [(True, 2, False, True), (False, 2, False, False), (True, 1, False, False)],
+    "cpu_offload,use_thp,dp_shared_memory,dp_size,elastic_ep,expected",
+    [
+        (True, False, None, 2, False, True),
+        (False, False, None, 2, False, False),
+        (True, False, None, 1, False, False),
+        (True, False, None, 2, True, False),
+        # use_thp backs private tables; sharing would silently ignore it.
+        (True, True, None, 2, False, False),
+        (True, True, False, 2, False, False),
+    ],
 )
 def test_engram_dp_shared_memory_defaults_when_supported(
-    cpu_offload, dp_size, elastic_ep, expected
+    cpu_offload, use_thp, dp_shared_memory, dp_size, elastic_ep, expected
 ):
-    """Unset dp_shared_memory enables sharing only for offloaded, non-elastic DP."""
+    """Resolve sharing only where supported, preserving an explicit false."""
     parallel = ParallelConfig(data_parallel_size=dp_size)
     parallel.enable_elastic_ep = elastic_ep
-    config = EngramConfig(cpu_offload=cpu_offload)
+    config = EngramConfig(
+        cpu_offload=cpu_offload,
+        use_thp=use_thp,
+        dp_shared_memory=dp_shared_memory,
+    )
     config.resolve_dp_shared_memory(parallel)
     assert config.dp_shared_memory is expected
+
+
+@pytest.mark.skip_global_cleanup
+def test_engram_thp_rejects_explicit_shared_memory():
+    with pytest.raises(
+        ValueError, match="use_thp requires cpu_offload=True and dp_shared_memory=False"
+    ):
+        EngramConfig(use_thp=True, dp_shared_memory=True)
 
 
 @pytest.mark.parametrize(
@@ -1552,14 +1601,14 @@ def test_engram_dp_shared_memory_config_validation(
         ("DeepseekV41ForCausalLM", [1], "cuda", True),
         ("DeepseekV41ForCausalLM", [1], "rocm", True),
         ("DeepseekV41ForCausalLM", [], "cuda", False),
-        ("DeepseekV41ForCausalLM", [1], "cpu", False),
+        ("DeepseekV41ForCausalLM", [1], "cpu", True),
         ("Qwen4ExpForCausalLM", [1], "cuda", True),
         ("Qwen4ExpForCausalLM", [1], "rocm", True),
         ("Qwen4ExpForConditionalGeneration", [1], "cuda", True),
         ("Qwen4ExpForConditionalGeneration", [1], "rocm", True),
         ("Qwen4ExpForCausalLM", [], "cuda", False),
         ("Qwen4ExpForCausalLM", None, "cuda", False),
-        ("Qwen4ExpForCausalLM", [1], "cpu", False),
+        ("Qwen4ExpForCausalLM", [1], "cpu", True),
         ("LlamaForCausalLM", [1], "cuda", False),
         ("Qwen4ExpMTP", [], "cuda", False),
         (None, None, "cuda", False),
