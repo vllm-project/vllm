@@ -9,7 +9,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 from einops import rearrange
-from transformers import PretrainedConfig
+from transformers import PreTrainedConfig
 from transformers.activations import GELUActivation
 from transformers.feature_extraction_utils import BatchFeature
 
@@ -197,8 +197,8 @@ KeyeVL1_5VideoInputs: TypeAlias = (
 class KeyeVL1_5Projector(nn.Module):
     def __init__(
         self,
-        text_config: PretrainedConfig,
-        vision_config: PretrainedConfig,
+        text_config: PreTrainedConfig,
+        vision_config: PreTrainedConfig,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ):
@@ -509,15 +509,15 @@ class KeyeVL1_5ForConditionalGeneration(
 ):
     def _build_projector(
         self,
-        text_config: PretrainedConfig,
-        vision_config: PretrainedConfig,
+        text_config: PreTrainedConfig,
+        vision_config: PreTrainedConfig,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ) -> nn.Module:
         return KeyeVL1_5Projector(text_config, vision_config, quant_config, prefix)
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
-        config: PretrainedConfig = vllm_config.model_config.hf_config
+        config: PreTrainedConfig = vllm_config.model_config.hf_config
         self.merge_size = config.vision_config.spatial_merge_size
         super().__init__(vllm_config=vllm_config, prefix=prefix)
 

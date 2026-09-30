@@ -149,7 +149,7 @@ def test_activate_logs_info():
 
 def test_activate_rejects_unknown_mode():
     with pytest.raises(ValueError, match="Unsupported JIT monitor mode"):
-        jit_monitor.activate(mode="panic")  # type: ignore[arg-type]
+        jit_monitor.activate(mode="panic")
 
 
 def test_activate_without_triton():

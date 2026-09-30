@@ -199,6 +199,15 @@ class CpuPlatform(Platform):
         if model_config is not None:
             model_config.disable_cascade_attn = True
 
+        # Import lazily: vllm.triton_utils imports vllm.platforms.current_platform,
+        # which is still being resolved while this platform class is loading.
+        from vllm.triton_utils import HAS_TRITON
+
+        if cls.get_cpu_architecture() == CpuArchEnum.X86 and not HAS_TRITON:
+            logger.warning_once(
+                "Triton is not installed. triton-cpu is expected on x86 CPUs."
+            )
+
         cache_config = vllm_config.cache_config
 
         is_deepseek_v4 = (
@@ -395,11 +404,23 @@ class CpuPlatform(Platform):
         # Avoid inductor generates num_thread() and breaks the thread binding
         os.environ["TORCHINDUCTOR_CPP_DYNAMIC_THREADS"] = "1"
 
-        # For efficient conv state memory access. The C++ causal_conv1d
-        # kernels (VDPBF16PS, no AMX tiles) consume the SD layout on any
-        # AVX-512BF16 CPU, so apply it beyond AMX (e.g. AMD Zen5/Turin).
-        if torch.cpu._is_avx512_bf16_supported():
-            os.environ["VLLM_SSM_CONV_STATE_LAYOUT"] = "SD"
+        # NIXL's Mamba descriptors require DS conv state storage. Select it
+        # before cache shapes are created, while preserving an explicit layout.
+        conv_state_layout_env = "VLLM_SSM_CONV_STATE_LAYOUT"
+        if conv_state_layout_env not in os.environ:
+            kv_transfer_config = vllm_config.kv_transfer_config
+            uses_nixl = kv_transfer_config is not None and any(
+                kv_transfer_config.has_connector(name)
+                for name in (
+                    "NixlConnector",
+                    "NixlPullConnector",
+                    "NixlPushConnector",
+                )
+            )
+            if uses_nixl:
+                os.environ[conv_state_layout_env] = "DS"
+            elif torch.cpu._is_avx512_bf16_supported():
+                os.environ[conv_state_layout_env] = "SD"
 
         ld_preload_str = os.getenv("LD_PRELOAD", "")
         cpu_architecture = Platform.get_cpu_architecture()
@@ -498,11 +519,11 @@ class CpuPlatform(Platform):
             return
 
         # reconcile attention and mamba page sizes
-        backend_cls = cls._find_non_ssm_backend(vllm_config)
-        if backend_cls is None:
+        backend_classes = cls._find_non_ssm_backends(vllm_config)
+        if not backend_classes:
             return
 
-        cls._align_hybrid_block_size(vllm_config, backend_cls)
+        cls._align_hybrid_block_size(vllm_config, backend_classes[0])
 
     @classmethod
     def discover_numa_topology(cls) -> list[list[int]]:
@@ -625,6 +646,60 @@ class CpuPlatform(Platform):
                 import vllm._C  # noqa: F401
             except ImportError as e:
                 logger.warning_once("Failed to import from vllm._C: %s", repr(e))
+
+    @classmethod
+    def register_triton_kernel_overrides(cls) -> None:
+        """Fallback C++ implementations for core Triton kernels.
+
+        Used when the Triton-CPU backend is unavailable. When Triton-CPU is
+        present, the Triton kernels can run natively and the overrides
+        would only shadow them, so registration is skipped.
+        """
+        from vllm.triton_utils import HAS_TRITON
+
+        if HAS_TRITON:
+            return
+
+        from vllm.triton_utils.dispatcher import register_kernels
+        from vllm.utils import cpu_triton_utils as cpu_tl
+
+        register_kernels(
+            {
+                "vllm.v1.worker.block_table.ComputeSlotMappingKernel.kernel": (
+                    cpu_tl._compute_slot_mapping_kernel_impl
+                ),
+                "vllm.v1.spec_decode.utils.eagle_step_slot_mapping_metadata_kernel": (
+                    cpu_tl._eagle_step_slot_mapping_metadata_kernel_impl
+                ),
+                "vllm.v1.spec_decode.utils.eagle_prepare_inputs_padded_kernel": (
+                    cpu_tl._eagle_prepare_inputs_padded_kernel_impl
+                ),
+                "vllm.v1.spec_decode.utils.eagle_prepare_next_token_padded_kernel": (
+                    cpu_tl._eagle_prepare_next_token_padded_kernel_impl
+                ),
+                "vllm.v1.spec_decode.utils.copy_and_expand_eagle_inputs_kernel": (
+                    cpu_tl._copy_and_expand_eagle_inputs_kernel_impl
+                ),
+                "vllm.v1.spec_decode.utils.copy_and_expand_dflash_inputs_kernel": (
+                    cpu_tl._copy_and_expand_dflash_inputs_kernel_impl
+                ),
+                "vllm.v1.sample.rejection_sampler.rejection_greedy_sample_kernel": (
+                    cpu_tl._rejection_greedy_sample_kernel_impl
+                ),
+                "vllm.v1.sample.rejection_sampler.rejection_random_sample_kernel": (
+                    cpu_tl._rejection_random_sample_kernel_impl
+                ),
+                "vllm.v1.sample.rejection_sampler.expand_kernel": (
+                    cpu_tl._expand_kernel_impl
+                ),
+                "vllm.v1.sample.rejection_sampler.sample_recovered_tokens_kernel": (
+                    cpu_tl._sample_recovered_tokens_kernel_impl
+                ),
+                "vllm.v1.worker.mamba_utils.batch_memcpy_kernel": (
+                    cpu_tl._batch_memcpy_impl
+                ),
+            }
+        )
 
     @classmethod
     def pack_kv_cache(
