@@ -599,6 +599,7 @@ if (ENABLE_X86_ISA)
 
     set(VLLM_EXT_SRC_AVX2
         "csrc/cpu/sgl-kernels/fla.cpp"
+        "csrc/cpu/cpu_wna16.cpp"
         "csrc/cpu/cpu_fused_moe.cpp"
         "csrc/cpu/utils.cpp"
         "csrc/cpu/spec_decode_utils.cpp"

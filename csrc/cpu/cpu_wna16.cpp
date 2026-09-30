@@ -104,6 +104,7 @@ class Dequantizer4b {
       scalar_vec_t output_vec_0(wb_0);
       scalar_vec_t output_vec_1(wb_1);
 
+#if defined(CPU_CAPABILITY_AMXBF16)
       // AMX needs to interleave K elements to pack as 32 bits
       if constexpr (isa == ISA::AMX) {
         vec_op::interleave_save(output_vec_0, output_vec_1, curr_weight);
@@ -111,6 +112,10 @@ class Dequantizer4b {
         output_vec_0.save(curr_weight);
         output_vec_1.save(curr_weight + 16);
       }
+#else
+      output_vec_0.save(curr_weight);
+      output_vec_1.save(curr_weight + 16);
+#endif
 
       // update
       curr_q_weight += 2;
@@ -312,6 +317,7 @@ void cpu_gemm_wna16(
   const int64_t zeros_group_stride = has_zp ? zeros->stride(0) : 0;
 
   VLLM_DISPATCH_16B_TYPES(input.scalar_type(), "cpu_gemm_wna16", [&]() {
+#if defined(CPU_CAPABILITY_AMXBF16)
     if (isa == ISA::AMX) {
       using gemm_t = cpu_micro_gemm::MicroGemm<ISA::AMX, scalar_t>;
       if (has_zp) {
@@ -334,7 +340,9 @@ void cpu_gemm_wna16(
             scales_group_stride, zeros_group_stride, group_size, pack_factor);
         return;
       }
-    } else if (isa == ISA::VEC) {
+    }
+#endif
+    if (isa == ISA::VEC) {
       using gemm_t = cpu_micro_gemm::MicroGemm<ISA::VEC, scalar_t>;
       if (has_zp) {
         using dequantizer_t = Dequantizer4b<scalar_t, ISA::VEC, true>;
