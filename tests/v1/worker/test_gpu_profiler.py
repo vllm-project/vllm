@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import json
 import os
+import threading
 from contextlib import nullcontext
 from types import SimpleNamespace
 from unittest.mock import MagicMock, Mock, call, patch
@@ -380,6 +381,33 @@ def test_immediate_start_stop(default_profiler_config):
     profiler.stop()
     assert profiler._running is False
     assert profiler._active is False
+    assert profiler.stop_call_count == 1
+
+
+def test_stop_waits_for_inflight_start(default_profiler_config):
+    """A stop() from another thread during a slow start() must still stop the
+    backend instead of leaving it running with the session marked inactive."""
+    profiler = ConcreteWorkerProfiler(default_profiler_config)
+    in_start = threading.Event()
+    release_start = threading.Event()
+
+    def slow_start():
+        in_start.set()
+        release_start.wait()
+
+    with patch.object(profiler, "_start", side_effect=slow_start):
+        start_thread = threading.Thread(target=profiler.start)
+        start_thread.start()
+        assert in_start.wait(timeout=5)
+        stop_thread = threading.Thread(target=profiler.stop)
+        stop_thread.start()
+        stop_thread.join(timeout=0.1)
+        release_start.set()
+        start_thread.join(timeout=5)
+        stop_thread.join(timeout=5)
+
+    assert profiler._active is False
+    assert profiler._running is False
     assert profiler.stop_call_count == 1
 
 
