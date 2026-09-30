@@ -1,14 +1,18 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import os
+from contextlib import nullcontext
 from multiprocessing import connection
 from threading import Event
 from types import SimpleNamespace
 
 import pytest
+import torch
 import zmq
 
 import vllm.platforms as platforms
+from vllm.utils import torch_utils
 from vllm.v1.engine import core as core_module
 from vllm.v1.engine import utils as engine_utils
 from vllm.v1.engine.core import EngineCoreProc, EngineShutdownState
@@ -19,8 +23,127 @@ from vllm.v1.engine.utils import (
     EngineZmqAddresses,
     wait_for_engine_startup,
 )
+from vllm.v1.executor import UniProcExecutor, multiproc_executor
 
 pytestmark = pytest.mark.skip_global_cleanup
+
+
+@pytest.mark.parametrize(
+    (
+        "executor_class",
+        "local_engine_count",
+        "initial_threads",
+        "user_threads",
+        "fail_start",
+        "expected",
+    ),
+    [
+        (UniProcExecutor, 1, 192, None, False, (12, "12", "1")),
+        (UniProcExecutor, 2, 192, None, False, (6, "6", "1")),
+        (UniProcExecutor, 2, 192, None, True, (6, "6", "1")),
+        (UniProcExecutor, 2, 5, None, False, (5, "5", "1")),
+        (UniProcExecutor, 2, 1, None, False, (1, "1", "1")),
+        (UniProcExecutor, 2, 5, "5", False, (5, "5", None)),
+        (
+            multiproc_executor.MultiprocExecutor,
+            2,
+            192,
+            None,
+            False,
+            (192, None, None),
+        ),
+    ],
+)
+def test_engine_core_startup_threads_are_scoped_to_launch(
+    monkeypatch: pytest.MonkeyPatch,
+    executor_class,
+    local_engine_count: int,
+    initial_threads: int,
+    user_threads: str | None,
+    fail_start: bool,
+    expected: tuple[int, str | None, str | None],
+):
+    """UniProc workers inherit their CPU share and restore the parent."""
+    marker = torch_utils.OMP_NUM_THREADS_SET_BY_VLLM
+    monkeypatch.delenv(marker, raising=False)
+    monkeypatch.delenv("OMP_NUM_THREADS", raising=False)
+    if user_threads is not None:
+        monkeypatch.setenv("OMP_NUM_THREADS", user_threads)
+    monkeypatch.setattr(torch_utils, "available_cpu_count", lambda: 12)
+    platform = SimpleNamespace(
+        is_cpu=lambda: False, is_cuda_alike=lambda: True, is_xpu=lambda: False
+    )
+    monkeypatch.setattr(engine_utils, "current_platform", platform)
+    threads = SimpleNamespace(count=initial_threads)
+    setter_calls = []
+
+    def set_threads(count):
+        setter_calls.append(count)
+        threads.count = count
+
+    monkeypatch.setattr(torch, "get_num_threads", lambda: threads.count)
+    monkeypatch.setattr(torch, "set_num_threads", set_threads)
+    start_states = []
+
+    def thread_state():
+        return (
+            threads.count,
+            os.environ.get("OMP_NUM_THREADS"),
+            os.environ.get(marker),
+        )
+
+    def start_process():
+        start_states.append(thread_state())
+        if fail_start:
+            raise RuntimeError("start failed")
+
+    def get_context():
+        assert thread_state() == (initial_threads, user_threads, None)
+        return SimpleNamespace(
+            Process=lambda **kwargs: SimpleNamespace(
+                name=kwargs["name"],
+                exitcode=1 if fail_start else None,
+                start=start_process,
+            )
+        )
+
+    monkeypatch.setattr(engine_utils, "get_mp_context", get_context)
+    monkeypatch.setattr(engine_utils, "shutdown", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        engine_utils.numa_utils,
+        "configure_subprocess",
+        lambda *args, **kwargs: nullcontext(),
+    )
+    with (
+        pytest.raises(RuntimeError, match="start failed")
+        if fail_start
+        else nullcontext()
+    ):
+        manager = CoreEngineProcManager(
+            local_engine_count=local_engine_count,
+            start_index=0,
+            local_start_index=0,
+            vllm_config=SimpleNamespace(
+                shutdown_timeout=0,
+                parallel_config=SimpleNamespace(
+                    data_parallel_size=local_engine_count,
+                    assigned_physical_gpu_ids=None,
+                    use_ray=False,
+                ),
+            ),
+            local_client=True,
+            handshake_address="unused",
+            executor_class=executor_class,
+            log_stats=False,
+        )
+        manager._finalizer.detach()
+    assert start_states == [expected] * (1 if fail_start else local_engine_count)
+    assert thread_state() == (initial_threads, user_threads, None)
+    assert setter_calls == (
+        [expected[0], initial_threads]
+        if executor_class is UniProcExecutor and expected[0] < initial_threads
+        else []
+    )
 
 
 @pytest.mark.parametrize(
