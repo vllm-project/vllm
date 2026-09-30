@@ -869,6 +869,39 @@ class Scheduler(SchedulerInterface):
         if not preempted_reqs and self._pause_state == PauseState.UNPAUSED:
             step_skipped_waiting = create_request_queue(self.policy)
 
+            # Deadlock avoidance for completed async KV loads
+            # (WAITING_FOR_REMOTE_KVS). A WFR request whose async load has
+            # finished is in ``finished_recving_kv_req_ids``, already holds its
+            # KV blocks resident (allocated when it was admitted), and is
+            # non-preemptible. It is therefore *promotable*:
+            # ``_try_promote_blocked_waiting_request`` returns True and it can be
+            # scheduled reusing its resident blocks without allocating new ones.
+            #
+            # The waiting loop drains the queue from the front and ``break``s
+            # (not ``continue``) as soon as ``allocate_slots`` returns None for
+            # the request at the front. Under a saturated KV cache the front can
+            # be a block-starved request while the promotable WFR requests sit
+            # further back, so the loop exits before reaching them -- even
+            # though running one would free the very blocks the front needs.
+            # With no runnable requests left, ``running`` can fall to zero and
+            # the engine stops making progress.
+            #
+            # Move the completed-load WFR requests to the front so they are
+            # reached (and promoted) before any block-starved request can break
+            # the loop. Order-preserving among the promoted requests; a no-op
+            # unless a load has actually completed.
+            if self.finished_recving_kv_req_ids and self.skipped_waiting:
+                ready_recv = [
+                    r
+                    for r in self.skipped_waiting
+                    if r.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+                    and r.request_id in self.finished_recving_kv_req_ids
+                ]
+                if ready_recv:
+                    self.skipped_waiting.remove_requests(ready_recv)
+                    for r in reversed(ready_recv):
+                        self.skipped_waiting.prepend_request(r)
+
             while (self.waiting or self.skipped_waiting) and token_budget > 0:
                 if input_budget <= draft_slots:
                     break
