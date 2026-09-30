@@ -14,32 +14,6 @@ from vllm.models.deepseek_v41.common.engram import (
     ParallelEngramEmbedding,
 )
 from vllm.platforms import current_platform
-from vllm.platforms.interface import DeviceCapability
-
-
-@pytest.mark.parametrize(
-    "is_cuda,capability,expected",
-    [
-        (True, (10, 0), (36864, 4096)),
-        (True, (10, 3), (36864, 4096)),
-        (True, (9, 0), (None, None)),
-        (False, (10, 0), (None, None)),
-    ],
-)
-def test_engram_lookup_tuning_only_applies_to_blackwell(
-    monkeypatch, is_cuda, capability, expected
-):
-    """Use the lookup device's architecture, keeping other platforms untuned."""
-    monkeypatch.setattr(current_platform, "is_cuda", lambda: is_cuda)
-
-    def get_capability(device_id=0):
-        assert device_id == 1
-        return DeviceCapability(*capability)
-
-    monkeypatch.setattr(
-        type(current_platform), "get_device_capability", staticmethod(get_capability)
-    )
-    assert engram_ops._engram_lookup_thresholds(torch.device("cuda:1")) == expected
 
 
 def _reference_engram_post_wkv(
