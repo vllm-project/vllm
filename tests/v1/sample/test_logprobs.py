@@ -486,12 +486,12 @@ def test_prompt_logprob_token_ids_require_v2_model_runner():
     params = SamplingParams(prompt_logprob_token_ids=[1, 2])
     with patch.object(SamplingParams, "verify"):
         with pytest.raises(VLLMValidationError, match="V2 model runner"):
-            InputProcessor._validate_params(processor, params, ("generate",))
+            InputProcessor._validate_params(processor, params, ("generate",))  # type: ignore[arg-type]
         processor.vllm_config.use_v2_model_runner = True
-        InputProcessor._validate_params(processor, params, ("generate",))
+        InputProcessor._validate_params(processor, params, ("generate",))  # type: ignore[arg-type]
         processor.vllm_config.cache_config.kv_sharing_fast_prefill = True
         with pytest.raises(VLLMValidationError, match="fast-prefill"):
-            InputProcessor._validate_params(processor, params, ("generate",))
+            InputProcessor._validate_params(processor, params, ("generate",))  # type: ignore[arg-type]
 
 
 def test_none_logprobs(vllm_model, example_prompts):

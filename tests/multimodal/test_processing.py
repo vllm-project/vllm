@@ -1282,7 +1282,7 @@ def test_get_supported_mm_processor_kwargs_uses_supported_modalities(
     processor: SimpleNamespace,
     expected: dict[str, set[str]],
 ) -> None:
-    info = BaseProcessingInfo(SimpleNamespace())
+    info = BaseProcessingInfo(SimpleNamespace())  # type: ignore[arg-type]
     info.__dict__["supported_mm_limits"] = supported_mm_limits
     monkeypatch.setattr(info, "get_hf_processor", lambda **_: processor)
 
@@ -1292,7 +1292,7 @@ def test_get_supported_mm_processor_kwargs_uses_supported_modalities(
 def test_supported_mm_processor_kwargs_is_cached(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    info = BaseProcessingInfo(SimpleNamespace())
+    info = BaseProcessingInfo(SimpleNamespace())  # type: ignore[arg-type]
     expected = {"images_kwargs": {"size"}}
     calls = 0
 
