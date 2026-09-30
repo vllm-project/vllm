@@ -1084,7 +1084,7 @@ class Glm4vProcessingInfo(BaseProcessingInfo):
         ``smart_resize`` as the ``max_pixels`` argument, which constrains
         ``t_bar * h_bar * w_bar <= max_pixels``.
         """
-        mm_kwargs = self.ctx.get_merged_mm_kwargs({}, modality=modality)
+        mm_kwargs = self.ctx.get_modality_mm_kwargs({}, modality)
         if (override_max_pixels := mm_kwargs.get("max_pixels")) is not None:
             return int(override_max_pixels)
 
@@ -1101,7 +1101,7 @@ class Glm4vProcessingInfo(BaseProcessingInfo):
         return self._get_longest_edge(size, "GLM4V image processor size")
 
     def _get_video_max_pixels(self) -> int:
-        mm_kwargs = self.ctx.get_merged_mm_kwargs({}, modality="video")
+        mm_kwargs = self.ctx.get_modality_mm_kwargs({}, "video")
         if (override_max_pixels := mm_kwargs.get("max_pixels")) is not None:
             return int(override_max_pixels)
 

@@ -1194,7 +1194,7 @@ class CohereCompassProcessingInfo(BaseProcessingInfo):
         merge_size = vision_config.spatial_merge_size
         temporal_patch_size = vision_config.temporal_patch_size
 
-        mm_kwargs = self.ctx.get_merged_mm_kwargs(mm_kwargs, modality=modality)
+        mm_kwargs = self.ctx.get_modality_mm_kwargs(mm_kwargs, modality)
         size = image_processor.size
         if override_size := mm_kwargs.get("size"):
             size = size | override_size

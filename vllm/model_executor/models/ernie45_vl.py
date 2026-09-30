@@ -931,7 +931,7 @@ class Ernie4_5_VLProcessingInfo(BaseProcessingInfo):
             min_pixels_key = "shortest_edge"
             max_pixels_key = "longest_edge"
 
-        mm_kwargs = self.ctx.get_merged_mm_kwargs(mm_kwargs, modality=modality)
+        mm_kwargs = self.ctx.get_modality_mm_kwargs(mm_kwargs, modality)
         size = image_processor.size
         if override_size := mm_kwargs.get("size"):
             size = size | override_size

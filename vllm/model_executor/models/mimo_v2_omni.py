@@ -737,7 +737,7 @@ class MiMoV2OmniProcessingInfo(BaseProcessingInfo):
         temporal_patch_size = vision_config.temporal_patch_size
         tokens_per_second = vision_config.tokens_per_second
 
-        mm_kwargs = self.ctx.get_merged_mm_kwargs(mm_kwargs, modality=modality)
+        mm_kwargs = self.ctx.get_modality_mm_kwargs(mm_kwargs, modality)
         size = image_processor.size
         if override_size := mm_kwargs.get("size"):
             size = size | override_size

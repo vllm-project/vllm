@@ -538,9 +538,7 @@ class LegacyMultiModalProcessor(_MultiModalProcessorBase):
             image_sizes=image_sizes,
             **_num_multimodal_tokens_kwargs(
                 count_tokens,
-                self.info.ctx.get_merged_mm_kwargs(
-                    hf_processor_mm_kwargs, modality="image"
-                ),
+                self.info.ctx.get_modality_mm_kwargs(hf_processor_mm_kwargs, "image"),
             ),
         )
 
@@ -835,8 +833,8 @@ class OffsetsMultiModalProcessor(_MultiModalProcessorBase):
                 image_sizes=sizes,
                 **_num_multimodal_tokens_kwargs(
                     count_tokens,
-                    self.info.ctx.get_merged_mm_kwargs(
-                        hf_processor_mm_kwargs, modality="image"
+                    self.info.ctx.get_modality_mm_kwargs(
+                        hf_processor_mm_kwargs, "image"
                     ),
                 ),
             )
