@@ -108,7 +108,7 @@ def _build_harness(
     )
     manager = StructuredOutputManager(vllm_config)
     if use_reasoner:
-        manager.reasoner_cls = MockReasoner  # type: ignore[assignment]
+        manager.reasoner_cls = MockReasoner
 
     sampling_params = SamplingParams(
         structured_outputs=structured_outputs
