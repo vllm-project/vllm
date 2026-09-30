@@ -7,14 +7,12 @@ The request classification and cudagraph staging intentionally mirror
 differently on device rather than on the host.
 """
 
-from dataclasses import dataclass, fields
+from dataclasses import replace
 
 import torch
 
-from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.model_executor.layers.mamba.checkpoint import (
-    MambaPrefillCheckpointBuilder,
     MambaPrefillCheckpointMetadata,
 )
 from vllm.third_party.flash_linear_attention.ops.utils import FLA_CHUNK_SIZE
@@ -26,7 +24,6 @@ from vllm.v1.attention.backends.gdn_attn import (
     GDNAttentionMetadataBuilder,
 )
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
-from vllm.v1.kv_cache_interface import MambaSpec
 
 logger = init_logger(__name__)
 
@@ -95,24 +92,7 @@ def prepare_chunk_metadata_device(
     return chunk_indices, chunk_offsets
 
 
-@dataclass
-class KimiK3ROCmKDAMetadata(GDNAttentionMetadata):
-    checkpoint: MambaPrefillCheckpointMetadata | None = None
-
-
 class KimiK3ROCmKDAMetadataBuilder(GDNAttentionMetadataBuilder):
-    def __init__(
-        self,
-        kv_cache_spec: MambaSpec,
-        layer_names: list[str],
-        vllm_config: VllmConfig,
-        device: torch.device,
-    ) -> None:
-        super().__init__(kv_cache_spec, layer_names, vllm_config, device)
-        self.checkpoint_builder = MambaPrefillCheckpointBuilder(
-            vllm_config, kv_cache_spec
-        )
-
     def build(  # type: ignore[override]
         self,
         common_prefix_len: int,
@@ -128,15 +108,13 @@ class KimiK3ROCmKDAMetadataBuilder(GDNAttentionMetadataBuilder):
             num_decode_draft_tokens_cpu,
             fast_build,
         )
-        checkpoint_enabled = (
-            self.vllm_config.cache_config.mamba_cache_mode == "align"
-            and isinstance(self.kv_cache_spec, MambaSpec)
-            and self.kv_cache_spec.num_prefill_checkpoint_blocks > 0
-        )
-        if not checkpoint_enabled:
+        if attn_metadata.checkpoint is None:
             return attn_metadata
-        return KimiK3ROCmKDAMetadata(
-            **{f.name: getattr(attn_metadata, f.name) for f in fields(attn_metadata)},
+        # The shared builder keys checkpoint rows on every request; the ROCm
+        # prefill path indexes them by prefill_query_start_loc, so rebuild with
+        # those rows.
+        return replace(
+            attn_metadata,
             checkpoint=self._build_checkpoint_metadata(
                 common_attn_metadata, attn_metadata, num_decode_draft_tokens_cpu
             ),
