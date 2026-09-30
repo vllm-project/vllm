@@ -158,7 +158,6 @@ class InputProcessor:
                         else None
                     ),
                     vocab_size=self.model_config.get_vocab_size(),
-                    async_scheduling=self.vllm_config.scheduler_config.async_scheduling,
                 )
 
             if self.model_config.return_sampling_mask:

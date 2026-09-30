@@ -71,7 +71,6 @@ def _verify_diffusion(params: SamplingParams, canvas_length: int | None = None):
         params,
         canvas_length=canvas_length,
         vocab_size=model_config.get_vocab_size(),
-        async_scheduling=True,
     )
 
 
@@ -100,7 +99,7 @@ def test_diffusion_extra_args_are_validated_without_a_served_canvas():
         {"diffusion_canvas_length": 8},
     ],
 )
-def test_narrow_diffusion_canvas_requires_async_scheduling(
+def test_diffusion_canvas_width_is_accepted_with_either_scheduler(
     async_scheduling, extra_args
 ):
     processor = SimpleNamespace(
@@ -115,11 +114,7 @@ def test_narrow_diffusion_canvas_requires_async_scheduling(
         validate_logits_processors_params=lambda params: None,
     )
     params = SamplingParams(extra_args=extra_args)
-    if not async_scheduling and extra_args.get("diffusion_canvas_length") == 4:
-        with pytest.raises(VLLMValidationError, match="requires --async-scheduling"):
-            InputProcessor._validate_params(processor, params, ("generate",))
-    else:
-        InputProcessor._validate_params(processor, params, ("generate",))
+    InputProcessor._validate_params(processor, params, ("generate",))
 
 
 @pytest.mark.parametrize(
