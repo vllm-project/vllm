@@ -22,7 +22,16 @@ Level 1 sleep will offload the model weights and discard the KV cache. The conte
 
 ### Host memory after wake-up
 
-With level 1 sleep the weights are backed up in pinned host memory. After `wake_up` the backup is freed, but PyTorch's host caching allocator keeps the pinned blocks so the next `sleep` can reuse them without pinning again. For a process that sleeps and wakes repeatedly this is what you want. When several engines share one GPU and take turns sleeping, it means every engine keeps a weight-sized block of host RAM even while it is awake. Set `VLLM_SLEEP_MODE_RELEASE_HOST_MEMORY=1` to return the blocks to the OS after each wake-up, at the cost of pinning the backup again on the next sleep.
+Level 1 sleep backs up the weights in pinned host memory. After `wake_up` the backup is freed. But PyTorch's host caching allocator keeps the pinned blocks, so the next `sleep` can reuse them without pinning again. This is the default, and it is the faster choice for a process that sleeps and wakes repeatedly.
+
+The cached blocks stay in host RAM while the engine is awake. When several engines share one GPU and take turns sleeping, every engine keeps a weight-sized block of host RAM. No other engine can use this memory.
+
+Set `VLLM_SLEEP_MODE_RELEASE_HOST_MEMORY=1` to return the cached pinned blocks to the OS after each `wake_up`. Two costs apply:
+
+- The wake-up is slower, because the release takes time.
+- The next `sleep` pins the backup again.
+
+The release applies to the whole host cache of the process, not only to the weight backup. It returns every unused cached pinned block to the OS, including blocks that other parts of vLLM pinned.
 
 ## Usage
 
