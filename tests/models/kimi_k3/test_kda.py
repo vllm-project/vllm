@@ -1338,7 +1338,7 @@ def test_flashinfer_fused_kda_spec_decode_integration(
             out=torch.empty_like(x),
         )
         q, k, v = mixed_qkv.view(num_rows, 3, H, D).unbind(1)
-        recurrent_out, _ = fused_recurrent_kda(
+        recurrent_out, _ = fused_recurrent_kda_nvidia(
             q=q.unsqueeze(0),
             k=k.unsqueeze(0),
             v=v.unsqueeze(0),
