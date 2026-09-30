@@ -18,14 +18,10 @@ from typing import TYPE_CHECKING
 import torch
 
 from vllm.config import VllmConfig
-from vllm.model_executor.layers.mamba.checkpoint import (
-    MambaPrefillCheckpointBuilder,
-    MambaPrefillCheckpointMetadata,
-)
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.torch_utils import async_tensor_h2d
-from vllm.v1.attention.backend import CommonAttentionMetadata
+from vllm.v1.attention.backend import AttentionCGSupport, CommonAttentionMetadata
 from vllm.v1.attention.backends.gdn_attn import (
     GDNAttentionBackend,
     GDNAttentionMetadata,
@@ -271,7 +267,6 @@ class KimiK3KDAMetadata(GDNAttentionMetadata, RecoverSSMMetadata):
     recoverssm_context: "KDARecoverSSMCommitContext | None" = field(
         default=None, repr=False, compare=False
     )
-    checkpoint: MambaPrefillCheckpointMetadata | None = None
 
     def commit_recoverssm_state(
         self, num_accepted_tokens: torch.Tensor
@@ -305,6 +300,10 @@ class KimiK3KDAMetadata(GDNAttentionMetadata, RecoverSSMMetadata):
 
 
 class KimiK3KDAMetadataBuilder(GDNAttentionMetadataBuilder):
+    # Overrides GDN's UNIFORM_BATCH: adaptive verification requires ALWAYS from every
+    # builder, and KDA reads per-request offsets off device within a fixed k+1 window,
+    # so one k+1 graph replays any 1..k+1 mix.
+    _cudagraph_support = AttentionCGSupport.ALWAYS
     mamba_aligned_state_indices: torch.Tensor | None = None
 
     def __init__(
@@ -315,9 +314,6 @@ class KimiK3KDAMetadataBuilder(GDNAttentionMetadataBuilder):
         device: torch.device,
     ) -> None:
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
-        self.checkpoint_builder = MambaPrefillCheckpointBuilder(
-            vllm_config, kv_cache_spec
-        )
         additional_config = vllm_config.additional_config
         self.use_flashinfer_prefill = (
             isinstance(additional_config, dict)
@@ -407,6 +403,12 @@ class KimiK3KDAMetadataBuilder(GDNAttentionMetadataBuilder):
                     query_start_loc_cpu.diff() > 0
                 )
                 spec_sequence_masks_cpu |= active_decode_mask_cpu
+                # Adaptive's cost-table profiler probes eager dummy rows longer than
+                # RecoverSSM's num_spec+1 activation capacity; route them out instead
+                # of tripping the capacity check below.
+                spec_sequence_masks_cpu &= (
+                    query_start_loc_cpu.diff() <= self.num_spec + 1
+                )
             # Native KDA can use its regular decode path when no draft token
             # was scheduled. RecoverSSM must preserve its extended conv window.
             if (
@@ -750,3 +752,9 @@ class KimiK3KDAAttentionBackend(GDNAttentionBackend):
     @staticmethod
     def get_builder_cls() -> type[KimiK3KDAMetadataBuilder]:
         return KimiK3KDAMetadataBuilder
+
+    @classmethod
+    def supports_device_cpu_query_lens_mismatch(cls) -> bool:
+        # Pure spec-decode reads its plan from DEVICE offsets, so CPU/device
+        # mismatch is fine; the mixed branch still assumes CPU totals match.
+        return True

@@ -84,7 +84,10 @@ def task_routes(request, monkeypatch) -> tuple[str, list[tuple[str, list[str]]]]
 
     # Register routers for this specific task (development mode already enabled).
     register_api_routers(
-        args, app, supported_tasks=(task,), model_config=MockModelConfig()
+        args,
+        app,
+        supported_tasks=(task,),
+        model_config=MockModelConfig(),  # type: ignore[arg-type]
     )
 
     routes = get_all_http_routes(app)
