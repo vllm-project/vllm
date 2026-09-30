@@ -47,6 +47,10 @@ from vllm.model_executor.layers.linear import (
 )
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    QuantKey,
+    kMxfp8Dynamic,
+)
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
@@ -213,20 +217,6 @@ def _ue8m0_uint8_to_float(sf: torch.Tensor) -> torch.Tensor:
     return (sf.to(torch.int32) << 23).view(torch.float32)
 
 
-class HiddenQuantSpec(typing.NamedTuple):
-    """Hidden-state quantization parameters consumed by prepare_megamoe_inputs.
-
-    Attributes:
-        group_k: number of hidden-dim elements per quantization group.
-        scale_ue8m0: True => pack per-group UE8M0 exponents into int32;
-                     False => store per-group fp32 scales directly.
-
-    """
-
-    group_k: int
-    scale_ue8m0: bool
-
-
 class DeepGemmMegaMoEBackend:
     """Abstract MegaMoE backend that hides deep_gemm-specific details.
 
@@ -241,7 +231,7 @@ class DeepGemmMegaMoEBackend:
 
     # Human-readable MMA type tag used by deep_gemm helpers. SM100 default.
     mma_type: str = "fp8xfp4"
-    hidden_quant: HiddenQuantSpec = HiddenQuantSpec(group_k=32, scale_ue8m0=True)
+    hidden_quant: QuantKey = kMxfp8Dynamic
 
     def transform_weights(
         self,
@@ -333,7 +323,7 @@ class DeepGemmSm100MegaMoEBackend(DeepGemmMegaMoEBackend):
     """Default MegaMoE backend targeting SM100 via deep_gemm fp8_fp4_mega_moe."""
 
     mma_type = "fp8xfp4"
-    hidden_quant = HiddenQuantSpec(group_k=32, scale_ue8m0=True)
+    hidden_quant = kMxfp8Dynamic
 
     def transform_weights(
         self,
@@ -1080,8 +1070,7 @@ class DeepseekV4MegaMoEExperts(nn.Module):
             is_padding=is_padding,
             shared_x_sf=shared_x_sf,
             shared_block_m=shared_block_m,
-            hidden_quant_group_k=backend.hidden_quant.group_k,
-            hidden_quant_scale_ue8m0=backend.hidden_quant.scale_ue8m0,
+            hidden_quant=backend.hidden_quant,
         )
 
         assert self._transformed_l1_weights is not None

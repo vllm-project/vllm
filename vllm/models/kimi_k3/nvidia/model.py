@@ -502,6 +502,7 @@ class KimiK3MegaMoEExperts(DeepseekV4MegaMoEExperts):
                 else None,
             )
 
+        backend = self._ensure_backend()
         prepare_megamoe_inputs(
             hidden_states,
             topk_weights,
@@ -511,11 +512,11 @@ class KimiK3MegaMoEExperts(DeepseekV4MegaMoEExperts):
             symm_buffer.topk_idx[:num_tokens],
             symm_buffer.topk_weights[:num_tokens],
             is_padding=is_padding,
+            hidden_quant=backend.hidden_quant,
         )
         self.finalize_weights()
         assert self._transformed_l1_weights is not None
         assert self._transformed_l2_weights is not None
-        backend = self._ensure_backend()
         backend.run_mega_moe(
             y=y,
             l1_weights=self._transformed_l1_weights,
