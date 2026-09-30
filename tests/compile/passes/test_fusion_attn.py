@@ -248,7 +248,6 @@ class TestAttentionNvfp4QuantPatternModel(AttentionQuantPatternModel):
 PATTERN_TEST_MODELS_FP8: list[tuple[str, type]] = []
 PATTERN_TEST_MODELS_FP4: list[tuple[str, type]] = []
 HEADS: list[tuple[int, int]] = []
-SPLIT_ATTENTION: list[bool] = []
 BACKENDS_FP8: list[AttentionBackendEnum] = []
 BACKENDS_FP4: list[AttentionBackendEnum] = []
 
