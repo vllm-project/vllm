@@ -822,6 +822,7 @@ def unified_attention(
     k_descale,
     v_descale,
     seq_threshold_3D=None,
+    max_q_len_3D=1,
     num_par_softmax_segments=None,
     softmax_segm_output=None,
     softmax_segm_max=None,
@@ -1042,15 +1043,38 @@ def unified_attention(
     # 1. No intermediate tiled softmax buffers for the 3D kernel have been allocated, or
     # 2. The batch includes at least one prefill request, or
     # 3. The number of sequences exceeds the configured threshold, or
-    # 4. Batch invariance is enabled
+    # 4. The scratch cannot cover this batch's query rows, or
+    # 5. Batch invariance is enabled
+    #
+    # (2) is a *capacity* constraint, not a prefill-specific one: the kernel
+    # and ``reduce_segments`` index ``softmax_segm_*`` per query row
+    # (``segm_output[token, head, segm_idx, :]``), so the scratch must have a
+    # row for every query token in the batch. ``max_q_len_3D`` is how many
+    # query rows per sequence the caller sized that scratch for -- 1 for plain
+    # decode, ``1 + num_speculative_tokens`` under speculative decoding.
+    # Gating on it rather than on ``max_seqlen_q > 1`` keeps true prefill on
+    # the 2D path (prefill's query length far exceeds any decode threshold,
+    # and split-KV would not help it anyway) while letting speculative decode
+    # keep the 3D path it was previously and unintentionally excluded from.
+    #
+    # (4) is the exact scratch bound. ``max_seqlen_q <= max_q_len_3D`` alone
+    # is not sufficient: the scratch holds ``seq_threshold_3D * max_q_len_3D``
+    # rows, and a batch of ``num_seqs`` sequences uses ``q.shape[0]`` of them,
+    # so check the row count that is actually consumed.
+    max_segm_rows = (
+        0
+        if (softmax_segm_max is None or seq_threshold_3D is None)
+        else seq_threshold_3D * max_q_len_3D
+    )
     use_3d = not (
         seq_threshold_3D is None
         or num_par_softmax_segments is None
         or softmax_segm_output is None
         or softmax_segm_max is None
         or softmax_segm_expsum is None
-        or max_seqlen_q > 1
+        or max_seqlen_q > max_q_len_3D
         or num_seqs > seq_threshold_3D
+        or q.shape[0] > max_segm_rows
         or is_batch_invariant
     )
 
