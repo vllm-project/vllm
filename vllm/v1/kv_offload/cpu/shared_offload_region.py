@@ -1,11 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import contextlib
+import ctypes
 import errno
 import mmap
 import os
 import time
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
 import torch
@@ -68,6 +70,39 @@ def _get_populate_write_fn(
     return _madvise_populate_write
 
 
+def _populate_ranges(
+    mmap_obj: mmap.mmap,
+    ranges: list[tuple[int, int]],
+    populate_write_fn: Callable[[mmap.mmap, int, int], None],
+    num_threads: int,
+) -> None:
+    """Pre-fault (offset, length) ranges, splitting them across threads.
+
+    Faulting 4 KiB shmem pages is kernel-bound (~1-2 GB/s per thread), so
+    large regions populate much faster in parallel. mmap.madvise holds the
+    GIL, so the threaded path calls libc madvise directly via ctypes.
+    """
+    if num_threads <= 1 or populate_write_fn is not _madvise_populate_write:
+        for offset, length in ranges:
+            populate_write_fn(mmap_obj, offset, length)
+        return
+
+    libc = ctypes.CDLL(None, use_errno=True)
+    libc.madvise.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_int]
+    base = ctypes.addressof(ctypes.c_char.from_buffer(mmap_obj))
+
+    def populate(shard: list[tuple[int, int]]) -> None:
+        for offset, length in shard:
+            if libc.madvise(base + offset, length, _MADV_POPULATE_WRITE) != 0:
+                err = ctypes.get_errno()
+                raise OSError(err, os.strerror(err))
+
+    shard_size = -(-len(ranges) // num_threads)
+    shards = [ranges[i : i + shard_size] for i in range(0, len(ranges), shard_size)]
+    with ThreadPoolExecutor(len(shards), thread_name_prefix="shm_populate") as ex:
+        list(ex.map(populate, shards))
+
+
 class SharedOffloadRegion:
     """Single mmap-backed memory region shared across all workers for a
     vLLM instance.  Workers coordinate via the filesystem: the first worker
@@ -97,6 +132,7 @@ class SharedOffloadRegion:
         *,
         creator_memory_check: Callable[[int], None] | None = None,
         populate_only_on_creator: bool = False,
+        populate_threads: int = 1,
     ) -> None:
         if populate_only_on_creator and barrier is None:
             raise ValueError("Creator-only population requires a barrier.")
@@ -217,16 +253,18 @@ class SharedOffloadRegion:
             worker_offset = rank * cpu_page_size
             _t0 = time.perf_counter()
             page_size = self.page_size
+            ranges = []
             for chunk in range(num_chunks):
                 raw_offset = chunk * self._row_stride + worker_offset
                 aligned_offset = (raw_offset // page_size) * page_size
                 end = raw_offset + cpu_page_size
-                aligned_length = end - aligned_offset
-                populate_write_fn(self.mmap_obj, aligned_offset, aligned_length)
+                ranges.append((aligned_offset, end - aligned_offset))
+            _populate_ranges(self.mmap_obj, ranges, populate_write_fn, populate_threads)
             logger.debug(
-                "MADV_POPULATE_WRITE loop: %d chunks in %.3f s",
+                "MADV_POPULATE_WRITE loop: %d chunks in %.3f s (%d threads)",
                 num_chunks,
                 time.perf_counter() - _t0,
+                populate_threads,
             )
         else:
             # No rank — populate the entire shared region in one call.
