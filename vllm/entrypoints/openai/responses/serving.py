@@ -15,7 +15,6 @@ from openai.types.responses import (
     ResponseOutputMessage,
     ResponseOutputText,
     ResponseStatus,
-    response_text_delta_event,
 )
 from openai.types.responses.response_output_text import Logprob, LogprobTopLogprob
 from pydantic import TypeAdapter
@@ -334,6 +333,16 @@ class OpenAIServingResponses(GenerateBaseServing):
         maybe_validation_error = self._validate_create_responses_input(request)
         if maybe_validation_error is not None:
             return maybe_validation_error
+
+        maybe_template_error = self.online_renderer.validate_chat_template(
+            request_chat_template=None,
+            chat_template_kwargs=request.chat_template_kwargs,
+            trust_request_chat_template=(
+                self.online_renderer.trust_request_chat_template
+            ),
+        )
+        if maybe_template_error is not None:
+            return maybe_template_error
 
         self._preflight()
 
@@ -813,14 +822,19 @@ class OpenAIServingResponses(GenerateBaseServing):
             if final_output.finish_reason == "length":
                 status = "incomplete"
 
-            # TODO: Build final response items from the accumulated streaming
-            # parser results instead of reparsing the complete output.
-            output = self._make_response_output_items(
-                request,
-                final_output,
-                tokenizer,
-                parser=context.response_parser,
+            streamed_items = context.streamed_output_items
+            self._log_final_output(
+                request, final_output, is_streaming=streamed_items is not None
             )
+            if streamed_items is not None:
+                output = streamed_items
+            else:
+                output = self._make_response_output_items(
+                    request,
+                    final_output,
+                    tokenizer,
+                    parser=context.response_parser,
+                )
 
             if request.enable_response_messages:
                 input_messages = context.input_messages
@@ -962,32 +976,21 @@ class OpenAIServingResponses(GenerateBaseServing):
             )
         return out
 
-    def _create_stream_response_logprobs(
+    def _log_final_output(
         self,
-        token_ids: Sequence[int],
-        logprobs: SampleLogprobs | None,
-        tokenizer: TokenizerLike,
-        top_logprobs: int | None = None,
-    ) -> list[response_text_delta_event.Logprob]:
-        lgs = self._create_response_logprobs(
-            token_ids=token_ids,
-            logprobs=logprobs,
-            tokenizer=tokenizer,
-            top_logprobs=top_logprobs,
-        )
-        return [
-            response_text_delta_event.Logprob(
-                token=lg.token,
-                logprob=lg.logprob,
-                top_logprobs=[
-                    response_text_delta_event.LogprobTopLogprob(
-                        token=tl.token, logprob=tl.logprob
-                    )
-                    for tl in lg.top_logprobs
-                ],
+        request: ResponsesRequest,
+        final_output: CompletionOutput,
+        is_streaming: bool,
+    ) -> None:
+        if self.enable_log_outputs and self.request_logger:
+            self.request_logger.log_outputs(
+                request_id=request.request_id,
+                outputs=final_output.text,
+                output_token_ids=final_output.token_ids,
+                finish_reason=final_output.finish_reason,
+                is_streaming=is_streaming,
+                delta=False,
             )
-            for lg in lgs
-        ]
 
     def _make_response_output_items(
         self,
@@ -996,17 +999,6 @@ class OpenAIServingResponses(GenerateBaseServing):
         tokenizer: TokenizerLike,
         parser: Parser | None = None,
     ) -> list[ResponseOutputItem]:
-        # Log complete response if output logging is enabled
-        if self.enable_log_outputs and self.request_logger:
-            self.request_logger.log_outputs(
-                request_id=request.request_id,
-                outputs=final_output.text,
-                output_token_ids=final_output.token_ids,
-                finish_reason=final_output.finish_reason,
-                is_streaming=False,
-                delta=False,
-            )
-
         # Compute logprobs if requested
         logprobs = None
         if request.is_include_output_logprobs() and final_output.logprobs:
@@ -1197,14 +1189,12 @@ class OpenAIServingResponses(GenerateBaseServing):
 
         hide_stream_metadata = not request.include_reasoning and self.parser is not None
 
-        def _get_logprobs(
-            output: CompletionOutput,
-        ) -> list[response_text_delta_event.Logprob]:
+        def _get_logprobs(output: CompletionOutput) -> list[Logprob]:
             if not request.is_include_output_logprobs():
                 return []
             if hide_stream_metadata:
                 return []
-            return self._create_stream_response_logprobs(
+            return self._create_response_logprobs(
                 token_ids=output.token_ids,
                 logprobs=output.logprobs,
                 tokenizer=tokenizer,
@@ -1252,6 +1242,9 @@ class OpenAIServingResponses(GenerateBaseServing):
 
         for event in processor.close_current():
             yield _increment_sequence_number_and_return(event)
+
+        assert isinstance(context, SimpleContext)
+        context.streamed_output_items = processor.output_items
 
     async def _process_harmony_streaming_events(
         self,
