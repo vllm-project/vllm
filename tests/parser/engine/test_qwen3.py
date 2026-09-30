@@ -22,6 +22,7 @@ from vllm.parser.engine.parser_engine import ParserEngine
 from vllm.parser.qwen3 import (
     TOOL_CALL_END,
     TOOL_CALL_START,
+    Qwen3Parser,
     qwen3_config,
 )
 
@@ -1199,3 +1200,91 @@ def test_mimo_preserves_verbatim_parameter_values(
     )
     assert collect_function_name(results) == "run"
     assert json.loads(collect_tool_arguments(results)) == {"text": value}
+
+
+class TestQuotedToolCallsInReasoning:
+    @pytest.fixture
+    def thinking_parser(self, mock_request):
+        from vllm.entrypoints.openai.chat_completion.protocol import (
+            ChatCompletionToolsParam,
+        )
+
+        # Offer the quoted name so name validation alone cannot hide the bug.
+        tools = [
+            ChatCompletionToolsParam(
+                type="function",
+                function={
+                    "name": "get_weather",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"city": {"type": "string"}},
+                    },
+                },
+            )
+        ]
+        mock_request.tools = tools
+
+        # This class needs thinking enabled, unlike the file's parser fixture.
+        tokenizer = make_mock_tokenizer(
+            {
+                "<think>": 50,
+                "</think>": 51,
+                TOOL_CALL_START: 60,
+                TOOL_CALL_END: 61,
+            }
+        )
+        return Qwen3Parser(tokenizer, tools=tools)
+
+    @pytest.fixture
+    def quoted_reasoning(self):
+        # This complete block is an example in reasoning, not an emitted call.
+        return (
+            "I am quoting an example, not calling a tool:\n"
+            "<tool_call>\n"
+            "<function=get_weather>\n"
+            "<parameter=city>Paris</parameter>\n"
+            "</function>\n"
+            "</tool_call>\n"
+            "That was only an example."
+        )
+
+    def test_quoted_markup_does_not_emit_call(
+        self, thinking_parser, mock_request, quoted_reasoning
+    ):
+        text = "<think>" + quoted_reasoning + "</think>Done."
+        result = thinking_parser.extract_tool_calls(text, mock_request)
+
+        assert result.tools_called is False
+        assert result.tool_calls == []
+
+    def test_quoted_markup_survives_in_reasoning(
+        self, thinking_parser, mock_request, quoted_reasoning
+    ):
+        text = "<think>" + quoted_reasoning + "</think>Done."
+        reasoning, content = thinking_parser.extract_reasoning(text, mock_request)
+
+        # Prevent a fix that suppresses the phantom by deleting the example.
+        assert reasoning == quoted_reasoning
+        assert content == "Done."
+
+    def test_quoted_markup_then_real_call_emits_only_real_call(
+        self, thinking_parser, mock_request, quoted_reasoning
+    ):
+        # Different cities make an accidental substitution visible.
+        text = (
+            "<think>"
+            + quoted_reasoning
+            + "</think>\n"
+            "<tool_call>\n"
+            "<function=get_weather>\n"
+            "<parameter=city>Tokyo</parameter>\n"
+            "</function>\n"
+            "</tool_call>"
+        )
+        result = thinking_parser.extract_tool_calls(text, mock_request)
+
+        assert result.tools_called is True
+        assert len(result.tool_calls) == 1
+        assert result.tool_calls[0].function.name == "get_weather"
+        args = json.loads(result.tool_calls[0].function.arguments)
+        assert args == {"city": "Tokyo"}
