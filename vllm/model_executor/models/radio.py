@@ -722,6 +722,46 @@ class RadioModel(nn.Module):
             weights_list = list(weights)
 
         for name, weight in weights_list:
+            if name.startswith(("embeddings.", "encoder.layer.")):
+                shard_id = None
+                if name.startswith("embeddings."):
+                    part, _, suffix = name.removeprefix("embeddings.").partition(".")
+                    mapped = {
+                        "patch_projection": "embedder",
+                        "video_patch_projection": "video_embedder",
+                        "position_embedding": "pos_embed",
+                        "cls_register_token": "cls_token.token",
+                    }[part]
+                    hf_vllm_key = f"model.patch_generator.{mapped}"
+                    if suffix:
+                        hf_vllm_key += f".{suffix}"
+                else:
+                    index, suffix = name.removeprefix("encoder.layer.").split(".", 1)
+                    for projection, shard in (
+                        ("query", "q"),
+                        ("key", "k"),
+                        ("value", "v"),
+                    ):
+                        prefix = f"attention.attention.{projection}."
+                        if suffix.startswith(prefix):
+                            suffix = "attn.qkv." + suffix.removeprefix(prefix)
+                            shard_id = shard
+                            break
+                    suffix = suffix.replace("attention.output.dense.", "attn.proj.")
+                    suffix = suffix.replace("layer_scale1.lambda1", "ls1")
+                    suffix = suffix.replace("layer_scale2.lambda1", "ls2")
+                    hf_vllm_key = f"model.encoder.layers.{index}.{suffix}"
+                param = params_dict[hf_vllm_key]
+                if shard_id is None:
+                    weight_loader = getattr(
+                        param, "weight_loader", default_weight_loader
+                    )
+                    weight_loader(param, weight)
+                else:
+                    sharded_weight_loader = param.weight_loader
+                    sharded_weight_loader(param, weight, shard_id)
+                loaded_params.add(hf_vllm_key)
+                continue
             if not name.startswith("radio_model."):
                 # Skip non-radio weights
                 continue

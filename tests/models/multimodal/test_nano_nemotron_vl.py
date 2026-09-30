@@ -112,7 +112,10 @@ def test_nano_nemotron_vl_skips_multimodal_weights_in_text_only_mode():
     assert language_model.loaded_weights == [("layers.0.weight", language_weight)]
 
 
-def test_nano_nemotron_vl_loads_vision_weights_without_sound_encoder():
+@pytest.mark.parametrize(
+    "vision_key", ["radio_model.encoder.weight", "embeddings.patch_projection.weight"]
+)
+def test_nano_nemotron_vl_loads_vision_weights_without_sound_encoder(vision_key):
     model = object.__new__(NemotronH_Nano_VL_V2)
     language_model = _LanguageModel()
     vision_model = _VisionModel()
@@ -127,14 +130,38 @@ def test_nano_nemotron_vl_loads_vision_weights_without_sound_encoder():
     model.load_weights(
         [
             ("language_model.layers.0.weight", language_weight),
-            ("vision_model.radio_model.encoder.weight", vision_weight),
+            (f"vision_model.{vision_key}", vision_weight),
         ]
     )
 
     assert language_model.loaded_weights == [("layers.0.weight", language_weight)]
-    assert vision_model.loaded_weights == [
-        ("radio_model.encoder.weight", vision_weight)
+    assert len(vision_model.loaded_weights) == 1
+    key, loaded = vision_model.loaded_weights[0]
+    assert key == vision_key
+    assert loaded is vision_weight
+
+
+def test_nano_nemotron_vl_loads_named_vision_projector_weights():
+    model = object.__new__(NemotronH_Nano_VL_V2)
+    adapter = torch.nn.Sequential(
+        torch.nn.LayerNorm(2),
+        torch.nn.Linear(2, 2, bias=False),
+        torch.nn.Identity(),
+        torch.nn.Linear(2, 2, bias=False),
+    )
+    object.__setattr__(model, "model_config", _ImageOnlyModelConfig())
+    object.__setattr__(model, "language_model", _LanguageModel())
+    object.__setattr__(model, "mlp1", adapter)
+    object.__setattr__(model, "vision_model", _VisionModel())
+    object.__setattr__(model, "sound_encoder", None)
+    weights = [
+        ("vision_projector.mlp1.norm.weight", torch.full((2,), 2.0)),
+        ("vision_projector.mlp1.linear1.weight", torch.full((2, 2), 3.0)),
+        ("vision_projector.mlp1.linear2.weight", torch.full((2, 2), 4.0)),
     ]
+    model.load_weights(weights)
+    for index, (_, expected) in zip((0, 1, 3), weights):
+        torch.testing.assert_close(adapter[index].weight, expected, rtol=0, atol=0)
 
 
 def test_nano_nemotron_vl_requires_sound_encoder_for_sound_weights():

@@ -21,6 +21,50 @@ DOWNLOAD_PATTERN = ["*.json", "*.py", "*.safetensors", "*.txt", "*.model"]
 DEVICE_TYPE = current_platform.device_type
 
 
+def test_radio_loads_hf_embeddings_qkv_and_layer_scales(default_vllm_config, dist_init):
+    config = RadioConfig(
+        model_name="vit_small_patch16_224",
+        image_size=32,
+        cpe_max_size=32,
+        teachers=[{"name": 0}],
+        register_multiple=1,
+        video_temporal_patch_size=2,
+    )
+    model = RadioModel(config, num_hidden_layers_override=1)
+    params = dict(model.named_parameters())
+    mapping = {
+        "embeddings.patch_projection.weight": "model.patch_generator.embedder.weight",
+        "embeddings.video_patch_projection.weight": (
+            "model.patch_generator.video_embedder.weight"
+        ),
+        "embeddings.position_embedding": "model.patch_generator.pos_embed",
+        "embeddings.cls_register_token": "model.patch_generator.cls_token.token",
+        "encoder.layer.0.attention.output.dense.weight": (
+            "model.encoder.layers.0.attn.proj.weight"
+        ),
+        "encoder.layer.0.layer_scale1.lambda1": "model.encoder.layers.0.ls1",
+        "encoder.layer.0.layer_scale2.lambda1": "model.encoder.layers.0.ls2",
+    }
+    sources = {
+        source: torch.full_like(params[target], index + 0.25)
+        for index, (source, target) in enumerate(mapping.items())
+    }
+    for suffix in ("weight", "bias"):
+        target = params[f"model.encoder.layers.0.attn.qkv.{suffix}"]
+        for index, projection in enumerate(("query", "key", "value")):
+            sources[f"encoder.layer.0.attention.attention.{projection}.{suffix}"] = (
+                torch.full_like(target.chunk(3)[index], index + 1.0)
+            )
+    loaded = model.load_weights(sources)
+    assert set(mapping.values()) <= loaded
+    for source, target in mapping.items():
+        torch.testing.assert_close(params[target], sources[source], rtol=0, atol=0)
+    for suffix in ("weight", "bias"):
+        target = params[f"model.encoder.layers.0.attn.qkv.{suffix}"]
+        for index, actual in enumerate(target.chunk(3)):
+            torch.testing.assert_close(actual, torch.full_like(actual, index + 1.0))
+
+
 @torch.inference_mode()
 def run_radio_test(
     image_assets: ImageTestAssets,
