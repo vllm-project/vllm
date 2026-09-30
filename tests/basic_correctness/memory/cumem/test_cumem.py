@@ -450,7 +450,7 @@ def test_cudagraph_pool_survives_sleep(level, monkeypatch):
         return {
             ptr
             for ptr, data in allocator.pointer_to_data.items()
-            if data.tag == allocator.cudagraph_tag
+            if data.tag == "cudagraph"
         }
 
     ptrs = graph_ptrs()
@@ -487,8 +487,9 @@ def test_cudagraph_pool_survives_sleep(level, monkeypatch):
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="cuMem CUDA graph pool")
 def test_plain_cudagraph_capture_bypasses_cumem(monkeypatch):
     """Captures route to the one cuMem graph pool, except under
-    plain_cudagraph_capture() (memory profiling)."""
+    plain_cudagraph_capture() (memory profiling); NCCL follows either pool."""
     import vllm.device_allocator as device_allocator
+    import vllm.distributed.device_communicators.pynccl_allocator as nccl_alloc
 
     monkeypatch.setattr(
         device_allocator, "cumem_cudagraph_pool_enabled", lambda _: True
@@ -497,10 +498,12 @@ def test_plain_cudagraph_capture_bypasses_cumem(monkeypatch):
     pool = current_platform.graph_pool_handle()
     with device_allocator.use_cudagraph_pool(pool, None) as routed:
         assert allocator.current_tag == "cudagraph"
-    assert routed == allocator.cudagraph_pool[0].id
+        assert nccl_alloc._graph_pool_id == routed
+    assert routed == allocator.allocator_and_pools["cudagraph"][0][0].id
     with (
         device_allocator.plain_cudagraph_capture(),
         device_allocator.use_cudagraph_pool(pool, None) as plain,
     ):
         assert allocator.current_tag == allocator.default_tag
+        assert nccl_alloc._graph_pool_id == pool
     assert plain == pool

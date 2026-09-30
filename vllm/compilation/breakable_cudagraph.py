@@ -37,7 +37,6 @@ import vllm.envs as envs
 from vllm.compilation.monitor import validate_cudagraph_capturing_enabled
 from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.device_allocator import use_cudagraph_pool
-from vllm.distributed.device_communicators.pynccl_allocator import set_graph_pool_id
 from vllm.forward_context import (
     BatchDescriptor,
     get_forward_context,
@@ -386,7 +385,6 @@ class BreakableCUDAGraphWrapper:
             use_cudagraph_pool(self.graph_pool, self.vllm_config) as pool,
             BreakableCUDAGraphCapture(pool=pool) as capture,
         ):
-            set_graph_pool_id(pool or current_platform.graph_pool_handle())
             output = self.runnable(*args, **kwargs)
             # Join the offloader's copy stream while we still hold the last
             # segment open, so the join is captured into the graph (otherwise

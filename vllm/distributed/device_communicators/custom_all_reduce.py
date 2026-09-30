@@ -161,10 +161,10 @@ class CustomAllreduce:
 
         """
         self._IS_CAPTURING = False
-        vllm_config = get_current_vllm_config_or_none()
+        config = get_current_vllm_config_or_none()
         # cuMem graph buffers cannot be IPC-registered; capture copies them instead.
-        self._capture_registered = not (
-            vllm_config is not None and cumem_cudagraph_pool_enabled(vllm_config)
+        self._capture_registered = config is None or not cumem_cudagraph_pool_enabled(
+            config
         )
         self._ptr = 0
         self.disabled = True

@@ -111,7 +111,6 @@ class CuMemAllocator:
 
     instance: "CuMemAllocator | None" = None
     default_tag: str = "default"
-    cudagraph_tag: str = "cudagraph"
 
     @staticmethod
     def get_instance() -> "CuMemAllocator":
@@ -141,8 +140,6 @@ class CuMemAllocator:
         self.pointer_to_data: dict[int, AllocationData] = {}
         self.current_tag: str = CuMemAllocator.default_tag
         self.allocator_and_pools: dict[str, list[Any]] = {}
-        # The one CUDA graph pool; captured graphs reference it until exit.
-        self.cudagraph_pool: tuple[Any, Any] | None = None
         # Creating strong references to the two callbacks here to prevent
         # these ephemeral bound-method objects being garbage collected.
         # See discussions in https://github.com/vllm-project/vllm/pull/22724
@@ -436,17 +433,17 @@ class CuMemAllocator:
     @contextmanager
     def use_cudagraph_pool(self) -> Iterator[tuple[int, int]]:
         """Tag CUDA graph capture allocations and yield the graph pool id."""
-        if self.cudagraph_pool is None:
+        if "cudagraph" not in self.allocator_and_pools:
             allocator = get_pluggable_allocator(
                 self.python_malloc_callback, self.python_free_callback
             )
             mem_pool = torch.cuda.memory.MemPool(allocator._allocator)
-            self.cudagraph_pool = (mem_pool, allocator)
+            self.allocator_and_pools["cudagraph"] = [(mem_pool, allocator)]
         old_tag = self.current_tag
-        self.current_tag = self.cudagraph_tag
+        self.current_tag = "cudagraph"
         try:
             # capture_begin routes allocations to this pool; no use_mem_pool.
-            yield self.cudagraph_pool[0].id
+            yield self.allocator_and_pools["cudagraph"][0][0].id
         finally:
             self.current_tag = old_tag
 

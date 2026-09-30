@@ -23,7 +23,6 @@ from vllm.compilation.wrapper import TorchCompileWithNoGuardsWrapper
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.config.compilation import CUDAGraphMode
 from vllm.device_allocator import plain_cudagraph_capture, use_cudagraph_pool
-from vllm.distributed.device_communicators.pynccl_allocator import set_graph_pool_id
 from vllm.distributed.parallel_state import (
     get_pp_group,
     graph_capture,
@@ -491,9 +490,6 @@ class CudaGraphManager:
                                 graph, pool, stream=self._capture_stream(desc)
                             ),
                         ):
-                            set_graph_pool_id(
-                                pool or current_platform.graph_pool_handle()
-                            )
                             forward_fn(CUDAGraphMode.NONE)
                             # Join offloader's copy stream after forward to avoid
                             # unjoined stream error. The last layer's start_prefetch

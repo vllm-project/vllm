@@ -23,15 +23,8 @@ DEFERRABLE_TAGS: tuple[str, ...] = ("weights", "kv_cache")
 
 
 def cumem_cudagraph_pool_enabled(vllm_config: "VllmConfig") -> bool:
-    """Whether decoder CUDA graphs are captured into cuMem pools that sleep
-    mode offloads: Model Runner V2 with the cumem sleep backend on CUDA.
-
-    NCCL buffer registration must then stay off (``NCCL_GRAPH_REGISTER=0``,
-    no ``TORCH_NCCL_USE_TENSOR_REGISTER_ALLOCATOR_HOOK``): it retains the cuMem
-    handles of graph buffers, pinning them through sleep, and keeps stale
-    registrations after wake remaps the pool, which causes hangs or wrong
-    results. An explicit opt-in is refused, not warned about.
-    """
+    """Whether CUDA graphs are captured into the cuMem pool that sleep mode
+    offloads: Model Runner V2 with the cumem sleep backend on CUDA."""
     return (
         vllm_config.use_v2_model_runner
         and vllm_config.model_config.enable_sleep_mode
@@ -56,10 +49,17 @@ def plain_cudagraph_capture() -> Iterator[None]:
         _plain_cudagraph_capture.reset(token)
 
 
+@contextmanager
 def use_cudagraph_pool(
     pool: tuple[int, int] | None, vllm_config: "VllmConfig"
-) -> AbstractContextManager[tuple[int, int] | None]:
-    """Route CUDA graph allocations through cuMem when sleep mode is enabled."""
+) -> Iterator[tuple[int, int] | None]:
+    """Yield the pool to capture into, routed through cuMem when sleep mode
+    offloads graph pools, and point NCCL's graph allocator at it."""
+    from vllm.distributed.device_communicators.pynccl_allocator import (
+        set_graph_pool_id,
+    )
+
+    ctx: AbstractContextManager[tuple[int, int] | None] = nullcontext(pool)
     if (
         pool is not None
         and not _plain_cudagraph_capture.get()
@@ -67,8 +67,10 @@ def use_cudagraph_pool(
     ):
         from vllm.device_allocator.cumem import CuMemAllocator
 
-        return CuMemAllocator.get_instance().use_cudagraph_pool()
-    return nullcontext(pool)
+        ctx = CuMemAllocator.get_instance().use_cudagraph_pool()
+    with ctx as graph_pool:
+        set_graph_pool_id(graph_pool or current_platform.graph_pool_handle())
+        yield graph_pool
 
 
 @dataclasses.dataclass

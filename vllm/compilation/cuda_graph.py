@@ -16,7 +16,6 @@ from vllm.compilation.counter import compilation_counter
 from vllm.compilation.monitor import validate_cudagraph_capturing_enabled
 from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.device_allocator import use_cudagraph_pool
-from vllm.distributed.device_communicators.pynccl_allocator import set_graph_pool_id
 from vllm.forward_context import (
     BatchDescriptor,
     get_forward_context,
@@ -306,7 +305,6 @@ class CUDAGraphWrapper:
                 graph_pool = stack.enter_context(
                     use_cudagraph_pool(self.graph_pool, self.vllm_config)
                 )
-                set_graph_pool_id(graph_pool or current_platform.graph_pool_handle())
 
                 # Sync offloader's copy stream before capture.
                 # Ensure any pre-capture prefetches from offloader are complete.
