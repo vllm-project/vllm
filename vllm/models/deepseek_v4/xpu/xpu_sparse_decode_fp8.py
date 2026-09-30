@@ -166,9 +166,7 @@ def xpu_sparse_decode_fp8(
     num_tokens = q.shape[0]
     device = q.device
 
-    use_topk = (not swa_only) and topk_indices is not None and kv_cache is not None
-
-    if use_topk:
+    if not swa_only and topk_indices is not None and kv_cache is not None:
         topk_idx_2d = (
             topk_indices.squeeze(1) if topk_indices.dim() == 3 else topk_indices
         )
@@ -177,6 +175,7 @@ def xpu_sparse_decode_fp8(
         topk_idx_2d = None
         max_topk = 0
 
+    use_topk = topk_idx_2d is not None
     swa_idx_2d = swa_indices.squeeze(1) if swa_indices.dim() == 3 else swa_indices
     max_swa = swa_idx_2d.shape[1]
     K_total = max_topk + max_swa
@@ -187,7 +186,7 @@ def xpu_sparse_decode_fp8(
         (num_tokens * K_total, OUTPUT_DIM), dtype=torch.bfloat16, device=device
     )
 
-    if use_topk and n_topk_rows > 0:
+    if topk_idx_2d is not None and kv_cache is not None and n_topk_rows > 0:
         dequant_gather_slots(
             workspace[:n_topk_rows],
             kv_cache,
