@@ -3,14 +3,13 @@
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use futures::future::join_all;
 use itertools::Itertools;
 use serde::Serialize;
 use serde_json::Value as JsonValue;
-use tokio::sync::mpsc;
+use tokio::sync::{Mutex, mpsc};
 use tokio_util::task::AbortOnDropHandle;
 use tracing::{debug, info, trace};
 
@@ -284,7 +283,9 @@ pub struct EngineCoreClient {
     inner: Arc<ClientInner>,
     coordinator: Option<CoordinatorHandle>,
     abort_tx: mpsc::UnboundedSender<AbortRequest>,
-    profile_active: AtomicBool,
+    /// Whether a profiling session is awaiting an explicit stop. Held across each
+    /// start/stop utility call so a stale stop reply cannot clear a newer session.
+    profile_active: Mutex<bool>,
 
     /// Runtime used to send messages to the engine and drive all background tasks.
     runtime: BackgroundShutdownRuntime,
@@ -433,7 +434,7 @@ impl EngineCoreClient {
             inner,
             coordinator,
             abort_tx,
-            profile_active: AtomicBool::new(false),
+            profile_active: Mutex::new(false),
             runtime,
             output_task,
             dispatcher_task,
@@ -972,14 +973,14 @@ impl EngineCoreClient {
         delay_iterations: Option<u64>,
         max_iterations: Option<u64>,
     ) -> Result<()> {
-        if self
-            .profile_active
-            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-            .is_err()
-        {
+        let mut active = self.profile_active.lock().await;
+        if *active {
             return Err(Error::ProfileAlreadyActive);
         }
 
+        // A cancelled start may still reach the engine, so only a reported
+        // failure clears the session; otherwise a stop is needed.
+        *active = true;
         if let Err(error) = self
             .call_utility::<(), _>(
                 "profile",
@@ -987,7 +988,7 @@ impl EngineCoreClient {
             )
             .await
         {
-            self.profile_active.store(false, Ordering::Release);
+            *active = false;
             return Err(error);
         }
         Ok(())
@@ -995,8 +996,9 @@ impl EngineCoreClient {
 
     /// Stop profiling the engine.
     pub async fn stop_profile(&self, profile_prefix: Option<&str>) -> Result<()> {
+        let mut active = self.profile_active.lock().await;
         self.call_utility::<(), _>("profile", (false, profile_prefix)).await?;
-        self.profile_active.store(false, Ordering::Release);
+        *active = false;
         Ok(())
     }
 

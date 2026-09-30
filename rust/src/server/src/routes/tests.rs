@@ -7763,6 +7763,70 @@ async fn start_profile_succeeds_again_after_stop() {
     engine_task.await.expect("mock engine task");
 }
 
+/// Receive a `profile` utility call with the expected args and return its call id.
+async fn recv_profile_call(dealer: &mut DealerSocket, expected_args: Vec<Value>) -> u64 {
+    let utility = recv_engine_message(dealer).await;
+    let payload = decode_value(&utility[1]).expect("decode utility payload");
+    let array = payload.as_array().expect("utility payload array");
+    assert_eq!(array[2], Value::from("profile"));
+    assert_eq!(array[3], Value::Array(expected_args));
+    array[1].as_u64().expect("call id")
+}
+
+/// A start issued while a stop is in flight waits for that stop instead of
+/// racing it, so a stale stop reply cannot clear the new session.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn start_profile_waits_for_inflight_stop() {
+    let (stop_received_tx, stop_received_rx) = tokio::sync::oneshot::channel();
+    let (release_stop_tx, release_stop_rx) = tokio::sync::oneshot::channel::<()>();
+    let (app, engine_task) = test_profiling_app_with_engine_script(move |dealer, push| {
+        boxed_test_future(async move {
+            let start = || vec![Value::from(true), Value::Nil, Value::Nil, Value::Nil];
+
+            let call_id = recv_profile_call(dealer, start()).await;
+            send_outputs(push, utility_outputs(call_id, utility_none_result())).await;
+
+            let call_id = recv_profile_call(dealer, vec![Value::from(false), Value::Nil]).await;
+            stop_received_tx.send(()).expect("notify stop received");
+            release_stop_rx.await.expect("release stop");
+            send_outputs(push, utility_outputs(call_id, utility_none_result())).await;
+
+            let call_id = recv_profile_call(dealer, start()).await;
+            send_outputs(push, utility_outputs(call_id, utility_none_result())).await;
+        })
+    })
+    .await;
+
+    let post = |uri: &'static str| {
+        let mut app = app.clone();
+        async move {
+            app.call(
+                Request::builder()
+                    .method("POST")
+                    .uri(uri)
+                    .body(Body::empty())
+                    .expect("build request"),
+            )
+            .await
+            .expect("call app")
+            .status()
+        }
+    };
+
+    assert_eq!(post("/start_profile").await, StatusCode::OK);
+    let stop = tokio::spawn(post("/stop_profile"));
+    stop_received_rx.await.expect("stop received");
+    let restart = tokio::spawn(post("/start_profile"));
+    // No hook observes the restart reaching the profile lock; give it time so
+    // an unserialized client would reject it against the stale session.
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    release_stop_tx.send(()).expect("release stop");
+    assert_eq!(stop.await.expect("stop task"), StatusCode::OK);
+    assert_eq!(restart.await.expect("restart task"), StatusCode::OK);
+    engine_task.await.expect("mock engine task");
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
 async fn start_profile_route_rejects_invalid_prefix() {
