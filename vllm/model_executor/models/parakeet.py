@@ -18,6 +18,7 @@ from vllm.model_executor.layers.activation import ReLUSquaredActivation
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+from vllm.model_executor.models.transformers.utils import recursive_replace_linear
 from vllm.model_executor.models.utils import maybe_prefix
 from vllm.platforms import current_platform
 from vllm.transformers_utils.configs.parakeet import ExtractorConfig, ParakeetConfig
@@ -87,35 +88,25 @@ class ProjectedParakeet(nn.Module):
         ``2T - 1``, while the other encoder linears operate on each clip's
         subsampled sequence of length ``T``. The multimodal LoRA runtime has one
         tower mapping per modality, so that projection cannot safely share the
-        audio mapping in a batch containing different adapters.
-        """
-        linear_names = [
-            name
-            for name, module in self.encoder.named_modules()
-            if name
-            and isinstance(module, nn.Linear)
-            and not name.endswith(".relative_k_proj")
-        ]
-        for name in linear_names:
-            source = self.encoder.get_submodule(name)
-            assert isinstance(source, nn.Linear)
-            replacement = ReplicatedLinear(
-                source.in_features,
-                source.out_features,
-                bias=source.bias is not None,
-                return_bias=False,
-                prefix=maybe_prefix(prefix, name),
-            )
-            default_weight_loader(replacement.weight, source.weight)
-            if source.bias is not None:
-                assert replacement.bias is not None
-                default_weight_loader(replacement.bias, source.bias)
+        audio mapping in a batch containing different adapters, and is left as
+        a plain ``nn.Linear``.
 
-            parent_name, _, child_name = name.rpartition(".")
-            parent = (
-                self.encoder.get_submodule(parent_name) if parent_name else self.encoder
-            )
-            setattr(parent, child_name, replacement)
+        The replaced linears are left freshly initialized -- ``load_weights``
+        finds them by their (unchanged) qualified name and overwrites them
+        with the real checkpoint values afterwards, same as every other
+        vLLM-native linear in the model.
+        """
+
+        def _is_relative_k_proj(qual_name: str, module: nn.Module) -> bool:
+            del module
+            return qual_name.rsplit(".", 1)[-1] == "relative_k_proj"
+
+        recursive_replace_linear(
+            self.encoder,
+            quant_config=None,
+            prefix=prefix,
+            skip_predicate=_is_relative_k_proj,
+        )
 
     def forward(
         self, input_features: torch.Tensor, attention_mask: torch.Tensor | None = None
