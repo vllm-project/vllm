@@ -736,6 +736,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
                 w2_bias=w2_bias,
                 _cache_permute_indices=self._cache_permute_indices,
                 activation=self.moe.activation,
+                use_separated_a4w4=self.moe.use_mxfp4_w4a4_dsv4,
             )
         )
 

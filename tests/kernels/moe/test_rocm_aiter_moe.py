@@ -638,6 +638,115 @@ def test_aiter_moe_padding_env_var(
         assert envs.VLLM_ROCM_MOE_PADDING is moe_padding
 
 
+# a4w4 (FP4 activation) opt-in gating test ---------------------------------
+
+
+@pytest.mark.parametrize(
+    ("env_value", "model_type", "expected"),
+    [
+        # Unset/"0" is opt-in-only: a4w4 never turns on by itself, even on
+        # a validated model type.
+        (None, "deepseek_v41", False),
+        ("0", "deepseek_v41", False),
+        ("1", "deepseek_v41", True),
+        ("1", "deepseek_v41_text", True),
+    ],
+)
+def test_aiter_moe_a4w4_dsv4_is_opt_in(
+    env_value: str | None,
+    model_type: str,
+    expected: bool,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """vllm-project/vllm#58819's a4w4 MoE activation path must stay a plain
+    explicit opt-in (VLLM_ROCM_USE_AITER_MOE_A4W4_DSV4=1), with no
+    default-on behavior, but is still only permitted on the model types
+    this flag has been validated for."""
+    import types
+
+    from tests.kernels.moe.utils import make_dummy_moe_config
+    from vllm._aiter_ops import rocm_aiter_ops
+
+    _assert_aiter_supported()
+
+    fake_vllm_config = types.SimpleNamespace(
+        model_config=types.SimpleNamespace(
+            hf_config=types.SimpleNamespace(model_type=model_type)
+        )
+    )
+
+    with monkeypatch.context() as mp:
+        mp.setenv("VLLM_ROCM_USE_AITER", "1")
+        mp.setenv("VLLM_ROCM_USE_AITER_MOE", "1")
+        if env_value is None:
+            mp.delenv("VLLM_ROCM_USE_AITER_MOE_A4W4_DSV4", raising=False)
+        else:
+            mp.setenv("VLLM_ROCM_USE_AITER_MOE_A4W4_DSV4", env_value)
+        _reload_envs()
+        rocm_aiter_ops.refresh_env_variables()
+
+        with mock.patch(
+            "vllm.config.get_current_vllm_config_or_none",
+            return_value=fake_vllm_config,
+        ):
+            moe_config = make_dummy_moe_config(
+                num_experts=4,
+                experts_per_token=2,
+                hidden_dim=256,
+                intermediate_size=512,
+                in_dtype=torch.bfloat16,
+            )
+
+        assert moe_config.use_mxfp4_w4a4_dsv4 is expected
+
+
+@pytest.mark.parametrize("model_type", ["deepseek_v4", "gpt_oss", None])
+def test_aiter_moe_a4w4_dsv4_rejects_unvalidated_model_type(
+    model_type: str | None,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Forcing a4w4 on a model type this flag hasn't been GSM8K/AgentX
+    validated for must raise: it also flips the MXFP4 weight-shuffle layout
+    (ATOM SEPARATED vs INTERLEAVE), which silently produces garbled output
+    on the wrong model rather than just being a slower path — the same bug
+    class vllm-project/vllm#58819's own second commit fixed for DeepSeek
+    V4.1 itself."""
+    import types
+
+    from tests.kernels.moe.utils import make_dummy_moe_config
+    from vllm._aiter_ops import rocm_aiter_ops
+
+    _assert_aiter_supported()
+
+    fake_vllm_config = types.SimpleNamespace(
+        model_config=types.SimpleNamespace(
+            hf_config=types.SimpleNamespace(model_type=model_type)
+        )
+    )
+
+    with monkeypatch.context() as mp:
+        mp.setenv("VLLM_ROCM_USE_AITER", "1")
+        mp.setenv("VLLM_ROCM_USE_AITER_MOE", "1")
+        mp.setenv("VLLM_ROCM_USE_AITER_MOE_A4W4_DSV4", "1")
+        _reload_envs()
+        rocm_aiter_ops.refresh_env_variables()
+
+        with (
+            mock.patch(
+                "vllm.config.get_current_vllm_config_or_none",
+                return_value=fake_vllm_config,
+            ),
+            pytest.raises(ValueError, match="VLLM_ROCM_USE_AITER_MOE_A4W4_DSV4"),
+        ):
+            make_dummy_moe_config(
+                num_experts=4,
+                experts_per_token=2,
+                hidden_dim=256,
+                intermediate_size=512,
+                in_dtype=torch.bfloat16,
+            )
+
+
 # Dispatch-policy forwarding test ------------------------------------------
 
 
