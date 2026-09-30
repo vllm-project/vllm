@@ -17,16 +17,16 @@ from vllm.v1.attention.ops import rocm_aiter_mla_sparse as sparse_mod
 
 
 @pytest.mark.parametrize(
-    "on_gfx950,flag,heads,expected",
+    "on_gfx950,available,heads,expected",
     [
         (True, True, 32, "flydsl"),
         (True, False, 32, "gluon"),
         (True, True, 64, "gluon"),
-        (False, True, 32, "gluon"),
+        (False, False, 32, "gluon"),
     ],
 )
 def test_rocm_fp8_paged_mqa_logits_dispatch(
-    monkeypatch, on_gfx950, flag, heads, expected
+    monkeypatch, on_gfx950, available, heads, expected
 ):
     batch_size, next_n, max_model_len = 2, 3, 256
     called = {}
@@ -47,12 +47,11 @@ def test_rocm_fp8_paged_mqa_logits_dispatch(
 
     monkeypatch.setattr(sparse_mod, "_ON_GFX942", not on_gfx950)
     monkeypatch.setattr(sparse_mod, "_ON_GFX950", on_gfx950)
-    monkeypatch.setenv(
-        "VLLM_ROCM_USE_AITER_FLYDSL_PAGED_MQA_LOGITS", "1" if flag else "0"
-    )
     monkeypatch.setattr(rocm_aiter_ops, "is_enabled", lambda: True)
     monkeypatch.setattr(
-        sparse_mod, "_flydsl_paged_mqa_logits_kernel", lambda: fake_flydsl
+        sparse_mod,
+        "_flydsl_paged_mqa_logits_kernel",
+        lambda: fake_flydsl if available else None,
     )
     monkeypatch.setattr(
         sparse_mod,
