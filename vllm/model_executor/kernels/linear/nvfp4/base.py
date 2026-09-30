@@ -41,6 +41,13 @@ class NvFp4LinearKernel(ABC):
         """
         return None
 
+    def input_quant_activation_types(self) -> tuple[type[torch.nn.Module], ...] | None:
+        """Restrict automatic activation fusion, without restricting QAct inputs.
+
+        None preserves unrestricted producer selection; an empty tuple disables it.
+        """
+        return None
+
     @classmethod
     @abstractmethod
     def is_supported(

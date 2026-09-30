@@ -71,6 +71,55 @@ def _patch_key_deriver(
     )
 
 
+@pytest.mark.parametrize("width", [16, 48, 80, 1344, 5376])
+def test_relu2_nvfp4_warmup_rows_cover_padding_tiles(width: int) -> None:
+    from vllm.model_executor.layers.fusion.relu2_nvfp4_quant import (
+        _relu_squared_nvfp4_quant_launch,
+        _relu_squared_nvfp4_warmup_rows,
+    )
+
+    rows = list(_relu_squared_nvfp4_warmup_rows(width, 32768))
+    assert rows == list(range(1, 129))
+    padded_tiles = {
+        _relu_squared_nvfp4_quant_launch(m, width)[1]["PAD_PER_CTA"] for m in rows
+    }
+    for m in range(1, 32769):
+        grid, args = _relu_squared_nvfp4_quant_launch(m, width)
+        assert args["PAD_PER_CTA"] in padded_tiles
+        assert grid[0] * args["PAD_PER_CTA"] >= args["PADDED_SCALE_SIZE"]
+    assert not _relu_squared_nvfp4_warmup_rows(width, 0)
+    assert list(_relu_squared_nvfp4_warmup_rows(width, 17)) == list(range(1, 18))
+
+
+@pytest.mark.parametrize(
+    "width",
+    [16, 48, 80, 1344, 5376, 16 * ((1 << 23) - 1), 16 << 23, 16 * ((1 << 23) + 1)],
+)
+def test_relu2_nvfp4_row_bound_keeps_index_products_i32(width: int) -> None:
+    from vllm.model_executor.layers.fusion.relu2_nvfp4_quant import (
+        _relu_squared_nvfp4_max_rows,
+        _relu_squared_nvfp4_quant_launch,
+        _relu_squared_nvfp4_warmup_rows,
+    )
+    from vllm.utils.math_utils import round_up
+
+    max_rows = _relu_squared_nvfp4_max_rows(width)
+    rows = {0, 1, 127, 128, 129, max_rows, max_rows + 1, max(0, max_rows - 1)}
+    assert len(_relu_squared_nvfp4_warmup_rows(width, (1 << 63))) == min(128, max_rows)
+    for m in rows:
+        groups = m * (width // 16)
+        scale_size = round_up(m, 128) * round_up(width // 16, 4)
+        assert (m <= max_rows) == (groups <= 1 << 30 and scale_size <= 1 << 30)
+        if 0 < m <= max_rows:
+            grid, args = _relu_squared_nvfp4_quant_launch(m, width)
+            assert grid[0] * args["GROUPS_PER_CTA"] <= 1 << 31
+            assert grid[0] * args["PAD_PER_CTA"] <= 1 << 31
+            assert all(
+                args[name] <= 1 << 30
+                for name in ("M", "NUM_GROUPS", "PADDED_SCALE_SIZE")
+            )
+
+
 class _TestTritonKernel(VllmTritonJitKernel["_TestTritonKernel.CompileKey"]):
     kernel = _FakeTritonKernel()
 
