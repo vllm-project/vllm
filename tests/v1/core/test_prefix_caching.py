@@ -1259,6 +1259,31 @@ def test_hisparse_cleanup_publishes_only_finalized_terminal_pages(
     assert not coordinator.has_pending_work()
 
 
+@pytest.mark.parametrize("num_prompt_pages,reads_host", [(31, True), (20, False)])
+def test_hisparse_prefill_reads_host_before_prompt_outgrows_pool(
+    num_prompt_pages, reads_host
+):
+    """A prefill that cannot keep its whole prompt resident reads from host early.
+
+    Pinned pages were released only once free blocks fell below a fixed
+    watermark. A chunk larger than the watermark exhausted the pool first, so
+    the prefill was preempted instead of switching to host reads.
+    """
+    manager = make_hisparse_kv_cache_manager(
+        32, 64, enable_caching=True, max_model_len=1024
+    )
+    coordinator = get_hisparse_coordinator(manager)
+    tokens = list(range(num_prompt_pages * HISPARSE_BLOCK_SIZE))
+    request = make_request("prefill", tokens, HISPARSE_BLOCK_SIZE, sha256)
+    assert manager.allocate_slots(request, HISPARSE_BLOCK_SIZE) is not None
+    pool = coordinator.gpu_pool
+    assert pool is not None
+    assert pool.get_num_free_blocks() >= coordinator.transition_watermark
+
+    hot_manager = coordinator.hot_managers[0]
+    assert (request.request_id in hot_manager.hot_required) == reads_host
+
+
 def test_hisparse_preempted_prefill_resumes_from_durable_prefix():
     """A prefill preempted mid-way must resume from the pages already on host.
 

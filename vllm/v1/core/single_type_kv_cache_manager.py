@@ -2541,7 +2541,7 @@ class HiSparseResidentManager(_HiSparseAuxiliaryManager):
     ) -> None:
         assert self.coordinator is not None
         self.coordinator.plan_prefix_materialization(request.request_id, num_tokens)
-        self.coordinator.update_residency(request.request_id)
+        self.coordinator.update_residency(request.request_id, request.num_prompt_tokens)
 
     def allocate_new_blocks(
         self, request_id: str, num_tokens: int, num_tokens_main_model: int

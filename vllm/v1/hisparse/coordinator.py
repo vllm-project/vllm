@@ -318,6 +318,17 @@ class HiSparseCoordinator:
             manager.has_hot(request_id) for manager in self.hot_managers
         )
 
+    def _remaining_prompt_blocks(self, request_id: str, num_prompt_tokens: int) -> int:
+        """Resident blocks the rest of the prompt would pin."""
+        return sum(
+            max(
+                cdiv(num_prompt_tokens, manager.block_size)
+                - len(manager.req_to_blocks.get(request_id, ())),
+                0,
+            )
+            for manager in self.resident_managers
+        )
+
     def _resident_page_blocks(
         self, request_id: str, page_idx: int
     ) -> list[KVCacheBlock] | None:
@@ -385,13 +396,14 @@ class HiSparseCoordinator:
         for hot_manager in self.hot_managers:
             hot_manager.require_hot(request_id)
 
-    def update_residency(self, request_id: str) -> None:
+    def update_residency(self, request_id: str, num_prompt_tokens: int = 0) -> None:
         """Per-step residency policy for a scheduled request.
 
         A request that can read from host releases every clean sealed page to
         the pool. One that cannot keeps its pages pinned until the shared pool
-        runs low, then asks for a hot region. Pages remain pinned until that region
-        is allocated on a subsequent scheduling pass.
+        runs low, or can no longer hold the rest of its prompt, then asks for a
+        hot region. Pages remain pinned until that region is allocated on a
+        subsequent scheduling pass.
         """
         if not self.resident_managers:
             return
@@ -403,7 +415,10 @@ class HiSparseCoordinator:
             state.pages_to_adopt = 0
         if not self._can_read_from_host(request_id):
             assert self.gpu_pool is not None
-            if self.gpu_pool.get_num_free_blocks() >= self.transition_watermark:
+            if self.gpu_pool.get_num_free_blocks() >= max(
+                self.transition_watermark,
+                self._remaining_prompt_blocks(request_id, num_prompt_tokens),
+            ):
                 return
             for manager in self.hot_managers:
                 manager.require_hot(request_id)
