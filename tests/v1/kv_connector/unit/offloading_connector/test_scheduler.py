@@ -205,7 +205,7 @@ def _make_partial_tail_scheduler(
     recurrent_only: bool = False,
 ) -> OffloadingConnectorScheduler:
     vllm_config = _make_vllm_config(extra_config={"self_describing_kv_events": True})
-    vllm_config.cache_config.prefix_match_unit = 4
+    vllm_config.cache_config.prefix_match_unit = None if recurrent_only else 4
     vllm_config.speculative_config = None
     vllm_config.kv_events_config = KVEventsConfig(
         enable_kv_cache_events=True, publisher="null"
@@ -697,7 +697,7 @@ def test_external_cache_hit_sources_recurrent_only_state(source):
     scheduler = _make_partial_tail_scheduler(recurrent_only=True)
     request = _make_partial_tail_request(scheduler)
     request.num_prompt_tokens = request.num_tokens = 64
-    request.block_hashes = [BlockHash(f"h{i}".encode()) for i in range(16)]
+    request.block_hashes = [BlockHash(f"h{i}".encode()) for i in range(4)]
     request.all_token_ids = list(range(64))
     state = scheduler._req_status[request.request_id]
     state.update_offload_keys()

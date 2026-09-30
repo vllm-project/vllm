@@ -234,6 +234,7 @@ def test_connector_reports_configured_cache_source(
             disk_path=str(tmp_path / "kv-offload.bin"),
             disk_capacity_bytes=_BYTES_PER_BLOCK * 4,
         )
+    assert vllm_config.kv_transfer_config is not None
     vllm_config.kv_transfer_config.kv_connector_extra_config = extra_config
 
     connector = SimpleCPUOffloadConnector(
