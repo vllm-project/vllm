@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import asyncio
+import threading
 from http import HTTPStatus
 
 import pytest
@@ -9,13 +11,18 @@ from vllm.assets.image import ImageAsset
 from vllm.assets.video import VideoAsset
 from vllm.config import CacheConfig, ModelConfig, VllmConfig
 from vllm.entrypoints.serve import create_error_response
+from vllm.multimodal.media import MediaRef
 from vllm.multimodal.parse import parse_mm_uuids
 from vllm.renderers.hf import HfRenderer
 from vllm.tokenizers.registry import cached_tokenizer_from_config
 
 cherry_pil_image = ImageAsset("cherry_blossom").pil_image
 stop_pil_image = ImageAsset("stop_sign").pil_image
-baby_reading_np_ndarrays = VideoAsset("baby_reading").np_ndarrays
+baby_reading_video_asset = VideoAsset("baby_reading")
+baby_reading_video = (
+    baby_reading_video_asset.np_ndarrays,
+    baby_reading_video_asset.metadata,
+)
 
 
 def _build_renderer(
@@ -127,7 +134,7 @@ def test_multi_modal_uuids_accepts_none_and_passes_through(
 
     mm_data = {
         "image": [cherry_pil_image, stop_pil_image],
-        "video": baby_reading_np_ndarrays,
+        "video": baby_reading_video,
     }
 
     # Use a consistent two-image scenario across all configurations
@@ -207,7 +214,7 @@ def test_multi_modal_uuids_preserved_when_caching_disabled(mm_uuids, expected):
     request_id = "req-42"
     mm_data = {
         "image": [cherry_pil_image, stop_pil_image],
-        "video": baby_reading_np_ndarrays,
+        "video": baby_reading_video,
     }
 
     mm_processor = renderer.get_mm_processor()
@@ -225,8 +232,6 @@ def test_validate_mm_uuids_does_not_decode_lazy_media():
     """UUID validation only checks None-ness, so it must not unwrap lazy
     items (unwrapping would decode every item on the single _mm_executor
     worker, defeating cache-hit-skips-decode)."""
-    from vllm.multimodal.media import MediaRef
-
     renderer = _build_renderer()
 
     decoder_calls = 0
@@ -234,7 +239,7 @@ def test_validate_mm_uuids_does_not_decode_lazy_media():
     def decode():
         nonlocal decoder_calls
         decoder_calls += 1
-        return baby_reading_np_ndarrays
+        return baby_reading_video
 
     mm_data = {"video": [MediaRef(decode, b"video-bytes")]}
 
@@ -252,11 +257,6 @@ async def test_process_multimodal_async_does_not_block_mm_worker_on_decode():
     """Two-phase `_process_multimodal_async` must free the single
     `_mm_executor` worker while a lazy decode is in flight, so a second
     request's phase 1 can interleave (cross-request decode overlap)."""
-    import asyncio
-    import threading
-
-    from vllm.multimodal.media import MediaRef
-
     renderer = _build_renderer()
     processor = renderer.get_mm_processor()
     assert processor.supports_two_phase_apply

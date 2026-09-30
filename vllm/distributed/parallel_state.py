@@ -1583,6 +1583,14 @@ def get_dcp_group() -> GroupCoordinator:
     return _DCP
 
 
+def get_dcp_world_size_and_rank(enabled: bool = True) -> tuple[int, int]:
+    """Return ``(world_size, rank)`` in the DCP group, or ``(1, 0)`` when disabled
+    (e.g. a replicated draft cache) or the group is uninitialized (unit tests)."""
+    if not enabled or _DCP is None:
+        return 1, 0
+    return _DCP.world_size, _DCP.rank_in_group
+
+
 _PP: GroupCoordinator | None = None
 
 

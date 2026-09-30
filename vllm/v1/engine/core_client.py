@@ -366,6 +366,11 @@ class InprocClient(EngineCoreClient):
             log_stats,
             executor_fail_callback=executor_fail_callback,
         )
+        # Release the executor's workers when the client is collected, as
+        # MPClient does; they hold GPU memory for the life of the process
+        # otherwise. The callback must not reference self, or self would stay
+        # reachable and the finalizer would never run.
+        self._finalizer = weakref.finalize(self, self.engine_core.shutdown)
 
     def get_output(self) -> EngineCoreOutputs:
         outputs, model_executed = self.engine_core.step_fn()
@@ -384,7 +389,8 @@ class InprocClient(EngineCoreClient):
             self.engine_core.abort_requests(request_ids)
 
     def shutdown(self, timeout: float | None = None) -> None:
-        self.engine_core.shutdown()
+        if self._finalizer.detach() is not None:
+            self.engine_core.shutdown()
 
     def profile(self, is_start: bool = True, profile_prefix: str | None = None) -> None:
         self.engine_core.profile(is_start, profile_prefix)
@@ -1233,6 +1239,23 @@ class AsyncMPClient(MPClient):
     async def call_utility_async(self, method: str, *args) -> Any:
         return await self._call_utility_async(method, *args, engine=self.core_engine)
 
+    async def call_utility_all_async(self, method: str, *args) -> list[Any]:
+        # Like the Rust client's call_utility: one result per managed engine.
+        return await asyncio.gather(
+            *[
+                self._call_utility_async(method, *args, engine=engine)
+                for engine in self.core_engines
+            ]
+        )
+
+    async def call_utility_consensus_async(self, method: str, *args) -> Any:
+        results = await self.call_utility_all_async(method, *args)
+        if any(result != results[0] for result in results):
+            raise RuntimeError(
+                f"Engines returned different {method} results: {results}"
+            )
+        return results[0]
+
     async def _call_utility_async(
         self, method: str, *args, engine: EngineIdentity
     ) -> Any:
@@ -1268,7 +1291,7 @@ class AsyncMPClient(MPClient):
         await self.call_utility_async("resume_scheduler")
 
     async def is_scheduler_paused_async(self) -> bool:
-        return await self.call_utility_async("is_scheduler_paused")
+        return await self.call_utility_consensus_async("is_scheduler_paused")
 
     async def profile_async(
         self, is_start: bool = True, profile_prefix: str | None = None
@@ -1281,8 +1304,10 @@ class AsyncMPClient(MPClient):
     async def reset_prefix_cache_async(
         self, reset_running_requests: bool = False, reset_connector: bool = False
     ) -> bool:
-        return await self.call_utility_async(
-            "reset_prefix_cache", reset_running_requests, reset_connector
+        return all(
+            await self.call_utility_all_async(
+                "reset_prefix_cache", reset_running_requests, reset_connector
+            )
         )
 
     async def reset_encoder_cache_async(self) -> None:
@@ -1295,10 +1320,10 @@ class AsyncMPClient(MPClient):
         await self.call_utility_async("release_kv_cache_memory")
 
     async def wake_up_async(self, tags: list[str] | None = None) -> bool:
-        return await self.call_utility_async("wake_up", tags)
+        return all(await self.call_utility_all_async("wake_up", tags))
 
     async def is_sleeping_async(self) -> bool:
-        return await self.call_utility_async("is_sleeping")
+        return await self.call_utility_consensus_async("is_sleeping")
 
     async def execute_dummy_batch_async(self) -> None:
         await self.call_utility_async("execute_dummy_batch")
@@ -1307,7 +1332,7 @@ class AsyncMPClient(MPClient):
         await self.call_utility_async("set_weight_version", weight_version)
 
     async def get_weight_version_async(self) -> str:
-        return await self.call_utility_async("get_weight_version")
+        return await self.call_utility_consensus_async("get_weight_version")
 
     async def add_lora_async(self, lora_request: LoRARequest) -> bool:
         return await self.call_utility_async("add_lora", lora_request)
@@ -1336,6 +1361,10 @@ class AsyncMPClient(MPClient):
         return await self.call_utility_async(
             "collective_rpc", method, timeout, args, kwargs
         )
+
+    async def compute_weight_checksums_async(self) -> list[dict[str, str]]:
+        per_engine = await self.call_utility_all_async("compute_weight_checksums")
+        return [worker for workers in per_engine for worker in workers]
 
     async def handle_fault(
         self, ft_request: FaultToleranceRequest
@@ -1581,6 +1610,10 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
         ) // client_count
 
     def get_core_engine_for_request(self, request: EngineCoreRequest) -> EngineIdentity:
+        if (engine := self.reqs_in_flight.get(request.request_id)) is not None:
+            # This is for streaming-input session affinity.
+            return engine
+
         # Engines are in rank order.
         if (eng_index := request.data_parallel_rank) is None and (
             eng_index := get_late_interaction_engine_index(
@@ -1635,14 +1668,7 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
 
     async def call_utility_async(self, method: str, *args) -> Any:
         # Only the result from the first engine is returned.
-        return (
-            await asyncio.gather(
-                *[
-                    self._call_utility_async(method, *args, engine=engine)
-                    for engine in self.core_engines
-                ]
-            )
-        )[0]
+        return (await self.call_utility_all_async(method, *args))[0]
 
     @staticmethod
     async def process_engine_outputs(
@@ -1883,13 +1909,29 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
         await asyncio.to_thread(self._coord_store.wait, ready_keys)
         logger.info("[Elastic EP] Successfully started new engines")
 
+    def _eep_commit_pause_mode(self) -> PauseMode:
+        from vllm.distributed.elastic_ep.elastic_execute import (
+            can_reuse_fused_moe_kernel,
+        )
+
+        # MRV2 re-warms through the request pool, so running requests must
+        # finish first while new ones stay queued in the scheduler.
+        parallel_config = self.vllm_config.parallel_config
+        if self.vllm_config.use_v2_model_runner and not can_reuse_fused_moe_kernel(
+            parallel_config
+        ):
+            return "wait"
+        return "keep"
+
     async def _commit_scale_up_elastic_ep(self, new_data_parallel_size: int) -> None:
         new_core_engines = [
             rank.to_bytes(2, "little")
             for rank in range(len(self.core_engines), new_data_parallel_size)
         ]
 
-        await self.pause_scheduler_async(mode="keep", clear_cache=False)
+        await self.pause_scheduler_async(
+            mode=self._eep_commit_pause_mode(), clear_cache=False
+        )
         wait_future = self._eep_wait_for_setup_switch_complete()
         finish_futures = [
             asyncio.create_task(
@@ -1961,7 +2003,8 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
         for rank in range(new_data_parallel_size, cur_data_parallel_size):
             self._kv_event_sources.pop(rank, None)
         removed_dp_size = cur_data_parallel_size - new_data_parallel_size
-        pause_modes = ["keep"] * new_data_parallel_size + ["abort"] * removed_dp_size
+        eep_mode = self._eep_commit_pause_mode()
+        pause_modes = [eep_mode] * new_data_parallel_size + ["abort"] * removed_dp_size
         pause_futures = [
             self._call_utility_async("pause_scheduler", mode, False, engine=engine)
             for mode, engine in zip(pause_modes, old_core_engines)

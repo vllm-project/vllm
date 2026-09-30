@@ -852,7 +852,7 @@ class AiterFlashAttentionBackend(AttentionBackend):
         return attn_type in (AttentionType.DECODER,)
 
     @staticmethod
-    def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
+    def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int | MultipleOf]:
         if not rocm_aiter_ops.is_shuffle_kv_cache_enabled():
             return [16, 32]
         # Only gluon serves 128-token pages; the pa_fwd_asm/ll4mi decode
