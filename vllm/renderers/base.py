@@ -71,6 +71,7 @@ if TYPE_CHECKING:
         ChatCompletionMessageParam,
         ConversationMessage,
     )
+    from vllm.multimodal.processing.context import TimingContext
 
 logger = init_logger(__name__)
 
@@ -839,7 +840,7 @@ class BaseRenderer(ABC, Generic[_T]):
 
         return mm_uuid_items
 
-    def _process_multimodal_phase1(
+    def _prepare_multimodal_inputs(
         self,
         prompt: list[int],
         mm_data: MultiModalDataDict,
@@ -848,9 +849,8 @@ class BaseRenderer(ABC, Generic[_T]):
         media_io_kwargs: Mapping[str, Mapping[str, object]] | None = None,
         *,
         skip_mm_cache: bool = False,
-    ) -> tuple["BaseMultiModalProcessor", MultiModalApplyState]:
-        """Parse + hash + cache lookup + decode submission, without joining
-        the decodes; runs on the single-worker `_mm_executor`."""
+    ) -> tuple["BaseMultiModalProcessor", MMProcessorInputs, "TimingContext"]:
+        """Prepare parsed inputs and timing for blocking and split processing."""
         mm_processor = self.get_mm_processor()
 
         mm_req_id = f"renderer{self.api_process_rank}-mm-{self._mm_req_counter.inc(1)}"
@@ -875,6 +875,30 @@ class BaseRenderer(ABC, Generic[_T]):
             ),
         )
         mm_timing_ctx = self._mm_timing_registry.get(mm_req_id)
+
+        return mm_processor, mm_processor_inputs, mm_timing_ctx
+
+    def _process_multimodal_phase1(
+        self,
+        prompt: list[int],
+        mm_data: MultiModalDataDict,
+        mm_uuids: MultiModalUUIDDict | None,
+        mm_processor_kwargs: Mapping[str, object] | None,
+        media_io_kwargs: Mapping[str, Mapping[str, object]] | None = None,
+        *,
+        skip_mm_cache: bool = False,
+    ) -> tuple["BaseMultiModalProcessor", MultiModalApplyState]:
+        """Submit decodes without joining them on the single multimodal worker."""
+        mm_processor, mm_processor_inputs, mm_timing_ctx = (
+            self._prepare_multimodal_inputs(
+                prompt,
+                mm_data,
+                mm_uuids,
+                mm_processor_kwargs,
+                media_io_kwargs,
+                skip_mm_cache=skip_mm_cache,
+            )
+        )
 
         with set_default_torch_num_threads():
             state = mm_processor.apply_phase1(mm_processor_inputs, mm_timing_ctx)
@@ -904,30 +928,16 @@ class BaseRenderer(ABC, Generic[_T]):
         *,
         skip_mm_cache: bool = False,
     ) -> "MultiModalInput":
-        mm_processor = self.get_mm_processor()
-
-        mm_req_id = f"renderer{self.api_process_rank}-mm-{self._mm_req_counter.inc(1)}"
-
-        mm_data_items = mm_processor.info.parse_mm_data(mm_data)
-        mm_uuid_items = parse_mm_uuids(mm_uuids)
-
-        mm_uuid_items = self._process_mm_uuids(
-            mm_data, mm_data_items, mm_uuid_items, mm_req_id
+        mm_processor, mm_processor_inputs, mm_timing_ctx = (
+            self._prepare_multimodal_inputs(
+                prompt,
+                mm_data,
+                mm_uuids,
+                mm_processor_kwargs,
+                media_io_kwargs,
+                skip_mm_cache=skip_mm_cache,
+            )
         )
-
-        mm_processor_inputs = MMProcessorInputs(
-            prompt,
-            mm_data_items,
-            mm_uuid_items,
-            hf_processor_mm_kwargs=mm_processor_kwargs or {},
-            media_io_kwargs=media_io_kwargs or {},
-            cache=(
-                self._mm_processor_only_cache
-                if skip_mm_cache
-                else self._mm_processor_cache
-            ),
-        )
-        mm_timing_ctx = self._mm_timing_registry.get(mm_req_id)
 
         with set_default_torch_num_threads():
             mm_inputs = mm_processor.apply(mm_processor_inputs, mm_timing_ctx)

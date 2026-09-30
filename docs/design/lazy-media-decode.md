@@ -109,6 +109,8 @@ Two module-level functions and a processor method in `vllm/multimodal/processing
 
 `apply()` is the synchronous composition of the same three steps, via `_cached_apply_hf_processor` and `_build_mm_input`; `apply_phase1` and `apply_phase2` expose the split. `BaseRenderer._process_multimodal_async` uses the split, running both phases on `_mm_executor` and awaiting `wait_decodes_async()` on the event loop in between, so the worker interleaves other requests' phases while the media pool decodes. `supports_two_phase_apply` gates that: it holds only while the processor leaves `apply`, `_cached_apply_hf_processor` and `_apply_hf_processor` unoverridden, and otherwise the renderer uses `_process_multimodal_blocking_async`.
 
+The blocking renderer path and phase 1 both call `_prepare_multimodal_inputs`. This helper resolves the processor, creates a request ID, parses media and UUIDs, applies UUID validation and generation, selects the renderer cache (including `skip_mm_cache`), and retrieves the timing context. Each path then calls its processor entry point under `set_default_torch_num_threads()`.
+
 The unified `vision_chunk` modality is resolved earlier, in the request parser, because its chunk items must be concrete before they reach the renderer. `_predecode_vision_chunk_items` in `vllm/entrypoints/chat_utils.py` decodes those refs concurrently on the same media pool, off the event loop, and raises the first failure instead of letting it be swallowed downstream.
 
 ### The single multimodal worker
