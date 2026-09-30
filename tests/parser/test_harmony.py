@@ -872,6 +872,15 @@ class TestProcessChunk:
             ("final", "Two"),
         ]
 
+    def test_malformed_token_does_not_raise(self, harmony_parser):
+        malformed = encode_output(
+            "<|channel|>analysis<|message|>think<|end|><|return|>"
+            "<|start|>assistant<|channel|>final<|message|>answer<|return|>"
+        )
+
+        result = harmony_parser.process_chunk(malformed)
+        assert "".join(s.delta for s in result.segments if s.delta) == "thinkanswer"
+
 
 class TestCountReasoningTokens:
     def test_matches_process_chunk(self, harmony_parser, gpt_oss_tokenizer):
@@ -1197,6 +1206,21 @@ class TestAdjustRequest:
                 ],
             ),
             (
+                {
+                    "tool_choice": "auto",
+                    "strict_tools": True,
+                    "response_format_type": "json_schema",
+                },
+                [
+                    "COMMENTARY",
+                    "TOOL_CALL_1_CHANNEL_FIRST",
+                    "TOOL_CALL_1_FUNCTION_FIRST",
+                    "TOOL_CALL_2_CHANNEL_FIRST",
+                    "TOOL_CALL_2_FUNCTION_FIRST",
+                    "FINAL_JSON_SCHEMA",
+                ],
+            ),
+            (
                 {"response_format_type": "json_schema"},
                 ["FINAL_JSON_SCHEMA"],
             ),
@@ -1281,6 +1305,7 @@ class TestAdjustRequest:
             "tool_auto_strict",
             "tool_required",
             "tool_named",
+            "pr56086_tool_auto_strict_response_format_json_schema",
             "response_format_json_schema",
             "response_format_json_object",
             "structured_outputs_json",
