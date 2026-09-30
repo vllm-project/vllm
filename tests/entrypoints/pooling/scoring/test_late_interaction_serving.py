@@ -49,6 +49,53 @@ def _query_key(context: PoolingServeContext) -> str:
 
 
 @pytest.mark.asyncio
+@pytest.mark.skip_global_cleanup
+@pytest.mark.parametrize("failed_stage", ["query", "doc"])
+async def test_flash_late_interaction_cleans_up_queries_on_failure(
+    failed_stage: str,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    serving = object.__new__(ServingScores)
+    serving.io_processor = Mock()
+    serving.engine_client = Mock(abort=AsyncMock(), collective_rpc=AsyncMock())
+
+    context = _make_context()
+    monkeypatch.setattr(serving, "_init_ctx", AsyncMock(return_value=context))
+    monkeypatch.setattr(serving, "_preprocessing", AsyncMock())
+
+    async def encode_queries(ctx):
+        ctx.late_interaction_query_keys = ["query-key"]
+        if failed_stage == "query":
+            raise RuntimeError("query failed")
+
+    async def encode_docs(ctx):
+        if failed_stage == "doc":
+            raise RuntimeError("doc failed")
+
+    monkeypatch.setattr(
+        serving,
+        "_flash_late_interaction_encode_queries",
+        AsyncMock(side_effect=encode_queries),
+    )
+    monkeypatch.setattr(
+        serving,
+        "_flash_late_interaction_encode_docs",
+        AsyncMock(side_effect=encode_docs),
+    )
+
+    with pytest.raises(RuntimeError, match=f"{failed_stage} failed"):
+        await serving.flash_late_interaction()
+
+    serving.engine_client.abort.assert_awaited_once_with(
+        ["query-key", f"{context.request_id}-doc-0"]
+    )
+    serving.engine_client.collective_rpc.assert_awaited_once_with(
+        "release_late_interaction_query_cache",
+        args=(["query-key"],),
+    )
+
+
+@pytest.mark.asyncio
 async def test_colliding_request_ids_use_distinct_query_cache_keys(
     monkeypatch: pytest.MonkeyPatch,
 ):

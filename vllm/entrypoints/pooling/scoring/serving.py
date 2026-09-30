@@ -195,12 +195,38 @@ class ServingScores(PoolingServing):
         ctx = await self._init_ctx(self.io_processor, *args, **kwargs)
         await self._preprocessing(self.io_processor, ctx)
 
-        # stage 1: encode queries and cache token embeddings on workers.
-        await self._flash_late_interaction_encode_queries(ctx)
-        # stage 2: encode docs and return scalar scores from workers.
-        await self._flash_late_interaction_encode_docs(ctx)
+        try:
+            # stage 1: encode queries and cache token embeddings on workers.
+            await self._flash_late_interaction_encode_queries(ctx)
+            # stage 2: encode docs and return scalar scores from workers.
+            await self._flash_late_interaction_encode_docs(ctx)
+        except BaseException:
+            try:
+                await self._cleanup_flash_late_interaction(ctx)
+            except Exception:
+                logger.exception("Failed to clean up late-interaction query cache.")
+            raise
 
         return await self._postprocessing_async(self.io_processor, ctx)
+
+    async def _cleanup_flash_late_interaction(self, ctx: ScoringServeContext) -> None:
+        query_keys = ctx.late_interaction_query_keys
+        if not query_keys:
+            return
+
+        assert ctx.n_queries is not None
+        assert ctx.engine_inputs is not None
+        n_docs = len(ctx.engine_inputs) - ctx.n_queries
+        doc_keys = [f"{ctx.request_id}-doc-{i}" for i in range(n_docs)]
+
+        try:
+            # Stop documents before removing the query tensors they reference.
+            await self.engine_client.abort([*query_keys, *doc_keys])
+        finally:
+            await self.engine_client.collective_rpc(
+                "release_late_interaction_query_cache",
+                args=(query_keys,),
+            )
 
     async def _flash_late_interaction_encode_queries(self, ctx: ScoringServeContext):
         assert ctx.n_queries is not None
