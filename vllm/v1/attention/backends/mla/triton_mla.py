@@ -75,7 +75,7 @@ def triton_mla_decode_forward(
     k_scale: torch.Tensor,
     sm_count: int,
     out_dtype: torch.dtype,
-    mask_empty_shards: bool = False,
+    lse_dtype: torch.dtype,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Run the generic split-KV MLA decode over independently bounded rows.
 
@@ -83,18 +83,19 @@ def triton_mla_decode_forward(
     express causality entirely through ``seq_lens``. DCP verify uses that so
     each rank returns a local output and LSE for the MLA layer to merge.
 
-    ``mask_empty_shards`` is only for that merge. A zero-length row makes the
-    stage-2 reducer store NaN, and the cross-rank LSE combine needs the
-    identity ``(0, -inf)`` instead. The generic Triton path leaves the kernel
-    result alone: rewriting every empty row would change non-DCP padding on
-    every platform.
+    The kernel computes the LSE in fp32 and casts on store, so ``lse_dtype``
+    only sets the precision the cross-rank merge sees.
+
+    A zero-length row (an empty DCP shard or graph padding) comes back as a
+    NaN output with an LSE of -inf. The DCP combine gives it zero weight and
+    never reads the output.
     """
     num_rows, num_heads = q.shape[:2]
     output = torch.zeros(
         num_rows, num_heads, kv_lora_rank, dtype=out_dtype, device=q.device
     )
     # Zeros, matching the historical Triton MLA decode path.
-    lse = torch.zeros(num_rows, num_heads, dtype=out_dtype, device=q.device)
+    lse = torch.zeros(num_rows, num_heads, dtype=lse_dtype, device=q.device)
     num_kv_splits = (
         1
         if envs.VLLM_BATCH_INVARIANT
@@ -130,11 +131,6 @@ def triton_mla_decode_forward(
         v_scale=k_scale,
         is_mla=True,
     )
-
-    if mask_empty_shards:
-        empty = seq_lens == 0
-        output.masked_fill_(empty[:, None, None], 0)
-        lse.masked_fill_(empty[:, None], float("-inf"))
     return output, lse
 
 
@@ -311,8 +307,6 @@ class TritonMLAImpl(MLACommonImpl[MLACommonMetadata]):
         if is_quantized_kv_cache(self.kv_cache_dtype):
             self.supports_quant_query_input = False
 
-        # Cached once: num_kv_splits is recomputed per forward, but the CU
-        # count is not.
         self._sm_count = current_platform.num_compute_units()
 
     def forward_mqa(
@@ -371,5 +365,6 @@ class TritonMLAImpl(MLACommonImpl[MLACommonMetadata]):
             self.kv_lora_rank,
             layer._k_scale,
             self._sm_count,
+            q.dtype,
             q.dtype,
         )
