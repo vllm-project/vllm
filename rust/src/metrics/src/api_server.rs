@@ -27,6 +27,10 @@ fn weight_operation_duration_histogram() -> Histogram {
     Histogram::new([0.01, 0.1, 1.0, 10.0, 30.0, 60.0, 120.0, 300.0, 600.0])
 }
 
+fn sleep_mode_operation_duration_histogram() -> Histogram {
+    Histogram::new([0.01, 0.1, 1.0, 10.0, 30.0, 60.0, 120.0, 300.0, 600.0])
+}
+
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
 pub struct HttpRequestLabels {
     pub method: String,
@@ -45,12 +49,20 @@ pub struct WeightOperationLabels {
     pub operation: &'static str,
 }
 
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+pub struct SleepModeOperationLabels {
+    pub operation: &'static str,
+}
+
 pub(crate) type HttpRequestCounterFamily = Family<HttpRequestLabels, U64Counter>;
 pub(crate) type HttpHandlerHistogramFamily =
     Family<HttpHandlerLabels, Histogram, fn() -> Histogram>;
 pub(crate) type WeightOperationHistogramFamily =
     Family<WeightOperationLabels, Histogram, fn() -> Histogram>;
 pub(crate) type WeightOperationGaugeFamily = Family<WeightOperationLabels, U64Gauge>;
+pub(crate) type SleepModeOperationHistogramFamily =
+    Family<SleepModeOperationLabels, Histogram, fn() -> Histogram>;
+pub(crate) type SleepModeOperationGaugeFamily = Family<SleepModeOperationLabels, U64Gauge>;
 
 /// API-server Prometheus families exported from the HTTP middleware layer.
 pub struct ApiServerMetrics {
@@ -59,6 +71,8 @@ pub struct ApiServerMetrics {
     pub http_request_duration_highr_seconds: Histogram,
     pub weight_operation_duration_seconds: WeightOperationHistogramFamily,
     pub weight_operations_in_flight: WeightOperationGaugeFamily,
+    pub sleep_mode_operation_duration_seconds: SleepModeOperationHistogramFamily,
+    pub sleep_mode_operations_in_flight: SleepModeOperationGaugeFamily,
 }
 
 impl ApiServerMetrics {
@@ -102,12 +116,30 @@ impl ApiServerMetrics {
             weight_operations_in_flight.clone(),
         );
 
+        let sleep_mode_operation_duration_seconds = Family::new_with_constructor(
+            sleep_mode_operation_duration_histogram as fn() -> Histogram,
+        );
+        registry.register(
+            "vllm:sleep_mode_operation_duration_seconds",
+            "Duration of one sleep-mode operation.",
+            sleep_mode_operation_duration_seconds.clone(),
+        );
+
+        let sleep_mode_operations_in_flight = SleepModeOperationGaugeFamily::default();
+        registry.register(
+            "vllm:sleep_mode_operations_in_flight",
+            "Sleep-mode operations currently awaited.",
+            sleep_mode_operations_in_flight.clone(),
+        );
+
         Self {
             http_requests,
             http_request_duration_seconds,
             http_request_duration_highr_seconds,
             weight_operation_duration_seconds,
             weight_operations_in_flight,
+            sleep_mode_operation_duration_seconds,
+            sleep_mode_operations_in_flight,
         }
     }
 
@@ -119,6 +151,21 @@ impl ApiServerMetrics {
         WeightOperationRecorder {
             started_at: Instant::now(),
             duration: self.weight_operation_duration_seconds.get_or_create_owned(&labels),
+            in_flight,
+        }
+    }
+
+    /// Record one dispatched sleep-mode engine operation.
+    pub fn record_sleep_mode_operation(
+        &self,
+        operation: &'static str,
+    ) -> SleepModeOperationRecorder {
+        let labels = SleepModeOperationLabels { operation };
+        let in_flight = self.sleep_mode_operations_in_flight.get_or_create_owned(&labels);
+        in_flight.inc();
+        SleepModeOperationRecorder {
+            started_at: Instant::now(),
+            duration: self.sleep_mode_operation_duration_seconds.get_or_create_owned(&labels),
             in_flight,
         }
     }
@@ -137,6 +184,20 @@ impl Drop for WeightOperationRecorder {
     }
 }
 
+/// Records duration and clears in-flight tracking on completion or cancellation.
+pub struct SleepModeOperationRecorder {
+    started_at: Instant,
+    duration: Histogram,
+    in_flight: U64Gauge,
+}
+
+impl Drop for SleepModeOperationRecorder {
+    fn drop(&mut self) {
+        self.in_flight.dec();
+        self.duration.observe(self.started_at.elapsed().as_secs_f64());
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use prometheus_client::encoding::text::encode;
@@ -144,10 +205,50 @@ mod tests {
 
     use super::ApiServerMetrics;
 
-    fn rendered(registry: &Registry) -> String {
+    fn rendered_metrics(registry: &Registry) -> String {
         let mut rendered = String::new();
         encode(&mut rendered, registry).expect("encode metrics");
         rendered
+    }
+
+    #[test]
+    fn sleep_mode_recorder_tracks_duration_and_concurrency() {
+        let mut registry = Registry::default();
+        let metrics = ApiServerMetrics::register(&mut registry);
+        for operation in ["sleep", "release_kv_cache_memory", "wake"] {
+            let recorder = metrics.record_sleep_mode_operation(operation);
+            let active = rendered_metrics(&registry);
+            assert!(active.contains(&format!(
+                "vllm:sleep_mode_operations_in_flight{{operation=\"{operation}\"}} 1"
+            )));
+
+            drop(recorder);
+            let succeeded = rendered_metrics(&registry);
+            assert!(succeeded.contains(&format!(
+                "vllm:sleep_mode_operations_in_flight{{operation=\"{operation}\"}} 0"
+            )));
+            assert!(succeeded.contains(&format!(
+                "vllm:sleep_mode_operation_duration_seconds_count{{operation=\"{operation}\"}} 1"
+            )));
+
+            let first = metrics.record_sleep_mode_operation(operation);
+            let second = metrics.record_sleep_mode_operation(operation);
+            assert!(rendered_metrics(&registry).contains(&format!(
+                "vllm:sleep_mode_operations_in_flight{{operation=\"{operation}\"}} 2"
+            )));
+            drop(first);
+            assert!(rendered_metrics(&registry).contains(&format!(
+                "vllm:sleep_mode_operations_in_flight{{operation=\"{operation}\"}} 1"
+            )));
+            drop(second);
+            let rendered = rendered_metrics(&registry);
+            assert!(rendered.contains(&format!(
+                "vllm:sleep_mode_operations_in_flight{{operation=\"{operation}\"}} 0"
+            )));
+            assert!(rendered.contains(&format!(
+                "vllm:sleep_mode_operation_duration_seconds_count{{operation=\"{operation}\"}} 3"
+            )));
+        }
     }
 
     #[test]
@@ -156,16 +257,14 @@ mod tests {
         let metrics = ApiServerMetrics::register(&mut registry);
 
         let recorder = metrics.record_weight_operation("update");
-        assert!(
-            rendered(&registry)
-                .contains("vllm:rl_weight_update_operations_in_flight{operation=\"update\"} 1")
-        );
+        assert!(rendered_metrics(&registry)
+            .contains("vllm:rl_weight_update_operations_in_flight{operation=\"update\"} 1"));
         drop(recorder);
 
-        let after = rendered(&registry);
-        assert!(
-            after.contains("vllm:rl_weight_update_operations_in_flight{operation=\"update\"} 0")
-        );
+        let after = rendered_metrics(&registry);
+        assert!(after.contains(
+            "vllm:rl_weight_update_operations_in_flight{operation=\"update\"} 0"
+        ));
         assert!(after.contains(
             "vllm:rl_weight_update_operation_duration_seconds_count{operation=\"update\"} 1"
         ));
