@@ -413,6 +413,7 @@ def _register_overlaid_mla_worker(
     worker._transfer_layer_region_indices = ()
     worker._transfer_layer_group_ids = ()
     worker._region_is_mla = []
+    worker._region_num_kv_heads = []
     worker.block_len_per_layer = []
     worker.block_stride_per_layer = []
     worker.device_id = 0
