@@ -53,7 +53,7 @@ def _make_proposer(
     monkeypatch.setattr(llm_base_proposer, "AttentionGroup", _FakeAttentionGroup)
 
     proposer = EagleProposer.__new__(EagleProposer)
-    proposer.vllm_config = None  # type: ignore[assignment]  # Patched backend discovery does not read config.
+    proposer.vllm_config = None
     proposer.device = None
     proposer._draft_attn_layer_names = set(layer_names)
     proposer.kv_cache_gid = -1
