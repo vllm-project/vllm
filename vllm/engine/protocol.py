@@ -199,8 +199,8 @@ class EngineClient(ABC):
         ...
 
     @abstractmethod
-    async def wake_up(self, tags: list[str] | None = None) -> None:
-        """Wake up the engine."""
+    async def wake_up(self, tags: list[str] | None = None) -> bool:
+        """Wake the tagged resources; return whether every engine is fully awake."""
         ...
 
     @abstractmethod

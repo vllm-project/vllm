@@ -14,6 +14,7 @@ from vllm.distributed.weight_transfer.base import (
     WeightTransferUpdateRequest,
 )
 from vllm.engine.protocol import EngineClient
+from vllm.entrypoints.serve.dev.rlhf.metrics import weight_operation_metrics
 from vllm.logger import init_logger
 from vllm.v1.engine import PauseMode
 
@@ -163,21 +164,24 @@ async def init_weight_transfer_engine(
     raw_request: Request,
     init_info: Annotated[dict[str, Any], Body(embed=True)],
 ):
-    await engine_client(raw_request).init_weight_transfer_engine(
-        WeightTransferInitRequest(init_info=init_info)
-    )
+    with weight_operation_metrics().record("init"):
+        await engine_client(raw_request).init_weight_transfer_engine(
+            WeightTransferInitRequest(init_info=init_info)
+        )
     return JSONResponse(content={"message": "Weight transfer initialized"})
 
 
 @router.post("/start_weight_update")
 async def start_weight_update(raw_request: Request):
-    await engine_client(raw_request).start_weight_update()
+    with weight_operation_metrics().record("start"):
+        await engine_client(raw_request).start_weight_update()
     return JSONResponse(content={"message": "Weight update started"})
 
 
 @router.post("/start_draft_weight_update")
 async def start_draft_weight_update(raw_request: Request):
-    await engine_client(raw_request).start_draft_weight_update()
+    with weight_operation_metrics().record("start_draft"):
+        await engine_client(raw_request).start_draft_weight_update()
     return JSONResponse(content={"message": "Draft weight update started"})
 
 
@@ -186,9 +190,10 @@ async def update_weights(
     raw_request: Request,
     update_info: Annotated[WeightTransferUpdatePayload, Body(embed=True)],
 ):
-    await engine_client(raw_request).update_weights(
-        request=WeightTransferUpdateRequest(update_info=update_info)
-    )
+    with weight_operation_metrics().record("update"):
+        await engine_client(raw_request).update_weights(
+            request=WeightTransferUpdateRequest(update_info=update_info)
+        )
     return JSONResponse(content={"message": "Weights updated"})
 
 
@@ -197,7 +202,8 @@ async def finish_weight_update(
     raw_request: Request,
     weight_version: Annotated[str | None, Body(embed=True)] = None,
 ):
-    await engine_client(raw_request).finish_weight_update(weight_version)
+    with weight_operation_metrics().record("finish"):
+        await engine_client(raw_request).finish_weight_update(weight_version)
     return JSONResponse(content={"message": "Weight update finished"})
 
 
