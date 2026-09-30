@@ -46,12 +46,12 @@ def _shrink_config(config):
     return config
 
 
-def _num_hisparse_spills(runner: VllmRunner) -> int:
+def _num_hisparse_transfers(runner: VllmRunner) -> int:
     client = runner.llm.llm_engine.engine_core
     coordinator = get_hisparse_coordinator(
         client.engine_core.scheduler.kv_cache_manager
     )
-    return coordinator.next_spill_id
+    return coordinator.next_transfer_id
 
 
 def _offload_load_bytes() -> float:
@@ -86,12 +86,12 @@ def _get_hisparse_worker(runner: VllmRunner) -> HiSparseConnectorWorker:
     "with_offloading", [False, True], ids=["standalone", "offload"]
 )
 @fork_new_process_for_each_test
-def test_hisparse_spill_and_prefix_restore(
+def test_hisparse_write_back_and_prefix_restore(
     monkeypatch: pytest.MonkeyPatch,
     vllm_runner: type[VllmRunner],
     with_offloading: bool,
 ):
-    """Spilled prefixes restore and FULL-graph decode writes reach host KV.
+    """Written-back prefixes restore and FULL-graph decode writes reach host KV.
 
     A regression omitted attention metadata before FULL graph replay, so decode
     completed normally while its newly written KV rows were never copied to host.
@@ -218,7 +218,7 @@ def test_hisparse_spill_and_prefix_restore(
 
         runner.generate_greedy(pressure, max_tokens=8)
 
-        assert _num_hisparse_spills(runner) > 0
+        assert _num_hisparse_transfers(runner) > 0
         load_bytes = _offload_load_bytes()
         actual = runner.generate_greedy([target], max_tokens=8)
         runner.generate_greedy([[42]], max_tokens=1)
@@ -280,7 +280,7 @@ def test_hisparse_host_exhaustion_defers_requests(
             num_pressure * host.block_size,
             num_pressure * host.block_size,
         )
-        original_plan = coordinator.plan_prefix_spills
+        original_plan = coordinator.plan_prefix_write_backs
         original_count = host.get_num_blocks_to_allocate
         checked_steps = 0
         refusals = 0
@@ -297,7 +297,7 @@ def test_hisparse_host_exhaustion_defers_requests(
             refusals += int(required > 0)
             return required
 
-        monkeypatch.setattr(coordinator, "plan_prefix_spills", plan)
+        monkeypatch.setattr(coordinator, "plan_prefix_write_backs", plan)
         monkeypatch.setattr(host, "get_num_blocks_to_allocate", count)
         actual = runner.generate_greedy(prompts, max_tokens=16)
 

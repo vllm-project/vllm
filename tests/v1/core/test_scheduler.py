@@ -234,11 +234,11 @@ def _bind_hisparse_connector(scheduler):
     return coordinator
 
 
-def test_pending_hisparse_spill_keeps_scheduler_alive():
-    """A final host spill must complete after the last request finishes."""
+def test_pending_hisparse_write_back_keeps_scheduler_alive():
+    """A final host write-back must complete after the last request finishes."""
     scheduler = create_scheduler()
     coordinator = _bind_hisparse_connector(scheduler)
-    pending = coordinator.pending_spills
+    pending = coordinator.pending_transfers
     pending[0] = Mock()
     assert scheduler.has_requests()
     pending.clear()

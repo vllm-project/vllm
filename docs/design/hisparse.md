@@ -44,7 +44,8 @@ to complete host blocks.
 | Host block / host page | A block of the separate CPU pool and the KV page it holds. The host pages are the authoritative copy of a request's sparse-MLA KV. |
 | GPU page | A request's KV page held in a GPU block. Code calls these resident pages (the resident group). |
 | Hot buffer / hot row | A request's fixed set of GPU blocks that hold host pages fetched for attention, and one row within it. |
-| Spill | Copying a GPU page to its host page. |
+| Write-back | Copying a GPU page to its host page. Happens eagerly, not only under memory pressure. |
+| Page transfer | One tracked write-back or restore of a page, identified by its transfer ID. |
 | Mirror | Copying KV rows to host as decode writes them, rather than a whole page at once. |
 | Durable | A page whose host copy is complete, so its GPU copy can be released. |
 | Publish | Registering durable host pages in the prefix cache so later requests can hit them. |
@@ -63,7 +64,7 @@ to complete host blocks.
 | HiSparse source and prefix identity | `HiSparseCoordinator` | maps tokens to logical host blocks |
 | Resident GPU block leases | normal KV cache manager | allocates and frees HMA blocks |
 | Resident block tables | normal KV cache manager | tells attention where resident pages are |
-| Residency transitions | `HiSparseCoordinator` | plans spill-before-free transactions |
+| Residency transitions | `HiSparseCoordinator` | plans write-back-before-release transactions |
 | Logical host block allocation | `HiSparseCoordinator` | owns the separate CPU block pool and its lifecycle |
 | Pinned host-pool lifecycle | `HiSparseWorker` | worker-wide backing and teardown |
 | Per-cache host view and hot contents | `HiSparseRuntime` | binds host/hot storage and fills cache-manager-provided hot leases |
@@ -182,7 +183,7 @@ host prefix boundary. If that suffix is unavailable, all groups fall back to
 the shorter prefix they share. NIXL P/D transfers continue to place indexer KV
 directly in its GPU group.
 
-## Spill transaction
+## Write-back transaction
 
 A resident block cannot be released until its contents have been handed to the
 worker.
@@ -237,7 +238,7 @@ the same command, output, and cache-resolution boundaries.
 
 | Class | Inherits / implements | Responsibility |
 | --- | --- | --- |
-| `HiSparseCoordinator` | plain scheduler component | host allocation, source prefixes, resident leases, and spill state machine |
+| `HiSparseCoordinator` | plain scheduler component | host allocation, source prefixes, resident leases, and page-transfer state machine |
 | `HiSparseConnector` | `KVConnectorBase_V1`, `SupportsHMA` | scheduler/worker metadata and lifecycle boundary |
 | `HiSparseResidentManager` | `SingleTypeKVCacheManager` | normal block-pool bookkeeping with host-backed holes |
 | `PagedCacheView` | immutable data object | shared resident/hot HMA tensor binding |

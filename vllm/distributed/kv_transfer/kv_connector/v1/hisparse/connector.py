@@ -182,7 +182,7 @@ class HiSparseConnectorScheduler:
         self.coordinator.release_completed_host_copies(
             metadata.completed_host_copy_dst_ids
         )
-        self.coordinator.update_spills(
+        self.coordinator.update_transfers(
             metadata.enqueued_transfer_counts,
             metadata.completed_transfer_counts,
         )

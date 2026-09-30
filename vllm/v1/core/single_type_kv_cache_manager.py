@@ -2540,7 +2540,7 @@ class HiSparseResidentManager(_HiSparseAuxiliaryManager):
         replay_boundaries: Sequence[int],
     ) -> None:
         assert self.coordinator is not None
-        self.coordinator.plan_prefix_spills(request.request_id, num_tokens)
+        self.coordinator.plan_prefix_write_backs(request.request_id, num_tokens)
         self.coordinator.update_residency(request.request_id)
 
     def allocate_new_blocks(

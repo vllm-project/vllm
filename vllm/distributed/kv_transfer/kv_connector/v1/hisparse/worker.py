@@ -780,21 +780,25 @@ class HiSparseConnectorWorker:
         )
         if source_blocks_by_transfer.ndim != 2:
             raise RuntimeError(
-                "HiSparse spill DMA source mappings must be rectangular."
+                "HiSparse write-back DMA source mappings must be rectangular."
             )
         for layer_index, cache in enumerate(self.cache_handles):
             source_index = cache.runtime.resident_source_index
             if source_index >= source_blocks_by_transfer.shape[1]:
-                raise RuntimeError("HiSparse spill DMA source index is out of range.")
+                raise RuntimeError(
+                    "HiSparse write-back DMA source index is out of range."
+                )
             source_blocks = source_blocks_by_transfer[:, source_index]
             source = self.resident_caches[layer_index]
             destination = self.host_caches[layer_index]
             if np.any(source_blocks < 0) or np.any(source_blocks >= source.shape[0]):
-                raise RuntimeError("HiSparse spill DMA source is out of range.")
+                raise RuntimeError("HiSparse write-back DMA source is out of range.")
             if np.any(destination_rows < 0) or np.any(
                 destination_rows + self.kernel_block_size > destination.shape[0]
             ):
-                raise RuntimeError("HiSparse spill DMA destination is out of range.")
+                raise RuntimeError(
+                    "HiSparse write-back DMA destination is out of range."
+                )
             row_bytes = source.shape[-1] * source.element_size()
             descriptor_slice = slice(layer_index, descriptor_count, num_layers)
             descriptors.src_np[descriptor_slice] = (

@@ -70,7 +70,7 @@ class _HiSparseRequestState:
 
 
 @dataclass
-class _PendingSpill:
+class _PendingTransfer:
     transfer_id: int
     page: tuple[str, int]
     request_state: _HiSparseRequestState
@@ -83,7 +83,7 @@ class _PendingSpill:
 
 
 class HiSparseCoordinator:
-    """Own HiSparse host allocation, host publication, spills, and GPU residency.
+    """Own HiSparse host allocation, publication, page transfers, and GPU residency.
 
     GPU-resident pages are a write-back cache of the host tier. Once a page's
     host copy is durable and its owner can read from host (it has, or has
@@ -124,7 +124,7 @@ class HiSparseCoordinator:
         self.hot_managers = tuple(hot_managers)
         self.host_manager: HiSparseSourceManager | None = None
         self.host_group_id: int | None = None
-        self.max_spill_pages = 0
+        self.max_transfer_pages = 0
         for group_id, manager in enumerate(managers):
             if isinstance(manager, HiSparseSourceManager):
                 if self.host_manager is not None:
@@ -154,7 +154,7 @@ class HiSparseCoordinator:
             resident_block_size = resident_block_sizes.pop()
             if self.host_manager.block_size != resident_block_size:
                 raise ValueError("HiSparse host and resident block sizes must match.")
-            self.max_spill_pages = max_model_len // resident_block_size
+            self.max_transfer_pages = max_model_len // resident_block_size
             self.gpu_pool = self.resident_managers[0].block_pool
             # Requests start reading from host once the shared pool runs this
             # low, so admissions find evictable pages rather than pinned ones.
@@ -167,10 +167,10 @@ class HiSparseCoordinator:
         # request -> prefix length an external load is still filling in.
         self._pending_imports: dict[str, int] = {}
         self.block_table_updates: set[str] = set()
-        self.spills_to_send: list[SparseKVPageTransfer] = []
-        self.pending_spills: dict[int, _PendingSpill] = {}
+        self.transfers_to_send: list[SparseKVPageTransfer] = []
+        self.pending_transfers: dict[int, _PendingTransfer] = {}
         self.request_states: dict[str, _HiSparseRequestState] = {}
-        self.next_spill_id = 0
+        self.next_transfer_id = 0
         # Published host block hash -> GPU copies of that page, readable until
         # the pool evicts them. Lets a host prefix hit come back GPU-resident.
         self.copies: dict[BlockHashWithGroupId, tuple[KVCacheBlock, ...]] = {}
@@ -404,11 +404,13 @@ class HiSparseCoordinator:
         self._unpin_durable_pages(request_id, state)
 
     # ------------------------------------------------------------------
-    # Host publication and spills
+    # Host publication and page transfers
     # ------------------------------------------------------------------
 
-    def plan_prefix_spills(self, request_id: str, num_computed_tokens: int) -> None:
-        """Eagerly spill every sealed page that has no host copy yet."""
+    def plan_prefix_write_backs(
+        self, request_id: str, num_computed_tokens: int
+    ) -> None:
+        """Eagerly write back every sealed page that has no host copy yet."""
         if not self.resident_managers:
             return
         assert self.host_manager is not None
@@ -418,7 +420,7 @@ class HiSparseCoordinator:
             self._pending_imports.get(request_id, 0), host_block_size
         )
         state = self._get_request_state(request_id)
-        budget = max(self.max_spill_pages - len(self.spills_to_send), 0)
+        budget = max(self.max_transfer_pages - len(self.transfers_to_send), 0)
         for page_idx in range(num_pages):
             if page_idx < importing_pages:
                 continue
@@ -542,25 +544,25 @@ class HiSparseCoordinator:
         self.host_manager.block_pool.touch([host_block])
         for manager, block in zip(self.resident_managers, blocks):
             manager.block_pool.touch([block])
-        spill_id = self.next_spill_id
-        self.next_spill_id += 1
+        transfer_id = self.next_transfer_id
+        self.next_transfer_id += 1
         plan = SparseKVPageTransfer(
-            transfer_id=spill_id,
+            transfer_id=transfer_id,
             host_block_id=host_block.block_id,
             resident_block_ids=tuple(block.block_id for block in blocks),
             after_forward=after_forward,
             restore=restore,
         )
-        self.pending_spills[spill_id] = _PendingSpill(
-            transfer_id=spill_id,
+        self.pending_transfers[transfer_id] = _PendingTransfer(
+            transfer_id=transfer_id,
             page=(request_id, page_idx),
             request_state=state,
             host_block=host_block,
             resident_blocks=tuple(blocks),
             restore=restore,
         )
-        state.pending_pages[page_idx] = spill_id
-        self.spills_to_send.append(plan)
+        state.pending_pages[page_idx] = transfer_id
+        self.transfers_to_send.append(plan)
         return True
 
     # ------------------------------------------------------------------
@@ -658,44 +660,46 @@ class HiSparseCoordinator:
         """Package residency decisions for the worker connector."""
         if not self.resident_managers:
             return None
-        command = SparseKVOffloadCommand(page_transfers=self.spills_to_send)
-        self.spills_to_send = []
+        command = SparseKVOffloadCommand(page_transfers=self.transfers_to_send)
+        self.transfers_to_send = []
         return command
 
     def has_pending_reclamation(self) -> bool:
-        """Whether an in-flight spill will free GPU or host blocks on completion."""
+        """Whether an in-flight transfer will free GPU or host blocks on completion."""
         return any(
             pending.host_block.ref_cnt == 1
             or (
                 pending.page[0] in self.request_states
                 and self._can_read_from_host(pending.page[0])
             )
-            for pending in self.pending_spills.values()
+            for pending in self.pending_transfers.values()
         )
 
     def has_pending_work(self) -> bool:
-        return bool(self.spills_to_send or self.pending_spills or self._retained_copies)
+        return bool(
+            self.transfers_to_send or self.pending_transfers or self._retained_copies
+        )
 
-    def update_spills(
+    def update_transfers(
         self,
         enqueued_counts: Mapping[int, int],
         completed_counts: Mapping[int, int],
     ) -> None:
-        for spill_id, count in enqueued_counts.items():
-            pending = self.pending_spills.get(spill_id)
+        for transfer_id, count in enqueued_counts.items():
+            pending = self.pending_transfers.get(transfer_id)
             if pending is not None and pending.expected_worker_completions == 0:
                 pending.expected_worker_completions = count
-        for spill_id, count in completed_counts.items():
-            pending = self.pending_spills.get(spill_id)
+        for transfer_id, count in completed_counts.items():
+            pending = self.pending_transfers.get(transfer_id)
             if pending is not None:
                 pending.worker_completions += count
 
-        self._apply_enqueued_spills()
+        self._apply_enqueued_transfers()
         self._complete_host_writes()
 
-    def _apply_enqueued_spills(self) -> None:
+    def _apply_enqueued_transfers(self) -> None:
         """Drop the GPU pins once every worker has completed the transfer."""
-        for pending in self.pending_spills.values():
+        for pending in self.pending_transfers.values():
             if (
                 pending.enqueue_applied
                 or not pending.expected_worker_completions
@@ -709,14 +713,14 @@ class HiSparseCoordinator:
     def _complete_host_writes(self) -> None:
         completed = [
             pending
-            for pending in self.pending_spills.values()
+            for pending in self.pending_transfers.values()
             if pending.enqueue_applied
             and pending.expected_worker_completions
             and pending.worker_completions >= pending.expected_worker_completions
         ]
         completed_request_ids: set[str] = set()
         for pending in completed:
-            self.pending_spills.pop(pending.transfer_id, None)
+            self.pending_transfers.pop(pending.transfer_id, None)
             request_id, page_idx = pending.page
             pending.request_state.pending_pages.pop(page_idx, None)
             if self.request_states.get(request_id) is pending.request_state:
@@ -787,7 +791,7 @@ class HiSparseCoordinator:
             # them before the remaining copies finish and the prefix publishes.
             self.host_manager.block_pool.touch(publication.detached_blocks)
         else:
-            # Preemption can cancel a scheduled forward after its spills were
+            # Preemption can cancel a scheduled forward after its write-backs were
             # planned, so its copies do not prove that the KV was computed.
             state.publication = None
         for manager in self.resident_managers:
