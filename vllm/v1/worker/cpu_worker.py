@@ -77,7 +77,8 @@ class CPUWorker(Worker):
         available_memory = memory_status.available_memory
 
         if (
-            vllm_config.cache_config.kv_cache_memory_bytes is None
+            vllm_config.model_config.runner_type != "pooling"
+            and vllm_config.cache_config.kv_cache_memory_bytes is None
             and self.requested_cpu_memory > available_memory
         ):
             raise ValueError(
@@ -214,7 +215,16 @@ class CPUWorker(Worker):
 
         kv_cache_size = None
         msg = None
-        if explicit_kv_cache_size is not None:
+        if self.model_config.runner_type == "pooling":
+            # Encoder-only / pooling models (embeddings, rerankers, classifiers)
+            # do not perform autoregressive generation and do not require a KV cache.
+            kv_cache_size = 0
+            msg = (
+                "Encoder-only / pooling model detected; "
+                f"KV cache size set to 0 GiB on node {cpu_core.numa_node}."
+            )
+            logger.info(msg)
+        elif explicit_kv_cache_size is not None:
             if explicit_kv_cache_size > available_memory:
                 raise ValueError(
                     f"Available memory on node {cpu_core.numa_node} "
@@ -231,6 +241,7 @@ class CPUWorker(Worker):
                 f"{format_gib(memory_status.total_memory)}) GiB for KV cache "
                 f"on node {cpu_core.numa_node}."
             )
+            logger.debug(msg)
         else:
             consumed_memory = psutil.Process(os.getpid()).memory_info().rss
             requested_memory_for_kv = int(self.requested_cpu_memory - consumed_memory)
@@ -258,6 +269,14 @@ class CPUWorker(Worker):
             )
 
         logger.info(msg)
+        # Emit a detailed debug log for later nmon analysis
+        logger.debug(
+            "KV cache size=%s GiB, available_memory=%s GiB, "
+            "requested_cpu_memory=%s GiB",
+            format_gib(kv_cache_size),
+            format_gib(available_memory),
+            format_gib(self.requested_cpu_memory),
+        )
 
         return kv_cache_size
 
