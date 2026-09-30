@@ -112,34 +112,12 @@ def _partition_hisparse_specs(
     return source_specs, indexer_specs
 
 
-def get_hisparse_pool_bytes_per_block(
-    vllm_config: VllmConfig, kv_cache_groups: list[KVCacheGroupSpec]
-) -> int:
-    """The bytes per block `get_hisparse_kv_cache_config` divides available
-    memory by to size the GPU pool for these groups."""
-    from vllm.v1.core.kv_cache_utils import _get_kv_cache_bytes_per_block
-
-    _, device_groups = _create_hisparse_groups(vllm_config, kv_cache_groups)
-    return _get_kv_cache_bytes_per_block(device_groups)
-
-
-def get_hisparse_gpu_memory_usage(
-    vllm_config: VllmConfig,
-    kv_cache_groups: list[KVCacheGroupSpec],
-) -> int:
-    """GPU pool bytes one request at max_model_len draws: every device group
-    (indexer, resident and hot) takes its own blocks from the shared pool."""
-    from vllm.v1.core.kv_cache_utils import _get_kv_cache_bytes_per_block
-
-    _, device_groups = _create_hisparse_groups(vllm_config, kv_cache_groups)
-    num_blocks = sum(
-        cdiv(
-            group.kv_cache_spec.max_memory_usage_bytes(vllm_config),
-            group.kv_cache_spec.page_size_bytes,
-        )
-        for group in device_groups
-    )
-    return num_blocks * _get_kv_cache_bytes_per_block(device_groups)
+def get_hisparse_gpu_groups(
+    vllm_config: VllmConfig, groups: list[KVCacheGroupSpec]
+) -> list[KVCacheGroupSpec]:
+    """The GPU groups HiSparse lays these groups out as, sharing one pool."""
+    _, gpu_groups = _create_hisparse_groups(vllm_config, groups)
+    return gpu_groups
 
 
 def _create_hisparse_groups(

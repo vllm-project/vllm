@@ -21,11 +21,10 @@ from vllm.utils.math_utils import cdiv, round_up
 from vllm.utils.mem_utils import format_gib
 from vllm.utils.torch_utils import get_dtype_size
 from vllm.v1.hisparse.layout import (
-    get_hisparse_gpu_memory_usage,
+    get_hisparse_gpu_groups,
     get_hisparse_host_pool_bytes,
     get_hisparse_kv_cache_config,
     get_hisparse_kv_cache_groups,
-    get_hisparse_pool_bytes_per_block,
 )
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
@@ -1159,10 +1158,10 @@ def _allocated_bytes_per_block(
     vllm_config: VllmConfig, kv_cache_groups: list[KVCacheGroupSpec]
 ) -> int:
     """The bytes per block `get_kv_cache_config_from_groups` allocates for these
-    groups. HiSparse lays them out as its own GPU groups first, so it divides by
-    their block size instead of `_pool_bytes_per_block`."""
+    groups. HiSparse lays them out as its own GPU groups and sizes its pool from
+    those."""
     if vllm_config.attention_config.hisparse_config is not None:
-        return get_hisparse_pool_bytes_per_block(vllm_config, kv_cache_groups)
+        kv_cache_groups = get_hisparse_gpu_groups(vllm_config, kv_cache_groups)
     return _pool_bytes_per_block(kv_cache_groups)
 
 
@@ -2512,7 +2511,7 @@ def _max_memory_usage_bytes_from_groups(
         return 0
 
     if vllm_config.attention_config.hisparse_config is not None:
-        return get_hisparse_gpu_memory_usage(vllm_config, kv_cache_groups)
+        kv_cache_groups = get_hisparse_gpu_groups(vllm_config, kv_cache_groups)
 
     if (glm5_layout := _glm5_next_tensor_layout(kv_cache_groups)) is not None:
         (
