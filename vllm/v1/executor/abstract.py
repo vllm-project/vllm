@@ -345,7 +345,18 @@ class Executor(ABC):
     def is_sleeping(self) -> bool:
         return bool(self.sleeping_tags)
 
+    @property
+    def all_resources_resident(self) -> bool:
+        return (
+            self.sleep_resource_states["weights"] == "resident"
+            and self.sleep_resource_states["kv_cache"] == "resident"
+        )
+
     def sleep(self, level: int = 1):
+        if self.sleeping_tags and self.sleeping_tags != SLEEP_TAGS:
+            raise RuntimeError(
+                "Cannot sleep while executor resources are partially awake"
+            )
         if "weights" in self.sleeping_tags:
             logger.warning("Executor is already sleeping.")
             return

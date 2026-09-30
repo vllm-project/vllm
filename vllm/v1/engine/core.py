@@ -919,10 +919,12 @@ class EngineCore:
         self._publish_sleep_state()
 
     def get_sleep_state(self) -> dict[str, Any]:
-        return dict(
-            scheduler_paused=self.is_scheduler_paused(),
-            **self.model_executor.sleep_resource_states,
-        )
+        resources = self.model_executor.sleep_resource_states
+        return {
+            "scheduler_paused": self.is_scheduler_paused(),
+            "weights": resources["weights"],
+            "kv_cache": resources["kv_cache"],
+        }
 
     def _publish_sleep_state(self) -> None:
         # In-process callers read the snapshot directly.
@@ -999,7 +1001,7 @@ class EngineCore:
 
         # Partial wakes intentionally keep the remaining allocations asleep.
         # Resume scheduling only once all executor memory is resident again.
-        fully_awake = not self.model_executor.is_sleeping
+        fully_awake = self.model_executor.all_resources_resident
         if fully_awake:
             self.resume_scheduler()
         return fully_awake
@@ -1017,7 +1019,7 @@ class EngineCore:
             raise RuntimeError(
                 "release_kv_cache_memory() requires a completed pause first"
             )
-        if self.model_executor.is_sleeping:
+        if not self.model_executor.all_resources_resident:
             raise RuntimeError(
                 "release_kv_cache_memory() requires all executor memory to be resident"
             )
@@ -1630,8 +1632,13 @@ class EngineCoreProc(EngineCore):
     def _publish_sleep_state(self) -> None:
         if not getattr(self, "log_stats", False):
             return
+        snapshot = self.get_sleep_state()
         stats = SchedulerStats(
-            sleep_state=EngineSleepState(**self.get_sleep_state()),
+            sleep_state=EngineSleepState(
+                scheduler_paused=snapshot["scheduler_paused"],
+                weights=snapshot["weights"],
+                kv_cache=snapshot["kv_cache"],
+            ),
             sleep_state_only=True,
         )
         # All frontends see each engine's snapshot, including while idle.

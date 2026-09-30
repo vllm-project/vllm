@@ -126,6 +126,7 @@ class LLMEngine:
                 aggregate_engine_logging=aggregate_engine_logging,
             )
             self.logger_manager.log_engine_initialized()
+            self._record_sleep_snapshot()
 
         if not multiprocess_mode:
             # for v0 compatibility
@@ -398,17 +399,21 @@ class LLMEngine:
     def _record_sleep_snapshot(self) -> None:
         from vllm.v1.metrics.stats import EngineSleepState
 
+        if self.logger_manager is None:
+            return
         try:
-            state = EngineSleepState(**self.engine_core.get_sleep_state())
+            snapshot = self.engine_core.get_sleep_state()
+            state = EngineSleepState(
+                scheduler_paused=snapshot["scheduler_paused"],
+                weights=snapshot["weights"],
+                kv_cache=snapshot["kv_cache"],
+            )
         except Exception:
             logger.warning(
                 "Unable to refresh engine sleep-state metrics", exc_info=True
             )
             return
-        self.logger_manager.record_sleep_snapshot(
-            state,
-            self.vllm_config.parallel_config.data_parallel_index,
-        )
+        self.logger_manager.record_sleep_snapshot(state, 0)
 
     def is_sleeping(self) -> bool:
         return self.engine_core.is_sleeping()

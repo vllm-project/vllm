@@ -29,7 +29,11 @@ A failed collective memory RPC may leave workers in different states. Its
 potentially affected resources become `unknown`, rather than claiming a
 successful offload, release, or wake. State changes only after executor operations;
 invalid or redundant wake requests do not invent residency changes. Scheduler
-state is read from the actual scheduler pause state.
+state is read from the actual scheduler pause state. A wake after a failed sleep
+RPC does not resume scheduling while either resource remains `unknown`; the wake
+API returns `false` and `engine_fully_awake` remains zero. A new sleep request
+while only some resources are awake is rejected until that partial transition
+has a defined executor contract.
 
 | Operation | Scheduler | Weights | KV cache |
 | --- | --- | --- | --- |
@@ -57,7 +61,8 @@ migration. `awake` follows the new fully-awake predicate; `weights_offloaded`
 follows the confirmed weight disposition; `discard_all` is set only while
 weights are discarded and KV cache is released. All three may be zero for a
 scheduler pause, partial wake, KV-only release, or unknown resources, so these
-legacy flags are not a complete state model. Partial weight wake clears the
+legacy flags are not a complete state model. In particular, `unknown` never
+counts as awake or as a confirmed offload. Partial weight wake clears the
 stale `weights_offloaded` flag immediately. New dashboards should use the
 resource dimensions and `engine_fully_awake`. Rust does not add the deprecated
 three-state metric.

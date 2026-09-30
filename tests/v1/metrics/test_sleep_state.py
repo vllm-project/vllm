@@ -3,13 +3,14 @@
 
 from queue import Queue
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 import msgspec
 import pytest
 from prometheus_client import CollectorRegistry, Gauge, generate_latest
 
-from vllm.v1.engine.core import EngineCoreProc
+from vllm.v1.engine.core import EngineCore, EngineCoreProc
+from vllm.v1.engine.llm_engine import LLMEngine
 from vllm.v1.executor.abstract import Executor
 from vllm.v1.metrics.loggers import PrometheusStatLogger, StatLoggerManager
 from vllm.v1.metrics.stats import EngineSleepState, SchedulerStats
@@ -22,6 +23,7 @@ class FakeExecutor:
     wake_up = Executor.wake_up
     discard = Executor.discard
     is_sleeping = Executor.is_sleeping
+    all_resources_resident = Executor.all_resources_resident
 
     def __init__(self):
         self.sleeping_tags = set()
@@ -37,6 +39,7 @@ def test_resource_transitions_and_noop_wake():
         "kv_cache": "released",
     }
     executor.wake_up(["weights"])
+    assert not executor.all_resources_resident
     assert executor.sleep_resource_states == {
         "weights": "resident",
         "kv_cache": "released",
@@ -45,6 +48,7 @@ def test_resource_transitions_and_noop_wake():
     assert executor.sleep_resource_states["kv_cache"] == "released"
     executor.wake_up(["kv_cache"])
     assert not executor.is_sleeping
+    assert executor.all_resources_resident
     executor.discard(("kv_cache",))
     assert executor.sleep_resource_states == {
         "weights": "resident",
@@ -53,6 +57,47 @@ def test_resource_transitions_and_noop_wake():
     executor.wake_up()
     executor.sleep(2)
     assert executor.sleep_resource_states["weights"] == "discarded"
+
+
+def test_partial_wake_then_sleep_is_rejected():
+    executor = FakeExecutor()
+    executor.sleep(1)
+    executor.wake_up(["weights"])
+    with pytest.raises(RuntimeError, match="partially awake"):
+        executor.sleep(1)
+    assert executor.collective_rpc.call_count == 2
+    assert executor.sleep_resource_states == {
+        "weights": "resident",
+        "kv_cache": "released",
+    }
+
+
+def test_failed_sleep_then_wake_keeps_scheduler_paused_and_metric_zero():
+    executor = FakeExecutor()
+    executor.collective_rpc.side_effect = RuntimeError("worker failed")
+    engine = object.__new__(EngineCore)
+    engine.model_executor = executor
+    engine.pause_scheduler = Mock(return_value=None)
+    engine.resume_scheduler = Mock()
+    engine.is_scheduler_paused = Mock(return_value=True)
+
+    with pytest.raises(RuntimeError, match="worker failed"):
+        engine.sleep(1)
+    assert not executor.all_resources_resident
+    assert engine.wake_up() is False
+    engine.resume_scheduler.assert_not_called()
+
+    logger, registry = make_logger()
+    state = engine.get_sleep_state()
+    logger.record_sleep_snapshot(
+        EngineSleepState(
+            scheduler_paused=state["scheduler_paused"],
+            weights=state["weights"],
+            kv_cache=state["kv_cache"],
+        ),
+        0,
+    )
+    assert registry.get_sample_value("vllm:engine_fully_awake", {"engine": "0"}) == 0
 
 
 @pytest.mark.parametrize("operation", ["sleep", "wake", "discard"])
@@ -124,6 +169,59 @@ def test_partial_wake_scrape_clears_stale_flags_and_isolates_dp_engine():
     assert b'resource="weights",state="resident"} 1.0' in generate_latest(registry)
 
 
+def test_sync_snapshot_uses_local_engine_index_with_nonzero_dp_index():
+    logger, registry = make_logger()
+    engine = object.__new__(LLMEngine)
+    engine.vllm_config = SimpleNamespace(
+        parallel_config=SimpleNamespace(data_parallel_index=3)
+    )
+    engine.engine_core = SimpleNamespace(
+        get_sleep_state=lambda: {
+            "scheduler_paused": False,
+            "weights": "resident",
+            "kv_cache": "resident",
+        }
+    )
+    engine.logger_manager = SimpleNamespace(
+        record_sleep_snapshot=logger.record_sleep_snapshot
+    )
+    engine._record_sleep_snapshot()
+    assert registry.get_sample_value("vllm:engine_fully_awake", {"engine": "0"}) == 1
+
+
+def test_sync_logger_records_initial_snapshot():
+    config = SimpleNamespace(
+        logging_config=None,
+        model_config=Mock(),
+        observability_config=SimpleNamespace(otlp_traces_endpoint=None),
+        parallel_config=SimpleNamespace(
+            data_parallel_size=1, distributed_executor_backend="mp"
+        ),
+        scheduler_config=SimpleNamespace(stream_interval=1),
+    )
+    core_client = Mock()
+    core_client.get_sleep_state.return_value = {
+        "scheduler_paused": False,
+        "weights": "resident",
+        "kv_cache": "resident",
+    }
+    manager = Mock()
+    with (
+        patch("vllm.v1.engine.llm_engine.configure_logging_if_needed"),
+        patch("vllm.v1.engine.llm_engine.renderer_from_config"),
+        patch("vllm.v1.engine.llm_engine.InputProcessor"),
+        patch("vllm.v1.engine.llm_engine.OutputProcessor"),
+        patch(
+            "vllm.v1.engine.llm_engine.EngineCoreClient.make_client",
+            return_value=core_client,
+        ),
+        patch("vllm.v1.engine.llm_engine.StatLoggerManager", return_value=manager),
+        patch.object(LLMEngine, "reset_mm_cache"),
+    ):
+        LLMEngine(config, Mock(), log_stats=True, multiprocess_mode=True)
+    manager.record_sleep_snapshot.assert_called_once_with(EngineSleepState(), 0)
+
+
 @pytest.mark.parametrize(
     "state",
     [
@@ -173,6 +271,16 @@ def test_state_snapshot_does_not_reset_existing_metrics():
     )
     normal.record.assert_not_called()
     normal.record_sleep_snapshot.assert_called_once_with(EngineSleepState(True), 0)
+
+
+def test_identical_sleep_snapshots_are_not_recorded_twice():
+    manager = object.__new__(StatLoggerManager)
+    logger = Mock()
+    manager.stat_loggers = [logger]
+    manager.record_sleep_snapshot(EngineSleepState(), 0)
+    manager.record_sleep_snapshot(EngineSleepState(), 0)
+    manager.record_sleep_snapshot(EngineSleepState(), 1)
+    assert logger.record_sleep_snapshot.call_count == 2
 
 
 def test_new_series_absent_until_first_snapshot():

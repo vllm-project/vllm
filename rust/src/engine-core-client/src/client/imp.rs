@@ -434,12 +434,6 @@ pub(crate) async fn run_output_dispatcher_loop(
 
             match outputs {
                 EngineCoreOutputs::RequestBatch(batch) => {
-                    if let Some(stats) = batch.scheduler_stats.as_ref()
-                        && stats.sleep_state_only
-                    {
-                        inner.scheduler_stats_recorder.record(batch.engine_index, stats);
-                        continue;
-                    }
                     let has_outputs = !batch.outputs.is_empty();
                     let mut iteration_tokens = 0_u64;
                     let senders = inner.take_senders_for_outputs(&batch.outputs);

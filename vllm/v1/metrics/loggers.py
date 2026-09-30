@@ -1310,6 +1310,7 @@ class StatLoggerManager:
     ):
         self.engine_indexes = engine_idxs if engine_idxs else [0]
         self.stat_loggers: list[AggregateStatLoggerBase] = []
+        self._last_sleep_snapshots: dict[int, EngineSleepState] = {}
         stat_logger_factories: list[StatLoggerFactory] = []
         if custom_stat_loggers is not None:
             stat_logger_factories.extend(custom_stat_loggers)
@@ -1372,8 +1373,14 @@ class StatLoggerManager:
             )
 
     def record_sleep_snapshot(self, state: EngineSleepState, engine_idx: int):
+        snapshots = getattr(self, "_last_sleep_snapshots", None)
+        if snapshots is None:
+            snapshots = self._last_sleep_snapshots = {}
+        if snapshots.get(engine_idx) == state:
+            return
         for logger in self.stat_loggers:
             logger.record_sleep_snapshot(state, engine_idx)
+        snapshots[engine_idx] = state
 
     def record_sleep_state(self, sleep: int = 0, level: int = 0):
         for logger in self.stat_loggers:
