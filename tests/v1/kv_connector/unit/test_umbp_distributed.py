@@ -17,11 +17,14 @@ from vllm.distributed.kv_transfer.kv_connector.v1.umbp.connector import (
     UMBPStoreConnector,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.umbp.data import (
+    TRANSFER_NOT_ATTEMPTED,
+    BlockIdentityCodec,
     KVLayoutDescriptor,
     KVRegion,
     RankTopology,
     UMBPConnectorMetadata,
     UMBPConnectorWorkerMetadata,
+    UMBPNamespace,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.umbp.runtime import (
     DistributedRuntime,
@@ -31,8 +34,11 @@ from vllm.distributed.kv_transfer.kv_connector.v1.umbp.runtime import (
 from vllm.distributed.kv_transfer.kv_connector.v1.umbp.runtime import (
     distributed as distributed_runtime,
 )
+from vllm.distributed.kv_transfer.kv_connector.v1.umbp.scheduler import (
+    UMBPStoreConnectorScheduler,
+)
 
-from .test_umbp_shared import _kv_cache_config, _vllm_config
+from .test_umbp_shared import _kv_cache_config, _SchedulerHandle, _vllm_config
 
 MASTER = "10.0.0.1:15558"
 BASE_OPTIONS = {"master_address": MASTER, "peer_service_port": 17000}
@@ -518,6 +524,12 @@ def _crashed_producer_and_reader(**options):
     return scheduler_b, worker_b, hashes
 
 
+def _report_worker_output(scheduler, worker) -> None:
+    scheduler.update_connector_output(
+        SimpleNamespace(kv_connector_worker_meta=worker.build_connector_worker_meta())
+    )
+
+
 def test_objects_of_a_dead_node_fail_the_load_for_recompute(master):
     scheduler, worker, hashes = _crashed_producer_and_reader()
 
@@ -527,6 +539,88 @@ def test_objects_of_a_dead_node_fail_the_load_for_recompute(master):
     _load(scheduler, worker, request)
 
     assert worker.get_block_ids_with_load_errors() == {5, 6}
+
+
+def test_a_failed_load_is_not_retried_while_quarantined(master, monkeypatch):
+    from vllm.distributed.kv_transfer.kv_connector.v1.umbp import (
+        scheduler as scheduler_module,
+    )
+
+    now = [1000.0]
+    monkeypatch.setattr(scheduler_module.time, "monotonic", lambda: now[0])
+    scheduler, worker, hashes = _crashed_producer_and_reader(
+        load_failure_quarantine_ms=5000
+    )
+    request = _request("consumer", hashes)
+    assert scheduler.get_num_new_matched_tokens(request, 0) == (32, False)
+    _load(scheduler, worker, request)
+    _report_worker_output(scheduler, worker)
+
+    # The rescheduled request recomputes instead of loading the dead copy again.
+    assert scheduler.get_num_new_matched_tokens(request, 0) == (0, False)
+    now[0] += 6
+    assert scheduler.get_num_new_matched_tokens(request, 0) == (32, False)
+
+
+def test_quarantine_can_be_disabled(master):
+    scheduler, worker, hashes = _crashed_producer_and_reader(
+        load_failure_quarantine_ms=0
+    )
+    request = _request("consumer", hashes)
+    scheduler.get_num_new_matched_tokens(request, 0)
+    _load(scheduler, worker, request)
+    _report_worker_output(scheduler, worker)
+
+    assert scheduler.get_num_new_matched_tokens(request, 0) == (32, False)
+
+
+def test_a_refused_load_is_not_quarantined(master):
+    scheduler, worker, hashes = _crashed_producer_and_reader()
+    request = _request("consumer", hashes)
+    assert scheduler.get_num_new_matched_tokens(request, 0) == (32, False)
+    keys = scheduler.connector_scheduler._build_lookup_context(
+        request, 0, tuple(hashes)
+    ).keys
+    scheduler.update_connector_output(
+        SimpleNamespace(
+            kv_connector_worker_meta=UMBPConnectorWorkerMetadata(
+                failed_loads={key: f"{TRANSFER_NOT_ATTEMPTED}: blocked" for key in keys}
+            )
+        )
+    )
+
+    assert scheduler.get_num_new_matched_tokens(request, 0) == (32, False)
+
+
+def test_quarantine_is_off_by_default_outside_distributed_mode():
+    codec = BlockIdentityCodec(UMBPNamespace("local-quarantine"))
+    hashes = [b"local-a", b"local-b"]
+    scheduler = UMBPStoreConnectorScheduler(
+        _vllm_config({"mode": "embedded"}),
+        _kv_cache_config(),
+        _SchedulerHandle({codec.key(block_hash, 0): True for block_hash in hashes}),
+        codec,
+    )
+    request = _request("local", hashes)
+    scheduler.update_connector_output(
+        SimpleNamespace(
+            kv_connector_worker_meta=UMBPConnectorWorkerMetadata(
+                failed_loads={codec.key(hashes[0], 0): "load failed"}
+            )
+        )
+    )
+
+    assert scheduler.get_num_new_matched_tokens(request, 0) == (32, True)
+    scheduler.close()
+
+
+def test_config_rejects_a_negative_quarantine(master):
+    with pytest.raises(ValueError, match="load_failure_quarantine_ms"):
+        UMBPStoreConnector(
+            _distributed_config(load_failure_quarantine_ms=-1),
+            KVConnectorRole.SCHEDULER,
+            _kv_cache_config(),
+        )
 
 
 class _Gate:

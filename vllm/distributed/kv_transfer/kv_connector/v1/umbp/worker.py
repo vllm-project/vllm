@@ -221,6 +221,8 @@ class UMBPStoreConnectorWorker:
         if is_load:
             if not succeeded:
                 self._failed_recving.add(request_id)
+                for key in result.failed_keys:
+                    self._worker_meta.failed_loads[key] = result.error or "load failed"
             self._worker_meta.failed_block_ids.update(result.failed_block_ids)
         elif succeeded:
             if publish:

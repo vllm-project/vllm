@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from collections.abc import Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
@@ -40,6 +41,7 @@ from vllm.v1.outputs import KVConnectorOutput
 from vllm.v1.request import Request
 
 from .data import (
+    TRANSFER_NOT_ATTEMPTED,
     BlockIdentityCodec,
     BlockLoadBatch,
     BlockTransferPlan,
@@ -266,6 +268,20 @@ class UMBPStoreConnectorScheduler:
             max_workers=int(extra.get("lookup_workers", 2)),
             thread_name_prefix="umbp-lookup",
         )
+        # A distributed lookup keeps reporting objects of a node that died
+        # until the master expires it. Treating a failed object as a miss for
+        # a while stops a rescheduled request from retrying the same failing
+        # load every step. Local pools forget such objects at once.
+        quarantine_ms = extra.get(
+            "load_failure_quarantine_ms",
+            30000 if extra.get("mode") == "distributed" else 0,
+        )
+        if type(quarantine_ms) is not int or quarantine_ms < 0:
+            raise ValueError(
+                "load_failure_quarantine_ms must be a non-negative integer"
+            )
+        self._load_failure_quarantine_s = quarantine_ms / 1000
+        self._quarantined_keys: dict[str, float] = {}
         self._requests: dict[str, Request] = {}
         self._request_trackers: dict[str, RequestTracker] = {}
         self._next_generation = 0
@@ -381,6 +397,7 @@ class UMBPStoreConnectorScheduler:
                 request.request_id,
             )
             return 0, False
+        hits = self._drop_quarantined_hits(keys, hits)
         per_rank = self.topology.rank_count
         offset = 0
         logical_hits_by_group: dict[int, list[bool]] = {}
@@ -1207,10 +1224,30 @@ class UMBPStoreConnectorScheduler:
         self._pending_finished_stores[request.request_id] = plans
         return False
 
+    def _drop_quarantined_hits(self, keys: list[str], hits: list[bool]) -> list[bool]:
+        if not self._quarantined_keys:
+            return hits
+        now = time.monotonic()
+        self._quarantined_keys = {
+            key: until for key, until in self._quarantined_keys.items() if until > now
+        }
+        return [
+            hit and key not in self._quarantined_keys
+            for key, hit in zip(keys, hits, strict=True)
+        ]
+
     def update_connector_output(self, output: KVConnectorOutput) -> None:
         metadata = output.kv_connector_worker_meta
         if not isinstance(metadata, UMBPConnectorWorkerMetadata):
             return
+        # A later store of the same key does not lift the quarantine: a pool
+        # that still lists the dead copy reports that store as already done.
+        if self._load_failure_quarantine_s > 0 and metadata.failed_loads:
+            until = time.monotonic() + self._load_failure_quarantine_s
+            for key, error in metadata.failed_loads.items():
+                # A load that was never attempted says nothing about the object.
+                if not error.startswith(TRANSFER_NOT_ATTEMPTED):
+                    self._quarantined_keys[key] = until
         pool = self._gpu_block_pool
         for event_id, result in metadata.store_events.items():
             event = self._store_events.get(event_id)
@@ -1264,6 +1301,7 @@ class UMBPStoreConnectorScheduler:
         for pending in self._pending_lookups.values():
             pending.future.cancel()
         self._pending_lookups.clear()
+        self._quarantined_keys.clear()
         self._load_specs.clear()
         self._pending_loads.clear()
         return self.runtime.clear()

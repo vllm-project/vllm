@@ -750,6 +750,8 @@ class UMBPConnectorWorkerMetadata(KVConnectorWorkerMetadata):
 
     store_events: dict[int, StoreEventResult] = field(default_factory=dict)
     failed_block_ids: set[int] = field(default_factory=set)
+    # Rank-local keys of failed loads, with the runtime's error.
+    failed_loads: dict[str, str] = field(default_factory=dict)
 
     def aggregate(
         self, other: KVConnectorWorkerMetadata
@@ -759,4 +761,5 @@ class UMBPConnectorWorkerMetadata(KVConnectorWorkerMetadata):
         for event, result in other.store_events.items():
             self.store_events.setdefault(event, StoreEventResult()).merge(result)
         self.failed_block_ids.update(other.failed_block_ids)
+        self.failed_loads.update(other.failed_loads)
         return self

@@ -98,6 +98,7 @@ The same configuration can be used on every host.
 | `staging_buffer_size`, `backend_policy_path` | | Passed through to MORI. |
 | `lookup_timeout_ms` | `2000` | Longest a scheduler lookup waits for the master before reporting misses. |
 | `num_workers`, `timeout_ms` | `4`, `30000` | Transfer threads per worker, and how long a transfer may run before the worker treats the pool as stalled. |
+| `load_failure_quarantine_ms` | `30000` | How long an object that failed to load is treated as a miss. |
 | `load_async`, `lookup_async`, `lazy_offload`, `key_namespace` | | Shared connector options, as in embedded mode. |
 
 `dram_use_shared_memory`, `dram_shm_name`, and the `dram_*_watermark` options
@@ -129,7 +130,7 @@ with the default `fail` policy that request fails instead of recomputing.
 | Master hangs, or its host stops answering | MORI's lookup and routing calls have no deadline and block until the master answers. A lookup gives up after `lookup_timeout_ms` and reports misses; later lookups report misses at once until that call returns. A store that outlives `timeout_ms` stays pending with its source blocks pinned until MORI returns, and new loads and stores fail immediately meanwhile. Requests recompute. |
 | Master restarts at the same address | Live nodes re-register on their next heartbeat and resend their objects; hits resume without restarting engines, after gRPC's reconnect backoff. |
 | Engine stops cleanly | Its workers unregister; objects in their pools leave the index. Copies other nodes made remain. |
-| Engine crashes | Its objects stay indexed until the master expires the node. Loads of them fail meanwhile and those blocks recompute. |
+| Engine crashes | Its objects stay indexed until the master expires the node. The first load of each fails and recomputes; the object is then treated as a miss for `load_failure_quarantine_ms`, so requests do not retry it. |
 | Engine restarts | It joins at once under new identities and reads the rest of the pool. |
 | `POST /reset_prefix_cache?reset_external=true` | Reports failure and clears nothing: the pool is shared by every attached engine, and MORI has no cluster-wide clear. |
 
