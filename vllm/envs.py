@@ -2145,11 +2145,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_WEIGHT_OFFLOADING_DISABLE_UVA": lambda: bool(
         int(os.getenv("VLLM_WEIGHT_OFFLOADING_DISABLE_UVA", "0"))
     ),
-    # Return the pinned host memory that backed up the weights during
-    # level-1 sleep to the OS after wake_up, instead of leaving it cached
-    # in PyTorch's host allocator for the next sleep. Trades a slower next
-    # sleep for lower steady-state host memory, e.g. when several engines
-    # share one GPU and take turns sleeping.
+    # Return the cached pinned host memory to the OS after wake_up, instead
+    # of leaving it in PyTorch's host allocator for the next sleep. Trades a
+    # slower wake-up and a slower next sleep for lower steady-state host
+    # memory, for example when several engines share one GPU and take turns
+    # sleeping. Drains the whole host cache, not only the weight backup.
     "VLLM_SLEEP_MODE_RELEASE_HOST_MEMORY": lambda: bool(
         int(os.getenv("VLLM_SLEEP_MODE_RELEASE_HOST_MEMORY", "0"))
     ),
