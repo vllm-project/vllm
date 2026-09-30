@@ -1,6 +1,9 @@
 #include "libtorch_stable/torch_utils.h"
 
+#include <algorithm>
 #include <cmath>
+#include <limits>
+#include <type_traits>
 
 #include "libtorch_stable/core/math.hpp"
 #include "cuda_compat.h"
@@ -37,73 +40,94 @@ __device__ __forceinline__ T silu_kernel(const T& x) {
   return (T)(((float)x) / (1.0f + expf((float)-x)));
 }
 
-// Activation and gating kernel template.
+// Two saturated floats to two fp8 values. The packed cvt rounds each lane
+// exactly like the scalar cvt, so both paths produce the same bits.
+template <typename fp8_type>
+__device__ __forceinline__ void fp8x2_from_saturated(fp8_type* dst,
+                                                     float const a,
+                                                     float const b) {
+#if !defined(USE_ROCM) && defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800
+  if constexpr (std::is_same_v<fp8_type, c10::Float8_e4m3fn>) {
+    *reinterpret_cast<__nv_fp8x2_storage_t*>(dst) =
+        __nv_cvt_float2_to_fp8x2(make_float2(a, b), __NV_SATFINITE, __NV_E4M3);
+    return;
+  }
+#endif
+  dst[0] = fp8_from_saturated<fp8_type>(a);
+  dst[1] = fp8_from_saturated<fp8_type>(b);
+}
+
+// Activation, gating and static per-tensor fp8 quantization.
+//
+// One flat grid over every VEC-wide chunk of the output: each thread loads VEC
+// gate and VEC up elements, computes VEC activations in fp32 and stores VEC
+// fp8 values in one write. VEC == 1 is the fallback for rows that are not
+// 16-byte vectorizable.
+constexpr int kActQuantBlockSize = 256;
+constexpr int kActQuantVecSize = 16;
+constexpr int kActQuantMaxBlocksPerSm = 8;
+
 template <typename scalar_t, scalar_t (*ACT_FN)(const scalar_t&),
-          typename fp8_type>
-__global__ void act_and_mul_quant_kernel(
-    fp8_type* __restrict__ out,          // [..., d]
-    const scalar_t* __restrict__ input,  // [..., 2, d]
-    const float* scale, const int d) {
-  const int32_t blocks_per_token = gridDim.y;
+          typename fp8_type, int VEC>
+__global__ void __launch_bounds__(kActQuantBlockSize)
+    act_and_mul_quant_kernel(fp8_type* __restrict__ out,          // [..., d]
+                             const scalar_t* __restrict__ input,  // [..., 2, d]
+                             const float* scale, const uint32_t d,
+                             const uint32_t chunks_per_row,
+                             const uint32_t num_chunks) {
+  static_assert(VEC == 1 || (VEC * sizeof(scalar_t)) % sizeof(int4) == 0);
+  static_assert(VEC == 1 || (VEC * sizeof(fp8_type)) % sizeof(int4) == 0);
+  constexpr int kInLoads = VEC * sizeof(scalar_t) / sizeof(int4);
+  constexpr int kOutStores = VEC * sizeof(fp8_type) / sizeof(int4);
 
-  const int32_t elems_per_128bit_load = (128 / 8) / sizeof(scalar_t);
+  const float inverted_scale = 1 / *scale;
+  const int64_t stride = static_cast<int64_t>(gridDim.x) * blockDim.x;
 
-  // We don't expect the hidden dimension to exceed 32 bits so int32 should
-  // be safe here.
-  const int32_t tgt_elems_per_block = div_ceil(d, blocks_per_token);
-  const int32_t elems_per_block =
-      round_to_next_multiple_of(tgt_elems_per_block, elems_per_128bit_load);
-  const int32_t block_start = blockIdx.y * elems_per_block;
-  int32_t block_end = block_start + elems_per_block;
-  block_end = block_end > d ? d : block_end;
+  for (int64_t chunk =
+           static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+       chunk < num_chunks; chunk += stride) {
+    const uint32_t row = static_cast<uint32_t>(chunk) / chunks_per_row;
+    const uint32_t col =
+        (static_cast<uint32_t>(chunk) - row * chunks_per_row) * VEC;
+    const scalar_t* x_ptr = input + static_cast<int64_t>(row) * 2 * d + col;
+    const scalar_t* y_ptr = x_ptr + d;
+    fp8_type* out_ptr = out + static_cast<int64_t>(row) * d + col;
 
-  // token_idx is 64 bit to prevent 32 bit overflow when the number of tokens
-  // is very large
-  const int64_t token_idx = blockIdx.x;
-  const scalar_t* __restrict__ x_ptr = input + token_idx * 2 * d;
-  const scalar_t* __restrict__ y_ptr = input + token_idx * 2 * d + d;
-  fp8_type* __restrict__ out_ptr = out + token_idx * d;
-
-  // 128-bit vectorized code
-  const int32_t vec_loop_end =
-      round_to_previous_multiple_of(elems_per_128bit_load, block_end);
-  const int32_t vec_end_idx = vec_loop_end / elems_per_128bit_load;
-  const int32_t vec_start_idx = block_start / elems_per_128bit_load;
-
-  const int4* __restrict__ x_128bit_ptr = reinterpret_cast<const int4*>(x_ptr);
-  const int4* __restrict__ y_128bit_ptr = reinterpret_cast<const int4*>(y_ptr);
-  int2* __restrict__ out_128bit_ptr = reinterpret_cast<int2*>(out_ptr);
-
-  float inverted_scale = 1 / *scale;
+    alignas(sizeof(int4)) scalar_t x[VEC];
+    alignas(sizeof(int4)) scalar_t y[VEC];
+    if constexpr (VEC == 1) {
+      x[0] = VLLM_LDG(x_ptr);
+      y[0] = VLLM_LDG(y_ptr);
+    } else {
+      const int4* x_vec = reinterpret_cast<const int4*>(x_ptr);
+      const int4* y_vec = reinterpret_cast<const int4*>(y_ptr);
 #pragma unroll
-  for (int32_t vec_idx = vec_start_idx + threadIdx.x; vec_idx < vec_end_idx;
-       vec_idx += blockDim.x) {
-    const int4 x_128bit = VLLM_LDG(&x_128bit_ptr[vec_idx]);
-    const int4 y_128bit = VLLM_LDG(&y_128bit_ptr[vec_idx]);
-    using scalar_128bit_vec_t = std::array<scalar_t, elems_per_128bit_load>;
-    using scalar_64bit_vec_t = std::array<fp8_type, elems_per_128bit_load>;
-
-    scalar_64bit_vec_t out_vec;
-    const auto x_vec = reinterpret_cast<scalar_128bit_vec_t const&>(x_128bit);
-    const auto y_vec = reinterpret_cast<scalar_128bit_vec_t const&>(y_128bit);
-
-#pragma unroll
-    for (int i = 0; i < elems_per_128bit_load; i++) {
-      out_vec[i] = scaled_fp8_conversion<true, fp8_type>(
-          ACT_FN(x_vec[i]) * y_vec[i], inverted_scale);
+      for (int i = 0; i < kInLoads; i++) {
+        reinterpret_cast<int4*>(x)[i] = VLLM_LDG(&x_vec[i]);
+        reinterpret_cast<int4*>(y)[i] = VLLM_LDG(&y_vec[i]);
+      }
     }
 
-    out_128bit_ptr[vec_idx] = reinterpret_cast<const int2&>(out_vec);
-  }
+    float r[VEC];
+#pragma unroll
+    for (int i = 0; i < VEC; i++) {
+      r[i] = scaled_fp8_saturate<true, fp8_type>(ACT_FN(x[i]) * y[i],
+                                                 inverted_scale);
+    }
 
-  // Scalar cleanup code
-  if (block_end > vec_loop_end) {
-    for (int64_t idx = vec_loop_end + threadIdx.x; idx < block_end;
-         idx += blockDim.x) {
-      const scalar_t x = VLLM_LDG(&x_ptr[idx]);
-      const scalar_t y = VLLM_LDG(&y_ptr[idx]);
-      out_ptr[idx] =
-          scaled_fp8_conversion<true, fp8_type>(ACT_FN(x) * y, inverted_scale);
+    if constexpr (VEC == 1) {
+      out_ptr[0] = fp8_from_saturated<fp8_type>(r[0]);
+    } else {
+      alignas(sizeof(int4)) fp8_type o[VEC];
+#pragma unroll
+      for (int i = 0; i < VEC; i += 2) {
+        fp8x2_from_saturated<fp8_type>(&o[i], r[i], r[i + 1]);
+      }
+#pragma unroll
+      for (int i = 0; i < kOutStores; i++) {
+        reinterpret_cast<int4*>(out_ptr)[i] =
+            reinterpret_cast<const int4*>(o)[i];
+      }
     }
   }
 }
@@ -558,28 +582,39 @@ __global__ void silu_mul_fp8_quant_deep_gemm_kernel(
 
 }  // namespace vllm
 
-// Launch activation, gating, and quantize kernel.
-#define LAUNCH_ACTIVATION_GATE_KERNEL(KERNEL)                             \
-  int d = input.size(-1) / 2;                                             \
-  int64_t num_tokens = input.numel() / input.size(-1);                    \
-  dim3 grid(num_tokens, num_tokens > 16 ? num_tokens > 32 ? 1 : 2 : 4);   \
-  dim3 block(std::min(d, 512));                                           \
-  const torch::stable::accelerator::DeviceGuard device_guard(             \
-      input.get_device_index());                                          \
-  const cudaStream_t stream =                                             \
-      get_current_cuda_stream(input.get_device_index());                  \
-  VLLM_STABLE_DISPATCH_FLOATING_TYPES(                                    \
-      input.scalar_type(), "act_and_mul_kernel", [&] {                    \
-        VLLM_STABLE_DISPATCH_FP8_TYPES(                                   \
-            out.scalar_type(), "act_and_mul_quant_kernel_fp8_type", [&] { \
-              vllm::act_and_mul_quant_kernel<scalar_t, KERNEL<scalar_t>,  \
-                                             fp8_t>                       \
-                  <<<grid, block, 0, stream>>>(                           \
-                      out.mutable_data_ptr<fp8_t>(),                      \
-                      input.const_data_ptr<scalar_t>(),                   \
-                      scale.const_data_ptr<float>(), d);                  \
-            });                                                           \
-      });
+template <typename T>
+static bool ptr_int4_aligned(const T* ptr) {
+  return reinterpret_cast<uintptr_t>(ptr) % sizeof(int4) == 0;
+}
+
+// Grid: min(chunks / block, SMs * kActQuantMaxBlocksPerSm) blocks with a
+// stride loop. Chunk indices are 32-bit inside the kernel, so inputs with
+// more than 2^32 chunks are split into launches of whole rows.
+template <typename scalar_t, scalar_t (*ACT_FN)(const scalar_t&),
+          typename fp8_type, int VEC>
+static void launch_act_and_mul_quant(fp8_type* out, const scalar_t* input,
+                                     const float* scale, int64_t num_tokens,
+                                     int64_t d, cudaStream_t stream) {
+  const int64_t chunks_per_row = d / VEC;
+  const int64_t max_blocks =
+      static_cast<int64_t>(get_device_prop()->multiProcessorCount) *
+      vllm::kActQuantMaxBlocksPerSm;
+  const int64_t max_rows_per_launch =
+      static_cast<int64_t>(std::numeric_limits<uint32_t>::max()) /
+      chunks_per_row;
+  for (int64_t row = 0; row < num_tokens; row += max_rows_per_launch) {
+    const int64_t rows = std::min(max_rows_per_launch, num_tokens - row);
+    const int64_t num_chunks = rows * chunks_per_row;
+    const int64_t num_blocks = std::max<int64_t>(
+        1,
+        std::min(max_blocks, div_ceil(num_chunks, vllm::kActQuantBlockSize)));
+    vllm::act_and_mul_quant_kernel<scalar_t, ACT_FN, fp8_type, VEC>
+        <<<num_blocks, vllm::kActQuantBlockSize, 0, stream>>>(
+            out + row * d, input + row * 2 * d, scale, static_cast<uint32_t>(d),
+            static_cast<uint32_t>(chunks_per_row),
+            static_cast<uint32_t>(num_chunks));
+  }
+}
 
 void silu_and_mul_quant(torch::stable::Tensor& out,    // [..., d]
                         torch::stable::Tensor& input,  // [..., 2 * d]
@@ -592,7 +627,35 @@ void silu_and_mul_quant(torch::stable::Tensor& out,    // [..., d]
           input.scalar_type() == torch::headeronly::ScalarType::BFloat16,
       "Input must be FP16 or BF16");
   STD_TORCH_CHECK(input.size(-1) % 2 == 0);
-  LAUNCH_ACTIVATION_GATE_KERNEL(vllm::silu_kernel);
+  if (input.numel() == 0) {
+    return;
+  }
+  const int64_t d = input.size(-1) / 2;
+  const int64_t num_tokens = input.numel() / input.size(-1);
+  const torch::stable::accelerator::DeviceGuard device_guard(
+      input.get_device_index());
+  const cudaStream_t stream = get_current_cuda_stream(input.get_device_index());
+  VLLM_STABLE_DISPATCH_FLOATING_TYPES(
+      input.scalar_type(), "act_and_mul_quant_kernel", [&] {
+        VLLM_STABLE_DISPATCH_FP8_TYPES(
+            out.scalar_type(), "act_and_mul_quant_kernel_fp8_type", [&] {
+              const scalar_t* in_ptr = input.const_data_ptr<scalar_t>();
+              fp8_t* out_ptr = out.mutable_data_ptr<fp8_t>();
+              const float* scale_ptr = scale.const_data_ptr<float>();
+              const bool vectorized = d % vllm::kActQuantVecSize == 0 &&
+                                      ptr_int4_aligned(in_ptr) &&
+                                      ptr_int4_aligned(out_ptr);
+              if (vectorized) {
+                launch_act_and_mul_quant<scalar_t, vllm::silu_kernel<scalar_t>,
+                                         fp8_t, vllm::kActQuantVecSize>(
+                    out_ptr, in_ptr, scale_ptr, num_tokens, d, stream);
+              } else {
+                launch_act_and_mul_quant<scalar_t, vllm::silu_kernel<scalar_t>,
+                                         fp8_t, 1>(out_ptr, in_ptr, scale_ptr,
+                                                   num_tokens, d, stream);
+              }
+            });
+      });
 }
 
 void persistent_masked_m_silu_mul_quant(
