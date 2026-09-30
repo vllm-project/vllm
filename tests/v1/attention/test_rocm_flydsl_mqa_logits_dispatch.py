@@ -18,15 +18,16 @@ from vllm.v1.attention.ops import rocm_aiter_mla_sparse as sparse_mod
 
 
 @pytest.mark.parametrize(
-    "on_gfx942,on_gfx950,flag,expected",
+    "on_gfx942,on_gfx950,aiter_enabled,expected",
     [
-        (True, False, False, "flydsl"),
+        (True, False, True, "flydsl"),
         (False, True, True, "flydsl"),
-        (False, True, False, "triton"),
+        (False, False, True, "triton"),
+        (False, True, False, "torch"),
     ],
 )
 def test_rocm_fp8_mqa_logits_dispatch(
-    monkeypatch, on_gfx942, on_gfx950, flag, expected
+    monkeypatch, on_gfx942, on_gfx950, aiter_enabled, expected
 ):
     called = []
     out = torch.empty((1, 1))
@@ -39,10 +40,14 @@ def test_rocm_fp8_mqa_logits_dispatch(
         called.append("triton")
         return out
 
+    def fake_torch(*args, **kwargs):
+        called.append("torch")
+        return out
+
     monkeypatch.setattr(sparse_mod, "_ON_GFX942", on_gfx942)
     monkeypatch.setattr(sparse_mod, "_ON_GFX950", on_gfx950)
-    monkeypatch.setenv("VLLM_ROCM_USE_AITER_FLYDSL_MQA_LOGITS", "1" if flag else "0")
-    monkeypatch.setattr(rocm_aiter_ops, "is_enabled", lambda: True)
+    monkeypatch.setattr(rocm_aiter_ops, "is_enabled", lambda: aiter_enabled)
+    monkeypatch.setattr(rocm_aiter_ops, "is_rdna_aiter_enabled", lambda: False)
     monkeypatch.setitem(
         sys.modules,
         "aiter.ops.flydsl",
@@ -53,6 +58,7 @@ def test_rocm_fp8_mqa_logits_dispatch(
         "mqa_logits_module",
         lambda: SimpleNamespace(fp8_mqa_logits=fake_triton),
     )
+    monkeypatch.setattr(sparse_mod, "fp8_mqa_logits_torch", fake_torch)
 
     result = sparse_mod.rocm_fp8_mqa_logits(
         torch.empty((1, 1, 1)),
