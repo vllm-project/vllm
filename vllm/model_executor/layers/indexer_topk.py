@@ -339,6 +339,17 @@ class SparseIndexerTopk(torch.nn.Module):
                 f"requires fp32 logits with stride(1) == 1, got "
                 f"dtype={logits.dtype}, stride={logits.stride()}"
             )
+        # float4 row loads: the row pitch must be a multiple of 4 elements and
+        # the base 16-byte aligned; rows may not overlap (an expand view).
+        num_rows, width = logits.shape
+        row_pitch = logits.stride(0) if num_rows > 1 else width
+        if row_pitch % 4 != 0 or (num_rows > 1 and row_pitch < width):
+            failures.append(
+                f"logits row stride must be a multiple of 4 and at least the "
+                f"row width, got stride(0)={row_pitch}, width={width}"
+            )
+        if logits.data_ptr() % 16 != 0:
+            failures.append("logits base pointer must be 16-byte aligned")
         return failures
 
     def _cooperative_constraints(

@@ -1911,6 +1911,14 @@ def test_sparse_indexer_topk_backend_resolution() -> None:
             resolve("flashinfer_gvr2", k=3000)
         with pytest.raises(RuntimeError, match="fp32"):
             resolve("flashinfer_gvr2", logits.to(torch.bfloat16))
+        # Row pitch not a multiple of 4 (float4 loads): refused explicitly,
+        # and "auto" never picks gvr_2 for it.
+        odd_pitch = torch.randn(64, 131074, dtype=torch.float32, device="cuda")[
+            :, :131072
+        ]
+        with pytest.raises(RuntimeError, match="multiple of 4"):
+            resolve("flashinfer_gvr2", odd_pitch)
+        assert resolve("auto", odd_pitch) != "flashinfer_gvr2"
         logits = logits[:, :16384]
         unaligned_logits = unaligned_logits[:, :16384]
     else:
