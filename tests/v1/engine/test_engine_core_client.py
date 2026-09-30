@@ -389,6 +389,28 @@ def test_dplb_finished_requests_release_inflight():
     assert req.request_id not in client.reqs_in_flight
 
 
+def test_dplb_abort_without_route_reaches_every_engine():
+    """A paused rejection retires a streaming session's route, but its input task
+    may already have re-sent a chunk under that id; the abort must still land."""
+    client = _make_dplb_client(num_engines=2)
+    client.resources = SimpleNamespace(engine_dead=False)
+    routed = make_request(SamplingParams(max_tokens=1))
+    engine = client.get_core_engine_for_request(routed)
+    sent = []
+
+    async def record(req_ids, eng):
+        sent.append((tuple(req_ids), eng))
+
+    client._abort_requests = record
+    asyncio.run(client.abort_requests_async([routed.request_id]))
+    asyncio.run(client.abort_requests_async(["retired"]))
+
+    assert sent == [
+        ((routed.request_id,), engine),
+        *((("retired",), eng) for eng in client.core_engines),
+    ]
+
+
 @pytest.mark.parametrize(
     ("effective_size", "other_size"),
     [(None, None), (4224, 4224), (4224, 1056), (4224, None)],
