@@ -57,6 +57,7 @@ def _make_runner(
     runner.decode_query_len = decode_query_len
     runner.adaptive_verification = None
     runner.pcp_manager = None
+    runner.use_pp = False
     runner.req_states = SimpleNamespace(
         req_id_to_index={req_id: i for i, req_id in enumerate(req_states)},
         # The runner keeps this as min(num_computed_tokens, prefill_len).
