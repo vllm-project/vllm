@@ -91,9 +91,11 @@ def compute_sub_block_ptrs(
     output[:] = flat[skip_count : skip_count + num_sub_blocks]
 
 
-def _build_run_plans(ref: CanonicalKVCacheRef) -> tuple[CopyRun, ...]:
+def _build_run_plans(
+    ref: CanonicalKVCacheRef, canonical_layout: bool = True
+) -> tuple[CopyRun, ...]:
     """Build structured copy runs for one data ref."""
-    mapping = ref.mapping
+    mapping = ref.mapping if canonical_layout else None
     if mapping is None:
         page_size = ref.page_size_bytes
         return (CopyRun(0, 0, page_size, 1, page_size, page_size),)
@@ -246,6 +248,7 @@ class SingleDirectionOffloadingHandler:
             cpu_tensors if gpu_to_cpu else gpu_tensors
         )
         self.gpu_to_cpu: bool = gpu_to_cpu
+        self._canonical_layout = canonical_layout
         self.layer_refs_per_group = layer_refs_per_group
 
         # GPU blocks may be smaller
@@ -256,7 +259,7 @@ class SingleDirectionOffloadingHandler:
         # Keep canonical runs structured until the backend consumes them.
         # Non-canonical refs use one whole-page run per layer.
         self._copy_runs: list[list[tuple[CopyRun, ...]]] = [
-            [_build_run_plans(ref) for ref in layer_refs]
+            [_build_run_plans(ref, canonical_layout) for ref in layer_refs]
             for layer_refs in layer_refs_per_group
         ]
         self._backend = CopyBackendAdapter(
@@ -318,7 +321,7 @@ class SingleDirectionOffloadingHandler:
                 skip_count=dst_skip_count,
             )
 
-            mapping = data_ref.mapping
+            mapping = data_ref.mapping if self._canonical_layout else None
             if self.gpu_to_cpu and mapping is not None and mapping.num_writers > 1:
                 block_bases_src, block_bases_dst = self._filter_writer_blocks(
                     block_bases_src,
