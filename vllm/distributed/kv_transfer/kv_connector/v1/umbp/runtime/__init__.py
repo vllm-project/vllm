@@ -9,8 +9,10 @@ from .base import (
 )
 from .embedded import EmbeddedRuntime
 from .factory import UMBPRuntimeConfig, UMBPRuntimeFactory
+from .standalone import StandaloneRuntime
 
 UMBPRuntimeFactory.register("embedded", EmbeddedRuntime.from_config)
+UMBPRuntimeFactory.register("standalone", StandaloneRuntime.from_config)
 
 __all__ = [
     "IUMBPRuntime",
@@ -20,4 +22,5 @@ __all__ = [
     "UMBPRuntimeConfig",
     "UMBPRuntimeFactory",
     "EmbeddedRuntime",
+    "StandaloneRuntime",
 ]

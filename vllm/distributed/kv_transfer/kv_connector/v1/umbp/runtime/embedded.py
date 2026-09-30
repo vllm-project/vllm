@@ -311,12 +311,14 @@ class _MoriWorkerHandle(UMBPWorkerHandle):
         timeout_s: float,
         layout: KVLayoutDescriptor | None = None,
         lookup_instance: str = "",
+        serve_lookups: bool = True,
     ) -> None:
         self.client = client
         self._namespace = namespace
         self._topology = topology
         self._lookup_dir = lookup_dir
         self._lookup_instance = lookup_instance
+        self._serve_lookups = serve_lookups
         self._lookup_server: _MoriLookupServer | None = None
         self._registered_storages: set[int] = set()
         self._gpu_devices: set[int] = set()
@@ -363,7 +365,7 @@ class _MoriWorkerHandle(UMBPWorkerHandle):
                 self._gpu_devices.add(device)
 
         self._register_load_layouts(kv_caches)
-        if self._lookup_server is None:
+        if self._serve_lookups and self._lookup_server is None:
             self._lookup_server = _MoriLookupServer(
                 _lookup_socket_path(
                     self._namespace,
