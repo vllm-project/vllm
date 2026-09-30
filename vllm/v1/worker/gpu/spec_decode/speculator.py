@@ -58,6 +58,8 @@ def _target_feeds_hc_residual(vllm_config: VllmConfig) -> bool:
 
 class BaseSpeculator(ABC):
     num_query_per_req: int = 1
+    # Extra query slots reserved per request outside the regular queries.
+    num_extra_query_per_req: int = 0
 
     @abstractmethod
     def init_cudagraph_manager(self, cudagraph_mode: CUDAGraphMode) -> None:
@@ -138,6 +140,7 @@ class DraftModelSpeculator(BaseSpeculator):
         # DP configuration
         self.dp_size = vllm_config.parallel_config.data_parallel_size
         self.dp_rank = vllm_config.parallel_config.data_parallel_rank
+        self.dcp_size = vllm_config.parallel_config.decode_context_parallel_size
 
         self.eplb_state: EplbState | None = None
 
@@ -301,6 +304,7 @@ class DraftModelSpeculator(BaseSpeculator):
         step: int,
         causal: bool | Mapping[int, bool] = True,
         dcp_local_seq_lens: torch.Tensor | None = None,
+        slot_mappings: torch.Tensor | None = None,
     ) -> dict[str, Any] | None:
         num_reqs_padded = batch_desc.num_reqs or num_reqs
         # A FULL graph replays a captured shape whose padded requests each hold
@@ -322,7 +326,8 @@ class DraftModelSpeculator(BaseSpeculator):
         block_tables = [
             x[:num_reqs_padded] for x in self.block_tables.input_block_tables
         ]
-        slot_mappings = self.block_tables.slot_mappings[:, :num_tokens]
+        if slot_mappings is None:
+            slot_mappings = self.block_tables.slot_mappings[:, :num_tokens]
         draft_seq_lens_cpu_upper_bound = torch.zeros(
             num_reqs_padded, dtype=torch.int32, device="cpu"
         )
@@ -332,14 +337,14 @@ class DraftModelSpeculator(BaseSpeculator):
             out=draft_seq_lens_cpu_upper_bound[:num_reqs],
         )
         draft_seq_lens_cpu_upper_bound[:num_reqs].clamp_(max=self.max_model_len)
-        if dcp_local_seq_lens is None and self.block_tables.cp_size > 1:
+        if dcp_local_seq_lens is None and self.dcp_size > 1:
             # Draft steps advance and rewind their own global sequence lengths,
             # so the target model's DCP-local lengths may already be stale.
             dcp_local_seq_lens = prepare_dcp_local_seq_lens(
                 self.input_buffers.dcp_local_seq_lens,
                 self.input_buffers.seq_lens,
                 num_reqs,
-                self.block_tables.cp_size,
+                self.dcp_size,
                 self.block_tables.cp_rank,
                 self.block_tables.cp_interleave,
             )

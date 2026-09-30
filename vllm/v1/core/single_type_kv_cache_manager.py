@@ -106,11 +106,9 @@ class SingleTypeKVCacheManager(ABC):
         # managers have been validated by the coordinator.
         self.cache_hit_alignment_tokens = scheduler_block_size
         # The block size for this manager; used for actual block allocation.
-        self.block_size = kv_cache_spec.block_size
-        self.dcp_world_size = dcp_world_size
-        self.pcp_world_size = pcp_world_size
-        if dcp_world_size > 1:
-            self.block_size *= dcp_world_size
+        self.dcp_world_size = dcp_world_size if kv_cache_spec.dcp_sharded else 1
+        self.pcp_world_size = pcp_world_size if kv_cache_spec.dcp_sharded else 1
+        self.block_size = kv_cache_spec.block_size * self.dcp_world_size
         self.kv_cache_spec = kv_cache_spec
         self.block_pool = block_pool
         self.enable_caching = enable_caching
@@ -1455,10 +1453,6 @@ class MambaManager(SingleTypeKVCacheManager):
         self, kv_cache_spec: MambaSpec, block_pool: BlockPool, **kwargs
     ) -> None:
         super().__init__(kv_cache_spec, block_pool, **kwargs)
-        # Mamba layers use TP instead of DCP, so each rank holds the full
-        # recurrent state. Undo the DCP/PCP block_size scaling that the base
-        # class applies for attention groups whose KV cache is partitioned.
-        self.block_size = kv_cache_spec.block_size
         self.mamba_cache_mode = kv_cache_spec.mamba_cache_mode
         self.num_speculative_blocks: int = kv_cache_spec.num_speculative_blocks
         self.has_prefill_checkpoint_blocks = (
@@ -2048,9 +2042,21 @@ class MambaManager(SingleTypeKVCacheManager):
             blocks = self.req_to_blocks[request.request_id]
             assert 0 <= checkpoint_idx < len(blocks)
             checkpoint_block = blocks[checkpoint_idx]
+            # The prompt's final chunk caches only up to its last full block,
+            # so ``num_tokens < num_prompt_tokens`` holds there too; its
+            # checkpoint is the prompt's reusable boundary, not a transient one.
+            is_prompt_checkpoint = (
+                checkpoint_position
+                == get_mamba_prefill_checkpoint_position(
+                    request.num_prompt_tokens,
+                    hash_block_size,
+                    self.drop_eagle_checkpoint_block,
+                )
+            )
             if (
                 retention_interval == 0
                 and num_tokens < request.num_prompt_tokens
+                and not is_prompt_checkpoint
                 and checkpoint_position != request.shared_prefix_boundary
             ):
                 # retention_interval == 0 keeps this transient checkpoint
@@ -2217,8 +2223,8 @@ class SinkFullAttentionManager(FullAttentionManager):
 class HiSparseSourceManager(FullAttentionManager):
     """Host-tier manager with a private pool; publishes hashes once durable.
 
-    Host capacity is best effort: a page that cannot get a host block keeps a
-    null host entry, so its GPU copy is never written back and stays pinned.
+    Every page gets a host block: allocation fails when the host pool cannot
+    back it, so each GPU-resident page can be written back and later reclaimed.
     """
 
     coordinator: "HiSparseCoordinator | None" = None
@@ -2267,44 +2273,21 @@ class HiSparseSourceManager(FullAttentionManager):
         num_tokens_main_model: int,
         apply_admission_cap: bool = False,
     ) -> int:
-        if (
-            total_computed_tokens > num_local_computed_tokens
-            or self._has_partial_local_hit(
-                new_computed_blocks, num_local_computed_tokens
-            )
-        ):
-            # External loads need real destinations; future GPU-computed pages
-            # remain best effort. Use the same admission sentinel as Mamba.
-            required = super().get_num_blocks_to_allocate(
-                request_id,
-                total_computed_tokens,
-                new_computed_blocks,
-                total_computed_tokens,
-                num_local_computed_tokens,
-                total_computed_tokens,
-            )
-            if required > self.block_pool.get_num_free_blocks():
-                assert self.coordinator is not None
-                assert self.coordinator.gpu_pool is not None
-                return self.coordinator.gpu_pool.num_gpu_blocks + 1
-        return 0
-
-    def allocate_new_blocks(
-        self, request_id: str, num_tokens: int, num_tokens_main_model: int
-    ) -> list[KVCacheBlock]:
-        req_blocks = self.req_to_blocks[request_id]
-        num_required = cdiv(num_tokens, self.block_size)
-        num_free = self.block_pool.get_num_free_blocks()
-        if request_id in self._partial_hit_reqs:
-            num_free -= 1
-        fit_blocks = min(num_required, len(req_blocks) + max(0, num_free))
-        new_blocks = super().allocate_new_blocks(
+        required = super().get_num_blocks_to_allocate(
             request_id,
-            fit_blocks * self.block_size,
-            min(num_tokens_main_model, fit_blocks * self.block_size),
+            num_tokens,
+            new_computed_blocks,
+            total_computed_tokens,
+            num_local_computed_tokens,
+            num_tokens_main_model,
         )
-        req_blocks.extend([self._null_block] * (num_required - len(req_blocks)))
-        return new_blocks
+        # Host blocks come from a private pool, so they never count against
+        # the GPU pool. Use the same admission sentinel as Mamba instead.
+        if required > self.block_pool.get_num_free_blocks():
+            assert self.coordinator is not None
+            assert self.coordinator.gpu_pool is not None
+            return self.coordinator.gpu_pool.num_gpu_blocks + 1
+        return 0
 
     def allocate_external_computed_blocks(
         self,

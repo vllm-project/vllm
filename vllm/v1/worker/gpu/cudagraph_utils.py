@@ -69,7 +69,8 @@ class BatchExecutionDescriptor:
     num_reqs: int | None  # None means no request padding is needed (PIECEWISE graphs)
     uniform_token_count: int | None = None
     # Upper bound on per-request query length. Varlen decode graphs leave
-    # uniform_token_count unset, so this is what keeps a prefill batch out of one.
+    # uniform_token_count unset, so this is what keeps a prefill batch out of one:
+    # the runner passes None for any batch with a prefill.
     max_query_len: int | None = None
     num_active_loras: int = 0
     # Number of microbatches the batch is split into (DBO). 1 means no splitting.
@@ -160,7 +161,6 @@ class CudaGraphManager:
         # DBO supports FULL CUDA graphs only.
         self.ubatch_runner = ubatch_runner
 
-        self.dp_size = vllm_config.parallel_config.data_parallel_size
         self.tp_size = vllm_config.parallel_config.tensor_parallel_size
         self.is_first_pp_rank = get_pp_group().is_first_rank
         self.is_last_pp_rank = get_pp_group().is_last_rank
@@ -383,6 +383,23 @@ class CudaGraphManager:
                         key = (i, num_active_loras)
                         self._candidates.setdefault(key, []).extend(matching)
                     current_range_start = num_tokens + 1
+
+    @property
+    def dp_size(self) -> int:
+        # Not cached: elastic EP rewrites parallel_config in place on scale.
+        return self.vllm_config.parallel_config.data_parallel_size
+
+    def release_graphs(self) -> None:
+        """Drop the captured graphs so a later capture() can refill them.
+
+        Elastic EP reallocates the MoE workspace when it grows, which leaves
+        every captured graph holding a stale data pointer. `_capture_descs` is
+        kept, so `needs_capture()` still reports the work to redo.
+        """
+        self.graphs.clear()
+        self._graphs_captured = False
+        if self.breakable_cg_runner is not None:
+            BreakableCUDAGraphWrapper.clear_all_graphs()
 
     def needs_capture(self) -> bool:
         return len(self._capture_descs) > 0
