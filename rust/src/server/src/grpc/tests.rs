@@ -2234,6 +2234,7 @@ async fn control_aggregates_multi_engine_capacity() {
             coordinator_mode: None,
             model_name: "test-model".to_string(),
             client_index: 0,
+            engine_stats_enabled: true,
         };
         let client_task = tokio::spawn(EngineCoreClient::connect(client_config));
         let mut engine_sockets = Vec::new();

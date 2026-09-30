@@ -422,6 +422,19 @@ def test_hisparse_rejects_disabled_hybrid_kv_cache_manager(monkeypatch):
         )
 
 
+def test_hisparse_rejects_disabled_full_isl_reservation(monkeypatch):
+    monkeypatch.setattr(current_platform, "is_cuda", lambda: True)
+    with pytest.raises(ValueError, match="requires --scheduler-reserve-full-isl"):
+        VllmConfig(
+            attention_config=AttentionConfig(hisparse_config=HiSparseConfig()),
+            scheduler_config=SchedulerConfig(
+                max_model_len=2048,
+                is_encoder_decoder=False,
+                scheduler_reserve_full_isl=False,
+            ),
+        )
+
+
 def test_hisparse_rejects_non_cuda(monkeypatch):
     monkeypatch.setattr(current_platform, "is_cuda", lambda: False)
     with pytest.raises(ValueError, match="requires NVIDIA CUDA"):
@@ -1590,14 +1603,14 @@ def test_engram_dp_shared_memory_config_validation(
         ("DeepseekV41ForCausalLM", [1], "cuda", True),
         ("DeepseekV41ForCausalLM", [1], "rocm", True),
         ("DeepseekV41ForCausalLM", [], "cuda", False),
-        ("DeepseekV41ForCausalLM", [1], "cpu", False),
+        ("DeepseekV41ForCausalLM", [1], "cpu", True),
         ("Qwen4ExpForCausalLM", [1], "cuda", True),
         ("Qwen4ExpForCausalLM", [1], "rocm", True),
         ("Qwen4ExpForConditionalGeneration", [1], "cuda", True),
         ("Qwen4ExpForConditionalGeneration", [1], "rocm", True),
         ("Qwen4ExpForCausalLM", [], "cuda", False),
         ("Qwen4ExpForCausalLM", None, "cuda", False),
-        ("Qwen4ExpForCausalLM", [1], "cpu", False),
+        ("Qwen4ExpForCausalLM", [1], "cpu", True),
         ("LlamaForCausalLM", [1], "cuda", False),
         ("Qwen4ExpMTP", [], "cuda", False),
         (None, None, "cuda", False),
