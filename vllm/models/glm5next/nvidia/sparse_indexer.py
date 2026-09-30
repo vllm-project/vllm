@@ -284,6 +284,10 @@ def sparse_attn_indexer_kpool(
             _pos = positions[num_decode_tokens:num_tokens].to(torch.int32)
             _buf = topk_indices_buffer[num_decode_tokens:num_tokens]
             _fill_causal_indices(_buf, _pos)
+            # Short prefills skip MQA scoring entirely, so there is no local
+            # row-sharded result to exchange. This can occur with forced MQA,
+            # which keeps row_shard_sizes populated in shared metadata.
+            shard_sizes = None
 
         # Get the full shared workspace buffers once (will allocate on first use).
         # Layout switches between FP8 (head_dim bytes + 4-byte fp32 scale) and
