@@ -107,9 +107,7 @@ def reorder_w13_to_w31_for_flashinfer_cutedsl(
     )
 
 
-# Names of the per-die shard tensors that get registered as Parameters so EPLB
-# can find them. The block scales are registered in their *swizzled contiguous*
-# form, not the MMA view -- see _shard_nvfp4_moe_weights_per_die.
+# EPLB needs contiguous, expert-major scale Parameters rather than MMA views.
 _LOCALIZED_SHARD_PARAMS = (
     "w13_weight",
     "w2_weight",
@@ -119,37 +117,19 @@ _LOCALIZED_SHARD_PARAMS = (
 
 
 def _shard_nvfp4_moe_weights_per_die(layer, res, w13, w13_scale, w2, w2_scale):
-    """Split weights across locality domains for locality-domain (TP-A) localization.
+    """Shard FC1 intermediate rows and FC2 hidden rows across locality domains.
 
-    Both GEMMs split dim=1 of the stored [E, N, K] layout: FC1 over the
-    intermediate, FC2 over the hidden output. Block scales index K (the last
-    axis), so weight and scale slice with the same index and no 16-element
-    block is ever cut.
-
-    Must run on PRE-swizzle scales: convert_sf_to_mma_layout produces a 6-D
-    layout in which a die boundary is no longer a slice. Each shard is swizzled
-    independently instead.
+    Slice weights and scales along N in [E, N, K] before swizzling each shard.
     """
     n = res.num_split
     assert w13.shape[1] % n == 0 and w2.shape[1] % n == 0
     n13, n2 = w13.shape[1] // n, w2.shape[1] // n
-    # interleave_linear_and_gate(group_size=64) leaves dim 1 as ALTERNATING
-    # 64-row blocks: [up(64), gate(64), up(64), gate(64), ...]. The period is
-    # therefore 2*64 = 128, and a die boundary must land on a whole up/gate
-    # PAIR -- at a multiple of 64 but not 128, one die gets an `up` block whose
-    # matching `gate` block sits on the other die, which is silently wrong
-    # numerics rather than a crash. Both current models satisfy this (K3
-    # n13=3072, DSR1 n13=2048), so the old `% 64` check never fired.
+    # Keep each interleaved 64-row up/gate pair in the same shard.
     assert n13 % 128 == 0, (
         f"per-die w13 rows {n13} must be a multiple of 128 (a whole up/gate "
         "pair after interleave_linear_and_gate(group_size=64))"
     )
-    # n13/n2 come from the WEIGHTS but are applied to the SCALES below. That is
-    # only sound because create_weights gives both the same dim-1
-    # (w13: S*intermediate_size_per_partition, w2: hidden_size) -- dim 2 differs
-    # (fp4 packs 2/byte, scales are 1 per group_size) but is never sliced.
-    # Assert it rather than assume: Python slicing CLAMPS, so a scale tensor
-    # padded differently would silently yield the wrong rows instead of raising.
+    # Weight-derived slice offsets require matching scale rows.
     assert w13_scale.shape[1] == w13.shape[1], (
         f"w13_scale dim1 {w13_scale.shape[1]} != w13 dim1 {w13.shape[1]}; "
         "the per-die slice offsets would be wrong"
@@ -168,13 +148,8 @@ def _shard_nvfp4_moe_weights_per_die(layer, res, w13, w13_scale, w2, w2_scale):
                 "w13_weight": w13[:, a : a + n13, :].contiguous(),
                 "w2_weight": w2[:, b : b + n2, :].contiguous(),
             }
-            # Swizzled but NOT yet in MMA layout. This is the form that gets
-            # registered: contiguous and expert-major, so EPLB's
-            # is_contiguous() assert and .view(local_num_experts, -1) both
-            # hold. convert_sf_to_mma_layout returns a strided view whose
-            # leading dim is 32, not the expert count, so registering that
-            # instead would make EPLB slice the wrong axis. Keep each input
-            # mapped until its asynchronous swizzle has completed.
+            # Register contiguous, expert-major scales for EPLB, not the MMA view.
+            # Keep each source alive until its asynchronous swizzle completes.
             scale_shard = w13_scale[:, a : a + n13, :].contiguous()
             shard["w13_weight_scale_param"] = swizzle_blockscale(scale_shard)
             torch.cuda.current_stream(w13_scale.device).synchronize()
@@ -182,19 +157,13 @@ def _shard_nvfp4_moe_weights_per_die(layer, res, w13, w13_scale, w2, w2_scale):
             shard["w2_weight_scale_param"] = swizzle_blockscale(scale_shard)
             torch.cuda.current_stream(w2_scale.device).synchronize()
 
-        # Register so EPLB can see the shards at all: get_expert_weights()
-        # builds its list from named_parameters(), and set_eplb_state() -- the
-        # only caller -- runs after process_weights_after_loading, so
-        # registering here is in time. Pool membership is a property of the
-        # allocation above; nn.Parameter wraps in place without copying, so the
-        # data stays in res.pools[i].
+        # Register shards for EPLB; Parameter wrapping preserves their pool storage.
         for name in _LOCALIZED_SHARD_PARAMS:
             param = torch.nn.Parameter(shard[name], requires_grad=False)
             layer.register_parameter(f"localized{i}_{name}", param)
             shard[name] = param
 
-        # Allocation-free: these alias the registered Parameters, so EPLB's
-        # in-place rearrangement is visible to the kernel with no re-derivation.
+        # Views preserve visibility of EPLB's in-place updates.
         shard["w13_weight_scale"] = nvfp4_swizzled_scale_to_cutedsl_mma_view(
             shard["w13_weight_scale_param"]
         )
@@ -274,8 +243,7 @@ def prepare_nvfp4_moe_layer_for_flashinfer_cutedsl(
         w13 = interleave_linear_and_gate(w13, group_size=64, dim=1)
         w13_scale = interleave_linear_and_gate(w13_scale, group_size=64, dim=1)
 
-    # Locality domains: shard here -- weights are interleaved but scales are not yet
-    # swizzled, which is the only point where a die boundary is still a slice.
+    # Shard after interleaving and before scale swizzling.
     from vllm.distributed.localization import get_localized_resources
 
     _localized_resources = get_localized_resources()
@@ -284,7 +252,10 @@ def prepare_nvfp4_moe_layer_for_flashinfer_cutedsl(
             layer, _localized_resources, w13, w13_scale, w2, w2_scale
         )
 
+        # Free originals before memory profiling so reclaimed storage is available
+        # for KV cache. Retain shape metadata; EPLB uses the registered shards.
         if envs.VLLM_MOE_LOCALIZE_FREE_FULL_WEIGHTS:
+            # Surface asynchronous sharding errors before releasing source storage.
             torch.cuda.synchronize()
             freed = 0
             for _t in (w13, w2):
@@ -294,8 +265,7 @@ def prepare_nvfp4_moe_layer_for_flashinfer_cutedsl(
                     _st.resize_(0)
                     freed += _n
             if freed:
-                # Read by RoutedExperts.get_expert_weights() so EPLB skips these
-                # now-empty Parameters and rearranges the per-die shards instead.
+                # Exclude original weights from EPLB in favor of shards.
                 layer.localized_freed_full_weight_names = (
                     "w13_weight",
                     "w2_weight",

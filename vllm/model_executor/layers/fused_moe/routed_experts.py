@@ -1325,16 +1325,8 @@ class RoutedExperts(PluggableLayer):
 
         weights = list(self.named_parameters())
 
-        # Locality-domain localization copies the MoE weights into per-die shards
-        # and then
-        # frees the full-width originals with storage.resize_(0), leaving the
-        # Parameter registered with its original shape. .view() does not inspect
-        # storage size, so such a tensor would pass every check below and EPLB
-        # would transfer into a zero-byte allocation -- silent corruption, not a
-        # raise. Drop them; the registered per-die shards carry the data and are
-        # rearranged instead. Keyed off an explicit attribute rather than probing
-        # storage, because this method is shared by every MoE quant backend and
-        # some use tensor subclasses that do not implement untyped_storage().
+        # EPLB must use shards when original weight storage has been released.
+        # Use explicit metadata: some tensor subclasses lack untyped_storage().
         localized_freed = getattr(self, "localized_freed_full_weight_names", ())
         if localized_freed:
             weights = [(name, p) for name, p in weights if name not in localized_freed]

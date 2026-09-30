@@ -95,17 +95,8 @@ def eager_break_during_capture(fn: F) -> F:
         def unified_attention_with_output(...):
             ...
 
-    The break-or-passthrough decision is made at call time, never at
-    decoration time. ``VLLM_USE_BREAKABLE_CUDAGRAPH`` is auto-enabled by
-    ``VllmConfig`` in the driver and only reaches multi-process workers after
-    their interpreters have started (e.g. Ray executor v2 applies the driver
-    env in ``initialize_worker``). If the decorated module is imported before
-    that point (``sitecustomize``, ``PYTHONPATH`` shims, plugins), an
-    import-time check would silently leave the op unwrapped and the
-    attention/KDA kernels would be captured *inside* the piecewise graph
-    segments, producing garbage on replay. Checking for an active capture on
-    every call is a thread-local lookup and costs nothing when the feature is
-    off.
+    Check capture state at call time: workers may receive
+    ``VLLM_USE_BREAKABLE_CUDAGRAPH`` after this module is imported.
     """
 
     @functools.wraps(fn)
@@ -246,16 +237,7 @@ class BreakableCUDAGraphCapture:
 def validate_piecewise_capture_breaks(
     capture: BreakableCUDAGraphCapture, forward_context: Any
 ) -> None:
-    """Fail loudly if a PIECEWISE capture recorded no eager break.
-
-    A piecewise capture of a model that has attention-like layers must
-    contain at least one eager segment. Zero breaks means the
-    ``@eager_break_during_capture`` ops were not routed through
-    :meth:`BreakableCUDAGraphCapture.add_eager`, so attention / KDA kernels
-    (and their capture-time metadata) were baked into the graph. Replaying
-    such a graph yields silently wrong outputs, which is far worse than
-    failing here.
-    """
+    """Reject piecewise captures that have attention layers but no eager breaks."""
     if forward_context.cudagraph_runtime_mode != CUDAGraphMode.PIECEWISE:
         return
     if not forward_context.no_compile_layers or capture.num_eager_breaks > 0:

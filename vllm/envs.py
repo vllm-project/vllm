@@ -1708,30 +1708,20 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_USE_FLASHINFER_MOE_INT4": lambda: bool(
         int(os.getenv("VLLM_USE_FLASHINFER_MOE_INT4", "0"))
     ),
-    # Split MoE weights and both MoE GEMMs across a multi-die GPU's locality
-    # domains ("locality-domain localization"), using one CUDA green context per die.
-    # Rubin (SM107) NVFP4 only; requires cuda-bindings >= 13.4.
+    # Split Rubin NVFP4 MoE across locality domains; requires cuda-bindings >= 13.4.
     "VLLM_USE_LOCALITY_DOMAINS": lambda: bool(
         int(os.getenv("VLLM_USE_LOCALITY_DOMAINS", "0"))
     ),
-    # Fill each locality-domain compute partition to an equal share of all SMs.
-    # Backfilled SMs may come from another locality domain, trading a small
-    # amount of remote memory traffic for full-device SM utilization.
+    # Give each compute partition an equal share of all SMs, allowing remote SMs.
     "VLLM_MOE_LOCALIZE_BACKFILL": lambda: bool(
         int(os.getenv("VLLM_MOE_LOCALIZE_BACKFILL", "0"))
     ),
-    # Run the MoE output memset on its own stream, overlapping FC1, instead
-    # of between the FC1 and FC2 joins. On by default; 0 restores the old
-    # ordering so the change can be A/B tested without a rebuild.
+    # Overlap output memset with FC1 on an auxiliary stream.
     "VLLM_MOE_LOCALIZE_MEMSET_OVERLAP": lambda: bool(
         int(os.getenv("VLLM_MOE_LOCALIZE_MEMSET_OVERLAP", "1"))
     ),
-    # After per-die sharding the full-width MoE weights are dead: the localized
-    # path reads shard["w1_weight"]/shard["w2_weight"], and the only surviving
-    # use of the originals is w2_weight.size(1) for hidden_size. Freeing their
-    # storage returns ~97 GiB/GPU on Kimi K3 (KV cache 45.2 -> ~142 GiB).
-    # Off by default: it is destructive and incompatible with EPLB, which
-    # rearranges experts in place.
+    # Release full-width weight storage after sharding, disabling full-width
+    # fallback. EPLB uses the registered shards instead of the originals.
     "VLLM_MOE_LOCALIZE_FREE_FULL_WEIGHTS": lambda: bool(
         int(os.getenv("VLLM_MOE_LOCALIZE_FREE_FULL_WEIGHTS", "0"))
     ),

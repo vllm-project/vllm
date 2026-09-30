@@ -80,8 +80,7 @@ class FlashInferCuteDSLExperts(mk.FusedMoEExpertsModular):
         self.gemm1_alpha = quant_config.gemm1_alpha
         self.gemm1_beta = quant_config.gemm1_beta
         self.gemm1_clamp_limit = quant_config.gemm1_clamp_limit
-        # SiTU (Kimi K3). The CuteDSL kernel keys SiTU off situ_beta rather than
-        # off an activation enum, so these ride alongside the base activation.
+        # FlashInfer selects SiTU via its beta parameters.
         self.situ_beta = moe_config.activation_situ_beta
         self.situ_linear_beta = moe_config.activation_situ_linear_beta
         self.per_token_activation = per_token_activation
@@ -97,17 +96,11 @@ class FlashInferCuteDSLExperts(mk.FusedMoEExpertsModular):
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         layer.w13_weight_scale_2.data.mul_(layer.w13_input_scale)
         layer.w2_weight_scale_2.data.mul_(layer.w2_input_scale)
-        # apply() has no `layer` argument; keep a reference so the
-        # locality-domain shards can be read from it. Looked up lazily, so hook
-        # order is irrelevant.
+        # apply() reads shards lazily because it has no layer argument.
         self._localized_layer = layer
 
     def _localized_call_kwargs(self, w1: torch.Tensor) -> dict:
-        """Locality-domain kwargs for the FlashInfer call, built and cached per layer.
-
-        Empty when localization is off or this layer carries no per-die shards,
-        which leaves the FlashInfer call on its ordinary full-width path.
-        """
+        """Cache FlashInfer locality arguments, or an empty dict without shards."""
         cached = getattr(self, "_localized_kwargs", None)
         if cached is not None:
             return cached
@@ -131,14 +124,6 @@ class FlashInferCuteDSLExperts(mk.FusedMoEExpertsModular):
             "[locality domains] localized MoE wired: %d per-die shards", len(shards)
         )
 
-        # vLLM names the fused gate+up weight w13; FlashInfer calls it w1 and its
-        # scales _sf. The alphas and fc2_input_scale are deliberately absent: they
-        # are per-expert or global, so they are invariant under a split on N and
-        # locality domains read the same unsharded tensors from the call site.
-        # FlashInfer validates len(localized_streams) == len(localized_weights).
-        # Check it
-        # here so a future mismatch names this call site instead of surfacing as
-        # a ValueError from inside the kernel wrapper.
         assert len(res.split_streams) == len(shards), (
             f"{len(res.split_streams)} split streams for {len(shards)} weight "
             "shards; these must be 1:1"
@@ -153,25 +138,16 @@ class FlashInferCuteDSLExperts(mk.FusedMoEExpertsModular):
                 }
                 for sh in shards
             ],
-            # split_streams, NOT streams: the list now also carries the
-            # auxiliary memset resource, and FlashInfer validates
-            # len(localized_streams) == len(localized_weights).
+            # Compute streams only; the auxiliary stream is reserved for memset.
             "localized_streams": res.split_streams,
+            # FlashInfer expects one shared per-domain SM count.
             "localized_sm_count": _one_sm_count(res),
-            # When the originals are retained, tune the full-width pipeline
-            # alongside localization for every token bucket. This handles the
-            # non-monotonic Kimi-K3 crossover without a model-specific cutoff.
+            # Retained full weights let autotuning compare both paths.
             "localized_allow_nonlocalized": (
                 not envs.VLLM_MOE_LOCALIZE_FREE_FULL_WEIGHTS
             ),
             "autotune_use_cuda_graph": self.autotune_use_cuda_graph,
-            # Lets FlashInfer run the output memset off the compute
-            # partitions and concurrently with FC1, rather than between the
-            # FC1 and FC2 joins. Which stream this actually is gets logged at
-            # construction as "[locality domains] output-memset stream: ...".
-            # Omitting the
-            # kwarg restores the old
-            # ordering, which is how the change gets A/B tested.
+            # Optionally overlap output zeroing on the auxiliary stream.
             **(
                 {"localized_memset_stream": res.aux_stream}
                 if envs.VLLM_MOE_LOCALIZE_MEMSET_OVERLAP
@@ -332,9 +308,6 @@ class FlashInferCuteDSLExperts(mk.FusedMoEExpertsModular):
             ),
             **swiglu_kwargs,
             **per_token_kwargs,
-            # Empty unless locality-domain localization is on, in which case both
-            # GEMMs are
-            # split across the device's dies. w1/w2 above stay the full-width
-            # tensors: FlashInfer still reads hidden_size from w2_weight.
+            # Full-width weight metadata is retained even when storage is released.
             **self._localized_call_kwargs(w1),
         )

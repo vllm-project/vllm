@@ -396,14 +396,7 @@ def test_quantized_activation_replay_does_not_retain_tensors(
 def test_decorator_breaks_when_enabled_only_after_decoration(
     cuda_capture_stream, monkeypatch: pytest.MonkeyPatch
 ):
-    """Regression: the break decision must not be frozen at import time.
-
-    VLLM_USE_BREAKABLE_CUDAGRAPH is auto-set by VllmConfig in the driver and
-    reaches Ray workers only after their interpreters started. A module
-    decorated while the env var was still unset (sitecustomize / PYTHONPATH
-    shims) must still break once capture is active, otherwise attention is
-    captured inside the graph and replay is silently wrong.
-    """
+    """Honor capture enabled after the function was decorated."""
     import vllm.envs as envs
     from vllm.compilation.breakable_cudagraph import (
         BreakableCUDAGraphCapture,
@@ -438,8 +431,7 @@ def test_decorator_breaks_when_enabled_only_after_decoration(
 def test_validate_piecewise_capture_breaks_rejects_unbroken_capture(
     cuda_capture_stream,
 ):
-    """A PIECEWISE capture of a model with attention layers that recorded no
-    eager break means attention was baked into the graph: must raise."""
+    """Reject a piecewise attention capture without eager breaks."""
     from types import SimpleNamespace
 
     from vllm.compilation.breakable_cudagraph import (

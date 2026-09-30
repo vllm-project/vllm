@@ -1,10 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Shared per-device locality-domain contexts, streams, and pools.
+"""Per-device locality-domain contexts, streams, and memory pools.
 
-Initialize before weight allocation and CUDA graph capture, and retain
-contexts for the lifetime of their streams. Enable with
-VLLM_USE_LOCALITY_DOMAINS.
+Initialize before weight allocation and CUDA graph capture; all layers share
+these resources. Enable with VLLM_USE_LOCALITY_DOMAINS. Optional
+VLLM_MOE_LOCALIZE_BACKFILL adds SMs outside each domain's local allocation.
 """
 
 from __future__ import annotations
@@ -22,27 +22,14 @@ logger = init_logger(__name__)
 
 @dataclass(frozen=True)
 class LocalizedResources:
-    """Per-device locality-domain resources. Every list is INDEX-ALIGNED and has
-    ``len() == num_resources``:
+    """Shared resources with aligned context, stream, pool, and SM-count lists.
 
-        ``[0, num_split)``             compute partitions; index ``i`` is exactly
-                                       what the kernels take as ``partition_id``
-                                       / ``domain_id``.
-        ``[num_split, num_resources)`` auxiliary resources -- currently just the
-                                       memset context, which is a green context
-                                       and a stream like the split ones but owns
-                                       no allocator.
-
-    Modelling the auxiliary resource as ordinary list entries rather than
-    special-case fields keeps one construction path and leaves room for further
-    auxiliary contexts without a schema change.
+    The first ``num_split`` entries are compute domains. Remaining entries are
+    auxiliary resources, which have no memory pool.
     """
 
     num_split: int
-    # Retained on purpose: torch maps stream -> context through a
-    # WeakValueDictionary and GreenContext.__del__ destroys the streams it
-    # handed out, so dropping this list yields "CUDA error: context is
-    # destroyed" on first use. Applies to the auxiliary context too.
+    # Keep contexts alive: streams hold weak references and are destroyed with them.
     contexts: list[Any] = field(repr=False)
     streams: list[torch.cuda.Stream] = field(repr=False)
     pools: list[Any | None] = field(repr=False)  # None where no allocator is needed
@@ -54,16 +41,12 @@ class LocalizedResources:
 
     @property
     def split_streams(self) -> list[torch.cuda.Stream]:
-        """The compute partitions only -- what FlashInfer's localized_streams takes.
-
-        It validates ``len(localized_streams) == len(localized_weights)``, so the
-        auxiliary stream must NOT be included here.
-        """
+        """Compute streams in shard order, excluding the auxiliary memset stream."""
         return self.streams[: self.num_split]
 
     @property
     def aux_stream(self) -> torch.cuda.Stream | None:
-        """The auxiliary stream, or None if the split consumed the whole device."""
+        """The auxiliary stream, if present."""
         return (
             self.streams[self.num_split]
             if self.num_resources > self.num_split
@@ -83,10 +66,7 @@ class LocalizedResources:
         )
 
 
-# Strong references, process lifetime, keyed by device index. A plain dict
-# rather than functools.cache: creation is EAGER (init_device, where the config
-# lives) while reads happen later from inside the model. A cache would silently
-# construct on a late first read -- i.e. make streams at the worst moment.
+# Retain resources for the process lifetime; initialize before model execution.
 _LOCALIZED_RESOURCES: dict[int, LocalizedResources] = {}
 
 
@@ -112,8 +92,6 @@ def _backfilled_contexts(device_index: int, num_domains: int):
             f"cannot split {sm_resource.sm.smCount} SMs across {num_domains} domains"
         )
 
-    # CUDA defines BACKFILL as 0x1 and LOCALITY_DOMAIN_ID as 0x1 << 1;
-    # bitwise OR sets both independent flag bits.
     flags = (
         _drv.CUdevSmResourceGroup_flags.CU_DEV_SM_RESOURCE_GROUP_BACKFILL
         | _drv.CUdevSmResourceGroup_flags.CU_DEV_SM_RESOURCE_GROUP_LOCALITY_DOMAIN_ID
@@ -122,6 +100,7 @@ def _backfilled_contexts(device_index: int, num_domains: int):
     for domain_id in range(num_domains):
         p = _drv.CU_DEV_SM_RESOURCE_GROUP_PARAMS()
         p.smCount = target_sm_count
+        # Use the default co-scheduled group size.
         p.coscheduledSmCount = 0
         p.flags = flags
         p.localityDomainId = domain_id
@@ -155,7 +134,14 @@ def _backfilled_contexts(device_index: int, num_domains: int):
 
 
 def _reserved_remainder_stream(device_index: int, num_domains: int):
-    """Create an auxiliary stream from resources outside the compute domains."""
+    """Create a memset stream on SMs outside the compute domains.
+
+    Repeat the locality split because PyTorch discards its remainder resource.
+
+    Returns:
+        (stream, context, reason, sm_count). On failure or no remaining SMs,
+        returns (None, None, reason, 0) for the caller's full-device fallback.
+    """
     try:
         from torch.cuda._utils import _check_cuda_bindings as _chk
         from torch.cuda._utils import _cuda_bindings_driver as _drv
@@ -201,41 +187,28 @@ def _reserved_remainder_stream(device_index: int, num_domains: int):
         )
 
 
-_CU_DEVICE_ATTRIBUTE_MEMORY_NODE_MULTIPROCESSOR_COUNT = 157
-
-
 def _node_local_sm_count(device_index: int) -> int | None:
-    """SMs guaranteed node-local to one die, or None if unavailable.
-
-    Returns None on any failure so the caller falls back to total // num_domains;
-    a wrong-but-plausible number here would silently mis-size every localized
-    grid, which is the bug this exists to avoid.
-    """
-    import ctypes
-
+    """Return the node-local SM count, or None if the query fails."""
     try:
-        libcuda = ctypes.CDLL("libcuda.so.1")
-        val = ctypes.c_int(0)
-        rc = libcuda.cuDeviceGetAttribute(
-            ctypes.byref(val),
-            ctypes.c_int(_CU_DEVICE_ATTRIBUTE_MEMORY_NODE_MULTIPROCESSOR_COUNT),
-            ctypes.c_int(device_index),
+        from cuda.bindings import driver as cuda
+
+        rc, sm_count = cuda.cuDeviceGetAttribute(
+            cuda.CUdevice_attribute.CU_DEVICE_ATTRIBUTE_LOCALITY_DOMAIN_MULTIPROCESSOR_COUNT,
+            device_index,
         )
         total = torch.cuda.get_device_properties(device_index).multi_processor_count
-        if rc != 0 or not (0 < val.value <= total):
+        if rc != cuda.CUresult.CUDA_SUCCESS or not (0 < sm_count <= total):
             logger.warning(
                 "[locality domains] node-local SM query unusable "
-                "(rc=%d value=%d total=%d); "
+                "(rc=%s value=%s total=%d); "
                 "falling back to total // num_domains",
                 rc,
-                val.value,
+                sm_count,
                 total,
             )
             return None
-        logger.info(
-            "[locality domains] node-local SMs=%d of %d total", val.value, total
-        )
-        return val.value
+        logger.info("[locality domains] node-local SMs=%d of %d total", sm_count, total)
+        return sm_count
     except Exception as e:  # noqa: BLE001 - any failure -> documented fallback
         logger.warning(
             "[locality domains] node-local SM query failed (%s: %s); falling back to "
@@ -254,6 +227,7 @@ def maybe_init_localized_resources(
     Returns None (and logs why) when localization is off or unavailable, so the
     caller can fall back to the ordinary non-localized path.
     """
+    # Surface allocation fallbacks, which can affect weight locality and performance.
     import warnings as _warnings
 
     _warnings.filterwarnings("always", message=".*Localized CUDA allocation failed.*")
@@ -280,8 +254,6 @@ def maybe_init_localized_resources(
 
     try:
         if not is_localization_supported(idx):
-            # Most likely cuda-bindings < 13.4: torch's gate needs BOTH the
-            # driver and the cuda.bindings package at >= 13.4.
             logger.warning(
                 "[locality domains] is_localization_supported(%d) is False; "
                 "check cuda.bindings >= 13.4 and driver >= 13.4",
@@ -298,7 +270,6 @@ def maybe_init_localized_resources(
             )
             return None
 
-        # ---- split resources: one green context / stream / pool per die ----
         backfill = False
         rem_ctx = None
         rem_sms = 0
@@ -328,6 +299,7 @@ def maybe_init_localized_resources(
             LocalizedMemPool(i, device=idx) for i in range(num_domains)
         ]
         total_sm = torch.cuda.get_device_properties(idx).multi_processor_count
+        # Size persistent grids to each partition; total SMs include the remainder.
         if backfill:
             sm_per_resource = compute_sm_counts
             logger.info(
@@ -338,9 +310,7 @@ def maybe_init_localized_resources(
             sm_per_die = _node_local_sm_count(idx) or (total_sm // num_domains)
             sm_per_resource = [sm_per_die] * num_domains
 
-        # ---- auxiliary resource: the memset context ------------------------
-        # Appended to the SAME lists, so there is one construction path and one
-        # index space. It owns no allocator, hence a None pool.
+        # Use remainder SMs for memset, falling back to a full-device stream.
         if backfill:
             if rem_ctx is not None:
                 aux_ctx, aux_stream, aux_sms = rem_ctx, rem_ctx.Stream(), rem_sms
@@ -357,8 +327,6 @@ def maybe_init_localized_resources(
             aux_ctx = None
             memset_reason = f"full-device memset stream ({memset_reason})"
             aux_sms = total_sm
-        # Harness scripts assert on this exact line -- it is the only remaining
-        # evidence that the memset context was created, so keep it verbatim.
         logger.info("[locality domains] output-memset stream: %s", memset_reason)
         contexts.append(aux_ctx)
         streams.append(aux_stream)
