@@ -4434,18 +4434,23 @@ def cpu_gemm_wna16(
     pack_factor: int,
     isa_hint: str,
 ) -> torch.Tensor:
-    output = torch.empty((input.size(0), scales.size(1)), dtype=input.dtype)
+    # Match int4_scaled_mm_cpu: flatten >2-D activations to [M, K] for the
+    # C++ kernel, then restore the original leading dims on the output.
+    x_shape = input.shape
+    x_2d = input.reshape(-1, x_shape[-1]) if len(x_shape) > 2 else input
+    out = torch.empty((x_2d.size(0), scales.size(1)), dtype=input.dtype)
     torch.ops._C.cpu_gemm_wna16(
-        input,
+        x_2d,
         q_weight,
-        output,
+        out,
         scales,
         zeros,
         bias,
         pack_factor,
         isa_hint,
     )
-    return output
+    out = out.reshape(x_shape[:-1] + (out.size(-1),)) if len(x_shape) > 2 else out
+    return out
 
 
 def cpu_activation_lut_bf16(input: torch.Tensor, activation: str) -> torch.Tensor:
