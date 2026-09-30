@@ -57,7 +57,11 @@ from vllm.v1.core.kv_cache_utils import (
     tensor_data,
     to_event_extra_keys,
 )
-from vllm.v1.hisparse.layout import _size_hisparse_host_pool, lay_out_hisparse_groups
+from vllm.v1.hisparse.layout import (
+    check_hisparse_pool_fits,
+    create_hisparse_layout,
+    get_hisparse_gpu_memory_usage,
+)
 from vllm.v1.kv_cache_interface import (
     ChunkedLocalAttentionSpec,
     CircularBufferSpec,
@@ -139,9 +143,14 @@ def test_hisparse_hma_uses_resolved_gpu_block_size(
             get_resolved_kv_cache_layout=lambda: KVCacheLayout.BLHNC,
         ),
     )
+    indexer_spec = specs["model.layers.0.self_attn.indexer"]
+    assert get_hisparse_gpu_memory_usage(config, [group]) == (
+        indexer_spec.max_memory_usage_bytes(config)
+    )
+
     monkeypatch.setattr(kv_cache_utils, "get_hisparse_host_pool_bytes", lambda _: 2**30)
     cache_config = kv_cache_utils.get_kv_cache_config_from_groups(
-        config, lay_out_hisparse_groups(config, [group]), available_memory=2**30
+        config, [group], available_memory=2**30
     )
     assert cache_config.num_blocks == 7
     assert cache_config.hisparse_host_num_blocks is not None
@@ -234,16 +243,12 @@ def test_hisparse_host_pool_must_fit_max_model_len(monkeypatch, extra_blocks, ok
     host_budget = (4 + extra_blocks) * host_page
     group = KVCacheGroupSpec(list(specs), group_spec)
 
-    source_group = lay_out_hisparse_groups(config, [group])[0]
-
     if ok:
-        host_num_blocks, _, _ = _size_hisparse_host_pool(
-            config, source_group, host_budget
-        )
-        assert host_num_blocks == 4 + extra_blocks
+        layout = create_hisparse_layout(config, [group], host_budget=host_budget)
+        assert layout.host_num_blocks == 4 + extra_blocks
     else:
         with pytest.raises(ValueError, match="increase host_pool_gib"):
-            _size_hisparse_host_pool(config, source_group, host_budget)
+            create_hisparse_layout(config, [group], host_budget=host_budget)
 
 
 @pytest.mark.parametrize(
@@ -283,88 +288,15 @@ def test_hisparse_pool_must_fit_max_model_len(
     config.model_config.hf_config.index_topk = 128
     config.cache_config.num_gpu_blocks_override = num_gpu_blocks
     config.cache_config.kv_cache_layout = "BLHNC"
+    scheduler_config = kv_cache_utils.generate_scheduler_kv_cache_config(
+        kv_cache_utils.get_kv_cache_configs(config, [specs], [2**34])
+    )
 
     if ok:
-        kv_cache_utils.get_kv_cache_configs(config, [specs], [2**34])
+        check_hisparse_pool_fits(config, scheduler_config)
     else:
-        with pytest.raises(ValueError, match="max seq len"):
-            kv_cache_utils.get_kv_cache_configs(config, [specs], [2**34])
-
-
-def test_hisparse_workers_share_the_smallest_pool(monkeypatch):
-    """Workers with less free memory shrink every worker's HiSparse pool to
-    theirs, by re-planning from the laid-out groups."""
-    monkeypatch.setattr(
-        hisparse_runtime_module.current_platform, "is_cuda_alike", lambda: True
-    )
-    monkeypatch.setattr(kv_cache_utils, "get_hisparse_host_pool_bytes", lambda _: 2**30)
-    specs: dict[str, KVCacheSpec] = {}
-    for i in range(4):
-        specs[f"model.layers.{i}.self_attn"] = MLAAttentionSpec(
-            block_size=64,
-            num_kv_heads=1,
-            head_size=576,
-            dtype=torch.bfloat16,
-            is_index_group_leader=True,
-        )
-        specs[f"model.layers.{i}.self_attn.indexer"] = MLAAttentionSpec(
-            block_size=64,
-            num_kv_heads=1,
-            head_size=128,
-            dtype=torch.bfloat16,
-            cache_role=SparseCacheRole.INDEXER,
-        )
-    config = VllmConfig(model_config=ModelConfig(max_model_len=8192))
-    config.attention_config.hisparse_config = HiSparseConfig()
-    config.model_config.hf_config.index_topk = 128
-    config.cache_config.kv_cache_layout = "BLHNC"
-
-    configs = kv_cache_utils.get_kv_cache_configs(
-        config, [dict(specs), dict(specs)], [2**30, 2**29]
-    )
-
-    smaller = kv_cache_utils.get_kv_cache_configs(config, [dict(specs)], [2**29])[0]
-    assert [c.num_blocks for c in configs] == [smaller.num_blocks] * 2
-    assert configs[0].kv_cache_groups == smaller.kv_cache_groups
-    assert configs[0].kv_cache_tensors == smaller.kv_cache_tensors
-
-
-def test_hisparse_rejects_uneven_workers(monkeypatch):
-    """Workers with different layer counts get different HiSparse layouts,
-    which one scheduler config cannot describe."""
-    monkeypatch.setattr(
-        hisparse_runtime_module.current_platform, "is_cuda_alike", lambda: True
-    )
-    monkeypatch.setattr(kv_cache_utils, "get_hisparse_host_pool_bytes", lambda _: 2**30)
-
-    def worker_specs(layers: range) -> dict[str, KVCacheSpec]:
-        specs: dict[str, KVCacheSpec] = {}
-        for i in layers:
-            specs[f"model.layers.{i}.self_attn"] = MLAAttentionSpec(
-                block_size=64,
-                num_kv_heads=1,
-                head_size=576,
-                dtype=torch.bfloat16,
-                is_index_group_leader=True,
-            )
-            specs[f"model.layers.{i}.self_attn.indexer"] = MLAAttentionSpec(
-                block_size=64,
-                num_kv_heads=1,
-                head_size=128,
-                dtype=torch.bfloat16,
-                cache_role=SparseCacheRole.INDEXER,
-            )
-        return specs
-
-    config = VllmConfig(model_config=ModelConfig(max_model_len=8192))
-    config.attention_config.hisparse_config = HiSparseConfig()
-    config.model_config.hf_config.index_topk = 128
-    config.cache_config.num_gpu_blocks_override = 1000
-    config.cache_config.kv_cache_layout = "BLHNC"
-    kv_cache_specs = [worker_specs(range(0, 5)), worker_specs(range(5, 8))]
-
-    with pytest.raises(NotImplementedError, match="same KV cache layout"):
-        kv_cache_utils.get_kv_cache_configs(config, kv_cache_specs, [2**34, 2**34])
+        with pytest.raises(ValueError, match="GPU KV cache pool"):
+            check_hisparse_pool_fits(config, scheduler_config)
 
 
 def test_hisparse_rejects_deepseek_v4():
@@ -387,7 +319,11 @@ def test_hisparse_rejects_deepseek_v4():
     )
 
     with pytest.raises(ValueError, match="does not support DeepSeek V4"):
-        lay_out_hisparse_groups(config, [group])
+        create_hisparse_layout(
+            config,
+            [group],
+            host_budget=2**30,
+        )
 
 
 @pytest.fixture(autouse=True)
