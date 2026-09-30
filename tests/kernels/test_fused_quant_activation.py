@@ -81,6 +81,44 @@ def test_silu_and_mul(
     opcheck(torch.ops._C.silu_and_mul_quant, (ops_out, x, scale))
 
 
+def _offset_view(shape: tuple[int, ...], dtype: torch.dtype, offset: int):
+    """A contiguous tensor whose storage starts `offset` elements into its
+    buffer, so its data pointer is not 16-byte aligned."""
+    numel = 1
+    for s in shape:
+        numel *= s
+    return torch.empty(numel + offset, dtype=dtype)[offset:].view(shape)
+
+
+@pytest.mark.parametrize("num_tokens, hidden_size", [(1, 32), (17, 4096), (3045, 8192)])
+@pytest.mark.parametrize("dtype", DTYPES)
+@pytest.mark.parametrize("seed", SEEDS)
+@torch.inference_mode()
+def test_silu_and_mul_quant_unaligned_matches_aligned(
+    default_vllm_config,
+    num_tokens: int,
+    hidden_size: int,
+    dtype: torch.dtype,
+    seed: int,
+) -> None:
+    """The vectorized path (aligned, d % 16 == 0) and the scalar fallback
+    (unaligned data pointer) must produce identical bits."""
+    set_random_seed(seed)
+    torch.set_default_device("cuda:0")
+
+    scale = torch.rand((1), dtype=torch.float32) + 0.5
+    x = torch.randn(num_tokens, hidden_size, dtype=dtype)
+    aligned = ops_impl(x, scale)
+
+    x_off = _offset_view(x.shape, dtype, 4)
+    x_off.copy_(x)
+    assert x_off.data_ptr() % 16 != 0
+    out_off = _offset_view(aligned.shape, current_platform.fp8_dtype(), 4)
+    torch.ops._C.silu_and_mul_quant(out_off, x_off, scale)
+
+    assert torch.equal(out_off.view(torch.uint8), aligned.view(torch.uint8))
+
+
 # ---------------------------------------------------------------------------
 # Tests for maybe_fused_act_quant interface
 # ---------------------------------------------------------------------------
