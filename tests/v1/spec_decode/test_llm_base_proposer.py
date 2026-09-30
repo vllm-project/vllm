@@ -16,6 +16,7 @@ from types import SimpleNamespace
 import pytest
 
 import vllm.v1.spec_decode.llm_base_proposer as llm_base_proposer
+from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.spec_decode.eagle import EagleProposer
 
 SCHEDULER_BLOCK_SIZE = 256
@@ -52,7 +53,7 @@ def _make_proposer(
     monkeypatch.setattr(llm_base_proposer, "AttentionGroup", _FakeAttentionGroup)
 
     proposer = EagleProposer.__new__(EagleProposer)
-    proposer.vllm_config = None
+    proposer.vllm_config = None  # type: ignore[assignment]  # Patched backend discovery does not read config.
     proposer.device = None
     proposer._draft_attn_layer_names = set(layer_names)
     proposer.kv_cache_gid = -1
@@ -61,10 +62,10 @@ def _make_proposer(
     return proposer
 
 
-def _make_kv_cache_config(layer_names: set[str]) -> SimpleNamespace:
+def _make_kv_cache_config(layer_names: set[str]) -> KVCacheConfig:
     spec = SimpleNamespace(block_size=SCHEDULER_BLOCK_SIZE)
     group = SimpleNamespace(layer_names=list(layer_names), kv_cache_spec=spec)
-    return SimpleNamespace(kv_cache_groups=[group])
+    return SimpleNamespace(kv_cache_groups=[group])  # type: ignore[return-value]
 
 
 def test_block_size_uses_kernel_block_size(monkeypatch: pytest.MonkeyPatch):
@@ -81,7 +82,9 @@ def test_block_size_uses_kernel_block_size(monkeypatch: pytest.MonkeyPatch):
     assert proposer.block_size == KERNEL_BLOCK_SIZE
     assert proposer.block_size != SCHEDULER_BLOCK_SIZE
     # The metadata builder keeps receiving the kernel block size as well.
-    assert proposer.draft_attn_groups[0].kernel_block_size == KERNEL_BLOCK_SIZE
+    group = proposer.draft_attn_groups[0]
+    assert isinstance(group, _FakeAttentionGroup)
+    assert group.kernel_block_size == KERNEL_BLOCK_SIZE
 
 
 def test_block_size_falls_back_to_kv_cache_spec(monkeypatch: pytest.MonkeyPatch):
