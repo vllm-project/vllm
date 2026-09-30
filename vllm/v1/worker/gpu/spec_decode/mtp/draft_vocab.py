@@ -24,7 +24,6 @@ import os
 import numpy as np
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 
 from vllm.distributed import (
     get_tensor_model_parallel_rank,
@@ -33,6 +32,7 @@ from vllm.distributed import (
     tensor_model_parallel_all_reduce,
 )
 from vllm.logger import init_logger
+from vllm.model_executor.layers.utils import dispatch_unquantized_gemm
 
 logger = init_logger(__name__)
 
@@ -90,12 +90,15 @@ def _install(model: nn.Module, path: str, vocab_size: int, max_rows: int) -> Non
     out_buf = torch.full(
         (max_rows, vocab_size), float("-inf"), dtype=ref.dtype, device=dev
     )
+    # The platform GEMM: on ROCm it sends these few-row GEMVs to wvSplitK,
+    # 1.5x faster than the rocBLAS kernel F.linear picks.
+    gemm = dispatch_unquantized_gemm()
 
     def compute_logits(hidden_states: torch.Tensor) -> torch.Tensor:
         num = hidden_states.shape[0]
         if num > max_rows:
             return original(hidden_states)
-        local = F.linear(hidden_states.to(rows.dtype), rows)
+        local = gemm(None, hidden_states.to(rows.dtype), rows)
         gathered = tensor_model_parallel_all_gather(local, dim=-1)
         out = out_buf[:num]
         out.index_copy_(1, ids, gathered.to(out.dtype))
