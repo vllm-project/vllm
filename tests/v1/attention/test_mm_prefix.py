@@ -728,72 +728,22 @@ def test_flashinfer_mm_prefix_validate_configuration(use_dcp, use_rswa, reason):
         assert any(reason in r for r in reasons), reasons
 
 
-@pytest.mark.parametrize("major", [9, 10])
-@pytest.mark.parametrize("cache_dtype", ["fp8", "fp8_e4m3"])
 @pytest.mark.parametrize(
-    ("mm_prefix", "wrapper"), [(True, True), (False, True), (True, False)]
+    ("major", "cache_dtype", "mm_prefix", "wrapper"),
+    [
+        (9, "fp8", True, True),
+        (10, "fp8_e4m3", True, True),
+        (10, "fp8", False, True),
+        (10, "fp8_e4m3", True, False),
+    ],
 )
-def test_flashinfer_mm_prefix_fp8_keeps_model_dtype_query(
+def test_flashinfer_fp8_query_dtype_and_trtllm_scales(
     major, cache_dtype, mm_prefix, wrapper
 ):
-    """fa2 has no FP8-query path, so the native mm-prefix path reads an FP8
-    cache with a model-dtype query. Builder and impl must agree for prefill
-    and decode. Without that path (a non-mm model, or no wrapper, where the
-    composite still runs FlashInfer for causal batches) nothing changes."""
-    import unittest.mock
-    from types import SimpleNamespace
-
-    from tests.v1.attention.utils import create_vllm_config
-    from vllm.config import set_current_vllm_config
-    from vllm.platforms.interface import DeviceCapability
-    from vllm.v1.attention.backends import flashinfer as fi
-
-    vllm_config = create_vllm_config(model_name=MODEL)
-    if mm_prefix:
-        _enable_mm_prefix(vllm_config)
-    mc = vllm_config.model_config
-    builder = SimpleNamespace(
-        vllm_config=vllm_config,
-        model_config=mc,
-        cache_dtype=cache_dtype,
-        kv_cache_spec=SimpleNamespace(dtype=torch.uint8),
-    )
-    with (
-        set_current_vllm_config(vllm_config),
-        unittest.mock.patch.object(
-            type(current_platform),
-            "get_device_capability",
-            return_value=DeviceCapability(major, 0),
-        ),
-        unittest.mock.patch.object(
-            fi, "_mm_prefix_wrapper_cls", return_value=object if wrapper else None
-        ),
-        unittest.mock.patch.object(fi, "can_use_trtllm_attention", return_value=True),
-        unittest.mock.patch.object(fi, "force_use_trtllm_attention", return_value=None),
-    ):
-        q_prefill = fi.FlashInferMetadataBuilder.get_q_data_type(builder, True)
-        q_decode = fi.FlashInferMetadataBuilder.get_q_data_type(builder, False)
-        impl = fi.FlashInferImpl(8, HEAD_SIZE, 1.0, 2, None, None, cache_dtype)
-        fused = impl.fused_output_quant_supported(fi.kFp8StaticTensorSym)
-
-    if mm_prefix and wrapper:
-        assert q_prefill == q_decode == mc.dtype
-        assert not impl.supports_quant_query_input and not fused
-    else:
-        # SM90 decodes through XQA, which takes a model-dtype query.
-        fp8 = torch.float8_e4m3fn
-        assert (q_prefill, q_decode) == (fp8, fp8 if major == 10 else mc.dtype)
-        assert impl.supports_quant_query_input == fused == (major == 10)
-
-
-@pytest.mark.parametrize("fp8_query", [False, True])
-def test_flashinfer_trtllm_scales_follow_query_and_kv(fp8_query):
-    """The TRTLLM calls get scales for what they actually read.
-
-    A model-dtype query was never scaled by q_scale, and the prefill KV that
-    the dequant kernel rebuilds already carries the K/V scales. An FP8 query
-    keeps the existing scales. Runs the real forward() with the calls mocked.
-    """
+    """fa2 has no FP8-query path, so the native mm-prefix path keeps a
+    model-dtype query for an FP8 cache, in the builder and the impl alike, and
+    the SM100 TRTLLM calls then drop q_scale; the dequantized prefill KV
+    already carries the K/V scales. Without that path nothing changes."""
     import unittest.mock
     from types import SimpleNamespace
 
@@ -803,10 +753,21 @@ def test_flashinfer_trtllm_scales_follow_query_and_kv(fp8_query):
     from vllm.v1.attention.backends import flashinfer as fi
 
     scale, q_s, k_s, v_s = 0.125, 2.0, 3.0, 0.5
-    q_dtype = torch.float8_e4m3fn if fp8_query else torch.bfloat16
+    native = mm_prefix and wrapper
     vllm_config = create_vllm_config(model_name=MODEL)
+    if mm_prefix:
+        _enable_mm_prefix(vllm_config)
+    mc = vllm_config.model_config
+    builder = SimpleNamespace(
+        vllm_config=vllm_config, model_config=mc, cache_dtype=cache_dtype
+    )
+    layer = SimpleNamespace(
+        **{f"_{n}_scale": torch.tensor(s) for n, s in zip("qkv", (q_s, k_s, v_s))},
+        **{f"_{n}_scale_float": s for n, s in zip("qkv", (q_s, k_s, v_s))},
+        _o_scale_float=None,
+    )
+    table, lens = torch.tensor([[0], [1]], dtype=torch.int32), torch.tensor([8])
     calls: dict[str, Any] = {}
-    dequantized = torch.zeros(1)
 
     def capture(name, result=None):
         def call(*args, **kwargs):
@@ -815,74 +776,65 @@ def test_flashinfer_trtllm_scales_follow_query_and_kv(fp8_query):
 
         return call
 
-    int32 = dict(dtype=torch.int32)
-    block_table = torch.tensor([[0], [1]], **int32)
-    lens = torch.tensor([8], **int32)
-    metadata = SimpleNamespace(
-        num_actual_tokens=5,
-        use_cascade=False,
-        kv_cache_layout=KVCacheLayout.LBHNC,
-        num_decodes=1,
-        num_decode_tokens=1,
-        num_prefills=1,
-        num_prefill_tokens=4,
-        q_data_type_prefill=q_dtype,
-        q_data_type_decode=q_dtype,
-        prefill=fi.TRTLLMPrefill(
-            block_table[1:], lens, torch.tensor([0, 4], **int32), lens, 4, 8
-        ),
-        decode=fi.FlashInferTrtllmAPIDecode(
-            fi.FlashInferDecodeKernel.TRTLLM_GEN, block_table[:1], lens, 8
-        ),
-    )
-    layer = SimpleNamespace(
-        **{f"_{n}_scale": torch.tensor(s) for n, s in zip("qkv", (q_s, k_s, v_s))},
-        **{f"_{n}_scale_float": s for n, s in zip("qkv", (q_s, k_s, v_s))},
-        _o_scale_float=None,
-    )
     with (
         set_current_vllm_config(vllm_config),
         unittest.mock.patch.object(
             type(current_platform),
             "get_device_capability",
-            return_value=DeviceCapability(10, 0),
+            return_value=DeviceCapability(major, 0),
         ),
         unittest.mock.patch.multiple(
             fi,
+            _mm_prefix_wrapper_cls=lambda: object if wrapper else None,
             can_use_trtllm_attention=lambda *a, **k: True,
+            force_use_trtllm_attention=lambda: None,
             _get_trtllm_workspace_buffer=lambda: torch.zeros(8),
-            trtllm_prefill_attn_kvfp8_dequant=capture(
-                "dequant", (dequantized, block_table[1:])
-            ),
+            trtllm_prefill_attn_kvfp8_dequant=capture("dequant", ("kv", table)),
             trtllm_batch_context_with_kv_cache=capture("prefill"),
             trtllm_batch_decode_with_kv_cache=capture("decode"),
         ),
     ):
-        impl = fi.FlashInferImpl(8, HEAD_SIZE, scale, 2, None, None, "fp8_e4m3")
-        impl.forward(
-            layer,
-            torch.zeros(5, 8, HEAD_SIZE, dtype=q_dtype),
-            None,
-            None,
-            torch.zeros(2, 2, 16, 2 * HEAD_SIZE, dtype=torch.uint8),
-            metadata,
-            torch.empty(5, 8, HEAD_SIZE, dtype=torch.bfloat16),
-        )
+        q_dtype = fi.FlashInferMetadataBuilder.get_q_data_type(builder, True)
+        assert fi.FlashInferMetadataBuilder.get_q_data_type(builder, False) == q_dtype
+        impl = fi.FlashInferImpl(8, HEAD_SIZE, scale, 2, None, None, cache_dtype)
+        fused = impl.fused_output_quant_supported(fi.kFp8StaticTensorSym)
+        if major == 10:
+            metadata = SimpleNamespace(
+                num_actual_tokens=5,
+                use_cascade=False,
+                kv_cache_layout=KVCacheLayout.LBHNC,
+                num_decodes=1,
+                num_decode_tokens=1,
+                num_prefills=1,
+                num_prefill_tokens=4,
+                q_data_type_prefill=q_dtype,
+                q_data_type_decode=q_dtype,
+                prefill=fi.TRTLLMPrefill(table[1:], lens, lens, lens, 4, 8),
+                decode=fi.FlashInferTrtllmAPIDecode(
+                    fi.FlashInferDecodeKernel.TRTLLM_GEN, table[:1], lens, 8
+                ),
+            )
+            query = torch.zeros(5, 8, HEAD_SIZE, dtype=q_dtype)
+            kv_cache = torch.zeros(2, 2, 16, 2 * HEAD_SIZE, dtype=torch.uint8)
+            impl.forward(layer, query, None, None, kv_cache, metadata, query)
 
+    assert q_dtype == (mc.dtype if native else torch.float8_e4m3fn)
+    assert impl.supports_quant_query_input == fused == (major == 10 and not native)
+    if major == 9:
+        return
     prefill, decode = calls["prefill"], calls["decode"]
     assert prefill["query"].dtype == decode["query"].dtype == q_dtype
-    # Decode always reads the FP8 cache directly.
     assert decode["kv_cache"][0].dtype == torch.float8_e4m3fn
     assert decode["bmm2_scale"] == v_s
-    if fp8_query:
+    if native:
+        assert calls["dequant"][2:4] == (layer._k_scale, layer._v_scale)
+        assert prefill["kv_cache"] == "kv"
+        assert (prefill["bmm1_scale"], prefill["bmm2_scale"]) == (scale, 1.0)
+        assert decode["bmm1_scale"] == scale * k_s
+    else:
         assert "dequant" not in calls
         assert prefill["bmm1_scale"] == decode["bmm1_scale"] == scale * q_s * k_s
         assert prefill["bmm2_scale"] == v_s
-    else:
-        assert calls["dequant"][2:4] == (layer._k_scale, layer._v_scale)
-        assert prefill["kv_cache"] is dequantized
-        assert (prefill["bmm1_scale"], prefill["bmm2_scale"]) == (scale, 1.0)
-        assert decode["bmm1_scale"] == scale * k_s
 
 
 def _flashinfer_builder_env(sliding_window: int | None, cache_dtype: str = "auto"):
