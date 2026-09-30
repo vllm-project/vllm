@@ -31,8 +31,9 @@ import torch.nn as nn
 import vllm.envs as envs
 from vllm.compilation.counter import compilation_counter
 from vllm.compilation.cuda_graph import CUDAGraphStat
+from vllm.compilation.wrapper import compile_model_with_stock_torch
 from vllm.config import VllmConfig
-from vllm.config.compilation import CUDAGraphMode
+from vllm.config.compilation import CompilationMode, CUDAGraphMode
 from vllm.distributed.aux_output_connector.worker import (
     AuxOutputWorkerConnector,
     get_aux_output_connector,
@@ -233,10 +234,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         # Persistent buffer for intermediate tensors (non-first PP ranks).
         self.intermediate_tensors: IntermediateTensors | None = None
-
-        # Data parallelism.
-        self.dp_size = self.parallel_config.data_parallel_size
-        self.dp_rank = self.parallel_config.data_parallel_rank
 
         # Dual batch overlap. Created in initialize_kv_cache(), once everything
         # it runs the microbatched forward with exists.
@@ -509,9 +506,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         if self.is_pooling_model and self.is_last_pp_rank:
             self.pooling_runner = PoolingRunner(self.model, self.vllm_config)
         eplb_models_added |= self.eplb.maybe_register_model(
-            self.model, self.model_config, load_dummy_weights
+            self.model, self.model_config
         )
-        self.eplb.maybe_start_async_loop(eplb_models_added)
+        self.eplb.maybe_start_async_loop(eplb_models_added, load_dummy_weights)
 
         if not self.is_first_pp_rank:
             # For non-first PP ranks, create intermediate tensors sized
@@ -525,6 +522,19 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             )
 
         get_offloader().post_init()
+
+        if self.compilation_config.mode == CompilationMode.STOCK_TORCH_COMPILE:
+            compile_model_with_stock_torch(self.model, self.vllm_config)
+
+    @property
+    def dp_size(self) -> int:
+        # Not cached: elastic EP rewrites parallel_config in place on reconfigure.
+        return self.parallel_config.data_parallel_size
+
+    @property
+    def dp_rank(self) -> int:
+        # Not cached: elastic EP rewrites parallel_config in place on reconfigure.
+        return self.parallel_config.data_parallel_rank
 
     def get_model(self) -> nn.Module:
         return self.model
@@ -904,8 +914,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 spec_hidden_states = pre_hc_hidden_states[: hidden_states.shape[0]]  # type: ignore[union-attr]
             if isinstance(self.sampler, GPUWatermarkSampler):
                 self.speculator.prepare_watermarking(
-                    self.sampler._get_contexts(input_batch.idx_mapping),
-                    self.sampler.watermarking.gpu[input_batch.idx_mapping],
+                    self.sampler, input_batch.idx_mapping
                 )
             with use_workspace_lane(self._draft_workspace_lane):
                 self.speculator.propose(
@@ -2054,6 +2063,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # Non-last PP rank: hidden_states is None because this rank produced
             # IntermediateTensors instead of final hidden states. Receive the
             # sampled tokens broadcast from the last rank and update local state.
+            if self.pcp_manager is not None:
+                input_batch = self.pcp_manager.global_batch
             assert self.pp_handler is not None
             all_decode_next = self.pp_handler.receive(input_batch)
             # Optimistically update num_computed_tokens for entire batch here.
@@ -2182,8 +2193,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 spec_hidden_states = pre_hc_hidden_states[: draft_hidden_states.size(0)]
             if isinstance(self.sampler, GPUWatermarkSampler):
                 self.speculator.prepare_watermarking(
-                    self.sampler._get_contexts(input_batch.idx_mapping),
-                    self.sampler.watermarking.gpu[input_batch.idx_mapping],
+                    self.sampler, input_batch.idx_mapping
                 )
             with use_workspace_lane(self._draft_workspace_lane):
                 draft_tokens = self.speculator.propose(
@@ -2337,9 +2347,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     def setup_eplb_from_mapping(
         self, expanded_physical_to_logical: torch.Tensor
     ) -> None:
-        self.eplb.setup_from_mapping(
-            self.model, self.model_config, expanded_physical_to_logical
-        )
+        self.eplb.setup_from_mapping(self.model_config, expanded_physical_to_logical)
 
     ########### EPLB methods end ###########
 
