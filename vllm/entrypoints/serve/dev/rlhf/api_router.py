@@ -3,13 +3,14 @@
 
 import json
 from http import HTTPStatus
-from typing import Annotated
+from typing import Annotated, Any
 
 from fastapi import APIRouter, Body, FastAPI, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
 
 from vllm.distributed.weight_transfer.base import (
     WeightTransferInitRequest,
+    WeightTransferUpdatePayload,
     WeightTransferUpdateRequest,
 )
 from vllm.engine.protocol import EngineClient
@@ -104,6 +105,10 @@ async def abort_requests(raw_request: Request) -> JSONResponse:
         body = await raw_request.json()
     except json.JSONDecodeError as e:
         raise HTTPException(status_code=400, detail="Invalid JSON format") from e  # noqa: B904
+    if not isinstance(body, dict):
+        raise HTTPException(
+            status_code=400, detail="Request body must be a JSON object"
+        )
 
     request_ids = body.get("request_ids")
 
@@ -154,17 +159,10 @@ async def is_paused(raw_request: Request) -> JSONResponse:
 
 
 @router.post("/init_weight_transfer_engine")
-async def init_weight_transfer_engine(raw_request: Request):
-    try:
-        body = await raw_request.json()
-    except json.JSONDecodeError as e:
-        raise HTTPException(status_code=400, detail="Invalid JSON format") from e  # noqa: B904
-    init_info = body.get("init_info")
-    if init_info is None:
-        raise HTTPException(
-            status_code=HTTPStatus.BAD_REQUEST.value,
-            detail="Missing 'init_info' in request body",
-        )
+async def init_weight_transfer_engine(
+    raw_request: Request,
+    init_info: Annotated[dict[str, Any], Body(embed=True)],
+):
     await engine_client(raw_request).init_weight_transfer_engine(
         WeightTransferInitRequest(init_info=init_info)
     )
@@ -184,17 +182,10 @@ async def start_draft_weight_update(raw_request: Request):
 
 
 @router.post("/update_weights")
-async def update_weights(raw_request: Request):
-    try:
-        body = await raw_request.json()
-    except json.JSONDecodeError as e:
-        raise HTTPException(status_code=400, detail="Invalid JSON format") from e  # noqa: B904
-    update_info = body.get("update_info")
-    if update_info is None:
-        raise HTTPException(
-            status_code=HTTPStatus.BAD_REQUEST.value,
-            detail="Missing 'update_info' in request body",
-        )
+async def update_weights(
+    raw_request: Request,
+    update_info: Annotated[WeightTransferUpdatePayload, Body(embed=True)],
+):
     await engine_client(raw_request).update_weights(
         request=WeightTransferUpdateRequest(update_info=update_info)
     )
