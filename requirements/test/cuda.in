@@ -86,7 +86,7 @@ plotly # required for perf comparison html report
 # Skipped (no patched release yet): sqlitedict, accelerate, lmcache, nltk GHSA-8mgp-746c-j5xp.
 urllib3>=2.7.0
 cryptography>=50.0.0
-pyjwt>=2.13.0
+pyjwt>=2.14.0
 pyasn1>=0.6.4
 python-multipart>=0.0.31
 anyio>=4.14.2
