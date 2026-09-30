@@ -46,7 +46,6 @@ from vllm.models.kimi_k3.amd.kda_metadata import (
 from vllm.models.kimi_k3.amd.ops.fused_sigmoid_gating import (
     fused_sigmoid_gating_delta_rule_update,
 )
-from vllm.models.kimi_k3.amd.ops.third_party.kda import fused_recurrent_kda
 from vllm.models.kimi_k3.amd.ops.kda_chunk import (
     is_fused_kda_chunk_supported,
 )
@@ -56,6 +55,7 @@ from vllm.models.kimi_k3.amd.ops.kda_decode import (
     make_decode_norm_weight_loader,
 )
 from vllm.models.kimi_k3.amd.ops.kda_prefill import chunk_kda_prefill
+from vllm.models.kimi_k3.amd.ops.third_party.kda import fused_recurrent_kda
 from vllm.models.kimi_k3.amd.ops.third_party.replayssm import (
     append_kda_replayssm_buffers,
     append_kda_replayssm_dtypes,
@@ -613,8 +613,7 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
                 uniform_sequence_length = m.uniform_spec_sequence_length
                 if (
                     uniform_sequence_length is not None
-                    and q_spec.shape[1]
-                    != m.num_spec_decodes * uniform_sequence_length
+                    and q_spec.shape[1] != m.num_spec_decodes * uniform_sequence_length
                 ):
                     uniform_sequence_length = None
                 core_attn_out_spec, _ = fused_recurrent_kda(

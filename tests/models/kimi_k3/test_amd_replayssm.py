@@ -117,9 +117,7 @@ def test_replayssm_verify_window_matches_recurrence(cache_len: int) -> None:
     set_random_seed(1)
     A_log = torch.randn(NUM_HEADS, device=DEVICE)
     dt_bias = torch.randn(NUM_HEADS, HEAD_DIM, device=DEVICE)
-    state0 = 0.1 * torch.randn(
-        num_seqs, NUM_HEADS, HEAD_DIM, HEAD_DIM, device=DEVICE
-    )
+    state0 = 0.1 * torch.randn(num_seqs, NUM_HEADS, HEAD_DIM, HEAD_DIM, device=DEVICE)
     ref_out, _ = _reference(q, k, v, a, b, A_log, dt_bias, state0, num_seqs, seq_len)
     ref_second = _split(ref_out, num_seqs, seq_len, window, seq_len)
 
