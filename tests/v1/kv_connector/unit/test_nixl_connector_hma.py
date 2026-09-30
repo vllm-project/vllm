@@ -375,6 +375,7 @@ def test_update_state_after_alloc_tracks_cached_blocks_per_group():
     scheduler._reqs_in_batch = set()
     scheduler._reqs_need_save = {}
     scheduler._reqs_need_recv = {}
+    scheduler._reqs_recving = set()
     scheduler.use_host_buffer = False
     scheduler.is_bidirectional_kv_xfer_enabled = False
     scheduler._is_hma_required = False
@@ -429,6 +430,7 @@ def test_full_local_hit_is_not_awaited_by_the_scheduler():
     scheduler._reqs_in_batch = set()
     scheduler._reqs_need_save = {}
     scheduler._reqs_need_recv = {}
+    scheduler._reqs_recving = set()
     scheduler.use_host_buffer = False
     scheduler.is_bidirectional_kv_xfer_enabled = False
     scheduler._is_hma_required = False

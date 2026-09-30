@@ -66,7 +66,11 @@ from vllm.distributed.kv_transfer.kv_connector.v1.ssm_conv_transfer_utils import
     MambaConvSplitInfo,
     derive_mamba_conv_split,
 )
-from vllm.distributed.nixl_utils import NixlWrapper, nixl_agent_config
+from vllm.distributed.nixl_utils import (
+    NixlWrapper,
+    nixl_agent_config,
+    nixlRemoteDisconnectError,
+)
 from vllm.distributed.parallel_state import (
     get_pcp_group,
     get_tensor_model_parallel_rank,
@@ -3053,6 +3057,26 @@ class NixlBaseConnectorWorker:
             for handle in handles:
                 try:
                     xfer_state = self.nixl_wrapper.check_xfer_state(handle)
+                except Exception as e:
+                    self._log_failure(
+                        failure_type="transfer_exception",
+                        req_id=req_id,
+                        error=e,
+                    )
+                    if nixlRemoteDisconnectError is not None and isinstance(
+                        e, nixlRemoteDisconnectError
+                    ):
+                        # NIXL caches disconnect as a terminal transfer status.
+                        if not self._handle_failed_transfer(
+                            req_id, handle, failed_req_ids
+                        ):
+                            in_progress.append(handle)
+                    else:
+                        # An unobservable READ can still have writes in flight.
+                        self._handle_failed_transfer(req_id, None, failed_req_ids)
+                        in_progress.append(handle)
+                    continue
+                try:
                     if xfer_state == "DONE":
                         res = self.nixl_wrapper.get_xfer_telemetry(handle)
                         self.xfer_stats.record_transfer(res)

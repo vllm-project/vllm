@@ -24,6 +24,9 @@ import pytest
 from pydantic import ValidationError
 
 from vllm.config.scheduler import SchedulerConfig
+from vllm.entrypoints.generate.base.serving import GenerateBaseServing
+from vllm.entrypoints.openai.completion.protocol import CompletionRequest
+from vllm.entrypoints.serve.engine.protocol import ErrorResponse
 from vllm.entrypoints.serve.exception_handling.error_response import (
     create_error_response,
 )
@@ -125,6 +128,81 @@ def _make_scheduler_config(**kwargs) -> SchedulerConfig:
         max_model_len=4096,
         is_encoder_decoder=False,
         **kwargs,
+    )
+
+
+async def _check_kv_transfer_cancellation(admitted, error_response, barrier=None):
+    ready = asyncio.Event()
+
+    async def submit(request):
+        ready.set()
+
+    llm = _make_request_test_llm(10, submit)
+    llm.notify_kv_transfer_request_rejected = AsyncMock()
+    serving = SimpleNamespace(
+        has_kv_connector=True,
+        engine_client=llm,
+        _get_data_parallel_rank=lambda _: None,
+    )
+    request = CompletionRequest(
+        model="test", prompt=[1], kv_transfer_params={"do_remote_prefill": True}
+    )
+
+    async def consume():
+        if admitted:
+            async for _ in llm.generate(
+                _make_engine_request("test", 1), SamplingParams(), "test"
+            ):
+                pass
+        else:
+            ready.set()
+            await asyncio.Event().wait()
+
+    async def create_response():
+        try:
+            # Completion serving also iterates engines in child tasks.
+            await asyncio.create_task(consume())
+        except asyncio.CancelledError:
+            if error_response:
+                return create_error_response("Client disconnected")
+            raise
+
+    task = asyncio.create_task(
+        GenerateBaseServing._with_kv_transfer_rejection_cleanup(
+            serving, create_response(), request, None
+        )
+    )
+    await ready.wait()
+    if barrier is not None:
+        own_ready, peer_ready = barrier
+        own_ready.set()
+        await peer_ready.wait()
+    task.cancel()
+    if error_response:
+        assert isinstance(await task, ErrorResponse)
+    else:
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    assert llm.notify_kv_transfer_request_rejected.await_count == int(not admitted)
+    assert request.kv_transfer_params == {"do_remote_prefill": True}
+    if admitted:
+        llm.engine_core.abort_requests_async.assert_awaited_once_with(["test"])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("admitted", [False, True])
+@pytest.mark.parametrize("error_response", [False, True])
+async def test_kv_transfer_cleanup_follows_engine_admission(admitted, error_response):
+    """Only cancellation before admission needs a rejection-cleanup request."""
+    await _check_kv_transfer_cancellation(admitted, error_response)
+
+
+@pytest.mark.asyncio
+async def test_kv_transfer_cleanup_isolated_between_concurrent_requests():
+    first_ready, second_ready = asyncio.Event(), asyncio.Event()
+    await asyncio.gather(
+        _check_kv_transfer_cancellation(False, False, (first_ready, second_ready)),
+        _check_kv_transfer_cancellation(True, True, (second_ready, first_ready)),
     )
 
 

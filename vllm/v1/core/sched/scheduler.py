@@ -441,6 +441,7 @@ class Scheduler(SchedulerInterface):
     def _find_shared_prefix_load(self, request: Request) -> _SharedPrefixLoad | None:
         if not self._shared_prefix_loads or not self._can_share_prefix_load(request):
             return None
+        assert self.connector is not None
         for index in range(len(request.block_hashes) - 1, -1, -1):
             block_hash = request.block_hashes[index]
             entry = self._shared_prefix_loads.get(block_hash)
@@ -449,6 +450,9 @@ class Scheduler(SchedulerInterface):
                 and not entry.failed
                 and entry.num_tokens == (index + 1) * self.block_size
                 and entry.num_tokens < request.num_tokens
+                and self.connector.is_shared_prefix_load_compatible(
+                    request, entry.owner, entry.num_tokens
+                )
             ):
                 return entry
         return None
@@ -1028,6 +1032,10 @@ class Scheduler(SchedulerInterface):
                             break
                         shared_load.followers.add(request_id)
                         self._shared_load_followers[request_id] = shared_load
+                        assert self.connector is not None
+                        self.connector.on_shared_prefix_load(
+                            request, shared_load.owner, shared_load.num_tokens
+                        )
                         request_queue.pop_request()
                         request.status = RequestStatus.WAITING_FOR_REMOTE_KVS
                         request.num_computed_tokens = shared_load.num_tokens
@@ -1354,22 +1362,32 @@ class Scheduler(SchedulerInterface):
                     break
 
                 self._shared_load_recompute.discard(request_id)
+                shared_tokens = num_computed_tokens
                 if (
                     load_kv_async
-                    and 0 < num_computed_tokens < request.num_tokens
-                    and num_computed_tokens % self.block_size == 0
-                    and num_computed_tokens
-                    <= len(request.block_hashes) * self.block_size
+                    and self.connector is not None
+                    and self.connector.supports_shared_prefix_load_slicing()
+                ):
+                    # Only immutable full blocks may be shared. A full-prompt
+                    # load can contain these; followers compute their own tail.
+                    shared_tokens = min(shared_tokens, request.num_tokens - 1)
+                    shared_tokens -= shared_tokens % self.block_size
+                if (
+                    load_kv_async
+                    and 0 < shared_tokens < request.num_tokens
+                    and shared_tokens % self.block_size == 0
+                    and shared_tokens <= len(request.block_hashes) * self.block_size
                     and self._can_share_prefix_load(request)
                 ):
-                    key = request.block_hashes[
-                        num_computed_tokens // self.block_size - 1
-                    ]
+                    key = request.block_hashes[shared_tokens // self.block_size - 1]
                     if key not in self._shared_prefix_loads:
                         self._shared_prefix_loads[key] = _SharedPrefixLoad(
                             request,
-                            num_computed_tokens,
-                            self.kv_cache_manager.get_blocks(request_id),
+                            shared_tokens,
+                            self.kv_cache_manager.truncate_computed_blocks(
+                                self.kv_cache_manager.get_blocks(request_id),
+                                shared_tokens,
+                            ),
                         )
                         self._shared_load_owners[request_id] = key
 

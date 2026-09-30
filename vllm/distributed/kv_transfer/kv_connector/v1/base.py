@@ -470,13 +470,46 @@ class KVConnectorBase_V1(ABC):
     def supports_shared_prefix_loads(self) -> bool:
         """Whether async loads may be shared using core prefix-cache hashes.
 
-        Opting in guarantees that external KV is exact, uses the same isolation
-        namespace as local prefix caching, and has no request-specific access
-        restrictions. A load must finish even if its initiating request aborts.
-        Followers will not issue a lookup or load; their normal request lifecycle
-        hooks still run. Unsupported connectors retain per-request allocation.
+        For requests accepted by the compatibility hook, external KV must be
+        exact and sharing must respect the isolation namespace of local prefix
+        caching as well as connector-specific access restrictions. A load must
+        finish even if its initiating request aborts.
+        Followers will not issue a lookup or load. The compatibility and attach
+        hooks below run before their normal request lifecycle hooks.
+        Unsupported connectors retain per-request allocation.
         """
         return False
+
+    def supports_shared_prefix_load_slicing(self) -> bool:
+        """Whether full blocks within a larger async load may be shared.
+
+        The connector must permit followers to compute the remaining tail
+        locally, without a separate lookup or load for that tail. By default,
+        core only shares aligned loads ending before the last request token.
+        """
+        return False
+
+    def is_shared_prefix_load_compatible(
+        self, request: "Request", owner: "Request", num_tokens: int
+    ) -> bool:
+        """Check connector-specific isolation before adopting an owner's load.
+
+        Core has already checked the prefix hashes and pinned destination
+        blocks. This must be a metadata-only check with no side effects.
+        """
+        return True
+
+    def on_shared_prefix_load(
+        self, request: "Request", owner: "Request", num_tokens: int
+    ) -> None:
+        """Handle a follower that adopted a compatible in-flight prefix.
+
+        Called once, after allocation succeeds, instead of
+        ``update_state_after_alloc``. Connectors with per-request remote
+        resources must release the follower's unused resources here without
+        cancelling the owner's transfer.
+        """
+        return
 
     def bind_kv_cache_manager(self, kv_cache_manager: "KVCacheManager") -> None:
         """Bind the scheduler's cache manager after it has been constructed."""

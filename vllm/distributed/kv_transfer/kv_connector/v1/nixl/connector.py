@@ -339,6 +339,29 @@ class NixlBaseConnector(KVConnectorBase_V1, SupportsHMA):
 class NixlPullConnector(NixlBaseConnector):
     """Pull-based (READ) NIXL KV transfer connector."""
 
+    def supports_shared_prefix_loads(self) -> bool:
+        scheduler = self.connector_scheduler
+        return isinstance(scheduler, NixlPullConnectorScheduler) and (
+            scheduler.supports_shared_prefix_loads()
+        )
+
+    def supports_shared_prefix_load_slicing(self) -> bool:
+        return True
+
+    def is_shared_prefix_load_compatible(
+        self, request: "Request", owner: "Request", num_tokens: int
+    ) -> bool:
+        assert isinstance(self.connector_scheduler, NixlPullConnectorScheduler)
+        return self.connector_scheduler.is_shared_prefix_load_compatible(
+            request, owner, num_tokens
+        )
+
+    def on_shared_prefix_load(
+        self, request: "Request", owner: "Request", num_tokens: int
+    ) -> None:
+        assert isinstance(self.connector_scheduler, NixlPullConnectorScheduler)
+        self.connector_scheduler.on_shared_prefix_load(request, owner, num_tokens)
+
     def __init__(
         self,
         vllm_config: VllmConfig,
