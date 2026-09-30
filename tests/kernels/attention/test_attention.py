@@ -26,7 +26,6 @@ NUM_BLOCKS = 4321  # Arbitrary values for testing
 PARTITION_SIZE_ROCM = 256
 DTYPES = [torch.bfloat16, torch.float16]
 NUM_GEN_SEQS = [7]  # Arbitrary values for testing
-NUM_PREFILL_SEQS = [3]  # Arbitrary values for testing
 NUM_HEADS = [(32, 8), (40, 40), (64, 8)]  # Arbitrary values for testing
 
 # Head sizes supported by the ROCm paged attention kernel.

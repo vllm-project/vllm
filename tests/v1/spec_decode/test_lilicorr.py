@@ -11,6 +11,7 @@ from torch import nn
 
 from vllm.config import (
     CompilationConfig,
+    CompilationMode,
     DeviceConfig,
     LoadConfig,
     VllmConfig,
@@ -122,7 +123,7 @@ def test_lilicorr_matches_exported_head(head_width, slots, dtype):
         set_current_vllm_config(
             VllmConfig(
                 device_config=DeviceConfig("cuda"),
-                compilation_config=CompilationConfig(mode=0),
+                compilation_config=CompilationConfig(mode=CompilationMode.NONE),
             )
         ),
     ):
@@ -183,23 +184,23 @@ def test_runtime_length_keeps_trained_checkpoint_geometry(monkeypatch):
     with set_current_vllm_config(
         VllmConfig(
             device_config=DeviceConfig("cpu"),
-            compilation_config=CompilationConfig(mode=0),
+            compilation_config=CompilationConfig(mode=CompilationMode.NONE),
         )
     ):
         for slots in (1, 3):
             spec.num_speculative_tokens = slots
             head = LiLiCorr(
-                vllm_config=SimpleNamespace(speculative_config=spec)
+                vllm_config=SimpleNamespace(speculative_config=spec)  # type: ignore[arg-type]
             ).lilicorr
             assert head.slot_embedding.shape == (1, 1, 3, 1, 8)
             assert head.relative_slot_bias.shape == (2, 7)
         spec.draft_model_config.hf_config.dflash_config["lilicorr_enabled"] = False
         with pytest.raises(ValueError, match="lilicorr_enabled"):
-            LiLiCorr(vllm_config=SimpleNamespace(speculative_config=spec))
+            LiLiCorr(vllm_config=SimpleNamespace(speculative_config=spec))  # type: ignore[arg-type]
         spec.draft_model_config.hf_config.dflash_config["lilicorr_enabled"] = True
         spec.num_speculative_tokens = 4
         with pytest.raises(ValueError, match="trained block_size"):
-            LiLiCorr(vllm_config=SimpleNamespace(speculative_config=spec))
+            LiLiCorr(vllm_config=SimpleNamespace(speculative_config=spec))  # type: ignore[arg-type]
 
 
 @pytest.mark.parametrize("tp_size", [1, 2])
@@ -268,7 +269,11 @@ def test_candidates_use_global_partition_and_exclude_padding(monkeypatch, tp_siz
         )
         monkeypatch.setattr(logits_processor, "_topk", lambda x, k: x.topk(k, dim=-1))
         ids, values = logits_processor.LogitsProcessor.get_top_k_tokens(
-            fake, lm_head, torch.empty(2, 1), 2, return_log_probs=True
+            fake,  # type: ignore[arg-type]
+            lm_head,  # type: ignore[arg-type]
+            torch.empty(2, 1),
+            2,
+            return_log_probs=True,
         )
         expected = torch.cat(valid_shards, -1).log_softmax(-1).topk(2)
         torch.testing.assert_close(ids, expected.indices)
@@ -286,13 +291,13 @@ def test_context_anchor_is_last_committed_normalized_feature():
         anchor_valid=torch.ones(4, dtype=torch.bool),
     )
     batch = SimpleNamespace(num_reqs=2, query_start_loc=torch.tensor([0, 2, 6]))
-    LiLiCorrSpeculator.prepare_context_anchor(spec, batch, torch.tensor([0, 2]))
+    LiLiCorrSpeculator.prepare_context_anchor(spec, batch, torch.tensor([0, 2]))  # type: ignore[arg-type]
     torch.testing.assert_close(spec.anchor_hidden[:2], norm(hidden[[1, 3]]))
     assert spec.anchor_valid.tolist() == [True, True, False, False]
     assert not spec.anchor_hidden[2:].any()
     # A smaller reordered batch must not retain an old request's anchor.
     batch = SimpleNamespace(num_reqs=1, query_start_loc=torch.tensor([0, 3]))
-    LiLiCorrSpeculator.prepare_context_anchor(spec, batch, torch.tensor([1]))
+    LiLiCorrSpeculator.prepare_context_anchor(spec, batch, torch.tensor([1]))  # type: ignore[arg-type]
     torch.testing.assert_close(spec.anchor_hidden[0], norm(hidden[1]))
     assert not spec.anchor_hidden[1:].any()
 
@@ -316,7 +321,7 @@ def test_candidate_generation_routes_scores_and_adaptive_inputs(monkeypatch, lil
 
     monkeypatch.setattr(DFlashSpeculator, "__init__", init_base)
     cls = LiLiCorrSpeculator if lilicorr else DFlash2Speculator
-    spec = cls(None, torch.device("cpu"))
+    spec = cls(None, torch.device("cpu"))  # type: ignore[arg-type]
     hidden = torch.arange(36).float().view(9, 4)
     spec._run_model = lambda *args: hidden
     spec.sample_indices = torch.tensor([1, 2, 4, 5, 7, 8])
@@ -329,7 +334,7 @@ def test_candidate_generation_routes_scores_and_adaptive_inputs(monkeypatch, lil
     spec.draft_logits = None
     spec.use_fp64_gumbel = False
     spec.enable_adaptive_verification = True
-    spec.input_buffers = SimpleNamespace(input_ids=torch.arange(9))
+    spec.input_buffers = SimpleNamespace(input_ids=torch.arange(9))  # type: ignore[assignment]
     candidates = torch.arange(24).view(6, 4)
     log_probs = candidates.float().log_softmax(-1)
     scores = torch.randn(3, 2, 4, 4)
@@ -349,22 +354,35 @@ def test_candidate_generation_routes_scores_and_adaptive_inputs(monkeypatch, lil
         compute_candidates=lambda h: (candidates, log_probs),
         model=SimpleNamespace(lilicorr=score, candidate_selector=score),
     )
-    spec.target_embeddings = lambda ids: ids.float().unsqueeze(-1).expand(*ids.shape, 4)
     if lilicorr:
+        assert isinstance(spec, LiLiCorrSpeculator)
+        monkeypatch.setattr(
+            spec,
+            "target_embeddings",
+            lambda ids: ids.float().unsqueeze(-1).expand(*ids.shape, 4),
+            raising=False,
+        )
         spec.anchor_hidden.copy_(torch.arange(12).view(3, 4))
         spec.anchor_valid[:2] = True
-    spec.candidate_sampler.sample = sample
-    spec._maybe_predict_acceptance = lambda *args: adaptive_inputs.extend(args)
+    monkeypatch.setattr(spec.candidate_sampler, "sample", sample)
+    monkeypatch.setattr(
+        spec, "_maybe_predict_acceptance", lambda *args: adaptive_inputs.extend(args)
+    )
     spec._generate_draft(3, 9, None, None, None)
 
     expected_ids = candidates.view(3, 2, 4)
-    expected_first = spec.target_embeddings(expected_ids) if lilicorr else expected_ids
+    expected_first = (
+        spec.target_embeddings(expected_ids)
+        if isinstance(spec, LiLiCorrSpeculator)
+        else expected_ids
+    )
     torch.testing.assert_close(scoring_inputs[0], expected_first)
     torch.testing.assert_close(scoring_inputs[1], log_probs.view(3, 2, 4))
     torch.testing.assert_close(
         scoring_inputs[2], hidden[spec.sample_indices].view(3, 2, 4)
     )
     if lilicorr:
+        assert isinstance(spec, LiLiCorrSpeculator)
         torch.testing.assert_close(scoring_inputs[3], spec.anchor_hidden)
         torch.testing.assert_close(scoring_inputs[4], spec.anchor_valid)
     else:
@@ -472,7 +490,7 @@ def test_checkpoint_coverage_rejects_incomplete_or_wrong_heads(
 ):
     from vllm.model_executor.models.lilicorr import LiLiCorr, LiLiCorrForCausalLM
 
-    wrapper = LiLiCorrForCausalLM.__new__(LiLiCorrForCausalLM)
+    wrapper = LiLiCorrForCausalLM.__new__(LiLiCorrForCausalLM)  # type: ignore[type-abstract]
     nn.Module.__init__(wrapper)
     wrapper.model = LiLiCorr.__new__(LiLiCorr)
     nn.Module.__init__(wrapper.model)
@@ -480,7 +498,7 @@ def test_checkpoint_coverage_rejects_incomplete_or_wrong_heads(
     with set_current_vllm_config(
         VllmConfig(
             device_config=DeviceConfig("cpu"),
-            compilation_config=CompilationConfig(mode=0),
+            compilation_config=CompilationConfig(mode=CompilationMode.NONE),
         )
     ):
         wrapper.model.lilicorr = LiLiCorrHead(
@@ -615,10 +633,10 @@ def owned_head_model(monkeypatch):
         with set_current_vllm_config(
             VllmConfig(
                 device_config=DeviceConfig("cpu"),
-                compilation_config=CompilationConfig(mode=0),
+                compilation_config=CompilationConfig(mode=CompilationMode.NONE),
             )
         ):
-            model = LiLiCorrForCausalLM(vllm_config=vllm_config)
+            model = LiLiCorrForCausalLM(vllm_config=vllm_config)  # type: ignore[arg-type]
         return model, vllm_config
 
     return build
@@ -720,7 +738,7 @@ def test_quantized_head_calls_methods_without_reading_packed_weights(monkeypatch
     with set_current_vllm_config(
         VllmConfig(
             device_config=DeviceConfig("cpu"),
-            compilation_config=CompilationConfig(mode=0),
+            compilation_config=CompilationConfig(mode=CompilationMode.NONE),
         )
     ):
         head = LiLiCorrHead(
@@ -728,7 +746,7 @@ def test_quantized_head_calls_methods_without_reading_packed_weights(monkeypatch
             block_size=4,
             rms_norm_eps=1e-6,
             config=_config(hidden_size=8),
-            quant_config=quant_config,
+            quant_config=quant_config,  # type: ignore[arg-type]
             prefix="model.lilicorr",
         )
     with torch.no_grad():

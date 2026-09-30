@@ -41,6 +41,14 @@ def test_sampling_params_trace_field_rejects_empty_list():
         )
 
 
+def test_sampling_params_trace_field_rejects_prompt_scoring():
+    params = SamplingParams(trace_decode_token_ids=[1], prompt_logprob_token_ids=[2, 3])
+    with pytest.raises(ValueError, match="prompt_logprob_token_ids"):
+        params._validate_trace_replay(
+            _make_model_config(vocab_size=100), speculative_config=None
+        )
+
+
 def test_sampling_params_trace_field_requires_single_output():
     params = SamplingParams(n=2, trace_decode_token_ids=[1])
     with pytest.raises(ValueError, match="requires n=1"):
@@ -96,7 +104,8 @@ def test_trace_decode_token_ids_rejects_speculative_decoding():
     params = SamplingParams(trace_decode_token_ids=[1])
     with pytest.raises(ValueError, match="not supported with speculative decoding"):
         params._validate_trace_replay(
-            _make_model_config(vocab_size=100), speculative_config=object()
+            _make_model_config(vocab_size=100),
+            speculative_config=object(),  # type: ignore[arg-type]  # Only non-None presence is tested.
         )
 
 
