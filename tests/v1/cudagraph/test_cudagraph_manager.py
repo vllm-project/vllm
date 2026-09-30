@@ -38,7 +38,7 @@ def _reset_graph_pool_id():
 
 def _create_vllm_config() -> MagicMock:
     compilation_config = CompilationConfig(
-        cudagraph_mode="FULL",
+        cudagraph_mode=CUDAGraphMode.FULL,
         cudagraph_capture_sizes=[4],
     )
     compilation_config.max_cudagraph_capture_size = 4
@@ -264,7 +264,7 @@ def _create_decode_vllm_config(
     use_kda_recoverssm: bool = False,
 ) -> MagicMock:
     compilation_config = CompilationConfig(
-        cudagraph_mode="FULL_AND_PIECEWISE",
+        cudagraph_mode=CUDAGraphMode.FULL_AND_PIECEWISE,
         cudagraph_capture_sizes=capture_sizes,
     )
     compilation_config.max_cudagraph_capture_size = capture_sizes[-1]
@@ -473,6 +473,7 @@ def test_dynamic_spec_decode_shared_token_count_stays_reachable(monkeypatch):
     assert any(len(descs) > 1 for descs in by_num_tokens.values())
 
     for desc in full_descs:
+        assert desc.num_reqs is not None
         assert desc in manager._candidates[(desc.num_tokens, 0)], desc
         assert (
             manager.dispatch(
