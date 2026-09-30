@@ -1178,6 +1178,81 @@ def test_hisparse_finished_request_leaves_free_copies():
     assert not coordinator.spills_to_send
 
 
+@pytest.mark.parametrize(
+    "status,expected_cached_pages",
+    [
+        (RequestStatus.FINISHED_STOPPED, 2),
+        (RequestStatus.FINISHED_ABORTED, 2),
+        (RequestStatus.RUNNING, 0),
+    ],
+    ids=["stopped", "aborted", "running"],
+)
+def test_hisparse_cleanup_publishes_only_finalized_terminal_pages(
+    status, expected_cached_pages
+):
+    """Only terminal cleanup may publish completed, finalized pages."""
+    manager = make_hisparse_kv_cache_manager(32, 16, enable_caching=True)
+    coordinator = get_hisparse_coordinator(manager)
+    request = make_request("terminal", list(range(33)), HISPARSE_BLOCK_SIZE, sha256)
+    request.spec_token_ids = list(range(33, 49))
+    assert manager.allocate_slots(request, 49, num_lookahead_tokens=16) is not None
+    host_blocks = list(manager.get_blocks(request.request_id).blocks[0])
+    command = coordinator.build_offload_command()
+    counts = {transfer.transfer_id: 1 for transfer in command.page_transfers}
+    assert len(counts) == 2
+    request.status = status
+    manager.free(request)
+    coordinator.update_spills(counts, counts)
+    assert all(
+        block.block_hash is not None for block in host_blocks[:expected_cached_pages]
+    )
+    assert all(
+        block.block_hash is None for block in host_blocks[expected_cached_pages:]
+    )
+    assert all(block.ref_cnt == 0 for block in host_blocks)
+    assert not coordinator.has_pending_work()
+
+
+def test_hisparse_terminal_prefix_waits_for_all_workers_and_preserves_identity():
+    """Old completions retain their pages through pressure and request-ID reuse."""
+    manager = make_hisparse_kv_cache_manager(32, 8, enable_caching=True)
+    coordinator = get_hisparse_coordinator(manager)
+    host_pool = coordinator.get_host_block_pool()
+    tokens = list(range(2 * HISPARSE_BLOCK_SIZE + 1))
+    request = make_request("reused", tokens, HISPARSE_BLOCK_SIZE, sha256)
+    assert manager.allocate_slots(request, len(tokens)) is not None
+    old_blocks = list(manager.get_blocks(request.request_id).blocks[0])
+    command = coordinator.build_offload_command()
+    counts = {transfer.transfer_id: 2 for transfer in command.page_transfers}
+    partial = dict.fromkeys(counts, 1)
+    first_completions = partial.copy()
+    first_completions[next(iter(counts))] = 2
+    coordinator.update_spills(counts, first_completions)
+    request.status = RequestStatus.FINISHED_LENGTH_CAPPED
+    manager.free(request)
+    replacement = make_request(
+        "reused", list(range(100, 117)), HISPARSE_BLOCK_SIZE, sha256
+    )
+    assert manager.allocate_slots(replacement, 17) is not None
+    new_blocks = list(manager.get_blocks(replacement.request_id).blocks[0])
+    pressure = host_pool.get_new_blocks(host_pool.get_num_free_blocks())
+    assert not {block.block_id for block in old_blocks[:2]} & {
+        block.block_id for block in pressure + new_blocks
+    }
+    assert all(block.block_hash is None for block in old_blocks)
+    coordinator.update_spills({}, partial)
+    repeated = make_request("probe", tokens, HISPARSE_BLOCK_SIZE, sha256)
+    assert manager.get_computed_blocks(repeated)[1] == 2 * HISPARSE_BLOCK_SIZE
+    assert all(block.block_hash is None for block in new_blocks)
+    assert all(block.ref_cnt == 0 for block in old_blocks[:2])
+    coordinator.update_spills({}, partial)
+    assert all(block.ref_cnt == 0 for block in old_blocks[:2])
+    host_pool.free_blocks(pressure)
+    manager.free(replacement)
+    _publish_hisparse_pages(manager)
+    assert not coordinator.has_pending_work()
+
+
 def test_hisparse_reset_prefix_cache_drops_copies():
     """Reset must forget GPU copies along with the host hashes they mirror."""
     manager = make_hisparse_kv_cache_manager(32, 16, enable_caching=True)

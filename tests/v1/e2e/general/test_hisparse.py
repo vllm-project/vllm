@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import time
+
 import prometheus_client
 import pytest
 import torch
@@ -18,6 +20,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.multi_connector import (
     MultiConnector,
 )
 from vllm.platforms import current_platform
+from vllm.sampling_params import SamplingParams
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.v1.hisparse.coordinator import get_hisparse_coordinator
 
@@ -301,3 +304,99 @@ def test_hisparse_host_exhaustion_defers_requests(
         assert checked_steps > 0
         assert refusals > 0
         assert actual == expected
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda(), reason="HiSparse requires NVIDIA CUDA"
+)
+@fork_new_process_for_each_test
+def test_hisparse_terminal_prefix_reuse(
+    monkeypatch: pytest.MonkeyPatch,
+    vllm_runner: type[VllmRunner],
+):
+    """Finished requests publish mirrored host KV after a late acknowledgement."""
+    capability = current_platform.get_device_capability()
+    if capability is None or capability.major < 9:
+        pytest.skip("Sparse MLA requires Hopper or newer")
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+    monkeypatch.setenv("VLLM_DEEP_GEMM_WARMUP", "skip")
+    target = [1000 + i % 64 for i in range(257)]
+    sampling = SamplingParams(temperature=0, max_tokens=1, ignore_eos=True)
+    with vllm_runner(
+        MODEL,
+        load_format="dummy",
+        hf_overrides=_shrink_config,
+        attention_config=AttentionConfig(
+            hisparse_config=HiSparseConfig(
+                device_buffer_size=512, eager_host_mirror=True
+            )
+        ),
+        kv_transfer_config=KVTransferConfig(
+            kv_connector="HiSparseConnector",
+            kv_role="kv_both",
+            kv_connector_extra_config={"host_pool_gib": 0.01},
+        ),
+        block_size=64,
+        max_model_len=320,
+        max_num_batched_tokens=512,
+        max_num_seqs=2,
+        num_gpu_blocks_override=128,
+        enable_prefix_caching=True,
+        enable_chunked_prefill=True,
+        enforce_eager=True,
+    ) as runner:
+        engine = runner.llm.llm_engine.engine_core.engine_core
+        coordinator = get_hisparse_coordinator(engine.scheduler.kv_cache_manager)
+        worker = _get_hisparse_worker(runner)
+        original_updates = worker.take_transfer_updates
+        original_free = coordinator.free
+        held_completions: list[int] = []
+        update_calls = 0
+        terminal_pending_pages = 0
+
+        def take_updates():
+            nonlocal update_calls
+            with gpu_sync_allowed():
+                torch.accelerator.synchronize()
+            enqueued, completed = original_updates()
+            held_completions.extend(completed)
+            update_calls += 1
+            if update_calls <= 2:
+                return enqueued, []
+            completed = held_completions.copy()
+            held_completions.clear()
+            return enqueued, completed
+
+        def free(request_id):
+            nonlocal terminal_pending_pages
+            state = coordinator.request_states.get(request_id)
+            if state is not None:
+                terminal_pending_pages += len(state.pending_pages)
+            original_free(request_id)
+
+        def drain_pending_work():
+            deadline = time.monotonic() + 10
+            while coordinator.has_pending_work():
+                assert time.monotonic() < deadline, "HiSparse transfers did not drain"
+                runner.llm.llm_engine.step()
+
+        monkeypatch.setattr(worker, "take_transfer_updates", take_updates)
+        monkeypatch.setattr(coordinator, "free", free)
+        [first] = runner.llm.generate(
+            [{"prompt_token_ids": target}], sampling, use_tqdm=False
+        )
+        assert terminal_pending_pages == 4
+        assert first.num_cached_tokens == 0
+        assert coordinator.has_pending_work()
+        drain_pending_work()
+        assert not coordinator.has_pending_work()
+        assert not held_completions
+        assert update_calls > 2
+
+        [repeated] = runner.llm.generate(
+            [{"prompt_token_ids": target}], sampling, use_tqdm=False
+        )
+        assert repeated.num_cached_tokens == 256
+        assert repeated.outputs[0].token_ids == first.outputs[0].token_ids
+        drain_pending_work()
+        assert not coordinator.has_pending_work()
