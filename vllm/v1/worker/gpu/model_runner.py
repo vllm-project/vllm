@@ -2064,6 +2064,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # Non-last PP rank: hidden_states is None because this rank produced
             # IntermediateTensors instead of final hidden states. Receive the
             # sampled tokens broadcast from the last rank and update local state.
+            if self.pcp_manager is not None:
+                input_batch = self.pcp_manager.global_batch
             assert self.pp_handler is not None
             all_decode_next = self.pp_handler.receive(input_batch)
             # Optimistically update num_computed_tokens for entire batch here.
