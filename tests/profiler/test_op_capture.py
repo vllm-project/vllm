@@ -14,6 +14,9 @@ from vllm.engine.arg_utils import EngineArgs
 from vllm.model_executor.layers.mamba.ops.gather_initial_states import (
     gather_initial_states,
 )
+from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
+    requantize_with_max_scale,
+)
 from vllm.model_executor.model_loader import get_model_loader
 from vllm.model_executor.model_loader.meta_loader import MetaModelLoader
 from vllm.model_executor.models.qwen2 import Qwen2MLP
@@ -553,6 +556,19 @@ def test_gather_initial_states_is_recorded_on_meta():
         output = gather_initial_states(state, indices, has_initial_state)
     assert output.shape == (3, 2, 8) and output.is_meta
     assert skipped == ["_gather_initial_states_kernel"]
+
+
+def test_per_tensor_fp8_requantization_passes_meta_weights_through():
+    """A static per-tensor FP8 checkpoint loads on meta, as Mistral-Medium-3.5's.
+
+    Whether to requantize fused shards depends on the loaded scale values, which
+    meta has none of; either way the shapes are the same.
+    """
+    weight = torch.empty(6, 4, dtype=torch.float8_e4m3fn, device="meta")
+    weight_scale = torch.empty(2, dtype=torch.float32, device="meta")
+    max_scale, requantized = requantize_with_max_scale(weight, weight_scale, [4, 2])
+    assert max_scale.shape == () and max_scale.is_meta
+    assert requantized is weight
 
 
 @pytest.mark.skipif(not HAS_TRITON, reason="Triton is not installed")
