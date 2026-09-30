@@ -4,6 +4,7 @@
 import asyncio
 import threading
 import time
+from collections.abc import Sequence
 from contextlib import nullcontext
 from copy import deepcopy
 from types import SimpleNamespace
@@ -877,7 +878,7 @@ def test_limit_mm_per_prompt_apply(model_id, num_images, limit, is_valid):
     ],
 )
 def test_budget_caps_prevent_dummy_input_validation_failure(
-    model_id, user_limit, supported_limit
+    model_id, user_limit, supported_limit, monkeypatch
 ):
     limit_mm_per_prompt = {"image": user_limit}
 
@@ -887,7 +888,9 @@ def test_budget_caps_prevent_dummy_input_validation_failure(
     )
 
     processor = MULTIMODAL_REGISTRY.create_processor(model_config)
-    processor.info.get_supported_mm_limits = lambda: {"image": supported_limit}
+    monkeypatch.setattr(
+        processor.info, "get_supported_mm_limits", lambda: {"image": supported_limit}
+    )
 
     # This is what budget.py uses to derive mm_counts
     allowed = processor.info.allowed_mm_limits
@@ -945,7 +948,7 @@ def test_hf_processor_init_kwargs(
     )
 
     processor = ctx.get_hf_processor(
-        DummyProcessor,  # type: ignore[arg-type]
+        DummyProcessor,
         **inference_kwargs,
     )
     assert processor.a == expected_kwargs["a"]
@@ -976,7 +979,7 @@ def test_hf_processor_call_kwargs(
         tokenizer=None,
     )
 
-    processor = ctx.get_hf_processor(DummyProcessor)  # type: ignore[arg-type]
+    processor = ctx.get_hf_processor(DummyProcessor)
 
     result = ctx.call_hf_processor(processor, {}, inference_kwargs)
     assert result == expected_kwargs
@@ -1287,7 +1290,7 @@ def test_get_supported_mm_processor_kwargs_uses_supported_modalities(
     processor: SimpleNamespace,
     expected: dict[str, set[str]],
 ) -> None:
-    info = BaseProcessingInfo(SimpleNamespace())
+    info = BaseProcessingInfo(SimpleNamespace())  # type: ignore[arg-type]
     info.__dict__["supported_mm_limits"] = supported_mm_limits
     monkeypatch.setattr(info, "get_hf_processor", lambda **_: processor)
 
@@ -1297,7 +1300,7 @@ def test_get_supported_mm_processor_kwargs_uses_supported_modalities(
 def test_supported_mm_processor_kwargs_is_cached(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    info = BaseProcessingInfo(SimpleNamespace())
+    info = BaseProcessingInfo(SimpleNamespace())  # type: ignore[arg-type]
     expected = {"images_kwargs": {"size"}}
     calls = 0
 
@@ -1550,7 +1553,10 @@ def test_processor_inputs_hashes_scope_kwargs_by_modality():
             "video": [np.zeros((2, 8, 8, 3), dtype=np.uint8)],
         }
     )
-    mm_uuid_items = {"image": ["image-uuid"], "video": ["video-uuid"]}
+    mm_uuid_items: dict[str, Sequence[str | None]] = {
+        "image": ["image-uuid"],
+        "video": ["video-uuid"],
+    }
 
     def get_hashes(video_frames: int, image_size: int, video_size: int):
         return ProcessorInputs(
@@ -1834,7 +1840,7 @@ def test_processing_preserves_borrowed_mapped_ref():
     state.wait_decodes()
     processor.apply_phase2(state)
 
-    assert owned.data == b""
+    assert isinstance(owned, MediaRef) and owned.data == b""
     assert mapped.data == parent.data == b"image"
     assert mapped.decode().size == parent.decode().size == (4, 4)
 
@@ -2144,7 +2150,9 @@ def test_lazy_phase2_handles_hit_eviction():
     assert processor.hf_calls == 2
     assert result["mm_kwargs"]["image"][0] is not None
     assert lazy2.data == data
-    assert state.inputs.mm_data_items["image"].get_raw(0).data == b""
+
+    ref = state.inputs.mm_data_items["image"].get_raw(0)
+    assert isinstance(ref, MediaRef) and ref.data == b""
 
 
 @pytest.mark.parametrize(
@@ -2152,7 +2160,7 @@ def test_lazy_phase2_handles_hit_eviction():
     [(None, 491520, 491520), (True, 491520, 8192), (True, 128, 128), (False, 128, 128)],
 )
 def test_dummy_inputs_scheduler_budget(
-    chunked_prefill, max_model_len, expected_seq_len
+    chunked_prefill, max_model_len, expected_seq_len, monkeypatch
 ):
     ctx = build_model_context(
         "llava-hf/llava-v1.6-mistral-7b-hf",
@@ -2165,11 +2173,9 @@ def test_dummy_inputs_scheduler_budget(
         ctx.model_config,
         tokenizer=ctx.tokenizer,
     )
-    processor.apply = lambda *args, **kwargs: {"prompt_token_ids": [7]}
-
-    kwargs = {}
+    scheduler_config = None
     if chunked_prefill is not None:
-        kwargs["scheduler_config"] = SchedulerConfig(
+        scheduler_config = SchedulerConfig(
             max_model_len=max_model_len,
             is_encoder_decoder=False,
             max_num_batched_tokens=8192,
@@ -2177,5 +2183,10 @@ def test_dummy_inputs_scheduler_budget(
             enable_chunked_prefill=chunked_prefill,
         )
 
-    result = processor.get_dummy_mm_inputs({"image": 1}, **kwargs)
+    monkeypatch.setattr(
+        processor, "apply", lambda *args, **kwargs: {"prompt_token_ids": [7]}
+    )
+    result = processor.get_dummy_mm_inputs(
+        {"image": 1}, scheduler_config=scheduler_config
+    )
     assert len(result["prompt_token_ids"]) == expected_seq_len

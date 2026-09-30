@@ -277,6 +277,9 @@ pub struct Config {
     pub grpc_port: Option<u16>,
     /// Maximum time to wait for active HTTP/gRPC requests to drain on shutdown.
     pub shutdown_timeout: Duration,
+    /// Whether the caller manages the engine process and shuts it down when
+    /// the shutdown token is cancelled. Enables the gRPC `Control.Shutdown` RPC.
+    pub manages_engine: bool,
     /// Maximum idle time on a keep-alive HTTP connection before the server
     /// closes it (`VLLM_HTTP_TIMEOUT_KEEP_ALIVE`, default 5s).
     pub keep_alive_timeout: Duration,

@@ -121,10 +121,11 @@ def test_hash_collision_video_num_frames():
 
     def item_for_hash(num_frames: int):
         frames: np.ndarray = np.zeros((num_frames, 8, 8, 3), dtype=np.uint8)
-        video = MediaRef(
+        video: MediaRef = MediaRef(
             lambda: (frames, {}), source, DecodeSpec({"num_frames": num_frames})
         )
         items = MultiModalDataParser()._parse_video_data([video])
+        assert items is not None
         item = items.get_all_raw()[0]
         assert not video.is_decoded
         return item
@@ -143,8 +144,9 @@ def test_hash_video_tensor_frames():
     spec = DecodeSpec({"video_backend": "torchcodec"})
 
     def item_for_hash(frames):
-        video = MediaRef(lambda: (frames, {}), source, spec)
+        video: MediaRef = MediaRef(lambda: (frames, {}), source, spec)
         items = MultiModalDataParser()._parse_video_data([video])
+        assert items is not None
         item = items.get_all_raw()[0]
         assert not video.is_decoded
         return item
