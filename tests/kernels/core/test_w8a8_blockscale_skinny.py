@@ -61,8 +61,7 @@ def _load_payload(
         x_scale = payload["x_scale"].cuda()
     else:
         x_bf16 = payload["x_bf16"].cuda()
-        x_fp8, x_scale = rocm_aiter_ops.group_fp8_quant(x_bf16,
-                                                        transpose_scale=True)
+        x_fp8, x_scale = rocm_aiter_ops.group_fp8_quant(x_bf16, transpose_scale=True)
 
     if tokens is not None:
         x_fp8, x_scale = _slice_or_repeat_token_rows(x_fp8, x_scale, tokens)
@@ -118,9 +117,9 @@ def _repeat_scale_tokens(
 
 
 def _run_candidate(x_fp8, weight, x_scale, weight_scale) -> torch.Tensor:
-    out = torch.empty((x_fp8.shape[0], weight.shape[0]),
-                      dtype=torch.bfloat16,
-                      device=x_fp8.device)
+    out = torch.empty(
+        (x_fp8.shape[0], weight.shape[0]), dtype=torch.bfloat16, device=x_fp8.device
+    )
     cu_count = torch.cuda.get_device_properties(x_fp8.device).multi_processor_count
     return ops.wvSplitKQBlockScale(
         weight,
@@ -221,7 +220,7 @@ def test_w8a8_blockscale_skinny_rejects_misaligned_base_pointer(
             dtype=x_fp8.dtype,
             device=x_fp8.device,
         )
-        x_fp8 = base[:, 1:1 + x_fp8.shape[1]]
+        x_fp8 = base[:, 1 : 1 + x_fp8.shape[1]]
         assert x_fp8.stride(0) % 16 == 0
         assert x_fp8.data_ptr() % 16 != 0
         msg = "activation data pointer must be 16-byte aligned"
@@ -231,7 +230,7 @@ def test_w8a8_blockscale_skinny_rejects_misaligned_base_pointer(
             dtype=weight.dtype,
             device=weight.device,
         )
-        weight = base[:, 1:1 + weight.shape[1]]
+        weight = base[:, 1 : 1 + weight.shape[1]]
         assert weight.stride(0) % 16 == 0
         assert weight.data_ptr() % 16 != 0
         msg = "weight data pointer must be 16-byte aligned"
@@ -344,7 +343,10 @@ def test_w8a8_blockscale_skinny_rejects_invalid_scale_layout(
 @pytest.mark.parametrize(
     ("guard_case", "msg"),
     [
-        ("bpreshuffle_false", "wvSplitKQBlockScale first version supports bpreshuffle only"),
+        (
+            "bpreshuffle_false",
+            "wvSplitKQBlockScale first version supports bpreshuffle only",
+        ),
         ("tokens_9", r"activation token count must be in \[1, 8\]"),
         ("k_2048", "logical K must be 4096"),
         ("n_1024", r"first version supports bpreshuffle logical N in \{4096, 1536\}"),
@@ -412,9 +414,7 @@ def test_w8a8_blockscale_skinny_rejects_nonpositive_cu_count(
 
 @pytest.mark.parametrize("payload_name", ["wo_b", "wqa_wkv"])
 @pytest.mark.parametrize("tokens", [1, 6, 8])
-def test_w8a8_blockscale_skinny_transposed_scale_views(
-    payload_name: str, tokens: int
-):
+def test_w8a8_blockscale_skinny_transposed_scale_views(payload_name: str, tokens: int):
     x_fp8, weight, x_scale, weight_scale = _load_payload(payload_name, tokens=tokens)
     x_scale_t = x_scale.t()
     weight_scale_t = weight_scale.t()
@@ -437,15 +437,13 @@ def test_w8a8_blockscale_skinny_transposed_scale_views(
 
 @pytest.mark.parametrize("payload_name", ["wo_b", "wqa_wkv"])
 @pytest.mark.parametrize("tokens", [1, 2, 4, 6, 8])
-def test_w8a8_blockscale_skinny_cuda_graph_replay(
-    payload_name: str, tokens: int
-):
+def test_w8a8_blockscale_skinny_cuda_graph_replay(payload_name: str, tokens: int):
     x_fp8, weight, x_scale, weight_scale = _load_payload(payload_name, tokens=tokens)
 
     cu_count = torch.cuda.get_device_properties(x_fp8.device).multi_processor_count
-    out = torch.empty((x_fp8.shape[0], weight.shape[0]),
-                      dtype=torch.bfloat16,
-                      device=x_fp8.device)
+    out = torch.empty(
+        (x_fp8.shape[0], weight.shape[0]), dtype=torch.bfloat16, device=x_fp8.device
+    )
 
     # Warm JIT/extension path before capture.
     ops.wvSplitKQBlockScale(weight, x_fp8, x_scale, weight_scale, out, cu_count, True)
@@ -467,3 +465,164 @@ def test_w8a8_blockscale_skinny_cuda_graph_replay(
     for _ in range(5):
         g.replay()
         torch.testing.assert_close(out, ref, atol=0.0, rtol=0.0)
+
+
+# ---------------------------------------------------------------------------
+# Payload-free synthetic tests.
+#
+# The tests above require a captured runtime payload (real pre-shuffled weights)
+# and are skipped unless VLLM_W8A8_BLOCKSCALE_SKINNY_*_PAYLOAD is set, so they do
+# not run in default CI. The tests below construct their own inputs and a pure
+# torch reference, so they exercise the kernel's numerics and guards on any
+# gfx1151 node without external files.
+#
+# The kernel reads weights through PyTorch strides (see bpreshuffle_ptr), so a
+# logically contiguous [N, K] weight makes it compute a plain strided
+# block-scaled GEMM that we can mirror in torch. This is enough to cover the
+# scale-layout handling (including the square wo_b case) and the output numerics;
+# it deliberately does not assert anything about the physical pre-shuffle
+# permutation, which is validated by the payload-based tests.
+# ---------------------------------------------------------------------------
+
+_K = 4096
+_K_GROUPS = _K // 128
+
+
+def _skip_if_not_gfx1151() -> None:
+    from vllm.platforms.rocm import on_gfx1151
+
+    if not on_gfx1151():
+        pytest.skip("wvSplitKQBlockScale is implemented for gfx1151 only")
+
+
+def _make_synthetic_inputs(
+    n: int, tokens: int, seed: int = 0
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Build (weight, activation, activation_scale, weight_scale) for an
+    N x K = (n, 4096) block-scaled fp8 GEMM with `tokens` rows of activation.
+
+    Scales are canonical: activation_scale is [tokens, K/128] and weight_scale
+    is [N/128, K/128], both contiguous float32.
+    """
+    torch.manual_seed(seed)
+    fp8_dtype = current_platform.fp8_dtype()
+    device = "cuda"
+
+    # Keep magnitudes small so the fp8 round-trip stays well inside e4m3 range.
+    weight = (torch.randn(n, _K, device=device) * 0.25).to(fp8_dtype)
+    activation = (torch.randn(tokens, _K, device=device) * 0.25).to(fp8_dtype)
+
+    weight_scale = (
+        torch.rand(n // 128, _K_GROUPS, device=device, dtype=torch.float32) * 0.5 + 0.5
+    )
+    activation_scale = (
+        torch.rand(tokens, _K_GROUPS, device=device, dtype=torch.float32) * 0.5 + 0.5
+    )
+    return weight, activation, activation_scale, weight_scale
+
+
+def _reference_blockscale_gemm(
+    weight: torch.Tensor,
+    activation: torch.Tensor,
+    activation_scale: torch.Tensor,
+    weight_scale: torch.Tensor,
+) -> torch.Tensor:
+    """Pure-torch reference matching the kernel's math.
+
+    The kernel upconverts fp8 -> bf16 before the dot product, so dequantize
+    through bf16 here too, then apply the per-128 block scales.
+    """
+    n, k = weight.shape
+    tokens = activation.shape[0]
+    k_groups = k // 128
+
+    # Dequantize through bf16 (matching the kernel's fp8 -> bf16 upconvert),
+    # then apply the per-128 block scales and matmul in fp32.
+    w = weight.to(torch.bfloat16).float().view(n, k_groups, 128)
+    a = activation.to(torch.bfloat16).float().view(tokens, k_groups, 128)
+
+    # weight_scale is [N/128, K/128]: each scale row covers 128 weight rows.
+    w_scale_per_row = weight_scale.repeat_interleave(128, dim=0)  # [N, K/128]
+    w = w * w_scale_per_row.view(n, k_groups, 1)
+    a = a * activation_scale.view(tokens, k_groups, 1)
+
+    w = w.reshape(n, k)
+    a = a.reshape(tokens, k)
+    return (a @ w.t()).to(torch.bfloat16)
+
+
+def _run_op(weight, activation, activation_scale, weight_scale) -> torch.Tensor:
+    out = torch.empty(
+        (activation.shape[0], weight.shape[0]),
+        dtype=torch.bfloat16,
+        device=activation.device,
+    )
+    cu_count = torch.cuda.get_device_properties(activation.device).multi_processor_count
+    ops.wvSplitKQBlockScale(
+        weight, activation, activation_scale, weight_scale, out, cu_count, True
+    )
+    return out
+
+
+@pytest.mark.parametrize("n", [4096, 1536])
+@pytest.mark.parametrize("tokens", [1, 2, 6, 8])
+def test_w8a8_blockscale_skinny_synthetic_matches_reference(n: int, tokens: int):
+    _skip_if_not_gfx1151()
+    weight, activation, a_scale, w_scale = _make_synthetic_inputs(n, tokens)
+
+    out = _run_op(weight, activation, a_scale, w_scale)
+    ref = _reference_blockscale_gemm(weight, activation, a_scale, w_scale)
+
+    assert torch.isfinite(out).all()
+    torch.testing.assert_close(out.float(), ref.float(), atol=2e-2, rtol=2e-2)
+
+
+@pytest.mark.parametrize("n", [4096, 1536])
+@pytest.mark.parametrize("tokens", [1, 6, 8])
+def test_w8a8_blockscale_skinny_synthetic_transposed_scales(n: int, tokens: int):
+    """Transposed scale views must give the same result as the canonical layout.
+
+    For n == 4096 the weight_scale is square (32x32), which is exactly the case
+    where shape alone cannot distinguish a canonical [N/128, K/128] tensor from a
+    transposed [K/128, N/128] view. The stride-based disambiguation must resolve
+    both to identical numerics.
+    """
+    _skip_if_not_gfx1151()
+    weight, activation, a_scale, w_scale = _make_synthetic_inputs(n, tokens)
+
+    canonical = _run_op(weight, activation, a_scale, w_scale)
+
+    a_scale_t = a_scale.t()
+    w_scale_t = w_scale.t()
+    assert not w_scale_t.is_contiguous()
+    transposed = _run_op(weight, activation, a_scale_t, w_scale_t)
+
+    torch.testing.assert_close(
+        transposed.float(), canonical.float(), atol=0.0, rtol=0.0
+    )
+
+
+def test_w8a8_blockscale_skinny_synthetic_rejects_ambiguous_square_scale():
+    """A square weight_scale with no unit-stride dimension is undecidable and
+    must be rejected rather than silently misread."""
+    _skip_if_not_gfx1151()
+    n, tokens = 4096, 6
+    weight, activation, a_scale, w_scale = _make_synthetic_inputs(n, tokens)
+
+    # Strided view of a [32, 64] buffer -> shape (32, 32) with strides (64, 2):
+    # neither dimension is contiguous, so the layout is ambiguous.
+    base = torch.empty(
+        (w_scale.shape[0], w_scale.shape[1] * 2),
+        dtype=w_scale.dtype,
+        device=w_scale.device,
+    )
+    ambiguous = base[:, ::2]
+    assert ambiguous.shape == w_scale.shape
+    assert ambiguous.stride(0) != 1 and ambiguous.stride(1) != 1
+
+    out = torch.empty((tokens, n), dtype=torch.bfloat16, device=activation.device)
+    cu_count = torch.cuda.get_device_properties(activation.device).multi_processor_count
+    with pytest.raises(RuntimeError, match="square weight_scale layout is ambiguous"):
+        ops.wvSplitKQBlockScale(
+            weight, activation, a_scale, ambiguous, out, cu_count, True
+        )
