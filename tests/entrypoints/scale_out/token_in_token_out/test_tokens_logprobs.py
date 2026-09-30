@@ -11,10 +11,11 @@ from vllm.logprobs import Logprob
 
 def test_top_logprobs_alternatives_have_own_token_ids():
     """Each top_logprobs alternative must carry its own integer token id."""
+    # Engine dict at logprobs=2 with the sampled token 262 also top-1.
     result = ServingTokens._create_tokens_logprobs(
         None,
         token_ids=[262],
-        top_logprobs=[{262: Logprob(-0.1), 257: Logprob(-1.2), 428: Logprob(-2.3)}],
+        top_logprobs=[{262: Logprob(-0.1), 257: Logprob(-1.2)}],
         num_output_top_logprobs=2,
     )
     token_ids = {e.token_id for e in result.content[0].top_logprobs}
@@ -57,14 +58,14 @@ def test_sampled_token_absent_from_topk_uses_sentinel():
 
 
 def test_logprobs_zero_emits_sampled_token():
-    """logprobs=0 must still emit 1 entry (the sampled token)."""
+    """logprobs=0: the engine returns only the sampled token, and it is kept."""
     result = ServingTokens._create_tokens_logprobs(
         None,
         token_ids=[7],
-        top_logprobs=[{7: Logprob(-0.9), 8: Logprob(-1.1)}],
+        top_logprobs=[{7: Logprob(-0.9)}],
         num_output_top_logprobs=0,
     )
-    assert len(result.content[0].top_logprobs) == 1
+    assert [t.token_id for t in result.content[0].top_logprobs] == [7]
 
 
 def test_logprobs_minus_one_emits_all_tokens():
@@ -78,9 +79,9 @@ def test_logprobs_minus_one_emits_all_tokens():
 
 
 def test_sampled_token_outside_topk_comes_first():
-    """The engine puts the sampled token first, then ranks 1..k. When the
-    sampled token is outside the top k it takes one of the k slots, so rank k
-    is left out (same as the OpenAI endpoints)."""
+    """The engine puts the sampled token first, then ranks 1..k. Generate keeps
+    all k + 1 candidates when the sampled token is outside the top k; derender
+    applies each endpoint's cut (#59513)."""
     result = ServingTokens._create_tokens_logprobs(
         None,
         token_ids=[50],
@@ -93,7 +94,7 @@ def test_sampled_token_outside_topk_comes_first():
         ],
         num_output_top_logprobs=2,
     )
-    assert [t.rank for t in result.content[0].top_logprobs] == [5, 1]
+    assert [t.rank for t in result.content[0].top_logprobs] == [5, 1, 2]
 
 
 def test_logprob_is_required_on_the_wire():
