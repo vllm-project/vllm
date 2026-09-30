@@ -2380,6 +2380,8 @@ __global__ void gemm_q4_wmma_kernel_128x128(const T*, const uint32_t*,
 // ones gives sum_k(a) per row in the same layout, and scale and zero are
 // folded in fp32 per column:
 //   c += s * acc - s * (1024 + zero) * sum_k(a)
+// With two row tiles the kernel is WMMA-bound, so the zero is subtracted from
+// the magic halves instead (exact in fp16) and the sum_k(a) WMMA goes away.
 // The 8 waves of a block split K in 8 contiguous parts and meet in LDS.
 // ===========================================================================
 #if defined(__HIP__RDNA3__) || !defined(__HIP_DEVICE_COMPILE__)
@@ -2387,6 +2389,7 @@ __device__ __forceinline__ uint32_t d16_xhalf(uint32_t v) {
   return __builtin_amdgcn_permlanex16(v, v, 0x76543210u, 0xFEDCBA98u, false,
                                       false);
 }
+typedef _Float16 d16_h2 __attribute__((ext_vector_type(2)));
 // 8 packed nibbles of one column (K 0..7) -> 8 magic halves in K order.
 __device__ __forceinline__ void d16_magic(uint32_t w, uint32_t* h) {
   h[0] = (w & 0x000F000Fu) | 0x64006400u;
@@ -2403,6 +2406,7 @@ __global__ void __launch_bounds__(256) gemm_q4_wmma_kernel_dec16(
     const int groups, const int zero_offset) {
   // 16-K steps in flight; two tiles at 3 or 4 spill to scratch.
   constexpr int PF = MT == 1 ? 4 : 2;
+  constexpr bool ZERO_IN_B = MT == 2;
   const int tid = threadIdx.x, lane = tid & 31;
   const int wave = __builtin_amdgcn_readfirstlane(tid >> 5);
   const int lane_lo = lane & 15, lane_hi = lane >> 4;
@@ -2438,15 +2442,18 @@ __global__ void __launch_bounds__(256) gemm_q4_wmma_kernel_dec16(
   // Group data: scales of the 4 columns (8 bytes) and their zero nibbles.
   const uint32_t* zp = b_qzeros + n0 / 8;
   const int zsh = (n0 & 7) * 4;
+  d16_h2 zb[4];
   auto group_sz = [&](int g, float (&s)[4], float (&zz)[4]) {
     const uint2 sv = *(const uint2*)(b_scales + (long)g * size_n + n0);
     const uint32_t zw = zp[(long)g * (size_n / 8)] >> zsh;
     const T* sh = reinterpret_cast<const T*>(&sv);
   #pragma unroll
     for (int t = 0; t < 4; ++t) {
+      const float z =
+          1024.0f + (float)(((zw >> (4 * t)) & 0xF) + (uint32_t)zero_offset);
       s[t] = (float)sh[t];
-      zz[t] = -s[t] * (1024.0f + (float)(((zw >> (4 * t)) & 0xF) +
-                                         (uint32_t)zero_offset));
+      zz[t] = -s[t] * z;
+      zb[t] = d16_h2{(_Float16)z, (_Float16)z};
     }
   };
 
@@ -2485,14 +2492,25 @@ __global__ void __launch_bounds__(256) gemm_q4_wmma_kernel_dec16(
           uint32_t h[8];
           d16_magic(lane_hi ? o : mine[t], &h[0]);
           d16_magic(lane_hi ? mine[t] : o, &h[4]);
+          if constexpr (ZERO_IN_B) {
+  #pragma unroll
+            for (int i = 0; i < 8; ++i) {
+              d16_h2 x;
+              __builtin_memcpy(&x, &h[i], 4);
+              x -= zb[t];
+              __builtin_memcpy(&h[i], &x, 4);
+            }
+          }
           v16fp16 bf;
           __builtin_memcpy(&bf, h, sizeof(bf));
   #pragma unroll
           for (int mt = 0; mt < MT; ++mt)
             acc[mt][t] = wmma_mma(af[mt], bf, acc[mt][t]);
         }
+        if constexpr (!ZERO_IN_B)
   #pragma unroll
-        for (int mt = 0; mt < MT; ++mt) sa[mt] = wmma_mma(af[mt], ones, sa[mt]);
+          for (int mt = 0; mt < MT; ++mt)
+            sa[mt] = wmma_mma(af[mt], ones, sa[mt]);
         // End of a group: fold it with its scale and zero.
         const int k_next = k0 + 16 * (st + 1);
         if ((k_next % gs) == 0 || st + 1 == nst) {
@@ -2502,7 +2520,9 @@ __global__ void __launch_bounds__(256) gemm_q4_wmma_kernel_dec16(
             for (int t = 0; t < 4; ++t) {
   #pragma unroll
               for (int i = 0; i < 8; ++i) {
-                cacc[mt][t][i] += gs_s[t] * acc[mt][t][i] + gs_z[t] * sa[mt][i];
+                cacc[mt][t][i] += ZERO_IN_B ? gs_s[t] * acc[mt][t][i]
+                                            : gs_s[t] * acc[mt][t][i] +
+                                                  gs_z[t] * sa[mt][i];
                 acc[mt][t][i] = 0.0f;
               }
             }
