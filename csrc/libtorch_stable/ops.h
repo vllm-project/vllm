@@ -150,6 +150,11 @@ void silu_and_mul_nvfp4_quant(torch::stable::Tensor& out,
                               torch::stable::Tensor& input,
                               torch::stable::Tensor& input_global_scale);
 
+void gelu_tanh_and_mul_nvfp4_quant(torch::stable::Tensor& out,
+                                   torch::stable::Tensor& output_block_scale,
+                                   torch::stable::Tensor& input,
+                                   torch::stable::Tensor& input_global_scale);
+
 void cutlass_mxfp4_group_mm(torch::stable::Tensor& output,
                             const torch::stable::Tensor& a,
                             const torch::stable::Tensor& b,

@@ -46,6 +46,10 @@ void silu_and_mul_nvfp4_quant_sm1xxa(torch::stable::Tensor& output,
                                      torch::stable::Tensor& output_sf,
                                      torch::stable::Tensor& input,
                                      torch::stable::Tensor& input_sf);
+void gelu_tanh_and_mul_nvfp4_quant_sm1xxa(torch::stable::Tensor& output,
+                                          torch::stable::Tensor& output_sf,
+                                          torch::stable::Tensor& input,
+                                          torch::stable::Tensor& input_sf);
 #endif
 
 #if (defined(ENABLE_NVFP4_SM100) && ENABLE_NVFP4_SM100) || \
@@ -151,6 +155,23 @@ void silu_and_mul_nvfp4_quant(torch::stable::Tensor& output,
 #endif
   STD_TORCH_CHECK_NOT_IMPLEMENTED(
       false, "No compiled silu_and_mul nvfp4 quantization kernel");
+}
+
+void gelu_tanh_and_mul_nvfp4_quant(torch::stable::Tensor& output,
+                                   torch::stable::Tensor& output_sf,
+                                   torch::stable::Tensor& input,
+                                   torch::stable::Tensor& input_sf) {
+#if (defined(ENABLE_NVFP4_SM100) && ENABLE_NVFP4_SM100) || \
+    (defined(ENABLE_NVFP4_SM120) && ENABLE_NVFP4_SM120)
+  STD_TORCH_CHECK(
+      nvfp4_quant_sm_supported(),
+      "No compiled gelu_tanh_and_mul nvfp4 quantization kernel for SM ",
+      get_sm_version_num(), ". Recompile with the appropriate CUDA arch.");
+  return gelu_tanh_and_mul_nvfp4_quant_sm1xxa(output, output_sf, input,
+                                              input_sf);
+#endif
+  STD_TORCH_CHECK_NOT_IMPLEMENTED(
+      false, "No compiled gelu_tanh_and_mul nvfp4 quantization kernel");
 }
 
 void silu_and_mul_scaled_fp4_experts_quant(
