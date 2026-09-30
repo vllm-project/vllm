@@ -1320,14 +1320,15 @@ def _adaptive_config(
         (_adaptive_config(adaptive=False), SimpleNamespace(), None),
         # DCP routes plan per-row windows from host lengths.
         (_adaptive_config(dcp=2), SimpleNamespace(), None),
-        # The DSpark draft block is non-causal and never trimmed.
+        # Kimi-K3 DSpark draft layers share the target's group; causality is
+        # decided per batch, so the merged non-causal spec keeps the bound.
         (
             _adaptive_config(),
             SimpleNamespace(non_causal_multi_token_decode=True),
-            None,
+            8,
         ),
     ],
-    ids=["adaptive", "fixed", "dcp", "non_causal_draft"],
+    ids=["adaptive", "fixed", "dcp", "shared_draft_group"],
 )
 def test_varlen_cudagraph_bound_follows_adaptive_verification(config, spec, bound):
     assert (
