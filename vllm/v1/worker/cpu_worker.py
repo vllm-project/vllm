@@ -76,9 +76,14 @@ class CPUWorker(Worker):
         )
         available_memory = memory_status.available_memory
 
-        if (
-            vllm_config.model_config.runner_type != "pooling"
-            and vllm_config.cache_config.kv_cache_memory_bytes is None
+        if vllm_config.model_config.runner_type == "pooling":
+            logger.info(
+                "Encoder-only / pooling model detected; "
+                "skipping CPU memory reservation for KV cache on node %s.",
+                cpu_core.numa_node,
+            )
+        elif (
+            vllm_config.cache_config.kv_cache_memory_bytes is None
             and self.requested_cpu_memory > available_memory
         ):
             raise ValueError(
