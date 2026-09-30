@@ -3200,6 +3200,7 @@ def test_hisparse_fp8_decode_resolves_rows_once_then_runs_batched_attention():
         (num_tokens + 1, 4), dtype=torch.int32, device=device
     )
     index_group.row_indices = torch.arange(num_tokens, dtype=torch.int32, device=device)
+    index_group.masked_req_ids = torch.empty_like(index_group.row_indices)
     impl = SimpleNamespace(
         kv_lora_rank=1,
         index_group=index_group,
@@ -3254,7 +3255,11 @@ def test_hisparse_keeps_speculative_rows_as_decodes():
 
 
 def test_hisparse_decode_skips_padding_rows():
-    """CUDA-graph padding rows map to request 0 and must not resolve against it."""
+    """Padding rows are masked, and the ids stay in the group's persistent buffer.
+
+    The resolver reads them on the HiSparse copy stream, where a compute-stream
+    temporary can already be recycled (CUDA graphs do), scrambling rows' requests.
+    """
     topk = torch.arange(20, dtype=torch.int32).view(10, 2)
     cache = SimpleNamespace(
         source_block_table=torch.zeros((2, 1), dtype=torch.int32),
@@ -3264,6 +3269,7 @@ def test_hisparse_decode_skips_padding_rows():
     index_group.caches = [cache]
     index_group.physical_topk_indices = torch.empty((11, 2), dtype=torch.int32)
     index_group.row_indices = torch.arange(10, dtype=torch.int32)
+    index_group.masked_req_ids = torch.empty_like(index_group.row_indices)
     metadata = SimpleNamespace(
         query_start_loc=torch.tensor([0, 8, 9], dtype=torch.int32),
         req_id_per_token=torch.tensor([0] * 8 + [1, 0], dtype=torch.int32),
@@ -3274,9 +3280,10 @@ def test_hisparse_decode_skips_padding_rows():
         0, topk, metadata, block_stride_rows=None, return_valid_counts=False
     )
 
+    request_ids = cache.swap_in.call_args.args[0]
+    assert request_ids.data_ptr() == index_group.masked_req_ids.data_ptr()
     torch.testing.assert_close(
-        cache.swap_in.call_args.args[0],
-        torch.tensor([0] * 8 + [1, -1], dtype=torch.int32),
+        request_ids, torch.tensor([0] * 8 + [1, -1], dtype=torch.int32)
     )
 
 

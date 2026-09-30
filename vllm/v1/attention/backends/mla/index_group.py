@@ -173,6 +173,13 @@ class HiSparseMLAIndexGroup(SparseMLAIndexGroup):
     hisparse_group: Any | None = None
     prefill_stream: torch.Stream | None = None
     prefill_ready_events: list[torch.Event] = field(default_factory=list)
+    masked_req_ids: torch.Tensor = field(init=False)
+
+    def __post_init__(self) -> None:
+        # The residency resolver reads per-row request ids on the HiSparse copy
+        # stream. A temporary from the compute stream could be recycled (under
+        # CUDA graphs, reliably) before that read, so they live here instead.
+        self.masked_req_ids = torch.empty_like(self.row_indices)
 
     def register_layer(
         self,
@@ -253,13 +260,13 @@ class HiSparseMLAIndexGroup(SparseMLAIndexGroup):
         assert source_block_table is not None
         # CUDA-graph padding rows past the batch's tokens map to request 0;
         # mark them -1 so residency resolution skips them.
-        req_id_per_token = torch.where(
-            self.row_indices[:num_tokens] < attn_metadata.query_start_loc[-1],
-            req_id_per_token,
-            -1,
+        masked_req_ids = self.masked_req_ids[:num_tokens]
+        masked_req_ids.copy_(req_id_per_token)
+        masked_req_ids.masked_fill_(
+            self.row_indices[:num_tokens] >= attn_metadata.query_start_loc[-1], -1
         )
         return cache.swap_in(
-            req_id_per_token,
+            masked_req_ids,
             block_table=source_block_table,
             logical_topk_indices=logical_topk_indices,
             block_size=attn_metadata.block_size,
