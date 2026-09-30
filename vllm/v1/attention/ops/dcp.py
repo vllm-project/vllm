@@ -1442,7 +1442,8 @@ class DCPCombine(Protocol):
         *,
         seq_lens: torch.Tensor,
         query_start_loc: torch.Tensor,
-    ) -> torch.Tensor: ...
+        return_lse: bool = False,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]: ...
 
 
 class MLADCPManager:
@@ -1544,11 +1545,17 @@ class MLADCPManager:
         is_lse_base_on_e: bool,
         seq_lens: torch.Tensor | None = None,
         query_start_loc: torch.Tensor | None = None,
-    ) -> torch.Tensor:
+        return_lse: bool = False,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         # Forced MQA path pass all batch tokens (including prefill) into combine,
         # which may exceed the direct symmetric-memory workspace. Fall back to
-        # the nccl a2a combine for those cases.
-        if partial_output.shape[0] <= direct_workspace.max_num_tokens:
+        # the nccl a2a combine for those cases. The direct C++ reduce cannot
+        # return the combined LSE, so return_lse callers (models applying a
+        # softmax sink after the merge) take the nccl path too.
+        if (
+            partial_output.shape[0] <= direct_workspace.max_num_tokens
+            and not return_lse
+        ):
             return direct_workspace.lse_reduce(
                 partial_output,
                 partial_lse,
@@ -1563,6 +1570,7 @@ class MLADCPManager:
             is_lse_base_on_e=is_lse_base_on_e,
             seq_lens=seq_lens,
             query_start_loc=query_start_loc,
+            return_lse=return_lse,
         )
 
     def _init_query_gather(

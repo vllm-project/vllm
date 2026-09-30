@@ -3277,6 +3277,7 @@ def _sparse_attn_decode_reduce_kernel(
     part_acc_ptr,
     attn_sink_ptr,
     out_ptr,
+    lse_ptr,
     pos_ptr,
     cos_sin_ptr,
     out_scale_ptr,
@@ -3301,6 +3302,7 @@ def _sparse_attn_decode_reduce_kernel(
     NOPE: tl.constexpr,
     HALF: tl.constexpr,
     QUANT_OUT: tl.constexpr,
+    RETURN_LSE: tl.constexpr,
 ):
     query_idx = tl.program_id(0)
     pid_h = tl.program_id(1)
@@ -3352,6 +3354,16 @@ def _sparse_attn_decode_reduce_kernel(
     if HAS_ATTN_SINK:
         l_final = l_final + tl.exp(sink - m_final)
     denom = tl.maximum(l_final, 1.0e-30)
+
+    if RETURN_LSE:
+        # Natural-log LSE of whatever this launch folded (the sink included
+        # when HAS_ATTN_SINK); -inf when every split was empty, which a
+        # cross-rank LSE merge weights to zero.
+        tl.store(
+            lse_ptr + query_idx * num_heads + head_offsets,
+            m_final + tl.log(l_final),
+            mask=head_mask,
+        )
 
     # Phase 2: weighted sum of the per-split accumulators. The combine weight
     # for each split only depends on the (already known) global max, so the
@@ -3746,12 +3758,18 @@ def _rocm_sparse_attn_decode_ragged_triton(
     inv_rope_positions: torch.Tensor | None = None,
     inv_rope_cos_sin_cache: torch.Tensor | None = None,
     out_mxfp8: tuple[torch.Tensor, torch.Tensor] | None = None,
+    lse_out: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Split-K sparse decode; returns the attention output.
 
     With ``out_mxfp8 = (data, scale)`` the reduce writes MXFP8 instead of
     bf16: ``data`` is [b, h * d] e4m3 and ``scale`` [b, h * d // 32] E8M0, and
     ``data`` viewed as [b, h, d] is returned.
+
+    ``lse_out`` ([b, h] fp32, contiguous) additionally receives the
+    natural-log LSE of whatever this launch folded — callers deferring the
+    softmax sink for a cross-rank merge pass ``attn_sink=None`` alongside it.
+    A query with no attended slots stores -inf. Split-K path only.
     """
     assert q.ndim == 3, f"expected q=[b,h,d], got {q.shape}"
     assert main_cache.ndim == 3, (
@@ -3848,12 +3866,26 @@ def _rocm_sparse_attn_decode_ragged_triton(
         assert out.dtype == torch.bfloat16, (
             f"expected out dtype {torch.bfloat16}, got {out.dtype}"
         )
+    if lse_out is not None:
+        assert lse_out.dtype == torch.float32, (
+            f"expected lse_out dtype {torch.float32}, got {lse_out.dtype}"
+        )
+        assert lse_out.shape == (num_queries, num_heads), (
+            f"expected lse_out shape [{num_queries}, {num_heads}], "
+            f"got {tuple(lse_out.shape)}"
+        )
+        assert lse_out.stride(-1) == 1 and lse_out.stride(0) == num_heads, (
+            "expected a contiguous lse_out"
+        )
     heads_blocks = triton.cdiv(num_heads, block_h)
     nope_block = triton.next_power_of_2(nope_head_dim)
     comb_dim = nope_head_dim + rope_head_dim
     is_fnuz = current_platform.is_fp8_fnuz()
 
     if not (_ON_GFX942 or _ON_GFX950):  # Fallback path for un-tuned architectures.
+        assert lse_out is None, (
+            "lse_out requires the gfx942/gfx950 split-K decode path"
+        )
         block_k = 16 if head_dim >= 256 else 32
         _sparse_attn_decode_ragged_kernel[(num_queries, heads_blocks)](
             q,
@@ -4034,6 +4066,8 @@ def _rocm_sparse_attn_decode_ragged_triton(
         part_acc,
         attn_sink,
         out,
+        # Never stored to when RETURN_LSE is off, same as the attn_sink dummy.
+        lse_out if lse_out is not None else part_m,
         inv_rope_positions,
         inv_rope_cos_sin_cache,
         out_scale,
@@ -4058,6 +4092,7 @@ def _rocm_sparse_attn_decode_ragged_triton(
         NOPE=nope_head_dim,
         HALF=rope_head_dim // 2,
         QUANT_OUT=out_scale is not None,
+        RETURN_LSE=lse_out is not None,
         num_warps=4,
     )
     return out
@@ -4085,6 +4120,7 @@ def _rocm_sparse_attn_decode_triton(
     inv_rope_positions: torch.Tensor | None = None,
     inv_rope_cos_sin_cache: torch.Tensor | None = None,
     out_mxfp8: tuple[torch.Tensor, torch.Tensor] | None = None,
+    lse_out: torch.Tensor | None = None,
 ) -> torch.Tensor:
     if main_ragged_indices is None or main_ragged_indptr is None:
         main_ragged_indices, main_ragged_indptr = build_ragged_indices_from_dense(
@@ -4126,6 +4162,7 @@ def _rocm_sparse_attn_decode_triton(
         inv_rope_positions=inv_rope_positions,
         inv_rope_cos_sin_cache=inv_rope_cos_sin_cache,
         out_mxfp8=out_mxfp8,
+        lse_out=lse_out,
     )
 
 
@@ -4230,6 +4267,7 @@ def rocm_sparse_attn_decode(
     inv_rope_positions: torch.Tensor | None = None,
     inv_rope_cos_sin_cache: torch.Tensor | None = None,
     output_mxfp8: tuple[torch.Tensor, torch.Tensor] | None = None,
+    lse_out: torch.Tensor | None = None,
 ) -> int:
     """Run sparse MLA decode into ``output``.
 
@@ -4242,6 +4280,11 @@ def rocm_sparse_attn_decode(
     MXFP8-quantizes the rotated rows for the FP8 wo_a (see
     ``_rocm_sparse_attn_decode_ragged_triton``). It needs gfx950 and the fused
     inverse RoPE, and always covers every row.
+
+    ``lse_out`` ([tokens, heads] fp32) additionally receives the natural-log
+    LSE of whatever this launch folded; callers deferring the softmax sink
+    for a cross-rank merge pass ``attn_sink=None`` alongside it (see
+    ``_rocm_sparse_attn_decode_ragged_triton``). Split-K path only.
     """
     assert swa_k_cache.dtype == torch.uint8, (
         "ROCm Triton sparse decode expects uint8 fp8_ds_mla SWA cache, "
@@ -4299,6 +4342,7 @@ def rocm_sparse_attn_decode(
         inv_rope_positions=inv_rope_positions,
         inv_rope_cos_sin_cache=inv_rope_cos_sin_cache,
         out_mxfp8=output_mxfp8,
+        lse_out=lse_out,
     )
     if output_mxfp8 is not None:
         return q.shape[0]

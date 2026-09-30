@@ -203,6 +203,15 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
         cache_config = vllm_config.cache_config
+        # DeepseekV4Attention has no AttentionImpl, so the generic
+        # check_attention_cp_compatibility LSE gate never sees these layers;
+        # without an explicit check dcp > 1 serves unmerged per-rank partials.
+        if vllm_config.parallel_config.decode_context_parallel_size > 1:
+            raise NotImplementedError(
+                "Decode Context Parallelism is not yet supported for "
+                "DeepSeek-V4 attention: per-rank partial attention outputs "
+                "are not merged across DCP ranks."
+            )
         tp_size = get_tensor_model_parallel_world_size()
         layer_id = extract_layer_index(prefix)
 
