@@ -5878,6 +5878,95 @@ def test_prefix_cache_stats_report_sparse_retention_miss():
     assert stats.sparse_retention_misses == 2 * block_size
 
 
+@pytest.mark.parametrize(
+    "eagle,with_mamba,expected_hits,expected_misses",
+    [(True, False, 48, 0), (False, False, 32, 0), (False, True, 0, 32)],
+)
+def test_sparse_retention_misses_exclude_dense_group_losses(
+    eagle, with_mamba, expected_hits, expected_misses
+):
+    """Dense eviction and EAGLE drops must not be attributed to sparse state."""
+    block_size = 16
+    config = _make_hybrid_kv_cache_config(
+        block_size, 200, ["full", "full"] + (["mamba_align"] if with_mamba else [])
+    )
+    draft = config.kv_cache_groups[1]
+    draft.kv_cache_spec = replace(draft.kv_cache_spec, num_kv_heads=2)
+    draft.is_eagle_group = eagle
+    manager = make_kv_cache_manager(
+        config,
+        max_model_len=8192,
+        enable_caching=True,
+        use_eagle=eagle,
+        hash_block_size=block_size,
+        log_stats=True,
+    )
+    shared = [7] * (4 * block_size)
+    seed = make_request("seed", shared + [50] * block_size, block_size, sha256)
+    cb, nc, _ = manager.get_computed_blocks(seed)
+    allocated = manager.allocate_slots(seed, seed.num_tokens, nc, cb)
+    assert allocated is not None
+    draft_block = allocated.blocks[1][2].block_id
+    manager.free(seed)
+    if not eagle:
+        manager.block_pool.evict_blocks({draft_block})
+
+    request = make_request("request", shared + [60] * block_size, block_size, sha256)
+    _, hits, boundary = manager.get_computed_blocks(request)
+    assert hits == expected_hits
+    assert boundary == len(shared)
+    request.shared_prefix_boundary = boundary
+    manager.record_prefix_cache_stats(request, hits)
+    stats = manager.prefix_cache_stats
+    assert stats is not None
+    assert stats.sparse_retention_misses == expected_misses
+
+
+@pytest.mark.parametrize(
+    "evict,expected_hits,expected_misses", [(False, 48, 0), (True, 16, 32)]
+)
+@pytest.mark.parametrize("full_block_size", [16, 32])
+def test_sparse_retention_misses_exclude_sliding_window_eagle_drop(
+    evict, expected_hits, expected_misses, full_block_size
+):
+    """Count missing sliding-window state, excluding its intentional block drop."""
+    block_size = 16
+    config = _make_hybrid_kv_cache_config(block_size, 200, ["full", "sliding_window"])
+    config.kv_cache_groups[0].kv_cache_spec = replace(
+        config.kv_cache_groups[0].kv_cache_spec, block_size=full_block_size
+    )
+    expected_hits = expected_hits // full_block_size * full_block_size
+    config.kv_cache_groups[1].is_eagle_group = True
+    manager = make_kv_cache_manager(
+        config,
+        max_model_len=8192,
+        enable_caching=True,
+        use_eagle=True,
+        hash_block_size=block_size,
+        retention_interval=None,
+        log_stats=True,
+    )
+    shared = [7] * (4 * block_size)
+    seed = make_request("seed", shared + [50] * block_size, block_size, sha256)
+    cb, nc, _ = manager.get_computed_blocks(seed)
+    allocated = manager.allocate_slots(seed, seed.num_tokens, nc, cb)
+    assert allocated is not None
+    sw_block = allocated.blocks[1][2].block_id
+    manager.free(seed)
+    if evict:
+        manager.block_pool.evict_blocks({sw_block})
+
+    request = make_request("request", shared + [60] * block_size, block_size, sha256)
+    _, hits, boundary = manager.get_computed_blocks(request)
+    assert hits == expected_hits
+    assert boundary == len(shared)
+    request.shared_prefix_boundary = boundary
+    manager.record_prefix_cache_stats(request, hits)
+    stats = manager.prefix_cache_stats
+    assert stats is not None
+    assert stats.sparse_retention_misses == expected_misses
+
+
 def test_prefix_cache_stats_no_sparse_retention_miss_on_clean_hit():
     """A hit that every group agrees on reports no loss, so the counter does
     not fire on healthy reuse."""

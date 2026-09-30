@@ -6764,10 +6764,7 @@ def _create_hybrid_mamba_align_scheduler(
 
 
 def test_sparse_retention_miss_recorded_at_admission():
-    """The sparse-retention counter reads the shared-prefix boundary that
-    ``schedule()`` stores on the request during its lookup. Going through the
-    scheduler pins that wiring: if the boundary were not stored before the
-    admission-time stats call, the loss would be reported as zero."""
+    """Admission statistics include the sparse loss captured during lookup."""
     block_size = 16
     scheduler = _create_hybrid_mamba_align_scheduler(block_size)
     manager = scheduler.kv_cache_manager

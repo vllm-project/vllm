@@ -14,6 +14,7 @@ from vllm.v1.core.kv_cache_utils import (
 )
 from vllm.v1.core.single_type_kv_cache_manager import (
     CrossAttentionManager,
+    KVCacheHitDiagnostics,
     MambaManager,
     SingleTypeKVCacheManager,
     get_manager_for_kv_cache_spec,
@@ -173,6 +174,7 @@ class KVCacheCoordinator(ABC):
         # (``scheduler_block_size``) to land on real cache-hit boundaries.
         # 0 = keep only the latest replay boundary; None = dense;
         self.retention_interval = kv_cache_config.prefix_cache_retention_interval
+        self.sparse_retention_misses = 0
         _validate_prefix_cache_retention_interval(
             self.retention_interval,
             self.scheduler_block_size,
@@ -882,6 +884,8 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
         num_groups = len(self.kv_cache_config.kv_cache_groups)
         hit_length = max_cache_hit_length
         longest_hit_length = 0
+        self.sparse_retention_misses = 0
+        diagnostics = KVCacheHitDiagnostics()
         hit_blocks_by_group: list[list[KVCacheBlock] | None] = [None] * num_groups
         hit_length_by_group: list[int] = [0] * num_groups
 
@@ -935,6 +939,7 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
                     _max_length = min(
                         curr_hit_length + eagle_margin, max_cache_hit_length
                     )
+                diagnostics.eagle_drop_tokens = 0
                 hit_blocks, _new_hit_length = manager_cls.find_longest_cache_hit(
                     block_hashes=block_hashes,
                     max_length=_max_length,
@@ -949,7 +954,17 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
                     pcp_world_size=self.single_type_managers[
                         first_group_id
                     ].pcp_world_size,
+                    diagnostics=diagnostics,
                 )
+                if isinstance(spec, (MambaSpec, SlidingWindowSpec)):
+                    # Only reductions made by a sparse group count; the EAGLE
+                    # drop is intentional even when all its blocks are cached.
+                    self.sparse_retention_misses += max(
+                        min(curr_hit_length, longest_hit_length)
+                        - _new_hit_length
+                        - diagnostics.eagle_drop_tokens,
+                        0,
+                    )
                 if drop_eagle_block:
                     eagle_verified.add(idx)
                 elif _new_hit_length < curr_hit_length:
