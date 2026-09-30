@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from http import HTTPStatus
+from typing import cast
 from unittest.mock import MagicMock
 
 import pytest
@@ -112,7 +113,8 @@ async def test_load_lora_adapter_base_model_name(load_inplace: bool):
     assert response.error.type == "InvalidUserInput"
     assert response.error.code == HTTPStatus.BAD_REQUEST
     assert len(serving_models.lora_requests) == 0
-    serving_models.engine_client.add_lora.assert_not_called()
+    add_lora_mock = cast(MagicMock, serving_models.engine_client.add_lora)
+    add_lora_mock.assert_not_called()
 
 
 @pytest.mark.asyncio
