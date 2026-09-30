@@ -1,11 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Contains helpers that are applied to collections.
+"""Contains helpers that are applied to collections.
 
 This is similar in concept to the `collections` module.
 """
 
+import math
 from collections import defaultdict
 from collections.abc import Callable, Generator, Hashable, Iterable, Mapping, Sequence
 from typing import Generic, Literal, TypeVar
@@ -19,8 +19,7 @@ _V = TypeVar("_V")
 
 
 class LazyDict(Mapping[str, _V], Generic[_V]):
-    """
-    Evaluates dictionary items only when they are accessed.
+    """Evaluates dictionary items only when they are accessed.
 
     Adapted from: https://stackoverflow.com/a/47212782/5082708
     """
@@ -68,6 +67,13 @@ def is_list_of(
     assert_never(check)
 
 
+def is_list_of_numbers(value: object) -> bool:
+    """Check every item is an int or finite float, excluding booleans."""
+    return isinstance(value, list) and all(
+        type(v) is int or (type(v) is float and math.isfinite(v)) for v in value
+    )
+
+
 @overload
 def common_prefix(items: Sequence[str]) -> str: ...
 
@@ -108,8 +114,7 @@ def flatten_2d_lists(lists: Iterable[Iterable[T]]) -> list[T]:
 
 
 def full_groupby(values: Iterable[_V], *, key: Callable[[_V], _K]):
-    """
-    Unlike [`itertools.groupby`][], groups are not broken by
+    """Unlike [`itertools.groupby`][], groups are not broken by
     non-contiguous data.
     """
     groups = defaultdict[_K, list[_V]](list)

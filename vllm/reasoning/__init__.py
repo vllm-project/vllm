@@ -32,6 +32,10 @@ _REASONING_PARSERS_TO_REGISTER = {
         "deepseek_v4_engine_reasoning_parser",
         "DeepSeekV4ParserReasoningAdapter",
     ),
+    "deepseek_v41": (
+        "deepseek_v41_engine_reasoning_parser",
+        "DeepSeekV41ParserReasoningAdapter",
+    ),
     "poolside_v1": (
         "poolside_v1_reasoning_parser",
         "PoolsideV1ReasoningParser",
@@ -72,6 +76,10 @@ _REASONING_PARSERS_TO_REGISTER = {
         "granite_reasoning_parser",
         "GraniteReasoningParser",
     ),
+    "granite_thinking_parser": (
+        "granite_thinking_engine_reasoning_parser",
+        "GraniteThinkingParserReasoningAdapter",
+    ),
     "holo2": (
         "deepseek_v3_reasoning_parser",
         "DeepSeekV3ReasoningWithThinkingParser",
@@ -84,6 +92,10 @@ _REASONING_PARSERS_TO_REGISTER = {
         "hy_v3_reasoning_parser",
         "HYV3ReasoningParser",
     ),
+    "hy_v4": (
+        "hy_v4_reasoning_parser",
+        "HYV4ReasoningParser",
+    ),
     "kimi_k2": (
         "kimi_k2_reasoning_parser",
         "KimiK2ReasoningParser",
@@ -92,9 +104,13 @@ _REASONING_PARSERS_TO_REGISTER = {
         "kimi_k3_reasoning_parser",
         "KimiK3ReasoningParser",
     ),
+    "k2_horizon": (
+        "k2_horizon_reasoning_parser",
+        "K2HorizonReasoningParser",
+    ),
     "mimo": (
-        "qwen3_engine_reasoning_parser",
-        "Qwen3ParserReasoningAdapter",
+        "mimo_engine_reasoning_parser",
+        "MiMoParserReasoningAdapter",
     ),
     "minimax_m2": (
         "minimax_m2_reasoning_parser",
@@ -119,6 +135,10 @@ _REASONING_PARSERS_TO_REGISTER = {
     "olmo3": (
         "olmo3_reasoning_parser",
         "Olmo3ReasoningParser",
+    ),
+    "plamo3": (
+        "plamo3_engine_reasoning_parser",
+        "Plamo3ParserReasoningAdapter",
     ),
     "muse_glimmer": (
         "muse_glimmer_reasoning_parser",

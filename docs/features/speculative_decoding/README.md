@@ -9,6 +9,7 @@ To train your own draft models for optimized speculative decoding, see [vllm-pro
 vLLM supports a variety of methods of speculative decoding. Model-based methods such as EAGLE, MTP, draft models, PARD and MLP provide the best latency reduction, while simpler methods such as n-gram and suffix decoding provide modest speedups without increasing workload during peak traffic.
 
 - [EAGLE](eagle.md)
+- [LiLiCorr](lilicorr.md)
 - [Multi-Token Prediction (MTP)](mtp.md)
 - [Draft Model](draft_model.md)
 - [Parallel Draft Model (PARD)](parallel_draft_model.md)
@@ -19,6 +20,7 @@ vLLM supports a variety of methods of speculative decoding. Model-based methods 
 - [Custom Proposer Backend (Experimental)](#custom-proposer-backend-experimental)
 - [Dynamic Speculative Decoding](dynamic_speculative_decoding.md)
 - [Adaptive Verification](adaptive_verification.md)
+- [Per-Request Acceptance Metrics](acceptance_metrics.md)
 
 ## Method Selection at a Glance
 

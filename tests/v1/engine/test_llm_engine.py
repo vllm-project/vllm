@@ -49,13 +49,6 @@ def vllm_model(vllm_runner, request):
         yield vllm_model
 
 
-@pytest.fixture(scope="function")
-def vllm_model_apc(vllm_runner):
-    """VllmRunner test fixture with APC."""
-    with _vllm_model(True, vllm_runner) as vllm_model:
-        yield vllm_model
-
-
 @pytest.fixture(
     # Function scope decouples tests & allows
     # env var adjustment via monkeypatch
@@ -82,7 +75,7 @@ def _get_test_sampling_params(
     rng = random.Random(seed)
 
     def get_mostly_n_gt1() -> int:
-        r"""Mostly n \in [2,20], ~1/3 n=1"""
+        r"""Mostly n \in [2,20], ~1/3 n=1."""
         x = rng.randint(0, 28)
         if x < 10:
             return 1
@@ -125,6 +118,7 @@ def test_parallel_sampling(vllm_model, example_prompts) -> None:
     Args:
       vllm_model: VllmRunner instance under test.
       example_prompt: test fixture providing prompts for testing.
+
     """
     sampling_params_list, n_list = _get_test_sampling_params(example_prompts)
     llm: LLM = vllm_model.llm

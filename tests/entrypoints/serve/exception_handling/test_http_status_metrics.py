@@ -14,7 +14,7 @@ import pytest
 from fastapi import HTTPException
 from prometheus_client import CollectorRegistry
 
-from vllm.entrypoints.openai.api_server import build_app
+from vllm.entrypoints.launchers.api_server.entry import build_app
 from vllm.exceptions import (
     VLLMNotFoundError,
     VLLMServerError,

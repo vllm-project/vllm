@@ -7,14 +7,14 @@ from http import HTTPStatus
 
 from vllm.config import ModelConfig
 from vllm.engine.protocol import EngineClient
-from vllm.entrypoints.openai.engine.protocol import (
+from vllm.entrypoints.openai.models.protocol import BaseModelPath, LoRAModulePath
+from vllm.entrypoints.serve import create_error_response
+from vllm.entrypoints.serve.engine.protocol import (
     ErrorResponse,
     ModelCard,
     ModelList,
     ModelPermission,
 )
-from vllm.entrypoints.openai.models.protocol import BaseModelPath, LoRAModulePath
-from vllm.entrypoints.serve import create_error_response
 from vllm.entrypoints.serve.lora.protocol import (
     LoadLoRAAdapterRequest,
     UnloadLoRAAdapterRequest,
@@ -245,6 +245,14 @@ class OpenAIServingModels:
                 status_code=HTTPStatus.BAD_REQUEST,
             )
 
+        if self.is_base_model(request.lora_name):
+            return create_error_response(
+                message=f"The lora adapter '{request.lora_name}' conflicts with a "
+                "served base model.",
+                err_type="InvalidUserInput",
+                status_code=HTTPStatus.BAD_REQUEST,
+            )
+
         # If not loading inplace
         # Check if the lora adapter with the given name already exists
         if not request.load_inplace and request.lora_name in self.lora_requests:
@@ -289,6 +297,7 @@ class OpenAIServingModels:
             LoRARequest if found and loaded successfully.
             ErrorResponse (404) if no resolver finds the adapter.
             ErrorResponse (400) if adapter(s) are found but none load.
+
         """
         async with self.lora_resolver_lock[lora_name]:
             # First check if this LoRA is already loaded
