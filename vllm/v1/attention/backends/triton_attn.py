@@ -40,7 +40,7 @@ from vllm.v1.attention.ops.triton_reshape_and_cache_flash import (
     triton_reshape_and_cache_flash_per_token_head_quant,
 )
 from vllm.v1.attention.ops.triton_unified_attention import (
-    _supports_uniform_decode,
+    MAX_3D_QUERY_LEN,
     unified_attention,
 )
 from vllm.v1.kv_cache_interface import (
@@ -55,31 +55,6 @@ logger = init_logger(__name__)
 # constants
 MIN_LAUNCH_GRID_SIZE_2D = 128  # Minimum launch grid size of 2D kernel
 NUM_PAR_SOFTMAX_SEGMENTS = 16  # Number of parallel tiled softmax segments
-
-
-def _is_uniform_decode(common_attn_metadata: CommonAttentionMetadata) -> bool:
-    """Whether every nonempty request is a non-prefill of max_query_len tokens.
-
-    Empty requests are full-graph padding. MRV2 pads query_start_loc but not
-    is_prefilling, so requests without a flag must be empty.
-    """
-    num_reqs = common_attn_metadata.num_reqs
-    max_query_len = common_attn_metadata.max_query_len
-    is_prefilling = common_attn_metadata.is_prefilling
-    if (
-        max_query_len <= 1
-        or is_prefilling is None
-        or not _supports_uniform_decode(
-            max_query_len, num_reqs, common_attn_metadata.num_actual_tokens
-        )
-    ):
-        return False
-    query_lens = common_attn_metadata.query_start_loc_cpu[: num_reqs + 1].diff()
-    prefilling = torch.ones(num_reqs, dtype=torch.bool)
-    num_flags = min(num_reqs, len(is_prefilling))
-    prefilling[:num_flags] = is_prefilling[:num_flags]
-    is_decode = (query_lens == max_query_len) & ~prefilling
-    return bool(is_decode.any() and (is_decode | (query_lens == 0)).all())
 
 
 @dataclass
@@ -122,7 +97,6 @@ class TritonAttentionMetadata:
     mm_prefix_range_tensor: torch.Tensor | None = None
     rswa_prefix_lens: torch.Tensor | None = None
     rswa_window: int | None = None
-    is_uniform_decode: bool = False
 
 
 class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMetadata]):
@@ -184,18 +158,12 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
         headdim_padded = next_power_of_2(self.headdim)
         max_query_len_3d = 1
         speculative_config = vllm_config.speculative_config
-        self.adaptive_verification = bool(
-            speculative_config and speculative_config.enable_adaptive_verification
-        )
         if speculative_config is not None:
             num_speculative_tokens = speculative_config.num_speculative_tokens or 0
             query_len = 1 + num_speculative_tokens * (
                 2 if speculative_config.parallel_drafting else 1
             )
-            max_num_seqs = vllm_config.scheduler_config.max_num_seqs
-            if _supports_uniform_decode(
-                query_len, max_num_seqs, max_num_seqs * query_len
-            ):
+            if query_len <= MAX_3D_QUERY_LEN:
                 max_query_len_3d = query_len
         # Scratch is indexed by query token, including verification tokens.
         max_num_tokens_3d = (
@@ -237,11 +205,8 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
         attn_metadata = self.build(0, common_attn_metadata)
         # When doing full graph capture, setting seq_lens to
         # max_model_len will cause graph capture to be extremely
-        # slow. Uniform verification still needs seq_len >= query_len.
-        capture_seq_len = (
-            attn_metadata.max_query_len if attn_metadata.is_uniform_decode else 1
-        )
-        attn_metadata.seq_lens.fill_(capture_seq_len)
+        # slow, so here we set it to 1.
+        attn_metadata.seq_lens.fill_(1)
         return attn_metadata
 
     def build(
@@ -253,10 +218,6 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
         num_reqs = common_attn_metadata.num_reqs
         num_actual_tokens = common_attn_metadata.num_actual_tokens
         max_query_len = common_attn_metadata.max_query_len
-        # Adaptive verification redistributes query lengths on device only.
-        is_uniform_decode = not self.adaptive_verification and _is_uniform_decode(
-            common_attn_metadata
-        )
 
         max_seq_len = common_attn_metadata.max_seq_len
         query_start_loc = common_attn_metadata.query_start_loc
@@ -284,7 +245,6 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
         attn_metadata = TritonAttentionMetadata(
             num_actual_tokens=num_actual_tokens,
             max_query_len=max_query_len,
-            is_uniform_decode=is_uniform_decode,
             query_start_loc=query_start_loc,
             max_seq_len=max_seq_len,
             seq_lens=seq_lens,
@@ -736,7 +696,6 @@ class TritonAttentionImpl(AttentionImpl):
             q_descale=q_descale,
             k_descale=k_descale,
             v_descale=v_descale,
-            is_uniform_decode=attn_metadata.is_uniform_decode,
             seq_threshold_3D=seq_threshold_3D,
             num_par_softmax_segments=num_par_softmax_segments,
             softmax_segm_output=softmax_segm_output,

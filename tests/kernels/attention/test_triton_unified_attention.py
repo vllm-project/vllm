@@ -18,6 +18,7 @@ from vllm.v1.attention.ops.triton_attention_helpers import (
     softmax_step,
 )
 from vllm.v1.attention.ops.triton_unified_attention import (
+    MAX_3D_QUERY_LEN,
     reduce_segments,
     unified_attention,
 )
@@ -54,7 +55,6 @@ def _uses_splitk(
     query_len,
     scratch,
     *,
-    uniform=True,
     causal=True,
     threshold=8,
     mm_prefix=None,
@@ -84,7 +84,6 @@ def _uses_splitk(
         None,
         None,
         None,
-        is_uniform_decode=uniform,
         seq_threshold_3D=threshold,
         num_par_softmax_segments=16,
         softmax_segm_output=scratch[0],
@@ -130,16 +129,22 @@ def test_splitk_validates_each_scratch_tensor(
 @pytest.mark.parametrize(
     "query_len,options,expected",
     [
-        (1, {"uniform": False}, True),
-        (1, {"uniform": False, "causal": False}, True),
+        (1, {}, True),
+        (1, {"causal": False}, True),
         (5, {}, True),
-        (5, {"uniform": False}, False),
-        (6, {}, False),
+        (6, {"num_seqs": 1}, True),
+        (6, {"num_seqs": 1, "num_query_tokens": 8}, True),
+        (8, {}, True),
+        (9, {"num_seqs": 1}, False),
         (5, {"causal": False}, False),
         (5, {"causal": "per_sequence"}, False),
         (5, {"threshold": 1}, False),
         (5, {"batch_invariant": True}, False),
         (5, {"mm_prefix": True}, False),
+        # BLOCK_Q is 2 for 8 query heads per KV head: 4 * ceil(4 / 2) <= 8.
+        (4, {"num_seqs": 4}, True),
+        (5, {"num_seqs": 4}, False),
+        (8, {"threshold": 7}, False),
     ],
 )
 def test_splitk_admission_preserves_decode_and_bounds_verification(
@@ -149,93 +154,15 @@ def test_splitk_admission_preserves_decode_and_bounds_verification(
     monkeypatch.setattr(
         attention, "is_batch_invariant", options.pop("batch_invariant", False)
     )
+    num_seqs = options.setdefault("num_seqs", 2)
     if options.get("causal") == "per_sequence":
-        options["causal"] = torch.ones(2, dtype=torch.bool, device="cpu")
+        options["causal"] = torch.ones(num_seqs, dtype=torch.bool, device="cpu")
     if options.get("mm_prefix"):
-        options["mm_prefix"] = torch.zeros((2, 1, 2), dtype=torch.int32, device="cpu")
-    scratch = _scratch(2 * query_len)
-    assert _uses_splitk(monkeypatch, query_len, scratch, **options) is expected
-
-
-@pytest.fixture
-def sm120_six_query_platform(monkeypatch):
-    monkeypatch.setattr(current_platform, "is_cuda", lambda: True)
-    monkeypatch.setattr(
-        current_platform, "is_device_capability", lambda cap: cap == (12, 0)
-    )
-    monkeypatch.setattr(attention, "is_batch_invariant", False)
-
-
-@pytest.mark.parametrize(
-    "query_len,num_seqs,num_tokens,rows,uniform,expected",
-    [
-        (5, 2, 10, 10, True, True),
-        (6, 1, 6, 6, True, True),
-        (6, 1, 6, 5, True, False),
-        (6, 1, 7, 7, True, False),
-        (6, 2, 12, 12, True, False),
-        (7, 1, 7, 7, True, False),
-        (6, 1, 6, 6, False, False),
-    ],
-)
-def test_six_query_dispatch_requires_single_six_row_batch(
-    monkeypatch,
-    sm120_six_query_platform,
-    query_len,
-    num_seqs,
-    num_tokens,
-    rows,
-    uniform,
-    expected,
-):
-    scratch = _scratch(rows)
-    assert (
-        _uses_splitk(
-            monkeypatch,
-            query_len,
-            scratch,
-            num_seqs=num_seqs,
-            num_query_tokens=num_tokens,
-            uniform=uniform,
-            threshold=6,
+        options["mm_prefix"] = torch.zeros(
+            (num_seqs, 1, 2), dtype=torch.int32, device="cpu"
         )
-        is expected
-    )
-
-
-@pytest.mark.parametrize(
-    "cuda,capability", [(False, (12, 0)), (True, (9, 0)), (True, (10, 0))]
-)
-def test_six_query_does_not_expand_other_platforms(monkeypatch, cuda, capability):
-    monkeypatch.setattr(current_platform, "is_cuda", lambda: cuda)
-    monkeypatch.setattr(
-        current_platform, "is_device_capability", lambda cap: cap == capability
-    )
-    monkeypatch.setattr(attention, "is_batch_invariant", False)
-    scratch = _scratch(6)
-    assert not _uses_splitk(monkeypatch, 6, scratch, num_seqs=1, threshold=6)
-
-
-@pytest.mark.parametrize(
-    "options",
-    [
-        {"causal": False},
-        {"threshold": 0},
-        {"mm_prefix": True},
-        {"batch_invariant": True},
-    ],
-)
-def test_six_query_preserves_existing_dispatch_guards(
-    monkeypatch, sm120_six_query_platform, options
-):
-    options = options.copy()
-    monkeypatch.setattr(
-        attention, "is_batch_invariant", options.pop("batch_invariant", False)
-    )
-    if options.get("mm_prefix"):
-        options["mm_prefix"] = torch.zeros((1, 1, 2), dtype=torch.int32, device="cpu")
-    scratch = _scratch(6)
-    assert not _uses_splitk(monkeypatch, 6, scratch, num_seqs=1, **options)
+    scratch = _scratch(options.get("num_query_tokens", num_seqs * query_len))
+    assert _uses_splitk(monkeypatch, query_len, scratch, **options) is expected
 
 
 @pytest.mark.parametrize("empty_state", ["masked", "unvisited", "all_empty"])
@@ -335,11 +262,22 @@ def test_reduce_segments_leaves_graph_padding_untouched(query_lens, seq_lens) ->
     )
 
 
-@pytest.mark.parametrize("query_len", [2, 4])
+@pytest.mark.parametrize(
+    "seq_lens",
+    [
+        *[
+            [(width, 128), (width, 129), (width, 257)]
+            for width in range(2, MAX_3D_QUERY_LEN + 1, 2)
+        ],
+        # Prefill chunk, verification, decode, padding, short query.
+        [(8, 8), (6, 129), (1, 257), (0, 0), (3, 64)],
+    ],
+    ids=["w2", "w4", "w6", "w8", "mixed"],
+)
 @pytest.mark.parametrize("sliding_window", [None, 32])
-def test_speculative_splitk_matches_reference(query_len, sliding_window):
+def test_speculative_splitk_matches_reference(seq_lens, sliding_window):
     test_triton_unified_attn(
-        seq_lens=[(query_len, 128), (query_len, 129), (query_len, 257)],
+        seq_lens=seq_lens,
         num_heads=(8, 1),
         head_size=128,
         sliding_window=sliding_window,
@@ -348,26 +286,19 @@ def test_speculative_splitk_matches_reference(query_len, sliding_window):
         soft_cap=None,
         num_blocks=8,
         q_dtype=None,
-        seq_threshold_3D=8,
+        seq_threshold_3D=32,
     )
 
 
 def test_speculative_splitk_bf16_query_fp8_kv():
     test_triton_unified_attn_bf16_query_fp8_kv(
-        seq_lens=[(5, 128), (5, 129), (5, 4097)],
+        seq_lens=[(6, 128), (6, 129), (6, 4097)],
         num_heads=(8, 1),
         head_size=128,
         block_size=128,
         num_blocks=64,
-        seq_threshold_3D=8,
+        seq_threshold_3D=16,
     )
-
-
-SM120_SIX_QUERY_NATIVE = pytest.mark.skipif(
-    not current_platform.is_cuda()
-    or not current_platform.is_device_capability((12, 0)),
-    reason="Single-request six-query split-K requires SM120",
-)
 
 
 def _native_graph_inputs(window, width, num_seqs):
@@ -378,7 +309,7 @@ def _native_graph_inputs(window, width, num_seqs):
     builder = _builder(
         width - 1, max_num_seqs=num_seqs, capture_sizes=[num_tokens], device="cuda"
     )
-    common = _metadata([width] * num_seqs, [False] * num_seqs)
+    common = _metadata([width] * num_seqs)
     common.query_start_loc = common.query_start_loc_cpu.to("cuda")
     common.seq_lens = torch.full((num_seqs,), 129, dtype=torch.int32, device="cuda")
     common.max_seq_len = 4097
@@ -422,7 +353,6 @@ def _native_graph_inputs(window, width, num_seqs):
         softmax_segm_output=scratch[0],
         softmax_segm_max=scratch[1],
         softmax_segm_expsum=scratch[2],
-        is_uniform_decode=metadata.is_uniform_decode,
         kv_quant_mode=KVQuantMode.FP8_PER_TENSOR,
     )
     return args, scratch
@@ -462,8 +392,16 @@ def _check_native_graph(args, query_lens, kv_lens, window=None):
                 ([6], [4097], False),
                 ([6], [6], True),
             ],
-            marks=SM120_SIX_QUERY_NATIVE,
             id="width6",
+        ),
+        pytest.param(
+            MAX_3D_QUERY_LEN,
+            [
+                ([MAX_3D_QUERY_LEN], [129], False),
+                ([2], [2], False),
+                ([MAX_3D_QUERY_LEN], [MAX_3D_QUERY_LEN], True),
+            ],
+            id="width8",
         ),
         pytest.param(
             5,
@@ -481,7 +419,6 @@ def _check_native_graph(args, query_lens, kv_lens, window=None):
 def test_native_graph_replay_preserves_buffers_and_padding(window, width, replays):
     num_seqs = len(replays[0][0])
     args, scratch = _native_graph_inputs(window, width, num_seqs)
-    assert args["is_uniform_decode"]
     assert all(buffer.shape[0] == width * num_seqs for buffer in scratch)
     pointers = [buffer.data_ptr() for buffer in scratch]
     stream = torch.cuda.Stream()
@@ -508,7 +445,6 @@ def test_native_graph_replay_preserves_buffers_and_padding(window, width, replay
         assert [buffer.data_ptr() for buffer in scratch] == pointers
 
 
-@SM120_SIX_QUERY_NATIVE
 @pytest.mark.parametrize("num_kv_heads", [1, 8])
 @torch.inference_mode()
 def test_six_query_native_fp8_query_head_families(monkeypatch, num_kv_heads):
@@ -541,7 +477,7 @@ def test_six_query_native_fp8_query_head_families(monkeypatch, num_kv_heads):
     )
     fp8_keys = (keys / k_scale).to(FP8_DTYPE)
     fp8_values = (values / v_scale).to(FP8_DTYPE)
-    common = _metadata([6], [False])
+    common = _metadata([6])
     common.query_start_loc = common.query_start_loc_cpu.to("cuda")
     common.seq_lens = torch.tensor([129], dtype=torch.int32, device="cuda")
     common.max_seq_len = 129
@@ -591,7 +527,6 @@ def test_six_query_native_fp8_query_head_families(monkeypatch, num_kv_heads):
         softmax_segm_output=scratch[0],
         softmax_segm_max=scratch[1],
         softmax_segm_expsum=scratch[2],
-        is_uniform_decode=metadata.is_uniform_decode,
         kv_quant_mode=KVQuantMode.FP8_PER_TENSOR,
     )
     with torch.device("cuda"):
@@ -1003,8 +938,9 @@ def test_triton_unified_attn(
 
     num_par_softmax_segments = 16
     head_size_padded = next_power_of_2(head_size)
-    is_uniform_decode = len(set(query_lens)) == 1 and max_query_len <= 5
-    scratch_rows = seq_threshold_3D * (max_query_len if is_uniform_decode else 1)
+    scratch_rows = seq_threshold_3D * (
+        max_query_len if max_query_len <= MAX_3D_QUERY_LEN else 1
+    )
     softmax_segm_output = torch.empty(
         (scratch_rows, num_query_heads, num_par_softmax_segments, head_size_padded),
         dtype=torch.float32,
@@ -1035,7 +971,6 @@ def test_triton_unified_attn(
         q_descale=q_descale,
         k_descale=k_descale,
         v_descale=v_descale,
-        is_uniform_decode=is_uniform_decode,
         seq_threshold_3D=seq_threshold_3D,
         num_par_softmax_segments=num_par_softmax_segments,
         softmax_segm_output=softmax_segm_output,
@@ -1126,8 +1061,9 @@ def test_triton_unified_attn_bf16_query_fp8_kv(
 
     num_par_softmax_segments = 16
     head_size_padded = next_power_of_2(head_size)
-    is_uniform_decode = len(set(query_lens)) == 1 and max_query_len <= 5
-    scratch_rows = seq_threshold_3D * (max_query_len if is_uniform_decode else 1)
+    scratch_rows = seq_threshold_3D * (
+        max_query_len if max_query_len <= MAX_3D_QUERY_LEN else 1
+    )
     softmax_segm_output = torch.empty(
         (scratch_rows, num_query_heads, num_par_softmax_segments, head_size_padded),
         dtype=torch.float32,
@@ -1158,7 +1094,6 @@ def test_triton_unified_attn_bf16_query_fp8_kv(
         q_descale=None,
         k_descale=k_descale,
         v_descale=v_descale,
-        is_uniform_decode=is_uniform_decode,
         seq_threshold_3D=seq_threshold_3D,
         num_par_softmax_segments=num_par_softmax_segments,
         softmax_segm_output=softmax_segm_output,

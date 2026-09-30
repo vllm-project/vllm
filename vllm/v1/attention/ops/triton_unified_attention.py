@@ -33,17 +33,8 @@ from vllm.v1.kv_cache_interface import KVQuantMode
 logger = init_logger(__name__)
 is_batch_invariant = envs.VLLM_BATCH_INVARIANT
 float8_info = torch.finfo(current_platform.fp8_dtype())
-MAX_UNIFORM_DECODE_QUERY_LEN = 5
-
-
-def _supports_uniform_decode(query_len: int, num_seqs: int, num_tokens: int) -> bool:
-    return query_len <= MAX_UNIFORM_DECODE_QUERY_LEN or (
-        query_len == 6  # Validated only for one unpadded SM120 request.
-        and num_seqs == 1
-        and num_tokens == 6
-        and current_platform.is_cuda()
-        and current_platform.is_device_capability((12, 0))
-    )
+# Longest per-request query (e.g. 1 + num_speculative_tokens) run by split-K.
+MAX_3D_QUERY_LEN = 8
 
 
 @triton.jit
@@ -874,8 +865,6 @@ def unified_attention(
     # Gemma4: clamp mm_prefix bidirectional ranges by the sliding window.
     # Default False keeps the original behavior for every other model.
     mm_prefix_clamp_sliding_window: bool = False,
-    # Caller-verified: each nonempty sequence is a decode of max_seqlen_q queries.
-    is_uniform_decode: bool = False,
 ):
     # Resolve causal: bool or per-seq tensor.
     use_per_seq_causal = isinstance(causal, torch.Tensor)
@@ -1064,8 +1053,8 @@ def unified_attention(
 
     # Launch the 2D kernel if
     # 1. No intermediate tiled softmax buffers for the 3D kernel have been allocated, or
-    # 2. A multi-query batch is not a supported uniform causal decode, or
-    # 3. The number of sequences exceeds the configured threshold, or
+    # 2. A request has over MAX_3D_QUERY_LEN queries or non-causal masking, or
+    # 3. The number of Q blocks per KV head exceeds the configured threshold, or
     # 4. Batch invariance is enabled
     use_3d = not (
         seq_threshold_3D is None
@@ -1077,15 +1066,14 @@ def unified_attention(
         or (
             max_seqlen_q > 1
             and (
-                not is_uniform_decode
-                or not _supports_uniform_decode(max_seqlen_q, num_seqs, q.shape[0])
+                max_seqlen_q > MAX_3D_QUERY_LEN
                 or not use_causal
                 or use_per_seq_causal
                 or use_mm_prefix
                 or tuned_large_head
             )
         )
-        or num_seqs > seq_threshold_3D
+        or num_seqs * triton.cdiv(max_seqlen_q, BLOCK_Q) > seq_threshold_3D
         or is_batch_invariant
     )
     if use_3d:
