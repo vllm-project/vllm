@@ -39,6 +39,10 @@ class XgrammarBackend(StructuredOutputBackend):
         self.disable_any_whitespace = (
             self.vllm_config.structured_outputs_config.disable_any_whitespace
         )
+        model_config = self.vllm_config.model_config
+        is_plamo3 = (
+            model_config is not None and model_config.hf_config.model_type == "plamo3"
+        )
 
         if is_mistral_tokenizer(self.tokenizer):
             # NOTE: ideally, xgrammar should handle this accordingly.
@@ -58,6 +62,10 @@ class XgrammarBackend(StructuredOutputBackend):
                 stop_token_ids=stop_token_ids,
                 add_prefix_space=True,
             )
+        elif is_plamo3 and callable(
+            init_xgrammar := getattr(self.tokenizer, "init_xgrammar", None)
+        ):
+            tokenizer_info, _ = init_xgrammar()
         else:
             tokenizer_info = xgr.TokenizerInfo.from_huggingface(
                 self.tokenizer,

@@ -117,6 +117,11 @@ ignore_missing_imports = true
 check_untyped_defs = true
 follow_imports = "silent"
 
+[[tool.mypy.overrides]]
+module = "tests.*"
+disable_error_code = ["arg-type", "assignment"]
+enable_error_code = ["method-assign"]
+
 [tool.pytest.ini_options]
 markers = [
     "slow_test",

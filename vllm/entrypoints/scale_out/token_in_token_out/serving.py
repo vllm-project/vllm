@@ -39,6 +39,7 @@ from vllm.inputs import EngineInput, TokensPrompt, mm_input
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob
 from vllm.multimodal.inputs import (
+    MultiModalKwargsItem,
     MultiModalKwargsItems,
     PlaceholderRange,
 )
@@ -106,6 +107,23 @@ class ServingTokens(GenerateBaseServing):
             else getattr(mc, "override_generation_config", {}).get("max_new_tokens")
         )
 
+    def _validate_mm_cache_handles(
+        self,
+        mm_kwargs: dict[str, list[MultiModalKwargsItem | None]],
+        mm_hashes: dict[str, list[str]],
+    ) -> ErrorResponse | None:
+        cache = self.online_renderer.renderer.mm_processor_cache
+        if cache is None:
+            return None
+        try:
+            for modality, items in mm_kwargs.items():
+                for mm_hash, item in zip(mm_hashes[modality], items, strict=True):
+                    if item is not None:
+                        cache.validate_input_item(item, mm_hash)
+        except ValueError as error:
+            return self.create_error_response(error)
+        return None
+
     async def serve_tokens(
         self,
         request: GenerateRequest,
@@ -137,6 +155,11 @@ class ServingTokens(GenerateBaseServing):
             return self.create_error_response(
                 f"sampling_params.n must be at most the server's max_num_seqs "
                 f"({max_num_seqs}), got {sampling_params.n}."
+            )
+        # The stream schema has no field for the scores.
+        if request.stream and sampling_params.prompt_logprob_token_ids is not None:
+            return self.create_error_response(
+                "prompt_logprob_token_ids are not available when stream=true."
             )
         if self.force_no_detokenize and sampling_params.stop:
             # SamplingParams rejects stop with detokenize=False at request
@@ -196,6 +219,8 @@ class ServingTokens(GenerateBaseServing):
             # Deserialize full tensor data and optional metadata-only data.
             # Metadata-only items are valid when ec_transfer_params is set.
             mm_kwargs = mm_kwargs_from_features(features)
+            if error := self._validate_mm_cache_handles(mm_kwargs, features.mm_hashes):
+                return error
 
             engine_input = mm_input(
                 prompt_token_ids=request.token_ids,
@@ -389,6 +414,11 @@ class ServingTokens(GenerateBaseServing):
             choices=choices,
             usage=usage,
             prompt_logprobs=clamp_prompt_logprobs(final_res.prompt_logprobs),
+            prompt_token_id_logprobs=(
+                numpy2base64(final_res.prompt_token_id_logprobs)
+                if final_res.prompt_token_id_logprobs is not None
+                else None
+            ),
             prompt_token_ids=(
                 final_res.prompt_token_ids if request.return_token_ids else None
             ),
