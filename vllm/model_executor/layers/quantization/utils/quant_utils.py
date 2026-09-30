@@ -364,7 +364,7 @@ def check_activation_quant_fallback(
     if envs.VLLM_STRICT_QUANT_SCHEME:
         return f"{msg}, which VLLM_STRICT_QUANT_SCHEME=1 forbids"
     logger.warning_once(
-        "%s. Set VLLM_STRICT_QUANT_SCHEME=1 to raise an error instead.", msg
+        "%s. Set VLLM_STRICT_QUANT_SCHEME=1 to forbid this fallback.", msg
     )
     return None
 

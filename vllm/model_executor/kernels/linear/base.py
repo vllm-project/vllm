@@ -191,6 +191,16 @@ class MMLinearKernel(ABC, Generic[_ConfigT, _ParamsT]):
         raise NotImplementedError
 
     @classmethod
+    def executed_activation_key(
+        cls, activation_quant_key: QuantKey | None
+    ) -> QuantKey | None:
+        """The activation quantization the kernel runs for a layer requesting
+        `activation_quant_key`. Weight-only kernels return None; kernel
+        selection then warns about, or under VLLM_STRICT_QUANT_SCHEME forbids,
+        the fallback."""
+        return activation_quant_key
+
+    @classmethod
     @abstractmethod
     def can_implement(cls, config: _ConfigT) -> tuple[bool, str | None]:
         """Check if this kernel can implement the given configuration.

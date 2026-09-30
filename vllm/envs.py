@@ -1670,9 +1670,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_B12X_MOE_FP4_FORCE_A16": lambda: bool(
         int(os.getenv("VLLM_B12X_MOE_FP4_FORCE_A16", "0"))
     ),
-    # Error instead of warning when a kernel would run with a different
-    # activation quantization than the checkpoint or quantization config
-    # requests (e.g. Marlin running FP8 W8A8 layers as W8A16).
+    # Forbid kernels that run a different activation quantization than the
+    # checkpoint or quantization config requests (e.g. Marlin running FP8 W8A8
+    # layers as W8A16). Otherwise such fallbacks are allowed with a warning.
     "VLLM_STRICT_QUANT_SCHEME": lambda: bool(
         int(os.getenv("VLLM_STRICT_QUANT_SCHEME", "0"))
     ),

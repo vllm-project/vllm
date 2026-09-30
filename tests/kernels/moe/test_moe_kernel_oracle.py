@@ -16,6 +16,9 @@ import pytest
 
 from tests.kernels.moe.utils import make_dummy_moe_config
 from vllm.model_executor.layers.fused_moe.experts.marlin_moe import MarlinExperts
+from vllm.model_executor.layers.fused_moe.experts.nvfp4_emulation_moe import (
+    Nvfp4QuantizationEmulationTritonExperts,
+)
 from vllm.model_executor.layers.fused_moe.experts.triton_moe import TritonExperts
 from vllm.model_executor.layers.fused_moe.oracle import UnquantizedMoEKernelOracle
 from vllm.model_executor.layers.fused_moe.oracle import nvfp4 as nvfp4_oracle
@@ -76,21 +79,26 @@ def test_strict_quant_scheme_skips_activation_fallbacks(monkeypatch, strict, exp
     """Marlin runs NVFP4 W4A4 layers as W4A16. VLLM_STRICT_QUANT_SCHEME keeps the
     backend priority order but skips such fallbacks; emulation honors W4A4."""
     monkeypatch.setenv("VLLM_STRICT_QUANT_SCHEME", str(int(strict)))
-
-    def backend_to_kernel_cls(backend):
-        class Experts:
-            @staticmethod
-            def is_supported_config(*args):
-                supported = (NvFp4MoeBackend.MARLIN, NvFp4MoeBackend.EMULATION)
-                return backend in supported, None
-
-        return [Experts]
-
-    monkeypatch.setattr(nvfp4_oracle, "backend_to_kernel_cls", backend_to_kernel_cls)
-    backend, _ = nvfp4_oracle.select_nvfp4_moe_backend(
-        make_dummy_moe_config(), weight_key=kNvfp4Static, activation_key=kNvfp4Dynamic
+    kernels = {
+        NvFp4MoeBackend.MARLIN: MarlinExperts,
+        NvFp4MoeBackend.EMULATION: Nvfp4QuantizationEmulationTritonExperts,
+    }
+    for k_cls in kernels.values():
+        monkeypatch.setattr(
+            k_cls, "_supports_current_device", staticmethod(lambda: True)
+        )
+    monkeypatch.setattr(
+        nvfp4_oracle,
+        "backend_to_kernel_cls",
+        lambda backend: [kernels[backend]] if backend in kernels else [],
     )
-    assert backend == expected
+
+    backend, experts_cls = nvfp4_oracle.select_nvfp4_moe_backend(
+        make_dummy_moe_config(hidden_dim=256, intermediate_size=256),
+        weight_key=kNvfp4Static,
+        activation_key=kNvfp4Dynamic,
+    )
+    assert (backend, experts_cls) == (expected, kernels[expected])
 
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="Marlin requires CUDA")

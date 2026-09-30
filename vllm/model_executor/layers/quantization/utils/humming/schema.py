@@ -267,7 +267,7 @@ def _warn_input_fallback(
         return
     logger.warning_once(
         "Humming runs %s activations as %s. Set VLLM_STRICT_QUANT_SCHEME=1 "
-        "to raise an error instead.",
+        "to forbid this fallback.",
         requested,
         "unquantized" if executed is None or executed.num_bits >= 16 else executed,
     )

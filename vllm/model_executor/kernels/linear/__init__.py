@@ -12,7 +12,7 @@ or kernel implementation, add it to this __init__.py to maintain
 import stability.
 """
 
-from typing import TypeVar
+from typing import Any, TypeVar
 
 import torch
 
@@ -612,28 +612,13 @@ _KernelT = TypeVar("_KernelT", bound=ScaledMMLinearKernel | MMLinearKernel)
 _KernelConfigT = TypeVar("_KernelConfigT", bound=MMLinearLayerConfig)
 
 
-# Kernels that run unquantized activations whatever the layer requests.
-_WEIGHT_ONLY_KERNELS: frozenset[type] = frozenset(
-    {
-        MarlinFP8ScaledMMLinearKernel,
-        HummingFP8ScaledMMLinearKernel,
-        HummingInt8ScaledMMLinearKernel,
-        CPUFp8BlockScaledMMKernel,
-        CPUFp8PerTensorScaledMMLinearKernel,
-        FlashInferCuteDslNvFp4W4A16LinearKernel,
-        MarlinNvFp4LinearKernel,
-        MarlinMxfp8LinearKernel,
-        MarlinMxFp4LinearKernel,
-    }
-)
-
-
 def _check_activation_fallback(
-    kernel: type, activation_quant_key: QuantKey | None
+    kernel: type[Any], activation_quant_key: QuantKey | None
 ) -> str | None:
-    executed_key = None if kernel in _WEIGHT_ONLY_KERNELS else activation_quant_key
     return check_activation_quant_fallback(
-        kernel.__name__, activation_quant_key, executed_key
+        kernel.__name__,
+        activation_quant_key,
+        kernel.executed_activation_key(activation_quant_key),
     )
 
 

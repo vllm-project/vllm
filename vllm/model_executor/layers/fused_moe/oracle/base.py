@@ -32,37 +32,11 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEQuantConfig,
 )
-from vllm.model_executor.layers.quantization.utils.quant_utils import (
-    check_activation_quant_fallback,
-)
 
 if TYPE_CHECKING:
     from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
 
 BackendT = TypeVar("BackendT", bound=Enum)
-
-
-def is_supported_backend_config(
-    backend: Enum,
-    k_cls: type[mk.FusedMoEExperts],
-    moe_config: FusedMoEConfig,
-    weight_key: "QuantKey | None",
-    activation_key: "QuantKey | None",
-    executed_activation_key: "QuantKey | None",
-    activation_format: mk.FusedMoEActivationFormat,
-) -> tuple[bool, str | None]:
-    """`k_cls.is_supported_config` for a `backend` that runs a layer requesting
-    `activation_key` with `executed_activation_key` activations, subject to
-    `check_activation_quant_fallback`."""
-    supported, reason = k_cls.is_supported_config(
-        k_cls, moe_config, weight_key, executed_activation_key, activation_format
-    )
-    if supported:
-        reason = check_activation_quant_fallback(
-            f"{backend.value} MoE backend", activation_key, executed_activation_key
-        )
-        supported = reason is None
-    return supported, reason
 
 
 class MoEKernelOracle(ABC, Generic[BackendT]):

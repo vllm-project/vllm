@@ -20,9 +20,6 @@ from vllm.model_executor.layers.fused_moe.config import (
     fp8_w8a8_moe_quant_config,
     fp8_w8a16_moe_quant_config,
 )
-from vllm.model_executor.layers.fused_moe.oracle.base import (
-    is_supported_backend_config,
-)
 from vllm.model_executor.layers.fused_moe.routed_experts import RoutedExperts
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     prepare_fp8_moe_layer_for_fi,
@@ -264,20 +261,6 @@ def backend_to_kernel_cls(
         raise ValueError(f"Unknown FP8 MoE backend: {backend.value}")
 
 
-def executed_activation_key(
-    backend: Fp8MoeBackend, activation_key: QuantKey | None
-) -> QuantKey | None:
-    """The activation quantization `backend` runs for a layer requesting
-    `activation_key`."""
-    # Marlin and CPU are W8A16. Humming quantizes activations only as
-    # configured by VLLM_HUMMING_INPUT_QUANT_CONFIG.
-    if backend in (Fp8MoeBackend.MARLIN, Fp8MoeBackend.CPU) or (
-        backend == Fp8MoeBackend.HUMMING and not envs.VLLM_HUMMING_INPUT_QUANT_CONFIG
-    ):
-        return None
-    return activation_key
-
-
 def map_fp8_backend(runner_backend: MoEBackend) -> Fp8MoeBackend:
     """Map user's MoEBackend to Fp8MoeBackend."""
     mapping = {
@@ -372,14 +355,17 @@ def resolve_fp8_moe_weight_block_shape(
     refine if kernels allow, else pad to the TP shard."""
     refined_shape = refine_fp8_moe_block_shape(config, weight_block_size)
     if is_checkpoint_fp8_serialized and config.moe_backend != "auto":
-        backend = map_fp8_backend(config.moe_backend)
-        kernel_classes = backend_to_kernel_cls(backend)
-        can_refine = refined_shape is not None and any(
+        kernel_classes = backend_to_kernel_cls(map_fp8_backend(config.moe_backend))
+        refined_key = (
+            None
+            if refined_shape is None
+            else create_fp8_quant_key(
+                static=True, group_shape=GroupShape(*refined_shape)
+            )
+        )
+        can_refine = refined_key is not None and any(
             k_cls._supports_quant_scheme(
-                create_fp8_quant_key(
-                    static=True, group_shape=GroupShape(*refined_shape)
-                ),
-                executed_activation_key(backend, activation_key),
+                refined_key, k_cls.executed_activation_key(refined_key, activation_key)
             )
             for k_cls in kernel_classes
         )
@@ -454,14 +440,8 @@ def select_fp8_moe_backend(
         activation_format: mk.FusedMoEActivationFormat,
     ) -> tuple[Fp8MoeBackend, type[mk.FusedMoEExperts]]:
         for k_cls in backend_to_kernel_cls(backend):
-            supported, reason = is_supported_backend_config(
-                backend,
-                k_cls,
-                config,
-                weight_key,
-                activation_key,
-                executed_activation_key(backend, activation_key),
-                activation_format,
+            supported, reason = k_cls.is_supported_config(
+                k_cls, config, weight_key, activation_key, activation_format
             )
             if supported:
                 logger.info_once(_make_log_backend(backend))
@@ -535,13 +515,11 @@ def select_fp8_moe_backend(
     # Select kernels in order of backend.
     for backend in AVAILABLE_BACKENDS:
         for k_cls in backend_to_kernel_cls(backend):
-            supported, reason = is_supported_backend_config(
-                backend,
+            supported, reason = k_cls.is_supported_config(
                 k_cls,
                 config,
                 weight_key,
                 activation_key,
-                executed_activation_key(backend, activation_key),
                 activation_format,
             )
             if supported:
