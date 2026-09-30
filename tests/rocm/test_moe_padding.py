@@ -71,6 +71,8 @@ DTYPE = torch.bfloat16
 NUM_EXPERTS = 4
 TOPK = 2
 NUM_TOKENS = 16
+# Mirrors `_maybe_pad_weight`'s `num_pad` constant in unquantized_fused_moe_method.py.
+PAD_BYTES = 256
 # 256 bf16 elems * 2 bytes = 512 bytes: eligible for `_maybe_pad_weight` on
 # both w13 and w2.
 HIDDEN_SIZE = 256
@@ -78,7 +80,14 @@ INTERMEDIATE_SIZE = 256
 
 
 def _set_padding_env(monkeypatch: pytest.MonkeyPatch, padding: bool) -> None:
+    """Sets the flag only; `_maybe_pad_weight` reads it lazily, no AITER needed."""
     monkeypatch.setenv("VLLM_ROCM_MOE_PADDING", "1" if padding else "0")
+
+
+def _set_padding_env_with_aiter(monkeypatch: pytest.MonkeyPatch, padding: bool) -> None:
+    """Also enables AITER, for tests routing through RoutedExperts's backend
+    selection."""
+    _set_padding_env(monkeypatch, padding)
     monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1")
     monkeypatch.setenv("VLLM_ROCM_USE_AITER_MOE", "1")
 
@@ -275,7 +284,7 @@ def test_maybe_pad_weight_transparent(
     assert torch.equal(result, original), "padding must not alter weight values"
 
     if expect_padded:
-        num_pad = 256 // original.element_size()
+        num_pad = PAD_BYTES // original.element_size()
         assert result.stride(-1) == 1
         assert result.stride(-2) == original.stride(-2) + num_pad
         assert result.untyped_storage().nbytes() > original.untyped_storage().nbytes()
@@ -373,7 +382,7 @@ def test_aiter_moe_padding_numerically_transparent(
     outputs: dict[bool, torch.Tensor] = {}
     storage_nbytes: dict[bool, tuple[int, int]] = {}
     for padding in (True, False):
-        _set_padding_env(monkeypatch, padding)
+        _set_padding_env_with_aiter(monkeypatch, padding)
 
         with torch.device(DEVICE):
             layer = _make_routed_experts(HIDDEN_SIZE, INTERMEDIATE_SIZE)
