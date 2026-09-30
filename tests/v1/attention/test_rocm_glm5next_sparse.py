@@ -8,6 +8,7 @@ import torch
 
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
+from vllm.utils.torch_utils import set_random_seed
 from vllm.v1.attention.backends.mla import rocm_aiter_mla_sparse as sparse_mod
 from vllm.v1.attention.backends.mla.rocm_aiter_mla_sparse import (
     _use_rocm_sparse_triton,
@@ -73,12 +74,10 @@ def test_fit_kpool_indices_preserves_tail_and_best_history():
 )
 def test_fit_kpool_indices_matches_eager_reference(num_tokens, topk_tokens, tail_width):
     """The Triton fit must reproduce the eager packing rule exactly."""
-    generator = torch.Generator(device="cpu").manual_seed(topk_tokens + num_tokens)
+    set_random_seed(topk_tokens + num_tokens)
     width = topk_tokens + tail_width
-    token_indices = torch.randint(
-        0, 4096, (num_tokens, width), dtype=torch.int32, generator=generator
-    )
-    valid = torch.rand((num_tokens, width), generator=generator) < 0.5
+    token_indices = torch.randint(0, 4096, (num_tokens, width), dtype=torch.int32)
+    valid = torch.rand((num_tokens, width)) < 0.5
     valid[0] = False
     valid[-1] = True
     token_indices = torch.where(valid, token_indices, -1).cuda()
