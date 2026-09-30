@@ -3,7 +3,7 @@
 
 import json
 from http import HTTPStatus
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, Body, FastAPI, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
@@ -214,6 +214,43 @@ async def update_weight_version(
 async def weight_info(raw_request: Request):
     weight_version = await engine_client(raw_request).get_weight_version()
     return JSONResponse(content={"weight_version": weight_version})
+
+
+@router.post("/weight_checker")
+async def weight_checker(
+    raw_request: Request,
+    action: Annotated[Literal["checksum", "reset", "compare"], Body(embed=True)],
+    baseline: Annotated[dict[str, str] | None, Body(embed=True)] = None,
+) -> JSONResponse:
+    """Checksum, reset, or compare model weights against a baseline."""
+    client = engine_client(raw_request)
+    if action == "reset":
+        await client.collective_rpc("reset_weights")
+        return JSONResponse(content={"status": "reset"})
+    if action == "compare" and baseline is None:
+        raise HTTPException(
+            status_code=HTTPStatus.BAD_REQUEST.value,
+            detail="action='compare' requires a 'baseline' object",
+        )
+
+    checksums: dict[str, str] = {}
+    for worker_checksums in await client.compute_weight_checksums():
+        if duplicates := checksums.keys() & worker_checksums.keys():
+            raise HTTPException(
+                status_code=HTTPStatus.INTERNAL_SERVER_ERROR.value,
+                detail=f"Duplicate weight checksum keys: {sorted(duplicates)}",
+            )
+        checksums.update(worker_checksums)
+    if action == "checksum":
+        return JSONResponse(content={"checksums": checksums})
+
+    assert baseline is not None
+    mismatches = sorted(
+        key
+        for key in checksums.keys() | baseline.keys()
+        if checksums.get(key) != baseline.get(key)
+    )
+    return JSONResponse(content={"match": not mismatches, "mismatches": mismatches})
 
 
 @router.get("/get_world_size")

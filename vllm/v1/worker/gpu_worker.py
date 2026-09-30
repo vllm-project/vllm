@@ -58,6 +58,10 @@ from vllm.distributed.weight_transfer import (
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.model_executor.model_loader import get_model_loader
+from vllm.model_executor.model_loader.weight_checksum import (
+    compute_tensor_digests,
+    zero_weights,
+)
 from vllm.model_executor.warmup.kernel_warmup import kernel_warmup
 from vllm.multimodal.gpu_ipc_memory import reserve_mm_ipc_gpu_memory
 from vllm.platforms import current_platform
@@ -341,6 +345,22 @@ class Worker(WorkerBase):
 
     def checkpoint_restore(self) -> None:
         checkpoint_restore_distributed_state()
+
+    def _weight_checksum_prefix(self) -> str:
+        # data_parallel_rank is 0 in dense workers; only the index is unique.
+        dp = self.parallel_config.data_parallel_index
+        pp = get_pp_group().rank_in_group
+        pcp = get_pcp_group().rank_in_group
+        tp = get_tp_group().rank_in_group
+        return f"dp{dp}:pp{pp}:pcp{pcp}:tp{tp}:"
+
+    def compute_weight_checksums(self) -> dict[str, str]:
+        prefix = self._weight_checksum_prefix()
+        digests = compute_tensor_digests(self.model_runner.get_model())
+        return {prefix + name: digest for name, digest in digests.items()}
+
+    def reset_weights(self) -> None:
+        zero_weights(self.model_runner.get_model())
 
     def _maybe_get_memory_pool_context(self, tag: str) -> AbstractContextManager:
         if (
