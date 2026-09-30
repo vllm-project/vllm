@@ -922,3 +922,102 @@ def test_b12x_nvfp4_w4a16_preserves_bf16_activations_under_graph_replay(
             torch.testing.assert_close(actual, expected, atol=0.005, rtol=0.01)
     finally:
         layer.b12x_nvfp4_a16_finalizer()
+
+
+def _block_weights(n, k, codec):
+    block_size, block_bytes = (
+        (32, 34) if codec == "q8_0" else (256, 66 if codec == "iq2_xxs" else 74)
+    )
+    raw = torch.randint(0, 256, (n, k // block_size, block_bytes), dtype=torch.uint8)
+    raw[..., :2] = torch.full(
+        (n, k // block_size, 1), 1 / 128, dtype=torch.float16
+    ).view(torch.uint8)
+    return raw
+
+
+@pytest.mark.parametrize("codec", ["iq2_xs", "iq2_xxs", "q8_0"])
+@torch.inference_mode()
+def test_b12x_block_quant_dense_compiled_graph(default_vllm_config, codec):
+    supported, reason = B12xNvFp4W4A16LinearKernel.is_supported()
+    if not supported:
+        pytest.skip(reason)
+    from b12x.testing.iq2_xs_reference import dequantize_blocks
+
+    from vllm.model_executor.layers.quantization.modelopt_block_quant import (
+        ModelOptBlockQuantLinearMethod,
+    )
+
+    default_vllm_config.scheduler_config.max_num_batched_tokens = 32
+    default_vllm_config.scheduler_config.max_num_scheduled_tokens = 32
+    default_vllm_config.compilation_config.cudagraph_capture_sizes = [1, 4]
+    method = ModelOptBlockQuantLinearMethod(codec)
+    raw = _block_weights(128, 256, codec)
+    decoded = dequantize_blocks(raw).bfloat16().cuda()
+    layer = torch.nn.Module()
+    layer.weight = torch.nn.Parameter(raw.cuda(), requires_grad=False)
+    method.process_weights_after_loading(layer)
+    try:
+        run = torch.compile(
+            lambda x: method.apply(layer, x), fullgraph=True, dynamic=True
+        )
+        for rows in (1, 4, 17):
+            x = torch.randn(rows, 256, device="cuda", dtype=torch.bfloat16)
+            run(x)
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph):
+                output = run(x)
+            for _ in range(2):
+                x.normal_()
+                allocated = torch.cuda.memory_allocated()
+                graph.replay()
+                torch.cuda.synchronize()
+                assert torch.cuda.memory_allocated() == allocated
+                expected = (x.float() @ decoded.float().T).bfloat16()
+                torch.testing.assert_close(output, expected, rtol=0.015, atol=0.03125)
+            graph.reset()
+    finally:
+        layer.b12x_block_finalizer()
+
+
+@pytest.mark.parametrize("id_dtype", [torch.int32, torch.int64])
+@torch.inference_mode()
+def test_b12x_q8_embedding_graph(default_vllm_config, id_dtype):
+    supported, reason = B12xNvFp4W4A16LinearKernel.is_supported()
+    if not supported:
+        pytest.skip(reason)
+    from b12x.testing.q8_0_reference import dequantize_blocks
+
+    from vllm.model_executor.layers.quantization.modelopt_block_quant import (
+        ModelOptBlockQuantLinearMethod,
+    )
+
+    default_vllm_config.scheduler_config.max_num_batched_tokens = 32
+    default_vllm_config.scheduler_config.max_num_scheduled_tokens = 32
+    default_vllm_config.compilation_config.cudagraph_capture_sizes = [1, 4]
+    method = ModelOptBlockQuantLinearMethod("q8_0")
+    method.is_embedding = True
+    raw = _block_weights(128, 256, "q8_0")
+    decoded = dequantize_blocks(raw).bfloat16().cuda()
+    layer = torch.nn.Module()
+    layer.weight = torch.nn.Parameter(raw.cuda(), requires_grad=False)
+    method.process_weights_after_loading(layer)
+    try:
+        run = torch.compile(
+            lambda x: method.embedding(layer, x), fullgraph=True, dynamic=True
+        )
+        for count in (7, 9, 70):
+            ids = torch.arange(count, device="cuda", dtype=id_dtype)
+            torch._dynamo.mark_dynamic(ids, 0)
+            torch.testing.assert_close(run(ids), decoded[ids.long()], rtol=0, atol=0)
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            output = run(ids)
+        ids.add_(20)
+        allocated = torch.cuda.memory_allocated()
+        graph.replay()
+        torch.cuda.synchronize()
+        assert torch.cuda.memory_allocated() == allocated
+        torch.testing.assert_close(output, decoded[ids.long()], rtol=0, atol=0)
+        graph.reset()
+    finally:
+        layer.b12x_block_finalizer()

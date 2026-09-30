@@ -3,6 +3,7 @@
 
 import inspect
 from abc import ABC, abstractmethod
+from collections.abc import Iterable
 from typing import TYPE_CHECKING, Any
 
 import regex as re
@@ -247,6 +248,12 @@ class QuantizationConfig(ABC):
         from vllm.model_executor.models.utils import WeightsMapper
 
         return WeightsMapper(orig_to_new_suffix={".g_idx": None})
+
+    def process_checkpoint_weights(
+        self, weights: Iterable[tuple[str, torch.Tensor]], *, dtype: torch.dtype
+    ) -> Iterable[tuple[str, torch.Tensor]]:
+        """Transform serialized tensors before model naming and parameter sharding."""
+        return weights
 
     def apply_vllm_mapper(  # noqa: B027
         self, hf_to_vllm_mapper: "WeightsMapper"
