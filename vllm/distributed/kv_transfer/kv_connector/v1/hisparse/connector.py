@@ -240,7 +240,7 @@ class HiSparseConnector(KVConnectorBase_V1, SupportsHMA):
     def has_pending_block_frees(self) -> bool:
         assert self.connector_scheduler is not None
         assert self.connector_scheduler.coordinator is not None
-        return self.connector_scheduler.coordinator.has_pending_reclamation()
+        return self.connector_scheduler.coordinator.has_pending_block_frees()
 
     def finish_forward(self) -> None:
         assert self.connector_worker is not None

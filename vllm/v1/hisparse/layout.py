@@ -346,7 +346,7 @@ def get_hisparse_kv_cache_config(
         host_resident=True,
     )
     logger.info_once(
-        "HiSparse HMA: %.1f GiB host source (%d blocks), %.1f GiB shared "
+        "HiSparse HMA: %.1f GiB host pool (%d blocks), %.1f GiB shared "
         "GPU indexer/resident/hot pool (%d blocks).",
         host_size / 2**30,
         hisparse_layout.host_num_blocks,

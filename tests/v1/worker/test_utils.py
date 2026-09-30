@@ -147,7 +147,7 @@ def test_hisparse_appends_reference_slots_within_a_mirror_phase(monkeypatch):
         MagicMock(), MagicMock(), torch.empty(4, dtype=torch.int64)
     )
     worker._slot_mapping_staging = state
-    handle = SimpleNamespace(runtime=SimpleNamespace(resident_source_index=1))
+    handle = SimpleNamespace(runtime=SimpleNamespace(resident_group_index=1))
     worker.cache_layer_names = ["layer"]
     worker.cache_handles = [handle]
     worker._layer_mirror_callbacks = (MagicMock(),)
@@ -502,7 +502,7 @@ def test_hisparse_pre_forward_transfer_builds_page_descriptors():
     worker.resident_caches = (source,)
     worker.host_caches = (destination,)
     worker.cache_handles = [
-        SimpleNamespace(runtime=SimpleNamespace(resident_source_index=0))
+        SimpleNamespace(runtime=SimpleNamespace(resident_group_index=0))
     ]
     worker._dma_free_descriptors = []
     worker._submit_dma_descriptors = MagicMock()
@@ -567,14 +567,14 @@ def test_hisparse_tail_restore_preserves_imported_rows(
     )
     worker.cache_handles = [
         SimpleNamespace(
-            runtime=SimpleNamespace(resident_source_index=i, eager_host_mirror=True)
+            runtime=SimpleNamespace(resident_group_index=i, eager_host_mirror=True)
         )
         for i in range(2)
     ]
     worker._record_transfer_completion = MagicMock()
     stream = torch.cuda.current_stream() if device == "cuda" else MagicMock()
     monkeypatch.setattr(hisparse_worker_module, "current_stream", lambda: stream)
-    transfer = SparseKVPageTransfer(7, 2, (1, 3), False, restore=True)
+    transfer = SparseKVPageTransfer(7, 2, (1, 3), False, is_restore=True)
 
     restore_pages = worker._restore_pages
     if device == "cuda":
@@ -624,7 +624,7 @@ def test_hisparse_dma_row_mirror_builds_descriptors(monkeypatch):
     worker.host_caches = (destination,)
     worker.cache_handles = [
         SimpleNamespace(
-            runtime=SimpleNamespace(resident_source_index=0), decode_batch=True
+            runtime=SimpleNamespace(resident_group_index=0), decode_batch=True
         )
     ]
     worker.hot_backing = SimpleNamespace(device=torch.device("cuda:0"))
@@ -670,7 +670,7 @@ def test_hisparse_row_dma_uses_resident_spans():
     worker.host_caches = (destination,)
     worker.cache_handles = [
         SimpleNamespace(
-            runtime=SimpleNamespace(resident_source_index=0), decode_batch=True
+            runtime=SimpleNamespace(resident_group_index=0), decode_batch=True
         )
     ]
     worker._set_row_mirrors(
@@ -817,7 +817,7 @@ def test_hisparse_prefill_mirrors_source_groups_and_flushes_partial_group():
             runtime=SimpleNamespace(
                 eager_host_mirror=False,
                 is_group_leader=False,
-                resident_source_index=source_index,
+                resident_group_index=source_index,
             ),
             decode_batch=False,
             host_mirror_required=layer_index < 5,

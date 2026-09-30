@@ -187,7 +187,7 @@ def test_hisparse_write_back_and_prefix_restore(
                     torch.accelerator.synchronize()
                 assert worker._row_mirrors
                 for layer_index, cache in enumerate(worker.cache_handles):
-                    source_index = cache.runtime.resident_source_index
+                    source_index = cache.runtime.resident_group_index
                     for mirror in worker._row_mirrors:
                         source_row = mirror.source_starts[source_index]
                         destination_row = mirror.destination_start
@@ -280,7 +280,7 @@ def test_hisparse_host_exhaustion_defers_requests(
             num_pressure * host.block_size,
             num_pressure * host.block_size,
         )
-        original_plan = coordinator.plan_prefix_write_backs
+        original_plan = coordinator.plan_write_backs
         original_count = host.get_num_blocks_to_allocate
         checked_steps = 0
         refusals = 0
@@ -297,7 +297,7 @@ def test_hisparse_host_exhaustion_defers_requests(
             refusals += int(required > 0)
             return required
 
-        monkeypatch.setattr(coordinator, "plan_prefix_write_backs", plan)
+        monkeypatch.setattr(coordinator, "plan_write_backs", plan)
         monkeypatch.setattr(host, "get_num_blocks_to_allocate", count)
         actual = runner.generate_greedy(prompts, max_tokens=16)
 
@@ -352,7 +352,7 @@ def test_hisparse_terminal_prefix_reuse(
         original_free = coordinator.free
         held_completions: list[int] = []
         update_calls = 0
-        terminal_pending_pages = 0
+        terminal_pages_in_transfer = 0
 
         def take_updates():
             nonlocal update_calls
@@ -368,10 +368,10 @@ def test_hisparse_terminal_prefix_reuse(
             return enqueued, completed
 
         def free(request_id):
-            nonlocal terminal_pending_pages
+            nonlocal terminal_pages_in_transfer
             state = coordinator.request_states.get(request_id)
             if state is not None:
-                terminal_pending_pages += len(state.pending_pages)
+                terminal_pages_in_transfer += len(state.transfer_id_by_page)
             original_free(request_id)
 
         def drain_pending_work():
@@ -385,7 +385,7 @@ def test_hisparse_terminal_prefix_reuse(
         [first] = runner.llm.generate(
             [{"prompt_token_ids": target}], sampling, use_tqdm=False
         )
-        assert terminal_pending_pages == 4
+        assert terminal_pages_in_transfer == 4
         assert first.num_cached_tokens == 0
         assert coordinator.has_pending_work()
         drain_pending_work()

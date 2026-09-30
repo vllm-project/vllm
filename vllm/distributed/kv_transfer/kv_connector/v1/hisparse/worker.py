@@ -415,17 +415,17 @@ class HiSparseConnectorWorker:
         transfers = (
             metadata.command.page_transfers if metadata.command is not None else []
         )
-        self._restore_pages([transfer for transfer in transfers if transfer.restore])
+        self._restore_pages([transfer for transfer in transfers if transfer.is_restore])
         self._post_forward_transfers = [
             transfer
             for transfer in transfers
-            if not transfer.restore and transfer.after_forward
+            if not transfer.is_restore and transfer.after_forward
         ]
         self._submit_transfers(
             [
                 transfer
                 for transfer in transfers
-                if not transfer.restore and not transfer.after_forward
+                if not transfer.is_restore and not transfer.after_forward
             ]
         )
         self._pending_invalid_block_ids.extend(metadata.source_block_ids)
@@ -462,7 +462,7 @@ class HiSparseConnectorWorker:
         handle = self.cache_handles[0]
         slots = handle.slot_mapping
         assert slots is not None
-        source_index = handle.runtime.resident_source_index
+        source_index = handle.runtime.resident_group_index
         start = state.num_tokens
         end = start + num_tokens
         if end > state.slots.shape[0]:
@@ -642,7 +642,7 @@ class HiSparseConnectorWorker:
         row_counts = self._row_mirror_counts
         for descriptor_offset, layer_index in enumerate(layer_indices):
             cache = self.cache_handles[layer_index]
-            source_index = cache.runtime.resident_source_index
+            source_index = cache.runtime.resident_group_index
             if source_index >= self._row_mirror_source_starts.shape[1]:
                 raise RuntimeError("HiSparse row DMA source index is out of range.")
             source_rows = self._row_mirror_source_starts[:, source_index]
@@ -700,8 +700,8 @@ class HiSparseConnectorWorker:
         next_layer = layer_index + 1
         if (
             next_layer < len(self.cache_handles)
-            and self.cache_handles[next_layer].runtime.resident_source_index
-            == handle.runtime.resident_source_index
+            and self.cache_handles[next_layer].runtime.resident_group_index
+            == handle.runtime.resident_group_index
         ):
             return
         ready_event = self._layer_ready_events[layer_index]
@@ -739,7 +739,7 @@ class HiSparseConnectorWorker:
         if not transfers:
             return
         for layer_index, cache in enumerate(self.cache_handles):
-            source_index = cache.runtime.resident_source_index
+            source_index = cache.runtime.resident_group_index
             source = self.host_caches[layer_index]
             destination = self.resident_caches[layer_index]
             for transfer in transfers:
@@ -783,7 +783,7 @@ class HiSparseConnectorWorker:
                 "HiSparse write-back DMA source mappings must be rectangular."
             )
         for layer_index, cache in enumerate(self.cache_handles):
-            source_index = cache.runtime.resident_source_index
+            source_index = cache.runtime.resident_group_index
             if source_index >= source_blocks_by_transfer.shape[1]:
                 raise RuntimeError(
                     "HiSparse write-back DMA source index is out of range."

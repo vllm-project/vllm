@@ -7,7 +7,7 @@ Status: experimental
 There are three different jobs:
 
 1. The normal KV cache system manages GPU block pools and tables.
-2. `HiSparseCoordinator` manages logical host blocks, source-prefix identity, and
+2. `HiSparseCoordinator` manages logical host blocks, host-prefix identity, and
    host/GPU residency transitions.
 3. `HiSparseConnector` carries residency work between scheduler and worker;
    `HiSparseWorker` coordinates transfers, while per-cache
@@ -18,7 +18,7 @@ GPU allocation shared by the resident and hot groups; it does not manage CPU
 memory or KV identity.
 
 ```text
-request ────► HiSparseCoordinator ── source blocks + residency policy
+request ────► HiSparseCoordinator ── host blocks + residency policy
                     │
                     ├──► KV cache manager ── resident/hot GPU leases (HMA)
                     │
@@ -61,7 +61,7 @@ to complete host blocks.
 
 | Thing | Owner | What “owner” means |
 | --- | --- | --- |
-| HiSparse source and prefix identity | `HiSparseCoordinator` | maps tokens to logical host blocks |
+| HiSparse host-prefix identity | `HiSparseCoordinator` | maps tokens to logical host blocks |
 | Resident GPU block leases | normal KV cache manager | allocates and frees HMA blocks |
 | Resident block tables | normal KV cache manager | tells attention where resident pages are |
 | Residency transitions | `HiSparseCoordinator` | plans write-back-before-release transactions |
@@ -77,11 +77,11 @@ The key distinction is logical allocation versus contents. `HiSparseCoordinator`
 owns host block IDs and their request/prefix associations. `HiSparseWorker` and
 its per-cache runtimes own the corresponding bytes. The normal cache manager
 sees only device pools.
-The source group has `block_pool_id=None`; device-pool consumers must narrow it
+The host group has `block_pool_id=None`; device-pool consumers must narrow it
 before indexing, so host ownership cannot masquerade as a numeric GPU pool.
 
 For single-node MP tensor parallelism, every TP worker maps the same pinned host
-pool and uses the same block and layer offsets. MLA source KV is replicated
+pool and uses the same block and layer offsets. MLA KV is replicated
 across TP ranks, so this stores one physical copy instead of one copy per rank.
 TP rank 0 writes the shared host pool; peers wait on its IPC events before
 reading it. Other executor and parallel layouts retain private per-rank pools.
@@ -109,7 +109,7 @@ HiSparseConnector                          HiSparseConnector
 The command travels in `kv_connector_metadata`; transfer updates return in
 `KVConnectorOutput.kv_connector_worker_meta`. The model runner does not
 interpret page transfers. Enqueue acknowledgements let the scheduler release
-source leases in stream order; completion acknowledgements publish the copied
+resident leases in stream order; completion acknowledgements publish the copied
 host pages.
 
 ## Resident device pages
@@ -118,7 +118,7 @@ Resident pages are intentionally outside `HiSparseRuntime`.
 
 KV-cache initialization binds cache-manager allocations to the attention-facing
 `HiSparseCacheHandle` before constructing `HiSparseWorker`. That same
-handle's runtime retains the resident source index needed by a transfer plan.
+handle's runtime retains the resident group index needed by a transfer plan.
 There is no second resident object or registration wrapper.
 
 ```text
@@ -160,7 +160,7 @@ evicts a hot row another row of the step still reads.
 The decoder chooses the landing target once per request from the normal cache
 admission calculation. If the complete imported prefix fits the device pools,
 NIXL transfers it directly into resident GPU pages. Otherwise, if the fixed
-host-backed GPU footprint and host source blocks fit, the request imports into
+host-backed GPU footprint and host blocks fit, the request imports into
 the host tier. There is no context-length threshold or other heuristic, and a
 request waiting for capacity retains its choice across admission retries.
 
@@ -191,7 +191,7 @@ worker.
 ```text
 HiSparseCoordinator                            HiSparseWorker
           │                                     │
-          │ pin source and destination leases   │
+          │ pin resident and host leases        │
           │── SparseKVPageTransfer ─────────────►│
           │                                     │ enqueue GPU-to-host copy
           │◄── enqueued transfer ID ────────────│
@@ -200,14 +200,14 @@ HiSparseCoordinator                            HiSparseWorker
           │                                     │ copy reaches its event
           │◄── completed transfer ID ───────────│
           │ mark host page durable              │
-          │ release destination host lease      │
+          │ release host lease                  │
 ```
 
 “Enqueued” means the copy has entered the worker stream. Stream ordering makes
 it safe to release the resident GPU block for later work, but the host page is
 not yet published. “Completed” means the worker has observed the copy's event;
 only then does the coordinator publish the host page for prefix reuse and
-release its destination lease. A host-write event separately protects direct
+release its host lease. A host-write event separately protects direct
 CPU readers from writes already queued on the accelerator.
 
 The worker transfer contains only its transfer ID and physical copy
@@ -238,7 +238,7 @@ the same command, output, and cache-resolution boundaries.
 
 | Class | Inherits / implements | Responsibility |
 | --- | --- | --- |
-| `HiSparseCoordinator` | plain scheduler component | host allocation, source prefixes, resident leases, and page-transfer state machine |
+| `HiSparseCoordinator` | plain scheduler component | host allocation, host prefixes, resident leases, and page-transfer state machine |
 | `HiSparseConnector` | `KVConnectorBase_V1`, `SupportsHMA` | scheduler/worker metadata and lifecycle boundary |
 | `HiSparseResidentManager` | `SingleTypeKVCacheManager` | normal block-pool bookkeeping with host-backed holes |
 | `PagedCacheView` | immutable data object | shared resident/hot HMA tensor binding |

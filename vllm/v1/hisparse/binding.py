@@ -212,7 +212,7 @@ def bind_hisparse_kv_caches(
         for tensor_config in kv_cache_config.kv_cache_tensors
         for layer_index, name in enumerate(tensor_config.layers)
     }
-    resident_source_index = 0
+    resident_group_index = 0
     for group_id, group in enumerate(kv_cache_config.kv_cache_groups):
         if not isinstance(group.kv_cache_spec, HiSparseResidentSpec):
             continue
@@ -233,8 +233,8 @@ def bind_hisparse_kv_caches(
             )
             assert cache_handle.view is not None
             kv_caches[cache_name] = cache_handle.view.cache
-            cache_handle.runtime.resident_source_index = resident_source_index
-        resident_source_index += 1
+            cache_handle.runtime.resident_group_index = resident_group_index
+        resident_group_index += 1
 
     hot_backing: torch.Tensor | None = None
     cache_handles: list[HiSparseCacheHandle] = []

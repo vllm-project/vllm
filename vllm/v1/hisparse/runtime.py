@@ -740,7 +740,7 @@ class HiSparseRuntime:
         index_group.stats_row_bytes += row_bytes
 
         self.eager_host_mirror = config.eager_host_mirror
-        self.resident_source_index = -1
+        self.resident_group_index = -1
         self.request_state_indices: torch.Tensor | None = None
         self.shared_host_region: SharedOffloadRegion | None = None
 

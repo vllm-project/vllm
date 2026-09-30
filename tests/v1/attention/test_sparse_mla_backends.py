@@ -2553,7 +2553,7 @@ def test_hisparse_row_dma_copies_discontiguous_spans_across_layers():
     worker.cache_handles = [
         SimpleNamespace(
             decode_batch=True,
-            runtime=SimpleNamespace(resident_source_index=0),
+            runtime=SimpleNamespace(resident_group_index=0),
         )
         for _ in resident_caches
     ]
