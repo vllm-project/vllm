@@ -14,6 +14,7 @@ from typing import Any, Generic, TypeVar, cast
 import pybase64
 
 _T = TypeVar("_T")
+_U = TypeVar("_U")
 
 _LENGTH_BYTES = 8
 
@@ -156,9 +157,9 @@ class MediaRef(Generic[_T]):
 
     def map(
         self,
-        transform: Callable[[_T], Any],
+        transform: Callable[[_T], _U],
         **settings: Any,
-    ) -> "MediaRef[Any]":
+    ) -> "MediaRef[_U]":
         """Return a ref decoding to `transform(self.decode())`.
 
         Shares this ref's bytes (no copy) so the parse layer can stack
@@ -176,14 +177,14 @@ class MediaRef(Generic[_T]):
         return MediaRef(lambda: transform(self.decode()), self._data, spec, key=key)
 
     def release(self) -> None:
-        """Drop the encoded bytes and everything that still pins them.
+        """Drop this ref's encoded bytes and decode closure.
 
         Call once hashing is done and the item is either decoded or known to
-        be a cache hit. Clearing the decoder is what actually frees the
-        payload: the decode closure pins the bytes and, for images, the
-        header-opened PIL image whose `fp` holds a second copy of them.
+        be a cache hit, after any in-flight decode has finished. Decoded media
+        remains readable; an undecoded ref cannot decode after release.
 
-        A released ref can no longer be decoded.
+        Other owners can retain the payload: a mapped ref does not release a
+        separately retained parent, and decoded media may contain encoded bytes.
         """
         self._data = b""
         self._decoder = None

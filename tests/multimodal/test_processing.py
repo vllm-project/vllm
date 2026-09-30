@@ -31,6 +31,7 @@ from vllm.multimodal.processing.context import (
 from vllm.multimodal.processing.inputs import ProcessorInputs
 from vllm.multimodal.processing.processor import (
     BaseMultiModalProcessor,
+    MultiModalApplyState,
     PlaceholderFeaturesInfo,
     PromptIndexTargets,
     PromptInsertion,
@@ -1818,11 +1819,12 @@ def test_lazy_cache_miss_decodes_in_parallel():
     assert calls == [1] * num_items
 
 
-def test_lazy_decode_error_becomes_unprocessable():
+@pytest.mark.parametrize("use_cache", [False, True])
+def test_lazy_decode_error_becomes_unprocessable(use_cache):
     """A decode failure surfaces as VLLMUnprocessableEntityError, and
     in-flight sibling decodes are still awaited rather than abandoned."""
     processor = _LazyTestProcessor()
-    cache = _lazy_cache()
+    cache = _lazy_cache() if use_cache else None
 
     def bad_decode():
         raise ValueError("corrupt media")
@@ -1834,16 +1836,41 @@ def test_lazy_decode_error_becomes_unprocessable():
         slow_completed.set()
         return Image.new("RGB", (4, 4))
 
+    refs = [MediaRef(bad_decode, b"broken"), MediaRef(slow_decode, b"good")]
     with pytest.raises(VLLMUnprocessableEntityError) as exc_info:
         _lazy_apply(
             processor,
-            [MediaRef(bad_decode, b"broken"), MediaRef(slow_decode, b"good")],
+            refs,
             cache,
         )
 
     assert exc_info.value.parameter is None
     assert "image media at index 0" in str(exc_info.value)
     assert slow_completed.is_set()
+    assert all(ref.data == b"" for ref in refs)
+
+
+def test_cache_missing_items_selects_existing_refs(monkeypatch):
+    """Cache lookup selects parsed refs without decoding or reparsing them."""
+    processor = _LazyTestProcessor()
+    cache = _lazy_cache()
+    decoder = _CountingDecoder(Image.new("RGB", (4, 4)))
+    ref = MediaRef(decoder, b"miss")
+    inputs = _lazy_inputs(processor, [None, ref], cache)
+    monkeypatch.setattr(cache, "is_cached", lambda hashes: [True, False])
+
+    def unexpected_parse(*args, **kwargs):
+        pytest.fail("Cache misses must not be parsed again")
+
+    monkeypatch.setattr(processor.info, "parse_mm_data", unexpected_parse)
+    flags, missing = processor._get_cache_missing_items(
+        cache, inputs.mm_data_items, {"image": ["cached", "miss"]}
+    )
+
+    assert flags == {"image": [True, False]}
+    assert missing["image"].get_raw(0) is ref
+    assert missing["image"].get_original_index(0) == 1
+    assert decoder.calls == 0
 
 
 @pytest.mark.parametrize("phase", ["sync", "async", "eviction"])
@@ -1883,12 +1910,15 @@ def test_lazy_decode_error_keeps_request_index_with_cache_hits(phase, monkeypatc
         else:
             processor.apply_phase2(state)
 
+    assert all(ref.data == b"" for ref in refs)
 
-def test_lazy_miss_bytes_available_during_hf_processing():
+
+@pytest.mark.parametrize("use_cache", [False, True])
+def test_lazy_miss_bytes_available_during_hf_processing(use_cache):
     """A cache-miss ref still holds its encoded bytes while the HF processor
     runs, and they are released afterwards."""
     processor = _LazyTestProcessor()
-    cache = _lazy_cache()
+    cache = _lazy_cache() if use_cache else None
     lazy = MediaRef(_CountingDecoder(Image.new("RGB", (4, 4))), b"image-bytes")
 
     _lazy_apply(processor, [lazy], cache)
@@ -1899,11 +1929,11 @@ def test_lazy_miss_bytes_available_during_hf_processing():
     assert lazy.data == b""
 
 
-def test_lazy_miss_bytes_released_on_hf_processor_error():
-    """Bytes of cache-miss refs are released even if HF processing raises
-    (try/finally in `_cached_apply_hf_processor`)."""
+@pytest.mark.parametrize("use_cache", [False, True])
+def test_lazy_miss_bytes_released_on_hf_processor_error(use_cache):
+    """Payloads are released if HF processing fails, with or without a cache."""
     processor = _LazyTestProcessor()
-    cache = _lazy_cache()
+    cache = _lazy_cache() if use_cache else None
     processor.fail_hf_processor = True
     lazy = MediaRef(_CountingDecoder(Image.new("RGB", (4, 4))), b"image-bytes")
 
@@ -1912,6 +1942,35 @@ def test_lazy_miss_bytes_released_on_hf_processor_error():
 
     assert processor.seen_encoded_bytes == [b"image-bytes"]
     assert lazy.data == b""
+
+
+def test_lazy_cancellation_drains_decodes_before_release():
+    """Repeated cancellation must not release a payload still being decoded."""
+    from concurrent.futures import Future
+
+    ref = MediaRef(lambda: Image.new("RGB", (4, 4)), b"payload")
+    future: Future[Image.Image] = Future()
+    state = MultiModalApplyState(
+        _lazy_inputs(_LazyTestProcessor(), [ref], None),
+        TimingContext(enabled=False),
+        None,
+        [("image", 0, future)],
+    )
+
+    async def cancel_decode_wait():
+        task = asyncio.create_task(state.wait_decodes_async())
+        await asyncio.sleep(0)
+        for _ in range(2):
+            task.cancel()
+            await asyncio.sleep(0)
+        assert not task.done()
+        assert ref.data == b"payload"
+        future.set_result(ref.decode())
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, timeout=5)
+        assert ref.data == b""
+
+    asyncio.run(cancel_decode_wait())
 
 
 @pytest.mark.asyncio

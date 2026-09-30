@@ -32,6 +32,13 @@ class ProcessorInputs:
 
     cache: BaseMultiModalProcessorCache | None = None
 
+    @property
+    def can_use_cache(self) -> bool:
+        """Whether these inputs can use the processor cache."""
+        return self.cache is not None and not any(
+            items.get_passthrough_data() for items in self.mm_data_items.values()
+        )
+
     def get_mm_hashes(
         self,
         model_id: str,

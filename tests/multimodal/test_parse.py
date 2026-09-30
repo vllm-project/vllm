@@ -300,3 +300,43 @@ def test_reparse_video_preserves_metadata(video_needs_metadata, lazy):
     result = reparsed.get(1)
     np.testing.assert_array_equal(result[0] if video_needs_metadata else result, frames)
     assert decoder.calls == int(lazy)
+
+
+@pytest.mark.parametrize("video_needs_metadata", [False, True])
+def test_select_video_preserves_lazy_refs_and_metadata(video_needs_metadata):
+    """Selecting misses keeps raw refs and resolves only selected metadata."""
+    frames = np.zeros((3, 8, 12, 3), dtype=np.uint8)
+    metadata = {"fps": 2.0}
+    decoders = [_CountingDecoder((frames, metadata)) for _ in range(2)]
+    refs = [MediaRef(decoder, bytes([index])) for index, decoder in enumerate(decoders)]
+    items = MultiModalDataParser(
+        video_needs_metadata=video_needs_metadata
+    ).parse_mm_data({"video": [None, *refs]})["video"]
+
+    selected = items.select([2, 1]).select([0])
+    assert isinstance(selected, VideoProcessorItems)
+    assert selected.get_original_index(0) == 2
+    assert selected.get_raw(0) is items.get_raw(2)
+    assert all(decoder.calls == 0 for decoder in decoders)
+    assert selected.get_metadata(0) == metadata
+    assert decoders[0].calls == 0
+    assert decoders[1].calls == 1
+    assert selected.get_num_frames(0) == 3
+    assert selected.get_frame_size(0) == (12, 8)
+    np.testing.assert_array_equal(selected.get_frames(0), frames)
+    result = selected.get(0)
+    np.testing.assert_array_equal(result[0] if video_needs_metadata else result, frames)
+
+
+def test_select_audio_metadata_preserves_passthrough_fields():
+    """Selecting dictionary embeddings keeps aligned model input fields."""
+    parser = AudioMetadataParser(allow_missing_mm_embeddings=True)
+    items = parser.parse_mm_data(
+        {"audio": {"audio_num_tokens": torch.tensor([[3], [5]])}}
+    )["audio"]
+    selected = items.select([1])
+
+    assert selected.get_count() == 1
+    assert selected.get_original_index(0) == 1
+    assert selected.get(0)["audio_num_tokens"].item() == 5
+    assert selected.get_passthrough_data()["audio_num_tokens"].numel() == 1

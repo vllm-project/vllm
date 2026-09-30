@@ -28,9 +28,11 @@ Derivation is linear in the payload, so building refs on an event loop is offloa
 
 `decode()` is memoized and lock-guarded, so concurrent callers decode exactly once. Exceptions from the decoder propagate unchanged; wrapping them is the caller's job.
 
-`map(transform, **settings)` returns a ref decoding to `transform(self.decode())`. It shares the parent's bytes rather than copying them, and `settings` extend the spec so the transform's own parameters stay part of the identity. The new key is derived from the parent's *key*, not by re-digesting the payload. The parse layer uses this to stack resampling, channel normalization and video metadata unpacking onto the decode step, so they run in the parallel decode phase.
+`map(transform, **settings)` takes a transform from `_T` to `_U` and returns a `MediaRef[_U]` decoding to `transform(self.decode())`. It shares the parent's bytes rather than copying them. Supplied `settings` extend the spec and derive a new key from the parent's *key*, without re-digesting the payload; with no settings, the spec and key are preserved. The parse layer uses this to defer resampling, channel normalization and video metadata validation to the parallel decode phase.
 
-`release()` clears `data` and drops the decode closure. Dropping the closure is what actually frees the payload: it pins the bytes and, for images, the header-opened PIL image whose `fp` holds a second copy of them. A released ref raises `RuntimeError` from `decode()`.
+`release()` clears this ref's `data` and drops its decode closure, after any in-flight decode has finished. The closure can pin the bytes and, for images, the header-opened PIL image whose `fp` holds a second copy. Decoded media remains readable after release; an undecoded ref raises `RuntimeError` from `decode()` after release.
+
+Release affects this ref's ownership of the payload. A mapped ref does not release a separately retained parent, because another consumer may still need that parent. Decoded results can also retain encoded bytes, such as a video's `original_video_bytes` metadata or a raw-bytes decoder's result. Those owners control the remaining lifetime of the payload.
 
 ### Pickling
 
@@ -77,19 +79,33 @@ A model that wants encoded bytes rather than decoded frames says so through the 
 - `get(index)` returns the decoded object. HF-side helpers such as `is_valid_image` do `isinstance` checks and cannot be handed a reference, so everything the HF processor sees comes through here. By the time items are consumed the batch decode has run, making this a cache read.
 - `get_raw(index)` returns the item as stored, which for fetched media is the `MediaRef` itself. Hashing, cache-miss selection and byte release all read through `get_raw`, so none of them pays for a decode. `ModalityDataItems.get_raw` defaults to `get`, so the two views coincide for embeddings and for media the user already decoded.
 
-The parsers build refs rather than decoding them. `_parse_audio_data` maps resampling and channel normalization onto the ref; `_parse_image_data` leaves refs alone, since mode conversion happens inside the image decoder; `_get_video_with_metadata` maps the `(frames, metadata)` unpack onto the ref and defers the `video_needs_metadata` check to decode time.
+The parsers prepare fetched refs without decoding them. `_parse_audio_data` maps resampling and channel normalization onto the ref; `_parse_image_data` leaves refs alone, since mode conversion happens inside the image decoder; `_get_video_with_metadata` preserves `(frames, metadata)` in the raw video ref and defers the `video_needs_metadata` check to decode time.
+
+### Selecting parsed items
+
+`ModalityDataItems.select(indices)` selects existing parsed items without repeating validation or normalization. It preserves their concrete class and raw refs. Video selections also select the corresponding metadata entries; dictionary embeddings select their field items together. Cache lookup uses this operation instead of feeding parsed items through `parse_mm_data()` again, so each miss keeps its existing decode transforms and cache key.
+
+Selections retain original request positions through `get_original_index(index)`, including when a selection is selected again. Decode submission uses those positions for errors, so compacting a miss list does not renumber the corrupt item.
+
+### Video views
+
+`VideoProcessorItems.get(index)` returns the view expected by HF: frames alone, or `(frames, metadata)` when `video_needs_metadata` is enabled. `get_frames(index)` always returns the frames, and frame size/count helpers use it regardless of the HF view. `get_metadata(index)` resolves one video's metadata without decoding its siblings. The existing `metadata` property resolves the metadata list for consumers that need the whole batch.
+
+Keeping the raw tuple and exposing these views separately lets cache-miss selection preserve metadata even when HF consumes frames alone. It also lets audio extraction read metadata before requesting frames through `get()`.
 
 ## Decode orchestration
 
-Three module-level functions in `vllm/multimodal/processing/processor.py` do the work.
+Two module-level functions and a processor method in `vllm/multimodal/processing/processor.py` handle decode submission and waiting.
 
-- `_submit_ref_decodes` walks the raw items of every `ProcessorBatchItems` modality, submits each undecoded ref's `decode()` to the shared media thread pool (`global_thread_pool`, sized by `VLLM_MEDIA_LOADING_THREAD_COUNT`), and records `(modality, index, future)` triples. It does not wait.
+- `_submit_ref_decodes` walks the raw items of every `ProcessorBatchItems` modality, submits each undecoded ref's `decode()` to the shared media thread pool (`global_thread_pool`, sized by `VLLM_MEDIA_LOADING_THREAD_COUNT`), and records `(modality, original_index, future)` triples. It does not wait.
 - `_collect_ref_decodes` joins every future — in-flight work is never abandoned — and raises the first failure.
 - `_decode_ref_items` composes the two, and is the blocking fallback for items that turn out to need decoding late.
 
 ### Two-phase apply
 
-`MultiModalApplyState` carries the inputs, timing context, hashes and decode futures between the phases. Phase 1 hashes, looks up the cache and submits decodes without joining them, so the worker that runs it stays free; the futures are drained off that worker through `wait_decodes()` or `wait_decodes_async()`; phase 2 runs the HF processor and merges the cache.
+`MultiModalApplyState` carries the inputs, timing context, hashes and decode futures between the phases, and owns cleanup of the parsed refs supplied to processing. Phase 1 hashes, looks up the cache and submits decodes without joining them, so the worker that runs it stays free; the futures are drained off that worker through `wait_decodes()` or `wait_decodes_async()`; phase 2 runs the HF processor and merges the cache.
+
+`ProcessorInputs.can_use_cache` centralizes eligibility for the synchronous and split paths. A cache must be present, and no item may supply passthrough data. Otherwise phase 1 decodes all refs and phase 2 uses the no-cache path, computing hashes after HF processing.
 
 `apply()` is the synchronous composition of the same three steps, via `_cached_apply_hf_processor` and `_build_mm_input`; `apply_phase1` and `apply_phase2` expose the split. `BaseRenderer._process_multimodal_async` uses the split, running both phases on `_mm_executor` and awaiting `wait_decodes_async()` on the event loop in between, so the worker interleaves other requests' phases while the media pool decodes. `supports_two_phase_apply` gates that: it holds only while the processor leaves `apply`, `_cached_apply_hf_processor` and `_apply_hf_processor` unoverridden, and otherwise the renderer uses `_process_multimodal_blocking_async`.
 
@@ -106,9 +122,13 @@ The comment above `_mm_warmup_future` in `vllm/renderers/base.py` is the authori
 
 ### Byte lifecycle
 
-Nothing is released in phase 1, even though hashing is finished and a cache hit will never need its bytes again. Phase 2 re-derives the cache state rather than reusing phase 1's, because other requests' phases run in between: a miss may have become a hit, and a hit may have been evicted. An evicted hit is reprocessed from its bytes, and `decode()` raises once they are released, so releasing on the hit path in phase 1 would turn that eviction race into a request failure.
+Refs remain intact between phases. Phase 2 re-derives the cache state rather than reusing phase 1's, because other requests' phases run in between: a miss may have become a hit, and a hit may have been evicted. An evicted hit needs its retained payload for decoding, so releasing a hit in phase 1 would turn that eviction race into a request failure.
 
-Release therefore happens in phase 2, in a `finally` around the HF processor call. Cache-miss refs keep their encoded bytes until after HF has consumed them; then every ref's bytes go, whether or not the processor raised.
+`_apply_hf_processor_phase2` calls `MultiModalApplyState.release()` in a `finally` covering the cached and no-cache paths. Refs keep their payloads through HF processing, field construction, prompt-update construction and cache merging. The state releases the original input refs on completion or failure; selected misses share those same refs and need no separate release pass.
+
+If decoding fails before phase 2, the wait methods drain submitted decodes and release the state's refs before propagating the failure. `wait_decodes_async()` shields the futures from cancellation. If its caller cancels, it waits for all submitted decodes, including through repeated cancellation, then releases the refs and propagates cancellation. This keeps payloads alive while worker threads may still be using them.
+
+State cleanup leaves decoded results readable and does not release separately retained parent refs. Releasing the state's refs therefore does not guarantee that every copy or owner of the encoded payload has disappeared.
 
 ## Error surface
 

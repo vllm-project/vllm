@@ -157,6 +157,19 @@ def test_media_ref_map_extends_the_key():
     assert same.map(lambda x: x, b=3).key != mapped.key
 
 
+def test_mapped_release_preserves_separately_owned_parent():
+    """Releasing a mapped view must not invalidate another owner's parent ref."""
+    parent = MediaRef(lambda: 2, b"payload")
+    mapped = parent.map(str)
+    assert mapped.decode() == "2"
+    mapped.release()
+
+    assert mapped.data == b""
+    assert mapped.decode() == "2"
+    assert parent.data == b"payload"
+    assert parent.decode() == 2
+
+
 def test_media_ref_release_frees_the_encoded_bytes():
     """release() must drop every pin on the payload, not just one of them.
 

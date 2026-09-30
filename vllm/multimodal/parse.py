@@ -4,6 +4,7 @@
 from abc import ABC, abstractmethod
 from collections import UserDict
 from collections.abc import Callable, Iterator, Mapping, Sequence, Set
+from copy import copy
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -13,11 +14,12 @@ from typing import (
     TypeAlias,
     TypeGuard,
     TypeVar,
+    cast,
 )
 
 import numpy as np
 import torch
-from typing_extensions import assert_never
+from typing_extensions import Self, assert_never
 
 from vllm.inputs import ModalityData, MultiModalDataDict, MultiModalUUIDDict
 from vllm.utils.collection_utils import is_list_of
@@ -67,6 +69,21 @@ class ModalityDataItems(ABC, Generic[_T, _I]):
 
         self.data: _T = data
         self.modality = modality
+        self._original_indices: list[int] | None = None
+
+    def get_original_index(self, index: int) -> int:
+        return (
+            index if self._original_indices is None else self._original_indices[index]
+        )
+
+    def select(self, indices: Sequence[int]) -> Self:
+        """Select parsed items without repeating validation or normalization."""
+        selected = copy(self)
+        selected.data = cast(_T, [self.get_raw(index) for index in indices])
+        selected._original_indices = [
+            self.get_original_index(index) for index in indices
+        ]
+        return selected
 
     def __repr__(self) -> str:
         return f"{type(self).__name__}(modality={self.modality!r}, len={len(self)})"
@@ -120,7 +137,7 @@ class ModalityDataItems(ABC, Generic[_T, _I]):
         raise NotImplementedError
 
 
-class ProcessorBatchItems(ModalityDataItems[Sequence[_T], _T]):
+class ProcessorBatchItems(ModalityDataItems[Sequence[_T | MediaRef[_T]], _T]):
     """Base class for data items that are arranged in a list."""
 
     def get_count(self) -> int:
@@ -327,6 +344,17 @@ class DictEmbeddingItems(
     def get_count(self) -> int:
         return len(self._kwargs[self.modality])
 
+    def select(self, indices: Sequence[int]) -> Self:
+        selected = copy(self)
+        selected._kwargs = MultiModalKwargsItems(
+            {self.modality: [self._kwargs[self.modality][index] for index in indices]}
+        )
+        selected.data = selected._kwargs.get_data()  # type: ignore[assignment]
+        selected._original_indices = [
+            self.get_original_index(index) for index in indices
+        ]
+        return selected
+
     def get(self, index: int) -> Mapping[str, torch.Tensor]:
         return self._kwargs[self.modality][index].get_data()
 
@@ -396,10 +424,13 @@ class ImageEmbeddingItems(EmbeddingItems):
         super().__init__(data, "image", expected_hidden_size)
 
 
-class VideoProcessorItems(ProcessorBatchItems[HfVideoItem | None]):
+DecodedVideo: TypeAlias = HfVideoItem | tuple[HfVideoItem, dict[str, Any]]
+
+
+class VideoProcessorItems(ProcessorBatchItems[DecodedVideo | None]):
     def __init__(
         self,
-        data: Sequence[HfVideoItem | None],
+        data: Sequence[DecodedVideo | MediaRef[DecodedVideo] | None],
         metadata: dict[str, Any] | list[dict[str, Any] | None] | None = None,
         *,
         video_needs_metadata: bool = True,
@@ -409,7 +440,13 @@ class VideoProcessorItems(ProcessorBatchItems[HfVideoItem | None]):
         self._metadata = metadata
         self.video_needs_metadata = video_needs_metadata
 
-    def get(self, index: int) -> HfVideoItem | None:
+    def select(self, indices: Sequence[int]) -> Self:
+        selected = super().select(indices)
+        if isinstance(self._metadata, list):
+            selected._metadata = [self._metadata[index] for index in indices]
+        return selected
+
+    def get(self, index: int) -> DecodedVideo | None:
         video = super().get(index)
         if isinstance(video, tuple):
             frames, metadata = video
@@ -418,23 +455,40 @@ class VideoProcessorItems(ProcessorBatchItems[HfVideoItem | None]):
             return video if self.video_needs_metadata else frames
         return video
 
+    def get_frames(self, index: int) -> HfVideoItem | None:
+        """Return frames regardless of the HF processor's metadata setting."""
+        video = super().get(index)
+        return video[0] if isinstance(video, tuple) else video
+
+    def get_metadata(self, index: int) -> dict[str, Any] | None:
+        """Resolve metadata for one video without decoding its siblings."""
+        if isinstance(self._metadata, dict):
+            return self._metadata
+        if isinstance(self._metadata, list) and self._metadata[index] is not None:
+            return self._metadata[index]
+        video = super().get(index)
+        metadata = video[1] if isinstance(video, tuple) else None
+        if isinstance(self._metadata, list):
+            self._metadata[index] = metadata
+        return metadata
+
     @property
     def metadata(self) -> dict[str, Any] | list[dict[str, Any] | None] | None:
         """Resolve fetched video metadata when a consumer requests it."""
-        for index, item in enumerate(self.data):
-            if isinstance(item, MediaRef):
-                self.get(index)
+        if isinstance(self._metadata, list):
+            for index in range(self.get_count()):
+                self.get_metadata(index)
         return self._metadata
 
     def get_num_frames(self, item_idx: int) -> int:
-        video = self.get(item_idx)
+        video = self.get_frames(item_idx)
         if video is None:
             raise ValueError(f"Cannot get length of cached video at {item_idx}")
 
         return len(video)
 
     def get_frame_size(self, item_idx: int) -> ImageSize:
-        video = self.get(item_idx)
+        video = self.get_frames(item_idx)
         if video is None:
             raise ValueError(f"Cannot get size of cached video at {item_idx}")
         if len(video) == 0:
