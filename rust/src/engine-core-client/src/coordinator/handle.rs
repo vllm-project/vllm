@@ -166,7 +166,10 @@ mod tests {
         assert!(!handle.notify_first_request(engine).unwrap());
 
         assert!(command_rx.try_recv().is_ok());
-        assert!(command_rx.try_recv().is_err(), "the second request coalesces");
+        assert!(
+            command_rx.try_recv().is_err(),
+            "the second request coalesces"
+        );
         let snapshot = *state.lock();
         assert!(snapshot.wake_pending);
         assert!(!snapshot.engines_running);
