@@ -1448,7 +1448,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         if (
             spec_sequence_masks is not None
             and mixed_qkv_spec is not None
-            and self.use_gdn_recoverssm
+            and getattr(self, "use_gdn_recoverssm", False)
         ):
             query_spec, key_spec, value_spec, verify_views = (
                 self._recoverssm_verify_qkv(mixed_qkv_spec)
