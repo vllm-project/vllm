@@ -42,6 +42,7 @@ from vllm.model_executor.layers.fused_moe import (
     GateLinear,
     MoERunner,
 )
+from vllm.model_executor.layers.fusion.fused_act_quant import maybe_fused_act_quant
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
@@ -281,7 +282,7 @@ class Gemma4MLP(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         gate_up, _ = self.gate_up_proj(x)
-        x = self.act_fn(gate_up)
+        x = maybe_fused_act_quant(self.act_fn, gate_up, self.down_proj)
         x, _ = self.down_proj(x)
         return x
 
