@@ -73,6 +73,11 @@ class JartAllReduce:
         return out
 
 
+def jart_fusion_max_tokens(hidden_size: int) -> int:
+    """Largest token count whose all-reduce still takes the jart path."""
+    return min(_MAX_ROWS, (envs.VLLM_JART_AR_MAX_NUMEL - 1) // hidden_size)
+
+
 def maybe_create_jart_all_reduce(
     cpu_group: ProcessGroup, device: torch.device, world_size: int
 ) -> JartAllReduce | None:
@@ -192,13 +197,17 @@ def make_jart_fusion_pass(config):
     class JartAllReduceRMSNormPass(VllmFusionPatternMatcherPass):
         def __init__(self, config) -> None:
             super().__init__(config, "jart_ar_rms_fusion_pass")
+            self.max_token_num = jart_fusion_max_tokens(
+                config.model_config.get_hidden_size()
+            )
             for eps in (1e-6, 1e-5):
                 self.register(JartAllReduceRMSNorm(eps, self.model_dtype))
                 self.register(JartAllReduceRMSNormLast(eps, self.model_dtype))
                 pm._seen_patterns.clear()
 
         def is_applicable_for_range(self, compile_range) -> bool:
-            # The op decides at run time (capture + size).
-            return True
+            # Above the cap the op would run its unfused eager fallback, which
+            # is slower than the add + RMSNorm kernel Inductor generates.
+            return compile_range.end <= self.max_token_num
 
     return JartAllReduceRMSNormPass(config)
