@@ -1248,6 +1248,14 @@ class AsyncMPClient(MPClient):
             ]
         )
 
+    async def call_utility_consensus_async(self, method: str, *args) -> Any:
+        results = await self.call_utility_all_async(method, *args)
+        if any(result != results[0] for result in results):
+            raise RuntimeError(
+                f"Engines returned different {method} results: {results}"
+            )
+        return results[0]
+
     async def _call_utility_async(
         self, method: str, *args, engine: EngineIdentity
     ) -> Any:
@@ -1283,7 +1291,7 @@ class AsyncMPClient(MPClient):
         await self.call_utility_async("resume_scheduler")
 
     async def is_scheduler_paused_async(self) -> bool:
-        return await self.call_utility_async("is_scheduler_paused")
+        return await self.call_utility_consensus_async("is_scheduler_paused")
 
     async def profile_async(
         self, is_start: bool = True, profile_prefix: str | None = None
@@ -1296,8 +1304,10 @@ class AsyncMPClient(MPClient):
     async def reset_prefix_cache_async(
         self, reset_running_requests: bool = False, reset_connector: bool = False
     ) -> bool:
-        return await self.call_utility_async(
-            "reset_prefix_cache", reset_running_requests, reset_connector
+        return all(
+            await self.call_utility_all_async(
+                "reset_prefix_cache", reset_running_requests, reset_connector
+            )
         )
 
     async def reset_encoder_cache_async(self) -> None:
@@ -1313,7 +1323,7 @@ class AsyncMPClient(MPClient):
         return all(await self.call_utility_all_async("wake_up", tags))
 
     async def is_sleeping_async(self) -> bool:
-        return await self.call_utility_async("is_sleeping")
+        return await self.call_utility_consensus_async("is_sleeping")
 
     async def execute_dummy_batch_async(self) -> None:
         await self.call_utility_async("execute_dummy_batch")
@@ -1322,7 +1332,7 @@ class AsyncMPClient(MPClient):
         await self.call_utility_async("set_weight_version", weight_version)
 
     async def get_weight_version_async(self) -> str:
-        return await self.call_utility_async("get_weight_version")
+        return await self.call_utility_consensus_async("get_weight_version")
 
     async def add_lora_async(self, lora_request: LoRARequest) -> bool:
         return await self.call_utility_async("add_lora", lora_request)
