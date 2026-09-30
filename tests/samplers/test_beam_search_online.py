@@ -57,8 +57,8 @@ class _EngineClient:
 
 
 class _Serving(BeamSearchOnlineMixin):
-    renderer = _Renderer()  # type: ignore[assignment]
-    engine_client = _EngineClient()  # type: ignore[assignment]
+    renderer = _Renderer()
+    engine_client = _EngineClient()
 
 
 @pytest.mark.asyncio
