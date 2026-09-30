@@ -19,7 +19,10 @@ import torch.nn as nn
 import vllm.envs as envs
 from vllm.config import CUDAGraphMode, VllmConfig, set_current_vllm_config
 from vllm.config.compilation import CompilationMode
-from vllm.device_allocator import get_mem_allocator_instance
+from vllm.device_allocator import (
+    cumem_cudagraph_pool_enabled,
+    get_mem_allocator_instance,
+)
 from vllm.distributed import (
     ensure_model_parallel_initialized,
     init_distributed_environment,
@@ -419,6 +422,16 @@ class Worker(WorkerBase):
         if self.device_config.device_type == "cuda":
             # This env var set by Ray causes exceptions with graph building.
             os.environ.pop("NCCL_ASYNC_ERROR_HANDLING", None)
+            # See cumem_cudagraph_pool_enabled(); must precede communicator init.
+            if cumem_cudagraph_pool_enabled(self.vllm_config):
+                graph_register = os.environ.setdefault("NCCL_GRAPH_REGISTER", "0")
+                hook = os.getenv("TORCH_NCCL_USE_TENSOR_REGISTER_ALLOCATOR_HOOK", "0")
+                if graph_register != "0" or hook.lower() not in ("", "0", "false"):
+                    raise ValueError(
+                        "Unset NCCL_GRAPH_REGISTER and "
+                        "TORCH_NCCL_USE_TENSOR_REGISTER_ALLOCATOR_HOOK: sleep mode "
+                        "offloads Model Runner V2 CUDA graph pools."
+                    )
             parallel_config = self.parallel_config
             if (
                 parallel_config.distributed_executor_backend
