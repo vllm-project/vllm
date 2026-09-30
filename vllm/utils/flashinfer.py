@@ -79,6 +79,23 @@ FLASHINFER_CUBINS_REPOSITORY = os.environ.get(
     "https://edge.urm.nvidia.com/artifactory/sw-kernelinferencelibrary-public-generic-local/",  # noqa: E501
 )
 
+_DEFAULT_CUDA_HOME = "/usr/local/cuda"
+
+
+def _flashinfer_nvcc_path() -> str | None:
+    """Return the nvcc FlashInfer's JIT would run, or None if it is missing.
+
+    Mirrors ``flashinfer.jit.cpp_ext.get_cuda_path()`` without importing
+    FlashInfer, whose import initializes CUDA.
+    """
+    cuda_home = os.environ.get("CUDA_HOME") or os.environ.get("CUDA_PATH")
+    if not cuda_home:
+        nvcc = shutil.which("nvcc")
+        cuda_home = (
+            os.path.dirname(os.path.dirname(nvcc)) if nvcc else _DEFAULT_CUDA_HOME
+        )
+    return shutil.which(os.path.join(cuda_home, "bin", "nvcc"))
+
 
 @functools.cache
 def has_flashinfer_cubin() -> bool:
@@ -99,12 +116,15 @@ def has_flashinfer() -> bool:
     if importlib.util.find_spec("flashinfer") is None:
         logger.debug_once("FlashInfer unavailable since package was not found")
         return False
-    # When not using flashinfer cubin,
-    # Also check if nvcc is available since it's required to JIT compile flashinfer
-    if not has_flashinfer_cubin() and shutil.which("nvcc") is None:
-        logger.debug_once(
-            "FlashInfer unavailable since nvcc was not found "
-            "and not using pre-downloaded cubins"
+    # FlashInfer's JIT runs nvcc and `ninja` (from PATH).
+    if not has_flashinfer_cubin() and (
+        _flashinfer_nvcc_path() is None or shutil.which("ninja") is None
+    ):
+        logger.warning_once(
+            "FlashInfer kernels are disabled: flashinfer-cubin is not installed "
+            "and nvcc (CUDA_HOME, CUDA_PATH, PATH or /usr/local/cuda) or ninja "
+            "(PATH) is missing. Set CUDA_HOME to a CUDA toolkit and put ninja on "
+            "PATH, or run `flashinfer download-kernels`."
         )
         return False
     return True

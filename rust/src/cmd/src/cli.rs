@@ -363,6 +363,14 @@ pub struct SharedRuntimeArgs {
     #[serde(default)]
     pub enable_scale_out: bool,
 
+    /// Send an SSE keep-alive comment line every this many seconds when a
+    /// streaming response is idle (queued, prefill, or between tokens), to
+    /// prevent reverse proxies/tunnels with read timeouts from closing the
+    /// connection. Defaults to 0, which disables keep-alive comments entirely.
+    #[arg(long, default_value_t = 0)]
+    #[serde(default)]
+    pub sse_keep_alive_interval: u64,
+
     /// If provided, the server will require one of these keys to be presented
     /// in the Authorization header.
     #[educe(Debug(ignore))]
@@ -372,7 +380,9 @@ pub struct SharedRuntimeArgs {
     pub api_key: Vec<String>,
 
     /// Disable periodic logging of engine statistics (throughput, queue depth,
-    /// cache usage).
+    /// cache usage). Engines also stop recording stats, so metrics derived from
+    /// engine-reported scheduler stats and request lifecycle events are not
+    /// exported.
     #[arg(long)]
     #[serde(default)]
     pub disable_log_stats: bool,
@@ -616,6 +626,8 @@ impl SharedRuntimeArgs {
             enable_prompt_tokens_details: self.enable_prompt_tokens_details,
             enable_request_id_headers: self.enable_request_id_headers,
             enable_scale_out: self.enable_scale_out,
+            sse_keep_alive_interval: (self.sse_keep_alive_interval > 0)
+                .then(|| Duration::from_secs(self.sse_keep_alive_interval)),
         }
     }
 

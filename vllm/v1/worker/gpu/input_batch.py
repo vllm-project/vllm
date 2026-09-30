@@ -81,6 +81,8 @@ class InputBatch:
     is_prefilling_np: np.ndarray
     # == np.any(is_prefilling_np)
     has_prefill: bool
+    # No prefills, or only prefill rows that run as decodes.
+    decode_graph_eligible: bool
 
     # [num_tokens_after_padding]
     input_ids: torch.Tensor
@@ -113,6 +115,11 @@ class InputBatch:
     # [num_reqs] set only under PCP+DCP (see CommonAttentionMetadata).
     dcp_local_seq_lens_cpu_upper_bound: torch.Tensor | None = None
 
+    # [num_reqs] prefilling rows that schedule one new prompt token (excluding
+    # drafts) over existing context and so compute exactly like decodes.
+    # None if there are no prefills.
+    prefill_runs_as_decode_np: np.ndarray | None = None
+
     @classmethod
     def make_dummy(
         cls,
@@ -127,7 +134,7 @@ class InputBatch:
 
         req_ids = [f"req_{i}_{random_uuid()}" for i in range(num_reqs)]
         idx_mapping_np = np.arange(num_reqs, dtype=np.intp)
-        idx_mapping = torch.arange(num_reqs, dtype=torch.int64, device=device)
+        idx_mapping = torch.arange(num_reqs, dtype=torch.int32, device=device)
         expanded_idx_mapping = idx_mapping
         expanded_local_pos = torch.zeros(num_reqs, dtype=torch.int32, device=device)
 
@@ -196,6 +203,7 @@ class InputBatch:
             num_computed_prefill_tokens_np=np.zeros(num_reqs, dtype=np.int32),
             is_prefilling_np=np.zeros(num_reqs, dtype=np.bool_),
             has_prefill=False,
+            decode_graph_eligible=True,
             input_ids=input_ids,
             positions=positions,
             is_padding=is_padding,
@@ -555,28 +563,12 @@ def _post_update_kernel(
     all_token_ids_ptr,
     all_token_ids_stride,
     total_len_ptr,
-    broadcast_drafts_ptr,
-    broadcast_drafts_stride,
-    draft_tokens_ptr,
-    draft_tokens_stride,
-    num_spec,
 ):
     req_id = tl.program_id(0)
     req_state_idx = tl.load(idx_mapping_ptr + req_id)
     if req_state_idx < 0:
         # Filter rows with negative index entries.
         return
-
-    if broadcast_drafts_ptr is not None:
-        # PP path: adopt the draft tokens proposed by the last rank's
-        # speculator so the next verification step embeds the real drafts.
-        for i in range(num_spec):
-            token_id = tl.load(
-                broadcast_drafts_ptr + req_id * broadcast_drafts_stride + i
-            )
-            tl.store(
-                draft_tokens_ptr + req_state_idx * draft_tokens_stride + i, token_id
-            )
 
     total_len = tl.load(total_len_ptr + req_state_idx)
     num_sampled = tl.load(num_sampled_ptr + req_id)
@@ -638,11 +630,6 @@ def post_update(
     all_token_ids: torch.Tensor,
     # [max_num_reqs]
     total_len: torch.Tensor,
-    # [num_reqs, num_spec]; drafts broadcast from the last PP rank. Only
-    # passed on non-last PP ranks, which never run the speculator.
-    broadcast_drafts: torch.Tensor | None = None,
-    # [max_num_reqs, num_spec]
-    draft_tokens_out: torch.Tensor | None = None,
 ) -> None:
     num_reqs = idx_mapping.shape[0]
     _post_update_kernel[(num_reqs,)](
@@ -659,11 +646,6 @@ def post_update(
         all_token_ids,
         all_token_ids.stride(0),
         total_len,
-        broadcast_drafts,
-        broadcast_drafts.stride(0) if broadcast_drafts is not None else 0,
-        draft_tokens_out,
-        draft_tokens_out.stride(0) if draft_tokens_out is not None else 0,
-        broadcast_drafts.shape[1] if broadcast_drafts is not None else 0,
         num_warps=1,
     )
 
