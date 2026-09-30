@@ -48,11 +48,9 @@ class AttentionType(str, Enum):
     """Attention between dec. Q and enc. K/V for encoder-decoder."""
 
 
+@dataclass(frozen=True)
 class MultipleOf:
     base: int
-
-    def __init__(self, base: int):
-        self.base = base
 
     def __repr__(self) -> str:
         return f"MultipleOf({self.base})"

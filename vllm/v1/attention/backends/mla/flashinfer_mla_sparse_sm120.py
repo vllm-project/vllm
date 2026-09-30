@@ -11,11 +11,13 @@ from vllm.model_executor.layers.attention.sparse_mla_attention import (
 )
 from vllm.v1.attention.backend import AttentionLayer, AttentionType
 from vllm.v1.attention.backends.mla.flashinfer_mla_sparse import (
+    SM120_PAGE_ROWS,
     FlashInferMLASparseMetadata,
     _get_workspace_buffer,
 )
 from vllm.v1.attention.backends.mla.index_group import HiSparseMLAIndexGroup
 from vllm.v1.attention.backends.mla.sparse_utils import (
+    flat_kv_row_view,
     triton_convert_req_index_to_global_index,
 )
 
@@ -184,6 +186,9 @@ class FlashInferMLASparseSM120Impl(SparseMLACommonImpl[FlashInferMLASparseMetada
             output = torch.cat(outputs) if len(outputs) > 1 else outputs[0]
             return output, None
 
+        kv_rows, block_stride_rows = flat_kv_row_view(
+            kv_c_and_k_pe_cache, attn_metadata.block_size
+        )
         topk_indices_physical = cast(
             torch.Tensor,
             triton_convert_req_index_to_global_index(
@@ -191,13 +196,20 @@ class FlashInferMLASparseSM120Impl(SparseMLACommonImpl[FlashInferMLASparseMetada
                 attn_metadata.block_table,
                 topk_indices,
                 BLOCK_SIZE=attn_metadata.block_size,
+                BLOCK_STRIDE_ROWS=block_stride_rows,
                 NUM_TOPK_TOKENS=topk_indices.shape[1],
             ),
         )
         return (
             self._run_mqa_kernel(
                 q,
-                kv_c_and_k_pe_cache,
+                kv_rows.view(
+                    -1,
+                    256
+                    if block_stride_rows % 256 == attn_metadata.block_size % 256 == 0
+                    else SM120_PAGE_ROWS,
+                    kv_rows.shape[-1],
+                ),
                 topk_indices_physical,
             ),
             None,

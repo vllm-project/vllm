@@ -67,9 +67,9 @@ def _make_kv_cache_config(layer_names: set[str]) -> SimpleNamespace:
     return SimpleNamespace(kv_cache_groups=[group])
 
 
-def test_block_size_uses_kernel_block_size(monkeypatch: pytest.MonkeyPatch):
-    """The proposer's slot-mapping math runs against the kernel-granularity
-    block table, so block_size must come from kernel_block_sizes."""
+def test_block_size_uses_manager_block_size(monkeypatch: pytest.MonkeyPatch):
+    """The proposer's slot-mapping math runs against the manager-granularity
+    block table; only the metadata builders see kernel blocks."""
     layer_names = {"draft.0.self_attn.attn"}
     proposer = _make_proposer(monkeypatch, layer_names)
 
@@ -78,9 +78,7 @@ def test_block_size_uses_kernel_block_size(monkeypatch: pytest.MonkeyPatch):
         kernel_block_sizes=[KERNEL_BLOCK_SIZE],
     )
 
-    assert proposer.block_size == KERNEL_BLOCK_SIZE
-    assert proposer.block_size != SCHEDULER_BLOCK_SIZE
-    # The metadata builder keeps receiving the kernel block size as well.
+    assert proposer.block_size == SCHEDULER_BLOCK_SIZE
     assert proposer.draft_attn_groups[0].kernel_block_size == KERNEL_BLOCK_SIZE
 
 
@@ -109,4 +107,4 @@ def test_draft_layer_iteration_is_deterministic(monkeypatch: pytest.MonkeyPatch)
         )
         assert len(proposer.draft_attn_groups) == 1
         assert proposer.draft_attn_groups[0].layer_names == expected_order
-        assert proposer.block_size == KERNEL_BLOCK_SIZE
+        assert proposer.block_size == SCHEDULER_BLOCK_SIZE

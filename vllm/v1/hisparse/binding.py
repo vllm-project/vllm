@@ -55,8 +55,9 @@ def resolve_hisparse_block_size(
     if len(block_sizes) != 1:
         raise ValueError("HiSparse requires one scheduler block size.")
     backends = [attn_layers[name].get_attn_backend() for name in mla_specs]
+    specs = list(mla_specs.values())
     try:
-        block_size = select_common_block_size(block_sizes.pop(), backends)
+        block_size = select_common_block_size(block_sizes.pop(), backends, specs)
     except ValueError as error:
         raise ValueError(
             "HiSparse requires a GPU block size supported by every sparse "
@@ -96,16 +97,13 @@ def allocate_hisparse_kv_caches(
             if isinstance(host_spec, UniformTypeKVCacheSpecs)
             else host_spec
         )
-        kernel_block_size = kernel_block_sizes[host_group_id]
-        if isinstance(spec, MLAAttentionSpec) and spec.storage_block_size is not None:
-            kernel_block_size = spec.storage_block_size
         views = create_kv_cache_views(
             backing,
             spec,
             kv_cache_config.num_blocks_of(tensor),
             layout,
             tensor,
-            kernel_block_size=kernel_block_size,
+            kernel_block_size=kernel_block_sizes[host_group_id],
         )
         kv_caches.update(zip(tensor.layers, views))
     return kv_caches

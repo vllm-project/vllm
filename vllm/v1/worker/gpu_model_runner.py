@@ -234,6 +234,8 @@ from .utils import (
     allocate_kv_cache,
     bind_kv_cache,
     copy_kv_cache_blocks_inplace,
+    customize_attention_spec,
+    map_kv_caches_to_kernel_blocks,
     prepare_kernel_block_sizes,
     sanity_check_mm_encoder_outputs,
 )
@@ -719,7 +721,6 @@ class GPUModelRunner(
             max(self.max_model_len, self.max_encoder_len), placeholder_block_size
         )
         self._init_block_sizes = [placeholder_block_size]
-        self._init_kernel_block_sizes = [placeholder_block_size]
         self._init_max_num_blocks = [placeholder_max_num_blocks]
         self._init_slot_mapping_modes = [SlotMappingMode.TOKEN_TO_KV_SLOT]
         self.cp_kv_cache_interleave_size = (
@@ -735,7 +736,6 @@ class GPUModelRunner(
             device=self.device,
             vocab_size=self.model_config.get_vocab_size(),
             block_sizes=[placeholder_block_size],
-            kernel_block_sizes=[placeholder_block_size],
             max_num_blocks_per_req=[placeholder_max_num_blocks],
             num_spec_tokens=self.num_spec_tokens,
             logitsprocs=build_logitsprocs(
@@ -2520,8 +2520,8 @@ class GPUModelRunner(
                     )
 
             if for_cudagraph_capture:
-                attn_metadata_i = builder.build_for_cudagraph_capture(
-                    common_attn_metadata
+                attn_metadata_i = attn_group.build_metadata_for_cudagraph_capture(
+                    common_attn_metadata, ubid or 0
                 )
             elif (
                 cache_key in cached_attn_metadata
@@ -2529,13 +2529,16 @@ class GPUModelRunner(
             ):
                 attn_metadata_i = builder.update_block_table(
                     cached_attn_metadata[cache_key],
-                    common_attn_metadata.block_table_tensor,
+                    attn_group.map_block_table(
+                        common_attn_metadata.block_table_tensor, ubid or 0
+                    ),
                     common_attn_metadata.slot_mapping,
                 )
             else:
-                attn_metadata_i = builder.build(
+                attn_metadata_i = attn_group.build_metadata(
+                    common_attn_metadata,
+                    ubid or 0,
                     common_prefix_len=cascade_attn_prefix_len,
-                    common_attn_metadata=common_attn_metadata,
                     **extra_attn_metadata_args,
                 )
                 if builder.supports_update_block_table:
@@ -7186,9 +7189,7 @@ class GPUModelRunner(
             return
         self.reorder_batch_threshold = reduce(min_none_high, reorder_batch_thresholds)  # type: ignore[assignment]
 
-    def may_reinitialize_input_batch(
-        self, kv_cache_config: KVCacheConfig, kernel_block_sizes: list[int]
-    ) -> None:
+    def may_reinitialize_input_batch(self, kv_cache_config: KVCacheConfig) -> None:
         """Re-initialize the input batch if the block sizes are different from
         what it was originally created with. This happens when the final
         block size (determined after model loading) differs from the
@@ -7197,7 +7198,6 @@ class GPUModelRunner(
 
         Args:
             kv_cache_config: The KV cache configuration.
-            kernel_block_sizes: The kernel block sizes for each KV cache group.
 
         """
         block_sizes = []
@@ -7222,14 +7222,12 @@ class GPUModelRunner(
 
         if (
             block_sizes != self._init_block_sizes
-            or kernel_block_sizes != self._init_kernel_block_sizes
             or max_num_blocks != self._init_max_num_blocks
             or slot_mapping_modes != self._init_slot_mapping_modes
             or self.cp_kv_cache_interleave_size
             != self.parallel_config.cp_kv_cache_interleave_size
         ):
             self._init_block_sizes = block_sizes
-            self._init_kernel_block_sizes = kernel_block_sizes
             self._init_max_num_blocks = max_num_blocks
             self._init_slot_mapping_modes = slot_mapping_modes
             self.cp_kv_cache_interleave_size = (
@@ -7244,7 +7242,6 @@ class GPUModelRunner(
                     device=self.device,
                     vocab_size=self.model_config.get_vocab_size(),
                     block_sizes=block_sizes,
-                    kernel_block_sizes=kernel_block_sizes,
                     max_num_blocks_per_req=max_num_blocks,
                     num_spec_tokens=self.num_spec_tokens,
                     logitsprocs=self.input_batch.logitsprocs,
@@ -7259,10 +7256,6 @@ class GPUModelRunner(
         assert self._init_block_sizes == block_sizes, (
             f"InputBatch block_sizes {self._init_block_sizes} != "
             f"kv_cache block_sizes {block_sizes}"
-        )
-        assert self._init_kernel_block_sizes == kernel_block_sizes, (
-            f"InputBatch kernel_block_sizes {self._init_kernel_block_sizes} "
-            f"!= kv_cache kernel_block_sizes {kernel_block_sizes}"
         )
 
     def _attn_group_iterator(self) -> Iterator[AttentionGroup]:
@@ -7310,8 +7303,11 @@ class GPUModelRunner(
         num_attn_module = (
             2 if self.model_config.hf_config.model_type == "longcat_flash" else 1
         )
+        attn_groups = [g for groups in self.attn_groups for g in groups]
+        if self.speculative_config:
+            attn_groups += getattr(self.drafter, "draft_attn_groups", [])
         bind_kv_cache(
-            kv_caches,
+            map_kv_caches_to_kernel_blocks(kv_caches, attn_groups),
             self.compilation_config.static_forward_context,
             self.kv_caches,
             num_attn_module,
@@ -7388,7 +7384,7 @@ class GPUModelRunner(
         self.initialize_metadata_builders(kv_cache_config, kernel_block_sizes)
 
         # Reinitialize need to after initialize_attn_backend
-        self.may_reinitialize_input_batch(kv_cache_config, kernel_block_sizes)
+        self.may_reinitialize_input_batch(kv_cache_config)
         # Capture warmup providers that depend on allocated KV-cache strides.
         with self.jit_warmup_registry.activate():  # type: ignore[attr-defined]
             kv_caches = self.initialize_kv_cache_tensors(
@@ -7465,7 +7461,9 @@ class GPUModelRunner(
             # Skip modules that don't need KV cache (eg encoder-only attention)
             if spec := attn_module.get_kv_cache_spec(self.vllm_config):
                 if isinstance(spec, AttentionSpec):
-                    spec = attn_module.get_attn_backend().customize_spec(spec)
+                    spec = customize_attention_spec(
+                        attn_module.get_attn_backend(), spec
+                    )
                 kv_cache_spec[layer_name] = spec
 
         return kv_cache_spec
