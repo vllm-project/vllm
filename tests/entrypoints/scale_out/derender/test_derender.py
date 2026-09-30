@@ -793,7 +793,7 @@ async def test_derender_chat_oversized_logprobs_rejected(client):
     """logprobs.content longer than max_model_len returns 400."""
     oversized_logprobs: dict = {
         "content": [
-            {"token": "x", "logprob": -1.0, "bytes": None, "top_logprobs": []}
+            {"token_id": 42, "logprob": -1.0, "rank": 1, "top_logprobs": []}
             for _ in range(1_000_000)
         ]
     }
@@ -824,11 +824,11 @@ async def test_derender_chat_oversized_top_logprobs_rejected(client):
     oversized_top_logprobs = {
         "content": [
             {
-                "token": "x",
+                "token_id": 42,
                 "logprob": -1.0,
-                "bytes": None,
+                "rank": 1,
                 "top_logprobs": [
-                    {"token": f"t{i}", "logprob": -float(i), "bytes": None}
+                    {"token_id": i, "logprob": -float(i), "rank": i + 1}
                     for i in range(25)
                 ],
             }

@@ -325,18 +325,16 @@ class GenerateLogProb(BaseModel):
     """
 
     token_id: int
-    # Matches the OpenAI shapes' sentinel for "no candidate was returned for
-    # this position", which the server emits when the sampled token is absent
-    # from the engine's top-k map.
-    logprob: float = -9999.0
+    logprob: float
     rank: int | None = None
 
 
 class GenerateLogProbsContent(GenerateLogProb):
     """The sampled token at one position, plus its top-k candidates.
 
-    ``top_logprobs`` is a list in rank order (rank 1 first), not a dict: JSON
-    turns dict keys into strings and the order would be implicit.
+    ``top_logprobs`` is a list, not a dict: JSON turns dict keys into strings
+    and the order would be implicit. It is in the engine's order: the sampled
+    token first, then the remaining candidates in rank order.
     """
 
     top_logprobs: list[GenerateLogProb] = []
@@ -345,9 +343,7 @@ class GenerateLogProbsContent(GenerateLogProb):
 class GenerateLogProbs(BaseModel):
     """Output logprobs for one choice.
 
-    ``content`` holds one entry per generated token. ``content=None`` is the
-    normal state when no per-token candidates were requested; it is not an
-    error.
+    ``content`` holds one entry per generated token.
     """
 
     content: list[GenerateLogProbsContent] | None = None

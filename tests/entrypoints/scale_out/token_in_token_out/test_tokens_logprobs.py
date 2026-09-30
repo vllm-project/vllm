@@ -1,6 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import pytest
+from pydantic import ValidationError
+
+from vllm.entrypoints.scale_out.token_in_token_out.protocol import GenerateLogProb
 from vllm.entrypoints.scale_out.token_in_token_out.serving import ServingTokens
 from vllm.logprobs import Logprob
 
@@ -71,3 +75,28 @@ def test_logprobs_minus_one_emits_all_tokens():
         num_output_top_logprobs=-1,
     )
     assert len(result.content[0].top_logprobs) == 2
+
+
+def test_sampled_token_outside_topk_comes_first():
+    """The engine puts the sampled token first, then ranks 1..k. When the
+    sampled token is outside the top k it takes one of the k slots, so rank k
+    is left out (same as the OpenAI endpoints)."""
+    result = ServingTokens._create_tokens_logprobs(
+        None,
+        token_ids=[50],
+        top_logprobs=[
+            {
+                50: Logprob(-3.0, rank=5),
+                10: Logprob(-0.2, rank=1),
+                20: Logprob(-1.0, rank=2),
+            }
+        ],
+        num_output_top_logprobs=2,
+    )
+    assert [t.rank for t in result.content[0].top_logprobs] == [5, 1]
+
+
+def test_logprob_is_required_on_the_wire():
+    """A payload missing logprob is rejected rather than read as -9999."""
+    with pytest.raises(ValidationError):
+        GenerateLogProb.model_validate({"token_id": 1})

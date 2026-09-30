@@ -601,7 +601,11 @@ class ServingTokens(GenerateBaseServing):
         for i, token_id in enumerate(token_ids):
             step_top_logprobs = top_logprobs[i]
             if step_top_logprobs is None or step_top_logprobs.get(token_id) is None:
-                logprobs_content.append(GenerateLogProbsContent(token_id=token_id))
+                # Same sentinel the OpenAI shapes use when the sampled token
+                # has no entry in the engine's top-k map.
+                logprobs_content.append(
+                    GenerateLogProbsContent(token_id=token_id, logprob=-9999.0)
+                )
             else:
                 step_token = step_top_logprobs[token_id]
 

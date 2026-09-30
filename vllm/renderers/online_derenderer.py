@@ -9,7 +9,7 @@ from vllm.entrypoints.generate.base.protocol import (
     DeltaMessage,
     ToolCall,
 )
-from vllm.entrypoints.generate.base.serving import decode_token_id
+from vllm.entrypoints.generate.base.serving import decode_token_ids
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionLogProb,
     ChatCompletionLogProbs,
@@ -1007,7 +1007,11 @@ def _resolve_logprobs(
     resolved_content = []
 
     for entry in logprobs.content:
-        token_str, token_bytes = decode_token_id(entry.token_id, tokenizer)
+        # One batch per position: the sampled id and its top-k ids.
+        (token_str, token_bytes), *top_decoded = decode_token_ids(
+            [entry.token_id, *(top.token_id for top in entry.top_logprobs)],
+            tokenizer,
+        )
 
         if token_str.endswith("\ufffd"):
             token_str = _correct_decoded_token(
@@ -1016,8 +1020,7 @@ def _resolve_logprobs(
             token_bytes = list(token_str.encode("utf-8"))
 
         resolved_top = []
-        for top in entry.top_logprobs:
-            top_str, top_bytes = decode_token_id(top.token_id, tokenizer)
+        for top, (top_str, top_bytes) in zip(entry.top_logprobs, top_decoded):
             if top_str.endswith("\ufffd"):
                 top_str = _correct_decoded_token(
                     top.token_id, context_token_ids, tokenizer
