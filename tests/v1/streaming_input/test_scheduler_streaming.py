@@ -179,6 +179,7 @@ class TestStreamingScheduler(unittest.TestCase):
             request_id="session",
             prompt_token_ids=[1, 2, 3],
         )
+        session.append_output_token_ids(10)
         session.num_computed_tokens = len(session.prompt_token_ids)
         session.max_tokens = 2
 
@@ -195,6 +196,7 @@ class TestStreamingScheduler(unittest.TestCase):
         assert session.sampling_params.max_tokens == 10
         assert session.max_tokens == 10
 
+        session.append_output_token_ids(11)
         session.num_computed_tokens = len(session.prompt_token_ids)
 
         new_request2 = DummyRequest(
@@ -216,6 +218,7 @@ class TestStreamingScheduler(unittest.TestCase):
             request_id="session",
             prompt_token_ids=[1, 2, 3],
         )
+        session.append_output_token_ids(10)
         session.num_computed_tokens = len(session.prompt_token_ids)
 
         new_request = DummyRequest(
@@ -246,6 +249,7 @@ class TestStreamingScheduler(unittest.TestCase):
             prompt_token_ids=[1, 2, 3],
             mm_features=[mm_feature],
         )
+        session.append_output_token_ids(10)
         session.num_computed_tokens = len(session.prompt_token_ids)
 
         mm_feature = MultiModalFeatureSpec(
@@ -316,6 +320,7 @@ class TestStreamingScheduler(unittest.TestCase):
         )
         scheduler.add_request(session)
         session.status = RequestStatus.WAITING_FOR_STREAMING_REQ
+        session.append_output_token_ids(10)
         session.num_computed_tokens = len(session.prompt_token_ids)
 
         next_request = DummyRequest(
