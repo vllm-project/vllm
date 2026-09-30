@@ -1256,7 +1256,7 @@ class TestPushWriterNegative:
         w = _StubWriterWorker.fresh()
         for bogus_rid in (123, None, 4.5, b"bytes-not-str"):
             payload = _registration_data("placeholder")
-            payload["request_id"] = bogus_rid  # type: ignore[assignment]
+            payload["request_id"] = bogus_rid
             notif = PUSH_REG_NOTIF_PREFIX + msgspec.msgpack.encode(payload)
             w._handle_push_reg_notif(notif)
         assert w._pending_d_registrations == {}
