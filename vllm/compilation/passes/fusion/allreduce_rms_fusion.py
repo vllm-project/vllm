@@ -1567,6 +1567,96 @@ class AiterAllreduceFusedAddRMSNormGroupQuantWithIndexerPattern(
         return _replacement
 
 
+class AiterAllreduceFusedAddRMSNormMxfp4GemmPattern(
+    BasePattern, VllmPatternReplacement
+):
+    """AllReduce + fused-add RMSNorm feeding an MXFP4 dynamic-quant linear.
+
+    Matches ``all_reduce -> fused_add_rms_norm -> gemm_with_dynamic_quant``
+    (``AiterMxfp4LinearKernel`` with ``VLLM_ROCM_USE_AITER_FP4_ASM_GEMM=1``)
+    and lowers it to ``rocm_aiter_fused_allreduce_rmsnorm_mxfp4_gemm``, which
+    moves the per-1x32 activation quant into the all-reduce epilogue at
+    decode. The normed activation stays a pattern output, so bf16 consumers
+    of the same norm (e.g. Qwen3.5/3.8 GDN ``in_proj_ba`` next to the MXFP4
+    ``in_proj_qkvz``) keep working.
+    """
+
+    gemma_norm = False
+
+    def __init__(
+        self,
+        epsilon: float,
+        dtype: torch.dtype,
+        device: str | None,
+    ) -> None:
+        super().__init__(dtype, device)
+        self.epsilon = epsilon
+        self.FUSED_OP = rocm_aiter_ops.get_fused_allreduce_rmsnorm_mxfp4_gemm_op()
+
+    def get_inputs(self) -> list[torch.Tensor]:
+        hidden, out = 64, 32
+        return [
+            self.empty(5, hidden),
+            self.empty(5, hidden),
+            self.empty(hidden),
+            torch.empty(out, hidden // 2, dtype=torch.uint8, device=self.device),
+            torch.empty(out, hidden // 32, dtype=torch.uint8, device=self.device),
+        ]
+
+    @property
+    def pattern(self):
+        def _pattern(
+            residual: torch.Tensor,
+            input_: torch.Tensor,
+            norm_weight: torch.Tensor,
+            weight: torch.Tensor,
+            weight_scale: torch.Tensor,
+        ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+            ar_out = tensor_model_parallel_all_reduce(input_)
+            w = norm_weight.float() + 1.0 if self.gemma_norm else norm_weight
+            rms, residual_out = vllm.ir.ops.fused_add_rms_norm(
+                ar_out, residual, w, self.epsilon
+            )
+            out = torch.ops.vllm.gemm_with_dynamic_quant(
+                rms, weight, weight_scale, True, self.dtype
+            )
+            return out, rms, residual_out
+
+        return _pattern
+
+    @property
+    def replacement(self):
+        def _replacement(
+            residual: torch.Tensor,
+            input_: torch.Tensor,
+            norm_weight: torch.Tensor,
+            weight: torch.Tensor,
+            weight_scale: torch.Tensor,
+        ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+            w = norm_weight if self.gemma_norm else norm_weight.to(input_.dtype)
+            fused = self.FUSED_OP(
+                input_=input_,
+                residual=residual,
+                norm_weight=w,
+                epsilon=self.epsilon,
+                gemma_norm=self.gemma_norm,
+                weight=weight,
+                weight_scale=weight_scale,
+                out_dtype=self.dtype,
+            )
+            return fused[0], fused[1], fused[2]
+
+        return _replacement
+
+
+class AiterAllreduceFusedAddGemmaRMSNormMxfp4GemmPattern(
+    AiterAllreduceFusedAddRMSNormMxfp4GemmPattern
+):
+    """Gemma (1 + w) variant of ``AiterAllreduceFusedAddRMSNormMxfp4GemmPattern``."""
+
+    gemma_norm = True
+
+
 class RocmAiterAllReduceFusionPass(VllmFusionPatternMatcherPass):
     def __init__(self, config: VllmConfig) -> None:
         super().__init__(config, "rocm_aiter_allreduce_fusion_pass")
@@ -1629,8 +1719,25 @@ class RocmAiterAllReduceFusionPass(VllmFusionPatternMatcherPass):
                 "aiter past PR #2823 to enable the trailing per-group "
                 "FP8 quant fusion."
             )
+        supports_mxfp4_gemm = (
+            rocm_aiter_ops.is_asm_fp4_gemm_dynamic_quant_enabled()
+            and ca_comm.build_supports_gemma_mxfp4_quant()
+        )
 
         for epsilon in [1e-5, 1e-6]:
+            # The MXFP4 linear patterns span the AR+RMS subgraph plus the
+            # linear, so they must be tried before any AR+RMS-only pattern.
+            if supports_mxfp4_gemm:
+                self.register(
+                    AiterAllreduceFusedAddGemmaRMSNormMxfp4GemmPattern(
+                        epsilon, self.model_dtype, self.device
+                    )
+                )
+                self.register(
+                    AiterAllreduceFusedAddRMSNormMxfp4GemmPattern(
+                        epsilon, self.model_dtype, self.device
+                    )
+                )
             # Quant-fused variants must register first so the pattern matcher
             # tries them before the AR+RMS-only variants. Otherwise the
             # AR+RMS-only fusion runs first and consumes the all_reduce node,
