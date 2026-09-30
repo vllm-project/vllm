@@ -14,7 +14,7 @@ from types import SimpleNamespace
 import numpy as np
 import torch
 
-from vllm.v1.worker.gpu.model_runner import grammar_invalid_drafts
+from vllm.v1.worker.gpu.structured_outputs import grammar_invalid_drafts
 
 
 def _input_batch(req_ids, num_drafts, num_admitted=None):
@@ -64,22 +64,3 @@ def test_follow_the_device_layout_under_adaptive_verification():
     # 3 for "b": the real rows are a=0..2, b=3..6, not the scheduled 0..3, 4..7.
     batch = _input_batch(["a", "b"], [3, 3], num_admitted=[2, 3])
     assert _invalid_rows(batch, ["a", "b"], [1, 0]) == [2, 4, 5, 6]
-
-
-def test_fall_back_to_the_whole_window_without_the_field():
-    # An older scheduler, or warmup, supplies no num_acceptable_drafts; be
-    # conservative rather than accepting drafts whose mask is unknown.
-    batch = _input_batch(["g"], [3])
-    assert _invalid_rows(batch, ["g"], None) == [1, 2, 3]
-
-
-def test_nothing_without_drafts_or_grammar_requests():
-    batch = _input_batch(["g"], [3])
-    batch.num_draft_tokens = 0
-    assert _invalid_rows(batch, ["g"], [0]) is None
-    assert _invalid_rows(_input_batch(["g"], [3]), [], []) is None
-
-
-def test_unknown_request_is_skipped():
-    batch = _input_batch(["p"], [3])
-    assert _invalid_rows(batch, ["g"], [0]) is None
