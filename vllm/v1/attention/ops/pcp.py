@@ -63,6 +63,12 @@ def maybe_gather_mla_latent_cache_inputs(
         return kv_c_normed, k_pe, slot_mapping
     assert slot_mapping is not None
     num_tokens = kv_c_normed.shape[0]
+    if k_pe.numel() == 0:
+        (cache_kv_c,), cache_slot_mapping = _gather_prefill_cache_inputs(
+            (kv_c_normed,), slot_mapping, num_decode_tokens
+        )
+        cache_k_pe = k_pe.new_empty((cache_slot_mapping.shape[0], *k_pe.shape[1:]))
+        return cache_kv_c, cache_k_pe, cache_slot_mapping
     k_pe_flat = k_pe.reshape(num_tokens, -1)
     (cache_kv_c, cache_k_pe_flat), cache_slot_mapping = _gather_prefill_cache_inputs(
         (kv_c_normed, k_pe_flat),
