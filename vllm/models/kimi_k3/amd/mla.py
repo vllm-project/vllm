@@ -95,6 +95,10 @@ class KimiK3MultiHeadLatentAttentionWrapper(MultiHeadLatentAttentionWrapper):
             q[..., self.qk_nope_head_dim :], k_pe = self.rotary_emb(
                 positions, q[..., self.qk_nope_head_dim :], k_pe
             )
+            # HIP YaRN RoPE returns fp32. The q slice assignment casts back to
+            # bf16, but rebinding k_pe keeps fp32. concat_and_cache_mla then
+            # stores those bits as the KV dtype.
+            k_pe = k_pe.to(kv_c_normed.dtype)
 
         if self.indexer and self.is_sparse and not self.skip_topk:
             self.indexer(hidden_states, q_c, positions, self.indexer_rope_emb)
