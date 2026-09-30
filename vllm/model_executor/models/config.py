@@ -893,6 +893,12 @@ class Qwen4ExpForConditionalGenerationConfig(Qwen3_5ForConditionalGenerationConf
                 or parallel_config.use_sequence_parallel_moe
             )
         ):
+            # MoE SP also enables HC SP without the explicit HC flag.
+            if (
+                parallel_config.use_sequence_parallel_moe
+                and parallel_config.pipeline_parallel_size != 1
+            ):
+                raise ValueError("Qwen4Exp MoE SP requires PP=1")
             layer_indices = range(text_config.num_hidden_layers)
             if vllm_config.model_config.architecture == "Qwen4ExpMTP":
                 # MTP decoder indices follow the target model's layers.

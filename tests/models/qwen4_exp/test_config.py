@@ -49,36 +49,26 @@ def _text_config(**kwargs) -> Qwen4ExpTextConfig:
     return Qwen4ExpTextConfig(**values)
 
 
-@pytest.mark.parametrize(
-    "tp_size,pp_size,hc_sp,moe_sp,expected,error",
-    [
-        (1, 1, False, False, False, None),
-        (2, 1, False, False, False, None),
-        (2, 1, True, False, True, None),
-        (2, 1, False, True, True, None),
-        (2, 1, True, True, True, None),
-        (1, 1, True, False, None, "requires TP>1"),
-        (2, 2, True, False, None, "requires PP=1"),
-        (2, 2, False, True, None, "requires PP=1"),
-    ],
-)
-def test_sp_parallel_modes(tp_size, pp_size, hc_sp, moe_sp, expected, error) -> None:
-    """Validate HC opt-in, automatic MoE SP, and unsupported topologies."""
-    from vllm.models.qwen4_exp.nvidia.model import is_hc_sequence_parallel_enabled
-
+def test_moe_sp_rejects_pipeline_parallel() -> None:
+    """Automatic MoE SP must validate HC topology even without --enable-hc-sp."""
     config = SimpleNamespace(
-        parallel_config=SimpleNamespace(
-            tensor_parallel_size=tp_size,
-            pipeline_parallel_size=pp_size,
-            use_sequence_parallel_moe=moe_sp,
-            enable_hc_sp=hc_sp,
+        model_config=SimpleNamespace(
+            hf_text_config=_text_config(num_experts=4, ple_layer_ids=[]),
+        ),
+        cache_config=CacheConfig(),
+        parallel_config=ParallelConfig(
+            tensor_parallel_size=2,
+            pipeline_parallel_size=2,
+            data_parallel_size=2,
+            enable_expert_parallel=True,
+            all2all_backend="allgather_reducescatter",
         ),
     )
-    if error:
-        with pytest.raises(ValueError, match=error):
-            is_hc_sequence_parallel_enabled(config)
-    else:
-        assert is_hc_sequence_parallel_enabled(config) is expected
+    with (
+        patch("vllm.platforms.current_platform.is_cuda", return_value=True),
+        pytest.raises(ValueError, match="MoE SP requires PP=1"),
+    ):
+        Qwen4ExpForConditionalGenerationConfig.verify_and_update_config(config)
 
 
 @pytest.mark.parametrize(

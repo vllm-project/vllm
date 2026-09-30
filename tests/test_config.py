@@ -3987,32 +3987,39 @@ def test_revision_resolved_for_model(mock_resolve):
 
 
 @pytest.mark.parametrize(
-    "architecture,is_cuda,supported",
+    "enabled,supported,is_cuda,tp_size,pp_size,error",
     [
-        ("Qwen4ExpForCausalLM", True, True),
-        ("Qwen4ExpForConditionalGeneration", True, True),
-        ("Qwen4ExpMTP", True, True),
-        ("Qwen4ExpForCausalLM", False, False),
-        ("DeepseekV4ForCausalLM", True, False),
+        (True, True, True, 2, 1, None),
+        (True, False, True, 2, 1, "not supported for this model"),
+        (True, True, False, 2, 1, "requires CUDA"),
+        (True, True, True, 1, 1, None),
+        (True, False, False, 1, 2, None),
+        (True, True, True, 2, 2, "requires PP=1"),
+        (False, False, False, 2, 1, None),
     ],
 )
-def test_hc_sp_model_support(architecture, is_cuda, supported):
-    """Accept HC SP for target and MTP models only on supported platforms."""
+def test_hc_sp_model_support(enabled, supported, is_cuda, tp_size, pp_size, error):
+    """Validate active HC SP configurations and ignore the flag with TP=1."""
+    from vllm.model_executor.models.registry import ModelRegistry
+
     model = SimpleNamespace(
-        architecture=architecture,
+        architectures=["HCModel"],
+        registry=ModelRegistry,
         model_arch_config=SimpleNamespace(total_num_attention_heads=8),
         multimodal_config=None,
     )
-    parallel = SimpleNamespace(
-        enable_hc_sp=True,
-        tensor_parallel_size=2,
-        pipeline_parallel_size=1,
-        enable_expert_parallel=False,
-        decode_context_parallel_size=1,
+    parallel = ParallelConfig(
+        enable_hc_sp=enabled,
+        tensor_parallel_size=tp_size,
+        pipeline_parallel_size=pp_size,
     )
-    with patch("vllm.config.model.current_platform.is_cuda", return_value=is_cuda):
-        if supported:
-            ModelConfig.verify_with_parallel_config(model, parallel)
-        else:
-            with pytest.raises(ValueError, match="requires Qwen4Exp on CUDA"):
+    with (
+        patch("vllm.config.model.current_platform.is_cuda", return_value=is_cuda),
+        patch.object(ModelRegistry, "is_hc_sp_supported_model", return_value=supported),
+        patch.object(ModelRegistry, "is_pp_supported_model", return_value=True),
+    ):
+        if error:
+            with pytest.raises(ValueError, match=error):
                 ModelConfig.verify_with_parallel_config(model, parallel)
+        else:
+            ModelConfig.verify_with_parallel_config(model, parallel)

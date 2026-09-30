@@ -37,6 +37,7 @@ from vllm.model_executor.models.interfaces import (
     IsHybrid,
     MixtureOfExperts,
     MultiModalEmbeddings,
+    SupportsHCSP,
     SupportsLoRA,
     SupportsMRoPE,
     SupportsPP,
@@ -95,15 +96,9 @@ from .qsa import Qwen4ExpQSAAttention
 def is_hc_sequence_parallel_enabled(vllm_config: VllmConfig) -> bool:
     """Enable GR/PLE SP explicitly or automatically with sequence-parallel MoE."""
     parallel_config = vllm_config.parallel_config
-    if parallel_config.tensor_parallel_size == 1:
-        if parallel_config.enable_hc_sp:
-            raise ValueError("Qwen4Exp HC SP requires TP>1")
-        return False
-    enabled = parallel_config.enable_hc_sp or parallel_config.use_sequence_parallel_moe
-    if enabled and parallel_config.pipeline_parallel_size != 1:
-        # HC and MoE must agree on the token layout when MoE SP is enabled.
-        raise ValueError("Qwen4Exp HC SP requires PP=1")
-    return enabled
+    return parallel_config.tensor_parallel_size > 1 and (
+        parallel_config.enable_hc_sp or parallel_config.use_sequence_parallel_moe
+    )
 
 
 def without_modelopt_fp4(
@@ -721,6 +716,7 @@ class Qwen4ExpModel(nn.Module):
 class Qwen4ExpForCausalLM(
     nn.Module,
     HasInnerState,
+    SupportsHCSP,
     SupportsLoRA,
     SupportsMRoPE,
     SupportsPP,
@@ -970,6 +966,7 @@ class Qwen4ExpProcessingInfo(Qwen3VLProcessingInfo):
 class Qwen4ExpForConditionalGeneration(
     Qwen3_5ForConditionalGeneration,
     HasInnerState,
+    SupportsHCSP,
     Qwen4ExpMixtureOfExperts,
 ):
     """Qwen3-VL vision tower backed by the Qwen4Exp language model."""

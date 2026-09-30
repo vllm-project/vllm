@@ -1499,17 +1499,13 @@ class ModelConfig:
         self,
         parallel_config: ParallelConfig,
     ) -> None:
-        # Other HC models must opt in before accepting this execution mode.
-        if parallel_config.enable_hc_sp and (
-            not current_platform.is_cuda()
-            or self.architecture
-            not in (
-                "Qwen4ExpForCausalLM",
-                "Qwen4ExpForConditionalGeneration",
-                "Qwen4ExpMTP",
-            )
-        ):
-            raise ValueError("--enable-hc-sp currently requires Qwen4Exp on CUDA")
+        if parallel_config.enable_hc_sp and parallel_config.tensor_parallel_size > 1:
+            if not current_platform.is_cuda():
+                raise ValueError("--enable-hc-sp currently requires CUDA")
+            if not self.registry.is_hc_sp_supported_model(self.architectures, self):
+                raise ValueError("--enable-hc-sp is not supported for this model")
+            if parallel_config.pipeline_parallel_size != 1:
+                raise ValueError("--enable-hc-sp requires PP=1")
 
         total_num_attention_heads = self.model_arch_config.total_num_attention_heads
         tensor_parallel_size = parallel_config.tensor_parallel_size
