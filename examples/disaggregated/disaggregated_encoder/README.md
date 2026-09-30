@@ -58,7 +58,7 @@ The vllm instances and `disagg_encoder_proxy` supports local URIs with ```{"url"
 ## EC connector and KV transfer
 
 `ECExampleConnector` stores encoder cache on local disk. For RDMA/TCP transfer
-without a shared filesystem, use `ECMooncakeConnector` (1E+1PD only through
+without a shared filesystem, use `ECMooncakeConnector` (1E + 1PD only through
 this proxy). See
 [ECMooncakeConnector Usage Guide](../../../docs/features/mooncake_ec_connector_usage.md).
 
