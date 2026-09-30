@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import NamedTuple
 
@@ -143,6 +144,23 @@ class SamplingMaskTensors(NamedTuple):
                 BLOCK_SIZE=8192,
             )
         return cls(token_ids, packed_mask, counts, vocab_size, rows_per_request)
+
+    @classmethod
+    def cat(cls, chunks: Sequence[SamplingMaskTensors]) -> SamplingMaskTensors:
+        """Join request-contiguous chunks that share one output layout."""
+        first = chunks[0]
+        assert all(
+            chunk.vocab_size == first.vocab_size
+            and chunk.rows_per_request == first.rows_per_request
+            for chunk in chunks
+        ), "sampling mask chunks must share vocab_size and rows_per_request"
+        return cls(
+            torch.cat([chunk.token_ids for chunk in chunks]),
+            torch.cat([chunk.packed_mask for chunk in chunks]),
+            torch.cat([chunk.counts for chunk in chunks]),
+            first.vocab_size,
+            first.rows_per_request,
+        )
 
     def to_cpu_nonblocking(self) -> SamplingMaskTensors:
         if self.token_ids.device.type == "cpu":

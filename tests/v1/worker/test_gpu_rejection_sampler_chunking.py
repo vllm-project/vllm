@@ -17,6 +17,46 @@ from vllm.v1.worker.gpu.spec_decode.rejection_sampler import (
 )
 
 
+def _make_input_batch(
+    cu_num_logits_np: np.ndarray,
+    idx_mapping_np: np.ndarray,
+    device: torch.device,
+) -> SimpleNamespace:
+    """Minimal InputBatch fields read by RejectionSampler._verify_in_chunks."""
+    num_reqs = len(idx_mapping_np)
+    num_logits_per_req = np.diff(cu_num_logits_np)
+    return SimpleNamespace(
+        num_reqs=num_reqs,
+        cu_num_logits_np=cu_num_logits_np,
+        cu_num_logits=torch.from_numpy(cu_num_logits_np).to(device),
+        idx_mapping_np=idx_mapping_np,
+        idx_mapping=torch.from_numpy(idx_mapping_np).to(device),
+        expanded_idx_mapping=torch.from_numpy(
+            np.repeat(idx_mapping_np, num_logits_per_req)
+        ).to(device),
+        expanded_local_pos=torch.from_numpy(
+            np.concatenate(
+                [np.arange(count, dtype=np.int32) for count in num_logits_per_req]
+            )
+        ).to(device),
+        seq_lens_cpu_upper_bound=torch.full((num_reqs,), 64, dtype=torch.int32),
+    )
+
+
+def _make_rejection_sampler(
+    sampler: SimpleNamespace, num_speculative_steps: int
+) -> RejectionSampler:
+    """RejectionSampler for standard, fixed-boundary, unwatermarked verification."""
+    rejection_sampler = object.__new__(RejectionSampler)
+    rejection_sampler.sampler = sampler
+    rejection_sampler.num_speculative_steps = num_speculative_steps
+    rejection_sampler.enable_adaptive_verification = False
+    rejection_sampler.synthetic_conditional_rates = None
+    rejection_sampler.use_block_verification = False
+    rejection_sampler.watermark_key = None
+    return rejection_sampler
+
+
 def test_iter_request_chunks_preserves_request_boundaries():
     cu_num_logits = np.array([0, 3, 4, 11, 13], dtype=np.int32)
 
@@ -34,30 +74,11 @@ def test_chunked_scores_match_full_batch(logprobs_mode: str):
     cu_num_logits_np = np.array([0, 3, 4, 8, 10], dtype=np.int32)
     num_logits_per_req = np.diff(cu_num_logits_np)
     idx_mapping_np = np.array([7, 2, 9, 1], dtype=np.int32)
-    input_batch = SimpleNamespace(
-        num_reqs=4,
-        cu_num_logits_np=cu_num_logits_np,
-        cu_num_logits=torch.from_numpy(cu_num_logits_np).to(device),
-        idx_mapping_np=idx_mapping_np,
-        idx_mapping=torch.from_numpy(idx_mapping_np).to(device),
-        expanded_idx_mapping=torch.from_numpy(
-            np.repeat(idx_mapping_np, num_logits_per_req)
-        ).to(device),
-        expanded_local_pos=torch.from_numpy(
-            np.concatenate(
-                [np.arange(count, dtype=np.int32) for count in num_logits_per_req]
-            )
-        ).to(device),
-        seq_lens_cpu_upper_bound=torch.from_numpy(
-            np.array([10, 20, 30, 40], dtype=np.int32)
-        ),
+    input_batch = _make_input_batch(cu_num_logits_np, idx_mapping_np, device)
+    rejection_sampler = _make_rejection_sampler(
+        SimpleNamespace(logprobs_mode=logprobs_mode, return_sampling_mask=False),
+        num_speculative_steps=3,
     )
-    rejection_sampler = object.__new__(RejectionSampler)
-    rejection_sampler.sampler = SimpleNamespace(
-        logprobs_mode=logprobs_mode, return_sampling_mask=False
-    )
-    rejection_sampler.num_speculative_steps = 3
-    rejection_sampler.enable_adaptive_verification = False
 
     def fake_verify(
         self,
@@ -128,19 +149,7 @@ def test_replay_on_off_preserves_rejection_sampling_and_rng(monkeypatch):
     vocab_size = 8
     cu_num_logits_np = np.arange(0, 13, rows_per_request, dtype=np.int32)
     idx_mapping_np = np.arange(num_reqs, dtype=np.int32)
-    input_batch = SimpleNamespace(
-        num_reqs=num_reqs,
-        cu_num_logits_np=cu_num_logits_np,
-        cu_num_logits=torch.from_numpy(cu_num_logits_np).to(device),
-        idx_mapping_np=idx_mapping_np,
-        idx_mapping=torch.from_numpy(idx_mapping_np).to(device),
-        expanded_idx_mapping=torch.repeat_interleave(
-            torch.arange(num_reqs, device=device), rows_per_request
-        ),
-        expanded_local_pos=torch.arange(rows_per_request, device=device).repeat(
-            num_reqs
-        ),
-    )
+    input_batch = _make_input_batch(cu_num_logits_np, idx_mapping_np, device)
     processed_logits = torch.zeros((12, vocab_size), device=device)
     processed_logits[0, 0] = -float("inf")
     processed_logits[rows_per_request + 1, 1] = -float("inf")
@@ -165,12 +174,7 @@ def test_replay_on_off_preserves_rejection_sampling_and_rng(monkeypatch):
         use_fp64_gumbel=False,
         apply_sampling_params=lambda logits, *_: logits,
     )
-    rejection_sampler = object.__new__(RejectionSampler)
-    rejection_sampler.sampler = sampler
-    rejection_sampler.num_speculative_steps = num_speculative_steps
-    rejection_sampler.enable_adaptive_verification = False
-    rejection_sampler.synthetic_conditional_rates = None
-    rejection_sampler.use_block_verification = False
+    rejection_sampler = _make_rejection_sampler(sampler, num_speculative_steps)
     pos = torch.arange(12, dtype=torch.int32, device=device)
 
     pack_calls: list[tuple[list[int], int, int]] = []

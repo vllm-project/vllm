@@ -181,42 +181,36 @@ def _sampling_replay_config(
     ("config", "message"),
     [
         (_sampling_replay_config(), None),
-        (_sampling_replay_config(speculative_method="mtp"), None),
+        *(
+            (_sampling_replay_config(speculative_method=method), None)
+            for method in (
+                "mtp",
+                "eagle",
+                "eagle3",
+                "dflash",
+                "dspark",
+                "draft_model",
+            )
+        ),
+        *(
+            (
+                _sampling_replay_config(
+                    speculative_method="mtp",
+                    rejection_sample_method=rejection_sample_method,
+                ),
+                None,
+            )
+            for rejection_sample_method in ("standard", "block", "synthetic")
+        ),
         (
             _sampling_replay_config(
-                return_sampling_mask=False, speculative_method="dflash"
+                return_sampling_mask=False, speculative_method="dspark", adaptive=True
             ),
             None,
         ),
         (
-            _sampling_replay_config(speculative_method="mtp", adaptive=True),
+            _sampling_replay_config(speculative_method="dspark", adaptive=True),
             "requires fixed verification boundaries",
-        ),
-        (
-            _sampling_replay_config(speculative_method="eagle"),
-            "currently supports only the MTP speculative method",
-        ),
-        (
-            _sampling_replay_config(speculative_method="dflash"),
-            "currently supports only the MTP speculative method",
-        ),
-        (
-            _sampling_replay_config(speculative_method="dspark"),
-            "currently supports only the MTP speculative method",
-        ),
-        (
-            _sampling_replay_config(
-                speculative_method="mtp",
-                rejection_sample_method="synthetic",
-            ),
-            "only rejection_sample_method='standard'",
-        ),
-        (
-            _sampling_replay_config(
-                speculative_method="mtp",
-                rejection_sample_method="block",
-            ),
-            "only rejection_sample_method='standard'",
         ),
         (
             _sampling_replay_config(is_diffusion=True),

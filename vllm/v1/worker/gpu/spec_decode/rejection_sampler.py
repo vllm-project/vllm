@@ -385,15 +385,11 @@ class RejectionSampler:
 
         sampled = torch.cat(sampled_chunks)
         num_sampled = torch.cat(num_sampled_chunks)
-        sampling_mask_tensors = None
-        if sampling_mask_chunks:
-            sampling_mask_tensors = SamplingMaskTensors(
-                torch.cat([chunk.token_ids for chunk in sampling_mask_chunks]),
-                torch.cat([chunk.packed_mask for chunk in sampling_mask_chunks]),
-                torch.cat([chunk.counts for chunk in sampling_mask_chunks]),
-                logits.shape[1],
-                self.num_speculative_steps + 1,
-            )
+        sampling_mask_tensors = (
+            SamplingMaskTensors.cat(sampling_mask_chunks)
+            if sampling_mask_chunks
+            else None
+        )
         return sampled, num_sampled, logprobs_tensors, sampling_mask_tensors
 
     def __call__(
