@@ -4,19 +4,17 @@
 
 DeepseekV41ROCMAiterSparseSWAMetadataBuilder.build runs once per SWA KV cache
 group, which is 8 times a step for DeepSeek-V4.1-Flash at TP 4. For a decode
-batch that this file does not take, each build launches 8 small kernels:
+batch that this file does not take, each build launches 6 small kernels:
 torch.ge for is_valid_token, the zero fill of the unused decode_swa_lens,
-_compute_swa_indices_and_lens_kernel, the ragged row count, torch.cumsum, the
-ragged compaction and 2 copies into the CUDA graph buffers. On MI325X each
-took about 4.2 us, so at 128k context the 8 builds held the GPU for 281 us of
-every step before the decode graph could start.
+_compute_swa_indices_and_lens_kernel, the ragged row count, its in-place scan
+and the ragged compaction into the CUDA graph buffers. On MI325X each took
+about 4.2 us, and all of them run before the decode graph can start.
 
 _decode_swa_meta_kernel writes the same tensors with one program: the dense
 window indices and lengths, is_valid_token, the zero lengths after the batch,
-and the ragged indices and indptr directly into the graph buffers. It does not
-write the ragged entries past indptr[-1]. _copy_ragged_to_graph_buffers copies
-them from an uninitialized tensor, and the attention kernels read only up to
-indptr.
+and the ragged indices and indptr directly into the graph buffers. Like
+build_ragged_into_graph_buffers, it does not write the ragged entries past
+indptr[-1], and the attention kernels read only up to indptr.
 
 The DSpark draft's 3 layers build their non-causal block the same way, with
 ComputeDSparkNoncausalSWAIndicesKernel in place of the window kernel. That
@@ -244,7 +242,7 @@ def build(builder, common_prefix_len, cam, fast_build, replay_start, metadata_cl
 
     # These are the fields DeepseekSparseSWAMetadataBuilder.build returns for
     # a batch without prefill tokens, and the ragged views
-    # _copy_ragged_to_graph_buffers returns.
+    # build_ragged_into_graph_buffers returns.
     tile_sched = builder.build_tile_scheduler(num_decode_tokens)
     base = sparse_swa.DeepseekSparseSWAMetadata(
         seq_lens=cam.seq_lens,

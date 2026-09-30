@@ -6,6 +6,7 @@ import inspect
 import math
 from collections.abc import Callable
 from importlib.util import find_spec
+from typing import Protocol
 
 import torch
 import torch.nn.functional as F
@@ -2070,74 +2071,133 @@ def _compact_dense_row_to_ragged_kernel(
         written += tl.sum(keep.to(tl.int32), axis=0)
 
 
-def build_ragged_indices_from_dense(
+def build_ragged_indices_from_dense_out(
     indices: torch.Tensor,
     lengths: torch.Tensor,
+    out_indices: torch.Tensor,
+    out_indptr: torch.Tensor,
     num_rows: int = -1,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    indices = indices.reshape(indices.shape[0], -1)
+) -> None:
+    """Like :func:`build_ragged_indices_from_dense`, into caller-owned buffers.
+
+    Writes ``out_indptr[: n + 1]`` and ``out_indices[: out_indptr[n]]`` for
+    ``n = indices.shape[0]``; the rest of both buffers is left untouched.
+    """
+    if indices.ndim != 2:
+        indices = indices.reshape(indices.shape[0], -1)
     lengths = lengths.to(device=indices.device, dtype=torch.int32).reshape(-1)
     assert lengths.numel() == indices.shape[0], (
         f"Expected one length per row, got {lengths.shape} for indices {indices.shape}"
     )
 
-    max_width = indices.shape[1] if indices.ndim == 2 else 0
+    num_queries, max_width = indices.shape
+    assert out_indices.dtype == torch.int32 and out_indices.is_contiguous()
+    assert out_indptr.dtype == torch.int32 and out_indptr.is_contiguous()
+    assert out_indices.numel() >= num_queries * max_width
+    assert out_indptr.numel() >= num_queries + 1
     # Both kernels bound the row by row_width and row_len, so no clamp needed.
     lengths = lengths.contiguous()
 
     # Dense rows reserve slots they may not fill, leaving -1 anywhere in the
     # first `lengths` entries. Keep only the valid ones, since the consumers
     # index the KV pool without checking the sign.
-    num_queries = indices.shape[0]
     # max_width is whatever the caller packed (align(topk + window, 128) for the
     # V4.1 indexer) and nothing caps it, so loop the row rather than size the
     # block by it.
     block = min(triton.next_power_of_2(max_width), 1024) if max_width > 0 else 1
-    counts = torch.empty(num_queries, dtype=torch.int32, device=indices.device)
-    indptr = torch.empty(num_queries + 1, dtype=torch.int32, device=indices.device)
-    if num_queries > 0 and max_width > 0:
-        # A program per row only gets row_width elements, which is launch
-        # bound for narrow rows. Tile rows to fill the block.
-        block_r = max(1, 1024 // block)
-        _count_valid_row_entries_kernel[(triton.cdiv(num_queries, block_r),)](
-            indices,
-            lengths,
-            counts,
-            indptr,
-            indices.stride(0),
-            int(num_rows),
-            num_queries,
-            max_width,
-            BLOCK_R=block_r,
-            BLOCK_W=block,
-        )
-    else:
-        counts.zero_()
+    indptr = out_indptr[: num_queries + 1]
+    counts = indptr[1:]
+    if num_queries == 0 or max_width == 0:
         indptr.zero_()
+        return
 
-    torch.cumsum(counts, dim=0, out=indptr[1:])
+    # A program per row only gets row_width elements, which is launch
+    # bound for narrow rows. Tile rows to fill the block.
+    block_r = max(1, 1024 // block)
+    _count_valid_row_entries_kernel[(triton.cdiv(num_queries, block_r),)](
+        indices,
+        lengths,
+        counts,
+        indptr,
+        indices.stride(0),
+        int(num_rows),
+        num_queries,
+        max_width,
+        BLOCK_R=block_r,
+        BLOCK_W=block,
+    )
+    counts.cumsum_(0)
 
-    if indices.numel() == 0:
-        flat = torch.empty(0, dtype=torch.int32, device=indices.device)
-    else:
-        flat = torch.empty(
-            indices.shape[0] * max_width,
-            dtype=torch.int32,
-            device=indices.device,
-        )
-        if flat.numel() > 0:
-            _compact_dense_row_to_ragged_kernel[(indices.shape[0],)](
-                indices,
-                lengths,
-                indptr,
-                flat,
-                indices.stride(0),
-                int(num_rows),
-                max_width,
-                BLOCK_W=block,
-            )
+    _compact_dense_row_to_ragged_kernel[(num_queries,)](
+        indices,
+        lengths,
+        indptr,
+        out_indices,
+        indices.stride(0),
+        int(num_rows),
+        max_width,
+        BLOCK_W=block,
+    )
 
+
+def build_ragged_indices_from_dense(
+    indices: torch.Tensor,
+    lengths: torch.Tensor,
+    num_rows: int = -1,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    flat = torch.empty(indices.numel(), dtype=torch.int32, device=indices.device)
+    indptr = torch.empty(indices.shape[0] + 1, dtype=torch.int32, device=indices.device)
+    build_ragged_indices_from_dense_out(indices, lengths, flat, indptr, num_rows)
     return flat, indptr
+
+
+class DecodeSWARaggedMetadata(Protocol):
+    num_decode_tokens: int
+    decode_swa_indices: torch.Tensor | None
+    decode_swa_lens: torch.Tensor | None
+    decode_swa_ragged_indices: torch.Tensor | None
+    decode_swa_ragged_indptr: torch.Tensor | None
+
+
+def build_ragged_into_graph_buffers(
+    dense_indices: torch.Tensor,
+    dense_lens: torch.Tensor,
+    ragged_indices_buffer: torch.Tensor,
+    ragged_indptr_buffer: torch.Tensor,
+    num_rows: int,
+    max_entries_per_row: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Pack dynamic ragged metadata into persistent CUDA graph buffers.
+
+    FULL decode graphs capture kernel argument addresses. Keep the returned
+    tensors backed by stable storage, while indptr continues to bound reads.
+    """
+    dense = dense_indices.reshape(dense_indices.shape[0], -1)
+    build_ragged_indices_from_dense_out(
+        dense, dense_lens, ragged_indices_buffer, ragged_indptr_buffer
+    )
+    indptr_out = ragged_indptr_buffer[: num_rows + 1]
+    if _ON_GFX950:
+        # Preserve the graph-stable base pointer while exposing source capacity
+        # to the sync-free split selector; indptr still carries the true NNZ.
+        return ragged_indices_buffer[: max(dense.numel(), 1)], indptr_out
+    return ragged_indices_buffer[: max(num_rows * max_entries_per_row, 1)], indptr_out
+
+
+def refresh_decode_swa_ragged(metadata: DecodeSWARaggedMetadata) -> None:
+    """Repack the decode SWA ragged indices in place after a draft step."""
+    if metadata.num_decode_tokens == 0:
+        return
+    assert metadata.decode_swa_indices is not None
+    assert metadata.decode_swa_lens is not None
+    assert metadata.decode_swa_ragged_indices is not None
+    assert metadata.decode_swa_ragged_indptr is not None
+    build_ragged_indices_from_dense_out(
+        metadata.decode_swa_indices.reshape(metadata.num_decode_tokens, -1),
+        metadata.decode_swa_lens,
+        metadata.decode_swa_ragged_indices,
+        metadata.decode_swa_ragged_indptr,
+    )
 
 
 def _as_int32_contiguous_1d(x: torch.Tensor) -> torch.Tensor:
