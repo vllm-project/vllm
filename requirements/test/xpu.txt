@@ -515,7 +515,9 @@ networkx==3.6.1
 ninja==1.13.0
     # via -r requirements/test/../common.txt
 nltk==3.10.3
-    # via rouge-score
+    # via
+    #   -r requirements/test/xpu.in
+    #   rouge-score
 num2words==0.5.14
     # via -r requirements/test/xpu.in
 numba==0.65.0
@@ -671,6 +673,7 @@ pathvalidate==3.3.1
     # via pytablewriter
 pillow==12.3.0
     # via
+    #   -c requirements/common.txt
     #   -r requirements/test/../common.txt
     #   matplotlib
     #   mistral-common
@@ -1218,7 +1221,7 @@ werkzeug==3.1.8
     # via schemathesis
 word2number==1.1
     # via lm-eval
-xgrammar==0.2.7
+xgrammar==0.2.8
     # via
     #   -c requirements/common.txt
     #   -r requirements/test/../common.txt

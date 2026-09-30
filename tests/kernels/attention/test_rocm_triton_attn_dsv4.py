@@ -8,6 +8,7 @@ import pytest
 import torch
 
 from vllm.platforms import current_platform
+from vllm.utils.torch_utils import set_random_seed
 
 pytestmark = pytest.mark.skipif(
     not current_platform.is_rocm(), reason="Only used by ROCm"
@@ -422,6 +423,37 @@ def test_compute_global_topk_ragged_indices_and_indptr() -> None:
     torch.testing.assert_close(actual_ragged[expected_positions], expected_values)
     torch.testing.assert_close(actual_indptr, expected_indptr)
     torch.testing.assert_close(actual_lens, expected_lens)
+
+
+@pytest.mark.parametrize("width", [16, 640, 2176])
+@pytest.mark.parametrize("num_queries", [1, 70, 1000])
+@torch.inference_mode()
+def test_build_ragged_indices_from_dense_drops_invalid_entries(
+    width: int, num_queries: int
+) -> None:
+    from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
+        build_ragged_indices_from_dense,
+    )
+
+    device = torch.device("cuda")
+    set_random_seed(width + num_queries)
+    num_rows = 5000
+    indices = torch.randint(0, num_rows + 100, (num_queries, width))
+    indices[torch.rand(num_queries, width) < 0.3] = -1
+    lengths = torch.randint(0, width + 8, (num_queries,))
+
+    flat, indptr = build_ragged_indices_from_dense(
+        indices.to(device, torch.int32),
+        lengths.to(device, torch.int32),
+        num_rows=num_rows,
+    )
+
+    # Each row keeps its in-range entries within its length, in order.
+    expected = [
+        [x for x in row[:n] if 0 <= x < num_rows]
+        for row, n in zip(indices.tolist(), lengths.tolist())
+    ]
+    assert _rows_from_ragged(flat, indptr) == expected
 
 
 @torch.inference_mode()
