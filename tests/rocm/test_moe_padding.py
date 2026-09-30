@@ -13,15 +13,15 @@ tested here, the padded storage never persists on `w13_weight`/`w2_weight`:
 `.contiguous()` is skipped specifically to keep this same padding, so its
 persisted parameters *do* stay padded.
 
-This file verifies, for AITER only:
-1. `_maybe_pad_weight` in isolation: grows storage/`stride(-2)` only when
-   eligible (512-byte-aligned) and the flag is on -- covering no padding,
-   hidden-only, intermediate-only, and both-dimensions-padded, since w13
-   and w2 key their alignment gate off different dims; a true no-op
-   (identical object) otherwise.
-2. End to end: `AiterExperts.apply()` matches an independent reference
-   regardless of the flag, and persisted parameter storage size is
-   unaffected by it.
+This file verifies:
+1. `_maybe_pad_weight` in isolation (any ROCm backend, AITER not required):
+   grows storage/`stride(-2)` only when eligible (512-byte-aligned) and the
+   flag is on -- covering no padding, hidden-only, intermediate-only, and
+   both-dimensions-padded, since w13 and w2 key their alignment gate off
+   different dims; a true no-op (identical object) otherwise.
+2. End to end, AITER only (per #54966's "Test padding" ask):
+   `AiterExperts.apply()` matches an independent reference regardless of
+   the flag, and persisted parameter storage size is unaffected by it.
 
 Logical `hidden_dim_unpadded`/`intermediate_size_per_partition_unpadded`
 padding and HIP-graph token-padding are separate mechanisms, covered in
@@ -58,11 +58,15 @@ from vllm.platforms import current_platform
 aiter_available = importlib.util.find_spec("aiter") is not None
 
 pytestmark = pytest.mark.skipif(
-    not (current_platform.is_rocm() and aiter_available),
-    reason="ROCm MoE padding tests require ROCm with AITER installed",
+    not current_platform.is_rocm(),
+    reason="VLLM_ROCM_MOE_PADDING only takes effect on ROCm",
+)
+requires_aiter = pytest.mark.skipif(
+    not aiter_available,
+    reason="requires AITER to exercise AiterExperts.apply()",
 )
 
-DEVICE = "cuda"
+DEVICE = current_platform.device_type
 DTYPE = torch.bfloat16
 NUM_EXPERTS = 4
 TOPK = 2
@@ -352,6 +356,7 @@ def _reference_moe_forward(
 # --- 2. End-to-end numerical transparency through AiterExperts -------------
 
 
+@requires_aiter
 @torch.inference_mode()
 def test_aiter_moe_padding_numerically_transparent(
     monkeypatch: pytest.MonkeyPatch,
