@@ -839,7 +839,7 @@ class LLM(BeamSearchOfflineMixin, PoolingOfflineMixin, OfflineInferenceMixin):
         """
         self.llm_engine.release_kv_cache_memory()
 
-    def wake_up(self, tags: list[str] | None = None):
+    def wake_up(self, tags: list[str] | None = None) -> bool:
         """Wake up the engine from sleep mode. See the [sleep][vllm.LLM.sleep]
         method for more details.
 
@@ -851,8 +851,11 @@ class LLM(BeamSearchOfflineMixin, PoolingOfflineMixin, OfflineInferenceMixin):
                 (or None) before the engine is used again.
                 Use tags=["scheduling"] to resume from level 0 sleep.
 
+        Returns:
+            Whether the engine is fully awake.
+
         """
-        self.llm_engine.wake_up(tags)
+        return self.llm_engine.wake_up(tags)
 
     def get_metrics(self) -> list["Metric"]:
         """Return a snapshot of aggregated metrics from Prometheus.
