@@ -1837,8 +1837,9 @@ def test_processing_preserves_borrowed_mapped_ref():
     state = processor.apply_phase1(inputs, TimingContext(enabled=False))
     owned = state.inputs.mm_data_items["image"].get_raw(0)
     assert owned is not mapped
-    state.wait_decodes()
-    processor.apply_phase2(state)
+    with state:
+        state.wait_decodes()
+        processor.apply_phase2(state)
 
     assert isinstance(owned, MediaRef) and owned.data == b""
     assert mapped.data == parent.data == b"image"
@@ -1954,7 +1955,10 @@ def test_lazy_decode_error_keeps_request_index_with_cache_hits(phase, monkeypatc
             cache, "is_cached", lambda hashes: [True, False, False, True]
         )
 
-    with pytest.raises(VLLMUnprocessableEntityError, match="image media at index 2"):
+    with (
+        state,
+        pytest.raises(VLLMUnprocessableEntityError, match="image media at index 2"),
+    ):
         if phase == "sync":
             state.wait_decodes()
         elif phase == "async":
@@ -2013,7 +2017,11 @@ def test_lazy_cancellation_drains_decodes_before_release():
     )
 
     async def cancel_decode_wait():
-        task = asyncio.create_task(state.wait_decodes_async())
+        async def wait_owned_decodes():
+            with state:
+                await state.wait_decodes_async()
+
+        task = asyncio.create_task(wait_owned_decodes())
         await asyncio.sleep(0)
         for _ in range(2):
             task.cancel()
@@ -2072,20 +2080,22 @@ async def test_lazy_phase1_does_not_block_mm_worker():
             ),
             timeout=30,
         )
-        await state_b.wait_decodes_async()
-        result_b = await asyncio.wait_for(
-            loop.run_in_executor(executor, processor.apply_phase2, state_b),
-            timeout=30,
-        )
+        with state_b:
+            await state_b.wait_decodes_async()
+            result_b = await asyncio.wait_for(
+                loop.run_in_executor(executor, processor.apply_phase2, state_b),
+                timeout=30,
+            )
         assert not release_decode.is_set()
         assert result_b["mm_kwargs"]["image"][0] is not None
 
         release_decode.set()
-        await state_a.wait_decodes_async()
-        result_a = await asyncio.wait_for(
-            loop.run_in_executor(executor, processor.apply_phase2, state_a),
-            timeout=30,
-        )
+        with state_a:
+            await state_a.wait_decodes_async()
+            result_a = await asyncio.wait_for(
+                loop.run_in_executor(executor, processor.apply_phase2, state_a),
+                timeout=30,
+            )
         assert result_a["mm_kwargs"]["image"][0] is not None
     finally:
         release_decode.set()
@@ -2115,7 +2125,8 @@ def test_lazy_phase2_rederives_miss_to_hit():
     assert processor.hf_calls == hf_before + 1
 
     # A's phase 2 re-checks the cache, finds the hit, and skips reprocessing.
-    result_a = processor.apply_phase2(state_a)
+    with state_a:
+        result_a = processor.apply_phase2(state_a)
     assert processor.hf_calls == hf_before + 1
     assert result_a["mm_kwargs"]["image"][0] is not None
 
@@ -2145,7 +2156,8 @@ def test_lazy_phase2_handles_hit_eviction():
     # The item is evicted between the phases, so phase 2 has to decode and
     # process it after all.
     cache.clear_cache()
-    result = processor.apply_phase2(state)
+    with state:
+        result = processor.apply_phase2(state)
 
     assert processor.hf_calls == 2
     assert result["mm_kwargs"]["image"][0] is not None
@@ -2190,3 +2202,32 @@ def test_dummy_inputs_scheduler_budget(
         {"image": 1}, scheduler_config=scheduler_config
     )
     assert len(result["prompt_token_ids"]) == expected_seq_len
+
+
+def test_lazy_submission_failure_releases_owned_refs(monkeypatch):
+    """Partial submission drains jobs without masking the submission error."""
+    from concurrent.futures import Future
+
+    from vllm.multimodal.media.connector import global_thread_pool
+
+    processor = _LazyTestProcessor()
+    refs = [MediaRef(lambda: Image.new("RGB", (4, 4)), data) for data in (b"a", b"b")]
+    inputs = _lazy_inputs(processor, refs, None).fork_media_refs()
+    monkeypatch.setattr(inputs, "fork_media_refs", lambda: inputs)
+    submitted: Future[Image.Image] = Future()
+    submitted.set_exception(ValueError("decode failed"))
+    calls = 0
+
+    def submit(decoder):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return submitted
+        raise RuntimeError("submission failed")
+
+    monkeypatch.setattr(global_thread_pool, "submit", submit)
+    with pytest.raises(RuntimeError, match="submission failed"):
+        processor.apply_phase1(inputs, TimingContext(enabled=False))
+
+    assert all(ref.data == b"" for ref in inputs.mm_data_items["image"].data)
+    assert [ref.data for ref in refs] == [b"a", b"b"]

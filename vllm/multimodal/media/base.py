@@ -43,7 +43,7 @@ class DecodeSpec:
         """Return a copy with `settings` merged over the current ones."""
         return DecodeSpec({**self.settings, **settings})
 
-    def digest(self) -> bytes:
+    def canonical_bytes(self) -> bytes:
         """Return the canonical JSON bytes used for key derivation."""
         return self._canonical
 
@@ -59,7 +59,7 @@ def derive_media_key(data: bytes, spec: DecodeSpec) -> bytes:
     depend on which optional hash packages happen to be installed.
     """
     hasher = hashlib.sha256()
-    for chunk in (data, spec.digest()):
+    for chunk in (data, spec.canonical_bytes()):
         # Each chunk is preceded by its length, so a chunk boundary can never
         # be shifted by the content of an earlier one.
         hasher.update(len(chunk).to_bytes(_LENGTH_BYTES, "little"))
@@ -95,7 +95,7 @@ class MediaRef(Generic[_T]):
     - `decode()`: the decoded media, produced at most once and thread-safely.
     """
 
-    __slots__ = ("_data", "_decoder", "_lock", "_media", "key", "spec")
+    __slots__ = ("_data", "_decoder", "_lock", "_media", "_key", "_spec")
 
     def __init__(
         self,
@@ -112,8 +112,16 @@ class MediaRef(Generic[_T]):
         self._media: Any = _UNDECODED
         self._lock = threading.Lock()
 
-        self.spec = DecodeSpec() if spec is None else spec
-        self.key = derive_media_key(data, self.spec) if key is None else key
+        self._spec = DecodeSpec() if spec is None else spec
+        self._key = derive_media_key(data, self.spec) if key is None else key
+
+    @property
+    def key(self) -> bytes:
+        return self._key
+
+    @property
+    def spec(self) -> DecodeSpec:
+        return self._spec
 
     @property
     def data(self) -> bytes:

@@ -977,20 +977,19 @@ class BaseRenderer(ABC, Generic[_T]):
         cancelled = False
 
         async def run_phases() -> "MultiModalInput":
-            state = None
-            try:
-                processor, state = await loop.run_in_executor(
-                    self._mm_executor,
-                    partial(
-                        self._process_multimodal_phase1,
-                        prompt,
-                        mm_data,
-                        mm_uuids,
-                        mm_processor_kwargs,
-                        media_io_kwargs=media_io_kwargs,
-                        skip_mm_cache=skip_mm_cache,
-                    ),
-                )
+            processor, state = await loop.run_in_executor(
+                self._mm_executor,
+                partial(
+                    self._process_multimodal_phase1,
+                    prompt,
+                    mm_data,
+                    mm_uuids,
+                    mm_processor_kwargs,
+                    media_io_kwargs=media_io_kwargs,
+                    skip_mm_cache=skip_mm_cache,
+                ),
+            )
+            with state:
                 await state.wait_decodes_async()
                 if cancelled:
                     raise asyncio.CancelledError
@@ -1001,9 +1000,6 @@ class BaseRenderer(ABC, Generic[_T]):
                     return self._process_multimodal_phase2(processor, state)
 
                 return await loop.run_in_executor(self._mm_executor, finish_processing)
-            finally:
-                if state is not None:
-                    state.release()
 
         def mark_cancelled() -> None:
             nonlocal cancelled

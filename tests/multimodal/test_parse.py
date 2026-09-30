@@ -356,3 +356,23 @@ def test_select_audio_metadata_preserves_passthrough_fields():
     token_counts = selected.get_passthrough_data()["audio_num_tokens"]
     assert isinstance(token_counts, torch.Tensor)
     assert token_counts.numel() == 1
+
+
+@pytest.mark.parametrize("as_tensor", [False, True])
+@pytest.mark.parametrize("indices", [[], [2, 0]])
+def test_select_embeddings_preserves_representation(as_tensor, indices):
+    """Selection keeps batched tensors and lists usable as model inputs."""
+    data = torch.arange(24).reshape(3, 2, 4)
+    items = MultiModalDataParser().parse_mm_data(
+        {"image": data if as_tensor else list(data)}
+    )["image"]
+    selected = items.select([2, 1, 0]).select(indices)
+    values = selected.get_passthrough_data()["image_embeds"]
+    assert isinstance(values, torch.Tensor if as_tensor else list)
+    assert selected.get_count() == len(indices)
+    for index, original in enumerate([2, 1, 0][i] for i in indices):
+        assert selected.get_original_index(index) == original
+        torch.testing.assert_close(selected.get(index), data[original])
+    if as_tensor:
+        assert isinstance(values, torch.Tensor)
+        assert values.shape == (len(indices), 2, 4)

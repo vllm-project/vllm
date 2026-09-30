@@ -10,11 +10,11 @@ So the unit that travels from fetch to processor is not a decoded object. It is 
 
 ## The media reference
 
-`MediaRef[_T]` in `vllm/multimodal/media/base.py` is the single value type for fetched media. It carries `key` (the cache identity, as `bytes`), `spec` (a `DecodeSpec`, the resolved decode configuration already folded into the key) and `data` (the encoded bytes, `b""` once released), and exposes `is_decoded`, `decode()`, `map()` and `release()`. It appears in the `ImageItem`, `VideoItem` and `AudioItem` aliases in `vllm/multimodal/inputs.py`, so a reference is a legal item everywhere a decoded object is.
+`MediaRef[_T]` in `vllm/multimodal/media/base.py` is the single value type for fetched media. It carries read-only `key` (the cache identity, as `bytes`) and `spec` (a `DecodeSpec`, the resolved decode configuration already folded into the key), alongside `data` (the encoded bytes, `b""` once released), and exposes `is_decoded`, `decode()`, `map()` and `release()`. It appears in the `ImageItem`, `VideoItem` and `AudioItem` aliases in `vllm/multimodal/inputs.py`, so a reference is a legal item everywhere a decoded object is.
 
 ### Cache key
 
-`derive_media_key(data, spec)` digests the encoded bytes together with `DecodeSpec.digest()`, each chunk preceded by its length so that a chunk boundary cannot be shifted by the content before it. Two properties follow.
+`derive_media_key(data, spec)` digests the encoded bytes together with `DecodeSpec.canonical_bytes()`, each chunk preceded by its length so that a chunk boundary cannot be shifted by the content before it. Two properties follow.
 
 The key depends on the *encoded* payload and the decode configuration, never on decoded content. Deriving it has to be cheaper than decoding, or the cache cannot save anything: header parsing at most, never rasterization. Different encodings of the same picture are therefore different items, unless an EXIF `ImageID` identifies them as one (see [Hashing](#hashing)).
 
@@ -128,9 +128,9 @@ The comment above `_mm_warmup_future` in `vllm/renderers/base.py` is the authori
 
 Refs remain intact between phases. Phase 2 re-derives the cache state rather than reusing phase 1's, because other requests' phases run in between: a miss may have become a hit, and a hit may have been evicted. An evicted hit needs its retained payload for decoding, so releasing a hit in phase 1 would turn that eviction race into a request failure.
 
-`_apply_hf_processor_phase2` calls `MultiModalApplyState.release()` in a `finally` covering the cached and no-cache paths. Refs keep their payloads through HF processing, field construction, prompt-update construction and cache merging. The state releases the original input refs on completion or failure; selected misses share those same refs and need no separate release pass.
+`MultiModalApplyState` is a context manager. Synchronous processing and the async renderer each own one context covering the decode wait and processing. On exit, `close()` drains submitted work before releasing the owned wrappers. Refs keep their payloads through HF processing, field construction, prompt-update construction and cache merging. Selected misses share those same wrappers and need no separate release pass. Phase 1 closes the state itself if it fails before returning ownership to its caller.
 
-If decoding fails before phase 2, the wait methods drain submitted decodes and release the state's refs before propagating the failure. `wait_decodes_async()` shields the futures from cancellation. If its caller cancels, it waits for all submitted decodes, including through repeated cancellation, then releases the refs and propagates cancellation. This keeps payloads alive while worker threads may still be using them.
+If decoding fails before phase 2, the wait methods drain submitted decodes and the owning context releases the state's refs before propagating the failure. `wait_decodes_async()` shields the futures from cancellation. If its caller cancels, it waits for all submitted decodes, including through repeated cancellation, then propagates cancellation through the owning context, which releases the refs. This keeps payloads alive while worker threads may still be using them.
 
 State cleanup leaves decoded results readable and does not release separately retained parent refs. Releasing the state's refs therefore does not guarantee that every copy or owner of the encoded payload has disappeared.
 
@@ -142,6 +142,6 @@ The wrapping is what makes the status 422. A corrupt payload raises `ValueError`
 
 ## Limitations
 
-- `supports_two_phase_apply` is a runtime reflection probe comparing three methods (`apply`, `_cached_apply_hf_processor`, `_apply_hf_processor`) against the base implementations. A processor that overrides one of them falls back to the blocking path with nothing to say so, and the probe covers only the methods it names.
+- `supports_two_phase_apply` is a runtime reflection probe comparing three methods (`apply`, `_cached_apply_hf_processor`, `_apply_hf_processor`) against the base implementations. A processor that overrides one of them falls back to the blocking path and logs the overriding methods once at debug level. The probe covers only the methods it names.
 - The single-worker `_mm_executor` serializes the HF processor call across all concurrent requests. Only the decode wait is lifted off it.
 - The connector's on-disk download cache and the download-time size cap it negotiates apply to `http(s)` URLs alone. A `file:` URL shared by two decoders is read once per decoder and a `data:` URL is base64-decoded once per decoder; per-decoder guards such as audio's encoded-size check stay eager on every scheme.

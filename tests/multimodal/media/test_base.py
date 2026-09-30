@@ -284,11 +284,11 @@ def test_media_ref_fork_release_preserves_borrowed_ref():
 def test_decode_spec_snapshots_nested_settings():
     settings = {"nested": {"values": [1, 2]}}
     spec = DecodeSpec(settings)
-    digest = spec.digest()
+    digest = spec.canonical_bytes()
     settings["nested"]["values"].append(3)
     spec.settings["nested"]["values"].append(4)
     assert spec.settings == {"nested": {"values": [1, 2]}}
-    assert spec.digest() == digest
+    assert spec.canonical_bytes() == digest
     assert pickle.loads(pickle.dumps(spec)) == spec
 
 
@@ -296,3 +296,11 @@ def test_decode_spec_snapshots_nested_settings():
 def test_decode_spec_rejects_noncanonical_values(value):
     with pytest.raises((TypeError, ValueError)):
         DecodeSpec({"value": value})
+
+
+@pytest.mark.parametrize("attribute", ["key", "spec"])
+def test_media_ref_cache_identity_is_read_only(attribute):
+    """A fetched ref's cache identity cannot diverge from its decoder."""
+    ref = MediaRef(lambda: "decoded", b"payload")
+    with pytest.raises(AttributeError):
+        setattr(ref, attribute, getattr(ref, attribute))

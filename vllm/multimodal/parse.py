@@ -14,7 +14,6 @@ from typing import (
     TypeAlias,
     TypeGuard,
     TypeVar,
-    cast,
 )
 
 import numpy as np
@@ -76,10 +75,13 @@ class ModalityDataItems(ABC, Generic[_T, _I]):
             index if self._original_indices is None else self._original_indices[index]
         )
 
+    @abstractmethod
     def select(self, indices: Sequence[int]) -> Self:
         """Select parsed items without repeating validation or normalization."""
+        raise NotImplementedError
+
+    def _copy_selected(self, indices: Sequence[int]) -> Self:
         selected = copy(self)
-        selected.data = cast(_T, [self.get_raw(index) for index in indices])
         selected._original_indices = [
             self.get_original_index(index) for index in indices
         ]
@@ -139,6 +141,11 @@ class ModalityDataItems(ABC, Generic[_T, _I]):
 
 class ProcessorBatchItems(ModalityDataItems[Sequence[_T | MediaRef[_T]], _T]):
     """Base class for data items that are arranged in a list."""
+
+    def select(self, indices: Sequence[int]) -> Self:
+        selected = self._copy_selected(indices)
+        selected.data = [self.data[index] for index in indices]
+        return selected
 
     def map_raw(
         self, transform: Callable[[_T | MediaRef[_T]], _T | MediaRef[_T]]
@@ -259,6 +266,14 @@ class EmbeddingItems(
                         f"Embedding shape: {tuple(tensor.shape)}"
                     )
 
+    def select(self, indices: Sequence[int]) -> Self:
+        selected = self._copy_selected(indices)
+        if isinstance(self.data, torch.Tensor):
+            selected.data = self.data[list(indices)]
+        else:
+            selected.data = [self.data[index] for index in indices]
+        return selected
+
     def get_count(self) -> int:
         return len(self.data)
 
@@ -353,14 +368,11 @@ class DictEmbeddingItems(
         return len(self._kwargs[self.modality])
 
     def select(self, indices: Sequence[int]) -> Self:
-        selected = copy(self)
+        selected = self._copy_selected(indices)
         selected._kwargs = MultiModalKwargsItems(
             {self.modality: [self._kwargs[self.modality][index] for index in indices]}
         )
         selected.data = selected._kwargs.get_data()  # type: ignore[assignment]
-        selected._original_indices = [
-            self.get_original_index(index) for index in indices
-        ]
         return selected
 
     def get(self, index: int) -> Mapping[str, torch.Tensor]:

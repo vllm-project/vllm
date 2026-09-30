@@ -5,6 +5,7 @@ from abc import ABC, abstractmethod
 from collections import defaultdict, deque
 from collections.abc import Callable, Generator, ItemsView, Iterable, Mapping, Sequence
 from concurrent.futures import Future
+from contextlib import suppress
 from dataclasses import dataclass, field, replace
 from enum import Enum
 from functools import lru_cache
@@ -19,7 +20,7 @@ from typing import (
 )
 
 import torch
-from typing_extensions import TypeVar, assert_never
+from typing_extensions import Self, TypeVar, assert_never
 
 from vllm.config import SchedulerConfig
 from vllm.exceptions import VLLMUnprocessableEntityError
@@ -1062,13 +1063,13 @@ class MediaDecodeJob(NamedTuple):
 
 def _submit_ref_decodes(
     mm_data_items: MultiModalDataItems,
+    decodes: list[MediaDecodeJob],
 ) -> list[MediaDecodeJob]:
     """Submit decodes of all not-yet-decoded media refs to the media thread
     pool, without waiting for them.
 
     Selected items retain their original request indices.
     """
-    decodes = list[MediaDecodeJob]()
     for modality, items in mm_data_items.items():
         if not isinstance(items, ProcessorBatchItems):
             continue
@@ -1123,6 +1124,23 @@ class MultiModalApplyState:
 
     _released: bool = field(default=False, init=False, repr=False)
 
+    def __enter__(self) -> Self:
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback) -> None:
+        self.close()
+
+    def close(self) -> None:
+        """Drain submitted work before releasing owned refs."""
+        try:
+            for job in self.decodes:
+                # Wait methods report failures; cleanup preserves the
+                # exception already propagating from processing.
+                with suppress(BaseException):
+                    job.future.result()
+        finally:
+            self.release()
+
     def release(self) -> None:
         """Release owned refs once, after decoding and processing have finished.
 
@@ -1146,12 +1164,8 @@ class MultiModalApplyState:
         """
         if not self.decodes:
             return
-        try:
-            with self.timing_ctx.record("decode_mm_items"):
-                _collect_ref_decodes(self.decodes)
-        except Exception:
-            self.release()
-            raise
+        with self.timing_ctx.record("decode_mm_items"):
+            _collect_ref_decodes(self.decodes)
 
     async def wait_decodes_async(self) -> None:
         """Await all submitted decodes without blocking the event loop.
@@ -1164,19 +1178,15 @@ class MultiModalApplyState:
             *(asyncio.wrap_future(job.future) for job in self.decodes),
             return_exceptions=True,
         )
-        try:
-            with self.timing_ctx.record("decode_mm_items"):
-                results = await await_with_cancellation_drain(pending)
-            for job, result in zip(self.decodes, results):
-                if isinstance(result, Exception):
-                    raise _decode_error(
-                        job.modality, job.original_index, result
-                    ) from result
-                if isinstance(result, BaseException):
-                    raise result
-        except BaseException:
-            self.release()
-            raise
+        with self.timing_ctx.record("decode_mm_items"):
+            results = await await_with_cancellation_drain(pending)
+        for job, result in zip(self.decodes, results):
+            if isinstance(result, Exception):
+                raise _decode_error(
+                    job.modality, job.original_index, result
+                ) from result
+            if isinstance(result, BaseException):
+                raise result
 
 
 class BaseMultiModalProcessor(ABC, Generic[_I]):
@@ -1531,6 +1541,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
     def _decode_ref_items(
         self,
         mm_data_items: MultiModalDataItems,
+        decodes: list[MediaDecodeJob],
     ) -> None:
         """Decode all undecoded media refs in parallel on the media thread
         pool.
@@ -1539,7 +1550,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         VLLMUnprocessableEntityError so corrupt media surfaces as a client
         error (422) instead of a server error.
         """
-        _collect_ref_decodes(_submit_ref_decodes(mm_data_items))
+        _collect_ref_decodes(_submit_ref_decodes(mm_data_items, decodes))
 
     def _recompute_cached_prompt_update(
         self,
@@ -1609,8 +1620,9 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
     ) -> MultiModalProcessingResult:
         """The no-cache/passthrough path: decode everything, then process."""
         state = self._apply_hf_processor_phase1(inputs, timing_ctx, use_cache=False)
-        state.wait_decodes()
-        return self._apply_hf_processor_phase2(state)
+        with state:
+            state.wait_decodes()
+            return self._apply_hf_processor_phase2(state)
 
     def _apply_hf_processor_phase1(
         self,
@@ -1627,37 +1639,43 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         before calling `_apply_hf_processor_phase2`.
         """
         inputs = inputs.fork_media_refs()
-        if not use_cache:
+        state = MultiModalApplyState(inputs, timing_ctx, None, [])
+        try:
+            if not use_cache:
+                with timing_ctx.record("decode_mm_items"):
+                    _submit_ref_decodes(inputs.mm_data_items, state.decodes)
+                return state
+
+            cache = inputs.cache
+            assert cache is not None
+
+            with timing_ctx.record("get_mm_hashes"):
+                mm_hashes = inputs.get_mm_hashes(
+                    self.info.model_id,
+                    self.info.ctx.get_mm_config().mm_hasher_algorithm,
+                )
+
+            with timing_ctx.record("get_cache_missing_items"):
+                _, mm_missing_data_items = self._get_cache_missing_items(
+                    cache=cache,
+                    mm_data_items=inputs.mm_data_items,
+                    mm_hashes=mm_hashes,
+                )
+
             with timing_ctx.record("decode_mm_items"):
-                decodes = _submit_ref_decodes(inputs.mm_data_items)
-            return MultiModalApplyState(inputs, timing_ctx, None, decodes)
+                # Submit miss-item decodes without joining; the join happens off
+                # the mm worker (see MultiModalApplyState.wait_decodes*). The
+                # lookup is re-done in phase 2, so a stale miss set here only
+                # wastes a redundant decode. Nothing is released here: a hit can
+                # still be evicted before phase 2, which then has to reprocess it
+                # from the very bytes a release would drop.
+                _submit_ref_decodes(mm_missing_data_items, state.decodes)
 
-        cache = inputs.cache
-        assert cache is not None
-
-        with timing_ctx.record("get_mm_hashes"):
-            mm_hashes = inputs.get_mm_hashes(
-                self.info.model_id,
-                self.info.ctx.get_mm_config().mm_hasher_algorithm,
-            )
-
-        with timing_ctx.record("get_cache_missing_items"):
-            _, mm_missing_data_items = self._get_cache_missing_items(
-                cache=cache,
-                mm_data_items=inputs.mm_data_items,
-                mm_hashes=mm_hashes,
-            )
-
-        with timing_ctx.record("decode_mm_items"):
-            # Submit miss-item decodes without joining; the join happens off
-            # the mm worker (see MultiModalApplyState.wait_decodes*). The
-            # lookup is re-done in phase 2, so a stale miss set here only
-            # wastes a redundant decode. Nothing is released here: a hit can
-            # still be evicted before phase 2, which then has to reprocess it
-            # from the very bytes a release would drop.
-            decodes = _submit_ref_decodes(mm_missing_data_items)
-
-        return MultiModalApplyState(inputs, timing_ctx, mm_hashes, decodes)
+            state.mm_hashes = mm_hashes
+            return state
+        except BaseException:
+            state.close()
+            raise
 
     def _apply_hf_processor_phase2(
         self,
@@ -1665,12 +1683,9 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
     ) -> MultiModalProcessingResult:
         """Phase 2: HF processing and cache merge; runs on the mm worker
         after the state's decode futures have completed."""
-        try:
-            if state.mm_hashes is None:
-                return self._apply_hf_processor_no_cache(state.inputs, state.timing_ctx)
-            return self._cached_apply_hf_processor_phase2(state)
-        finally:
-            state.release()
+        if state.mm_hashes is None:
+            return self._apply_hf_processor_no_cache(state.inputs, state.timing_ctx)
+        return self._cached_apply_hf_processor_phase2(state)
 
     def _apply_hf_processor_no_cache(
         self,
@@ -1727,8 +1742,9 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         state = self._apply_hf_processor_phase1(
             inputs, timing_ctx, use_cache=inputs.can_use_cache
         )
-        state.wait_decodes()
-        return self._apply_hf_processor_phase2(state)
+        with state:
+            state.wait_decodes()
+            return self._apply_hf_processor_phase2(state)
 
     def _cached_apply_hf_processor_phase2(
         self,
@@ -1758,7 +1774,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
             # Normally a no-op: phase-1 decodes were drained before phase 2.
             # Only items that flipped hit->miss (evicted between the phases)
             # decode here, from the bytes phase 1 deliberately kept.
-            self._decode_ref_items(mm_missing_data_items)
+            self._decode_ref_items(mm_missing_data_items, state.decodes)
 
         # NOTE: The prompt does not correspond to `mm_missing_data_items`,
         # so we can't apply prompt updates until the new multimodal
@@ -2051,12 +2067,18 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         renderer keeps those processors on the blocking path.
         """
         cls = type(self)
-        return (
-            cls.apply is BaseMultiModalProcessor.apply
-            and cls._cached_apply_hf_processor
-            is BaseMultiModalProcessor._cached_apply_hf_processor
-            and cls._apply_hf_processor is BaseMultiModalProcessor._apply_hf_processor
-        )
+        overrides = [
+            name
+            for name in ("apply", "_cached_apply_hf_processor", "_apply_hf_processor")
+            if getattr(cls, name) is not getattr(BaseMultiModalProcessor, name)
+        ]
+        if overrides:
+            logger.debug_once(
+                "%s uses blocking multimodal processing because it overrides %s",
+                cls.__qualname__,
+                ", ".join(overrides),
+            )
+        return not overrides
 
     def apply_phase1(
         self,
@@ -2068,7 +2090,8 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
 
         Runs on the single mm worker; the returned state's decode futures
         must be drained (off the mm worker, via `wait_decodes` /
-        `wait_decodes_async`) before `apply_phase2`.
+        `wait_decodes_async`) before `apply_phase2`. Use the state as a
+        context manager to drain and release it on completion or failure.
         """
         return self._apply_hf_processor_phase1(
             inputs, timing_ctx, use_cache=inputs.can_use_cache
