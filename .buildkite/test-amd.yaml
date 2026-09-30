@@ -5056,7 +5056,6 @@ steps:
   - vllm/platforms/rocm.py
   - vllm/envs.py
   - tests/kernels/moe/test_gpt_oss_triton_kernels.py
-  - tests/kernels/moe/test_modular_oai_triton_moe.py
   - tests/kernels/moe/test_moe.py
   - tests/kernels/moe/test_block_int8.py
   - tests/kernels/moe/test_triton_moe_no_act_mul.py
@@ -5064,7 +5063,6 @@ steps:
   optional: true
   commands:
     - pytest -v -s kernels/moe/test_gpt_oss_triton_kernels.py
-    - pytest -v -s kernels/moe/test_modular_oai_triton_moe.py
     - pytest -v -s kernels/moe/test_moe.py
     - pytest -v -s kernels/moe/test_block_int8.py
     - pytest -v -s kernels/moe/test_triton_moe_no_act_mul.py
@@ -5108,11 +5106,11 @@ steps:
 
 #------------------------------------------------------  mi355 · models / basic  -------------------------------------------------------#
 
-- label: ":amd: (MI355 DPX) Basic Models (Other)" # TBD
+- label: ":amd: (MI355) Basic Models (Other)" # TBD
   timeout_in_minutes: 65
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
   dind: false
-  agent_pool: mi355_dpx
+  agent_pool: mi355_1
   optional: true
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:

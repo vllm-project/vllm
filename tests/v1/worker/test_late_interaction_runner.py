@@ -142,7 +142,7 @@ def test_invalid_query_uses_raises():
         mode=LATE_INTERACTION_MODE_CACHE_QUERY,
         query_key="query-bad",
     )
-    bad_meta.query_uses = "bad-int"  # type: ignore[assignment]
+    bad_meta.query_uses = "bad-int"
     bad_query_params = _make_pooling_params(bad_meta)
 
     with pytest.raises(ValueError, match="must be an integer value"):
