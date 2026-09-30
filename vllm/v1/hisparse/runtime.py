@@ -492,7 +492,7 @@ class HiSparsePrefillStagingPlan:
     dst_rows: torch.Tensor
     miss_mask: torch.Tensor
     block_size: int
-    # Host rows with a GPU-resident copy (adopted shadow pages): the flat
+    # Host rows with a GPU-resident copy (reclaimed GPU copies): the flat
     # resident-cache row to read instead of DMAing from host, -1 for misses.
     gpu_row_ids: torch.Tensor | None = None
     gpu_source_key: tuple[int, int] | None = None
@@ -740,7 +740,7 @@ class HiSparseRuntime:
         index_group.stats_row_bytes += row_bytes
 
         self.eager_host_mirror = config.eager_host_mirror
-        self.resident_source_index = -1
+        self.resident_group_index = -1
         self.request_state_indices: torch.Tensor | None = None
         self.shared_host_region: SharedOffloadRegion | None = None
 
@@ -902,7 +902,7 @@ class HiSparseRuntime:
         self._swap_step += 1
         return slice(start, stop)
 
-    def _resolve_residency(
+    def _launch_residency_kernel(
         self,
         *,
         resident: HiSparseCacheHandle | None = None,
@@ -1005,7 +1005,7 @@ class HiSparseRuntime:
         else:
             group.copy_stream.wait_stream(compute_stream)
         with group.copy_stream:
-            self._resolve_residency(
+            self._launch_residency_kernel(
                 resident=resident,
                 req_id_per_token=req_id_per_token,
                 block_table=block_table,
@@ -1043,7 +1043,7 @@ class HiSparseRuntime:
         current_stream().wait_event(self._layer_ready_event)
         self._swap_staged = False
 
-    def swap_in(
+    def resolve_residency(
         self,
         *,
         resident: HiSparseCacheHandle,
@@ -1196,7 +1196,7 @@ class HiSparseCacheHandle:
         self.block_table = block_table
         self.slot_mapping = slot_mapping
 
-    def swap_in(
+    def resolve_residency(
         self,
         req_id_per_token: torch.Tensor,
         block_table: torch.Tensor,
@@ -1207,7 +1207,7 @@ class HiSparseCacheHandle:
         attention_indices_out: torch.Tensor | None = None,
         valid_counts_out: torch.Tensor | None = None,
     ) -> HiSparseTopKResult:
-        return self.runtime.swap_in(
+        return self.runtime.resolve_residency(
             resident=self,
             req_id_per_token=req_id_per_token[: logical_topk_indices.shape[0]],
             block_table=block_table,
@@ -1299,7 +1299,7 @@ def create_hisparse_cache_handle(
     if is_index_group_leader and index_group is not None:
         index_group.hisparse_group = runtime.index_group
     logger.info_once(
-        "Enabled experimental HiSparse HMA hot cache: top_k=%d, "
+        "Enabled experimental HiSparse HMA hot buffers: top_k=%d, "
         "device_buffer_size=%d (%d LRU rows), max_num_seqs=%d.",
         config.top_k,
         config.device_buffer_size,

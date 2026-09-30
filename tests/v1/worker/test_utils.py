@@ -28,7 +28,7 @@ from vllm.model_executor.layers.mamba.mamba_mixer2 import MambaMixer2
 from vllm.utils.mem_constants import GiB_bytes
 from vllm.utils.mem_utils import MemorySnapshot
 from vllm.v1.core.kv_cache_utils import KVCacheBlockCopy
-from vllm.v1.hisparse.types import SparseKVPageTransfer, SparseKVRowMirror
+from vllm.v1.hisparse.types import HiSparsePageTransfer, HiSparseRowMirror
 from vllm.v1.worker.utils import (
     bind_kv_cache,
     bind_kv_cache_to_layers,
@@ -94,8 +94,8 @@ def test_hisparse_worker_get_kv_connector_stats_reads_completed_snapshot(monkeyp
 
 
 def test_hisparse_row_mirrors_follow_runner_request_order():
-    first = SparseKVRowMirror((1,), 10, 1)
-    second = SparseKVRowMirror((2,), 20, 1)
+    first = HiSparseRowMirror((1,), 10, 1)
+    second = HiSparseRowMirror((2,), 20, 1)
     row_mirrors = {"first": (first,), "second": (second,)}
 
     assert _flatten_row_mirrors(row_mirrors, ["second", "first"]) == (
@@ -107,28 +107,28 @@ def test_hisparse_row_mirrors_follow_runner_request_order():
 def test_hisparse_gpu_slots_select_written_rows_from_async_envelope():
     """Rejected speculative rows must never become durable host KV."""
     candidates = (
-        SparseKVRowMirror((100, 500), 1000, 4),
-        SparseKVRowMirror((20, 300), 2000, 4),
+        HiSparseRowMirror((100, 500), 1000, 4),
+        HiSparseRowMirror((20, 300), 2000, 4),
     )
     source_slots = np.array([102, 103, -1, 21, 22, 23], dtype=np.int64)
 
     assert _select_written_row_mirrors(candidates, source_slots, 0) == (
-        SparseKVRowMirror((102, 502), 1002, 2),
-        SparseKVRowMirror((21, 301), 2001, 3),
+        HiSparseRowMirror((102, 502), 1002, 2),
+        HiSparseRowMirror((21, 301), 2001, 3),
     )
 
 
 def test_hisparse_written_rows_preserve_scheduler_page_boundaries():
     candidates = (
-        SparseKVRowMirror((0,), 100, 4),
-        SparseKVRowMirror((4,), 104, 4),
+        HiSparseRowMirror((0,), 100, 4),
+        HiSparseRowMirror((4,), 104, 4),
     )
 
     assert _select_written_row_mirrors(
         candidates, np.array([2, 3, 4, 5], dtype=np.int64), 0
     ) == (
-        SparseKVRowMirror((2,), 102, 2),
-        SparseKVRowMirror((4,), 104, 2),
+        HiSparseRowMirror((2,), 102, 2),
+        HiSparseRowMirror((4,), 104, 2),
     )
 
 
@@ -147,7 +147,7 @@ def test_hisparse_appends_reference_slots_within_a_mirror_phase(monkeypatch):
         MagicMock(), MagicMock(), torch.empty(4, dtype=torch.int64)
     )
     worker._slot_mapping_staging = state
-    handle = SimpleNamespace(runtime=SimpleNamespace(resident_source_index=1))
+    handle = SimpleNamespace(runtime=SimpleNamespace(resident_group_index=1))
     worker.cache_layer_names = ["layer"]
     worker.cache_handles = [handle]
     worker._layer_mirror_callbacks = (MagicMock(),)
@@ -502,12 +502,14 @@ def test_hisparse_pre_forward_transfer_builds_page_descriptors():
     worker.resident_caches = (source,)
     worker.host_caches = (destination,)
     worker.cache_handles = [
-        SimpleNamespace(runtime=SimpleNamespace(resident_source_index=0))
+        SimpleNamespace(runtime=SimpleNamespace(resident_group_index=0))
     ]
     worker._dma_free_descriptors = []
     worker._submit_dma_descriptors = MagicMock()
 
-    worker._enqueue_transfers([SparseKVPageTransfer(7, 2, (1,), after_forward=False)])
+    worker._enqueue_transfers(
+        [HiSparsePageTransfer(7, 2, (1,), runs_after_forward=False)]
+    )
 
     descriptors, count = worker._submit_dma_descriptors.call_args.args
     assert count == 1
@@ -526,7 +528,7 @@ def test_hisparse_eager_mirror_records_transfer_without_page_copy():
     ]
     worker._record_transfer_completion = MagicMock()
     worker._enqueue_transfers = MagicMock()
-    transfers = [SparseKVPageTransfer(7, 2, (1,), after_forward=False)]
+    transfers = [HiSparsePageTransfer(7, 2, (1,), runs_after_forward=False)]
 
     worker._submit_transfers(transfers)
 
@@ -567,14 +569,14 @@ def test_hisparse_tail_restore_preserves_imported_rows(
     )
     worker.cache_handles = [
         SimpleNamespace(
-            runtime=SimpleNamespace(resident_source_index=i, eager_host_mirror=True)
+            runtime=SimpleNamespace(resident_group_index=i, eager_host_mirror=True)
         )
         for i in range(2)
     ]
     worker._record_transfer_completion = MagicMock()
     stream = torch.cuda.current_stream() if device == "cuda" else MagicMock()
     monkeypatch.setattr(hisparse_worker_module, "current_stream", lambda: stream)
-    transfer = SparseKVPageTransfer(7, 2, (1, 3), False, restore=True)
+    transfer = HiSparsePageTransfer(7, 2, (1, 3), False, is_restore=True)
 
     restore_pages = worker._restore_pages
     if device == "cuda":
@@ -606,7 +608,7 @@ def test_hisparse_lazy_mirror_copies_transfer_pages():
     ]
     worker._record_transfer_completion = MagicMock()
     worker._enqueue_transfers = MagicMock()
-    transfers = [SparseKVPageTransfer(7, 2, (1,), after_forward=False)]
+    transfers = [HiSparsePageTransfer(7, 2, (1,), runs_after_forward=False)]
 
     worker._submit_transfers(transfers)
 
@@ -624,7 +626,7 @@ def test_hisparse_dma_row_mirror_builds_descriptors(monkeypatch):
     worker.host_caches = (destination,)
     worker.cache_handles = [
         SimpleNamespace(
-            runtime=SimpleNamespace(resident_source_index=0), decode_batch=True
+            runtime=SimpleNamespace(resident_group_index=0), decode_batch=True
         )
     ]
     worker.hot_backing = SimpleNamespace(device=torch.device("cuda:0"))
@@ -647,7 +649,7 @@ def test_hisparse_dma_row_mirror_builds_descriptors(monkeypatch):
         hisparse_worker_module.ops, "swap_blocks_batch", swap_blocks_batch
     )
 
-    worker._set_row_mirrors((SparseKVRowMirror((3,), 4, 1),))
+    worker._set_row_mirrors((HiSparseRowMirror((3,), 4, 1),))
     worker._enqueue_row_dma(range(1))
 
     src_ptrs, dst_ptrs, sizes = swap_blocks_batch.call_args.args
@@ -670,13 +672,13 @@ def test_hisparse_row_dma_uses_resident_spans():
     worker.host_caches = (destination,)
     worker.cache_handles = [
         SimpleNamespace(
-            runtime=SimpleNamespace(resident_source_index=0), decode_batch=True
+            runtime=SimpleNamespace(resident_group_index=0), decode_batch=True
         )
     ]
     worker._set_row_mirrors(
         (
-            SparseKVRowMirror((0,), 4, 2),
-            SparseKVRowMirror((2,), 9, 1),
+            HiSparseRowMirror((0,), 4, 2),
+            HiSparseRowMirror((2,), 9, 1),
         )
     )
     worker._dma_free_descriptors = []
@@ -726,7 +728,7 @@ def test_hisparse_finish_forward_mirrors_all_layers_once(monkeypatch):
     worker.is_host_writer = True
     worker.cache_handles = handles
     worker.hot_backing = SimpleNamespace(device=torch.device("cuda:0"))
-    worker._set_row_mirrors((SparseKVRowMirror((0, 0), 7, 3),))
+    worker._set_row_mirrors((HiSparseRowMirror((0, 0), 7, 3),))
     worker._dma_submitted = False
     worker._per_layer_mirrored = set()
     worker._submitted_mirror_layers = set()
@@ -775,7 +777,7 @@ def test_hisparse_finish_forward_does_not_repeat_per_layer_mirrors():
     worker = _make_hisparse_worker()
     worker.is_host_writer = True
     worker.cache_handles = handles
-    worker._set_row_mirrors((SparseKVRowMirror((0, 0), 7, 2),))
+    worker._set_row_mirrors((HiSparseRowMirror((0, 0), 7, 2),))
     worker._per_layer_mirrored = {0, 1}
     worker._submitted_mirror_layers = {0, 1}
     worker._enqueue_row_dma = MagicMock()
@@ -790,7 +792,7 @@ def test_hisparse_finish_forward_submits_lazy_post_forward_transfer(monkeypatch)
     worker = _make_hisparse_worker()
     worker.is_host_writer = True
     worker.cache_handles = [SimpleNamespace(runtime=runtime, num_actual_tokens=0)]
-    transfer = SparseKVPageTransfer(7, 2, (1,), after_forward=True)
+    transfer = HiSparsePageTransfer(7, 2, (1,), runs_after_forward=True)
     worker._post_forward_transfers = [transfer]
     worker._forward_ready_event = MagicMock()
     worker._enqueue_host_mirror = MagicMock()
@@ -817,7 +819,7 @@ def test_hisparse_prefill_mirrors_source_groups_and_flushes_partial_group():
             runtime=SimpleNamespace(
                 eager_host_mirror=False,
                 is_group_leader=False,
-                resident_source_index=source_index,
+                resident_group_index=source_index,
             ),
             decode_batch=False,
             host_mirror_required=layer_index < 5,
@@ -831,7 +833,7 @@ def test_hisparse_prefill_mirrors_source_groups_and_flushes_partial_group():
     worker = _make_hisparse_worker()
     worker.is_host_writer = True
     worker.cache_handles = handles
-    worker._set_row_mirrors((SparseKVRowMirror((0, 0, 0), 7, 2),))
+    worker._set_row_mirrors((HiSparseRowMirror((0, 0, 0), 7, 2),))
     worker._per_layer_mirrored = set()
     worker._submitted_mirror_layers = set()
     worker._layer_ready_events = tuple(MagicMock() for _ in handles)
@@ -872,7 +874,7 @@ def test_hisparse_finish_forward_rejects_partial_per_layer_mirror():
     worker = _make_hisparse_worker()
     worker.is_host_writer = True
     worker.cache_handles = handles
-    worker._set_row_mirrors((SparseKVRowMirror((0, 0), 7, 2),))
+    worker._set_row_mirrors((HiSparseRowMirror((0, 0), 7, 2),))
     worker._per_layer_mirrored = {0}
     worker._submitted_mirror_layers = set()
     worker._enqueue_row_dma = MagicMock()
@@ -936,7 +938,7 @@ def test_hisparse_finish_forward_mirrors_standalone_mtp_cache(monkeypatch):
     worker = _make_hisparse_worker()
     worker.is_host_writer = True
     worker.cache_handles = [inactive, mtp]
-    worker._set_row_mirrors((SparseKVRowMirror((0,), 7, 2),))
+    worker._set_row_mirrors((HiSparseRowMirror((0,), 7, 2),))
     worker._per_layer_mirrored = set()
     worker._submitted_mirror_layers = set()
     worker._enqueue_row_dma = MagicMock()
@@ -966,7 +968,7 @@ def test_hisparse_shared_host_reader_skips_mirror(monkeypatch):
     worker = _make_hisparse_worker()
     worker.is_host_writer = False
     worker.cache_handles = [handle]
-    worker._set_row_mirrors((SparseKVRowMirror((0,), 7, 2),))
+    worker._set_row_mirrors((HiSparseRowMirror((0,), 7, 2),))
     worker._per_layer_mirrored = set()
     worker._enqueue_row_dma = MagicMock()
 
@@ -984,7 +986,7 @@ def test_hisparse_shared_host_reader_skips_transfer_completion():
     worker._enqueued_transfer_ids = []
     worker._pending_transfer_events = []
 
-    worker._record_transfer_completion([SparseKVPageTransfer(1, 2, (3,), True)])
+    worker._record_transfer_completion([HiSparsePageTransfer(1, 2, (3,), True)])
 
     assert worker._enqueued_transfer_ids == []
     assert worker._pending_transfer_events == []
@@ -1001,8 +1003,8 @@ def test_hisparse_writer_records_transfer_completion_after_dma(monkeypatch):
 
     worker._record_transfer_completion(
         [
-            SparseKVPageTransfer(3, 2, (1,), False),
-            SparseKVPageTransfer(7, 4, (5,), True),
+            HiSparsePageTransfer(3, 2, (1,), False),
+            HiSparsePageTransfer(7, 4, (5,), True),
         ]
     )
 
@@ -1042,7 +1044,7 @@ def test_hisparse_step_waits_for_previous_host_write(monkeypatch, is_host_writer
 
     worker.start_step(
         SimpleNamespace(
-            host_block_copies=[],
+            host_cow_copies=[],
             command=None,
             source_block_ids=[],
             row_mirrors={},
@@ -1053,7 +1055,7 @@ def test_hisparse_step_waits_for_previous_host_write(monkeypatch, is_host_writer
     )
     worker.start_step(
         SimpleNamespace(
-            host_block_copies=[],
+            host_cow_copies=[],
             command=None,
             source_block_ids=[],
             row_mirrors={},
@@ -1094,8 +1096,8 @@ def test_hisparse_shared_host_block_copy_has_one_writer(
 
     assert copy_blocks.call_count == expected_copies
     tp_group.barrier.assert_called_once_with()
-    assert worker.take_completed_host_copies() == [1]
-    assert worker.take_completed_host_copies() == []
+    assert worker.take_completed_host_cow_copies() == [1]
+    assert worker.take_completed_host_cow_copies() == []
 
 
 def test_hisparse_empty_step_does_not_replay_stale_host_mirror(monkeypatch):
@@ -1126,7 +1128,7 @@ def test_hisparse_empty_step_does_not_replay_stale_host_mirror(monkeypatch):
 
     worker.start_step(
         SimpleNamespace(
-            host_block_copies=[],
+            host_cow_copies=[],
             command=None,
             source_block_ids=[],
             row_mirrors={},

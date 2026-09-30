@@ -5,18 +5,18 @@ from dataclasses import dataclass
 
 
 @dataclass(frozen=True)
-class SparseKVPageTransfer:
+class HiSparsePageTransfer:
     """Copy one logical KV page between cache-manager and worker-owned tiers."""
 
     transfer_id: int
     host_block_id: int
     resident_block_ids: tuple[int, ...]
-    after_forward: bool
-    restore: bool = False
+    runs_after_forward: bool
+    is_restore: bool = False
 
 
 @dataclass(frozen=True)
-class SparseKVRowMirror:
+class HiSparseRowMirror:
     """Mirror one contiguous resident-row span into the host cache."""
 
     source_starts: tuple[int, ...]
@@ -25,7 +25,7 @@ class SparseKVRowMirror:
 
 
 @dataclass
-class SparseKVOffloadCommand:
+class HiSparseTransferCommand:
     """Opaque scheduler-to-worker command for one model step."""
 
-    page_transfers: list[SparseKVPageTransfer]
+    page_transfers: list[HiSparsePageTransfer]

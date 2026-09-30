@@ -16,7 +16,7 @@ from vllm.v1.core.single_type_kv_cache_manager import (
     ChunkedLocalAttentionManager,
     CrossAttentionManager,
     FullAttentionManager,
-    HiSparseSourceManager,
+    HiSparseHostManager,
     MambaManager,
     SingleTypeKVCacheManager,
     SinkFullAttentionManager,
@@ -181,8 +181,8 @@ class TestKVCacheSpecRegistry:
     def test_mla_manager_selection_by_role(self, role):
         """Only the source role overrides ordinary MLA manager selection."""
         expected = (
-            HiSparseSourceManager
-            if role == KVCacheGroupRole.HISPARSE_SOURCE
+            HiSparseHostManager
+            if role == KVCacheGroupRole.HISPARSE_HOST
             else FullAttentionManager
         )
         assert (

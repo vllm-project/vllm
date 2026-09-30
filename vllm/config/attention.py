@@ -28,9 +28,9 @@ class HiSparseConfig:
 
     eager_host_mirror: bool = True
     """Mirror decode-written KV rows to the host pool during the forward so
-    page spills complete without moving data. When disabled, decode rows stay
-    resident-only and evicted pages are copied to host at spill time. Prefill
-    rows are always mirrored during the forward."""
+    page write-backs complete without moving data. When disabled, decode rows
+    stay on the GPU until their page is written back. Prefill rows are always
+    mirrored during the forward."""
 
 
 @config
