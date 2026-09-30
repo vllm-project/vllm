@@ -1374,7 +1374,7 @@ def test_varlen_with_paged_kv_dynamic_causal(
     )
 
 
-@pytest.mark.parametrize("kv_cache_dtype", ["auto", "fp8_e4m3", "fp8_e5m2"])
+@pytest.mark.parametrize("kv_cache_dtype", ["auto", "fp8_e4m3"])
 @pytest.mark.skipif(not torch.cpu._is_amx_tile_supported(), reason="no AMX support.")
 @set_default_torch_num_threads(4)
 def test_amx_spec_decode_gqa_mixed_request_correctness(kv_cache_dtype: str) -> None:
@@ -1394,11 +1394,10 @@ def test_amx_spec_decode_gqa_mixed_request_correctness(kv_cache_dtype: str) -> N
     )
 
 
-@pytest.mark.parametrize("kv_cache_dtype", ["auto", "fp8_e4m3", "fp8_e5m2"])
 @pytest.mark.skipif(not torch.cpu._is_amx_tile_supported(), reason="no AMX support.")
 @set_default_torch_num_threads(4)
-def test_amx_gqa_mixed_prefill_boundary(kv_cache_dtype: str) -> None:
-    # At a Q:KV-head ratio of 32, q=33 exceeds the grouped work bound.
+def test_amx_gqa_q17_grouped_q33_falls_back() -> None:
+    # At a Q:KV-head ratio of 32, q=17 groups while q=33 exceeds the work bound.
     varlen_with_paged_kv(
         seq_lens=[(17, 8192), (33, 8193)],
         num_heads=(32, 1),
@@ -1411,7 +1410,6 @@ def test_amx_gqa_mixed_prefill_boundary(kv_cache_dtype: str) -> None:
         use_alibi=False,
         use_sink=False,
         isa="amx",
-        kv_cache_dtype=kv_cache_dtype,
         expected_grouped_requests={0},
         expected_mha_requests={1},
     )
@@ -1450,45 +1448,25 @@ def _metadata_q_head_nums_by_request(metadata: torch.Tensor) -> dict[int, set[in
     }
 
 
-def _scheduler_metadata_for_test(
-    query_lens: list[int],
-    seq_lens: list[int],
-    dynamic_causal: list[bool] | None = None,
-) -> torch.Tensor:
-    query_start_loc = torch.tensor([0] + query_lens, dtype=torch.int32).cumsum(
-        0, dtype=torch.int32
-    )
-    dynamic_causal_tensor = (
-        torch.tensor(dynamic_causal, dtype=torch.bool)
-        if dynamic_causal is not None
-        else None
-    )
-    return cpu_attn_get_scheduler_metadata(
-        num_reqs=len(query_lens),
-        num_heads=32,
-        num_kv_heads=4,
-        head_dim=256,
-        seq_lens=torch.tensor(seq_lens, dtype=torch.int32),
-        dtype=torch.bfloat16,
-        query_start_loc=query_start_loc,
-        causal=dynamic_causal is None,
-        sliding_window_size=-1,
-        isa="amx",
-        enable_kv_split=True,
-        dynamic_causal=dynamic_causal_tensor,
-    )
-
-
 @pytest.mark.skipif(not torch.cpu._is_amx_tile_supported(), reason="no AMX support.")
 @set_default_torch_num_threads(4)
 def test_amx_scheduler_keeps_noncausal_request_on_mha() -> None:
-    metadata = _scheduler_metadata_for_test(
-        [4, 4], [8192, 8192], dynamic_causal=[True, False]
+    varlen_with_paged_kv(
+        seq_lens=[(4, 8192), (4, 8192)],
+        num_heads=(32, 4),
+        head_size=128,
+        sliding_window=None,
+        dtype=torch.bfloat16,
+        block_size=32,
+        soft_cap=None,
+        num_blocks=256,
+        use_alibi=False,
+        use_sink=False,
+        isa="amx",
+        dynamic_causal=[True, False],
+        expected_grouped_requests={0},
+        expected_mha_requests={1},
     )
-    q_head_nums = _metadata_q_head_nums_by_request(metadata)
-    assert len(q_head_nums[0]) == 1
-    assert next(iter(q_head_nums[0])) > 1
-    assert q_head_nums[1] == {1}
 
 
 # ---------------------------------------------------------------------------

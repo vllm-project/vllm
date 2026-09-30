@@ -83,7 +83,6 @@ torch::Tensor get_scheduler_metadata(
 
   const int64_t kv_cache_idx =
       static_cast<int64_t>(parse_fp8_kv_dtype(kv_cache_dtype));
-  input.fp8_kv_cache = kv_cache_idx != 0;
   VLLM_DISPATCH_FLOATING_TYPES(dtype, "get_scheduler_metadata", [&]() {
     CPU_ATTN_DISPATCH(head_dim, isa, kv_cache_idx, [&]() {
       input.elem_size = sizeof(attn_impl::kv_cache_t);

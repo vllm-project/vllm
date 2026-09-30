@@ -28,18 +28,6 @@ if torch.cpu._is_amx_tile_supported():
 KV_CACHE_DTYPE_CHOICES = ["auto", "fp8_e4m3", "fp8_e5m2"]
 
 
-def parse_query_lens(value: str) -> list[int]:
-    try:
-        query_lens = [int(entry.strip()) for entry in value.split(",")]
-    except ValueError:
-        raise ValueError(
-            "--query-lens must be comma-separated positive integers"
-        ) from None
-    if any(query_len <= 0 for query_len in query_lens):
-        raise ValueError("--query-lens must contain only positive integers")
-    return query_lens
-
-
 def get_attn_isa(
     block_size: int | None = None,
     dtype: torch.dtype | None = None,
@@ -83,7 +71,6 @@ def main(
     kv_cache_dtype: str = "auto",
     seed: int = 0,
     iters: int = 20,
-    benchmark_scheduler: bool = False,
 ) -> None:
     set_random_seed(seed)
     num_seqs = len(seq_lens)
@@ -164,23 +151,20 @@ def main(
         kv_cache_dtype=kv_cache_dtype,
     )
 
-    def make_metadata() -> torch.Tensor:
-        return cpu_attn_get_scheduler_metadata(
-            num_reqs=num_seqs,
-            num_heads=num_query_heads,
-            num_kv_heads=num_kv_heads,
-            head_dim=head_size,
-            seq_lens=kv_lens_tensor,
-            dtype=dtype,
-            query_start_loc=cu_query_lens,
-            causal=True,
-            sliding_window_size=sliding_window if sliding_window is not None else -1,
-            isa=isa,
-            enable_kv_split=enable_kv_split,
-            kv_cache_dtype=kv_cache_dtype,
-        )
-
-    metadata = make_metadata()
+    metadata = cpu_attn_get_scheduler_metadata(
+        num_reqs=num_seqs,
+        num_heads=num_query_heads,
+        num_kv_heads=num_kv_heads,
+        head_dim=head_size,
+        seq_lens=kv_lens_tensor,
+        dtype=dtype,
+        query_start_loc=cu_query_lens,
+        causal=True,
+        sliding_window_size=sliding_window if sliding_window is not None else -1,
+        isa=isa,
+        enable_kv_split=enable_kv_split,
+        kv_cache_dtype=kv_cache_dtype,
+    )
 
     out_with_split = torch.empty_like(query)
 
@@ -209,10 +193,9 @@ def main(
             times.append((end_time - start_time) / 1e6)
         return times
 
-    print("benchmark mode: synthetic CPU attention; kernel-only evidence")
-
-    # Warmup, then benchmark the attention kernel.
+    # warmup
     run_benchmark(5)
+    # benchmark
     times = run_benchmark(iters)
 
     time_min = min(times)
@@ -225,15 +208,6 @@ def main(
     print("\tmean (ms) = ", time_mean)
     print("\tstd = ", time_std)
     print("\tmedian (ms) = ", np.median(times))
-    if benchmark_scheduler:
-        for _ in range(5):
-            make_metadata()
-        scheduler_times = []
-        for _ in range(iters):
-            start_time = time.perf_counter_ns()
-            make_metadata()
-            scheduler_times.append((time.perf_counter_ns() - start_time) / 1e6)
-        print("\tscheduler metadata median (ms) = ", np.median(scheduler_times))
 
 
 def generate_seq_lens(
@@ -243,19 +217,10 @@ def generate_seq_lens(
     kv_len_min: int,
     kv_len_max: int,
     seed: int = 0,
-    query_lens: list[int] | None = None,
 ) -> list[tuple[int, int]]:
+    assert 1 <= q_len_min <= q_len_max
     assert 1 <= kv_len_min <= kv_len_max
-    if query_lens is None:
-        assert 1 <= q_len_min <= q_len_max
-        assert kv_len_max >= q_len_min
-    else:
-        if len(query_lens) != batch_size:
-            raise ValueError("query_lens length must match batch_size")
-        if any(query_len <= 0 for query_len in query_lens):
-            raise ValueError("query_lens must contain only positive integers")
-        if max(query_lens) > kv_len_max:
-            raise ValueError("kv_len_max must be at least the largest query length")
+    assert kv_len_max >= q_len_min
 
     g = torch.Generator(device="cpu").manual_seed(seed)
 
@@ -263,14 +228,10 @@ def generate_seq_lens(
         return torch.randint(lo, hi + 1, (1,), generator=g).item()
 
     seq_lens: list[tuple[int, int]] = []
-    for i in range(batch_size):
-        if query_lens is None:
-            # ensure q <= kv
-            kv = rint(max(kv_len_min, q_len_min), kv_len_max)
-            q = rint(q_len_min, min(q_len_max, kv))
-        else:
-            q = query_lens[i]
-            kv = rint(max(kv_len_min, q), kv_len_max)
+    for _ in range(batch_size):
+        # ensure q <= kv
+        kv = rint(max(kv_len_min, q_len_min), kv_len_max)
+        q = rint(q_len_min, min(q_len_max, kv))
         seq_lens.append((q, kv))
 
     return seq_lens
@@ -281,13 +242,6 @@ if __name__ == "__main__":
     parser.add_argument("--batch-size", type=int, default=64)
     parser.add_argument("--q-len-min", type=int, default=512)
     parser.add_argument("--q-len-max", type=int, default=512)
-    parser.add_argument(
-        "--query-lens",
-        type=parse_query_lens,
-        default=None,
-        metavar="1,4,...",
-        help="Explicit per-request query lengths; overrides --q-len-min/--q-len-max.",
-    )
     parser.add_argument("--kv-len-min", type=int, default=512)
     parser.add_argument("--kv-len-max", type=int, default=512)
     parser.add_argument("--num-blocks", type=int, default=4096)
@@ -324,23 +278,8 @@ if __name__ == "__main__":
     )
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--iters", type=int, default=20)
-    parser.add_argument(
-        "--benchmark-scheduler",
-        action="store_true",
-        help="Also time native scheduler metadata creation.",
-    )
 
     args = parser.parse_args()
-    if args.query_lens is not None:
-        if len(args.query_lens) != args.batch_size:
-            parser.error(
-                "--query-lens must contain one value per request "
-                f"(expected {args.batch_size}, got {len(args.query_lens)})"
-            )
-        if max(args.query_lens) > args.kv_len_max:
-            parser.error(
-                "--kv-len-max must be at least the largest value in --query-lens"
-            )
     print(args)
 
     seq_lens = generate_seq_lens(
@@ -350,7 +289,6 @@ if __name__ == "__main__":
         args.kv_len_min,
         args.kv_len_max,
         args.seed,
-        query_lens=args.query_lens,
     )
 
     print("batch (query len, kv len) = ", seq_lens)
@@ -376,5 +314,4 @@ if __name__ == "__main__":
         kv_cache_dtype=args.kv_cache_dtype,
         seed=args.seed,
         iters=args.iters,
-        benchmark_scheduler=args.benchmark_scheduler,
     )

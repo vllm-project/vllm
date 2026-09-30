@@ -434,7 +434,6 @@ class AttentionScheduler {
     int32_t kv_block_alignment;  // context length alignment requirement
     bool enable_kv_split;
     bool* dynamic_causal;
-    bool fp8_kv_cache;
   };
 
   static constexpr int32_t MaxQTileIterNum = 128;
@@ -478,19 +477,6 @@ class AttentionScheduler {
       int32_t q_head_num;
       bool grouped;
     };
-    struct ScheduleMetrics {
-      int64_t aligned_kv_bytes = 0;
-      int64_t fp8_conversion_bytes = 0;
-      int64_t runnable_tasks = 0;
-      int64_t task_waves = 0;
-      int64_t max_task_bytes = 0;
-      int64_t reduction_bytes = 0;
-      int64_t reduction_items = 0;
-      int64_t synchronization_items = 0;
-      int64_t descriptor_bytes = 0;
-      int64_t amx_tile_operations = 0;
-      double score = std::numeric_limits<double>::infinity();
-    };
     const auto request_causal = [&](const int32_t req_id) {
       return is_dynamic_causal ? input.dynamic_causal[req_id] : causal;
     };
@@ -529,37 +515,34 @@ class AttentionScheduler {
                      aligned_right);
           }
         };
-    const auto legacy_kv_len_per_thread =
-        [&](const SchedulePlan& plan, const bool adaptive_request,
-            const std::vector<SchedulePlan>* request_plans) {
-          int64_t total_aligned_kv_len = 0;
-          for (int32_t req_id = 0; req_id < input.num_reqs; ++req_id) {
-            const bool in_category =
-                adaptive_request
-                    ? request_adaptive_eligible(req_id)
-                    : (supports_gqa && request_q_token_num(req_id) == 1);
-            if (!in_category) {
-              continue;
-            }
-            const SchedulePlan req_plan =
-                request_plans == nullptr ? plan : (*request_plans)[req_id];
-            for_each_query_tile(
-                req_id, req_plan,
-                [&](const int32_t, const int32_t, const int32_t, const int32_t,
-                    const int32_t aligned_left, const int32_t aligned_right) {
-                  total_aligned_kv_len += aligned_right - aligned_left;
-                });
-          }
-          if (total_aligned_kv_len <= 0) {
-            return static_cast<int64_t>(kv_len_alignment);
-          }
-          const int64_t average_kv_len =
-              (total_aligned_kv_len + thread_num - 1) / thread_num;
-          return std::max<int64_t>(
-              kv_len_alignment,
-              ((average_kv_len + kv_len_alignment - 1) / kv_len_alignment) *
-                  kv_len_alignment);
-        };
+    const auto legacy_kv_len_per_thread = [&](const SchedulePlan& plan,
+                                              const bool adaptive_request) {
+      int64_t total_aligned_kv_len = 0;
+      for (int32_t req_id = 0; req_id < input.num_reqs; ++req_id) {
+        const bool in_category =
+            adaptive_request
+                ? request_adaptive_eligible(req_id)
+                : (supports_gqa && request_q_token_num(req_id) == 1);
+        if (!in_category) {
+          continue;
+        }
+        for_each_query_tile(
+            req_id, plan,
+            [&](const int32_t, const int32_t, const int32_t, const int32_t,
+                const int32_t aligned_left, const int32_t aligned_right) {
+              total_aligned_kv_len += aligned_right - aligned_left;
+            });
+      }
+      if (total_aligned_kv_len <= 0) {
+        return static_cast<int64_t>(kv_len_alignment);
+      }
+      const int64_t average_kv_len =
+          (total_aligned_kv_len + thread_num - 1) / thread_num;
+      return std::max<int64_t>(
+          kv_len_alignment,
+          ((average_kv_len + kv_len_alignment - 1) / kv_len_alignment) *
+              kv_len_alignment);
+    };
     const auto compatibility_split_num =
         [&](const int32_t tile_q, const int64_t aligned_kv_len,
             const bool adaptive_request, const int64_t kv_len_per_thread) {
@@ -580,304 +563,51 @@ class AttentionScheduler {
           split_num = std::min(split_num, max_viable_split);
           return static_cast<int32_t>(std::max<int64_t>(split_num, 1));
         };
-    struct RequestScheduleMetrics {
-      ScheduleMetrics metrics;
-      bool valid = true;
-    };
-    const auto evaluate_request_plan =
-        [&](const int32_t req_id, const SchedulePlan& req_plan,
-            const bool plan_eligible, const bool ordinary_decode,
-            const int64_t decode_kv_len_per_thread,
-            const int64_t adaptive_kv_len_per_thread) {
-          RequestScheduleMetrics result;
-          ScheduleMetrics& metrics = result.metrics;
-          if (request_q_token_num(req_id) == 0) {
-            return result;
-          }
-          const int32_t required_split_kv_len =
-              plan_eligible ? min_adaptive_split_kv_len : min_split_kv_len;
-          const bool compatibility_split =
-              ordinary_decode ||
-              (plan_eligible && req_plan.grouped && req_plan.q_head_num > 1);
-          const int32_t groups_per_kv =
-              original_q_head_per_kv / req_plan.q_head_num;
-          for_each_query_tile(
-              req_id, req_plan,
-              [&](const int32_t, const int32_t tile_q, const int32_t,
-                  const int32_t, const int32_t aligned_left,
-                  const int32_t aligned_right) {
-                if (!result.valid) {
-                  return;
-                }
-                const int64_t aligned_kv_len = aligned_right - aligned_left;
-                const int32_t split_num =
-                    compatibility_split
-                        ? compatibility_split_num(
-                              tile_q, aligned_kv_len, plan_eligible,
-                              plan_eligible ? adaptive_kv_len_per_thread
-                                            : decode_kv_len_per_thread)
-                        : 1;
-                if (split_num > 1 &&
-                    aligned_kv_len < static_cast<int64_t>(split_num) *
-                                         required_split_kv_len) {
-                  result.valid = false;
-                  return;
-                }
-                const int64_t instances =
-                    static_cast<int64_t>(input.num_heads_kv) * groups_per_kv;
-                const int64_t useful_rows = tile_q * req_plan.q_head_num;
-                const int64_t row_tiles = (useful_rows + 15) / 16;
-                const int64_t kv_bytes = instances * aligned_kv_len * 2 *
-                                         input.head_dim * input.elem_size;
-                const int64_t split_units =
-                    (aligned_kv_len / kv_len_alignment + split_num - 1) /
-                    split_num;
-                const int64_t fp8_conversion_bytes =
-                    input.isa == ISA::AMX && input.fp8_kv_cache
-                        ? instances * 2 * aligned_kv_len * input.head_dim * 4
-                        : 0;
-                const int64_t tile_operations =
-                    uses_amx ? instances * 4 * row_tiles *
-                                   (aligned_kv_len / kv_len_alignment) *
-                                   (input.head_dim / 32)
-                             : 0;
-                const int64_t task_bytes =
-                    split_units * kv_len_alignment * 2 * input.head_dim *
-                        input.elem_size +
-                    fp8_conversion_bytes / (instances * split_num) +
-                    tile_operations * 64 / (instances * split_num);
-                metrics.amx_tile_operations += tile_operations;
-                metrics.aligned_kv_bytes += kv_bytes;
-                metrics.fp8_conversion_bytes += fp8_conversion_bytes;
-                metrics.runnable_tasks += instances * split_num;
-                metrics.max_task_bytes =
-                    std::max(metrics.max_task_bytes, task_bytes);
-                if (split_num > 1) {
-                  const int64_t rows = tile_q * req_plan.q_head_num;
-                  const auto round64 = [](const int64_t value) {
-                    return ((value + 63) / 64) * 64;
-                  };
-                  const int64_t producer_bytes =
-                      static_cast<int64_t>(split_num) * rows *
-                      (input.head_dim * input.output_buffer_elem_size + 2 * 4);
-                  const int64_t combine_bytes =
-                      (split_num - 1) * 3 * rows * input.head_dim * 4 +
-                      8 * rows * (split_num + 1);
-                  const int64_t scratch_bytes =
-                      round64(split_num) +
-                      round64(static_cast<int64_t>(split_num) * rows *
-                              input.head_dim * input.output_buffer_elem_size) +
-                      2 * round64(static_cast<int64_t>(split_num) * rows *
-                                  sizeof(float));
-                  metrics.reduction_bytes +=
-                      instances *
-                      (producer_bytes + combine_bytes + scratch_bytes);
-                  metrics.reduction_items += instances;
-                  metrics.synchronization_items += instances * split_num;
-                }
-              });
-          return result;
-        };
-    const auto finish_metrics = [&](ScheduleMetrics& metrics,
-                                    const bool has_multi_token_plan,
-                                    const bool include_batch_overhead) {
-      metrics.task_waves =
-          (metrics.runnable_tasks + thread_num - 1) / thread_num +
-          (metrics.reduction_items + thread_num - 1) / thread_num;
-      metrics.descriptor_bytes =
-          metrics.runnable_tasks * sizeof(AttentionWorkItemGroup) +
-          metrics.reduction_items * sizeof(ReductionWorkItemGroup);
-      metrics.synchronization_items +=
-          metrics.runnable_tasks + metrics.reduction_items;
-      if (include_batch_overhead) {
-        metrics.synchronization_items +=
-            thread_num + (metrics.reduction_items > 0 ? thread_num : 0);
-      }
-      if (metrics.runnable_tasks == 0) {
-        return;
-      }
-      const double effective_bytes =
-          metrics.aligned_kv_bytes + metrics.fp8_conversion_bytes +
-          metrics.amx_tile_operations * 64 + metrics.reduction_bytes;
-      const int64_t effective_parallelism =
-          has_multi_token_plan
-              ? std::min<int64_t>(thread_num, metrics.runnable_tasks)
-              : thread_num;
-      const double serial_work =
-          std::max(effective_bytes / effective_parallelism,
-                   static_cast<double>(metrics.max_task_bytes));
-      metrics.score = serial_work * thread_num + 64.0 * metrics.task_waves +
-                      64.0 * metrics.synchronization_items +
-                      metrics.descriptor_bytes;
-    };
-    const auto evaluate_request =
-        [&](const int32_t req_id, const SchedulePlan& req_plan,
-            const bool plan_eligible, const bool ordinary_decode,
-            const int64_t decode_kv_len_per_thread,
-            const int64_t adaptive_kv_len_per_thread) {
-          RequestScheduleMetrics result = evaluate_request_plan(
-              req_id, req_plan, plan_eligible, ordinary_decode,
-              decode_kv_len_per_thread, adaptive_kv_len_per_thread);
-          if (!result.valid || result.metrics.runnable_tasks == 0) {
-            result.metrics.score = std::numeric_limits<double>::infinity();
-            return result.metrics;
-          }
-          finish_metrics(result.metrics, plan_eligible, false);
-          return result.metrics;
-        };
-    const auto evaluate_plan =
-        [&](const SchedulePlan& plan,
-            const std::vector<SchedulePlan>* request_plans) {
-          ScheduleMetrics metrics;
-          bool has_grouped_plan = false;
-          const int64_t decode_kv_len_per_thread =
-              legacy_kv_len_per_thread(plan, false, request_plans);
-          const int64_t adaptive_kv_len_per_thread =
-              legacy_kv_len_per_thread(plan, true, request_plans);
-          for (int32_t req_id = 0; req_id < input.num_reqs; ++req_id) {
-            const bool plan_eligible = request_adaptive_eligible(req_id);
-            const bool ordinary_decode =
-                supports_gqa && request_q_token_num(req_id) == 1;
-            const SchedulePlan req_plan =
-                plan_eligible
-                    ? (request_plans == nullptr ? plan
-                                                : (*request_plans)[req_id])
-                    : (ordinary_decode
-                           ? SchedulePlan{original_q_head_per_kv, true}
-                           : SchedulePlan{1, false});
-            has_grouped_plan |= plan_eligible && req_plan.grouped;
-            RequestScheduleMetrics request_metrics = evaluate_request_plan(
-                req_id, req_plan, plan_eligible, ordinary_decode,
-                decode_kv_len_per_thread, adaptive_kv_len_per_thread);
-            if (!request_metrics.valid) {
-              return metrics;
-            }
-            metrics.aligned_kv_bytes +=
-                request_metrics.metrics.aligned_kv_bytes;
-            metrics.fp8_conversion_bytes +=
-                request_metrics.metrics.fp8_conversion_bytes;
-            metrics.runnable_tasks += request_metrics.metrics.runnable_tasks;
-            metrics.max_task_bytes = std::max(
-                metrics.max_task_bytes, request_metrics.metrics.max_task_bytes);
-            metrics.reduction_bytes += request_metrics.metrics.reduction_bytes;
-            metrics.reduction_items += request_metrics.metrics.reduction_items;
-            metrics.synchronization_items +=
-                request_metrics.metrics.synchronization_items;
-            metrics.amx_tile_operations +=
-                request_metrics.metrics.amx_tile_operations;
-          }
-          if (metrics.runnable_tasks == 0) {
-            return metrics;
-          }
-          finish_metrics(metrics, has_multi_token_request, true);
-          if (has_multi_token_request && has_grouped_plan && uses_amx &&
-              metrics.runnable_tasks < thread_num) {
-            metrics.score = std::numeric_limits<double>::infinity();
-          }
-          return metrics;
-        };
-
     const SchedulePlan mha_plan{1, false};
     SchedulePlan batch_plan = mha_plan;
-    std::vector<SchedulePlan> selected_request_plans;
     if (has_multi_token_request) {
-      const ScheduleMetrics mha_metrics = evaluate_plan(mha_plan, nullptr);
-      ScheduleMetrics batch_metrics = mha_metrics;
-      selected_request_plans.reserve(input.num_reqs);
-      for (int32_t req_id = 0; req_id < input.num_reqs; ++req_id) {
-        if (request_adaptive_eligible(req_id)) {
-          selected_request_plans.push_back(mha_plan);
-        } else if (supports_gqa && request_q_token_num(req_id) == 1) {
-          selected_request_plans.push_back({original_q_head_per_kv, true});
-        } else {
-          selected_request_plans.push_back(mha_plan);
-        }
-      }
-
-      const int64_t decode_kv_len_per_thread =
-          legacy_kv_len_per_thread(mha_plan, false, &selected_request_plans);
-      const int64_t adaptive_kv_len_per_thread =
-          legacy_kv_len_per_thread(mha_plan, true, &selected_request_plans);
-#pragma omp parallel for schedule(static, 1)
-      for (int32_t req_id = 0; req_id < input.num_reqs; ++req_id) {
-        if (!request_adaptive_eligible(req_id)) {
-          continue;
-        }
-        SchedulePlan selected_plan = mha_plan;
-        ScheduleMetrics selected_metrics = evaluate_request(
-            req_id, selected_plan, true, false, decode_kv_len_per_thread,
-            adaptive_kv_len_per_thread);
-        for (int32_t group = 2; group <= original_q_head_per_kv; ++group) {
-          if (original_q_head_per_kv % group != 0 ||
-              group > max_num_q_per_iter) {
-            continue;
-          }
-          const SchedulePlan candidate{group, true};
-          const ScheduleMetrics metrics = evaluate_request(
-              req_id, candidate, true, false, decode_kv_len_per_thread,
-              adaptive_kv_len_per_thread);
-          if (metrics.score < selected_metrics.score) {
-            selected_plan = candidate;
-            selected_metrics = metrics;
-          }
-        }
-        selected_request_plans[req_id] = selected_plan;
-      }
-
-      SchedulePlan best_uniform_plan = mha_plan;
-      ScheduleMetrics best_uniform_metrics = mha_metrics;
-      for (int32_t group = 2; group <= original_q_head_per_kv; ++group) {
+      // Choose the widest group that can keep the worker team occupied.
+      for (int32_t group = original_q_head_per_kv; group >= 2; --group) {
         if (original_q_head_per_kv % group != 0 || group > max_num_q_per_iter) {
           continue;
         }
         const SchedulePlan candidate{group, true};
-        const ScheduleMetrics metrics = evaluate_plan(candidate, nullptr);
-        if (metrics.score < best_uniform_metrics.score) {
-          best_uniform_plan = candidate;
-          best_uniform_metrics = metrics;
+        const int64_t adaptive_kv_len_per_thread =
+            legacy_kv_len_per_thread(candidate, true);
+        int64_t runnable_tasks = 0;
+        for (int32_t req_id = 0; req_id < input.num_reqs; ++req_id) {
+          if (!request_adaptive_eligible(req_id)) {
+            continue;
+          }
+          for_each_query_tile(
+              req_id, candidate,
+              [&](const int32_t, const int32_t tile_q, const int32_t,
+                  const int32_t, const int32_t aligned_left,
+                  const int32_t aligned_right) {
+                const int32_t splits = compatibility_split_num(
+                    tile_q, aligned_right - aligned_left, true,
+                    adaptive_kv_len_per_thread);
+                runnable_tasks +=
+                    static_cast<int64_t>(input.num_heads_q / group) * splits;
+              });
+        }
+        if (runnable_tasks >= thread_num) {
+          batch_plan = candidate;
+          break;
         }
       }
-
-      const ScheduleMetrics per_request_metrics =
-          evaluate_plan(mha_plan, &selected_request_plans);
-      if (std::isfinite(per_request_metrics.score) &&
-          per_request_metrics.score < best_uniform_metrics.score) {
-        batch_plan = mha_plan;
-        batch_metrics = per_request_metrics;
-      } else {
-        selected_request_plans.clear();
-        batch_plan = best_uniform_plan;
-        batch_metrics = best_uniform_metrics;
-      }
-      TORCH_CHECK(std::isfinite(batch_metrics.score),
-                  "No valid CPU attention schedule");
-    } else {
-      bool decode_only_batch = supports_gqa;
-      for (int32_t req_id = 0; req_id < input.num_reqs; ++req_id) {
-        decode_only_batch &= request_q_token_num(req_id) == 0 ||
-                             request_q_token_num(req_id) == 1;
-      }
-      if (decode_only_batch) {
-        batch_plan = {original_q_head_per_kv, true};
-      }
     }
-    const auto materialize_plan = [&](const SchedulePlan& selected_plan,
-                                      const std::vector<SchedulePlan>*
-                                          selected_request_plans) {
-      const int64_t decode_kv_len_per_thread = legacy_kv_len_per_thread(
-          selected_plan, false, selected_request_plans);
+    const auto materialize_plan = [&](const SchedulePlan& selected_plan) {
+      const int64_t decode_kv_len_per_thread =
+          legacy_kv_len_per_thread(selected_plan, false);
       const int64_t adaptive_kv_len_per_thread =
-          legacy_kv_len_per_thread(selected_plan, true, selected_request_plans);
+          legacy_kv_len_per_thread(selected_plan, true);
       std::vector<SchedulePlan> request_plans;
       request_plans.reserve(input.num_reqs);
       for (int32_t req_id = 0; req_id < input.num_reqs; ++req_id) {
         const bool plan_eligible = request_adaptive_eligible(req_id);
         if (plan_eligible) {
-          const SchedulePlan request_plan =
-              selected_request_plans == nullptr
-                  ? selected_plan
-                  : (*selected_request_plans)[req_id];
-          request_plans.emplace_back(request_plan);
+          request_plans.push_back(selected_plan);
         } else if (supports_gqa && request_q_token_num(req_id) == 1) {
           request_plans.push_back({original_q_head_per_kv, true});
         } else {
@@ -1241,12 +971,8 @@ class AttentionScheduler {
     };
 
     MaterializedPlan plan;
-    // Keep FP8 batches without multi-token candidates on legacy scheduling.
-    if (input.isa == ISA::AMX &&
-        (!input.fp8_kv_cache || has_multi_token_request)) {
-      auto [workitems, reductions] = materialize_plan(
-          batch_plan,
-          selected_request_plans.empty() ? nullptr : &selected_request_plans);
+    if (batch_plan.grouped) {
+      auto [workitems, reductions] = materialize_plan(batch_plan);
       plan.workitems = std::move(workitems);
       plan.reduction_items = std::move(reductions);
     } else {
