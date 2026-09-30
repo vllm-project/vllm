@@ -7,7 +7,7 @@ import torch
 import torch.nn.functional as F
 
 import vllm._custom_ops as ops
-from tests.kernels.utils import opcheck
+from tests.kernels.utils import fp8_ulp_distance, opcheck
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.fusion.fused_act_quant import maybe_fused_act_quant
 from vllm.model_executor.layers.fusion.quant_activation import QuantizedActivation
@@ -43,14 +43,15 @@ def ref_impl(
 
 
 def assert_fp8_close(actual: torch.Tensor, expected: torch.Tensor) -> None:
-    """Within one fp8 e4m3 ulp: relative spacing is 2^-3, the smallest
-    subnormal is 2^-9. The kernel uses the fast exp and divide intrinsics,
-    which can move a value across a rounding boundary."""
-    torch.testing.assert_close(
-        actual.to(torch.float32),
-        expected.to(torch.float32),
-        rtol=2**-3,
-        atol=2**-9,
+    """At most one E4M3 code apart, on a bounded number of isolated elements:
+    the kernel's fast exp and divide can land on the other side of a rounding
+    boundary from the fp32 reference."""
+    ulp = fp8_ulp_distance(actual, expected)
+    max_outliers = ulp.numel() // 100_000 + 8
+    num_outliers = int((ulp > 0).sum().item())
+    assert int(ulp.max()) <= 1, f"fp8 mismatch: {int(ulp.max())} ulp"
+    assert num_outliers <= max_outliers, (
+        f"fp8 mismatch: {num_outliers} outliers (allowed {max_outliers})"
     )
 
 
