@@ -1017,10 +1017,10 @@ class ResponseEventStreamTest(unittest.TestCase):
                 self.assertEqual(open_field, ev["field"], f"chunk outside its region: {ev}")
                 # Every chunk carries a boolean `dirty` flag.
                 self.assertIsInstance(ev["dirty"], bool, f"missing/non-bool dirty: {ev}")
-                chunk_accum[open_field] += ev["text"]
+                chunk_accum[ev["field"]] += ev["text"]
             elif t == "region_close":
                 self.assertEqual(open_field, ev["field"], f"close for non-open region: {ev}")
-                close_values[open_field] = ev["value"]
+                close_values[ev["field"]] = ev["value"]
                 open_field = None
             else:
                 self.fail(f"unexpected event type: {ev!r}")
