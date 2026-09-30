@@ -160,6 +160,13 @@ class AsyncOutput(AsyncModelRunnerOutput):
             self.prompt_token_id_logprobs_dict = {
                 k: v.to("cpu", non_blocking=True) for k, v in token_id_logprobs.items()
             }
+            last_hidden_states = self.model_runner_output.last_hidden_states
+            self.last_hidden_states: dict[str, torch.Tensor] | None = None
+            if last_hidden_states:
+                self.last_hidden_states = {
+                    k: v.to("cpu", non_blocking=True)
+                    for k, v in last_hidden_states.items()
+                }
             if self.pending_aux_output is not None:
                 self.pending_aux_output.enqueue_cpu_copy(
                     num_sampled=self.num_sampled_tokens_np,
@@ -201,6 +208,8 @@ class AsyncOutput(AsyncModelRunnerOutput):
         self.model_runner_output.prompt_token_id_logprobs_dict = (
             self.prompt_token_id_logprobs_dict
         )
+        if self.last_hidden_states is not None:
+            self.model_runner_output.last_hidden_states = self.last_hidden_states
         if self.pending_aux_output is not None:
             self.model_runner_output.aux_output_connector_output = (
                 self.pending_aux_output.process_output()

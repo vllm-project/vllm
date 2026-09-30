@@ -292,6 +292,11 @@ class ModelRunnerOutput:
     # req_id -> [num_scored_rows, num_token_ids] prompt_logprob_token_ids scores.
     prompt_token_id_logprobs_dict: dict[str, torch.Tensor] = field(default_factory=dict)
 
+    # req_id -> [num_generated_tokens, hidden_size]: the hidden states the
+    # sampled tokens' logits were computed from, for the requests that set
+    # SamplingParams.return_last_hidden_states. None when none did.
+    last_hidden_states: dict[str, torch.Tensor] | None = None
+
     # [num_reqs, hidden_size]
     pooler_output: list[torch.Tensor | None] | None = None
 
