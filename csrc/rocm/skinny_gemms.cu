@@ -1356,6 +1356,9 @@ torch::Tensor wvSplitK(const at::Tensor& in_a, const at::Tensor& in_b,
       case 16:
         WVSPLIT_TILE(sYT, 16)
         break;
+      case 20:
+        WVSPLIT_TILE(sYT, 20)
+        break;
       default:
         throw std::runtime_error(
             "Unsupported N value: " + std::to_string(M_in) + "," +

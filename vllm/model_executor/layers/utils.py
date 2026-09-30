@@ -347,12 +347,26 @@ def rocm_unquantized_gemm_impl(
         # The skinny kernels assume contiguous K elements. A shape-preserving
         # reshape can retain a transposed activation's non-contiguous strides.
         x_view = x.reshape(-1, x.size(-1)).contiguous()
-        # N = 13..16 only for tall weights: with in_proj_ba (24x5120) at N=16
-        # wvSplitK is 6x slower than rocBLAS on gfx1100, while at N <= 12 it
-        # is 2.6x faster for any M.
-        if m > 8 and (0 < n <= 12 or (n <= 16 and m >= 1024)):
+        # N = 13..16 and 20 in one call only for tall weights: with in_proj_ba
+        # (24x5120) at N=16 wvSplitK is 6x slower than rocBLAS on gfx1100,
+        # while at N <= 12 it is 2.6x faster for any M. Otherwise N = 13..24
+        # goes in chunks of <= 12 rows, which re-reads the weight per chunk:
+        # it pays on short weights (in_proj_ba 34 -> 14-22 us) and on the
+        # 62080-row lm_head at N=24 (1.95 -> 1.49 ms), not in between.
+        if m > 8 and (0 < n <= 12 or (n in (13, 14, 15, 16, 20) and m >= 1024)):
             cu_count = num_compute_units()
             out = ops.wvSplitK(weight, x_view, cu_count, bias)
+            return out.reshape(*x.shape[:-1], weight.shape[0])
+        if 12 < n <= 24 and (8 < m < 1024 or m >= 32768) and bias is None:
+            cu_count = num_compute_units()
+            chunks = (n + 11) // 12
+            step = (n + chunks - 1) // chunks
+            out = torch.cat(
+                [
+                    ops.wvSplitK(weight, x_view[i : i + step], cu_count, None)
+                    for i in range(0, n, step)
+                ]
+            )
             return out.reshape(*x.shape[:-1], weight.shape[0])
         elif m % 4 == 0 and n == 1 and k <= 8192 and bias is None:
             out = ops.LLMM1(weight, x_view, 4)
