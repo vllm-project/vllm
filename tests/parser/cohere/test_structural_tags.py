@@ -347,7 +347,7 @@ class TestAdjustRequestFoldFromStructuredOutputs:
                 id="chat_completion_request",
             ),
             pytest.param(
-                lambda: StructuredOutputsParams(json=[1, 2, 3]),  # type: ignore[arg-type]
+                lambda: StructuredOutputsParams(json=[1, 2, 3]),
                 id="structured_outputs_params",
             ),
         ],

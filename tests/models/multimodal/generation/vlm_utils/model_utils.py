@@ -1193,7 +1193,7 @@ def voxtral_patch_hf_runner(hf_model: "HfRunner") -> "HfRunner":
                 output.sequences = output.sequences[:, prompt_len:]
         return output
 
-    hf_model.get_inputs = patched_get_inputs  # type: ignore[method-assign, assignment]
+    hf_model.get_inputs = patched_get_inputs  # type: ignore[method-assign]
     hf_model.model.generate = patched_generate  # type: ignore[method-assign]
     return hf_model
 

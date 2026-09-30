@@ -113,7 +113,7 @@ def test_beam_search_abort_returns_partial_outputs_and_continues_other_prompts(
         {"type": "token", "prompt_token_ids": [token]} for token in [prompt_token, 2]
     ]
     params = BeamSearchParams(beam_width=2, max_tokens=3)
-    outputs = llm.beam_search(prompts, params)  # type: ignore[arg-type]
+    outputs = llm.beam_search(prompts, params)
 
     aborted, normal = outputs
     expected_tokens = (
@@ -326,7 +326,7 @@ def test_beam_search_structured_output(
 
     llm = LLM(
         model=model,
-        dtype=dtype,  # type: ignore[arg-type]
+        dtype=dtype,
         max_model_len=512,
         structured_outputs_config=dict(
             backend="xgrammar",
@@ -345,7 +345,7 @@ def test_beam_search_structured_output(
         "Generate a JSON object for a person with name and age:",
     ]
 
-    outputs = llm.beam_search(prompts, params)  # type: ignore[arg-type]
+    outputs = llm.beam_search(prompts, params)
 
     assert len(outputs) == len(prompts)
     for output in outputs:

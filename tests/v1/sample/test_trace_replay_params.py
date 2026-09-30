@@ -105,7 +105,7 @@ def test_trace_decode_token_ids_rejects_speculative_decoding():
     with pytest.raises(ValueError, match="not supported with speculative decoding"):
         params._validate_trace_replay(
             _make_model_config(vocab_size=100),
-            speculative_config=object(),  # type: ignore[arg-type]  # Only non-None presence is tested.
+            speculative_config=object(),
         )
 
 

@@ -98,7 +98,7 @@ def test_draft_quant_exclusions_include_global_layer_indices():
         ]
     )
 
-    _add_global_draft_layer_exclusions(quant_config, 88, 5)  # type: ignore[arg-type]
+    _add_global_draft_layer_exclusions(quant_config, 88, 5)
 
     assert "layers.88.mlp_conv*" in quant_config.exclude_modules
     assert "*layers.92.self_attn.q_proj" in quant_config.exclude_modules
@@ -171,7 +171,7 @@ def test_selector_leaves_greedy_drafting_without_proposal_logits(monkeypatch):
     allocating one here would claim a proposal the walk never sampled from.
     """
     _stub_base(monkeypatch, None)
-    speculator = DFlash2Speculator(None, torch.device("cpu"))  # type: ignore[arg-type]  # Base initialization is stubbed.
+    speculator = DFlash2Speculator(None, torch.device("cpu"))
 
     assert speculator.draft_logits is None
 
@@ -183,7 +183,7 @@ def test_selector_asks_for_fp32_proposal_logits():
     candidate row often enough that the walk and the rejection sampler checking it
     would no longer read the same distribution.
     """
-    dtype, fill = DFlash2Speculator.draft_logits_spec(None, None)  # type: ignore[arg-type]  # Constant spec ignores self/config.
+    dtype, fill = DFlash2Speculator.draft_logits_spec(None, None)
 
     assert dtype is torch.float32
     assert fill == float("-inf")
@@ -309,9 +309,9 @@ def test_candidate_model_decoder_layer_cls(monkeypatch, variant):
     vllm_config.compilation_config = mock_current_vllm_config.compilation_config
 
     # 3. Instantiate the model under meta device to avoid parameter allocation issues
-    with set_current_vllm_config(mock_current_vllm_config), torch.device("meta"):  # type: ignore[arg-type]
+    with set_current_vllm_config(mock_current_vllm_config), torch.device("meta"):
         model_cls = DFlash2Qwen3Model if variant == "dflash2" else LiLiCorr
-        model = model_cls(vllm_config=vllm_config)  # type: ignore[arg-type]
+        model = model_cls(vllm_config=vllm_config)
 
     # 4. Assert that the layers are DFlash2Qwen3DecoderLayer (the subclass)
     assert len(model.layers) == 2
@@ -350,7 +350,7 @@ def test_conv_projections_use_draft_quant_config(monkeypatch):
         quant_method="W4A16_NVFP4", is_checkpoint_nvfp4_serialized=True
     )
     layer = DFlash2Qwen3DecoderLayer(
-        SimpleNamespace(  # type: ignore[arg-type]
+        SimpleNamespace(
             speculative_config=SimpleNamespace(num_speculative_tokens=7),
             model_config=SimpleNamespace(dtype=torch.bfloat16),
         ),
@@ -434,7 +434,7 @@ def test_context_kv_uses_quantized_projection_fallback(monkeypatch):
         for projection in projections
     ]
     qwen3_dflash.DFlashQwen3Model._build_context_kv_buffers(
-        model,  # type: ignore[arg-type]
+        model,
         layers_attn,
         has_bias=False,
     )
@@ -442,7 +442,7 @@ def test_context_kv_uses_quantized_projection_fallback(monkeypatch):
     assert all(not hasattr(projection, "weight") for projection in projections)
 
     actual_k, actual_v = qwen3_dflash.DFlashQwen3Model._project_context_kv(
-        model,  # type: ignore[arg-type]
+        model,
         context_states,
         num_ctx=2,
         num_layers=2,

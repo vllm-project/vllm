@@ -114,7 +114,7 @@ def get_default_xfer_telemetry(
     class AttributeDict(dict):
         __slots__ = ()
         __getattr__ = dict.__getitem__
-        __setattr__ = dict.__setitem__  # type: ignore[assignment]
+        __setattr__ = dict.__setitem__
 
     # We can't instantiate nixlXferTelemetry because it's read only and
     # ray env does not have NIXL, so we must fake it

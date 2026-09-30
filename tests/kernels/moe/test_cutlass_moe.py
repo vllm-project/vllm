@@ -538,7 +538,7 @@ def run_8_bit(
     assert num_local_experts is not None
     return run_with_expert_maps(
         num_experts,
-        num_local_experts,  # type: ignore[arg-type]
+        num_local_experts,
         quant_config,
         **kwargs,
     )

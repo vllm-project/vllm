@@ -511,14 +511,14 @@ class TestMLAPrefillBackendParsing:
 
     def test_valid_string_parses_to_enum(self):
         config = AttentionConfig(
-            mla_prefill_backend="FLASH_ATTN",  # type: ignore[arg-type]
+            mla_prefill_backend="FLASH_ATTN",
         )
         assert config.mla_prefill_backend == MLAPrefillBackendEnum.FLASH_ATTN
 
     def test_invalid_string_raises_error(self):
         with pytest.raises(ValueError, match="Unknown MLA prefill backend"):
             AttentionConfig(
-                mla_prefill_backend="NONEXISTENT",  # type: ignore[arg-type]
+                mla_prefill_backend="NONEXISTENT",
             )
 
 

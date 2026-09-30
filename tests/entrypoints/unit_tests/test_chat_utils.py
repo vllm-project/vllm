@@ -216,7 +216,7 @@ def video_url():
 @pytest.fixture(scope="module")
 def audio_url():
     audio = AudioAsset("mary_had_lamb")
-    return encode_audio_url(*audio.audio_and_sample_rate)  # type: ignore[arg-type]
+    return encode_audio_url(*audio.audio_and_sample_rate)
 
 
 def _assert_mm_data_is_image_input(
@@ -3194,5 +3194,5 @@ def test_validate_chat_template_rejects_invalid_type():
     with pytest.raises(
         VLLMValidationError, match="not a valid chat template type"
     ) as exc_info:
-        validate_chat_template(123)  # type: ignore[arg-type]
+        validate_chat_template(123)
     assert exc_info.value.parameter == "chat_template"

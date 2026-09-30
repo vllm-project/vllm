@@ -158,9 +158,7 @@ def test_wrapper_forwards_spec_step_idx():
 
     hidden_states = torch.empty(0)
     wrapper = object.__new__(DeepSeekV4MTP)
-    wrapper.model = SimpleNamespace(  # type: ignore[assignment]
-        get_top_tokens=lambda *args: args
-    )
+    wrapper.model = SimpleNamespace(get_top_tokens=lambda *args: args)
 
     assert DeepSeekV4MTP.get_top_tokens(wrapper, hidden_states, 2) == (hidden_states, 2)
     assert DeepSeekV4MTP.get_top_tokens(wrapper, hidden_states) == (hidden_states, 0)

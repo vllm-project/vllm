@@ -304,9 +304,9 @@ def test_wait_for_engine_startup_reports_watched_process_exit():
             wait_for_engine_startup(
                 handshake_socket,
                 [CoreEngine()],
-                parallel_config,  # type: ignore[arg-type]
+                parallel_config,
                 coordinated_dp=False,
-                cache_config=None,  # type: ignore[arg-type]
+                cache_config=None,
                 launch=launch,
             )
     finally:

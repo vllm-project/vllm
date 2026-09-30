@@ -14,7 +14,7 @@ from vllm.outputs import RequestOutput
 
 def _make_mock_llm() -> LLM:
     llm = object.__new__(LLM)
-    llm.model_config = SimpleNamespace(  # type: ignore[assignment]
+    llm.model_config = SimpleNamespace(
         runner_type="generate", enable_prompt_embeds=False
     )
     return llm

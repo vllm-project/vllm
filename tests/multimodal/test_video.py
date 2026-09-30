@@ -493,7 +493,7 @@ def test_pynvvideocodec_failed_rebuild_invalidates_decoder_slot():
 
     old_decoder = FakeDecoder()
     slot = PyNvVideoCodecDecoderSlot(FakeStream())
-    slot.decoder = old_decoder  # type: ignore[assignment]  # Fake retained GPU decoder.
+    slot.decoder = old_decoder
     slot.source_path = "valid.mp4"
 
     class FakeNvc:

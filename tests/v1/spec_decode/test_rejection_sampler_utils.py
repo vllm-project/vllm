@@ -700,7 +700,7 @@ def test_verify_rejects_unproposed_drafts():
     first_pos = inputs["pos"].view(num_trials, K + 1)[:, 0]
     prefill_len = first_pos + 1
     rejection_sampler = object.__new__(RejectionSampler)
-    rejection_sampler.sampler = SimpleNamespace(  # type: ignore[assignment]
+    rejection_sampler.sampler = SimpleNamespace(
         apply_sampling_params=lambda logits, *args: logits,
         sampling_states=SimpleNamespace(
             temperature=SimpleNamespace(gpu=inputs["temperature"]),

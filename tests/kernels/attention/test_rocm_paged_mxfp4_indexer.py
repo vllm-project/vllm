@@ -227,9 +227,7 @@ def _decode_metadata(case, rows, ratio, query_lens):
         num_decode_tokens=len(rows),
         num_prefills=0,
         num_prefill_tokens=0,
-        decode=types.SimpleNamespace(  # type: ignore[arg-type]
-            block_table=block_table, seq_lens=lens[:, None]
-        ),
+        decode=types.SimpleNamespace(block_table=block_table, seq_lens=lens[:, None]),
         decode_row_lens=lens,
         decode_block_ends=(lens + CAND_BLOCK - 1) // CAND_BLOCK,
         decode_native=native,
@@ -280,7 +278,7 @@ def _prefill_metadata(
         num_decode_tokens=0,
         num_prefills=len(case.seq_lens),
         num_prefill_tokens=len(rows),
-        prefill=types.SimpleNamespace(chunks=chunks),  # type: ignore[arg-type]
+        prefill=types.SimpleNamespace(chunks=chunks),
         prefill_plans=plans,
         gather_launches=plan_gather_launches(chunks, plans, gather_rows),
     )

@@ -3575,7 +3575,7 @@ def test_flashmla_fp8_paths_accept_decode_subset(monkeypatch, use_mixed_batch: b
 
     if use_mixed_batch:
         fp8_metadata = FlashMLASparseMetadata.FP8KernelMetadata(
-            scheduler_metadata=object(),  # type: ignore[arg-type]
+            scheduler_metadata=object(),
             dummy_block_table=torch.empty(1, 1, dtype=torch.int32, device=DEVICE_TYPE),
             cache_lens=torch.empty(1, dtype=torch.int32, device=DEVICE_TYPE),
         )
@@ -3588,7 +3588,7 @@ def test_flashmla_fp8_paths_accept_decode_subset(monkeypatch, use_mixed_batch: b
             num_prefill_tokens=num_batch_tokens - num_decode_tokens,
             decode=FP8Meta.Decode(
                 seq_lens=torch.empty(1, dtype=torch.int32, device=DEVICE_TYPE),
-                kernel_metadata=object(),  # type: ignore[arg-type]
+                kernel_metadata=object(),
                 decode_query_len=num_decode_tokens,
             ),
             prefill=FP8Meta.Prefill(
@@ -3774,7 +3774,7 @@ def test_fp8_mixed_batch_dcp_neutralizes_empty_rows(monkeypatch):
 
     metadata = SimpleNamespace(
         fp8_extra_metadata=FlashMLASparseMetadata.FP8KernelMetadata(
-            scheduler_metadata=object(),  # type: ignore[arg-type]
+            scheduler_metadata=object(),
             dummy_block_table=torch.empty(1, 1, dtype=torch.int32, device=DEVICE_TYPE),
             cache_lens=torch.empty(1, dtype=torch.int32, device=DEVICE_TYPE),
         ),

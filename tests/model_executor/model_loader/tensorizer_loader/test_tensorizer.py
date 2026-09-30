@@ -36,7 +36,7 @@ try:
     import tensorizer
     from tensorizer import EncryptionParams
 except ImportError:
-    tensorizer = PlaceholderModule("tensorizer")  # type: ignore[assignment]
+    tensorizer = PlaceholderModule("tensorizer")
     EncryptionParams = tensorizer.placeholder_attr("EncryptionParams")
 
 

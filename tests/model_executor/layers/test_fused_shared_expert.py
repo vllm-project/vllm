@@ -413,7 +413,7 @@ def test_deepseek_v4_shared_expert_fse_uses_mtp_quantization_config_prefix(
     )
 
     compatible, reason = is_shared_expert_quant_fse_compatible(
-        DeepseekV4Config(),  # type: ignore[arg-type]
+        DeepseekV4Config(),
         "model.layers.2.ffn.experts",
         "model.layers.2.ffn.shared_experts",
     )
@@ -824,7 +824,7 @@ def test_models_fse_init(
         model_type, quantization_config
     )
     vllm_config = VllmConfig()
-    vllm_config.model_config = SimpleNamespace(  # type: ignore[assignment]
+    vllm_config.model_config = SimpleNamespace(
         hf_config=config,
         hf_text_config=config,
         dtype=torch.bfloat16,
@@ -893,7 +893,7 @@ def test_models_fse_init(
                     DeepSeekV4MTP,
                 )
 
-                vllm_config.speculative_config = SimpleNamespace(  # type: ignore[assignment]
+                vllm_config.speculative_config = SimpleNamespace(
                     draft_model_config=SimpleNamespace(hf_config=config),
                     method="mtp",
                     parallel_drafting=False,

@@ -1782,7 +1782,7 @@ def test_aiter_indexer_requires_the_aiter_attend(monkeypatch):
             num_index_heads=1,
             index_head_dim=HEAD_DIM,
             # The implementation also accepts this legacy fp8 alias.
-            indexer_kv_dtype="fp8_e4m3",  # type: ignore[arg-type]
+            indexer_kv_dtype="fp8_e4m3",
             max_model_len=8192,
         )
 

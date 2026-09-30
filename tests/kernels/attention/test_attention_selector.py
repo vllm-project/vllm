@@ -23,12 +23,12 @@ from vllm.platforms.interface import DeviceCapability
 if current_platform.is_cuda():
     from vllm.platforms.cuda import CudaPlatform
 else:
-    CudaPlatform = None  # type: ignore[assignment]  # Unavailable platform import.
+    CudaPlatform = None
 
 if current_platform.is_rocm():
     from vllm.platforms.rocm import RocmPlatform
 else:
-    RocmPlatform = None  # type: ignore[misc, assignment]  # Unavailable platform import.
+    RocmPlatform = None  # type: ignore[misc]  # Unavailable platform import.
 
 from vllm.v1.attention.backend import AttentionType
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
@@ -356,14 +356,14 @@ def test_invalid_backend():
 def test_auto_backend_string(auto_value: str):
     """Test that 'auto' string value triggers automatic backend selection."""
     # Using "auto" should result in backend=None (automatic selection)
-    attention_config = AttentionConfig(backend=auto_value)  # type: ignore[arg-type]
+    attention_config = AttentionConfig(backend=auto_value)
     assert attention_config.backend is None
 
 
 def test_auto_backend_selection_behavior():
     """Test that 'auto' backend behaves same as None (automatic selection)."""
     # Create config with explicit "auto"
-    auto_config = AttentionConfig(backend="auto")  # type: ignore[arg-type]
+    auto_config = AttentionConfig(backend="auto")
 
     # Create config with None (default)
     none_config = AttentionConfig(backend=None)
