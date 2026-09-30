@@ -468,20 +468,13 @@ class HiSparseResidentSpec(KVCacheSpec):
     def max_admission_blocks_per_request(
         self, max_in_flight_tokens: int, max_model_len: int
     ) -> int:
-        """Per-request admission cap, in blocks, and the pool sizing bound.
-
-        Pages already written back to host are released to the pool, so a
-        request needs only its in-flight pages resident.
-        """
         num_tokens = min(max_in_flight_tokens, max_model_len)
         return cdiv(num_tokens, self.block_size)
 
     def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
-        max_blocks = self.max_admission_blocks_per_request(
-            max_in_flight_tokens=vllm_config.max_in_flight_tokens,
-            max_model_len=vllm_config.model_config.max_model_len,
+        return cdiv(vllm_config.model_config.max_model_len, self.block_size) * (
+            self.page_size
         )
-        return max_blocks * self.page_size
 
     @property
     def has_layer_views(self) -> bool:
