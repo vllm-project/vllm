@@ -28,6 +28,40 @@ from vllm.utils.network_utils import get_open_port
 from vllm.utils.system_utils import update_environment_variables
 
 
+def test_message_queue_readiness_includes_overflow_payload():
+    buffer = ShmRingBuffer(n_reader=1, max_chunk_bytes=64, max_chunks=1)
+    writer = SimpleNamespace(
+        _is_writer=True, n_local_reader=1, buffer=buffer, current_idx=0
+    )
+    socket = mock.Mock()
+    reader = SimpleNamespace(
+        _is_local_reader=True,
+        buffer=buffer,
+        current_idx=0,
+        local_reader_rank=0,
+        local_socket=socket,
+    )
+    with buffer.get_metadata(0) as metadata, buffer.get_data(0) as data:
+        metadata[:] = b"\x00\x00"
+        assert MessageQueue.can_enqueue(writer)
+        assert not MessageQueue.can_dequeue(reader)
+        metadata[0] = 1
+        data[0] = 0
+        assert not MessageQueue.can_enqueue(writer)
+        assert MessageQueue.can_dequeue(reader)
+        socket.poll.assert_not_called()
+        data[0] = 1  # Overflow marker may arrive before its socket payload.
+        socket.poll.return_value = 0
+        assert not MessageQueue.can_dequeue(reader)
+        socket.poll.return_value = 1
+        assert MessageQueue.can_dequeue(reader)
+        socket.poll.assert_called_with(timeout=0)
+        assert metadata[1] == 0  # Readiness must not consume the slot.
+        metadata[1] = 1
+        assert MessageQueue.can_enqueue(writer)
+        assert not MessageQueue.can_dequeue(reader)
+
+
 def get_arrays(n: int, seed: int = 0) -> list[np.ndarray]:
     np.random.seed(seed)
     sizes = np.random.randint(1, 10_000, n)
