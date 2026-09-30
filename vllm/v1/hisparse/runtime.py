@@ -492,7 +492,7 @@ class HiSparsePrefillStagingPlan:
     dst_rows: torch.Tensor
     miss_mask: torch.Tensor
     block_size: int
-    # Host rows with a GPU-resident copy (adopted shadow pages): the flat
+    # Host rows with a GPU-resident copy (adopted GPU copies): the flat
     # resident-cache row to read instead of DMAing from host, -1 for misses.
     gpu_row_ids: torch.Tensor | None = None
     gpu_source_key: tuple[int, int] | None = None
@@ -1043,7 +1043,7 @@ class HiSparseRuntime:
         current_stream().wait_event(self._layer_ready_event)
         self._swap_staged = False
 
-    def swap_in(
+    def fetch_from_host(
         self,
         *,
         resident: HiSparseCacheHandle,
@@ -1196,7 +1196,7 @@ class HiSparseCacheHandle:
         self.block_table = block_table
         self.slot_mapping = slot_mapping
 
-    def swap_in(
+    def fetch_from_host(
         self,
         req_id_per_token: torch.Tensor,
         block_table: torch.Tensor,
@@ -1207,7 +1207,7 @@ class HiSparseCacheHandle:
         attention_indices_out: torch.Tensor | None = None,
         valid_counts_out: torch.Tensor | None = None,
     ) -> HiSparseTopKResult:
-        return self.runtime.swap_in(
+        return self.runtime.fetch_from_host(
             resident=self,
             req_id_per_token=req_id_per_token[: logical_topk_indices.shape[0]],
             block_table=block_table,
@@ -1299,7 +1299,7 @@ def create_hisparse_cache_handle(
     if is_index_group_leader and index_group is not None:
         index_group.hisparse_group = runtime.index_group
     logger.info_once(
-        "Enabled experimental HiSparse HMA hot cache: top_k=%d, "
+        "Enabled experimental HiSparse HMA hot buffers: top_k=%d, "
         "device_buffer_size=%d (%d LRU rows), max_num_seqs=%d.",
         config.top_k,
         config.device_buffer_size,

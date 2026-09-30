@@ -548,7 +548,7 @@ def test_nixl_hisparse_full_block_import_keeps_a_writable_tail(num_tokens):
     assert all(resident[-1] not in copies for copies in coordinator.copies.values())
     coordinator.update_spills({}, {restore.transfer_id: 1})
     assert resident[-1].ref_cnt == 1
-    assert coordinator.request_states[request.request_id].valid_pages == set(
+    assert coordinator.request_states[request.request_id].durable_pages == set(
         range(num_tokens // HISPARSE_BLOCK_SIZE)
     )
     if num_tokens % HISPARSE_BLOCK_SIZE:
@@ -625,7 +625,7 @@ def test_hisparse_full_pool_keeps_pages_pinned_until_preemption():
     assert manager.allocate_slots(second, num_new_tokens=16) is not None
 
 
-def test_hisparse_materializes_prefix_without_allocating_hot_blocks():
+def test_hisparse_spills_prefix_without_allocating_hot_blocks():
     """A host prefix becomes visible only when every page is durable.
 
     Completing a later page first must not expose a prefix with a hole.
@@ -675,7 +675,7 @@ def test_hisparse_materializes_prefix_without_allocating_hot_blocks():
     assert blocks[3] == []
 
 
-def test_hisparse_materialization_respects_per_step_spill_budget():
+def test_hisparse_prefix_spills_respect_per_step_budget():
     """Prefix publication must not bypass the configured spill batch limit."""
     manager = make_hisparse_kv_cache_manager(
         32,
@@ -691,7 +691,7 @@ def test_hisparse_materialization_respects_per_step_spill_budget():
     first = coordinator.build_offload_command().page_transfers
     assert len(first) == 1
 
-    coordinator.plan_prefix_materialization(request.request_id, len(tokens))
+    coordinator.plan_prefix_spills(request.request_id, len(tokens))
     second = coordinator.build_offload_command().page_transfers
     assert len(second) == 1
     assert first[0].transfer_id != second[0].transfer_id
@@ -960,7 +960,7 @@ def test_host_receive_completion_without_spill_metadata(failed):
     if failed:
         assert state is None
     else:
-        assert state is not None and state.valid_pages == {0, 1}
+        assert state is not None and state.durable_pages == {0, 1}
 
 
 def test_hisparse_recomputation_does_not_complete_failed_host_import():
@@ -976,7 +976,7 @@ def test_hisparse_recomputation_does_not_complete_failed_host_import():
     manager.cache_blocks(request, 16)
     assert manager.allocate_slots(request, 16) is not None
     state = get_hisparse_coordinator(manager).request_states.get(request.request_id)
-    assert state is None or 1 not in state.valid_pages
+    assert state is None or 1 not in state.durable_pages
 
 
 def test_hisparse_host_import_ignores_unsealed_tail():
@@ -987,7 +987,7 @@ def test_hisparse_host_import_ignores_unsealed_tail():
     coordinator.complete_host_import("partial", HISPARSE_BLOCK_SIZE + 1)
 
     state = coordinator.request_states["partial"]
-    assert state.valid_pages == {0}
+    assert state.durable_pages == {0}
     assert state.ready_prefix_pages == 1
 
 
@@ -998,7 +998,7 @@ def test_hisparse_resident_request_can_grow_without_hot_capacity():
     assert manager.allocate_slots(request, num_new_tokens=32) is not None
     request.num_computed_tokens = 32
 
-    # Three free blocks fit the next indexer/resident pages, but not a hot region.
+    # Three free blocks fit the next indexer/resident pages, but not a hot buffer.
     assert manager.block_pool.get_num_free_blocks() == 3
     assert manager.allocate_slots(request, num_new_tokens=1) is not None
     assert manager.get_block_ids(request.request_id)[3] == []
@@ -1108,7 +1108,7 @@ def test_mamba_boundary_handoffs_do_not_pin_obsolete_blocks():
     assert all(block.ref_cnt == 0 for block in old_blocks[:-1])
 
 
-def test_hisparse_prefix_hit_adopts_gpu_shadow_pages():
+def test_hisparse_prefix_hit_adopts_gpu_copies():
     """A host prefix hit must come back GPU-resident while shadows survive."""
     manager = make_hisparse_kv_cache_manager(32, 16, enable_caching=True)
     tokens = list(range(4 * HISPARSE_BLOCK_SIZE))
@@ -1268,7 +1268,7 @@ def test_hisparse_reset_prefix_cache_drops_copies():
     assert not coordinator.copies
 
 
-def test_hisparse_reused_copy_is_not_adopted():
+def test_hisparse_evicted_copy_is_not_adopted():
     """A host prefix hit must not adopt a GPU copy the pool has handed out."""
     manager = make_hisparse_kv_cache_manager(32, 16, enable_caching=True)
     tokens = list(range(4 * HISPARSE_BLOCK_SIZE))

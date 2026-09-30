@@ -37,6 +37,25 @@ memory consumption is therefore topology- and implementation-dependent. The
 realized capacity may be slightly smaller because the budget is rounded down
 to complete host blocks.
 
+## Nomenclature
+
+| Term | Meaning |
+| --- | --- |
+| Host block / host page | A block of the separate CPU pool and the KV page it holds. The host pages are the authoritative copy of a request's sparse-MLA KV. |
+| GPU page | A request's KV page held in a GPU block. Code calls these resident pages (the resident group). |
+| Hot buffer / hot row | A request's fixed set of GPU blocks that hold host pages fetched for attention, and one row within it. |
+| Spill | Copying a GPU page to its host page. |
+| Mirror | Copying KV rows to host as decode writes them, rather than a whole page at once. |
+| Durable | A page whose host copy is complete, so its GPU copy can be released. |
+| Publish | Registering durable host pages in the prefix cache so later requests can hit them. |
+| Fetch from host | Resolving attention's top-k positions and copying missing host rows into the hot buffer (`fetch_from_host`). |
+| Restore | Copying a host page back into a GPU page. |
+| Import | KV arriving from a P/D prefill node. |
+| Pin / release | Holding or dropping a GPU page's allocation reference. Code calls the release `unpin`. |
+| GPU copy | A durable GPU page whose reference was released but whose contents stay readable until the pool evicts its block. |
+| Adopt | A host-prefix hit pointing a page at a still-valid GPU copy instead of reading it from host. |
+| Evict | The pool handing a released block to another allocation, which destroys any GPU copy it held. |
+
 ## Ownership
 
 | Thing | Owner | What “owner” means |
@@ -131,7 +150,7 @@ attention metadata; neither the worker nor individual cache handles keep a
 duplicate mapping.
 
 Speculative decoding resolves all verification rows of a request in one pass:
-one block resolves the union of the rows' top-k against the request's hot-cache
+one block resolves the union of the rows' top-k against the request's hot-buffer
 state, so rows that select the same host row share its hot row and no row
 evicts a hot row another row of the step still reads.
 
@@ -165,7 +184,7 @@ directly in its GPU group.
 
 ## Spill transaction
 
-A resident block cannot be reused until its contents have been handed to the
+A resident block cannot be released until its contents have been handed to the
 worker.
 
 ```text
@@ -179,12 +198,12 @@ HiSparseCoordinator                            HiSparseWorker
           │ release resident lease to HMA       │
           │                                     │ copy reaches its event
           │◄── completed transfer ID ───────────│
-          │ mark host page valid                │
+          │ mark host page durable              │
           │ release destination host lease      │
 ```
 
 “Enqueued” means the copy has entered the worker stream. Stream ordering makes
-it safe to reuse the resident GPU block for later work, but the host page is
+it safe to release the resident GPU block for later work, but the host page is
 not yet published. “Completed” means the worker has observed the copy's event;
 only then does the coordinator publish the host page for prefix reuse and
 release its destination lease. A host-write event separately protects direct

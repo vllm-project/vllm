@@ -280,7 +280,7 @@ def test_hisparse_host_exhaustion_defers_requests(
             num_pressure * host.block_size,
             num_pressure * host.block_size,
         )
-        original_plan = coordinator.plan_prefix_materialization
+        original_plan = coordinator.plan_prefix_spills
         original_count = host.get_num_blocks_to_allocate
         checked_steps = 0
         refusals = 0
@@ -297,7 +297,7 @@ def test_hisparse_host_exhaustion_defers_requests(
             refusals += int(required > 0)
             return required
 
-        monkeypatch.setattr(coordinator, "plan_prefix_materialization", plan)
+        monkeypatch.setattr(coordinator, "plan_prefix_spills", plan)
         monkeypatch.setattr(host, "get_num_blocks_to_allocate", count)
         actual = runner.generate_greedy(prompts, max_tokens=16)
 

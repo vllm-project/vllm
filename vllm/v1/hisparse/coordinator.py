@@ -52,19 +52,20 @@ class _PendingPublication:
 class _HiSparseRequestState:
     """Residency bookkeeping for one request.
 
-    A resident page moves through three states: dirty (only the GPU copy
-    exists), clean (``valid_pages``: the host copy is complete) and unpinned
-    (``unpinned_pages``: clean, and its allocation reference was released so
-    the pool may reuse it). ``pinned_clean`` tracks clean pages still holding
-    their reference, which only happens before the request can read from host.
+    A resident page moves through three states: not yet durable (only the GPU
+    copy exists), durable (``durable_pages``: its host copy is complete) and
+    unpinned (``unpinned_pages``: durable, and its allocation reference was
+    released so the pool may evict it). ``pinned_durable`` tracks durable pages
+    still holding their reference, which only happens before the request can
+    read from host.
     """
 
-    valid_pages: set[int] = field(default_factory=set)
+    durable_pages: set[int] = field(default_factory=set)
     ready_prefix_pages: int = 0
     pending_pages: dict[int, int] = field(default_factory=dict)
     publication: _PendingPublication | None = None
     copies_recorded_blocks: int = 0
-    pinned_clean: set[int] = field(default_factory=set)
+    pinned_durable: set[int] = field(default_factory=set)
     unpinned_pages: set[int] = field(default_factory=set)
 
 
@@ -86,7 +87,7 @@ class HiSparseCoordinator:
 
     GPU-resident pages are a write-back cache of the host tier. Once a page's
     host copy is durable and its owner can read from host (it has, or has
-    asked for, a hot region), the page's allocation reference is released with
+    asked for, a hot buffer), the page's allocation reference is released with
     ``BlockPool.unpin_blocks``: the block stays in the block table and keeps
     being read, but the pool counts it as free and may hand it out, at which
     point the owner's page is nulled and its block table republished.
@@ -171,7 +172,7 @@ class HiSparseCoordinator:
         self.request_states: dict[str, _HiSparseRequestState] = {}
         self.next_spill_id = 0
         # Published host block hash -> GPU copies of that page, readable until
-        # the pool reuses them. Lets a host prefix hit come back GPU-resident.
+        # the pool evicts them. Lets a host prefix hit come back GPU-resident.
         self.copies: dict[BlockHashWithGroupId, tuple[KVCacheBlock, ...]] = {}
         self._copy_by_block: dict[int, BlockHashWithGroupId] = {}
         # Unpinned GPU block id -> (request, page) pairs still reading it.
@@ -193,7 +194,7 @@ class HiSparseCoordinator:
         if num_host_pages == 0:
             return
         state = self._get_request_state(request_id)
-        state.valid_pages.update(range(num_host_pages))
+        state.durable_pages.update(range(num_host_pages))
         state.ready_prefix_pages = max(num_host_pages, state.ready_prefix_pages)
         self._adopt_copies(request_id, state, host_blocks[:num_host_pages])
         state.copies_recorded_blocks = max(state.copies_recorded_blocks, num_host_pages)
@@ -259,7 +260,7 @@ class HiSparseCoordinator:
             for manager, block in zip(self.resident_managers, blocks):
                 if manager.adopt_resident_page(request_id, host_idx, block):
                     manager.block_pool.touch([block])
-                    state.pinned_clean.add(host_idx)
+                    state.pinned_durable.add(host_idx)
 
     def _record_copies(self, request_id: str, num_computed_tokens: int) -> None:
         """Index the GPU copies of just-published host blocks for later hits."""
@@ -332,30 +333,32 @@ class HiSparseCoordinator:
     def _unpin_page(
         self, request_id: str, state: _HiSparseRequestState, page_idx: int
     ) -> bool:
-        if page_idx in state.pending_pages or page_idx not in state.valid_pages:
+        if page_idx in state.pending_pages or page_idx not in state.durable_pages:
             return False
         blocks = self._resident_page_blocks(request_id, page_idx)
         if blocks is None:
             return False
         for manager, block in zip(self.resident_managers, blocks):
             self._owners.setdefault(block.block_id, set()).add((request_id, page_idx))
-            manager.block_pool.unpin_blocks([block], self._on_block_reused)
-        state.pinned_clean.discard(page_idx)
+            manager.block_pool.unpin_blocks([block], self._on_block_evicted)
+        state.pinned_durable.discard(page_idx)
         state.unpinned_pages.add(page_idx)
         return True
 
-    def _unpin_clean_pages(self, request_id: str, state: _HiSparseRequestState) -> None:
-        for page_idx in sorted(state.pinned_clean):
+    def _unpin_durable_pages(
+        self, request_id: str, state: _HiSparseRequestState
+    ) -> None:
+        for page_idx in sorted(state.pinned_durable):
             self._unpin_page(request_id, state, page_idx)
 
-    def _page_became_clean(
+    def _page_became_durable(
         self, request_id: str, state: _HiSparseRequestState, page_idx: int
     ) -> None:
-        state.pinned_clean.add(page_idx)
+        state.pinned_durable.add(page_idx)
         if self._can_read_from_host(request_id):
             self._unpin_page(request_id, state, page_idx)
 
-    def _on_block_reused(self, block: KVCacheBlock) -> None:
+    def _on_block_evicted(self, block: KVCacheBlock) -> None:
         host_hash = self._copy_by_block.get(block.block_id)
         if host_hash is not None:
             self._drop_copy(host_hash)
@@ -383,9 +386,9 @@ class HiSparseCoordinator:
     def update_residency(self, request_id: str) -> None:
         """Per-step residency policy for a scheduled request.
 
-        A request that can read from host releases every clean sealed page to
+        A request that can read from host releases every durable sealed page to
         the pool. One that cannot keeps its pages pinned until the shared pool
-        runs low, then asks for a hot region. Pages remain pinned until that region
+        runs low, then asks for a hot buffer. Pages remain pinned until that region
         is allocated on a subsequent scheduling pass.
         """
         if not self.resident_managers:
@@ -398,16 +401,14 @@ class HiSparseCoordinator:
             for manager in self.hot_managers:
                 manager.require_hot(request_id)
             return
-        self._unpin_clean_pages(request_id, state)
+        self._unpin_durable_pages(request_id, state)
 
     # ------------------------------------------------------------------
     # Host publication and spills
     # ------------------------------------------------------------------
 
-    def plan_prefix_materialization(
-        self, request_id: str, num_computed_tokens: int
-    ) -> None:
-        """Eagerly write back every sealed page that has no host copy yet."""
+    def plan_prefix_spills(self, request_id: str, num_computed_tokens: int) -> None:
+        """Eagerly spill every sealed page that has no host copy yet."""
         if not self.resident_managers:
             return
         assert self.host_manager is not None
@@ -425,7 +426,7 @@ class HiSparseCoordinator:
                 break
             if page_idx in state.pending_pages:
                 continue
-            if page_idx in state.valid_pages:
+            if page_idx in state.durable_pages:
                 continue
             if not all(
                 manager.get_resident_page(request_id, page_idx) is not None
@@ -501,7 +502,7 @@ class HiSparseCoordinator:
         block_size = self.resident_managers[0].block_size
         num_pages = num_computed_tokens // block_size
         state = self._get_request_state(request_id)
-        state.valid_pages = set(range(num_pages))
+        state.durable_pages = set(range(num_pages))
         state.ready_prefix_pages = num_pages
         if num_computed_tokens:
             self._plan_page_transfer(
@@ -720,21 +721,23 @@ class HiSparseCoordinator:
             pending.request_state.pending_pages.pop(page_idx, None)
             if self.request_states.get(request_id) is pending.request_state:
                 if not pending.restore:
-                    pending.request_state.valid_pages.add(page_idx)
-                if page_idx in pending.request_state.valid_pages:
-                    self._page_became_clean(request_id, pending.request_state, page_idx)
+                    pending.request_state.durable_pages.add(page_idx)
+                if page_idx in pending.request_state.durable_pages:
+                    self._page_became_durable(
+                        request_id, pending.request_state, page_idx
+                    )
                     if pending.restore:
                         self._record_copy(request_id, page_idx, pending.host_block)
                 completed_request_ids.add(request_id)
             elif pending.request_state.publication is not None:
                 if not pending.restore:
-                    pending.request_state.valid_pages.add(page_idx)
+                    pending.request_state.durable_pages.add(page_idx)
                 self._publish_detached_blocks(pending.request_state)
             assert self.host_manager is not None
             self.host_manager.block_pool.free_blocks([pending.host_block])
         for request_id in completed_request_ids:
             state = self.request_states[request_id]
-            while state.ready_prefix_pages in state.valid_pages:
+            while state.ready_prefix_pages in state.durable_pages:
                 state.ready_prefix_pages += 1
             self._publish_host_blocks_if_ready(request_id)
 
@@ -746,7 +749,7 @@ class HiSparseCoordinator:
         if blocks is None:
             return
         assert self.host_manager is not None
-        while state.ready_prefix_pages in state.valid_pages:
+        while state.ready_prefix_pages in state.durable_pages:
             state.ready_prefix_pages += 1
         # The host group uses full-attention retention. Only sealed pages with
         # completed copies can outlive the request, including on cancellation.
@@ -762,7 +765,7 @@ class HiSparseCoordinator:
         state.publication = None
 
     def free(self, request_id: str) -> None:
-        """Detach the request; its clean pages stay readable copies in the pool."""
+        """Detach the request; its durable pages stay readable GPU copies."""
         self._pending_imports.pop(request_id, None)
         state = self.request_states.pop(request_id, None)
         if state is None:
@@ -799,10 +802,10 @@ class HiSparseCoordinator:
                     if owners is not None:
                         owners.discard((request_id, page_idx))
                 elif (
-                    page_idx in state.valid_pages
+                    page_idx in state.durable_pages
                     and page_idx not in state.pending_pages
                 ):
-                    manager.block_pool.unpin_blocks([block], self._on_block_reused)
+                    manager.block_pool.unpin_blocks([block], self._on_block_evicted)
                 else:
                     continue
                 blocks[page_idx] = manager._null_block

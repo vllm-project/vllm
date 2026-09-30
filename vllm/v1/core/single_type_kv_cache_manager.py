@@ -2385,7 +2385,7 @@ class _HiSparseAuxiliaryManager(SingleTypeKVCacheManager):
 
 
 class HiSparseHotManager(_HiSparseAuxiliaryManager):
-    """Allocate a hot region only after a request acquires CPU-only history."""
+    """Allocate a hot buffer only after a request acquires CPU-only history."""
 
     def __init__(self, kv_cache_spec: HiSparseHotSpec, **kwargs) -> None:
         super().__init__(kv_cache_spec, **kwargs)
@@ -2409,7 +2409,7 @@ class HiSparseHotManager(_HiSparseAuxiliaryManager):
         apply_admission_cap: bool = False,
     ) -> int:
         assert not new_computed_blocks
-        # A hot region is needed to read host-backed history: an external
+        # A hot buffer is needed to read host-backed history: an external
         # import, a new request resuming a host prefix, or one already asked
         # to transition. Running requests keep their earlier answer.
         host_import = total_computed_tokens > num_local_computed_tokens
@@ -2540,7 +2540,7 @@ class HiSparseResidentManager(_HiSparseAuxiliaryManager):
         replay_boundaries: Sequence[int],
     ) -> None:
         assert self.coordinator is not None
-        self.coordinator.plan_prefix_materialization(request.request_id, num_tokens)
+        self.coordinator.plan_prefix_spills(request.request_id, num_tokens)
         self.coordinator.update_residency(request.request_id)
 
     def allocate_new_blocks(
