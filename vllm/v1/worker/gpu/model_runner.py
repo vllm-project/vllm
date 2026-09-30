@@ -765,7 +765,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.vllm_config,
                 kv_cache_allocation_context=kv_cache_allocation_context,
                 block_tables=self.block_tables,
-                draft_layer_names=draft_attn_layer_names or (),
             )
         self.kv_caches = [
             cache for cache in kv_caches_dict.values() if cache.device == self.device
