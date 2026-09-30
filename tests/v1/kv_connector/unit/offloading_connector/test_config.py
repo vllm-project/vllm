@@ -17,7 +17,10 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading.scheduler import (
     SchedulerOffloadConfig,
 )
 from vllm.platforms import current_platform
-from vllm.v1.core.kv_cache_utils import generate_scheduler_kv_cache_config
+from vllm.v1.core.kv_cache_utils import (
+    generate_scheduler_kv_cache_config,
+    get_kv_cache_config_from_groups,
+)
 from vllm.v1.kv_cache_interface import (
     CircularBufferSpec,
     FullAttentionSpec,
@@ -33,6 +36,7 @@ from vllm.v1.kv_cache_interface import (
     SlidingWindowSpec,
     UniformTypeKVCacheSpecs,
 )
+from vllm.v1.kv_cache_layout import KVCacheLayout
 from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 from vllm.v1.kv_offload.file_mapper import FileMapper
 from vllm.v1.kv_offload.tiering.spec import TieringOffloadingSpec
@@ -437,6 +441,90 @@ def test_hisparse_partial_group_size_survives_scheduler_flattening():
 
     assert worker.worker_kv_bytes_per_block == scheduler.worker_kv_bytes_per_block
     assert worker.worker_kv_bytes_per_block == wrapped.page_size_bytes
+
+
+def _make_packed_group_config(tp_size: int = 1, full_indexer: bool = False):
+    config = _make_vllm_config(tensor_parallel_size=tp_size)
+    config.cache_config.kv_cache_layout = "BLHNC"
+    config.cache_config.get_resolved_kv_cache_layout.return_value = KVCacheLayout.BLHNC
+    config.cache_config.num_gpu_blocks_override = 4
+    config.attention_config.hisparse_config = None
+    main_spec = _mla_spec(head_size=8, dtype=torch.uint8)
+    indexer_spec = (
+        FullAttentionSpec(block_size=16, num_kv_heads=1, head_size=1, dtype=torch.uint8)
+        if full_indexer
+        else MLAAttentionSpec(
+            block_size=16,
+            num_kv_heads=1,
+            head_size=4,
+            dtype=torch.uint8,
+            tokens_per_state=4,
+            alignment=32,
+        )
+    )
+    layer_specs = {
+        "mla.0": main_spec,
+        "indexer.0": indexer_spec,
+        "mla.1": main_spec,
+        "indexer.1": indexer_spec,
+    }
+    mixed = UniformTypeKVCacheSpecs.from_specs(layer_specs)
+    assert mixed is not None
+    groups = [
+        KVCacheGroupSpec(list(layer_specs), mixed),
+        KVCacheGroupSpec(
+            ["scratch"],
+            CircularBufferSpec(
+                block_size=16, num_kv_heads=1, head_size=1, dtype=torch.uint8
+            ),
+        ),
+        KVCacheGroupSpec(
+            ["swa"],
+            SlidingWindowMLASpec(
+                block_size=16,
+                num_kv_heads=1,
+                head_size=8,
+                dtype=torch.uint8,
+                sliding_window=128,
+            ),
+        ),
+    ]
+    return config, get_kv_cache_config_from_groups(config, groups, 4096)
+
+
+@pytest.mark.parametrize("tp_size", [1, 2])
+@pytest.mark.parametrize("full_indexer", [False, True])
+def test_packed_group_layout_survives_scheduler_flattening(tp_size, full_indexer):
+    config, cache = _make_packed_group_config(tp_size, full_indexer)
+    expected = (((0, 128), (256, 32), (128, 128), (288, 32)), ((0, 128),))
+    scheduler_cache = generate_scheduler_kv_cache_config([cache] * tp_size)
+    for representation in (cache, scheduler_cache):
+        result = build_offloading_config(config, representation)
+        assert tuple(g.group_id for g in result.groups) == (0, 2)
+        assert tuple(g.packed_layout for g in result.groups) == expected
+        assert result.worker_kv_bytes_per_block == 320
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [("offset", 1), ("layer_stride", 0), ("block_stride", 128), ("size", 1)],
+)
+def test_packed_group_layout_rejects_invalid_placements(field, value):
+    config, cache = _make_packed_group_config()
+    setattr(cache.kv_cache_tensors[0], field, value)
+    result = build_offloading_config(config, cache)
+    assert all(not g.packed_layout for g in result.groups)
+
+
+@pytest.mark.parametrize(
+    "layout,canonical", [("LBHNC", False), ("BLNHC", False), ("BLHNC", True)]
+)
+def test_packed_group_layout_rejects_other_host_layouts(layout, canonical):
+    config, cache = _make_packed_group_config()
+    config.cache_config.kv_cache_layout = layout
+    config.kv_transfer_config.kv_connector_extra_config["canonical_layout"] = canonical
+    result = build_offloading_config(config, cache)
+    assert all(not g.packed_layout for g in result.groups)
 
 
 def test_zero_blocks_skips_tensor_layout_validation():

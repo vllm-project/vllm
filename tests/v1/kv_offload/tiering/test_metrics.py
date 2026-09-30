@@ -94,7 +94,8 @@ def test_tiering_metrics_tracker_stops_lookup_metrics_after_allocation():
     assert TieringOffloadingMetrics.CHUNK_HITS not in values
 
 
-def test_tiering_metrics_tracker_records_finished_job_metrics():
+@pytest.mark.parametrize("reported_bytes", [None, 7])
+def test_tiering_metrics_tracker_records_finished_job_metrics(reported_bytes):
     tracker = TieringMetricsTracker(
         tier_types=["fs"],
         num_primary_chunks=5,
@@ -125,10 +126,16 @@ def test_tiering_metrics_tracker_records_finished_job_metrics():
         tracker.on_job_registered(job)
 
     tracker.on_job_finished(
-        jobs[0], JobResult(job_id=0, success=True, transfer_time=0.5)
+        jobs[0],
+        JobResult(
+            job_id=0, success=True, transfer_time=0.5, transfer_bytes=reported_bytes
+        ),
     )
     tracker.on_job_finished(
-        jobs[1], JobResult(job_id=1, success=True, transfer_time=0.25)
+        jobs[1],
+        JobResult(
+            job_id=1, success=True, transfer_time=0.25, transfer_bytes=reported_bytes
+        ),
     )
     tracker.on_job_finished(jobs[2], JobResult(job_id=2, success=False))
     tracker.on_job_finished(jobs[3], JobResult(job_id=3, success=False))
@@ -137,16 +144,20 @@ def test_tiering_metrics_tracker_records_finished_job_metrics():
     assert stats is not None
     values = stats.data["data"]
     label = ("1:fs",)
-    assert values[TieringOffloadingMetrics.WRITE_BYTES][label] == 16
+    expected_bytes = 16 if reported_bytes is None else reported_bytes
+    assert values[TieringOffloadingMetrics.WRITE_BYTES][label] == expected_bytes
     assert values[TieringOffloadingMetrics.WRITE_TIME][label] == 0.5
-    assert values[TieringOffloadingMetrics.READ_BYTES][label] == 16
+    assert values[TieringOffloadingMetrics.READ_BYTES][label] == expected_bytes
     assert values[TieringOffloadingMetrics.READ_TIME][label] == 0.25
     assert values[TieringOffloadingMetrics.CASCADE_JOB_FAILURES][label] == 1
     assert values[TieringOffloadingMetrics.PROMOTION_JOB_FAILURES][label] == 1
     tracker.assert_idle()
 
 
-def test_tiering_metrics_tracker_records_partial_promotion_success_bytes():
+@pytest.mark.parametrize("reported_bytes", [None, 7])
+def test_tiering_metrics_tracker_records_partial_promotion_success_bytes(
+    reported_bytes,
+):
     tracker = TieringMetricsTracker(
         tier_types=["fs"],
         num_primary_chunks=5,
@@ -166,6 +177,7 @@ def test_tiering_metrics_tracker_records_partial_promotion_success_bytes():
             success=False,
             successful_keys=(keys[0], keys[2]),
             transfer_time=0.5,
+            transfer_bytes=reported_bytes,
         ),
     )
 
@@ -173,7 +185,9 @@ def test_tiering_metrics_tracker_records_partial_promotion_success_bytes():
     assert stats is not None
     values = stats.data["data"]
     label = ("1:fs",)
-    assert values[TieringOffloadingMetrics.READ_BYTES][label] == 32
+    assert values[TieringOffloadingMetrics.READ_BYTES][label] == (
+        32 if reported_bytes is None else reported_bytes
+    )
     assert values[TieringOffloadingMetrics.READ_TIME][label] == 0.5
     assert values[TieringOffloadingMetrics.PROMOTION_JOB_FAILURES][label] == 1
     tracker.assert_idle()

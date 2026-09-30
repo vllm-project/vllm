@@ -56,6 +56,59 @@ def _group_kv_bytes_per_block(group: "KVCacheGroupSpec") -> int:
     return spec.page_size_bytes * len(group.layer_names)
 
 
+def _get_packed_layouts(
+    kv_cache_config: "KVCacheConfig",
+    selected_groups: tuple[tuple[int, "KVCacheGroupSpec"], ...],
+) -> dict[int, tuple[tuple[int, int], ...]]:
+    """Certify contiguous BLHNC group prefixes from retained tensor placements."""
+    tensors = kv_cache_config.kv_cache_tensors
+    if (
+        kv_cache_config.hisparse_host_num_blocks is not None
+        or kv_cache_config.num_blocks <= 0
+        or not tensors
+    ):
+        return {}
+    block_stride = tensors[0].block_stride
+    layers: dict[str, tuple[int, int]] = {}
+    for tensor in tensors:
+        if (
+            tensor.host_resident
+            or tensor.block_stride != block_stride
+            or tensor.size != block_stride * kv_cache_config.num_blocks
+            or not 0 < tensor.layer_stride <= block_stride
+        ):
+            return {}
+        # In BLHNC, the layer stride includes the whole padded page, even
+        # for one-layer runs. Unlike specs, placements survive flattening.
+        for index, name in enumerate(tensor.layers):
+            if name in layers:
+                return {}
+            layers[name] = (
+                tensor.offset + index * tensor.layer_stride,
+                tensor.layer_stride,
+            )
+    layouts = {}
+    packed_attention = False
+    for group_id, group in selected_groups:
+        if not group.layer_names or any(n not in layers for n in group.layer_names):
+            return {}
+        layout = tuple(layers[name] for name in group.layer_names)
+        end = 0
+        for offset, page_bytes in sorted(layout):
+            if offset != end or offset + page_bytes > block_stride:
+                return {}
+            end += page_bytes
+        layouts[group_id] = layout
+        spec = next(iter(iter_layer_specs(group.kv_cache_spec)), None)
+        packed_attention |= (
+            isinstance(spec, AttentionSpec)
+            and spec.page_size_bytes < block_stride
+            and any(page == spec.page_size_bytes for _, page in layout)
+        )
+    # The worker uses a single packed transfer region only for strided pages.
+    return layouts if packed_attention else {}
+
+
 def build_offloading_config(
     vllm_config: "VllmConfig",
     kv_cache_config: "KVCacheConfig",
@@ -74,6 +127,25 @@ def build_offloading_config(
     )
     if not selected_groups:
         raise ValueError("KV offloading found no eligible cache groups.")
+    canonical_layout = bool(extra_config.get("canonical_layout", False))
+    packed_layouts = {}
+    if (
+        vllm_config.cache_config.kv_cache_layout == "BLHNC"
+        and not canonical_layout
+        and parallel_config.pipeline_parallel_size == 1
+        and parallel_config.prefill_context_parallel_size == 1
+        and parallel_config.decode_context_parallel_size == 1
+        and parallel_config.world_size == parallel_config.tensor_parallel_size
+        and parallel_config.nnodes_within_dp == 1
+        and (
+            parallel_config.distributed_executor_backend == "mp"
+            or (
+                parallel_config.world_size == 1
+                and parallel_config.distributed_executor_backend == "uni"
+            )
+        )
+    ):
+        packed_layouts = _get_packed_layouts(kv_cache_config, selected_groups)
     groups = tuple(
         OffloadingGroupConfig(
             group_id=group_id,
@@ -82,6 +154,7 @@ def build_offloading_config(
                 parallel_config.decode_context_parallel_size,
             ),
             layer_names=tuple(group.layer_names),
+            packed_layout=packed_layouts.get(group_id, ()),
         )
         for group_id, group in selected_groups
     )
@@ -174,8 +247,6 @@ def build_offloading_config(
         and parallel_config.distributed_executor_backend == "mp"
         and parallel_config.nnodes_within_dp == 1
     )
-
-    canonical_layout = bool(extra_config.get("canonical_layout", False))
 
     # Only a single non-MLA full-attention group with genuinely head-sharded
     # pages is parallelism-invariant: replicated latent or GQA heads,

@@ -16,8 +16,10 @@ File naming:  <base_path>_r<rank>/<hhh>/<hh>_g<group_idx>/<hash_hex>.bin
 
 import functools
 import json
+import mmap
 import os
 from collections.abc import Iterable
+from itertools import groupby
 from typing import TYPE_CHECKING, ClassVar
 
 try:
@@ -30,6 +32,7 @@ except ImportError:
 from typing_extensions import override
 
 from vllm.logger import init_logger
+from vllm.utils.math_utils import round_up
 from vllm.v1.kv_offload.base import (
     Locality,
     LookupResult,
@@ -37,6 +40,7 @@ from vllm.v1.kv_offload.base import (
     OffloadingEvent,
     OffloadKey,
     ReqContext,
+    get_offload_group_idx,
 )
 from vllm.v1.kv_offload.file_mapper import FileMapper
 from vllm.v1.kv_offload.tiering.async_lookup import AsyncLookupManager
@@ -50,6 +54,7 @@ from vllm.v1.kv_offload.tiering.base import (
     TransferJob,
 )
 from vllm.v1.kv_offload.tiering.fs.io import (
+    _validate_offsets,
     batch_load_block,
     batch_store_block,
     probe_o_direct,
@@ -117,6 +122,7 @@ class FileSystemTierManager(SecondaryTierManager):
         enable_kv_events: bool = False,
         locality: str | None = None,
         backpressure_detector: BackpressureDetector | None = None,
+        compact_groups: bool = False,
     ):
         """Args:
         offloading_spec: Contains normalized offloading configuration and
@@ -132,6 +138,8 @@ class FileSystemTierManager(SecondaryTierManager):
         locality: Whether this tier's storage is LOCAL or REMOTE relative
             to the publishing vLLM instance.
         backpressure_detector: Optional backpressure detector.
+        compact_groups: Pack unequal BLHNC groups to reduce file size at the
+            cost of additional CPU copies.
 
         """
         super().__init__(
@@ -155,8 +163,7 @@ class FileSystemTierManager(SecondaryTierManager):
         # Keys of in-flight load (promotion) jobs, so a failed load can mark
         # its own cached lookup verdicts False (see get_finished_jobs).
         self._load_job_keys: dict[JobId, list[OffloadKey]] = {}
-        # Block count per in-flight job, used to report transfer_bytes.
-        self._job_block_counts: dict[JobId, int] = {}
+        self._job_file_sizes: dict[JobId, list[int]] = {}
         # Per load job: how many blocks loaded before a failure (partial keep).
         # Written by the pool worker inside the load task before it raises (so
         # before task_done publishes the job); read on the scheduler thread in
@@ -170,13 +177,47 @@ class FileSystemTierManager(SecondaryTierManager):
             "primary_kv_view.strides cannot be None"
         )
         self._block_size: int = primary_kv_view.strides[0]
+        config = offloading_spec.config
+        self._packed_block_size = config.worker_kv_bytes_per_block
+        self._group_sizes: dict[int, int] = {}
+        storage_format = None
+        if (
+            compact_groups
+            and config.groups
+            and all(group.packed_layout for group in config.groups)
+        ):
+            group_sizes = {
+                group.group_id: sum(size for _, size in group.packed_layout)
+                for group in config.groups
+            }
+            if min(group_sizes.values()) < self._packed_block_size:
+                self._group_sizes = group_sizes
+                copies = (
+                    1
+                    if offloading_spec.replicated_layout
+                    else config.parallel.world_size
+                )
+                self._packed_blocks = config.cache.blocks_per_chunk * copies
+                assert self._block_size == round_up(
+                    self._packed_blocks * self._packed_block_size, 4096
+                )
+                storage_format = {
+                    "name": "packed-group-v1",
+                    "layout": config.kv_cache_layout,
+                    "block_bytes": self._packed_block_size,
+                    "copies": copies,
+                    "groups": [
+                        (group.group_id, group.packed_layout) for group in config.groups
+                    ],
+                }
 
         # Opt in; FileMapper enables it only for a parallelism-invariant block.
         self.file_mapper = FileMapper.from_offloading_spec(
             root_dir=root_dir,
             offloading_spec=offloading_spec,
             blocks_per_file=offloading_spec.blocks_per_chunk,
-            parallel_agnostic=True,
+            parallel_agnostic=storage_format is None,
+            storage_format=storage_format,
         )
 
         # Write config file
@@ -225,14 +266,13 @@ class FileSystemTierManager(SecondaryTierManager):
         if self.events is not None:
             self._store_job_keys[job_metadata.job_id] = keys
         task = functools.partial(
-            batch_store_block,
+            self._transfer_blocks,
             [self.file_mapper.get_file_name(key) for key in keys],
-            self._primary_kv_view,
             [int(cid) * self._block_size for cid in job_metadata.chunk_ids],
-            self._block_size,
-            self._use_o_direct,
+            keys,
+            False,
         )
-        self._job_block_counts[job_metadata.job_id] = len(keys)
+        self._job_file_sizes[job_metadata.job_id] = [self._file_size(k) for k in keys]
         self._pool.enqueue_store(job_metadata.job_id, 1, [task])
 
     @override
@@ -242,19 +282,13 @@ class FileSystemTierManager(SecondaryTierManager):
         # keys as a miss (see get_finished_jobs).
         keys = list(job_metadata.keys)
         self._load_job_keys[job_id] = keys
-        self._job_block_counts[job_id] = len(keys)
+        self._job_file_sizes[job_id] = [self._file_size(k) for k in keys]
         paths = [self.file_mapper.get_file_name(key) for key in keys]
         offsets = [int(cid) * self._block_size for cid in job_metadata.chunk_ids]
 
         def load_task() -> None:
             try:
-                batch_load_block(
-                    paths,
-                    self._primary_kv_view,
-                    offsets,
-                    self._block_size,
-                    self._use_o_direct,
-                )
+                self._transfer_blocks(paths, offsets, keys, True)
             except OSError as exc:
                 # Runs on the pool worker thread. Record how many blocks loaded
                 # before the failure so get_finished_jobs can keep them; this
@@ -275,14 +309,98 @@ class FileSystemTierManager(SecondaryTierManager):
 
         self._pool.enqueue_load(job_id, 1, [load_task])
 
+    def _file_size(self, key: OffloadKey) -> int:
+        if not self._group_sizes:
+            return self._block_size
+        return round_up(
+            self._group_sizes[get_offload_group_idx(key)] * self._packed_blocks, 4096
+        )
+
+    def _transfer_blocks(
+        self, paths: list[str], offsets: list[int], keys: list[OffloadKey], load: bool
+    ) -> None:
+        transfer = batch_load_block if load else batch_store_block
+        if not self._group_sizes:
+            transfer(
+                paths,
+                self._primary_kv_view,
+                offsets,
+                self._block_size,
+                self._use_o_direct,
+            )
+            return
+
+        primary = self._primary_kv_view.cast("B")
+        _validate_offsets(primary, offsets, self._block_size)
+        sizes = [self._group_sizes[get_offload_group_idx(key)] for key in keys]
+        completed = 0
+        # Keep original key order: a failed load reports a successful prefix.
+        for size, run in groupby(zip(paths, offsets, sizes), key=lambda item: item[2]):
+            entries = list(run)
+            if size == self._packed_block_size:
+                try:
+                    transfer(
+                        [p for p, _, _ in entries],
+                        primary,
+                        [o for _, o, _ in entries],
+                        self._block_size,
+                        self._use_o_direct,
+                    )
+                except OSError as exc:
+                    exc.num_succeeded = completed + getattr(exc, "num_succeeded", 0)  # type: ignore[attr-defined]
+                    raise
+                completed += len(entries)
+                continue
+
+            file_size = round_up(size * self._packed_blocks, 4096)
+            # Bound staging memory to 16 MiB per task, or one larger file.
+            batch_size = max(1, (16 * 1024 * 1024) // file_size)
+            for start in range(0, len(entries), batch_size):
+                batch = entries[start : start + batch_size]
+                error = None
+                with (
+                    mmap.mmap(-1, len(batch) * file_size) as buffer,
+                    memoryview(buffer) as packed,
+                ):
+                    if not load:
+                        for i, (_, offset, _) in enumerate(batch):
+                            for block in range(self._packed_blocks):
+                                src = offset + block * self._packed_block_size
+                                dst = i * file_size + block * size
+                                packed[dst : dst + size] = primary[src : src + size]
+                    succeeded = 0
+                    try:
+                        transfer(
+                            [p for p, _, _ in batch],
+                            packed,
+                            [i * file_size for i in range(len(batch))],
+                            file_size,
+                            self._use_o_direct,
+                        )
+                        succeeded = len(batch)
+                    except OSError as exc:
+                        succeeded = getattr(exc, "num_succeeded", 0)
+                        exc.num_succeeded = completed + succeeded  # type: ignore[attr-defined]
+                        # I/O tracebacks retain memoryviews of the staging mmap.
+                        error = exc.with_traceback(None)
+                    if load:
+                        for i, (_, offset, _) in enumerate(batch[:succeeded]):
+                            for block in range(self._packed_blocks):
+                                src = i * file_size + block * size
+                                dst = offset + block * self._packed_block_size
+                                primary[dst : dst + size] = packed[src : src + size]
+                if error is not None:
+                    raise error
+                completed += len(batch)
+
     @override
     def get_finished_jobs(self) -> Iterable[JobResult]:
         """Collect finished jobs; a failed promotion marks only its failed keys
         as a miss here (scheduler thread)."""
         results = []
         for job_id, success, transfer_time in self._pool.get_finished():
-            block_count = self._job_block_counts.pop(job_id, 0)
-            transfer_bytes = block_count * self._block_size if block_count else None
+            file_sizes = self._job_file_sizes.pop(job_id, [])
+            transfer_bytes = sum(file_sizes) if file_sizes else None
             if self.events is not None:
                 keys = self._store_job_keys.pop(job_id, None)
                 if success and keys:
@@ -310,7 +428,7 @@ class FileSystemTierManager(SecondaryTierManager):
                         success=False,
                         successful_keys=tuple(successful) if successful else None,
                         transfer_time=transfer_time,
-                        transfer_bytes=transfer_bytes,
+                        transfer_bytes=sum(file_sizes[:num_succeeded]),
                     )
                 )
                 continue
