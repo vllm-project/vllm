@@ -196,9 +196,5 @@ async def test_empty_input_stream_finishes_without_engine_request():
     assert task is not None
     await task
 
-    output = queue.get_nowait()
-    assert output is not STREAM_FINISHED
-    assert output.request_id == "request"
-    assert output.outputs == []
-    assert output.finished
+    assert queue.get_nowait() is STREAM_FINISHED
     llm._add_request.assert_not_awaited()

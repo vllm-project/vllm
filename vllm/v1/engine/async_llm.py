@@ -641,16 +641,7 @@ class AsyncLLM(EngineClient):
                         # finished. Don't send if cancelled (session was aborted).
                         await self._add_request(final_req, None, None, 0, queue)
                     elif not errored:
-                        queue.put(
-                            RequestOutput(
-                                request_id=request_id,
-                                prompt=None,
-                                prompt_token_ids=None,
-                                prompt_logprobs=None,
-                                outputs=[],
-                                finished=True,
-                            )
-                        )
+                        queue.put(STREAM_FINISHED)
 
         # Ensure output handler is running.
         self._run_output_handler()
