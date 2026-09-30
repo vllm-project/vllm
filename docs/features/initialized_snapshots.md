@@ -42,10 +42,10 @@ Snapshots currently require:
   and CRIU still reopens it by path, so replacing that file permanently
   invalidates the artifact without an early error.
 
-The official `vllm/vllm-openai` Linux x86-64 image includes the snapshot
-runtime. It still requires a compatible host driver, kernel, and privileges.
-Arm64 images omit it. Source installs must set `CRIU_CUDA_PLUGIN_DIR` to the
-directory containing `cuda_plugin.so`.
+The official CUDA 13 `vllm/vllm-openai` Linux x86-64 images include the
+snapshot runtime. CUDA 12.x and Arm64 images omit it. A compatible host
+driver, kernel, and privileges are still required. Source installs must set
+`CRIU_CUDA_PLUGIN_DIR` to the directory containing `cuda_plugin.so`.
 
 Run snapshot commands with `docker exec` inside a long-lived container. Restore
 hands the API server off as a detached process, so a one-shot container would
