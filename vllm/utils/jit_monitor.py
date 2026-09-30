@@ -16,7 +16,7 @@ Currently monitors:
 - CuTeDSL cute.compile calls
 - Triton ``@triton.autotune`` cache misses (via ``knobs.autotuning.print``)
 - Triton ``@triton.jit`` first-time compilations
-  (via ``knobs.runtime.jit_post_compile_hook``)
+  (via ``knobs.compilation.listener``; disk-cache loads are logged at info level)
 - TileLang ``@tilelang.jit`` first-time compilations
 """
 
@@ -235,8 +235,35 @@ def _log_triton_jit_compile(fn_name: str, kwargs) -> None:
     )
 
 
+def _format_listener_details(src: object) -> str:
+    """Verbose-mode details for a compilation-listener event."""
+    parts: list[str] = []
+    signature = getattr(src, "signature", None)
+    if isinstance(signature, Mapping) and signature:
+        parts.append("signature=" + _safe_repr(dict(signature)))
+    constants = getattr(src, "constants", None)
+    if isinstance(constants, Mapping) and constants:
+        parts.append(
+            "constants=" + _safe_repr({str(k): v for k, v in constants.items()})
+        )
+    fn = getattr(src, "fn", None)
+    qualname = getattr(fn, "__qualname__", None)
+    if qualname:
+        parts.append(f"fn={qualname}")
+    return "; ".join(parts)
+
+
 def _setup_triton_jit_hook() -> None:
-    """Register a jit_post_compile_hook that warns on compilation."""
+    """Register a compilation listener that warns on real JIT compiles.
+
+    Triton's ``jit_post_compile_hook`` fires after every in-process cache
+    miss, including kernels served from the on-disk cache:
+    ``compiler.compile`` returns early with ``cache_hit=True`` without
+    compiling, and the runtime still invokes the post-compile hook
+    afterwards. ``knobs.compilation.listener`` carries the ``cache_hit``
+    flag, so this monitor warns only when a kernel was actually compiled
+    (``cache_hit is False``) and logs disk-cache loads at info level.
+    """
     if not HAS_TRITON:
         return
     from triton import knobs
@@ -257,22 +284,58 @@ def _setup_triton_jit_hook() -> None:
         cast(Any, _guarded)._vllm_guarded = True
         _triton_jit.serialize_specialization_data = _guarded
 
-    existing_hook = knobs.runtime.jit_post_compile_hook
+    compilation_knobs = getattr(knobs, "compilation", None)
+    if not hasattr(compilation_knobs, "listener"):
+        # Triton without the compilation listener: keep the previous
+        # post-compile hook (disk-cache loads are indistinguishable there).
+        existing_hook = knobs.runtime.jit_post_compile_hook
 
-    def _on_jit_compile(**kwargs):
-        # `jit_post_compile_hook` is Triton internal API and its
-        # signature has changed across releases (kwargs added/renamed).
-        # Accept **kwargs so an upstream change cannot crash this hook
-        # with TypeError, and forward the full kwarg set to any
-        # pre-existing hook unchanged.
-        fn = kwargs.get("fn")
-        fn_name = getattr(fn, "name", "<unknown>")
-        _log_triton_jit_compile(fn_name, kwargs)
-        if existing_hook is not None:
-            return existing_hook(**kwargs)
+        def _on_jit_compile(**kwargs):
+            # `jit_post_compile_hook` is Triton internal API and its
+            # signature has changed across releases (kwargs added/renamed).
+            # Accept **kwargs so an upstream change cannot crash this hook
+            # with TypeError, and forward the full kwarg set to any
+            # pre-existing hook unchanged.
+            fn = kwargs.get("fn")
+            fn_name = getattr(fn, "name", "<unknown>")
+            _log_triton_jit_compile(fn_name, kwargs)
+            if existing_hook is not None:
+                return existing_hook(**kwargs)
+            return None
+
+        knobs.runtime.jit_post_compile_hook = _on_jit_compile
+        return
+
+    previous_listener = compilation_knobs.listener
+
+    def _on_triton_compile_event(*, src=None, cache_hit=None, **_forwarded):
+        # Called by ``compiler.compile`` for both disk-cache hits
+        # (``cache_hit=True``, no compilation) and real compilations
+        # (``cache_hit=False``). Only the latter is a JIT event.
+        fn_name = getattr(src, "name", None) or "<unknown>"
+        if cache_hit is False:
+            detail = _format_listener_details(src) if _verbose else None
+            _handle_jit_event(
+                backend="Triton",
+                event="kernel JIT compilation",
+                fn_name=fn_name,
+                detail=detail,
+            )
+        else:
+            # A disk-cache load is not a JIT event; keep it observable at
+            # info level so warm starts are still traceable.
+            logger.info(
+                "Triton kernel %s served from disk cache (no compilation; "
+                "not a JIT event).",
+                fn_name,
+            )
+        if previous_listener is not None:
+            payload = {"src": src, "cache_hit": cache_hit}
+            payload.update(_forwarded)
+            return previous_listener(**payload)
         return None
 
-    knobs.runtime.jit_post_compile_hook = _on_jit_compile
+    compilation_knobs.listener = _on_triton_compile_event
 
 
 # ------------------------------------------------------------------
