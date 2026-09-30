@@ -22,6 +22,9 @@ from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
     QuantizeMethodBase,
 )
+from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors import (  # noqa: E501
+    CompressedTensorsConfig,
+)
 from vllm.model_executor.layers.quantization.fp8 import Fp8Config
 from vllm.model_executor.layers.quantization.modelopt import (
     ModelOptMixedPrecisionConfig,
@@ -180,6 +183,11 @@ class Qwen4ExpPLEEmbeddingMethod(QuantizeMethodBase):
         if isinstance(
             quant_config, ModelOptQuantConfigBase
         ) and quant_config.is_layer_excluded(prefix):
+            return Qwen4ExpPLEUnquantizedEmbeddingMethod()
+        if (
+            isinstance(quant_config, CompressedTensorsConfig)
+            and quant_config.get_scheme_dict(None, layer_name=prefix) is None
+        ):
             return Qwen4ExpPLEUnquantizedEmbeddingMethod()
         if not isinstance(quant_config, Fp8Config):
             raise NotImplementedError(
