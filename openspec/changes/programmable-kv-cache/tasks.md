@@ -16,16 +16,16 @@
 
 - [x] 2.1 Set up the uv-managed Python environment, editable vLLM dependencies, and required pre-commit hooks.
 - [x] 2.2 Map behavior checks to existing nearby suites; document module contracts, guarded failure modes, and the cheapest effective test level before adding tests.
-- [ ] 2.3 Record baseline versions/configurations and run complete relevant CPU and Mooncake correctness suites plus real-transfer integration in the chosen environment; smoke tests do not satisfy acceptance.
+- [x] 2.3 Record baseline versions/configurations and run complete relevant CPU and Mooncake correctness suites plus real-transfer integration in the chosen environment; smoke tests do not satisfy acceptance.
 
 ## 3. Control contracts and logical state
 
 - [x] 3.1 Implement validated action payloads, target/capability records, and bounded correlated operation results using the existing envelope.
 - [ ] 3.2 Implement the logical session/continuation index and hash/group-aware resolution, including cache-hit associations and reported coverage. Logical index/resolution implemented; engine request/cache hooks and physical group validation remain.
 - [x] 3.3 Implement independent Retain declarations, expiry, Release, and explicit task-tree cleanup.
-- [ ] 3.4 Verify shared-prefix lifetimes, branch selection, missing content, duplicate control, and unconsumed signals.
+- [x] 3.4 Verify shared-prefix lifetimes, branch selection, missing content, duplicate control, and unconsumed signals.
 - [ ] 3.5 Implement consumption of the merged hint contract for supported cache/state actions, with shared request-attached/request-free validation and action/version capability discovery.
-- [ ] 3.6 Implement the agreed explicit association/continuation/task management commands separately from optional policy signals.
+- [x] 3.6 Implement the agreed explicit association/continuation/task management commands separately from optional policy signals.
 - [ ] 3.7 Implement bounded logical-state queries and the agreed association events, including new membership on cache hits.
 - [ ] 3.8 Verify derived-step correlation, partial effects, unknown versions, bounded/pruned index behavior, and stale logical updates.
 - [ ] 3.9 Implement whole-envelope native/backend dispatch and ensure native-consumed envelopes are not also forwarded through KVCR's existing request hook.

@@ -54,7 +54,11 @@ that period rejects new submissions. Expired IDs can execute again, so callers
 must query within the retention window and use new IDs for intentional retries.
 
 The deduplication unit is the entire ordered envelope plus interpretation/routing
-context. An identical resubmission cannot refresh a Retain TTL or restart work.
+context, including an attached request binding and cache compatibility namespace.
+An identical resubmission cannot refresh a Retain TTL or restart work. Reusing IDs
+for another request binding or weight/layout namespace is a conflict. These fields
+belong to the invocation/result context, not the merged envelope. Native results
+identify their compatibility namespace explicitly.
 Unknown versions and invalid payloads are reported before semantic execution.
 Each derived step retains its parent message/action identity and its own outcome.
 One failed action does not roll back earlier actions; multi-action submission is
@@ -127,3 +131,9 @@ The open-source workload is verl Agent Loop's multi-turn tool example. Preserve
 equivalent model-visible work across baselines. External GPT-OSS-120B and
 DeepSeek-V4-Flash machines will be provided later; those runs remain pending and
 are not replaced by the local debugging results.
+
+The installed native Mooncake CUDA 13 package is `0.3.13.post1`. Local development
+uses an isolated master on `127.0.0.1:19151`, metrics/admin on `127.0.0.1:19153`,
+and TCP transfer. The real-buffer integration suite also supports starting and
+stopping its own isolated master, so its correctness checks are reproducible
+without this particular development process.

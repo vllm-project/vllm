@@ -51,6 +51,8 @@ class ControlContext:
     engine_id: str
     engine_epoch: str
     consumer: Literal["native", "backend"]
+    binding_id: str | None = None
+    namespace: str | None = None
 
 
 @dataclass(frozen=True)
@@ -65,6 +67,8 @@ class OperationResult:
     sequence: int
     reason: str = ""
     completed_steps: tuple[str, ...] = ()
+    binding_id: str | None = None
+    namespace: str | None = None
 
 
 @dataclass(frozen=True)
@@ -160,7 +164,11 @@ def envelope_fingerprint(
     if len(encoded) > max_bytes:
         raise ControlError("invalid_envelope", "Envelope byte limit exceeded")
     digest = hashlib.sha256()
-    digest.update(context.consumer.encode("ascii"))
+    digest.update(
+        json.dumps((context.consumer, context.binding_id, context.namespace)).encode(
+            "utf-8"
+        )
+    )
     digest.update(encoded)
     return digest.digest()
 
@@ -214,6 +222,10 @@ class OperationRegistry:
             raise ControlError("stale_epoch", "Control targets an earlier engine epoch")
         if context.consumer not in ("native", "backend"):
             raise ControlError("unsupported_consumer", "Unknown interpretation path")
+        if context.binding_id is not None:
+            _validate_id(context.binding_id, "binding_id")
+        if context.namespace is not None:
+            _validate_id(context.namespace, "namespace")
 
     def submit(self, envelope: KvHintsEnvelope, context: ControlContext) -> Submission:
         self.validate_context(context)
@@ -246,6 +258,8 @@ class OperationRegistry:
                 self._sequence,
                 OperationStatus.RECEIVED,
                 self._sequence,
+                binding_id=context.binding_id,
+                namespace=context.namespace,
             )
             results[action.action_id] = result
             self._events.append(result)
@@ -274,7 +288,12 @@ class OperationRegistry:
         current = self.get(operation.message_id, operation.action_id)
         if current is None:
             raise ControlError("missing", "Unknown or expired operation")
-        if operation.operation_id != current.operation_id:
+        if (
+            operation.operation_id != current.operation_id
+            or operation.binding_id != current.binding_id
+            or operation.consumer != current.consumer
+            or operation.namespace != current.namespace
+        ):
             raise ControlError(
                 "stale_operation", "Completion refers to an expired action"
             )

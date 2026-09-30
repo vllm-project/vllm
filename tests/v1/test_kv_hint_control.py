@@ -15,6 +15,7 @@ from vllm.v1.kv_hints.control import (
     OperationRegistry,
     OperationStatus,
 )
+from vllm.v1.kv_hints.controller import NativeKVController
 from vllm.v1.kv_hints.native import (
     AssociatePayload,
     DemotePayload,
@@ -28,6 +29,8 @@ from vllm.v1.kv_hints.native import (
     SignalPayload,
     parse_native_action,
 )
+from vllm.v1.kv_hints.retention import RetentionDeclarations
+from vllm.v1.kv_hints.state import SessionPrefixIndex
 
 CONTEXT = ControlContext("engine-a", "epoch-a", "native")
 
@@ -84,7 +87,9 @@ def test_retry_observes_original_progress_without_refreshing_lifetime(registry, 
     assert not registry.submit(hint, CONTEXT).replayed
 
 
-@pytest.mark.parametrize("changed", ["payload", "order", "consumer", "version"])
+@pytest.mark.parametrize(
+    "changed", ["payload", "order", "consumer", "version", "binding"]
+)
 def test_conflicting_message_cannot_reuse_ids(registry, changed):
     hint = envelope(action_ids=("a", "b"))
     registry.submit(hint, CONTEXT)
@@ -95,6 +100,8 @@ def test_conflicting_message_cannot_reuse_ids(registry, changed):
         hint.actions.reverse()
     elif changed == "consumer":
         context = replace(CONTEXT, consumer="backend")
+    elif changed == "binding":
+        context = replace(CONTEXT, binding_id="another-request")
     else:
         hint = msgspec.structs.replace(hint, protocol_version="0.2")
     with pytest.raises(ControlError) as error:
@@ -476,6 +483,7 @@ def test_task_management_is_explicit_and_does_not_accept_policy_signal_schema():
                 "finish_task", {"target": SESSION_TARGET, "signal": "tool_wait"}
             )
         )
+
     with pytest.raises(ControlError, match="parent itself"):
         parse_native_action(
             native_action(
@@ -489,3 +497,362 @@ def test_task_management_is_explicit_and_does_not_accept_policy_signal_schema():
                 },
             )
         )
+
+
+@pytest.fixture
+def controller(registry, now):
+    index = SessionPrefixIndex("model-layout-weights", registry.engine_epoch)
+    declarations = RetentionDeclarations(index, clock=lambda: now[0])
+    return NativeKVController(registry, index, declarations)
+
+
+def command(message_id, action_type, payload):
+    return KvHintsEnvelope("0.1", message_id, [native_action(action_type, payload)])
+
+
+def create_session(controller, session_id="s"):
+    submission = controller.submit(
+        command(
+            "associate-" + session_id,
+            "associate",
+            {
+                "session_id": session_id,
+                "continuation_id": "c",
+                "expected_revision": 0,
+                "target": HASH_TARGET,
+            },
+        ),
+        CONTEXT,
+    )
+    assert submission.results[0].status == OperationStatus.COMPLETED
+
+
+def test_native_directives_manage_state_without_a_policy_or_inference(controller):
+    create_session(controller)
+    result = controller.submit(
+        command(
+            "retain",
+            "retain",
+            {
+                "target": SESSION_TARGET,
+                "owner_id": "s",
+                "declaration_id": "d",
+                "priority": 80,
+            },
+        ),
+        CONTEXT,
+    ).results[0]
+    assert result.completed_steps == ("declaration_effective",)
+    assert controller.declarations.priority(0, "0123") == 80
+    released = controller.submit(
+        command(
+            "release",
+            "release",
+            {
+                "owner_id": "s",
+                "declaration_id": "d",
+            },
+        ),
+        CONTEXT,
+    ).results[0]
+    assert released.status == OperationStatus.COMPLETED
+    assert controller.declarations.priority(0, "0123") == 0
+    finished = controller.submit(
+        command(
+            "finish",
+            "finish_task",
+            {
+                "session_id": "s",
+                "expected_revision": controller.index.session_revision("s"),
+            },
+        ),
+        CONTEXT,
+    ).results[0]
+    assert finished.status == OperationStatus.COMPLETED
+    assert controller.index.query().items == ()
+
+
+def test_native_retry_does_not_renew_a_declaration(controller, now):
+    create_session(controller)
+    hint = command(
+        "retain",
+        "retain",
+        {
+            "target": SESSION_TARGET,
+            "owner_id": "s",
+            "declaration_id": "d",
+            "priority": 80,
+            "ttl_seconds": 5,
+        },
+    )
+    first = controller.submit(hint, CONTEXT)
+    now[0] += 4
+    replay = controller.submit(hint, CONTEXT)
+    assert replay.replayed
+    assert replay.results == first.results
+    now[0] += 1
+    assert controller.declarations.get("s", "d") is None
+
+
+def test_unconsumed_signal_does_not_even_create_an_unknown_association(controller):
+    result = controller.submit(
+        command(
+            "signal",
+            "signal",
+            {
+                "target": SESSION_TARGET,
+                "signal": "tool_wait",
+                "resume_after_seconds": 1,
+            },
+        ),
+        CONTEXT,
+    ).results[0]
+    assert result.status == OperationStatus.UNCONSUMED
+    assert controller.index.query().items == ()
+    assert controller.index.events(0, epoch=CONTEXT.engine_epoch) == ()
+
+
+def test_native_action_errors_are_correlated_without_rolling_back_earlier_actions(
+    controller,
+):
+    actions = [
+        native_action(
+            "associate",
+            {
+                "session_id": "s",
+                "continuation_id": "c",
+                "expected_revision": 0,
+                "target": HASH_TARGET,
+            },
+        ),
+        native_action(
+            "retain",
+            {
+                "target": SESSION_TARGET,
+                "owner_id": "s",
+                "declaration_id": "d",
+                "priority": -1,
+            },
+        ),
+        native_action("signal", {"target": SESSION_TARGET, "signal": "resume"}),
+    ]
+    hint = KvHintsEnvelope(
+        "0.1",
+        "multi",
+        [msgspec.structs.replace(a, action_id=str(i)) for i, a in enumerate(actions)],
+    )
+    results = controller.submit(hint, CONTEXT).results
+    assert [r.status for r in results] == [
+        OperationStatus.COMPLETED,
+        OperationStatus.FAILED,
+        OperationStatus.UNCONSUMED,
+    ]
+    assert [r.action_id for r in results] == ["0", "1", "2"]
+    assert controller.index.get("s", "c").blocks
+    assert controller.declarations.get("s", "d") is None
+
+
+def test_native_unknown_protocol_does_not_execute_valid_payload(controller):
+    hint = msgspec.structs.replace(
+        command(
+            "unknown",
+            "associate",
+            {
+                "session_id": "s",
+                "continuation_id": "c",
+                "expected_revision": 0,
+                "target": HASH_TARGET,
+            },
+        ),
+        protocol_version="future",
+    )
+    assert (
+        controller.submit(hint, CONTEXT).results[0].status
+        == OperationStatus.UNSUPPORTED
+    )
+    assert controller.index.query().items == ()
+
+
+def test_backend_request_payload_is_left_to_the_existing_hook(controller):
+    hint = command("opaque", "retain", {"backend_specific": [None, False, {"x": 17}]})
+    hint = msgspec.structs.replace(hint, protocol_version="backend-version")
+    wire = msgspec.json.encode(hint)
+    assert (
+        controller.consume_attached(
+            hint, replace(CONTEXT, consumer="backend"), request_id="req"
+        )
+        is None
+    )
+    assert msgspec.json.encode(hint) == wire
+    assert controller.registry.get("opaque", "action") is None
+    assert controller.index.query().items == ()
+    outcome = controller.submit(hint, replace(CONTEXT, consumer="backend")).results[0]
+    assert outcome.status == OperationStatus.UNSUPPORTED
+    assert "request-scoped" in outcome.reason
+
+
+def test_attached_and_independent_request_targets_use_the_same_resolver(controller):
+    calls = []
+
+    def resolve(target, request_id):
+        resolved = request_id if target.request_id == "$request" else target.request_id
+        calls.append((target.request_id, request_id))
+        if resolved != "active":
+            raise ControlError("missing", "Request is not active")
+        return msgspec.convert(HASH_TARGET, type=HashTarget)
+
+    controller.request_resolver = resolve
+    for session, target_id, attached in (
+        ("attached", "$request", True),
+        ("independent", "active", False),
+    ):
+        hint = command(
+            session,
+            "associate",
+            {
+                "session_id": session,
+                "continuation_id": "c",
+                "expected_revision": 0,
+                "target": {"kind": "request", "request_id": target_id},
+            },
+        )
+        result = (
+            controller.consume_attached(hint, CONTEXT, request_id="active")
+            if attached
+            else controller.submit(hint, CONTEXT)
+        )
+        assert result.results[0].status == OperationStatus.COMPLETED
+    assert calls == [("$request", "active"), ("active", None)]
+    assert controller.index.members(0, "0123") == (
+        ("attached", "c"),
+        ("independent", "c"),
+    )
+
+
+def test_native_capabilities_do_not_claim_unconfigured_physical_execution(controller):
+    caps = controller.capabilities()
+    assert caps.engine_epoch == CONTEXT.engine_epoch
+    assert {a.action_type for a in caps.actions} == {
+        "retain",
+        "release",
+        "associate",
+        "finish_task",
+        "signal",
+    }
+    assert all("request" not in a.targets for a in caps.actions)
+    result = controller.submit(
+        command("prefetch", "prefetch", {"target": HASH_TARGET, "source": "cpu"}),
+        CONTEXT,
+    )
+    assert result.results[0].status == OperationStatus.UNSUPPORTED
+
+
+@pytest.mark.parametrize(
+    "failure,status",
+    [
+        (ControlError("capacity", "No destination capacity"), OperationStatus.DEFERRED),
+        (RuntimeError("Transfer backend failed"), OperationStatus.FAILED),
+    ],
+)
+def test_execution_errors_are_not_reported_as_cancellation(controller, failure, status):
+    class Executor:
+        def submit(self, operation, payload, target):
+            raise failure
+
+    controller.executor = Executor()
+    result = controller.submit(
+        command("prefetch", "prefetch", {"target": HASH_TARGET, "source": "cpu"}),
+        CONTEXT,
+    )
+    assert result.results[0].status == status
+
+
+def test_approved_async_execution_is_not_reported_as_completed(controller):
+    pending = []
+
+    class Executor:
+        def submit(self, operation, payload, target):
+            pending.append((operation, target))
+            controller.registry.update(operation, OperationStatus.ACCEPTED)
+
+    controller.executor = Executor()
+    result = controller.submit(
+        command("prefetch", "prefetch", {"target": HASH_TARGET, "source": "cpu"}),
+        CONTEXT,
+    )
+    assert result.results[0].status == OperationStatus.ACCEPTED
+    assert result.results[0].completed_steps == ()
+    assert pending[0][1].prefixes[0].blocks
+    controller.registry.update(
+        pending[0][0],
+        OperationStatus.COMPLETED,
+        completed_steps=("destination_registered",),
+    )
+    assert (
+        controller.registry.get("prefetch", "action").status
+        == OperationStatus.COMPLETED
+    )
+
+
+def test_failure_after_task_cleanup_reports_partial_effects(controller):
+    class Executor:
+        def cancel_owners(self, owners):
+            assert owners == ("s",)
+            raise ControlError("busy", "Worker interests could not be cancelled")
+
+    create_session(controller)
+    controller.executor = Executor()
+    result = controller.submit(
+        command(
+            "finish",
+            "finish_task",
+            {
+                "session_id": "s",
+                "expected_revision": controller.index.session_revision("s"),
+            },
+        ),
+        CONTEXT,
+    ).results[0]
+    assert result.status == OperationStatus.PARTIAL
+    assert result.completed_steps == ("declarations_released", "associations_removed")
+    assert controller.index.query().items == ()
+
+
+def test_attached_retry_cannot_reinterpret_current_request_as_another_request(
+    controller,
+):
+    controller.request_resolver = lambda target, request_id: msgspec.convert(
+        HASH_TARGET, type=HashTarget
+    )
+    hint = command(
+        "bound",
+        "associate",
+        {
+            "session_id": "s",
+            "continuation_id": "c",
+            "expected_revision": 0,
+            "target": {"kind": "request", "request_id": "$request"},
+        },
+    )
+    first = controller.consume_attached(hint, CONTEXT, request_id="first")
+    assert first.results[0].binding_id == "first"
+    replay = controller.consume_attached(hint, CONTEXT, request_id="first")
+    assert replay.replayed
+    with pytest.raises(ControlError, match="different content"):
+        controller.consume_attached(hint, CONTEXT, request_id="second")
+
+
+def test_native_result_and_deduplication_are_bound_to_cache_compatibility(controller):
+    hint = command(
+        "signal", "signal", {"target": SESSION_TARGET, "signal": "tool_wait"}
+    )
+    first = controller.submit(hint, CONTEXT).results[0]
+    assert first.namespace == "model-layout-weights"
+    with pytest.raises(ControlError, match="another cache namespace"):
+        controller.submit(hint, replace(CONTEXT, namespace="obsolete-weights"))
+    new_index = SessionPrefixIndex("new-weights", CONTEXT.engine_epoch)
+    updated = NativeKVController(
+        controller.registry, new_index, RetentionDeclarations(new_index)
+    )
+    with pytest.raises(ControlError, match="different content"):
+        updated.submit(hint, CONTEXT)

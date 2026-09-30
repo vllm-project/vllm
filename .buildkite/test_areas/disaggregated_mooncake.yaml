@@ -51,6 +51,9 @@ steps:
   device: l4
   num_devices: 2
   source_file_dependencies:
+    - vllm/distributed/kv_transfer/kv_connector/v1/mooncake/store/
+    - vllm/distributed/mooncake_store.py
+    - tests/v1/kv_connector/mooncake_integration/test_store_buffers.py
     - vllm/distributed/ec_transfer/
     - vllm/config/ec_transfer.py
     - vllm/config/multimodal.py
@@ -106,6 +109,7 @@ steps:
       print(requirement)
       PY
       )"
+    - .venv/bin/python -m pytest -v tests/v1/kv_connector/mooncake_integration/test_store_buffers.py
     - bash tests/v1/ec_connector/integration/run_epd_mooncake_ec_full_pipeline.sh
   mirror:
     amd:

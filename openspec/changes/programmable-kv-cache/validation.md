@@ -130,3 +130,45 @@ The complete suite is rerun after this fixture correction.
 
 Final result: **504 passed**, 324.09 seconds. Normal pre-commit hooks and mypy
 3.10/3.12 checks passed for the changed state/retention and test files.
+
+## October 1: native command interpretation and real Store baseline
+
+`NativeKVController` consumes the merged actions through a common attached/free
+submission method. Logical commands execute without local policies; signals are
+unconsumed by default. Backend-owned attached envelopes remain opaque for the
+existing request hook. Independent backend control reports unsupported instead
+of reinterpreting the payload. Engine resource approval remains a separate
+executor interface and is not yet connected to scheduler/worker execution.
+
+Tests cover native/opaque ownership, action-specific errors, non-transactional
+multi-action outcomes, TTL-safe retries, request binding, compatibility namespaces,
+asynchronous approval without false completion, and partial cleanup effects.
+
+Installed `mooncake-transfer-engine-cuda13==0.3.13.post1`. Added a real native Store
+integration suite rather than extending the dict-backed mock with claims of real
+transfer. It starts an isolated loopback master unless an address is supplied,
+creates two Store clients, and transfers actual GPU buffers in both directions.
+Its 36 cases cover three dtypes, three sizes, one/three buffers per key, and a
+missing member in every batch; successful data must match exactly and the missing
+destination must remain unchanged. The suite is wired into the existing two-GPU
+Mooncake TCP Buildkite job.
+
+```bash
+CUDA_VISIBLE_DEVICES=0,3 .venv/bin/python -m pytest \
+  tests/v1/kv_connector/mooncake_integration/test_store_buffers.py -q -rs
+```
+
+Result: **36 passed**, 14.27 seconds. This establishes native buffer-transfer
+correctness, not hint-to-worker integration, model reuse, or a serving speedup.
+
+Combined phase gate after request-binding/namespace correlation changes:
+
+```bash
+CUDA_VISIBLE_DEVICES=0,3 .venv/bin/python -m pytest \
+  tests/v1/test_kv_hint_control.py tests/v1/test_kv_hint_state.py \
+  tests/v1/test_request.py tests/v1/kv_offload/tiering/test_kvcr_tier.py \
+  tests/v1/kv_connector/mooncake_integration/test_store_buffers.py -q -rs
+```
+
+Result: **176 passed**, 52.36 seconds, no skipped cases. Normal pre-commit hooks
+and mypy 3.10/3.12 checks passed. The real Store suite used its own master lifecycle.

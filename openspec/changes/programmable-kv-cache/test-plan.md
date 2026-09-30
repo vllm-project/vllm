@@ -21,6 +21,13 @@ State tests use a fake monotonic clock, bounded capacities, and observable queri
 Use seeded interleavings for shared declarations, retries, cancellation and reset;
 do not replace real worker/engine integration with a simulated operation loop.
 
+The native Store transport's contract is registered source/destination buffers →
+per-key results and exact copied values. Guard against batch failure corrupting
+successful members or treating Get's byte counts as errors. The cheapest effective
+level is native Store integration on real GPUs: the existing accuracy scripts test
+the separate PD connector and existing Store unit suites mock the backend, so
+`mooncake_integration/test_store_buffers.py` supplies this missing suite.
+
 ## Real execution acceptance
 
 1. Run existing CPU worker transfer correctness on allocated GPUs, including both
