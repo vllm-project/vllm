@@ -116,6 +116,8 @@ class _MoonEPPrefetchPool:
         group: dist.ProcessGroup,
         use_fabric: bool,
     ):
+        # Private MoonEP helpers, valid at the pinned MOONEP_COMMIT_HASH; see
+        # the MoonEPExpertWeightPools docstring before bumping the pin.
         from moonep._C import (  # type: ignore[import-not-found]
             nvl_dist_alloc,
             nvl_release_mem_handle,
@@ -201,7 +203,35 @@ class MoonEPExpertWeightPools:
     pools are created collectively on first use and shared by every MoE
     layer, so the extra memory is ``epn`` expert weights per projection per
     rank in total, not per layer.
+
+    Single-inflight invariant: every same-shaped layer's prefetch rows
+    ``[epn, 2 * epn)`` alias the same physical slots, so layer N+1's
+    ``prefetch_weight`` must not start before layer N's expert GEMMs have
+    finished reading them. The current path holds this trivially:
+    ``MoonEPPrepareAndFinalize`` is synchronous (``supports_async`` is
+    False) and prefetch runs on the main stream right before the compute
+    that consumes it. Enabling MoonEP's async prefetch / DBO requires
+    per-inflight-layer (double-buffered) pools or explicit cross-layer
+    events; see :meth:`assert_synchronous_use`.
+
+    Relies on MoonEP's VMM primitives (``moonep._C.nvl_dist_alloc`` /
+    ``nvl_dist_map``) and two private helpers in ``moonep.buffer``
+    (``_map_nvl_dist_tensor``, ``_use_fabric_for_group``), as of the
+    MoonEP commit pinned in ``tools/ep_kernels/install_python_libraries.sh``
+    (``MOONEP_COMMIT_HASH``). Re-check this class against
+    ``moonep/buffer.py`` and MoonEP's weight-buffer README section whenever
+    that pin moves: the chunk layout assumed here (local weights at the end
+    of their VMM block, prefetch payload at the start of the next) is what
+    makes the ``[2 * epn]`` view contiguous.
     """
+
+    @staticmethod
+    def assert_synchronous_use(prepare_finalize: mk.FusedMoEPrepareAndFinalize):
+        assert not prepare_finalize.supports_async(), (
+            "MoonEPExpertWeightPools shares one prefetch pool across layers and "
+            "requires synchronous prefetch; async prefetch / DBO needs "
+            "per-inflight-layer pools"
+        )
 
     def __init__(self, group: dist.ProcessGroup | None):
         self.group = group
@@ -214,6 +244,7 @@ class MoonEPExpertWeightPools:
         key = (name, (epn, *expert_shape), dtype)
         pool = self._pools.get(key)
         if pool is None:
+            # Private MoonEP helper, valid at the pinned MOONEP_COMMIT_HASH.
             from moonep.buffer import (  # type: ignore[import-not-found]
                 _use_fabric_for_group,
             )
@@ -517,6 +548,12 @@ class MoonEPPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         self._plan = plan
         self._cu_seqlens = cu_seqlens
 
+        # Synchronous on purpose: the prefetch slots are shared by every
+        # layer (see MoonEPExpertWeightPools), so this must complete on the
+        # main stream before the expert GEMMs and before the next layer's
+        # prefetch. Do not switch to async_finish=True without giving each
+        # in-flight layer its own slots.
+        MoonEPExpertWeightPools.assert_synchronous_use(self)
         self._buffer.prefetch_weight(
             plan=plan, **self._resolve_expert_weights().prefetch_kwargs()
         )
