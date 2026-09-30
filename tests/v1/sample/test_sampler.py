@@ -17,8 +17,9 @@ PIN_MEMORY_AVAILABLE = is_pin_memory_available()
 MAX_NUM_REQS = 256
 VOCAB_SIZE = 1024
 NUM_OUTPUT_TOKENS = 20
-CUDA_DEVICES = [
-    f"{current_platform.device_type}:{i}"
+DEVICE_TYPE = current_platform.device_type
+DEVICES = [
+    f"{DEVICE_TYPE}:{i}"
     for i in range(1 if current_platform.device_count() == 1 else 2)
 ]
 MAX_NUM_PROMPT_TOKENS = 64
@@ -168,8 +169,7 @@ def _create_default_sampling_metadata(
 def _create_weighted_output_token_list(
     batch_size: int, vocab_size: int
 ) -> tuple[list[list[int]], list[list[int]]]:
-    """
-    Creates an output token list where each token occurs a distinct
+    """Creates an output token list where each token occurs a distinct
     number of times.
 
     For each batch, a random subset of token IDs is selected from the
@@ -184,6 +184,7 @@ def _create_weighted_output_token_list(
             - The second element is a list of distinct token IDs for each
               batch, ordered by their frequency in the corresponding output
               list.
+
     """
     output_token_ids: list[list[int]] = []
     sorted_token_ids_in_output: list[list[int]] = []
@@ -199,14 +200,13 @@ def _create_weighted_output_token_list(
     return output_token_ids, sorted_token_ids_in_output
 
 
-@pytest.mark.parametrize("device", CUDA_DEVICES)
+@pytest.mark.parametrize("device", DEVICES)
 @pytest.mark.parametrize("batch_size", [1, 2, 32])
 @pytest.mark.parametrize("presence_penalty", [-2.0, 2.0])
 def test_sampler_presence_penalty(
     device: str, batch_size: int, presence_penalty: float
 ):
-    """
-    Test to verify that if presence penalty is enabled then tokens
+    """Test to verify that if presence penalty is enabled then tokens
     are penalized as per their presence in the existing output.
     """
     torch.set_default_device(device)
@@ -249,14 +249,13 @@ def test_sampler_presence_penalty(
             assert penalized_token_id not in output_token_ids[batch_idx]
 
 
-@pytest.mark.parametrize("device", CUDA_DEVICES)
+@pytest.mark.parametrize("device", DEVICES)
 @pytest.mark.parametrize("batch_size", [1, 2, 32])
 @pytest.mark.parametrize("frequency_penalty", [-2.0, 2.0])
 def test_sampler_frequency_penalty(
     device: str, batch_size: int, frequency_penalty: float
 ):
-    """
-    Test to verify that if frequency penalty is enabled then tokens are
+    """Test to verify that if frequency penalty is enabled then tokens are
     penalized as per their frequency of occurrence.
     """
     torch.set_default_device(device)
@@ -305,14 +304,13 @@ def test_sampler_frequency_penalty(
             assert penalized_token_id not in distinct_sorted_token_ids_in_output
 
 
-@pytest.mark.parametrize("device", CUDA_DEVICES)
+@pytest.mark.parametrize("device", DEVICES)
 @pytest.mark.parametrize("batch_size", [1, 2, 32])
 @pytest.mark.parametrize("repetition_penalty", [0.1, 1.9])
 def test_sampler_repetition_penalty(
     device: str, batch_size: int, repetition_penalty: float
 ):
-    """
-    Test to verify that when the repetition penalty is enabled, tokens
+    """Test to verify that when the repetition penalty is enabled, tokens
     are penalized based on their presence in the prompt or the existing
     output.
     """
@@ -335,6 +333,7 @@ def test_sampler_repetition_penalty(
     for batch_idx in range(batch_size):
         non_penalized_token_id = logits[batch_idx].argmax().item()
         penalized_token_id = logits[batch_idx].argmin().item()
+        assert sampling_metadata.prompt_token_ids is not None
         prompt_tokens = sampling_metadata.prompt_token_ids[batch_idx][:].tolist()
         output_tokens = sampling_metadata.output_token_ids[batch_idx]
         if repetition_penalty > 1.0:
@@ -363,14 +362,13 @@ def test_sampler_repetition_penalty(
             )
 
 
-@pytest.mark.parametrize("device", CUDA_DEVICES)
+@pytest.mark.parametrize("device", DEVICES)
 @pytest.mark.parametrize("batch_size", [1, 2, 32])
 @pytest.mark.parametrize("num_allowed_token_ids", [0, 1, 2])
 def test_sampler_allowed_token_ids(
     device: str, batch_size: int, num_allowed_token_ids: int
 ):
-    """
-    Test to verify that when the repetition penalty is enabled, tokens
+    """Test to verify that when the repetition penalty is enabled, tokens
     are penalized based on their presence in the prompt or the existing
     output.
     """
@@ -409,14 +407,13 @@ def test_sampler_allowed_token_ids(
                 assert logits_for_req[token_id] != -float("inf")
 
 
-@pytest.mark.parametrize("device", CUDA_DEVICES)
+@pytest.mark.parametrize("device", DEVICES)
 @pytest.mark.parametrize("batch_size", [1, 2, 32])
 @pytest.mark.parametrize("bad_words_lengths", [(1,), (1, 3), (2, 2)])
 def test_sampler_bad_words(
     device: str, batch_size: int, bad_words_lengths: tuple[int, ...]
 ):
-    """
-    Test to verify that when the bad words restriction is present, tokens
+    """Test to verify that when the bad words restriction is present, tokens
     are penalized based on their match with the bad words.
     """
     torch.set_default_device(device)

@@ -50,8 +50,6 @@ class IsaacConfig(Qwen3Config):
         vision_attn_implementation: str | None = None,
         **kwargs,
     ):
-        super().__init__(**kwargs)
-
         if isinstance(text_config, dict):
             # from HF config
             self.text_config = self.sub_configs["text_config"](**text_config)
@@ -92,6 +90,7 @@ class IsaacConfig(Qwen3Config):
             vision_max_num_patches,
         )
         self.vision_attn_implementation = vision_attn_implementation
+        super().__init__(**kwargs)
 
 
 __all__ = [

@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Benchmark the performance of the cutlass_moe_fp4 kernel vs the triton_moe
+"""Benchmark the performance of the cutlass_moe_fp4 kernel vs the triton_moe
 kernel. The cutlass_moe_fp4 kernel takes in fp4 quantized weights and 16-bit
 activations. The triton_moe kernel takes in fp8 weights(tensor scaled to fp8)
 and 16-bit activations.
@@ -22,7 +21,7 @@ from vllm.model_executor.layers.fused_moe.config import (
     fp8_w8a8_moe_quant_config,
     nvfp4_moe_quant_config,
 )
-from vllm.model_executor.layers.fused_moe.cutlass_moe import (
+from vllm.model_executor.layers.fused_moe.experts.cutlass_moe import (
     CutlassExpertsFp4,
 )
 from vllm.model_executor.layers.fused_moe.fused_moe import fused_experts, fused_topk

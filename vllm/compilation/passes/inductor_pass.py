@@ -30,6 +30,9 @@ class PassContext:
     def __init__(self, compile_range: Range):
         self.compile_range: Range = compile_range
 
+        # set of arg indices
+        self.donated_input_ids: set[int] = set()
+
 
 def get_pass_context() -> PassContext:
     """Get the current pass context."""
@@ -51,15 +54,22 @@ def pass_context(compile_range: Range) -> Generator[None, None, None]:
         _pass_context = prev_context
 
 
+@functools.cache
+def _hash_source_cached(*srcs: str | type | types.FunctionType) -> str:
+    hasher = hashlib.sha256()
+    for src in srcs:
+        src_str = src if isinstance(src, str) else inspect.getsource(src)
+        hasher.update(src_str.encode("utf-8"))
+    return hasher.hexdigest()
+
+
 class InductorPass(CustomGraphPass):  # type: ignore[misc]
-    """
-    A custom graph pass that uses a hash of its source as the UUID.
+    """A custom graph pass that uses a hash of its source as the UUID.
     This is defined as a convenience and should work in most cases.
     """
 
     def uuid(self) -> str:
-        """
-        Provide a unique identifier for the pass, used in Inductor code cache.
+        """Provide a unique identifier for the pass, used in Inductor code cache.
         This should depend on the pass implementation, so that changes to the
         pass result in recompilation.
         By default, the object source is hashed.
@@ -68,29 +78,29 @@ class InductorPass(CustomGraphPass):  # type: ignore[misc]
 
     @staticmethod
     def hash_source(*srcs: str | Any) -> str:
+        """Utility method to hash the sources of functions or objects.
+
+        Args:
+            srcs: strings or objects to add to the hash.
+                Objects and functions have their source inspected.
+                Results are cached by resolved types to avoid repeated
+                inspect.getsource() calls.
+
         """
-        Utility method to hash the sources of functions or objects.
-        :param srcs: strings or objects to add to the hash.
-        Objects and functions have their source inspected.
-        :return:
-        """
-        hasher = hashlib.sha256()
-        for src in srcs:
-            if isinstance(src, str):
-                src_str = src
-            elif isinstance(src, (types.FunctionType, type)):
-                src_str = inspect.getsource(src)
-            else:
-                # object instance
-                src_str = inspect.getsource(src.__class__)
-            hasher.update(src_str.encode("utf-8"))
-        return hasher.hexdigest()
+        # Resolve instances to their class for a hashable cache key.
+        cache_key = tuple(
+            src if isinstance(src, (str, type, types.FunctionType)) else src.__class__
+            for src in srcs
+        )
+        return _hash_source_cached(*cache_key)
 
     @staticmethod
     def hash_dict(dict_: dict[Any, Any]) -> str:
-        """
-        Utility method to hash a dictionary, can alternatively be used for uuid.
-        :return: A sha256 hash of the json rep of the dictionary.
+        """Utility method to hash a dictionary, can alternatively be used for uuid.
+
+        Returns:
+            A sha256 hash of the json rep of the dictionary.
+
         """
         encoded = json.dumps(dict_, sort_keys=True).encode("utf-8")
         return hashlib.sha256(encoded).hexdigest()
@@ -100,8 +110,7 @@ class InductorPass(CustomGraphPass):  # type: ignore[misc]
 
 
 class CallableInductorPass(InductorPass):
-    """
-    This class is a wrapper for a callable that automatically provides an
+    """This class is a wrapper for a callable that automatically provides an
     implementation of the UUID.
     """
 
@@ -119,8 +128,7 @@ class CallableInductorPass(InductorPass):
 
 
 def enable_fake_mode(fn: Callable[P, R]) -> Callable[P, R]:
-    """
-    Applies a FakeTensorMode context. This is useful when you don't want to
+    """Applies a FakeTensorMode context. This is useful when you don't want to
     create or run things with real tensors.
     """
 

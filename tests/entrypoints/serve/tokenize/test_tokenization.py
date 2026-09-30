@@ -9,7 +9,7 @@ from tests.utils import RemoteOpenAIServer
 from vllm.tokenizers import get_tokenizer
 
 # any model with a chat template should work here
-MODEL_NAME = "HuggingFaceH4/zephyr-7b-beta"
+MODEL_NAME = "HuggingFaceTB/SmolLM2-135M-Instruct"
 
 
 @pytest.fixture(scope="module")
@@ -101,13 +101,13 @@ async def test_tokenize_chat(
                 if continue_final:
                     conversation.append({"role": "assistant", "content": "Sure,"})
 
-                prompt = tokenizer.apply_chat_template(
+                prompt = tokenizer.apply_chat_template(  # type: ignore[call-arg]
                     add_generation_prompt=add_generation,
                     continue_final_message=continue_final,
                     conversation=conversation,
                     tokenize=False,
                 )
-                tokens = tokenizer.encode(prompt, add_special_tokens=add_special)
+                tokens = tokenizer.encode(prompt, add_special_tokens=add_special)  # type: ignore[arg-type]
 
                 response = requests.post(
                     server.url_for("tokenize"),
@@ -169,14 +169,14 @@ async def test_tokenize_chat_with_tools(
                 if continue_final:
                     conversation.append({"role": "assistant", "content": "Sure,"})
 
-                prompt = tokenizer.apply_chat_template(
+                prompt = tokenizer.apply_chat_template(  # type: ignore[call-arg]
                     add_generation_prompt=add_generation,
                     continue_final_message=continue_final,
                     conversation=conversation,
                     tools=tools,
                     tokenize=False,
                 )
-                tokens = tokenizer.encode(prompt, add_special_tokens=add_special)
+                tokens = tokenizer.encode(prompt, add_special_tokens=add_special)  # type: ignore[arg-type]
 
                 response = requests.post(
                     server.url_for("tokenize"),

@@ -8,15 +8,16 @@ import regex as re
 from transformers import PreTrainedTokenizerBase
 
 import vllm.envs as envs
-from vllm.entrypoints.openai.chat_completion.protocol import (
-    ChatCompletionRequest,
-)
-from vllm.entrypoints.openai.engine.protocol import (
+from vllm.entrypoints.generate.base.protocol import (
     DeltaMessage,
     ExtractedToolCallInformation,
 )
+from vllm.entrypoints.openai.chat_completion.protocol import (
+    ChatCompletionRequest,
+)
 from vllm.logger import init_logger
 from vllm.tool_parsers.abstract_tool_parser import (
+    Tool,
     ToolParser,
 )
 from vllm.tool_parsers.utils import (
@@ -30,8 +31,7 @@ logger = init_logger(__name__)
 
 
 class Llama4PythonicToolParser(ToolParser):
-    """
-    Toolcall parser for Llama4 that produce tool calls in a pythonic style
+    """Toolcall parser for Llama4 that produce tool calls in a pythonic style
     Use --enable-auto-tool-choice --tool-call-parser llama4_pythonic
     """
 
@@ -47,8 +47,12 @@ class Llama4PythonicToolParser(ToolParser):
         re.DOTALL,
     )
 
-    def __init__(self, tokenizer: PreTrainedTokenizerBase):
-        super().__init__(tokenizer)
+    def __init__(
+        self,
+        tokenizer: PreTrainedTokenizerBase,
+        tools: list[Tool] | None = None,
+    ):
+        super().__init__(tokenizer, tools)
 
     # Rename for readability. This is NOT a tool id.
     @property
@@ -62,10 +66,7 @@ class Llama4PythonicToolParser(ToolParser):
     def extract_tool_calls(
         self, model_output: str, request: ChatCompletionRequest
     ) -> ExtractedToolCallInformation:
-        """
-        Extract the tool calls from a complete model response.
-        """
-
+        """Extract the tool calls from a complete model response."""
         # remove <|python_start|> and <|python_end|>
         # as Llama 4 model sometime will output those tokens
         if model_output.startswith("<|python_start|>"):

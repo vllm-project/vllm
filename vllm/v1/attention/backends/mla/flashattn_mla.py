@@ -20,12 +20,12 @@ from vllm.model_executor.layers.attention.mla_attention import (
 )
 from vllm.platforms.interface import DeviceCapability
 from vllm.utils.math_utils import round_up
+from vllm.utils.torch_utils import is_quantized_kv_cache
 from vllm.v1.attention.backend import (
     AttentionCGSupport,
     AttentionLayer,
     AttentionType,
     MultipleOf,
-    is_quantized_kv_cache,
 )
 from vllm.v1.attention.backends.fa_utils import (
     flash_attn_supports_mla,
@@ -49,12 +49,16 @@ class FlashAttnMLABackend(MLACommonBackend):
     ]
 
     @staticmethod
-    def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
+    def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int | MultipleOf]:
         return [MultipleOf(16)]
 
     @staticmethod
     def get_name() -> str:
         return "FLASH_ATTN_MLA"
+
+    @classmethod
+    def supports_batch_invariance(cls) -> bool:
+        return True
 
     @staticmethod
     def get_builder_cls() -> type["FlashAttnMLAMetadataBuilder"]:
@@ -78,6 +82,7 @@ class FlashAttnMLABackend(MLACommonBackend):
         use_mla: bool,
         has_sink: bool,
         use_sparse: bool,
+        use_mm_prefix: bool,
         device_capability: DeviceCapability,
     ) -> str | None:
         if not flash_attn_supports_mla():
@@ -189,8 +194,11 @@ class FlashAttnMLAMetadataBuilder(MLACommonMetadataBuilder[FlashAttnMLAMetadata]
         query_start_loc_cpu: torch.Tensor,
         query_start_loc_device: torch.Tensor,
         num_decode_tokens: int,
+        max_query_len: int,
         dcp_tot_seq_lens_device: torch.Tensor | None,
     ) -> FlashAttnMLADecodeMetadata:
+        # Measured, not the promised bound: _schedule_decode asserts metadata size
+        # against a persistent buffer.
         query_lens_cpu = query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]
         max_query_len = query_lens_cpu.max().item()
 
@@ -250,6 +258,7 @@ class FlashAttnMLAMetadataBuilder(MLACommonMetadataBuilder[FlashAttnMLAMetadata]
 
 class FlashAttnMLAImpl(MLACommonImpl[FlashAttnMLAMetadata]):
     can_return_lse_for_decode: bool = True
+    supports_dcp: bool = True
 
     def __init__(
         self,
@@ -319,7 +328,7 @@ class FlashAttnMLAImpl(MLACommonImpl[FlashAttnMLAMetadata]):
                 q, [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1
             )
 
-        if self.kv_cache_dtype.startswith("fp8"):
+        if is_quantized_kv_cache(self.kv_cache_dtype):
             raise NotImplementedError("FP8 FlashAttention MLA not yet supported")
 
         kv_c_cache = kv_c_and_k_pe_cache[..., : self.kv_lora_rank]

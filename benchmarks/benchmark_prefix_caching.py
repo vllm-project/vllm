@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Benchmark the efficiency of prefix caching.
+"""Benchmark the efficiency of prefix caching.
 
 This script allows you to benchmark the performance of
 a model with and without prefix caching using either fixed prompts
@@ -32,7 +31,6 @@ import dataclasses
 import json
 import random
 import time
-from dataclasses import fields
 
 from transformers import PreTrainedTokenizerBase
 
@@ -197,7 +195,7 @@ def main(args):
 
     engine_args = EngineArgs.from_cli_args(args)
 
-    llm = LLM(**{f.name: getattr(engine_args, f.name) for f in fields(engine_args)})
+    llm = LLM.from_engine_args(engine_args)
 
     sampling_params = SamplingParams(
         temperature=0,

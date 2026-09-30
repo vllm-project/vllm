@@ -1,12 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from dataclasses import asdict
 from typing import NamedTuple
 
 import pytest
 from PIL import Image
 
-from vllm import LLM, EngineArgs, SamplingParams
+from vllm import LLM, SamplingParams
 from vllm.assets.image import ImageAsset
 from vllm.config import AttentionConfig, KVTransferConfig
 from vllm.multimodal.utils import encode_image_url
@@ -30,12 +29,12 @@ class InputCase(NamedTuple):
 
 
 def _check_path_len(path):
-    """Return the latest length in path"""
+    """Return the latest length in path."""
     return len(list(path.iterdir()))
 
 
 def _list_path(path):
-    """Return the list of foldername (hashes generated) under the path"""
+    """Return the list of foldername (hashes generated) under the path."""
     return list(path.iterdir())
 
 
@@ -48,8 +47,7 @@ def run_test(
     expected_len: int,
     info: str,
 ):
-    """
-    One individual test to process the prompt and output base on 1 set of input
+    """One individual test to process the prompt and output base on 1 set of input
     Then check if the length in the storage path matches the expected length
     `info` introduces details or purpose of the individual test
     """
@@ -68,9 +66,7 @@ def run_test(
 
 
 def process_prompt(processor, llm: LLM, question: str, image_urls: list[Image]):
-    """
-    Form the prompt based on the text and image input, then llm generate output
-    """
+    """Form the prompt based on the text and image input, then llm generate output."""
     placeholders = [
         {
             "type": "image_url",
@@ -116,36 +112,17 @@ def process_prompt(processor, llm: LLM, question: str, image_urls: list[Image]):
         ["FLASH_ATTN", "TRITON_ATTN"]
         if current_platform.is_cuda()
         else ["TRITON_ATTN"]
-        if current_platform.is_rocm()
+        if current_platform.is_rocm() or current_platform.is_xpu()
         else []
     ),
 )
 def test_shared_storage_connector_hashes(tmp_path, attn_backend):
-    """
-    Tests that ExampleConnector saves KV to the storage locations
+    """Tests that ExampleConnector saves KV to the storage locations
     with proper hashes; that are unique for inputs with identical text but
     different images (same size), or same multiple images but different orders.
     """
     # Using tmp_path as the storage path to store KV
     print(f"KV storage path at: {str(tmp_path)}")
-
-    # Configure the ExampleConnector
-    kv_transfer_config = KVTransferConfig(
-        kv_connector="ExampleConnector",
-        kv_role="kv_both",
-        kv_connector_extra_config={"shared_storage_path": str(tmp_path)},
-    )
-
-    engine_args = EngineArgs(
-        model=MODEL_NAME,
-        max_model_len=8192,
-        max_num_seqs=1,
-        gpu_memory_utilization=0.4,
-        attention_config=AttentionConfig(backend=attn_backend),
-        enforce_eager=True,
-        kv_transfer_config=kv_transfer_config,
-        limit_mm_per_prompt={"image": 2},
-    )
 
     # don't put this import at the top level
     # it will call torch.accelerator.device_count()
@@ -163,8 +140,20 @@ def test_shared_storage_connector_hashes(tmp_path, attn_backend):
     assert image_1 != image_2, "The images should not be identical"
 
     # Create the LLM instance
-    engine_args = asdict(engine_args)
-    llm = LLM(**engine_args)
+    llm = LLM(
+        model=MODEL_NAME,
+        max_model_len=8192,
+        max_num_seqs=1,
+        gpu_memory_utilization=0.4,
+        attention_config=AttentionConfig(backend=attn_backend),
+        enforce_eager=True,
+        kv_transfer_config=KVTransferConfig(
+            kv_connector="ExampleConnector",
+            kv_role="kv_both",
+            kv_connector_extra_config={"shared_storage_path": str(tmp_path)},
+        ),
+        limit_mm_per_prompt={"image": 2},
+    )
 
     # Prepare the input cases
     input_cases = [

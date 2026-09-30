@@ -9,14 +9,14 @@
 - Online APIs:
     - Pooling API (`/pooling`)
 
-The difference between the (sequence) embedding task and the token embedding task is that (sequence) embedding outputs one embedding for each sequence, while token embedding outputs a embedding for each token.
+The difference between the (sequence) embedding task and the token embedding task is that (sequence) embedding outputs one embedding for each sequence, while token embedding outputs an embedding for each token.
 
 Many embedding models support both (sequence) embedding and token embedding. For further details on (sequence) embedding, please refer to [this page](embed.md).
 
 !!! note
 
-    Pooling multitask support is deprecated and will be removed in v0.20. When the default pooling task (embed) is not 
-    what you want, you need to manually specify it via via `PoolerConfig(task="token_embed")` offline or
+    Pooling multitask support has been removed since v0.21. When the default pooling task (embed) is not 
+    what you want, you need to manually specify it via `PoolerConfig(task="token_embed")` offline or
     `--pooler-config.task token_embed` online.
 
 ## Typical Use Cases
@@ -61,7 +61,7 @@ Models of any architecture can be converted into embedding models using `--conve
 | `ColModernVBertForRetrieval` | ColModernVBERT | T / I | `ModernVBERT/colmodernvbert-merged` | | |
 | `ColPaliForRetrieval` | ColPali | T / I | `vidore/colpali-v1.3-hf` | | |
 | `ColQwen3` | Qwen3-VL | T / I | `TomoroAI/tomoro-colqwen3-embed-4b`, `TomoroAI/tomoro-colqwen3-embed-8b` | | |
-| `ColQwen3_5` | ColQwen3.5 | T + I + V | `athrael-soju/colqwen3.5-4.5B-v3` | | |
+| `ColQwen3_5` | ColQwen3.5 | T + I + V | `athrael-soju/colqwen3.5-4.5B-v3`, `vultr/VultronRetrieverPrime-Qwen3.5-8B` | | |
 | `OpsColQwen3Model` | Qwen3-VL | T / I | `OpenSearch-AI/Ops-Colqwen3-4B`, `OpenSearch-AI/Ops-Colqwen3-8B` | | |
 | `Qwen3VLNemotronEmbedModel` | Qwen3-VL | T / I | `nvidia/nemotron-colembed-vl-4b-v2`, `nvidia/nemotron-colembed-vl-8b-v2` | ✅︎ | ✅︎ |
 | `*ForConditionalGeneration`<sup>C</sup>, `*ForCausalLM`<sup>C</sup>, etc. | Generative models | \* | N/A | \* | \* |
@@ -70,6 +70,14 @@ Models of any architecture can be converted into embedding models using `--conve
 \* Feature support is the same as that of the original model.
 
 If your model is not in the above list, we will try to automatically convert the model using [as_embedding_model][vllm.model_executor.models.adapters.as_embedding_model].
+
+### Special models
+
+| Architecture | Models | Example HF Models | [LoRA](../../features/lora.md) | [PP](../../serving/parallelism_scaling.md) |
+| ------------ | ------ | ----------------- | -------------------- | ------------------------- |
+| `JinaForRanking` | Qwen3-based | `jinaai/jina-reranker-v3` | | |
+
+jina-reranker-v3 is a listwise document reranker model with a novel `last but not late interaction` architecture. More information can be found at: [examples/pooling/token_embed/jina_reranker_v3_offline.py](../../../examples/pooling/token_embed/jina_reranker_v3_offline.py)
 
 --8<-- [end:supported-token-embed-models]
 
@@ -86,7 +94,7 @@ The following [pooling parameters][vllm.PoolingParams] are supported.
 
 ### `LLM.encode`
 
-The [encode][vllm.LLM.encode] method is available to all pooling models in vLLM.
+The [encode][vllm.entrypoints.pooling.offline.PoolingOfflineMixin.encode] method is available to all pooling models in vLLM.
 
 Set `pooling_task="token_embed"` when using `LLM.encode` for token embedding Models:
 
@@ -102,7 +110,7 @@ print(f"Data: {data!r}")
 
 ### `LLM.score`
 
-The [score][vllm.LLM.score] method outputs similarity scores between sentence pairs.
+The [score][vllm.entrypoints.pooling.offline.PoolingOfflineMixin.score] method outputs similarity scores between sentence pairs.
 
 All models that support token embedding task also support using the score API to compute similarity scores by calculating the late interaction of two input prompts.
 
@@ -121,7 +129,7 @@ print(f"Score: {score}")
 
 ## Online Serving
 
-Please refer to the [pooling API](README.md#pooling-api) and use `"task":"token_embed"`.
+Please refer to the [Pooling API](README.md#pooling-api) and use `"task":"token_embed"`.
 
 ## More examples
 

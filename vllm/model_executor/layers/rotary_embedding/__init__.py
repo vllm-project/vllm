@@ -6,12 +6,17 @@ from typing import Any
 
 import torch
 
+from .bailing_mrope import BailingMRotaryEmbedding
 from .base import RotaryEmbedding
-from .deepseek_scaling_rope import DeepseekScalingRotaryEmbedding
+from .deepseek_scaling_rope import (
+    DeepseekScalingRotaryEmbedding,
+    DeepseekV4ScalingRotaryEmbedding,
+)
 from .dual_chunk_rope import DualChunkRotaryEmbedding
 from .dynamic_ntk_alpha_rope import DynamicNTKAlphaRotaryEmbedding
 from .dynamic_ntk_scaling_rope import DynamicNTKScalingRotaryEmbedding
 from .fope import FourierRotaryEmbedding
+from .gemma4_rope import Gemma4RotaryEmbedding
 from .linear_scaling_rope import LinearScalingRotaryEmbedding
 from .llama3_rope import Llama3RotaryEmbedding
 from .llama4_vision_rope import Llama4VisionRotaryEmbedding
@@ -19,7 +24,6 @@ from .mrope import MRotaryEmbedding
 from .mrope_interleaved import MRotaryEmbeddingInterleaved
 from .ntk_scaling_rope import NTKScalingRotaryEmbedding
 from .phi3_long_rope_scaled_rope import Phi3LongRoPEScaledRotaryEmbedding
-from .xdrope import XDRotaryEmbedding
 from .yarn_scaling_rope import YaRNScalingRotaryEmbedding
 
 _ROPE_DICT: dict[tuple[Any, ...], RotaryEmbedding] = {}
@@ -58,11 +62,13 @@ def get_rope(
     rope_parameters = rope_parameters or {}
     base = rope_parameters.get("rope_theta", 10000)
     scaling_type = rope_parameters.get("rope_type", "default")
-    partial_rotary_factor = rope_parameters.get("partial_rotary_factor", 1.0)
-
-    if partial_rotary_factor <= 0.0 or partial_rotary_factor > 1.0:
-        raise ValueError(f"{partial_rotary_factor=} must be between 0.0 and 1.0")
-    rotary_dim = int(head_size * partial_rotary_factor)
+    if rotary_dim := rope_parameters.get("rope_dim", None):
+        pass
+    else:
+        partial_rotary_factor = rope_parameters.get("partial_rotary_factor", 1.0)
+        if partial_rotary_factor <= 0.0 or partial_rotary_factor > 1.0:
+            raise ValueError(f"{partial_rotary_factor=} must be between 0.0 and 1.0")
+        rotary_dim = int(head_size * partial_rotary_factor)
 
     key = (
         head_size,
@@ -90,6 +96,16 @@ def get_rope(
             is_neox_style,
             dtype,
             **extra_kwargs,
+        )
+    elif scaling_type == "bailing_mrope":
+        rotary_emb = BailingMRotaryEmbedding(
+            head_size,
+            rotary_dim,
+            max_position,
+            base,
+            is_neox_style,
+            dtype,
+            mrope_section=rope_parameters["mrope_section"],
         )
     elif scaling_type == "default":
         if "mrope_section" in rope_parameters:
@@ -134,6 +150,17 @@ def get_rope(
                 is_neox_style,
                 dtype,
             )
+    elif scaling_type == "proportional":
+        # Proportional RoPE is used by Gemma4 for global (full) attention.
+        # Gemma4 uses a sparse/fractional RoPE with cross-mixing between halves.
+        rotary_emb = Gemma4RotaryEmbedding(
+            head_size,
+            rotary_dim,
+            max_position,
+            base,
+            is_neox_style,
+            dtype,
+        )
     elif scaling_type == "llama3":
         scaling_factor = rope_parameters["factor"]
         low_freq_factor = rope_parameters["low_freq_factor"]
@@ -193,10 +220,14 @@ def get_rope(
             )
         elif "factor" in rope_parameters:
             scaling_factor = rope_parameters["factor"]
+            max_trained_positions = rope_parameters.get(
+                "max_trained_positions", max_position
+            )
             rotary_emb = DynamicNTKScalingRotaryEmbedding(
                 head_size,
                 rotary_dim,
                 max_position,
+                max_trained_positions,
                 base,
                 is_neox_style,
                 scaling_factor,
@@ -206,18 +237,6 @@ def get_rope(
             raise ValueError(
                 "Dynamic rope scaling must contain either 'alpha' or 'factor' field"
             )
-    elif scaling_type == "xdrope":
-        scaling_alpha = rope_parameters["alpha"]
-        rotary_emb = XDRotaryEmbedding(
-            head_size,
-            rotary_dim,
-            max_position,
-            base,
-            is_neox_style,
-            scaling_alpha,
-            dtype,
-            xdrope_section=rope_parameters["xdrope_section"],
-        )
     elif scaling_type == "yarn":
         scaling_factor = rope_parameters["factor"]
         original_max_position = rope_parameters["original_max_position_embeddings"]
@@ -226,16 +245,15 @@ def get_rope(
             for k, v in rope_parameters.items()
             if k
             in (
-                "extrapolation_factor",
-                "attn_factor",
                 "beta_fast",
                 "beta_slow",
-                "apply_yarn_scaling",
+                "mscale",
+                "mscale_all_dim",
+                "attention_factor",
                 "truncate",
             )
         }
         if "mrope_section" in rope_parameters:
-            extra_kwargs.pop("apply_yarn_scaling", None)
             rotary_emb = MRotaryEmbedding(
                 head_size,
                 rotary_dim,
@@ -268,15 +286,17 @@ def get_rope(
             for k, v in rope_parameters.items()
             if k
             in (
-                "extrapolation_factor",
-                "attn_factor",
                 "beta_fast",
                 "beta_slow",
                 "mscale",
                 "mscale_all_dim",
             )
         }
-        rotary_emb = DeepseekScalingRotaryEmbedding(
+        if rope_parameters.get("is_deepseek_v4", False):
+            cls = DeepseekV4ScalingRotaryEmbedding
+        else:
+            cls = DeepseekScalingRotaryEmbedding
+        rotary_emb = cls(
             head_size,
             rotary_dim,
             original_max_position,

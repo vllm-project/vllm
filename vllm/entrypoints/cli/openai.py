@@ -5,6 +5,7 @@ import argparse
 import os
 import signal
 import sys
+import time
 from typing import TYPE_CHECKING
 
 from openai import OpenAI
@@ -44,25 +45,72 @@ def _interactive_cli(args: argparse.Namespace) -> tuple[str, OpenAI]:
     return model_name, openai_client
 
 
-def _print_chat_stream(stream) -> str:
-    output = ""
+def _print_chat_stream(stream, stats: bool = False) -> str:
+    output: str = ""
+    in_reasoning: bool = False
+    start: float = time.perf_counter()
+    ttft: float | None = None
+    completion_tokens: int = 0
     for chunk in stream:
+        if chunk.usage is not None:
+            completion_tokens = chunk.usage.completion_tokens
+        if not chunk.choices:
+            continue
         delta = chunk.choices[0].delta
+        reasoning = getattr(delta, "reasoning", None) or getattr(
+            delta, "reasoning_content", None
+        )
+        if ttft is None and (reasoning or delta.content):
+            ttft = time.perf_counter() - start
+        if reasoning:
+            if not in_reasoning:
+                print("<think>", flush=True)
+                in_reasoning = True
+            print(reasoning, end="", flush=True)
         if delta.content:
+            if in_reasoning:
+                print("\n</think>", flush=True)
+                in_reasoning = False
             output += delta.content
             print(delta.content, end="", flush=True)
+    if in_reasoning:
+        print("\n</think>", end="", flush=True)
     print()
+    if stats:
+        _print_metrics(start, ttft, completion_tokens)
     return output
 
 
-def _print_completion_stream(stream) -> str:
+def _print_metrics(start: float, ttft: float | None, completion_tokens: int) -> None:
+    total_time = time.perf_counter() - start
+    if ttft is None or total_time <= 0:
+        return
+    print(f"{'TTFT:':<5} {ttft * 1000:.2f} ms")
+    print(
+        f"{'TPS:':<5} {completion_tokens / total_time:.2f} tokens/s "
+        f"({completion_tokens} tokens in {total_time:.2f}s)"
+    )
+
+
+def _print_completion_stream(stream, stats: bool = False) -> str:
     output = ""
+    start = time.perf_counter()
+    ttft: float | None = None
+    completion_tokens = 0
     for chunk in stream:
+        if chunk.usage is not None:
+            completion_tokens = chunk.usage.completion_tokens
+        if not chunk.choices:
+            continue
         text = chunk.choices[0].text
-        if text is not None:
+        if text:
+            if ttft is None:
+                ttft = time.perf_counter() - start
             output += text
             print(text, end="", flush=True)
     print()
+    if stats:
+        _print_metrics(start, ttft, completion_tokens)
     return output
 
 
@@ -127,18 +175,23 @@ class ChatCommand(CLISubcommand):
     def cmd(args: argparse.Namespace) -> None:
         model_name, client = _interactive_cli(args)
         system_prompt = args.system_prompt
+        stats = args.stats
         conversation: list[ChatCompletionMessageParam] = []
 
         if system_prompt is not None:
             conversation.append({"role": "system", "content": system_prompt})
 
-        if args.quick:
+        create_kwargs = {"model": model_name, "stream": True}
+        if stats:
+            create_kwargs["stream_options"] = {"include_usage": True}
+
+        if args.quick is not None:
             conversation.append({"role": "user", "content": args.quick})
 
             stream = client.chat.completions.create(
-                model=model_name, messages=conversation, stream=True
+                messages=conversation, **create_kwargs
             )
-            output = _print_chat_stream(stream)
+            output = _print_chat_stream(stream, stats)
             conversation.append({"role": "assistant", "content": output})
             return
 
@@ -151,9 +204,9 @@ class ChatCommand(CLISubcommand):
             conversation.append({"role": "user", "content": input_message})
 
             stream = client.chat.completions.create(
-                model=model_name, messages=conversation, stream=True
+                messages=conversation, **create_kwargs
             )
-            output = _print_chat_stream(stream)
+            output = _print_chat_stream(stream, stats)
             conversation.append({"role": "assistant", "content": output})
 
     @staticmethod
@@ -175,6 +228,11 @@ class ChatCommand(CLISubcommand):
             type=str,
             metavar="MESSAGE",
             help=("Send a single prompt as MESSAGE and print the response, then exit."),
+        )
+        parser.add_argument(
+            "--stats",
+            action="store_true",
+            help="Print TTFT and TPS statistics after each response.",
         )
         return parser
 
@@ -198,17 +256,20 @@ class CompleteCommand(CLISubcommand):
     @staticmethod
     def cmd(args: argparse.Namespace) -> None:
         model_name, client = _interactive_cli(args)
+        stats = args.stats
 
         kwargs = {
             "model": model_name,
             "stream": True,
         }
-        if args.max_tokens:
+        if args.max_tokens is not None:
             kwargs["max_tokens"] = args.max_tokens
+        if stats:
+            kwargs["stream_options"] = {"include_usage": True}
 
-        if args.quick:
+        if args.quick is not None:
             stream = client.completions.create(prompt=args.quick, **kwargs)
-            _print_completion_stream(stream)
+            _print_completion_stream(stream, stats)
             return
 
         print("Please enter prompt to complete:")
@@ -218,7 +279,7 @@ class CompleteCommand(CLISubcommand):
             except EOFError:
                 break
             stream = client.completions.create(prompt=input_prompt, **kwargs)
-            _print_completion_stream(stream)
+            _print_completion_stream(stream, stats)
 
     @staticmethod
     def add_cli_args(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
@@ -235,6 +296,11 @@ class CompleteCommand(CLISubcommand):
             type=str,
             metavar="PROMPT",
             help="Send a single prompt and print the completion output, then exit.",
+        )
+        parser.add_argument(
+            "--stats",
+            action="store_true",
+            help="Print TTFT and TPS statistics after each response.",
         )
         return parser
 

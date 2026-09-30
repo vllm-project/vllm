@@ -23,7 +23,8 @@ def _apply_bad_words_single_batch(
         assert len(actual_prefix) == len(expected_prefix)
 
         if actual_prefix == expected_prefix:
-            logits[last_token_id] = _SMALLEST_LOGIT
+            # Assign to slice to avoid cpu->gpu sync.
+            logits[last_token_id : last_token_id + 1] = _SMALLEST_LOGIT
 
 
 def apply_bad_words(

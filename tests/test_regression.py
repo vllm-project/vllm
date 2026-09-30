@@ -17,22 +17,6 @@ from vllm import LLM, SamplingParams
 from vllm.platforms import current_platform
 
 
-@pytest.mark.skip(reason="In V1, we reject tokens > max_seq_len")
-def test_duplicated_ignored_sequence_group():
-    """https://github.com/vllm-project/vllm/issues/1655"""
-
-    sampling_params = SamplingParams(temperature=0.01, top_p=0.1, max_tokens=256)
-    llm = LLM(
-        model="distilbert/distilgpt2",
-        max_num_batched_tokens=4096,
-        tensor_parallel_size=1,
-    )
-    prompts = ["This is a short prompt", "This is a very long prompt " * 1000]
-    outputs = llm.generate(prompts, sampling_params=sampling_params)
-
-    assert len(prompts) == len(outputs)
-
-
 @pytest.mark.parametrize(
     "model",
     [
@@ -72,9 +56,10 @@ def test_gc():
 
 
 def test_model_from_modelscope(monkeypatch: pytest.MonkeyPatch):
-    # model: https://modelscope.cn/models/qwen/Qwen1.5-0.5B-Chat/summary
+    # model: https://www.modelscope.ai/models/qwen/Qwen1.5-0.5B-Chat
     with monkeypatch.context() as m:
         m.setenv("VLLM_USE_MODELSCOPE", "True")
+        m.setenv("MODELSCOPE_DOMAIN", "www.modelscope.ai")
         # Don't use HF_TOKEN for ModelScope repos, otherwise it will fail
         # with 400 Client Error: Bad Request.
         m.setenv("HF_TOKEN", "")

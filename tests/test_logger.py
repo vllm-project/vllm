@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import enum
+import io
 import json
 import logging
 import os
@@ -10,21 +11,25 @@ from dataclasses import dataclass
 from json.decoder import JSONDecodeError
 from tempfile import NamedTemporaryFile
 from typing import Any
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 from uuid import uuid4
 
 import pytest
 
-from vllm.entrypoints.logger import RequestLogger
+import vllm.logger as vllm_logger
+from vllm.config import LoggingConfig
 from vllm.logger import (
     _DATE_FORMAT,
     _FORMAT,
     _configure_vllm_root_logger,
+    _use_color,
+    configure_logging,
     enable_trace_function_call,
     init_logger,
 )
 from vllm.logging_utils import NewLineFormatter
 from vllm.logging_utils.dump_input import prepare_object_to_dump
+from vllm.utils.system_utils import decorate_logs
 
 
 def f1(x):
@@ -49,16 +54,27 @@ def test_trace_function_call():
     os.remove(path)
 
 
+def test_caplog_vllm_captures_info_before_runtime_logging_is_configured(caplog_vllm):
+    message = "Capture this unconfigured INFO record"
+    logger = init_logger(f"vllm.test_logger.{uuid4()}")
+
+    logger.info(message)
+
+    assert message in caplog_vllm.text
+
+
 def test_default_vllm_root_logger_configuration(monkeypatch):
     """This test presumes that VLLM_CONFIGURE_LOGGING (default: True) and
     VLLM_LOGGING_CONFIG_PATH (default: None) are not configured and default
     behavior is activated."""
     monkeypatch.setenv("VLLM_LOGGING_COLOR", "0")
-    _configure_vllm_root_logger()
+    early_logger = init_logger(f"vllm.test_logger.{uuid4()}")
+    configure_logging(LoggingConfig())
 
     logger = logging.getLogger("vllm")
     assert logger.level == logging.INFO
     assert not logger.propagate
+    assert early_logger.isEnabledFor(logging.INFO)
 
     handler = logger.handlers[0]
     assert isinstance(handler, logging.StreamHandler)
@@ -71,6 +87,142 @@ def test_default_vllm_root_logger_configuration(monkeypatch):
     assert isinstance(formatter, NewLineFormatter)
     assert formatter._fmt == _FORMAT
     assert formatter.datefmt == _DATE_FORMAT
+
+
+def test_offline_llm_configures_logging_before_logging_args(monkeypatch):
+    import vllm.entrypoints.llm as llm_module
+
+    class StopInitialization(Exception):
+        pass
+
+    configured = False
+
+    def configure_logging(_):
+        nonlocal configured
+        configured = True
+
+    def log_args(_):
+        assert configured
+        raise StopInitialization
+
+    monkeypatch.setattr(llm_module, "configure_logging_if_needed", configure_logging)
+    monkeypatch.setattr(llm_module, "log_non_default_args", log_args)
+
+    with pytest.raises(StopInitialization):
+        llm_module.LLM(model="facebook/opt-125m")
+
+
+def test_json_logging(monkeypatch, tmp_path):
+    output = io.StringIO()
+    logging_config = {
+        "version": 1,
+        "disable_existing_loggers": False,
+        "formatters": {
+            "json": {
+                "class": "pythonjsonlogger.jsonlogger.JsonFormatter",
+                "format": (
+                    "%(asctime)s %(levelname)s %(name)s %(vllm_process_name)s "
+                    "%(process)d %(message)s"
+                ),
+            },
+        },
+        "handlers": {
+            "console": {
+                "class": "logging.StreamHandler",
+                "formatter": "json",
+                "stream": "ext://sys.stdout",
+            },
+        },
+        "loggers": {
+            "vllm": {
+                "handlers": ["console"],
+                "level": "INFO",
+                "propagate": False,
+            },
+        },
+    }
+
+    logging_config_path = tmp_path / "logging_config.json"
+    logging_config_path.write_text(json.dumps(logging_config))
+
+    try:
+        with monkeypatch.context() as context:
+            context.setattr(sys, "stdout", output)
+            # Restore this module-global state when the context exits.
+            context.setattr(vllm_logger, "_vllm_process_info", None)
+            _configure_vllm_root_logger(
+                LoggingConfig(pylogging_config_file=str(logging_config_path))
+            )
+            decorate_logs("Worker_DP0")
+            init_logger("vllm.structured_log_probe").info("structured log probe")
+
+            log = json.loads(output.getvalue())
+    finally:
+        _configure_vllm_root_logger(LoggingConfig())
+
+    assert log["message"] == "structured log probe"
+    assert log["vllm_process_name"] == "Worker_DP0"
+    assert log["process"] == os.getpid()
+
+
+@pytest.mark.parametrize("factory_order", ["before", "after", "replacement"])
+def test_configure_logging_preserves_application_record_factory(
+    monkeypatch, factory_order
+):
+    """Application fields survive initial configuration and reconfiguration."""
+    original_factory = logging.getLogRecordFactory()
+    monkeypatch.setattr(vllm_logger, "dictConfig", lambda _: None)
+    monkeypatch.setattr(vllm_logger, "_last_configured_logging_config", None)
+    monkeypatch.setattr(vllm_logger, "_vllm_process_info", None)
+    config = LoggingConfig()
+    formatter = logging.Formatter("%(request_id)s %(vllm_process_name)s %(message)s")
+
+    try:
+        logging.setLogRecordFactory(logging.LogRecord)
+        if factory_order != "before":
+            configure_logging(config)
+        base_factory = (
+            logging.LogRecord
+            if factory_order == "replacement"
+            else logging.getLogRecordFactory()
+        )
+
+        def application_factory(*args, **kwargs):
+            record = base_factory(*args, **kwargs)
+            record.request_id = "request-123"
+            return record
+
+        logging.setLogRecordFactory(application_factory)
+        decorate_logs("Worker_DP0")
+        for _ in range(2):
+            configure_logging(config)
+            record = logging.getLogger("application").makeRecord(
+                "application", logging.INFO, __file__, 1, "probe", (), None
+            )
+            assert formatter.format(record) == "request-123 Worker_DP0 probe"
+    finally:
+        logging.setLogRecordFactory(original_factory)
+
+
+def test_use_color_force_color(monkeypatch):
+    """FORCE_COLOR forces colored logs without a TTY, while NO_COLOR and an
+    explicit VLLM_LOGGING_COLOR=0 take precedence over it."""
+    monkeypatch.setattr(sys, "stdout", io.StringIO())
+    monkeypatch.setattr(sys, "stderr", io.StringIO())
+    for var in ("NO_COLOR", "FORCE_COLOR", "VLLM_LOGGING_COLOR"):
+        monkeypatch.delenv(var, raising=False)
+
+    assert not _use_color()
+
+    monkeypatch.setenv("FORCE_COLOR", "1")
+    assert _use_color()
+
+    monkeypatch.setenv("VLLM_LOGGING_COLOR", "0")
+    assert not _use_color()
+    monkeypatch.delenv("VLLM_LOGGING_COLOR")
+
+    monkeypatch.setenv("NO_COLOR", "1")
+    assert not _use_color()
 
 
 def test_descendent_loggers_depend_on_and_propagate_logs_to_root_logger(monkeypatch):
@@ -110,9 +262,11 @@ def test_logger_configuring_can_be_disabled(monkeypatch):
     monkeypatch.setenv("VLLM_CONFIGURE_LOGGING", "0")
     monkeypatch.delenv("VLLM_LOGGING_CONFIG_PATH", raising=False)
 
+    original_factory = logging.getLogRecordFactory()
     with patch("vllm.logger.dictConfig") as dict_config_mock:
-        _configure_vllm_root_logger()
+        configure_logging(LoggingConfig(configure_logging=False))
     dict_config_mock.assert_not_called()
+    assert logging.getLogRecordFactory() is original_factory
 
 
 def test_an_error_is_raised_when_custom_logging_config_file_does_not_exist(monkeypatch):
@@ -192,9 +346,11 @@ def test_custom_logging_config_is_parsed_and_used_when_provided(monkeypatch):
     with NamedTemporaryFile(encoding="utf-8", mode="w") as logging_config_file:
         logging_config_file.write(json.dumps(valid_logging_config))
         logging_config_file.flush()
-        monkeypatch.setenv("VLLM_LOGGING_CONFIG_PATH", logging_config_file.name)
+        monkeypatch.delenv("VLLM_LOGGING_CONFIG_PATH", raising=False)
         with patch("vllm.logger.dictConfig") as dict_config_mock:
-            _configure_vllm_root_logger()
+            configure_logging(
+                LoggingConfig(pylogging_config_file=logging_config_file.name)
+            )
             dict_config_mock.assert_called_with(valid_logging_config)
 
 
@@ -215,13 +371,18 @@ def test_custom_logging_config_causes_an_error_if_configure_logging_is_off(monke
     with NamedTemporaryFile(encoding="utf-8", mode="w") as logging_config_file:
         logging_config_file.write(json.dumps(valid_logging_config))
         logging_config_file.flush()
-        monkeypatch.setenv("VLLM_LOGGING_CONFIG_PATH", logging_config_file.name)
+        monkeypatch.delenv("VLLM_LOGGING_CONFIG_PATH", raising=False)
         with pytest.raises(RuntimeError) as ex_info:
-            _configure_vllm_root_logger()
+            configure_logging(
+                LoggingConfig(
+                    configure_logging=False,
+                    pylogging_config_file=logging_config_file.name,
+                )
+            )
         assert ex_info.type is RuntimeError
         expected_message_snippet = (
-            "VLLM_CONFIGURE_LOGGING evaluated to false, but "
-            "VLLM_LOGGING_CONFIG_PATH was given."
+            "Logging configuration is disabled, but a Python logging config "
+            "file was given."
         )
         assert expected_message_snippet in str(ex_info)
 
@@ -269,254 +430,14 @@ def test_prepare_object_to_dump():
     assert prepare_object_to_dump(CustomClass(1, "b")) == "CustomClass(a=1, b='b')"
 
 
-def test_request_logger_log_outputs():
-    """Test the new log_outputs functionality."""
-    # Create a mock logger to capture log calls
-    mock_logger = MagicMock()
-
-    with patch("vllm.entrypoints.logger.logger", mock_logger):
-        request_logger = RequestLogger(max_log_len=None)
-
-        # Test basic output logging
-        request_logger.log_outputs(
-            request_id="test-123",
-            outputs="Hello, world!",
-            output_token_ids=[1, 2, 3, 4],
-            finish_reason="stop",
-            is_streaming=False,
-            delta=False,
-        )
-
-        mock_logger.info.assert_called_once()
-        call_args = mock_logger.info.call_args.args
-        assert "Generated response %s%s" in call_args[0]
-        assert call_args[1] == "test-123"
-        assert call_args[3] == "Hello, world!"
-        assert call_args[4] == [1, 2, 3, 4]
-        assert call_args[5] == "stop"
-
-
-def test_request_logger_log_outputs_streaming_delta():
-    """Test log_outputs with streaming delta mode."""
-    mock_logger = MagicMock()
-
-    with patch("vllm.entrypoints.logger.logger", mock_logger):
-        request_logger = RequestLogger(max_log_len=None)
-
-        # Test streaming delta logging
-        request_logger.log_outputs(
-            request_id="test-456",
-            outputs="Hello",
-            output_token_ids=[1],
-            finish_reason=None,
-            is_streaming=True,
-            delta=True,
-        )
-
-        mock_logger.info.assert_called_once()
-        call_args = mock_logger.info.call_args.args
-        assert "Generated response %s%s" in call_args[0]
-        assert call_args[1] == "test-456"
-        assert call_args[2] == " (streaming delta)"
-        assert call_args[3] == "Hello"
-        assert call_args[4] == [1]
-        assert call_args[5] is None
-
-
-def test_request_logger_log_outputs_streaming_complete():
-    """Test log_outputs with streaming complete mode."""
-    mock_logger = MagicMock()
-
-    with patch("vllm.entrypoints.logger.logger", mock_logger):
-        request_logger = RequestLogger(max_log_len=None)
-
-        # Test streaming complete logging
-        request_logger.log_outputs(
-            request_id="test-789",
-            outputs="Complete response",
-            output_token_ids=[1, 2, 3],
-            finish_reason="length",
-            is_streaming=True,
-            delta=False,
-        )
-
-        mock_logger.info.assert_called_once()
-        call_args = mock_logger.info.call_args.args
-        assert "Generated response %s%s" in call_args[0]
-        assert call_args[1] == "test-789"
-        assert call_args[2] == " (streaming complete)"
-        assert call_args[3] == "Complete response"
-        assert call_args[4] == [1, 2, 3]
-        assert call_args[5] == "length"
-
-
-def test_request_logger_log_outputs_with_truncation():
-    """Test log_outputs respects max_log_len setting."""
-    mock_logger = MagicMock()
-
-    with patch("vllm.entrypoints.logger.logger", mock_logger):
-        # Set max_log_len to 10
-        request_logger = RequestLogger(max_log_len=10)
-
-        # Test output truncation
-        long_output = "This is a very long output that should be truncated"
-        long_token_ids = list(range(20))  # 20 tokens
-
-        request_logger.log_outputs(
-            request_id="test-truncate",
-            outputs=long_output,
-            output_token_ids=long_token_ids,
-            finish_reason="stop",
-            is_streaming=False,
-            delta=False,
-        )
-
-        mock_logger.info.assert_called_once()
-        call_args = mock_logger.info.call_args
-
-        # Check that output was truncated to first 10 characters
-        logged_output = call_args[0][3]
-        assert logged_output == "This is a "
-        assert len(logged_output) == 10
-
-        # Check that token IDs were truncated to first 10 tokens
-        logged_token_ids = call_args[0][4]
-        assert logged_token_ids == list(range(10))
-        assert len(logged_token_ids) == 10
-
-
-def test_request_logger_log_outputs_none_values():
-    """Test log_outputs handles None values correctly."""
-    mock_logger = MagicMock()
-
-    with patch("vllm.entrypoints.logger.logger", mock_logger):
-        request_logger = RequestLogger(max_log_len=None)
-
-        # Test with None output_token_ids
-        request_logger.log_outputs(
-            request_id="test-none",
-            outputs="Test output",
-            output_token_ids=None,
-            finish_reason="stop",
-            is_streaming=False,
-            delta=False,
-        )
-
-        mock_logger.info.assert_called_once()
-        call_args = mock_logger.info.call_args.args
-        assert "Generated response %s%s" in call_args[0]
-        assert call_args[1] == "test-none"
-        assert call_args[3] == "Test output"
-        assert call_args[4] is None
-        assert call_args[5] == "stop"
-
-
-def test_request_logger_log_outputs_empty_output():
-    """Test log_outputs handles empty output correctly."""
-    mock_logger = MagicMock()
-
-    with patch("vllm.entrypoints.logger.logger", mock_logger):
-        request_logger = RequestLogger(max_log_len=5)
-
-        # Test with empty output
-        request_logger.log_outputs(
-            request_id="test-empty",
-            outputs="",
-            output_token_ids=[],
-            finish_reason="stop",
-            is_streaming=False,
-            delta=False,
-        )
-
-        mock_logger.info.assert_called_once()
-        call_args = mock_logger.info.call_args.args
-        assert "Generated response %s%s" in call_args[0]
-        assert call_args[1] == "test-empty"
-        assert call_args[3] == ""
-        assert call_args[4] == []
-        assert call_args[5] == "stop"
-
-
-def test_request_logger_log_outputs_integration():
-    """Test that log_outputs can be called alongside log_inputs."""
-    mock_logger = MagicMock()
-
-    with patch("vllm.entrypoints.logger.logger", mock_logger):
-        request_logger = RequestLogger(max_log_len=None)
-
-        # Test that both methods can be called without interference
-        request_logger.log_inputs(
-            request_id="test-integration",
-            prompt="Test prompt",
-            prompt_token_ids=[1, 2, 3],
-            prompt_embeds=None,
-            params=None,
-            lora_request=None,
-        )
-
-        request_logger.log_outputs(
-            request_id="test-integration",
-            outputs="Test output",
-            output_token_ids=[4, 5, 6],
-            finish_reason="stop",
-            is_streaming=False,
-            delta=False,
-        )
-
-        # Should have been called twice - once for inputs, once for outputs
-        assert mock_logger.info.call_count == 2
-
-        # Check that the calls were made with correct patterns
-        input_call = mock_logger.info.call_args_list[0][0]
-        output_call = mock_logger.info.call_args_list[1][0]
-
-        assert "Received request %s" in input_call[0]
-        assert input_call[1] == "test-integration"
-
-        assert "Generated response %s%s" in output_call[0]
-        assert output_call[1] == "test-integration"
-
-
-def test_streaming_complete_logs_full_text_content():
-    """Test that streaming complete logging includes
-    full accumulated text, not just token count."""
-    mock_logger = MagicMock()
-
-    with patch("vllm.entrypoints.logger.logger", mock_logger):
-        request_logger = RequestLogger(max_log_len=None)
-
-        # Test with actual content instead of token count format
-        full_response = "This is a complete response from streaming"
-        request_logger.log_outputs(
-            request_id="test-streaming-full-text",
-            outputs=full_response,
-            output_token_ids=None,
-            finish_reason="streaming_complete",
-            is_streaming=True,
-            delta=False,
-        )
-
-        mock_logger.info.assert_called_once()
-        call_args = mock_logger.info.call_args.args
-
-        # Verify the logged output is the full text, not a token count format
-        logged_output = call_args[3]
-        assert logged_output == full_response
-        assert "tokens>" not in logged_output
-        assert "streaming_complete" not in logged_output
-
-        # Verify other parameters
-        assert call_args[1] == "test-streaming-full-text"
-        assert call_args[2] == " (streaming complete)"
-        assert call_args[5] == "streaming_complete"
-
-
 # Add vllm prefix to make sure logs go through the vllm logger
 test_logger = init_logger("vllm.test_logger")
 
 
 def mp_function(**kwargs):
     # This function runs in a subprocess
+    if logging_config := kwargs.pop("logging_config", None):
+        configure_logging(logging_config)
 
     test_logger.warning("This is a subprocess: %s", kwargs.get("a"))
     test_logger.error("This is a subprocess error.")
@@ -548,7 +469,13 @@ def test_caplog_mp_spawn(caplog_mp_spawn):
         p = ctx.Process(
             target=mp_function,
             name=f"SubProcess{1}",
-            kwargs={"a": "AAAA", "b": "BBBBB"},
+            kwargs={
+                "a": "AAAA",
+                "b": "BBBBB",
+                "logging_config": LoggingConfig(
+                    pylogging_config_file=os.environ["VLLM_LOGGING_CONFIG_PATH"]
+                ),
+            },
         )
         p.start()
         p.join()

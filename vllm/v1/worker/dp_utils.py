@@ -1,20 +1,39 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from contextlib import contextmanager, nullcontext
+from contextvars import ContextVar
 
-import numpy as np
 import torch
 import torch.distributed as dist
 
 from vllm.config import ParallelConfig
 from vllm.distributed.parallel_state import get_dp_group
 from vllm.logger import init_logger
+from vllm.utils.gpu_sync_debug import gpu_sync_allowed
+from vllm.utils.torch_utils import PIN_MEMORY
 from vllm.v1.worker.ubatch_utils import (
     check_ubatch_thresholds,
     is_last_ubatch_empty,
 )
 
 logger = init_logger(__name__)
+
+_skip_dp_coordination = ContextVar("skip_dp_coordination", default=False)
+
+
+@contextmanager
+def skip_dp_coordination():
+    """Run without coordinating DP metadata with other DP ranks."""
+    token = _skip_dp_coordination.set(True)
+    try:
+        yield
+    finally:
+        _skip_dp_coordination.reset(token)
+
+
+def should_skip_dp_coordination() -> bool:
+    return _skip_dp_coordination.get()
 
 
 def _get_device_and_group(parallel_config: ParallelConfig):
@@ -29,7 +48,6 @@ def _get_device_and_group(parallel_config: ParallelConfig):
     if parallel_config.disable_nccl_for_dp_synchronization:
         logger.info_once(
             "Using CPU all reduce to synchronize DP padding between ranks.",
-            scope="local",
         )
         device = "cpu"
         group = get_dp_group().cpu_group
@@ -46,11 +64,14 @@ def _run_ar(
     dp_size = parallel_config.data_parallel_size
     dp_rank = parallel_config.data_parallel_rank
     device, group = _get_device_and_group(parallel_config)
-    tensor = torch.zeros(4, dp_size, device=device, dtype=torch.int32)
-    tensor[0][dp_rank] = orig_num_tokens_per_ubatch
-    tensor[1][dp_rank] = padded_num_tokens_per_ubatch
-    tensor[2][dp_rank] = 1 if should_ubatch else 0
-    tensor[3][dp_rank] = cudagraph_mode
+    # Populate this rank's contribution on CPU to reduce GPU syncs.
+    pin_memory = PIN_MEMORY and torch.device(device).type == "cuda"
+    tensor_cpu = torch.zeros(4, dp_size, dtype=torch.int32, pin_memory=pin_memory)
+    tensor_cpu[0][dp_rank] = orig_num_tokens_per_ubatch
+    tensor_cpu[1][dp_rank] = padded_num_tokens_per_ubatch
+    tensor_cpu[2][dp_rank] = 1 if should_ubatch else 0
+    tensor_cpu[3][dp_rank] = cudagraph_mode
+    tensor = tensor_cpu.to(device, non_blocking=True)
     dist.all_reduce(tensor, group=group)
     return tensor
 
@@ -91,8 +112,7 @@ def _post_process_dp_padding(tensor: torch.Tensor, should_dp_pad: bool) -> torch
 
 
 def _post_process_cudagraph_mode(tensor: torch.Tensor) -> int:
-    """
-    Synchronize cudagraph_mode across DP ranks by taking the minimum.
+    """Synchronize cudagraph_mode across DP ranks by taking the minimum.
     If any rank has NONE (0), all ranks use NONE.
     This ensures all ranks send consistent values (all padded or all unpadded).
     """
@@ -106,8 +126,7 @@ def _synchronize_dp_ranks(
     cudagraph_mode: int,
     parallel_config: ParallelConfig,
 ) -> tuple[bool, torch.Tensor | None, int]:
-    """
-    1. Decides if each DP rank is going to microbatch. Either all ranks
+    """1. Decides if each DP rank is going to microbatch. Either all ranks
     run with microbatching or none of them do.
 
     2. Determines the total number of tokens that each rank will run.
@@ -137,27 +156,33 @@ def _synchronize_dp_ranks(
         parallel_config=parallel_config,
     )
 
-    # Synchronize cudagraph_mode across ranks first (take min).
-    # This is needed before DP padding decision since we use the synced
-    # cudagraph mode to determine whether DP padding is needed.
-    synced_cudagraph_mode = _post_process_cudagraph_mode(tensor)
+    # Only the NCCL path leaves `tensor` on device. With Gloo -- the default
+    # under async scheduling -- the all-reduce runs on CPU, so the reads below
+    # are host-side and the check should stay armed.
+    with (
+        nullcontext()
+        if parallel_config.disable_nccl_for_dp_synchronization
+        else gpu_sync_allowed()
+    ):
+        # Synchronize cudagraph_mode across ranks first (take min).
+        # This is needed before DP padding decision since we use the synced
+        # cudagraph mode to determine whether DP padding is needed.
+        synced_cudagraph_mode = _post_process_cudagraph_mode(tensor)
 
-    # Check conditions for microbatching
-    should_ubatch = _post_process_ubatch(tensor, parallel_config.num_ubatches)
+        # Check conditions for microbatching
+        should_ubatch = _post_process_ubatch(tensor, parallel_config.num_ubatches)
 
-    # DP padding is needed when cudagraph is enabled (synced across ranks)
-    # or when ubatching/DBO is active (ubatching requires uniform batch
-    # sizes across DP ranks currently).
-    # Use the synced runtime cudagraph mode rather than the compilation config
-    # so we can avoid padding when cudagraph is not enabled for this step.
-    should_dp_pad = synced_cudagraph_mode != 0 or should_ubatch
+        # DP padding is needed when cudagraph is enabled (synced across ranks)
+        # or when ubatching/DBO is active (ubatching requires uniform batch
+        # sizes across DP ranks currently).
+        # Use the synced runtime cudagraph mode rather than the compilation
+        # config so we can avoid padding when cudagraph is not enabled for
+        # this step.
+        should_dp_pad = synced_cudagraph_mode != 0 or should_ubatch
 
-    # Pad all DP ranks up to the maximum token count across ranks if
-    # should_dp_pad is True
-    num_tokens_after_padding = _post_process_dp_padding(
-        tensor,
-        should_dp_pad,
-    )
+        # Pad all DP ranks up to the maximum token count across ranks if
+        # should_dp_pad is True
+        num_tokens_after_padding = _post_process_dp_padding(tensor, should_dp_pad)
 
     return should_ubatch, num_tokens_after_padding, synced_cudagraph_mode
 
@@ -168,11 +193,9 @@ def coordinate_batch_across_dp(
     parallel_config: ParallelConfig,
     num_tokens_padded: int | None = None,
     uniform_decode: bool | None = None,
-    num_scheduled_tokens_per_request: np.ndarray | None = None,
     cudagraph_mode: int = 0,
 ) -> tuple[bool, torch.Tensor | None, int]:
-    """
-    Coordinates amongst all DP ranks to determine if and how the full batch
+    """Coordinates amongst all DP ranks to determine if and how the full batch
     should be split into microbatches.
 
     Args:
@@ -183,8 +206,6 @@ def coordinate_batch_across_dp(
             TP, etc)
         uniform_decode: Only used if allow_microbatching is True. True if the batch
             only contains single token decodes
-        num_scheduled_tokens_per_request: Only used if allow_microbatching is True. The
-            number of tokens per request.
         cudagraph_mode: The cudagraph mode for this rank (0=NONE, 1=PIECEWISE, 2=FULL).
             DP padding is enabled when synced cudagraph mode across ranks is not NONE.
 
@@ -215,6 +236,19 @@ def coordinate_batch_across_dp(
 
     if num_tokens_padded is None:
         num_tokens_padded = num_tokens_unpadded
+
+    if should_skip_dp_coordination():
+        should_ubatch = should_attempt_ubatching and not is_last_ubatch_empty(
+            num_tokens_unpadded,
+            num_tokens_padded,
+            parallel_config.num_ubatches,
+        )
+        num_tokens_after_padding = torch.full(
+            (parallel_config.data_parallel_size,),
+            num_tokens_padded,
+            dtype=torch.int32,
+        )
+        return should_ubatch, num_tokens_after_padding, cudagraph_mode
 
     (should_ubatch, num_tokens_after_padding, synced_cudagraph_mode) = (
         _synchronize_dp_ranks(

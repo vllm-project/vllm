@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from dataclasses import dataclass
+from types import SimpleNamespace
 from typing import Any
 
 import torch
@@ -14,6 +15,7 @@ from tests.kernels.quantization.nvfp4_utils import (
     dequantize_nvfp4_to_dtype,
 )
 from tests.kernels.utils import torch_experts
+from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import VllmConfig
 from vllm.distributed import (
     get_dp_group,
@@ -32,12 +34,24 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
     RoutingMethodType,
 )
+from vllm.model_executor.layers.quantization.utils.fp8_utils import is_fp8
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    QuantKey,
+    kFp8Dynamic128Sym,
+    kFp8DynamicTensorSym,
+    kFp8DynamicTokenSym,
+    kFp8Static128BlockSym,
+    kFp8StaticChannelSym,
+    kFp8StaticTensorSym,
+)
 from vllm.utils.import_utils import (
     has_aiter,
     has_deep_ep,
+    has_deep_ep_v2,
     has_deep_gemm,
     has_mori,
 )
+from vllm.utils.math_utils import next_power_of_2
 
 from .mk_objects import (
     TestMoEQuantConfig,
@@ -69,6 +83,8 @@ class Config:
     fused_experts_type: mk.FusedMoEExperts
 
     world_size: int
+
+    activation: MoEActivation = MoEActivation.SILU
 
     torch_trace_dir_path: str | None = None
 
@@ -137,10 +153,12 @@ class Config:
         return self.E // self.world_size
 
     def make_env_data(self) -> tuple[VllmConfig, dict[Any, Any]]:
-        """
-        make env data for vllm launch.
-        """
+        """Make env data for vllm launch."""
         vllm_config = VllmConfig()
+        vllm_config.model_config = SimpleNamespace(
+            enforce_eager=True,
+            is_moe=True,
+        )
         vllm_config.parallel_config.data_parallel_size = self.world_size
         vllm_config.parallel_config.enable_expert_parallel = True
 
@@ -152,11 +170,44 @@ class Config:
 
         return vllm_config, env_dict
 
-    def is_fp8_block_quantized(self):
+    def fp8_quant_key_pair(self) -> tuple[QuantKey, QuantKey]:
+        """Derive the (weight_quant_key, activation_quant_key) pair an FP8
+        quant config of this shape corresponds to (either OCP or FNUZ FP8,
+        see ``current_platform.fp8_dtype()``)."""
+        if self.quant_block_shape is not None:
+            return kFp8Static128BlockSym, kFp8Dynamic128Sym
+        if self.is_per_out_ch_quant:
+            return (
+                kFp8StaticChannelSym,
+                kFp8DynamicTokenSym
+                if self.is_per_act_token_quant
+                else kFp8StaticTensorSym,
+            )
         return (
-            self.quant_dtype == torch.float8_e4m3fn
-            and self.quant_block_shape is not None
+            kFp8StaticTensorSym,
+            kFp8DynamicTensorSym
+            if self.is_per_act_token_quant
+            else kFp8StaticTensorSym,
         )
+
+    def fe_supports_quant_scheme(self) -> bool:
+        """Check if the fused experts class supports this quant config.
+        See https://github.com/ROCm/aiter/issues/2419 for AITER gaps."""
+        if self.quant_config is None or self.quant_dtype is None:
+            return True
+        if not is_fp8(self.quant_dtype):
+            return True
+        w_key, a_key = self.fp8_quant_key_pair()
+        fe_cls = self.fused_experts_type
+        if hasattr(fe_cls, "_supports_quant_scheme"):
+            try:
+                return fe_cls._supports_quant_scheme(w_key, a_key)
+            except NotImplementedError:
+                pass
+        return True
+
+    def is_fp8_block_quantized(self):
+        return is_fp8(self.quant_dtype) and self.quant_block_shape is not None
 
     def is_batched_prepare_finalize(self):
         info = prepare_finalize_info(self.prepare_finalize_type)
@@ -182,10 +233,6 @@ class Config:
         info = expert_info(self.fused_experts_type)
         return info.blocked_quantization_support
 
-    def supports_expert_map(self):
-        info = expert_info(self.fused_experts_type)
-        return info.supports_expert_map
-
     def supports_apply_weight_on_input(self):
         info = prepare_finalize_info(self.prepare_finalize_type)
         return info.supports_apply_weight_on_input
@@ -201,13 +248,17 @@ class Config:
             or info.backend == "deepep_low_latency"
         )
 
+    def needs_deep_ep_v2(self):
+        info = prepare_finalize_info(self.prepare_finalize_type)
+        return info.backend == "deepep_v2"
+
     def needs_aiter(self):
         info = expert_info(self.fused_experts_type)
         return info.needs_aiter
 
     def needs_mori(self):
         info = prepare_finalize_info(self.prepare_finalize_type)
-        return info.backend == "mori"
+        return info.backend in ("mori_high_throughput", "mori_low_latency")
 
     def all2all_backend(self):
         info = prepare_finalize_info(self.prepare_finalize_type)
@@ -253,6 +304,25 @@ class Config:
                     f"{self.fe_supported_types()}."
                 )
 
+        # Check quant scheme compatibility with fused experts class
+        if not self.fe_supports_quant_scheme():
+            return False, (
+                f"FE {self.fused_experts_type.__name__} does not support "
+                f"quant scheme (per_out_ch={self.is_per_out_ch_quant}, "
+                f"per_act_token={self.is_per_act_token_quant}, "
+                f"block={self.quant_block_shape})"
+            )
+
+        # Check activation support; NotImplementedError means no opinion.
+        try:
+            if not self.fused_experts_type._supports_activation(self.activation):
+                return False, (
+                    f"FE {self.fused_experts_type.__name__} does not support "
+                    f"activation {self.activation}"
+                )
+        except NotImplementedError:
+            pass
+
         # Check block quantization support
         is_block_quantized = self.quant_block_shape is not None
         if is_block_quantized and self.quant_dtype is None:
@@ -268,12 +338,31 @@ class Config:
         # Check dependencies (turn into asserts?)
         if self.needs_deep_ep() and not has_deep_ep():
             return False, "Needs DeepEP, but DeepEP not available."
+        if self.needs_deep_ep_v2() and not has_deep_ep_v2():
+            return False, "Needs DeepEP v2, but DeepEP v2 not available."
         if self.needs_deep_gemm() and not has_deep_gemm():
-            return False, "Needs DeepGEMM, but DeepGEMM not available."
+            return (
+                False,
+                "Needs DeepGEMM, but the current vLLM environment does not provide it.",
+            )
         if self.needs_aiter() and not has_aiter():  # noqa: SIM103
             return False, "Needs Aiter, but Aiter not available."
         if self.needs_mori() and not has_mori():  # noqa: SIM103
             return False, "Needs MoRI, but MoRI not available."
+        if self.needs_mori() and not rocm_aiter_ops.is_fused_moe_enabled():
+            return False, (
+                "Mori requires AITER's fused-moe backend to be enabled "
+                "(VLLM_ROCM_USE_AITER=1 and VLLM_ROCM_USE_AITER_MOE=1)."
+            )
+
+        try:
+            if not self.fused_experts_type._supports_current_device():
+                return (
+                    False,
+                    f"{self.fused_experts_type} not supported on the current device.",
+                )
+        except NotImplementedError:
+            pass
 
         return True, None
 
@@ -301,7 +390,7 @@ class WeightTensors:
     def is_quantized(self) -> bool:
         # or w1_scale is not None?
         return (
-            self.w1.dtype == torch.float8_e4m3fn
+            is_fp8(self.w1.dtype)
             or self.w1.dtype == torch.uint8
             or self.w1.dtype == torch.int8
         )
@@ -373,9 +462,7 @@ class RankTensors:
     def make_hidden_states(
         config: Config,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
-        """
-        Return hidden_states
-        """
+        """Return hidden_states."""
         m, k, dtype = (config.M, config.K, config.dtype)
         device = torch.accelerator.current_device_index()
         a = torch.randn((m, k), device=device, dtype=dtype) / 15.0
@@ -420,7 +507,7 @@ class RankTensors:
         topk_ids = topk_ids.to(device=device)
 
         expert_map = None
-        if config.world_size > 1 and config.supports_expert_map():
+        if config.world_size > 1:
             expert_map = torch.full(
                 (global_num_experts,), fill_value=-1, dtype=torch.int32
             )
@@ -530,6 +617,7 @@ def reference_moe_impl(
         topk_ids=rank_tensors.topk_ids,
         global_num_experts=config.E,
         expert_map=None,
+        activation=config.activation,
         w1_scale=w1_scale,
         w2_scale=w2_scale,
         a1_scale=a_scale,
@@ -554,13 +642,6 @@ def make_modular_kernel(
     vllm_config: VllmConfig,
     quant_config: FusedMoEQuantConfig,
 ) -> mk.FusedMoEKernel:
-    def next_power_of_2(x):
-        import math
-
-        if x == 0:
-            return 1
-        return 2 ** math.ceil(math.log2(x))
-
     # make moe config
     moe_parallel_config: FusedMoEParallelConfig = FusedMoEParallelConfig.make(
         tp_size_=get_tensor_model_parallel_world_size(),
@@ -574,13 +655,13 @@ def make_modular_kernel(
         num_experts=config.E,
         experts_per_token=config.topk,
         hidden_dim=config.K,
-        intermediate_size_per_partition=config.N,
+        intermediate_size=config.N,
         num_local_experts=config.num_local_experts,
         num_logical_experts=config.E,
         moe_parallel_config=moe_parallel_config,
         in_dtype=config.dtype,
         max_num_tokens=next_power_of_2(config.M),
-        activation=MoEActivation.SILU,
+        activation=config.activation,
         device=vllm_config.device_config.device,
         routing_method=RoutingMethodType.DeepSeekV3,
     )
@@ -603,10 +684,61 @@ def make_modular_kernel(
     modular_kernel = mk.FusedMoEKernel(
         prepare_finalize=prepare_finalize,
         fused_experts=fused_experts,
-        inplace=False,
     )
 
     return modular_kernel
+
+
+def _maybe_convert_weights_for_experts(
+    config: Config,
+    rank_weights: WeightTensors,
+) -> WeightTensors:
+    """Convert weights to expert-specific format (e.g., TrtLLM BlockMajorK)."""
+    from vllm.model_executor.layers.fused_moe.oracle.fp8 import (
+        Fp8MoeBackend,
+        convert_to_fp8_moe_kernel_format,
+    )
+
+    fe_type = config.fused_experts_type
+    fe_name = getattr(fe_type, "__name__", "")
+
+    backend: Fp8MoeBackend | None = None
+    if fe_name == "TrtLlmFp8ExpertsModular":
+        backend = Fp8MoeBackend.FLASHINFER_TRTLLM
+    elif fe_name == "FlashInferExperts":
+        backend = Fp8MoeBackend.FLASHINFER_CUTLASS
+
+    if backend is None or not rank_weights.is_quantized():
+        return rank_weights
+
+    mock_layer = SimpleNamespace(
+        weight_block_size=config.quant_block_shape,
+        moe_config=SimpleNamespace(
+            is_act_and_mul=True,
+            intermediate_size_per_partition=config.N,
+        ),
+        activation=SimpleNamespace(is_gated=True),
+    )
+
+    w1, w2, w1_scale, w2_scale = convert_to_fp8_moe_kernel_format(
+        fp8_backend=backend,
+        layer=mock_layer,
+        w13=rank_weights.w1,
+        w2=rank_weights.w2,
+        w13_scale=rank_weights.w1_scale,
+        w2_scale=rank_weights.w2_scale,
+        w13_input_scale=None,
+        w2_input_scale=None,
+    )
+
+    return WeightTensors(
+        w1=w1,
+        w2=w2,
+        w1_scale=w1_scale,
+        w2_scale=w2_scale,
+        w1_gs=rank_weights.w1_gs,
+        w2_gs=rank_weights.w2_gs,
+    )
 
 
 def run_modular_kernel(
@@ -621,6 +753,7 @@ def run_modular_kernel(
 
     # weights for rank
     rank_weights = weights.slice_weights(pgi.rank, config.num_local_experts)
+    rank_weights = _maybe_convert_weights_for_experts(config, rank_weights)
 
     if config.quant_dtype == "nvfp4":
         gscale = _make_gscale(config.num_local_experts)
@@ -654,7 +787,7 @@ def run_modular_kernel(
         "w2": rank_weights.w2,
         "topk_weights": rank_tensors.topk_weights,
         "topk_ids": topk_ids,
-        "activation": MoEActivation.SILU,
+        "activation": config.activation,
         "expert_map": rank_tensors.expert_map,
         "global_num_experts": config.E,
         "apply_router_weight_on_input": config.topk == 1
@@ -665,6 +798,8 @@ def run_modular_kernel(
     num_tokens_across_dp = torch.tensor(
         [num_tokens] * config.world_size, device="cuda", dtype=torch.int
     )
+
+    torch.distributed.barrier()
 
     with set_forward_context(
         None,

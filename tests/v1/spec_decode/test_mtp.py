@@ -5,6 +5,7 @@ from unittest import mock
 
 import pytest
 import torch
+import torch.nn as nn
 
 from tests.v1.attention.utils import (
     BatchSpec,
@@ -28,6 +29,32 @@ from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.spec_decode.eagle import EagleProposer
 
 mimo_7b_dir = "XiaomiMiMo/MiMo-7B-Base"
+DEVICE_TYPE = current_platform.device_type
+
+
+def test_glm_mtp_defers_lm_head(default_vllm_config):
+    from vllm.model_executor.models import deepseek_mtp
+    from vllm.models.glm5next.common import mtp
+
+    config = mock.MagicMock(
+        hidden_size=16,
+        rms_norm_eps=1e-5,
+        index_topk=8,
+        index_kpool=4,
+    )
+    vllm_config = mock.MagicMock()
+    vllm_config.speculative_config.draft_model_config.hf_config = config
+    vllm_config.scheduler_config.max_num_batched_tokens = 4
+
+    with (
+        mock.patch.object(mtp, "Glm5NextDecoderLayer", return_value=nn.Identity()),
+        mock.patch.object(deepseek_mtp, "ParallelLMHead") as parallel_lm_head,
+        mock.patch.object(mtp.current_platform, "device_type", "cpu"),
+    ):
+        layer = mtp.Glm5NextMultiTokenPredictorLayer(vllm_config, "model.layers.1")
+
+    parallel_lm_head.assert_not_called()
+    assert layer.shared_head.head is None
 
 
 def _create_mtp_proposer(num_speculative_tokens: int) -> EagleProposer:
@@ -48,7 +75,7 @@ def _create_mtp_proposer(num_speculative_tokens: int) -> EagleProposer:
         model_config=model_config,
         cache_config=CacheConfig(),
         speculative_config=speculative_config,
-        device_config=DeviceConfig(device=current_platform.device_type),
+        device_config=DeviceConfig(device=DEVICE_TYPE),
         parallel_config=ParallelConfig(),
         load_config=LoadConfig(),
         scheduler_config=SchedulerConfig(
@@ -57,15 +84,14 @@ def _create_mtp_proposer(num_speculative_tokens: int) -> EagleProposer:
         ),
     )
 
-    return EagleProposer(vllm_config=vllm_config, device=current_platform.device_type)
+    return EagleProposer(vllm_config=vllm_config, device=DEVICE_TYPE)
 
 
-@mock.patch("vllm.v1.spec_decode.eagle.get_pp_group")
-@mock.patch("vllm.v1.spec_decode.eagle.get_layers_from_vllm_config")
-@mock.patch("vllm.v1.spec_decode.eagle.get_model")
+@mock.patch("vllm.v1.spec_decode.llm_base_proposer.get_pp_group")
+@mock.patch("vllm.v1.spec_decode.llm_base_proposer.get_layers_from_vllm_config")
+@mock.patch("vllm.v1.spec_decode.llm_base_proposer.get_model")
 def test_mtp_load_model_unified(mock_get_model, mock_get_layers, mock_get_pp_group):
     """Test MTP-specific model loading with unified model approach."""
-
     # Setup mocks
     mock_model = mock.MagicMock()
     mock_model.model.embed_tokens.weight.shape = (131072, 4096)
@@ -116,9 +142,8 @@ def test_mtp_load_model_unified(mock_get_model, mock_get_layers, mock_get_pp_gro
 
 @pytest.mark.parametrize("num_speculative_tokens", [1])
 def test_mtp_propose(num_speculative_tokens, monkeypatch):
-    """Test that MTP's forward method returns hidden states directly"""
-
-    device = torch.device(current_platform.device_type)
+    """Test that MTP's forward method returns hidden states directly."""
+    device = torch.device(DEVICE_TYPE)
     batch_size = 2
     seq_lens = [5, 3]
     total_tokens = sum(seq_lens)
@@ -195,7 +220,6 @@ def test_mtp_propose(num_speculative_tokens, monkeypatch):
         device=device,
     )
 
-    proposer.runner = mock.MagicMock()
     mock_attn_group = mock.MagicMock()
     mock_attn_group.get_metadata_builder.return_value = attn_metadata_builder
     mock_attn_group.layer_names = list(proposer._draft_attn_layer_names)
@@ -204,6 +228,7 @@ def test_mtp_propose(num_speculative_tokens, monkeypatch):
 
     # Run propose
     result = proposer.propose(
+        num_speculative_tokens=num_speculative_tokens,
         target_token_ids=target_token_ids,
         target_positions=target_positions,
         target_hidden_states=target_hidden_states,

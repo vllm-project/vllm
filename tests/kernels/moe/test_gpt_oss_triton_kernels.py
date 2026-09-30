@@ -1,13 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from dataclasses import dataclass, fields
+from dataclasses import dataclass, fields, is_dataclass
 
 import pytest
 import torch
 import torch.nn.functional as F
 
 from vllm.platforms import current_platform
-from vllm.utils.import_utils import has_triton_kernels
+from vllm.utils.import_utils import get_triton_kernels_version, has_triton_kernels
 
 if not has_triton_kernels():
     pytest.skip(
@@ -15,26 +15,29 @@ if not has_triton_kernels():
         allow_module_level=True,
     )
 
-import triton_kernels.matmul_ogs_details.opt_flags as opt_flags
 import triton_kernels.swiglu
-from triton_kernels.matmul_ogs import FlexCtx, PrecisionConfig
+
+if get_triton_kernels_version() == "3.8":
+    # 3.8: matmul_ogs -> matmul, matmul_ogs_details -> matmul_details
+    import triton_kernels.matmul_details.opt_flags as opt_flags
+    from triton_kernels.matmul import FlexCtx, PrecisionConfig
+else:
+    import triton_kernels.matmul_ogs_details.opt_flags as opt_flags
+    from triton_kernels.matmul_ogs import FlexCtx, PrecisionConfig
 from triton_kernels.numerics import InFlexData
 from triton_kernels.numerics_details.mxfp import downcast_to_mxfp, upcast_from_mxfp
 from triton_kernels.tensor import FP4, convert_layout, wrap_torch_tensor
 from triton_kernels.tensor_details import layout
 from triton_kernels.testing import assert_close
-from triton_kernels.topk import topk as topk_fn
 
 from vllm.model_executor.layers.fused_moe.config import mxfp4_w4a16_moe_quant_config
-from vllm.model_executor.layers.fused_moe.gpt_oss_triton_kernels_moe import (
-    legacy_routing,
-    make_routing_data,
+from vllm.model_executor.layers.fused_moe.experts.gpt_oss_triton_kernels_moe import (
     triton_kernel_moe_forward,
 )
+from vllm.model_executor.layers.quantization.utils.mxfp4_utils import mx_scale_kwargs
 from vllm.utils.math_utils import round_up
-from vllm.utils.torch_utils import set_random_seed
 
-from .utils import shuffle_weight
+from .utils import mxfp4_w_layouts, shuffle_weight
 
 
 def deshuffle(w: torch.Tensor):
@@ -97,10 +100,18 @@ def init_compute_data(M, K, N, E, a_dtype: str, w_dtype: str, num_warps: int):
     if w_dtype != "mx4":
         pytest.skip("NYI")
     else:  # quantize to mx4
-        # careful on the padding here, the activation padding need to be
-        # multiple of 64, the actual engine is not implemented
-        w1_bottom_pad = round_up(w1_tri.shape[1], 64) - w1_tri.shape[1]
-        w1_right_pad = round_up(w1_tri.shape[2], 128) - w1_tri.shape[2]
+        # Padding alignment depends on the platform.  On CDNA4 the scale
+        # swizzle requires SCALE_K % 8 == 0 (K % 256) and
+        # SCALE_N % 32 == 0 (2*N % 512), matching the production
+        # alignment in mxfp4_round_up_hidden_size_and_intermediate_size.
+        # On CUDA (Hopper) the scale layout pads internally, so the
+        # original 64/128 alignment is sufficient.
+        if current_platform.is_rocm():
+            k_align, n2_align = 256, 512
+        else:
+            k_align, n2_align = 64, 128
+        w1_bottom_pad = round_up(w1_tri.shape[1], k_align) - w1_tri.shape[1]
+        w1_right_pad = round_up(w1_tri.shape[2], n2_align) - w1_tri.shape[2]
 
         w2_bottom_pad = w1_right_pad // 2
         w2_right_pad = w1_bottom_pad
@@ -129,12 +140,12 @@ def init_compute_data(M, K, N, E, a_dtype: str, w_dtype: str, num_warps: int):
 
         x_tri = F.pad(x_tri, (0, x_pad, 0, 0), mode="constant", value=0)
 
-        w_layout, w_layout_opts = layout.make_default_matmul_mxfp4_w_layout(mx_axis=1)
-        w_scale_layout, w_scale_layout_opts = (
-            layout.make_default_matmul_mxfp4_w_scale_layout(
-                mx_axis=1, num_warps=num_warps
-            )
-        )
+        (
+            w_layout,
+            w_layout_opts,
+            w_scale_layout,
+            w_scale_layout_opts,
+        ) = mxfp4_w_layouts(mx_axis=1, num_warps=num_warps)
 
         w1_tri, w1_scale_tri = downcast_to_mxfp(w1_tri, torch.uint8, axis=1)
         w1 = upcast_from_mxfp(w1_tri, w1_scale_tri, torch.bfloat16, axis=1)
@@ -161,10 +172,10 @@ def init_compute_data(M, K, N, E, a_dtype: str, w_dtype: str, num_warps: int):
         )
 
         pc1 = PrecisionConfig(
-            weight_scale=w1_scale_tri, flex_ctx=FlexCtx(rhs_data=InFlexData())
+            **mx_scale_kwargs(w1_scale_tri), flex_ctx=FlexCtx(rhs_data=InFlexData())
         )
         pc2 = PrecisionConfig(
-            weight_scale=w2_scale_tri, flex_ctx=FlexCtx(rhs_data=InFlexData())
+            **mx_scale_kwargs(w2_scale_tri), flex_ctx=FlexCtx(rhs_data=InFlexData())
         )
 
         # tucuate so the rest can run properly
@@ -277,8 +288,6 @@ class Case:
 @pytest.mark.parametrize("num_token", [2])
 @pytest.mark.parametrize("tp", [1, 2, 4, 8])
 def test_equiv(num_token, a_dtype, w_dtype, tp, workspace_init):
-    from triton_kernels.tensor_details import layout
-
     if not hasattr(layout, "make_default_matmul_mxfp4_w_layout"):
         pytest.skip("make_default_matmul_mxfp4_w_layout not available")
 
@@ -369,41 +378,61 @@ def test_unit_shuffle():
     assert_close(ref=out_ref, tri=out)
 
 
-@pytest.mark.parametrize("num_tokens", [2, 8, 64])
-@pytest.mark.parametrize("num_experts", [32, 128])
-@pytest.mark.parametrize("topk", [1, 4])
-@pytest.mark.parametrize("renormalize", [True, False])
-@pytest.mark.parametrize("dtype", [torch.bfloat16])
-def test_legacy_routing(
-    num_tokens: int, num_experts: int, topk: int, renormalize: bool, dtype: torch.dtype
-):
-    set_random_seed(0)
-    gating_output = torch.randn(num_tokens, num_experts, device="cuda", dtype=dtype)
-
-    sm_first = not renormalize
-    logits = gating_output
-    if sm_first:
-        logits = torch.softmax(logits, dim=-1)
-    sparse_logits = topk_fn(logits, topk, apply_softmax=not sm_first)
-    topk_ids = sparse_logits.indx.to(torch.long)
-    topk_weights = sparse_logits.vals
-    routing_data_ref, gather_indx_ref, scatter_indx_ref = make_routing_data(
-        topk_ids, topk_weights, num_experts
+@pytest.mark.parametrize("n_tokens", [1, 33, 512])
+@pytest.mark.parametrize("n_experts,topk", [(32, 4), (128, 4)])
+def test_routing_data_from_sparse_topk_parity(n_tokens, n_experts, topk):
+    """routing_data_from_sparse_topk must produce routing structures
+    identical to make_routing_data for the same topk result."""
+    from vllm.model_executor.layers.fused_moe.experts import (
+        gpt_oss_triton_kernels_moe as gptoss_moe,
     )
 
-    routing_data, gather_indx, scatter_indx = legacy_routing(
-        gating_output, topk, sm_first=sm_first
+    make_routing_data = gptoss_moe.make_routing_data
+    routing_data_from_sparse_topk = gptoss_moe.routing_data_from_sparse_topk
+
+    if gptoss_moe.triton_kernels_version == "3.5.1":
+        pytest.skip("SparseMatrix path requires triton_kernels v3.6.0+")
+    if gptoss_moe.triton_kernels_version == "3.8":
+        pytest.skip(
+            "3.8 rebuilds routing from raw ids, so routing_data_from_sparse_topk "
+            "just forwards to make_routing_data and the comparison is vacuous"
+        )
+
+    from triton_kernels.topk import topk as topk_fn
+
+    torch.manual_seed(0)
+    logits = torch.randn(n_tokens, n_experts, dtype=torch.bfloat16, device="cuda")
+    sparse_topk = topk_fn(logits, topk, apply_softmax=True)
+    assert not isinstance(sparse_topk, tuple)
+
+    rd_new, gather_new, scatter_new = routing_data_from_sparse_topk(
+        sparse_topk, n_experts
+    )
+    rd_ref, gather_ref, scatter_ref = make_routing_data(
+        sparse_topk.indx.to(torch.long), sparse_topk.vals, n_experts
     )
 
-    assert_close(
-        ref=gather_indx_ref.src_indx, tri=gather_indx.src_indx, maxtol=0, rmstol=0
-    )
-    assert_close(
-        ref=gather_indx_ref.dst_indx, tri=gather_indx.dst_indx, maxtol=0, rmstol=0
-    )
-    assert_close(
-        ref=scatter_indx_ref.src_indx, tri=scatter_indx.src_indx, maxtol=0, rmstol=0
-    )
-    assert_close(
-        ref=scatter_indx_ref.dst_indx, tri=scatter_indx.dst_indx, maxtol=0, rmstol=0
-    )
+    def assert_equivalent(new, ref, path="RoutingData"):
+        """Recursively compare tensor-valued leaves of routing structures."""
+        if isinstance(ref, torch.Tensor):
+            torch.testing.assert_close(new, ref, msg=lambda m: f"{path}: {m}")
+        elif isinstance(ref, (int, float, bool, str)) or ref is None:
+            assert new == ref, f"{path}: {new!r} != {ref!r}"
+        elif is_dataclass(ref):
+            for f in fields(ref):
+                assert_equivalent(
+                    getattr(new, f.name), getattr(ref, f.name), f"{path}.{f.name}"
+                )
+        elif callable(ref):
+            assert callable(new), f"{path}: callable vs {type(new)}"
+        elif hasattr(ref, "__dict__"):
+            for k, v in vars(ref).items():
+                assert_equivalent(getattr(new, k), v, f"{path}.{k}")
+        else:
+            assert type(new) is type(ref), f"{path}: {type(new)} vs {type(ref)}"
+
+    assert_equivalent(rd_new, rd_ref)
+    torch.testing.assert_close(gather_new.src_indx, gather_ref.src_indx)
+    torch.testing.assert_close(gather_new.dst_indx, gather_ref.dst_indx)
+    torch.testing.assert_close(scatter_new.src_indx, scatter_ref.src_indx)
+    torch.testing.assert_close(scatter_new.dst_indx, scatter_ref.dst_indx)

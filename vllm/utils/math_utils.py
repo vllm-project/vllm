@@ -13,13 +13,8 @@ def cdiv(a: int, b: int) -> int:
 
 
 def next_power_of_2(n: int) -> int:
-    """The next power of 2 (inclusive)"""
+    """The next power of 2 (inclusive)."""
     return 1 if n < 1 else 1 << (n - 1).bit_length()
-
-
-def prev_power_of_2(n: int) -> int:
-    """The previous power of 2 (inclusive)"""
-    return 0 if n <= 0 else 1 << (n.bit_length() - 1)
 
 
 def round_up(x: int, y: int) -> int:

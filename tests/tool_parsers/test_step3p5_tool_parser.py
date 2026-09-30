@@ -5,15 +5,16 @@ import json
 from collections.abc import Generator
 
 import pytest
+from openai.types.responses import FunctionTool
 
-from vllm.entrypoints.openai.chat_completion.protocol import (
-    ChatCompletionRequest,
-    ChatCompletionToolsParam,
-)
-from vllm.entrypoints.openai.engine.protocol import (
+from vllm.entrypoints.generate.base.protocol import (
     DeltaMessage,
     FunctionCall,
     ToolCall,
+)
+from vllm.entrypoints.openai.chat_completion.protocol import (
+    ChatCompletionRequest,
+    ChatCompletionToolsParam,
 )
 from vllm.tokenizers import TokenizerLike, get_tokenizer
 from vllm.tokenizers.detokenizer_utils import detokenize_incrementally
@@ -28,8 +29,8 @@ def step3p5_tokenizer():
 
 
 @pytest.fixture
-def step3p5_tool_parser(step3p5_tokenizer):
-    return Step3p5ToolParser(step3p5_tokenizer)
+def step3p5_tool_parser(step3p5_tokenizer, sample_tools):
+    return Step3p5ToolParser(step3p5_tokenizer, tools=sample_tools)
 
 
 @pytest.fixture
@@ -366,7 +367,7 @@ def test_extract_tool_calls(
 
 
 def test_extract_tool_calls_fallback_no_tags(step3p5_tool_parser, sample_tools):
-    """Test fallback parsing when XML tags are missing"""
+    """Test fallback parsing when XML tags are missing."""
     model_output = """<function=get_current_weather>
 <parameter=city>
 Dallas
@@ -386,26 +387,29 @@ TX
     assert extracted_tool_calls.tool_calls[0].function.name == "get_current_weather"
 
 
-def test_extract_tool_calls_type_conversion(step3p5_tool_parser):
-    """Test parameter type conversion based on tool schema"""
-    tools = [
-        ChatCompletionToolsParam(
-            type="function",
-            function={
-                "name": "test_types",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "int_param": {"type": "integer"},
-                        "float_param": {"type": "float"},
-                        "bool_param": {"type": "boolean"},
-                        "str_param": {"type": "string"},
-                        "obj_param": {"type": "object"},
-                    },
-                },
-            },
-        )
-    ]
+@pytest.mark.parametrize("api", ["chat", "responses"])
+def test_extract_tool_calls_type_conversion(step3p5_tokenizer, api):
+    """Test parameter type conversion based on Chat and Responses tool schemas."""
+    parameters = {
+        "type": "object",
+        "properties": {
+            "int_param": {"type": "integer"},
+            "float_param": {"type": "float"},
+            "bool_param": {"type": "boolean"},
+            "str_param": {"type": "string"},
+            "obj_param": {"type": "object"},
+        },
+    }
+    tools: list[ChatCompletionToolsParam | FunctionTool] = (
+        [
+            ChatCompletionToolsParam(
+                type="function",
+                function={"name": "test_types", "parameters": parameters},
+            )
+        ]
+        if api == "chat"
+        else [FunctionTool(type="function", name="test_types", parameters=parameters)]
+    )
 
     model_output = """<tool_call>
 <function=test_types>
@@ -427,10 +431,9 @@ hello world
 </function>
 </tool_call>"""
 
-    request = ChatCompletionRequest(model=MODEL, messages=[], tools=tools)
-    extracted_tool_calls = step3p5_tool_parser.extract_tool_calls(
-        model_output, request=request
-    )
+    parser = Step3p5ToolParser(step3p5_tokenizer, tools=tools)
+    request = ChatCompletionRequest(model=MODEL, messages=[])
+    extracted_tool_calls = parser.extract_tool_calls(model_output, request=request)
 
     args = json.loads(extracted_tool_calls.tool_calls[0].function.arguments)
     assert args["int_param"] == 42
@@ -623,7 +626,7 @@ def test_extract_tool_calls_streaming(
     expected_tool_calls,
     expected_content,
 ):
-    """Test incremental streaming behavior including typed parameters"""
+    """Test incremental streaming behavior including typed parameters."""
     request = ChatCompletionRequest(model=MODEL, messages=[], tools=sample_tools)
 
     other_content = ""
@@ -693,7 +696,7 @@ def test_extract_tool_calls_streaming(
 def test_extract_tool_calls_missing_closing_parameter_tag(
     step3p5_tool_parser, sample_tools
 ):
-    """Test handling of missing closing </parameter> tag"""
+    """Test handling of missing closing </parameter> tag."""
     # Using get_current_weather from sample_tools but with malformed XML
     model_output = """Let me check the weather for you:
 <tool_call>
@@ -735,7 +738,7 @@ fahrenheit
 def test_extract_tool_calls_streaming_missing_closing_tag(
     step3p5_tool_parser, step3p5_tokenizer, sample_tools
 ):
-    """Test streaming with missing closing </parameter> tag"""
+    """Test streaming with missing closing </parameter> tag."""
     # Using get_current_weather from sample_tools but with malformed XML
     model_output = """Let me check the weather for you:
 <tool_call>
@@ -809,7 +812,7 @@ fahrenheit
 def test_extract_tool_calls_streaming_incremental(
     step3p5_tool_parser, step3p5_tokenizer, sample_tools
 ):
-    """Test that streaming is truly incremental"""
+    """Test that streaming is truly incremental."""
     model_output = """I'll check the weather.<tool_call>
 <function=get_current_weather>
 <parameter=city>
@@ -864,8 +867,8 @@ TX
     assert parsed_args["state"] == "TX"
 
 
-def test_extract_tool_calls_complex_type_with_single_quote(step3p5_tool_parser):
-    """Test parameter type conversion based on tool schema"""
+def test_extract_tool_calls_complex_type_with_single_quote(step3p5_tokenizer):
+    """Test parameter type conversion based on tool schema."""
     tools = [
         ChatCompletionToolsParam(
             type="function",
@@ -893,10 +896,9 @@ def test_extract_tool_calls_complex_type_with_single_quote(step3p5_tool_parser):
 </function>
 </tool_call>"""
 
+    parser = Step3p5ToolParser(step3p5_tokenizer, tools=tools)
     request = ChatCompletionRequest(model=MODEL, messages=[], tools=tools)
-    extracted_tool_calls = step3p5_tool_parser.extract_tool_calls(
-        model_output, request=request
-    )
+    extracted_tool_calls = parser.extract_tool_calls(model_output, request=request)
 
     args = json.loads(extracted_tool_calls.tool_calls[0].function.arguments)
     assert args["obj_param"] == {"key": "value"}
@@ -1433,3 +1435,140 @@ rectangle
     assert "<function=calculate_area>" not in extracted_tool_calls.content, (
         "Second tool call should not be in content"
     )
+
+
+def _accumulate_tool_states(delta_messages):
+    """Accumulate tool call state from a stream of DeltaMessage objects."""
+    content = ""
+    tool_states = {}
+    for delta_message in delta_messages:
+        if delta_message.content:
+            content += delta_message.content
+        if delta_message.tool_calls:
+            for tool_call in delta_message.tool_calls:
+                idx = tool_call.index
+                if idx not in tool_states:
+                    tool_states[idx] = {
+                        "id": None,
+                        "name": None,
+                        "arguments": "",
+                        "type": None,
+                    }
+                if tool_call.id:
+                    tool_states[idx]["id"] = tool_call.id
+                if tool_call.type:
+                    tool_states[idx]["type"] = tool_call.type
+                if tool_call.function:
+                    if tool_call.function.name:
+                        tool_states[idx]["name"] = tool_call.function.name
+                    if tool_call.function.arguments is not None:
+                        tool_states[idx]["arguments"] += tool_call.function.arguments
+    return content, tool_states
+
+
+def test_streaming_mtp_variable_chunks(
+    step3p5_tool_parser, step3p5_tokenizer, sample_tools
+):
+    """Regression: MTP variable-size chunks spanning param boundaries (PR #33690)."""
+    request = ChatCompletionRequest(model=MODEL, messages=[], tools=sample_tools)
+
+    delta_text_chunks = [
+        "<tool_call>\n<function=get_current_weather>\n<parameter=city>\n",
+        "Dallas\n</parameter>\n<parameter=state>\nTX",
+        "\n</parameter>\n<parameter=unit>\nfahrenheit\n</parameter>",
+        "\n</function>\n</tool_call>",
+    ]
+
+    _, tool_states = _accumulate_tool_states(
+        stream_delta_message_generator_from_chunks(
+            step3p5_tool_parser, step3p5_tokenizer, delta_text_chunks, request
+        )
+    )
+
+    assert len(tool_states) == 1
+
+    state = tool_states[0]
+    assert state["id"] is not None
+    assert state["type"] == "function"
+    assert state["name"] == "get_current_weather"
+
+    args = json.loads(state["arguments"])
+    assert args["city"] == "Dallas"
+    assert args["state"] == "TX"
+    assert args["unit"] == "fahrenheit"
+
+
+def test_streaming_multi_token_per_step(
+    step3p5_tool_parser, step3p5_tokenizer, sample_tools
+):
+    """Regression: MTP large chunks spanning multiple tool calls (PR #33690)."""
+    model_output = """<tool_call>
+<function=get_current_weather>
+<parameter=city>
+Dallas
+</parameter>
+<parameter=state>
+TX
+</parameter>
+<parameter=unit>
+fahrenheit
+</parameter>
+</function>
+</tool_call>
+<tool_call>
+<function=get_current_weather>
+<parameter=city>
+Orlando
+</parameter>
+<parameter=state>
+FL
+</parameter>
+<parameter=unit>
+celsius
+</parameter>
+</function>
+</tool_call>"""
+
+    request = ChatCompletionRequest(model=MODEL, messages=[], tools=sample_tools)
+
+    # MTP-style large chunks
+    mtp_chunks = [
+        (
+            "<tool_call>\n<function=get_current_weather>\n"
+            "<parameter=city>\nDallas\n</parameter>\n"
+            "<parameter=state>\nTX"
+        ),
+        (
+            "\n</parameter>\n<parameter=unit>\nfahrenheit\n</parameter>\n"
+            "</function>\n</tool_call>\n"
+            "<tool_call>\n<function=get_current_weather>\n"
+            "<parameter=city>\nOrlando\n</parameter>\n"
+            "<parameter=state>\nFL\n</parameter>\n"
+            "<parameter=unit>\ncelsius\n</parameter>\n"
+            "</function>\n</tool_call>"
+        ),
+    ]
+
+    _, mtp_tool_states = _accumulate_tool_states(
+        stream_delta_message_generator_from_chunks(
+            step3p5_tool_parser, step3p5_tokenizer, mtp_chunks, request
+        )
+    )
+
+    # Token-by-token streaming (reference)
+    step3p5_tool_parser_ref = Step3p5ToolParser(step3p5_tokenizer)
+    _, ref_tool_states = _accumulate_tool_states(
+        stream_delta_message_generator(
+            step3p5_tool_parser_ref, step3p5_tokenizer, model_output, request
+        )
+    )
+
+    assert len(mtp_tool_states) == 2
+    assert len(ref_tool_states) == 2
+
+    # MTP results must match reference
+    for idx in range(2):
+        assert mtp_tool_states[idx]["name"] == ref_tool_states[idx]["name"]
+        mtp_args = json.loads(mtp_tool_states[idx]["arguments"])
+        ref_args = json.loads(ref_tool_states[idx]["arguments"])
+        assert mtp_args == ref_args

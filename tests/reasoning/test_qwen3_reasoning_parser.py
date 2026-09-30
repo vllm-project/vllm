@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import pytest
-from transformers import AutoTokenizer
+from transformers import AutoTokenizer, PreTrainedTokenizerBase
 
 from tests.reasoning.utils import (
     StreamingReasoningReconstructor,
@@ -24,7 +24,7 @@ REASONING_MODEL_NAMES = [
 
 
 @pytest.fixture(scope="module", params=REASONING_MODEL_NAMES)
-def qwen3_tokenizer(request):
+def qwen3_tokenizer(request) -> PreTrainedTokenizerBase:
     return AutoTokenizer.from_pretrained(request.param)
 
 
@@ -76,6 +76,25 @@ WITHOUT_THINK_STREAM = {
     "output": "This is the rest",
     "reasoning": "This is the rest",
     "content": None,
+}
+
+# --- <tool_call> without </think> (implicit reasoning end) ---
+
+TOOL_CALL_BODY = (
+    "<tool_call>\n<function=bash>\n<parameter=command>"
+    "\ncat /etc/hosts\n</parameter>\n</function>\n</tool_call>"
+)
+
+TOOL_CALL_NO_THINK_END = {
+    "output": "I need to read the file.\n\n" + TOOL_CALL_BODY,
+    "reasoning": "I need to read the file.\n\n",
+    "content": TOOL_CALL_BODY,
+}
+
+TOOL_CALL_WITH_THINK_NO_END = {
+    "output": "<think>I need to read the file.\n\n" + TOOL_CALL_BODY,
+    "reasoning": "I need to read the file.\n\n",
+    "content": TOOL_CALL_BODY,
 }
 
 # --- Edge cases ---
@@ -199,6 +218,26 @@ TEST_CASES = [
         TRUNCATED_NO_START_TOKEN_STREAM,
         id="truncated_no_start_token_stream",
     ),
+    pytest.param(
+        False,
+        TOOL_CALL_NO_THINK_END,
+        id="tool_call_no_think_end",
+    ),
+    pytest.param(
+        True,
+        TOOL_CALL_NO_THINK_END,
+        id="tool_call_no_think_end_stream",
+    ),
+    pytest.param(
+        False,
+        TOOL_CALL_WITH_THINK_NO_END,
+        id="tool_call_with_think_no_end",
+    ),
+    pytest.param(
+        True,
+        TOOL_CALL_WITH_THINK_NO_END,
+        id="tool_call_with_think_no_end_stream",
+    ),
 ]
 
 
@@ -255,6 +294,13 @@ MULTI_TOKEN_DELTA_CASES = [
         "content",
         id="no_start_end_grouped_with_content",
     ),
+    pytest.param(
+        # <tool_call> arrives in a separate delta after reasoning text
+        ["I need to read the file.\n\n", "<tool_call>\n<function=bash>"],
+        "I need to read the file.\n\n",
+        "<tool_call>\n<function=bash>",
+        id="tool_call_implicit_reasoning_end",
+    ),
 ]
 
 
@@ -295,6 +341,12 @@ THINKING_DISABLED_CASES = [
         None,
         "Some output without think tokens",
         id="thinking_disabled_no_think_tokens",
+    ),
+    pytest.param(
+        "I need to read the file.\n\n" + TOOL_CALL_BODY,
+        None,
+        "I need to read the file.\n\n" + TOOL_CALL_BODY,
+        id="thinking_disabled_with_tool_call",
     ),
 ]
 

@@ -8,6 +8,7 @@ from vllm.logging_utils.access_log_filter import (
 from vllm.logging_utils.formatter import ColoredFormatter, NewLineFormatter
 from vllm.logging_utils.lazy import lazy
 from vllm.logging_utils.log_time import logtime
+from vllm.logging_utils.torch_tensor import tensors_str_no_data
 
 __all__ = [
     "NewLineFormatter",
@@ -16,4 +17,5 @@ __all__ = [
     "create_uvicorn_log_config",
     "lazy",
     "logtime",
+    "tensors_str_no_data",
 ]

@@ -3,10 +3,11 @@
 import pytest
 import torch
 import torch.nn as nn
-from huggingface_hub import snapshot_download
-from transformers import AutoConfig, AutoModel, CLIPImageProcessor
+from transformers import AutoConfig, AutoModel, CLIPImageProcessor, PreTrainedModel
 
 from vllm.distributed import cleanup_dist_env_and_memory
+from vllm.platforms import current_platform
+from vllm.transformers_utils.repo_utils import hf_api
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
 
 from ....conftest import ImageTestAssets
@@ -14,6 +15,8 @@ from ....conftest import ImageTestAssets
 # we use snapshot_download to prevent conflicts between
 # dynamic_module and trust_remote_code for hf_runner
 DOWNLOAD_PATTERN = ["*.json", "*.py", "*.safetensors", "*.txt", "*.model"]
+
+DEVICE_TYPE = current_platform.device_type
 
 
 @torch.inference_mode()
@@ -23,7 +26,7 @@ def run_intern_vit_test(
     *,
     dtype: str,
 ):
-    model = snapshot_download(model_id, allow_patterns=DOWNLOAD_PATTERN)
+    model = hf_api().snapshot_download(model_id, allow_patterns=DOWNLOAD_PATTERN)
     torch_dtype = STR_DTYPE_TO_TORCH_DTYPE[dtype]
 
     img_processor = CLIPImageProcessor.from_pretrained(model)
@@ -37,11 +40,25 @@ def run_intern_vit_test(
     if not getattr(config, "norm_type", None):
         config.norm_type = "rms_norm"
 
-    hf_model = AutoModel.from_pretrained(
-        model, dtype=torch_dtype, trust_remote_code=True
-    ).to("cuda")
+    # Monkey-patch for transformers v5 compatibility: InternVisionModel's
+    # custom code doesn't call post_init(), so all_tied_weights_keys is
+    # never set. Remove once https://github.com/OpenGVLab/InternVL fixes it.
+    _orig_init = PreTrainedModel.__init__
+
+    def _patched_init(self, *args, **kwargs):
+        _orig_init(self, *args, **kwargs)
+        self.all_tied_weights_keys = {}
+
+    PreTrainedModel.__init__ = _patched_init
+
+    try:
+        hf_model = AutoModel.from_pretrained(
+            model, dtype=torch_dtype, trust_remote_code=True
+        ).to(DEVICE_TYPE)
+    finally:
+        PreTrainedModel.__init__ = _orig_init
     hf_outputs_per_image = [
-        hf_model(pixel_value.to("cuda")).last_hidden_state
+        hf_model(pixel_value.to(DEVICE_TYPE)).last_hidden_state
         for pixel_value in pixel_values
     ]
 
@@ -53,9 +70,10 @@ def run_intern_vit_test(
     del hf_model
     cleanup_dist_env_and_memory()
 
-    vllm_model = vllm_model.to("cuda", torch_dtype)
+    vllm_model = vllm_model.to(DEVICE_TYPE, torch_dtype)
     vllm_outputs_per_image = [
-        vllm_model(pixel_values=pixel_value.to("cuda")) for pixel_value in pixel_values
+        vllm_model(pixel_values=pixel_value.to(DEVICE_TYPE))
+        for pixel_value in pixel_values
     ]
     del vllm_model
     cleanup_dist_env_and_memory()

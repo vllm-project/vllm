@@ -1,8 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-"""
-Benchmark for FlashInfer fused collective operations vs standard operations.
+"""Benchmark for FlashInfer fused collective operations vs standard operations.
 
 This benchmark compares:
 1. FlashInfer's allreduce_fusion with trtllm backend
@@ -25,6 +24,7 @@ import pandas as pd
 import torch  # type: ignore
 import torch.distributed as dist  # type: ignore
 
+from vllm._custom_ops import create_fp4_output_tensors
 from vllm.config.vllm import CompilationConfig, VllmConfig, set_current_vllm_config
 from vllm.distributed import (
     tensor_model_parallel_all_reduce,
@@ -46,7 +46,7 @@ RMS_NORM_STATIC_FP8_QUANT_OP = torch.ops._C.rms_norm_static_fp8_quant
 FUSED_ADD_RMS_NORM_STATIC_FP8_QUANT_OP = (
     torch.ops._C.fused_add_rms_norm_static_fp8_quant
 )
-SCALED_FP4_QUANT_OP = torch.ops._C.scaled_fp4_quant
+SCALED_FP4_QUANT_OUT_OP = torch.ops._C.scaled_fp4_quant.out
 
 logger = init_logger(__name__)
 
@@ -79,13 +79,17 @@ _FI_MAX_SIZES = {
     2: 64 * MiB,  # 64MB
     4: 64 * MiB,  # 64MB
     8: 64 * MiB,  # 64MB
+    16: 64 * MiB,  # 64MB (multi-node)
 }
 
 # Global workspace tensors for FlashInfer (keyed by backend name)
 _FI_WORKSPACES: dict = {}
 
-# Backends to benchmark
-FLASHINFER_BACKENDS = ["trtllm", "mnnvl"]
+# Backends to benchmark. trtllm is single-node only and can hang cross-node, so
+# multi-node sweeps can restrict to mnnvl via FI_BACKENDS=mnnvl.
+FLASHINFER_BACKENDS = [
+    b for b in os.environ.get("FI_BACKENDS", "trtllm,mnnvl").split(",") if b
+]
 
 
 def setup_flashinfer_workspace(
@@ -334,13 +338,23 @@ class VllmFusedAllreduce:
         output_scale: torch.Tensor,
     ):
         allreduce_out = tensor_model_parallel_all_reduce(input_tensor)
-        rms_out = self.rms_norm(allreduce_out, residual)
+        rms_output = self.rms_norm(allreduce_out, residual)
         if residual is None:
-            SCALED_FP4_QUANT_OP(quant_out, rms_out, output_scale, input_global_scale)
+            rms_out = rms_output
+        else:
+            rms_out, residual_out = rms_output
+
+        SCALED_FP4_QUANT_OUT_OP(
+            rms_out,
+            input_global_scale,
+            True,
+            output=quant_out,
+            output_scale=output_scale,
+        )
+
+        if residual is None:
             return quant_out, output_scale
         else:
-            rms_out, residual_out = rms_out
-            SCALED_FP4_QUANT_OP(quant_out, rms_out, output_scale, input_global_scale)
             return quant_out, residual_out, output_scale
 
 
@@ -362,8 +376,9 @@ def create_test_tensors(
     scale_fp4 = torch.tensor(1.0, dtype=torch.float32)
     quant_out_fp8 = torch.empty_like(input_tensor, dtype=FP8_DTYPE)
     # Pre-allocate FP4 output tensors (to avoid allocation overhead in benchmarks)
-    fp4_quant_out = torch.empty((num_tokens, hidden_dim // 2), dtype=torch.uint8)
-    fp4_output_scale = torch.empty((128, 4), dtype=torch.int32)
+    fp4_quant_out, fp4_output_scale = create_fp4_output_tensors(
+        num_tokens, hidden_dim, input_tensor.device, True
+    )
 
     return (
         input_tensor,
@@ -430,9 +445,15 @@ def run_benchmarks(
     """Run all benchmarks for given configuration.
 
     Args:
+        num_tokens: Number of tokens in the benchmark input.
+        hidden_dim: Hidden dimension of the benchmark input.
+        dtype: dtype of the benchmark input.
+        use_residual: Whether to include a residual add in the fused op.
+        no_oneshot: Skip the one-shot allreduce variants.
         allreduce_params: Shared parameters for FlashInfer fused allreduce.
         workspaces: Dict mapping backend name ("trtllm", "mnnvl") to workspace.
         quant_modes: Set of quantization modes: "none", "fp8", "fp4".
+
     """
     (
         input_tensor,
@@ -983,7 +1004,10 @@ def main():
     rank = int(os.environ["RANK"])
     world_size = int(os.environ["WORLD_SIZE"])
 
-    device = torch.device(f"cuda:{rank}")
+    # Use LOCAL_RANK for the device so multi-node runs (global rank >= GPUs per
+    # node) map to a valid local GPU; falls back to global rank single-node.
+    local_rank = int(os.environ.get("LOCAL_RANK", rank))
+    device = torch.device(f"cuda:{local_rank}")
     torch.accelerator.set_device_index(device)
     torch.set_default_device(device)
 

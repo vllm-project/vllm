@@ -15,7 +15,7 @@ from vllm import LLM
 from vllm.distributed import get_tensor_model_parallel_rank
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.model_executor.models.llama import LlamaForCausalLM
-from vllm.utils.torch_utils import cuda_device_count_stateless
+from vllm.platforms import current_platform
 from vllm.v1.engine.async_llm import AsyncLLM
 
 MODELS = ["hmellor/tiny-random-LlamaForCausalLM"]
@@ -23,7 +23,6 @@ MODELS = ["hmellor/tiny-random-LlamaForCausalLM"]
 
 def evil_method(self, *args, **kwargs):
     """Evil method that raises an exception."""
-
     if get_tensor_model_parallel_rank() == 0:
         raise Exception("Simulated Error in startup!")
 
@@ -57,7 +56,7 @@ def test_async_llm_startup_error(
     Test profiling (forward()) and load weights failures.
     AsyncLLM always uses an MP client.
     """
-    if cuda_device_count_stateless() < tensor_parallel_size:
+    if current_platform.device_count() < tensor_parallel_size:
         pytest.skip(reason="Not enough CUDA devices")
 
     # Monkeypatch an error in the model.
@@ -99,7 +98,7 @@ def test_llm_startup_error(
     # If MODELS list grows, each architecture needs its own test variant.
     if model != "JackFram/llama-68m":
         pytest.skip(reason="Only test JackFram/llama-68m")
-    if cuda_device_count_stateless() < tensor_parallel_size:
+    if current_platform.device_count() < tensor_parallel_size:
         pytest.skip(reason="Not enough CUDA devices")
 
     with monkeypatch.context() as m:

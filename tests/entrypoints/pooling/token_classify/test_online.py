@@ -45,6 +45,7 @@ async def test_pooling_token_classify(server: RemoteOpenAIServer, model_name: st
     poolings = PoolingResponse.model_validate(response.json())
     assert len(poolings.data) == 1
     assert len(poolings.data[0].data) == 8
+    assert isinstance(poolings.data[0].data[0], list)
     assert len(poolings.data[0].data[0]) == 2
 
 
@@ -63,8 +64,12 @@ async def test_pooling_not_supported(
             "task": task,
         },
     )
+    assert response.json()["error"]["type"] == "BadRequestError"
 
-    if task != "classify":
-        assert response.json()["error"]["type"] == "BadRequestError"
+    if task == "plugin":
+        err_msg = "No IOProcessor plugin installed."
+    elif task == "classify":
+        err_msg = "Try switching the model's pooling_task via"
+    else:
         err_msg = f"Unsupported task: {task!r}"
-        assert response.json()["error"]["message"].startswith(err_msg)
+    assert response.json()["error"]["message"].startswith(err_msg)

@@ -1,10 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+
 import pytest
 
 import vllm
 from vllm.lora.request import LoRARequest
+from vllm.platforms import current_platform
 
 from ..utils import multi_gpu_test
 
@@ -40,6 +42,28 @@ EXPECTED_LORA_OUTPUT = [
 ]
 
 
+def reformat(text: str) -> str:
+    # Remove all spaces immediately before or after comma
+    text = ",".join(map(str.strip, text.split(",")))
+    # Remove duplicated blank spaces
+    text = " ".join(map(str.strip, text.split()))
+    return text
+
+
+def _enable_deterministic_lora_shrink(monkeypatch: pytest.MonkeyPatch) -> None:
+    if not current_platform.is_rocm():
+        return
+
+    # These tests assert exact greedy outputs. Force the Triton LoRA shrink
+    # kernel to use SPLIT_K=1 so it stores the complete reduction directly
+    # instead of accumulating split-K partial results with atomic_add.
+    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
+    # The kernel configuration reads VLLM_BATCH_INVARIANT at import time.
+    # Spawn the engine process so it observes this setting even if the LoRA
+    # Triton utilities were already imported during test collection.
+    monkeypatch.setenv("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
+
+
 def generate_and_test(llm: vllm.LLM, lora_path: str, lora_id: int) -> None:
     prompts = [
         PROMPT_TEMPLATE.format(
@@ -66,62 +90,100 @@ def generate_and_test(llm: vllm.LLM, lora_path: str, lora_id: int) -> None:
         generated_texts.append(generated_text)
         print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
     for i in range(len(EXPECTED_LORA_OUTPUT)):
-        assert generated_texts[i].startswith(EXPECTED_LORA_OUTPUT[i])
+        # The generated text may have different numbers of blank space,
+        # so reformat to compare.
+        compactGeneratedStr = reformat(generated_texts[i])
+        compactExpectedStr = reformat(EXPECTED_LORA_OUTPUT[i])
+        if not generated_texts[i].startswith(
+            EXPECTED_LORA_OUTPUT[i]
+        ) and not compactGeneratedStr.startswith(compactExpectedStr):
+            raise AssertionError(
+                f"Generated: {generated_texts[i]}, Expected: {EXPECTED_LORA_OUTPUT[i]}"
+            )
 
 
-@pytest.mark.parametrize("mxfp4_use_marlin", [True, False])
+@pytest.mark.parametrize(
+    "mxfp4_use_marlin",
+    [
+        False,
+        pytest.param(
+            True,
+            marks=pytest.mark.skipif(
+                current_platform.is_rocm() or current_platform.is_xpu(),
+                reason="marlin not supported",
+            ),
+        ),
+    ],
+)
 @pytest.mark.parametrize("specialize_active_lora", [True, False])
 def test_gpt_oss_lora(
-    monkeypatch: pytest.MonkeyPatch,
     gptoss20b_lora_files,
     mxfp4_use_marlin,
     specialize_active_lora,
+    monkeypatch: pytest.MonkeyPatch,
 ):
-    with monkeypatch.context() as m:
-        m.setenv("VLLM_MXFP4_USE_MARLIN", "1" if mxfp4_use_marlin else "0")
-        llm = vllm.LLM(
-            MODEL_PATH,
-            max_model_len=1024,
-            enable_lora=True,
-            max_loras=4,
-            max_lora_rank=8,
-            max_num_seqs=2,
-            max_num_batched_tokens=2048,
-            specialize_active_lora=specialize_active_lora,
-            compilation_config=vllm.config.CompilationConfig(  # Avoid OOM
-                cudagraph_specialize_lora=False,
-            ),
-        )
+    _enable_deterministic_lora_shrink(monkeypatch)
 
-        generate_and_test(llm, gptoss20b_lora_files, lora_id=1)
-        generate_and_test(llm, gptoss20b_lora_files, lora_id=2)
+    llm = vllm.LLM(
+        MODEL_PATH,
+        max_model_len=1024,
+        enable_lora=True,
+        max_loras=4,
+        max_lora_rank=8,
+        max_num_seqs=2,
+        max_num_batched_tokens=2048,
+        specialize_active_lora=specialize_active_lora,
+        moe_backend="marlin" if mxfp4_use_marlin else "auto",
+        linear_backend="marlin" if mxfp4_use_marlin else "auto",
+        compilation_config=vllm.config.CompilationConfig(  # Avoid OOM
+            cudagraph_specialize_lora=False,
+        ),
+    )
+
+    generate_and_test(llm, gptoss20b_lora_files, lora_id=1)
+    generate_and_test(llm, gptoss20b_lora_files, lora_id=2)
 
 
 @multi_gpu_test(num_gpus=2)
 @pytest.mark.parametrize("fully_sharded_loras", [False, True])
-@pytest.mark.parametrize("mxfp4_use_marlin", [True, False])
+@pytest.mark.parametrize(
+    "mxfp4_use_marlin",
+    [
+        False,
+        pytest.param(
+            True,
+            marks=pytest.mark.skipif(
+                current_platform.is_rocm() or current_platform.is_xpu(),
+                reason="marlin not supported",
+            ),
+        ),
+    ],
+)
 def test_gpt_oss_lora_tp2(
-    monkeypatch: pytest.MonkeyPatch,
     gptoss20b_lora_files,
     fully_sharded_loras,
     mxfp4_use_marlin,
+    monkeypatch: pytest.MonkeyPatch,
 ):
-    with monkeypatch.context() as m:
-        m.setenv("VLLM_MXFP4_USE_MARLIN", "1" if mxfp4_use_marlin else "0")
-        llm = vllm.LLM(
-            MODEL_PATH,
-            max_model_len=1024,
-            enable_lora=True,
-            max_loras=2,
-            max_num_seqs=2,
-            max_num_batched_tokens=2048,
-            tensor_parallel_size=2,
-            gpu_memory_utilization=0.8,
-            fully_sharded_loras=fully_sharded_loras,
-            compilation_config=vllm.config.CompilationConfig(  # Avoid OOM
-                cudagraph_specialize_lora=False,
-            ),
-        )
+    _enable_deterministic_lora_shrink(monkeypatch)
 
-        generate_and_test(llm, gptoss20b_lora_files, lora_id=1)
-        generate_and_test(llm, gptoss20b_lora_files, lora_id=2)
+    llm = vllm.LLM(
+        MODEL_PATH,
+        max_model_len=1024,
+        enable_lora=True,
+        max_loras=2,
+        max_num_seqs=2,
+        max_num_batched_tokens=2048,
+        tensor_parallel_size=2,
+        gpu_memory_utilization=0.8,
+        fully_sharded_loras=fully_sharded_loras,
+        enable_expert_parallel=not fully_sharded_loras,
+        moe_backend="marlin" if mxfp4_use_marlin else "auto",
+        linear_backend="marlin" if mxfp4_use_marlin else "auto",
+        compilation_config=vllm.config.CompilationConfig(
+            cudagraph_specialize_lora=False,
+        ),
+    )
+
+    generate_and_test(llm, gptoss20b_lora_files, lora_id=1)
+    generate_and_test(llm, gptoss20b_lora_files, lora_id=2)

@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-This example shows how to use vLLM for running offline inference with
+"""This example shows how to use vLLM for running offline inference with
 vision language reranker models for multimodal scoring tasks.
 
 Vision language rerankers score the relevance between a text query and
@@ -10,7 +9,6 @@ multimodal documents (text + images/videos).
 
 from argparse import Namespace
 from collections.abc import Callable
-from dataclasses import asdict
 from pathlib import Path
 from typing import NamedTuple
 
@@ -125,7 +123,7 @@ def main(args: Namespace):
     model_request = model_example_map[args.model_name]()
     engine_args = model_request.engine_args
 
-    llm = LLM(**asdict(engine_args))
+    llm = LLM.from_engine_args(engine_args)
 
     print("Query: string & Document: string")
     outputs = llm.score(query, document)

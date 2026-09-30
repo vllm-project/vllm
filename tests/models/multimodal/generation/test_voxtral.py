@@ -4,9 +4,9 @@
 import json
 
 import pytest
-from mistral_common.audio import Audio
-from mistral_common.protocol.instruct.chunk import AudioChunk, RawAudio, TextChunk
+from mistral_common.protocol.instruct.chunk import AudioChunk, TextChunk
 from mistral_common.protocol.instruct.messages import UserMessage
+from mistral_common.tokens.tokenizers.audio import Audio
 from transformers import VoxtralForConditionalGeneration
 
 from vllm.tokenizers.mistral import MistralTokenizer
@@ -36,9 +36,7 @@ def _get_prompt(audio_assets: AudioTestAssets, question: str) -> list[int]:
         Audio.from_file(str(asset.get_local_path()), strict=False)
         for asset in audio_assets
     ]
-    audio_chunks = [
-        AudioChunk(input_audio=RawAudio.from_audio(audio)) for audio in audios
-    ]
+    audio_chunks = [AudioChunk.from_audio(audio) for audio in audios]
 
     messages = [
         UserMessage(content=[*audio_chunks, TextChunk(text=question)]).to_openai()
@@ -80,7 +78,6 @@ def test_online_serving(vllm_runner, audio_assets: AudioTestAssets):
 
     Steps run sequentially so each releases the GPU before the next starts.
     """
-
     question = f"What's happening in these {len(audio_assets)} audio clips?"
     max_tokens = 10
     audio_data = [asset.audio_and_sample_rate for asset in audio_assets]
@@ -149,6 +146,10 @@ def test_online_serving(vllm_runner, audio_assets: AudioTestAssets):
     )
 
 
+@pytest.mark.skip(
+    reason="VoxtralProcessor.apply_chat_template() in transformers v5 "
+    "doesn't resolve chat_template=None to the default template"
+)
 def test_hf_reference(hf_runner, vllm_runner, audio_assets: AudioTestAssets):
     """Compare vLLM Mistral-format output against HF Transformers reference.
 

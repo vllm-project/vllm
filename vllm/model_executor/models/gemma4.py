@@ -1,0 +1,1509 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# Copyright 2025 The vLLM team.
+# Copyright 2025 Google Inc. HuggingFace Inc. team. All rights reserved.
+#
+#
+
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+"""Gemma 4 model implementation for vLLM."""
+
+from collections.abc import Iterable
+from dataclasses import replace
+from itertools import islice
+
+import torch
+from torch import nn
+
+from vllm.compilation.decorators import support_torch_compile
+from vllm.config import CacheConfig, VllmConfig
+from vllm.config.utils import getattr_iter
+from vllm.distributed import (
+    get_pp_group,
+    get_tensor_model_parallel_rank,
+    get_tensor_model_parallel_world_size,
+)
+from vllm.forward_context import get_forward_context
+from vllm.logger import init_logger
+from vllm.model_executor.layers.activation import get_act_and_mul_fn
+from vllm.model_executor.layers.attention import Attention
+from vllm.model_executor.layers.fused_moe import (
+    FusedMoEFactory,
+    GateLinear,
+    MoERunner,
+)
+from vllm.model_executor.layers.layernorm import RMSNorm
+from vllm.model_executor.layers.linear import (
+    ColumnParallelLinear,
+    MergedColumnParallelLinear,
+    QKVParallelLinear,
+    ReplicatedLinear,
+    RowParallelLinear,
+)
+from vllm.model_executor.layers.logits_processor import LogitsProcessor
+from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.model_executor.layers.rotary_embedding import get_rope
+from vllm.model_executor.layers.vocab_parallel_embedding import (
+    ParallelLMHead,
+    VocabParallelEmbedding,
+)
+from vllm.platforms import current_platform
+from vllm.sequence import IntermediateTensors
+from vllm.transformers_utils.configs.gemma4 import gemma4_layer_config
+from vllm.triton_utils import tl, triton
+from vllm.v1.attention.backends.utils import KVSharingFastPrefillMetadata
+
+from .interfaces import (
+    EagleModelMixin,
+    MixtureOfExperts,
+    SupportsEagle3,
+    SupportsLoRA,
+    SupportsPP,
+    SupportsQuant,
+)
+from .utils import (
+    AutoWeightsLoader,
+    PPMissingLayer,
+    ShardIds,
+    WeightsMapper,
+    extract_layer_index,
+    make_layers,
+    maybe_prefix,
+)
+
+logger = init_logger(__name__)
+
+
+def _gemma4_layer_weights_mapper(config) -> WeightsMapper:
+    """Stack each decoder layer's projections the way its modules are built.
+
+    gate/up pack into `mlp.gate_up_proj`. Layers with a qkv_proj pack q/k/v
+    into it; `attention_k_eq_v` full-attention layers ship k_proj only, so K
+    is loaded into both the K and V shards and no v_proj is expected. KV-shared
+    layers only have q_proj; the K/V tensors original checkpoints still ship
+    for them are dropped.
+    """
+    num_layers = config.num_hidden_layers
+    first_kv_shared = num_layers - getattr(config, "num_kv_shared_layers", 0)
+    k_eq_v_layers = (
+        {
+            i
+            for i, layer_type in enumerate(config.layer_types[:first_kv_shared])
+            if layer_type == "full_attention"
+        }
+        if getattr(config, "attention_k_eq_v", False)
+        else set()
+    )
+    qkv_shards: tuple[tuple[str, ShardIds], ...] = (("q", "q"), ("k", "k"), ("v", "v"))
+    k_eq_v_shards: tuple[tuple[str, ShardIds], ...] = (("q", "q"), ("k", ["k", "v"]))
+    stacked: dict[str, tuple[str, ShardIds]] = {
+        ".mlp.gate_proj.": (".mlp.gate_up_proj.", 0),
+        ".mlp.up_proj.": (".mlp.gate_up_proj.", 1),
+    }
+    stacked |= {
+        f"layers.{i}.self_attn.{shard}_proj.": (
+            f"layers.{i}.self_attn.qkv_proj.",
+            shard_id,
+        )
+        for i in range(first_kv_shared)
+        for shard, shard_id in (k_eq_v_shards if i in k_eq_v_layers else qkv_shards)
+    }
+    return WeightsMapper(
+        orig_to_new_substr={
+            f"layers.{i}.self_attn.{name}.": None
+            for i in range(first_kv_shared, num_layers)
+            for name in ("k_proj", "v_proj", "k_norm")
+        },
+        orig_to_new_stacked=stacked,
+    )
+
+
+@triton.jit
+def _gemma4_routing_kernel(
+    gating_ptr,
+    per_expert_scale_ptr,
+    topk_weights_ptr,
+    topk_ids_ptr,
+    E: tl.constexpr,
+    K: tl.constexpr,
+    BLOCK_E: tl.constexpr,
+):
+    pid = tl.program_id(0)
+    offs_e = tl.arange(0, BLOCK_E)
+    valid = offs_e < E
+
+    logits = tl.load(
+        gating_ptr + pid * E + offs_e,
+        mask=valid,
+        other=-float("inf"),
+    ).to(tl.float32)
+
+    max_l = tl.max(logits, axis=0)
+
+    # Float32 → ascending-sortable bijection
+    MIN32 = -2147483648
+    logit_bits = logits.to(tl.int32, bitcast=True)
+    sign_b = logit_bits >> 31
+    key = tl.where(sign_b == 0, logit_bits ^ -1, logit_bits ^ MIN32)
+    key = tl.where(valid, key, 0x7FFFFFFF)
+    sk64 = key.to(tl.int64) & 0x00000000FFFFFFFF
+    packed = (sk64 << 32) | offs_e.to(tl.int64)
+    sorted_p = tl.sort(packed, descending=False)
+
+    # Vectorized extraction of ALL sorted elements — no K-loop, no cross-lane reductions
+    all_keys = ((sorted_p >> 32) & 0x00000000FFFFFFFF).to(tl.int32)
+    all_ids = (sorted_p & 0x00000000FFFFFFFF).to(tl.int32)
+
+    # Inverse bijection: recover original logit bits
+    sign_k = all_keys >> 31
+    all_bits = tl.where(sign_k < 0, all_keys ^ -1, all_keys ^ MIN32)
+    all_logits = all_bits.to(tl.float32, bitcast=True)
+
+    # Compute raw_exp for ALL BLOCK_E elements — vectorized, ~2 VALU clocks
+    all_raw_exp = tl.math.exp2((all_logits - max_l) * 1.4426950408889634)
+
+    # Sum only top-K for renorm — ONE masked reduction
+    top_mask = offs_e < K
+    renorm_raw = tl.sum(tl.where(top_mask, all_raw_exp, 0.0), axis=0)
+    renorm_raw = tl.where(renorm_raw > 0.0, renorm_raw, 1.0)
+    inv_renorm = 1.0 / renorm_raw
+
+    # Load scales for top-K only (masked gather; scale array is tiny → L1 cached)
+    all_scales = tl.load(
+        per_expert_scale_ptr + all_ids.to(tl.int64),
+        mask=top_mask,
+        other=1.0,
+    ).to(tl.float32)
+
+    # Final weights: vectorized multiply (only top-K will be stored)
+    all_weights = (all_raw_exp * inv_renorm * all_scales).to(tl.float32)
+
+    # Write results with TWO masked stores — replaces K × 2 serial scalar stores
+    base_off = pid * K + offs_e
+    tl.store(topk_ids_ptr + base_off, all_ids, mask=top_mask)
+    tl.store(topk_weights_ptr + base_off, all_weights, mask=top_mask)
+
+
+def gemma4_fused_routing_kernel_triton(
+    gating_output: torch.Tensor,
+    topk: int,
+    per_expert_scale: torch.Tensor,
+    num_warps: int = 1,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    gating_output = gating_output.contiguous()
+    per_expert_scale = per_expert_scale.contiguous()
+    T, E = gating_output.shape
+    weights = torch.empty(T, topk, dtype=torch.float32, device=gating_output.device)
+    ids = torch.empty(T, topk, dtype=torch.int32, device=gating_output.device)
+    BLOCK_E = triton.next_power_of_2(E)
+    _gemma4_routing_kernel[(T,)](
+        gating_output,
+        per_expert_scale,
+        weights,
+        ids,
+        E,
+        topk,
+        BLOCK_E,
+        num_warps=num_warps,
+    )
+    return weights, ids
+
+
+def gemma4_routing_function_torch(
+    gating_output: torch.Tensor,
+    topk: int,
+    per_expert_scale: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    _, topk_ids = torch.topk(gating_output, k=topk, dim=-1)
+    router_probabilities = torch.nn.functional.softmax(gating_output, dim=-1)
+    indicator = torch.nn.functional.one_hot(
+        topk_ids, num_classes=gating_output.size(-1)
+    ).sum(dim=-2)
+    gate_weights = indicator * router_probabilities
+    renorm_factor = torch.sum(gate_weights, dim=-1, keepdim=True)
+    renorm_factor = torch.where(renorm_factor > 0.0, renorm_factor, 1.0)
+    dispatch_weights = gate_weights / renorm_factor
+
+    topk_weights = dispatch_weights.gather(1, topk_ids)
+
+    # Fold per_expert_scale into routing weights
+    expert_scales = per_expert_scale[topk_ids].to(topk_weights.dtype)
+    topk_weights = topk_weights * expert_scales
+    return topk_weights.to(torch.float32), topk_ids.to(torch.int32)
+
+
+def _get_text_config(config):
+    """Dereference text_config if config is a nested Gemma4Config.
+
+    Gemma4 checkpoints use architectures=["Gemma4ForConditionalGeneration"]
+    which yields a Gemma4Config with nested text_config. This function
+    transparently returns the text config regardless of nesting.
+    """
+    if hasattr(config, "text_config"):
+        return config.text_config
+    return config
+
+
+class Gemma4MLP(nn.Module):
+    def __init__(
+        self,
+        hidden_size: int,
+        intermediate_size: int,
+        hidden_activation: str,
+        quant_config: QuantizationConfig | None = None,
+        prefix: str = "",
+    ) -> None:
+        super().__init__()
+        self.gate_up_proj = MergedColumnParallelLinear(
+            hidden_size,
+            [intermediate_size] * 2,
+            bias=False,
+            quant_config=quant_config,
+            prefix=f"{prefix}.gate_up_proj",
+        )
+        self.down_proj = RowParallelLinear(
+            intermediate_size,
+            hidden_size,
+            bias=False,
+            quant_config=quant_config,
+            prefix=f"{prefix}.down_proj",
+        )
+        self.act_fn = get_act_and_mul_fn(hidden_activation)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        gate_up, _ = self.gate_up_proj(x)
+        x = self.act_fn(gate_up)
+        x, _ = self.down_proj(x)
+        return x
+
+
+class Gemma4Router(nn.Module):
+    """Router for Gemma4 MoE that preprocesses input before projection.
+
+    Applies RMSNorm (no learned weight), root_size scaling
+    (hidden_size^{-0.5}), then a learned per-dimension scale before
+    projecting to expert logits.
+
+    This preprocessing is applied ONLY to the router's input, not to
+    the expert MLPs' input.
+    """
+
+    def __init__(
+        self,
+        config,
+        quant_config: QuantizationConfig | None = None,
+        prefix: str = "",
+    ) -> None:
+        super().__init__()
+        self.hidden_size = config.hidden_size
+
+        # RMSNorm without learned weight — pure normalization only
+        self.norm = RMSNorm(self.hidden_size, eps=config.rms_norm_eps, has_weight=False)
+        # Per-dimension learned scale, applied after norm + root_size
+        self.scale = nn.Parameter(torch.ones(self.hidden_size))
+        # Per-expert output scale folded into routing weights so that
+        # MoERunner's fused kernel computes: Σ_e (expert_e * w_e * scale_e)
+        self.per_expert_scale = nn.Parameter(torch.ones(config.num_experts))
+        # Constant 1/sqrt(hidden_size) scaling factor
+        self.register_buffer(
+            "root_size",
+            torch.tensor(self.hidden_size**-0.5),
+            persistent=False,
+        )
+        # Project to expert logits; replicated across TP for consistent routing
+        # GateLinear supports bf16 W/A → fp32 output, which is important
+        # because the topk kernel often needs fp32 for stable routing.
+        self.proj = GateLinear(
+            self.hidden_size,
+            config.num_experts,
+            bias=False,
+            out_dtype=torch.float32,
+            prefix=f"{prefix}.proj",
+        )
+
+    def routing_function(
+        self,
+        hidden_states: torch.Tensor,
+        gating_output: torch.Tensor,
+        topk: int,
+        renormalize: bool,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Softmax over ALL experts → top-k → renormalize.
+
+        MoERunner's built-in fused_topk scopes softmax differently, so Gemma4
+        needs its own routing for numerical correctness.
+
+        NOTE: self.per_expert_scale is read at call time (not captured into a
+        local) so that torch.func.functional_call parameter substitution
+        reaches the routing function correctly.
+        """
+        if current_platform.is_cuda_alike() or current_platform.is_xpu():
+            return gemma4_fused_routing_kernel_triton(
+                gating_output, topk, self.per_expert_scale
+            )
+
+        return gemma4_routing_function_torch(gating_output, topk, self.per_expert_scale)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Returns raw router logits [T, E]."""
+        x = self.norm(x)
+        x = x * self.root_size.to(x.dtype)
+        x = x * self.scale.to(x.dtype)
+        router_logits, _ = self.proj(x)
+        return router_logits
+
+
+class Gemma4Attention(nn.Module):
+    def __init__(
+        self,
+        config,
+        hidden_size: int,
+        num_heads: int,
+        num_kv_heads: int,
+        head_dim: int,
+        max_position_embeddings: int,
+        cache_config: CacheConfig | None = None,
+        quant_config: QuantizationConfig | None = None,
+        attn_logits_soft_cap: float | None = None,
+        prefix: str = "",
+    ) -> None:
+        super().__init__()
+        self.config = config
+        self.hidden_size = hidden_size
+
+        tp_size = get_tensor_model_parallel_world_size()
+        self.tp_rank = get_tensor_model_parallel_rank()
+        self.total_num_heads = num_heads
+        assert self.total_num_heads % tp_size == 0
+        self.num_heads = self.total_num_heads // tp_size
+        self.total_num_kv_heads = num_kv_heads
+        if self.total_num_kv_heads >= tp_size:
+            assert self.total_num_kv_heads % tp_size == 0
+        else:
+            assert tp_size % self.total_num_kv_heads == 0
+        self.num_kv_heads = max(1, self.total_num_kv_heads // tp_size)
+        self.head_dim = head_dim
+        self.q_size = self.num_heads * self.head_dim
+        self.kv_size = self.num_kv_heads * self.head_dim
+        # Gemma4 uses scaling=1.0.
+        # Unlike Gemma2/3, query_pre_attn_scalar is NOT used here;
+        # Q/K norms with learnable weights handle scaling implicitly.
+        self.scaling = 1.0
+
+        layer_idx = extract_layer_index(prefix)
+        num_kv_shared_layers = getattr(config, "num_kv_shared_layers", 0)
+        first_kv_shared_layer_idx = config.num_hidden_layers - num_kv_shared_layers
+        self.is_kv_shared_layer = (
+            num_kv_shared_layers > 0 and layer_idx >= first_kv_shared_layer_idx
+        )
+
+        if self.is_kv_shared_layer:
+            # K/V come from the target layer's cache, so like HF this layer
+            # only has q_proj (and no k_norm/v_norm).
+            self.q_proj = ColumnParallelLinear(
+                hidden_size,
+                self.total_num_heads * self.head_dim,
+                bias=config.attention_bias,
+                quant_config=quant_config,
+                prefix=f"{prefix}.q_proj",
+            )
+        else:
+            # QKVParallelLinear handles GQA correctly for all layer types.
+            # k_eq_v layers load K weights into both K and V slots via
+            # hf_to_vllm_mapper — no structural difference needed.
+            self.qkv_proj = QKVParallelLinear(
+                hidden_size,
+                self.head_dim,
+                self.total_num_heads,
+                self.total_num_kv_heads,
+                bias=config.attention_bias,
+                quant_config=quant_config,
+                prefix=f"{prefix}.qkv_proj",
+            )
+            self.k_norm = RMSNorm(self.head_dim, eps=config.rms_norm_eps)
+            # V norm: no learnable scale (pure normalization only)
+            self.v_norm = RMSNorm(
+                self.head_dim, eps=config.rms_norm_eps, has_weight=False
+            )
+        self.o_proj = RowParallelLinear(
+            self.total_num_heads * self.head_dim,
+            hidden_size,
+            bias=config.attention_bias,
+            quant_config=quant_config,
+            prefix=f"{prefix}.o_proj",
+        )
+
+        # Q norm: output = norm(x) * weight (learnable per-head scale)
+        self.q_norm = RMSNorm(self.head_dim, eps=config.rms_norm_eps)
+
+        # Determine layer type and sliding window
+        layer_type = config.layer_types[layer_idx]
+        self.is_sliding = layer_type == "sliding_attention"
+        sliding_window = config.sliding_window if self.is_sliding else None
+
+        # Initialize RoPE based on layer type.
+        # Gemma4 uses different RoPE parameters for sliding vs full attention.
+        if layer_type in config.rope_parameters:
+            # Per-layer-type rope config (dict format).
+            # rope_parameters already contains the correct
+            # partial_rotary_factor per layer type (1.0 for full
+            # attention, 1.0 for sliding). Do NOT override with
+            # global_partial_rotary_factor — that config key is
+            # not needed for Gemma4 — config uses per-layer rope_parameters.
+            rope_parameters = dict(config.rope_parameters[layer_type])
+        else:
+            # Legacy config format fallback.
+            rope_parameters = dict(config.rope_parameters.copy())
+            if self.is_sliding:
+                rope_parameters["rope_theta"] = getattr(
+                    config, "rope_local_base_freq", 10000.0
+                )
+
+        # KV sharing: layers in the last `num_kv_shared_layers` share KV
+        # cache with earlier layers of the same type.
+        kv_sharing_target_layer_name = None
+        if self.is_kv_shared_layer:
+            # Find the last non-shared layer of the same attention type
+            prev_layers = config.layer_types[:first_kv_shared_layer_idx]
+            current_layer_type = config.layer_types[layer_idx]
+            kv_shared_layer_index = (
+                len(prev_layers) - 1 - prev_layers[::-1].index(current_layer_type)
+            )
+            if kv_shared_layer_index >= 0:
+                if ".layers." in prefix:
+                    param_name_before_layers = prefix.split(".layers.")[0]
+                else:
+                    raise ValueError(
+                        "Unexpected prefix format for Gemma4Attention: "
+                        f"'{prefix}'. Expected to contain '.layers.'."
+                    )
+                kv_sharing_target_layer_name = (
+                    f"{param_name_before_layers}.layers."
+                    f"{kv_shared_layer_index}.self_attn.attn"
+                )
+
+        self.rotary_emb = get_rope(
+            self.head_dim,
+            max_position=max_position_embeddings,
+            rope_parameters=rope_parameters,
+            is_neox_style=True,
+        )
+
+        self.attn = Attention(
+            self.num_heads,
+            self.head_dim,
+            self.scaling,
+            num_kv_heads=self.num_kv_heads,
+            cache_config=cache_config,
+            quant_config=quant_config,
+            logits_soft_cap=attn_logits_soft_cap,
+            per_layer_sliding_window=sliding_window,
+            kv_sharing_target_layer_name=kv_sharing_target_layer_name,
+            # Gemma4 vision bidi: on sliding layers the bidirectional image
+            # block must stay within the sliding window, matching HF's
+            # (causal OR blockwise) AND sliding_window. Without this the image
+            # span (~1100 soft tokens at max_soft_tokens=1120) exceeds the 1024
+            # window; the runner keeps the full range and the kernel bounds it
+            # per-query here.
+            mm_prefix_clamp_sliding_window=self.is_sliding,
+            prefix=f"{prefix}.attn",
+        )
+
+    def forward(
+        self,
+        positions: torch.Tensor,
+        hidden_states: torch.Tensor,
+        **kwargs,
+    ) -> torch.Tensor:
+        if self.is_kv_shared_layer:
+            # Shared KV: only Q is projected; K/V come from the target layer.
+            q, _ = self.q_proj(hidden_states)
+            q = q.unflatten(-1, (self.num_heads, self.head_dim))
+            q = self.q_norm(q)
+            q = q.flatten(-2, -1)
+            q, _ = self.rotary_emb(positions, q, None)
+            attn_output = self.attn(q, None, None)
+        else:
+            # For k_eq_v, K weights are loaded into both K and V slots of
+            # qkv_proj, so V == K automatically.
+            qkv, _ = self.qkv_proj(hidden_states)
+            q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
+
+            q = q.unflatten(-1, (self.num_heads, self.head_dim))
+            q = self.q_norm(q)
+            q = q.flatten(-2, -1)
+
+            k = k.unflatten(-1, (self.num_kv_heads, self.head_dim))
+            k = self.k_norm(k)
+            k = k.flatten(-2, -1)
+            q, k = self.rotary_emb(positions, q, k)
+
+            v = v.unflatten(-1, (self.num_kv_heads, self.head_dim))
+            v = self.v_norm(v)
+            v = v.flatten(-2, -1)
+            attn_output = self.attn(q, k, v)
+
+        output, _ = self.o_proj(attn_output)
+
+        return output
+
+
+class Gemma4DecoderLayer(nn.Module):
+    def __init__(
+        self,
+        config,
+        cache_config: CacheConfig | None = None,
+        quant_config: QuantizationConfig | None = None,
+        prefix: str = "",
+    ) -> None:
+        super().__init__()
+        self.hidden_size = config.hidden_size
+        self.hidden_size_per_layer_input = getattr(
+            config, "hidden_size_per_layer_input", 0
+        )
+
+        layer_idx = extract_layer_index(prefix)
+        self.layer_idx = layer_idx
+
+        # Gemma4 uses different head dimensions for sliding vs full attention
+        layer_config = gemma4_layer_config(config, layer_idx)
+        head_dim = layer_config.head_dim
+        num_kv_heads = layer_config.num_key_value_heads
+
+        self.self_attn = Gemma4Attention(
+            config=config,
+            hidden_size=self.hidden_size,
+            num_heads=config.num_attention_heads,
+            num_kv_heads=num_kv_heads,
+            head_dim=head_dim,
+            max_position_embeddings=config.max_position_embeddings,
+            cache_config=cache_config,
+            quant_config=quant_config,
+            attn_logits_soft_cap=getattr(config, "attn_logit_softcapping", None),
+            prefix=f"{prefix}.self_attn",
+        )
+
+        # Compute per-layer intermediate_size from config.
+        # When use_double_wide_mlp is set, intermediate_size doubles for
+        # KV-shared layers (layers >= first_kv_shared_layer_idx).
+        first_kv_shared_layer_idx = config.num_hidden_layers - getattr(
+            config, "num_kv_shared_layers", 0
+        )
+        is_kv_shared_layer = layer_idx >= first_kv_shared_layer_idx > 0
+        use_double_wide_mlp = (
+            getattr(config, "use_double_wide_mlp", False) and is_kv_shared_layer
+        )
+        layer_intermediate_size = config.intermediate_size * (
+            2 if use_double_wide_mlp else 1
+        )
+
+        self.mlp = Gemma4MLP(
+            hidden_size=self.hidden_size,
+            intermediate_size=layer_intermediate_size,
+            hidden_activation=config.hidden_activation,
+            quant_config=quant_config,
+            prefix=f"{prefix}.mlp",
+        )
+
+        # Layer norms: output = norm(x) * weight
+        self.input_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.post_attention_layernorm = RMSNorm(
+            config.hidden_size, eps=config.rms_norm_eps
+        )
+        self.pre_feedforward_layernorm = RMSNorm(
+            config.hidden_size, eps=config.rms_norm_eps
+        )
+        self.post_feedforward_layernorm = RMSNorm(
+            config.hidden_size, eps=config.rms_norm_eps
+        )
+
+        # MoE (Mixture of Experts) — router + expert block parallel to MLP
+        self.enable_moe_block = getattr(config, "enable_moe_block", False) or getattr(
+            config, "use_second_mlp_block", False
+        )
+        self.router: Gemma4Router | None
+        self.experts: MoERunner | None
+        self.post_feedforward_layernorm_1: RMSNorm | None
+        self.post_feedforward_layernorm_2: RMSNorm | None
+        self.pre_feedforward_layernorm_2: RMSNorm | None
+        if self.enable_moe_block:
+            self.router = Gemma4Router(
+                config,
+                quant_config=quant_config,
+                prefix=f"{prefix}.router",
+            )
+            names = ("moe_intermediate_size", "expert_intermediate_size")
+            intermediate_size = getattr_iter(config, names)
+            if intermediate_size is None:
+                raise ValueError("Gemma4 MoE requires an expert intermediate size")
+            self.experts = FusedMoEFactory(
+                num_experts=config.num_experts,
+                top_k=config.top_k_experts,
+                hidden_size=config.hidden_size,
+                intermediate_size=intermediate_size,
+                renormalize=True,
+                quant_config=quant_config,
+                prefix=f"{prefix}.experts",
+                custom_routing_function=self.router.routing_function,
+                activation="gelu_tanh",
+            )
+            self.post_feedforward_layernorm_1 = RMSNorm(
+                config.hidden_size, eps=config.rms_norm_eps
+            )
+            self.post_feedforward_layernorm_2 = RMSNorm(
+                config.hidden_size, eps=config.rms_norm_eps
+            )
+            self.pre_feedforward_layernorm_2 = RMSNorm(
+                config.hidden_size, eps=config.rms_norm_eps
+            )
+        else:
+            self.router = None
+            self.experts = None
+            self.post_feedforward_layernorm_1 = None
+            self.post_feedforward_layernorm_2 = None
+            self.pre_feedforward_layernorm_2 = None
+
+        # Per-Layer Embedding (PLE) components — present in each decoder layer
+        self.per_layer_input_gate: ReplicatedLinear | None
+        self.per_layer_projection: ReplicatedLinear | None
+        self.post_per_layer_input_norm: RMSNorm | None
+        if (
+            self.hidden_size_per_layer_input is not None
+            and self.hidden_size_per_layer_input > 0
+        ):
+            # Gate: projects hidden_states → per-layer dim for gating
+            self.per_layer_input_gate = ReplicatedLinear(
+                self.hidden_size,
+                self.hidden_size_per_layer_input,
+                bias=False,
+                quant_config=quant_config,
+                prefix=f"{prefix}.per_layer_input_gate",
+                return_bias=False,
+            )
+            # Projection: projects gated per-layer input back → hidden size
+            self.per_layer_projection = ReplicatedLinear(
+                self.hidden_size_per_layer_input,
+                self.hidden_size,
+                bias=False,
+                quant_config=quant_config,
+                prefix=f"{prefix}.per_layer_projection",
+                return_bias=False,
+            )
+            # Post-PLE norm: output = norm(x) * weight
+            self.post_per_layer_input_norm = RMSNorm(
+                config.hidden_size, eps=config.rms_norm_eps
+            )
+        else:
+            self.per_layer_input_gate = None
+            self.per_layer_projection = None
+            self.post_per_layer_input_norm = None
+
+        # Layer scalar (loaded from checkpoint) — applies to ALL text layers
+        self.register_buffer("layer_scalar", torch.ones(1))
+
+    def forward(
+        self,
+        positions: torch.Tensor,
+        hidden_states: torch.Tensor,
+        residual: torch.Tensor | None,
+        per_layer_input: torch.Tensor | None = None,
+        **kwargs,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        # Gemma4 residual pattern:
+        # 1. input_norm(x) → attn → post_attn_norm → ADD residual
+        # 2. pre_ff_norm → mlp → post_ff_norm → ADD residual
+        residual = hidden_states
+
+        hidden_states = self.input_layernorm(residual)
+
+        hidden_states = self.self_attn(
+            positions=positions,
+            hidden_states=hidden_states,
+            **kwargs,
+        )
+
+        hidden_states = self.post_attention_layernorm(hidden_states)
+        hidden_states = hidden_states + residual
+        residual = hidden_states
+
+        # MLP runs unconditionally (same inputs for MoE and non-MoE)
+        hidden_states = self.pre_feedforward_layernorm(hidden_states)
+        hidden_states = self.mlp(hidden_states)
+
+        if self.enable_moe_block:
+            assert self.post_feedforward_layernorm_1 is not None
+            assert self.pre_feedforward_layernorm_2 is not None
+            assert self.router is not None
+            assert self.experts is not None
+            assert self.post_feedforward_layernorm_2 is not None
+            hidden_states_1 = self.post_feedforward_layernorm_1(hidden_states)
+
+            hidden_states_2 = self.pre_feedforward_layernorm_2(residual)
+            router_logits = self.router(residual)
+            hidden_states_2 = self.experts(hidden_states_2, router_logits)
+            hidden_states_2 = self.post_feedforward_layernorm_2(hidden_states_2)
+
+            # Combine MLP and MoE outputs
+            hidden_states = hidden_states_1 + hidden_states_2
+
+        hidden_states = self.post_feedforward_layernorm(hidden_states)
+        hidden_states = hidden_states + residual
+
+        # Apply PLE (Per-Layer Embedding) if configured
+        if per_layer_input is not None and self.per_layer_input_gate is not None:
+            assert self.per_layer_projection is not None
+            assert self.post_per_layer_input_norm is not None
+            gate = self.per_layer_input_gate(hidden_states)
+            gate = torch.nn.functional.gelu(gate, approximate="tanh")
+            gated_per_layer = gate * per_layer_input
+            per_layer_contribution = self.per_layer_projection(gated_per_layer)
+            per_layer_contribution = self.post_per_layer_input_norm(
+                per_layer_contribution
+            )
+            hidden_states = hidden_states + per_layer_contribution
+
+        # Apply layer scalar for full-attention layers
+        # Apply per-layer scalar (all text layers)
+        hidden_states = hidden_states * self.layer_scalar
+
+        return hidden_states, None
+
+
+def _run_decoder_layers(
+    decoder_layers: list[Gemma4DecoderLayer],
+    layer_idx_start: int,
+    positions: torch.Tensor,
+    hidden_states: torch.Tensor,
+    per_layer_inputs: torch.Tensor | None = None,
+    **kwargs,
+) -> torch.Tensor:
+    """Run a slice of decoder layers with PLE extraction."""
+    residual = None
+    for idx, layer in enumerate(decoder_layers):
+        layer_idx = idx + layer_idx_start
+        layer_per_input = (
+            per_layer_inputs[:, layer_idx, :] if per_layer_inputs is not None else None
+        )
+        hidden_states, residual = layer(
+            positions,
+            hidden_states,
+            residual,
+            per_layer_input=layer_per_input,
+            **kwargs,
+        )
+    return hidden_states
+
+
+@support_torch_compile(
+    enable_if=lambda vllm_config: vllm_config.cache_config.kv_sharing_fast_prefill
+)
+class Gemma4SelfDecoderLayers(nn.Module):
+    """Compiled wrapper: embedding + non-KV-shared layers (YOCO first half).
+
+    Owns the embedding and PLE modules so they are inside the compiled
+    graph. Gemma4Model delegates embedding methods here.
+    """
+
+    def __init__(
+        self,
+        *,
+        vllm_config: VllmConfig,
+        prefix: str = "",
+        decoder_layers: list[Gemma4DecoderLayer],
+        layer_idx_start: int,
+        embed_tokens: VocabParallelEmbedding,
+        normalizer: torch.Tensor,
+        embed_tokens_per_layer: VocabParallelEmbedding | None,
+        embed_scale_per_layer: torch.Tensor | None,
+        per_layer_model_projection: ColumnParallelLinear | None,
+        per_layer_projection_norm: RMSNorm | None,
+        per_layer_input_scale: torch.Tensor | None,
+        per_layer_projection_scale: torch.Tensor | None,
+    ):
+        super().__init__()
+        self.decoder_layers = decoder_layers
+        self.layer_idx_start = layer_idx_start
+
+        config = _get_text_config(vllm_config.model_config.hf_config)
+        self.config = config
+        self.hidden_size_per_layer_input = getattr(
+            config, "hidden_size_per_layer_input", 0
+        )
+        self.vocab_size_per_layer_input = getattr(
+            config, "vocab_size_per_layer_input", config.vocab_size
+        )
+
+        # Shared references to modules owned by Gemma4Model — must be
+        # inside this nn.Module so torch.compile captures them.
+        self.embed_tokens = embed_tokens
+        self.embed_tokens_per_layer = embed_tokens_per_layer
+        self.per_layer_model_projection = per_layer_model_projection
+        self.per_layer_projection_norm = per_layer_projection_norm
+
+        # Register the shared scalars as buffers so they follow the model on
+        # .to(device); plain attributes stay on CPU.
+        self.register_buffer("normalizer", normalizer, persistent=False)
+        self.register_buffer(
+            "embed_scale_per_layer", embed_scale_per_layer, persistent=False
+        )
+        self.register_buffer(
+            "per_layer_input_scale", per_layer_input_scale, persistent=False
+        )
+        self.register_buffer(
+            "per_layer_projection_scale", per_layer_projection_scale, persistent=False
+        )
+
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.embed_tokens(input_ids) * self.normalizer
+
+    def get_per_layer_inputs(self, input_ids: torch.Tensor) -> torch.Tensor | None:
+        """Get per-layer embeddings from embed_tokens_per_layer.
+
+        Returns:
+            Per-layer embeddings (num_tokens, num_layers,
+            hidden_size_per_layer_input)
+
+        """
+        if self.embed_tokens_per_layer is None:
+            return None
+        per_layer_inputs_mask = torch.logical_and(
+            input_ids >= 0,
+            input_ids < self.vocab_size_per_layer_input,
+        )
+        per_layer_inputs_tokens = torch.where(
+            per_layer_inputs_mask, input_ids, torch.zeros_like(input_ids)
+        )
+        per_layer_embeds = self.embed_tokens_per_layer(per_layer_inputs_tokens)
+        per_layer_embeds = per_layer_embeds * self.embed_scale_per_layer
+        return per_layer_embeds.reshape(
+            *input_ids.shape,
+            self.config.num_hidden_layers,
+            self.hidden_size_per_layer_input,
+        )
+
+    def project_per_layer_inputs(
+        self,
+        inputs_embeds: torch.Tensor,
+        per_layer_inputs: torch.Tensor | None,
+    ) -> torch.Tensor | None:
+        """Project inputs_embeds and combine with per_layer_inputs.
+
+        Steps:
+        1. Project inputs_embeds: hidden_size → total_ple_dim
+        2. Scale by hidden_size^{-0.5}
+        3. Reshape to (num_tokens, num_layers, per_layer_dim)
+        4. Normalize with per_layer_projection_norm
+        5. Combine: (projection + per_layer_inputs) * 1/sqrt(2)
+        """
+        if self.per_layer_model_projection is None:
+            return None
+        assert self.per_layer_projection_norm is not None
+        per_layer_projection = self.per_layer_model_projection(inputs_embeds)
+        per_layer_projection = per_layer_projection * self.per_layer_projection_scale
+        per_layer_projection = per_layer_projection.reshape(
+            *inputs_embeds.shape[:-1],
+            self.config.num_hidden_layers,
+            self.hidden_size_per_layer_input,
+        )
+        per_layer_projection = self.per_layer_projection_norm(per_layer_projection)
+        if per_layer_inputs is None:
+            return per_layer_projection
+        return (per_layer_projection + per_layer_inputs) * self.per_layer_input_scale
+
+    def forward(
+        self,
+        input_ids: torch.Tensor | None,
+        positions: torch.Tensor,
+        inputs_embeds: torch.Tensor | None = None,
+        per_layer_inputs: torch.Tensor | None = None,
+        **kwargs,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        if inputs_embeds is not None:
+            hidden_states = inputs_embeds
+            per_layer_inputs = self.project_per_layer_inputs(
+                hidden_states, per_layer_inputs
+            )
+        else:
+            hidden_states = self.embed_input_ids(input_ids)
+            per_layer_embeds = self.get_per_layer_inputs(input_ids)
+            per_layer_inputs = self.project_per_layer_inputs(
+                hidden_states, per_layer_embeds
+            )
+
+        hidden_states = _run_decoder_layers(
+            self.decoder_layers,
+            self.layer_idx_start,
+            positions,
+            hidden_states,
+            per_layer_inputs,
+            **kwargs,
+        )
+        return hidden_states, per_layer_inputs
+
+
+@support_torch_compile(
+    enable_if=lambda vllm_config: vllm_config.cache_config.kv_sharing_fast_prefill
+)
+class Gemma4CrossDecoderLayers(nn.Module):
+    """Cross-decoder layers (YOCO second half, KV-shared)."""
+
+    def __init__(
+        self,
+        *,
+        vllm_config: VllmConfig,
+        prefix: str = "",
+        decoder_layers: list[Gemma4DecoderLayer],
+        layer_idx_start: int,
+    ):
+        super().__init__()
+        self.decoder_layers = decoder_layers
+        self.layer_idx_start = layer_idx_start
+
+    def forward(
+        self,
+        positions: torch.Tensor,
+        hidden_states: torch.Tensor,
+        per_layer_inputs: torch.Tensor | None = None,
+        **kwargs,
+    ) -> torch.Tensor:
+        return _run_decoder_layers(
+            self.decoder_layers,
+            self.layer_idx_start,
+            positions,
+            hidden_states,
+            per_layer_inputs,
+            **kwargs,
+        )
+
+
+@support_torch_compile(
+    enable_if=lambda vllm_config: not vllm_config.cache_config.kv_sharing_fast_prefill
+)
+class Gemma4Model(nn.Module, EagleModelMixin, SupportsQuant):
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
+        super().__init__()
+        config = _get_text_config(vllm_config.model_config.hf_config)
+        cache_config = vllm_config.cache_config
+        quant_config = vllm_config.quant_config
+        self.config = config
+        self.quant_config = quant_config
+        self.hf_to_vllm_mapper = _gemma4_layer_weights_mapper(config)
+
+        # PLE config values (default to 0 if not present — disables PLE)
+        self.hidden_size_per_layer_input = getattr(
+            config, "hidden_size_per_layer_input", 0
+        )
+        self.vocab_size_per_layer_input = getattr(
+            config, "vocab_size_per_layer_input", config.vocab_size
+        )
+
+        self.embed_tokens = VocabParallelEmbedding(
+            config.vocab_size,
+            config.hidden_size,
+            quant_config=quant_config,
+            prefix=f"{prefix}.embed_tokens",
+        )
+
+        # Per-Layer Embedding (PLE) components
+        self.embed_tokens_per_layer: VocabParallelEmbedding | None
+        self.per_layer_model_projection: ColumnParallelLinear | None
+        self.per_layer_projection_norm: RMSNorm | None
+        if (
+            self.hidden_size_per_layer_input is not None
+            and self.hidden_size_per_layer_input > 0
+        ):
+            total_ple_dim = self.hidden_size_per_layer_input * config.num_hidden_layers
+            self.embed_tokens_per_layer = VocabParallelEmbedding(
+                self.vocab_size_per_layer_input,
+                total_ple_dim,
+                quant_config=quant_config,
+                prefix=f"{prefix}.embed_tokens_per_layer",
+            )
+            # Scaled embedding factor (from config, not hardcoded)
+            # Register as buffer so it moves to GPU with the model
+            # and interacts correctly with torch.compile AOT caching.
+            self.register_buffer(
+                "embed_scale_per_layer",
+                torch.tensor(self.hidden_size_per_layer_input**0.5),
+                persistent=False,
+            )
+            # Projection: hidden_size → total_ple_dim
+            # ColumnParallelLinear with gather_output=True
+            self.per_layer_model_projection = ColumnParallelLinear(
+                config.hidden_size,
+                total_ple_dim,
+                bias=False,
+                gather_output=True,
+                return_bias=False,
+                quant_config=quant_config,
+                prefix=f"{prefix}.per_layer_model_projection",
+            )
+            # PLE projection norm: output = norm(x) * weight
+            self.per_layer_projection_norm = RMSNorm(
+                self.hidden_size_per_layer_input,
+                eps=config.rms_norm_eps,
+            )
+            # Scale factor for combining projection + per_layer_inputs
+            # Register as buffer so it moves to GPU with the model
+            # and interacts correctly with torch.compile AOT caching.
+            self.register_buffer(
+                "per_layer_input_scale",
+                torch.rsqrt(torch.tensor(2.0)),
+                persistent=False,
+            )
+            # Scaled projection: multiply output by hidden_size**-0.5.
+            # Register as buffer for GPU placement and torch.compile.
+            self.register_buffer(
+                "per_layer_projection_scale",
+                torch.tensor(config.hidden_size**-0.5),
+                persistent=False,
+            )
+        else:
+            self.embed_tokens_per_layer = None
+            self.embed_scale_per_layer = None
+            self.per_layer_model_projection = None
+            self.per_layer_projection_norm = None
+            self.per_layer_input_scale = None
+            self.per_layer_projection_scale = None
+
+        self.start_layer, self.end_layer, self.layers = make_layers(
+            config.num_hidden_layers,
+            lambda prefix: Gemma4DecoderLayer(
+                config,
+                cache_config=cache_config,
+                quant_config=quant_config,
+                prefix=prefix,
+            ),
+            prefix=f"{prefix}.layers",
+        )
+        # Final norm: output = norm(x) * weight
+        self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+
+        # Embedding scale = sqrt(hidden_size), cast to model dtype to avoid
+        # mixed-precision drift from bf16 * fp32 across deep stacks.
+        self.register_buffer(
+            "normalizer",
+            torch.tensor(
+                config.hidden_size**0.5,
+                dtype=vllm_config.model_config.dtype,
+            ),
+            persistent=False,
+        )
+
+        # --- You Only Cache Once (YOCO) split for fast prefill ---
+        first_kv_shared_layer_idx = config.num_hidden_layers - getattr(
+            config, "num_kv_shared_layers", 0
+        )
+
+        from vllm.compilation.backends import set_model_tag
+
+        # Layers 0..(K-1) are self-decoder layers in YOCO
+        with set_model_tag("self_decoder"):
+            self.self_decoder = Gemma4SelfDecoderLayers(
+                vllm_config=vllm_config,
+                prefix=f"{prefix}.self_decoder",
+                decoder_layers=self.layers[:first_kv_shared_layer_idx],
+                layer_idx_start=0,
+                embed_tokens=self.embed_tokens,
+                normalizer=self.normalizer,
+                embed_tokens_per_layer=getattr(self, "embed_tokens_per_layer", None),
+                embed_scale_per_layer=getattr(self, "embed_scale_per_layer", None),
+                per_layer_model_projection=getattr(
+                    self, "per_layer_model_projection", None
+                ),
+                per_layer_projection_norm=getattr(
+                    self, "per_layer_projection_norm", None
+                ),
+                per_layer_input_scale=getattr(self, "per_layer_input_scale", None),
+                per_layer_projection_scale=getattr(
+                    self, "per_layer_projection_scale", None
+                ),
+            )
+        # Layers K..(N-1) are cross-decoder layers in YOCO
+        with set_model_tag("cross_decoder"):
+            self.cross_decoder = Gemma4CrossDecoderLayers(
+                vllm_config=vllm_config,
+                prefix=f"{prefix}.cross_decoder",
+                decoder_layers=self.layers[first_kv_shared_layer_idx:],
+                layer_idx_start=first_kv_shared_layer_idx,
+            )
+
+        self.fast_prefill_enabled = cache_config.kv_sharing_fast_prefill
+
+        if self.fast_prefill_enabled:
+            # Allocate static buffers for CUDAGraph
+            max_num_tokens = vllm_config.scheduler_config.max_num_batched_tokens
+            device = next(self.parameters()).device
+            self.positions = torch.zeros(
+                max_num_tokens, dtype=torch.int64, device=device
+            )
+            self.hidden_states = torch.zeros(
+                (max_num_tokens, config.hidden_size),
+                dtype=vllm_config.model_config.dtype,
+                device=device,
+            )
+            if (
+                self.hidden_size_per_layer_input
+                and self.hidden_size_per_layer_input > 0
+            ):
+                self.per_layer_inputs = torch.zeros(
+                    (
+                        max_num_tokens,
+                        config.num_hidden_layers,
+                        self.hidden_size_per_layer_input,
+                    ),
+                    dtype=vllm_config.model_config.dtype,
+                    device=device,
+                )
+            else:
+                self.per_layer_inputs = None
+
+        # Custom factory that includes per_layer_inputs for PLE-enabled PP.
+        # per_layer_inputs has shape (batch, num_layers, per_layer_dim),
+        # which differs from the standard (batch, hidden_size) shape,
+        # so we can't use the default factory.
+        ple_dim = self.hidden_size_per_layer_input
+        num_layers = config.num_hidden_layers
+        hidden_size = config.hidden_size
+
+        def _make_empty_intermediate_tensors(
+            batch_size: int,
+            dtype: torch.dtype,
+            device: torch.device,
+        ) -> IntermediateTensors:
+            tensors: dict[str, torch.Tensor] = {
+                "hidden_states": torch.zeros(
+                    (batch_size, hidden_size),
+                    dtype=dtype,
+                    device=device,
+                ),
+            }
+            if ple_dim and ple_dim > 0:
+                tensors["per_layer_inputs"] = torch.zeros(
+                    (batch_size, num_layers, ple_dim),
+                    dtype=dtype,
+                    device=device,
+                )
+            return IntermediateTensors(tensors)
+
+        self.make_empty_intermediate_tensors = _make_empty_intermediate_tensors
+
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.self_decoder.embed_input_ids(input_ids)
+
+    def get_per_layer_inputs(self, input_ids: torch.Tensor) -> torch.Tensor | None:
+        """Get per-layer embeddings from embed_tokens_per_layer.
+
+        Returns:
+            Per-layer embeddings (num_tokens, num_layers,
+            hidden_size_per_layer_input)
+
+        """
+        return self.self_decoder.get_per_layer_inputs(input_ids)
+
+    def project_per_layer_inputs(
+        self,
+        inputs_embeds: torch.Tensor,
+        per_layer_inputs: torch.Tensor | None,
+    ) -> torch.Tensor | None:
+        """Project inputs_embeds and combine with per_layer_inputs.
+
+        Steps:
+        1. Project inputs_embeds: hidden_size → total_ple_dim
+        2. Scale by hidden_size^{-0.5}
+        3. Reshape to (num_tokens, num_layers, per_layer_dim)
+        4. Normalize with per_layer_projection_norm
+        5. Combine: (projection + per_layer_inputs) * 1/sqrt(2)
+        """
+        return self.self_decoder.project_per_layer_inputs(
+            inputs_embeds, per_layer_inputs
+        )
+
+    def fast_prefill_forward(
+        self,
+        input_ids: torch.Tensor | None,
+        positions: torch.Tensor,
+        inputs_embeds: torch.Tensor | None = None,
+        per_layer_inputs: torch.Tensor | None = None,
+        **kwargs,
+    ) -> torch.Tensor:
+        logits_indices_padded, num_logits_indices = None, None
+        attn_metadata = get_forward_context().attn_metadata
+
+        if attn_metadata is not None:
+            assert isinstance(attn_metadata, dict)
+            layer_attn_metadata = attn_metadata[
+                self.layers[-1].self_attn.attn.layer_name
+            ]
+            if isinstance(layer_attn_metadata, KVSharingFastPrefillMetadata):
+                logits_indices_padded = layer_attn_metadata.logits_indices_padded
+                num_logits_indices = layer_attn_metadata.num_logits_indices
+
+        batch_size = positions.size(0)
+        self.positions[:batch_size].copy_(positions)
+        self_decoder_hidden_states, per_layer_inputs = self.self_decoder(
+            input_ids=input_ids,
+            positions=self.positions[:batch_size],
+            inputs_embeds=inputs_embeds,
+            per_layer_inputs=per_layer_inputs,
+            **kwargs,
+        )
+
+        if logits_indices_padded is None:
+            logits_indices_padded = torch.arange(
+                batch_size,
+                dtype=positions.dtype,
+                device=positions.device,
+            )
+
+        # NOTE: Keep .clone() until fix in
+        # https://github.com/vllm-project/vllm/pull/22282
+        hidden_states = self_decoder_hidden_states.clone()
+
+        num_padded = logits_indices_padded.size(0)
+        self.positions[:num_padded].copy_(positions[logits_indices_padded])
+        self.hidden_states[:num_padded].copy_(
+            self_decoder_hidden_states[logits_indices_padded]
+        )
+        if self.per_layer_inputs is not None and per_layer_inputs is not None:
+            self.per_layer_inputs[:num_padded].copy_(
+                per_layer_inputs[logits_indices_padded]
+            )
+
+        # Update batch_descriptor so the cross-decoder's piecewise
+        # CUDAGraphWrapper dispatches to the correct (reduced) batch size.
+        forward_context = get_forward_context()
+        orig_batch_desc = forward_context.batch_descriptor
+        if orig_batch_desc is not None:
+            forward_context.batch_descriptor = replace(
+                orig_batch_desc, num_tokens=num_padded
+            )
+
+        cross_per_layer = (
+            self.per_layer_inputs[:num_padded]
+            if self.per_layer_inputs is not None
+            else None
+        )
+        cross_hidden_states = self.cross_decoder(
+            self.positions[:num_padded],
+            self.hidden_states[:num_padded],
+            cross_per_layer,
+            **kwargs,
+        )
+
+        # Restore the original batch_descriptor
+        forward_context.batch_descriptor = orig_batch_desc
+
+        if num_logits_indices is not None:
+            assert num_logits_indices > 0
+            hidden_states[logits_indices_padded[:num_logits_indices]] = (
+                cross_hidden_states[:num_logits_indices]
+            )
+        else:
+            hidden_states = cross_hidden_states
+
+        return hidden_states
+
+    def forward(
+        self,
+        input_ids: torch.Tensor | None,
+        positions: torch.Tensor,
+        intermediate_tensors: IntermediateTensors | None,
+        inputs_embeds: torch.Tensor | None = None,
+        per_layer_inputs: torch.Tensor | None = None,
+        **kwargs,
+    ) -> torch.Tensor | IntermediateTensors | tuple[torch.Tensor, list[torch.Tensor]]:
+        if self.fast_prefill_enabled:
+            hidden_states = self.fast_prefill_forward(
+                input_ids,
+                positions,
+                inputs_embeds,
+                per_layer_inputs,
+                **kwargs,
+            )
+            hidden_states = self.norm(hidden_states)
+            return hidden_states
+
+        # Normal (non-fast-prefill) path with PP support
+        if get_pp_group().is_first_rank:
+            if inputs_embeds is not None:
+                hidden_states = inputs_embeds
+                # When called from the multimodal wrapper, raw PLE
+                # embeddings are pre-computed and passed explicitly.
+                # Project them through per_layer_model_projection.
+                per_layer_inputs = self.project_per_layer_inputs(
+                    hidden_states, per_layer_inputs
+                )
+            else:
+                hidden_states = self.embed_input_ids(input_ids)
+                # Compute per-layer inputs for PLE
+                per_layer_embeds = self.get_per_layer_inputs(input_ids)
+                per_layer_inputs = self.project_per_layer_inputs(
+                    hidden_states, per_layer_embeds
+                )
+        else:
+            assert intermediate_tensors is not None
+            hidden_states = intermediate_tensors["hidden_states"]
+            if per_layer_inputs is not None:
+                per_layer_inputs = intermediate_tensors["per_layer_inputs"]
+        residual = None
+        aux_hidden_states = self._maybe_add_hidden_state([], 0, hidden_states, residual)
+        for layer_idx, layer in enumerate(
+            islice(self.layers, self.start_layer, self.end_layer)
+        ):
+            # Extract the per-layer embedding for this specific layer
+            if per_layer_inputs is not None:
+                actual_layer_idx = self.start_layer + layer_idx
+                layer_per_input = per_layer_inputs[
+                    :, actual_layer_idx, :
+                ]  # (num_tokens, per_layer_dim)
+            else:
+                layer_per_input = None
+            hidden_states, residual = layer(
+                positions,
+                hidden_states,
+                residual,
+                per_layer_input=layer_per_input,
+                **kwargs,
+            )
+            self._maybe_add_hidden_state(
+                aux_hidden_states, layer_idx + 1, hidden_states, residual
+            )
+        if not get_pp_group().is_last_rank:
+            tensors: dict[str, torch.Tensor] = {
+                "hidden_states": hidden_states,
+            }
+            if per_layer_inputs is not None:
+                tensors["per_layer_inputs"] = per_layer_inputs
+            return IntermediateTensors(tensors)
+        # Gemma4 incorporates residual into hidden_states directly
+        # Apply norm without residual fusion when possible.
+        if residual is None:
+            hidden_states = self.norm(hidden_states)
+        else:
+            hidden_states, _ = self.norm(hidden_states, residual)
+
+        if len(aux_hidden_states) > 0:
+            return hidden_states, aux_hidden_states
+        return hidden_states
+
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+        loader = AutoWeightsLoader(self)
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
+
+
+class Gemma4ForCausalLM(
+    nn.Module, SupportsLoRA, SupportsPP, MixtureOfExperts, SupportsEagle3
+):
+    hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_substr={
+            # Multimodal weights are handled by the multimodal wrapper.
+            "audio_tower.": None,
+            "vision_tower.": None,
+            "embed_audio.": None,
+            "embed_vision.": None,
+        },
+        orig_to_new_prefix={
+            # Gemma4ForConditionalGeneration already loads the text stack
+            # from `model.language_model.*`. We reuse that same checkpoint
+            # and adapter naming for the text-only Gemma4ForCausalLM path,
+            # so LoRA keys from the conditional wrapper map onto `model.*`.
+            "model.language_model.": "model.",
+        },
+    )
+    # KV-shared layers only have q_proj, so qkv_proj packing applies to
+    # the other layers.
+    packed_modules_mapping = {
+        "qkv_proj": [
+            "q_proj",
+            "k_proj",
+            "v_proj",
+        ],
+        "gate_up_proj": [
+            "gate_proj",
+            "up_proj",
+        ],
+    }
+
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
+        config = _get_text_config(vllm_config.model_config.hf_config)
+        quant_config = vllm_config.quant_config
+
+        super().__init__()
+        self.config = config
+        self.quant_config = quant_config
+        self.model = Gemma4Model(
+            vllm_config=vllm_config,
+            prefix=maybe_prefix(prefix, "model"),
+        )
+
+        self.lm_head = ParallelLMHead(
+            config.vocab_size,
+            config.hidden_size,
+            quant_config=quant_config,
+            prefix=maybe_prefix(prefix, "lm_head"),
+        )
+        if config.tie_word_embeddings:
+            self.lm_head = self.lm_head.tie_weights(self.model.embed_tokens)
+
+        self.logits_processor = LogitsProcessor(
+            config.vocab_size,
+            soft_cap=getattr(config, "final_logit_softcapping", None),
+        )
+        self.make_empty_intermediate_tensors = (
+            self.model.make_empty_intermediate_tensors
+        )
+
+        # --- MixtureOfExperts protocol ---
+        self.moe_layers: list[nn.Module] = [
+            layer.experts
+            for layer in self.model.layers
+            if not isinstance(layer, PPMissingLayer) and layer.experts is not None
+        ]
+        self.num_moe_layers = len(self.moe_layers)
+
+        num_experts = config.num_experts if self.num_moe_layers else 0
+        self.num_logical_experts = num_experts
+        self.num_physical_experts = num_experts
+        self.num_local_physical_experts = num_experts
+        self.num_routed_experts = num_experts
+
+        self.num_expert_groups = 1
+        self.num_shared_experts = 0
+        self.num_redundant_experts = 0
+
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.model.embed_input_ids(input_ids)
+
+    def forward(
+        self,
+        input_ids: torch.Tensor,
+        positions: torch.Tensor,
+        intermediate_tensors: IntermediateTensors | None = None,
+        inputs_embeds: torch.Tensor | None = None,
+        **kwargs,
+    ) -> torch.Tensor | IntermediateTensors | tuple[torch.Tensor, list[torch.Tensor]]:
+        hidden_states = self.model(
+            input_ids, positions, intermediate_tensors, inputs_embeds, **kwargs
+        )
+        return hidden_states
+
+    def compute_logits(
+        self,
+        hidden_states: torch.Tensor,
+    ) -> torch.Tensor | None:
+        return self.logits_processor(self.lm_head, hidden_states)
+
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+        loader = AutoWeightsLoader(self)
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)

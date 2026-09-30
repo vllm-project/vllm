@@ -1,11 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from __future__ import annotations
+
 import dataclasses
 import glob
 import os
 import time
 from collections.abc import Generator, Iterable
-from typing import cast
+from typing import TYPE_CHECKING, cast
 
 import torch
 from torch import nn
@@ -25,6 +27,7 @@ from vllm.model_executor.model_loader.weight_utils import (
     fastsafetensors_weights_iterator,
     filter_duplicate_safetensors_files,
     filter_files_not_needed_for_inference,
+    filter_mm_encoder_only_safetensors_files,
     get_quant_config,
     instanttensor_weights_iterator,
     maybe_download_from_modelscope,
@@ -32,10 +35,14 @@ from vllm.model_executor.model_loader.weight_utils import (
     multi_thread_safetensors_weights_iterator,
     np_cache_weights_iterator,
     pt_weights_iterator,
+    resolve_mm_encoder_only_lm_prefixes,
     safetensors_weights_iterator,
 )
 from vllm.tracing import instrument
 from vllm.transformers_utils.repo_utils import list_filtered_repo_files
+
+if TYPE_CHECKING:
+    from vllm.model_executor.models.utils import WeightsMapper
 
 logger = init_logger(__name__)
 
@@ -74,9 +81,21 @@ class DefaultModelLoader(BaseModelLoader):
     def __init__(self, load_config: LoadConfig):
         super().__init__(load_config)
         self.local_expert_ids: set[int] | None = None
+        # Set in load_weights when --mm-encoder-only; used to drop LM-only shards.
+        self._encoder_only_lm_prefixes: tuple[str, ...] | None = None
+        self._encoder_only_weights_mapper: WeightsMapper | None = None
 
         extra_config = load_config.model_loader_extra_config
-        allowed_keys = {"enable_multithread_load", "num_threads"}
+        if not isinstance(extra_config, dict):
+            raise ValueError(
+                f"model_loader_extra_config must be a dict for load format "
+                f"{load_config.load_format}, got {type(extra_config).__name__}"
+            )
+        allowed_keys = {
+            "enable_multithread_load",
+            "num_threads",
+            "enable_weights_track",
+        }
         unexpected_keys = set(extra_config.keys()) - allowed_keys
 
         if unexpected_keys:
@@ -86,6 +105,36 @@ class DefaultModelLoader(BaseModelLoader):
                 f"{unexpected_keys}"
             )
 
+        enable_multithread_load = extra_config.get("enable_multithread_load", False)
+        if not isinstance(enable_multithread_load, bool):
+            raise ValueError(
+                f"enable_multithread_load must be a bool, got "
+                f"{type(enable_multithread_load).__name__}"
+            )
+        num_threads = extra_config.get("num_threads")
+        if num_threads is not None and not (
+            isinstance(num_threads, int) and num_threads > 0
+        ):
+            raise ValueError(
+                f"num_threads must be a positive integer, got {num_threads!r}"
+            )
+
+        self.enable_weights_track: bool | None = extra_config.get(
+            "enable_weights_track", None
+        )
+
+        # The multi-thread loader ignores safetensors_load_strategy, so reject
+        # the combination instead of silently dropping the requested strategy.
+        if extra_config.get("enable_multithread_load") and (
+            load_config.safetensors_load_strategy not in (None, "lazy")
+        ):
+            raise ValueError(
+                "enable_multithread_load does not support "
+                "safetensors_load_strategy="
+                f"{load_config.safetensors_load_strategy!r}; the multi-thread "
+                "loader only implements the default lazy strategy."
+            )
+
     def _prepare_weights(
         self,
         model_name_or_path: str,
@@ -93,7 +142,7 @@ class DefaultModelLoader(BaseModelLoader):
         revision: str | None,
         fall_back_to_pt: bool,
         allow_patterns_overrides: list[str] | None,
-    ) -> tuple[str, list[str], bool]:
+    ) -> tuple[str, list[str], bool, str]:
         """Prepare weights for the model.
 
         If the model is not local, it will be downloaded."""
@@ -144,7 +193,9 @@ class DefaultModelLoader(BaseModelLoader):
         else:
             raise ValueError(f"Unknown load_format: {load_format}")
 
-        if fall_back_to_pt:
+        # Don't fall back to .pt for explicit safetensors formats; otherwise a
+        # .pt file is matched and later opened as safetensors.
+        if fall_back_to_pt and not use_safetensors:
             allow_patterns += ["*.pt"]
 
         if allow_patterns_overrides is not None:
@@ -169,7 +220,7 @@ class DefaultModelLoader(BaseModelLoader):
         for pattern in allow_patterns:
             hf_weights_files += glob.glob(os.path.join(hf_folder, pattern))
             if len(hf_weights_files) > 0:
-                if pattern == "*.safetensors":
+                if pattern.endswith(".safetensors"):
                     use_safetensors = True
                 break
 
@@ -179,7 +230,7 @@ class DefaultModelLoader(BaseModelLoader):
             # safetensors file. Using both breaks.
             # Here, we download the `model.safetensors.index.json` and filter
             # any files not found in the index.
-            if not is_local:
+            if not is_local and len(hf_weights_files) > 1:
                 download_safetensors_index_file_from_hf(
                     model_name_or_path,
                     index_file,
@@ -198,20 +249,40 @@ class DefaultModelLoader(BaseModelLoader):
                 f"Cannot find any model weights with `{model_name_or_path}`"
             )
 
-        return hf_folder, hf_weights_files, use_safetensors
+        return hf_folder, hf_weights_files, use_safetensors, index_file
 
     def _get_weights_iterator(
-        self, source: "Source"
+        self, source: Source
     ) -> Generator[tuple[str, torch.Tensor], None, None]:
         """Get an iterator for the model weights based on the load format."""
         extra_config = self.load_config.model_loader_extra_config
-        hf_folder, hf_weights_files, use_safetensors = self._prepare_weights(
-            source.model_or_path,
-            source.subfolder,
-            source.revision,
-            source.fall_back_to_pt,
-            source.allow_patterns_overrides,
+        hf_folder, hf_weights_files, use_safetensors, index_file = (
+            self._prepare_weights(
+                source.model_or_path,
+                source.subfolder,
+                source.revision,
+                source.fall_back_to_pt,
+                source.allow_patterns_overrides,
+            )
         )
+        if (
+            self._encoder_only_lm_prefixes is not None
+            and use_safetensors
+            and hf_weights_files
+        ):
+            hf_weights_files = filter_mm_encoder_only_safetensors_files(
+                hf_weights_files,
+                hf_folder,
+                index_file,
+                self._encoder_only_lm_prefixes,
+                weights_mapper=self._encoder_only_weights_mapper,
+            )
+            if not hf_weights_files:
+                raise RuntimeError(
+                    "mm-encoder-only shard filter removed all weight files for "
+                    f"`{source.model_or_path}`; check language_model prefixes "
+                    f"{self._encoder_only_lm_prefixes}"
+                )
         if self.load_config.load_format == "npcache":
             # Currently np_cache only support *.bin checkpoints
             assert use_safetensors is False
@@ -248,6 +319,12 @@ class DefaultModelLoader(BaseModelLoader):
                         self.load_config.use_tqdm_on_load,
                         self.load_config.safetensors_load_strategy,
                         local_expert_ids=self.local_expert_ids,
+                        safetensors_prefetch_num_threads=(
+                            self.load_config.safetensors_prefetch_num_threads
+                        ),
+                        safetensors_prefetch_block_size=(
+                            self.load_config.safetensors_prefetch_block_size
+                        ),
                     )
         else:
             if extra_config.get("enable_multithread_load"):
@@ -299,6 +376,29 @@ class DefaultModelLoader(BaseModelLoader):
             revision=model_config.revision,
             fall_back_to_pt=True,
             allow_patterns_overrides=None,
+        )
+
+    def _init_mm_encoder_only_weight_filter(
+        self, model: nn.Module, model_config: ModelConfig
+    ) -> None:
+        """Skip pure language-model safetensors shards under --mm-encoder-only."""
+        mm_config = model_config.multimodal_config
+        if mm_config is None or not mm_config.mm_encoder_only:
+            self._encoder_only_lm_prefixes = None
+            self._encoder_only_weights_mapper = None
+            return
+
+        # Derive from _language_model_names; fail-closed on shared HF roots
+        # (Molmo/Phi-4-MM/Muse). Qwen nested/flat keys classified via mapper.
+        weights_mapper = cast(
+            "WeightsMapper | None", getattr(model, "hf_to_vllm_mapper", None)
+        )
+        self._encoder_only_lm_prefixes = resolve_mm_encoder_only_lm_prefixes(
+            getattr(model, "_language_model_names", None),
+            weights_mapper=weights_mapper,
+        )
+        self._encoder_only_weights_mapper = (
+            weights_mapper if self._encoder_only_lm_prefixes is not None else None
         )
 
     def _init_ep_weight_filter(self, model_config: ModelConfig) -> None:
@@ -376,19 +476,46 @@ class DefaultModelLoader(BaseModelLoader):
                 self.load_config.safetensors_load_strategy = "torchao"
 
         self._init_ep_weight_filter(model_config)
+        self._init_mm_encoder_only_weight_filter(model, model_config)
 
-        weights_to_load = {name for name, _ in model.named_parameters()}
         loaded_weights = model.load_weights(self.get_all_weights(model_config, model))
 
         self.counter_after_loading_weights = time.perf_counter()
         logger.info_once(
             "Loading weights took %.2f seconds",
             self.counter_after_loading_weights - self.counter_before_loading_weights,
-            scope="local",
         )
         # We only enable strict check for non-quantized models
-        # that have loaded weights tracking currently.
-        if model_config.quantization is None and loaded_weights is not None:
+        # that have loaded weights tracking by default.
+        default_enable_weights_track = (
+            model_config.quantization is None and loaded_weights is not None
+        )
+        enable_weights_track = (
+            self.enable_weights_track
+            if self.enable_weights_track is not None
+            else default_enable_weights_track
+        )
+        if enable_weights_track:
+            self.track_weights_loading(model, loaded_weights)
+
+    def track_weights_loading(
+        self, model: nn.Module, loaded_weights: set[str] | None
+    ) -> None:
+        weights_to_load = {name for name, _ in model.named_parameters()}
+        if loaded_weights is not None:
+            # ignore online quantization scales
+            for name, module in model.named_modules():
+                quant_method = getattr(module, "quant_method", None)
+                has_online_quant = getattr(quant_method, "uses_meta_device", False)
+                has_postprocess_quant = getattr(
+                    quant_method, "process_weights_after_loading", None
+                )
+                # ignore kv_cache scale and online quant scale,
+                # which can be missing in checkpoints
+                if has_online_quant or has_postprocess_quant:
+                    for param_name, _ in module.named_parameters():
+                        full_name = f"{name}.{param_name}" if name else param_name
+                        loaded_weights.add(full_name)
             weights_not_loaded = weights_to_load - loaded_weights
             if weights_not_loaded:
                 raise ValueError(

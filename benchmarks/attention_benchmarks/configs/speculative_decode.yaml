@@ -49,8 +49,6 @@ backends:
 
 # Benchmark settings
 device: "cuda:0"
-repeats: 10  # More repeats for statistical significance
-warmup_iters: 5
 profile_memory: false
 
 # Test these threshold values for optimization

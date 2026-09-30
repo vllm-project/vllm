@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Argument parsing utilities for vLLM."""
 
+import argparse
 import json
 import sys
 import textwrap
@@ -15,7 +16,7 @@ from argparse import (
     _ArgumentGroup,
 )
 from collections import defaultdict
-from typing import Any
+from typing import Any, NoReturn
 
 import regex as re
 import yaml
@@ -25,20 +26,89 @@ from vllm.logger import init_logger
 logger = init_logger(__name__)
 
 
+def human_readable_int(value: str) -> int:
+    """Parse human-readable integers like '1k', '2M', etc.
+    Including decimal values with decimal multipliers.
+
+    Examples:
+    - '1k' -> 1,000
+    - '1K' -> 1,024
+    - '25.6k' -> 25,600
+
+    """
+    value = value.strip()
+
+    match = re.fullmatch(r"(\d+(?:\.\d+)?)([kKmMgGtT])", value)
+    if match:
+        decimal_multiplier = {
+            "k": 10**3,
+            "m": 10**6,
+            "g": 10**9,
+            "t": 10**12,
+        }
+        binary_multiplier = {
+            "K": 2**10,
+            "M": 2**20,
+            "G": 2**30,
+            "T": 2**40,
+        }
+
+        number, suffix = match.groups()
+        if suffix in decimal_multiplier:
+            mult = decimal_multiplier[suffix]
+            return int(float(number) * mult)
+        elif suffix in binary_multiplier:
+            mult = binary_multiplier[suffix]
+            # Do not allow decimals with binary multipliers
+            try:
+                return int(number) * mult
+            except ValueError as e:
+                raise argparse.ArgumentTypeError(
+                    "Decimals are not allowed "
+                    f"with binary suffixes like {suffix}. Did you mean to use "
+                    f"{number}{suffix.lower()} instead?"
+                ) from e
+
+    # Regular plain number.
+    return int(value)
+
+
+def human_readable_int_or_auto(value: str) -> int:
+    """Parse human-readable integers like '1k', '2M', etc.
+    Including decimal values with decimal multipliers.
+    Also accepts -1 or 'auto' as a special value for auto-detection.
+
+    Examples:
+    - '1k' -> 1,000
+    - '1K' -> 1,024
+    - '25.6k' -> 25,600
+    - '-1' or 'auto' -> -1 (special value for auto-detection)
+
+    """
+    value = value.strip()
+
+    if value == "-1" or value.lower() == "auto":
+        return -1
+
+    return human_readable_int(value)
+
+
+def summary_line(description: str | None) -> str:
+    """Return the first paragraph of a config docstring as a single line."""
+    return " ".join((description or "").split("\n\n", 1)[0].split())
+
+
 class SortedHelpFormatter(ArgumentDefaultsHelpFormatter, RawDescriptionHelpFormatter):
     """SortedHelpFormatter that sorts arguments by their option strings."""
 
     def _split_lines(self, text, width):
-        """
-        1. Sentences split across lines have their single newlines removed.
-        2. Paragraphs and explicit newlines are split into separate lines.
+        """1. Sentences split across lines have their single newlines removed.
+        2. Paragraphs and lists are split into separate lines.
         3. Each line is wrapped to the specified width (width of terminal).
         """
-        # The patterns also include whitespace after the newline
-        single_newline = re.compile(r"(?<!\n)\n(?!\n)\s*")
-        multiple_newlines = re.compile(r"\n{2,}\s*")
-        text = single_newline.sub(" ", text)
-        lines = re.split(multiple_newlines, text)
+        # The pattern also includes whitespace after the newline
+        newlines_to_remove = re.compile(r"(?<!\n)\n(?!\n)(?!\s*(-|\*|\+|\d+\.))\s*")
+        lines = newlines_to_remove.sub(" ", text).splitlines()
         return sum([textwrap.wrap(line, width) for line in lines], [])
 
     def add_arguments(self, actions):
@@ -68,6 +138,22 @@ class FlexibleArgumentParser(ArgumentParser):
         # Pop kwarg "add_json_tip" to control whether to add the JSON tip
         self.add_json_tip = kwargs.pop("add_json_tip", True)
         super().__init__(*args, **kwargs)
+        self._show_serve_task_hint = False
+
+    def error(self, message: str) -> NoReturn:
+        if (
+            (self.prog.endswith(" serve") or self._show_serve_task_hint)
+            and message.startswith("unrecognized arguments:")
+            and re.search(r"(^|\s)--task(=|\s|$)", message)
+        ):
+            message += (
+                "\n\nHint: --task is not a vllm serve option. "
+                "For embedding, reranking, or reward models, use "
+                "--runner pooling. To adapt a generative model for pooling, "
+                "also use --convert embed, --convert classify, or "
+                "--convert reward."
+            )
+        super().error(message)
 
     if sys.version_info < (3, 13):
         # Enable the deprecated kwarg for Python 3.12 and below
@@ -122,7 +208,7 @@ class FlexibleArgumentParser(ArgumentParser):
             for group in self._action_groups:
                 if group.title and group.title.lower() == search_keyword:
                     formatter.start_section(group.title)
-                    formatter.add_text(group.description)
+                    formatter.add_text(summary_line(group.description))
                     formatter.add_arguments(group._group_actions)
                     formatter.end_section()
                     formatter.add_text(self._json_tip)
@@ -161,12 +247,18 @@ class FlexibleArgumentParser(ArgumentParser):
         # positionals, optionals and user-defined groups
         formatter.start_section("Config Groups")
         config_groups = ""
-        for group in self._action_groups:
-            if not group._group_actions:
-                continue
-            title = group.title
-            description = group.description or ""
-            config_groups += f"{title: <24}{description}\n"
+        groups = [g for g in self._action_groups if g._group_actions]
+        titles = [g.title or "" for g in groups]
+        title_width = max((len(title) for title in titles), default=0) + 1
+        width = max(formatter._width - formatter._current_indent, title_width + 20)
+        for title, group in zip(titles, groups):
+            lines = textwrap.wrap(
+                summary_line(group.description),
+                width,
+                initial_indent=f"{title: <{title_width}}",
+                subsequent_indent=" " * title_width,
+            )
+            config_groups += ("\n".join(lines) or title) + "\n"
         formatter.add_text(config_groups)
         formatter.end_section()
 
@@ -183,6 +275,9 @@ class FlexibleArgumentParser(ArgumentParser):
     ):
         if args is None:
             args = sys.argv[1:]
+        self._show_serve_task_hint = args[:1] == ["serve"] and any(
+            re.match(r"^--task(=.+|$)", arg) for arg in args[1:]
+        )
 
         if args and args[0] == "serve":
             # Check for --model in command line arguments first
@@ -194,7 +289,7 @@ class FlexibleArgumentParser(ArgumentParser):
                     "With `vllm serve`, you should provide the model as a "
                     "positional argument or in a config file instead of via "
                     "the `--model` option. "
-                    "The `--model` option will be removed in v0.13."
+                    "The `--model` option will be removed in a future version."
                 )
 
                 if args[model_idx] == "--model":
@@ -340,7 +435,12 @@ class FlexibleArgumentParser(ArgumentParser):
                 try:
                     value = json.loads(value_str)
                 except json.decoder.JSONDecodeError:
-                    value = value_str
+                    # Support human-readable suffixes (e.g. 1k, 80g) for
+                    # dotted config args like --config.field 80g
+                    try:
+                        value = human_readable_int(value_str)  # type: ignore[assignment]
+                    except (ValueError, ArgumentTypeError):
+                        value = value_str
 
                 # Merge all values with the same key into a single dict
                 arg_dict = create_nested_dict(keys, value)
@@ -378,7 +478,7 @@ class FlexibleArgumentParser(ArgumentParser):
         The arguments in config file will be inserted between
         the argument list.
 
-        example:
+        Example:
         ```yaml
             port: 12323
             tensor-parallel-size: 4
@@ -404,6 +504,7 @@ class FlexibleArgumentParser(ArgumentParser):
         Please note how the config args are inserted after the sub command.
         this way the order of priorities is maintained when these are args
         parsed by super().
+
         """
         assert args.count("--config") <= 1, "More than one config file specified!"
 
@@ -418,7 +519,7 @@ class FlexibleArgumentParser(ArgumentParser):
         config_args = self.load_config_file(file_path)
 
         # 0th index might be the sub command {serve,chat,complete,...}
-        # optionally followed by model_tag (only for serve)
+        # optionally followed by model_tag (serve or snapshot create)
         # followed by config args
         # followed by rest of cli args.
         # maintaining this order will enforce the precedence
@@ -426,8 +527,11 @@ class FlexibleArgumentParser(ArgumentParser):
         if args[0].startswith("-"):
             # No sub command (e.g., api_server entry point)
             args = config_args + args[0:index] + args[index + 2 :]
-        elif args[0] == "serve":
-            model_in_cli = len(args) > 1 and not args[1].startswith("-")
+        elif args[0] == "serve" or args[:2] == ["snapshot", "create"]:
+            model_index = 1 if args[0] == "serve" else 2
+            model_in_cli = len(args) > model_index and not args[model_index].startswith(
+                "-"
+            )
             model_in_config = any(arg == "--model" for arg in config_args)
 
             if not model_in_cli and not model_in_config:
@@ -439,15 +543,19 @@ class FlexibleArgumentParser(ArgumentParser):
             if model_in_cli:
                 # Model specified as positional arg, keep CLI version
                 args = (
-                    [args[0]]
-                    + [args[1]]
+                    args[: model_index + 1]
                     + config_args
-                    + args[2:index]
+                    + args[model_index + 1 : index]
                     + args[index + 2 :]
                 )
             else:
                 # No model in CLI, use config if available
-                args = [args[0]] + config_args + args[1:index] + args[index + 2 :]
+                args = (
+                    args[:model_index]
+                    + config_args
+                    + args[model_index:index]
+                    + args[index + 2 :]
+                )
         else:
             args = [args[0]] + config_args + args[1:index] + args[index + 2 :]
 
@@ -504,6 +612,8 @@ class FlexibleArgumentParser(ArgumentParser):
             if isinstance(value, bool):
                 if value:
                     processed_args.append("--" + key)
+                elif (no_key := f"--no-{key}") in self._option_string_actions:
+                    processed_args.append(no_key)
             elif isinstance(value, list):
                 if value:
                     processed_args.append("--" + key)

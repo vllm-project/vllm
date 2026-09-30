@@ -20,8 +20,8 @@ import torch.nn as nn
 # Import prefetch_ops to register custom ops at module load time
 import vllm.model_executor.offloader.prefetch_ops  # noqa: F401
 from vllm.logger import init_logger
-from vllm.model_executor.offloader.base import BaseOffloader
-from vllm.utils.platform_utils import is_pin_memory_available
+from vllm.model_executor.offloader.base import BaseOffloader, should_pin_memory
+from vllm.utils.torch_utils import get_dtype_size
 
 logger = init_logger(__name__)
 
@@ -54,7 +54,7 @@ class ParamInfo:
         numel = 1
         for dim in self.shape:
             numel *= dim
-        return numel * torch.finfo(self.dtype).bits // 8
+        return numel * get_dtype_size(self.dtype)
 
 
 class StaticBufferPool:
@@ -124,6 +124,21 @@ class StaticBufferPool:
         return self._buffers[key][slot_idx % self.slot_capacity]
 
 
+def _get_next_prefetch_index(
+    index: int,
+    prefetch_step: int,
+    module_count: int,
+) -> int:
+    """Return a refill target that preserves static-buffer slot ownership."""
+    next_index = (index + prefetch_step) % module_count
+    if (
+        prefetch_step < module_count
+        and next_index % prefetch_step != index % prefetch_step
+    ):
+        next_index = index % prefetch_step
+    return next_index
+
+
 class PrefetchOffloader(BaseOffloader):
     """Prefetching-based offloader with group-based layer selection.
 
@@ -136,6 +151,7 @@ class PrefetchOffloader(BaseOffloader):
         num_in_group: Offload this many layers per group (last N of each group).
         prefetch_step: Number of layers to prefetch ahead.
         mode: Offload mode ("cpu" is currently supported).
+
     """
 
     def __init__(
@@ -163,11 +179,15 @@ class PrefetchOffloader(BaseOffloader):
     def wrap_modules(
         self,
         modules_generator: Generator[nn.Module, None, None],
+        prefix: str = "",
     ) -> list[nn.Module]:
         """Wrap modules with prefetch offloading logic."""
         assert len(self.module_offloaders) == 0, (
             "wrap_modules should only be called once"
         )
+
+        if prefix:
+            prefix = f"{prefix}."
 
         all_modules = []
         offload_modules = []
@@ -182,7 +202,9 @@ class PrefetchOffloader(BaseOffloader):
                     whitelist = [
                         name
                         for name, _ in module.named_parameters()
-                        if any(f".{p}." in f".{name}." for p in self.offload_params)
+                        if any(
+                            f".{p}." in f".{prefix}{name}." for p in self.offload_params
+                        )
                     ]
                 else:
                     whitelist = [name for name, _ in module.named_parameters()]
@@ -225,7 +247,11 @@ class PrefetchOffloader(BaseOffloader):
 
             # Start prefetch for next layer (circular)
             # mutates_args on output_tensor creates ordering dependency
-            next_index = (index + self.prefetch_step) % len(self.module_offloaders)
+            next_index = _get_next_prefetch_index(
+                index,
+                self.prefetch_step,
+                len(self.module_offloaders),
+            )
             # Handle tuple output (e.g., (hidden_states, residual))
             if isinstance(output, tuple):
                 torch.ops.vllm.start_prefetch(output[0], next_index)
@@ -528,7 +554,7 @@ class _ModuleOffloader:
                 gpu_buffer = offloader._gpu_buffer
                 assert cpu_storage is not None, "CPU storage not initialized"
                 assert gpu_buffer is not None, "GPU buffer not assigned"
-                assert not is_pin_memory_available() or cpu_storage.is_pinned(), (
+                assert not should_pin_memory() or cpu_storage.is_pinned(), (
                     f"CPU storage for {name} is not pinned! "
                     "non_blocking=True H2D copy from non-pinned memory "
                     "causes stream synchronization that breaks "
@@ -629,7 +655,7 @@ class _CpuParamOffloader(_BaseParamOffloader):
         original GPU tensor is garbage collected.
         """
         param = self._param
-        pin_memory = is_pin_memory_available()
+        pin_memory = should_pin_memory()
 
         # Create pinned CPU storage and copy current GPU data
         self._cpu_storage = torch.empty_strided(
@@ -666,7 +692,7 @@ class _CpuParamOffloader(_BaseParamOffloader):
         param = self._param
 
         if param.data.device.type == "cpu":
-            if is_pin_memory_available() and not param.data.is_pinned():
+            if should_pin_memory() and not param.data.is_pinned():
                 pinned = torch.empty_strided(
                     size=param.data.size(),
                     stride=param.data.stride(),

@@ -29,7 +29,7 @@ The following parameters are supported, which must be added as extra parameters:
 - `grammar`: the output will follow the context free grammar.
 - `structural_tag`: Follow a JSON schema within a set of specified tags within the generated text.
 
-You can see the complete list of supported parameters on the [OpenAI-Compatible Server](../serving/openai_compatible_server.md) page.
+You can see the complete list of supported parameters on the [OpenAI-Compatible Server](../serving/online_serving/openai_compatible_server.md) page.
 
 Structured outputs are supported by default in the OpenAI-Compatible Server. You
 may choose to specify the backend to use by setting the
@@ -165,7 +165,7 @@ As an example, we can use to define a specific format of simplified SQL queries:
     print(completion.choices[0].message.content)
     ```
 
-See also: [full example](../examples/online_serving/structured_outputs.md)
+See also: [full example](../../examples/features/structured_outputs/README.md)
 
 ## Reasoning Outputs
 
@@ -208,7 +208,7 @@ Note that you can use reasoning with any provided structured outputs feature. Th
     print("content: ", completion.choices[0].message.content)
     ```
 
-See also: [full example](../examples/online_serving/structured_outputs.md)
+See also: [full example](../../examples/features/structured_outputs/README.md)
 
 !!! note
     When using Qwen3 Coder models with reasoning enabled, structured outputs might become disabled if the reasoning content does not get parsed into the `reasoning` field separately (v0.11.2+).
@@ -304,7 +304,7 @@ Step #2: explanation="Next, let's isolate 'x' by dividing both sides of the equa
 Answer: x = -29/8
 ```
 
-An example of using `structural_tag` can be found here: [examples/online_serving/structured_outputs](../../examples/online_serving/structured_outputs)
+An example of using `structural_tag` can be found here: [examples/features/structured_outputs](../../examples/features/structured_outputs/README.md)
 
 ## Offline Inference
 
@@ -339,4 +339,4 @@ shown below:
     print(outputs[0].outputs[0].text)
     ```
 
-See also: [full example](../examples/online_serving/structured_outputs.md)
+See also: [full example](../../examples/features/structured_outputs/structured_outputs_offline.py)

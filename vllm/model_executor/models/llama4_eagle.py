@@ -17,6 +17,7 @@
 # limitations under the License.
 
 from collections.abc import Iterable
+from typing import TYPE_CHECKING
 
 import torch
 import torch.nn as nn
@@ -32,18 +33,46 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
-from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.llama4 import Llama4DecoderLayer, Llama4ForCausalLM
 from vllm.model_executor.models.utils import extract_layer_index
 
-from .interfaces import SupportsMultiModal
-from .utils import AutoWeightsLoader, maybe_prefix, process_eagle_weight
+from .interfaces import SupportsMultiModal, SupportsMultiModalEmbeddings
+from .utils import (
+    AutoWeightsLoader,
+    WeightsMapper,
+    maybe_prefix,
+    process_eagle_weight,
+)
 
 logger = init_logger(__name__)
 
 
+if TYPE_CHECKING:
+
+    class _EagleLlama4ForCausalLMBase(nn.Module):
+        def set_moe_parameters(self) -> None: ...
+
+        def permute_qk_weight_for_rotary(
+            self, name: str, loaded_weight: torch.Tensor
+        ) -> tuple[str, torch.Tensor]: ...
+
+else:
+    _EagleLlama4ForCausalLMBase = Llama4ForCausalLM
+
+
 @support_torch_compile
 class LlamaModel(nn.Module):
+    hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_prefix={"model.": ""},
+        orig_to_new_stacked={
+            ".q_proj": (".qkv_proj", "q"),
+            ".k_proj": (".qkv_proj", "k"),
+            ".v_proj": (".qkv_proj", "v"),
+            ".gate_proj": (".gate_up_proj", 0),
+            ".up_proj": (".gate_up_proj", 1),
+        },
+    )
+
     def __init__(
         self,
         *,
@@ -53,7 +82,9 @@ class LlamaModel(nn.Module):
         quant_config: QuantizationConfig | None = None,
     ) -> None:
         super().__init__()
-        self.config = vllm_config.speculative_config.draft_model_config.hf_config
+        speculative_config = vllm_config.speculative_config
+        assert speculative_config is not None
+        self.config = speculative_config.draft_model_config.hf_config
         self.validate_and_update_config(start_layer_id, quant_config)
         self.vocab_size = self.config.vocab_size
         self.embed_tokens = VocabParallelEmbedding(
@@ -108,34 +139,8 @@ class LlamaModel(nn.Module):
         return hidden_states, hidden_states
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        stacked_params_mapping = [
-            # (param_name, shard_name, shard_id)
-            (".qkv_proj", ".q_proj", "q"),
-            (".qkv_proj", ".k_proj", "k"),
-            (".qkv_proj", ".v_proj", "v"),
-            (".gate_up_proj", ".gate_proj", 0),
-            (".gate_up_proj", ".up_proj", 1),
-        ]
-        params_dict = dict(self.named_parameters())
-        loaded_params: set[str] = set()
-        for name, loaded_weight in weights:
-            name = name.removeprefix("model.")
-            for param_name, weight_name, shard_id in stacked_params_mapping:
-                if weight_name not in name:
-                    continue
-                name = name.replace(weight_name, param_name)
-                param = params_dict[name]
-                weight_loader = param.weight_loader
-                weight_loader(param, loaded_weight, shard_id)
-                break
-            else:
-                param = params_dict[name]
-                weight_loader = getattr(param, "weight_loader", default_weight_loader)
-                weight_loader(param, loaded_weight)
-            loaded_params.add(name)
-        for name in params_dict:
-            assert name in loaded_params, f"{name} is not loaded!"
-        return loaded_params
+        loader = AutoWeightsLoader(self)
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
     def validate_and_update_config(
         self, start_layer_id: int, quant_config: QuantizationConfig | None = None
@@ -163,20 +168,22 @@ class LlamaModel(nn.Module):
             }
 
 
-class EagleLlama4ForCausalLM(Llama4ForCausalLM):
+class EagleLlama4ForCausalLM(_EagleLlama4ForCausalLMBase, SupportsMultiModalEmbeddings):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         nn.Module.__init__(self)
-        self.config = vllm_config.speculative_config.draft_model_config.hf_config
+        speculative_config = vllm_config.speculative_config
+        assert speculative_config is not None
+        self.config = speculative_config.draft_model_config.hf_config
         target_layer_num = vllm_config.model_config.get_num_layers(
             vllm_config.parallel_config
         )
         # draft model quantization config may differ from target model
         quant_config = VllmConfig.get_quantization_config(
-            vllm_config.speculative_config.draft_model_config, vllm_config.load_config
+            speculative_config.draft_model_config, vllm_config.load_config
         )
         self.model = LlamaModel(
             vllm_config=vllm_config,
-            prefix="model",
+            prefix=maybe_prefix(prefix, "model"),
             start_layer_id=target_layer_num,
             quant_config=quant_config,
         )
@@ -208,23 +215,6 @@ class EagleLlama4ForCausalLM(Llama4ForCausalLM):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         return self.model(input_ids, positions, hidden_states, inputs_embeds)
 
-    def get_top_tokens(
-        self,
-        hidden_states: torch.Tensor,
-    ) -> torch.Tensor:
-        """Vocab-parallel argmax without all-gathering full logits.
-
-        Falls back to full logits when draft_id_to_target_id remapping is
-        active, since the shared lm_head covers the full target vocab but
-        the draft model only predicts over a subset (draft_vocab_size).
-        """
-        if (
-            hasattr(self, "draft_id_to_target_id")
-            and self.draft_id_to_target_id is not None
-        ):
-            return self.compute_logits(hidden_states).argmax(dim=-1)
-        return self.logits_processor.get_top_tokens(self.lm_head, hidden_states)
-
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> None:
         def transform(inputs):
             name, loaded_weight = inputs
@@ -234,9 +224,5 @@ class EagleLlama4ForCausalLM(Llama4ForCausalLM):
             process_eagle_weight(self, name)
             return name, weight
 
-        loader = AutoWeightsLoader(
-            self,
-            # lm_head is tied with target model (Llama4ForCausalLM)
-            skip_prefixes=([]),
-        )
+        loader = AutoWeightsLoader(self)
         loader.load_weights(map(transform, weights))

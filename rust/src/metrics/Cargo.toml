@@ -1,0 +1,15 @@
+[package]
+name = "vllm-metrics"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+itertools.workspace = true
+prometheus-client.workspace = true
+
+[dev-dependencies]
+expect-test.workspace = true
+
+[lints]
+workspace = true
