@@ -43,8 +43,12 @@ The layer owns frequencies and cache buffers; `platform.spec` supplies the
 operation and any alternate cache dtype needed for compilation.
 
 ```text
-RotaryEmbedding -> existing CustomOp dispatch -> spec.rope(...) -> existing kernel
+RotaryEmbedding.forward_platform -> spec.rope(...) -> existing kernel
 ```
+
+`CustomOp` binds this unified entry point when the operation is enabled,
+without selecting `forward_cuda`, `forward_hip`, `forward_cpu`, or `forward_xpu`.
+Operations that do not implement `forward_platform` retain the legacy dispatch.
 
 `PlatformSpec` is a small immutable value, not an implementation registry or
 an inheritance hierarchy. CPU and CUDA bind the existing custom op; ROCm
@@ -53,10 +57,13 @@ Existing layers keep their selection if AITER settings are refreshed.
 XPU retains its native fallback for `key=None`.
 Platform policy stays in the existing `platforms/{cpu,cuda,rocm,xpu}.py` files.
 
-The existing `CustomOp` enable/disable behavior, per-device entry points,
-`forward_static` reference, and OOT `forward_oot` overrides are retained.
+The existing `CustomOp` enable/disable behavior, `forward_static` reference,
+and OOT `forward_oot` overrides are retained.
 Disabled operations use `forward_native`, including for OOT replacements.
-Specialized RoPE variants and their legacy FlashInfer paths are not migrated.
+Legacy direct `forward_cuda` and `forward_hip` calls are adapted by `CustomOp`;
+they are not part of the migrated operation's normal execution path.
+FoPE supplies its own native operation for learned per-head frequencies.
+MRoPE and DeepSeek RoPE, including their FlashInfer paths, are not migrated.
 
 This is not a replacement for [vLLM IR](vllm_ir.md): spec owns platform
 compatibility policy, while IR owns operator representation and compiler

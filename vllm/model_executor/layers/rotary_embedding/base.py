@@ -166,23 +166,12 @@ class RotaryEmbedding(RotaryEmbeddingBase):
             self.is_neox_style,
         )
 
-    def forward_cuda(
+    def forward_platform(
         self,
         positions: torch.Tensor,
         query: torch.Tensor,
         key: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
-        if self.use_flashinfer:
-            torch.ops.vllm.flashinfer_rotary_embedding(
-                positions,
-                query,
-                key,
-                self.head_size,
-                self.cos_sin_cache,
-                self.is_neox_style,
-            )
-            return query, key
-
         return self.spec.rope(
             positions,
             query,
@@ -192,30 +181,6 @@ class RotaryEmbedding(RotaryEmbeddingBase):
             self._match_cos_sin_cache_dtype(query),
             self.is_neox_style,
         )
-
-    def forward_hip(
-        self,
-        positions: torch.Tensor,
-        query: torch.Tensor,
-        key: torch.Tensor | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor | None]:
-        return self.forward_cuda(positions, query, key)
-
-    def forward_xpu(
-        self,
-        positions: torch.Tensor,
-        query: torch.Tensor,
-        key: torch.Tensor | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor | None]:
-        return self.forward_cuda(positions, query, key)
-
-    def forward_cpu(
-        self,
-        positions: torch.Tensor,
-        query: torch.Tensor,
-        key: torch.Tensor | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor | None]:
-        return self.forward_cuda(positions, query, key)
 
     def extra_repr(self) -> str:
         s = f"head_size={self.head_size}, rotary_dim={self.rotary_dim}"
