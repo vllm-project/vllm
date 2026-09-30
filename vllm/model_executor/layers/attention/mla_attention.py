@@ -1350,6 +1350,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         common_kwargs = dict(
             block_size=vllm_config.cache_config.block_size,
             num_kv_heads=1,
+            max_tp_shards=1,
             head_size=self.head_size,
             dtype=kv_cache_dtype,
             cache_dtype_str=self.kv_cache_dtype,
