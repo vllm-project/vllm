@@ -525,7 +525,7 @@ def test_causal_conv1d_update_cpu_preserves_sd_state(
         bias=None,
         silu_activation=False,
         conv_state_indices=state_indices,
-        is_vnni=False,
+        is_weight_packed=False,
     )
 
     assert out is x
@@ -1270,7 +1270,7 @@ def test_causal_conv1d_fwd_cpu_ds_adapter_varlen_mixed_initial_state(
         cache_indices=state_indices,
         has_initial_state=has_initial_state,
         silu_activation=True,
-        is_vnni=False,
+        is_weight_packed=False,
     )
     monkeypatch.setattr(gdn_attention, "is_conv_state_dim_first", lambda: True)
     out_ds = gdn_attention._causal_conv1d_fwd_cpu(
@@ -1282,7 +1282,7 @@ def test_causal_conv1d_fwd_cpu_ds_adapter_varlen_mixed_initial_state(
         cache_indices=state_indices,
         has_initial_state=has_initial_state,
         silu_activation=True,
-        is_vnni=False,
+        is_weight_packed=False,
     )
 
     torch.testing.assert_close(out_ds, out_sd)
@@ -1327,7 +1327,7 @@ def test_causal_conv1d_update_cpu_ds_adapter_wide_multi_token_copyback(
         bias=None,
         silu_activation=False,
         conv_state_indices=state_indices,
-        is_vnni=False,
+        is_weight_packed=False,
         num_accepted_tokens=num_accepted_tokens,
     )
 

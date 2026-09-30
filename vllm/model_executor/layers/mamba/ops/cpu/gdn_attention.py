@@ -55,7 +55,7 @@ def _causal_conv1d_fwd_cpu(
     cache_indices: torch.Tensor,
     has_initial_state: torch.Tensor,
     silu_activation: bool,
-    is_vnni: bool,
+    is_weight_packed: bool,
 ) -> torch.Tensor:
     if not is_conv_state_dim_first():
         return ops.causal_conv1d_fwd_cpu(
@@ -67,7 +67,7 @@ def _causal_conv1d_fwd_cpu(
             cache_indices=cache_indices,
             has_initial_state=has_initial_state,
             silu_activation=silu_activation,
-            is_vnni=is_vnni,
+            is_weight_packed=is_weight_packed,
         )
 
     scratch, identity_indices = _stage_ds_conv_states(conv_states, cache_indices)
@@ -80,7 +80,7 @@ def _causal_conv1d_fwd_cpu(
         cache_indices=identity_indices,
         has_initial_state=has_initial_state,
         silu_activation=silu_activation,
-        is_vnni=is_vnni,
+        is_weight_packed=is_weight_packed,
     )
     _scatter_ds_conv_states(conv_states, cache_indices, scratch)
     return out
@@ -94,7 +94,7 @@ def _causal_conv1d_update_cpu(
     bias: torch.Tensor | None,
     silu_activation: bool,
     conv_state_indices: torch.Tensor,
-    is_vnni: bool,
+    is_weight_packed: bool,
     num_accepted_tokens: torch.Tensor | None = None,
 ) -> torch.Tensor:
     if not is_conv_state_dim_first():
@@ -105,7 +105,7 @@ def _causal_conv1d_update_cpu(
             bias=bias,
             silu_activation=silu_activation,
             conv_state_indices=conv_state_indices,
-            is_vnni=is_vnni,
+            is_weight_packed=is_weight_packed,
             num_accepted_tokens=num_accepted_tokens,
         )
 
@@ -117,17 +117,19 @@ def _causal_conv1d_update_cpu(
         bias=bias,
         silu_activation=silu_activation,
         conv_state_indices=identity_indices,
-        is_vnni=is_vnni,
+        is_weight_packed=is_weight_packed,
         num_accepted_tokens=num_accepted_tokens,
     )
     _scatter_ds_conv_states(conv_states, conv_state_indices, scratch)
     return out
+
 
 def is_arm_bf16() -> bool:
     return (
         current_platform.get_cpu_architecture() == CpuArchEnum.ARM
         and torch.cpu.get_capabilities().get("bf16", False)
     )
+
 
 def cpu_gdn_attention_core(
     mixed_qkv: torch.Tensor,
