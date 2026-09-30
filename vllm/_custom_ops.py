@@ -2253,6 +2253,27 @@ def wvSplitKQ(
     return out
 
 
+def wvSplitKQBlockScale(
+    weight: torch.Tensor,
+    activation: torch.Tensor,
+    activation_scale: torch.Tensor,
+    weight_scale: torch.Tensor,
+    out: torch.Tensor,
+    cu_count: int,
+    bpreshuffle: bool = True,
+) -> torch.Tensor:
+    torch.ops._rocm_C.wvSplitKQBlockScale(
+        weight,
+        activation,
+        activation_scale,
+        weight_scale,
+        out,
+        cu_count,
+        bpreshuffle,
+    )
+    return out
+
+
 # moe
 def moe_sum(
     input: torch.Tensor,

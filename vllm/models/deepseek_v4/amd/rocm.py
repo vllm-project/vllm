@@ -7,6 +7,9 @@ from typing import cast
 
 import torch
 
+import vllm._custom_ops as ops
+from vllm import envs
+from vllm.config import VllmConfig
 from vllm.distributed import (
     get_tensor_model_parallel_world_size,
     tensor_model_parallel_all_reduce,
@@ -860,13 +863,40 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
         scale: torch.Tensor,
         x: torch.Tensor,
         reduce_tp: bool,
+        tag: str,
     ) -> torch.Tensor:
         from vllm._aiter_ops import rocm_aiter_ops
+        from vllm.platforms.rocm import on_gfx1151
 
         x_fp8, x_scale = rocm_aiter_ops.group_fp8_quant(x, transpose_scale=True)
-        out = rocm_aiter_ops.gemm_a8w8_blockscale_bpreshuffle(
-            x_fp8, weight, x_scale, scale, output_dtype=x.dtype
+        use_wvsplitk_blockscale = (
+            tag in ("wo_b", "wqa_wkv")
+            and on_gfx1151()
+            and x_fp8.dim() == 2
+            and weight.dim() == 2
+            and 1 <= x_fp8.shape[0] <= 8
+            and x_fp8.shape[1] == 4096
+            and weight.shape[0] in (4096, 1536)
+            and weight.shape[1] == 4096
         )
+        if use_wvsplitk_blockscale:
+            out = torch.empty(
+                (x_fp8.shape[0], weight.shape[0]), dtype=x.dtype, device=x.device
+            )
+            cu_count = torch.cuda.get_device_properties(x.device).multi_processor_count
+            ops.wvSplitKQBlockScale(
+                weight,
+                x_fp8,
+                x_scale,
+                scale,
+                out,
+                cu_count,
+                True,
+            )
+        else:
+            out = rocm_aiter_ops.gemm_a8w8_blockscale_bpreshuffle(
+                x_fp8, weight, x_scale, scale, output_dtype=x.dtype
+            )
         if reduce_tp and get_tensor_model_parallel_world_size() > 1:
             out = tensor_model_parallel_all_reduce(out)
         return out
@@ -874,7 +904,11 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
     def _fused_wqa_wkv_gemm(self, hidden_states: torch.Tensor) -> torch.Tensor:
         if self._wqa_wkv_scale is not None and hidden_states.dim() == 2:
             return self._bpre_attn_gemm(
-                self.fused_wqa_wkv.weight, self._wqa_wkv_scale, hidden_states, False
+                self.fused_wqa_wkv.weight,
+                self._wqa_wkv_scale,
+                hidden_states,
+                False,
+                "wqa_wkv",
             )
         return super()._fused_wqa_wkv_gemm(hidden_states)
 
@@ -983,7 +1017,9 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
         )
         zf = z.flatten(1)
         if self._wo_b_scale is not None and zf.dim() == 2:
-            return self._bpre_attn_gemm(self.wo_b.weight, self._wo_b_scale, zf, True)
+            return self._bpre_attn_gemm(
+                self.wo_b.weight, self._wo_b_scale, zf, True, "wo_b"
+            )
         return self.wo_b(zf)
 
     def forward_mqa(
