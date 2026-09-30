@@ -691,6 +691,17 @@ def rocm_fp8_paged_mqa_logits_triton(
 
 
 @functools.lru_cache
+def _flydsl_paged_mqa_logits_kernel():
+    if not _ON_GFX950:
+        return None
+    try:
+        from aiter.ops.flydsl import flydsl_fp8_paged_mqa_logits
+    except ImportError:
+        return None
+    return flydsl_fp8_paged_mqa_logits
+
+
+@functools.lru_cache
 def paged_mqa_logits_module():
     paged_mqa_logits_module_path = None
     if find_spec("aiter.ops.triton.pa_mqa_logits") is not None:
@@ -705,17 +716,6 @@ def paged_mqa_logits_module():
         except ImportError:
             return None
     return None
-
-
-@functools.lru_cache
-def _flydsl_paged_mqa_logits_kernel():
-    if not _ON_GFX950:
-        return None
-    try:
-        from aiter.ops.flydsl import flydsl_fp8_paged_mqa_logits
-    except ImportError:
-        return None
-    return flydsl_fp8_paged_mqa_logits
 
 
 def rocm_fp8_paged_mqa_logits(
