@@ -21,10 +21,10 @@ from vllm.utils.math_utils import cdiv, round_up
 from vllm.utils.mem_utils import format_gib
 from vllm.utils.torch_utils import get_dtype_size
 from vllm.v1.hisparse.layout import (
-    get_hisparse_gpu_groups,
     get_hisparse_host_pool_bytes,
     get_hisparse_kv_cache_config,
     get_hisparse_kv_cache_groups,
+    lay_out_hisparse_groups,
 )
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
@@ -1149,20 +1149,12 @@ def _pool_bytes_per_block(kv_cache_groups: list[KVCacheGroupSpec]) -> int:
     """Bytes consumed by one block in the worker's shared KV cache pool, mirroring
     the divisor used by `get_kv_cache_config_from_groups` to convert
     `available_memory` into `num_blocks`. Used to compute the effective KV cache
-    capacity once `num_gpu_blocks_override` is applied.
+    capacity once `num_gpu_blocks_override` is applied. Host-resident groups
+    have their own pool.
     """
-    return _get_kv_cache_bytes_per_block(kv_cache_groups)
-
-
-def _allocated_bytes_per_block(
-    vllm_config: VllmConfig, kv_cache_groups: list[KVCacheGroupSpec]
-) -> int:
-    """The bytes per block `get_kv_cache_config_from_groups` allocates for these
-    groups. HiSparse lays them out as its own GPU groups and sizes its pool from
-    those."""
-    if vllm_config.attention_config.hisparse_config is not None:
-        kv_cache_groups = get_hisparse_gpu_groups(vllm_config, kv_cache_groups)
-    return _pool_bytes_per_block(kv_cache_groups)
+    return _get_kv_cache_bytes_per_block(
+        [group for group in kv_cache_groups if not group.host_resident]
+    )
 
 
 def get_uniform_page_size(kv_cache_specs: Iterable[KVCacheSpec]) -> int:
@@ -2507,11 +2499,10 @@ def _max_memory_usage_bytes_from_groups(
     Each group independently claims blocks from the shared pool, so a request consumes
     the sum of the per-group block counts, i.e. ``bytes_per_block * total_blocks``.
     """
+    # Host-resident groups have their own pool.
+    kv_cache_groups = [group for group in kv_cache_groups if not group.host_resident]
     if not kv_cache_groups:
         return 0
-
-    if vllm_config.attention_config.hisparse_config is not None:
-        kv_cache_groups = get_hisparse_gpu_groups(vllm_config, kv_cache_groups)
 
     if (glm5_layout := _glm5_next_tensor_layout(kv_cache_groups)) is not None:
         (
@@ -2777,6 +2768,32 @@ def get_kv_cache_configs(
         _project_kv_cache_groups_to_worker(global_kv_cache_groups, worker_spec)
         for worker_spec in kv_cache_specs
     ]
+    for projected_groups, kv_cache_spec_one_worker in zip(
+        projected_groups_per_worker, kv_cache_specs
+    ):
+        assert sum(len(group.layer_names) for group in projected_groups) == len(
+            kv_cache_spec_one_worker
+        ), "Some layers are not assigned to any group."
+
+    if vllm_config.attention_config.hisparse_config is not None:
+        # Size and allocate the groups HiSparse actually allocates.
+        projected_groups_per_worker = [
+            lay_out_hisparse_groups(vllm_config, groups) if groups else groups
+            for groups in projected_groups_per_worker
+        ]
+        worker_layouts = {
+            tuple(
+                (type(group.kv_cache_spec), group.kv_cache_spec.page_size_bytes)
+                for group in groups
+            )
+            for groups in projected_groups_per_worker
+            if groups
+        }
+        if len(worker_layouts) > 1:
+            raise NotImplementedError(
+                "HiSparse requires the same KV cache layout on every worker; "
+                "pipeline stages with different layers are not supported."
+            )
 
     # If `num_gpu_blocks_override` is set, the cache size that will actually
     # be allocated is decoupled from the profiled `available_memory`:
@@ -2791,7 +2808,7 @@ def get_kv_cache_configs(
             if not groups:
                 adjusted_memory.append(avail_mem)
                 continue
-            bytes_per_block = _allocated_bytes_per_block(vllm_config, groups)
+            bytes_per_block = _pool_bytes_per_block(groups)
             logger.info(
                 "Overriding num_gpu_blocks=%d with num_gpu_blocks_override=%d",
                 avail_mem // bytes_per_block,
@@ -2800,18 +2817,11 @@ def get_kv_cache_configs(
             adjusted_memory.append(override * bytes_per_block)
         available_memory = adjusted_memory
 
-    if vllm_config.attention_config.hisparse_config is not None and override is None:
-        # An override already gives every worker the same number of blocks, of
-        # its own size; the min would shrink workers with larger blocks.
-        available_memory = [min(available_memory)] * len(available_memory)
-
     # Reserve the null block BlockPool permanently holds back, so auto-fit and
     # the capacity check both plan against usable blocks. Allocation below
     # still uses the full memory.
     check_memory = [
-        avail_mem - _allocated_bytes_per_block(vllm_config, groups)
-        if groups
-        else avail_mem
+        avail_mem - _pool_bytes_per_block(groups) if groups else avail_mem
         for groups, avail_mem in zip(projected_groups_per_worker, available_memory)
     ]
 
@@ -2830,12 +2840,9 @@ def get_kv_cache_configs(
         )
 
     kv_cache_configs: list[KVCacheConfig] = []
-    for projected_groups, kv_cache_spec_one_worker, available_memory_one_worker in zip(
-        projected_groups_per_worker, kv_cache_specs, available_memory
+    for projected_groups, available_memory_one_worker in zip(
+        projected_groups_per_worker, available_memory
     ):
-        assert sum(len(group.layer_names) for group in projected_groups) == len(
-            kv_cache_spec_one_worker
-        ), "Some layers are not assigned to any group."
         kv_cache_configs.append(
             get_kv_cache_config_from_groups(
                 vllm_config, projected_groups, available_memory_one_worker

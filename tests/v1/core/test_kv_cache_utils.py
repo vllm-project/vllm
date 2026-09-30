@@ -57,9 +57,7 @@ from vllm.v1.core.kv_cache_utils import (
     tensor_data,
     to_event_extra_keys,
 )
-from vllm.v1.hisparse.layout import (
-    create_hisparse_layout,
-)
+from vllm.v1.hisparse.layout import _size_hisparse_host_pool, lay_out_hisparse_groups
 from vllm.v1.kv_cache_interface import (
     ChunkedLocalAttentionSpec,
     CircularBufferSpec,
@@ -143,7 +141,7 @@ def test_hisparse_hma_uses_resolved_gpu_block_size(
     )
     monkeypatch.setattr(kv_cache_utils, "get_hisparse_host_pool_bytes", lambda _: 2**30)
     cache_config = kv_cache_utils.get_kv_cache_config_from_groups(
-        config, [group], available_memory=2**30
+        config, lay_out_hisparse_groups(config, [group]), available_memory=2**30
     )
     assert cache_config.num_blocks == 7
     assert cache_config.hisparse_host_num_blocks is not None
@@ -236,12 +234,16 @@ def test_hisparse_host_pool_must_fit_max_model_len(monkeypatch, extra_blocks, ok
     host_budget = (4 + extra_blocks) * host_page
     group = KVCacheGroupSpec(list(specs), group_spec)
 
+    source_group = lay_out_hisparse_groups(config, [group])[0]
+
     if ok:
-        layout = create_hisparse_layout(config, [group], host_budget=host_budget)
-        assert layout.host_num_blocks == 4 + extra_blocks
+        host_num_blocks, _, _ = _size_hisparse_host_pool(
+            config, source_group, host_budget
+        )
+        assert host_num_blocks == 4 + extra_blocks
     else:
         with pytest.raises(ValueError, match="increase host_pool_gib"):
-            create_hisparse_layout(config, [group], host_budget=host_budget)
+            _size_hisparse_host_pool(config, source_group, host_budget)
 
 
 @pytest.mark.parametrize(
@@ -289,12 +291,9 @@ def test_hisparse_pool_must_fit_max_model_len(
             kv_cache_utils.get_kv_cache_configs(config, [specs], [2**34])
 
 
-@pytest.mark.parametrize("num_gpu_blocks,ok", [(788, False), (789, True)])
-def test_hisparse_override_fits_uneven_workers(monkeypatch, num_gpu_blocks, ok):
-    """Workers with different layer counts pack into different HiSparse block
-    sizes. An override gives each the same block count, so the worker with
-    larger blocks must be checked against its own pool (788 blocks plus the
-    null block), not the smallest worker's bytes."""
+def test_hisparse_rejects_uneven_workers(monkeypatch):
+    """Workers with different layer counts get different HiSparse layouts,
+    which one scheduler config cannot describe."""
     monkeypatch.setattr(
         hisparse_runtime_module.current_platform, "is_cuda_alike", lambda: True
     )
@@ -322,18 +321,12 @@ def test_hisparse_override_fits_uneven_workers(monkeypatch, num_gpu_blocks, ok):
     config = VllmConfig(model_config=ModelConfig(max_model_len=8192))
     config.attention_config.hisparse_config = HiSparseConfig()
     config.model_config.hf_config.index_topk = 128
-    config.cache_config.num_gpu_blocks_override = num_gpu_blocks
+    config.cache_config.num_gpu_blocks_override = 1000
     config.cache_config.kv_cache_layout = "BLHNC"
     kv_cache_specs = [worker_specs(range(0, 5)), worker_specs(range(5, 8))]
 
-    if ok:
-        configs = kv_cache_utils.get_kv_cache_configs(
-            config, kv_cache_specs, [2**34, 2**34]
-        )
-        assert [c.num_blocks for c in configs] == [num_gpu_blocks] * 2
-    else:
-        with pytest.raises(ValueError, match="max seq len"):
-            kv_cache_utils.get_kv_cache_configs(config, kv_cache_specs, [2**34, 2**34])
+    with pytest.raises(NotImplementedError, match="same KV cache layout"):
+        kv_cache_utils.get_kv_cache_configs(config, kv_cache_specs, [2**34, 2**34])
 
 
 def test_hisparse_rejects_deepseek_v4():
@@ -356,11 +349,7 @@ def test_hisparse_rejects_deepseek_v4():
     )
 
     with pytest.raises(ValueError, match="does not support DeepSeek V4"):
-        create_hisparse_layout(
-            config,
-            [group],
-            host_budget=2**30,
-        )
+        lay_out_hisparse_groups(config, [group])
 
 
 @pytest.fixture(autouse=True)

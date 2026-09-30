@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections import defaultdict
-from dataclasses import dataclass
 from typing import cast
 
 from vllm.config import VllmConfig
@@ -33,15 +32,6 @@ logger = init_logger(__name__)
 
 HISPARSE_HOT_SUFFIX = ".hisparse_hot"
 HISPARSE_RESIDENT_SUFFIX = ".hisparse_resident"
-
-
-@dataclass(frozen=True)
-class HiSparseLayout:
-    source_group: KVCacheGroupSpec
-    device_groups: list[KVCacheGroupSpec]
-    host_num_blocks: int
-    host_block_stride: int
-    shared_host_pool: bool
 
 
 def get_hisparse_kv_cache_groups(
@@ -112,18 +102,11 @@ def _partition_hisparse_specs(
     return source_specs, indexer_specs
 
 
-def get_hisparse_gpu_groups(
+def lay_out_hisparse_groups(
     vllm_config: VllmConfig, groups: list[KVCacheGroupSpec]
 ) -> list[KVCacheGroupSpec]:
-    """The GPU groups HiSparse lays these groups out as, sharing one pool."""
-    _, gpu_groups = _create_hisparse_groups(vllm_config, groups)
-    return gpu_groups
-
-
-def _create_hisparse_groups(
-    vllm_config: VllmConfig, groups: list[KVCacheGroupSpec]
-) -> tuple[KVCacheGroupSpec, list[KVCacheGroupSpec]]:
-    """The host source group and the GPU groups sharing HiSparse's device pool."""
+    """Replace the grouped specs with the groups HiSparse allocates: the host
+    source group, then the GPU groups sharing one device pool."""
     source_specs, indexer_specs = _partition_hisparse_specs(groups)
     block_sizes = {
         spec.block_size for spec in (*source_specs.values(), *indexer_specs.values())
@@ -219,15 +202,19 @@ def _create_hisparse_groups(
         enable_kv_transfer=True,
     )
     regular_groups = groups[1:]
-    return source_group, [indexer_group, *resident_groups, *hot_groups, *regular_groups]
+    return [
+        source_group,
+        indexer_group,
+        *resident_groups,
+        *hot_groups,
+        *regular_groups,
+    ]
 
 
-def create_hisparse_layout(
-    vllm_config: VllmConfig,
-    groups: list[KVCacheGroupSpec],
-    host_budget: int,
-) -> HiSparseLayout:
-    source_group, gpu_groups = _create_hisparse_groups(vllm_config, groups)
+def _size_hisparse_host_pool(
+    vllm_config: VllmConfig, source_group: KVCacheGroupSpec, host_budget: int
+) -> tuple[int, int, bool]:
+    """Host blocks, host block stride, and whether the host pool is shared."""
     shared_host_pool = use_shared_hisparse_host_pool(vllm_config)
     host_block_stride = get_hisparse_host_block_stride(
         source_group.kv_cache_spec.page_size_bytes,
@@ -250,14 +237,7 @@ def create_hisparse_layout(
             f"HiSparse host pool has {host_num_blocks} blocks but max_model_len "
             f"needs {min_host_blocks}; increase host_pool_gib."
         )
-
-    return HiSparseLayout(
-        source_group=source_group,
-        device_groups=gpu_groups,
-        host_num_blocks=host_num_blocks,
-        host_block_stride=host_block_stride,
-        shared_host_pool=shared_host_pool,
-    )
+    return host_num_blocks, host_block_stride, shared_host_pool
 
 
 def _build_hisparse_kv_cache_tensors(
@@ -326,8 +306,11 @@ def get_hisparse_kv_cache_config(
         validate_kv_cache_layout,
     )
 
-    hisparse_layout = create_hisparse_layout(vllm_config, kv_cache_groups, host_budget)
-    device_groups = hisparse_layout.device_groups
+    (source_group,) = [group for group in kv_cache_groups if group.host_resident]
+    device_groups = [group for group in kv_cache_groups if not group.host_resident]
+    host_num_blocks, host_block_stride, shared_host_pool = _size_hisparse_host_pool(
+        vllm_config, source_group, host_budget
+    )
     layout = vllm_config.cache_config.get_resolved_kv_cache_layout()
     validate_kv_cache_layout(layout, device_groups)
     bytes_per_block = _get_kv_cache_bytes_per_block(device_groups)
@@ -339,14 +322,14 @@ def get_hisparse_kv_cache_config(
         device_groups, num_blocks, size, layout, bytes_per_block
     )
 
-    host_groups = [hisparse_layout.source_group]
+    host_groups = [source_group]
     host_layout = KVCacheLayout.LBNHC
     validate_kv_cache_layout(host_layout, host_groups)
     host_bytes_per_block = _get_kv_cache_bytes_per_block(host_groups)
-    host_size = host_bytes_per_block * hisparse_layout.host_num_blocks
+    host_size = host_bytes_per_block * host_num_blocks
     kv_cache_tensors[:0] = _build_hisparse_kv_cache_tensors(
         host_groups,
-        hisparse_layout.host_num_blocks,
+        host_num_blocks,
         host_size,
         host_layout,
         host_bytes_per_block,
@@ -356,7 +339,7 @@ def get_hisparse_kv_cache_config(
         "HiSparse HMA: %.1f GiB host source (%d blocks), %.1f GiB shared "
         "GPU indexer/resident/hot pool (%d blocks).",
         host_size / 2**30,
-        hisparse_layout.host_num_blocks,
+        host_num_blocks,
         size / 2**30,
         num_blocks,
     )
@@ -364,9 +347,9 @@ def get_hisparse_kv_cache_config(
         num_blocks=num_blocks,
         kv_cache_tensors=kv_cache_tensors,
         kv_cache_groups=[*host_groups, *device_groups],
-        hisparse_host_num_blocks=hisparse_layout.host_num_blocks,
-        hisparse_host_block_stride=hisparse_layout.host_block_stride,
-        hisparse_shared_host_pool=hisparse_layout.shared_host_pool,
+        hisparse_host_num_blocks=host_num_blocks,
+        hisparse_host_block_stride=host_block_stride,
+        hisparse_shared_host_pool=shared_host_pool,
         prefix_cache_retention_interval=(
             vllm_config.cache_config.prefix_cache_retention_interval
         ),
