@@ -1,9 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import types
+from contextlib import nullcontext
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
+import numpy as np
 import pytest
 import torch
 
@@ -57,6 +59,7 @@ def _capturer_with_buffer(
     dp_rank: int = 0,
     tp_size: int = 1,
     dtype: torch.dtype = torch.int32,
+    output_dtype: torch.dtype = torch.uint8,
 ) -> RoutedExpertsCapturer:
     # Bypass __init__ so the test can use a CPU buffer and skip the
     # VllmConfig dependency. The CUDA device-tensor allocation in the
@@ -64,12 +67,15 @@ def _capturer_with_buffer(
     c = RoutedExpertsCapturer.__new__(RoutedExpertsCapturer)
     c.dp_rank = dp_rank
     c.tp_size = tp_size
-    c.output_dtype = torch.uint8
+    c.output_dtype = output_dtype
     c.device_buffer = torch.full(
         (max_tokens, num_layers, num_experts_per_tok),
         -1,
         dtype=dtype,
     )
+    c.pp_layers = slice(0, num_layers)
+    c.pp_dst = -1
+    c.pp_peers = []
     return c
 
 
@@ -456,6 +462,9 @@ def test_routed_experts_capturer_exposes_output_profile(
     import vllm.model_executor.layers.fused_moe.routed_experts_capturer as module
 
     monkeypatch.setattr(module, "current_platform", SimpleNamespace(device_type="cpu"))
+    monkeypatch.setattr(
+        module, "get_pp_group", lambda: SimpleNamespace(world_size=1, rank_in_group=0)
+    )
     config = SimpleNamespace(
         model_config=SimpleNamespace(
             get_total_num_hidden_layers=lambda: 3,
@@ -650,6 +659,72 @@ def test_routed_experts_capturer_dp_unexpected_batch_raises():
     assert capturer.device_buffer[0, 0, 0].item() == -1
 
 
+@pytest.mark.parametrize("output_dtype", [torch.uint8, torch.uint16])
+def test_routed_experts_capturer_pp_sends_own_layer_span(monkeypatch, output_dtype):
+    """A non-last PP stage sends only its own layers, narrowed and as bytes.
+
+    NCCL has no uint16 datatype, so wide expert IDs must go over the wire as
+    their byte view.
+    """
+    capturer = _capturer_with_buffer(num_layers=4, output_dtype=output_dtype)
+    capturer.pp_layers = slice(2, 4)
+    capturer.pp_dst = 5
+    capturer.pp_comm = Mock()
+    capturer.pp_stream = Mock()
+    capturer.device_buffer[:2] = torch.arange(16, dtype=torch.int32).view(2, 4, 2)
+    send = Mock()
+    # record_stream and CUDA streams have no CPU implementation.
+    monkeypatch.setattr(torch.Tensor, "record_stream", lambda self, stream: None)
+    monkeypatch.setattr(torch.cuda, "current_stream", Mock())
+    monkeypatch.setattr(torch.cuda, "stream", lambda stream: nullcontext())
+    monkeypatch.setattr(torch.distributed, "send", send)
+
+    capturer.send_stage_routing_data(2)
+
+    (payload,) = send.call_args.args
+    assert send.call_args.kwargs == {"dst": 5, "group": capturer.pp_comm}
+    assert payload.dtype == torch.uint8
+    expected = capturer.device_buffer[:2, 2:4].to(output_dtype)
+    assert torch.equal(payload.view(output_dtype), expected)
+
+
+@pytest.mark.parametrize("output_dtype", [torch.uint8, torch.uint16])
+def test_routed_experts_capturer_pp_collects_peer_spans(monkeypatch, output_dtype):
+    """The last PP stage fills the earlier stages' layers from their sends."""
+    capturer = _capturer_with_buffer(num_layers=4, output_dtype=output_dtype)
+    capturer.pp_layers = slice(2, 4)
+    capturer.pp_comm = Mock()
+    capturer.pp_peers = [(3, slice(0, 2))]
+    capturer.device_buffer[:2, 2:4] = torch.arange(10, 18, dtype=torch.int32).view(
+        2, 2, 2
+    )
+    peer_rows = torch.tensor([[[1, 2], [3, 4]], [[5, 6], [7, 8]]], dtype=output_dtype)
+
+    def fake_recv(tensor, src, group):
+        assert (src, group) == (3, capturer.pp_comm)
+        assert tensor.dtype == torch.uint8
+        tensor.copy_(peer_rows.view(torch.uint8))
+
+    monkeypatch.setattr(torch.distributed, "recv", fake_recv)
+
+    snapshot = capturer.snapshot_routing_data(2)
+
+    assert torch.equal(snapshot[:, 0:2], peer_rows)
+    assert snapshot[:, 2:4].tolist() == capturer.device_buffer[:2, 2:4].tolist()
+
+
+def test_routed_experts_capturer_pp_send_is_noop_on_non_sender(monkeypatch):
+    """Non-sending ranks stay off the wire: a send nobody posts a receive for
+    would hang the pipeline."""
+    capturer = _capturer_with_buffer()
+    send = Mock()
+    monkeypatch.setattr(torch.distributed, "send", send)
+
+    capturer.send_stage_routing_data(2)
+
+    send.assert_not_called()
+
+
 def test_get_aux_output_connector_passes_config(monkeypatch):
     import vllm.distributed.aux_output_connector.worker as aux_output_worker
 
@@ -709,6 +784,26 @@ def test_aux_output_worker_connector_binds_capture_on_non_output_rank(monkeypatc
     capturer.snapshot_routing_data.assert_not_called()
 
 
+def test_aux_output_worker_connector_send_requires_step_metadata():
+    """Send routing data only when step metadata is present."""
+    import vllm.distributed.aux_output_connector.worker as aux_output_worker
+
+    connector = aux_output_worker.AuxOutputWorkerConnector.__new__(
+        aux_output_worker.AuxOutputWorkerConnector
+    )
+    connector._capturer = Mock()
+    connector._buffer = None
+    connector._step_metadata = None
+    input_batch = SimpleNamespace(num_reqs=2, query_start_loc_np=np.array([0, 3, 7]))
+
+    connector.send_stage_output(input_batch)
+    connector._capturer.send_stage_routing_data.assert_not_called()
+
+    connector._step_metadata = Mock()
+    connector.send_stage_output(input_batch)
+    connector._capturer.send_stage_routing_data.assert_called_once_with(7)
+
+
 def test_aux_output_worker_connector_default_capacity(monkeypatch):
     import vllm.distributed.aux_output_connector.worker as aux_output_worker
 
@@ -717,6 +812,9 @@ def test_aux_output_worker_connector_default_capacity(monkeypatch):
     background_store_constructor = Mock(side_effect=lambda store, **_: store)
     capturer = SimpleNamespace(shape_per_token=(2,), output_dtype_name="int32")
     monkeypatch.setattr(aux_output_worker, "get_tp_group", lambda: tp_group)
+    monkeypatch.setattr(
+        aux_output_worker, "get_pp_group", lambda: SimpleNamespace(is_last_rank=True)
+    )
     monkeypatch.setattr(
         aux_output_worker, "RoutedExpertsCapturer", Mock(return_value=capturer)
     )

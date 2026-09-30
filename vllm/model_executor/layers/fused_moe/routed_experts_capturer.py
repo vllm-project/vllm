@@ -13,7 +13,8 @@ from typing import Protocol, runtime_checkable
 import torch
 
 from vllm.config import VllmConfig
-from vllm.distributed.parallel_state import get_tp_group
+from vllm.distributed.parallel_state import get_pp_group, get_tp_group
+from vllm.distributed.utils import get_pp_indices
 from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig
 from vllm.platforms import current_platform
@@ -46,6 +47,9 @@ class RoutedExpertsCapturer:
 
     Layer-level hooks call :meth:`capture` inside the forward pass. Routing
     rows owned by this DP rank are written into a preallocated device buffer.
+    Under pipeline parallelism a stage only fills its own layer span, so
+    :meth:`send_stage_routing_data` sends that span to the last stage, where
+    :meth:`snapshot_routing_data` reassembles every layer.
 
     The device buffer uses ``int32``. Stable snapshots use the narrowest dtype
     that can represent every logical expert ID.
@@ -83,6 +87,32 @@ class RoutedExpertsCapturer:
         )
         self.dp_rank = vllm_config.parallel_config.data_parallel_rank
         self.tp_size = vllm_config.parallel_config.tensor_parallel_size
+
+        # setup PP group for R3
+        pp_group = get_pp_group()
+        pp_size = pp_group.world_size
+        self.pp_layers = slice(
+            *get_pp_indices(num_layers, pp_group.rank_in_group, pp_size)
+        )
+        self.pp_dst = -1
+        self.pp_peers: list[tuple[int, slice]] = []
+        if pp_size == 1:
+            return
+
+        self.pp_comm = pp_group.make_sibling_device_group(
+            group_desc="pp_routed_experts"
+        )
+
+        if not get_tp_group().is_first_rank:
+            return
+        if not pp_group.is_last_rank:
+            self.pp_dst = pp_group.last_rank
+            self.pp_stream = torch.cuda.Stream()
+            return
+
+        for pp_rank in range(pp_size - 1):
+            layers = slice(*get_pp_indices(num_layers, pp_rank, pp_size))
+            self.pp_peers.append((pp_group.ranks[pp_rank], layers))
 
     def capture(self, layer_id: int, topk_ids: torch.Tensor) -> None:
         if not 0 <= layer_id < self.device_buffer.shape[1]:
@@ -153,9 +183,40 @@ class RoutedExpertsCapturer:
             f"dp_rank={self.dp_rank}, tp_size={self.tp_size})"
         )
 
+    def send_stage_routing_data(self, num_tokens: int) -> None:
+        """Send this PP stage's layer span to the last stage.
+
+        Sent on a side stream so the main stream does not block on the last
+        stage's matching receive. The narrowed copy is independent of
+        ``device_buffer``; it is sent as bytes since NCCL lacks uint16.
+        """
+        if self.pp_dst < 0:
+            return
+        rows = self.device_buffer[:num_tokens, self.pp_layers].to(self.output_dtype)
+        main_stream = torch.cuda.current_stream()
+        with torch.cuda.stream(self.pp_stream):
+            self.pp_stream.wait_stream(main_stream)
+            rows.record_stream(self.pp_stream)
+            torch.distributed.send(
+                rows.view(torch.uint8), dst=self.pp_dst, group=self.pp_comm
+            )
+
     def snapshot_routing_data(self, num_tokens: int) -> torch.Tensor:
-        """Return a stable snapshot of the current routing data."""
-        return self.device_buffer[:num_tokens].to(self.output_dtype)
+        """Return a stable snapshot of the current routing data.
+
+        Under PP the other stages' layer spans are received here. They were
+        sent steps ago, so the receives complete without waiting.
+        """
+        snapshot = self.device_buffer[:num_tokens].to(self.output_dtype)
+        for src, layers in self.pp_peers:
+            rows = torch.empty(
+                (num_tokens, layers.stop - layers.start, snapshot.shape[2]),
+                dtype=snapshot.dtype,
+                device=snapshot.device,
+            )
+            torch.distributed.recv(rows.view(torch.uint8), src=src, group=self.pp_comm)
+            snapshot[:, layers] = rows
+        return snapshot
 
 
 class RoutedExpertsSink:

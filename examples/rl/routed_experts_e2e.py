@@ -133,6 +133,7 @@ def run_inference(
     prompts: list[str],
     max_new_tokens: int = 50,
     tp: int = 1,
+    pp: int = 1,
     max_model_len: int = 4096,
 ) -> InferenceResult:
     """Run inference with routed experts capture enabled via AsyncLLM."""
@@ -140,6 +141,7 @@ def run_inference(
         model=model,
         enable_return_routed_experts=True,
         tensor_parallel_size=tp,
+        pipeline_parallel_size=pp,
         max_model_len=max_model_len,
         disable_log_stats=True,
         attention_backend="FLASH_ATTN",
@@ -299,6 +301,7 @@ def main():
     )
     parser.add_argument("--model", type=str, default=DEFAULT_MODEL)
     parser.add_argument("--tp", type=int, default=1)
+    parser.add_argument("--pp", type=int, default=1)
     parser.add_argument("--max-model-len", type=int, default=4096)
     parser.add_argument("--num-prompts", type=int, default=20)
     parser.add_argument("--max-new-tokens", type=int, default=50)
@@ -320,6 +323,7 @@ def main():
 
     print(f"Model: {args.model}")
     print(f"TP: {args.tp}")
+    print(f"PP: {args.pp}")
     print(f"Prompts: {len(prompts)}")
     print(f"Max new tokens: {args.max_new_tokens}")
     print()
@@ -330,6 +334,7 @@ def main():
         prompts=prompts,
         max_new_tokens=args.max_new_tokens,
         tp=args.tp,
+        pp=args.pp,
         max_model_len=args.max_model_len,
     )
     print(f"num_experts (from model config): {baseline.num_experts}")
@@ -352,6 +357,7 @@ def main():
             prompts=prompts,
             max_new_tokens=args.max_new_tokens,
             tp=args.tp,
+            pp=args.pp,
             max_model_len=args.max_model_len,
         )
 

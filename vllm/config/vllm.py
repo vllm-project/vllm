@@ -1163,11 +1163,6 @@ class VllmConfig:
                 "--enable-return-routed-experts is incompatible with "
                 "adaptive speculative verification."
             )
-        if self.parallel_config.pipeline_parallel_size > 1:
-            raise ValueError(
-                "--enable-return-routed-experts is incompatible with "
-                "pipeline parallelism (PP > 1)."
-            )
         if (
             self.parallel_config.decode_context_parallel_size > 1
             or self.parallel_config.prefill_context_parallel_size > 1
