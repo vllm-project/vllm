@@ -5,6 +5,7 @@ import json
 from collections.abc import Generator
 
 import pytest
+from openai.types.responses import FunctionTool
 
 from vllm.entrypoints.generate.base.protocol import (
     DeltaMessage,
@@ -386,26 +387,29 @@ TX
     assert extracted_tool_calls.tool_calls[0].function.name == "get_current_weather"
 
 
-def test_extract_tool_calls_type_conversion(step3p5_tokenizer):
-    """Test parameter type conversion based on tool schema."""
-    tools = [
-        ChatCompletionToolsParam(
-            type="function",
-            function={
-                "name": "test_types",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "int_param": {"type": "integer"},
-                        "float_param": {"type": "float"},
-                        "bool_param": {"type": "boolean"},
-                        "str_param": {"type": "string"},
-                        "obj_param": {"type": "object"},
-                    },
-                },
-            },
-        )
-    ]
+@pytest.mark.parametrize("api", ["chat", "responses"])
+def test_extract_tool_calls_type_conversion(step3p5_tokenizer, api):
+    """Test parameter type conversion based on Chat and Responses tool schemas."""
+    parameters = {
+        "type": "object",
+        "properties": {
+            "int_param": {"type": "integer"},
+            "float_param": {"type": "float"},
+            "bool_param": {"type": "boolean"},
+            "str_param": {"type": "string"},
+            "obj_param": {"type": "object"},
+        },
+    }
+    tools: list[ChatCompletionToolsParam | FunctionTool] = (
+        [
+            ChatCompletionToolsParam(
+                type="function",
+                function={"name": "test_types", "parameters": parameters},
+            )
+        ]
+        if api == "chat"
+        else [FunctionTool(type="function", name="test_types", parameters=parameters)]
+    )
 
     model_output = """<tool_call>
 <function=test_types>
@@ -428,7 +432,7 @@ hello world
 </tool_call>"""
 
     parser = Step3p5ToolParser(step3p5_tokenizer, tools=tools)
-    request = ChatCompletionRequest(model=MODEL, messages=[], tools=tools)
+    request = ChatCompletionRequest(model=MODEL, messages=[])
     extracted_tool_calls = parser.extract_tool_calls(model_output, request=request)
 
     args = json.loads(extracted_tool_calls.tool_calls[0].function.arguments)
