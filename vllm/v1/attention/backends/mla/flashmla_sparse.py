@@ -55,9 +55,11 @@ from vllm.v1.attention.ops.flashmla import (
 from vllm.v1.kv_cache_interface import AttentionSpec
 from vllm.v1.worker.workspace import current_workspace_manager
 
-# FlashMLA's schedule planner keeps a few ints per batch entry in shared
-# memory, so the per-token layout plans at most this many tokens per call.
-_MAX_TOKENS_PER_SCHED_PLAN = 8192
+# With one batch entry per token, each FlashMLA call allocates fp32 split-KV
+# accumulators of about tokens * h_q * d_v * 4 bytes. Bounding them per call
+# keeps long prefills from needing a large free block at run time, and keeps
+# the tokens per call well within the planner's shared memory.
+_MAX_SPLIT_ACCUM_BYTES = 256 * 1024 * 1024
 
 if TYPE_CHECKING:
     from vllm.model_executor.models.deepseek_v2 import Indexer
@@ -1250,11 +1252,12 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
         """
         num_tokens, actual_num_heads = q.shape[0], q.shape[1]
         q = self._pad_q_heads_for_fp8_kernel(q)
+        tokens_per_call = _MAX_SPLIT_ACCUM_BYTES // (q.shape[1] * self.kv_lora_rank * 4)
         out = q.new_empty((num_tokens, 1, q.shape[1], self.kv_lora_rank))
         k_cache = kv_c_and_k_pe_cache.view(torch.uint8).unsqueeze(-2)
         lses = []
-        for start in range(0, num_tokens, _MAX_TOKENS_PER_SCHED_PLAN):
-            end = min(start + _MAX_TOKENS_PER_SCHED_PLAN, num_tokens)
+        for start in range(0, num_tokens, tokens_per_call):
+            end = min(start + tokens_per_call, num_tokens)
             _, lse = flash_mla_with_kvcache(
                 q=q[start:end].unsqueeze(1),
                 k_cache=k_cache,

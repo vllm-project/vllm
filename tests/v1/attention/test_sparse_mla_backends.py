@@ -3697,11 +3697,12 @@ def test_fp8_dcp_topk_length_matches_masked_rows(
     ok, reason = flashmla.is_flashmla_sparse_supported()
     if not ok:
         pytest.skip(reason)
-    monkeypatch.setattr(
-        "vllm.v1.attention.backends.mla.flashmla_sparse._MAX_TOKENS_PER_SCHED_PLAN", 16
-    )
     torch.manual_seed(0)
     num_heads, head_dim, block_size, num_topk = 64, 576, 64, 2048
+    monkeypatch.setattr(
+        "vllm.v1.attention.backends.mla.flashmla_sparse._MAX_SPLIT_ACCUM_BYTES",
+        16 * num_heads * 512 * 4,  # 16 tokens per call
+    )
     seq_lens = [9000, 2100, 700]
     # With interleave > 1 a rank's local slots can run up to interleave past
     # seq_len / dcp.
