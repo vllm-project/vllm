@@ -59,7 +59,7 @@ def fused_sigmoid_gating_delta_rule_update_kernel(
     IS_SPEC_DECODING: tl.constexpr,
     IS_KDA: tl.constexpr,
 ):
-    i_k, i_v, i_nh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
+    i_nh, i_v, i_k = tl.program_id(0), tl.program_id(1), tl.program_id(2)
     i_n, i_hv = i_nh // HV, i_nh % HV
     i_h = i_hv // (HV // H)
     if IS_VARLEN:
@@ -238,7 +238,8 @@ def fused_sigmoid_gating_delta_rule_update(
     else:
         stride_indices_seq, stride_indices_tok = ssm_state_indices.stride()
 
-    grid = (NK, NV, N * HV)
+    # CUDA limits grid Y/Z dimensions to 65535, so N * HV goes in X.
+    grid = (N * HV, NV, NK)
     fused_sigmoid_gating_delta_rule_update_kernel[grid](
         A_log=A_log,
         a=a.contiguous(),
