@@ -39,6 +39,7 @@ from vllm.inputs import EngineInput, TokensPrompt, mm_input
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob
 from vllm.multimodal.inputs import (
+    MultiModalKwargsItem,
     MultiModalKwargsItems,
     PlaceholderRange,
 )
@@ -105,6 +106,23 @@ class ServingTokens(GenerateBaseServing):
             if mc.generation_config not in ("auto", "vllm")
             else getattr(mc, "override_generation_config", {}).get("max_new_tokens")
         )
+
+    def _validate_mm_cache_handles(
+        self,
+        mm_kwargs: dict[str, list[MultiModalKwargsItem | None]],
+        mm_hashes: dict[str, list[str]],
+    ) -> ErrorResponse | None:
+        cache = self.online_renderer.renderer.mm_processor_cache
+        if cache is None:
+            return None
+        try:
+            for modality, items in mm_kwargs.items():
+                for mm_hash, item in zip(mm_hashes[modality], items, strict=True):
+                    if item is not None:
+                        cache.validate_input_item(item, mm_hash)
+        except ValueError as error:
+            return self.create_error_response(error)
+        return None
 
     async def serve_tokens(
         self,
@@ -201,6 +219,8 @@ class ServingTokens(GenerateBaseServing):
             # Deserialize full tensor data and optional metadata-only data.
             # Metadata-only items are valid when ec_transfer_params is set.
             mm_kwargs = mm_kwargs_from_features(features)
+            if error := self._validate_mm_cache_handles(mm_kwargs, features.mm_hashes):
+                return error
 
             engine_input = mm_input(
                 prompt_token_ids=request.token_ids,
