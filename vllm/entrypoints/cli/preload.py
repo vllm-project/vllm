@@ -39,6 +39,10 @@ from vllm.logger import init_logger
 from vllm.model_executor.model_loader.weight_cache.protocol import (
     check_ipc_platform_support,
 )
+from vllm.model_executor.model_loader.weight_cache.seed import (
+    PEER_IPC_SEED_SOURCE,
+    RDMA_SEED_SOURCE,
+)
 from vllm.utils.network_utils import get_distributed_init_method, get_open_port
 
 if typing.TYPE_CHECKING:
@@ -99,6 +103,58 @@ def _start_health_server(
     return server, thread
 
 
+def _split_addresses(value: str | None) -> list[str]:
+    return [address.strip() for address in (value or "").split(",") if address.strip()]
+
+
+def _seed_address(value: str | None, local_rank: int, global_rank: int) -> str | None:
+    """Resolve one daemon's source address.
+
+    One address per local GPU, in ``local_rank`` order, names each source's
+    Unix socket, which is the same-host form. A single ``host:base_port``
+    instead makes every rank dial ``base_port + its global rank``, matching
+    how a source lays its listeners out, so one flag covers a whole
+    cross-host replica.
+    """
+    addresses = _split_addresses(value)
+    if not addresses:
+        return None
+    if len(addresses) > 1:
+        if local_rank >= len(addresses):
+            raise ValueError(
+                f"--weight-cache-seed has {len(addresses)} addresses but local "
+                f"GPU {local_rank} needs one; pass one address per local GPU"
+            )
+        return addresses[local_rank]
+    only = addresses[0]
+    if only.startswith(("/", "./")):
+        return only
+    host, separator, port = only.rpartition(":")
+    if not separator or not host or not port.isdigit():
+        raise ValueError(
+            "--weight-cache-seed must be a Unix socket path or host:base_port, "
+            f"got {only!r}"
+        )
+    return f"{host}:{int(port) + global_rank}"
+
+
+def _listen_address(
+    value: str | None, global_rank: int, port_offset: int = 0
+) -> tuple[str, int] | None:
+    """Bind address for one daemon's seed listener.
+
+    Ranks are spread over consecutive ports from the base so a peer can
+    derive every address from one flag; the draft group is offset past the
+    target group's block.
+    """
+    if not value:
+        return None
+    host, separator, port = value.rpartition(":")
+    if not separator or not host or not port.isdigit():
+        raise ValueError(f"--weight-cache-listen must be host:base_port, got {value!r}")
+    return host, int(port) + port_offset + global_rank
+
+
 def _run_warmup_engine(args: argparse.Namespace, socket_dir: str | None) -> None:
     """Boot one throwaway engine against the ready daemons.
 
@@ -152,6 +208,56 @@ class PreloadSubcommand(CLISubcommand):
             help="Rendezvous port for the MTP draft daemon group. Defaults to "
             "--weight-cache-master-port + 1 for multi-node, or a free port "
             "for single-node.",
+        )
+        parser.add_argument(
+            "--weight-cache-seed",
+            type=str,
+            default=None,
+            help="Fill these daemons from an already-loaded replica instead "
+            "of the checkpoint. Either one source Unix socket path per local "
+            "GPU (comma separated, in device order) for same-host copies, or "
+            "one host:base_port for cross-host copies, where each rank dials "
+            "base_port + its global rank.",
+        )
+        parser.add_argument(
+            "--weight-cache-draft-seed",
+            type=str,
+            default=None,
+            help="Same as --weight-cache-seed for the speculative draft daemon group.",
+        )
+        parser.add_argument(
+            "--weight-cache-device-offset",
+            type=int,
+            default=0,
+            help="Shift these daemons onto local GPUs starting at this index. "
+            f"A same-host --weight-cache-seed-backend {PEER_IPC_SEED_SOURCE} "
+            "mirror needs it: the source's CUDA IPC handles name its devices "
+            "by index, so the mirror must keep every GPU visible and move its "
+            "own ranks past the source's block rather than remapping with "
+            "CUDA_VISIBLE_DEVICES.",
+        )
+        parser.add_argument(
+            "--weight-cache-seed-backend",
+            choices=[PEER_IPC_SEED_SOURCE, RDMA_SEED_SOURCE],
+            default=PEER_IPC_SEED_SOURCE,
+            help="Mover for --weight-cache-seed: peer_ipc copies through CUDA "
+            "IPC on one host, rdma pulls through the Mooncake TransferEngine "
+            "across hosts.",
+        )
+        parser.add_argument(
+            "--weight-cache-listen",
+            type=str,
+            default=None,
+            help="host:base_port to serve seed peers on, in addition to the "
+            "local Unix socket. Requires --weight-cache-seed-token.",
+        )
+        parser.add_argument(
+            "--weight-cache-seed-token",
+            type=str,
+            default=None,
+            help="Shared secret a remote seed peer must present. The remote "
+            "control plane is JSON only and authenticates before decoding a "
+            "payload, but it is unencrypted, so keep it on a trusted network.",
         )
         parser.add_argument(
             "--preload-autotune",
@@ -209,6 +315,27 @@ class PreloadSubcommand(CLISubcommand):
             raise ValueError(
                 "--preload-autotune runs one local engine, so it supports "
                 "neither --nnodes > 1 nor --data-parallel-size > 1"
+            )
+        if args.weight_cache_listen and not args.weight_cache_seed_token:
+            raise ValueError(
+                "--weight-cache-listen requires --weight-cache-seed-token so a "
+                "remote peer must authenticate before the daemon answers it"
+            )
+        remote_seed = any(
+            not address.startswith(("/", "./"))
+            for address in _split_addresses(args.weight_cache_seed)
+            + _split_addresses(args.weight_cache_draft_seed)
+        )
+        if remote_seed and not args.weight_cache_seed_token:
+            raise ValueError(
+                "Seeding from a remote daemon requires --weight-cache-seed-token"
+            )
+        if remote_seed and args.weight_cache_seed_backend == PEER_IPC_SEED_SOURCE:
+            raise ValueError(
+                f"--weight-cache-seed-backend {PEER_IPC_SEED_SOURCE} copies "
+                "through CUDA IPC, which cannot cross hosts; pass "
+                f"--weight-cache-seed-backend {RDMA_SEED_SOURCE} for a remote "
+                "source"
             )
         tp_size = parallel_config.tensor_parallel_size
         pp_size = parallel_config.pipeline_parallel_size
@@ -282,35 +409,47 @@ class PreloadSubcommand(CLISubcommand):
                 groups, placements
             )
         }
-        procs = [
-            ctx.Process(
-                target=_run_daemon,
-                args=(
-                    dp_rank * pp_size * tp_size + pp_rank * tp_size + tp_rank,
-                    local_rank,
-                    config,
-                    init_method,
-                    args.weight_cache_socket_dir,
-                    ready_queue,
-                    is_draft,
-                    dp_rank,
-                    pp_rank,
-                ),
-                name=(
-                    f"vllm-weight-cache-{format_daemon_role(is_draft)}-"
-                    f"{(dp_rank * pp_size * tp_size + pp_rank * tp_size + tp_rank)}"
-                ),
+        world_size = dp_size * pp_size * tp_size
+        procs = []
+        for group_index, (is_draft, config, init_method) in enumerate(groups):
+            seed_value = (
+                args.weight_cache_draft_seed if is_draft else args.weight_cache_seed
             )
-            for (is_draft, config, init_method), (
-                local_rank,
-                dp_rank,
-                pp_rank,
-                tp_rank,
-            ) in product(groups, placements)
-        ]
-        # Held in a list so the signal handler below reaches the warmup
-        # engine once it exists.
-        warmup_procs: list[BaseProcess] = []
+            # The draft group's listeners sit past the target group's block, so
+            # one base port serves both roles without colliding.
+            port_offset = group_index * world_size
+            for local_rank, dp_rank, pp_rank, tp_rank in placements:
+                global_rank = dp_rank * pp_size * tp_size + pp_rank * tp_size + tp_rank
+                procs.append(
+                    ctx.Process(
+                        target=_run_daemon,
+                        args=(
+                            global_rank,
+                            local_rank,
+                            config,
+                            init_method,
+                            args.weight_cache_socket_dir,
+                            ready_queue,
+                            is_draft,
+                            dp_rank,
+                            pp_rank,
+                            _seed_address(seed_value, local_rank, global_rank),
+                            args.weight_cache_seed_backend,
+                            _listen_address(
+                                args.weight_cache_listen, global_rank, port_offset
+                            ),
+                            args.weight_cache_seed_token,
+                            args.weight_cache_device_offset,
+                        ),
+                        name=(
+                            f"vllm-weight-cache-{format_daemon_role(is_draft)}-"
+                            f"{global_rank}"
+                        ),
+                    )
+                )
+        # Held in a list so the signal handler below reaches the
+        # warmup engine once it exists.
+        aux_procs: list[BaseProcess] = []
         health_state = _HealthState(procs)
         health_server = None
         health_thread = None
@@ -326,7 +465,7 @@ class PreloadSubcommand(CLISubcommand):
         def _shutdown(signum, frame):
             if health_server is not None:
                 health_server.should_exit = True
-            for proc in (*warmup_procs, *procs):
+            for proc in (*aux_procs, *procs):
                 proc.terminate()
 
         signal.signal(signal.SIGINT, _shutdown)
@@ -354,7 +493,7 @@ class PreloadSubcommand(CLISubcommand):
                         health_thread.join()
                     sys.exit(max((p.exitcode or 0) for p in procs))
         if args.preload_autotune:
-            _warm_up_kernels(ctx, args, warmup_procs)
+            _warm_up_kernels(ctx, args, aux_procs)
         health_state.mark_ready()
         socket_dir_msg = args.weight_cache_socket_dir or "the default socket dir"
         logger.info_once(
@@ -394,7 +533,7 @@ class PreloadSubcommand(CLISubcommand):
 def _warm_up_kernels(
     ctx: "multiprocessing.context.SpawnContext",
     args: argparse.Namespace,
-    warmup_procs: list[BaseProcess],
+    aux_procs: list[BaseProcess],
 ) -> None:
     """Run the one-time warmup engine, reporting but not raising failures.
 
@@ -410,10 +549,10 @@ def _warm_up_kernels(
         args=(args, args.weight_cache_socket_dir),
         name="vllm-weight-cache-warmup",
     )
-    warmup_procs.append(proc)
+    aux_procs.append(proc)
     proc.start()
     proc.join()
-    warmup_procs.remove(proc)
+    aux_procs.remove(proc)
     if proc.exitcode == 0:
         logger.info_once(
             "Kernel warmup finished; the daemons now hold the FlashInfer "

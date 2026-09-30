@@ -465,3 +465,172 @@ def test_artifact_store_evicts_oldest_past_its_cap():
     assert store.get(keys[0]) is None
     assert store.get(keys[1]) == b"1"
     assert store.get(keys[2]) == b"2"
+
+
+def test_seed_manifest_describes_every_exported_tensor():
+    """A mirror allocates from the manifest alone, so it must carry the shape
+    and dtype of every entry and reject a dtype it cannot size."""
+    import torch
+
+    from vllm.model_executor.model_loader.weight_cache.protocol import TensorEntry
+    from vllm.model_executor.model_loader.weight_cache.seed import (
+        build_manifest,
+        manifest_dtype,
+        manifest_nbytes,
+    )
+
+    manifest = build_manifest(
+        {
+            "weight": TensorEntry.from_tensor(
+                torch.zeros(2, 3, dtype=torch.float16), "param"
+            ),
+            "scale": TensorEntry.from_tensor(
+                torch.ones(4, dtype=torch.float32), "buffer"
+            ),
+        }
+    )
+    assert manifest == {
+        "weight": {"shape": [2, 3], "dtype": "float16", "is_param": True},
+        "scale": {"shape": [4], "dtype": "float32", "is_param": False},
+    }
+    assert manifest_nbytes(manifest) == 2 * 3 * 2 + 4 * 4
+    assert manifest_dtype("bfloat16") is torch.bfloat16
+    with pytest.raises(RuntimeError, match="unsupported dtype"):
+        manifest_dtype("not_a_torch_dtype")
+
+
+def test_peer_seed_copy_owns_its_tensors():
+    """The mirror must end up with its own memory: aliasing the source would
+    tie its lifetime to the replica it was seeded from."""
+    from unittest.mock import patch
+
+    import torch
+
+    from vllm.model_executor.model_loader.weight_cache.protocol import TensorEntry
+    from vllm.model_executor.model_loader.weight_cache.seed import (
+        PeerIpcSeedSource,
+        build_manifest,
+    )
+
+    entries = {
+        "weight": TensorEntry.from_tensor(
+            torch.zeros(2, 3, dtype=torch.float16), "param"
+        )
+    }
+    with patch.object(torch.accelerator, "synchronize"):
+        result = PeerIpcSeedSource().fill(
+            build_manifest(entries),
+            {"source_device_index": 0, "entries": entries},
+            torch.device("cpu"),
+        )
+    assert torch.equal(result["weight"], torch.zeros(2, 3, dtype=torch.float16))
+    assert result["weight"].data_ptr() != entries["weight"].cpu_tensor.data_ptr()
+
+
+def test_peer_seed_rejects_a_remapped_source_device():
+    """A CUDA IPC handle names its device by index, so a mirror that sees a
+    different physical GPU at that index must refuse rather than open a
+    handle on the wrong device."""
+    from unittest.mock import patch
+
+    import torch
+
+    from vllm.model_executor.model_loader.weight_cache.protocol import TensorEntry
+    from vllm.model_executor.model_loader.weight_cache.seed import (
+        PeerIpcSeedSource,
+        build_manifest,
+    )
+
+    entries = {"weight": TensorEntry.from_tensor(torch.zeros(2), "param")}
+    seed = {
+        "source_device_index": 0,
+        "source_gpu_uuid": "GPU-source",
+        "entries": entries,
+    }
+    with patch(
+        "vllm.model_executor.model_loader.weight_cache.seed.current_platform"
+    ) as platform:
+        platform.get_device_uuid.return_value = "GPU-somewhere-else"
+        with pytest.raises(RuntimeError, match="different physical GPU"):
+            PeerIpcSeedSource().fill(build_manifest(entries), seed, torch.device("cpu"))
+
+
+@contextlib.contextmanager
+def _remote_seed_daemon(token):
+    """Serve the daemon's remote seed plane on a loopback port.
+
+    Only that handler is exercised, so __init__ (which loads a model onto a
+    GPU) is skipped and just the state it touches is provided.
+    """
+    from vllm.model_executor.model_loader.weight_cache.artifact_cache import (
+        ArtifactStore,
+    )
+    from vllm.model_executor.model_loader.weight_cache.daemon import WeightCacheDaemon
+    from vllm.model_executor.model_loader.weight_cache.protocol import ArtifactCacheKey
+
+    daemon = WeightCacheDaemon.__new__(WeightCacheDaemon)
+    daemon.artifacts = ArtifactStore()
+    daemon.seed_token = token
+    daemon.model = None
+    daemon.mirror = None
+    daemon.role = "target"
+    daemon.global_rank = 0
+    key = ArtifactCacheKey(kind="flashinfer_autotune", content_hash="abc")
+    daemon.artifacts.put(key, b"tuned")
+
+    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    server.bind(("127.0.0.1", 0))
+    server.listen()
+
+    def _serve():
+        while True:
+            try:
+                conn, _ = server.accept()
+            except OSError:
+                return
+            with conn, contextlib.suppress(Exception):
+                daemon._handle_remote_connection(conn)
+
+    thread = threading.Thread(target=_serve, daemon=True)
+    thread.start()
+    try:
+        yield server.getsockname()[1]
+    finally:
+        server.close()
+        thread.join(timeout=5)
+
+
+def _ask_remote(port, message):
+    from vllm.model_executor.model_loader.weight_cache.protocol import (
+        recv_json,
+        send_json,
+    )
+
+    with socket.create_connection(("127.0.0.1", port), timeout=5) as sock:
+        send_json(sock, message)
+        return recv_json(sock)
+
+
+def test_remote_seed_plane_requires_the_shared_token():
+    """The listener authenticates before serving anything, and it speaks JSON
+    rather than pickle so an unauthenticated peer's bytes are never
+    deserialized into objects."""
+    import pybase64 as base64
+
+    with _remote_seed_daemon("s3cret") as port:
+        assert _ask_remote(port, {"cmd": "fetch_artifacts"})["status"] == "error"
+        wrong = _ask_remote(port, {"cmd": "fetch_artifacts", "token": "guess"})
+        assert wrong["status"] == "error"
+        served = _ask_remote(port, {"cmd": "fetch_artifacts", "token": "s3cret"})
+        assert served["status"] == "ok"
+        assert base64.b64decode(served["artifacts"][0]["data"]) == b"tuned"
+
+
+def test_remote_seed_plane_refuses_local_only_commands():
+    """Exporting IPC handles and releasing weights stay on the
+    owner-verified Unix socket even for an authenticated peer."""
+    with _remote_seed_daemon("s3cret") as port:
+        for cmd in ("get_state", "release", "put_artifact", "get_memory"):
+            response = _ask_remote(port, {"cmd": cmd, "token": "s3cret"})
+            assert response["status"] == "error"
+            assert "served locally" in response["message"]

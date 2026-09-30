@@ -9,6 +9,10 @@ bytes, so the daemon can serve one to any local process that reaches its
 socket rather than only to the engine that owns its GPU.
 """
 
+from typing import Any
+
+import pybase64 as base64
+
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader.weight_cache.protocol import (
@@ -16,8 +20,10 @@ from vllm.model_executor.model_loader.weight_cache.protocol import (
     ArtifactCacheKey,
     WeightCacheUnavailableError,
     connect_daemon,
+    dataclass_to_json,
     get_current_device_uuid,
     get_socket_path,
+    json_to_dataclass,
     recv_msg,
     send_msg,
 )
@@ -56,6 +62,43 @@ class ArtifactStore:
         if key not in self._artifacts and len(self._artifacts) >= self.max_entries:
             self._artifacts.pop(next(iter(self._artifacts)))
         self._artifacts[key] = data
+
+    def to_json(self) -> list[dict[str, Any]]:
+        """Render the store for the remote control plane."""
+        return [
+            {"key": dataclass_to_json(key), "data": base64.b64encode(data).decode()}
+            for key, data in self._artifacts.items()
+        ]
+
+    def merge_json(self, payload: Any) -> int:
+        """Adopt a peer's artifacts, dropping anything malformed.
+
+        The payload comes from a seeding peer and is untrusted, so a bad
+        entry is skipped rather than failing the seed: these are caches, and
+        losing one only costs the work of recomputing it.
+
+        Returns:
+            How many artifacts were adopted.
+
+        """
+        if not isinstance(payload, list):
+            return 0
+        adopted = 0
+        for item in payload:
+            try:
+                key = json_to_dataclass(ArtifactCacheKey, item["key"])
+                data = base64.b64decode(item["data"], validate=True)
+            except Exception:
+                logger.warning("Skipping a malformed artifact from a seed peer")
+                continue
+            if len(data) > MAX_ARTIFACT_SIZE:
+                logger.warning(
+                    "Skipping an oversized %r artifact from a seed peer", key.kind
+                )
+                continue
+            self.put(key, data)
+            adopted += 1
+        return adopted
 
 
 class DaemonArtifactCache:
