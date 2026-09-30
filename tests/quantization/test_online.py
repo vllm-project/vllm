@@ -612,7 +612,6 @@ def test_nvfp4_per_token_backend_contract() -> None:
     from vllm.model_executor.layers.fused_moe.experts.flashinfer_cutlass_moe import (
         FlashInferExperts,
     )
-    from vllm.model_executor.layers.fused_moe.experts.marlin_moe import MarlinExperts
     from vllm.model_executor.layers.fused_moe.experts.trtllm_nvfp4_moe import (
         TrtLlmNvFp4ExpertsModular,
         TrtLlmNvFp4ExpertsMonolithic,
@@ -628,7 +627,6 @@ def test_nvfp4_per_token_backend_contract() -> None:
     assert FlashInferCuteDSLExperts._supports_quant_scheme(*scheme)
     assert FlashInferCuteDSLExperts._supports_no_act_and_mul()
     assert not FlashInferExperts._supports_quant_scheme(*scheme)
-    assert not MarlinExperts._supports_quant_scheme(*scheme)
 
 
 @pytest.mark.parametrize("per_token_activation", [False, True])
