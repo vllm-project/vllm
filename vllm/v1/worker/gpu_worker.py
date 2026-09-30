@@ -57,6 +57,7 @@ from vllm.distributed.weight_transfer import (
 )
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
+from vllm.model_executor.model_loader import get_model_loader
 from vllm.model_executor.model_loader.weight_checksum import (
     compute_tensor_digests,
     zero_weights,
@@ -507,7 +508,13 @@ class Worker(WorkerBase):
 
             # take current memory snapshot
             self.init_snapshot = init_snapshot = MemorySnapshot(device=self.device)
-            self.requested_memory = request_memory(init_snapshot, self.cache_config)
+            # Weights from external model loader process
+            external_weight_memory = get_model_loader(
+                self.load_config
+            ).get_external_weight_memory(self.vllm_config)
+            self.requested_memory = request_memory(
+                init_snapshot, self.cache_config, external_weight_memory
+            )
             logger.debug("worker init memory snapshot: %r", self.init_snapshot)
             logger.debug(
                 "worker requested memory: %sGiB", format_gib(self.requested_memory)
