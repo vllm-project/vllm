@@ -1818,6 +1818,42 @@ def test_worker_polls_async_load_without_forward_execution(fail_load):
     assert worker.get_block_ids_with_load_errors() == ({1} if fail_load else set())
 
 
+class _WaitRecordingDelayedLoadHandle(_DelayedLoadWorkerHandle):
+    def __init__(self):
+        self.waited = []
+
+    def wait(self, job):
+        self.waited.append(job)
+        job.complete()
+        return job
+
+
+@pytest.mark.parametrize("layerwise", [False, True])
+def test_forward_does_not_wait_for_async_loads(layerwise):
+    """Async loads fill blocks of requests the running batch does not contain."""
+    handle = _WaitRecordingDelayedLoadHandle()
+    worker = UMBPStoreConnectorWorker(handle, layerwise_load=layerwise)
+    plan = BlockTransferPlan(
+        "async-load",
+        1,
+        request_id="req",
+        ranges=(KVRange("layer1", 0, 1, 1000, 16, 16, 0),),
+    )
+    worker.start_load_kv(
+        None, UMBPConnectorMetadata(async_load=True, load_requests={"req": [plan]})
+    )
+
+    worker.wait_for_layer_load("layer1")
+    worker.wait_for_layer_load("")
+
+    assert handle.waited == []
+    assert worker.get_finished(set()) == (None, None)
+    # Blocks of a preempted batch may be reused, so their loads must settle.
+    worker.handle_preemptions(UMBPConnectorMetadata(preempted_block_ids={1}))
+    assert handle.waited == [handle.load_job]
+    assert worker.get_finished(set()) == (None, {"req"})
+
+
 class _CancellableWorkerHandle(_WorkerHandle):
     def __init__(self):
         self.cancelled = []
@@ -2017,11 +2053,13 @@ def test_load_cancellation_preserves_other_requests(layerwise):
     )
     worker.handle_preemptions(UMBPConnectorMetadata(preempted_request_ids={"first"}))
     worker.wait_for_layer_load("")
+    # Asynchronous loads settle through get_finished, not the forward pass.
+    finished = worker.get_finished(set())
 
     assert len(handle.cancelled) == 1
     assert handle.cancelled[0].plans[0].request_id == "first"
     assert worker.get_kv_connector_stats().reduce()["load_completed"] == 1
-    assert worker.get_finished(set()) == (None, None if layerwise else {"second"})
+    assert finished == (None, None if layerwise else {"second"})
     worker.wait_for_layer_load("")
     assert worker.get_kv_connector_stats() is None
 

@@ -255,6 +255,10 @@ class UMBPStoreConnectorWorker:
         return succeeded
 
     def wait_for_layer_load(self, layer_name: str) -> None:
+        if self._report_load_completions:
+            # Asynchronous loads fill blocks of requests that do not run until
+            # get_finished reports them, so no forward pass reads those blocks.
+            return
         self._drain_load_jobs(wait=True, layer_name=layer_name)
 
     def save_kv_layer(
@@ -427,7 +431,7 @@ class UMBPStoreConnectorWorker:
         if not (metadata.preempted_block_ids or metadata.preempted_request_ids):
             return
         if not metadata.preempted_request_ids:
-            self.wait_for_layer_load("")
+            self._drain_load_jobs(wait=True)
             self.wait_for_save()
             self._drain_store_jobs(wait=True)
             return

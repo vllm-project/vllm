@@ -308,8 +308,12 @@ def test_finished_hybrid_tail_roundtrip_restores_full_state(tmp_path, device):
         )
         output.finished_req_ids = set()
         worker.start_load_kv(None, scheduler.build_connector_meta(output))
-        worker.wait_for_layer_load("")
-        assert worker.get_finished(set()) == (None, {"replay"})
+        # Asynchronous loads settle through get_finished, not the forward pass.
+        deadline = time.monotonic() + 10
+        while (finished := worker.get_finished(set())) == (None, None):
+            assert time.monotonic() < deadline, "load completion was not reported"
+            time.sleep(0.001)
+        assert finished == (None, {"replay"})
         assert worker.get_failed_recving() == set()
         for index, (name, cache) in enumerate(caches.items(), 3):
             assert torch.equal(cache[index], expected[name])
