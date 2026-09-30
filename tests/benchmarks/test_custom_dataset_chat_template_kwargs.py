@@ -58,7 +58,7 @@ def test_chat_template_kwargs_forwarded(tmp_path: Path) -> None:
     _write_one(jsonl)
 
     tok = _RecordingTokenizer()
-    get_samples(_args(str(jsonl), {"thinking": True}), tok)
+    get_samples(_args(str(jsonl), {"thinking": True}), tok)  # type: ignore[arg-type]
 
     assert tok.captured_kwargs == {"thinking": True}
 
@@ -70,6 +70,6 @@ def test_chat_template_kwargs_default_is_noop(tmp_path: Path) -> None:
     _write_one(jsonl)
 
     tok = _RecordingTokenizer()
-    get_samples(_args(str(jsonl), None), tok)
+    get_samples(_args(str(jsonl), None), tok)  # type: ignore[arg-type]
 
     assert tok.captured_kwargs == {}

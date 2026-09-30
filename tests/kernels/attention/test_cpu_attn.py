@@ -836,7 +836,7 @@ def varlen_encoder_zentorch_sdpa(
         key,
         value,
         output,
-        SimpleNamespace(query_start_loc=query_start_loc, causal=False),
+        SimpleNamespace(query_start_loc=query_start_loc, causal=False),  # type: ignore[arg-type]
         scale,
         sliding_window if sliding_window is not None else -1,
         alibi_slopes,

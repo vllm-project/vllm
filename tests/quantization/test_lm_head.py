@@ -15,6 +15,7 @@ from tests.quantization.utils import load_model_without_vllm_runner
 from vllm.model_executor.layers.linear import ColumnParallelLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization.auto_gptq import AutoGPTQLinearMethod
+from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
 from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors import (  # noqa: E501
     CompressedTensorsConfig,
 )
@@ -80,6 +81,7 @@ def test_quantized_lm_head_matches_linear(
         dtype=torch.bfloat16, head_dtype=None
     )
     default_vllm_config.kernel_config.linear_backend = "humming"
+    quant_config: QuantizationConfig
     if quant_format is None:
         quant_config = ModelOptNvFp4Config(
             quant_method=preset,

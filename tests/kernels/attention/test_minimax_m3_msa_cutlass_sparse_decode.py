@@ -235,14 +235,14 @@ def test_msa_metadata_builder_prepares_cutlass_for_regular_decode(
     builder.num_q_heads = 64
     builder.num_kv_heads = 4
     builder.topk_blocks = TOPK
-    builder.kv_cache_spec = SimpleNamespace(num_kv_heads=4)
+    builder.kv_cache_spec = SimpleNamespace(num_kv_heads=4)  # type: ignore[assignment]
     builder.kv_cache_dtype = "fp8_e4m3"
     builder.decode_backend = "cutlass"
-    builder.msa_cutlass_plan_cache = object()
+    builder.msa_cutlass_plan_cache = object()  # type: ignore[assignment]  # Mocked plan-cache sentinel.
 
     metadata = builder.build(
         0,
-        SimpleNamespace(
+        SimpleNamespace(  # type: ignore[arg-type]
             seq_lens_cpu_upper_bound=torch.full((batch,), 257, dtype=torch.int32)
         ),
     )
@@ -377,7 +377,7 @@ def test_query_fp8_stays_valid_when_cutlass_plan_appears_on_replay(
     with torch.cuda.stream(stream), override_forward_context(forward_context):
         capture = BreakableCUDAGraphCapture()
         with capture:
-            query_fp8 = MiniMaxM3SparseAttention._allocate_query_fp8(attention, qkv)
+            query_fp8 = MiniMaxM3SparseAttention._allocate_query_fp8(attention, qkv)  # type: ignore[arg-type]
             if query_fp8 is not None:
                 query_fp8.zero_()
             run_attention(query_fp8)

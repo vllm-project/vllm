@@ -340,7 +340,7 @@ def _make_v2_state(
         device=device,
         all_token_ids=SimpleNamespace(gpu=all_tokens),
     )
-    state = DryState(_make_vllm_config(), req_states)
+    state = DryState(_make_vllm_config(), req_states)  # type: ignore[arg-type]
     if tokenizer is not None:
         # Re-resolve the default set now that a tokenizer is installed.
         state._tokenizer = tokenizer
@@ -446,7 +446,7 @@ def test_spec_decode_is_refused_at_construction():
     )
     config = _make_vllm_config(speculative_config=SimpleNamespace())
     with pytest.raises(ValueError, match="speculative decoding"):
-        DryState(config, req_states)
+        DryState(config, req_states)  # type: ignore[arg-type]
 
 
 def test_v2_draft_expanded_logits_raise():
@@ -917,7 +917,10 @@ def test_loads_through_the_loader_by_fqcn():
         total_len=None,
     )
     procs = loader.build_custom_logits_processors(
-        _make_vllm_config(), req_states, False, [DRY_FQCN]
+        _make_vllm_config(),
+        req_states,  # type: ignore[arg-type]
+        False,
+        [DRY_FQCN],
     )
     assert [type(p) for p in procs] == [DryState]
 

@@ -85,7 +85,7 @@ def test_compute_probs_and_sample_next_token_uses_fp64_exponential_race():
 def test_mtp_model_returns_tuple(architecture: str, expected: bool):
     proposer = object.__new__(SpecDecodeBaseProposer)
     proposer.method = "mtp"
-    proposer.draft_model_config = SimpleNamespace(
+    proposer.draft_model_config = SimpleNamespace(  # type: ignore[assignment]  # Architecture-only config.
         hf_config=SimpleNamespace(architectures=[architecture])
     )
 

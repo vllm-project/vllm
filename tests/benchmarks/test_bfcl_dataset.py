@@ -271,7 +271,7 @@ def test_bfcl_prompt_len_includes_tools(tmp_path: Path) -> None:
     args.num_prompts = 1
 
     with _patch_hf_api(fake_download):
-        samples = get_samples(args, fake)
+        samples = get_samples(args, fake)  # type: ignore[arg-type]
 
     assert len(samples) == 1
     assert captured["tools"] is not None, (
@@ -311,7 +311,7 @@ def test_bfcl_prompt_len_falls_back_when_tokenizer_rejects_tools(
     args.num_prompts = 1
 
     with _patch_hf_api(fake_download):
-        samples = get_samples(args, _LegacyTokenizer())
+        samples = get_samples(args, _LegacyTokenizer())  # type: ignore[arg-type]
 
     assert len(samples) == 1
     assert samples[0].prompt_len > 0

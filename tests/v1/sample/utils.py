@@ -4,14 +4,26 @@
 from collections.abc import Iterator
 from enum import Enum
 from typing import NamedTuple
+from unittest.mock import MagicMock
 
 import regex as re
 import torch
 
 from vllm import CompletionOutput
+from vllm.config import ReasoningConfig
 from vllm.utils.torch_utils import make_tensor_with_pad
 from vllm.v1.sample.logits_processor import BatchUpdate, LogitsProcessor
 from vllm.v1.sample.metadata import SamplingMetadata
+
+
+def create_mock_reasoning_config(
+    start_token_ids: list[int], end_token_ids: list[int]
+) -> ReasoningConfig:
+    return MagicMock(
+        spec=ReasoningConfig,
+        reasoning_start_token_ids=start_token_ids,
+        reasoning_end_token_ids=end_token_ids,
+    )
 
 
 class BatchLogprobsComposition(Enum):
@@ -141,7 +153,11 @@ def compute_correct_cumulative_logprob(completion_output: CompletionOutput) -> f
     token_ids = completion_output.token_ids
     logprobs = completion_output.logprobs
     assert logprobs is not None
-    return sum([lp[tok_id].logprob for tok_id, lp in zip(token_ids, logprobs)])
+    values: list[float] = []
+    for tok_id, lp in zip(token_ids, logprobs):
+        assert lp is not None
+        values.append(lp[tok_id].logprob)
+    return sum(values)
 
 
 def create_fake_logits(batch_size: int, vocab_size: int) -> torch.Tensor:

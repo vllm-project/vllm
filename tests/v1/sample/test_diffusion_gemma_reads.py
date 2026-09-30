@@ -341,6 +341,7 @@ def test_batch_allowed_needs_one_shared_set():
     assert states.batch_allowed([]) is None
 
     shared = states.batch_allowed([0])
+    assert shared is not None
     assert shared.tolist() == [1, 2, 3]
     assert shared.dtype == torch.int64
     assert states.batch_allowed([0, 0]) is shared

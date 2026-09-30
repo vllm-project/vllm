@@ -153,6 +153,7 @@ def test_triton_unified_attn_diffkv_vs_reference(
     else:
         from vllm.v1.attention.backends.fa_utils import flash_attn_varlen_func
 
+        assert fa_version is not None
         # FA's TMA path needs aligned singleton strides (num_kv_heads == 1).
         fa_k = canonicalize_singleton_dim_strides(key_cache)
         fa_v = canonicalize_singleton_dim_strides(value_cache)
