@@ -230,17 +230,19 @@ class PleRecoverSSMMetadata(PleShortConvAttentionMetadata, RecoverSSMMetadata):
 
 
 class PleRecoverSSMMetadataBuilder(PleShortConvAttentionMetadataBuilder):
-    # Same as the GDN RecoverSSM builder: PIECEWISE only for now.
-    _cudagraph_support = AttentionCGSupport.NEVER
+    # Same as the GDN RecoverSSM builder: uniform spec-decode batches replay as FULL
+    # graphs on the base builder's staged, null-padded buffers; the commit runs after
+    # sampling, outside the graph.
+    _cudagraph_support = AttentionCGSupport.UNIFORM_BATCH
 
     def __init__(self, kv_cache_spec, layer_names, vllm_config, device) -> None:
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
-        self.use_full_cuda_graph = False
         self._ones = torch.ones(
             vllm_config.scheduler_config.max_num_seqs, dtype=torch.int32, device=device
         )
         self._ctx: _PleConvCommit | None = None
         self._logged = False
+        self._capturing = False
 
     def _get_ctx(self):
         if self._ctx is None:
@@ -270,6 +272,9 @@ class PleRecoverSSMMetadataBuilder(PleShortConvAttentionMetadataBuilder):
         m = common_attn_metadata
         rows = None
         if self.use_spec_decode and num_decode_draft_tokens_cpu is not None:
+            if self._capturing and m.is_prefilling is None:
+                # CUDA graph capture: dummy decode batches, every row a spec window.
+                m = m.replace(is_prefilling=torch.zeros(m.num_reqs, dtype=torch.bool))
             if m.is_prefilling is None or m.is_prefilling.device.type != "cpu":
                 raise ValueError("PLE RecoverSSM needs the CPU is_prefilling mask")
             # the same classification as the GDN builder, so both commits map the same
@@ -295,7 +300,10 @@ class PleRecoverSSMMetadataBuilder(PleShortConvAttentionMetadataBuilder):
             return meta
         base = {f.name: getattr(meta, f.name) for f in fields(meta)}
         n = meta.num_spec_decodes
-        base["num_accepted_tokens"] = self._ones[:n]
+        # sized like the (possibly graph-padded) state indices
+        assert meta.spec_state_indices_tensor is not None
+        num_rows = meta.spec_state_indices_tensor.shape[0]
+        base["num_accepted_tokens"] = self._ones[:num_rows]
         if rows is None:
             raise ValueError("PLE RecoverSSM: spec rows without draft counts")
         req_idx = recoverssm_request_indices(rows, n, m.query_start_loc.device)
@@ -314,6 +322,13 @@ class PleRecoverSSMMetadataBuilder(PleShortConvAttentionMetadataBuilder):
         return PleRecoverSSMMetadata(
             **base, recoverssm_commit=commit, recoverssm_context=self._get_ctx()
         )
+
+    def build_for_cudagraph_capture(self, common_attn_metadata):
+        self._capturing = True
+        try:
+            return super().build_for_cudagraph_capture(common_attn_metadata)
+        finally:
+            self._capturing = False
 
 
 class PleRecoverSSMAttentionBackend(PleShortConvAttentionBackend):

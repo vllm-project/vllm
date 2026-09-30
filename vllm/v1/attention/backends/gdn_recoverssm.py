@@ -76,18 +76,19 @@ class GDNRecoverSSMMetadata(GDNAttentionMetadata, RecoverSSMMetadata):
 
 
 class GDNRecoverSSMMetadataBuilder(GDNAttentionMetadataBuilder):
-    # The verify/commit metadata is not staged for FULL graph replay yet; declaring
-    # NEVER makes the runner fall back to PIECEWISE (attention compiled piecewise).
-    _cudagraph_support = AttentionCGSupport.NEVER
+    # Uniform spec-decode batches replay as FULL graphs: the base builder stages the
+    # state indices, query offsets and accepted counts into persistent buffers and pads
+    # the batch with null-state, zero-length rows, which the verify kernel skips. The
+    # commit runs after sampling, outside the graph, on the staged tensors.
+    _cudagraph_support = AttentionCGSupport.UNIFORM_BATCH
 
     def __init__(self, kv_cache_spec, layer_names, vllm_config, device) -> None:
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
-        # The builder may be created before the runner resolves the CUDA graph mode.
-        self.use_full_cuda_graph = False
         max_reqs = vllm_config.scheduler_config.max_num_seqs
         self._ones = torch.ones(max_reqs, dtype=torch.int32, device=device)
         self._context: Any = None
         self._logged = False
+        self._capturing = False
 
     def _get_context(self):
         if self._context is None:
@@ -120,6 +121,9 @@ class GDNRecoverSSMMetadataBuilder(GDNAttentionMetadataBuilder):
         m = common_attn_metadata
         rows = None
         if self.use_spec_decode and num_decode_draft_tokens_cpu is not None:
+            if self._capturing and m.is_prefilling is None:
+                # CUDA graph capture: dummy decode batches, every row a spec window.
+                m = m.replace(is_prefilling=torch.zeros(m.num_reqs, dtype=torch.bool))
             if m.is_prefilling is None or m.is_prefilling.device.type != "cpu":
                 raise ValueError("GDN RecoverSSM needs the CPU is_prefilling mask")
             # Positive counts only defeat the base builder's "no drafts -> regular
@@ -144,7 +148,11 @@ class GDNRecoverSSMMetadataBuilder(GDNAttentionMetadataBuilder):
             n = meta.num_spec_decodes
             assert meta.spec_state_indices_tensor is not None
             base["spec_state_indices_tensor"] = meta.spec_state_indices_tensor[:, :1]
-            base["num_accepted_tokens"] = self._ones[:n]
+            # One accepted token per row: the checkpoint already holds the accepted
+            # state. Sized like the (possibly graph-padded) state indices.
+            base["num_accepted_tokens"] = self._ones[
+                : base["spec_state_indices_tensor"].shape[0]
+            ]
             if rows is None:
                 raise ValueError("GDN RecoverSSM: spec rows without draft counts")
             request_indices = recoverssm_request_indices(
@@ -169,6 +177,15 @@ class GDNRecoverSSMMetadataBuilder(GDNAttentionMetadataBuilder):
             recoverssm_commit=commit,
             recoverssm_context=self._get_context() if commit is not None else None,
         )
+
+    def build_for_cudagraph_capture(
+        self, common_attn_metadata: CommonAttentionMetadata
+    ):
+        self._capturing = True
+        try:
+            return super().build_for_cudagraph_capture(common_attn_metadata)
+        finally:
+            self._capturing = False
 
 
 class GDNRecoverSSMAttentionBackend(GDNAttentionBackend):

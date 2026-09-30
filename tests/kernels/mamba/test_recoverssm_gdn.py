@@ -600,3 +600,31 @@ def test_align_boundary_bf16_state(nc, accepted, bs):
         rtol=BF16_ULP,
         atol=1e-5,
     )
+
+
+def test_verify_skips_cuda_graph_padding_rows():
+    """FULL graph replay pads the batch with null-state, zero-length rows (the GDN
+    builder's staging); the verify must give the real rows the same output and replay
+    records as the unpadded call, and touch nothing for the padding."""
+    from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
+
+    inp = _make([4, 2, 4], nb=12, seed=3)
+    real = torch.tensor([2, 5, 7], dtype=torch.int32, device="cuda")
+    ref_cache = inp["replay_cache"].clone()
+    ref = _verify(inp, state_indices=real, replay_cache=ref_cache)
+
+    before = inp["checkpoint_state"].clone()
+    pad_cache = inp["replay_cache"].clone()
+    padded_idx = torch.tensor(
+        [2, 5, 7, NULL_BLOCK_ID, NULL_BLOCK_ID], dtype=torch.int32, device="cuda"
+    )
+    padded_qsl = torch.tensor([0, 4, 6, 10, 10, 10], dtype=torch.int32, device="cuda")
+    out = _verify(
+        inp,
+        state_indices=padded_idx,
+        query_start_loc=padded_qsl,
+        replay_cache=pad_cache,
+    )
+    assert torch.equal(out, ref)
+    assert torch.equal(pad_cache, ref_cache)
+    assert torch.equal(inp["checkpoint_state"], before)

@@ -134,14 +134,14 @@ def test_uses_recoverssm_predicate():
     assert not uses_recoverssm(SimpleNamespace(), 3)
 
 
-def test_builders_fall_back_to_piecewise():
+def test_builders_support_uniform_batch_full_graphs():
     from vllm.v1.attention.backends.gdn_recoverssm import GDNRecoverSSMMetadataBuilder
     from vllm.v1.attention.backends.ple_recoverssm import PleRecoverSSMMetadataBuilder
 
     for builder in (GDNRecoverSSMMetadataBuilder, PleRecoverSSMMetadataBuilder):
         assert (
             builder.get_cudagraph_support(cast(Any, None), cast(Any, None))
-            == AttentionCGSupport.NEVER
+            == AttentionCGSupport.UNIFORM_BATCH
         )
 
 
