@@ -60,11 +60,12 @@ from vllm.distributed.device_communicators.shm_broadcast import (
     check_shm_free_space,
 )
 from vllm.distributed.parallel_state import GroupCoordinator
-from vllm.forward_context import get_forward_context
+from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import ColumnParallelLinear
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.utils import set_weight_attrs
+from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.platform_utils import is_uva_available
 from vllm.utils.torch_utils import get_accelerator_view_from_cpu_tensor
@@ -73,8 +74,18 @@ logger = init_logger(__name__)
 
 # Cache value for tokens that take no part in an n-gram (image spans).
 DEAD_ID = -1
-# Below this many rows, sorting a host lookup costs more than it saves.
-_SORT_MIN_ROWS = 36864
+
+
+def _engram_lookup_thresholds(device: torch.device) -> tuple[int | None, int | None]:
+    """Host lookup thresholds on `device`: the rows from which to sort, and the
+    tokens (max over DP ranks) from which to run inline. None disables that path."""
+    if current_platform.is_cuda() and current_platform.is_device_capability_family(
+        100, device.index or 0
+    ):
+        # Measured on GB200.
+        return 36864, 4096
+    # TODO: Add hand-tuned thresholds for other GPU families.
+    return None, None
 
 
 def _is_prime(n: int) -> bool:
@@ -724,13 +735,6 @@ def gather_engram_hashes(
 class DPSharedEngramStorage:
     """Registered host weights shared by a node-local DP group with one writer."""
 
-    @staticmethod
-    def check_available(num_bytes: int) -> None:
-        """Raise if this rank cannot hold `num_bytes` of shared tables."""
-        if not os.path.isdir(SHM_PATH):
-            raise RuntimeError(f"{SHM_PATH} is not mounted")
-        check_shm_free_space(num_bytes, allocation_name="Engram tables")
-
     def __init__(
         self, num_rows: int, dim: int, block_size: int, group: GroupCoordinator
     ) -> None:
@@ -825,55 +829,42 @@ class DPSharedEngramStorage:
         ):
             raise RuntimeError("Shared Engram parameter storage must not be replaced")
         if self._views is None:
-            self._views = self._device_views()
+            self._views = (
+                get_accelerator_view_from_cpu_tensor(self.weight),
+                get_accelerator_view_from_cpu_tensor(self.weight_scale_inv),
+            )
         return self._views
 
-    def _device_views(self) -> tuple[torch.Tensor, torch.Tensor]:
-        return (
-            get_accelerator_view_from_cpu_tensor(self.weight),
-            get_accelerator_view_from_cpu_tensor(self.weight_scale_inv),
-        )
 
-
-def select_shared_engram_storage(
-    layout: EngramLayout,
-    storages: tuple[type[DPSharedEngramStorage], ...],
-    block_size: int = 32,
-) -> type[DPSharedEngramStorage] | None:
-    """The first of `storages` in which every co-located DP replica can hold the
-    full tables, or None to shard the tables across replicas instead."""
+def can_share_engram_tables(layout: EngramLayout, block_size: int = 32) -> bool:
+    """Whether co-located DP replicas exist and /dev/shm can hold the full tables."""
     if get_engram_dp_size() == 1:
         logger.warning_once(
             "Engram DP replicas are not co-located on one node; "
             "storing the offloaded tables per rank instead of sharing them."
         )
-        return None
+        return False
     num_bytes = sum(layout.num_embeddings) * (
         layout.head_dim + layout.head_dim // block_size
     )
     group = get_engram_dp_group()
     assert group is not None
-    for storage in storages:
-        reason = None
-        try:
-            storage.check_available(num_bytes)
-        except Exception as exc:
-            reason = f"{type(exc).__name__}: {exc}"
-        # Replicas may disagree (e.g. on NUMA nodes) but must pick together.
-        reasons: list[str | None] = [None] * group.world_size
-        torch.distributed.all_gather_object(reasons, reason, group=group.cpu_group)
-        failures = "; ".join(
-            f"EDP rank {rank}: {reason}"
-            for rank, reason in enumerate(reasons)
-            if reason is not None
-        )
-        if not failures:
-            return storage
+    # Only the leader allocates, so every replica follows its check.
+    error = None
+    if group.rank_in_group == 0:
+        if not os.path.isdir(SHM_PATH):
+            error = f"{SHM_PATH} is not mounted"
+        else:
+            try:
+                check_shm_free_space(num_bytes, allocation_name="Engram tables")
+            except Exception as exc:
+                error = f"{type(exc).__name__}: {exc}"
+    error = group.broadcast_object(error)
+    if error is not None:
         logger.warning_once(
-            "Cannot share Engram tables in %s (%s).", storage.__name__, failures
+            "Sharding the offloaded Engram tables across DP replicas: %s", error
         )
-    logger.warning_once("Sharding the offloaded Engram tables across DP replicas.")
-    return None
+    return error is None
 
 
 def _allocate_huge_page_storage(num_bytes: int) -> torch.Tensor | None:
@@ -931,7 +922,6 @@ class ParallelEngramEmbedding(nn.Module):
         cpu_offload: bool = False,
         dp_shared_memory: bool = False,
         use_thp: bool = False,
-        shared_storage: type[DPSharedEngramStorage] = DPSharedEngramStorage,
     ) -> None:
         super().__init__()
         assert head_sizes and all(size > 0 for size in head_sizes)
@@ -939,7 +929,6 @@ class ParallelEngramEmbedding(nn.Module):
         self.cpu_offload = cpu_offload
         self.dp_shared_memory = dp_shared_memory
         self.use_thp = use_thp
-        self.shared_storage = shared_storage
         self.dp_size = get_engram_dp_size()
         if dp_shared_memory:
             if not cpu_offload:
@@ -1010,7 +999,7 @@ class ParallelEngramEmbedding(nn.Module):
         if self.dp_shared_memory:
             group = get_engram_dp_group()
             assert group is not None
-            storage = self.shared_storage(
+            storage = DPSharedEngramStorage(
                 self.part_num_embeddings, self.dim, self.block_size, group
             )
             self._shared_memory = storage
@@ -1093,7 +1082,13 @@ class ParallelEngramEmbedding(nn.Module):
             return
         weight, scales = self._storage()
         ids_stride_t, ids_stride_h = indices.stride()
-        sort = self.cpu_offload and self._packed is None and rows >= _SORT_MIN_ROWS
+        sort_min_rows, _ = _engram_lookup_thresholds(indices.device)
+        sort = (
+            self.cpu_offload
+            and self._packed is None
+            and sort_min_rows is not None
+            and rows >= sort_min_rows
+        )
         dst = indices
         if sort:
             # Small-page host tables miss the TLB per row; in table order, rows on
@@ -1329,13 +1324,11 @@ class Engram(nn.Module):
         use_sequence_parallel: bool,
         prefix: str,
         prefetch_stream: torch.cuda.Stream | None = None,
-        shared_storage: type[DPSharedEngramStorage] = DPSharedEngramStorage,
     ) -> None:
         super().__init__()
         # Layers sharing one stream serialize their offloaded lookups, so they
         # take turns instead of jointly starving decoder compute of SMs.
         self._prefetch_stream = prefetch_stream
-        self._shared_storage = shared_storage
         self.layer_hash_index = layer_hash_index
         self.dim = config.hidden_size
         self.hc_mult = config.hc_mult
@@ -1384,7 +1377,6 @@ class Engram(nn.Module):
             cpu_offload=engram_config.cpu_offload,
             dp_shared_memory=bool(engram_config.dp_shared_memory),
             use_thp=engram_config.use_thp,
-            shared_storage=self._shared_storage,
         )
 
     def _init_staging(self, max_tokens: int, head_dim: int) -> None:
@@ -1412,16 +1404,18 @@ class Engram(nn.Module):
         else:
             self._start_prefetch(hash_ids, rows)
 
-    def _lookup_inline(self, num_tokens: int) -> bool:
-        """Whether a host lookup runs on the main stream instead of prefetching."""
-        return False
-
     @eager_break_during_capture
     def _start_prefetch(self, hash_ids: torch.Tensor, rows: torch.Tensor) -> None:
         # Eager boundaries let the lookup span piecewise graph segments, and
         # decide per replay (on the replay stream) whether it runs inline.
+        num_tokens = hash_ids.shape[0]
+        # All DP ranks must agree, or EP collectives wait on the slowest one.
+        if is_forward_context_available() and (dp := get_forward_context().dp_metadata):
+            num_tokens = int(dp.num_tokens_across_dp_cpu.max())
         current = stream = torch.cuda.current_stream()
-        if self._lookup_inline(hash_ids.shape[0]):
+        # Big lookups stall persistent main-stream kernels anyway: run them inline.
+        _, inline_min_tokens = _engram_lookup_thresholds(hash_ids.device)
+        if inline_min_tokens is not None and num_tokens >= inline_min_tokens:
             self.embed_tokens.lookup(hash_ids, rows)
         else:
             stream = self._prefetch_stream

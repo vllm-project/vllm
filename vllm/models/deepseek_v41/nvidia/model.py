@@ -99,14 +99,13 @@ from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.worker.ubatching import dbo_current_ubatch_id
 
 from ..common.engram import (
-    DPSharedEngramStorage,
+    Engram,
     EngramLayout,
     NgramHashState,
+    can_share_engram_tables,
     gather_engram_hashes,
-    select_shared_engram_storage,
 )
 from ..common.mm_preprocess import IMAGE_SENTINEL_BASE_ID, image_sentinel_mask
-from .engram import CuMemEngramStorage, Engram
 from .ops.mhc import (
     MHC_OVERLAP_MAX_TOKENS,
     init_mhc_all_reduce,
@@ -288,7 +287,6 @@ class DeepseekV4DecoderLayer(nn.Module):
         candidate_block_buffer: torch.Tensor | None = None,
         engram_layout: EngramLayout | None = None,
         engram_prefetch_stream: torch.cuda.Stream | None = None,
-        engram_shared_storage: type[DPSharedEngramStorage] = DPSharedEngramStorage,
         run_gemm_rs: bool = False,
         mhc_stream: torch.cuda.Stream | None = None,
         fuse_mhc_all_reduce: bool = False,
@@ -313,7 +311,6 @@ class DeepseekV4DecoderLayer(nn.Module):
                     use_sequence_parallel=self.use_sequence_parallel,
                     prefix=f"{prefix}.engram",
                     prefetch_stream=engram_prefetch_stream,
-                    shared_storage=engram_shared_storage,
                 )
 
         self.rms_norm_eps = config.rms_norm_eps
@@ -703,17 +700,12 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
             and engram_config.cpu_offload
             else None
         )
-        engram_shared_storage = None
         if (
             self.engram_layout is not None
             and engram_config is not None
             and engram_config.dp_shared_memory
         ):
-            # Prefer 2M-page cuMem tables, then /dev/shm, else shard across DP.
-            engram_shared_storage = select_shared_engram_storage(
-                self.engram_layout, (CuMemEngramStorage, DPSharedEngramStorage)
-            )
-            engram_config.dp_shared_memory = engram_shared_storage is not None
+            engram_config.dp_shared_memory = can_share_engram_tables(self.engram_layout)
 
         if self.engram_layout is not None and engram_config and engram_config.use_thp:
             # Release old checkpoint cache before allocating the Engram host tables.
@@ -738,7 +730,6 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
                 candidate_block_buffer=self.candidate_block_buffer,
                 engram_layout=self.engram_layout,
                 engram_prefetch_stream=engram_prefetch_stream,
-                engram_shared_storage=engram_shared_storage or DPSharedEngramStorage,
                 run_gemm_rs=self.run_gemm_rs,
                 mhc_stream=mhc_stream,
                 fuse_mhc_all_reduce=self.fuse_mhc_all_reduce,
