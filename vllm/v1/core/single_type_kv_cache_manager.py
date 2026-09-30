@@ -2247,7 +2247,7 @@ class HiSparseSourceManager(FullAttentionManager):
             enable_caching=self.enable_caching and self.kv_cache_spec.prefix_cacheable,
             hash_block_size=device_pool.hash_block_size,
             enable_kv_cache_events=device_pool.enable_kv_cache_events,
-            metrics_collector=device_pool.metrics_collector,
+            metrics_collector=None,
             medium=MEDIUM_CPU,
             event_owner=device_pool,
         )
