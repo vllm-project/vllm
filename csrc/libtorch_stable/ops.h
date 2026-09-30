@@ -411,6 +411,16 @@ void fused_gdn_decode_post_conv_mtp(
     torch::stable::Tensor const& norm_weight, torch::stable::Tensor& out,
     double scale, double norm_eps, const std::string& output_gate_activation);
 
+void fused_gdn_decode_post_conv_mtp_replay(
+    torch::stable::Tensor const& mixed_qkv, torch::stable::Tensor const& a,
+    torch::stable::Tensor const& b, torch::stable::Tensor const& a_log,
+    torch::stable::Tensor const& dt_bias,
+    torch::stable::Tensor const& state_indices,
+    torch::stable::Tensor const& cu_seqlens, torch::stable::Tensor& state,
+    torch::stable::Tensor& replay, torch::stable::Tensor const& output_gate,
+    torch::stable::Tensor const& norm_weight, torch::stable::Tensor& out,
+    double scale, double norm_eps, const std::string& output_gate_activation);
+
 #endif
 
 #ifdef VLLM_ENABLE_FUSED_KDA_CHUNK

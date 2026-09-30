@@ -560,13 +560,22 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         elif current_platform.is_xpu():
             self.gdn_decode_kernel = "XPU"
 
-        self.enable_fused_gdn_decode = self.gdn_decode_kernel == "cuda"
-        # RecoverSSM verify replaces the per-draft snapshot path (Triton decode
-        # only)
+        # RecoverSSM verify replaces the per-draft snapshot path. Spec-only
+        # batches run it in the fused CUDA kernel when that kernel is available;
+        # other batches use the Triton verify.
         self.use_gdn_recoverssm = self._uses_gdn_recoverssm()
-        if self.use_gdn_recoverssm:
+        if (
+            self.use_gdn_recoverssm
+            and self.gdn_decode_kernel == "cuda"
+            and not hasattr(torch.ops._C, "fused_gdn_decode_post_conv_mtp_replay")
+        ):
+            logger.info_once(
+                "Falling back to the Triton GDN decode path: "
+                "torch.ops._C.fused_gdn_decode_post_conv_mtp_replay is not built"
+            )
             self.gdn_decode_kernel = "triton"
-            self.enable_fused_gdn_decode = False
+        self.enable_fused_gdn_decode = self.gdn_decode_kernel == "cuda"
+        if self.use_gdn_recoverssm:
             self.enable_packed_recurrent_decode = False
             logger.info_once(
                 "GDN RecoverSSM speculative verify active (spec_query_len %d)",
@@ -1828,7 +1837,12 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             conv_state_indices=state_indices[:num_requests, 0],
             num_accepted_tokens=num_accepted_tokens[:num_requests],
             query_start_loc=cu_seqlens[: num_requests + 1],
-            max_query_len=state_indices.size(1),
+            # RecoverSSM keeps only the checkpoint column
+            max_query_len=(
+                self.num_spec + 1
+                if getattr(self, "use_gdn_recoverssm", False)
+                else state_indices.size(1)
+            ),
             validate_data=False,
         )
         self._forward_core_decode_spec_post_conv_fused_norm(
@@ -1857,6 +1871,25 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         assert num_accepted_tokens is not None
 
         num_requests = attn_metadata.num_spec_decodes
+        if getattr(self, "use_gdn_recoverssm", False):
+            ops.fused_gdn_decode_post_conv_mtp_replay(
+                mixed_qkv=mixed_qkv,
+                a=a,
+                b=b,
+                A_log=self.A_log,
+                dt_bias=self.dt_bias,
+                state_indices=state_indices[:num_requests],
+                cu_seqlens=cu_seqlens[: num_requests + 1],
+                state=self.kv_cache[1],
+                replay=self.kv_cache[2],
+                output_gate=output_gate,
+                norm_weight=self.norm.weight,
+                out=core_attn_out,
+                scale=self.head_k_dim**-0.5,
+                norm_eps=self.layer_norm_epsilon,
+                output_gate_activation=self.norm.activation,
+            )
+            return
         ops.fused_gdn_decode_post_conv_mtp(
             mixed_qkv=mixed_qkv,
             a=a,
@@ -1922,6 +1955,10 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             and state_indices is not None
             and state_indices.size(1) <= MAX_FUSED_GDN_MTP_TOKENS
             and hasattr(torch.ops._C, "fused_gdn_decode_post_conv_mtp")
+            and (
+                not getattr(self, "use_gdn_recoverssm", False)
+                or self.num_spec + 1 <= MAX_FUSED_GDN_MTP_TOKENS
+            )
         )
 
     def _rms_norm_gated_cuda(

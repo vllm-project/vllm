@@ -2740,6 +2740,52 @@ def fused_gdn_decode_post_conv_mtp(
     return out
 
 
+def fused_gdn_decode_post_conv_mtp_replay(
+    mixed_qkv: torch.Tensor,
+    a: torch.Tensor,
+    b: torch.Tensor,
+    A_log: torch.Tensor,
+    dt_bias: torch.Tensor,
+    state_indices: torch.Tensor,
+    cu_seqlens: torch.Tensor,
+    state: torch.Tensor,
+    replay: torch.Tensor,
+    output_gate: torch.Tensor,
+    norm_weight: torch.Tensor,
+    out: torch.Tensor | None = None,
+    scale: float = 128**-0.5,
+    norm_eps: float = 1e-5,
+    output_gate_activation: str = "silu",
+) -> torch.Tensor:
+    """RecoverSSM verify of GDN speculative windows with the fused CUDA kernel.
+
+    Each window starts from its checkpoint ``state[state_indices[i, 0]]``, which
+    is only read. Instead of per-token states the kernel writes each token's
+    replay record ``[correction (V), normalized key (K), log decay (1)]`` into
+    ``replay[state_indices[i, 0], :, t]``, the layout the RecoverSSM commit folds.
+    """
+    if out is None:
+        out = torch.empty_like(output_gate)
+    torch.ops._C.fused_gdn_decode_post_conv_mtp_replay(
+        mixed_qkv,
+        a,
+        b,
+        A_log,
+        dt_bias,
+        state_indices,
+        cu_seqlens,
+        state,
+        replay,
+        output_gate,
+        norm_weight,
+        out,
+        scale,
+        norm_eps,
+        output_gate_activation,
+    )
+    return out
+
+
 def concat_and_cache_mla(
     kv_c: torch.Tensor,
     k_pe: torch.Tensor,
