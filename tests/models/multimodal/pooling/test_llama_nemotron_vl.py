@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Tests for the LlamaNemotronVL model family:
+"""Tests for the LlamaNemotronVL model family:
   - nvidia/llama-nemotron-embed-vl-1b-v2  (LlamaNemotronVLForCausalLM / embed)
   - nvidia/llama-nemotron-rerank-vl-1b-v2
       (LlamaNemotronVLForSequenceClassification / rerank)
@@ -24,7 +23,13 @@ from vllm.entrypoints.chat_utils import (
     ChatCompletionContentPartTextParam,
 )
 from vllm.entrypoints.pooling.scoring.typing import ScoreMultiModalParam
+from vllm.model_executor.layers.fusion.mm_input_norm import FusedMMInputNorm
 from vllm.platforms import current_platform
+from vllm.transformers_utils.processors.nemotron_vl import (
+    SIGLIP_MEAN,
+    SIGLIP_STD,
+    LlamaNemotronVLEmbedImageProcessor,
+)
 
 from ....conftest import IMAGE_ASSETS, HfRunner, PromptImageInput, VllmRunner
 from ....utils import ROCM_ENGINE_KWARGS
@@ -51,6 +56,54 @@ HF_IMAGE_PROMPTS = IMAGE_ASSETS.prompts(
 )
 
 MODELS = ["nvidia/llama-nemotron-embed-vl-1b-v2"]
+
+
+@pytest.mark.usefixtures("default_vllm_config")
+def test_device_normalization_matches_cpu_transform() -> None:
+    device = current_platform.device_type
+    image = Image.new("RGB", (48, 32), color=(12, 128, 240))
+    processor_kwargs = dict(
+        image_size=32,
+        min_dynamic_patch=1,
+        max_dynamic_patch=1,
+        dynamic_image_size=True,
+        use_thumbnail=False,
+    )
+
+    cpu_processor = LlamaNemotronVLEmbedImageProcessor(**processor_kwargs)
+    device_processor = LlamaNemotronVLEmbedImageProcessor(
+        **processor_kwargs, do_rescale=False, do_normalize=False
+    )
+
+    expected = cpu_processor._images_to_pixel_values_lst([image])[0]
+    raw_pixels = device_processor._images_to_pixel_values_lst([image])[0]
+    input_norm = FusedMMInputNorm(
+        image_mean=list(SIGLIP_MEAN),
+        image_std=list(SIGLIP_STD),
+        rescale_factor=1 / 255,
+    ).to(device)
+    actual = input_norm(
+        raw_pixels.flatten(start_dim=1).to(device), expected.dtype
+    ).view_as(expected)
+
+    assert raw_pixels.dtype == torch.uint8
+    torch.testing.assert_close(actual, expected.to(device))
+
+
+@pytest.mark.parametrize(("do_rescale", "do_normalize"), [(True, False), (False, True)])
+def test_device_normalization_rejects_partial_cpu_processing(
+    do_rescale: bool, do_normalize: bool
+) -> None:
+    with pytest.raises(ValueError, match="both enabled or both disabled"):
+        LlamaNemotronVLEmbedImageProcessor(
+            image_size=32,
+            min_dynamic_patch=1,
+            max_dynamic_patch=1,
+            dynamic_image_size=True,
+            use_thumbnail=False,
+            do_rescale=do_rescale,
+            do_normalize=do_normalize,
+        )
 
 
 def _run_test(
