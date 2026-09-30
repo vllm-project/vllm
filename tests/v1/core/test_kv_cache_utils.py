@@ -58,9 +58,8 @@ from vllm.v1.core.kv_cache_utils import (
     to_event_extra_keys,
 )
 from vllm.v1.hisparse.layout import (
-    check_hisparse_pool_fits,
-    create_hisparse_layout,
-    get_hisparse_gpu_memory_usage,
+    _size_hisparse_host_pool,
+    get_hisparse_kv_cache_groups,
 )
 from vllm.v1.kv_cache_interface import (
     ChunkedLocalAttentionSpec,
@@ -119,9 +118,6 @@ def test_hisparse_hma_uses_resolved_gpu_block_size(
             cache_role=SparseCacheRole.INDEXER,
         ),
     }
-    group_spec = UniformTypeKVCacheSpecs.from_specs(specs)
-    assert group_spec is not None
-    group = KVCacheGroupSpec(list(specs), group_spec)
     config = SimpleNamespace(
         attention_config=SimpleNamespace(hisparse_config=HiSparseConfig()),
         model_config=SimpleNamespace(
@@ -143,14 +139,9 @@ def test_hisparse_hma_uses_resolved_gpu_block_size(
             get_resolved_kv_cache_layout=lambda: KVCacheLayout.BLHNC,
         ),
     )
-    indexer_spec = specs["model.layers.0.self_attn.indexer"]
-    assert get_hisparse_gpu_memory_usage(config, [group]) == (
-        indexer_spec.max_memory_usage_bytes(config)
-    )
-
     monkeypatch.setattr(kv_cache_utils, "get_hisparse_host_pool_bytes", lambda _: 2**30)
     cache_config = kv_cache_utils.get_kv_cache_config_from_groups(
-        config, [group], available_memory=2**30
+        config, get_hisparse_kv_cache_groups(config, specs), available_memory=2**30
     )
     assert cache_config.num_blocks == 7
     assert cache_config.hisparse_host_num_blocks is not None
@@ -229,8 +220,6 @@ def test_hisparse_host_pool_must_fit_max_model_len(monkeypatch, extra_blocks, ok
             cache_role=SparseCacheRole.INDEXER,
         ),
     }
-    group_spec = UniformTypeKVCacheSpecs.from_specs(specs)
-    assert group_spec is not None
     config = SimpleNamespace(
         attention_config=SimpleNamespace(hisparse_config=HiSparseConfig()),
         model_config=SimpleNamespace(
@@ -241,14 +230,16 @@ def test_hisparse_host_pool_must_fit_max_model_len(monkeypatch, extra_blocks, ok
     )
     host_page = specs["model.layers.0.self_attn"].page_size_bytes
     host_budget = (4 + extra_blocks) * host_page
-    group = KVCacheGroupSpec(list(specs), group_spec)
+    source_group = get_hisparse_kv_cache_groups(config, specs)[0]
 
     if ok:
-        layout = create_hisparse_layout(config, [group], host_budget=host_budget)
-        assert layout.host_num_blocks == 4 + extra_blocks
+        host_num_blocks, _, _ = _size_hisparse_host_pool(
+            config, source_group, host_budget
+        )
+        assert host_num_blocks == 4 + extra_blocks
     else:
         with pytest.raises(ValueError, match="increase host_pool_gib"):
-            create_hisparse_layout(config, [group], host_budget=host_budget)
+            _size_hisparse_host_pool(config, source_group, host_budget)
 
 
 @pytest.mark.parametrize(
@@ -288,15 +279,12 @@ def test_hisparse_pool_must_fit_max_model_len(
     config.model_config.hf_config.index_topk = 128
     config.cache_config.num_gpu_blocks_override = num_gpu_blocks
     config.cache_config.kv_cache_layout = "BLHNC"
-    scheduler_config = kv_cache_utils.generate_scheduler_kv_cache_config(
-        kv_cache_utils.get_kv_cache_configs(config, [specs], [2**34])
-    )
 
     if ok:
-        check_hisparse_pool_fits(config, scheduler_config)
+        kv_cache_utils.get_kv_cache_configs(config, [specs], [2**34])
     else:
-        with pytest.raises(ValueError, match="GPU KV cache pool"):
-            check_hisparse_pool_fits(config, scheduler_config)
+        with pytest.raises(ValueError, match="max seq len"):
+            kv_cache_utils.get_kv_cache_configs(config, [specs], [2**34])
 
 
 def test_hisparse_rejects_deepseek_v4():
@@ -309,9 +297,6 @@ def test_hisparse_rejects_deepseek_v4():
             model_version="deepseek_v4",
         )
     }
-    full_uniform = UniformTypeKVCacheSpecs.from_specs(full_specs)
-    assert full_uniform is not None
-    group = KVCacheGroupSpec(list(full_specs), full_uniform)
     config = SimpleNamespace(
         attention_config=SimpleNamespace(hisparse_config=HiSparseConfig()),
         model_config=SimpleNamespace(hf_config=SimpleNamespace(index_topk=512)),
@@ -319,11 +304,7 @@ def test_hisparse_rejects_deepseek_v4():
     )
 
     with pytest.raises(ValueError, match="does not support DeepSeek V4"):
-        create_hisparse_layout(
-            config,
-            [group],
-            host_budget=2**30,
-        )
+        get_hisparse_kv_cache_groups(config, full_specs)
 
 
 @pytest.fixture(autouse=True)

@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections import defaultdict
-from dataclasses import dataclass
 from typing import cast
 
 from vllm.config import VllmConfig
@@ -35,18 +34,13 @@ HISPARSE_HOT_SUFFIX = ".hisparse_hot"
 HISPARSE_RESIDENT_SUFFIX = ".hisparse_resident"
 
 
-@dataclass(frozen=True)
-class HiSparseLayout:
-    source_group: KVCacheGroupSpec
-    device_groups: list[KVCacheGroupSpec]
-    host_num_blocks: int
-    host_block_stride: int
-    shared_host_pool: bool
-
-
 def get_hisparse_kv_cache_groups(
     vllm_config: VllmConfig, kv_cache_spec: dict[str, KVCacheSpec]
 ) -> list[KVCacheGroupSpec] | None:
+    """The groups HiSparse allocates: the host source group, then the GPU
+    groups sharing one device pool. Derived resident/hot specs in
+    `kv_cache_spec` (see `expand_hisparse_kv_cache_specs`) are laid out again
+    from the attention specs they belong to."""
     attention_config = getattr(vllm_config, "attention_config", None)
     if attention_config is None or attention_config.hisparse_config is None:
         return None
@@ -56,20 +50,42 @@ def get_hisparse_kv_cache_groups(
         for name, spec in kv_cache_spec.items()
         if isinstance(spec, MLAAttentionSpec)
     }
+    if not mla_specs:
+        return None
     other_specs = {
         name: spec
         for name, spec in kv_cache_spec.items()
-        if not isinstance(spec, MLAAttentionSpec)
+        if not isinstance(
+            spec, (MLAAttentionSpec, HiSparseResidentSpec, HiSparseHotSpec)
+        )
     }
-    if not mla_specs or not other_specs:
-        return None
 
     from vllm.v1.core.kv_cache_utils import get_kv_cache_groups
 
     mla_group_spec = UniformTypeKVCacheSpecs.from_specs(mla_specs)
     assert mla_group_spec is not None
     mla_group = KVCacheGroupSpec(list(mla_specs), mla_group_spec)
-    return [mla_group, *get_kv_cache_groups(vllm_config, other_specs)]
+    regular_groups = (
+        get_kv_cache_groups(vllm_config, other_specs) if other_specs else []
+    )
+    return _lay_out_hisparse_groups(vllm_config, [mla_group, *regular_groups])
+
+
+def expand_hisparse_kv_cache_specs(
+    vllm_config: VllmConfig, kv_cache_spec: dict[str, KVCacheSpec]
+) -> dict[str, KVCacheSpec]:
+    """Add a spec for each resident/hot cache HiSparse derives from an attention
+    layer, so each worker's specs name every cache it allocates."""
+    groups = get_hisparse_kv_cache_groups(vllm_config, kv_cache_spec)
+    if groups is None:
+        return kv_cache_spec
+    derived = {
+        layer_name: group.kv_cache_spec
+        for group in groups
+        if isinstance(group.kv_cache_spec, (HiSparseResidentSpec, HiSparseHotSpec))
+        for layer_name in group.layer_names
+    }
+    return {**kv_cache_spec, **derived}
 
 
 def get_hisparse_host_pool_bytes(vllm_config: VllmConfig) -> int:
@@ -112,24 +128,9 @@ def _partition_hisparse_specs(
     return source_specs, indexer_specs
 
 
-def get_hisparse_gpu_memory_usage(
-    vllm_config: VllmConfig,
-    kv_cache_groups: list[KVCacheGroupSpec],
-) -> int:
-    _, indexer_specs = _partition_hisparse_specs(kv_cache_groups)
-    return sum(
-        spec.max_memory_usage_bytes(vllm_config) for spec in indexer_specs.values()
-    ) + sum(
-        group.kv_cache_spec.max_memory_usage_bytes(vllm_config)
-        for group in kv_cache_groups[1:]
-    )
-
-
-def create_hisparse_layout(
-    vllm_config: VllmConfig,
-    groups: list[KVCacheGroupSpec],
-    host_budget: int,
-) -> HiSparseLayout:
+def _lay_out_hisparse_groups(
+    vllm_config: VllmConfig, groups: list[KVCacheGroupSpec]
+) -> list[KVCacheGroupSpec]:
     source_specs, indexer_specs = _partition_hisparse_specs(groups)
     block_sizes = {
         spec.block_size for spec in (*source_specs.values(), *indexer_specs.values())
@@ -225,11 +226,22 @@ def create_hisparse_layout(
         enable_kv_transfer=True,
     )
     regular_groups = groups[1:]
-    gpu_groups = [indexer_group, *resident_groups, *hot_groups, *regular_groups]
+    return [
+        source_group,
+        indexer_group,
+        *resident_groups,
+        *hot_groups,
+        *regular_groups,
+    ]
 
+
+def _size_hisparse_host_pool(
+    vllm_config: VllmConfig, source_group: KVCacheGroupSpec, host_budget: int
+) -> tuple[int, int, bool]:
+    """Host blocks, host block stride, and whether the host pool is shared."""
     shared_host_pool = use_shared_hisparse_host_pool(vllm_config)
     host_block_stride = get_hisparse_host_block_stride(
-        sum(spec.page_size_bytes for spec in source_specs.values()),
+        source_group.kv_cache_spec.page_size_bytes,
         use_shared_host_pool=shared_host_pool,
     )
     host_num_blocks = host_budget // host_block_stride
@@ -237,47 +249,19 @@ def create_hisparse_layout(
         raise ValueError("HiSparse has no allocatable host blocks.")
     # Every computed page needs a host block, so one request at max_model_len
     # must fit alongside the pool's null block and a copy-on-write tail.
-    min_host_blocks = cdiv(vllm_config.model_config.max_model_len, gpu_block_size) + 2
+    min_host_blocks = (
+        cdiv(
+            vllm_config.model_config.max_model_len,
+            source_group.kv_cache_spec.block_size,
+        )
+        + 2
+    )
     if host_num_blocks < min_host_blocks:
         raise ValueError(
             f"HiSparse host pool has {host_num_blocks} blocks but max_model_len "
             f"needs {min_host_blocks}; increase host_pool_gib."
         )
-
-    return HiSparseLayout(
-        source_group=source_group,
-        device_groups=gpu_groups,
-        host_num_blocks=host_num_blocks,
-        host_block_stride=host_block_stride,
-        shared_host_pool=shared_host_pool,
-    )
-
-
-def check_hisparse_pool_fits(
-    vllm_config: VllmConfig, kv_cache_config: KVCacheConfig
-) -> None:
-    """Reject a GPU pool that can never admit one request at max_model_len.
-
-    Admission needs a request's pages in every GPU group at once, including
-    resident pages for the whole prompt: they stay pinned through prefill.
-    """
-    blocks_per_request = sum(
-        cdiv(
-            group.kv_cache_spec.max_memory_usage_bytes(vllm_config),
-            group.kv_cache_spec.page_size_bytes,
-        )
-        for group in kv_cache_config.kv_cache_groups
-        if not group.host_resident
-    )
-    usable_blocks = kv_cache_config.num_blocks - 1  # The pool's null block.
-    if blocks_per_request > usable_blocks:
-        raise ValueError(
-            f"HiSparse's GPU KV cache pool has {usable_blocks} usable blocks, but "
-            "one request at max_model_len "
-            f"({vllm_config.model_config.max_model_len}) needs "
-            f"{blocks_per_request} across its indexer, resident and hot groups. "
-            "Increase the KV cache memory or decrease max_model_len."
-        )
+    return host_num_blocks, host_block_stride, shared_host_pool
 
 
 def _build_hisparse_kv_cache_tensors(
@@ -346,8 +330,11 @@ def get_hisparse_kv_cache_config(
         validate_kv_cache_layout,
     )
 
-    hisparse_layout = create_hisparse_layout(vllm_config, kv_cache_groups, host_budget)
-    device_groups = hisparse_layout.device_groups
+    (source_group,) = [group for group in kv_cache_groups if group.host_resident]
+    device_groups = [group for group in kv_cache_groups if not group.host_resident]
+    host_num_blocks, host_block_stride, shared_host_pool = _size_hisparse_host_pool(
+        vllm_config, source_group, host_budget
+    )
     layout = vllm_config.cache_config.get_resolved_kv_cache_layout()
     validate_kv_cache_layout(layout, device_groups)
     bytes_per_block = _get_kv_cache_bytes_per_block(device_groups)
@@ -359,14 +346,14 @@ def get_hisparse_kv_cache_config(
         device_groups, num_blocks, size, layout, bytes_per_block
     )
 
-    host_groups = [hisparse_layout.source_group]
+    host_groups = [source_group]
     host_layout = KVCacheLayout.LBNHC
     validate_kv_cache_layout(host_layout, host_groups)
     host_bytes_per_block = _get_kv_cache_bytes_per_block(host_groups)
-    host_size = host_bytes_per_block * hisparse_layout.host_num_blocks
+    host_size = host_bytes_per_block * host_num_blocks
     kv_cache_tensors[:0] = _build_hisparse_kv_cache_tensors(
         host_groups,
-        hisparse_layout.host_num_blocks,
+        host_num_blocks,
         host_size,
         host_layout,
         host_bytes_per_block,
@@ -376,7 +363,7 @@ def get_hisparse_kv_cache_config(
         "HiSparse HMA: %.1f GiB host source (%d blocks), %.1f GiB shared "
         "GPU indexer/resident/hot pool (%d blocks).",
         host_size / 2**30,
-        hisparse_layout.host_num_blocks,
+        host_num_blocks,
         size / 2**30,
         num_blocks,
     )
@@ -384,9 +371,9 @@ def get_hisparse_kv_cache_config(
         num_blocks=num_blocks,
         kv_cache_tensors=kv_cache_tensors,
         kv_cache_groups=[*host_groups, *device_groups],
-        hisparse_host_num_blocks=hisparse_layout.host_num_blocks,
-        hisparse_host_block_stride=hisparse_layout.host_block_stride,
-        hisparse_shared_host_pool=hisparse_layout.shared_host_pool,
+        hisparse_host_num_blocks=host_num_blocks,
+        hisparse_host_block_stride=host_block_stride,
+        hisparse_shared_host_pool=shared_host_pool,
         prefix_cache_retention_interval=(
             vllm_config.cache_config.prefix_cache_retention_interval
         ),

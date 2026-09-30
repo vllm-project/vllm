@@ -21,7 +21,7 @@ from vllm.utils.math_utils import cdiv, round_up
 from vllm.utils.mem_utils import format_gib
 from vllm.utils.torch_utils import get_dtype_size
 from vllm.v1.hisparse.layout import (
-    get_hisparse_gpu_memory_usage,
+    expand_hisparse_kv_cache_specs,
     get_hisparse_host_pool_bytes,
     get_hisparse_kv_cache_config,
     get_hisparse_kv_cache_groups,
@@ -1149,9 +1149,12 @@ def _pool_bytes_per_block(kv_cache_groups: list[KVCacheGroupSpec]) -> int:
     """Bytes consumed by one block in the worker's shared KV cache pool, mirroring
     the divisor used by `get_kv_cache_config_from_groups` to convert
     `available_memory` into `num_blocks`. Used to compute the effective KV cache
-    capacity once `num_gpu_blocks_override` is applied.
+    capacity once `num_gpu_blocks_override` is applied. Host-resident groups
+    have their own pool.
     """
-    return _get_kv_cache_bytes_per_block(kv_cache_groups)
+    return _get_kv_cache_bytes_per_block(
+        [group for group in kv_cache_groups if not group.host_resident]
+    )
 
 
 def get_uniform_page_size(kv_cache_specs: Iterable[KVCacheSpec]) -> int:
@@ -2496,11 +2499,10 @@ def _max_memory_usage_bytes_from_groups(
     Each group independently claims blocks from the shared pool, so a request consumes
     the sum of the per-group block counts, i.e. ``bytes_per_block * total_blocks``.
     """
+    # Host-resident groups have their own pool.
+    kv_cache_groups = [group for group in kv_cache_groups if not group.host_resident]
     if not kv_cache_groups:
         return 0
-
-    if vllm_config.attention_config.hisparse_config is not None:
-        return get_hisparse_gpu_memory_usage(vllm_config, kv_cache_groups)
 
     if (glm5_layout := _glm5_next_tensor_layout(kv_cache_groups)) is not None:
         (
@@ -2684,9 +2686,10 @@ def _project_kv_cache_groups_to_worker(
                 },
             )
         projected_groups.append(
-            KVCacheGroupSpec(
-                worker_layer_names,
-                group_spec,
+            replace(
+                group,
+                layer_names=worker_layer_names,
+                kv_cache_spec=group_spec,
                 is_eagle_group=group.is_eagle_group and bool(worker_layer_names),
             )
         )
@@ -2727,6 +2730,13 @@ def get_kv_cache_configs(
         The generated KVCacheConfigs for each worker.
 
     """
+    # HiSparse derives resident and hot caches from its attention layers; name
+    # them so grouping, projection and sizing see every cache a worker allocates.
+    kv_cache_specs = [
+        expand_hisparse_kv_cache_specs(vllm_config, kv_cache_spec_one_worker)
+        for kv_cache_spec_one_worker in kv_cache_specs
+    ]
+
     # Merge the KV cache specs of all workers. Different PP stages may have
     # different layer names, and different TP ranks of the same PP stage should
     # have the same KV cache spec.
@@ -2788,9 +2798,6 @@ def get_kv_cache_configs(
             )
             adjusted_memory.append(override * bytes_per_block)
         available_memory = adjusted_memory
-
-    if vllm_config.attention_config.hisparse_config is not None:
-        available_memory = [min(available_memory)] * len(available_memory)
 
     # Reserve the null block BlockPool permanently holds back, so auto-fit and
     # the capacity check both plan against usable blocks. Allocation below

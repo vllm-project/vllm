@@ -34,7 +34,6 @@ from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.core.kv_cache_utils import KVCacheBlockCopy
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.hisparse.coordinator import get_hisparse_coordinator
-from vllm.v1.hisparse.layout import check_hisparse_pool_fits
 from vllm.v1.hisparse.types import SparseKVOffloadCommand, SparseKVRowMirror
 from vllm.v1.outputs import KVConnectorOutput
 
@@ -225,7 +224,6 @@ class HiSparseConnector(KVConnectorBase_V1, SupportsHMA):
 
     def bind_kv_cache_manager(self, kv_cache_manager: KVCacheManager) -> None:
         assert self.connector_scheduler is not None
-        check_hisparse_pool_fits(self._vllm_config, kv_cache_manager.kv_cache_config)
         self.connector_scheduler.bind_coordinator(
             get_hisparse_coordinator(kv_cache_manager)
         )
