@@ -1648,6 +1648,7 @@ class Scheduler(SchedulerInterface):
         session.num_prompt_tokens = len(session.prompt_token_ids)
         session.arrival_time = update.arrival_time
         session.sampling_params = update.sampling_params
+        session.max_tokens = update.max_tokens
         if session.status == RequestStatus.WAITING_FOR_STREAMING_REQ:
             self.num_waiting_for_streaming_input -= 1
         session.status = RequestStatus.WAITING
@@ -2780,16 +2781,6 @@ class Scheduler(SchedulerInterface):
         Otherwise, this method will only reset the KV prefix cache when there
         is no running requests taking KV cache.
         """
-        if reset_running_requests and self.aux_output_connector is not None:
-            if self._pause_state != PauseState.PAUSED_ALL:
-                raise RuntimeError(
-                    "AuxOutput Connector only supports resetting running requests "
-                    "after pause(mode='keep')."
-                )
-            if any(request.num_in_flight_tokens for request in self.requests.values()):
-                raise RuntimeError(
-                    "AuxOutput Connector cannot reset while model output is in flight."
-                )
         if reset_running_requests:
             # For logging.
             timestamp = time.monotonic()
