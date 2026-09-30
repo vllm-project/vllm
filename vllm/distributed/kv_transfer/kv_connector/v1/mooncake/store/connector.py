@@ -13,6 +13,7 @@ enabling prefix caching via hash-based deduplication.
 
 from collections import Counter
 from collections.abc import Iterable, Sequence
+from contextlib import AbstractContextManager
 from typing import Any
 
 import torch
@@ -27,6 +28,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1,
     KVConnectorMetadata,
     KVConnectorRole,
+    KVConnectorTransferResults,
     KVConnectorWorkerMetadata,
     SupportsHMA,
 )
@@ -321,6 +323,17 @@ class MooncakeStoreConnector(KVConnectorBase_V1, SupportsHMA):
     # Worker-side methods
     # ============================================================
 
+    def get_mem_pool_context(self) -> AbstractContextManager | None:
+        """Return a context manager for the custom MemPool, or None.
+
+        Called by the Worker before ``initialize_kv_cache`` so that KV
+        cache is allocated from the Mooncake-managed pool when
+        ``custom_mem_pool`` is set in ``kv_connector_extra_config``.
+        """
+        if self.connector_worker is None:
+            return None
+        return self.connector_worker.get_mem_pool_context()
+
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         assert self.connector_worker is not None
         self.connector_worker.register_kv_caches(kv_caches)
@@ -358,6 +371,14 @@ class MooncakeStoreConnector(KVConnectorBase_V1, SupportsHMA):
         metadata = self._get_connector_metadata()
         assert isinstance(metadata, MooncakeStoreConnectorMetadata)
         return self.connector_worker.get_finished(finished_req_ids, metadata)
+
+    def get_transfer_results(
+        self, finished_req_ids: set[str]
+    ) -> KVConnectorTransferResults:
+        assert self.connector_worker is not None
+        metadata = self._get_connector_metadata()
+        assert isinstance(metadata, MooncakeStoreConnectorMetadata)
+        return self.connector_worker.get_transfer_results(finished_req_ids, metadata)
 
     def get_block_ids_with_load_errors(self) -> set[int]:
         assert self.connector_worker is not None

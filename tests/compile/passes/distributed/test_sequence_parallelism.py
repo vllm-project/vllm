@@ -222,7 +222,7 @@ def test_sequence_parallelism_pass_requires_full_graph_compilation():
     ]
 
     sequence_parallelism_pass = object.__new__(SequenceParallelismPass)
-    sequence_parallelism_pass.compilation_config = vllm_config.compilation_config
+    sequence_parallelism_pass.compilation_config = vllm_config.compilation_config  # type: ignore[assignment]
     sequence_parallelism_pass.min_token_num = 1
 
     with pytest.raises(
