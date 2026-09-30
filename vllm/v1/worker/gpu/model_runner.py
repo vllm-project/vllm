@@ -914,8 +914,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 spec_hidden_states = pre_hc_hidden_states[: hidden_states.shape[0]]  # type: ignore[union-attr]
             if isinstance(self.sampler, GPUWatermarkSampler):
                 self.speculator.prepare_watermarking(
-                    self.sampler._get_contexts(input_batch.idx_mapping),
-                    self.sampler.watermarking.gpu[input_batch.idx_mapping],
+                    self.sampler, input_batch.idx_mapping
                 )
             with use_workspace_lane(self._draft_workspace_lane):
                 self.speculator.propose(
@@ -2194,8 +2193,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 spec_hidden_states = pre_hc_hidden_states[: draft_hidden_states.size(0)]
             if isinstance(self.sampler, GPUWatermarkSampler):
                 self.speculator.prepare_watermarking(
-                    self.sampler._get_contexts(input_batch.idx_mapping),
-                    self.sampler.watermarking.gpu[input_batch.idx_mapping],
+                    self.sampler, input_batch.idx_mapping
                 )
             with use_workspace_lane(self._draft_workspace_lane):
                 draft_tokens = self.speculator.propose(
