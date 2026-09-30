@@ -3,38 +3,30 @@
 """Fused QSA pre-indexer kernel for Qwen4Exp."""
 
 from dataclasses import dataclass
-from typing import Any
 
 import torch
 
-from vllm.model_executor.layers.fused_qk_norm_rope import (
-    fused_qk_rmsnorm_rope_gate_head,
-)
 from vllm.triton_utils import tl, triton
 
 
 @dataclass
 class QSAMainPrepare:
-    """Main-branch work fused into the pre-indexer launch.
+    """Main-attention inputs and outputs for the fused pre-indexer launch.
 
-    Programs appended after the indexer work normalize and rotate the main
-    Q/K heads, copy the output gate, and write K/V straight into the paged
-    cache at ``slot_mapping`` (negative slots are skipped). Both branches
-    rotate with the owner's ``[cos | sin]`` table.
+    The launch then also does ``fused_qk_rmsnorm_rope_gate`` and
+    ``reshape_and_cache_flash`` for the main attention.
     """
 
-    q_gate: torch.Tensor  # [num_tokens, num_q_heads * 2 * head_dim], per head [q|gate]
-    k: torch.Tensor  # [num_tokens, num_kv_heads * head_dim]
-    v: torch.Tensor  # [num_tokens, num_kv_heads * head_dim]
+    qkv: torch.Tensor  # [tokens, (2 * q_heads + 2 * kv_heads) * head_dim]
     q_norm_weight: torch.Tensor
     k_norm_weight: torch.Tensor
     eps: float
-    rotary_dim: int
-    q_out: torch.Tensor  # [num_tokens, num_q_heads, head_dim], contiguous
-    gate_out: torch.Tensor  # [num_tokens, num_q_heads, head_dim], contiguous
-    kv_cache: torch.Tensor  # [num_blocks, page_size, num_kv_heads, 2 * head_dim]
-    slot_mapping: torch.Tensor  # [num_tokens]
-    norm_beta: float = 1.0
+    q_out: torch.Tensor  # [tokens, q_heads, head_dim], contiguous
+    gate_out: torch.Tensor  # [tokens, q_heads, head_dim], contiguous
+    kv_cache: torch.Tensor  # [blocks, page_size, kv_heads, 2 * head_dim]
+    slot_mapping: torch.Tensor  # [tokens]
+    k_scale: torch.Tensor
+    v_scale: torch.Tensor
 
 
 @triton.jit
@@ -110,6 +102,27 @@ def _norm_rope(
     return tl.reshape(result, (TILE_T, TILE_H, D))
 
 
+@triton.jit
+def _to_dst_dtype(x, dst, scale_ptr):
+    """Round to BF16 like the unfused path, then scale for an FP8 destination."""
+    out_ty = dst.dtype.element_ty
+    x = x.to(tl.bfloat16)
+    if out_ty == tl.float8e4nv:
+        x = x.to(tl.float32) / tl.load(scale_ptr)
+    return x.to(out_ty)
+
+
+@triton.jit
+def _store_rotated(dst, y, o1, o2, scale_ptr):
+    """Store a normalized head whose first ``2 * len(o1)`` dims are rotated."""
+    HALF: tl.constexpr = o1.shape[0]
+    dims = tl.arange(0, y.shape[0])
+    rot = tl.arange(0, HALF)
+    tl.store(dst + dims, _to_dst_dtype(y, dst, scale_ptr), mask=dims >= 2 * HALF)
+    tl.store(dst + rot, _to_dst_dtype(o1, dst, scale_ptr))
+    tl.store(dst + HALF + rot, _to_dst_dtype(o2, dst, scale_ptr))
+
+
 @triton.jit(
     do_not_specialize=[
         "num_tokens",
@@ -163,87 +176,93 @@ def _qsa_pre_indexer_kernel(
     MROPE_H: tl.constexpr,
     MROPE_W: tl.constexpr,
     FUSE_MAIN: tl.constexpr = False,
-    main_q_gate_ptr=None,
-    main_q_gate_stride_token=0,
-    main_k_ptr=None,
-    main_k_stride_token=0,
-    main_v_ptr=None,
-    main_v_stride_token=0,
+    main_qkv_ptr=None,
+    main_qkv_stride_token=0,
     main_q_norm_weight_ptr=None,
     main_k_norm_weight_ptr=None,
+    main_eps=0.0,
     main_q_out_ptr=None,
-    main_q_out_stride_token=0,
     main_gate_out_ptr=None,
-    main_gate_out_stride_token=0,
     main_cache_ptr=None,
     main_cache_stride_block=0,
     main_cache_stride_token=0,
     main_cache_stride_head=0,
     main_slots_ptr=None,
-    MAIN_NUM_Q_HEADS: tl.constexpr = 0,
-    MAIN_NUM_KV_HEADS: tl.constexpr = 0,
-    MAIN_HEAD_DIM: tl.constexpr = 0,
-    MAIN_ROTARY_DIM: tl.constexpr = 0,
-    MAIN_HALF_ROTARY: tl.constexpr = 0,
-    MAIN_HEAD_BLOCK: tl.constexpr = 0,
-    MAIN_ROT_HALF_BLOCK: tl.constexpr = 0,
-    MAIN_HAS_PASS: tl.constexpr = False,
-    MAIN_PAGE_SIZE: tl.constexpr = 1,
-    MAIN_EPS: tl.constexpr = 0.0,
-    MAIN_NORM_BETA: tl.constexpr = 0.0,
+    main_k_scale_ptr=None,
+    main_v_scale_ptr=None,
+    MAIN_HQ: tl.constexpr = 0,
+    MAIN_HK: tl.constexpr = 0,
+    MAIN_D: tl.constexpr = 0,
+    MAIN_PAGE_SIZE: tl.constexpr = 0,
 ):
     pid = tl.program_id(0)
     if FUSE_MAIN:
-        # Main-branch programs follow the indexer work: one per (token, head)
-        # of the owner's Q and K heads, sharing the cos/sin table and
-        # positions with the indexer.
         num_index_work = num_k_work + tl.cdiv(num_tokens, TILE_T_Q) * tl.cdiv(
             HQ, TILE_H_Q
         )
         if pid >= num_index_work:
+            # Main attention: one program per (token, Q or KV head) after the
+            # indexer work. RoPE covers the first D // 2 dims, the width of the
+            # shared cos/sin table.
             main_pid = pid - num_index_work
-            heads_per_token: tl.constexpr = MAIN_NUM_Q_HEADS + MAIN_NUM_KV_HEADS
-            fused_qk_rmsnorm_rope_gate_head(
-                main_pid // heads_per_token,
-                main_pid % heads_per_token,
-                main_q_gate_ptr,
-                main_k_ptr,
-                main_q_out_ptr,
-                main_cache_ptr,
-                main_gate_out_ptr,
-                main_q_norm_weight_ptr,
-                main_k_norm_weight_ptr,
-                cos_sin_ptr,
-                pos_ptr,
-                main_q_gate_stride_token,
-                main_k_stride_token,
-                main_q_out_stride_token,
-                main_cache_stride_token,
-                main_gate_out_stride_token,
-                D // 2,
-                pos_stride_axis,
-                pos_stride_token,
-                MAIN_NUM_Q_HEADS,
-                MAIN_HEAD_DIM,
-                MAIN_ROTARY_DIM,
-                MAIN_HALF_ROTARY,
-                MAIN_EPS,
-                MAIN_NORM_BETA,
-                main_q_gate_ptr.dtype.element_ty,
-                MAIN_HEAD_BLOCK,
-                MAIN_ROT_HALF_BLOCK,
-                MAIN_HAS_PASS,
-                IS_2D_POSITIONS,
-                MROPE_H,
-                MROPE_W,
-                K_TO_PAGED_CACHE=True,
-                k_slots_ptr=main_slots_ptr,
-                k_out_stride_block=main_cache_stride_block,
-                k_out_stride_head=main_cache_stride_head,
-                v_ptr=main_v_ptr,
-                v_stride_t=main_v_stride_token,
-                PAGE_SIZE=MAIN_PAGE_SIZE,
-            )
+            token = main_pid // (MAIN_HQ + MAIN_HK)
+            head = main_pid % (MAIN_HQ + MAIN_HK)
+            HALF: tl.constexpr = D // 4
+            dims = tl.arange(0, MAIN_D)
+            rot = tl.arange(0, HALF)
+            row = main_qkv_ptr + token * main_qkv_stride_token
+            is_k = head >= MAIN_HQ
+            kv_head = head - MAIN_HQ
+            if is_k:
+                src = row + (2 * MAIN_HQ + kv_head) * MAIN_D
+                weight_ptr = main_k_norm_weight_ptr
+            else:
+                src = row + 2 * head * MAIN_D
+                weight_ptr = main_q_norm_weight_ptr
+            x = tl.load(src + dims).to(tl.float32)
+            inv_rms = tl.rsqrt(tl.sum(x * x, axis=0) / MAIN_D + main_eps)
+            w = tl.load(weight_ptr + dims).to(tl.float32) + 1.0
+            y = x * inv_rms * w
+            x1 = tl.load(src + rot).to(tl.float32)
+            x2 = tl.load(src + HALF + rot).to(tl.float32)
+            w1 = tl.load(weight_ptr + rot).to(tl.float32) + 1.0
+            w2 = tl.load(weight_ptr + HALF + rot).to(tl.float32) + 1.0
+            x1 = (x1 * inv_rms * w1).to(tl.bfloat16).to(tl.float32)
+            x2 = (x2 * inv_rms * w2).to(tl.bfloat16).to(tl.float32)
+            pos = tl.load(pos_ptr + token * pos_stride_token).to(tl.int64)
+            if IS_2D_POSITIONS:
+                pos_h = tl.load(pos_ptr + pos_stride_axis + token * pos_stride_token)
+                pos_w = tl.load(
+                    pos_ptr + 2 * pos_stride_axis + token * pos_stride_token
+                )
+                is_h = (rot % 3 == 1) & (rot < 3 * MROPE_H)
+                is_w = (rot % 3 == 2) & (rot < 3 * MROPE_W)
+                pos = tl.where(
+                    is_h, pos_h.to(tl.int64), tl.where(is_w, pos_w.to(tl.int64), pos)
+                )
+            cos = tl.load(cos_sin_ptr + pos * (D // 2) + rot).to(tl.float32)
+            sin = tl.load(cos_sin_ptr + pos * (D // 2) + HALF + rot).to(tl.float32)
+            o1 = x1 * cos - x2 * sin
+            o2 = x2 * cos + x1 * sin
+            if is_k:
+                slot = tl.load(main_slots_ptr + token).to(tl.int64)
+                if slot >= 0:
+                    dst = (
+                        main_cache_ptr
+                        + (slot // MAIN_PAGE_SIZE) * main_cache_stride_block
+                        + (slot % MAIN_PAGE_SIZE) * main_cache_stride_token
+                        + kv_head * main_cache_stride_head
+                    )
+                    _store_rotated(dst, y, o1, o2, main_k_scale_ptr)
+                    v = tl.load(src + MAIN_HK * MAIN_D + dims)
+                    tl.store(
+                        dst + MAIN_D + dims, _to_dst_dtype(v, dst, main_v_scale_ptr)
+                    )
+            else:
+                out = (token * MAIN_HQ + head) * MAIN_D
+                _store_rotated(main_q_out_ptr + out, y, o1, o2, main_k_scale_ptr)
+                gate = tl.load(src + MAIN_D + dims)
+                tl.store(main_gate_out_ptr + out + dims, gate)
             return
     # K work occupies the first programs; the remaining programs tile Q. This
     # keeps both paths in one launch while leaving their register shapes
@@ -536,8 +555,8 @@ def qsa_pre_indexer(
 ) -> None:
     """Normalize Q, compress K, then update the circular raw state.
 
-    ``main`` appends the owner's main Q/K norm/RoPE/gate and K/V cache write
-    to the same launch (see :class:`QSAMainPrepare`).
+    With ``main``, the same launch also prepares the main attention's Q/K/gate
+    and writes its K/V cache (see :class:`QSAMainPrepare`).
     """
     num_tokens = q.shape[0]
     if num_tokens == 0:
@@ -574,53 +593,37 @@ def qsa_pre_indexer(
     num_k_work = k_work_metadata.shape[0]
     num_q_work = triton.cdiv(num_tokens, TILE_T_Q) * triton.cdiv(num_q_heads, TILE_H_Q)
     num_main_work = 0
-    main_kwargs: dict[str, Any] = {}
+    main_kwargs = {}
     if main is not None:
-        num_main_q_heads, main_head_dim = main.q_out.shape[1:]
+        _, num_main_q_heads, main_head_dim = main.q_out.shape
         num_main_kv_heads = main.kv_cache.shape[2]
-        assert main.q_gate.shape == (num_tokens, num_main_q_heads * 2 * main_head_dim)
-        assert main.k.shape == (num_tokens, num_main_kv_heads * main_head_dim)
-        assert main.v.shape == main.k.shape
-        assert main.q_gate.stride(-1) == main.k.stride(-1) == main.v.stride(-1) == 1
-        assert main.q_out.shape == main.gate_out.shape
+        qkv_width = 2 * (num_main_q_heads + num_main_kv_heads) * main_head_dim
+        assert main.qkv.shape == (num_tokens, qkv_width)
         assert main.q_out.is_contiguous() and main.gate_out.is_contiguous()
-        assert main.kv_cache.ndim == 4 and main.kv_cache.stride(-1) == 1
         assert main.kv_cache.shape[-1] == 2 * main_head_dim
         assert main.slot_mapping.shape == (num_tokens,)
-        assert 0 < main.rotary_dim <= main_head_dim and main.rotary_dim % 2 == 0
-        assert main.rotary_dim == cos_sin_cache.shape[-1]
         num_main_work = num_tokens * (num_main_q_heads + num_main_kv_heads)
-        main_kwargs = {
-            "FUSE_MAIN": True,
-            "main_q_gate_ptr": main.q_gate,
-            "main_q_gate_stride_token": main.q_gate.stride(0),
-            "main_k_ptr": main.k,
-            "main_k_stride_token": main.k.stride(0),
-            "main_v_ptr": main.v,
-            "main_v_stride_token": main.v.stride(0),
-            "main_q_norm_weight_ptr": main.q_norm_weight,
-            "main_k_norm_weight_ptr": main.k_norm_weight,
-            "main_q_out_ptr": main.q_out,
-            "main_q_out_stride_token": main.q_out.stride(0),
-            "main_gate_out_ptr": main.gate_out,
-            "main_gate_out_stride_token": main.gate_out.stride(0),
-            "main_cache_ptr": main.kv_cache,
-            "main_cache_stride_block": main.kv_cache.stride(0),
-            "main_cache_stride_token": main.kv_cache.stride(1),
-            "main_cache_stride_head": main.kv_cache.stride(2),
-            "main_slots_ptr": main.slot_mapping,
-            "MAIN_NUM_Q_HEADS": num_main_q_heads,
-            "MAIN_NUM_KV_HEADS": num_main_kv_heads,
-            "MAIN_HEAD_DIM": main_head_dim,
-            "MAIN_ROTARY_DIM": main.rotary_dim,
-            "MAIN_HALF_ROTARY": main.rotary_dim // 2,
-            "MAIN_HEAD_BLOCK": triton.next_power_of_2(main_head_dim),
-            "MAIN_ROT_HALF_BLOCK": triton.next_power_of_2(main.rotary_dim // 2),
-            "MAIN_HAS_PASS": main.rotary_dim < main_head_dim,
-            "MAIN_PAGE_SIZE": main.kv_cache.shape[1],
-            "MAIN_EPS": main.eps,
-            "MAIN_NORM_BETA": main.norm_beta,
-        }
+        main_kwargs = dict(
+            FUSE_MAIN=True,
+            main_qkv_ptr=main.qkv,
+            main_qkv_stride_token=main.qkv.stride(0),
+            main_q_norm_weight_ptr=main.q_norm_weight,
+            main_k_norm_weight_ptr=main.k_norm_weight,
+            main_eps=main.eps,
+            main_q_out_ptr=main.q_out,
+            main_gate_out_ptr=main.gate_out,
+            main_cache_ptr=main.kv_cache,
+            main_cache_stride_block=main.kv_cache.stride(0),
+            main_cache_stride_token=main.kv_cache.stride(1),
+            main_cache_stride_head=main.kv_cache.stride(2),
+            main_slots_ptr=main.slot_mapping,
+            main_k_scale_ptr=main.k_scale,
+            main_v_scale_ptr=main.v_scale,
+            MAIN_HQ=num_main_q_heads,
+            MAIN_HK=num_main_kv_heads,
+            MAIN_D=main_head_dim,
+            MAIN_PAGE_SIZE=main.kv_cache.shape[1],
+        )
     _qsa_pre_indexer_kernel[(num_k_work + num_q_work + num_main_work,)](
         q,
         q.stride(0),

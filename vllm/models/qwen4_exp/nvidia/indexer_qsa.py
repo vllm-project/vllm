@@ -245,16 +245,9 @@ class QSAIndexer(nn.Module):
         valid-entry count (the attention kernel's loop bound, never a token
         index).
 
-        ``main_prepare`` fuses the owner's main Q/K prepare and K/V cache
-        write into the fused pre-indexer launch.
+        ``main_prepare`` is handed to the fused pre-indexer launch.
         """
         metadata = self._metadata()
-        if main_prepare is not None and (
-            metadata is None or not self.use_fused_pre_indexer
-        ):
-            raise ValueError(
-                "main_prepare requires QSA metadata and the fused pre-indexer"
-            )
         if metadata is None:
             # Preserve step-0 indices when later MTP steps reuse the buffer.
             if self.skip_topk and out is not None:
