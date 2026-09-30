@@ -439,6 +439,7 @@ to measure a concurrent serving-style workload.
 | --------- | ------------- | ------------- |
 | `vllm` / `openai` | `/v1/completions` | OpenAI-compatible completions (streaming) |
 | `openai-chat` | `/v1/chat/completions` | OpenAI-compatible chat completions (streaming, multimodal) |
+| `openai-responses` | `/v1/responses` | OpenAI Responses API (streaming; reasoning deltas count toward TTFT and ITL) |
 
 ### Embedding / Pooling
 
@@ -495,7 +496,7 @@ Run `vllm-bench --help` for the authoritative list. Grouped reference below.
 
 | Flag | Default | Description |
 | ------ | --------- | ------------- |
-| `--backend` | `openai` | Backend type (`vllm`, `openai`, `openai-chat`, `openai-embeddings`, `openai-embeddings-chat`, `vllm-pooling`, `vllm-rerank`) |
+| `--backend` | `openai` | Backend type (`vllm`, `openai`, `openai-chat`, `openai-responses`, `openai-embeddings`, `openai-embeddings-chat`, `vllm-pooling`, `vllm-rerank`) |
 | `--base-url` | — | Server base URL (overrides `--host`/`--port`) |
 | `--host` | `127.0.0.1` | Server host |
 | `--port` | `8000` | Server port |
@@ -589,7 +590,7 @@ Run `vllm-bench --help` for the authoritative list. Grouped reference below.
 | `--presence-penalty` | Presence penalty |
 | `--repetition-penalty` | Repetition penalty |
 
-Merged into the request body. Only effective with generation backends (`vllm`, `openai`, `openai-chat`); ignored by pooling/embedding backends.
+Merged into the request body. Only effective with generation backends (`vllm`, `openai`, `openai-chat`, `openai-responses`); ignored by pooling/embedding backends.
 
 </details>
 
@@ -810,6 +811,7 @@ src/
 │   ├── streaming.rs         # SSE stream parser with speculative JSON parse
 │   ├── openai_completions.rs # /v1/completions backend
 │   ├── openai_chat.rs       # /v1/chat/completions backend
+│   ├── openai_responses.rs  # /v1/responses backend
 │   └── pooling.rs           # Embedding/pooling/rerank backends (non-streaming)
 ├── datasets/
 │   ├── mod.rs               # SampleRequest, ConversationTurn, MultiTurnConversation types
