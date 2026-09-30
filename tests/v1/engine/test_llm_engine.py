@@ -49,13 +49,6 @@ def vllm_model(vllm_runner, request):
         yield vllm_model
 
 
-@pytest.fixture(scope="function")
-def vllm_model_apc(vllm_runner):
-    """VllmRunner test fixture with APC."""
-    with _vllm_model(True, vllm_runner) as vllm_model:
-        yield vllm_model
-
-
 @pytest.fixture(
     # Function scope decouples tests & allows
     # env var adjustment via monkeypatch
