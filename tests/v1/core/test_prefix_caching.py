@@ -2901,21 +2901,21 @@ def test_mm_prefix_caching():
         (
             kv_cache_utils.NONE_HASH,
             tuple(all_token_ids[:block_size]),
-            (("aaa", 11),),
+            (("mm", "aaa", 11),),
         )
     )
     assert block_hashes[1] == sha256(
         (
             block_hashes[0],
             tuple(all_token_ids[block_size : block_size * 2]),
-            (("aaa", -5), ("bbb", 14)),
+            (("mm", "aaa", -5), ("mm", "bbb", 14)),
         )
     )
     assert block_hashes[2] == sha256(
         (
             block_hashes[1],
             tuple(all_token_ids[block_size * 2 : block_size * 3]),
-            (("bbb", -2),),
+            (("mm", "bbb", -2),),
         )
     )
 
@@ -2938,7 +2938,7 @@ def test_mm_prefix_caching():
         (
             block_hashes[2],
             tuple(all_token_ids[3 * block_size :] + [8] * 5),
-            (("ccc", 0),),
+            (("mm", "ccc", 0),),
         )
     )
 
@@ -2984,7 +2984,11 @@ def test_cache_key_salting():
     block_hashes = req0.block_hashes
     assert len(block_hashes) == 3
     assert block_hashes[0] == sha256(
-        (kv_cache_utils.NONE_HASH, tuple(token_ids[:block_size]), ("salt1",))
+        (
+            kv_cache_utils.NONE_HASH,
+            tuple(token_ids[:block_size]),
+            (("cache_salt", "salt1"),),
+        )
     )
     assert block_hashes[1] == sha256(
         (block_hashes[0], tuple(token_ids[block_size : block_size * 2]), None)
@@ -3029,7 +3033,11 @@ def test_cache_key_salting():
     block_hashes = req2.block_hashes
     assert len(block_hashes) == 3
     assert block_hashes[0] == sha256(
-        (kv_cache_utils.NONE_HASH, tuple(token_ids[:block_size]), ("salt2",))
+        (
+            kv_cache_utils.NONE_HASH,
+            tuple(token_ids[:block_size]),
+            (("cache_salt", "salt2"),),
+        )
     )
     assert block_hashes[1] == sha256(
         (block_hashes[0], tuple(token_ids[block_size : block_size * 2]), None)
