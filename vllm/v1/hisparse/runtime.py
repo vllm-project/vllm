@@ -902,7 +902,7 @@ class HiSparseRuntime:
         self._swap_step += 1
         return slice(start, stop)
 
-    def _resolve_residency(
+    def _launch_residency_kernel(
         self,
         *,
         resident: HiSparseCacheHandle | None = None,
@@ -1005,7 +1005,7 @@ class HiSparseRuntime:
         else:
             group.copy_stream.wait_stream(compute_stream)
         with group.copy_stream:
-            self._resolve_residency(
+            self._launch_residency_kernel(
                 resident=resident,
                 req_id_per_token=req_id_per_token,
                 block_table=block_table,
@@ -1043,7 +1043,7 @@ class HiSparseRuntime:
         current_stream().wait_event(self._layer_ready_event)
         self._swap_staged = False
 
-    def fetch_from_host(
+    def resolve_residency(
         self,
         *,
         resident: HiSparseCacheHandle,
@@ -1196,7 +1196,7 @@ class HiSparseCacheHandle:
         self.block_table = block_table
         self.slot_mapping = slot_mapping
 
-    def fetch_from_host(
+    def resolve_residency(
         self,
         req_id_per_token: torch.Tensor,
         block_table: torch.Tensor,
@@ -1207,7 +1207,7 @@ class HiSparseCacheHandle:
         attention_indices_out: torch.Tensor | None = None,
         valid_counts_out: torch.Tensor | None = None,
     ) -> HiSparseTopKResult:
-        return self.runtime.fetch_from_host(
+        return self.runtime.resolve_residency(
             resident=self,
             req_id_per_token=req_id_per_token[: logical_topk_indices.shape[0]],
             block_table=block_table,

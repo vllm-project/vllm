@@ -42,19 +42,19 @@ to complete host blocks.
 | Term | Meaning |
 | --- | --- |
 | Host block / host page | A block of the separate CPU pool and the KV page it holds. The host pages are the authoritative copy of a request's sparse-MLA KV. |
-| GPU page | A request's KV page held in a GPU block. Code calls these resident pages (the resident group). |
+| Resident page | A request's KV page held in a GPU block of its resident group. |
 | Hot buffer / hot row | A request's fixed set of GPU blocks that hold host pages fetched for attention, and one row within it. |
-| Write-back | Copying a GPU page to its host page. Happens eagerly, not only under memory pressure. |
+| Write-back | Copying a resident page to its host page. Happens eagerly, not only under memory pressure. |
 | Page transfer | One tracked write-back or restore of a page, identified by its transfer ID. |
 | Mirror | Copying KV rows to host as decode writes them, rather than a whole page at once. |
-| Durable | A page whose host copy is complete, so its GPU copy can be released. |
+| Durable | A page whose host copy is complete, so its resident block can be released. |
 | Publish | Registering durable host pages in the prefix cache so later requests can hit them. |
-| Fetch from host | Resolving attention's top-k positions and copying missing host rows into the hot buffer (`fetch_from_host`). |
-| Restore | Copying a host page back into a GPU page. |
+| Resolve residency | Mapping attention's top-k positions to physical rows: resident pages directly, hot rows on a hit, and host rows copied into the hot buffer on a miss (`resolve_residency`). |
+| Restore | Copying a host page back into a resident page. |
 | Import | KV arriving from a P/D prefill node. |
-| Pin / release | Holding or dropping a GPU page's allocation reference. Code calls the release `unpin`. |
-| GPU copy | A durable GPU page whose reference was released but whose contents stay readable until the pool evicts its block. |
-| Adopt | A host-prefix hit pointing a page at a still-valid GPU copy instead of reading it from host. |
+| Pin / release | Holding or dropping a resident page's allocation reference (`BlockPool.unpin_blocks` in core). |
+| GPU copy | A durable resident page whose reference was released but whose contents stay readable until the pool evicts its block. |
+| Adopt | A host-prefix hit pointing a page at a GPU copy the pool has not yet evicted, instead of reading it from host. |
 | Evict | The pool handing a released block to another allocation, which destroys any GPU copy it held. |
 
 ## Ownership

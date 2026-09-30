@@ -1042,7 +1042,7 @@ def test_hisparse_step_waits_for_previous_host_write(monkeypatch, is_host_writer
 
     worker.start_step(
         SimpleNamespace(
-            host_block_copies=[],
+            host_cow_copies=[],
             command=None,
             source_block_ids=[],
             row_mirrors={},
@@ -1053,7 +1053,7 @@ def test_hisparse_step_waits_for_previous_host_write(monkeypatch, is_host_writer
     )
     worker.start_step(
         SimpleNamespace(
-            host_block_copies=[],
+            host_cow_copies=[],
             command=None,
             source_block_ids=[],
             row_mirrors={},
@@ -1094,8 +1094,8 @@ def test_hisparse_shared_host_block_copy_has_one_writer(
 
     assert copy_blocks.call_count == expected_copies
     tp_group.barrier.assert_called_once_with()
-    assert worker.take_completed_host_copies() == [1]
-    assert worker.take_completed_host_copies() == []
+    assert worker.take_completed_host_cow_copies() == [1]
+    assert worker.take_completed_host_cow_copies() == []
 
 
 def test_hisparse_empty_step_does_not_replay_stale_host_mirror(monkeypatch):
@@ -1126,7 +1126,7 @@ def test_hisparse_empty_step_does_not_replay_stale_host_mirror(monkeypatch):
 
     worker.start_step(
         SimpleNamespace(
-            host_block_copies=[],
+            host_cow_copies=[],
             command=None,
             source_block_ids=[],
             row_mirrors={},

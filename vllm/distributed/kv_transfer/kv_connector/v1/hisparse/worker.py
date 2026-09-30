@@ -411,7 +411,7 @@ class HiSparseConnectorWorker:
         for handle in self.cache_handles:
             handle.all_context_pages_resident = metadata.all_context_pages_resident
             handle.mirror_from_resident = True
-        self._copy_host_blocks(metadata.host_block_copies, previous_host_write_event)
+        self._copy_host_blocks(metadata.host_cow_copies, previous_host_write_event)
         transfers = (
             metadata.command.page_transfers if metadata.command is not None else []
         )
@@ -494,13 +494,13 @@ class HiSparseConnectorWorker:
 
     def _copy_host_blocks(
         self,
-        host_block_copies: Sequence[KVCacheBlockCopy],
+        host_cow_copies: Sequence[KVCacheBlockCopy],
         previous_host_write_event: torch.Event,
     ) -> None:
-        if not host_block_copies:
+        if not host_cow_copies:
             return
         self._completed_host_copy_dst_ids.extend(
-            copy.dst_block_id for copy in host_block_copies
+            copy.dst_block_id for copy in host_cow_copies
         )
         if self.shared_host_region is None or get_tensor_model_parallel_rank() == 0:
             if self.host_caches:
@@ -508,7 +508,7 @@ class HiSparseConnectorWorker:
             copy_kv_cache_blocks_inplace(
                 self.host_caches,
                 self.host_num_blocks,
-                host_block_copies,
+                host_cow_copies,
             )
         if self.shared_host_region is not None:
             get_tp_group().barrier()
@@ -899,7 +899,7 @@ class HiSparseConnectorWorker:
                 self.host_write_event.record(compute_stream)
         self._release_completed_dma_descriptors()
 
-    def take_completed_host_copies(self) -> list[int]:
+    def take_completed_host_cow_copies(self) -> list[int]:
         """Drain host copies this worker has enqueued for this step."""
         completed = self._completed_host_copy_dst_ids
         self._completed_host_copy_dst_ids = []

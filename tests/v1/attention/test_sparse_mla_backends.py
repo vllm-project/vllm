@@ -1964,7 +1964,7 @@ def test_hisparse_uses_graph_stable_request_state_mapping():
     cache_handle = HiSparseCacheHandle(runtime)
     cache_handle.all_context_pages_resident = False
     runtime.begin_forward()
-    cache_handle.fetch_from_host(
+    cache_handle.resolve_residency(
         req_id_per_token=torch.tensor([0], dtype=torch.int32, device=device),
         block_table=torch.tensor([[1]], dtype=torch.int32, device=device),
         logical_topk_indices=torch.tensor([[0]], dtype=torch.int32, device=device),
@@ -2006,7 +2006,7 @@ def test_hisparse_maps_speculative_rows_through_request_state():
     )
     cache_handle.all_context_pages_resident = True
     runtime.begin_forward()
-    physical = cache_handle.fetch_from_host(
+    physical = cache_handle.resolve_residency(
         req_id_per_token=torch.zeros(4, dtype=torch.int32, device=device),
         block_table=torch.zeros((1, 1), dtype=torch.int32, device=device),
         logical_topk_indices=torch.zeros((4, 1), dtype=torch.int32, device=device),
@@ -2067,7 +2067,7 @@ def test_hisparse_speculative_rows_resolve_host_misses_consistently(
         topk = (rows * row_stride + base + step * (top_k // 2)) % (
             num_blocks * block_size
         )
-        hot_indices = cache.fetch_from_host(
+        hot_indices = cache.resolve_residency(
             req_id_per_token=req_ids,
             block_table=block_table,
             logical_topk_indices=topk.clone(),
@@ -2110,7 +2110,7 @@ def test_hisparse_speculative_rows_count_a_shared_load_once():
     topk = torch.arange(top_k, dtype=torch.int32, device=device).repeat(2, 1)
 
     runtime.begin_forward()
-    cache.fetch_from_host(
+    cache.resolve_residency(
         req_id_per_token=torch.zeros(2, dtype=torch.int32, device=device),
         block_table=block_table,
         logical_topk_indices=topk,
@@ -2152,7 +2152,7 @@ def test_hisparse_union_table_scales_with_union_bound():
     topk = torch.arange(top_k, dtype=torch.int32, device=device).view(1, top_k)
 
     runtime.begin_forward()
-    hot_indices = cache.fetch_from_host(
+    hot_indices = cache.resolve_residency(
         req_id_per_token=req_ids,
         block_table=block_table,
         logical_topk_indices=topk,
@@ -2212,7 +2212,7 @@ def test_hisparse_resident_rows_bypass_hot_lru():
     lru_before = cache_handle.runtime.index_group.lru_slots.clone()
 
     cache_handle.runtime.begin_forward()
-    indices, valid_counts = cache_handle.fetch_from_host(
+    indices, valid_counts = cache_handle.resolve_residency(
         req_id_per_token=request_ids,
         block_table=source_table,
         logical_topk_indices=topk,
@@ -2275,7 +2275,7 @@ def test_hisparse_swap_in_preserves_rows_across_eviction():
         )
         topk[:, -1] = -1
 
-        hot_indices, valid_counts = cache.fetch_from_host(
+        hot_indices, valid_counts = cache.resolve_residency(
             req_id_per_token=req_ids,
             block_table=block_table,
             logical_topk_indices=topk.clone(),
@@ -2363,15 +2363,15 @@ def test_hisparse_multi_step_swaps_match_independent():
             block_size=block_size,
         )
         producer_indices = [
-            producer.fetch_from_host(logical_topk_indices=topk.clone(), **kw)
+            producer.resolve_residency(logical_topk_indices=topk.clone(), **kw)
             for topk in topks
         ]
         independent_indices = [
-            indep.fetch_from_host(logical_topk_indices=topk.clone(), **kw)
+            indep.resolve_residency(logical_topk_indices=topk.clone(), **kw)
             for topk in topks
         ]
         follower_indices = [
-            shared.fetch_from_host(logical_topk_indices=topk.clone(), **kw)
+            shared.resolve_residency(logical_topk_indices=topk.clone(), **kw)
             for topk in topks
         ]
         torch.accelerator.synchronize()
@@ -2433,7 +2433,7 @@ def test_hisparse_multi_step_writes_request_major_output():
 
     cache.runtime.begin_forward()
     for step in range(query_len):
-        cache.fetch_from_host(
+        cache.resolve_residency(
             request_ids,
             block_table,
             logical[:, step],
@@ -2614,7 +2614,7 @@ def test_hisparse_remaps_strided_hma_rows_for_attention():
     cache = HiSparseCacheHandle(runtime)
     cache.all_context_pages_resident = False
     runtime.begin_forward()
-    attention_indices = cache.fetch_from_host(
+    attention_indices = cache.resolve_residency(
         req_id_per_token=torch.tensor([0], dtype=torch.int32, device=device),
         block_table=torch.arange(1, 9, dtype=torch.int32, device=device).view(1, 8),
         logical_topk_indices=torch.tensor(
@@ -2749,7 +2749,7 @@ def test_hisparse_newest_write_and_recycled_slot_invalidation():
     topk = torch.tensor([[0, -1, -1, -1]], dtype=torch.int32, device=device)
     cache_handle.all_context_pages_resident = False
     cache_handle.runtime.begin_forward()
-    hot_indices = cache_handle.fetch_from_host(
+    hot_indices = cache_handle.resolve_residency(
         req_id_per_token=req_ids,
         block_table=block_table,
         logical_topk_indices=topk,
@@ -2764,7 +2764,7 @@ def test_hisparse_newest_write_and_recycled_slot_invalidation():
         torch.tensor([8], dtype=torch.int64, device=device), req_ids
     )
     cache_handle.runtime.begin_forward()
-    hot_indices = cache_handle.fetch_from_host(
+    hot_indices = cache_handle.resolve_residency(
         req_id_per_token=req_ids,
         block_table=block_table,
         logical_topk_indices=topk,
@@ -3181,7 +3181,7 @@ def test_hisparse_fp8_decode_resolves_rows_once_then_runs_batched_attention():
     )
     kernel_shapes: list[torch.Size] = []
 
-    def fetch_from_host(req_ids, *, logical_topk_indices, **kwargs):  # noqa: ARG001
+    def resolve_residency(req_ids, *, logical_topk_indices, **kwargs):  # noqa: ARG001
         return logical_topk_indices + 10
 
     def run_kernel(self, *, q, **kwargs):  # noqa: ARG001
@@ -3195,7 +3195,7 @@ def test_hisparse_fp8_decode_resolves_rows_once_then_runs_batched_attention():
         source_block_table=torch.empty(
             num_decodes, 1, dtype=torch.int32, device=device
         ),
-        fetch_from_host=MagicMock(side_effect=fetch_from_host),
+        resolve_residency=MagicMock(side_effect=resolve_residency),
     )
     index_group = object.__new__(HiSparseMLAIndexGroup)
     index_group.caches = [cache]
@@ -3224,12 +3224,12 @@ def test_hisparse_fp8_decode_resolves_rows_once_then_runs_batched_attention():
         impl, q, topk, metadata, SimpleNamespace(), num_decodes
     )
 
-    cache.fetch_from_host.assert_called_once()
+    cache.resolve_residency.assert_called_once()
     torch.testing.assert_close(
-        cache.fetch_from_host.call_args.args[0], metadata.req_id_per_token
+        cache.resolve_residency.call_args.args[0], metadata.req_id_per_token
     )
     torch.testing.assert_close(
-        cache.fetch_from_host.call_args.kwargs["logical_topk_indices"], topk
+        cache.resolve_residency.call_args.kwargs["logical_topk_indices"], topk
     )
     assert kernel_shapes == [(num_decodes, query_len, 2, 4)]
     assert output.shape == (num_tokens, 2, 1)
@@ -3266,7 +3266,7 @@ def test_hisparse_decode_skips_padding_rows():
     topk = torch.arange(20, dtype=torch.int32).view(10, 2)
     cache = SimpleNamespace(
         source_block_table=torch.zeros((2, 1), dtype=torch.int32),
-        fetch_from_host=MagicMock(return_value=topk),
+        resolve_residency=MagicMock(return_value=topk),
     )
     index_group = object.__new__(HiSparseMLAIndexGroup)
     index_group.caches = [cache]
@@ -3283,7 +3283,7 @@ def test_hisparse_decode_skips_padding_rows():
         0, topk, metadata, block_stride_rows=None, return_valid_counts=False
     )
 
-    request_ids = cache.fetch_from_host.call_args.args[0]
+    request_ids = cache.resolve_residency.call_args.args[0]
     assert request_ids.data_ptr() == index_group.request_ids.data_ptr()
     torch.testing.assert_close(
         request_ids, torch.tensor([0] * 8 + [1, -1], dtype=torch.int32)

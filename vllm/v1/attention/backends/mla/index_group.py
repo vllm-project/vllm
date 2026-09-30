@@ -259,7 +259,7 @@ class HiSparseMLAIndexGroup(SparseMLAIndexGroup):
         request_ids.masked_fill_(
             self.row_indices[:num_tokens] >= attn_metadata.query_start_loc[-1], -1
         )
-        return cache.fetch_from_host(
+        return cache.resolve_residency(
             request_ids,
             block_table=source_block_table,
             logical_topk_indices=logical_topk_indices,

@@ -687,7 +687,7 @@ def test_hisparse_prefix_write_backs_respect_per_step_budget():
         enable_caching=True,
     )
     coordinator = get_hisparse_coordinator(manager)
-    coordinator.max_transfer_pages = 1
+    coordinator.max_transfers_per_step = 1
     tokens = list(range(2 * HISPARSE_BLOCK_SIZE))
     request = make_request("bounded", tokens, HISPARSE_BLOCK_SIZE, sha256)
 
@@ -735,7 +735,7 @@ def test_hisparse_host_cow_copy_is_drained_without_a_gpu_pool():
     connector = HiSparseConnectorScheduler(async_speculative=False)
     connector.bind_coordinator(coordinator)
     output = SchedulerOutput.make_empty()
-    copies = connector.build_connector_meta(output).host_block_copies
+    copies = connector.build_connector_meta(output).host_cow_copies
     assert output.has_sync_kv_loads
 
     assert new_blocks and new_block_ids == []
@@ -748,7 +748,7 @@ def test_hisparse_host_cow_copy_is_drained_without_a_gpu_pool():
     connector.update_connector_output(
         KVConnectorOutput(
             kv_connector_worker_meta=HiSparseConnectorWorkerMetadata(
-                {}, {}, completed_host_copy_dst_ids=(copies[0].dst_block_id,)
+                {}, {}, completed_host_cow_dst_ids=(copies[0].dst_block_id,)
             )
         )
     )
@@ -929,7 +929,7 @@ def test_hisparse_host_exhaustion_defers_allocation(enable_caching):
         hot.require_hot(request.request_id)
         hot.allocate_new_blocks(request.request_id, 64, 64)
     coordinator.update_residency(request.request_id)
-    assert coordinator.request_states[request.request_id].unpinned_pages == {0, 1}
+    assert coordinator.request_states[request.request_id].released_pages == {0, 1}
     for resident in coordinator.resident_managers:
         assert [b.ref_cnt for b in resident.req_to_blocks[request.request_id]] == [
             0,
@@ -992,7 +992,7 @@ def test_hisparse_host_import_ignores_unsealed_tail():
 
     state = coordinator.request_states["partial"]
     assert state.durable_pages == {0}
-    assert state.ready_prefix_pages == 1
+    assert state.num_durable_prefix_pages == 1
 
 
 def test_hisparse_resident_request_can_grow_without_hot_capacity():
