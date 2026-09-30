@@ -260,37 +260,28 @@ class QuickAllReduce:
         # AITER's FlyDSL INT4 implementation is substantially faster than the
         # HIP QuickReduce INT4 kernel for prefill-sized BF16 payloads. It owns
         # its own HIP IPC buffers, so initialize it instead of the HIP
-        # communicator when available. Keep a 2 MiB floor: the FlyDSL kernel's
-        # fixed launch cost regresses decode-sized collectives below this.
+        # communicator. Keep a 2 MiB floor: the FlyDSL kernel's fixed launch
+        # cost regresses decode-sized collectives below this.
         if self.qr_quant_level == QuickReduceRegime.INT4:
-            try:
-                from aiter.ops.flydsl import QuickAllReduceInt4
+            from aiter.ops.flydsl import QuickAllReduceInt4
 
-                self._flydsl_int4 = QuickAllReduceInt4(
-                    group=self.group,
-                    device=self.device,
-                    rank=self.rank,
-                    world_size=self.world_size,
-                )
-            except (ImportError, RuntimeError, ValueError) as exc:
-                logger.warning(
-                    "AITER FlyDSL INT4 QuickReduce unavailable; "
-                    "falling back to HIP QuickReduce: %s",
-                    exc,
-                )
-                self._flydsl_int4 = None
-            else:
-                # QuickAllReduceInt4 rejects payloads above its 4 GiB window.
-                self.qr_max_size = min(effective_qr_max_size, 0xFFFFFFFF)
-                self.qr_min_size = qr_min_size if qr_min_size is not None else 2 * MB
-                self.disabled = False
-                logger.info(
-                    "Using AITER FlyDSL INT4 QuickReduce for BF16 payloads "
-                    "from %d MiB through %d MiB",
-                    self.qr_min_size // MB,
-                    self.qr_max_size // MB,
-                )
-                return
+            self._flydsl_int4 = QuickAllReduceInt4(
+                group=self.group,
+                device=self.device,
+                rank=self.rank,
+                world_size=self.world_size,
+            )
+            # QuickAllReduceInt4 rejects payloads above its 4 GiB window.
+            self.qr_max_size = min(effective_qr_max_size, 0xFFFFFFFF)
+            self.qr_min_size = qr_min_size if qr_min_size is not None else 2 * MB
+            self.disabled = False
+            logger.info(
+                "Using AITER FlyDSL INT4 QuickReduce for BF16 payloads "
+                "from %d MiB through %d MiB",
+                self.qr_min_size // MB,
+                self.qr_max_size // MB,
+            )
+            return
 
         self._ptr = ops.init_custom_qr(self.rank, self.world_size, qr_max_size)
         self.create_shared_buffer()
