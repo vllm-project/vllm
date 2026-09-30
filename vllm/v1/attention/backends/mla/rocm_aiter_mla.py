@@ -110,6 +110,15 @@ def _fp8_mla_prefill_supported() -> bool:
     return True
 
 
+def _asm_fp8_prefill_superseded(prefill_backend: object) -> bool:
+    """Whether the selected MLA prefill backend supersedes the ASM FP8 prefill.
+
+    ``AiterFlyDSLFP8PrefillBackend`` runs FP8 attention itself and also serves
+    context-free prefills, so the assembly prefill kernel must not claim them.
+    """
+    return isinstance(prefill_backend, AiterFlyDSLFP8PrefillBackend)
+
+
 @functools.lru_cache(maxsize=1)
 def _aiter_mla_native_h24_reducer_supported() -> bool:
     """Whether AITER's JIT reducer supports the native H24/512 shape."""
@@ -783,13 +792,13 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
         # the standard prefill path. Head counts that are not a multiple of 16
         # are replicate-padded up to one in _mla_fp8_prefill_attn, so the gate
         # is the same head-count predicate the decode path uses.
-        # The FlyDSL FP8 prefill backend also serves context-free prefills;
-        # without PS metadata the impl skips the assembly kernel.
+        # A FlyDSL FP8 prefill backend supersedes the assembly kernel, so the
+        # PS workspace buffers below are not allocated either.
         self._fp8_prefill_enabled = _fp8_mla_prefill_supported() and (
             kv_cache_dtype_str == "fp8"
             and vllm_config.model_config.dtype == torch.bfloat16
             and AiterMLAHelper.is_valid_num_heads(self.num_heads)
-            and not isinstance(self._prefill_backend, AiterFlyDSLFP8PrefillBackend)
+            and not _asm_fp8_prefill_superseded(self._prefill_backend)
         )
         if self._fp8_prefill_enabled:
             max_prefill_qlen = min(
@@ -2064,17 +2073,21 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
         """Dispatch prefill to the FP8 ASM kernel when available.
 
         Falls back to the parent (``flash_attn_varlen_func``) when FP8
-        MLA prefill is disabled, PS metadata is missing, or chunked
-        context requires two-pass merge.
+        MLA prefill is disabled, the selected prefill backend supersedes
+        it, PS metadata is missing, or chunked context requires two-pass
+        merge.
 
         The annotation uses the base ``MLACommonMetadata`` to honour LSP
         with ``MLACommonImpl.forward_mha``; the AITER builder always
         produces ``AiterMLAMetadata`` instances at runtime, so we narrow
         with ``isinstance`` before reading the AITER-specific FP8 fields.
         """
+        prefill_metadata = attn_metadata.prefill
         if (
             not self._fp8_prefill_enabled
             or not isinstance(attn_metadata, AiterMLAMetadata)
+            or prefill_metadata is None
+            or _asm_fp8_prefill_superseded(prefill_metadata.prefill_backend)
             or attn_metadata.fp8_prefill_qo_indptr is None
         ):
             return super().forward_mha(
@@ -2088,8 +2101,6 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
                 output_scale,
             )
 
-        assert attn_metadata.prefill is not None
-        prefill_metadata = attn_metadata.prefill
         has_context = prefill_metadata.chunked_context is not None
 
         if has_context:

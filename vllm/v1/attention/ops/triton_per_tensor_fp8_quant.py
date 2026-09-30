@@ -10,6 +10,11 @@ needed and the ops are CUDA-graph safe. Compile-time specialization does not
 depend on the token counts (only the grid size does), so varying batch shapes
 do not recompile.
 
+One grid covers all the inputs in each launch, so a program can land past the
+end of a smaller input. Such programs do no work and compute no address, and
+every load and store is masked regardless, so no out-of-range pointer is formed
+or dereferenced.
+
 Adapted from the fused QKV quantizer in ROCm/ATOM (atom/model_ops/
 triton_fused_qkv_quant.py, MIT license).
 """
@@ -47,10 +52,13 @@ def _partial_amax(
     PARTS: tl.constexpr,
     BLOCK: tl.constexpr,
 ):
-    offsets = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
+    # The grid is fixed at PARTS, so the trip count is per-program: it drops to
+    # zero once this program's stripe starts past the end of this input.
+    start = tl.program_id(0) * BLOCK
     acc = tl.zeros((BLOCK,), tl.float32)
-    for step in range(tl.cdiv(N, PARTS * BLOCK)):
-        x = _load(X, offsets + step * PARTS * BLOCK, N, SHAPE, STRIDE)
+    for step in range(tl.cdiv(N - start, PARTS * BLOCK)):
+        offsets = start + step * PARTS * BLOCK + tl.arange(0, BLOCK)
+        x = _load(X, offsets, N, SHAPE, STRIDE)
         acc = tl.maximum(acc, tl.abs(x))
     tl.store(Partial + tl.program_id(0), tl.max(acc, 0))
 
@@ -92,15 +100,20 @@ def _quant(
     FP8_MAX: tl.constexpr,
     MIN_DESCALE: tl.constexpr,
 ):
-    offsets = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
-    x = _load(X, offsets, N, SHAPE, STRIDE)
-    amax = tl.max(tl.load(Partial + tl.arange(0, PARTS)), 0)
-    descale = amax / FP8_MAX
-    descale = tl.where(descale > 0, descale, MIN_DESCALE)
-    y = tl.clamp(x * (1.0 / descale), -FP8_MAX, FP8_MAX)
-    tl.store(Y + offsets, y.to(Y.dtype.element_ty), offsets < N)
-    if tl.program_id(0) == 0:
-        tl.store(Scale, descale)
+    # One grid covers all inputs, so it is sized for the largest. Programs
+    # past this input's end do nothing; program 0 still writes the descale,
+    # which is what an empty input needs.
+    start = tl.program_id(0) * BLOCK
+    if start < N or start == 0:
+        offsets = start + tl.arange(0, BLOCK)
+        x = _load(X, offsets, N, SHAPE, STRIDE)
+        amax = tl.max(tl.load(Partial + tl.arange(0, PARTS)), 0)
+        descale = amax / FP8_MAX
+        descale = tl.where(descale > 0, descale, MIN_DESCALE)
+        y = tl.clamp(x * (1.0 / descale), -FP8_MAX, FP8_MAX)
+        tl.store(Y + offsets, y.to(Y.dtype.element_ty), offsets < N)
+        if start == 0:
+            tl.store(Scale, descale)
 
 
 @triton.jit
