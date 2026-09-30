@@ -16,6 +16,7 @@ from uuid import uuid4
 
 import pytest
 
+import vllm.logger as vllm_logger
 from vllm.config import LoggingConfig
 from vllm.logger import (
     _DATE_FORMAT,
@@ -28,6 +29,7 @@ from vllm.logger import (
 )
 from vllm.logging_utils import NewLineFormatter
 from vllm.logging_utils.dump_input import prepare_object_to_dump
+from vllm.utils.system_utils import decorate_logs
 
 
 def f1(x):
@@ -110,6 +112,98 @@ def test_offline_llm_configures_logging_before_logging_args(monkeypatch):
         llm_module.LLM(model="facebook/opt-125m")
 
 
+def test_json_logging(monkeypatch, tmp_path):
+    output = io.StringIO()
+    logging_config = {
+        "version": 1,
+        "disable_existing_loggers": False,
+        "formatters": {
+            "json": {
+                "class": "pythonjsonlogger.jsonlogger.JsonFormatter",
+                "format": (
+                    "%(asctime)s %(levelname)s %(name)s %(vllm_process_name)s "
+                    "%(process)d %(message)s"
+                ),
+            },
+        },
+        "handlers": {
+            "console": {
+                "class": "logging.StreamHandler",
+                "formatter": "json",
+                "stream": "ext://sys.stdout",
+            },
+        },
+        "loggers": {
+            "vllm": {
+                "handlers": ["console"],
+                "level": "INFO",
+                "propagate": False,
+            },
+        },
+    }
+
+    logging_config_path = tmp_path / "logging_config.json"
+    logging_config_path.write_text(json.dumps(logging_config))
+
+    try:
+        with monkeypatch.context() as context:
+            context.setattr(sys, "stdout", output)
+            # Restore this module-global state when the context exits.
+            context.setattr(vllm_logger, "_vllm_process_info", None)
+            _configure_vllm_root_logger(
+                LoggingConfig(pylogging_config_file=str(logging_config_path))
+            )
+            decorate_logs("Worker_DP0")
+            init_logger("vllm.structured_log_probe").info("structured log probe")
+
+            log = json.loads(output.getvalue())
+    finally:
+        _configure_vllm_root_logger(LoggingConfig())
+
+    assert log["message"] == "structured log probe"
+    assert log["vllm_process_name"] == "Worker_DP0"
+    assert log["process"] == os.getpid()
+
+
+@pytest.mark.parametrize("factory_order", ["before", "after", "replacement"])
+def test_configure_logging_preserves_application_record_factory(
+    monkeypatch, factory_order
+):
+    """Application fields survive initial configuration and reconfiguration."""
+    original_factory = logging.getLogRecordFactory()
+    monkeypatch.setattr(vllm_logger, "dictConfig", lambda _: None)
+    monkeypatch.setattr(vllm_logger, "_last_configured_logging_config", None)
+    monkeypatch.setattr(vllm_logger, "_vllm_process_info", None)
+    config = LoggingConfig()
+    formatter = logging.Formatter("%(request_id)s %(vllm_process_name)s %(message)s")
+
+    try:
+        logging.setLogRecordFactory(logging.LogRecord)
+        if factory_order != "before":
+            configure_logging(config)
+        base_factory = (
+            logging.LogRecord
+            if factory_order == "replacement"
+            else logging.getLogRecordFactory()
+        )
+
+        def application_factory(*args, **kwargs):
+            record = base_factory(*args, **kwargs)
+            record.request_id = "request-123"
+            return record
+
+        logging.setLogRecordFactory(application_factory)
+        decorate_logs("Worker_DP0")
+        for _ in range(2):
+            configure_logging(config)
+            record = logging.getLogger("application").makeRecord(
+                "application", logging.INFO, __file__, 1, "probe", (), None
+            )
+            assert formatter.format(record) == "request-123 Worker_DP0 probe"
+    finally:
+        logging.setLogRecordFactory(original_factory)
+
+
 def test_use_color_force_color(monkeypatch):
     """FORCE_COLOR forces colored logs without a TTY, while NO_COLOR and an
     explicit VLLM_LOGGING_COLOR=0 take precedence over it."""
@@ -168,9 +262,11 @@ def test_logger_configuring_can_be_disabled(monkeypatch):
     monkeypatch.setenv("VLLM_CONFIGURE_LOGGING", "0")
     monkeypatch.delenv("VLLM_LOGGING_CONFIG_PATH", raising=False)
 
+    original_factory = logging.getLogRecordFactory()
     with patch("vllm.logger.dictConfig") as dict_config_mock:
         configure_logging(LoggingConfig(configure_logging=False))
     dict_config_mock.assert_not_called()
+    assert logging.getLogRecordFactory() is original_factory
 
 
 def test_an_error_is_raised_when_custom_logging_config_file_does_not_exist(monkeypatch):

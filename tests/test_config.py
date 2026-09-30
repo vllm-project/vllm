@@ -5,6 +5,7 @@ import json
 import logging
 import os
 from dataclasses import MISSING, Field, asdict, dataclass, field
+from datetime import timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from typing import cast
@@ -90,6 +91,16 @@ def test_nested_rope_validation_patch_preserves_flat_rope_parameters(monkeypatch
         "rope_theta": 500000.0,
     }
     assert len(calls) == 2
+
+
+def test_dspark_adaptive_verification_separates_graph_cache():
+    config = object.__new__(SpeculativeConfig)
+    config.method = "dspark"
+    config.draft_model_config = None
+    config.enable_adaptive_verification = False
+    fixed_hash = config.compute_hash()
+    config.enable_adaptive_verification = True
+    assert config.compute_hash() != fixed_hash
 
 
 def _write_json(path: Path, value: object) -> None:
@@ -409,6 +420,19 @@ def test_hisparse_rejects_disabled_hybrid_kv_cache_manager(monkeypatch):
         )
 
 
+def test_hisparse_rejects_disabled_full_isl_reservation(monkeypatch):
+    monkeypatch.setattr(current_platform, "is_cuda", lambda: True)
+    with pytest.raises(ValueError, match="requires --scheduler-reserve-full-isl"):
+        VllmConfig(
+            attention_config=AttentionConfig(hisparse_config=HiSparseConfig()),
+            scheduler_config=SchedulerConfig(
+                max_model_len=2048,
+                is_encoder_decoder=False,
+                scheduler_reserve_full_isl=False,
+            ),
+        )
+
+
 def test_hisparse_rejects_non_cuda(monkeypatch):
     monkeypatch.setattr(current_platform, "is_cuda", lambda: False)
     with pytest.raises(ValueError, match="requires NVIDIA CUDA"):
@@ -582,7 +606,7 @@ def test_rocm_mrv1_default_yields_to_v1_unsupported_config(monkeypatch):
         speculative_config=None,
     )
     config._dflash_needs_multi_kv_group = lambda: False
-    config._is_dflash2_draft = lambda: False
+    config._is_dflash_candidate_draft = lambda: False
     config._get_v2_model_runner_unsupported_features = lambda: []
     # The real predicate, so the test also pins where dspark lands in it.
     config._get_v1_model_runner_unsupported_features = lambda: (
@@ -813,7 +837,8 @@ def test_v2_model_runner_supports_custom_logits_processors():
     assert config._get_v2_model_runner_unsupported_features() == []
 
 
-def test_dflash2_draft_forces_v2_model_runner():
+@pytest.mark.parametrize("architecture", ["DFlash2DraftModel", "LiLiCorrDraftModel"])
+def test_dflash_candidate_draft_forces_v2_model_runner(architecture):
     """A DFlash2 draft must reach the V2 speculator, the only one that runs its
     candidate selector; on V1 it would draft as DFlash1 without raising."""
 
@@ -825,11 +850,15 @@ def test_dflash2_draft_forces_v2_model_runner():
             )
         )
 
-    assert VllmConfig._is_dflash2_draft(config("dflash", ["DFlash2DraftModel"]))
-    assert not VllmConfig._is_dflash2_draft(config("dflash", ["DFlashDraftModel"]))
-    assert not VllmConfig._is_dflash2_draft(config("eagle", ["DFlash2DraftModel"]))
-    assert not VllmConfig._is_dflash2_draft(SimpleNamespace(speculative_config=None))
-    assert not VllmConfig._is_dflash2_draft(
+    assert VllmConfig._is_dflash_candidate_draft(config("dflash", [architecture]))
+    assert not VllmConfig._is_dflash_candidate_draft(
+        config("dflash", ["DFlashDraftModel"])
+    )
+    assert not VllmConfig._is_dflash_candidate_draft(config("eagle", [architecture]))
+    assert not VllmConfig._is_dflash_candidate_draft(
+        SimpleNamespace(speculative_config=None)
+    )
+    assert not VllmConfig._is_dflash_candidate_draft(
         SimpleNamespace(
             speculative_config=SimpleNamespace(method="dflash", draft_model_config=None)
         )
@@ -873,6 +902,8 @@ def test_resolve_cudagraph_mode_adjusts_spec_decode_sizes_only_for_v1(
         ("FULL_AND_PIECEWISE", False, "ALWAYS", "FULL_DECODE_ONLY"),
         ("FULL_DECODE_ONLY", False, "ALWAYS", "FULL_DECODE_ONLY"),
         ("FULL_DECODE_ONLY", False, "NEVER", "NONE"),
+        ("FULL_AND_PIECEWISE", True, "UNIFORM_BATCH", "FULL_AND_PIECEWISE"),
+        ("FULL", True, "UNIFORM_BATCH", "FULL_DECODE_ONLY"),
     ],
 )
 def test_resolve_cudagraph_mode_uses_loaded_piecewise_provider(
@@ -1243,7 +1274,7 @@ def test_v1_model_runner_rejects_v2_only_features():
         model_config=None,
     )
     config._dflash_needs_multi_kv_group = lambda: False
-    config._is_dflash2_draft = lambda: False
+    config._is_dflash_candidate_draft = lambda: False
     config._get_v1_model_runner_unsupported_features = lambda: (
         VllmConfig._get_v1_model_runner_unsupported_features(config)
     )
@@ -1430,7 +1461,7 @@ def test_v1_model_runner_rejects_pipeline_parallelism_with_async_scheduling():
         model_config=None,
     )
     config._dflash_needs_multi_kv_group = lambda: False
-    config._is_dflash2_draft = lambda: False
+    config._is_dflash_candidate_draft = lambda: False
 
     assert VllmConfig._get_v1_model_runner_unsupported_features(config) == []
 
@@ -1445,6 +1476,20 @@ def test_data_parallel_rpc_port_has_fixed_default():
 
 def test_all2all_backend_has_portable_default():
     assert ParallelConfig().all2all_backend == "allgather_reducescatter"
+
+
+def test_dp_group_uses_configured_timeout_without_current_config(monkeypatch):
+    monkeypatch.setattr(vllm_config_module, "_current_vllm_config", None)
+    config = ParallelConfig(cpu_distributed_timeout_seconds=30)
+    with (
+        patch(
+            "vllm.distributed.utils.rendezvous",
+            return_value=iter([(torch.distributed.HashStore(), 0, 1)]),
+        ),
+        patch("vllm.distributed.utils.init_gloo_process_group") as init_group,
+    ):
+        config.stateless_init_dp_group()
+    assert init_group.call_args.kwargs["timeout"] == timedelta(seconds=30)
 
 
 @pytest.mark.parametrize(
@@ -1478,19 +1523,40 @@ def test_engram_dp_shared_memory_requires_cpu_offload():
         EngramConfig(cpu_offload=False, dp_shared_memory=True)
 
 
+@pytest.mark.skip_global_cleanup
 @pytest.mark.parametrize(
-    "cpu_offload,dp_size,elastic_ep,expected",
-    [(True, 2, False, True), (False, 2, False, False), (True, 1, False, False)],
+    "cpu_offload,use_thp,dp_shared_memory,dp_size,elastic_ep,expected",
+    [
+        (True, False, None, 2, False, True),
+        (False, False, None, 2, False, False),
+        (True, False, None, 1, False, False),
+        (True, False, None, 2, True, False),
+        # use_thp backs private tables; sharing would silently ignore it.
+        (True, True, None, 2, False, False),
+        (True, True, False, 2, False, False),
+    ],
 )
 def test_engram_dp_shared_memory_defaults_when_supported(
-    cpu_offload, dp_size, elastic_ep, expected
+    cpu_offload, use_thp, dp_shared_memory, dp_size, elastic_ep, expected
 ):
-    """Unset dp_shared_memory enables sharing only for offloaded, non-elastic DP."""
+    """Resolve sharing only where supported, preserving an explicit false."""
     parallel = ParallelConfig(data_parallel_size=dp_size)
     parallel.enable_elastic_ep = elastic_ep
-    config = EngramConfig(cpu_offload=cpu_offload)
+    config = EngramConfig(
+        cpu_offload=cpu_offload,
+        use_thp=use_thp,
+        dp_shared_memory=dp_shared_memory,
+    )
     config.resolve_dp_shared_memory(parallel)
     assert config.dp_shared_memory is expected
+
+
+@pytest.mark.skip_global_cleanup
+def test_engram_thp_rejects_explicit_shared_memory():
+    with pytest.raises(
+        ValueError, match="use_thp requires cpu_offload=True and dp_shared_memory=False"
+    ):
+        EngramConfig(use_thp=True, dp_shared_memory=True)
 
 
 @pytest.mark.parametrize(
@@ -1535,14 +1601,14 @@ def test_engram_dp_shared_memory_config_validation(
         ("DeepseekV41ForCausalLM", [1], "cuda", True),
         ("DeepseekV41ForCausalLM", [1], "rocm", True),
         ("DeepseekV41ForCausalLM", [], "cuda", False),
-        ("DeepseekV41ForCausalLM", [1], "cpu", False),
+        ("DeepseekV41ForCausalLM", [1], "cpu", True),
         ("Qwen4ExpForCausalLM", [1], "cuda", True),
         ("Qwen4ExpForCausalLM", [1], "rocm", True),
         ("Qwen4ExpForConditionalGeneration", [1], "cuda", True),
         ("Qwen4ExpForConditionalGeneration", [1], "rocm", True),
         ("Qwen4ExpForCausalLM", [], "cuda", False),
         ("Qwen4ExpForCausalLM", None, "cuda", False),
-        ("Qwen4ExpForCausalLM", [1], "cpu", False),
+        ("Qwen4ExpForCausalLM", [1], "cpu", True),
         ("LlamaForCausalLM", [1], "cuda", False),
         ("Qwen4ExpMTP", [], "cuda", False),
         (None, None, "cuda", False),

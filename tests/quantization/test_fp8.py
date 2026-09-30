@@ -25,6 +25,7 @@ from vllm.model_executor.layers.attention.attention import (
     set_default_quant_scales,
 )
 from vllm.model_executor.layers.fused_moe import FusedMoEFactory
+from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
 from vllm.model_executor.layers.quantization.fp8 import (
     Fp8Config,
     Fp8LinearMethod,
@@ -79,17 +80,22 @@ def test_deepseek_v41_mxfp8_scale_loading(
     for module in (model_module, linear_module):
         monkeypatch.setattr(module, "get_tensor_model_parallel_world_size", lambda: 2)
         monkeypatch.setattr(module, "get_tensor_model_parallel_rank", lambda: tp_rank)
-    tp_args = dict(quant_config=quant_config, bias=False)
     block = torch.nn.Module()
     block.attn = torch.nn.Module()
-    block.attn.wq_b = ColumnParallelLinear(128, 128, **tp_args)
-    block.attn.fused_wqa_wkv = MergedColumnParallelLinear(128, [128, 64], **tp_args)
+    block.attn.wq_b = ColumnParallelLinear(
+        128, 128, quant_config=quant_config, bias=False
+    )
+    block.attn.fused_wqa_wkv = MergedColumnParallelLinear(
+        128, [128, 64], quant_config=quant_config, bias=False
+    )
     block.ffn = torch.nn.Module()
     block.ffn.shared_experts = torch.nn.Module()
     block.ffn.shared_experts.gate_up_proj = MergedColumnParallelLinear(
-        128, [128, 128], **tp_args
+        128, [128, 128], quant_config=quant_config, bias=False
     )
-    block.ffn.shared_experts.down_proj = RowParallelLinear(128, 128, **tp_args)
+    block.ffn.shared_experts.down_proj = RowParallelLinear(
+        128, 128, quant_config=quant_config, bias=False
+    )
     block.ffn.experts = torch.nn.Module()
     block.ffn.experts.register_parameter(
         "weight_scale", torch.nn.Parameter(torch.empty(3, 4, dtype=torch.uint8), False)
@@ -111,9 +117,11 @@ def test_deepseek_v41_mxfp8_scale_loading(
     model.config = SimpleNamespace(num_attention_heads=2)
     model.quant_config = quant_config
     model.use_sequence_parallel = False
-    model.get_expert_mapping = lambda: [
-        ("experts.weight_scale", "experts.0.w1.weight_scale", 0, "w1")
-    ]
+    monkeypatch.setattr(
+        model,
+        "get_expert_mapping",
+        lambda: [("experts.weight_scale", "experts.0.w1.weight_scale", 0, "w1")],
+    )
 
     checkpoints = [
         ("attn.wq_b", "attn.wq_b", 128, 128, 0, None),
@@ -211,7 +219,10 @@ def test_deepseek_v41_vl_mapper_routes_linear_scales(
     vllm_config = SimpleNamespace(
         quant_config=SimpleNamespace(weight_block_size=weight_block_size)
     )
-    resolved = model_module._linear_scale_param_name(vllm_config, expert_dtype)
+    resolved = model_module._linear_scale_param_name(
+        vllm_config,  # type: ignore[arg-type]
+        expert_dtype,
+    )
     assert resolved == scale_name
 
     mapper = vl_module._make_deepseek_v4_vl_weights_mapper(expert_dtype, resolved)
@@ -226,6 +237,85 @@ def test_deepseek_v41_vl_mapper_routes_linear_scales(
         f"language_model.model.layers.0.attn.wq_a.{scale_name}",
         "language_model.model.layers.0.attn.wkv.weight",
     ]
+
+
+def test_deepseek_v41_vl_exposes_quant_mappings_on_class():
+    """``configure_quant_config`` reads both mappings off the class, before
+    ``__init__`` builds the instance mapper. Without them a Quark config's
+    per-layer keys never match this wrapper's ``language_model.``-rooted
+    prefixes and every attention shard falls back to the global spec."""
+    from vllm.models.deepseek_v41.amd.vl_model import DeepseekV41ForCausalLM
+
+    assert "fused_wqa_wkv" in DeepseekV41ForCausalLM.packed_modules_mapping
+    mapper = DeepseekV41ForCausalLM.hf_to_vllm_mapper.get_rename_mapper()
+    assert mapper.apply_list(["layers.0.attn.wq_a"]) == [
+        "language_model.model.layers.0.attn.wq_a"
+    ]
+
+
+def test_deepseek_v41_engram_scale_accepts_quark_name():
+    """Quark exports name the engram scale ``embed.weight_scale``; the
+    ``\\.scale$`` rules only match a literal ``.scale`` suffix, so without an
+    explicit rule the tensor is never routed and loading fails."""
+    from vllm.models.deepseek_v41.amd import model as model_module
+
+    mapper = model_module._make_deepseek_v4_weights_mapper("fp4", "weight_scale")
+    weight = torch.empty(0)
+    mapped = [
+        name
+        for name, _ in mapper.apply(
+            [
+                ("layers.1.engram.embed.weight_scale", weight),
+                ("layers.1.engram.embed.scale", weight),
+            ]
+        )
+    ]
+    assert mapped == [
+        "model.layers.1.engram.embed_tokens.weight_scale_inv",
+        "model.layers.1.engram.embed_tokens.weight_scale_inv",
+    ]
+
+
+def test_deepseek_v41_declines_quark_configs():
+    """``from_config`` rewrites a Quark config into a single global FP8 scheme,
+    which would discard the per-layer specs of a mixed-precision export (MXFP4
+    experts + 2-D block MXFP8 attention in DeepSeek-V4.1-Flash). QuarkConfig
+    knows how to dispatch each scheme, so it must handle every Quark export."""
+    from vllm.models.deepseek_v41.quant_config import DeepseekV4FP8Config
+
+    hf_config = SimpleNamespace(model_type="deepseek_v41")
+    mxfp4_global = {
+        "global_quant_config": {
+            "weight": {"dtype": "fp4", "qscheme": "per_group", "group_size": 32}
+        },
+        "quant_method": "quark",
+    }
+
+    assert (
+        DeepseekV4FP8Config.override_quantization_method(
+            mxfp4_global, None, hf_config=hf_config
+        )
+        is None
+    )
+
+    mixed = {
+        **mxfp4_global,
+        "layer_quant_config": {
+            "layers.0.attn.wkv": {
+                "weight": {
+                    "dtype": "fp8_e4m3",
+                    "qscheme": "per_block",
+                    "block_size": [32, 32],
+                }
+            }
+        },
+    }
+    assert (
+        DeepseekV4FP8Config.override_quantization_method(
+            mixed, None, hf_config=hf_config
+        )
+        is None
+    )
 
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="DeepGEMM requires CUDA")
@@ -294,7 +384,7 @@ def test_deepgemm_mxfp8_preserves_weight_and_scale_values(
 @pytest.mark.parametrize("config_source", ["deepseek", "mxfp8"])
 @pytest.mark.parametrize("num_tokens", [1, 7, 128])
 def test_mxfp8_bmm_loads_and_projects_grouped_weights(
-    dist_init, default_vllm_config, prequantized, config_source, num_tokens
+    dist_init, default_vllm_config, monkeypatch, prequantized, config_source, num_tokens
 ):
     """BMM metadata set after construction selects grouped weight processing."""
     from vllm.model_executor.kernels.linear.mxfp8.deep_gemm import (
@@ -319,10 +409,11 @@ def test_mxfp8_bmm_loads_and_projects_grouped_weights(
         pytest.skip("DeepGEMM MXFP8 BMM requires Blackwell")
 
     default_vllm_config.model_config = SimpleNamespace(dtype=torch.bfloat16)
-    quant_config = DeepseekV4FP8Config(
+    deepseek_config = DeepseekV4FP8Config(
         is_checkpoint_fp8_serialized=True, weight_block_size=[32, 32]
     )
-    quant_config._resolved_expert_dtype = "fp4"
+    deepseek_config._resolved_expert_dtype = "fp4"
+    quant_config: QuantizationConfig = deepseek_config
     if config_source == "mxfp8":
         quant_config = get_quantization_config("mxfp8").from_config(
             {"quant_method": "mxfp8"}
@@ -353,7 +444,7 @@ def test_mxfp8_bmm_loads_and_projects_grouped_weights(
     model.config = SimpleNamespace(num_attention_heads=2)
     model.quant_config = quant_config
     model.use_sequence_parallel = False
-    model.get_expert_mapping = lambda: []
+    monkeypatch.setattr(model, "get_expert_mapping", lambda: [])
     model.load_weights(
         [
             ("layers.0.attn.wo_a.weight", weight),
@@ -364,6 +455,7 @@ def test_mxfp8_bmm_loads_and_projects_grouped_weights(
         weight.float().reshape(8, 32, 16, 32)
         * torch.exp2(scales.float() - 127)[:, None, :, None]
     ).reshape(2, 128, 512)
+    assert isinstance(linear.quant_method, ModelOptLinearMethod)
     linear.quant_method.process_weights_after_loading(linear)
     linear.quant_method.process_weights_after_loading(linear)
     assert isinstance(linear.quant_method.kernel, DeepGemmMxfp8BmmLinearKernel)
@@ -706,7 +798,7 @@ def test_kv_cache_scale_sync_to_host_copies():
     set_default_quant_scales(layer, register_buffer=True)
     layer.kv_cache_dtype = "fp8"
 
-    method = BaseKVCacheMethod(quant_config=None)
+    method = BaseKVCacheMethod(quant_config=None)  # type: ignore[arg-type]  # Scale synchronization does not use quant_config.
     method.create_weights(layer)
     # 0.3 stays != 1.0 even after the fp8_fnuz x2 rescale.
     checkpoint_scale = torch.tensor(0.3, dtype=torch.float32)
