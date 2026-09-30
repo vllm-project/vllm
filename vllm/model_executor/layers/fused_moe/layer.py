@@ -363,6 +363,7 @@ def FusedMoEFactory(
         activation=moe_activation,
         device=vllm_config.device_config.device,
         routing_method=router.routing_method_type,  # Not ideal
+        has_hash_routing=hash_indices_table is not None,
         swiglu_limit=swiglu_limit,
         swiglu_alpha=swiglu_alpha,
         swiglu_beta=swiglu_beta,

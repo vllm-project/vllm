@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import torch
-from transformers import PretrainedConfig
+from transformers import PreTrainedConfig
 
 from vllm.config import (
     VllmConfig,
@@ -24,7 +24,7 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
 
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         vllm_config: VllmConfig,
         prefix: str = "",
     ) -> None:
