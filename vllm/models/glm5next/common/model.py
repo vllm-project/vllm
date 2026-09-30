@@ -22,6 +22,7 @@ from vllm.model_executor.layers.fused_moe import (
     GateLinear,
     fused_moe_make_expert_params_mapping,
 )
+from vllm.model_executor.layers.fusion.mm_input_norm import build_mm_input_norm
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
@@ -1103,6 +1104,7 @@ class Glm5NextForConditionalGeneration(
                 # and yields NaN image features. Mirrors the MLA/KDA proj
                 # pattern (quant_config=None for BF16 submodules).
                 quant_config=None,
+                input_norm=build_mm_input_norm(self.model_config),
                 prefix=maybe_prefix(prefix, "visual"),
             )
 
