@@ -423,6 +423,14 @@ class StreamingParserEngine:
         if self.skip_reasoning_parsing and terminal in self._reasoning_markup_terminals:
             return self._emit_for_state(value, token_count)
 
+        if transition.emit_terminal:
+            # `value` is the terminal's own text on both the lexer and the
+            # pre-lexed token-id path; emit it as content, then apply the
+            # transition for its state change and declared events only.
+            events = self._emit_for_state(value, token_count)
+            events.extend(self._apply_transition(transition, "", 0))
+            return events
+
         if self.skip_tool_parsing and terminal in self._tool_terminals:
             # Inkling reuses one terminal for tool, text, and reasoning exits.
             # Outside a forwarded tool span, apply its normal transition.
