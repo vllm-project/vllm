@@ -1362,6 +1362,10 @@ class AsyncMPClient(MPClient):
             "collective_rpc", method, timeout, args, kwargs
         )
 
+    async def compute_weight_checksums_async(self) -> list[dict[str, str]]:
+        per_engine = await self.call_utility_all_async("compute_weight_checksums")
+        return [worker for workers in per_engine for worker in workers]
+
     async def handle_fault(
         self, ft_request: FaultToleranceRequest
     ) -> FaultToleranceResult:
