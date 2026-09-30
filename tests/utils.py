@@ -830,7 +830,7 @@ class RemoteOpenAIServerCustom(RemoteOpenAIServer):
         self.proc: Process = cast(Any, ctx).Process(
             target=_run_in_new_process_group,
             args=(self.child_process_fxn, env_dict, model, vllm_serve_args),
-        )  # type: ignore[assignment]
+        )
         with _temporarily_sanitized_pythonpath_env():
             self.proc.start()
 

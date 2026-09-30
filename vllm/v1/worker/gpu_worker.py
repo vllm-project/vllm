@@ -57,6 +57,11 @@ from vllm.distributed.weight_transfer import (
 )
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
+from vllm.model_executor.model_loader import get_model_loader
+from vllm.model_executor.model_loader.weight_checksum import (
+    compute_tensor_digests,
+    zero_weights,
+)
 from vllm.model_executor.warmup.kernel_warmup import kernel_warmup
 from vllm.multimodal.gpu_ipc_memory import reserve_mm_ipc_gpu_memory
 from vllm.platforms import current_platform
@@ -341,6 +346,22 @@ class Worker(WorkerBase):
     def checkpoint_restore(self) -> None:
         checkpoint_restore_distributed_state()
 
+    def _weight_checksum_prefix(self) -> str:
+        # data_parallel_rank is 0 in dense workers; only the index is unique.
+        dp = self.parallel_config.data_parallel_index
+        pp = get_pp_group().rank_in_group
+        pcp = get_pcp_group().rank_in_group
+        tp = get_tp_group().rank_in_group
+        return f"dp{dp}:pp{pp}:pcp{pcp}:tp{tp}:"
+
+    def compute_weight_checksums(self) -> dict[str, str]:
+        prefix = self._weight_checksum_prefix()
+        digests = compute_tensor_digests(self.model_runner.get_model())
+        return {prefix + name: digest for name, digest in digests.items()}
+
+    def reset_weights(self) -> None:
+        zero_weights(self.model_runner.get_model())
+
     def _maybe_get_memory_pool_context(self, tag: str) -> AbstractContextManager:
         if (
             current_platform.is_cuda_alike()
@@ -487,7 +508,13 @@ class Worker(WorkerBase):
 
             # take current memory snapshot
             self.init_snapshot = init_snapshot = MemorySnapshot(device=self.device)
-            self.requested_memory = request_memory(init_snapshot, self.cache_config)
+            # Weights from external model loader process
+            external_weight_memory = get_model_loader(
+                self.load_config
+            ).get_external_weight_memory(self.vllm_config)
+            self.requested_memory = request_memory(
+                init_snapshot, self.cache_config, external_weight_memory
+            )
             logger.debug("worker init memory snapshot: %r", self.init_snapshot)
             logger.debug(
                 "worker requested memory: %sGiB", format_gib(self.requested_memory)
@@ -495,6 +522,10 @@ class Worker(WorkerBase):
         else:
             raise RuntimeError(f"Unsupported device type: {self.device_config.device}")
 
+        self._init_workspace_and_model_runner()
+
+    def _init_workspace_and_model_runner(self) -> None:
+        """Set up the workspace manager, build the model runner, report usage."""
         # DSpark target and draft CUDA graphs retain workspace views concurrently.
         num_ubatches = 2 if self.vllm_config.parallel_config.enable_dbo else 1
         init_workspace_manager(
@@ -502,8 +533,13 @@ class Worker(WorkerBase):
             num_ubatches,
             _num_workspace_lanes(self.vllm_config, self.use_v2_model_runner),
         )
+        self.model_runner: GPUModelRunner = self._make_model_runner()
+        if self.rank == 0:
+            # If usage stat is enabled, collect relevant info.
+            report_usage_stats(self.vllm_config)
 
-        # Construct the model runner
+    def _make_model_runner(self) -> "GPUModelRunner":
+        """Construct the platform's model runner; subclasses override this."""
         if self.use_v2_model_runner:
             if self.vllm_config.is_mm_encoder_only:
                 from vllm.v1.worker.mm_encoder_model_runner import (
@@ -515,19 +551,10 @@ class Worker(WorkerBase):
                 )
 
             # HACK(woosuk): This is a temporary fix to avoid type errors.
-            self.model_runner: GPUModelRunner = GPUModelRunnerV2(  # type: ignore
-                self.vllm_config, self.device
-            )
-        else:
-            from vllm.v1.worker.gpu_model_runner import (
-                GPUModelRunner as GPUModelRunnerV1,
-            )
+            return GPUModelRunnerV2(self.vllm_config, self.device)  # type: ignore
+        from vllm.v1.worker.gpu_model_runner import GPUModelRunner as GPUModelRunnerV1
 
-            self.model_runner = GPUModelRunnerV1(self.vllm_config, self.device)
-
-        if self.rank == 0:
-            # If usage stat is enabled, collect relevant info.
-            report_usage_stats(self.vllm_config)
+        return GPUModelRunnerV1(self.vllm_config, self.device)
 
     def handle_ft_command(self, ft_request):
         assert self.worker_sentinel is not None
