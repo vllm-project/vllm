@@ -92,7 +92,7 @@ def test_oot_registration_multimodal(
         )
 
         first_token = llm.get_tokenizer().decode(0)
-        outputs = llm.generate(prompts, sampling_params)
+        outputs = llm.generate(prompts, sampling_params)  # type: ignore[arg-type]
 
         for output in outputs:
             generated_text = output.outputs[0].text

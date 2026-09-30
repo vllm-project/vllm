@@ -148,7 +148,7 @@ def test_tool_parser_adjust_request_builds_valid_response_text_config() -> None:
     description string that the previous two-step construction injected.
     """
     parser = ToolParser.__new__(ToolParser)
-    parser.model_tokenizer = None
+    parser.model_tokenizer = None  # type: ignore[assignment]
 
     request = _build_responses_request(tool_choice="required")
     ToolParser.adjust_request(parser, request)

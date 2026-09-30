@@ -156,7 +156,7 @@ def test_v1_generation_is_deterministic_across_batch_sizes_with_needle(
         # Ensure engines are shutdown to free GPU/VRAM across test sessions
         if llm is not None:
             with contextlib.suppress(Exception):
-                llm.shutdown()
+                llm.llm_engine.engine_core.shutdown()
 
 
 @skip_unsupported
@@ -457,7 +457,7 @@ def test_logprobs_bitwise_batch_invariance_ragged_chunked_prefill(backend):
         )
     finally:
         with contextlib.suppress(Exception):
-            llm.shutdown()
+            llm.llm_engine.engine_core.shutdown()
 
 
 @skip_unsupported
@@ -506,7 +506,7 @@ def test_simple_generation(backend):
 
     finally:
         with contextlib.suppress(Exception):
-            llm.shutdown()
+            llm.llm_engine.engine_core.shutdown()
 
 
 @skip_unsupported
@@ -816,15 +816,8 @@ def test_decode_logprobs_match_prefill_logprobs(
             if token_idx == 0:
                 prefix_prompt = prompt
             else:
-                # Use the partial output text up to this token
-                # We'll need to construct this from the full output
-                prefix_output = decode_output.outputs[0]
-                # Get the text for tokens 0 to token_idx-1
-                # Unfortunately, we don't have per-token text, so we'll use
-                # a different approach: run prefill with prompt + tokens[0:token_idx]
-
-                # Actually, we need to get the actual text. Let's use a workaround:
-                # Run a generation with max_tokens = token_idx to get that prefix
+                # No per-token text, so regenerate with max_tokens = token_idx
+                # to get the prefix text
                 prefix_sp = SamplingParams(
                     temperature=0.0,
                     max_tokens=token_idx,
