@@ -25,6 +25,9 @@ if TYPE_CHECKING:
     CUDA_VISIBLE_DEVICES: str | None = None
     VLLM_ENGINE_ITERATION_TIMEOUT_S: int = 60
     VLLM_ENGINE_READY_TIMEOUT_S: int = 600
+    VLLM_HEALTH_CHECK_GPU_TIMEOUT: float = 20.0
+    VLLM_READY_STALL_TIMEOUT_S: float = 60.0
+    VLLM_READY_IDLE_PROBE_CACHE_TTL_S: float = 10.0
     VLLM_API_KEY: str | None = None
     VLLM_DEBUG_LOG_API_SERVER_RESPONSE: bool = False
     S3_ACCESS_KEY_ID: str | None = None
@@ -810,6 +813,20 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # during startup. Default is 600 seconds (10 minutes).
     "VLLM_ENGINE_READY_TIMEOUT_S": lambda: int(
         os.environ.get("VLLM_ENGINE_READY_TIMEOUT_S", "600")
+    ),
+    # Timeout for the idle GPU execution readiness probe.
+    "VLLM_HEALTH_CHECK_GPU_TIMEOUT": lambda: float(
+        os.environ.get("VLLM_HEALTH_CHECK_GPU_TIMEOUT", "20")
+    ),
+    # Maximum time a busy EngineCore may go without completing a model step.
+    # Set to 0 to disable busy-stall detection.
+    "VLLM_READY_STALL_TIMEOUT_S": lambda: float(
+        os.environ.get("VLLM_READY_STALL_TIMEOUT_S", "60")
+    ),
+    # Successful idle GPU probes are cached to avoid duplicate probe work.
+    # Set to 0 to disable the cache.
+    "VLLM_READY_IDLE_PROBE_CACHE_TTL_S": lambda: float(
+        os.environ.get("VLLM_READY_IDLE_PROBE_CACHE_TTL_S", "10")
     ),
     # API key for vLLM API server
     "VLLM_API_KEY": lambda: os.environ.get("VLLM_API_KEY", None),
@@ -2354,6 +2371,9 @@ def compile_factors() -> dict[str, object]:
         "VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR",
         "VLLM_FLASHINFER_AUTOTUNE_SKIP_OPS",
         "VLLM_ENGINE_ITERATION_TIMEOUT_S",
+        "VLLM_HEALTH_CHECK_GPU_TIMEOUT",
+        "VLLM_READY_STALL_TIMEOUT_S",
+        "VLLM_READY_IDLE_PROBE_CACHE_TTL_S",
         "VLLM_HTTP_TIMEOUT_KEEP_ALIVE",
         "VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS",
         "VLLM_WORKER_SHUTDOWN_TIMEOUT_SECONDS",
