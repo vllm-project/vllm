@@ -1,0 +1,20 @@
+diff --git a/csrc/runtime/jit.hpp b/csrc/runtime/jit.hpp
+index 0a394de..5a82c05 100644
+--- a/csrc/runtime/jit.hpp
++++ b/csrc/runtime/jit.hpp
+@@ -24,5 +24,15 @@ inline void init_jit(const std::string& library_root_path) {
+     jit = deep_jit::LazyInit<deep_jit::Runtime<deep_jit::CUDA>>([config] {
+         auto runtime = std::make_shared<deep_jit::Runtime<deep_jit::CUDA>>(config);
++
++        // DeepGEMM dispatches SM107 through its SM100 implementations. Target
++        // the compatible SM100 family so the runtime JIT uses the complete
++        // TMA/TCGEN/TMEM feature set in DeepGEMM's pinned CUTLASS revision.
++        // The compiler architecture is part of DeepJIT's cache key.
++        const auto [major, minor] = runtime->device.get_arch_pair();
++        if (major == 10 and minor == 7) {
++            runtime->default_compiler_options.arch = "100f";
++        }
++
+         runtime->default_compiler_options.nvcc_flags->
+             emplace_back("--diag-suppress=39,161,174,177,186,940");
+         runtime->default_compiler_options.nvcc_flags->

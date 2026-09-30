@@ -1,4 +1,5 @@
 include(FetchContent)
+find_package(Git REQUIRED)
 
 # If DEEPGEMM_SRC_DIR is set, DeepGEMM is built from that directory
 # instead of downloading.
@@ -58,6 +59,40 @@ else()
       GIT_PROGRESS TRUE
     )
   endif()
+
+  # DeepJIT otherwise targets physical SM107 (`sm_107f`). DeepGEMM dispatches
+  # SM107 through SM100 kernels and its vendored CUTLASS predates SM107, so
+  # compile those JIT kernels for the compatible SM100 family without changing
+  # DeepJIT's physical device-reporting API.
+  set(_deepgemm_sm107_patch
+      "${CMAKE_SOURCE_DIR}/cmake/patches/deepgemm-sm107-sm100-family.patch")
+  execute_process(
+    COMMAND "${GIT_EXECUTABLE}" -C "${deepgemm_SOURCE_DIR}"
+            apply --check "${_deepgemm_sm107_patch}"
+    RESULT_VARIABLE _deepgemm_patch_check
+    OUTPUT_QUIET
+    ERROR_QUIET)
+  if(_deepgemm_patch_check EQUAL 0)
+    execute_process(
+      COMMAND "${GIT_EXECUTABLE}" -C "${deepgemm_SOURCE_DIR}"
+              apply "${_deepgemm_sm107_patch}"
+      COMMAND_ERROR_IS_FATAL ANY)
+  else()
+    # A cached FetchContent tree may already contain the patch. Accept only an
+    # exact reverse-applicable patch; any other state is an actionable error.
+    execute_process(
+      COMMAND "${GIT_EXECUTABLE}" -C "${deepgemm_SOURCE_DIR}"
+              apply --reverse --check "${_deepgemm_sm107_patch}"
+      RESULT_VARIABLE _deepgemm_reverse_patch_check
+      OUTPUT_QUIET
+      ERROR_QUIET)
+    if(NOT _deepgemm_reverse_patch_check EQUAL 0)
+      message(FATAL_ERROR
+        "DeepGEMM SM107 family-target patch does not apply cleanly to "
+        "${deepgemm_SOURCE_DIR}")
+    endif()
+  endif()
+  message(STATUS "DeepGEMM SM107 JIT target: SM100 family")
   message(STATUS "DeepGEMM is available at ${deepgemm_SOURCE_DIR}")
 endif()
 
