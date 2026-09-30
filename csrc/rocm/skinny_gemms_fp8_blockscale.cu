@@ -123,8 +123,7 @@ __device__ __forceinline__ const uint8_t* bpreshuffle_ptr(const uint8_t* base,
 
 #if defined(__GFX11__) || defined(__GFX12__)
 __device__ __forceinline__ float dot2_bf16(__nv_bfloat162 lhs,
-                                           __nv_bfloat162 rhs,
-                                           float acc) {
+                                           __nv_bfloat162 rhs, float acc) {
   return __builtin_amdgcn_fdot2_f32_bf16(
       *reinterpret_cast<const bf16x2_t*>(&lhs),
       *reinterpret_cast<const bf16x2_t*>(&rhs), acc, /*clamp=*/false);
@@ -178,8 +177,8 @@ __device__ __forceinline__ bf16_16_t fp8x16_to_bf16(uint4 packed) {
 }
 
 template <int TOKENS>
-__global__ __launch_bounds__(kThreadsPerWG)
-void wvSplitKQBlockScaleBpreshuffleGfx1151Kernel(
+__global__
+__launch_bounds__(kThreadsPerWG) void wvSplitKQBlockScaleBpreshuffleGfx1151Kernel(
     const uint8_t* __restrict__ weight, const uint8_t* __restrict__ activation,
     const float* __restrict__ activation_scale,
     const float* __restrict__ weight_scale, __hip_bfloat16* __restrict__ out,
@@ -214,12 +213,12 @@ void wvSplitKQBlockScaleBpreshuffleGfx1151Kernel(
 
       bf16_16_t weight_frag[kYTile];
       bool active_y[kYTile];
-#pragma unroll
+  #pragma unroll
       for (int y = 0; y < kYTile; ++y) {
         active_y[y] = (out_n + y) < N;
         if (active_y[y]) {
-          const uint8_t* w_ptr = bpreshuffle_ptr(weight, out_n + y, logical_k,
-                                                 weight_stride0, weight_stride1);
+          const uint8_t* w_ptr = bpreshuffle_ptr(
+              weight, out_n + y, logical_k, weight_stride0, weight_stride1);
           weight_frag[y] =
               fp8x16_to_bf16(*reinterpret_cast<const uint4*>(w_ptr));
         } else {
@@ -229,7 +228,7 @@ void wvSplitKQBlockScaleBpreshuffleGfx1151Kernel(
 
       float ws[kYTile] = {};
       if ((lane & 7) == 0) {
-#pragma unroll
+  #pragma unroll
         for (int y = 0; y < kYTile; ++y) {
           if (active_y[y]) {
             ws[y] = weight_scale[((out_n + y) >> 7) * ws_n_stride +
@@ -237,23 +236,24 @@ void wvSplitKQBlockScaleBpreshuffleGfx1151Kernel(
           }
         }
       }
-#pragma unroll
+  #pragma unroll
       for (int y = 0; y < kYTile; ++y) {
         ws[y] = subgroup_broadcast8(ws[y], lane);
       }
 
-#pragma unroll
+  #pragma unroll
       for (int token = 0; token < TOKENS; ++token) {
         const uint4 packed_a = sA[(token * kFixedK + logical_k) / kAChunk];
         const bf16_16_t act_frag = fp8x16_to_bf16(packed_a);
 
         float as = 0.0f;
         if ((lane & 7) == 0) {
-          as = activation_scale[token * as_token_stride + k_group * as_k_stride];
+          as =
+              activation_scale[token * as_token_stride + k_group * as_k_stride];
         }
         as = subgroup_broadcast8(as, lane);
 
-#pragma unroll
+  #pragma unroll
         for (int y = 0; y < kYTile; ++y) {
           if (active_y[y]) {
             const float partial = dot16_bf16(act_frag, weight_frag[y]);
@@ -263,18 +263,18 @@ void wvSplitKQBlockScaleBpreshuffleGfx1151Kernel(
       }
     }
 
-#pragma unroll
+  #pragma unroll
     for (int token = 0; token < TOKENS; ++token) {
-#pragma unroll
+  #pragma unroll
       for (int y = 0; y < kYTile; ++y) {
         sum[token][y] = wave32_reduce_sum(sum[token][y]);
       }
     }
 
     if (lane == (kWaveSize - 1)) {
-#pragma unroll
+  #pragma unroll
       for (int token = 0; token < TOKENS; ++token) {
-#pragma unroll
+  #pragma unroll
         for (int y = 0; y < kYTile; ++y) {
           if (out_n + y < N) {
             out[token * out_stride0 + (out_n + y) * out_stride1] =
@@ -301,10 +301,10 @@ void launch_wvsplitk_blockscale_bpreshuffle_gfx1151(
     const at::Tensor& weight, const at::Tensor& activation,
     const at::Tensor& activation_scale, const at::Tensor& weight_scale,
     at::Tensor& out, int64_t cu_count) {
-  const auto as = resolve_activation_scale_strides(activation_scale, TOKENS,
-                                                   kFixedKGroups);
-  const auto ws =
-      resolve_weight_scale_strides(weight_scale, out.size(1) / 128, kFixedKGroups);
+  const auto as =
+      resolve_activation_scale_strides(activation_scale, TOKENS, kFixedKGroups);
+  const auto ws = resolve_weight_scale_strides(weight_scale, out.size(1) / 128,
+                                               kFixedKGroups);
 
   dim3 grid(cu_count);
   dim3 block(kWaveSize, kWavesPerWG);
@@ -313,16 +313,18 @@ void launch_wvsplitk_blockscale_bpreshuffle_gfx1151(
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
 
   auto* weight_ptr = reinterpret_cast<const uint8_t*>(weight.data_ptr<fp8_t>());
-  auto* act_ptr = reinterpret_cast<const uint8_t*>(activation.data_ptr<fp8_t>());
-  auto* out_ptr = reinterpret_cast<__hip_bfloat16*>(out.data_ptr<c10::BFloat16>());
+  auto* act_ptr =
+      reinterpret_cast<const uint8_t*>(activation.data_ptr<fp8_t>());
+  auto* out_ptr =
+      reinterpret_cast<__hip_bfloat16*>(out.data_ptr<c10::BFloat16>());
 
   wvSplitKQBlockScaleBpreshuffleGfx1151Kernel<TOKENS>
       <<<grid, block, 0, stream>>>(
           weight_ptr, act_ptr, activation_scale.data_ptr<float>(),
-          weight_scale.data_ptr<float>(), out_ptr, static_cast<int>(out.size(1)),
-          weight.stride(0), weight.stride(1), activation.stride(0), as.outer,
-          as.k, ws.outer, ws.k, out.stride(0), out.stride(1),
-          static_cast<int>(cu_count));
+          weight_scale.data_ptr<float>(), out_ptr,
+          static_cast<int>(out.size(1)), weight.stride(0), weight.stride(1),
+          activation.stride(0), as.outer, as.k, ws.outer, ws.k, out.stride(0),
+          out.stride(1), static_cast<int>(cu_count));
 }
 
 }  // namespace
@@ -339,8 +341,9 @@ void wvSplitKQBlockScale(const at::Tensor& weight, const at::Tensor& activation,
               "wvSplitKQBlockScale is currently supported on gfx1151 only");
   TORCH_CHECK(bpreshuffle,
               "wvSplitKQBlockScale first version supports bpreshuffle only");
-  TORCH_CHECK(weight.is_cuda() && activation.is_cuda() && activation_scale.is_cuda() &&
-                  weight_scale.is_cuda() && out.is_cuda(),
+  TORCH_CHECK(weight.is_cuda() && activation.is_cuda() &&
+                  activation_scale.is_cuda() && weight_scale.is_cuda() &&
+                  out.is_cuda(),
               "wvSplitKQBlockScale expects CUDA/HIP tensors");
   TORCH_CHECK(weight.device() == activation.device() &&
                   weight.device() == activation_scale.device() &&
@@ -355,28 +358,26 @@ void wvSplitKQBlockScale(const at::Tensor& weight, const at::Tensor& activation,
               "activation_scale must be float32");
   TORCH_CHECK(weight_scale.scalar_type() == at::kFloat,
               "weight_scale must be float32");
-  TORCH_CHECK(out.scalar_type() == at::kBFloat16,
-              "out must be bfloat16");
+  TORCH_CHECK(out.scalar_type() == at::kBFloat16, "out must be bfloat16");
 
   TORCH_CHECK(weight.dim() == 2, "weight must be rank-2");
   TORCH_CHECK(activation.dim() == 2, "activation must be rank-2");
   TORCH_CHECK(out.dim() == 2, "out must be rank-2");
-  TORCH_CHECK(reinterpret_cast<std::uintptr_t>(weight.data_ptr()) % kVecLoadBytes == 0,
-              "weight data pointer must be 16-byte aligned");
+  TORCH_CHECK(
+      reinterpret_cast<std::uintptr_t>(weight.data_ptr()) % kVecLoadBytes == 0,
+      "weight data pointer must be 16-byte aligned");
   TORCH_CHECK(weight.stride(0) % kAChunk == 0,
               "weight row stride must be a multiple of 16 elements");
-  TORCH_CHECK(weight.stride(1) == 1,
-              "weight must have contiguous K dimension");
-  TORCH_CHECK(reinterpret_cast<std::uintptr_t>(activation.data_ptr()) %
-                      kVecLoadBytes ==
-                  0,
-              "activation data pointer must be 16-byte aligned");
+  TORCH_CHECK(weight.stride(1) == 1, "weight must have contiguous K dimension");
+  TORCH_CHECK(
+      reinterpret_cast<std::uintptr_t>(activation.data_ptr()) % kVecLoadBytes ==
+          0,
+      "activation data pointer must be 16-byte aligned");
   TORCH_CHECK(activation.stride(0) % kAChunk == 0,
               "activation row stride must be a multiple of 16 elements");
   TORCH_CHECK(activation.stride(1) == 1,
               "activation must have contiguous K dimension");
-  TORCH_CHECK(out.stride(1) == 1,
-              "out must have contiguous N dimension");
+  TORCH_CHECK(out.stride(1) == 1, "out must have contiguous N dimension");
 
   const int64_t tokens = activation.size(0);
   const int64_t K = activation.size(1);
@@ -388,9 +389,9 @@ void wvSplitKQBlockScale(const at::Tensor& weight, const at::Tensor& activation,
   const int64_t logical_K = weight.size(1);
   TORCH_CHECK(logical_K == K,
               "bpreshuffle weight shape does not match activation K");
-  TORCH_CHECK(N == 4096 || N == 1536,
-              "first version supports bpreshuffle logical N in {4096, 1536}, got ",
-              N);
+  TORCH_CHECK(
+      N == 4096 || N == 1536,
+      "first version supports bpreshuffle logical N in {4096, 1536}, got ", N);
   TORCH_CHECK(out.size(0) == tokens && out.size(1) == N,
               "out must be shaped [tokens, N], got ", out.sizes(),
               " for logical N=", N, " tokens=", tokens);
