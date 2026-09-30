@@ -9,6 +9,7 @@ can consume the same descriptor without changing the worker.
 
 import functools
 from enum import Enum, auto
+from typing import NamedTuple
 
 import numpy as np
 import torch
@@ -23,8 +24,18 @@ from vllm.v1.kv_offload.cpu.swap_blocks_triton import (
     swap_blocks_batch,
 )
 
-RUN_DESC_FIELDS = 6
 _DescriptorBuffers = tuple[torch.Tensor, torch.Tensor, torch.Tensor]
+
+
+class CopyRunDescriptor(NamedTuple):
+    """A logical copy run before backend-specific tensor materialization."""
+
+    src_base: int
+    dst_base: int
+    fragment_size: int
+    num_fragments: int
+    src_stride: int
+    dst_stride: int
 
 
 class CopyBackend(Enum):
@@ -106,8 +117,42 @@ class CopyBackendAdapter:
         self._buffer_pool: list[_DescriptorBuffers] = []
         self._inflight_buffers: dict[int, _DescriptorBuffers] = {}
 
-    def prepare_transfer(self, job_id: int, num_copy_ops: int) -> None:
-        """Reserve fragment descriptors until the asynchronous copy finishes."""
+    def _expand_run_desc(
+        self,
+        run_descs: list[CopyRunDescriptor],
+        buffers: _DescriptorBuffers,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Expand logical runs into the legacy fragment descriptor buffers."""
+        src_buffer, dst_buffer, size_buffer = buffers
+        src = src_buffer.numpy().view(np.uint64)
+        dst = dst_buffer.numpy().view(np.uint64)
+        sizes = size_buffer.numpy()
+        cursor = 0
+        for run in run_descs:
+            num_fragments = run.num_fragments
+            if num_fragments == 0:
+                continue
+            end = cursor + num_fragments
+            fragment_ids = np.arange(num_fragments, dtype=np.uint64)
+            src[cursor:end] = run.src_base + fragment_ids * run.src_stride
+            dst[cursor:end] = run.dst_base + fragment_ids * run.dst_stride
+            sizes[cursor:end] = run.fragment_size
+            cursor = end
+        return src_buffer[:cursor], dst_buffer[:cursor], size_buffer[:cursor]
+
+    @staticmethod
+    def _estimate_max_copy_ops(run_descs: list[CopyRunDescriptor]) -> int:
+        """Count legacy fragment descriptors needed by logical runs."""
+        return sum(run.num_fragments for run in run_descs)
+
+    def submit(
+        self,
+        job_id: int,
+        run_descs: list[CopyRunDescriptor],
+        *,
+        is_src_access_order_any: bool,
+    ) -> None:
+        num_copy_ops = self._estimate_max_copy_ops(run_descs)
         buffers = (
             self._buffer_pool.pop()
             if self._buffer_pool
@@ -116,52 +161,18 @@ class CopyBackendAdapter:
         if buffers[0].numel() < num_copy_ops:
             buffers = _new_descriptor_buffers(num_copy_ops)
         self._inflight_buffers[job_id] = buffers
-
-    def _expand_run_desc(
-        self, run_desc: torch.Tensor, buffers: _DescriptorBuffers
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Expand packed runs into the legacy fragment descriptor buffers."""
-        run_array = run_desc.numpy().view("uint64")
-        src_buffer, dst_buffer, size_buffer = buffers
-        src = src_buffer.numpy().view(np.uint64)
-        dst = dst_buffer.numpy().view(np.uint64)
-        sizes = size_buffer.numpy()
-        cursor = 0
-        for (
-            src_base,
-            dst_base,
-            fragment_size,
-            num_fragments,
-            src_stride,
-            dst_stride,
-        ) in run_array:
-            num_fragments = int(num_fragments)
-            if num_fragments == 0:
-                continue
-            end = cursor + num_fragments
-            fragment_ids = np.arange(num_fragments, dtype=np.uint64)
-            src[cursor:end] = src_base + fragment_ids * src_stride
-            dst[cursor:end] = dst_base + fragment_ids * dst_stride
-            sizes[cursor:end] = fragment_size
-            cursor = end
-        return src_buffer[:cursor], dst_buffer[:cursor], size_buffer[:cursor]
-
-    def submit(
-        self,
-        job_id: int,
-        run_desc: torch.Tensor,
-        *,
-        is_src_access_order_any: bool,
-    ) -> None:
-        buffers = self._inflight_buffers[job_id]
-        src, dst, sizes = self._expand_run_desc(run_desc, buffers)
-        if src.numel() > 0:
-            self._backend_copy(
-                src,
-                dst,
-                sizes,
-                is_src_access_order_any=is_src_access_order_any,
-            )
+        try:
+            src, dst, sizes = self._expand_run_desc(run_descs, buffers)
+            if src.numel() > 0:
+                self._backend_copy(
+                    src,
+                    dst,
+                    sizes,
+                    is_src_access_order_any=is_src_access_order_any,
+                )
+        except Exception:
+            self.finish_transfer(job_id)
+            raise
 
     def finish_transfer(self, job_id: int) -> None:
         buffers = self._inflight_buffers.pop(job_id)

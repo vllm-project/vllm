@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import time
 from collections import deque
-from collections.abc import Sequence
 from dataclasses import dataclass
 
 import numpy as np
@@ -25,8 +24,8 @@ from vllm.v1.kv_offload.base import (
 )
 from vllm.v1.kv_offload.cpu.host_register import host_register, host_unregister
 from vllm.v1.kv_offload.cpu.copy_backend import (
-    RUN_DESC_FIELDS,
     CopyBackendAdapter,
+    CopyRunDescriptor,
 )
 from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
 
@@ -40,7 +39,6 @@ class Transfer:
     start_event: torch.Event
     end_event: torch.Event
     num_bytes: int
-    run_desc: torch.Tensor
 
 
 def compute_sub_block_ptrs(
@@ -181,12 +179,6 @@ def pin_mmap_region(region: SharedOffloadRegion) -> None:
     )
 
 
-def _new_run_descriptor_buffer(num_run_ops: int) -> torch.Tensor:
-    return torch.empty(
-        (num_run_ops, RUN_DESC_FIELDS), dtype=torch.int64, pin_memory=PIN_MEMORY
-    )
-
-
 class SingleDirectionOffloadingHandler:
     """Handles transfers for a single direction, either CPU->GPU or GPU->CPU.
     Transfers are guaranteed to be executed in order of their submission.
@@ -286,23 +278,6 @@ class SingleDirectionOffloadingHandler:
         self._stream_pool: list[torch.cuda.Stream] = []
         # list of CUDA events available for re-use
         self._event_pool: list[torch.Event] = []
-        # list of packed pinned run descriptor buffers available for re-use
-        self._run_buffer_pool: list[torch.Tensor] = []
-
-    def _estimate_max_run_ops(self, group_sizes: Sequence[int]) -> int:
-        """Upper bound on packed run descriptors for one transfer."""
-        return sum(
-            group_size * sum(len(runs) for runs in self._copy_runs[g_idx])
-            for g_idx, group_size in enumerate(group_sizes)
-        )
-
-    def _estimate_max_copy_ops(self, group_sizes: Sequence[int]) -> int:
-        """Upper bound on fragment descriptors needed by the batch backend."""
-        return sum(
-            group_size
-            * sum(run.num_fragments for runs in self._copy_runs[g_idx] for run in runs)
-            for g_idx, group_size in enumerate(group_sizes)
-        )
 
     def _fill_run_ops(
         self,
@@ -312,15 +287,13 @@ class SingleDirectionOffloadingHandler:
         group_size: int,
         src_skip_count: int,
         dst_skip_count: int,
-        all_run_desc: np.ndarray,
-        op_idx: int,
-    ) -> tuple[int, int]:
-        """Fill packed runs and defer fragment expansion to the adapter."""
-        all_run_desc_u64 = all_run_desc.view(np.uint64)
+    ) -> tuple[list[CopyRunDescriptor], int]:
+        """Build logical runs and defer tensor materialization to the adapter."""
         if group_size > len(self._scratch_bases_src):
             self._scratch_bases_src = np.empty(group_size, dtype=np.uint64)
             self._scratch_bases_dst = np.empty(group_size, dtype=np.uint64)
 
+        run_descs: list[CopyRunDescriptor] = []
         num_bytes = 0
         for runs, data_ref in zip(
             self._copy_runs[g_idx], self.layer_refs_per_group[g_idx]
@@ -358,8 +331,6 @@ class SingleDirectionOffloadingHandler:
             num_active_blocks = len(block_bases_src)
 
             for run in runs:
-                end_idx = op_idx + num_active_blocks
-                desc = all_run_desc_u64[op_idx:end_idx]
                 if self.gpu_to_cpu:
                     src_offset = run.local_offset
                     dst_offset = run.canonical_offset
@@ -370,15 +341,19 @@ class SingleDirectionOffloadingHandler:
                     dst_offset = run.local_offset
                     src_stride = run.canonical_stride
                     dst_stride = run.local_stride
-                np.add(block_bases_src, src_offset, out=desc[:, 0])
-                np.add(block_bases_dst, dst_offset, out=desc[:, 1])
-                desc[:, 2] = run.fragment_size
-                desc[:, 3] = run.num_fragments
-                desc[:, 4] = src_stride
-                desc[:, 5] = dst_stride
+                run_descs.extend(
+                    CopyRunDescriptor(
+                        src_base=int(src_base) + src_offset,
+                        dst_base=int(dst_base) + dst_offset,
+                        fragment_size=run.fragment_size,
+                        num_fragments=run.num_fragments,
+                        src_stride=src_stride,
+                        dst_stride=dst_stride,
+                    )
+                    for src_base, dst_base in zip(block_bases_src, block_bases_dst)
+                )
                 num_bytes += num_active_blocks * run.fragment_size * run.num_fragments
-                op_idx = end_idx
-        return op_idx, num_bytes
+        return run_descs, num_bytes
 
     def _filter_writer_blocks(
         self,
@@ -444,23 +419,9 @@ class SingleDirectionOffloadingHandler:
         block_indices = gpu_spec.block_indices
         assert len(block_indices) == len(self.layer_refs_per_group)
 
-        num_run_ops = self._estimate_max_run_ops(group_sizes)
-        num_copy_ops = self._estimate_max_copy_ops(group_sizes)
-
-        run_desc_buffer = (
-            self._run_buffer_pool.pop()
-            if self._run_buffer_pool
-            else _new_run_descriptor_buffer(num_run_ops)
-        )
-        if run_desc_buffer.shape[0] < num_run_ops:
-            run_desc_buffer = _new_run_descriptor_buffer(num_run_ops)
-        run_desc = run_desc_buffer[:num_run_ops]
-        all_run_desc = run_desc.numpy()
-        self._backend.prepare_transfer(job_id, num_copy_ops)
-
         src_offset = 0
         dst_offset = 0
-        op_idx = 0
+        run_descs: list[CopyRunDescriptor] = []
         # count total number of bytes copied
         num_transfer_bytes = 0
         for g_idx, (group_size, block_idx) in enumerate(
@@ -482,16 +443,15 @@ class SingleDirectionOffloadingHandler:
             src_end_offset = src_offset + src_blocks_count
             assert src_end_offset <= num_src_blocks
 
-            op_idx, group_bytes = self._fill_run_ops(
+            group_run_descs, group_bytes = self._fill_run_ops(
                 g_idx,
                 group_src=src_blocks[src_offset:src_end_offset],
                 group_dst=dst_blocks[dst_offset:dst_end_offset],
                 group_size=group_size,
                 src_skip_count=src_logical_blocks_to_skip,
                 dst_skip_count=dst_logical_blocks_to_skip,
-                all_run_desc=all_run_desc,
-                op_idx=op_idx,
             )
+            run_descs.extend(group_run_descs)
             num_transfer_bytes += group_bytes
 
             src_offset = src_end_offset
@@ -499,11 +459,6 @@ class SingleDirectionOffloadingHandler:
 
         assert src_offset == num_src_blocks
         assert dst_offset == num_dst_blocks
-        # Writer rotation may skip non-writer blocks, leaving op_idx below
-        # the sized upper bound.
-        assert op_idx <= num_run_ops
-        run_desc = run_desc[:op_idx]
-
         stream = (
             self._stream_pool.pop() if self._stream_pool else current_platform.Stream()
         )
@@ -539,12 +494,11 @@ class SingleDirectionOffloadingHandler:
         is_src_access_order_any = not self.gpu_to_cpu
         with current_platform.stream(stream):
             start_event.record(stream)
-            if op_idx > 0:
-                self._backend.submit(
-                    job_id,
-                    run_desc,
-                    is_src_access_order_any=is_src_access_order_any,
-                )
+            self._backend.submit(
+                job_id,
+                run_descs,
+                is_src_access_order_any=is_src_access_order_any,
+            )
             end_event.record(stream)
 
         self._transfer_events[job_id] = end_event
@@ -555,7 +509,6 @@ class SingleDirectionOffloadingHandler:
                 start_event=start_event,
                 end_event=end_event,
                 num_bytes=num_transfer_bytes,
-                run_desc=run_desc_buffer,
             )
         )
 
@@ -580,7 +533,6 @@ class SingleDirectionOffloadingHandler:
             self._stream_pool.append(transfer.stream)
             self._event_pool.append(transfer.end_event)
             self._event_pool.append(transfer.start_event)
-            self._run_buffer_pool.append(transfer.run_desc)
             self._backend.finish_transfer(transfer.job_id)
             del self._transfer_events[transfer.job_id]
         return results
@@ -612,7 +564,6 @@ class SingleDirectionOffloadingHandler:
         self._transfer_events.clear()
         self._stream_pool.clear()
         self._event_pool.clear()
-        self._run_buffer_pool.clear()
         self._backend.clear()
         self.src_tensors.clear()
         self.dst_tensors.clear()
