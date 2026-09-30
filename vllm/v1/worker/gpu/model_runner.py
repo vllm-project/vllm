@@ -1271,7 +1271,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         ]
         is_prefilling_np = num_computed_prefill_tokens_np < prefill_len_np
         has_prefill = bool(is_prefilling_np.any())
-        max_seq_len_np = self.req_states.max_seq_len[idx_mapping_np]
+        max_seq_len_np = None
+        if self.use_pp and has_prefill:
+            # consumed by the PP `compute_need_sampled_mask` for batches with prefill.
+            max_seq_len_np = self.req_states.max_seq_len[idx_mapping_np]
 
         num_draft_tokens_np = None
         if draft_tokens:
@@ -2385,10 +2388,10 @@ class BatchReqState(NamedTuple):
     prefill_len_np: np.ndarray  # [num_reqs]
     num_computed_prefill_tokens_np: np.ndarray  # [num_reqs]
     is_prefilling_np: np.ndarray  # [num_reqs]
+    max_seq_len_np: np.ndarray | None  # [num_reqs], None in non-pp case
     has_prefill: bool
     prefill_runs_as_decode_np: np.ndarray | None  # [num_reqs]
     decode_graph_eligible: bool
-    max_seq_len_np: np.ndarray  # [num_reqs]
 
 
 def sort_batch_req_ids(

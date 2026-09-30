@@ -37,31 +37,20 @@ class PendingRecv:
 
 def compute_need_sampled_mask(input_batch: InputBatch) -> np.ndarray | None:
     """Return a bool array of shape `[input_batch.num_reqs]` marking requests
-    that produce a sampled token this step, and therefore must have that token
-    (and the draft block proposed from it) propagated to the earlier PP stages.
-    Returns None if no request in the batch produces a sample."""
+    with outputs that might be needed in a subsequent (decode) step.
+    Returns None if no sampled outputs are needed in the requests' next step."""
     old_computed = input_batch.num_computed_tokens_np
     prefill_len = input_batch.prefill_len_np
     # Exclude non-final prefill chunks (they don't produce a sample).
-    produces_sample = old_computed + input_batch.num_scheduled_tokens >= prefill_len
+    need_sampled_mask = old_computed + input_batch.num_scheduled_tokens >= prefill_len
     max_seq_len = input_batch.max_seq_len_np
     if max_seq_len is not None:
         # Also exclude final prefill chunks whose single sampled token reaches
-        # the request's length cap: the request finishes and leaves the engine,
-        # so no follow-up step reads its broadcast payload. This is the
-        # disaggregated-prefill case, where routers submit max_tokens=1 so the
-        # final chunk's token is handed off to the decode instance instead.
-        # Decoding rows are never excluded: speculative decoding advances
-        # num_computed_tokens several tokens per step and can transiently
-        # overrun prompt_len + max_tokens while the scheduler still runs the
-        # request; dropping such a row would desynchronize the PP stages.
-        finished_prefill = (
-            produces_sample
-            & input_batch.is_prefilling_np
-            & (prefill_len + 1 >= max_seq_len)
-        )
-        produces_sample &= ~finished_prefill
-    return produces_sample if produces_sample.any() else None
+        # the request's length cap.
+        finished_prefill = prefill_len + 1 >= max_seq_len
+        finished_prefill &= input_batch.is_prefilling_np
+        need_sampled_mask &= ~finished_prefill
+    return need_sampled_mask if need_sampled_mask.any() else None
 
 
 class PPHandler:
