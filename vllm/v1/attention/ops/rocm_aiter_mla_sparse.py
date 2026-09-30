@@ -780,10 +780,7 @@ def rocm_fp8_paged_mqa_logits(
         if _ON_GFX942 or _ON_GFX950:
             flydsl_fp8_paged_mqa_logits = (
                 _flydsl_paged_mqa_logits_kernel()
-                if envs.VLLM_ROCM_USE_AITER_FLYDSL_PAGED_MQA_LOGITS
-                and block_size == 64
-                and q_fp8.shape[2] == 32
-                and next_n <= 8
+                if block_size == 64 and q_fp8.shape[2] == 32 and next_n <= 8
                 else None
             )
             if flydsl_fp8_paged_mqa_logits is not None:
