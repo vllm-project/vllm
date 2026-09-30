@@ -7,7 +7,7 @@ from collections.abc import Iterable
 
 import torch
 import torch.nn as nn
-from transformers import PretrainedConfig
+from transformers import PreTrainedConfig
 
 from vllm.config import VllmConfig
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -30,7 +30,7 @@ from .utils import maybe_prefix
 class LongCatMultiTokenPredictorLayer(nn.Module):
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         prefix: str,
         vllm_config: VllmConfig,
         quant_config: QuantizationConfig | None = None,
@@ -313,8 +313,7 @@ class LongCatFlashMTP(nn.Module):
     def _rewrite_spec_layer_name(
         self, spec_layer: int, name: str, new_to_old_names_mapping: dict
     ) -> str:
-        """
-        Rewrite the weight name to match the format of the original model.
+        """Rewrite the weight name to match the format of the original model.
         Add .mtp_block for modules in transformer layer block for spec layer
         and rename shared layer weights to be top level.
         """
@@ -354,7 +353,7 @@ class LongCatFlashMTP(nn.Module):
         return name
 
     def get_spec_layer_idx_from_weight_name(
-        self, config: PretrainedConfig, weight_name: str
+        self, config: PreTrainedConfig, weight_name: str
     ) -> int | None:
         if "model.mtp" in weight_name:
             return config.num_hidden_layers * 2

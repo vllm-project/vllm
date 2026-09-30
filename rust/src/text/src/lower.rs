@@ -60,7 +60,9 @@ pub fn lower_text_request(
         priority: request.priority,
         data_parallel_rank: request.data_parallel_rank,
         session_id: request.session_id.clone(),
-        reasoning_parser_kwargs: request.reasoning_parser_kwargs.clone(),
+        kv_hints: request.kv_hints.clone(),
+        reasoning_parser_kwargs: Some(request.reasoning_parser_kwargs.clone()),
+        reasoning_ended: request.reasoning_ended,
         lora_request: request.lora_request.clone(),
         arrival_time: request.arrival_time,
         trace_headers: None,
@@ -101,6 +103,8 @@ pub fn lower_sampling_params(
         thinking_token_budget,
         logprobs,
         prompt_logprobs,
+        prompt_logprob_token_ids,
+        prompt_logprob_start,
         min_p,
         frequency_penalty,
         presence_penalty,
@@ -121,6 +125,8 @@ pub fn lower_sampling_params(
         logprobs,
         prompt_logprobs,
         logprob_token_ids.as_deref(),
+        prompt_logprob_token_ids.as_deref(),
+        prompt_logprob_start,
         sampling_limits,
     )?;
     validate_repetition_detection(repetition_detection.as_ref())?;
@@ -174,6 +180,8 @@ pub fn lower_sampling_params(
         thinking_token_budget,
         logprobs,
         prompt_logprobs,
+        prompt_logprob_token_ids,
+        prompt_logprob_start,
         min_p,
         frequency_penalty,
         presence_penalty,
@@ -320,6 +328,7 @@ mod tests {
     use std::collections::{BTreeSet, HashMap};
 
     use serial_test::file_serial;
+    use vllm_engine_core_client::protocol::kv_hints::{KvHintAction, KvHintsEnvelope};
     use vllm_engine_core_client::protocol::multimodal::{
         MmFeatureSpec, MmModality, PlaceholderRange,
     };
@@ -643,6 +652,8 @@ mod tests {
                 thinking_token_budget: None,
                 logprobs: None,
                 prompt_logprobs: None,
+                prompt_logprob_token_ids: None,
+                prompt_logprob_start: None,
                 min_p: 0.0,
                 frequency_penalty: 0.0,
                 presence_penalty: 0.0,
@@ -698,6 +709,8 @@ mod tests {
                 thinking_token_budget: None,
                 logprobs: None,
                 prompt_logprobs: None,
+                prompt_logprob_token_ids: None,
+                prompt_logprob_start: None,
                 min_p: 0.0,
                 frequency_penalty: 0.0,
                 presence_penalty: 0.0,
@@ -867,6 +880,8 @@ mod tests {
                 thinking_token_budget: None,
                 logprobs: None,
                 prompt_logprobs: None,
+                prompt_logprob_token_ids: None,
+                prompt_logprob_start: None,
                 min_p: 0.0,
                 frequency_penalty: 0.0,
                 presence_penalty: 0.0,
@@ -932,6 +947,8 @@ mod tests {
                 thinking_token_budget: None,
                 logprobs: None,
                 prompt_logprobs: None,
+                prompt_logprob_token_ids: None,
+                prompt_logprob_start: None,
                 min_p: 0.0,
                 frequency_penalty: 0.0,
                 presence_penalty: 0.0,
@@ -1005,6 +1022,8 @@ mod tests {
                 thinking_token_budget: None,
                 logprobs: None,
                 prompt_logprobs: None,
+                prompt_logprob_token_ids: None,
+                prompt_logprob_start: None,
                 min_p: 0.1,
                 frequency_penalty: 0.0,
                 presence_penalty: 0.0,
@@ -1117,6 +1136,44 @@ mod tests {
                 vocab_size: 1000,
             }) if token_ids == vec![1000]
         ));
+    }
+
+    #[test]
+    fn lower_sampling_params_validates_prompt_logprob_token_ids() {
+        let lower = |ids: Option<Vec<u32>>, start: Option<u32>| {
+            lower_sampling_params_with_limits(
+                SamplingParams {
+                    prompt_logprob_token_ids: ids,
+                    prompt_logprob_start: start,
+                    ..Default::default()
+                },
+                sample_sampling_limits(),
+            )
+        };
+        let rejects = |ids, start| match lower(ids, start) {
+            Err(error) => error.to_string(),
+            Ok(_) => panic!("expected rejection"),
+        };
+
+        let params = lower(Some(vec![1, 2]), Some(1)).unwrap();
+        assert_eq!(params.prompt_logprob_token_ids, Some(vec![1, 2]));
+        assert_eq!(params.prompt_logprob_start, Some(1));
+        expect_test::expect![[r#"
+            [
+                "prompt_logprob_token_ids must not be empty.",
+                "requested prompt_logprob_token_ids of 21, which is greater than max allowed: 20",
+                "token_id(s) [1000] in prompt_logprob_token_ids are out of vocabulary. Vocabulary size: 1000",
+                "prompt_logprob_token_ids must not contain duplicates.",
+                "prompt_logprob_start requires prompt_logprob_token_ids.",
+            ]
+        "#]]
+        .assert_debug_eq(&[
+            rejects(Some(vec![]), None),
+            rejects(Some((0..21).collect()), None),
+            rejects(Some(vec![1000]), None),
+            rejects(Some(vec![1, 1]), None),
+            rejects(None, Some(0)),
+        ]);
     }
 
     #[test]
@@ -1256,6 +1313,8 @@ mod tests {
                 thinking_token_budget: None,
                 logprobs: None,
                 prompt_logprobs: None,
+                prompt_logprob_token_ids: None,
+                prompt_logprob_start: None,
                 min_p: 0.1,
                 frequency_penalty: 0.0,
                 presence_penalty: 0.0,
@@ -1299,6 +1358,35 @@ mod tests {
 
         assert!(!prepared.text_request.intermediate);
         assert_eq!(prepared.generate_request.request_id, "text-1");
+    }
+
+    #[test]
+    fn lower_text_request_passes_kv_hints_through() {
+        let hints = KvHintsEnvelope {
+            protocol_version: "0.1".to_string(),
+            message_id: "msg-1".to_string(),
+            actions: vec![KvHintAction {
+                action_id: "action-1".to_string(),
+                action_type: "example.action".to_string(),
+                action_version: "1.0".to_string(),
+                payload: Default::default(),
+            }],
+        };
+        let request = TextRequest {
+            kv_hints: Some(hints.clone()),
+            ..sample_request()
+        };
+
+        let prepared = lower_text_request(
+            request,
+            vec![1, 2, 3],
+            sample_sampling_hints(),
+            sample_sampling_limits(),
+            &stub_tokenizer(),
+        )
+        .unwrap();
+
+        assert_eq!(prepared.generate_request.kv_hints, Some(hints));
     }
 
     #[test]

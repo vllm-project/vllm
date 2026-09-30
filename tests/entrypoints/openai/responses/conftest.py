@@ -126,6 +126,11 @@ def _validate_event_pairing(events: list, pairs_of_event_types: dict[str, str]) 
         etype = event.type
         if etype in end_events:
             expected_start = pairs_of_event_types[etype]
+            # Deltas are optional, e.g. a function call with no arguments.
+            if expected_start.endswith(".delta") and (
+                not stack or stack[-1] != expected_start
+            ):
+                continue
             assert stack and stack[-1] == expected_start, (
                 f"Stack mismatch for {etype}: "
                 f"expected {expected_start}, "

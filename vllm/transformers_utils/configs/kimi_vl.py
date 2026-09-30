@@ -3,12 +3,12 @@
 # Adapted from https://huggingface.co/moonshotai/Kimi-VL-A3B-Instruct/blob/main/configuration_kimi_vl.py
 
 from transformers import DeepseekV2Config
-from transformers.configuration_utils import PretrainedConfig
+from transformers.configuration_utils import PreTrainedConfig
 
 from vllm.transformers_utils.configs.moonvit import MoonViTConfig
 
 
-class KimiVLConfig(PretrainedConfig):
+class KimiVLConfig(PreTrainedConfig):
     model_type = "kimi_vl"
 
     def __init__(

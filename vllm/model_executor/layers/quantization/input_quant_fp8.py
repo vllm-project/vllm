@@ -28,8 +28,7 @@ _FP8_MIN_SCALING_FACTOR = 1.0 / (_FP8_MAX * 512.0)
 # --8<-- [start:quant_fp8]
 @CustomOp.register("quant_fp8")
 class QuantFP8(CustomOp):
-    """
-    Quantize input tensor to FP8 (per-tensor, per-token, per-channel, or per-group).
+    """Quantize input tensor to FP8 (per-tensor, per-token, per-channel, or per-group).
     This CustomOp supports both static and dynamic quantization.
     """
 
@@ -45,18 +44,18 @@ class QuantFP8(CustomOp):
         use_ue8m0: bool | None = None,  # for Torch compile
         compile_native: bool = True,
     ):
-        """
-        Args:
-            static: static or dynamic quantization
-            group_shape: quantization group shape (PER_TOKEN, PER_TENSOR,
-                PER_CHANNEL, or arbitrary block size)
-            num_token_padding: Pad the token dimension of output to this
-                size
-            tma_aligned_scales: For group quantization, output scales in
-                TMA-aligned layout
-            column_major_scales: For group quantization, output scales in
-                column major format
-            compile_native: Manually compile forward_native if compile mode > None
+        """Args:
+        static: static or dynamic quantization
+        group_shape: quantization group shape (PER_TOKEN, PER_TENSOR,
+            PER_CHANNEL, or arbitrary block size)
+        num_token_padding: Pad the token dimension of output to this
+            size
+        tma_aligned_scales: For group quantization, output scales in
+            TMA-aligned layout
+        column_major_scales: For group quantization, output scales in
+            column major format
+        compile_native: Manually compile forward_native if compile mode > None
+
         """
         super().__init__(compile_native=compile_native)
         self.static = static
@@ -156,8 +155,11 @@ class QuantFP8(CustomOp):
         if use_aiter_per_token_quant:
             return rocm_aiter_ops.per_token_quant(x, _FP8_DTYPE, scale)
 
-        # Fallback to CUDA implementation
-        return self.forward_cuda(x, scale, scale_ub)
+        # Fall back to the CUDA implementation. Dispatch on the class, not
+        # through self: a subclass may override forward_cuda with a different
+        # signature (_DecodeConcatQuantFP8 does), and a virtual call would
+        # re-enter it with mismatched arguments.
+        return QuantFP8.forward_cuda(self, x, scale, scale_ub)
 
     def forward_xpu(
         self,
@@ -176,7 +178,8 @@ class QuantFP8(CustomOp):
                 dtype=_FP8_DTYPE,
                 use_ue8m0=self.use_ue8m0,
             )
-        return self.forward_cuda(x, scale, scale_ub, use_triton)
+        # Dispatch on the class, for the same reason as in forward_hip.
+        return QuantFP8.forward_cuda(self, x, scale, scale_ub, use_triton)
 
     def forward_native(
         self,

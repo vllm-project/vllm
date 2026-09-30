@@ -14,12 +14,12 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Qwen3.5-MoE model configuration"""
+"""Qwen3.5-MoE model configuration."""
 
-from transformers.configuration_utils import PretrainedConfig
+from transformers.configuration_utils import PreTrainedConfig
 
 
-class Qwen3_5MoeTextConfig(PretrainedConfig):
+class Qwen3_5MoeTextConfig(PreTrainedConfig):
     model_type = "qwen3_5_moe_text"
     keys_to_ignore_at_inference = ["past_key_values"]
 
@@ -120,7 +120,7 @@ class Qwen3_5MoeTextConfig(PretrainedConfig):
         self.router_aux_loss_coef = router_aux_loss_coef
         super().__init__(**kwargs)
         # Set these AFTER super().__init__() because transformers v4's
-        # PretrainedConfig.__init__ has these as explicit params with different
+        # PreTrainedConfig.__init__ has these as explicit params with different
         # defaults (e.g. tie_word_embeddings=True) that would overwrite our values.
         self.pad_token_id = pad_token_id
         self.bos_token_id = bos_token_id
@@ -128,7 +128,7 @@ class Qwen3_5MoeTextConfig(PretrainedConfig):
         self.tie_word_embeddings = tie_word_embeddings
 
 
-class Qwen3_5MoeVisionConfig(PretrainedConfig):
+class Qwen3_5MoeVisionConfig(PreTrainedConfig):
     model_type = "qwen3_5_moe"
     base_config_key = "vision_config"
 
@@ -164,7 +164,7 @@ class Qwen3_5MoeVisionConfig(PretrainedConfig):
         self.initializer_range = initializer_range
 
 
-class Qwen3_5MoeConfig(PretrainedConfig):
+class Qwen3_5MoeConfig(PreTrainedConfig):
     model_type = "qwen3_5_moe"
     sub_configs = {
         "vision_config": Qwen3_5MoeVisionConfig,
@@ -198,7 +198,7 @@ class Qwen3_5MoeConfig(PretrainedConfig):
         self.vision_start_token_id = vision_start_token_id
         self.vision_end_token_id = vision_end_token_id
         super().__init__(**kwargs)
-        # Set after super().__init__() to avoid v4 PretrainedConfig overwrite
+        # Set after super().__init__() to avoid v4 PreTrainedConfig overwrite
         self.tie_word_embeddings = tie_word_embeddings
 
 

@@ -18,7 +18,6 @@ from vllm.v1.attention.backends.mamba_attn import (
 )
 from vllm.v1.attention.backends.utils import (
     NULL_BLOCK_ID,
-    compute_causal_conv1d_metadata,
     mamba_get_block_table_tensor,
 )
 from vllm.v1.kv_cache_interface import MambaSpec
@@ -108,6 +107,7 @@ class PleShortConvAttentionMetadataBuilder(ShortConvAttentionMetadataBuilder):
     _cudagraph_support = AttentionCGSupport.UNIFORM_BATCH
     reorder_batch_threshold: int = 1
     supports_update_block_table = False
+    needs_causal_conv1d_metadata = False
 
     def __init__(
         self,
@@ -281,18 +281,10 @@ class PleShortConvAttentionMetadataBuilder(ShortConvAttentionMetadataBuilder):
                 spec_sequence_masks_cpu, device=query_start_loc.device
             )
 
-        # For causal_conv1d (non-spec prefill Triton kernel metadata).
-        nums_dict = None
-        batch_ptr = None
-        token_chunk_offset_ptr = None
         has_initial_states_p = None
         has_initial_states_d = None
         num_computed_tokens_p = None
-        # Original request indices of the non-spec requests, ordered
-        # [decodes, prefills]. Used to gather per-request data consistently.
-        non_spec_req_idx_cpu: torch.Tensor | None = None
 
-        query_lens = torch.diff(query_start_loc)
         # Per-request classification by mask, NOT by position. With
         # spec-decode, the front decode group can contain both spec-decode
         # requests and plain non-spec single-token decodes. Spec requests are
@@ -317,37 +309,32 @@ class PleShortConvAttentionMetadataBuilder(ShortConvAttentionMetadataBuilder):
             else 0
         )
 
-        # Original request indices grouped as
-        # [spec | non-spec decode | non-spec prefill]; each group keeps the
-        # original (already reordered) relative order via a stable nonzero.
-        spec_req_idx_cpu = spec_sequence_masks_cpu.nonzero(as_tuple=True)[0]
-        decode_req_idx_cpu = decode_mask_cpu.nonzero(as_tuple=True)[0]
-        prefill_req_idx_cpu = prefill_mask_cpu.nonzero(as_tuple=True)[0]
-        non_spec_req_idx_cpu = torch.cat((decode_req_idx_cpu, prefill_req_idx_cpu))
-        spec_req_idx = async_tensor_h2d(spec_req_idx_cpu, device=query_start_loc.device)
+        assert num_accepted_tokens is not None
         non_spec_req_idx: torch.Tensor | None = None
 
         if num_decodes == 0 and num_prefills == 0:
-            # Pure speculative-decode batch: all real tokens are spec tokens.
-            spec_token_indx = torch.arange(
-                num_spec_decode_tokens,
-                dtype=torch.int32,
-                device=query_start_loc.device,
-            )
-            non_spec_token_indx = torch.empty(
-                0, dtype=torch.int32, device=query_start_loc.device
-            )
-            spec_state_indices_tensor = block_table_tensor[spec_req_idx, 0]
+            # All real requests are speculative; zero-length padding is trailing.
+            spec_token_indx = None
+            non_spec_token_indx = None
+            spec_state_indices_tensor = block_table_tensor[:num_spec_decodes, 0]
+            num_accepted_tokens = num_accepted_tokens[:num_spec_decodes]
             non_spec_state_indices_tensor = None
             spec_query_start_loc = query_start_loc[: num_spec_decodes + 1]
             non_spec_query_start_loc = None
-            non_spec_query_start_loc_cpu = None
         else:
             # Mixed batch: build a per-token group key consistent with the
             # request grouping above (spec=0 | decode=1 | prefill=2) and a
             # stable sort, so tokens of each request stay contiguous and in
             # request order. This yields spec tokens first, then the non-spec
             # [decode, prefill] tokens.
+            query_lens = torch.diff(query_start_loc)
+            spec_req_idx_cpu = spec_sequence_masks_cpu.nonzero(as_tuple=True)[0]
+            decode_req_idx_cpu = decode_mask_cpu.nonzero(as_tuple=True)[0]
+            prefill_req_idx_cpu = prefill_mask_cpu.nonzero(as_tuple=True)[0]
+            non_spec_req_idx_cpu = torch.cat((decode_req_idx_cpu, prefill_req_idx_cpu))
+            spec_req_idx = async_tensor_h2d(
+                spec_req_idx_cpu, device=query_start_loc.device
+            )
             non_spec_req_idx = async_tensor_h2d(
                 non_spec_req_idx_cpu, device=query_start_loc.device
             )
@@ -360,14 +347,17 @@ class PleShortConvAttentionMetadataBuilder(ShortConvAttentionMetadataBuilder):
                 dtype=torch.int64,
                 device=query_start_loc.device,
             )
-            req_group[spec_req_idx] = 0
-            req_group[decode_req_idx] = 1
-            token_group = torch.repeat_interleave(req_group, query_lens)
+            req_group.index_fill_(0, spec_req_idx, 0)
+            req_group.index_fill_(0, decode_req_idx, 1)
+            token_group = torch.repeat_interleave(
+                req_group, query_lens, output_size=int(query_start_loc_cpu[-1])
+            )
             token_perm = torch.argsort(token_group, stable=True)
             spec_token_indx = token_perm[:num_spec_decode_tokens]
             non_spec_token_indx = token_perm[num_spec_decode_tokens:]
 
             spec_state_indices_tensor = block_table_tensor[spec_req_idx, 0]
+            num_accepted_tokens = num_accepted_tokens[spec_req_idx]
             non_spec_state_indices_tensor = block_table_tensor[non_spec_req_idx, 0]
             spec_query_start_loc = torch.zeros(
                 num_spec_decodes + 1,
@@ -385,22 +375,8 @@ class PleShortConvAttentionMetadataBuilder(ShortConvAttentionMetadataBuilder):
                 dim=0,
                 out=non_spec_query_start_loc[1:],
             )
-            non_spec_query_start_loc_cpu = torch.zeros(
-                num_decodes + num_prefills + 1, dtype=torch.int32
-            )
-            torch.cumsum(
-                query_lens_cpu[non_spec_req_idx_cpu],
-                dim=0,
-                out=non_spec_query_start_loc_cpu[1:],
-            )
 
-        assert num_accepted_tokens is not None
-        # Accepted-token counts must follow the same request order as the
-        # speculative state indices.
-        num_accepted_tokens = num_accepted_tokens[spec_req_idx]
-
-        # Compute the conv-state slots for the non-spec decode/prefill split,
-        # plus the initial-state masks and Triton causal_conv1d metadata.
+        # Compute the conv-state slots for the non-spec decode/prefill split.
         if non_spec_state_indices_tensor is None:
             state_indices_tensor = block_table_tensor[:0, 0]
         else:
@@ -431,20 +407,9 @@ class PleShortConvAttentionMetadataBuilder(ShortConvAttentionMetadataBuilder):
                 ]
                 has_initial_states_p = num_computed_tokens_p > 0
                 assert non_spec_query_start_loc is not None
-                assert non_spec_query_start_loc_cpu is not None
                 query_start_loc_p = (
                     non_spec_query_start_loc[num_decodes:] - num_decode_tokens
                 )
-                query_start_loc_p_cpu = (
-                    non_spec_query_start_loc_cpu[num_decodes:] - num_decode_tokens
-                )
-                if query_start_loc.device.type != "cpu":
-                    nums_dict, batch_ptr, token_chunk_offset_ptr = (
-                        compute_causal_conv1d_metadata(
-                            query_start_loc_p_cpu,
-                            device=query_start_loc.device,
-                        )
-                    )
 
         # Prepare persistent tensors for CUDA graph capture and replay.
         # ``m.num_actual_tokens`` is already padded by the model runner.
@@ -509,9 +474,6 @@ class PleShortConvAttentionMetadataBuilder(ShortConvAttentionMetadataBuilder):
             non_spec_token_indx=non_spec_token_indx,
             num_accepted_tokens=num_accepted_tokens,
             num_decode_draft_tokens_cpu=num_decode_draft_tokens_cpu,
-            nums_dict=nums_dict,
-            batch_ptr=batch_ptr,
-            token_chunk_offset_ptr=token_chunk_offset_ptr,
             query_start_loc_p=query_start_loc_p,
             query_start_loc_d=query_start_loc_d,
             state_indices_tensor_p=state_indices_tensor_p,

@@ -36,10 +36,10 @@ COPY pyproject.toml ./
 
 # The script is expected to install whatever python dependencies are missing
 # as well as whatever system libraries need to be installed from source
-COPY  build_vllm_*.sh ./
+COPY docker/build_vllm_*.sh docker/
 
 RUN --mount=type=cache,target=/root/.cache/uv \
-    sh ./build_vllm_$(uname -m).sh
+    sh ./docker/build_vllm_$(uname -m).sh
 
 # copy vllm source code to build cache
 COPY . .

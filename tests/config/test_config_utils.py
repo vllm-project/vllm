@@ -40,7 +40,7 @@ class DummyLogprobsMode(Enum):
 
 
 def test_hash_factors_deterministic():
-    """Test that hash_factors produces consistent SHA-256 hashes"""
+    """Test that hash_factors produces consistent SHA-256 hashes."""
     factors = {"a": 1, "b": "test"}
     hash1 = hash_factors(factors)
     hash2 = hash_factors(factors)
@@ -215,6 +215,9 @@ def test_cache_config_hash_ignores_kv_cache_sizing_knobs():
     base_hash = CacheConfig().compute_hash()
     assert CacheConfig(kv_cache_memory_bytes=1 << 30).compute_hash() == base_hash
     assert CacheConfig(gpu_memory_utilization=0.5).compute_hash() == base_hash
+    config = CacheConfig()
+    config.effective_attention_block_size = 64
+    assert config.compute_hash() == base_hash
 
 
 def test_scheduler_config_hash_includes_max_num_seqs():

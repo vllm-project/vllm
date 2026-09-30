@@ -4,7 +4,9 @@
 
 These tests exercise:
   - Zero-limit modalities are filtered from mm_counts passed to
-    get_dummy_processor_inputs (e.g. --limit-mm-per-prompt image=0 ...)
+    get_dummy_inputs (e.g. --limit-mm-per-prompt image=0 ...)
+  - The warmup runs through the processor-only cache and clears it afterwards,
+    so its dummy inputs never land in the sender cache used by the serving path
   - MM warmup is skipped entirely when mm_processor is None
   - The multimodal warmup is launched as a task on the single-worker
     _mm_executor to overlap engine-core init (future lifecycle, join by
@@ -21,10 +23,13 @@ that acts as the renderer instance.
 """
 
 from concurrent.futures import Future, ThreadPoolExecutor
+from types import MethodType, SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
 
+from vllm.entrypoints.chat_utils import ChatTemplateResolutionError
+from vllm.multimodal.processing import BaseMultiModalProcessor
 from vllm.renderers.base import BaseRenderer
 from vllm.renderers.params import ChatParams
 
@@ -34,9 +39,11 @@ def _make_renderer_mock(mm_limits: dict[str, int]) -> MagicMock:
 
     render_chat is mocked to raise ChatTemplateResolutionError so the chat
     warmup block is skipped cleanly, keeping the test focused on MM warmup.
-    """
-    from vllm.entrypoints.chat_utils import ChatTemplateResolutionError
 
+    The processor is a mock at its I/O boundaries (``dummy_inputs`` and
+    ``apply``) but keeps the real ``get_dummy_mm_inputs``, since that is where
+    the warmup's seq_len capping and cache plumbing actually live.
+    """
     renderer = MagicMock()
 
     # chat warmup: make render_chat raise so we skip past it cleanly
@@ -45,13 +52,17 @@ def _make_renderer_mock(mm_limits: dict[str, int]) -> MagicMock:
     # MM processor with configurable limits
     mm_processor = MagicMock()
     mm_processor.info.allowed_mm_limits = mm_limits
+    mm_processor.info.ctx.model_config = renderer.model_config
     mm_processor.apply.return_value = {"prompt_token_ids": [1]}
+    mm_processor.get_dummy_mm_inputs = MethodType(
+        BaseMultiModalProcessor.get_dummy_mm_inputs, mm_processor
+    )
     renderer.mm_processor = mm_processor
-    renderer._readonly_mm_processor = None
+    renderer._mm_processor_cache = MagicMock(name="sender_cache")
+    renderer._mm_processor_only_cache = MagicMock(name="processor_only_cache")
     renderer._warmup_mm_processor = BaseRenderer._warmup_mm_processor.__get__(
         renderer, BaseRenderer
     )
-    renderer._clear_processor_cache = BaseRenderer._clear_processor_cache
     renderer.warmup_mm = BaseRenderer.warmup_mm.__get__(renderer, BaseRenderer)
     renderer.start_mm_warmup_in_background = (
         BaseRenderer.start_mm_warmup_in_background.__get__(renderer, BaseRenderer)
@@ -64,7 +75,6 @@ def _make_renderer_mock(mm_limits: dict[str, int]) -> MagicMock:
     renderer._mm_warmup_future = None
     # MM warmup has not run yet; warmup_mm must actually execute on the mock.
     renderer._mm_warmup_done = False
-    renderer.clear_mm_cache = MagicMock()
     renderer.model_config.max_model_len = 128
     renderer.config.scheduler_config.max_num_batched_tokens = 8192
     renderer.config.scheduler_config.enable_chunked_prefill = True
@@ -80,10 +90,9 @@ class TestMmWarmupZeroLimitFiltering:
         """A modality with limit=0 must not appear in mm_counts."""
         renderer = _make_renderer_mock({"image": 1, "video": 0})
 
-        with patch("vllm.multimodal.processing.TimingContext", autospec=True):
-            BaseRenderer.warmup(renderer, ChatParams())
+        BaseRenderer.warmup(renderer, ChatParams())
 
-        get_inputs = renderer.mm_processor.dummy_inputs.get_dummy_processor_inputs
+        get_inputs = renderer.mm_processor.get_dummy_inputs
         get_inputs.assert_called_once()
         _, kwargs = get_inputs.call_args
         assert "video" not in kwargs["mm_counts"]
@@ -93,10 +102,9 @@ class TestMmWarmupZeroLimitFiltering:
         """When all limits are 0, mm_counts must be empty."""
         renderer = _make_renderer_mock({"image": 0, "video": 0})
 
-        with patch("vllm.multimodal.processing.TimingContext", autospec=True):
-            BaseRenderer.warmup(renderer, ChatParams())
+        BaseRenderer.warmup(renderer, ChatParams())
 
-        get_inputs = renderer.mm_processor.dummy_inputs.get_dummy_processor_inputs
+        get_inputs = renderer.mm_processor.get_dummy_inputs
         get_inputs.assert_called_once()
         _, kwargs = get_inputs.call_args
         assert kwargs["mm_counts"] == {}
@@ -105,10 +113,9 @@ class TestMmWarmupZeroLimitFiltering:
         """All modalities with limit > 0 must be present in mm_counts."""
         renderer = _make_renderer_mock({"image": 2, "video": 1})
 
-        with patch("vllm.multimodal.processing.TimingContext", autospec=True):
-            BaseRenderer.warmup(renderer, ChatParams())
+        BaseRenderer.warmup(renderer, ChatParams())
 
-        get_inputs = renderer.mm_processor.dummy_inputs.get_dummy_processor_inputs
+        get_inputs = renderer.mm_processor.get_dummy_inputs
         get_inputs.assert_called_once()
         _, kwargs = get_inputs.call_args
         assert kwargs["mm_counts"] == {"image": 1, "video": 1}
@@ -125,35 +132,52 @@ class TestMmWarmupRunsNormally:
         renderer = _make_renderer_mock({"image": 1, "video": 1})
         renderer.model_config.max_model_len = max_model_len
 
-        with patch("vllm.multimodal.processing.TimingContext", autospec=True):
-            BaseRenderer.warmup(renderer, ChatParams())
+        BaseRenderer.warmup(renderer, ChatParams())
 
-        get_inputs = renderer.mm_processor.dummy_inputs.get_dummy_processor_inputs
+        get_inputs = renderer.mm_processor.get_dummy_inputs
         assert get_inputs.call_args.kwargs["seq_len"] == expected_seq_len
 
     def test_processor_apply_called(self):
         renderer = _make_renderer_mock({"image": 1})
 
-        with patch("vllm.multimodal.processing.TimingContext", autospec=True):
-            BaseRenderer.warmup(renderer, ChatParams())
+        BaseRenderer.warmup(renderer, ChatParams())
 
         renderer.mm_processor.apply.assert_called_once()
-
-    def test_mm_cache_cleared_after_warmup(self):
-        renderer = _make_renderer_mock({"image": 1})
-
-        with patch("vllm.multimodal.processing.TimingContext", autospec=True):
-            BaseRenderer.warmup(renderer, ChatParams())
-
-        renderer.clear_mm_cache.assert_called_once()
 
     def test_render_chat_called_with_warmup_message(self):
         renderer = _make_renderer_mock({"image": 1})
 
-        with patch("vllm.multimodal.processing.TimingContext", autospec=True):
-            BaseRenderer.warmup(renderer, ChatParams())
+        BaseRenderer.warmup(renderer, ChatParams())
 
         renderer.render_chat.assert_called_once()
+
+
+class TestMmWarmupCacheRouting:
+    # The warmup runs through the processor-only cache and drops it afterwards,
+    # so the dummy inputs never reach the sender cache used by the serving path.
+
+    def test_warmup_passes_processor_only_cache(self):
+        renderer = _make_renderer_mock({"image": 1})
+
+        with patch.object(
+            renderer.mm_processor,
+            "get_dummy_mm_inputs",
+            wraps=renderer.mm_processor.get_dummy_mm_inputs,
+        ) as spy:
+            BaseRenderer.warmup(renderer, ChatParams())
+
+        assert spy.call_args.kwargs["cache"] is renderer._mm_processor_only_cache
+        assert (
+            spy.call_args.kwargs["scheduler_config"] is renderer.config.scheduler_config
+        )
+
+    def test_only_cache_cleared_and_sender_cache_untouched(self):
+        renderer = _make_renderer_mock({"image": 1})
+
+        BaseRenderer.warmup(renderer, ChatParams())
+
+        renderer._mm_processor_only_cache.clear_cache.assert_called_once()
+        renderer._mm_processor_cache.clear_cache.assert_not_called()
 
 
 class TestMmWarmupSkippedWhenNoProcessor:
@@ -168,51 +192,28 @@ class TestMmWarmupSkippedWhenNoProcessor:
         renderer.model_config.get_multimodal_config.assert_not_called()
 
 
-class TestReadonlyMmWarmup:
-    """Readonly MM processor warmup must mirror the render path behavior."""
-
-    def test_readonly_processor_apply_called_and_cache_cleared(self):
-        renderer = _make_renderer_mock({"image": 1})
-        readonly_mm_processor = MagicMock()
-        readonly_mm_processor.info.allowed_mm_limits = {"image": 1}
-        renderer._readonly_mm_processor = readonly_mm_processor
-
-        with patch("vllm.multimodal.processing.TimingContext", autospec=True):
-            BaseRenderer.warmup(renderer, ChatParams())
-
-        readonly_mm_processor.apply.assert_called_once()
-        readonly_mm_processor.cache.clear_cache.assert_called_once()
-
-
 class TestWarmupFaultIsolation:
-    # A failure during a multimodal processor warmup is caught so it does not
-    # abort the remaining warmup steps; warmup itself must not raise.
+    # A failure during a warmup step is caught so it does not abort the other
+    # step; warmup itself must not raise.
 
     def test_chat_failure_does_not_abort_mm_warmup(self):
         renderer = _make_renderer_mock({"image": 1})
         renderer.render_chat.side_effect = RuntimeError("chat boom")
 
-        with patch("vllm.multimodal.processing.TimingContext", autospec=True):
-            BaseRenderer.warmup(renderer, ChatParams())  # must not raise
+        BaseRenderer.warmup(renderer, ChatParams())  # must not raise
 
         renderer.mm_processor.apply.assert_called_once()
 
-    def test_mm_failure_does_not_abort_readonly_warmup(self):
+    def test_mm_failure_is_swallowed_and_cache_cleared(self):
         renderer = _make_renderer_mock({"image": 1})
-        readonly_mm_processor = MagicMock()
-        readonly_mm_processor.info.allowed_mm_limits = {"image": 1}
-        renderer._readonly_mm_processor = readonly_mm_processor
-        # main processor warmup blows up before apply()
-        renderer.mm_processor.dummy_inputs.get_dummy_processor_inputs.side_effect = (
-            RuntimeError("mm boom")
-        )
+        # the warmup blows up before apply()
+        renderer.mm_processor.get_dummy_inputs.side_effect = RuntimeError("mm boom")
 
-        with patch("vllm.multimodal.processing.TimingContext", autospec=True):
-            BaseRenderer.warmup(renderer, ChatParams())  # must not raise
+        BaseRenderer.warmup(renderer, ChatParams())  # must not raise
 
-        readonly_mm_processor.apply.assert_called_once()
-        # cache is still cleared in the failed task's finally
-        renderer.clear_mm_cache.assert_called_once()
+        renderer.mm_processor.apply.assert_not_called()
+        # the cache is still cleared in the failed warmup's finally
+        renderer._mm_processor_only_cache.clear_cache.assert_called_once()
 
 
 class TestBackgroundMmWarmup:
@@ -234,16 +235,15 @@ class TestBackgroundMmWarmup:
     def test_start_submits_future_to_mm_executor(self):
         renderer = self._make_bg_renderer({"image": 1})
         try:
-            with patch("vllm.multimodal.processing.TimingContext", autospec=True):
-                # Spy on the real executor's submit to confirm the warmup is
-                # dispatched through _mm_executor (not a separate Thread).
-                with patch.object(
-                    renderer._mm_executor, "submit", wraps=renderer._mm_executor.submit
-                ) as spy:
-                    renderer.start_mm_warmup_in_background()
-                    assert isinstance(renderer._mm_warmup_future, Future)
-                    assert spy.called
-                renderer._join_mm_warmup()
+            # Spy on the real executor's submit to confirm the warmup is
+            # dispatched through _mm_executor (not a separate Thread).
+            with patch.object(
+                renderer._mm_executor, "submit", wraps=renderer._mm_executor.submit
+            ) as spy:
+                renderer.start_mm_warmup_in_background()
+                assert isinstance(renderer._mm_warmup_future, Future)
+                assert spy.called
+            renderer._join_mm_warmup()
             assert renderer._mm_warmup_future is None
             renderer.mm_processor.apply.assert_called_once()
         finally:
@@ -252,7 +252,6 @@ class TestBackgroundMmWarmup:
     def test_start_noop_for_text_only_model(self):
         renderer = _make_renderer_mock({})
         renderer.mm_processor = None
-        # _readonly_mm_processor is already None
 
         renderer.start_mm_warmup_in_background()
 
@@ -261,12 +260,11 @@ class TestBackgroundMmWarmup:
     def test_start_is_run_at_most_once(self):
         renderer = self._make_bg_renderer({"image": 1})
         try:
-            with patch("vllm.multimodal.processing.TimingContext", autospec=True):
-                renderer.start_mm_warmup_in_background()
-                first = renderer._mm_warmup_future
-                renderer.start_mm_warmup_in_background()  # must not spawn a second
-                assert renderer._mm_warmup_future is first
-                renderer._join_mm_warmup()
+            renderer.start_mm_warmup_in_background()
+            first = renderer._mm_warmup_future
+            renderer.start_mm_warmup_in_background()  # must not spawn a second
+            assert renderer._mm_warmup_future is first
+            renderer._join_mm_warmup()
         finally:
             renderer._mm_executor.shutdown(wait=True)
 
@@ -275,9 +273,8 @@ class TestBackgroundMmWarmup:
         # run only the chat warmup — the MM warmup must not run twice.
         renderer = self._make_bg_renderer({"image": 1})
         try:
-            with patch("vllm.multimodal.processing.TimingContext", autospec=True):
-                renderer.start_mm_warmup_in_background()
-                BaseRenderer.warmup(renderer, ChatParams())
+            renderer.start_mm_warmup_in_background()
+            BaseRenderer.warmup(renderer, ChatParams())
 
             # MM apply called exactly once (by the background warmup task).
             renderer.mm_processor.apply.assert_called_once()
@@ -294,13 +291,12 @@ class TestBackgroundMmWarmup:
         # re-run the MM warmup — the _mm_warmup_done flag survives the join.
         renderer = self._make_bg_renderer({"image": 1})
         try:
-            with patch("vllm.multimodal.processing.TimingContext", autospec=True):
-                renderer.start_mm_warmup_in_background()
-                # Simulate reset_mm_cache joining the background warmup first
-                # (clears _mm_warmup_future, sets _mm_warmup_done via the join).
-                renderer._join_mm_warmup()
-                assert renderer._mm_warmup_future is None  # joined & cleared
-                BaseRenderer.warmup(renderer, ChatParams())
+            renderer.start_mm_warmup_in_background()
+            # Simulate reset_mm_cache joining the background warmup first
+            # (clears _mm_warmup_future, sets _mm_warmup_done via the join).
+            renderer._join_mm_warmup()
+            assert renderer._mm_warmup_future is None  # joined & cleared
+            BaseRenderer.warmup(renderer, ChatParams())
 
             # MM apply called exactly once (by the background warmup task);
             # warmup() did not re-run warmup_mm despite the future being cleared.
@@ -313,9 +309,8 @@ class TestBackgroundMmWarmup:
         # Direct repeated calls to warmup_mm run the MM warmup only once.
         renderer = _make_renderer_mock({"image": 1})
 
-        with patch("vllm.multimodal.processing.TimingContext", autospec=True):
-            renderer.warmup_mm()
-            renderer.warmup_mm()  # second call must be a no-op
+        renderer.warmup_mm()
+        renderer.warmup_mm()  # second call must be a no-op
 
         renderer.mm_processor.apply.assert_called_once()
 
@@ -324,10 +319,9 @@ class TestBackgroundMmWarmup:
         # so the mm_processor_cache is never touched concurrently.
         renderer = self._make_bg_renderer({"image": 1})
 
-        with patch("vllm.multimodal.processing.TimingContext", autospec=True):
-            renderer.start_mm_warmup_in_background()
-            future = renderer._mm_warmup_future
-            renderer.shutdown()
+        renderer.start_mm_warmup_in_background()
+        future = renderer._mm_warmup_future
+        renderer.shutdown()
 
         assert renderer._mm_warmup_future is None
         # The background warmup was allowed to complete (apply ran) and the
@@ -344,10 +338,6 @@ class TestEngineStartWarmupHook:
     # These tests pin the renderer plumbing contract on EngineCoreClient.
 
     def _mock_config(self):
-        from types import SimpleNamespace
-
-        from vllm.v1.engine.core_client import EngineCoreClient  # noqa: F401
-
         cfg = SimpleNamespace(
             parallel_config=SimpleNamespace(
                 data_parallel_size=1,

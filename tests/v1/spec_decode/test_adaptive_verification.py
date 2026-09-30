@@ -1,15 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from contextlib import nullcontext
 from types import SimpleNamespace
 
 import numpy as np
 import pytest
 
 from vllm.config.compilation import CUDAGraphMode
-from vllm.v1.attention.backend import AttentionCGSupport
+from vllm.v1.attention.backend import AttentionCGSupport, AttentionMetadataBuilder
 from vllm.v1.worker.gpu.async_utils import StepTimingSample
-from vllm.v1.worker.gpu.attn_utils import AttentionCGSupportInfo
 from vllm.v1.worker.gpu.spec_decode import adaptive_verification as adaptive_module
 from vllm.v1.worker.gpu.spec_decode.adaptive_verification import (
     AdaptiveVerificationManager,
@@ -58,37 +58,90 @@ def test_resolve_adaptive_cudagraph_mode(mode, piecewise_capture_available, expe
     )
 
 
-def test_manager_scopes_varlen_check_without_weakening_runner_cg_mode(monkeypatch):
-    class Backend:
-        @classmethod
-        def supports_device_cpu_query_lens_mismatch(cls):
-            return True
+@pytest.mark.parametrize(
+    "target_support,target_bound,device_offsets,additional,error",
+    [
+        pytest.param(AttentionCGSupport.ALWAYS, None, True, None, None, id="always"),
+        pytest.param(
+            AttentionCGSupport.UNIFORM_BATCH, 8, True, None, None, id="bounded"
+        ),
+        pytest.param(
+            AttentionCGSupport.UNIFORM_BATCH,
+            None,
+            True,
+            None,
+            "TargetBackend allows none",
+            id="unsupported",
+        ),
+        pytest.param(
+            AttentionCGSupport.UNIFORM_BATCH,
+            7,
+            True,
+            None,
+            "up to 8, but TargetBackend allows at most 7",
+            id="too-narrow",
+        ),
+        pytest.param(
+            AttentionCGSupport.UNIFORM_BATCH,
+            8,
+            False,
+            None,
+            "trims verification requests",
+            id="host-query-lens",
+        ),
+        pytest.param(
+            AttentionCGSupport.ALWAYS,
+            None,
+            True,
+            (AttentionCGSupport.UNIFORM_BATCH, "EncoderBackend"),
+            "EncoderBackend allows none",
+            id="additional-group",
+        ),
+    ],
+)
+def test_manager_checks_target_varlen_cudagraph_bound(
+    monkeypatch, target_support, target_bound, device_offsets, additional, error
+):
+    """Target builders must replay varlen decode graphs of the verification
+    width; draft-only groups are not checked."""
 
-    class Builder:
-        def __init__(self, support):
-            self.support = support
+    def group(backend_name, layer_name, support, bound=None, mismatch=True):
+        class Builder(AttentionMetadataBuilder):
+            _cudagraph_support = support
 
-        def get_cudagraph_support(self, *_args):
-            return self.support
+            def __init__(self):
+                pass
 
-    def group(layer_name, support):
-        builder = Builder(support)
+            def build(self, common_prefix_len, common_attn_metadata, fast_build=False):
+                raise NotImplementedError
+
+            if bound is not None:
+
+                @classmethod
+                def get_varlen_cudagraph_max_query_len(cls, *_args):
+                    return bound
+
+        backend = type(
+            backend_name,
+            (),
+            {"supports_device_cpu_query_lens_mismatch": staticmethod(lambda: mismatch)},
+        )
+        builder = Builder()
         return SimpleNamespace(
             layer_names=[layer_name],
-            backend=Backend,
+            backend=backend,
             kv_cache_spec=None,
             get_metadata_builder=lambda _index: builder,
         )
 
     groups = [
         [
-            group("target", AttentionCGSupport.ALWAYS),
-            group("draft", AttentionCGSupport.UNIFORM_BATCH),
+            group(
+                "TargetBackend", "target", target_support, target_bound, device_offsets
+            ),
+            group("DraftBackend", "draft", AttentionCGSupport.UNIFORM_BATCH),
         ]
     ]
-    runner_support = AttentionCGSupportInfo(
-        AttentionCGSupport.UNIFORM_BATCH, "DraftBackend"
-    )
     created = object()
     monkeypatch.setattr(
         adaptive_module,
@@ -96,20 +149,19 @@ def test_manager_scopes_varlen_check_without_weakening_runner_cg_mode(monkeypatc
         lambda *_args, **_kwargs: created,
     )
 
-    manager = maybe_create_adaptive_verification_manager(
-        enable_adaptive_verification=True,
-        attn_groups=groups,
-        attn_cg_support=runner_support,
-        req_states=object(),
-        query_start_loc=object(),
-        num_bonus_tokens=1,
-        max_total_logits=1,
-        vllm_config=None,
-        target_layer_names={"target"},
-    )
-
-    assert manager is created
-    assert runner_support.min_cg_support == AttentionCGSupport.UNIFORM_BATCH
+    with pytest.raises(ValueError, match=error) if error else nullcontext():
+        manager = maybe_create_adaptive_verification_manager(
+            enable_adaptive_verification=True,
+            attn_groups=groups,
+            req_states=SimpleNamespace(num_speculative_steps=7),
+            query_start_loc=object(),
+            num_bonus_tokens=1,
+            max_total_logits=1,
+            vllm_config=None,
+            target_layer_names={"target"},
+            additional_attn_cg_support=additional,
+        )
+        assert manager is created
 
 
 def test_budget_stops_where_marginal_drafts_stop_paying_for_themselves():

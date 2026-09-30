@@ -3,13 +3,14 @@
 
 import json
 from http import HTTPStatus
-from typing import Annotated
+from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, Body, FastAPI, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
 
 from vllm.distributed.weight_transfer.base import (
     WeightTransferInitRequest,
+    WeightTransferUpdatePayload,
     WeightTransferUpdateRequest,
 )
 from vllm.engine.protocol import EngineClient
@@ -36,6 +37,8 @@ async def pause_generation(
     """Pause generation requests to allow weight updates.
 
     Args:
+        raw_request: The incoming FastAPI request, used to reach the engine
+            client on the app state.
         mode: How to handle in-flight requests:
             - ``"abort"``: Abort all in-flight requests immediately (default).
             - ``"wait"``: Wait for in-flight requests to complete.
@@ -43,8 +46,8 @@ async def pause_generation(
         wait_for_inflight_requests: DEPRECATED. Use ``mode="wait"`` instead.
         clear_cache: DEPRECATED. Whether to clear KV/prefix caches after
             draining. Ignored when mode="keep".
-    """
 
+    """
     engine = engine_client(raw_request)
 
     try:
@@ -74,7 +77,6 @@ async def pause_generation(
 @router.post("/resume")
 async def resume_generation(raw_request: Request) -> JSONResponse:
     """Resume generation after a pause."""
-
     engine = engine_client(raw_request)
 
     try:
@@ -97,13 +99,16 @@ async def abort_requests(raw_request: Request) -> JSONResponse:
 
     Empty/missing ``request_ids`` aborts all in-flight requests.
     """
-
     engine = engine_client(raw_request)
 
     try:
         body = await raw_request.json()
     except json.JSONDecodeError as e:
         raise HTTPException(status_code=400, detail="Invalid JSON format") from e  # noqa: B904
+    if not isinstance(body, dict):
+        raise HTTPException(
+            status_code=400, detail="Request body must be a JSON object"
+        )
 
     request_ids = body.get("request_ids")
 
@@ -139,7 +144,6 @@ async def abort_requests(raw_request: Request) -> JSONResponse:
 @router.get("/is_paused")
 async def is_paused(raw_request: Request) -> JSONResponse:
     """Return the current pause status."""
-
     engine = engine_client(raw_request)
 
     try:
@@ -155,17 +159,10 @@ async def is_paused(raw_request: Request) -> JSONResponse:
 
 
 @router.post("/init_weight_transfer_engine")
-async def init_weight_transfer_engine(raw_request: Request):
-    try:
-        body = await raw_request.json()
-    except json.JSONDecodeError as e:
-        raise HTTPException(status_code=400, detail="Invalid JSON format") from e  # noqa: B904
-    init_info = body.get("init_info")
-    if init_info is None:
-        raise HTTPException(
-            status_code=HTTPStatus.BAD_REQUEST.value,
-            detail="Missing 'init_info' in request body",
-        )
+async def init_weight_transfer_engine(
+    raw_request: Request,
+    init_info: Annotated[dict[str, Any], Body(embed=True)],
+):
     await engine_client(raw_request).init_weight_transfer_engine(
         WeightTransferInitRequest(init_info=init_info)
     )
@@ -185,17 +182,10 @@ async def start_draft_weight_update(raw_request: Request):
 
 
 @router.post("/update_weights")
-async def update_weights(raw_request: Request):
-    try:
-        body = await raw_request.json()
-    except json.JSONDecodeError as e:
-        raise HTTPException(status_code=400, detail="Invalid JSON format") from e  # noqa: B904
-    update_info = body.get("update_info")
-    if update_info is None:
-        raise HTTPException(
-            status_code=HTTPStatus.BAD_REQUEST.value,
-            detail="Missing 'update_info' in request body",
-        )
+async def update_weights(
+    raw_request: Request,
+    update_info: Annotated[WeightTransferUpdatePayload, Body(embed=True)],
+):
     await engine_client(raw_request).update_weights(
         request=WeightTransferUpdateRequest(update_info=update_info)
     )
@@ -226,6 +216,43 @@ async def weight_info(raw_request: Request):
     return JSONResponse(content={"weight_version": weight_version})
 
 
+@router.post("/weight_checker")
+async def weight_checker(
+    raw_request: Request,
+    action: Annotated[Literal["checksum", "reset", "compare"], Body(embed=True)],
+    baseline: Annotated[dict[str, str] | None, Body(embed=True)] = None,
+) -> JSONResponse:
+    """Checksum, reset, or compare model weights against a baseline."""
+    client = engine_client(raw_request)
+    if action == "reset":
+        await client.collective_rpc("reset_weights")
+        return JSONResponse(content={"status": "reset"})
+    if action == "compare" and baseline is None:
+        raise HTTPException(
+            status_code=HTTPStatus.BAD_REQUEST.value,
+            detail="action='compare' requires a 'baseline' object",
+        )
+
+    checksums: dict[str, str] = {}
+    for worker_checksums in await client.compute_weight_checksums():
+        if duplicates := checksums.keys() & worker_checksums.keys():
+            raise HTTPException(
+                status_code=HTTPStatus.INTERNAL_SERVER_ERROR.value,
+                detail=f"Duplicate weight checksum keys: {sorted(duplicates)}",
+            )
+        checksums.update(worker_checksums)
+    if action == "checksum":
+        return JSONResponse(content={"checksums": checksums})
+
+    assert baseline is not None
+    mismatches = sorted(
+        key
+        for key in checksums.keys() | baseline.keys()
+        if checksums.get(key) != baseline.get(key)
+    )
+    return JSONResponse(content={"match": not mismatches, "mismatches": mismatches})
+
+
 @router.get("/get_world_size")
 async def get_world_size(
     raw_request: Request,
@@ -234,9 +261,12 @@ async def get_world_size(
     """Get the world size from the parallel config.
 
     Args:
+        raw_request: The incoming FastAPI request, used to reach the engine
+            client on the app state.
         include_dp: If True (default), returns the world size including
             data parallelism (TP * PP * DP). If False, returns the world
             size without data parallelism (TP * PP).
+
     """
     parallel_config = engine_client(raw_request).vllm_config.parallel_config
     if include_dp:

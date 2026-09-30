@@ -147,8 +147,7 @@ def _build_worker_with_dict_store(vllm_config, kv_cache_config, store):
 
 
 def test_e2e_swa_plus_full_save_then_lookup_hits():
-    """
-    E2E: build a SWA+Full hybrid worker, save all blocks via the sending
+    """E2E: build a SWA+Full hybrid worker, save all blocks via the sending
     thread (synchronously), then verify lookup returns the full hit length.
     Also verify that evicting SWA's early blocks (outside its window) still
     allows a full hit because the window covers the tail.

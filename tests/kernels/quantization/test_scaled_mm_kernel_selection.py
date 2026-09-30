@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Tests for ScaledMM kernel selection logic (CPU-only)
+"""Tests for ScaledMM kernel selection logic (CPU-only).
 
 Run `pytest tests/kernels/quantization/test_scaled_mm_kernel_selection.py`.
 """
@@ -35,7 +35,7 @@ pytestmark = pytest.mark.cpu_test
 
 
 def test_auto_linear_backend_is_unchanged_without_overrides():
-    kernels = [object]
+    kernels: list[type] = [object]
     quantizations = (
         "fp8_block_w8a8",
         "fp8_w8a8",

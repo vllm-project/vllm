@@ -1,8 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-"""
-Analytic flops/memory estimation module for transformer components,
+"""Analytic flops/memory estimation module for transformer components,
 to help derive MFU (Model Flops Utilization) stats for a running model.
 """
 
@@ -33,8 +32,7 @@ logger = init_logger(__name__)
 
 
 class InvalidComponent(Exception):
-    """
-    Custom exception to indicate that a certain ComponentMetric is not
+    """Custom exception to indicate that a certain ComponentMetric is not
     applicable to the given VllmConfig.
     """
 
@@ -99,8 +97,7 @@ class PerfStats:
 
 @dataclass
 class ExecutionContext:
-    """
-    Represents an execution context for a batch of requests.
+    """Represents an execution context for a batch of requests.
 
     This class aggregates statistics across multiple requests in a batch,
     separately tracking prefill and decode phases.
@@ -202,8 +199,7 @@ class ExecutionContext:
 
 
 class ParsedArgs:
-    """
-    Syntactic sugar so that Parsers can use dot notations
+    """Syntactic sugar so that Parsers can use dot notations
     to access/update the parsed arguments.
 
     e.g.)
@@ -227,16 +223,14 @@ class ParsedArgs:
 
 class Parser(Protocol):
     def parse(self, args: ParsedArgs, vllm_config: VllmConfig) -> ParsedArgs:
-        """
-        Parse the vllm config and update the current ParsedArgs and pass it on.
+        """Parse the vllm config and update the current ParsedArgs and pass it on.
         If the parser isn't applicable to the vllm_config, it will do nothing.
         """
         ...
 
 
 class ParserChain:
-    """
-    Applies chain of parser in a sequential order.
+    """Applies chain of parser in a sequential order.
     Later parsers might overwrite results from previous parsers,
     so parsers should be chained in the appropriate order if they
     are not mutually exclusive.
@@ -260,8 +254,7 @@ _COMPONENT_METRICS_REGISTRY: dict[str, type["ComponentMetrics"]] = {}
 
 
 class ComponentMetrics(BaseModel, ABC):
-    """
-    Each concrete ComponentMetrics class is associated with:
+    """Each concrete ComponentMetrics class is associated with:
     - fields that are required for metric derivation
       (fields are specified/validated through pydantic model)
     - parser to parse VllmConfig into fields
@@ -277,8 +270,7 @@ class ComponentMetrics(BaseModel, ABC):
     @classmethod
     @abstractmethod
     def get_parser(cls) -> ParserChain:
-        """
-        Return a ParserChain that provides values for all required fields.
+        """Return a ParserChain that provides values for all required fields.
         The returned parser chain must populate ParsedArgs with values for every
         field defined on this ComponentMetrics class. Missing fields will cause
         a ValidationError when from_vllm_config() is called.
@@ -292,11 +284,9 @@ class ComponentMetrics(BaseModel, ABC):
 
     @classmethod
     def from_vllm_config(cls, vllm_config: VllmConfig) -> Self:
-        """
-        Instantiate this class from VllmConfig.
+        """Instantiate this class from VllmConfig.
         Raises ValidationError if parsing fails.
         """
-
         parser = cls.get_parser()
         parsed_args = parser.parse(vllm_config)
         try:
@@ -343,8 +333,7 @@ class ComponentMetrics(BaseModel, ABC):
 
 
 class BaseConfigParser(Parser):
-    """
-    Parses base model configuration.
+    """Parses base model configuration.
     Provides: vocab_size, hidden_size, num_attention_heads, num_hidden_layers,
     weight_byte_size, activation_byte_size, dp_size, tp_size, pp_size, enable_ep
     """
@@ -380,9 +369,10 @@ class BaseConfigParser(Parser):
 
         args.weight_byte_size = get_dtype_size(torch_dtype)
 
-        # FIXME: handle this better by parsing whether activations use
-        # bf16, fp32, etc...
-        args.activation_byte_size = 2
+        # Activations are produced in the model's compute dtype. Quantization
+        # overrides weight_byte_size below but leaves activations alone, so
+        # this stays keyed on the model dtype.
+        args.activation_byte_size = get_dtype_size(torch_dtype)
 
         args.dp_size = vllm_config.parallel_config.data_parallel_size
         args.tp_size = vllm_config.parallel_config.tensor_parallel_size
@@ -396,8 +386,7 @@ class BaseConfigParser(Parser):
 
 
 class BaseAttentionConfigParser(Parser):
-    """
-    Parses attention-specific configuration.
+    """Parses attention-specific configuration.
     Provides: num_key_value_heads, head_dim, cache_byte_size
     """
 
@@ -418,8 +407,7 @@ class BaseAttentionConfigParser(Parser):
 
 
 class SlidingWindowAttentionParser(Parser):
-    """
-    Parses sliding window attention configuration and layer breakdown.
+    """Parses sliding window attention configuration and layer breakdown.
     Provides: sliding_window, num_swa_layers
     """
 
@@ -466,8 +454,7 @@ class SlidingWindowAttentionParser(Parser):
 
 
 class AttentionQuantizationConfigParser(Parser):
-    """
-    Parses quantization configuration for attention layers.
+    """Parses quantization configuration for attention layers.
     Overrides: weight_byte_size
     """
 
@@ -490,8 +477,7 @@ class AttentionQuantizationConfigParser(Parser):
 
 
 class AttentionDetectionParser(Parser):
-    """
-    Prevents standard AttentionMetrics from being instantiated for MLA models.
+    """Prevents standard AttentionMetrics from being instantiated for MLA models.
     MLA models should use MLAAttentionMetrics instead.
     """
 
@@ -589,6 +575,7 @@ class AttentionMetrics(ComponentMetrics):
 
         Returns:
             Dict with keys: qkv_proj, out_proj, attn_qk, attn_av.
+
         """
         D, q, kv, d = (
             self.hidden_size,
@@ -642,6 +629,7 @@ class AttentionMetrics(ComponentMetrics):
         Returns:
             Dict with keys: qkv_input, qkv_weight, attn_input (conditional),
             out_input, out_weight.
+
         """
         D, q, kv, d = (
             self.hidden_size,
@@ -747,8 +735,7 @@ class AttentionMetrics(ComponentMetrics):
 
 
 class MLADetectionParser(Parser):
-    """
-    Validates that the model uses MLA attention.
+    """Validates that the model uses MLA attention.
     Raises InvalidComponent if the model does not use MLA,
     so MLAAttentionMetrics is silently skipped for non-MLA models.
     """
@@ -761,8 +748,7 @@ class MLADetectionParser(Parser):
 
 
 class MLAConfigParser(Parser):
-    """
-    Parses MLA-specific configuration fields.
+    """Parses MLA-specific configuration fields.
     Provides: kv_lora_rank, qk_nope_head_dim, qk_rope_head_dim,
     v_head_dim, q_lora_rank
     """
@@ -787,8 +773,7 @@ class MLAConfigParser(Parser):
 
 
 class MLAAttentionMetrics(ComponentMetrics):
-    """
-    Performance metrics for Multi-Latent Attention (MLA) layers.
+    """Performance metrics for Multi-Latent Attention (MLA) layers.
 
     MLA uses a compressed latent representation for KV cache:
     - KV cache stores a single compressed vector of size
@@ -1025,8 +1010,7 @@ class MLAAttentionMetrics(ComponentMetrics):
 
 
 class BaseFfnConfigParser(Parser):
-    """
-    Parses FFN and MoE configuration.
+    """Parses FFN and MoE configuration.
     Provides: intermediate_size, num_experts, num_experts_per_tok,
     moe_intermediate_size, num_shared_experts, num_moe_layers
     """
@@ -1056,8 +1040,7 @@ class BaseFfnConfigParser(Parser):
 
 
 class FfnParallelParser(Parser):
-    """
-    Parses FFN parallelism configuration.
+    """Parses FFN parallelism configuration.
 
     Provides: ffn_tp_size, ffn_ep_size
     """
@@ -1077,8 +1060,7 @@ class FfnParallelParser(Parser):
 
 
 class InterleaveMoeLayerStepParser(Parser):
-    """
-    Parses interleave_moe_layer_step field for models like Llama4.
+    """Parses interleave_moe_layer_step field for models like Llama4.
 
     Overrides: num_moe_layers
     """
@@ -1104,8 +1086,7 @@ class InterleaveMoeLayerStepParser(Parser):
 
 
 class MoeLayerFreqParser(Parser):
-    """
-    Parses moe_layer_freq and first_k_dense_replace fields for models like Deepseek.
+    """Parses moe_layer_freq and first_k_dense_replace fields for models like Deepseek.
 
     Overrides: num_moe_layers
     """
@@ -1129,8 +1110,7 @@ class MoeLayerFreqParser(Parser):
 
 
 class FfnQuantizationConfigParser(Parser):
-    """
-    Parses quantization configuration for FFN layers.
+    """Parses quantization configuration for FFN layers.
 
     Overrides: weight_byte_size
     """
@@ -1486,11 +1466,9 @@ class UnembedMetrics(ComponentMetrics):
 
 class ModelMetrics:
     def __init__(self, vllm_config: VllmConfig) -> None:
-        """
-        Parse vllm_config to instantiate metrics for each component.
+        """Parse vllm_config to instantiate metrics for each component.
         is_enabled() will return False if no component metrics could be instantiated.
         """
-
         self.vllm_config = vllm_config
 
         self.metrics: list[ComponentMetrics] = []
@@ -1558,10 +1536,7 @@ class ModelMetrics:
     def get_step_perf_stats_per_gpu(
         self, scheduler_output: SchedulerOutput
     ) -> PerfStats:
-        """
-        Calculate perf stats for the current step based on scheduled tokens.
-        """
-
+        """Calculate perf stats for the current step based on scheduled tokens."""
         t0 = time.monotonic()
 
         # Build a single batch context

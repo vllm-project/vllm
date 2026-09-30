@@ -26,3 +26,13 @@ def test_logprobs_zero_emits_sampled_token():
         num_output_top_logprobs=0,
     )
     assert len(result.content[0].top_logprobs) == 1
+
+
+def test_logprobs_minus_one_emits_all_tokens():
+    result = ServingTokens._create_tokens_logprobs(
+        None,
+        token_ids=[7],
+        top_logprobs=[{7: Logprob(-0.9), 8: Logprob(-1.1)}],
+        num_output_top_logprobs=-1,
+    )
+    assert len(result.content[0].top_logprobs) == 2

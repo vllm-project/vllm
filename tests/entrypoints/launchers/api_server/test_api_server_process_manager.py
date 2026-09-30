@@ -307,7 +307,8 @@ def test_external_process_monitoring(api_server_args):
         def run_with_exception_capture():
             try:
                 wait_for_completion_or_failure(
-                    api_server_manager=manager, coordinator=mock_coordinator
+                    api_server_manager=manager,
+                    coordinator=mock_coordinator,  # type: ignore[arg-type]
                 )
             except Exception as e:
                 result["exception"] = e
@@ -376,7 +377,7 @@ def test_gather_actual_addresses_end_to_end():
     manager = APIServerProcessManager(
         listen_address=f"tcp://{host}:0",
         sock=sock,
-        args="test_args",
+        args="test_args",  # type: ignore[arg-type]
         num_servers=num_servers,
         input_addresses=placeholder_inputs,
         output_addresses=placeholder_outputs,
@@ -423,7 +424,7 @@ def test_gather_actual_addresses_child_crash_before_report():
     manager = APIServerProcessManager(
         listen_address=f"tcp://{host}:0",
         sock=sock,
-        args="test_args",
+        args="test_args",  # type: ignore[arg-type]
         num_servers=num_servers,
         input_addresses=placeholder_inputs,
         output_addresses=placeholder_outputs,
@@ -489,3 +490,49 @@ def test_rust_frontend_launch_log_redacts_credentials(monkeypatch, caplog):
     assert hf_token not in message
     assert api_key not in message
     assert '"hf_token": "***"' in message
+
+
+def test_rust_frontend_uses_config_model_as_model_tag(monkeypatch, caplog, tmp_path):
+    """Config-only model selection must be forwarded to the Rust frontend."""
+    import subprocess as subprocess_mod
+
+    from vllm.entrypoints.launchers.cli_args import make_arg_parser
+    from vllm.utils.argparse_utils import FlexibleArgumentParser
+    from vllm.v1.utils import RustFrontendProcessManager
+
+    config_path = tmp_path / "config.yml"
+    config_path.write_text("model: org/model\n")
+    args = make_arg_parser(FlexibleArgumentParser()).parse_args(
+        ["--config", str(config_path)]
+    )
+    assert args.model == "org/model"
+    assert args.model_tag is None
+
+    class _FakeProc:
+        pid = 4321
+        returncode = 0
+
+        def poll(self):
+            return 0
+
+        def wait(self, timeout=None):
+            return 0
+
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        monkeypatch.setattr(subprocess_mod, "Popen", lambda *a, **kw: _FakeProc())
+        with caplog.at_level("INFO", logger="vllm.v1.utils"):
+            RustFrontendProcessManager(
+                binary_path="/nonexistent/vllm-rs",
+                sock=sock,
+                args=args,
+                input_address="ipc:///tmp/in",
+                output_address="ipc:///tmp/out",
+                engine_start_index=0,
+                engine_count=1,
+                data_parallel_size=1,
+            )
+    finally:
+        sock.close()
+
+    assert '"model_tag": "org/model"' in caplog.text

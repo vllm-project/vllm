@@ -8,13 +8,16 @@ import torch
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
-from vllm.profiler.wrapper import TorchProfilerWrapper
 from vllm.utils.mem_utils import MemorySnapshot, format_gib
 from vllm.utils.torch_utils import set_random_seed
 from vllm.v1.utils import report_usage_stats
 from vllm.v1.worker.gpu_worker import Worker, init_worker_distributed_environment
 from vllm.v1.worker.workspace import init_workspace_manager
-from vllm.v1.worker.xpu_model_runner import XPUModelRunner, XPUModelRunnerV2
+from vllm.v1.worker.xpu_model_runner import (
+    XPUMMEncoderModelRunner,
+    XPUModelRunner,
+    XPUModelRunnerV2,
+)
 
 from .utils import request_memory
 
@@ -216,7 +219,14 @@ class XPUWorker(Worker):
         init_workspace_manager(self.device, num_ubatches)
 
         # Construct the model runner
-        model_runner = XPUModelRunnerV2 if self.use_v2_model_runner else XPUModelRunner
+        if self.use_v2_model_runner:
+            model_runner = (
+                XPUMMEncoderModelRunner
+                if self.vllm_config.is_mm_encoder_only
+                else XPUModelRunnerV2
+            )
+        else:
+            model_runner = XPUModelRunner  # type: ignore[assignment]
         self.model_runner = model_runner(  # type: ignore
             self.vllm_config, self.device
         )
@@ -224,33 +234,6 @@ class XPUWorker(Worker):
         if self.rank == 0:
             # If usage stat is enabled, collect relevant info.
             report_usage_stats(self.vllm_config)
-
-    def profile(self, is_start: bool = True, profile_prefix: str | None = None):
-        if self.profiler_config is None or self.profiler_config.profiler is None:
-            raise RuntimeError(
-                "Profiling is not enabled. Please set --profiler-config to enable "
-                "profiling. Example: "
-                "'--profiler-config.profiler=torch --profiler-config.torch_profiler_dir"
-                "=YOUR_DIR_PATH_TO_DUMP_TRACE'"
-            )
-
-        if is_start and self.profiler is None:
-            from vllm.distributed.utils import get_worker_rank_suffix
-
-            rank_suffix = get_worker_rank_suffix(global_rank=self.rank)
-            trace_name = (
-                f"{profile_prefix}_{rank_suffix}" if profile_prefix else rank_suffix
-            )
-
-            self.profiler = TorchProfilerWrapper(
-                self.profiler_config,
-                worker_name=trace_name,
-                local_rank=self.local_rank,
-                activities=["CPU", "XPU"],
-            )
-            logger.debug("Starting torch profiler with trace name: %s", trace_name)
-
-        super().profile(is_start=is_start, profile_prefix=profile_prefix)
 
     def shutdown(self) -> None:
         logger.info(

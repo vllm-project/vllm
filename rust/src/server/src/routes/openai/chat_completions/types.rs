@@ -9,15 +9,15 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use serde_with::SerializeDisplay;
 use validator::Validate;
-use vllm_chat::ReasoningEffort;
 use vllm_engine_core_client::protocol::sampling::RepetitionDetectionParams;
 use vllm_text::TruncationSide;
 
 use crate::routes::openai::utils::structured_outputs::ResponseFormat;
 use crate::routes::openai::utils::types::{
-    ChatLogProbs, ChatMessage, Normalizable, PromptLogprobs, StreamOptions, StreamResponseEnvelope,
-    StringOrArray, Tool, ToolCall, ToolCallDelta, ToolChoice, Usage, default_true,
-    deserialize_request_top_k, validate_messages, validate_stop, validate_top_p_value,
+    ChatLogProbs, ChatMessage, Normalizable, PromptLogprobs, ReasoningEffort, StreamOptions,
+    StreamResponseEnvelope, StringOrArray, Tool, ToolCall, ToolCallDelta, ToolChoice, Usage,
+    default_true, deserialize_request_top_k, validate_messages, validate_stop,
+    validate_top_p_value,
 };
 
 /// vLLM-compatible request type for the Chat Completions API.

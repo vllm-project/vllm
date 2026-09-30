@@ -43,8 +43,7 @@ class SMControlContextManager:
         set_comm_sms: Callable[[int], None],
         set_compute_sms: Callable[[int], None],
     ):
-        """
-        Context manager for controlling SM (Streaming Multiprocessor)
+        """Context manager for controlling SM (Streaming Multiprocessor)
         allocation. Upon entering the context, it sets the number of SMs
         allocated for communication and computation to comm_sms and
         total_sms - comm_sms respectively. Upon exiting, it restores the
@@ -57,8 +56,8 @@ class SMControlContextManager:
                 A function that sets the number of SMs for communication.
             set_compute_sms (Callable[[int], None]):
                 A function that sets the number of SMs for computation.
-        """
 
+        """
         assert current_platform.is_cuda() or current_platform.is_rocm(), (
             "SM/CU control is supported on CUDA and ROCm platforms"
         )
@@ -221,8 +220,7 @@ def slice_query_start_locs(
     query_start_loc: torch.Tensor,
     request_slice: slice,
 ) -> torch.Tensor:
-    """
-    Creates a new query_start_loc that corresponds to the requests in
+    """Creates a new query_start_loc that corresponds to the requests in
     request_slice.
 
     Note: This function creates a new tensor to hold the new query_start_locs.
@@ -237,11 +235,9 @@ def slice_query_start_locs(
 def _make_metadata_with_slice(
     ubatch_slice: UBatchSlice, attn_metadata: CommonAttentionMetadata
 ) -> CommonAttentionMetadata:
-    """
-    This function creates a new CommonAttentionMetadata that corresponds to
+    """This function creates a new CommonAttentionMetadata that corresponds to
     the requests included in ubatch_slice
     """
-
     assert not ubatch_slice.is_empty(), f"Ubatch slice {ubatch_slice} is empty"
 
     request_slice = ubatch_slice.request_slice
@@ -338,8 +334,7 @@ def split_attn_metadata(
     ubatch_slices: list[UBatchSlice],
     common_attn_metadata: CommonAttentionMetadata,
 ) -> list[CommonAttentionMetadata]:
-    """
-    Creates a new CommonAttentionMetadata instance that corresponds to the
+    """Creates a new CommonAttentionMetadata instance that corresponds to the
     requests for each UBatchSlice in ubatch_slices.
 
     Note: This function does not modify common_attn_metadata

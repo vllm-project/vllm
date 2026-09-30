@@ -159,6 +159,8 @@ pub(super) fn prepare_chat_request(
             thinking_token_budget: request.thinking_token_budget,
             logprobs: request.logprobs.then_some(top_logprobs),
             prompt_logprobs,
+            prompt_logprob_token_ids: None,
+            prompt_logprob_start: None,
             min_p: request.min_p,
             frequency_penalty: request.frequency_penalty,
             presence_penalty: request.presence_penalty,
@@ -180,7 +182,7 @@ pub(super) fn prepare_chat_request(
         chat_options: ChatOptions {
             generation_prompt_mode,
             chat_template: request.chat_template,
-            reasoning_effort: request.reasoning_effort,
+            reasoning_effort: request.reasoning_effort.map(|effort| effort.as_str().into()),
             response_format,
             template_kwargs,
         },
@@ -317,6 +319,9 @@ pub(crate) fn convert_message(message: ChatMessage) -> Result<VllmChatMessage, A
             convert_content(content)?,
             convert_message_tools(tools)?,
         )),
+        ChatMessage::Custom { role, content } => {
+            Ok(VllmChatMessage::custom(role, convert_content(content)?))
+        }
     }
 }
 
@@ -442,6 +447,7 @@ mod tests {
     use expect_test::expect;
     use llm_multimodal::ImageDetail;
     use serde_json::json;
+    use thiserror_ext::AsReport as _;
     use validator::Validate;
     use vllm_chat::{
         AssistantContentBlock, AssistantToolCall, ChatContentPart, ChatMessage as VllmChatMessage,
@@ -485,6 +491,50 @@ mod tests {
             }],
             stream: true,
             ..Default::default()
+        }
+    }
+
+    #[test]
+    fn chat_http_reasoning_effort_preserves_omission_none_and_kwargs() {
+        for effort in [None, Some(json!(null))].into_iter().chain(
+            ["none", "minimal", "low", "medium", "high", "xhigh", "max"]
+                .map(|name| Some(json!(name))),
+        ) {
+            let kwargs = json!({"reasoning_effort": 37, "thinking": true});
+            let mut value = json!({
+                "messages": [{"role": "user", "content": "hello"}],
+                "chat_template_kwargs": kwargs,
+            });
+            if let Some(effort) = &effort {
+                value["reasoning_effort"] = effort.clone();
+            }
+            let request: ChatCompletionRequest = serde_json::from_value(value).unwrap();
+            let prepared = prepare_chat_request(
+                request,
+                &served(&["test-model"]),
+                request_context(&HeaderMap::new(), None),
+            )
+            .unwrap();
+            let options = prepared.chat_request.chat_options;
+            assert_eq!(
+                serde_json::to_value(options.reasoning_effort).unwrap(),
+                effort.unwrap_or(serde_json::Value::Null)
+            );
+            assert_eq!(
+                serde_json::to_value(options.template_kwargs).unwrap(),
+                kwargs
+            );
+        }
+    }
+
+    #[test]
+    fn chat_http_reasoning_effort_rejects_model_extensions_at_top_level() {
+        for effort in [json!(37), json!("custom")] {
+            let request = json!({
+                "messages": [{"role": "user", "content": "hello"}],
+                "reasoning_effort": effort,
+            });
+            assert!(serde_json::from_value::<ChatCompletionRequest>(request).is_err());
         }
     }
 
@@ -747,7 +797,7 @@ mod tests {
         );
 
         let tokenizer = Arc::new(TestTokenizer::new());
-        let prompt = KimiK3ChatRenderer::new(tokenizer.clone())
+        let prompt = KimiK3ChatRenderer::new(tokenizer.clone(), Default::default())
             .render(&prepared.chat_request)
             .expect("Kimi K3 rendering succeeds")
             .prompt;
@@ -1001,6 +1051,43 @@ mod tests {
                 }]),
             )]
         );
+    }
+
+    #[test]
+    fn prepare_chat_request_accepts_custom_role_messages() {
+        let request: ChatCompletionRequest = serde_json::from_value(json!({
+            "messages": [
+                {"role": "root", "content": "Custom identity."},
+                {"role": "user", "content": "hello"},
+            ],
+        }))
+        .expect("parse custom role message");
+
+        let prepared = prepare_chat_request(
+            request,
+            &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
+            ResolvedRequestContext::default(),
+        )
+        .expect("request is valid");
+
+        assert_eq!(
+            prepared.chat_request.messages,
+            vec![
+                VllmChatMessage::custom("root", "Custom identity."),
+                VllmChatMessage::user("hello"),
+            ]
+        );
+    }
+
+    #[test]
+    fn chat_http_message_keeps_standard_role_errors() {
+        let error = serde_json::from_value::<ChatMessage>(json!({
+            "role": "tool",
+            "content": "Sunny",
+        }))
+        .unwrap_err();
+
+        expect!["missing field `tool_call_id`"].assert_eq(&error.to_report_string());
     }
 
     #[test]

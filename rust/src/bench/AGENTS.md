@@ -23,7 +23,7 @@ cargo test -p vllm-bench -- --ignored
 
 ## Architecture
 
-- `src/main.rs` — Entry point, mimalloc, tokio runtime, mode dispatch (compare/sweep/multi-run/multi-turn/single)
+- `src/main.rs` — Entry point, mimalloc, tokio runtime, mode dispatch (compare/sweep/multi-run/multi-turn/single, `mm-processor` subcommand)
 - `src/cli.rs` — clap derive CLI args (~50+ flags)
 - `src/config.rs` — Validated config from CLI; `GoodputConfig`, `RampUpConfig`, sampling param merging
 - `src/error.rs` — `BenchError` enum (Http, Json, Tokenizer, Config, EndpointTimeout, Backend, Io)
@@ -32,6 +32,7 @@ cargo test -p vllm-bench -- --ignored
 - `src/sweep.rs` — Concurrency/rate parameter sweep (`--sweep-max-concurrency`, `--sweep-request-rate`)
 - `src/multi_run.rs` — N-run aggregation with mean/std/min/max/CV (`--num-runs`)
 - `src/compare.rs` — Side-by-side diff of two result JSON files (`--compare`)
+- `src/mm_processor.rs` — `vllm-bench mm-processor` subcommand: offline multimodal preprocessing latency benchmark against a managed headless engine (mirrors `vllm bench mm-processor`); per-stage timings come from `vllm_tracing::timing::RequestTimingLayer` (via `vllm_chat::mm_timing_layer`)
 - `src/tokenizer.rs` — `TokenizerKind` enum: Local(HuggingFace), Tiktoken, OR Server-side `/tokenize`+`/detokenize` fallback
 - `src/tiktoken.rs` — Tiktoken BPE loader (`.tiktoken`/`.model` files; built-in encodings o200k_base/cl100k_base; pat_str extraction from Python source)
 - `src/hub.rs` — `HubRepo`: thin wrapper over hf-hub's async (reqwest/native-tls) API — file download and repo listing, optional revision; the sync ureq backend is unusable here because it pulls rustls, which `rust/deny.toml` bans

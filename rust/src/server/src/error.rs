@@ -175,16 +175,43 @@ mod tests {
     }
 
     #[test]
-    fn invalid_reasoning_effort_maps_to_invalid_request() {
-        let error = vllm_chat::Error::InvalidReasoningEffort(
-            "DeepSeek V4.1 reasoning_effort must be within [1, 100]".to_string(),
-        );
+    fn invalid_reasoning_parameters_map_to_invalid_request() {
+        for error in [
+            vllm_chat::Error::InvalidReasoningEffort(
+                "DeepSeek V4.1 reasoning_effort must be within [1, 100]".to_string(),
+            ),
+            vllm_chat::Error::InvalidReasoningControl {
+                message: "template kwarg `thinking` must be a boolean".to_string(),
+            },
+        ] {
+            let api_error = chat_submit_error("failed to submit chat request", error);
+            assert_eq!(api_error.status_code(), StatusCode::BAD_REQUEST);
+            assert_eq!(
+                api_error.to_error_response().error.error_type,
+                "invalid_request_error"
+            );
+        }
+    }
+
+    #[test]
+    fn chat_template_throw_maps_to_invalid_request() {
+        let error = vllm_chat::Error::ChatTemplateThrown {
+            message: "Unexpected reasoning effort high.".to_string(),
+        };
         let api_error = chat_submit_error("failed to submit chat request", error);
         assert_eq!(api_error.status_code(), StatusCode::BAD_REQUEST);
-        assert_eq!(
-            api_error.to_error_response().error.error_type,
-            "invalid_request_error"
+        let response = api_error.to_error_response();
+        assert_eq!(response.error.error_type, "invalid_request_error");
+        assert_eq!(response.error.message, "Unexpected reasoning effort high.");
+    }
+
+    #[test]
+    fn chat_template_render_failure_stays_internal() {
+        let error = vllm_chat::Error::ChatTemplate(
+            "failed to render jinja template: unknown function".to_string(),
         );
+        let api_error = chat_submit_error("failed to submit chat request", error);
+        assert_eq!(api_error.status_code(), StatusCode::INTERNAL_SERVER_ERROR);
     }
 
     #[test]

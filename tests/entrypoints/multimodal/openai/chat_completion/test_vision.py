@@ -34,8 +34,7 @@ REQUIRED_BEAM_SEARCH_TERMS = [
 
 
 def check_output_matches_terms(content: str, term_groups: list[list[str]]) -> bool:
-    """
-    Check if content matches all required term groups.
+    """Check if content matches all required term groups.
     Each term group requires at least one of its terms to be present.
     All term groups must be satisfied.
     """

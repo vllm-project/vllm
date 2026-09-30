@@ -13,6 +13,7 @@ from vllm import envs
 from vllm.distributed.kv_transfer.kv_connector.utils import (
     BlockIds,
     EngineId,
+    clip_ssm_state_blocks,
     yield_req_data,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
@@ -288,22 +289,20 @@ class NixlBaseConnectorScheduler:
                 and blocks
                 and (n_spec_blocks := self._ssm_spec_blocks[i]) is not None
             ):
-                if n_spec := min(n_spec_blocks, len(blocks) - 1):
-                    blocks = blocks[:-n_spec]
-                if not self._ssm_state_slots_are_positional:
-                    # Never empty: downstream reads that as a full prefix hit.
-                    blocks = blocks[-1:]
+                blocks = clip_ssm_state_blocks(
+                    blocks, n_spec_blocks, self._ssm_state_slots_are_positional
+                )
             clipped.append(blocks)
         return tuple(clipped)
 
     def set_xfer_handshake_metadata(
         self, metadata: dict[tuple[int, int], KVConnectorHandshakeMetadata]
     ) -> None:
-        """
-        Set the KV connector handshake metadata for this connector.
+        """Set the KV connector handshake metadata for this connector.
 
         Args:
             metadata (dict): the handshake metadata to set.
+
         """
         encoded_data: dict[tuple[int, int], bytes] = {}
         encoder = msgspec.msgpack.Encoder()

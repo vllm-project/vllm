@@ -1,14 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from transformers.configuration_utils import PretrainedConfig
+from transformers.configuration_utils import PreTrainedConfig
 
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
 
 
-class Glm5NextTextConfig(PretrainedConfig):
+class Glm5NextTextConfig(PreTrainedConfig):
     model_type = "glm5_next_text"
     base_config_key = "text_config"
     keys_to_ignore_at_inference = ["past_key_values"]
@@ -271,7 +271,7 @@ class Glm5NextTextConfig(PretrainedConfig):
         ]
 
 
-class Glm5NextVisionConfig(PretrainedConfig):
+class Glm5NextVisionConfig(PreTrainedConfig):
     model_type = "glm5_next_vision"
     base_config_key = "vision_config"
 
@@ -324,7 +324,7 @@ class Glm5NextVisionConfig(PretrainedConfig):
         self.swiglu_limit = swiglu_limit
 
 
-class Glm5NextConfig(PretrainedConfig):
+class Glm5NextConfig(PreTrainedConfig):
     model_type = "glm5_next"
     sub_configs = {
         "vision_config": Glm5NextVisionConfig,
@@ -345,7 +345,7 @@ class Glm5NextConfig(PretrainedConfig):
         **kwargs,
     ):
         # Init super() first so base-class defaults don't clobber text-config
-        # values set below (PretrainedConfig has many text-related defaults
+        # values set below (PreTrainedConfig has many text-related defaults
         # that differ from Glm5NextTextConfig).
         super().__init__(**kwargs)
 
@@ -379,7 +379,7 @@ class Glm5NextConfig(PretrainedConfig):
     # and must NOT be mirrored onto text_config: ``architectures`` /
     # ``torch_dtype`` differ between the top-level config and the text
     # sub-config, and mirroring them makes the top-level ``architectures``
-    # silently read back as None (PretrainedConfig initializes both to None),
+    # silently read back as None (PreTrainedConfig initializes both to None),
     # which then fails model-class resolution ("No model architectures are
     # specified").
     _UNMIRRORED_KEYS = [

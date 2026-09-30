@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Tests for MNNVL AllToAll operations.
+"""Tests for MNNVL AllToAll operations.
 
 Requires: docker run ... --cap-add=SYS_PTRACE ...
 Run: pytest tests/distributed/test_mnnvl_alltoall.py -v
@@ -9,12 +8,14 @@ Run: pytest tests/distributed/test_mnnvl_alltoall.py -v
 
 import os
 import traceback
+from contextlib import contextmanager
 
 import pytest
 import torch
 import torch.multiprocessing as mp
 
 from vllm.distributed import get_ep_group
+from vllm.platforms import current_platform
 from vllm.utils.flashinfer import (
     has_flashinfer_nvlink_one_sided,
     has_flashinfer_nvlink_two_sided,
@@ -23,6 +24,8 @@ from vllm.utils.import_utils import has_deep_ep_v2
 from vllm.utils.network_utils import get_open_port
 
 from ..utils import init_test_distributed_environment
+
+DEVICE = current_platform.device_type
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -87,6 +90,7 @@ def _run_worker(rank, world_size, port, worker_fn, dp_size, dp_port, err_queue):
                  Otherwise use tp=world_size (default for EP-based tests).
         dp_port: Separate port for the DP master (only used when dp_size is set).
         err_queue: Queue for propagating tracebacks to the parent process.
+
     """
     try:
         os.environ.pop("CUDA_VISIBLE_DEVICES", None)
@@ -115,6 +119,7 @@ def _init_dp_environment(world_size, rank, port, dp_size, dp_port):
     Args:
         port: Port for torch.distributed init.
         dp_port: Separate port for the DP master group init.
+
     """
     from vllm.config import VllmConfig, set_current_vllm_config
     from vllm.config.parallel import ParallelConfig
@@ -144,16 +149,17 @@ def _init_dp_environment(world_size, rank, port, dp_size, dp_port):
         ensure_model_parallel_initialized(1, 1)
 
 
+@contextmanager
 def _make_forward_context(rank, world_size, num_tokens_per_rank):
-    """Create a forward context with mock DP metadata for AgRs tests.
+    """Keep the vLLM config and mock-DP forward context active together.
 
     Returns a context manager suitable for ``with`` statements.
     The real DPMetadata (with sp_local_sizes etc.) is created internally
     by set_forward_context from num_tokens_across_dp; the attn_metadata
     placeholder just satisfies the "attn_metadata is not None" guard.
     """
+    from vllm.config import VllmConfig, set_current_vllm_config
     from vllm.config.parallel import ParallelConfig
-    from vllm.config.vllm import VllmConfig
     from vllm.forward_context import set_forward_context
 
     class _AttnMeta:
@@ -169,14 +175,18 @@ def _make_forward_context(rank, world_size, num_tokens_per_rank):
         is_moe_model=True,
         data_parallel_rank=rank,
     )
-    return set_forward_context(
-        _AttnMeta(),
-        vllm_config,
-        num_tokens=num_tokens_per_rank,
-        num_tokens_across_dp=torch.tensor(
-            [num_tokens_per_rank] * world_size, dtype=torch.int
+    with (
+        set_current_vllm_config(vllm_config),
+        set_forward_context(
+            _AttnMeta(),
+            vllm_config,
+            num_tokens=num_tokens_per_rank,
+            num_tokens_across_dp=torch.tensor(
+                [num_tokens_per_rank] * world_size, dtype=torch.int
+            ),
         ),
-    )
+    ):
+        yield
 
 
 # ---------------------------------------------------------------------------
@@ -482,7 +492,7 @@ def _args_dispatch_combine_worker(rank, world_size):
     from vllm.forward_context import get_forward_context
 
     cpu_group = get_ep_group().cpu_group
-    device = torch.device(f"cuda:{rank}")
+    device = torch.device(f"{DEVICE}:{rank}")
 
     hidden_size = 64
     tokens_per_rank = 16
@@ -623,7 +633,7 @@ def _two_sided_data_worker(rank, world_size):
     # Use DP group because MnnvlMoe workspace allocation calls get_dp_group()
     # internally and requires dp_size == ep_size.
     cpu_group = get_dp_group().cpu_group
-    device = torch.device(f"cuda:{rank}")
+    device = torch.device(f"{DEVICE}:{rank}")
     num_gpus = torch.accelerator.device_count()
 
     hidden_size = 128
@@ -768,7 +778,7 @@ def _one_sided_data_worker(rank, world_size):
     from vllm.forward_context import get_forward_context
 
     cpu_group = get_dp_group().cpu_group
-    device = torch.device(f"cuda:{rank}")
+    device = torch.device(f"{DEVICE}:{rank}")
 
     hidden_size = 256
     tokens_per_rank = 32

@@ -534,6 +534,7 @@ class _RDTProducerServer:
         Raises:
             RuntimeError: two consumers of one sharing group disagree on the
                 chunks they pull from this producer.
+
         """
         sg = self._share_group(consumer_id)
         if plan_digest is not None:
@@ -681,6 +682,7 @@ class _RDTProducerServer:
 
         Raises:
             ValueError: ``seq`` was not supplied.
+
         """
         needed = sorted({n for n, _ in specs})
         if self._served_names is not None:
@@ -1023,6 +1025,7 @@ class ShardedRDTTrainerWeightTransferEngine(
 
         Raises:
             RuntimeError: called before ``trainer_init`` cached the server names.
+
         """
         if self._server_names is None:
             raise RuntimeError(

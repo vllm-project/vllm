@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Whenever you add an architecture to this page, please also update
+"""Whenever you add an architecture to this page, please also update
 `tests/models/registry.py` with example HuggingFace models for it.
 """
 
@@ -634,6 +633,7 @@ _SPECULATIVE_DECODING_MODELS = {
     "EagleLlama4ForCausalLM": ("llama4_eagle", "EagleLlama4ForCausalLM"),
     "EagleMiniCPMForCausalLM": ("minicpm_eagle", "EagleMiniCPMForCausalLM"),
     "DFlashDraftModel": ("qwen3_dflash", "DFlashQwen3ForCausalLM"),
+    "LiLiCorrDraftModel": ("lilicorr", "LiLiCorrForCausalLM"),
     "DFlash2DraftModel": ("qwen3_dflash2", "DFlash2Qwen3ForCausalLM"),
     # Muse Glimmer's DFlash draft head, reusing the generic qwen3_dflash
     # implementation. EAGLEConfig rewrites a dflash draft's architecture to
@@ -928,9 +928,7 @@ class _BaseRegisteredModel(ABC):
 
 @dataclass(frozen=True)
 class _RegisteredModel(_BaseRegisteredModel):
-    """
-    Represents a model that has already been imported in the main process.
-    """
+    """Represents a model that has already been imported in the main process."""
 
     interfaces: _ModelInfo
     model_cls: type[nn.Module]
@@ -951,9 +949,7 @@ class _RegisteredModel(_BaseRegisteredModel):
 
 @dataclass(frozen=True)
 class _LazyRegisteredModel(_BaseRegisteredModel):
-    """
-    Represents a model that has not been imported in the main process.
-    """
+    """Represents a model that has not been imported in the main process."""
 
     module_name: str
     class_name: str
@@ -1018,7 +1014,7 @@ class _LazyRegisteredModel(_BaseRegisteredModel):
             return None
 
     def _save_modelinfo_to_cache(self, mi: _ModelInfo, module_hash: str) -> None:
-        """save dictionary json file to cache"""
+        """Save dictionary json file to cache."""
         from vllm.model_executor.model_loader.weight_utils import atomic_writer
 
         try:
@@ -1128,8 +1124,7 @@ class _ModelRegistry:
         model_arch: str,
         model_cls: type[nn.Module] | str,
     ) -> None:
-        """
-        Register an external model to be used in vLLM.
+        """Register an external model to be used in vLLM.
 
         `model_cls` can be either:
 

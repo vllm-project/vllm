@@ -23,6 +23,10 @@ METRIC_SOURCE_FILES = [
         "path": "vllm/distributed/kv_transfer/kv_connector/v1/nixl/stats.py",
         "key": "metrics-nixl",
     },
+    {
+        "path": "vllm/v1/simple_kv_offload/metrics.py",
+        "key": "metrics-simple-kv-offload",
+    },
     {"path": "vllm/v1/metrics/perf.py", "key": "metrics-mfu"},
 ]
 

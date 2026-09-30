@@ -83,7 +83,7 @@ To build the `vllm-rs` in isolation:
 
 ```bash
 # from the local checkout
-./build_rust.sh
+./tools/build_rust.sh
 ```
 
 ### Engine-free renderer

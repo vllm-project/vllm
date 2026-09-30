@@ -7,6 +7,7 @@ import pytest
 import torch
 from torch import nn
 
+from vllm.config import ParallelConfig
 from vllm.model_executor.models.utils import WeightsMapper
 from vllm.platforms import current_platform
 
@@ -15,129 +16,130 @@ pytestmark = pytest.mark.skipif(
 )
 
 
-def _preshuffled_fp8_linear(
-    holder: str = "quant_method", weight_shape: tuple[int, int] = (256, 128)
-) -> nn.Module:
-    pytest.importorskip("aiter")
-    from vllm.model_executor.kernels.linear.scaled_mm.aiter import (
-        AiterPreshuffledFp8BlockScaledMMKernel,
-    )
-    from vllm.model_executor.kernels.linear.scaled_mm.ScaledMMLinearKernel import (
-        FP8ScaledMMLinearLayerConfig,
-    )
-    from vllm.model_executor.layers.quantization.utils.quant_utils import (
-        kFp8Dynamic128Sym,
-        kFp8Static128BlockSym,
-    )
-
-    config = FP8ScaledMMLinearLayerConfig(
-        weight_quant_key=kFp8Static128BlockSym,
-        activation_quant_key=kFp8Dynamic128Sym,
-        input_dtype=torch.bfloat16,
-        out_dtype=torch.bfloat16,
-        weight_shape=weight_shape,
-    )
-    layer = nn.Module()
-    layer.weight = nn.Parameter(
-        torch.randn(*weight_shape, device="cuda").to(current_platform.fp8_dtype()),
-        requires_grad=False,
-    )
-    layer.register_parameter(
-        "weight_scale" if holder == "scheme" else "weight_scale_inv",
-        nn.Parameter(
-            torch.ones(*(dim // 128 for dim in weight_shape), device="cuda"),
-            requires_grad=False,
-        ),
-    )
-    setattr(
-        layer,
-        holder,
-        SimpleNamespace(fp8_linear=AiterPreshuffledFp8BlockScaledMMKernel(config)),
-    )
-    return layer
-
-
-@pytest.mark.parametrize("holder", ["quant_method", "scheme"])
-def test_rocm_wo_a_keeps_row_major_weights(holder: str, default_vllm_config) -> None:
-    from vllm.v1.attention.ops.rocm_aiter_mla_sparse import _get_cached_wo_a_bf16
-
-    layer = _preshuffled_fp8_linear(holder)
-    layer.is_bmm = True
-    original = layer.weight.detach().clone()
-    kernel = getattr(layer, holder).fp8_linear
-    kernel.process_weights_after_loading(layer)
-
-    actual = _get_cached_wo_a_bf16(layer, 2, 128, 128)
-    torch.testing.assert_close(actual, original.to(torch.bfloat16).view(2, 128, 128))
-
-
-@pytest.mark.parametrize("holder", ["quant_method", "scheme"])
-def test_rocm_gateup_shuffles_once_and_down_proj_keeps_preshuffled_backend(
-    holder: str, monkeypatch: pytest.MonkeyPatch, default_vllm_config
+@pytest.mark.parametrize("hash_routing", [False, True], ids=["regular", "hash"])
+@pytest.mark.parametrize("vision", [False, True], ids=["text", "vision"])
+@torch.inference_mode()
+def test_rocm_moe_routing_and_shared_experts_match_reference(
+    hash_routing, vision, monkeypatch, default_vllm_config, dist_init
 ) -> None:
-    from vllm._aiter_ops import rocm_aiter_ops
-    from vllm.models.deepseek_v4.amd import model as rocm_model
-
-    gate_up, down = _preshuffled_fp8_linear(holder), _preshuffled_fp8_linear(holder)
-    original_gate_up = gate_up.weight.detach().clone()
-    original_down = down.weight.detach().clone()
-    monkeypatch.setattr(
-        rocm_model, "MergedColumnParallelLinear", lambda *a, **k: gate_up
+    """AMD V4 routing, clamped experts and shared output agree with PyTorch."""
+    from vllm.forward_context import set_forward_context
+    from vllm.models.deepseek_v4.amd.model import DeepseekV4MoE
+    from vllm.models.deepseek_v4.common.mm_preprocess import IMAGE_SENTINEL_BASE_ID
+    from vllm.utils.torch_utils import set_default_torch_dtype
+    from vllm.v1.worker.workspace import (
+        init_workspace_manager,
+        is_workspace_manager_initialized,
     )
-    monkeypatch.setattr(rocm_model, "RowParallelLinear", lambda *a, **k: down)
-    monkeypatch.setattr(rocm_aiter_ops, "is_enabled", lambda: True)
-    model = rocm_model.DeepseekV4MLP(128, 128, "silu")
-    for linear in (gate_up, down):
-        getattr(linear, holder).fp8_linear.process_weights_after_loading(linear)
-    model.prepare_gateup_preshuffle()
 
-    for linear, original in ((gate_up, original_gate_up), (down, original_down)):
-        expected = rocm_aiter_ops.shuffle_weight(original, layout=(16, 16))
-        torch.testing.assert_close(
-            linear.weight.view(torch.uint8), expected.view(torch.uint8)
+    monkeypatch.setenv("VLLM_ROCM_USE_AITER_MOE", "0")
+    monkeypatch.setenv("VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS", "0")
+    default_vllm_config.kernel_config.moe_backend = "triton"
+    config = SimpleNamespace(
+        hidden_size=512,
+        n_routed_experts=8,
+        num_experts_per_tok=2,
+        moe_intermediate_size=512,
+        swiglu_limit=0.05,
+        norm_topk_prob=True,
+        scoring_func="sqrtsoftplus",
+        routed_scaling_factor=1.5,
+        num_hash_layers=int(hash_routing),
+        vocab_size=IMAGE_SENTINEL_BASE_ID + 8,
+        topk_method="noaux_tc",
+        vision_n_layers=int(vision),
+        n_shared_experts=1,
+        hidden_act="silu",
+    )
+    torch.manual_seed(42)
+    with torch.device("cuda"), set_default_torch_dtype(torch.bfloat16):
+        moe = DeepseekV4MoE(
+            SimpleNamespace(
+                model_config=SimpleNamespace(hf_config=config),
+                quant_config=None,
+                parallel_config=ParallelConfig(),
+            ),
+            prefix="model.layers.0.ffn",
         )
+        for parameter in moe.parameters():
+            if parameter.is_floating_point():
+                parameter.normal_(std=0.04)
+        hidden = torch.randn(17, config.hidden_size) * 0.1
+        input_ids = torch.arange(17, dtype=torch.int32)
+        if vision:
+            # Include both ends of the five-token sentinel interval and the
+            # first ordinary token above it.
+            input_ids[1:4] = torch.tensor(
+                [
+                    IMAGE_SENTINEL_BASE_ID,
+                    IMAGE_SENTINEL_BASE_ID + 4,
+                    IMAGE_SENTINEL_BASE_ID + 5,
+                ],
+                dtype=torch.int32,
+            )
+        if moe.gate.tid2eid is not None:
+            rows = torch.arange(config.vocab_size)
+            moe.gate.tid2eid.copy_(torch.stack((rows % 8, (rows + 3) % 8), dim=1))
+        if moe.gate.e_score_correction_bias is not None:
+            moe.gate.e_score_correction_bias.copy_(torch.arange(8) * 0.1)
+        if moe.gate.bias_vl is not None:
+            moe.gate.bias_vl.copy_(torch.arange(8) * -0.1)
 
+    scores = torch.nn.functional.softplus(
+        hidden.float() @ moe.gate.weight.float().T
+    ).sqrt()
+    bias = moe.gate.e_score_correction_bias
+    selection_scores = scores if bias is None else scores + bias
+    expected_ids = selection_scores.topk(2, dim=-1).indices
+    if hash_routing:
+        expected_ids = moe.gate.tid2eid[input_ids.long()].long()
+    if vision:
+        image_mask = (input_ids >= IMAGE_SENTINEL_BASE_ID) & (
+            input_ids < IMAGE_SENTINEL_BASE_ID + 5
+        )
+        expected_ids[image_mask] = (
+            (scores + moe.gate.bias_vl).topk(2, dim=-1).indices[image_mask]
+        )
+    expected_weights = scores.gather(1, expected_ids)
+    expected_weights *= config.routed_scaling_factor / expected_weights.sum(
+        dim=-1, keepdim=True
+    )
+    router_logits, _ = moe.gate(hidden)
+    weights, ids = moe.experts.router.select_experts(
+        hidden, router_logits, topk_indices_dtype=torch.int32, input_ids=input_ids
+    )
+    torch.testing.assert_close(ids.long(), expected_ids)
+    torch.testing.assert_close(weights, expected_weights, rtol=1e-5, atol=1e-6)
 
-def test_rocm_fused_qkv_quant_matches_preshuffled_gemm_scale_layout(
-    monkeypatch: pytest.MonkeyPatch, default_vllm_config
-) -> None:
-    from vllm._aiter_ops import rocm_aiter_ops
-    from vllm.models.deepseek_v4.amd.rocm import (
-        DeepseekV4ROCMAiterMLAAttention,
-        apply_pre_quantized_block_scaled_mm,
-    )
+    def expert_reference(x, gate_up_weight, down_weight):
+        gate, up = (
+            torch.nn.functional.linear(x, gate_up_weight).float().chunk(2, dim=-1)
+        )
+        gate = gate.clamp(max=config.swiglu_limit)
+        up = up.clamp(-config.swiglu_limit, config.swiglu_limit)
+        activated = (torch.nn.functional.silu(gate) * up).to(x.dtype)
+        return torch.nn.functional.linear(activated, down_weight).float()
 
-    if not rocm_aiter_ops.is_blockscale_bpreshuffle_tuned(1024, 256):
-        pytest.skip("Requires a tuned AITER preshuffled FP8 GEMM")
-    linear = _preshuffled_fp8_linear(weight_shape=(1024, 256))
-    original = linear.weight.detach().clone()
-    linear.quant_method.fp8_linear.process_weights_after_loading(linear)
-    attention = DeepseekV4ROCMAiterMLAAttention.__new__(DeepseekV4ROCMAiterMLAAttention)
-    nn.Module.__init__(attention)
-    attention.wq_b = linear
-    attention.indexer = None
-    attention.q_lora_rank, attention.head_dim = 256, 128
-    attention.eps = 1e-5
-    attention.q_norm = SimpleNamespace(
-        weight=torch.ones(256, dtype=torch.bfloat16, device="cuda")
+    routed = moe.experts.routed_experts
+    expected = torch.zeros_like(hidden, dtype=torch.float32)
+    for expert_id in range(config.n_routed_experts):
+        token, slot = torch.where(expected_ids == expert_id)
+        expected[token] += (
+            expert_reference(
+                hidden[token], routed.w13_weight[expert_id], routed.w2_weight[expert_id]
+            )
+            * expected_weights[token, slot, None]
+        )
+    shared = moe.shared_experts
+    expected += expert_reference(
+        hidden, shared.gate_up_proj.weight, shared.down_proj.weight
     )
-    attention.kv_norm = SimpleNamespace(
-        weight=torch.ones(128, dtype=torch.bfloat16, device="cuda")
-    )
-    monkeypatch.setattr(rocm_aiter_ops, "is_linear_fp8_enabled", lambda: True)
-    # Multiple rows and groups with different ranges expose byte-order errors.
-    inputs = torch.randn(16, 384, dtype=torch.bfloat16, device="cuda")
-    inputs[:, :128] *= 4
-    quantized, scales, _ = attention._split_qkv_and_norm(inputs)
-    assert scales is not None
-    output = apply_pre_quantized_block_scaled_mm(linear, quantized, scales)
-    q = inputs[:, :256].float()
-    normalized = q * torch.rsqrt(q.square().mean(dim=-1, keepdim=True) + attention.eps)
-    reference_scales = normalized.view(16, 2, 128).abs().amax(dim=-1)
-    reference_scales /= torch.finfo(current_platform.fp8_dtype()).max
-    dequantized = quantized.float() * reference_scales.repeat_interleave(128, dim=1)
-    expected = dequantized @ original.float().T
-    torch.testing.assert_close(output.float(), expected, atol=0.125, rtol=0.01)
+    moe.experts._quant_method.process_weights_after_loading(routed)
+    if not is_workspace_manager_initialized():
+        init_workspace_manager(torch.device("cuda:0"))
+    with set_forward_context(None, default_vllm_config, num_tokens=hidden.shape[0]):
+        actual = moe(hidden, input_ids)
+    torch.testing.assert_close(actual.float(), expected, rtol=0.02, atol=5e-5)
 
 
 def test_rocm_packed_kv_cache_auto_uses_ds_mla_layout() -> None:
@@ -225,7 +227,9 @@ def test_rocm_moe_wires_vision_routing_on_hash_and_regular_layers(
         n_shared_experts=None,
     )
     vllm_config = SimpleNamespace(
-        model_config=SimpleNamespace(hf_config=config), quant_config=None
+        model_config=SimpleNamespace(hf_config=config),
+        quant_config=None,
+        parallel_config=ParallelConfig(),
     )
 
     hash_moe = rocm_model.DeepseekV4MoE(vllm_config, prefix="model.layers.0.ffn")
@@ -238,6 +242,24 @@ def test_rocm_moe_wires_vision_routing_on_hash_and_regular_layers(
         assert moe.gate.bias_vl is not None
         assert factory_kwargs["bias_vl"] is moe.gate.bias_vl
         assert factory_kwargs["image_sentinel_lo"] == IMAGE_SENTINEL_BASE_ID
+
+
+def test_rocm_fse_rejects_data_parallel_deployment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from vllm.models.deepseek_v4.amd.model import _fuse_shared_experts_enabled
+
+    config = SimpleNamespace(n_shared_experts=1)
+
+    monkeypatch.setenv("VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS", "1")
+    with pytest.raises(ValueError, match="data parallelism"):
+        _fuse_shared_experts_enabled(config, ParallelConfig(data_parallel_size=2))
+
+    # Expert parallelism already disables FSE: no raise, FSE stays off.
+    assert not _fuse_shared_experts_enabled(
+        config, ParallelConfig(data_parallel_size=2, enable_expert_parallel=True)
+    )
+    assert _fuse_shared_experts_enabled(config, ParallelConfig())
 
 
 def test_rocm_mtp_forwards_input_ids_for_vision_routing(

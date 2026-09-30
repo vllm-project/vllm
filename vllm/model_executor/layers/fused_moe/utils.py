@@ -69,6 +69,7 @@ def resolve_layer_fused_shared_expert(
 
     Raises:
         ValueError: If requested shared-expert fusion is quantization-incompatible.
+
     """
     # NOTE: is_fusion_moe_shared_experts_enabled is decorated with @if_aiter_supported
     # that returns None if AITER is not available.
@@ -164,20 +165,19 @@ def _count_expert_num_tokens(
 def count_expert_num_tokens(
     topk_ids: torch.Tensor, num_local_experts: int, expert_map: torch.Tensor | None
 ) -> torch.Tensor:
-    """
-    Count the number to tokens assigned to each expert.
+    """Count the number to tokens assigned to each expert.
 
-    Parameters:
-    - topk_ids (torch.Tensor): Tensor mapping each token to its
-    list of experts.
-    - num_local_experts (int): Number of experts in this rank.
-    - expert_map (Optional[torch.Tensor]):  A tensor mapping expert indices
-    from the global expert space to the local expert space of the expert
-    parallel shard.
+    Args:
+        topk_ids (torch.Tensor): Tensor mapping each token to its list of experts.
+        num_local_experts (int): Number of experts in this rank.
+        expert_map (Optional[torch.Tensor]):  A tensor mapping expert indices
+            from the global expert space to the local expert space of the expert
+            parallel shard.
 
     Returns:
     A tensor of size num_local_experts, where tensor[i] holds the number
     of tokens assigned to the ith expert.
+
     """
     assert topk_ids.dtype.is_signed, "The kernel uses -1 to represent invalid topk_ids"
     expert_num_tokens = torch.empty(
@@ -202,8 +202,7 @@ def count_expert_num_tokens(
 
 
 def _resize_cache(x: torch.Tensor, v: tuple[int, ...]) -> torch.Tensor:
-    """
-    Shrink the given tensor and apply the given view to it.  This is
+    """Shrink the given tensor and apply the given view to it.  This is
     used to resize the intermediate fused_moe caches.
     """
     assert prod(v) <= x.numel(), (
@@ -226,8 +225,7 @@ def _fp8_quantize(
     per_act_token: bool,
     block_shape: list[int] | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """
-    Perform fp8 quantization on the inputs.  If a block_shape
+    """Perform fp8 quantization on the inputs.  If a block_shape
     is provided, the output will be blocked.
     """
     if block_shape is None:
@@ -252,11 +250,9 @@ def _int8_quantize(
     per_act_token: bool,
     block_shape: list[int] | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """
-    Perform int8 quantization on the inputs.  If a block_shape
+    """Perform int8 quantization on the inputs.  If a block_shape
     is provided, the output will be blocked.
     """
-
     # If weights are per-channel (per_channel_quant=True), then
     # activations apply per-token quantization. Otherwise, assume
     # activation tensor-wise fp8/int8 quantization, dynamic or static
@@ -455,35 +451,6 @@ def normalize_batched_scales_shape(
             scales = scales.view(num_experts, -1, scales.size(-1))
 
     return scales
-
-
-@triton.jit
-def _pack_topk_ids_weights_kernel(
-    topk_ids_ptr,
-    topk_weights_ptr,
-    output_ptr,
-    n_elements,
-    BLOCK_SIZE: tl.constexpr,
-    USE_GDC: tl.constexpr,
-    launch_pdl: tl.constexpr,  # triton metadata
-):
-    pid = tl.program_id(axis=0)
-    offsets = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
-    mask = offsets < n_elements
-    if USE_GDC:
-        tl.extra.cuda.gdc_launch_dependents()
-        tl.extra.cuda.gdc_wait()
-    expert_id = tl.load(topk_ids_ptr + offsets, mask=mask, other=0).to(tl.int32)
-    expert_id_shifted = expert_id << 16
-
-    weight = tl.load(topk_weights_ptr + offsets, mask=mask, other=0.0)
-    weight_bf16 = weight.to(tl.bfloat16)
-    weight_int16 = weight_bf16.to(tl.int16, bitcast=True)
-
-    weight_int32 = weight_int16.to(tl.int32) & 0xFFFF
-
-    packed = expert_id_shifted | weight_int32
-    tl.store(output_ptr + offsets, packed, mask=mask)
 
 
 def fi_moe_largest_bucket(moe_config: "FusedMoEConfig") -> int:

@@ -473,6 +473,20 @@ def _conv_inputs(total_tokens: int):
     return x, weight, bias
 
 
+def _conv_states(
+    num_slots: int,
+    state_len: int,
+    dim: int = CONV_DIM,
+    layout: str = "SD",
+) -> torch.Tensor:
+    if layout == "SD":
+        return torch.zeros(num_slots, state_len, dim, dtype=torch.bfloat16).transpose(
+            1, 2
+        )
+    assert layout == "DS"
+    return torch.zeros(num_slots, dim, state_len, dtype=torch.bfloat16)
+
+
 def _sd_conv_states(
     num_slots: int, state_len: int, dim: int = CONV_DIM
 ) -> torch.Tensor:
@@ -482,6 +496,39 @@ def _sd_conv_states(
 
 def _maybe_pack_conv_weight(weight: torch.Tensor, is_vnni: bool) -> torch.Tensor:
     return ops.causal_conv1d_weight_pack(weight) if is_vnni else weight
+
+
+@torch.inference_mode()
+def test_causal_conv1d_update_cpu_preserves_sd_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """SD state and indices reach the native operator unchanged."""
+    num_slots = 2
+    state_len = CONV_KERNEL - 1
+    conv_state = _sd_conv_states(num_slots, state_len)
+    state_indices = torch.tensor([1], dtype=torch.int32)
+    x = torch.zeros(1, CONV_DIM, dtype=torch.bfloat16)
+    recorded = {}
+
+    def record_update(**kwargs):
+        recorded.update(kwargs)
+        return x
+
+    monkeypatch.setattr(gdn_attention, "is_conv_state_dim_first", lambda: False)
+    monkeypatch.setattr(gdn_attention.ops, "causal_conv1d_update_cpu", record_update)
+    out = gdn_attention._causal_conv1d_update_cpu(
+        x=x,
+        conv_states=conv_state,
+        weight=torch.zeros(CONV_DIM, CONV_KERNEL, dtype=torch.bfloat16),
+        bias=None,
+        silu_activation=False,
+        conv_state_indices=state_indices,
+        is_vnni=False,
+    )
+
+    assert out is x
+    assert recorded["conv_states"] is conv_state
+    assert recorded["conv_state_indices"] is state_indices
 
 
 @torch.inference_mode()
@@ -1024,7 +1071,18 @@ def test_batch_memcpy_cpu_fallback() -> None:
     copy each src into its dst, validating the (src_ptrs, dst_ptrs, sizes)
     argument order against ctypes.memmove(dst, src, size).
     """
-    from vllm.utils.cpu_triton_utils import batch_memcpy_kernel
+    from vllm.triton_utils.dispatcher import (
+        KernelOverride,
+        register_kernels,
+    )
+    from vllm.utils.cpu_triton_utils import _batch_memcpy_impl
+
+    register_kernels(
+        {"vllm.v1.worker.mamba_utils.batch_memcpy_kernel": _batch_memcpy_impl}
+    )
+    from vllm.v1.worker.mamba_utils import batch_memcpy_kernel
+
+    assert isinstance(batch_memcpy_kernel, KernelOverride)
 
     # Varied byte sizes, including a non-power-of-two run.
     sizes_bytes = [256, 1024, 17 * 4, 4096]
@@ -1121,6 +1179,145 @@ def _run_prefill_cpp(x, weight, bias, seq_lens, is_vnni=False):
         is_vnni=is_vnni,
     )
     return out.transpose(0, 1).contiguous(), conv_state
+
+
+def _python_native_fwd(**kwargs):
+    from vllm.model_executor.layers.mamba.ops.cpu.causal_conv1d import (
+        causal_conv1d_fn_cpu,
+    )
+
+    return causal_conv1d_fn_cpu(
+        x=kwargs["x"],
+        weight=kwargs["weight"],
+        bias=kwargs["bias"],
+        conv_states=kwargs["conv_states"],
+        query_start_loc=kwargs["query_start_loc"],
+        cache_indices=kwargs["cache_indices"],
+        has_initial_state=kwargs["has_initial_state"],
+        activation=kwargs["silu_activation"],
+    )
+
+
+@torch.inference_mode()
+def test_causal_conv1d_fwd_cpu_ds_adapter_varlen_mixed_initial_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    dim = 8
+    seq_lens = [2, 3]
+    state_len = _STATE_LEN
+    state_indices = torch.tensor([2, 0], dtype=torch.int32)
+    query_start_loc = torch.tensor([0, 2, 5], dtype=torch.int32)
+    has_initial_state = torch.tensor([False, True])
+    x_tokens, weight, bias = _conv_inputs(sum(seq_lens))
+    x_tokens = x_tokens[:, :dim]
+    weight = weight[:dim]
+    bias = bias[:dim]
+    x = x_tokens.transpose(0, 1).contiguous()
+    logical_state = (
+        torch.arange(3 * dim * state_len, dtype=torch.float32)
+        .view(3, dim, state_len)
+        .to(torch.bfloat16)
+    )
+    state_sd = _conv_states(3, state_len, dim, "SD")
+    state_ds = _conv_states(3, state_len, dim, "DS")
+    state_sd.copy_(logical_state)
+    state_ds.copy_(logical_state)
+    recorded = []
+
+    def record_fwd(**kwargs):
+        recorded.append(
+            (
+                kwargs["conv_states"].shape,
+                kwargs["conv_states"].stride(),
+                kwargs["cache_indices"].clone(),
+            )
+        )
+        return _python_native_fwd(**kwargs)
+
+    monkeypatch.setattr(gdn_attention.ops, "causal_conv1d_fwd_cpu", record_fwd)
+    monkeypatch.setattr(gdn_attention, "is_conv_state_dim_first", lambda: False)
+    out_sd = gdn_attention._causal_conv1d_fwd_cpu(
+        x=x,
+        weight=weight,
+        bias=bias,
+        conv_states=state_sd,
+        query_start_loc=query_start_loc,
+        cache_indices=state_indices,
+        has_initial_state=has_initial_state,
+        silu_activation=True,
+        is_vnni=False,
+    )
+    monkeypatch.setattr(gdn_attention, "is_conv_state_dim_first", lambda: True)
+    out_ds = gdn_attention._causal_conv1d_fwd_cpu(
+        x=x,
+        weight=weight,
+        bias=bias,
+        conv_states=state_ds,
+        query_start_loc=query_start_loc,
+        cache_indices=state_indices,
+        has_initial_state=has_initial_state,
+        silu_activation=True,
+        is_vnni=False,
+    )
+
+    torch.testing.assert_close(out_ds, out_sd)
+    torch.testing.assert_close(state_ds, state_sd)
+    assert recorded[0][2].equal(state_indices)
+    assert recorded[1][0] == (2, dim, state_len)
+    assert recorded[1][1] == (dim * state_len, 1, dim)
+    assert recorded[1][2].equal(torch.arange(2, dtype=torch.int32))
+
+
+@torch.inference_mode()
+def test_causal_conv1d_update_cpu_ds_adapter_wide_multi_token_copyback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    dim = 8
+    seq_len = 4
+    state_len = seq_len + 5
+    state = _conv_states(4, state_len, dim, "DS")
+    state.copy_(
+        torch.arange(state.numel(), dtype=torch.float32).view_as(state).to(state.dtype)
+    )
+    original_state = state.clone()
+    state_indices = torch.tensor([3, 1, 0], dtype=torch.int32)
+    num_accepted_tokens = torch.tensor([1, 4, 2], dtype=torch.int32)
+    mutated_scratch = torch.arange(
+        state_indices.numel() * dim * state_len, dtype=torch.float32
+    ).view(state_indices.numel(), dim, state_len)
+    mutated_scratch = (mutated_scratch + 200).to(state.dtype)
+    recorded = {}
+
+    def mutate_update(**kwargs):
+        recorded.update(kwargs)
+        kwargs["conv_states"].copy_(mutated_scratch)
+        return torch.zeros_like(kwargs["x"])
+
+    monkeypatch.setattr(gdn_attention, "is_conv_state_dim_first", lambda: True)
+    monkeypatch.setattr(gdn_attention.ops, "causal_conv1d_update_cpu", mutate_update)
+    gdn_attention._causal_conv1d_update_cpu(
+        x=torch.zeros(state_indices.numel(), seq_len, dim, dtype=state.dtype),
+        conv_states=state,
+        weight=torch.zeros(dim, CONV_KERNEL, dtype=state.dtype),
+        bias=None,
+        silu_activation=False,
+        conv_state_indices=state_indices,
+        is_vnni=False,
+        num_accepted_tokens=num_accepted_tokens,
+    )
+
+    expected_state = original_state.clone()
+    expected_state.index_copy_(0, state_indices.to(torch.long), mutated_scratch)
+    torch.testing.assert_close(state, expected_state)
+    torch.testing.assert_close(
+        state.index_select(0, state_indices)[:, :, _STATE_LEN:],
+        mutated_scratch[:, :, _STATE_LEN:],
+    )
+    torch.testing.assert_close(
+        recorded["conv_state_indices"],
+        torch.arange(state_indices.numel(), dtype=torch.int32),
+    )
+    torch.testing.assert_close(recorded["num_accepted_tokens"], num_accepted_tokens)
 
 
 @pytest.mark.skipif(

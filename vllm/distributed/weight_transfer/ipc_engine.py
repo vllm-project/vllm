@@ -121,8 +121,7 @@ class IPCWeightTransferUpdateInfo(WeightTransferUpdateInfo):
 class IPCWeightTransferEngine(
     WeightTransferEngine[IPCWeightTransferInitInfo, IPCWeightTransferUpdateInfo]
 ):
-    """
-    Weight transfer engine using CUDA IPC for communication between trainer and workers.
+    """Weight transfer engine using CUDA IPC between trainer and workers.
 
     This implementation uses CUDA IPC to transfer weights from the trainer (rank 0)
     to all inference workers in a process group. IPC handles are used to share
@@ -149,13 +148,13 @@ class IPCWeightTransferEngine(
         self._packed_importer = PackedBufferImporter()
 
     def init_transfer_engine(self, init_info: IPCWeightTransferInitInfo) -> None:
-        """
-        Initialize the weight transfer mechanism. No data-plane rendezvous is
+        """Initialize the weight transfer mechanism. No data-plane rendezvous is
         needed for IPC; this just records the trainer-supplied wire params so the
         worker decodes exactly as the trainer encoded.
 
         Args:
             init_info: IPC initialization info (carries `packed`).
+
         """
         self.packed = init_info.packed
 
@@ -182,8 +181,7 @@ class IPCWeightTransferEngine(
         self._packed_importer.close()
 
     def receive_weights(self, update_info: IPCWeightTransferUpdateInfo) -> None:
-        """
-        Receive weights from the trainer via CUDA IPC handles and load them.
+        """Receive weights from the trainer via CUDA IPC handles and load them.
 
         Whether the transfer is packed is read from `self.packed`, set at the
         init handshake from the trainer's init info, so it is guaranteed to
@@ -193,6 +191,7 @@ class IPCWeightTransferEngine(
             update_info: IPC update info containing parameter names, dtypes, shapes,
                         and IPC handles. Each IPC handle is a mapping between physical
                         GPU UUID and the rebuild_cuda_tensor args tuple.
+
         """
         # Use the worker's assigned device rather than the ambient current
         # device: the receive path is no longer wrapped in

@@ -24,7 +24,7 @@ from vllm.model_executor.layers.quantization.utils.nvfp4_emulation_utils import 
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     amax_for_moe_weight_quant,
-    kNvfp4Dynamic,
+    kNvfp4DynamicToken,
     kNvfp4Static,
     weight_amax,
 )
@@ -100,7 +100,7 @@ class Nvfp4OnlineMoEMethod(OnlineMoEMethodBase):
         self.nvfp4_backend, self.experts_cls = select_nvfp4_moe_backend(
             config=self.moe,
             weight_key=kNvfp4Static,
-            activation_key=kNvfp4Dynamic,
+            activation_key=kNvfp4DynamicToken,
         )
 
     def process_weights_after_loading(self, layer: Module) -> None:
@@ -178,6 +178,14 @@ class Nvfp4OnlineMoEMethod(OnlineMoEMethodBase):
                 routing_tables=layer._expert_routing_tables(),
                 per_token_activation=True,
             )
+        else:
+            # Reload creates new scale tensors; derived kernel scales must use
+            # their new values before layerwise reload restores captured storage.
+            assert self.moe_quant_config is not None
+            assert self.moe_quant_config.g1_alphas is not None
+            assert self.moe_quant_config.g2_alphas is not None
+            self.moe_quant_config.g1_alphas.copy_(w13_scale_2)
+            self.moe_quant_config.g2_alphas.copy_(w2_scale_2)
 
         self.moe_kernel.fused_experts.process_weights_after_loading(layer)
 

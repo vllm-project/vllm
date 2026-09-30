@@ -95,12 +95,10 @@ fn utility_response(
         "get_supported_tasks" => utility_envelope(vec!["generate"]),
         "is_sleeping" => utility_envelope(false),
         "reset_prefix_cache" => utility_envelope(true),
-        "reset_mm_cache"
-        | "reset_encoder_cache"
-        | "profile"
-        | "sleep"
-        | "wake_up"
-        | "execute_dummy_batch" => utility_envelope(()),
+        "wake_up" => utility_envelope(true),
+        "reset_mm_cache" | "reset_encoder_cache" | "profile" | "sleep" | "execute_dummy_batch" => {
+            utility_envelope(())
+        }
         _ => utility_envelope(Value::Nil),
     }?;
 

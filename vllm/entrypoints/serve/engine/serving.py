@@ -41,6 +41,9 @@ class BaseServing:
         self,
         request: AnyRequest | AnyPoolingRequest,
     ) -> ErrorResponse | None:
+        if self.request_logger is not None:
+            self.request_logger.log_request_body(request)
+
         error_response = None
 
         if self._is_model_supported(request.model):
@@ -117,7 +120,7 @@ class BaseServing:
     def _base_request_id(
         raw_request: Request | None, default: str | None = None
     ) -> str | None:
-        """Pulls the request id to use from a header, if provided"""
+        """Pulls the request id to use from a header, if provided."""
         if raw_request is not None and (
             (req_id := raw_request.headers.get("X-Request-Id")) is not None
         ):

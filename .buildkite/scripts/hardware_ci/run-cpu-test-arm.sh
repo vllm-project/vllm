@@ -30,7 +30,7 @@ remove_docker_container
 docker pull "$IMAGE"
 
 # Run the image
-docker run -itd --cpuset-cpus="$CORE_RANGE" --entrypoint /bin/bash -v ~/.cache/huggingface:/root/.cache/huggingface -e HF_TOKEN --env VLLM_CPU_KVCACHE_SPACE=16 --env VLLM_CPU_CI_ENV=1 -e E2E_OMP_THREADS="$OMP_CORE_RANGE" --shm-size=4g --name "$CONTAINER_NAME" "$IMAGE"
+docker run -itd --cpuset-cpus="$CORE_RANGE" --entrypoint /bin/bash -v ~/.cache/huggingface:/root/.cache/huggingface -e HF_TOKEN --env VLLM_CPU_KVCACHE_SPACE=16 --env VLLM_CPU_CI_ENV=1 -e E2E_OMP_THREADS="$OMP_CORE_RANGE" -e TERM=xterm-256color -e PY_COLORS=1 -e FORCE_COLOR=1 -e CLICOLOR_FORCE=1 --shm-size=4g --name "$CONTAINER_NAME" "$IMAGE"
 
 print_packages() {
   docker exec "$CONTAINER_NAME" bash -c "

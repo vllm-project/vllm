@@ -179,6 +179,63 @@ def test_mamba_retirement_bounds_prefill_states(block_size, in_flight_chunks):
     assert pool.get_num_free_blocks() == initial_free
 
 
+@pytest.mark.parametrize("block_size", [896, 1536])
+@pytest.mark.parametrize("num_speculative_blocks", [0, 1, 4])
+@pytest.mark.parametrize("prompt_tokens", [25121, 704547])
+def test_mamba_checkpoint_admission_matches_allocation(
+    block_size, num_speculative_blocks, prompt_tokens
+):
+    """Checkpoint admission must match the subsequent physical allocation."""
+    spec = MambaSpec(
+        block_size=block_size,
+        shapes=((1, 1),),
+        dtypes=(torch.float32,),
+        mamba_cache_mode="align",
+        num_speculative_blocks=num_speculative_blocks,
+        num_prefill_checkpoint_blocks=1,
+        prefill_checkpoint_alignment=64,
+    )
+    pool = BlockPool(
+        num_gpu_blocks=2048,
+        enable_caching=True,
+        hash_block_size=128,
+    )
+    manager = MambaManager(
+        spec,
+        block_pool=pool,
+        enable_caching=True,
+        kv_cache_group_id=0,
+        scheduler_block_size=block_size,
+    )
+    request_id = "prefill"
+    computed_tokens = 23040
+
+    def estimate(num_tokens, total_computed_tokens, apply_admission_cap):
+        return manager.get_num_blocks_to_allocate(
+            request_id=request_id,
+            num_tokens=num_tokens,
+            new_computed_blocks=[],
+            total_computed_tokens=total_computed_tokens,
+            num_local_computed_tokens=total_computed_tokens,
+            num_tokens_main_model=num_tokens,
+            apply_admission_cap=apply_admission_cap,
+        )
+
+    estimate(computed_tokens, 0, False)
+    manager.allocate_new_blocks(request_id, computed_tokens, computed_tokens)
+    assert request_id in manager._allocated_block_reqs
+
+    admission_estimate = estimate(prompt_tokens, computed_tokens, True)
+    allocation_estimate = estimate(prompt_tokens, computed_tokens, False)
+    assert request_id in manager._checkpoints
+
+    free_before = pool.get_num_free_blocks()
+    manager.allocate_new_blocks(request_id, prompt_tokens, prompt_tokens)
+    allocated = free_before - pool.get_num_free_blocks()
+
+    assert admission_estimate == allocation_estimate == allocated
+
+
 def get_sliding_window_manager(
     sliding_window_spec,
     block_pool,

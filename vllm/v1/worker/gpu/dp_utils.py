@@ -55,8 +55,7 @@ def sync_cudagraph_and_dp_padding(
     allow_ubatching: bool = False,
     uniform_decode: bool = False,
 ) -> tuple[BatchExecutionDescriptor, DPSyncState | None]:
-    """
-    Coordinates the batch descriptor and DP padding across all ranks.
+    """Coordinates the batch descriptor and DP padding across all ranks.
 
     `parallel_config` is only needed to decide whether to microbatch, so callers
     that never do (`allow_ubatching=False`) can leave it out.
@@ -244,10 +243,17 @@ def dispatch_cg_and_sync_dp(
         dp_size: Data-parallel world size. 1 skips all cross-rank work.
         dp_rank: This rank's index in the DP group.
         max_query_len: Upper bound on per-request query length, for selecting
-            varlen decode graphs. None means the graph must not constrain it.
+            varlen decode graphs. None, as for a batch with a prefill, keeps
+            the batch out of graphs that constrain it.
         need_eager: Force `CUDAGraphMode.NONE` instead of dispatching.
         num_active_loras: Active LoRA count for this rank. Does not need
             cross-rank agreement; it never changes a bucket's token count.
+        parallel_config: Only needed to decide whether to microbatch, so
+            callers that never do (`allow_ubatching=False`) can leave it out.
+        allow_ubatching: Whether this rank's batch may be split into
+            microbatches. Agreed across ranks before it takes effect.
+        uniform_decode: Whether this rank's batch is a uniform decode, used
+            to pick the microbatching split.
         dp_sync: Agreement from a prior dispatch over this same batch, to reuse.
             Must come from a batch with this same padded `num_tokens` and the
             same `uniform_token_count`; `num_reqs` may differ, as neither
@@ -257,6 +263,7 @@ def dispatch_cg_and_sync_dp(
     Returns:
         (batch_desc, sync), where `sync` is this batch's agreement for a later
         dispatch to reuse. It is None when `dp_size` is 1 or no rank has work.
+
     """
     reuse_eager = dp_sync is not None and dp_sync.eager
 

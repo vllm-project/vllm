@@ -106,6 +106,7 @@ impl Llm {
             prompt_len,
             max_tokens_param,
             1,
+            self.client.engine_stats_enabled(),
         );
         let guard = self.inflight.track(external_request_id, internal_request_id);
 

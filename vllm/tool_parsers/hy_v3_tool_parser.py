@@ -181,6 +181,7 @@ class HYV3ToolParser(ToolParser):
             "-3"   → int(-3)
 
         Return None on failure.
+
         """
         try:
             if "." in value or "e" in value or "E" in value:

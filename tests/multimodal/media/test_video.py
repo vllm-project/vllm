@@ -77,8 +77,7 @@ def test_video_media_io_kwargs(monkeypatch: pytest.MonkeyPatch):
 @pytest.mark.parametrize("is_color", [True, False])
 @pytest.mark.parametrize("fourcc, ext", [("mp4v", "mp4"), ("XVID", "avi")])
 def test_opencv_video_io_colorspace(tmp_path, is_color: bool, fourcc: str, ext: str):
-    """
-    Test all functions that use OpenCV for video I/O return RGB format.
+    """Test all functions that use OpenCV for video I/O return RGB format.
     Both RGB and grayscale videos are tested.
     """
     image_path = get_vllm_public_assets(
@@ -168,8 +167,7 @@ class TestVideoBackendOverride2(VideoLoader):
 
 
 def test_video_media_io_backend_kwarg_override(monkeypatch: pytest.MonkeyPatch):
-    """
-    Test that video_backend kwarg can override the VLLM_VIDEO_LOADER_BACKEND
+    """Test that video_backend kwarg can override the VLLM_VIDEO_LOADER_BACKEND
     environment variable.
 
     This allows users to dynamically select a different video backend
@@ -201,8 +199,7 @@ def test_video_media_io_backend_kwarg_override(monkeypatch: pytest.MonkeyPatch):
 def test_video_media_io_backend_kwarg_not_passed_to_loader(
     monkeypatch: pytest.MonkeyPatch,
 ):
-    """
-    Test that video_backend kwarg is consumed by VideoMediaIO and NOT passed
+    """Test that video_backend kwarg is consumed by VideoMediaIO and NOT passed
     through to the underlying video loader's load_bytes method.
 
     This ensures the kwarg is properly popped from kwargs before forwarding.
@@ -245,8 +242,7 @@ def test_video_media_io_backend_kwarg_not_passed_to_loader(
 
 
 def test_video_media_io_backend_env_var_fallback(monkeypatch: pytest.MonkeyPatch):
-    """
-    Test that when video_backend kwarg is None or not provided,
+    """Test that when video_backend kwarg is None or not provided,
     VideoMediaIO falls back to VLLM_VIDEO_LOADER_BACKEND env var.
     """
     with monkeypatch.context() as m:
@@ -285,7 +281,6 @@ def test_load_base64_jpeg_returns_metadata():
     metadata, which broke downstream consumers that rely on fields like
     total_num_frames and fps. See PR #37301.
     """
-
     num_test_frames = 3
 
     b64_frames = _make_jpeg_b64_frames(num_test_frames)

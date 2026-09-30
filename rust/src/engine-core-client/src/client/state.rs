@@ -67,25 +67,40 @@ struct EngineRoutingState {
     inflight: usize,
     /// The latest real scheduler snapshot received from this engine, if any.
     last_scheduler_stats: Option<EngineLoadSnapshot>,
+    /// Requests admitted since the last scheduler snapshot was received.
+    ///
+    /// Added to the snapshot so each admission raises the routing score before
+    /// the next snapshot arrives. Only tracked once a snapshot exists.
+    admitted_since_stats: usize,
 }
 
 impl EngineRoutingState {
     /// Compute the routing score used to pick the least-loaded engine.
     ///
-    /// Scheduler stats can raise the load estimate above the frontend-local
-    /// view, but they should not lower it below requests this frontend has
-    /// already admitted.
+    /// Scheduler stats, plus admissions not yet reflected in them, can raise
+    /// the load estimate above the frontend-local view, but they should not
+    /// lower it below requests this frontend has already admitted.
     fn routing_score(&self) -> usize {
         let Some(stats) = self.last_scheduler_stats else {
             return self.inflight;
         };
 
-        self.inflight.max(stats.running + stats.waiting)
+        self.inflight.max(stats.running + stats.waiting + self.admitted_since_stats)
     }
 
-    /// Replace the local routing view with a fresh real scheduler snapshot.
+    /// Record one request admitted to this engine.
+    fn record_admission(&mut self) {
+        self.inflight += 1;
+        if self.last_scheduler_stats.is_some() {
+            self.admitted_since_stats += 1;
+        }
+    }
+
+    /// Replace the local routing view with a fresh real scheduler snapshot,
+    /// resetting the admissions counted on top of the previous one.
     fn apply_scheduler_counts(&mut self, next: EngineLoadSnapshot) {
         self.last_scheduler_stats = Some(next);
+        self.admitted_since_stats = 0;
     }
 }
 
@@ -121,7 +136,7 @@ impl RequestRegistry {
     ///
     /// When `data_parallel_rank` is provided, the request is routed directly to
     /// the engine at that rank index, bypassing load balancing. Otherwise
-    /// the engine with the fewest in-flight requests is chosen.
+    /// the engine with the lowest routing score is chosen.
     pub fn register(
         &mut self,
         request_id: String,
@@ -154,7 +169,7 @@ impl RequestRegistry {
             .routing_per_engine
             .get_mut(&engine_id)
             .expect("request registry must track all known engines");
-        state.inflight += 1;
+        state.record_admission();
 
         Ok((engine_id, rx))
     }
@@ -736,6 +751,7 @@ mod tests {
         let state = EngineRoutingState {
             inflight: 3,
             last_scheduler_stats: None,
+            ..Default::default()
         };
 
         assert_eq!(state.routing_score(), 3);
@@ -749,6 +765,7 @@ mod tests {
                 waiting: 0,
                 running: 2,
             }),
+            ..Default::default()
         };
 
         assert_eq!(state.routing_score(), 7);
@@ -762,6 +779,7 @@ mod tests {
                 waiting: 3,
                 running: 2,
             }),
+            ..Default::default()
         };
 
         assert_eq!(state.routing_score(), 5);
@@ -793,6 +811,129 @@ mod tests {
 
         let (chosen, _) = registry.register("req-stats".to_string(), None, None).unwrap();
         assert_eq!(chosen, engine_1);
+    }
+
+    #[test]
+    fn registry_spreads_bursts_after_cancellation_before_stats_refresh() {
+        let mut distributions = Vec::new();
+        for counts in [[10, 12], [12, 12]] {
+            let mut registry = RequestRegistry::new(
+                &[0, 1].map(|rank| connected_engine(EngineId::from_engine_index(rank))),
+            );
+            let mut old_requests = Vec::new();
+            for (rank, running) in counts.into_iter().enumerate() {
+                for index in 0..running {
+                    let request_id = format!("old-{rank}-{index}");
+                    registry.register(request_id.clone(), None, Some(rank as u32)).unwrap();
+                    old_requests.push(request_id);
+                }
+                registry.apply_scheduler_counts(
+                    rank as u32,
+                    EngineLoadSnapshot {
+                        waiting: 0,
+                        running,
+                    },
+                );
+            }
+            drop(registry.abort_many(&old_requests, 0.0));
+
+            let mut distribution = [0; 2];
+            for index in 0..14 {
+                let (engine, _) = registry.register(format!("new-{index}"), None, None).unwrap();
+                distribution[engine.engine_index().unwrap() as usize] += 1;
+            }
+            distributions.push(distribution);
+        }
+        expect_test::expect!["[[8, 6], [7, 7]]"].assert_eq(&format!("{distributions:?}"));
+    }
+
+    #[test]
+    fn registry_preserves_tie_order_across_finished_requests_and_stats_refreshes() {
+        let ranks = [2, 5, 9];
+        let mut registry = RequestRegistry::new(
+            &ranks.map(|rank| connected_engine(EngineId::from_engine_index(rank))),
+        );
+        let mut chosen = Vec::new();
+        for index in 0..6 {
+            for rank in ranks {
+                registry.apply_scheduler_counts(
+                    u32::from(rank),
+                    EngineLoadSnapshot {
+                        waiting: 0,
+                        running: 0,
+                    },
+                );
+            }
+            let request_id = format!("req-{index}");
+            let (engine, _) = registry.register(request_id.clone(), None, None).unwrap();
+            chosen.push(engine.engine_index().unwrap());
+            drop(registry.finish_many(&[request_id]));
+        }
+        expect_test::expect!["[2, 2, 2, 2, 2, 2]"].assert_eq(&format!("{chosen:?}"));
+    }
+
+    #[test]
+    fn registry_refreshes_estimates_without_erasing_inflight() {
+        let mut registry = RequestRegistry::new(
+            &[0, 1].map(|rank| connected_engine(EngineId::from_engine_index(rank))),
+        );
+        let snapshot = EngineLoadSnapshot {
+            waiting: 0,
+            running: 10,
+        };
+        registry.apply_scheduler_counts(0, snapshot);
+        registry.apply_scheduler_counts(
+            1,
+            EngineLoadSnapshot {
+                waiting: 0,
+                running: 12,
+            },
+        );
+        for index in 0..4 {
+            registry.register(format!("pinned-{index}"), None, Some(0)).unwrap();
+        }
+
+        // Even unchanged counts replace the optimistic estimate for that engine.
+        registry.apply_scheduler_counts(0, snapshot);
+        let (after_refresh, _) = registry.register("after-refresh".into(), None, None).unwrap();
+        // An older, empty snapshot must not erase the five admitted requests.
+        for rank in [0, 1] {
+            registry.apply_scheduler_counts(
+                rank,
+                EngineLoadSnapshot {
+                    waiting: 0,
+                    running: 0,
+                },
+            );
+        }
+        let (after_empty, _) = registry.register("after-empty".into(), None, None).unwrap();
+        expect_test::expect!["(Some(0), Some(1))"].assert_eq(&format!(
+            "{:?}",
+            (after_refresh.engine_index(), after_empty.engine_index())
+        ));
+    }
+
+    #[test]
+    fn registry_explicit_admissions_raise_routing_score() {
+        let mut registry = RequestRegistry::new(
+            &[2, 5, 9].map(|rank| connected_engine(EngineId::from_engine_index(rank))),
+        );
+        for rank in [2, 5, 9] {
+            registry.apply_scheduler_counts(
+                rank,
+                EngineLoadSnapshot {
+                    waiting: 0,
+                    running: 10,
+                },
+            );
+        }
+        registry.register("pinned".into(), None, Some(9)).unwrap();
+        let mut chosen = Vec::new();
+        for index in 0..3 {
+            let (engine, _) = registry.register(format!("auto-{index}"), None, None).unwrap();
+            chosen.push(engine.engine_index().unwrap());
+        }
+        expect_test::expect!["[2, 5, 2]"].assert_eq(&format!("{chosen:?}"));
     }
 
     #[test]

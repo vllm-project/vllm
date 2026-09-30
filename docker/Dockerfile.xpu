@@ -14,12 +14,12 @@ WORKDIR /workspace
 COPY requirements/build/rust.txt requirements/build/rust.txt
 RUN python3 -m pip install --no-cache-dir -r requirements/build/rust.txt
 
-# Copy only the Rust build inputs; build_rust.sh publishes artifacts needed
+# Copy only the Rust build inputs; tools/build_rust.sh publishes artifacts needed
 # by the wheel build stage.
 COPY rust rust
 COPY rust-toolchain.toml rust-toolchain.toml
 COPY tools/build_rust.py tools/build_rust.py
-COPY build_rust.sh build_rust.sh
+COPY tools/build_rust.sh tools/build_rust.sh
 
 # Cap cargo parallelism to avoid exhausting the CI host's open-file limit
 # (rustc spawns enough concurrent processes to hit RLIMIT_NOFILE otherwise).
@@ -29,7 +29,7 @@ ENV CARGO_BUILD_JOBS=4
 # inputs. The child stage below relinks the crates that embed the exact version.
 RUN --mount=type=cache,target=/root/.cargo/registry,sharing=locked \
     --mount=type=cache,target=/root/.cargo/git,sharing=locked \
-    SETUPTOOLS_SCM_PRETEND_VERSION="0.0.0+docker.cache" bash build_rust.sh
+    SETUPTOOLS_SCM_PRETEND_VERSION="0.0.0+docker.cache" bash tools/build_rust.sh
 
 # Relink with the exact Git-derived package version.
 FROM rust-build-cache AS rust-build
@@ -37,7 +37,7 @@ FROM rust-build-cache AS rust-build
 RUN --mount=type=cache,target=/root/.cargo/registry,sharing=locked \
     --mount=type=cache,target=/root/.cargo/git,sharing=locked \
     --mount=type=bind,source=.git,target=.git \
-    SETUPTOOLS_SCM_PRETEND_METADATA="{dirty=false}" bash build_rust.sh
+    SETUPTOOLS_SCM_PRETEND_METADATA="{dirty=false}" bash tools/build_rust.sh
 
 FROM ubuntu:24.04 AS vllm-base
 
@@ -87,11 +87,14 @@ RUN mkdir neo && \
 
 # Install XPU-Manager payloads without registering conflicting libze package
 # dependencies in dpkg.
+# Note that ocl-icd-opencl-dev is required by DLE upgrade but xpu-smi, should
+# can be removed in future.
 RUN apt-get update -y && \
     apt-get install -y --no-install-recommends software-properties-common && \
     add-apt-repository -y ppa:kobuk-team/intel-graphics && \
     apt-get update -y && \
     apt-get install -y --no-install-recommends libhwloc15 libpciaccess0 libigsc1 intel-metrics-library && \
+    apt-get install -y ocl-icd-opencl-dev && \
     mkdir xpu-m && \
     cd xpu-m && \
     wget https://github.com/intel/xpumanager/releases/download/v2.1.0/xpu-smi_2.1.0+26.33.6468cec-1.24.04_amd64.deb && \
@@ -263,5 +266,20 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install -e tests/vllm_test_utils
+
+# Replace 2026.1.2 DLE packages to 2026.1.3
+RUN --mount=type=cache,target=/root/.cache/uv \
+    --mount=type=bind,source=.git,target=.git \
+    uv pip install \
+      "intel-cmplr-lib-rt==2026.1.1" \
+      "intel-cmplr-lib-ur==2026.1.1" \
+      "intel-cmplr-lic-rt==2026.1.1" \
+      "intel-sycl-rt==2026.1.1" \
+      "oneccl-devel==2022.1.2; platform_system == 'Linux' and platform_machine == 'x86_64'" \
+      "oneccl==2022.1.2; platform_system == 'Linux' and platform_machine == 'x86_64'" \
+      "dpcpp-cpp-rt==2026.1.1" \
+      "intel-opencl-rt==2026.1.1" \
+      "intel-openmp==2026.1.1" \
+      "intel-pti==1.1.0"
 
 ENTRYPOINT ["vllm", "serve"]

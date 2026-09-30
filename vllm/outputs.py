@@ -53,6 +53,7 @@ class CompletionOutput:
             ``--per-request-spec-decode-metrics`` is enabled; None otherwise.
             Surfaced in the response as ``metrics.speculative_decoding`` for
             single-sequence (``n == 1``) requests.
+
     """
 
     index: int
@@ -90,6 +91,7 @@ class PoolingOutput:
 
     Args:
         data: The extracted hidden states.
+
     """
 
     data: torch.Tensor
@@ -115,6 +117,10 @@ class RequestOutput:
                           For encoder/decoder models, this is the
                           decoder input prompt token ids.
         prompt_logprobs: The log probabilities to return per prompt token.
+        prompt_token_id_logprobs: Logprobs of prompt_logprob_token_ids, shaped
+            [max(prompt_len - 1 - prompt_logprob_start, 0),
+            len(prompt_logprob_token_ids)]; row i scores them as predictions of
+            prompt token prompt_logprob_start + i + 1.
         outputs: The output sequences of the request.
         finished: Whether the whole request is finished.
         metrics: Metrics associated with the request.
@@ -128,6 +134,7 @@ class RequestOutput:
             prefix-cache writes for this request.
         kv_transfer_params: The params for remote K/V transfer.
         ec_transfer_params: The params for remote encoder-cache transfer.
+
     """
 
     def __init__(
@@ -145,6 +152,7 @@ class RequestOutput:
         num_cached_tokens: int | None = None,
         num_cache_creation_tokens: int | None = None,
         *,
+        prompt_token_id_logprobs: np.ndarray | None = None,
         kv_transfer_params: dict[str, Any] | None = None,
         ec_transfer_params: dict[str, Any] | None = None,
         # Forward compatibility, code that uses args added in new release can
@@ -159,6 +167,7 @@ class RequestOutput:
         self.prompt = prompt
         self.prompt_token_ids = prompt_token_ids
         self.prompt_logprobs = prompt_logprobs
+        self.prompt_token_id_logprobs = prompt_token_id_logprobs
         self.outputs = outputs
         self.finished = finished
         self.metrics = metrics
@@ -172,7 +181,6 @@ class RequestOutput:
 
     def add(self, next_output: "RequestOutput", aggregate: bool) -> None:
         """Merge subsequent RequestOutput into this one"""
-
         self.finished |= next_output.finished
         self.kv_transfer_params = next_output.kv_transfer_params
         self.ec_transfer_params = next_output.ec_transfer_params
@@ -192,6 +200,10 @@ class RequestOutput:
                         completion.cumulative_logprob = (
                             next_completion.cumulative_logprob
                         )
+                        # R3 is returned on the terminal output and must survive
+                        # aggregation with earlier chunks that have no R3.
+                        if next_completion.routed_experts is not None:
+                            completion.routed_experts = next_completion.routed_experts
                         completion.finish_reason = next_completion.finish_reason
                         completion.stop_reason = next_completion.stop_reason
                     else:
@@ -209,6 +221,7 @@ class RequestOutput:
             f"encoder_prompt={self.encoder_prompt!r}, "
             f"encoder_prompt_token_ids={self.encoder_prompt_token_ids}, "
             f"prompt_logprobs={self.prompt_logprobs}, "
+            f"prompt_token_id_logprobs={self.prompt_token_id_logprobs}, "
             f"outputs={self.outputs}, "
             f"finished={self.finished}, "
             f"metrics={self.metrics}, "
@@ -232,8 +245,7 @@ _O = TypeVar("_O", default=PoolingOutput)
 
 
 class PoolingRequestOutput(Generic[_O]):
-    """
-    The output data of a pooling request to the LLM.
+    """The output data of a pooling request to the LLM.
 
     Args:
         request_id (str): A unique identifier for the pooling request.
@@ -241,6 +253,7 @@ class PoolingRequestOutput(Generic[_O]):
         prompt_token_ids (list[int]): A list of token IDs used in the prompt.
         num_cached_tokens: The number of tokens with prefix cache hit.
         finished (bool): A flag indicating whether the pooling is completed.
+
     """
 
     def __init__(
@@ -274,6 +287,7 @@ class EmbeddingOutput:
     Args:
         embedding: The embedding vector, which is a list of floats.
             Its length depends on the hidden dimension of the model.
+
     """
 
     embedding: list[float]
@@ -315,6 +329,7 @@ class ClassificationOutput:
     Args:
         probs: The probability vector, which is a list of floats.
             Its length depends on the number of classes.
+
     """
 
     probs: list[float]
@@ -356,6 +371,7 @@ class ScoringOutput:
 
     Args:
         score: The similarity score, which is a scalar value.
+
     """
 
     score: float

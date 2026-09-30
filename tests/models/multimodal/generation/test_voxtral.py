@@ -78,7 +78,6 @@ def test_online_serving(vllm_runner, audio_assets: AudioTestAssets):
 
     Steps run sequentially so each releases the GPU before the next starts.
     """
-
     question = f"What's happening in these {len(audio_assets)} audio clips?"
     max_tokens = 10
     audio_data = [asset.audio_and_sample_rate for asset in audio_assets]

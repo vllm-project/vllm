@@ -14,6 +14,7 @@ from vllm.utils.hashing import safe_hash
 logger = init_logger(__name__)
 
 ProfilerKind = Literal["torch", "cuda", "proton"]
+TorchProfilerActivity = Literal["CPU", "CUDA", "PrivateUse1", "XPU"]
 ProtonBackend = Literal["cupti"]
 ProtonContext = Literal["shadow", "python"]
 ProtonData = Literal["tree", "trace"]
@@ -50,6 +51,12 @@ class ProfilerConfig:
     """Directory to save torch profiler traces. Both AsyncLLM's CPU traces and
     worker's traces (CPU & GPU) will be saved under this directory. Note that
     it must be an absolute path."""
+
+    torch_profiler_activities: list[TorchProfilerActivity] | None = Field(
+        default=None, min_length=1
+    )
+    """Activities recorded by workers using the torch profiler. When unset,
+    each worker uses its platform default: CPU; CPU and CUDA; or CPU and XPU."""
 
     proton_profiler_dir: str = ""
     """Directory to save Triton Proton profiles. Each worker writes a
@@ -151,8 +158,7 @@ class ProfilerConfig:
     """
 
     def compute_hash(self) -> str:
-        """
-        WARNING: Whenever a new field is added to this config,
+        """WARNING: Whenever a new field is added to this config,
         ensure that it is included in the factors list if
         it affects the computation graph.
 
@@ -171,7 +177,24 @@ class ProfilerConfig:
     @model_validator(mode="after")
     def _validate_profiler_config(self) -> Self:
         has_delay_or_limit = self.delay_iterations > 0 or self.max_iterations > 0
-        if self.profiler == "torch" and has_delay_or_limit and not self.ignore_frontend:
+        activities = self.torch_profiler_activities
+        if activities is not None:
+            if self.profiler != "torch":
+                raise ValueError(
+                    "torch_profiler_activities is only applicable when profiler "
+                    "is set to 'torch'"
+                )
+            if len(activities) != len(set(activities)):
+                raise ValueError(
+                    "torch_profiler_activities must not contain duplicates"
+                )
+        records_cpu_activity = activities is None or "CPU" in activities
+        if (
+            self.profiler == "torch"
+            and has_delay_or_limit
+            and not self.ignore_frontend
+            and records_cpu_activity
+        ):
             logger.warning_once(
                 "Using 'torch' profiler with delay_iterations or max_iterations "
                 "while ignore_frontend is False may result in high overhead."

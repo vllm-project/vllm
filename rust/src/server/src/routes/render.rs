@@ -105,6 +105,7 @@ fn lower_render_request(
         kv_transfer_params: None,
         ec_transfer_params: None,
         content_parts: None,
+        return_token_ids: None,
         other: Default::default(),
     };
     validate_generate_request(&request, &state.served_model_names)?;
@@ -123,7 +124,7 @@ async fn render_chat(
     let chat_request = lower_chat_request(body, &model_resolution(&state), request_context)?;
     let (text_request, _) = state
         .chat
-        .prepare(chat_request)
+        .prepare(chat_request, &state.text)
         .await
         .map_err(|error| ApiError::invalid_request(error.to_report_string(), None))?;
     Ok(Json(lower_render_request(

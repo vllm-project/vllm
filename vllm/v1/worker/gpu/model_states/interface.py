@@ -28,16 +28,12 @@ class ModelSpecificAttnMetadata:
     """Base class for model-specific attention metadata."""
 
     def get_extra_common_attn_kwargs(
-        self,
-        kv_cache_group_id: int,
-        num_reqs: int,
+        self, kv_cache_group_id: int, num_reqs: int
     ) -> dict[str, Any]:
         return {}
 
     def get_extra_attn_kwargs(
-        self,
-        attn_metadata_builder: Any,
-        num_reqs: int,
+        self, attn_metadata_builder: Any, num_reqs: int
     ) -> dict[str, Any]:
         return {}
 
@@ -59,7 +55,6 @@ class ModelState(ABC):
         self.model = model
         self.device = device
 
-        self.max_model_len = self.model_config.max_model_len
         self.max_num_reqs = self.scheduler_config.max_num_seqs
         self.max_num_tokens = self.scheduler_config.max_num_batched_tokens
         self.inputs_embeds_size = self.model_config.get_inputs_embeds_size()
@@ -98,6 +93,11 @@ class ModelState(ABC):
                     and observability_config.enable_mm_processor_stats
                 ),
             )
+
+    @property
+    def max_model_len(self) -> int:
+        # Auto-fit can reduce the limit after model state initialization.
+        return self.model_config.max_model_len
 
     def get_supported_generation_tasks(self) -> tuple[GenerationTask, ...]:
         from vllm.model_executor.models.interfaces import (

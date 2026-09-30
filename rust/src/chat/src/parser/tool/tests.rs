@@ -240,3 +240,22 @@ fn factory_new_registers_phi4_mini_json_by_name() {
     assert!(factory.contains(names::PHI4_MINI_JSON));
     factory.create(names::PHI4_MINI_JSON, &[]).unwrap();
 }
+
+#[test]
+fn factory_parses_mimo_parameter_tags() {
+    let factory = ToolParserFactory::new();
+    for model in ["XiaomiMiMo/MiMo-V2.5", "XiaomiMiMo/MiMo-V2.5-Pro"] {
+        assert_eq!(factory.resolve_name_for_model(model), Some(names::MIMO));
+        let mut parser = factory.create_for_model(model, &[]).unwrap();
+        let mut output = ToolParserOutput::default();
+        parser.parse_into("<tool_call>\n<function=lookup>\n<parameter=query>\n杭州\n</parameter>\n</function>\n</tool_call>", &mut output).unwrap();
+        output.append(parser.finish().unwrap());
+        let output = output.coalesce();
+        assert_eq!(output.calls().len(), 1);
+        assert_eq!(output.calls()[0].name.as_deref(), Some("lookup"));
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&output.calls()[0].arguments).unwrap(),
+            serde_json::json!({"query":"\n杭州\n"})
+        );
+    }
+}

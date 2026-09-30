@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from unittest.mock import MagicMock
 
 import pytest
 
@@ -11,20 +10,6 @@ from vllm.reasoning.kimi_k2_reasoning_parser import KimiK2ReasoningParser
 from vllm.tokenizers import get_tokenizer
 
 REASONING_MODEL_NAME = "moonshotai/Kimi-K2.5"
-
-
-@pytest.fixture
-def mock_kimi_k2_tokenizer():
-    tokenizer = MagicMock()
-    tokenizer.get_vocab.return_value = {
-        "<think>": 100,
-        "</think>": 101,
-        "<|tool_calls_section_begin|>": 200,
-        "<|tool_calls_section_end|>": 201,
-        "<|tool_call_begin|>": 202,
-        "<|tool_call_end|>": 203,
-    }
-    return tokenizer
 
 
 @pytest.fixture(scope="module")

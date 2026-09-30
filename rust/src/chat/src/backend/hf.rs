@@ -70,12 +70,26 @@ impl HfChatBackend {
                 options,
                 multimodal_render_info,
             )?),
-            RendererSelection::DeepSeekV32 => Arc::new(DeepSeekV32ChatRenderer::new()),
-            RendererSelection::DeepSeekV4 => Arc::new(DeepSeekV4ChatRenderer::new()),
-            RendererSelection::DeepSeekV41 => Arc::new(DeepSeekV41ChatRenderer::new()),
-            RendererSelection::Harmony => Arc::new(HarmonyChatRenderer::new()?),
-            RendererSelection::Inkling => Arc::new(InklingChatRenderer::new(tokenizer.clone())?),
-            RendererSelection::KimiK3 => Arc::new(KimiK3ChatRenderer::new(tokenizer.clone())),
+            RendererSelection::DeepSeekV32 => Arc::new(DeepSeekV32ChatRenderer::new(
+                options.default_chat_template_kwargs,
+            )),
+            RendererSelection::DeepSeekV4 => Arc::new(DeepSeekV4ChatRenderer::new(
+                options.default_chat_template_kwargs,
+            )),
+            RendererSelection::DeepSeekV41 => Arc::new(DeepSeekV41ChatRenderer::new(
+                options.default_chat_template_kwargs,
+            )),
+            RendererSelection::Harmony => Arc::new(HarmonyChatRenderer::new(
+                options.default_chat_template_kwargs,
+            )?),
+            RendererSelection::Inkling => Arc::new(InklingChatRenderer::new(
+                tokenizer.clone(),
+                options.default_chat_template_kwargs,
+            )?),
+            RendererSelection::KimiK3 => Arc::new(KimiK3ChatRenderer::new(
+                tokenizer.clone(),
+                options.default_chat_template_kwargs,
+            )),
         };
 
         info!(
@@ -120,6 +134,7 @@ impl ChatBackend for HfChatBackend {
             self.tokenizer.clone(),
             options.tool_call_parser,
             options.reasoning_parser,
+            options.tool_strict_level,
         )?))
     }
 }
@@ -281,6 +296,39 @@ mod tests {
     }
 
     #[test]
+    fn native_renderer_inherits_deployment_reasoning_below_request_controls() {
+        let backend = HfChatBackend::from_resolved_model_files(
+            resolved_files(r#"{"model_type":"deepseek_v4"}"#, "{}"),
+            "test-model".to_string(),
+            LoadModelBackendsOptions {
+                default_chat_template_kwargs: [
+                    ("thinking".to_string(), serde_json::json!(false)),
+                    ("reasoning_effort".to_string(), serde_json::json!("low")),
+                ]
+                .into(),
+                ..Default::default()
+            },
+            test_tokenizer(),
+        )
+        .unwrap();
+        let mut request = request_with_user_text("hello");
+        let rendered = backend.chat_renderer().render(&request).unwrap();
+        assert!(rendered.prompt.into_text().unwrap().ends_with("</think>"));
+        assert_eq!(rendered.effective_template_kwargs["enable_thinking"], false);
+
+        request.chat_options.reasoning_effort = Some(crate::EffortValue::from("max"));
+        let rendered = backend.chat_renderer().render(&request).unwrap();
+        let prompt = rendered.prompt.into_text().unwrap();
+        assert!(prompt.contains("Reasoning Effort: Beyond maximum"));
+        assert!(prompt.ends_with("<think>"));
+        assert_eq!(
+            rendered.effective_template_kwargs["reasoning_effort"],
+            "max"
+        );
+        assert_eq!(rendered.effective_template_kwargs["thinking"], true);
+    }
+
+    #[test]
     fn auto_uses_harmony_renderer_and_output_processor_for_gpt_oss_model_type() {
         let backend = backend_for_selection(
             RendererSelection::Auto,
@@ -296,6 +344,7 @@ mod tests {
         let error = match backend.new_chat_output_processor(
             &mut request,
             NewChatOutputProcessorOptions {
+                tool_strict_level: crate::ToolStrictLevel::Auto,
                 tool_call_parser: &ParserSelection::Explicit("json".to_string()),
                 reasoning_parser: &ParserSelection::Auto,
             },

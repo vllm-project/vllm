@@ -16,8 +16,7 @@ if TYPE_CHECKING:
 
 
 class _InputOptions(TypedDict):
-    """
-    Additional options available to all
+    """Additional options available to all
     [`SingletonInput`][vllm.inputs.engine.SingletonInput] types.
     """
 
@@ -44,11 +43,6 @@ class TokensInput(_InputOptions):
     """Char-level (start, end) offsets per token, propagated from the
     renderer's TokensPrompt when offsets were computed."""
 
-    assistant_tokens_mask: NotRequired[list[int] | None]
-    """Per-token 0/1 mask marking assistant-generated tokens.
-    Populated when ``return_assistant_tokens_mask=True`` is set on the
-    render request and the chat template supports ``{% generation %}``."""
-
 
 def tokens_input(
     prompt_token_ids: list[int],
@@ -56,8 +50,7 @@ def tokens_input(
     prompt: str | None = None,
     cache_salt: str | None = None,
 ) -> TokensInput:
-    """
-    Construct [`TokensInput`][vllm.inputs.engine.TokensInput]
+    """Construct [`TokensInput`][vllm.inputs.engine.TokensInput]
     from optional values.
     """
     inputs = TokensInput(type="token", prompt_token_ids=prompt_token_ids)
@@ -104,8 +97,7 @@ def embeds_input(
     prompt_token_ids: list[int] | None = None,
     is_token_ids: list[bool] | None = None,
 ) -> EmbedsInput:
-    """
-    Construct [`EmbedsInput`][vllm.inputs.engine.EmbedsInput]
+    """Construct [`EmbedsInput`][vllm.inputs.engine.EmbedsInput]
     from optional values.
     """
     inputs = EmbedsInput(type="embeds", prompt_embeds=prompt_embeds)
@@ -158,11 +150,6 @@ class MultiModalInput(_InputOptions):
     `prompt_token_ids`.
     """
 
-    assistant_tokens_mask: NotRequired[list[int] | None]
-    """Per-token 0/1 mask marking assistant-generated tokens.
-    Populated when ``return_assistant_tokens_mask=True`` is set on the
-    render request and the chat template supports ``{% generation %}``."""
-
 
 def mm_input(
     prompt_token_ids: list[int],
@@ -190,13 +177,13 @@ def mm_input(
 
 
 class MultiModalEncDecInput(MultiModalInput):
-    """
-    Represents multi-modal input to the engine for encoder-decoder models.
+    """Represents multi-modal input to the engine for encoder-decoder models.
 
     Note:
         Even text-only encoder-decoder models are currently implemented
         as multi-modal models for convenience.
         (Example: https://github.com/vllm-project/bart-plugin)
+
     """
 
     encoder_prompt_token_ids: list[int]
@@ -253,8 +240,7 @@ which can be passed to `LLMEngine.add_request` or `AsyncLLM.add_request`.
 
 
 class EncoderDecoderInput(TypedDict):
-    """
-    A rendered [`EncoderDecoderPrompt`][vllm.inputs.llm.EncoderDecoderPrompt]
+    """A rendered [`EncoderDecoderPrompt`][vllm.inputs.llm.EncoderDecoderPrompt]
     which can be passed to `LLMEngine.add_request` or `AsyncLLM.add_request`.
     """
 
@@ -315,8 +301,7 @@ def _prepare_decoder_input_ids_for_generation(
     decoder_input_ids: list[int],
     decoder_start_token_id: int,
 ) -> list[int]:
-    """
-    Prepare `decoder_input_ids` for generation with encoder-decoder models,
+    """Prepare `decoder_input_ids` for generation with encoder-decoder models,
     according to `GenerationMixin._prepare_decoder_input_ids_for_generation()`.
 
     Source:

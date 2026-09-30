@@ -6,10 +6,8 @@
 import json
 from typing import Annotated, Any, Literal, TypeAlias
 
-import regex as re
 from pydantic import (
     BaseModel,
-    ConfigDict,
     Field,
     model_serializer,
 )
@@ -21,7 +19,6 @@ from vllm.entrypoints.serve.engine.protocol import OpenAIBaseModel, UsageInfo
 from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
 from vllm.sampling_params import StructuredOutputsParams
-from vllm.utils.import_utils import resolve_obj_by_qualname
 
 logger = init_logger(__name__)
 
@@ -49,6 +46,34 @@ def validate_cache_salt(cache_salt: object) -> None:
             "Parameter 'cache_salt' must be at most 128 characters and must "
             "not contain '@', '/', '\\\\', or NUL.",
             parameter="cache_salt",
+        )
+
+
+def validate_request_mm_kwargs(
+    *,
+    mm_processor_kwargs: dict[str, Any] | None,
+    media_io_kwargs: dict[str, dict[str, Any]] | None,
+    trust_request_mm_kwargs: bool,
+) -> None:
+    """Reject untrusted per-request multimodal kwarg overrides."""
+    if trust_request_mm_kwargs:
+        return
+
+    if mm_processor_kwargs:
+        raise VLLMValidationError(
+            "Per-request mm_processor_kwargs are disabled by default because "
+            "they can change multimodal preprocessing resource usage. Start "
+            "the server with --trust-request-mm-kwargs only when clients "
+            "are trusted.",
+            parameter="mm_processor_kwargs",
+        )
+    if media_io_kwargs:
+        raise VLLMValidationError(
+            "Per-request media_io_kwargs are disabled by default because "
+            "they can change multimodal media loading resource usage. Start "
+            "the server with --trust-request-mm-kwargs only when clients "
+            "are trusted.",
+            parameter="media_io_kwargs",
         )
 
 
@@ -259,53 +284,6 @@ class FunctionDefinition(OpenAIBaseModel):
         if self.defer_loading is None:
             data.pop("defer_loading", None)
         return data
-
-
-# extra="forbid" is a workaround to have kwargs as a field,
-# see https://github.com/pydantic/pydantic/issues/3125
-class LogitsProcessorConstructor(BaseModel):
-    qualname: str
-    args: list[Any] | None = None
-    kwargs: dict[str, Any] | None = None
-
-    model_config = ConfigDict(extra="forbid")
-
-
-LogitsProcessors = list[str | LogitsProcessorConstructor]
-
-
-def get_logits_processors(
-    processors: LogitsProcessors | None, pattern: str | None
-) -> list[Any] | None:
-    if processors and pattern:
-        logits_processors = []
-        for processor in processors:
-            qualname = processor if isinstance(processor, str) else processor.qualname
-            if not re.match(pattern, qualname):
-                raise ValueError(
-                    f"Logits processor '{qualname}' is not allowed by this "
-                    "server. See --logits-processor-pattern engine argument "
-                    "for more information."
-                )
-            try:
-                logits_processor = resolve_obj_by_qualname(qualname)
-            except Exception as e:
-                raise ValueError(
-                    f"Logits processor '{qualname}' could not be resolved: {e}"
-                ) from e
-            if isinstance(processor, LogitsProcessorConstructor):
-                logits_processor = logits_processor(
-                    *processor.args or [], **processor.kwargs or {}
-                )
-            logits_processors.append(logits_processor)
-        return logits_processors
-    elif processors:
-        raise ValueError(
-            "The `logits_processors` argument is not supported by this "
-            "server. See --logits-processor-pattern engine argument "
-            "for more information."
-        )
-    return None
 
 
 class FunctionCall(OpenAIBaseModel):

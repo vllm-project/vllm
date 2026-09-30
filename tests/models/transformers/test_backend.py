@@ -13,7 +13,7 @@ from typing import Any
 import pytest
 import torch
 import torch.nn as nn
-from transformers import AutoConfig, AutoModel, PretrainedConfig
+from transformers import AutoConfig, AutoModel, PreTrainedConfig
 
 from vllm.config import ModelConfig, VllmConfig
 from vllm.model_executor.models.interfaces import SupportsMultiModal
@@ -524,7 +524,7 @@ def replace_vocab_embeddings(model, **config_kwargs):
 
     stub = nn.Module()
     stub.model = model
-    stub.config = PretrainedConfig(
+    stub.config = PreTrainedConfig(
         vocab_size=VOCAB_SIZE, num_positions=NUM_POSITIONS, **config_kwargs
     )
     embeddings = Base._vocab_embeddings(stub)

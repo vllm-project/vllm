@@ -67,21 +67,6 @@ __forceinline__ __device__ float dot22_8_f(half2 (&dq)[4], const half* a_ptr) {
   return result;
 }
 
-__forceinline__ __device__ float dot22_8_f(float (&dq)[8],
-                                           const bf16_t* a_ptr) {
-  float result = 0.0f;
-  #pragma unroll
-  for (int i = 0; i < 4; i++) {
-    uint32_t aw;
-    __builtin_memcpy(&aw, a_ptr + 2 * i, sizeof(uint32_t));
-    float a_x = __uint_as_float((aw & 0xFFFFu) << 16);
-    float a_y = __uint_as_float(aw & 0xFFFF0000u);
-    result = __fmaf_rn(dq[2 * i + 0], a_x, result);
-    result = __fmaf_rn(dq[2 * i + 1], a_y, result);
-  }
-  return result;
-}
-
 __forceinline__ __device__ void atomic_add_pk4_f16(half* addr, half2 v01,
                                                    half2 v23) {
   unsigned long long* addr_u = reinterpret_cast<unsigned long long*>(addr);

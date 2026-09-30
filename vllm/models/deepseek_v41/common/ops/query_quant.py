@@ -3,7 +3,10 @@
 
 import torch
 
-from vllm.model_executor.layers.fusion.quant_activation import QuantizedActivation
+from vllm.model_executor.layers.fusion.quant_activation import (
+    QuantizedActivation,
+    get_input_quant_key,
+)
 from vllm.model_executor.layers.quantization.utils.quant_utils import kMxfp8Dynamic
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
@@ -102,6 +105,7 @@ def fused_q_kv_rmsnorm_quant(
     )
     if tokens:
         block = triton.next_power_of_2(max(q_size, kv_size))
+        launch_pdl = current_platform.is_arch_support_pdl()
         _q_kv_norm_quant_kernel[(padded_tokens, 2)](
             qr,
             kv,
@@ -117,8 +121,9 @@ def fused_q_kv_rmsnorm_quant(
             q_size,
             kv_size,
             block,
-            current_platform.is_arch_support_pdl(),
+            launch_pdl,
             num_warps=8 if block >= 2048 else 4,
+            launch_pdl=launch_pdl,
         )
     return QuantizedActivation(qo, scales, qr.dtype, qr.shape, kMxfp8Dynamic), kvo
 
@@ -135,7 +140,7 @@ def can_fuse_query_quant(linears: list[torch.nn.Module]) -> bool:
     # QuantKey does not encode scale layout; restrict this producer to the
     # consumers that accept F8_128x4 swizzled scales.
     return all(
-        getattr(linear, "input_quant_key", None) == kMxfp8Dynamic
+        get_input_quant_key(linear) == kMxfp8Dynamic
         and type(getattr(getattr(linear, "quant_method", None), "kernel", None))
         in (FlashInferCutedslMxfp8LinearKernel, FlashInferCutlassMxfp8LinearKernel)
         for linear in linears

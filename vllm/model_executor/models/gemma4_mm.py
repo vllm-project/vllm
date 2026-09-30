@@ -36,20 +36,13 @@ from transformers.models.gemma4.configuration_gemma4 import (
 
 from vllm.config import VllmConfig
 from vllm.config.model import get_served_model_name
-from vllm.config.multimodal import (
-    AudioDummyOptions,
-    BaseDummyOptions,
-    VideoDummyOptions,
-)
+from vllm.config.multimodal import MultiModalDummyOptions, VideoDummyOptions
 from vllm.inputs import MultiModalDataDict
 from vllm.logger import init_logger
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.models.gemma3n_mm import batch_audio_features
-from vllm.model_executor.models.gemma4 import (
-    _GEMMA4_EXPERT_PARENT_MAPPER,
-    Gemma4ForCausalLM,
-)
+from vllm.model_executor.models.gemma4 import Gemma4ForCausalLM
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.model_executor.models.transformers.utils import recursive_replace_linear
 from vllm.multimodal import MULTIMODAL_REGISTRY
@@ -132,8 +125,7 @@ def _get_max_soft_tokens(
 
 
 class Gemma4ImagePixelInputs(TensorSchema):
-    """
-    Pre-patchified image inputs from the Gemma4 image processor.
+    """Pre-patchified image inputs from the Gemma4 image processor.
 
     Dimensions:
         - bn: Batch size * number of images
@@ -159,11 +151,10 @@ class Gemma4ImagePixelInputs(TensorSchema):
 
 
 class Gemma4AudioInputs(TensorSchema):
-    """
-    Dimensions:
-        - bn: Batch size * number of audios
-        - s: Sequence length (MEL spectrogram frames)
-        - f: Number of features (MEL bins)
+    """Dimensions:
+    - bn: Batch size * number of audios
+    - s: Sequence length (MEL spectrogram frames)
+    - f: Number of features (MEL bins)
     """
 
     type: Literal["audio"] = "audio"
@@ -278,10 +269,7 @@ class Gemma4ProcessingInfo(BaseProcessingInfo):
         num_frames = _VIDEO_MAX_FRAMES
         mm_config = self.ctx.model_config.get_multimodal_config()
         video_opts = mm_config.limit_per_prompt.get("video")
-        if (
-            isinstance(video_opts, VideoDummyOptions)
-            and video_opts.num_frames is not None
-        ):
+        if video_opts is not None and video_opts.num_frames is not None:
             num_frames = min(num_frames, video_opts.num_frames)
         tokens["video"] = num_frames * (_VIDEO_MAX_SOFT_TOKENS + 2 + 6)
         return tokens
@@ -304,9 +292,12 @@ class Gemma4ProcessingInfo(BaseProcessingInfo):
         for an image of the given dimensions, after padding is stripped.
 
         Args:
+            image_width: Width of the image in pixels.
+            image_height: Height of the image in pixels.
             max_soft_tokens: Override for the vision config's
                 ``default_output_length``.  When *None*, the value from
                 the model config is used.
+
         """
         vision_cfg = self.get_hf_config().vision_config
         patch_size = vision_cfg.patch_size
@@ -345,8 +336,12 @@ class Gemma4ProcessingInfo(BaseProcessingInfo):
         produce after stripping padding.
 
         Args:
+            image_width: Width of the image in pixels.
+            image_height: Height of the image in pixels.
+            processor: The Gemma4 processor, when already constructed.
             max_soft_tokens: Override for the default token budget.
                 When *None*, falls back to the model config value.
+
         """
         if processor is None:
             processor = self.get_hf_processor()
@@ -500,9 +495,8 @@ class Gemma4DummyInputsBuilder(BaseDummyInputsBuilder[Gemma4ProcessingInfo]):
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions] | None = None,
+        mm_options: MultiModalDummyOptions | None = None,
     ) -> MultiModalDataDict:
-        num_images = mm_counts.get("image", 0)
         num_audios = mm_counts.get("audio", 0)
         num_videos = mm_counts.get("video", 0)
         processor = self.info.get_hf_processor()
@@ -515,18 +509,12 @@ class Gemma4DummyInputsBuilder(BaseDummyInputsBuilder[Gemma4ProcessingInfo]):
         img_width = size.get("width", 224)
         img_height = size.get("height", 224)
 
-        image_overrides = mm_options.get("image") if mm_options else None
-        audio_overrides = mm_options.get("audio") if mm_options else None
-        video_overrides = mm_options.get("video") if mm_options else None
-        assert audio_overrides is None or isinstance(audio_overrides, AudioDummyOptions)
-        assert video_overrides is None or isinstance(video_overrides, VideoDummyOptions)
-
         data: dict[str, Any] = {
             "image": self._get_dummy_images(
                 width=img_width,
                 height=img_height,
-                num_images=num_images,
-                overrides=image_overrides,
+                num_images=mm_counts.get("image", 0),
+                overrides=mm_options.get("image") if mm_options else None,
             ),
         }
 
@@ -535,7 +523,7 @@ class Gemma4DummyInputsBuilder(BaseDummyInputsBuilder[Gemma4ProcessingInfo]):
             data["audio"] = self._get_dummy_audios(
                 length=audio_len,
                 num_audios=num_audios,
-                overrides=audio_overrides,
+                overrides=mm_options.get("audio") if mm_options else None,
             )
 
         if num_videos > 0:
@@ -544,7 +532,7 @@ class Gemma4DummyInputsBuilder(BaseDummyInputsBuilder[Gemma4ProcessingInfo]):
                 height=img_height,
                 num_frames=_VIDEO_MAX_FRAMES,
                 num_videos=num_videos,
-                overrides=video_overrides,
+                overrides=mm_options.get("video") if mm_options else None,
             )
 
         return data
@@ -590,22 +578,25 @@ class Gemma4DummyInputsBuilder(BaseDummyInputsBuilder[Gemma4ProcessingInfo]):
 
 
 class Gemma4MultiModalProcessor(BaseMultiModalProcessor[Gemma4ProcessingInfo]):
+    def _get_hf_mm_text(self, mm_counts: Mapping[str, int]) -> str:
+        return self.dummy_inputs.get_dummy_text(mm_counts)
+
     def _apply_hf_processor_main(
         self,
         mm_items: MultiModalDataItems,
-        hf_processor_mm_kwargs: Mapping[str, object],
+        hf_kwargs: Mapping[str, object],
     ) -> BatchFeature:
-        valid_mm_items = mm_items.select(
-            {k for k, c in mm_items.get_all_counts().items() if c > 0}
+        hf_data, hf_kwargs, passthrough_data = self._get_hf_mm_inputs(
+            mm_items, hf_kwargs
         )
-        mm_data, passthrough_data = self._get_hf_mm_data(valid_mm_items)
 
-        if not mm_data:
-            return BatchFeature(dict(passthrough_data))
+        if not hf_data:
+            return self._finalize_hf_mm_data(hf_data, hf_kwargs, passthrough_data)
 
-        prompt_text = self.dummy_inputs.get_dummy_text(mm_items.get_all_counts())
+        prompt_text = hf_data.pop("text")
+        assert isinstance(prompt_text, str)
 
-        merged_kwargs = self.info.ctx.get_merged_mm_kwargs(hf_processor_mm_kwargs)
+        merged_kwargs = self.info.ctx.get_merged_mm_kwargs(hf_kwargs)
         val, is_top_level_max_soft_tokens = _get_max_soft_tokens(merged_kwargs)
 
         if val is not None and val not in _SUPPORTED_SOFT_TOKENS:
@@ -614,14 +605,12 @@ class Gemma4MultiModalProcessor(BaseMultiModalProcessor[Gemma4ProcessingInfo]):
                 f"Valid values are {_SUPPORTED_SOFT_TOKENS}."
             )
 
-        mm_data = dict(mm_data)
-
         # ---- VIDEO HANDLING ----
         # Gemma4 decomposes video into timestamped image frames.
         # Each frame is processed with max_soft_tokens=70 through the
         # same vision tower, matching transformers processing_gemma4.py.
         video_outputs: dict[str, Any] = {}
-        if videos := mm_data.pop("videos", []):
+        if videos := hf_data.pop("videos", []):
             assert isinstance(videos, list)
             processor = self.info.get_hf_processor()
 
@@ -651,7 +640,7 @@ class Gemma4MultiModalProcessor(BaseMultiModalProcessor[Gemma4ProcessingInfo]):
                 timestamps = [idx / fps for idx in frame_indices]
 
                 # Process frames as images with max_soft_tokens=70
-                video_mm_kwargs = dict(hf_processor_mm_kwargs)
+                video_mm_kwargs = dict(hf_kwargs)
                 # Override configured image options too: these inputs are video
                 # frames, whose cache keys exclude images_kwargs.
                 video_mm_kwargs["images_kwargs"] = {}
@@ -721,18 +710,14 @@ class Gemma4MultiModalProcessor(BaseMultiModalProcessor[Gemma4ProcessingInfo]):
                 "video_timestamps": video_timestamps_per_video,
             }
 
-        # The processor accepts 'audio' not 'audios'.
-        if "audios" in mm_data:
-            mm_data["audio"] = mm_data.pop("audios")
-
         # Warn if any audio waveform exceeds the model's max duration.
-        if "audio" in mm_data:
+        if "audio" in hf_data:
             processor = self.info.get_hf_processor()
             sr = processor.feature_extractor.sampling_rate
             max_tokens = processor.audio_seq_length
             ms_per_tok = processor.audio_ms_per_token
             max_duration_s = max_tokens * ms_per_tok / 1000.0
-            audios = mm_data["audio"]
+            audios = hf_data["audio"]
             if not isinstance(audios, (list, tuple)):
                 audios = [audios]
             for i, waveform in enumerate(audios):
@@ -755,13 +740,13 @@ class Gemma4MultiModalProcessor(BaseMultiModalProcessor[Gemma4ProcessingInfo]):
         # NOTE: This requires a corresponding type annotation on the
         # HF side (Gemma4ProcessorKwargs.images_kwargs) so that
         # _merge_kwargs routes max_soft_tokens into images_kwargs.
-        patched_mm_kwargs = dict(hf_processor_mm_kwargs)
+        patched_mm_kwargs = dict(hf_kwargs)
         if val is not None and is_top_level_max_soft_tokens:
             patched_mm_kwargs["max_soft_tokens"] = val
 
         processed_data = self.info.ctx.call_hf_processor(
             self.info.get_hf_processor(**patched_mm_kwargs),
-            dict(text=prompt_text, **mm_data),
+            dict(text=prompt_text, **hf_data),
             patched_mm_kwargs,
         )
 
@@ -792,9 +777,9 @@ class Gemma4MultiModalProcessor(BaseMultiModalProcessor[Gemma4ProcessingInfo]):
             processed_data["input_features_mask"] = unpadded_masks
 
         processed_data.update(video_outputs)
-        processed_data.update(passthrough_data)
-
-        return processed_data
+        return self._finalize_hf_mm_data(
+            hf_data, hf_kwargs, passthrough_data, processed_data
+        )
 
     def _get_mm_fields_config(
         self,
@@ -1058,7 +1043,7 @@ class Gemma4ForConditionalGeneration(
     }
 
     # Maps checkpoint prefixes to vLLM module paths.
-    hf_to_vllm_mapper = _GEMMA4_EXPERT_PARENT_MAPPER | WeightsMapper(
+    hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={
             # vision tower
             "model.vision_tower": "vision_tower",

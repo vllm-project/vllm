@@ -4,10 +4,10 @@
 # adapted from https://github.com/deepseek-ai/DeepSeek-VL2/blob/faf18023f24b962b32d9f0a2d89e402a8d383a78/deepseek_vl2/models/modeling_deepseek_vl_v2.py#L115-L268
 
 from huggingface_hub.dataclasses import strict
-from transformers import DeepseekV2Config, PretrainedConfig
+from transformers import DeepseekV2Config, PreTrainedConfig
 
 
-class VisionEncoderConfig(PretrainedConfig):
+class VisionEncoderConfig(PreTrainedConfig):
     model_type: str = "vision"
 
     model_name: str = "vit_so400m_patch14_siglip_384.webli"
@@ -58,7 +58,7 @@ class VisionEncoderConfig(PretrainedConfig):
         super().__init__(**kwargs)
 
 
-class MlpProjectorConfig(PretrainedConfig):
+class MlpProjectorConfig(PreTrainedConfig):
     model_type = "mlp_projector"
     projector_type: str = "downsample_mlp_gelu"
     input_dim: int = 1152
@@ -98,7 +98,7 @@ class DeepseekVLV2TextConfig(DeepseekV2Config):
     kv_lora_rank: int | None = DeepseekV2Config.kv_lora_rank
 
 
-class DeepseekVLV2Config(PretrainedConfig):
+class DeepseekVLV2Config(PreTrainedConfig):
     model_type = "deepseek_vl_v2"
 
     tile_tag: str = "2D"

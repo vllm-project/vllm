@@ -12,20 +12,20 @@ from vllm.distributed.device_communicators.shm_object_storage import (
 
 
 class TestSingleWriterShmRingBuffer(unittest.TestCase):
-    """Test suite for the ring buffer implementation"""
+    """Test suite for the ring buffer implementation."""
 
     def setUp(self):
-        """Set up test fixtures"""
+        """Set up test fixtures."""
         self.buffer_size = 4096
         self.ring_buffer = None
 
     def tearDown(self):
-        """Clean up after tests"""
+        """Clean up after tests."""
         if self.ring_buffer:
             self.ring_buffer.close()
 
     def test_buffer_opening(self):
-        """Test opening an existing buffer"""
+        """Test opening an existing buffer."""
         # First create a buffer
         self.ring_buffer = SingleWriterShmRingBuffer(
             data_buffer_size=self.buffer_size, create=True
@@ -39,7 +39,7 @@ class TestSingleWriterShmRingBuffer(unittest.TestCase):
         )
 
     def test_buffer_access(self):
-        """Test accessing allocated buffers"""
+        """Test accessing allocated buffers."""
         self.ring_buffer = SingleWriterShmRingBuffer(
             data_buffer_size=self.buffer_size, create=True
         )
@@ -61,7 +61,7 @@ class TestSingleWriterShmRingBuffer(unittest.TestCase):
         self.assertEqual(read_id, monotonic_id)
 
     def test_memory_error_on_full_buffer(self):
-        """Test that MemoryError is raised when buffer is full"""
+        """Test that MemoryError is raised when buffer is full."""
         small_buffer_size = 200
         self.ring_buffer = SingleWriterShmRingBuffer(
             data_buffer_size=small_buffer_size, create=True
@@ -76,7 +76,7 @@ class TestSingleWriterShmRingBuffer(unittest.TestCase):
             self.ring_buffer.allocate_buf(1)  # Would exceed buffer capacity
 
     def test_allocation_and_free(self):
-        """Test allocation and freeing of buffers"""
+        """Test allocation and freeing of buffers."""
         small_buffer_size = 200
         self.ring_buffer = SingleWriterShmRingBuffer(
             data_buffer_size=small_buffer_size, create=True
@@ -96,7 +96,7 @@ class TestSingleWriterShmRingBuffer(unittest.TestCase):
             self.assertEqual(freed_ids[0], i)
 
     def test_clear_buffer(self):
-        """Test clearing the buffer"""
+        """Test clearing the buffer."""
         self.ring_buffer = SingleWriterShmRingBuffer(
             data_buffer_size=self.buffer_size, create=True
         )
@@ -180,7 +180,7 @@ class TestSingleWriterShmRingBuffer(unittest.TestCase):
 
 
 def main():
-    """Main function demonstrating usage and running tests"""
+    """Main function demonstrating usage and running tests."""
     print("=== SingleWriterShmRingBuffer Test Suite ===\n")
 
     # Run unit tests

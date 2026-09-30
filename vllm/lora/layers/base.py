@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING, overload
 
 import torch
 import torch.nn as nn
-from transformers import PretrainedConfig
+from transformers import PreTrainedConfig
 
 from vllm.config.lora import LoRAConfig
 
@@ -73,7 +73,7 @@ class BaseLayerWithLoRA(nn.Module):
         self,
         max_loras: int,
         lora_config: LoRAConfig,
-        model_config: PretrainedConfig | None = None,
+        model_config: PreTrainedConfig | None = None,
     ) -> None:
         """Initializes lora matrices."""
         ...
@@ -103,7 +103,7 @@ class BaseLayerWithLoRA(nn.Module):
         source_layer: nn.Module,
         lora_config: LoRAConfig,
         packed_modules_list: list,
-        model_config: PretrainedConfig | None = None,
+        model_config: PreTrainedConfig | None = None,
     ) -> bool:
         """Returns True if the layer can be replaced by this LoRA layer."""
         raise NotImplementedError

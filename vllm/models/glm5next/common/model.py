@@ -355,6 +355,7 @@ class Glm5NextDecoderLayer(nn.Module):
                 intermediate_size=config.intermediate_size,
                 hidden_act=config.hidden_act,
                 quant_config=quant_config,
+                is_sequence_parallel=self.is_sequence_parallel,
                 prefix=f"{prefix}.mlp",
                 swiglu_limit=config.swiglu_limit,
             )
