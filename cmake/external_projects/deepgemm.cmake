@@ -32,8 +32,10 @@ else()
   # Pinned to the fork's dev branch: upstream 2.8.0 plus the SM120
   # port, the SM90 paged-MQA kv_block=32/next_n=4 port, configurable SwiGLU
   # alpha/beta, and SiTU for FP8/FP4 Mega MoE. Also includes the CUDA 12.x
-  # layout header fix from vllm-project/DeepGEMM#12.
-  set(_DEEPGEMM_UPSTREAM_TAG "e1f418c2a4f20818221f6b0e578b4c2f634d4c3f")
+  # layout header fix from vllm-project/DeepGEMM#12 plus the SM120
+  # 32-state page support from vllm-project/DeepGEMM#14 (required by
+  # DeepSeek-V4.1 on SM120, see vllm-project/vllm#59203).
+  set(_DEEPGEMM_UPSTREAM_TAG "69014314813e10910a77fe5643d1463d17a0d5fe")
 
   set(_deepgemm_fc_root "${FETCHCONTENT_BASE_DIR}")
   if(NOT _deepgemm_fc_root)
