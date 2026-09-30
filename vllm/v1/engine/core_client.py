@@ -1320,7 +1320,7 @@ class AsyncMPClient(MPClient):
         await self.call_utility_async("release_kv_cache_memory")
 
     async def wake_up_async(self, tags: list[str] | None = None) -> bool:
-        return await self.call_utility_async("wake_up", tags)
+        return all(await self.call_utility_all_async("wake_up", tags))
 
     async def is_sleeping_async(self) -> bool:
         return await self.call_utility_consensus_async("is_sleeping")
@@ -1361,6 +1361,10 @@ class AsyncMPClient(MPClient):
         return await self.call_utility_async(
             "collective_rpc", method, timeout, args, kwargs
         )
+
+    async def compute_weight_checksums_async(self) -> list[dict[str, str]]:
+        per_engine = await self.call_utility_all_async("compute_weight_checksums")
+        return [worker for workers in per_engine for worker in workers]
 
     async def handle_fault(
         self, ft_request: FaultToleranceRequest
