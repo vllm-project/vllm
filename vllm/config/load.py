@@ -107,7 +107,8 @@ class LoadConfig:
     weights."""
     release_weight_page_cache: bool = False
     """Drop the checkpoint files from the OS page cache once this worker has
-    loaded its weights (`posix_fadvise(POSIX_FADV_DONTNEED)` on every file).
+    loaded its weights, including a speculative drafter such as MTP that reads
+    the same files (`posix_fadvise(POSIX_FADV_DONTNEED)` on every file).
     The pages are clean and are not read again after loading, so releasing
     them returns the checkpoint's size in host memory to the node; the cost is
     a cold re-read of the files on the next start. Only local files are

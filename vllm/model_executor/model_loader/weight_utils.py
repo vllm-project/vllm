@@ -956,15 +956,30 @@ def _prefetch_checkpoint(
             pass
 
 
-def release_checkpoint_page_cache(files: list[str]) -> None:
-    """Advise the kernel to drop the given files from the OS page cache.
+# Local checkpoint files read by weight loaders in this process, kept until
+# release_checkpoint_page_cache drops them from the page cache.
+_checkpoint_files: dict[str, None] = {}
 
+
+def record_checkpoint_files(files: list[str]) -> None:
+    """Remember checkpoint files for release_checkpoint_page_cache."""
+    _checkpoint_files.update(dict.fromkeys(files))
+
+
+def release_checkpoint_page_cache() -> None:
+    """Advise the kernel to drop every recorded checkpoint file from the OS
+    page cache, then forget the files.
+
+    The worker calls this once all its models are loaded, since a speculative
+    drafter such as MTP reads the same files as the target model.
     `POSIX_FADV_DONTNEED` frees clean, unmapped pages immediately and leaves
     dirty or mapped pages alone, so calling it while another process is still
     reading one of the files is safe: that reader re-reads from disk. Files
     that cannot be opened are skipped. No-op on platforms without
     `posix_fadvise`.
     """
+    files = list(_checkpoint_files)
+    _checkpoint_files.clear()
     fadvise = getattr(os, "posix_fadvise", None)
     dontneed = getattr(os, "POSIX_FADV_DONTNEED", None)
     if fadvise is None or dontneed is None:
