@@ -1083,3 +1083,55 @@ async def test_pause_keep_multi_request():
         for result in results:
             assert result.finished
             assert len(result.outputs[0].token_ids) == 10
+
+
+@pytest.mark.asyncio
+async def test_parallel_sampling_cumulative() -> None:
+    """AsyncLLM.generate with n>1 and CUMULATIVE output kind yields n
+    cumulative snapshots that are monotone non-decreasing.
+
+    Covers the AsyncLLM + CUMULATIVE leg of the parallel-sampling test
+    matrix in https://github.com/vllm-project/vllm/issues/21948 (previously
+    only DELTA and FINAL_ONLY were parameterized).
+    """
+    with ExitStack() as after:
+        with set_default_torch_num_threads(1):
+            engine = AsyncLLM.from_engine_args(TEXT_ENGINE_ARGS)
+        after.callback(engine.shutdown)
+
+        n = 2
+        max_tokens = 10
+        sampling_params = SamplingParams(
+            max_tokens=max_tokens,
+            ignore_eos=True,
+            output_kind=RequestOutputKind.CUMULATIVE,
+            temperature=0.5,
+            seed=33,
+            n=n,
+        )
+        per_seq: dict[int, list[int]] = {i: [] for i in range(n)}
+        finished: set[int] = set()
+        async for out in engine.generate(
+            request_id="request-cumulative",
+            prompt=TEXT_PROMPT,
+            sampling_params=sampling_params,
+        ):
+            for comp in out.outputs:
+                per_seq[comp.index].append(len(comp.token_ids))
+                if comp.finished:
+                    finished.add(comp.index)
+
+        # Every one of the n parallel completions must finish and reach the
+        # requested length, with monotone non-decreasing cumulative snapshots.
+        assert finished == set(range(n)), (
+            f"expected all {n} completions to finish, got {finished}"
+        )
+        for i in range(n):
+            lens = per_seq[i]
+            assert lens[-1] == max_tokens, (
+                f"completion {i} must reach {max_tokens} tokens, got {lens}"
+            )
+            assert lens == sorted(lens), (
+                f"CUMULATIVE snapshots for completion {i} must be "
+                f"monotone non-decreasing, got {lens}"
+            )
