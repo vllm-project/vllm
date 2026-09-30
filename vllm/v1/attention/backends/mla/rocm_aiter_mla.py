@@ -258,8 +258,7 @@ def _triton_dcp_verify_supported(dcp_world_size: int, cp_interleave: int) -> boo
     The batch shape is causal qlen>1 over a DCP shard. Eagle MTP and DSpark
     target verify are that same shape, so this is not limited to one
     speculative method: gfx942 has no cprr kernel and segmented TILE-128 is
-    LDS-unsafe, and a DSpark-only gate would leave Eagle with no route.
-    qlen==1 and non-causal blocks stay on the plain ASM decode.
+    LDS-unsafe. qlen==1 and non-causal stay on the plain ASM decode.
     """
     return on_gfx942() and dcp_world_size > 1 and cp_interleave == 1
 
@@ -1239,6 +1238,9 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
         page_size = (
             self.kernel_block_size if use_triton_decode else self._segmented_page_size
         )
+        # The base builder types kernel_block_size as int | None. This builder
+        # sets it in __init__, and both page sizes are ints from then on.
+        assert page_size is not None
         max_local_pages = cdiv(max_kv_seq_len, page_size)
         if buffers is not None:
             row_block_table = buffers.block_table[:num_rows]
