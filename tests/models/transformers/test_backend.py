@@ -729,47 +729,6 @@ def test_attention_dispatch_is_required(monkeypatch: pytest.MonkeyPatch):
         Base._create_attention_instances(model)
 
 
-@pytest.mark.parametrize(
-    ("model_prefix", "layer_name"),
-    [("", "0.attn"), ("draft_model", "draft_model.0.attn")],
-)
-def test_attention_layer_name_is_qualified_by_model_prefix(
-    monkeypatch: pytest.MonkeyPatch, model_prefix: str, layer_name: str
-):
-    """Attention layers are registered by name, so a `draft_model` drafter built
-    in the same engine as its target must not reuse the target's layer names."""
-    monkeypatch.setattr(
-        "vllm.model_executor.models.transformers.base.get_pp_indices",
-        lambda *_: (0, 1),
-    )
-    names = []
-
-    class RecordingAttention:
-        def __init__(self, **kwargs):
-            names.append(kwargs["prefix"])
-
-    fuser = SimpleNamespace(scale=lambda _: None, sinks=lambda _: None)
-    model = SimpleNamespace(
-        text_config=SimpleNamespace(num_hidden_layers=1),
-        pp_group=SimpleNamespace(rank_in_group=0, world_size=1),
-        attention_fusers={0: ("layers.0.self_attn", fuser)},
-        get_submodule=lambda _: SimpleNamespace(),
-        model_config=SimpleNamespace(
-            model_arch_config=[SimpleNamespace(head_size=16)],
-            get_num_attention_heads=lambda *_: 4,
-            get_num_kv_heads=lambda *_: 2,
-        ),
-        parallel_config=None,
-        cache_config=None,
-        quant_config=None,
-        _get_attn_cls=lambda: RecordingAttention,
-    )
-
-    Base._create_attention_instances(model, model_prefix)
-
-    assert names == [layer_name]
-
-
 @pytest.mark.parametrize("model_type", ATTENTION_MODEL_TYPES)
 def test_attention_scale_is_the_declared_one(model_type: str):
     """The scale comes off the module, not from the `head_size**-0.5` default.

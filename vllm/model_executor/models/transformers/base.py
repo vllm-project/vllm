@@ -575,12 +575,8 @@ class Base(
 
         self.hf_to_vllm_mapper |= WeightsMapper(orig_to_new_stacked=orig_to_new_stacked)
 
-    def _create_attention_instances(self, model_prefix: str = ""):
-        """Create `Attention` instances to inform KV cache allocation.
-
-        Layer names are qualified by `model_prefix` so that two models in one
-        engine, e.g. a target and its `draft_model` drafter, do not register the
-        same attention layer name."""
+    def _create_attention_instances(self, prefix: str = ""):
+        """Create `Attention` instances to inform KV cache allocation."""
         text_config = self.text_config
         attn_cls = self._get_attn_cls()
 
@@ -613,8 +609,8 @@ class Base(
                     f"Layer {layer} does not dispatch through the Transformers "
                     "attention interface and vLLM has no other way to handle it."
                 )
-            prefix, attn_fuser = self.attention_fusers[i]
-            attn_module = self.get_submodule(prefix)
+            attn_prefix, attn_fuser = self.attention_fusers[i]
+            attn_module = self.get_submodule(attn_prefix)
 
             # `[i]` is the whole-model config unless the checkpoint is
             # heterogeneous, in which case it is this layer's own geometry.
@@ -632,17 +628,18 @@ class Base(
                 scale=scale,
                 cache_config=self.cache_config,
                 quant_config=self.quant_config,
-                prefix=maybe_prefix(model_prefix, f"{i}.attn"),
+                prefix=maybe_prefix(prefix, f"{attn_prefix}.{VLLM_ATTN_ATTR}"),
             )
 
             if attn_cls is MLAAttention:
                 mla_fuser = next(
-                    (f for f in self.fusers[prefix] if isinstance(f, MLAFuser)), None
+                    (f for f in self.fusers[attn_prefix] if isinstance(f, MLAFuser)),
+                    None,
                 )
                 if mla_fuser is None:
                     raise ValueError(
-                        f"Layer {i} ({prefix}) did not fuse as MLA, but the rest of "
-                        "the model did, so its latent KV cache cannot be allocated."
+                        f"Layer {i} ({attn_prefix}) did not fuse as MLA, but the rest "
+                        "of the model did, so its latent KV cache cannot be allocated."
                     )
                 dims = get_mla_dims(self.model_config)
                 kwargs.update(

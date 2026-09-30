@@ -152,11 +152,8 @@ def test_draft_model_quantization(
 
 @single_gpu_only
 def test_draft_model_transformers_backend(vllm_runner):
-    """Target and drafter both run on the Transformers modeling backend.
-
-    OLMo-2 has no native vLLM implementation, so this only works if the
-    drafter's attention layers are named under its `draft_model` prefix instead
-    of colliding with the target's (`Duplicate layer name: 0.attn`)."""
+    """Ensure that Attention prefixes don't collide between the target and
+    draft models when both models use the Transformers modelling backend."""
     sd_case = ArgsTest(
         target_model="allenai/OLMo-2-0425-1B-Instruct",
         draft_model="allenai/OLMo-2-0425-1B-Instruct",
