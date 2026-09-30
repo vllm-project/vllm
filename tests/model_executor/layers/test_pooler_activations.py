@@ -224,11 +224,11 @@ class TestResolveClassifierActFn:
         model_config = SimpleNamespace(
             hf_config=SimpleNamespace(num_labels=3, problem_type="")
         )
-        result = resolve_classifier_act_fn(model_config, act_fn=None)
+        result = resolve_classifier_act_fn(model_config, act_fn=None)  # type: ignore[arg-type]
         assert isinstance(result, PoolerClassify)
         assert result.num_labels == 3
 
     def test_passes_through_provided_act_fn(self):
         custom = PoolerIdentity()
-        result = resolve_classifier_act_fn(None, act_fn=custom)
+        result = resolve_classifier_act_fn(None, act_fn=custom)  # type: ignore[arg-type]
         assert result is custom
