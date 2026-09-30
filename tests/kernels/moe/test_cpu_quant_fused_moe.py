@@ -197,14 +197,15 @@ def test_w8a16_block_fp8_cpu_fused_moe(M, N, K, E, topk, seed):
 
     pw1, pw2 = _prepack_experts(w1), _prepack_experts(w2)
 
-    # Test inplace=False against reference
-    out = ops.fused_experts_cpu(
+    # Test writing into a fresh output buffer against reference
+    out = torch.empty_like(a)
+    ops.fused_experts_cpu(
+        out,
         a.clone(),
         pw1,
         pw2,
         topk_weight,
         topk_ids,
-        False,
         ops.CPUQuantMethod.FP8_W8A16,
         w1_s,
         w2_s,
@@ -215,14 +216,16 @@ def test_w8a16_block_fp8_cpu_fused_moe(M, N, K, E, topk, seed):
     )
     torch.testing.assert_close(ref_out.bfloat16(), out, atol=1e-2, rtol=1e-2)
 
-    # Test inplace=True produces identical output
-    out_inplace = ops.fused_experts_cpu(
-        a.clone(),
+    # Test writing into the input tensor itself (aliased in-place) produces
+    # an identical result
+    a_inplace = a.clone()
+    ops.fused_experts_cpu(
+        a_inplace,
+        a_inplace,
         pw1,
         pw2,
         topk_weight,
         topk_ids,
-        True,
         ops.CPUQuantMethod.FP8_W8A16,
         w1_s,
         w2_s,
@@ -231,7 +234,7 @@ def test_w8a16_block_fp8_cpu_fused_moe(M, N, K, E, topk, seed):
         BLOCK_SIZE,
         is_vnni=True,
     )
-    torch.testing.assert_close(out_inplace, out, atol=0, rtol=0)
+    torch.testing.assert_close(a_inplace, out, atol=0, rtol=0)
 
 
 def test_w8a16_block_fp8_cpu_fused_moe_small_expert_blocks():
@@ -249,13 +252,14 @@ def test_w8a16_block_fp8_cpu_fused_moe_small_expert_blocks():
         a, w1, w2, w1_s, w2_s, topk_weight, topk_ids, BLOCK_SIZE
     )
     pw1, pw2 = _prepack_experts(w1), _prepack_experts(w2)
-    out = ops.fused_experts_cpu(
+    out = torch.empty_like(a)
+    ops.fused_experts_cpu(
+        out,
         a,
         pw1,
         pw2,
         topk_weight,
         topk_ids,
-        False,
         ops.CPUQuantMethod.FP8_W8A16,
         w1_s,
         w2_s,
@@ -469,13 +473,15 @@ def test_mxfp4_cpu_fused_moe(M, N, K, E, topk, seed):
     pw2, pw2s = _prepack_mxfp4_experts(w2q, w2s)
 
     # Kernel
-    out = ops.fused_experts_cpu(
-        a.clone(),
+    a_in = a.clone()
+    out = torch.empty_like(a_in)
+    ops.fused_experts_cpu(
+        out,
+        a_in,
         pw1,
         pw2,
         topk_weight,
         topk_ids,
-        False,  # inplace
         ops.CPUQuantMethod.MXFP4,
         pw1s,  # w1_scale
         pw2s,  # w2_scale
@@ -511,13 +517,135 @@ def test_mxfp4_cpu_fused_moe_small_expert_blocks():
 
     pw1, pw1s = _prepack_mxfp4_experts(w1q, w1s)
     pw2, pw2s = _prepack_mxfp4_experts(w2q, w2s)
-    out = ops.fused_experts_cpu(
+    out = torch.empty_like(a)
+    ops.fused_experts_cpu(
+        out,
         a,
         pw1,
         pw2,
         topk_weight,
         topk_ids,
-        False,
+        ops.CPUQuantMethod.MXFP4,
+        pw1s,
+        pw2s,
+        None,
+        None,
+        None,
+    )
+
+    torch.testing.assert_close(ref_out.bfloat16(), out, atol=1e-2, rtol=1e-2)
+
+
+# Both E2M1 zero codes: 0b0000 (+0.0) and 0b1000 (-0.0), in both nibbles.
+MXFP4_ZERO_BYTES = [0x00, 0x88, 0x08, 0x80]
+# 0 and 255 are the ends of the E8M0 range; 127 is the identity scale.
+MXFP4_E8M0_VALUES = [0, 1, 127, 200, 254, 255]
+
+
+@pytest.mark.parametrize("zero_byte", MXFP4_ZERO_BYTES)
+@pytest.mark.parametrize("e8m0", MXFP4_E8M0_VALUES)
+def test_mxfp4_cpu_zero_codes_stay_zero(zero_byte, e8m0):
+    """A zero E2M1 code stays zero for every E8M0 exponent.
+
+    The unpack applies the block scale as an integer add on the bf16 exponent
+    field, which is exact for every value in the E2M1 codebook except the two
+    zeros: 0x0000 and 0x8000 have no exponent to shift, so adding to them
+    produces a small finite number instead of zero. Both are special-cased, and
+    this is the invariant that special case exists for.
+
+    Worth pinning separately from ``test_mxfp4_cpu_fused_moe``: there the zero
+    codes are a small fraction of random weights and a broken special case
+    would stay inside the 1e-2 tolerance for the low exponents. Here every
+    weight is a zero, so the output is exactly zero or it is not.
+    """
+    N, K, E, M = 64, 64, 2, 4
+    dtype = torch.bfloat16
+    set_random_seed(0)
+
+    a = torch.randn(M, K, dtype=dtype)
+    w1q = torch.full((E, 2 * N, K // 2), zero_byte, dtype=torch.uint8)
+    w1s = torch.full((E, 2 * N, K // 32), e8m0, dtype=torch.uint8)
+    # w2 is ordinary: the zeros have to survive the first GEMM and the
+    # activation, and a nonzero w2 is what would expose it if they did not.
+    w2_bf16 = torch.randn(E, K, N, dtype=dtype) / 10
+    w2q, w2s = MXFP4QuantizeUtil.quantize(w2_bf16)
+    w2s = w2s.reshape(E, K, N // 32)
+
+    topk_weight = torch.ones((M, 1), dtype=torch.float32)
+    topk_ids = torch.zeros((M, 1), dtype=torch.int32)
+
+    pw1, pw1s = _prepack_mxfp4_experts(w1q, w1s)
+    pw2, pw2s = _prepack_mxfp4_experts(w2q, w2s)
+    out = torch.empty_like(a)
+    ops.fused_experts_cpu(
+        out,
+        a,
+        pw1,
+        pw2,
+        topk_weight,
+        topk_ids,
+        ops.CPUQuantMethod.MXFP4,
+        pw1s,
+        pw2s,
+        None,
+        None,
+        None,
+    )
+
+    # silu(0) * 0 = 0, so the whole layer collapses to exactly zero. Not
+    # assert_close: any nonzero output here is a wrong unpack, not rounding.
+    assert torch.equal(out, torch.zeros_like(out)), (
+        f"zero code 0x{zero_byte:02x} with e8m0={e8m0} produced "
+        f"max |out| = {out.abs().max().item()}"
+    )
+
+
+# Narrower than MXFP4_E8M0_VALUES on purpose: this test keeps nonzero weights,
+# and 6.0 * 2**(255-127) is not representable in bf16, so the ends of the E8M0
+# range would compare inf against inf and prove nothing. The all-zero test above
+# is the one that can reach them.
+MXFP4_E8M0_FINITE = [107, 127, 137]
+
+
+@pytest.mark.parametrize("e8m0", MXFP4_E8M0_FINITE)
+def test_mxfp4_cpu_zero_codes_mixed_with_nonzero(e8m0):
+    """Zeros and nonzeros in the same 32-element scale block.
+
+    The zero check is per lane, not per block: this fails if it is ever
+    rewritten as a whole-block branch. Uses a single shared exponent so the
+    reference is a plain power of two.
+    """
+    N, K, E, M = 64, 64, 2, 4
+    dtype = torch.bfloat16
+    set_random_seed(0)
+
+    a = torch.randn(M, K, dtype=dtype)
+    # Alternate a zero byte and a nonzero one along K, so every scale block
+    # holds both kinds.
+    pattern = torch.tensor([0x88, 0x21], dtype=torch.uint8).repeat(K // 4)
+    w1q = pattern.view(1, 1, -1).expand(E, 2 * N, K // 2).contiguous()
+    w1s = torch.full((E, 2 * N, K // 32), e8m0, dtype=torch.uint8)
+    w1dq = MXFP4QuantizeUtil.dequantize(w1q, dtype, w1s)
+
+    w2_bf16 = torch.randn(E, K, N, dtype=dtype) / 10
+    w2q, w2s = MXFP4QuantizeUtil.quantize(w2_bf16)
+    w2s = w2s.reshape(E, K, N // 32)
+    w2dq = MXFP4QuantizeUtil.dequantize(w2q, dtype, w2s)
+
+    topk_weight = torch.ones((M, 1), dtype=torch.float32)
+    topk_ids = torch.zeros((M, 1), dtype=torch.int32)
+    ref_out = ref_mxfp4_fused_moe(a, w1dq, w2dq, topk_weight, topk_ids, 1)
+
+    pw1, pw1s = _prepack_mxfp4_experts(w1q, w1s)
+    pw2, pw2s = _prepack_mxfp4_experts(w2q, w2s)
+    out = torch.empty_like(a)
+    ops.fused_experts_cpu(
+        out,
+        a,
+        pw1,
+        pw2,
+        topk_weight,
+        topk_ids,
         ops.CPUQuantMethod.MXFP4,
         pw1s,
         pw2s,
@@ -570,13 +698,15 @@ def test_mxfp4_cpu_fused_moe_bias_swiglu(M, N, K, E, topk, seed):
     pw2, pw2s = _prepack_mxfp4_experts(w2q, w2s)
 
     # Kernel
-    out = ops.fused_experts_cpu(
-        a.clone(),
+    a_in = a.clone()
+    out = torch.empty_like(a_in)
+    ops.fused_experts_cpu(
+        out,
+        a_in,
         pw1,
         pw2,
         topk_weight,
         topk_ids,
-        False,  # inplace
         ops.CPUQuantMethod.MXFP4,
         pw1s,  # w1_scale
         pw2s,  # w2_scale
@@ -696,6 +826,7 @@ def _make_int4_moe_weights(E, N, K, group_size, quant_algo):
         w1_zeros, w2_zeros,
         w1_zeros_packed, w2_zeros_packed,
         w1_s, w2_s
+
     """
     w1_int4 = torch.randint(0, 16, (E, K, 2 * N), dtype=torch.int32)
     w2_int4 = torch.randint(0, 16, (E, N, K), dtype=torch.int32)
@@ -825,13 +956,15 @@ def test_int4_w4a16_cpu_fused_moe(M, N, K, E, topk, group_size, quant_algo, seed
         )
     )
 
-    out = ops.fused_experts_cpu(
-        a.clone(),
+    a_in = a.clone()
+    out = torch.empty_like(a_in)
+    ops.fused_experts_cpu(
+        out,
+        a_in,
         blocked_w1,
         blocked_w2,
         topk_weight,
         topk_ids,
-        False,  # inplace
         ops.CPUQuantMethod.INT4_W4A8,
         blocked_s1,
         blocked_s2,
@@ -932,7 +1065,11 @@ INT8_MOE_CONFIGS = [
 @pytest.mark.parametrize("is_vnni", [False, True])
 @pytest.mark.parametrize("inplace", [False, True])
 def test_int8_w8a8_cpu_fused_moe(M, N, K, E, topk, seed, is_vnni, inplace):
-    """Test fused_experts_cpu INT8 W8A8 against torch reference."""
+    """Test fused_experts_cpu INT8 W8A8 against torch reference.
+
+    ``inplace`` exercises writing into a fresh output buffer vs. aliasing
+    the input tensor as the output buffer.
+    """
     set_random_seed(seed)
 
     a = torch.randn(M, K, dtype=torch.bfloat16) / (0.5 * K**0.5)
@@ -948,13 +1085,15 @@ def test_int8_w8a8_cpu_fused_moe(M, N, K, E, topk, seed, is_vnni, inplace):
     w1 = _prepack_experts(w1_q) if is_vnni else w1_q
     w2 = _prepack_experts(w2_q) if is_vnni else w2_q
 
-    out = ops.fused_experts_cpu(
-        a.clone(),
+    a_in = a.clone()
+    out = a_in if inplace else torch.empty_like(a_in)
+    ops.fused_experts_cpu(
+        out,
+        a_in,
         w1,
         w2,
         topk_weight,
         topk_ids,
-        inplace,
         ops.CPUQuantMethod.INT8_W8A8,
         w1_s,
         w2_s,
@@ -973,6 +1112,204 @@ def test_int8_w8a8_cpu_fused_moe(M, N, K, E, topk, seed, is_vnni, inplace):
         atol=2e-1,
         rtol=2e-1,
     )
+
+
+# ===========================================================================
+# FP8 W8A8 MoE
+# ===========================================================================
+
+
+requires_cpu_fp8_w8a8 = pytest.mark.skipif(
+    not ops.cpu_has_amx_fp8(),
+    reason="requires native AMX-FP8 hardware",
+)
+
+FP8_W8A8_MAX = torch.finfo(torch.float8_e4m3fn).max
+FP8_W8A8_QUANT_GROUP = 128  # quantization group size for both K and N dimensions
+
+
+def _make_fp8_w8a8_weight_w13(
+    E: int, two_n: int, K: int, group_K: int = FP8_W8A8_QUANT_GROUP
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Create w13 [E, 2N, K] FP8 with group scales [E, 2N, G] where G = K//group_K."""
+    G = K // group_K
+    w_list, s_list = [], []
+    for _ in range(E):
+        w_f32 = torch.randn(two_n, K)
+        # Per-row, per-K-group quantization: scale [2N, G]
+        w_re = w_f32.view(two_n, G, group_K)
+        abs_max = w_re.abs().amax(dim=2, keepdim=True).clamp(min=1e-7)  # [2N, G, 1]
+        scale = (abs_max / FP8_W8A8_MAX).squeeze(2)  # [2N, G]
+        w_q = (
+            (w_re / abs_max).clamp(-FP8_W8A8_MAX, FP8_W8A8_MAX).to(torch.float8_e4m3fn)
+        )
+        w_list.append(w_q.view(two_n, K).contiguous())
+        s_list.append(scale.float())
+    return torch.stack(w_list), torch.stack(s_list)  # [E, 2N, K], [E, 2N, G]
+
+
+def _make_fp8_w8a8_weight_w2(
+    E: int,
+    K: int,
+    N: int,
+    group_K: int = FP8_W8A8_QUANT_GROUP,
+    group_N: int = FP8_W8A8_QUANT_GROUP,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Create w2 [E, K, N] FP8 with block scales [E, K//gK, N//gN]."""
+    nK = K // group_K
+    nN = N // group_N
+    w_list, s_list = [], []
+    for _ in range(E):
+        w_f32 = torch.randn(K, N)
+        w_re = w_f32.view(nK, group_K, nN, group_N)
+        abs_max = w_re.abs().amax(dim=(1, 3), keepdim=True).clamp(min=1e-7)
+        scale = (abs_max / FP8_W8A8_MAX).squeeze(1).squeeze(2)  # [nK, nN]
+        w_q = (
+            (w_re / abs_max).clamp(-FP8_W8A8_MAX, FP8_W8A8_MAX).to(torch.float8_e4m3fn)
+        )
+        w_list.append(w_q.view(K, N).contiguous())
+        s_list.append(scale.float())
+    return torch.stack(w_list), torch.stack(s_list)  # [E, K, N], [E, K//gK, N//gN]
+
+
+def _pack_fp8_w8a8_w13(
+    w13: torch.Tensor,  # [E, 2N, K] FP8
+    w13_scale: torch.Tensor,  # [E, 2N, G] float32
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Pack w13 for CPU FP8 W8A8 MoE kernel using float8_linear_prepack_cpu."""
+    E = w13.size(0)
+    packed_list, scale_list = [], []
+    for i in range(E):
+        pw, ps = torch.ops._C.float8_linear_prepack_cpu(
+            w13[i].contiguous(), w13_scale[i].contiguous()
+        )
+        packed_list.append(pw)
+        scale_list.append(ps)
+    return torch.stack(packed_list), torch.stack(scale_list)
+
+
+def _ref_fp8_w8a8_moe(
+    hidden_states: torch.Tensor,  # BF16 [M, K_hidden] (after FP8 round-trip dequant)
+    w13: torch.Tensor,  # FP8 [E, 2N, K_hidden]
+    w13_scale: torch.Tensor,  # float32 [E, 2N, G] (G = K_hidden//group_K)
+    w2: torch.Tensor,  # FP8 [E, K_hidden, N]
+    w2_scale: torch.Tensor,  # float32 [E, K_hidden//gK, N//gN]
+    topk_weights: torch.Tensor,  # float32 [M, top_k]
+    topk_ids: torch.Tensor,  # int64 [M, top_k]
+    N: int,
+    group_K: int = FP8_W8A8_QUANT_GROUP,
+    group_N: int = FP8_W8A8_QUANT_GROUP,
+) -> torch.Tensor:
+    """Reference implementation: dequantize weights then compute MoE."""
+    M, K_hidden = hidden_states.shape
+    top_k = topk_ids.shape[1]
+    output = torch.zeros(M, K_hidden, dtype=torch.bfloat16)
+
+    for tok in range(M):
+        x = hidden_states[tok].float()  # [K_hidden]
+        for k_idx in range(top_k):
+            expert_id = topk_ids[tok, k_idx].item()
+            w = topk_weights[tok, k_idx].item()
+
+            # Stage 1: x @ w13.T — gate and up projections
+            w13_e = w13[expert_id].float()  # [2N, K_hidden]
+            ws_e = w13_scale[expert_id].float()  # [2N, G]
+            G = ws_e.shape[1]
+            w13_dq = torch.zeros_like(w13_e)
+            for g in range(G):
+                c0, c1 = g * group_K, (g + 1) * group_K
+                w13_dq[:, c0:c1] = w13_e[:, c0:c1] * ws_e[:, g : g + 1]
+            gate_up = (x.unsqueeze(0) @ w13_dq.T).squeeze(0)  # [2N]
+
+            gate = gate_up[:N]
+            up = gate_up[N:]
+            act = F.silu(gate) * up  # [N]
+
+            # Stage 2: act @ w2.T — down projection
+            w2_e = w2[expert_id].float()  # [K_hidden, N]
+            ws2_e = w2_scale[expert_id].float()  # [K_hidden//gK, N//gN]
+            nK2 = K_hidden // group_K
+            nN2 = N // group_N
+            w2_dq = torch.zeros_like(w2_e)
+            for gi in range(nK2):
+                for gj in range(nN2):
+                    r0, r1 = gi * group_K, (gi + 1) * group_K
+                    c0, c1 = gj * group_N, (gj + 1) * group_N
+                    w2_dq[r0:r1, c0:c1] = w2_e[r0:r1, c0:c1] * ws2_e[gi, gj]
+            out_e = (act.unsqueeze(0) @ w2_dq.T).squeeze(0)  # [K_hidden]
+
+            output[tok] += (w * out_e).to(torch.bfloat16)
+
+    return output
+
+
+@requires_cpu_fp8_w8a8
+@pytest.mark.parametrize(
+    "E,N,K,M,top_k",
+    [
+        # N and K must be multiples of FP8_W8A8_QUANT_GROUP=128
+        (4, 128, 256, 1, 2),  # single token (decode phase)
+        (4, 128, 256, 8, 2),
+        (8, 256, 512, 16, 2),
+        (4, 256, 512, 4, 1),
+    ],
+)
+def test_fp8_w8a8_cpu_fused_moe(E: int, N: int, K: int, M: int, top_k: int):
+    """Test fused_experts_cpu FP8_W8A8 shape/dtype and accuracy vs a
+    dequantized BF16 reference."""
+    set_random_seed(42)
+
+    w13, w13_scale = _make_fp8_w8a8_weight_w13(E, 2 * N, K)
+    w2, w2_scale = _make_fp8_w8a8_weight_w2(E, K, N)
+
+    packed_w13, packed_w13_scale = _pack_fp8_w8a8_w13(w13, w13_scale)
+    packed_w2 = _prepack_experts(w2)
+
+    hidden_states = torch.randn(M, K, dtype=torch.bfloat16) * 0.1
+    x_fp8, x_scales = torch.ops._C.quantize_fp8e4m3_vec(hidden_states, True, None)
+    assert x_fp8.dtype == torch.float8_e4m3fn
+    assert x_scales.shape == (M,)
+
+    gen = torch.Generator().manual_seed(0)
+    topk_weights = torch.softmax(torch.randn(M, top_k, generator=gen), dim=-1).float()
+    topk_ids = torch.zeros(M, top_k, dtype=torch.int32)
+    for i in range(M):
+        topk_ids[i] = torch.randperm(E, generator=torch.Generator().manual_seed(i))[
+            :top_k
+        ].int()
+
+    output = torch.empty(M, K, dtype=torch.bfloat16)
+    ops.fused_experts_cpu(
+        output,
+        x_fp8,
+        packed_w13,
+        packed_w2,
+        topk_weights,
+        topk_ids,
+        ops.CPUQuantMethod.FP8_W8A8,
+        packed_w13_scale,  # w1_scale: [E, Nc, G, BLOCK_N]
+        w2_scale,  # w2_scale: [E, K//128, N//128]
+        None,  # w1_zero
+        None,  # w2_zero
+        [FP8_W8A8_QUANT_GROUP, FP8_W8A8_QUANT_GROUP],  # block_size
+        None,  # w1_bias
+        None,  # w2_bias
+        None,  # alpha
+        None,  # limit
+        True,  # is_vnni (weights already packed)
+        x_scales,  # a1_scale: per-token FP8 activation scales
+    )
+
+    assert output.shape == (M, K)
+    assert output.dtype == torch.bfloat16
+    assert not torch.isnan(output).any()
+    assert not torch.isinf(output).any()
+
+    x_dequant = (x_fp8.float() * x_scales.unsqueeze(1)).bfloat16()
+    ref = _ref_fp8_w8a8_moe(
+        x_dequant, w13, w13_scale, w2, w2_scale, topk_weights, topk_ids.long(), N
+    )
+    torch.testing.assert_close(output.float(), ref.float(), atol=1e-2, rtol=1e-2)
 
 
 if __name__ == "__main__":

@@ -22,6 +22,14 @@ _TORCH_TO_CUTE_DTYPE = {
     torch.float32: Float32,
 }
 
+
+def torch_to_cute_dtype(dtype: torch.dtype):
+    try:
+        return _TORCH_TO_CUTE_DTYPE[dtype]
+    except KeyError as exc:
+        raise TypeError(f"Unsupported CuTe dtype {dtype}") from exc
+
+
 _CUTE_TO_PTX_DTYPE = {
     BFloat16: "bf16",
     Float16: "f16",
@@ -38,6 +46,18 @@ EVICT_LAST = Int64(0x14F0000000000000)
 @dsl_user_op
 def recast_val(x, dtype, *, loc=None, ip=None):
     return dtype(llvm.bitcast(dtype.mlir_type, x.ir_value(loc=loc, ip=ip)))
+
+
+@dsl_user_op
+def to_cta0_smem(ptr: cute.Pointer, *, loc=None, ip=None):
+    return cute.make_ptr(
+        ptr.dtype,
+        ptr.toint(loc=loc, ip=ip) & 0xFEFF_FFFF,
+        cute.AddressSpace.smem,
+        assumed_align=8,
+        loc=loc,
+        ip=ip,
+    )
 
 
 def simple_tma_copy(atom, src, dst, mbar=None, cache_policy=None):

@@ -8,7 +8,9 @@ set -ex
 #   --nvshmem-ver <ver>  NVSHMEM version 
 
 CUDA_HOME=${CUDA_HOME:-/usr/local/cuda}
-DEEPEP_COMMIT_HASH=${DEEPEP_COMMIT_HASH:-"d4f41e4e93"}
+# Pinned in full: an abbreviated hash is not a ref, so a consumer that
+# fetches the pin directly ("git fetch origin <sha>") cannot resolve it.
+DEEPEP_COMMIT_HASH=${DEEPEP_COMMIT_HASH:-"d4f41e4e93602a15e95f55f6ee8df8f1aaa0e4bb"}
 
 NVSHMEM_VER=${NVSHMEM_VER:-"3.3.24"}  # Default supports both CUDA 12 and 13
 WORKSPACE=${WORKSPACE:-$(pwd)/ep_kernels_workspace}

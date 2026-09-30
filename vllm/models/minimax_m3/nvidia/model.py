@@ -16,7 +16,7 @@ from collections.abc import Iterable
 
 import torch
 from torch import nn
-from transformers import PretrainedConfig
+from transformers import PreTrainedConfig
 
 from vllm import _custom_ops as ops
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
@@ -68,8 +68,12 @@ from vllm.model_executor.models.utils import (
     make_empty_intermediate_tensors_factory,
     make_layers,
     maybe_prefix,
+    spec_decode_needs_target_embed,
 )
 from vllm.model_executor.models.vision import run_dp_sharded_mrope_vision_model
+from vllm.models.minimax_m3.common.encoder_cudagraph import (
+    MiniMaxM3EncoderCudaGraphMixin,
+)
 from vllm.models.minimax_m3.common.indexer import MiniMaxM3Indexer
 from vllm.models.minimax_m3.common.mm_preprocess import (
     MiniMaxM3VLDummyInputsBuilder,
@@ -92,7 +96,7 @@ from vllm.v1.kv_cache_interface import (
 )
 
 
-def _sparse_attention_layer_ids(config: PretrainedConfig) -> set[int]:
+def _sparse_attention_layer_ids(config: PreTrainedConfig) -> set[int]:
     """Layer ids whose attention runs the extra sparse "index" branch."""
     cfg = getattr(config, "sparse_attention_config", None)
     if not cfg:
@@ -103,7 +107,7 @@ def _sparse_attention_layer_ids(config: PretrainedConfig) -> set[int]:
     return {i for i, f in enumerate(freq) if f != 0}
 
 
-def _is_moe_layer(config: PretrainedConfig, layer_id: int) -> bool:
+def _is_moe_layer(config: PreTrainedConfig, layer_id: int) -> bool:
     """Whether this layer's MLP is a sparse MoE block (vs a dense MLP)."""
     moe_layer_freq = getattr(config, "moe_layer_freq", None)
     if moe_layer_freq is None:
@@ -147,7 +151,7 @@ class MiniMaxM3MLP(nn.Module):
 
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         intermediate_size: int,
         quant_config: QuantizationConfig | None = None,
         reduce_results: bool = True,
@@ -194,7 +198,7 @@ class MiniMaxM3MoE(nn.Module):
 
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         layer_id: int,
         quant_config: QuantizationConfig | None = None,
         reduce_results: bool = True,
@@ -290,7 +294,7 @@ class MiniMaxM3Attention(nn.Module):
 
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         layer_id: int,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
@@ -403,7 +407,7 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
 
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         layer_id: int,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
@@ -498,7 +502,9 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
         set_default_quant_scales(self, register_buffer=True)
         # Indexer side-cache dtype, mirroring --kv-cache-dtype for the main
         # cache (--attention-config '{"indexer_kv_dtype": ...}').
-        self.indexer_kv_dtype = vllm_config.attention_config.indexer_kv_dtype
+        self.indexer_kv_dtype = vllm_config.attention_config.resolve_indexer_kv_dtype(
+            "bf16"
+        )
 
         # Shared top-k buffer: the indexer writes the selected blocks into it and
         # the attend impl reads them back (so nothing crosses the eager break as a
@@ -562,6 +568,15 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
             kv_quant_mode=get_kv_quant_mode(self.kv_cache_dtype),
         )
 
+    def _allocate_query_fp8(self, qkv: torch.Tensor) -> torch.Tensor | None:
+        if not getattr(self.impl, "use_cutlass_decode", False):
+            return None
+        return torch.empty(
+            (qkv.shape[0], self.q_size),
+            dtype=torch.float8_e4m3fn,
+            device=qkv.device,
+        )
+
     def forward(
         self,
         positions: torch.Tensor,
@@ -596,16 +611,7 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
         main_slot_mapping = fwd_slot_mapping[self.layer_name]
         index_slot_mapping = fwd_slot_mapping[self.indexer.index_cache.prefix]
         q = qkv.new_empty((num_tokens, self.q_size))
-        use_msa_decode = self.impl.should_use_msa_decode(self.layer_name)
-        query_fp8 = (
-            torch.empty(
-                (num_tokens, self.q_size),
-                dtype=torch.float8_e4m3fn,
-                device=qkv.device,
-            )
-            if use_msa_decode
-            else None
-        )
+        query_fp8 = self._allocate_query_fp8(qkv)
         # index_q matches the index-K cache dtype (e4m3 for the fp8 score path);
         # the fused kernel emits fp8 directly when this buffer is e4m3.
         index_q = qkv.new_empty(
@@ -798,7 +804,9 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
 
         self.vocab_size = config.vocab_size
 
-        if get_pp_group().is_first_rank:
+        if get_pp_group().is_first_rank or spec_decode_needs_target_embed(
+            vllm_config, include_mtp=vllm_config.use_v2_model_runner
+        ):
             self.embed_tokens = VocabParallelEmbedding(
                 config.vocab_size,
                 config.hidden_size,
@@ -1057,6 +1065,9 @@ class MiniMaxM3SparseForCausalLM(nn.Module, SupportsPP, SupportsEagle3):
     def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor | None:
         return self.logits_processor(self.lm_head, hidden_states)
 
+    def compute_logits_local(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        return self.logits_processor(self.lm_head, hidden_states, skip_gather=True)
+
     def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
         return self.model.get_expert_mapping()
 
@@ -1071,7 +1082,11 @@ class MiniMaxM3SparseForCausalLM(nn.Module, SupportsPP, SupportsEagle3):
     dummy_inputs=MiniMaxM3VLDummyInputsBuilder,
 )
 class MiniMaxM3SparseForConditionalGeneration(
-    nn.Module, SupportsMultiModal, SupportsPP, SupportsEagle3
+    nn.Module,
+    SupportsMultiModal,
+    MiniMaxM3EncoderCudaGraphMixin,
+    SupportsPP,
+    SupportsEagle3,
 ):
     """Top-level (VL) entry point for MiniMax M3.
 
@@ -1125,7 +1140,7 @@ class MiniMaxM3SparseForConditionalGeneration(
         with self._mark_tower_model(vllm_config, {"image", "video"}):
             vision_config = config.vision_config
             self.vision_tower = MiniMaxVLVisionModel(
-                config=PretrainedConfig.from_dict(vision_config),
+                config=PreTrainedConfig.from_dict(vision_config),
                 text_hidden_size=text_hidden_size,
                 projector_hidden_size=projector_hidden_size,
                 quant_config=self.quant_config,
@@ -1269,6 +1284,9 @@ class MiniMaxM3SparseForConditionalGeneration(
 
     def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor | None:
         return self.language_model.compute_logits(hidden_states)
+
+    def compute_logits_local(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        return self.language_model.compute_logits_local(hidden_states)
 
     def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
         return self.language_model.get_expert_mapping()
