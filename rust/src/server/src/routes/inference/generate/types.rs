@@ -199,16 +199,14 @@ pub(super) struct PlaceholderRangeInfo {
 
 /// Mirrors the Python vLLM `GenerateLogProbs` class: output logprobs for one
 /// choice, carrying integer token ids rather than the OpenAI string token.
-///
-/// `content` is `None` when no per-token candidates were requested; that is the
-/// normal state, not an error.
 #[derive(Debug, Clone, Serialize)]
 pub(super) struct GenerateLogProbs {
     pub content: Option<Vec<GenerateLogProbsContent>>,
 }
 
 /// Mirrors the Python vLLM `GenerateLogProbsContent` class: the sampled token
-/// at one position plus its top-k candidates, in rank order.
+/// at one position plus its top-k candidates, in the engine's order: the
+/// sampled token first, then the remaining candidates in rank order.
 #[derive(Debug, Clone, Serialize)]
 pub(super) struct GenerateLogProbsContent {
     pub token_id: u32,

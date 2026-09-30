@@ -3,6 +3,10 @@
 
 from unittest.mock import MagicMock
 
+import pytest
+from pydantic import ValidationError
+
+from vllm.entrypoints.scale_out.token_in_token_out.protocol import GenerateLogProb
 from vllm.entrypoints.scale_out.token_in_token_out.serving import ServingTokens
 from vllm.logprobs import Logprob
 
@@ -75,21 +79,23 @@ def test_logprobs_minus_one_emits_all_tokens():
     assert len(result.content[0].top_logprobs) == 2
 
 
-def test_tokens_level_logprobs_have_no_bytes():
-    result = ServingTokens._create_tokens_logprobs(
+def test_text_logprobs_without_tokenizer_are_placeholders_without_bytes():
+    """--return-tokens-as-token-ids keeps `token_id:N` placeholders in text mode."""
+    result = ServingTokens._create_text_logprobs(
         None,
         token_ids=[7],
         top_logprobs=[{7: Logprob(-0.9), 8: Logprob(-1.1)}],
         num_output_top_logprobs=2,
     )
     entry = result.content[0]
+    assert entry.token == "token_id:7"
     assert entry.bytes is None
     assert all(t.bytes is None for t in entry.top_logprobs)
 
 
 def test_resolved_logprobs_use_engine_decoded_tokens_and_bytes():
     tokenizer = MagicMock()
-    result = ServingTokens._create_tokens_logprobs(
+    result = ServingTokens._create_text_logprobs(
         None,
         token_ids=[7],
         top_logprobs=[
@@ -110,7 +116,7 @@ def test_resolved_logprobs_use_engine_decoded_tokens_and_bytes():
 def test_resolved_logprobs_decode_tokens_the_engine_did_not():
     tokenizer = MagicMock()
     tokenizer.decode.side_effect = lambda ids: f"<{ids[0]}>"
-    result = ServingTokens._create_tokens_logprobs(
+    result = ServingTokens._create_text_logprobs(
         None,
         token_ids=[7, 9],
         top_logprobs=[{7: Logprob(-0.9)}, None],
@@ -120,3 +126,28 @@ def test_resolved_logprobs_decode_tokens_the_engine_did_not():
     assert [e.token for e in result.content] == ["<7>", "<9>"]
     assert result.content[0].top_logprobs[0].token == "<7>"
     assert result.content[1].bytes == list(b"<9>")
+
+
+def test_sampled_token_outside_topk_comes_first():
+    """The engine puts the sampled token first, then ranks 1..k. When the
+    sampled token is outside the top k it takes one of the k slots, so rank k
+    is left out (same as the OpenAI endpoints)."""
+    result = ServingTokens._create_tokens_logprobs(
+        None,
+        token_ids=[50],
+        top_logprobs=[
+            {
+                50: Logprob(-3.0, rank=5),
+                10: Logprob(-0.2, rank=1),
+                20: Logprob(-1.0, rank=2),
+            }
+        ],
+        num_output_top_logprobs=2,
+    )
+    assert [t.rank for t in result.content[0].top_logprobs] == [5, 1]
+
+
+def test_logprob_is_required_on_the_wire():
+    """A payload missing logprob is rejected rather than read as -9999."""
+    with pytest.raises(ValidationError):
+        GenerateLogProb.model_validate({"token_id": 1})

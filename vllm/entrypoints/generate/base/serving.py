@@ -347,25 +347,33 @@ def format_token_id_placeholder(token_id: int) -> str:
     return f"token_id:{token_id}"
 
 
-def decode_token_id(
-    token_id: int, tokenizer: TokenizerLike
-) -> tuple[str, list[int] | None]:
-    """Decode a single token id to its token string and UTF-8 bytes.
+def decode_token_ids(
+    token_ids: list[int], tokenizer: TokenizerLike
+) -> list[tuple[str, list[int] | None]]:
+    """Decode token ids individually to their token strings and UTF-8 bytes.
 
     Uses the engine's per-token detokenization, which restores the
     SentencePiece leading space that `convert_tokens_to_string` drops, so the
-    strings match the coupled endpoints. Returns ("", None) if the id has no
-    vocab entry.
+    strings match the coupled endpoints. Ids are decoded in one batch (callers
+    pass a position's sampled id together with its top-k ids). An id with no
+    vocab entry decodes to ("", None).
     """
-    if tokenizer.convert_ids_to_tokens([token_id])[0] is None:
-        logger.warning_once(
-            "decode_token_id: token_id %d has no vocab entry; "
-            "substituting empty string",
-            token_id,
-        )
-        return "", None
-    token_str = convert_ids_list_to_tokens(tokenizer, [token_id])[0]
-    return token_str, list(token_str.encode("utf-8", errors="replace"))
+    pieces = tokenizer.convert_ids_to_tokens(token_ids)
+    known = [tid for tid, piece in zip(token_ids, pieces) if piece is not None]
+    decoded = iter(convert_ids_list_to_tokens(tokenizer, known))
+    out: list[tuple[str, list[int] | None]] = []
+    for tid, piece in zip(token_ids, pieces):
+        if piece is None:
+            logger.warning_once(
+                "decode_token_ids: token_id %d has no vocab entry; "
+                "substituting empty string",
+                tid,
+            )
+            out.append(("", None))
+            continue
+        token_str = next(decoded)
+        out.append((token_str, list(token_str.encode("utf-8", errors="replace"))))
+    return out
 
 
 def clamp_prompt_logprobs(

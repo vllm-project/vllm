@@ -141,3 +141,32 @@ def test_sentencepiece_leading_space_matches_engine():
     )
     completion = _convert_chat_logprobs_to_completion_logprobs(resolved)
     assert completion.top_logprobs == [{" true": -0.5, "true": -1.5}]
+
+
+def test_unknown_top_id_does_not_shift_the_other_candidates():
+    """Ids are decoded in one batch per position; an id with no vocab entry
+    becomes an empty token without shifting its neighbours."""
+    unknown = 99
+    logprobs = GenerateLogProbs(
+        content=[
+            GenerateLogProbsContent(
+                token_id=PLAIN,
+                logprob=-0.5,
+                rank=1,
+                top_logprobs=[
+                    GenerateLogProb(token_id=unknown, logprob=-1.0, rank=1),
+                    GenerateLogProb(token_id=PLAIN, logprob=-0.5, rank=2),
+                ],
+            )
+        ]
+    )
+
+    resolved = _resolve_logprobs(logprobs, _StubTokenizer())
+
+    assert resolved.content is not None
+    entry = resolved.content[0]
+    assert entry.token == "ok"
+    assert [(t.token, t.bytes) for t in entry.top_logprobs] == [
+        ("", None),
+        ("ok", list(b"ok")),
+    ]

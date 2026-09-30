@@ -105,11 +105,13 @@ choice carries a `GenerateLogProbs`; `output_mode: "text"` returns decoded
 }
 ```
 
-- `content` has one entry per generated token, in generation order. `content:
-  null` is the normal state when no per-token candidates were requested, not an
-  error.
-- `top_logprobs` is a list in rank order, not a dict: JSON turns dict keys into
-  strings and the ordering would be implicit.
+- `content` has one entry per generated token, in generation order.
+- `top_logprobs` is a list, not a dict: JSON turns dict keys into strings and
+  the ordering would be implicit. It follows the engine's order: the sampled
+  token first, then the remaining candidates in rank order. With non-greedy
+  sampling the sampled token can sit outside the top k (for example ranks
+  `[5, 1, 2]` at `logprobs=2`); it then takes one of the `logprobs` slots and
+  the rank-k candidate is left out, as on the OpenAI endpoints.
 - There is no `token` or `bytes` field. The generate server has no tokenizer;
   [derender](derenderer.md) fills those in when it converts the response to the
   OpenAI shapes.
