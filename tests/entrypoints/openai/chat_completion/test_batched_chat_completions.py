@@ -26,6 +26,7 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
     BatchChatCompletionRequest,
 )
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
+from vllm.exceptions import VLLMValidationError
 from vllm.outputs import CompletionOutput, RequestOutput
 from vllm.renderers.online_renderer import OnlineRenderer
 from vllm.v1.engine.async_llm import AsyncLLM
@@ -385,3 +386,19 @@ async def test_batched_harmony_response_format_uses_structural_tag() -> None:
     assert len(calls) == 2
     for call in calls:
         assert call.args[1].structured_outputs.structural_tag is not None
+
+
+@pytest.mark.skip_global_cleanup
+def test_batch_rejects_kv_transfer_prompt_token_ids():
+    """One pre-tokenized prompt cannot stand in for every conversation."""
+    with pytest.raises(
+        VLLMValidationError, match=r"parameter=kv_transfer_params\.prompt_token_ids"
+    ):
+        BatchChatCompletionRequest(
+            model="test-model",
+            messages=[
+                [{"role": "user", "content": "first"}],
+                [{"role": "user", "content": "second"}],
+            ],
+            kv_transfer_params={"prompt_token_ids": [10, 20, 30]},
+        )
