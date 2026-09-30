@@ -338,8 +338,8 @@ class HarmonyParser(DelegatingParser):
             repaired_header = False
             try:
                 self._harmony_parser.process(token_id)
-            except HarmonyError as error:
-                repaired_header = self._repair_malformed_header(error, token_id)
+            except HarmonyError:
+                repaired_header = self._repair_malformed_header(token_id)
                 if not repaired_header:
                     continue
             channel = self._harmony_parser.current_channel
@@ -377,47 +377,90 @@ class HarmonyParser(DelegatingParser):
             reasoning_token_count=reasoning_token_count,
         )
 
-    def _repair_malformed_header(self, error: HarmonyError, token_id: int) -> bool:
-        if (
-            not str(error)
-            .lower()
-            .startswith("unexpected tokens remaining in message header")
-        ):
-            return False
+    def _repair_malformed_header(self, token_id: int) -> bool:
+        """Repair duplicated metadata sampled into a tool-call content type.
 
+        A well-formed tool header ends with::
+
+            commentary to=python <|constrain|>code
+
+        In a long tool-calling run, the model instead sampled::
+
+            commentary to=python <|constrain|>commentary to=assistant
+            <|constrain|>analysis to=python code
+
+        This corruption occurred with both exact ``oss-harmony`` rendering and
+        the compatibility header ordering, so changing prompt rendering cannot
+        prevent it. Recovery is attempted only after Harmony has already
+        rejected a token; valid input is therefore never re-encoded.
+
+        The current message may start at the latest ``<|start|>`` retained
+        after an earlier rejected header. The first channel after that boundary
+        starts the assistant-specific part of the header. The initial assistant
+        message can omit ``<|start|>`` because Harmony is primed with its role;
+        in that case the first channel starts the header. Everything before the
+        first ``<|constrain|>`` is preserved, and the rest is replaced by the
+        final ``code`` or ``json`` token.
+
+        Dropping sampled tokens is destructive, so the discarded section must
+        contain at least one recognizable duplicate of channel or recipient
+        metadata and no possible authored content. Replaying the corrected
+        header through a fresh assistant parser is necessary because Harmony
+        moves the failed parser out of its header state before raising. The new
+        parser resets its token and message history, stream state, current
+        metadata, and content delta. Earlier completed messages have already
+        been emitted, so only the corrected current header is replayed.
+
+        Args:
+            token_id: The token that Harmony rejected.
+
+        Returns:
+            ``True`` if a recognized malformed header was repaired and replayed;
+            otherwise ``False``.
+
+        """
         encoding = get_encoding()
         message_token = encoding.encode("<|message|>", allowed_special="all")[0]
         if token_id != message_token:
             return False
 
-        header_tokens = self._current_message_tokens.copy()
+        current_message_tokens = self._current_message_tokens.copy()
         start_token = encoding.encode("<|start|>", allowed_special="all")[0]
         channel_token = encoding.encode("<|channel|>", allowed_special="all")[0]
-        if start_token in header_tokens:
+        if start_token in current_message_tokens:
+            # Failed messages are not cleared from `_current_message_tokens`.
+            # Harmony accepts the next start token, so its last occurrence is
+            # the boundary of the header that just failed, not an earlier one.
             start_index = (
-                len(header_tokens) - 1 - header_tokens[::-1].index(start_token)
+                len(current_message_tokens)
+                - 1
+                - current_message_tokens[::-1].index(start_token)
             )
             try:
-                channel_index = header_tokens.index(channel_token, start_index + 1)
-            except ValueError:
-                return False
-        else:
-            try:
-                channel_index = (
-                    len(header_tokens) - 1 - header_tokens[::-1].index(channel_token)
+                channel_index = current_message_tokens.index(
+                    channel_token, start_index + 1
                 )
             except ValueError:
                 return False
-        header_tokens = header_tokens[channel_index:]
+        else:
+            # The assistant role primes Harmony in its header state, so the
+            # first completion message starts directly with its channel.
+            try:
+                channel_index = current_message_tokens.index(channel_token)
+            except ValueError:
+                return False
+        channel_section_tokens = current_message_tokens[channel_index:]
 
         constrain_token = encoding.encode("<|constrain|>", allowed_special="all")[0]
         try:
-            constrain_index = header_tokens.index(constrain_token)
+            constrain_index = channel_section_tokens.index(constrain_token)
         except ValueError:
             return False
 
-        header_prefix = encoding.decode(header_tokens[:constrain_index])
-        content_type = encoding.decode(header_tokens[constrain_index + 1 :])
+        header_prefix = encoding.decode(channel_section_tokens[:constrain_index])
+        malformed_section = encoding.decode(
+            channel_section_tokens[constrain_index + 1 :]
+        )
         channels = ("analysis", "commentary", "final")
         recipient_marker = " to="
         recipient = (
@@ -426,24 +469,31 @@ class HarmonyParser(DelegatingParser):
             else None
         )
         parts = (
-            content_type.replace("<|channel|>", " ")
+            malformed_section.replace("<|channel|>", " ")
             .replace("<|constrain|>", " ")
             .split()
         )
-        if (
-            len(parts) < 2
-            or parts[-1] not in ("code", "json")
-            or any(
-                part not in channels
-                and part != recipient
-                and not part.startswith("to=")
-                for part in parts[:-1]
-            )
+        # A lone `code` is already valid and has no duplicate metadata to drop.
+        if len(parts) < 2:
+            return False
+        # In every observed corruption the real type is last; `analysis text`
+        # is rejected because only the observed tool types are safe to restore.
+        content_type = parts[-1]
+        if content_type not in ("code", "json"):
+            return False
+        # Accept only recognizable metadata before the type. For example,
+        # `analysis to=python code` is safe, while `analysis authored code`
+        # might discard model-authored text and must be rejected.
+        if any(
+            part not in channels and part != recipient and not part.startswith("to=")
+            for part in parts[:-1]
         ):
             return False
-        content_type = parts[-1]
+
+        # Retain the channel/recipient prefix and first constrain marker, then
+        # replay `<|message|>` so the fresh parser enters content state.
         corrected_tokens = [
-            *header_tokens[: constrain_index + 1],
+            *channel_section_tokens[: constrain_index + 1],
             *encoding.encode(content_type),
         ]
 
