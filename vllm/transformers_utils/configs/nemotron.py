@@ -15,25 +15,24 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Nemotron model configuration"""
+"""Nemotron model configuration."""
 
-from transformers import PretrainedConfig
+from transformers import PreTrainedConfig
 from transformers.utils import logging
 
 logger = logging.get_logger(__name__)
 
 
-class NemotronConfig(PretrainedConfig):
-    r"""
-    This is the configuration class to store the configuration of a
+class NemotronConfig(PreTrainedConfig):
+    r"""This is the configuration class to store the configuration of a
     [`NemotronModel`]. It is used to instantiate a Nemotron model
     according to the specified arguments, defining the model architecture.
     Instantiating a configuration with the defaults will yield a similar
     configuration to that of the Nemotron-8B.
 
-    Configuration objects inherit from [`PretrainedConfig`] and can be
+    Configuration objects inherit from [`PreTrainedConfig`] and can be
     used to control the model outputs. Read the documentation from
-    [`PretrainedConfig`] for more information.
+    [`PreTrainedConfig`] for more information.
 
 
     Args:
@@ -114,7 +113,9 @@ class NemotronConfig(PretrainedConfig):
     >>> model = NemotronModel(configuration)
     >>> # Accessing the model configuration
     >>> configuration = model.config
-    ```"""
+    ```
+
+    """
 
     model_type = "nemotron"
     keys_to_ignore_at_inference = ["past_key_values"]
@@ -193,9 +194,7 @@ class NemotronConfig(PretrainedConfig):
         )
 
     def _rope_parameters_validation(self):
-        """
-        Validate the `rope_parameters` configuration.
-        """
+        """Validate the `rope_parameters` configuration."""
         if self.rope_parameters is None:
             return
 

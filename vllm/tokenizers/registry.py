@@ -145,13 +145,6 @@ def resolve_tokenizer_args(
         else:
             assert_never(runner_type)
 
-    if tokenizer_mode == "slow":
-        if kwargs.get("use_fast", False):
-            raise ValueError("Cannot use the fast tokenizer in slow tokenizer mode.")
-
-        tokenizer_mode = "hf"
-        kwargs["use_fast"] = False
-
     # Try to use official Mistral tokenizer if possible
     if (
         tokenizer_mode == "auto"
