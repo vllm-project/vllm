@@ -1476,15 +1476,17 @@ class ZenCPUExpertsInt8(mk.FusedMoEExpertsModular):
             "ZenCPUExpertsInt8 requires per-channel weight scales on the layer."
         )
         num_experts = self.w1_scale.shape[0]
-        self._w1_scale_bf16 = (
+        # ZenDNN's fast routed MoE kernel only accepts f32 expert scales; bf16
+        # silently drops the layer onto the slower per-expert path.
+        self._w1_scale_f32 = (
             self.w1_scale.detach()
-            .to(torch.bfloat16)
+            .to(torch.float32)
             .reshape(num_experts, -1)
             .contiguous()
         )
-        self._w2_scale_bf16 = (
+        self._w2_scale_f32 = (
             self.w2_scale.detach()
-            .to(torch.bfloat16)
+            .to(torch.float32)
             .reshape(num_experts, -1)
             .contiguous()
         )
@@ -1611,8 +1613,8 @@ class ZenCPUExpertsInt8(mk.FusedMoEExpertsModular):
             topk_ids.to(torch.int32).contiguous(),
             apply_router_weight_on_input,  # skip_weighted
             str(activation.value).lower(),
-            self._w1_scale_bf16,
-            self._w2_scale_bf16,
+            self._w1_scale_f32,
+            self._w2_scale_f32,
         )
 
 
