@@ -110,6 +110,10 @@ identify tokens by integer ID rather than by the OpenAI string token. With
   sampling the sampled token can sit outside the top k (for example ranks
   `[5, 1, 2]` at `logprobs=2`); it then takes one of the `logprobs` slots and
   the rank-k candidate is left out, as on the OpenAI endpoints.
+- `rank` is the token's rank in the vocabulary distribution (1 = most likely)
+  on every entry, the sampled one included; a top-k candidate's rank is its
+  top-k position. The list is not sorted by it, so sort by `rank` if you need
+  rank order.
 - There is no `token` or `bytes` field. The generate server has no tokenizer;
   [derender](derenderer.md) fills those in when it converts the response to the
   OpenAI shapes.
