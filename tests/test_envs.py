@@ -272,6 +272,21 @@ def test_gdn_decode_kernel_env(monkeypatch: pytest.MonkeyPatch):
             env_func()
 
 
+def test_lora_deterministic_split_k_env(monkeypatch: pytest.MonkeyPatch):
+    env_func = environment_variables["VLLM_LORA_DETERMINISTIC_SPLIT_K"]
+    monkeypatch.delenv("VLLM_LORA_DETERMINISTIC_SPLIT_K", raising=False)
+    assert env_func() == 0
+
+    for value in ("0", "8"):
+        monkeypatch.setenv("VLLM_LORA_DETERMINISTIC_SPLIT_K", value)
+        assert env_func() == int(value)
+
+    for value in ("4", "16", "eight"):
+        monkeypatch.setenv("VLLM_LORA_DETERMINISTIC_SPLIT_K", value)
+        with pytest.raises(ValueError, match="VLLM_LORA_DETERMINISTIC_SPLIT_K"):
+            env_func()
+
+
 class TestEnvListWithChoices:
     """Test cases for env_list_with_choices function."""
 
