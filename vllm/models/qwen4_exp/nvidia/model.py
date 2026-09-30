@@ -13,6 +13,7 @@ from vllm.distributed import get_pp_group
 from vllm.model_executor.layers.fused_moe.utils import (
     is_model_fused_shared_expert_compatible,
 )
+from vllm.model_executor.layers.fusion.mm_input_norm import build_mm_input_norm
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn import (
     QwenGatedDeltaNetAttention,
@@ -79,6 +80,7 @@ from ..common.mtp import make_mtp_hidden_buffer
 from ..config import ATTENTION_LAYER_TYPES, QSA_LAYER_TYPE, Qwen4ExpConfig
 from .hyperconnection import GatedResidual, HyperConnectionConfig
 from .low_latency_gemm import enable_qwen4_exp_low_latency_gemm
+from .ops.cute_dsl.hc_down_silu import request_hc_down_silu_warmup
 from .ple_layer import Qwen4ExpPLELayer
 from .qsa import Qwen4ExpQSAAttention
 
@@ -673,6 +675,16 @@ class Qwen4ExpForCausalLM(
         )
         self.set_moe_parameters(self.model.layers)
         enable_qwen4_exp_low_latency_gemm(self, self.model_config.dtype)
+        if self.model_config.dtype == torch.bfloat16:
+            # Precompile the fused HC down+SiLU kernels for every CUDA-graph
+            # capture size in the fused dispatch range, so no CuTe-DSL JIT
+            # happens during graph capture.
+            request_hc_down_silu_warmup(
+                vllm_config.compilation_config.cudagraph_capture_sizes or (),
+                self.config.hc_lowrank,
+                self.config.hc_count,
+                self.config.hidden_size * self.config.hc_count,
+            )
 
     @staticmethod
     def get_model_state_cls():
@@ -915,6 +927,7 @@ class Qwen4ExpForConditionalGeneration(
                     config.vision_config,
                     norm_eps=config.text_config.rms_norm_eps,
                     quant_config=quant_config,
+                    input_norm=build_mm_input_norm(self.model_config),
                     prefix=maybe_prefix(prefix, "visual"),
                 )
 

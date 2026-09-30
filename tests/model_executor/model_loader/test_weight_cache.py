@@ -12,6 +12,8 @@ import subprocess
 import sys
 import tempfile
 import threading
+import urllib.error
+import urllib.request
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -20,6 +22,7 @@ import pytest
 from vllm import SamplingParams
 from vllm.assets.image import ImageAsset
 from vllm.platforms import current_platform
+from vllm.utils.network_utils import get_open_port
 
 
 class WeightCacheDaemon:
@@ -33,6 +36,7 @@ class WeightCacheDaemon:
     ):
         # Short base path: Unix socket paths are limited to ~107 characters.
         self.socket_dir = tempfile.mkdtemp(prefix="vllm_ipc_")
+        self.health_port = get_open_port()
         self._cmd = [
             sys.executable,
             "-m",
@@ -45,6 +49,10 @@ class WeightCacheDaemon:
             "--weight-cache-socket-dir",
             self.socket_dir,
             "--enforce-eager",
+            "--weight-cache-health-host",
+            "127.0.0.1",
+            "--weight-cache-health-port",
+            str(self.health_port),
             *(extra_args or []),
         ]
         self._proc: subprocess.Popen | None = None
@@ -62,6 +70,16 @@ class WeightCacheDaemon:
     def _drain_stderr(self) -> None:
         assert self._proc is not None and self._proc.stderr is not None
         self._proc.stderr.read()
+
+    def check_health(self) -> None:
+        url = f"http://127.0.0.1:{self.health_port}/health"
+        try:
+            with urllib.request.urlopen(url, timeout=5) as response:
+                assert response.status == 200
+        except urllib.error.HTTPError as error:
+            raise AssertionError(
+                f"Weight cache daemon is not ready: HTTP {error.code}"
+            ) from error
 
     def _stop(self) -> None:
         assert self._proc is not None
@@ -200,6 +218,7 @@ def test_ipc_cache_cold_start_and_warm_restart(vllm_runner, case: ModelCase):
         extra_args=case.daemon_args,
     ) as d:
         warm_outputs = generate(vllm_runner, case, d.socket_dir, fallback=False)
+        d.check_health()
         # Warm restart: a second engine lifetime against the same daemon.
         restart_outputs = generate(vllm_runner, case, d.socket_dir, fallback=False)
 
@@ -231,12 +250,12 @@ def test_daemon_places_tp_and_dp_ranks_on_local_gpus():
     from vllm.model_executor.model_loader.weight_cache.daemon import plan_local_ranks
 
     tp_second_node = _parallel(tensor_parallel_size=8, nnodes=2, node_rank=1)
-    assert plan_local_ranks(tp_second_node) == [(i, 0, 4 + i) for i in range(4)]
+    assert plan_local_ranks(tp_second_node) == [(i, 0, 0, 4 + i) for i in range(4)]
 
     dp_third_node = _parallel(
         data_parallel_size=16, data_parallel_size_local=4, data_parallel_rank=8
     )
-    assert plan_local_ranks(dp_third_node) == [(i, 8 + i, 0) for i in range(4)]
+    assert plan_local_ranks(dp_third_node) == [(i, 8 + i, 0, 0) for i in range(4)]
 
     dp_tp = _parallel(
         tensor_parallel_size=2,
@@ -244,29 +263,43 @@ def test_daemon_places_tp_and_dp_ranks_on_local_gpus():
         data_parallel_size_local=2,
         data_parallel_rank=2,
     )
-    assert plan_local_ranks(dp_tp) == [(0, 2, 0), (1, 2, 1), (2, 3, 0), (3, 3, 1)]
+    assert plan_local_ranks(dp_tp) == [
+        (0, 2, 0, 0),
+        (1, 2, 0, 1),
+        (2, 3, 0, 0),
+        (3, 3, 0, 1),
+    ]
 
     # DP + nnodes: node-local TP replicas
     dp_tp_node0 = _parallel(tensor_parallel_size=8, data_parallel_size=2, nnodes=2)
-    assert plan_local_ranks(dp_tp_node0) == [(i, 0, i) for i in range(8)]
+    assert plan_local_ranks(dp_tp_node0) == [(i, 0, 0, i) for i in range(8)]
     dp_tp_node1 = _parallel(
         tensor_parallel_size=8, data_parallel_size=2, nnodes=2, node_rank=1
     )
-    assert plan_local_ranks(dp_tp_node1) == [(i, 1, i) for i in range(8)]
+    assert plan_local_ranks(dp_tp_node1) == [(i, 1, 0, i) for i in range(8)]
 
     # DP + nnodes: TP group spans nodes (TP8 x DP2 on 4 nodes)
     tp_span_node1 = _parallel(
         tensor_parallel_size=8, data_parallel_size=2, nnodes=4, node_rank=1
     )
-    assert plan_local_ranks(tp_span_node1) == [(i, 0, 4 + i) for i in range(4)]
+    assert plan_local_ranks(tp_span_node1) == [(i, 0, 0, 4 + i) for i in range(4)]
     tp_span_node2 = _parallel(
         tensor_parallel_size=8, data_parallel_size=2, nnodes=4, node_rank=2
     )
-    assert plan_local_ranks(tp_span_node2) == [(i, 1, i) for i in range(4)]
+    assert plan_local_ranks(tp_span_node2) == [(i, 1, 0, i) for i in range(4)]
 
     # DP + nnodes: several DP replicas per node (TP4 x DP4 on 2 nodes)
     dp_multi_node0 = _parallel(tensor_parallel_size=4, data_parallel_size=4, nnodes=2)
-    assert plan_local_ranks(dp_multi_node0) == [(i, i // 4, i % 4) for i in range(8)]
+    assert plan_local_ranks(dp_multi_node0) == [(i, i // 4, 0, i % 4) for i in range(8)]
+
+    # PP adds one daemon placement per stage while preserving TP rank order.
+    pp_tp = _parallel(tensor_parallel_size=2, pipeline_parallel_size=2)
+    assert plan_local_ranks(pp_tp) == [
+        (0, 0, 0, 0),
+        (1, 0, 0, 1),
+        (2, 0, 1, 0),
+        (3, 0, 1, 1),
+    ]
 
 
 def test_daemon_rejects_unmappable_parallelism():
@@ -283,8 +316,7 @@ def test_daemon_rejects_unmappable_parallelism():
     _reject_unsupported_parallelism(
         _parallel(tensor_parallel_size=4, data_parallel_size=4, nnodes=2)
     )
-    with pytest.raises(ValueError, match="pipeline"):
-        _reject_unsupported_parallelism(_parallel(pipeline_parallel_size=2))
+    _reject_unsupported_parallelism(_parallel(pipeline_parallel_size=2))
     with pytest.raises(ValueError, match="evenly divide"):
         _reject_unsupported_parallelism(_parallel(tensor_parallel_size=3, nnodes=2))
     with pytest.raises(ValueError, match="evenly divide"):
@@ -316,6 +348,24 @@ def test_weight_cache_key_distinguishes_dp_ranks():
         vllm_version="v",
         dp_size=16,
         dp_rank=3,
+        pp_size=2,
+        pp_rank=1,
     )
     assert key.mismatched_fields(replace(key, dp_rank=4)) == ["dp_rank"]
     assert key.mismatched_fields(replace(key, dp_size=8, dp_rank=3)) == ["dp_size"]
+    assert key.mismatched_fields(replace(key, pp_rank=0)) == ["pp_rank"]
+
+
+def test_ipc_loader_copy_mode_reports_no_external_weight_memory():
+    """Copy mode clones the weights into the engine, so nothing is external
+    (vllm_config is never touched)."""
+    from vllm.config import LoadConfig
+    from vllm.model_executor.model_loader.weight_cache.ipc_loader import (
+        IpcModelLoader,
+    )
+
+    copy_mode = LoadConfig(
+        load_format="ipc_cache", model_loader_extra_config={"mode": "copy"}
+    )
+    loader = IpcModelLoader(copy_mode)
+    assert loader.get_external_weight_memory(None) == 0  # type: ignore[arg-type]
