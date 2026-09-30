@@ -34,6 +34,9 @@
 ###############################################################################
 set -o pipefail
 
+# shellcheck source=.buildkite/scripts/rocm/build-config.sh
+source "$(dirname "${BASH_SOURCE[0]}")/../rocm/build-config.sh" || exit $?
+
 : "${BUILDKIT_PROGRESS:=plain}"
 : "${TERM:=xterm-256color}"
 : "${FORCE_COLOR:=1}"
@@ -106,6 +109,10 @@ clear_ci_orchestration_env() {
     VLLM_CI_REQUIRE_WORKSPACE_MOUNT \
     VLLM_TEST_COMMANDS \
     VLLM_CI_BRANCH \
+    CI_ROCM_DOCKERFILE_BASE \
+    CI_ROCM_DOCKERFILE \
+    ROCM_BASE_DOCKERFILE \
+    CI_BASE_DOCKERFILE \
     VLLM_CI_BASE_IMAGE \
     VLLM_CI_FALLBACK_IMAGE \
     VLLM_CI_DOCKER_DISABLED \
@@ -119,18 +126,6 @@ clear_ci_orchestration_env() {
     VLLM_CI_USE_ARTIFACTS \
     VLLM_CI_RESULTS_ROOT \
     VLLM_ALLOW_DEPRECATED_BEAM_SEARCH
-}
-
-cleanup_network() {
-  local max_nodes=${NUM_NODES:-2}
-  for node in $(seq 0 $((max_nodes - 1))); do
-    if docker ps -a -q -f name="node${node}" | grep -q .; then
-      docker stop "node${node}" || true
-    fi
-  done
-  if docker network ls | grep -q docker-net; then
-    docker network rm docker-net || true
-  fi
 }
 
 amd_ci_teardown_log() {
@@ -237,6 +232,9 @@ prepare_artifact_image() {
   metadata_file=$(find "${artifact_work_dir}" -name "ci-base-image.txt" -type f | head -1)
   if [[ -n "${metadata_file}" && -s "${metadata_file}" ]]; then
     base_image=$(tr -d '[:space:]' < "${metadata_file}")
+  elif using_custom_rocm_dockerfiles; then
+    echo "Custom ROCm ci_base metadata is missing; using the full CI image"
+    return 1
   fi
 
   echo "--- Preparing local ROCm test image"
@@ -605,6 +603,33 @@ initialize_native_environment() {
     mkdir -p "${HF_XET_CACHE}" || return 1
     echo "Configured hf-xet for shared ${hf_fstype} cache at ${HF_HOME}"
   fi
+}
+
+check_dpx_gpu_exclusivity() {
+  local devices=(/dev/dri/renderD*)
+  local device_id lock_status
+
+  if [[ "${#devices[@]}" -ne 1 || ! -c "${devices[0]}" ]]; then
+    echo "DPX guard requires exactly one render device; refusing to start tests." >&2
+    return 1
+  fi
+  # This queue mounts the same host-local HF cache into every pod on the node.
+  if ! mountpoint -q "${HF_HOME}"; then
+    echo "DPX guard requires the shared HF cache mount; refusing to start tests." >&2
+    return 1
+  fi
+  device_id=$(stat -Lc '%t-%T' "${devices[0]}") || return 1
+  mkdir -p "${HF_HOME}/.vllm-dpx-locks" || return 1
+  # Hold the descriptor through workload and teardown; never delete the file.
+  exec {dpx_gpu_lock_fd}>>"${HF_HOME}/.vllm-dpx-locks/${device_id}.lock" || return 1
+  flock -n -E 75 "${dpx_gpu_lock_fd}" && return 0
+  lock_status=$?
+  if [[ "${lock_status}" -eq 75 ]]; then
+    echo "DPX GPU collision: ${devices[0]} (${device_id}) is already locked by another CI job; refusing to start tests." >&2
+  else
+    echo "DPX GPU lock failed (status ${lock_status}); refusing to start tests." >&2
+  fi
+  return 1
 }
 
 run_native_preflight() {
@@ -1168,15 +1193,15 @@ collect_rocm_failure_diagnostics() {
     # Bus data identifies a card within the public node without publishing its
     # persistent UUID, serial number, or process list.
     run_failure_diagnostic "${diagnostics_path}" "${probe_deadline}" \
-      amd-smi static -b -g all
+      amd-smi static --bus --gpu all
     run_failure_diagnostic "${diagnostics_path}" "${probe_deadline}" \
-      amd-smi metric -e -k -P -x -g all
+      amd-smi metric --ecc --ecc-blocks --pcie --gpu all
     run_failure_diagnostic "${diagnostics_path}" "${probe_deadline}" \
-      amd-smi bad-pages -p -r -u -g all
+      amd-smi static --ras --gpu all
     run_failure_diagnostic "${diagnostics_path}" "${probe_deadline}" \
-      amd-smi metric -p -t -u -m -v -g all
+      amd-smi metric --power --temperature --usage --mem-usage --gpu all
     run_failure_diagnostic "${diagnostics_path}" "${probe_deadline}" \
-      amd-smi xgmi -l -g all
+      amd-smi xgmi --link-status --gpu all
   elif [[ "${amd_diagnostics_expected_gpu_count}" != "0" ]] \
     && command -v rocm-smi >/dev/null 2>&1; then
     run_failure_diagnostic "${diagnostics_path}" "${probe_deadline}" rocm-smi \
@@ -1487,6 +1512,10 @@ if is_native_runtime; then
     echo "Failed to initialize the native test environment"
     exit 1
   fi
+  if [[ "${BUILDKITE_AGENT_META_DATA_QUEUE:-}" == *dpx* \
+    && "${VLLM_CI_EXPECTED_GPU_COUNT:-1}" != "0" ]]; then
+    check_dpx_gpu_exclusivity || exit 1
+  fi
   if [[ "${commands}" == *python_only_compile.sh* ]]; then
     # This no-GPU job validates the ROCm precompiled/editable install path,
     # rather than CPU runtime platform selection.
@@ -1614,6 +1643,13 @@ fi
 
 echo "Final commands: $commands"
 
+# Match native CPU jobs even when the container can see AMD devices.
+cpu_platform_env=()
+if [[ "${VLLM_CI_EXPECTED_GPU_COUNT:-1}" == "0" \
+  && "$commands" != *python_only_compile.sh* ]]; then
+  cpu_platform_env=(-e "VLLM_TARGET_DEVICE=cpu")
+fi
+
 standalone_merge_base_env=()
 if [[ "$commands" == *python_only_compile.sh* ]]; then
   # The ROCm test image often ships /vllm-workspace without .git. Resolve the
@@ -1704,13 +1740,11 @@ if is_multi_node "$commands"; then
 
     /bin/bash -c "${composite_command}"
     exit_code=$?
-    cleanup_network
     handle_pytest_exit "$exit_code"
   else
     echo "Multi-node job detected but failed to parse bracket command syntax."
     echo "Expected format: prefix ; [node0_cmd1, node0_cmd2] && [node1_cmd1, node1_cmd2]"
     echo "Got: $commands"
-    cleanup_network
     exit 111
   fi
 else
@@ -1773,6 +1807,7 @@ else
     -e "VLLM_CACHE_ROOT=${CONTAINER_CACHE_ROOT}/vllm" \
     -e "XDG_CACHE_HOME=${CONTAINER_CACHE_ROOT}/xdg" \
     -e "PYTORCH_ROCM_ARCH=" \
+    "${cpu_platform_env[@]}" \
     "${standalone_merge_base_env[@]}" \
     --name "${container_name}" \
     "${image_name}" \

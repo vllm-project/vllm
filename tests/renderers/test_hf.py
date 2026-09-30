@@ -11,6 +11,7 @@ from vllm.exceptions import VLLMValidationError
 from vllm.renderers.hf import (
     _consolidate_system_messages,
     _convert_developer_to_system,
+    _detect_content_format,
     _detect_developer_role_support,
     _get_hf_base_chat_template_params,
     _template_error_reason,
@@ -122,7 +123,7 @@ def test_no_load_chat_template_literallike():
 )
 @pytest.mark.parametrize("use_tools", [True, False])
 def test_resolve_chat_template(sample_json_schema, model, use_tools):
-    """checks that chat_template is a dict type for HF models."""
+    """Checks that chat_template is a dict type for HF models."""
     model_info = HF_EXAMPLE_MODELS.find_hf_info(model)
     model_info.check_available_online(on_fail="skip")
 
@@ -195,7 +196,7 @@ def test_resolve_chat_template(sample_json_schema, model, use_tools):
     ],
 )
 def test_resolve_chat_template_kwargs(sample_json_schema, model, expected_kwargs):
-    """checks that chat_template is a dict type for HF models."""
+    """Checks that chat_template is a dict type for HF models."""
     model_info = HF_EXAMPLE_MODELS.find_hf_info(model)
     model_info.check_available_online(on_fail="skip")
 
@@ -361,6 +362,66 @@ def test_resolve_chat_template_kwargs_with_template_name():
     assert "unknown_param" not in resolved
 
 
+@pytest.mark.parametrize(
+    ("chat_template", "expected_format"),
+    [
+        (
+            """
+            {% macro render_message(role, message_content) %}
+              {% for item in message_content %}{{ item['type'] }}{% endfor %}
+            {% endmacro %}
+            {% for message in messages %}
+              {{ render_message(message['role'], message['content']) }}
+            {% endfor %}
+            """,
+            "openai",
+        ),
+        (
+            """
+            {% macro render_message(role, message_content) %}
+              {% for item in message_content %}{{ item['type'] }}{% endfor %}
+            {% endmacro %}
+            {% for message in messages %}
+              {{ render_message(
+                  role=message['role'],
+                  message_content=message['content'],
+              ) }}
+            {% endfor %}
+            """,
+            "openai",
+        ),
+        (
+            """
+            {% for message in messages %}
+              {% for item in message['content'] %}{{ item['type'] }}{% endfor %}
+            {% endfor %}
+            """,
+            "openai",
+        ),
+        (
+            """
+            {% macro render_message(content) %}
+              {% for item in content %}{{ item['type'] }}{% endfor %}
+            {% endmacro %}
+            {% for message in messages %}
+              {{ render_message(content=['text only']) }}
+            {% endfor %}
+            """,
+            "string",
+        ),
+        (
+            """
+            {% for message in messages %}{{ message['content'] }}{% endfor %}
+            """,
+            "string",
+        ),
+    ],
+)
+def test_detect_content_format(chat_template, expected_format):
+    """Detect content format when content is passed through a macro."""
+    assert _detect_content_format(chat_template, default="string") == expected_format
+
+
 # NOTE: Qwen2-Audio default chat template is specially defined inside
 # processor class instead of using `tokenizer_config.json`
 @pytest.mark.parametrize(
@@ -373,9 +434,11 @@ def test_resolve_chat_template_kwargs_with_template_name():
         ("fixie-ai/ultravox-v0_5-llama-3_2-1b", "string"),
         ("Qwen/Qwen2-Audio-7B-Instruct", "openai"),
         ("meta-llama/Llama-Guard-3-1B", "openai"),
+        ("XiaomiMiMo/MiMo-V2.5-Pro", "openai"),
     ],
 )
 def test_resolve_content_format_hf_defined(model, expected_format):
+    """Detect the chat template content format for built-in HF models."""
     model_info = HF_EXAMPLE_MODELS.find_hf_info(model)
     model_info.check_available_online(on_fail="skip")
 
