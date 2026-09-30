@@ -170,6 +170,7 @@ class SparseIndexerTopk(torch.nn.Module):
                 1 + (spec.num_speculative_tokens if spec is not None else 0)
             )
         self._gvr2_warmed: set[tuple[int, int, int]] = set()
+        self._gvr2_hint: torch.Tensor | None = None
         self._is_cuda = current_platform.is_cuda()
         self._has_deep_select = self._is_cuda and (
             current_platform.is_device_capability_family(100)
@@ -297,6 +298,33 @@ class SparseIndexerTopk(torch.nn.Module):
             topk_tokens,
             time.perf_counter() - start,
         )
+
+    def _gvr2_hint_rows(
+        self, num_rows: int, topk_tokens: int, device: torch.device
+    ) -> torch.Tensor:
+        """A constant ``[num_rows, topk_tokens]`` int32 hint for gvr_2.
+
+        The kernel derives k from the hint width and only uses the hint to
+        seed its sampling ladder; exactness never depends on it. A fixed
+        ``arange(k)`` row therefore stands in for the previous step's top-k,
+        which the indexer does not keep across steps.
+        """
+        hint = self._gvr2_hint
+        if (
+            hint is None
+            or hint.shape[0] < num_rows
+            or hint.shape[1] != topk_tokens
+            or hint.device != device
+        ):
+            rows = max(num_rows, self._gvr2_max_rows)
+            hint = (
+                torch.arange(topk_tokens, dtype=torch.int32, device=device)
+                .unsqueeze(0)
+                .expand(rows, topk_tokens)
+                .contiguous()
+            )
+            self._gvr2_hint = hint
+        return hint[:num_rows]
 
     @staticmethod
     def _gvr2_constraints(logits: torch.Tensor, topk_tokens: int) -> list[str]:
@@ -429,22 +457,21 @@ class SparseIndexerTopk(torch.nn.Module):
             # length as its kv length, so both seq_lens layouts map onto the
             # kernel's contract; compress_ratio stays 1 because the logits
             # and seq_lens are already in the same (possibly pooled) units.
-            # Hint-free (pre_idx=None): exact, ~10% slower than a hinted
-            # call. max_seq_len=row width keeps the call free of host syncs.
-            # The kernel needs a contiguous, 16B-aligned output and writes
-            # the -1 fill past a short row itself.
-            row_ends = self._row_ends(seq_lens, next_n, logits.shape[0]).contiguous()
+            # max_seq_len=row width keeps the call free of host syncs. The
+            # kernel needs a contiguous, 16B-aligned output and writes the
+            # -1 fill past a short row itself.
+            num_rows = logits.shape[0]
+            row_ends = self._row_ends(seq_lens, next_n, num_rows).contiguous()
             direct = topk_indices.is_contiguous() and topk_indices.data_ptr() % 16 == 0
             out = topk_indices if direct else torch.empty_like(topk_indices)
             run_varlen(
                 logits,
-                None,
+                self._gvr2_hint_rows(num_rows, topk_tokens, logits.device),
                 row_ends,
                 out,
                 next_n=1,
                 compress_ratio=1,
                 max_seq_len=logits.shape[1],
-                top_k=topk_tokens,
             )
             if not direct:
                 topk_indices.copy_(out)

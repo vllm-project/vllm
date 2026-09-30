@@ -440,11 +440,28 @@ def has_flashinfer_sparse_mla_sm120_config(num_q_heads: int, top_k: int) -> bool
 @functools.cache
 def has_flashinfer_topk_varlen_gvr2() -> bool:
     """Return ``True`` if FlashInfer ships the ``gvr_2`` varlen top-k backend
-    (self-sampling GVR V2, ``flashinfer.top_k_varlen(backend="gvr_2")``)."""
+    (self-sampling GVR V2, ``flashinfer.top_k_varlen(backend="gvr_2")``).
+
+    Feature-detected on the production entry ``run_varlen`` (FlashInfer >=
+    0.7.0: per-row ``kv_lens`` plus a capture-stable ``max_seq_len``) and the
+    band-aware ``warmup_varlen`` (``row_stride``) that the dispatcher calls.
+    """
     if not has_flashinfer():
         return False
-    mod = _get_submodule("flashinfer.topk_varlen.kernels.gvr2_topk_host")
-    return mod is not None and callable(getattr(mod, "run_varlen", None))
+    try:
+        import inspect
+
+        from flashinfer.topk_varlen.kernels import gvr2_topk_host
+
+        run_params = inspect.signature(gvr2_topk_host.run_varlen).parameters
+        warmup_params = inspect.signature(gvr2_topk_host.warmup_varlen).parameters
+    except Exception:
+        # The module imports the CuTe DSL; anything it raises means unusable.
+        return False
+    return {"pre_idx", "kv_lens", "max_seq_len"} <= set(run_params) and {
+        "num_rows_list",
+        "row_stride",
+    } <= set(warmup_params)
 
 
 @functools.cache
