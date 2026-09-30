@@ -976,7 +976,7 @@ class BaseRenderer(ABC, Generic[_T]):
         loop = asyncio.get_running_loop()
         cancelled = False
 
-        async def run_phases() -> "MultiModalInput | None":
+        async def run_phases() -> "MultiModalInput":
             state = None
             try:
                 processor, state = await loop.run_in_executor(
@@ -993,11 +993,11 @@ class BaseRenderer(ABC, Generic[_T]):
                 )
                 await state.wait_decodes_async()
                 if cancelled:
-                    return None
+                    raise asyncio.CancelledError
 
-                def finish_processing() -> "MultiModalInput | None":
+                def finish_processing() -> "MultiModalInput":
                     if cancelled:
-                        return None
+                        raise asyncio.CancelledError
                     return self._process_multimodal_phase2(processor, state)
 
                 return await loop.run_in_executor(self._mm_executor, finish_processing)
@@ -1010,11 +1010,7 @@ class BaseRenderer(ABC, Generic[_T]):
             cancelled = True
 
         operation = asyncio.create_task(run_phases())
-        result = await await_with_cancellation_drain(
-            operation, on_cancel=mark_cancelled
-        )
-        assert result is not None
-        return result
+        return await await_with_cancellation_drain(operation, on_cancel=mark_cancelled)
 
     def _process_tokens(
         self,
