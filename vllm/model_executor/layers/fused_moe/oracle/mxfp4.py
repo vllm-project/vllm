@@ -408,23 +408,26 @@ def _backend_activation_key(backend: Mxfp4MoeBackend) -> QuantKey | None:
     return None  # BF16 activation
 
 
-def _user_moe_activation_override() -> QuantKey | None:
-    """User's MoE activation override from quantization_config, or None."""
+def _user_moe_activation_override() -> tuple[QuantKey | None, bool]:
+    """Return the user's activation key and whether it was specified."""
     args = get_current_vllm_config().model_config.quantization_config
     if not isinstance(args, QuantizationConfigArgs) or args.moe is None:
-        return None
-    return args.moe.activation
+        return None, False
+    return args.moe.activation, "activation" in args.moe.fields_set
 
 
 def _resolve_activation_key(
     model_activation_key: QuantKey | None,
 ) -> QuantKey | None:
-    """Combine the model-supplied activation key with the user override.
-    Raises on conflict (both set and disagreeing)."""
-    user_override = _user_moe_activation_override()
-    if user_override is None:
+    """Combine the model-supplied activation key with the user override."""
+    user_override, is_set = _user_moe_activation_override()
+    if not is_set:
         return model_activation_key
-    if model_activation_key is None or model_activation_key == user_override:
+    if (
+        user_override is None
+        or model_activation_key is None
+        or model_activation_key == user_override
+    ):
         return user_override
     raise ValueError(
         f"checkpoint declares MoE activation={model_activation_key} but "

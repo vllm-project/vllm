@@ -49,6 +49,7 @@ from vllm.model_executor.layers.fused_moe.oracle.int_wna16 import (
 from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
     TRITON_BACKENDS,
     Mxfp4MoeBackend,
+    _resolve_activation_key,
     backend_to_kernel_cls,
     convert_gpt_oss_weight_to_mxfp4_moe_kernel_format,
     make_mxfp4_moe_kernel,
@@ -97,6 +98,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kInt8StaticTensorAsym,
     kInt8StaticTensorSym,
     kMxfp4Dynamic,
+    kMxfp4Static,
     kNvfp4Dynamic,
     kNvfp4Static,
 )
@@ -1562,6 +1564,9 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
         weight_quant_key: QuantKey,
         activation_quant_key: QuantKey | None,
     ):
+        # TODO: Remove once ocp_mx_scheme is dropped.
+        if weight_quant_key == kMxfp4Static:
+            activation_quant_key = _resolve_activation_key(activation_quant_key)
         super().__init__(moe, weight_quant_key, activation_quant_key)
         self.weight_dtype = next(
             dtype
