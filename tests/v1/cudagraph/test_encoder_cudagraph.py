@@ -259,8 +259,6 @@ def _run_packing(
         (batch_indices, path, token_budget) for every graph replay.
 
     """
-    mgr._get_item_specs = lambda mm_kwargs: specs
-    mgr._select_items = lambda mm_kwargs, indices: ({"indices": indices}, ())
     mgr.model = MagicMock()
 
     runs: list[tuple[list[int], str, int]] = []
@@ -271,8 +269,6 @@ def _run_packing(
             specs[i].get_path_output_tokens(path) for i in mm_kwargs["indices"]
         )
         return torch.zeros(n_tokens, 32)
-
-    mgr._run_budget_graph = fake_run
 
     def fake_postprocess(
         graph_outputs,
@@ -286,7 +282,16 @@ def _run_packing(
             outputs_by_orig_idx[i] = torch.zeros(per_item_out_tokens[i], 32)
 
     mgr.model.postprocess_encoder_output = fake_postprocess
-    result = mgr._execute_local({})
+    with (
+        patch.object(mgr, "_get_item_specs", lambda mm_kwargs: specs),
+        patch.object(
+            mgr,
+            "_select_items",
+            lambda mm_kwargs, indices: ({"indices": indices}, ()),
+        ),
+        patch.object(mgr, "_run_budget_graph", fake_run),
+    ):
+        result = mgr._execute_local({})
     assert len(result) == len(specs)
     return runs
 
