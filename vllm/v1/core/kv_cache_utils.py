@@ -2676,6 +2676,9 @@ def _project_kv_cache_groups_to_worker(
         worker_layer_names = [
             layer_name for layer_name in group.layer_names if layer_name in worker_spec
         ]
+        if len(worker_layer_names) == len(group.layer_names):
+            projected_groups.append(group)
+            continue
         group_spec = group.kv_cache_spec
         if worker_layer_names and isinstance(group_spec, UniformTypeKVCacheSpecs):
             group_spec = UniformTypeKVCacheSpecs(
@@ -2686,10 +2689,9 @@ def _project_kv_cache_groups_to_worker(
                 },
             )
         projected_groups.append(
-            replace(
-                group,
-                layer_names=worker_layer_names,
-                kv_cache_spec=group_spec,
+            KVCacheGroupSpec(
+                worker_layer_names,
+                group_spec,
                 is_eagle_group=group.is_eagle_group and bool(worker_layer_names),
             )
         )
