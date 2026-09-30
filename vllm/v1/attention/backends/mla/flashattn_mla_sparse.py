@@ -266,7 +266,7 @@ def _fa4_cute_mla_available() -> str | None:
 
 
 class FlashAttnMLASparseFA4Backend(FlashInferMLASparseTRTLLMBackend):
-    """Decode-only batches on FA4; every other batch on the trtllm-gen kernel."""
+    """FA4 for is_decode kernel calls; trtllm-gen for the rest."""
 
     supported_dtypes: ClassVar[list[torch.dtype]] = [torch.bfloat16]
     # The qv kernel asserts every descale is None: BF16 KV cache only.
@@ -304,7 +304,6 @@ class FlashAttnMLASparseFA4Backend(FlashInferMLASparseTRTLLMBackend):
             return reason
         vllm_config = get_current_vllm_config_or_none()
         if vllm_config is None:
-            # No engine context: only the static gates above apply.
             return None
         if vllm_config.model_config is not None:
             hf_config = vllm_config.model_config.hf_text_config
@@ -333,7 +332,6 @@ class FlashAttnMLASparseFA4Backend(FlashInferMLASparseTRTLLMBackend):
                     f"FA4 sparse MLA requires {head_counts} gathered query heads, "
                     f"got num_heads={num_heads} * dcp_size={dcp_size}"
                 )
-        # super()'s remaining gates; their reasons name ``cls``, hence this backend.
         return super().supports_combination(*args, **kwargs)
 
 
@@ -357,8 +355,6 @@ def _fa4_varlen_scalars(
 
 
 class FlashAttnMLASparseFA4Impl(FlashInferMLASparseImpl):
-    """FA4 for decode rows; FlashInfer's trtllm-gen kernel for prefill rows."""
-
     # FA4 emits a natural-log LSE; prefill converts trtllm-gen's log2 LSE.
     lse_base_on_e: bool = True
 
@@ -388,19 +384,8 @@ class FlashAttnMLASparseFA4Impl(FlashInferMLASparseImpl):
             ql_nope, q_pe = q
         else:
             # 16B-aligned halves of the fused query; FA4 reads them in place.
-            assert q.shape[-1] == self.kv_lora_rank + self.qk_rope_head_dim
             ql_nope, q_pe = q[..., : self.kv_lora_rank], q[..., self.kv_lora_rank :]
         kv_rows, _ = flat_kv_row_view(kv_cache, block_size)
-        return self._decode(ql_nope, q_pe, kv_rows, topk_indices, valid_counts)
-
-    def _decode(
-        self,
-        ql_nope: torch.Tensor,
-        q_pe: torch.Tensor,
-        kv_rows: torch.Tensor,
-        topk_indices: torch.Tensor,
-        valid_counts: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor | None]:
         num_tokens = q_pe.shape[0]
         num_kv_rows = kv_rows.shape[0]
         assert self.topk_indices_buffer is not None

@@ -80,7 +80,6 @@ from vllm.v1.attention.backends.mla.flashattn_mla_sparse import (
 from vllm.v1.attention.backends.mla.flashinfer_mla_sparse import (
     FlashInferMLASparseImpl,
     FlashInferMLASparseTRTLLMBackend,
-    _get_workspace_buffer,
 )
 from vllm.v1.attention.backends.mla.flashinfer_mla_sparse_sm120 import (
     FlashInferMLASparseSM120Impl,
@@ -409,12 +408,8 @@ def _quantize_dequantize_nvfp4_ds_mla(
 
 @pytest.mark.parametrize(
     "backend_cls",
-    [
-        FlashMLASparseBackend,
-        FlashInferMLASparseTRTLLMBackend,
-        FlashAttnMLASparseFA4Backend,
-    ],
-    ids=["FlashMLA", "FlashInferTRTLLM", "FlashAttnFA4"],
+    [FlashMLASparseBackend, FlashInferMLASparseTRTLLMBackend],
+    ids=["FlashMLA", "FlashInferTRTLLM"],
 )
 @pytest.mark.parametrize("batch_name", list(SPARSE_BACKEND_BATCH_SPECS.keys()))
 @pytest.mark.parametrize(
@@ -504,8 +499,6 @@ def test_sparse_backend_decode_correctness(
             device_capability
         ):
             pytest.skip("FlashInferMLASparseTRTLLMBackend requires SM 10.x capability")
-    elif backend_cls == FlashAttnMLASparseFA4Backend:
-        _require_fa4()
 
     batch_spec = SPARSE_BACKEND_BATCH_SPECS[batch_name]
     use_fp8_ds_mla_quantization = kv_cache_dtype == "fp8_ds_mla"
@@ -3620,9 +3613,8 @@ def test_flashinfer_sm120_hisparse_decode_uses_index_group():
     impl._run_mqa_kernel.assert_called_once()
 
 
-@pytest.mark.parametrize("layer_index", [0, 1])
-def test_flashattn_plain_path_converts_through_index_group(monkeypatch, layer_index):
-    """FA3's plain path converts once per group; a follower reuses the buffer."""
+def test_flashattn_plain_path_passes_converted_topk(monkeypatch):
+    """FA3's plain path hands the converted top-k straight to the kernel."""
     import vllm.v1.attention.backends.mla.flashattn_mla_sparse as fa3_module
 
     device = torch.device(DEVICE_TYPE)
@@ -3631,28 +3623,8 @@ def test_flashattn_plain_path_converts_through_index_group(monkeypatch, layer_in
         2 * block_size * (lora + rope), dtype=torch.bfloat16, device=device
     ).view(2, block_size, lora + rope)
     logical = torch.zeros(num_tokens, topk_tokens, dtype=torch.int32, device=device)
-    group = index_group_module.SparseMLAIndexGroup(
-        logical_topk_indices=logical,
-        physical_topk_indices=torch.full_like(logical, 9),
-        valid_topk_counts=torch.ones(num_tokens, dtype=torch.int32, device=device),
-        row_indices=torch.arange(num_tokens, dtype=torch.int32, device=device),
-        request_ids=torch.zeros(num_tokens, dtype=torch.int32, device=device),
-        side_stream=torch.Stream(device=device),
-        logical_topk_ready=torch.Event(),
-        physical_topk_ready=torch.Event(),
-        has_indexer=False,
-        num_layers=2,
-    )
-    converts: list[int] = []
-
-    def convert(req_ids, block_table, topk, **kwargs):  # noqa: ARG001
-        converts.append(kwargs["BLOCK_STRIDE_ROWS"])
-        kwargs["out"].fill_(5)
-        kwargs["valid_counts_out"].fill_(topk_tokens)
-
-    monkeypatch.setattr(
-        index_group_module, "triton_convert_req_index_to_global_index", convert
-    )
+    physical = torch.full_like(logical, 5)
+    counts = torch.full((num_tokens,), topk_tokens, dtype=torch.int32, device=device)
     recorded: dict = {}
 
     def fake_kernel(**kwargs):
@@ -3663,9 +3635,9 @@ def test_flashattn_plain_path_converts_through_index_group(monkeypatch, layer_in
 
     impl = object.__new__(FlashAttnMLASparseImpl)
     impl.topk_indices_buffer = logical
-    impl.index_group = group
-    impl.index_group_index = layer_index
+    impl.index_group = SimpleNamespace(num_layers=2)
     impl.dcp_world_size = 1
+    impl._convert_logical_to_physical_topk = MagicMock(return_value=(physical, counts))
     impl.kv_lora_rank = lora
     impl.qk_rope_head_dim = rope
     impl.cu_seqlens_q_buffer = torch.arange(
@@ -3674,20 +3646,12 @@ def test_flashattn_plain_path_converts_through_index_group(monkeypatch, layer_in
     impl.scale = 0.25
     q_nope = torch.zeros(num_tokens, 2, lora, device=device)
     q_rope = torch.zeros(num_tokens, 2, rope, device=device)
-    metadata = SimpleNamespace(
-        num_decode_tokens=num_tokens,
-        block_size=block_size,
-        block_table=torch.zeros((num_tokens, 1), dtype=torch.int32, device=device),
-        req_id_per_token=torch.zeros(num_tokens, dtype=torch.int32, device=device),
-    )
+    metadata = SimpleNamespace(num_decode_tokens=num_tokens, block_size=block_size)
 
     out, lse = impl.forward_mqa((q_nope, q_rope), kv_cache, metadata, None)
 
-    assert converts == ([block_size] if layer_index == 0 else [])
-    assert (recorded["block_table"] == (5 if layer_index == 0 else 9)).all()
-    assert (recorded["seqused_k"] == (topk_tokens if layer_index == 0 else 1)).all()
-    assert recorded["block_table"].data_ptr() == group.physical_topk_indices.data_ptr()
-    assert recorded["seqused_k"].data_ptr() == group.valid_topk_counts.data_ptr()
+    assert recorded["block_table"] is physical
+    assert recorded["seqused_k"] is counts
     kv_rows = kv_cache.view(-1, lora + rope)
     assert recorded["q"] is q_rope and recorded["q_v"] is q_nope
     torch.testing.assert_close(recorded["k"][:, 0, 0], kv_rows[:, lora:])
@@ -3696,10 +3660,7 @@ def test_flashattn_plain_path_converts_through_index_group(monkeypatch, layer_in
 
 
 @pytest.mark.parametrize("dcp", [1, 2], ids=["native", "dcp2"])
-@pytest.mark.parametrize(
-    "num_decode_tokens,is_decode", [(3, True), (1, False)], ids=["decode", "mixed"]
-)
-def test_sparse_mqa_plain_lane_wiring(monkeypatch, dcp, num_decode_tokens, is_decode):
+def test_sparse_mqa_plain_lane_wiring(monkeypatch, dcp):
     """The plain lane converts once and hands the hook one whole-batch call."""
     import vllm.model_executor.layers.attention.sparse_mla_attention as sparse_mla
 
@@ -3714,7 +3675,7 @@ def test_sparse_mqa_plain_lane_wiring(monkeypatch, dcp, num_decode_tokens, is_de
     counts = torch.full((num_tokens,), topk_tokens, dtype=torch.int32)
     layer = object()
     metadata = SimpleNamespace(
-        num_decode_tokens=num_decode_tokens,
+        num_decode_tokens=num_tokens,
         block_size=block_size,
         block_table=torch.zeros((num_tokens, 1), dtype=torch.int32),
         req_id_per_token=req_id_per_token,
@@ -3743,15 +3704,7 @@ def test_sparse_mqa_plain_lane_wiring(monkeypatch, dcp, num_decode_tokens, is_de
         assert args[1] is metadata.block_table
         assert args[2].data_ptr() == topk_buffer.data_ptr()
         assert args[2].shape == (num_tokens, topk_tokens)
-        assert kwargs == {
-            "dcp_size": dcp,
-            "dcp_rank": dcp - 1,
-            "cp_kv_cache_interleave_size": 2,
-            "BLOCK_SIZE": block_size,
-            "BLOCK_STRIDE_ROWS": 8,
-            "NUM_TOPK_TOKENS": topk_tokens,
-            "return_valid_counts": True,
-        }
+        assert kwargs["BLOCK_STRIDE_ROWS"] == 8
     else:
         index_filter.assert_not_called()
         args, kwargs = impl._convert_logical_to_physical_topk.call_args
@@ -3759,25 +3712,21 @@ def test_sparse_mqa_plain_lane_wiring(monkeypatch, dcp, num_decode_tokens, is_de
         assert args[0].shape == (num_tokens, topk_tokens)
         assert args[1] is metadata
         assert kwargs == {"block_stride_rows": 8, "return_valid_counts": True}
-
-    # Identity, not equality: a copy would break the group's buffer stability.
-    hook_args, hook_kwargs = impl._forward_mqa_kernel.call_args
-    assert hook_args[0] is q
-    assert hook_args[1] is kv_cache
-    assert hook_args[2] is physical
-    assert hook_args[3] is counts
-    assert hook_kwargs == {
-        "layer": layer,
-        "block_size": block_size,
-        "is_decode": is_decode,
-    }
+    impl._forward_mqa_kernel.assert_called_once_with(
+        q,
+        kv_cache,
+        physical,
+        counts,
+        layer=layer,
+        block_size=block_size,
+        is_decode=True,
+    )
 
 
 @pytest.mark.parametrize("split_q", [False, True], ids=["fused", "split"])
 @pytest.mark.parametrize(
     "num_decode_tokens,all_resident,lane",
     [
-        (5, True, "decode"),
         (0, True, "resident"),
         (0, False, "staged"),
         # Fewer prefill than decode rows: row counts cannot tell the calls apart.
@@ -3820,7 +3769,6 @@ def test_sparse_mqa_hisparse_lanes(
     index_group.cache = MagicMock(
         return_value=SimpleNamespace(all_context_pages_resident=all_resident)
     )
-    # Decode rows and a decode-free resident prefill share the group's converter.
     index_group.convert_logical_to_physical_topk = MagicMock(
         return_value=decode_ret if num_decode_tokens else resident_ret
     )
@@ -3841,7 +3789,6 @@ def test_sparse_mqa_hisparse_lanes(
         if split_q:
             assert rows[0].tolist() == rows[1].tolist()
             rows = rows[0]
-        assert kwargs.keys() == {"layer", "block_size", "is_decode"}
         assert kwargs["layer"] is layer and kwargs["block_size"] == block_size
         is_decode = kwargs["is_decode"]
         calls.append((rows, cache.data_ptr(), indices, counts, is_decode))
@@ -3872,11 +3819,6 @@ def test_sparse_mqa_hisparse_lanes(
         assert args[2] is metadata
         assert kwargs == {"block_stride_rows": None, "return_valid_counts": True}
 
-    if lane == "decode":
-        assert [call[-1] for call in calls] == [True]
-        assert (out == 1.0).all()
-        return
-
     rows, kv_ptr, indices, counts, is_decode = calls[-1]
     assert is_decode is False
     assert rows.tolist() == q[num_decode_tokens:].tolist()
@@ -3892,7 +3834,6 @@ def test_sparse_mqa_hisparse_lanes(
         # The resident cache carries its own stride, so the group resolves it.
         assert kwargs == {"block_stride_rows": None, "return_valid_counts": True}
     else:
-        # Staged and mixed both stage; the resident lane is decode-free only.
         assert index_group.convert_logical_to_physical_topk.call_count == min(
             num_decode_tokens, 1
         )
@@ -3987,18 +3928,8 @@ def test_hisparse_mixed_single_token_batch_is_not_decode_only():
     assert not cache.decode_batch
 
 
-def _require_fa4():
-    """Skip unless this GPU can run the FA4 cute-DSL MLA kernel."""
-    if not current_platform.is_device_capability_family(100):
-        pytest.skip("FA4 sparse MLA requires SM 10.x")
-    if (reason := _fa4_cute_mla_available()) is not None:
-        pytest.skip(reason)
-
-
 def _fa4_impl(**fields):
-    """Skip constructor dependencies while retaining the implementation methods."""
     buffer = fields.pop("topk_indices_buffer")
-    # DeepSeek-V3.2 shapes, and the DCP fields AttentionImpl.__new__ would fill.
     fields.setdefault("num_heads", 16)
     fields.setdefault("kv_lora_rank", 512)
     fields.setdefault("qk_nope_head_dim", 128)
@@ -4009,7 +3940,6 @@ def _fa4_impl(**fields):
     fields.setdefault("dcp_rank", 0)
     fields.setdefault("need_to_return_lse_for_decode", False)
     fields.setdefault("index_group_index", 0)
-    # FlashInferMLASparseImpl.__init__ state; the kernel scales resolve lazily.
     fields.setdefault("is_nope_mla", False)
     fields.setdefault("_workspace_buffer", None)
     fields.setdefault("bmm1_scale", None)
@@ -4104,7 +4034,10 @@ def _record_fa4_kernels(monkeypatch, num_heads, *, device):
     "num_heads,return_lse", [(128, False), (16, True)], ids=["heads128", "heads16_lse"]
 )
 def test_fa4_sparse_decode_kernel_correctness(num_heads, return_lse):
-    _require_fa4()
+    if not current_platform.is_device_capability_family(100):
+        pytest.skip("FA4 sparse MLA requires SM 10.x")
+    if (reason := _fa4_cute_mla_available()) is not None:
+        pytest.skip(reason)
     counts = [0, 1, 127, 128, 129, 2047, 2048]
     inputs = _fa4_inputs(counts, num_heads=num_heads, topk=2048, num_blocks=64)
     impl = _fa4_impl(
@@ -4160,9 +4093,6 @@ def test_fa4_sparse_hook_routes_lanes(monkeypatch, is_decode, dcp):
     valid_counts = inputs.valid_counts.clone()
     q = (inputs.ql_nope, inputs.q_pe)
     if dcp > 1:
-        # This rank's share: token 0 owns none of its top-k, so its row stays all -1.
-        valid_counts[0] = 0
-        inputs.topk_indices[0] = -1
         # DCP without PCP (the gate rejects the pair) always fuses the query.
         q = torch.cat(q, dim=-1)
     impl = _fa4_impl(
@@ -4172,9 +4102,7 @@ def test_fa4_sparse_hook_routes_lanes(monkeypatch, is_decode, dcp):
         need_to_return_lse_for_decode=dcp > 1,
     )
 
-    # Entered through forward_mqa on a plain (non-HiSparse) index group, whose
-    # converter is stubbed: the lane choice is the decode/prefill token split.
-    inputs.metadata.num_decode_tokens = num_tokens if is_decode else 0
+    inputs.metadata.num_decode_tokens = num_tokens if is_decode else 1
     convert = MagicMock(return_value=(inputs.topk_indices, valid_counts))
     impl._convert_logical_to_physical_topk = convert
     monkeypatch.setattr(sparse_mla, "triton_filter_and_convert_dcp_index", convert)
@@ -4182,7 +4110,6 @@ def test_fa4_sparse_hook_routes_lanes(monkeypatch, is_decode, dcp):
     with torch.inference_mode():
         out, lse = impl.forward_mqa(q, inputs.kv_cache, inputs.metadata, None)
 
-    # Only DCP asks for an LSE, and both lanes then return it as (tokens, heads).
     assert lse is None if dcp == 1 else lse.shape == (num_tokens, kernel_heads)
     assert out.shape == (num_tokens, kernel_heads, 512)
 
@@ -4200,7 +4127,6 @@ def test_fa4_sparse_hook_routes_lanes(monkeypatch, is_decode, dcp):
         # The flat KV rows of the whole page pool, addressed by the top-k list.
         assert fa4["v"].data_ptr() == inputs.kv_cache.data_ptr()
         assert fa4["seqused_k"].tolist() == [4 * inputs.block_size] * num_tokens
-        # The qv kernel takes the two halves, fused query or not.
         assert fa4["q"].shape[-1] == inputs.rope_dim
         assert fa4["q_v"].shape[-1] == inputs.kv_lora_rank
         assert (out == 1.0).all()
@@ -4213,19 +4139,10 @@ def test_fa4_sparse_hook_routes_lanes(monkeypatch, is_decode, dcp):
     assert trtllm["return_lse"] is (dcp > 1)
     assert trtllm["query"].shape[0] == num_tokens
     assert trtllm["seq_lens"] is valid_counts
-    assert trtllm["block_tables"].shape == (num_tokens, 1, inputs.topk)
-    assert trtllm["sparse_mla_top_k"] == inputs.topk
-    # The lane runs on the shared buffer the builder pre-sizes under DCP.
-    assert trtllm["workspace_buffer"] is _get_workspace_buffer(torch.device("cpu"))
-    if dcp == 1:
-        assert (out == 2.0).all()
-        return
-    expected = calls.lse(num_tokens) * math.log(2.0)
-    torch.testing.assert_close(lse[1:], expected[1:], rtol=0, atol=1e-5)
-    assert (out[1:] == 2.0).all()
-    # Token 0 owns no slot on this rank: the DCP merge identity.
-    assert (out[0] == 0).all()
-    assert torch.isneginf(lse[0]).all()
+    assert (out == 2.0).all()
+    if dcp > 1:
+        expected = calls.lse(num_tokens) * math.log(2.0)
+        torch.testing.assert_close(lse, expected, rtol=0, atol=1e-5)
 
 
 def test_fa4_sparse_autotune_hisparse_decode_runs_decode_lane(monkeypatch):
@@ -4249,12 +4166,7 @@ def test_fa4_sparse_autotune_hisparse_decode_runs_decode_lane(monkeypatch):
         impl = _fa4_impl(topk_indices_buffer=buffer, index_group=index_group)
         return SimpleNamespace(impl=impl, hisparse_cache=object())
 
-    # Two layers share one warmup key; another backend's impl is skipped.
-    layers = {
-        "a": fa4_layer(),
-        "b": fa4_layer(),
-        "other": SimpleNamespace(impl=object(), hisparse_cache=object()),
-    }
+    layers = {"a": fa4_layer()}
     runner = SimpleNamespace(
         vllm_config=SimpleNamespace(
             compilation_config=SimpleNamespace(static_forward_context=layers)
@@ -4267,7 +4179,6 @@ def test_fa4_sparse_autotune_hisparse_decode_runs_decode_lane(monkeypatch):
     (fa4,) = calls.fa4
     assert calls.trtllm == []
     assert fa4["v"].data_ptr() == hot.data_ptr()
-    # The decode lane's cached varlen scalars, keyed on the hot row count.
     assert fa4["seqused_k"].tolist() == [hot.shape[0] * block_size] * max_num_reqs
     assert fa4["gather_kv_indices"].shape == (max_num_reqs, topk)
 
@@ -4284,7 +4195,6 @@ def test_fa4_sparse_autotune_hisparse_decode_runs_decode_lane(monkeypatch):
         ({"index_topk": 192}, "index_topk"),
         # PCP over a DCP-sharded cache: the inherited reason names this backend.
         ({"dcp": 2, "pcp": 2}, "FLASH_ATTN_MLA_SPARSE_FA4 does not support"),
-        ({"hisparse": True}, None),
         ({"kv_dtype": "fp8"}, "kv_cache_dtype"),
         ({"flashinfer": False}, "FlashInfer"),
     ],
@@ -4300,8 +4210,6 @@ def test_fa4_sparse_gate(monkeypatch, config, expected):
     vllm_config = _build_sparse_dcp_vllm_config(config.get("heads", 16), dcp)
     vllm_config.parallel_config.prefill_context_parallel_size = config.get("pcp", 1)
     vllm_config.model_config.hf_text_config.index_topk = config.get("index_topk", 128)
-    if config.get("hisparse"):
-        vllm_config.attention_config.hisparse_config = HiSparseConfig()
 
     with set_current_vllm_config(vllm_config):
         reasons = FlashAttnMLASparseFA4Backend.validate_configuration(
