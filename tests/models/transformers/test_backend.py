@@ -260,7 +260,7 @@ def test_quantization(
         model,
         model_impl="auto",
         enforce_eager=True,
-        **quantization_kwargs,  # type: ignore[arg-type]
+        **quantization_kwargs,
     ) as vllm_model:
         vllm_outputs = vllm_model.generate_greedy_logprobs(
             example_prompts, max_tokens=max_tokens, num_logprobs=num_logprobs
@@ -270,7 +270,7 @@ def test_quantization(
         model,
         model_impl="transformers",
         enforce_eager=True,
-        **quantization_kwargs,  # type: ignore[arg-type]
+        **quantization_kwargs,
     ) as vllm_model:
         model_config = vllm_model.llm.llm_engine.model_config
         assert model_config.using_transformers_backend()
