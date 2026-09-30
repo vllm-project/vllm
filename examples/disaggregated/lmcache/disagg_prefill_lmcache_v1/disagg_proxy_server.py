@@ -80,7 +80,6 @@ class StatsCalculator:
 
 
 stats_calculator = StatsCalculator()
-counter = 0
 
 
 def parse_args():
@@ -106,9 +105,17 @@ async def send_request_to_service(
 ):
     """Send a request to a service using a persistent client."""
     req_data = req_data.copy()
+    req_data["stream"] = False
     req_data["max_tokens"] = 1
     if "max_completion_tokens" in req_data:
         req_data["max_completion_tokens"] = 1
+    if "stream_options" in req_data:
+        del req_data["stream_options"]
+    # These args are not supported for P: P is forced to a single token, and
+    # `min_tokens > max_tokens` is rejected by SamplingParams. They are dropped
+    # from the copy only, so the decode leg still receives the original values.
+    req_data.pop("min_tokens", None)
+    req_data.pop("min_completion_tokens", None)
 
     headers = {"Authorization": f"Bearer {os.environ.get('OPENAI_API_KEY')}"}
     response = await client.post(endpoint, json=req_data, headers=headers)
@@ -136,9 +143,6 @@ async def stream_service_response(
 
 @app.post("/v1/completions")
 async def handle_completions(request: Request):
-    global counter, stats_calculator
-    counter += 1
-
     st = time.time()
     try:
         req_data = await request.json()
@@ -173,9 +177,6 @@ async def handle_completions(request: Request):
 
 @app.post("/v1/chat/completions")
 async def handle_chat_completions(request: Request):
-    global counter, stats_calculator
-    counter += 1
-
     st = time.time()
     try:
         req_data = await request.json()
