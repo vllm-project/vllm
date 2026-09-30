@@ -290,14 +290,16 @@ def test_context_anchor_is_last_committed_normalized_feature():
         anchor_hidden=torch.full((4, 4), 123.0),
         anchor_valid=torch.ones(4, dtype=torch.bool),
     )
-    batch = SimpleNamespace(num_reqs=2, query_start_loc=torch.tensor([0, 2, 6]))
-    LiLiCorrSpeculator.prepare_context_anchor(spec, batch, torch.tensor([0, 2]))
+    LiLiCorrSpeculator.prepare_context_anchor(
+        spec, 2, torch.tensor([0, 2, 6]), torch.tensor([0, 2])
+    )
     torch.testing.assert_close(spec.anchor_hidden[:2], norm(hidden[[1, 3]]))
     assert spec.anchor_valid.tolist() == [True, True, False, False]
     assert not spec.anchor_hidden[2:].any()
     # A smaller reordered batch must not retain an old request's anchor.
-    batch = SimpleNamespace(num_reqs=1, query_start_loc=torch.tensor([0, 3]))
-    LiLiCorrSpeculator.prepare_context_anchor(spec, batch, torch.tensor([1]))
+    LiLiCorrSpeculator.prepare_context_anchor(
+        spec, 1, torch.tensor([0, 3]), torch.tensor([1])
+    )
     torch.testing.assert_close(spec.anchor_hidden[0], norm(hidden[1]))
     assert not spec.anchor_hidden[1:].any()
 
