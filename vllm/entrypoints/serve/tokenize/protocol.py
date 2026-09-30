@@ -12,12 +12,8 @@ from vllm.entrypoints.chat_utils import (
     ChatTemplateContentFormatOption,
     normalize_reasoning_content,
 )
-from vllm.entrypoints.openai.chat_completion.protocol import (
-    ChatCompletionToolsParam,
-)
-from vllm.entrypoints.openai.engine.protocol import (
-    OpenAIBaseModel,
-)
+from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionToolsParam
+from vllm.entrypoints.serve.engine.protocol import OpenAIBaseModel
 from vllm.exceptions import VLLMValidationError
 from vllm.renderers import ChatParams, TokenizeParams, merge_kwargs
 
@@ -126,6 +122,8 @@ class TokenizeChatRequest(OpenAIBaseModel):
     @model_validator(mode="before")
     @classmethod
     def check_generation_prompt(cls, data):
+        if not isinstance(data, dict):
+            return data
         if data.get("continue_final_message") and data.get("add_generation_prompt"):
             raise VLLMValidationError(
                 "Cannot set both `continue_final_message` and "
@@ -189,8 +187,7 @@ class DetokenizeResponse(OpenAIBaseModel):
 
 
 class TokenizerInfoResponse(OpenAIBaseModel):
-    """
-    Response containing tokenizer configuration
+    """Response containing tokenizer configuration
     equivalent to tokenizer_config.json
     """
 

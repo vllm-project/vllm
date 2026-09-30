@@ -16,6 +16,7 @@ from vllm.config import VllmConfig, replace
 from vllm.distributed.parallel_state import get_pp_group
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader import get_model
+from vllm.model_executor.model_loader.utils import get_draft_load_config
 from vllm.v1.worker.gpu.spec_decode.autoregressive.speculator import (
     AutoRegressiveSpeculator,
 )
@@ -27,13 +28,17 @@ def _copy_target_kv_scales(attn: nn.Module, target_attn: nn.Module) -> None:
     """Copy target KV scales while preserving their tensor representation.
 
     Default attention scales are scalar buffers, while some quantization
-    methods replace them with length-one or per-head parameters. Re-register
-    cloned buffers on the draft layer so the shared KV cache is interpreted
-    with the target's values and shapes without aliasing target parameters.
+    methods replace them with length-one or per-head parameters. Preserve the
+    draft layer's registration type so the shared KV cache is interpreted with
+    the target's values and shapes without aliasing target parameters.
     """
     for scale_name in ("_k_scale", "_v_scale"):
+        draft_scale = getattr(attn, scale_name)
         target_scale = getattr(target_attn, scale_name)
-        attn.register_buffer(scale_name, target_scale.detach().clone())
+        scale = target_scale.detach().clone()
+        if isinstance(draft_scale, nn.Parameter):
+            scale = nn.Parameter(scale, requires_grad=False)
+        setattr(attn, scale_name, scale)
     for scale_name in ("_k_scale_float", "_v_scale_float"):
         setattr(attn, scale_name, getattr(target_attn, scale_name))
     for scale_name in ("_k_scale_cpu", "_v_scale_cpu"):
@@ -57,7 +62,7 @@ class Gemma4Speculator(AutoRegressiveSpeculator):
             draft_model = get_model(
                 vllm_config=draft_vllm_config,
                 model_config=self.speculative_config.draft_model_config,
-                load_config=self.speculative_config.draft_load_config,
+                load_config=get_draft_load_config(draft_vllm_config),
             )
         self._setup_gemma4_kv_sharing(draft_model, target_attn_layer_names)
         self._share_embeddings(draft_model, target_model)
@@ -108,20 +113,19 @@ class Gemma4Speculator(AutoRegressiveSpeculator):
             return
 
         target_num_kv_shared = getattr(target_text_config, "num_kv_shared_layers", 0)
-        num_non_shared = len(target_layer_types) - target_num_kv_shared
-        target_names_by_index: dict[int, str] = {}
-        for name in target_attn_layer_names:
-            _, separator, layer_suffix = name.partition(".layers.")
-            if not separator:
-                continue
-            layer_index, _, _ = layer_suffix.partition(".")
-            if layer_index.isdigit():
-                target_names_by_index[int(layer_index)] = name
-
-        type_to_target_names: dict[str, list[str]] = defaultdict(list)
+        target_num_layers = getattr(
+            target_text_config, "num_hidden_layers", len(target_layer_types)
+        )
+        num_non_shared = target_num_layers - target_num_kv_shared
+        type_to_target_indices: dict[str, list[int]] = defaultdict(list)
         for idx, lt in enumerate(target_layer_types[:num_non_shared]):
-            if target_name := target_names_by_index.get(idx):
-                type_to_target_names[lt].append(target_name)
+            type_to_target_indices[lt].append(idx)
+
+        target_prefix = "model.layers"
+        for name in target_attn_layer_names:
+            if ".layers." in name:
+                target_prefix = name.split(".layers.")[0] + ".layers"
+                break
 
         draft_layer_types = getattr(draft_text_config, "layer_types", [])
         for draft_idx, layer in enumerate(model.model.layers):
@@ -136,7 +140,7 @@ class Gemma4Speculator(AutoRegressiveSpeculator):
                 if draft_idx < len(draft_layer_types)
                 else "full_attention"
             )
-            candidates = type_to_target_names.get(draft_layer_type, [])
+            candidates = type_to_target_indices.get(draft_layer_type, [])
             if not candidates:
                 logger.warning(
                     "No target layer of type '%s' for draft layer %d",
@@ -145,7 +149,8 @@ class Gemma4Speculator(AutoRegressiveSpeculator):
                 )
                 continue
 
-            target_layer_name = candidates[-1]
+            target_idx = candidates[-1]
+            target_layer_name = f"{target_prefix}.{target_idx}.self_attn.attn"
             attn.kv_sharing_target_layer_name = target_layer_name
 
             # KV-cache sharing aliases the cache tensor during allocation, but

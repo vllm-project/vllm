@@ -25,15 +25,15 @@ from mistral_common.protocol.instruct.tool_calls import (
 )
 from partial_json_parser.core.options import Allow
 
-from vllm.entrypoints.openai.chat_completion.protocol import (
-    ChatCompletionRequest,
-)
-from vllm.entrypoints.openai.engine.protocol import (
+from vllm.entrypoints.generate.base.protocol import (
     DeltaFunctionCall,
     DeltaMessage,
     DeltaToolCall,
     ExtractedToolCallInformation,
     StructuralTagResponseFormat,
+)
+from vllm.entrypoints.openai.chat_completion.protocol import (
+    ChatCompletionRequest,
 )
 from vllm.parser.engine.events import EventType
 from vllm.parser.engine.streaming_parser_engine import StreamingParserEngine
@@ -2045,7 +2045,6 @@ def test_content_tool_calls_transition_emits_reasoning_end(
     reasoning_encoding,
 ):
     """(CONTENT, TOOL_CALLS) must emit REASONING_END when reasoning is enabled."""
-
     cfg = mistral_config(reasoning_encoding=reasoning_encoding)
     engine = StreamingParserEngine(
         config=cfg, tokenizer=mistral_tokenizer, vocab=mistral_tokenizer.get_vocab()
@@ -2219,7 +2218,7 @@ def test_adjust_request_pre_v11_required_clears_response_format(
     mistral_pre_v11_tool_parser: MistralToolParser,
     response_format: dict,
 ) -> None:
-    """required + response_format must inject the tool schema and clear
+    """Required + response_format must inject the tool schema and clear
     response_format so the tool schema is the sole structured-output
     constraint, matching the base ToolParser (otherwise the request either
     hits the "multiple constraints" engine error or, with no constraint,

@@ -8,6 +8,8 @@ from vllm.platforms import current_platform
 from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.ops.triton_decode_attention import decode_attention_fwd
 
+pytestmark = pytest.mark.skip_global_cleanup
+
 DEVICE_TYPE = current_platform.device_type
 
 

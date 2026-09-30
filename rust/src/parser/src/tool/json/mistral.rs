@@ -7,6 +7,7 @@ use crate::tool::{Result, Tool, ToolParser, ToolParserOutput};
 const MISTRAL_CONFIG: JsonToolCallConfig = JsonToolCallConfig {
     parser_name: "Mistral",
     start_marker: "[TOOL_CALLS] [",
+    framed_start_marker: None,
     end_marker: "]",
     marker_whitespace: JsonToolCallWhitespace::Optional,
     delimiter: Some(","),
