@@ -190,6 +190,7 @@ class RequestState:
         # Routed experts accumulation (prompt + sample chunks)
         self.routed_experts_chunks: list[np.ndarray] = []
         self.sampling_mask_chunks: list[SamplingMaskLists] = []
+        self.last_hidden_states_chunks: list[torch.Tensor] = []
 
         # Stream Interval
         self.stream_interval = stream_interval
@@ -460,12 +461,17 @@ class RequestState:
         if finished and self.routed_experts_chunks:
             routed_experts = np.concatenate(self.routed_experts_chunks, axis=0)
 
+        last_hidden_states = None
+        if finished and self.last_hidden_states_chunks:
+            last_hidden_states = torch.cat(self.last_hidden_states_chunks, dim=0)
+
         return CompletionOutput(
             index=self.request_index,
             text=text,
             token_ids=token_ids,
             routed_experts=routed_experts,
             sampling_mask=sampling_mask,
+            last_hidden_states=last_hidden_states,
             logprobs=logprobs,
             cumulative_logprob=self.logprobs_processor.cumulative_logprob,
             finish_reason=str(finish_reason) if finished else None,
@@ -752,6 +758,10 @@ class OutputProcessor:
                     req_state.sampling_mask_chunks.append(
                         engine_core_output.new_sampling_mask
                     )
+                if engine_core_output.new_last_hidden_states is not None:
+                    req_state.last_hidden_states_chunks.append(
+                        engine_core_output.new_last_hidden_states
+                    )
 
                 # 3) Compute sample and prompt logprobs for request,
                 # if required.
@@ -824,6 +834,8 @@ class OutputProcessor:
             )
         if output.routed_experts is not None:
             req_state.routed_experts_chunks[-1] = output.routed_experts[:-num_dropped]
+        if output.new_last_hidden_states is not None:
+            output.new_last_hidden_states = output.new_last_hidden_states[:num_kept]
 
     def _finish_request(self, req_state: RequestState) -> None:
         req_id = req_state.request_id

@@ -279,6 +279,10 @@ class ModelConfig:
     equivalent to setting `-cc.mode=none -cc.cudagraph_mode=none`."""
     return_sampling_mask: bool = False
     """Whether to return the post-processing token support for each sample."""
+    enable_return_last_hidden_states: bool = False
+    """Whether requests may ask for the hidden state each generated token's
+    logits were computed from (`SamplingParams.return_last_hidden_states`).
+    When disabled, such requests are rejected and nothing else changes."""
     max_logprobs: int = Field(default=20, ge=-1)
     """Maximum number of log probabilities to return when `logprobs` is
     specified in `SamplingParams`. The default value comes the default for the
@@ -474,6 +478,7 @@ class ModelConfig:
             "spec_target_max_model_len",
             "enforce_eager",
             "return_sampling_mask",
+            "enable_return_last_hidden_states",
             "logprobs_mode",
             "use_fp64_gumbel",
             "enable_trace_replay",

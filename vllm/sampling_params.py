@@ -445,6 +445,13 @@ class SamplingParams(
     token IDs during decoding instead of sampling randomly. Real logprobs are
     still computed. Conflict checking is performed at the engine level."""
 
+    return_last_hidden_states: bool = False
+    """Return, for each generated token, the hidden state its logits were
+    computed from (the input to the model's `compute_logits`, which for most
+    decoder models is the last layer's output after the final norm), in
+    `CompletionOutput.last_hidden_states`. Requires the engine to be started
+    with `enable_return_last_hidden_states=True`."""
+
     @staticmethod
     def from_optional(
         n: int | None = 1,
@@ -912,6 +919,7 @@ class SamplingParams(
         self._validate_allowed_token_ids(model_config)
         self._validate_spec_decode(speculative_config)
         self._validate_diffusion(model_config)
+        self._validate_last_hidden_states(model_config)
         self._validate_structured_outputs(
             model_config, structured_outputs_config, tokenizer
         )
@@ -1191,6 +1199,19 @@ class SamplingParams(
             raise VLLMValidationError(
                 "The min_p and logit_bias sampling parameters "
                 "are not yet supported with speculative decoding."
+            )
+
+    def _validate_last_hidden_states(self, model_config: ModelConfig) -> None:
+        if (
+            self.return_last_hidden_states
+            and not model_config.enable_return_last_hidden_states
+        ):
+            raise VLLMValidationError(
+                "return_last_hidden_states requires the engine to be started "
+                "with enable_return_last_hidden_states=True "
+                "(--enable-return-last-hidden-states).",
+                parameter="return_last_hidden_states",
+                value=True,
             )
 
     def _validate_diffusion(self, model_config: ModelConfig) -> None:
