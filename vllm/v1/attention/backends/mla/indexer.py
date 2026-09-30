@@ -7,7 +7,7 @@ import numpy as np
 import torch
 
 import vllm.envs as envs
-from vllm.config import VllmConfig
+from vllm.config import VllmConfig, get_current_vllm_config_or_none
 from vllm.distributed import get_dcp_group, get_pcp_group
 from vllm.logger import init_logger
 from vllm.model_executor.warmup.jit_warmup import kernel_launcher, zip_inputs
@@ -21,6 +21,7 @@ from vllm.model_executor.warmup.jit_warmup_triton_helper import (
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.deep_gemm import (
+    PAGED_MQA_PAGE_SIZES,
     get_paged_mqa_logits_metadata,
     has_deep_gemm,
     native_next_n_supported,
@@ -203,6 +204,29 @@ class PrepareUniformDecodeKernel(
         )
 
 
+def _kv_pool_tokens_per_state(kv_cache_spec: KVCacheSpec | None) -> int | None:
+    """``index_kpool``-style tokens-per-state of a pooled indexer cache, else None.
+
+    Best source is the KV cache spec (``tokens_per_state = index_kpool`` for
+    ``Glm5NextIndexerCache``); callers that select block sizes without a spec
+    (e.g. hybrid block alignment) fall back to the model config.
+    """
+    if isinstance(kv_cache_spec, MLAAttentionSpec):
+        tokens_per_state = kv_cache_spec.tokens_per_state
+        if isinstance(tokens_per_state, int) and tokens_per_state > 1:
+            return tokens_per_state
+    vllm_config = get_current_vllm_config_or_none()
+    hf_text_config = (
+        getattr(vllm_config.model_config, "hf_text_config", None)
+        if vllm_config is not None and vllm_config.model_config is not None
+        else None
+    )
+    index_kpool = getattr(hf_text_config, "index_kpool", None)
+    if isinstance(index_kpool, int) and index_kpool > 1:
+        return index_kpool
+    return None
+
+
 class DeepseekV32IndexerBackend(AttentionBackend):
     @classmethod
     def supports_pcp(cls) -> bool:
@@ -223,7 +247,21 @@ class DeepseekV32IndexerBackend(AttentionBackend):
 
     @staticmethod
     def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int | MultipleOf]:
-        return [1, MultipleOf(16)] if current_platform.is_rocm() else [64]
+        if not current_platform.is_rocm():
+            # Non-ROCm declares the fixed 64-token kernel block.
+            return [64]
+        tokens_per_state = _kv_pool_tokens_per_state(kv_cache_spec)
+        if tokens_per_state is None:
+            return [1, MultipleOf(16)]
+        # Pooled-state deployments (GLM-5.3-Flash kpool, index_kpool = N) can
+        # only be addressed in pages of PAGED_MQA_PAGE_SIZES states: both the
+        # kpool writer and the index cache gather index page columns of
+        # ``page_size * index_kpool`` tokens. Advertising the manager block
+        # here instead would leave the block table at manager granularity while
+        # every consumer reads it at pool-page granularity (see
+        # Glm5NextIndexerCache.storage_block_size) - silently aliasing the
+        # index cache (#54359, #56380, #58858).
+        return [page * tokens_per_state for page in PAGED_MQA_PAGE_SIZES]
 
     @classmethod
     def get_supported_head_sizes(cls) -> list[int]:
