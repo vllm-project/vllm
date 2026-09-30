@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import math
+
 import pytest
 import torch
 import torch.nn.functional as F
@@ -97,9 +99,7 @@ def test_silu_and_mul(
 def _offset_view(shape: tuple[int, ...], dtype: torch.dtype, offset: int):
     """A contiguous tensor whose storage starts `offset` elements into its
     buffer, so its data pointer is not 16-byte aligned."""
-    numel = 1
-    for s in shape:
-        numel *= s
+    numel = math.prod(shape)
     return torch.empty(numel + offset, dtype=dtype)[offset:].view(shape)
 
 
