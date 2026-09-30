@@ -37,6 +37,8 @@ from vllm.entrypoints.generate.base.protocol import (
     DeltaFunctionCall,
     DeltaMessage,
     DeltaToolCall,
+    FunctionCall,
+    ToolCall,
 )
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionResponse,
@@ -999,11 +1001,6 @@ class TestInlineSystemMessageInMessagesArray:
 
 def _make_stream_converter():
     obj = MagicMock(spec=AnthropicServingMessages)
-    obj.stop_reason_map = {
-        "stop": "end_turn",
-        "length": "max_tokens",
-        "tool_calls": "tool_use",
-    }
     obj.message_stream_converter = (
         AnthropicServingMessages.message_stream_converter.__get__(obj)
     )
@@ -1669,6 +1666,71 @@ class TestStopSequenceReason:
         assert msg_deltas[0]["delta"]["stop_reason"] == "end_turn"
         assert "stop_sequence" in msg_deltas[0]["delta"]
         assert msg_deltas[0]["delta"]["stop_sequence"] is None
+
+
+class TestToolUseStopReason:
+    """A response carrying a tool_use block reports ``stop_reason="tool_use"``
+    even when the chat layer says ``finish_reason="stop"``, as it does for a
+    forced (named) tool. Truncation and matched stop strings stay truthful.
+    """
+
+    @pytest.mark.parametrize(
+        ("finish_reason", "stop_reason", "expected"),
+        [
+            ("stop", None, "tool_use"),
+            ("tool_calls", "</x>", "stop_sequence"),
+        ],
+    )
+    def test_non_streaming(self, finish_reason, stop_reason, expected):
+        tool_call = ToolCall(
+            function=FunctionCall(name="get_weather", arguments='{"city": "Paris"}')
+        )
+        response = ChatCompletionResponse(
+            id="chatcmpl-test",
+            model="test-model",
+            choices=[
+                ChatCompletionResponseChoice(
+                    index=0,
+                    message=ChatMessage(role="assistant", tool_calls=[tool_call]),
+                    finish_reason=finish_reason,
+                    stop_reason=stop_reason,
+                )
+            ],
+            usage=UsageInfo(prompt_tokens=5, total_tokens=8, completion_tokens=3),
+        )
+
+        result = _make_full_converter().messages_full_converter(response)
+
+        assert result.content[0].type == "tool_use"
+        assert result.stop_reason == expected
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("finish_reason", "expected"),
+        [("stop", "tool_use"), ("length", "max_tokens")],
+    )
+    async def test_streaming(self, finish_reason, expected):
+        async def sse_input():
+            yield _make_stream_chunk(delta=DeltaMessage(role="assistant"))
+            yield _make_stream_chunk(
+                delta=DeltaMessage(
+                    tool_calls=[_tc(id="call_1", name="get_weather", args='{"c')]
+                )
+            )
+            yield _make_stream_chunk(finish_reason=finish_reason)
+            yield _make_stream_chunk(
+                choices=[],
+                usage=UsageInfo(prompt_tokens=5, total_tokens=8, completion_tokens=3),
+            )
+            yield "data: [DONE]"
+
+        converter = _make_stream_converter()
+        events = _parse_sse_events(
+            [e async for e in converter.message_stream_converter(sse_input())]
+        )
+
+        msg_deltas = [data for ev_type, data in events if ev_type == "message_delta"]
+        assert msg_deltas[0]["delta"]["stop_reason"] == expected
 
 
 # ======================================================================
