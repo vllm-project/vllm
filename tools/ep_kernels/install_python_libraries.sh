@@ -177,6 +177,15 @@ do_build() {
     clone_repo "$repo" "$name" "$key" "$commit"
     cd "$name"
 
+    # MoonEP pins nvidia-cutlass-dsl to the exact version it was released
+    # against, which conflicts with (and would downgrade) vLLM's own pin in
+    # requirements/cuda.txt; MoonEP runs on the newer release. Relax the pin
+    # to a floor until upstream does (MoonshotAI/MoonEP setup.py).
+    if [[ "$name" == "MoonEP" ]]; then
+        sed -i -E 's/"nvidia-cutlass-dsl==([0-9.]+)"/"nvidia-cutlass-dsl>=\1"/' setup.py
+        grep -q 'nvidia-cutlass-dsl>=' setup.py
+    fi
+
     # DeepEP CUDA 13 patch
     if [[ "$name" == "DeepEP" && "${CUDA_VERSION_MAJOR}" -ge 13 ]]; then
         sed -i "s|f'{nvshmem_dir}/include']|f'{nvshmem_dir}/include', '${CUDA_HOME}/include/cccl']|" "setup.py"
