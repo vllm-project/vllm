@@ -641,8 +641,8 @@ void silu_and_mul_quant(torch::stable::Tensor& out,    // [..., d]
               fp8_t* out_ptr = out.mutable_data_ptr<fp8_t>();
               const float* scale_ptr = scale.const_data_ptr<float>();
               const bool vectorized = d % vllm::kActQuantVecSize == 0 &&
-                                      is_16byte_aligned(in_ptr) &&
-                                      is_16byte_aligned(out_ptr);
+                                      vllm::is_16byte_aligned(in_ptr) &&
+                                      vllm::is_16byte_aligned(out_ptr);
               if (vectorized) {
                 launch_act_and_mul_quant<scalar_t, vllm::silu_fast, fp8_t,
                                          vllm::kActQuantVecSize>(
