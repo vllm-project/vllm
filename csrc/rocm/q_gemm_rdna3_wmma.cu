@@ -2404,8 +2404,9 @@ __global__ void __launch_bounds__(256) gemm_q4_wmma_kernel_dec16(
     const uint32_t* __restrict__ b_qzeros, const T* __restrict__ b_scales,
     T* __restrict__ c, const int size_m, const int size_n, const int size_k,
     const int groups, const int zero_offset) {
-  // 16-K steps in flight; two tiles at 3 or 4 spill to scratch.
-  constexpr int PF = MT == 1 ? 4 : 2;
+  // 16-K steps in flight: two fit the fold every 2 steps of group-32 weights,
+  // and two tiles at 3 or 4 spill to scratch.
+  constexpr int PF = 2;
   constexpr bool ZERO_IN_B = MT == 2;
   const int tid = threadIdx.x, lane = tid & 31;
   const int wave = __builtin_amdgcn_readfirstlane(tid >> 5);
