@@ -307,6 +307,7 @@ def test_zero_token_pcp_rank_participates_in_compressed_mapping_gather(monkeypat
 
     def fake_get_compressed_slot_mapping(
         num_tokens,
+        slot_mapping,
         query_start_loc,
         seq_lens,
         block_table,

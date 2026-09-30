@@ -213,6 +213,7 @@ def test_partition_padding_is_derived_from_batch_descriptor(
         pcp_world_size=2,
         pcp_rank=0,
         device=device,
+        shard_decode_requests=False,
         max_num_reqs=4,
         max_num_tokens=8,
     )
@@ -424,7 +425,7 @@ def test_sharded_decode_layout_selects_owner_kv_for_replication(monkeypatch):
         shard_decode_requests=True,
         dcp_world_size=1,
     )
-    monkeypatch.setattr(pcp_manager_module, "async_copy_to_gpu", _copy_to_cpu)
+    monkeypatch.setattr(pcp_manager_module, "async_tensor_h2d", _copy_to_cpu)
     manager._build_batch_layout(
         num_scheduled_tokens=np.array([1, 1, 1], dtype=np.int32),
         num_computed_tokens=np.array([16, 16, 16], dtype=np.int32),
@@ -746,6 +747,7 @@ def test_parallel_config_manages_decode_sharding(
     parallel_config = ParallelConfig(
         prefill_context_parallel_size=pcp_world_size,
         decode_context_parallel_size=dcp_world_size,
+        distributed_executor_backend="ray",
     )
 
     assert parallel_config.pcp_shard_decode_requests is expected
