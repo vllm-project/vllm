@@ -1589,6 +1589,8 @@ def test_request_rejected_while_paused(
     )
 
     assert not output_processor.has_unfinished_requests()
+    # Chunks the input task sent after the rejection must not outlive it.
+    assert result.reqs_to_abort == ([request.request_id] if request.resumable else [])
     if queue is not None:
         with pytest.raises(EnginePausedError):
             queue.get_nowait()

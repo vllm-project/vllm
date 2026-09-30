@@ -688,8 +688,10 @@ class OutputProcessor:
             pooling_output = engine_core_output.pooling_output
             finish_reason = engine_core_output.finish_reason
             if finish_reason == FinishReason.PAUSED:
-                # Rejected, so a streaming-input session takes no more input.
-                req_state.streaming_input = False
+                # Rejected: end the session, including chunks sent since then.
+                if req_state.streaming_input:
+                    req_state.streaming_input = False
+                    reqs_to_abort.append(req_id)
                 if req_state.queue is not None:
                     req_state.queue.close()
                 if pooling_output is None and req_state.detokenizer is None:
