@@ -2066,7 +2066,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             if self.pcp_manager is not None:
                 input_batch = self.pcp_manager.global_batch
             assert self.pp_handler is not None
-            all_decode_next = self.pp_handler.receive(input_batch)
+            all_decode_next = self.pp_handler.receive(
+                input_batch, self.model_state.defer_postprocess_state()
+            )
             # Optimistically update num_computed_tokens for entire batch here.
             # Will be adjusted for rejections if necessary in update_requests.
             self.postprocess_num_computed_tokens(input_batch)

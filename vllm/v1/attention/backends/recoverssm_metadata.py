@@ -19,6 +19,9 @@ class RecoverSSMPostprocessMetadata:
 
 
 class RecoverSSMMetadata(abc.ABC):
+    def snapshot_for_deferred_commit(self) -> "RecoverSSMMetadata":
+        raise NotImplementedError("Deferred RecoverSSM commit is not supported")
+
     @abc.abstractmethod
     def commit_recoverssm_state(
         self, num_accepted_tokens: torch.Tensor
