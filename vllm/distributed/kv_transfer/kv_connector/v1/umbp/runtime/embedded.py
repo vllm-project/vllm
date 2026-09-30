@@ -763,8 +763,27 @@ def _configure_dram(client_config: Any, options: dict[str, Any]) -> None:
             setattr(dram, field, options[option])
 
 
-def _resolve_embedded_options(config: UMBPRuntimeConfig) -> dict[str, Any]:
-    options = dict(config.options)
+_DISTRIBUTED_ONLY_OPTIONS = frozenset(
+    {
+        "master_address",
+        "node_address",
+        "node_id",
+        "io_engine_host",
+        "io_engine_port",
+        "peer_service_port",
+        "dram_page_size",
+        "staging_buffer_size",
+        "cache_remote_fetches",
+        "ranged_locality_prefetch",
+        "local_first",
+        "backend_policy_path",
+        "lookup_timeout_ms",
+        "ranged_scratch_size",
+    }
+)
+
+
+def _validate_dram_options(options: dict[str, Any]) -> None:
     if "capacity_bytes" in options and "total_capacity_bytes" in options:
         raise ValueError(
             "capacity_bytes and total_capacity_bytes are mutually exclusive"
@@ -791,21 +810,27 @@ def _resolve_embedded_options(config: UMBPRuntimeConfig) -> dict[str, Any]:
         not isinstance(options["dram_shm_name"], str) or not options["dram_shm_name"]
     ):
         raise ValueError("dram_shm_name must be a non-empty string")
-    if {
-        "master_address",
-        "node_address",
-        "io_engine_host",
-        "peer_service_port",
-    } & options.keys():
-        raise ValueError("embedded UMBP cannot configure distributed-only options")
+
+
+def _split_total_capacity(options: dict[str, Any], rank_count: int) -> None:
     total = options.pop("total_capacity_bytes", None)
     if total is not None:
-        if total < config.rank_count:
+        if total < rank_count:
             raise ValueError(
                 "total_capacity_bytes must provide at least one byte per rank"
             )
-        options["capacity_bytes"] = total // config.rank_count
+        options["capacity_bytes"] = total // rank_count
         options["_configured_total_capacity_bytes"] = total
+
+
+def _resolve_embedded_options(config: UMBPRuntimeConfig) -> dict[str, Any]:
+    options = dict(config.options)
+    _validate_dram_options(options)
+    if _DISTRIBUTED_ONLY_OPTIONS & options.keys():
+        raise ValueError(
+            f"{config.mode} UMBP cannot configure distributed-only options"
+        )
+    _split_total_capacity(options, config.rank_count)
     return options
 
 

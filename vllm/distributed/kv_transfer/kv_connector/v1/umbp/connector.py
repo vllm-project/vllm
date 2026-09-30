@@ -87,7 +87,7 @@ class UMBPStoreConnector(KVConnectorBase_V1, SupportsHMA):
         runtime_config = UMBPRuntimeConfig.from_vllm(
             vllm_config
         ).resolve_for_rank_count(topology.rank_count)
-        if runtime_config.mode in ("embedded", "standalone") and topology.pp_size > 1:
+        if topology.pp_size > 1:
             raise NotImplementedError(
                 f"{runtime_config.mode} UMBP does not support pipeline parallelism"
             )
