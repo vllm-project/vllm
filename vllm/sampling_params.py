@@ -711,16 +711,19 @@ class SamplingParams(
         kv_params = (self.extra_args or {}).get("kv_transfer_params") or {}
         if not isinstance(kv_params, dict):
             raise VLLMValidationError("kv_transfer_params must be a dictionary")
-        inline = kv_params.get("return_inline", False)
+        inline = kv_params.get("return_last_hidden_state", False)
         if not isinstance(inline, bool):
-            raise VLLMValidationError("return_inline must be a boolean")
+            raise VLLMValidationError("return_last_hidden_state must be a boolean")
         if not inline:
             return False
         if self.max_tokens != 1 or self.n != 1:
-            raise VLLMValidationError("return_inline requires max_tokens=1 and n=1")
+            raise VLLMValidationError(
+                "return_last_hidden_state requires max_tokens=1 and n=1"
+            )
         if kv_params.get("include_output_tokens") or "hidden_states_path" in kv_params:
             raise VLLMValidationError(
-                "return_inline conflicts with include_output_tokens/hidden_states_path"
+                "return_last_hidden_state conflicts with "
+                "include_output_tokens/hidden_states_path"
             )
         return True
 

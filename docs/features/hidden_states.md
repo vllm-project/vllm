@@ -20,23 +20,43 @@ llm = LLM(model="Qwen/Qwen3.5-4B")
 normal = SamplingParams(max_tokens=128)
 inline = SamplingParams(
     max_tokens=1,
-    extra_args={"kv_transfer_params": {"return_inline": True}},
+    extra_args={"kv_transfer_params": {"return_last_hidden_state": True}},
 )
 
 llm.generate("Tell me a story.", normal)
 result = llm.generate("Describe a forest.", inline)[0]
-vector = result.kv_transfer_params["hidden_states"]
+vector = result.kv_transfer_params["last_hidden_state"]
 llm.generate("Continue the story.", normal)
 ```
 
 On the Python and Rust `/v1/chat/completions` and `/v1/completions` endpoints, add
-`"kv_transfer_params": {"return_inline": true}` with `max_tokens=1`, `n=1`, and
-`stream=false`. Ordinary requests retain their usual token budgets and streaming.
+`"kv_transfer_params": {"return_last_hidden_state": true}` with `max_tokens=1`,
+`n=1`, and `stream=false`. Ordinary requests retain their usual token budgets and streaming.
 Offline batches may mix ordinary and opted-in requests.
+
+For example, with the OpenAI Python client:
+
+```python
+from openai import OpenAI
+
+client = OpenAI(base_url="http://localhost:8000/v1", api_key="unused")
+response = client.chat.completions.create(
+    model="Qwen/Qwen3.5-4B",
+    messages=[{"role": "user", "content": "Describe a forest."}],
+    max_completion_tokens=1,
+    n=1,
+    stream=False,
+    extra_body={
+        "chat_template_kwargs": {"enable_thinking": False},
+        "kv_transfer_params": {"return_last_hidden_state": True},
+    },
+)
+vector = response.model_dump()["kv_transfer_params"]["last_hidden_state"]
+```
 
 The response's `kv_transfer_params` contains:
 
-- `hidden_states`: one list of `hidden_size` finite floats;
+- `last_hidden_state`: one list of `hidden_size` finite floats;
 - `token_position`: the zero-based last position of the processed prompt;
 - `layer_id`: the text decoder's number of layers;
 - `representation`: `"post_final_norm"`.

@@ -2129,7 +2129,7 @@ class Scheduler(SchedulerInterface):
                 if finished:
                     kv_transfer_params, ec_transfer_params = self._free_request(request)
                     if (request.kv_transfer_params or {}).get(
-                        "return_inline", False
+                        "return_last_hidden_state", False
                     ) and finish_reason in (FinishReason.STOP, FinishReason.LENGTH):
                         vector = (model_runner_output.hidden_states or {}).get(req_id)
                         model_config = self.vllm_config.model_config
@@ -2146,7 +2146,7 @@ class Scheduler(SchedulerInterface):
                             new_token_ids = []
                         else:
                             kv_transfer_params = {
-                                "hidden_states": vector,
+                                "last_hidden_state": vector,
                                 "token_position": request.num_prompt_tokens - 1,
                                 "layer_id": (
                                     model_config.hf_text_config.num_hidden_layers

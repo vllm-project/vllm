@@ -381,7 +381,7 @@ mod tests {
         let output = EngineCoreOutput {
             request_id: "inline".to_string(),
             kv_transfer_params: Some(serde_json::json!({
-                "hidden_states": [1.25, -0.5, 0.0],
+                "last_hidden_state": [1.25, -0.5, 0.0],
                 "token_position": 17,
                 "layer_id": 32,
                 "representation": "post_final_norm",
@@ -393,7 +393,7 @@ mod tests {
         expect_test::expect![[r#"
             Some(
                 Object {
-                    "hidden_states": Array [
+                    "last_hidden_state": Array [
                         Number(1.25),
                         Number(-0.5),
                         Number(0.0),

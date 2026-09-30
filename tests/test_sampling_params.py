@@ -82,11 +82,11 @@ def test_extra_args_preserves_custom_objects_and_shared_containers():
     ],
 )
 def test_inline_hidden_states_rejects_generation_fanout(overrides):
-    with pytest.raises(VLLMValidationError, match="return_inline requires"):
+    with pytest.raises(VLLMValidationError, match="return_last_hidden_state requires"):
         SamplingParams(
             **({"max_tokens": 1} | overrides),
             extra_args={
-                "kv_transfer_params": {"return_inline": True},
+                "kv_transfer_params": {"return_last_hidden_state": True},
             },
         )
 
@@ -97,7 +97,9 @@ def test_ordinary_generation_on_extraction_server_keeps_token_budget(inline):
         max_tokens=128,
         n=2,
         extra_args={
-            "kv_transfer_params": {} if inline is None else {"return_inline": inline},
+            "kv_transfer_params": {}
+            if inline is None
+            else {"return_last_hidden_state": inline},
         },
     )
     assert not params.validate_inline_output()

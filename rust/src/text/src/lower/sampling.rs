@@ -6,7 +6,7 @@ use vllm_engine_core_client::protocol::sampling::EngineCoreSamplingParams;
 
 #[derive(Debug, Error, PartialEq)]
 pub enum SamplingParamsError {
-    #[error("return_inline requires max_tokens=1")]
+    #[error("return_last_hidden_state requires max_tokens=1")]
     InlineOutputMaxTokens,
     #[error("{parameter} must be a finite number, got {value}")]
     NotFinite { parameter: &'static str, value: f32 },
@@ -66,7 +66,7 @@ pub(crate) fn validate_resolved_sampling_params(
             .extra_args
             .as_ref()
             .and_then(|args| args.get("kv_transfer_params"))
-            .and_then(|params| params.get("return_inline"))
+            .and_then(|params| params.get("return_last_hidden_state"))
             == Some(&serde_json::Value::Bool(true))
     {
         return Err(SamplingParamsError::InlineOutputMaxTokens);
@@ -117,7 +117,7 @@ mod inline_tests {
                     max_tokens,
                     extra_args: Some(HashMap::from([(
                         "kv_transfer_params".into(),
-                        json!({"return_inline": inline}),
+                        json!({"return_last_hidden_state": inline}),
                     )])),
                     ..EngineCoreSamplingParams::for_test()
                 };

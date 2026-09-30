@@ -467,7 +467,7 @@ class EngineCore:
 
         if (
             request.kv_transfer_params is not None
-            and not request.kv_transfer_params.get("return_inline", False)
+            and not request.kv_transfer_params.get("return_last_hidden_state", False)
             and not self.scheduler.get_kv_connector()
         ):
             logger.warning(
@@ -1002,7 +1002,8 @@ class EngineCore:
             )
         ):
             raise ValueError(
-                "return_inline is unsupported for this engine or resumable input"
+                "return_last_hidden_state is unsupported for this engine "
+                "or resumable input"
             )
 
         req = Request.from_engine_core_request(request, self.request_block_hasher)

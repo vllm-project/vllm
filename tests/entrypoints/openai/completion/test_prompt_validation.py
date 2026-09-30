@@ -137,11 +137,11 @@ def test_inline_hidden_states_rejects_unsupported_http_shapes(endpoint, options)
             {"messages": [{"role": "user", "content": "hello"}]},
         )
     )
-    with pytest.raises(VLLMValidationError, match="return_inline"):
+    with pytest.raises(VLLMValidationError, match="return_last_hidden_state"):
         cls(
             model="test",
             max_tokens=1,
-            kv_transfer_params={"return_inline": True},
+            kv_transfer_params={"return_last_hidden_state": True},
             **prompt,
             **options,
         )
@@ -155,7 +155,9 @@ def test_inline_hidden_states_rejects_multiple_completion_prompts(prompt):
 
     with pytest.raises(VLLMValidationError, match="single prompt"):
         CompletionRequest(
-            prompt=prompt, max_tokens=1, kv_transfer_params={"return_inline": True}
+            prompt=prompt,
+            max_tokens=1,
+            kv_transfer_params={"return_last_hidden_state": True},
         )
 
 
@@ -227,28 +229,34 @@ async def test_inline_hidden_states_with_concurrent_streaming(
                     model=model,
                     messages=[{"role": "user", "content": "Describe a forest."}],
                     max_tokens=1,
-                    extra_body={"kv_transfer_params": {"return_inline": True}},
+                    extra_body={
+                        "kv_transfer_params": {"return_last_hidden_state": True}
+                    },
                 ),
             )
             payload = inline.kv_transfer_params
-            assert len(payload["hidden_states"]) == config.hidden_size
+            assert len(payload["last_hidden_state"]) == config.hidden_size
             assert payload["representation"] == "post_final_norm"
-            assert all(torch.isfinite(torch.tensor(payload["hidden_states"])))
-            with pytest.raises(openai.BadRequestError, match="return_inline"):
+            assert all(torch.isfinite(torch.tensor(payload["last_hidden_state"])))
+            with pytest.raises(
+                openai.BadRequestError, match="return_last_hidden_state"
+            ):
                 await client.completions.create(
                     model=model,
                     prompt="hello",
                     max_tokens=2,
-                    extra_body={"kv_transfer_params": {"return_inline": True}},
+                    extra_body={
+                        "kv_transfer_params": {"return_last_hidden_state": True}
+                    },
                 )
             completion = await client.completions.create(
                 model=model,
                 prompt="A forest is",
                 max_tokens=1,
-                extra_body={"kv_transfer_params": {"return_inline": True}},
+                extra_body={"kv_transfer_params": {"return_last_hidden_state": True}},
             )
             assert (
-                len(completion.kv_transfer_params["hidden_states"])
+                len(completion.kv_transfer_params["last_hidden_state"])
                 == config.hidden_size
             )
             assert completion.kv_transfer_params["layer_id"] == config.num_hidden_layers

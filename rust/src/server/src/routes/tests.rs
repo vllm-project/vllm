@@ -7395,7 +7395,7 @@ async fn inline_hidden_states_follow_engine_capability_and_reach_http_responses(
             let mut ready = default_ready_response();
             ready.supports_inline_hidden_states = supported;
             let payload = json!({
-                "hidden_states": [0.25, -0.5], "token_position": 4,
+                "last_hidden_state": [0.25, -0.5], "token_position": 4,
                 "layer_id": 2, "representation": "post_final_norm",
             });
             let expected = payload.clone();
@@ -7406,7 +7406,7 @@ async fn inline_hidden_states_follow_engine_capability_and_reach_http_responses(
                         let add = recv_engine_message(dealer).await;
                         let request: EngineCoreRequest = rmp_serde::from_slice(&add[1]).expect("decode request");
                         let params = request.sampling_params.as_ref().unwrap();
-                        assert_eq!(params.extra_args.as_ref().unwrap()["kv_transfer_params"]["return_inline"], inline);
+                        assert_eq!(params.extra_args.as_ref().unwrap()["kv_transfer_params"]["return_last_hidden_state"], inline);
                         let mut output = request_output(&request.request_id, vec![b'x' as u32], Some(EngineCoreFinishReason::Length));
                         output.kv_transfer_params = inline.then(|| payload.clone());
                         send_outputs(push, RequestBatchOutputs { outputs: vec![output], ..Default::default() }.into()).await;
@@ -7431,7 +7431,7 @@ async fn inline_hidden_states_follow_engine_capability_and_reach_http_responses(
                 let body = json!({
                     "model": "Qwen/Qwen1.5-0.5B-Chat", "prompt": "hello",
                     "messages": [{"role": "user", "content": "hello"}],
-                    "max_tokens": max_tokens, "kv_transfer_params": {"return_inline": inline},
+                    "max_tokens": max_tokens, "kv_transfer_params": {"return_last_hidden_state": inline},
                 });
                 let response = app
                     .call(
@@ -7458,7 +7458,12 @@ async fn inline_hidden_states_follow_engine_capability_and_reach_http_responses(
                         }
                     );
                 } else {
-                    assert!(actual["error"]["message"].as_str().unwrap().contains("return_inline"));
+                    assert!(
+                        actual["error"]["message"]
+                            .as_str()
+                            .unwrap()
+                            .contains("return_last_hidden_state")
+                    );
                 }
             }
             engine_task.await.expect("mock engine task");

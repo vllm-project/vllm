@@ -566,7 +566,7 @@ def test_inline_hidden_state_json_payload_round_trip():
     from vllm.v1.engine import EngineCoreOutput, FinishReason
 
     payload = {
-        "hidden_states": [1.25, -0.5, 0.0],
+        "last_hidden_state": [1.25, -0.5, 0.0],
         "token_position": 17,
         "layer_id": 32,
         "representation": "post_final_norm",

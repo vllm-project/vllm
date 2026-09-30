@@ -74,7 +74,7 @@ def test_inline_hidden_state_arrives_with_token_and_releases_request(
     scheduler = create_scheduler(async_scheduling=async_scheduling)
     model_config = scheduler.vllm_config.model_config
     normal, inline = create_requests(num_requests=2, max_tokens=1)
-    inline.kv_transfer_params = {"return_inline": True}
+    inline.kv_transfer_params = {"return_last_hidden_state": True}
     inline.client_index = 7
     for request in (normal, inline):
         scheduler.add_request(request)
@@ -107,7 +107,7 @@ def test_inline_hidden_state_arrives_with_token_and_releases_request(
             assert output.new_token_ids == [43]
             assert output.finish_reason == FinishReason.LENGTH
             assert output.kv_transfer_params == {
-                "hidden_states": vector,
+                "last_hidden_state": vector,
                 "token_position": inline.num_prompt_tokens - 1,
                 "layer_id": model_config.hf_text_config.num_hidden_layers,
                 "representation": "post_final_norm",

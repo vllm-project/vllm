@@ -57,12 +57,12 @@ pub(crate) fn validate_inline_hidden_states(
             "kv_transfer_params must be an object."
         );
     }
-    let inline = match get("return_inline") {
+    let inline = match get("return_last_hidden_state") {
         None | Some(serde_json::Value::Bool(false)) => return Ok(false),
         Some(serde_json::Value::Bool(true)) => true,
         _ => bail_invalid_request!(
-            param = "kv_transfer_params.return_inline",
-            "return_inline must be a boolean."
+            param = "kv_transfer_params.return_last_hidden_state",
+            "return_last_hidden_state must be a boolean."
         ),
     };
     if get("hidden_states_path").is_some()
@@ -76,8 +76,8 @@ pub(crate) fn validate_inline_hidden_states(
         })
     {
         bail_invalid_request!(
-            param = "kv_transfer_params.return_inline",
-            "return_inline conflicts with include_output_tokens/hidden_states_path."
+            param = "kv_transfer_params.return_last_hidden_state",
+            "return_last_hidden_state conflicts with include_output_tokens/hidden_states_path."
         );
     }
     Ok(inline)
@@ -96,8 +96,8 @@ pub(crate) fn validate_inline_hidden_states_backend(
             .all(|r| r.supports_inline_hidden_states)
     {
         bail_invalid_request!(
-            param = "kv_transfer_params.return_inline",
-            "return_inline is not supported by this engine configuration."
+            param = "kv_transfer_params.return_last_hidden_state",
+            "return_last_hidden_state is not supported by this engine configuration."
         );
     }
     Ok(())
@@ -112,19 +112,19 @@ mod tests {
     #[test]
     fn inline_hidden_states_validate_effective_metadata() {
         for (params, valid) in [
-            (json!({"return_inline": true}), true),
-            (json!({"return_inline": "true"}), false),
-            (json!({"return_inline": null}), false),
+            (json!({"return_last_hidden_state": true}), true),
+            (json!({"return_last_hidden_state": "true"}), false),
+            (json!({"return_last_hidden_state": null}), false),
             (
-                json!({"return_inline": true, "include_output_tokens": true}),
+                json!({"return_last_hidden_state": true, "include_output_tokens": true}),
                 false,
             ),
             (
-                json!({"return_inline": true, "hidden_states_path": null}),
+                json!({"return_last_hidden_state": true, "hidden_states_path": null}),
                 false,
             ),
             (
-                json!({"return_inline": true, "include_output_tokens": false}),
+                json!({"return_last_hidden_state": true, "include_output_tokens": false}),
                 true,
             ),
         ] {

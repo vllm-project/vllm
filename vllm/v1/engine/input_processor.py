@@ -92,8 +92,8 @@ class InputProcessor:
                 self.vllm_config
             ):
                 raise VLLMValidationError(
-                    "return_inline requires Model Runner V2 with native Qwen2 or "
-                    "Qwen3.5 generation on CPU, CUDA, or ROCm, PP=1, "
+                    "return_last_hidden_state requires Model Runner V2 with native "
+                    "Qwen2 or Qwen3.5 generation on CPU, CUDA, or ROCm, PP=1, "
                     "no context parallelism, "
                     "no speculative decoding, and no KV connector"
                 )
@@ -309,7 +309,7 @@ class InputProcessor:
             and params.validate_inline_output()
         ):
             raise VLLMValidationError(
-                "return_inline does not support resumable requests"
+                "return_last_hidden_state does not support resumable requests"
             )
         self._validate_lora(lora_request)
 

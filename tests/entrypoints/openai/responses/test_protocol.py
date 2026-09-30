@@ -43,10 +43,10 @@ def test_serialize_messages() -> None:
 
 
 def test_inline_hidden_states_rejected_by_responses():
-    with pytest.raises(VLLMValidationError, match="return_inline"):
+    with pytest.raises(VLLMValidationError, match="return_last_hidden_state"):
         ResponsesRequest(
             model="test",
             input="hello",
             max_output_tokens=1,
-            kv_transfer_params={"return_inline": True},
+            kv_transfer_params={"return_last_hidden_state": True},
         )

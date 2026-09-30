@@ -151,7 +151,7 @@ def test_inline_qwen35_mixed_generation_and_prefix_hits(tmp_path, monkeypatch):
         max_tokens=1,
         temperature=0,
         extra_args={
-            "kv_transfer_params": {"return_inline": True},
+            "kv_transfer_params": {"return_last_hidden_state": True},
         },
     )
     prompts = ["A forest is", "A forest is " + "full of trees " * 200]
@@ -170,14 +170,14 @@ def test_inline_qwen35_mixed_generation_and_prefix_hits(tmp_path, monkeypatch):
         assert payload["representation"] == "post_final_norm"
         assert payload["layer_id"] == config.num_hidden_layers
         assert payload["token_position"] == len(first.prompt_token_ids) - 1
-        vector = torch.tensor(payload["hidden_states"])
+        vector = torch.tensor(payload["last_hidden_state"])
         assert vector.shape == (config.hidden_size,)
         assert torch.isfinite(vector).all()
         # Prefix reuse should retain the same representation, allowing bf16
         # arithmetic to differ with batching (not a reference-model parity test).
         torch.testing.assert_close(
             vector,
-            torch.tensor(cached.kv_transfer_params["hidden_states"]),
+            torch.tensor(cached.kv_transfer_params["last_hidden_state"]),
             atol=0.125,
             rtol=0.02,
         )
@@ -258,12 +258,12 @@ def test_inline_qwen35_against_reference_final_hidden_state(with_image, monkeypa
         SamplingParams(
             max_tokens=1,
             temperature=0,
-            extra_args={"kv_transfer_params": {"return_inline": True}},
+            extra_args={"kv_transfer_params": {"return_last_hidden_state": True}},
         ),
     )[0]
     assert result.prompt_token_ids == ids
     assert result.outputs[0].token_ids == [next_token]
-    vector = torch.tensor(result.kv_transfer_params["hidden_states"])
+    vector = torch.tensor(result.kv_transfer_params["last_hidden_state"])
     # Fixed gates for bf16 backend differences: test magnitudes as well as
     # direction. These are acceptance thresholds, not measured error claims.
     assert torch.isfinite(vector).all()

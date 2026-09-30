@@ -25,8 +25,8 @@ pub(super) fn validate_request_compat(
     )? && (request.stream || request.n.unwrap_or(1) != 1 || request.use_beam_search)
     {
         bail_invalid_request!(
-            param = "kv_transfer_params.return_inline",
-            "return_inline requires non-streaming generation with n=1 (no beam search)."
+            param = "kv_transfer_params.return_last_hidden_state",
+            "return_last_hidden_state requires non-streaming generation with n=1 (no beam search)."
         );
     }
 
@@ -169,7 +169,7 @@ mod tests {
         let mut request = base_request();
         request.stream = false;
         request.kv_transfer_params = Some(std::collections::HashMap::from([(
-            "return_inline".to_string(),
+            "return_last_hidden_state".to_string(),
             json!(true),
         )]));
         assert!(validate_request_compat(&request, &["Qwen/Qwen1.5-0.5B-Chat".to_string()]).is_ok());
@@ -191,7 +191,7 @@ mod tests {
             .kv_transfer_params
             .as_mut()
             .unwrap()
-            .insert("return_inline".to_string(), json!(false));
+            .insert("return_last_hidden_state".to_string(), json!(false));
         assert!(validate_request_compat(&request, &["Qwen/Qwen1.5-0.5B-Chat".to_string()]).is_ok());
     }
 
