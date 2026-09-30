@@ -16,6 +16,7 @@ from vllm.entrypoints.chat_utils import (
     ChatCompletionMessageParam,
     ChatTemplateContentFormatOption,
     ConversationMessage,
+    has_non_text_content,
 )
 from vllm.entrypoints.generate.base.protocol import validate_request_mm_kwargs
 from vllm.entrypoints.openai.chat_completion.protocol import (
@@ -101,17 +102,49 @@ def _extract_allowed_tools_from_mcp_requests(
     return allowed_tools_map
 
 
-def _reused_prompt_token_ids(request: Any) -> list[int] | None:
+def _reused_prompt_token_ids(
+    request: Any, messages: list[Any] | None = None
+) -> list[int] | None:
     """Pop prompt token ids forwarded for decode-side reuse, if any.
 
     Disaggregated serving carries the prefill stage's ids in
     ``kv_transfer_params`` so the decode stage can skip re-tokenizing. Removing
     the key keeps the id list out of the engine's sampling metadata.
+
+    Returns None without checking the ids when ``echo`` is set or ``messages``
+    has non-text content, since both need ``messages`` to be rendered.
+    Otherwise raises VLLMValidationError if the ids are malformed.
     """
     kv = getattr(request, "kv_transfer_params", None)
     if not isinstance(kv, dict):
         return None
-    return kv.pop("prompt_token_ids", None) or None
+    ids = kv.pop("prompt_token_ids", None)
+    if ids is None:
+        return None
+    if getattr(request, "echo", False):
+        logger.debug(
+            "Ignoring kv_transfer_params['prompt_token_ids']: "
+            "echo is set, so messages are rendered instead."
+        )
+        return None
+    if has_non_text_content(messages):
+        logger.debug(
+            "Ignoring kv_transfer_params['prompt_token_ids']: "
+            "messages have non-text content and are rendered instead."
+        )
+        return None
+    # bool is an int subclass, hence the exact type check.
+    if (
+        not isinstance(ids, list)
+        or not ids
+        or any(type(x) is not int or x < 0 for x in ids)
+    ):
+        raise VLLMValidationError(
+            "`kv_transfer_params['prompt_token_ids']` must be a non-empty list "
+            "of non-negative integers.",
+            parameter="kv_transfer_params.prompt_token_ids",
+        )
+    return ids
 
 
 class OnlineRenderer:
@@ -748,7 +781,7 @@ class OnlineRenderer:
             default_mm_processor_kwargs=getattr(request, "mm_processor_kwargs", None),
         )
 
-        reuse_ids = _reused_prompt_token_ids(request)
+        reuse_ids = _reused_prompt_token_ids(request, messages)
         if reuse_ids:
             # Decode-side token reuse: feed the forwarded ids straight to the
             # engine, skipping templating and tokenization. ``messages`` are not
