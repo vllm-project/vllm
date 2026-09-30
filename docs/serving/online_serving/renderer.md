@@ -108,10 +108,13 @@ choice carries a `GenerateLogProbs`; `output_mode: "text"` returns decoded
 - `content` has one entry per generated token, in generation order.
 - `top_logprobs` is a list, not a dict: JSON turns dict keys into strings and
   the ordering would be implicit. It follows the engine's order: the sampled
-  token first, then the remaining candidates in rank order. With non-greedy
-  sampling the sampled token can sit outside the top k (for example ranks
-  `[5, 1, 2]` at `logprobs=2`); it then takes one of the `logprobs` slots and
-  the rank-k candidate is left out, as on the OpenAI endpoints.
+  token first, then the remaining candidates in rank order. It holds every
+  candidate the engine returned and is not cut to `logprobs`: k entries when
+  the sampled token is in the top k, k + 1 when non-greedy sampling picked a
+  token outside it (for example ranks `[5, 1, 2]` at `logprobs=2`). The OpenAI
+  endpoints cut this differently (`/v1/chat/completions` keeps the first k,
+  `/v1/completions` the first k + 1), so [derender](derenderer.md) applies the
+  cut of the endpoint it renders for.
 - `rank` is the token's rank in the vocabulary distribution (1 = most likely)
   on every entry, the sampled one included; a top-k candidate's rank is its
   top-k position. The list is not sorted by it, so sort by `rank` if you need

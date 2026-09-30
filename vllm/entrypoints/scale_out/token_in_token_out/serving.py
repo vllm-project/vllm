@@ -775,6 +775,13 @@ class ServingTokens(GenerateBaseServing):
     ) -> GenerateLogProbs:
         """Create generate-shaped logprobs (integer token ids, no tokenizer).
 
+        ``top_logprobs`` carries every candidate the engine returned for the
+        position: the sampled token first, then the top k, so k entries when the
+        sampled token is in the top k and k + 1 when it is not. It is not cut to
+        ``num_output_top_logprobs``: `/v1/chat/completions` and
+        `/v1/completions` cut differently, and derender applies each endpoint's
+        cut the way the coupled server does.
+
         The engine reports rank 0 for a sampled token whose logprob is NaN; that
         is not a rank, so it is sent as ``None`` (the logprob is clamped).
         """
@@ -802,14 +809,8 @@ class ServingTokens(GenerateBaseServing):
                                 logprob=_clamp_logprob(top_logprob.logprob),
                                 rank=top_logprob.rank or None,
                             )
-                            for rank_index, (top_token_id, top_logprob) in enumerate(
-                                step_top_logprobs.items()
-                            )
+                            for top_token_id, top_logprob in step_top_logprobs.items()
                             if num_output_top_logprobs is not None
-                            and (
-                                num_output_top_logprobs == -1
-                                or rank_index < max(num_output_top_logprobs, 1)
-                            )
                         ],
                     )
                 )
