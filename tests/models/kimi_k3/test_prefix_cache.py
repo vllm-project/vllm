@@ -49,15 +49,14 @@ pytestmark = pytest.mark.skipif(
 )
 
 NIXL = {"kv_connector": "NixlConnector", "kv_role": "kv_both"}
+# SimpleCPUOffloadConnector as in the Kimi-K3 recipe.
 OFFLOAD = {
-    "kv_connector": "OffloadingConnector",
-    "kv_role": "kv_both",
-    "kv_connector_extra_config": {"cpu_bytes_to_use": 32 << 30},
-}
-SIMPLE_OFFLOAD = {
     "kv_connector": "SimpleCPUOffloadConnector",
     "kv_role": "kv_both",
-    "kv_connector_extra_config": {"cpu_bytes_to_use": 32 << 30},
+    "kv_connector_extra_config": {
+        "cpu_bytes_to_use_per_rank": 32 << 30,
+        "lazy_offload": False,
+    },
 }
 NIXL_OFFLOAD = {
     "kv_connector": "MultiConnector",
@@ -106,7 +105,6 @@ class Deployment:
 DEPLOYMENTS = {
     "plain": Deployment(Instance()),
     "offload": Deployment(Instance(kv_config=OFFLOAD), offload=True),
-    "simple-offload": Deployment(Instance(kv_config=SIMPLE_OFFLOAD), offload=True),
     "dcp2": Deployment(Instance(tp=2, dcp=2)),
     "dcp2-offload": Deployment(Instance(tp=2, dcp=2, kv_config=OFFLOAD), offload=True),
     "pd": Deployment(Instance(kv_config=NIXL), prefill=Instance(kv_config=NIXL)),
@@ -130,7 +128,6 @@ DEPLOYMENTS = {
 KNOWN_FAILURES = {
     "pd-dcp2": "NIXL sets cp_kv_cache_interleave_size to the block size, "
     "but FlashInfer MLA DCP requires 1",
-    "dcp2-offload": "CPU offload never hits with DCP on a hybrid model",
 }
 
 

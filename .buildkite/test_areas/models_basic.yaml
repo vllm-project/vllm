@@ -155,9 +155,8 @@ steps:
   - vllm/models/kimi_k3/
   - vllm/v1/core/
   - vllm/distributed/kv_transfer/kv_connector/v1/nixl/
-  - vllm/distributed/kv_transfer/kv_connector/v1/offloading/
-  - vllm/distributed/kv_transfer/kv_connector/v1/offloading_connector.py
   - vllm/distributed/kv_transfer/kv_connector/v1/simple_cpu_offload_connector.py
+  - vllm/v1/simple_kv_offload/
   - vllm/model_executor/layers/mamba/
   - tests/models/kimi_k3/test_prefix_cache.py
   commands:
