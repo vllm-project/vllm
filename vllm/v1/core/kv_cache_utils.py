@@ -2695,6 +2695,26 @@ def _project_kv_cache_groups_to_worker(
     return projected_groups
 
 
+def _lay_out_worker_groups(
+    vllm_config: VllmConfig, kv_cache_groups: list[KVCacheGroupSpec]
+) -> list[KVCacheGroupSpec]:
+    """The groups a worker allocates for its KV cache groups. HiSparse replaces
+    them with its host source group and the GPU groups sharing its pool."""
+    if vllm_config.attention_config.hisparse_config is not None and kv_cache_groups:
+        return lay_out_hisparse_groups(vllm_config, kv_cache_groups)
+    return kv_cache_groups
+
+
+def get_worker_kv_cache_groups(
+    vllm_config: VllmConfig, kv_cache_spec: dict[str, KVCacheSpec]
+) -> list[KVCacheGroupSpec]:
+    """The groups `get_kv_cache_config_from_groups` takes for one worker's own
+    layers."""
+    return _lay_out_worker_groups(
+        vllm_config, get_kv_cache_groups(vllm_config, kv_cache_spec)
+    )
+
+
 def get_kv_cache_configs(
     vllm_config: VllmConfig,
     kv_cache_specs: list[dict[str, KVCacheSpec]],
@@ -2775,12 +2795,12 @@ def get_kv_cache_configs(
             kv_cache_spec_one_worker
         ), "Some layers are not assigned to any group."
 
+    # Size and allocate the groups each worker actually allocates.
+    projected_groups_per_worker = [
+        _lay_out_worker_groups(vllm_config, groups)
+        for groups in projected_groups_per_worker
+    ]
     if vllm_config.attention_config.hisparse_config is not None:
-        # Size and allocate the groups HiSparse actually allocates.
-        projected_groups_per_worker = [
-            lay_out_hisparse_groups(vllm_config, groups) if groups else groups
-            for groups in projected_groups_per_worker
-        ]
         worker_layouts = {
             tuple(
                 (type(group.kv_cache_spec), group.kv_cache_spec.page_size_bytes)
