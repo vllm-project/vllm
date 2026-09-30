@@ -724,6 +724,13 @@ def gather_engram_hashes(
 class DPSharedEngramStorage:
     """Registered host weights shared by a node-local DP group with one writer."""
 
+    @staticmethod
+    def check_available(num_bytes: int) -> None:
+        """Raise if this rank cannot hold `num_bytes` of shared tables."""
+        if not os.path.isdir(SHM_PATH):
+            raise RuntimeError(f"{SHM_PATH} is not mounted")
+        check_shm_free_space(num_bytes, allocation_name="Engram tables")
+
     def __init__(
         self, num_rows: int, dim: int, block_size: int, group: GroupCoordinator
     ) -> None:
@@ -828,6 +835,47 @@ class DPSharedEngramStorage:
         )
 
 
+def select_shared_engram_storage(
+    layout: EngramLayout,
+    storages: tuple[type[DPSharedEngramStorage], ...],
+    block_size: int = 32,
+) -> type[DPSharedEngramStorage] | None:
+    """The first of `storages` in which every co-located DP replica can hold the
+    full tables, or None to shard the tables across replicas instead."""
+    if get_engram_dp_size() == 1:
+        logger.warning_once(
+            "Engram DP replicas are not co-located on one node; "
+            "storing the offloaded tables per rank instead of sharing them."
+        )
+        return None
+    num_bytes = sum(layout.num_embeddings) * (
+        layout.head_dim + layout.head_dim // block_size
+    )
+    group = get_engram_dp_group()
+    assert group is not None
+    for storage in storages:
+        reason = None
+        try:
+            storage.check_available(num_bytes)
+        except Exception as exc:
+            reason = f"{type(exc).__name__}: {exc}"
+        # Replicas may disagree (e.g. on NUMA nodes) but must pick together.
+        reasons: list[str | None] = [None] * group.world_size
+        torch.distributed.all_gather_object(reasons, reason, group=group.cpu_group)
+        failures = "; ".join(
+            f"EDP rank {rank}: {reason}"
+            for rank, reason in enumerate(reasons)
+            if reason is not None
+        )
+        if not failures:
+            return storage
+        logger.warning_once(
+            "Cannot share Engram tables in %s (%s).", storage.__name__, failures
+        )
+    logger.warning_once("Sharding the offloaded Engram tables across DP replicas.")
+    return None
+
+
 def _allocate_huge_page_storage(num_bytes: int) -> torch.Tensor | None:
     """Register prefaulted huge pages, or return None for pinned-memory fallback."""
     try:
@@ -871,7 +919,6 @@ class ParallelEngramEmbedding(nn.Module):
     """
 
     _weight_loader = staticmethod(_engram_head_shard_weight_loader)
-    _shared_storage_cls = DPSharedEngramStorage
     _shared_memory: DPSharedEngramStorage | None = None
     _packed: torch.Tensor | None = None
 
@@ -884,6 +931,7 @@ class ParallelEngramEmbedding(nn.Module):
         cpu_offload: bool = False,
         dp_shared_memory: bool = False,
         use_thp: bool = False,
+        shared_storage: type[DPSharedEngramStorage] = DPSharedEngramStorage,
     ) -> None:
         super().__init__()
         assert head_sizes and all(size > 0 for size in head_sizes)
@@ -891,6 +939,7 @@ class ParallelEngramEmbedding(nn.Module):
         self.cpu_offload = cpu_offload
         self.dp_shared_memory = dp_shared_memory
         self.use_thp = use_thp
+        self.shared_storage = shared_storage
         self.dp_size = get_engram_dp_size()
         if dp_shared_memory:
             if not cpu_offload:
@@ -961,7 +1010,7 @@ class ParallelEngramEmbedding(nn.Module):
         if self.dp_shared_memory:
             group = get_engram_dp_group()
             assert group is not None
-            storage = self._shared_storage_cls(
+            storage = self.shared_storage(
                 self.part_num_embeddings, self.dim, self.block_size, group
             )
             self._shared_memory = storage
@@ -1268,7 +1317,6 @@ class Engram(nn.Module):
     training kernel).
     """
 
-    _embedding_cls: type[ParallelEngramEmbedding] = ParallelEngramEmbedding
     _prefetch_stream: torch.cuda.Stream | None = None
     _prefetch_done: torch.cuda.Event | None = None
 
@@ -1281,11 +1329,13 @@ class Engram(nn.Module):
         use_sequence_parallel: bool,
         prefix: str,
         prefetch_stream: torch.cuda.Stream | None = None,
+        shared_storage: type[DPSharedEngramStorage] = DPSharedEngramStorage,
     ) -> None:
         super().__init__()
         # Layers sharing one stream serialize their offloaded lookups, so they
         # take turns instead of jointly starving decoder compute of SMs.
         self._prefetch_stream = prefetch_stream
+        self._shared_storage = shared_storage
         self.layer_hash_index = layer_hash_index
         self.dim = config.hidden_size
         self.hc_mult = config.hc_mult
@@ -1327,13 +1377,14 @@ class Engram(nn.Module):
     ) -> ParallelEngramEmbedding:
         engram_config = get_current_vllm_config().engram_config
         assert engram_config is not None
-        return self._embedding_cls(
+        return ParallelEngramEmbedding(
             layout.num_embeddings[layer_hash_index],
             layout.head_dim,
             tuple(size for order in layout.primes[layer_hash_index] for size in order),
             cpu_offload=engram_config.cpu_offload,
             dp_shared_memory=bool(engram_config.dp_shared_memory),
             use_thp=engram_config.use_thp,
+            shared_storage=self._shared_storage,
         )
 
     def _init_staging(self, max_tokens: int, head_dim: int) -> None:

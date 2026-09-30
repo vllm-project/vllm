@@ -42,11 +42,12 @@ from vllm.forward_context import set_forward_context
 from vllm.models.deepseek_v41.common import engram as common_ops
 from vllm.models.deepseek_v41.common.engram import (
     EngramLayout,
+    ParallelEngramEmbedding,
     engram_head_shard_rank,
     gather_engram_hashes,
 )
 from vllm.models.deepseek_v41.nvidia import engram as nvidia_ops
-from vllm.models.deepseek_v41.nvidia.engram import Engram, ParallelEngramEmbedding
+from vllm.models.deepseek_v41.nvidia.engram import Engram
 from vllm.platforms import current_platform
 from vllm.utils.network_utils import get_open_port
 from vllm.utils.system_utils import update_environment_variables
@@ -208,8 +209,15 @@ def _worker(rank: int, tp_size: int, port: int) -> None:
                 n_heads,
                 sequence_parallel,
             )
-        # AMD shares tables through the common /dev/shm storage.
-        _check_table(vllm_config, True, True, 8, False, engram_cls=common_ops.Engram)
+        # The /dev/shm fallback, which AMD always uses.
+        _check_table(
+            vllm_config,
+            True,
+            True,
+            8,
+            False,
+            shared_storage=common_ops.DPSharedEngramStorage,
+        )
     finally:
         cleanup_dist_env_and_memory()
 
@@ -269,11 +277,14 @@ def _check_shared_storage_lifetime_and_failures(failure):
 
 
 def _check_share_decision_agrees():
-    """Oversized tables, or one replica unable to host them, unshare every rank."""
+    """Every rank falls back from cuMem to /dev/shm to sharding together, even
+    when only one replica cannot use a storage."""
+    storages = (nvidia_ops.CuMemEngramStorage, common_ops.DPSharedEngramStorage)
     small = SimpleNamespace(num_embeddings=(128,), head_dim=DIM)
-    assert nvidia_ops.can_share_engram_tables(small)
     huge = SimpleNamespace(num_embeddings=(1 << 50,), head_dim=DIM)
-    assert not nvidia_ops.can_share_engram_tables(huge)
+    select = common_ops.select_shared_engram_storage
+    assert select(small, storages) is nvidia_ops.CuMemEngramStorage
+    assert select(huge, storages) is None
 
     def no_meminfo(*args, **kwargs):
         raise OSError("no NUMA sysfs")
@@ -281,7 +292,7 @@ def _check_share_decision_agrees():
     with pytest.MonkeyPatch.context() as patch:
         if get_engram_dp_group().rank_in_group == 1:
             patch.setattr(nvidia_ops, "open", no_meminfo, raising=False)
-        assert not nvidia_ops.can_share_engram_tables(small)
+        assert select(small, storages) is common_ops.DPSharedEngramStorage
 
 
 def _check_table(
@@ -290,7 +301,7 @@ def _check_table(
     dp_shared_memory,
     n_heads,
     sequence_parallel,
-    engram_cls=Engram,
+    shared_storage=nvidia_ops.CuMemEngramStorage,
 ):
     parallel = vllm_config.parallel_config
     dp_size, tp_size = parallel.data_parallel_size, parallel.tensor_parallel_size
@@ -343,13 +354,14 @@ def _check_table(
                 init_patch.setattr(
                     common_ops, "get_current_vllm_config", lambda: component_config
                 )
-                engram = engram_cls(
+                engram = Engram(
                     config,
                     quant_config=None,
                     layout=layout,
                     layer_hash_index=0,
                     use_sequence_parallel=sequence_parallel,
                     prefix="model.layers.0.engram",
+                    shared_storage=shared_storage,
                 )
             layer = engram.embed_tokens
             if multithread:
