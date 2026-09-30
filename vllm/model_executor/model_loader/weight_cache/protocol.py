@@ -289,8 +289,12 @@ class WeightCacheKey:
     quant_config_hash: str
     revision: str | None
     vllm_version: str
+    pp_size: int = 1
+    pp_rank: int = 0
     is_draft: bool = False
     """Daemon group the weights come from; False is the target model."""
+    dp_size: int = 1
+    dp_rank: int = 0
 
     @classmethod
     def from_model_config(
@@ -299,7 +303,11 @@ class WeightCacheKey:
         tp_size: int,
         tp_rank: int,
         *,
+        pp_size: int = 1,
+        pp_rank: int = 0,
         is_draft: bool = False,
+        dp_size: int = 1,
+        dp_rank: int = 0,
     ) -> "WeightCacheKey":
         """Build the fingerprint for a model configuration.
 
@@ -321,12 +329,16 @@ class WeightCacheKey:
             model_arch=arch,
             tp_size=tp_size,
             tp_rank=tp_rank,
+            pp_size=pp_size,
+            pp_rank=pp_rank,
             dtype=str(model_config.dtype),
             quantization=model_config.quantization,
             quant_config_hash=_hash_quant_config(quant_config),
             revision=model_config.revision,
             vllm_version=vllm.version.__version__,
             is_draft=is_draft,
+            dp_size=dp_size,
+            dp_rank=dp_rank,
         )
 
     def mismatched_fields(self, other: "WeightCacheKey") -> list[str]:
