@@ -67,30 +67,8 @@ cp -rL --no-preserve=ownership,timestamps "${SCRIPT_DIR}/." "${STAGED_DIR}/"
 chmod -R u+rwX "${STAGED_DIR}" 2>/dev/null || true
 export DISAGG_SCRIPTS_DIR="${STAGED_DIR}"
 echo "[slurm-submit] staged scripts for compute nodes: ${DISAGG_SCRIPTS_DIR}" >&2
-
-# ---- vLLM source overlays --------------------------------------------------
-# The container imports vLLM from the image's dist-packages, so a repo-side fix
-# never reaches a run on its own. Stage the files we need to override next to
-# the scripts; run_xPyD_disagg.slurm bind-mounts them over the image's copies.
-# Staging from the repo (rather than keeping a second copy in this directory)
-# keeps the repo the single source of truth.
-#   prepare_finalize/mori.py -- combine() must be given this rank's own
-#   routing, not dispatch()'s returned out_idx, or MoRI >= 7f28e9a17 raises
-#   and older MoRI silently corrupts cross-node results (ROCm/mori#475).
-VLLM_REPO_ROOT="${VLLM_REPO_ROOT:-$(cd "${SCRIPT_DIR}/../.." && pwd)}"
-_overlay_src="${VLLM_REPO_ROOT}/vllm/model_executor/layers/fused_moe/prepare_finalize/mori.py"
-if [[ -f "${_overlay_src}" ]] && grep -q '_dispatch_topk_ids' "${_overlay_src}"; then
-    mkdir -p "${STAGED_DIR}/overlays"
-    cp -L --no-preserve=ownership,timestamps "${_overlay_src}" \
-        "${STAGED_DIR}/overlays/fused_moe_prepare_finalize_mori.py"
-    echo "[slurm-submit] staged vLLM overlay: prepare_finalize/mori.py (mori#475 combine fix)" >&2
-else
-    echo "[slurm-submit] no vLLM mori overlay staged (${_overlay_src} missing or unpatched)" >&2
-fi
 export IMAGE MODEL_NAME WIDE_EP_MODE xP yD GPUS_PER_NODE RUN_AFTER_HEALTH HEALTH_TIMEOUT_S
 export SHARED_MOUNT LOG_ROOT DRY_RUN MORIIO_READ_MODE
-# Pinned MoRI rebuild (install_mori.sh); only acts on WIDE_EP_MODE=1 xP=2 yD=2.
-export MORI_COMMIT MORI_REPO MORI_REINSTALL_FORCE MORI_SKIP_REINSTALL
 export ROUTER_TYPE ROUTER_PORT VLLM_ROUTER_IMAGE
 # Leave the image's own ionic userspace in place instead of mounting the host's.
 export SKIP_IONIC_MOUNTS
