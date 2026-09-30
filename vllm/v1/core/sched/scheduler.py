@@ -1624,6 +1624,8 @@ class Scheduler(SchedulerInterface):
         # Keep the computed output tokens (all tokens but the final sampled one)
         # Cannot rely on num_computed_tokens because it may be 0 after preemption.
         keep_end = session.num_tokens - 1
+        assert keep_end >= session.num_computed_tokens
+
         kept_output_tokens = session._all_token_ids[
             session.num_prompt_tokens : keep_end
         ]
