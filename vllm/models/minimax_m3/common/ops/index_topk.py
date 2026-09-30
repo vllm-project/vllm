@@ -30,7 +30,7 @@ def _use_fp8_dot(q: torch.Tensor, k: torch.Tensor) -> bool:
         q.dtype == k.dtype
         and q.dtype in (torch.float8_e4m3fn, torch.float8_e5m2)
         and current_platform.is_cuda()
-        and current_platform.has_device_capability(89)
+        and current_platform.has_device_capability(90)
     )
 
 
