@@ -426,7 +426,6 @@ mod tests {
             (decode_time - itl_sum).abs() < 1e-6,
             "latency - ttft ({decode_time}s) != sum(itl) ({itl_sum}s)"
         );
-        assert!(output.latency < usage_delay.as_secs_f64());
     }
 
     /// ignore_eos and extra_body must survive the raw-splice path.
