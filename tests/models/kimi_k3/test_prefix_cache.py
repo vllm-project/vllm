@@ -160,7 +160,7 @@ def _known_failure(name: str, mode: Mode) -> str | None:
             "but FlashInfer MLA DCP requires 1"
         )
     if mode.spec and deployment.decode.dcp > 1:
-        return "FlashInfer MLA DCP decode breaks on ragged spec-decode batches"
+        return "FlashInfer MLA DCP decode breaks on ragged spec batches (#59392)"
     return None
 
 
