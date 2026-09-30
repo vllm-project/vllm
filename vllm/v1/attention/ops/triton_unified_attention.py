@@ -1038,6 +1038,18 @@ def unified_attention(
             f"(out.stride(1) = {out.stride(1)} != head_size = {head_size})."
         )
 
+    # Non-causal multi-token decode rows read all of [0, seq_len) per query row.
+    multi_query_3d = (
+        not use_causal
+        and not use_mm_prefix
+        and not use_rswa
+        and sliding_window_val == 0
+        and sinks is None
+        and kv_quant_mode == KVQuantMode.NONE
+        and softmax_segm_output is not None
+        and softmax_segm_output.shape[0] >= q.shape[0]
+    )
+
     # Launch the 2D kernel if
     # 1. No intermediate tiled softmax buffers for the 3D kernel have been allocated, or
     # 2. The batch includes at least one prefill request, or
@@ -1049,7 +1061,7 @@ def unified_attention(
         or softmax_segm_output is None
         or softmax_segm_max is None
         or softmax_segm_expsum is None
-        or max_seqlen_q > 1
+        or (max_seqlen_q > 1 and not multi_query_3d)
         or num_seqs > seq_threshold_3D
         or is_batch_invariant
     )

@@ -132,6 +132,7 @@ def ref_paged_attn(
     scale: float,
     sliding_window: int | None = None,
     soft_cap: float | None = None,
+    causal: bool = True,
 ) -> torch.Tensor:
     num_seqs = len(query_lens)
     block_tables = block_tables.cpu().numpy()
@@ -160,6 +161,8 @@ def ref_paged_attn(
         attn = torch.einsum("qhd,khd->hqk", q, k).float()
         empty_mask = torch.ones(query_len, kv_len)
         mask = torch.triu(empty_mask, diagonal=kv_len - query_len + 1).bool()
+        if not causal:
+            mask.zero_()
         if sliding_window is not None:
             sliding_window_mask = (
                 torch.triu(
@@ -596,6 +599,100 @@ def test_triton_unified_attn_bf16_query_fp8_kv(
     (
         torch.testing.assert_close(output, ref_output, atol=atol, rtol=rtol),
         f"{torch.max(torch.abs(output - ref_output))}",
+    )
+
+
+@pytest.mark.parametrize("num_heads", [(8, 2), (4, 4)])
+@pytest.mark.parametrize("query_len", [3, 4])
+@pytest.mark.parametrize(
+    ("causal", "scratch_tokens", "expect_3d"),
+    [(False, 64, True), (True, 64, False), (False, 8, False)],
+)
+@torch.inference_mode()
+def test_triton_unified_attn_multi_query_3d(
+    num_heads: tuple[int, int],
+    query_len: int,
+    causal: bool,
+    scratch_tokens: int,
+    expect_3d: bool,
+) -> None:
+    """Non-causal multi-query rows (DFlash drafts) take the 3D launch when the
+    scratch holds every query token; causal rows and short scratch stay 2D.
+    A trailing cudagraph padding request (seq_len 0) must not affect live rows."""
+    torch.set_default_device(DEVICE_TYPE)
+
+    set_random_seed(0)
+    num_query_heads, num_kv_heads = num_heads
+    head_size, block_size, num_blocks = 128, 16, 2048
+    kv_lens = [7, 1536, 8192]
+    query_lens = [query_len] * len(kv_lens)
+    num_live_tokens = sum(query_lens)
+    num_tokens = num_live_tokens + query_len
+    scale = head_size**-0.5
+
+    query = torch.randn(num_tokens, num_query_heads, head_size, dtype=torch.bfloat16)
+    key_cache = torch.randn(
+        num_blocks, block_size, num_kv_heads, head_size, dtype=torch.bfloat16
+    )
+    value_cache = torch.randn_like(key_cache)
+    cu_query_lens = torch.tensor([0, *query_lens, query_len], dtype=torch.int32).cumsum(
+        dim=0, dtype=torch.int32
+    )
+    seq_lens = torch.tensor([*kv_lens, 0], dtype=torch.int32)
+    block_tables = torch.randint(
+        0, num_blocks, (len(kv_lens) + 1, max(kv_lens) // block_size), dtype=torch.int32
+    )
+    block_tables[-1] = 0
+
+    num_par_softmax_segments = 16
+    head_size_padded = next_power_of_2(head_size)
+    softmax_segm_output = torch.empty(
+        (scratch_tokens, num_query_heads, num_par_softmax_segments, head_size_padded),
+        dtype=torch.float32,
+    )
+    softmax_segm_max = torch.full(
+        (scratch_tokens, num_query_heads, num_par_softmax_segments), 7.0
+    )
+    softmax_segm_expsum = torch.empty_like(softmax_segm_max)
+    output = torch.empty_like(query)
+
+    unified_attention(
+        q=query,
+        k=key_cache,
+        v=value_cache,
+        out=output,
+        cu_seqlens_q=cu_query_lens,
+        seqused_k=seq_lens,
+        max_seqlen_q=query_len,
+        max_seqlen_k=max(kv_lens),
+        softmax_scale=scale,
+        causal=causal,
+        window_size=(-1, -1),
+        block_table=block_tables,
+        softcap=0,
+        q_descale=None,
+        k_descale=None,
+        v_descale=None,
+        seq_threshold_3D=8,
+        num_par_softmax_segments=num_par_softmax_segments,
+        softmax_segm_output=softmax_segm_output,
+        softmax_segm_max=softmax_segm_max,
+        softmax_segm_expsum=softmax_segm_expsum,
+    )
+
+    assert bool((softmax_segm_max != 7.0).any()) is expect_3d
+    ref_output = ref_paged_attn(
+        query=query[:num_live_tokens],
+        key_cache=key_cache,
+        value_cache=value_cache,
+        query_lens=query_lens,
+        kv_lens=kv_lens,
+        block_tables=block_tables,
+        scale=scale,
+        causal=causal,
+    )
+    torch.testing.assert_close(
+        output[:num_live_tokens], ref_output, atol=1.5e-2, rtol=1e-2
     )
 
 

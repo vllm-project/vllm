@@ -52,6 +52,7 @@ logger = init_logger(__name__)
 # constants
 MIN_LAUNCH_GRID_SIZE_2D = 128  # Minimum launch grid size of 2D kernel
 NUM_PAR_SOFTMAX_SEGMENTS = 16  # Number of parallel tiled softmax segments
+NUM_PAR_SOFTMAX_SEGMENTS_MULTI_QUERY_ROCM = 128
 
 
 @dataclass
@@ -118,7 +119,7 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
             vllm_config, layer_names
         ) or model_config.get_num_attention_heads(vllm_config.parallel_config)
         self.num_heads_kv = model_config.get_num_kv_heads(vllm_config.parallel_config)
-        self.headdim = model_config.get_head_size()
+        self.headdim = kv_cache_spec.head_size
 
         # Check if CUDA Graphs are enabled for decode
         self.decode_cudagraph_enabled = (
@@ -152,10 +153,21 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
             )
 
         self.num_par_softmax_segments = NUM_PAR_SOFTMAX_SEGMENTS
+        max_num_tokens_3d = self.seq_threshold_3D
+        speculative_config = vllm_config.speculative_config
+        if vllm_config.attention_config.use_non_causal and speculative_config:
+            # Non-causal draft rows (DFlash) also run the 3D kernel.
+            max_num_tokens_3d = min(
+                self.seq_threshold_3D, vllm_config.scheduler_config.max_num_seqs
+            ) * (1 + speculative_config.num_speculative_tokens)
+            if current_platform.is_rocm():
+                self.num_par_softmax_segments = (
+                    NUM_PAR_SOFTMAX_SEGMENTS_MULTI_QUERY_ROCM
+                )
         headdim_padded = next_power_of_2(self.headdim)
         self.softmax_segm_output = torch.empty(
             (
-                self.seq_threshold_3D,
+                max_num_tokens_3d,
                 self.num_heads_q,
                 self.num_par_softmax_segments,
                 headdim_padded,
@@ -164,12 +176,12 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
             device=device,
         )
         self.softmax_segm_max = torch.empty(
-            (self.seq_threshold_3D, self.num_heads_q, self.num_par_softmax_segments),
+            (max_num_tokens_3d, self.num_heads_q, self.num_par_softmax_segments),
             dtype=torch.float32,
             device=device,
         )
         self.softmax_segm_expsum = torch.empty(
-            (self.seq_threshold_3D, self.num_heads_q, self.num_par_softmax_segments),
+            (max_num_tokens_3d, self.num_heads_q, self.num_par_softmax_segments),
             dtype=torch.float32,
             device=device,
         )
