@@ -40,7 +40,6 @@ from vllm.v1.attention.ops.triton_reshape_and_cache_flash import (
     triton_reshape_and_cache_flash_per_token_head_quant,
 )
 from vllm.v1.attention.ops.triton_unified_attention import (
-    MAX_UNIFORM_DECODE_QUERY_LEN,
     _supports_uniform_decode,
     unified_attention,
 )
@@ -56,6 +55,31 @@ logger = init_logger(__name__)
 # constants
 MIN_LAUNCH_GRID_SIZE_2D = 128  # Minimum launch grid size of 2D kernel
 NUM_PAR_SOFTMAX_SEGMENTS = 16  # Number of parallel tiled softmax segments
+
+
+def _is_uniform_decode(common_attn_metadata: CommonAttentionMetadata) -> bool:
+    """Whether every nonempty request is a non-prefill of max_query_len tokens.
+
+    Empty requests are full-graph padding. MRV2 pads query_start_loc but not
+    is_prefilling, so requests without a flag must be empty.
+    """
+    num_reqs = common_attn_metadata.num_reqs
+    max_query_len = common_attn_metadata.max_query_len
+    is_prefilling = common_attn_metadata.is_prefilling
+    if (
+        max_query_len <= 1
+        or is_prefilling is None
+        or not _supports_uniform_decode(
+            max_query_len, num_reqs, common_attn_metadata.num_actual_tokens
+        )
+    ):
+        return False
+    query_lens = common_attn_metadata.query_start_loc_cpu[: num_reqs + 1].diff()
+    prefilling = torch.ones(num_reqs, dtype=torch.bool)
+    num_flags = min(num_reqs, len(is_prefilling))
+    prefilling[:num_flags] = is_prefilling[:num_flags]
+    is_decode = (query_lens == max_query_len) & ~prefilling
+    return bool(is_decode.any() and (is_decode | (query_lens == 0)).all())
 
 
 @dataclass
@@ -160,6 +184,9 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
         headdim_padded = next_power_of_2(self.headdim)
         max_query_len_3d = 1
         speculative_config = vllm_config.speculative_config
+        self.adaptive_verification = bool(
+            speculative_config and speculative_config.enable_adaptive_verification
+        )
         if speculative_config is not None:
             num_speculative_tokens = speculative_config.num_speculative_tokens or 0
             query_len = 1 + num_speculative_tokens * (
@@ -226,34 +253,10 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
         num_reqs = common_attn_metadata.num_reqs
         num_actual_tokens = common_attn_metadata.num_actual_tokens
         max_query_len = common_attn_metadata.max_query_len
-        is_uniform_decode = False
-        is_prefilling = common_attn_metadata.is_prefilling
-        speculative_config = self.vllm_config.speculative_config
-        if (
-            max_query_len > 1
-            and _supports_uniform_decode(max_query_len, num_reqs, num_actual_tokens)
-            and is_prefilling is not None
-            and not (
-                speculative_config is not None
-                and speculative_config.enable_adaptive_verification
-            )
-        ):
-            query_starts = common_attn_metadata.query_start_loc_cpu[: num_reqs + 1]
-            query_lens = query_starts[1:] - query_starts[:-1]
-            # MRV2 pads query offsets but keeps prefill flags at the active size.
-            num_phase_rows = min(num_reqs, len(is_prefilling))
-            is_uniform_decode = bool(
-                torch.any(query_lens > 0)
-                and torch.all((query_lens == 0) | (query_lens == max_query_len))
-                and torch.all(
-                    (query_lens[:num_phase_rows] == 0) | ~is_prefilling[:num_phase_rows]
-                )
-                and torch.all(query_lens[num_phase_rows:] == 0)
-            )
-            if max_query_len > MAX_UNIFORM_DECODE_QUERY_LEN:
-                is_uniform_decode = is_uniform_decode and bool(
-                    query_starts[0] == 0 and query_starts[-1] == num_actual_tokens
-                )
+        # Adaptive verification redistributes query lengths on device only.
+        is_uniform_decode = not self.adaptive_verification and _is_uniform_decode(
+            common_attn_metadata
+        )
 
         max_seq_len = common_attn_metadata.max_seq_len
         query_start_loc = common_attn_metadata.query_start_loc

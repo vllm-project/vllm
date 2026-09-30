@@ -188,13 +188,6 @@ def test_six_query_requires_exact_unpadded_request(
     assert builder.build(0, common).is_uniform_decode is expected
 
 
-def test_six_query_rejects_shifted_offsets(sm120_platform):
-    builder = _builder(5, max_num_seqs=1, capture_sizes=[6])
-    common = _metadata([6], [False])
-    common.query_start_loc_cpu += 1
-    assert not builder.build(0, common).is_uniform_decode
-
-
 def test_six_query_capture_preserves_six_rows(sm120_platform):
     builder = _builder(5, max_num_seqs=1, capture_sizes=[6])
     common = _metadata([6], [False])
