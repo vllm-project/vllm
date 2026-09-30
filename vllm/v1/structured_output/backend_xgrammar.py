@@ -453,7 +453,5 @@ def validate_xgrammar_grammar(sampling_params: SamplingParams) -> None:
                 xgr.Grammar.from_structural_tag(tags, s_tag["triggers"])
             else:
                 xgr.Grammar.from_structural_tag(so_params.structural_tag)
-        except VLLMValidationError:
-            raise
         except Exception as e:
             raise VLLMValidationError("Invalid structural tag specification.") from e
