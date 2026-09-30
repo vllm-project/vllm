@@ -130,10 +130,10 @@ path. The resolver consumes the existing graph-stable request mapping from
 attention metadata; neither the worker nor individual cache handles keep a
 duplicate mapping.
 
-Speculative decoding resolves and consumes each verification step in order.
-Each step receives distinct replayable plan rows while sharing the request's
-hot-cache state, so a later step cannot reuse a hot row before an earlier step
-has consumed it.
+Speculative decoding resolves all verification rows of a request in one pass:
+one block resolves the union of the rows' top-k against the request's hot-cache
+state, so rows that select the same host row share its hot row and no row
+evicts a hot row another row of the step still reads.
 
 ## P/D import target
 

@@ -19,7 +19,8 @@ from vllm.distributed import get_tp_group
 from vllm.forward_context import get_forward_context, in_piecewise_cudagraph
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
-from vllm.utils.math_utils import round_up
+from vllm.utils.math_utils import cdiv, round_up
+from vllm.utils.mem_utils import get_max_shared_memory_bytes
 from vllm.utils.torch_utils import current_stream
 from vllm.v1.attention.backend import max_decode_query_len
 from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
@@ -96,6 +97,9 @@ class PagedCacheView:
 class ResolvedHiSparseConfig:
     top_k: int
     device_buffer_size: int
+    # Most host rows one request's decode rows can select in a step: every
+    # verification row's top-k.
+    max_union_rows: int
     eager_host_mirror: bool = True
 
     @classmethod
@@ -151,7 +155,35 @@ class ResolvedHiSparseConfig:
         return cls(
             top_k=model_top_k,
             device_buffer_size=device_buffer_size,
+            max_union_rows=min_device_buffer_size,
             eager_host_mirror=config.eager_host_mirror,
+        )
+
+
+def _check_residency_shared_memory(
+    device: torch.device, config: ResolvedHiSparseConfig
+) -> None:
+    """Reject a config whose residency resolver exceeds per-block shared memory."""
+    # Mirrors hisparse_resolve_residency's layout: union hash keys and values
+    # (plus an empty slot), per-chunk offsets, five counters, done bits, and
+    # the int16 compacted LRU.
+    hot_size = config.device_buffer_size
+    num_chunks = cdiv(hot_size, 32)
+    required = 4 * (2 * (config.max_union_rows + 1) + 3 * num_chunks + 7) + 2 * hot_size
+    device_index = (
+        device.index
+        if device.index is not None
+        else torch.accelerator.current_device_index()
+    )
+    available = get_max_shared_memory_bytes(device_index)
+    if required > available:
+        raise ValueError(
+            "HiSparse residency resolution needs "
+            f"{required} B of shared memory per block for "
+            f"device_buffer_size={config.device_buffer_size} and "
+            f"{config.max_union_rows} rows per request "
+            "(decode query length x index_topk), but the device allows "
+            f"{available} B. Lower device_buffer_size or num_speculative_tokens."
         )
 
 
@@ -677,6 +709,9 @@ class HiSparseRuntime:
         # Logical slots per request. Physical rows come from its ephemeral HMA
         # block table and need not be contiguous in the shared slab.
         self.region_stride = config.device_buffer_size
+        self.max_union_rows = config.max_union_rows
+        if self.device.type == "cuda":
+            _check_residency_shared_memory(self.device, config)
 
         row_bytes = row_width * kv_dtype.itemsize
         if row_bytes % 16 != 0:
@@ -919,6 +954,7 @@ class HiSparseRuntime:
             group.lru_slots,
             request_state_indices,
             self.region_stride,
+            self.max_union_rows,
             None,
             group.swap_stats,
             physical_topk_indices,

@@ -680,7 +680,7 @@ void hisparse_resolve_residency(
     torch::stable::Tensor& device_global_indices,
     torch::stable::Tensor& lru_slots,
     std::optional<torch::stable::Tensor> const& request_state_indices,
-    int64_t region_stride,
+    int64_t region_stride, int64_t max_union_rows,
     std::optional<torch::stable::Tensor> const& miss_mask,
     std::optional<torch::stable::Tensor> const& stats,
     std::optional<torch::stable::Tensor> const& attention_indices,
