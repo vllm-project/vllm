@@ -16,6 +16,7 @@ from tests.quantization.utils import (
     _test_online_quant_peak_mem_impl,
     is_quant_method_supported,
     load_model_without_vllm_runner,
+    quant_config_args,
 )
 from vllm import _custom_ops as ops
 from vllm._aiter_ops import rocm_aiter_ops
@@ -180,7 +181,7 @@ def test_qianfan_online_fp8_keeps_vision_layers_unquantized(
     config = OnlineQuantizationConfig(args)
     other_config = OnlineQuantizationConfig(args)
     model = QianfanOCRForConditionalGeneration.__new__(
-        QianfanOCRForConditionalGeneration
+        QianfanOCRForConditionalGeneration  # type: ignore[type-abstract]
     )
     model._patch_quant_config(
         SimpleNamespace(vision_config=SimpleNamespace(num_hidden_layers=2)),
@@ -216,17 +217,30 @@ def test_online_nvfp4_reuses_kernel_when_weights_are_reprocessed(
     method.moe_kernel = None
 
     layer = Mock()
-    converted_weights = tuple(object() for _ in range(8))
-    convert_weights = Mock(return_value=converted_weights)
-    process_weights = Mock()
+    converted_weights = [
+        tuple(torch.full((2,), value + index) for index in range(8))
+        for value in (1.0, 2.0, 0.5)
+    ]
+    convert_weights = Mock(side_effect=converted_weights)
+    quant_config = SimpleNamespace(
+        g1_alphas=converted_weights[0][2].clone(),
+        g2_alphas=converted_weights[0][6].clone(),
+    )
+    alpha_ptrs = (quant_config.g1_alphas.data_ptr(), quant_config.g2_alphas.data_ptr())
+    observed_scales = []
+    process_weights = Mock(
+        side_effect=lambda _: observed_scales.append(
+            (quant_config.g1_alphas.clone(), quant_config.g2_alphas.clone())
+        )
+    )
     kernel = SimpleNamespace(
         fused_experts=SimpleNamespace(
             process_weights_after_loading=process_weights,
         )
     )
     make_kernel = Mock(return_value=kernel)
-    get_quant_config = Mock(return_value=object())
-    method.get_fused_moe_quant_config = get_quant_config
+    get_quant_config = Mock(return_value=quant_config)
+    monkeypatch.setattr(method, "get_fused_moe_quant_config", get_quant_config)
 
     monkeypatch.setattr(
         "vllm.model_executor.layers.quantization.online.nvfp4."
@@ -242,14 +256,22 @@ def test_online_nvfp4_reuses_kernel_when_weights_are_reprocessed(
         make_kernel,
     )
 
-    method._setup_kernel(layer)
-    method._setup_kernel(layer)
+    for weights in converted_weights:
+        method._setup_kernel(layer)
+        # Expert post-processing must observe fresh scales, with stable storage.
+        torch.testing.assert_close(observed_scales[-1][0], weights[2])
+        torch.testing.assert_close(observed_scales[-1][1], weights[6])
+        assert method.moe_quant_config is quant_config
+        assert (
+            quant_config.g1_alphas.data_ptr(),
+            quant_config.g2_alphas.data_ptr(),
+        ) == alpha_ptrs
 
     assert method.moe_kernel is kernel
-    assert convert_weights.call_count == 2
+    assert convert_weights.call_count == 3
     make_kernel.assert_called_once()
     get_quant_config.assert_called_once()
-    assert process_weights.call_count == 2
+    assert process_weights.call_count == 3
 
 
 def _fully_quantized_quark_config() -> QuarkConfig:
@@ -334,7 +356,7 @@ def test_online_prequantized_compatibility(
     checkpoint_config = checkpoint_config_factory()
 
     checkpoint_config.online_quantization_config = OnlineQuantizationConfig(
-        QuantizationConfigArgs(linear="mxfp8")
+        quant_config_args(linear="mxfp8")
     )
     config = checkpoint_config
 
@@ -387,7 +409,7 @@ def test_online_ignore_keeps_checkpoint_quantization_linear(
     quant_config = _fully_quantized_quark_config()
     prefix = "model.layers.0.self_attn.o_proj"
     quant_config.online_quantization_config = OnlineQuantizationConfig(
-        QuantizationConfigArgs(linear="mxfp8", ignore=[prefix])
+        quant_config_args(linear="mxfp8", ignore=[prefix])
     )
     monkeypatch.setattr(
         quant_config.online_quantization_config,
@@ -416,7 +438,7 @@ def test_online_quantization_rejects_prequantized_moe(
     prefix = "model.layers.0.mlp.experts"
     quant_config = _fully_quantized_quark_config()
     quant_config.online_quantization_config = OnlineQuantizationConfig(
-        QuantizationConfigArgs(linear="mxfp4", moe="mxfp4")
+        quant_config_args(linear="mxfp4", moe="mxfp4")
     )
 
     with pytest.raises(ValueError, match="pre-quantized layer"):
@@ -439,7 +461,7 @@ def test_activation_only_override_applies_to_checkpoint_method(
     model_config = ModelConfig(
         model=str(tmp_path),
         quantization="compressed-tensors",
-        quantization_config=QuantizationConfigArgs(moe={"activation": "mxfp8"}),
+        quantization_config=quant_config_args(moe={"activation": "mxfp8"}),
         hf_overrides={
             "quantization_config": {
                 "quant_method": "compressed-tensors",
@@ -493,7 +515,7 @@ def test_online_overlay_loads_checkpoint_config_file(tmp_path) -> None:
     model_config = ModelConfig(
         model=str(tmp_path),
         quantization="awq",
-        quantization_config=QuantizationConfigArgs(linear="mxfp8"),
+        quantization_config=quant_config_args(linear="mxfp8"),
     )
 
     result = weight_utils.get_quant_config(model_config, LoadConfig())
@@ -553,7 +575,7 @@ def test_online_shorthand_selects_checkpoint_or_online_config(
 
 def test_log_online_quantization_for_composable_config(monkeypatch) -> None:
     """Composable configs log their nested online quantization results."""
-    online_config = OnlineQuantizationConfig(QuantizationConfigArgs(linear="mxfp8"))
+    online_config = OnlineQuantizationConfig(quant_config_args(linear="mxfp8"))
     online_config.quantized_layers = {
         "model.layers.0.self_attn.o_proj": ("linear", "mxfp8", None),
         "model.layers.1.self_attn.o_proj": ("linear", "mxfp8", None),
@@ -582,6 +604,30 @@ def test_checkpoint_quantization_rejects_online_shorthand(tmp_path) -> None:
 
     with pytest.raises(ValueError, match="does not match the quantization"):
         ModelConfig(model=str(tmp_path), quantization="fp8_per_channel")
+
+
+def test_nvfp4_per_token_backend_contract() -> None:
+    from vllm.model_executor.layers.fused_moe.experts.flashinfer_cutedsl_moe import (
+        FlashInferCuteDSLExperts,
+    )
+    from vllm.model_executor.layers.fused_moe.experts.flashinfer_cutlass_moe import (
+        FlashInferExperts,
+    )
+    from vllm.model_executor.layers.fused_moe.experts.trtllm_nvfp4_moe import (
+        TrtLlmNvFp4ExpertsModular,
+        TrtLlmNvFp4ExpertsMonolithic,
+    )
+    from vllm.model_executor.layers.quantization.utils.quant_utils import (
+        kNvfp4DynamicToken,
+        kNvfp4Static,
+    )
+
+    scheme = (kNvfp4Static, kNvfp4DynamicToken)
+    assert TrtLlmNvFp4ExpertsMonolithic._supports_quant_scheme(*scheme)
+    assert TrtLlmNvFp4ExpertsModular._supports_quant_scheme(*scheme)
+    assert FlashInferCuteDSLExperts._supports_quant_scheme(*scheme)
+    assert FlashInferCuteDSLExperts._supports_no_act_and_mul()
+    assert not FlashInferExperts._supports_quant_scheme(*scheme)
 
 
 @pytest.mark.parametrize("per_token_activation", [False, True])
@@ -1119,7 +1165,7 @@ def test_online_quantization_records_global_config(
     default_vllm_config, dist_init
 ) -> None:
     default_vllm_config.model_config = ModelConfig()
-    config = OnlineQuantizationConfig(QuantizationConfigArgs(linear="fp8_per_block"))
+    config = OnlineQuantizationConfig(quant_config_args(linear="fp8_per_block"))
     prefix = "model.layers.0.self_attn.o_proj"
     layer = ColumnParallelLinear(
         input_size=1,
@@ -1173,7 +1219,7 @@ def test_online_quantization_targets_reject_unsupported_layer() -> None:
 
 
 def test_log_online_quantization(default_vllm_config, monkeypatch) -> None:
-    config = OnlineQuantizationConfig(QuantizationConfigArgs(linear="fp8_per_tensor"))
+    config = OnlineQuantizationConfig(quant_config_args(linear="fp8_per_tensor"))
     config.quantized_layers = {
         "model.layers.0.mlp.down_proj": ("linear", "fp8_per_tensor", None),
         "model.layers.1.mlp.down_proj": ("linear", "fp8_per_tensor", None),
