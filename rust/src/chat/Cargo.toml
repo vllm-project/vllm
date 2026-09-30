@@ -28,6 +28,7 @@ thiserror-ext.workspace = true
 time.workspace = true
 tokio.workspace = true
 tracing.workspace = true
+tracing-subscriber.workspace = true
 trait-set.workspace = true
 uuid.workspace = true
 vllm-engine-core-client.workspace = true
@@ -35,6 +36,7 @@ vllm-llm.workspace = true
 vllm-parser.workspace = true
 vllm-text.workspace = true
 vllm-tokenizer.workspace = true
+vllm-tracing.workspace = true
 xgrammar-structural-tag.workspace = true
 
 [dev-dependencies]
@@ -47,7 +49,6 @@ rmp-serde.workspace = true
 serial_test.workspace = true
 tempfile.workspace = true
 tokio.workspace = true
-tracing-subscriber.workspace = true
 uuid.workspace = true
 vllm-engine-core-client = { workspace = true, features = ["test-util"] }
 vllm-tokenizer = { workspace = true, features = ["test-utils"] }

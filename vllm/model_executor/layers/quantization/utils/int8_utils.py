@@ -178,6 +178,7 @@ def per_token_group_quant_int8(
     Returns:
         tuple[torch.Tensor, torch.Tensor]: The quantized tensor and the
             scaling factor for quantization.
+
     """
     assert x.shape[-1] % group_size == 0, (
         "the last dimension of `x` cannot be divisible by `group_size`"

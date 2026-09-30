@@ -166,6 +166,7 @@ class MultiModuleMTPSpeculator(DraftModelSpeculator):
             input_batch.idx_mapping,
             temperature,
             seeds,
+            dummy_run=dummy_run,
         )
 
         num_tokens = input_batch.num_tokens
@@ -189,7 +190,7 @@ class MultiModuleMTPSpeculator(DraftModelSpeculator):
         # When all requests are decoding (no true prefills), each has
         # num_speculative_steps + 1 tokens, enabling FULL graph replay.
         uniform_token_count = get_uniform_decode_token_count(
-            num_reqs, num_tokens, max_query_len, input_batch.has_prefill
+            num_reqs, num_tokens, max_query_len, input_batch.decode_graph_eligible
         )
         batch_desc, batch_sync = dispatch_cg_and_sync_dp(
             self.cudagraph_manager,
@@ -226,10 +227,9 @@ class MultiModuleMTPSpeculator(DraftModelSpeculator):
             slot_mappings = build_slot_mappings_by_layer(
                 slot_mappings_tensor, self.kv_cache_config
             )
-            draft_attn_metadata = self._build_draft_attn_metadata(
+            draft_attn_metadata = self._build_attn_metadata(
                 num_reqs=num_reqs,
-                num_reqs_padded=batch_desc.num_reqs or num_reqs,
-                num_tokens_padded=batch_desc.num_tokens,
+                batch_desc=batch_desc,
                 query_start_loc_np=input_batch.query_start_loc_np,
                 seq_lens_cpu_upper_bound=seq_lens_cpu_upper_bound,
                 step=0,
