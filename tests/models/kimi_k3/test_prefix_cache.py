@@ -283,14 +283,16 @@ def _serve(deployment: Deployment, mode: Mode) -> Iterator[list[RemoteOpenAIServ
         stack.callback(RemoteOpenAIServer.shutdown_many, servers)
         next_gpu = 0
         for instance in deployment.instances:
-            gpus = range(next_gpu, next_gpu + instance.tp)
-            next_gpu += instance.tp
-            env = {
-                "CUDA_VISIBLE_DEVICES": ",".join(map(str, gpus)),
-                "VLLM_SERVER_DEV_MODE": "1",
-                "VLLM_SSM_CONV_STATE_LAYOUT": "DS",
-                "VLLM_NIXL_SIDE_CHANNEL_PORT": str(get_open_port()),
-            }
+            env = {}
+            if deployment.offload:
+                # Enables /reset_prefix_cache.
+                env["VLLM_SERVER_DEV_MODE"] = "1"
+            if deployment.prefill is not None:
+                gpus = range(next_gpu, next_gpu + instance.tp)
+                next_gpu += instance.tp
+                env["CUDA_VISIBLE_DEVICES"] = ",".join(map(str, gpus))
+                env["VLLM_SSM_CONV_STATE_LAYOUT"] = "DS"
+                env["VLLM_NIXL_SIDE_CHANNEL_PORT"] = str(get_open_port())
             servers.append(
                 RemoteOpenAIServer(
                     MODEL,

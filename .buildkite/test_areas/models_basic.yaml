@@ -146,9 +146,9 @@ steps:
       # cuda.bindings.driver), so they are deliberately left out here.
       - pytest -v -s models/kimi_k3
 
-- label: ":nvidia: (4xB200) Kimi K3 Prefix Cache"
+- label: ":nvidia: (4xB200) Kimi K3 Prefix Cache Shard %N"
   key: kimi-k3-prefix-cache-4xb200
-  timeout_in_minutes: 90
+  timeout_in_minutes: 75
   device: b200-k8s
   num_devices: 4
   source_file_dependencies:
@@ -161,7 +161,8 @@ steps:
   - vllm/model_executor/layers/mamba/
   - tests/models/kimi_k3/test_prefix_cache.py
   commands:
-  - pytest -v -s models/kimi_k3/test_prefix_cache.py
+  - pytest -v -s models/kimi_k3/test_prefix_cache.py --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
+  parallelism: 2
 
 - label: ":nvidia: (H200) GLM5Next"
   key: glm5next-unit-tests
