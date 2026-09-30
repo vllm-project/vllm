@@ -32,10 +32,11 @@ When using `vllm bench serve`, you can enable profiling by passing the `--profil
 Traces can be visualized using <https://ui.perfetto.dev/>.
 
 Each worker writes its trace and summary table under `torch_profiler_dir`,
-named after its rank, for example
-`dp0_pp0_tp0_dcp0_ep0_rank0.<id>.pt.trace.json.gz` and
-`dp0_pp0_tp0_dcp0_ep0_rank0.profiler_out.txt`. The AsyncLLM CPU trace uses
-`<hostname>_<pid>.async_llm` instead of the rank suffix. When a session sets
+named after its rank, for example `rank0.<id>.pt.trace.json.gz` and
+`rank0.profiler_out.txt`. Depending on the parallel configuration, the rank
+name can also include the parallel ranks, such as
+`dp0_pp0_tp0_dcp0_ep0_rank0`. The AsyncLLM CPU trace uses
+`<hostname>_<pid>.async_llm` instead of the rank name. When a session sets
 `profile_prefix`, it is prepended as `<profile_prefix>_`, so summaries from
 different sessions do not overwrite each other.
 
