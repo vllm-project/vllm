@@ -285,7 +285,7 @@ def test_async_tp_pass_requires_full_graph_compilation():
     ]
 
     async_tp_pass = object.__new__(AsyncTPPass)
-    async_tp_pass.compilation_config = vllm_config.compilation_config
+    async_tp_pass.compilation_config = vllm_config.compilation_config  # type: ignore[assignment]
 
     with pytest.raises(
         AssertionError, match="AsyncTPPass requires full-graph compilation"
@@ -303,6 +303,7 @@ def async_tp_pass_on_test_model(
     dtype: torch.dtype,
     dynamic: bool,
     distributed_init_method: str,
+    check_numerics: bool = False,
 ):
     set_random_seed(0)
 
@@ -363,12 +364,24 @@ def async_tp_pass_on_test_model(
         hidden_states = torch.randn(
             (batch_size * seq_len, hidden_size), dtype=dtype, requires_grad=False
         )
+        if check_numerics:
+            hidden_states += local_rank * 0.125
 
         if dynamic:
             torch._dynamo.mark_dynamic(hidden_states, 0)
 
         compiled_model = torch.compile(model, backend=backend)
-        compiled_model(hidden_states)
+        actual = compiled_model(hidden_states)
+
+        if check_numerics:
+            # These are new checks, so no existing tolerance is relaxed.
+            # Allow BF16 rounding vs. eager, but keep the lifetime check exact.
+            expected = model(hidden_states)
+            torch.testing.assert_close(actual, expected, rtol=1e-2, atol=1e-2)
+            snapshot = actual.clone()
+            changed = compiled_model(-hidden_states)
+            torch.testing.assert_close(changed, -expected, rtol=1e-2, atol=1e-2)
+            torch.testing.assert_close(actual, snapshot, rtol=0, atol=0)
 
         assert async_tp_pass.matched_count == 1
 

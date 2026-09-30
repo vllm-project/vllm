@@ -32,7 +32,8 @@ matplotlib # required for qwen-vl test
 mistral_common[image,audio]>=1.11.6 # required for voxtral test
 num2words # required for smolvlm test
 open_clip_torch==2.32.0 # Required for nemotron_vl test, Nemotron Parse in test_common.py
-datamodel_code_generator # required for minicpm3 test
+datamodel_code_generator>=0.64.0 # required for minicpm3 test
+nltk>=3.10.3 # pin transitive rouge-score/lm-eval dep for known GHSAs
 lm-eval[api]>=0.4.12 # required for model evaluation test
 mteb[bm25s]>=2, <3 # required for mteb test
 transformers==5.17.0
@@ -65,7 +66,7 @@ decord==0.6.0
 imagehash # Required for Prithvi tests
 segmentation-models-pytorch>0.4.0 # Required for Prithvi tests
 
-gpt-oss>=0.0.7; python_version > '3.11'
+gpt-oss[eval]>=0.0.7; python_version > '3.11'
 
 perceptron # required for isaac test
 kaldi-native-fbank>=1.18.7 # required for fireredasr2 test

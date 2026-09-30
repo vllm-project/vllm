@@ -26,6 +26,7 @@ from vllm.v1.attention.backend import (
     AttentionMetadataBuilder,
     CommonAttentionMetadata,
     MultipleOf,
+    max_decode_query_len,
 )
 from vllm.v1.attention.backends.mla.compressor_utils import (
     get_dspark_swa_index_width,
@@ -148,7 +149,7 @@ class DeepseekSparseSWABackend(AttentionBackend):
         return "DEEPSEEK_SPARSE_SWA"
 
     @staticmethod
-    def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
+    def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int | MultipleOf]:
         return [MultipleOf(32)]
 
     @classmethod
@@ -456,14 +457,10 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
         self.num_speculative_tokens = (
             spec_config.num_speculative_tokens if spec_config else 0
         )
-        # Decode can have query_len up to
-        #   1 + (2 if parallel drafting else 1) * num_speculative_tokens.
         # sparse_swa has no MQA-vs-dense-MHA routing, so multi-token queries take
-        # the prefill path and the decode/prefill split stays at that width.
-        spec_mult = (
-            2 if (spec_config is not None and spec_config.parallel_drafting) else 1
-        )
-        self.decode_threshold = 1 + spec_mult * self.num_speculative_tokens
+        # the prefill path and the decode/prefill split stays at the widest
+        # decode.
+        self.decode_threshold = max_decode_query_len(self.vllm_config)
         self.reorder_batch_threshold = None
 
         hf_config = self.vllm_config.model_config.hf_config
@@ -613,7 +610,7 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
         )
 
         is_valid_token = self.is_valid_token[: slot_mapping.shape[0]]
-        is_valid_token.copy_(slot_mapping >= 0)
+        torch.ge(slot_mapping, 0, out=is_valid_token)
         if replay_start is None:
             # Graph captures build without it; their dummy batches replay nothing.
             replay_start = self.no_replay_start

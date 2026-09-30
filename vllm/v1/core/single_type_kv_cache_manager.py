@@ -106,11 +106,9 @@ class SingleTypeKVCacheManager(ABC):
         # managers have been validated by the coordinator.
         self.cache_hit_alignment_tokens = scheduler_block_size
         # The block size for this manager; used for actual block allocation.
-        self.block_size = kv_cache_spec.block_size
-        self.dcp_world_size = dcp_world_size
-        self.pcp_world_size = pcp_world_size
-        if dcp_world_size > 1:
-            self.block_size *= dcp_world_size
+        self.dcp_world_size = dcp_world_size if kv_cache_spec.dcp_sharded else 1
+        self.pcp_world_size = pcp_world_size if kv_cache_spec.dcp_sharded else 1
+        self.block_size = kv_cache_spec.block_size * self.dcp_world_size
         self.kv_cache_spec = kv_cache_spec
         self.block_pool = block_pool
         self.enable_caching = enable_caching
@@ -143,9 +141,9 @@ class SingleTypeKVCacheManager(ABC):
         # aligned segment (SWA). Initialized lazily by the coordinator after
         # determining the attention groups.
         self.use_eagle = False
-        # ``CacheConfig.enable_mamba_fine_grained_prefix_cache``, narrowed and set
+        # ``CacheConfig.enable_mamba_shared_prefix_checkpoint``, narrowed and set
         # by ``KVCacheManager``; only an EAGLE Mamba "align" group ever gets it.
-        self.fine_grained_prefix_cache = False
+        self.shared_prefix_checkpoint = False
         # Partial-hit copy-on-write bookkeeping. Populated only by fine-grained
         # managers (full attention, mamba "align"); harmlessly empty elsewhere.
         self._partial_hit_reqs: dict[str, tuple[int, KVCacheBlock]] = {}
@@ -1455,10 +1453,6 @@ class MambaManager(SingleTypeKVCacheManager):
         self, kv_cache_spec: MambaSpec, block_pool: BlockPool, **kwargs
     ) -> None:
         super().__init__(kv_cache_spec, block_pool, **kwargs)
-        # Mamba layers use TP instead of DCP, so each rank holds the full
-        # recurrent state. Undo the DCP/PCP block_size scaling that the base
-        # class applies for attention groups whose KV cache is partitioned.
-        self.block_size = kv_cache_spec.block_size
         self.mamba_cache_mode = kv_cache_spec.mamba_cache_mode
         self.num_speculative_blocks: int = kv_cache_spec.num_speculative_blocks
         self.has_prefill_checkpoint_blocks = (
@@ -2048,9 +2042,21 @@ class MambaManager(SingleTypeKVCacheManager):
             blocks = self.req_to_blocks[request.request_id]
             assert 0 <= checkpoint_idx < len(blocks)
             checkpoint_block = blocks[checkpoint_idx]
+            # The prompt's final chunk caches only up to its last full block,
+            # so ``num_tokens < num_prompt_tokens`` holds there too; its
+            # checkpoint is the prompt's reusable boundary, not a transient one.
+            is_prompt_checkpoint = (
+                checkpoint_position
+                == get_mamba_prefill_checkpoint_position(
+                    request.num_prompt_tokens,
+                    hash_block_size,
+                    self.drop_eagle_checkpoint_block,
+                )
+            )
             if (
                 retention_interval == 0
                 and num_tokens < request.num_prompt_tokens
+                and not is_prompt_checkpoint
                 and checkpoint_position != request.shared_prefix_boundary
             ):
                 # retention_interval == 0 keeps this transient checkpoint
@@ -2078,7 +2084,7 @@ class MambaManager(SingleTypeKVCacheManager):
         latest_prompt_hash_boundary = (
             request.num_prompt_tokens // hash_block_size
         ) * hash_block_size
-        if self.use_eagle:
+        if self.drop_eagle_checkpoint_block:
             # Eagle groups match one hash unit past the candidate and drop it,
             # so register the tail one unit lower.
             latest_prompt_hash_boundary = max(
@@ -2090,7 +2096,7 @@ class MambaManager(SingleTypeKVCacheManager):
         # running state block, mutated in place, which equals what its key
         # promises only after that step's forward.
         if num_tokens != latest_prompt_hash_boundary and not (
-            self.fine_grained_prefix_cache
+            self.shared_prefix_checkpoint
             and num_tokens == request.shared_prefix_boundary
             and request.num_computed_tokens < num_tokens <= request.num_prompt_tokens
         ):
