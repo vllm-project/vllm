@@ -34,12 +34,6 @@ typedef __hip_fp8x4_e4m3_fnuz __nv_fp8x4_e4m3;
 
 namespace vllm {
 
-template <typename T>
-__device__ __forceinline__ T silu_kernel(const T& x) {
-  // x * sigmoid(x)
-  return (T)(((float)x) / (1.0f + expf((float)-x)));
-}
-
 // Two saturated floats to two fp8 values. The packed cvt rounds each lane
 // exactly like the scalar cvt, so both paths produce the same bits.
 template <typename fp8_type>
@@ -62,14 +56,16 @@ __device__ __forceinline__ void fp8x2_from_saturated(fp8_type* dst,
 // One flat grid over every VEC-wide chunk of the output: each thread loads VEC
 // gate and VEC up elements, computes VEC activations in fp32 and stores VEC
 // fp8 values in one write. VEC == 1 is the fallback for rows that are not
-// 16-byte vectorizable.
+// 16-byte vectorizable. The whole chain (activation, product, scale) stays in
+// fp32 and rounds once at the fp8 conversion, like the Inductor-generated
+// kernel for the unfused path.
 constexpr int kActQuantBlockSize = 256;
 constexpr int kActQuantVecSize = 16;
+constexpr int kActQuantMinBlocksPerSm = 4;
 constexpr int kActQuantMaxBlocksPerSm = 8;
 
-template <typename scalar_t, scalar_t (*ACT_FN)(const scalar_t&),
-          typename fp8_type, int VEC>
-__global__ void __launch_bounds__(kActQuantBlockSize)
+template <typename scalar_t, float (*ACT_FN)(float), typename fp8_type, int VEC>
+__global__ void __launch_bounds__(kActQuantBlockSize, kActQuantMinBlocksPerSm)
     act_and_mul_quant_kernel(fp8_type* __restrict__ out,          // [..., d]
                              const scalar_t* __restrict__ input,  // [..., 2, d]
                              const float* scale, const uint32_t d,
@@ -111,8 +107,9 @@ __global__ void __launch_bounds__(kActQuantBlockSize)
     float r[VEC];
 #pragma unroll
     for (int i = 0; i < VEC; i++) {
-      r[i] = scaled_fp8_saturate<true, fp8_type>(ACT_FN(x[i]) * y[i],
-                                                 inverted_scale);
+      r[i] = scaled_fp8_saturate<true, fp8_type>(
+          ACT_FN(static_cast<float>(x[i])) * static_cast<float>(y[i]),
+          inverted_scale);
     }
 
     if constexpr (VEC == 1) {
@@ -134,6 +131,12 @@ __global__ void __launch_bounds__(kActQuantBlockSize)
 
 __device__ __forceinline__ float silu(float x) {
   return __fdividef(x, (1.f + expf(-x)));
+}
+
+// fp32 silu with the fast intrinsics, as silu_and_mul_nvfp4_quant and the
+// Inductor-generated kernel compute it.
+__device__ __forceinline__ float silu_fast(float x) {
+  return __fdividef(x, (1.f + __expf(-x)));
 }
 
 __device__ __forceinline__ float2 silu2(float2 x) {
@@ -590,8 +593,7 @@ static bool ptr_int4_aligned(const T* ptr) {
 // Grid: min(chunks / block, SMs * kActQuantMaxBlocksPerSm) blocks with a
 // stride loop. Chunk indices are 32-bit inside the kernel, so inputs with
 // more than 2^32 chunks are split into launches of whole rows.
-template <typename scalar_t, scalar_t (*ACT_FN)(const scalar_t&),
-          typename fp8_type, int VEC>
+template <typename scalar_t, float (*ACT_FN)(float), typename fp8_type, int VEC>
 static void launch_act_and_mul_quant(fp8_type* out, const scalar_t* input,
                                      const float* scale, int64_t num_tokens,
                                      int64_t d, cudaStream_t stream) {
@@ -635,7 +637,7 @@ void silu_and_mul_quant(torch::stable::Tensor& out,    // [..., d]
   const torch::stable::accelerator::DeviceGuard device_guard(
       input.get_device_index());
   const cudaStream_t stream = get_current_cuda_stream(input.get_device_index());
-  VLLM_STABLE_DISPATCH_FLOATING_TYPES(
+  VLLM_STABLE_DISPATCH_HALF_TYPES(
       input.scalar_type(), "act_and_mul_quant_kernel", [&] {
         VLLM_STABLE_DISPATCH_FP8_TYPES(
             out.scalar_type(), "act_and_mul_quant_kernel_fp8_type", [&] {
@@ -646,13 +648,12 @@ void silu_and_mul_quant(torch::stable::Tensor& out,    // [..., d]
                                       ptr_int4_aligned(in_ptr) &&
                                       ptr_int4_aligned(out_ptr);
               if (vectorized) {
-                launch_act_and_mul_quant<scalar_t, vllm::silu_kernel<scalar_t>,
-                                         fp8_t, vllm::kActQuantVecSize>(
+                launch_act_and_mul_quant<scalar_t, vllm::silu_fast, fp8_t,
+                                         vllm::kActQuantVecSize>(
                     out_ptr, in_ptr, scale_ptr, num_tokens, d, stream);
               } else {
-                launch_act_and_mul_quant<scalar_t, vllm::silu_kernel<scalar_t>,
-                                         fp8_t, 1>(out_ptr, in_ptr, scale_ptr,
-                                                   num_tokens, d, stream);
+                launch_act_and_mul_quant<scalar_t, vllm::silu_fast, fp8_t, 1>(
+                    out_ptr, in_ptr, scale_ptr, num_tokens, d, stream);
               }
             });
       });
