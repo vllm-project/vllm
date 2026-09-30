@@ -4,10 +4,11 @@
 import pytest
 import torch
 
+from vllm._aiter_ops import is_aiter_found_and_supported
 from vllm.platforms import current_platform
 
-if not current_platform.is_rocm():
-    pytest.skip("ROCm-only test.", allow_module_level=True)
+if not current_platform.is_rocm() or not is_aiter_found_and_supported():
+    pytest.skip("Requires ROCm with AITER.", allow_module_level=True)
 
 from vllm.v1.attention.ops.rocm_aiter_mla_sparse import _per_sequence_context_lens
 
