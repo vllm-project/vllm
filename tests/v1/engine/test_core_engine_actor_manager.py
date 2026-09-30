@@ -20,6 +20,8 @@ from vllm.v1.engine.core_client import BackgroundResources
 from vllm.v1.engine.utils import (
     CoreEngineActorManager,
     EngineZmqAddresses,
+    _dp_nodes_master_first,
+    _node_ip_from_resources,
     get_engine_zmq_addresses,
     launch_core_engines,
 )
@@ -363,3 +365,110 @@ def test_ray_dp_addresses_resolved_before_actor_creation(
                 "time they DEALER-connect. See PR #42585 / Ray-DP "
                 "multi-API-server regression."
             )
+
+
+def test_dp_nodes_master_first_orders_and_validates():
+    master = {"GPU": 2.0, "node:10.0.0.1": 1.0, "node:__internal_head__": 1.0}
+    worker = {"GPU": 2.0, "node:10.0.0.2": 1.0}
+
+    nodes = _dp_nodes_master_first({"w": worker, "m": master}, "10.0.0.1")
+    assert [node_id for node_id, _ in nodes] == ["m", "w"]
+
+    with pytest.raises(AssertionError, match="DP master node"):
+        _dp_nodes_master_first({"w": worker}, "10.0.0.1")
+    with pytest.raises(AssertionError, match="one head node"):
+        _dp_nodes_master_first({"a": master, "b": dict(master)}, "10.0.0.1")
+
+
+@pytest.fixture
+def ray_2gpu_node(monkeypatch: pytest.MonkeyPatch):
+    """Real single-node Ray with 2 virtual GPUs and no dashboard.
+
+    Resource maps and placement groups are real. Without the dashboard any
+    ``ray.util.state.list_nodes()`` call fails, the production condition this
+    path must survive. Only the platform device key is patched ("" on CPU).
+    """
+    from ray._private.state import available_resources_per_node
+
+    if ray.is_initialized():
+        ray.shutdown()
+    ray.init(num_cpus=4, num_gpus=2, include_dashboard=False, log_to_driver=False)
+    monkeypatch.setattr("vllm.v1.engine.utils.current_platform.ray_device_key", "GPU")
+
+    (node_resources,) = available_resources_per_node().values()
+    master_ip = _node_ip_from_resources(node_resources)
+    assert master_ip is not None
+    created = []
+
+    def hold_gpus(num_gpus: int):
+        """Occupy GPUs so the node looks like it already runs engines."""
+        pg = ray.util.placement_group([{"GPU": 1.0}] * num_gpus)
+        ray.get(pg.ready(), timeout=60)
+        created.append(pg)
+
+    yield SimpleNamespace(master_ip=master_ip, hold_gpus=hold_gpus, created=created)
+
+    for pg in created:
+        ray.util.remove_placement_group(pg)
+    ray.shutdown()
+
+
+def _elastic_ep_config(dp_size: int, world_size: int, master_ip: str):
+    return SimpleNamespace(
+        parallel_config=SimpleNamespace(
+            data_parallel_size=dp_size,
+            data_parallel_master_ip=master_ip,
+            world_size=world_size,
+        )
+    )
+
+
+@pytest.mark.timeout(120)
+def test_add_dp_placement_groups_does_not_require_ray_default(ray_2gpu_node):
+    """DP 1 -> 2 on an idle node: one schedulable group pinned to the master,
+    found without the dashboard (``list_nodes`` would fail here)."""
+    ip = ray_2gpu_node.master_ip
+
+    pgs, local_ranks = CoreEngineActorManager.add_dp_placement_groups(
+        _elastic_ep_config(dp_size=1, world_size=1, master_ip=ip), 2
+    )
+    ray_2gpu_node.created.extend(pgs)
+
+    assert [pg.bundle_specs for pg in pgs] == [
+        [{"GPU": 1.0, f"node:{ip}": 0.001}, {"CPU": 1.0}]
+    ]
+    assert local_ranks == [0]
+    ray.get(pgs[0].ready(), timeout=60)
+
+
+@pytest.mark.timeout(120)
+def test_add_dp_placement_groups_counts_engines_already_on_node(ray_2gpu_node):
+    """One GPU already held -> the new engine gets local rank 1."""
+    ray_2gpu_node.hold_gpus(1)
+
+    pgs, local_ranks = CoreEngineActorManager.add_dp_placement_groups(
+        _elastic_ep_config(dp_size=1, world_size=1, master_ip=ray_2gpu_node.master_ip),
+        2,
+    )
+    ray_2gpu_node.created.extend(pgs)
+
+    assert len(pgs) == 1
+    assert local_ranks == [1]
+    ray.get(pgs[0].ready(), timeout=60)
+
+
+@pytest.mark.timeout(120)
+def test_add_dp_placement_groups_respects_world_size(ray_2gpu_node):
+    """With TP=2 a node with one idle GPU cannot host a new engine."""
+    ray_2gpu_node.hold_gpus(1)
+
+    assert CoreEngineActorManager.add_dp_placement_groups(
+        _elastic_ep_config(dp_size=1, world_size=2, master_ip=ray_2gpu_node.master_ip),
+        2,
+    ) == ([], [])
+
+
+def test_add_dp_placement_groups_noop_without_growth():
+    assert CoreEngineActorManager.add_dp_placement_groups(
+        _elastic_ep_config(dp_size=2, world_size=1, master_ip="10.0.0.1"), 2
+    ) == ([], [])
