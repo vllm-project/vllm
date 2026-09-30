@@ -724,6 +724,7 @@ def test_worker_init_enables_requested_profiler_clock(
         device=torch.device(device_type), device_type=device_type
     )
     worker.model_config = SimpleNamespace(dtype=torch.float16, seed=0)
+    worker.load_config = SimpleNamespace()
     worker.cache_config = SimpleNamespace()
     worker.parallel_config = SimpleNamespace(
         data_parallel_size=dp_size,
@@ -780,7 +781,11 @@ def test_worker_init_enables_requested_profiler_clock(
             f"vllm.v1.worker.{runner_paths[device_type][use_v2]}", return_value=runner
         ),
         patch("vllm.distributed.utils.get_worker_rank_suffix", return_value="rank0"),
+        patch("vllm.v1.worker.gpu_worker.init_workspace_manager"),
+        patch("vllm.v1.worker.gpu_worker.report_usage_stats"),
+        patch("vllm.v1.worker.gpu_worker.get_model_loader") as get_model_loader,
     ):
+        get_model_loader.return_value.get_external_weight_memory.return_value = 0
         worker.init_device()
         worker.profile()
 
