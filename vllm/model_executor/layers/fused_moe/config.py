@@ -1372,6 +1372,12 @@ class FusedMoEConfig:
                     f"model_type in {_AITER_MOE_A4W4_DSV4_VALIDATED_MODEL_TYPES}, "
                     f"got {model_type!r}. Unset this env var for this model."
                 )
+            if not rocm_aiter_ops.fused_moe_supports_quant_dtype_a():
+                raise ValueError(
+                    "VLLM_ROCM_USE_AITER_MOE_A4W4_DSV4=1 needs an AITER build "
+                    "with fused_moe(quant_dtype_a=...) support "
+                    "(ROCm/aiter#5439+). Upgrade AITER or unset this env var."
+                )
             self.use_mxfp4_w4a4_dsv4 = True
 
         if self.use_mori_kernels:

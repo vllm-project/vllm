@@ -361,18 +361,6 @@ def _rocm_aiter_fused_moe_impl(
     activation = ActivationType(activation_method)
     quant_type = QuantType(quant_method)
 
-    # aiter's public fused_moe()/fused_moe_ custom op can't override the
-    # activation quant dtype, so we call its private _fused_moe_impl
-    # directly (see use_mxfp4_w4a4_dsv4 in rocm_aiter_moe.py). Depends on
-    # aiter's internals, pinned to v0.1.13.post1. Safe to call directly:
-    # vLLM's own custom op already forms the torch.compile/CUDA-graph
-    # boundary, so the kernel launches are identical either way.
-    _fused_moe_call = fused_moe
-    if q_dtype_a is not None:
-        from aiter.fused_moe import _fused_moe_impl
-
-        _fused_moe_call = _fused_moe_impl
-
     extra_kwargs: dict = {}
     if gate_mode and rocm_aiter_ops.fused_moe_supports_gate_mode():
         extra_kwargs["gate_mode"] = gate_mode
@@ -392,26 +380,21 @@ def _rocm_aiter_fused_moe_impl(
             shared_expert_id=shared_expert_id,
         )
     if q_dtype_a is not None:
-        extra_kwargs["_q_dtype_a"] = q_dtype_a
+        # DeepSeek V4.1 a4w4 override (use_mxfp4_w4a4_dsv4 in
+        # rocm_aiter_moe.py). rocm_aiter_ops.fused_moe_supports_quant_dtype_a()
+        # is checked at config time, so this is only reached on an AITER
+        # build new enough to accept it.
+        extra_kwargs["quant_dtype_a"] = q_dtype_a
 
-    # ``fused_moe_`` (the private entry point) expects plain enum values,
-    # matching what ``fused_moe()`` itself passes down internally.
-    activation_arg = (
-        activation.value if _fused_moe_call is not fused_moe else activation
-    )
-    quant_type_arg = (
-        quant_type.value if _fused_moe_call is not fused_moe else quant_type
-    )
-
-    return _fused_moe_call(
+    return fused_moe(
         hidden_states,
         w1,
         w2,
         topk_weight,
         topk_ids,
         expert_mask,
-        activation_arg,
-        quant_type_arg,
+        activation,
+        quant_type,
         doweight_stage1,
         w1_scale,
         w2_scale,
@@ -2509,6 +2492,21 @@ class rocm_aiter_ops:
         from aiter.fused_moe import fused_moe
 
         return "gate_mode" in inspect.signature(fused_moe).parameters
+
+    @classmethod
+    @if_aiter_supported
+    @functools.cache
+    def fused_moe_supports_quant_dtype_a(cls) -> bool:
+        """Probe whether the installed aiter.fused_moe accepts `quant_dtype_a`.
+
+        Added in https://github.com/ROCm/aiter/pull/5439 (unreleased at
+        merge time). Older AITER can't override the activation quant dtype.
+        """
+        import inspect
+
+        from aiter.fused_moe import fused_moe
+
+        return "quant_dtype_a" in inspect.signature(fused_moe).parameters
 
     @staticmethod
     def _probe_dsv4_i384_fhmoe_capability(num_tokens: int) -> bool:
