@@ -17,11 +17,13 @@ from vllm.v1.kv_offload.base import (
     CanonicalKVCacheRef,
     CanonicalKVCaches,
     CanonicalKVCacheTensor,
+    CopyRun,
     GPULoadStoreSpec,
     TransferResult,
 )
-from vllm.v1.kv_offload.cpu import gpu_worker
+from vllm.v1.kv_offload.cpu import copy_backend, gpu_worker
 from vllm.v1.kv_offload.cpu.common import CPULoadStoreSpec
+from vllm.v1.kv_offload.cpu.copy_backend import CopyBackend, CopyBackendAdapter
 from vllm.v1.kv_offload.cpu.gpu_worker import CPUOffloadingWorker
 from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
 
@@ -39,30 +41,43 @@ NUM_MAPPINGS_PER_GROUP = [2]
 
 @pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm-specific test")
 def test_rocm_cpu_to_gpu_uses_dma(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(gpu_worker, "HAS_TRITON", True)
-    monkeypatch.setattr(gpu_worker.current_platform, "is_xpu", lambda: False)
-    monkeypatch.setattr(gpu_worker.current_platform, "is_rocm", lambda: True)
+    monkeypatch.setattr(copy_backend, "HAS_TRITON", True)
+    monkeypatch.setattr(copy_backend.current_platform, "is_xpu", lambda: False)
+    monkeypatch.setattr(copy_backend.current_platform, "is_rocm", lambda: True)
 
     refs = [[CanonicalKVCacheRef(tensor_idx=0, page_size_bytes=512)]]
-    assert gpu_worker._select_swap_blocks_fn(refs, gpu_to_cpu=False) is (
-        ops.swap_blocks_batch
-    )
+    _, swap_blocks = CopyBackendAdapter.resolve(refs, gpu_to_cpu=False)
+    assert swap_blocks is ops.swap_blocks_batch
 
 
-@pytest.mark.skipif(not gpu_worker.HAS_TRITON, reason="Requires Triton")
+@pytest.mark.skipif(not copy_backend.HAS_TRITON, reason="Requires Triton")
 def test_unpinned_cpu_to_gpu_uses_dma(monkeypatch: pytest.MonkeyPatch) -> None:
     """The Triton load path dereferences CPU pointers on the GPU, so pageable
     host memory takes the DMA path even for pages where Triton would win."""
-    monkeypatch.setattr(gpu_worker.current_platform, "is_xpu", lambda: False)
-    monkeypatch.setattr(gpu_worker.current_platform, "is_rocm", lambda: False)
+    monkeypatch.setattr(copy_backend.current_platform, "is_xpu", lambda: False)
+    monkeypatch.setattr(copy_backend.current_platform, "is_rocm", lambda: False)
 
     refs = [[CanonicalKVCacheRef(tensor_idx=0, page_size_bytes=512)]]
-    assert gpu_worker._select_swap_blocks_fn(refs, gpu_to_cpu=False) is not (
-        ops.swap_blocks_batch
-    )
-    assert gpu_worker._select_swap_blocks_fn(
+    _, swap_blocks = CopyBackendAdapter.resolve(refs, gpu_to_cpu=False)
+    assert swap_blocks is not ops.swap_blocks_batch
+    _, swap_blocks = CopyBackendAdapter.resolve(
         refs, gpu_to_cpu=False, host_memory_is_pinned=False
-    ) is (ops.swap_blocks_batch)
+    )
+    assert swap_blocks is ops.swap_blocks_batch
+
+
+@pytest.mark.skipif(not copy_backend.HAS_TRITON, reason="Requires Triton")
+def test_unaligned_canonical_runs_use_dma(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(copy_backend.current_platform, "is_xpu", lambda: False)
+    monkeypatch.setattr(copy_backend.current_platform, "is_rocm", lambda: False)
+
+    refs = [[CanonicalKVCacheRef(tensor_idx=0, page_size_bytes=512)]]
+    runs = [[(CopyRun(0, 0, 7, 1, 7, 7),)]]
+    backend, swap_blocks = CopyBackendAdapter.resolve(
+        refs, gpu_to_cpu=False, copy_runs=runs
+    )
+    assert backend is CopyBackend.BATCH_DMA
+    assert swap_blocks is ops.swap_blocks_batch
 
 
 def test_worker_shutdown_releases_region_and_runs_both_handlers() -> None:
@@ -179,7 +194,8 @@ def test_handler_shutdown_skips_transfers_after_event_sync_failure() -> None:
     handler._transfer_events = {1: failed_event, 2: skipped_event}
     handler._stream_pool = [MagicMock()]
     handler._event_pool = [MagicMock()]
-    handler._buffer_pool = [(MagicMock(), MagicMock(), MagicMock())]
+    handler._run_buffer_pool = [MagicMock()]
+    handler._backend = MagicMock()
     handler.src_tensors = [MagicMock()]
     handler.dst_tensors = [MagicMock()]
 
@@ -191,7 +207,8 @@ def test_handler_shutdown_skips_transfers_after_event_sync_failure() -> None:
     assert not handler._transfer_events
     assert not handler._stream_pool
     assert not handler._event_pool
-    assert not handler._buffer_pool
+    assert not handler._run_buffer_pool
+    handler._backend.clear.assert_called_once_with()
     assert not handler.src_tensors
     assert not handler.dst_tensors
 
