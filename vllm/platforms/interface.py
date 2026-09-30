@@ -863,23 +863,24 @@ class Platform:
             or cache_config.cache_dtype == "ultraquant_4bit"
         ):
             # TurboQuant and UltraQuant have packed K|V layouts; the standard
-            # FullAttentionSpec
-            # formula over-sizes it and trips unify_kv_cache_spec_page_size
-            # when all attention layers are TQ. With mixed skip+TQ the skip
-            # layers still use the standard layout — take max so mamba
-            # padding covers the largest actual page. Each dtype packs via its
-            # own backend, so probe the packed page through the matching one.
-            from vllm.v1.attention.backends.turboquant_attn import (
-                TurboQuantAttentionBackend,
-            )
-
-            _pack_backend: type[TurboQuantAttentionBackend] = TurboQuantAttentionBackend
+            # FullAttentionSpec formula over-sizes them and trips
+            # unify_kv_cache_spec_page_size when all attention layers are
+            # packed. With mixed skip+packed the skip layers still use the
+            # standard layout — take max so mamba padding covers the largest
+            # actual page. Each dtype packs via its own backend.
+            _pack_backend: type[AttentionBackend]
             if cache_config.cache_dtype == "ultraquant_4bit":
                 from vllm.v1.attention.backends.ultraquant_attn import (
                     UltraQuantAttentionBackend,
                 )
 
                 _pack_backend = UltraQuantAttentionBackend
+            else:
+                from vllm.v1.attention.backends.turboquant_attn import (
+                    TurboQuantAttentionBackend,
+                )
+
+                _pack_backend = TurboQuantAttentionBackend
 
             tq_spec = FullAttentionSpec(
                 block_size=1,
