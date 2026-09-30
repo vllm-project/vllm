@@ -44,14 +44,10 @@ def _compact_sampling_mask_kernel(
     output_row = tl.program_id(0)
     req_idx = output_row // ROWS_PER_REQUEST
     slot_idx = output_row % ROWS_PER_REQUEST
-    source_row = tl.load(cu_num_logits_ptr + req_idx) + slot_idx
-    request_end = tl.load(cu_num_logits_ptr + req_idx + 1)
-    is_active = (slot_idx < tl.load(num_sampled_tokens_ptr + req_idx)) & (
-        source_row < request_end
-    )
-    if not is_active:
+    if slot_idx >= tl.load(num_sampled_tokens_ptr + req_idx):
         tl.store(counts_ptr + output_row, 0)
         return
+    source_row = tl.load(cu_num_logits_ptr + req_idx) + slot_idx
 
     count = tl.zeros((), dtype=tl.int32)
 
@@ -126,34 +122,29 @@ class SamplingMaskTensors(NamedTuple):
             device=device,
         )
         counts = torch.empty(num_output_rows, dtype=torch.int32, device=device)
-        if num_output_rows:
-            _compact_sampling_mask_kernel[(num_output_rows,)](
-                logits,
-                logits.stride(0),
-                logits.stride(1),
-                cu_num_logits,
-                num_sampled_tokens,
-                token_ids,
-                token_ids.stride(0),
-                packed_mask,
-                packed_mask.stride(0),
-                counts,
-                vocab_size,
-                max_num_kept,
-                ROWS_PER_REQUEST=rows_per_request,
-                BLOCK_SIZE=8192,
-            )
+        _compact_sampling_mask_kernel[(num_output_rows,)](
+            logits,
+            logits.stride(0),
+            logits.stride(1),
+            cu_num_logits,
+            num_sampled_tokens,
+            token_ids,
+            token_ids.stride(0),
+            packed_mask,
+            packed_mask.stride(0),
+            counts,
+            vocab_size,
+            max_num_kept,
+            ROWS_PER_REQUEST=rows_per_request,
+            BLOCK_SIZE=8192,
+        )
         return cls(token_ids, packed_mask, counts, vocab_size, rows_per_request)
 
     @classmethod
     def cat(cls, chunks: Sequence[SamplingMaskTensors]) -> SamplingMaskTensors:
         """Join request-contiguous chunks that share one output layout."""
         first = chunks[0]
-        assert all(
-            chunk.vocab_size == first.vocab_size
-            and chunk.rows_per_request == first.rows_per_request
-            for chunk in chunks
-        ), "sampling mask chunks must share vocab_size and rows_per_request"
+        assert len({(c.vocab_size, c.rows_per_request) for c in chunks}) == 1
         return cls(
             torch.cat([chunk.token_ids for chunk in chunks]),
             torch.cat([chunk.packed_mask for chunk in chunks]),
@@ -188,8 +179,7 @@ class SamplingMaskTensors(NamedTuple):
         else:
             assert num_sampled_tokens is not None
             active_slots = (
-                np.arange(self.rows_per_request)[None, :]
-                < (num_sampled_tokens[:, None])
+                np.arange(self.rows_per_request)[None, :] < num_sampled_tokens[:, None]
             )
             sampled_rows = np.flatnonzero(active_slots)
             cu_num_generated_tokens = np.cumsum(
@@ -208,7 +198,5 @@ class SamplingMaskTensors(NamedTuple):
         supports = [support(row) for row in sampled_rows]
         offsets = np.zeros(len(supports) + 1, dtype=np.int64)
         np.cumsum([len(s) for s in supports], out=offsets[1:])
-        flattened = (
-            np.concatenate(supports) if supports else np.empty(0, dtype=np.int32)
-        )
-        return SamplingMaskLists(flattened, offsets, cu_num_generated_tokens)
+        flat = np.concatenate([np.empty(0, dtype=np.int32), *supports])
+        return SamplingMaskLists(flat, offsets, cu_num_generated_tokens)
