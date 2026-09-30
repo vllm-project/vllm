@@ -13,24 +13,14 @@ from vllm.lora.ops.triton_ops.kernel_utils import do_shrink_kernel
 from vllm.lora.ops.triton_ops.utils import (
     _get_lora_a_ptr,
     get_lora_op_configs,
+    is_batch_invariant,
     supports_pdl,
 )
 from vllm.triton_utils import tl, triton
 from vllm.utils.torch_utils import direct_register_custom_op
 
-# 0 keeps the default shrink path; 8 (BI only) writes FP32 partials for 8
-# fixed K splits and reduces them in a fixed order.
-_TWO_PASS_SPLIT_K = envs.VLLM_LORA_DETERMINISTIC_SPLIT_K
-if _TWO_PASS_SPLIT_K:
-    if not envs.VLLM_BATCH_INVARIANT:
-        raise RuntimeError(
-            "VLLM_LORA_DETERMINISTIC_SPLIT_K=8 requires VLLM_BATCH_INVARIANT=1."
-        )
-    if envs.VLLM_LORA_ENABLE_DUAL_STREAM:
-        raise RuntimeError(
-            "VLLM_LORA_DETERMINISTIC_SPLIT_K=8 cannot be combined with "
-            "VLLM_LORA_ENABLE_DUAL_STREAM=1."
-        )
+# Batch-invariant shrink splits K into this many fixed partials (no atomics).
+_BI_SPLIT_K = 8
 
 
 @triton.jit
@@ -270,13 +260,13 @@ def _lora_shrink(
         # An empty first call has no work to do.
         return
     partials: torch.Tensor | None = None
-    if _TWO_PASS_SPLIT_K:
+    if is_batch_invariant:
         # Allocated before the no-LoRA return so profiling sees the scratch.
         # Per-call allocation keeps each CUDA graph's scratch in its own pool.
         partials = torch.empty(
             (
                 output_tensor.size(0),
-                _TWO_PASS_SPLIT_K,
+                _BI_SPLIT_K,
                 inputs.size(0),
                 output_tensor.size(-1),
             ),
@@ -331,9 +321,9 @@ def _lora_shrink(
     GROUP_SIZE_M = kernel_config.get("group_size_m", 8)
 
     # Every M must keep the same K partition for batch invariance.
-    if _TWO_PASS_SPLIT_K:
+    if partials is not None:
         BLOCK_K = 256
-        SPLIT_K = _TWO_PASS_SPLIT_K
+        SPLIT_K = _BI_SPLIT_K
     EVEN_K = K % (BLOCK_K * SPLIT_K) == 0  # type: ignore
 
     # TODO (varun): This grid formulation maximizes parallelization at the
@@ -346,7 +336,11 @@ def _lora_shrink(
     )
 
     # PDL only works when dual-stream is being used.
-    use_gdc = supports_pdl(inputs.device) and envs.VLLM_LORA_ENABLE_DUAL_STREAM
+    use_gdc = (
+        supports_pdl(inputs.device)
+        and envs.VLLM_LORA_ENABLE_DUAL_STREAM
+        and partials is None
+    )
     first_out = output_tensor if partials is None else partials
     partial_args = {}
     if partials is not None:

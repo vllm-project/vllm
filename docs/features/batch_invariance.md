@@ -138,26 +138,6 @@ Batch invariance has been tested and verified on the following models:
 
 Other models may also work, but these have been explicitly validated. If you encounter issues with a specific model, please report them on the [GitHub issue tracker](https://github.com/vllm-project/vllm/issues/new/choose).
 
-## LoRA Deterministic Split-K (Experimental)
-
-In batch-invariant mode the LoRA shrink kernel does not split the K
-dimension. `VLLM_LORA_DETERMINISTIC_SPLIT_K=8` instead writes FP32 partial
-sums for 8 fixed K splits and adds them in a fixed order, without atomics.
-
-```bash
-VLLM_BATCH_INVARIANT=1 VLLM_LORA_DETERMINISTIC_SPLIT_K=8 vllm serve <model> \
-    --enable-lora --lora-modules ...
-```
-
-- Requires `VLLM_BATCH_INVARIANT=1`; accepted values are `0` (default) and `8`.
-- Cannot be combined with `VLLM_LORA_ENABLE_DUAL_STREAM=1`.
-- Tested on CUDA dense LoRA with BF16/FP16 inputs on SM89, SM90, SM100 and SM120 GPUs.
-
-!!! warning
-    Split-K=8 is batch-invariant on its own but uses a different reduction
-    order than the default path, so generated tokens and logprobs can differ
-    between the two settings.
-
 ## Implementation Details
 
 When batch invariance is enabled, vLLM:
@@ -165,6 +145,7 @@ When batch invariance is enabled, vLLM:
 1. Uses deterministic kernel implementations for attention and other operations
 2. Ensures consistent numerical behavior across different batch sizes
 3. Disables certain optimizations that may introduce non-determinism (such as custom all-reduce operations in tensor parallel mode)
+4. Splits the LoRA shrink reduction into 8 fixed K chunks that are summed in a fixed order instead of with atomics
 
 !!! note
     Enabling batch invariance may impact performance compared to the default non-deterministic mode. This trade-off is intentional to guarantee reproducibility.
