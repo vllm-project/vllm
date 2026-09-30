@@ -10,6 +10,7 @@ service Control {
   rpc GetModelInfo (GetModelInfoRequest) returns (ModelInfo) {}
 
   // Request managed-engine shutdown using the configured shutdown timeout.
+  // Returns FAILED_PRECONDITION when this server does not manage the engine process.
   rpc Shutdown (ShutdownRequest) returns (ShutdownResponse) {}
 
   // Request lifecycle.

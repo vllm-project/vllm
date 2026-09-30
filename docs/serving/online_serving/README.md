@@ -27,26 +27,6 @@ We currently support the following OpenAI APIs:
 
 - Anthropic messages API (`/v1/messages`, `/v1/messages/count_tokens`)
 
-## Rust gRPC engine shutdown
-
-The Rust frontend's `vllm.Control/Shutdown` RPC lets a trusted sidecar
-request shutdown of a managed engine, for example when it cannot recover its
-cache index after restarting. It is available with `vllm-rs serve --grpc-port`.
-The request and response are empty.
-
-Shutdown follows the same path as SIGTERM: stop serving HTTP and gRPC, drain
-active requests according to `--shutdown-timeout`, and terminate the managed
-Python engine. The default timeout is zero. Repeated requests are harmless while
-the service is reachable. A response acknowledges acceptance, not completed
-shutdown; the connection can close before the response arrives. Callers must
-observe process exit or a new engine instance before treating recovery as
-complete. Restarting the engine remains the deployment supervisor's responsibility.
-
-Frontend-only modes (`vllm-rs frontend` and `vllm-rs serve
---data-parallel-size-local 0`) return `FAILED_PRECONDITION` because they do not
-own the engine process. The RPC does not terminate externally managed engines.
-Protect the listener as described in [gRPC interface security](../../usage/security.md#grpc-interface).
-
 ## Cohere APIs
 
 - [Cohere Embed API](../../models/pooling_models/embed.md#cohere-embed-api) (`/v2/embed`)

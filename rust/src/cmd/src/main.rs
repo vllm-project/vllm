@@ -159,7 +159,7 @@ async fn async_main(cli: Cli) -> Result<()> {
                 let config = args.to_frontend_config(handshake_address);
                 let shutdown = shutdown.clone();
                 tokio::spawn(async move {
-                    let result = vllm_server::serve_with_engine_shutdown(config, shutdown).await;
+                    let result = vllm_server::serve(config, shutdown).await;
                     if result.is_ok() {
                         info!("OpenAI server shut down gracefully");
                     }
