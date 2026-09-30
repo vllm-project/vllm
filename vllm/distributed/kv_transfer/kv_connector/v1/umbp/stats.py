@@ -48,22 +48,18 @@ class UMBPStoreConnectorStats(KVConnectorStats):
     def reset(self) -> None:
         self.data.clear()
 
-    def aggregate(self, other: KVConnectorStats) -> "UMBPStoreConnectorStats":
+    def aggregate(self, other: KVConnectorStats) -> UMBPStoreConnectorStats:
         if not isinstance(other, UMBPStoreConnectorStats):
             raise TypeError("cannot aggregate incompatible UMBP stats")
         result = UMBPStoreConnectorStats()
         for operation, values in [*self.data.items(), *other.data.items()]:
-            entry = result.data.setdefault(
+            result.record(
                 operation,
-                {
-                    "submitted": 0,
-                    "completed": 0,
-                    "failed": 0,
-                    "num_bytes": 0,
-                },
+                submitted=values.get("submitted", 0),
+                completed=values.get("completed", 0),
+                failed=values.get("failed", 0),
+                num_bytes=values.get("num_bytes", 0),
             )
-            for key in entry:
-                entry[key] += values.get(key, 0)
         return result
 
     def reduce(self) -> dict[str, int | float]:
@@ -111,7 +107,7 @@ class UMBPStorePromMetrics(KVConnectorPromMetrics):
         )
         self._bytes = self._counter_cls(
             name="vllm:umbp_transfer_bytes_total",
-            documentation="Number of bytes transferred by UMBP.",
+            documentation="Bytes in successfully completed UMBP transfer ranges.",
             labelnames=labels,
         )
 

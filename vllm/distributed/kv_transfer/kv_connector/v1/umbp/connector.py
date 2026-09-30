@@ -110,6 +110,7 @@ class UMBPStoreConnector(KVConnectorBase_V1, SupportsHMA):
         layout = KVLayoutPlanner.from_kv_cache_config(kv_cache_config)
         layout_descriptor = layout.describe(topology)
         self._runtime = runtime
+        self._store_submitted = False
         self.connector_scheduler: UMBPStoreConnectorScheduler | None = None
         self.connector_worker: UMBPStoreConnectorWorker | None = None
         if role == KVConnectorRole.SCHEDULER:
@@ -121,6 +122,7 @@ class UMBPStoreConnector(KVConnectorBase_V1, SupportsHMA):
                 ),
                 codec,
                 topology,
+                layerwise_store=runtime.capabilities.layerwise_store,
             )
         else:
             self.connector_worker = UMBPStoreConnectorWorker(
@@ -131,6 +133,10 @@ class UMBPStoreConnector(KVConnectorBase_V1, SupportsHMA):
                 codec=codec,
                 layerwise_load=runtime.capabilities.layerwise_load,
                 layerwise_store=runtime.capabilities.layerwise_store,
+                enable_kv_cache_events=bool(
+                    vllm_config.kv_events_config
+                    and vllm_config.kv_events_config.enable_kv_cache_events
+                ),
             )
 
     def get_num_new_matched_tokens(
@@ -204,6 +210,16 @@ class UMBPStoreConnector(KVConnectorBase_V1, SupportsHMA):
         assert self.connector_worker is not None
         self.connector_worker.register_kv_caches(kv_caches)
 
+    def bind_connector_metadata(self, connector_metadata: KVConnectorMetadata) -> None:
+        super().bind_connector_metadata(connector_metadata)
+        self._store_submitted = False
+
+    def clear_connector_metadata(self) -> None:
+        # No-forward steps skip the model runner's wait_for_save hook.
+        if self.connector_worker is not None and self.has_connector_metadata():
+            self.wait_for_save()
+        super().clear_connector_metadata()
+
     def handle_preemptions(self, kv_connector_metadata: KVConnectorMetadata) -> None:
         assert self.connector_worker is not None
         assert isinstance(kv_connector_metadata, UMBPConnectorMetadata)
@@ -235,11 +251,14 @@ class UMBPStoreConnector(KVConnectorBase_V1, SupportsHMA):
         )
 
     def wait_for_save(self) -> None:
+        if self._store_submitted:
+            return
         assert self.connector_worker is not None
         metadata = self._get_connector_metadata()
         assert isinstance(metadata, UMBPConnectorMetadata)
         self.connector_worker.enqueue_stores(metadata)
         self.connector_worker.wait_for_save()
+        self._store_submitted = True
 
     def get_finished(
         self, finished_req_ids: set[str]

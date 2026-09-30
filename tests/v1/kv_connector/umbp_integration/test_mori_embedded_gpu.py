@@ -210,7 +210,8 @@ def test_mori_store_overlaps_gpu_compute(tmp_path):
     not torch.accelerator.is_available(),
     reason="requires a ROCm GPU",
 )
-def test_mori_embedded_dram_eviction_and_restore(tmp_path):
+@pytest.mark.parametrize("bulk_load", [False, True])
+def test_mori_embedded_dram_eviction_and_restore(tmp_path, bulk_load):
     torch.accelerator.set_device_index(0)
     object_size = 1 << 20
     topology = RankTopology()
@@ -231,7 +232,7 @@ def test_mori_embedded_dram_eviction_and_restore(tmp_path):
         )
     )
     worker = runtime.create_worker_handle("mori-eviction", topology, layout)
-    source = torch.empty(object_size, dtype=torch.uint8, device="cuda:0")
+    source = torch.empty((1, object_size), dtype=torch.uint8, device="cuda:0")
     destination = torch.empty_like(source)
     worker.register_buffers({"layer0": source, "destination": destination})
     keys = []
@@ -269,8 +270,12 @@ def test_mori_embedded_dram_eviction_and_restore(tmp_path):
 
     destination.zero_()
     latest = keys[-1]
-    loaded = worker.wait(
-        worker.load(
+    if bulk_load:
+        worker.register_buffers({"layer0": destination})
+        job = worker.load_blocks([BlockTransferPlan(latest, 0, group_id=0)])
+        assert job is not None
+    else:
+        job = worker.load(
             [
                 BlockTransferPlan(
                     latest,
@@ -289,8 +294,9 @@ def test_mori_embedded_dram_eviction_and_restore(tmp_path):
                 )
             ]
         )
-    )
+    loaded = worker.wait(job)
     assert loaded.status is TransferJobStatus.COMPLETED
+    assert loaded.completed_bytes == object_size
     torch.accelerator.synchronize()
     assert torch.all(destination == expected[latest])
     worker.close()

@@ -12,10 +12,9 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import Enum
-from math import gcd
-from typing import Any, Literal
+from typing import Any, NamedTuple, overload
 
 import torch
 
@@ -106,21 +105,6 @@ class RankTopology:
 
 
 @dataclass(frozen=True)
-class RankCompletenessPolicy:
-    """Required rank-local objects for one logical KV block."""
-
-    topology: RankTopology
-
-    @property
-    def required_namespaces(self) -> tuple[tuple[int, int, int, int], ...]:
-        return self.topology.all_namespaces()
-
-    @property
-    def required_rank_count(self) -> int:
-        return len(self.required_namespaces)
-
-
-@dataclass(frozen=True)
 class UMBPNamespace:
     """Compatibility namespace for objects stored outside the engine."""
 
@@ -200,11 +184,6 @@ class BlockIdentityCodec:
             f"{block_hash.hex()}"
         )
 
-    def keys_for_block(
-        self, block_hash: bytes, group_ids: Sequence[int]
-    ) -> tuple[str, ...]:
-        return tuple(self.key(block_hash, group_id) for group_id in group_ids)
-
     def keys_for_topology(
         self,
         block_hash: bytes,
@@ -242,114 +221,12 @@ class KVRegion:
 
 
 @dataclass(frozen=True)
-class KVShardSlice:
-    """One contiguous KV-head slice copied between TP ranks."""
-
-    producer_rank: int
-    source_head: int
-    destination_head: int
-    num_heads: int
-
-
-@dataclass(frozen=True)
-class TPShardMapping:
-    """TP shard mapping for one consumer rank."""
-
-    producer_tp_size: int
-    consumer_tp_size: int
-    consumer_rank: int
-    num_kv_heads: int
-    slices: tuple[KVShardSlice, ...]
-    replicated: bool = False
-
-    @classmethod
-    def build(
-        cls,
-        producer_tp_size: int,
-        consumer_tp_size: int,
-        consumer_rank: int,
-        num_kv_heads: int,
-    ) -> TPShardMapping:
-        if producer_tp_size <= 0 or consumer_tp_size <= 0:
-            raise ValueError("TP sizes must be positive")
-        if consumer_rank < 0 or consumer_rank >= consumer_tp_size:
-            raise ValueError("consumer_rank is outside the consumer TP group")
-        if num_kv_heads <= 0:
-            raise ValueError("num_kv_heads must be positive")
-
-        common = (
-            producer_tp_size
-            * consumer_tp_size
-            // gcd(producer_tp_size, consumer_tp_size)
-        )
-        if num_kv_heads < common:
-            # MQA/GQA ranks can replicate a smaller KV-head set.
-            return cls(
-                producer_tp_size,
-                consumer_tp_size,
-                consumer_rank,
-                num_kv_heads,
-                (
-                    KVShardSlice(
-                        producer_rank=0,
-                        source_head=0,
-                        destination_head=0,
-                        num_heads=num_kv_heads,
-                    ),
-                ),
-                replicated=True,
-            )
-        if num_kv_heads % common:
-            raise ValueError(
-                "num_kv_heads must be divisible by lcm(producer_tp_size, "
-                "consumer_tp_size)"
-            )
-
-        consumer_heads = num_kv_heads // consumer_tp_size
-        consumer_start = consumer_rank * consumer_heads
-        slices: list[KVShardSlice] = []
-        for producer_rank in range(producer_tp_size):
-            producer_heads = num_kv_heads // producer_tp_size
-            producer_start = producer_rank * producer_heads
-            overlap_start = max(consumer_start, producer_start)
-            overlap_end = min(
-                consumer_start + consumer_heads,
-                producer_start + producer_heads,
-            )
-            if overlap_start < overlap_end:
-                slices.append(
-                    KVShardSlice(
-                        producer_rank=producer_rank,
-                        source_head=overlap_start - producer_start,
-                        destination_head=overlap_start - consumer_start,
-                        num_heads=overlap_end - overlap_start,
-                    )
-                )
-        return cls(
-            producer_tp_size,
-            consumer_tp_size,
-            consumer_rank,
-            num_kv_heads,
-            tuple(slices),
-        )
-
-    def validate(self) -> None:
-        if self.replicated:
-            return
-        expected = self.num_kv_heads // self.consumer_tp_size
-        covered = sum(item.num_heads for item in self.slices)
-        if covered != expected:
-            raise ValueError(f"TP mapping covers {covered} heads, expected {expected}")
-
-
-@dataclass(frozen=True)
 class KVLayoutDescriptor:
     """Backend-neutral description of one rank-local KV object layout."""
 
     regions: tuple[KVRegion, ...]
     topology: RankTopology
     layout_format: str = "rank_local"
-    tp_shard_mapping: TPShardMapping | None = None
 
     def __post_init__(self) -> None:
         if not self.layout_format:
@@ -368,6 +245,10 @@ class KVLayoutPlanner:
 
     def __init__(self, regions: Sequence[KVRegion]) -> None:
         self.regions = tuple(regions)
+        self._regions_by_group = {
+            group_id: tuple(r for r in self.regions if r.group_id == group_id)
+            for group_id in {r.group_id for r in self.regions}
+        }
         self._base_addresses: dict[str, int] = {}
         self._physical_strides: dict[str, int] = {}
 
@@ -409,13 +290,11 @@ class KVLayoutPlanner:
         self,
         topology: RankTopology,
         layout_format: str = "rank_local",
-        tp_shard_mapping: TPShardMapping | None = None,
     ) -> KVLayoutDescriptor:
         return KVLayoutDescriptor(
             regions=self.regions,
             topology=topology,
             layout_format=layout_format,
-            tp_shard_mapping=tp_shard_mapping,
         )
 
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]) -> None:
@@ -486,12 +365,44 @@ class KVLayoutPlanner:
         token_end: int | None = None,
     ) -> BlockTransferPlan:
         """Lower one GPU block into a deterministic scatter/gather plan."""
+        return BlockTransferPlan(
+            key=key,
+            block_id=block_id,
+            ranges=self._ranges_for_block(
+                block_id, base_addresses, group_id, token_start, token_end
+            ),
+            request_id=request_id,
+            generation=generation,
+        )
+
+    def materialize(self, plan: BlockTransferPlan) -> BlockTransferPlan:
+        if not self._base_addresses:
+            raise RuntimeError("KV caches must be registered before planning")
+        return replace(
+            plan,
+            ranges=self._ranges_for_block(
+                plan.block_id,
+                self._base_addresses,
+                plan.group_id,
+                plan.token_start,
+                plan.token_end,
+            ),
+        )
+
+    def _ranges_for_block(
+        self,
+        block_id: int,
+        base_addresses: dict[str, int],
+        group_id: int | None,
+        token_start: int | None,
+        token_end: int | None,
+    ) -> tuple[KVRange, ...]:
         if block_id < 0:
             raise ValueError("block_id must be non-negative")
         regions = (
             self.regions
             if group_id is None
-            else tuple(region for region in self.regions if region.group_id == group_id)
+            else self._regions_by_group.get(group_id, ())
         )
         if group_id is not None and not regions:
             raise ValueError(f"KV layout does not contain cache group {group_id}")
@@ -507,6 +418,28 @@ class KVLayoutPlanner:
             physical_stride = self._physical_strides.get(
                 region.layer_name, region.block_stride
             )
+            if (
+                token_start is None
+                and token_end is None
+                and region.block_bytes <= physical_stride
+            ):
+                ranges.append(
+                    KVRange(
+                        layer_name=region.layer_name,
+                        group_id=region.group_id,
+                        block_id=block_id,
+                        base_address=base_address + block_id * physical_stride,
+                        stride=physical_stride,
+                        length=region.block_bytes,
+                        object_offset=(
+                            object_offset
+                            if group_id is not None
+                            else region.object_offset
+                        ),
+                    )
+                )
+                object_offset += region.block_bytes
+                continue
             physical_parts = max(1, region.block_bytes // physical_stride)
             if token_start is not None or token_end is not None:
                 if token_start is None or token_end is None:
@@ -552,17 +485,10 @@ class KVLayoutPlanner:
                     )
                 )
             object_offset += partial_length
-        return BlockTransferPlan(
-            key=key,
-            block_id=block_id,
-            ranges=tuple(ranges),
-            request_id=request_id,
-            generation=generation,
-        )
+        return tuple(ranges)
 
 
-@dataclass(frozen=True)
-class KVRange:
+class KVRange(NamedTuple):
     """A source/destination range in a runtime transfer."""
 
     layer_name: str
@@ -592,6 +518,46 @@ class BlockTransferPlan:
     token_start: int | None = None
     token_end: int | None = None
     logical_key: str | None = None
+    token_offset: int = 0
+
+
+@dataclass(frozen=True)
+class BlockLoadBatch(Sequence[BlockTransferPlan]):
+    """Whole-block loads with request metadata shared across the batch."""
+
+    keys: list[str]
+    block_ids: list[int]
+    group_ids: list[int]
+    request_id: str
+    generation: int
+
+    def __post_init__(self) -> None:
+        if len(self.keys) != len(self.block_ids) or len(self.keys) != len(
+            self.group_ids
+        ):
+            raise ValueError("load batch columns must have equal lengths")
+
+    def __len__(self) -> int:
+        return len(self.keys)
+
+    @overload
+    def __getitem__(self, index: int) -> BlockTransferPlan: ...
+
+    @overload
+    def __getitem__(self, index: slice) -> list[BlockTransferPlan]: ...
+
+    def __getitem__(
+        self, index: int | slice
+    ) -> BlockTransferPlan | list[BlockTransferPlan]:
+        if isinstance(index, slice):
+            return [self[i] for i in range(*index.indices(len(self)))]
+        return BlockTransferPlan(
+            key=self.keys[index],
+            block_id=self.block_ids[index],
+            group_id=self.group_ids[index],
+            request_id=self.request_id,
+            generation=self.generation,
+        )
 
 
 @dataclass
@@ -601,82 +567,27 @@ class LoadSpec:
     local_tokens: int
     external_tokens: int
     block_hashes_by_group: tuple[tuple[bytes | None, ...], ...] = ()
-    can_load: bool = False
 
     @property
     def num_tokens_to_load(self) -> int:
         return max(self.external_tokens - self.local_tokens, 0)
 
 
-class LookupStatus(str, Enum):
-    PENDING = "pending"
-    HIT = "hit"
-    MISS = "miss"
-    ERROR = "error"
-    CANCELLED = "cancelled"
-
-
-@dataclass
-class LookupState:
-    """Request-scoped lookup state owned by the scheduler."""
-
-    request_id: str
-    status: LookupStatus = LookupStatus.PENDING
-    matched_tokens: int = 0
-    error: str | None = None
-
-    def complete(self, matched_tokens: int) -> None:
-        self.status = LookupStatus.HIT if matched_tokens else LookupStatus.MISS
-        self.matched_tokens = matched_tokens
-        self.error = None
-
-    def fail(self, error: str) -> None:
-        self.status = LookupStatus.ERROR
-        self.matched_tokens = 0
-        self.error = error
-
-    def cancel(self) -> None:
-        self.status = LookupStatus.CANCELLED
-        self.matched_tokens = 0
-
-
-@dataclass(frozen=True)
-class PartialTailPlan:
-    """A non-block-aligned tail that must be pinned and stored separately."""
-
-    request_id: str
-    generation: int
-    block_id: int
-    group_id: int
-    start_token: int
-    end_token: int
-    key: str
-    block_size: int
-
-
 @dataclass
 class RequestTracker:
     """Core request state shared by every runtime mode."""
 
-    request_id: str
     generation: int
-    token_len: int = 0
     saved_tokens: int = 0
     block_ids: tuple[list[int], ...] = ()
     load_spec: LoadSpec | None = None
-    save_mode: Literal["eager", "lazy"] = "eager"
-    prefill_end_tokens: int = 0
     retry_from_tokens: int | None = None
-    pending_tail: PartialTailPlan | None = None
 
     def reset(self) -> None:
-        self.token_len = 0
         self.saved_tokens = 0
         self.block_ids = ()
         self.load_spec = None
-        self.prefill_end_tokens = 0
         self.retry_from_tokens = None
-        self.pending_tail = None
         self.generation += 1
 
     def update_blocks(self, block_ids: tuple[list[int], ...]) -> None:
@@ -696,10 +607,8 @@ class RequestTracker:
     def replace_blocks(self, block_ids: tuple[list[int], ...]) -> None:
         """Replace stale pre-preemption tables with resumed full tables."""
         self.block_ids = tuple(list(group) for group in block_ids)
-        self.token_len = 0
         self.saved_tokens = 0
         self.retry_from_tokens = None
-        self.pending_tail = None
         self.generation += 1
 
     def mark_saved(self, token_count: int, block_size: int) -> int:
@@ -733,11 +642,33 @@ class TransferJobStatus(str, Enum):
 class TransferJobState:
     """Per-key completion state; one failed key does not fail its siblings."""
 
-    plans: tuple[BlockTransferPlan, ...]
+    plans: tuple[BlockTransferPlan, ...] | BlockLoadBatch
     status: TransferJobStatus = TransferJobStatus.PENDING
     completed_keys: set[str] = field(default_factory=set)
     failed_keys: set[str] = field(default_factory=set)
     error: str | None = None
+    plan_bytes: tuple[int, ...] | None = None
+
+    @property
+    def keys(self) -> Sequence[str]:
+        if isinstance(self.plans, BlockLoadBatch):
+            return self.plans.keys
+        return tuple(plan.key for plan in self.plans)
+
+    @property
+    def completed_bytes(self) -> int:
+        if self.plan_bytes is not None:
+            return sum(
+                size
+                for key, size in zip(self.keys, self.plan_bytes, strict=True)
+                if key in self.completed_keys
+            )
+        return sum(
+            item.length
+            for plan in self.plans
+            if plan.key in self.completed_keys
+            for item in plan.ranges
+        )
 
     def start(self) -> None:
         if self.status != TransferJobStatus.PENDING:
@@ -745,7 +676,7 @@ class TransferJobState:
         self.status = TransferJobStatus.RUNNING
 
     def complete(self, keys: Sequence[str] = ()) -> None:
-        self.completed_keys.update(keys or (plan.key for plan in self.plans))
+        self.completed_keys.update(keys or self.keys)
         self._finish_if_done()
 
     def fail(self, keys: Sequence[str], error: str | None = None) -> None:
@@ -759,10 +690,18 @@ class TransferJobState:
 
     @property
     def failed_block_ids(self) -> set[int]:
+        if isinstance(self.plans, BlockLoadBatch):
+            return {
+                block_id
+                for key, block_id in zip(
+                    self.plans.keys, self.plans.block_ids, strict=True
+                )
+                if key in self.failed_keys
+            }
         return {plan.block_id for plan in self.plans if plan.key in self.failed_keys}
 
     def _finish_if_done(self) -> None:
-        keys = {plan.key for plan in self.plans}
+        keys = set(self.keys)
         if self.completed_keys | self.failed_keys >= keys:
             self.status = (
                 TransferJobStatus.FAILED
@@ -776,40 +715,36 @@ class UMBPConnectorMetadata(KVConnectorMetadata):
     """Scheduler-to-worker metadata for one engine step."""
 
     async_load: bool = False
-    load_plans: list[BlockTransferPlan] = field(default_factory=list)
     store_plans: list[BlockTransferPlan] = field(default_factory=list)
-    load_requests: dict[str, list[BlockTransferPlan]] = field(default_factory=dict)
-    store_requests: dict[str, list[BlockTransferPlan]] = field(default_factory=dict)
-    load_plans_by_layer: dict[str, list[BlockTransferPlan]] = field(
+    load_requests: dict[str, list[BlockTransferPlan] | BlockLoadBatch] = field(
         default_factory=dict
     )
+    store_requests: dict[str, list[BlockTransferPlan]] = field(default_factory=dict)
     store_plans_by_layer: dict[str, list[BlockTransferPlan]] = field(
         default_factory=dict
     )
-    deferred_store_requests: set[str] = field(default_factory=set)
-    partial_tail_plans: list[PartialTailPlan] = field(default_factory=list)
-    lookup_states: dict[str, LookupState] = field(default_factory=dict)
     preempted_block_ids: set[int] = field(default_factory=set)
     preempted_request_ids: set[str] = field(default_factory=set)
     store_event: int = -1
 
 
 @dataclass
+class StoreEventResult:
+    """Terminal worker count and unpublished objects for one store event."""
+
+    completed_workers: int = 0
+    failed_tokens: set[tuple[str, int]] = field(default_factory=set)
+
+    def merge(self, other: StoreEventResult) -> None:
+        self.completed_workers += other.completed_workers
+        self.failed_tokens.update(other.failed_tokens)
+
+
+@dataclass
 class UMBPConnectorWorkerMetadata(KVConnectorWorkerMetadata):
     """Worker completion metadata aggregated across ranks."""
 
-    completed_loads: set[str] = field(default_factory=set)
-    completed_stores: set[str] = field(default_factory=set)
-    kv_events: list[Any] = field(default_factory=list)
-    failed_loads: dict[str, str] = field(default_factory=dict)
-    failed_store_errors: dict[str, str] = field(default_factory=dict)
-    failed_stores: set[str] = field(default_factory=set)
-    completed_store_counts: dict[str, int] = field(default_factory=dict)
-    failed_store_counts: dict[str, int] = field(default_factory=dict)
-    completed_store_tokens: dict[tuple[str, int], int] = field(default_factory=dict)
-    failed_store_tokens: dict[tuple[str, int], int] = field(default_factory=dict)
-    completed_store_events: dict[int, int] = field(default_factory=dict)
-    failed_store_events: dict[int, int] = field(default_factory=dict)
+    store_events: dict[int, StoreEventResult] = field(default_factory=dict)
     failed_block_ids: set[int] = field(default_factory=set)
 
     def aggregate(
@@ -817,33 +752,7 @@ class UMBPConnectorWorkerMetadata(KVConnectorWorkerMetadata):
     ) -> UMBPConnectorWorkerMetadata:
         if not isinstance(other, UMBPConnectorWorkerMetadata):
             raise TypeError("cannot aggregate incompatible UMBP worker metadata")
-        self.completed_loads.update(other.completed_loads)
-        self.completed_stores.update(other.completed_stores)
-        self.kv_events.extend(other.kv_events)
-        self.failed_loads.update(other.failed_loads)
-        self.failed_store_errors.update(other.failed_store_errors)
-        self.failed_stores.update(other.failed_stores)
-        for key, count in other.completed_store_counts.items():
-            self.completed_store_counts[key] = (
-                self.completed_store_counts.get(key, 0) + count
-            )
-        for key, count in other.failed_store_counts.items():
-            self.failed_store_counts[key] = self.failed_store_counts.get(key, 0) + count
-        for token, count in other.completed_store_tokens.items():
-            self.completed_store_tokens[token] = (
-                self.completed_store_tokens.get(token, 0) + count
-            )
-        for token, count in other.failed_store_tokens.items():
-            self.failed_store_tokens[token] = (
-                self.failed_store_tokens.get(token, 0) + count
-            )
-        for event, count in other.completed_store_events.items():
-            self.completed_store_events[event] = (
-                self.completed_store_events.get(event, 0) + count
-            )
-        for event, count in other.failed_store_events.items():
-            self.failed_store_events[event] = (
-                self.failed_store_events.get(event, 0) + count
-            )
+        for event, result in other.store_events.items():
+            self.store_events.setdefault(event, StoreEventResult()).merge(result)
         self.failed_block_ids.update(other.failed_block_ids)
         return self

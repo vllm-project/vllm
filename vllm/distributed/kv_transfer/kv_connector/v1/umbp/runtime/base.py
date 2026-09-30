@@ -26,13 +26,9 @@ class UMBPRuntimeCapabilities:
     load: bool = True
     store: bool = True
     publish: bool = True
-    ranged_io: bool = False
     layerwise_load: bool = False
     layerwise_store: bool = False
     partial_hash_hits: bool = False
-    cancellation: bool = False
-    async_transfer: bool = False
-    eviction_events: bool = False
 
 
 class UMBPSchedulerHandle(Protocol):
@@ -53,11 +49,17 @@ class UMBPWorkerHandle(Protocol):
     def load(self, plans: Sequence[BlockTransferPlan]) -> TransferJobState:
         """Start loading the requested plans."""
 
+    def load_blocks(
+        self, plans: Sequence[BlockTransferPlan]
+    ) -> TransferJobState | None:
+        """Optionally load logical blocks; None requests ordinary materialization."""
+        return None
+
     def store(self, plans: Sequence[BlockTransferPlan]) -> TransferJobState:
         """Start storing the requested plans."""
 
     def wait(self, job: TransferJobState) -> TransferJobState:
-        """Wait for a job and return its final per-key state."""
+        """Return a final state only when buffers are safe to reuse; otherwise raise."""
 
     def poll(self, job: TransferJobState) -> TransferJobState | None:
         """Return a finished job without blocking, or None if still pending."""
