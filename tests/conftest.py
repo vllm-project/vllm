@@ -317,11 +317,6 @@ def example_system_message() -> str:
         return f.read()
 
 
-@pytest.fixture
-def example_long_prompts() -> list[str]:
-    return [prompt for filename in _LONG_PROMPTS for prompt in _read_prompts(filename)]
-
-
 @pytest.fixture(scope="session")
 def image_assets() -> ImageTestAssets:
     return IMAGE_ASSETS
