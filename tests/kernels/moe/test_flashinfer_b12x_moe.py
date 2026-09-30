@@ -28,6 +28,7 @@ if not has_flashinfer_b12x_moe():
 # Import fp4_quantize after the skip guard — FlashInfer must be installed.
 from flashinfer.fp4_quantization import fp4_quantize
 
+import vllm.envs as envs
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from tests.kernels.moe.utils import make_dummy_moe_config
 from tests.kernels.utils import torch_moe
@@ -227,16 +228,24 @@ def test_flashinfer_b12x_moe(
     [
         # half padded, 64 routed rows -> static b12x path
         (32, 2, "half"),
-        # ALL rows padded, 768 routed rows -> crosses the 640-row static/dynamic cutover.
+        # ALL rows padded, 768 routed rows -> crosses the 640-row static/dynamic
+        # cutover.
         # This is the shape that faulted in production.
         (384, 2, "all"),
-        # vLLM documents that cudagraph padding rows may carry NaN/Inf activations; a zero
-        # route weight must still yield exactly zero, not 0 * NaN.
+        # vLLM documents that cudagraph padding rows may carry NaN/Inf activations;
+        # a zero route weight must still yield exactly zero, not 0 * NaN.
         (32, 2, "nan"),
     ],
 )
+@pytest.mark.skipif(
+    not envs.VLLM_MOE_SKIP_PADDING,
+    reason="the -1 sentinel is only written, and only guarded, when "
+    "VLLM_MOE_SKIP_PADDING is on",
+)
 @torch.inference_mode()
-def test_flashinfer_b12x_moe_tolerates_padding_sentinel(m, topk, pad_mode, workspace_init):
+def test_flashinfer_b12x_moe_tolerates_padding_sentinel(
+    m, topk, pad_mode, workspace_init
+):
     """Padding rows carrying the -1 sentinel must not reach the b12x kernels.
 
     ``VLLM_MOE_SKIP_PADDING`` makes the topk kernels write -1 into ``topk_ids``
@@ -298,9 +307,7 @@ def test_flashinfer_b12x_moe_tolerates_padding_sentinel(m, topk, pad_mode, works
         experts = FlashInferB12xExperts(
             moe_config=moe_config, quant_config=quant_config
         )
-        _process_b12x_weights(
-            experts, w1_blockscale, w2_blockscale, ones_e, ones_e
-        )
+        _process_b12x_weights(experts, w1_blockscale, w2_blockscale, ones_e, ones_e)
         kernel = mk.FusedMoEKernel(
             maybe_make_prepare_finalize(
                 moe=moe_config,
@@ -335,8 +342,8 @@ def test_flashinfer_b12x_moe_tolerates_padding_sentinel(m, topk, pad_mode, works
             )
 
         out = _run(padded_ids)
-        # Padding rows contribute nothing -- exactly zero, and finite even when the padded
-        # activations were NaN.
+        # Padding rows contribute nothing -- exactly zero, and finite even when the
+        # padded activations were NaN.
         assert torch.equal(out[num_real:], torch.zeros_like(out[num_real:]))
         assert torch.isfinite(out[num_real:]).all()
         if num_real:
