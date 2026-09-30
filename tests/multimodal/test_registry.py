@@ -24,4 +24,4 @@ def test_create_processor_error_uses_served_model_name():
         ValueError,
         match="friendly-model-name is not a multimodal model",
     ):
-        MULTIMODAL_REGISTRY.create_processor(model_config)
+        MULTIMODAL_REGISTRY.create_processor(model_config)  # type: ignore[arg-type]

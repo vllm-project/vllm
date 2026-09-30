@@ -995,6 +995,7 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C_cache_ops, ops) {
       "                 Tensor! lru_slots,"
       "                 Tensor? request_state_indices,"
       "                 int region_stride,"
+      "                 int max_union_rows,"
       "                 Tensor(a!)? miss_mask=None,"
       "                 Tensor(b!)? stats=None,"
       "                 Tensor(c!)? attention_indices=None,"
