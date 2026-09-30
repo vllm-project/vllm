@@ -168,7 +168,7 @@ def test_watermarked_bonus_uses_target_key():
         watermarker=GumbelWatermarker(key=42, context_width=2),
     )
     expected = GumbelWatermarker(key=42, context_width=2).sample(
-        target_logits.unsqueeze(0), contexts[1:], lambda _: None
+        target_logits.unsqueeze(0), contexts[1:]
     )
 
     assert num_sampled.item() == 2
@@ -196,7 +196,7 @@ def test_watermarked_recovery_uses_target_key():
         watermarker=GumbelWatermarker(key=42, context_width=2),
     )
     expected = GumbelWatermarker(key=42, context_width=2).sample(
-        target_logits.unsqueeze(0), contexts[:1], lambda _: None
+        target_logits.unsqueeze(0), contexts[:1]
     )
 
     assert num_sampled.item() == 1
@@ -225,9 +225,7 @@ def test_watermarked_recovery_supports_smaller_draft_vocabulary():
         watermarking=torch.tensor([True], device="cuda"),
         watermarker=watermarker,
     )
-    expected = watermarker.sample(
-        target_logits[:4].unsqueeze(0), contexts[:1], lambda _: None
-    )
+    expected = watermarker.sample(target_logits[:4].unsqueeze(0), contexts[:1])
 
     assert num_sampled.item() == 1
     assert sampled[0, 0] == expected.token_ids[0]
@@ -702,7 +700,7 @@ def test_verify_rejects_unproposed_drafts():
     first_pos = inputs["pos"].view(num_trials, K + 1)[:, 0]
     prefill_len = first_pos + 1
     rejection_sampler = object.__new__(RejectionSampler)
-    rejection_sampler.sampler = SimpleNamespace(
+    rejection_sampler.sampler = SimpleNamespace(  # type: ignore[assignment]
         apply_sampling_params=lambda logits, *args: logits,
         sampling_states=SimpleNamespace(
             temperature=SimpleNamespace(gpu=inputs["temperature"]),
