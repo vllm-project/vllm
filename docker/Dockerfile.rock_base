@@ -207,8 +207,9 @@ RUN cd mori \
     && git checkout ${MORI_BRANCH} \
     && git submodule update --init --recursive \
     && ln -sfn ${ROCM_PATH} /opt/rocm \
-    && mkdir -p /usr/lib64 && ln -sf /usr/lib/x86_64-linux-gnu/libc.so /usr/lib64/libc.so \
-    && python3 setup.py bdist_wheel --dist-dir=dist && ls /app/mori/dist/*.whl
+    && pip install "setuptools_scm>=6.2" \
+    && CMAKE_PREFIX_PATH="${ROCM_PATH}:${ROCM_PATH}/lib/rocm_sysdeps" \
+       python3 setup.py bdist_wheel --dist-dir=dist && ls /app/mori/dist/*.whl
 RUN mkdir -p /app/install && cp /app/mori/dist/*.whl /app/install
 
 ###
