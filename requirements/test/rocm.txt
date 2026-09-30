@@ -6,7 +6,7 @@ accelerate==1.13.0
     # via peft
 aiohappyeyeballs==2.6.1
     # via aiohttp
-aiohttp==3.13.3
+aiohttp==3.14.3
     # via
     #   -c requirements/common.txt
     #   -r requirements/test/../common.txt
@@ -37,12 +37,13 @@ anyio==4.13.0
     # via
     #   anthropic
     #   httpx
+    #   httpx2
     #   mcp
     #   openai
     #   sse-starlette
     #   starlette
     #   watchfiles
-apache-tvm-ffi==0.1.10
+apache-tvm-ffi==0.1.11
     # via
     #   -c requirements/rocm.txt
     #   tilelang
@@ -72,12 +73,16 @@ azure-storage-blob==12.28.0
     # via runai-model-streamer-azure
 backoff==2.2.1
     # via -r requirements/test/rocm.in
+bitsandbytes==0.50.0
+    # via -r requirements/test/rocm.in
 black==26.3.1
     # via datamodel-code-generator
 blake3==1.0.8
     # via -r requirements/test/../common.txt
 blobfile==3.0.0
-    # via -r requirements/test/rocm.in
+    # via
+    #   -r requirements/test/rocm.in
+    #   gpt-oss
 bm25s==0.2.13
     # via mteb
 boto3==1.42.74
@@ -131,7 +136,7 @@ cloudpickle==3.1.2
     #   tilelang
 cohere==7.0.8
     # via -r requirements/test/rocm.in
-cohere-melody==0.11.1
+cohere-melody==0.14.0
     # via -r requirements/test/rocm.in
 colorama==0.4.6
     # via
@@ -160,7 +165,7 @@ cryptography==46.0.0
     #   pyjwt
 cycler==0.12.1
     # via matplotlib
-datamodel-code-generator==0.55.0
+datamodel-code-generator==0.79.0
     # via -r requirements/test/rocm.in
 dataproperty==1.1.0
     # via
@@ -176,6 +181,8 @@ decorator==5.2.1
     # via librosa
 decord==0.6.0
     # via -r requirements/test/rocm.in
+defusedxml==0.7.1
+    # via nltk
 depyf==0.20.0
     # via
     #   -c requirements/common.txt
@@ -195,7 +202,7 @@ distro==1.9.0
     #   openai
 dnspython==2.8.0
     # via email-validator
-docker==7.1.0
+docker==7.2.0
     # via gpt-oss
 docopt==0.6.2
     # via num2words
@@ -297,7 +304,7 @@ googleapis-common-protos==1.73.0
     #   google-api-core
     #   opentelemetry-exporter-otlp-proto-grpc
     #   opentelemetry-exporter-otlp-proto-http
-gpt-oss==0.0.8
+gpt-oss==0.0.9
     # via -r requirements/test/rocm.in
 graphql-core==3.2.8
     # via hypothesis-graphql
@@ -317,6 +324,7 @@ grpcio-reflection==1.78.0
 h11==0.16.0
     # via
     #   httpcore
+    #   httpcore2
     #   uvicorn
 h2==4.3.0
     # via httpx
@@ -332,6 +340,8 @@ html2text==2025.4.15
     # via gpt-oss
 httpcore==1.0.9
     # via httpx
+httpcore2==2.12.0
+    # via httpx2
 httptools==0.7.1
     # via uvicorn
 httpx==0.27.2
@@ -342,14 +352,13 @@ httpx==0.27.2
     #   fastapi
     #   fastapi-cloud-cli
     #   huggingface-hub
-    #   mcp
     #   model-hosting-container-standards
     #   openai
     #   perceptron
     #   schemathesis
-httpx-sse==0.4.3
+httpx2==2.12.0
     # via mcp
-huggingface-hub==1.28.0
+huggingface-hub==1.31.0
     # via
     #   -c requirements/common.txt
     #   -r requirements/test/../common.txt
@@ -377,11 +386,12 @@ hypothesis-graphql==0.13.0
     # via schemathesis
 hypothesis-jsonschema==0.23.1
     # via schemathesis
-idna==3.11
+idna==3.19
     # via
     #   anyio
     #   email-validator
     #   httpx
+    #   httpx2
     #   requests
     #   yarl
 ijson==3.5.0
@@ -409,6 +419,7 @@ jinja2==3.1.6
     #   datamodel-code-generator
     #   fastapi
     #   genai-perf
+    #   gpt-oss
     #   lm-eval
     #   torch
 jiter==0.14.0
@@ -441,6 +452,10 @@ jsonschema-specifications==2025.9.1
     # via jsonschema
 junit-xml==1.9
     # via schemathesis
+jupyter-client==8.10.0
+    # via gpt-oss
+jupyter-core==5.9.1
+    # via jupyter-client
 kaldi-native-fbank==1.22.3
     # via -r requirements/test/rocm.in
 kaleido==1.0.0
@@ -498,8 +513,12 @@ mbstrdecoder==1.1.4
     #   dataproperty
     #   pytablewriter
     #   typepy
-mcp==1.27.0
-    # via -r requirements/test/../common.txt
+mcp==2.1.1
+    # via
+    #   -c requirements/common.txt
+    #   -r requirements/test/../common.txt
+mcp-types==2.1.1
+    # via mcp
 mdurl==0.1.2
     # via markdown-it-py
 mistral-common==1.11.6
@@ -552,8 +571,10 @@ networkx==3.6.1
     #   torch
 ninja==1.13.0
     # via -r requirements/test/../common.txt
-nltk==3.9.3
-    # via rouge-score
+nltk==3.10.3
+    # via
+    #   -r requirements/test/rocm.in
+    #   rouge-score
 num2words==0.5.14
     # via -r requirements/test/rocm.in
 numba==0.65.0
@@ -566,6 +587,7 @@ numpy==2.2.6
     #   -r requirements/test/../common.txt
     #   accelerate
     #   albumentations
+    #   bitsandbytes
     #   bm25s
     #   contourpy
     #   cupy-cuda12x
@@ -576,6 +598,7 @@ numpy==2.2.6
     #   evaluate
     #   fastparquet
     #   genai-perf
+    #   gpt-oss
     #   imagehash
     #   imageio
     #   librosa
@@ -618,10 +641,6 @@ openai==2.31.0
     # via
     #   -c requirements/common.txt
     #   -r requirements/test/../common.txt
-openai-harmony==0.0.8
-    # via
-    #   -c requirements/common.txt
-    #   -r requirements/test/../common.txt
     #   gpt-oss
 opencensus==0.11.4
     # via ray
@@ -639,6 +658,7 @@ opentelemetry-api==1.40.0
     # via
     #   -c requirements/common.txt
     #   -r requirements/test/../common.txt
+    #   mcp
     #   opentelemetry-exporter-otlp-proto-grpc
     #   opentelemetry-exporter-otlp-proto-http
     #   opentelemetry-exporter-prometheus
@@ -687,14 +707,19 @@ orjson==3.11.7
     # via
     #   genai-perf
     #   kaleido
+oss-harmony==0.0.11
+    # via
+    #   -c requirements/common.txt
+    #   -r requirements/test/../common.txt
 outlines-core==0.2.14
     # via
     #   -c requirements/common.txt
     #   -r requirements/test/../common.txt
-packaging==26.0
+packaging==26.2
     # via
     #   -c requirements/rocm.txt
     #   accelerate
+    #   bitsandbytes
     #   black
     #   datasets
     #   evaluate
@@ -721,6 +746,7 @@ pandas==3.0.1
     #   evaluate
     #   fastparquet
     #   genai-perf
+    #   gpt-oss
     #   statsmodels
 partial-json-parser==0.2.1.1.post7
     # via -r requirements/test/../common.txt
@@ -736,8 +762,9 @@ perceptron==0.1.4
     # via -r requirements/test/rocm.in
 perf-analyzer==0.1.0
     # via genai-perf
-pillow==12.1.1
+pillow==12.3.0
     # via
+    #   -c requirements/common.txt
     #   -r requirements/test/../common.txt
     #   genai-perf
     #   imagehash
@@ -751,6 +778,7 @@ pillow==12.1.1
 platformdirs==4.3.6
     # via
     #   black
+    #   jupyter-core
     #   pooch
     #   python-discovery
     #   virtualenv
@@ -843,11 +871,12 @@ pydantic==2.12.5
     #   gpt-oss
     #   lm-format-enforcer
     #   mcp
+    #   mcp-types
     #   mistral-common
     #   model-hosting-container-standards
     #   mteb
     #   openai
-    #   openai-harmony
+    #   oss-harmony
     #   pydantic-extra-types
     #   pydantic-settings
     #   ray
@@ -861,9 +890,7 @@ pydantic-extra-types==2.11.1
     #   fastapi
     #   mistral-common
 pydantic-settings==2.13.1
-    # via
-    #   fastapi
-    #   mcp
+    # via fastapi
 pygments==2.19.2
     # via
     #   pytest
@@ -910,6 +937,7 @@ pytest-timeout==2.3.1
 python-dateutil==2.9.0.post0
     # via
     #   botocore
+    #   jupyter-client
     #   matplotlib
     #   pandas
     #   typepy
@@ -958,6 +986,7 @@ pyzmq==27.1.0
     # via
     #   -c requirements/common.txt
     #   -r requirements/test/../common.txt
+    #   jupyter-client
 rapidfuzz==3.12.1
     # via
     #   -r requirements/test/rocm.in
@@ -1147,7 +1176,7 @@ starlette-testclient==0.4.1
     # via schemathesis
 statsmodels==0.14.6
     # via genai-perf
-structlog==25.5.0
+structlog==26.1.0
     # via gpt-oss
 supervisor==4.3.0
     # via model-hosting-container-standards
@@ -1195,20 +1224,22 @@ timm==1.0.17
     #   -r requirements/test/rocm.in
     #   open-clip-torch
     #   segmentation-models-pytorch
-tokenizers==0.22.2
+tokenizers==0.23.1
     # via
     #   -c requirements/common.txt
     #   -r requirements/test/../common.txt
-    #   -r requirements/test/rocm.in
     #   cohere
     #   transformers
 torch-c-dlpack-ext==0.1.5
     # via tilelang
+tornado==6.5.10
+    # via jupyter-client
 tqdm==4.67.3
     # via
     #   -r requirements/test/../common.txt
     #   datasets
     #   evaluate
+    #   gpt-oss
     #   huggingface-hub
     #   lm-eval
     #   mteb
@@ -1222,7 +1253,11 @@ tqdm==4.67.3
     #   sentence-transformers
     #   tilelang
     #   transformers
-transformers==5.15.0
+traitlets==5.16.1
+    # via
+    #   jupyter-client
+    #   jupyter-core
+transformers==5.17.0
     # via
     #   -c requirements/common.txt
     #   -r requirements/test/../common.txt
@@ -1237,6 +1272,10 @@ transformers-stream-generator==0.0.5
     # via -r requirements/test/rocm.in
 tritonclient==2.66.0
     # via -r requirements/test/rocm.in
+truststore==0.10.4
+    # via
+    #   httpcore2
+    #   httpx2
 typeguard==4.5.1
     # via inflect
 typepy==1.3.4
@@ -1257,6 +1296,7 @@ typing-extensions==4.15.0
     # via
     #   -c requirements/common.txt
     #   -r requirements/test/../common.txt
+    #   aiohttp
     #   aiosignal
     #   albumentations
     #   alembic
@@ -1270,10 +1310,13 @@ typing-extensions==4.15.0
     #   cohere
     #   fastapi
     #   grpcio
+    #   httpx2
     #   huggingface-hub
+    #   jupyter-client
     #   librosa
     #   lm-eval
     #   mcp
+    #   mcp-types
     #   mistral-common
     #   mteb
     #   openai
@@ -1343,7 +1386,7 @@ word2number==1.1
     # via lm-eval
 wrapt==2.1.2
     # via smart-open
-xgrammar==0.2.1
+xgrammar==0.2.8
     # via
     #   -c requirements/common.txt
     #   -r requirements/test/../common.txt

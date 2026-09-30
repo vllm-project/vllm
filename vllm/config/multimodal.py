@@ -3,20 +3,209 @@
 
 from collections.abc import Mapping
 from pathlib import Path
-from typing import Any, Literal, TypeAlias, TypedDict, cast, final
+from typing import Any, Literal, TypeAlias, TypeVar, final, overload
 
 import torch
-from pydantic import ConfigDict, Field, field_validator, model_validator
+from pydantic import (
+    ConfigDict,
+    Field,
+    GetCoreSchemaHandler,
+    field_validator,
+    model_validator,
+)
 from pydantic.dataclasses import dataclass
+from pydantic_core import core_schema
 
 import vllm.envs as envs
 from vllm.config.ec_transfer import ECTransferConfig
-from vllm.config.utils import config, get_from_deprecated_env_if_set
+from vllm.config.utils import config
 from vllm.logger import init_logger
 from vllm.utils.hashing import safe_hash
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 logger = init_logger(__name__)
+
+_T = TypeVar("_T")
+
+# HuggingFace processors accept a shared flat namespace in addition to the
+# nested processor kwarg scopes ``text_kwargs`` / ``images_kwargs`` /
+# ``videos_kwargs`` / ``audio_kwargs``. vLLM recognizes these scopes when
+# resolving ``mm_processor_kwargs``.
+_HF_PROCESSOR_KWARG_SCOPES = (
+    "text_kwargs",
+    "images_kwargs",
+    "videos_kwargs",
+    "audio_kwargs",
+)
+
+
+def _recursively_merge_mm_processor_kwargs(
+    defaults: Mapping[str, object],
+    overrides: Mapping[str, object],
+) -> dict[str, object]:
+    """Merge two mappings recursively, with ``overrides`` taking precedence.
+
+    Nested values are merged only when both values are mappings; otherwise the
+    override replaces the existing value.
+    """
+    merged = dict(defaults)
+
+    for key, value in overrides.items():
+        default_value = merged.get(key)
+        if isinstance(default_value, Mapping) and isinstance(value, Mapping):
+            merged[key] = _recursively_merge_mm_processor_kwargs(default_value, value)
+        else:
+            merged[key] = value
+
+    return merged
+
+
+def _merge_mm_processor_scope(
+    config_flat: Mapping[str, object],
+    config_scoped: Mapping[str, object],
+    inference_flat: Mapping[str, object],
+    inference_scoped: Mapping[str, object],
+) -> dict[str, object]:
+    """Merge kwargs for one existing HuggingFace processor kwarg scope.
+
+    Flat kwargs contribute only to keys present in either the configured or
+    inference-time scope. For those keys, precedence is:
+    configured flat < configured scoped < inference flat < inference scoped.
+
+    Nested mappings are merged recursively; otherwise the higher-priority value
+    replaces the lower-priority value.
+    """
+    # Flat kwargs contribute only to keys present in this scope in either input.
+    scoped_keys = config_scoped.keys() | inference_scoped.keys()
+    config_flat_for_scope = {
+        key: value for key, value in config_flat.items() if key in scoped_keys
+    }
+    inference_flat_for_scope = {
+        key: value for key, value in inference_flat.items() if key in scoped_keys
+    }
+
+    # Merge from lowest to highest priority:
+    # configured flat -> configured scoped -> inference flat -> inference scoped.
+    merged = _recursively_merge_mm_processor_kwargs(
+        config_flat_for_scope, config_scoped
+    )
+    merged = _recursively_merge_mm_processor_kwargs(merged, inference_flat_for_scope)
+    merged = _recursively_merge_mm_processor_kwargs(merged, inference_scoped)
+    return merged
+
+
+def _merge_mm_processor_kwargs(
+    config_kwargs: Mapping[str, object],
+    inference_kwargs: Mapping[str, object],
+) -> dict[str, object]:
+    """Merge configured and inference-time multi-modal processor kwargs.
+
+    The merge is performed in two parts:
+
+    1. The shared flat kwargs are merged recursively, with inference-time values
+       taking precedence.
+    2. Each existing HuggingFace processor kwarg scope is merged separately.
+       For keys present in either the configured or inference-time scope,
+       precedence is:
+       configured flat < configured scoped < inference flat < inference scoped.
+
+    For example:
+
+        configured = {
+            "size": {"shortest_edge": 256},
+            "videos_kwargs": {
+                "size": {"longest_edge": 1024},
+                "num_frames": 16,
+            },
+        }
+        inference = {
+            "size": {"shortest_edge": 512},
+            "videos_kwargs": {"fps": 4},
+        }
+
+    produces:
+
+        {
+            "size": {"shortest_edge": 512},
+            "videos_kwargs": {
+                "size": {
+                    "shortest_edge": 512,
+                    "longest_edge": 1024,
+                },
+                "num_frames": 16,
+                "fps": 4,
+            },
+        }
+
+    Scoped values do not modify the shared flat kwargs or sibling scopes.
+    Missing scopes, None-valued scopes, and empty scope mappings are treated as
+    absent and do not create a scope.
+    """
+    # Merge the shared flat kwargs first; nested scopes are handled separately
+    # below.
+    config_flat = {
+        key: value
+        for key, value in config_kwargs.items()
+        if key not in _HF_PROCESSOR_KWARG_SCOPES
+    }
+    inference_flat = {
+        key: value
+        for key, value in inference_kwargs.items()
+        if key not in _HF_PROCESSOR_KWARG_SCOPES
+    }
+    merged = _recursively_merge_mm_processor_kwargs(config_flat, inference_flat)
+
+    # Merge each nested processor kwarg scope present in either input.
+    for scoped_key in _HF_PROCESSOR_KWARG_SCOPES:
+        config_scope_value = config_kwargs.get(scoped_key)
+        inference_scope_value = inference_kwargs.get(scoped_key)
+
+        # Treat missing scopes, None-valued scopes, and empty scope mappings as
+        # absent.
+        if isinstance(config_scope_value, Mapping) and not config_scope_value:
+            config_scope_value = None
+        if isinstance(inference_scope_value, Mapping) and not inference_scope_value:
+            inference_scope_value = None
+
+        # Skip adding the scope to the merged result when it is absent from both
+        # sources.
+        if config_scope_value is None and inference_scope_value is None:
+            continue
+
+        # Handle the inference scope first because it has higher precedence; only
+        # mapping-valued scopes participate in the recursive scoped merge.
+        inference_scope_kwargs: Mapping[str, object]
+        if inference_scope_value is None:
+            inference_scope_kwargs = {}
+        elif not isinstance(inference_scope_value, Mapping):
+            # Non-mapping scopes cannot participate in the recursive scoped merge;
+            # the higher-priority inference value replaces the configured scope.
+            merged[scoped_key] = inference_scope_value
+            continue
+        else:
+            inference_scope_kwargs = inference_scope_value
+
+        # Handle the configured scope next because it has lower precedence; only
+        # mapping-valued scopes participate in the recursive scoped merge.
+        if isinstance(config_scope_value, Mapping):
+            config_scope_kwargs = config_scope_value
+        elif inference_scope_value is None:
+            # Non-mapping scopes cannot participate in the recursive scoped merge;
+            # preserve the configured value when inference contributes nothing.
+            merged[scoped_key] = config_scope_value
+            continue
+        else:
+            config_scope_kwargs = {}
+
+        # Merge this scope together with the matching flat kwargs.
+        merged[scoped_key] = _merge_mm_processor_scope(
+            config_flat,
+            config_scope_kwargs,
+            inference_flat,
+            inference_scope_kwargs,
+        )
+
+    return merged
 
 
 @dataclass
@@ -51,17 +240,50 @@ class AudioDummyOptions(BaseDummyOptions):
 
 
 @final
-class MultiModalDummyOptionsBuiltins(TypedDict, total=False):
-    """Type annotations for modality types predefined by vLLM."""
+class MultiModalDummyOptions(dict[str, BaseDummyOptions]):
+    """Dummy data options for each modality.
 
-    image: ImageDummyOptions
-    """Options for dummy images."""
+    Lookups of the modalities predefined by vLLM return their own options
+    class, while any other modality returns
+    [`BaseDummyOptions`][vllm.config.multimodal.BaseDummyOptions].
+    """
 
-    video: VideoDummyOptions
-    """Options for dummy videos."""
+    @overload  # type: ignore[override]
+    def get(self, key: Literal["image"], /) -> ImageDummyOptions | None: ...
 
-    audio: AudioDummyOptions
-    """Options for dummy audios."""
+    @overload
+    def get(self, key: Literal["image"], default: _T, /) -> ImageDummyOptions | _T: ...
+
+    @overload
+    def get(self, key: Literal["video"], /) -> VideoDummyOptions | None: ...
+
+    @overload
+    def get(self, key: Literal["video"], default: _T, /) -> VideoDummyOptions | _T: ...
+
+    @overload
+    def get(self, key: Literal["audio"], /) -> AudioDummyOptions | None: ...
+
+    @overload
+    def get(self, key: Literal["audio"], default: _T, /) -> AudioDummyOptions | _T: ...
+
+    @overload
+    def get(self, key: str, /) -> BaseDummyOptions | None: ...
+
+    @overload
+    def get(self, key: str, default: _T, /) -> BaseDummyOptions | _T: ...
+
+    def get(self, key: str, default: object = None, /) -> object:
+        return super().get(key, default)
+
+    @classmethod
+    def __get_pydantic_core_schema__(
+        cls,
+        source_type: Any,
+        handler: GetCoreSchemaHandler,
+    ) -> core_schema.CoreSchema:
+        return core_schema.no_info_after_validator_function(
+            cls, handler.generate_schema(dict[str, BaseDummyOptions])
+        )
 
 
 MMEncoderTPMode = Literal["weights", "data"]
@@ -75,25 +297,6 @@ MMProcessorDevice: TypeAlias = str
 `"xpu"` on XPU). Validated against that set by the CLI."""
 
 
-def _get_mm_hasher_algorithm() -> MMHasherAlgorithm:
-    env_value = get_from_deprecated_env_if_set(
-        "VLLM_MM_HASHER_ALGORITHM",
-        "v0.27",
-        "mm_hasher_algorithm",
-    )
-    env_value = "blake3" if env_value is None else env_value
-    return cast(MMHasherAlgorithm, env_value.lower())
-
-
-MMDummyOptions: TypeAlias = dict[str, BaseDummyOptions]
-"""
-A dictionary containing an entry for each modality type of dummy data.
-
-The built-in modalities are defined by
-[`MultiModalDummyOptionsBuiltins`][vllm.config.multimodal.MultiModalDummyOptionsBuiltins].
-"""
-
-
 @config
 class MultiModalConfig:
     """Controls the behavior of multimodal models."""
@@ -101,7 +304,9 @@ class MultiModalConfig:
     language_model_only: bool = False
     """If True, disables all multimodal inputs by setting all modality limits to 0.
     Equivalent to setting `--limit-mm-per-prompt` to 0 for every modality."""
-    limit_per_prompt: MMDummyOptions = Field(default_factory=dict)
+    limit_per_prompt: MultiModalDummyOptions = Field(
+        default_factory=MultiModalDummyOptions
+    )
     """The maximum number of input items and options allowed per
     prompt for each modality.
 
@@ -157,13 +362,14 @@ class MultiModalConfig:
     resulting in a total memory usage of
     `mm_processor_cache_gb * (api_server_count + data_parallel_size)`.
 
+    A single processed item larger than this budget is served uncached
+    (with a warning) instead of failing. Raise this value to cache such items.
+
     Set to `0` to disable this cache completely (not recommended)."""
     mm_processor_cache_type: MMCacheType = "lru"
     """Type of cache to use for the multi-modal preprocessor/mapper. If `shm`,
     use shared memory FIFO cache. If `lru`, use mirrored LRU cache."""
-    mm_hasher_algorithm: MMHasherAlgorithm = Field(
-        default_factory=_get_mm_hasher_algorithm
-    )
+    mm_hasher_algorithm: MMHasherAlgorithm = "blake3"
     """Hash algorithm to use for multi-modal input caching. Use `"sha256"` or
     `"sha512"` for FIPS-compliant deployments."""
     mm_shm_cache_max_object_size_mb: int = Field(default=128, ge=0)
@@ -266,8 +472,8 @@ class MultiModalConfig:
     def _validate_limit_per_prompt(
         cls,
         value: dict[str, int | dict[str, int]],
-    ) -> MMDummyOptions:
-        out: MMDummyOptions = {}
+    ) -> MultiModalDummyOptions:
+        out = MultiModalDummyOptions()
 
         for k, v in value.items():
             # Handle legacy format where only count is specified
@@ -366,6 +572,7 @@ class MultiModalConfig:
         Returns:
             The kwargs to build the config with, unchanged unless the flag adds
             a `device`.
+
         """
         if mm_processor_device in (None, "auto"):
             return mm_processor_kwargs
@@ -399,6 +606,7 @@ class MultiModalConfig:
             ValueError: If `device` is not something `torch.device` accepts.
                 `validate_mm_processor_device` is what surfaces this during
                 startup, so the value is only parsed once.
+
         """
         device = (self.mm_processor_kwargs or {}).get("device")
         if device is None:
@@ -427,6 +635,7 @@ class MultiModalConfig:
             ValueError: If the requested device is not a torch device, or if it
                 is the accelerator on an instance that also runs the language
                 model.
+
         """
         from vllm.platforms import current_platform
 
@@ -461,8 +670,7 @@ class MultiModalConfig:
         )
 
     def compute_hash(self) -> str:
-        """
-        WARNING: Whenever a new field is added to this config,
+        """WARNING: Whenever a new field is added to this config,
         ensure that it is included in the factors list if
         it affects the computation graph.
 
@@ -485,8 +693,7 @@ class MultiModalConfig:
         return hash_str
 
     def get_limit_per_prompt(self, modality: str) -> int:
-        """
-        Get the maximum number of input items allowed per prompt
+        """Get the maximum number of input items allowed per prompt
         for the given modality (backward compatible).
         """
         if self.language_model_only:
@@ -504,15 +711,28 @@ class MultiModalConfig:
         self,
         inference_kwargs: Mapping[str, object],
     ) -> dict[str, object]:
-        """
-        Get the keyword arguments to pass to the multi-modal processor
+        """Get the keyword arguments to pass to the multi-modal processor
         according to the extra arguments passed during inference.
+
+        Nested mappings are merged recursively, with inference-time values taking
+        precedence over configured values.
         """
-        kwargs = self.mm_processor_kwargs or {}
+        merged = _merge_mm_processor_kwargs(
+            self.mm_processor_kwargs or {},
+            inference_kwargs,
+        )
         if self.mm_device_do_normalize:
-            kwargs["do_normalize"] = False
-            kwargs["do_rescale"] = False
-        return kwargs | dict(inference_kwargs)
+            # The model expects raw pixels and normalises on device;
+            # overriding these per request would silently double-normalise.
+            for key in ("do_normalize", "do_rescale"):
+                if key in inference_kwargs:
+                    logger.warning_once(
+                        "mm_device_do_normalize is enabled; ignoring "
+                        "per-request mm_processor_kwargs[%r].",
+                        key,
+                    )
+                merged[key] = False
+        return merged
 
     def use_gpu_video_backend(self) -> bool:
         """Return whether the configured video loader or codec uses the GPU."""

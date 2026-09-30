@@ -7,6 +7,7 @@ import torch
 
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
+from vllm.utils.torch_utils import direct_register_custom_op
 
 from .base import RotaryEmbeddingBase
 from .yarn_scaling_rope import YaRNScalingRotaryEmbedding, yarn_get_mscale
@@ -19,6 +20,8 @@ def _triton_mrope_forward(
     cos,
     sin,
     num_tokens,
+    q_token_stride,
+    k_token_stride,
     n_qh: tl.constexpr,
     n_kh: tl.constexpr,
     hd: tl.constexpr,
@@ -38,9 +41,10 @@ def _triton_mrope_forward(
     # and supports cos and sin cache with shape (3, num_tokens, rotary_dim // 2)
     # instead of (3, bsz, seq_len, head_dim), also supports interleaved rotary
     pid = tl.program_id(0)
-    # locate start address
-    q_ptr = q_ptr + pid * (n_qh * hd)
-    k_ptr = k_ptr + pid * (n_kh * hd)
+    # locate start address (int64: num_tokens * row_stride exceeds 2^31 for
+    # worst-case ViT forwards, e.g. MiniMax M3 packs ~768k patches/item)
+    q_ptr = q_ptr + pid.to(tl.int64) * q_token_stride
+    k_ptr = k_ptr + pid.to(tl.int64) * k_token_stride
 
     # ####################################################################
     # get the cos(mθ_{i...d/2}) and sin(mθ_{i...d/2}) for token position
@@ -178,9 +182,17 @@ def triton_mrope(
             (T/H/W positions with multimodal inputs)
         mrope_section: [t, h, w]
         head_size: int
+        rotary_dim: Number of leading dimensions rotary is applied to.
+        mrope_interleaved: Whether the T/H/W sections are interleaved rather
+            than concatenated.
         is_neox_style: Whether rotary pairs use split-half (NeoX) or
             adjacent (GPT-J) layout.
+
     """
+    # The kernel indexes each token row through an explicit row stride and
+    # requires dense rows.
+    assert q.dim() == 2 and q.stride(-1) == 1
+    assert k.dim() == 2 and k.stride(-1) == 1
     n_row, n_q_head_head_dim = q.shape
     n_q_head = n_q_head_head_dim // head_size
     n_kv_head = k.shape[1] // head_size
@@ -188,10 +200,6 @@ def triton_mrope(
     pad_n_q_head = triton.next_power_of_2(n_q_head)
     pad_n_kv_head = triton.next_power_of_2(n_kv_head)
 
-    # ensure tensors passed into the kernel are contiguous.
-    # It will be no-op if they are already contiguous
-    q = q.contiguous()
-    k = k.contiguous()
     cos = cos.contiguous()
     sin = sin.contiguous()
 
@@ -206,6 +214,8 @@ def triton_mrope(
         cos,
         sin,
         n_row,
+        q.stride(0),
+        k.stride(0),
         n_q_head,
         n_kv_head,
         head_size,
@@ -236,6 +246,62 @@ def apply_interleaved_rope(x: torch.Tensor, mrope_section: list[int]) -> torch.T
     return torch.where(is_width, x[2], result)
 
 
+def _mrope_apply(
+    positions: torch.Tensor,
+    query: torch.Tensor,
+    key: torch.Tensor,
+    cos_sin_cache: torch.Tensor,
+    head_size: int,
+    rotary_dim: int,
+    mrope_section_t: int,
+    mrope_section_h: int,
+    mrope_section_w: int,
+    mrope_interleaved: bool,
+    is_neox_style: bool,
+) -> None:
+    cos_sin = cos_sin_cache[positions]
+    cos, sin = cos_sin.chunk(2, dim=-1)
+    query_out, key_out = triton_mrope(
+        query,
+        key,
+        cos,
+        sin,
+        [mrope_section_t, mrope_section_h, mrope_section_w],
+        head_size,
+        rotary_dim,
+        mrope_interleaved,
+        is_neox_style,
+    )
+    if query_out.data_ptr() != query.data_ptr():
+        query.copy_(query_out.view_as(query))
+    if key_out.data_ptr() != key.data_ptr():
+        key.copy_(key_out.view_as(key))
+
+
+def _mrope_apply_fake(
+    positions: torch.Tensor,
+    query: torch.Tensor,
+    key: torch.Tensor,
+    cos_sin_cache: torch.Tensor,
+    head_size: int,
+    rotary_dim: int,
+    mrope_section_t: int,
+    mrope_section_h: int,
+    mrope_section_w: int,
+    mrope_interleaved: bool,
+    is_neox_style: bool,
+) -> None:
+    return
+
+
+direct_register_custom_op(
+    op_name="mrope",
+    op_func=_mrope_apply,
+    mutates_args=["query", "key"],
+    fake_impl=_mrope_apply_fake,
+)
+
+
 class MRotaryEmbedding(RotaryEmbeddingBase):
     """Rotary Embedding with Multimodal Sections."""
 
@@ -252,21 +318,28 @@ class MRotaryEmbedding(RotaryEmbeddingBase):
         # YaRN parameters.
         *,
         scaling_factor: float | None = None,
-        extrapolation_factor: float = 1,
-        attn_factor: float = 1,
         beta_fast: int = 32,
         beta_slow: int = 1,
+        mscale: float | None = None,
+        mscale_all_dim: float | None = None,
+        attention_factor: float | None = None,
         truncate: bool = True,
     ) -> None:
         self.scaling_factor = scaling_factor
-        self.extrapolation_factor = extrapolation_factor
-        self.attn_factor = attn_factor
         self.beta_fast = beta_fast
         self.beta_slow = beta_slow
         self.truncate = truncate
         if self.scaling_factor is not None:
             # Get n-d magnitude scaling corrected for interpolation
-            self.mscale = float(yarn_get_mscale(self.scaling_factor) * attn_factor)
+            if attention_factor is not None:
+                self.mscale = float(attention_factor)
+            elif mscale and mscale_all_dim:
+                self.mscale = float(
+                    yarn_get_mscale(self.scaling_factor, mscale)
+                    / yarn_get_mscale(self.scaling_factor, mscale_all_dim)
+                )
+            else:
+                self.mscale = float(yarn_get_mscale(self.scaling_factor))
         else:
             self.mscale = 1.0
 
@@ -313,6 +386,8 @@ class MRotaryEmbedding(RotaryEmbeddingBase):
                 [3, num_tokens] (T/H/W positions with multimodal inputs)
             query: [num_tokens, num_heads * head_size]
             key: [num_tokens, num_kv_heads * head_size]
+            offsets: Optional per-token position offsets added to positions.
+
         """
         assert positions.ndim == 1 or positions.ndim == 2
         assert key is not None
@@ -413,6 +488,35 @@ class MRotaryEmbedding(RotaryEmbeddingBase):
         key = torch.cat((key_rot, key_pass), dim=-1).reshape(key_shape)
         return query, key
 
+    def forward_hip(
+        self,
+        positions: torch.Tensor,
+        query: torch.Tensor,
+        key: torch.Tensor | None = None,
+        offsets: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        if positions.ndim == 2:
+            assert key is not None
+            assert self.mrope_section
+            query_shape = query.shape
+            key_shape = key.shape
+            cos_sin_cache = self._match_cos_sin_cache_dtype(query)
+            torch.ops.vllm.mrope(
+                positions,
+                query,
+                key,
+                cos_sin_cache,
+                self.head_size,
+                self.rotary_dim,
+                self.mrope_section[0],
+                self.mrope_section[1],
+                self.mrope_section[2],
+                self.mrope_interleaved,
+                self.is_neox_style,
+            )
+            return query.reshape(query_shape), key.reshape(key_shape)
+        return super().forward_hip(positions, query, key)
+
     def forward_cpu(
         self,
         positions: torch.Tensor,
@@ -421,6 +525,15 @@ class MRotaryEmbedding(RotaryEmbeddingBase):
         offsets: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         return self.forward_native(positions, query, key, offsets)
+
+    def forward_xpu(
+        self,
+        positions: torch.Tensor,
+        query: torch.Tensor,
+        key: torch.Tensor | None = None,
+        offsets: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        return self.forward_cuda(positions, query, key, offsets)
 
     @staticmethod
     def get_next_input_positions(

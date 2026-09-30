@@ -1,8 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Tests for the CUTLASS-based W4A8 grouped GEMM kernel and the full MoE layer.
-"""
+"""Tests for the CUTLASS-based W4A8 grouped GEMM kernel and the full MoE layer."""
 
 import random
 from dataclasses import dataclass
@@ -19,8 +17,9 @@ from vllm.platforms import current_platform
 from vllm.scalar_type import ScalarType, scalar_types
 from vllm.utils.torch_utils import set_random_seed
 
+capability = current_platform.get_device_capability()
 IS_SUPPORTED_BY_GPU = (
-    current_platform.is_cuda() and current_platform.get_device_capability()[0] >= 9
+    current_platform.is_cuda() and capability is not None and capability[0] >= 9
 )
 
 
@@ -37,8 +36,7 @@ def cutlass_quantize(
     group_size: int | None,
     zero_points: bool = False,
 ):
-    """
-    Quantize weights into W4 and compute reference dequantized weights.
+    """Quantize weights into W4 and compute reference dequantized weights.
 
     Encoding/reordering of weights and packing of scales is deferred
     until after all experts are combined.
@@ -66,13 +64,13 @@ def cutlass_quantize(
 def cutlass_preprocess(
     w_q_experts: list[torch.Tensor], w_s_experts: list[torch.Tensor]
 ):
-    """
-    Reorder/encode expert weights and pack scales.
+    """Reorder/encode expert weights and pack scales.
 
     Returns:
         w_q_packed: Packed/encoded int4 weights for all experts.
         w_s_packed: Packed fp8 scales for all experts.
         packed_layout: Layout/stride metadata for grouped GEMM.
+
     """
     w_s_packed = ops.cutlass_pack_scale_fp8(torch.stack(w_s_experts))
     w_q_packed, packed_layout = ops.cutlass_encode_and_reorder_int4b_grouped(
@@ -130,7 +128,6 @@ def make_moe_test_setup(
     random_zero: bool = False,
 ) -> MoETestSetup:
     """Create a full set of tensors for testing cutlass_w4a8_moe_mm."""
-
     assert K % GROUP_SIZE == 0
     # Token counts per expert (multiples of `alignment`).
     Ms = [alignment * random.randint(1, max_blocks) for _ in range(num_experts)]
@@ -276,9 +273,7 @@ def test_cutlass_w4a8_moe_mm_end_to_end(shape, random_zero):
 
 
 class W4A8MoELayer(torch.nn.Module):
-    """
-    Minimal wrapper module to test cuda graphs
-    """
+    """Minimal wrapper module to test cuda graphs."""
 
     def __init__(self, setup: MoETestSetup):
         super().__init__()
