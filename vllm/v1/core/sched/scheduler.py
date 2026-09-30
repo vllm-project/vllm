@@ -1222,12 +1222,43 @@ class Scheduler(SchedulerInterface):
                 )
 
                 if new_blocks is None:
-                    # The request cannot be scheduled.
+                    # The request cannot be scheduled: the KV cache has no room
+                    # for its next chunk.
 
                     # NOTE: we need to untouch the request from the encode cache
                     # manager
                     if request.has_encoder_inputs:
                         self.encoder_cache_manager.free(request)
+
+                    # Deadlock avoidance for completed async KV loads
+                    # (WAITING_FOR_REMOTE_KVS). A request whose async load has
+                    # finished sits in ``finished_recving_kv_req_ids``; it
+                    # already holds its KV blocks resident (allocated at
+                    # admission) and is non-preemptible, so it reuses those
+                    # blocks -- it can be scheduled even when the cache is full
+                    # and, once it runs and completes, frees blocks for others.
+                    #
+                    # This loop drains the waiting queue and ``break``s here as
+                    # soon as one request cannot allocate. If a block-starved
+                    # request is reached before those ready-to-run requests, the
+                    # loop would exit while the very requests that could free the
+                    # cache are still queued -- and with nothing left to run,
+                    # ``running`` can fall to zero and the engine stalls.
+                    #
+                    # While such a request is still queued, skip this one instead
+                    # of ending the loop, so the ready request is reached and
+                    # scheduled. Policy-independent: it acts wherever queue
+                    # selection put the block-starved request, and does not rely
+                    # on reordering the queue. A no-op when no async load has
+                    # completed, so back-pressure (break on a full cache) is
+                    # otherwise unchanged. Terminates: the request is removed
+                    # from the active queue into ``step_skipped_waiting``, which
+                    # is not reconsulted until the loop ends, so the active
+                    # queue strictly shrinks.
+                    if self.finished_recving_kv_req_ids:
+                        request_queue.pop_request()
+                        step_skipped_waiting.prepend_request(request)
+                        continue
                     break
 
                 # KVTransfer: the connector uses this info to determine
