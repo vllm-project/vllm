@@ -1752,17 +1752,35 @@ def _get_cached_wo_a_bf16(
     # metadata. Applying that retained scale again would double-dequantize the
     # weight. Block scaling is only valid while the one-byte FP8 storage remains.
     if wo_a_scale_param is not None and wo_a.weight.element_size() == 1:
-        wo_a_weight = wo_a.weight.view(n_local_groups, o_lora_rank, hidden_dim).to(
-            torch.float32
+        is_per_channel = wo_a_scale_param.dim() == 1 or (
+            wo_a_scale_param.dim() == 2 and wo_a_scale_param.shape[-1] == 1
         )
-        wo_a_scale = _expand_2d_block_scales(
-            wo_a_scale_param.view(n_local_groups, -1, wo_a_scale_param.shape[-1]),
-            o_lora_rank,
+        wo_a_weight_src = wo_a.weight
+        if is_per_channel and tuple(wo_a_weight_src.shape) == (
             hidden_dim,
-        )
+            n_local_groups * o_lora_rank,
+        ):
+            # Quark PTPC wo_a is loaded as [in, out] for the bmm linear, while
+            # the inverse-RoPE einsum consumes [group, rank, in].
+            wo_a_weight_src = wo_a_weight_src.t().contiguous()
+        wo_a_weight = wo_a_weight_src.reshape(
+            n_local_groups, o_lora_rank, hidden_dim
+        ).to(torch.float32)
+        if is_per_channel:
+            wo_a_scale = wo_a_scale_param.reshape(
+                n_local_groups, o_lora_rank, 1
+            ).to(torch.float32)
+        else:
+            wo_a_scale = _expand_2d_block_scales(
+                wo_a_scale_param.reshape(
+                    n_local_groups, -1, wo_a_scale_param.shape[-1]
+                ),
+                o_lora_rank,
+                hidden_dim,
+            )
         cached = (wo_a_weight * wo_a_scale).to(torch.bfloat16)
     else:
-        cached = wo_a.weight.view(n_local_groups, o_lora_rank, hidden_dim).to(
+        cached = wo_a.weight.reshape(n_local_groups, o_lora_rank, hidden_dim).to(
             torch.bfloat16
         )
     wo_a._dsv4_wo_a_bf16 = cached
