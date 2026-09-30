@@ -113,7 +113,7 @@ Keeping the raw tuple and exposing these views separately lets cache-miss select
 
 The blocking renderer path and phase 1 both call `_prepare_multimodal_inputs`. This helper resolves the processor, creates a request ID, parses media and UUIDs, applies UUID validation and generation, selects the renderer cache (including `skip_mm_cache`), and retrieves the timing context. Each path then calls its processor entry point under `set_default_torch_num_threads()`.
 
-The unified `vision_chunk` modality is resolved earlier, in the request parser, because its chunk items must be concrete before they reach the renderer. `_predecode_vision_chunk_items` in `vllm/entrypoints/chat_utils.py` decodes those refs concurrently on the same media pool, off the event loop, and raises the first failure instead of letting it be swallowed downstream.
+The unified `vision_chunk` modality is resolved earlier, in the request parser, because its chunk items must be concrete before they reach the renderer. `_predecode_vision_chunk_items` in `vllm/entrypoints/chat_utils.py` decodes those refs concurrently on the same media pool from `vllm/multimodal/media/executor.py`, off the event loop, and raises the first failure instead of letting it be swallowed downstream. Resolution materializes refs before passing images to `VisionChunkImage` or video frames to the chunk splitter.
 
 ### The single multimodal worker
 
@@ -128,7 +128,7 @@ The comment above `_mm_warmup_future` in `vllm/renderers/base.py` is the authori
 
 Refs remain intact between phases. Phase 2 re-derives the cache state rather than reusing phase 1's, because other requests' phases run in between: a miss may have become a hit, and a hit may have been evicted. An evicted hit needs its retained payload for decoding, so releasing a hit in phase 1 would turn that eviction race into a request failure.
 
-`MultiModalApplyState` is a context manager. Synchronous processing and the async renderer each own one context covering the decode wait and processing. On exit, `close()` drains submitted work before releasing the owned wrappers. Refs keep their payloads through HF processing, field construction, prompt-update construction and cache merging. Selected misses share those same wrappers and need no separate release pass. Phase 1 closes the state itself if it fails before returning ownership to its caller.
+`MultiModalApplyState` is a context manager. Synchronous processing and the async renderer each own one context covering the decode wait and processing. On exit, `close()` drains submitted work before releasing the owned wrappers through its private `_release_refs()` helper. Refs keep their payloads through HF processing, field construction, prompt-update construction and cache merging. Selected misses share those same wrappers and need no separate release pass. Phase 1 closes the state itself if it fails before returning ownership to its caller.
 
 If decoding fails before phase 2, the wait methods drain submitted decodes and the owning context releases the state's refs before propagating the failure. `wait_decodes_async()` shields the futures from cancellation. If its caller cancels, it waits for all submitted decodes, including through repeated cancellation, then propagates cancellation through the owning context, which releases the refs. This keeps payloads alive while worker threads may still be using them.
 

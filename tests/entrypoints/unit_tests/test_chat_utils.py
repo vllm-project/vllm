@@ -3076,7 +3076,8 @@ async def test_resolve_items_does_not_leak_tasks_on_partial_failure():
 
 
 @pytest.mark.asyncio
-async def test_resolve_items_decodes_lazy_vision_chunk_off_event_loop():
+@pytest.mark.parametrize("modality", ["image", "video"])
+async def test_resolve_items_decodes_lazy_vision_chunk_off_event_loop(modality):
     """Lazy vision_chunk items decode on the media thread pool, not the
     event-loop thread, when use_unified_vision_chunk_modality is active."""
     loop_thread_name = threading.current_thread().name
@@ -3084,7 +3085,7 @@ async def test_resolve_items_decodes_lazy_vision_chunk_off_event_loop():
 
     def _decode():
         decode_thread_names.append(threading.current_thread().name)
-        return "decoded-image"
+        return "decoded-image" if modality == "image" else ("decoded-frames", {})
 
     lazy_item = MediaRef(_decode, b"fake-image-bytes")
 
@@ -3097,9 +3098,13 @@ async def test_resolve_items_decodes_lazy_vision_chunk_off_event_loop():
             hf_config=MagicMock(use_unified_vision_chunk=True),
         )
     )
-    tracker.__dict__["mm_processor"] = MagicMock()
+    processor = MagicMock()
+    processor.split_video_chunks.return_value = [
+        {"video_chunk": "split-frames", "prompt": "video-prompt"}
+    ]
+    tracker.__dict__["mm_processor"] = processor
     tracker._items_by_modality["vision_chunk"] = [lambda: _fetch()]
-    tracker._modality_order["vision_chunk"] = ["image"]
+    tracker._modality_order["vision_chunk"] = [modality]
 
     mm_data, mm_uuids = await tracker.resolve_items()
 
@@ -3109,8 +3114,13 @@ async def test_resolve_items_decodes_lazy_vision_chunk_off_event_loop():
     assert mm_data is not None and mm_data["vision_chunk"] is not None
     chunk = mm_data["vision_chunk"][0]
     assert chunk is not None
-    assert chunk["type"] == "image"
-    assert chunk["image"] == "decoded-image"
+    if modality == "image":
+        assert chunk["type"] == "image"
+        assert chunk["image"] == "decoded-image"
+    else:
+        processor.split_video_chunks.assert_called_once_with("decoded-frames")
+        assert chunk["type"] == "video_chunk"
+        assert chunk["video_chunk"] == "split-frames"
     assert mm_uuids == {"vision_chunk": ["uuid-0"]}
 
 
@@ -3441,3 +3451,30 @@ async def test_use_audio_in_video_downloads_the_video_once_async(
         {"video": 1, "audio": 1} if use_audio_in_video else {"video": 1}
     )
     _assert_mm_data_inputs(mm_data, expected)
+
+
+@pytest.mark.parametrize("predecoded", [False, True])
+def test_resolve_items_passes_materialized_video_to_chunk_splitter(predecoded):
+    """The synchronous tracker passes decoded frames to the video splitter."""
+    ref: MediaRef[tuple[str, dict]] = MediaRef(lambda: ("decoded-frames", {}), b"video")
+    if predecoded:
+        ref.decode()
+    processor = MagicMock()
+    processor.split_video_chunks.return_value = [
+        {"video_chunk": "split-frames", "prompt": "video-prompt"}
+    ]
+    tracker = MultiModalItemTracker(
+        MagicMock(hf_config=MagicMock(use_unified_vision_chunk=True))
+    )
+    tracker.__dict__["mm_processor"] = processor
+    tracker._items_by_modality["vision_chunk"] = [(ref, "video-id")]
+    tracker._modality_order["vision_chunk"] = ["video"]
+
+    mm_data, _ = tracker.resolve_items()
+
+    processor.split_video_chunks.assert_called_once_with("decoded-frames")
+    assert mm_data is not None
+    chunks = mm_data["vision_chunk"]
+    assert isinstance(chunks, list)
+    assert chunks[0] is not None
+    assert chunks[0]["video_chunk"] == "split-frames"

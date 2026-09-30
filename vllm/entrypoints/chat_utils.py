@@ -24,6 +24,7 @@ from typing import (
     cast,
     get_args,
     get_origin,
+    overload,
 )
 
 from openai.types.chat import (
@@ -72,12 +73,12 @@ from vllm.multimodal.media import (
     MediaIO,
     MediaRef,
 )
-from vllm.multimodal.media.connector import global_thread_pool
 from vllm.multimodal.media.decode import (
     MediaDecodeJob,
     collect_media_decodes_async,
     submit_media_decodes,
 )
+from vllm.multimodal.media.executor import global_thread_pool
 from vllm.multimodal.processing import BaseMultiModalProcessor
 from vllm.renderers.embed_utils import (
     safe_load_prompt_embeds,
@@ -88,6 +89,7 @@ from vllm.utils.collection_utils import is_list_of, is_list_of_numbers
 from vllm.utils.import_utils import LazyLoader
 
 if TYPE_CHECKING:
+    import numpy as np
     import torch
     import transformers
 else:
@@ -682,6 +684,17 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
     def mm_processor(self):
         return self.mm_registry.create_processor(self.model_config)
 
+    @overload
+    def get_media_io(self, modality: Literal["image"]) -> MediaIO[Image.Image]: ...
+
+    @overload
+    def get_media_io(
+        self, modality: Literal["audio"]
+    ) -> MediaIO[tuple["np.ndarray", int | float]]: ...
+
+    @overload
+    def get_media_io(self, modality: str) -> MediaIO[Any]: ...
+
     def get_media_io(self, modality: str) -> MediaIO[Any]:
         """The decoder the model's processor wants for `modality`.
 
@@ -774,8 +787,8 @@ def _vision_chunk_decode_error(
     )
 
 
-def _decode_media_ref(data: object, modality: str, index: int) -> None:
-    """Trigger decoding of a media ref.
+def _decode_media_ref(data: object, modality: str, index: int) -> object:
+    """Return the materialized media, wrapping decode failures.
 
     Decode failures are wrapped as VLLMUnprocessableEntityError so corrupt
     media surfaces as a client error (422) instead of a server error.
@@ -785,10 +798,10 @@ def _decode_media_ref(data: object, modality: str, index: int) -> None:
     URL-fetched item is a `MediaRef`, so `{modality}_url` is where it came
     from.
     """
-    if not isinstance(data, MediaRef) or data.is_decoded:
-        return
+    if not isinstance(data, MediaRef):
+        return data
     try:
-        data.decode()
+        return data.decode()
     except Exception as error:
         raise _vision_chunk_decode_error(modality, index, error) from error
 
@@ -833,14 +846,14 @@ def _resolve_vision_chunk_items(
     ):
         # Decode media refs up front: decode failures must propagate instead
         # of being swallowed by the split_video_chunks fallback below.
-        _decode_media_ref(data, inner_modality, index)
+        is_media_ref = isinstance(data, MediaRef)
+        data = _decode_media_ref(data, inner_modality, index)
         if inner_modality == "image":
             # Pass the decoded PIL.Image on to avoid a redundant bytes->PIL
             # conversion in media_processor.
-            if isinstance(data, MediaRef):
-                image_data = data.decode()
+            if is_media_ref:
                 processed_chunks.append(
-                    VisionChunkImage(type="image", image=image_data, uuid=uuid)
+                    VisionChunkImage(type="image", image=data, uuid=uuid)
                 )
             else:
                 processed_chunks.append(data)  # type: ignore[arg-type]
@@ -882,8 +895,8 @@ async def _predecode_vision_chunk_items(
 ) -> None:
     """Decode vision_chunk media refs concurrently on the media thread pool.
 
-    Waits for every submitted decode to finish, then raises the first failure
-    (already wrapped as VLLMUnprocessableEntityError by `_decode_media_ref`).
+    Waits for every submitted decode to finish, then wraps the first failure
+    with `_vision_chunk_decode_error`.
     """
     lazy_items = [
         (index, inner_modality, data)

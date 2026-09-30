@@ -2213,7 +2213,7 @@ def test_lazy_submission_failure_releases_owned_refs(monkeypatch):
     """Partial submission drains jobs without masking the submission error."""
     from concurrent.futures import Future
 
-    from vllm.multimodal.media.connector import global_thread_pool
+    from vllm.multimodal.media.executor import global_thread_pool
 
     processor = _LazyTestProcessor()
     refs = [MediaRef(lambda: Image.new("RGB", (4, 4)), data) for data in (b"a", b"b")]

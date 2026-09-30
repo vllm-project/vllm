@@ -40,13 +40,13 @@ from ..inputs import (
     PlaceholderRange,
 )
 from ..media import MediaRef
-from ..media.connector import global_thread_pool
 from ..media.decode import (
     MediaDecodeJob,
     collect_media_decodes,
     collect_media_decodes_async,
     submit_media_decodes,
 )
+from ..media.executor import global_thread_pool
 from ..parse import MultiModalDataItems, MultiModalUUIDItems, ProcessorBatchItems
 from .context import BaseProcessingInfo, TimingContext
 from .dummy_inputs import BaseDummyInputsBuilder, MultiModalDummyOptions
@@ -1106,9 +1106,9 @@ class MultiModalApplyState:
                 with suppress(BaseException):
                     job.future.result()
         finally:
-            self.release()
+            self._release_refs()
 
-    def release(self) -> None:
+    def _release_refs(self) -> None:
         """Release owned refs once, after decoding and processing have finished.
 
         Selected cache misses share the state's wrappers. Borrowed input refs

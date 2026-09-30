@@ -37,7 +37,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from vllm.multimodal.hasher import MultiModalHasher
 from vllm.multimodal.media.audio import AudioMediaIO
 from vllm.multimodal.media.base import MediaRef
-from vllm.multimodal.media.connector import global_thread_pool
+from vllm.multimodal.media.executor import global_thread_pool
 from vllm.multimodal.media.image import ImageMediaIO
 
 HASHER_ALGORITHM = "blake3"  # MultiModalConfig.mm_hasher_algorithm default
@@ -449,12 +449,13 @@ def bench_memory(image_results: dict[tuple, dict[str, float]]) -> None:
             f"{dec / 1e6:>11.2f}M {dec / enc:>6.1f}x"
         )
     print(
-        "\nOn a cache hit a MediaRef keeps only the encoded bytes, and\n"
-        "release() drops those too; the eager path keeps decoded pixels for\n"
-        "the whole request.\n"
+        "\nCache hits avoid decoded pixels. Processing releases its forked\n"
+        "wrappers after phase 2; caller-owned refs retain encoded payloads\n"
+        "and image headers until their owners release or drop them.\n"
     )
 
-    # Measured: process RSS for 100 retained cache-hit items, eager vs ref.
+    # Compare retained decoded images with directly released refs and with
+    # the borrowed-parent ownership used by processing.
     n = 100
     image_io = ImageMediaIO()
     data = make_image_bytes(1024, 1024, "JPEG", seed=7)
@@ -483,12 +484,29 @@ def bench_memory(image_results: dict[tuple, dict[str, float]]) -> None:
     del ref_items
     gc.collect()
 
+    rss2 = get_rss_mb()
+    borrowed_items = []
+    owned_items = []
+    for _ in range(n):
+        parent = image_io.load_bytes_ref(data)
+        owned = parent.fork()
+        MultiModalHasher.hash_kwargs(HASHER_ALGORITHM, image=owned)
+        owned.release()
+        borrowed_items.append(parent)
+        owned_items.append(owned)
+    gc.collect()
+    rss_borrowed = get_rss_mb()
+    del borrowed_items, owned_items, parent, owned
+    gc.collect()
+
     print(
         f"RSS for {n} retained 1024x1024 JPEG cache-hit items "
         f"({len(data) / 1e3:.0f} KB encoded each):"
     )
     print(f"  eager (decoded image kept): +{rss_eager - rss0:8.1f} MB")
-    print(f"  ref   (bytes released)    : +{rss_ref - rss1:8.1f} MB")
+    print(f"  ref   (original released): +{rss_ref - rss1:8.1f} MB")
+    print(f"  fork  (parent retained)  : +{rss_borrowed - rss2:8.1f} MB")
+    print("  One encoded payload is shared; RSS includes allocator reuse.")
     print()
 
 

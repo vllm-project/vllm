@@ -2,14 +2,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import asyncio
-import atexit
 import contextlib
 import hashlib
 import os
 import tempfile
 import time
 from collections.abc import Sequence
-from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, TypeVar
 from urllib.request import url2pathname
@@ -34,6 +32,7 @@ from vllm.utils.registry import ExtensionManager
 
 from .audio import AudioEmbeddingMediaIO, AudioMediaIO
 from .base import MediaIO, MediaRef
+from .executor import global_thread_pool
 from .image import ImageEmbeddingMediaIO, ImageMediaIO
 from .video import VideoEmbeddingMediaIO, VideoMediaIO
 
@@ -42,11 +41,6 @@ logger = init_logger(__name__)
 _M = TypeVar("_M")
 _V = TypeVar("_V")
 _A = TypeVar("_A")
-
-global_thread_pool = ThreadPoolExecutor(
-    max_workers=envs.VLLM_MEDIA_LOADING_THREAD_COUNT
-)
-atexit.register(global_thread_pool.shutdown)
 
 MEDIA_CONNECTOR_REGISTRY = ExtensionManager()
 

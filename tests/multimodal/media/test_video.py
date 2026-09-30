@@ -776,6 +776,7 @@ def test_lazy_video_without_metadata_raises_at_decode():
 
     item, metadata = parser._get_video_with_metadata(lazy)
     assert metadata is None
+    assert isinstance(item, MediaRef)
     assert not item.is_decoded
 
     with pytest.raises(ValueError, match="Video metadata is required"):

@@ -166,7 +166,7 @@ class ProcessorBatchItems(ModalityDataItems[Sequence[_T | MediaRef[_T]], _T]):
         item = self.data[index]
         return item.decode() if isinstance(item, MediaRef) else item
 
-    def get_raw(self, index: int) -> object:
+    def get_raw(self, index: int) -> _T | MediaRef[_T]:
         return self.data[index]
 
     def get_processor_data(self) -> Mapping[str, object]:
