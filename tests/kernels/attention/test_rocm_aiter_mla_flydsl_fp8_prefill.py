@@ -32,6 +32,8 @@ from vllm.v1.attention.backends.mla.prefill.selector import (  # noqa: E402
     MLAPrefillSelectorConfig,
 )
 from vllm.v1.attention.ops.triton_per_tensor_fp8_quant import (  # noqa: E402
+    _BLOCK,
+    _PARTS,
     fused_per_tensor_fp8_quant,
 )
 
@@ -70,6 +72,26 @@ def test_fused_per_tensor_fp8_quant_matches_reference(num_tokens: int) -> None:
         # x * (1 / descale) may round one e4m3 step away from x / descale.
         ulp_diff = x_fp8.view(torch.int8).int() - ref_fp8.view(torch.int8).int()
         assert ulp_diff.numel() == 0 or ulp_diff.abs().max() <= 1
+
+
+_STRIPE = _PARTS * _BLOCK
+
+
+@pytest.mark.parametrize(
+    "numel",
+    [1, _BLOCK, _BLOCK + 1, _STRIPE - 1, _STRIPE, _STRIPE + 1, 3 * _STRIPE + 7],
+)
+def test_fused_per_tensor_fp8_quant_covers_every_element(numel: int) -> None:
+    """One grid serves inputs of different sizes; no element may be dropped."""
+    x = torch.full((numel, 1, 1), 0.5, device="cuda", dtype=torch.bfloat16)
+    expected = 100.0 / torch.finfo(FP8_DTYPE).max
+    for pos in sorted({0, _BLOCK - 1, _BLOCK, _STRIPE - 1, _STRIPE, numel - 1}):
+        if pos >= numel:
+            continue
+        probe = x.clone()
+        probe[pos] = 100.0
+        _, (descale,) = fused_per_tensor_fp8_quant(probe)
+        assert descale.item() == pytest.approx(expected), f"missed element {pos}"
 
 
 def test_fused_per_tensor_fp8_quant_zero_input() -> None:
