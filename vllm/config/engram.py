@@ -116,10 +116,15 @@ class EngramConfig:
                 f"{sorted(_CHECKPOINT_MAPPED_ARCHITECTURES)} only, not "
                 f"{model_config.architecture}."
             )
-        if self.checkpoint_mapped and not current_platform.is_cuda():
-            # The ROCm Qwen4Exp path has no mapped backend and would silently
-            # store the full pinned table instead.
-            raise ValueError("Engram checkpoint_mapped is implemented for CUDA only.")
+        if self.checkpoint_mapped:
+            from vllm.platforms import current_platform
+
+            if not current_platform.is_cuda():
+                # The ROCm Qwen4Exp path has no mapped backend and would
+                # silently store the full pinned table instead.
+                raise ValueError(
+                    "Engram checkpoint_mapped is implemented for CUDA only."
+                )
 
     def resolve_dp_shared_memory(self, parallel_config: "ParallelConfig") -> None:
         """Share host tables by default wherever the configuration permits."""
