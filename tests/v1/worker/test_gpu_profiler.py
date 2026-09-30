@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import os
 from contextlib import nullcontext
+from threading import Event
 from types import SimpleNamespace
 from unittest.mock import MagicMock, Mock, call, patch
 from uuid import UUID
@@ -18,6 +19,7 @@ from vllm.config import (
 )
 from vllm.config.profiler import _is_uri_path
 from vllm.platforms import current_platform
+from vllm.profiler.proton import ProtonPhaseManager
 from vllm.profiler.wrapper import (
     ProtonProfilerWrapper,
     TorchProfilerWrapper,
@@ -569,6 +571,7 @@ def test_profiler_entered_during_capture():
 def make_proton(session_id: int | None = 7):
     data = SimpleNamespace(
         advance_phase=Mock(side_effect=range(1, 100)),
+        is_phase_complete=Mock(return_value=True),
         clear=Mock(),
         get=Mock(return_value={"traceEvents": []}),
         get_msgpack=Mock(return_value=b"profile"),
@@ -691,6 +694,7 @@ class TestProtonConfig:
             ("proton_hook", "triton"),
             ("proton_output_format", "chrome_trace"),
             ("proton_graph_attribution", True),
+            ("proton_flush_interval", 2),
         ],
     )
     def test_rejects_proton_options_for_other_profilers(self, field, value):
@@ -761,15 +765,39 @@ class TestProtonConfig:
             "PERIODIC_FLUSHING:format=hatchet",
         ],
     )
-    def test_graph_attribution_rejects_periodic_flushing(self, tmp_path, mode):
-        # Reject before Proton's native phase manager can abort the worker.
-        with pytest.raises(ValueError, match="incompatible with periodic_flushing"):
-            ProfilerConfig(
+    def test_graph_attribution_supports_periodic_flushing(self, tmp_path, mode):
+        config = VllmConfig(
+            profiler_config=ProfilerConfig(
                 profiler="proton",
                 proton_profiler_dir=str(tmp_path),
                 proton_graph_attribution=True,
                 proton_mode=mode,
-            )
+            ),
+        )
+        assert config.profiler_config.proton_mode == mode
+
+    @pytest.mark.parametrize(
+        "options",
+        [
+            {"proton_data": "trace"},
+            {"proton_mode": "periodic_flushing:format=chrome_trace"},
+            {"proton_mode": "periodic_flushing:interval=1"},
+            {
+                "proton_mode": "periodic_flushing:format=hatchet",
+                "proton_output_format": "hatchet_msgpack",
+            },
+            {"proton_flush_interval": 0},
+            {"proton_mode": None, "proton_flush_interval": 2},
+        ],
+    )
+    def test_periodic_flushing_rejects_invalid_options(self, tmp_path, options):
+        config = dict(
+            profiler="proton",
+            proton_profiler_dir=str(tmp_path),
+            proton_mode="periodic_flushing",
+        )
+        with pytest.raises(ValueError):
+            ProfilerConfig(**(config | options))
 
     @pytest.mark.parametrize("attribution", [False, True])
     @pytest.mark.parametrize(
@@ -952,11 +980,228 @@ class TestProtonProfilerWrapper:
         assert output_names[0].name.endswith("_run0.hatchet")
         assert output_names[1].name.endswith("_run1.hatchet")
 
+    @pytest.mark.parametrize("capture", [False, True])
+    def test_periodic_profiles_are_written_before_stop_and_isolate_runs(
+        self, tmp_path, capture
+    ):
+        wrapper, proton = make_proton_wrapper(
+            tmp_path,
+            proton_mode="PERIODIC_FLUSHING:format=hatchet",
+            proton_graph_attribution=capture,
+            proton_flush_interval=2,
+        )
+        if capture:
+            with wrapper.capture_cuda_graphs():
+                pass
+        for run in range(2):
+            wrapper.start()
+            wrapper.start()
+            assert wrapper.has_cuda_graph_session == capture
+            wrapper.step()
+            wrapper.step()
+            assert not list(tmp_path.glob(f"*_run{run}.part_*.hatchet"))
+            wrapper.step()
+            wrapper._phase_manager.poll(wait=True)
+            assert len(list(tmp_path.glob(f"*_run{run}.part_0.hatchet"))) == 1
+            assert wrapper.is_running
+            wrapper.stop()
+            wrapper.stop()
+            assert len(list(tmp_path.glob(f"*_run{run}.part_*.hatchet"))) == 2
+        assert all(c.kwargs["mode"] is None for c in proton.start.call_args_list)
+        assert proton.start.call_count == (1 if capture else 2)
+        assert proton.finalize.call_count == (0 if capture else 2)
+        wrapper.shutdown()
+        assert proton.finalize.call_count == (1 if capture else 2)
+
+    def test_periodic_export_failure_keeps_collecting_without_partial_files(
+        self, tmp_path
+    ):
+        wrapper, proton = make_proton_wrapper(
+            tmp_path,
+            proton_mode="periodic_flushing",
+            proton_flush_interval=1,
+        )
+        wrapper.start()
+        wrapper.step()
+        proton.data.get.side_effect = [OSError("disk full"), [], [], []]
+        proton.data.is_phase_complete.return_value = False
+        wrapper.step()
+        assert wrapper.is_running
+        proton.data.is_phase_complete.return_value = True
+        with pytest.raises(OSError, match="disk full"):
+            wrapper._phase_manager.poll(wait=True)
+        proton.deactivate.assert_not_called()
+        proton.data.clear.assert_not_called()
+        assert not list(tmp_path.glob("*.hatchet"))
+        assert not list(tmp_path.glob("*.tmp"))
+        wrapper.step()
+        wrapper.stop()
+        assert len(list(tmp_path.glob("*_run0.part_0.hatchet"))) == 1
+        assert len(list(tmp_path.glob("*_run0.part_1.hatchet"))) == 1
+        assert len(list(tmp_path.glob("*_run0.part_2.hatchet"))) == 1
+
+    def test_periodic_flushing_respects_delay_and_iteration_limit(self, tmp_path):
+        wrapper, proton = make_proton_wrapper(
+            tmp_path,
+            proton_mode="periodic_flushing",
+            proton_flush_interval=1,
+            delay_iterations=2,
+            max_iterations=2,
+        )
+        wrapper.start()
+        wrapper.step()
+        proton.start.assert_not_called()
+        wrapper.step()
+        assert not list(tmp_path.glob("*.hatchet"))
+        wrapper.step()
+        wrapper._phase_manager.poll(wait=True)
+        assert len(list(tmp_path.glob("*.hatchet"))) == 1
+        wrapper.step()
+        assert not wrapper.is_running
+        assert len(list(tmp_path.glob("*.hatchet"))) == 2
+
+    def test_periodic_waits_for_complete_phase_and_exports_in_background(
+        self, tmp_path
+    ):
+        """Incomplete GPU data and slow disk writes must not block worker steps."""
+        wrapper, proton = make_proton_wrapper(
+            tmp_path, proton_mode="periodic_flushing", proton_flush_interval=2
+        )
+        entered, release = Event(), Event()
+
+        def slow_read(*args):
+            entered.set()
+            assert release.wait(timeout=10)
+            return []
+
+        proton.data.is_phase_complete.return_value = False
+        proton.data.get.side_effect = slow_read
+        try:
+            wrapper.start()
+            for _ in range(3):
+                wrapper.step()
+            proton.data.get.assert_not_called()
+            proton.data.clear.assert_not_called()
+            proton.data.is_phase_complete.return_value = True
+            wrapper.step()
+            assert entered.wait(timeout=10)
+            # The exporter is still blocked, but another step can proceed.
+            wrapper.step()
+            assert wrapper.is_running
+            proton.deactivate.assert_not_called()
+            proton.data.clear.assert_not_called()
+        finally:
+            release.set()
+            wrapper.stop()
+            wrapper.shutdown()
+        assert len(list(tmp_path.glob("*_run0.part_*.hatchet"))) == 3
+
+    @pytest.mark.parametrize("capture", [False, True])
+    @pytest.mark.parametrize("recover_at_shutdown", [False, True])
+    @pytest.mark.parametrize("failure", ["flush", "advance", "write"])
+    def test_failed_periodic_stop_retains_phases_until_recovery(
+        self, tmp_path, monkeypatch, capture, recover_at_shutdown, failure
+    ):
+        """Worker stop must retain failed sessions for the next run or shutdown."""
+        wrapper, proton = make_proton_wrapper(
+            tmp_path,
+            proton_mode="periodic_flushing",
+            proton_graph_attribution=capture,
+            proton_flush_interval=1,
+        )
+        if capture:
+            with wrapper.capture_cuda_graphs():
+                pass
+        worker = SimpleNamespace(
+            rank=0,
+            profiler=wrapper,
+            profiler_config=SimpleNamespace(profiler="proton"),
+            elastic_ep_executor=Mock(),
+        )
+        monkeypatch.setattr(
+            "vllm.distributed.utils.get_worker_rank_suffix", lambda **kwargs: "rank0"
+        )
+        monkeypatch.setattr("vllm.v1.worker.gpu_worker.gc.unfreeze", lambda: None)
+        monkeypatch.setattr(
+            "vllm.v1.worker.gpu_worker.ensure_kv_transfer_shutdown", None
+        )
+        monkeypatch.setattr(
+            "vllm.v1.worker.gpu_worker.ensure_ec_transfer_shutdown", None
+        )
+        monkeypatch.setattr(current_platform, "is_cuda_alike", lambda: False)
+        proton.data.clear.reset_mock()
+        proton.data.is_phase_complete.return_value = False
+        Worker.profile(worker, profile_prefix="first")
+        parts = 1 if failure == "write" else 2
+        for _ in range(parts):
+            worker.profiler.step()
+        failing_call = {
+            "flush": proton.deactivate,
+            "advance": proton.data.advance_phase,
+            "write": proton.data.get,
+        }[failure]
+        original_effect = failing_call.side_effect
+        failing_call.side_effect = RuntimeError(f"{failure} failed")
+        Worker.profile(worker, is_start=False)
+        assert worker.profiler is wrapper
+        if failure != "write":
+            proton.data.get.assert_not_called()
+        proton.data.clear.assert_not_called()
+        proton.finalize.assert_not_called()
+        failing_call.side_effect = original_effect
+        if not recover_at_shutdown:
+            Worker.profile(worker, profile_prefix="second")
+            worker.profiler.step()
+            Worker.profile(worker, is_start=False)
+            assert (worker.profiler is wrapper) == capture
+        Worker.shutdown(worker)
+        first_phase = 1 if capture else 0
+        expected = range(first_phase, first_phase + parts + (not recover_at_shutdown))
+        assert proton.data.clear.call_args_list == [
+            call(7, phase) for phase in expected
+        ]
+        assert len(list(tmp_path.glob("proton_first_*_run0.part_*.hatchet"))) == parts
+        assert len(list(tmp_path.glob("proton_second_*_run1.part_*.hatchet"))) == (
+            0 if recover_at_shutdown else 1
+        )
+        proton.start.assert_called_once()
+        proton.finalize.assert_called_once()
+
+    def test_completed_phase_is_retained_when_clear_fails(self, tmp_path):
+        proton = make_proton()
+        manager = ProtonPhaseManager(proton, 7, None, asynchronous=True)
+        proton.data.clear.side_effect = [RuntimeError("clear failed"), None]
+        try:
+            manager.rotate(str(tmp_path / "part0"))
+            with pytest.raises(RuntimeError, match="clear failed"):
+                manager.poll(wait=True)
+            manager.poll(wait=True)
+            assert proton.data.clear.call_args_list == [call(7, 0), call(7, 0)]
+            proton.data.get.assert_called_once_with(7, 0)
+        finally:
+            manager.close()
+
     def test_capture_is_noop_without_opt_in(self, tmp_path):
         wrapper, proton = make_proton_wrapper(tmp_path)
         with wrapper.capture_cuda_graphs():
             pass
         proton.start.assert_not_called()
+
+    def test_repeated_capture_discards_only_capture_activity(self, tmp_path):
+        wrapper, proton = make_proton_wrapper(tmp_path, proton_graph_attribution=True)
+
+        for _ in range(2):
+            with wrapper.capture_cuda_graphs():
+                pass
+            wrapper.start()
+            wrapper.stop()
+
+        proton.start.assert_called_once()
+        assert proton.data.get.call_args_list == [call(7, 1), call(7, 3)]
+        assert proton.data.clear.call_args_list == [
+            call(7, phase) for phase in range(4)
+        ]
+        assert len(list(tmp_path.glob("proton_rank_3_*.hatchet"))) == 2
 
     @pytest.mark.parametrize("delay", [0, 2])
     def test_duplicate_start_preserves_output_prefix(self, tmp_path, delay):
@@ -981,17 +1226,19 @@ class TestProtonProfilerWrapper:
         wrapper.stop()
         assert len(list(tmp_path.glob("proton_second_*.hatchet"))) == 1
 
-    def test_failed_export_clears_activity_and_allows_next_interval(self, tmp_path):
+    def test_failed_export_retries_activity_in_next_interval(self, tmp_path):
         wrapper, proton = make_proton_wrapper(tmp_path, proton_graph_attribution=True)
         with wrapper.capture_cuda_graphs():
             pass
-        proton.data.get.side_effect = [OSError("disk full"), []]
+        proton.data.get.side_effect = [OSError("disk full"), [], []]
+        proton.data.clear.reset_mock()
         wrapper.start()
         wrapper.stop()
-        proton.data.clear.assert_called_with(7, 1)
+        proton.data.clear.assert_not_called()
         wrapper.start()
         wrapper.stop()
         proton.data.clear.assert_called_with(7, 2)
+        assert len(list(tmp_path.glob("*_run0.hatchet"))) == 1
         assert len(list(tmp_path.glob("*_run1.hatchet"))) == 1
 
     def test_cuda_graph_context_deactivates_after_capture_error(self, tmp_path):
@@ -1031,6 +1278,30 @@ class TestProtonProfilerWrapper:
 
         proton.deactivate.assert_called_with(session=7, flushing=True)
         proton.data.clear.assert_not_called()
+
+    @pytest.mark.parametrize("capture", [True, False])
+    def test_failed_flush_preserves_incomplete_activity(self, tmp_path, capture):
+        """Neither capture discard nor interval export may clear unflushed data."""
+        wrapper, proton = make_proton_wrapper(tmp_path, proton_graph_attribution=True)
+        if not capture:
+            with wrapper.capture_cuda_graphs():
+                pass
+            proton.data.clear.reset_mock()
+            wrapper.start()
+        proton.deactivate.side_effect = RuntimeError("flush failed")
+
+        if capture:
+            with (
+                pytest.raises(RuntimeError, match="flush failed"),
+                wrapper.capture_cuda_graphs(),
+            ):
+                pass
+        else:
+            wrapper.stop()
+
+        proton.data.get.assert_not_called()
+        proton.data.clear.assert_not_called()
+        assert not list(tmp_path.glob("*.hatchet"))
 
     def test_shutdown_finalizes_cuda_graph_capture_session(self, tmp_path):
         wrapper, proton = make_proton_wrapper(tmp_path, proton_graph_attribution=True)
@@ -1099,7 +1370,7 @@ def test_gpu_worker_recreates_proton_profiler_for_each_run():
         ),
         patch("vllm.profiler.wrapper.ProtonProfilerWrapper") as wrapper,
     ):
-        wrapper.return_value.has_cuda_graph_session = False
+        wrapper.return_value.has_retained_session = False
         Worker.profile(worker, profile_prefix="first")
         Worker.profile(worker, is_start=False)
         Worker.profile(worker, profile_prefix="second")
@@ -1117,6 +1388,7 @@ def test_gpu_worker_reuses_cuda_graph_proton_session():
     worker.rank = 1
     worker.profiler = MagicMock(spec=ProtonProfilerWrapper)
     worker.profiler.has_cuda_graph_session = True
+    worker.profiler.has_retained_session = True
     worker.profiler_config.profiler = "proton"
 
     with patch(
@@ -1188,7 +1460,11 @@ def test_proton_initializes_before_cuda_graph_capture():
 @_requires_no_injected_cupti_tool
 @pytest.mark.parametrize("context", ["shadow", "python"])
 @pytest.mark.parametrize("output_format", ["hatchet", "hatchet_msgpack"])
-def test_proton_cuda_graph_replay_attribution_on_gpu(tmp_path, context, output_format):
+@pytest.mark.parametrize("periodic", [False, True])
+@pytest.mark.parametrize("capture", [False, True])
+def test_proton_cuda_graph_replay_attribution_on_gpu(
+    tmp_path, context, output_format, periodic, capture
+):
     """Both intervals contain replay kernels, without capture-only activity."""
     import json
 
@@ -1204,9 +1480,11 @@ def test_proton_cuda_graph_replay_attribution_on_gpu(tmp_path, context, output_f
         ProfilerConfig(
             profiler="proton",
             proton_profiler_dir=str(tmp_path),
-            proton_graph_attribution=True,
+            proton_graph_attribution=capture,
             proton_context=context,
             proton_output_format=output_format,
+            proton_mode="periodic_flushing" if periodic else None,
+            proton_flush_interval=2 if periodic else 100,
         ),
         worker_name="gpu",
     )
@@ -1234,33 +1512,43 @@ def test_proton_cuda_graph_replay_attribution_on_gpu(tmp_path, context, output_f
         return []
 
     try:
-        with Worker._get_cudagraph_capture_context(worker):
-            with proton.scope("capture_only"):
-                capture_only()
-            torch.accelerator.synchronize()
-            with torch.cuda.graph(graph), proton.scope("captured_add"):
-                captured_add()
+        if capture:
+            with Worker._get_cudagraph_capture_context(worker):
+                with proton.scope("capture_only"):
+                    capture_only()
+                torch.accelerator.synchronize()
+                with torch.cuda.graph(graph), proton.scope("captured_add"):
+                    captured_add()
         for run in range(2):
             wrapper.start()
-            with wrapper.annotate_context_manager(f"replay_{run}"):
-                graph.replay()
+            for _ in range(3):
+                wrapper.step()
+                with wrapper.annotate_context_manager(f"replay_{run}"):
+                    if capture:
+                        graph.replay()
+                    else:
+                        captured_add()
             wrapper.stop()
-            (path,) = tmp_path.glob(f"*_run{run}.{output_format}")
-            if output_format == "hatchet_msgpack":
-                import msgpack
+            paths = sorted(tmp_path.glob(f"*_run{run}*.{output_format}"))
+            counts = [2, 1] if periodic else [3]
+            assert len(paths) == len(counts)
+            for path, count in zip(paths, counts):
+                if output_format == "hatchet_msgpack":
+                    import msgpack
 
-                data = msgpack.unpackb(path.read_bytes())
-            else:
-                data = json.loads(path.read_text())
-            serialized = json.dumps(data)
-            assert "<captured_at>" in serialized
-            assert "captured_add" in serialized
-            assert "capture_only" not in serialized
-            assert f"replay_{1 - run}" not in serialized
-            metrics = kernel_metrics(data)
-            assert sum(metric["count"] for metric in metrics) == 1
-            assert sum(metric["time (ns)"] for metric in metrics) > 0
-        torch.testing.assert_close(x, torch.full_like(x, 4))
+                    data = msgpack.unpackb(path.read_bytes())
+                else:
+                    data = json.loads(path.read_text())
+                serialized = json.dumps(data)
+                if capture:
+                    assert "<captured_at>" in serialized
+                    assert "captured_add" in serialized
+                assert "capture_only" not in serialized
+                assert f"replay_{1 - run}" not in serialized
+                metrics = kernel_metrics(data)
+                assert sum(metric["count"] for metric in metrics) == count
+                assert sum(metric["time (ns)"] for metric in metrics) > 0
+        torch.testing.assert_close(x, torch.full_like(x, 8 if capture else 7))
     finally:
         wrapper.shutdown()
     assert not list(tmp_path.glob(".proton_cuda_graph_session*"))

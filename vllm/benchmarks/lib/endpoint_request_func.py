@@ -128,6 +128,27 @@ def _validate_api_url(
         raise ValueError(f"{api_name} URL must end with one of: {expected_suffixes}.")
 
 
+async def async_request_profile(
+    api_url: str,
+    session: aiohttp.ClientSession,
+    extra_headers: dict[str, str] | None = None,
+) -> RequestFuncOutput:
+    """Send a profiler control request, whose successful response has no body."""
+    headers = _get_headers()
+    if extra_headers:
+        headers.update(extra_headers)
+    output = RequestFuncOutput()
+    try:
+        async with session.post(url=api_url, headers=headers) as response:
+            output.success = response.status == 200
+            if not output.success:
+                output.error = f"HTTP {response.status}: {await response.text()}"
+    except Exception as exc:
+        output.success = False
+        output.error = str(exc)
+    return output
+
+
 def _update_payload_common(
     payload: dict[str, Any],
     request_func_input: RequestFuncInput,
