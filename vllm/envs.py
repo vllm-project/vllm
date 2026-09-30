@@ -222,6 +222,8 @@ if TYPE_CHECKING:
     VLLM_ENABLE_GEMM_RS: bool = False
     VLLM_BLOCKSCALE_FP8_GEMM_FLASHINFER: bool = True
     VLLM_USE_FLASHINFER_MOE_INT4: bool = False
+    VLLM_TRITON_AUTOTUNE_CACHE_DIR: str | None = None
+    VLLM_TRITON_AUTOTUNE_FORCE: bool = False
     VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR: str | None = None
     VLLM_FLASHINFER_AUTOTUNE_SKIP_OPS: list[str] | None = None
     VLLM_FLASHINFER_ALLREDUCE_BACKEND: Literal["auto", "trtllm", "mnnvl"] = "auto"
@@ -1778,6 +1780,15 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "MOONCAKE_REQUESTER_LOCAL_HOSTNAME": lambda: os.getenv(
         "MOONCAKE_REQUESTER_LOCAL_HOSTNAME"
     ),
+    # Root directory for Triton launch configs tuned during kernel warmup.
+    # Defaults to $VLLM_CACHE_ROOT/triton_autotune.
+    "VLLM_TRITON_AUTOTUNE_CACHE_DIR": lambda: os.getenv(
+        "VLLM_TRITON_AUTOTUNE_CACHE_DIR", None
+    ),
+    # If set, retune even when a tuned, user, or bundled config already exists.
+    "VLLM_TRITON_AUTOTUNE_FORCE": lambda: bool(
+        int(os.getenv("VLLM_TRITON_AUTOTUNE_FORCE", "0"))
+    ),
     # Override the directory for the FlashInfer autotune config cache.
     "VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR": lambda: os.getenv(
         "VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR", None
@@ -2367,6 +2378,8 @@ def compile_factors() -> dict[str, object]:
         "VLLM_TUNED_CONFIG_FOLDER",
         "VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR",
         "VLLM_FLASHINFER_AUTOTUNE_SKIP_OPS",
+        "VLLM_TRITON_AUTOTUNE_CACHE_DIR",
+        "VLLM_TRITON_AUTOTUNE_FORCE",
         "VLLM_ENGINE_ITERATION_TIMEOUT_S",
         "VLLM_HTTP_TIMEOUT_KEEP_ALIVE",
         "VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS",
