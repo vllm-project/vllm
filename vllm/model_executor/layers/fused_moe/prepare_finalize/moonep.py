@@ -212,7 +212,7 @@ class MoonEPExpertWeightPools:
     False) and prefetch runs on the main stream right before the compute
     that consumes it. Enabling MoonEP's async prefetch / DBO requires
     per-inflight-layer (double-buffered) pools or explicit cross-layer
-    events; see :meth:`assert_synchronous_use`.
+    events; see :meth:`check_synchronous_use`.
 
     Relies on MoonEP's VMM primitives (``moonep._C.nvl_dist_alloc`` /
     ``nvl_dist_map``) and two private helpers in ``moonep.buffer``
@@ -226,12 +226,15 @@ class MoonEPExpertWeightPools:
     """
 
     @staticmethod
-    def assert_synchronous_use(prepare_finalize: mk.FusedMoEPrepareAndFinalize):
-        assert not prepare_finalize.supports_async(), (
-            "MoonEPExpertWeightPools shares one prefetch pool across layers and "
-            "requires synchronous prefetch; async prefetch / DBO needs "
-            "per-inflight-layer pools"
-        )
+    def check_synchronous_use(prepare_finalize: mk.FusedMoEPrepareAndFinalize):
+        # A hard check rather than assert: violating this corrupts expert
+        # weights silently, and assert is stripped under python -O.
+        if prepare_finalize.supports_async():
+            raise RuntimeError(
+                "MoonEPExpertWeightPools shares one prefetch pool across layers; "
+                "async prefetch requires per-inflight-layer pools or explicit "
+                "cross-layer events"
+            )
 
     def __init__(self, group: dist.ProcessGroup | None):
         self.group = group
@@ -553,7 +556,7 @@ class MoonEPPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         # main stream before the expert GEMMs and before the next layer's
         # prefetch. Do not switch to async_finish=True without giving each
         # in-flight layer its own slots.
-        MoonEPExpertWeightPools.assert_synchronous_use(self)
+        MoonEPExpertWeightPools.check_synchronous_use(self)
         self._buffer.prefetch_weight(
             plan=plan, **self._resolve_expert_weights().prefetch_kwargs()
         )
