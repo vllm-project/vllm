@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import torch
 
@@ -41,6 +41,9 @@ class KVConnector:
         return EMPTY_MODEL_RUNNER_OUTPUT
 
     def set_disabled(self, disabled: bool) -> None:
+        pass
+
+    def bind_model_runner(self, runner: Any) -> None:
         pass
 
 
@@ -115,6 +118,12 @@ class ActiveKVConnector(KVConnector):
         finished_req_ids = scheduler_output.finished_req_ids
         kv_connector_output = self.post_forward(finished_req_ids, wait_for_save=False)
         return ModelRunnerOutput.with_kv_conn_output_only(kv_connector_output)
+
+    def bind_model_runner(self, runner: Any) -> None:
+        # For connectors that run the model themselves (PrefillLaneConnector).
+        bind = getattr(self.kv_connector, "bind_model_runner", None)
+        if bind is not None:
+            bind(runner)
 
     def set_disabled(self, disabled: bool) -> None:
         # Ensure that layer-wise connector hooks aren't called when disabled.

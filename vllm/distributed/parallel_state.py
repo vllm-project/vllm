@@ -26,6 +26,7 @@ If you only need to use the distributed environment without model/pipeline
 import contextlib
 import gc
 import pickle
+import threading
 import weakref
 from collections import deque, namedtuple
 from collections.abc import Callable
@@ -190,12 +191,25 @@ def resume_device_comms() -> None:
     _apply_to_device_comms(lambda comm: comm.resume())
 
 
-def all_reduce(tensor: torch.Tensor, group_name: str) -> torch.Tensor:
+# A thread that runs a forward concurrently with the main one talks to the other
+# ranks over its own TP communicator (see use_tp_lane). Collectives baked into
+# compiled graphs name the TP group, so the lookup by name is redirected too.
+_tp_lane = threading.local()
+
+
+def _lookup_group(group_name: str) -> "GroupCoordinator":
+    lane = _tp_lane.__dict__.get("groups")
+    if lane is not None and group_name in lane:
+        return lane[group_name]
     assert group_name in _groups, f"Group {group_name} is not found."
     group = _groups[group_name]()
     if group is None:
         raise ValueError(f"Group {group_name} is destroyed.")
-    return group._all_reduce_out_place(tensor)
+    return group
+
+
+def all_reduce(tensor: torch.Tensor, group_name: str) -> torch.Tensor:
+    return _lookup_group(group_name)._all_reduce_out_place(tensor)
 
 
 def all_reduce_fake(tensor: torch.Tensor, group_name: str) -> torch.Tensor:
@@ -205,11 +219,7 @@ def all_reduce_fake(tensor: torch.Tensor, group_name: str) -> torch.Tensor:
 def reduce_scatter(
     tensor: torch.Tensor, dim: int, world_size: int, group_name: str
 ) -> torch.Tensor:
-    assert group_name in _groups, f"Group {group_name} is not found."
-    group = _groups[group_name]()
-    if group is None:
-        raise ValueError(f"Group {group_name} is destroyed.")
-    return group._reduce_scatter_out_place(tensor, dim)
+    return _lookup_group(group_name)._reduce_scatter_out_place(tensor, dim)
 
 
 def reduce_scatter_fake(
@@ -223,11 +233,7 @@ def reduce_scatter_fake(
 def all_gather(
     tensor: torch.Tensor, dim: int, world_size: int, group_name: str
 ) -> torch.Tensor:
-    assert group_name in _groups, f"Group {group_name} is not found."
-    group = _groups[group_name]()
-    if group is None:
-        raise ValueError(f"Group {group_name} is destroyed.")
-    return group._all_gather_out_place(tensor, dim)
+    return _lookup_group(group_name)._all_gather_out_place(tensor, dim)
 
 
 def all_gather_fake(
@@ -1545,8 +1551,50 @@ _TP: GroupCoordinator | None = None
 
 
 def get_tp_group() -> GroupCoordinator:
+    lane = _tp_lane.__dict__.get("tp")
+    if lane is not None:
+        return lane
     assert _TP is not None, "tensor model parallel group is not initialized"
     return _TP
+
+
+_TP_LANE: GroupCoordinator | None = None
+
+
+def init_tp_lane_group() -> GroupCoordinator:
+    """Create a second TP communicator for a concurrent forward thread.
+
+    Collective over the world group. Its name keeps the custom all-reduce
+    backends off, so it only talks NCCL and shares no buffers with the TP group.
+    """
+    global _TP_LANE
+    if _TP_LANE is None:
+        tp = get_tp_group()
+        world_size = torch.distributed.get_world_size()
+        group_ranks = [
+            list(range(start, start + tp.world_size))
+            for start in range(0, world_size, tp.world_size)
+        ]
+        assert tp.ranks in group_ranks, "TP must be the innermost dimension"
+        _TP_LANE = init_model_parallel_group(
+            group_ranks,
+            get_world_group().local_rank,
+            torch.distributed.get_backend(tp.device_group),
+            group_name="tp_lane",
+        )
+    return _TP_LANE
+
+
+@contextmanager
+def use_tp_lane():
+    """Route this thread's TP collectives through the lane communicator."""
+    assert _TP is not None and _TP_LANE is not None
+    _tp_lane.tp = _TP_LANE
+    _tp_lane.groups = {_TP.unique_name: _TP_LANE}
+    try:
+        yield
+    finally:
+        del _tp_lane.tp, _tp_lane.groups
 
 
 _ETP: GroupCoordinator | None = None
@@ -2286,6 +2334,11 @@ def destroy_model_parallel():
     if _TP:
         _TP.destroy()
     _TP = None
+
+    global _TP_LANE
+    if _TP_LANE:
+        _TP_LANE.destroy()
+    _TP_LANE = None
 
     global _DCP
     if _DCP:

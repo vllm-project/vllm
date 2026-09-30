@@ -31,6 +31,7 @@ from vllm.distributed import (
     tensor_model_parallel_all_gather,
     tensor_model_parallel_all_reduce,
 )
+from vllm.forward_context import has_thread_local_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.utils import dispatch_unquantized_gemm
 
@@ -94,13 +95,21 @@ def _install(model: nn.Module, path: str, vocab_size: int, max_rows: int) -> Non
     # 1.5x faster than the rocBLAS kernel F.linear picks.
     gemm = dispatch_unquantized_gemm()
 
+    # A prefill lane drafts concurrently with the main runner: own buffer.
+    lane_buf: list[torch.Tensor] = []
+
     def compute_logits(hidden_states: torch.Tensor) -> torch.Tensor:
         num = hidden_states.shape[0]
         if num > max_rows:
             return original(hidden_states)
         local = gemm(None, hidden_states.to(rows.dtype), rows)
         gathered = tensor_model_parallel_all_gather(local, dim=-1)
-        out = out_buf[:num]
+        buf = out_buf
+        if has_thread_local_forward_context():
+            if not lane_buf:
+                lane_buf.append(torch.full_like(out_buf, float("-inf")))
+            buf = lane_buf[0]
+        out = buf[:num]
         out.index_copy_(1, ids, gathered.to(out.dtype))
         return out
 

@@ -640,17 +640,20 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             additional_attn_cg_support=additional_attn_cg_support,
         )
 
-        self.block_tables = BlockTables(
+        self.block_table_kwargs: dict[str, Any] = dict(
             block_sizes=block_sizes,
             max_num_reqs=self.max_num_reqs,
             max_num_batched_tokens=self.max_num_tokens,
             max_num_blocks_per_group=max_num_blocks_per_group,
-            device=self.device,
-            kernel_block_sizes=self.kernel_block_sizes,
             slot_mapping_enabled=slot_mapping_enabled,
             cp_size=self.dcp_size,
             cp_rank=self.dcp_rank,
             cp_interleave=self.cp_interleave,
+        )
+        self.block_tables = BlockTables(
+            device=self.device,
+            kernel_block_sizes=self.kernel_block_sizes,
+            **self.block_table_kwargs,
         )
         self.pcp_manager = pcp.maybe_build_pcp_manager(
             self.vllm_config,
@@ -729,6 +732,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.kv_connector = NO_OP_KV_CONNECTOR
         else:
             self.kv_connector = get_kv_connector(self.vllm_config, kv_caches_dict)
+            self.kv_connector.bind_model_runner(self)
 
     def _init_kv_zero_meta(self) -> None:
         """Build KV-block zeroing metadata; invoked from gpu_worker."""
