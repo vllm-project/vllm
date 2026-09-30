@@ -253,9 +253,7 @@ class HiSparseMLAIndexGroup(SparseMLAIndexGroup):
         source_block_table = cache.source_block_table
         assert source_block_table is not None
         # CUDA-graph padding rows past the batch's tokens map to request 0;
-        # mark them -1 so residency resolution skips them. The resolver reads
-        # the ids on the HiSparse copy stream, so they go in the group's buffer:
-        # a compute-stream temporary can be recycled before that read.
+        # mark them -1 so residency resolution skips them.
         request_ids = self.request_ids[:num_tokens]
         request_ids.copy_(req_id_per_token)
         request_ids.masked_fill_(
