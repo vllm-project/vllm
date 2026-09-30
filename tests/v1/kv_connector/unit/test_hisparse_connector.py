@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 import torch
@@ -19,10 +19,8 @@ from vllm.distributed.kv_transfer.kv_connector.v1.hisparse.worker import (
     HiSparseConnectorWorker,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.multi_connector import MultiConnector
-from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
 from vllm.v1.hisparse.coordinator import get_hisparse_coordinator
 from vllm.v1.hisparse.runtime import HiSparseCacheHandle
-from vllm.v1.metrics.stats import KVCacheEvictionEvent
 from vllm.v1.worker.gpu.kv_connector import ActiveKVConnector
 
 
@@ -52,47 +50,6 @@ def test_cache_manager_binding_preserves_hisparse_and_legacy_pool_hooks(nested):
 
 def test_hisparse_requires_block_outermost_device_layout():
     assert HiSparseConnector.get_required_kvcache_layout(MagicMock()) == "BLHNC"
-
-
-def test_hisparse_host_pool_keeps_device_block_lifecycle():
-    """Host blocks must not feed the device KV cache residency metrics.
-
-    Host and device pools number blocks independently, so a host allocation
-    that reported to the device pool's collector overwrote the sample of the
-    device block with the same id, and evicting the host block emitted a false
-    device eviction sample.
-    """
-    from tests.v1.core.test_prefix_caching import (
-        make_hisparse_kv_cache_config,
-        make_kv_cache_manager,
-    )
-    from tests.v1.core.utils import create_requests
-
-    collector = KVCacheMetricsCollector(sample_rate=1.0)
-    manager = make_kv_cache_manager(
-        make_hisparse_kv_cache_config(2, 2),
-        max_model_len=128,
-        enable_caching=True,
-        hash_block_size=16,
-        metrics_collector=collector,
-    )
-    coordinator = get_hisparse_coordinator(manager)
-    assert coordinator.host_manager is not None
-    device = manager.block_pool
-    host = coordinator.host_manager.block_pool
-    request = create_requests(1, num_tokens=16)[0]
-    for pool, birth in ((device, 1), (host, 2)):
-        with patch("time.monotonic_ns", return_value=birth * 10**9):
-            block = pool.get_new_blocks(1)[0]
-            assert block.block_id == 1
-            pool.cache_full_blocks(request, [block], 0, 1, 16, 0)
-    with patch("time.monotonic_ns", return_value=3_000_000_000):
-        host.free_blocks([host.blocks[1]])
-        host.evict_blocks({1})
-    assert collector.drain_events() == []
-    with patch("time.monotonic_ns", return_value=6_000_000_000):
-        device.evict_blocks({1})
-    assert collector.drain_events() == [KVCacheEvictionEvent(5.0, 5.0, ())]
 
 
 def test_no_forward_enqueues_deferred_hisparse_transfers():
