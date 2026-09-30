@@ -152,18 +152,25 @@ DEPLOYMENTS = {
 }
 
 
-KNOWN_FAILURES = {
-    "pd-dcp2": "NIXL sets cp_kv_cache_interleave_size to the block size, "
-    "but FlashInfer MLA DCP requires 1",
-}
+def _known_failure(name: str, mode: Mode) -> str | None:
+    deployment = DEPLOYMENTS[name]
+    if deployment.prefill is not None and deployment.decode.dcp > 1:
+        return (
+            "NIXL sets cp_kv_cache_interleave_size to the block size, "
+            "but FlashInfer MLA DCP requires 1"
+        )
+    if mode.spec and deployment.decode.dcp > 1:
+        return "FlashInfer MLA DCP decode breaks on ragged spec-decode batches"
+    return None
 
 
-def _marks(name: str) -> list:
-    num_gpus = DEPLOYMENTS[name].num_gpus
-    marks = multi_gpu_marks(num_gpus=num_gpus) if num_gpus > 1 else []
-    if name in KNOWN_FAILURES:
-        marks.append(pytest.mark.xfail(reason=KNOWN_FAILURES[name], strict=True))
-    return marks
+def _case(name: str, mode: Mode):
+    marks = []
+    if (num_gpus := DEPLOYMENTS[name].num_gpus) > 1:
+        marks += multi_gpu_marks(num_gpus=num_gpus)
+    if reason := _known_failure(name, mode):
+        marks.append(pytest.mark.xfail(reason=reason, strict=True))
+    return pytest.param(name, mode, marks=marks, id=f"{name}-{mode.name}")
 
 
 def _block_size(url: str) -> int:
@@ -346,9 +353,8 @@ def _format(turns: list[Turn]) -> str:
     return "\n".join(rows)
 
 
-@pytest.mark.parametrize("mode", MODES, ids=lambda mode: mode.name)
 @pytest.mark.parametrize(
-    "name", [pytest.param(name, marks=_marks(name)) for name in DEPLOYMENTS]
+    "name, mode", [_case(name, mode) for name in DEPLOYMENTS for mode in MODES]
 )
 def test_turns_reuse_prefix_and_match_recompute(name: str, mode: Mode) -> None:
     deployment = DEPLOYMENTS[name]
