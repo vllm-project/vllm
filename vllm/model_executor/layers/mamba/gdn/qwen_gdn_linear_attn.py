@@ -556,7 +556,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
     def _fused_gdn_decode_unsupported_reason(
         self, vllm_config: VllmConfig
     ) -> str | None:
-        conv_state_dtype, recurrent_state_dtype = self.get_state_dtype()
+        conv_state_dtype, recurrent_state_dtype = self.get_state_dtype()[:2]
         if (
             self.gqa_interleaved_layout
             or self.head_k_dim != 128
@@ -1748,8 +1748,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         core_attn_out: torch.Tensor,
         attn_metadata: GDNAttentionMetadata,
     ):
-        """
-        Cached non-spec decode: amortizes the SSM-state HBM traffic by caching
+        """Cached non-spec decode: amortizes the SSM-state HBM traffic by caching
         the per-step d/k/g vectors in a ring buffer and reconstructing the
         output from a checkpoint that is only rewritten every
         replayssm_buffer_len steps.

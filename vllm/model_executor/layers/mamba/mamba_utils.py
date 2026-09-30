@@ -301,7 +301,7 @@ class MambaStateShapeCalculator:
         head_v_dim: int,
         conv_kernel_size: int,
         num_spec: int = 0,
-    ):
+    ) -> tuple[tuple[int, int], tuple[int, int, int]]:
         conv_dim = head_k_dim * num_k_heads * 2 + head_v_dim * num_v_heads
         conv_state_shape = cls._orient_conv_shape(
             divide(conv_dim, tp_world_size),
@@ -318,11 +318,17 @@ class MambaStateShapeCalculator:
     @classmethod
     def append_gated_delta_net_replayssm_ring(
         cls,
-        base_shapes: tuple[tuple[int, ...], ...],
+        base_shapes: tuple[tuple[int, int], tuple[int, int, int]],
         num_k_heads: int,
         tp_world_size: int,
         replayssm_buffer_len: int,
-    ) -> tuple[tuple[int, ...], ...]:
+    ) -> tuple[
+        tuple[int, int],
+        tuple[int, int, int],
+        tuple[int, int, int],
+        tuple[int, int, int],
+        tuple[int, int],
+    ]:
         """Append the GDN ReplaySSM ring shapes (d_cache, k_cache, g_cache) to a
         base ``(conv, ssm)`` tuple. ``base_shapes[1]`` is the ssm shape
         ``(num_v_heads // tp, head_v_dim, head_k_dim)``; k_cache uses the

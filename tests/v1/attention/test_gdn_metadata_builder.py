@@ -17,6 +17,7 @@ from tests.v1.attention.utils import (
 )
 from vllm.config import SpeculativeConfig
 from vllm.config.compilation import CUDAGraphMode
+from vllm.config.mamba import MambaBackendEnum
 from vllm.v1.attention.backends.gdn_attn import (
     GDNAttentionMetadata,
     GDNAttentionMetadataBuilder,
@@ -711,3 +712,24 @@ def test_replayssm_rejects_stochastic_rounding():
             vllm_config=vllm_config,
             device=DEVICE,
         )
+
+
+def test_replayssm_rejects_flashinfer_backend():
+    builder = _create_replayssm_gdn_builder(16)
+    builder.vllm_config.mamba_config.backend = MambaBackendEnum.FLASHINFER
+    with pytest.raises(ValueError, match="GDN ReplaySSM requires.*triton"):
+        GDNAttentionMetadataBuilder(
+            kv_cache_spec=builder.kv_cache_spec,
+            layer_names=["layer.0"],
+            vllm_config=builder.vllm_config,
+            device=DEVICE,
+        )
+
+
+def test_replayssm_requires_decode_base():
+    builder = _create_replayssm_gdn_builder(16)
+    common = create_common_attn_metadata(
+        BatchSpec(seq_lens=[106], query_lens=[1]), BLOCK_SIZE, DEVICE
+    )
+    with pytest.raises(ValueError, match="exact CPU sequence lengths.*decode-base"):
+        builder.build(0, common)

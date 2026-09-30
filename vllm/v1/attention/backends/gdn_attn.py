@@ -8,6 +8,7 @@ from typing import Literal
 import torch
 
 from vllm.config import VllmConfig
+from vllm.config.mamba import MambaBackendEnum
 from vllm.model_executor.layers.mamba.checkpoint import (
     MambaPrefillCheckpointBuilder,
     MambaPrefillCheckpointMetadata,
@@ -194,7 +195,10 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
         # Cached decode kernel: persistent per-decode-row write position and
         # flush flag. write_pos is derived per request each step so recycled
         # paged blocks need no zero-init.
-        self.use_replayssm: bool = vllm_config.cache_config.use_replayssm
+        self.use_replayssm: bool = (
+            vllm_config.cache_config.use_replayssm
+            and not vllm_config.cache_config.use_kda_recoverssm
+        )
         self.replayssm_buffer_len: int | None = (
             vllm_config.cache_config.replayssm_buffer_len
             if self.use_replayssm
@@ -209,6 +213,8 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
                 "stochastic rounding."
             )
         if self.use_replayssm:
+            if vllm_config.mamba_config.backend != MambaBackendEnum.TRITON:
+                raise ValueError("GDN ReplaySSM requires --mamba-backend triton")
             self.decode_write_pos_d: torch.Tensor = torch.empty(
                 (self.decode_cudagraph_max_bs,),
                 dtype=torch.int32,
@@ -529,13 +535,21 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
         is_flush_d = None
         if self.use_replayssm and spec_sequence_masks is None and num_decodes > 0:
             decode_base_cpu = m.replayssm_decode_base_cpu
-            num_computed_tokens_cpu = m._num_computed_tokens_cpu
-            if decode_base_cpu is None or num_computed_tokens_cpu is None:
+            seq_lens_cpu = m.seq_lens_cpu_upper_bound
+            async_spec_decode = (
+                self.vllm_config.scheduler_config.async_scheduling
+                and self.speculative_config is not None
+            )
+            if decode_base_cpu is None or seq_lens_cpu is None or async_spec_decode:
                 raise ValueError(
-                    "use_replayssm requires CPU decode-base and "
-                    "computed-token counts to derive decode write positions"
+                    "--use-replayssm requires exact CPU sequence lengths and "
+                    "decode-base counts to derive decode write positions"
                 )
-            num_computed_d = num_computed_tokens_cpu[:num_decodes]
+            query_lens_cpu = (
+                query_start_loc_cpu[1 : num_decodes + 1]
+                - query_start_loc_cpu[:num_decodes]
+            )
+            num_computed_d = seq_lens_cpu[:num_decodes] - query_lens_cpu
             decode_base_d = decode_base_cpu[:num_decodes]
             align_mode = self.vllm_config.cache_config.mamba_cache_mode == "align"
             block_size = self.kv_cache_spec.block_size
@@ -549,10 +563,6 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             else:
                 effective_base = decode_base_d
             decode_steps_cpu = num_computed_d - effective_base
-            query_lens_cpu = (
-                query_start_loc_cpu[1 : num_decodes + 1]
-                - query_start_loc_cpu[:num_decodes]
-            )
             valid_decode_rows = query_lens_cpu > 0
             # A single-token prefill row replayed as decode has decode_steps < 0;
             # force a one-token flush (write_pos=0, is_flush=1) off the checkpoint.
