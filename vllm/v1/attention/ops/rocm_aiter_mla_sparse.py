@@ -19,6 +19,10 @@ from vllm.triton_utils import tl, triton
 from vllm.utils.torch_utils import LayerNameType, direct_register_custom_op
 from vllm.v1.attention.backends.mla.indexer import DeepseekV32IndexerMetadata
 from vllm.v1.attention.ops.common import pack_seq_triton, unpack_seq_triton
+from vllm.v1.attention.ops.mxfp4_mla import GROUP_SIZE as MXFP4_GROUP_SIZE
+from vllm.v1.attention.ops.mxfp4_mla import row_bytes as mxfp4_row_bytes
+from vllm.v1.attention.ops.mxfp4_mla import scale_region_offset as mxfp4_scale_offset
+from vllm.v1.attention.ops.mxfp4_mla_read import unpack_mxfp4_tile_hw
 from vllm.v1.worker.workspace import current_workspace_manager
 
 if current_platform.is_rocm():
@@ -2016,6 +2020,33 @@ def _validate_dsv4_sparse_dims(
     )
 
 
+def _reject_mxfp4_cache(cache: torch.Tensor, nope_head_dim: int, which: str) -> None:
+    """Refuse a packed MXFP4 cache on a path that cannot decode one.
+
+    Both fp8_ds_mla and MXFP4 caches are ``uint8``, so a dtype check cannot
+    separate them and a wrong guess is silent: the row is simply reinterpreted.
+    The row *width* does separate them -- MXFP4 packs ``nope_head_dim`` values
+    into ``nope_head_dim // 2`` data bytes plus ``nope_head_dim // 32`` inline
+    E8M0 scale bytes (272 for a 512-wide latent), which is not an fp8_ds_mla
+    geometry for the same latent.
+    """
+    from vllm.v1.attention.ops.mxfp4_mla import row_bytes
+
+    if cache.dtype != torch.uint8 or cache.ndim == 0:
+        return
+    if cache.shape[-1] == row_bytes(nope_head_dim):
+        raise NotImplementedError(
+            f"rocm_sparse_attn_decode received what looks like a packed MXFP4 "
+            f"{which} cache: uint8 with a {cache.shape[-1]}-byte row, which is "
+            f"exactly mxfp4_mla's [{nope_head_dim // 2} E2M1 | "
+            f"{nope_head_dim // 32} E8M0] layout for a {nope_head_dim}-wide "
+            f"latent. The decode kernels have no KV_IS_MXFP4 path and would "
+            f"read this as fp8_ds_mla, returning silent garbage. Route through "
+            f"rocm_sparse_attn_prefill, which does support mxfp4_mla and which "
+            f"serves decode too (max_query_len == 1 qualifies)."
+        )
+
+
 @triton.jit
 def _count_valid_row_entries_kernel(
     indices_ptr,
@@ -2170,6 +2201,42 @@ def _sparse_kv_row_offset(slot, stride):
 
 
 @triton.jit
+def _load_mxfp4_rows_inline(
+    cache_ptr,
+    slots,
+    valid,
+    BLOCK_K: tl.constexpr,
+    LATENT: tl.constexpr,
+    GROUP: tl.constexpr,
+    ROW_BYTES: tl.constexpr,
+    SCALE_OFFSET: tl.constexpr,
+):
+    """Gather BLOCK_K packed MXFP4 rows as a bf16 [BLOCK_K, LATENT] tile.
+
+    The row pitch is a byte count, so ``slots`` indexes bytes rather than
+    elements. Invalid slots come back as zeros, which contribute nothing to
+    either the score dot or the output accumulation.
+    """
+    # Data region as int32: the hardware converter's operands must be int32,
+    # and slot * ROW_BYTES is 4-byte aligned because 272 == 4 * 68.
+    row32 = cache_ptr.to(tl.pointer_type(tl.int32)) + _sparse_kv_row_offset(
+        slots[:, None], ROW_BYTES // 4
+    )
+    words = tl.load(
+        row32 + tl.arange(0, LATENT // 8)[None, :], mask=valid[:, None], other=0
+    )
+    # Scales stay uint8; they are one byte per group of 32.
+    row8 = cache_ptr + _sparse_kv_row_offset(slots[:, None], ROW_BYTES)
+    encoded_scales = tl.load(
+        row8 + SCALE_OFFSET + tl.arange(0, LATENT // GROUP)[None, :],
+        mask=valid[:, None],
+        other=127,
+    )
+    tile = unpack_mxfp4_tile_hw(words, encoded_scales, BLOCK_K, LATENT, GROUP)
+    return tl.where(valid[:, None], tile, 0.0)
+
+
+@triton.jit
 def _sparse_attn_prefill_ragged_kernel(
     q_ptr,
     kv_ptr,
@@ -2190,6 +2257,10 @@ def _sparse_attn_prefill_ragged_kernel(
     num_kv,
     scale,
     HAS_ATTN_SINK: tl.constexpr,
+    KV_IS_MXFP4: tl.constexpr,
+    KV_ROW_BYTES: tl.constexpr,
+    KV_SCALE_OFFSET: tl.constexpr,
+    MXFP4_GROUP: tl.constexpr,
     BLOCK_H: tl.constexpr,
     BLOCK_D: tl.constexpr,
     BLOCK_K: tl.constexpr,
@@ -2230,13 +2301,31 @@ def _sparse_attn_prefill_ragged_kernel(
         valid = in_range & (slot >= 0) & (slot < num_kv)
         safe_slot = tl.where(valid, slot, 0)
 
-        kv = tl.load(
-            kv_ptr
-            + _sparse_kv_row_offset(safe_slot[:, None], kv_stride_n)
-            + dim_offsets[None, :] * kv_stride_d,
-            mask=valid[:, None] & dim_mask[None, :],
-            other=0.0,
-        )
+        if KV_IS_MXFP4:
+            # Packed MXFP4: the row is KV_ROW_BYTES of uint8, not head_dim
+            # elements, so address it by byte pitch. Two loads from the same
+            # row -- data then inline E8M0 scales -- both slot-major and unit
+            # stride, so neither needs a transpose. See mxfp4_mla_read for the
+            # unpack and why it unpacks once and feeds both dots instead of
+            # using tl.dot_scaled.
+            kv = _load_mxfp4_rows_inline(
+                kv_ptr,
+                safe_slot,
+                valid,
+                BLOCK_K,
+                BLOCK_D,
+                MXFP4_GROUP,
+                KV_ROW_BYTES,
+                KV_SCALE_OFFSET,
+            ).to(q.dtype)
+        else:
+            kv = tl.load(
+                kv_ptr
+                + _sparse_kv_row_offset(safe_slot[:, None], kv_stride_n)
+                + dim_offsets[None, :] * kv_stride_d,
+                mask=valid[:, None] & dim_mask[None, :],
+                other=0.0,
+            )
 
         next_k_pos = k_start + BLOCK_K + k_offsets
         slot = tl.load(
@@ -3468,6 +3557,15 @@ def _rocm_sparse_attn_prefill_ragged_triton(
         "_rocm_sparse_attn_prefill_ragged_triton",
     )
 
+    # MXFP4 arrives as a uint8 cache whose row is a byte pitch rather than
+    # head_dim elements: 256 packed E2M1 bytes plus 16 inline E8M0 scale bytes
+    # for a 512-wide latent. head_dim stays the logical width.
+    kv_is_mxfp4 = kv.dtype == torch.uint8 and kv.shape[-1] == mxfp4_row_bytes(head_dim)
+    assert not (kv_is_mxfp4 and q.dtype != torch.bfloat16), (
+        f"MXFP4 KV requires a bf16 query, got q={q.dtype}"
+    )
+    kv_row_bytes = kv.shape[-1] if kv_is_mxfp4 else 0
+    kv_scale_offset = mxfp4_scale_offset(head_dim) if kv_is_mxfp4 else 0
     block_h = 16
     block_d = triton.next_power_of_2(head_dim)
     block_k = 16 if head_dim >= 256 else 32
@@ -3493,6 +3591,10 @@ def _rocm_sparse_attn_prefill_ragged_triton(
         kv.shape[0],
         float(scale),
         HAS_ATTN_SINK=has_attn_sink,
+        KV_IS_MXFP4=kv_is_mxfp4,
+        KV_ROW_BYTES=kv_row_bytes,
+        KV_SCALE_OFFSET=kv_scale_offset,
+        MXFP4_GROUP=MXFP4_GROUP_SIZE,
         BLOCK_H=block_h,
         BLOCK_D=block_d,
         BLOCK_K=block_k,
@@ -4253,6 +4355,16 @@ def rocm_sparse_attn_decode(
         rope_head_dim,
         "rocm_sparse_attn_decode",
     )
+    # A packed MXFP4 cache is ALSO uint8, so the dtype asserts below cannot tell
+    # it apart from fp8_ds_mla -- they would pass and the kernels would read a
+    # 272-byte [256 E2M1 | 16 E8M0] row as though it were an fp8_ds_mla row,
+    # returning silent garbage instead of failing. The decode kernels have no
+    # KV_IS_MXFP4 path; only _sparse_attn_prefill_ragged_kernel does, which is
+    # why the GLM-5.3-Flash backend routes both prefill and decode through
+    # rocm_sparse_attn_prefill. Fail loudly if anything reaches here.
+    _reject_mxfp4_cache(swa_k_cache, nope_head_dim, "SWA")
+    if kv_cache is not None:
+        _reject_mxfp4_cache(kv_cache, nope_head_dim, "extra")
 
     main_indices = swa_indices.reshape(swa_indices.shape[0], -1)
 
