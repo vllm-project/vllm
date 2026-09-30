@@ -129,19 +129,12 @@ class Mamba2AttentionMetadataBuilder(
         )
         self.chunk_size: int = chunk_size
 
-    def build(
+    def _compute_common_metadata(
         self,
-        common_prefix_len: int,
         common_attn_metadata: CommonAttentionMetadata,
-        fast_build: bool = False,
         **kwargs: Any,
     ) -> Mamba2AttentionMetadata:
-        common = self._compute_common_metadata(
-            common_attn_metadata,
-            num_accepted_tokens=kwargs.get("num_accepted_tokens"),
-            prev_last_scheduled_idx=kwargs.get("prev_last_scheduled_idx"),
-            num_decode_draft_tokens_cpu=kwargs.get("num_decode_draft_tokens_cpu"),
-        )
+        common = super()._compute_common_metadata(common_attn_metadata, **kwargs)
 
         seq_idx_p = None
         cu_chunk_seqlen_p = None

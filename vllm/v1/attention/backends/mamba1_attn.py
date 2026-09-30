@@ -35,14 +35,12 @@ class Mamba1AttentionMetadataBuilder(
 ):
     metadata_cls = Mamba1AttentionMetadata
 
-    def build(
+    def _compute_common_metadata(
         self,
-        common_prefix_len: int,
         common_attn_metadata: CommonAttentionMetadata,
-        fast_build: bool = False,
         **kwargs: Any,
     ) -> Mamba1AttentionMetadata:
-        common = self._compute_common_metadata(common_attn_metadata)
+        common = super()._compute_common_metadata(common_attn_metadata)
 
         if (
             common.num_prefills > 0

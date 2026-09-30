@@ -45,7 +45,7 @@ class MambaHybridAttnMetadata(ModelSpecificAttnMetadata):
     def get_extra_common_attn_kwargs(
         self, kv_cache_group_id: int, num_reqs: int
     ) -> dict[str, Any]:
-        return {"is_prefilling": self.is_prefilling[:num_reqs]}
+        return {"is_prefilling": self.is_prefilling}
 
     def get_extra_attn_kwargs(
         self, attn_metadata_builder: Any, num_reqs: int
@@ -61,12 +61,8 @@ class MambaHybridAttnMetadata(ModelSpecificAttnMetadata):
         ):
             return {}
         return {
-            "num_accepted_tokens": None
-            if self.num_accepted_tokens is None
-            else self.num_accepted_tokens[:num_reqs],
-            "num_decode_draft_tokens_cpu": None
-            if self.num_decode_draft_tokens_cpu is None
-            else self.num_decode_draft_tokens_cpu[:num_reqs],
+            "num_accepted_tokens": self.num_accepted_tokens,
+            "num_decode_draft_tokens_cpu": self.num_decode_draft_tokens_cpu,
         }
 
 
