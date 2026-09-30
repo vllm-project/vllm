@@ -530,7 +530,11 @@ def test_select_cuda_flashinfer_cutlass_backend(
 
 
 @skipif_not_cuda_rocm
-def test_select_lora_backend_prefers_triton():
+@patch(
+    "vllm.model_executor.layers.fused_moe.oracle.unquantized._trtllm_bf16_lora_supported",
+    return_value=False,
+)
+def test_select_lora_backend_prefers_triton(mock_trtllm_lora_supported):
     """LoRA-enabled unquantized MoE should select Triton backend."""
     moe_config = make_dummy_moe_config()
     moe_config.is_lora_enabled = True

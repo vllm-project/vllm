@@ -225,14 +225,13 @@ def select_unquantized_moe_backend(
     """Select the primary Unquantized MoE backend.
     Note: Shape-specific fallbacks may still occur at runtime.
     """
-    # NOTE: the kernels are selected in the following order.
-    AVAILABLE_BACKENDS = _get_priority_backends(moe_config)
 
     def _make_log_backend(
         backend: UnquantizedMoeBackend,
+        available_backends: list[UnquantizedMoeBackend],
         is_lora: bool = False,
     ) -> str:
-        available_strs = [b.value for b in AVAILABLE_BACKENDS]
+        available_strs = [b.value for b in available_backends]
         lora = "" if not is_lora else "LoRA "
         return (
             f"Using {backend.value} Unquantized MoE {lora}backend out "
@@ -259,6 +258,7 @@ def select_unquantized_moe_backend(
         backend: UnquantizedMoeBackend,
         config: FusedMoEConfig,
         activation_format: mk.FusedMoEActivationFormat,
+        available_backends: list[UnquantizedMoeBackend],
         is_lora: bool = False,
     ) -> tuple[UnquantizedMoeBackend, type[mk.FusedMoEExperts] | None]:
         reason = None
@@ -267,7 +267,9 @@ def select_unquantized_moe_backend(
                 k_cls, config, None, None, activation_format
             )
             if supported:
-                logger.info_once(_make_log_backend(backend, is_lora))
+                logger.info_once(
+                    _make_log_backend(backend, available_backends, is_lora)
+                )
                 return backend, k_cls
         raise ValueError(_make_log_unsupported(backend, reason, is_lora))
 
@@ -293,7 +295,12 @@ def select_unquantized_moe_backend(
             UnquantizedMoeBackend.TRITON,
             moe_config,
             mk.FusedMoEActivationFormat.Standard,
+            [UnquantizedMoeBackend.TRITON],
+            is_lora=True,
         )
+
+    # NOTE: the kernels are selected in the following order.
+    AVAILABLE_BACKENDS = _get_priority_backends(moe_config)
 
     # NOTE(rob): We need to peak into the P/F selection to determine
     # if we are using the batched or standard expert format, which
@@ -304,7 +311,10 @@ def select_unquantized_moe_backend(
     # so it is not interchangeable with the token-major experts backends.
     if moe_config.moe_parallel_config.use_moonep_kernels:
         return _return_or_raise(
-            UnquantizedMoeBackend.MOONEP, moe_config, activation_format
+            UnquantizedMoeBackend.MOONEP,
+            moe_config,
+            activation_format,
+            AVAILABLE_BACKENDS,
         )
 
     runner_backend = moe_config.moe_backend
@@ -318,7 +328,9 @@ def select_unquantized_moe_backend(
         ):
             requested_backend = UnquantizedMoeBackend.BATCHED_TRITON
 
-        return _return_or_raise(requested_backend, moe_config, activation_format)
+        return _return_or_raise(
+            requested_backend, moe_config, activation_format, AVAILABLE_BACKENDS
+        )
 
     # Handle explicit AITER FP8 configuration.
     if envs.is_set("VLLM_ROCM_USE_AITER") or envs.is_set("VLLM_ROCM_USE_AITER_MOE"):
@@ -338,7 +350,7 @@ def select_unquantized_moe_backend(
                     k_cls, moe_config, None, None, activation_format
                 )
                 if supported:
-                    logger.info_once(_make_log_backend(backend))
+                    logger.info_once(_make_log_backend(backend, AVAILABLE_BACKENDS))
                     return backend, k_cls
             # AITER was explicitly requested but does not support this
             # deployment configuration (e.g. a non-gated MoE activation,
@@ -366,7 +378,7 @@ def select_unquantized_moe_backend(
                 k_cls, moe_config, None, None, activation_format
             )
             if supported:
-                logger.info_once(_make_log_backend(backend))
+                logger.info_once(_make_log_backend(backend, AVAILABLE_BACKENDS))
                 return backend, k_cls
 
             logger.debug_once(_make_log_unsupported(backend, reason))
