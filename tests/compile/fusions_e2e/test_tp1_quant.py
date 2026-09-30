@@ -208,7 +208,7 @@ def test_tp1_fp4_fusions(
 @pytest.mark.parametrize(
     "model_name, matches_fn, model_kwargs, hf_overrides", [qwen3_8_27b_mixed_fp4]
 )
-@pytest.mark.parametrize("attn_backend", [TRITON_ATTN])
+@pytest.mark.parametrize("attn_backend", [FLASHINFER_ATTN])
 @pytest.mark.parametrize("n_layers", [4])
 @pytest.mark.parametrize("inductor_graph_partition", INDUCTOR_GRAPH_PARTITION)
 @pytest.mark.skipif(not is_blackwell(), reason="Blackwell required for fp4")
