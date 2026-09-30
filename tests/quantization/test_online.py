@@ -1427,14 +1427,54 @@ def test_online_int8_moe_w2_scale_matches_unsharded(monkeypatch) -> None:
     ),
     reason="NVFP4 weight quantization needs a Blackwell (SM100) GPU.",
 )
-def test_online_nvfp4_quantizes_original_expert_weights() -> None:
+@pytest.mark.parametrize(
+    "four_over_six,e4m3_max", [(None, 448), ("0", 448), ("1", 256), ("1", 448)]
+)
+def test_online_nvfp4_quantizes_original_expert_weights(
+    monkeypatch, four_over_six, e4m3_max
+) -> None:
+    from flashinfer import fp4_quantize
+
+    from vllm.model_executor.layers.quantization.online import nvfp4
+
+    if four_over_six is None:
+        monkeypatch.delenv("FLASHINFER_NVFP4_4OVER6", raising=False)
+    else:
+        monkeypatch.setenv("FLASHINFER_NVFP4_4OVER6", four_over_six)
+    monkeypatch.setenv(
+        "FLASHINFER_NVFP4_4OVER6_E4M3_USE_256", str(int(e4m3_max == 256))
+    )
+    monkeypatch.setenv("FLASHINFER_NVFP4_4OVER6_ERR_MODE", "MSE")
+    monkeypatch.setenv("FLASHINFER_NVFP4_4OVER6_ERR_USE_FAST_MATH", "1")
+    monkeypatch.setenv("FLASHINFER_DISABLE_FP4_QUANT_FAST_MATH", "0")
+    monkeypatch.setenv("TRTLLM_DISABLE_FP4_QUANT_FAST_MATH", "0")
+    # Numerical agreement alone would not catch an unintended backend switch.
+    unexpected_quantizer = (
+        "scaled_fp4_quant" if four_over_six == "1" else "flashinfer_fp4_quantize"
+    )
+    monkeypatch.setattr(
+        nvfp4,
+        unexpected_quantizer,
+        Mock(side_effect=AssertionError(f"Unexpected call to {unexpected_quantizer}")),
+    )
     torch.manual_seed(0)
     weight = torch.randn(2, 32, 32, device="cuda", dtype=torch.bfloat16)
+    weight[1, -1, -1] = 20.75
 
     quantized, block_scale, global_decode_scale = _quantize_moe_weight_to_nvfp4(weight)
-    global_encode_scale = 1.0 / global_decode_scale
+    amax = weight.float().abs().amax((1, 2))
+    if four_over_six != "1":
+        global_encode_scale = (6.0 * 448) / amax
+        expected_decode_scale = global_encode_scale.reciprocal()
+    else:
+        global_encode_scale = torch.div(6.0 * e4m3_max, amax)
+        expected_decode_scale = torch.div(1.0, global_encode_scale)
+    torch.testing.assert_close(
+        global_decode_scale, expected_decode_scale, rtol=0, atol=0
+    )
+    quantize = fp4_quantize if four_over_six == "1" else scaled_fp4_quant
     expected = [
-        scaled_fp4_quant(
+        quantize(
             expert_weight,
             expert_scale,
             is_sf_swizzled_layout=False,
@@ -1451,9 +1491,45 @@ def test_online_nvfp4_quantizes_original_expert_weights() -> None:
         torch.stack([expert_weight for expert_weight, _ in expected]),
     )
     assert torch.equal(
-        block_scale,
-        torch.stack([expert_scale for _, expert_scale in expected]),
+        block_scale.view(torch.uint8),
+        torch.stack([expert_scale for _, expert_scale in expected]).view(torch.uint8),
     )
+
+
+@pytest.mark.skipif(
+    not (
+        current_platform.is_cuda() and current_platform.is_device_capability_family(100)
+    ),
+    reason="Per-token NVFP4 quantization needs a Blackwell (SM100) GPU.",
+)
+@pytest.mark.parametrize("e4m3_max", [None, 256, 448])
+def test_online_nvfp4_per_token_4over6_scale(monkeypatch, e4m3_max):
+    from flashinfer import SfLayout, nvfp4_quantize
+
+    from vllm.model_executor.layers.fused_moe.experts.trtllm_nvfp4_moe import (
+        TrtLlmNvFp4ExpertsBase,
+    )
+
+    monkeypatch.setenv("FLASHINFER_NVFP4_4OVER6", "0" if e4m3_max is None else "1")
+    monkeypatch.setenv(
+        "FLASHINFER_NVFP4_4OVER6_E4M3_USE_256", str(int(e4m3_max == 256))
+    )
+    monkeypatch.setenv("FLASHINFER_NVFP4_4OVER6_ERR_MODE", "MSE")
+    monkeypatch.setenv("FLASHINFER_NVFP4_4OVER6_ERR_USE_FAST_MATH", "1")
+    monkeypatch.setenv("FLASHINFER_DISABLE_FP4_QUANT_FAST_MATH", "1")
+    torch.manual_seed(0)
+    x = torch.randn(17, 64, device="cuda", dtype=torch.bfloat16)
+    x[0].zero_()
+    experts = object.__new__(TrtLlmNvFp4ExpertsBase)
+    actual = experts._quantize_per_token_input(x)
+    expected = nvfp4_quantize(
+        x,
+        1.0 / (6.0 * (e4m3_max or 448)),
+        sfLayout=SfLayout.layout_linear,
+        per_token_activation=True,
+    )
+    for output, reference in zip(actual, expected):
+        torch.testing.assert_close(output, reference, rtol=0, atol=0)
 
 
 @pytest.mark.skipif(

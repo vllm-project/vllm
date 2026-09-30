@@ -37,10 +37,6 @@ from vllm.utils.flashinfer import has_flashinfer_trtllm_fused_moe
 
 logger = init_logger(__name__)
 
-# Base scale for per-token NVFP4 activation quant; the kernel folds the
-# per-token global scale (from the activation amax) on top of it.
-_PER_TOKEN_BASE_GLOBAL_SCALE = 1.0 / (448.0 * 6.0)
-
 
 class TrtLlmNvFp4ExpertsBase:
     """NvFp4 TRTLLM-Gen MoE kernels. Supports modular and monolithic interface."""
@@ -267,10 +263,15 @@ class TrtLlmNvFp4ExpertsBase:
         Returns ``(packed_fp4, block_scale, per_token_scale)``.
         """
         from flashinfer import SfLayout, nvfp4_quantize
+        from flashinfer.quantization.nvfp4_quantization_utils import (
+            current_nvfp4_4over6_config,
+            nvfp4_e4m3_max,
+        )
 
+        e4m3_max = nvfp4_e4m3_max(current_nvfp4_4over6_config())
         hs_fp4, hs_block_scale, per_token_scale = nvfp4_quantize(
             hidden_states,
-            _PER_TOKEN_BASE_GLOBAL_SCALE,
+            1.0 / (e4m3_max * 6.0),
             sfLayout=SfLayout.layout_linear,
             per_token_activation=True,
         )

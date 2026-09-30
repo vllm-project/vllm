@@ -30,8 +30,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 )
 from vllm.model_executor.utils import replace_parameter
 from vllm.platforms import current_platform
-
-FLOAT8_E4M3_MAX = torch.finfo(torch.float8_e4m3fn).max
+from vllm.utils.flashinfer import flashinfer_fp4_quantize
 
 
 def _quantize_moe_weight_to_nvfp4(
@@ -45,14 +44,26 @@ def _quantize_moe_weight_to_nvfp4(
     ``(E, N, K // 2)``, block scales ``(E, N, K // 16)``, and the per-expert
     global scale ``(E,)`` stored as ``amax / (fp4_max * fp8_max)``.
     """
+    from flashinfer.quantization.nvfp4_quantization_utils import (
+        current_nvfp4_4over6_config,
+        nvfp4_e4m3_max,
+    )
+
     assert weight.dim() == 3, f"expected 3D expert weights, got {weight.shape}"
     k = weight.shape[-1]
     assert k % 16 == 0, f"last dim must be a multiple of 16, got {k}"
 
     amax = weight_amax(weight.flatten(1), dim=-1).to(torch.float32)
     amax = amax_for_moe_weight_quant(amax, moe_tp_size).clamp_min(1e-8)
-    global_scale = (FLOAT4_E2M1_MAX * FLOAT8_E4M3_MAX) / amax
-    weight_scale_2 = (1.0 / global_scale).to(torch.float32)
+    four_over_six = current_nvfp4_4over6_config()
+    e4m3_max = nvfp4_e4m3_max(four_over_six)
+    if four_over_six is None:
+        global_scale = (FLOAT4_E2M1_MAX * e4m3_max) / amax
+        weight_scale_2 = (1.0 / global_scale).to(torch.float32)
+    else:
+        # Match the 4/6 reference's division, not reciprocal multiplication.
+        global_scale = torch.div(FLOAT4_E2M1_MAX * e4m3_max, amax)
+        weight_scale_2 = torch.div(1.0, global_scale)
 
     # Keep the original BF16/FP16 values as the quantizer input. Folding each
     # expert's FP32 global scale into the weight would add a BF16/FP16 rounding
@@ -64,6 +75,13 @@ def _quantize_moe_weight_to_nvfp4(
             expert_scale,
             is_sf_swizzled_layout=False,
         )
+        if four_over_six is None
+        else flashinfer_fp4_quantize(
+            expert_weight,
+            expert_scale,
+            is_sf_swizzled_layout=False,
+            backend="cuda",
+        )
         for expert_weight, expert_scale in zip(
             weight,
             global_scale,
@@ -71,7 +89,9 @@ def _quantize_moe_weight_to_nvfp4(
         )
     ]
     qweight = torch.stack([quantized for quantized, _ in quantized_experts])
-    block_scale = torch.stack([block_scale for _, block_scale in quantized_experts])
+    block_scale = torch.stack(
+        [block_scale for _, block_scale in quantized_experts]
+    ).view(torch.float8_e4m3fn)
     return (
         qweight,
         block_scale,
