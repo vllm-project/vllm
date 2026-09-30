@@ -2561,20 +2561,20 @@ class HiSparseResidentManager(_HiSparseAuxiliaryManager):
         return super().pop_blocks_for_free(request_id)
 
     def reclaim_resident_page(
-        self, request_id: str, block_idx: int, block: KVCacheBlock
+        self, request_id: str, page_idx: int, block: KVCacheBlock
     ) -> bool:
         """Point a null prefix page at a pinned GPU copy of its contents."""
         blocks = self.req_to_blocks.get(request_id)
-        if blocks is None or block_idx >= len(blocks) or not blocks[block_idx].is_null:
+        if blocks is None or page_idx >= len(blocks) or not blocks[page_idx].is_null:
             return False
-        blocks[block_idx] = block
+        blocks[page_idx] = block
         return True
 
-    def get_resident_page(self, request_id: str, block_idx: int) -> KVCacheBlock | None:
+    def get_resident_page(self, request_id: str, page_idx: int) -> KVCacheBlock | None:
         blocks = self.req_to_blocks.get(request_id)
-        if blocks is None or block_idx >= len(blocks):
+        if blocks is None or page_idx >= len(blocks):
             return None
-        block = blocks[block_idx]
+        block = blocks[page_idx]
         return None if block.is_null else block
 
 

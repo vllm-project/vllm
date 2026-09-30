@@ -371,7 +371,7 @@ def test_hisparse_terminal_prefix_reuse(
             nonlocal terminal_pages_in_transfer
             state = coordinator.request_states.get(request_id)
             if state is not None:
-                terminal_pages_in_transfer += len(state.transfer_id_by_page)
+                terminal_pages_in_transfer += len(state.in_flight_transfers)
             original_free(request_id)
 
         def drain_pending_work():

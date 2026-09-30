@@ -994,7 +994,8 @@ def test_hisparse_host_import_ignores_unsealed_tail():
     manager = make_hisparse_kv_cache_manager(16, 16)
     coordinator = get_hisparse_coordinator(manager)
 
-    coordinator._mark_imported_pages_durable("partial", HISPARSE_BLOCK_SIZE + 1)
+    coordinator.record_pending_host_import("partial", HISPARSE_BLOCK_SIZE + 1)
+    coordinator.finish_host_import("partial", failed=False)
 
     state = coordinator.request_states["partial"]
     assert state.durable_pages == {0}
