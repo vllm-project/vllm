@@ -97,11 +97,14 @@ def test_silu_and_mul(
     opcheck(torch.ops._C.silu_and_mul_quant, (ops_out, x, scale))
 
 
-def _offset_view(shape: tuple[int, ...], dtype: torch.dtype, offset: int):
-    """A contiguous tensor whose storage starts `offset` elements into its
-    buffer, so its data pointer is not 16-byte aligned."""
+def _misaligned_empty(shape: tuple[int, ...], dtype: torch.dtype) -> torch.Tensor:
+    """Contiguous tensor whose ``data_ptr`` is not 16B aligned."""
     numel = math.prod(shape)
-    return torch.empty(numel + offset, dtype=dtype)[offset:].view(shape)
+    base = torch.empty(numel + 16, dtype=dtype)
+    view = base[1 : 1 + numel]
+    if view.data_ptr() % 16 == 0:
+        pytest.skip("allocator did not yield a misaligned offset")
+    return view.view(shape)
 
 
 @pytest.mark.parametrize("num_tokens, hidden_size", [(1, 32), (17, 4096), (3045, 8192)])
@@ -124,10 +127,8 @@ def test_silu_and_mul_quant_unaligned_matches_aligned(
     x = torch.randn(num_tokens, hidden_size, dtype=dtype)
     aligned = ops_impl(x, scale)
 
-    x_off = _offset_view(x.shape, dtype, 4)
-    x_off.copy_(x)
-    assert x_off.data_ptr() % 16 != 0
-    out_off = _offset_view(aligned.shape, current_platform.fp8_dtype(), 4)
+    x_off = _misaligned_empty(x.shape, dtype).copy_(x)
+    out_off = _misaligned_empty(aligned.shape, current_platform.fp8_dtype())
     torch.ops._C.silu_and_mul_quant(out_off, x_off, scale)
 
     assert torch.equal(out_off.view(torch.uint8), aligned.view(torch.uint8))
