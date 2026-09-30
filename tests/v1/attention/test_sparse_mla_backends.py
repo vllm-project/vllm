@@ -106,7 +106,7 @@ from vllm.v1.hisparse.runtime import (
     build_hisparse_prefill_staging_plan,
     hisparse_prefill_staging_remap,
 )
-from vllm.v1.hisparse.types import SparseKVRowMirror
+from vllm.v1.hisparse.types import HiSparseRowMirror
 
 SPARSE_BACKEND_BATCH_SPECS = {
     name: BATCH_SPECS[name]
@@ -2566,8 +2566,8 @@ def test_hisparse_row_dma_copies_discontiguous_spans_across_layers():
     worker._dma_submitted = False
     worker._set_row_mirrors(
         (
-            SparseKVRowMirror((1,), 5, 2),
-            SparseKVRowMirror((8,), 10, 4),
+            HiSparseRowMirror((1,), 5, 2),
+            HiSparseRowMirror((8,), 10, 4),
         )
     )
 

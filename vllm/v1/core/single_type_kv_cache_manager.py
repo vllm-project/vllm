@@ -2220,7 +2220,7 @@ class SinkFullAttentionManager(FullAttentionManager):
         assert sink_len is not None and sink_len > 0 and sink_len % self.block_size == 0
 
 
-class HiSparseSourceManager(FullAttentionManager):
+class HiSparseHostManager(FullAttentionManager):
     """Host-tier manager with a private pool; publishes hashes once durable.
 
     Every page gets a host block: allocation fails when the host pool cannot
@@ -2316,7 +2316,7 @@ class HiSparseSourceManager(FullAttentionManager):
         replay_boundaries: Sequence[int],
     ) -> None:
         assert self.coordinator is not None
-        self.coordinator.publish_when_ready(
+        self.coordinator.publish_when_durable(
             request,
             num_tokens,
             retention_interval,
@@ -2529,7 +2529,7 @@ class HiSparseResidentManager(_HiSparseAuxiliaryManager):
         req_blocks.extend([self._null_block] * num_host_pages)
         self.num_cached_block[request_id] = 0
         assert self.coordinator is not None
-        self.coordinator.commit_computed_blocks(request_id, num_host_pages)
+        self.coordinator.record_host_prefix_hit(request_id, num_host_pages)
 
     def cache_blocks(
         self,
@@ -2560,7 +2560,7 @@ class HiSparseResidentManager(_HiSparseAuxiliaryManager):
         self.coordinator.free(request_id)
         return super().pop_blocks_for_free(request_id)
 
-    def adopt_resident_page(
+    def reclaim_resident_page(
         self, request_id: str, block_idx: int, block: KVCacheBlock
     ) -> bool:
         """Point a null prefix page at a pinned GPU copy of its contents."""
@@ -2629,7 +2629,7 @@ def get_manager_for_kv_cache_spec(
 def register_all_kvcache_specs(vllm_config):
     """Built-in spec registration"""
     KVCacheSpecRegistry.register_role_manager(
-        KVCacheGroupRole.HISPARSE_SOURCE, HiSparseSourceManager
+        KVCacheGroupRole.HISPARSE_HOST, HiSparseHostManager
     )
     KVCacheSpecRegistry.register(
         FullAttentionSpec,

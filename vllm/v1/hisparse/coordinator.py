@@ -13,15 +13,15 @@ from vllm.v1.core.kv_cache_utils import (
     KVCacheBlockCopy,
 )
 from vllm.v1.core.single_type_kv_cache_manager import (
+    HiSparseHostManager,
     HiSparseHotManager,
     HiSparseResidentManager,
-    HiSparseSourceManager,
     SingleTypeKVCacheManager,
 )
 from vllm.v1.hisparse.types import (
-    SparseKVOffloadCommand,
-    SparseKVPageTransfer,
-    SparseKVRowMirror,
+    HiSparsePageTransfer,
+    HiSparseRowMirror,
+    HiSparseTransferCommand,
 )
 from vllm.v1.kv_cache_interface import (
     HiSparseResidentSpec,
@@ -63,7 +63,7 @@ class _HiSparseRequestState:
     durable_pages: set[int] = field(default_factory=set)
     num_durable_prefix_pages: int = 0
     transfer_id_by_page: dict[int, int] = field(default_factory=dict)
-    publication: _PendingPublication | None = None
+    pending_publication: _PendingPublication | None = None
     num_gpu_copy_recorded_pages: int = 0
     pinned_durable_pages: set[int] = field(default_factory=set)
     released_pages: set[int] = field(default_factory=set)
@@ -122,11 +122,11 @@ class HiSparseCoordinator:
                 manager.coordinator = self
         self.resident_managers = tuple(resident_managers)
         self.hot_managers = tuple(hot_managers)
-        self.host_manager: HiSparseSourceManager | None = None
+        self.host_manager: HiSparseHostManager | None = None
         self.host_group_id: int | None = None
         self.max_transfers_per_step = 0
         for group_id, manager in enumerate(managers):
-            if isinstance(manager, HiSparseSourceManager):
+            if isinstance(manager, HiSparseHostManager):
                 if self.host_manager is not None:
                     raise ValueError("Only one HiSparse host group is supported.")
                 num_host_blocks = kv_cache_config.hisparse_host_num_blocks
@@ -167,9 +167,9 @@ class HiSparseCoordinator:
         # reports having run them.
         self._retained_cow_copies: dict[int, tuple[KVCacheBlock, KVCacheBlock]] = {}
         # request -> prefix length an external load is still filling in.
-        self._pending_imports: dict[str, int] = {}
+        self._pending_import_tokens: dict[str, int] = {}
         self.block_table_updates: set[str] = set()
-        self.transfers_to_send: list[SparseKVPageTransfer] = []
+        self.transfers_to_send: list[HiSparsePageTransfer] = []
         self.pending_transfers: dict[int, _PendingTransfer] = {}
         self.request_states: dict[str, _HiSparseRequestState] = {}
         self.next_transfer_id = 0
@@ -187,7 +187,7 @@ class HiSparseCoordinator:
             self.request_states[request_id] = state
         return state
 
-    def commit_computed_blocks(self, request_id: str, num_host_pages: int) -> None:
+    def record_host_prefix_hit(self, request_id: str, num_host_pages: int) -> None:
         """Account for a prefix hit on host pages the request now references."""
         if not self.resident_managers or self.host_manager is None:
             return
@@ -200,7 +200,7 @@ class HiSparseCoordinator:
         state.num_durable_prefix_pages = max(
             num_host_pages, state.num_durable_prefix_pages
         )
-        self._adopt_gpu_copies(request_id, state, host_blocks[:num_host_pages])
+        self._reclaim_gpu_copies(request_id, state, host_blocks[:num_host_pages])
         state.num_gpu_copy_recorded_pages = max(
             state.num_gpu_copy_recorded_pages, num_host_pages
         )
@@ -244,7 +244,7 @@ class HiSparseCoordinator:
     # GPU copies of published host pages
     # ------------------------------------------------------------------
 
-    def _adopt_gpu_copies(
+    def _reclaim_gpu_copies(
         self,
         request_id: str,
         state: _HiSparseRequestState,
@@ -264,7 +264,7 @@ class HiSparseCoordinator:
             if blocks is None:
                 continue
             for manager, block in zip(self.resident_managers, blocks):
-                if manager.adopt_resident_page(request_id, host_idx, block):
+                if manager.reclaim_resident_page(request_id, host_idx, block):
                     manager.block_pool.touch([block])
                     state.pinned_durable_pages.add(host_idx)
 
@@ -423,7 +423,7 @@ class HiSparseCoordinator:
         host_block_size = self.host_manager.block_size
         num_pages = num_computed_tokens // host_block_size
         importing_pages = cdiv(
-            self._pending_imports.get(request_id, 0), host_block_size
+            self._pending_import_tokens.get(request_id, 0), host_block_size
         )
         state = self._get_request_state(request_id)
         budget = max(self.max_transfers_per_step - len(self.transfers_to_send), 0)
@@ -441,10 +441,10 @@ class HiSparseCoordinator:
                 for manager in self.resident_managers
             ):
                 continue
-            if self._plan_page_transfer(request_id, page_idx, after_forward=True):
+            if self._plan_page_transfer(request_id, page_idx, runs_after_forward=True):
                 budget -= 1
 
-    def publish_when_ready(
+    def publish_when_durable(
         self,
         request: Request,
         num_computed_tokens: int,
@@ -467,9 +467,9 @@ class HiSparseCoordinator:
                 replay_boundaries=replay_boundaries,
             )
             self._record_gpu_copies(request_id, num_computed_tokens)
-            state.publication = None
+            state.pending_publication = None
             return
-        state.publication = _PendingPublication(
+        state.pending_publication = _PendingPublication(
             request=request,
             num_computed_tokens=num_computed_tokens,
             num_pages=num_pages,
@@ -477,11 +477,11 @@ class HiSparseCoordinator:
             replay_boundaries=replay_boundaries,
         )
 
-    def _publish_host_blocks_if_ready(self, request_id: str) -> None:
+    def _publish_deferred_if_durable(self, request_id: str) -> None:
         state = self.request_states.get(request_id)
         if state is None:
             return
-        publication = state.publication
+        publication = state.pending_publication
         if (
             publication is None
             or state.num_durable_prefix_pages < publication.num_pages
@@ -495,18 +495,20 @@ class HiSparseCoordinator:
             replay_boundaries=publication.replay_boundaries,
         )
         self._record_gpu_copies(request_id, publication.num_computed_tokens)
-        state.publication = None
+        state.pending_publication = None
 
     def record_pending_host_import(self, request_id: str, num_tokens: int) -> None:
         """Note a prefix an external load is populating in host pages."""
-        self._pending_imports[request_id] = num_tokens
+        self._pending_import_tokens[request_id] = num_tokens
 
     def finish_host_import(self, request_id: str, *, failed: bool) -> None:
-        num_tokens = self._pending_imports.pop(request_id, None)
+        num_tokens = self._pending_import_tokens.pop(request_id, None)
         if num_tokens is not None and not failed:
-            self.complete_host_import(request_id, num_tokens)
+            self._mark_imported_pages_durable(request_id, num_tokens)
 
-    def complete_host_import(self, request_id: str, num_computed_tokens: int) -> None:
+    def _mark_imported_pages_durable(
+        self, request_id: str, num_computed_tokens: int
+    ) -> None:
         """Publish externally populated host pages after connector completion."""
         if not self.resident_managers:
             return
@@ -519,17 +521,17 @@ class HiSparseCoordinator:
             self._plan_page_transfer(
                 request_id,
                 (num_computed_tokens - 1) // block_size,
-                after_forward=False,
+                runs_after_forward=False,
                 is_restore=True,
             )
-        self._publish_host_blocks_if_ready(request_id)
+        self._publish_deferred_if_durable(request_id)
 
     def _plan_page_transfer(
         self,
         request_id: str,
         page_idx: int,
         *,
-        after_forward: bool,
+        runs_after_forward: bool,
         is_restore: bool = False,
     ) -> bool:
         assert self.host_manager is not None
@@ -555,11 +557,11 @@ class HiSparseCoordinator:
             manager.block_pool.touch([block])
         transfer_id = self.next_transfer_id
         self.next_transfer_id += 1
-        plan = SparseKVPageTransfer(
+        plan = HiSparsePageTransfer(
             transfer_id=transfer_id,
             host_block_id=host_block.block_id,
             resident_block_ids=tuple(block.block_id for block in blocks),
-            after_forward=after_forward,
+            runs_after_forward=runs_after_forward,
             is_restore=is_restore,
         )
         self.pending_transfers[transfer_id] = _PendingTransfer(
@@ -581,12 +583,12 @@ class HiSparseCoordinator:
     def build_row_mirrors(
         self,
         requests: Iterable[tuple[str, int, int]],
-    ) -> tuple[SparseKVRowMirror, ...]:
+    ) -> tuple[HiSparseRowMirror, ...]:
         """Map scheduled rows to scheduler-owned resident and host blocks."""
         if not self.resident_managers or self.host_manager is None:
             return ()
         block_size = self.resident_managers[0].block_size
-        mirrors: list[SparseKVRowMirror] = []
+        mirrors: list[HiSparseRowMirror] = []
         for request_id, num_computed_tokens, num_scheduled_tokens in requests:
             host_blocks = self.host_manager.req_to_blocks.get(request_id)
             resident_blocks = [
@@ -625,7 +627,7 @@ class HiSparseCoordinator:
                     token_position += num_rows
                     continue
                 mirrors.append(
-                    SparseKVRowMirror(
+                    HiSparseRowMirror(
                         source_starts=tuple(source_starts),
                         destination_start=(
                             host_block.block_id * block_size + row_offset
@@ -665,11 +667,11 @@ class HiSparseCoordinator:
         self.block_table_updates.clear()
         return updates
 
-    def build_offload_command(self) -> SparseKVOffloadCommand | None:
+    def build_transfer_command(self) -> HiSparseTransferCommand | None:
         """Package residency decisions for the worker connector."""
         if not self.resident_managers:
             return None
-        command = SparseKVOffloadCommand(page_transfers=self.transfers_to_send)
+        command = HiSparseTransferCommand(page_transfers=self.transfers_to_send)
         self.transfers_to_send = []
         return command
 
@@ -744,7 +746,7 @@ class HiSparseCoordinator:
                     if pending.is_restore:
                         self._record_gpu_copy(request_id, page_idx, pending.host_block)
                 completed_request_ids.add(request_id)
-            elif pending.request_state.publication is not None:
+            elif pending.request_state.pending_publication is not None:
                 if not pending.is_restore:
                     pending.request_state.durable_pages.add(page_idx)
                 self._publish_finished_prefix(pending.request_state)
@@ -754,10 +756,10 @@ class HiSparseCoordinator:
             state = self.request_states[request_id]
             while state.num_durable_prefix_pages in state.durable_pages:
                 state.num_durable_prefix_pages += 1
-            self._publish_host_blocks_if_ready(request_id)
+            self._publish_deferred_if_durable(request_id)
 
     def _publish_finished_prefix(self, state: _HiSparseRequestState) -> None:
-        publication = state.publication
+        publication = state.pending_publication
         if publication is None or state.transfer_id_by_page:
             return
         blocks = publication.leased_host_blocks
@@ -777,15 +779,15 @@ class HiSparseCoordinator:
             kv_cache_group_id=self.host_manager.kv_cache_group_id,
         )
         self.host_manager.block_pool.free_blocks(reversed(blocks))
-        state.publication = None
+        state.pending_publication = None
 
     def free(self, request_id: str) -> None:
         """Detach the request; its durable pages stay readable GPU copies."""
-        self._pending_imports.pop(request_id, None)
+        self._pending_import_tokens.pop(request_id, None)
         state = self.request_states.pop(request_id, None)
         if state is None:
             return
-        publication = state.publication
+        publication = state.pending_publication
         if (
             publication is not None
             and publication.request.is_finished()
@@ -804,7 +806,7 @@ class HiSparseCoordinator:
         else:
             # Preemption can cancel a scheduled forward after its write-backs were
             # planned, so its copies do not prove that the KV was computed.
-            state.publication = None
+            state.pending_publication = None
         for manager in self.resident_managers:
             blocks = manager.req_to_blocks.get(request_id)
             if not blocks:

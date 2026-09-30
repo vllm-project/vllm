@@ -179,7 +179,7 @@ def make_hisparse_kv_cache_config(
         KVCacheGroupSpec(
             ["source"],
             source_spec,
-            role=KVCacheGroupRole.HISPARSE_SOURCE,
+            role=KVCacheGroupRole.HISPARSE_HOST,
             host_resident=True,
         ),
         KVCacheGroupSpec(
@@ -267,7 +267,7 @@ def test_hisparse_async_speculation_mirrors_uncertain_position_range():
     """Unresolved drafts must not leave gaps in the eager host mirror."""
     coordinator = MagicMock(host_group_id=0)
     coordinator.take_block_table_updates.return_value = {}
-    coordinator.build_offload_command.return_value = None
+    coordinator.build_transfer_command.return_value = None
     coordinator.build_row_mirrors.return_value = ()
     scheduler = HiSparseConnectorScheduler(
         async_speculative=True,
@@ -334,7 +334,9 @@ def test_hisparse_host_prefix_can_be_completed_by_indexer_offload():
     tokens = list(range(4 * HISPARSE_BLOCK_SIZE))
     original = make_request("original", tokens, HISPARSE_BLOCK_SIZE, sha256)
     assert manager.allocate_slots(original, num_new_tokens=len(tokens)) is not None
-    transfers = get_hisparse_coordinator(manager).build_offload_command().page_transfers
+    transfers = (
+        get_hisparse_coordinator(manager).build_transfer_command().page_transfers
+    )
     transfer_counts = {transfer.transfer_id: 1 for transfer in transfers}
     get_hisparse_coordinator(manager).update_transfers(transfer_counts, transfer_counts)
     _, indexer_blocks, _, _ = manager.get_blocks(original.request_id).blocks
@@ -364,9 +366,9 @@ def test_hisparse_host_prefix_can_be_completed_by_indexer_offload():
     assert not resident[2].is_null
     assert not resident[3].is_null
     coordinator = get_hisparse_coordinator(manager)
-    assert not coordinator.build_offload_command().page_transfers
+    assert not coordinator.build_transfer_command().page_transfers
     coordinator.finish_host_import(resumed.request_id, failed=False)
-    transfers = coordinator.build_offload_command().page_transfers
+    transfers = coordinator.build_transfer_command().page_transfers
     assert len(transfers) == 1 and transfers[0].is_restore
     assert transfers[0].resident_block_ids == (resident[2].block_id,)
 
@@ -380,7 +382,9 @@ def test_hisparse_indexer_offload_is_capped_by_missing_host_prefix():
     tokens = list(range(4 * HISPARSE_BLOCK_SIZE))
     original = make_request("original", tokens, HISPARSE_BLOCK_SIZE, sha256)
     assert manager.allocate_slots(original, num_new_tokens=len(tokens)) is not None
-    transfers = get_hisparse_coordinator(manager).build_offload_command().page_transfers
+    transfers = (
+        get_hisparse_coordinator(manager).build_transfer_command().page_transfers
+    )
     transfer_counts = {transfer.transfer_id: 1 for transfer in transfers}
     get_hisparse_coordinator(manager).update_transfers(transfer_counts, transfer_counts)
     host_blocks, _, _, _ = manager.get_blocks(original.request_id).blocks
@@ -518,13 +522,13 @@ def test_nixl_hisparse_full_block_import_keeps_a_writable_tail(num_tokens):
     assert all(block.is_null for block in resident[:-1])
     assert not resident[-1].is_null
     coordinator = get_hisparse_coordinator(manager)
-    assert not coordinator.build_offload_command().page_transfers
+    assert not coordinator.build_transfer_command().page_transfers
 
     coordinator.finish_host_import(request.request_id, failed=False)
-    transfers = coordinator.build_offload_command().page_transfers
+    transfers = coordinator.build_transfer_command().page_transfers
     assert len(transfers) == 1
     restore = transfers[0]
-    assert restore.is_restore and not restore.after_forward
+    assert restore.is_restore and not restore.runs_after_forward
     assert restore.host_block_id == host[-1].block_id
     assert restore.resident_block_ids == (resident[-1].block_id,)
     request.num_computed_tokens = count
@@ -566,7 +570,7 @@ def test_hisparse_aborted_tail_restore_retains_both_endpoints():
     host_tail, gpu_tail = host[-1], resident[-1]
     coordinator = get_hisparse_coordinator(manager)
     coordinator.finish_host_import(request.request_id, failed=False)
-    restore = coordinator.build_offload_command().page_transfers[0]
+    restore = coordinator.build_transfer_command().page_transfers[0]
     manager.free(request)
     assert host_tail.ref_cnt == gpu_tail.ref_cnt == 1
     coordinator.update_transfers({restore.transfer_id: 2}, {restore.transfer_id: 1})
@@ -642,9 +646,11 @@ def test_hisparse_writes_back_prefix_without_allocating_hot_blocks():
     assert len(blocks[2]) == 2
     assert blocks[3] == []
 
-    transfers = get_hisparse_coordinator(manager).build_offload_command().page_transfers
+    transfers = (
+        get_hisparse_coordinator(manager).build_transfer_command().page_transfers
+    )
     assert len(transfers) == 2
-    assert all(transfer.after_forward for transfer in transfers)
+    assert all(transfer.runs_after_forward for transfer in transfers)
     resident_blocks = manager.get_blocks(request.request_id).blocks[2]
     assert [block.ref_cnt for block in resident_blocks] == [2, 2]
     transfer_counts = {transfer.transfer_id: 1 for transfer in transfers}
@@ -692,11 +698,11 @@ def test_hisparse_prefix_write_backs_respect_per_step_budget():
     request = make_request("bounded", tokens, HISPARSE_BLOCK_SIZE, sha256)
 
     assert manager.allocate_slots(request, num_new_tokens=len(tokens)) is not None
-    first = coordinator.build_offload_command().page_transfers
+    first = coordinator.build_transfer_command().page_transfers
     assert len(first) == 1
 
     coordinator.plan_write_backs(request.request_id, len(tokens))
-    second = coordinator.build_offload_command().page_transfers
+    second = coordinator.build_transfer_command().page_transfers
     assert len(second) == 1
     assert first[0].transfer_id != second[0].transfer_id
 
@@ -988,7 +994,7 @@ def test_hisparse_host_import_ignores_unsealed_tail():
     manager = make_hisparse_kv_cache_manager(16, 16)
     coordinator = get_hisparse_coordinator(manager)
 
-    coordinator.complete_host_import("partial", HISPARSE_BLOCK_SIZE + 1)
+    coordinator._mark_imported_pages_durable("partial", HISPARSE_BLOCK_SIZE + 1)
 
     state = coordinator.request_states["partial"]
     assert state.durable_pages == {0}
@@ -1039,7 +1045,7 @@ def test_hisparse_capacity_query_does_not_require_hot_blocks():
 
 def _publish_hisparse_pages(manager: KVCacheManager) -> None:
     """Ack all planned write-backs so host pages publish to the prefix cache."""
-    command = get_hisparse_coordinator(manager).build_offload_command()
+    command = get_hisparse_coordinator(manager).build_transfer_command()
     counts = {transfer.transfer_id: 1 for transfer in command.page_transfers}
     get_hisparse_coordinator(manager).update_transfers(counts, counts)
 
@@ -1112,7 +1118,7 @@ def test_mamba_boundary_handoffs_do_not_pin_obsolete_blocks():
     assert all(block.ref_cnt == 0 for block in old_blocks[:-1])
 
 
-def test_hisparse_prefix_hit_adopts_gpu_copies():
+def test_hisparse_prefix_hit_reclaims_gpu_copies():
     """A host prefix hit must come back GPU-resident while its GPU copies survive."""
     manager = make_hisparse_kv_cache_manager(32, 16, enable_caching=True)
     tokens = list(range(4 * HISPARSE_BLOCK_SIZE))
@@ -1201,7 +1207,7 @@ def test_hisparse_cleanup_publishes_only_finalized_terminal_pages(
     request.spec_token_ids = list(range(33, 49))
     assert manager.allocate_slots(request, 49, num_lookahead_tokens=16) is not None
     host_blocks = list(manager.get_blocks(request.request_id).blocks[0])
-    command = coordinator.build_offload_command()
+    command = coordinator.build_transfer_command()
     counts = {transfer.transfer_id: 1 for transfer in command.page_transfers}
     assert len(counts) == 2
     request.status = status
@@ -1226,7 +1232,7 @@ def test_hisparse_terminal_prefix_waits_for_all_workers_and_preserves_identity()
     request = make_request("reused", tokens, HISPARSE_BLOCK_SIZE, sha256)
     assert manager.allocate_slots(request, len(tokens)) is not None
     old_blocks = list(manager.get_blocks(request.request_id).blocks[0])
-    command = coordinator.build_offload_command()
+    command = coordinator.build_transfer_command()
     counts = {transfer.transfer_id: 2 for transfer in command.page_transfers}
     partial = dict.fromkeys(counts, 1)
     first_completions = partial.copy()
@@ -1272,8 +1278,8 @@ def test_hisparse_reset_prefix_cache_drops_copies():
     assert not coordinator.gpu_copies
 
 
-def test_hisparse_evicted_copy_is_not_adopted():
-    """A host prefix hit must not adopt a GPU copy the pool has handed out."""
+def test_hisparse_evicted_copy_is_not_reclaimed():
+    """A host prefix hit must not reclaim a GPU copy the pool has handed out."""
     manager = make_hisparse_kv_cache_manager(32, 16, enable_caching=True)
     tokens = list(range(4 * HISPARSE_BLOCK_SIZE))
     original = make_request("original", tokens, HISPARSE_BLOCK_SIZE, sha256)

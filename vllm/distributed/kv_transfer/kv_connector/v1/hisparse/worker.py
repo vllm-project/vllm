@@ -27,7 +27,7 @@ from vllm.utils.torch_utils import current_stream
 from vllm.v1.core.kv_cache_utils import KVCacheBlockCopy
 from vllm.v1.hisparse.layout import HISPARSE_HOT_SUFFIX
 from vllm.v1.hisparse.runtime import HiSparseCacheHandle, release_pinned_state
-from vllm.v1.hisparse.types import SparseKVPageTransfer, SparseKVRowMirror
+from vllm.v1.hisparse.types import HiSparsePageTransfer, HiSparseRowMirror
 from vllm.v1.kv_cache_interface import (
     HiSparseHotSpec,
     KVCacheConfig,
@@ -55,7 +55,7 @@ class _SlotMappingStaging:
     stream: torch.Stream
     event: torch.Event
     slots: torch.Tensor
-    candidates: tuple[SparseKVRowMirror, ...] = ()
+    candidates: tuple[HiSparseRowMirror, ...] = ()
     num_tokens: int = 0
     source_index: int = 0
 
@@ -85,9 +85,9 @@ def _get_hisparse_cache(
 
 
 def _flatten_row_mirrors(
-    row_mirrors: Mapping[str, tuple[SparseKVRowMirror, ...]],
+    row_mirrors: Mapping[str, tuple[HiSparseRowMirror, ...]],
     request_ids: Sequence[str] | None,
-) -> tuple[SparseKVRowMirror, ...]:
+) -> tuple[HiSparseRowMirror, ...]:
     ordered_ids = row_mirrors if request_ids is None else request_ids
     return tuple(
         mirror
@@ -97,10 +97,10 @@ def _flatten_row_mirrors(
 
 
 def _select_written_row_mirrors(
-    candidates: tuple[SparseKVRowMirror, ...],
+    candidates: tuple[HiSparseRowMirror, ...],
     source_slots: np.ndarray,
     source_index: int,
-) -> tuple[SparseKVRowMirror, ...]:
+) -> tuple[HiSparseRowMirror, ...]:
     """Select and coalesce GPU-written rows from a scheduler-owned envelope."""
     source_slots = source_slots[source_slots >= 0]
     if source_slots.size == 0 or not candidates:
@@ -139,7 +139,7 @@ def _select_written_row_mirrors(
     run_starts = np.concatenate(([0], boundaries))
     run_ends = np.concatenate((boundaries, [destinations.size]))
     return tuple(
-        SparseKVRowMirror(
+        HiSparseRowMirror(
             source_starts=tuple(int(value) for value in sources[start]),
             destination_start=int(destinations[start]),
             num_rows=int(end - start),
@@ -333,7 +333,7 @@ class HiSparseConnectorWorker:
         self._pending_invalid_block_ids: list[int] = []
         # Destination block ids of host copies this worker has run.
         self._completed_host_copy_dst_ids: list[int] = []
-        self._post_forward_transfers: list[SparseKVPageTransfer] = []
+        self._post_forward_transfers: list[HiSparsePageTransfer] = []
         self._enqueued_transfer_ids: list[int] = []
         self._pending_transfer_events: deque[tuple[torch.Event, tuple[int, ...]]] = (
             deque()
@@ -419,13 +419,13 @@ class HiSparseConnectorWorker:
         self._post_forward_transfers = [
             transfer
             for transfer in transfers
-            if not transfer.is_restore and transfer.after_forward
+            if not transfer.is_restore and transfer.runs_after_forward
         ]
         self._submit_transfers(
             [
                 transfer
                 for transfer in transfers
-                if not transfer.is_restore and not transfer.after_forward
+                if not transfer.is_restore and not transfer.runs_after_forward
             ]
         )
         self._pending_invalid_block_ids.extend(metadata.source_block_ids)
@@ -603,7 +603,7 @@ class HiSparseConnectorWorker:
             self._pending_transfer_events.append((completion_event, transfer_ids))
             self._enqueued_transfer_ids.extend(transfer_ids)
 
-    def _set_row_mirrors(self, mirrors: tuple[SparseKVRowMirror, ...]) -> None:
+    def _set_row_mirrors(self, mirrors: tuple[HiSparseRowMirror, ...]) -> None:
         self._row_mirrors = mirrors
         self._row_mirror_destination_starts = np.fromiter(
             (mirror.destination_start for mirror in mirrors),
@@ -717,7 +717,7 @@ class HiSparseConnectorWorker:
 
     def _record_transfer_completion(
         self,
-        transfers: list[SparseKVPageTransfer],
+        transfers: list[HiSparsePageTransfer],
         *,
         stream: torch.Stream | None = None,
     ) -> None:
@@ -734,7 +734,7 @@ class HiSparseConnectorWorker:
         self._pending_transfer_events.append((completion_event, transfer_ids))
         self._enqueued_transfer_ids.extend(transfer_ids)
 
-    def _restore_pages(self, transfers: list[SparseKVPageTransfer]) -> None:
+    def _restore_pages(self, transfers: list[HiSparsePageTransfer]) -> None:
         """Restore imported tails on every rank before its forward or graph replay."""
         if not transfers:
             return
@@ -758,13 +758,13 @@ class HiSparseConnectorWorker:
                     )
         self._record_transfer_completion(transfers, stream=current_stream())
 
-    def _submit_transfers(self, transfers: list[SparseKVPageTransfer]) -> None:
+    def _submit_transfers(self, transfers: list[HiSparsePageTransfer]) -> None:
         if self.cache_handles[0].runtime.eager_host_mirror:
             self._record_transfer_completion(transfers)
         else:
             self._enqueue_transfers(transfers)
 
-    def _enqueue_transfers(self, transfers: list[SparseKVPageTransfer]) -> None:
+    def _enqueue_transfers(self, transfers: list[HiSparsePageTransfer]) -> None:
         if not transfers or not self.is_host_writer:
             return
         num_layers = len(self.cache_handles)

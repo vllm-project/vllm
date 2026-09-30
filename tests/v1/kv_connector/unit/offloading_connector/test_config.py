@@ -593,7 +593,7 @@ def test_hisparse_partial_group_size_survives_scheduler_flattening():
         ["source"],
         _full_attention_spec(),
         host_resident=True,
-        role=KVCacheGroupRole.HISPARSE_SOURCE,
+        role=KVCacheGroupRole.HISPARSE_HOST,
     )
     worker_indexer = KVCacheGroupSpec(
         list(layer_specs), wrapped, role=KVCacheGroupRole.HISPARSE_INDEXER

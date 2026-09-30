@@ -34,7 +34,7 @@ from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.core.kv_cache_utils import KVCacheBlockCopy
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.hisparse.coordinator import get_hisparse_coordinator
-from vllm.v1.hisparse.types import SparseKVOffloadCommand, SparseKVRowMirror
+from vllm.v1.hisparse.types import HiSparseRowMirror, HiSparseTransferCommand
 from vllm.v1.outputs import KVConnectorOutput
 
 if TYPE_CHECKING:
@@ -47,10 +47,10 @@ if TYPE_CHECKING:
 
 @dataclass
 class HiSparseConnectorMetadata(KVConnectorMetadata):
-    command: SparseKVOffloadCommand | None
+    command: HiSparseTransferCommand | None
     host_cow_copies: tuple[KVCacheBlockCopy, ...]
     source_block_ids: tuple[int, ...]
-    row_mirrors: dict[str, tuple[SparseKVRowMirror, ...]]
+    row_mirrors: dict[str, tuple[HiSparseRowMirror, ...]]
     all_context_pages_resident: bool
 
 
@@ -109,7 +109,7 @@ class HiSparseConnectorScheduler:
         scheduler_output.block_table_updates = (
             self.coordinator.take_block_table_updates() or None
         )
-        command = self.coordinator.build_offload_command()
+        command = self.coordinator.build_transfer_command()
         host_cow_copies = self.coordinator.take_host_cow_copies()
         source_group_id = self.coordinator.host_group_id
         assert source_group_id is not None

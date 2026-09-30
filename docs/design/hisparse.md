@@ -54,7 +54,7 @@ to complete host blocks.
 | Import | KV arriving from a P/D prefill node. |
 | Pin / release | Holding or dropping a resident page's allocation reference (`BlockPool.unpin_blocks` in core). |
 | GPU copy | A durable resident page whose reference was released but whose contents stay readable until the pool evicts its block. |
-| Adopt | A host-prefix hit pointing a page at a GPU copy the pool has not yet evicted, instead of reading it from host. |
+| Reclaim | A host-prefix hit taking back a released GPU copy the pool has not yet evicted, re-pinning it instead of reading the page from host. |
 | Evict | The pool handing a released block to another allocation, which destroys any GPU copy it held. |
 
 ## Ownership
@@ -192,7 +192,7 @@ worker.
 HiSparseCoordinator                            HiSparseWorker
           │                                     │
           │ pin resident and host leases        │
-          │── SparseKVPageTransfer ─────────────►│
+          │── HiSparsePageTransfer ─────────────►│
           │                                     │ enqueue GPU-to-host copy
           │◄── enqueued transfer ID ────────────│
           │ replace resident table entry        │
@@ -245,7 +245,7 @@ the same command, output, and cache-resolution boundaries.
 | `HiSparseWorker` | connector-owned worker component | worker-wide transfer scheduling and host-pool lifecycle |
 | `HiSparseRuntime` | plain worker-owned component | per-cache host/hot tensors, GPU LRU, and fused resolution |
 | `HiSparseCacheHandle` | plain attention component | resident view and fused cache resolution |
-| `SparseKVOffloadCommand` | dataclass | opaque scheduler-to-worker work |
+| `HiSparseTransferCommand` | dataclass | opaque scheduler-to-worker work |
 
 ## Performance invariants
 

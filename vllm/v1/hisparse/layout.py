@@ -95,7 +95,7 @@ def _partition_hisparse_specs(
     if not all(isinstance(spec, MLAAttentionSpec) for spec in specs.values()):
         raise ValueError("HiSparse requires its first cache group to contain MLA only.")
 
-    source_specs = {
+    host_specs = {
         name: spec
         for name, spec in specs.items()
         if isinstance(spec, MLAAttentionSpec)
@@ -107,9 +107,9 @@ def _partition_hisparse_specs(
         if isinstance(spec, MLAAttentionSpec)
         and spec.cache_role is SparseCacheRole.INDEXER
     }
-    if not source_specs or not indexer_specs:
+    if not host_specs or not indexer_specs:
         raise ValueError("HiSparse requires sparse-MLA and indexer cache specs.")
-    return source_specs, indexer_specs
+    return host_specs, indexer_specs
 
 
 def get_hisparse_gpu_memory_usage(
@@ -130,9 +130,9 @@ def create_hisparse_layout(
     groups: list[KVCacheGroupSpec],
     host_budget: int,
 ) -> HiSparseLayout:
-    source_specs, indexer_specs = _partition_hisparse_specs(groups)
+    host_specs, indexer_specs = _partition_hisparse_specs(groups)
     block_sizes = {
-        spec.block_size for spec in (*source_specs.values(), *indexer_specs.values())
+        spec.block_size for spec in (*host_specs.values(), *indexer_specs.values())
     }
     if len(block_sizes) != 1:
         raise ValueError("HiSparse requires one resolved GPU block size.")
@@ -158,7 +158,7 @@ def create_hisparse_layout(
     indexer_page = sum(spec.page_size_bytes for spec in indexer_specs.values())
     hot_blocks_per_request = cdiv(config.device_buffer_size, gpu_block_size)
     hot_units: list[list[tuple[str, MLAAttentionSpec]]] = []
-    for layer_name, layer_spec in source_specs.items():
+    for layer_name, layer_spec in host_specs.items():
         if layer_spec.is_index_group_leader or not hot_units:
             hot_units.append([])
         hot_units[-1].append((f"{layer_name}{HISPARSE_HOT_SUFFIX}", layer_spec))
@@ -214,13 +214,13 @@ def create_hisparse_layout(
         append_hot_group(current)
 
     source_group_spec = UniformTypeKVCacheSpecs.from_specs(
-        cast(dict[str, KVCacheSpec], source_specs)
+        cast(dict[str, KVCacheSpec], host_specs)
     )
     assert source_group_spec is not None
     source_group = KVCacheGroupSpec(
-        list(source_specs),
+        list(host_specs),
         source_group_spec,
-        role=KVCacheGroupRole.HISPARSE_SOURCE,
+        role=KVCacheGroupRole.HISPARSE_HOST,
         host_resident=True,
         enable_kv_transfer=True,
     )
@@ -229,7 +229,7 @@ def create_hisparse_layout(
 
     shared_host_pool = use_shared_hisparse_host_pool(vllm_config)
     host_block_stride = get_hisparse_host_block_stride(
-        sum(spec.page_size_bytes for spec in source_specs.values()),
+        sum(spec.page_size_bytes for spec in host_specs.values()),
         use_shared_host_pool=shared_host_pool,
     )
     host_num_blocks = host_budget // host_block_stride

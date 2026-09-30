@@ -492,7 +492,7 @@ class HiSparsePrefillStagingPlan:
     dst_rows: torch.Tensor
     miss_mask: torch.Tensor
     block_size: int
-    # Host rows with a GPU-resident copy (adopted GPU copies): the flat
+    # Host rows with a GPU-resident copy (reclaimed GPU copies): the flat
     # resident-cache row to read instead of DMAing from host, -1 for misses.
     gpu_row_ids: torch.Tensor | None = None
     gpu_source_key: tuple[int, int] | None = None
