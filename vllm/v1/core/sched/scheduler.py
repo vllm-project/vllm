@@ -1621,13 +1621,14 @@ class Scheduler(SchedulerInterface):
 
         Discards the last sampled output token from the prior input chunk.
         """
-        # Current streaming input behaviour: Keep only computed output tokens
-        # (discard final sampled output token).
-        num_computed_tokens = session.num_computed_tokens
+        # Keep the output tokens except the final sampled one. A session
+        # preempted or reclaimed before this fold has num_computed_tokens == 0,
+        # but its tokens are still valid and only need recomputing.
+        keep_end = max(session.num_computed_tokens, session.num_tokens - 1)
         kept_output_tokens = session._all_token_ids[
-            session.num_prompt_tokens : num_computed_tokens
+            session.num_prompt_tokens : keep_end
         ]
-        del session._all_token_ids[num_computed_tokens:]
+        del session._all_token_ids[keep_end:]
         session._output_token_ids.clear()
         assert session.prompt_token_ids is not None
         # Extend prompt with kept output tokens.
