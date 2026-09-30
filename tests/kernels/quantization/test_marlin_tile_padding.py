@@ -437,6 +437,11 @@ def test_mxfp8_marlin_padded_round_trip(shape):
     layer.weight_scale = torch.nn.Parameter(scales, requires_grad=False)
 
     prepare_mxfp8_layer_for_marlin(layer)
+    reload_weight, reload_scale, _ = layer.fp8_marlin_processing_plan.process(
+        weight_fp8, scales
+    )
+    assert torch.equal(reload_weight, layer.weight)
+    assert torch.equal(reload_scale, layer.weight_scale)
 
     x = torch.randn(8, size_k, dtype=dtype, device="cuda") / size_k**0.5
     output = apply_mxfp8_marlin_linear(

@@ -46,6 +46,20 @@ class MarlinMxfp8LinearKernel(Mxfp8LinearKernel):
 
         prepare_mxfp8_layer_for_marlin(layer)
 
+    def process_reload_tensors(
+        self,
+        layer: torch.nn.Module,
+        weight: torch.Tensor,
+        weight_scale: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        plan = getattr(layer, "fp8_marlin_processing_plan", None)
+        if plan is None:
+            raise RuntimeError(
+                "Marlin MXFP8 reload requires a cold-bound processing plan"
+            )
+        weight, weight_scale, _ = plan.process(weight, weight_scale)
+        return weight, weight_scale
+
     def apply_weights(
         self,
         layer: torch.nn.Module,
