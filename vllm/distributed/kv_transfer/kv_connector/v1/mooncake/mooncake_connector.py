@@ -4,6 +4,7 @@ import asyncio
 import itertools
 import logging
 import queue
+import secrets
 import threading
 import time
 from collections import defaultdict
@@ -592,10 +593,6 @@ def _pp_mismatch_hides_packed_layers(
     )
 
 
-# P returns this when a pull omits the KV layout and that version was never stored.
-_LAYOUT_RESEND_ERR = "Mooncake KV layout is not cached"
-
-
 def _get_tensor_dense_flag(tensor: torch.Tensor) -> bool | None:
     is_dense = getattr(tensor, "is_non_overlapping_and_dense", None)
     if callable(is_dense):
@@ -625,9 +622,9 @@ class MooncakeXferMetadata(
     # peer did not send the field, so the run must not be promoted.
     registered_row_offsets: list[int] = msgspec.field(default_factory=list)
     remote_pp_size: int = 1
-    # Incremented by the sender on each register_kv_caches. 0 means the peer
-    # still sends the layout on every pull.
-    layout_version: int = 0
+    # Random per register_kv_caches, so ids never repeat across restarts.
+    # 0 means the peer sends the layout on every pull.
+    layout_id: int = 0
 
 
 def _metadata_includes_layout(meta: MooncakeXferMetadata) -> bool:
@@ -643,6 +640,9 @@ class MooncakeXferResponseStatus(IntEnum):
     CONTINUE = 1
     # Something wrong, see err_msg
     ERROR = 2
+    # P does not hold the layout for this layout_id; resend it.
+    # Only sent for pulls with a nonzero layout_id and no layout.
+    LAYOUT_MISS = 3
 
 
 class MooncakeXferResponse(
@@ -653,6 +653,9 @@ class MooncakeXferResponse(
     ok_reqs: list[ReqId] | None = None
     err_reqs: list[ReqId] | None = None
     err_msg: str | None = None
+    # The pull's layout_id once P holds that layout. D omits the layout only
+    # after seeing it, so a P that predates this field always gets it.
+    layout_id: int = 0
 
 
 @dataclass
@@ -1239,13 +1242,13 @@ class MooncakeConnectorWorker:
             tuple,
             tuple[list[TransferRegion], list[TransferRegion], str | None],
         ] = {}
-        # (host, port, tp_rank, pp_size, tp_size, layout_version) -> regions.
+        # (host, port, tp_rank, pp_size, tp_size, layout_id) -> regions.
         # Filled only after a pull that actually carried the layout.
         self._layout_by_peer: dict[
             tuple, tuple[list[TransferRegion], list[TransferRegion]]
         ] = {}
-        self._kv_layout_version = 0
-        # Decode side: peers that have accepted the current layout version.
+        self._kv_layout_id = 0
+        # Decode side: worker addresses that echoed the current layout_id.
         self._acked_layout_peers: set[str] = set()
         self._logged_xfer_sizes: set[tuple[str, bool]] = set()
 
@@ -1534,14 +1537,30 @@ class MooncakeConnectorWorker:
             )
             await sock.send_multipart((identity, self._encoder.encode(response)))
             return
-        local_regions, remote_regions, prep_err = self._prepare_transfer_regions(meta)
-        if prep_err is not None:
-            response = MooncakeXferResponse(
-                status=MooncakeXferResponseStatus.ERROR,
-                err_msg=prep_err,
+        if meta.layout_id and not _metadata_includes_layout(meta):
+            stored = self._layout_by_peer.get(self._peer_layout_key(meta))
+            if stored is None:
+                response = MooncakeXferResponse(
+                    status=MooncakeXferResponseStatus.LAYOUT_MISS,
+                    err_msg=(
+                        f"Mooncake KV layout {meta.layout_id:#x} from "
+                        f"{meta.remote_hostname}:{meta.remote_port} is not cached."
+                    ),
+                )
+                await sock.send_multipart((identity, self._encoder.encode(response)))
+                return
+            local_regions, remote_regions = stored
+        else:
+            local_regions, remote_regions, prep_err = self._prepare_transfer_regions(
+                meta
             )
-            await sock.send_multipart((identity, self._encoder.encode(response)))
-            return
+            if prep_err is not None:
+                response = MooncakeXferResponse(
+                    status=MooncakeXferResponseStatus.ERROR,
+                    err_msg=prep_err,
+                )
+                await sock.send_multipart((identity, self._encoder.encode(response)))
+                return
         validation_err = _validate_asymmetric_region_lengths(
             local_regions=local_regions,
             remote_regions=remote_regions,
@@ -1602,6 +1621,7 @@ class MooncakeConnectorWorker:
                     status=MooncakeXferResponseStatus.FINISH,
                     err_reqs=list(pending_reqs),
                     err_msg="Timeout waiting for P side ready.",
+                    layout_id=meta.layout_id,
                 )
                 await sock.send_multipart((identity, self._encoder.encode(response)))
                 break
@@ -1692,6 +1712,7 @@ class MooncakeConnectorWorker:
                 ok_reqs=[d_req_id for d_req_id, _ in ok_ready_reqs] or None,
                 err_reqs=err_reqs or None,
                 err_msg=err_msg,
+                layout_id=meta.layout_id,
             )
             await sock.send_multipart((identity, self._encoder.encode(response)))
 
@@ -1989,7 +2010,12 @@ class MooncakeConnectorWorker:
         self.region_shared_groups = []
         self.region_row_offsets = []
         self.opaque_packed_storages = set()
-        self._forget_peer_layouts()
+        self._prepared_transfer_regions.clear()
+        self._layout_by_peer.clear()
+        self._acked_layout_peers.clear()
+        self._logged_xfer_sizes.clear()
+        # Odd, so never 0 (the "layout on every pull" marker).
+        self._kv_layout_id = secrets.randbits(63) | 1
 
         packed_storage_to_region: dict[int, int] = {}
         packed_view_to_region: dict[tuple[int, int, int], int] = {}
@@ -2310,11 +2336,11 @@ class MooncakeConnectorWorker:
         pull_metas: dict[ReqId, PullReqMeta],
     ):
         req_ids = set(pull_metas)
-        # Version 0 peers still attach the layout every time. After registration
-        # the layout is sent once per worker address.
         include_layout = (
-            self._kv_layout_version == 0 or worker_addr not in self._acked_layout_peers
+            not self._kv_layout_id or worker_addr not in self._acked_layout_peers
         )
+        # Each pass either returns or breaks out of the recv loop to resend
+        # the layout after a LAYOUT_MISS.
         while True:
             metadata = self._build_pull_metadata(
                 pull_metas, include_layout=include_layout
@@ -2324,7 +2350,6 @@ class MooncakeConnectorWorker:
             logger.debug(
                 "Sending kv transfer request for %s on path: %s", req_ids, worker_addr
             )
-            resend_layout = False
             try:
                 with make_zmq_socket(
                     self.async_zmq_ctx, worker_addr, zmq.DEALER, bind=False, linger=0
@@ -2337,18 +2362,34 @@ class MooncakeConnectorWorker:
                     while True:
                         ret_msg = await sock.recv()
                         response = self._xfer_resp_decoder.decode(ret_msg)
-                        if response.status == MooncakeXferResponseStatus.ERROR:
-                            err_msg = response.err_msg or "transfer error"
-                            if not include_layout and _LAYOUT_RESEND_ERR in err_msg:
-                                self._acked_layout_peers.discard(worker_addr)
+                        status = response.status
+                        if status == MooncakeXferResponseStatus.LAYOUT_MISS:
+                            self._acked_layout_peers.discard(worker_addr)
+                            if not include_layout:
+                                logger.info(
+                                    "Mooncake prefill %s lost the KV layout; "
+                                    "resending it.",
+                                    worker_addr,
+                                )
                                 include_layout = True
-                                resend_layout = True
                                 break
-                            self._handle_failed_recv(pull_metas, req_ids, err_msg)
+                        if status in (
+                            MooncakeXferResponseStatus.ERROR,
+                            MooncakeXferResponseStatus.LAYOUT_MISS,
+                        ):
+                            self._handle_failed_recv(
+                                pull_metas,
+                                req_ids,
+                                response.err_msg or "transfer error",
+                            )
                             return
-                        self.process_pulling_result(response, pull_metas)
-                        if response.status == MooncakeXferResponseStatus.FINISH:
+                        if (
+                            self._kv_layout_id
+                            and response.layout_id == self._kv_layout_id
+                        ):
                             self._acked_layout_peers.add(worker_addr)
+                        self.process_pulling_result(response, pull_metas)
+                        if status == MooncakeXferResponseStatus.FINISH:
                             return
             except zmq.ContextTerminated:
                 logger.debug(
@@ -2357,8 +2398,6 @@ class MooncakeConnectorWorker:
                 return
             except Exception as e:
                 self._handle_failed_recv(pull_metas, req_ids, f"transfer failed: {e}")
-                return
-            if not resend_layout:
                 return
 
     def _handle_failed_recv(
@@ -2594,20 +2633,9 @@ class MooncakeConnectorWorker:
         )
         cached = self._prepared_transfer_regions.get(cache_key)
         if cached is not None:
+            # A new layout_id can carry a layout this cache already holds.
+            self._remember_peer_layout(meta, cached)
             return cached
-
-        if meta.layout_version > 0 and not _metadata_includes_layout(meta):
-            stored = self._layout_by_peer.get(self._peer_layout_key(meta))
-            if stored is None:
-                return (
-                    [],
-                    [],
-                    (
-                        f"{_LAYOUT_RESEND_ERR} (version {meta.layout_version} from "
-                        f"{meta.remote_hostname}:{meta.remote_port})."
-                    ),
-                )
-            return stored[0], stored[1], None
 
         def finish(
             local: list[TransferRegion],
@@ -2616,8 +2644,6 @@ class MooncakeConnectorWorker:
         ) -> tuple[list[TransferRegion], list[TransferRegion], str | None]:
             prepared = (local, remote, err)
             self._prepared_transfer_regions[cache_key] = prepared
-            if err is None and meta.layout_version > 0:
-                self._layout_by_peer[self._peer_layout_key(meta)] = (local, remote)
             return prepared
 
         shared_groups: list[tuple[int, ...]] | None = self.region_shared_groups
@@ -2702,17 +2728,10 @@ class MooncakeConnectorWorker:
                 n_aligned,
                 len(local_regions),
             )
-        self._prepared_transfer_regions[cache_key] = (
-            local_regions,
-            remote_regions,
-            None,
-        )
-        if meta.layout_version > 0:
-            self._layout_by_peer[self._peer_layout_key(meta)] = (
-                local_regions,
-                remote_regions,
-            )
-        return local_regions, remote_regions, None
+        prepared = (local_regions, remote_regions, None)
+        self._prepared_transfer_regions[cache_key] = prepared
+        self._remember_peer_layout(meta, prepared)
+        return prepared
 
     def _peer_layout_key(self, meta: MooncakeXferMetadata) -> tuple:
         return (
@@ -2721,24 +2740,20 @@ class MooncakeConnectorWorker:
             meta.remote_tp_rank,
             meta.remote_pp_size,
             meta.remote_tp_size,
-            meta.layout_version,
+            meta.layout_id,
         )
 
-    def _forget_peer_layouts(self) -> None:
-        """Drop cached peer layouts. Safe when __init__ was skipped."""
-        prepared = getattr(self, "_prepared_transfer_regions", None)
-        if prepared is not None:
-            prepared.clear()
-        by_peer = getattr(self, "_layout_by_peer", None)
-        if by_peer is not None:
-            by_peer.clear()
-        acked = getattr(self, "_acked_layout_peers", None)
-        if acked is not None:
-            acked.clear()
-        logged = getattr(self, "_logged_xfer_sizes", None)
-        if logged is not None:
-            logged.clear()
-        self._kv_layout_version = getattr(self, "_kv_layout_version", 0) + 1
+    def _remember_peer_layout(
+        self,
+        meta: MooncakeXferMetadata,
+        prepared: tuple[list[TransferRegion], list[TransferRegion], str | None],
+    ) -> None:
+        local_regions, remote_regions, err = prepared
+        if err is None and meta.layout_id:
+            self._layout_by_peer[self._peer_layout_key(meta)] = (
+                local_regions,
+                remote_regions,
+            )
 
     def _build_pull_metadata(
         self,
@@ -2757,7 +2772,7 @@ class MooncakeConnectorWorker:
                 remote_tp_size=self.tp_size,
                 remote_tp_rank=self.tp_rank,
                 remote_pp_size=self.pp_size,
-                layout_version=self._kv_layout_version,
+                layout_id=self._kv_layout_id,
                 req_blocks=req_blocks,
                 kv_caches_base_addr=[],
                 block_lens=[],
@@ -2769,7 +2784,7 @@ class MooncakeConnectorWorker:
             remote_tp_size=self.tp_size,
             remote_tp_rank=self.tp_rank,
             remote_pp_size=self.pp_size,
-            layout_version=self._kv_layout_version,
+            layout_id=self._kv_layout_id,
             req_blocks=req_blocks,
             kv_caches_base_addr=self.kv_caches_base_addr,
             block_lens=self.block_len_per_layer,

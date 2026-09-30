@@ -242,8 +242,11 @@ async def test_build_transfer_params_uses_non_overlapping_physical_pages():
     kv_cache_config = make_hybrid_gdn_kv_cache_config(block_size=16)
     worker = object.__new__(MooncakeConnectorWorker)
     worker.shutdown = noop_shutdown
-    # __new__ skips __init__, where this cache is created. register_kv_caches clears it.
+    # __new__ skips __init__, where these caches are created.
     worker._prepared_transfer_regions = {}
+    worker._layout_by_peer = {}
+    worker._acked_layout_peers = set()
+    worker._logged_xfer_sizes = set()
     worker.use_mla = False
     worker.engine = SimpleNamespace(batch_register_memory=lambda *_: 0)
     worker.is_kv_consumer = True
