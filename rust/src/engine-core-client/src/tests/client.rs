@@ -2291,6 +2291,89 @@ async fn multi_engine_abort_is_grouped_and_utility_fans_out_to_all_engines() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn wake_up_requires_every_engine_to_be_fully_awake() {
+    init_tracing();
+    let ipc = IpcNamespace::new().unwrap();
+    let handshake_address = ipc.handshake_endpoint();
+    let mut engines = Vec::new();
+    for engine_index in 0..2 {
+        let engine = spawn_mock_engine_task(
+            handshake_address.clone(),
+            EngineId::from_engine_index(engine_index).into_frame().to_vec(),
+            move |dealer, push| {
+                Box::pin(async move {
+                    let results = if engine_index == 0 {
+                        [true, false, true]
+                    } else {
+                        [false, true, true]
+                    };
+                    for (attempt, fully_awake) in results.into_iter().enumerate() {
+                        let utility = recv_engine_message(dealer).await;
+                        assert_eq!(utility[0].as_ref(), &[0x03]);
+                        let payload = decode_value(&utility[1]);
+                        let array = payload.as_array().expect("utility payload array");
+                        let call_id = array[1].as_u64().expect("call_id");
+                        assert_eq!(array[2], Value::from("wake_up"));
+                        let tags = if attempt == 1 {
+                            Value::Array(vec![Value::from("weights")])
+                        } else {
+                            Value::Nil
+                        };
+                        assert_eq!(array[3], Value::Array(vec![tags]));
+                        send_outputs(
+                            push,
+                            UtilityCallOutput {
+                                engine_index: u32::from(engine_index),
+                                timestamp: 0.0,
+                                output: UtilityOutput {
+                                    call_id: call_id.into(),
+                                    failure_message: None,
+                                    result: Some(utility_result_value(fully_awake)),
+                                },
+                            }
+                            .into(),
+                        )
+                        .await;
+                    }
+                })
+            },
+        );
+        engines.push(engine);
+    }
+    let client = connect_client_with_ipc(
+        handshake_test_config(
+            handshake_address,
+            2,
+            "test-model",
+            Duration::from_secs(2),
+            5,
+            None,
+        ),
+        &ipc,
+    )
+    .await;
+
+    for (tags, expected) in [
+        (None, false),
+        (Some(vec!["weights".to_owned()]), false),
+        (None, true),
+    ] {
+        assert_eq!(
+            timeout(Duration::from_secs(2), client.wake_up(tags))
+                .await
+                .expect("wake timeout")
+                .expect("wake result"),
+            expected
+        );
+    }
+    for (shutdown_tx, engine_task) in engines {
+        let _ = shutdown_tx.send(());
+        engine_task.await.unwrap();
+    }
+    client.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn collective_rpc_flattens_results_from_all_engines() {
     init_tracing();
     let ipc = IpcNamespace::new().unwrap();
