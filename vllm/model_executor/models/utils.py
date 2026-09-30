@@ -35,7 +35,6 @@ if TYPE_CHECKING:
     from transformers import PreTrainedConfig
     from transformers.conversion_mapping import WeightRenaming
 
-    from vllm.config.model import ModelConfig
     from vllm.model_executor.layers.quantization import QuantizationConfig
 
 logger = init_logger(__name__)
@@ -337,7 +336,7 @@ class AutoWeightsLoader:
         """
         # Add persistent registered buffers.
         # Non-persistent buffers are excluded, matching PyTorch state_dict().
-        non_persistent = getattr(module, "_non_persistent_buffers_set", set())
+        non_persistent: set[str] = getattr(module, "_non_persistent_buffers_set", set())
         for buf_name, buf in module.named_buffers(recurse=False):
             if buf_name not in child_params and buf_name not in non_persistent:
                 child_params[buf_name] = buf
@@ -558,7 +557,7 @@ def maybe_fuse_shared_experts(
 
 
 def get_spec_layer_idx_from_weight_name(
-    config: "ModelConfig", weight_name: str
+    config: "PreTrainedConfig", weight_name: str
 ) -> int | None:
     """Return the MTP layer index a weight belongs to, or None.
 
@@ -587,7 +586,7 @@ def get_spec_layer_idx_from_weight_name(
 
 
 def skip_spec_layers(
-    weights: Iterable[tuple[str, torch.Tensor]], config: "ModelConfig"
+    weights: Iterable[tuple[str, torch.Tensor]], config: "PreTrainedConfig"
 ) -> Iterable[tuple[str, torch.Tensor]]:
     """Drop MTP spec-layer weights (loaded by the MTP head, not the base model).
 
@@ -629,11 +628,11 @@ def init_vllm_registered_model(
 
 
 @overload
-def flatten_bn(x: torch.Tensor) -> torch.Tensor: ...
+def flatten_bn(x: list[torch.Tensor]) -> list[torch.Tensor]: ...
 
 
 @overload
-def flatten_bn(x: list[torch.Tensor]) -> list[torch.Tensor]: ...
+def flatten_bn(x: torch.Tensor) -> torch.Tensor: ...
 
 
 @overload
@@ -845,17 +844,24 @@ class PPMissingLayer(torch.nn.Identity):
         return args[0] if args else next(iter(kwargs.values()))
 
 
-def spec_decode_needs_target_embed(vllm_config: VllmConfig) -> bool:
-    """Whether the last PP rank needs the target input embedding."""
+def spec_decode_needs_target_embed(
+    vllm_config: VllmConfig, *, include_mtp: bool = False
+) -> bool:
+    """Whether the last PP rank needs the target input embedding.
+
+    MTP targets opt in when their drafter supports sharing this embedding.
+    """
     from vllm.distributed.parallel_state import get_pp_group
 
     speculative_config = vllm_config.speculative_config
-    if speculative_config is None or speculative_config.method not in (
+    if speculative_config is None:
+        return False
+    if speculative_config.method not in (
         "eagle",
         "eagle3",
         "dflash",
         "dspark",
-    ):
+    ) and not (include_mtp and speculative_config.method == "mtp"):
         return False
     pp = get_pp_group()
     return pp.world_size > 1 and pp.is_last_rank
@@ -973,7 +979,9 @@ def get_draft_quant_config(vllm_config: VllmConfig) -> "QuantizationConfig | Non
         The draft model's config if available, None otherwise.
 
     """
-    draft_model_config = vllm_config.speculative_config.draft_model_config
+    speculative_config = vllm_config.speculative_config
+    assert speculative_config is not None
+    draft_model_config = speculative_config.draft_model_config
     draft_load_config = vllm_config.load_config
 
     return (

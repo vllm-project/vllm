@@ -26,7 +26,7 @@ from vllm.config.quantization import QuantizationConfigArgs
 from vllm.config.scheduler import RunnerType
 from vllm.config.utils import config, getattr_iter
 from vllm.logger import init_logger
-from vllm.platforms import current_platform
+from vllm.platforms import CpuArchEnum, current_platform
 from vllm.tasks import PoolingTask, ScoreType, SupportedTask
 from vllm.transformers_utils.config import (
     ConfigFormat,
@@ -89,7 +89,6 @@ ConvertOption = Literal["auto", ConvertType]
 TokenizerMode = Literal[
     "auto",
     "hf",
-    "slow",
     "mistral",
     "deepseek_v32",
     "deepseek_v4",
@@ -148,7 +147,6 @@ class ModelConfig:
     - "auto" will use the tokenizer from `mistral_common` for Mistral models
       if available, otherwise it will use the "hf" tokenizer.
     - "hf" will use the fast tokenizer if available.
-    - "slow" will always use the slow tokenizer.
     - "mistral" will always use the tokenizer from `mistral_common`.
     - "deepseek_v32" will always use the tokenizer from `deepseek_v32`.
     - "deepseek_v4" will always use the tokenizer from `deepseek_v4`.
@@ -589,22 +587,27 @@ class ModelConfig:
         self.maybe_pull_model_tokenizer_for_runai(self.model, self.tokenizer)
 
         # If loading model/tokenizer from HF Hub, resolve the revision once
-        # to prevent resolving it multiple times downstream.
-        # If the weights come from a different repo, we cannot eagerly resolve revision
-        weights_from_model = not self.model_weights or self.model_weights == self.model
-        # If the config comes from a different repo, we cannot eagerly resolve revision
-        config_from_model = not self.hf_config_path or self.hf_config_path == self.model
-        can_resolve_model_revision = config_from_model and weights_from_model
-        if can_resolve_model_revision:
-            self.revision = resolve_revision(
-                self.model,
+        # to prevent resolving it multiple times downstream. A resolved revision
+        # only pins the repo it was resolved for, so each repo needs its own call.
+        self.revision = resolve_revision(
+            self.model,
+            self.revision,
+            self.hf_token,
+        )
+
+        # The config can live in another repo, which `self.revision` does not pin.
+        # It stays `None` if the config comes from `self.model`, so that call sites
+        # fall back to `self.revision` the same way they fall back to `self.model`.
+        self._hf_config_revision = None
+        if self.hf_config_path and self.hf_config_path != self.model:
+            self._hf_config_revision = resolve_revision(
+                self.hf_config_path,
                 self.revision,
                 self.hf_token,
             )
 
         if (
-            can_resolve_model_revision
-            and self.tokenizer == self.model
+            self.tokenizer == self.model
             and self.tokenizer_revision == requested_revision
         ):
             self.tokenizer_revision = self.revision
@@ -632,7 +635,7 @@ class ModelConfig:
         hf_config = get_config(
             self.hf_config_path or self.model,
             self.trust_remote_code,
-            self.revision,
+            self._hf_config_revision or self.revision,
             self.code_revision,
             self.config_format,
             hf_overrides_kw=hf_overrides_kw,
@@ -1803,7 +1806,7 @@ class ModelConfig:
             config = try_get_generation_config(
                 self.hf_config_path or self.model,
                 trust_remote_code=self.trust_remote_code,
-                revision=self.revision,
+                revision=self._hf_config_revision or self.revision,
                 code_revision=self.code_revision,
                 config_format=self.config_format,
                 hf_token=self.hf_token,
@@ -1846,6 +1849,8 @@ class ModelConfig:
 
         available_params = [
             "repetition_penalty",
+            "presence_penalty",
+            "frequency_penalty",
             "temperature",
             "top_k",
             "top_p",
@@ -2438,6 +2443,12 @@ def _get_and_verify_dtype(
                 config_dtype,
                 is_pooling_model=is_pooling_model,
             )
+            if (
+                current_platform.is_cpu()
+                and current_platform.get_cpu_architecture() == CpuArchEnum.POWERPC
+                and torch_dtype in (torch.float16, torch.float32)
+            ):
+                torch_dtype = torch.bfloat16
         else:
             if dtype not in _STR_DTYPE_TO_TORCH_DTYPE:
                 raise ValueError(f"Unknown dtype: {dtype!r}")
