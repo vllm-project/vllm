@@ -154,6 +154,24 @@ def nccl_symm_mem_allgather_worker(local_rank: int, world_size: int):
         torch.testing.assert_close(first_output, first_expected, atol=0.0, rtol=0.0)
         torch.testing.assert_close(second_output, second_expected, atol=0.0, rtol=0.0)
 
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            graph_first = cuda_communicator.all_gather(first_input, dim=0)
+            graph_second = cuda_communicator.all_gatherv(
+                second_input, dim=0, sizes=[per_rank_size] * world_size
+            )
+
+        assert graph_first.data_ptr() != graph_second.data_ptr()
+        for iteration in range(2):
+            first_input.fill_(local_rank + 1 + 10 * iteration)
+            second_input.fill_(local_rank + 11 + 10 * iteration)
+            dist.all_gather_into_tensor(first_expected, first_input, group=group)
+            dist.all_gather_into_tensor(second_expected, second_input, group=group)
+            graph.replay()
+            torch.accelerator.synchronize()
+            torch.testing.assert_close(graph_first, first_expected, atol=0.0, rtol=0.0)
+            torch.testing.assert_close(graph_second, second_expected, atol=0.0, rtol=0.0)
+
 
 @pytest.mark.skipif(
     not current_platform.is_cuda(),
@@ -232,6 +250,24 @@ def nccl_symm_mem_reduce_scatter_worker(local_rank: int, world_size: int):
         assert first_output.data_ptr() != second_output.data_ptr()
         torch.testing.assert_close(first_output, first_expected, atol=2.5, rtol=0.1)
         torch.testing.assert_close(second_output, second_expected, atol=2.5, rtol=0.1)
+
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            graph_first = cuda_communicator.reduce_scatter(first_input, dim=0)
+            graph_second = cuda_communicator.reduce_scatterv(
+                second_input, dim=0, sizes=[per_rank_size] * world_size
+            )
+
+        assert graph_first.data_ptr() != graph_second.data_ptr()
+        for iteration in range(2):
+            first_input.fill_(local_rank + 1 + 10 * iteration)
+            second_input.fill_(local_rank + 11 + 10 * iteration)
+            dist.reduce_scatter_tensor(first_expected, first_input, group=group)
+            dist.reduce_scatter_tensor(second_expected, second_input, group=group)
+            graph.replay()
+            torch.accelerator.synchronize()
+            torch.testing.assert_close(graph_first, first_expected, atol=0.0, rtol=0.0)
+            torch.testing.assert_close(graph_second, second_expected, atol=0.0, rtol=0.0)
 
 
 @pytest.mark.skipif(
