@@ -4,23 +4,20 @@
 import logging
 from pathlib import Path
 
-from vllm import envs
-
 
 class NewLineFormatter(logging.Formatter):
     """Adds logging prefix to newlines to align multi-line messages."""
 
-    def __init__(self, fmt, datefmt=None, style="%"):
+    def __init__(self, fmt, datefmt=None, style="%", *, log_level: str | None = None):
         super().__init__(fmt, datefmt, style)
 
-        self.use_relpath = envs.VLLM_LOGGING_LEVEL == "DEBUG"
+        self.use_relpath = log_level == "DEBUG"
         if self.use_relpath:
             self.root_dir = Path(__file__).resolve().parent.parent.parent
 
     def format(self, record):
         def shrink_path(relpath: Path) -> str:
-            """
-            Shortens a file path for logging display:
+            """Shortens a file path for logging display:
             - Removes leading 'vllm' folder if present.
             - If path starts with 'v1',
             keeps the first two and last two levels,
@@ -36,8 +33,10 @@ class NewLineFormatter(logging.Formatter):
 
             Args:
                 relpath (Path): The relative path to be shortened.
+
             Returns:
                 str: The shortened path string for display.
+
             """
             parts = list(relpath.parts)
             new_parts = []
@@ -92,11 +91,20 @@ class ColoredFormatter(NewLineFormatter):
         "CRITICAL": "\033[35m",  # Magenta
     }
     GREY = "\033[90m"  # Grey for timestamp and file info
+    PROCESS_PREFIX_COLOR = "\033[0;36m"
+    PROCESS_PREFIX_RESET = "\033[0;0m"
     RESET = "\033[0m"
 
-    def __init__(self, fmt, datefmt=None, style="%"):
+    def __init__(self, fmt, datefmt=None, style="%", *, log_level: str | None = None):
         # Inject grey color codes into format string for timestamp and file info
         if fmt:
+            # Wrap process prefix with cyan
+            fmt = fmt.replace(
+                "(%(vllm_process_name)s pid=%(process)d)",
+                f"{self.PROCESS_PREFIX_COLOR}"
+                "(%(vllm_process_name)s pid=%(process)d)"
+                f"{self.PROCESS_PREFIX_RESET}",
+            )
             # Wrap %(asctime)s with grey
             fmt = fmt.replace("%(asctime)s", f"{self.GREY}%(asctime)s{self.RESET}")
             # Wrap [%(fileinfo)s:%(lineno)d] with grey
@@ -106,7 +114,7 @@ class ColoredFormatter(NewLineFormatter):
             )
 
         # Call parent __init__ with potentially modified format string
-        super().__init__(fmt, datefmt, style)
+        super().__init__(fmt, datefmt, style, log_level=log_level)
 
     def format(self, record):
         # Store original levelname to restore later (in case record is reused)

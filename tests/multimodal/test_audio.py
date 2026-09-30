@@ -179,7 +179,7 @@ def test_audio_resampler_invalid_method(dummy_audio):
     # Validated eagerly so a bad method fails at construction, not on the
     # first audio request.
     with pytest.raises(ValueError, match="Invalid resampling method"):
-        AudioResampler(target_sr=22050, method="invalid")
+        AudioResampler(target_sr=22050, method="invalid")  # type: ignore[arg-type]
 
 
 def test_audio_resampler_no_target_sr(dummy_audio):
@@ -380,6 +380,7 @@ class TestMultiModalDataParserChannelNormalization:
         result = parser._parse_audio_data((stereo_audio, 16000))
 
         # Check that result is mono (1D)
+        assert result is not None
         audio_item = result.get(0)
         assert audio_item.ndim == 1, f"Expected 1D mono audio, got {audio_item.ndim}D"
         assert audio_item.shape == (3,), f"Expected shape (3,), got {audio_item.shape}"
@@ -406,6 +407,7 @@ class TestMultiModalDataParserChannelNormalization:
         result = parser._parse_audio_data((stereo_audio, 16000))
 
         # Check that result preserves original shape (after resampling)
+        assert result is not None
         audio_item = result.get(0)
         # When target_channels=None, stereo audio should be preserved
         assert audio_item.ndim == 2, f"Expected 2D stereo audio, got {audio_item.ndim}D"
@@ -429,6 +431,7 @@ class TestMultiModalDataParserChannelNormalization:
         ]
 
         # Check that result is still mono (1D)
+        assert result is not None
         audio_item = result.get(0)
         assert audio_item.ndim == 1
         assert audio_item.shape == (16000,)
@@ -452,6 +455,7 @@ class TestMultiModalDataParserChannelNormalization:
         result = parser._parse_audio_data((surround_audio, 16000))
 
         # Check that result is stereo (2 channels)
+        assert result is not None
         audio_item = result.get(0)
         assert audio_item.ndim == 2
         assert audio_item.shape[0] == 2  # 2 channels
@@ -489,6 +493,7 @@ class TestAudioPipelineE2E:
 
         # Process audio through the parser
         result = parser._parse_audio_data((stereo_torchaudio, 16000))
+        assert result is not None
         audio_output = result.get(0)
 
         # Verify output is mono 1D
@@ -518,6 +523,7 @@ class TestAudioPipelineE2E:
 
         # Process audio through the parser
         result = parser._parse_audio_data((stereo_soundfile, 16000))
+        assert result is not None
         audio_output = result.get(0)
 
         # Verify output is mono 1D
@@ -543,6 +549,7 @@ class TestAudioPipelineE2E:
 
         # Process audio through the parser
         result = parser._parse_audio_data((mono_pyav, 16000))
+        assert result is not None
         audio_output = result.get(0)
 
         # Verify output is still mono 1D
@@ -578,6 +585,7 @@ class TestAudioPipelineE2E:
 
         # Process audio through the parser
         result = parser._parse_audio_data((surround_audio, 16000))
+        assert result is not None
         audio_output = result.get(0)
 
         # Verify output is mono 1D
@@ -609,6 +617,7 @@ class TestAudioPipelineE2E:
         # Process audio through the parser
         # Note: Parser expects numpy, so we convert first (simulating real usage)
         result = parser._parse_audio_data((stereo_torch.numpy(), 16000))
+        assert result is not None
         audio_output = result.get(0)
 
         # Verify output is mono 1D numpy array
@@ -636,6 +645,7 @@ class TestAudioPipelineE2E:
 
         # Process audio through the parser
         result = parser._parse_audio_data((stereo_audio, 16000))
+        assert result is not None
         audio_output = result.get(0)
 
         # Verify output preserves stereo (2D)
@@ -660,6 +670,7 @@ class TestAudioPipelineE2E:
 
         # Process audio through the parser
         result = parser._parse_audio_data((stereo_48k, 48000))
+        assert result is not None
         audio_output = result.get(0)
 
         # Verify output is mono 1D at target sample rate
@@ -683,6 +694,7 @@ class TestAudioPipelineE2E:
         )
 
         result = parser._parse_audio_data((short_stereo, 16000))
+        assert result is not None
         audio_output = result.get(0)
 
         # Should still produce mono output
@@ -701,7 +713,6 @@ class TestAudioChunking:
 
     def test_split_audio_short_clip(self):
         """Audio shorter than max_clip_duration_s should not be split."""
-
         # 10 seconds of audio at 16kHz
         audio = np.linspace(-1.0, 1.0, 160000, dtype=np.float32)
 
@@ -718,7 +729,6 @@ class TestAudioChunking:
 
     def test_split_audio_exact_length(self):
         """Audio exactly at max_clip_duration_s should not be split."""
-
         # Exactly 30 seconds at 16kHz
         audio = np.linspace(-1.0, 1.0, 480000, dtype=np.float32)
 
@@ -735,7 +745,6 @@ class TestAudioChunking:
 
     def test_split_audio_long_clip(self):
         """Long audio should be split into multiple chunks."""
-
         # 65 seconds of audio at 16kHz
         audio = np.linspace(-1.0, 1.0, 1040000, dtype=np.float32)
 
@@ -755,7 +764,6 @@ class TestAudioChunking:
 
     def test_split_audio_chunks_have_correct_length(self):
         """Each chunk (except last) should be approximately max_clip_duration_s."""
-
         # 65 seconds of audio at 16kHz
         audio = np.linspace(-1.0, 1.0, 1040000, dtype=np.float32)
 
@@ -847,7 +855,6 @@ class TestAudioChunking:
 
     def test_split_audio_preserves_boundaries(self):
         """Verify first and last samples are preserved when chunking."""
-
         audio = np.arange(1120000, dtype=np.float32)  # 70s at 16kHz
 
         chunks = split_audio(
@@ -899,7 +906,6 @@ class TestAudioChunking:
 
     def test_split_audio_with_different_sample_rates(self):
         """Test chunking works with different sample rates."""
-
         # 40 seconds at 8kHz
         audio_8k = np.linspace(-1.0, 1.0, 320000, dtype=np.float32)
 
