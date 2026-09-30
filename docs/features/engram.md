@@ -123,7 +123,8 @@ pressure is read again on the next miss. By default no prewarm is needed; for
 a fast first request, read the PLE files once after the server has started
 and allocated its KV cache.
 
-Reload is unsupported and fails closed. ROCm and elastic EP reject the key.
+Reload is unsupported and fails closed. Non-CUDA platforms and elastic EP reject
+the key.
 Load paths that do not hand over file-backed safetensors tensors fail at bind
 (`eager`, `.bin`, runai, `fastsafetensors`, `instanttensor`). The multithread
 loader is file-backed and is admitted. `--load-format dummy` serves zeros.
