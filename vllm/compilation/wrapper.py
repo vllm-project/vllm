@@ -12,7 +12,13 @@ from typing import Any, ParamSpec, TypeVar
 import torch
 
 import vllm.envs as envs
-from vllm.config import CompilationMode, CUDAGraphMode, get_current_vllm_config
+from vllm.compilation.counter import compilation_counter
+from vllm.config import (
+    CompilationMode,
+    CUDAGraphMode,
+    VllmConfig,
+    get_current_vllm_config,
+)
 from vllm.config.compilation import DynamicShapesType
 from vllm.logger import init_logger
 from vllm.utils.nvtx_pytorch_hooks import layerwise_nvtx_marker_context
@@ -42,6 +48,17 @@ def _compilation_context() -> Generator[None, None, None]:
     finally:
         torch._dynamo.config.cache_size_limit = original_cache_size
         torch._dynamo.config.accumulated_cache_size_limit = original_accumulated_cache
+
+
+def compile_model_with_stock_torch(
+    model: torch.nn.Module, vllm_config: VllmConfig
+) -> None:
+    from vllm.env_override import _apply_constrain_to_fx_strides_patch
+
+    _apply_constrain_to_fx_strides_patch()
+    backend = vllm_config.compilation_config.init_backend(vllm_config)
+    compilation_counter.stock_torch_compile_count += 1
+    model.compile(fullgraph=True, backend=backend)
 
 
 class TorchCompileWithNoGuardsWrapper:
