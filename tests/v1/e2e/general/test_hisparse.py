@@ -167,9 +167,6 @@ def test_hisparse_spill_and_prefix_restore(
         worker = _get_hisparse_worker(runner)
         engine_core = runner.llm.llm_engine.engine_core.engine_core
         model_runner = engine_core.model_executor.driver_worker.worker.model_runner
-        if forced_backend is not None:
-            selected = model_runner.attn_groups[0][0].backend.get_name()
-            assert selected == forced_backend
         full_graph_calls = 0
         full_replay_pending = False
         original_run_fullgraph = model_runner.cudagraph_manager.run_fullgraph

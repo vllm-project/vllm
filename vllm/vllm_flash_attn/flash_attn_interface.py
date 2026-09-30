@@ -292,12 +292,9 @@ def flash_attn_varlen_func(
         aux_tensors: auxiliary tensors consumed by mask_mod. FA4 only.
         aux_tensor_leading_dims: leading dimensions of each entry in aux_tensors.
         dynamic_causal: optional per-sequence causal offsets. FA4 only.
-        gather_kv_indices: (total_q, gather_kv_length) int32, one KV row list per query
-            token, with `-1` as the "no token" sentinel. Requires q_v, excludes
-            block_table, and gather_kv_length must be a multiple of 128. FA4 only.
-        gather_kv_valid_length: (total_q,) int32, leading real entries per
-            gather_kv_indices row. The kernel attends `round_up(length, 128)`
-            entries, so the rest must be `-1`. Needs gather_kv_indices. FA4 only.
+        gather_kv_indices: (total_q, k) int32 KV rows per query token, `-1` padded,
+            k a multiple of 128. Requires q_v, excludes block_table. FA4 only.
+        gather_kv_valid_length: (total_q,) int32, real entries per row. FA4 only.
 
     Return:
         out: (total, nheads, headdim).
