@@ -5,7 +5,7 @@ ARG VLLM_BRANCH="main"
 ARG COMMON_WORKDIR=/app
 ARG BASE_IMAGE=rocm/vllm-dev:base
 ARG CI_BASE_IMAGE=rocm/vllm-dev:ci_base
-ARG ROCM_TRITON_KERNELS_COMMIT=0f380657dbf3ee86eb57558ff71df24f03b5d4e7
+ARG ROCM_TRITON_KERNELS_COMMIT=669b31acc1dd1b3fd93286afd5db67f65d9f7557
 ARG INSTALL_LMCACHE=false
 # NIC backend for MoRI RDMA support.
 # By default (all), drivers and userspace libraries for all supported NIC types
@@ -948,12 +948,15 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 
 # Install vLLM using uv (inherited from base stage)
 # Note: No -U flag to avoid upgrading PyTorch ROCm to CUDA version
+# Keep OpenTelemetry within LMCache's cap.
 RUN --mount=type=bind,from=export_vllm,src=/,target=/install \
     --mount=type=cache,target=/root/.cache/uv \
     cd /install \
-    && uv pip install --system -r requirements/rocm.txt \
+    && echo "opentelemetry-api<=1.40.0" > /tmp/otel-constraints.txt \
+    && uv pip install --system -c /tmp/otel-constraints.txt -r requirements/rocm.txt \
     && pip uninstall -y vllm \
-    && uv pip install --system *.whl
+    && uv pip install --system -c /tmp/otel-constraints.txt *.whl \
+    && rm /tmp/otel-constraints.txt
 
 # Install NIXL ROCm wheel
 RUN --mount=type=bind,from=build_nixl,src=/app/install,target=/nixl_install \

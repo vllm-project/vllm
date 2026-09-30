@@ -84,7 +84,7 @@ class DeepseekV32Indexer(nn.Module):
             disable_tp=True,
             prefix=f"{prefix}.wk_weights_proj",
         )
-        self.k_norm = LayerNorm(self.head_dim, eps=1e-6)
+        self.k_norm = LayerNorm(self.head_dim, eps=1e-6, dtype=torch.float32)
         self.softmax_scale = self.head_dim**-0.5
 
         self.scale_fmt = "ue8m0"
@@ -495,6 +495,7 @@ class DeepseekV32Attention(MLAAttention):
                     self._vllm_config.parallel_config.cp_kv_cache_interleave_size
                 ),
                 skip_topk_buffer_clear=True,
+                topk_backend=self.indexer.indexer_op.topk_backend,
             )
         self.impl.record_logical_topk_ready()  # type: ignore[attr-defined]
 
