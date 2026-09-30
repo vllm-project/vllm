@@ -292,7 +292,8 @@ impl ClientInner {
         let mut input_send = self.input_send.clone();
         let engine_id = engine_id.clone();
 
-        self.handle
+        let result = match self
+            .handle
             .spawn(async move {
                 transport::send_message(
                     &mut input_send,
@@ -303,7 +304,19 @@ impl ClientInner {
                 )
                 .await
             })
-            .await?
+            .await
+        {
+            Ok(result) => result,
+            Err(error) => Err(error.into()),
+        };
+
+        match result {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                self.close_registries(Arc::new(error));
+                Err(self.closed_error())
+            }
+        }
     }
 
     /// Handle an abort request by sending the abort message to the engine.
@@ -549,6 +562,45 @@ mod tests {
                 ready_response: default_ready_response(),
             }],
         )
+    }
+
+    fn is_transport_error(error: &Error) -> bool {
+        match error {
+            Error::Transport(_) => true,
+            Error::Shared(error) => is_transport_error(error),
+            _ => false,
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn transport_send_failure_closes_client_and_pending_operations() {
+        let inner = test_inner().await;
+        let (engine_id, mut request_rx) =
+            inner.register_request("in-flight".to_string(), None, None).unwrap();
+        let (_, utility_rx) = inner.allocate_and_register_utility_call().unwrap();
+
+        let send_error = inner
+            .send_to_engine(&engine_id, EngineCoreRequestType::Add, &())
+            .await
+            .unwrap_err();
+
+        assert!(is_transport_error(&send_error));
+        assert!(!inner.is_healthy());
+        assert!(is_transport_error(
+            inner.health_error().as_deref().expect("health error recorded")
+        ));
+
+        let request_error = request_rx.recv().await.expect("pending request notified").unwrap_err();
+        assert!(is_transport_error(&request_error));
+
+        let utility_error = utility_rx.await.expect("pending utility call notified").unwrap_err();
+        assert!(is_transport_error(&utility_error));
+
+        let Err(next_request_error) = inner.register_request("new-request".to_string(), None, None)
+        else {
+            panic!("closed client accepted a new request");
+        };
+        assert!(is_transport_error(&next_request_error));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
