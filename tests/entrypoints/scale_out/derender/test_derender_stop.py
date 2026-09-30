@@ -13,8 +13,8 @@ from vllm.entrypoints.scale_out.token_in_token_out.protocol import (
 )
 from vllm.renderers.online_derenderer import (
     OnlineDerenderer,
+    decode_with_stop,
     normalize_stop_strings,
-    output_token_ids_for_text,
     truncate_at_stop_string,
 )
 
@@ -66,14 +66,21 @@ def test_chat_keeps_the_stop_string_when_asked():
     assert choice.stop_reason == "three"
 
 
-def test_chat_stop_token_is_left_out_of_the_text():
-    choice = _chat([1, 2, 3], stop_token_ids=[3])
+def test_chat_token_stop_drops_the_last_id_without_a_client_list():
+    # EOS and end-of-turn ids are added on the server. The client list is a subset.
+    choice = _chat([1, 2, 3])
     assert choice.message.content == "one two"
     assert choice.stop_reason == 3
 
 
-def test_length_finish_keeps_a_matching_stop_token():
-    choice = _chat([1, 2, 3], stop_token_ids=[3], finish_reason="length")
+def test_chat_keeps_the_last_token_when_asked():
+    choice = _chat([1, 2, 3], include_stop_str_in_output=True)
+    assert choice.message.content == "one two three"
+    assert choice.stop_reason == 3
+
+
+def test_length_finish_keeps_the_last_token():
+    choice = _chat([1, 2, 3], finish_reason="length")
     assert choice.message.content == "one two three"
     assert choice.stop_reason is None
 
@@ -106,22 +113,28 @@ def test_streaming_stop_strings_are_rejected_by_the_helper():
 
 
 def test_stop_helpers_match_the_coupled_rule():
-    ids, stopped = output_token_ids_for_text(
+    text, ids, reason = decode_with_stop(
+        _Tokenizer(),
         [1, 2, 3],
+        skip_special_tokens=True,
         finish_reason="stop",
-        stop_token_ids=[3],
+        stop=None,
         include_stop_str_in_output=False,
     )
+    assert text == "one two"
     assert ids == [1, 2]
-    assert stopped == 3
-    kept, kept_reason = output_token_ids_for_text(
+    assert reason == 3
+    kept, kept_ids, kept_reason = decode_with_stop(
+        _Tokenizer(),
         [1, 2, 3],
+        skip_special_tokens=True,
         finish_reason="stop",
-        stop_token_ids=[3],
-        include_stop_str_in_output=True,
+        stop=["three"],
+        include_stop_str_in_output=False,
     )
-    assert kept == [1, 2, 3]
-    assert kept_reason == 3
+    assert kept == "one two "
+    assert kept_ids == [1, 2, 3]
+    assert kept_reason == "three"
     text, reason = truncate_at_stop_string("one two three", ["three"], False)
     assert text == "one two "
     assert reason == "three"

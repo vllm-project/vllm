@@ -57,29 +57,33 @@ def normalize_stop_strings(stop: str | Sequence[str] | None) -> list[str]:
     return [item for item in stop if item]
 
 
-def output_token_ids_for_text(
+def decode_with_stop(
+    tokenizer: TokenizerLike,
     token_ids: Sequence[int],
     *,
+    skip_special_tokens: bool,
     finish_reason: str | None,
-    stop_token_ids: Sequence[int] | None,
+    stop: str | Sequence[str] | None,
     include_stop_str_in_output: bool,
-) -> tuple[list[int], int | None]:
-    """Drop a trailing stop token before text is decoded.
+) -> tuple[str, list[int], int | str | None]:
+    """Decode output text, then apply the engine's stop rule.
 
-    The generate host keeps that id in ``token_ids``. The coupled server
-    leaves it out of the text when ``include_stop_str_in_output`` is false.
+    A matched stop string wins. Otherwise a token stop drops the last id.
+    The client's stop_token_ids list is a subset of the ids the engine uses.
     """
     ids = list(token_ids)
-    if (
-        finish_reason != "stop"
-        or not ids
-        or not stop_token_ids
-        or ids[-1] not in stop_token_ids
-    ):
-        return ids, None
+    text = tokenizer.decode(ids, skip_special_tokens=skip_special_tokens)
+    text, stopped_str = truncate_at_stop_string(text, stop, include_stop_str_in_output)
+    if stopped_str is not None:
+        return text, ids, stopped_str
+    if finish_reason != "stop" or not ids:
+        return text, ids, None
+    stopped_token = ids[-1]
     if include_stop_str_in_output:
-        return ids, ids[-1]
-    return ids[:-1], ids[-1]
+        return text, ids, stopped_token
+    ids = ids[:-1]
+    text = tokenizer.decode(ids, skip_special_tokens=skip_special_tokens)
+    return text, ids, stopped_token
 
 
 def truncate_at_stop_string(
@@ -196,13 +200,22 @@ class OnlineDerenderer:
                 else False
             )
             stop = chat_request.stop if chat_request is not None else None
-            stop_token_ids = (
-                chat_request.stop_token_ids if chat_request is not None else None
+            use_parser = self.parser is not None and chat_request is not None
+            skip_special = (
+                False
+                if use_parser
+                else (
+                    chat_request.skip_special_tokens
+                    if chat_request is not None
+                    else True
+                )
             )
-            token_ids, stopped_token = output_token_ids_for_text(
+            decoded_text, token_ids, stop_reason = decode_with_stop(
+                tokenizer,
                 choice.token_ids,
+                skip_special_tokens=skip_special,
                 finish_reason=choice.finish_reason,
-                stop_token_ids=stop_token_ids,
+                stop=stop,
                 include_stop_str_in_output=include_stop,
             )
 
@@ -213,14 +226,8 @@ class OnlineDerenderer:
             )
 
             if self.parser is not None and chat_request is not None:
-                # Parser path: decode with special tokens preserved
-                # so the parser can see markers like </think>,
-                # <tool_call>, or Harmony channel tokens.
-                decoded_text = tokenizer.decode(token_ids, skip_special_tokens=False)
-                decoded_text, stopped_str = truncate_at_stop_string(
-                    decoded_text, stop, include_stop
-                )
-
+                # Parser path keeps special-token markers so the parser can
+                # see </think>, <tool_call>, or Harmony channel tokens.
                 chat_template_kwargs: dict[str, Any] = {}
                 if not self.use_harmony:
                     chat_template_kwargs = (
@@ -274,22 +281,8 @@ class OnlineDerenderer:
                     tool_calls=tc_items,
                 )
             else:
-                # No parser: plain detokenization honouring the request's
-                # skip_special_tokens (default True when no request was given).
-                skip_special = (
-                    chat_request.skip_special_tokens
-                    if chat_request is not None
-                    else True
-                )
-                decoded_text = tokenizer.decode(
-                    token_ids, skip_special_tokens=skip_special
-                )
-                decoded_text, stopped_str = truncate_at_stop_string(
-                    decoded_text, stop, include_stop
-                )
                 message = ChatMessage(role="assistant", content=decoded_text)
 
-            stop_reason = stopped_str if stopped_str is not None else stopped_token
             choices.append(
                 ChatCompletionResponseChoice(
                     index=choice.index,
@@ -756,24 +749,14 @@ class OnlineDerenderer:
                 stop = (
                     completion_request.stop if completion_request is not None else None
                 )
-                stop_token_ids = (
-                    completion_request.stop_token_ids
-                    if completion_request is not None
-                    else None
-                )
-                token_ids, stopped_token = output_token_ids_for_text(
+                decoded_text, _, stop_reason = decode_with_stop(
+                    tokenizer,
                     choice.token_ids,
+                    skip_special_tokens=skip_special,
                     finish_reason=choice.finish_reason,
-                    stop_token_ids=stop_token_ids,
+                    stop=stop,
                     include_stop_str_in_output=include_stop,
                 )
-                decoded_text = tokenizer.decode(
-                    token_ids, skip_special_tokens=skip_special
-                )
-                decoded_text, stopped_str = truncate_at_stop_string(
-                    decoded_text, stop, include_stop
-                )
-                stop_reason = stopped_str if stopped_str is not None else stopped_token
                 completion_logprobs = None
                 if choice.logprobs is not None:
                     resolved = _resolve_logprobs(choice.logprobs, tokenizer)
