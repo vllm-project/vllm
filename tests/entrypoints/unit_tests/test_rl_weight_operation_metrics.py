@@ -8,12 +8,14 @@ from contextlib import nullcontext
 from types import SimpleNamespace
 
 import pytest
-from fastapi import HTTPException
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
 from prometheus_client import REGISTRY, CollectorRegistry
 
 from vllm.entrypoints.serve.dev.rlhf import api_router
 from vllm.entrypoints.serve.dev.rlhf import metrics as rlhf_metrics
 from vllm.entrypoints.serve.dev.rlhf.metrics import WeightOperationMetrics
+from vllm.entrypoints.serve.exception_handling.register import init_exception_handler
 from vllm.v1.metrics.prometheus import get_prometheus_registry
 
 pytestmark = [pytest.mark.cpu_test, pytest.mark.skip_global_cleanup]
@@ -27,12 +29,8 @@ def sample(registry, name, operation):
 
 
 class Request:
-    def __init__(self, engine, body=None):
+    def __init__(self, engine):
         self.app = SimpleNamespace(state=SimpleNamespace(engine_client=engine))
-        self._body = body
-
-    async def json(self):
-        return self._body
 
 
 class Engine:
@@ -84,7 +82,7 @@ def test_record_releases_in_flight_and_observes_duration(registry, fail):
 )
 async def test_route_records_its_operation(registry, operation, route, body):
     engine = Engine()
-    task = asyncio.create_task(route(Request(engine, body)))
+    task = asyncio.create_task(route(Request(engine), **(body or {})))
     await engine.started.wait()
     assert sample(registry, IN_FLIGHT, operation) == 1
     engine.release.set()
@@ -97,7 +95,7 @@ async def test_route_records_its_operation(registry, operation, route, body):
 async def test_cancelled_route_releases_in_flight(registry):
     engine = Engine()
     task = asyncio.create_task(
-        api_router.update_weights(Request(engine, {"update_info": {}}))
+        api_router.update_weights(Request(engine), update_info={})
     )
     await engine.started.wait()
     task.cancel()
@@ -143,10 +141,14 @@ def test_in_flight_is_summed_across_api_server_processes(tmp_path, monkeypatch):
     assert sample(scraped, DURATION, "update") == 2
 
 
-@pytest.mark.asyncio
-async def test_rejected_request_is_not_recorded(registry):
-    with pytest.raises(HTTPException):
-        await api_router.update_weights(Request(Engine(), {}))
+def test_rejected_request_is_not_recorded(registry):
+    app = FastAPI()
+    app.include_router(api_router.router)
+    init_exception_handler(app)
+    app.state.engine_client = Engine()
+    app.state.args = SimpleNamespace(log_error_stack=False)
+    response = TestClient(app).post("/update_weights", json={})
+    assert response.status_code == 400
     assert sample(registry, DURATION, "update") is None
 
 
