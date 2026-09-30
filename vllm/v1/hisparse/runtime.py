@@ -19,7 +19,7 @@ from vllm.distributed import get_tp_group
 from vllm.forward_context import get_forward_context, in_piecewise_cudagraph
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
-from vllm.utils.math_utils import round_up
+from vllm.utils.math_utils import cdiv, round_up
 from vllm.utils.mem_utils import get_max_shared_memory_bytes
 from vllm.utils.torch_utils import current_stream
 from vllm.v1.attention.backend import max_decode_query_len
@@ -164,9 +164,12 @@ def _check_residency_shared_memory(
     device: torch.device, config: ResolvedHiSparseConfig
 ) -> None:
     """Reject a config whose residency resolver exceeds per-block shared memory."""
-    required = torch.ops._C_cache_ops.hisparse_resolve_residency_smem_bytes(
-        config.device_buffer_size, config.max_union_rows
-    )
+    # Mirrors hisparse_resolve_residency's layout: union hash keys and values
+    # (plus an empty slot), per-chunk offsets, five counters, done bits, and
+    # the int16 compacted LRU.
+    hot_size = config.device_buffer_size
+    num_chunks = cdiv(hot_size, 32)
+    required = 4 * (2 * (config.max_union_rows + 1) + 3 * num_chunks + 7) + 2 * hot_size
     device_index = (
         device.index
         if device.index is not None

@@ -952,19 +952,6 @@ void hisparse_invalidate_written_slots(
                   cudaGetErrorString(launch_error));
 }
 
-int64_t hisparse_resolve_residency_smem_bytes(int64_t hot_size,
-                                              int64_t max_union_rows) {
-  // hisparse_resolve_residency_kernel's layout: hash keys and values for the
-  // union bound plus a spare empty slot, per-chunk offsets, counters and done
-  // bits, then the int16 compacted LRU.
-  const int64_t hash_size = max_union_rows + 1;
-  const int64_t num_buffer_chunks = (hot_size + kWarpSize - 1) / kWarpSize;
-  return static_cast<int64_t>(sizeof(int32_t)) *
-             (2 * hash_size + 2 * (num_buffer_chunks + 1) + kResidencyCounters +
-              num_buffer_chunks) +
-         static_cast<int64_t>(sizeof(int16_t)) * hot_size;
-}
-
 void hisparse_resolve_residency(
     torch::stable::Tensor const& host_cache, torch::stable::Tensor& hot_cache,
     torch::stable::Tensor const& hot_block_table,
@@ -1229,8 +1216,11 @@ void hisparse_resolve_residency(
                   max_union_rows);
   // One spare entry above the union bound keeps every probe sequence finite.
   const int hash_size = static_cast<int>(max_union_rows) + 1;
-  const size_t smem_bytes = static_cast<size_t>(
-      hisparse_resolve_residency_smem_bytes(hot_size, max_union_rows));
+  const int num_buffer_chunks = (hot_size + kWarpSize - 1) / kWarpSize;
+  const size_t smem_bytes =
+      sizeof(int32_t) * (2 * hash_size + 2 * (num_buffer_chunks + 1) +
+                         kResidencyCounters + num_buffer_chunks) +
+      sizeof(int16_t) * hot_size;
 
   const torch::stable::accelerator::DeviceGuard device_guard(
       hot_cache.get_device_index());
