@@ -931,6 +931,8 @@ void launch_gemm_q4_deterministic(const T* a, const uint32_t* b_q_weight,
 torch::Tensor gptq_gemm_rdna3_wmma(torch::Tensor a, torch::Tensor b_q_weight,
                                    torch::Tensor b_qzeros,
                                    torch::Tensor b_scales, bool use_v2_format);
+bool gptq_gemm_rdna3_dec16_fits(int64_t size_m, int64_t size_n, int64_t size_k,
+                                int64_t groups);
 
 torch::Tensor gptq_gemm_rdna3(torch::Tensor a, torch::Tensor b_q_weight,
                               torch::Tensor b_qzeros, torch::Tensor b_scales,
@@ -990,9 +992,22 @@ torch::Tensor gptq_gemm_rdna3(torch::Tensor a, torch::Tensor b_q_weight,
   // fills in the dimension it has to spare. A shape-aware dispatch is where the
   // rest of the performance is; it is not done here because tuning that needs a
   // machine that is not also serving traffic.
+  //
+  // M in [5, 16] goes to the dec16 kernel when the shape fits it: WMMA with
+  // the weights loaded straight into B fragments, exact (raw nibbles, scale
+  // and zero folded in fp32). On the shapes above it is 7% faster than the
+  // scalar path at M=6 and 39% faster than the older WMMA kernels at M=16,
+  // with ~35% less error against fp64 than the latter; the scalar path keeps
+  // M <= 4.
   constexpr int64_t WMMA_MIN_M = 12;
-  if (a.dim() == 2 && b_q_weight.dim() == 2 && a.size(1) % 16 == 0 &&
-      b_q_weight.size(1) % 16 == 0 && a.size(0) >= WMMA_MIN_M) {
+  constexpr int64_t DEC16_MIN_M = 5;
+  const bool dec16 = a.dim() == 2 && b_q_weight.dim() == 2 &&
+                     a.scalar_type() == torch::kHalf &&
+                     a.size(0) >= DEC16_MIN_M && a.size(0) <= 16 &&
+                     gptq_gemm_rdna3_dec16_fits(a.size(0), b_q_weight.size(1),
+                                                a.size(1), b_scales.size(0));
+  if (dec16 || (a.dim() == 2 && b_q_weight.dim() == 2 && a.size(1) % 16 == 0 &&
+                b_q_weight.size(1) % 16 == 0 && a.size(0) >= WMMA_MIN_M)) {
     return gptq_gemm_rdna3_wmma(a, b_q_weight, b_qzeros, b_scales,
                                 use_v2_format);
   }

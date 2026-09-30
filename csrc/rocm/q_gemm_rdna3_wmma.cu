@@ -2259,8 +2259,7 @@ __global__ void __launch_bounds__(128) gemm_q4_wmma_kernel_128x128(
   };
   auto store_dq = [&](int buf) __attribute__((always_inline)) {
     if (!dq_ok) return;
-    const uint32_t zero_v =
-        ((r_qz >> dq_zshift) & 0xF) + (uint32_t)zero_offset;
+    const uint32_t zero_v = ((r_qz >> dq_zshift) & 0xF) + (uint32_t)zero_offset;
     half2 ch_z, ch_y;
     prep_zero_scale_fp16_precise(zero_v, r_sc, ch_z, ch_y);
   #pragma unroll
@@ -2277,8 +2276,7 @@ __global__ void __launch_bounds__(128) gemm_q4_wmma_kernel_128x128(
   int a_off[4];
   #pragma unroll
   for (int mi = 0; mi < 4; mi++)
-    a_off[mi] =
-        min(m_tile + wm * 64 + mi * 16 + lane_lo, size_m - 1) * size_k;
+    a_off[mi] = min(m_tile + wm * 64 + mi * 16 + lane_lo, size_m - 1) * size_k;
   V16 af[4];
   #pragma unroll
   for (int mi = 0; mi < 4; mi++)
@@ -2368,12 +2366,204 @@ __global__ void gemm_q4_wmma_kernel_128x128(const T*, const uint32_t*,
                                             const int, const int, float*) {}
 #endif
 
+// ===========================================================================
+// Decode kernel (fp16, M <= 16): the weights go straight from global memory
+// into WMMA B fragments, with no LDS staging and no split-K partials.
+//
+// A wave owns 64 columns as four 16-column WMMA tiles whose columns are
+// interleaved: lane c holds column 4c + t of tile t, so one 16-byte load (4
+// columns x 8 K of one packed row) gives a lane its column of all four tiles.
+// Per 16-K step the low half of the wave loads packed row 2s and the high
+// half row 2s + 1; a permlanex16 swaps the halves, so every lane has the 16 K
+// of its four columns. The nibbles become raw magic halves (1024 + q, exact
+// in fp16); per 32-K group the WMMA accumulates them, a WMMA against ones
+// gives sum_k(a) per row in the same layout, and scale and zero are folded
+// in fp32 per column:
+//   c += s * acc - s * (1024 + zero) * sum_k(a)
+// The 8 waves of a block split K in 8 contiguous parts and meet in LDS.
+// ===========================================================================
+#if defined(__HIP__RDNA3__) || !defined(__HIP_DEVICE_COMPILE__)
+__device__ __forceinline__ uint32_t d16_xhalf(uint32_t v) {
+  return __builtin_amdgcn_permlanex16(v, v, 0x76543210u, 0xFEDCBA98u, false,
+                                      false);
+}
+// 8 packed nibbles of one column (K 0..7) -> 8 magic halves in K order.
+__device__ __forceinline__ void d16_magic(uint32_t w, uint32_t (&h)[4]) {
+  h[0] = (w & 0x000F000Fu) | 0x64006400u;
+  h[1] = ((w >> 4) & 0x000F000Fu) | 0x64006400u;
+  h[2] = ((w >> 8) & 0x000F000Fu) | 0x64006400u;
+  h[3] = ((w >> 12) & 0x000F000Fu) | 0x64006400u;
+}
+
+template <typename T>
+__global__ void __launch_bounds__(256)
+    gemm_q4_wmma_kernel_dec16(const T* __restrict__ a,
+                              const uint32_t* __restrict__ b_q,
+                              const uint32_t* __restrict__ b_qzeros,
+                              const T* __restrict__ b_scales, T* __restrict__ c,
+                              const int size_m, const int size_n,
+                              const int size_k, const int groups,
+                              const int zero_offset) {
+  constexpr int PF = 4;  // 16-K steps in flight
+  const int tid = threadIdx.x, lane = tid & 31;
+  const int wave = __builtin_amdgcn_readfirstlane(tid >> 5);
+  const int lane_lo = lane & 15, lane_hi = lane >> 4;
+  const int n0 = blockIdx.x * 64 + 4 * lane_lo;  // this lane's 4 columns
+  const int kpart = size_k / 8;
+  const int k0 = wave * kpart;
+  const int nst = kpart / 16;
+  const int gs = size_k / groups;
+
+  __shared__ float sRed[8][32][33];
+
+  const uint32_t* bp = b_q + (long)(k0 / 8 + lane_hi) * size_n + n0;
+  const bool a_ok = lane_lo < size_m;
+  const T* ap = a + (long)min(lane_lo, size_m - 1) * size_k + k0;
+  uint4 rb[PF];
+  v16fp16 ra[PF];
+  auto load = [&](int st, int slot) {
+    rb[slot] = *(const uint4*)(bp + (long)st * 2 * size_n);
+    if (a_ok)
+      __builtin_memcpy(&ra[slot], ap + 16 * st, sizeof(v16fp16));
+    else
+      for (int i = 0; i < 16; ++i) ra[slot][i] = (_Float16)0.0f;
+  };
+  // Group data: scales of the 4 columns (8 bytes) and their zero nibbles.
+  const uint32_t* zp = b_qzeros + n0 / 8;
+  const int zsh = (n0 & 7) * 4;
+  auto group_sz = [&](int g, float (&s)[4], float (&zz)[4]) {
+    const uint2 sv = *(const uint2*)(b_scales + (long)g * size_n + n0);
+    const uint32_t zw = zp[(long)g * (size_n / 8)] >> zsh;
+    const T* sh = reinterpret_cast<const T*>(&sv);
+  #pragma unroll
+    for (int t = 0; t < 4; ++t) {
+      s[t] = (float)sh[t];
+      zz[t] =
+          -s[t] *
+          (1024.0f + (float)(((zw >> (4 * t)) & 0xF) + (uint32_t)zero_offset));
+    }
+  };
+
+  v16fp16 ones;
+  #pragma unroll
+  for (int i = 0; i < 16; ++i) ones[i] = (_Float16)1.0f;
+  v8fp32 cacc[4], acc[4], sa;
+  #pragma unroll
+  for (int t = 0; t < 4; ++t)
+    for (int i = 0; i < 8; ++i) cacc[t][i] = acc[t][i] = 0.0f;
+  for (int i = 0; i < 8; ++i) sa[i] = 0.0f;
+
+  #pragma unroll
+  for (int p = 0; p < PF; ++p)
+    if (p < nst) load(p, p);
+  float gs_s[4], gs_z[4];
+  group_sz(k0 / gs, gs_s, gs_z);
+
+  for (int s0 = 0; s0 < nst; s0 += PF) {
+  #pragma unroll
+    for (int p = 0; p < PF; ++p) {
+      const int st = s0 + p;
+      if (st < nst) {
+        const uint4 w = rb[p];
+        const v16fp16 af = ra[p];
+        if (st + PF < nst) load(st + PF, p);
+        const uint32_t mine[4] = {w.x, w.y, w.z, w.w};
+        uint32_t lo8[4], hi8[4];
+  #pragma unroll
+        for (int t = 0; t < 4; ++t) {
+          const uint32_t o = d16_xhalf(mine[t]);
+          lo8[t] = lane_hi ? o : mine[t];
+          hi8[t] = lane_hi ? mine[t] : o;
+        }
+  #pragma unroll
+        for (int t = 0; t < 4; ++t) {
+          uint32_t h[8];
+          d16_magic(lo8[t], *reinterpret_cast<uint32_t (*)[4]>(&h[0]));
+          d16_magic(hi8[t], *reinterpret_cast<uint32_t (*)[4]>(&h[4]));
+          v16fp16 bf;
+          __builtin_memcpy(&bf, h, sizeof(bf));
+          acc[t] = wmma_mma(af, bf, acc[t]);
+        }
+        sa = wmma_mma(af, ones, sa);
+        // End of a 32-K group: fold it with its scale and zero.
+        const int k_next = k0 + 16 * (st + 1);
+        if ((k_next % gs) == 0 || st + 1 == nst) {
+  #pragma unroll
+          for (int t = 0; t < 4; ++t) {
+  #pragma unroll
+            for (int i = 0; i < 8; ++i) {
+              cacc[t][i] += gs_s[t] * acc[t][i] + gs_z[t] * sa[i];
+              acc[t][i] = 0.0f;
+            }
+          }
+          for (int i = 0; i < 8; ++i) sa[i] = 0.0f;
+          if (st + 1 < nst) group_sz(k_next / gs, gs_s, gs_z);
+        }
+      }
+    }
+  }
+
+  // The 8 K parts meet: wave t (< 4) sums tile t.
+  #pragma unroll
+  for (int t = 0; t < 4; ++t)
+  #pragma unroll
+    for (int i = 0; i < 8; ++i) sRed[wave][lane][8 * t + i] = cacc[t][i];
+  __syncthreads();
+  if (wave >= 4) return;
+  const int t = wave;
+  #pragma unroll
+  for (int i = 0; i < 8; ++i) {
+    float v = 0.0f;
+  #pragma unroll
+    for (int w = 0; w < 8; ++w) v += sRed[w][lane][8 * t + i];
+    const int m = 2 * i + lane_hi;
+    if (m < size_m) c[(long)m * size_n + n0 + t] = __float2half_rn(v);
+  }
+}
+#else
+template <typename T>
+__global__ void gemm_q4_wmma_kernel_dec16(const T*, const uint32_t*,
+                                          const uint32_t*, const T*, T*,
+                                          const int, const int, const int,
+                                          const int, const int) {}
+#endif
+
+// Shapes the dec16 kernel covers: one 16-row tile, 64-column blocks, K split
+// in 8 parts that start on group boundaries.
+inline bool dec16_fits(int size_m, int size_n, int size_k, int groups) {
+  const int gs = size_k / groups;
+  return size_m <= 16 && size_n % 64 == 0 && size_k % 256 == 0 &&
+         gs % 32 == 0 && (size_k / 8) % gs == 0;
+}
+
+// fp16 decode with M <= 16 on the dec16 kernel; false if the shape does not
+// fit it (caller falls back).
+template <typename T>
+bool launch_gemm_q4_wmma_dec16(const T* a, const uint32_t* b_q_weight,
+                               const uint32_t* b_qzeros, const T* b_scales,
+                               T* c, int size_m, int size_n, int size_k,
+                               int groups, int zero_offset,
+                               cudaStream_t stream) {
+  if constexpr (!std::is_same<T, half>::value) {
+    return false;
+  } else {
+    if (!dec16_fits(size_m, size_n, size_k, groups)) return false;
+    gemm_q4_wmma_kernel_dec16<T><<<dim3(size_n / 64), dim3(256), 0, stream>>>(
+        a, b_q_weight, b_qzeros, b_scales, c, size_m, size_n, size_k, groups,
+        zero_offset);
+    return true;
+  }
+}
+
 template <typename T>
 void launch_gemm_q4_wmma_64x64_4w(const T* a, const uint32_t* b_q_weight,
                                   const uint32_t* b_qzeros, const T* b_scales,
                                   T* c, int size_m, int size_n, int size_k,
                                   int groups, int zero_offset,
                                   cudaStream_t stream) {
+  if (launch_gemm_q4_wmma_dec16<T>(a, b_q_weight, b_qzeros, b_scales, c, size_m,
+                                   size_n, size_k, groups, zero_offset, stream))
+    return;
   // Fall back to v4 when N < 64 (would waste 1+ waves on out-of-range cols).
   if (size_m < 64 || size_n < 64) {
     launch_gemm_q4_wmma_64x32_4w<T>(a, b_q_weight, b_qzeros, b_scales, c,
@@ -2585,4 +2775,13 @@ torch::Tensor gptq_gemm_rdna3_wmma(torch::Tensor a, torch::Tensor b_q_weight,
   }
 
   return c;
+}
+
+// Whether the fp16 decode kernel (dec16) takes an [M, K] x [K, N] GEMM with
+// this many quantization groups; the scalar entry sends M in [5, 16] to the
+// WMMA path only when it does.
+bool gptq_gemm_rdna3_dec16_fits(int64_t size_m, int64_t size_n, int64_t size_k,
+                                int64_t groups) {
+  return vllm::gptq_rdna3_wmma::dec16_fits((int)size_m, (int)size_n,
+                                           (int)size_k, (int)groups);
 }
