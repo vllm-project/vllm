@@ -786,6 +786,105 @@ def test_flashinfer_mm_prefix_fp8_keeps_model_dtype_query(
         assert impl.supports_quant_query_input == fused == (major == 10)
 
 
+@pytest.mark.parametrize("fp8_query", [False, True])
+def test_flashinfer_trtllm_scales_follow_query_and_kv(fp8_query):
+    """The TRTLLM calls get scales for what they actually read.
+
+    A model-dtype query was never scaled by q_scale, and the prefill KV that
+    the dequant kernel rebuilds already carries the K/V scales. An FP8 query
+    keeps the existing scales. Runs the real forward() with the calls mocked.
+    """
+    import unittest.mock
+    from types import SimpleNamespace
+
+    from tests.v1.attention.utils import create_vllm_config
+    from vllm.config import set_current_vllm_config
+    from vllm.platforms.interface import DeviceCapability
+    from vllm.v1.attention.backends import flashinfer as fi
+
+    scale, q_s, k_s, v_s = 0.125, 2.0, 3.0, 0.5
+    q_dtype = torch.float8_e4m3fn if fp8_query else torch.bfloat16
+    vllm_config = create_vllm_config(model_name=MODEL)
+    vllm_config.cache_config.kv_cache_layout = "LBHNC"
+    calls: dict[str, Any] = {}
+    dequantized = torch.zeros(1)
+
+    def capture(name, result=None):
+        def call(*args, **kwargs):
+            calls[name] = kwargs or args
+            return result
+
+        return call
+
+    int32 = dict(dtype=torch.int32)
+    block_table = torch.tensor([[0], [1]], **int32)
+    lens = torch.tensor([8], **int32)
+    metadata = SimpleNamespace(
+        num_actual_tokens=5,
+        use_cascade=False,
+        num_decodes=1,
+        num_decode_tokens=1,
+        num_prefills=1,
+        num_prefill_tokens=4,
+        q_data_type_prefill=q_dtype,
+        q_data_type_decode=q_dtype,
+        prefill=fi.TRTLLMPrefill(
+            block_table[1:], lens, torch.tensor([0, 4], **int32), lens, 4, 8
+        ),
+        decode=fi.FlashInferTrtllmAPIDecode(
+            fi.FlashInferDecodeKernel.TRTLLM_GEN, block_table[:1], lens, 8
+        ),
+    )
+    layer = SimpleNamespace(
+        **{f"_{n}_scale": torch.tensor(s) for n, s in zip("qkv", (q_s, k_s, v_s))},
+        **{f"_{n}_scale_float": s for n, s in zip("qkv", (q_s, k_s, v_s))},
+        _o_scale_float=None,
+    )
+    with (
+        set_current_vllm_config(vllm_config),
+        unittest.mock.patch.object(
+            type(current_platform),
+            "get_device_capability",
+            return_value=DeviceCapability(10, 0),
+        ),
+        unittest.mock.patch.multiple(
+            fi,
+            can_use_trtllm_attention=lambda *a, **k: True,
+            _get_trtllm_workspace_buffer=lambda: torch.zeros(8),
+            trtllm_prefill_attn_kvfp8_dequant=capture(
+                "dequant", (dequantized, block_table[1:])
+            ),
+            trtllm_batch_context_with_kv_cache=capture("prefill"),
+            trtllm_batch_decode_with_kv_cache=capture("decode"),
+        ),
+    ):
+        impl = fi.FlashInferImpl(8, HEAD_SIZE, scale, 2, None, None, "fp8_e4m3")
+        impl.forward(
+            layer,
+            torch.zeros(5, 8, HEAD_SIZE, dtype=q_dtype),
+            None,
+            None,
+            torch.zeros(2, 2, 16, 2 * HEAD_SIZE, dtype=torch.uint8),
+            metadata,
+            torch.empty(5, 8, HEAD_SIZE, dtype=torch.bfloat16),
+        )
+
+    prefill, decode = calls["prefill"], calls["decode"]
+    assert prefill["query"].dtype == decode["query"].dtype == q_dtype
+    # Decode always reads the FP8 cache directly.
+    assert decode["kv_cache"][0].dtype == torch.float8_e4m3fn
+    assert decode["bmm2_scale"] == v_s
+    if fp8_query:
+        assert "dequant" not in calls
+        assert prefill["bmm1_scale"] == decode["bmm1_scale"] == scale * q_s * k_s
+        assert prefill["bmm2_scale"] == v_s
+    else:
+        assert calls["dequant"][2:4] == (layer._k_scale, layer._v_scale)
+        assert prefill["kv_cache"] is dequantized
+        assert (prefill["bmm1_scale"], prefill["bmm2_scale"]) == (scale, 1.0)
+        assert decode["bmm1_scale"] == scale * k_s
+
+
 def _flashinfer_builder_env(sliding_window: int | None, cache_dtype: str = "auto"):
     """vllm_config + kv_cache_spec + per-layer-parameter mock for FlashInfer."""
     import unittest.mock
@@ -1015,6 +1114,9 @@ def test_flashinfer_mm_prefix_kv_cache_path(cache_dtype):
         # so the mock grows it here; the annotation keeps mypy from rejecting
         # an attribute the stub class does not declare.
         mock_layer: Any = MockAttentionLayer(device, k_scale, v_scale)
+        # q_scale belongs to an FP8 query; it must not touch this one.
+        mock_layer._q_scale = torch.tensor(1.5, device=device)
+        mock_layer._q_scale_float = 1.5
         impl.do_kv_cache_update(
             mock_layer, key, value, kv_cache, attn_metadata.slot_mapping
         )
