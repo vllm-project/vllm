@@ -1007,6 +1007,48 @@ def test_offloading_connector(request_runner, async_scheduling: bool):
     runner.run(decoded_tokens=[EOS_TOKEN_ID], expected_loaded=(3, 4, 5))
 
 
+@pytest.mark.parametrize("async_scheduling", [False, True])
+def test_preempted_request_resumed_in_the_same_step(
+    request_runner, async_scheduling: bool
+):
+    """A sleep that keeps the tier preempts and resumes in one step.
+
+    `sleep(clear_cache=True)` preempts the running requests, and nothing is
+    scheduled until the wake-up, so the step that reports the preemption is
+    also the step that resumes the request. With the offloaded tier kept, that
+    step already carries the resume load, and the preemption flush must not
+    take it for one of the stores it is there to settle.
+    """
+    block_size, blocks_per_chunk = 4, 3
+    tokens_per_chunk = block_size * blocks_per_chunk
+    runner = request_runner(
+        block_size=block_size,
+        num_gpu_blocks=100,
+        async_scheduling=async_scheduling,
+        blocks_per_chunk=blocks_per_chunk,
+    )
+
+    runner.new_request(token_ids=[0] * tokens_per_chunk * 2)
+    runner.manager.prepare_store.side_effect = lambda keys, ctx: generate_store_output(
+        keys
+    )
+    runner._run([0], complete_transfers=True)
+    # Retire the store, so the resume step starts with no job registered.
+    runner._run([0] * 4, complete_transfers=True)
+
+    # What _reset_caches(reset_connector=False) does on the way into sleep.
+    runner.scheduler.reset_prefix_cache(
+        reset_running_requests=True, reset_connector=False
+    )
+    assert runner.scheduler.reset_preempted_req_ids
+
+    runner.connector_scheduler._maximal_prefix_lookup = lambda keys, ctx, *_: 2
+    runner.manager.prepare_store.side_effect = lambda keys, ctx: generate_store_output(
+        keys
+    )
+    runner._run([0], complete_transfers=True)
+
+
 @pytest.mark.parametrize("async_scheduling", [True, False])
 def test_request_preemption(request_runner, async_scheduling: bool):
     block_size = 4

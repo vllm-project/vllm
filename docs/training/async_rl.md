@@ -28,6 +28,10 @@ The `mode` parameter controls how in-flight requests are handled:
 
 The `clear_cache` parameter controls whether to clear the KV cache and prefix cache after pausing.
 
+`clear_cache=True` also resets a configured KV connector's cache. `clear_connector_cache=False`
+keeps it while still clearing the local caches, so later requests reuse the retained blocks. Block
+hashes do not cover the weights, so only do this when the pause does not replace them.
+
 ### resume_generation
 
 ```python

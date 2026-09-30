@@ -33,6 +33,7 @@ async def pause_generation(
     mode: Annotated[PauseMode, Query()] = "abort",
     wait_for_inflight_requests: bool = Query(False),
     clear_cache: Annotated[bool, Query()] = True,
+    clear_connector_cache: Annotated[bool, Query()] = True,
 ) -> JSONResponse:
     """Pause generation requests to allow weight updates.
 
@@ -45,7 +46,8 @@ async def pause_generation(
             - ``"keep"``: Freeze requests in queue; they resume on /resume.
         wait_for_inflight_requests: DEPRECATED. Use ``mode="wait"`` instead.
         clear_cache: DEPRECATED. Whether to clear KV/prefix caches after
-            draining. Ignored when mode="keep".
+            draining. Applies to every mode, "keep" included.
+        clear_connector_cache: Evict the KV tier too; unsafe if weights change.
 
     """
     engine = engine_client(raw_request)
@@ -54,6 +56,7 @@ async def pause_generation(
         await engine.pause_generation(
             mode=mode,
             clear_cache=clear_cache,
+            clear_connector_cache=clear_connector_cache,
             wait_for_inflight_requests=wait_for_inflight_requests,
         )
         return JSONResponse(

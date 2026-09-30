@@ -189,7 +189,12 @@ class EngineClient(ABC):
         ...
 
     @abstractmethod
-    async def sleep(self, level: int = 1, mode: "PauseMode" = "abort") -> None:
+    async def sleep(
+        self,
+        level: int = 1,
+        mode: "PauseMode" = "abort",
+        clear_connector_cache: bool = True,
+    ) -> None:
         """Sleep the engine."""
         ...
 
@@ -220,6 +225,7 @@ class EngineClient(ABC):
         mode: "PauseMode" = "abort",
         wait_for_inflight_requests: bool = False,
         clear_cache: bool = True,
+        clear_connector_cache: bool = True,
     ) -> None:
         """Pause new generation/encoding requests.
 
@@ -233,6 +239,7 @@ class EngineClient(ABC):
             wait_for_inflight_requests: DEPRECATED. Use ``mode="wait"`` instead.
             clear_cache: DEPRECATED. Whether to clear KV and prefix caches
                 after draining.
+            clear_connector_cache: Evict the KV tier too; unsafe if weights change.
 
         """
         ...

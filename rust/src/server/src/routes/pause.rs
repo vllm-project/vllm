@@ -19,6 +19,8 @@ pub(crate) struct PauseParams {
     mode: PauseMode,
     #[serde(default = "default_clear_cache")]
     clear_cache: bool,
+    #[serde(default = "default_clear_connector_cache")]
+    clear_connector_cache: bool,
 }
 
 #[derive(Serialize)]
@@ -32,6 +34,10 @@ pub(crate) struct IsPausedResponse {
 }
 
 const fn default_clear_cache() -> bool {
+    true
+}
+
+const fn default_clear_connector_cache() -> bool {
     true
 }
 
@@ -52,7 +58,11 @@ pub async fn pause(
 
     state
         .engine_core_client()
-        .pause_scheduler(params.mode, params.clear_cache)
+        .pause_scheduler(
+            params.mode,
+            params.clear_cache,
+            params.clear_connector_cache,
+        )
         .await
         .map_err(|error| utility_call_error("pause", error))?;
 
