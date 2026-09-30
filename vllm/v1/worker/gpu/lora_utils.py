@@ -112,6 +112,7 @@ class LoraState:
         Returns:
             The lm_head mapping, the per-token mapping, and the LoRA requests
             active in this batch.
+
         """
         lora_ids = self.lora_ids[idx_mapping]
         prompt_lora_mapping = tuple(lora_ids.repeat(num_logits_per_req))

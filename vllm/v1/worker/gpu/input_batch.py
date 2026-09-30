@@ -56,6 +56,7 @@ def make_num_logits_per_req(
 
     Returns:
         int32 array of shape ``[num_reqs]``.
+
     """
     if num_draft_tokens is None:
         return np.full(num_reqs, num_bonus_tokens, dtype=np.int32)
