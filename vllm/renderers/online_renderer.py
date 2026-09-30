@@ -16,6 +16,7 @@ from vllm.entrypoints.chat_utils import (
     ChatCompletionMessageParam,
     ChatTemplateContentFormatOption,
     ConversationMessage,
+    has_non_text_content,
 )
 from vllm.entrypoints.generate.base.protocol import validate_request_mm_kwargs
 from vllm.entrypoints.openai.chat_completion.protocol import (
@@ -101,17 +102,49 @@ def _extract_allowed_tools_from_mcp_requests(
     return allowed_tools_map
 
 
-def _reused_prompt_token_ids(request: Any) -> list[int] | None:
+def _reused_prompt_token_ids(
+    request: Any, messages: list[Any] | None = None
+) -> list[int] | None:
     """Pop prompt token ids forwarded for decode-side reuse, if any.
 
     Disaggregated serving carries the prefill stage's ids in
     ``kv_transfer_params`` so the decode stage can skip re-tokenizing. Removing
     the key keeps the id list out of the engine's sampling metadata.
+
+    Returns None without checking the ids when ``echo`` is set or ``messages``
+    has non-text content, since both need ``messages`` to be rendered.
+    Otherwise raises VLLMValidationError if the ids are malformed.
     """
     kv = getattr(request, "kv_transfer_params", None)
     if not isinstance(kv, dict):
         return None
-    return kv.pop("prompt_token_ids", None) or None
+    ids = kv.pop("prompt_token_ids", None)
+    if ids is None:
+        return None
+    if getattr(request, "echo", False):
+        logger.debug(
+            "Ignoring kv_transfer_params['prompt_token_ids']: "
+            "echo is set, so messages are rendered instead."
+        )
+        return None
+    if has_non_text_content(messages):
+        logger.debug(
+            "Ignoring kv_transfer_params['prompt_token_ids']: "
+            "messages have non-text content and are rendered instead."
+        )
+        return None
+    # bool is an int subclass, hence the exact type check.
+    if (
+        not isinstance(ids, list)
+        or not ids
+        or any(type(x) is not int or x < 0 for x in ids)
+    ):
+        raise VLLMValidationError(
+            "`kv_transfer_params['prompt_token_ids']` must be a non-empty list "
+            "of non-negative integers.",
+            parameter="kv_transfer_params.prompt_token_ids",
+        )
+    return ids
 
 
 class OnlineRenderer:
@@ -259,15 +292,7 @@ class OnlineRenderer:
             )
         else:
             # For GPT-OSS.
-            if self.parser is not None:
-                # HarmonyParser doesn't need chat_template_kwargs
-                # TODO: Unify adjust_request() call with non-harmony branch
-                self.parser(
-                    self.renderer.get_tokenizer(),
-                    request.tools,
-                    model_config=self.model_config,
-                ).adjust_request(request=request)
-
+            self.adjust_harmony_request(request)
             should_include_tools = tool_dicts is not None
             conversation, engine_inputs = self._make_request_with_harmony(
                 request, should_include_tools
@@ -355,14 +380,7 @@ class OnlineRenderer:
         previous_response_outputs: list[ResponseOutputItem] | None,
         tool_server: "ToolServer | None",
     ) -> ResponsesRenderResult | ErrorResponse:
-        if self.parser is not None:
-            # HarmonyParser doesn't need chat_template_kwargs
-            # TODO: Unify adjust_request() call with non-harmony branch
-            self.parser(
-                self.renderer.get_tokenizer(),
-                request.tools,
-                model_config=self.model_config,
-            ).adjust_request(request=request)
+        self.adjust_harmony_request(request)
 
         if previous_messages is not None and any(
             not isinstance(message, OpenAIMessage) for message in previous_messages
@@ -487,6 +505,24 @@ class OnlineRenderer:
             messages=messages,
             engine_input=engine_inputs[0],
         )
+
+    def adjust_harmony_request(
+        self, request: ChatCompletionRequest | ResponsesRequest
+    ) -> None:
+        """Apply the Harmony parser's ``adjust_request`` to ``request`` in place.
+
+        Every Harmony render path must call this before sampling params are
+        built from ``request``.
+        """
+        if self.parser is None:
+            return
+        # HarmonyParser doesn't need chat_template_kwargs
+        # TODO: Unify adjust_request() call with non-harmony branch
+        self.parser(
+            self.renderer.get_tokenizer(),
+            request.tools,
+            model_config=self.model_config,
+        ).adjust_request(request=request)
 
     def _make_request_with_harmony(
         self,
@@ -745,7 +781,7 @@ class OnlineRenderer:
             default_mm_processor_kwargs=getattr(request, "mm_processor_kwargs", None),
         )
 
-        reuse_ids = _reused_prompt_token_ids(request)
+        reuse_ids = _reused_prompt_token_ids(request, messages)
         if reuse_ids:
             # Decode-side token reuse: feed the forwarded ids straight to the
             # engine, skipping templating and tokenization. ``messages`` are not
