@@ -401,10 +401,30 @@ class VideoProcessorItems(ProcessorBatchItems[HfVideoItem | None]):
         self,
         data: Sequence[HfVideoItem | None],
         metadata: dict[str, Any] | list[dict[str, Any] | None] | None = None,
+        *,
+        video_needs_metadata: bool = True,
     ) -> None:
         super().__init__(data, "video")
 
-        self.metadata = metadata
+        self._metadata = metadata
+        self.video_needs_metadata = video_needs_metadata
+
+    def get(self, index: int) -> HfVideoItem | None:
+        video = super().get(index)
+        if isinstance(video, tuple):
+            frames, metadata = video
+            if isinstance(self._metadata, list) and self._metadata[index] is None:
+                self._metadata[index] = metadata
+            return video if self.video_needs_metadata else frames
+        return video
+
+    @property
+    def metadata(self) -> dict[str, Any] | list[dict[str, Any] | None] | None:
+        """Resolve fetched video metadata when a consumer requests it."""
+        for index, item in enumerate(self.data):
+            if isinstance(item, MediaRef):
+                self.get(index)
+        return self._metadata
 
     def get_num_frames(self, item_idx: int) -> int:
         video = self.get(item_idx)
@@ -643,22 +663,18 @@ class MultiModalDataParser:
         video: VideoItem,
     ) -> tuple[DecodedFrames | MediaRef[Any], dict[str, Any] | None]:
         if isinstance(video, MediaRef):
-            # Unpack (frames, metadata) at decode time; nothing is decoded
-            # here.
+            # Keep metadata in the raw ref so cache miss reparsing preserves it.
             def unpack(decoded: Any) -> Any:
                 if isinstance(decoded, tuple):
                     frames, metadata = decoded
                 else:
                     frames, metadata = decoded, None
-                if self.video_needs_metadata:
-                    if metadata is None:
-                        raise ValueError(
-                            "Video metadata is required but not found in mm "
-                            "input. Please check your video input in "
-                            "`multi_modal_data`"
-                        )
-                    return frames, metadata
-                return frames
+                if self.video_needs_metadata and metadata is None:
+                    raise ValueError(
+                        "Video metadata is required but not found in mm input. "
+                        "Please check your video input in `multi_modal_data`"
+                    )
+                return (frames, metadata) if metadata is not None else frames
 
             return video.map(unpack), None
         if isinstance(video, tuple):
@@ -786,7 +802,7 @@ class MultiModalDataParser:
             data_items = [data]
         elif isinstance(data, (np.ndarray, torch.Tensor)):
             data_items = [elem for elem in data]
-        elif isinstance(data, tuple) and len(data) == 2:
+        elif isinstance(data, MediaRef) or (isinstance(data, tuple) and len(data) == 2):
             data_items = [data]
         else:
             data_items = data  # type: ignore[assignment]
@@ -802,6 +818,7 @@ class MultiModalDataParser:
                 new_videos.append(None)
                 metadata_lst.append(None)
                 continue
+
             video, metadata = self._get_video_with_metadata(data_item)
             if (
                 self.video_needs_metadata
@@ -812,7 +829,7 @@ class MultiModalDataParser:
                     "Video metadata is required but not found in mm input. "
                     "Please check your video input in `multi_modal_data`"
                 )
-            if self.video_needs_metadata and metadata is not None:
+            if metadata is not None:
                 new_videos.append((video, metadata))
             else:
                 # For refs the metadata check is deferred to decode time
@@ -820,7 +837,11 @@ class MultiModalDataParser:
                 new_videos.append(video)
             metadata_lst.append(metadata)
 
-        return VideoProcessorItems(new_videos, metadata=metadata_lst)
+        return VideoProcessorItems(
+            new_videos,
+            metadata=metadata_lst,
+            video_needs_metadata=self.video_needs_metadata,
+        )
 
     def _parse_vision_chunk_data(
         self,

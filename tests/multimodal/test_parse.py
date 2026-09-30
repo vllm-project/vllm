@@ -5,6 +5,7 @@ import pytest
 import torch
 from PIL import Image
 
+from vllm.multimodal.media import MediaRef
 from vllm.multimodal.parse import (
     AudioProcessorItems,
     ImageProcessorItems,
@@ -142,8 +143,6 @@ class _CountingDecoder:
 def test_parse_audio_lazy_item_resamples_on_decode():
     """A lazy audio item parses without decoding; resampling and channel
     normalization are stacked onto the decode."""
-    from vllm.multimodal.media import MediaRef
-
     waveform = np.arange(16, dtype=np.float32)
     parser = MultiModalDataParser(
         target_sr=16000, target_channels=1, audio_resample_method="scipy"
@@ -162,7 +161,6 @@ def test_parse_audio_lazy_item_resamples_on_decode():
 def test_parse_audio_lazy_item_key_covers_resample_settings():
     """The resampling settings join the item's cache key, so a different
     target rate cannot reuse a stale processor cache entry."""
-    from vllm.multimodal.media import MediaRef
 
     def parsed_key(target_sr, target_channels=None):
         parser = MultiModalDataParser(
@@ -183,8 +181,6 @@ def test_parse_audio_lazy_item_key_covers_resample_settings():
 def test_parse_video_lazy_item_unpacks_frames_on_decode():
     """A lazy video item parses without decoding; the frames/metadata tuple
     is unpacked when the decode runs."""
-    from vllm.multimodal.media import MediaRef
-
     frames = np.zeros((2, H, W, 3), dtype=np.uint8)
     metadata = {"total_num_frames": 2, "fps": 2.0, "duration": 1.0}
 
@@ -211,8 +207,6 @@ def test_parse_video_lazy_item_unpacks_frames_on_decode():
 def test_parse_video_lazy_missing_metadata_raises_on_decode():
     """With video_needs_metadata, a lazy video whose decode yields no
     metadata fails at decode time, not at parse time."""
-    from vllm.multimodal.media import MediaRef
-
     frames = np.zeros((2, H, W, 3), dtype=np.uint8)
     parser = MultiModalDataParser(video_needs_metadata=True)
     lazy = MediaRef(lambda: frames, b"video-bytes")
@@ -220,3 +214,50 @@ def test_parse_video_lazy_missing_metadata_raises_on_decode():
 
     with pytest.raises(ValueError, match="metadata is required"):
         items.get(0)
+
+
+@pytest.mark.parametrize("video_needs_metadata", [False, True])
+@pytest.mark.parametrize("single_item", [False, True])
+def test_lazy_video_metadata_available_before_frames(video_needs_metadata, single_item):
+    """Audio extraction can read metadata without first requesting frames."""
+    frames = np.zeros((2, 8, 8, 3), dtype=np.uint8)
+    metadata = {"original_video_bytes": b"video-bytes", "fps": 2.0}
+    decoder = _CountingDecoder((frames, metadata))
+    ref = MediaRef(decoder, b"video-bytes")
+    parser = MultiModalDataParser(video_needs_metadata=video_needs_metadata)
+    data = ref if single_item else [None, (frames, {"fps": 1.0}), ref]
+    items = parser.parse_mm_data({"video": data})["video"]
+
+    assert decoder.calls == 0
+    index = 0 if single_item else 2
+    assert items.get_raw(index).key
+    assert decoder.calls == 0
+    expected = [metadata] if single_item else [None, {"fps": 1.0}, metadata]
+    assert items.metadata == expected
+    assert items.metadata == expected
+    video = items.get(index)
+    np.testing.assert_array_equal(video[0] if video_needs_metadata else video, frames)
+    assert decoder.calls == 1
+
+
+@pytest.mark.parametrize("video_needs_metadata", [False, True])
+@pytest.mark.parametrize("lazy", [False, True])
+def test_reparse_video_preserves_metadata(video_needs_metadata, lazy):
+    """Cache miss reparsing preserves metadata and the processor's frames view."""
+    from vllm.multimodal.media import MediaRef
+
+    frames = np.zeros((2, 8, 8, 3), dtype=np.uint8)
+    metadata = {"fps": 2.0, "original_video_bytes": b"video-bytes"}
+    decoder = _CountingDecoder((frames, metadata))
+    video = MediaRef(decoder, b"video-bytes") if lazy else (frames, metadata)
+    parser = MultiModalDataParser(video_needs_metadata=video_needs_metadata)
+    items = parser.parse_mm_data({"video": [None, video]})["video"]
+    reparsed = parser.parse_mm_data({"video": items.get_all_raw()})["video"]
+
+    assert decoder.calls == 0
+    if lazy:
+        assert reparsed.get_raw(1).key == items.get_raw(1).key
+    assert reparsed.metadata == items.metadata == [None, metadata]
+    result = reparsed.get(1)
+    np.testing.assert_array_equal(result[0] if video_needs_metadata else result, frames)
+    assert decoder.calls == int(lazy)

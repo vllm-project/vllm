@@ -46,6 +46,8 @@ Pickling materializes the media. `__reduce__` hands the decoded object to `_medi
 
 `MediaConnector` in `vllm/multimodal/media/connector.py` is transport only. It owns URL scheme dispatch (`data:`, `http(s):`, `file:`), the allowed-domain check, the encoded-size cap, the on-disk download cache, the redirect policy and error normalization — and nothing about how bytes decode. Its `fetch_image`, `fetch_video` and `fetch_audio`, with their `_async` variants, take a caller-supplied `MediaIO` and return a `MediaRef`.
 
+Custom `MEDIA_CONNECTOR_REGISTRY` plugins must update their constructor and fetch overrides for this API change. Remove `media_io_kwargs` from the constructor, accept the caller-supplied `media_io` argument in every `fetch_*` override (including async variants), and return a `MediaRef`. Video fetch overrides receive the resolved decoder instead of a `video_processor` argument. Delegate to `load_from_url` or `load_from_url_async` with that decoder to preserve the processor's decode configuration and cache identity. Overrides of the shared video/audio fetch methods must also preserve both supplied decoders.
+
 ### One download, two decoders
 
 `fetch_video_and_audio` and `fetch_video_and_audio_async` serve one download to two decode specs. `use_audio_in_video` reads the audio track out of the video payload, so building both refs from a single fetch is what keeps the URL from being downloaded twice. The shared download takes the strictest of the decoders' size caps (`_strictest_max_bytes`) and the video fetch timeout.
