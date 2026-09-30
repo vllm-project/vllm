@@ -183,8 +183,13 @@ __global__ __launch_bounds__(64 * NSB) void decode_int8_wmma(
       const bool tlive = qv_hi > rt * 16 && qv_lo < rt * 16 + 16;
       const int qv = rt * 16 + j;
       if (tlive && si < num_splits && h == 0 && qv >= qv_lo && qv < qv_hi) {
-        float* op = mid_o + (int64_t)(grp * G + qv / hpk) * smo +
-                    (int64_t)(qv % hpk) * smh + (int64_t)si * sms;
+        // qx is opaque so the address is built here: hoisted out of the
+        // segment loop it was spilled to scratch, and the reload sometimes
+        // returned another lane's address (writes past mid_o, page faults).
+        int qx = qv;
+        asm volatile("" : "+v"(qx));
+        float* op = mid_o + (int64_t)(grp * G + qx / hpk) * smo +
+                    (int64_t)(qx % hpk) * smh + (int64_t)si * sms;
         op[HS] = -INFINITY;
         op[HS + 1] = 0.0f;
       }
@@ -419,9 +424,10 @@ __global__ __launch_bounds__(64 * NSB) void decode_int8_wmma(
       l += xhalf(l);
       cp += xhalf(cp);
       if (qlive) {
-        const int hq = qv % hpk;
-        float* op = mid_o + (int64_t)(grp * G + qrow) * smo + (int64_t)hq * smh +
-                    (int64_t)si * sms;
+        int qx = qv;  // opaque, as in the empty-split store above
+        asm volatile("" : "+v"(qx));
+        float* op = mid_o + (int64_t)(grp * G + qx / hpk) * smo +
+                    (int64_t)(qx % hpk) * smh + (int64_t)si * sms;
         const bool any = m != -INFINITY;
         const float corr = BIAS * cp;
 #pragma unroll
