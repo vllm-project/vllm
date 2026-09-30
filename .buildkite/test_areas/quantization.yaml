@@ -102,6 +102,7 @@ steps:
       depends_on:
       - image-build-amd
       source_file_dependencies:
+      - tests/quantization/test_gfx950_moe.py
       - tests/quantization/test_rocm_moe.py
       - tests/utils.py
       - vllm/model_executor/models/deepseek_v2.py
@@ -118,6 +119,7 @@ steps:
       - vllm/envs.py
       commands:
       - pytest -v -s tests/quantization/test_rocm_moe.py
+      - pytest -v -s tests/quantization/test_gfx950_moe.py
 
 - label: ":nvidia: (H200 MIG 35GB) Quantized Models"
   device: h200_35gb
