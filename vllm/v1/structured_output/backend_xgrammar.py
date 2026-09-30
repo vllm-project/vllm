@@ -341,13 +341,16 @@ def _node_has_unsupported_features(obj: dict[str, Any]) -> bool:
     return isinstance(obj.get("allOf"), list) and len(obj["allOf"]) >= 2
 
 
-def _walk_schema(schema):
+def _walk_schema(schema: dict[str, Any]):
     yield schema
 
-    resource = DRAFT202012.create_resource(schema)
-
-    for subresource in resource.subresources():
-        yield from _walk_schema(subresource.contents)
+    try:
+        resource = DRAFT202012.create_resource(schema)
+        for subresource in resource.subresources():
+            yield from _walk_schema(subresource.contents)
+    except (AttributeError, TypeError):
+        # Malformed schema
+        return
 
 
 def has_xgrammar_unsupported_json_features(schema: dict[str, Any]) -> bool:
@@ -411,13 +414,15 @@ def validate_xgrammar_grammar(sampling_params: SamplingParams) -> None:
         else:
             schema = so_params.json
 
-        if has_xgrammar_unsupported_json_features(schema):
-            raise VLLMValidationError(
-                "The provided JSON schema contains features not supported by xgrammar."
-            )
-
         try:
+            if has_xgrammar_unsupported_json_features(schema):
+                raise VLLMValidationError(
+                    "The provided JSON schema contains features not supported "
+                    "by xgrammar."
+                )
             xgr.Grammar.from_json_schema(schema)
+        except VLLMValidationError:
+            raise
         except Exception as err:
             raise VLLMValidationError(
                 f"Failed to transform json schema into a grammar: {err}"

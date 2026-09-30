@@ -1,13 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import json
 
 import pytest
 from xgrammar import Grammar
 from xgrammar.testing import _is_grammar_accept_string
 
-from vllm.exceptions import VLLMValidationError
 from vllm.sampling_params import SamplingParams, StructuredOutputsParams
 from vllm.v1.structured_output.backend_xgrammar import (
     has_xgrammar_unsupported_json_features,
