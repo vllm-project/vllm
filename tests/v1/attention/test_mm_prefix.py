@@ -805,7 +805,6 @@ def test_flashinfer_trtllm_scales_follow_query_and_kv(fp8_query):
     scale, q_s, k_s, v_s = 0.125, 2.0, 3.0, 0.5
     q_dtype = torch.float8_e4m3fn if fp8_query else torch.bfloat16
     vllm_config = create_vllm_config(model_name=MODEL)
-    vllm_config.cache_config.kv_cache_layout = "LBHNC"
     calls: dict[str, Any] = {}
     dequantized = torch.zeros(1)
 
@@ -822,6 +821,7 @@ def test_flashinfer_trtllm_scales_follow_query_and_kv(fp8_query):
     metadata = SimpleNamespace(
         num_actual_tokens=5,
         use_cascade=False,
+        kv_cache_layout=KVCacheLayout.LBHNC,
         num_decodes=1,
         num_decode_tokens=1,
         num_prefills=1,

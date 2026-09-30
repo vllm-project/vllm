@@ -37,6 +37,8 @@ from vllm.entrypoints.generate.base.protocol import (
     DeltaFunctionCall,
     DeltaMessage,
     DeltaToolCall,
+    FunctionCall,
+    ToolCall,
 )
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionResponse,
@@ -999,11 +1001,6 @@ class TestInlineSystemMessageInMessagesArray:
 
 def _make_stream_converter():
     obj = MagicMock(spec=AnthropicServingMessages)
-    obj.stop_reason_map = {
-        "stop": "end_turn",
-        "length": "max_tokens",
-        "tool_calls": "tool_use",
-    }
     obj.message_stream_converter = (
         AnthropicServingMessages.message_stream_converter.__get__(obj)
     )
@@ -1383,6 +1380,11 @@ Q35_TEMPLATE = (
     "{%- endfor %}"
 )
 
+PERMISSIVE_TEMPLATE = (
+    "{%- for message in messages %}{{- message.role }}: {{ message.content }}\n"
+    "{%- endfor %}"
+)
+
 
 class TestDetectMergeInlineSystem:
     """Verify _detect_merge_inline_system auto-detection.
@@ -1402,17 +1404,45 @@ class TestDetectMergeInlineSystem:
     def test_no_restriction_no_merge(self):
         """Template without restriction accepts mid-conversation system."""
         assert (
-            AnthropicServingMessages._detect_merge_inline_system(
-                "{%- for message in messages %}"
-                "{{- message.role }}: {{ message.content }}\n"
-                "{%- endfor %}"
-            )
+            AnthropicServingMessages._detect_merge_inline_system(PERMISSIVE_TEMPLATE)
             is False
         )
 
     def test_no_template_defaults_merge(self):
         """No chat_template → conservative default: merge."""
         assert AnthropicServingMessages._detect_merge_inline_system(None) is True
+
+    @pytest.mark.parametrize(
+        ("resolved", "expected"),
+        [(PERMISSIVE_TEMPLATE, False), (Q35_TEMPLATE, True)],
+    )
+    def test_probes_resolved_template_without_cli_override(
+        self, monkeypatch, resolved, expected
+    ):
+        """Without --chat-template, probe the tokenizer's template (#58727).
+
+        Merging defeats prefix caching, so it is warned about at startup.
+        """
+        import vllm.entrypoints.anthropic.serving as serving_mod
+        from vllm.renderers.hf import HfRenderer
+
+        monkeypatch.setattr(
+            serving_mod, "resolve_chat_template", lambda *a, **kw: resolved
+        )
+        mock_logger = MagicMock()
+        monkeypatch.setattr(serving_mod, "logger", mock_logger)
+        renderer = MagicMock(spec=HfRenderer)
+        renderer.tokenizer = MagicMock()
+        online_renderer = SimpleNamespace(
+            renderer=renderer,
+            chat_template=None,
+            model_config=None,
+        )
+        assert (
+            AnthropicServingMessages._should_merge_inline_system(online_renderer)
+            is expected
+        )
+        assert mock_logger.warning_once.called is expected
 
 
 # ======================================================================
@@ -1638,6 +1668,78 @@ class TestStopSequenceReason:
         assert msg_deltas[0]["delta"]["stop_sequence"] is None
 
 
+class TestToolUseStopReason:
+    """A response carrying a tool_use block reports ``stop_reason="tool_use"``
+    even when the chat layer says ``finish_reason="stop"``, as it does for a
+    forced (named) tool. A call cut short by max_tokens or a stop string does not.
+    """
+
+    @pytest.mark.parametrize(
+        ("finish_reason", "stop_reason", "expected"),
+        [
+            ("stop", None, "tool_use"),
+            ("tool_calls", "</x>", "tool_use"),
+        ],
+    )
+    def test_non_streaming(self, finish_reason, stop_reason, expected):
+        tool_call = ToolCall(
+            function=FunctionCall(name="get_weather", arguments='{"city": "Paris"}')
+        )
+        response = ChatCompletionResponse(
+            id="chatcmpl-test",
+            model="test-model",
+            choices=[
+                ChatCompletionResponseChoice(
+                    index=0,
+                    message=ChatMessage(role="assistant", tool_calls=[tool_call]),
+                    finish_reason=finish_reason,
+                    stop_reason=stop_reason,
+                )
+            ],
+            usage=UsageInfo(prompt_tokens=5, total_tokens=8, completion_tokens=3),
+        )
+
+        result = _make_full_converter().messages_full_converter(response)
+
+        assert result.content[0].type == "tool_use"
+        assert result.stop_reason == expected
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("args", "finish_reason", "stop_reason", "expected"),
+        [
+            ('{"city": "Paris"}', "stop", None, "tool_use"),
+            ('{"city": "Pa', "length", None, "max_tokens"),
+            ('{"city": "Paris"}', "tool_calls", "</x>", "tool_use"),
+            ('{"city": "Pa', "tool_calls", "</x>", "stop_sequence"),
+        ],
+    )
+    async def test_streaming(self, args, finish_reason, stop_reason, expected):
+        async def sse_input():
+            yield _make_stream_chunk(delta=DeltaMessage(role="assistant"))
+            yield _make_stream_chunk(
+                delta=DeltaMessage(
+                    tool_calls=[_tc(id="call_1", name="get_weather", args=args)]
+                )
+            )
+            yield _make_stream_chunk(
+                finish_reason=finish_reason, stop_reason=stop_reason
+            )
+            yield _make_stream_chunk(
+                choices=[],
+                usage=UsageInfo(prompt_tokens=5, total_tokens=8, completion_tokens=3),
+            )
+            yield "data: [DONE]"
+
+        converter = _make_stream_converter()
+        events = _parse_sse_events(
+            [e async for e in converter.message_stream_converter(sse_input())]
+        )
+
+        msg_deltas = [data for ev_type, data in events if ev_type == "message_delta"]
+        assert msg_deltas[0]["delta"]["stop_reason"] == expected
+
+
 # ======================================================================
 # Client-caused errors are 4xx, not 500 (Issue #52088)
 # ======================================================================
@@ -1802,6 +1904,28 @@ class TestThinkingConfig:
                 max_tokens=4096,
                 messages=[{"role": "user", "content": "Hello"}],
                 thinking=thinking,
+            )
+
+    def test_pd_prefill_leg_skips_budget_check(self):
+        """P/D sidecars resend the request to the prefill node with
+        max_tokens=1; the budget is enforced on the decode leg instead."""
+        thinking = {"type": "enabled", "budget_tokens": 1024}
+        request = AnthropicMessagesRequest(
+            model="test-model",
+            max_tokens=1,
+            messages=[{"role": "user", "content": "Hello"}],
+            thinking=thinking,
+            kv_transfer_params={"do_remote_decode": True},
+        )
+
+        assert _convert(request).thinking_token_budget == 1024
+        with pytest.raises(ValidationError):
+            AnthropicMessagesRequest(
+                model="test-model",
+                max_tokens=1,
+                messages=[{"role": "user", "content": "Hello"}],
+                thinking=thinking,
+                kv_transfer_params={"do_remote_decode": False},
             )
 
     def test_adaptive_pins_nothing_and_keeps_effort_ceiling(self):

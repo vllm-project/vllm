@@ -566,72 +566,64 @@ def test_aiter_moe_shared_experts_enablement_follows_env(
         assert rocm_aiter_ops.is_fusion_moe_shared_experts_enabled() is expected
 
 
-def test_aiter_moe_situv2_syncs_aiter_a4w4_env(
+@pytest.mark.parametrize(
+    "value,expected_act,expected_env",
+    [
+        # Unset / auto / legacy "1" all mean the a4w4 default.
+        (None, "a4w4", {"AITER_SITUV2_A4W4": "1"}),
+        ("auto", "a4w4", {"AITER_SITUV2_A4W4": "1"}),
+        ("1", "a4w4", {"AITER_SITUV2_A4W4": "1"}),
+        ("a4w4", "a4w4", {"AITER_SITUV2_A4W4": "1"}),
+        ("0", "a16w4", {}),
+        ("a16w4", "a16w4", {}),
+        ("A8W4", "a8w4", {"AITER_SITUV2_A8W4": "1"}),
+    ],
+)
+def test_aiter_moe_situv2_activation_syncs_aiter_env(
+    value: str | None,
+    expected_act: str,
+    expected_env: dict[str, str],
     monkeypatch: pytest.MonkeyPatch,
 ):
-    """SiTUv2 MoE should route to AITER a4w4 and clear legacy a8w4 overrides."""
+    """Each SiTUv2 activation choice sets exactly its AITER dispatch env."""
+    import os
+
     from vllm._aiter_ops import rocm_aiter_ops
 
     _assert_aiter_supported()
 
     with monkeypatch.context() as mp:
-        mp.delenv("AITER_SITUV2_A8W4", raising=False)
-        mp.delenv("AITER_SITUV2_A4W4", raising=False)
-        mp.setenv("VLLM_ROCM_USE_AITER", "1")
-        mp.setenv("VLLM_ROCM_USE_AITER_MOE", "1")
-        mp.setenv("VLLM_ROCM_USE_AITER_MOE_SITUV2", "1")
-        _reload_envs()
-        rocm_aiter_ops.refresh_env_variables()
-
-        import os
-
-        assert os.environ.get("AITER_SITUV2_A4W4") == "1"
-        assert "AITER_SITUV2_A8W4" not in os.environ
-
-
-def test_aiter_moe_situv2_legacy_a8w4_alias_enables_a4w4(
-    monkeypatch: pytest.MonkeyPatch,
-):
-    """Deprecated VLLM_ROCM_USE_AITER_MOE_SITUV2_A8W4 still enables SiTUv2 a4w4."""
-    from vllm._aiter_ops import rocm_aiter_ops
-
-    _assert_aiter_supported()
-
-    with monkeypatch.context() as mp:
-        mp.delenv("AITER_SITUV2_A8W4", raising=False)
-        mp.delenv("AITER_SITUV2_A4W4", raising=False)
-        mp.delenv("VLLM_ROCM_USE_AITER_MOE_SITUV2", raising=False)
-        mp.setenv("VLLM_ROCM_USE_AITER", "1")
-        mp.setenv("VLLM_ROCM_USE_AITER_MOE", "1")
-        mp.setenv("VLLM_ROCM_USE_AITER_MOE_SITUV2_A8W4", "1")
-        _reload_envs()
-        rocm_aiter_ops.refresh_env_variables()
-
-        import os
-
-        assert os.environ.get("AITER_SITUV2_A4W4") == "1"
-        assert "AITER_SITUV2_A8W4" not in os.environ
-
-
-def test_aiter_moe_situv2_clears_aiter_env_when_disabled(
-    monkeypatch: pytest.MonkeyPatch,
-):
-    from vllm._aiter_ops import rocm_aiter_ops
-
-    _assert_aiter_supported()
-
-    with monkeypatch.context() as mp:
+        # Stale AITER overrides must be replaced by the vLLM selection.
+        mp.setenv("AITER_SITUV2_A8W4", "1")
         mp.setenv("AITER_SITUV2_A4W4", "1")
         mp.setenv("VLLM_ROCM_USE_AITER", "1")
         mp.setenv("VLLM_ROCM_USE_AITER_MOE", "1")
-        mp.delenv("VLLM_ROCM_USE_AITER_MOE_SITUV2_A8W4", raising=False)
-        mp.setenv("VLLM_ROCM_USE_AITER_MOE_SITUV2", "0")
+        if value is None:
+            mp.delenv("VLLM_ROCM_USE_AITER_MOE_SITUV2", raising=False)
+        else:
+            mp.setenv("VLLM_ROCM_USE_AITER_MOE_SITUV2", value)
         _reload_envs()
         rocm_aiter_ops.refresh_env_variables()
 
-        import os
+        assert rocm_aiter_ops.get_fused_moe_situv2_activation() == expected_act
+        assert rocm_aiter_ops.is_fused_moe_situv2_gate_up_interleaved() is (
+            expected_act == "a8w4"
+        )
+        assert rocm_aiter_ops.is_fused_moe_situv2_enabled() is (expected_act != "a16w4")
+        for name in ("AITER_SITUV2_A8W4", "AITER_SITUV2_A4W4"):
+            assert os.environ.get(name) == expected_env.get(name)
 
-        assert "AITER_SITUV2_A4W4" not in os.environ
+
+def test_aiter_moe_situv2_rejects_unknown_activation(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    with monkeypatch.context() as mp:
+        mp.setenv("VLLM_ROCM_USE_AITER_MOE_SITUV2", "a8w8")
+        _reload_envs()
+        import vllm.envs as envs
+
+        with pytest.raises(ValueError, match="VLLM_ROCM_USE_AITER_MOE_SITUV2"):
+            _ = envs.VLLM_ROCM_USE_AITER_MOE_SITUV2
 
 
 @pytest.mark.parametrize("moe_padding", [True, False])
@@ -644,6 +636,115 @@ def test_aiter_moe_padding_env_var(
         mp.setenv("VLLM_ROCM_MOE_PADDING", "1" if moe_padding else "0")
         envs = _reload_envs()
         assert envs.VLLM_ROCM_MOE_PADDING is moe_padding
+
+
+# a4w4 (FP4 activation) opt-in gating test ---------------------------------
+
+
+@pytest.mark.parametrize(
+    ("env_value", "model_type", "expected"),
+    [
+        # Unset/"0" is opt-in-only: a4w4 never turns on by itself, even on
+        # a validated model type.
+        (None, "deepseek_v41", False),
+        ("0", "deepseek_v41", False),
+        ("1", "deepseek_v41", True),
+        ("1", "deepseek_v41_text", True),
+    ],
+)
+def test_aiter_moe_a4w4_dsv4_is_opt_in(
+    env_value: str | None,
+    model_type: str,
+    expected: bool,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """vllm-project/vllm#58819's a4w4 MoE activation path must stay a plain
+    explicit opt-in (VLLM_ROCM_USE_AITER_MOE_A4W4_DSV4=1), with no
+    default-on behavior, but is still only permitted on the model types
+    this flag has been validated for."""
+    import types
+
+    from tests.kernels.moe.utils import make_dummy_moe_config
+    from vllm._aiter_ops import rocm_aiter_ops
+
+    _assert_aiter_supported()
+
+    fake_vllm_config = types.SimpleNamespace(
+        model_config=types.SimpleNamespace(
+            hf_config=types.SimpleNamespace(model_type=model_type)
+        )
+    )
+
+    with monkeypatch.context() as mp:
+        mp.setenv("VLLM_ROCM_USE_AITER", "1")
+        mp.setenv("VLLM_ROCM_USE_AITER_MOE", "1")
+        if env_value is None:
+            mp.delenv("VLLM_ROCM_USE_AITER_MOE_A4W4_DSV4", raising=False)
+        else:
+            mp.setenv("VLLM_ROCM_USE_AITER_MOE_A4W4_DSV4", env_value)
+        _reload_envs()
+        rocm_aiter_ops.refresh_env_variables()
+
+        with mock.patch(
+            "vllm.config.get_current_vllm_config_or_none",
+            return_value=fake_vllm_config,
+        ):
+            moe_config = make_dummy_moe_config(
+                num_experts=4,
+                experts_per_token=2,
+                hidden_dim=256,
+                intermediate_size=512,
+                in_dtype=torch.bfloat16,
+            )
+
+        assert moe_config.use_mxfp4_w4a4_dsv4 is expected
+
+
+@pytest.mark.parametrize("model_type", ["deepseek_v4", "gpt_oss", None])
+def test_aiter_moe_a4w4_dsv4_rejects_unvalidated_model_type(
+    model_type: str | None,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Forcing a4w4 on a model type this flag hasn't been GSM8K/AgentX
+    validated for must raise: it also flips the MXFP4 weight-shuffle layout
+    (ATOM SEPARATED vs INTERLEAVE), which silently produces garbled output
+    on the wrong model rather than just being a slower path — the same bug
+    class vllm-project/vllm#58819's own second commit fixed for DeepSeek
+    V4.1 itself."""
+    import types
+
+    from tests.kernels.moe.utils import make_dummy_moe_config
+    from vllm._aiter_ops import rocm_aiter_ops
+
+    _assert_aiter_supported()
+
+    fake_vllm_config = types.SimpleNamespace(
+        model_config=types.SimpleNamespace(
+            hf_config=types.SimpleNamespace(model_type=model_type)
+        )
+    )
+
+    with monkeypatch.context() as mp:
+        mp.setenv("VLLM_ROCM_USE_AITER", "1")
+        mp.setenv("VLLM_ROCM_USE_AITER_MOE", "1")
+        mp.setenv("VLLM_ROCM_USE_AITER_MOE_A4W4_DSV4", "1")
+        _reload_envs()
+        rocm_aiter_ops.refresh_env_variables()
+
+        with (
+            mock.patch(
+                "vllm.config.get_current_vllm_config_or_none",
+                return_value=fake_vllm_config,
+            ),
+            pytest.raises(ValueError, match="VLLM_ROCM_USE_AITER_MOE_A4W4_DSV4"),
+        ):
+            make_dummy_moe_config(
+                num_experts=4,
+                experts_per_token=2,
+                hidden_dim=256,
+                intermediate_size=512,
+                in_dtype=torch.bfloat16,
+            )
 
 
 # Dispatch-policy forwarding test ------------------------------------------
