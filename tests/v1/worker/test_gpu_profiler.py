@@ -325,6 +325,7 @@ def test_worker_reuses_torch_wrapper_across_profile_rounds(worker_type):
 
 def test_executor_profile_only_forwards_supplied_override_kwargs():
     executor = MagicMock()
+    executor.vllm_config.parallel_config.worker_cls = "vllm.v1.worker.gpu_worker.Worker"
 
     Executor.profile(executor, True, "default")
     Executor.profile(
@@ -343,6 +344,26 @@ def test_executor_profile_only_forwards_supplied_override_kwargs():
             kwargs={"delay_iterations": 5, "max_iterations": 2},
         ),
     ]
+
+
+class _LegacyProfileWorker:
+    def profile(self, is_start: bool = True, profile_prefix: str | None = None):
+        pass
+
+
+def test_executor_rejects_overrides_unsupported_by_worker():
+    """Out-of-tree workers with the old ``profile`` signature are rejected
+    before dispatch, so a failed collective_rpc cannot leave replies queued."""
+    executor = MagicMock()
+    executor.vllm_config.parallel_config.worker_cls = f"{__name__}._LegacyProfileWorker"
+
+    with pytest.raises(ValueError, match="max_iterations"):
+        Executor.profile(executor, True, None, max_iterations=2)
+    Executor.profile(executor, True, "legacy")
+
+    executor.collective_rpc.assert_called_once_with(
+        "profile", args=(True, "legacy"), kwargs=None
+    )
 
 
 def test_worker_rejects_invalid_profile_prefix():
