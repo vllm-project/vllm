@@ -53,8 +53,7 @@ META = torch.device("meta")
 
 class _FakeLayer:
     """Stand-in for a leaf module. The planner only stores it and keys on
-    ``id()``; nothing in the plan path touches its attributes.
-    """
+    ``id()``; nothing in the plan path touches its attributes."""
 
     def __init__(self, tag: str) -> None:
         self.tag = tag
@@ -65,8 +64,7 @@ class _FakeLayer:
 
 def _module(layer, copies):
     """What the bake records for one leaf module: a scatter list whose entries
-    all carry that module as their ``layer``.
-    """
+    all carry that module as their ``layer``."""
     for c in copies:
         c.layer = layer
     return copies
@@ -83,8 +81,7 @@ def _copy(
     dtype=torch.bfloat16,
 ):
     """A `_Scatter` as the bake would record it: source key, owning layer, and
-    the meta destination region.
-    """
+    the meta destination region."""
     stride = (
         (1,)
         if len(shape) == 1
@@ -143,8 +140,7 @@ def _planner(baked, *, name_meta, live=None, held_by=None, group_lens=None):
 
 def _one_module_per_layer(n_layers, *, dtype="bfloat16", numel=4):
     """`(baked, name_meta, names, group_lens)` for a pre / N-layer / post model
-    where every gather group is one fully-baked leaf module.
-    """
+    where every gather group is one fully-baked leaf module."""
     names = ["embed.weight"]
     names += [f"model.layers.{i}.w" for i in range(n_layers)]
     names += ["norm.weight"]
@@ -165,8 +161,7 @@ def _one_module_per_layer(n_layers, *, dtype="bfloat16", numel=4):
 class TestFakeOpChains:
     """Every allowlisted op must append itself to the chain and hand back a
     child whose shape/dtype PyTorch itself computed. The chain is the wire
-    format the producer replays, so its exact contents are load-bearing.
-    """
+    format the producer replays, so its exact contents are load-bearing."""
 
     def _fake(self, shape=(4, 6), dtype=torch.bfloat16, sink=None):
         return FakeRDTTensor(
@@ -227,8 +222,7 @@ class TestFakeOpChains:
     @pytest.mark.parametrize("op,n", [("chunk", 2), ("unbind", 4)])
     def test_multi_return_op_emits_one_child_per_output(self, op, n):
         """chunk/unbind hand back a tuple; each child carries the base op plus a
-        trailing __getitem__(i) so the producer can index the replayed result.
-        """
+        trailing __getitem__(i) so the producer can index the replayed result."""
         parts = getattr(self._fake(), op)(*((n,) if op == "chunk" else ()), 0)
         assert isinstance(parts, tuple)
         assert len(parts) == n
@@ -244,8 +238,7 @@ class TestFakeOpChains:
 
 class TestFakeUnsupportedOps:
     """Anything that needs real data must fail loudly at bake time rather than
-    silently transferring the wrong bytes.
-    """
+    silently transferring the wrong bytes."""
 
     def _fake(self):
         return FakeRDTTensor(
@@ -285,8 +278,7 @@ class TestFakeUnsupportedOps:
 
 class TestBakeRecording:
     """During the dry run the fake's ``copy_`` is the data sink: it records the
-    source chain plus the meta destination's strided region and moves nothing.
-    """
+    source chain plus the meta destination's strided region and moves nothing."""
 
     def _recorder_and_fake(self, shape=(4, 6)):
         rec = BakeSink()
@@ -322,8 +314,7 @@ class TestBakeRecording:
 
     def test_unattributed_copy_is_live_but_unrecorded(self):
         """A copy_ with no loader stamp cannot be attributed to a param, so its
-        module must fall back to the plain load — but the name still moved data.
-        """
+        module must fall back to the plain load — but the name still moved data."""
         rec, fake = self._recorder_and_fake()
         rec.current = None
         torch.empty((4, 6), dtype=torch.bfloat16, device=META).copy_(fake)
@@ -363,8 +354,7 @@ class TestBakeRecording:
         producer packs what the replay yields, so the record must carry the
         POST-chain dtype: taking it from the source name's metadata instead sizes
         the slice with the wrong itemsize and shifts every later slice in the
-        chunk, carving the packed blob differently on the two sides.
-        """
+        chunk, carving the packed blob differently on the two sides."""
         rec, fake = self._recorder_and_fake(shape=(4,))
         layer = _FakeLayer("reinterpreted")
         rec.current = (layer, "weight")
@@ -384,8 +374,7 @@ class TestBakeRecording:
         the producer packs what the chain yields, and nothing downstream can
         catch a mismatch — the consumer's buffer view is exactly prod(dest.shape)
         elements, so it reshapes cleanly over bytes laid out at other offsets.
-        So the bake refuses rather than recording a slice it cannot carve.
-        """
+        So the bake refuses rather than recording a slice it cannot carve."""
         rec, fake = self._recorder_and_fake(shape=(1, 6))
         rec.current = (_FakeLayer("broadcast"), "weight")
         param = torch.empty((4, 6), dtype=torch.bfloat16, device=META)
@@ -401,8 +390,7 @@ class TestBakeRecording:
 class TestConsumerIdentity:
     """Every worker in the fleet needs a DISTINCT id in 0..C-1: it selects the
     worker's producer block and keys the producer's per-consumer serve ring, so
-    a collision silently serves two workers out of one ring.
-    """
+    a collision silently serves two workers out of one ring."""
 
     def _engine(self, *, dp_index, rank, world_size):
         eng = object.__new__(ShardedRDTWeightTransferEngine)
@@ -439,8 +427,7 @@ class TestConsumerIdentity:
     def test_independent_engines_offset_into_distinct_ranges(self):
         """A fleet of separate engines restarts _global_worker_index at 0 in
         each, so without the replica offset every engine would claim 0..w-1.
-        The driver sets replica_rank on the payload; these are the ids it buys.
-        """
+        The driver sets replica_rank on the payload; these are the ids it buys."""
         ids = [
             self._ids(num_consumers=8, workers=range(4), replica_rank=r, num_replicas=2)
             for r in (0, 1)
@@ -466,8 +453,7 @@ def _router(
     group_lens=None,
 ):
     """A router over ``n`` single-name groups unless told otherwise, so a test
-    can state expectations in group indices.
-    """
+    can state expectations in group indices."""
     if names is None:
         n = len(name_owner_class or []) or (len(group_lens or []) or 1)
         names = [f"g{i}" for i in range(n)]
@@ -496,8 +482,7 @@ class TestRdtRouter:
     def test_every_producer_nic_carries_traffic(self):
         """16 producers / 8 consumers: the block rule spreads each consumer's
         pulls over its block, alternating by group, so no producer sits idle.
-        Plain `consumer_id % len(owners)` would idle half of them.
-        """
+        Plain `consumer_id % len(owners)` would idle half of them."""
         r = _router(16, 8, group_lens=[1] * 95)
         names = [f"g{i}" for i in range(95)]
         for c in range(8):
@@ -515,8 +500,7 @@ class TestRdtRouter:
 
     def test_pipeline_stages_route_to_the_owning_stage(self):
         """2 stages x 8 ranks: groups 0-2 on stage 0, 3-5 on stage 1. Two owner
-        sets, one per stage; each consumer reaches both.
-        """
+        sets, one per stage; each consumer reaches both."""
         r = _router(
             16,
             8,
@@ -532,8 +516,7 @@ class TestRdtRouter:
 
     def test_expert_names_route_to_the_holding_ranks(self):
         """A name held by only some ranks routes to those; a replicated name
-        keeps the full set.
-        """
+        keeps the full set."""
         r = RdtRouter(
             8,
             4,
@@ -552,8 +535,7 @@ class TestRdtRouter:
 
     def test_consumers_spread_over_an_owner_set(self):
         """Several ranks hold a name (its TP peers); the block rule must spread
-        consumers across them, not funnel through one.
-        """
+        consumers across them, not funnel through one."""
         r = _router(
             4, 4, owner_sets=[[0, 1]], name_owner_class=[0] * 6, group_lens=[1] * 6
         )
@@ -562,8 +544,7 @@ class TestRdtRouter:
 
     def test_a_group_frees_at_every_owner_of_any_of_its_names(self):
         """The free barrier is per group, so its fan-out is the UNION over the
-        group's names: a rank holding none of them is not signalled.
-        """
+        group's names: a rank holding none of them is not signalled."""
         r = RdtRouter(4, 2, [[0, 1], [2, 3]], [0, 1, 0], ["a", "b", "c"], [2, 1])
         assert r.group_owners(0) == [0, 1, 2, 3]
         assert r.group_owners(1) == [0, 1]
@@ -633,8 +614,7 @@ class TestReplicaOverlay:
 
     def test_adding_a_deployment_does_not_move_the_first_one(self):
         """The strongest form: an existing consumer's routes are byte-identical
-        before and after another deployment is provisioned.
-        """
+        before and after another deployment is provisioned."""
         one, names = self._fleet(16, 8, 1)
         two, _ = self._fleet(16, 8, 2)
         for consumer_id in range(8):
@@ -644,8 +624,7 @@ class TestReplicaOverlay:
 
     def test_one_deployment_is_the_historical_carve(self):
         """Default (no width) and width == the whole fleet must agree with the
-        plain block rule, so a single-deployment fleet is untouched.
-        """
+        plain block rule, so a single-deployment fleet is untouched."""
         plain = _router(16, 8, group_lens=[1] * 6)
         explicit, names = self._fleet(16, 8, 1)
         for consumer_id in range(8):
@@ -659,8 +638,7 @@ class TestReplicaOverlay:
     def test_the_overlay_holds_for_partially_owned_names(self):
         """Pipeline stages and experts too: two owner sets, one narrow. The
         narrow one already forced agreement (one owner, no block to carve); the
-        wide one is what the carve decides.
-        """
+        wide one is what the carve decides."""
         r, names = self._fleet(
             8,
             4,
@@ -676,16 +654,14 @@ class TestReplicaOverlay:
     def test_a_width_that_does_not_divide_the_fleet_raises(self):
         """A uniform fleet is asserted upstream in ``get_world_size``; if it ever
         is not, the overlay would map two workers of one deployment onto the same
-        block index, so refuse rather than serve the wrong bytes.
-        """
+        block index, so refuse rather than serve the wrong bytes."""
         with pytest.raises(ValueError, match="does not divide"):
             RdtRouter(4, 6, None, None, ["a"], [1], workers_per_replica=4)
 
     def test_pulls_still_carry_the_global_consumer_id(self):
         """The carve uses the index WITHIN a deployment, but the wire must keep
         the fleet-global id: it is what lets the producer tell the sharers of a
-        slot apart, and count their arrivals separately.
-        """
+        slot apart, and count their arrivals separately."""
 
         class _Method:
             def __init__(self):
@@ -728,8 +704,7 @@ def _producer_pack_offsets(slices):
 class TestPackedLayout:
     def test_consumer_layout_matches_the_producer_rule(self):
         """Mixed dtypes, sizes that do not land on 16B — i.e. the Kimi-style
-        group (fp8 weights + fp32 scales + bf16 norms) that exposes alignment.
-        """
+        group (fp8 weights + fp32 scales + bf16 norms) that exposes alignment."""
         specs = [
             ("w.fp8", "float8_e4m3fn", [17]),
             ("w.scale", "float32", [3]),
@@ -804,8 +779,7 @@ class TestPackedLayout:
 class TestChunkModuleScatters:
     """The chunk cut: one chunk per distinct owner class present in the copies,
     ascending by class index. Derived purely from the bake plus the ownership
-    table, so vLLM's expert placement needs no cases.
-    """
+    table, so vLLM's expert placement needs no cases."""
 
     def test_unstamped_copies_form_one_chunk(self):
         layer = _FakeLayer("l")
@@ -819,8 +793,7 @@ class TestChunkModuleScatters:
         """Classes are numbered by first appearance in metadata order, so the
         replicated class (0) leads and the rest follow — the ordering the old
         "-1 first, then ascending stamp" rule produced, now falling out of the
-        table instead of a special case.
-        """
+        table instead of a special case."""
         layer = _FakeLayer("moe")
         names = ["norm", "e5", "e0", "e2"]
         copies = [_copy(n, shape=(4,)) for n in names]
@@ -840,8 +813,7 @@ class TestChunkModuleScatters:
 
     def test_copy_order_within_a_chunk_is_bake_order(self):
         """Scatter order within a chunk must follow the bake, not the stamp
-        sort: the packed layout and the producer's replay agree on keys order.
-        """
+        sort: the packed layout and the producer's replay agree on keys order."""
         layer = _FakeLayer("moe")
         names = ["e3", "e1", "e2"]  # one stamp, deliberately unsorted names
         copies = [_copy(n, shape=(4,)) for n in names]
@@ -855,8 +827,7 @@ class TestChunkModuleScatters:
 
     def test_stamps_interleave_across_modules_without_reordering_within(self):
         """Two modules' copies bucket by stamp; within each bucket the order is
-        module-then-bake order.
-        """
+        module-then-bake order."""
         a, b = _FakeLayer("a"), _FakeLayer("b")
         mods = [
             _module(a, [_copy("a0", shape=(4,)), _copy("a1", shape=(4,))]),
@@ -876,8 +847,7 @@ class TestChunkModuleScatters:
     def test_scatters_carry_their_own_dtype(self):
         """Dtype rides the record from the bake, where it is the fake's dtype
         AFTER its op chain — not a plan-time lookup of the source name, which
-        would be wrong for any chain that reinterprets dtype.
-        """
+        would be wrong for any chain that reinterprets dtype."""
         layer = _FakeLayer("l")
         eng = _planner({}, name_meta={"w": ("float32", [10])})
         ((_er, scatters),) = eng._chunk_module_scatters(
@@ -916,8 +886,7 @@ class TestBuildCallPlan:
 
     def test_materialize_fires_on_a_modules_first_chunk_only(self):
         """Empty HF params are allocated once per module, by construction —
-        including a FusedMoE-like module whose copies span owner-class chunks.
-        """
+        including a FusedMoE-like module whose copies span owner-class chunks."""
         layer = _FakeLayer("spanning")
         names = [f"w{i}" for i in range(4)]
         copies = [_copy(n, shape=(4,)) for n in names]
@@ -952,8 +921,7 @@ class TestBuildCallPlan:
     def test_free_signal_waits_for_a_groups_last_chunk_when_it_is_split(self):
         """The load-bearing case: with the group cut across owner-class chunks the
         signal must hang off the LAST one. Signaling earlier lets the producers
-        drop the gather buffers while a later chunk's RDMA is still reading.
-        """
+        drop the gather buffers while a later chunk's RDMA is still reading."""
         layer = _FakeLayer("l")
         names = [f"w{i}" for i in range(4)]
         copies = [_copy(n, shape=(4,)) for n in names]
@@ -969,8 +937,7 @@ class TestBuildCallPlan:
 
     def test_free_signal_timing_across_two_split_groups(self):
         """Two groups x 2 owner-class chunks each: signals land on each group's
-        last chunk only.
-        """
+        last chunk only."""
         names_a = [f"model.layers.0.w{i}" for i in range(4)]
         names_b = [f"model.layers.1.w{i}" for i in range(4)]
         baked, name_meta, stamps = {}, {}, {}
@@ -988,8 +955,7 @@ class TestBuildCallPlan:
     def test_a_group_with_nothing_local_is_signaled_at_sync_start(self):
         """The owners still published it, so this consumer must signal it —
         immediately, before the pipeline (signal-before-publish is tolerated),
-        never hung off another group's chunk.
-        """
+        never hung off another group's chunk."""
         baked, name_meta, names, group_lens = _one_module_per_layer(2)
         del baked["model.layers.1.w"]  # nothing baked, and not live => no pull
         eng = _planner(
@@ -1010,8 +976,7 @@ class TestBuildCallPlan:
 
     def test_modules_are_deduped_within_a_group(self):
         """Several names of one fused module map to the same scatter list; the
-        plan must not chunk it twice.
-        """
+        plan must not chunk it twice."""
         layer = _FakeLayer("fused")
         names = ["qkv.q", "qkv.k", "qkv.v"]
         copies = [_copy(n, shape=(4,)) for n in names]
@@ -1027,8 +992,7 @@ class TestBuildCallPlan:
 
     def test_plan_is_a_pure_function_of_its_inputs(self):
         """Called twice with the same arguments it must produce the same plan —
-        that is what lets the engine build it once and reuse it every sync.
-        """
+        that is what lets the engine build it once and reuse it every sync."""
         baked, name_meta, names, group_lens = _one_module_per_layer(2)
         eng = _planner(baked, name_meta=name_meta)
         a = eng._build_call_plan(names, group_lens)
@@ -1048,8 +1012,7 @@ class TestBuildCallPlan:
 class TestUnbakedNamesGuard:
     """A live name with no baked plan has no way to load — there is no fallback,
     and its pull would target groups the pipeline already freed — so the plan
-    build fails at init, naming the names.
-    """
+    build fails at init, naming the names."""
 
     def test_a_live_unbaked_name_fails_the_plan_build(self):
         baked, name_meta, names, group_lens = _one_module_per_layer(2)
@@ -1060,8 +1023,7 @@ class TestUnbakedNamesGuard:
 
     def test_never_copied_names_are_dropped_entirely(self):
         """Experts owned by another EP rank no-op in their loader: not an error,
-        and not a chunk — their group is pre-freed if nothing else fills it.
-        """
+        and not a chunk — their group is pre-freed if nothing else fills it."""
         baked, name_meta, names, group_lens = _one_module_per_layer(2)
         del baked["norm.weight"]
         eng = _planner(baked, name_meta=name_meta, live=set(names) - {"norm.weight"})
@@ -1073,15 +1035,13 @@ class TestUnbakedNamesGuard:
 class TestCallPlanRouting:
     """Under partial ownership each chunk must be pulled from a producer that
     actually holds every name in it. Consumers bind EVERY producer (signals fan
-    out to all owners), so local index == trainer rank.
-    """
+    out to all owners), so local index == trainer rank."""
 
     def _routed_planner(
         self, held_by_group, num_consumers, consumer_id, *, held_by=None
     ):
         """``held_by_group[g]`` = the ranks holding group g's names, so a test
-        can still speak in groups; ``held_by`` overrides individual names.
-        """
+        can still speak in groups; ``held_by`` overrides individual names."""
         baked, name_meta, names, group_lens = _one_module_per_layer(
             len(held_by_group) - 2
         )
@@ -1108,16 +1068,14 @@ class TestCallPlanRouting:
 
     def test_two_stage_ownership_splits_chunks_between_owners(self):
         """Two PP stages, 4 groups: stage 0 holds the first half, stage 1 the
-        second. Every chunk goes to a holder of its names.
-        """
+        second. Every chunk goes to a holder of its names."""
         eng, names, group_lens = self._routed_planner([[0], [0], [1], [1]], 1, 0)
         plan = eng._build_call_plan(names, group_lens)
         assert [c.owner for c in plan.chunks] == [0, 0, 1, 1]
 
     def test_a_multi_owner_group_still_resolves_to_one_producer(self):
         """Every chunk is served by exactly ONE producer: splitting a pull only
-        multiplies produce calls, since the consumer's NIC bounds it.
-        """
+        multiplies produce calls, since the consumer's NIC bounds it."""
         eng, names, group_lens = self._routed_planner([[0, 1]] * 4, 1, 0)
         plan = eng._build_call_plan(names, group_lens)
         assert all(0 <= c.owner < 2 for c in plan.chunks)
@@ -1125,8 +1083,7 @@ class TestCallPlanRouting:
     def test_an_expert_name_routes_to_the_rank_holding_it(self):
         """PP ∩ EP: stage 0 = ranks 0-1, stage 1 = ranks 2-3, and one expert
         name inside a stage-1 group is held by rank 3 alone. The name's own owner
-        set is what routes it.
-        """
+        set is what routes it."""
         eng, names, group_lens = self._routed_planner(
             [[0, 1], [0, 1], [2, 3], [2, 3]],
             1,
@@ -1141,8 +1098,7 @@ class TestCallPlanRouting:
     def test_an_unheld_name_is_rejected_at_init(self):
         """A name no rank holds can never be served. The trainer raises when it
         transposes the holdings; the router's validate() is the consumer-side
-        backstop, and either way it fails at init rather than at first pull.
-        """
+        backstop, and either way it fails at init rather than at first pull."""
         with pytest.raises(ValueError, match="empty"):
             RdtRouter(2, 1, [[]], [0], ["w"], [1]).validate()
 
@@ -1151,16 +1107,14 @@ class TestSignalCompleteness:
     """Every gather group is signaled exactly once — after its last chunk when
     the worker pulls from it, at sync start otherwise — for ANY expert
     placement. A group signaled twice over-credits the barrier; a group never
-    signaled parks a producer credit and hangs end_sync.
-    """
+    signaled parks a producer credit and hangs end_sync."""
 
     def _moe_planner(self, worker_experts, *, ep_size=4, n_experts=8, n_layers=2):
         """Pre / n_layers MoE layers / post. Each layer: one norm (its own
         module, stamp -1) + n_experts expert names stamped ``e // n_local``.
         The worker's bake covers only ``worker_experts`` (its placement);
         foreign expert names never copied => dropped entirely, as in the real
-        bake.
-        """
+        bake."""
         n_local = n_experts // ep_size
         names = ["embed.weight"]
         group_lens = [1]
@@ -1220,8 +1174,7 @@ class TestSignalCompleteness:
 
     def test_placement_changes_only_the_chunk_count_never_the_signals(self):
         """Linear experts 0-3 hit 2 owner classes; round_robin 0,2,4,6
-        hits all 4. More chunks per group, identical signal set.
-        """
+        hits all 4. More chunks per group, identical signal set."""
         plans = {}
         for label, experts in (("linear", [0, 1, 2, 3]), ("round_robin", [0, 2, 4, 6])):
             eng, names, group_lens = self._moe_planner(worker_experts=experts)
@@ -1235,8 +1188,7 @@ class TestSignalCompleteness:
 
     def test_the_fused_module_materializes_first_and_quants_last_across_chunks(self):
         """The FusedMoE shape: one module's copies span every owner-class chunk of
-        its group; materialize on its first, quant on its last.
-        """
+        its group; materialize on its first, quant on its last."""
         eng, names, group_lens = self._moe_planner(
             worker_experts=[0, 2, 4, 6], n_layers=1
         )
@@ -1294,8 +1246,7 @@ class TestLayerwiseGroups:
     def test_flattening_a_partition_returns_the_input_order(self):
         """Un-indexed names group by POSITION, not by name class — so one that
         looks like a pre-block name still lands after the layers it follows.
-        Group index therefore means the same thing on every rank.
-        """
+        Group index therefore means the same thing on every rank."""
         names = [
             "embed.weight",
             "model.layers.0.a",
@@ -1313,8 +1264,7 @@ class TestLayerwiseGroups:
 
     def test_stacks_keep_prefix_appearance_order_and_sort_within(self):
         """Two stacks stay in the order they appear — the vision tower before the
-        text stack — while each sorts by index internally.
-        """
+        text stack — while each sorts by index internally."""
         names = [
             "visual.blocks.1.w",
             "visual.blocks.0.w",
@@ -1331,8 +1281,7 @@ class TestLayerwiseGroups:
     def test_the_post_block_lands_last_however_early_it_arrives(self):
         """Megatron-Bridge streams the last pipeline stage's output block before
         its layers. Sweeping un-indexed names after the first layer into a
-        trailing group is what lets the gather loop walk groups ascending.
-        """
+        trailing group is what lets the gather loop walk groups ascending."""
         names = ["model.layers.0.w", "model.norm.weight", "model.layers.1.w"]
         assert layerwise_groups(names) == [
             ["model.layers.0.w"],
@@ -1342,8 +1291,7 @@ class TestLayerwiseGroups:
 
     def test_names_sharing_a_layer_coalesce_when_the_source_interleaves(self):
         """A raw-checkpoint source may yield in shard-packing order. Coalescing on
-        the key keeps that from shattering one layer into many groups.
-        """
+        the key keeps that from shattering one layer into many groups."""
         names = [
             "model.layers.0.a",
             "model.layers.1.a",
@@ -1385,15 +1333,13 @@ class TestLayerwiseGroups:
     def test_every_supported_naming_convention_partitions_per_layer(self, prefix):
         """One decoder layer per group under any prefix, with no per-architecture
         table. A literal `model.layers.` match silently yields one whole-model
-        group for most of these.
-        """
+        group for most of these."""
         names = [f"{prefix}{i}.self_attn.q_proj.weight" for i in range(3)]
         assert layerwise_groups(names) == [[n] for n in names]
 
     def test_a_moe_layer_stays_whole(self):
         """The OUTERMOST index wins, so per-expert names group by layer. Splitting
-        on the expert would cut FusedMoE — one leaf module — across groups.
-        """
+        on the expert would cut FusedMoE — one leaf module — across groups."""
         names = [
             "model.layers.0.mlp.experts.0.w1.weight",
             "model.layers.0.mlp.experts.1.w1.weight",
@@ -1410,8 +1356,7 @@ class TestLayerwiseGroups:
     def test_a_vlm_partitions_the_vision_tower_and_the_text_stack(self):
         """Qwen-VL layout. Today's literal `model.layers.` match puts every one of
         these in ONE group — the whole model — because the text stack ships as
-        `model.language_model.layers.`.
-        """
+        `model.language_model.layers.`."""
         names = [
             "visual.patch_embed.proj.weight",
             "visual.blocks.0.attn.qkv.weight",
@@ -1430,8 +1375,7 @@ class TestLayerwiseGroups:
 
     def test_two_stacks_sharing_an_index_do_not_merge(self):
         """The key carries the prefix, so vision block 0 and text layer 0 are
-        different groups even though both are index 0.
-        """
+        different groups even though both are index 0."""
         names = [
             "visual.blocks.0.attn.qkv.weight",
             "model.language_model.layers.0.self_attn.q_proj.weight",
@@ -1468,23 +1412,20 @@ class TestOpAllowlistAgreement:
 
     def test_every_bake_recordable_op_is_replayable(self):
         """Anything the bake can record must be serveable, or the failure lands a
-        whole sync later than the mistake.
-        """
+        whole sync later than the mistake."""
         assert not set(SUPPORTED_OPS.values()) - set(ALLOWED_OPS)
 
     def test_the_producer_allows_nothing_the_consumer_cannot_emit(self):
         """The allowlist is also a guard against a misbehaving or spoofed
         consumer invoking arbitrary methods on trainer tensors, so it must not be
         wider than the ops the bake can actually produce. ``to`` in particular
-        would let a replay change dtype or device.
-        """
+        would let a replay change dtype or device."""
         assert not set(ALLOWED_OPS) - set(SUPPORTED_OPS.values())
         assert "to" not in ALLOWED_OPS
 
     def test_transpose_via_t_is_serveable(self):
         """The specific regression: a chain recorded from ``.t()`` must pass the
-        producer's guard.
-        """
+        producer's guard."""
         fake = FakeRDTTensor(
             name="w",
             shape=torch.Size((4, 6)),
@@ -1529,8 +1470,7 @@ BAKE_MODELS = [
 class TestRequiresTheRayExecutor:
     """The engine's data plane is Ray's, so a non-Ray executor cannot work. The
     check is at construction because the alternative is an opaque failure during
-    the first handshake, long after the misconfiguration.
-    """
+    the first handshake, long after the misconfiguration."""
 
     def _construct(self, backend):
         cfg = SimpleNamespace(
@@ -1557,8 +1497,7 @@ class TestRequiresTheRayExecutor:
 
     def test_a_custom_executor_class_is_left_alone(self):
         """A `type[Executor]` override is deliberate and unjudgeable here, so it
-        must not be rejected for merely not being the string "ray".
-        """
+        must not be rejected for merely not being the string "ray"."""
 
         class _CustomExecutor:
             pass

@@ -2,8 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Fine-grained partial prefix-cache hits for hybrid (full attention + mamba
 "align") models: scheduler chunk splitting, partial tail registration, CoW
-on partial hits, and same-step deferral.
-"""
+on partial hits, and same-step deferral."""
 
 from math import lcm
 from types import SimpleNamespace
@@ -14,6 +13,9 @@ import torch
 
 from tests.v1.core.test_prefix_caching import make_kv_cache_manager, make_request
 from vllm.distributed.kv_transfer.kv_connector.v1.base import SupportsHMA
+from vllm.model_executor.layers.mamba.checkpoint import (
+    compute_mamba_prefill_checkpoints,
+)
 from vllm.utils.hashing import sha256
 from vllm.v1.core.kv_cache_utils import (
     KVCacheBlockCopy,
@@ -29,6 +31,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheGroupSpec,
     MambaSpec,
     SlidingWindowSpec,
+    get_mamba_prefill_checkpoint_position,
 )
 
 
@@ -175,8 +178,7 @@ def test_mamba_align_split_partial_tail_schedule(dcp_world_size: int):
     """Chunk ends with partial hits on: block-aligned chunks, one extra stop
     at the prompt's last hash boundary (registering the partial tail), then
     the remaining tokens. block=512, hash=32, prompt=10000, budget=8192:
-    0 -> 8192 -> 9728 -> 9984 -> 10000.
-    """
+    0 -> 8192 -> 9728 -> 9984 -> 10000."""
     block_size = 512
     scheduler_block_size = block_size * dcp_world_size
     hash_block_size = 32
@@ -190,7 +192,7 @@ def test_mamba_align_split_partial_tail_schedule(dcp_world_size: int):
         dcp_world_size=dcp_world_size,
         scheduler_block_size=scheduler_block_size,
         mamba_partial_cache_hit=True,
-        mamba_fine_grained_prefix_cache=False,
+        mamba_shared_prefix_checkpoint=False,
         mamba_has_prefill_checkpoint_blocks=False,
     )
     split = Scheduler._mamba_block_aligned_split
@@ -238,7 +240,7 @@ def test_mamba_align_split_when_block_exceeds_scheduling_budget():
         use_eagle_block_drop=False,
         hash_block_size=32,
         mamba_partial_cache_hit=False,
-        mamba_fine_grained_prefix_cache=False,
+        mamba_shared_prefix_checkpoint=False,
         mamba_has_prefill_checkpoint_blocks=False,
     )
     req = make_request("0", [0] * prompt_length, 32, sha256)
@@ -279,7 +281,7 @@ def test_mamba_align_split_when_block_exceeds_long_prefill_threshold():
         use_eagle_block_drop=False,
         hash_block_size=32,
         mamba_partial_cache_hit=False,
-        mamba_fine_grained_prefix_cache=False,
+        mamba_shared_prefix_checkpoint=False,
         mamba_has_prefill_checkpoint_blocks=False,
     )
     req = make_request("0", [0] * prompt_length, 32, sha256)
@@ -688,6 +690,81 @@ def test_transient_checkpoint_evicts_retained_boundary_hash():
     assert manager.block_pool.get_cached_block(checkpoint_hash, [1]) is None
 
 
+@pytest.mark.parametrize("prompt_len", [120, 104, 96])
+def test_prompt_end_checkpoint_survives_block_aligned_cache_count(prompt_len):
+    """At the default match unit the hybrid coordinator hands ``cache_blocks``
+    a block-aligned token count, which is below the prompt length whenever the
+    prompt is not block-aligned. The prompt-end checkpoint is the replay
+    boundary and must stay published under retention_interval=0; only a
+    mid-prompt checkpoint is transient.
+    """
+    hash_block_size = mamba_block_size = 32
+    manager = make_full_mamba_manager(
+        dcp_world_size=1,
+        hash_block_size=hash_block_size,
+        full_block_size=hash_block_size,
+        mamba_block_size=mamba_block_size,
+        num_prefill_checkpoint_blocks=1,
+    )
+    manager.coordinator.retention_interval = 0
+    assert not manager.coordinator.enable_partial_hash_hits
+
+    request = make_request("producer", list(range(prompt_len)), hash_block_size, sha256)
+    assert manager.allocate_slots(request, request.num_tokens) is not None
+    checkpoint_position = get_mamba_prefill_checkpoint_position(
+        prompt_len, hash_block_size, drop_eagle_block=False
+    )
+    checkpoint_hash = request.block_hashes[checkpoint_position // hash_block_size - 1]
+    hit = manager.block_pool.get_cached_block(checkpoint_hash, [1])
+    assert hit is not None
+    assert hit[0].block_hash_num_tokens == checkpoint_position
+
+    manager.free(request)
+    replay = make_request("replay", list(range(prompt_len)), hash_block_size, sha256)
+    _, num_computed, _ = manager.get_computed_blocks(replay)
+    assert num_computed == checkpoint_position
+
+
+@pytest.mark.parametrize("retention_interval,reserved", [(None, True), (0, False)])
+def test_intermediate_chunk_checkpoint_reserved_only_under_dense_retention(
+    retention_interval, reserved
+):
+    """A checkpoint inside a chunk that does not finish the prefill is only
+    publishable under dense retention. With retention_interval=0 it would be
+    evicted as transient, so the block is not reserved in the first place;
+    the prefill-end checkpoint is reserved either way.
+    """
+    hash_block_size = 16
+    manager = make_full_mamba_manager(
+        dcp_world_size=1,
+        hash_block_size=hash_block_size,
+        full_block_size=hash_block_size,
+        mamba_block_size=32,
+        num_prefill_checkpoint_blocks=1,
+    )
+    manager.coordinator.retention_interval = retention_interval
+    mamba_manager = manager.coordinator.single_type_managers[1]
+
+    request = make_request("producer", list(range(240)), hash_block_size, sha256)
+    computed_blocks, num_computed, _ = manager.get_computed_blocks(request)
+    free_before = manager.block_pool.get_num_free_blocks()
+
+    # Mid-prompt chunk: the chunk-keyed position (112) is inside it. Blocks:
+    # the attention blocks, the running mamba block, plus the checkpoint.
+    assert manager.allocate_slots(request, 128, num_computed, computed_blocks)
+    assert (request.request_id in mamba_manager._checkpoints) == reserved
+    allocated = free_before - manager.block_pool.get_num_free_blocks()
+    assert allocated == 128 // hash_block_size + 1 + int(reserved)
+
+    request.num_computed_tokens = 128
+    manager.new_step_starts()
+    # Final chunk: the prefill-end checkpoint at 224 is reserved either way.
+    assert manager.allocate_slots(request, 112) is not None
+    assert mamba_manager._checkpoints[request.request_id][0] == 224
+    end_hash = request.block_hashes[224 // hash_block_size - 1]
+    assert manager.block_pool.get_cached_block(end_hash, [1]) is not None
+
+
 def test_eagle_block_aligned_checkpoint_replaces_newer_hash():
     hash_block_size = mamba_block_size = 32
     manager = make_full_mamba_manager(
@@ -744,8 +821,7 @@ def test_hash_aligned_query_end_uses_regular_partial_tail():
 
 def test_external_mamba_hit_same_block_uses_running_cow_on_continue():
     """An external mid-block hit must become a running request even when its
-    first continuation does not need another Mamba block.
-    """
+    first continuation does not need another Mamba block."""
     hash_block_size = 2
     mamba_block_size = 4 * hash_block_size
     kv_cache_config = KVCacheConfig(
@@ -817,8 +893,7 @@ def test_external_mamba_hit_same_block_uses_running_cow_on_continue():
 
 def test_boundary_state_offloads_returns_cow_target():
     """Boundary hand-offs expose aligned snapshots and the partial-tail CoW
-    target, never the overwritten CoW source.
-    """
+    target, never the overwritten CoW source."""
     hash_block_size = 2
     block_size = 2 * hash_block_size
     kv_cache_config = KVCacheConfig(
@@ -1004,8 +1079,7 @@ def test_connector_finish_registers_partial_tail_before_cleanup():
 def test_boundary_state_offload_dropped_when_request_freed_before_drain():
     """A hand-off recorded in the same scheduling pass as the request's death
     must not be drained: its release hook has already run, so draining would
-    leak a pinned block.
-    """
+    leak a pinned block."""
     hash_block_size = 2
     block_size = 2 * hash_block_size
     kv_cache_config = KVCacheConfig(
@@ -1052,8 +1126,7 @@ def test_boundary_state_offload_dropped_when_request_freed_before_drain():
 
 def test_boundary_state_offloads_block_aligned_prompt():
     """A prompt ending on a block boundary registers no CoW partial tail; its
-    boundary state block is handed off as a snapshot instead (once).
-    """
+    boundary state block is handed off as a snapshot instead (once)."""
     hash_block_size = 2
     block_size = 2 * hash_block_size
     kv_cache_config = KVCacheConfig(
@@ -1107,8 +1180,7 @@ def test_boundary_state_offloads_block_aligned_prompt():
 def test_truncate_computed_blocks_preserves_sparse_prefix_positions():
     """truncate_computed_blocks slices each group by its own block size,
     keeps null placeholders in the retained prefix, and leaves the original
-    lookup result untouched (pure view, no refcount changes).
-    """
+    lookup result untouched (pure view, no refcount changes)."""
     hash_block_size = 2
     kv_cache_config = KVCacheConfig(
         num_blocks=24,
@@ -1163,8 +1235,7 @@ def test_truncate_computed_blocks_preserves_sparse_prefix_positions():
 
 def test_truncate_computed_blocks_allows_short_mamba_group_only():
     """External state may replace a short Mamba hit, but other groups must
-    cover the aligned local endpoint.
-    """
+    cover the aligned local endpoint."""
     hash_block_size = 2
     kv_cache_config = KVCacheConfig(
         num_blocks=24,
@@ -1306,8 +1377,7 @@ def test_hybrid_mamba_partial_tail_owner_continue_preserves_later_hit():
 def test_hybrid_mamba_moved_partial_entry_defers_same_step_hit():
     """The owner's move re-arms the same-step guard: the moved entry is
     filled by this step's copy, and chained same-step copies read stale
-    sources, so a request hitting it in the move step must be deferred.
-    """
+    sources, so a request hitting it in the move step must be deferred."""
     hash_block_size = 2
     block_size = 2 * hash_block_size
     kv_cache_config = KVCacheConfig(
@@ -1597,8 +1667,7 @@ def test_hybrid_partial_hash_truncates_full_attention_hit_length():
 
 def test_cow_retained_blocks_returned_for_release():
     """new_step_starts returns the CoW copy retentions instead of freeing
-    them; the scheduler owns releasing them once the copy has run.
-    """
+    them; the scheduler owns releasing them once the copy has run."""
     hash_block_size = 2
     block_size = 2 * hash_block_size
     kv_cache_config = KVCacheConfig(
@@ -1651,8 +1720,7 @@ def test_cow_retained_blocks_returned_for_release():
 
 def test_free_cow_retained_blocks_defers_until_copy_step_processed():
     """Scheduler releases CoW retentions immediately when the copy's step has
-    been processed (or deferral is off), and defers them otherwise.
-    """
+    been processed (or deferral is off), and defers them otherwise."""
     from collections import deque
 
     freed: list = []
@@ -1689,8 +1757,7 @@ def test_free_cow_retained_blocks_defers_until_copy_step_processed():
 def test_full_attention_eagle_drops_one_hash_unit():
     """With fine-grained partial hits, eagle rewinds the hit by one hash unit
     instead of a whole cache block: the tail block's KV is append-only, so it
-    still covers the reduced length and stays in the hit as a partial block.
-    """
+    still covers the reduced length and stays in the hit as a partial block."""
     from vllm.v1.core.block_pool import BlockPool
     from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager
 
@@ -1766,8 +1833,7 @@ def test_hybrid_partial_hit_with_eagle_stays_within_group_blocks():
     """Regression: with eagle, the mamba group must not receive the eagle
     lookup margin — its finder never applies the drop, so it could return a
     hit past the blocks the (dropped) full-attention group covers, crashing
-    the consumer's CoW with block_idx >= len(req_blocks).
-    """
+    the consumer's CoW with block_idx >= len(req_blocks)."""
     hash_block_size = 2
     block_size = 2 * hash_block_size
     kv_cache_config = KVCacheConfig(
@@ -1839,7 +1905,7 @@ def test_mamba_align_split_stops_below_eagle_proof_boundary():
         use_eagle_block_drop=True,
         hash_block_size=hash_block_size,
         mamba_partial_cache_hit=True,
-        mamba_fine_grained_prefix_cache=False,
+        mamba_shared_prefix_checkpoint=False,
         mamba_has_prefill_checkpoint_blocks=False,
     )
     split = Scheduler._mamba_block_aligned_split
@@ -2369,8 +2435,7 @@ def test_retention_snapshots_handed_off_with_exact_block_ids():
     """Under sparse retention, each retained mamba boundary state block is
     handed to the connector with its exact block id. Connectors must not resolve
     align-mode state blocks positionally because the block table is not
-    append-only.
-    """
+    append-only."""
     hash_block_size = 2
     block_size = 4
     manager = make_kv_cache_manager(
@@ -2411,8 +2476,7 @@ def test_snapshot_handoff_dense_default_retention():
     """With dense (default) retention, every materialized mamba boundary
     state block is handed off — regular mamba-align + prefix-match-unit
     deployments get store-able boundary snapshots without setting a
-    prefix-cache retention interval.
-    """
+    prefix-cache retention interval."""
     hash_block_size = 2
     block_size = 4
     manager = make_kv_cache_manager(
@@ -2444,8 +2508,7 @@ def test_snapshot_handoff_dense_default_retention():
 
 def _run_chunked_prefill(manager, req, chunk_size, num_chunks):
     """Prefill ``req`` one ``chunk_size`` chunk per scheduler step, yielding the
-    boundary-state hand-offs offered (and claimed) at each step.
-    """
+    boundary-state hand-offs offered (and claimed) at each step."""
     computed_blocks, num_computed, _ = manager.get_computed_blocks(req)
     for step in range(num_chunks):
         manager.new_step_starts()
@@ -2509,8 +2572,7 @@ def test_boundary_states_offered_past_prompt_for_resumed_prefill():
     ``num_prompt_tokens``. A resumed request re-prefills its generated tokens
     and every group re-saves them, so filtering on the original prompt length
     would silently strip the mamba key for boundaries full attention still
-    stores; only the connector knows where its save window ends.
-    """
+    stores; only the connector knows where its save window ends."""
     block_size = 8
     prompt_len = block_size
     manager = make_kv_cache_manager(
@@ -2548,3 +2610,105 @@ def test_boundary_states_offered_past_prompt_for_resumed_prefill():
     offered = [b for _, _, b in drain_boundary_state_offloads(manager).get("0", [])]
     assert 2 * block_size in offered
     assert req0.num_prompt_tokens < 2 * block_size
+
+
+def test_prompt_end_checkpoint_survives_sparse_retention_with_coarse_hash():
+    """With hash_block_size == mamba block size (no fine-grained matching), the
+    hybrid coordinator caches the final chunk only up to its last full block,
+    so the managers see ``num_tokens < num_prompt_tokens`` there too. The
+    prompt-end checkpoint must still be published under retention_interval=0,
+    otherwise the next request that extends this prompt misses the prefix.
+    """
+    block_size = 32
+    manager = make_full_mamba_manager(
+        dcp_world_size=1,
+        hash_block_size=block_size,
+        full_block_size=block_size,
+        mamba_block_size=block_size,
+        num_prefill_checkpoint_blocks=1,
+    )
+    manager.coordinator.retention_interval = 0
+
+    # 240 tokens: not block aligned, prompt-end checkpoint at 224.
+    request = make_request("producer", list(range(240)), block_size, sha256)
+    computed_blocks, num_computed, _ = manager.get_computed_blocks(request)
+    assert manager.allocate_slots(request, 128, num_computed, computed_blocks)
+    request.num_computed_tokens = 128
+    manager.new_step_starts()
+    assert manager.allocate_slots(request, 112) is not None
+
+    end_hash = request.block_hashes[224 // block_size - 1]
+    assert manager.block_pool.get_cached_block(end_hash, [1]) is not None
+
+    # A request extending the prompt resumes from that checkpoint.
+    follower = make_request("follower", list(range(240)) + [7] * 40, block_size, sha256)
+    _, num_hit, _ = manager.get_computed_blocks(follower)
+    assert num_hit == 224
+
+
+@pytest.mark.parametrize(
+    "hash_block_size,mamba_block_size,use_eagle",
+    [(32, 32, False), (16, 32, False), (32, 32, True)],
+)
+@pytest.mark.parametrize("retention_interval", [0, None])
+@pytest.mark.parametrize(
+    "num_prompt_tokens,num_output_tokens",
+    [(104, 0), (200, 0), (40, 24), (40, 25), (150, 43)],
+)
+@pytest.mark.parametrize("chunk_blocks", [2, 100])
+def test_checkpoint_reservation_matches_worker(
+    hash_block_size,
+    mamba_block_size,
+    use_eagle,
+    retention_interval,
+    num_prompt_tokens,
+    num_output_tokens,
+    chunk_blocks,
+):
+    """The worker exports a checkpoint wherever `compute_mamba_prefill_checkpoints`
+    says, into whatever block sits at its column. Each chunk, the manager must
+    either reserve exactly that position and column, or leave the column null so
+    the export is masked; anything else publishes a hash over the wrong state.
+    Under sparse retention, only the prefill-end chunk may reserve one.
+    """
+    manager = make_full_mamba_manager(
+        dcp_world_size=1,
+        hash_block_size=hash_block_size,
+        full_block_size=hash_block_size,
+        mamba_block_size=mamba_block_size,
+        num_blocks=64,
+        use_eagle=use_eagle,
+        num_speculative_blocks=3 if use_eagle else 0,
+        num_prefill_checkpoint_blocks=1,
+    )
+    manager.coordinator.retention_interval = retention_interval
+    mamba_manager = manager.coordinator.single_type_managers[1]
+
+    request = make_request(
+        "req", list(range(num_prompt_tokens)), hash_block_size, sha256
+    )
+    request.append_output_token_ids(list(range(1000, 1000 + num_output_tokens)))
+    num_tokens = request.num_tokens
+    prefill_end = max(num_prompt_tokens, num_tokens - 1)
+
+    start = 0
+    while start < num_tokens:
+        end = min(start + chunk_blocks * mamba_block_size, num_tokens)
+        assert manager.allocate_slots(request, end - start) is not None
+        offsets, cols = compute_mamba_prefill_checkpoints(
+            [end],
+            [end - start],
+            hash_block_size=hash_block_size,
+            mamba_block_size=mamba_block_size,
+            checkpoint_alignment=16,
+            drop_eagle_block=use_eagle,
+        )
+        reserved = mamba_manager._checkpoints.get(request.request_id)
+        if reserved is not None:
+            assert reserved == (start + offsets[0], cols[0])
+            assert retention_interval is None or end >= prefill_end
+        elif offsets[0]:
+            assert mamba_manager.req_to_blocks[request.request_id][cols[0]].is_null
+        request.num_computed_tokens = end
+        manager.new_step_starts()
+        start = end

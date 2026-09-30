@@ -22,7 +22,7 @@ import numpy as np
 import pytest
 
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.cache import MultiModalProcessorSenderCache
+from vllm.multimodal.cache import LruKeyReplicatedSenderCache
 
 from ....multimodal.utils import random_audio, random_video
 from ...utils import build_model_context
@@ -63,36 +63,32 @@ def test_audio_in_video_cache_correctness(model_id: str, num_videos: int) -> Non
         mm_processor_cache_gb=1,
     )
 
-    # Baseline: no cache, always processes from scratch.
-    baseline_processor = MULTIMODAL_REGISTRY.create_processor(
-        ctx.model_config, cache=None
-    )
+    processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+
     # Sender cache: on a cache hit returns (None, prompt_updates) for each
     # item, setting mm_kwargs["video"] = [None] – the exact condition that
     # triggered the original bug.
-    sender_cache = MultiModalProcessorSenderCache(ctx.model_config)
-    cached_processor = MULTIMODAL_REGISTRY.create_processor(
-        ctx.model_config, cache=sender_cache
-    )
+    sender_cache = LruKeyReplicatedSenderCache(ctx.model_config)
 
-    video_token_id = baseline_processor.info.get_hf_config().video_token_id
+    video_token_id = processor.info.get_hf_config().video_token_id
 
     mm_data = create_mm_data(num_videos)
     hf_processor_mm_kwargs = {"use_audio_in_video": True}
 
-    def run(processor):
+    def run(processor, cache):
         return processor(
             [video_token_id] * num_videos,
-            mm_items=baseline_processor.info.parse_mm_data(mm_data),
+            mm_items=processor.info.parse_mm_data(mm_data),
             hf_processor_mm_kwargs=hf_processor_mm_kwargs,
+            cache=cache,
         )["prompt_token_ids"]
 
-    baseline_ids = run(baseline_processor)
+    baseline_ids = run(processor, cache=None)
 
     # First call on the sender-cache processor: cache miss.
     # mm_kwargs["video"] items are real tensors; use_audio_in_video is
     # detected normally from the item data.
-    first_ids = run(cached_processor)
+    first_ids = run(processor, cache=sender_cache)
     assert first_ids == baseline_ids, (
         "Cache-miss call produced different prompt_token_ids than baseline.\n"
         f"  baseline  : {baseline_ids}\n"
@@ -103,7 +99,7 @@ def test_audio_in_video_cache_correctness(model_id: str, num_videos: int) -> Non
     # MultiModalProcessorSenderCache.get_and_update_item returns (None, …),
     # so mm_kwargs["video"] = [None].  Before the fix, use_audio_in_video was
     # not detected, yielding wrong token ids.
-    second_ids = run(cached_processor)
+    second_ids = run(processor, cache=sender_cache)
     assert second_ids == baseline_ids, (
         "Cache-hit call produced different prompt_token_ids than baseline.\n"
         "This is the regression introduced when use_audio_in_video detection\n"
@@ -123,7 +119,7 @@ def test_use_audio_in_video_without_audio_track(model_id: str) -> None:
         model_id,
         limit_mm_per_prompt={"audio": 1, "image": 0, "video": 1},
     )
-    processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config, cache=None)
+    processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
     video_token_id = processor.info.get_hf_config().video_token_id
 
     rng = np.random.RandomState(0)

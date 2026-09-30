@@ -82,8 +82,7 @@ class RayPrometheusMetric:
 
 class RayGaugeWrapper(RayPrometheusMetric):
     """Wraps around ray.util.metrics.Gauge to provide same API as
-    prometheus_client.Gauge
-    """
+    prometheus_client.Gauge"""
 
     def __init__(
         self,
@@ -117,8 +116,7 @@ class RayGaugeWrapper(RayPrometheusMetric):
 
 class RayCounterWrapper(RayPrometheusMetric):
     """Wraps around ray.util.metrics.Counter to provide same API as
-    prometheus_client.Counter
-    """
+    prometheus_client.Counter"""
 
     def __init__(
         self,
@@ -143,8 +141,7 @@ class RayCounterWrapper(RayPrometheusMetric):
 
 class RayHistogramWrapper(RayPrometheusMetric):
     """Wraps around ray.util.metrics.Histogram to provide same API as
-    prometheus_client.Histogram
-    """
+    prometheus_client.Histogram"""
 
     def __init__(
         self,

@@ -15,27 +15,26 @@ import functools
 from unittest.mock import MagicMock, patch
 
 import pytest
-from transformers import PretrainedConfig
+from transformers import PreTrainedConfig
 
 from vllm.config.parallel import ParallelConfig
 from vllm.config.speculative import SpeculativeConfig
 
 
-def _make_hf_config(**kwargs) -> PretrainedConfig:
+def _make_hf_config(**kwargs) -> PreTrainedConfig:
     defaults = dict(
         architectures=["LlamaForCausalLM"],
         model_type="llama",
         num_hidden_layers=64,
     )
     defaults.update(kwargs)
-    return PretrainedConfig(**defaults)
+    return PreTrainedConfig(**defaults)
 
 
 @pytest.mark.cpu_test
 def test_dict_overrides_are_not_forwarded_to_draft():
     """Dict overrides are target-specific key patches; the draft must get
-    only the architecture-mapping override.
-    """
+    only the architecture-mapping override."""
     composed = SpeculativeConfig.compose_draft_hf_overrides(
         {"max_position_embeddings": 1234}
     )
@@ -48,13 +47,97 @@ def test_none_overrides_fall_back_to_arch_mapping():
     assert composed is SpeculativeConfig.hf_config_override
 
 
+def _make_speculative_config(
+    hf_kwargs: dict, architecture: str, **speculative_kwargs
+) -> SpeculativeConfig:
+    hf_config = SpeculativeConfig.hf_config_override(_make_hf_config(**hf_kwargs))
+    draft = MagicMock(
+        hf_config=hf_config, architectures=hf_config.architectures, max_model_len=128
+    )
+    draft.registry.inspect_model_cls.return_value = (None, architecture)
+    target = MagicMock(max_model_len=128, quantization=None, hf_overrides={})
+    target.hf_config.model_type = hf_kwargs["model_type"]
+
+    with patch("vllm.config.speculative.ModelConfig", return_value=draft):
+        return SpeculativeConfig(
+            model="draft",
+            **speculative_kwargs,
+            target_model_config=target,
+            target_parallel_config=ParallelConfig(),
+        )
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize(
+    ("hf_kwargs", "n_predict", "architecture"),
+    [
+        (
+            dict(
+                model_type="deepseek_v4",
+                num_nextn_predict_layers=3,
+                dspark_block_size=5,
+            ),
+            3,
+            "DSparkDraftModel",
+        ),
+        (
+            dict(
+                model_type="deepseek_v41",
+                num_nextn_predict_layers=3,
+                dspark_block_size=5,
+            ),
+            3,
+            "DSparkV41DraftModel",
+        ),
+        (
+            dict(
+                model_type="gemma4_text",
+                architectures=["Gemma4DSparkModel"],
+                block_size=5,
+            ),
+            None,
+            "Gemma4DSparkModel",
+        ),
+    ],
+)
+@pytest.mark.parametrize("speculative_kwargs", [{"num_speculative_tokens": 5}, {}])
+def test_dspark_width_is_independent_of_mtp_stages(
+    hf_kwargs, n_predict, architecture, speculative_kwargs
+):
+    config = _make_speculative_config(
+        hf_kwargs, architecture, method="dspark", **speculative_kwargs
+    )
+
+    assert config.num_speculative_tokens == 5
+    assert getattr(config.draft_model_config.hf_config, "n_predict", None) == n_predict
+    assert config.draft_model_config.hf_config.architectures == [architecture]
+
+
+@pytest.mark.cpu_test
+def test_mtp_stages_are_independent_of_dspark_width():
+    hf_kwargs = dict(
+        model_type="deepseek_v4", num_nextn_predict_layers=3, dspark_block_size=5
+    )
+    config = _make_speculative_config(
+        hf_kwargs, "DeepSeekV4MTPModel", method="mtp", num_speculative_tokens=6
+    )
+
+    assert config.num_speculative_tokens == 6
+    assert config.draft_model_config.hf_config.n_predict == 3
+    assert config.draft_model_config.hf_config.architectures == ["DeepSeekV4MTPModel"]
+
+    with pytest.raises(ValueError, match="must be divisible by n_predict=3"):
+        _make_speculative_config(
+            hf_kwargs, "DeepSeekV4MTPModel", method="mtp", num_speculative_tokens=5
+        )
+
+
 @pytest.mark.cpu_test
 def test_callable_overrides_reach_the_draft_config():
     """A callable override (config-to-config transform) composes with the
-    architecture-mapping override and is applied to the draft config.
-    """
+    architecture-mapping override and is applied to the draft config."""
 
-    def shrink(hf_config: PretrainedConfig) -> PretrainedConfig:
+    def shrink(hf_config: PreTrainedConfig) -> PreTrainedConfig:
         hf_config.num_hidden_layers = 1
         return hf_config
 
@@ -69,11 +152,10 @@ def test_callable_overrides_reach_the_draft_config():
 @pytest.mark.cpu_test
 def test_arch_mapping_applies_before_callable_override():
     """The static arch-mapping override runs first, so the user callable
-    observes (and may adjust) the post-mapping config.
-    """
+    observes (and may adjust) the post-mapping config."""
     seen_architectures: list[str] = []
 
-    def record(hf_config: PretrainedConfig) -> PretrainedConfig:
+    def record(hf_config: PreTrainedConfig) -> PreTrainedConfig:
         seen_architectures.append(hf_config.architectures[0])
         return hf_config
 
@@ -120,7 +202,7 @@ def test_inkling_override_exposes_all_mtp_depths():
     assert out.local_layer_ids == [0, 2, 4]
 
 
-def _module_level_shrink(hf_config: PretrainedConfig) -> PretrainedConfig:
+def _module_level_shrink(hf_config: PreTrainedConfig) -> PreTrainedConfig:
     hf_config.num_hidden_layers = 1
     return hf_config
 
@@ -131,8 +213,7 @@ def test_composed_override_is_picklable():
     the composed override must be picklable. A nested local closure is not
     (it raised ``Can't get local object`` on DFlashDraftModel); a
     ``functools.partial`` over a module-referenceable static method is.
-    Guard against regressing to a closure.
-    """
+    Guard against regressing to a closure."""
     composed = SpeculativeConfig.compose_draft_hf_overrides(_module_level_shrink)
 
     assert isinstance(composed, functools.partial)

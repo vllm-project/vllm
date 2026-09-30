@@ -46,8 +46,7 @@ def test_logprobs_tensors_cat():
 def test_logprobs_tensors_tolists_with_tensor_boundaries():
     """Adaptive verification hands over the request boundaries as a tensor
     (they only exist on device); tolists() must materialize it as a plain
-    list so slice_request splits requests correctly.
-    """
+    list so slice_request splits requests correctly."""
     tensors = LogprobsTensors(
         torch.tensor([[1, 2], [3, 4], [5, 6]]),
         torch.tensor([[0.1, 0.2], [0.3, 0.4], [0.5, 0.6]]),
@@ -86,8 +85,7 @@ def test_sampling_mask_lists_to_nested_list():
 def test_sampling_mask_tensors_match_finite_support(max_num_kept):
     """Whatever its size (empty, one, around the compact width, beyond the
     cap, the whole vocab), a sampled row's mask is exactly the ascending set
-    of its finite logits; rows that sampled nothing are empty.
-    """
+    of its finite logits; rows that sampled nothing are empty."""
     from vllm.v1.worker.gpu.sample.output import MAX_COMPACT_SUPPORT
 
     vocab_size = 20_001
@@ -114,8 +112,7 @@ def test_sampling_mask_tensors_match_finite_support(max_num_kept):
 def test_sampling_mask_matches_processed_top_k_top_p_support():
     """The mask must exactly mirror whatever support `apply_top_k_top_p`
     (the real logits-processing function used by the sampler) actually
-    produces, whatever backend implements it.
-    """
+    produces, whatever backend implements it."""
     processed_logits = apply_top_k_top_p(
         logits=torch.tensor(
             [[6.0, 5.0, 4.0, 4.0, 4.0, 2.0, 1.0, 0.0]], device=DEVICE_TYPE
@@ -141,8 +138,7 @@ def test_sampling_mask_matches_processed_top_k_top_p_support():
 def test_sampling_mask_preserves_top_k_boundary_ties():
     """When the kept support is wider than `max_num_kept` (e.g. a top-k
     boundary tie keeps more than k logits), the mask must fall back to the
-    exact bitmask instead of silently truncating to `max_num_kept` ids.
-    """
+    exact bitmask instead of silently truncating to `max_num_kept` ids."""
     processed_logits = torch.tensor(
         [[6.0, 5.0, 4.0, 4.0, 4.0, float("-inf"), float("-inf"), float("-inf")]],
         device=DEVICE_TYPE,

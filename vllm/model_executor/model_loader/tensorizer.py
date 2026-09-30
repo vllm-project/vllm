@@ -18,7 +18,7 @@ import regex as re
 import torch
 from torch import nn
 from torch.utils._python_dispatch import TorchDispatchMode
-from transformers import PretrainedConfig
+from transformers import PreTrainedConfig
 
 import vllm.envs as envs
 from vllm.config import ModelConfig, ParallelConfig, VllmConfig, set_current_vllm_config
@@ -173,7 +173,7 @@ class TensorizerConfig(MutableMapping):
     deserialization_kwargs: dict[str, Any] | None = None
     _extra_serialization_attrs: dict[str, Any] | None = field(init=False, default=None)
     model_class: type[torch.nn.Module] | None = field(init=False, default=None)
-    hf_config: PretrainedConfig | None = field(init=False, default=None)
+    hf_config: PreTrainedConfig | None = field(init=False, default=None)
     dtype: str | torch.dtype | None = field(init=False, default=None)
     _is_sharded: bool = field(init=False, default=False)
     _fields: ClassVar[tuple[str, ...]]
@@ -497,8 +497,7 @@ def _check_tensors_on_meta_device(model: nn.Module) -> None:
 
 def _resize_lora_embeddings(model: nn.Module):
     """Modify LoRA embedding layers to use bigger tensors
-    to allow for adapter added tokens.
-    """
+    to allow for adapter added tokens."""
     for child in model.modules():
         if (
             isinstance(child, VocabParallelEmbedding)

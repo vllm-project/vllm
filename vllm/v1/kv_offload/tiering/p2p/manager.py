@@ -134,8 +134,7 @@ class P2PDestInfo:
 
 def _parse_source(kv_params: dict | None) -> P2PSourceInfo | None:
     """Parse the consumer sub-dict (PD ``remote_prefiller`` or symmetric
-    ``remote_kv_source``) into a ``P2PSourceInfo``, or None if absent/incomplete.
-    """
+    ``remote_kv_source``) into a ``P2PSourceInfo``, or None if absent/incomplete."""
     role = _remote_prefiller_params(kv_params)
     do_probe = False
     if role is None:
@@ -156,8 +155,7 @@ def _parse_source(kv_params: dict | None) -> P2PSourceInfo | None:
 
 def _parse_dest(kv_params: dict | None) -> P2PDestInfo | None:
     """Parse the producer ``remote_decoder`` sub-dict into a ``P2PDestInfo``,
-    or None if the block is absent (not a remote-decode request).
-    """
+    or None if the block is absent (not a remote-decode request)."""
     role = _remote_decoder_params(kv_params)
     if role is None:
         return None
@@ -267,7 +265,25 @@ class P2PSecondaryTierManager(SecondaryTierManager):
                 number, or anything convertible to one.
 
         """
-        super().__init__(offloading_spec, primary_kv_view, tier_type)
+        backpressure_detector = kwargs.pop("backpressure_detector", None)
+        if backpressure_detector is not None:
+            # The generic (store-latency) detector is unreliable for P2P: in
+            # PD mode dropping a store can leave the decoder waiting until the
+            # load timeout instead of failing fast, and rendezvous time makes
+            # store latency a poor pressure signal. Reject it until a
+            # P2P-specific fail-fast path exists.
+            raise ValueError(
+                "Backpressure is not supported for the P2P secondary tier. "
+                "The generic store-latency detector cannot fail fast in PD "
+                "mode and rendezvous time makes store latency an unreliable "
+                "pressure signal. Remove the 'backpressure' config from the "
+                "p2p tier."
+            )
+        super().__init__(
+            offloading_spec,
+            primary_kv_view,
+            tier_type,
+        )
         try:
             timeout_s = float(unbound_store_timeout_s)
         except (TypeError, ValueError):

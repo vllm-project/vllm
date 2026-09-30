@@ -91,7 +91,7 @@ class MiniMaxM3IndexerBackend(AttentionBackend):
         return [128]
 
     @staticmethod
-    def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
+    def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int | MultipleOf]:
         return [128]
 
     @classmethod
@@ -173,8 +173,7 @@ class MiniMaxM3IndexerPrefillMetadata:
 @dataclass
 class MiniMaxM3IndexerDecodeMetadata:
     """Per-decode state (cudagraph-safe). ``decode_query_len`` is the uniform
-    per-request query length (1, or 1 + num_speculative_tokens).
-    """
+    per-request query length (1, or 1 + num_speculative_tokens)."""
 
     seq_lens: torch.Tensor  # [num_decodes] int32
     block_table: torch.Tensor
@@ -207,8 +206,7 @@ class MiniMaxM3IndexerMetadataBuilder(
     AttentionMetadataBuilder[MiniMaxM3IndexerMetadata]
 ):
     """Abstract base: shared setup only. The Triton and MSA builders are
-    parallel subclasses that each own their full ``build`` (no shared code).
-    """
+    parallel subclasses that each own their full ``build`` (no shared code)."""
 
     # Full cudagraphs for uniform decode batches (incl. spec-decode verify).
     _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.UNIFORM_BATCH
@@ -504,16 +502,21 @@ def select_indexer_impl_cls(
     On Blackwell (SM100) with ``topk_blocks == 16`` (the only width fmha_sm100's
     ``sparse_topk_select`` kernel supports), the fmha_sm100 score + top-k path is
     used for both bf16 and fp8 index caches. Everything else falls back to the
-    Triton indexer (bf16 only).
+    Triton indexer, with fp8 restricted to CUDA platforms that advertise fp8
+    support.
     """
     if indexer_kv_dtype in ("mxfp4", "nvfp4"):
         raise NotImplementedError(
             f"indexer_kv_dtype={indexer_kv_dtype!r} needs the (not-yet-added) "
             "CuteDSL indexer impl."
         )
-    is_sm100 = (
-        current_platform.is_cuda() and current_platform.is_device_capability_family(100)
-    )
+    is_cuda = current_platform.is_cuda()
+    is_fp8 = indexer_kv_dtype in ("fp8", "fp8_e4m3")
+    if is_fp8 and not (is_cuda and current_platform.supports_fp8()):
+        raise NotImplementedError(
+            f"indexer_kv_dtype={indexer_kv_dtype!r} requires CUDA fp8 support."
+        )
+    is_sm100 = is_cuda and current_platform.is_device_capability_family(100)
     use_msa = (
         is_sm100
         and topk_blocks == 16
@@ -532,7 +535,7 @@ def select_indexer_impl_cls(
             indexer_kv_dtype,
         )
         return MiniMaxM3IndexerMSAImpl
-    if indexer_kv_dtype != "bf16":
+    if indexer_kv_dtype not in ("bf16", "fp8", "fp8_e4m3"):
         raise NotImplementedError(
             f"indexer_kv_dtype={indexer_kv_dtype!r} is not supported by the "
             "Triton indexer impl."

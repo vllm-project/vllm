@@ -16,8 +16,7 @@ import torch
 
 class TestTritonMoeForwardExpertMap:
     """Test that triton_kernel_moe_forward applies expert_map remapping
-    when expert_map is provided (EP active).
-    """
+    when expert_map is provided (EP active)."""
 
     def test_expert_map_remap(self):
         device = "cuda" if torch.cuda.is_available() else "cpu"

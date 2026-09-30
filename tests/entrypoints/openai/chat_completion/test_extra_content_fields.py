@@ -54,8 +54,7 @@ def stop_sign_image_url():
 async def test_translategemma_extra_lang_code_fields(client: openai.AsyncOpenAI):
     """En -> es translation through TranslateGemma's bundled chat template's
     ``text`` content branch, which depends on ``source_lang_code`` /
-    ``target_lang_code`` extra fields being preserved on the content part.
-    """
+    ``target_lang_code`` extra fields being preserved on the content part."""
     completion = await client.chat.completions.create(
         model=MODEL_NAME,
         messages=[
@@ -99,8 +98,7 @@ async def test_translategemma_image_extra_lang_code_fields(
     ``source_lang_code`` / ``target_lang_code`` extras must survive parsing
     and end up alongside the ``{"type": "image"}`` placeholder so the
     template's image branch (``content["type"] == 'image'``) renders the
-    right OCR-translation prompt.
-    """
+    right OCR-translation prompt."""
     completion = await client.chat.completions.create(
         model=MODEL_NAME,
         messages=[

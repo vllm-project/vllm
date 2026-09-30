@@ -278,12 +278,12 @@ class VocabParallelEmbedding(PluggableLayer):
         self.num_embeddings = num_embeddings
         self.padding_size = padding_size
         self.org_vocab_size = org_num_embeddings or num_embeddings
-        num_added_embeddings = num_embeddings - self.org_vocab_size
+        self.num_added_embeddings = num_embeddings - self.org_vocab_size
         self.org_vocab_size_padded = pad_vocab_size(
             self.org_vocab_size, self.padding_size
         )
         self.num_embeddings_padded = pad_vocab_size(
-            self.org_vocab_size_padded + num_added_embeddings, self.padding_size
+            self.org_vocab_size_padded + self.num_added_embeddings, self.padding_size
         )
         assert self.org_vocab_size_padded <= self.num_embeddings_padded
 
@@ -296,6 +296,18 @@ class VocabParallelEmbedding(PluggableLayer):
             self.tp_size,
         )
         self.embedding_dim = embedding_dim
+        # Divide the weight matrix along the vocabulary dimension.
+        self.num_embeddings_per_partition = divide(
+            self.num_embeddings_padded, self.tp_size
+        )
+
+        # Quantization methods share the same weight factory as linear layers,
+        # so setup standard linear metadata.
+        self.input_size = self.input_size_per_partition = embedding_dim
+        self.output_size = self.num_embeddings_padded
+        self.output_size_per_partition = self.num_embeddings_per_partition
+        self.output_partition_sizes = [self.output_size_per_partition]
+        self.prefix = prefix
 
         # Avoid overriding a preselected model-specific method with generic
         # config-based dispatch.
@@ -322,11 +334,6 @@ class VocabParallelEmbedding(PluggableLayer):
         if params_dtype is None:
             params_dtype = torch.get_default_dtype()
         self.params_dtype = params_dtype
-        # Divide the weight matrix along the vocabulary dimension.
-        self.num_added_embeddings = self.num_embeddings - self.org_vocab_size
-        self.num_embeddings_per_partition = divide(
-            self.num_embeddings_padded, self.tp_size
-        )
         assert (
             self.shard_indices.num_elements_padded == self.num_embeddings_per_partition
         )
@@ -349,10 +356,10 @@ class VocabParallelEmbedding(PluggableLayer):
 
         self.quant_method.create_weights(
             self,
-            self.embedding_dim,
-            [self.num_embeddings_per_partition],
-            self.embedding_dim,
-            self.num_embeddings_padded,
+            self.input_size_per_partition,
+            self.output_partition_sizes,
+            self.input_size,
+            self.output_size,
             params_dtype=params_dtype,
             weight_loader=self.weight_loader,
         )
@@ -376,8 +383,7 @@ class VocabParallelEmbedding(PluggableLayer):
     ) -> VocabParallelEmbeddingShardIndices:
         """Get start and end indices for vocab parallel embedding, following the
         layout outlined in the class docstring, based on the given tp_rank and
-        tp_size.
-        """
+        tp_size."""
         num_added_embeddings_padded = vocab_size_padded - org_vocab_size_padded
         padded_org_vocab_start_index, padded_org_vocab_end_index = (
             vocab_range_from_global_vocab_size(org_vocab_size_padded, tp_rank, tp_size)
@@ -601,6 +607,7 @@ class ParallelLMHead(VocabParallelEmbedding):
         *,
         disable_tp: bool = False,
     ):
+        self.has_bias = bias
         super().__init__(
             num_embeddings,
             embedding_dim,

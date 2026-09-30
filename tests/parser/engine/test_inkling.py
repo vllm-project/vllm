@@ -23,8 +23,13 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionToolsParam,
     FunctionDefinition,
 )
+from vllm.parser.abstract_parser import DelegatingParser
 from vllm.parser.engine.events import EventType
 from vllm.parser.engine.parser_engine_config import ParserState
+from vllm.parser.engine.registered_adapters import (
+    InklingParserReasoningAdapter,
+    InklingParserToolAdapter,
+)
 from vllm.parser.engine.streaming_parser_engine import StreamingParserEngine
 from vllm.parser.inkling import InklingParser, _inkling_arg_converter, inkling_config
 from vllm.parser.parser_manager import ParserManager
@@ -70,8 +75,7 @@ _MARKERS = sorted(_TML_VOCAB, key=len, reverse=True)
 def _tokenize(text: str) -> list[tuple[int, str]]:
     """Tokenize like the real stream: markers are atomic special tokens,
     plain text becomes one token per character (matching the mock
-    tokenizer's ``chr``-based decode).
-    """
+    tokenizer's ``chr``-based decode)."""
     tokens: list[tuple[int, str]] = []
     i = 0
     while i < len(text):
@@ -88,8 +92,7 @@ def _tokenize(text: str) -> list[tuple[int, str]]:
 
 def _stream(parser, request, text: str, chunk_size: int):
     """Stream production-shaped deltas: ``chunk_size`` tokens per delta,
-    with delta_token_ids covering every token (specials and text).
-    """
+    with delta_token_ids covering every token (specials and text)."""
     tokens = _tokenize(text)
     results = []
     previous_text = ""
@@ -121,8 +124,7 @@ def _stream(parser, request, text: str, chunk_size: int):
 def _stream_text_only(parser, request, text: str, chunk_size: int):
     """Stream text-only deltas (no token ids), chunked at arbitrary
     character boundaries — exercises the text-lexing fallback path,
-    including markers split across chunks.
-    """
+    including markers split across chunks."""
     results = []
     previous_text = ""
     for start in range(0, len(text), chunk_size):
@@ -169,12 +171,16 @@ def _delegating(mock_tokenizer, tools=None):
     return parser_cls(mock_tokenizer, tools or [])
 
 
+class _TwoPassInklingParser(DelegatingParser):
+    reasoning_parser_cls = InklingParserReasoningAdapter
+    tool_parser_cls = InklingParserToolAdapter
+
+
 def _stream_delegating(parser, request, text, chunk_size, prompt_token_ids):
     """Stream ``text`` through ``DelegatingParser.parse_delta``, ``chunk_size``
     tokens per delta; return ``(content, reasoning, ordered tool names,
     ordered tool arguments)``. Arguments arrive in fragments, so they are
-    concatenated per tool index.
-    """
+    concatenated per tool index."""
     tokens = _tokenize(text)
     content, reasoning = "", ""
     tools: dict[int, str] = {}
@@ -526,8 +532,7 @@ class TestToolCallFiltering:
     """Inkling equivalents of the generic tool-call-filtering replay tests
     (Inkling is excluded from those in test_replay.py: its structural
     role/kind tokens and shared block-end token don't fit the generic
-    reasoning/tool split model).
-    """
+    reasoning/tool split model)."""
 
     def test_skip_tool_parsing_round_trip(self, mock_tokenizer, mock_request):
         # First pass (reasoning adapter, skip_tool_parsing): reasoning is
@@ -764,6 +769,30 @@ class TestDelegatingTwoPass:
         assert TOOL_JSON not in content
         assert END_MESSAGE not in content
 
+    def test_function_name_not_in_content_after_reasoning(
+        self, mock_tokenizer, mock_request
+    ):
+        name = "search_documents_by_keyword"
+        tools = [_function_tool(name)]
+        mock_request.tools = tools
+        text = (
+            f"{THINK_START} context.{END_MESSAGE}{MSG_MODEL}"
+            f"{name}{_tool_block(name, '{}')}"
+        )
+
+        content, reasoning, names, args = _stream_delegating(
+            _TwoPassInklingParser(mock_tokenizer, tools),
+            mock_request,
+            text,
+            chunk_size=12,
+            prompt_token_ids=self.GEN_PROMPT,
+        )
+
+        assert reasoning == " context."
+        assert content == ""
+        assert names == [name]
+        assert json.loads(args[0]) == {}
+
     @pytest.mark.parametrize("opener", [TEXT_START, TOOL_TEXT, TOOL_ERROR])
     @pytest.mark.parametrize("chunk_size", [1, 3, 64])
     def test_visible_text_then_tool_streaming(
@@ -825,8 +854,7 @@ class TestDelegatingTwoPass:
     ):
         """The optional function name between ``<|message_model|>`` and the
         content-kind marker is metadata: the buffered header must be
-        discarded on the way out, not flushed into content.
-        """
+        discarded on the way out, not flushed into content."""
         tools = [_function_tool()]
         mock_request.tools = tools
         content, _, names, args = _stream_delegating(
@@ -843,8 +871,7 @@ class TestDelegatingTwoPass:
     def test_content_state_tool_start_streaming(self, mock_tokenizer, mock_request):
         """Same opener reached from CONTENT rather than MESSAGE_HEADER: a
         text block closed with no ``<|message_model|>`` before the tool
-        block. Preceding text must reach content exactly once, unmarked.
-        """
+        block. Preceding text must reach content exactly once, unmarked."""
         tools = [_function_tool()]
         mock_request.tools = tools
         content, _, names, args = _stream_delegating(
@@ -866,8 +893,7 @@ def test_content_tool_start_emits_reasoning_end_in_reasoning_pass():
     boundary (#49876), but the header-flush path
     (MESSAGE_HEADER --END_MESSAGE--> CONTENT) reaches CONTENT without
     one, so a tool block opening from there relies on this transition
-    alone to hand off to the tool pass.
-    """
+    alone to hand off to the tool pass."""
     engine = StreamingParserEngine(inkling_config(), tokenizer=None)
     engine.skip_tool_parsing = True
     engine.reset(initial_state=ParserState.CONTENT)
@@ -884,8 +910,7 @@ def test_skip_reasoning_parsing_inert_for_shared_markers():
     markers. Inkling has none — ``<|end_message|>`` is labelled THINK_END
     yet also closes text, header, and tool blocks — so the flag must be
     inert: a tool block still closes through its transition and following
-    text returns to CONTENT instead of leaking into the argument stream.
-    """
+    text returns to CONTENT instead of leaking into the argument stream."""
     engine = StreamingParserEngine(inkling_config(), tokenizer=None)
     engine.skip_reasoning_parsing = True
     engine.reset(initial_state=ParserState.CONTENT)
@@ -905,8 +930,7 @@ class TestToolParserWithoutReasoningParser:
     labels ``<|end_message|>`` as THINK_END; a bypass keyed on the label
     would neutralize the closer of every block kind, leaking markers into
     content and leaving tool calls unterminated. Structure must keep
-    parsing exactly as with the reasoning parser attached.
-    """
+    parsing exactly as with the reasoning parser attached."""
 
     GEN_PROMPT = [_TML_VOCAB[MSG_MODEL]]
 

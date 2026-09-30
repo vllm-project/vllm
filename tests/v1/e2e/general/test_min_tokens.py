@@ -172,8 +172,7 @@ def llm_v1():
 
 def test_min_tokens_with_terminal_structured_output(llm_v1: LLM):
     """A grammar whose only legal continuation is EOS must stop under
-    min_tokens instead of sampling outside the grammar.
-    """
+    min_tokens instead of sampling outside the grammar."""
     params = SamplingParams(
         temperature=GREEDY,
         min_tokens=20,

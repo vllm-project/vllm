@@ -18,12 +18,15 @@ def test_sanitize_message():
         sanitize_message("<_io.BytesIO object at 0x7a95e299e750>")
         == "<_io.BytesIO object>"
     )
+    assert (
+        sanitize_message("<PIL.Image.Image image mode=RGB size=2x2 at 0x7D52EAF07BF0>")
+        == "<PIL.Image.Image image mode=RGB size=2x2>"
+    )
 
 
 class TestSanitizeMessageFilePaths:
     """sanitize_message should also strip file paths and traceback
-    frames, not just memory addresses - see #31683.
-    """
+    frames, not just memory addresses - see #31683."""
 
     def test_strips_traceback_style_frame(self):
         msg = (
@@ -45,8 +48,7 @@ class TestSanitizeMessageFilePaths:
 
     def test_strips_single_parent_container_path(self):
         """Regression: /app/server.py and /workspace/server.py (common in
-        container deployments) were missed by the original {2,} quantifier.
-        """
+        container deployments) were missed by the original {2,} quantifier."""
         assert "/app/" not in sanitize_message("Error in /app/server.py")
         assert "/workspace/" not in sanitize_message("Error in /workspace/server.py")
 

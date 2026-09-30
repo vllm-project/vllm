@@ -45,8 +45,7 @@ def _bgmv_shrink(
     inputs, lora_weight, output, seq_len_tensor, lora_indices, scaling=1.0
 ):
     """Memory-efficient shrink reference: per-LoRA matmul loop.
-    output[mask] = scaling * inputs[mask] @ weight.T
-    """
+    output[mask] = scaling * inputs[mask] @ weight.T"""
     exploded = torch.repeat_interleave(lora_indices, seq_len_tensor)
     for lid in exploded.unique():
         if lid < 0:
@@ -67,8 +66,7 @@ def _bgmv_expand(
     add_inputs=False,
 ):
     """Memory-efficient expand reference: per-LoRA matmul loop.
-    output[mask, offset:offset+n] (+)= inputs[mask] @ weight.T
-    """
+    output[mask, offset:offset+n] (+)= inputs[mask] @ weight.T"""
     exploded = torch.repeat_interleave(lora_indices, seq_len_tensor)
     for lid in exploded.unique():
         if lid < 0:

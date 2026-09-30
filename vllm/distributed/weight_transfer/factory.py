@@ -141,8 +141,7 @@ class WeightTransferTrainerFactory:
         class_name: str | None = None,
     ) -> None:
         """Register a trainer engine. Same conventions as
-        `WeightTransferEngineFactory.register_engine`.
-        """
+        `WeightTransferEngineFactory.register_engine`."""
         if name in cls._registry:
             raise ValueError(
                 f"Weight transfer trainer engine '{name}' is already registered."
@@ -244,6 +243,12 @@ WeightTransferEngineFactory.register_engine(
     "ShardedRDTWeightTransferEngine",
 )
 
+WeightTransferEngineFactory.register_engine(
+    "nccl_m2n",
+    "vllm.distributed.weight_transfer.m2n_engine",
+    "M2NWeightTransferEngine",
+)
+
 
 # Trainer-side engines, parallel to the worker registry above.
 WeightTransferTrainerFactory.register_engine(
@@ -268,4 +273,10 @@ WeightTransferTrainerFactory.register_engine(
     "sharded_rdt",
     "vllm.distributed.weight_transfer.sharded_rdt_trainer",
     "ShardedRDTTrainerWeightTransferEngine",
+)
+
+WeightTransferTrainerFactory.register_engine(
+    "nccl_m2n",
+    "vllm.distributed.weight_transfer.m2n_trainer",
+    "M2NTrainerWeightTransferEngine",
 )

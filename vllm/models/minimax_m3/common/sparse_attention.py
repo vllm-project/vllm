@@ -159,7 +159,7 @@ class MiniMaxM3SparseBackend(AttentionBackend):
         return [128]
 
     @staticmethod
-    def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
+    def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int | MultipleOf]:
         # Page size == sparse block size (one sparse block per KV page).
         return [128]
 
@@ -203,8 +203,7 @@ class MiniMaxM3SparsePrefillMetadata:
 @dataclass
 class MiniMaxM3SparseDecodeMetadata:
     """Per-decode state (cudagraph-safe). ``decode_query_len`` is the uniform
-    per-request query length (1, or 1 + num_speculative_tokens).
-    """
+    per-request query length (1, or 1 + num_speculative_tokens)."""
 
     seq_lens: torch.Tensor  # [num_decodes] int32
     block_table: torch.Tensor

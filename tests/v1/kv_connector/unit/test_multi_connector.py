@@ -20,7 +20,10 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     SupportsHMA,
     supports_hma,
 )
-from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorStats
+from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
+    KVConnectorLogging,
+    KVConnectorStats,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.multi_connector import (
     MultiConnector,
     MultiKVConnectorPromMetrics,
@@ -65,6 +68,7 @@ class MockConnector(KVConnectorBase_V1):
         # Override just build_kv_connector_stats
         mock.build_kv_connector_stats = cls.build_kv_connector_stats
         mock.get_kv_connector_stats.return_value = None
+        mock.get_mem_pool_context.return_value = None
         return mock
 
     @classmethod
@@ -198,6 +202,36 @@ def mc() -> MultiConnector:
     return mc
 
 
+def test_multi_connector_mem_pool_context_none(mc: MultiConnector):
+    assert mc.get_mem_pool_context() is None
+
+
+def test_multi_connector_forwards_mem_pool_context(mc: MultiConnector):
+    context = MagicMock()
+    provider = MagicMock(spec_set=KVConnectorBase_V1)
+    provider.get_mem_pool_context.return_value = context
+    mc._connectors = [mc._connectors[0], provider]
+
+    assert mc.get_mem_pool_context() is context
+    provider.get_mem_pool_context.assert_called_once_with()
+
+
+def test_multi_connector_rejects_multiple_mem_pool_contexts(mc: MultiConnector):
+    providers = [
+        MagicMock(spec_set=KVConnectorBase_V1),
+        MagicMock(spec_set=KVConnectorBase_V1),
+    ]
+    for provider in providers:
+        provider.get_mem_pool_context.return_value = MagicMock()
+    mc._connectors = providers
+
+    with pytest.raises(
+        ValueError,
+        match="Multiple connectors provide a KV cache memory pool",
+    ):
+        mc.get_mem_pool_context()
+
+
 # Helper function to compare directories recursively
 def _compare_directories(dir1: Path, dir2: Path) -> bool:
     """Compares two directories recursively for identical content."""
@@ -317,6 +351,7 @@ def test_multi_example_connector_consistency():
     # First three events are from initialization. Layer hooks run before the
     # deferred load starts after the forward pass.
     expected_worker_prefix = [
+        "get_mem_pool_context",
         "register_kv_caches",
         "set_host_xfer_buffer_ops",
         "get_handshake_metadata",
@@ -555,8 +590,7 @@ class TestMultiConnectorStats:
 
     def test_build_kv_connector_stats_reconstructs_nixl_stats(self):
         """Test that NixlConnector stats are properly reconstructed with
-        correct data.
-        """
+        correct data."""
         serialized_data = {
             "NixlConnector": {
                 "transfer_duration": [1.5, 2.3],
@@ -565,6 +599,8 @@ class TestMultiConnectorStats:
                 "num_descriptors": [10, 20],
                 "num_failed_transfers": [],
                 "num_failed_notifications": [],
+                "num_failed_handshakes": [],
+                "num_kv_expired_reqs": [],
             }
         }
 
@@ -588,6 +624,8 @@ class TestMultiConnectorStats:
                 "num_descriptors": [10],
                 "num_failed_transfers": [],
                 "num_failed_notifications": [],
+                "num_failed_handshakes": [],
+                "num_kv_expired_reqs": [],
             },
             "MockConnector": {"mock_field": [1, 2, 3]},
         }
@@ -617,6 +655,8 @@ class TestMultiConnectorStats:
                 "num_descriptors": [10],
                 "num_failed_transfers": [],
                 "num_failed_notifications": [],
+                "num_failed_handshakes": [],
+                "num_kv_expired_reqs": [],
             },
         }
 
@@ -636,6 +676,8 @@ class TestMultiConnectorStats:
                 "num_descriptors": [10],
                 "num_failed_transfers": [],
                 "num_failed_notifications": [],
+                "num_failed_handshakes": [],
+                "num_kv_expired_reqs": [],
             }
         )
         mock_stats = MockConnectorStats(data={"mock_field": [1, 2, 3]})
@@ -665,6 +707,8 @@ class TestMultiConnectorStats:
                 "num_descriptors": [10],
                 "num_failed_transfers": [],
                 "num_failed_notifications": [],
+                "num_failed_handshakes": [],
+                "num_kv_expired_reqs": [],
             }
         )
 
@@ -696,6 +740,8 @@ class TestMultiConnectorStats:
                 "num_descriptors": [10],
                 "num_failed_transfers": [],
                 "num_failed_notifications": [],
+                "num_failed_handshakes": [],
+                "num_kv_expired_reqs": [],
             },
             "ExampleConnector": {"some_field": [1, 2, 3]},
         }
@@ -733,6 +779,8 @@ class TestMultiConnectorStats:
                         "num_descriptors": [10],
                         "num_failed_transfers": [],
                         "num_failed_notifications": [],
+                        "num_failed_handshakes": [],
+                        "num_kv_expired_reqs": [],
                     }
                 )
             }
@@ -748,6 +796,8 @@ class TestMultiConnectorStats:
                         "num_descriptors": [20],
                         "num_failed_transfers": [],
                         "num_failed_notifications": [],
+                        "num_failed_handshakes": [],
+                        "num_kv_expired_reqs": [],
                     }
                 )
             }
@@ -779,6 +829,8 @@ class TestMultiConnectorStats:
                         "num_descriptors": [10],
                         "num_failed_transfers": [],
                         "num_failed_notifications": [],
+                        "num_failed_handshakes": [],
+                        "num_kv_expired_reqs": [],
                     }
                 )
             }
@@ -805,6 +857,8 @@ class TestMultiConnectorStats:
                         "num_descriptors": [10, 20],
                         "num_failed_transfers": [],
                         "num_failed_notifications": [],
+                        "num_failed_handshakes": [],
+                        "num_kv_expired_reqs": [],
                     }
                 )
             }
@@ -818,6 +872,38 @@ class TestMultiConnectorStats:
         assert "Num successful transfers" in reduced["NixlConnector"]
         assert reduced["NixlConnector"]["Num successful transfers"] == 2
 
+    def test_log_renders_plain_scalars(self):
+        """Reduced stats must render as plain numbers in the CLI log, not
+        numpy reprs (eg np.float64(2.338))."""
+        stats = MultiKVConnectorStats(
+            data={
+                "NixlConnector": NixlKVConnectorStats(
+                    data={
+                        "transfer_duration": [1.0, 2.0],
+                        "post_duration": [0.1, 0.2],
+                        "bytes_transferred": [1024, 2048],
+                        "num_descriptors": [10, 20],
+                        "num_failed_transfers": [],
+                        "num_failed_notifications": [],
+                        "num_failed_handshakes": [],
+                        "num_kv_expired_reqs": [],
+                    }
+                )
+            }
+        )
+
+        kv_logging = KVConnectorLogging(kv_transfer_config=None)
+        kv_logging.transfer_stats_accumulator = stats
+        log_records: list[tuple] = []
+        kv_logging.log(log_fn=lambda *args: log_records.append(args))
+
+        assert len(log_records) == 1
+        msg = log_records[0][1]
+        assert "np.float" not in msg
+        assert "'Avg xfer time (ms)': 1500.0" in msg
+        # The accumulator is reset after logging.
+        assert kv_logging.transfer_stats_accumulator is None
+
     def test_reset(self):
         """Test that reset() resets all nested connector stats."""
         stats = MultiKVConnectorStats(
@@ -830,6 +916,8 @@ class TestMultiConnectorStats:
                         "num_descriptors": [10, 20],
                         "num_failed_transfers": [],
                         "num_failed_notifications": [],
+                        "num_failed_handshakes": [],
+                        "num_kv_expired_reqs": [],
                     }
                 )
             }

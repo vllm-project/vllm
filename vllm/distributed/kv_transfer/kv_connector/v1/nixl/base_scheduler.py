@@ -13,6 +13,7 @@ from vllm import envs
 from vllm.distributed.kv_transfer.kv_connector.utils import (
     BlockIds,
     EngineId,
+    clip_ssm_state_blocks,
     yield_req_data,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
@@ -288,11 +289,9 @@ class NixlBaseConnectorScheduler:
                 and blocks
                 and (n_spec_blocks := self._ssm_spec_blocks[i]) is not None
             ):
-                if n_spec := min(n_spec_blocks, len(blocks) - 1):
-                    blocks = blocks[:-n_spec]
-                if not self._ssm_state_slots_are_positional:
-                    # Never empty: downstream reads that as a full prefix hit.
-                    blocks = blocks[-1:]
+                blocks = clip_ssm_state_blocks(
+                    blocks, n_spec_blocks, self._ssm_state_slots_are_positional
+                )
             clipped.append(blocks)
         return tuple(clipped)
 
@@ -400,8 +399,7 @@ class NixlBaseConnectorScheduler:
     def _get_remote_prefill_token_count(self, num_prompt_tokens: int) -> int:
         """D-side only. The number of prompt tokens to load from the prefiller.
         Stops short of the trailing ``_prefill_backoff()`` tokens that the decoder
-        will recompute locally.
-        """
+        will recompute locally."""
         backoff = self._prefill_backoff()
         if backoff and num_prompt_tokens > backoff:
             return num_prompt_tokens - backoff
@@ -414,8 +412,7 @@ class NixlBaseConnectorScheduler:
         multi-module MTP it is the drafter's whole lookahead window.
 
         Guarded by ``_p_side_truncated`` to avoid repeated truncation if the
-        request is preempted and rescheduled.
-        """
+        request is preempted and rescheduled."""
         backoff = self._prefill_backoff()
         params = request.kv_transfer_params
         if (

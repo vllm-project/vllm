@@ -51,8 +51,7 @@ def _check_consistency(target: TokenizerLike, expected: TokenizerLike):
 def test_thread_pool_tokenizer_pickle(model_id: str):
     """Regression test for issue #45433: the thread-pool tokenizer wrapper
     reconstructs through maybe_make_thread_pool on unpickling, which used to
-    fall off the end and return None.
-    """
+    fall off the end and return None."""
     reference_tokenizer = AutoTokenizer.from_pretrained(model_id)
 
     pooled_tokenizer = maybe_make_thread_pool(deepcopy(reference_tokenizer))
@@ -62,7 +61,7 @@ def test_thread_pool_tokenizer_pickle(model_id: str):
     unpickled_tokenizer = pickle.loads(pickle.dumps(pooled_tokenizer))
     assert unpickled_tokenizer is not None
     assert isinstance(unpickled_tokenizer, ThreadSafeHFTokenizerMixin)
-    assert unpickled_tokenizer.encode("prompt") == reference_tokenizer.encode("prompt")
+    assert unpickled_tokenizer.encode("prompt") == reference_tokenizer.encode("prompt")  # type: ignore[attr-defined]
 
     # Idempotence: wrapping an already-pooled tokenizer returns it unchanged.
-    assert maybe_make_thread_pool(pooled_tokenizer) is pooled_tokenizer
+    assert maybe_make_thread_pool(pooled_tokenizer) is pooled_tokenizer  # type: ignore[type-var]

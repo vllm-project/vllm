@@ -144,8 +144,7 @@ class CpuGpuBuffer:
 
     def copy_to_cpu(self, n: int | None = None) -> torch.Tensor:
         """NOTE: Because this method is non-blocking, explicit synchronization
-        is needed to ensure the data is copied to CPU.
-        """
+        is needed to ensure the data is copied to CPU."""
         if n is None:
             return self.cpu.copy_(self.gpu, non_blocking=True)
         return self.cpu[:n].copy_(self.gpu[:n], non_blocking=True)
@@ -159,8 +158,7 @@ def get_engine_client_zmq_addr(
     """Return an IPC path (``local_only=True``) or ``tcp://host:port``.
 
     ``port=0`` lets the kernel assign the port at ``bind()`` time; the
-    caller must recover it via ``getsockopt(zmq.LAST_ENDPOINT)``.
-    """
+    caller must recover it via ``getsockopt(zmq.LAST_ENDPOINT)``."""
     if local_only:
         return get_open_zmq_ipc_path()
     return get_tcp_uri(host, port)
@@ -265,8 +263,7 @@ class APIServerProcessManager:
     ) -> tuple[list[str], list[str]]:
         """Return (inputs, outputs) reported by each child, indexed by
         ``client_index``. Raises ``RuntimeError`` on timeout or premature
-        child exit.
-        """
+        child exit."""
         n = len(self._address_pipes)
         inputs: list[str | None] = [None] * n
         outputs: list[str | None] = [None] * n
@@ -394,6 +391,16 @@ class RustFrontendProcessManager:
                 "data_parallel_hybrid_lb",
             },
         )
+
+        # `model_tag` is the positional `vllm serve` model argument. When the
+        # model is supplied only through `--config`, argparse populates `model`
+        # while leaving `model_tag` unset. The Rust frontend requires
+        # `model_tag` in its JSON bootstrap payload, so use the resolved model
+        # as a fallback.
+        model_tag = getattr(args, "model_tag", None) or getattr(args, "model", None)
+        if model_tag is not None:
+            args_dict["model_tag"] = model_tag
+
         # The Rust `frontend` subcommand parses --args-json via serde_json,
         # which bypasses clap and therefore ignores any `#[arg(env = ...)]`
         # declarations on SharedRuntimeArgs fields. Forward the env-driven
@@ -427,8 +434,7 @@ class RustFrontendProcessManager:
 
 class _SubprocessWrapper:
     """Wraps subprocess.Popen to provide the BaseProcess-like interface
-    needed by wait_for_completion_or_failure.
-    """
+    needed by wait_for_completion_or_failure."""
 
     def __init__(self, proc, name: str):
         self._proc = proc
@@ -524,12 +530,17 @@ def run_api_server_worker_proc(
     listen_address, sock, args, client_config=None, **uvicorn_kwargs
 ) -> None:
     """Entrypoint for individual API server worker processes."""
+    if logging_config := getattr(args, "logging_config", None):
+        from vllm.logger import configure_logging
+
+        configure_logging(logging_config)
+
     from vllm.entrypoints.launchers.api_server.entry import run_server_worker
 
     client_config = client_config or {}
     server_index = client_config.get("client_index", 0)
 
-    # Set process title and add process-specific prefix to stdout and stderr.
+    # Set process title and process-specific log metadata.
     set_process_title("APIServer", str(server_index))
     decorate_logs()
 

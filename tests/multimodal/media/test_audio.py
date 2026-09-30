@@ -54,8 +54,7 @@ def test_audio_media_io_load_base64(dummy_audio_bytes):
 def test_audio_media_io_load_base64_rejects_malformed(dummy_audio_bytes):
     """Malformed base64 must surface as a ValueError so the server answers 400.
     Without strict decoding the bad characters are dropped, the garbage reaches
-    libsndfile, and the client gets a 500 instead.
-    """
+    libsndfile, and the client gets a 500 instead."""
     encoded = base64.b64encode(dummy_audio_bytes).decode("utf-8")
     malformed = encoded[:8] + "!!!@@@###" + encoded[8:]
 
@@ -134,8 +133,7 @@ def test_small_file_passes_memory_guard():
 
 def test_memory_guard_rejects_large_allocation():
     """A file whose frames*channels*4 exceeds the byte limit must be
-    rejected before allocating the buffer.
-    """
+    rejected before allocating the buffer."""
     # 100_000 frames * 8 channels * 4 bytes = 3.2 MB
     payload = _make_flac_bytes(frames=100_000, channels=8, samplerate=48000)
     # Set limit to 1 MiB — should reject
@@ -150,8 +148,7 @@ def test_memory_guard_rejects_large_allocation():
 
 def test_forged_samplerate_rejected_by_memory_guard():
     """The PoC scenario: high sample rate fools the duration guard but
-    the memory guard catches the large frame*channel allocation.
-    """
+    the memory guard catches the large frame*channel allocation."""
     # Forged high sample rate: 655350 Hz, 8 channels, 1M frames
     # Duration guard sees: 1_000_000 / 655_350 = 1.5s → passes
     # Memory: 1_000_000 * 8 * 4 = 32 MB
@@ -188,9 +185,15 @@ def test_load_audio_backend_matches_default(backend, dummy_audio_bytes):
     ref_audio, ref_sr = load_audio(BytesIO(dummy_audio_bytes), sr=None)
     audio, sr = load_audio(BytesIO(dummy_audio_bytes), sr=None, backend=backend)
     assert sr == ref_sr
-    # Decoders disagree only on codec encoder-delay/padding, so torchcodec may
-    # emit a few extra trailing samples (e.g. ~192 for Ogg Vorbis). Compare the
-    # overlapping region, which must agree to float32 precision.
+    if backend == "torchcodec":
+        # Vorbis encoder padding is trimmed, so torchcodec must match the
+        # soundfile reference exactly, including the waveform length.
+        assert audio.shape == ref_audio.shape
+        np.testing.assert_allclose(ref_audio, audio, atol=1e-4)
+        return
+    # Decoders disagree only on codec encoder-delay/padding, so PyAV may
+    # emit a few extra trailing samples (e.g. ~192 for Ogg Vorbis). Compare
+    # the overlapping region, which must agree to float32 precision.
     n = min(ref_audio.shape[-1], audio.shape[-1])
     assert n > 0
     np.testing.assert_allclose(ref_audio[:n], audio[:n], atol=1e-4)
@@ -204,6 +207,17 @@ def test_load_audio_default_preserves_vorbis_length(dummy_audio_bytes):
     assert audio.shape == expected.shape
 
 
+def test_load_audio_torchcodec_preserves_vorbis_length(dummy_audio_bytes):
+    """Torchcodec must trim Vorbis trailing padding even on FFmpeg < 5.0,
+    matching the soundfile reference exactly."""
+    pytest.importorskip("torchcodec")
+    expected, expected_sr = load_audio_soundfile(BytesIO(dummy_audio_bytes), sr=None)
+    audio, sr = load_audio_torchcodec(BytesIO(dummy_audio_bytes), sr=None)
+    assert sr == expected_sr
+    assert audio.shape == expected.shape
+    np.testing.assert_allclose(audio, expected, atol=1e-4)
+
+
 def test_load_audio_unknown_backend_rejected(dummy_audio_bytes):
     """An unknown backend must fail loudly instead of silently degrading."""
     with pytest.raises(ValueError, match="Unknown audio backend"):
@@ -212,8 +226,7 @@ def test_load_audio_unknown_backend_rejected(dummy_audio_bytes):
 
 def test_load_audio_auto_falls_back_without_torchcodec(dummy_audio_bytes):
     """`auto` must fall back to the soundfile → PyAV chain when torchcodec
-    is not importable.
-    """
+    is not importable."""
     ref_audio, ref_sr = load_audio_soundfile(BytesIO(dummy_audio_bytes), sr=None)
     with patch.object(audio_module, "load_audio_torchcodec", side_effect=ImportError):
         audio, sr = load_audio(BytesIO(dummy_audio_bytes), sr=None, backend="auto")
@@ -223,8 +236,7 @@ def test_load_audio_auto_falls_back_without_torchcodec(dummy_audio_bytes):
 
 def test_load_audio_auto_falls_back_without_ffmpeg(dummy_audio_bytes):
     """Torchcodec installed but system ffmpeg missing (`AudioDecoder is None`)
-    must surface as ImportError so `auto` falls back to soundfile → PyAV.
-    """
+    must surface as ImportError so `auto` falls back to soundfile → PyAV."""
     ref_audio, ref_sr = load_audio_soundfile(BytesIO(dummy_audio_bytes), sr=None)
     with patch.object(audio_module, "AudioDecoder", None):
         with pytest.raises(ImportError, match="torchcodec audio backend"):
@@ -239,8 +251,7 @@ def test_load_audio_auto_falls_back_when_libtorchcodec_unloadable(
 ):
     """Torchcodec loads its ffmpeg-backed core lazily at decoder construction;
     a "Could not load libtorchcodec" RuntimeError there (no system ffmpeg)
-    must also surface as ImportError so `auto` falls back.
-    """
+    must also surface as ImportError so `auto` falls back."""
 
     class _UnloadableDecoder:
         def __init__(self, *args, **kwargs):

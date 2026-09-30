@@ -61,8 +61,7 @@ class TestIsReasoningEnd:
 
     def test_previous_turn_tool_call_ignored(self, parser):
         """A finished tool call from an earlier turn says nothing about the
-        turn currently being generated.
-        """
+        turn currently being generated."""
         prompt = [THINK_S, TEXT, TOOL_S, TEXT, TOOL_E, OBSERVATION, TEXT, ASSISTANT]
         assert not parser.is_reasoning_end(prompt)
 
@@ -89,8 +88,7 @@ class TestExtractContentIds:
 
     def test_falls_back_to_tool_call(self, parser):
         """Without ``</think>``, content starts at the opener itself so the
-        tool parser still receives a well-formed call.
-        """
+        tool parser still receives a well-formed call."""
         ids = [THINK_S, TEXT, TOOL_S, 30, TOOL_E]
         assert parser.extract_content_ids(ids) == [TOOL_S, 30, TOOL_E]
 

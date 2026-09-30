@@ -36,8 +36,7 @@ logger = init_logger(__name__)
 
 class CompilationMode(enum.IntEnum):
     """The compilation approach used for torch.compile-based compilation of the
-    model.
-    """
+    model."""
 
     NONE = 0
     """No torch.compile compilation is applied, model runs in fully eager pytorch mode.
@@ -155,15 +154,15 @@ class PassConfig:
     fuse_rope_kvcache: bool = None  # type: ignore[assignment]
     """Fuse the QK rope + KV cache ops."""
     fuse_qk_norm_rope_kvcache: bool = Field(default=None)  # type: ignore[assignment]
-    """Fuse QK RMSNorm + RoPE + KV cache update into a single AITER HIP
+    """Fuse QK RMSNorm + RoPE/MRoPE + KV cache update into an AITER HIP
     kernel. Supersedes both enable_qk_norm_rope_fusion and fuse_rope_kvcache
-    for layers that support it. Auto-enabled at O1+ on ROCm for models
-    with QK-norm (e.g. Qwen3-MoE)."""
+    for layers that support it. Auto-enabled at O2+ on ROCm for models
+    with QK-norm (e.g. Qwen3-MoE and Qwen3-VL-class architectures)."""
 
     rope_kvcache_fusion_max_token_num: int = 256
     """The threshold for ROCm AITER RoPE+KVCache fusion e.g. for small batch decode.
     Larger batch sizes e.g. during prefill will use the unfused kernels.
-    Also applies to the fused QK-Norm+RoPE+KVCache pass.
+    Also applies to the fused QK-Norm+RoPE/MRoPE+KVCache pass.
     """
 
     fi_allreduce_fusion_max_size_mb: float | None = None
@@ -337,8 +336,7 @@ class PassConfig:
 class DynamicShapesType(str, enum.Enum):
     """Types of dynamic shapes handling in torch.compile().
     see  Dynamic shapes and vllm guard dropping in torch_compile.md
-    for more details.
-    """
+    for more details."""
 
     BACKED = "backed"
     """Use backed dynamic shapes. torch.compile() guards on backed dynamic

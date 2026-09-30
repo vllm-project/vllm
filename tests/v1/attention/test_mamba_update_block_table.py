@@ -28,8 +28,7 @@ def _make_vllm_config(
     block_size: int | None = None,
 ):
     """Create a minimal mock VllmConfig with only the fields the builder
-    accesses, avoiding any model download / HF config inspection.
-    """
+    accesses, avoiding any model download / HF config inspection."""
     speculative_config = (
         SimpleNamespace(
             num_speculative_tokens=num_speculative_tokens,
@@ -75,8 +74,7 @@ def test_mamba_single_token_prompt_runs_as_prefill():
 def test_update_block_table_copies_block_idx_to_persistent_buffers():
     """update_block_table() must write block_idx tensors to the current
     builder's persistent buffers, not leave them pointing to a different
-    builder's buffers.
-    """
+    builder's buffers."""
     block_size = 16
     max_model_len = 256
     num_reqs = 4
@@ -180,8 +178,7 @@ def test_state_indices_tensor_d_includes_num_speculative_blocks():
     bug 1: with mamba_cache_mode='all' and speculative decoding enabled,
     the cudagraph buffer for state_indices_tensor_d must allocate the same
     per-request column count as the runtime block table, which includes
-    num_speculative_blocks trailing scratch columns.
-    """
+    num_speculative_blocks trailing scratch columns."""
     block_size = 16
     max_model_len = 256
     max_num_seqs = 4
@@ -214,8 +211,7 @@ def test_block_idx_cudagraph_capture_padded_by_num_reqs():
     bug 2: with mamba_cache_mode='all' and spec decode, _update_metadata_for
     _cudagraph_capture must slice block_idx_last_{scheduled,computed}_token
     by the request count (padded_bs == num_reqs), not by num_decode_tokens.
-    Past num_decodes, the slice must be zero-filled.
-    """
+    Past num_decodes, the slice must be zero-filled."""
     block_size = 16
     max_model_len = 256
     max_num_seqs = 8
@@ -295,8 +291,7 @@ def test_block_idx_prev_step_persistent_buffer_allocated():
     block_idx_last_scheduled_token_prev_step as a persistent buffer with the
     same shape as the existing block_idx_last_{scheduled,computed}_token
     buffers, so cudagraph capture records a stable pointer for the prev-step
-    input anchor consumed by mamba_mixer2's input gather.
-    """
+    input anchor consumed by mamba_mixer2's input gather."""
     block_size = 16
     max_model_len = 256
     max_num_seqs = 8
@@ -324,8 +319,7 @@ def test_block_idx_prev_step_persistent_buffer_allocated():
 
 def test_block_idx_prev_step_persistent_buffer_skipped_without_spec_decode():
     """Without spec decode, the prev-step buffer is unused and must not be
-    allocated — the input anchor reduces to last_computed_token.
-    """
+    allocated — the input anchor reduces to last_computed_token."""
     block_size = 16
     max_model_len = 256
     max_num_seqs = 8
@@ -349,8 +343,7 @@ def test_block_idx_prev_step_cudagraph_capture_uses_persistent_buffer():
     """_update_metadata_for_cudagraph_capture must copy the prev-step anchor
     into the builder's persistent buffer (so cudagraph replay reads from the
     same underlying memory), pad past num_decodes with zero, and return a
-    slice of the persistent buffer in the metadata.
-    """
+    slice of the persistent buffer in the metadata."""
     block_size = 16
     max_model_len = 256
     max_num_seqs = 8
@@ -434,3 +427,40 @@ def test_block_idx_prev_step_cudagraph_capture_uses_persistent_buffer():
 
     # Tail values past num_decodes: zero-filled padding for cudagraph capture.
     assert torch.all(out.block_idx_last_scheduled_token_prev_step[num_decodes:] == 0)
+
+
+def test_num_state_writes_p_matches_block_idx_tensors():
+    """The prefill state save sizes its batched copy from
+    num_state_writes_p instead of reading the block index tensors back from
+    the GPU, so the host count must equal what those tensors say."""
+    # (block_size, seq_lens, query_lens, is_prefilling)
+    cases = [
+        # block-aligned and unaligned computed tokens, and a chunked prefill
+        (16, [64, 33, 17], [48, 17, 1], [True, True, True]),
+        (32, [200, 100, 64], [200, 36, 64], [True, True, True]),
+        # decode rows ahead of the prefills
+        (16, [40, 41, 100, 200], [1, 1, 60, 200], [False, False, True, True]),
+        # prefills that stay inside their first block: nothing to write
+        (16, [65, 66, 67], [1, 2, 3], [True, True, True]),
+    ]
+
+    for block_size, seq_lens, query_lens, is_prefilling in cases:
+        metadata = MockMambaBuilder.build_mamba_metadata(
+            _make_vllm_config(4096, len(seq_lens), block_size=block_size),
+            seq_lens=seq_lens,
+            query_lens=query_lens,
+            is_prefilling=is_prefilling,
+        )
+        num_reqs, num_prefills = metadata.num_reqs, metadata.num_prefills
+        block_idx_last_p = metadata.block_idx_last_scheduled_token[
+            num_reqs - num_prefills : num_reqs
+        ]
+        expected = int(
+            (block_idx_last_p - metadata.block_idx_first_scheduled_token_p)
+            .clamp(min=0)
+            .sum()
+        )
+
+        assert metadata.num_state_writes_p == expected, (
+            f"seq_lens={seq_lens} query_lens={query_lens} block_size={block_size}"
+        )

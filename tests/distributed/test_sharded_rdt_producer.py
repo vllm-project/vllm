@@ -236,8 +236,7 @@ class TestPublishAndRebuild:
     def test_views_of_one_storage_do_not_overlap(self, server_factory):
         """One IPC export per storage, one as_strided view per name — the whole
         point of the storage/view split. Overlapping views would serve the same
-        bytes for two different weights.
-        """
+        bytes for two different weights."""
         server = server_factory()
         server.begin_sync(1)
         _publish(server, GI_A, GROUP_A, nbytes=64)
@@ -260,8 +259,7 @@ class TestPublishAndRebuild:
     def test_the_default_lookahead_is_one(self):
         """1 is the sweet spot: group N+1 is gathered AND pullable while N is
         being pulled, with resident memory at its floor of 2 groups — the bound
-        the larger-model runs size against.
-        """
+        the larger-model runs size against."""
         assert DEFAULT_GATHER_LOOKAHEAD == 1
 
 
@@ -276,8 +274,7 @@ class TestFreeBarrier:
 
     def test_group_is_held_until_the_last_live_consumer_signals(self, server_factory):
         """Every live consumer signals every owner; releasing on the first
-        signal would drop storage other consumers are still reading.
-        """
+        signal would drop storage other consumers are still reading."""
         server = server_factory()
         server.begin_sync(3)
         _publish(server, GI_A, GROUP_A)
@@ -304,8 +301,7 @@ class TestFreeBarrier:
     ):
         """A consumer with nothing to pull from a group signals it at sync
         start, which can precede the publish. The publish must then release the
-        group rather than wait for a signal that will never come again.
-        """
+        group rather than wait for a signal that will never come again."""
         server = server_factory()
         server.begin_sync(1)
         server.free_group(GI_A)
@@ -328,8 +324,7 @@ class TestFreeBarrier:
         the server says the group is gone — and it hears that ONLY through
         ``wait_freed`` / ``end_sync``, never a publish return (a freed notice
         riding an unharvested async publish while the engine blocks in
-        ``wait_freed`` would wedge the loop).
-        """
+        ``wait_freed`` would wedge the loop)."""
         server = server_factory()
         server.begin_sync(1)
         _publish(server, GI_A, GROUP_A)
@@ -358,8 +353,7 @@ class TestFreeBarrier:
 
 class _CountingSource:
     """`iter_groups` yielding one CPU-tensor group per call, built lazily so a
-    group's tensors exist only once the engine's credit gate lets it gather.
-    """
+    group's tensors exist only once the engine's credit gate lets it gather."""
 
     def __init__(self, groups):
         self._groups = groups
@@ -372,8 +366,7 @@ class _CountingSource:
 class _ResidencyDict(dict):
     """The engine's `_inflight`, instrumented: `max_len` is the high-water mark
     of groups whose CUDA-IPC export refs were alive at once — the trainer's
-    resident-memory bound in groups.
-    """
+    resident-memory bound in groups."""
 
     def __init__(self):
         super().__init__()
@@ -387,8 +380,7 @@ class _ResidencyDict(dict):
 def _loop_engine(server, n_groups, *, lookahead):
     """A real engine wired straight to a real (non-Ray) server, with only the
     state `_run_gather_loop` reads. The `_rpc` seam dispatches inline;
-    `_publish_async` sees no `.remote` and runs inline too.
-    """
+    `_publish_async` sees no `.remote` and runs inline too."""
     groups = [(f"model.layers.{gi}.w",) for gi in range(n_groups)]
     e = ShardedRDTTrainerWeightTransferEngine.__new__(
         ShardedRDTTrainerWeightTransferEngine
@@ -411,16 +403,14 @@ class TestGatherCredit:
     serveable immediately, and the ENGINE's loop stops gathering while more than
     `gather_lookahead` groups are unfreed. So at most `lookahead + 1` groups are
     resident — two at the default — while group N+1 is pulled the instant N's
-    pulls finish.
-    """
+    pulls finish."""
 
     @pytest.fixture
     def gather_engine(self, monkeypatch):
         """Neutralize the two CUDA touches in the export path so the REAL
         gather loop runs on CPU: `.cuda()` becomes identity, and the storage
         export ships the `(nbytes, ..., device, ...)` tuple the fixture's
-        stubbed `rebuild_cuda_tensor` expects.
-        """
+        stubbed `rebuild_cuda_tensor` expects."""
         monkeypatch.setattr(torch.Tensor, "cuda", lambda self: self)
         monkeypatch.setattr(
             trainer_mod,
@@ -432,8 +422,7 @@ class TestGatherCredit:
     def test_publish_never_blocks(self, server_factory):
         """Publishing must not park on a credit: the whole point is that a
         gathered group becomes serveable immediately. Three publishes with no
-        frees, inline on this thread — a block here hangs the test.
-        """
+        frees, inline on this thread — a block here hangs the test."""
         server = server_factory(gather_lookahead=1)
         server.begin_sync(1)
         for gi in range(3):
@@ -447,8 +436,7 @@ class TestGatherCredit:
         than 2 groups of gathered weights, no matter how the consumer paces —
         and the pipeline still overlaps, because the consumer here refuses to
         free group N until N+1 is already published (pullable). A gate an
-        off-by-one too tight deadlocks this test; too loose fails max_len.
-        """
+        off-by-one too tight deadlocks this test; too loose fails max_len."""
         server = server_factory(gather_lookahead=1)
         n_groups = 8
         engine = gather_engine(server, n_groups, lookahead=1)
@@ -490,8 +478,7 @@ class TestGatherCredit:
     ):
         """0 is the serialized baseline: the loop waits for group N to be freed
         before gathering N+1, so exactly ONE group is ever resident and nothing
-        overlaps. A floor of 1 on the bound would silently pipeline instead.
-        """
+        overlaps. A floor of 1 on the bound would silently pipeline instead."""
         server = server_factory(gather_lookahead=0)
         engine = gather_engine(server, 4, lookahead=0)
 
@@ -517,8 +504,7 @@ class TestGatherCredit:
         self, server_factory, gather_engine
     ):
         """Lookahead + 1, not a hardcoded 2: at lookahead=2 a free-nothing
-        consumer sees exactly 3 groups gathered before the loop parks.
-        """
+        consumer sees exactly 3 groups gathered before the loop parks."""
         server = server_factory(gather_lookahead=2)
         engine = gather_engine(server, 8, lookahead=2)
 
@@ -554,8 +540,7 @@ class TestGatherCredit:
     def test_a_gather_error_releases_a_blocked_wait_freed(self, server_factory):
         """Otherwise a trainer-side failure on another rank deadlocks this one
         inside its credit gate. It must RAISE, not return empty — an empty
-        return would spin the engine straight back into the wait.
-        """
+        return would spin the engine straight back into the wait."""
         server = server_factory()
         server.begin_sync(1)
         _publish(server, GI_A, GROUP_A)
@@ -636,8 +621,7 @@ class TestBeginSync:
 
     def test_the_target_is_floored_at_one(self, server_factory):
         """A bare/zero call must not make every group free instantly (or divide
-        the barrier by zero).
-        """
+        the barrier by zero)."""
         server = server_factory()
         server.begin_sync(0)
         assert server._live_count == 1
@@ -645,8 +629,7 @@ class TestBeginSync:
     def test_a_degraded_sync_lowers_the_target(self, server_factory):
         """FT degraded sync: the live count is the WHOLE degraded-sync
         mechanism on this side — the group releases after the live consumers
-        alone.
-        """
+        alone."""
         server = server_factory()
         server.begin_sync(2)  # 4 provisioned, 2 alive
         _publish(server, GI_A, GROUP_A)
@@ -670,8 +653,7 @@ class TestBeginSync:
     def test_a_straggler_signal_cannot_credit_the_next_sync(self, server_factory):
         """begin_sync resets the counts, so a signal that leaked past the sync
         boundary would over-credit — the reason the consumer drains its fired
-        signals before finishing. Pin the reset side of that contract.
-        """
+        signals before finishing. Pin the reset side of that contract."""
         server = server_factory()
         server.begin_sync(2)
         _publish(server, GI_A, GROUP_A)
@@ -693,8 +675,7 @@ class TestBeginSync:
         self, server_factory
     ):
         """The packed layout repeats every sync — that is what makes caching the
-        destination views worth ~5ms per 384-spec group.
-        """
+        destination views worth ~5ms per 384-spec group."""
         server = server_factory()
         server._pack_dsts[("sentinel",)] = (0, [])
         server.begin_sync(1)
@@ -705,8 +686,7 @@ class TestServedNamesGuard:
     """A producer serves only the names it holds: its stage's groups, and
     within them its own EP coordinate's experts plus the replicated names.
     Without this guard a misrouted pull would block forever in the cache wait
-    for a name this rank never publishes.
-    """
+    for a name this rank never publishes."""
 
     def test_a_pull_for_an_unserved_name_fails_loudly(self, server_factory):
         server = server_factory(served_names=list(GROUP_A))
@@ -722,8 +702,7 @@ class TestServedNamesGuard:
 
     def test_served_names_none_accepts_anything(self, server_factory):
         """Gather-to-all: every producer holds every group, so there is nothing
-        to guard. The call proceeds to the cache wait (not exercised here).
-        """
+        to guard. The call proceeds to the cache wait (not exercised here)."""
         server = server_factory(served_names=None)
         assert server._served_names is None
 
@@ -770,8 +749,7 @@ class TestStallWatchdog:
 
     def test_end_sync_fails_when_a_consumer_never_signals(self, server_factory):
         """The exact mid-sync death signature: the group is published, one of
-        the two live consumers that owed a signal is gone.
-        """
+        the two live consumers that owed a signal is gone."""
         server = server_factory(stall_timeout_s=0.3)
         server.begin_sync(2)
         _publish(server, GI_A, GROUP_A)
@@ -785,8 +763,7 @@ class TestStallWatchdog:
         """The watchdog fires on the existing `set_gather_error` channel, so one
         stall unwinds the whole rank through one path rather than each waiter
         timing out separately — here both a consumer parked in the serve cache
-        wait and the engine parked in its credit gate.
-        """
+        wait and the engine parked in its credit gate."""
         server = server_factory(gather_lookahead=1, stall_timeout_s=0.3)
         server.begin_sync(1)
         _publish(server, GI_A, GROUP_A)
@@ -819,8 +796,7 @@ class TestStallWatchdog:
         """A consumer that is slow but signaling must never trip it: the stamp
         is global to the producer, so a steady trickle of signals holds the
         whole rank open. Nine sequential publishes with a 0.3s timeout each take
-        longer in total than the timeout, and none may fire.
-        """
+        longer in total than the timeout, and none may fire."""
         server = server_factory(gather_lookahead=1, stall_timeout_s=0.3)
         server.begin_sync(1)
         for gi in range(9):
@@ -833,8 +809,7 @@ class TestStallWatchdog:
 
     def test_begin_sync_resets_the_progress_stamp(self, server_factory):
         """Syncs are minutes apart. Without the reset the first publish of sync N+1
-        would measure its stall from somewhere inside sync N and fire immediately.
-        """
+        would measure its stall from somewhere inside sync N and fire immediately."""
         server = server_factory(gather_lookahead=1, stall_timeout_s=0.3)
         server.begin_sync(1)
         _publish(server, GI_A, GROUP_A)
@@ -856,8 +831,7 @@ class TestConcurrentPublishAndFree:
         self, server_factory
     ):
         """Every group published must end up freed and out of the cache, with
-        end_sync returning cleanly — the property whose violation is a hang.
-        """
+        end_sync returning cleanly — the property whose violation is a hang."""
         server = server_factory(gather_lookahead=2)
         server.begin_sync(1)
         groups = [(gi, (f"model.layers.{gi}.w",)) for gi in range(12)]
@@ -892,8 +866,7 @@ class TestConcurrentPublishAndFree:
     ):
         """All live consumers signaling at once: the release must happen on the
         last signal and only once, or the engine drops IPC refs twice (or
-        never).
-        """
+        never)."""
         server = server_factory()
         server.begin_sync(8)
         _publish(server, GI_A, GROUP_A)
@@ -920,8 +893,7 @@ class TestFakeServerAgreesWithTheRealOne:
     """`test_sharded_rdt_trainer.py`'s `_FakeProducerServer` is a second,
     independent model of this protocol that the engine-side tests assert on. Pin
     the two against each other so the fake cannot silently drift from the
-    semantics the real server enforces.
-    """
+    semantics the real server enforces."""
 
     @staticmethod
     def _fake():
@@ -952,8 +924,7 @@ class TestExportRing:
     """The packed export path. Its one hard invariant is that the trainer packs
     a group exactly the way ``publish_group`` rebuilds it — a layout
     disagreement would serve the wrong bytes with nothing downstream to catch
-    it.
-    """
+    it."""
 
     @staticmethod
     def _engine():
@@ -1045,8 +1016,7 @@ class TestExportRingSlotSafety:
     ):
         """Free the later group of each pair first and hold the earlier one live
         until the NEXT group is gathered -- the window a modular slot counter got
-        wrong (at lookahead=1 there are 2 slots, so group 2 took group 0's).
-        """
+        wrong (at lookahead=1 there are 2 slots, so group 2 took group 0's)."""
         server = server_factory(gather_lookahead=1)
         n_groups = 8
         engine = gather_engine(server, n_groups, lookahead=1)
@@ -1170,8 +1140,7 @@ class TestSharedServeSlots:
 
     def test_one_deployment_never_shares(self, sharing_server):
         """With the width equal to the live count every group is a singleton, so
-        each call packs for itself out of its own ring.
-        """
+        each call packs for itself out of its own ring."""
         server = sharing_server(workers_per_replica=2)
         server.begin_sync(2, [0, 1])
         _publish(server, GI_A, GROUP_A)
@@ -1251,8 +1220,7 @@ class TestSharedServeSlots:
 
     def test_a_seqless_call_is_refused(self, sharing_server):
         """The slot comes from ``seq``, so a caller that sends none cannot be
-        served safely.
-        """
+        served safely."""
         server = sharing_server(workers_per_replica=2)
         server.begin_sync(1, [0])
         _publish(server, GI_A, GROUP_A)
@@ -1262,8 +1230,7 @@ class TestSharedServeSlots:
 
     def test_a_failed_pack_reaches_every_sharer(self, sharing_server):
         """Only the packer touches the buffer, so its failure has to be
-        republished: a waiter must raise rather than read a half-written slot.
-        """
+        republished: a waiter must raise rather than read a half-written slot."""
         server = sharing_server(workers_per_replica=2)
         server.begin_sync(4, [0, 1, 2, 3])
         _publish(server, GI_A, GROUP_A)
@@ -1287,8 +1254,7 @@ class TestSharedServeSlots:
 
     def test_a_degraded_sync_narrows_the_rendezvous(self, sharing_server):
         """A dead deployment must not be waited for: a survivor left alone in
-        its group packs for itself instead of blocking on the corpse.
-        """
+        its group packs for itself instead of blocking on the corpse."""
         server = sharing_server(workers_per_replica=2, stall_timeout_s=30.0)
         server.begin_sync(3, [0, 1, 3])  # consumer 2 died
         _publish(server, GI_A, GROUP_A)
@@ -1302,8 +1268,7 @@ class TestSharedServeSlots:
 
     def test_a_sharer_that_never_arrives_trips_the_watchdog(self, sharing_server):
         """A consumer that dies INSIDE the sync window has no detector, exactly
-        as for the free barrier; the rendezvous waits on the same channel.
-        """
+        as for the free barrier; the rendezvous waits on the same channel."""
         server = sharing_server(workers_per_replica=2, stall_timeout_s=0.3)
         server.begin_sync(4, [0, 1, 2, 3])
         _publish(server, GI_A, GROUP_A)
@@ -1315,8 +1280,7 @@ class TestSharedServeSlots:
 
 class TestSharedReservation:
     """``reserve_serve_buffer`` under sharing: one ring per GROUP, and the
-    init-time check that the group's members pull the same chunks.
-    """
+    init-time check that the group's members pull the same chunks."""
 
     def test_matching_plans_reserve_one_ring_between_them(self, sharing_server):
         server = sharing_server(workers_per_replica=2)
@@ -1338,8 +1302,7 @@ class TestSharedReservation:
     def test_mismatched_plans_fail_at_reservation(self, sharing_server):
         """Sharing rests on the sharers pulling the same chunks. Checked here,
         where it names both consumers, rather than at serve time, where it is a
-        rendezvous nobody completes.
-        """
+        rendezvous nobody completes."""
         server = sharing_server(workers_per_replica=2)
         server.reserve_serve_buffer(0, 1024, "plan-a")
 
@@ -1348,8 +1311,7 @@ class TestSharedReservation:
 
     def test_different_groups_may_differ(self, sharing_server):
         """Only the members of ONE group have to agree; worker 0 and worker 1 of
-        the same deployment hold different slices and never share a slot.
-        """
+        the same deployment hold different slices and never share a slot."""
         server = sharing_server(workers_per_replica=2)
         server.reserve_serve_buffer(0, 1024, "plan-a")
         server.reserve_serve_buffer(1, 1024, "plan-b")
@@ -1358,8 +1320,7 @@ class TestSharedReservation:
 
     def test_a_missing_digest_skips_the_check(self, sharing_server):
         """The digest is optional on the wire, so an engine that does not send
-        one still reserves.
-        """
+        one still reserves."""
         server = sharing_server(workers_per_replica=2)
         server.reserve_serve_buffer(0, 1024, None)
         server.reserve_serve_buffer(2, 1024, None)

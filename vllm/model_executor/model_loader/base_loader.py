@@ -28,6 +28,11 @@ class BaseModelLoader(ABC):
     def __init__(self, load_config: LoadConfig):
         self.load_config = load_config
 
+    def get_external_weight_memory(self, vllm_config: VllmConfig) -> int:
+        """Get weights memory from external process;
+        0 when the weights are not external."""
+        return 0
+
     @abstractmethod
     def download_model(self, model_config: ModelConfig) -> None:
         """Download a model so that it can be immediately loaded."""
@@ -36,8 +41,7 @@ class BaseModelLoader(ABC):
     @abstractmethod
     def load_weights(self, model: nn.Module, model_config: ModelConfig) -> None:
         """Load weights into a model. This standalone API allows
-        inplace weights loading for an already-initialized model
-        """
+        inplace weights loading for an already-initialized model"""
         raise NotImplementedError
 
     def create_model(

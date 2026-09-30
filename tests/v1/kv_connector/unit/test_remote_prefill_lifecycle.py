@@ -25,7 +25,7 @@ pytestmark = pytest.mark.cpu_test
 
 
 def _num_waiting_requests(scheduler) -> int:
-    return len(scheduler.waiting) + len(scheduler.skipped_waiting)
+    return len(scheduler.waiting) + len(scheduler.kv_holding_waiting)
 
 
 def test_basic_lifecycle():
@@ -64,7 +64,7 @@ def test_basic_lifecycle():
 
     # Req waiting for KVs with no computed/scheduled toks ...
     assert _num_waiting_requests(scheduler) == 1
-    assert request in scheduler.skipped_waiting
+    assert request in scheduler.kv_holding_waiting
     assert request.status == RequestStatus.WAITING_FOR_REMOTE_KVS
     assert request.num_computed_tokens == NUM_TOKENS
 
@@ -704,8 +704,7 @@ def test_async_load_reserves_blocks_for_inflight():
 
 def test_async_loads_both_admitted_when_pool_fits():
     """Sanity: with a pool large enough, the reservation gate admits both async
-    loads (it is not over-conservative).
-    """
+    loads (it is not over-conservative)."""
     vllm_config = create_vllm_config()
     BLOCK_SIZE = vllm_config.cache_config.block_size
     scheduler = create_scheduler(vllm_config, num_blocks=64)
@@ -732,3 +731,131 @@ def test_async_loads_both_admitted_when_pool_fits():
 
     for req in reqs:
         assert req.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+
+
+def test_async_load_reserves_blocks_for_promotion_margin():
+    """An async load is not admitted unless the blocks its own promotion will
+    need are still free.
+
+    A parked load is allocated without lookahead slots, but promotion pads it
+    to ``1 + num_spec_tokens`` and asks for the lookahead margin on top. Without
+    reserving that margin, two loads can be admitted that together consume the
+    whole pool; the head then fails ``allocate_slots`` forever while the load
+    behind it is never reached, and with nothing running no block is ever freed.
+
+    req_a (4 blocks) and req_b (3 blocks) exactly fill the 7 usable blocks, so
+    req_b must be held back in WAITING holding no blocks, leaving req_a room to
+    be promoted and run.
+    """
+    vllm_config = create_vllm_config(num_speculative_tokens=3)
+    BLOCK_SIZE = vllm_config.cache_config.block_size
+    scheduler = create_scheduler(vllm_config, num_blocks=8)  # usable = 7
+
+    req_a = create_request(
+        request_id=1,
+        block_size=BLOCK_SIZE,
+        num_tokens=BLOCK_SIZE * 4,
+        do_remote_prefill=True,
+        max_tokens=1,
+    )
+    req_b = create_request(
+        request_id=2,
+        block_size=BLOCK_SIZE,
+        num_tokens=BLOCK_SIZE * 3,
+        do_remote_prefill=True,
+        max_tokens=1,
+    )
+    scheduler.add_request(req_a)
+    scheduler.add_request(req_b)
+
+    # Both get a full external hit, so each would hold its whole prompt.
+    with patch.object(
+        scheduler.connector,
+        "get_num_new_matched_tokens",
+        side_effect=[(BLOCK_SIZE * 4, True), (BLOCK_SIZE * 3, True)],
+    ):
+        scheduler.schedule()
+
+    assert req_a.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+    assert req_b.status == RequestStatus.WAITING
+    req_to_blocks = scheduler.kv_cache_manager.coordinator.single_type_managers[
+        0
+    ].req_to_blocks
+    assert req_b.request_id not in req_to_blocks
+
+    # req_a's load lands: it must be promotable and actually get scheduled.
+    scheduler.update_from_output(
+        scheduler.schedule(),
+        create_model_runner_output([], finished_recving={req_a.request_id}),
+    )
+    scheduler_output = scheduler.schedule()
+    assert req_a.status == RequestStatus.RUNNING
+    assert scheduler_output.num_scheduled_tokens[req_a.request_id] > 0
+
+
+def test_deferred_lookup_does_not_block_parked_load():
+    """A request with a deferred connector lookup must not strand an async
+    load queued behind it.
+
+    req_a's lookup is deferred (connector returns None), so it is parked in
+    waiting holding no blocks; req_b is then admitted as an async
+    load holding most of the pool. Once req_a's lookup resolves it cannot
+    allocate, and the waiting scan stops at it every step. The parked load
+    must still be promotable: it lives in the KV-holding queue
+    that is drained first, so it runs, finishes, and frees its blocks for
+    req_a.
+    """
+    vllm_config = create_vllm_config()
+    BLOCK_SIZE = vllm_config.cache_config.block_size
+    scheduler = create_scheduler(vllm_config, num_blocks=8)  # usable = 7
+
+    req_a = create_request(
+        request_id=1, block_size=BLOCK_SIZE, num_tokens=BLOCK_SIZE * 4, max_tokens=1
+    )
+    req_b = create_request(
+        request_id=2,
+        block_size=BLOCK_SIZE,
+        num_tokens=BLOCK_SIZE * 5,
+        do_remote_prefill=True,
+        max_tokens=1,
+    )
+    scheduler.add_request(req_a)
+    scheduler.add_request(req_b)
+
+    deferrals = [(None, False)]
+
+    def lookup(request, num_computed_tokens):
+        if request is req_b:
+            return BLOCK_SIZE * 5, True
+        return deferrals.pop() if deferrals else (0, False)
+
+    with patch.object(
+        scheduler.connector, "get_num_new_matched_tokens", side_effect=lookup
+    ):
+        # Step 1: req_a's lookup is deferred; req_b is admitted as an async
+        # load holding 5 of 7 usable blocks.
+        scheduler.schedule()
+        assert req_a.status == RequestStatus.WAITING
+        assert req_b.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+
+        # req_a's lookup resolves (no hit) while req_b's transfer is in
+        # flight; req_a needs 4 blocks but only 2 are free, so the waiting
+        # scan stops at it. req_b's transfer then finishes.
+        scheduler.update_from_output(
+            scheduler.schedule(),
+            create_model_runner_output([], finished_recving={req_b.request_id}),
+        )
+
+        # req_b must still be reached, promoted, and scheduled despite the
+        # scan stopping at req_a.
+        scheduler_output = scheduler.schedule()
+        assert req_b.status == RequestStatus.RUNNING
+        assert scheduler_output.num_scheduled_tokens[req_b.request_id] > 0
+
+        # req_b finishes and frees its blocks; now req_a fits and runs.
+        scheduler.update_from_output(
+            scheduler_output, create_model_runner_output([req_b])
+        )
+        scheduler_output = scheduler.schedule()
+        assert req_a.status == RequestStatus.RUNNING
+        assert scheduler_output.num_scheduled_tokens[req_a.request_id] > 0

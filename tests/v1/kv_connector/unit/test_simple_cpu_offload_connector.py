@@ -129,8 +129,7 @@ def _make_ring_kv_cache_config(num_blocks: int = 16) -> KVCacheConfig:
 
 def test_ring_scratch_group_is_accepted_and_never_offloaded() -> None:
     """The ring group's capacity is not a token granularity, it holds no
-    hashed blocks, and it never participates in CPU hits.
-    """
+    hashed blocks, and it never participates in CPU hits."""
     vllm_config = create_vllm_config(
         kv_connector="SimpleCPUOffloadConnector",
         kv_role="kv_both",

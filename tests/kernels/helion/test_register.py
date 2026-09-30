@@ -397,6 +397,7 @@ class TestHelionKernelWrapper:
             )
 
             assert wrapper._disabled is True
+            assert wrapper._disabled_reason is not None
             assert "No configs available" in wrapper._disabled_reason
 
     def test_disabled_wrapper_raises_on_call(self, sample_kernel):
@@ -598,8 +599,7 @@ class TestHelionKernelWrapper:
     )
     def test_init_eagerly_initializes_hop_path(self):
         """Test that register_kernel eagerly builds the configured kernel
-        on the HOP path (no custom op registration needed).
-        """
+        on the HOP path (no custom op registration needed)."""
         from vllm.kernels.helion.utils import get_canonical_gpu_name
 
         configs: dict[CaseKey, helion.Config] = {
@@ -634,8 +634,7 @@ class TestHelionKernelWrapper:
     )
     def test_init_eagerly_initializes(self):
         """Test that register_kernel eagerly loads configs and detects GPU
-        during construction so __call__ needs no further initialization.
-        """
+        during construction so __call__ needs no further initialization."""
         from vllm.kernels.helion.utils import get_canonical_gpu_name
 
         with (
@@ -963,8 +962,7 @@ class TestTorchCompileHOP:
 
     def test_compiled_graph_contains_helion_hop(self):
         """Verify torch.compile on a HelionKernelWrapper emits a
-        helion_kernel_wrapper_mutation HOP node in the FX graph.
-        """
+        helion_kernel_wrapper_mutation HOP node in the FX graph."""
         configs: dict[CaseKey, helion.Config] = {
             CaseKey.default(): helion.Config(block_sizes=[4, 4])
         }

@@ -45,8 +45,7 @@ def _attention(q_lora_rank: int | None):
 
 def _match(q_lora_rank: int | None) -> MLAFuser | None:
     """Match a meta `DeepseekV2Attention` directly (bypassing the per-class
-    `get_fuser` cache, so both q_lora variants of the same class are seen).
-    """
+    `get_fuser` cache, so both q_lora variants of the same class are seen)."""
     attn = _attention(q_lora_rank)
     return MLAFuser.match(trace(attn), attn)
 
@@ -54,7 +53,6 @@ def _match(q_lora_rank: int | None) -> MLAFuser | None:
 def test_discovers_modules_without_q_lora():
     fuser = _match(q_lora_rank=None)
     assert isinstance(fuser, MLAFuser)
-    assert not fuser.has_q_lora
     assert fuser.q_proj_name == "q_proj"
     assert fuser.kv_a_proj_name == "kv_a_proj_with_mqa"
     assert fuser.kv_a_layernorm_name == "kv_a_layernorm"
@@ -69,7 +67,6 @@ def test_discovers_modules_without_q_lora():
 def test_discovers_modules_with_q_lora():
     fuser = _match(q_lora_rank=64)
     assert isinstance(fuser, MLAFuser)
-    assert fuser.has_q_lora
     assert fuser.q_a_proj_name == "q_a_proj"
     assert fuser.q_a_layernorm_name == "q_a_layernorm"
     assert fuser.q_b_proj_name == "q_b_proj"
@@ -82,8 +79,7 @@ def test_discovers_modules_with_q_lora():
 
 def test_q_lora_stacks_qkv_a_proj():
     """The MLA layer reads `q_a_proj` and `kv_a_proj_with_mqa` fused into one
-    down-projection, so both checkpoint weights must remap into it.
-    """
+    down-projection, so both checkpoint weights must remap into it."""
     fuser = _match(q_lora_rank=64)
     assert isinstance(fuser, MLAFuser)
     prefix = "model.layers.0.self_attn"
@@ -104,13 +100,12 @@ def test_update_forward_rewrites_real_attention(q_lora_rank):
     The q-LoRA path hoists the merged down-projection to a top-level statement
     while its calls sit inside the `q_lora_rank` branches, so the region it
     spans is wide; a check that over-approximates aliasing would silently refuse
-    here and cost the fusion rather than fail loudly.
-    """
+    here and cost the fusion rather than fail loudly."""
     fuser = _match(q_lora_rank)
     assert isinstance(fuser, MLAFuser)
     fuser.update_forward(_attention(q_lora_rank))
     names = set(fuser.fused_forward.__code__.co_names)
-    if fuser.has_q_lora:
+    if fuser.q_a_proj_name is not None:
         assert _FUSED_QKV_A_PROJ in names
         assert not {"q_a_proj", "kv_a_proj_with_mqa"} & names
 
@@ -129,8 +124,7 @@ class _Norm(nn.Module):
 
 class RenamedMLA(nn.Module):
     """An MLA-shaped attention whose children have non-standard names, proving
-    discovery is by structure and not attribute name.
-    """
+    discovery is by structure and not attribute name."""
 
     def __init__(self):
         super().__init__()
@@ -157,13 +151,12 @@ class RenamedMLA(nn.Module):
 
 def test_discovers_modules_under_arbitrary_names():
     """Discovery is purely structural: `RenamedMLA` gives its children non-standard
-    names, and `match` still locates each projection by dataflow.
-    """
+    names, and `match` still locates each projection by dataflow."""
     with torch.device("meta"):
         module = RenamedMLA()
         fuser = MLAFuser.match(trace(module), module)
     assert isinstance(fuser, MLAFuser)
-    assert not fuser.has_q_lora
+    assert fuser.q_a_proj_name is None
     assert fuser.q_proj_name == "alpha"
     assert fuser.kv_a_proj_name == "beta"
     assert fuser.kv_a_layernorm_name == "gamma"

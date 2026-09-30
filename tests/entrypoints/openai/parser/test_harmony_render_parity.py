@@ -20,6 +20,7 @@ Each test:
 """
 
 from openai.types.responses import ResponseFunctionToolCall
+from openai_harmony import Message, Role
 
 from tests.entrypoints.openai.utils import verify_harmony_messages
 from vllm.entrypoints.openai.parser.harmony_utils import (
@@ -33,6 +34,23 @@ from vllm.entrypoints.openai.responses.harmony import (
     response_previous_input_to_harmony,
 )
 
+
+def test_render_uses_legacy_tool_call_header():
+    tool_call = (
+        Message.from_role_and_content(Role.ASSISTANT, "print('hello')")
+        .with_channel("commentary")
+        .with_recipient("python")
+        .with_content_type("code")
+    )
+
+    rendered = get_encoding().decode(render_for_completion([tool_call]))
+
+    assert (
+        "<|start|>assistant to=python<|channel|>commentary code<|message|>" in rendered
+    )
+    assert "commentary to=python <|constrain|>code" not in rendered
+
+
 # Use a fixed date so the system message is deterministic across both paths.
 _DATE = "2025-01-01"
 
@@ -43,8 +61,7 @@ def _system():
 
 class TestResponseInputToHarmonyRenderParity:
     """Each test drives the same conversation through both APIs and asserts
-    identical Harmony messages and rendered token sequences.
-    """
+    identical Harmony messages and rendered token sequences."""
 
     # -----------------------------------------------------------------------
     # Single-message cases
@@ -52,8 +69,7 @@ class TestResponseInputToHarmonyRenderParity:
 
     def test_developer_message(self):
         """Both APIs must render developer messages identically using
-        DeveloperContent (with the '# Instructions' header).
-        """
+        DeveloperContent (with the '# Instructions' header)."""
         chat_msgs = parse_chat_input_to_harmony_message(
             {"role": "developer", "content": "Be concise."}
         )
@@ -248,8 +264,7 @@ class TestResponseInputToHarmonyRenderParity:
     def test_reasoning_combined_with_function_call(self):
         """Chat API packs reasoning + tool_calls into one dict; responses API
         represents them as two separate items. Both must produce the same two
-        Harmony messages in the same order: analysis then commentary.
-        """
+        Harmony messages in the same order: analysis then commentary."""
         chat_msgs = parse_chat_input_to_harmony_message(
             {
                 "role": "assistant",
@@ -532,8 +547,7 @@ class TestResponseInputToHarmonyRenderParity:
     def test_completed_turns_drop_reasoning(self):
         """Validates that reasoning from completed turns is dropped, while
         reasoning from the current in-progress tool-call turn is preserved
-        in both chat completions and responses previous_input_messages.
-        """
+        in both chat completions and responses previous_input_messages."""
         first_turn_reasoning = "FIRST_TURN_REASONING"
         second_turn_reasoning = "SECOND_TURN_REASONING"
 

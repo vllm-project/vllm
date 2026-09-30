@@ -231,8 +231,7 @@ class LMCacheMPRequestTracker:
     ####
     def needs_retrieve(self) -> bool:
         """Check whether the current request needs retrieve, will be used
-        update_stage_after_alloc
-        """
+        update_stage_after_alloc"""
         return (
             self.num_lmcache_hit_blocks > self.num_vllm_hit_blocks
             and self.state != LMCacheMPRequestState.READY
@@ -240,8 +239,7 @@ class LMCacheMPRequestTracker:
 
     def is_ready_for_retrieving(self) -> bool:
         """Check whether the current request is ready for retrieving,
-        will be used in process_loading_requests
-        """
+        will be used in process_loading_requests"""
         return (
             self.state == LMCacheMPRequestState.WAITING_FOR_LOAD
             and self.needs_retrieve()

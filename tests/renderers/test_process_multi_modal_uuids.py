@@ -15,7 +15,11 @@ from vllm.tokenizers.registry import cached_tokenizer_from_config
 
 cherry_pil_image = ImageAsset("cherry_blossom").pil_image
 stop_pil_image = ImageAsset("stop_sign").pil_image
-baby_reading_np_ndarrays = VideoAsset("baby_reading").np_ndarrays
+baby_reading_video_asset = VideoAsset("baby_reading")
+baby_reading_video = (
+    baby_reading_video_asset.np_ndarrays,
+    baby_reading_video_asset.metadata,
+)
 
 
 def _build_renderer(
@@ -49,8 +53,7 @@ def _build_text_only_renderer() -> HfRenderer:
 
 def test_text_only_model_mm_data_maps_to_bad_request():
     """Sending multimodal data to a text-only model is a client mistake, so it
-    must surface as a ValueError and reach the client as HTTP 400, not 500.
-    """
+    must surface as a ValueError and reach the client as HTTP 400, not 500."""
     renderer = _build_text_only_renderer()
 
     with pytest.raises(ValueError, match="text-only") as exc_info:
@@ -128,7 +131,7 @@ def test_multi_modal_uuids_accepts_none_and_passes_through(
 
     mm_data = {
         "image": [cherry_pil_image, stop_pil_image],
-        "video": baby_reading_np_ndarrays,
+        "video": baby_reading_video,
     }
 
     # Use a consistent two-image scenario across all configurations
@@ -208,7 +211,7 @@ def test_multi_modal_uuids_preserved_when_caching_disabled(mm_uuids, expected):
     request_id = "req-42"
     mm_data = {
         "image": [cherry_pil_image, stop_pil_image],
-        "video": baby_reading_np_ndarrays,
+        "video": baby_reading_video,
     }
 
     mm_processor = renderer.get_mm_processor()

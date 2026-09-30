@@ -8,6 +8,7 @@ These tests run on real hardware — no mocks. Skipped on non-GFX950 platforms.
 import pytest
 import torch
 
+from vllm.config.kernel import MoEBackend
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEParallelConfig,
@@ -53,7 +54,7 @@ def disable_rocm_aiter(monkeypatch: pytest.MonkeyPatch):
     set_rocm_aiter(monkeypatch, False)
 
 
-def _make_w4a4_moe_config(moe_backend: str = "auto") -> FusedMoEConfig:
+def _make_w4a4_moe_config(moe_backend: MoEBackend = "auto") -> FusedMoEConfig:
     from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 
     return FusedMoEConfig(
@@ -160,8 +161,7 @@ def test_qwen38_tep8_auto_fallback_respects_explicit_backend(
 @pytest.fixture
 def mxfp4_oracle_config():
     """Stub the config the oracle reads (``model_config.quantization_config``)
-    so backend dispatch resolves without a real model / user override.
-    """
+    so backend dispatch resolves without a real model / user override."""
     from unittest.mock import patch
 
     with patch(

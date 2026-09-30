@@ -275,8 +275,7 @@ def test_rms_norm_per_block_quant_batch_invariant(
     hidden_size: int, dtype: torch.dtype, seed: int
 ):
     """C++ ``rms_norm_per_block_quant`` must be batch invariant across the
-    block threshold (compiled fp8 block-quant path; block pinned to 512).
-    """
+    block threshold (compiled fp8 block-quant path; block pinned to 512)."""
     import vllm._custom_ops as ops
 
     device = torch.device(DEVICE_TYPE)
@@ -525,6 +524,7 @@ def test_rms_norm_batch_invariance(dtype):
     batch[4] = row[0]
     out_batch = rms_norm_batch_invariant(batch, weight, eps=eps)
 
+    assert isinstance(out_single, torch.Tensor) and isinstance(out_batch, torch.Tensor)
     assert torch.equal(out_single[0], out_batch[4]), (
         "rms_norm output for a row differs when batch context changes"
     )
@@ -548,6 +548,7 @@ if __name__ == "__main__":
 
     # Batch-invariant implementation
     triton_output = rms_norm_batch_invariant(input_tensor, weight, eps=eps)
+    assert isinstance(triton_output, torch.Tensor)
 
     # Compare
     max_diff = (triton_output - reference_output).abs().max().item()

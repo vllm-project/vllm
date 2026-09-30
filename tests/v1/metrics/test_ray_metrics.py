@@ -6,6 +6,7 @@ from unittest.mock import MagicMock
 import pytest
 import ray
 
+from tests.utils import wait_for_memory_to_settle
 from vllm.config.model import ModelDType
 from vllm.platforms import current_platform
 from vllm.sampling_params import SamplingParams
@@ -45,33 +46,40 @@ def test_engine_log_metrics_ray(
     max_tokens: int,
 ) -> None:
     """Simple smoke test, verifying this can be used without exceptions.
-    Need to start a Ray cluster in order to verify outputs.
-    """
+    Need to start a Ray cluster in order to verify outputs."""
+    engine_args = AsyncEngineArgs(
+        model=model, dtype=dtype, disable_log_stats=False, enforce_eager=True
+    )
 
     @ray.remote(num_gpus=1)
     class EngineTestActor:
         async def run(self):
-            engine_args = AsyncEngineArgs(
-                model=model, dtype=dtype, disable_log_stats=False, enforce_eager=True
-            )
-
             engine = AsyncLLM.from_engine_args(
                 engine_args, stat_loggers=[RayPrometheusStatLogger]
             )
 
-            for i, prompt in enumerate(example_prompts):
-                results = engine.generate(
-                    request_id=f"request-id-{i}",
-                    prompt=prompt,
-                    sampling_params=SamplingParams(max_tokens=max_tokens),
-                )
+            try:
+                for i, prompt in enumerate(example_prompts):
+                    results = engine.generate(
+                        request_id=f"request-id-{i}",
+                        prompt=prompt,
+                        sampling_params=SamplingParams(max_tokens=max_tokens),
+                    )
 
-                async for _ in results:
-                    pass
+                    async for _ in results:
+                        pass
+            finally:
+                engine.shutdown()
 
     # Create the actor and call the async method
-    actor = EngineTestActor.remote()  # type: ignore[attr-defined]
-    ray.get(actor.run.remote())
+    try:
+        actor = EngineTestActor.remote()  # type: ignore[attr-defined]
+        ray.get(actor.run.remote())
+    finally:
+        ray.shutdown()
+        wait_for_memory_to_settle(
+            threshold_ratio=1.0 - engine_args.gpu_memory_utilization
+        )
 
 
 def test_sanitized_opentelemetry_name():
@@ -120,8 +128,7 @@ def test_sanitized_opentelemetry_name():
 def _install_mock_metric(wrapper: RayPrometheusMetric) -> MagicMock:
     """Swap the wrapper's underlying Ray metric for a MagicMock while
     preserving the real metric's ``_tag_keys`` (labels() reads them to
-    validate arity).
-    """
+    validate arity)."""
     real_metric = wrapper.metric
     mock = MagicMock()
     mock._tag_keys = real_metric._tag_keys
@@ -131,8 +138,7 @@ def _install_mock_metric(wrapper: RayPrometheusMetric) -> MagicMock:
 
 def test_ray_counter_labels_returns_independent_children():
     """RayCounterWrapper.labels() must return distinct labeled children that
-    each carry their own tag set.
-    """
+    each carry their own tag set."""
     base = RayCounterWrapper(
         name="vllm_test_finish_reason",
         documentation="",
@@ -152,8 +158,7 @@ def test_ray_counter_labels_returns_independent_children():
 
 def test_ray_counter_inc_forwards_per_child_tags():
     """.inc() on a labeled counter must forward that child's tags to the
-    underlying Ray metric (not rely on a shared set_default_tags).
-    """
+    underlying Ray metric (not rely on a shared set_default_tags)."""
     wrapper = RayCounterWrapper(
         name="vllm_test_counter_tag_forward",
         documentation="",
@@ -218,8 +223,7 @@ def test_ray_histogram_labels_returns_independent_children_and_forwards_tags():
 def test_ray_counter_labels_accepts_non_string_label_values():
     """RayPrometheusStatLogger passes ``str(idx)`` for engine indexes; this
     covers the coercion path for any caller that passes a non-string label
-    value positionally.
-    """
+    value positionally."""
     wrapper = RayCounterWrapper(
         name="vllm_test_nonstr_label",
         documentation="",
@@ -242,8 +246,7 @@ def test_ray_counter_labels_arity_validation():
 
 def test_unlabeled_inc_carries_replica_id():
     """Recording on an unlabeled metric must still pass ReplicaId — it's a
-    declared tag_key and Ray rejects updates that omit any declared key.
-    """
+    declared tag_key and Ray rejects updates that omit any declared key."""
     wrapper = RayCounterWrapper(
         name="vllm_test_unlabeled_replica_id",
         documentation="",
@@ -256,8 +259,7 @@ def test_unlabeled_inc_carries_replica_id():
 
 def test_double_labels_raises():
     """labels() on an already-labeled child should raise, mirroring the
-    prometheus_client contract.
-    """
+    prometheus_client contract."""
     wrapper = RayCounterWrapper(
         name="vllm_test_double_labels",
         documentation="",

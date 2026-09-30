@@ -76,8 +76,7 @@ def test_basic_functionality(
 
 def test_routing_strategy_integration(monkeypatch, device):
     """Test that the routing strategy environment variable works with
-    FusedMoEFactory.
-    """
+    FusedMoEFactory."""
     pytest.importorskip("vllm.model_executor.layers.fused_moe.layer")
 
     import vllm.envs as envs
@@ -158,8 +157,7 @@ def test_routing_strategy_integration(monkeypatch, device):
 
 def test_distribution_based_routing_with_custom_strategy():
     """Test registering and using DistributionBasedRouting with custom
-    parameters.
-    """
+    parameters."""
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     # Register custom distribution-based strategy

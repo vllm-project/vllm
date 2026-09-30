@@ -60,8 +60,41 @@ class TestGetMLAPrefillBackend:
 
     def test_cpu_uses_sdpa_prefill(self):
         vllm_config = _make_vllm_config()
+        zen_cls = MLAPrefillBackendEnum.ZEN_CPU.get_class()
+
+        # A Zen CPU with zentorch selects the Zen backend, so expect whichever
+        # one this host offers.
+        expected = (
+            zen_cls if zen_cls.is_available() else MLAPrefillBackendEnum.CPU.get_class()
+        )
 
         with patch("vllm.platforms.current_platform") as mock_platform:
+            mock_platform.is_cpu.return_value = True
+
+            backend = get_mla_prefill_backend(vllm_config)
+            assert backend is expected
+
+    def test_zen_cpu_prefers_zentorch_prefill(self):
+        vllm_config = _make_vllm_config()
+        zen_cls = MLAPrefillBackendEnum.ZEN_CPU.get_class()
+
+        with (
+            patch("vllm.platforms.current_platform") as mock_platform,
+            patch.object(zen_cls, "is_available", return_value=True),
+        ):
+            mock_platform.is_cpu.return_value = True
+
+            backend = get_mla_prefill_backend(vllm_config)
+            assert backend is zen_cls
+
+    def test_zen_cpu_falls_back_when_zentorch_unavailable(self):
+        vllm_config = _make_vllm_config()
+        zen_cls = MLAPrefillBackendEnum.ZEN_CPU.get_class()
+
+        with (
+            patch("vllm.platforms.current_platform") as mock_platform,
+            patch.object(zen_cls, "is_available", return_value=False),
+        ):
             mock_platform.is_cpu.return_value = True
 
             backend = get_mla_prefill_backend(vllm_config)
@@ -315,8 +348,7 @@ class TestBackendValidation:
 
     def test_flash_attn_accepts_glm53_flash_nope_dimensions(self):
         """(256, 0, 256) runs the same FA kernels as GLM-5's (192, 64, 256); a
-        RoPE-carrying 320-wide query does not.
-        """
+        RoPE-carrying 320-wide query does not."""
         try:
             from vllm.v1.attention.backends.mla.prefill.flash_attn import (
                 FlashAttnPrefillBackend,
@@ -479,14 +511,14 @@ class TestMLAPrefillBackendParsing:
 
     def test_valid_string_parses_to_enum(self):
         config = AttentionConfig(
-            mla_prefill_backend="FLASH_ATTN",  # type: ignore[arg-type]
+            mla_prefill_backend="FLASH_ATTN",
         )
         assert config.mla_prefill_backend == MLAPrefillBackendEnum.FLASH_ATTN
 
     def test_invalid_string_raises_error(self):
         with pytest.raises(ValueError, match="Unknown MLA prefill backend"):
             AttentionConfig(
-                mla_prefill_backend="NONEXISTENT",  # type: ignore[arg-type]
+                mla_prefill_backend="NONEXISTENT",
             )
 
 

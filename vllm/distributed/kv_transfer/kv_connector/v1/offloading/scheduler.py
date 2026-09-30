@@ -553,6 +553,7 @@ def _create_req_context(req: Request) -> ReqContext:
     return ReqContext(
         req_id=req.request_id,
         kv_transfer_params=params,
+        kv_hints=req.kv_hints,
         load_tier_filter=load_filter,
     )
 
@@ -676,8 +677,7 @@ class OffloadingConnectorScheduler:
         start_chunk_idx: int,
     ) -> int | None:
         """Return the number of consecutive offloaded chunks from the start,
-        or None if the backend deferred a lookup.
-        """
+        or None if the backend deferred a lookup."""
         hit_count = 0
         defer_lookup = False
         for local_idx, key in enumerate(keys):
@@ -712,8 +712,7 @@ class OffloadingConnectorScheduler:
         """Return the end index (in `keys`) of the last run of
         `sliding_window_size` consecutive hits, scanning from the end.
         The first run may need a larger window for a partial rightmost chunk.
-        Returns 0 on miss, None if the backend deferred a lookup.
-        """
+        Returns 0 on miss, None if the backend deferred a lookup."""
         defer_lookup = False
         pending_in_window = False
         consecutive_hits = 0

@@ -65,8 +65,7 @@ def create_txt_slices_jsonl(
     trust_remote_code: bool = False,
 ) -> None:
     """Read *input_path*, slice it into prompts, and write JSONL to
-    *output_path*.
-    """
+    *output_path*."""
     tokenizer = AutoTokenizer.from_pretrained(
         tokenizer_name, trust_remote_code=trust_remote_code
     )

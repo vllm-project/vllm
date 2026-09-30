@@ -6,7 +6,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from vllm.config.multimodal import VideoDummyOptions
+from vllm.config.multimodal import MultiModalDummyOptions, VideoDummyOptions
 from vllm.model_executor.models.molmo2 import (
     Molmo2DummyInputsBuilder,
     build_flat_image_bool_length,
@@ -70,8 +70,7 @@ def test_dummy_video_num_frames_override_honors_min_of_two(
 ):
     """A ``num_frames`` override below 2 must be ignored (the model needs at
     least 2 frames), matching the "cannot be less than 2, will be ignored"
-    warning.
-    """
+    warning."""
     builder = object.__new__(Molmo2DummyInputsBuilder)
     builder.info = SimpleNamespace(
         get_hf_processor=lambda: SimpleNamespace(
@@ -84,7 +83,9 @@ def test_dummy_video_num_frames_override_honors_min_of_two(
     data = builder.get_dummy_mm_data(
         seq_len=128,
         mm_counts={"image": 0, "video": 1},
-        mm_options={"video": VideoDummyOptions(num_frames=num_frames_override)},
+        mm_options=MultiModalDummyOptions(
+            video=VideoDummyOptions(num_frames=num_frames_override)
+        ),
     )
 
     video, _metadata = data["video"][0]

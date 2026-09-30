@@ -240,8 +240,7 @@ async def test_long_text_embedding_1500_chars(
     client_with_chunked_processing: openai.AsyncOpenAI, model_name: str
 ):
     """Test embedding processing for ~1500 character long text
-    (~1028 tokens, exceeding 512 token limit).
-    """
+    (~1028 tokens, exceeding 512 token limit)."""
     # Verify text length
     # Verify text has sufficient word count (approximately 1500 words)
     word_count = len(LONG_TEXT_1500_WORDS.split())
@@ -275,6 +274,7 @@ async def test_long_text_embedding_1500_chars(
 
     # Verify embedding vector validity
     embedding_vector = embeddings.data[0].embedding
+    assert isinstance(embedding_vector, list)
     assert all(isinstance(x, float) for x in embedding_vector), (
         "Embedding vector should contain floats"
     )
@@ -289,8 +289,7 @@ async def test_long_text_embedding_2500_chars(
     client_with_chunked_processing: openai.AsyncOpenAI, model_name: str
 ):
     """Test embedding processing for ~2500 character long text
-    (~2048 tokens, requiring multiple chunks).
-    """
+    (~2048 tokens, requiring multiple chunks)."""
     # Verify text length
     # Verify text has sufficient word count (approximately 2500 words)
     word_count = len(LONG_TEXT_2500_WORDS.split())
@@ -324,6 +323,7 @@ async def test_long_text_embedding_2500_chars(
 
     # Verify embedding vector validity
     embedding_vector = embeddings.data[0].embedding
+    assert isinstance(embedding_vector, list)
     assert all(isinstance(x, float) for x in embedding_vector), (
         "Embedding vector should contain floats"
     )
@@ -382,8 +382,7 @@ async def test_chunked_vs_normal_consistency(
     client_with_chunked_processing: openai.AsyncOpenAI, model_name: str
 ):
     """Test consistency between chunked and
-    normal processing (using short text).
-    """
+    normal processing (using short text)."""
     # Use a short text within the 512 token limit
     short_text = (
         "Artificial intelligence technology is changing our world, "
@@ -412,6 +411,7 @@ async def test_chunked_vs_normal_consistency(
 
     # 验证embedding向量的有效性
     embedding_vector = embeddings.data[0].embedding
+    assert isinstance(embedding_vector, list)
     assert all(isinstance(x, float) for x in embedding_vector)
     assert not all(x == 0 for x in embedding_vector)
 
@@ -441,6 +441,7 @@ async def test_chunked_processing_response_format(
 
     # Verify embedding vector properties
     embedding_vector = embeddings.data[0].embedding
+    assert isinstance(embedding_vector, list)
     import math
 
     vector_norm = math.sqrt(sum(x * x for x in embedding_vector))
