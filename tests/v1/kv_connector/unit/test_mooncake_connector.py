@@ -11,6 +11,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
+import msgspec
 import pytest
 import torch
 import zmq.asyncio
@@ -23,6 +24,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake import (
     mooncake_utils,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_connector import (
+    _LAYOUT_RESEND_ERR,
     _SHARED_REGION_GROUP_ID,
     KVConnectorRole,
     MooncakeConnector,
@@ -2182,6 +2184,155 @@ def test_prepare_transfer_regions_reuses_success_and_error():
     assert worker._prepared_transfer_regions == {}
     worker._prepare_transfer_regions(meta)
     assert calls == 6
+
+
+def test_steady_pull_omits_layout_and_unknown_version_asks_for_resend():
+    """A later pull is much smaller, and a new layout version is not guessed."""
+    n = 146
+    names = [f"model.layers.{i}.self_attn" for i in range(n)]
+    req_blocks = {"d": ("xfer", [[1, 2, 3]])}
+    full = MooncakeXferMetadata(
+        remote_hostname="h",
+        remote_port=1,
+        remote_tp_size=4,
+        remote_tp_rank=0,
+        layout_version=1,
+        req_blocks=req_blocks,
+        kv_caches_base_addr=list(range(n)),
+        block_lens=[4096] * n,
+        kv_block_lens=[3000] * n,
+        registered_layer_names=names,
+        registered_layer_indices=list(range(n)),
+        registered_group_indices=[i % 5 for i in range(n)],
+        registered_shared_group_ids=[[] for _ in range(n)],
+        registered_row_offsets=[i * 100 for i in range(n)],
+    )
+    steady = MooncakeXferMetadata(
+        remote_hostname="h",
+        remote_port=1,
+        remote_tp_size=4,
+        remote_tp_rank=0,
+        layout_version=1,
+        req_blocks=req_blocks,
+        kv_caches_base_addr=[],
+        block_lens=[],
+        kv_block_lens=[],
+    )
+    encoder = msgspec.msgpack.Encoder()
+    full_bytes = len(encoder.encode(full))
+    steady_bytes = len(encoder.encode(steady))
+    assert steady_bytes < full_bytes * 0.2
+
+    worker, _, regions, _ = _register_sliced_packed_mla([0, 1])
+    calls = 0
+    original = worker._get_transfer_regions
+
+    def counting(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return original(*args, **kwargs)
+
+    worker._get_transfer_regions = counting
+    handshake = _xfer_meta(
+        regions,
+        req_blocks,
+        remote_hostname="peer",
+        remote_port=9,
+        remote_tp_size=worker.tp_size,
+        remote_pp_size=worker.pp_size,
+        layout_version=1,
+    )
+    assert worker._prepare_transfer_regions(handshake)[2] is None
+    assert calls == 2
+    short = MooncakeXferMetadata(
+        remote_hostname="peer",
+        remote_port=9,
+        remote_tp_size=worker.tp_size,
+        remote_tp_rank=0,
+        remote_pp_size=worker.pp_size,
+        layout_version=1,
+        req_blocks=req_blocks,
+        kv_caches_base_addr=[],
+        block_lens=[],
+        kv_block_lens=[],
+    )
+    again = worker._prepare_transfer_regions(short)
+    assert again[2] is None
+    assert calls == 2
+    missed = worker._prepare_transfer_regions(
+        MooncakeXferMetadata(
+            remote_hostname="peer",
+            remote_port=9,
+            remote_tp_size=worker.tp_size,
+            remote_tp_rank=0,
+            remote_pp_size=worker.pp_size,
+            layout_version=2,
+            req_blocks=req_blocks,
+            kv_caches_base_addr=[],
+            block_lens=[],
+            kv_block_lens=[],
+        )
+    )
+    assert missed[2] is not None
+    assert _LAYOUT_RESEND_ERR in missed[2]
+    assert calls == 2
+
+
+@pytest.mark.asyncio
+async def test_pull_resends_layout_when_prefill_forgot_it():
+    worker, _, _, _ = _register_sliced_packed_mla([0])
+    addr = "tcp://peer:1"
+    worker._acked_layout_peers.add(addr)
+    pull = {
+        "d": PullReqMeta(
+            d_req_id="d",
+            transfer_id="t",
+            local_block_ids=[[1]],
+            remote_engine_id="p",
+            remote_bootstrap_addr="http://bootstrap",
+        )
+    }
+    sent: list[bytes] = []
+    responses = [
+        worker._encoder.encode(
+            MooncakeXferResponse(
+                status=MooncakeXferResponseStatus.ERROR,
+                err_msg=f"{_LAYOUT_RESEND_ERR} (version 1 from peer:1).",
+            )
+        ),
+        worker._encoder.encode(
+            MooncakeXferResponse(
+                status=MooncakeXferResponseStatus.FINISH,
+                ok_reqs=["d"],
+            )
+        ),
+    ]
+
+    class _Sock:
+        def setsockopt(self, *_args, **_kwargs):
+            return None
+
+        async def send(self, data: bytes):
+            sent.append(data)
+
+        async def recv(self):
+            return responses.pop(0)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+    with patch(
+        "vllm.distributed.kv_transfer.kv_connector.v1.mooncake."
+        "mooncake_connector.make_zmq_socket",
+        return_value=_Sock(),
+    ):
+        await worker.receive_kv_from_single_worker(addr, pull)
+    assert len(sent) == 2
+    assert len(sent[1]) > len(sent[0])
+    assert addr in worker._acked_layout_peers
 
 
 def test_coalesce_keeps_a_run_inside_its_starting_row():
