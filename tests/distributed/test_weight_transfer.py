@@ -1261,6 +1261,21 @@ class TestTrainerClients:
         client.finish_weight_update("step-42")
         assert captured["json"] == {"weight_version": "step-42"}
 
+    def test_http_client_finish_raises_on_baseline_mismatch(self, monkeypatch):
+        """finish_weight_update sends the baseline and raises on a mismatch."""
+        captured = {}
+
+        def fake_post(self, path, json=None):
+            captured["json"] = json
+            return {"match": False, "mismatches": ["dp0:pp0:pcp0:tp0:w"]}
+
+        monkeypatch.setattr(HTTPVLLMWeightSyncClient, "_post", fake_post)
+        client = HTTPVLLMWeightSyncClient("http://localhost:8000")
+        baseline = {"dp0:pp0:pcp0:tp0:w": "0" * 64}
+        with pytest.raises(RuntimeError, match="dp0:pp0:pcp0:tp0:w"):
+            client.finish_weight_update(baseline=baseline)
+        assert captured["json"] == {"baseline": baseline}
+
 
 class TestModuleSource:
     """`ModuleSource` metadata vs. materialized iteration (dense, no GPU)."""

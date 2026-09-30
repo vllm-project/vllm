@@ -196,9 +196,15 @@ async def update_weights(
 async def finish_weight_update(
     raw_request: Request,
     weight_version: Annotated[str | None, Body(embed=True)] = None,
+    baseline: Annotated[dict[str, str] | None, Body(embed=True)] = None,
 ):
-    await engine_client(raw_request).finish_weight_update(weight_version)
-    return JSONResponse(content={"message": "Weight update finished"})
+    """Finish the weight update; with a baseline, also compare the weights."""
+    client = engine_client(raw_request)
+    await client.finish_weight_update(weight_version)
+    content: dict[str, Any] = {"message": "Weight update finished"}
+    if baseline is not None:
+        content |= _compare(await _weight_checksums(client), baseline)
+    return JSONResponse(content=content)
 
 
 @router.post("/update_weight_version")
@@ -233,6 +239,14 @@ async def weight_checker(
             detail="action='compare' requires a 'baseline' object",
         )
 
+    checksums = await _weight_checksums(client)
+    if action == "checksum":
+        return JSONResponse(content={"checksums": checksums})
+    assert baseline is not None
+    return JSONResponse(content=_compare(checksums, baseline))
+
+
+async def _weight_checksums(client: EngineClient) -> dict[str, str]:
     checksums: dict[str, str] = {}
     for worker_checksums in await client.compute_weight_checksums():
         if duplicates := checksums.keys() & worker_checksums.keys():
@@ -241,16 +255,16 @@ async def weight_checker(
                 detail=f"Duplicate weight checksum keys: {sorted(duplicates)}",
             )
         checksums.update(worker_checksums)
-    if action == "checksum":
-        return JSONResponse(content={"checksums": checksums})
+    return checksums
 
-    assert baseline is not None
+
+def _compare(checksums: dict[str, str], baseline: dict[str, str]) -> dict[str, Any]:
     mismatches = sorted(
         key
         for key in checksums.keys() | baseline.keys()
         if checksums.get(key) != baseline.get(key)
     )
-    return JSONResponse(content={"match": not mismatches, "mismatches": mismatches})
+    return {"match": not mismatches, "mismatches": mismatches}
 
 
 @router.get("/get_world_size")

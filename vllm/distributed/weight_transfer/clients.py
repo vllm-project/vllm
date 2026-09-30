@@ -67,13 +67,14 @@ class HTTPVLLMWeightSyncClient:
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
 
-    def _post(self, path: str, json: dict[str, Any] | None = None) -> None:
+    def _post(self, path: str, json: dict[str, Any] | None = None) -> Any:
         import requests
 
         response = requests.post(
             f"{self.base_url}/{path}", json=json, timeout=self.timeout
         )
         response.raise_for_status()
+        return response.json()
 
     def init_weight_transfer_engine(self, init_info: dict[str, Any]) -> None:
         self._post("init_weight_transfer_engine", {"init_info": init_info})
@@ -86,11 +87,20 @@ class HTTPVLLMWeightSyncClient:
             "update_weights", {"update_info": _json_safe_update_payload(update_info)}
         )
 
-    def finish_weight_update(self, weight_version: str | None = None) -> None:
-        json = (
-            {"weight_version": weight_version} if weight_version is not None else None
-        )
-        self._post("finish_weight_update", json)
+    def finish_weight_update(
+        self,
+        weight_version: str | None = None,
+        baseline: dict[str, str] | None = None,
+    ) -> None:
+        """Finish the update; raise if the weights differ from `baseline`."""
+        fields = {"weight_version": weight_version, "baseline": baseline}
+        json = {key: value for key, value in fields.items() if value is not None}
+        result = self._post("finish_weight_update", json or None)
+        if baseline is not None and not result["match"]:
+            mismatches = result["mismatches"]
+            raise RuntimeError(
+                f"{len(mismatches)} weights differ from the baseline: {mismatches[:5]}"
+            )
 
 
 class RayVLLMWeightSyncClient:

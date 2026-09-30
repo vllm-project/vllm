@@ -13,6 +13,7 @@ use serde_json::Value as JsonValue;
 use crate::error::{ApiError, invalid_request};
 use crate::state::AppState;
 use crate::utils::utility_call_error;
+use vllm_engine_core_client::EngineCoreClient;
 
 #[derive(Debug, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
@@ -52,17 +53,14 @@ pub async fn weight_checker(
 ) -> Result<Json<WeightCheckerResponse>, ApiError> {
     let Json(body) = body?;
     let client = state.engine_core_client();
-    let no_args = || {
-        (
-            Vec::<JsonValue>::new(),
-            BTreeMap::<String, JsonValue>::new(),
-        )
-    };
-
     if body.action == WeightCheckerAction::Reset {
-        let (args, kwargs) = no_args();
         client
-            .collective_rpc("reset_weights", None, args, kwargs)
+            .collective_rpc(
+                "reset_weights",
+                None,
+                Vec::<JsonValue>::new(),
+                BTreeMap::<String, JsonValue>::new(),
+            )
             .await
             .map_err(|error| utility_call_error("reset_weights", error))?;
         return Ok(Json(WeightCheckerResponse::Reset { status: "reset" }));
@@ -74,9 +72,29 @@ pub async fn weight_checker(
         ));
     }
 
-    let (args, kwargs) = no_args();
+    let checksums = weight_checksums(client).await?;
+    let Some(baseline) = body.baseline.filter(|_| body.action == WeightCheckerAction::Compare)
+    else {
+        return Ok(Json(WeightCheckerResponse::Checksums { checksums }));
+    };
+    let mismatches = mismatches(&checksums, &baseline);
+    Ok(Json(WeightCheckerResponse::Compare {
+        matched: mismatches.is_empty(),
+        mismatches,
+    }))
+}
+
+/// Merge every worker's weight checksums, rejecting duplicate keys.
+pub(crate) async fn weight_checksums(
+    client: &EngineCoreClient,
+) -> Result<BTreeMap<String, String>, ApiError> {
     let workers = client
-        .collective_rpc("compute_weight_checksums", None, args, kwargs)
+        .collective_rpc(
+            "compute_weight_checksums",
+            None,
+            Vec::<JsonValue>::new(),
+            BTreeMap::<String, JsonValue>::new(),
+        )
         .await
         .map_err(|error| utility_call_error("compute_weight_checksums", error))?;
     let mut checksums = BTreeMap::new();
@@ -93,21 +111,20 @@ pub async fn weight_checker(
             checksums.insert(key, digest);
         }
     }
+    Ok(checksums)
+}
 
-    let Some(baseline) = body.baseline.filter(|_| body.action == WeightCheckerAction::Compare)
-    else {
-        return Ok(Json(WeightCheckerResponse::Checksums { checksums }));
-    };
-    let mismatches: Vec<String> = checksums
+/// Keys whose digest differs from the baseline or is missing on either side.
+pub(crate) fn mismatches(
+    checksums: &BTreeMap<String, String>,
+    baseline: &BTreeMap<String, String>,
+) -> Vec<String> {
+    checksums
         .keys()
         .chain(baseline.keys())
         .collect::<BTreeSet<_>>()
         .into_iter()
         .filter(|key| checksums.get(*key) != baseline.get(*key))
         .cloned()
-        .collect();
-    Ok(Json(WeightCheckerResponse::Compare {
-        matched: mismatches.is_empty(),
-        mismatches,
-    }))
+        .collect()
 }
