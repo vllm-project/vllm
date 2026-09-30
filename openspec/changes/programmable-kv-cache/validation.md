@@ -172,3 +172,51 @@ CUDA_VISIBLE_DEVICES=0,3 .venv/bin/python -m pytest \
 
 Result: **176 passed**, 52.36 seconds, no skipped cases. Normal pre-commit hooks
 and mypy 3.10/3.12 checks passed. The real Store suite used its own master lifecycle.
+
+## October 1: engine-owned local eviction
+
+Added optional retention ordering to BlockPool's existing free queue. Priority
+ties retain the original LRU/LIFO ordering, and retained blocks remain evictable.
+Declarations do not acquire correctness references. Heap bookkeeping is bounded;
+partial-prefix aliases, cache reset and transfer reuse notifications are covered.
+The feature-disabled pool keeps its original queue implementation.
+
+Added scoped eviction through the existing pool and KV manager. Active references,
+unpin/reuse readers and unaddressed aliases prevent reclamation. A duplicate copy
+does not produce a logical removal event while another copy is still present.
+Native results expose affected physical block counts and blocked/missing targets.
+This invalidates cache entries inside the existing arena; it does not claim to
+free the arena's CUDA allocation. Startup/serving wiring is still pending.
+
+The complete cache/manager/control gate was:
+
+```bash
+CUDA_VISIBLE_DEVICES=0,3 .venv/bin/python -m pytest \
+  tests/v1/core/test_prefix_caching.py tests/v1/core/test_kv_cache_utils.py \
+  tests/v1/core/test_single_type_kv_cache_manager.py \
+  tests/v1/core/test_deferred_block_free.py \
+  tests/v1/test_kv_hint_state.py tests/v1/test_kv_hint_control.py -q
+```
+
+Result: **485 passed**, 157.73 seconds. An earlier run found the same host-GPU-count
+assumption in an existing PP=4 grouping unit test; its topology check is now mocked
+locally, without changing the grouping assertions or using additional GPUs.
+Range reporting was subsequently refined to distinguish a missing tail from a
+known but unaligned range, and to recognize an existing partial-prefix alias.
+After that refinement, the complete control/state suites passed **120 tests** in
+32.25 seconds. Normal pre-commit and mypy 3.10/3.12 checks passed.
+
+The Qwen3.8-27B checkpoint is complete: 18 shards, 55,563,006,776 weight-file bytes.
+A TP=2 baseline on GPUs 0/3 with 4 GiB KV per rank and eager execution initializes
+three Mamba groups plus one full-attention group, all with an effective block size
+of 784 tokens. Three shared-prefix questions produce identical output token IDs
+before/after cache reuse and after cache reset; the warm pass hits 784 tokens per
+question. This is a debugging baseline, not the full model evaluation.
+
+GSM8K was downloaded through the supplied dataset function at revision
+`740312add88f781978c0658806c59bc2815b9866`. The dedicated evaluation uses 128 seeded
+questions, full few-shot rationales matching the repository's GSM8K completion
+format, and separate forced-recomputation/prefix-cache passes. An initial
+direct-answer chat prompt was rejected: its 621–729-token prompts did not exercise
+784-token reuse boundaries and scored only 55.47%. The evaluation now asserts a
+sufficient shared prefix before generation; the accuracy threshold was not lowered.

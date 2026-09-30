@@ -55,6 +55,8 @@ class KVOperationExecutor(Protocol):
 
     def capabilities(self) -> tuple[ActionCapability, ...]: ...
 
+    def validate_scope(self, target: LogicalResolution) -> None: ...
+
     def submit(
         self,
         operation: OperationResult,
@@ -214,7 +216,13 @@ class NativeKVController:
             ),
         ]
         if self.executor is not None:
-            actions.extend(self.executor.capabilities())
+            for capability in self.executor.capabilities():
+                if self.request_resolver is not None and "hashes" in capability.targets:
+                    capability = msgspec.structs.replace(
+                        capability,
+                        targets=tuple(dict.fromkeys((*capability.targets, "request"))),
+                    )
+                actions.append(capability)
         return ConsumerCapabilities(
             self.registry.engine_id,
             self.registry.engine_epoch,
@@ -251,6 +259,8 @@ class NativeKVController:
             return
         if isinstance(payload, RetainPayload):
             target = self._target(payload.target, request_id)
+            if self.executor is not None:
+                self.executor.validate_scope(self.index.resolve(target))
             declaration = self.declarations.retain(
                 msgspec.structs.replace(payload, target=target)
             )
@@ -259,7 +269,7 @@ class NativeKVController:
             )
             status = (
                 OperationStatus.PARTIAL
-                if any(p.partial_blocks for p in scope.prefixes)
+                if any(p.partial_blocks or p.missing_ranges for p in scope.prefixes)
                 else OperationStatus.COMPLETED
             )
             self.registry.update(
@@ -274,6 +284,8 @@ class NativeKVController:
             target = self._target(payload.target, request_id)
             assert isinstance(target, HashTarget)
             scope = self.index.resolve(target)
+            if self.executor is not None:
+                self.executor.validate_scope(scope)
             if any(p.partial_blocks for p in scope.prefixes):
                 raise ControlError(
                     "invalid_payload", "Association range splits content"

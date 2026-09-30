@@ -48,11 +48,19 @@ class AssociationPage:
 
 
 @dataclass(frozen=True)
+class RangeGap:
+    group_id: int | None
+    start_token: int
+    end_token: int
+
+
+@dataclass(frozen=True)
 class ResolvedPrefix:
     continuation: ContinuationKey | None
     revision: int | None
     blocks: tuple[ContentSpan, ...]
     partial_blocks: tuple[ContentSpan, ...]
+    missing_ranges: tuple[RangeGap, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -304,7 +312,38 @@ class SessionPrefixIndex:
                     partial.append(block)
                 else:
                     full.append(block)
-            prefixes.append(ResolvedPrefix(key, revision, tuple(full), tuple(partial)))
+            # A full partial-prefix alias can cover the requested interval even
+            # when the same page also has a longer, unselected prefix entry.
+            partial = [
+                b
+                for b in partial
+                if not any(
+                    f.group_id == b.group_id
+                    and f.start_token <= max(b.start_token, target.start_token)
+                    and f.end_token >= min(b.end_token, target.end_token or b.end_token)
+                    for f in full
+                )
+            ]
+            gaps = []
+            if isinstance(target, SessionTarget) and target.end_token is not None:
+                groups = {b.group_id for b in blocks}
+                if not groups:
+                    gaps.append(RangeGap(None, target.start_token, target.end_token))
+                for group in sorted(groups):
+                    cursor = target.start_token
+                    for block in (b for b in blocks if b.group_id == group):
+                        start = max(block.start_token, target.start_token)
+                        end = min(block.end_token, target.end_token)
+                        if start >= end:
+                            continue
+                        if start > cursor:
+                            gaps.append(RangeGap(group, cursor, start))
+                        cursor = max(cursor, end)
+                    if cursor < target.end_token:
+                        gaps.append(RangeGap(group, cursor, target.end_token))
+            prefixes.append(
+                ResolvedPrefix(key, revision, tuple(full), tuple(partial), tuple(gaps))
+            )
         return LogicalResolution(
             self.namespace, target.start_token, target.end_token, tuple(prefixes)
         )

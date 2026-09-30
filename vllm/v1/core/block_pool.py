@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Callable, Iterable, Sequence
-from typing import Any
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any
 
 from vllm.distributed.kv_events import (
     MEDIUM_GPU,
@@ -29,6 +30,17 @@ from vllm.v1.core.kv_cache_utils import (
 from vllm.v1.request import Request
 
 logger = init_logger(__name__)
+
+if TYPE_CHECKING:
+    from vllm.v1.core.kv_cache_retention import RetentionFreeBlockQueue
+
+
+@dataclass(frozen=True)
+class ScopedCacheEviction:
+    evicted: frozenset[BlockHashWithGroupId]
+    blocked: frozenset[BlockHashWithGroupId]
+    missing: frozenset[BlockHashWithGroupId]
+    num_evicted_blocks: int
 
 
 class BlockHashToBlockMap:
@@ -80,6 +92,15 @@ class BlockHashToBlockMap:
             return block_id in blocks
         self._unexpected_blocks_type(blocks)
         return False
+
+    def get_blocks(self, key: BlockHashWithGroupId) -> tuple[KVCacheBlock, ...]:
+        """Return every physical copy of the addressed cached content."""
+        blocks = self._cache.get(key)
+        if blocks is None:
+            return ()
+        if isinstance(blocks, KVCacheBlock):
+            return (blocks,)
+        return tuple(blocks.values())
 
     def insert(self, key: BlockHashWithGroupId, block: KVCacheBlock) -> None:
         """Inserts the KVCacheBlock to the cache"""
@@ -193,6 +214,40 @@ class BlockPool:
         # Callbacks for blocks released with ``unpin_blocks`` whose contents
         # are still being read until the pool reuses them.
         self._reuse_watchers: dict[int, Callable[[KVCacheBlock], None]] = {}
+        self._retention_queue: RetentionFreeBlockQueue | None = None
+
+    def configure_retention(
+        self,
+        priority: Callable[[BlockHashWithGroupId], int],
+        synchronize: Callable[[], Iterable[BlockHashWithGroupId]],
+    ) -> None:
+        """Install engine-owned priority ordering once, before serving requests."""
+        from vllm.v1.core.kv_cache_retention import RetentionFreeBlockQueue
+
+        if not self.enable_caching or self._retention_queue is not None:
+            raise ValueError(
+                "Retention requires caching and can only be configured once"
+            )
+
+        def block_priority(block: KVCacheBlock) -> int:
+            result = priority(block.block_hash) if block.block_hash is not None else 0
+            for alias in self.cached_block_hashes_by_block.get(block.block_id, ()):
+                result = max(result, priority(alias))
+            return result
+
+        def refresh() -> None:
+            assert self._retention_queue is not None
+            for key in synchronize():
+                for block in self.cached_block_hash_to_block.get_blocks(key):
+                    self._retention_queue.cache_changed(block)
+
+        self._retention_queue = RetentionFreeBlockQueue(
+            self.free_block_queue.get_all_free_blocks(),
+            self.blocks,
+            block_priority,
+            refresh,
+        )
+        self.free_block_queue = self._retention_queue
 
     def get_cached_block(
         self, block_hash: BlockHash, kv_cache_group_ids: list[int]
@@ -608,6 +663,8 @@ class BlockPool:
             ):
                 removed_hashes.append(block_hash)
         block.reset_hash()
+        if self._retention_queue is not None:
+            self._retention_queue.cache_changed(block)
         return removed_hashes
 
     def _emit_block_removed_events(
@@ -646,6 +703,8 @@ class BlockPool:
                 block_hash_with_group_id
             )
         self.cached_block_hash_to_block.insert(block_hash_with_group_id, block)
+        if self._retention_queue is not None:
+            self._retention_queue.cache_changed(block)
 
     def move_block_hashes(
         self,
@@ -826,6 +885,57 @@ class BlockPool:
             block = self.blocks[block_id]
             self._maybe_evict_cached_block(block)
 
+    def evict_unreferenced(
+        self, keys: Iterable[BlockHashWithGroupId]
+    ) -> ScopedCacheEviction:
+        """Evict addressed copies without invalidating active or shared storage.
+
+        A page with unaddressed aliases cannot be reclaimed by this operation.
+        Evicted and blocked may both contain a key when it has multiple copies.
+        """
+        selected = set(keys)
+        missing = set()
+        candidates: dict[int, KVCacheBlock] = {}
+        for key in selected:
+            copies = self.cached_block_hash_to_block.get_blocks(key)
+            if not copies:
+                missing.add(key)
+            for block in copies:
+                candidates[block.block_id] = block
+        evicted: set[BlockHashWithGroupId] = set()
+        blocked: set[BlockHashWithGroupId] = set()
+        num_evicted_blocks = 0
+        for block in candidates.values():
+            hashes = set(self.cached_block_hashes_by_block.get(block.block_id, ()))
+            if block.block_hash is not None:
+                hashes.add(block.block_hash)
+            if (
+                block.ref_cnt != 0
+                or block.is_null
+                or block.block_id in self._reuse_watchers
+                or not hashes <= selected
+            ):
+                blocked.update(hashes & selected)
+                continue
+            if self.metrics_collector:
+                self.metrics_collector.on_block_evicted(block)
+            evicted.update(self._remove_cached_block_hashes(block))
+            num_evicted_blocks += 1
+        # One reclaimed duplicate is not removal of the logical cache entry.
+        self._emit_block_removed_events(
+            [
+                key
+                for key in evicted
+                if not self.cached_block_hash_to_block.get_blocks(key)
+            ]
+        )
+        return ScopedCacheEviction(
+            frozenset(evicted),
+            frozenset(blocked),
+            frozenset(missing),
+            num_evicted_blocks,
+        )
+
     def reset_prefix_cache(self) -> bool:
         """Reset prefix cache. This function may be used in RLHF
         flows to invalid prefix caching after the weights are updated,
@@ -856,6 +966,9 @@ class BlockPool:
         # Remove all hashes from all blocks.
         for block in self.blocks:
             block.reset_hash()
+
+        if self._retention_queue is not None:
+            self._retention_queue.rebuild()
 
         if self.metrics_collector:
             self.metrics_collector.reset()

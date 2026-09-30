@@ -23,7 +23,7 @@ class ContentSpan(msgspec.Struct, frozen=True, forbid_unknown_fields=True):  # t
     """Logical group content; no allocator block IDs or residency claim."""
 
     block_hash: Annotated[str, msgspec.Meta(pattern="^[0-9a-f]{2,128}$")]
-    group_id: Annotated[int, msgspec.Meta(ge=0)]
+    group_id: Annotated[int, msgspec.Meta(ge=0, le=(1 << 32) - 1)]
     start_token: TokenPosition
     end_token: TokenPosition
 
@@ -198,8 +198,13 @@ def validate_target(target: Target) -> None:
         for block in target.blocks:
             per_group.setdefault(block.group_id, []).append(block)
         for blocks in per_group.values():
-            ordered = sorted(blocks, key=lambda block: block.start_token)
-            if any(a.end_token > b.start_token for a, b in zip(ordered, ordered[1:])):
+            ordered = sorted(
+                blocks, key=lambda block: (block.start_token, block.end_token)
+            )
+            if any(
+                a.end_token > b.start_token and a.start_token != b.start_token
+                for a, b in zip(ordered, ordered[1:])
+            ):
                 raise ControlError(
                     "invalid_payload", "Content spans overlap in a group"
                 )

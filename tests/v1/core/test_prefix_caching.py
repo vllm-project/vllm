@@ -3,6 +3,7 @@
 """Compare the with and without prefix caching."""
 
 import copy
+import random
 from collections.abc import Callable
 from dataclasses import replace
 from math import lcm
@@ -66,6 +67,13 @@ from vllm.v1.kv_cache_interface import (
     MLAAttentionSpec,
     SlidingWindowSpec,
 )
+from vllm.v1.kv_hints.control import ControlContext, OperationRegistry, OperationStatus
+from vllm.v1.kv_hints.controller import NativeKVController
+from vllm.v1.kv_hints.native import ContentSpan, HashTarget, RetainPayload
+from vllm.v1.kv_hints.protocol import KvHintAction, KvHintsEnvelope
+from vllm.v1.kv_hints.resources import KVResourceController, KVRetentionPriority
+from vllm.v1.kv_hints.retention import RetentionDeclarations
+from vllm.v1.kv_hints.state import SessionPrefixIndex
 from vllm.v1.outputs import KVConnectorOutput
 from vllm.v1.request import RequestStatus
 
@@ -5968,3 +5976,348 @@ def test_get_unhashed_block_ids_all_groups():
     )
 
     assert blocks.get_unhashed_block_ids_all_groups() == [[1, 4], []]
+
+
+def make_retention_pool(num_blocks=3, *, extra_free=0, block_size=4):
+    now = [100.0]
+    pool = BlockPool(
+        num_blocks + extra_free + 1, enable_caching=True, hash_block_size=4
+    )
+    index = SessionPrefixIndex("namespace", "epoch")
+    declarations = RetentionDeclarations(index, clock=lambda: now[0])
+    KVRetentionPriority(pool, declarations)
+    request = make_request(
+        "retained", list(range(num_blocks * block_size)), block_size=4, hash_fn=sha256
+    )
+    blocks = pool.get_new_blocks(num_blocks)
+    pool.cache_full_blocks(request, blocks, 0, num_blocks, block_size, 0)
+    pool.free_blocks(blocks)
+    return pool, declarations, now, request, blocks
+
+
+def retain_cached(declarations, request, position, priority, ttl=None, owner="owner"):
+    return declarations.retain(
+        RetainPayload(
+            HashTarget(
+                "namespace",
+                (
+                    ContentSpan(
+                        request.block_hashes[position].hex(),
+                        0,
+                        position * 4,
+                        (position + 1) * 4,
+                    ),
+                ),
+            ),
+            owner,
+            str(position),
+            priority,
+            ttl,
+        )
+    )
+
+
+def test_retention_bias_changes_eviction_order_without_pinning():
+    pool, declarations, _, request, blocks = make_retention_pool()
+    retain_cached(declarations, request, 0, 90)
+    retain_cached(declarations, request, 1, 10)
+    assert all(block.ref_cnt == 0 for block in blocks)
+    assert pool.get_num_free_blocks() == 3
+    assert pool.get_new_blocks(2) == [blocks[2], blocks[1]]
+    assert blocks[0].block_hash is not None
+    assert pool.get_new_blocks(1) == [blocks[0]]
+    assert all(block.ref_cnt == 1 for block in blocks)
+
+
+def test_independent_retention_expiry_is_applied_before_pool_allocation():
+    pool, declarations, now, request, blocks = make_retention_pool()
+    retain_cached(declarations, request, 0, 90, ttl=5, owner="high")
+    retain_cached(declarations, request, 0, 20, ttl=20, owner="low")
+    retain_cached(declarations, request, 1, 30)
+    retain_cached(declarations, request, 2, 10)
+    now[0] += 5
+    assert pool.get_new_blocks(1) == [blocks[2]]
+    assert pool.get_new_blocks(1) == [blocks[0]]
+    assert declarations.get("low", "0") is not None
+
+
+def test_retention_never_selects_active_references_and_keeps_lifo_for_unhashed_blocks():
+    pool, _, _, _, blocks = make_retention_pool()
+    pool.touch([blocks[0]])
+    assert pool.get_new_blocks(2) == blocks[1:]
+    pool.free_blocks([blocks[1], blocks[0], blocks[2]])
+    assert pool.get_new_blocks(3) == [blocks[1], blocks[2], blocks[0]]
+
+
+def test_retention_applies_to_a_new_partial_alias_on_an_idle_cached_copy():
+    pool, declarations, _, request, blocks = make_retention_pool(
+        extra_free=1, block_size=8
+    )
+    retain_cached(declarations, request, 0, 90)
+    # Refresh the declaration view while this partial hash has no GPU entry.
+    unused = pool.get_new_blocks(1)[0]
+    assert unused not in blocks
+    pool.cache_partial_block(
+        request, blocks[0], num_tokens=4, block_size=8, kv_cache_group_id=0
+    )
+    assert pool.get_new_blocks(2) == blocks[1:]
+    assert blocks[0].block_hash is not None
+
+
+def test_cache_reset_cannot_leave_priority_on_a_reused_physical_block():
+    pool, declarations, _, request, blocks = make_retention_pool()
+    retain_cached(declarations, request, 0, 90)
+    chosen = pool.get_new_blocks(1)
+    assert chosen == [blocks[1]]
+    pool.free_blocks(chosen)
+    order = pool.free_block_queue.get_all_free_blocks()
+    assert pool.reset_prefix_cache()
+    assert pool.get_new_blocks(3) == order
+    assert all(block.block_hash is None for block in blocks)
+
+
+def test_evicted_idle_copy_loses_its_heap_priority_before_reallocation():
+    pool, declarations, _, request, blocks = make_retention_pool()
+    retain_cached(declarations, request, 0, 90)
+    # Populate the priority view without consuming this retained copy.
+    assert pool.get_new_blocks(1) == [blocks[1]]
+    pool.evict_blocks({blocks[0].block_id})
+    assert pool.get_new_blocks(1) == [blocks[0]]
+
+
+def test_retention_reuse_still_notifies_unpinned_transfer_readers():
+    pool, declarations, _, request, blocks = make_retention_pool()
+    retain_cached(declarations, request, 0, 90)
+    pool.touch([blocks[1]])
+    reused = []
+    pool.unpin_blocks([blocks[1]], lambda block: reused.append(block.block_id))
+    chosen = pool.get_new_blocks(3)
+    assert set(b.block_id for b in chosen) == set(b.block_id for b in blocks)
+    assert reused == [blocks[1].block_id]
+
+
+def test_scoped_eviction_preserves_active_copies_and_reports_partial_effects():
+    pool, _, _, request, blocks = make_retention_pool()
+    keys = [make_block_hash_with_group_id(h, 0) for h in request.block_hashes]
+    pool.touch([blocks[0]])
+    missing = make_block_hash_with_group_id(BlockHash(b"missing"), 0)
+    result = pool.evict_unreferenced([*keys, missing])
+    assert result.blocked == {keys[0]}
+    assert result.evicted == set(keys[1:])
+    assert result.missing == {missing}
+    assert result.num_evicted_blocks == 2
+    assert blocks[0].ref_cnt == 1 and blocks[0].block_hash == keys[0]
+    assert pool.get_num_free_blocks() == 2
+
+
+def test_scoped_eviction_keeps_an_unaddressed_partial_alias():
+    pool, _, _, request, blocks = make_retention_pool(block_size=8)
+    alias = pool.cache_partial_block(
+        request, blocks[0], num_tokens=4, block_size=8, kv_cache_group_id=0
+    )
+    primary = blocks[0].block_hash
+    assert primary is not None and alias is not None
+    partial = pool.evict_unreferenced([primary])
+    assert partial.blocked == {primary}
+    assert partial.num_evicted_blocks == 0
+    assert pool.get_cached_block(request.block_hashes[0], [0]) == [blocks[0]]
+    whole = pool.evict_unreferenced([primary, alias])
+    assert whole.evicted == {primary, alias}
+    assert whole.num_evicted_blocks == 1
+
+
+def test_scoped_eviction_does_not_announce_removal_while_a_duplicate_is_active():
+    pool = BlockPool(
+        4, enable_caching=True, hash_block_size=4, enable_kv_cache_events=True
+    )
+    request = make_request("duplicated", [1, 2, 3, 4], block_size=4, hash_fn=sha256)
+    copies = pool.get_new_blocks(2)
+    for block in copies:
+        pool.cache_full_blocks(request, [block], 0, 1, 4, 0)
+    pool.free_blocks([copies[0]])
+    pool.take_events()
+    key = make_block_hash_with_group_id(request.block_hashes[0], 0)
+    partial = pool.evict_unreferenced([key])
+    assert partial.evicted == partial.blocked == {key}
+    assert partial.num_evicted_blocks == 1
+    assert pool.get_cached_block(request.block_hashes[0], [0]) == [copies[1]]
+    assert pool.take_events() == []
+    pool.free_blocks([copies[1]])
+    assert pool.evict_unreferenced([key]).num_evicted_blocks == 1
+    assert len(pool.take_events()) == 1
+
+
+def test_scoped_eviction_does_not_abandon_an_unpinned_source_reader():
+    pool, _, _, request, blocks = make_retention_pool()
+    pool.touch([blocks[0]])
+    reused = []
+    pool.unpin_blocks([blocks[0]], lambda block: reused.append(block.block_id))
+    key = make_block_hash_with_group_id(request.block_hashes[0], 0)
+    result = pool.evict_unreferenced([key])
+    assert result.blocked == {key}
+    assert result.num_evicted_blocks == 0
+    assert reused == []
+    assert blocks[0].block_hash == key
+
+
+def test_native_evict_reports_actual_effects_from_the_existing_manager():
+    config = KVCacheConfig(
+        num_blocks=4,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                ["layer"],
+                FullAttentionSpec(
+                    block_size=4, num_kv_heads=1, head_size=8, dtype=torch.float32
+                ),
+            )
+        ],
+    )
+    manager = make_kv_cache_manager(config, max_model_len=64, hash_block_size=4)
+    registry = OperationRegistry("engine", engine_epoch="epoch")
+    index = SessionPrefixIndex("namespace", "epoch")
+    declarations = RetentionDeclarations(index)
+    resources = KVResourceController(manager, registry, declarations)
+    controller = NativeKVController(registry, index, declarations, executor=resources)
+    request = make_request("request", list(range(12)), block_size=4, hash_fn=sha256)
+    pool = manager.block_pool
+    blocks = pool.get_new_blocks(3)
+    pool.cache_full_blocks(request, blocks, 0, 3, 4, 0)
+    pool.free_blocks(blocks)
+    pool.touch([blocks[0]])
+    target = {
+        "kind": "hashes",
+        "namespace": "namespace",
+        "blocks": [
+            {
+                "block_hash": h.hex(),
+                "group_id": 0,
+                "start_token": i * 4,
+                "end_token": (i + 1) * 4,
+            }
+            for i, h in enumerate(request.block_hashes)
+        ],
+    }
+    hint = KvHintsEnvelope(
+        "0.1", "evict", [KvHintAction("action", "evict", "1", {"target": target})]
+    )
+    result = controller.submit(
+        hint, ControlContext("engine", "epoch", "native")
+    ).results[0]
+    assert result.status == OperationStatus.PARTIAL
+    assert result.affected_blocks == 2 and result.blocked_targets == 1
+    assert result.missing_targets == 0
+    assert blocks[0].ref_cnt == 1 and blocks[0].block_hash is not None
+    assert all(block.block_hash is None for block in blocks[1:])
+
+
+def test_native_retention_rejects_an_unconfigured_group_before_changing_state():
+    config = KVCacheConfig(
+        num_blocks=4,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                ["layer"],
+                FullAttentionSpec(
+                    block_size=4, num_kv_heads=1, head_size=8, dtype=torch.float32
+                ),
+            )
+        ],
+    )
+    manager = make_kv_cache_manager(config, max_model_len=64, hash_block_size=4)
+    registry = OperationRegistry("engine", engine_epoch="epoch")
+    index = SessionPrefixIndex("namespace", "epoch")
+    declarations = RetentionDeclarations(index)
+    controller = NativeKVController(
+        registry,
+        index,
+        declarations,
+        executor=KVResourceController(manager, registry, declarations),
+    )
+    hint = KvHintsEnvelope(
+        "0.1",
+        "retain",
+        [
+            KvHintAction(
+                "action",
+                "retain",
+                "1",
+                {
+                    "owner_id": "s",
+                    "declaration_id": "d",
+                    "priority": 90,
+                    "target": {
+                        "kind": "hashes",
+                        "namespace": "namespace",
+                        "blocks": [
+                            {
+                                "block_hash": "0011",
+                                "group_id": 1,
+                                "start_token": 0,
+                                "end_token": 4,
+                            }
+                        ],
+                    },
+                },
+            )
+        ],
+    )
+    result = controller.submit(
+        hint, ControlContext("engine", "epoch", "native")
+    ).results[0]
+    assert result.status == OperationStatus.UNSUPPORTED
+    assert declarations.get("s", "d") is None
+    assert manager.block_pool.get_num_free_blocks() == 3
+
+
+@pytest.mark.parametrize("seed", [0, 73, 311])
+def test_retention_allocation_interleavings_match_priority_then_existing_queue_order(
+    seed,
+):
+    pool, declarations, now, request, _ = make_retention_pool(num_blocks=12)
+    rng = random.Random(seed)
+    allocated: list[KVCacheBlock] = []
+    for _ in range(250):
+        action = rng.randrange(4)
+        if action == 0:
+            retain_cached(
+                declarations,
+                request,
+                rng.randrange(12),
+                rng.randrange(101),
+                ttl=rng.randrange(1, 10),
+            )
+        elif action == 1 and allocated:
+            block = allocated.pop(rng.randrange(len(allocated)))
+            if rng.randrange(2):
+                position = rng.randrange(12)
+                pool.cache_full_blocks(
+                    request,
+                    [pool.null_block] * position + [block],
+                    position,
+                    position + 1,
+                    4,
+                    0,
+                )
+            pool.free_blocks([block])
+        elif action == 2 and pool.get_num_free_blocks():
+            free = pool.free_block_queue.get_all_free_blocks()
+
+            def expected_priority(block):
+                if block.block_hash is None:
+                    return 0
+                return declarations.priority(
+                    get_group_id(block.block_hash),
+                    get_block_hash(block.block_hash).hex(),
+                )
+
+            count = rng.randrange(1, min(3, len(free)) + 1)
+            expected = sorted(free, key=expected_priority)[:count]
+            actual = pool.get_new_blocks(count)
+            assert actual == expected
+            assert all(block.ref_cnt == 1 for block in actual)
+            allocated.extend(actual)
+            assert len({block.block_id for block in allocated}) == len(allocated)
+        else:
+            now[0] += 1
+        assert pool.get_num_free_blocks() + len(allocated) == 12

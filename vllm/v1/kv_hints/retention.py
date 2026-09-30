@@ -4,8 +4,9 @@
 
 import heapq
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
+from types import MappingProxyType
 from typing import TypeAlias
 
 from vllm.v1.kv_hints.control import ControlError
@@ -67,6 +68,8 @@ class RetentionDeclarations:
         self._by_content: dict[ContentKey, dict[DeclarationKey, int]] = {}
         self._following: dict[ContinuationKey, set[DeclarationKey]] = {}
         self._expiry: list[tuple[float, int, DeclarationKey]] = []
+        self._projection_version: tuple[int, int] | None = None
+        self._projection: Mapping[ContentKey, int] = MappingProxyType({})
 
     def retain(self, payload: RetainPayload) -> RetainDeclaration:
         """Create/update a declaration after native validation and deduplication."""
@@ -182,6 +185,39 @@ class RetentionDeclarations:
                     priority = max(priority, declaration.priority)
         return priority
 
+    def priority_snapshot(self) -> tuple[tuple[int, int], Mapping[ContentKey, int]]:
+        """Return a cached eviction view, invalidated by expiry or followed growth."""
+        self.expire()
+        version = (self._generation, self.index.revision if self._following else 0)
+        if version != self._projection_version:
+            priorities = {
+                key: max(values.values()) for key, values in self._by_content.items()
+            }
+            for continuation, keys in self._following.items():
+                try:
+                    state = self.index.get(*continuation)
+                except ControlError:
+                    continue
+                for key in keys:
+                    declaration = self._declarations[key]
+                    if state.incarnation != declaration.continuation_incarnation:
+                        continue
+                    target = declaration.target
+                    for block in state.blocks:
+                        if block.start_token >= target.start_token and (
+                            target.end_token is None
+                            or block.end_token <= target.end_token
+                        ):
+                            content = content_key(block)
+                            priorities[content] = max(
+                                priorities.get(content, 0), declaration.priority
+                            )
+            self._projection = MappingProxyType(
+                {key: p for key, p in priorities.items() if p}
+            )
+            self._projection_version = version
+        return version, self._projection
+
     def release(self, owner_id: str, declaration_id: str) -> bool:
         self.expire()
         removed = self._remove((owner_id, declaration_id))
@@ -271,6 +307,7 @@ class RetentionDeclarations:
         declaration = self._declarations.pop(key, None)
         if declaration is None:
             return False
+        self._generation += 1
         owner = self._owners[declaration.owner_id]
         owner.remove(key)
         if not owner:
@@ -307,7 +344,8 @@ class RetentionDeclarations:
     @staticmethod
     def _resolution_size(resolution: LogicalResolution) -> int:
         return sum(
-            max(1, len(p.blocks) + len(p.partial_blocks)) for p in resolution.prefixes
+            max(1, len(p.blocks) + len(p.partial_blocks) + len(p.missing_ranges))
+            for p in resolution.prefixes
         )
 
     def _compact_expiry(self) -> None:

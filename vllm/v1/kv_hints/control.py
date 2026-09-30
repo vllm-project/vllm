@@ -69,6 +69,10 @@ class OperationResult:
     completed_steps: tuple[str, ...] = ()
     binding_id: str | None = None
     namespace: str | None = None
+    affected_blocks: int = 0
+    blocked_targets: int = 0
+    missing_targets: int = 0
+    displaced_blocks: int = 0
 
 
 @dataclass(frozen=True)
@@ -278,6 +282,10 @@ class OperationRegistry:
         *,
         reason: str = "",
         completed_steps: tuple[str, ...] | None = None,
+        affected_blocks: int | None = None,
+        blocked_targets: int | None = None,
+        missing_targets: int | None = None,
+        displaced_blocks: int | None = None,
     ) -> OperationResult:
         """Publish progress after the executor has validated the physical outcome."""
         self.validate_context(
@@ -299,6 +307,17 @@ class OperationRegistry:
             )
         if not isinstance(status, OperationStatus):
             raise ValueError("Expected OperationStatus")
+        counts = {
+            name: getattr(current, name) if value is None else value
+            for name, value in (
+                ("affected_blocks", affected_blocks),
+                ("blocked_targets", blocked_targets),
+                ("missing_targets", missing_targets),
+                ("displaced_blocks", displaced_blocks),
+            )
+        }
+        if any(type(value) is not int or value < 0 for value in counts.values()):
+            raise ValueError("Operation counts must be nonnegative integers")
         if len(reason) > 4096:
             raise ValueError("Operation reason exceeds 4096 characters")
         steps = current.completed_steps if completed_steps is None else completed_steps
@@ -316,6 +335,7 @@ class OperationRegistry:
             status == current.status
             and reason == current.reason
             and steps == current.completed_steps
+            and all(getattr(current, name) == value for name, value in counts.items())
         ):
             return current
         if current.status.terminal:
@@ -339,6 +359,10 @@ class OperationRegistry:
             sequence=self._sequence,
             reason=reason,
             completed_steps=steps,
+            affected_blocks=counts["affected_blocks"],
+            blocked_targets=counts["blocked_targets"],
+            missing_targets=counts["missing_targets"],
+            displaced_blocks=counts["displaced_blocks"],
         )
         message = self._messages[operation.message_id]
         message.results[operation.action_id] = result

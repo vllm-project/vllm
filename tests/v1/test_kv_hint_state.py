@@ -88,6 +88,24 @@ def test_group_specific_ranges_report_partial_blocks_without_rounding(index):
         index.resolve(HashTarget("old-weights", blocks))
 
 
+def test_range_past_known_content_reports_the_untracked_tail(index):
+    associate(index, "s", (span(1),))
+    resolved = index.resolve(SessionTarget("s", "main", end_token=32)).prefixes[0]
+    assert [
+        (g.group_id, g.start_token, g.end_token) for g in resolved.missing_ranges
+    ] == [(0, 16, 32)]
+    assert resolved.blocks == (span(1),)
+
+
+def test_known_partial_alias_fully_covers_a_shorter_range(index):
+    alias, full = span(1, 0, 8), span(2, 0, 16)
+    associate(index, "s", (alias, full))
+    resolved = index.resolve(SessionTarget("s", "main", end_token=8)).prefixes[0]
+    assert resolved.blocks == (alias,)
+    assert resolved.partial_blocks == ()
+    assert resolved.missing_ranges == ()
+
+
 def test_known_empty_is_distinct_from_unknown_and_pruned(index):
     empty = associate(index, "empty")
     assert index.resolve(SessionTarget("empty")).prefixes[0].blocks == ()

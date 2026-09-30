@@ -6,7 +6,7 @@
 - [ ] 1.2 Agree on the control transport/profile, explicit engine routing, target coverage, CPU adapter, and per-backend capability matrix.
 - [x] 1.3 Specify operation statuses, deduplication/retry limits, declaration timing, task cleanup ordering, and bounded index/result storage.
 - [x] 1.4 Specify reference policies, composer conflict rules, and any optional admission/score behavior without allowing cache plugins to mutate queues directly.
-- [ ] 1.5 Identify the model, usable GPU allocation, Mooncake deployment, and open-source rollout example for reproducible validation.
+- [x] 1.5 Identify the model, usable GPU allocation, Mooncake deployment, and open-source rollout example for reproducible validation.
 - [x] 1.6 Confirm application control through the merged hints, explicit state commands separate from policy signals, and incremental association events with queries.
 - [ ] 1.7 Define snapshot/follow-growth target scope, derived-plan outcomes, and stale/retried logical-state updates.
 - [x] 1.8 Confirm lightweight orchestrator for first delivery, one interpretation path per entire envelope, preserved KVCR forwarding, and a separate future-work tracker.
@@ -33,7 +33,7 @@
 ## 4. Local execution and policy integration
 
 - [ ] 4.1 Add engine-owned operation approval, reservation/reference accounting, cancellation, and stale-completion protection through existing KV manager paths.
-- [ ] 4.2 Implement retention-aware eviction and explicit local Evict while preserving active references and the feature-disabled path.
+- [x] 4.2 Implement retention-aware eviction and explicit local Evict while preserving active references and the feature-disabled path.
 - [ ] 4.3 Add startup-configured policy/composer interfaces and a common pressure/demand snapshot.
 - [ ] 4.4 Implement the agreed reference policies and scheduler-cooperation extension.
 - [ ] 4.5 Verify deduplicated work, competing capacity requests, declaration independence, and pressure-induced deferral.
