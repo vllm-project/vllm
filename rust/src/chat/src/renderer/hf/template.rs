@@ -8,18 +8,22 @@
 //! - special tokens are wired to `vllm_text::backends::hf::HfSpecialTokens`
 
 use std::collections::HashMap;
+use std::error::Error as _;
 use std::fs;
+use std::iter;
 use std::path::Path;
 
-use minijinja::Environment;
+use minijinja::{Environment, Error as MinijinjaError, ErrorKind, Value};
 use serde::{Deserialize, Serialize};
 use serde_json::{self};
+use thiserror::Error as ThisError;
 use vllm_text::backend::hf::HfSpecialTokens;
 
 use super::error::TemplateError;
 use super::format::{
     ChatTemplateContentFormat, ChatTemplateContentFormatOption, detect_chat_template_content_format,
 };
+use super::generation::{render_generation, rewrite_generation_blocks};
 use super::tojson::hf_tojson_filter;
 use crate::renderer::hf::{TemplateMessage, TemplateTool};
 
@@ -36,14 +40,49 @@ fn build_environment(template: String) -> Result<Environment<'static>> {
 
     env.set_unknown_method_callback(minijinja_contrib::pycompat::unknown_method_callback);
     env.add_filter("tojson", hf_tojson_filter);
+    env.add_function("__hf_generation", render_generation);
+    env.add_function("raise_exception", raise_exception);
 
     Ok(env)
+}
+
+/// Error source attached by [`raise_exception`], so that an exception thrown
+/// by the template can be told apart from a template that fails to render.
+#[derive(Debug, ThisError)]
+#[error("{message}")]
+struct ThrownTemplateException {
+    message: String,
+}
+
+/// Throw an exception with the template's own message, aborting rendering.
+fn raise_exception(message: Value) -> std::result::Result<Value, MinijinjaError> {
+    let thrown = ThrownTemplateException {
+        message: message.to_string(),
+    };
+    let error = MinijinjaError::new(
+        ErrorKind::InvalidOperation,
+        "chat template threw an exception",
+    );
+    Err(error.with_source(thrown))
+}
+
+impl TemplateError {
+    /// Return the template's own message if rendering was aborted by
+    /// [`raise_exception`].
+    pub(super) fn thrown_message(&self) -> Option<&str> {
+        let Self::Jinja(error) = self else {
+            return None;
+        };
+        iter::successors(error.source(), |&error| error.source())
+            .find_map(|error| error.downcast_ref::<ThrownTemplateException>())
+            .map(|thrown| thrown.message.as_str())
+    }
 }
 
 #[serde_with::skip_serializing_none]
 #[derive(Default, Serialize)]
 pub(super) struct TemplateContext<'a> {
-    pub(super) messages: &'a [TemplateMessage],
+    pub(super) messages: &'a [TemplateMessage<'a>],
     pub(super) add_generation_prompt: bool,
     pub(super) continue_final_message: bool,
     pub(super) tools: Option<&'a [TemplateTool]>,
@@ -107,6 +146,7 @@ pub(super) struct CompiledChatTemplate {
 impl CompiledChatTemplate {
     /// Compile the given chat template string into a [`CompiledChatTemplate`].
     pub fn new(template: String, content_format: ChatTemplateContentFormatOption) -> Result<Self> {
+        let template = rewrite_generation_blocks(template)?;
         let content_format = match content_format {
             ChatTemplateContentFormatOption::Auto => detect_chat_template_content_format(&template),
             ChatTemplateContentFormatOption::String => ChatTemplateContentFormat::String,
@@ -183,6 +223,59 @@ mod tests {
         assert!(
             err.contains("failed to render jinja template"),
             "Error should explain parse failure, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_raise_exception_returns_template_message() {
+        let template = CompiledChatTemplate::new(
+            "{{- raise_exception('Unexpected reasoning effort ' ~ reasoning_effort ~ '.') }}"
+                .to_string(),
+            ChatTemplateContentFormatOption::Auto,
+        )
+        .unwrap();
+        let mut kwargs = HashMap::new();
+        kwargs.insert("reasoning_effort".to_string(), serde_json::json!("high"));
+
+        let error = template
+            .apply(TemplateContext {
+                template_kwargs: Some(&kwargs),
+                ..Default::default()
+            })
+            .unwrap_err();
+
+        assert_eq!(
+            error.thrown_message(),
+            Some("Unexpected reasoning effort high."),
+            "expected an exception thrown by the template, got: {error:?}"
+        );
+    }
+
+    #[test]
+    fn test_raise_exception_in_untaken_branch_renders() {
+        let template = CompiledChatTemplate::new(
+            "{% if messages %}{{ raise_exception('unreachable') }}{% endif %}ok".to_string(),
+            ChatTemplateContentFormatOption::Auto,
+        )
+        .unwrap();
+
+        assert_eq!(template.apply(TemplateContext::default()).unwrap(), "ok");
+    }
+
+    #[test]
+    fn test_unknown_function_is_not_reported_as_thrown() {
+        let template = CompiledChatTemplate::new(
+            "{{ undefined_helper('not registered') }}".to_string(),
+            ChatTemplateContentFormatOption::Auto,
+        )
+        .unwrap();
+
+        let error = template.apply(TemplateContext::default()).unwrap_err();
+
+        assert_eq!(
+            error.thrown_message(),
+            None,
+            "expected a jinja render error, got: {error:?}"
         );
     }
 

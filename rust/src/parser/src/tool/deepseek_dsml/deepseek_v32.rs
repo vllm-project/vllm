@@ -194,6 +194,34 @@ mod tests {
     }
 
     #[test]
+    fn deepseek_v32_parse_complete_keeps_parameter_without_string_attr() {
+        // The model sometimes omits `string="..."`; the parameter must still
+        // be kept and converted through the schema, like `string="false"`.
+        let mut parser = DeepSeekV32ToolParser::new(&test_tools());
+        let output = parser
+            .parse_complete(
+                "<｜DSML｜function_calls>\n\
+                 <｜DSML｜invoke name=\"convert\">\n\
+                 <｜DSML｜parameter name=\"whole\">5.0</｜DSML｜parameter>\n\
+                 <｜DSML｜parameter name=\"flag\" >true</｜DSML｜parameter>\n\
+                 <｜DSML｜parameter name=\"payload\" string=\"true\">{\"nested\":true}</｜DSML｜parameter>\n\
+                 </｜DSML｜invoke>\n\
+                 </｜DSML｜function_calls>",
+            )
+            .unwrap();
+
+        assert_eq!(output.calls().len(), 1);
+        assert_eq!(
+            serde_json::from_str::<Value>(&output.calls()[0].arguments).unwrap(),
+            json!({
+                "whole": 5.0,
+                "flag": true,
+                "payload": "{\"nested\":true}",
+            })
+        );
+    }
+
+    #[test]
     fn deepseek_v32_parse_complete_preserves_raw_closing_tag_text_in_parameter_value() {
         let mut parser = DeepSeekV32ToolParser::new(&test_tools());
         let output = parser

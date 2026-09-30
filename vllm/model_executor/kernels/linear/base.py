@@ -50,6 +50,7 @@ class Params:
         # Access typed parameters
         output = func(input, params.weight, params.weight_scale)
         ```
+
     """
 
     weight: torch.Tensor
@@ -72,7 +73,7 @@ class Params:
 
 @dataclass
 class FP8Params(Params):
-    """FP8 layer parameters with typed fields"""
+    """FP8 layer parameters with typed fields."""
 
     input_scale_ub: torch.Tensor | None
 
@@ -80,7 +81,7 @@ class FP8Params(Params):
 
     @classmethod
     def from_layer(cls, layer: torch.nn.Module) -> "FP8Params":
-        """Extract parameters from layer"""
+        """Extract parameters from layer."""
         return cls(
             weight=getattr(layer, cls.WEIGHT),
             weight_scale=getattr(layer, cls.WEIGHT_SCALE),
@@ -163,6 +164,7 @@ class MMLinearKernel(ABC, Generic[_ConfigT, _ParamsT]):
         2. Initialization: __init__() creates kernel instance with config
         3. Weight loading: process_weights_after_loading() preprocesses weights
         4. Inference: apply_weights() executes the quantized matmul
+
     """
 
     @classmethod
@@ -184,6 +186,7 @@ class MMLinearKernel(ABC, Generic[_ConfigT, _ParamsT]):
             A tuple of (is_supported, reason):
                 - is_supported: True if the kernel can run on this hardware
                 - reason: If not supported, a string explaining why; otherwise None
+
         """
         raise NotImplementedError
 
@@ -204,7 +207,7 @@ class MMLinearKernel(ABC, Generic[_ConfigT, _ParamsT]):
             A tuple of (can_implement, reason):
                 - can_implement: True if this kernel supports the config
                 - reason: If not supported, a string explaining why; otherwise None
-            ```
+
         """
         raise NotImplementedError
 
@@ -214,6 +217,7 @@ class MMLinearKernel(ABC, Generic[_ConfigT, _ParamsT]):
         Args:
             config: Kernel-specific configuration containing settings like
                    quantization keys, output dtypes, etc.
+
         """
         self.config = config
 
@@ -245,6 +249,7 @@ class MMLinearKernel(ABC, Generic[_ConfigT, _ParamsT]):
                 weight_reordered = reorder_weights(params.weight)
                 replace_parameter(layer, params.WEIGHT, weight_reordered)
             ```
+
         """
         raise NotImplementedError
 
@@ -270,6 +275,7 @@ class MMLinearKernel(ABC, Generic[_ConfigT, _ParamsT]):
             def _get_layer_params(self, layer, **kwargs):
                 return MyKernelParams.from_layer(layer)
             ```
+
         """
         raise NotImplementedError
 
@@ -281,6 +287,7 @@ class MMLinearKernel(ABC, Generic[_ConfigT, _ParamsT]):
 
         Returns:
             Number of tokens to pad, or None for no padding (default)
+
         """
         return None
 
@@ -306,5 +313,6 @@ class MMLinearKernel(ABC, Generic[_ConfigT, _ParamsT]):
 
         Returns:
             Output tensor of shape [..., out_features]
+
         """
         raise NotImplementedError

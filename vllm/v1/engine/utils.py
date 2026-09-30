@@ -124,6 +124,31 @@ def _get_bundle_node_ip(bundle: dict[str, float]) -> str:
     raise ValueError(f"Missing node affinity in placement bundle: {bundle}")
 
 
+def _dp_nodes_master_first(
+    available_resources: dict[str, dict], dp_master_ip: str
+) -> list[tuple[str, dict]]:
+    """Live Ray nodes as ``(node_id, resources)`` with the DP master first.
+
+    The master is found through the ``node:<ip>`` resource Ray sets on every
+    node, so this works with the resource maps from ``ray._private.state``.
+    Do not replace it with ``ray.util.state.list_nodes()``: that API goes
+    through the dashboard HTTP server and only exists with ``ray[default]``
+    (see #23822).
+    """
+    master_key = f"node:{dp_master_ip}"
+    nodes = sorted(
+        available_resources.items(), key=lambda item: master_key not in item[1]
+    )
+    assert len(nodes) > 0, "No nodes with resources found in Ray cluster."
+    assert master_key in nodes[0][1], (
+        f"The DP master node (ip: {dp_master_ip}) is missing or dead"
+    )
+    assert len(nodes) == 1 or master_key not in nodes[1][1], (
+        "There can only be one head node"
+    )
+    return nodes
+
+
 def _node_ip_from_resources(node_resources: dict) -> str | None:
     """Return the node IP encoded in a Ray per-node resource dict, or None.
 
@@ -142,8 +167,7 @@ def _node_ip_from_resources(node_resources: dict) -> str | None:
 
 
 class CoreEngineProcManager:
-    """
-    Utility class to handle creation, readiness, and shutdown
+    """Utility class to handle creation, readiness, and shutdown
     of background processes used by the AsyncLLM and LLMEngine.
     """
 
@@ -255,7 +279,6 @@ class CoreEngineProcManager:
 
     def monitor_engine_liveness(self) -> None:
         """Monitor engine core process liveness."""
-
         sentinel_to_proc = {proc.sentinel: proc for proc in self.processes}
         sentinels = set(sentinel_to_proc.keys())
 
@@ -316,8 +339,7 @@ def set_assigned_physical_gpu_ids_for_dp_rank(
     local_dp_rank: int,
     user_assigned_gpu_ids: list[int] | None = None,
 ) -> None:
-    """
-    Populate assigned_physical_gpu_ids on the config for the given DP rank.
+    """Populate assigned_physical_gpu_ids on the config for the given DP rank.
 
     user_assigned_gpu_ids is the full (un-sharded) --device-ids list, if the
     user provided one; this DP rank's shard is sliced from it. It is passed
@@ -345,8 +367,7 @@ def get_physical_gpu_ids_for_local_dp_rank(
     local_world_size: int | None = None,
     user_assigned_gpu_ids: list[int] | None = None,
 ) -> list[int]:
-    """
-    Returns list of physical GPU IDs for the specified
+    """Returns list of physical GPU IDs for the specified
     data parallel rank.
 
     For example, if world_size=2 and local_dp_rank=1, and there are 4 devices,
@@ -399,8 +420,7 @@ def _apply_dp_identity_suffix(dp_vllm_config, dp_rank: int) -> None:
 
 
 class CoreEngineActorManager:
-    """
-    Utility class to handle creation, readiness, and shutdown
+    """Utility class to handle creation, readiness, and shutdown
     of core engine Ray actors used by the AsyncLLM and LLMEngine.
 
     Different from CoreEngineProcManager, this class manages
@@ -552,10 +572,7 @@ class CoreEngineActorManager:
     def create_dp_placement_groups(
         vllm_config: VllmConfig,
     ) -> tuple[list["PlacementGroup"], list[int]]:
-        """
-        Create placement groups for data parallel.
-        """
-
+        """Create placement groups for data parallel."""
         import ray
         from ray._private.state import available_resources_per_node
 
@@ -569,14 +586,12 @@ class CoreEngineActorManager:
         placement_groups: list[PlacementGroup] = []
         local_dp_ranks: list[int] = []
 
-        dp_master_ip_key = f"node:{dp_master_ip}"
-        nodes = sorted(
-            available_resources.values(), key=lambda x: dp_master_ip_key not in x
-        )
-        assert len(nodes) > 0, "No nodes with resources found in Ray cluster."
-        assert dp_master_ip_key in nodes[0], (
-            f"The DP master node (ip: {dp_master_ip}) is missing or dead"
-        )
+        nodes = [
+            node_resources
+            for _, node_resources in _dp_nodes_master_first(
+                available_resources, dp_master_ip
+            )
+        ]
 
         # optionally restrict DP placement to a caller-provided node set.
         requested_node_ips = {
@@ -769,15 +784,12 @@ class CoreEngineActorManager:
     def add_dp_placement_groups(
         old_vllm_config: VllmConfig, new_data_parallel_size: int
     ) -> tuple[list["PlacementGroup"], list[int]]:
-        """
-        Add placement groups for new data parallel size.
-        """
+        """Add placement groups for new data parallel size."""
         import ray
         from ray._private.state import (
             available_resources_per_node,
             total_resources_per_node,
         )
-        from ray.util.state import list_nodes
 
         old_dp_size = old_vllm_config.parallel_config.data_parallel_size
         num_pg_to_create = new_data_parallel_size - old_dp_size
@@ -788,30 +800,27 @@ class CoreEngineActorManager:
         dp_master_ip = old_vllm_config.parallel_config.data_parallel_master_ip
         world_size = old_vllm_config.parallel_config.world_size
 
-        nodes = list_nodes()
-        nodes = sorted(nodes, key=lambda node: node.node_ip != dp_master_ip)
-        assert nodes[0].node_ip == dp_master_ip, "The first node must be the head node"
-        assert len(nodes) == 1 or nodes[1].node_ip != dp_master_ip, (
-            "There can only be one head node"
-        )
-
+        # Both maps are keyed by node id and only contain live nodes.
         available_resources = available_resources_per_node()
         total_resources = total_resources_per_node()
+        nodes = _dp_nodes_master_first(available_resources, dp_master_ip)
 
         placement_groups = []
         local_dp_ranks = []
         num_pg_created = 0
 
         device_str = current_platform.ray_device_key
-        for node in nodes:
+        for node_id, node_resources in nodes:
             if num_pg_created >= num_pg_to_create:
                 break
 
-            node_ip = node.node_ip
-            node_id = node.node_id
-            if device_str not in available_resources[node_id]:
+            node_ip = _node_ip_from_resources(node_resources)
+            assert node_ip is not None, (
+                f"No node IP key found in node resources: {node_resources}"
+            )
+            if device_str not in node_resources:
                 continue
-            available_gpus = int(available_resources[node_id][device_str])
+            available_gpus = int(node_resources[device_str])
 
             # Get total GPUs on this node from the node's resources
             # Ray stores node resources with node ID as key
@@ -1108,7 +1117,6 @@ def launch_core_engines(
     addresses: EngineZmqAddresses,
 ) -> Iterator[CoreEngineLaunch]:
     """Launch engine and DP coordinator processes as needed."""
-
     parallel_config = vllm_config.parallel_config
     dp_size = parallel_config.data_parallel_size
     local_engine_count = parallel_config.data_parallel_size_local
@@ -1139,6 +1147,7 @@ def launch_core_engines(
         coordinator = DPCoordinator(
             parallel_config,
             enable_wave_coordination=vllm_config.model_config.is_moe,
+            logging_config=vllm_config.logging_config,
         )
 
         addresses.coordinator_input, addresses.coordinator_output = (
