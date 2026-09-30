@@ -24,37 +24,6 @@ RUN_AFTER_HEALTH="${RUN_AFTER_HEALTH:-accuracy}"   # bench | accuracy
 DRY_RUN="${DRY_RUN:-0}"
 MORIIO_READ_MODE="${MORIIO_READ_MODE:-0}"   # 0 -> prefill writes (default); 1 -> decode reads KV (read_mode)
 
-# ---- pinned MoRI rebuild --------------------------------------------------
-# install_mori.sh clones and builds MoRI inside the container. It runs as the
-# same unprivileged user as everything else -- running the container as root
-# would let it write /app, but /data is NFS and squashes container root to an
-# anonymous uid that cannot write LOG_PATH, so the servers fail to start.
-# Instead give the build the three writable paths it needs, and only for the
-# runs that rebuild (same gate as install_mori.sh):
-#   /app/mori       tmpfs, because /app is root-owned in the image
-#   CCACHE_DIR      the image pins ccache to /root/.cache/ccache
-#   PYTHONUSERBASE  install prefix, since dist-packages is root-owned; it
-#                   precedes dist-packages on sys.path so the build wins
-# MORI_JIT_CACHE_DIR goes container-local too: the kernels this MoRI compiles
-# must not be reloaded by a later run using the image's MoRI.
-if [ "${MORI_SKIP_REINSTALL:-0}" = "1" ]; then
-    MORI_REBUILD=0
-elif [ "${MORI_REINSTALL_FORCE:-0}" = "1" ] ||
-     { [ "$WIDE_EP_MODE" = "1" ] && [ "$xP" = "2" ] && [ "$yD" = "2" ]; }; then
-    MORI_REBUILD=1
-else
-    MORI_REBUILD=0
-fi
-MORI_DOCKER_ARGS=()
-if [ "$MORI_REBUILD" = "1" ]; then
-    MORI_DOCKER_ARGS=(
-        --tmpfs "/app/mori:rw,mode=0755,uid=$(id -u),gid=$(id -g),size=${MORI_TMPFS_SIZE:-8g}"
-        -e CCACHE_DIR=/tmp/ccache
-        -e PYTHONUSERBASE=/tmp/mori_pyuser
-        -e MORI_JIT_CACHE_DIR=/tmp/mori_jit
-    )
-fi
-
 # ---- router / gateway (host-side; also forwarded into the container) --------
 # vllm-router -> external `vllm/vllm-router` container started on the rank-0 node (default)
 # proxy       -> in-container MoRIIO proxy (no extra container)
@@ -91,20 +60,6 @@ echo "$DISAGG_SCRIPTS_DIR"
 # In-container path the scripts are mounted to (and sourced from).
 CONTAINER_SCRIPTS="${CONTAINER_SCRIPTS:-/vllm-workspace/.buildkite/amd-disagg}"
 CLUSTER_ENV_IN="${CLUSTER_ENV_IN:-${CONTAINER_SCRIPTS}/cluster.sh}"
-
-# Overlay the staged vLLM fix onto the image's copy for the runs that also swap
-# MoRI, so the pinned MoRI and the caller fix it requires travel together.
-# install_mori.sh re-checks this inside the container: if the image ever moves
-# site-packages this mount lands on a path nothing imports, and a silent no-op
-# would surface much later as MoRI's combine() guard firing mid-run.
-VLLM_DIST_PACKAGES="${VLLM_DIST_PACKAGES:-/usr/local/lib/python3.12/dist-packages}"
-_mori_pf_overlay="${DISAGG_SCRIPTS_DIR}/overlays/fused_moe_prepare_finalize_mori.py"
-if [ "$MORI_REBUILD" = "1" ] && [ -f "$_mori_pf_overlay" ]; then
-    MORI_DOCKER_ARGS+=(
-        -v "${_mori_pf_overlay}:${VLLM_DIST_PACKAGES}/vllm/model_executor/layers/fused_moe/prepare_finalize/mori.py:ro"
-    )
-    echo "[disagg-pd] vLLM overlay: prepare_finalize/mori.py (mori#475 combine fix)"
-fi
 
 
 # Health endpoints (TP-mode ports from cluster.sh defaults).
@@ -207,7 +162,6 @@ echo "SLURM_NTASKS: $SLURM_NTASKS"
 echo "SLURM_TASKS_PER_NODE: $SLURM_TASKS_PER_NODE"
 echo "SLURM_JOB_CPUS_PER_NODE: $SLURM_JOB_CPUS_PER_NODE"
 echo "SLURM_JOB_PARTITION: $SLURM_JOB_PARTITION"
-echo "MoRI rebuild: $([ "$MORI_REBUILD" = "1" ] && echo "yes -> clone+build at ${MORI_SRC:-/app/mori} (tmpfs)" || echo "no (using the image's MoRI)")"
 echo "SLURM_JOB_NUM_NODES: $SLURM_JOB_NUM_NODES"
 echo "SLURM_JOBID: $SLURM_JOBID"
 echo "SLURM_JOB_QOS: $SLURM_JOB_QOS"
@@ -279,8 +233,6 @@ echo "[disagg-pd] LOG_PATH=$LOG_PATH"
 export IPADDRS
 
 export WIDE_EP_MODE xP yD GPUS_PER_NODE RUN_AFTER_HEALTH HEALTH_TIMEOUT_S DRY_RUN MORIIO_READ_MODE
-# Pinned MoRI rebuild (install_mori.sh); only acts on WIDE_EP_MODE=1 xP=2 yD=2.
-export MORI_COMMIT MORI_REPO MORI_REINSTALL_FORCE MORI_SKIP_REINSTALL
 export IMAGE SHARED_MOUNT CONTAINER_SCRIPTS DISAGG_SCRIPTS_DIR
 export CLUSTER_ENV="${CLUSTER_ENV_IN}"
 export DOCKER_CONT_NAME="vllm_disagg_${MODEL_NAME:-model}_${SLURM_JOB_ID}"
@@ -535,7 +487,6 @@ run_node_container() {
 
     docker run --rm \
 	--user "$(id -u):$(id -g)" \
-        "${MORI_DOCKER_ARGS[@]}" \
         --device /dev/dri \
         --device /dev/kfd \
         --device /dev/infiniband \
@@ -577,11 +528,6 @@ run_node_container() {
         -e HEALTH_TIMEOUT_S="$HEALTH_TIMEOUT_S" \
         -e DRY_RUN="$DRY_RUN" \
         -e MORIIO_READ_MODE="$MORIIO_READ_MODE" \
-        -e MORI_COMMIT="${MORI_COMMIT:-}" \
-        -e MORI_REPO="${MORI_REPO:-}" \
-        -e MORI_SRC="${MORI_SRC:-}" \
-        -e MORI_REINSTALL_FORCE="${MORI_REINSTALL_FORCE:-}" \
-        -e MORI_SKIP_REINSTALL="${MORI_SKIP_REINSTALL:-}" \
         -e ROUTER_TYPE="$ROUTER_TYPE" \
         -e ROUTER_PORT="$ROUTER_PORT" \
         -e ROUTER_POLICY="$ROUTER_POLICY" \
