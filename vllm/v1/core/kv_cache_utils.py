@@ -502,8 +502,8 @@ def _gen_mm_extra_hash_keys(
 ) -> tuple[list[Any], int]:
     """Generate extra keys related to MultiModal request for block hash
     computation. For multi-modal inputs, the extra keys are
-    (mm_hash, start_offset) that indicate a mm input contained in the
-    block and its starting offset in the block tokens.
+    ("mm", mm_hash, start_offset) tuples that indicate a mm input contained
+    in the block and its starting offset in the block tokens.
 
     Args:
         request: The request object.
@@ -549,7 +549,7 @@ def _gen_mm_extra_hash_keys(
             # relative to the start of the block so prefix-cache keys stay
             # distinct when the same MM item appears at different positions
             # within otherwise-identical placeholder blocks.
-            extra_keys.append((mm_feature.identifier, offset - start_token_idx))
+            extra_keys.append(("mm", mm_feature.identifier, offset - start_token_idx))
 
             if end_token_idx >= offset + length:
                 # If this block contains the end of the current mm input,
@@ -565,7 +565,7 @@ def _gen_mm_extra_hash_keys(
     return extra_keys, curr_mm_idx
 
 
-def _gen_lora_extra_hash_keys(request: Request) -> list[str]:
+def _gen_lora_extra_hash_keys(request: Request) -> list[tuple[str, str]]:
     """Generate extra keys related to LoRA for block hash computation.
 
     Args:
@@ -578,12 +578,12 @@ def _gen_lora_extra_hash_keys(request: Request) -> list[str]:
     """
     if not request.lora_request:
         return []
-    return [request.lora_request.lora_name]
+    return [("lora", request.lora_request.lora_name)]
 
 
 def _gen_prompt_embeds_extra_hash_keys(
     request: Request, start_token_idx: int, end_token_idx: int
-) -> list[bytes]:
+) -> list[tuple[str, bytes]]:
     """Generate extra keys related to prompt embeds for block hash computation.
 
     Args:
@@ -605,7 +605,7 @@ def _gen_prompt_embeds_extra_hash_keys(
         # Hash prompt embeds once per block and cache on request
         embeds_hash = hashlib.sha256(tensor_data(block_prompt_embeds)).digest()
         request._prompt_embeds_per_block_hashes[block_range] = embeds_hash
-    return [embeds_hash]
+    return [("prompt_embeds", embeds_hash)]
 
 
 def generate_block_hash_extra_keys(
@@ -629,9 +629,11 @@ def generate_block_hash_extra_keys(
     mm_extra_keys, new_start_mm_idx = _gen_mm_extra_hash_keys(
         request, start_token_idx, end_token_idx, start_mm_idx
     )
-    lora_extra_keys: list[str] = _gen_lora_extra_hash_keys(request)
-    cache_salt_keys: list[str] = (
-        [request.cache_salt] if (start_token_idx == 0 and request.cache_salt) else []
+    lora_extra_keys = _gen_lora_extra_hash_keys(request)
+    cache_salt_keys: list[tuple[str, str]] = (
+        [("cache_salt", request.cache_salt)]
+        if (start_token_idx == 0 and request.cache_salt)
+        else []
     )
     prompt_embeds_keys = _gen_prompt_embeds_extra_hash_keys(
         request, start_token_idx, end_token_idx
@@ -645,6 +647,35 @@ def generate_block_hash_extra_keys(
         return None, new_start_mm_idx
 
     return tuple(extra_keys), new_start_mm_idx
+
+
+def to_event_extra_keys(
+    extra_keys: Iterable[tuple[Any, ...] | None] | None,
+) -> list[tuple[Any, ...] | None] | None:
+    """Convert block-hash extra keys to the untagged per-block list published
+    in KV events.
+
+    External KV event consumers parse the pre-tagging shapes: bare LoRA names
+    and cache salts, ``(mm_identifier, offset)`` pairs and bare prompt-embeds
+    digests. Events keep that format until consumers handle the tagged keys.
+
+    Args:
+        extra_keys: One entry per block, each as returned by
+            `generate_block_hash_extra_keys`, or None.
+
+    Returns:
+        One untagged entry per block, or None if there are no entries.
+
+    """
+    if not extra_keys:
+        return None
+    event_keys = [
+        None
+        if keys is None
+        else tuple(key[1:] if key[0] == "mm" else key[1] for key in keys)
+        for keys in extra_keys
+    ]
+    return event_keys or None
 
 
 def hash_block_tokens(
@@ -714,7 +745,9 @@ def resolve_kv_cache_block_sizes(
       group's effective block size. Attention groups are scaled by DCP;
       Mamba groups keep their full per-rank state and are not scaled.
     - ``hash_block_size`` is the granularity at which ``Request.block_hashes``
-      is computed. Single group: equals scheduler block size. Multiple groups:
+      is computed. Single group: equals scheduler block size, and any other
+      ``cache_config.prefix_match_unit`` is rejected while block hashing is
+      active. Multiple groups:
       ``cache_config.prefix_match_unit`` override if set, else the GCD of
       group block sizes; every group's block size must be divisible by it.
       Returns the scheduler block size (i.e. disables finer hashing) if block
@@ -728,6 +761,21 @@ def resolve_kv_cache_block_sizes(
         if groups and not groups[0].kv_cache_spec.dcp_sharded:
             dcp = 1
         bs = cache_config.block_size * dcp
+        # The Mamba prefill checkpoint builder reads prefix_match_unit directly,
+        # so a value dropped here puts its checkpoints off the scheduler's grid.
+        if (
+            cache_config.prefix_match_unit not in (None, bs)
+            and len(groups) == 1
+            and (
+                cache_config.enable_prefix_caching
+                or vllm_config.kv_transfer_config is not None
+            )
+        ):
+            raise ValueError(
+                f"Invalid prefix_match_unit={cache_config.prefix_match_unit}; "
+                "with a single KV cache group, prefix-cache hits land on the "
+                f"block size ({bs}). Unset it or set it to {bs}."
+            )
         return bs, bs
 
     group_block_sizes = [

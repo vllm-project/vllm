@@ -8,7 +8,7 @@ accelerate==1.13.0
     # via peft
 aiohappyeyeballs==2.6.1
     # via aiohttp
-aiohttp==3.13.3
+aiohttp==3.14.3
     # via
     #   -c requirements/common.txt
     #   -r requirements/test/../common.txt
@@ -170,7 +170,7 @@ cupy-cuda12x==13.6.0
     # via ray
 cycler==0.12.1
     # via matplotlib
-datamodel-code-generator==0.26.3
+datamodel-code-generator==0.79.0
     # via -r requirements/test/cuda.in
 dataproperty==1.0.1
     # via
@@ -186,6 +186,8 @@ decorator==5.1.1
     # via librosa
 decord==0.6.0
     # via -r requirements/test/cuda.in
+defusedxml==0.7.1
+    # via nltk
 depyf==0.20.0
     # via
     #   -c requirements/common.txt
@@ -567,8 +569,10 @@ networkx==3.2.1
     #   torch
 ninja==1.13.0
     # via -r requirements/test/../common.txt
-nltk==3.9.1
-    # via rouge-score
+nltk==3.10.3
+    # via
+    #   -r requirements/test/cuda.in
+    #   rouge-score
 num2words==0.5.14
     # via -r requirements/test/cuda.in
 numba==0.65.0
@@ -743,7 +747,6 @@ packaging==24.2
     # via
     #   accelerate
     #   black
-    #   datamodel-code-generator
     #   datasets
     #   evaluate
     #   fastparquet
@@ -784,8 +787,9 @@ perceptron==0.1.4
     # via -r requirements/test/cuda.in
 perf-analyzer==0.1.0
     # via genai-perf
-pillow==10.4.0
+pillow==12.3.0
     # via
+    #   -c requirements/common.txt
     #   -r requirements/test/../common.txt
     #   genai-perf
     #   imagehash
@@ -1341,6 +1345,7 @@ typing-extensions==4.15.0
     # via
     #   -c requirements/common.txt
     #   -r requirements/test/../common.txt
+    #   aiohttp
     #   aiosignal
     #   albumentations
     #   alembic
@@ -1429,7 +1434,7 @@ word2number==1.1
     # via lm-eval
 wrapt==1.17.2
     # via smart-open
-xgrammar==0.2.7
+xgrammar==0.2.8
     # via
     #   -c requirements/common.txt
     #   -r requirements/test/../common.txt
