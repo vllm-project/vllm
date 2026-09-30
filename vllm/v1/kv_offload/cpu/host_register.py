@@ -11,10 +11,23 @@ still run correctly, just as pageable (slower) copies.
 
 import torch
 
+from vllm.distributed.device_communicators.cuda_wrapper import CudaRTLibrary
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
+
+
+def _load_cudart() -> CudaRTLibrary | None:
+    try:
+        return CudaRTLibrary()
+    except (AssertionError, AttributeError, OSError):
+        logger.warning(
+            "Could not load the CUDA runtime for host registration; "
+            "the offload region stays pageable",
+            exc_info=True,
+        )
+        return None
 
 
 def host_register(ptr: int, num_bytes: int) -> bool:
@@ -32,12 +45,16 @@ def host_register(ptr: int, num_bytes: int) -> bool:
         return False
 
     if current_platform.is_cuda_alike():
-        result = torch.cuda.cudart().cudaHostRegister(ptr, num_bytes, 0)
-        if result.value != 0:
+        cudart = _load_cudart()
+        if cudart is None:
+            return False
+        result = cudart.cudaHostRegister(ptr, num_bytes)
+        if result != 0:
+            cudart.cudaGetLastError()
             logger.warning(
                 "cudaHostRegister failed (code=%d) — transfers will still work "
                 "but may be slower (unpinned DMA)",
-                result.value,
+                result,
             )
             return False
         return True
@@ -65,9 +82,13 @@ def host_unregister(ptr: int) -> None:
         return
 
     if current_platform.is_cuda_alike():
-        result = torch.cuda.cudart().cudaHostUnregister(ptr)
-        if result.value != 0:
-            logger.warning("cudaHostUnregister failed (code=%d)", result.value)
+        cudart = _load_cudart()
+        if cudart is None:
+            return
+        result = cudart.cudaHostUnregister(ptr)
+        if result != 0:
+            cudart.cudaGetLastError()
+            logger.warning("cudaHostUnregister failed (code=%d)", result)
         return
 
     if current_platform.is_xpu():
