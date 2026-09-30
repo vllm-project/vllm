@@ -23,6 +23,26 @@ fn log_failed_requests(outputs: &[RequestFuncOutput]) {
     }
 }
 
+fn calculate_max_concurrency(outputs: &[&RequestFuncOutput]) -> usize {
+    let mut events = Vec::with_capacity(outputs.len() * 2);
+    for output in outputs {
+        if output.latency <= 0.0 {
+            continue;
+        }
+        events.push((output.start_time, 1_i64));
+        events.push((output.start_time + output.latency, -1_i64));
+    }
+    events.sort_by(|left, right| left.0.total_cmp(&right.0).then_with(|| left.1.cmp(&right.1)));
+
+    let mut active = 0_i64;
+    let mut peak = 0_i64;
+    for (_, delta) in events {
+        active += delta;
+        peak = peak.max(active);
+    }
+    peak as usize
+}
+
 /// Calculate benchmark metrics from request outputs.
 ///
 /// Mirrors Python's `calculate_metrics()` from serve.py:392-599.
@@ -83,10 +103,9 @@ pub fn calculate_metrics(
 
     // Calculate max output tokens per second and max concurrent requests
     let mut max_output_tokens_per_s = 0.0_f64;
-    let mut max_concurrent_requests: usize = 0;
-
     let successful_outputs: Vec<&RequestFuncOutput> =
         outputs.iter().filter(|o| o.success).collect();
+    let max_concurrent_requests = calculate_max_concurrency(&successful_outputs);
 
     if !successful_outputs.is_empty() {
         let min_start_time =
@@ -100,7 +119,6 @@ pub fn calculate_metrics(
         // Cap at 24 hours to prevent OOM from corrupted timing data
         let duration_seconds = raw_duration.min(86_400);
         let mut tokens_per_second = vec![0.0_f64; duration_seconds];
-        let mut concurrent_per_second = vec![0usize; duration_seconds];
 
         for output in &successful_outputs {
             // Calculate token generation timestamps
@@ -118,21 +136,9 @@ pub fn calculate_metrics(
                     tokens_per_second[bucket] += 1.0;
                 }
             }
-
-            // Track concurrent requests
-            let start_second = (output.start_time - min_start_time) as usize;
-            let end_second = ((output.start_time + output.latency) - min_start_time) as usize;
-            for slot in concurrent_per_second
-                .iter_mut()
-                .take(end_second.min(duration_seconds - 1) + 1)
-                .skip(start_second)
-            {
-                *slot += 1;
-            }
         }
 
         max_output_tokens_per_s = tokens_per_second.iter().cloned().fold(0.0_f64, f64::max);
-        max_concurrent_requests = *concurrent_per_second.iter().max().unwrap_or(&0);
     }
 
     let total_output: usize = actual_output_lens.iter().sum();
@@ -313,34 +319,7 @@ pub fn calculate_embedding_metrics(
     // Compute peak concurrent requests from start_time + latency windows
     let successful_outputs: Vec<&RequestFuncOutput> =
         outputs.iter().filter(|o| o.success).collect();
-    let max_concurrent_requests = if !successful_outputs.is_empty() {
-        let min_start =
-            successful_outputs.iter().map(|o| o.start_time).fold(f64::INFINITY, f64::min);
-        let max_end = successful_outputs
-            .iter()
-            .map(|o| o.start_time + o.latency)
-            .fold(f64::NEG_INFINITY, f64::max);
-
-        let raw_duration = (max_end - min_start).ceil() as usize + 1;
-        let duration_seconds = raw_duration.min(86_400);
-        let mut concurrent_per_second = vec![0usize; duration_seconds];
-
-        for output in &successful_outputs {
-            let start_second = (output.start_time - min_start) as usize;
-            let end_second = ((output.start_time + output.latency) - min_start) as usize;
-            for slot in concurrent_per_second
-                .iter_mut()
-                .take(end_second.min(duration_seconds - 1) + 1)
-                .skip(start_second)
-            {
-                *slot += 1;
-            }
-        }
-
-        *concurrent_per_second.iter().max().unwrap_or(&0)
-    } else {
-        0
-    };
+    let max_concurrent_requests = calculate_max_concurrency(&successful_outputs);
 
     let sorted_e2els = sort_clone(&e2els);
 
@@ -479,6 +458,74 @@ pub fn calculate_multi_turn_metrics(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn output(start_time: f64, latency: f64) -> RequestFuncOutput {
+        RequestFuncOutput {
+            success: true,
+            start_time,
+            latency,
+            ..Default::default()
+        }
+    }
+
+    fn outputs(intervals: &[(f64, f64)]) -> Vec<RequestFuncOutput> {
+        intervals.iter().map(|&(start, end)| output(start, end - start)).collect()
+    }
+
+    fn embedding_peak(intervals: &[(f64, f64)]) -> usize {
+        calculate_embedding_metrics(&outputs(intervals), 1.0, &[]).max_concurrent_requests
+    }
+
+    #[test]
+    fn peak_concurrency_uses_half_open_intervals() {
+        assert_eq!(embedding_peak(&[(0.0, 1.0), (1.0, 2.0)]), 1);
+    }
+
+    #[test]
+    fn peak_concurrency_counts_overlapping_requests() {
+        assert_eq!(embedding_peak(&[(0.0, 1.5), (1.0, 2.0)]), 2);
+    }
+
+    #[test]
+    fn peak_concurrency_does_not_bucket_subsecond_requests() {
+        assert_eq!(
+            embedding_peak(&[(0.0, 0.1), (0.2, 0.3), (0.4, 0.5), (0.6, 0.7), (0.8, 0.9),]),
+            1
+        );
+    }
+
+    #[test]
+    fn peak_concurrency_handles_simultaneous_boundary_events() {
+        assert_eq!(
+            embedding_peak(&[(0.0, 1.0), (0.0, 1.0), (1.0, 2.0), (1.0, 2.0), (1.0, 2.0),]),
+            3
+        );
+    }
+
+    #[test]
+    fn peak_concurrency_treats_zero_latency_as_empty() {
+        assert_eq!(embedding_peak(&[(0.0, 0.0)]), 0);
+    }
+
+    #[test]
+    fn generation_and_embedding_metrics_use_the_same_peak() {
+        let intervals = [(0.0, 0.1), (0.2, 0.3), (0.4, 0.5)];
+        let outputs = outputs(&intervals);
+        let inputs = vec![SampleRequest::default(); outputs.len()];
+        let generation = calculate_metrics(
+            &inputs,
+            &outputs,
+            1.0,
+            &[],
+            false,
+            &GoodputConfig::default(),
+        )
+        .0;
+        let embedding = calculate_embedding_metrics(&outputs, 1.0, &[]);
+
+        assert_eq!(generation.max_concurrent_requests, 1);
+        assert_eq!(embedding.max_concurrent_requests, 1);
+    }
 
     #[test]
     fn test_mean_empty() {
