@@ -1153,6 +1153,7 @@ def test_hisparse_cache_handles_join_index_groups_during_construction(monkeypatc
     resolved = hisparse_runtime_module.ResolvedHiSparseConfig(
         top_k=4,
         device_buffer_size=8,
+        max_union_rows=8,
     )
     monkeypatch.setattr(hisparse_runtime_module, "_has_hisparse_ops", lambda: True)
     monkeypatch.setattr(
