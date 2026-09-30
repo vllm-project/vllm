@@ -21,25 +21,25 @@ import torch
 
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.platforms import current_platform
+from vllm.utils.torch_utils import set_random_seed
+
+if not current_platform.is_rocm() or not rocm_aiter_ops.is_tgemm_enabled():
+    pytest.skip(
+        "AITER tuned GEMM not enabled (needs ROCm, AITER linear and gfx950).",
+        allow_module_level=True,
+    )
 
 # (hidden_size, num_experts): GLM-5/5.2, DeepSeek-V3 and Kimi-K2 routers.
 SHAPES = [(6144, 256), (7168, 256), (7168, 384)]
 NUM_TOKENS = [1, 2, 4, 8, 16, 32, 64, 128]
 
-# Error as a fraction of the largest reference logit. Measured worst case for
-# the tuned bf16 kernel across every shape/token count here is 8.8e-3; keep
-# ~2x headroom for kernel-selection changes between AITER versions.
-REL_TO_PEAK = 2e-2
+# The tuned kernels round each of up to MAX_SPLIT_K fp32 partials to bf16 and
+# add them with bf16 atomics: at most MAX_SPLIT_K + 1 bf16 roundings per logit.
+MAX_SPLIT_K = 8
+REL_TO_PEAK = (MAX_SPLIT_K + 1) * 2**-8
 # A top-k membership change needs error on both the promoted and demoted logit,
 # so the tie window is twice the single-value tolerance.
 TIE_REL_TO_PEAK = 2 * REL_TO_PEAK
-
-
-def _requires_aiter_tgemm():
-    if not current_platform.is_rocm():
-        pytest.skip("AITER router GEMM requires ROCm")
-    if not rocm_aiter_ops.is_tgemm_enabled():
-        pytest.skip("AITER tuned GEMM not enabled (needs AITER linear + gfx950)")
 
 
 def _run(x: torch.Tensor, weight: torch.Tensor, out_dtype: torch.dtype):
@@ -66,8 +66,7 @@ def test_matches_reference(
     num_tokens: int, hidden_dim: int, num_experts: int, out_dtype: torch.dtype
 ):
     """bf16 activation x bf16 weight should track a float64 reference."""
-    _requires_aiter_tgemm()
-    torch.manual_seed(42)
+    set_random_seed(42)
     device = torch.device("cuda")
     x = torch.randn(num_tokens, hidden_dim, dtype=torch.bfloat16, device=device)
     weight = torch.randn(num_experts, hidden_dim, dtype=torch.bfloat16, device=device)
@@ -87,11 +86,10 @@ def test_topk_routing_consistency(num_tokens: int, hidden_dim: int, num_experts:
     it changes the selected experts. Experts whose reference logit sits within
     the kernel's error of the k-th value are genuinely tied, so swapping them
     is acceptable; anything outside that window is a real routing bug."""
-    _requires_aiter_tgemm()
     top_k = 8
     device = torch.device("cuda")
     for seed in range(5):
-        torch.manual_seed(1000 + seed)
+        set_random_seed(1000 + seed)
         x = torch.randn(num_tokens, hidden_dim, dtype=torch.bfloat16, device=device)
         weight = torch.randn(
             num_experts, hidden_dim, dtype=torch.bfloat16, device=device
@@ -128,8 +126,7 @@ def test_matches_fp32_fallback(hidden_dim: int, num_experts: int, num_tokens: in
     accumulates over split-K rather than in one fp32 pass, which dominates, and
     the result is rounded to bf16 before the cast.
     """
-    _requires_aiter_tgemm()
-    torch.manual_seed(7)
+    set_random_seed(7)
     device = torch.device("cuda")
     x = torch.randn(num_tokens, hidden_dim, dtype=torch.bfloat16, device=device)
     weight = torch.randn(num_experts, hidden_dim, dtype=torch.bfloat16, device=device)
