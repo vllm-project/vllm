@@ -62,15 +62,16 @@ def _get_token_offs(
     naive_block_assignment: tl.constexpr,
     BLOCK_SIZE_M: tl.constexpr,
 ):
-    """Returns token offsets."""
+    """Returns int64 token offsets; offs_token * stride can exceed int32."""
     if naive_block_assignment:
-        return tl.where(offs == 0, pid_m, num_valid_tokens)
+        offs_token = tl.where(offs == 0, pid_m, num_valid_tokens)
     else:
         offs_token_id = pid_m * BLOCK_SIZE_M + offs
         token_ind = stride_tl * lora_id + offs_token_id
-        return tl.load(
+        offs_token = tl.load(
             sorted_token_ids_ptr + token_ind, token_ind < max_loras * stride_tl, 0
         )
+    return offs_token.to(tl.int64)
 
 
 @triton.jit
@@ -122,7 +123,7 @@ _FUSED_MOE_LORA_ONE_SHOT_MAX_RANK = 128
 
 
 @triton.heuristics({"EVEN_K": lambda args: args["K"] % args["BLOCK_K"] == 0})
-@triton.jit
+@triton.jit(do_not_specialize=["num_valid_tokens", "stride_tl_", "stride_el"])
 def _fused_moe_lora_one_shot_kernel(
     # ---- pointers ----
     x_ptr,
@@ -220,6 +221,8 @@ def _fused_moe_lora_one_shot_kernel(
             mask=token_ind < max_loras * stride_tl_,
             other=num_valid_tokens,
         )
+    # offs_token * stride_om can exceed int32 for large token counts.
+    offs_token = offs_token.to(tl.int64)
     token_mask = offs_token < num_valid_tokens
 
     # N range owned by this program. Splitting [0, N) into NPID_FACTOR
