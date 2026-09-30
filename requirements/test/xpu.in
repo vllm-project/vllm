@@ -65,7 +65,7 @@ cohere>=7.0.0 # required for cohere chat v2 api tests (protocol/serving import c
 # Dependabot GHSA floors for transitive test deps (excl. dependabot.yml ignores).
 urllib3>=2.7.0
 cryptography>=50.0.0
-pyjwt>=2.13.0
+pyjwt>=2.14.0
 pyasn1>=0.6.4
 python-multipart>=0.0.31
 anyio>=4.14.2
