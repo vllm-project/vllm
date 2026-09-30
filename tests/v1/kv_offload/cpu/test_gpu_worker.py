@@ -9,7 +9,6 @@ from unittest.mock import MagicMock
 import pytest
 import torch
 
-from vllm import _custom_ops as ops
 from vllm.platforms import current_platform
 from vllm.utils.math_utils import round_up
 from vllm.utils.torch_utils import set_random_seed
@@ -23,7 +22,11 @@ from vllm.v1.kv_offload.base import (
 )
 from vllm.v1.kv_offload.cpu import copy_backend, gpu_worker
 from vllm.v1.kv_offload.cpu.common import CPULoadStoreSpec
-from vllm.v1.kv_offload.cpu.copy_backend import CopyBackend, CopyBackendAdapter
+from vllm.v1.kv_offload.cpu.copy_backend import (
+    BatchDMABackend,
+    BatchTritonBackend,
+    CopyBackendAdapter,
+)
 from vllm.v1.kv_offload.cpu.gpu_worker import CPUOffloadingWorker
 from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
 
@@ -46,8 +49,8 @@ def test_rocm_cpu_to_gpu_uses_dma(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(copy_backend.current_platform, "is_rocm", lambda: True)
 
     refs = [[CanonicalKVCacheRef(tensor_idx=0, page_size_bytes=512)]]
-    _, swap_blocks = CopyBackendAdapter.resolve(refs, gpu_to_cpu=False)
-    assert swap_blocks is ops.swap_blocks_batch
+    backend = CopyBackendAdapter.resolve(refs, gpu_to_cpu=False)
+    assert isinstance(backend, BatchDMABackend)
 
 
 @pytest.mark.skipif(not copy_backend.HAS_TRITON, reason="Requires Triton")
@@ -58,12 +61,12 @@ def test_unpinned_cpu_to_gpu_uses_dma(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(copy_backend.current_platform, "is_rocm", lambda: False)
 
     refs = [[CanonicalKVCacheRef(tensor_idx=0, page_size_bytes=512)]]
-    _, swap_blocks = CopyBackendAdapter.resolve(refs, gpu_to_cpu=False)
-    assert swap_blocks is not ops.swap_blocks_batch
-    _, swap_blocks = CopyBackendAdapter.resolve(
+    backend = CopyBackendAdapter.resolve(refs, gpu_to_cpu=False)
+    assert isinstance(backend, BatchTritonBackend)
+    backend = CopyBackendAdapter.resolve(
         refs, gpu_to_cpu=False, host_memory_is_pinned=False
     )
-    assert swap_blocks is ops.swap_blocks_batch
+    assert isinstance(backend, BatchDMABackend)
 
 
 @pytest.mark.skipif(not copy_backend.HAS_TRITON, reason="Requires Triton")
@@ -73,11 +76,8 @@ def test_unaligned_canonical_runs_use_dma(monkeypatch: pytest.MonkeyPatch) -> No
 
     refs = [[CanonicalKVCacheRef(tensor_idx=0, page_size_bytes=512)]]
     runs = [[(CopyRun(0, 0, 7, 1, 7, 7),)]]
-    backend, swap_blocks = CopyBackendAdapter.resolve(
-        refs, gpu_to_cpu=False, copy_runs=runs
-    )
-    assert backend is CopyBackend.BATCH_DMA
-    assert swap_blocks is ops.swap_blocks_batch
+    backend = CopyBackendAdapter.resolve(refs, gpu_to_cpu=False, copy_runs=runs)
+    assert isinstance(backend, BatchDMABackend)
 
 
 def test_worker_shutdown_releases_region_and_runs_both_handlers() -> None:

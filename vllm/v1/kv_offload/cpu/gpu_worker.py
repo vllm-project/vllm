@@ -491,14 +491,9 @@ class SingleDirectionOffloadingHandler:
         # from the live GPU KV cache, which the compute stream keeps
         # writing; we must keep STREAM ordering so source reads are gated
         # by the transfer stream's wait_stream(compute) barrier.
-        is_src_access_order_any = not self.gpu_to_cpu
         with current_platform.stream(stream):
             start_event.record(stream)
-            self._backend.submit(
-                job_id,
-                run_descs,
-                is_src_access_order_any=is_src_access_order_any,
-            )
+            self._backend.submit(job_id, run_descs)
             end_event.record(stream)
 
         self._transfer_events[job_id] = end_event
