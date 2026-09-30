@@ -7,7 +7,6 @@ from contextlib import nullcontext
 from copy import deepcopy
 from types import SimpleNamespace
 from typing import TypedDict
-from unittest.mock import patch
 
 import numpy as np
 import pytest
@@ -1628,7 +1627,7 @@ def test_processor_inputs_hashes_distinguish_kwargs_shapes(left, right):
     [(None, 491520, 491520), (True, 491520, 8192), (True, 128, 128), (False, 128, 128)],
 )
 def test_dummy_inputs_scheduler_budget(
-    chunked_prefill, max_model_len, expected_seq_len
+    chunked_prefill, max_model_len, expected_seq_len, monkeypatch
 ):
     ctx = build_model_context(
         "llava-hf/llava-v1.6-mistral-7b-hf",
@@ -1651,8 +1650,10 @@ def test_dummy_inputs_scheduler_budget(
             enable_chunked_prefill=chunked_prefill,
         )
 
-    with patch.object(processor, "apply", return_value={"prompt_token_ids": [7]}):
-        result = processor.get_dummy_mm_inputs(
-            {"image": 1}, scheduler_config=scheduler_config
-        )
+    monkeypatch.setattr(
+        processor, "apply", lambda *args, **kwargs: {"prompt_token_ids": [7]}
+    )
+    result = processor.get_dummy_mm_inputs(
+        {"image": 1}, scheduler_config=scheduler_config
+    )
     assert len(result["prompt_token_ids"]) == expected_seq_len

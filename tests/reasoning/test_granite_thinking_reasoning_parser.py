@@ -1,10 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import TypedDict
+from typing import TypedDict, cast
 
 import pytest
 import regex as re
+from transformers import PreTrainedTokenizerBase
 
 from tests.reasoning.utils import run_reasoning_extraction
 from vllm.entrypoints.openai.chat_completion.protocol import (
@@ -52,8 +53,8 @@ class GraniteThinkingTokenizer:
 
 
 @pytest.fixture
-def tokenizer():
-    return GraniteThinkingTokenizer()
+def tokenizer() -> PreTrainedTokenizerBase:
+    return cast(PreTrainedTokenizerBase, GraniteThinkingTokenizer())
 
 
 # ── Basic reasoning extraction (non-streaming + streaming) ───────────
@@ -173,14 +174,14 @@ def tokenizer():
     ],
 )
 def test_granite_thinking_reasoning(
-    tokenizer: GraniteThinkingTokenizer,
+    tokenizer: PreTrainedTokenizerBase,
     streaming: bool,
     param_dict: ReasoningCase,
 ):
     output = tokenizer.tokenize(param_dict["output"])
     model_output = [tokenizer.convert_tokens_to_string([token]) for token in output]
     parser: ReasoningParser = ReasoningParserManager.get_reasoning_parser(parser_name)(
-        tokenizer  # type: ignore[arg-type]
+        tokenizer
     )
 
     reasoning, content = run_reasoning_extraction(
@@ -195,10 +196,10 @@ def test_granite_thinking_reasoning(
 
 
 def test_granite_thinking_no_content_after_end_token(
-    tokenizer: GraniteThinkingTokenizer,
+    tokenizer: PreTrainedTokenizerBase,
 ):
     parser_cls = ReasoningParserManager.get_reasoning_parser(parser_name)
-    parser = parser_cls(tokenizer)  # type: ignore[arg-type]
+    parser = parser_cls(tokenizer)
 
     reasoning, content = run_reasoning_extraction(
         parser,
@@ -215,11 +216,11 @@ def test_granite_thinking_no_content_after_end_token(
 
 @pytest.mark.parametrize("streaming", [False, True])
 def test_granite_thinking_whitespace_only_content(
-    tokenizer: GraniteThinkingTokenizer,
+    tokenizer: PreTrainedTokenizerBase,
     streaming: bool,
 ):
     parser_cls = ReasoningParserManager.get_reasoning_parser(parser_name)
-    parser = parser_cls(tokenizer)  # type: ignore[arg-type]
+    parser = parser_cls(tokenizer)
 
     reasoning, content = run_reasoning_extraction(
         parser,
@@ -235,10 +236,10 @@ def test_granite_thinking_whitespace_only_content(
 
 
 def test_granite_thinking_unterminated_think_block(
-    tokenizer: GraniteThinkingTokenizer,
+    tokenizer: PreTrainedTokenizerBase,
 ):
     parser_cls = ReasoningParserManager.get_reasoning_parser(parser_name)
-    parser = parser_cls(tokenizer)  # type: ignore[arg-type]
+    parser = parser_cls(tokenizer)
     request = ChatCompletionRequest(
         model="test-model",
         messages=[],
@@ -260,10 +261,10 @@ def test_granite_thinking_unterminated_think_block(
 
 
 def test_granite_thinking_disabled_moves_into_content(
-    tokenizer: GraniteThinkingTokenizer,
+    tokenizer: PreTrainedTokenizerBase,
 ):
     parser_cls = ReasoningParserManager.get_reasoning_parser(parser_name)
-    parser = parser_cls(tokenizer)  # type: ignore[arg-type]
+    parser = parser_cls(tokenizer)
     request = ChatCompletionRequest(
         model="test-model",
         messages=[],
@@ -285,7 +286,7 @@ def test_granite_thinking_disabled_moves_into_content(
 
 
 def test_granite_thinking_disabled_with_leading_newline(
-    tokenizer: GraniteThinkingTokenizer,
+    tokenizer: PreTrainedTokenizerBase,
 ):
     # With enable_thinking=False, model output goes through the swap
     # path: content is initially None (all text classified as
@@ -294,7 +295,7 @@ def test_granite_thinking_disabled_with_leading_newline(
     # enable_thinking=False output has no template-injected \n, so
     # this is a correctness check, not a realistic scenario.
     parser_cls = ReasoningParserManager.get_reasoning_parser(parser_name)
-    parser = parser_cls(tokenizer)  # type: ignore[arg-type]
+    parser = parser_cls(tokenizer)
     request = ChatCompletionRequest(
         model="test-model",
         messages=[],
@@ -316,10 +317,10 @@ def test_granite_thinking_disabled_with_leading_newline(
 
 
 def test_granite_thinking_force_nonempty_content_moves_into_content(
-    tokenizer: GraniteThinkingTokenizer,
+    tokenizer: PreTrainedTokenizerBase,
 ):
     parser_cls = ReasoningParserManager.get_reasoning_parser(parser_name)
-    parser = parser_cls(tokenizer)  # type: ignore[arg-type]
+    parser = parser_cls(tokenizer)
     request = ChatCompletionRequest(
         model="test-model",
         messages=[],
@@ -338,13 +339,13 @@ def test_granite_thinking_force_nonempty_content_moves_into_content(
 
 
 def test_granite_thinking_force_nonempty_no_swap_when_newlines_only(
-    tokenizer: GraniteThinkingTokenizer,
+    tokenizer: PreTrainedTokenizerBase,
 ):
     # When </think> IS present and content is newlines-only, lstrip
     # removes them but the swap should NOT fire — content was present,
     # just whitespace. Matches the HF plugin behavior.
     parser_cls = ReasoningParserManager.get_reasoning_parser(parser_name)
-    parser = parser_cls(tokenizer)  # type: ignore[arg-type]
+    parser = parser_cls(tokenizer)
     request = ChatCompletionRequest(
         model="test-model",
         messages=[],
@@ -363,12 +364,12 @@ def test_granite_thinking_force_nonempty_no_swap_when_newlines_only(
 
 
 def test_granite_thinking_force_nonempty_swaps_when_content_absent(
-    tokenizer: GraniteThinkingTokenizer,
+    tokenizer: PreTrainedTokenizerBase,
 ):
     # When </think> IS present but content is truly absent (zero
     # characters after </think>, e.g. max_tokens cut), swap fires.
     parser_cls = ReasoningParserManager.get_reasoning_parser(parser_name)
-    parser = parser_cls(tokenizer)  # type: ignore[arg-type]
+    parser = parser_cls(tokenizer)
     request = ChatCompletionRequest(
         model="test-model",
         messages=[],
@@ -387,10 +388,10 @@ def test_granite_thinking_force_nonempty_swaps_when_content_absent(
 
 
 def test_granite_thinking_force_nonempty_keeps_real_content(
-    tokenizer: GraniteThinkingTokenizer,
+    tokenizer: PreTrainedTokenizerBase,
 ):
     parser_cls = ReasoningParserManager.get_reasoning_parser(parser_name)
-    parser = parser_cls(tokenizer)  # type: ignore[arg-type]
+    parser = parser_cls(tokenizer)
     request = ChatCompletionRequest(
         model="test-model",
         messages=[],
@@ -412,10 +413,10 @@ def test_granite_thinking_force_nonempty_keeps_real_content(
 
 
 def test_granite_thinking_keeps_truncated_reasoning(
-    tokenizer: GraniteThinkingTokenizer,
+    tokenizer: PreTrainedTokenizerBase,
 ):
     parser_cls = ReasoningParserManager.get_reasoning_parser(parser_name)
-    parser = parser_cls(tokenizer)  # type: ignore[arg-type]
+    parser = parser_cls(tokenizer)
     request = ChatCompletionRequest(
         model="test-model",
         messages=[],
@@ -472,7 +473,7 @@ def _run_parse_delta(parser, tokenizer, text, request):
 
 
 def test_granite_thinking_streaming_enable_thinking_false(
-    tokenizer: GraniteThinkingTokenizer,
+    tokenizer: PreTrainedTokenizerBase,
 ):
     # With enable_thinking=False, the parser (constructed without
     # kwargs) starts in REASONING state. All text streams as reasoning
@@ -494,7 +495,7 @@ def test_granite_thinking_streaming_enable_thinking_false(
 
 
 def test_granite_thinking_streaming_strips_leading_newline(
-    tokenizer: GraniteThinkingTokenizer,
+    tokenizer: PreTrainedTokenizerBase,
 ):
     request = ChatCompletionRequest(
         model="test-model",
@@ -511,7 +512,7 @@ def test_granite_thinking_streaming_strips_leading_newline(
 
 
 def test_granite_thinking_streaming_promotes_reasoning_to_content(
-    tokenizer: GraniteThinkingTokenizer,
+    tokenizer: PreTrainedTokenizerBase,
 ):
     request = ChatCompletionRequest(
         model="test-model",
@@ -527,7 +528,7 @@ def test_granite_thinking_streaming_promotes_reasoning_to_content(
 
 
 def test_granite_thinking_streaming_no_promotion_with_real_content(
-    tokenizer: GraniteThinkingTokenizer,
+    tokenizer: PreTrainedTokenizerBase,
 ):
     request = ChatCompletionRequest(
         model="test-model",
@@ -548,7 +549,7 @@ def test_granite_thinking_streaming_no_promotion_with_real_content(
 
 
 def test_granite_thinking_streaming_no_promotion_without_opt_in(
-    tokenizer: GraniteThinkingTokenizer,
+    tokenizer: PreTrainedTokenizerBase,
 ):
     request = ChatCompletionRequest(model="test-model", messages=[])
     parser = _make_reasoning_parser(tokenizer)
@@ -564,12 +565,12 @@ def test_granite_thinking_streaming_no_promotion_without_opt_in(
 
 @pytest.mark.parametrize("streaming", [False, True])
 def test_granite_thinking_empty_think_block(
-    tokenizer: GraniteThinkingTokenizer,
+    tokenizer: PreTrainedTokenizerBase,
     streaming: bool,
 ):
     # <think></think>\nHello — empty reasoning, content after newline.
     parser_cls = ReasoningParserManager.get_reasoning_parser(parser_name)
-    parser = parser_cls(tokenizer)  # type: ignore[arg-type]
+    parser = parser_cls(tokenizer)
 
     reasoning, content = run_reasoning_extraction(
         parser,
@@ -592,7 +593,7 @@ def test_granite_thinking_empty_think_block(
     ],
 )
 def test_granite_thinking_streaming_chunking_independent(
-    tokenizer: GraniteThinkingTokenizer,
+    tokenizer: PreTrainedTokenizerBase,
     text: str,
     expected_reasoning: str,
     expected_content: str,
