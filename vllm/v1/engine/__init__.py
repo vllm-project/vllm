@@ -162,6 +162,9 @@ class EngineCoreRequest(
     session_id: str | None = None
     kv_hints: KvHintsEnvelope | None = None
 
+    # DP: whether the front-end sent FIRST_REQ to wake the ranks for this request.
+    wake_sent: bool = False
+
     @property
     def params(self) -> SamplingParams | PoolingParams:
         """Return the processed params (sampling or pooling)."""

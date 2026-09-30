@@ -2176,9 +2176,9 @@ class DPEngineCoreProc(EngineCoreProc):
             if (
                 not self.engines_running
                 and self.scheduler.pause_state == PauseState.UNPAUSED
+                and (request_wave != self.current_wave or not request.wake_sent)
             ):
-                # Idle rank given work: announce the wave, don't trust the
-                # front-end to.
+                # A stale wave, or the front-end did not wake the other ranks.
                 self.engines_running = True
                 self.output_queue.put_nowait(
                     (-1, EngineCoreOutputs(start_wave=self.current_wave))

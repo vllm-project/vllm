@@ -1531,6 +1531,7 @@ class DPAsyncMPClient(AsyncMPClient):
 
         request.current_wave = self.current_wave
         request.client_index = self.client_index
+        request.wake_sent = not self.engines_running
 
         chosen_engine = self.get_core_engine_for_request(request)
         to_await = self._send_input(EngineCoreRequestType.ADD, request, chosen_engine)

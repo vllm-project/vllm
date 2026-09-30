@@ -80,6 +80,7 @@ class Request:
         reasoning_parser_kwargs: dict[str, Any] | None = None,
         abort_immediately: bool = False,
         kv_hints: KvHintsEnvelope | None = None,
+        wake_sent: bool = False,
     ) -> None:
         self.request_id = request_id
         self.client_index = client_index
@@ -239,6 +240,7 @@ class Request:
         # If True, request should be aborted immediately after being added to
         # the scheduler so the connector's request_finished hook runs.
         self.abort_immediately = abort_immediately
+        self.wake_sent = wake_sent
 
     @classmethod
     def from_engine_core_request(
@@ -267,6 +269,7 @@ class Request:
             reasoning_ended=request.reasoning_ended,
             reasoning_parser_kwargs=request.reasoning_parser_kwargs,
             abort_immediately=request.abort_immediately,
+            wake_sent=request.wake_sent,
         )
 
     def append_output_token_ids(

@@ -747,16 +747,20 @@ def test_add_rejected_while_paused_at_a_boundary(pause_state, cleanup_marker, re
 
 
 @pytest.mark.parametrize(
-    "request_wave,pause_state,announces",
+    "request_wave,wake_sent,pause_state,announces",
     [
-        pytest.param(3, PauseState.UNPAUSED, True, id="current-wave"),
-        pytest.param(2, PauseState.UNPAUSED, True, id="stale-wave"),
-        pytest.param(3, PauseState.PAUSED_ALL, False, id="keep"),
+        pytest.param(3, True, PauseState.UNPAUSED, False, id="front-end-woke-ranks"),
+        pytest.param(3, False, PauseState.UNPAUSED, True, id="stale-running-belief"),
+        pytest.param(2, True, PauseState.UNPAUSED, True, id="stale-wave"),
+        pytest.param(3, False, PauseState.PAUSED_ALL, False, id="keep"),
     ],
 )
-def test_idle_dp_rank_announces_wave_for_new_work(request_wave, pause_state, announces):
+def test_idle_dp_rank_announces_wave_for_new_work(
+    request_wave, wake_sent, pause_state, announces
+):
     """A front-end that still believes a wave is running skips its wake-up, so an
-    idle rank handed work must announce the wave or its peers never join it."""
+    idle rank handed that work must announce the wave or its peers never join
+    it; when the front-end did wake them, the rank stays quiet as on main."""
     core = object.__new__(DPEngineCoreProc)
     core.has_coordinator = True
     core.current_wave = 3
@@ -765,7 +769,7 @@ def test_idle_dp_rank_announces_wave_for_new_work(request_wave, pause_state, ann
     core.output_queue = MagicMock()
 
     with patch.object(EngineCore, "add_request"):
-        core.add_request(MagicMock(), request_wave)
+        core.add_request(MagicMock(wake_sent=wake_sent), request_wave)
 
     assert core.engines_running == announces
     if announces:
