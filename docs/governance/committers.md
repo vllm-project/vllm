@@ -22,6 +22,7 @@ Sorted alphabetically by GitHub handle:
 - [@DarkLight1337](https://github.com/DarkLight1337): Multimodality, API server
 - [@dllehr-amd](https://github.com/dllehr-amd): AMD integration
 - [@esmeetu](https://github.com/esmeetu): developer marketing, community
+- [@gau-nernst](https://github.com/gau-nernst): Kernels and performance
 - [@gshtras](https://github.com/gshtras): ROCm / AMD GPU integration
 - [@Harry-Chen](https://github.com/Harry-Chen): Build, CI, CUDA architecture
 - [@heheda12345](https://github.com/heheda12345): Hybrid memory allocator
@@ -176,6 +177,7 @@ If you have PRs touching the area, please feel free to ping the area owner for r
 - FlashInfer: @LucasWilkinson, @mgoin, @WoosukKwon, @MatthewBonanni
 - Blackwell Kernels: @mgoin, @yewentao256
 - DeepEP/DeepGEMM: @mgoin, @yewentao256
+- FlashKDA: @gau-nernst
 
 ### Integrations
 
