@@ -115,7 +115,8 @@ def _partition_hisparse_specs(
 def get_hisparse_pool_bytes_per_block(
     vllm_config: VllmConfig, kv_cache_groups: list[KVCacheGroupSpec]
 ) -> int:
-    """Bytes per block of the GPU pool HiSparse builds from these groups."""
+    """The bytes per block `get_hisparse_kv_cache_config` divides available
+    memory by to size the GPU pool for these groups."""
     from vllm.v1.core.kv_cache_utils import _get_kv_cache_bytes_per_block
 
     _, device_groups = _create_hisparse_groups(vllm_config, kv_cache_groups)

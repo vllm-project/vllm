@@ -1155,11 +1155,12 @@ def _pool_bytes_per_block(kv_cache_groups: list[KVCacheGroupSpec]) -> int:
     return _get_kv_cache_bytes_per_block(kv_cache_groups)
 
 
-def _projected_pool_bytes_per_block(
+def _allocated_bytes_per_block(
     vllm_config: VllmConfig, kv_cache_groups: list[KVCacheGroupSpec]
 ) -> int:
-    """`_pool_bytes_per_block` for projected groups. HiSparse replaces them with
-    its own device groups, so its pool's block size differs."""
+    """The bytes per block `get_kv_cache_config_from_groups` allocates for these
+    groups. HiSparse lays them out as its own GPU groups first, so it divides by
+    their block size instead of `_pool_bytes_per_block`."""
     if vllm_config.attention_config.hisparse_config is not None:
         return get_hisparse_pool_bytes_per_block(vllm_config, kv_cache_groups)
     return _pool_bytes_per_block(kv_cache_groups)
@@ -2791,7 +2792,7 @@ def get_kv_cache_configs(
             if not groups:
                 adjusted_memory.append(avail_mem)
                 continue
-            bytes_per_block = _projected_pool_bytes_per_block(vllm_config, groups)
+            bytes_per_block = _allocated_bytes_per_block(vllm_config, groups)
             logger.info(
                 "Overriding num_gpu_blocks=%d with num_gpu_blocks_override=%d",
                 avail_mem // bytes_per_block,
@@ -2807,7 +2808,7 @@ def get_kv_cache_configs(
     # the capacity check both plan against usable blocks. Allocation below
     # still uses the full memory.
     check_memory = [
-        avail_mem - _projected_pool_bytes_per_block(vllm_config, groups)
+        avail_mem - _allocated_bytes_per_block(vllm_config, groups)
         if groups
         else avail_mem
         for groups, avail_mem in zip(projected_groups_per_worker, available_memory)
