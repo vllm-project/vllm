@@ -194,7 +194,6 @@ def test_handler_shutdown_skips_transfers_after_event_sync_failure() -> None:
     handler._transfer_events = {1: failed_event, 2: skipped_event}
     handler._stream_pool = [MagicMock()]
     handler._event_pool = [MagicMock()]
-    handler._run_buffer_pool = [MagicMock()]
     handler._backend = MagicMock()
     handler.src_tensors = [MagicMock()]
     handler.dst_tensors = [MagicMock()]
@@ -207,7 +206,6 @@ def test_handler_shutdown_skips_transfers_after_event_sync_failure() -> None:
     assert not handler._transfer_events
     assert not handler._stream_pool
     assert not handler._event_pool
-    assert not handler._run_buffer_pool
     handler._backend.clear.assert_called_once_with()
     assert not handler.src_tensors
     assert not handler.dst_tensors
