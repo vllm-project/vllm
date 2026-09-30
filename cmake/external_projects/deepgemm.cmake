@@ -30,7 +30,7 @@ else()
   # Keep in sync with tools/install_deepgemm.sh
   set(_DEEPGEMM_UPSTREAM_REPO "https://github.com/cleonard530/DeepGEMM.git")
   # TORCH_LIBRARY build with a CPython 3.10 stable-ABI floor.
-  set(_DEEPGEMM_UPSTREAM_TAG "84774729f5b208e42f34c92fa0577e61e44e3512")
+  set(_DEEPGEMM_UPSTREAM_TAG "45d9a6504f2590ab183791192bb5a31ae4712839")
 
   set(_deepgemm_fc_root "${FETCHCONTENT_BASE_DIR}")
   if(NOT _deepgemm_fc_root)
