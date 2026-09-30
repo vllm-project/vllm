@@ -779,13 +779,16 @@ def _run_after_module_import(module_name: str, callback: Callable[[], None]) -> 
     """Run ``callback`` right after ``module_name`` has been imported.
 
     If the module is already in ``sys.modules`` the callback runs now.
-    Otherwise a one-shot ``MetaPathFinder`` wraps the module loader's
-    ``exec_module`` so the callback runs right after the module body has
-    finished executing, before the import machinery hands the module back
-    to the importer. This lets ``vllm.env_override`` patch Inductor
-    internals without importing the Inductor stack eagerly during
-    ``import vllm`` (~0.5-0.75 s, >1400 modules), which only processes that
-    actually compile should pay.
+    Otherwise a ``MetaPathFinder`` wraps the module loader's ``exec_module``
+    so the callback runs right after the module body has finished executing,
+    before the import machinery hands the module back to the importer. This
+    lets ``vllm.env_override`` patch Inductor internals without importing the
+    Inductor stack eagerly during ``import vllm`` (~0.5-0.75 s, >1400
+    modules), which only processes that actually compile should pay.
+
+    The finder stays on ``sys.meta_path`` until the callback has run: a bare
+    ``importlib.util.find_spec(module_name)`` probe also consults it without
+    importing anything, and must not use it up before the real import.
     """
     import sys
 
@@ -797,11 +800,18 @@ def _run_after_module_import(module_name: str, callback: Callable[[], None]) -> 
     import importlib.util
 
     class _AfterImportFinder(importlib.abc.MetaPathFinder):
+        _resolving = False
+
         def find_spec(self, fullname, path, target=None):
-            if fullname != module_name:
+            # _resolving skips this finder while it asks the rest of
+            # sys.meta_path for the real spec below.
+            if fullname != module_name or self._resolving:
                 return None
-            sys.meta_path.remove(self)
-            spec = importlib.util.find_spec(fullname)
+            self._resolving = True
+            try:
+                spec = importlib.util.find_spec(fullname)
+            finally:
+                self._resolving = False
             if spec is None or spec.loader is None:
                 return None
             original_exec = spec.loader.exec_module
@@ -809,6 +819,8 @@ def _run_after_module_import(module_name: str, callback: Callable[[], None]) -> 
             def _exec_then_patch(module):
                 original_exec(module)
                 callback()
+                if self in sys.meta_path:
+                    sys.meta_path.remove(self)
 
             spec.loader.exec_module = _exec_then_patch  # type: ignore[method-assign]
             return spec
