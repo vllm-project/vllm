@@ -47,6 +47,9 @@ def _release_host_memory() -> None:
     sleeps and wakes repeatedly; when several engines share one GPU and take
     turns sleeping, it leaves every engine holding a weight-sized block of
     host RAM while awake.
+
+    The call drains the whole host cache of the process. It returns every
+    unused cached pinned block to the OS, not only the weight backup.
     """
     from vllm.platforms import current_platform
 
