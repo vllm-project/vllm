@@ -776,6 +776,7 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
                 else:
                     # Not tracked on either side (lease may have expired
                     # before the notif arrived). Log and skip.
+                    self.xfer_stats.record_notification_after_expiry()
                     logger.error(
                         "Unrecognized request %s notif (may have expired).",
                         req_id,

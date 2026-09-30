@@ -454,7 +454,7 @@ exported when NixlConnector is active:
 | `vllm:nixl_num_failed_transfers` | Counter | Cumulative count of failed NIXL KV-block transfers, including handshake and notification (`send_notif`) failures. These are grouped because all are sporadic lower-transport-layer events. |
 | `vllm:nixl_num_failed_notifications` | Counter | Cumulative count of failed notifications (`send_notif`), retained for compatibility. These failures are also included in `vllm:nixl_num_failed_transfers`; do not sum the two counters. |
 | `vllm:nixl_num_kv_expired_reqs` | Counter | Requests whose KV blocks expired on the prefiller before the decoder read them (tracked on the P instance). Kept separate from the failure counters above: KV expiry is an autoscaler/lease-tuning signal, not a transport issue. |
-| `vllm:nixl_num_unrecognized_reqs` | Counter | Completion notifications for requests the prefiller no longer tracks (tracked on the P instance). Each one matches a "Potentially invalid KV blocks" error log: the blocks may have been freed before the decoder finished reading them. |
+| `vllm:nixl_num_notifications_after_expiry` | Counter | Transfer completion notifications for requests that are no longer tracked when the notification arrives, usually because their KV lease expired first. With the pull connector this is counted on the P instance: the decoder may have read blocks that were already reused, and each one matches a "Potentially invalid KV blocks" error log. With the push connector it is counted on the instance that receives the notification. Transfers that fail outright are counted in `vllm:nixl_num_failed_transfers` instead. |
 
 !!! tip
     High `vllm:nixl_num_kv_expired_reqs` indicates that the prefiller's lease

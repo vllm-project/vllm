@@ -1747,7 +1747,7 @@ def test_nixl_prom_metrics_group_handshake_with_transfer_failures():
     stats.record_failed_handshake()
     stats.record_failed_notification()
     stats.record_kv_expired_req()
-    stats.record_unrecognized_req()
+    stats.record_notification_after_expiry()
     prom.observe(stats.data, engine_idx=0)
 
     def counter_value(name: str) -> float:
@@ -1759,14 +1759,14 @@ def test_nixl_prom_metrics_group_handshake_with_transfer_failures():
 
     assert counter_value("vllm:nixl_num_failed_transfers_total") == 3.0
     assert counter_value("vllm:nixl_num_kv_expired_reqs_total") == 1.0
-    assert counter_value("vllm:nixl_num_unrecognized_reqs_total") == 1.0
+    assert counter_value("vllm:nixl_num_notifications_after_expiry_total") == 1.0
 
 
 @patch(
     "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker.NixlWrapper",
     FakeNixlWrapper,
 )
-def test_unrecognized_notification_is_counted(default_vllm_config, dist_init):
+def test_notification_after_expiry_is_counted(default_vllm_config, dist_init):
     vllm_config = create_vllm_config()
     connector = NixlConnector(
         vllm_config, KVConnectorRole.WORKER, make_kv_cache_config(block_size=16)
@@ -1785,7 +1785,7 @@ def test_unrecognized_notification_is_counted(default_vllm_config, dist_init):
 
     stats = connector.get_kv_connector_stats()
     assert isinstance(stats, NixlKVConnectorStats)
-    assert stats.data["num_unrecognized_reqs"] == [1]
+    assert stats.data["num_notifications_after_expiry"] == [1]
 
 
 def test_multi_kv_connector_stats_aggregation():
