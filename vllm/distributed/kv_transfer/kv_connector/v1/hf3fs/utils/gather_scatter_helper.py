@@ -128,6 +128,7 @@ def scatter_kv_caches(
         num_heads: Size of the H axis
         content_size: Size of the C axis
         kv_cache_strides: Element strides of each ``[B, H, N, C]`` layer view
+
     """
     num_layers = len(kv_caches_ptrs)
     num_tokens_in_block = len(token_indices)
@@ -184,6 +185,7 @@ def gather_kv_caches(
         num_heads: Size of the H axis
         content_size: Size of the C axis
         kv_cache_strides: Element strides of each ``[B, H, N, C]`` layer view
+
     """
     num_layers = kv_caches_ptrs.shape[0]
     num_tokens_in_block = len(token_indices)

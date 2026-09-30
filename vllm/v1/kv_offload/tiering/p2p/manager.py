@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-P2PSecondaryTierManager: Secondary tier for P2P KV cache sharing.
+"""P2PSecondaryTierManager: Secondary tier for P2P KV cache sharing.
 
 Owns transports and a single bidirectional P2PSession per remote peer.
 """
@@ -264,8 +263,27 @@ class P2PSecondaryTierManager(SecondaryTierManager):
         Raises:
             ValueError: If ``unbound_store_timeout_s`` is not a positive
                 number, or anything convertible to one.
+
         """
-        super().__init__(offloading_spec, primary_kv_view, tier_type)
+        backpressure_detector = kwargs.pop("backpressure_detector", None)
+        if backpressure_detector is not None:
+            # The generic (store-latency) detector is unreliable for P2P: in
+            # PD mode dropping a store can leave the decoder waiting until the
+            # load timeout instead of failing fast, and rendezvous time makes
+            # store latency a poor pressure signal. Reject it until a
+            # P2P-specific fail-fast path exists.
+            raise ValueError(
+                "Backpressure is not supported for the P2P secondary tier. "
+                "The generic store-latency detector cannot fail fast in PD "
+                "mode and rendezvous time makes store latency an unreliable "
+                "pressure signal. Remove the 'backpressure' config from the "
+                "p2p tier."
+            )
+        super().__init__(
+            offloading_spec,
+            primary_kv_view,
+            tier_type,
+        )
         try:
             timeout_s = float(unbound_store_timeout_s)
         except (TypeError, ValueError):

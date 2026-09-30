@@ -9,7 +9,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 from einops import rearrange
-from transformers import PretrainedConfig
+from transformers import PreTrainedConfig
 from transformers.activations import GELUActivation
 from transformers.feature_extraction_utils import BatchFeature
 
@@ -51,8 +51,7 @@ logger = init_logger(__name__)
 
 
 def split_thw(grid_thw: torch.Tensor) -> torch.Tensor:
-    """
-    Split grid_thw in t dimension.
+    """Split grid_thw in t dimension.
 
     Args:
         grid_thw: [N, 3] tensor of [t, h, w]
@@ -66,6 +65,7 @@ def split_thw(grid_thw: torch.Tensor) -> torch.Tensor:
     tensor([[1, 3, 4],
            [1, 3, 4],
            [1, 5, 6]])
+
     """
     t = grid_thw[:, 0]
     h_w = grid_thw[:, 1:]
@@ -76,8 +76,7 @@ def split_thw(grid_thw: torch.Tensor) -> torch.Tensor:
 def get_num_patches(
     grid_thw: torch.Tensor, num_frames: list[int] | torch.Tensor
 ) -> list[int]:
-    """
-    Return num_patches per video.
+    """Return num_patches per video.
 
     Args:
         grid_thw: Tensor with shape [N, 3] containing temporal, height, width
@@ -101,8 +100,8 @@ def get_num_patches(
         >>> get_num_patches(grid_thw, num_frames)
         tensor([16, 1])  # Total patches for first video: 8+8=16,
                            second video: 1.
-    """
 
+    """
     assert len(grid_thw.shape) == 2
     if isinstance(num_frames, torch.Tensor):
         num_frames = num_frames.clone().tolist()
@@ -121,13 +120,12 @@ def get_num_patches(
 
 
 class KeyeVL1_5ImagePixelInputs(TensorSchema):
-    """
-    Dimensions:
-        - bnp: Batch size * Number of patches
-        - c: Number of channels
-        - ps: Patch size
-        - ni: Number of images
-        - g: Grid dimensions (3 for t, h, w)
+    """Dimensions:
+    - bnp: Batch size * Number of patches
+    - c: Number of channels
+    - ps: Patch size
+    - ni: Number of images
+    - g: Grid dimensions (3 for t, h, w)
     """
 
     type: Literal["pixel_values"]
@@ -140,13 +138,12 @@ class KeyeVL1_5ImagePixelInputs(TensorSchema):
 
 
 class KeyeVL1_5ImageEmbeddingInputs(TensorSchema):
-    """
-    Dimensions:
-        - nf: Number of image features
-        - hs: Hidden size (must match the hidden size of language model
-          backbone)
-        - ni: Number of images
-        - g: Grid dimensions (3 for t, h, w)
+    """Dimensions:
+    - nf: Number of image features
+    - hs: Hidden size (must match the hidden size of language model
+      backbone)
+    - ni: Number of images
+    - g: Grid dimensions (3 for t, h, w)
     """
 
     type: Literal["image_embeds"]
@@ -160,13 +157,12 @@ KeyeVL1_5ImageInputs: TypeAlias = (
 
 
 class KeyeVL1_5VideoPixelInputs(TensorSchema):
-    """
-    Dimensions:
-        - bnp: Batch size * Number of patches
-        - c: Number of channels
-        - ps: Patch size
-        - ni: Number of images
-        - g: Grid dimensions (3 for t, h, w)
+    """Dimensions:
+    - bnp: Batch size * Number of patches
+    - c: Number of channels
+    - ps: Patch size
+    - ni: Number of images
+    - g: Grid dimensions (3 for t, h, w)
     """
 
     type: Literal["pixel_values_videos"]
@@ -179,13 +175,12 @@ class KeyeVL1_5VideoPixelInputs(TensorSchema):
 
 
 class KeyeVL1_5VideoEmbeddingInputs(TensorSchema):
-    """
-    Dimensions:
-        - nf: Number of video features
-        - hs: Hidden size (must match the hidden size of language model
-          backbone)
-        - nv: Number of videos
-        - g: Grid dimensions (3 for t, h, w)
+    """Dimensions:
+    - nf: Number of video features
+    - hs: Hidden size (must match the hidden size of language model
+      backbone)
+    - nv: Number of videos
+    - g: Grid dimensions (3 for t, h, w)
     """
 
     type: Literal["video_embeds"]
@@ -202,8 +197,8 @@ KeyeVL1_5VideoInputs: TypeAlias = (
 class KeyeVL1_5Projector(nn.Module):
     def __init__(
         self,
-        text_config: PretrainedConfig,
-        vision_config: PretrainedConfig,
+        text_config: PreTrainedConfig,
+        vision_config: PreTrainedConfig,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ):
@@ -378,7 +373,7 @@ class KeyeVL1_5ProcessingInfo(KeyeProcessingInfo):
 
 
 class KeyeVL1_5MultiModalProcessor(BaseMultiModalProcessor[KeyeVL1_5ProcessingInfo]):
-    def _get_hf_processor_text(self, mm_counts: Mapping[str, int]) -> str:
+    def _get_hf_mm_text(self, mm_counts: Mapping[str, int]) -> str:
         return self.dummy_inputs.get_dummy_text(mm_counts)
 
     def _get_prompt_updates(
@@ -437,10 +432,10 @@ class KeyeVL1_5MultiModalProcessor(BaseMultiModalProcessor[KeyeVL1_5ProcessingIn
         cu_seqlens = torch.cumsum(torch.tensor([0] + num_frames.tolist()), dim=-1)
 
         def get_replacement_keye(item_idx: int, modality: str):
-            """
-            Args:
-                item_idx(int): The item index of modality to replace
-                modality(str): The modality
+            """Args:
+            item_idx(int): The item index of modality to replace
+            modality(str): The modality
+
             """
             if modality == "image":
                 out_item = out_mm_kwargs[modality][item_idx]
@@ -514,15 +509,15 @@ class KeyeVL1_5ForConditionalGeneration(
 ):
     def _build_projector(
         self,
-        text_config: PretrainedConfig,
-        vision_config: PretrainedConfig,
+        text_config: PreTrainedConfig,
+        vision_config: PreTrainedConfig,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ) -> nn.Module:
         return KeyeVL1_5Projector(text_config, vision_config, quant_config, prefix)
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
-        config: PretrainedConfig = vllm_config.model_config.hf_config
+        config: PreTrainedConfig = vllm_config.model_config.hf_config
         self.merge_size = config.vision_config.spatial_merge_size
         super().__init__(vllm_config=vllm_config, prefix=prefix)
 

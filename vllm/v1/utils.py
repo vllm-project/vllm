@@ -201,6 +201,7 @@ class APIServerProcessManager:
             output_addresses: Output addresses for each API server
             stats_update_address: Optional stats update address
             tensor_queue: Optional tensor IPC queue for sharing MM tensors
+
         """
         self.listen_address = listen_address
         self.sock = sock
@@ -390,6 +391,16 @@ class RustFrontendProcessManager:
                 "data_parallel_hybrid_lb",
             },
         )
+
+        # `model_tag` is the positional `vllm serve` model argument. When the
+        # model is supplied only through `--config`, argparse populates `model`
+        # while leaving `model_tag` unset. The Rust frontend requires
+        # `model_tag` in its JSON bootstrap payload, so use the resolved model
+        # as a fallback.
+        model_tag = getattr(args, "model_tag", None) or getattr(args, "model", None)
+        if model_tag is not None:
+            args_dict["model_tag"] = model_tag
+
         # The Rust `frontend` subcommand parses --args-json via serde_json,
         # which bypasses clap and therefore ignores any `#[arg(env = ...)]`
         # declarations on SharedRuntimeArgs fields. Forward the env-driven
@@ -519,13 +530,17 @@ def run_api_server_worker_proc(
     listen_address, sock, args, client_config=None, **uvicorn_kwargs
 ) -> None:
     """Entrypoint for individual API server worker processes."""
+    if logging_config := getattr(args, "logging_config", None):
+        from vllm.logger import configure_logging
+
+        configure_logging(logging_config)
 
     from vllm.entrypoints.launchers.api_server.entry import run_server_worker
 
     client_config = client_config or {}
     server_index = client_config.get("client_index", 0)
 
-    # Set process title and add process-specific prefix to stdout and stderr.
+    # Set process title and process-specific log metadata.
     set_process_title("APIServer", str(server_index))
     decorate_logs()
 
@@ -550,8 +565,8 @@ def wait_for_completion_or_failure(
             If CoreEngineProcManager, it manages local engines;
             if CoreEngineActorManager, it manages all engines.
         coordinator: The coordinator for data parallel.
-    """
 
+    """
     try:
         logger.info("Waiting for API servers to complete ...")
         # Create a mapping of sentinels to their corresponding processes
@@ -613,6 +628,7 @@ def shutdown(procs: list[BaseProcess], timeout: float | None = None) -> None:
     Args:
         procs: List of processes to shutdown
         timeout: Maximum time in seconds to wait for graceful shutdown
+
     """
     if timeout is None:
         # Keep a small grace period for best-effort cleanup paths that do not
@@ -667,8 +683,7 @@ def shutdown(procs: list[BaseProcess], timeout: float | None = None) -> None:
 def copy_slice(
     from_tensor: torch.Tensor, to_tensor: torch.Tensor, length: int
 ) -> torch.Tensor:
-    """
-    Copy the first length elements of a tensor into another tensor in a
+    """Copy the first length elements of a tensor into another tensor in a
     non-blocking manner.
 
     Used to copy pinned CPU tensor data to pre-allocated GPU tensors.
@@ -682,7 +697,6 @@ def report_usage_stats(
     vllm_config, usage_context: UsageContext = UsageContext.ENGINE_CONTEXT
 ) -> None:
     """Report usage statistics if enabled."""
-
     if not is_usage_stats_enabled():
         return
 
@@ -803,6 +817,7 @@ def tensor_data(tensor: torch.Tensor) -> memoryview:
 
     Returns:
         A memoryview of the tensor data as uint8.
+
     """
     return tensor.flatten().cpu().contiguous().view(torch.uint8).numpy().data
 
@@ -826,8 +841,7 @@ class IterationDetails:
 
 
 def compute_iteration_details(scheduler_output: SchedulerOutput) -> IterationDetails:
-    """
-    Compute the number of context/generation requests and tokens
+    """Compute the number of context/generation requests and tokens
     for the current iteration's scheduler output. A requests is regarded
     as a context request if its output tokens are still 0, an extended chunk
     of chunked prefill falls into this category.
@@ -838,6 +852,7 @@ def compute_iteration_details(scheduler_output: SchedulerOutput) -> IterationDet
     Returns:
         An IterationDetails object containing the number of
         context/generation requests and tokens.
+
     """
     num_context_requests = 0
     num_context_tokens = 0
