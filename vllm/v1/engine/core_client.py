@@ -1363,13 +1363,7 @@ class AsyncMPClient(MPClient):
         )
 
     async def compute_weight_checksums_async(self) -> list[dict[str, str]]:
-        # Gather every engine: DP load balancing returns only the first result.
-        per_engine = await asyncio.gather(
-            *[
-                self._call_utility_async("compute_weight_checksums", engine=engine)
-                for engine in self.core_engines
-            ]
-        )
+        per_engine = await self.call_utility_all_async("compute_weight_checksums")
         return [worker for workers in per_engine for worker in workers]
 
     async def handle_fault(
