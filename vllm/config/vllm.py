@@ -1370,8 +1370,6 @@ class VllmConfig:
 
     def _resolve_and_verify_engram_config(self) -> None:
         """Resolve defaults and validate n-gram embedding settings."""
-        from vllm.platforms import current_platform
-
         model_config = self.model_config
         speculative_config = self.speculative_config
         # Draft configs inherit the target's communication groups and settings.
@@ -1392,9 +1390,7 @@ class VllmConfig:
                 "Disable --enable-dbo and set --ubatch-size to 0."
             )
         if self.engram_config is None:
-            if not current_platform.is_cuda_alike() or not model_has_engram_layers(
-                model_config
-            ):
+            if not model_has_engram_layers(model_config):
                 return
             self.engram_config = EngramConfig()
         self.engram_config.verify_model_config(model_config)
@@ -1826,6 +1822,14 @@ class VllmConfig:
                 raise ValueError(
                     "HiSparse does not support decode context parallelism."
                 )
+            if not self.scheduler_config.scheduler_reserve_full_isl:
+                # Without it, async loads admitted against free host blocks can
+                # each wait on host pages the others hold, and waiting requests
+                # are never preempted to free them.
+                raise ValueError(
+                    "HiSparse requires --scheduler-reserve-full-isl; remove "
+                    "--no-scheduler-reserve-full-isl."
+                )
             if self.model_config is not None and not hasattr(
                 self.model_config.hf_config, "index_topk"
             ):
@@ -2024,11 +2028,15 @@ class VllmConfig:
         # After the platform hook, which has the last word on async scheduling.
         if (
             self.diffusion_config is not None
-            and self.scheduler_config.async_scheduling
             and self.scheduler_config.scheduler_cls is None
         ):
+            scheduler_name = (
+                "DiffusionAsyncScheduler"
+                if self.scheduler_config.async_scheduling
+                else "DiffusionScheduler"
+            )
             self.scheduler_config.scheduler_cls = (
-                "vllm.v1.core.sched.diffusion_scheduler.DiffusionAsyncScheduler"
+                f"vllm.v1.core.sched.diffusion_scheduler.{scheduler_name}"
             )
 
         self._normalize_piecewise_cudagraph_mode(
