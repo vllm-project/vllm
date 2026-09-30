@@ -11,40 +11,30 @@ from vllm.platforms import current_platform
 from vllm.v1.attention.ops.rocm_aiter_mla_prefill import context_row_indices
 
 
-def test_dcp_context_indices_skip_padding_and_respect_chunk_starts():
+@pytest.mark.parametrize(
+    "padded,lengths,starts,total,expected",
+    [
+        ([3, 2], [[7, 6], [2, 1]], [5, 0], 6, [0, 1, 5, 3, 4, 8]),
+        ([3], [[2, 9]], [4], 3, [3, 4, 5]),
+        ([3], [[1, 1]], [0], 3, None),
+    ],
+    ids=["padding_and_chunk_starts", "empty_rank", "inconsistent_total"],
+)
+def test_dcp_context_indices(padded, lengths, starts, total, expected):
     chunk = SimpleNamespace(
-        padded_local_seq_lens=[3, 2],
-        local_context_lens_allranks=[[7, 6], [2, 1]],
-        local_starts=[5, 0],
-        num_local_context_tokens=5,
-        num_context_tokens=6,
+        padded_local_seq_lens=padded,
+        local_context_lens_allranks=lengths,
+        local_starts=starts,
+        num_local_context_tokens=sum(padded),
+        num_context_tokens=total,
     )
-    rows = context_row_indices(chunk, torch.device("cpu"))
-    assert rows.tolist() == [0, 1, 5, 3, 4, 8]
-    assert rows.dtype == torch.int32
-
-
-def test_dcp_context_indices_allow_no_local_tokens_for_a_rank():
-    chunk = SimpleNamespace(
-        padded_local_seq_lens=[3],
-        local_context_lens_allranks=[[2, 9]],
-        local_starts=[4],
-        num_local_context_tokens=3,
-        num_context_tokens=3,
-    )
-    assert context_row_indices(chunk, torch.device("cpu")).tolist() == [3, 4, 5]
-
-
-def test_dcp_context_indices_reject_inconsistent_token_total():
-    chunk = SimpleNamespace(
-        padded_local_seq_lens=[3],
-        local_context_lens_allranks=[[1, 1]],
-        local_starts=[0],
-        num_local_context_tokens=3,
-        num_context_tokens=3,
-    )
-    with pytest.raises(AssertionError):
-        context_row_indices(chunk, torch.device("cpu"))
+    if expected is None:
+        with pytest.raises(AssertionError):
+            context_row_indices(chunk, torch.device("cpu"))
+    else:
+        rows = context_row_indices(chunk, torch.device("cpu"))
+        assert rows.tolist() == expected
+        assert rows.dtype == torch.int32
 
 
 def test_compressed_gather_preserves_bytes_and_workspace_partition(monkeypatch):
