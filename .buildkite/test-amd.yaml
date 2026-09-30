@@ -1859,6 +1859,7 @@ steps:
   - if [ "$$BUILDKITE_PARALLEL_JOB" = "0" ]; then pytest -v -s -x lora/test_gptoss_tp.py; fi
   - if [ "$$BUILDKITE_PARALLEL_JOB" = "1" ]; then pytest -v -s -x lora/test_qwen35_densemodel_lora.py; fi
   - if [ "$$BUILDKITE_PARALLEL_JOB" = "2" ]; then pytest -v -s -x lora/test_gemma4_tp.py; fi
+  - if [ "$$BUILDKITE_PARALLEL_JOB" = "0" ]; then pytest -v -s -x lora/test_sequence_classification.py::test_batched_loras_tp; fi
 
 #------------------------------------------------------  mi300 · model_executor  -------------------------------------------------------#
 
@@ -5266,7 +5267,7 @@ steps:
   - tests/models/language/generation
   optional: true
   commands:
-  - MAMBA_FORCE_BUILD=TRUE uv pip install --system --no-build-isolation 'git+https://github.com/AndreasKaratzas/mamba@rocm-7.0-v2.3.0'
+  - MAMBA_FORCE_BUILD=TRUE uv pip install --system --no-build-isolation 'git+https://github.com/AndreasKaratzas/mamba@fix-rocm-7.0-warp-size-constexpr'
   - CAUSAL_CONV1D_FORCE_BUILD=TRUE uv pip install --system --no-build-isolation 'git+https://github.com/Dao-AILab/causal-conv1d@v1.6.0'
   - pytest -v -s models/language/generation -m '(not core_model) and (not hybrid_model)'
 
