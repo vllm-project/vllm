@@ -874,11 +874,15 @@ fn parse_ramp_up(args: &BenchServeArgs) -> Result<Option<RampUpConfig>> {
 ///
 /// Python `vllm bench serve` defaulted to greedy decoding before v0.15, so
 /// results are only comparable with older runs when temperature is set explicitly.
+/// An explicit `"temperature": null` also falls back to the server default.
 fn uses_server_default_temperature(
     backend: BackendKind,
     extra_body: Option<&serde_json::Value>,
 ) -> bool {
-    !backend.is_pooling() && extra_body.and_then(|b| b.get("temperature")).is_none()
+    !backend.is_pooling()
+        && extra_body
+            .and_then(|b| b.get("temperature"))
+            .is_none_or(serde_json::Value::is_null)
 }
 
 #[cfg(test)]
@@ -947,6 +951,22 @@ mod tests {
             &["--extra-body", r#"{"temperature": 0.6}"#]
         ));
         assert!(!check("openai-embeddings", &[]));
+
+        // `"temperature": null` leaves it to the server, and `--extra-body`
+        // overrides `--temperature`, so both cases must still warn.
+        assert!(check(
+            "openai-chat",
+            &["--extra-body", r#"{"temperature": null}"#]
+        ));
+        assert!(check(
+            "openai-chat",
+            &[
+                "--temperature",
+                "0",
+                "--extra-body",
+                r#"{"temperature": null}"#
+            ]
+        ));
     }
 
     #[test]
