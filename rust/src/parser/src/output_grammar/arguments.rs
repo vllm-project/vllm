@@ -36,18 +36,13 @@ static ANY_SCHEMA: Value = Value::Bool(true);
 
 /// How one protocol renders the parameters of a call.
 pub trait ArgumentSyntax {
-    /// Text allowed around and between parameters, or `None` when parameters
-    /// are adjacent.
-    fn separator(&self, cx: &ArgumentContext<'_>) -> Option<Format>;
+    /// Text around and between parameters, or `None` when parameters are
+    /// adjacent.
+    fn separator(&self) -> Option<Format>;
 
     /// The grammar of one parameter whose value takes one of `options`, or
     /// `None` when none of them can be rendered.
-    fn parameter(
-        &self,
-        cx: &ArgumentContext<'_>,
-        key: ParameterKey<'_>,
-        options: &[ValueOption<'_>],
-    ) -> Option<Format>;
+    fn parameter(&self, key: ParameterKey<'_>, options: &[ValueOption<'_>]) -> Option<Format>;
 }
 
 /// The key of one parameter.
@@ -163,24 +158,6 @@ enum OptionSource {
     Any,
 }
 
-/// A string option rendered as raw text.
-#[derive(Debug, Clone, PartialEq)]
-pub enum RawString {
-    /// Any text: the value is whatever the model writes before a terminator,
-    /// surrounding whitespace included.
-    Free(Format),
-    /// A constant or a `pattern` match.
-    Constrained(Format),
-}
-
-impl RawString {
-    pub fn into_format(self) -> Format {
-        match self {
-            Self::Free(format) | Self::Constrained(format) => format,
-        }
-    }
-}
-
 impl ValueOption<'_> {
     /// The option as JSON text.
     pub fn json(&self) -> Format {
@@ -194,7 +171,7 @@ impl ValueOption<'_> {
     /// The option as raw text that ends before any of `terminators`, or `None`
     /// for a non-string option or a constant containing a terminator or an
     /// excluded substring.
-    pub fn raw_string(&self, terminators: &[&str]) -> Option<RawString> {
+    pub fn raw_string(&self, terminators: &[&str]) -> Option<Format> {
         if self.ty != JsonType::String {
             return None;
         }
@@ -206,20 +183,20 @@ impl ValueOption<'_> {
             .map(String::as_str)
             .chain(terminators.iter().copied())
             .collect::<Vec<_>>();
-        let free = || RawString::Free(Format::any_text_excluding(&excludes));
+        let text = || Format::any_text_excluding(&excludes);
         Some(match &self.source {
             OptionSource::Literal(Value::String(value)) => {
                 if excludes.iter().any(|exclude| value.contains(exclude)) {
                     return None;
                 }
-                RawString::Constrained(Format::const_string(value))
+                Format::const_string(value)
             }
             OptionSource::Literal(_) => unreachable!("literal options are typed by their value"),
             OptionSource::Schema(schema) => match schema.get("pattern").and_then(Value::as_str) {
-                Some(pattern) => RawString::Constrained(Format::regex(pattern)),
-                None => free(),
+                Some(pattern) => Format::regex(pattern),
+                None => text(),
             },
-            OptionSource::Any => free(),
+            OptionSource::Any => text(),
         })
     }
 }
@@ -236,37 +213,14 @@ pub struct ArgumentOptions {
     pub excludes: Vec<String>,
 }
 
-impl From<&JsonSchemaFormat> for ArgumentOptions {
-    fn from(format: &JsonSchemaFormat) -> Self {
-        Self {
-            any_order: format.any_order,
-            max_whitespace_cnt: format.max_whitespace_cnt,
-            excludes: format.excludes.clone(),
-        }
-    }
-}
-
-/// Request state shared by the parameters of one call.
-pub struct ArgumentContext<'a> {
+/// Request state shared by the value options of one call.
+struct ArgumentContext<'a> {
     options: &'a ArgumentOptions,
     /// The parameters schema, which local `$ref`s resolve against.
     root: &'a Value,
 }
 
 impl ArgumentContext<'_> {
-    /// Any whitespace, up to the request's limit.
-    pub fn whitespace(&self) -> Format {
-        Format::regex(match self.options.max_whitespace_cnt {
-            Some(max) => format!("[ \\n\\r\\t]{{0,{max}}}"),
-            None => "[ \\n\\r\\t]*".to_string(),
-        })
-    }
-
-    /// `format` with whitespace allowed on both sides.
-    pub fn padded(&self, format: Format) -> Format {
-        Format::sequence(vec![self.whitespace(), format, self.whitespace()])
-    }
-
     /// A JSON value under `schema`, which keeps the root's definitions so its
     /// local `$ref`s still resolve.
     fn json(&self, mut schema: Value) -> Format {
@@ -390,9 +344,8 @@ pub fn arguments(schema: &Value, syntax: &dyn ArgumentSyntax, options: &Argument
         options,
         root: schema,
     };
-    let parameter = |key: ParameterKey<'_>, schema: &Value| {
-        syntax.parameter(&cx, key, &cx.value_options(schema, 0))
-    };
+    let parameter =
+        |key: ParameterKey<'_>, schema: &Value| syntax.parameter(key, &cx.value_options(schema, 0));
 
     let schema = cx.resolve(schema, 0);
     let (properties, additional) = match schema {
@@ -425,14 +378,14 @@ pub fn arguments(schema: &Value, syntax: &dyn ArgumentSyntax, options: &Argument
         Value::Bool(false) => (vec![], None),
         _ => (vec![], parameter(ParameterKey::Free, &ANY_SCHEMA)),
     };
-    parameter_list(&cx, syntax.separator(&cx), properties, additional)
+    parameter_list(options, syntax.separator(), properties, additional)
 }
 
 /// Parameters in declared order, required ones mandatory, followed by any
 /// number of additional parameters; or, under `any_order`, any sequence of
 /// them with at least one when some are required.
 fn parameter_list(
-    cx: &ArgumentContext<'_>,
+    options: &ArgumentOptions,
     separator: Option<Format>,
     properties: Vec<(Format, bool)>,
     additional: Option<Format>,
@@ -442,7 +395,7 @@ fn parameter_list(
         None => parameter,
     };
     let mut elements = Vec::from_iter(separator.clone());
-    if cx.options.any_order {
+    if options.any_order {
         let any_required = properties.iter().any(|(_, required)| *required);
         let parameters = properties
             .into_iter()
@@ -509,33 +462,23 @@ mod tests {
     use expect_test::{Expect, expect};
     use serde_json::json;
 
-    /// Qwen-like: `<parameter=KEY>VALUE</parameter>`, raw strings, and
-    /// whitespace around every constrained value.
+    /// Qwen-like: `<parameter=KEY>VALUE</parameter>` on separate lines, with
+    /// raw strings.
     struct Untyped;
 
     impl ArgumentSyntax for Untyped {
-        fn separator(&self, cx: &ArgumentContext<'_>) -> Option<Format> {
-            Some(cx.whitespace())
+        fn separator(&self) -> Option<Format> {
+            Some(Format::const_string("\n"))
         }
 
-        fn parameter(
-            &self,
-            cx: &ArgumentContext<'_>,
-            key: ParameterKey<'_>,
-            options: &[ValueOption<'_>],
-        ) -> Option<Format> {
-            let (mut values, mut padded) = (vec![], vec![]);
-            for option in options {
-                match option.raw_string(&["</parameter>"]) {
-                    Some(RawString::Free(text)) => values.push(text),
-                    Some(RawString::Constrained(value)) => padded.push(value),
-                    None if option.ty == JsonType::String => {}
-                    None => padded.push(option.json()),
-                }
-            }
-            if !padded.is_empty() {
-                values.push(cx.padded(one_of(padded)));
-            }
+        fn parameter(&self, key: ParameterKey<'_>, options: &[ValueOption<'_>]) -> Option<Format> {
+            let values = options
+                .iter()
+                .filter_map(|option| match option.ty {
+                    JsonType::String => option.raw_string(&["</parameter>"]),
+                    _ => Some(option.json()),
+                })
+                .collect::<Vec<_>>();
             (!values.is_empty())
                 .then(|| key.tag("<parameter=", ">", one_of(values), "</parameter>"))
         }
@@ -546,25 +489,18 @@ mod tests {
     struct Typed;
 
     impl ArgumentSyntax for Typed {
-        fn separator(&self, _cx: &ArgumentContext<'_>) -> Option<Format> {
+        fn separator(&self) -> Option<Format> {
             None
         }
 
-        fn parameter(
-            &self,
-            _cx: &ArgumentContext<'_>,
-            key: ParameterKey<'_>,
-            options: &[ValueOption<'_>],
-        ) -> Option<Format> {
+        fn parameter(&self, key: ParameterKey<'_>, options: &[ValueOption<'_>]) -> Option<Format> {
             let tags = group_by(options, |option| option.ty)
                 .into_iter()
                 .filter_map(|(ty, options)| {
                     let values = options
                         .into_iter()
                         .filter_map(|option| match ty {
-                            JsonType::String => {
-                                option.raw_string(&["</arg>"]).map(RawString::into_format)
-                            }
+                            JsonType::String => option.raw_string(&["</arg>"]),
                             _ => Some(option.json()),
                         })
                         .collect::<Vec<_>>();
@@ -610,28 +546,21 @@ mod tests {
             &Untyped,
             expect![[r#"
                 sequence
-                  /[ \n\r\t]*/
+                  `\n`
                   sequence
                     tag `<parameter=location>` text excluding [`</parameter>`] `</parameter>`
-                    /[ \n\r\t]*/
+                    `\n`
                   optional
                     sequence
                       tag `<parameter=unit>` .. `</parameter>`
-                        sequence
-                          /[ \n\r\t]*/
-                          or
-                            `celsius`
-                            `fahrenheit`
-                          /[ \n\r\t]*/
-                      /[ \n\r\t]*/
+                        or
+                          `celsius`
+                          `fahrenheit`
+                      `\n`
                   optional
                     sequence
-                      tag `<parameter=days>` .. `</parameter>`
-                        sequence
-                          /[ \n\r\t]*/
-                          json(integer(minimum=1))
-                          /[ \n\r\t]*/
-                      /[ \n\r\t]*/
+                      tag `<parameter=days>` json(integer(minimum=1)) `</parameter>`
+                      `\n`
             "#]],
         );
     }
@@ -768,8 +697,8 @@ mod tests {
             json!(false),
             &Untyped,
             expect![[r#"
-            /[ \n\r\t]*/
-        "#]],
+                `\n`
+            "#]],
         );
     }
 
@@ -785,22 +714,19 @@ mod tests {
             &Untyped,
             expect![[r#"
                 sequence
-                  /[ \n\r\t]*/
+                  `\n`
                   sequence
                     tag `<parameter=path>` text excluding [`</parameter>`] `</parameter>`
-                    /[ \n\r\t]*/
+                    `\n`
                   star
                     sequence
                       sequence
                         `<parameter=`
                         /[a-zA-Z_][a-zA-Z0-9_]*/
                         `>`
-                        sequence
-                          /[ \n\r\t]*/
-                          json(boolean)
-                          /[ \n\r\t]*/
+                        json(boolean)
                         `</parameter>`
-                      /[ \n\r\t]*/
+                      `\n`
             "#]],
         );
     }

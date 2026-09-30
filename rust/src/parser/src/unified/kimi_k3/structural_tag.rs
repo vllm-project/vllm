@@ -12,8 +12,7 @@ use xgrammar_structural_tag::format::{Format, JsonSchemaFormat, StructuralTag, T
 use xgrammar_structural_tag::tool::{BuilderToolChoice, FunctionToolParam, function_parameters};
 
 use crate::output_grammar::arguments::{
-    self, ArgumentContext, ArgumentOptions, ArgumentSyntax, JsonType, ParameterKey, RawString,
-    ValueOption, group_by, one_of,
+    self, ArgumentOptions, ArgumentSyntax, JsonType, ParameterKey, ValueOption, group_by, one_of,
 };
 
 use super::{
@@ -34,16 +33,11 @@ pub(super) static KIMI_K3_STRUCTURAL_TAG_BUILDER: KimiK3StructuralTagBuilder =
 struct XtmlArguments;
 
 impl ArgumentSyntax for XtmlArguments {
-    fn separator(&self, _cx: &ArgumentContext<'_>) -> Option<Format> {
+    fn separator(&self) -> Option<Format> {
         None
     }
 
-    fn parameter(
-        &self,
-        _cx: &ArgumentContext<'_>,
-        key: ParameterKey<'_>,
-        options: &[ValueOption<'_>],
-    ) -> Option<Format> {
+    fn parameter(&self, key: ParameterKey<'_>, options: &[ValueOption<'_>]) -> Option<Format> {
         let escaped;
         let key = match key {
             ParameterKey::Declared(key) => {
@@ -60,9 +54,7 @@ impl ArgumentSyntax for XtmlArguments {
                     .filter_map(|option| match ty {
                         // The parser ends the call at its close marker, so a
                         // string value may contain neither close marker.
-                        JsonType::String => {
-                            option.raw_string(&[ARG_CLOSE, CALL_CLOSE]).map(RawString::into_format)
-                        }
+                        JsonType::String => option.raw_string(&[ARG_CLOSE, CALL_CLOSE]),
                         _ => Some(option.json()),
                     })
                     .collect::<Vec<_>>();
