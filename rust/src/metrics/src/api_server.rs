@@ -257,14 +257,16 @@ mod tests {
         let metrics = ApiServerMetrics::register(&mut registry);
 
         let recorder = metrics.record_weight_operation("update");
-        assert!(rendered_metrics(&registry)
-            .contains("vllm:rl_weight_update_operations_in_flight{operation=\"update\"} 1"));
+        assert!(
+            rendered_metrics(&registry)
+                .contains("vllm:rl_weight_update_operations_in_flight{operation=\"update\"} 1")
+        );
         drop(recorder);
 
         let after = rendered_metrics(&registry);
-        assert!(after.contains(
-            "vllm:rl_weight_update_operations_in_flight{operation=\"update\"} 0"
-        ));
+        assert!(
+            after.contains("vllm:rl_weight_update_operations_in_flight{operation=\"update\"} 0")
+        );
         assert!(after.contains(
             "vllm:rl_weight_update_operation_duration_seconds_count{operation=\"update\"} 1"
         ));
