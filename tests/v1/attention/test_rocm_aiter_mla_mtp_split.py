@@ -23,6 +23,10 @@ from vllm.v1.attention.backends.mla.rocm_aiter_mla import (  # noqa: E402
     AiterMLAImpl,
     AiterMLAMetadataBuilder,
 )
+from vllm.v1.attention.ops.dcp import (  # noqa: E402
+    CPTritonContext,
+    correct_attn_out,
+)
 from vllm.v1.attention.ops.rocm_aiter_mla_merge import (  # noqa: E402
     merge_mla_segments_triton,
 )
@@ -283,7 +287,6 @@ def test_triton_dcp_verify_uses_physical_blocks():
         torch.tensor([1000, 2000], dtype=torch.int32),
     )
 
-    assert view.use_triton_decode
     assert view.page_size == 768
     assert view.block_table.tolist() == [[7]] * qlen + [[10]] * qlen
 
@@ -570,7 +573,6 @@ def test_gfx942_dcp_verify_build_uses_triton_fallback(monkeypatch):
 
     assert metadata.dcp_route is rocm_aiter_mla._DCPDecodeRoute.TRITON
     assert metadata.dcp_verify is not None
-    assert metadata.dcp_verify.use_triton_decode
     assert metadata.paged_kv_indices is None
     assert not metadata.has_persistent_metadata
 
@@ -796,83 +798,62 @@ def test_segmented_verify_reduce_returns_natural_lse_and_masks_empty_rows():
     assert lse[1].item() == float("-inf")
 
 
-def test_triton_verify_masks_empty_rows(monkeypatch):
-    def fake_decode_attention_fwd(*args, **kwargs):
-        output, lse = args[3], args[4]
-        output.fill_(99)
-        lse.fill_(99)
+def test_triton_verify_empty_local_shard_merges_through_dcp_combine():
+    """Empty rows need no masking: -inf LSE gives them zero combine weight.
 
-    monkeypatch.setattr(triton_mla, "decode_attention_fwd", fake_decode_attention_fwd)
-    q = torch.zeros(2, 1, 576, dtype=torch.bfloat16, device="cuda")
-    output, lse = triton_mla.triton_mla_decode_forward(
-        q,
-        torch.zeros(1, 16, 576, dtype=torch.bfloat16, device="cuda"),
-        torch.zeros(2, 1, dtype=torch.int32, device="cuda"),
-        torch.tensor([1, 0], dtype=torch.int32, device="cuda"),
-        1,
-        576**-0.5,
-        512,
-        torch.tensor(1.0, device="cuda"),
-        sm_count=1,
-        out_dtype=torch.float32,
-        mask_empty_shards=True,
+    Row 0 has KV on both ranks, row 1 only on rank 0, row 2 on neither (graph
+    padding). The raw rows come back NaN; the production AG+RS combine must
+    still produce full-context attention and zeros for the padded row.
+    """
+    torch.manual_seed(0)
+    num_ranks, num_rows, num_heads = 2, 3, 16
+    kv_lora_rank, head_dim, block_size = 512, 576, 16
+    scale = head_dim**-0.5
+    local_lens = [[5, 4, 0], [5, 0, 0]]
+
+    q = torch.randn(num_rows, num_heads, head_dim, dtype=torch.bfloat16, device="cuda")
+    kv_caches = [
+        torch.randn(1, block_size, head_dim, dtype=torch.bfloat16, device="cuda")
+        for _ in range(num_ranks)
+    ]
+    outputs, lses = [], []
+    for rank in range(num_ranks):
+        output, lse = triton_mla.triton_mla_decode_forward(
+            q,
+            kv_caches[rank],
+            torch.zeros(num_rows, 1, dtype=torch.int32, device="cuda"),
+            torch.tensor(local_lens[rank], dtype=torch.int32, device="cuda"),
+            max(local_lens[rank]),
+            scale,
+            kv_lora_rank,
+            torch.tensor(1.0, device="cuda"),
+            sm_count=current_platform.num_compute_units(),
+            out_dtype=torch.bfloat16,
+            lse_dtype=torch.float32,
+        )
+        outputs.append(output)
+        lses.append(lse)
+
+    assert torch.isneginf(lses[1][1]).all()
+    assert torch.isneginf(lses[0][2]).all() and torch.isneginf(lses[1][2]).all()
+
+    all_lses = torch.stack(lses)
+    merged = sum(
+        correct_attn_out(outputs[rank], all_lses, rank, CPTritonContext())[0].float()
+        for rank in range(num_ranks)
     )
 
-    assert output.dtype == torch.float32
-    assert lse.dtype == torch.float32
-    assert output[0, 0, 0].item() == 99
-    assert lse[0, 0].item() == 99
-    assert output[1].count_nonzero().item() == 0
-    assert lse[1, 0].item() == float("-inf")
+    reference = torch.zeros(num_rows, num_heads, kv_lora_rank, device="cuda")
+    for row in range(num_rows):
+        keys = torch.cat(
+            [kv_caches[rank][0, : local_lens[rank][row]] for rank in range(num_ranks)]
+        ).float()
+        if keys.shape[0]:
+            probs = torch.softmax(q[row].float() @ keys.T * scale, dim=-1)
+            reference[row] = probs @ keys[:, :kv_lora_rank]
 
-
-def test_triton_decode_forward_leaves_generic_rows_unmasked(monkeypatch):
-    """Non-DCP Triton MLA must keep the kernel result, including empty rows."""
-
-    def fake_decode_attention_fwd(*args, **kwargs):
-        output, lse = args[3], args[4]
-        output.fill_(99)
-        lse.fill_(99)
-
-    monkeypatch.setattr(triton_mla, "decode_attention_fwd", fake_decode_attention_fwd)
-    q = torch.zeros(2, 1, 576, dtype=torch.bfloat16, device="cuda")
-    output, lse = triton_mla.triton_mla_decode_forward(
-        q,
-        torch.zeros(1, 16, 576, dtype=torch.bfloat16, device="cuda"),
-        torch.zeros(2, 1, dtype=torch.int32, device="cuda"),
-        torch.tensor([1, 0], dtype=torch.int32, device="cuda"),
-        1,
-        576**-0.5,
-        512,
-        torch.tensor(1.0, device="cuda"),
-        sm_count=1,
-        out_dtype=q.dtype,
-    )
-
-    assert output[1, 0, 0].item() == 99
-    assert lse[1, 0].item() == 99
-
-
-def test_triton_verify_kernel_accepts_empty_local_shard():
-    q = torch.randn(2, 16, 576, dtype=torch.bfloat16, device="cuda")
-    output, lse = triton_mla.triton_mla_decode_forward(
-        q,
-        torch.randn(1, 32, 576, dtype=torch.bfloat16, device="cuda"),
-        torch.zeros(2, 1, dtype=torch.int32, device="cuda"),
-        torch.tensor([1, 0], dtype=torch.int32, device="cuda"),
-        1,
-        576**-0.5,
-        512,
-        torch.tensor(1.0, device="cuda"),
-        sm_count=current_platform.num_compute_units(),
-        out_dtype=q.dtype,
-        mask_empty_shards=True,
-    )
-
-    assert torch.isfinite(output[0]).all()
-    assert torch.isfinite(lse[0]).all()
-    assert output[1].count_nonzero().item() == 0
-    assert torch.isneginf(lse[1]).all()
+    assert torch.isfinite(merged).all()
+    torch.testing.assert_close(merged, reference, rtol=2e-2, atol=2e-2)
 
 
 def test_segmented_dcp_verify_matches_causal_attention(monkeypatch):
@@ -1062,6 +1043,7 @@ def test_gfx942_triton_dcp_verify_matches_causal_attention(kv_dtype):
             )
         )
 
+    assert all(rank_lse.dtype == torch.float32 for _, rank_lse in partials)
     output, lse = partials[0]
     for rank_output, rank_lse in partials[1:]:
         output, lse = _lse_combine_natural(
