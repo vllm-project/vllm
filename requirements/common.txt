@@ -37,7 +37,7 @@ mistral_common[image] >= 1.11.6
 opencv-python-headless >= 4.13.0    # required for video IO
 pyyaml
 six>=1.16.0; python_version > '3.11' # transitive dependency of pandas that needs to be the latest version for python 3.12
-setuptools>=78.1.1,<81.0.0; python_version > '3.11' # used by triton; >=78.1.1 for GHSA-5rjg-fvgr-3xxf (83.x needed for GHSA-h35f-9h28-mq5c deferred)
+setuptools>=83.0.0; python_version > '3.11' # used by triton; >=83.0.0 for GHSA-h35f-9h28-mq5c
 einops # Required for Qwen2-VL.
 compressed-tensors == 0.17.0 # required for compressed-tensors
 depyf==0.20.0 # required for profiling and debugging with compilation config
