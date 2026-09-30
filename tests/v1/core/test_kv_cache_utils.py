@@ -242,15 +242,16 @@ def test_hisparse_host_pool_must_fit_max_model_len(monkeypatch, extra_blocks, ok
 
 @pytest.mark.parametrize(
     "max_model_len,num_gpu_blocks,ok",
-    [(8192, 160, False), (8192, 1000, True), (32768, 2576, False), (32768, 2577, True)],
+    [(8192, 160, False), (8192, 1000, True), (32768, 656, False), (32768, 657, True)],
 )
 def test_hisparse_pool_must_fit_max_model_len(
     monkeypatch, max_model_len, num_gpu_blocks, ok
 ):
     """Each resident group takes its own blocks from HiSparse's shared GPU pool,
     so a pool that fits only the indexer pages must be rejected at startup.
-    Resident pages stay pinned through prefill, so at 32768 tokens one request
-    needs 2576 blocks plus the null block, although only 2048 are in flight."""
+    Resident pages are capped at the in-flight window: at 32768 tokens with 2048
+    in flight, one request needs 512 indexer + 4 x 32 resident + 16 hot blocks,
+    plus the null block."""
     monkeypatch.setattr(
         hisparse_runtime_module.current_platform, "is_cuda_alike", lambda: True
     )
