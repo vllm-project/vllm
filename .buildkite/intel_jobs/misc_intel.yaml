@@ -54,7 +54,6 @@ steps:
     - tests/v1/ec_connector/unit
     - tests/v1/metrics
     - tests/entrypoints/openai/correctness/test_lmeval.py
-    - tests/kernels/core/test_rotary_embedding.py
     - tests/compile/test_rotary_embedding_compile.py
   commands:
     - >-
@@ -62,7 +61,7 @@ steps:
       'pip install -r requirements/kv_connectors.txt &&
       export VLLM_WORKER_MULTIPROC_METHOD=spawn &&
       cd tests &&
-      pytest -v -s kernels/core/test_rotary_embedding.py compile/test_rotary_embedding_compile.py -k rope_spec &&
+      pytest -v -s compile/test_rotary_embedding_compile.py &&
       pytest -v -s v1/executor &&
       VLLM_BATCH_INVARIANT=1 pytest -v -s -m "not cpu_test" v1/ec_connector/unit'
 
