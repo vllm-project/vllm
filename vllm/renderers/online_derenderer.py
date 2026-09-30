@@ -43,8 +43,69 @@ from vllm.tokenizers import TokenizerLike
 from vllm.tokenizers.detokenizer_utils import detokenize_incrementally
 from vllm.utils import random_uuid
 from vllm.utils.async_utils import make_async
+from vllm.v1.engine.detokenizer import check_stop_strings
 
 logger = init_logger(__name__)
+
+
+def normalize_stop_strings(stop: str | Sequence[str] | None) -> list[str]:
+    """Return the request stop strings, dropping empty values."""
+    if stop is None:
+        return []
+    if isinstance(stop, str):
+        return [stop] if stop else []
+    return [item for item in stop if item]
+
+
+def output_token_ids_for_text(
+    token_ids: Sequence[int],
+    *,
+    finish_reason: str | None,
+    stop_token_ids: Sequence[int] | None,
+    include_stop_str_in_output: bool,
+) -> tuple[list[int], int | None]:
+    """Drop a trailing stop token before text is decoded.
+
+    The generate host keeps that id in ``token_ids``. The coupled server
+    leaves it out of the text when ``include_stop_str_in_output`` is false.
+    """
+    ids = list(token_ids)
+    if (
+        finish_reason != "stop"
+        or not ids
+        or not stop_token_ids
+        or ids[-1] not in stop_token_ids
+    ):
+        return ids, None
+    if include_stop_str_in_output:
+        return ids, ids[-1]
+    return ids[:-1], ids[-1]
+
+
+def truncate_at_stop_string(
+    text: str,
+    stop: str | Sequence[str] | None,
+    include_in_output: bool,
+) -> tuple[str, str | None]:
+    """Cut decoded text at the earliest stop string.
+
+    Returns the text the client should see and the matched stop string.
+    """
+    strings = normalize_stop_strings(stop)
+    if not strings or not text:
+        return text, None
+    matched = check_stop_strings(
+        text,
+        len(text),
+        strings,
+        include_in_output,
+    )
+    if matched is None:
+        return text, None
+    stop_str, offset = matched
+    if offset >= 0:
+        text = text[:offset]
+    return text, stop_str
 
 
 class OnlineDerenderer:
@@ -129,6 +190,22 @@ class OnlineDerenderer:
             if not choice.token_ids:
                 raise ValueError(f"choice {choice.index} has empty or null token_ids")
 
+            include_stop = (
+                chat_request.include_stop_str_in_output
+                if chat_request is not None
+                else False
+            )
+            stop = chat_request.stop if chat_request is not None else None
+            stop_token_ids = (
+                chat_request.stop_token_ids if chat_request is not None else None
+            )
+            token_ids, stopped_token = output_token_ids_for_text(
+                choice.token_ids,
+                finish_reason=choice.finish_reason,
+                stop_token_ids=stop_token_ids,
+                include_stop_str_in_output=include_stop,
+            )
+
             resolved_logprobs = (
                 _resolve_logprobs(choice.logprobs, tokenizer)
                 if choice.logprobs is not None
@@ -139,8 +216,9 @@ class OnlineDerenderer:
                 # Parser path: decode with special tokens preserved
                 # so the parser can see markers like </think>,
                 # <tool_call>, or Harmony channel tokens.
-                decoded_text = tokenizer.decode(
-                    choice.token_ids, skip_special_tokens=False
+                decoded_text = tokenizer.decode(token_ids, skip_special_tokens=False)
+                decoded_text, stopped_str = truncate_at_stop_string(
+                    decoded_text, stop, include_stop
                 )
 
                 chat_template_kwargs: dict[str, Any] = {}
@@ -164,7 +242,7 @@ class OnlineDerenderer:
                     decoded_text,
                     chat_request,
                     enable_auto_tools=self.enable_auto_tools,
-                    model_output_token_ids=choice.token_ids,
+                    model_output_token_ids=token_ids,
                 )
 
                 if not getattr(chat_request, "include_reasoning", True):
@@ -204,16 +282,21 @@ class OnlineDerenderer:
                     else True
                 )
                 decoded_text = tokenizer.decode(
-                    choice.token_ids, skip_special_tokens=skip_special
+                    token_ids, skip_special_tokens=skip_special
+                )
+                decoded_text, stopped_str = truncate_at_stop_string(
+                    decoded_text, stop, include_stop
                 )
                 message = ChatMessage(role="assistant", content=decoded_text)
 
+            stop_reason = stopped_str if stopped_str is not None else stopped_token
             choices.append(
                 ChatCompletionResponseChoice(
                     index=choice.index,
                     message=message,
                     logprobs=resolved_logprobs,
                     finish_reason=choice.finish_reason,
+                    stop_reason=stop_reason,
                 )
             )
 
@@ -665,9 +748,32 @@ class OnlineDerenderer:
                         "has empty or null token_ids"
                     )
 
-                decoded_text = tokenizer.decode(
-                    choice.token_ids, skip_special_tokens=skip_special
+                include_stop = (
+                    completion_request.include_stop_str_in_output
+                    if completion_request is not None
+                    else False
                 )
+                stop = (
+                    completion_request.stop if completion_request is not None else None
+                )
+                stop_token_ids = (
+                    completion_request.stop_token_ids
+                    if completion_request is not None
+                    else None
+                )
+                token_ids, stopped_token = output_token_ids_for_text(
+                    choice.token_ids,
+                    finish_reason=choice.finish_reason,
+                    stop_token_ids=stop_token_ids,
+                    include_stop_str_in_output=include_stop,
+                )
+                decoded_text = tokenizer.decode(
+                    token_ids, skip_special_tokens=skip_special
+                )
+                decoded_text, stopped_str = truncate_at_stop_string(
+                    decoded_text, stop, include_stop
+                )
+                stop_reason = stopped_str if stopped_str is not None else stopped_token
                 completion_logprobs = None
                 if choice.logprobs is not None:
                     resolved = _resolve_logprobs(choice.logprobs, tokenizer)
@@ -679,6 +785,7 @@ class OnlineDerenderer:
                         index=index,
                         text=decoded_text,
                         finish_reason=choice.finish_reason,
+                        stop_reason=stop_reason,
                         logprobs=completion_logprobs,
                     )
                 )

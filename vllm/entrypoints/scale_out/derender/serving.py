@@ -20,7 +20,10 @@ from vllm.entrypoints.serve.engine.serving import BaseServing
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.inputs import EngineInput
 from vllm.logger import init_logger
-from vllm.renderers.online_derenderer import OnlineDerenderer
+from vllm.renderers.online_derenderer import (
+    OnlineDerenderer,
+    normalize_stop_strings,
+)
 
 from ..token_in_token_out.mm_features import extract_mm_features
 from ..token_in_token_out.protocol import (
@@ -271,6 +274,15 @@ class ServingDerender(BaseServing):
                 "markup into content."
             )
 
+        if request.chat_request is not None and normalize_stop_strings(
+            request.chat_request.stop
+        ):
+            return self.create_error_response(
+                "stop strings are not supported on streaming /derender. "
+                "Send the finished generate response to the non-streaming "
+                "derender endpoint."
+            )
+
         if (
             self.online_derenderer.parser is not None
             and request.prompt_token_ids is None
@@ -366,6 +378,15 @@ class ServingDerender(BaseServing):
         error_check_ret = await self._check_model(request)
         if error_check_ret is not None:
             return error_check_ret
+
+        if request.completion_request is not None and normalize_stop_strings(
+            request.completion_request.stop
+        ):
+            return self.create_error_response(
+                "stop strings are not supported on streaming /derender. "
+                "Send the finished generate response to the non-streaming "
+                "derender endpoint."
+            )
 
         model_name = request.model or self.models.model_name()
         try:
