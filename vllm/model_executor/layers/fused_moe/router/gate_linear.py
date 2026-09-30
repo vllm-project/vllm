@@ -63,8 +63,10 @@ class GateLinear(ReplicatedLinear):
 
             is_gfx950 = on_gfx950()
         is_rocm_fp32_shape = False
+        is_rocm_bf16w_shape = False
         if is_gfx950:
             from vllm.model_executor.layers.fused_moe.router.rocm_fp32_router_gemm import (  # noqa: E501
+                ROCM_BF16W_ROUTER_GEMM_SUPPORTED_SHAPES,
                 ROCM_FP32_ROUTER_GEMM_SUPPORTED_SHAPES,
             )
 
@@ -72,6 +74,10 @@ class GateLinear(ReplicatedLinear):
                 input_size,
                 output_size,
             ) in ROCM_FP32_ROUTER_GEMM_SUPPORTED_SHAPES
+            is_rocm_bf16w_shape = (
+                input_size,
+                output_size,
+            ) in ROCM_BF16W_ROUTER_GEMM_SUPPORTED_SHAPES
         can_use_specialized_kernels = (
             current_platform.is_cuda() and (is_hopper or is_blackwell) and not bias
         )
@@ -114,6 +120,17 @@ class GateLinear(ReplicatedLinear):
                 or (is_gfx950 and is_rocm_fp32_shape)
             )
         )
+        # bf16 weight with fp32 logits: the gfx950 kernel reads the bf16 rows
+        # and accumulates in fp32 (e.g. Kimi-K3's 7168 x 896 router).
+        self._rocm_bf16w_router_gemm_capable = (
+            self.is_unquantized
+            and not bias
+            and self.weight.dtype == torch.bfloat16
+            and is_gfx950
+            and is_rocm_bf16w_shape
+        )
+        if self._rocm_bf16w_router_gemm_capable and out_dtype == torch.float32:
+            self.allow_fp32_router_gemm = True
         self.allow_bf16x3_router_gemm = (
             self.is_unquantized
             and not bias
@@ -171,6 +188,8 @@ class GateLinear(ReplicatedLinear):
             and out_dtype == torch.float32
         ):
             self.allow_cublas_router_gemm = self.weight.dtype == torch.bfloat16
+        if self._rocm_bf16w_router_gemm_capable and out_dtype == torch.float32:
+            self.allow_fp32_router_gemm = True
 
         # out_dtype may start as None -> recompute eligibility here
         if self.allow_specialized_router_gemm:
@@ -252,6 +271,15 @@ class GateLinear(ReplicatedLinear):
 _FP32_ROUTER_GEMM_MAX_TOKENS = GateLinear.FP32_MAX_TOKENS
 
 
+def _fp32_router_gemm_fallback(x: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
+    # A bf16 weight reaches here only via the ROCm bf16-weight shapes.
+    if weight.dtype == torch.bfloat16:
+        if x.dtype == torch.bfloat16:
+            return torch.mm(x, weight.T, out_dtype=torch.float32)
+        weight = weight.float()
+    return torch.nn.functional.linear(x.float(), weight)
+
+
 def fp32_router_gemm_dispatch_impl(
     x: torch.Tensor,
     weight: torch.Tensor,
@@ -273,7 +301,7 @@ def fp32_router_gemm_dispatch_impl(
             x = x.contiguous()
             if can_use_rocm_fp32_router_gemm(x, weight):
                 return rocm_fp32_router_gemm(x, weight)
-            return torch.nn.functional.linear(x.float(), weight)
+            return _fp32_router_gemm_fallback(x, weight)
         return ops.fp32_router_gemm(x, weight)
 
     if allow_bf16x3_router_gemm and x.dtype == torch.bfloat16:
@@ -283,7 +311,7 @@ def fp32_router_gemm_dispatch_impl(
 
         return _bf16x3_router_gemm(x, weight)
 
-    return torch.nn.functional.linear(x.float(), weight)
+    return _fp32_router_gemm_fallback(x, weight)
 
 
 def fp32_router_gemm_dispatch_fake(

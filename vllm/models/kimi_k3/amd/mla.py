@@ -9,6 +9,7 @@ import torch
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.mla import MultiHeadLatentAttentionWrapper
+from vllm.models.kimi_k3.amd.ops.sigmoid_gate import sigmoid_gate_mul
 
 
 class KimiK3MultiHeadLatentAttentionWrapper(MultiHeadLatentAttentionWrapper):
@@ -115,6 +116,6 @@ class KimiK3MultiHeadLatentAttentionWrapper(MultiHeadLatentAttentionWrapper):
         )
 
         if self.g_proj is not None:
-            attn_out = attn_out * self.g_proj(hidden_states)[0].sigmoid()
+            attn_out = sigmoid_gate_mul(attn_out, self.g_proj(hidden_states)[0])
 
         return self.o_proj(attn_out)[0]
