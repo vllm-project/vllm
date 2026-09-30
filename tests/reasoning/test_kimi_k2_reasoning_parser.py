@@ -5,8 +5,8 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from vllm.entrypoints.generate.base.protocol import DeltaMessage
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
-from vllm.entrypoints.openai.engine.protocol import DeltaMessage
 from vllm.reasoning.kimi_k2_reasoning_parser import KimiK2ReasoningParser
 from vllm.tokenizers import get_tokenizer
 

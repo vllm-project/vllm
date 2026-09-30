@@ -6,13 +6,13 @@ import queue
 from pathlib import Path
 from typing import TypeAlias, TypeVar
 
-from transformers import AutoTokenizer, PreTrainedTokenizer, PreTrainedTokenizerFast
+from transformers import AutoTokenizer, PythonBackend, TokenizersBackend
 
 from vllm.transformers_utils.config import get_sentence_transformer_tokenizer_config
 
 from .protocol import TokenizerLike
 
-HfTokenizer: TypeAlias = PreTrainedTokenizer | PreTrainedTokenizerFast
+HfTokenizer: TypeAlias = PythonBackend | TokenizersBackend
 _T = TypeVar("_T", bound=TokenizerLike)
 
 
@@ -23,8 +23,7 @@ class ThreadSafeHFTokenizerMixin:
 
 
 def maybe_make_thread_pool(tokenizer: _T, copies: int = 1):
-    """
-    If `tokenizer` is a `PreTrainedTokenizerFast`, modify the tokenizer
+    """If `tokenizer` is a `TokenizersBackend`, modify the tokenizer
     in-place to make the public interface thread-safe by routing calls
     through a deep-copied tokenizer pool.
 
@@ -34,14 +33,14 @@ def maybe_make_thread_pool(tokenizer: _T, copies: int = 1):
       methods like ``add_special_tokens`` or ``add_tokens``.
     - Adjacent method calls could happen on different deep copies.
     """
-    if not isinstance(tokenizer, PreTrainedTokenizerFast) or isinstance(
+    if not isinstance(tokenizer, TokenizersBackend) or isinstance(
         tokenizer, ThreadSafeHFTokenizerMixin
     ):
         return tokenizer
 
     og_tokenizer = copy.copy(tokenizer)
 
-    tokenizer_pool: queue.Queue[PreTrainedTokenizerFast] = queue.Queue()
+    tokenizer_pool: queue.Queue[TokenizersBackend] = queue.Queue()
     for _ in range(copies):
         tokenizer_pool.put(copy.deepcopy(og_tokenizer))
 
@@ -105,8 +104,7 @@ def maybe_make_thread_pool(tokenizer: _T, copies: int = 1):
 
 
 def get_cached_tokenizer(tokenizer: HfTokenizer) -> HfTokenizer:
-    """
-    By default, transformers will recompute multiple tokenizer properties
+    """By default, transformers will recompute multiple tokenizer properties
     each time they are called, leading to a significant slowdown.
     This proxy caches these properties for faster access.
     """
@@ -116,6 +114,9 @@ def get_cached_tokenizer(tokenizer: HfTokenizer) -> HfTokenizer:
     tokenizer_all_special_tokens = tokenizer.all_special_tokens
     tokenizer_vocab = tokenizer.get_vocab()
     tokenizer_len = len(tokenizer)
+    # The underlying tokenizer class could be a specific backend,
+    # which does not always implement is_fast in Transformers
+    tokenizer_is_fast = getattr(tokenizer, "is_fast", True)
 
     max_token_id = max(tokenizer_vocab.values())
     max_chars_per_token = max(len(tok) for tok in tokenizer_vocab)
@@ -144,6 +145,10 @@ def get_cached_tokenizer(tokenizer: HfTokenizer) -> HfTokenizer:
         @property
         def max_chars_per_token(self) -> int:
             return max_chars_per_token
+
+        @property
+        def is_fast(self) -> bool:
+            return tokenizer_is_fast
 
         def get_vocab(self) -> dict[str, int]:
             return tokenizer_vocab

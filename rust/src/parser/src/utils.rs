@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 //! Shared helpers for streaming parsers.
 
 use winnow::Parser;
@@ -5,6 +8,8 @@ use winnow::error::{ContextError, ErrMode, ModalResult, Needed, StrContext, StrC
 use winnow::stream::{FindSlice, Offset, Partial, Stream};
 
 use crate::tool::{Result, ToolParserError};
+
+pub(crate) mod recursion;
 
 /// Return the byte length of the longest proper prefix of `token` that is also
 /// a suffix of `buffer`.

@@ -9,8 +9,6 @@ from pydantic import TypeAdapter, ValidationError
 from vllm import PoolingParams
 from vllm.entrypoints.pooling.embed.io_processor import EmbedIOProcessor
 from vllm.entrypoints.pooling.embed.protocol import (
-    CohereEmbedContent,
-    CohereEmbedInput,
     CohereEmbedRequest,
     EmbeddingBatchChatInputRequest,
     EmbeddingBatchChatRequest,
@@ -19,7 +17,10 @@ from vllm.entrypoints.pooling.embed.protocol import (
     EmbeddingCompletionRequest,
     EmbeddingRequest,
 )
-from vllm.entrypoints.pooling.typing import PoolingServeContext
+from vllm.entrypoints.pooling.typing import (
+    PoolingEngineInput,
+    PoolingServeContext,
+)
 from vllm.outputs import PoolingOutput, PoolingRequestOutput
 
 
@@ -410,6 +411,7 @@ class TestChunkedEmbeddingProcessing:
     def _make_handler(cls):
         handler = object.__new__(EmbedIOProcessor)
         handler.model_config = cls._FakeModelConfig()
+        handler.enable_chunked_processing = True
         return handler
 
     @staticmethod
@@ -421,15 +423,29 @@ class TestChunkedEmbeddingProcessing:
             }
         )
         assert isinstance(request, EmbeddingCompletionRequest)
+        pooling_params = PoolingParams()
         return PoolingServeContext(
             request=request,
-            pooling_params=PoolingParams(),
+            pooling_params=pooling_params,
             model_name="test",
             request_id="embd-client-prompt-999-chunk-888",
             engine_inputs=[
-                {"prompt_token_ids": [0, 1, 2, 3, 4]},
-                {"prompt_token_ids": [10, 11]},
+                PoolingEngineInput(
+                    prompts={"prompt_token_ids": [0, 1, 2, 3, 4]},
+                    params=pooling_params,
+                    lora_requests=None,
+                    priorities=0,
+                ),
+                PoolingEngineInput(
+                    prompts={"prompt_token_ids": [10, 11]},
+                    params=pooling_params,
+                    lora_requests=None,
+                    priorities=0,
+                ),
             ],
+            lora_request=None,
+            priorities=0,
+            prompt_extras=None,
         )
 
     @staticmethod
@@ -450,7 +466,7 @@ class TestChunkedEmbeddingProcessing:
         handler = self._make_handler()
         ctx = self._make_context()
 
-        handler._pre_process_chunked(ctx)
+        handler.maybe_pre_process_chunked(ctx)
 
         assert ctx.prompt_request_ids == [
             "embd-client-prompt-999-chunk-888-prompt-0-chunk-0",
@@ -488,227 +504,3 @@ class TestChunkedEmbeddingProcessing:
             ctx.final_res_batch[1].outputs.data,
             torch.tensor([9.0, 9.0]),
         )
-
-
-class TestPreProcessCohereOnline:
-    """Unit tests for EmbedIOProcessor._pre_process_cohere_online."""
-
-    @staticmethod
-    def _make_context(**request_kwargs) -> PoolingServeContext[CohereEmbedRequest]:
-        return PoolingServeContext(
-            request=CohereEmbedRequest(model="test", **request_kwargs),
-            pooling_params=PoolingParams(),
-            model_name="test",
-            request_id="embd-test",
-        )
-
-    @staticmethod
-    def _make_handler():
-        handler = object.__new__(EmbedIOProcessor)
-        handler._validate_input_type = lambda _input_type: None
-        return handler
-
-    def test_text_only_without_task_prefix_uses_completion_path(self):
-        handler = self._make_handler()
-        ctx = self._make_context(texts=["hello"])
-        calls: list[tuple[str, object]] = []
-
-        def preprocess_cmpl_online(request, prompt_input, prompt_embeds):
-            calls.append(("completion", prompt_input))
-            return ["completion"]
-
-        handler._get_task_instruction_prefix = lambda _input_type: None
-        handler._has_chat_template = lambda: False
-        handler._preprocess_cmpl_online = preprocess_cmpl_online
-        handler._batch_render_chat = lambda *_args, **_kwargs: pytest.fail(
-            "text-only request should not require chat rendering"
-        )
-
-        handler._pre_process_cohere_online(ctx)
-
-        assert ctx.engine_inputs == ["completion"]
-        assert calls == [("completion", ["hello"])]
-
-    def test_text_only_falls_back_to_prefixed_completion_without_template(self):
-        handler = self._make_handler()
-        ctx = self._make_context(texts=["hello"], input_type="query")
-        calls: list[tuple[str, object]] = []
-
-        def preprocess_cmpl(request, prompt_input, prompt_embeds):
-            calls.append(("completion", prompt_input))
-            return ["fallback"]
-
-        handler._get_task_instruction_prefix = lambda _input_type: "query: "
-        handler._has_chat_template = lambda: False
-        handler._batch_render_chat = lambda *_args, **_kwargs: pytest.fail(
-            "chat rendering should be skipped without a template"
-        )
-        handler._preprocess_cmpl_online = preprocess_cmpl
-
-        handler._pre_process_cohere_online(ctx)
-
-        assert ctx.engine_inputs == ["fallback"]
-        assert calls == [("completion", ["query: hello"])]
-
-    def test_text_only_with_template_uses_chat_path(self):
-        handler = self._make_handler()
-        ctx = self._make_context(texts=["hello"], input_type="query")
-        calls: list[tuple[str, object]] = []
-
-        def batch_render_chat(
-            request,
-            all_messages,
-            truncate_prompt_tokens,
-            truncation_side,
-        ):
-            calls.append(
-                (
-                    "chat",
-                    {
-                        "request": request,
-                        "all_messages": all_messages,
-                        "truncate_prompt_tokens": truncate_prompt_tokens,
-                        "truncation_side": truncation_side,
-                    },
-                )
-            )
-            return ["chat"]
-
-        handler._get_task_instruction_prefix = lambda _input_type: "query: "
-        handler._has_chat_template = lambda: True
-        handler._batch_render_chat = batch_render_chat
-        handler._preprocess_cmpl_online = lambda *_args, **_kwargs: pytest.fail(
-            "completion path should be skipped when a template exists"
-        )
-
-        handler._pre_process_cohere_online(ctx)
-
-        assert ctx.engine_inputs == ["chat"]
-        assert calls == [
-            (
-                "chat",
-                {
-                    "request": ctx.request,
-                    "all_messages": [
-                        handler._mixed_input_to_messages(
-                            CohereEmbedInput(
-                                content=[CohereEmbedContent(type="text", text="hello")]
-                            ),
-                            task_prefix="query: ",
-                        )
-                    ],
-                    "truncate_prompt_tokens": -1,
-                    "truncation_side": None,
-                },
-            )
-        ]
-
-
-class TestPreProcessOpenAIEmbeddingChatOnline:
-    """Unit tests for OpenAI embedding chat preprocessing."""
-
-    class _FakeModelConfig:
-        max_model_len = 128
-        encoder_config: dict[str, object] = {}
-        pooler_config = None
-        multimodal_config = None
-        is_encoder_decoder = False
-
-    class _FakeRenderer:
-        tokenizer = object()
-
-        def __init__(self):
-            self.calls = []
-
-        def render_chat(
-            self,
-            all_messages,
-            chat_params,
-            tok_params,
-            prompt_extras=None,
-        ):
-            self.calls.append(
-                {
-                    "all_messages": all_messages,
-                    "chat_params": chat_params,
-                    "tok_params": tok_params,
-                    "prompt_extras": prompt_extras,
-                }
-            )
-            return all_messages, [
-                {"prompt_token_ids": [index]} for index, _ in enumerate(all_messages)
-            ]
-
-    @classmethod
-    def _make_handler(cls, renderer):
-        handler = object.__new__(EmbedIOProcessor)
-        handler.renderer = renderer
-        handler.model_config = cls._FakeModelConfig()
-        handler.chat_template = "template"
-        handler.chat_template_content_format = "auto"
-        handler.trust_request_chat_template = False
-        handler.enable_chunked_processing = False
-        return handler
-
-    @staticmethod
-    def _make_context(
-        request: (
-            EmbeddingChatRequest
-            | EmbeddingBatchChatRequest
-            | EmbeddingChatInputRequest
-            | EmbeddingBatchChatInputRequest
-        ),
-    ) -> PoolingServeContext[
-        EmbeddingChatRequest
-        | EmbeddingBatchChatRequest
-        | EmbeddingChatInputRequest
-        | EmbeddingBatchChatInputRequest
-    ]:
-        return PoolingServeContext(
-            request=request,
-            pooling_params=PoolingParams(),
-            model_name="test",
-            request_id="embd-test",
-        )
-
-    def test_chat_template_kwargs_forwarded_for_batched_input_messages(self):
-        request = TypeAdapter(EmbeddingRequest).validate_python(
-            {
-                "model": "test",
-                "input": [
-                    [{"role": "user", "content": "hello"}],
-                    [{"role": "user", "content": "goodbye"}],
-                ],
-                "add_generation_prompt": True,
-                "chat_template_kwargs": {"instruction": "Represent the query: "},
-                "mm_processor_kwargs": {"max_pixels": 1},
-                "cache_salt": "salt",
-            }
-        )
-        assert isinstance(request, EmbeddingBatchChatInputRequest)
-
-        renderer = self._FakeRenderer()
-        handler = self._make_handler(renderer)
-        ctx = self._make_context(request)
-
-        handler.pre_process_online(ctx)
-
-        assert ctx.engine_inputs == [
-            {"prompt_token_ids": [0]},
-            {"prompt_token_ids": [1]},
-        ]
-        assert len(renderer.calls) == 1
-
-        call = renderer.calls[0]
-        assert call["all_messages"] == request.messages
-        assert call["prompt_extras"] == {
-            "mm_processor_kwargs": {"max_pixels": 1},
-            "cache_salt": "salt",
-        }
-
-        chat_template_kwargs = call["chat_params"].chat_template_kwargs
-        assert chat_template_kwargs["instruction"] == "Represent the query: "
-        assert chat_template_kwargs["add_generation_prompt"] is True
-        assert chat_template_kwargs["continue_final_message"] is False
-        assert "tools" not in chat_template_kwargs
-        assert chat_template_kwargs["tokenize"] is False

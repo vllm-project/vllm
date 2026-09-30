@@ -73,6 +73,7 @@ def make_copy_and_call(
 
     Returns:
         A wrapper function that copies inputs and calls the compiled function
+
     """
 
     def copy_and_call(*args: Any) -> Any:
@@ -122,8 +123,7 @@ def make_compiler(compilation_config: CompilationConfig) -> CompilerInterface:
 
 
 class CompilerManager:
-    """
-    A manager to manage the compilation process, including
+    """A manager to manage the compilation process, including
     caching the compiled graph, loading the compiled graph,
     and compiling the graph.
 
@@ -163,8 +163,7 @@ class CompilerManager:
     def initialize_cache(
         self, cache_dir: str, disable_cache: bool = False, prefix: str = ""
     ) -> None:
-        """
-        Initialize the cache directory for the compiler.
+        """Initialize the cache directory for the compiler.
 
         The organization of the cache directory is as follows:
         cache_dir=/path/to/hash_str/rank_i_j/prefix/
@@ -177,7 +176,6 @@ class CompilerManager:
         base cache dir of /path/to/hash_str/rank_i_j/ ,
         to store some common compilation artifacts.
         """
-
         self.disable_cache = disable_cache
         self.cache_dir = cache_dir
         self.cache_file_path = os.path.join(cache_dir, "vllm_compile_cache.py")
@@ -438,12 +436,10 @@ def _merge_empty_only_subgraphs(
     node_to_subgraph_id: dict[fx.Node, int],
     split_op_graphs: list[int],
 ) -> None:
-    """
-    Merge a partition that only contains an empty allocation op into the
+    """Merge a partition that only contains an empty allocation op into the
     previous partition. This avoids generating standalone empty submodules,
     which can lead to empty cudagraph captures.
     """
-
     nodes_by_subgraph_id: dict[int, list[fx.Node]] = defaultdict(list)
     for node, subgraph_id in node_to_subgraph_id.items():
         nodes_by_subgraph_id[subgraph_id].append(node)
@@ -489,6 +485,11 @@ def _decompose_size_nodes(graph: fx.GraphModule) -> None:
     size_nodes = list(graph.graph.find_nodes(op="call_method", target="size"))
 
     for node in size_nodes:
+        # Only x.size() (no dim) returns a torch.Size tuple that can't cross
+        # split boundaries. x.size(dim) already returns a scalar SymInt/int,
+        # which crosses fine, so leave it untouched.
+        if len(node.args) > 1 or "dim" in node.kwargs:
+            continue
         tensor_node = node.args[0]
         ev = tensor_node.meta.get("example_value")
         assert ev is not None, (
@@ -632,8 +633,7 @@ def wrap_with_cudagraph_if_needed(
     is_first_graph: bool,
     is_last_graph: bool,
 ) -> Any:
-    """
-    Wrap a piecewise backend with CUDA graph wrapper if needed.
+    """Wrap a piecewise backend with CUDA graph wrapper if needed.
     This function is shared between VllmBackend and
     construct_serializable_fn_from_inductor_cache.
 
@@ -646,6 +646,7 @@ def wrap_with_cudagraph_if_needed(
 
     Returns:
         The wrapped backend if CUDA graphs are enabled, otherwise the original backend
+
     """
     if (
         not compilation_config.cudagraph_mode.has_piecewise_cudagraphs()
@@ -878,8 +879,8 @@ class VllmBackend:
                   sym_shape_indices
                 - returns_tuple_map: dict mapping submod_name to
                   returns_tuple
-        """
 
+        """
         if not envs.VLLM_USE_MEGA_AOT_ARTIFACT:
             return None, None, None
 
@@ -1144,16 +1145,19 @@ class VllmBackend:
         compilation_counter.num_graphs_seen += 1
         from .monitor import torch_compile_start_time
 
-        dynamo_time = time.perf_counter() - torch_compile_start_time
+        current_perf = time.perf_counter()
+        current_epoch = time.time()
+        dynamo_time = current_perf - torch_compile_start_time
         logger.info_once(
             "Dynamo bytecode transform time: %.2f s",
             dynamo_time,
         )
 
         # Record Dynamo time in tracing if available
-        start_time = int(torch_compile_start_time * 1e9)
+        real_start_time = current_epoch - dynamo_time
+        start_time_ns = int(real_start_time * 1e9)
         attributes = {"dynamo.time_seconds": dynamo_time}
-        instrument_manual("Dynamo bytecode transform", start_time, None, attributes)
+        instrument_manual("Dynamo bytecode transform", start_time_ns, None, attributes)
 
         # we control the compilation process, each instance can only be
         # called once
@@ -1253,11 +1257,12 @@ class VllmBackend:
             # code adapted from
             # https://github.com/thuml/depyf/blob/dab831108a752d1facc00acdd6d4243891845c37/depyf/explain/patched_lazy_format_graph_code.py#L30
             # use `print_readable` because it can include submodules
-            src = (
-                "from __future__ import annotations\nimport torch\n"
-                + self.split_gm.print_readable(print_output=False)
-            )
-            src = src.replace("<lambda>", "GraphModule")
+            with dynamo_timed("vllm_print_readable"):
+                src = (
+                    "from __future__ import annotations\nimport torch\n"
+                    + self.split_gm.print_readable(print_output=False)
+                )
+                src = src.replace("<lambda>", "GraphModule")
             with open(graph_path, "w") as f:
                 f.write(src)
 

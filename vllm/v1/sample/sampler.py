@@ -6,6 +6,7 @@ import torch
 import torch.nn as nn
 
 from vllm.config.model import LogprobsMode
+from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.torch_utils import PIN_MEMORY
 from vllm.v1.outputs import LogprobsTensors, SamplerOutput
 from vllm.v1.sample.metadata import SamplingMetadata
@@ -18,8 +19,7 @@ _SAMPLING_EPS = 1e-5
 
 
 class Sampler(nn.Module):
-    """
-    A layer that samples the next tokens from the model's outputs
+    """A layer that samples the next tokens from the model's outputs
     with the following steps in order:
 
     1. If logprobs are requested:
@@ -169,6 +169,7 @@ class Sampler(nn.Module):
         Returns:
             LogprobsTensors with logprobs for the specified tokens, or None
             if no requests have logprob_token_ids.
+
         """
         if not logprob_token_ids:
             return None
@@ -251,7 +252,6 @@ class Sampler(nn.Module):
         The various logits processing functions called in this method
         may update the logits tensor in-place.
         """
-
         logprobs_mode = logprobs_mode_override or self.logprobs_mode
         assert not (sampling_metadata.all_greedy and sampling_metadata.all_random)
         if sampling_metadata.all_random:
@@ -311,8 +311,7 @@ class Sampler(nn.Module):
         num_logprobs: int,
         token_ids: torch.Tensor,
     ) -> LogprobsTensors:
-        """
-        Gather logprobs for topk and sampled/prompt token.
+        """Gather logprobs for topk and sampled/prompt token.
 
         Args:
           logprobs: (num tokens) x (vocab) tensor
@@ -328,6 +327,7 @@ class Sampler(nn.Module):
           Top-k int indices tensor, (num tokens) x (num_logprobs + 1)
           Top-k float logprobs tensor, (num tokens) x (num_logprobs + 1)
           Sampled token rank tensor, (num tokens)
+
         """
         assert token_ids.dtype == torch.int64
         # Find the topK values.
@@ -342,9 +342,10 @@ class Sampler(nn.Module):
         # of the compiled batched_count_greater_than. mark_unbacked makes
         # the size fully symbolic so dynamo doesn't specialize when
         # batch_size transitions from 1 to >=2.
-        torch._dynamo.decorators.mark_unbacked(logprobs, 0)
-        torch._dynamo.decorators.mark_unbacked(token_logprobs, 0)
-        token_ranks = batched_count_greater_than(logprobs, token_logprobs)
+        with gpu_sync_allowed(first_only=True):
+            torch._dynamo.decorators.mark_unbacked(logprobs, 0)
+            torch._dynamo.decorators.mark_unbacked(token_logprobs, 0)
+            token_ranks = batched_count_greater_than(logprobs, token_logprobs)
 
         # Concatenate together with the topk.
         indices = torch.cat((token_ids, topk_indices), dim=1)
@@ -378,13 +379,8 @@ class Sampler(nn.Module):
         any_penalties_or_bad_words = (
             bool(bad_words_token_ids) or not sampling_metadata.no_penalties
         )
-        holder = sampling_metadata.thinking_budget_state_holder
-        needs_thinking_combine = holder is not None and holder.has_tracked_requests()
-
         output_token_ids = sampling_metadata.output_token_ids
-        if predict_bonus_token and (
-            any_penalties_or_bad_words or needs_thinking_combine
-        ):
+        if predict_bonus_token and any_penalties_or_bad_words:
             # Combine base outputs with spec tokens when speculative decoding
             # is enabled.
             output_token_ids = self._combine_outputs_with_spec_tokens(
@@ -406,9 +402,11 @@ class Sampler(nn.Module):
 
         # Apply penalties (e.g., freq_penalties).
         logits = self.apply_penalties(logits, sampling_metadata, output_token_ids)
+        holder = sampling_metadata.thinking_budget_state_holder
         if holder is not None and holder.has_tracked_requests():
+            # Committed outputs only; spec drafts live in ``spec_token_ids``.
             holder.update_state(
-                output_token_ids,
+                sampling_metadata.output_token_ids,
                 sampling_metadata.spec_token_ids,
                 repeat_indices=None,
             )

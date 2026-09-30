@@ -5,30 +5,50 @@ from __future__ import annotations
 
 import json
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import Enum, auto
 from typing import TYPE_CHECKING, NamedTuple
 
-from openai_harmony import HarmonyError
+from openai_harmony import HarmonyError, Message, Role
+from xgrammar import StructuralTag
+from xgrammar.openai_tool_call_schema import BuiltinToolParam, FunctionToolParam
+from xgrammar.structural_tag import (
+    AnyTextFormat,
+    ConstStringFormat,
+    Format,
+    JSONSchemaFormat,
+    OptionalFormat,
+    OrFormat,
+    SequenceFormat,
+    TagFormat,
+)
 
 from vllm.entrypoints.chat_utils import make_tool_call_id
-from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
-from vllm.entrypoints.openai.engine.protocol import (
+from vllm.entrypoints.generate.base.protocol import (
     DeltaFunctionCall,
     DeltaMessage,
     DeltaToolCall,
     FunctionCall,
 )
+from vllm.entrypoints.openai.chat_completion.protocol import (
+    ChatCompletionRequest,
+)
 from vllm.entrypoints.openai.parser.harmony_utils import (
     extract_function_from_recipient,
+    get_encoding,
     get_streamable_parser_for_assistant,
     is_function_recipient,
 )
 from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.logger import init_logger
-from vllm.parser.abstract_parser import DelegatingParser
+from vllm.parser.abstract_parser import DelegatingParser, structured_outputs_to_format
 from vllm.reasoning.gptoss_reasoning_parser import GptOssReasoningParser
 from vllm.tool_parsers.gptoss_tool_parser import GptOssToolParser
+from vllm.tool_parsers.structural_tag_registry import (
+    SimplifiedToolChoice,
+    get_function_parameters,
+    register_vllm_structural_tag,
+)
 
 if TYPE_CHECKING:
     from openai_harmony import Message, StreamableParser
@@ -91,6 +111,12 @@ class HarmonyParser(DelegatingParser):
         self._next_tool_call_index = 0
         self._num_processed_messages = 0
 
+        self._num_counted_tokens = 0
+        self._num_reasoning_tokens = 0
+
+        # For error recovery
+        self._current_message_tokens: list[int] = []
+
     @property
     def _harmony_parser(self) -> StreamableParser:
         """Lazily initializes the Harmony parser."""
@@ -107,32 +133,48 @@ class HarmonyParser(DelegatingParser):
         self._num_processed_messages += 1
         return msg
 
-    def flush(self) -> Segment | None:
+    def flush(self) -> list[Segment]:
+        segments: list[Segment] = []
         try:
             self._harmony_parser.process_eos()
             msg = self._poll_completed_message()
         except HarmonyError:
             logger.warning(
                 "Harmony parser ended in a non-terminal state; returning the "
-                "raw unparsed output. This usually indicates a malformed "
-                "assistant turn, e.g. a 'final' channel missing the "
-                "<|message|> delimiter."
+                "recovered raw output."
             )
-            raise
-        finally:
-            # Reset to the initial assistant-parser state for the next turn.
-            self._parser = None
-            self._num_processed_messages = 0
+
+            final_channel = "final"
+            text = self.model_tokenizer.decode(self._current_message_tokens)
+            segments.append(
+                Segment(
+                    channel=final_channel,
+                    recipient=None,
+                    delta=text,
+                    completed_message=None,
+                )
+            )
+            msg = Message.from_role_and_content(Role.ASSISTANT, text).with_channel(
+                final_channel
+            )
+
+        # Reset to the initial assistant-parser state for the next turn.
+        self._parser = None
+        self._num_processed_messages = 0
+        self._current_message_tokens.clear()
 
         if msg is None:
-            return None
+            return segments
 
-        return Segment(
-            channel=msg.channel,
-            recipient=msg.recipient,
-            delta="",
-            completed_message=msg,
+        segments.append(
+            Segment(
+                channel=msg.channel,
+                recipient=msg.recipient,
+                delta="",
+                completed_message=msg,
+            )
         )
+        return segments
 
     def parse(
         self,
@@ -147,12 +189,9 @@ class HarmonyParser(DelegatingParser):
         Callers must decide whether to surface them.
         """
         result = self.process_chunk(model_output_token_ids)
-        try:
-            flushed_segment = self.flush()
-        except HarmonyError:
-            return None, model_output, None
-        if flushed_segment is not None:
-            result.segments.append(flushed_segment)
+        flushed_segments = self.flush()
+        if flushed_segments:
+            result.segments.extend(flushed_segments)
 
         reasoning_parts: list[str] = []
         content_parts: list[str] = []
@@ -209,13 +248,9 @@ class HarmonyParser(DelegatingParser):
         )
         result = self.process_chunk(delta_token_ids)
         if finished:
-            try:
-                flushed_segment = self.flush()
-            except HarmonyError:
-                self._next_tool_call_index = 0
-                return DeltaMessage(content=delta_text)
-            if flushed_segment is not None:
-                result.segments.append(flushed_segment)
+            flushed_segments = self.flush()
+            if flushed_segments:
+                result.segments.extend(flushed_segments)
         combined_content = ""
         combined_reasoning = ""
         tool_messages: list[DeltaToolCall] = []
@@ -281,6 +316,16 @@ class HarmonyParser(DelegatingParser):
             delta_message.reasoning = combined_reasoning
         if tool_messages:
             delta_message.tool_calls = tool_messages
+
+        # Suppress reasoning deltas if not requested
+        if delta_message and not request.include_reasoning:
+            delta_message.reasoning = None
+
+            # If only reasoning was in the message (no content, no tool_calls)
+            # skip emitting entirely
+            if not delta_message.content and not delta_message.tool_calls:
+                return None
+
         return delta_message
 
     def process_chunk(self, token_ids: Sequence[int]) -> ChunkResult:
@@ -290,7 +335,10 @@ class HarmonyParser(DelegatingParser):
         segments: list[Segment] = []
         reasoning_token_count = 0
         for token_id in token_ids:
-            self._harmony_parser.process(token_id)
+            try:
+                self._harmony_parser.process(token_id)
+            except HarmonyError:
+                continue
             channel = self._harmony_parser.current_channel
             recipient = self._normalize_recipient(
                 self._harmony_parser.current_recipient
@@ -298,9 +346,12 @@ class HarmonyParser(DelegatingParser):
             delta = self._harmony_parser.last_content_delta or ""
             completed_message = self._poll_completed_message()
 
-            if channel == "analysis" or (
-                channel == "commentary" and recipient is not None
-            ):
+            if completed_message is not None:
+                self._current_message_tokens.clear()
+            else:
+                self._current_message_tokens.append(token_id)
+
+            if self._is_reasoning_token(token_id, channel, recipient):
                 reasoning_token_count += 1
 
             segments.append(
@@ -314,10 +365,43 @@ class HarmonyParser(DelegatingParser):
 
             # TODO: Optionally merge and suppress empty Segments
 
+        self._num_counted_tokens += len(token_ids)
+        self._num_reasoning_tokens += reasoning_token_count
         return ChunkResult(
             segments=segments,
             reasoning_token_count=reasoning_token_count,
         )
+
+    def count_reasoning_tokens(self, token_ids: Sequence[int]) -> int:
+        if len(token_ids) == self._num_counted_tokens:
+            return self._num_reasoning_tokens
+
+        parser = get_streamable_parser_for_assistant()
+        count = 0
+        for token_id in token_ids:
+            try:
+                parser.process(token_id)
+            except HarmonyError:
+                continue
+            recipient = self._normalize_recipient(parser.current_recipient)
+            if self._is_reasoning_token(token_id, parser.current_channel, recipient):
+                count += 1
+        return count
+
+    @staticmethod
+    def _is_reasoning_token(
+        token_id: int, channel: str | None, recipient: str | None
+    ) -> bool:
+        is_reasoning_channel = channel == "analysis" or (
+            channel == "commentary" and recipient is not None
+        )
+        return is_reasoning_channel and not get_encoding().is_special_token(token_id)
+
+    def adjust_request(
+        self, request: ChatCompletionRequest | ResponsesRequest
+    ) -> ChatCompletionRequest | ResponsesRequest:
+        request = _adjust_output_format(request)
+        return super().adjust_request(request)
 
     @staticmethod
     def _normalize_recipient(recipient: str | None) -> str | None:
@@ -329,3 +413,167 @@ class HarmonyParser(DelegatingParser):
         if constrain_index == -1:
             return recipient
         return recipient[:constrain_index].rstrip() or None
+
+
+_JSON_CONSTRAINS = [" json", " <|constrain|>json"]
+# Harmomy's stop tokens are <|return|>, <|call|>, <|endoftext|>
+# They are represented as "" since xgrammar disallows stop tokens while
+# under constraints, leading to bad or infinite generations.
+_END_TAG = ["<|end|>", ""]
+_FINAL_BEGIN = "<|channel|>final{constrain}<|message|>"
+_TOOL_CALL_CHANNELS = [
+    "<|channel|>commentary",
+    "<|channel|>analysis",
+    "<|channel|>final",
+]
+_FUNCTION_CALL_BEGINS = [
+    " to=functions.{name}{channel}{constrain}<|message|>",
+    "{channel} to=functions.{name}{constrain}<|message|>",
+]
+_ANY_CONTENT = AnyTextFormat()
+
+
+def _assemble_tag(
+    allow_analysis: bool, allow_commentary: bool, content: Format
+) -> StructuralTag:
+    tags = []
+    if allow_analysis:
+        analysis_tag = OptionalFormat(
+            content=SequenceFormat(
+                elements=[
+                    TagFormat(
+                        begin="<|channel|>analysis<|message|>",
+                        content=_ANY_CONTENT,
+                        end="<|end|>",
+                    ),
+                    ConstStringFormat(value="<|start|>assistant"),
+                ]
+            )
+        )
+        tags.append(analysis_tag)
+
+    if allow_commentary:
+        commentary_tag = OptionalFormat(
+            content=SequenceFormat(
+                elements=[
+                    TagFormat(
+                        begin="<|channel|>commentary<|message|>",
+                        content=_ANY_CONTENT,
+                        end="<|end|>",
+                    ),
+                    ConstStringFormat(value="<|start|>assistant"),
+                ]
+            )
+        )
+        tags.append(commentary_tag)
+
+    tags.append(content)
+
+    return StructuralTag(format=SequenceFormat(elements=tags))
+
+
+@register_vllm_structural_tag("harmony")
+def get_harmony_structural_tag(
+    tools: list[FunctionToolParam],
+    builtin_tools: list[BuiltinToolParam],
+    tool_choice: SimplifiedToolChoice,
+    reasoning: bool,
+    token_suffix: str = "",
+) -> StructuralTag:
+    # reasoning always enabled for Harmony
+    del reasoning, token_suffix
+
+    if builtin_tools:
+        # Fallback for built-in tools
+        tags = [
+            TagFormat(
+                begin="to=",
+                content=AnyTextFormat(excludes=["<|start|>"]),
+                end=_END_TAG,
+            )
+        ]
+        tags.extend(
+            TagFormat(
+                begin=channel + " to=",
+                content=AnyTextFormat(excludes=["<|start|>", "<|channel|>"]),
+                end=_END_TAG,
+            )
+            for channel in _TOOL_CALL_CHANNELS
+        )
+    else:
+        tags = [
+            TagFormat(
+                begin=pattern.format(
+                    name=tool.function.name, channel=channel, constrain=constrain
+                ),
+                content=JSONSchemaFormat(
+                    json_schema=get_function_parameters(tool.function)
+                ),
+                end=_END_TAG,
+            )
+            for tool in tools
+            for pattern in _FUNCTION_CALL_BEGINS
+            for constrain in _JSON_CONSTRAINS
+            for channel in _TOOL_CALL_CHANNELS
+        ]
+
+    if tool_choice == "auto":
+        tags.extend(
+            TagFormat(
+                begin=_FINAL_BEGIN.format(constrain=constrain),
+                content=_ANY_CONTENT,
+                end=_END_TAG,
+            )
+            for constrain in _JSON_CONSTRAINS + [""]
+        )
+
+    return _assemble_tag(
+        allow_analysis=True, allow_commentary=True, content=OrFormat(elements=tags)
+    )
+
+
+def _adjust_output_format(
+    request: ChatCompletionRequest | ResponsesRequest,
+) -> ChatCompletionRequest | ResponsesRequest:
+    """Canonicalize request constraints into a reasoning-aware StructuralTag."""
+    params = request.extract_structured_outputs()
+    if params is None:
+        return request
+
+    final_content = structured_outputs_to_format(params)
+    if final_content is None:
+        return request
+
+    if isinstance(final_content, JSONSchemaFormat):
+        content = OrFormat(
+            elements=[
+                TagFormat(
+                    begin=_FINAL_BEGIN.format(constrain=constrain),
+                    content=final_content,
+                    end=_END_TAG,
+                )
+                for constrain in _JSON_CONSTRAINS
+            ]
+        )
+    else:
+        content = TagFormat(
+            begin=_FINAL_BEGIN.format(constrain=""), content=final_content, end=_END_TAG
+        )
+    structural_tag = _assemble_tag(
+        allow_analysis=True, allow_commentary=False, content=content
+    )
+
+    request.structured_outputs = replace(
+        params,
+        json=None,
+        regex=None,
+        choice=None,
+        grammar=None,
+        json_object=None,
+        structural_tag=json.dumps(structural_tag.model_dump()),
+    )
+    if isinstance(request, ResponsesRequest):
+        request.text = None
+    else:
+        request.response_format = None
+    return request

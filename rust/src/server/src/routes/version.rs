@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 use std::sync::Arc;
 
 use axum::Json;
@@ -18,6 +21,6 @@ pub async fn version(State(state): State<Arc<AppState>>) -> Json<VersionResponse
 
     Json(VersionResponse {
         version,
-        rust_frontend_version: env!("CARGO_PKG_VERSION"),
+        rust_frontend_version: vllm_build_info::VERSION,
     })
 }

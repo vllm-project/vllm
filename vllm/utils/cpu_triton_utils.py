@@ -1,22 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-"""
-Contains replacement functions to fallback Triton usages in CPU backend
-"""
+"""Contains replacement functions to fallback Triton usages in CPU backend."""
 
 import ctypes
-from collections.abc import Callable
 
 import torch
-
-
-class _FuncWrapper:
-    def __init__(self, func: Callable) -> None:
-        self.func = func
-
-    def __getitem__(self, *args, **kwargs) -> Callable:
-        return self.func
 
 
 # For _compute_slot_mapping_kernel in vllm/v1/worker/block_table.py
@@ -29,13 +18,17 @@ def _compute_slot_mapping_kernel_impl(
     block_table_stride: int,  # max_num_blocks_per_req
     block_size: int,
     slot_mapping: torch.Tensor,  # [max_num_tokens], int64
-    TOTAL_CP_WORLD_SIZE: int,
-    TOTAL_CP_RANK: int,
-    CP_KV_CACHE_INTERLEAVE_SIZE: int,
-    PAD_ID: int,
-    BLOCK_SIZE: int,
+    KV_CACHE_BLOCK_SIZE: int | None = None,
+    BLOCKS_PER_KV_BLOCK: int = 1,
+    TOTAL_CP_WORLD_SIZE: int = 1,
+    TOTAL_CP_RANK: int = 0,
+    CP_KV_CACHE_INTERLEAVE_SIZE: int = 1,
+    PAD_ID: int = -1,
+    BLOCK_SIZE: int = 1024,
 ) -> None:
     assert TOTAL_CP_WORLD_SIZE == 1, "Context Parallelism is not supported on CPU."
+    if BLOCKS_PER_KV_BLOCK != 1:
+        assert block_size * BLOCKS_PER_KV_BLOCK == KV_CACHE_BLOCK_SIZE
     torch.ops._C.compute_slot_mapping_kernel_impl(
         query_start_loc,
         positions,
@@ -43,9 +36,6 @@ def _compute_slot_mapping_kernel_impl(
         slot_mapping,
         block_size,
     )
-
-
-compute_slot_mapping_kernel = _FuncWrapper(_compute_slot_mapping_kernel_impl)
 
 
 def _ensure_int64(t: torch.Tensor) -> torch.Tensor:
@@ -452,31 +442,7 @@ def _sample_recovered_tokens_kernel_impl(
         output_token_ids.copy_(output_i64.to(orig_dtype))
 
 
-eagle_prepare_inputs_padded_kernel = _FuncWrapper(
-    _eagle_prepare_inputs_padded_kernel_impl
-)
-eagle_prepare_next_token_padded_kernel = _FuncWrapper(
-    _eagle_prepare_next_token_padded_kernel_impl
-)
-copy_and_expand_eagle_inputs_kernel = _FuncWrapper(
-    _copy_and_expand_eagle_inputs_kernel_impl
-)
-copy_and_expand_dflash_inputs_kernel = _FuncWrapper(
-    _copy_and_expand_dflash_inputs_kernel_impl
-)
-eagle_step_slot_mapping_metadata_kernel = _FuncWrapper(
-    _eagle_step_slot_mapping_metadata_kernel_impl
-)
-rejection_greedy_sample_kernel = _FuncWrapper(_rejection_greedy_sample_kernel_impl)
-rejection_random_sample_kernel = _FuncWrapper(_rejection_random_sample_kernel_impl)
-expand_kernel = _FuncWrapper(_expand_kernel_impl)
-sample_recovered_tokens_kernel = _FuncWrapper(_sample_recovered_tokens_kernel_impl)
-
-
 def _batch_memcpy_impl(src_ptrs, dst_ptrs, sizes, BLOCK_SIZE=None):
     # BLOCK_SIZE is unused; kept for signature parity with the Triton kernel.
     for src, dst, size in zip(src_ptrs.tolist(), dst_ptrs.tolist(), sizes.tolist()):
         ctypes.memmove(dst, src, size)
-
-
-batch_memcpy_kernel = _FuncWrapper(_batch_memcpy_impl)

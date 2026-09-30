@@ -50,7 +50,7 @@ def test_oot_registration_embedding(
         m.setenv("VLLM_PLUGINS", "register_dummy_model")
         prompts = ["Hello, my name is", "The text does not matter"]
         llm = LLM(
-            model=dummy_gemma2_embedding_path, load_format="dummy", max_model_len=2048
+            model=dummy_gemma2_embedding_path, load_format="dummy", max_model_len=512
         )
         outputs = llm.embed(prompts)
 
@@ -92,7 +92,7 @@ def test_oot_registration_multimodal(
         )
 
         first_token = llm.get_tokenizer().decode(0)
-        outputs = llm.generate(prompts, sampling_params)
+        outputs = llm.generate(prompts, sampling_params)  # type: ignore[arg-type]
 
         for output in outputs:
             generated_text = output.outputs[0].text
