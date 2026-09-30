@@ -346,12 +346,14 @@ def rocm_unquantized_gemm_impl(
     if use_skinny:
         # The skinny kernels assume contiguous K elements. A shape-preserving
         # reshape can retain a transposed activation's non-contiguous strides.
-        x_view = x.reshape(-1, x.size(-1)).contiguous()
+        # Note: Only build that view inside the branches that consume it.
         if (m == 1 or m > 8) and 0 < n <= 5:
+            x_view = x.reshape(-1, x.size(-1)).contiguous()
             cu_count = num_compute_units()
             out = ops.wvSplitK(weight, x_view, cu_count, bias)
             return out.reshape(*x.shape[:-1], weight.shape[0])
         elif m % 4 == 0 and n == 1 and k <= 8192 and bias is None:
+            x_view = x.reshape(-1, x.size(-1)).contiguous()
             out = ops.LLMM1(weight, x_view, 4)
             return out.reshape(*x.shape[:-1], weight.shape[0])
 
@@ -375,6 +377,13 @@ def rocm_unquantized_gemm(
     weight: torch.Tensor,
     bias: torch.Tensor | None = None,
 ) -> torch.Tensor:
+    # dispatch_unquantized_gemm() picks this backend for any ROCm build,
+    # regardless of the tensor's actual device; the custom op below is only
+    # registered for the CUDA/HIP dispatch key, so route CPU tensors (e.g.
+    # from unit tests that build layers without moving them to the GPU)
+    # through the device-agnostic fallback instead of hard-crashing.
+    if not x.is_cuda:
+        return default_unquantized_gemm(layer, x, weight, bias)
     return torch.ops.vllm.rocm_unquantized_gemm(x, weight, bias)
 
 
