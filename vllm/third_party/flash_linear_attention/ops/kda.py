@@ -68,7 +68,8 @@ def fused_recurrent_kda_fwd(
     else:
         stride_indices_seq, stride_indices_tok = ssm_state_indices.stride()
 
-    grid = (NK, NV, N * HV)
+    # CUDA limits grid Y/Z dimensions to 65535, so N * HV goes in X.
+    grid = (N * HV, NV, NK)
     fused_recurrent_gated_delta_rule_fwd_kernel[grid](
         q=q,
         k=k,
