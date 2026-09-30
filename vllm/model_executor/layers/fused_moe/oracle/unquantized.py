@@ -225,6 +225,8 @@ def select_unquantized_moe_backend(
     """Select the primary Unquantized MoE backend.
     Note: Shape-specific fallbacks may still occur at runtime.
     """
+    # NOTE: the kernels are selected in the following order.
+    AVAILABLE_BACKENDS = _get_priority_backends(moe_config)
 
     def _make_log_backend(
         backend: UnquantizedMoeBackend,
@@ -292,9 +294,6 @@ def select_unquantized_moe_backend(
             moe_config,
             mk.FusedMoEActivationFormat.Standard,
         )
-
-    # NOTE: the kernels are selected in the following order.
-    AVAILABLE_BACKENDS = _get_priority_backends(moe_config)
 
     # NOTE(rob): We need to peak into the P/F selection to determine
     # if we are using the batched or standard expert format, which
