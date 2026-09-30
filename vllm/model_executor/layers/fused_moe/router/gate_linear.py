@@ -6,7 +6,6 @@ from torch.nn.parameter import Parameter
 import vllm._custom_ops as ops
 from vllm.logger import init_logger
 from vllm.model_executor.custom_op import PluggableLayer
-from vllm.model_executor.layers.fused_moe.router import bf16x3_router_gemm_rocm
 from vllm.model_executor.layers.linear import (
     ReplicatedLinear,
     UnquantizedLinearMethod,
@@ -149,6 +148,10 @@ class GateLinear(ReplicatedLinear):
         # ROCm bf16x3 router GEMM eligibility. out_dtype may still be None here
         # and is folded in by set_out_dtype; the split itself is only built
         # once the tier is known to be on (see _GateLinearMethod).
+        from vllm.model_executor.layers.fused_moe.router import (
+            bf16x3_router_gemm_rocm,
+        )
+
         self._rocm_bf16x3_weight_eligible = (
             self._router_gemm_no_bias
             and self.weight.dtype == torch.float32
@@ -320,6 +323,10 @@ class _GateLinearMethod(UnquantizedLinearMethod):
         if not layer.allow_rocm_bf16x3_router_gemm:
             return
         try:
+            from vllm.model_executor.layers.fused_moe.router import (
+                bf16x3_router_gemm_rocm,
+            )
+
             layer._bf16x3_weight = bf16x3_router_gemm_rocm.split_bf16x3(layer.weight)
         except ValueError as exc:
             layer.allow_rocm_bf16x3_router_gemm = False
@@ -344,6 +351,10 @@ def rocm_bf16x3_router_gemm_dispatch_impl(
     ``@support_torch_compile`` model code and vLLM drops all Dynamo guards, so
     a plain Python branch on ``x.shape[0]`` would be frozen at first trace.
     """
+    from vllm.model_executor.layers.fused_moe.router import (
+        bf16x3_router_gemm_rocm,
+    )
+
     if bf16x3_router_gemm_rocm.is_supported(x, weight):
         return bf16x3_router_gemm_rocm.bf16x3_router_gemm(x, weight_split)
     # Below MIN_TOKENS, hand back to the low-M gfx950 kernel this tier is
