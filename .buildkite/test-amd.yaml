@@ -1859,6 +1859,7 @@ steps:
   - if [ "$$BUILDKITE_PARALLEL_JOB" = "0" ]; then pytest -v -s -x lora/test_gptoss_tp.py; fi
   - if [ "$$BUILDKITE_PARALLEL_JOB" = "1" ]; then pytest -v -s -x lora/test_qwen35_densemodel_lora.py; fi
   - if [ "$$BUILDKITE_PARALLEL_JOB" = "2" ]; then pytest -v -s -x lora/test_gemma4_tp.py; fi
+  - if [ "$$BUILDKITE_PARALLEL_JOB" = "0" ]; then pytest -v -s -x lora/test_sequence_classification.py::test_batched_loras_tp; fi
 
 #------------------------------------------------------  mi300 · model_executor  -------------------------------------------------------#
 

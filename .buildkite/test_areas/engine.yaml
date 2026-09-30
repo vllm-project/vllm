@@ -59,6 +59,11 @@ steps:
       - image-build-amd
       source_file_dependencies:
       - vllm/platforms/rocm.py
+      commands:
+      - pytest -v -s v1/engine/test_preprocess_error_handling.py
+      - pytest -v -s v1/engine --ignore v1/engine/test_preprocess_error_handling.py
+      - pytest -v -s v1/test_tensor_ipc_queue.py
+      - pytest -v -s config/test_mp_reducer.py
 
 - label: ":nvidia: (H200 MIG 18GB) E2E Scheduling"
   key: e2e-scheduling-1-gpu
