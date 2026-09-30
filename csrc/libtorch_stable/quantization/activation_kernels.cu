@@ -34,6 +34,12 @@ typedef __hip_fp8x4_e4m3_fnuz __nv_fp8x4_e4m3;
 
 namespace vllm {
 
+// fp32 silu with the fast intrinsics, as silu_and_mul_nvfp4_quant and the
+// Inductor-generated kernel compute it.
+__device__ __forceinline__ float silu_fast(float x) {
+  return __fdividef(x, (1.f + __expf(-x)));
+}
+
 // Two saturated floats to two fp8 values. The packed cvt rounds each lane
 // exactly like the scalar cvt, so both paths produce the same bits.
 template <typename fp8_type>
@@ -131,12 +137,6 @@ __global__ void __launch_bounds__(kActQuantBlockSize, kActQuantMinBlocksPerSm)
 
 __device__ __forceinline__ float silu(float x) {
   return __fdividef(x, (1.f + expf(-x)));
-}
-
-// fp32 silu with the fast intrinsics, as silu_and_mul_nvfp4_quant and the
-// Inductor-generated kernel compute it.
-__device__ __forceinline__ float silu_fast(float x) {
-  return __fdividef(x, (1.f + __expf(-x)));
 }
 
 __device__ __forceinline__ float2 silu2(float2 x) {
