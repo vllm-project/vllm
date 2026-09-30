@@ -1814,6 +1814,32 @@ PART_TYPES_TO_SKIP_NONE_CONTENT = (
 TEXT_PART_TYPES = frozenset(
     {"text", "input_text", "output_text", "refusal", "thinking"}
 )
+# Content part types that carry no multimodal data.
+_TEXT_CONTENT_PART_TYPES = TEXT_PART_TYPES | {"tool_reference"}
+# Keys that mark a content part as multimodal, whatever its ``type``.
+_MEDIA_CONTENT_PART_KEYS = frozenset(MM_PARSER_MAP) - _TEXT_CONTENT_PART_TYPES
+
+
+def has_non_text_content(messages: Any) -> bool:
+    """Whether any message in ``messages`` has a non-text content part.
+
+    Only list content is inspected, so validated chat content that is a
+    one-shot iterator is never consumed.
+    """
+    if not isinstance(messages, list):
+        return False
+    for msg in messages:
+        content = msg.get("content") if isinstance(msg, dict) else None
+        if not isinstance(content, list):
+            continue
+        for part in content:
+            if isinstance(part, dict) and (
+                any(key in part for key in _MEDIA_CONTENT_PART_KEYS)
+                or not isinstance(part_type := part.get("type", "text"), str)
+                or part_type not in _TEXT_CONTENT_PART_TYPES
+            ):
+                return True
+    return False
 
 
 def _parse_chat_message_content_parts(

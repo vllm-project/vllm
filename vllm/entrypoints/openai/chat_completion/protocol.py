@@ -20,10 +20,9 @@ from pydantic import (
 
 from vllm.config import ModelConfig
 from vllm.entrypoints.chat_utils import (
-    MM_PARSER_MAP,
-    TEXT_PART_TYPES,
     ChatCompletionMessageParam,
     ChatTemplateContentFormatOption,
+    has_non_text_content,
 )
 from vllm.entrypoints.generate.base.protocol import (
     AnyResponseFormat,
@@ -59,11 +58,6 @@ logger = init_logger(__name__)
 
 _INT64_MIN = -(2**63)
 _INT64_MAX = 2**63 - 1
-
-# Content part types that carry no multimodal data.
-_TEXT_CONTENT_PART_TYPES = TEXT_PART_TYPES | {"tool_reference"}
-# Keys that mark a content part as multimodal, whatever its ``type``.
-_MEDIA_CONTENT_PART_KEYS = frozenset(MM_PARSER_MAP) - _TEXT_CONTENT_PART_TYPES
 
 
 class ChatMessage(OpenAIBaseModel):
@@ -991,29 +985,16 @@ class ChatCompletionRequest(OpenAIBaseModel):
         if not isinstance(data, dict):
             return data
         kv_transfer_params = data.get("kv_transfer_params")
-        messages = data.get("messages")
         if (
-            not isinstance(kv_transfer_params, dict)
-            or kv_transfer_params.get("prompt_token_ids") is None
-            or not isinstance(messages, list)
+            isinstance(kv_transfer_params, dict)
+            and kv_transfer_params.get("prompt_token_ids") is not None
+            and has_non_text_content(data.get("messages"))
         ):
-            return data
-        for msg in messages:
-            content = msg.get("content") if isinstance(msg, dict) else None
-            if not isinstance(content, list):
-                continue
-            for part in content:
-                if isinstance(part, dict) and (
-                    any(key in part for key in _MEDIA_CONTENT_PART_KEYS)
-                    or not isinstance(part_type := part.get("type", "text"), str)
-                    or part_type not in _TEXT_CONTENT_PART_TYPES
-                ):
-                    logger.debug(
-                        "Ignoring kv_transfer_params['prompt_token_ids']: "
-                        "messages have non-text content and are rendered instead."
-                    )
-                    kv_transfer_params.pop("prompt_token_ids")
-                    return data
+            logger.debug(
+                "Ignoring kv_transfer_params['prompt_token_ids']: "
+                "messages have non-text content and are rendered instead."
+            )
+            kv_transfer_params.pop("prompt_token_ids")
         return data
 
     @model_validator(mode="before")
