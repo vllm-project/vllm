@@ -1671,14 +1671,14 @@ class TestStopSequenceReason:
 class TestToolUseStopReason:
     """A response carrying a tool_use block reports ``stop_reason="tool_use"``
     even when the chat layer says ``finish_reason="stop"``, as it does for a
-    forced (named) tool. Truncation and matched stop strings stay truthful.
+    forced (named) tool. A call cut short by max_tokens or a stop string does not.
     """
 
     @pytest.mark.parametrize(
         ("finish_reason", "stop_reason", "expected"),
         [
             ("stop", None, "tool_use"),
-            ("tool_calls", "</x>", "stop_sequence"),
+            ("tool_calls", "</x>", "tool_use"),
         ],
     )
     def test_non_streaming(self, finish_reason, stop_reason, expected):
@@ -1706,18 +1706,25 @@ class TestToolUseStopReason:
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
-        ("finish_reason", "expected"),
-        [("stop", "tool_use"), ("length", "max_tokens")],
+        ("args", "finish_reason", "stop_reason", "expected"),
+        [
+            ('{"city": "Paris"}', "stop", None, "tool_use"),
+            ('{"city": "Pa', "length", None, "max_tokens"),
+            ('{"city": "Paris"}', "tool_calls", "</x>", "tool_use"),
+            ('{"city": "Pa', "tool_calls", "</x>", "stop_sequence"),
+        ],
     )
-    async def test_streaming(self, finish_reason, expected):
+    async def test_streaming(self, args, finish_reason, stop_reason, expected):
         async def sse_input():
             yield _make_stream_chunk(delta=DeltaMessage(role="assistant"))
             yield _make_stream_chunk(
                 delta=DeltaMessage(
-                    tool_calls=[_tc(id="call_1", name="get_weather", args='{"c')]
+                    tool_calls=[_tc(id="call_1", name="get_weather", args=args)]
                 )
             )
-            yield _make_stream_chunk(finish_reason=finish_reason)
+            yield _make_stream_chunk(
+                finish_reason=finish_reason, stop_reason=stop_reason
+            )
             yield _make_stream_chunk(
                 choices=[],
                 usage=UsageInfo(prompt_tokens=5, total_tokens=8, completion_tokens=3),

@@ -101,6 +101,7 @@ def _to_anthropic_stop_reason(
     finish_reason: str | None,
     stop_reason: int | str | None,
     tool_used: bool,
+    tool_complete: bool,
 ) -> tuple[
     Literal["end_turn", "max_tokens", "stop_sequence", "tool_use"] | None,
     str | None,
@@ -110,12 +111,15 @@ def _to_anthropic_stop_reason(
     Anthropic reports ``tool_use`` whenever the model invoked a tool. The chat
     layer reports ``finish_reason="stop"`` for a named (forced) tool call, so
     ``tool_used`` records whether a ``tool_use`` block was produced.
-    Truncation and matched stop strings take precedence.
+    ``max_tokens`` always wins. A matched stop string wins unless the tool
+    calls are complete (``tool_complete``): a call it cut short must not run.
     """
     if finish_reason == "length":
         return "max_tokens", None
     if finish_reason not in ("stop", "tool_calls"):
         return None, None
+    if tool_complete:
+        return "tool_use", None
     # vLLM reports the matched stop string in stop_reason (a str);
     # an int stop-token-id or None (natural EOS) is not a stop sequence.
     if isinstance(stop_reason, str):
@@ -123,6 +127,14 @@ def _to_anthropic_stop_reason(
     if finish_reason == "tool_calls" or tool_used:
         return "tool_use", None
     return "end_turn", None
+
+
+def _is_json(text: str) -> bool:
+    try:
+        json.loads(text)
+    except json.JSONDecodeError:
+        return False
+    return True
 
 
 def wrap_data_with_event(data: str, event: str):
@@ -778,6 +790,8 @@ class AnthropicServingMessages(OpenAIServingChat):
             choice.finish_reason,
             choice.stop_reason,
             tool_used=bool(choice.message.tool_calls),
+            # Their arguments are json-decoded below, so parsed calls are complete.
+            tool_complete=bool(choice.message.tool_calls),
         )
 
         content: list[AnthropicContentBlock] = []
@@ -862,6 +876,9 @@ class AnthropicServingMessages(OpenAIServingChat):
             # int stop-token-id / None are not stop sequences.
             stop_sequence: int | str | None = None
             tool_used = False
+            # Arguments of the latest tool_use block; only the last call can be
+            # cut short by a stop string.
+            last_tool_args: list[str] = []
             state = _ActiveBlockState()
             # Map from tool call index to tool_use_id
             tool_index_to_id: dict[int, str] = {}
@@ -976,6 +993,9 @@ class AnthropicServingMessages(OpenAIServingChat):
                                     finish_reason or "stop",
                                     stop_sequence,
                                     tool_used=tool_used,
+                                    tool_complete=(
+                                        tool_used and _is_json("".join(last_tool_args))
+                                    ),
                                 )
                             )
                             stop_delta = AnthropicDelta(
@@ -1077,6 +1097,7 @@ class AnthropicServingMessages(OpenAIServingChat):
                                         for event in stop_and_flush():
                                             yield event
                                         tool_used = True
+                                        last_tool_args = []
                                         start_event = start_block(
                                             AnthropicContentBlock(
                                                 type="tool_use",
@@ -1092,6 +1113,9 @@ class AnthropicServingMessages(OpenAIServingChat):
                                         and tool_call.function.arguments
                                         and state.tool_use_id == tool_call.id
                                     ):
+                                        last_tool_args.append(
+                                            tool_call.function.arguments
+                                        )
                                         chunk = AnthropicStreamEvent(
                                             index=(
                                                 state.block_index
@@ -1117,6 +1141,9 @@ class AnthropicServingMessages(OpenAIServingChat):
                                         and tool_call.function.arguments
                                         and state.tool_use_id == tool_use_id
                                     ):
+                                        last_tool_args.append(
+                                            tool_call.function.arguments
+                                        )
                                         chunk = AnthropicStreamEvent(
                                             index=(
                                                 state.block_index
