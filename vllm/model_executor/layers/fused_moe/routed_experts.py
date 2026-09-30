@@ -691,7 +691,10 @@ class RoutedExperts(PluggableLayer):
             )
             and is_transposed
         ):
-            loaded_weight = loaded_weight.t().contiguous()
+            # Transpose on the parameter's device: a CPU transpose of the
+            # mmap view reads the file column-wise, which is very slow on
+            # NFS. The contiguous .to() reads it sequentially.
+            loaded_weight = loaded_weight.to(param.device).t().contiguous()
 
         if shard_id not in ("w1", "w2", "w3"):
             raise ValueError(f"shard_id must be ['w1','w2','w3'] but got {shard_id}.")
