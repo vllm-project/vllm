@@ -1159,10 +1159,15 @@ class SimpleCPUOffloadScheduler:
                         )
                     )
 
-        # Free CPU and GPU blocks' ref counts to turn them into prefix cache
+        # Free CPU and GPU blocks' ref counts to turn them into prefix cache.
+        # Lazy stores take cached blocks from the eviction end of the GPU free
+        # queue; return them there now that the CPU holds them. Appended as most
+        # recently used, they would outlive fresher blocks that the CPU does not
+        # hold, and the allocator would evict those instead.
         self.cpu_block_pool.free_blocks(cpu_blocks)
         self._gpu_block_pool.free_blocks(
-            self._gpu_block_pool.blocks[bid] for bid in gpu_block_ids
+            (self._gpu_block_pool.blocks[bid] for bid in gpu_block_ids),
+            evict_first=self._lazy_mode,
         )
 
     def _release_transfer_refs(self, transfer: TransferMeta) -> None:

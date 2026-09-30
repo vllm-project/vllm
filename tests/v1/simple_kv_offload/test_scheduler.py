@@ -1050,6 +1050,41 @@ def test_lazy_duplicate_store_skipped() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Test 2d: Lazy stores return offloaded blocks to the eviction end
+# ---------------------------------------------------------------------------
+def test_lazy_store_returns_blocks_to_eviction_end() -> None:
+    """Lazy: once stored, GPU blocks go back to the front of the free queue.
+
+    The scan offloads the blocks the allocator evicts next. Appended as most
+    recently used after the copy, they would outlive fresher cached blocks
+    that the CPU does not hold, so the allocator would evict those instead.
+    """
+    fix = make_scheduler(num_cpu_blocks=32, num_gpu_blocks=32, lazy=True)
+    sched = fix.scheduler
+    gpu_pool = fix.gpu_block_pool
+    target = sched._target_free
+
+    # Two finished requests leave 2 * target cached blocks in the free queue.
+    for _ in range(2):
+        req = make_request(num_blocks=target)
+        gpu_pool.free_blocks(_allocate_gpu_blocks(gpu_pool, req, target))
+    fillers = _flush_old_blocks_to_lru_head(
+        gpu_pool, num_filler_blocks=gpu_pool.get_num_free_blocks() - 2 * target
+    )
+
+    # The scan offloads the older request's blocks, at the front of the queue.
+    meta = sched.build_connector_meta(make_scheduler_output({}))
+    assert meta.store_event >= 0
+    assert len(meta.store_gpu_blocks) == target
+    simulate_store_completion(sched, meta.store_event)
+
+    # The allocator evicts the offloaded blocks first, not the newer request's.
+    evicted = gpu_pool.get_new_blocks(target)
+    assert [b.block_id for b in evicted] == list(meta.store_gpu_blocks)
+    gpu_pool.free_blocks(fillers + evicted)
+
+
+# ---------------------------------------------------------------------------
 # Test 3: LRU eviction order
 # ---------------------------------------------------------------------------
 def test_lru_eviction_order() -> None:
