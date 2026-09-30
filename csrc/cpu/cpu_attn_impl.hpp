@@ -1087,6 +1087,15 @@ class AttentionScheduler {
 
     // metadata_ptr->print();
 
+    // test out of boundary access
+    // {
+    //     float* cache_ptr =
+    //     cpu_utils::ScratchPadManager::getl_scratchpad_manager()->get_data<float>();
+    //     for (int64_t i = 0; i < scratchpad_size / sizeof(float); ++i) {
+    //         cache_ptr[i] = std::numeric_limits<float>::quiet_NaN();
+    //     }
+    // }
+
     return metadata_tensor;
   }
 
@@ -2045,6 +2054,16 @@ class AttentionMainLoop {
                   AttentionScheduler::align_kv_tile_pos(
                       kv_tile_start_pos, kv_tile_end_pos, blocksize_alignment);
 
+              // std::printf("thread_id: %d, req_id: %d, q_token_start: %d,
+              // q_token_end: %d, q_head_start: %d, q_head_end: %d, kv_head_idx:
+              // %d, kv_pos_start: %d, kv_pos_end: %d\n",
+              //                 thread_id, current_group_idx,
+              //                 q_token_start_idx, q_token_start_idx +
+              //                 actual_q_token_num, q_head_start_idx,
+              //                 q_head_start_idx + curr_q_heads_per_kv,
+              //                 kv_head_idx, kv_tile_start_pos,
+              //                 kv_tile_end_pos);
+
               // move buffers
               kv_cache_t* curr_k_cache =
                   reinterpret_cast<kv_cache_t*>(input->key_cache) +
@@ -2164,6 +2183,18 @@ class AttentionMainLoop {
                   const int32_t actual_kv_token_num =
                       aligned_actual_kv_tile_pos_right -
                       aligned_actual_kv_tile_pos_left;
+
+                  //   std::printf("\tq_iter_idx: %d, q_token_start: %d,
+                  //   q_token_end: %d, q_token_num: %d, q_head_num: %d,
+                  //   q_pos_start: %d, q_pos_end: %d, kv_pos_start: %d,
+                  //   kv_pos_end: %d\n",
+                  //             q_iter_idx, q_token_start_idx +
+                  //             q_head_tile_token_offset,  q_token_start_idx +
+                  //             q_head_tile_token_offset + q_tile_token_num,
+                  //             q_tile_token_num, q_tile_head_num,
+                  //             q_tile_pos_left, q_tile_pos_right,
+                  //             aligned_actual_kv_tile_pos_left,
+                  //             aligned_actual_kv_tile_pos_right);
 
                   // Move buffers
                   q_buffer_t* curr_q_heads_buffer =
