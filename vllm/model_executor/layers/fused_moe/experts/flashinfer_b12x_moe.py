@@ -5,6 +5,7 @@ from typing import Any
 
 import torch
 
+import vllm.envs as envs
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import (
@@ -285,16 +286,21 @@ class FlashInferB12xExperts(mk.FusedMoEExpertsModular):
         wrapper = self._wrapper
         assert wrapper is not None
 
-        # VLLM_MOE_SKIP_PADDING (on by default) makes the topk kernels write -1
-        # into topk_ids for cudagraph padding rows. The b12x kernels index the
-        # expert state with these ids directly, so the sentinel has to be
-        # neutralized here: route padding rows to expert 0 with zero weight,
-        # contributing nothing to the output. Done branchlessly to stay
-        # cudagraph-capturable.
+        # VLLM_MOE_SKIP_PADDING (on by default) makes the topk routers write -1
+        # into topk_ids for cudagraph padding rows. The mask is per row
+        # (`is_padding[:num_tokens]`), so a marked row is -1 in every slot and
+        # its whole output is discarded. The b12x kernels index the expert state
+        # with these ids directly, so the sentinel has to be neutralized here:
+        # route padding rows to expert 0 with zero weight, contributing nothing
+        # to the output. Branchless, so it stays cudagraph-capturable. Every
+        # sentinel writer is gated on the same flag and b12x takes no expert
+        # map, so with the flag off no -1 can arrive and the guard is skipped
+        # (a static read, resolved while the graph is traced).
         topk_ids = topk_ids.to(torch.int32)
-        is_padding = topk_ids < 0
-        topk_ids = torch.where(is_padding, 0, topk_ids)
-        topk_weights = torch.where(is_padding, 0.0, topk_weights)
+        if envs.VLLM_MOE_SKIP_PADDING:
+            is_padding = topk_ids < 0
+            topk_ids = torch.where(is_padding, 0, topk_ids)
+            topk_weights = torch.where(is_padding, 0.0, topk_weights)
 
         wrapper_output = wrapper.run(
             x=hidden_states,
