@@ -43,6 +43,28 @@ For example:
 VLLM_USE_RUST_FRONTEND=1 vllm serve Qwen/Qwen3-0.6B
 ```
 
+### gRPC discovery withdrawal on shutdown
+
+For discovery clients that watch standard gRPC health, the Rust frontend can
+keep accepting late requests briefly after reporting `NOT_SERVING`:
+
+```bash
+vllm-rs serve Qwen/Qwen3-0.6B --grpc-port 50051 \
+  --grpc-shutdown-grace-period 5 --shutdown-timeout 60
+```
+
+Send SIGTERM to `vllm-rs`. It publishes `NOT_SERVING`, keeps gRPC generation
+available for five seconds, then closes admission and drains accepted requests.
+The grace period is included in the 60-second frontend shutdown budget. The
+managed Python engine stays alive until the frontend finishes draining.
+The default grace is zero and preserves existing behavior. HTTP admission
+still closes when shutdown begins.
+
+This is a fixed propagation allowance, not an acknowledgment from discovery.
+It cannot guarantee successful late requests during discovery outages, engine
+failure, or signals sent directly to the Python engine. Externally managed
+engines must remain alive through frontend withdrawal and draining.
+
 ### RL weight synchronization
 
 With `VLLM_SERVER_DEV_MODE=1`, the Rust frontend supports the HTTP weight-transfer
