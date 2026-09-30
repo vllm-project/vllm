@@ -76,7 +76,6 @@ async def generate(request: GenerateRequest, raw_request: Request):
 abort_router = APIRouter()
 
 
-@abort_router.post("/abort_requests")
 async def abort_requests(raw_request: Request):
     """Abort one or more requests. To be used in a
     Disaggregated Everything setup.
@@ -99,8 +98,16 @@ async def abort_requests(raw_request: Request):
     return Response(status_code=200)
 
 
+# Under the `/inference` prefix, so `--api-key` guards it.
+router.add_api_route("/inference/v1/abort_requests", abort_requests, methods=["POST"])
+# Unauthenticated legacy path, kept for existing `--tokens-only` deployments.
+abort_router.add_api_route("/abort_requests", abort_requests, methods=["POST"])
+
+
 def attach_router(app: FastAPI):
     app.include_router(router)
+    if not getattr(app.state.args, "tokens_only", False):
+        return
     # The RLHF dev router registers its own /abort_requests first. Registering
     # this one too would only add a shadowed route with a duplicate operation ID.
     has_abort_route = any(

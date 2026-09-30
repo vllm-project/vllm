@@ -472,8 +472,7 @@ def output_mode_or_tokens(value: Any) -> Any:
     """Discriminator for `GenerateResponse` and `GenerateStreamResponse`.
 
     A missing `output_mode` means `tokens`. Existing clients and servers
-    that predate the field never send it and both unions are also parsed as
-    input by `/derender`.
+    that predate the field never send it.
     """
     if isinstance(value, dict):
         return value.get("output_mode", "tokens")
@@ -508,8 +507,13 @@ class DerenderChatRequest(BaseModel):
     model: str | None = None
     """Served model name. Defaults to the server's served model name."""
 
-    generate_response: GenerateResponse
-    """The complete token-in / token-out engine response to derender."""
+    generate_response: GenerateTokensResponse
+    """The complete token-in / token-out engine response to derender.
+
+    Only `output_mode="tokens"` responses are accepted. Other modes are
+    already detokenized and re-decoding their `token_ids` would undo the
+    engine's stop string truncation.
+    """
 
     prompt_tokens: int | None = None
     """Prompt token count for usage; defaults to 0 if omitted.
@@ -551,9 +555,9 @@ class DerenderCompletionRequest(BaseModel):
     model: str | None = None
     """Served model name. Defaults to the server's served model name."""
 
-    generate_responses: list[GenerateResponse]
-    """One response per prompt, parallel to the list[GenerateRequest]
-    returned by /v1/completions/render."""
+    generate_responses: list[GenerateTokensResponse]
+    """One `output_mode="tokens"` response per prompt, parallel to the
+    list[GenerateRequest] returned by /v1/completions/render."""
 
     prompt_tokens: list[int] | None = None
     """One prompt token count per response; each defaults to 0 if omitted.
@@ -739,8 +743,9 @@ class DerenderChatStreamRequest(BaseModel):
     stream: Literal[True]
 
     model: str | None = None
-    generate_chunk: GenerateStreamResponse
-    """One SSE chunk from `/inference/v1/generate` (`stream=True`)."""
+    generate_chunk: GenerateTokensStreamResponse
+    """One `output_mode="tokens"` SSE chunk from `/inference/v1/generate`
+    (`stream=True`)."""
 
     stream_state: DerenderStreamState | None = None
     """Client carried detok state from the previous call. `None` on first."""
@@ -785,8 +790,8 @@ class DerenderCompletionStreamRequest(BaseModel):
     stream: Literal[True]
 
     model: str | None = None
-    generate_chunk: GenerateStreamResponse
-    """One SSE chunk from `/inference/v1/generate`."""
+    generate_chunk: GenerateTokensStreamResponse
+    """One `output_mode="tokens"` SSE chunk from `/inference/v1/generate`."""
 
     stream_state: DerenderStreamState | None = None
     """Client-carried detok state. `None` on the first call."""

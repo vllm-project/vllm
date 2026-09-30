@@ -7,6 +7,7 @@ from fastapi import FastAPI
 
 from vllm.entrypoints.launchers.api_server.routers import register_api_routers
 from vllm.entrypoints.scale_out.token_in_token_out.api_router import attach_router
+from vllm.entrypoints.serve.middleware.authenticate import GUARDED_PREFIX
 from vllm.tasks import SupportedTask
 
 RENDER_PATHS = {
@@ -18,7 +19,8 @@ RENDER_PATHS = {
     "/v1/responses/render",
 }
 GENERATE_PATH = "/inference/v1/generate"
-ABORT_PATH = "/abort_requests"
+ABORT_PATH = "/inference/v1/abort_requests"
+UNAUTHENTICATED_ABORT_PATH = "/abort_requests"
 SCALE_OUT_PATHS = RENDER_PATHS | {GENERATE_PATH, ABORT_PATH}
 
 
@@ -68,26 +70,31 @@ def test_render_routes_remain_enabled_for_render_server():
 def test_tokens_only_mode_enables_generate_routes_when_flag_is_unset():
     paths = registered_paths(("generate",), tokens_only=True)
 
-    assert paths >= {GENERATE_PATH, ABORT_PATH}
+    assert paths >= {GENERATE_PATH, ABORT_PATH, UNAUTHENTICATED_ABORT_PATH}
 
 
-def test_abort_route_does_not_depend_on_tokens_only():
+def test_abort_route_without_tokens_only_requires_api_key():
     """A decode pool that loads a tokenizer serves generate without
-    --tokens-only and still needs /abort_requests."""
+    --tokens-only and still needs to abort, but only behind --api-key."""
     paths = registered_paths(("generate",), enable_scale_out=True, tokens_only=False)
 
     assert ABORT_PATH in paths
+    assert ABORT_PATH.startswith(GUARDED_PREFIX)
+    assert UNAUTHENTICATED_ABORT_PATH not in paths
 
 
-def test_abort_route_is_not_registered_twice():
+def test_unauthenticated_abort_route_is_not_registered_twice():
     """The RLHF dev router registers /abort_requests before the scale-out
     routers, so attaching the scale-out one too would add a shadowed duplicate."""
     app = FastAPI()
+    app.state.args = Namespace(tokens_only=True)
 
-    @app.post(ABORT_PATH)
+    @app.post(UNAUTHENTICATED_ABORT_PATH)
     async def existing_abort_requests():
         return None
 
     attach_router(app)
 
-    assert [route.path for route in app.routes].count(ABORT_PATH) == 1
+    paths = [route.path for route in app.routes]
+    assert paths.count(UNAUTHENTICATED_ABORT_PATH) == 1
+    assert ABORT_PATH in paths

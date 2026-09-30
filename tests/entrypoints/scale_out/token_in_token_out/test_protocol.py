@@ -15,6 +15,8 @@ from pydantic import TypeAdapter, ValidationError
 from vllm.entrypoints.scale_out.token_in_token_out.protocol import (
     DerenderChatRequest,
     DerenderChatStreamRequest,
+    DerenderCompletionRequest,
+    DerenderCompletionStreamRequest,
     GenerateRequest,
     GenerateResponse,
     GenerateStreamResponse,
@@ -160,8 +162,7 @@ def test_tokens_mode_allows_detokenize_false():
 
 
 def test_response_without_output_mode_parses_as_tokens():
-    """Existing clients and older servers never send output_mode, and
-    /derender parses GenerateResponse as input."""
+    """Existing clients and older servers never send output_mode."""
     parsed = TypeAdapter(GenerateResponse).validate_python(
         {"choices": [{"index": 0, "token_ids": [1]}]}
     )
@@ -212,6 +213,24 @@ def test_derender_requests_accept_responses_without_output_mode():
             "generate_chunk": {"choices": [{"index": 0, "token_ids": [1]}]},
         }
     )
+
+
+def test_derender_requests_reject_text_responses():
+    """Text responses are already detokenized with stop strings applied, so
+    re-decoding their token_ids would silently undo the truncation."""
+    text = {"output_mode": "text", "choices": [{"index": 0, "text": "hi"}]}
+    with pytest.raises(ValidationError, match="output_mode"):
+        DerenderChatRequest.model_validate({"generate_response": text})
+    with pytest.raises(ValidationError, match="output_mode"):
+        DerenderCompletionRequest.model_validate({"generate_responses": [text]})
+    with pytest.raises(ValidationError, match="output_mode"):
+        DerenderChatStreamRequest.model_validate(
+            {"stream": True, "generate_chunk": text}
+        )
+    with pytest.raises(ValidationError, match="output_mode"):
+        DerenderCompletionStreamRequest.model_validate(
+            {"stream": True, "generate_chunk": text}
+        )
 
 
 def test_tokens_response_echoes_output_mode_without_text():

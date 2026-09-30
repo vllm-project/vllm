@@ -19,6 +19,7 @@ from vllm.v1.engine.detokenizer import check_stop_strings
 
 MODEL_NAME = "Qwen/Qwen3-0.6B"
 GEN_ENDPOINT = "/inference/v1/generate"
+ABORT_ENDPOINT = "/inference/v1/abort_requests"
 
 
 def get_vocab_size(model_name):
@@ -718,7 +719,7 @@ async def test_text_mode_rejected_when_tokens_only(client):
 async def test_text_mode_stream_delivers_abort_finish_chunk(
     client, tokenizer, messages
 ):
-    """The final output after /abort_requests has no new token IDs, so it
+    """The final output after an abort has no new token IDs, so it
     reaches a text stream only because text mode emits finish-only chunks."""
     payload = {
         **_text_mode_payload(
@@ -741,7 +742,7 @@ async def test_text_mode_stream_delivers_abort_finish_chunk(
             chunks.append(chunk)
             if not aborted and chunk["choices"] and chunk["choices"][0]["text"]:
                 abort = await client.post(
-                    "/abort_requests",
+                    ABORT_ENDPOINT,
                     json={"request_ids": [chunk["request_id"]]},
                 )
                 assert abort.status_code == 200
@@ -758,13 +759,19 @@ async def test_text_mode_stream_delivers_abort_finish_chunk(
 @pytest.mark.asyncio
 @pytest.mark.skipif(
     envs.VLLM_USE_RUST_FRONTEND,
-    reason="the Rust frontend aborts all requests when request_ids is missing",
+    reason="the Rust frontend does not serve /inference/v1/abort_requests",
 )
 async def test_abort_requests_is_served_without_tokens_only(client):
     resp = await client.post(
-        "/abort_requests", json={"request_ids": ["generate-tokens-unknown"]}
+        ABORT_ENDPOINT, json={"request_ids": ["generate-tokens-unknown"]}
     )
     assert resp.status_code == 200
 
-    resp = await client.post("/abort_requests", json={})
+    resp = await client.post(ABORT_ENDPOINT, json={})
     assert resp.status_code == 400
+
+    # The unauthenticated path is only served with --tokens-only.
+    resp = await client.post(
+        "/abort_requests", json={"request_ids": ["generate-tokens-unknown"]}
+    )
+    assert resp.status_code == 404

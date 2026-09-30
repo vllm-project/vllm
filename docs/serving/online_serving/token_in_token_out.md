@@ -37,8 +37,9 @@ print(response["choices"][0]["token_ids"])
 ### Text
 
 - `text` comes from the request's own detokenizer, so `skip_special_tokens`, `spaces_between_special_tokens`, `stop` and `include_stop_str_in_output` behave as they do on `/v1/completions`.
-- A matched stop string is cut from `text` unless `include_stop_str_in_output` is set. `token_ids` keeps every generated token, so decoding `token_ids` yourself, or through `/derender`, brings the stop string back.
-- With `stream: true`, each choice's `text` is the delta since the previous chunk. A chunk is sent whenever the engine output carries new text or a `finish_reason`, even with no new token IDs. That covers text held back for stop string matching and the final output after `/abort_requests`.
+- A matched stop string is cut from `text` unless `include_stop_str_in_output` is set. `token_ids` keeps every generated token, so decoding `token_ids` yourself brings the stop string back.
+- `/derender` only accepts `output_mode: "tokens"` responses and returns a 400 for text responses which are already detokenized.
+- With `stream: true`, each choice's `text` is the delta since the previous chunk. A chunk is sent whenever the engine output carries new text or a `finish_reason`, even with no new token IDs. That covers text held back for stop string matching and the final output after an abort.
 
 ### Logprobs
 
@@ -56,14 +57,15 @@ For using `output_mode` with separate prefill and decode pools, see [Disaggregat
 
 ## Aborting requests
 
-`POST /abort_requests` aborts in-flight requests. It is registered wherever `/inference/v1/generate` is, so it does not need `--tokens-only`.
+`POST /inference/v1/abort_requests` aborts in-flight requests. It is registered wherever `/inference/v1/generate` is and requires the API key when `--api-key` is set, like `/inference/v1/generate`.
 
 ```bash
-curl -X POST http://localhost:8000/abort_requests \
+curl -X POST http://localhost:8000/inference/v1/abort_requests \
+  -H "Authorization: Bearer $VLLM_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{"request_ids": ["generate-tokens-42"]}'
 ```
 
 The request ID is the `request_id` the server returned: the `X-Request-Id` header or body `request_id` you sent, prefixed with `generate-tokens-`. A missing `request_ids` returns a 400. The response is empty and the abort finishes in the background.
 
-`/abort_requests` doesn't require the API key, even when `--api-key` is set. See [Security](../../usage/security.md#unprotected-endpoints-no-api-key-required).
+With `--tokens-only`, the same handler is also served at `POST /abort_requests` for existing deployments. That path doesn't require the API key, even when `--api-key` is set. See [Security](../../usage/security.md#unprotected-endpoints-no-api-key-required).
