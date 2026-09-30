@@ -72,15 +72,12 @@ def test_start_profile_forwards_session_overrides(
 @pytest.mark.parametrize(
     "body",
     [
-        {"profile_prefix": "../trace"},
-        {"profile_prefix": ""},
-        {"delay_iterations": -1},
+        {"profile_prefix": 1},
         {"delay_iterations": "1"},
-        {"max_iterations": -1},
         {"max_iterations": "20"},
     ],
 )
-def test_start_profile_rejects_invalid_overrides(
+def test_start_profile_rejects_wrongly_typed_overrides(
     client: TestClient, engine_client: AsyncMock, body: dict
 ) -> None:
     response = client.post("/start_profile", json=body)

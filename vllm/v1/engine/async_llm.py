@@ -224,37 +224,34 @@ class AsyncLLM(EngineClient):
         if (
             not self._frontend_profiler_injected
             and vllm_config.profiler_config.should_profile_frontend
-            and self._profile_session_guard_enabled
         ):
-            profiler_dir = vllm_config.profiler_config.torch_profiler_dir
-            logger.info(
-                "Torch profiler enabled. AsyncLLM CPU traces will be collected under %s",  # noqa: E501
-                profiler_dir,
-            )
-            self._frontend_profiler_worker_name = (
-                f"{socket.gethostname()}_{os.getpid()}.async_llm"
-            )
-            frontend_profiler_config = replace(
-                vllm_config.profiler_config,
-                delay_iterations=0,
-                max_iterations=0,
-                wait_iterations=0,
-                warmup_iterations=0,
-            )
-            self.profiler = TorchProfilerWrapper(
-                frontend_profiler_config,
-                worker_name=self._frontend_profiler_worker_name,
-                local_rank=0,
-                activities=["CPU"],
-            )
-        elif (
-            not self._frontend_profiler_injected
-            and vllm_config.profiler_config.should_profile_frontend
-        ):
-            logger.warning(
-                "Frontend CPU profiling is disabled when multiple API server "
-                "processes share an engine."
-            )
+            if self._profile_session_guard_enabled:
+                profiler_dir = vllm_config.profiler_config.torch_profiler_dir
+                logger.info(
+                    "Torch profiler enabled. AsyncLLM CPU traces will be collected under %s",  # noqa: E501
+                    profiler_dir,
+                )
+                self._frontend_profiler_worker_name = (
+                    f"{socket.gethostname()}_{os.getpid()}.async_llm"
+                )
+                frontend_profiler_config = replace(
+                    vllm_config.profiler_config,
+                    delay_iterations=0,
+                    max_iterations=0,
+                    wait_iterations=0,
+                    warmup_iterations=0,
+                )
+                self.profiler = TorchProfilerWrapper(
+                    frontend_profiler_config,
+                    worker_name=self._frontend_profiler_worker_name,
+                    local_rank=0,
+                    activities=["CPU"],
+                )
+            else:
+                logger.warning(
+                    "Frontend CPU profiling is disabled when multiple API server "
+                    "processes share an engine."
+                )
 
     @classmethod
     def from_vllm_config(

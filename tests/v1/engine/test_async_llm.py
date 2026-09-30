@@ -88,11 +88,16 @@ def _mock_async_llm_dependencies(monkeypatch: pytest.MonkeyPatch):
     return engine_core
 
 
-def test_cuda_profiler_requests_reach_engine_core(monkeypatch: pytest.MonkeyPatch):
+def _mock_vllm_config() -> MagicMock:
     vllm_config = MagicMock()
     vllm_config.logging_config = LoggingConfig()
     vllm_config.observability_config.otlp_traces_endpoint = None
     vllm_config.scheduler_config.stream_interval = 1
+    return vllm_config
+
+
+def test_cuda_profiler_requests_reach_engine_core(monkeypatch: pytest.MonkeyPatch):
+    vllm_config = _mock_vllm_config()
     vllm_config.profiler_config.profiler = "cuda"
     vllm_config.profiler_config.ignore_frontend = False
     vllm_config.profiler_config.should_profile_frontend = False
@@ -115,10 +120,7 @@ def test_cuda_profiler_requests_reach_engine_core(monkeypatch: pytest.MonkeyPatc
 def test_cuda_only_torch_profiler_skips_frontend_cpu_trace(
     monkeypatch: pytest.MonkeyPatch,
 ):
-    vllm_config = MagicMock()
-    vllm_config.logging_config = LoggingConfig()
-    vllm_config.observability_config.otlp_traces_endpoint = None
-    vllm_config.scheduler_config.stream_interval = 1
+    vllm_config = _mock_vllm_config()
     vllm_config.profiler_config.profiler = "torch"
     vllm_config.profiler_config.ignore_frontend = False
     vllm_config.profiler_config.torch_profiler_activities = ["CUDA"]
@@ -136,10 +138,7 @@ def test_cuda_only_torch_profiler_skips_frontend_cpu_trace(
 def test_profile_forwards_overrides_rejects_duplicate_and_allows_restart(
     monkeypatch: pytest.MonkeyPatch,
 ):
-    vllm_config = MagicMock()
-    vllm_config.logging_config = LoggingConfig()
-    vllm_config.observability_config.otlp_traces_endpoint = None
-    vllm_config.scheduler_config.stream_interval = 1
+    vllm_config = _mock_vllm_config()
     vllm_config.profiler_config.should_profile_frontend = False
     engine_core = _mock_async_llm_dependencies(monkeypatch)
 
@@ -147,6 +146,7 @@ def test_profile_forwards_overrides_rejects_duplicate_and_allows_restart(
 
     async def profile():
         for kwargs in (
+            {"profile_prefix": "../trace"},
             {"delay_iterations": -1},
             {"max_iterations": -1},
         ):
@@ -177,10 +177,7 @@ def test_profile_forwards_overrides_rejects_duplicate_and_allows_restart(
 
 
 def test_stop_profile_waits_for_inflight_start(monkeypatch: pytest.MonkeyPatch):
-    vllm_config = MagicMock()
-    vllm_config.logging_config = LoggingConfig()
-    vllm_config.observability_config.otlp_traces_endpoint = None
-    vllm_config.scheduler_config.stream_interval = 1
+    vllm_config = _mock_vllm_config()
     engine_core = _mock_async_llm_dependencies(monkeypatch)
     frontend_profiler = MagicMock()
 
@@ -224,10 +221,7 @@ def test_interrupted_engine_profile_start_skips_frontend_profiler(
     """The frontend trace starts only after the engine start succeeds. A
     cancelled start may still reach the engine, so it keeps the session active
     until /stop_profile."""
-    vllm_config = MagicMock()
-    vllm_config.logging_config = LoggingConfig()
-    vllm_config.observability_config.otlp_traces_endpoint = None
-    vllm_config.scheduler_config.stream_interval = 1
+    vllm_config = _mock_vllm_config()
     engine_core = _mock_async_llm_dependencies(monkeypatch)
     frontend_profiler = MagicMock()
     engine = AsyncLLM(
@@ -270,10 +264,7 @@ def test_interrupted_engine_profile_start_skips_frontend_profiler(
 def test_multi_client_profile_uses_idempotent_engine_requests(
     monkeypatch: pytest.MonkeyPatch, tmp_path
 ):
-    vllm_config = MagicMock()
-    vllm_config.logging_config = LoggingConfig()
-    vllm_config.observability_config.otlp_traces_endpoint = None
-    vllm_config.scheduler_config.stream_interval = 1
+    vllm_config = _mock_vllm_config()
     vllm_config.profiler_config = ProfilerConfig(
         profiler="torch",
         torch_profiler_dir=str(tmp_path),
@@ -317,10 +308,7 @@ def test_multi_client_profile_uses_idempotent_engine_requests(
 def test_frontend_profiler_ignores_worker_iteration_bounds(
     monkeypatch: pytest.MonkeyPatch, tmp_path
 ):
-    vllm_config = MagicMock()
-    vllm_config.logging_config = LoggingConfig()
-    vllm_config.observability_config.otlp_traces_endpoint = None
-    vllm_config.scheduler_config.stream_interval = 1
+    vllm_config = _mock_vllm_config()
     vllm_config.profiler_config = ProfilerConfig(
         profiler="torch",
         torch_profiler_dir=str(tmp_path),
