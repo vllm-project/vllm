@@ -47,8 +47,6 @@ def _build(
     vllm_config.model_config.dtype = torch.bfloat16
     vllm_config.model_config.get_num_attention_heads.return_value = MODEL_WIDE_NUM_HEADS
     vllm_config.cache_config.cache_dtype = "auto"
-    vllm_config.uniform_decode_query_len = 4
-    vllm_config.speculative_config = None
     kv_cache_spec = SimpleNamespace(
         num_kv_heads=NUM_KV_HEADS, head_size=64, block_size=block_size
     )
@@ -107,7 +105,6 @@ def test_cpu_builder_schedules_short_query_without_phase_marker(
         block_table_tensor=torch.zeros((1, 256), dtype=torch.int32),
         slot_mapping=torch.arange(4, dtype=torch.int64),
         causal=True,
-        is_prefilling=None,
     )
 
     with patch("vllm.v1.attention.backends.cpu_attn.envs.VLLM_CPU_ATTN_SPLIT_KV", True):

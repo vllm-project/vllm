@@ -10,10 +10,7 @@ import torch
 
 from vllm.model_executor.kernels.linear.zentorch_utils import has_zentorch_op
 from vllm.platforms import CpuArchEnum, current_platform
-from vllm.utils.torch_utils import (
-    set_default_torch_num_threads,
-    set_random_seed,
-)
+from vllm.utils.torch_utils import set_default_torch_num_threads, set_random_seed
 from vllm.v1.attention.backend import AttentionType
 from vllm.v1.attention.backends.cpu_attn import _get_attn_isa
 from vllm.v1.attention.backends.zentorch_sdpa import (
@@ -463,8 +460,6 @@ def varlen_with_paged_kv(
     v_scale: float = 1.0,
     dynamic_causal: list[bool] | None = None,
     s_aux_dtype: torch.dtype = torch.bfloat16,
-    expected_grouped_requests: set[int] | None = None,
-    expected_mha_requests: set[int] | None = None,
 ) -> None:
     set_random_seed(0)
     num_seqs = len(seq_lens)
@@ -609,14 +604,6 @@ def varlen_with_paged_kv(
         dynamic_causal=dynamic_causal_tensor,
         kv_cache_dtype=kv_cache_dtype,
     )
-    if expected_grouped_requests is not None or expected_mha_requests is not None:
-        q_head_nums = _metadata_q_head_nums_by_request(metadata)
-        for req_id in expected_grouped_requests or ():
-            assert len(q_head_nums[req_id]) == 1
-            assert next(iter(q_head_nums[req_id])) > 1
-        for req_id in expected_mha_requests or ():
-            assert q_head_nums[req_id] == {1}
-
     out_with_split = torch.empty_like(query)
     cpu_attention_with_kv_cache(
         query=query,
@@ -1375,117 +1362,35 @@ def test_varlen_with_paged_kv_dynamic_causal(
 
 
 @pytest.mark.parametrize("kv_cache_dtype", ["auto", "fp8_e4m3"])
+@pytest.mark.parametrize(
+    ("seq_lens", "num_heads", "head_size", "num_blocks"),
+    [
+        ([(5, 513), (1, 193), (4, 1025)], (32, 4), 128, 64),
+        ([(16, 8192)] * 4, (8, 1), 256, 512),
+    ],
+)
 @pytest.mark.skipif(not torch.cpu._is_amx_tile_supported(), reason="no AMX support.")
 @set_default_torch_num_threads(4)
-def test_amx_spec_decode_gqa_mixed_request_correctness(kv_cache_dtype: str) -> None:
+def test_amx_spec_decode_gqa_correctness(
+    kv_cache_dtype: str,
+    seq_lens: list[tuple[int, int]],
+    num_heads: tuple[int, int],
+    head_size: int,
+    num_blocks: int,
+) -> None:
     varlen_with_paged_kv(
-        seq_lens=[(5, 513), (1, 193), (4, 1025)],
-        num_heads=(32, 4),
-        head_size=128,
+        seq_lens=seq_lens,
+        num_heads=num_heads,
+        head_size=head_size,
         sliding_window=None,
         dtype=torch.bfloat16,
         block_size=32,
         soft_cap=None,
-        num_blocks=64,
+        num_blocks=num_blocks,
         use_alibi=True,
         use_sink=True,
         isa="amx",
         kv_cache_dtype=kv_cache_dtype,
-    )
-
-
-@pytest.mark.skipif(not torch.cpu._is_amx_tile_supported(), reason="no AMX support.")
-@set_default_torch_num_threads(4)
-def test_amx_gqa_q17_grouped_q33_falls_back() -> None:
-    # At a Q:KV-head ratio of 32, q=17 groups while q=33 exceeds the work bound.
-    varlen_with_paged_kv(
-        seq_lens=[(17, 8192), (33, 8193)],
-        num_heads=(32, 1),
-        head_size=128,
-        sliding_window=None,
-        dtype=torch.bfloat16,
-        block_size=32,
-        soft_cap=None,
-        num_blocks=512,
-        use_alibi=False,
-        use_sink=False,
-        isa="amx",
-        expected_grouped_requests={0},
-        expected_mha_requests={1},
-    )
-
-
-@pytest.mark.skipif(not torch.cpu._is_amx_tile_supported(), reason="no AMX support.")
-@set_default_torch_num_threads(4)
-@pytest.mark.parametrize("kv_cache_dtype", ["auto", "fp8_e4m3"])
-def test_amx_gqa_q16_with_few_heads(kv_cache_dtype: str) -> None:
-    varlen_with_paged_kv(
-        seq_lens=[(16, 8192)] * 4,
-        num_heads=(8, 1),
-        head_size=256,
-        sliding_window=None,
-        dtype=torch.bfloat16,
-        block_size=32,
-        soft_cap=None,
-        num_blocks=512,
-        use_alibi=False,
-        use_sink=False,
-        isa="amx",
-        kv_cache_dtype=kv_cache_dtype,
-    )
-
-
-@pytest.mark.skipif(not torch.cpu._is_amx_tile_supported(), reason="no AMX support.")
-@set_default_torch_num_threads(4)
-def test_amx_gqa_causal_q4_long_context() -> None:
-    varlen_with_paged_kv(
-        seq_lens=[(4, 8192)],
-        num_heads=(32, 4),
-        head_size=128,
-        sliding_window=None,
-        dtype=torch.bfloat16,
-        block_size=32,
-        soft_cap=None,
-        num_blocks=256,
-        use_alibi=False,
-        use_sink=False,
-        isa="amx",
-        kv_cache_dtype="auto",
-        expected_grouped_requests={0},
-    )
-
-
-def _metadata_q_head_nums_by_request(metadata: torch.Tensor) -> dict[int, set[int]]:
-    # Mirror AttentionMetadata's 192-byte header and the 48-byte
-    # AttentionWorkItemGroup layout, including q_head_num at byte offset 12.
-    metadata_words = metadata.view(torch.int32)
-    workitem_group_num = metadata_words[68 // 4].item()
-    workitems = metadata_words[192 // 4 : 192 // 4 + workitem_group_num * 12]
-    workitems = workitems.reshape(workitem_group_num, 12)
-    return {
-        req_id: set(workitems[workitems[:, 0] == req_id, 3].tolist())
-        for req_id in torch.unique(workitems[:, 0]).tolist()
-    }
-
-
-@pytest.mark.skipif(not torch.cpu._is_amx_tile_supported(), reason="no AMX support.")
-@set_default_torch_num_threads(4)
-def test_amx_scheduler_keeps_noncausal_request_on_mha() -> None:
-    varlen_with_paged_kv(
-        seq_lens=[(4, 8192), (4, 8192)],
-        num_heads=(32, 4),
-        head_size=128,
-        sliding_window=None,
-        dtype=torch.bfloat16,
-        block_size=32,
-        soft_cap=None,
-        num_blocks=256,
-        use_alibi=False,
-        use_sink=False,
-        isa="amx",
-        dynamic_causal=[True, False],
-        expected_grouped_requests={0},
-        expected_mha_requests={1},
     )
 
 
