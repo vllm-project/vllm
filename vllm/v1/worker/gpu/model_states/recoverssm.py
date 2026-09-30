@@ -16,6 +16,11 @@ class RecoverSSMState:
     def __init__(self) -> None:
         self._step: tuple[RecoverSSMMetadata, ...] | None = None
 
+    def reset(self) -> None:
+        """Drop the recorded step. Its metadata holds the commit contexts, which
+        reference the KV cache tensors they were built for."""
+        self._step = None
+
     def record_step(
         self,
         attn_metadata: dict[str, Any],
