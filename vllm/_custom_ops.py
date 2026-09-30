@@ -3159,6 +3159,26 @@ def mnnvl_lamport_reduce_scatter(
     )
 
 
+def mnnvl_multimem_reduce_scatter(
+    fa: int,
+    inp: torch.Tensor,
+    out: torch.Tensor,
+    local_buffer: int,
+    multicast_buffer: int,
+    stage_sz_bytes: int,
+    block_limit: int,
+) -> None:
+    torch.ops._C_custom_ar.mnnvl_multimem_reduce_scatter(
+        fa,
+        inp,
+        out,
+        local_buffer,
+        multicast_buffer,
+        stage_sz_bytes,
+        block_limit,
+    )
+
+
 def dispose(fa: int) -> None:
     torch.ops._C_custom_ar.dispose(fa)
 
@@ -3646,7 +3666,7 @@ def causal_conv1d_fwd_cpu(
     cache_indices: torch.Tensor | None,
     has_initial_state: torch.Tensor | None,
     silu_activation: bool,
-    is_vnni: bool,
+    is_weight_packed: bool,
 ) -> torch.Tensor:
     return torch.ops._C.causal_conv1d_fwd_cpu(
         x,
@@ -3658,7 +3678,7 @@ def causal_conv1d_fwd_cpu(
         has_initial_state,
         silu_activation,
         -1,
-        is_vnni,
+        is_weight_packed,
     )
 
 
@@ -3669,7 +3689,7 @@ def causal_conv1d_update_cpu(
     bias: torch.Tensor | None,
     silu_activation: bool,
     conv_state_indices: torch.Tensor | None,
-    is_vnni: bool,
+    is_weight_packed: bool,
     num_accepted_tokens: torch.Tensor | None = None,
 ) -> torch.Tensor:
     return torch.ops._C.causal_conv1d_update_cpu(
@@ -3681,7 +3701,7 @@ def causal_conv1d_update_cpu(
         num_accepted_tokens,
         conv_state_indices,
         -1,
-        is_vnni,
+        is_weight_packed,
     )
 
 
@@ -4414,18 +4434,23 @@ def cpu_gemm_wna16(
     pack_factor: int,
     isa_hint: str,
 ) -> torch.Tensor:
-    output = torch.empty((input.size(0), scales.size(1)), dtype=input.dtype)
+    # Match int4_scaled_mm_cpu: flatten >2-D activations to [M, K] for the
+    # C++ kernel, then restore the original leading dims on the output.
+    x_shape = input.shape
+    x_2d = input.reshape(-1, x_shape[-1]) if len(x_shape) > 2 else input
+    out = torch.empty((x_2d.size(0), scales.size(1)), dtype=input.dtype)
     torch.ops._C.cpu_gemm_wna16(
-        input,
+        x_2d,
         q_weight,
-        output,
+        out,
         scales,
         zeros,
         bias,
         pack_factor,
         isa_hint,
     )
-    return output
+    out = out.reshape(x_shape[:-1] + (out.size(-1),)) if len(x_shape) > 2 else out
+    return out
 
 
 def cpu_activation_lut_bf16(input: torch.Tensor, activation: str) -> torch.Tensor:

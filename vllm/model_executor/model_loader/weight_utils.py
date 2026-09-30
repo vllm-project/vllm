@@ -13,7 +13,7 @@ import tempfile
 import threading
 import time
 from collections.abc import Callable, Generator, Iterable
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from pathlib import Path
 from typing import IO, TYPE_CHECKING, Any
 
@@ -195,7 +195,11 @@ def get_quant_config(
     if model_config.quantization is None:
         raise ValueError("Model quantization method is not specified in the config.")
     quant_cls = get_quantization_config(model_config.quantization)
-    from vllm.config.quantization import _ONLINE_SHORTHANDS, QuantizationConfigArgs
+    from vllm.config.quantization import (
+        _ONLINE_SHORTHANDS,
+        QuantizationConfigArgs,
+        resolve_quantization_config,
+    )
     from vllm.model_executor.layers.quantization.online.base import (
         OnlineQuantizationConfig,
     )
@@ -335,6 +339,14 @@ def get_quant_config(
 
     # If the quantization config is not found, use the default config.
     if not possible_config_filenames:
+        if model_config.quantization == "fp8":
+            logger.warning_once(
+                "--quantization fp8 is deprecated for online quantization; "
+                "use --quantization fp8_per_tensor instead."
+            )
+            fp8_args = resolve_quantization_config("fp8_per_tensor", online_args)
+            assert fp8_args is not None
+            return OnlineQuantizationConfig(args=fp8_args)
         if model_config.quantization in _ONLINE_SHORTHANDS:
             args = online_args or _ONLINE_SHORTHANDS[model_config.quantization]
             assert isinstance(args, QuantizationConfigArgs)
@@ -830,6 +842,40 @@ def np_cache_weights_iterator(
         with open(param_path, "rb") as f:
             param = np.load(f)
         yield name, torch.from_numpy(param)
+
+
+def drop_checkpoint_cache(
+    model_name_or_path: str,
+    revision: str | None = None,
+    cache_dir: str | None = None,
+) -> None:
+    checkpoint_dir: Path | None = None
+    if os.path.isdir(model_name_or_path):
+        checkpoint_dir = Path(model_name_or_path)
+    else:
+        with suppress(OSError, ValueError):
+            checkpoint_dir = Path(
+                hf_api().snapshot_download(
+                    model_name_or_path,
+                    revision=revision,
+                    cache_dir=cache_dir,
+                    local_files_only=True,
+                )
+            )
+    if checkpoint_dir is None:
+        logger.info_once(
+            "No local checkpoint found for %s; skipping page-cache eviction",
+            model_name_or_path,
+        )
+        return
+    for path in checkpoint_dir.glob("*.safetensors"):
+        try:
+            with path.open("rb") as file:
+                os.posix_fadvise(file.fileno(), 0, 0, os.POSIX_FADV_DONTNEED)
+        except OSError as exc:
+            logger.warning(
+                "Could not release checkpoint page cache for %s: %s", path, exc
+            )
 
 
 def _get_checkpoints_size_bytes(files: list[str]) -> int:
