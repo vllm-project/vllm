@@ -5,12 +5,13 @@ import os
 import subprocess
 import sys
 from contextlib import nullcontext
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
-from prometheus_client import REGISTRY, CollectorRegistry
+from prometheus_client import CollectorRegistry
 
 from vllm.entrypoints.serve.dev.rlhf import api_router
 from vllm.entrypoints.serve.dev.rlhf import metrics as rlhf_metrics
@@ -152,18 +153,36 @@ def test_rejected_request_is_not_recorded(registry):
     assert sample(registry, DURATION, "update") is None
 
 
-def test_default_recorder_is_created_lazily_on_the_default_registry(monkeypatch):
-    monkeypatch.setattr(rlhf_metrics, "_metrics", None)
-    names = set(REGISTRY._names_to_collectors)
-    assert "vllm:rl_weight_update_operation_duration_seconds" not in names
-    metrics = rlhf_metrics.weight_operation_metrics()
-    try:
-        assert (
-            REGISTRY._names_to_collectors[
-                "vllm:rl_weight_update_operation_duration_seconds"
-            ]
-            is metrics.duration
-        )
-    finally:
-        REGISTRY.unregister(metrics.duration)
-        REGISTRY.unregister(metrics.in_flight)
+def test_default_recorder_is_created_lazily_on_the_default_registry():
+    """The default recorder registers on the process registry only when first used.
+
+    Runs in a fresh interpreter: the registry is process-global, so a route test
+    elsewhere in the session may already have registered these collectors, and
+    "not registered yet" would then be unobservable.
+    """
+    probe = """
+from prometheus_client import REGISTRY
+
+from vllm.entrypoints.serve.dev.rlhf import metrics as rlhf_metrics
+
+NAMES = [
+    "vllm:rl_weight_update_operation_duration_seconds",
+    "vllm:rl_weight_update_operations_in_flight",
+]
+assert rlhf_metrics._metrics is None
+assert not set(NAMES) & set(REGISTRY._names_to_collectors)
+
+metrics = rlhf_metrics.weight_operation_metrics()
+assert REGISTRY._names_to_collectors[NAMES[0]] is metrics.duration
+assert REGISTRY._names_to_collectors[NAMES[1]] is metrics.in_flight
+assert rlhf_metrics.weight_operation_metrics() is metrics
+print("lazy registration ok")
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", probe],
+        cwd=Path(__file__).parents[3],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "lazy registration ok" in result.stdout
