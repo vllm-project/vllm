@@ -10,8 +10,9 @@ import torch
 from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp
 from vllm.platforms import current_platform
-from vllm.platforms.spec.rotary_embedding import apply_rotary_emb
 from vllm.utils.torch_utils import direct_register_custom_op
+
+from .functional import apply_rotary_emb
 
 logger = init_logger(__name__)
 

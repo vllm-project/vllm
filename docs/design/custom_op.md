@@ -39,11 +39,13 @@ By default, if `compilation_config.backend == "inductor"` and `compilation_confi
 
 Standard cached RoPE demonstrates the boundary proposed in
 [the platform specification RFC](https://github.com/vllm-project/vllm/issues/57649).
-The layer owns frequencies and cache buffers; `platform.spec` supplies the
+The layer owns frequencies, cache buffers, and the default PyTorch
+`forward_static` computation. `platform.spec` optionally supplies an optimized
 operation and any alternate cache dtype needed for compilation.
 
 ```text
-RotaryEmbedding.forward_platform -> spec.rope(...) -> existing kernel
+CustomOp.dispatch_forward -> RotaryEmbedding.forward_platform
+                       -> spec.rope(...) or forward_native -> forward_static
 ```
 
 `CustomOp` binds this unified entry point when the operation is enabled,
@@ -54,7 +56,8 @@ Operations that do not implement `forward_platform` retain the legacy dispatch.
 an inheritance hierarchy. CPU and CUDA bind the existing custom op; ROCm
 selects AITER or the existing custom op when the layer is constructed.
 Existing layers keep their selection if AITER settings are refreshed.
-XPU retains its native fallback for `key=None`.
+XPU retains its native fallback for `key=None`; platforms without a RoPE
+implementation use the layer's reference computation.
 Platform policy stays in the existing `platforms/{cpu,cuda,rocm,xpu}.py` files.
 
 The existing `CustomOp` enable/disable behavior, `forward_static` reference,

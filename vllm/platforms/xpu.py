@@ -18,7 +18,7 @@ from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 from .interface import DeviceCapability, Platform, PlatformEnum
 from .spec import PlatformSpec
-from .spec.rotary_embedding import custom_rope, native_rope
+from .spec.rotary_embedding import custom_rope
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -146,6 +146,10 @@ class XPUPlatform(Platform):
         is_neox_style: bool,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         if key is None:
+            from vllm.model_executor.layers.rotary_embedding.functional import (
+                native_rope,
+            )
+
             return native_rope(
                 positions,
                 query,

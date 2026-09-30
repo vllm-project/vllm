@@ -6,8 +6,6 @@ from dataclasses import dataclass
 
 import torch
 
-from .rotary_embedding import native_rope
-
 Rope = Callable[
     [
         torch.Tensor,
@@ -24,7 +22,7 @@ Rope = Callable[
 
 @dataclass(frozen=True)
 class PlatformSpec:
-    """Platform operations resolved at layer construction, with native defaults."""
+    """Optional platform implementations resolved at layer construction."""
 
-    rope: Rope = native_rope
+    rope: Rope | None = None
     rope_cache_dtype: torch.dtype | None = None

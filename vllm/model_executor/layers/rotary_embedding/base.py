@@ -6,9 +6,9 @@ import torch
 
 from vllm.model_executor.custom_op import CustomOp
 from vllm.platforms import current_platform
-from vllm.platforms.spec.rotary_embedding import native_rope
 
 from .common import ApplyRotaryEmb
+from .functional import native_rope
 
 
 # --8<-- [start:rotary_embedding]
@@ -172,7 +172,10 @@ class RotaryEmbedding(RotaryEmbeddingBase):
         query: torch.Tensor,
         key: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
-        return self.spec.rope(
+        rope = self.spec.rope
+        if rope is None:
+            return self.forward_native(positions, query, key)
+        return rope(
             positions,
             query,
             key,
