@@ -6,11 +6,12 @@ from types import SimpleNamespace
 import pytest
 import torch
 
+from vllm._aiter_ops import is_aiter_found_and_supported
 from vllm.platforms import current_platform
 
-if not current_platform.is_rocm():
+if not current_platform.is_rocm() or not is_aiter_found_and_supported():
     pytest.skip(
-        "ROCm AITER sparse indexer test requires ROCm.",
+        "ROCm AITER sparse indexer test requires ROCm with AITER.",
         allow_module_level=True,
     )
 
