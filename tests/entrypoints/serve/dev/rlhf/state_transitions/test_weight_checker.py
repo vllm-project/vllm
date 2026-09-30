@@ -102,6 +102,8 @@ class TestSingleGPU:
 )
 def test_ipc_weight_transfer_restores_reset_weights():
     """The documented RL flow: reset, then transfer the checkpoint back."""
+    if current_platform.is_xpu():
+        pytest.skip("IPC weight transfer backend uses CUDA IPC handles")
     args = ["--weight-transfer-config", '{"backend": "ipc"}']
     with (
         patch.dict(os.environ, {"VLLM_ALLOW_INSECURE_SERIALIZATION": "1"}),
