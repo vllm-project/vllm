@@ -477,13 +477,8 @@ class KimiK25ForConditionalGeneration(
         from vllm.v1.worker.encoder_cudagraph_defs import EncoderCudaGraphConfig
 
         def pad_cu_seqlens(dst: torch.Tensor, src: torch.Tensor) -> None:
-            # Zero-length padding, same as Qwen's
-            # ``_pad_cumulative_seqlens_buffer``: tail slots repeat the last
-            # real cumulative offset, so the padding rows form zero-length
-            # varlen sequences and FlashAttn schedules no work for them.
-            # Pad-row attention outputs stay at their capture-time zeros
-            # (the wrapper passes a pre-zeroed ``out=``) and are dropped by
-            # ``postprocess_encoder_output``.
+            # Zero-length padding (same as Qwen): tail slots repeat the last
+            # real offset, so FlashAttn schedules no work for padding rows.
             n = min(src.shape[0], dst.shape[0])
             dst[:n].copy_(src[:n])
             if n < dst.shape[0]:

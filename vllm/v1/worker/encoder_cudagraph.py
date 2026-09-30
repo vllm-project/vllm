@@ -486,8 +486,7 @@ class EncoderCudaGraphManager:
             batches.append((list(current_batch), path_budgets))
 
         def should_defer_item(item_tokens: dict[str, int]) -> bool:
-            """Defer the item if closing the current batch strictly reduces
-            the summed token budgets on any path the item has tokens for."""
+            """Whether closing the batch strictly reduces summed budgets."""
             for path in paths:
                 item = item_tokens[path]
                 if item == 0:
@@ -496,12 +495,13 @@ class EncoderCudaGraphManager:
                 b_cur = self._path_fitting_budget(path, cur)
                 b_alone = self._path_fitting_budget(path, item)
                 b_merged = self._path_fitting_budget(path, cur + item)
-                # Only called when the item fits, so every lookup lands
-                # on a captured budget.
+                # Only called when the item fits; lookups land on a budget.
                 assert (
                     b_cur is not None and b_alone is not None and b_merged is not None
                 )
-                if b_cur + b_alone < b_merged:
+                # Only defer items that alone outweigh the whole current
+                # batch; splitting smaller ones fragments flood packing.
+                if b_cur + b_alone < b_merged and b_alone >= b_cur:
                     return True
             return False
 

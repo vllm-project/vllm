@@ -312,12 +312,13 @@ class TestExecuteLocalPacking:
         runs = _run_packing(mgr, [self._spec(4000), self._spec(4000)])
         assert runs == [([0, 1], "default", 8192)]
 
-    def test_deferral_only_when_strictly_cheaper(self):
-        # 2x1366 -> 2732 -> 4096 ties 2048 + 2048, so the first two merge;
-        # adding the third would jump to 8192 > 4096 + 2048, so it defers.
+    def test_deferral_requires_item_outweighing_batch(self):
+        # The third 1366-token item would save budget if deferred (4096+2048
+        # < 8192) but is smaller than the current batch (4096), so it merges:
+        # deferring mid-size items fragments flood packing into extra replays.
         mgr = _make_manager_with_budgets([256, 2048, 4096, 8192])
         runs = _run_packing(mgr, [self._spec(1366)] * 3)
-        assert runs == [([0, 1], "default", 4096), ([2], "default", 2048)]
+        assert runs == [([0, 1, 2], "default", 8192)]
 
     def test_packing_without_cliff_unchanged(self):
         mgr = _make_manager_with_budgets([256, 4096])
