@@ -306,3 +306,24 @@ def test_new_request_data_from_request_reuses_stripped_mm_features() -> None:
     assert second.mm_features[24] is first.mm_features[24]
     assert features[0].data is not None
     assert len(request._mm_stripped_prefix) == 25
+
+
+def test_strip_covered_mm_data_prefix_cache_matches_pure() -> None:
+    """The cached prefix path remains equivalent to the pure implementation."""
+    from dataclasses import replace
+
+    features = [
+        _mm_feature(0, 50),
+        replace(_mm_feature(100, 50), data=None),
+        _mm_feature(150, 50),
+        _mm_feature(300, 50),
+    ]
+    prefix: list[MultiModalFeatureSpec] = []
+
+    for computed in range(0, 401, 25):
+        cached = strip_covered_mm_data(features, computed, stripped_prefix=prefix)
+        pure = strip_covered_mm_data(features, computed)
+        assert len(cached) == len(pure)
+        assert [feature.data is None for feature in cached] == [
+            feature.data is None for feature in pure
+        ]
