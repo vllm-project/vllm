@@ -48,9 +48,9 @@ def _validate(
 ) -> StructuredOutputsParams:
     params = SamplingParams(structured_outputs=StructuredOutputsParams(grammar=grammar))
     params._validate_structured_outputs(
-        _StubModelConfig(),  # type: ignore[arg-type]
+        _StubModelConfig(),
         StructuredOutputsConfig(backend=backend),
-        tokenizer=tokenizer or object(),  # type: ignore[arg-type]
+        tokenizer=tokenizer or object(),
     )
     assert params.structured_outputs is not None
     return params.structured_outputs

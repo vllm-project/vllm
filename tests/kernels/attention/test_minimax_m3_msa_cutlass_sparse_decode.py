@@ -387,7 +387,7 @@ def test_query_fp8_stays_valid_when_cutlass_plan_appears_on_replay(
         assert capture.num_eager_breaks == 1
         assert observed_ptrs == []
 
-        decode.msa_cutlass = object()  # type: ignore[assignment]
+        decode.msa_cutlass = object()
         for _ in range(3):
             capture.replay()
         stream.synchronize()
