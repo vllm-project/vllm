@@ -68,8 +68,12 @@ from vllm.model_executor.models.utils import (
     make_empty_intermediate_tensors_factory,
     make_layers,
     maybe_prefix,
+    spec_decode_needs_target_embed,
 )
 from vllm.model_executor.models.vision import run_dp_sharded_mrope_vision_model
+from vllm.models.minimax_m3.common.encoder_cudagraph import (
+    MiniMaxM3EncoderCudaGraphMixin,
+)
 from vllm.models.minimax_m3.common.indexer import MiniMaxM3Indexer
 from vllm.models.minimax_m3.common.mm_preprocess import (
     MiniMaxM3VLDummyInputsBuilder,
@@ -800,7 +804,9 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
 
         self.vocab_size = config.vocab_size
 
-        if get_pp_group().is_first_rank:
+        if get_pp_group().is_first_rank or spec_decode_needs_target_embed(
+            vllm_config, include_mtp=vllm_config.use_v2_model_runner
+        ):
             self.embed_tokens = VocabParallelEmbedding(
                 config.vocab_size,
                 config.hidden_size,
@@ -1076,7 +1082,11 @@ class MiniMaxM3SparseForCausalLM(nn.Module, SupportsPP, SupportsEagle3):
     dummy_inputs=MiniMaxM3VLDummyInputsBuilder,
 )
 class MiniMaxM3SparseForConditionalGeneration(
-    nn.Module, SupportsMultiModal, SupportsPP, SupportsEagle3
+    nn.Module,
+    SupportsMultiModal,
+    MiniMaxM3EncoderCudaGraphMixin,
+    SupportsPP,
+    SupportsEagle3,
 ):
     """Top-level (VL) entry point for MiniMax M3.
 
