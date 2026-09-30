@@ -993,17 +993,18 @@ torch::Tensor gptq_gemm_rdna3(torch::Tensor a, torch::Tensor b_q_weight,
   // rest of the performance is; it is not done here because tuning that needs a
   // machine that is not also serving traffic.
   //
-  // M in [5, 16] goes to the dec16 kernel when the shape fits it: WMMA with
+  // M in [5, 32] goes to the dec16 kernel when the shape fits it: WMMA with
   // the weights loaded straight into B fragments, exact (raw nibbles, scale
   // and zero folded in fp32). On the shapes above it is 7% faster than the
   // scalar path at M=6 and 39% faster than the older WMMA kernels at M=16,
-  // with ~35% less error against fp64 than the latter; the scalar path keeps
-  // M <= 4.
+  // with ~35% less error against fp64 than the latter; at M 17..32 (two row
+  // tiles sharing each weight fragment) it is 35% faster. The scalar
+  // path keeps M <= 4.
   constexpr int64_t WMMA_MIN_M = 12;
   constexpr int64_t DEC16_MIN_M = 5;
   const bool dec16 = a.dim() == 2 && b_q_weight.dim() == 2 &&
                      a.scalar_type() == torch::kHalf &&
-                     a.size(0) >= DEC16_MIN_M && a.size(0) <= 16 &&
+                     a.size(0) >= DEC16_MIN_M && a.size(0) <= 32 &&
                      gptq_gemm_rdna3_dec16_fits(a.size(0), b_q_weight.size(1),
                                                 a.size(1), b_scales.size(0));
   if (dec16 || (a.dim() == 2 && b_q_weight.dim() == 2 && a.size(1) % 16 == 0 &&
