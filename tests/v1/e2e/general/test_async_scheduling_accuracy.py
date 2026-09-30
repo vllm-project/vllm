@@ -17,7 +17,7 @@ from tests.utils import (
     large_gpu_mark,
     single_gpu_only,
 )
-from tests.v1.e2e.general.async_scheduling_utils import (
+from tests.v1.e2e.general.accuracy_utils import (
     AccuracyTolerance,
     check_accuracy_budget,
     check_first_divergence,
