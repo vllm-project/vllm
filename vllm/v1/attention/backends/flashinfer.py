@@ -118,7 +118,34 @@ def _mm_prefix_wrapper_cls() -> type | None:
 
 # KV cache dtypes the mm-prefix variant reads. An NVFP4 cache is read through
 # the variant's scale-factor tensors (kv_cache_sf).
-_MM_PREFIX_KV_CACHE_DTYPES = (None, "auto", "float16", "bfloat16", "nvfp4")
+_MM_PREFIX_KV_CACHE_DTYPES = (
+    None,
+    "auto",
+    "float16",
+    "bfloat16",
+    "fp8",
+    "fp8_e4m3",
+    "nvfp4",
+)
+
+
+def _mm_prefix_keeps_model_dtype_query(
+    vllm_config: VllmConfig | None, cache_dtype: str
+) -> bool:
+    """Whether this FP8 cache is read with a query in the model dtype.
+
+    The mm-prefix wrapper runs on fa2, which has no FP8-query path. The query
+    dtype is fixed per layer rather than per batch, so a model that can take
+    the native mm-prefix path keeps it for prefill and decode alike.
+    """
+    return (
+        vllm_config is not None
+        and vllm_config.model_config is not None
+        and vllm_config.model_config.is_mm_prefix_lm
+        and cache_dtype.startswith("fp8")
+        and cache_dtype in _MM_PREFIX_KV_CACHE_DTYPES
+        and _mm_prefix_wrapper_cls() is not None
+    )
 
 
 trtllm_workspace_buffer = None
@@ -1112,6 +1139,9 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         # this group is unquantized (e.g. --kv-cache-dtype-skip-layers), even
         # if cache_config requests a quantized dtype globally.
         cache_dtype = self.cache_dtype
+
+        if _mm_prefix_keeps_model_dtype_query(self.vllm_config, cache_dtype):
+            return self.model_config.dtype
 
         # On SM90/SM12x, XQA decode requires BF16/FP16-Q even with FP8 KV cache.
         # FI native prefill on SM90 still uses FP8-Q in that case; SM12x prefill
@@ -2196,6 +2226,10 @@ class FlashInferImpl(AttentionImpl):
         vllm_config = get_current_vllm_config_or_none()
         # The layout is resolved after model construction, so read it lazily.
         self.cache_config = vllm_config.cache_config if vllm_config else None
+        # Must agree with the builder's get_q_data_type().
+        self.keeps_model_dtype_query = _mm_prefix_keeps_model_dtype_query(
+            vllm_config, self.kv_cache_dtype
+        )
         # Query pre-quantization needs a single dtype for the whole query tensor.
         # SM90 XQA needs BF16/FP16-Q for decode and FP8 for prefill,
         # so only enable this for SM100 trtllm-gen where both use FP8-Q.
@@ -2205,6 +2239,7 @@ class FlashInferImpl(AttentionImpl):
             and current_platform.is_device_capability_family(100)
             and vllm_config is not None
             and not vllm_config.attention_config.disable_flashinfer_q_quantization
+            and not self.keeps_model_dtype_query
         )
         self.bmm1_scale: float | None = None
         self.bmm2_scale: float | None = None
@@ -2247,11 +2282,13 @@ class FlashInferImpl(AttentionImpl):
             return False
         # XQA does not support FP8/NVFP4 output, so require trtllm-gen
         # (SM100+) here.  Without that we cannot fuse the output quant.
+        # The fusion also needs an FP8 query, which the mm-prefix path lacks.
         return (
             self.supports_xqa_or_trtllm_gen_decode
             and is_quantized_kv_cache(self.kv_cache_dtype)
             and current_platform.is_device_capability_family(100)
             and quant_key in (kFp8StaticTensorSym, kNvfp4Dynamic)
+            and not self.keeps_model_dtype_query
         )
 
     # FlashInfer requires attention sinks to be float32

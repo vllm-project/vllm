@@ -829,10 +829,9 @@ def test_mm_prefix_priority_without_changing_causal_default(
 ):
     """The image-mask requirement must reach CUDA's automatic backend priority.
 
-    FlashInfer serves an mm-prefix batch in one kernel when its own combination
-    validates, so it is offered before the composite; the composite is what the
-    priority falls back to otherwise. An fp8 cache is one such case: the
-    mm-prefix path rejects it whatever the JIT probe reports.
+    FlashInfer serves an mm-prefix batch in one kernel when its wrapper is
+    available, for a bf16 and an fp8 cache alike, so it is offered before the
+    composite; without the wrapper the priority falls back to the composite.
     """
     from vllm.engine.arg_utils import EngineArgs
 
@@ -849,8 +848,7 @@ def test_mm_prefix_priority_without_changing_causal_default(
         backend = get_attn_backend(
             256, torch.bfloat16, kv_cache_dtype, use_mm_prefix=use_mm_prefix
         )
-    native_serves_it = native_mm_prefix and kv_cache_dtype is None
-    if not use_mm_prefix or native_serves_it:
+    if not use_mm_prefix or native_mm_prefix:
         expected = "FLASHINFER"
     else:
         expected = "TRITON_FLASHINFER"
