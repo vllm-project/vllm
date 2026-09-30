@@ -40,6 +40,7 @@ class SparseMLAIndexGroup:
     physical_topk_indices: torch.Tensor
     valid_topk_counts: torch.Tensor
     row_indices: torch.Tensor
+    request_ids: torch.Tensor
     side_stream: torch.Stream
     logical_topk_ready: torch.Event
     physical_topk_ready: torch.Event
@@ -173,13 +174,6 @@ class HiSparseMLAIndexGroup(SparseMLAIndexGroup):
     hisparse_group: Any | None = None
     prefill_stream: torch.Stream | None = None
     prefill_ready_events: list[torch.Event] = field(default_factory=list)
-    masked_req_ids: torch.Tensor = field(init=False)
-
-    def __post_init__(self) -> None:
-        # The residency resolver reads per-row request ids on the HiSparse copy
-        # stream. A temporary from the compute stream could be recycled (under
-        # CUDA graphs, reliably) before that read, so they live here instead.
-        self.masked_req_ids = torch.empty_like(self.row_indices)
 
     def register_layer(
         self,
@@ -259,14 +253,16 @@ class HiSparseMLAIndexGroup(SparseMLAIndexGroup):
         source_block_table = cache.source_block_table
         assert source_block_table is not None
         # CUDA-graph padding rows past the batch's tokens map to request 0;
-        # mark them -1 so residency resolution skips them.
-        masked_req_ids = self.masked_req_ids[:num_tokens]
-        masked_req_ids.copy_(req_id_per_token)
-        masked_req_ids.masked_fill_(
+        # mark them -1 so residency resolution skips them. The resolver reads
+        # the ids on the HiSparse copy stream, so they go in the group's buffer:
+        # a compute-stream temporary can be recycled before that read.
+        request_ids = self.request_ids[:num_tokens]
+        request_ids.copy_(req_id_per_token)
+        request_ids.masked_fill_(
             self.row_indices[:num_tokens] >= attn_metadata.query_start_loc[-1], -1
         )
         return cache.swap_in(
-            masked_req_ids,
+            request_ids,
             block_table=source_block_table,
             logical_topk_indices=logical_topk_indices,
             block_size=attn_metadata.block_size,
@@ -391,6 +387,11 @@ class SparseMLAIndexGroupBuilder:
                     device=self.logical_topk_indices.device,
                 ),
                 row_indices=torch.arange(
+                    workspace_rows,
+                    dtype=torch.int32,
+                    device=self.logical_topk_indices.device,
+                ),
+                request_ids=torch.empty(
                     workspace_rows,
                     dtype=torch.int32,
                     device=self.logical_topk_indices.device,
