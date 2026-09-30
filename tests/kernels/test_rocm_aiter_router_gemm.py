@@ -33,10 +33,9 @@ if not current_platform.is_rocm() or not rocm_aiter_ops.is_tgemm_enabled():
 SHAPES = [(6144, 256), (7168, 256), (7168, 384)]
 NUM_TOKENS = [1, 2, 4, 8, 16, 32, 64, 128]
 
-# The tuned kernels round each of up to MAX_SPLIT_K fp32 partials to bf16 and
-# add them with bf16 atomics: at most MAX_SPLIT_K + 1 bf16 roundings per logit.
-MAX_SPLIT_K = 8
-REL_TO_PEAK = (MAX_SPLIT_K + 1) * 2**-8
+# Same 2e-2 as test_bf16_skinny_gemm.py, but relative to the peak logit: split-K
+# bf16 rounding error follows the partial sums, not each logit's own value.
+REL_TO_PEAK = 2e-2
 # A top-k membership change needs error on both the promoted and demoted logit,
 # so the tie window is twice the single-value tolerance.
 TIE_REL_TO_PEAK = 2 * REL_TO_PEAK
