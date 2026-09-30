@@ -10,7 +10,7 @@ use serde_with::{DeserializeFromStr, SerializeDisplay};
 use thiserror::Error;
 use xgrammar_structural_tag::builders::{StructuralTagBuilder, StructuralTagOptions};
 use xgrammar_structural_tag::format::Format;
-use xgrammar_structural_tag::tool::ToolChoiceValue;
+use xgrammar_structural_tag::tool::{BuilderToolChoice, ToolChoiceValue};
 use xgrammar_structural_tag::{
     FunctionDefinition, FunctionToolParam, ToolChoice, ToolParam, build_structural_tag,
 };
@@ -146,6 +146,12 @@ pub enum OutputGrammarError {
         /// Builder whose output did not match the parser's known shape.
         builder: &'static str,
     },
+    /// A model-owned grammar builder does not handle this tool choice.
+    #[error("unsupported tool choice for output grammar: {tool_choice:?}")]
+    UnsupportedToolChoice {
+        /// The rejected tool choice.
+        tool_choice: ToolChoice,
+    },
 }
 
 /// Build the visible (post-reasoning) language from a crate structural-tag
@@ -205,17 +211,71 @@ pub(crate) fn full_format_from_builder_for_test(
 fn tool_params(tools: &[Tool], strict_level: ToolStrictLevel) -> Vec<ToolParam> {
     tools
         .iter()
-        .map(|tool| {
-            ToolParam::Function(FunctionToolParam::new(FunctionDefinition {
-                name: tool.name.clone(),
-                description: tool.description.clone(),
-                parameters: Some(tool.parameters.clone()),
-                strict: Some(
-                    strict_level >= ToolStrictLevel::Parameter || tool.strict == Some(true),
-                ),
-            }))
-        })
+        .map(|tool| ToolParam::Function(function_tool_param(tool, strict_level)))
         .collect()
+}
+
+fn function_tool_param(tool: &Tool, strict_level: ToolStrictLevel) -> FunctionToolParam {
+    FunctionToolParam::new(FunctionDefinition {
+        name: tool.name.clone(),
+        description: tool.description.clone(),
+        parameters: Some(tool.parameters.clone()),
+        strict: Some(strict_level >= ToolStrictLevel::Parameter || tool.strict == Some(true)),
+    })
+}
+
+/// Request tools as crate structural-tag builders receive them.
+pub(crate) struct NormalizedToolChoice {
+    /// Function tools remaining after tool-choice normalization.
+    pub(crate) function_tools: Vec<FunctionToolParam>,
+    /// Builder-facing tool-choice mode.
+    pub(crate) tool_choice: BuilderToolChoice,
+}
+
+/// Normalize the request tools for a model-owned grammar builder, or return
+/// `None` when the request asks for no tool grammar.
+///
+/// Mirrors the normalization `build_structural_tag` applies before calling a
+/// crate builder, for the tool choices the frontend lowers.
+pub(crate) fn normalize_tool_choice(
+    ctx: &OutputGrammarContext<'_>,
+) -> Result<Option<NormalizedToolChoice>> {
+    if !tool_grammar_applies(ctx) {
+        return Ok(None);
+    }
+
+    let mut function_tools = ctx
+        .tools
+        .iter()
+        .map(|tool| function_tool_param(tool, ctx.tool_strict_level))
+        .collect::<Vec<_>>();
+    let tool_choice = match ctx.tool_choice {
+        ToolChoice::Value(ToolChoiceValue::Auto) => BuilderToolChoice::Auto,
+        ToolChoice::Value(ToolChoiceValue::Required) => BuilderToolChoice::Required,
+        ToolChoice::NamedFunction(choice) => {
+            let name = &choice.function.name;
+            function_tools.retain(|tool| &tool.function.name == name);
+            if function_tools.is_empty() {
+                return Err(
+                    xgrammar_structural_tag::Error::ToolNotFound { name: name.clone() }.into(),
+                );
+            }
+            BuilderToolChoice::Forced
+        }
+        tool_choice @ (ToolChoice::Value(ToolChoiceValue::None)
+        | ToolChoice::AllowedTools(_)
+        | ToolChoice::FlatAllowedTools(_)
+        | ToolChoice::Builtin(_)) => {
+            return Err(OutputGrammarError::UnsupportedToolChoice {
+                tool_choice: tool_choice.clone(),
+            });
+        }
+    };
+
+    Ok(Some(NormalizedToolChoice {
+        function_tools,
+        tool_choice,
+    }))
 }
 
 /// Whether the request asks for a tool grammar at all.
