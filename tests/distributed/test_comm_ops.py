@@ -325,6 +325,40 @@ def test_cuda_communicator_checkpoints_flashinfer_workspaces(
         workspace.checkpoint_restore.assert_called_once_with(group)
 
 
+@pytest.mark.parametrize("stable_va", [True, False], ids=["mnnvl", "symm-mem"])
+def test_cuda_communicator_suspend_detaches_flashinfer_workspace(
+    monkeypatch: pytest.MonkeyPatch,
+    stable_va: bool,
+) -> None:
+    group = object()
+    workspace = Mock()
+    if not stable_va:
+        workspace.checkpoint_prepare.side_effect = NotImplementedError
+        workspace.checkpoint_restore.side_effect = NotImplementedError
+    monkeypatch.setattr(flashinfer_all_reduce, "_fi_ar_workspace", workspace)
+    monkeypatch.setattr(flashinfer_all_reduce, "_fi_ar_quant_workspace", workspace)
+    monkeypatch.setattr(
+        flashinfer_all_reduce, "_fi_ar_workspace_groups", {id(workspace): group}
+    )
+    monkeypatch.setattr(
+        flashinfer_all_reduce, "TorchDistBackend", lambda group: group, raising=False
+    )
+
+    communicator = CudaCommunicator.__new__(CudaCommunicator)
+    communicator.cpu_group = group
+    communicator.pynccl_comm = Mock()
+    communicator._fi_ar_suspended = False
+    for _ in range(2):
+        communicator.suspend()
+    for _ in range(2):
+        communicator.resume()
+
+    workspace.checkpoint_prepare.assert_called_once_with()
+    workspace.checkpoint_restore.assert_called_once_with(group)
+    assert communicator.pynccl_comm.suspend.call_count == 2
+    assert communicator.pynccl_comm.resume.call_count == 2
+
+
 @pytest.mark.parametrize(
     ("backend", "capability", "world_size", "nodes", "expected"),
     [

@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 
+from collections.abc import Callable
+
 import torch
 from torch.distributed import ProcessGroup
 
@@ -107,6 +109,7 @@ class CudaCommunicator(DeviceCommunicatorBase):
         self.qr_comm: QuickAllReduce | None = None
         self.symm_mem_comm: SymmMemCommunicator | None = None
         self.fi_ar_comm: FlashInferAllReduce | None = None
+        self._fi_ar_suspended = False
         self.fi_pcie_ipc_ar_comm: FlashInferPcieIpcAllReduce | None = None
         self.aiter_ar_comm: AiterCustomAllreduce | None = None
         self.use_aiter_ag_rs: bool = False
@@ -706,12 +709,30 @@ class CudaCommunicator(DeviceCommunicatorBase):
         return bd is not None and bd.uniform
 
     def suspend(self) -> None:
+        # FlashInfer AR syncs over the gloo cpu_group, so order vs. NCCL is free.
+        if not self._fi_ar_suspended:
+            from .flashinfer_all_reduce import checkpoint_prepare_fi_ar_workspaces
+
+            self._fi_ar_suspended = True
+            self._apply_fi_ar_checkpoint(checkpoint_prepare_fi_ar_workspaces)
         if self.pynccl_comm is not None:
             self.pynccl_comm.suspend()
 
     def resume(self) -> None:
         if self.pynccl_comm is not None:
             self.pynccl_comm.resume()
+        if self._fi_ar_suspended:
+            from .flashinfer_all_reduce import checkpoint_restore_fi_ar_workspaces
+
+            self._fi_ar_suspended = False
+            self._apply_fi_ar_checkpoint(checkpoint_restore_fi_ar_workspaces)
+
+    def _apply_fi_ar_checkpoint(self, fn: Callable[[ProcessGroup], None]) -> None:
+        try:
+            fn(self.cpu_group)
+        except NotImplementedError:
+            # Workspaces backed by torch symmetric memory stay resident.
+            logger.debug_once("FlashInfer all-reduce workspace kept during suspend.")
 
     def checkpoint_prepare(self) -> None:
         # Only FlashInfer all-reduce and FlashInfer all2all are supported for now.
