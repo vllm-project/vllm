@@ -159,7 +159,7 @@ async def _wait_for_running_request(
             if _num_running_requests(response.text) > 0:
                 return time.monotonic() - start
             await asyncio.sleep(_INFLIGHT_REQUEST_POLL_INTERVAL)
-    pytest.fail(f"No request reached the running state within {timeout}s")
+    raise AssertionError(f"No request reached the running state within {timeout}s")
 
 
 @pytest.mark.asyncio
@@ -275,15 +275,15 @@ async def test_wait_timeout_completes_requests():
             _concurrent_request_loop(client, state, sigterm_sent, concurrency=10)
         )
 
-        # Drain can only complete requests the engine already admitted, so
-        # wait for the server to report one instead of guessing with a sleep.
-        admission_delay = await _wait_for_running_request(
-            remote_server.url_for("metrics")
-        )
-        proc.send_signal(signal.SIGTERM)
-        sigterm_sent.set()
-
         try:
+            # Drain can only complete requests the engine already admitted, so
+            # wait for the server to report one instead of guessing with a sleep.
+            admission_delay = await _wait_for_running_request(
+                remote_server.url_for("metrics")
+            )
+            proc.send_signal(signal.SIGTERM)
+            sigterm_sent.set()
+
             await asyncio.wait_for(request_task, timeout=_SHUTDOWN_DETECTION_TIMEOUT)
         except asyncio.TimeoutError:
             pass
