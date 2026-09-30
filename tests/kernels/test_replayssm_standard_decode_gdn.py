@@ -26,6 +26,41 @@ from vllm.third_party.flash_linear_attention.ops import (
 from vllm.utils.torch_utils import set_random_seed
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="Need CUDA device")
+@pytest.mark.parametrize("act_dtype", [torch.bfloat16, torch.float16])
+def test_replayssm_flush_keeps_beta_in_fp32(act_dtype):
+    """A one-token flush must not round beta to the activation dtype."""
+    device = "cuda"
+    k_dim = 64
+    mixed_qkv = torch.zeros(1, 2 * k_dim + 1, device=device, dtype=act_dtype)
+    mixed_qkv[0, 0] = 1
+    mixed_qkv[0, k_dim] = 1
+    mixed_qkv[0, -1] = 1
+    a = torch.zeros(1, 1, device=device, dtype=act_dtype)
+    b = torch.full_like(a, 0.25)
+    state = torch.zeros(2, 1, 1, k_dim, device=device, dtype=torch.float32)
+    fused_recurrent_gated_delta_rule_replayssm(
+        mixed_qkv=mixed_qkv,
+        a=a,
+        b=b,
+        A_log=torch.zeros(1, device=device),
+        dt_bias=torch.zeros(1, device=device),
+        scale=1.0,
+        initial_state=state,
+        d_cache=torch.zeros(2, 1, 16, 1, device=device, dtype=torch.float16),
+        k_cache=torch.zeros(2, 1, 16, k_dim, device=device, dtype=torch.float16),
+        g_cache=torch.zeros(2, 1, 16, device=device),
+        out=torch.empty(1, 1, 1, 1, device=device, dtype=act_dtype),
+        ssm_state_indices=torch.ones(1, device=device, dtype=torch.int32),
+        write_pos=torch.zeros(1, device=device, dtype=torch.int32),
+        is_flush=torch.ones(1, device=device, dtype=torch.int8),
+        use_qk_l2norm_in_kernel=False,
+    )
+    torch.testing.assert_close(
+        state[1, 0, 0, 0], torch.sigmoid(b.float()).squeeze(), rtol=1e-6, atol=1e-6
+    )
+
+
 def _output_tolerances(act_dtype: torch.dtype) -> tuple[float, float]:
     # Anchored on the baseline packed-decode kernel; same regime as the existing
     # GDN test. The output has no fp32 drift (tight 1e-4); keyed off act dtype.
@@ -34,7 +69,12 @@ def _output_tolerances(act_dtype: torch.dtype) -> tuple[float, float]:
     return 1e-2, 2e-2
 
 
-def _state_tolerances(act_dtype: torch.dtype) -> tuple[float, float]:
+def _state_tolerances(
+    act_dtype: torch.dtype, state_dtype: torch.dtype
+) -> tuple[float, float]:
+    if state_dtype == torch.bfloat16:
+        # The baseline rounds state every token; ReplaySSM rounds at flushes.
+        return 2e-2, 2e-2
     # The reconstructed checkpoint state vs the baseline's sequential state
     # differs a bit more than the output at fp32 (~8e-4, an fp32 reconstruction
     # vs recurrence difference, not a precision bug) -- same looser regime the
@@ -61,10 +101,10 @@ def _run_gdn_standard_decode(
 ) -> None:
     """Drive ``num_steps`` decode steps; check the ReplaySSM kernel matches the
     baseline packed decode each step (and the checkpoint state at flushes).
-    State follows ``state_dtype``; activations/caches follow ``act_dtype``."""
+    State follows ``state_dtype``; BF16 activations use FP16 ring storage."""
     device = "cuda"
     o_rtol, o_atol = _output_tolerances(act_dtype)
-    s_rtol, s_atol = _state_tolerances(act_dtype)
+    s_rtol, s_atol = _state_tolerances(act_dtype, state_dtype)
     set_random_seed(seed)
     scale = head_k_dim**-0.5
     qkv_dim = 2 * (num_q_heads * head_k_dim) + num_v_heads * head_v_dim
@@ -100,13 +140,14 @@ def _run_gdn_standard_decode(
     state_cached = state0.clone()
     state_before = state0.clone()
 
+    cache_dtype = torch.float16 if act_dtype == torch.bfloat16 else act_dtype
     d_cache = torch.zeros(
         num_state_slots,
         num_v_heads,
         max_cache_len,
         head_v_dim,
         device=device,
-        dtype=act_dtype,
+        dtype=cache_dtype,
     )
     k_cache = torch.zeros(
         num_state_slots,
@@ -114,7 +155,7 @@ def _run_gdn_standard_decode(
         max_cache_len,
         head_k_dim,
         device=device,
-        dtype=act_dtype,
+        dtype=cache_dtype,
     )
     g_cache = torch.zeros(
         num_state_slots, num_v_heads, max_cache_len, device=device, dtype=torch.float32
@@ -274,13 +315,14 @@ def test_replayssm_standard_decode_gdn_per_row_write_pos(
     )
     state_packed = state0.clone()
     state_cached = state0.clone()
+    cache_dtype = torch.float16 if act_dtype == torch.bfloat16 else act_dtype
     d_cache = torch.zeros(
         num_state_slots,
         num_v_heads,
         max_cache_len,
         head_v_dim,
         device=device,
-        dtype=act_dtype,
+        dtype=cache_dtype,
     )
     k_cache = torch.zeros(
         num_state_slots,
@@ -288,7 +330,7 @@ def test_replayssm_standard_decode_gdn_per_row_write_pos(
         max_cache_len,
         head_k_dim,
         device=device,
-        dtype=act_dtype,
+        dtype=cache_dtype,
     )
     g_cache = torch.zeros(
         num_state_slots, num_v_heads, max_cache_len, device=device, dtype=torch.float32

@@ -129,11 +129,12 @@ def _run_gdn_teacher_equivalence(
         num_state_slots, HV, V, K, device=device, dtype=state_dtype
     )
     state_dec = torch.zeros(num_state_slots, HV, V, K, device=device, dtype=state_dtype)
+    cache_dtype = torch.float16 if act_dtype == torch.bfloat16 else act_dtype
     d_cache = torch.zeros(
-        num_state_slots, HV, max_cache_len, V, device=device, dtype=act_dtype
+        num_state_slots, HV, max_cache_len, V, device=device, dtype=cache_dtype
     )
     k_cache = torch.zeros(
-        num_state_slots, H, max_cache_len, K, device=device, dtype=act_dtype
+        num_state_slots, H, max_cache_len, K, device=device, dtype=cache_dtype
     )
     g_cache = torch.zeros(
         num_state_slots, HV, max_cache_len, device=device, dtype=torch.float32

@@ -85,7 +85,7 @@ def fused_recurrent_gated_delta_rule_replayssm_kernel(
     softplus_x = tl.where(x <= SOFTPLUS_THRESHOLD, tl.log(1.0 + tl.exp(x)), x)
     g_val = -tl.exp(A_log_val) * softplus_x
     alpha_val = tl.exp(g_val)
-    beta_val = tl.sigmoid(b_val).to(b.dtype.element_ty).to(tl.float32)
+    beta_val = tl.sigmoid(b_val)
 
     # Replay decay over the committed cache, from the cached per-step gates g.
     p_g_main = g_cache + state_idx * stride_g_slot + i_hv * MAX_CACHE_LEN + o_c
@@ -333,9 +333,7 @@ def fused_recurrent_gated_delta_rule_replayssm(
         )
     max_cache_len = d_cache.shape[2]
 
-    # Launch config (block_v, num_warps, num_stages, nk) from the L-keyed config
-    # module; explicit kwargs override. Lets benchmarks/the config sweep pin it via
-    # override_replayssm_config("gdn_decode", ...).
+    # Explicit launch parameters override the defaults for this buffer length.
     cfg_bv, cfg_nw, cfg_ns, cfg_nk = get_replayssm_config("gdn_decode", L=max_cache_len)
     if block_v is None:
         block_v = cfg_bv
