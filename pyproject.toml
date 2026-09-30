@@ -177,6 +177,14 @@ output = "coverage.xml"
 unresolved-import = "ignore"
 unresolved-attribute = "ignore"
 
+[[tool.ty.overrides]]
+# Tests deliberately pass mocks and stand-ins where real types are expected
+include = ["tests/**"]
+
+[tool.ty.overrides.rules]
+invalid-argument-type = "ignore"
+invalid-assignment = "ignore"
+
 [tool.typos.files]
 # these files may be written in non english words
 extend-exclude = ["tests/models/fixtures/*", "tests/prompts/*", "tests/tokenizers_/*",
