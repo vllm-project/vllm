@@ -5849,6 +5849,82 @@ async fn collective_rpc_route_sends_expected_utility_call_and_returns_results() 
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
+async fn weight_checker_route_merges_worker_checksums_and_compares() {
+    let (mut app, engine_task) = test_admin_app_with_engine_script(|dealer, push| {
+        boxed_test_future(async move {
+            let workers = Value::Array(vec![
+                Value::Map(vec![(Value::from("tp0:a"), Value::from("1"))]),
+                Value::Map(vec![(Value::from("tp1:a"), Value::from("2"))]),
+            ]);
+            for (method, result) in [
+                ("compute_weight_checksums", workers.clone()),
+                ("compute_weight_checksums", workers),
+                ("reset_weights", Value::Array(vec![Value::Nil, Value::Nil])),
+            ] {
+                let utility = recv_engine_message(dealer).await;
+                let payload = decode_value(&utility[1]).expect("decode utility payload");
+                let array = payload.as_array().expect("utility payload array");
+                assert_eq!(array[2], Value::from("collective_rpc"));
+                assert_eq!(
+                    array[3].as_array().expect("rpc args")[0],
+                    Value::from(method)
+                );
+                let call_id = array[1].as_u64().expect("call id");
+                let envelope = UtilityResultEnvelope::without_type_info(result);
+                send_outputs(push, utility_outputs(call_id, envelope)).await;
+            }
+        })
+    })
+    .await;
+
+    let (status, body) =
+        post_json(&mut app, "/weight_checker", json!({"action": "checksum"})).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, json!({"checksums": {"tp0:a": "1", "tp1:a": "2"}}));
+
+    let baseline = json!({"tp0:a": "1", "tp1:a": "9", "tp2:a": "3"});
+    let (status, body) = post_json(
+        &mut app,
+        "/weight_checker",
+        json!({"action": "compare", "baseline": baseline}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        body,
+        json!({"match": false, "mismatches": ["tp1:a", "tp2:a"]})
+    );
+
+    let (status, body) = post_json(&mut app, "/weight_checker", json!({"action": "reset"})).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, json!({"status": "reset"}));
+    engine_task.abort_and_join().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn weight_checker_route_rejects_invalid_requests_before_engine_calls() {
+    let (mut app, engine_task) = test_admin_app_with_engine_script(|dealer, _push| {
+        boxed_test_future(async move {
+            let message = recv_engine_message(dealer).await;
+            panic!("invalid request reached engine: {message:?}");
+        })
+    })
+    .await;
+    for body in [
+        json!({}),
+        json!({"action": "frobnicate"}),
+        json!({"action": "compare"}),
+        json!({"action": "compare", "baseline": {"k": 1}}),
+    ] {
+        let (status, _) = post_json(&mut app, "/weight_checker", body.clone()).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    }
+    engine_task.abort_and_join().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
 async fn sleep_route_uses_python_compatible_default_query_values() {
     let (app, engine_task) = test_admin_app_with_engine_script(|dealer, push| {
         boxed_test_future(async move {
