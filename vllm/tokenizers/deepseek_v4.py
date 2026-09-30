@@ -18,7 +18,7 @@ def get_deepseek_v4_tokenizer(tokenizer: HfTokenizer) -> HfTokenizer:
 
     added_vocab = tokenizer.get_added_vocab()
 
-    class _DeepseekV4Tokenizer(tokenizer.__class__):  # type: ignore
+    class _DeepseekV4Tokenizer(tokenizer.__class__):
         def apply_chat_template(
             self,
             messages: list["ChatCompletionMessageParam"],

@@ -11,7 +11,7 @@ try:
         TpuPlatform as TpuInferencePlatform,
     )
 
-    TpuPlatform = TpuInferencePlatform  # type: ignore
+    TpuPlatform = TpuInferencePlatform
     USE_TPU_INFERENCE = True
 except ImportError:
     logger.error(

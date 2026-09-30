@@ -33,11 +33,11 @@ from vllm.utils import random_uuid
 logger = init_logger(__name__)
 
 try:
-    from lxml import etree as ET  # type: ignore
+    from lxml import etree as ET
 
     _HAS_LXML = True
 except Exception:  # pragma: no cover
-    import xml.etree.ElementTree as ET  # type: ignore
+    import xml.etree.ElementTree as ET
 
     _HAS_LXML = False
 

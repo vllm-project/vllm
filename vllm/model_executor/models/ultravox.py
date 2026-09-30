@@ -137,11 +137,11 @@ class UltravoxProcessingInfo(BaseProcessingInfo):
         hf_processor = self.get_hf_processor(**kwargs)
 
         # Changed in https://huggingface.co/fixie-ai/ultravox-v0_5-llama-3_2-1b/commit/9a3c571b8fdaf1e66dd3ea61bbcb6db5c70a438e
-        audio_processor = hf_processor.audio_processor  # type: ignore
+        audio_processor = hf_processor.audio_processor
         if isinstance(audio_processor, WhisperFeatureExtractor):
             return audio_processor
 
-        feature_extractor = audio_processor.feature_extractor  # type: ignore
+        feature_extractor = audio_processor.feature_extractor
         assert isinstance(feature_extractor, WhisperFeatureExtractor)
         return feature_extractor
 
@@ -266,7 +266,7 @@ class UltravoxMultiModalProcessor(BaseMultiModalProcessor[UltravoxProcessingInfo
         hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
         tokenizer = self.info.get_tokenizer()
 
-        replacement_id = hf_processor.audio_replacement_token_id  # type: ignore
+        replacement_id = hf_processor.audio_replacement_token_id
 
         # Each audio can be split into multiple chunks.
         # chunks_start_idx[i] indicates the start index of the chunks
@@ -290,7 +290,7 @@ class UltravoxMultiModalProcessor(BaseMultiModalProcessor[UltravoxProcessingInfo
             audio_token_lens = out_mm_data["audio_token_len"]
             assert isinstance(audio_token_lens, torch.Tensor)
             audio_token_len = audio_token_lens[start:end].sum()
-            return [replacement_id] * int(audio_token_len)  # type: ignore
+            return [replacement_id] * int(audio_token_len)
 
         return [
             PromptReplacement(
@@ -301,7 +301,7 @@ class UltravoxMultiModalProcessor(BaseMultiModalProcessor[UltravoxProcessingInfo
                 # placeholder text instead of `replacement_id`
                 target=cached_encode(
                     tokenizer,
-                    hf_processor.audio_token_replacement,  # type: ignore
+                    hf_processor.audio_token_replacement,
                     add_special_tokens=False,
                 ),
                 replacement=get_replacement_ultravox,

@@ -224,7 +224,7 @@ def _lora_expand(
     NUM_CTAS = kernel_config["num_ctas"]
     NUM_STAGES = kernel_config["num_stages"]
 
-    EVEN_K = K % BLOCK_K == 0  # type: ignore
+    EVEN_K = K % BLOCK_K == 0
 
     if inputs.dtype == torch.float32 and lora_b_weights[0].dtype in [
         torch.float16,

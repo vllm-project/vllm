@@ -392,7 +392,7 @@ def _reduced_vocabulary(tokenizer: TokenizerLike) -> dict[bytes, list[int]]:
 def get_outlines_vocabulary(tokenizer: TokenizerLike) -> oc.Vocabulary:
     """Get the `Vocabulary` object for a given tokenizer."""
     if hasattr(tokenizer, "_outlines_vocabulary"):
-        return tokenizer._outlines_vocabulary  # type: ignore
+        return tokenizer._outlines_vocabulary
 
     reduced_vocab = _reduced_vocabulary(tokenizer)
     vocabulary = OutlinesVocabulary(

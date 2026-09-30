@@ -45,7 +45,7 @@ def create_static_sink_attention_backend(
     prefix = "StaticSink_"
     underlying_builder = underlying_attn_backend.get_builder_cls()
 
-    class StaticSinkAttentionBuilder(underlying_builder):  # type: ignore
+    class StaticSinkAttentionBuilder(underlying_builder):
         def __init__(
             self,
             kv_cache_spec: AttentionSpec,

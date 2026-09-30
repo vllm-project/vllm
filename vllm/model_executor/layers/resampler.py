@@ -186,7 +186,7 @@ class BaseResampler(nn.Module):
             )
         else:
             # Maintain the same return value with ReplicatedLinear.forward
-            self.kv_proj = lambda *args, **kwargs: (  # type: ignore # noqa
+            self.kv_proj = lambda *args, **kwargs: (  # noqa
                 nn.Identity()(*args, **kwargs),
                 None,
             )

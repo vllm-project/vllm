@@ -86,9 +86,9 @@ def json_map_leaves(
 ) -> "BatchedTensorInputs" | _JSONTree[_U]:
     """Apply a function to each leaf in a nested JSON structure."""
     if isinstance(value, dict):
-        return {k: json_map_leaves(func, v) for k, v in value.items()}  # type: ignore
+        return {k: json_map_leaves(func, v) for k, v in value.items()}
     elif isinstance(value, list):
-        return [json_map_leaves(func, v) for v in value]  # type: ignore
+        return [json_map_leaves(func, v) for v in value]
     elif isinstance(value, tuple):
         return tuple(json_map_leaves(func, v) for v in value)
     else:

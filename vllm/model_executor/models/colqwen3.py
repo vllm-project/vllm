@@ -223,7 +223,7 @@ class ColQwen3Model(Qwen3VLForConditionalGeneration, SupportsLateInteraction):
         )
 
         if not isinstance(hidden_states, torch.Tensor):
-            return hidden_states  # type: ignore
+            return hidden_states
 
         if self.custom_text_proj is not None:
             proj_dtype = self.custom_text_proj.weight.dtype

@@ -77,7 +77,7 @@ def create_cross_attention_backend(
     underlying_builder = underlying_attn_backend.get_builder_cls()
     underlying_impl = underlying_attn_backend.get_impl_cls()
 
-    class CrossAttentionBuilder(underlying_builder):  # type: ignore
+    class CrossAttentionBuilder(underlying_builder):
         def build(
             self,
             common_prefix_len: int,

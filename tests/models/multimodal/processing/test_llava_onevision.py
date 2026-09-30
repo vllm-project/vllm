@@ -71,7 +71,7 @@ def test_processor_max_tokens(model_id):
     validate_one = partial(
         _validate_image_max_tokens_one,
         processor,
-        info.get_max_image_tokens(),  # type: ignore
+        info.get_max_image_tokens(),
         failed_size_excs,
     )
     pqdm(image_sizes, validate_one, n_jobs=8, desc="Validating image sizes")

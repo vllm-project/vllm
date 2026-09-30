@@ -1309,7 +1309,7 @@ class Worker(WorkerBase):
                 and self.model_runner.is_pooling_model
                 and output is None
             ):
-                output = self.model_runner.pool()  # type: ignore
+                output = self.model_runner.pool()
             if isinstance(
                 output, ModelRunnerOutput | AsyncModelRunnerOutput | NoneType
             ):
@@ -1333,7 +1333,7 @@ class Worker(WorkerBase):
         self._pp_send_work = handles[1:]
 
         if self.use_v2_model_runner and self.model_runner.is_pooling_model:
-            return self.model_runner.pool()  # type: ignore
+            return self.model_runner.pool()
         return None
 
     def take_draft_token_ids(self) -> DraftTokenIds | None:

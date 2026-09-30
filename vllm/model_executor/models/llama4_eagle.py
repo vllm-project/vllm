@@ -204,7 +204,7 @@ class EagleLlama4ForCausalLM(_EagleLlama4ForCausalLMBase, SupportsMultiModalEmbe
     def get_language_model(self) -> torch.nn.Module:
         return self.model
 
-    embed_input_ids = SupportsMultiModal.embed_input_ids  # type: ignore
+    embed_input_ids = SupportsMultiModal.embed_input_ids
 
     def forward(
         self,

@@ -34,9 +34,7 @@ def test_cuda_device_count_stateless():
     CUDA_VISIBLE_DEVICES is changed."""
     if current_platform.is_rocm():
         pytest.skip("Skip for ROCm because Ray uses HIP_VISIBLE_DEVICES.")
-    actor = _CUDADeviceCountStatelessTestActor.options(  # type: ignore
-        num_gpus=2
-    ).remote()
+    actor = _CUDADeviceCountStatelessTestActor.options(num_gpus=2).remote()
     assert len(sorted(ray.get(actor.get_cuda_visible_devices.remote()).split(","))) == 2
     assert ray.get(actor.get_count.remote()) == 2
     ray.get(actor.set_cuda_visible_devices.remote("0"))

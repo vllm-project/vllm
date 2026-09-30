@@ -224,10 +224,7 @@ class Lfm2ToolParser(ToolParser):
                 and parsed.elts
                 and all(isinstance(e, ast.Call) for e in parsed.elts)
             ):
-                tool_calls = [
-                    handle_single_tool(e)  # type: ignore
-                    for e in parsed.elts
-                ]
+                tool_calls = [handle_single_tool(e) for e in parsed.elts]
                 if kw_renamed:
                     tool_calls = [self._restore_reserved(tc) for tc in tool_calls]
                 return ExtractedToolCallInformation(
@@ -371,10 +368,7 @@ class Lfm2ToolParser(ToolParser):
                 isinstance(e, ast.Call) for e in parsed.elts
             ):
                 raise UnexpectedAstError("Tool output must be a list of function calls")
-            tool_calls = [
-                handle_single_tool(e)  # type: ignore
-                for e in parsed.elts
-            ]
+            tool_calls = [handle_single_tool(e) for e in parsed.elts]
             if kw_renamed:
                 tool_calls = [self._restore_reserved(tc) for tc in tool_calls]
 

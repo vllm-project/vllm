@@ -26,7 +26,7 @@ def create_encoder_only_attention_backend(
     prefix = "EncoderOnlyAttention_"
     underlying_builder = underlying_attn_backend.get_builder_cls()
 
-    class EncoderOnlyAttentionBuilder(underlying_builder):  # type: ignore
+    class EncoderOnlyAttentionBuilder(underlying_builder):
         def build(
             self,
             common_prefix_len: int,

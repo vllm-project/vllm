@@ -15,9 +15,9 @@ from http import HTTPStatus
 from statistics import mean
 from typing import NamedTuple
 
-import aiohttp  # type: ignore
-import numpy as np  # type: ignore
-import pandas as pd  # type: ignore
+import aiohttp
+import numpy as np
+import pandas as pd
 from bench_dataset import (
     ConversationsMap,
     ConvId,
@@ -30,7 +30,7 @@ from bench_dataset import (
     parse_input_json_file,
 )
 from bench_utils import TEXT_SEPARATOR, Color, logger
-from transformers import AutoTokenizer  # type: ignore
+from transformers import AutoTokenizer
 
 from vllm.benchmarks.lib.utils import redact_sensitive_namespace
 
@@ -639,7 +639,7 @@ async def client_main(
                 )
                 break
 
-            if stop_event.is_set():  # type: ignore
+            if stop_event.is_set():
                 logger.info(
                     f"{Color.YELLOW}Client {client_id} received "
                     f"a termination signal{Color.RESET}"

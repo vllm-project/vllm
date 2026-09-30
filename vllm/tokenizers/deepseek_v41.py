@@ -50,7 +50,7 @@ def get_deepseek_v41_tokenizer(tokenizer: HfTokenizer) -> HfTokenizer:
     wrapped = copy.copy(tokenizer)
     added_vocab = tokenizer.get_added_vocab()
 
-    class _DeepseekV41Tokenizer(tokenizer.__class__):  # type: ignore
+    class _DeepseekV41Tokenizer(tokenizer.__class__):
         def apply_chat_template(
             self,
             messages: list[ChatCompletionMessageParam],

@@ -184,11 +184,11 @@ try:
     ray_import_err = None
 
 except ImportError as e:
-    ray = None  # type: ignore
+    ray = None
     # only capture string to avoid variable references in the traceback that can
     # prevent garbage collection in some cases
     ray_import_err = str(e)
-    RayWorkerWrapper = None  # type: ignore
+    RayWorkerWrapper = None
 
 
 def detach_zero_copy_from_model_runner_output(output: "ModelRunnerOutput") -> None:

@@ -163,7 +163,7 @@ def iterative_moe(
         else:
             final_hidden_states = final_hidden_states + current_hidden_states
 
-    return final_hidden_states.view(orig_shape)  # type: ignore
+    return final_hidden_states.view(orig_shape)
 
 
 NUM_EXPERTS = [8, 64, 192]

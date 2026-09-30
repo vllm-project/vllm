@@ -1014,7 +1014,7 @@ def create_fast_prefill_custom_backend(
 ) -> type[AttentionBackend]:
     underlying_builder = underlying_attn_backend.get_builder_cls()
 
-    class FastPrefillAttentionBuilder(underlying_builder):  # type: ignore
+    class FastPrefillAttentionBuilder(underlying_builder):
         def build(
             self,
             common_prefix_len: int,
@@ -1029,7 +1029,7 @@ def create_fast_prefill_custom_backend(
             )
 
             class KVSharingFastPrefillAttentionMetadata(
-                metadata.__class__,  #  type: ignore
+                metadata.__class__,
                 KVSharingFastPrefillMetadata,
             ):
                 def __init__(self, metadata, common_attn_metadata):
@@ -1075,7 +1075,7 @@ def compute_causal_conv1d_metadata(
         mlist_len = len(nums_dict[BLOCK_M]["mlist"])
         nums_dict[BLOCK_M]["mlist_len"] = mlist_len
         MAX_NUM_PROGRAMS = max(1024, mlist_len) * 2
-        offsetlist = []  # type: ignore
+        offsetlist = []
         for idx, num in enumerate(nums):
             offsetlist.extend(range(num))
         offsetlist = torch.tensor(offsetlist, dtype=torch.int32, pin_memory=PIN_MEMORY)

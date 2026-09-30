@@ -81,14 +81,14 @@ class LRUCache(cachetools.LRUCache[_K, _V]):
     def cache(self) -> Mapping[_K, _V]:
         """Return the internal cache dictionary in order (read-only)."""
         return _MappingOrderCacheView(
-            self._Cache__data,  # type: ignore
+            self._Cache__data,
             self.order,
         )
 
     @property
     def order(self) -> Mapping[_K, None]:
         """Return the internal order dictionary (read-only)."""
-        return MappingProxyType(self._LRUCache__order)  # type: ignore
+        return MappingProxyType(self._LRUCache__order)
 
     @property
     def capacity(self) -> float:
@@ -118,7 +118,7 @@ class LRUCache(cachetools.LRUCache[_K, _V]):
 
     def touch(self, key: _K) -> None:
         if key in self:
-            self._LRUCache__order.move_to_end(key)  # type: ignore
+            self._LRUCache__order.move_to_end(key)
 
     @overload
     def get(self, key: _K, /) -> _V | None: ...

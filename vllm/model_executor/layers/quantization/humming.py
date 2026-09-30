@@ -413,7 +413,7 @@ class HummingLinearMethod(LinearMethodBase):
                     for name, _ in list(layer.named_parameters()):
                         if name != "bias":
                             delattr(layer, name)
-                    self.__class__ = UnquantizedLinearMethod  # type: ignore
+                    self.__class__ = UnquantizedLinearMethod
                     tensor = torch.empty(
                         (
                             layer.output_partition_sizes_sum,

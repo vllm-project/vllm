@@ -21,8 +21,8 @@ import os
 import time
 
 import pandas as pd
-import torch  # type: ignore
-import torch.distributed as dist  # type: ignore
+import torch
+import torch.distributed as dist
 
 from vllm._custom_ops import create_fp4_output_tensors
 from vllm.config.vllm import CompilationConfig, VllmConfig, set_current_vllm_config
@@ -53,8 +53,8 @@ logger = init_logger(__name__)
 # Try to import FlashInfer
 TorchDistBackend = None
 try:
-    import flashinfer.comm as flashinfer_comm  # type: ignore
-    from flashinfer.comm.mnnvl import (  # type: ignore
+    import flashinfer.comm as flashinfer_comm
+    from flashinfer.comm.mnnvl import (
         TorchDistBackend,
     )
 

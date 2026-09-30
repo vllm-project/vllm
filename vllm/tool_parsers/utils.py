@@ -477,10 +477,7 @@ def get_parameter_value(val: ast.expr) -> Any:
                 ast.dump(val),
             )
             raise UnexpectedAstError("Dict tool call arguments must have literal keys")
-        return {
-            k.value: get_parameter_value(v)  # type: ignore
-            for k, v in zip(val.keys, val.values)
-        }
+        return {k.value: get_parameter_value(v) for k, v in zip(val.keys, val.values)}
     elif isinstance(val, ast.List):
         return [get_parameter_value(v) for v in val.elts]
     elif isinstance(val, ast.Tuple):
@@ -499,10 +496,7 @@ def get_parameter_value(val: ast.expr) -> Any:
         # constant, but Python parses it as JoinedStr rather than Constant;
         # without this branch the whole call is dropped. F-strings with real
         # placeholders still fall through to the raise below.
-        return "".join(
-            str(part.value)  # type: ignore
-            for part in val.values
-        )
+        return "".join(str(part.value) for part in val.values)
     elif isinstance(val, ast.Name) and val.id in _JSON_NAME_LITERALS:
         return _JSON_NAME_LITERALS[val.id]
     elif isinstance(val, ast.UnaryOp) and isinstance(val.op, (ast.USub, ast.UAdd)):

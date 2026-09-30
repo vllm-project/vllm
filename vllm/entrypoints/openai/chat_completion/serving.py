@@ -1212,8 +1212,8 @@ class OpenAIServingChat(GenerateBaseServing):
                 elif choice.message.tool_calls:
                     # For tool calls, log the function name and arguments
                     tool_call_descriptions = []
-                    for tc in choice.message.tool_calls:  # type: ignore
-                        function_call: FunctionCall = tc.function  # type: ignore
+                    for tc in choice.message.tool_calls:
+                        function_call: FunctionCall = tc.function
                         tool_call_descriptions.append(
                             f"{function_call.name}({function_call.arguments})"
                         )

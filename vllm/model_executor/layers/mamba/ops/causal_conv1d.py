@@ -644,7 +644,7 @@ def causal_conv1d_fn(
             tot = 0
 
             mlist = []
-            offsetlist = []  # type: ignore
+            offsetlist = []
 
             nums = -(-seqlens // META["BLOCK_M"])
 

@@ -190,7 +190,7 @@ class MarlinLinearKernel(MPLinearKernel):
             input=x,
             weight=w_q,
             weight_scale=w_s,
-            weight_zp=w_zp,  # type: ignore
+            weight_zp=w_zp,
             workspace=None,
             wtype=c.weight_type,
             input_size_per_partition=c.partition_weight_shape[0],

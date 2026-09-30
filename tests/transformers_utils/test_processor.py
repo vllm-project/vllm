@@ -12,7 +12,7 @@ from vllm.transformers_utils.processor import (
 )
 
 
-class _FakeProcessorKwargs(ProcessingKwargs, total=False):  # type: ignore
+class _FakeProcessorKwargs(ProcessingKwargs, total=False):
     pass
 
 

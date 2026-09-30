@@ -106,7 +106,7 @@ class MLARoPEKVCacheCatPattern(VllmPatternReplacement):
                 use_flashinfer=self.use_flashinfer,
             )
         else:
-            self.rope_matcher = MatcherRotaryEmbedding(  # type: ignore
+            self.rope_matcher = MatcherRotaryEmbedding(
                 is_neox=self.is_neox,
                 head_size=self.qk_rope_head_dim,
                 num_heads=self.num_heads,

@@ -88,7 +88,7 @@ def create_mooncake_embedding_store_client(
     read_buffer_bytes: int = 128 * 1024**2,
 ) -> MooncakeEmbeddingStoreClient:
     try:
-        from mooncake.store import (  # type: ignore
+        from mooncake.store import (
             MooncakeDistributedStore,
             ObjectDataType,
             ReplicateConfig,

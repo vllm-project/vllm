@@ -217,7 +217,7 @@ class QuarkMoEMethod(FusedMoEMethodBase):
 
     @staticmethod
     def get_moe_method(
-        quant_config: "QuarkConfig",  # type: ignore # noqa E501 # noqa F821
+        quant_config: "QuarkConfig",  # noqa E501 # noqa F821
         module: RoutedExperts,
         method_cls: type["QuarkMoEMethod"],
         weight_quant_key: QuantKey | None,
@@ -289,7 +289,7 @@ class QuarkW4A16Int4MoEMethod(QuarkMoEMethod):
         weight_config: dict[str, Any],
         pack_method: str,
         moe: FusedMoEConfig,
-        quant_config: "QuarkConfig | None" = None,  # type: ignore # noqa F821
+        quant_config: "QuarkConfig | None" = None,  # noqa F821
     ):
         super().__init__(moe, weight_quant_key, activation_quant_key)
 
@@ -1986,7 +1986,7 @@ class QuarkNvfp4MoEMethod(QuarkMoEMethod):
     def __init__(
         self,
         moe: FusedMoEConfig,
-        quant_config: "QuarkConfig",  # type: ignore # noqa E501 # noqa F821
+        quant_config: "QuarkConfig",  # noqa E501 # noqa F821
         activation_quant_key: QuantKey | None,
     ):
         super().__init__(moe, kNvfp4Static, activation_quant_key)

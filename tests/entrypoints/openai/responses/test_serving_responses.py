@@ -1577,7 +1577,7 @@ def _identity_increment(event):
     seq = getattr(_identity_increment, "_counter", 0)
     if hasattr(event, "sequence_number"):
         event.sequence_number = seq
-    _identity_increment._counter = seq + 1  # type: ignore
+    _identity_increment._counter = seq + 1
     return event
 
 
@@ -1645,7 +1645,7 @@ class TestStreamingReasoningToContentTransition:
         request = ResponsesRequest(input="hi", tools=[], stream=True)
         sampling_params = SamplingParams(max_tokens=64)
         metadata = RequestResponseMetadata(request_id="req")
-        _identity_increment._counter = 0  # type: ignore
+        _identity_increment._counter = 0
 
         events = []
         async for event in serving._process_simple_streaming_events(
@@ -1711,7 +1711,7 @@ class TestStreamingReasoningToContentTransition:
         request = ResponsesRequest(input="hi", tools=[], stream=True)
         sampling_params = SamplingParams(max_tokens=64)
         metadata = RequestResponseMetadata(request_id="req")
-        _identity_increment._counter = 0  # type: ignore
+        _identity_increment._counter = 0
 
         events = []
         async for event in serving._process_simple_streaming_events(
@@ -1772,7 +1772,7 @@ class TestStreamingReasoningToContentTransition:
         request = ResponsesRequest(input="hi", tools=[], stream=True)
         sampling_params = SamplingParams(max_tokens=64)
         metadata = RequestResponseMetadata(request_id="req")
-        _identity_increment._counter = 0  # type: ignore
+        _identity_increment._counter = 0
 
         events = []
         async for event in serving._process_simple_streaming_events(
@@ -1850,7 +1850,7 @@ class TestAutoToolStreaming:
         )
         sampling_params = SamplingParams(max_tokens=64)
         metadata = RequestResponseMetadata(request_id="req")
-        _identity_increment._counter = 0  # type: ignore
+        _identity_increment._counter = 0
 
         events = []
         async for event in serving._process_simple_streaming_events(

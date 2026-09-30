@@ -17,8 +17,8 @@ DP_RANK = 0
 
 class EventSample(
     msgspec.Struct,
-    tag=True,  # type: ignore
-    array_like=True,  # type: ignore
+    tag=True,
+    array_like=True,
 ):
     """Test event for publisher testing."""
 

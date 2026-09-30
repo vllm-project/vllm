@@ -4,15 +4,15 @@ from abc import ABC, abstractmethod
 from statistics import mean
 from typing import Any, NamedTuple
 
-import numpy as np  # type: ignore
-import pandas as pd  # type: ignore
+import numpy as np
+import pandas as pd
 from bench_utils import (
     TEXT_SEPARATOR,
     Color,
     logger,
 )
 from tqdm import tqdm
-from transformers import AutoTokenizer  # type: ignore
+from transformers import AutoTokenizer
 
 # Conversation ID is a string (e.g: "UzTK34D")
 ConvId = str

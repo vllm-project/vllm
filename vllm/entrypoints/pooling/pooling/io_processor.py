@@ -129,9 +129,9 @@ class PluginWithIOProcessorPlugins(PoolingIOProcessor):
             )
 
             if hasattr(output, "request_id") and output.request_id is None:
-                output.request_id = ctx.request_id  # type: ignore
+                output.request_id = ctx.request_id
 
-            ctx.response = output_to_response(output)  # type: ignore
+            ctx.response = output_to_response(output)
         else:
             ctx.response = IOProcessorResponse(request_id=ctx.request_id, data=output)
 

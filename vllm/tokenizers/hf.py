@@ -129,7 +129,7 @@ def get_cached_tokenizer(tokenizer: HfTokenizer) -> HfTokenizer:
         with contextlib.suppress(NotImplementedError):
             max_token_id = max(max_token_id, tokenizer.vocab_size)
 
-    class CachedTokenizer(tokenizer.__class__):  # type: ignore
+    class CachedTokenizer(tokenizer.__class__):
         @property
         def all_special_ids(self) -> list[int]:
             return tokenizer_all_special_ids

@@ -454,10 +454,10 @@ class RayDistributedExecutor(Executor):
         non_block: bool = False,
     ) -> ModelRunnerOutput | None | Future[ModelRunnerOutput | None]:
         # Build the compiled DAG for the first time.
-        if self.forward_dag is None:  # type: ignore
+        if self.forward_dag is None:
             self.forward_dag = self._compiled_ray_dag(enable_asyncio=False)
 
-        refs = self.forward_dag.execute((scheduler_output, grammar_output))  # type: ignore
+        refs = self.forward_dag.execute((scheduler_output, grammar_output))
 
         if not self.has_connector:
             # Get output only from a single worker (output_rank)

@@ -430,7 +430,7 @@ def get_vllm_version():
             return f"{__version__} (git sha: {git_sha}, date: {date})"
         else:
             # it's a dev build without local changes
-            git_sha = version_str[1:]  # type: ignore
+            git_sha = version_str[1:]
             return f"{__version__} (git sha: {git_sha})"
     return __version__
 

@@ -119,7 +119,7 @@ class PackedLoRALayerWeights(LoRALayerWeights):
         )
         self.lora_alphas = lora_alphas
         if scaling is None:
-            self.scaling = [  # type: ignore
+            self.scaling = [
                 lora_alpha / self.rank  # type: ignore # noqa
                 for lora_alpha in self.lora_alphas
             ]
@@ -145,10 +145,7 @@ class PackedLoRALayerWeights(LoRALayerWeights):
             [lora.lora_alpha if lora is not None else None for lora in loras],
             [lora.lora_a if lora is not None else None for lora in loras],
             [lora.lora_b if lora is not None else None for lora in loras],
-            scaling=[
-                1 if lora is not None else None  # type: ignore
-                for lora in loras
-            ],
+            scaling=[1 if lora is not None else None for lora in loras],
         )
         return obj
 

@@ -75,10 +75,10 @@ class DeepGemmQuantScaleFMT(Enum):
             and (_fp8_gemm_nt_impl is not None)
         )
         if not use_e8m0:
-            cls._oracle_cache = cls.FLOAT32  # type: ignore
+            cls._oracle_cache = cls.FLOAT32
             return
 
-        cls._oracle_cache = (  # type: ignore
+        cls._oracle_cache = (
             cls.UE8M0
             if (
                 current_platform.is_device_capability_family(100)

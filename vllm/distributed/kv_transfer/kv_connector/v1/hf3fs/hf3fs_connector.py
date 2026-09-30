@@ -84,7 +84,7 @@ except Exception:
         Hf3fsClient as _MockClient,
     )
 
-    Hf3fsClient = _MockClient  # type: ignore
+    Hf3fsClient = _MockClient
 
 # Constants
 DEFAULT_MAX_IO_ENTRIES = 8

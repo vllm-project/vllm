@@ -182,7 +182,7 @@ class FireRedASR2ProcessingInfo(BaseProcessingInfo):
 
     def get_feature_extractor(self, **kwargs: object) -> FireRedASR2FeatureExtractor:
         hf_processor = self.get_hf_processor(**kwargs)
-        feature_extractor = hf_processor.feature_extractor  # type: ignore
+        feature_extractor = hf_processor.feature_extractor
         assert isinstance(feature_extractor, FireRedASR2FeatureExtractor)
         return feature_extractor
 

@@ -1456,7 +1456,7 @@ class MooncakeStoreWorker:
         kv_cache_config: KVCacheConfig,
     ):
         try:
-            from mooncake.store import (  # type: ignore
+            from mooncake.store import (
                 MooncakeDistributedStore,
                 ReplicateConfig,
             )

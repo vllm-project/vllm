@@ -60,7 +60,7 @@ class KimiK25Processor(ProcessorMixin):
             text_inputs = self.tokenizer(text)
 
             # Note: Modify in-place
-            input_ids: list[list[int]] = text_inputs["input_ids"]  # type: ignore
+            input_ids: list[list[int]] = text_inputs["input_ids"]
 
             if vision_chunks is not None:
                 num_tokens_per_chunk = [

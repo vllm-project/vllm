@@ -125,10 +125,10 @@ def extract_mm_features(
     elif getattr(request, "mm_hashes", None):
         if modify:
             return (
-                request.mm_hashes.copy(),  # type: ignore
-                request.mm_positions.copy(),  # type: ignore
+                request.mm_hashes.copy(),
+                request.mm_positions.copy(),
             )
         else:
-            return (request.mm_hashes, request.mm_positions)  # type: ignore
+            return (request.mm_hashes, request.mm_positions)
     else:
         return ([], [])

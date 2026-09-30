@@ -676,7 +676,7 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
 
         # Track original modality for vision_chunk items
         if use_vision_chunk:
-            self._items_by_modality[input_modality].append(item)  # type: ignore
+            self._items_by_modality[input_modality].append(item)
             self._modality_order["vision_chunk"].append(original_modality)
         else:
             self._items_by_modality[original_modality].append(item)
@@ -1735,16 +1735,12 @@ def _parse_chat_message_content_mm_part(
             return "image_url", image_url
         if "image_pil" in part:
             # "image_pil" could be None if UUID is provided.
-            image_params = cast(  # type: ignore
-                CustomChatCompletionContentPILImageParam, part
-            )
+            image_params = cast(CustomChatCompletionContentPILImageParam, part)
             image_pil = image_params.get("image_pil", None)
             return "image_pil", image_pil
         if "image_embeds" in part:
             # "image_embeds" could be None if UUID is provided.
-            image_params = cast(  # type: ignore
-                ChatCompletionContentPartImageEmbedsParam, part
-            )
+            image_params = cast(ChatCompletionContentPartImageEmbedsParam, part)
             image_embeds = image_params.get("image_embeds", None)
             return "image_embeds", image_embeds
         if "audio_embeds" in part:
@@ -2052,7 +2048,7 @@ def _parse_chat_message_content(
         content = [ChatCompletionContentPartTextParam(type="text", text=content)]
     result = _parse_chat_message_content_parts(
         role,
-        content,  # type: ignore
+        content,
         mm_tracker,
         wrap_dicts=(content_format == "openai"),
         interleave_strings=interleave_strings,

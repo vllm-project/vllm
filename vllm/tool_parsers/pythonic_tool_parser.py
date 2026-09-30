@@ -96,10 +96,7 @@ class PythonicToolParser(ToolParser):
             ):
                 return ExtractedToolCallInformation(
                     tools_called=True,
-                    tool_calls=[
-                        handle_single_tool(e)  # type: ignore
-                        for e in parsed.elts
-                    ],
+                    tool_calls=[handle_single_tool(e) for e in parsed.elts],
                     content=None,
                 )
             else:
@@ -136,10 +133,7 @@ class PythonicToolParser(ToolParser):
                 isinstance(e, ast.Call) for e in parsed.elts
             ):
                 raise UnexpectedAstError("Tool output must be a list of function calls")
-            tool_calls = [
-                handle_single_tool(e)  # type: ignore
-                for e in parsed.elts
-            ]
+            tool_calls = [handle_single_tool(e) for e in parsed.elts]
 
             tool_deltas = []
             for index, new_call in enumerate(tool_calls):

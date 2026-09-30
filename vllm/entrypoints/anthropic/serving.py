@@ -419,7 +419,7 @@ class AnthropicServingMessages(OpenAIServingChat):
                     openai_messages.append({"role": "system", "content": text})
                 continue
 
-            openai_msg: dict[str, Any] = {"role": msg.role}  # type: ignore
+            openai_msg: dict[str, Any] = {"role": msg.role}
 
             if isinstance(msg.content, str):
                 openai_msg["content"] = msg.content
@@ -455,13 +455,13 @@ class AnthropicServingMessages(OpenAIServingChat):
             openai_msg["reasoning"] = "".join(reasoning_parts)
 
         if tool_calls:
-            openai_msg["tool_calls"] = tool_calls  # type: ignore
+            openai_msg["tool_calls"] = tool_calls
 
         if content_parts:
             if len(content_parts) == 1 and content_parts[0]["type"] == "text":
                 openai_msg["content"] = content_parts[0]["text"]
             else:
-                openai_msg["content"] = content_parts  # type: ignore
+                openai_msg["content"] = content_parts
         elif not tool_calls and not reasoning_parts:
             return
 
@@ -1199,7 +1199,7 @@ class AnthropicServingMessages(OpenAIServingChat):
 
         _, engine_inputs = result
 
-        input_tokens = sum(  # type: ignore
+        input_tokens = sum(
             len(engine_input["prompt_token_ids"])  # type: ignore[typeddict-item, misc]
             for engine_input in engine_inputs
             if "prompt_token_ids" in engine_input

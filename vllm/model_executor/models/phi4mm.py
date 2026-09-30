@@ -939,8 +939,8 @@ class Phi4MMMultiModalProcessor(BaseMultiModalProcessor[Phi4MMProcessingInfo]):
         out_mm_kwargs: MultiModalKwargsItems,
     ) -> Sequence[PromptUpdate]:
         tokenizer = self.info.get_tokenizer()
-        image_tokens: list[str] = self.info.image_tokens  # type: ignore
-        audio_tokens: list[str] = self.info.audio_tokens  # type: ignore
+        image_tokens: list[str] = self.info.image_tokens
+        audio_tokens: list[str] = self.info.audio_tokens
 
         def get_image_token_ids(item_idx: int) -> list[int]:
             return cached_encode(
@@ -1010,14 +1010,14 @@ class Phi4MMMultiModalProcessor(BaseMultiModalProcessor[Phi4MMProcessingInfo]):
         tokenizer = self.info.get_tokenizer()
 
         if cached_update.modality == "image":
-            image_tokens: list[str] = self.info.image_tokens  # type: ignore
+            image_tokens: list[str] = self.info.image_tokens
             new_update = new_update.with_target(
                 cached_encode(
                     tokenizer, image_tokens[new_item_idx], add_special_tokens=False
                 )
             )
         elif cached_update.modality == "audio":
-            audio_tokens: list[str] = self.info.audio_tokens  # type: ignore
+            audio_tokens: list[str] = self.info.audio_tokens
             new_update = new_update.with_target(
                 cached_encode(
                     tokenizer, audio_tokens[new_item_idx], add_special_tokens=False

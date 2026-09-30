@@ -179,9 +179,9 @@ class EngineCore:
         self.check_for_draft_tokens = (
             self.use_spec_decode or vllm_config.model_config.is_diffusion
         )
-        if self.scheduler.connector is not None:  # type: ignore
-            self.model_executor.init_kv_output_aggregator(self.scheduler.connector)  # type: ignore
-        if self.scheduler.ec_connector is not None:  # type: ignore
+        if self.scheduler.connector is not None:
+            self.model_executor.init_kv_output_aggregator(self.scheduler.connector)
+        if self.scheduler.ec_connector is not None:
             self.model_executor.init_ec_output_aggregator()
 
         self.mm_receiver_cache = engine_receiver_cache_from_config(vllm_config)
