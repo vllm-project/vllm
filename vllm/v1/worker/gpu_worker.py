@@ -1732,6 +1732,9 @@ class Worker(WorkerBase):
 
     def _load_layout_model(self) -> None:
         with set_current_vllm_config(self.vllm_config):
+            # Runner buffers can outlive its shutdown-time allocator flush.
+            gc.collect()
+            torch.accelerator.empty_cache()
             self.init_snapshot = MemorySnapshot(device=self.device)
             self.requested_memory = request_memory(
                 self.init_snapshot, self.cache_config
