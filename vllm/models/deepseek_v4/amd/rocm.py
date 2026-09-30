@@ -872,6 +872,7 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
         use_wvsplitk_blockscale = (
             tag in ("wo_b", "wqa_wkv")
             and on_gfx1151()
+            and x.dtype == torch.bfloat16
             and x_fp8.dim() == 2
             and weight.dim() == 2
             and 1 <= x_fp8.shape[0] <= 8
