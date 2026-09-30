@@ -20,6 +20,8 @@ from vllm.utils.network_utils import get_open_port
 
 # Official Kimi-K3 config with 8 layers and no weights.
 MODEL = "riverclouds/Kimi-K3-8L-dummy"
+# The recipe's DSpark draft, reading target layers that exist in MODEL.
+DRAFT = "riverclouds/Kimi-K3-DSpark-for-8L-dummy"
 
 # Conversation: the first prompt spans FIRST_PROMPT_BLOCKS blocks plus an
 # unaligned tail, and each later turn appends TURN_TOKENS random tokens.
@@ -48,6 +50,14 @@ pytestmark = pytest.mark.skipif(
     reason="Kimi-K3 NVIDIA kernels require the SM100 family",
 )
 
+SPEC_CONFIG = {
+    "method": "dspark",
+    "model": DRAFT,
+    "num_speculative_tokens": 7,
+    "draft_sample_method": "probabilistic",
+    "rejection_sample_method": "block",
+}
+
 NIXL = {"kv_connector": "NixlConnector", "kv_role": "kv_both"}
 # SimpleCPUOffloadConnector as in the Kimi-K3 recipe.
 OFFLOAD = {
@@ -66,14 +76,31 @@ NIXL_OFFLOAD = {
 
 
 @dataclass(frozen=True)
+class Mode:
+    # A finer prefix_match_unit enables partial hits inside a Mamba block.
+    prefix_match_unit: int | None
+    spec: bool
+
+    @property
+    def name(self) -> str:
+        name = "block" if self.prefix_match_unit is None else "partial"
+        return f"{name}-dspark" if self.spec else name
+
+
+MODES = [Mode(unit, spec) for spec in (False, True) for unit in (None, 128)]
+
+
+@dataclass(frozen=True)
 class Instance:
     tp: int = 1
     dcp: int = 1
     kv_config: dict | None = None
     prefix_caching: bool = True
 
-    def args(self, prefix_match_unit: int | None) -> list[str]:
+    def args(self, mode: Mode) -> list[str]:
         args = BASE_ARGS + ["--tensor-parallel-size", str(self.tp)]
+        if mode.spec:
+            args += ["--speculative-config", json.dumps(SPEC_CONFIG)]
         if self.dcp > 1:
             args += ["--decode-context-parallel-size", str(self.dcp)]
         if self.kv_config is not None:
@@ -81,8 +108,8 @@ class Instance:
         if not self.prefix_caching:
             return args + ["--no-enable-prefix-caching"]
         args.append("--enable-prefix-caching")
-        if prefix_match_unit is not None:
-            args += ["--prefix-match-unit", str(prefix_match_unit)]
+        if mode.prefix_match_unit is not None:
+            args += ["--prefix-match-unit", str(mode.prefix_match_unit)]
         return args
 
 
@@ -230,15 +257,19 @@ class Turn:
         return self.output[0] == self.recompute[0]
 
 
-def _expected_cached(prev_prompt_len: int, hit_unit: int) -> int:
-    """A turn must reuse the previous prompt up to its last checkpoint."""
-    return (prev_prompt_len - 1) // hit_unit * hit_unit if prev_prompt_len else 0
+def _expected_cached(prev_prompt_len: int, hit_unit: int, spec: bool) -> int:
+    """A turn must reuse the previous prompt up to its last checkpoint.
+
+    EAGLE-style drafts drop the trailing unit, so the checkpoint is one earlier.
+    """
+    if not prev_prompt_len:
+        return 0
+    checkpoint = (prev_prompt_len - 1) // hit_unit * hit_unit
+    return max(checkpoint - hit_unit, 0) if spec else checkpoint
 
 
 @contextlib.contextmanager
-def _serve(
-    deployment: Deployment, prefix_match_unit: int | None
-) -> Iterator[list[RemoteOpenAIServer]]:
+def _serve(deployment: Deployment, mode: Mode) -> Iterator[list[RemoteOpenAIServer]]:
     with contextlib.ExitStack() as stack:
         # Sequential shutdown waits on memory still held by sibling servers.
         servers: list[RemoteOpenAIServer] = []
@@ -256,7 +287,7 @@ def _serve(
             servers.append(
                 RemoteOpenAIServer(
                     MODEL,
-                    instance.args(prefix_match_unit),
+                    instance.args(mode),
                     env_dict=env,
                     max_wait_seconds=STARTUP_TIMEOUT,
                 )
@@ -267,12 +298,12 @@ def _serve(
 def _run_conversation(
     deployment: Deployment,
     servers: list[RemoteOpenAIServer],
-    prefix_match_unit: int | None,
+    mode: Mode,
 ) -> list[Turn]:
     # Under P/D the prefiller computes the prompt, so hits are read from it.
     compute_url, decode_url = servers[0].url_root, servers[-1].url_root
     block_size = _block_size(compute_url)
-    hit_unit = prefix_match_unit or block_size
+    hit_unit = mode.prefix_match_unit or block_size
     rng = random.Random(0)
 
     def new_tokens(n: int) -> list[int]:
@@ -294,7 +325,7 @@ def _run_conversation(
             Turn(
                 prompt_len=len(prompt),
                 cached=_cached(computed),
-                expected_cached=_expected_cached(prev_len, hit_unit),
+                expected_cached=_expected_cached(prev_len, hit_unit, mode.spec),
                 recompute_cached=_cached(recompute),
                 output=_tokens_text_logprobs(output),
                 recompute=_tokens_text_logprobs(recompute),
@@ -315,19 +346,16 @@ def _format(turns: list[Turn]) -> str:
     return "\n".join(rows)
 
 
-@pytest.mark.parametrize("prefix_match_unit", [None, 128], ids=["block", "partial"])
+@pytest.mark.parametrize("mode", MODES, ids=lambda mode: mode.name)
 @pytest.mark.parametrize(
     "name", [pytest.param(name, marks=_marks(name)) for name in DEPLOYMENTS]
 )
-def test_turns_reuse_prefix_and_match_recompute(
-    name: str, prefix_match_unit: int | None
-) -> None:
+def test_turns_reuse_prefix_and_match_recompute(name: str, mode: Mode) -> None:
     deployment = DEPLOYMENTS[name]
-    with _serve(deployment, prefix_match_unit) as servers:
-        turns = _run_conversation(deployment, servers, prefix_match_unit)
+    with _serve(deployment, mode) as servers:
+        turns = _run_conversation(deployment, servers, mode)
     table = _format(turns)
-    mode = "block" if prefix_match_unit is None else "partial"
-    print(f"\n{name}-{mode}\n{table}")
+    print(f"\n{name}-{mode.name}\n{table}")
 
     assert all(t.recompute_cached == 0 for t in turns), table
     assert all(t.cached >= t.expected_cached for t in turns), table
