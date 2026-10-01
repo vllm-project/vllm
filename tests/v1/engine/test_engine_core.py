@@ -689,6 +689,39 @@ def test_dp_sync_interval_idle_pause_consensus_on_first_step(monkeypatch):
     assert not core.pending_pause
 
 
+@pytest.mark.parametrize(
+    "request_wave,engines_running,pause_state,announces",
+    [
+        pytest.param(3, False, PauseState.UNPAUSED, True, id="current-wave"),
+        pytest.param(2, False, PauseState.UNPAUSED, True, id="stale-wave"),
+        pytest.param(4, False, PauseState.UNPAUSED, True, id="newer-wave"),
+        pytest.param(3, True, PauseState.UNPAUSED, False, id="running"),
+        pytest.param(3, False, PauseState.PAUSED_ALL, False, id="paused"),
+    ],
+)
+def test_idle_dp_rank_announces_wave_for_new_work(
+    request_wave, engines_running, pause_state, announces
+):
+    """An idle rank handed work announces the wave itself: the front-end's wake
+    may have been dropped by a peer that was still paused."""
+    core = object.__new__(DPEngineCoreProc)
+    core.has_coordinator = True
+    core.current_wave = 3
+    core.engines_running = engines_running
+    core.scheduler = MagicMock(pause_state=pause_state)
+    core.output_queue = MagicMock()
+
+    with patch.object(EngineCore, "add_request"):
+        core.add_request(MagicMock(), request_wave)
+
+    if announces:
+        assert core.engines_running
+        _, outputs = core.output_queue.put_nowait.call_args.args[0]
+        assert outputs.start_wave == max(request_wave, 3)
+    else:
+        core.output_queue.put_nowait.assert_not_called()
+
+
 def _pausable_engine_core_proc() -> EngineCoreProc:
     """A bare EngineCoreProc holding just the state pause_scheduler touches."""
     core = object.__new__(EngineCoreProc)
