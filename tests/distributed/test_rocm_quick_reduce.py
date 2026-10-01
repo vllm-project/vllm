@@ -698,6 +698,8 @@ def test_quick_reduce_max_size_default(monkeypatch):
         ("gfx942", True),
         ("gfx950", True),
         ("gfx90a", False),
+        ("gfx1200", False),
+        ("gfx1201", False),
         ("", False),
     ],
 )
