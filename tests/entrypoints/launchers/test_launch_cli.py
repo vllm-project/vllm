@@ -652,6 +652,111 @@ def test_snapshot_create_rolls_back_failed_dump(tmp_path: Path):
     assert not target.exists()
 
 
+@pytest.mark.parametrize(
+    "failure_kind", ["called-process", "timeout", "missing", "unreadable"]
+)
+def test_snapshot_create_preserves_bounded_criu_diagnostics_after_cleanup(
+    tmp_path: Path, failure_kind: str, caplog: pytest.LogCaptureFixture
+):
+    target = tmp_path / "snapshot"
+    tools = _fake_snapshot_tools()
+    criu_tools = LocalSnapshotTools()
+    criu_tools.plugin_dir = tmp_path
+    original_run = criu_tools._run
+    criu_tools._privileged = lambda: []  # type: ignore[method-assign]
+    captured = "captured stderr " + "x" * 9000
+    if failure_kind == "timeout":
+        primary: subprocess.SubprocessError = subprocess.TimeoutExpired(
+            ["criu", "dump"], 1, output=b"captured stdout\xff", stderr=captured.encode()
+        )
+    else:
+        primary = subprocess.CalledProcessError(
+            1, ["criu", "dump"], output="captured stdout", stderr=captured
+        )
+
+    def run(command: list[str], **_kwargs: object):
+        if "tail" not in command:
+            raise primary
+        if failure_kind == "unreadable":
+            raise PermissionError("log is root-owned")
+        if failure_kind == "timeout":
+            return subprocess.CompletedProcess(command, 0, "timeout log tail", "")
+        return original_run(command, **_kwargs)
+
+    criu_tools._run = run  # type: ignore[method-assign]
+
+    def fail_dump(workdir: Path, _inventory: ProcessInventory) -> None:
+        images = workdir / "images"
+        images.mkdir()
+        if failure_kind != "missing":
+            (images / "dump.log").write_text(
+                "omitted dump prefix" + "d" * 9000 + "distinctive dump diagnostic"
+            )
+        criu_tools._criu("dump", workdir, [])
+
+    tools.dump.side_effect = fail_dump
+    with pytest.raises(type(primary)) as excinfo:
+        create_snapshot(
+            argparse.Namespace(snapshot_dir=str(target), model_tag="Qwen/Qwen3-0.6B"),
+            tools=tools,
+        )
+
+    assert excinfo.value is primary
+    assert not target.exists()
+    diagnostics = "\n".join(caplog.messages)
+    assert "captured stdout" in diagnostics
+    assert "captured stderr" not in diagnostics
+    assert "x" * 100 in diagnostics
+    assert len(diagnostics) < 17000
+    if failure_kind in {"missing", "unreadable"}:
+        assert "dump.log unavailable" in diagnostics
+        expected_error = (
+            "CalledProcessError" if failure_kind == "missing" else "PermissionError"
+        )
+        assert expected_error in diagnostics
+    elif failure_kind == "called-process":
+        assert "distinctive dump diagnostic" in diagnostics
+        assert "omitted dump prefix" not in diagnostics
+    else:
+        assert "timeout log tail" in diagnostics
+    if failure_kind == "timeout":
+        assert "captured stdout�" in diagnostics
+
+
+def test_snapshot_criu_failure_selects_restore_log(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+):
+    tools = LocalSnapshotTools()
+    tools.plugin_dir = tmp_path
+    tools._privileged = lambda: []  # type: ignore[method-assign]
+    artifact = tmp_path / "snapshot"
+    images = artifact / "images"
+    images.mkdir(parents=True)
+    (images / "restore.log").write_text(
+        "omitted restore prefix" + "r" * 9000 + "distinctive restore diagnostic"
+    )
+    primary = subprocess.CalledProcessError(1, ["criu", "restore"])
+    original_run = tools._run
+    tailed: list[str] = []
+
+    def run(command: list[str], **_kwargs: object):
+        if "tail" not in command:
+            raise primary
+        tailed.append(command[-1])
+        return original_run(command, **_kwargs)
+
+    tools._run = run  # type: ignore[method-assign]
+
+    with pytest.raises(subprocess.CalledProcessError) as excinfo:
+        tools._criu("restore", artifact, [])
+
+    assert excinfo.value is primary
+    assert tailed == [str(images / "restore.log")]
+    diagnostics = "\n".join(caplog.messages)
+    assert "distinctive restore diagnostic" in diagnostics
+    assert "omitted restore prefix" not in diagnostics
+
+
 def _restore_fixture(tmp_path: Path) -> argparse.Namespace:
     artifact = tmp_path / "snapshot"
     artifact.mkdir(mode=0o700)
