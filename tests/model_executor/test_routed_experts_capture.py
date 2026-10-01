@@ -11,6 +11,7 @@ from vllm.config import VllmConfig
 from vllm.config.compilation import CompilationMode
 from vllm.distributed.eplb.eplb_state import EplbLayerState
 from vllm.model_executor.layers.fused_moe.config import RoutingMethodType
+from vllm.model_executor.layers.fused_moe.experts.cpu_int4_moe import CPUExpertsInt4
 from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
     RoutedExpertsCapturer,
     bind_routed_experts_capturer,
@@ -211,6 +212,191 @@ def test_public_binding_rejects_monolithic_without_replay_support(monkeypatch):
         bind_routed_experts_capturer(
             types.SimpleNamespace(modules=lambda: [dummy_module]), DummyCapturer()
         )
+
+
+def test_public_binding_binds_monolithic_capture_to_the_layer(monkeypatch):
+    """Monolithic kernels route internally, so capture goes through a sink that
+    the layer owns. Rebuilding the kernel, as every weight reload does, cannot
+    drop it."""
+
+    def monolithic_kernel():
+        fused_experts = CPUExpertsInt4.__new__(CPUExpertsInt4)
+        fused_experts.supports_routing_replay_capture = lambda: True
+        fused_experts.moe_config = types.SimpleNamespace(
+            use_ep=False,
+            dp_size=1,
+            ep_size=1,
+            max_num_tokens=4,
+            experts_per_token=2,
+            device="cpu",
+        )
+        return types.SimpleNamespace(
+            impl=types.SimpleNamespace(fused_experts=fused_experts)
+        )
+
+    class DummyFusedMoE:
+        def __init__(self):
+            self.layer_id = 5
+            self.router = _make_router()
+            self.routed_experts = types.SimpleNamespace(
+                quant_method=types.SimpleNamespace(
+                    is_monolithic=True, moe_kernel=monolithic_kernel()
+                ),
+                routing_sink=None,
+            )
+            self._quant_method = self.routed_experts.quant_method
+
+    module = DummyFusedMoE()
+    import vllm.model_executor.layers.fused_moe.layer as fused_moe_layer
+
+    monkeypatch.setattr(fused_moe_layer, "MoERunner", DummyFusedMoE)
+    calls = []
+    capturer = types.SimpleNamespace(capture=lambda *args: calls.append(args))
+    bind_routed_experts_capturer(
+        types.SimpleNamespace(modules=lambda: [module]), capturer
+    )
+
+    sink = module.routed_experts.routing_sink
+    module._quant_method.moe_kernel = monolithic_kernel()  # weight reload
+    assert module.routed_experts.routing_sink is sink
+    sink.out(num_tokens=2)[:2] = torch.tensor([[1, 2], [3, 4]])
+    sink.capture(num_tokens=2)
+    assert calls[0][0] == 5
+    assert calls[0][1].tolist() == [[1, 2], [3, 4]]
+
+
+_QUANT = "vllm.model_executor.layers.quantization"
+_COMPRESSED = f"{_QUANT}.compressed_tensors.compressed_tensors_moe"
+
+
+@pytest.mark.parametrize(
+    "module,cls",
+    [
+        (
+            "vllm.model_executor.layers.fused_moe.unquantized_fused_moe_method",
+            "UnquantizedFusedMoEMethod",
+        ),
+        (f"{_QUANT}.auto_awq", "AutoAWQMoEMethod"),
+        (f"{_QUANT}.auto_gptq", "AutoGPTQMoEMethod"),
+        (
+            f"{_COMPRESSED}.compressed_tensors_moe_w4a4_nvfp4",
+            "CompressedTensorsW4A4Nvfp4MoEMethod",
+        ),
+        (
+            f"{_COMPRESSED}.compressed_tensors_moe_w4a8_int8",
+            "CompressedTensorsW4A8Int8MoEMethod",
+        ),
+        (
+            f"{_COMPRESSED}.compressed_tensors_moe_w8a8_fp8",
+            "CompressedTensorsW8A8Fp8MoEMethod",
+        ),
+        (
+            f"{_COMPRESSED}.compressed_tensors_moe_w8a8_int8",
+            "CompressedTensorsW8A8Int8MoEMethod",
+        ),
+        (
+            f"{_COMPRESSED}.compressed_tensors_moe_w8a8_mxfp8",
+            "CompressedTensorsW8A8Mxfp8MoEMethod",
+        ),
+        (
+            f"{_COMPRESSED}.compressed_tensors_moe_wna16",
+            "CompressedTensorsWNA16MoEMethod",
+        ),
+        (f"{_QUANT}.fp8", "Fp8MoEMethod"),
+        (f"{_QUANT}.modelopt", "ModelOptFp8MoEMethod"),
+        (f"{_QUANT}.modelopt", "ModelOptNvFp4FusedMoE"),
+        (f"{_QUANT}.modelopt", "ModelOptMxFp8FusedMoE"),
+        (f"{_QUANT}.moe_wna16", "MoeWNA16Method"),
+        (f"{_QUANT}.mxfp4", "GptOssMxfp4MoEMethod"),
+        (f"{_QUANT}.mxfp4", "Mxfp4MoEMethod"),
+        (f"{_QUANT}.online.int8", "Int8OnlineMoEMethod"),  # OnlineMoEMethodBase
+        (f"{_QUANT}.quark.quark_moe", "QuarkOCP_MX_MoEMethod"),
+    ],
+)
+def test_apply_monolithic_hands_the_layer_sink_to_the_kernel(module, cls):
+    """The kernel is rebuilt on reload; the layer is not. Every monolithic
+    quant method must read the sink from the layer on each call."""
+    import importlib
+    from unittest.mock import MagicMock
+
+    method_cls = getattr(importlib.import_module(module), cls)
+    method = method_cls.__new__(method_cls)
+    method.moe_kernel = MagicMock()
+    layer = MagicMock()
+    method.apply_monolithic(layer, x=MagicMock(), router_logits=MagicMock())
+
+    kwargs = method.moe_kernel.apply_monolithic.call_args.kwargs
+    assert kwargs["routing_sink"] is layer.routing_sink
+
+
+class _ToyMonolithicExperts(CPUExpertsInt4):
+    """Routes token t to experts (t + offset, t + offset + 1)."""
+
+    def __init__(self, offset: int, supports_capture: bool = True):
+        self.offset = offset
+        self.supports_capture = supports_capture
+        self.quant_config = None
+
+    @property
+    def expects_unquantized_inputs(self) -> bool:
+        return True
+
+    def supports_routing_replay_capture(self) -> bool:
+        return self.supports_capture
+
+    def apply(self, hidden_states, *args, routing_replay_out=None, **kwargs):
+        if routing_replay_out is not None:
+            t = torch.arange(hidden_states.shape[0])
+            routing_replay_out[: len(t)] = torch.stack([t, t + 1], 1) + self.offset
+        return hidden_states
+
+
+def test_monolithic_kernel_rebuild_keeps_capture():
+    """Through the production kernel path, the layer's sink captures what the
+    current kernel routed, before and after a reload rebuilds the kernel, and
+    a rebuilt kernel that cannot capture is refused instead of going stale."""
+    from vllm.model_executor.layers.fused_moe.modular_kernel import (
+        FusedMoEKernelMonolithicImpl,
+    )
+    from vllm.model_executor.layers.fused_moe.prepare_finalize.no_dp_ep import (
+        MoEPrepareAndFinalizeNoDPEPMonolithic,
+    )
+    from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
+        RoutedExpertsSink,
+    )
+
+    captured = []
+    moe_config = types.SimpleNamespace(
+        use_ep=False,
+        dp_size=1,
+        ep_size=1,
+        max_num_tokens=4,
+        experts_per_token=2,
+        device="cpu",
+    )
+    sink = RoutedExpertsSink(moe_config, lambda ids: captured.append(ids.tolist()))
+
+    def forward(experts):
+        kernel = FusedMoEKernelMonolithicImpl(
+            MoEPrepareAndFinalizeNoDPEPMonolithic(), experts
+        )
+        kernel.apply(
+            torch.zeros(3, 8),
+            w1=None,
+            w2=None,
+            router_logits=torch.zeros(3, 16),
+            activation=None,
+            global_num_experts=16,
+            expert_map=None,
+            apply_router_weight_on_input=False,
+            routing_sink=sink,
+        )
+
+    for offset in (0, 7):  # the kernel before and after a reload
+        forward(_ToyMonolithicExperts(offset))
+        assert captured[-1] == [[t + offset, t + offset + 1] for t in range(3)]
+    with pytest.raises(ValueError, match="not supported"):
+        forward(_ToyMonolithicExperts(0, supports_capture=False))
 
 
 def test_routed_experts_capturer_single_dp_no_metadata():

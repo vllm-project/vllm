@@ -4,13 +4,10 @@
 
 These tests exercise the wiring that lets ``RoutedExpertsCapturer`` see the
 expert IDs picked by FlashInfer's fused router-and-experts kernels (the
-"monolithic" path). When ``set_capture_fn`` is installed on
-a ``FusedMoEExpertsMonolithic`` subclass that supports it, the kernel call
-should:
-
-  * allocate an int16 ``(num_tokens, top_k)`` buffer,
-  * pass it to FlashInfer as ``routing_replay_out``,
-  * invoke the callback after the kernel returns.
+"monolithic" path). A ``FusedMoEExpertsMonolithic`` subclass that supports
+it writes each token's routed expert IDs into the leading rows of the
+``routing_replay_out`` tensor it is given. The layer's ``RoutedExpertsSink``
+owns that tensor and hands the rows to the capturer.
 """
 
 from __future__ import annotations
@@ -150,6 +147,7 @@ def _run_bf16_monolithic(
     topk_group: int | None = None,
     routed_scaling_factor: float | None = None,
     e_score_correction_bias: torch.Tensor | None = None,
+    routing_replay_out: torch.Tensor | None = None,
 ) -> torch.Tensor:
     return experts.apply(
         hidden_states=hidden_states,
@@ -165,7 +163,13 @@ def _run_bf16_monolithic(
         topk_group=topk_group,
         e_score_correction_bias=e_score_correction_bias,
         routed_scaling_factor=routed_scaling_factor,
+        routing_replay_out=routing_replay_out,
     )
+
+
+def _replay_buffer(num_tokens: int, top_k: int, device: torch.device) -> torch.Tensor:
+    """A ``routing_replay_out`` with one spare row to catch out-of-bounds writes."""
+    return torch.full((num_tokens + 1, top_k), -1, dtype=torch.int16, device=device)
 
 
 _DSV3_NUM_EXPERTS = 32
@@ -207,13 +211,8 @@ def test_trtllm_bf16_monolithic_routing_replay_records_valid_experts(
         device=device,
     )
 
-    captured: list[torch.Tensor] = []
-
-    def capture_fn(replay_out: torch.Tensor) -> None:
-        captured.append(replay_out.clone())
-
     assert experts.supports_routing_replay_capture()
-    experts.set_capture_fn(capture_fn)
+    replay_out = _replay_buffer(num_tokens, top_k, device)
 
     hidden_states = (
         torch.randn(num_tokens, hidden_size, device=device, dtype=torch.bfloat16) * 0.1
@@ -225,6 +224,7 @@ def test_trtllm_bf16_monolithic_routing_replay_records_valid_experts(
 
     _ = _run_bf16_monolithic(
         experts,
+        routing_replay_out=replay_out,
         hidden_states=hidden_states,
         w13=w13,
         w2=w2,
@@ -236,8 +236,8 @@ def test_trtllm_bf16_monolithic_routing_replay_records_valid_experts(
         e_score_correction_bias=routing_bias,
     )
 
-    assert len(captured) == 1
-    replay = captured[0]
+    replay = replay_out[:num_tokens]
+    assert (replay_out[num_tokens:] == -1).all(), "wrote past the batch"
     assert replay.dtype == torch.int16
     assert replay.shape == (num_tokens, top_k)
     assert (replay >= 0).all(), f"got out-of-range values: {replay}"
@@ -282,8 +282,7 @@ def test_trtllm_bf16_monolithic_routing_replay_non_dsv3(
         device=device,
     )
 
-    captured: list[torch.Tensor] = []
-    experts.set_capture_fn(lambda r: captured.append(r.clone()))
+    replay_out = _replay_buffer(num_tokens, top_k, device)
 
     hidden_states = (
         torch.randn(num_tokens, hidden_size, device=device, dtype=torch.bfloat16) * 0.1
@@ -294,6 +293,7 @@ def test_trtllm_bf16_monolithic_routing_replay_non_dsv3(
 
     _ = _run_bf16_monolithic(
         experts,
+        routing_replay_out=replay_out,
         hidden_states=hidden_states,
         w13=w13,
         w2=w2,
@@ -301,8 +301,8 @@ def test_trtllm_bf16_monolithic_routing_replay_non_dsv3(
         num_experts=num_experts,
     )
 
-    assert len(captured) == 1
-    replay = captured[0]
+    replay = replay_out[:num_tokens]
+    assert (replay_out[num_tokens:] == -1).all(), "wrote past the batch"
     assert replay.dtype == torch.int16
     assert replay.shape == (num_tokens, top_k)
     assert (replay >= 0).all(), f"got out-of-range values: {replay}"
@@ -313,27 +313,6 @@ def test_trtllm_bf16_monolithic_routing_replay_non_dsv3(
             f"token {t}: expected {top_k} distinct experts, "
             f"got {unique.numel()} ({replay[t].tolist()})"
         )
-
-
-def test_trtllm_bf16_monolithic_capture_disabled_skips_buffer_alloc() -> None:
-    """With no callback installed the kernel should not see a
-    ``routing_replay_out`` tensor — verify the helper short-circuits."""
-    torch.manual_seed(0)
-    device = torch.device("cuda:0")
-    experts, _, _ = _make_bf16_monolithic_experts(
-        num_experts=_DSV3_NUM_EXPERTS,
-        top_k=2,
-        hidden_size=1024,
-        intermediate_size=1024,
-        routing_method=RoutingMethodType.DeepSeekV3,
-        device=device,
-    )
-    # No callback installed.
-    buf = experts._maybe_make_routing_replay_buffer(num_tokens=4, device=device)
-    assert buf is None
-
-    # Dispatch is also a no-op.
-    experts._maybe_dispatch_routing_replay(buf, num_tokens=4)
 
 
 def test_trtllm_bf16_monolithic_supports_capture_for_all_routing() -> None:
@@ -359,9 +338,13 @@ def test_trtllm_bf16_monolithic_supports_capture_for_all_routing() -> None:
         )
 
 
-def test_trtllm_bf16_monolithic_capture_buffer_shape_and_dtype() -> None:
-    """When capture is installed, the allocated buffer is int16 and shaped
-    ``(num_tokens, experts_per_token)``."""
+def test_routed_experts_sink_buffer_and_capture() -> None:
+    """The sink owns one int16 buffer, sized for the largest dispatched batch at
+    a fixed address, and hands the kernel's leading rows to the callback."""
+    from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
+        RoutedExpertsSink,
+    )
+
     device = torch.device("cuda:0")
     experts, _, _ = _make_bf16_monolithic_experts(
         num_experts=_DSV3_NUM_EXPERTS,
@@ -371,26 +354,31 @@ def test_trtllm_bf16_monolithic_capture_buffer_shape_and_dtype() -> None:
         routing_method=RoutingMethodType.DeepSeekV3,
         device=device,
     )
-    experts.set_capture_fn(lambda r: None)
-    buf = experts._maybe_make_routing_replay_buffer(num_tokens=11, device=device)
-    assert buf is not None
+    captured: list[torch.Tensor] = []
+    sink = RoutedExpertsSink(experts.moe_config, captured.append)
+
+    buf = sink.out(num_tokens=11)
     assert buf.dtype == torch.int16
-    assert buf.shape[0] >= 11
-    assert buf.shape[1] == 4
-    assert buf.device.type == "cuda"
+    assert buf.shape[0] >= 11 and buf.shape[1] == 4
+    assert sink.out(num_tokens=3).data_ptr() == buf.data_ptr()
+    sink.capture(num_tokens=3)
+    assert captured[0].shape == (3, 4)
+    assert captured[0].data_ptr() == buf.data_ptr()
+    with pytest.raises(ValueError, match="holds"):
+        sink.out(num_tokens=buf.shape[0] + 1)
 
 
 def test_routed_experts_capturer_e2e_via_monolithic_experts() -> None:
-    """End-to-end: bind ``RoutedExpertsCapturer.capture`` as the callback
-    on the monolithic experts and verify the captured rows land in the
-    capturer's device buffer at the correct layer slot.
+    """End-to-end: a sink bound to ``RoutedExpertsCapturer.capture`` takes
+    the monolithic experts' routed IDs, and the rows land in the capturer's
+    device buffer at the correct layer slot.
 
-    Mirrors the monolithic path in ``bind_routed_experts_capturer``: a single
-    closure is installed on ``fused_experts`` and routes per-layer based on
-    the closed-over ``layer_id``.
+    Mirrors ``FusedMoEKernelMonolithicImpl.apply``: the kernel writes into
+    ``sink.out(...)`` and the sink captures the leading rows afterwards.
     """
     from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
         RoutedExpertsCapturer,
+        RoutedExpertsSink,
     )
 
     torch.manual_seed(7)
@@ -425,7 +413,7 @@ def test_routed_experts_capturer_e2e_via_monolithic_experts() -> None:
     def capture_fn(replay_out: torch.Tensor) -> None:
         capturer.capture(layer_id, replay_out)
 
-    experts.set_capture_fn(capture_fn)
+    sink = RoutedExpertsSink(experts.moe_config, capture_fn)
 
     hidden_states = (
         torch.randn(num_tokens, hidden_size, device=device, dtype=torch.bfloat16) * 0.1
@@ -446,6 +434,7 @@ def test_routed_experts_capturer_e2e_via_monolithic_experts() -> None:
     ):
         _ = _run_bf16_monolithic(
             experts,
+            routing_replay_out=sink.out(num_tokens),
             hidden_states=hidden_states,
             w13=w13,
             w2=w2,
@@ -456,6 +445,7 @@ def test_routed_experts_capturer_e2e_via_monolithic_experts() -> None:
             routed_scaling_factor=1.0,
             e_score_correction_bias=routing_bias,
         )
+        sink.capture(num_tokens)
 
     captured = capturer.device_buffer[:num_tokens, layer_id, :].cpu()
     # Valid expert IDs at this layer.
@@ -565,6 +555,7 @@ def _run_fp8_block_scale_monolithic(
     router_logits: torch.Tensor,
     num_experts: int,
     routing_bias: torch.Tensor,
+    routing_replay_out: torch.Tensor | None = None,
 ) -> torch.Tensor:
     return experts.apply(
         hidden_states=hidden_states_fp8,
@@ -582,6 +573,7 @@ def _run_fp8_block_scale_monolithic(
         topk_group=_DSV3_TOPK_GROUP,
         e_score_correction_bias=routing_bias,
         routed_scaling_factor=1.0,
+        routing_replay_out=routing_replay_out,
     )
 
 
@@ -614,8 +606,7 @@ def test_trtllm_fp8_block_scale_monolithic_routing_replay_records_valid_experts(
     )
     assert experts.supports_routing_replay_capture()
 
-    captured: list[torch.Tensor] = []
-    experts.set_capture_fn(lambda r: captured.append(r.clone()))
+    replay_out = _replay_buffer(num_tokens, top_k, device)
 
     # Per-token / per-block hidden scales (ones is fine for the routing
     # path; the GEMM output isn't being asserted on).
@@ -632,6 +623,7 @@ def test_trtllm_fp8_block_scale_monolithic_routing_replay_records_valid_experts(
 
     _ = _run_fp8_block_scale_monolithic(
         experts,
+        routing_replay_out=replay_out,
         hidden_states_fp8=hidden_states,
         hidden_states_scale=hidden_states_scale,
         w13=w13,
@@ -641,8 +633,8 @@ def test_trtllm_fp8_block_scale_monolithic_routing_replay_records_valid_experts(
         routing_bias=routing_bias,
     )
 
-    assert len(captured) == 1
-    replay = captured[0]
+    replay = replay_out[:num_tokens]
+    assert (replay_out[num_tokens:] == -1).all(), "wrote past the batch"
     assert replay.dtype == torch.int16
     assert replay.shape == (num_tokens, top_k)
     assert (replay >= 0).all(), f"got out-of-range values: {replay}"
@@ -776,6 +768,7 @@ def _run_nvfp4_monolithic(
     router_logits: torch.Tensor,
     num_experts: int,
     routing_bias: torch.Tensor,
+    routing_replay_out: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """The monolithic NVFP4 apply expects packed fp4 hidden states + the
     matching fp8 per-block scale stored in the ``a1q_scale`` slot."""
@@ -796,6 +789,7 @@ def _run_nvfp4_monolithic(
         topk_group=_DSV3_TOPK_GROUP,
         e_score_correction_bias=routing_bias,
         routed_scaling_factor=1.0,
+        routing_replay_out=routing_replay_out,
     )
 
 
@@ -835,8 +829,7 @@ def test_trtllm_nvfp4_monolithic_routing_replay_records_valid_experts(
     experts._w2_packed = w2_q
 
     assert experts.supports_routing_replay_capture()
-    captured: list[torch.Tensor] = []
-    experts.set_capture_fn(lambda r: captured.append(r.clone()))
+    replay_out = _replay_buffer(num_tokens, top_k, device)
 
     hidden_states = (
         torch.randn(num_tokens, hidden_size, device=device, dtype=torch.bfloat16) * 0.1
@@ -857,6 +850,7 @@ def test_trtllm_nvfp4_monolithic_routing_replay_records_valid_experts(
 
     _ = _run_nvfp4_monolithic(
         experts,
+        routing_replay_out=replay_out,
         hidden_states_q=hidden_states_q,
         hidden_states_scale=hidden_states_scale,
         router_logits=router_logits,
@@ -864,8 +858,8 @@ def test_trtllm_nvfp4_monolithic_routing_replay_records_valid_experts(
         routing_bias=routing_bias,
     )
 
-    assert len(captured) == 1
-    replay = captured[0]
+    replay = replay_out[:num_tokens]
+    assert (replay_out[num_tokens:] == -1).all(), "wrote past the batch"
     assert replay.dtype == torch.int16
     assert replay.shape == (num_tokens, top_k)
     assert (replay >= 0).all(), f"got out-of-range values: {replay}"

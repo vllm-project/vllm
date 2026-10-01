@@ -8,7 +8,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Callable
 from functools import partial
-from typing import Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 import torch
 
@@ -16,6 +16,9 @@ from vllm.config import VllmConfig
 from vllm.distributed.parallel_state import get_tp_group
 from vllm.forward_context import get_forward_context
 from vllm.platforms import current_platform
+
+if TYPE_CHECKING:
+    from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig
 
 logger = logging.getLogger(__name__)
 
@@ -186,6 +189,39 @@ class RoutedExpertsCapturer:
         return self.device_buffer[:num_tokens].to(self.output_dtype)
 
 
+class RoutedExpertsSink:
+    """Where a monolithic MoE kernel writes the expert ids it routed to.
+
+    Owned by the MoE layer, not by the kernel. The kernel is rebuilt on every
+    weight reload; the sink, and the buffer address that CUDA graphs captured,
+    live as long as the layer.
+    """
+
+    def __init__(
+        self, moe_config: FusedMoEConfig, capture_fn: Callable[[torch.Tensor], None]
+    ) -> None:
+        # Sized for per-rank batches gathered across the DP or EP group.
+        group_size = moe_config.ep_size if moe_config.use_ep else moe_config.dp_size
+        self.buffer = torch.empty(
+            (moe_config.max_num_tokens * group_size, moe_config.experts_per_token),
+            dtype=torch.int16,
+            device=moe_config.device,
+        )
+        self.capture_fn = capture_fn
+
+    def out(self, num_tokens: int) -> torch.Tensor:
+        """The ``routing_replay_out`` tensor for a batch of ``num_tokens``."""
+        if num_tokens > self.buffer.shape[0]:
+            raise ValueError(
+                f"Routing replay buffer holds {self.buffer.shape[0]} tokens, "
+                f"but the kernel received {num_tokens}."
+            )
+        return self.buffer
+
+    def capture(self, num_tokens: int) -> None:
+        self.capture_fn(self.buffer[:num_tokens])
+
+
 def bind_routed_experts_capturer(
     model: torch.nn.Module,
     capturer: RoutedExpertsCapturer,
@@ -219,7 +255,9 @@ def bind_routed_experts_capturer(
                     "Routed-experts capture is not supported with monolithic "
                     f"MoE kernel {type(fused_experts).__name__}."
                 )
-            fused_experts.set_capture_fn(capture_fn)
+            module.routed_experts.routing_sink = RoutedExpertsSink(
+                fused_experts.moe_config, capture_fn
+            )
             num_bound += 1
         elif isinstance(module.router, BaseRouter):
             module.router.set_capture_fn(capture_fn)
