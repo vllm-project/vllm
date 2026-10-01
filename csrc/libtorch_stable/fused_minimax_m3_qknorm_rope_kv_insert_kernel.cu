@@ -337,12 +337,6 @@ constexpr int kNvfp4DataBytes = kHeadDim / 2;            // 64
 constexpr int kNvfp4ScaleBytes = kHeadDim / 16;          // 8
 constexpr int kNvfp4LanesPerGroup = 16 / kElemsPerLane;  // 4
 
-__device__ __forceinline__ float rcpApproxFtz(float a) {
-  float b;
-  asm("rcp.approx.ftz.f32 %0, %1;" : "=f"(b) : "f"(a));
-  return b;
-}
-
 // Round-to-nearest-even, saturating E2M1 code of ``x`` (matches
 // cvt.rn.satfinite.e2m1x2.f32). Below 1 the grid is the 0.5-step subnormals;
 // from 1 up it is fp32 rounded to one mantissa bit, whose (exponent, mantissa)
@@ -361,6 +355,12 @@ __device__ __forceinline__ uint32_t e2m1Code(float x) {
 }
 
 #ifndef USE_ROCM
+__device__ __forceinline__ float rcpApproxFtz(float a) {
+  float b;
+  asm("rcp.approx.ftz.f32 %0, %1;" : "=f"(b) : "f"(a));
+  return b;
+}
+
 // a / b rounded to nearest even from r = RN(1 / b): Markstein's correction of
 // a * r, which is __fdiv_rn's fast path without its range-check branch. Exact
 // unless a * r overflows or the residual a - q * b underflows (a within a few
