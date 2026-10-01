@@ -6,6 +6,7 @@ from collections.abc import Callable
 from typing import Any
 
 import torch
+import torch.distributed as dist
 
 import vllm.envs as envs
 from vllm.model_executor.determinism.batch_invariant_configs import (
@@ -59,6 +60,7 @@ def matmul_kernel_persistent(
     stride_bn,
     stride_cm,
     stride_cn,
+    stride_bias,
     BLOCK_SIZE_M: tl.constexpr,  #
     BLOCK_SIZE_N: tl.constexpr,  #
     BLOCK_SIZE_K: tl.constexpr,  #
@@ -128,7 +130,7 @@ def matmul_kernel_persistent(
         c_ptrs = c_ptr + stride_cm * offs_cm[:, None] + stride_cn * offs_cn[None, :]
         c_mask = (offs_cm[:, None] < M) & (offs_cn[None, :] < N)
         if HAS_BIAS:
-            bias_ptrs = bias_ptr + offs_cn
+            bias_ptrs = bias_ptr + offs_cn * stride_bias
             bias = tl.load(bias_ptrs, mask=offs_cn < N, other=0.0).to(tl.float32)
             accumulator += bias
         c = accumulator.to(c_ptr.dtype.element_ty)
@@ -305,6 +307,8 @@ def matmul_persistent(
             ),
         )
 
+    if not _BLOCK_SIZES_RESOLVED:
+        _resolve_block_sizes()
     configs = {
         torch.bfloat16: {
             "BLOCK_SIZE_M": 128,
@@ -345,6 +349,7 @@ def matmul_persistent(
         b.stride(1),  #
         c.stride(0),
         c.stride(1),  #
+        bias.stride(0) if bias is not None else 1,
         NUM_SMS=NUM_SMS,  #
         A_LARGE=a.numel() > 2**31,
         B_LARGE=b.numel() > 2**31,
@@ -489,16 +494,19 @@ def bmm_kernel(
 
 
 @triton.jit
-def _log_softmax_kernel(
+def _softmax_kernel(
     input_ptr,
     output_ptr,
     input_row_stride,
+    input_col_stride,
     output_row_stride,
     n_cols,
     BLOCK_SIZE: tl.constexpr,
+    LOG: tl.constexpr = False,
 ):
-    """Compute log_softmax along the last dimension of a 2D tensor.
-    Each block handles one row of the input tensor.
+    """Compute softmax, or log_softmax when ``LOG``, along the last dimension of a
+    2D tensor. Each block handles one row of the input tensor, in a fixed block
+    order, so the result never depends on the row count.
     """
     # Get the row index for this block
     row_idx = tl.program_id(0).to(tl.int64)
@@ -514,7 +522,9 @@ def _log_softmax_kernel(
         mask = col_idx < n_cols
 
         # Load values
-        vals = tl.load(row_start_ptr + col_idx, mask=mask, other=-float("inf"))
+        vals = tl.load(
+            row_start_ptr + col_idx * input_col_stride, mask=mask, other=-float("inf")
+        )
 
         # Update maximum
         max_val = tl.max(tl.maximum(vals, max_val))
@@ -526,25 +536,26 @@ def _log_softmax_kernel(
         mask = col_idx < n_cols
 
         # Load values
-        vals = tl.load(row_start_ptr + col_idx, mask=mask, other=0.0)
+        vals = tl.load(row_start_ptr + col_idx * input_col_stride, mask=mask, other=0.0)
 
         # Compute exp(x - max_val) and accumulate
         exp_vals = tl.exp(vals - max_val)
         sum_exp += tl.sum(tl.where(mask, exp_vals, 0.0))
 
-    # Compute log(sum_exp)
-    log_sum_exp = tl.log(sum_exp)
+    log_sum_exp = tl.log(sum_exp) if LOG else 0.0
 
-    # Step 3: Compute final log_softmax values: x - max_val - log_sum_exp
+    # Step 3: normalise
     for col_offset in range(0, n_cols, BLOCK_SIZE):
         col_idx = col_offset + tl.arange(0, BLOCK_SIZE)
         mask = col_idx < n_cols
 
         # Load values
-        vals = tl.load(row_start_ptr + col_idx, mask=mask)
+        vals = tl.load(row_start_ptr + col_idx * input_col_stride, mask=mask)
 
-        # Compute log_softmax
-        output = vals - max_val - log_sum_exp
+        if LOG:
+            output = vals - max_val - log_sum_exp
+        else:
+            output = tl.exp(vals - max_val) / sum_exp
 
         # Store results
         tl.store(output_row_start_ptr + col_idx, output, mask=mask)
@@ -570,27 +581,52 @@ def log_softmax(input: torch.Tensor, dim: int = -1) -> torch.Tensor:
     # Flatten all dimensions except the last one
     original_shape = input.shape
     input_2d = input.reshape(-1, input.shape[-1])
-    input_2d = input_2d.contiguous()
 
     n_rows, n_cols = input_2d.shape
 
     # Allocate output tensor
-    output = torch.empty_like(input_2d)
+    output = torch.empty((n_rows, n_cols), dtype=input_2d.dtype, device=input_2d.device)
 
     # Choose block size based on the number of columns
     BLOCK_SIZE = 1024
 
     # Launch kernel with one block per row
     grid = (n_rows,)
-    _log_softmax_kernel[grid](
+    _softmax_kernel[grid](
         input_2d,
         output,
         input_2d.stride(0),
+        input_2d.stride(1),
         output.stride(0),
         n_cols,
         BLOCK_SIZE=BLOCK_SIZE,
+        LOG=True,
     )
     # Reshape output back to original shape
+    return output.reshape(original_shape)
+
+
+def softmax(input: torch.Tensor, dim: int = -1) -> torch.Tensor:
+    """Compute softmax along the last dimension using a Triton kernel."""
+    if dim != -1 and dim != input.ndim - 1:
+        raise ValueError(
+            "This implementation only supports softmax along the last dimension"
+        )
+
+    original_shape = input.shape
+    input_2d = input.reshape(-1, input.shape[-1])
+    n_rows, n_cols = input_2d.shape
+    output = torch.empty((n_rows, n_cols), dtype=input_2d.dtype, device=input_2d.device)
+
+    _softmax_kernel[(n_rows,)](
+        input_2d,
+        output,
+        input_2d.stride(0),
+        input_2d.stride(1),
+        output.stride(0),
+        n_cols,
+        BLOCK_SIZE=1024,
+    )
     return output.reshape(original_shape)
 
 
@@ -735,6 +771,9 @@ def mean_dim(
 
 def mm_batch_invariant(a, b, bias=None):
     if a.device.type == "xpu":
+        # The descriptor kernel reads the bias at unit stride.
+        if bias is not None:
+            bias = bias.contiguous()
         return matmul_descriptor_persistent(a, b, bias=bias)
     return matmul_persistent(a, b, bias=bias)
 
@@ -820,6 +859,8 @@ def bmm_batch_invariant(a, b, *, out=None):
         assert out.dtype == dtype and out.device == a.device, "out tensor mismatch"
         c = out
 
+    if not _BLOCK_SIZES_RESOLVED:
+        _resolve_block_sizes()
     configs = {
         torch.bfloat16: {
             "BLOCK_SIZE_M": 128,
@@ -877,8 +918,50 @@ def bmm_batch_invariant(a, b, *, out=None):
     return c
 
 
-def addmm_batch_invariant(bias, a, b):
-    return mm_batch_invariant(a, b, bias=bias)
+def _addmm_fused_bias(bias, beta, alpha, n):
+    # The kernel adds bias into its fp32 accumulator indexed by output column,
+    # so it can only absorb a row vector of width n, unscaled by alpha.
+    if beta == 0 or alpha != 1:
+        return None
+    if bias.dim() != 1 or bias.shape[0] != n:
+        return None
+    # fp32 keeps the scaling exact; the kernel casts the bias to fp32 anyway.
+    return bias if beta == 1 else bias.float() * beta
+
+
+def _addmm_impl(bias, a, b, beta, alpha, out):
+    fused_bias = _addmm_fused_bias(bias, beta, alpha, b.shape[1])
+    result = mm_batch_invariant(a, b, bias=fused_bias)
+    if fused_bias is None:
+        if alpha != 1:
+            result = result * alpha
+        if beta != 0:
+            result = result + (bias if beta == 1 else beta * bias)
+    if out is None:
+        return result
+    return out.copy_(result)
+
+
+def addmm_batch_invariant(bias, a, b, *, beta=1, alpha=1):
+    return _addmm_impl(bias, a, b, beta, alpha, None)
+
+
+# Inductor lowers mm/addmm/bmm to ``extern_kernels.<op>(..., out=buf)``, which
+# dispatches the ``.out`` overload rather than the default one. Registering only
+# the default leaves the compiled path on the vendor GEMM, so a compiled
+# ``torch.addmm`` is batch variant while the eager one is not.
+
+
+def mm_out_batch_invariant(a, b, *, out):
+    return matmul_batch_invariant(a, b, out=out)
+
+
+def addmm_out_batch_invariant(bias, a, b, *, beta=1, alpha=1, out):
+    return _addmm_impl(bias, a, b, beta, alpha, out)
+
+
+def bmm_out_batch_invariant(a, b, *, out):
+    return bmm_batch_invariant(a, b, out=out)
 
 
 def _log_softmax_batch_invariant(input, dim, _half_to_float):
@@ -887,10 +970,16 @@ def _log_softmax_batch_invariant(input, dim, _half_to_float):
     return log_softmax(input, dim=dim)
 
 
-def softmax_batch_invariant(input, dim, dtype=None):
-    # Compute softmax in a deterministic way
-    # First subtract max for numerical stability (standard practice)
+def softmax_batch_invariant(input, dim, half_to_float=False):
+    if half_to_float:
+        input = input.float()
+    if dim == -1 or dim == input.ndim - 1:
+        return softmax(input, dim=-1)
+
+    # Off the last dimension this falls back to torch ops, whose reduction split
+    # depends on the tensor shape.
     input_max = torch.amax(input, dim=dim, keepdim=True)
+    # First subtract max for numerical stability (standard practice)
     input = input - input_max
     exp_x = torch.exp(input)
     sum_exp_x = torch.sum(exp_x, dim=dim, keepdim=True)
@@ -1035,11 +1124,150 @@ def rms_norm_batch_invariant(
 
 
 def linear_batch_invariant(input, weight, bias=None):
-    output = matmul_batch_invariant(input, weight.t())
-
     if bias is not None:
-        output = output + bias
-    return output
+        bias = bias.expand(weight.shape[0])
+    output = mm_batch_invariant(
+        input.reshape(-1, input.shape[-1]), weight.t(), bias=bias
+    )
+    return output.view(*input.shape[:-1], output.shape[-1])
+
+
+@triton.jit
+def _fixed_order_sum_kernel(
+    src_ptr,  # (WORLD_SIZE, numel) gathered contributions, rank-major
+    out_ptr,  # (numel,)
+    numel,
+    stride_rank,
+    WORLD_SIZE: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+    LARGE: tl.constexpr,
+):
+    """Sum ``WORLD_SIZE`` contributions in ascending rank order, fp32 accumulator.
+
+    An output element sums exactly ``WORLD_SIZE`` values in a compile-time
+    constant order and rounds once, so the result depends only on the rank
+    ordering and never on how many elements are being reduced.
+    """
+    pid = tl.program_id(0)
+    if LARGE:
+        pid = pid.to(tl.int64)
+        stride_rank = stride_rank.to(tl.int64)
+    offs = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    mask = offs < numel
+
+    acc = tl.zeros([BLOCK_SIZE], dtype=tl.float32)
+    for r in tl.static_range(WORLD_SIZE):
+        vals = tl.load(src_ptr + r * stride_rank + offs, mask=mask, other=0.0)
+        acc += vals.to(tl.float32)
+
+    tl.store(out_ptr + offs, acc.to(out_ptr.dtype.element_ty), mask=mask)
+
+
+def all_reduce_batch_invariant(
+    input_: torch.Tensor, group: "torch.distributed.ProcessGroup | None" = None
+) -> torch.Tensor:
+    """Sum all-reduce whose result does not depend on the message size.
+
+    Library all-reduces (NCCL/RCCL) pick their algorithm, channel count and chunk
+    boundaries from the message size, so the order in which a given element's
+    contributions are summed changes with the number of tokens in the batch.
+
+    Instead, all-gather the contributions -- pure data movement, so bitwise
+    reproducible at any size -- and reduce them with ``_fixed_order_sum_kernel``.
+    """
+    world_size = dist.get_world_size(group)
+    if world_size == 1:
+        return input_
+
+    x = input_.contiguous()
+    numel = x.numel()
+    gathered = torch.empty((world_size, numel), dtype=x.dtype, device=x.device)
+    dist.all_gather_into_tensor(gathered, x.view(-1), group=group)
+
+    out = torch.empty_like(x)
+    BLOCK_SIZE = 1024
+    grid = (triton.cdiv(numel, BLOCK_SIZE),)
+    _fixed_order_sum_kernel[grid](
+        gathered,
+        out.view(-1),
+        numel,
+        numel,
+        WORLD_SIZE=world_size,
+        BLOCK_SIZE=BLOCK_SIZE,
+        LARGE=gathered.numel() > 2**31,
+    )
+    return out
+
+
+def reduce_scatter_batch_invariant(
+    input_: torch.Tensor,
+    group: "torch.distributed.ProcessGroup | None" = None,
+    sizes: list[int] | None = None,
+) -> torch.Tensor:
+    """Sum reduce-scatter over dim 0 whose result does not depend on the size.
+
+    ``ncclReduceScatter`` picks its chunking from the message size just as
+    ``ncclAllReduce`` does. Route around it the same way
+    ``all_reduce_batch_invariant`` does: an all-to-all sends rank ``d`` exactly
+    the rows it owns from every rank -- pure data movement, so bitwise
+    reproducible however the library chunks it -- and lands them rank-major,
+    which is the layout ``_fixed_order_sum_kernel`` already consumes.
+
+    ``sizes`` (the reduce-scatterv case) changes only *which* rows a rank
+    receives, never how the received contributions are summed, so variable
+    shard sizes are invariant for the same reason.
+
+    Args:
+        input_: Contiguous full-size input; dim 0 is the scattered axis.
+        group: Process group, defaults to the world group.
+        sizes: Per-rank row counts. Uniform split when ``None``.
+
+    Returns:
+        This rank's shard of the sum.
+
+    """
+    world_size = dist.get_world_size(group)
+    if world_size == 1:
+        return input_
+
+    x = input_.contiguous()
+    if sizes is None:
+        assert x.shape[0] % world_size == 0
+        sizes = [x.shape[0] // world_size] * world_size
+    else:
+        assert len(sizes) == world_size
+        assert x.shape[0] == sum(sizes)
+
+    rows = sizes[dist.get_rank(group)]
+    out = torch.empty((rows, *x.shape[1:]), dtype=x.dtype, device=x.device)
+    recv = torch.empty(
+        (world_size * rows, *x.shape[1:]), dtype=x.dtype, device=x.device
+    )
+    # Every rank takes part even when its own shard is empty: it still has rows
+    # to send to the others.
+    dist.all_to_all_single(
+        recv,
+        x,
+        output_split_sizes=[rows] * world_size,
+        input_split_sizes=sizes,
+        group=group,
+    )
+
+    numel = out.numel()
+    if numel == 0:
+        return out
+    BLOCK_SIZE = 1024
+    grid = (triton.cdiv(numel, BLOCK_SIZE),)
+    _fixed_order_sum_kernel[grid](
+        recv.view(-1),
+        out.view(-1),
+        numel,
+        numel,
+        WORLD_SIZE=world_size,
+        BLOCK_SIZE=BLOCK_SIZE,
+        LARGE=recv.numel() > 2**31,
+    )
+    return out
 
 
 _batch_invariant_MODE = False
@@ -1047,7 +1275,31 @@ _batch_invariant_LIB = None
 _fp16_block_size_n = 256
 _fp32_block_size_n = 128
 _fp32_num_stages = 3
+_BLOCK_SIZES_RESOLVED = False
 _NUM_SMS: int = 0
+
+
+def _resolve_block_sizes():
+    """Size the tiles to the shared memory, to avoid triton OutOfResources.
+
+    Runs when the mode is enabled, or on first use by a caller that never
+    enables it, such as a kernel unit test.
+    """
+    global _fp16_block_size_n, _fp32_block_size_n, _fp32_num_stages
+    global _BLOCK_SIZES_RESOLVED
+    _BLOCK_SIZES_RESOLVED = True
+    if not current_platform.is_cuda_alike():
+        return
+    if get_max_shared_memory_bytes() > 106496:
+        _fp16_block_size_n = 256
+        _fp32_block_size_n = 128
+        _fp32_num_stages = 3
+    else:
+        _fp16_block_size_n = 128
+        # SM89 N=1 fp32 128/stages=3 compiles to 131072B (>101376).
+        # Only N=1 OORs; keep 128/stages=3 for every other N.
+        _fp32_block_size_n = 32
+        _fp32_num_stages = 2
 
 
 def enable_batch_invariant_mode():
@@ -1062,12 +1314,17 @@ def enable_batch_invariant_mode():
     _batch_invariant_LIB = torch.library.Library("aten", "IMPL")
 
     key = current_platform.dispatch_key
-    if current_platform.is_cuda():
-        if current_platform.is_device_capability_family(80):
-            # SM80 (Ampere) cannot rely on cuBLASLt-only determinism; install the
-            # triton persistent matmul overrides for mm/addmm/matmul/linear.
+    if current_platform.is_cuda_alike():
+        if current_platform.is_rocm() or current_platform.is_device_capability_family(
+            80
+        ):
+            # Neither cuBLASLt on SM80 (Ampere) nor hipBLASLt can be made batch
+            # invariant; install the triton persistent matmul overrides for
+            # mm/addmm/matmul/linear.
             _batch_invariant_LIB.impl("aten::mm", mm_batch_invariant, key)
             _batch_invariant_LIB.impl("aten::addmm", addmm_batch_invariant, key)
+            _batch_invariant_LIB.impl("aten::mm.out", mm_out_batch_invariant, key)
+            _batch_invariant_LIB.impl("aten::addmm.out", addmm_out_batch_invariant, key)
             _batch_invariant_LIB.impl("aten::matmul", matmul_batch_invariant, key)
             _batch_invariant_LIB.impl("aten::linear", linear_batch_invariant, key)
         else:
@@ -1077,18 +1334,7 @@ def enable_batch_invariant_mode():
             os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":16:8"
             os.environ["CUBLASLT_WORKSPACE_SIZE"] = "1"
 
-        # Query the shared memory size and set block size
-        # accordingly to avoid triton OutOfResources.
-        if get_max_shared_memory_bytes() > 106496:
-            _fp16_block_size_n = 256
-            _fp32_block_size_n = 128
-            _fp32_num_stages = 3
-        else:
-            _fp16_block_size_n = 128
-            # SM89 N=1 fp32 128/stages=3 compiles to 131072B (>101376).
-            # Only N=1 OORs; keep 128/stages=3 for every other N.
-            _fp32_block_size_n = 32
-            _fp32_num_stages = 2
+        _resolve_block_sizes()
     elif current_platform.is_xpu():
         # Tensor descriptors need a global-memory allocator; must be set outside
         # torch.compile regions (triton.set_allocator modifies global state).
@@ -1100,6 +1346,8 @@ def enable_batch_invariant_mode():
         _NUM_SMS = num_compute_units(0)
         _batch_invariant_LIB.impl("aten::mm", mm_batch_invariant, key)
         _batch_invariant_LIB.impl("aten::addmm", addmm_batch_invariant, key)
+        _batch_invariant_LIB.impl("aten::mm.out", mm_out_batch_invariant, key)
+        _batch_invariant_LIB.impl("aten::addmm.out", addmm_out_batch_invariant, key)
         _batch_invariant_LIB.impl("aten::matmul", matmul_batch_invariant, key)
         _batch_invariant_LIB.impl("aten::linear", linear_batch_invariant, key)
 
@@ -1123,7 +1371,9 @@ def enable_batch_invariant_mode():
         _batch_invariant_LIB.impl(
             "aten::bmm", bmm_batch_invariant, key, allow_override=True
         )
-        torch.bmm = bmm_batch_invariant
+        _batch_invariant_LIB.impl(
+            "aten::bmm.out", bmm_out_batch_invariant, key, allow_override=True
+        )
 
     reduced_precision_val = (
         (False, False) if is_torch_equal_or_newer("2.10.0") else False
@@ -1145,28 +1395,32 @@ def override_envs_for_invariance():
 
     os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
 
-    # NCCL determinism settings. NCCL keeps the launch mode process-wide, so,
-    # unlike the pins below, it also applies to communicators shared with other
-    # processes.
-    os.environ["NCCL_LAUNCH_MODE"] = "GROUP"
-    pin_nccl_env(
-        {
-            "NCCL_COLLNET_ENABLE": "0",
-            "NCCL_NVLS_ENABLE": "0",
-            "NCCL_P2P_NET_DISABLE": "1",
-            "NCCL_MIN_NCHANNELS": "1",
-            "NCCL_MAX_NCHANNELS": "1",
-            "NCCL_PROTO": "Simple",
-            # NCCL >= 2.31 zero-fills the algorithm table of every collective
-            # when NCCL_ALGO is set and re-enables only the named ones; together
-            # with the NCCL_PROTO above, collectives not named here end up with
-            # no algorithm and fail with ncclInvalidUsage. Re-enable Ring and
-            # Tree for all collectives, then pin AllReduce to Tree.
-            "NCCL_ALGO": "ring,tree;allreduce:tree",
-            "NCCL_NTHREADS": "1",
-            "NCCL_SOCKET_NTHREADS": "1",
-        }
-    )
+    if current_platform.is_rocm():
+        # The skinny GEMMs pick their split of K from the batch size.
+        os.environ["VLLM_ROCM_USE_SKINNY_GEMM"] = "0"
+    else:
+        # NCCL determinism settings. NCCL keeps the launch mode process-wide, so,
+        # unlike the pins below, it also applies to communicators shared with other
+        # processes.
+        os.environ["NCCL_LAUNCH_MODE"] = "GROUP"
+        pin_nccl_env(
+            {
+                "NCCL_COLLNET_ENABLE": "0",
+                "NCCL_NVLS_ENABLE": "0",
+                "NCCL_P2P_NET_DISABLE": "1",
+                "NCCL_MIN_NCHANNELS": "1",
+                "NCCL_MAX_NCHANNELS": "1",
+                "NCCL_PROTO": "Simple",
+                # NCCL >= 2.31 zero-fills the algorithm table of every collective
+                # when NCCL_ALGO is set and re-enables only the named ones; together
+                # with the NCCL_PROTO above, collectives not named here end up with
+                # no algorithm and fail with ncclInvalidUsage. Re-enable Ring and
+                # Tree for all collectives, then pin AllReduce to Tree.
+                "NCCL_ALGO": "ring,tree;allreduce:tree",
+                "NCCL_NTHREADS": "1",
+                "NCCL_SOCKET_NTHREADS": "1",
+            }
+        )
 
     # torch.compile settings
     os.environ["VLLM_USE_AOT_COMPILE"] = "0"
