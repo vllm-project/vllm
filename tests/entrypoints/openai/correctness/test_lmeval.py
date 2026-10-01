@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-This file test accuracy of the vLLM server via LMEval.
+"""This file test accuracy of the vLLM server via LMEval.
 It uses local-completions, which interacts with vLLM
 through the OAI API with N concurrent connections.
 This simulates real work usage of the API and makes
@@ -37,7 +36,6 @@ if current_platform.is_tpu():
 
 def run_test(more_args):
     """Run the end to end accuracy test."""
-
     args = list(DEFAULT_ARGS)
     args.extend(more_args)
     print(f"Running with: {args}")
@@ -68,7 +66,6 @@ def run_test(more_args):
 
 def test_lm_eval_accuracy_v1_engine():
     """Run with the V1 Engine."""
-
     more_args = []
 
     # Limit compilation time for V1 on TPU

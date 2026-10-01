@@ -28,6 +28,11 @@ class BaseModelLoader(ABC):
     def __init__(self, load_config: LoadConfig):
         self.load_config = load_config
 
+    def get_external_weight_memory(self, vllm_config: VllmConfig) -> int:
+        """Get weights memory from external process;
+        0 when the weights are not external."""
+        return 0
+
     @abstractmethod
     def download_model(self, model_config: ModelConfig) -> None:
         """Download a model so that it can be immediately loaded."""
@@ -38,6 +43,19 @@ class BaseModelLoader(ABC):
         """Load weights into a model. This standalone API allows
         inplace weights loading for an already-initialized model"""
         raise NotImplementedError
+
+    def create_model(
+        self, vllm_config: VllmConfig, model_config: ModelConfig, prefix: str = ""
+    ) -> nn.Module:
+        """Create a model with the given configurations."""
+        model = initialize_model(
+            vllm_config=vllm_config,
+            model_config=model_config,
+            prefix=prefix,
+        )
+        log_online_quantization(vllm_config)
+        log_model_inspection(model)
+        return model
 
     @instrument(span_name="Load model")
     def load_model(
@@ -52,14 +70,11 @@ class BaseModelLoader(ABC):
         target_device = torch.device(load_device)
         with set_default_torch_dtype(model_config.dtype):
             with target_device:
-                model = initialize_model(
+                model = self.create_model(
                     vllm_config=vllm_config,
                     model_config=model_config,
                     prefix=prefix,
                 )
-
-            log_online_quantization(vllm_config)
-            log_model_inspection(model)
 
             logger.debug("Loading weights on %s ...", load_device)
             self.load_weights(model, model_config)

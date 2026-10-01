@@ -13,7 +13,7 @@ from typing import Any
 import pytest
 import torch
 import torch.nn as nn
-from transformers import AutoConfig, AutoModel, PretrainedConfig
+from transformers import AutoConfig, AutoModel, PreTrainedConfig
 
 from vllm.config import ModelConfig, VllmConfig
 from vllm.model_executor.models.interfaces import SupportsMultiModal
@@ -243,7 +243,7 @@ def test_distributed(
     "model, quantization_kwargs",
     [
         ("TheBloke/TinyLlama-1.1B-Chat-v0.3-AWQ", {}),
-        ("TheBloke/TinyLlama-1.1B-Chat-v0.3-GPTQ", {}),
+        ("LnL-AI/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bit", {}),
     ],
 )
 @pytest.mark.parametrize("max_tokens", [32])
@@ -260,7 +260,7 @@ def test_quantization(
         model,
         model_impl="auto",
         enforce_eager=True,
-        **quantization_kwargs,  # type: ignore[arg-type]
+        **quantization_kwargs,
     ) as vllm_model:
         vllm_outputs = vllm_model.generate_greedy_logprobs(
             example_prompts, max_tokens=max_tokens, num_logprobs=num_logprobs
@@ -270,7 +270,7 @@ def test_quantization(
         model,
         model_impl="transformers",
         enforce_eager=True,
-        **quantization_kwargs,  # type: ignore[arg-type]
+        **quantization_kwargs,
     ) as vllm_model:
         model_config = vllm_model.llm.llm_engine.model_config
         assert model_config.using_transformers_backend()
@@ -524,7 +524,7 @@ def replace_vocab_embeddings(model, **config_kwargs):
 
     stub = nn.Module()
     stub.model = model
-    stub.config = PretrainedConfig(
+    stub.config = PreTrainedConfig(
         vocab_size=VOCAB_SIZE, num_positions=NUM_POSITIONS, **config_kwargs
     )
     embeddings = Base._vocab_embeddings(stub)
@@ -769,3 +769,22 @@ def test_attention_scale_rejects_unresolvable_expression():
 
     with pytest.raises(ValueError, match="Cannot resolve attention scaling expression"):
         fuser.scale(Attention())
+
+
+class _ImageOnlyMRoPEModel:
+    """`get_rope_index` without `video_grid_thw` or `**kwargs` (e.g. HunYuanVL)."""
+
+    def get_rope_index(self, input_ids, image_grid_thw):
+        seq_len = input_ids.shape[-1]
+        positions = torch.arange(seq_len).view(1, 1, -1).expand(4, 1, -1)
+        return positions, torch.tensor([0])
+
+
+def test_get_mrope_input_positions_omits_unsupported_grid_kwargs():
+    """Optional grids the model can't accept must not be passed when empty."""
+    mixin = SimpleNamespace(model=_ImageOnlyMRoPEModel())
+
+    positions, delta = MultiModalMixin.get_mrope_input_positions(mixin, [1, 2, 3], [])
+
+    assert positions.shape == (4, 3)
+    assert delta == 0
