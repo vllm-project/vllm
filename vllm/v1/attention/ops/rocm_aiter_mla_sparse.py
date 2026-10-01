@@ -1015,11 +1015,24 @@ def rocm_fp8_mqa_logits(
 # instead, measured on gfx950; it is not a portable choice, which is why this
 # variant lives here rather than replacing the shared one.
 _MASK_GRID_COLS = 128
-# Columns each program handles per iteration. Work stops at the tile boundary
-# containing a row's end rather than at the end itself; the overshoot is
-# masked the same way the shared kernel masks it, so it costs a tile and
-# changes nothing.
-_MASK_TILE = 1024
+
+
+def _mask_tile(rows: int) -> int:
+    """Columns each program handles per iteration, measured on gfx950.
+
+    Every live tile pays for a scan of the row's candidate list, so wider
+    tiles win once there are enough rows to fill the GPU without them.
+    """
+    return 4096 if rows >= 64 else 2048
+
+
+@triton.jit
+def _wait_global_stores(x):
+    # tl.debug_barrier only waits on LDS traffic on AMD; the flags live in
+    # global memory, so their stores must land before the barrier.
+    tl.inline_asm_elementwise(
+        "s_waitcnt vmcnt(0)", "=v,v", [x], dtype=tl.int32, is_pure=False, pack=1
+    )
 
 
 @triton.jit(do_not_specialize=["width", "nblocks"])
@@ -1027,41 +1040,100 @@ def _mask_candidates_strided_kernel(
     logits,
     starts,
     ends,
+    candidates,
     flags,
     stride_row,
     stride_col,
     stride_start,
     stride_end,
+    stride_cand_row,
+    stride_cand_col,
     width,
     nblocks,
     BLOCK_SIZE: tl.constexpr,
+    K: tl.constexpr,
     HAS_STARTS: tl.constexpr,
     ROW_REPEAT: tl.constexpr,
     TILE: tl.constexpr,
 ):
     row = tl.program_id(0).to(tl.int64)
     start = tl.load(starts + row // ROW_REPEAT * stride_start) if HAS_STARTS else 0
-    end = tl.load(ends + row // ROW_REPEAT * stride_end)
-    edge = tl.load(flags + row * (nblocks + 1) + nblocks)
-    step = tl.num_programs(1) * TILE
-    tile_start = tl.program_id(1) * TILE
+    end = tl.minimum(tl.load(ends + row // ROW_REPEAT * stride_end), width)
+    pid = tl.program_id(1)
+    num_progs = tl.num_programs(1)
     # The shared kernel also sanitizes columns at or past `end`. Nothing reads
     # them: top_k_per_row_decode bounds its scan by the same row ends passed
     # here, and persistent_topk/cooperative_topk clamp by the same lengths.
     # Stopping at `end` is what makes the cost track the live context rather
     # than max_model_len.
-    while tile_start < end:
-        cols = tile_start + tl.arange(0, TILE)
-        valid = (cols >= start) & (cols < end) & (cols < width)
-        block = (cols - start) // BLOCK_SIZE
-        keep = tl.load(flags + row * (nblocks + 1) + block, valid, other=0)
-        keep = (keep != 0) | ((cols == width - 1) & (edge != 0))
-        tl.store(
-            logits + row * stride_row + cols * stride_col,
-            -float("inf"),
-            (cols < width) & ~(valid & keep),
+    if HAS_STARTS:
+        head_end = tl.minimum(start, end)
+        head = pid * TILE
+        while head < head_end:
+            cols = head + tl.arange(0, TILE)
+            tl.store(
+                logits + row * stride_row + cols * stride_col,
+                -float("inf"),
+                cols < head_end,
+            )
+            head += num_progs * TILE
+
+    # Tiles are laid out in block space from `start` and dealt round-robin to
+    # the programs of a row. Each program owns the flags of its own tiles, so
+    # it clears them, scatters the candidates that land in them and reads them
+    # back across workgroup barriers: one launch, and no flags are touched
+    # past the live context.
+    BLOCK_P2: tl.constexpr = triton.next_power_of_2(BLOCK_SIZE)
+    TILE_BLOCKS: tl.constexpr = TILE // BLOCK_P2
+    live_blocks = tl.cdiv(end - start, BLOCK_SIZE)
+    first = pid * TILE_BLOCKS
+    step = num_progs * TILE_BLOCKS
+    if first < live_blocks:
+        row_flags = flags + row * nblocks
+        blocks = tl.arange(0, TILE_BLOCKS)
+        tile = first
+        while tile < live_blocks:
+            tl.store(row_flags + tile + blocks, 0, tile + blocks < live_blocks)
+            tile += step
+
+        k = tl.arange(0, triton.next_power_of_2(K))
+        cand = tl.load(
+            candidates + row * stride_cand_row + k * stride_cand_col,
+            k < K,
+            other=-1,
         )
-        tile_start += step
+        # Preserve the packed-column clamp for candidates beyond the logits
+        # width: any such candidate keeps the row's last column.
+        past = start + cand * BLOCK_SIZE >= width
+        edge = tl.max(past.to(tl.int32), axis=0)
+        owned = (
+            (cand >= 0)
+            & (cand < live_blocks)
+            & ((cand // TILE_BLOCKS) % num_progs == pid)
+        )
+        _wait_global_stores(pid)
+        tl.debug_barrier()
+        tl.store(row_flags + cand, 1, owned)
+        _wait_global_stores(pid)
+        tl.debug_barrier()
+
+        offsets = tl.arange(0, BLOCK_P2)
+        tile = first
+        while tile < live_blocks:
+            b = tile + blocks
+            # .cv skips L1: a neighbouring row's program may have pulled a
+            # line holding these flags into it before they were written.
+            keep = tl.load(
+                row_flags + b, b < live_blocks, other=0, cache_modifier=".cv"
+            )
+            cols = start + b[:, None] * BLOCK_SIZE + offsets[None, :]
+            keep = (keep[:, None] != 0) | ((cols == width - 1) & (edge != 0))
+            tl.store(
+                logits + row * stride_row + cols * stride_col,
+                -float("inf"),
+                (offsets[None, :] < BLOCK_SIZE) & (cols < end) & ~keep,
+            )
+            tile += step
 
 
 def _apply_candidate_mask_strided(
@@ -1079,49 +1151,40 @@ def _apply_candidate_mask_strided(
     width is the ``max_model_len`` workspace and the live context is far
     shorter, i.e. the paged decode path below; the prefill chunks pass
     chunk-sized logits and stay on the shared kernel.
-    """
-    from vllm.model_executor.kernels.attention.dsa.candidate_blocks import (
-        _candidate_flags_kernel,
-    )
 
+    Unlike the shared kernel the candidate flags are built by the masking
+    programs themselves, each over only its own live tiles, so the whole mask
+    is a single launch and the flags past each row's end are never cleared.
+    """
     rows, width = logits.shape
     if not rows or not width:
         return
     nblocks = triton.cdiv(width, block_size)
-    flags = torch.empty((rows, nblocks + 1), device=logits.device, dtype=torch.uint8)
+    flags = torch.empty((rows, nblocks), device=logits.device, dtype=torch.uint8)
     start_stride = row_ks.stride(0) if row_ks is not None else 0
-    _candidate_flags_kernel[(rows,)](
-        candidate_blocks,
+    tile = _mask_tile(rows)
+    # Derived from tensor shapes, so the grid stays static and a FULL cudagraph
+    # capture remains valid across replays; only the loop trip count inside
+    # the kernel is data-dependent. The min keeps narrow widths from launching
+    # programs that would only fall through.
+    grid_cols = min(_MASK_GRID_COLS, triton.cdiv(width, tile))
+    _mask_candidates_strided_kernel[(rows, grid_cols)](
+        logits,
         row_ks,
+        row_ke,
+        candidate_blocks,
         flags,
-        *candidate_blocks.stride(),
+        *logits.stride(),
         start_stride,
+        row_ke.stride(0),
+        *candidate_blocks.stride(),
         width,
         nblocks,
         block_size,
         candidate_blocks.shape[1],
         row_ks is not None,
         row_repeat,
-    )
-    # Derived from width, which is a tensor shape, so the grid stays static and
-    # a FULL cudagraph capture remains valid across replays; only the loop trip
-    # count inside the kernel is data-dependent. The min keeps narrow widths
-    # from launching programs that would only fall through.
-    grid_cols = min(_MASK_GRID_COLS, triton.cdiv(width, _MASK_TILE))
-    _mask_candidates_strided_kernel[(rows, grid_cols)](
-        logits,
-        row_ks,
-        row_ke,
-        flags,
-        *logits.stride(),
-        start_stride,
-        row_ke.stride(0),
-        width,
-        nblocks,
-        block_size,
-        row_ks is not None,
-        row_repeat,
-        _MASK_TILE,
+        tile,
     )
 
 
@@ -1415,28 +1478,31 @@ def rocm_aiter_sparse_attn_indexer(
             )
 
             num_rows = logits.shape[0]
+            # Decode rows start at column 0 and the kernels take int32 ends, so
+            # no starts tensor or dtype cast is needed. Rows sharing one
+            # seq_len (next_n > 1 with per-request lens) are expanded in-kernel.
             visible = decode_metadata.seq_lens.reshape(-1)
-            if visible.numel() != num_rows:
-                visible = visible.repeat_interleave(next_n)
-            visible = visible[:num_rows].to(torch.int64)
-            row_starts = torch.zeros_like(visible)
+            row_repeat = next_n if visible.numel() != num_rows else 1
+            visible = visible[:num_rows]
             decode_candidates = candidate_blocks[:num_rows]
             if candidate_write:
                 _select_candidate_blocks(
                     logits,
-                    row_starts,
+                    None,
                     visible,
                     decode_candidates.shape[1],
                     candidate_block_size,
                     decode_candidates,
+                    row_repeat,
                 )
             else:
                 _apply_candidate_mask_strided(
                     logits,
-                    row_starts,
+                    None,
                     visible,
                     decode_candidates,
                     candidate_block_size,
+                    row_repeat,
                 )
 
         topk_indices = topk_indices_buffer[:num_padded_tokens, :topk_tokens]
