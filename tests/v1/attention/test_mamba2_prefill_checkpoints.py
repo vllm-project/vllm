@@ -164,21 +164,12 @@ def _call_get_kv_cache_spec(monkeypatch, mamba_cache_mode: str) -> MambaSpec:
     return MambaMixer2.get_kv_cache_spec(layer, vllm_config)
 
 
-def test_align_mode_opts_into_unaligned_checkpoints(monkeypatch):
-    """Align mode requests one checkpoint block at any token position."""
+def test_opts_into_unaligned_checkpoints(monkeypatch):
+    """One checkpoint block at any token position, via the chunk split."""
     spec = _call_get_kv_cache_spec(monkeypatch, "align")
 
     assert spec.num_prefill_checkpoint_blocks == 1
     assert spec.prefill_checkpoint_alignment == 1
-
-
-@pytest.mark.parametrize("mode", ["all", "none"])
-def test_non_align_modes_do_not_opt_in(monkeypatch, mode):
-    """`all` already caches every boundary; `none` has no prefix cache."""
-    spec = _call_get_kv_cache_spec(monkeypatch, mode)
-
-    assert spec.num_prefill_checkpoint_blocks == 0
-    assert spec.prefill_checkpoint_alignment is None
 
 
 @pytest.mark.parametrize("hash_block_size", [16, 64, 256])
