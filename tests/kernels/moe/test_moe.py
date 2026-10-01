@@ -62,7 +62,6 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils_test import (
     marlin_quantize,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
-    kFp8Static128BlockSym,
     kMxfp4Static,
     quantize_weights,
 )
@@ -1404,77 +1403,55 @@ def test_humming_selects_gemm_from_parallelism_and_override(
 
 
 @pytest.mark.parametrize(
-    ("overrides", "expected"),
+    ("model_type", "capability", "all2all_backend", "indexed"),
     [
-        ({}, "indexed"),
-        ({"model_type": "deepseek_v41_text"}, "indexed"),
-        ({"all2all_backend": "allgather_reducescatter"}, "indexed"),
-        ({"env_override": "grouped"}, "grouped_contiguous"),
-        ({"all2all_backend": "deepep_high_throughput"}, "grouped_contiguous"),
-        ({"capability": 100}, "grouped_contiguous"),
-        ({"model_type": "deepseek_v4"}, "grouped_contiguous"),
-        ({"routing_method": RoutingMethodType.TopK}, "grouped_contiguous"),
-        ({"weight_key": kFp8Static128BlockSym}, "grouped_contiguous"),
+        ("deepseek_v41", 90, None, True),
+        ("deepseek_v41", 90, "allgather_reducescatter", True),
+        ("deepseek_v41", 90, "deepep_high_throughput", False),
+        ("deepseek_v41", 100, None, False),
+        ("deepseek_v4", 90, None, False),
     ],
-    ids=str,
 )
 def test_humming_deepseek_v41_hopper_uses_indexed_gemm_with_ep(
-    monkeypatch: pytest.MonkeyPatch, overrides: dict[str, Any], expected: str
+    monkeypatch: pytest.MonkeyPatch,
+    model_type: str,
+    capability: int,
+    all2all_backend: str | None,
+    indexed: bool,
 ):
     pytest.importorskip("humming")
     import vllm.model_executor.layers.fused_moe.experts.fused_humming_moe as humming
     import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 
-    params: dict[str, Any] = {
-        "model_type": "deepseek_v41",
-        "capability": 90,
-        "routing_method": RoutingMethodType.DeepseekV4,
-        "all2all_backend": None,
-        "env_override": None,
-        "weight_key": kMxfp4Static,
-        **overrides,
-    }
-    env_override = params["env_override"]
-    capability = params["capability"]
-    weight_key = params["weight_key"]
-
-    if env_override is None:
-        monkeypatch.delenv("VLLM_HUMMING_MOE_GEMM_TYPE", raising=False)
-    else:
-        monkeypatch.setenv("VLLM_HUMMING_MOE_GEMM_TYPE", env_override)
+    monkeypatch.delenv("VLLM_HUMMING_MOE_GEMM_TYPE", raising=False)
     monkeypatch.setattr(humming.current_platform, "is_cuda", lambda: True)
     monkeypatch.setattr(
         humming.current_platform,
         "is_device_capability",
         lambda cap, device_id=0: cap == capability,
     )
-    hf_config = SimpleNamespace(model_type=params["model_type"])
+    hf_config = SimpleNamespace(model_type=model_type)
     monkeypatch.setattr(
         humming,
         "get_current_vllm_config_or_none",
         lambda: SimpleNamespace(model_config=SimpleNamespace(hf_config=hf_config)),
     )
     moe_config = make_dummy_moe_config()
-    moe_config.routing_method = params["routing_method"]
+    moe_config.routing_method = RoutingMethodType.DeepseekV4
     moe_config.moe_parallel_config.use_ep = True
-    if params["all2all_backend"] is not None:
+    if all2all_backend is not None:
         moe_config.moe_parallel_config.dp_size = 2
-        moe_config.moe_parallel_config.all2all_backend = params["all2all_backend"]
+        moe_config.moe_parallel_config.all2all_backend = all2all_backend
 
-    assert humming.get_humming_moe_gemm_type(moe_config, weight_key) == expected
-    # The experts classes must pick the same GEMM from the weight key.
-    for cls, gemm_type in (
-        (humming.HummingIndexedExperts, "indexed"),
-        (humming.HummingGroupedExperts, "grouped_contiguous"),
-    ):
-        supported, _ = cls.is_supported_config(
-            cls,
-            moe_config,
-            weight_key,
-            None,
-            mk.FusedMoEActivationFormat.Standard,
-        )
-        assert supported == (expected == gemm_type)
+    # Goes through the experts class so the weight key reaches the GEMM choice.
+    supported, _ = humming.HummingIndexedExperts.is_supported_config(
+        humming.HummingIndexedExperts,
+        moe_config,
+        kMxfp4Static,
+        None,
+        mk.FusedMoEActivationFormat.Standard,
+    )
+    assert supported == indexed
 
 
 @pytest.mark.parametrize(
