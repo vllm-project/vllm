@@ -955,12 +955,13 @@ class MooncakeConnectorScheduler:
             and not params.get("_p_side_truncated")
             and request.num_prompt_tokens > 1
         ):
+            # A mixed-mode prompt carries token ids, embeddings and a mask.
             if request.prompt_token_ids is not None:
                 request.prompt_token_ids.pop()
-            elif request.prompt_embeds is not None:
+            if request.prompt_embeds is not None:
                 request.prompt_embeds = request.prompt_embeds[:-1]
-            else:
-                return
+            if request.prompt_is_token_ids is not None:
+                request.prompt_is_token_ids.pop()
 
             request._all_token_ids.pop()
             request.num_prompt_tokens -= 1
