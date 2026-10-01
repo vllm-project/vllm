@@ -103,7 +103,7 @@ struct GdnDecodeStrides {
 };
 
 // RecoverSSM replay record: per slot, value head and window position,
-// [correction (V), normalized key (K), log decay (1)] in fp32.
+// [correction (V), normalized key (K), decay exp(g) (1)] in fp32.
 struct GdnReplayRecord {
   float* data;
   int64_t slot;
@@ -268,7 +268,9 @@ __global__ __launch_bounds__(kThreads, 2) void gdn_decode_post_conv_mtp_kernel(
       shared_decay[t] = __expf(g);
       shared_beta[t] = sigmoid_fast(b_value);
       if constexpr (WriteReplay) {
-        replay_record[t * replay.position + kDimV + kDimK] = g;
+        // The decay as multiplied below, so the commit replays this exact
+        // float.
+        replay_record[t * replay.position + kDimV + kDimK] = shared_decay[t];
       }
     }
   }
