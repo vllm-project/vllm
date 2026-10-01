@@ -159,7 +159,11 @@ class NixlPushConnectorScheduler(NixlBaseConnectorScheduler):
 
         if num_external_tokens <= 0:
             # Nothing to receive: full prefix-cache hit on D, no
-            # registration to stage.
+            # registration to stage. Stop renewing P's lease so it reclaims
+            # the blocks, and finish the remote prefill here so
+            # request_finished does not stage an empty recv for it.
+            self._stop_heartbeat(request.request_id)
+            params["do_remote_prefill"] = False
             return
 
         # First-pass D path: stash registration data the worker will
