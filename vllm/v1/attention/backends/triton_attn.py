@@ -163,17 +163,6 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
             self.max_seqs_64_segments = (current_platform.num_compute_units() - 1) // (
                 NUM_PAR_SOFTMAX_SEGMENTS * self.num_heads_kv
             )
-        max_num_tokens_3d = self.seq_threshold_3D
-        if self.max_seqs_64_segments > 0:
-            self.num_par_softmax_segments = 64
-            # build() reuses this scratch at 16 segments with proportionally more rows.
-            max_num_tokens_3d = max(
-                min(self.max_seqs_64_segments, max_num_tokens_3d),
-                cdiv(
-                    max_num_tokens_3d,
-                    self.num_par_softmax_segments // NUM_PAR_SOFTMAX_SEGMENTS,
-                ),
-            )
         headdim_padded = next_power_of_2(self.headdim)
         max_query_len_3d = 1
         speculative_config = vllm_config.speculative_config
@@ -185,10 +174,20 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
             if query_len <= MAX_3D_QUERY_LEN:
                 max_query_len_3d = query_len
         # Scratch is indexed by query token, including verification tokens.
-        max_num_tokens_3d = (
-            min(self.seq_threshold_3D, vllm_config.scheduler_config.max_num_seqs)
-            * max_query_len_3d
+        max_num_seqs_3d = min(
+            self.seq_threshold_3D, vllm_config.scheduler_config.max_num_seqs
         )
+        max_num_tokens_3d = max_num_seqs_3d * max_query_len_3d
+        if self.max_seqs_64_segments > 0:
+            self.num_par_softmax_segments = 64
+            # build() reuses this scratch at 16 segments with proportionally more rows.
+            max_num_tokens_3d = max(
+                min(self.max_seqs_64_segments, max_num_seqs_3d) * max_query_len_3d,
+                cdiv(
+                    max_num_tokens_3d,
+                    self.num_par_softmax_segments // NUM_PAR_SOFTMAX_SEGMENTS,
+                ),
+            )
         self.softmax_segm_output = torch.empty(
             (
                 max_num_tokens_3d,

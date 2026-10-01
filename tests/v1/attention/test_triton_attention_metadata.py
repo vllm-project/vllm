@@ -7,6 +7,7 @@ import pytest
 import torch
 
 from vllm.config import CUDAGraphMode
+from vllm.platforms import current_platform
 from vllm.v1.attention.backend import CommonAttentionMetadata
 from vllm.v1.attention.backends.triton_attn import TritonAttentionMetadataBuilder
 from vllm.v1.kv_cache_interface import FullAttentionSpec
@@ -88,8 +89,10 @@ def _metadata(query_lens):
     ],
 )
 def test_segment_scratch_covers_only_configured_eligible_queries(
-    num_speculative_tokens, parallel_drafting, max_num_seqs, capacity
+    monkeypatch, num_speculative_tokens, parallel_drafting, max_num_seqs, capacity
 ):
+    # 16-segment sizing; SM12.0 rows are covered in test_triton_attn_segments.py.
+    monkeypatch.setattr(current_platform, "is_device_capability", lambda _: False)
     builder = _builder(num_speculative_tokens, parallel_drafting, max_num_seqs)
     assert builder.softmax_segm_output.shape == (capacity, 8, 16, 128)
     assert builder.softmax_segm_max.shape == (capacity, 8, 16)

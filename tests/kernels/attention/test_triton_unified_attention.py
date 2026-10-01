@@ -367,7 +367,7 @@ def _native_graph_inputs(window, width, num_seqs):
         k_descale=torch.ones((1, 1), device="cuda"),
         v_descale=torch.ones((1, 1), device="cuda"),
         seq_threshold_3D=6,
-        num_par_softmax_segments=16,
+        num_par_softmax_segments=metadata.num_par_softmax_segments,
         softmax_segm_output=scratch[0],
         softmax_segm_max=scratch[1],
         softmax_segm_expsum=scratch[2],
@@ -541,7 +541,7 @@ def test_six_query_native_fp8_query_head_families(monkeypatch, num_kv_heads):
         k_descale=k_scale.expand(1, num_kv_heads).contiguous(),
         v_descale=v_scale.expand(1, num_kv_heads).contiguous(),
         seq_threshold_3D=builder.seq_threshold_3D,
-        num_par_softmax_segments=16,
+        num_par_softmax_segments=metadata.num_par_softmax_segments,
         softmax_segm_output=scratch[0],
         softmax_segm_max=scratch[1],
         softmax_segm_expsum=scratch[2],
@@ -564,7 +564,7 @@ def test_six_query_native_fp8_query_head_families(monkeypatch, num_kv_heads):
     assert kernel.__getitem__.call_args.args[0] == (
         6 // (16 // (8 // num_kv_heads)) + 1,
         num_kv_heads,
-        16,
+        metadata.num_par_softmax_segments,
     )
     assert all(torch.isfinite(buffer).any() for buffer in scratch)
 
