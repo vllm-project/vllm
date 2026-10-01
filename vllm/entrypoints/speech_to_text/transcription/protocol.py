@@ -339,6 +339,13 @@ class TranscriptionWord(OpenAIBaseModel):
     word: str
     """The text content of the word."""
 
+    probability: float | None = None
+    """Mean probability of the word's tokens as sampled during decoding (the
+    same per-word aggregation faster-whisper uses, but over this decode's own
+    token probabilities, so the values are not identical to faster-whisper's).
+    Not part of the OpenAI schema (vLLM extension); ``None`` when no logprobs
+    were available for the request."""
+
 
 class TranscriptionSegment(OpenAIBaseModel):
     id: int

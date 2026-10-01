@@ -3,9 +3,11 @@
 """``timestamp_granularities`` decides which machinery a request pays for.
 
 A ``verbose_json`` request that only asks for ``word`` needs none of the
-segment-level work: no logprobs (only ``avg_logprob`` reads them), no segment
-cutting, and no ``<|notimestamps|>`` -> ``<|0.00|>`` prompt swap (timestamp
-tokens are what segments are cut on; word onsets come from cross-attention DTW).
+segment-level work: no segment cutting and no ``<|notimestamps|>`` ->
+``<|0.00|>`` prompt swap (timestamp tokens are what segments are cut on; word
+onsets come from cross-attention DTW). It does need ``logprobs=1``: word
+``probability`` reads the sampled token's logprob, as segment ``avg_logprob``
+does.
 These tests pin that gating, and pin the regression it is easy to cause: a plain
 ``verbose_json`` request sends ``timestamp_granularities=[]``, not
 ``["segment"]``, so a naive ``"segment" in granularities`` check would silently
@@ -199,16 +201,18 @@ def test_non_verbose_formats_need_nothing(response_format):
 # --------------------------------------------------------------------------
 
 
-def test_word_only_request_does_not_request_logprobs():
+def test_word_only_request_requests_logprobs_for_word_probability():
+    """Word ``probability`` reads the sampled token's logprob, so a word-only
+    request needs ``logprobs=1`` even though it skips the segment path."""
     serving = _FakeServing()
     params = SamplingParams()
     serving._apply_verbose_params(_word_only(), params)
-    assert params.logprobs is None
+    assert params.logprobs == 1
     assert params.extra_args == {"word_timestamps": True}
 
 
 def test_plain_verbose_json_requests_logprobs():
-    """Segment ``avg_logprob`` is the only consumer, so it must still get them."""
+    """Segment ``avg_logprob`` reads them, so it must still get them."""
     serving = _FakeServing()
     params = SamplingParams()
     serving._apply_verbose_params(_request(response_format="verbose_json"), params)
@@ -469,3 +473,73 @@ def test_translation_segments_are_untouched():
     assert [s.text for s in segments] == [" Mary had", " a lamb"]
     assert text_parts == [" Mary had", " a lamb"]
     assert words == []
+
+
+# --------------------------------------------------------------------------
+# word probability: mean of the word's sampled-token probabilities
+# --------------------------------------------------------------------------
+
+
+def test_word_probability_is_the_mean_of_its_token_probabilities():
+    """Each word averages ``exp(logprob)`` of its own tokens (the per-word
+    aggregation faster-whisper uses: ``np.mean(text_token_probs[i:j])``)."""
+    import math
+
+    serving = _FakeServing()
+    # Tokens: " Mary"=10, " had"=11, then a timestamp token and eos; the
+    # timestamp/eos logprobs must not leak into any word.
+    token_ids = [10, 11, 101, 0]
+    logprobs = [
+        {10: _FakeLogprob(math.log(0.9))},
+        {11: _FakeLogprob(math.log(0.5))},
+        {101: _FakeLogprob(math.log(0.01))},
+        {0: _FakeLogprob(math.log(0.01))},
+    ]
+    words = serving._group_words(token_ids, _ONSETS, 0.0, logprobs)
+    assert [w.word for w in words] == ["Mary", "had"]
+    assert [round(w.probability, 6) for w in words] == [0.9, 0.5]
+
+
+def test_multi_token_word_averages_its_pieces():
+    import math
+
+    class _Tok(_FakeTokenizer):
+        def decode(self, ids):
+            return {10: " lit", 11: "tle", 12: " lamb"}[int(ids[0])]
+
+    serving = _FakeServing()
+    serving.tokenizer = _Tok()
+    token_ids = [10, 11, 12, 101, 0]
+    onsets = [0.0, 0.0, 0.0, 0.2, 0.4, 0.6, 0.8, 1.0]
+    logprobs = [
+        {t: _FakeLogprob(math.log(p))}
+        for t, p in zip(token_ids, [0.8, 0.4, 0.7, 0.01, 0.01])
+    ]
+    words = serving._group_words(token_ids, onsets, 0.0, logprobs)
+    assert [w.word for w in words] == ["little", "lamb"]
+    assert [round(w.probability, 6) for w in words] == [0.6, 0.7]
+
+
+def test_word_probability_is_none_without_logprobs():
+    serving = _FakeServing()
+    words = serving._group_words(_TOKEN_IDS, _ONSETS, 0.0)
+    assert words and all(w.probability is None for w in words)
+
+
+def test_word_only_response_carries_word_probability():
+    """End to end through ``_collect_output_parts``: the output's logprobs
+    reach the words on the word-only path, which has no segments."""
+    import math
+
+    serving = _FakeServing()
+    logprobs = [{t: _FakeLogprob(math.log(0.8))} for t in _TOKEN_IDS]
+    output = _FakeOutput(token_ids=_TOKEN_IDS, logprobs=logprobs, word_align=_ONSETS)
+    _, _, words = serving._collect_output_parts(
+        output,
+        request=_word_only(),
+        segment_class=TranscriptionSegment,
+        start_time=0.0,
+        need_segments=False,
+        want_words=True,
+    )
+    assert [round(w.probability, 6) for w in words] == [0.8, 0.8]

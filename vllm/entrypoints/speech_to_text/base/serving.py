@@ -91,6 +91,23 @@ def asr_inter_chunk_separator(
     return "" if language and language.lower() in no_space_languages else " "
 
 
+def _token_probability(
+    log_probs: "FlatLogprobs | list[dict[int, Logprob]] | None",
+    j: int,
+    tid: int,
+) -> float | None:
+    """Probability of output token ``j`` (sampled id ``tid``), if known.
+
+    ``log_probs`` is aligned with the output tokens, one entry per sampled
+    token, as ``_get_verbose_segments`` also reads it.
+    """
+    if log_probs is None or j >= len(log_probs):
+        return None
+    position = log_probs[j]
+    entry = position.get(tid) if position is not None else None
+    return None if entry is None else math.exp(entry.logprob)
+
+
 class SpeechToTextBaseServing(GenerateBaseServing):
     """Base class for speech-to-text operations like transcription and
     translation."""
@@ -454,8 +471,10 @@ class SpeechToTextBaseServing(GenerateBaseServing):
         self, request: SpeechToTextRequest, sampling_params: SamplingParams
     ) -> None:
         """Turn on only the sampling machinery this response format consumes."""
-        if self._needs_segments(request):
-            # Segment ``avg_logprob`` is the only consumer of logprobs.
+        if self._needs_segments(request) or self._wants_word_timestamps(request):
+            # Two consumers read the sampled token's logprob: segment
+            # ``avg_logprob`` and word ``probability``. ``logprobs=1`` is the
+            # sampled token only, so this adds no top-k work.
             sampling_params.logprobs = 1
 
         if self._wants_word_timestamps(request) and not isinstance(
@@ -488,17 +507,26 @@ class SpeechToTextBaseServing(GenerateBaseServing):
         token_ids: "Sequence[int]",
         token_times: list[float],
         start_offset: float,
+        log_probs: "FlatLogprobs | list[dict[int, Logprob]] | None" = None,
     ) -> "list[TranscriptionWord]":
         """Group generated tokens into words with (start, end) seconds from the
         per-position onset times computed by the worker's cross-attention DTW.
+
+        With ``log_probs``, each word also carries ``probability``: the mean
+        probability of its tokens as sampled. faster-whisper averages per word
+        the same way but recomputes token probabilities in a separate alignment
+        pass, so its numbers differ: measured on large-v3-turbo, mid-sentence
+        words agree within 0.01, while first words and words ending in
+        punctuation score lower here.
         """
         tok = self.tokenizer
         ts_begin = cast(int, tok.convert_tokens_to_ids("<|0.00|>"))
         specials = set(tok.all_special_ids)
         n_prompt = max(len(token_times) - len(token_ids), 0)
-        raw: list[tuple[str, float, float]] = []
+        raw: list[tuple[str, float, float, list[float]]] = []
         cur: str = ""
         cur_start: float | None = None
+        cur_probs: list[float] = []
         prev_end: float = 0.0
         for j, tid in enumerate(token_ids):
             pos = n_prompt + j
@@ -511,19 +539,22 @@ class SpeechToTextBaseServing(GenerateBaseServing):
             s, e = float(token_times[pos]), float(token_times[pos + 1])
             if piece.startswith(" ") and cur:
                 assert cur_start is not None
-                raw.append((cur.strip(), cur_start, prev_end))
-                cur, cur_start = "", None
+                raw.append((cur.strip(), cur_start, prev_end, cur_probs))
+                cur, cur_start, cur_probs = "", None, []
             if cur_start is None:
                 cur_start = s
             cur += piece
             prev_end = e
+            p = _token_probability(log_probs, j, tid)
+            if p is not None:
+                cur_probs.append(p)
         if cur:
             assert cur_start is not None
-            raw.append((cur.strip(), cur_start, prev_end))
+            raw.append((cur.strip(), cur_start, prev_end, cur_probs))
 
         words: list[TranscriptionWord] = []
         last = 0.0
-        for word, s, e in raw:
+        for word, s, e, probs in raw:
             s = max(s, last)
             e = max(e, s)
             words.append(
@@ -531,6 +562,7 @@ class SpeechToTextBaseServing(GenerateBaseServing):
                     word=word,
                     start=round(start_offset + s, 2),
                     end=round(start_offset + e, 2),
+                    probability=sum(probs) / len(probs) if probs else None,
                 )
             )
             last = s
@@ -584,7 +616,9 @@ class SpeechToTextBaseServing(GenerateBaseServing):
         words = (
             []
             if output.word_align is None
-            else self._group_words(output.token_ids, output.word_align, start_time)
+            else self._group_words(
+                output.token_ids, output.word_align, start_time, output.logprobs
+            )
         )
         num_word_tokens = self._count_word_tokens(output.token_ids)
         if words or not num_word_tokens:

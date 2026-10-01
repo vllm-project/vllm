@@ -134,13 +134,21 @@ curl http://localhost:8000/v1/audio/transcriptions \
   -F response_format=verbose_json -F 'timestamp_granularities[]=word'
 ```
 
+Each word carries `start`, `end` and `probability`. `probability` is the mean
+probability of the word's tokens as sampled during decoding, a vLLM extension
+that is not part of the OpenAI schema. faster-whisper averages per word the
+same way but recomputes token probabilities in a separate alignment pass, so
+the values are not identical: mid-sentence words agree closely, while first
+words and words ending in punctuation score lower here. Producing it needs the
+sampled token's logprob, so word requests always run with `logprobs=1`.
+
 Onsets are recovered from the decoder's cross-attention with a dynamic time
 warping pass, the same method used by OpenAI's Whisper and WhisperX. Requests
 that do not ask for word timestamps are unaffected: nothing is captured and no
 alignment runs for them.
 
-Asking only for `word` skips the segment machinery entirely, which is both faster
-and closer to what `json` would have transcribed. Ask for
+Asking only for `word` skips segment cutting and the timestamp-token prompt,
+which is both faster and closer to what `json` would have transcribed. Ask for
 `timestamp_granularities[]=segment` as well if you need both.
 
 !!! warning
