@@ -205,6 +205,7 @@ def _custom_ar_and_cumem_graph_pool(worker) -> tuple[bool, bool]:
 
 
 @multi_gpu_test(num_gpus=2)
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="cuMem CUDA graph pool")
 def test_sleep_cudagraph_custom_allreduce_tp2(monkeypatch):
     """TP=2 sleep/wake with Model Runner V2 CUDA graphs in cuMem graph pools
     and the legacy custom allreduce. Capture must not IPC-register cuMem graph
