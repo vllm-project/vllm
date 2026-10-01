@@ -66,7 +66,8 @@ def test_basic_lifecycle():
     assert _num_waiting_requests(scheduler) == 1
     assert request in scheduler.kv_holding_waiting
     assert request.status == RequestStatus.WAITING_FOR_REMOTE_KVS
-    assert request.num_computed_tokens == NUM_TOKENS
+    # The last prompt token is left for decode to compute.
+    assert request.num_computed_tokens == NUM_TOKENS - 1
 
     # ... but should have (uncached) blocks allocated to it.
     block_pool = scheduler.kv_cache_manager.block_pool

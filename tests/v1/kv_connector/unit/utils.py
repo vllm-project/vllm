@@ -535,7 +535,6 @@ def make_nixl_scheduler(
     )
 
     sched = object.__new__(NixlConnectorScheduler)
-    sched._has_mamba = has_mamba
     sched._is_hma_required = is_hma_required
     sched.kv_cache_config = make_kv_cache_config(
         block_size=16,
@@ -602,7 +601,6 @@ def make_nixl_push_scheduler(
     sched.side_channel_host = "127.0.0.1"
     sched.side_channel_port = 5600
     sched.is_bidirectional_kv_xfer_enabled = is_bidirectional_kv_xfer_enabled
-    sched._has_mamba = has_mamba
     sched.kv_cache_config = make_kv_cache_config(
         block_size=16,
         mamba_enabled=has_mamba,

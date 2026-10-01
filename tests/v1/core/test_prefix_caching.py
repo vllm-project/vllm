@@ -497,7 +497,7 @@ def allocate_external_prefix(
 
 @pytest.mark.parametrize("num_tokens", [1, 15, 16, 17, 31, 32, 33, 127])
 def test_nixl_hisparse_full_block_import_keeps_a_writable_tail(num_tokens):
-    """Import every real token and restore the page used by last-token replay."""
+    """Import the prompt and restore the page used by last-token replay."""
     from tests.v1.kv_connector.unit.utils import create_vllm_config
     from vllm.distributed.kv_transfer.kv_connector.v1.nixl.pull_scheduler import (
         NixlPullConnectorScheduler,
@@ -511,12 +511,15 @@ def test_nixl_hisparse_full_block_import_keeps_a_writable_tail(num_tokens):
     )
     request.kv_transfer_params = {"do_remote_prefill": True}
     count, is_async = connector.get_num_new_matched_tokens(request, 0)
-    assert count == num_tokens and is_async
+    # The decoder computes the last prompt token, except for a 1-token prompt.
+    assert count == max(num_tokens - 1, 1) and is_async
     assert allocate_external_prefix(manager, request, count) is not None
     source, _, resident, _ = manager.get_blocks(request.request_id).blocks
-    assert len(source) == len(resident) == (num_tokens + 15) // 16
+    assert len(source) == len(resident) == (count + 15) // 16
     assert all(block.is_null for block in resident[:-1])
-    assert not resident[-1].is_null
+    # Decode appends a page when it computes the last token; keep the import's.
+    source_tail, tail = source[-1], resident[-1]
+    assert not tail.is_null
     coordinator = get_hisparse_coordinator(manager)
     assert not coordinator.build_offload_command().page_transfers
 
@@ -525,8 +528,8 @@ def test_nixl_hisparse_full_block_import_keeps_a_writable_tail(num_tokens):
     assert len(transfers) == 1
     restore = transfers[0]
     assert restore.restore and not restore.after_forward
-    assert restore.host_block_id == source[-1].block_id
-    assert restore.resident_block_ids == (resident[-1].block_id,)
+    assert restore.host_block_id == source_tail.block_id
+    assert restore.resident_block_ids == (tail.block_id,)
     request.num_computed_tokens = count
     scheduler = SimpleNamespace(
         connector=connector,
@@ -541,20 +544,20 @@ def test_nixl_hisparse_full_block_import_keeps_a_writable_tail(num_tokens):
     assert manager.allocate_slots(request, num_new_tokens=1) is not None
     assert coordinator.build_row_mirrors([(request.request_id, num_tokens - 1, 1)])
     # A pending restore must not expose uninitialized GPU copies to prefix hits.
-    assert all(resident[-1] not in copies for copies in coordinator.copies.values())
+    assert all(tail not in copies for copies in coordinator.copies.values())
 
     coordinator.update_spills({restore.transfer_id: 2}, {restore.transfer_id: 1})
-    assert resident[-1].ref_cnt == 2
-    assert all(resident[-1] not in copies for copies in coordinator.copies.values())
+    assert tail.ref_cnt == 2
+    assert all(tail not in copies for copies in coordinator.copies.values())
     coordinator.update_spills({}, {restore.transfer_id: 1})
-    assert resident[-1].ref_cnt == 1
+    assert tail.ref_cnt == 1
     assert coordinator.request_states[request.request_id].valid_pages == set(
-        range(num_tokens // HISPARSE_BLOCK_SIZE)
+        range(count // HISPARSE_BLOCK_SIZE)
     )
-    if num_tokens % HISPARSE_BLOCK_SIZE:
-        assert source[-1].block_hash is None
+    if count % HISPARSE_BLOCK_SIZE:
+        assert source_tail.block_hash is None
     else:
-        assert coordinator.copies[source[-1].block_hash] == (resident[-1],)
+        assert coordinator.copies[source_tail.block_hash] == (tail,)
 
 
 def test_hisparse_aborted_tail_restore_retains_both_endpoints():

@@ -256,17 +256,15 @@ def test_abort_p_side_non_length_capped():
     req = create_request(
         request_id=44, block_size=BS, num_tokens=int(BS * 2.5), do_remote_decode=True
     )
-    req.sampling_params.max_tokens = 100
-    req.max_tokens = 100
     scheduler.add_request(req)
     req_id = req.request_id
     so = scheduler.schedule()
-    mro = create_model_runner_output(reqs=[req])
-    scheduler.update_from_output(so, mro)
+    # Abort while the prefill is in flight, before it is length-capped.
     scheduler.finish_requests([req_id], RequestStatus.FINISHED_ABORTED)
     conn = scheduler.connector.connector_scheduler
     assert req_id in conn._reqs_not_processed
     assert req_id not in scheduler.requests
+    scheduler.update_from_output(so, EMPTY_MODEL_RUNNER_OUTPUT)
     so = scheduler.schedule()
     scheduler.update_from_output(so, EMPTY_MODEL_RUNNER_OUTPUT)
     assert_scheduler_empty(scheduler)
@@ -288,7 +286,8 @@ def test_remote_blocks_exceed_prompt_tokens():
     req_id = req.request_id
     so = scheduler.schedule()
     assert req.status == RequestStatus.WAITING_FOR_REMOTE_KVS
-    assert req.num_computed_tokens == NUM_TOKENS
+    # P stops short of the last prompt token, which decode recomputes.
+    assert req.num_computed_tokens == NUM_TOKENS - 1
     scheduler.update_from_output(so, EMPTY_MODEL_RUNNER_OUTPUT)
     so = scheduler.schedule()
     mro = copy.deepcopy(EMPTY_MODEL_RUNNER_OUTPUT)
