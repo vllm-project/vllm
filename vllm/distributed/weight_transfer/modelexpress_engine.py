@@ -4,8 +4,8 @@
 
 """Re-export the weight-transfer backend maintained by ModelExpress.
 
-Install ModelExpress commit 3dc4974f95de157c3ec8c1a31899e4685baa8826 from
-its modelexpress_client/python subdirectory.
+Install ModelExpress from the main branch's modelexpress_client/python
+subdirectory.
 """
 
 try:
@@ -28,8 +28,7 @@ except ModuleNotFoundError as exc:
     raise ImportError(
         "The 'modelexpress' weight transfer backend requires ModelExpress. "
         "Install it with `uv pip install "
-        "'modelexpress @ git+https://github.com/ai-dynamo/modelexpress.git@"
-        "3dc4974f95de157c3ec8c1a31899e4685baa8826"
+        "'git+https://github.com/ai-dynamo/modelexpress@main"
         "#subdirectory=modelexpress_client/python'`."
     ) from exc
 

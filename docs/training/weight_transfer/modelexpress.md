@@ -48,11 +48,16 @@ vLLM's `WeightTransferEngine` interface.
 
 ## Inference Side
 
-Install ModelExpress commit `3dc4974f95de157c3ec8c1a31899e4685baa8826` on
-every worker:
+!!! warning "Development version"
+
+    This backend currently uses unreleased ModelExpress features from `main`,
+    which may introduce breaking changes. These features will be included in
+    the official ModelExpress v0.8.0 release.
+
+Install ModelExpress from the `main` branch on every worker:
 
 ```bash
-uv pip install "modelexpress @ git+https://github.com/ai-dynamo/modelexpress.git@3dc4974f95de157c3ec8c1a31899e4685baa8826#subdirectory=modelexpress_client/python"
+uv pip install "git+https://github.com/ai-dynamo/modelexpress@main#subdirectory=modelexpress_client/python"
 ```
 
 The backend is registered natively and loaded only when selected;
