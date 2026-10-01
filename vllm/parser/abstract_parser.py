@@ -242,6 +242,30 @@ class Parser:
 
         """
 
+    def reasoning_ended_in_prompt(self, prompt_token_ids: Sequence[int]) -> bool:
+        """Whether the current prompt turn already closed its reasoning block.
+
+        Unlike ``is_reasoning_end``, this must ignore conversation history.
+        Parsers that cannot make that distinction keep the default.
+        """
+        return False
+
+    def parse_with_prompt(
+        self,
+        model_output: str,
+        request: ChatCompletionRequest | ResponsesRequest,
+        enable_auto_tools: bool = False,
+        model_output_token_ids: Sequence[int] = (),
+        prompt_token_ids: Sequence[int] | None = None,
+    ) -> tuple[str | None, str | None, list[FunctionCall] | None]:
+        """Parse a complete output with its rendered prompt token IDs."""
+        return self.parse(
+            model_output,
+            request,
+            enable_auto_tools=enable_auto_tools,
+            model_output_token_ids=model_output_token_ids,
+        )
+
     @abstractmethod
     def parse_delta(
         self,
@@ -817,6 +841,42 @@ class DelegatingParser(Parser):
         )
         return reasoning, content, tool_calls
 
+    def reasoning_ended_in_prompt(self, prompt_token_ids: Sequence[int]) -> bool:
+        check_prompt = getattr(
+            self._reasoning_parser, "reasoning_ended_in_prompt", None
+        )
+        return (
+            bool(check_prompt(prompt_token_ids)) if check_prompt is not None else False
+        )
+
+    def parse_with_prompt(
+        self,
+        model_output: str,
+        request: ChatCompletionRequest | ResponsesRequest,
+        enable_auto_tools: bool = False,
+        model_output_token_ids: Sequence[int] = (),
+        prompt_token_ids: Sequence[int] | None = None,
+    ) -> tuple[str | None, str | None, list[FunctionCall] | None]:
+        reasoning_ended_in_prompt = (
+            prompt_token_ids is not None
+            and self.reasoning_ended_in_prompt(prompt_token_ids)
+        )
+        if not reasoning_ended_in_prompt:
+            return self.parse(
+                model_output,
+                request,
+                enable_auto_tools=enable_auto_tools,
+                model_output_token_ids=model_output_token_ids,
+            )
+
+        self._initialize_history_tool_call_cnt(request)
+        tool_calls, content = self._extract_tool_calls(
+            content=model_output,
+            request=request,
+            enable_auto_tools=enable_auto_tools,
+        )
+        return None, content, tool_calls
+
     def parse_delta(
         self,
         delta_text: str,
@@ -831,17 +891,18 @@ class DelegatingParser(Parser):
 
         if not state.prompt_reasoning_checked and prompt_token_ids is not None:
             state.prompt_reasoning_checked = True
-            if self._reasoning_parser is None or self.is_reasoning_end(
-                prompt_token_ids
+            reasoning_parser = self._reasoning_parser
+            if (
+                reasoning_parser is None
+                or self.reasoning_ended_in_prompt(prompt_token_ids)
+                or self.is_reasoning_end(prompt_token_ids)
             ):
                 state.reasoning_ended = True
             else:
                 # Reasoning is still open at the end of the prompt; let the
                 # reasoning parser adjust its initial parsing state so the
                 # first generated tokens are classified correctly.
-                self._reasoning_parser.adjust_initial_state_from_prompt(
-                    prompt_token_ids
-                )
+                reasoning_parser.adjust_initial_state_from_prompt(prompt_token_ids)
 
         current_text, current_token_ids = state.advance(delta_text, delta_token_ids)
         delta_message: DeltaMessage | None = None
