@@ -210,6 +210,7 @@ class DataTransport(ABC):
         Returns:
             A future resolving to None on success. A failed future means
             the peer must be rejected rather than acknowledged.
+
         """
         future: Future[None] = Future()
         try:
