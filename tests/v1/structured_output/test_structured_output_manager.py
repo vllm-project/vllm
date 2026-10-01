@@ -11,6 +11,8 @@ from vllm.config import DeviceConfig, StructuredOutputsConfig, VllmConfig
 from vllm.config.model import ModelConfig
 from vllm.config.speculative import SpeculativeConfig
 from vllm.config.structured_outputs import StructuredOutputsBackend
+from vllm.parser.engine.adapters import ParserEngineReasoningAdapter
+from vllm.parser.engine.parser_engine import ReasoningEnd
 from vllm.sampling_params import SamplingParams, StructuredOutputsParams
 from vllm.v1.request import Request
 from vllm.v1.structured_output import StructuredOutputManager
@@ -514,3 +516,88 @@ def test_outlines_termination(tokenizer):
     assert grammar.validate_tokens([eos]) == []
     assert grammar.accept_tokens(request.request_id, [one, eos, one])
     assert grammar.is_terminated()
+
+
+class MockEngineReasoner(ParserEngineReasoningAdapter):
+    """Ends reasoning implicitly on `marker`, which is also content."""
+
+    def __init__(self, tokenizer, marker: int):
+        self.marker = marker
+
+    @property
+    def reasoning_end_token_ids(self):
+        return frozenset({self.marker})
+
+    def find_reasoning_end(self, token_ids):
+        ids = list(token_ids)
+        if self.marker in ids:
+            return ReasoningEnd(ids.index(self.marker), True)
+        return ReasoningEnd(len(ids), False)
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+@pytest.mark.parametrize(
+    ("marker", "drafts", "row_pattern"),
+    [
+        pytest.param("{", (" ", "{", "}", EOS), "UUCCU", id="inclusive"),
+        pytest.param("{", ("{", "}"), "UCC", id="inclusive_first"),
+        pytest.param("{", (" ", " ", "{"), "UUUC", id="inclusive_last"),
+        pytest.param("z", (" ", "z", "{", "}"), "UUCCC", id="not_accepted"),
+    ],
+)
+def test_inclusive_reasoning_end_token(
+    tokenizer,
+    backend: StructuredOutputsBackend,
+    marker: str,
+    drafts: tuple[str, ...],
+    row_pattern: str,
+):
+    """An implicit end token ("{", like GLM's `<tool_call>`) is sampled
+    unconstrained but fed to the grammar. One it rejects ("z") is not fed to it."""
+    manager, request = _build_harness(
+        tokenizer,
+        backend,
+        reasoning_ended=False,
+        reasoning_parser_kwargs={"marker": _single_token(tokenizer, marker)},
+    )
+    manager.reasoner_cls = MockEngineReasoner
+    token_ids = _to_token_ids(tokenizer, drafts)
+    _run_real_flow(
+        manager,
+        request,
+        raw_drafts=token_ids,
+        expected_validated=token_ids,
+        expected_row_pattern=row_pattern,
+        expected_reasoning=True,
+        expect_terminated=EOS in drafts,
+    )
+    grammar = request.structured_output_request.grammar  # type: ignore[union-attr]
+    assert grammar is not None and not isinstance(grammar, Exception)
+    assert grammar.validate_tokens([_single_token(tokenizer, "{")]) == []
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+@pytest.mark.parametrize(
+    ("reasoner_cls", "consumed"),
+    [
+        pytest.param(MockEngineReasoner, True, id="no_drafts"),
+        pytest.param(MockReasoner, False, id="non_engine"),
+    ],
+)
+def test_end_token_committed_alone(
+    tokenizer, backend: StructuredOutputsBackend, reasoner_cls, consumed: bool
+):
+    """Only an engine-based reasoner feeds the end token "{" to the grammar."""
+    brace = _single_token(tokenizer, "{")
+    manager, request = _build_harness(
+        tokenizer,
+        backend,
+        reasoning_ended=False,
+        reasoning_parser_kwargs={"marker": brace},
+    )
+    manager.reasoner_cls = reasoner_cls
+    request.append_output_token_ids([brace])
+    assert manager.accept_tokens(request, [brace])
+    grammar = request.structured_output_request.grammar  # type: ignore[union-attr]
+    assert grammar is not None and not isinstance(grammar, Exception)
+    assert (grammar.validate_tokens([brace]) == []) is consumed
