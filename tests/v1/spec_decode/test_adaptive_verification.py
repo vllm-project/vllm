@@ -100,7 +100,7 @@ def test_tp_reallocation_agrees_on_request_boundaries(
     )
     monkeypatch.setattr(
         adaptive_module,
-        "async_copy_to_gpu",
+        "async_tensor_h2d",
         lambda array, *, out: out.copy_(torch.from_numpy(array)),
     )
     tp_group.world_size = tp_size
