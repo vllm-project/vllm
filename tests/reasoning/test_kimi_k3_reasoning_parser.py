@@ -394,7 +394,8 @@ def test_streaming_eof_does_not_expose_other_parser_reasoning():
         tool_parser_name="kimi_k3",
         enable_auto_tools=True,
     )
-    parser = parser_cls(Tokenizer())
+    assert parser_cls is not None
+    parser = parser_cls(cast(TokenizerLike, Tokenizer()))
     request = ChatCompletionRequest(
         model="test-model", messages=[], include_reasoning=False
     )
