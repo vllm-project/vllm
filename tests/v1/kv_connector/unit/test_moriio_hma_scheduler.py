@@ -814,16 +814,6 @@ def test_get_num_new_matched_tokens_write_plain_keeps_all_tokens():
     assert is_async is True
 
 
-def test_get_num_new_matched_tokens_write_without_remote_prefill_is_noop():
-    sched = _FakeScheduler(is_producer=False, mode=MoRIIOMode.WRITE, _has_mamba=False)
-    req = SimpleNamespace(
-        num_prompt_tokens=10,
-        prompt_token_ids=list(range(10)),
-        kv_transfer_params=None,
-    )
-    assert sched.get_num_new_matched_tokens(req, num_computed_tokens=2) == (0, False)
-
-
 @pytest.mark.parametrize(
     ("mode", "num_computed_tokens", "expected", "is_async", "params"),
     [

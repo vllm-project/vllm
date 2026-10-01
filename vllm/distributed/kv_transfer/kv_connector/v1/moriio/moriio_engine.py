@@ -259,9 +259,10 @@ class MoRIIOWriter:
             wrapper._mark_transfer_terminal_locked(task.transfer_id)
         self._clear_transfer_state(task.transfer_id)
 
-        remote_ip, remote_port = self._resolve_notify_endpoint(
-            task, task.remote_dp_rank
-        )
+        # No remote allocation arrived, so there is no decode_dp_rank to read.
+        # WRITE routing pins both legs to the same global DP rank.
+        decode_dp_rank = self.worker.vllm_config.parallel_config.data_parallel_rank
+        remote_ip, remote_port = self._resolve_notify_endpoint(task, decode_dp_rank)
         logger.error(
             "Deferred write task for request %s timed out after %.1fs waiting "
             "for remote blocks",

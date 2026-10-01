@@ -1863,8 +1863,6 @@ class MoRIIOConnectorWorker:
             remote_ip=remote_ip,
             multi_pod_hosts=multi_pod_hosts,
             remote_dp_size_local=remote_dp_size_local,
-            # WRITE routing pins both legs to the same global DP rank.
-            remote_dp_rank=self.dp_rank,
         )
         self._writer.schedule_write(task)
 
