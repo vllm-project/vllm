@@ -147,6 +147,10 @@ class Platform:
     # empty string means the device does not support ray
     ray_device_key: str = ""
 
+    @classmethod
+    def log_warnings(cls) -> None:
+        """Log platform-specific diagnostics after logging is configured."""
+
     # platform-agnostic way to specify the device control environment variable,
     # .e.g. CUDA_VISIBLE_DEVICES for CUDA.
     # hint: search for "get_visible_accelerator_ids_env_var" in
@@ -1114,6 +1118,16 @@ class Platform:
         cudaMemGetInfo may underreport free memory because it does not
         account for reclaimable OS memory (page cache, buffers).
         """
+        return False
+
+    @classmethod
+    def enable_multi_stream_overlap(
+        cls,
+        aux_stream_list: list[torch.cuda.Stream] | None,
+        attn_metadata: object,
+    ) -> bool:
+        """Whether the current platform should enable multi-stream overlap
+        for the given aux streams and attention metadata."""
         return False
 
     @classmethod
