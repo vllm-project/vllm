@@ -48,8 +48,6 @@ jobs:
     needs: pre-run-check
     if: github.repository_owner == 'vllm-project' && always() && (needs.pre-run-check.result == 'success' || needs.pre-run-check.result == 'skipped')
     runs-on: [self-hosted, linux, x64, vllm-runners]
-    env:
-      SKIP: pip-compile
     steps:
     - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       with:
@@ -62,14 +60,10 @@ jobs:
     - run: echo "::add-matcher::.github/workflows/matchers/mypy.json"
     - run: echo "::add-matcher::.github/workflows/matchers/shellcheck.json"
     - uses: pre-commit/action@2c7b3805fd2a0fd8c1884dcaebf91fc102a13ecd # v3.0.1
+      env:
+        SKIP: pip-compile
       with:
         extra_args: --all-files --hook-stage manual
-    - name: pip-compile (only if requirements or pre-commit config changed)
-      env:
-        SKIP: ""
-      run: |
-        if git diff --quiet HEAD^1 HEAD -- .pre-commit-config.yaml; then
-          pre-commit run pip-compile --hook-stage manual --show-diff-on-failure --color=always --from-ref HEAD^1 --to-ref HEAD
-        else
-          pre-commit run pip-compile --hook-stage manual --show-diff-on-failure --color=always --all-files
-        fi
+    - name: pip-compile (only if its inputs changed)
+      if: ${{ !cancelled() }}
+      run: pre-commit run pip-compile --hook-stage manual --show-diff-on-failure --color=always --from-ref HEAD^1 --to-ref HEAD
