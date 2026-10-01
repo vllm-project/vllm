@@ -229,10 +229,12 @@ def test_no_thread_when_no_tier_asks_for_one():
 
 
 def test_tier_that_did_not_opt_in_is_not_serviced_off_thread():
-    """Only opted-in tiers are touched by the control thread.
+    """Only opted-in tiers are polled and served by the control thread.
 
     A tier that expects the scheduler thread must not be dragged onto another
-    one just because it shares a manager with a tier that opted in.
+    one just because it shares a manager with a tier that opted in. Fan-out
+    through ParentManager (lookup, on_new_request, on_request_finished) can
+    still reach it from that thread; that is the documented exception.
     """
     num_chunks = 8
     primary = CPUPrimaryTierOffloadingManager(
@@ -276,6 +278,75 @@ def test_per_step_gate_is_not_touched_by_the_control_thread(manager_and_tier):
     polls_after_rounds = tier.polls
     assert polls_after_rounds > 0
     assert manager._processed_jobs_this_step is False
+
+
+class _LookingUpTier(_FakeTier):
+    """Opted-in tier that looks keys up through its parent while serving.
+
+    That is what the p2p server role does with a peer's lookup, and the parent
+    lookup lands in TieringOffloadingManager.lookup(), which polls tiers for
+    finished jobs.
+    """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.in_serve = False
+        self.nested_polls = 0
+        self.on_serve = self._look_up
+
+    def _look_up(self, parent: ParentManager) -> None:
+        self.in_serve = True
+        try:
+            parent.lookup(OffloadKey(b"\x01" * 8), ReqContext(req_id="peer"))
+        finally:
+            self.in_serve = False
+
+    def get_finished_jobs(self) -> Iterable[JobResult]:
+        if self.in_serve:
+            self.nested_polls += 1
+        return super().get_finished_jobs()
+
+
+def test_parent_lookup_while_serving_keeps_the_round_contained():
+    """A lookup issued while serving must not escape the control round.
+
+    Before the fix it ran the step's once-per-step poll from the control
+    thread: every tier got polled off-thread, the opted-in tier re-entrantly
+    from inside its own serve, and the gate was left set, so the next step
+    skipped its poll.
+    """
+    num_chunks = 8
+    primary = CPUPrimaryTierOffloadingManager(
+        num_chunks=num_chunks,
+        mmap_region=_mock_mmap_region(num_chunks),
+    )
+    common = {
+        "offloading_spec": MagicMock(),
+        "primary_kv_view": primary.get_kv_memoryview(),
+    }
+    opted_in = _LookingUpTier(tier_type="fake", **common)
+    quiet = _QuietTier(tier_type="quiet", **common)
+    manager = TieringOffloadingManager(
+        primary_tier=primary,
+        secondary_tiers=[opted_in, quiet],
+    )
+    try:
+        # Several rounds, each issuing a parent lookup between steps.
+        deadline = time.monotonic() + _SETTLE_S
+        while opted_in.serves < 3 and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert opted_in.serves >= 3, "control thread never served"
+
+        with manager.lock:
+            assert manager._processed_jobs_this_step is False
+            assert opted_in.nested_polls == 0
+            assert quiet.polls == 0, "quiet tier was polled off-thread"
+
+            # The next step's first lookup still does its poll.
+            manager.lookup(OffloadKey(b"\x02" * 8), _CTX)
+            assert quiet.polls == 1
+    finally:
+        manager.shutdown()
 
 
 def test_shutdown_joins_the_control_thread_before_tier_teardown(manager_and_tier):

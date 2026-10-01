@@ -385,10 +385,22 @@ class TieringOffloadingManager(OffloadingManager):
         The caller must hold self.lock for the whole call. serve_external_requests()
         relies on that: it establishes lookup() HITs and then pins them, and the
         two must not be separated by an eviction.
+
+        Serving can look keys up through the parent, and lookup() runs the
+        step's once-per-step poll. From here that poll would reach every tier
+        off-thread, re-enter the serving tier's get_finished_jobs() from inside
+        its own serve, and leave the gate set so the next step skips its poll.
+        The round has just polled its tiers itself, so it holds the gate shut
+        for its duration and then puts it back untouched.
         """
-        self._process_finished_jobs(self._external_serving_tiers)
-        for _, tier in self._external_serving_tiers:
-            tier.serve_external_requests(self._tier_parents[tier])
+        gate = self._processed_jobs_this_step
+        self._processed_jobs_this_step = True
+        try:
+            self._process_finished_jobs(self._external_serving_tiers)
+            for _, tier in self._external_serving_tiers:
+                tier.serve_external_requests(self._tier_parents[tier])
+        finally:
+            self._processed_jobs_this_step = gate
 
     @property
     def _transfer_jobs(self) -> dict[JobId, JobMetadata]:
