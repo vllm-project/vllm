@@ -36,6 +36,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_connector im
     TransferRegion,
     _align_transfer_regions,
     _block_ids_for_region,
+    _block_size_mismatch_error,
     _coalesce_contiguous_transfer_regions,
     _compute_sender_transfer_plan,
     _has_opaque_packed_row,
@@ -1375,6 +1376,44 @@ async def test_heterogeneous_pp_waits_for_consumer_without_shared_layers():
 
 
 @pytest.mark.asyncio
+async def test_send_kv_to_decode_rejects_block_size_mismatch():
+    """With different block sizes the same block ID names different tokens."""
+    config = create_vllm_config(kv_connector="MooncakeConnector", kv_role="kv_producer")
+    with (
+        set_current_vllm_config(config),
+        patch_worker_dependencies(),
+        patch.object(MooncakeConnectorWorker, "_sync_block_size_with_kernel"),
+    ):
+        worker = MooncakeConnector(
+            config, KVConnectorRole.WORKER, _make_test_kv_cache_config()
+        ).connector_worker
+        try:
+            block_size = worker.cache_config.block_size
+            worker.kv_caches_base_addr = [0x1000]
+            worker.block_len_per_layer = [256]
+            worker.kv_block_len_per_layer = [256]
+            worker.registered_layer_names = ["model.layers.0.self_attn"]
+            worker.registered_layer_indices = [0]
+            sock = AsyncMock(spec=zmq.asyncio.Socket, send_multipart=AsyncMock())
+            metadata = _xfer_meta(
+                [_region(0x2000, row_offset=-1)],
+                {"d-req": ("transfer", [[2]])},
+                remote_block_size=block_size * 2,
+            )
+            with patch.object(worker, "_send_blocks", return_value=0) as send:
+                await worker.send_kv_to_decode(b"consumer", sock, metadata)
+            response = worker._xfer_resp_decoder.decode(
+                sock.send_multipart.call_args.args[0][1]
+            )
+            assert response.status == MooncakeXferResponseStatus.ERROR
+            assert str(block_size * 2) in response.err_msg
+            send.assert_not_called()
+        finally:
+            worker.shutdown()
+            worker.is_kv_consumer = True
+
+
+@pytest.mark.asyncio
 @patch(
     "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_connector.TransferEngine",
     FakeMooncakeWrapper,
@@ -1616,6 +1655,7 @@ async def test_kv_consumuer(monkeypatch):
         assert sent_meta.block_lens == [4096]
         assert sent_meta.registered_layer_names == ["model.layers.0.self_attn"]
         assert sent_meta.registered_layer_indices == [0]
+        assert sent_meta.remote_block_size == vllm_config.cache_config.block_size
 
         # Verify internal state is updated correctly.
         assert "d-req-1" in decode_worker.finished_recving_reqs
@@ -2108,6 +2148,16 @@ def test_pp_mismatch_rejects_opaque_row_in_both_directions():
     assert not _pp_mismatch_hides_packed_layers(
         2, 1, local_has_opaque_row=False, **page_view
     )
+
+
+def test_block_size_mismatch_error():
+    """Only a peer that reports a different block size is rejected."""
+    assert _block_size_mismatch_error(1568, 1568) is None
+    # An older peer does not send its block size.
+    assert _block_size_mismatch_error(1568, 0) is None
+    err = _block_size_mismatch_error(1568, 784)
+    assert err is not None
+    assert "1568" in err and "784" in err
 
 
 def test_prepare_transfer_regions_reuses_success_and_error():
