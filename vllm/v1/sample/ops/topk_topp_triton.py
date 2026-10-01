@@ -27,9 +27,12 @@ from vllm.triton_utils import tl, triton
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.math_utils import next_power_of_2
 from vllm.utils.platform_utils import num_compute_units
+from vllm.v1.worker.workspace import current_workspace_manager
 
 _TRITON_TABLE_CACHE: dict[tuple[torch.device], tuple[torch.Tensor, torch.Tensor]] = {}
 _TRITON_BUFFER_CACHE: dict[tuple[torch.device, torch.dtype, int], torch.Tensor] = {}
+# Per device: scratch elements reserved in the WorkspaceManager.
+_TRITON_WORKSPACE_NUMEL: dict[torch.device, int] = {}
 
 # fmt: off
 _NORMAL_CDF_TO_SIGMA_TABLE = [
@@ -881,6 +884,26 @@ def _max_sampler_batch_size(vllm_config: Any) -> int:
     )
 
 
+def reserve_topk_topp_workspace(vllm_config: Any, device: torch.device) -> None:
+    """Reserve the top-k/top-p scratch at its maximum size before the lock."""
+    rows = min(num_compute_units(device.index), _max_sampler_batch_size(vllm_config))
+    vocab_size = vllm_config.model_config.get_vocab_size()
+    current_workspace_manager().get_simultaneous(((rows, vocab_size), torch.float32))
+    _TRITON_WORKSPACE_NUMEL[device] = rows * vocab_size
+
+
+def _topk_topp_workspace(
+    rows: int, vocab_size: int, device: torch.device
+) -> torch.Tensor | None:
+    """Scratch from the WorkspaceManager when the reservation covers it."""
+    if rows * vocab_size > _TRITON_WORKSPACE_NUMEL.get(device, 0):
+        return None
+    (buffer,) = current_workspace_manager().get_simultaneous(
+        ((rows, vocab_size), torch.float32)
+    )
+    return buffer
+
+
 def _topk_topp_warmup_inputs(vllm_config: Any) -> dict[str, Any]:
     vocab_size = vllm_config.model_config.get_vocab_size()
     split_enabled = current_platform.is_cuda_alike()
@@ -1678,15 +1701,17 @@ def apply_top_k_top_p_triton(
 
     NUM_PROGRAMS = min(num_sm, batch_size)
 
-    # Cache per-Triton Program buffer on each device.
-    buf_key = (logits.device, logits.dtype, vocab_size)
-    buffer = _TRITON_BUFFER_CACHE.get(buf_key)
-    if buffer is None or buffer.shape[0] < NUM_PROGRAMS:
-        size = min(next_power_of_2(NUM_PROGRAMS), num_sm)
-        buffer = logits.new_empty((size, vocab_size))
-        _TRITON_BUFFER_CACHE[buf_key] = buffer
-    if buffer.shape[0] > NUM_PROGRAMS:
-        buffer = buffer[:NUM_PROGRAMS]
+    buffer = _topk_topp_workspace(NUM_PROGRAMS, vocab_size, logits.device)
+    if buffer is None:
+        # Cache per-Triton Program buffer on each device.
+        buf_key = (logits.device, logits.dtype, vocab_size)
+        buffer = _TRITON_BUFFER_CACHE.get(buf_key)
+        if buffer is None or buffer.shape[0] < NUM_PROGRAMS:
+            size = min(next_power_of_2(NUM_PROGRAMS), num_sm)
+            buffer = logits.new_empty((size, vocab_size))
+            _TRITON_BUFFER_CACHE[buf_key] = buffer
+        if buffer.shape[0] > NUM_PROGRAMS:
+            buffer = buffer[:NUM_PROGRAMS]
 
     # Cache lookup table entries on each device.
     tables = _TRITON_TABLE_CACHE.get(logits.device)
@@ -1719,6 +1744,7 @@ def apply_top_k_top_p_triton(
 
 def reset_buffer_cache():
     _TRITON_BUFFER_CACHE.clear()
+    _TRITON_WORKSPACE_NUMEL.clear()
     _TRITON_TABLE_CACHE.clear()
     _TRITON_SPLIT_CACHE.clear()
     torch.accelerator.empty_cache()
