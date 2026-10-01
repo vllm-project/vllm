@@ -159,6 +159,9 @@ class DFlashSpeculator(DraftModelSpeculator):
         )
 
     def capture(self) -> None:
+        assert self.query_cudagraph_manager is not None
+        if not self.query_cudagraph_manager.needs_capture():
+            return
         logger.info("Capturing model for %s speculator...", self._speculator_name)
         # Padded sample rows must not scatter into a live request during capture.
         self.sample_indices.zero_()
@@ -174,7 +177,6 @@ class DFlashSpeculator(DraftModelSpeculator):
                 dtype=self.dtype,
                 device=self.device,
             )
-        assert self.query_cudagraph_manager is not None
         self.query_cudagraph_manager.capture(
             self._generate_draft,
             self.input_buffers,
@@ -183,7 +185,7 @@ class DFlashSpeculator(DraftModelSpeculator):
             self.kv_cache_config,
             self.max_model_len,
             causal=self._group_causal,
-            precompute_context_kv=self._prepare_graph_context,
+            prepare_graph_context=self._prepare_graph_context,
             progress_bar_desc=f"Capturing {self._speculator_name.lower()} CUDA graphs",
         )
 
