@@ -41,6 +41,7 @@ def chunk_kda_prefill(
     chunk_indices: torch.Tensor | None = None,
     chunk_offsets: torch.Tensor | None = None,
     use_fused_chunk: bool = False,
+    use_gluon_chunk: bool = False,
     out: torch.Tensor | None = None,
     checkpoint_state: torch.Tensor | None = None,
     checkpoint_offsets: torch.Tensor | None = None,
@@ -71,6 +72,8 @@ def chunk_kda_prefill(
         use_fused_chunk: request the two-kernel ROCm path. It is used only when
             every one of its preconditions holds; otherwise the Triton path
             runs unchanged.
+        use_gluon_chunk: run aiter's Gluon chunk KDA kernel instead of the
+            fused or Triton path.
         out: buffer the result must land in. Honoured by both backends, so the
             caller can hand in a slice of its own output and skip a copy.
         checkpoint_state: destination for mid-prefill recurrent state
@@ -115,6 +118,30 @@ def chunk_kda_prefill(
             raise ValueError("state_cache replaces initial_state/output_final_state")
         if state_indices is None or has_initial_state is None:
             raise ValueError("state_cache needs state_indices and has_initial_state")
+
+    if use_gluon_chunk:
+        from aiter.ops.triton.attention.chunk_kda import chunk_kda
+
+        return chunk_kda(
+            q=q,
+            k=k,
+            v=v,
+            g=raw_g,
+            beta=raw_beta,
+            A_log=A_log,
+            dt_bias=g_bias,
+            lower_bound=lower_bound,
+            cu_seqlens=cu_seqlens,
+            chunk_indices=chunk_indices,
+            chunk_offsets=chunk_offsets,
+            scale=scale,
+            out=out,
+            initial_state=initial_state,
+            output_final_state=output_final_state,
+            state_cache=state_cache,
+            state_indices=state_indices,
+            has_initial_state=has_initial_state,
+        )
 
     # Only the fused walk addresses the paged rows directly. The Triton path
     # gathers the rows it needs and scatters the results back here, so callers

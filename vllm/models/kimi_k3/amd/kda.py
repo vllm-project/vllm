@@ -6,6 +6,7 @@ from einops import rearrange
 from torch import nn
 
 from vllm import _custom_ops as ops
+from vllm._aiter_ops import rocm_aiter_ops
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.config import VllmConfig
 from vllm.distributed import divide
@@ -51,6 +52,7 @@ from vllm.models.kimi_k3.amd.ops.third_party.kda import (
     fused_recurrent_kda,
     fused_recurrent_kda_packed_decode,
 )
+from vllm.platforms.rocm import on_gfx950, on_gfx1250
 from vllm.third_party.flash_linear_attention.ops.kda import FusedRMSNormGated
 from vllm.transformers_utils.configs.kimi_linear import KimiLinearConfig
 from vllm.v1.attention.backend import AttentionBackend
@@ -214,18 +216,23 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
             "The ROCm Kimi-K3 KDA prefill backend must be one of "
             f"'auto', 'triton' or 'fused', got {backend!r}."
         )
-        if backend == "fused" and not is_fused_kda_chunk_supported():
+        gluon_ok = (
+            (on_gfx950() or on_gfx1250())
+            and rocm_aiter_ops.is_enabled()
+            and self.use_safe_gate
+        )
+        if backend in ("auto", "fused") and gluon_ok:
+            backend = "gluon"
+        elif backend == "auto":
+            backend = "fused" if is_fused_kda_chunk_supported() else "triton"
+        elif backend == "fused" and not is_fused_kda_chunk_supported():
             raise RuntimeError(
                 "The fused KDA chunk kernel requires gfx950 and a build that "
                 "includes it."
             )
-        self.use_fused_chunk = backend == "fused" or (
-            backend == "auto" and is_fused_kda_chunk_supported()
-        )
-        logger.info_once(
-            "Kimi-K3 KDA prefill backend: %s",
-            "fused" if self.use_fused_chunk else "triton",
-        )
+        self.use_gluon_chunk = backend == "gluon"
+        self.use_fused_chunk = backend == "fused"
+        logger.info_once("Kimi-K3 KDA prefill backend: %s", backend)
 
         self.o_norm = FusedRMSNormGated(self.head_dim, activation="sigmoid")
         decode_norm_weight = None
@@ -570,6 +577,7 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
                     chunk_indices=m.chunk_indices,
                     chunk_offsets=m.chunk_offsets,
                     use_fused_chunk=use_fused_chunk,
+                    use_gluon_chunk=self.use_gluon_chunk,
                     out=core_attn_out[:, nd_tok:num_actual_tokens] if direct else None,
                 )
                 # chunk_kda_prefill updates `recurrent_state` in place, so
