@@ -602,3 +602,17 @@ this change keeps those execution/reuse and standalone-retention boundaries and
 adds the merged-envelope control, logical state, policy composition, and
 cross-engine orchestration layers. Authentication and a final human duplicate
 review are required before publication.
+
+After the liveness and recovery-test refinements in commit `0ea7d3f6f5`, the
+final targeted regression was rerun:
+
+```bash
+.venv/bin/python -m pytest tests/v1/test_kv_hint_control.py \
+  tests/v1/test_kv_hint_state.py tests/v1/engine/test_kv_control.py \
+  tests/entrypoints/serve/kv_control/test_api.py \
+  tests/v1/kv_offload/tiering/test_kvcr_tier.py tests/v1/core/test_scheduler.py -q
+```
+
+Result: **399 passed**, 14 warnings, 193.93 seconds. The broader 574-test
+control/cache/scheduler run and the 399-test final run cover overlapping suites;
+no failures were observed after the final changes.
