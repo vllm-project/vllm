@@ -42,9 +42,12 @@ class QuestionType(ABC):
     def parse_options(self, qid: str, criteria: Any) -> list[Option]: ...
 
     @abstractmethod
-    def answer(self, question: Question, probs: list[float]) -> dict[str, Any]:
+    def answer(
+        self, question: Question, probs: list[float], label_mass: float
+    ) -> dict[str, Any]:
         """The answer for ``question``. ``probs[i]`` is the probability of
-        ``question.labels[i]``, and the list sums to 1."""
+        ``question.labels[i]`` among the labels, and the list sums to 1.
+        ``label_mass`` is the labels' total probability over the vocabulary."""
 
     def labels(self, options: list[Option], alphabet: list[str]) -> list[str]:
         """The label the model answers with for each option. ``alphabet`` holds
@@ -158,11 +161,15 @@ class ChoiceQuestion(QuestionType):
             for name, desc in criteria.items()
         ]
 
-    def answer(self, question: Question, probs: list[float]) -> dict[str, Any]:
+    def answer(
+        self, question: Question, probs: list[float], label_mass: float
+    ) -> dict[str, Any]:
         top = argmax(probs)
         return {
             "type": self.name,
             "choice": question.options[top].name,
             "probabilities": {a.name: p for a, p in zip(question.options, probs)},
-            "confidence": probs[top],
+            # The chosen label's probability over the whole vocabulary, so a
+            # read that mostly wanted a non-label token reports low confidence.
+            "confidence": probs[top] * label_mass,
         }

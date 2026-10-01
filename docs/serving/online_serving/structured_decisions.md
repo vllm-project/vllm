@@ -8,11 +8,11 @@ template.
 
 ## How it works
 
-1. Each question is one read. The user message is the state, followed by a
-   decision template rendered for that question: its allowed answers, each
-   with a single-token label such as `K`.
-2. The assistant reply is prefilled up to the question's label (`id:` by
-   default), and the read generates one token.
+1. Each question is one read. The user message is the state, followed by the
+   question and its allowed answers, each with a single-token label such as
+   `K`.
+2. The assistant reply is prefilled up to the question's label (`id:`), and
+   the read generates one token.
 3. The read returns the logprobs of that question's label tokens. Softmax over
    the labels gives the answer's probabilities.
 
@@ -70,7 +70,7 @@ Response, with probabilities that depend on the model:
       "type": "choice",
       "choice": "billing",
       "probabilities": {"billing": 0.97, "shipping": 0.01, "security": 0.02},
-      "confidence": 0.97
+      "confidence": 0.90
     }
   },
   "usage": {"input_tokens": 142, "output_tokens": 1},
@@ -82,46 +82,13 @@ Response, with probabilities that depend on the model:
 
 `diagnostics.label_mass` is the probability the model put on the labels across
 its whole vocabulary. A low value means most of the probability went to tokens
-that are not labels.
-
-## Decision templates
-
-Each read's question text comes from a Jinja template, rendered in the same
-sandboxed environment as chat templates. The server uses its built-in template unless it
-starts with `--decision-template`. That flag takes a file path or the template
-inline.
-
-The template receives `instructions` (a string or `None`) and `questions`, a
-list holding the one question being read, with `id`, `type`, `instructions` and
-`options`. Each option has `label`, `name` and `description`.
-
-A template may define an `answer(question, label)` macro that returns one
-question's answer as the model should write it. The default is `id: label`.
-The server renders the answer once per label and compares the tokens to find
-where the label goes, then prefills each read up to that point. The template
-can call the same macro to show the model the exact reply format.
-
-```jinja
-{% macro answer(question, label) %}{{ question.id }} -> {{ label }}{% endmacro %}
-Classify the ticket.
-{% for q in questions %}
-{{ q.instructions }}
-{% for o in q.options %}
-{{ o.label }} = {{ o.name }}{% if o.description %}: {{ o.description }}{% endif %}
-
-{% endfor %}
-{% endfor %}
-Reply as: {{ answer({"id": "id"}, "label") }}
-```
-
-The answers of all the labels must differ in exactly one token for the model's
-tokenizer, with some text before it. If the template breaks that, each request
-gets a 400 naming the question.
+that are not labels. `confidence` is the chosen option's probability over the
+whole vocabulary: its share of the labels times `label_mass`.
 
 ## Labels
 
-The first time the server uses a template, it tries each label from `A` to
-`ZZ` in the template's answer and keeps those that are one token. The label's
+At startup the server tries each label from `A` to `ZZ` in the answer format
+(`id: label`) and keeps those that are one token. The label's
 token can include a leading space or the colon before it. The server groups
 the labels by the rest of that token's text and keeps the largest group, so
 every label is tokenized the same way. A question takes single letters first

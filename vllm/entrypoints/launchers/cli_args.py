@@ -298,10 +298,6 @@ class FrontendArgs(BaseFrontendArgs):
         "critical", "error", "warning", "info", "debug", "trace"
     ] = "info"
     """Log level for uvicorn."""
-    decision_template: str | None = None
-    """The file path to the Jinja template for the structured decisions API
-    (`/v1/systemone`), or the template in single-line form. Defaults to a
-    built-in template."""
     disable_uvicorn_access_log: bool = False
     """Disable uvicorn access log."""
     disable_access_log_for_endpoints: str | None = None

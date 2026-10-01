@@ -62,7 +62,9 @@ def test_choice_decision(server):
     assert team["type"] == "choice"
     assert set(team["probabilities"]) == {"billing", "shipping", "security"}
     assert sum(team["probabilities"].values()) == pytest.approx(1.0, abs=1e-4)
-    assert team["confidence"] == max(team["probabilities"].values())
+    assert team["confidence"] == pytest.approx(
+        max(team["probabilities"].values()) * body["diagnostics"]["team"]["label_mass"]
+    )
     for diag in body["diagnostics"].values():
         assert 0.0 < diag["label_mass"] <= 1.0 + 1e-6
     assert body["usage"]["output_tokens"] == 2

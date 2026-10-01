@@ -67,7 +67,6 @@ class ServingStructuredDecisions(BaseServing):
         models: OpenAIServingModels,
         strategy: ReadStrategy,
         *,
-        decision_template: str | None = None,
         request_logger: RequestLogger | None = None,
     ) -> None:
         model_config = strategy.context.engine_client.model_config
@@ -76,7 +75,7 @@ class ServingStructuredDecisions(BaseServing):
         )
         self.strategy = strategy
         self.limits = strategy.limits()
-        self.template = DecisionTemplate(decision_template or DEFAULT_DECISION_TEMPLATE)
+        self.template = DecisionTemplate(DEFAULT_DECISION_TEMPLATE)
 
     def _tokenizer(self) -> TokenizerLike:
         return self.strategy.context.online_renderer.renderer.get_tokenizer()
@@ -118,7 +117,7 @@ class ServingStructuredDecisions(BaseServing):
         answers: dict[str, dict[str, Any]] = {}
         diagnostics: dict[str, QuestionDiagnostics] = {}
         for q, read in zip(questions, reads):
-            answers[q.id] = q.type.answer(q, read.probs)
+            answers[q.id] = q.type.answer(q, read.probs, read.label_mass)
             diagnostics[q.id] = QuestionDiagnostics(
                 label_mass=read.label_mass, argmax_is_label=read.argmax_is_label
             )

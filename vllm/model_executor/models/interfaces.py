@@ -1490,13 +1490,6 @@ def supports_transcription(
     return getattr(model, "supports_transcription", False)
 
 
-def decision_read_strategy(model: type[object] | object) -> str:
-    """The name of the read strategy the structured decisions API uses for the
-    model. A model class overrides it with a ``decision_read_strategy`` class
-    variable."""
-    return getattr(model, "decision_read_strategy", "next_token")
-
-
 @runtime_checkable
 class SupportsEagleBase(Protocol):
     """Base interface for models that support EAGLE-based speculative decoding."""

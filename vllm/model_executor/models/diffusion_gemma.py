@@ -18,7 +18,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Mapping, Sequence
 from types import SimpleNamespace
-from typing import Any, ClassVar
+from typing import Any
 
 import numpy as np
 import torch
@@ -166,8 +166,6 @@ class DiffusionGemmaForConditionalGeneration(
     In practice, the model's forward() dispatches based on the `mode` kwarg
     set by DiffusionGemmaModelState.prepare_inputs().
     """
-
-    decision_read_strategy: ClassVar[str] = "canvas"
 
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={

@@ -247,9 +247,6 @@ async def init_generate_state(
                     default_chat_template_kwargs=default_chat_template_kwargs,
                 )
             ),
-            decision_template=load_chat_template(
-                getattr(args, "decision_template", None)
-            ),
             request_logger=request_logger,
         )
         if strategy_cls is not None

@@ -59,12 +59,12 @@ def test_choice_labels_and_options():
 
 def test_choice_answer_shape():
     q = choice()
-    answer = q.type.answer(q, [0.2, 0.7, 0.1])
+    answer = q.type.answer(q, [0.2, 0.7, 0.1], 0.5)
     assert answer == {
         "type": "choice",
         "choice": "outage",
         "probabilities": {"billing": 0.2, "outage": 0.7, "other": 0.1},
-        "confidence": 0.7,
+        "confidence": 0.35,
     }
 
 
@@ -99,14 +99,16 @@ def test_registered_type_plugs_in():
         def labels(self, options: list[Option], alphabet: list[str]) -> list[str]:
             return ["yes", "no"]
 
-        def answer(self, question: Question, probs: list[float]) -> dict[str, Any]:
+        def answer(
+            self, question: Question, probs: list[float], label_mass: float
+        ) -> dict[str, Any]:
             return {"type": self.name, "yes": probs[0]}
 
     register_question_type(BinaryQuestion)
     try:
         q = build_question("ok", "test_binary", "Is it fine?", None, LETTERS, 128)
         assert q.labels == ("yes", "no")
-        assert q.type.answer(q, [0.9, 0.1]) == {"type": "test_binary", "yes": 0.9}
+        assert q.type.answer(q, [0.9, 0.1], 1.0) == {"type": "test_binary", "yes": 0.9}
         with pytest.raises(ValueError, match="already registered"):
             register_question_type(BinaryQuestion)
     finally:
