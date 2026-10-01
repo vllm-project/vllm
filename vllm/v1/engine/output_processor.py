@@ -19,6 +19,7 @@ from vllm.outputs import (
     RequestError,
     RequestOutput,
     SamplingMask,
+    WeightVersionSpan,
 )
 from vllm.sampling_params import RequestOutputKind
 from vllm.tokenizers import TokenizerLike
@@ -190,6 +191,8 @@ class RequestState:
         # Routed experts accumulation (prompt + sample chunks)
         self.routed_experts_chunks: list[np.ndarray] = []
         self.sampling_mask_chunks: list[SamplingMaskLists] = []
+        # (weight version, first output-token index) for each span.
+        self.weight_version_starts: list[tuple[str, int]] = []
 
         # Stream Interval
         self.stream_interval = stream_interval
@@ -460,6 +463,18 @@ class RequestState:
         if finished and self.routed_experts_chunks:
             routed_experts = np.concatenate(self.routed_experts_chunks, axis=0)
 
+        # Final outputs carry the spans; a zero-token output carries [].
+        weight_versions = None
+        if finished:
+            num_output_tokens = self.detokenizer.num_output_tokens()
+            starts = self.weight_version_starts
+            if starts or num_output_tokens == 0:
+                ends = [start for _, start in starts[1:]] + [num_output_tokens]
+                weight_versions = [
+                    WeightVersionSpan(version, start, end)
+                    for (version, start), end in zip(starts, ends)
+                ]
+
         return CompletionOutput(
             index=self.request_index,
             text=text,
@@ -471,6 +486,7 @@ class RequestState:
             finish_reason=str(finish_reason) if finished else None,
             stop_reason=stop_reason if finished else None,
             spec_decode_metrics=self.spec_decode_metrics if finished else None,
+            weight_versions=weight_versions,
         )
 
     def _new_pooling_output(self, pooling_output: torch.Tensor) -> PoolingOutput:
@@ -659,6 +675,7 @@ class OutputProcessor:
         engine_core_outputs: list[EngineCoreOutput],
         engine_core_timestamp: float | None = None,
         iteration_stats: IterationStats | None = None,
+        weight_version: str | None = None,
     ) -> OutputProcessorOutput:
         """Process the EngineCoreOutputs:
         1) Compute stats for logging
@@ -736,6 +753,17 @@ class OutputProcessor:
             if pooling_output is None:
                 assert req_state.detokenizer is not None
                 assert req_state.logprobs_processor is not None
+                # A new span starts where this step's label differs from the
+                # label of the request's previous tokens.
+                starts = req_state.weight_version_starts
+                if (
+                    new_token_ids
+                    and weight_version is not None
+                    and (not starts or starts[-1][0] != weight_version)
+                ):
+                    starts.append(
+                        (weight_version, req_state.detokenizer.num_output_tokens())
+                    )
                 # 2) Detokenize the token ids into text and perform stop checks.
                 num_prev_tokens = req_state.detokenizer.num_output_tokens()
                 stop_string = req_state.detokenizer.update(
