@@ -109,10 +109,6 @@ SEPARATE_GROUPS = [
     "tests/v1/worker",
 ]
 
-EXCLUDE = [
-    r"vllm/model_executor/models/[kK]",
-]
-
 
 def group_files(changed_files: list[str]) -> dict[str, list[str]]:
     """Group changed files into different mypy calls.
@@ -124,16 +120,12 @@ def group_files(changed_files: list[str]) -> dict[str, list[str]]:
         A dictionary mapping file group names to lists of changed files.
 
     """
-    exclude_pattern = re.compile(f"^{'|'.join(EXCLUDE)}.*")
     silent_pattern = re.compile(f"^({'|'.join(SILENT_GROUPS)}).*")
     file_groups: dict[str, list[str]] = {"": []}
     file_groups.update({k: [] for k in SEPARATE_GROUPS})
     # Longest path first so a sub-directory is not shadowed by its parent
     separate_groups = sorted(SEPARATE_GROUPS, key=len, reverse=True)
     for changed_file in changed_files:
-        # Skip files which should be ignored completely
-        if exclude_pattern.match(changed_file):
-            continue
         # Already-fixed paths go in the default group, which runs at the
         # stricter follow_imports setting from pyproject.toml
         if silent_pattern.match(changed_file):

@@ -502,6 +502,7 @@ class K2HorizonSparseMoeBlock(nn.Module):
             self.gate.bias = nn.Parameter(self.gate.bias.float(), requires_grad=False)
 
         self.num_shared_experts = config.num_shared_experts
+        self.shared_experts: K2HorizonMLP | None
         if config.num_shared_experts > 0:
             self.shared_experts = K2HorizonMLP(
                 hidden_size=config.hidden_size,
@@ -644,6 +645,14 @@ class K2HorizonAttention(nn.Module):
                 rope_parameters=rope_parameters,
                 dual_chunk_attention_config=dual_chunk_attention_config,
             )
+        attn_kwargs: dict[str, Any] = (
+            {
+                "layer_idx": extract_layer_index(prefix),
+                "dual_chunk_attention_config": dual_chunk_attention_config,
+            }
+            if dual_chunk_attention_config
+            else {}
+        )
         self.attn = Attention(
             self.num_heads,
             self.head_dim,
@@ -652,12 +661,7 @@ class K2HorizonAttention(nn.Module):
             cache_config=cache_config,
             quant_config=quant_config,
             prefix=f"{prefix}.attn",
-            **{
-                "layer_idx": extract_layer_index(prefix),
-                "dual_chunk_attention_config": dual_chunk_attention_config,
-            }
-            if dual_chunk_attention_config
-            else {},
+            **attn_kwargs,
         )
 
         self.query_key_norm = query_key_norm
@@ -842,6 +846,14 @@ class K2HorizonMoVAAttention(nn.Module):
                 rope_parameters=rope_parameters,
                 dual_chunk_attention_config=dual_chunk_attention_config,
             )
+        attn_kwargs: dict[str, Any] = (
+            {
+                "layer_idx": extract_layer_index(prefix),
+                "dual_chunk_attention_config": dual_chunk_attention_config,
+            }
+            if dual_chunk_attention_config
+            else {}
+        )
         self.attn = Attention(
             self.num_heads,
             self.head_dim,
@@ -850,12 +862,7 @@ class K2HorizonMoVAAttention(nn.Module):
             cache_config=cache_config,
             quant_config=quant_config,
             prefix=f"{prefix}.attn",
-            **{
-                "layer_idx": extract_layer_index(prefix),
-                "dual_chunk_attention_config": dual_chunk_attention_config,
-            }
-            if dual_chunk_attention_config
-            else {},
+            **attn_kwargs,
         )
 
         self.query_key_norm = query_key_norm
@@ -1228,9 +1235,10 @@ class K2HorizonModel(nn.Module, EagleModelMixin):
         expert_params_mapping = self.get_expert_mapping()
         for name, loaded_weight in weights:
             if "scale" in name or "zero_point" in name:
-                name = maybe_remap_kv_scale_name(name, params_dict)
-                if name is None:
+                remapped_name = maybe_remap_kv_scale_name(name, params_dict)
+                if remapped_name is None:
                     continue
+                name = remapped_name
 
             # QK norm weights
             if name.endswith(".self_attn.q_norm.weight") or name.endswith(
@@ -1267,7 +1275,9 @@ class K2HorizonModel(nn.Module, EagleModelMixin):
                                 kv_rank
                             ]
 
-                weight_loader = getattr(param, "weight_loader", default_weight_loader)
+                weight_loader: Callable[..., Any] = getattr(
+                    param, "weight_loader", default_weight_loader
+                )
                 weight_loader(param, loaded_weight)
                 loaded_params.add(name)
                 continue
@@ -1380,9 +1390,10 @@ class K2HorizonModel(nn.Module, EagleModelMixin):
                     continue
                 if name.endswith("scale"):
                     # Remapping the name of FP8 kv-scale.
-                    name = maybe_remap_kv_scale_name(name, params_dict)
-                    if name is None:
+                    remapped_name = maybe_remap_kv_scale_name(name, params_dict)
+                    if remapped_name is None:
                         continue
+                    name = remapped_name
                 if name not in params_dict:
                     continue
 

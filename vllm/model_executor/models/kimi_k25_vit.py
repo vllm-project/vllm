@@ -804,7 +804,7 @@ class MoonViT3dPretrainedModel(nn.Module):
         self,
         grid_thw_list: list[list[int]],
         *,
-        max_batch_size: int,
+        max_batch_size: int | None,
         max_seqlen_override: int | None = None,
         device: torch.device,
     ) -> dict[str, torch.Tensor | None]:
