@@ -354,3 +354,18 @@ def test_weight_cache_key_distinguishes_dp_ranks():
     assert key.mismatched_fields(replace(key, dp_rank=4)) == ["dp_rank"]
     assert key.mismatched_fields(replace(key, dp_size=8, dp_rank=3)) == ["dp_size"]
     assert key.mismatched_fields(replace(key, pp_rank=0)) == ["pp_rank"]
+
+
+def test_ipc_loader_copy_mode_reports_no_external_weight_memory():
+    """Copy mode clones the weights into the engine, so nothing is external
+    (vllm_config is never touched)."""
+    from vllm.config import LoadConfig
+    from vllm.model_executor.model_loader.weight_cache.ipc_loader import (
+        IpcModelLoader,
+    )
+
+    copy_mode = LoadConfig(
+        load_format="ipc_cache", model_loader_extra_config={"mode": "copy"}
+    )
+    loader = IpcModelLoader(copy_mode)
+    assert loader.get_external_weight_memory(None) == 0

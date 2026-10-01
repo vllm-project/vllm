@@ -7,7 +7,7 @@ import torch.nn as nn
 from transformers import DeepseekV2Config, DeepseekV3Config
 
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
-from vllm.config import CacheConfig, VllmConfig
+from vllm.config import CacheConfig, CUDAGraphMode, VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.distributed.parallel_state import get_tp_group
 from vllm.forward_context import get_forward_context
@@ -84,7 +84,7 @@ class DeepseekV32Indexer(nn.Module):
             disable_tp=True,
             prefix=f"{prefix}.wk_weights_proj",
         )
-        self.k_norm = LayerNorm(self.head_dim, eps=1e-6)
+        self.k_norm = LayerNorm(self.head_dim, eps=1e-6, dtype=torch.float32)
         self.softmax_scale = self.head_dim**-0.5
 
         self.scale_fmt = "ue8m0"
@@ -283,6 +283,18 @@ class DeepseekV32Attention(MLAAttention):
             is_neox_style=not getattr(config, "indexer_rope_interleave", False),
         )
 
+    def _should_prepare_mqa_query(
+        self,
+        attn_metadata: "MLACommonMetadata | None",
+        cudagraph_runtime_mode: CUDAGraphMode,
+    ) -> bool:
+        return (
+            attn_metadata is None
+            or not self._use_sparse_mha(attn_metadata)
+            or cudagraph_runtime_mode == CUDAGraphMode.FULL
+            or torch.cuda.is_current_stream_capturing()
+        )
+
     def forward(  # type: ignore[override]
         self,
         positions: torch.Tensor,
@@ -321,6 +333,9 @@ class DeepseekV32Attention(MLAAttention):
         layer_attn_metadata, _, _, _ = get_attention_context(self.layer_name)
         self.impl.prepare_for_batch(layer_attn_metadata)
 
+        prepare_mqa_query = self._should_prepare_mqa_query(
+            layer_attn_metadata, forward_context.cudagraph_runtime_mode
+        )
         if self.indexer is not None and not self.skip_topk:
             has_indexer = True
             indexer_k_norm_w = self.indexer.k_norm.weight
@@ -412,7 +427,8 @@ class DeepseekV32Attention(MLAAttention):
             index_q = None
 
         fuse_q_proj = (
-            not self._fp8_query
+            prepare_mqa_query
+            and not self._fp8_query
             and q.shape[0] > 0
             and self.num_local_heads in (4, 8, 16, 32, 64, 128)
             and (has_indexer or (self.num_local_heads <= 32 and q.shape[0] <= 1024))
@@ -421,7 +437,9 @@ class DeepseekV32Attention(MLAAttention):
             and q.dtype == torch.bfloat16
             and (index_q is None or index_q.shape[2] in (64, 128, 256))
         )
-        if fuse_q_proj:
+        if not prepare_mqa_query:
+            ql_nope = q_nope
+        elif fuse_q_proj:
             ql_nope = torch.empty(
                 (q.shape[0], self.num_local_heads, self.W_UK_T.shape[-1]),
                 dtype=q.dtype,
@@ -442,7 +460,7 @@ class DeepseekV32Attention(MLAAttention):
             indexer_n_head_scale,
             has_indexer=has_indexer,
             index_rope_interleave=self._index_rope_interleave,
-            quantize_mqa=self._fp8_query,
+            quantize_mqa=self._fp8_query and prepare_mqa_query,
             q_nope=q_nope if fuse_q_proj else None,
             w_uk_t=self.W_UK_T if fuse_q_proj else None,
         )
@@ -554,7 +572,11 @@ class DeepseekV32Attention(MLAAttention):
 
         if self._use_sparse_mha(attn_metadata):
             assert kv_c is not None and k_pe is not None
-            mha_q_pe = self.rotary_emb(positions, q_pe)[0] if self._fp8_query else mqa_q
+            mha_q_pe = (
+                self.rotary_emb(positions, q_pe)[0]
+                if mqa_q.dtype != q_pe.dtype
+                else mqa_q
+            )
             mha_q = torch.cat((q_nope, mha_q_pe), dim=-1)
             self.forward_impl(
                 mha_q,
