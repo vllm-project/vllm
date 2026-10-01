@@ -273,8 +273,14 @@ def compute_tile_loop_bounds(
         tile_end = tl.minimum((last_allowed_key // TILE_SIZE) + 1, num_tiles)
 
     if IS_3D:
-        loop_lo = max(segm_idx_or_0 * tiles_per_segment_or_0, tile_start)
-        loop_hi = min((segm_idx_or_0 + 1) * tiles_per_segment_or_0, tile_end)
+        if SLIDING_WINDOW > 0 and not (USE_MM_PREFIX or USE_R_SWA):
+            start_tile = tl.maximum(0, (seq_len - SLIDING_WINDOW) // TILE_SIZE)
+        else:
+            start_tile = 0
+        segm_lo = start_tile + segm_idx_or_0 * tiles_per_segment_or_0
+        segm_hi = start_tile + (segm_idx_or_0 + 1) * tiles_per_segment_or_0
+        loop_lo = max(segm_lo, tile_start)
+        loop_hi = min(segm_hi, tile_end)
     else:
         loop_lo = tile_start
         loop_hi = tile_end
