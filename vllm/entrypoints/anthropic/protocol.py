@@ -78,6 +78,16 @@ class AnthropicContentBlock(BaseModel):
         return self
 
 
+def _reject_tool_changes(content: str | list[AnthropicContentBlock] | None) -> None:
+    if content is None or isinstance(content, str):
+        return
+    for block in content:
+        if block.type in ("tool_addition", "tool_removal"):
+            raise ValueError(
+                f'{block.type} blocks are only allowed in messages with role "system"'
+            )
+
+
 class AnthropicMessage(BaseModel):
     """Message structure."""
 
@@ -86,12 +96,8 @@ class AnthropicMessage(BaseModel):
 
     @model_validator(mode="after")
     def validate_tool_change_role(self) -> "AnthropicMessage":
-        if self.role != "system" and not isinstance(self.content, str):
-            for block in self.content:
-                if block.type in ("tool_addition", "tool_removal"):
-                    raise ValueError(
-                        f"{block.type} blocks are only allowed in system messages"
-                    )
+        if self.role != "system":
+            _reject_tool_changes(self.content)
         return self
 
 
@@ -275,6 +281,12 @@ class AnthropicMessagesRequest(BaseModel):
             raise ValueError("max_tokens must be positive")
         return v
 
+    @field_validator("system")
+    @classmethod
+    def validate_system(cls, v):
+        _reject_tool_changes(v)
+        return v
+
     @model_validator(mode="after")
     def validate_thinking_budget(self) -> "AnthropicMessagesRequest":
         # P/D prefill legs are sent with max_tokens=1 and never decode; the
@@ -385,6 +397,12 @@ class AnthropicCountTokensRequest(BaseModel):
     def validate_model(cls, v):
         if not v:
             raise ValueError("Model is required")
+        return v
+
+    @field_validator("system")
+    @classmethod
+    def validate_system(cls, v):
+        _reject_tool_changes(v)
         return v
 
 

@@ -27,6 +27,7 @@ from pydantic import BaseModel, Field, ValidationError
 
 from vllm.entrypoints.anthropic.api_router import attach_router
 from vllm.entrypoints.anthropic.protocol import (
+    AnthropicCountTokensRequest,
     AnthropicMessagesRequest,
 )
 from vllm.entrypoints.anthropic.serving import (
@@ -2097,14 +2098,22 @@ class TestMidConversationToolChanges:
                 }
             )
 
-    def test_tool_change_outside_system_message_is_rejected(self):
-        with pytest.raises(ValidationError, match="only allowed in system messages"):
-            _make_request(
-                [
-                    {
-                        "role": "user",
-                        "content": [self._change("tool_addition", "search")],
-                    }
-                ],
-                tools=[{"name": "search", "input_schema": {}, "defer_loading": True}],
-            )
+    @pytest.mark.parametrize(
+        "request_cls", [AnthropicMessagesRequest, AnthropicCountTokensRequest]
+    )
+    @pytest.mark.parametrize("in_top_level_system", [False, True])
+    def test_tool_change_outside_system_message_is_rejected(
+        self, request_cls, in_top_level_system
+    ):
+        change = self._change("tool_addition", "search")
+        if in_top_level_system:
+            fields = {
+                "messages": [{"role": "user", "content": "Hi"}],
+                "system": [change],
+            }
+        else:
+            fields = {"messages": [{"role": "user", "content": [change]}]}
+        with pytest.raises(
+            ValidationError, match='only allowed in messages with role "system"'
+        ):
+            request_cls(model="test-model", max_tokens=128, **fields)
