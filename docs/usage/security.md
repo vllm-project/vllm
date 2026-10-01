@@ -396,12 +396,16 @@ Most cache paths default to subdirectories under a single root. Changing `VLLM_C
 
 | Environment Variable | Default | Description |
 | --- | --- | --- |
-| `VLLM_CACHE_ROOT` | `~/.cache/vllm` | Base cache directory. Respects `XDG_CACHE_HOME` if set. All paths below inherit from this unless explicitly overridden. |
+| `VLLM_CACHE_ROOT` | `~/.cache/vllm` | Base directory for vLLM-owned caches. Respects `XDG_CACHE_HOME` if set. |
 | *(torch.compile)* | `$VLLM_CACHE_ROOT/torch_compile_cache/` | Compilation cache for AOT-compiled models, Inductor graphs, and Triton kernels. Controlled by `VLLM_DISABLE_COMPILE_CACHE` (set to `1` to disable). |
-| `VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR` | `$VLLM_CACHE_ROOT/flashinfer_autotune_cache/<flashinfer-version>/<arch>/<cache-hash>/` | FlashInfer autotune config cache. |
+| `VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR` | FlashInfer's managed-cache default, or the legacy path described below | Overrides FlashInfer autotune cache placement for both cache APIs. |
 | `VLLM_ASSETS_CACHE` | `$VLLM_CACHE_ROOT/assets/` | Downloaded assets (e.g., tokenizer files). |
 | `VLLM_XLA_CACHE_PATH` | `$VLLM_CACHE_ROOT/xla_cache/` | XLA/TPU compilation cache. |
 | `VLLM_MEDIA_CACHE` | *(disabled)* | Optional cache for downloaded media (images, video, audio). Not enabled unless explicitly set. |
+
+Single-node deployments with PP=1 and Elastic EP disabled use FlashInfer's managed autotune cache when available. Without a vLLM override, FlashInfer uses `FLASHINFER_AUTOTUNE_CACHE_DIR`, or its default `~/.cache/flashinfer/autotune` (relocated by `FLASHINFER_WORKSPACE_BASE`). `VLLM_CACHE_ROOT` does not relocate this managed store. Participating ranks must see the same store and compatible environment namespace.
+
+The legacy fallback retains `$VLLM_CACHE_ROOT/flashinfer_autotune_cache/<flashinfer-version>/<arch>/<cache-hash>/`. With PP>1, each stage's TP group uses a separate file in that directory.
 
 ### Recommendations
 
