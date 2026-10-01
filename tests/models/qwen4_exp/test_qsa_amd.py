@@ -21,7 +21,7 @@ from vllm.models.qwen4_exp.amd.indexer_qsa import (
     apply_qsa_rope,
 )
 from vllm.models.qwen4_exp.amd.ops import qsa as qsa_ops
-from vllm.models.qwen4_exp.common.ops.qsa_pre_indexer import (
+from vllm.models.qwen4_exp.amd.ops.qsa_pre_indexer import (
     qsa_pre_indexer,
     supports_fused_pre_indexer,
 )

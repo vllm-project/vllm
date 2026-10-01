@@ -19,13 +19,13 @@ from vllm.transformers_utils.configs.qwen4_exp import (
     Qwen4ExpTextConfig,
 )
 
-from ..common.ops.qsa_pre_indexer import qsa_pre_indexer, supports_fused_pre_indexer
 from ..common.qsa_cache import (
     QSACompressedKeyCache,
     QSAForwardMetadata,
     QSAKeyStateCache,
     canonical_qsa_rope_positions,
 )
+from .ops.qsa_pre_indexer import qsa_pre_indexer, supports_fused_pre_indexer
 
 
 def apply_qsa_rope(

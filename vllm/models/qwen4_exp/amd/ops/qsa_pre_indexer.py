@@ -1,6 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Fused QSA pre-indexer kernel for Qwen4Exp."""
+"""Fused QSA pre-indexer kernel for the AMD Qwen4Exp path.
+
+Started as a copy of the NVIDIA kernel (``nvidia/ops/qsa_prepare.py``) and is
+kept separate so either vendor can change its own copy without re-validating
+the other. The state source select is two masked loads rather than a pointer
+select, which ROCm Triton rejects.
+"""
 
 import torch
 from torch import nn
@@ -18,8 +24,7 @@ def supports_fused_pre_indexer(
 
     The kernel hard-codes the rotary layout and the single-KV-head group
     compression it was written for; everything it rejects has a working unfused
-    path. The conditions are all config-shaped, so they hold or fail identically
-    on every platform.
+    path.
     """
     rotary_dim = int(rotary_emb.rotary_dim)
     mrope_section = getattr(rotary_emb, "mrope_section", None)
