@@ -8,6 +8,10 @@ from vllm.entrypoints.generate.base.serving import GenerateBaseServing
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.entrypoints.openai.completion.protocol import CompletionRequest
 from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
+from vllm.entrypoints.serve.utils.request_headers import (
+    NULL_REQUEST_CONTEXT,
+    RequestContext,
+)
 
 
 def _raw_request(headers: dict[str, str]) -> Request:
@@ -40,7 +44,9 @@ def test_get_session_id_accepts_body_field(openai_request):
 
     session_id = GenerateBaseServing._get_session_id(
         openai_request,
-        _raw_request({"X-Session-ID": "header-session"}),
+        RequestContext.from_raw_request(
+            _raw_request({"X-Session-ID": "header-session"})
+        ),
     )
 
     assert session_id == "body-session"
@@ -51,7 +57,9 @@ def test_get_session_id_accepts_session_header():
 
     session_id = GenerateBaseServing._get_session_id(
         request,
-        _raw_request({"X-Session-ID": "header-session"}),
+        RequestContext.from_raw_request(
+            _raw_request({"X-Session-ID": "header-session"})
+        ),
     )
 
     assert session_id == "header-session"
@@ -66,7 +74,9 @@ def test_get_session_id_ignores_correlation_header():
 
     session_id = GenerateBaseServing._get_session_id(
         request,
-        _raw_request({"X-Correlation-ID": "correlation-session"}),
+        RequestContext.from_raw_request(
+            _raw_request({"X-Correlation-ID": "correlation-session"})
+        ),
     )
 
     assert session_id == "xargs-session"
@@ -79,7 +89,7 @@ def test_get_session_id_keeps_vllm_xargs_as_compatibility_fallback():
         vllm_xargs={"session_id": "xargs-session"},
     )
 
-    session_id = GenerateBaseServing._get_session_id(request, None)
+    session_id = GenerateBaseServing._get_session_id(request, NULL_REQUEST_CONTEXT)
 
     assert session_id == "xargs-session"
 
@@ -92,6 +102,6 @@ def test_get_session_id_ignores_empty_and_non_string_values():
         vllm_xargs={"session_id": 7},
     )
 
-    session_id = GenerateBaseServing._get_session_id(request, None)
+    session_id = GenerateBaseServing._get_session_id(request, NULL_REQUEST_CONTEXT)
 
     assert session_id is None

@@ -50,6 +50,10 @@ from vllm.entrypoints.serve.engine.protocol import (
     UsageInfo,
 )
 from vllm.entrypoints.serve.utils.api_utils import get_max_tokens, should_include_usage
+from vllm.entrypoints.serve.utils.request_headers import (
+    NULL_REQUEST_CONTEXT,
+    RequestContext,
+)
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.entrypoints.serve.utils.tool_calls_utils import (
     maybe_filter_parallel_tool_calls,
@@ -221,7 +225,7 @@ class OpenAIServingChat(GenerateBaseServing):
     async def render_chat_request(
         self,
         request: ChatCompletionRequest,
-        raw_request: Request | None = None,
+        ctx: RequestContext = NULL_REQUEST_CONTEXT,
     ) -> tuple[list[ConversationMessage], list[EngineInput]] | ErrorResponse:
         """Validate the model and preprocess a chat completion request.
 
@@ -243,7 +247,7 @@ class OpenAIServingChat(GenerateBaseServing):
         # The X-VLLM-CACHE-SALT header overrides the body's cache_salt.
         # Resolved here (before rendering) so the renderer and every
         # downstream consumer see the effective value.
-        request.cache_salt = self._get_cache_salt(request, raw_request)
+        request.cache_salt = self._get_cache_salt(request, ctx)
 
         return await self.online_renderer.render_chat(request)
 
@@ -258,14 +262,15 @@ class OpenAIServingChat(GenerateBaseServing):
         for the API specification. This API mimics the OpenAI
         Chat Completion API.
         """
+        ctx = RequestContext.from_raw_request(raw_request)
         return await self._with_kv_transfer_rejection_cleanup(
-            self._create_chat_completion(request, raw_request), request, raw_request
+            self._create_chat_completion(request, ctx), request, ctx
         )
 
     async def _create_chat_completion(
         self,
         request: ChatCompletionRequest,
-        raw_request: Request | None = None,
+        ctx: RequestContext = NULL_REQUEST_CONTEXT,
     ) -> AsyncGenerator[str, None] | ChatCompletionResponse | ErrorResponse:
         # Streaming response
         tokenizer = self.renderer.tokenizer
@@ -279,26 +284,23 @@ class OpenAIServingChat(GenerateBaseServing):
                 chat_template_kwargs=chat_template_kwargs,
                 model_config=self.model_config,
             )
-        result = await self.render_chat_request(request, raw_request)
+        result = await self.render_chat_request(request, ctx)
         if isinstance(result, ErrorResponse):
             return result
 
         conversation, engine_inputs = result
 
-        request_id = (
-            f"chatcmpl-{self._base_request_id(raw_request, request.request_id)}"
-        )
+        request_id = f"chatcmpl-{self._base_request_id(ctx, request.request_id)}"
 
         request_metadata = RequestResponseMetadata(request_id=request_id)
-        if raw_request:
-            raw_request.state.request_metadata = request_metadata
+        ctx.set_request_metadata(request_metadata)
 
         lora_request = self._maybe_get_adapters(request, supports_default_mm_loras=True)
 
         model_name = self.models.model_name(lora_request)
 
         # Extract data_parallel_rank from header (router can inject it)
-        data_parallel_rank = self._get_data_parallel_rank(raw_request)
+        data_parallel_rank = self._get_data_parallel_rank(ctx)
 
         # Schedule the request and get the result generator.
         max_model_len = self.model_config.max_model_len
@@ -343,12 +345,8 @@ class OpenAIServingChat(GenerateBaseServing):
                 lora_request=lora_request,
             )
 
-            trace_headers = (
-                None
-                if raw_request is None
-                else await self._get_trace_headers(raw_request.headers)
-            )
-            session_id = self._get_session_id(request, raw_request)
+            trace_headers = await self._get_ctx_trace_headers(ctx)
+            session_id = self._get_session_id(request, ctx)
 
             if isinstance(sampling_params, BeamSearchParams):
                 generator = self.beam_search(
@@ -378,7 +376,7 @@ class OpenAIServingChat(GenerateBaseServing):
                     sub_request_id,
                     lora_request=lora_request,
                     trace_headers=trace_headers,
-                    priority=self._get_priority(request, raw_request),
+                    priority=self._get_priority(request, ctx),
                     data_parallel_rank=data_parallel_rank,
                     session_id=session_id,
                     reasoning_ended=reasoning_ended,

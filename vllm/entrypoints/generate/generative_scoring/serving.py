@@ -14,7 +14,6 @@ import time
 from collections.abc import AsyncGenerator, Mapping
 from typing import Literal
 
-from fastapi import Request
 from pydantic import Field
 
 from vllm.engine.protocol import EngineClient
@@ -25,6 +24,10 @@ from vllm.entrypoints.serve.engine.protocol import (
     UsageInfo,
 )
 from vllm.entrypoints.serve.engine.serving import BaseServing
+from vllm.entrypoints.serve.utils.request_headers import (
+    NULL_REQUEST_CONTEXT,
+    RequestContext,
+)
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.inputs import EngineInput, tokens_input
 from vllm.logger import init_logger
@@ -179,14 +182,14 @@ class ServingGenerativeScoring(BaseServing):
     async def create_generative_scoring(
         self,
         request: GenerativeScoringRequest,
-        raw_request: Request | None = None,
+        ctx: RequestContext = NULL_REQUEST_CONTEXT,
     ) -> GenerativeScoringResponse | ErrorResponse:
         """Create generative scoring for the given request.
 
         Args:
             request: The GenerativeScoringRequest containing query, items, and
                 label_token_ids.
-            raw_request: The raw FastAPI request object.
+            ctx: Parsed request headers (cache salt, priority, ...).
 
         Returns:
             GenerativeScoringResponse with probabilities for each item, or
@@ -237,7 +240,7 @@ class ServingGenerativeScoring(BaseServing):
             logger.exception("Error preparing request components")
             return self.create_error_response(e)
 
-        base_id = self._base_request_id(raw_request, default=request.request_id)
+        base_id = self._base_request_id(ctx, default=request.request_id)
         request_id = f"generative-scoring-{base_id}"
         created_time = int(time.time())
 
@@ -265,9 +268,7 @@ class ServingGenerativeScoring(BaseServing):
 
         # Get trace headers
         trace_headers = (
-            None
-            if raw_request is None
-            else await self._get_trace_headers(raw_request.headers)
+            None if ctx.headers is None else await self._get_trace_headers(ctx.headers)
         )
 
         # Schedule requests for all inputs

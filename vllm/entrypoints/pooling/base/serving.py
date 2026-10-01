@@ -20,7 +20,10 @@ from vllm.entrypoints.generate.base.protocol import validate_request_mm_kwargs
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.serve.engine.serving import BaseServing
 from vllm.entrypoints.serve.engine.typing import AnyRequest
-from vllm.entrypoints.serve.utils.request_headers import parse_request_headers
+from vllm.entrypoints.serve.utils.request_headers import (
+    NULL_REQUEST_CONTEXT,
+    RequestContext,
+)
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.lora.request import LoRARequest
 from vllm.renderers.base import BaseRenderer
@@ -76,7 +79,8 @@ class PoolingBaseServing(ABC, BaseServing):
         raw_request: Request | None = None,
     ) -> Response:
         io_processor = self.get_io_processor(request)
-        ctx = await self._init_ctx(io_processor, request, raw_request)
+        request_ctx = RequestContext.from_raw_request(raw_request)
+        ctx = await self._init_ctx(io_processor, request, request_ctx)
         await self._preprocessing(io_processor, ctx)
         await self._prepare_generators(ctx)
         await self._collect_batch(ctx)
@@ -109,7 +113,7 @@ class PoolingBaseServing(ABC, BaseServing):
         self,
         io_processor: PoolingIOProcessor,
         request: AnyPoolingRequest,
-        raw_request: Request | None = None,
+        request_ctx: RequestContext = NULL_REQUEST_CONTEXT,
     ):
         validate_request_mm_kwargs(
             mm_processor_kwargs=getattr(request, "mm_processor_kwargs", None),
@@ -117,7 +121,7 @@ class PoolingBaseServing(ABC, BaseServing):
             trust_request_mm_kwargs=self.trust_request_mm_kwargs,
         )
         base_request_id = self._base_request_id(
-            raw_request, getattr(request, "request_id", None)
+            request_ctx, getattr(request, "request_id", None)
         )
         request_id = f"{self.request_id_prefix}-{base_request_id}"
         await self._check_model(request)
@@ -128,10 +132,8 @@ class PoolingBaseServing(ABC, BaseServing):
         priorities = getattr(request, "priority", 0)
         # The X-VLLM-CACHE-SALT header overrides the body's cache_salt.
         cache_salt = getattr(request, "cache_salt", None)
-        if raw_request is not None:
-            header_cache_salt = parse_request_headers(raw_request.headers).cache_salt
-            if header_cache_salt is not None:
-                cache_salt = header_cache_salt
+        if request_ctx.cache_salt is not None:
+            cache_salt = request_ctx.cache_salt
         prompt_extras = {
             k: v
             for k in ("mm_processor_kwargs", "chat_template_kwargs")
@@ -142,7 +144,7 @@ class PoolingBaseServing(ABC, BaseServing):
 
         ctx = PoolingServeContext(
             request=request,
-            raw_request=raw_request,
+            request_ctx=request_ctx,
             model_name=model_name,
             pooling_params=pooling_params,
             request_id=request_id,
@@ -163,11 +165,7 @@ class PoolingBaseServing(ABC, BaseServing):
 
         generators: list[AsyncGenerator[PoolingRequestOutput, None]] = []
 
-        trace_headers = (
-            None
-            if ctx.raw_request is None
-            else await self._get_trace_headers(ctx.raw_request.headers)
-        )
+        trace_headers = await self._get_ctx_trace_headers(ctx.request_ctx)
 
         assert ctx.pooling_params is not None
         pooling_params = ctx.pooling_params
@@ -279,6 +277,14 @@ class PoolingBaseServing(ABC, BaseServing):
             log_tracing_disabled_warning()
 
         return None
+
+    async def _get_ctx_trace_headers(
+        self,
+        request_ctx: RequestContext | None,
+    ) -> Mapping[str, str] | None:
+        if request_ctx is None or request_ctx.headers is None:
+            return None
+        return await self._get_trace_headers(request_ctx.headers)
 
 
 class PoolingServing(PoolingBaseServing, ABC):

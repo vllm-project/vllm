@@ -2,8 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from typing import TYPE_CHECKING
 
-from fastapi import Request
-
 from vllm.entrypoints.anthropic.protocol import AnthropicMessagesRequest
 from vllm.entrypoints.anthropic.serving import AnthropicServingMessages
 from vllm.entrypoints.generate.base.serving import GenerateBaseServing
@@ -24,6 +22,10 @@ from vllm.entrypoints.scale_out.token_in_token_out.protocol import (
 from vllm.entrypoints.serve.engine.protocol import ErrorResponse
 from vllm.entrypoints.serve.engine.serving import BaseServing
 from vllm.entrypoints.serve.utils.api_utils import get_max_tokens
+from vllm.entrypoints.serve.utils.request_headers import (
+    NULL_REQUEST_CONTEXT,
+    RequestContext,
+)
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.inputs import EngineInput
 from vllm.logger import init_logger
@@ -79,7 +81,7 @@ class ServingRender(BaseServing):
     async def render_chat_request(
         self,
         request: ChatCompletionRequest,
-        raw_request: Request | None = None,
+        ctx: RequestContext = NULL_REQUEST_CONTEXT,
     ) -> GenerateRequest | ErrorResponse:
         """Validate the model and preprocess a chat completion request.
 
@@ -99,7 +101,7 @@ class ServingRender(BaseServing):
         # The X-VLLM-CACHE-SALT header overrides the body's cache_salt.
         # Resolved here (before rendering) so the renderer and every
         # downstream consumer see the effective value.
-        request.cache_salt = GenerateBaseServing._get_cache_salt(request, raw_request)
+        request.cache_salt = GenerateBaseServing._get_cache_salt(request, ctx)
 
         result = await self.online_renderer.render_chat(request, skip_mm_cache=True)
         if isinstance(result, ErrorResponse):
@@ -151,7 +153,7 @@ class ServingRender(BaseServing):
     async def render_messages_request(
         self,
         request: AnthropicMessagesRequest,
-        raw_request: Request | None = None,
+        ctx: RequestContext = NULL_REQUEST_CONTEXT,
     ) -> GenerateRequest | ErrorResponse:
         """Validate the model and preprocess an Anthropic Messages request.
 
@@ -162,12 +164,12 @@ class ServingRender(BaseServing):
         chat_req = AnthropicServingMessages.to_chat_completion_request(
             request, merge_inline_system=self._merge_inline_system
         )
-        return await self.render_chat_request(chat_req, raw_request)
+        return await self.render_chat_request(chat_req, ctx)
 
     async def render_completion_request(
         self,
         request: CompletionRequest,
-        raw_request: Request | None = None,
+        ctx: RequestContext = NULL_REQUEST_CONTEXT,
     ) -> list[GenerateRequest] | ErrorResponse:
         """Validate the model and preprocess a completion request.
 
@@ -178,7 +180,7 @@ class ServingRender(BaseServing):
         if error_check_ret is not None:
             return error_check_ret
         # The X-VLLM-CACHE-SALT header overrides the body's cache_salt.
-        request.cache_salt = GenerateBaseServing._get_cache_salt(request, raw_request)
+        request.cache_salt = GenerateBaseServing._get_cache_salt(request, ctx)
         result = await self.online_renderer.render_completion(
             request, skip_mm_cache=True
         )
@@ -229,13 +231,13 @@ class ServingRender(BaseServing):
     async def render_responses_request(
         self,
         request: ResponsesRequest,
-        raw_request: Request | None = None,
+        ctx: RequestContext = NULL_REQUEST_CONTEXT,
     ) -> GenerateRequest | ErrorResponse:
         error_check_ret = await self._check_model(request)
         if error_check_ret is not None:
             return error_check_ret
         # The X-VLLM-CACHE-SALT header overrides the body's cache_salt.
-        request.cache_salt = GenerateBaseServing._get_cache_salt(request, raw_request)
+        request.cache_salt = GenerateBaseServing._get_cache_salt(request, ctx)
         if request.previous_response_id is not None:
             return self.create_error_response(
                 message=(

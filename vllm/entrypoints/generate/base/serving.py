@@ -29,7 +29,7 @@ from vllm.entrypoints.serve.utils.request_headers import (
     CACHE_SALT_HEADER,
     PRIORITY_HEADER,
     SESSION_ID_HEADER,
-    parse_request_headers,
+    RequestContext,
 )
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.exceptions import GenerationError
@@ -243,28 +243,31 @@ class GenerateBaseServing(BaseServing, BeamSearchOnlineMixin):
 
         return None
 
+    async def _get_ctx_trace_headers(
+        self,
+        ctx: RequestContext,
+    ) -> Mapping[str, str] | None:
+        if ctx.headers is None:
+            return None
+        return await self._get_trace_headers(ctx.headers)
+
     @staticmethod
-    def _get_data_parallel_rank(raw_request: Request | None) -> int | None:
+    def _get_data_parallel_rank(ctx: RequestContext) -> int | None:
         """Pulls the data parallel rank from a header, if provided."""
-        if raw_request is None:
-            return None
-
-        return parse_request_headers(raw_request.headers).data_parallel_rank
+        return ctx.data_parallel_rank
 
     @staticmethod
-    def _get_session_id_from_headers(raw_request: Request | None) -> str | None:
-        if raw_request is None:
-            return None
-        return parse_request_headers(raw_request.headers).session_id
+    def _get_session_id_from_headers(ctx: RequestContext) -> str | None:
+        return ctx.session_id
 
     @staticmethod
     def _get_session_id(
         request: ChatCompletionRequest | CompletionRequest | ResponsesRequest,
-        raw_request: Request | None,
+        ctx: RequestContext,
     ) -> str | None:
         if request.session_id:
             return request.session_id
-        if value := GenerateBaseServing._get_session_id_from_headers(raw_request):
+        if value := ctx.session_id:
             return value
         if request.vllm_xargs:
             session_id = request.vllm_xargs.get("session_id")
@@ -275,18 +278,16 @@ class GenerateBaseServing(BaseServing, BeamSearchOnlineMixin):
     @staticmethod
     def _get_priority(
         request: ChatCompletionRequest | CompletionRequest | ResponsesRequest,
-        raw_request: Request | None,
+        ctx: RequestContext,
     ) -> int:
-        if raw_request is not None:
-            priority = parse_request_headers(raw_request.headers).priority
-            if priority is not None:
-                return priority
+        if ctx.priority is not None:
+            return ctx.priority
         return request.priority
 
     @staticmethod
     def _get_cache_salt(
         request: CacheSaltRequest,
-        raw_request: Request | None,
+        ctx: RequestContext,
     ) -> str | None:
         """Resolve the request's cache salt.
 
@@ -295,17 +296,15 @@ class GenerateBaseServing(BaseServing, BeamSearchOnlineMixin):
         overrides the body's ``priority``. A malformed header raises
         ``VLLMValidationError`` (see ``parse_request_headers``).
         """
-        if raw_request is not None:
-            cache_salt = parse_request_headers(raw_request.headers).cache_salt
-            if cache_salt is not None:
-                return cache_salt
+        if ctx.cache_salt is not None:
+            return ctx.cache_salt
         return request.cache_salt
 
     async def _with_kv_transfer_rejection_cleanup(
         self,
         awaitable: Awaitable[_T],
         request: ChatCompletionRequest | CompletionRequest | ResponsesRequest,
-        raw_request: Request | None,
+        ctx: RequestContext,
     ) -> _T:
         """Wrap a `create_*` coroutine so that, if it raises or returns an
         ErrorResponse (i.e. the request never reached the engine), the KV
@@ -326,7 +325,7 @@ class GenerateBaseServing(BaseServing, BeamSearchOnlineMixin):
                     await self.engine_client.notify_kv_transfer_request_rejected(
                         request.request_id,
                         kv_transfer_params,
-                        data_parallel_rank=self._get_data_parallel_rank(raw_request),
+                        data_parallel_rank=self._get_data_parallel_rank(ctx),
                     )
                 except Exception:
                     logger.warning(

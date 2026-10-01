@@ -72,6 +72,10 @@ from vllm.entrypoints.openai.responses.utils import (
 )
 from vllm.entrypoints.serve.engine.protocol import ErrorResponse
 from vllm.entrypoints.serve.utils.api_utils import get_max_tokens
+from vllm.entrypoints.serve.utils.request_headers import (
+    NULL_REQUEST_CONTEXT,
+    RequestContext,
+)
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.exceptions import GenerationError, VLLMValidationError
 from vllm.inputs import EngineInput
@@ -313,12 +317,13 @@ class OpenAIServingResponses(GenerateBaseServing):
         | ResponsesResponse
         | ErrorResponse
     ):
+        ctx = RequestContext.from_raw_request(raw_request)
         return await self._with_kv_transfer_rejection_cleanup(
-            self._create_responses(request, raw_request), request, raw_request
+            self._create_responses(request, ctx), request, ctx
         )
 
     async def _create_responses(
-        self, request: ResponsesRequest, raw_request: Request | None = None
+        self, request: ResponsesRequest, ctx: RequestContext = NULL_REQUEST_CONTEXT
     ) -> (
         AsyncGenerator[StreamingResponsesResponse, None]
         | ResponsesResponse
@@ -337,7 +342,7 @@ class OpenAIServingResponses(GenerateBaseServing):
         # The X-VLLM-CACHE-SALT header overrides the body's cache_salt.
         # Resolved here (before rendering) so the renderer and every
         # downstream consumer see the effective value.
-        request.cache_salt = self._get_cache_salt(request, raw_request)
+        request.cache_salt = self._get_cache_salt(request, ctx)
 
         if request.store and not self.enable_store:
             # Disable the store option.
@@ -371,8 +376,7 @@ class OpenAIServingResponses(GenerateBaseServing):
         engine_inputs = [render_result.engine_input]
 
         request_metadata = RequestResponseMetadata(request_id=request.request_id)
-        if raw_request:
-            raw_request.state.request_metadata = request_metadata
+        ctx.set_request_metadata(request_metadata)
 
         # Schedule the request and get the result generator.
         max_model_len = self.model_config.max_model_len
@@ -428,12 +432,8 @@ class OpenAIServingResponses(GenerateBaseServing):
                 default_max_tokens, self.default_sampling_params
             )
 
-            trace_headers = (
-                None
-                if raw_request is None
-                else await self._get_trace_headers(raw_request.headers)
-            )
-            session_id = self._get_session_id(request, raw_request)
+            trace_headers = await self._get_ctx_trace_headers(ctx)
+            session_id = self._get_session_id(request, ctx)
 
             chat_template_kwargs = self._effective_chat_template_kwargs(request)
             response_parser = self._make_response_parser(
@@ -504,7 +504,7 @@ class OpenAIServingResponses(GenerateBaseServing):
                     else None
                 ),
                 lora_request=lora_request,
-                priority=self._get_priority(request, raw_request),
+                priority=self._get_priority(request, ctx),
                 trace_headers=trace_headers,
                 session_id=session_id,
                 reasoning_parser_kwargs=reasoning_parser_kwargs,

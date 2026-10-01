@@ -87,6 +87,7 @@ from vllm.entrypoints.openai.chat_completion.serving import OpenAIServingChat
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.serve.engine.protocol import ErrorInfo, ErrorResponse
 from vllm.entrypoints.serve.exception_handling.utils import sanitize_message
+from vllm.entrypoints.serve.utils.request_headers import RequestContext
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.parser.abstract_parser import Parser
 from vllm.renderers.cohere import (
@@ -307,7 +308,9 @@ class CohereServingChatV2(OpenAIServingChat):
             )
 
         chat_req = self.to_chat_completion_request(request)
-        generator = await self.create_chat_completion(chat_req, raw_request)
+        generator = await self.create_chat_completion(
+            chat_req, RequestContext.from_raw_request(raw_request)
+        )
 
         match generator:
             case ErrorResponse():

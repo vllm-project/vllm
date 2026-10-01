@@ -36,6 +36,10 @@ from vllm.entrypoints.serve.engine.protocol import (
     UsageInfo,
 )
 from vllm.entrypoints.serve.utils.api_utils import get_max_tokens, should_include_usage
+from vllm.entrypoints.serve.utils.request_headers import (
+    NULL_REQUEST_CONTEXT,
+    RequestContext,
+)
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.exceptions import GenerationError, VLLMValidationError
 from vllm.inputs import EngineInput
@@ -88,7 +92,7 @@ class OpenAIServingCompletion(GenerateBaseServing):
     async def render_completion_request(
         self,
         request: CompletionRequest,
-        raw_request: Request | None = None,
+        ctx: RequestContext = NULL_REQUEST_CONTEXT,
     ) -> list[EngineInput] | ErrorResponse:
         """Validate the model and preprocess a completion request.
 
@@ -108,7 +112,7 @@ class OpenAIServingCompletion(GenerateBaseServing):
         # The X-VLLM-CACHE-SALT header overrides the body's cache_salt.
         # Resolved here (before rendering) so the renderer and every
         # downstream consumer see the effective value.
-        request.cache_salt = self._get_cache_salt(request, raw_request)
+        request.cache_salt = self._get_cache_salt(request, ctx)
 
         return await self.online_renderer.render_completion(request)
 
@@ -124,37 +128,37 @@ class OpenAIServingCompletion(GenerateBaseServing):
 
         NOTE: suffix is only supported by models that implement FIM rendering.
         """
+        ctx = RequestContext.from_raw_request(raw_request)
         return await self._with_kv_transfer_rejection_cleanup(
-            self._create_completion(request, raw_request), request, raw_request
+            self._create_completion(request, ctx), request, ctx
         )
 
     async def _create_completion(
         self,
         request: CompletionRequest,
-        raw_request: Request | None = None,
+        ctx: RequestContext = NULL_REQUEST_CONTEXT,
     ) -> AsyncGenerator[str, None] | CompletionResponse | ErrorResponse:
         if request.stream and request.use_beam_search:
             return self.create_error_response(
                 "Streaming is not currently supported with beam search"
             )
 
-        result = await self.render_completion_request(request, raw_request)
+        result = await self.render_completion_request(request, ctx)
         if isinstance(result, ErrorResponse):
             return result
 
         engine_inputs = result
 
-        request_id = f"cmpl-{self._base_request_id(raw_request, request.request_id)}"
+        request_id = f"cmpl-{self._base_request_id(ctx, request.request_id)}"
         created_time = int(time.time())
 
         request_metadata = RequestResponseMetadata(request_id=request_id)
-        if raw_request:
-            raw_request.state.request_metadata = request_metadata
+        ctx.set_request_metadata(request_metadata)
 
         lora_request = self._maybe_get_adapters(request)
 
         # Extract data_parallel_rank from header (router can inject it)
-        data_parallel_rank = self._get_data_parallel_rank(raw_request)
+        data_parallel_rank = self._get_data_parallel_rank(ctx)
 
         # Schedule the request and get the result generator.
         max_model_len = self.model_config.max_model_len
@@ -189,12 +193,8 @@ class OpenAIServingCompletion(GenerateBaseServing):
                 lora_request=lora_request,
             )
 
-            trace_headers = (
-                None
-                if raw_request is None
-                else await self._get_trace_headers(raw_request.headers)
-            )
-            session_id = self._get_session_id(request, raw_request)
+            trace_headers = await self._get_ctx_trace_headers(ctx)
+            session_id = self._get_session_id(request, ctx)
 
             if isinstance(sampling_params, BeamSearchParams):
                 generator = self.beam_search(
@@ -212,7 +212,7 @@ class OpenAIServingCompletion(GenerateBaseServing):
                     request_id_item,
                     lora_request=lora_request,
                     trace_headers=trace_headers,
-                    priority=self._get_priority(request, raw_request),
+                    priority=self._get_priority(request, ctx),
                     data_parallel_rank=data_parallel_rank,
                     session_id=session_id,
                 )

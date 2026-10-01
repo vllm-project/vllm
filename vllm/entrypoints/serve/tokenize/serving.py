@@ -20,6 +20,7 @@ from vllm.entrypoints.serve.tokenize.protocol import (
     TokenizeResponse,
     TokenizerInfoResponse,
 )
+from vllm.entrypoints.serve.utils.request_headers import RequestContext
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.inputs import TokensPrompt, tokens_input
 from vllm.logger import init_logger
@@ -57,13 +58,16 @@ class ServingTokenization(BaseServing):
     async def create_tokenize(
         self,
         request: TokenizeRequest,
-        raw_request: Request,
+        raw_request: Request | None = None,
     ) -> TokenizeResponse | ErrorResponse:
         error_check_ret = await self._check_model(request)
         if error_check_ret is not None:
             return error_check_ret
 
-        request_id = f"tokenize-{self._base_request_id(raw_request)}"
+        request_id = (
+            f"tokenize-"
+            f"{self._base_request_id(RequestContext.from_raw_request(raw_request))}"
+        )
 
         lora_request = self._maybe_get_adapters(request)
 
@@ -126,13 +130,16 @@ class ServingTokenization(BaseServing):
     async def create_detokenize(
         self,
         request: DetokenizeRequest,
-        raw_request: Request,
+        raw_request: Request | None = None,
     ) -> DetokenizeResponse | ErrorResponse:
         error_check_ret = await self._check_model(request)
         if error_check_ret is not None:
             return error_check_ret
 
-        request_id = f"tokenize-{self._base_request_id(raw_request)}"
+        request_id = (
+            f"tokenize-"
+            f"{self._base_request_id(RequestContext.from_raw_request(raw_request))}"
+        )
 
         lora_request = self._maybe_get_adapters(request)
 

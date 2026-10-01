@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, Mock
 
 import pytest
 
+from vllm.entrypoints.serve.utils.request_headers import RequestContext
 from vllm.entrypoints.speech_to_text.base.serving import SpeechToTextBaseServing
 from vllm.entrypoints.speech_to_text.transcription.protocol import TranscriptionResponse
 
@@ -82,7 +83,7 @@ async def test_non_streaming_cancel_aborts_engine_requests(
         server._create_speech_to_text(
             audio_data=b"audio",
             request=request,
-            raw_request=raw_request,
+            ctx=RequestContext.from_raw_request(raw_request),
             response_class=TranscriptionResponse,
             stream_generator_method=Mock(),
         )
@@ -154,7 +155,7 @@ async def test_non_streaming_cancel_advances_all_chunk_generators():
         server._create_speech_to_text(
             audio_data=b"audio",
             request=request,
-            raw_request=raw_request,
+            ctx=RequestContext.from_raw_request(raw_request),
             response_class=TranscriptionResponse,
             stream_generator_method=Mock(),
         )

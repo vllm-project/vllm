@@ -8,7 +8,6 @@ from collections.abc import AsyncGenerator
 from collections.abc import Sequence as GenericSequence
 
 import msgspec
-from fastapi import Request
 
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.chat_utils import AsyncMultiModalItemTracker
@@ -33,6 +32,10 @@ from vllm.entrypoints.serve.engine.protocol import (
     UsageInfo,
 )
 from vllm.entrypoints.serve.utils.api_utils import get_max_tokens, should_include_usage
+from vllm.entrypoints.serve.utils.request_headers import (
+    NULL_REQUEST_CONTEXT,
+    RequestContext,
+)
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.exceptions import GenerationError
 from vllm.inputs import EngineInput, TokensPrompt, mm_input
@@ -109,7 +112,7 @@ class ServingTokens(GenerateBaseServing):
     async def serve_tokens(
         self,
         request: GenerateRequest,
-        raw_request: Request | None = None,
+        ctx: RequestContext = NULL_REQUEST_CONTEXT,
     ) -> GenerateResponse | ErrorResponse | AsyncGenerator[str, None]:
         error_check_ret = await self._check_model(request)
         if error_check_ret is not None:
@@ -123,13 +126,10 @@ class ServingTokens(GenerateBaseServing):
 
         model_name = self.models.model_name(lora_request)
 
-        request_id = (
-            f"generate-tokens-{self._base_request_id(raw_request, request.request_id)}"
-        )
+        request_id = f"generate-tokens-{self._base_request_id(ctx, request.request_id)}"
 
         request_metadata = RequestResponseMetadata(request_id=request_id)
-        if raw_request:
-            raw_request.state.request_metadata = request_metadata
+        ctx.set_request_metadata(request_metadata)
 
         sampling_params = request.sampling_params
         max_num_seqs = self.engine_client.vllm_config.scheduler_config.max_num_seqs
@@ -160,7 +160,7 @@ class ServingTokens(GenerateBaseServing):
             return self.create_error_response(e)
 
         # The X-VLLM-CACHE-SALT header overrides the body's cache_salt.
-        request.cache_salt = self._get_cache_salt(request, raw_request)
+        request.cache_salt = self._get_cache_salt(request, ctx)
 
         engine_input: EngineInput
         if request.content_parts:
@@ -262,15 +262,11 @@ class ServingTokens(GenerateBaseServing):
             lora_request=lora_request,
         )
 
-        trace_headers = (
-            None
-            if raw_request is None
-            else await self._get_trace_headers(raw_request.headers)
-        )
+        trace_headers = await self._get_ctx_trace_headers(ctx)
 
         # Extract data_parallel_rank from header (router can inject it)
-        data_parallel_rank = self._get_data_parallel_rank(raw_request)
-        session_id = self._get_session_id_from_headers(raw_request)
+        data_parallel_rank = self._get_data_parallel_rank(ctx)
+        session_id = self._get_session_id_from_headers(ctx)
 
         result_generator = self.engine_client.generate(
             engine_input,

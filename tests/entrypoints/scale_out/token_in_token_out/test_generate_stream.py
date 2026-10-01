@@ -20,6 +20,7 @@ from vllm.entrypoints.scale_out.token_in_token_out.protocol import (
     GenerateResponse,
 )
 from vllm.entrypoints.scale_out.token_in_token_out.serving import ServingTokens
+from vllm.entrypoints.serve.utils.request_headers import RequestContext
 from vllm.exceptions import GenerationError
 from vllm.logprobs import Logprob
 from vllm.multimodal.inputs import PlaceholderRange
@@ -256,7 +257,7 @@ async def test_serve_tokens_threads_session_id_header_to_engine():
     raw_request = MagicMock()
     raw_request.headers = {"X-Session-ID": "header-session"}
 
-    await serving.serve_tokens(request, raw_request)
+    await serving.serve_tokens(request, RequestContext.from_raw_request(raw_request))
 
     assert engine.generate.call_args.kwargs["session_id"] == "header-session"
 

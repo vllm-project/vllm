@@ -362,9 +362,7 @@ async def test_create_transcription_non_streaming_joins_chunks_by_language():
             stream=False,
             response_format="json",
         )
-        out_en = await serving.create_transcription(
-            b"\x00\x00", req_en, raw_request=None
-        )
+        out_en = await serving.create_transcription(b"\x00\x00", req_en)
         assert not isinstance(out_en, ErrorResponse)
         assert out_en.text == "hello world"
 
@@ -383,8 +381,6 @@ async def test_create_transcription_non_streaming_joins_chunks_by_language():
             stream=False,
             response_format="json",
         )
-        out_zh = await serving.create_transcription(
-            b"\x00\x00", req_zh, raw_request=None
-        )
+        out_zh = await serving.create_transcription(b"\x00\x00", req_zh)
         assert not isinstance(out_zh, ErrorResponse)
         assert out_zh.text == "你好世界"

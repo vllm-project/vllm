@@ -16,6 +16,7 @@ from vllm.entrypoints.serve.utils.api_utils import (
     validate_json_request,
     with_cancellation,
 )
+from vllm.entrypoints.serve.utils.request_headers import RequestContext
 from vllm.logger import init_logger
 
 from ...serve.engine.protocol import ErrorResponse
@@ -60,7 +61,9 @@ async def generate(request: GenerateRequest, raw_request: Request):
     if handler is None:
         raise NotImplementedError("The model does not support generate tokens API")
 
-    generator = await handler.serve_tokens(request, raw_request)
+    generator = await handler.serve_tokens(
+        request, RequestContext.from_raw_request(raw_request)
+    )
 
     if isinstance(generator, ErrorResponse):
         return JSONResponse(

@@ -16,6 +16,7 @@ from vllm.entrypoints.serve.utils.api_utils import (
     validate_json_request,
     with_cancellation,
 )
+from vllm.entrypoints.serve.utils.request_headers import RequestContext
 from vllm.logger import init_logger
 
 router = APIRouter()
@@ -47,7 +48,9 @@ async def create_generative_scoring(
             "The model does not support the Generative Scoring API"
         )
 
-    result = await handler.create_generative_scoring(request, raw_request)
+    result = await handler.create_generative_scoring(
+        request, RequestContext.from_raw_request(raw_request)
+    )
 
     if isinstance(result, ErrorResponse):
         return JSONResponse(content=result.model_dump(), status_code=result.error.code)

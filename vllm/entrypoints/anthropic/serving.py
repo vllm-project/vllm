@@ -50,6 +50,7 @@ from vllm.entrypoints.openai.chat_completion.serving import OpenAIServingChat
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.serve.engine.protocol import ErrorResponse, UsageInfo
 from vllm.entrypoints.serve.exception_handling.utils import sanitize_message
+from vllm.entrypoints.serve.utils.request_headers import RequestContext
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.logger import init_logger
 from vllm.renderers.hf import HfRenderer, resolve_chat_template
@@ -1149,7 +1150,9 @@ class AnthropicServingMessages(OpenAIServingChat):
             request,
             merge_inline_system=self._merge_inline_system,
         )
-        result = await self.render_chat_request(chat_req, raw_request)
+        result = await self.render_chat_request(
+            chat_req, RequestContext.from_raw_request(raw_request)
+        )
         if isinstance(result, ErrorResponse):
             return result
 

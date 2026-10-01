@@ -232,7 +232,7 @@ class ServingScores(PoolingServing):
 
         query_ctx = ScoringServeContext(
             request=ctx.request,
-            raw_request=ctx.raw_request,
+            request_ctx=ctx.request_ctx,
             model_name=ctx.model_name,
             request_id=ctx.request_id,
             pooling_params=ctx.pooling_params,
@@ -273,7 +273,7 @@ class ServingScores(PoolingServing):
 
         doc_ctx = ScoringServeContext(
             request=ctx.request,
-            raw_request=ctx.raw_request,
+            request_ctx=ctx.request_ctx,
             model_name=ctx.model_name,
             request_id=ctx.request_id,
             pooling_params=ctx.pooling_params,

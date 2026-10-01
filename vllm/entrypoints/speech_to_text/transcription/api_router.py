@@ -16,6 +16,7 @@ from vllm.entrypoints.speech_to_text.base.utils import read_upload_with_limit
 from vllm.logger import init_logger
 
 from ...serve.engine.protocol import ErrorResponse
+from ...serve.utils.request_headers import RequestContext
 from .protocol import TranscriptionRequest, TranscriptionResponseVariant
 from .serving import OpenAIServingTranscription
 
@@ -48,7 +49,9 @@ async def create_transcriptions(
 
     audio_data = await read_upload_with_limit(request.file)
 
-    generator = await handler.create_transcription(audio_data, request, raw_request)
+    generator = await handler.create_transcription(
+        audio_data, request, RequestContext.from_raw_request(raw_request)
+    )
 
     if isinstance(generator, ErrorResponse):
         return JSONResponse(

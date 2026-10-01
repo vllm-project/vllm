@@ -11,7 +11,6 @@ from functools import cached_property
 from typing import Final, Literal, TypeAlias, TypeVar, cast
 
 import numpy as np
-from fastapi import Request
 from transformers import PreTrainedTokenizerBase
 
 import vllm.envs as envs
@@ -25,6 +24,9 @@ from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.serve.engine.protocol import ErrorResponse, UsageInfo
 from vllm.entrypoints.serve.engine.typing import SpeechToTextRequest
 from vllm.entrypoints.serve.utils.api_utils import get_max_tokens
+from vllm.entrypoints.serve.utils.request_headers import (
+    RequestContext,
+)
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.exceptions import VLLMValidationError
 from vllm.inputs import EncoderDecoderInput, EngineInput
@@ -421,7 +423,7 @@ class SpeechToTextBaseServing(GenerateBaseServing):
         self,
         audio_data: bytes,
         request: SpeechToTextRequest,
-        raw_request: Request,
+        ctx: RequestContext,
         response_class: type[ResponseType],
         stream_generator_method: Callable[..., AsyncGenerator[str, None]],
     ) -> T | V | AsyncGenerator[str, None] | ErrorResponse:
@@ -475,11 +477,10 @@ class SpeechToTextBaseServing(GenerateBaseServing):
             return self.create_error_response(
                 f"{request.response_format} format doesn't support streaming case"
             )
-        request_id = f"{self.task_type}-{self._base_request_id(raw_request)}"
+        request_id = f"{self.task_type}-{self._base_request_id(ctx)}"
 
         request_metadata = RequestResponseMetadata(request_id=request_id)
-        if raw_request:
-            raw_request.state.request_metadata = request_metadata
+        ctx.set_request_metadata(request_metadata)
 
         lora_request = self._maybe_get_adapters(request)
 
@@ -541,11 +542,7 @@ class SpeechToTextBaseServing(GenerateBaseServing):
                     lora_request=lora_request,
                 )
 
-                trace_headers = (
-                    None
-                    if raw_request is None
-                    else await self._get_trace_headers(raw_request.headers)
-                )
+                trace_headers = await self._get_ctx_trace_headers(ctx)
 
                 if isinstance(sampling_params, BeamSearchParams):
                     generator = self.beam_search(

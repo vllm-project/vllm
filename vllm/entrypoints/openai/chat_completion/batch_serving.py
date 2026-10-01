@@ -19,6 +19,7 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
 from vllm.entrypoints.openai.chat_completion.serving import OpenAIServingChat
 from vllm.entrypoints.serve.engine.protocol import ErrorResponse, UsageInfo
 from vllm.entrypoints.serve.utils.api_utils import get_max_tokens
+from vllm.entrypoints.serve.utils.request_headers import RequestContext
 from vllm.inputs import EngineInput
 from vllm.logger import init_logger
 from vllm.outputs import RequestOutput
@@ -109,12 +110,13 @@ class OpenAIServingChatBatch(OpenAIServingChat):
         returns one choice per conversation indexed 0, 1, ..., N-1.
         Streaming, tool use, and beam search are not supported.
         """
+        ctx = RequestContext.from_raw_request(raw_request)
         tokenizer = self.renderer.tokenizer
         assert tokenizer is not None
 
         # The X-VLLM-CACHE-SALT header overrides the body's cache_salt; the
         # effective salt applies to every conversation in the batch.
-        request.cache_salt = self._get_cache_salt(request, raw_request)
+        request.cache_salt = self._get_cache_salt(request, ctx)
 
         single_requests = [
             request.to_chat_completion_request(messages)
@@ -137,16 +139,13 @@ class OpenAIServingChatBatch(OpenAIServingChat):
             return render_result
         all_conversations, engine_prompts = render_result
 
-        request_id = (
-            f"chatcmpl-{self._base_request_id(raw_request, request.request_id)}"
-        )
+        request_id = f"chatcmpl-{self._base_request_id(ctx, request.request_id)}"
         request_metadata = RequestResponseMetadata(request_id=request_id)
-        if raw_request:
-            raw_request.state.request_metadata = request_metadata
+        ctx.set_request_metadata(request_metadata)
 
         lora_request = self._maybe_get_adapters(request, supports_default_mm_loras=True)
         model_name = self.models.model_name(lora_request)
-        data_parallel_rank = self._get_data_parallel_rank(raw_request)
+        data_parallel_rank = self._get_data_parallel_rank(ctx)
         max_model_len = self.model_config.max_model_len
 
         generators: list[AsyncGenerator[RequestOutput, None]] = []
@@ -171,12 +170,8 @@ class OpenAIServingChatBatch(OpenAIServingChat):
                 params=sampling_params,
                 lora_request=lora_request,
             )
-            trace_headers = (
-                None
-                if raw_request is None
-                else await self._get_trace_headers(raw_request.headers)
-            )
-            session_id = self._get_session_id(single_request, raw_request)
+            trace_headers = await self._get_ctx_trace_headers(ctx)
+            session_id = self._get_session_id(single_request, ctx)
             generators.append(
                 self.engine_client.generate(
                     engine_prompt,

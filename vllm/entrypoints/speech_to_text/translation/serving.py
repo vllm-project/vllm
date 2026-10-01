@@ -2,12 +2,14 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import AsyncGenerator
 
-from fastapi import Request
-
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.generate.base.protocol import RequestResponseMetadata
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.serve.engine.protocol import ErrorResponse
+from vllm.entrypoints.serve.utils.request_headers import (
+    NULL_REQUEST_CONTEXT,
+    RequestContext,
+)
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.logger import init_logger
 from vllm.outputs import RequestOutput
@@ -49,7 +51,7 @@ class OpenAIServingTranslation(SpeechToTextBaseServing):
         self,
         audio_data: bytes,
         request: TranslationRequest,
-        raw_request: Request | None = None,
+        ctx: RequestContext = NULL_REQUEST_CONTEXT,
     ) -> (
         TranslationResponse
         | TranslationResponseVerbose
@@ -64,7 +66,7 @@ class OpenAIServingTranslation(SpeechToTextBaseServing):
         return await self._create_speech_to_text(
             audio_data=audio_data,
             request=request,
-            raw_request=raw_request,
+            ctx=ctx,
             response_class=(
                 TranslationResponseVerbose
                 if request.response_format == "verbose_json"

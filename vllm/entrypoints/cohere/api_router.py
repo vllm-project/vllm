@@ -46,6 +46,7 @@ from vllm.entrypoints.serve.utils.api_utils import (
     validate_json_request,
     with_cancellation,
 )
+from vllm.entrypoints.serve.utils.request_headers import RequestContext
 from vllm.logger import init_logger
 
 _COHERE_PATH_PREFIX = "/cohere/"
@@ -193,7 +194,9 @@ if _SDK_AVAILABLE:
 
         try:
             chat_request = handler.to_chat_completion_request(request)
-            result = await render_handler.render_chat_request(chat_request, raw_request)
+            result = await render_handler.render_chat_request(
+                chat_request, RequestContext.from_raw_request(raw_request)
+            )
         except Exception as e:  # noqa: BLE001 - report as 500 for parity
             logger.exception("Error in /cohere/v2/chat/render: %s", e)
             return JSONResponse(

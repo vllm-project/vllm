@@ -5,11 +5,11 @@ from collections.abc import AsyncGenerator, Callable, Generator, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Generic, TypeAlias, TypedDict, TypeVar
 
-from fastapi import Request
 from pydantic import ConfigDict
 
 from vllm import PoolingParams, PoolingRequestOutput, PromptType
 from vllm.entrypoints.chat_utils import ChatCompletionMessageParam
+from vllm.entrypoints.serve.utils.request_headers import RequestContext
 from vllm.inputs import DataPrompt, EngineInput
 from vllm.lora.request import LoRARequest
 from vllm.renderers import ChatParams, TokenizeParams
@@ -85,7 +85,7 @@ class PoolingServeContext(Generic[PoolingRequestT]):
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     request: PoolingRequestT
-    raw_request: Request | None = None
+    request_ctx: "RequestContext | None" = None
     model_name: str
     request_id: str
     pooling_params: PoolingParams
