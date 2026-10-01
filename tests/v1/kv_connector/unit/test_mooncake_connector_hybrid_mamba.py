@@ -208,6 +208,48 @@ def test_register_kv_caches_emits_fa_and_gdn_regions(monkeypatch):
         connector.connector_worker = None
 
 
+def test_register_kv_caches_keeps_gdn_states_inside_a_packed_block(monkeypatch):
+    """A GDN page inside a larger packed block (another layer's pages share
+    each block id's row) must not copy the row stride from the page's offset,
+    which would run into the next block id, owned by another request."""
+    monkeypatch.setenv("VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT", "5")
+    vllm_config = create_vllm_config(
+        kv_connector="MooncakeConnector",
+        kv_role="kv_consumer",
+    )
+    kv_cache_config = make_hybrid_gdn_kv_cache_config(
+        vllm_config.cache_config.block_size
+    )
+
+    with set_current_vllm_config(vllm_config), patch_worker_dependencies():
+        connector = MooncakeConnector(
+            vllm_config,
+            KVConnectorRole.WORKER,
+            kv_cache_config,
+        )
+        worker = connector.connector_worker
+
+        num_blocks = kv_cache_config.num_blocks
+        gdn_spec = kv_cache_config.kv_cache_groups[1].kv_cache_spec
+        offset, stride = 64, 128
+        assert offset + gdn_spec.page_size_bytes <= stride
+        packed = torch.empty(num_blocks * stride, dtype=torch.int8)
+        gdn_cache = packed.view(num_blocks, stride)[
+            :, offset : offset + gdn_spec.page_size_bytes
+        ]
+
+        worker.register_kv_caches({"model.layers.1.linear_attn": gdn_cache})
+
+        base = packed.data_ptr() + offset
+        assert worker.kv_caches_base_addr == [base, base + 36]
+        assert worker.block_len_per_layer == [stride, stride]
+        assert worker.kv_block_len_per_layer == [36, 8]
+
+        worker.shutdown()
+        worker.shutdown = noop_shutdown
+        connector.connector_worker = None
+
+
 def test_register_kv_caches_scales_attention_len_to_kernel_block(monkeypatch):
     monkeypatch.setenv("VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT", "5")
     vllm_config = create_vllm_config(
