@@ -9,6 +9,7 @@ from dataclasses import dataclass
 
 import pytest
 import torch
+from torch._subclasses.fake_tensor import FakeTensorMode
 
 from tests.v1.attention.utils import (
     BatchSpec,
@@ -182,6 +183,36 @@ def _build(
             batch_spec.batch_size, dtype=torch.int32, device=DEVICE
         )
     return builder.build(common_prefix_len=0, common_attn_metadata=common, **kwargs)
+
+
+@pytest.mark.parametrize(
+    "num_prefill_checkpoint_blocks, expected_reuse", [(0, True), (1, False)]
+)
+def test_cross_group_reuse_requires_no_prefill_checkpoint(
+    num_prefill_checkpoint_blocks: int,
+    expected_reuse: bool,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Checkpoint page indices must be rebuilt for each KV cache group."""
+    vllm_config = create_vllm_config(
+        model_name="Qwen/Qwen3.5-0.8B", block_size=BLOCK_SIZE
+    )
+    mamba_spec = MambaSpec(
+        block_size=BLOCK_SIZE,
+        shapes=((16, 64),),
+        dtypes=(torch.float16,),
+        num_prefill_checkpoint_blocks=num_prefill_checkpoint_blocks,
+    )
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
+    with FakeTensorMode():
+        builder = GDNAttentionMetadataBuilder(
+            kv_cache_spec=mamba_spec,
+            layer_names=["layer.0"],
+            vllm_config=vllm_config,
+            device=torch.device("cuda"),
+        )
+
+    assert builder.supports_update_block_table is expected_reuse
 
 
 @pytest.mark.parametrize(

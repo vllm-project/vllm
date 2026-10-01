@@ -131,6 +131,8 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             and device.type == "cuda"
             # Not isinstance: KDA's RecoverSSM/checkpoint metadata is per group.
             and type(self) is GDNAttentionMetadataBuilder
+            # update_block_table() does not rebuild per-group checkpoints.
+            and kv_cache_spec.num_prefill_checkpoint_blocks == 0
         )
         if self.supports_update_block_table:
             # Opts into MRV2's CUDA-only aligned-index precompute.
