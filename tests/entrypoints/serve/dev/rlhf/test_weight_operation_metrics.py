@@ -21,8 +21,10 @@ from vllm.distributed.weight_transfer.ipc_engine import IPCTrainerInitInfo
 
 DURATION = "vllm:rl_weight_update_operation_duration_seconds"
 IN_FLIGHT = "vllm:rl_weight_update_operations_in_flight"
-# Enough requests that the kernel spreads them over both API servers.
-SYNCS = 8
+# The API servers accept from one shared listening socket, so the kernel may
+# hand one process most connections. Sync until both have recorded, within a cap.
+MIN_SYNCS = 8
+MAX_SYNCS = 64
 
 
 def scrape(url: str) -> dict[tuple[str, str], float]:
@@ -75,11 +77,15 @@ def test_weight_sync_metrics_aggregate_across_api_servers(tmp_path):
             client=HTTPVLLMWeightSyncClient(url),
             source=ModuleSource(trainer),
         )
-        for _ in range(SYNCS):
+        syncs = 0
+        while syncs < MIN_SYNCS or (
+            len(pids_that_recorded(tmp_path)) < 2 and syncs < MAX_SYNCS
+        ):
             engine.send_weights()
+            syncs += 1
         metrics = scrape(url)
 
-    calls = {"init": 1, "start": SYNCS, "update": SYNCS, "finish": SYNCS}
+    calls = {"init": 1, "start": syncs, "update": syncs, "finish": syncs}
     for operation, count in calls.items():
         assert metrics[(f"{DURATION}_count", operation)] == count, operation
         assert metrics[(IN_FLIGHT, operation)] == 0, operation
