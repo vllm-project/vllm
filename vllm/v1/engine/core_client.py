@@ -405,9 +405,15 @@ class InprocClient(EngineCoreClient):
     ) -> Any:
         from vllm.v1.kv_hints.api import unwrap_control_reply
 
-        return unwrap_control_reply(
+        result = unwrap_control_reply(
             self.engine_core.kv_control(method, invocation, payload)
         )
+        scheduler = self.engine_core.scheduler
+        if not scheduler.has_unfinished_requests() and scheduler.has_requests():
+            # This client has no busy loop. Control polling cooperatively drains
+            # connector work without creating an inference request.
+            self.get_output()
+        return result
 
     def add_request(self, request: EngineCoreRequest) -> None:
         req, request_wave = self.engine_core.preprocess_add_request(request)

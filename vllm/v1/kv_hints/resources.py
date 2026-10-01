@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Engine-side resource integration for programmable cache operations."""
 
+from collections.abc import Callable
+
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_manager import KVCacheManager
 from vllm.v1.core.kv_cache_utils import (
@@ -71,11 +73,13 @@ class KVResourceController:
         registry: OperationRegistry,
         declarations: RetentionDeclarations,
         adapters: tuple[KVTransferAdapter, ...] = (),
+        transfer_allowed: Callable[[], bool] | None = None,
     ):
         self.manager = manager
         self.registry = registry
         self.declarations = declarations
         self.pool = manager.block_pool
+        self.transfer_allowed = transfer_allowed
         self.retention_priority = KVRetentionPriority(self.pool, declarations)
         self.transfers = (
             KVTransferOperations(
@@ -170,6 +174,8 @@ class KVResourceController:
     ) -> None:
         self.validate_scope(target)
         if isinstance(payload, (DemotePayload, PrefetchPayload, SharePayload)):
+            if self.transfer_allowed is not None and not self.transfer_allowed():
+                raise ControlError("busy", "Engine is paused or sleeping")
             if self.transfers is None:
                 raise ControlError("unsupported", "No transfer adapter is configured")
             self.transfers.submit(operation, payload, target)

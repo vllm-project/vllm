@@ -66,6 +66,7 @@ if TYPE_CHECKING:
     from vllm.v1.core.block_pool import BlockPool
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks, KVCacheManager
     from vllm.v1.kv_cache_interface import KVCacheConfig
+    from vllm.v1.kv_hints.transfers import KVTransferAdapter
     from vllm.v1.request import Request
 
 # s_tensor_list, d_tensor_list, s_indices, d_indices, direction
@@ -471,6 +472,10 @@ class KVConnectorBase_V1(ABC):
         """Bind the scheduler's cache manager after it has been constructed."""
         self._kv_cache_manager = kv_cache_manager
         self.bind_gpu_block_pool(kv_cache_manager.block_pool)
+
+    def create_kv_control_adapters(self) -> tuple["KVTransferAdapter", ...]:
+        """Initialize supported request-free adapters when native control is enabled."""
+        return ()
 
     def bind_gpu_block_pool(self, gpu_block_pool: "BlockPool") -> None:
         """Bind the GPU block pool to the connector for per-GPU block status tracking.

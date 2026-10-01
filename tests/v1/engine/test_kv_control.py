@@ -15,12 +15,13 @@ from vllm.utils.hashing import sha256
 from vllm.v1.core.kv_cache_manager import KVCacheManager
 from vllm.v1.core.kv_cache_utils import get_request_block_hasher, init_none_hash
 from vllm.v1.engine.core import EngineCore
-from vllm.v1.engine.core_client import DPLBAsyncMPClient
+from vllm.v1.engine.core_client import DPLBAsyncMPClient, InprocClient
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
 )
+from vllm.v1.kv_hints.api import KVControlService
 from vllm.v1.kv_hints.control import ControlContext, ControlError
 from vllm.v1.kv_hints.engine import create_control_service
 from vllm.v1.kv_hints.protocol import KvHintAction, KvHintsEnvelope
@@ -454,3 +455,53 @@ def test_child_request_cannot_rewrite_the_captured_parent_prefix():
     )
     assert result.status == "failed" and "previously associated" in result.reason
     assert len(service.controller.index.query().items) == 1
+
+
+@pytest.mark.parametrize("inference_active", [False, True])
+def test_inproc_control_advances_idle_transfers_without_consuming_inference(
+    inference_active,
+):
+    from tests.v1.core.test_prefix_caching import make_movement_controller
+
+    init_none_hash(sha256)
+    manager, request, controller, adapter, target = make_movement_controller()
+    engine = object.__new__(EngineCore)
+    engine.kv_control_service = KVControlService(controller)
+    engine.check_for_draft_tokens = False
+    engine.scheduler = SimpleNamespace(
+        has_unfinished_requests=lambda: inference_active,
+        has_requests=lambda: bool(adapter.jobs),
+    )
+
+    def step():
+        adapter.finish()
+        return {}, False
+
+    engine.step_fn = step
+    client = object.__new__(InprocClient)
+    client.engine_core = engine
+    invocation = {"engine_id": "engine", "engine_epoch": "epoch"}
+    client.kv_control(
+        "submit",
+        invocation,
+        {
+            "protocol_version": "0.1",
+            "message_id": "load",
+            "actions": [
+                {
+                    "action_id": "a",
+                    "action_type": "prefetch",
+                    "action_version": "1",
+                    "payload": {"target": target, "source": "mooncake"},
+                }
+            ],
+        },
+    )
+    result = client.kv_control(
+        "operation", invocation, {"message_id": "load", "action_id": "a"}
+    )
+    assert result["status"] == ("running" if inference_active else "completed")
+    assert manager.get_computed_blocks(request)[1] == (0 if inference_active else 4)
+    if inference_active:
+        client.get_output()
+        assert manager.get_computed_blocks(request)[1] == 4

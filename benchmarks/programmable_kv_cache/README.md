@@ -85,7 +85,72 @@ completion alone never finishes a task. The recorded snapshot/hit prefixes conta
 request hits 784 cached tokens. These checks use the common logical index and
 actual engine observations, rather than application-invented residency.
 
-CPU/Mooncake movement and policy workloads remain incomplete; the script
-explicitly expects unsupported movement in this development stage. Update that
-assertion when the adapters are connected. No serving speedup is inferred from
-these runs.
+Native Mooncake movement is validated below. CPU movement and policy workload
+acceptance remain separate gates. No serving speedup is inferred from these runs.
+
+## Native Mooncake movement and cross-engine preparation
+
+Start an isolated Store and write its client configuration:
+
+```bash
+.venv/bin/mooncake_master --rpc_address=127.0.0.1 --rpc_port=19151 \
+  --metrics_host=127.0.0.1 --metrics_port=19153 --enable_metric_reporting=false
+```
+
+```json
+{
+  "metadata_server": "P2PHANDSHAKE",
+  "master_server_address": "127.0.0.1:19151",
+  "protocol": "tcp",
+  "device_name": "",
+  "global_segment_size": "2GB",
+  "local_buffer_size": "256MB"
+}
+```
+
+Save the JSON as `/tmp/programmable-kv-mooncake-config.json`. Use the HTTP server
+command above with `MOONCAKE_CONFIG_PATH` pointing to it, `OMP_NUM_THREADS=4`,
+`VLLM_WORKER_MULTIPROC_METHOD=spawn`, and the following extra argument:
+
+```bash
+--kv-transfer-config '{"kv_connector":"MooncakeStoreConnector","kv_role":"kv_both","kv_connector_extra_config":{"enable_lookup":false,"save_decode_cache":false}}'
+```
+
+Disabling ordinary request lookup makes subsequent hits evidence of the explicit
+Prefetch. Run the complete control workflow and movement accuracy comparison:
+
+```bash
+CUDA_VISIBLE_DEVICES=0,3 .venv/bin/python \
+  benchmarks/programmable_kv_cache/http_control.py \
+  --base-url http://127.0.0.1:18083 \
+  --dataset /home/youwei/bzh/dataset/openai/gsm8k \
+  --validate-movement mooncake --validate-request-associations \
+  --evaluation-samples 128 --output /tmp/qwen-http-mooncake-evaluation.json
+```
+
+The accuracy comparison uses identical questions and model-visible prompts.
+Unique per-question cache salts force recomputation in the baseline. The second
+pass performs Demote and request-free Prefetch before each eight-question batch.
+Both passes score **124/128 (96.875%)**, with no truncated answers and no numeric
+answer mismatches. Cached tokens are **0 / 100,352**. Driver durations include
+warmup and control operations; they are not a controlled speedup measurement.
+
+For cross-engine validation, start a second server with the same model/layout,
+Store configuration and TP=2, using `--port 18084`,
+`--kv-control-config '{"engine_id":"http-destination"}'`, and
+`--gpu-memory-utilization 0.45` when both instances share GPUs 0/3. Keep the fixed
+4 GiB cache per rank. Add `--destination-url http://127.0.0.1:18084` to the workflow
+command; `--evaluation-samples` can be omitted for this independent scenario.
+
+The sender checks engine IDs, epochs and compatibility namespaces, submits Share
+on A, prepares B through independent control, and then sends B its first inference
+request. B hits **784 tokens**, its greedy output matches A, and A retains its own
+warm prefix. The local Demote/Prefetch cycle moves and registers **four group
+copies**. Share reports Store availability; only B's Prefetch reports B's readiness.
+Compressed full responses and evaluation rows are saved under `results/`.
+
+The current native adapter accepts full group boundaries and exact primary cache
+entries with PCP=DCP=1; capability discovery reports these limits. Keys include
+the control compatibility namespace and are separate from ordinary offload keys.
+Paused/sleeping engines defer new physical work. In-process Python clients advance
+idle connector work cooperatively during control polling.

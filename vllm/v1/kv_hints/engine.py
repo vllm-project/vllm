@@ -6,6 +6,7 @@ import hashlib
 import json
 import uuid
 from collections.abc import Callable
+from typing import TYPE_CHECKING
 
 from vllm.config import VllmConfig
 from vllm.v1.core.kv_cache_manager import KVCacheManager
@@ -19,6 +20,9 @@ from vllm.v1.kv_hints.retention import RetentionDeclarations
 from vllm.v1.kv_hints.state import SessionPrefixIndex
 from vllm.v1.request import Request
 
+if TYPE_CHECKING:
+    from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorBase_V1
+
 
 def create_control_service(
     config: VllmConfig,
@@ -26,6 +30,8 @@ def create_control_service(
     weight_version: str,
     *,
     request_lookup: Callable[[str], Request | None] | None = None,
+    connector: "KVConnectorBase_V1 | None" = None,
+    transfer_allowed: Callable[[], bool] | None = None,
 ) -> KVControlService:
     settings = config.kv_control_config
     assert settings is not None
@@ -84,7 +90,10 @@ def create_control_service(
         max_declarations=settings.max_declarations,
         max_snapshot_entries=settings.max_snapshot_entries,
     )
-    executor = KVResourceController(manager, registry, declarations)
+    adapters = connector.create_kv_control_adapters() if connector is not None else ()
+    executor = KVResourceController(
+        manager, registry, declarations, adapters, transfer_allowed
+    )
     cache_profile = {
         "hash_algorithm": profile["hash_algorithm"],
         "hash_block_size": profile["hash_block_size"],

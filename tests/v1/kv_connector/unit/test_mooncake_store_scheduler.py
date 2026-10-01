@@ -7,6 +7,13 @@ from unittest.mock import patch
 import pytest
 import torch
 
+from vllm.distributed.kv_transfer.kv_connector.v1.control import (
+    KVTransferQueue,
+    KVTransferRankResult,
+)
+from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.control import (
+    MooncakeControlAdapter,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.data import (
     LoadSpec,
     MooncakeLookupResult,
@@ -20,7 +27,12 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.scheduler impor
 )
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
-from vllm.v1.core.kv_cache_utils import KVCacheBlock
+from vllm.v1.core.kv_cache_transfer import KVCacheTransferLease
+from vllm.v1.core.kv_cache_utils import (
+    BlockHash,
+    KVCacheBlock,
+    make_block_hash_with_group_id,
+)
 from vllm.v1.core.sched.output import KVConnectorBlockState
 from vllm.v1.kv_cache_interface import (
     CircularBufferSpec,
@@ -1518,3 +1530,77 @@ def test_worker_metadata_aggregates_completions_across_ranks():
         MooncakeStoreWorkerMetadata(completed_saves={1: 1, 2: 1})
     )
     assert merged.completed_saves == {1: 2, 2: 1}
+
+
+@pytest.mark.parametrize("last_success", [False, True])
+def test_control_only_work_stays_live_until_distinct_ranks_finish(last_success):
+    scheduler = _make_bare_scheduler()
+    scheduler._unfinished_request_ids.clear()
+    scheduler.control = KVTransferQueue(2)
+    lease = KVCacheTransferLease(
+        1,
+        3,
+        "load",
+        "mooncake/namespace",
+        make_block_hash_with_group_id(BlockHash(b"h" * 32), 0),
+        16,
+        2,
+    )
+    scheduler.control.submit(lease)
+    assert scheduler.has_pending_push_work()
+    metadata = scheduler.build_connector_meta(_make_offload_only_output([]))
+    assert metadata.requests == [] and metadata.control_transfers == [lease]
+    assert scheduler.control.take_metadata() == []
+    first = KVTransferRankResult(1, 3, 0, True)
+    scheduler.update_connector_output(
+        SimpleNamespace(
+            kv_connector_worker_meta=MooncakeStoreWorkerMetadata(
+                control_results=[first, first, KVTransferRankResult(1, 2, 1, True)],
+            ),
+        )
+    )
+    assert scheduler.has_pending_push_work()
+    assert scheduler.control.poll() == ()
+    assert not scheduler.reset_store()
+    scheduler.update_connector_output(
+        SimpleNamespace(
+            kv_connector_worker_meta=MooncakeStoreWorkerMetadata(
+                control_results=[
+                    KVTransferRankResult(1, 3, 1, last_success, "rank 1 error"),
+                ]
+            ),
+        )
+    )
+    assert not scheduler.has_pending_push_work()
+    (completed,) = scheduler.control.poll()
+    assert completed.success == last_success
+    assert completed.transfer_id == lease.transfer_id
+
+
+def test_resume_waits_for_native_prefetch_without_starting_request_load():
+    scheduler = _make_bare_scheduler()
+    config = SimpleNamespace(
+        parallel_config=SimpleNamespace(world_size=2),
+        kv_transfer_config=SimpleNamespace(
+            is_kv_producer=True, kv_connector_extra_config={}
+        ),
+    )
+    scheduler.control = MooncakeControlAdapter(config, scheduler.kv_cache_config, 16)
+    block_hash = BlockHash(b"h" * 32)
+    lease = KVCacheTransferLease(
+        1,
+        0,
+        "load",
+        "mooncake/namespace",
+        make_block_hash_with_group_id(block_hash, 0),
+        16,
+        2,
+    )
+    scheduler.control.submit(lease)
+    request = SimpleNamespace(block_hashes=[block_hash])
+    assert scheduler.get_num_new_matched_tokens(request, 0) == (None, False)
+    assert scheduler.load_specs == {}
+    scheduler.control.update(
+        [KVTransferRankResult(1, 0, rank, True) for rank in range(2)]
+    )
+    assert not scheduler.control.awaiting_load(request)

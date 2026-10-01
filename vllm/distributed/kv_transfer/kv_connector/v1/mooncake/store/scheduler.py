@@ -9,6 +9,9 @@ from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorMetadata,
 )
+from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.control import (  # noqa: E501
+    MooncakeControlAdapter,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.coordinator import (  # noqa: E501
     partial_hash_hits_enabled,
 )
@@ -51,6 +54,8 @@ def _new_req_prefill_tokens(request: NewRequestData) -> list[int]:
 
 class MooncakeStoreScheduler:
     """Scheduler-side component for MooncakeStoreConnector."""
+
+    control: MooncakeControlAdapter | None = None
 
     def __init__(
         self,
@@ -125,6 +130,8 @@ class MooncakeStoreScheduler:
         Returns ``(None, False)`` when an async lookup is still in flight,
         signaling the scheduler to retry this request on a later step.
         """
+        if self.control is not None and self.control.awaiting_load(request):
+            return None, False
         if not self.enable_lookup:
             return 0, False
 
@@ -234,6 +241,8 @@ class MooncakeStoreScheduler:
             self._unfinished_request_ids,
             preempted_ids,
         )
+        if self.control is not None:
+            meta.control_transfers = self.control.take_metadata()
 
         # Handle new requests
         for request in scheduler_output.scheduled_new_reqs:
@@ -613,6 +622,8 @@ class MooncakeStoreScheduler:
         meta = connector_output.kv_connector_worker_meta
         if not isinstance(meta, MooncakeStoreWorkerMetadata):
             return
+        if self.control is not None:
+            self.control.update(meta.control_results)
         pool = self._gpu_block_pool
         assert pool is not None
         for store_job_id, count in meta.completed_saves.items():
@@ -640,7 +651,9 @@ class MooncakeStoreScheduler:
         held indefinitely. Nothing else keeps it alive now that a finishing
         request no longer defers its own free.
         """
-        return bool(self._pinned_saves)
+        return bool(self._pinned_saves) or (
+            self.control is not None and self.control.has_pending
+        )
 
     def reset_store(self) -> bool:
         """Trigger a global ``remove_all(force=True)`` on the Mooncake master.
@@ -658,6 +671,8 @@ class MooncakeStoreScheduler:
 
         Returns True on ACK from worker, False on NACK or RPC error.
         """
+        if self.control is not None and self.control.has_pending:
+            return False
         try:
             ok = self.client.reset()
             if ok:

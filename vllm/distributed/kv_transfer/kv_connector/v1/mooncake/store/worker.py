@@ -89,6 +89,7 @@ from vllm.v1.kv_cache_interface import (
 )
 from vllm.v1.kv_cache_layout import KVCacheLayout
 
+from .control import MooncakeControlWorker
 from .metrics import MooncakeStoreConnectorStats
 
 logger = init_logger(__name__)
@@ -1415,6 +1416,9 @@ class KVCacheStoreRecvingThread(KVTransferThread):
 class MooncakeStoreWorker:
     """Worker-side component for MooncakeStoreConnector."""
 
+    _control: MooncakeControlWorker | None = None
+    _control_enabled = False
+
     @staticmethod
     def _create_mem_pool(
         extra_config: dict[str, Any], model_config: ModelConfig
@@ -1468,6 +1472,9 @@ class MooncakeStoreWorker:
             ) from e
 
         model_config = vllm_config.model_config
+        self._control_enabled = (
+            getattr(vllm_config, "kv_control_config", None) is not None
+        )
         parallel_config = vllm_config.parallel_config
 
         self.dp_rank = parallel_config.data_parallel_index
@@ -1519,6 +1526,10 @@ class MooncakeStoreWorker:
         preferred_segment = rdma_utils.get_configured_preferred_segment(extra_config)
         self.preferred_segment = preferred_segment
         self.store_replicate_config = ReplicateConfig()
+        if self._control_enabled:
+            self._control_replicate_config = ReplicateConfig()
+            if preferred_segment is not None:
+                self._control_replicate_config.preferred_segment = preferred_segment
         self.enable_group_semantics = (
             str(extra_config.get("enable_group_semantics", "False")).strip().lower()
             == "true"
@@ -1996,6 +2007,27 @@ class MooncakeStoreWorker:
             num_device_segments,
         )
 
+        if self._control_enabled:
+            group_ids = self._kv_cache_config.prefix_cacheable_group_ids
+            self._control = MooncakeControlWorker(
+                self.store,
+                dict(
+                    zip(
+                        group_ids,
+                        (db.store_layout for db in self.token_dbs),
+                        strict=True,
+                    )
+                ),
+                rank=self.pp_rank * self.tp_size + self.tp_rank,
+                tp_rank=self.tp_rank,
+                group_replication=dict(
+                    zip(group_ids, self._group_tp_replication_factors, strict=True)
+                ),
+                replicate_config=self._control_replicate_config,
+                group_semantics=self.enable_group_semantics
+                and self._supports_group_ids,
+            )
+
         # Start transfer threads
         if self.can_put:
             ready_event_sending = threading.Event()
@@ -2060,6 +2092,9 @@ class MooncakeStoreWorker:
         if self._capacity_only:
             return
 
+        if self._control is not None:
+            self._control.submit(metadata.control_transfers, "load")
+
         for request in metadata.requests:
             load_spec = request.load_spec
             if load_spec is None or not load_spec.can_load:
@@ -2077,6 +2112,9 @@ class MooncakeStoreWorker:
         """
         if self._capacity_only or not self.can_put:
             return
+
+        if self._control is not None:
+            self._control.submit(metadata.control_transfers, "store")
 
         current_event = None
         for request in metadata.requests:
@@ -2201,12 +2239,17 @@ class MooncakeStoreWorker:
                 self.kv_send_thread.delete_finished_stored_request(req_id)
 
     def build_connector_worker_meta(self) -> MooncakeStoreWorkerMetadata | None:
-        if self.kv_send_thread is None:
+        completed_saves = (
+            self.kv_send_thread.take_completed_saves()
+            if self.kv_send_thread is not None
+            else {}
+        )
+        control_results = self._control.poll() if self._control is not None else []
+        if not completed_saves and not control_results:
             return None
-        completed_saves = self.kv_send_thread.take_completed_saves()
-        if not completed_saves:
-            return None
-        return MooncakeStoreWorkerMetadata(completed_saves=completed_saves)
+        return MooncakeStoreWorkerMetadata(
+            completed_saves=completed_saves, control_results=control_results
+        )
 
     def lookup(
         self, num_tokens: int, block_hashes: Sequence[BlockHash]
@@ -2389,6 +2432,9 @@ class MooncakeStoreWorker:
         store = getattr(self, "store", None)
         if store is None:
             return
+        if self._control is not None:
+            self._control.close()
+            self._control = None
         self.store = None
         deadline = time.monotonic() + 5.0
         for thread in (self.kv_send_thread, *self.kv_recv_threads):

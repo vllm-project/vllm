@@ -173,6 +173,22 @@ evaluation; these examples do not promise universal performance gains.
 Actual model/group support is discovered from the initialized connector layout;
 the matrix does not equate a full-attention unit test with hybrid-model support.
 
+Native Mooncake operations use the connector's registered Store layouts and one
+engine-owned lease per group/hash/backend. First support requires primary cache
+entries at full group boundaries and PCP=DCP=1. Each rank reports its identity and
+generation; duplicate/stale acknowledgements cannot satisfy the all-rank barrier.
+No worker result registers GPU content until every rank has stopped accessing the
+buffer. Existing request lookup waits for a compatible native load.
+
+Control keys include the model/cache/weight compatibility namespace separately
+from ordinary automatic-offload keys. Share establishes Store accessibility while
+preserving the source; the orchestrator must submit Prefetch to the destination.
+Missing objects are distinct from backend failures. Cold retention/deletion remain
+unsupported. New movement is deferred while the engine is paused or sleeping;
+logical control remains available. The in-process Python client has no busy loop
+and advances idle connector work cooperatively when callers submit/query control.
+Live weight-version transition integration and its RL validation remain task 7.2.
+
 ## Execution environment
 
 The user selected GPUs 0 and 3 for local TP=2 and authorized an isolated local

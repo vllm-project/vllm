@@ -32,7 +32,7 @@
 
 ## 4. Local execution and policy integration
 
-- [ ] 4.1 Add engine-owned operation approval, reservation/reference accounting, cancellation, and stale-completion protection through existing KV manager paths.
+- [x] 4.1 Add engine-owned operation approval, reservation/reference accounting, cancellation, and stale-completion protection through existing KV manager paths.
 - [x] 4.2 Implement retention-aware eviction and explicit local Evict while preserving active references and the feature-disabled path.
 - [ ] 4.3 Add startup-configured policy/composer interfaces and a common pressure/demand snapshot.
 - [ ] 4.4 Implement the agreed reference policies and scheduler-cooperation extension.
@@ -40,10 +40,10 @@
 
 ## 5. Independent backend execution
 
-- [ ] 5.1 Add request-free operation dispatch/progress/completion to engine and connector liveness without synthetic inference requests.
+- [x] 5.1 Add request-free operation dispatch/progress/completion to engine and connector liveness without synthetic inference requests.
 - [ ] 5.2 Adapt the selected CPU offload path for approved Demote and Prefetch, including resume/load coordination.
-- [ ] 5.3 Adapt Mooncake Store lookup, approved buffers, transfer metadata, and completion for independent operations using unchanged backend APIs.
-- [ ] 5.4 Implement the agreed Share orchestration/result semantics and per-backend unsupported results.
+- [x] 5.3 Adapt Mooncake Store lookup, approved buffers, transfer metadata, and completion for independent operations using unchanged backend APIs.
+- [x] 5.4 Implement the agreed Share orchestration/result semantics and per-backend unsupported results.
 - [ ] 5.5 Verify real transfer correctness, partial failures, cancellation, all-rank completion, reset races, and source reclamation timing.
 - [ ] 5.6 Extend existing KVCR forwarding/query/deliver/cleanup regression coverage; preserve opaque payload values and prevent forwarding receipts from claiming GPU readiness.
 
@@ -58,10 +58,10 @@
 
 - [ ] 7.1 Add a reproducible multi-round shared-prefix rollout workload with controllable pressure, pauses, branches, and resume predictions.
 - [ ] 7.2 Add the agreed open-source workload integration and RL weight-version correctness coverage.
-- [ ] 7.3 Add and run the two-engine Mooncake example, proving actual destination cache hits after request-free preparation.
+- [x] 7.3 Add and run the two-engine Mooncake example, proving actual destination cache hits after request-free preparation.
 - [ ] 7.4 Run native/router-directive/local-policy/composed-policy comparisons and labeled oracle experiments; save raw measurements and commands.
 - [ ] 7.5 Run relevant model evaluations and measure overhead, regressions, admission delay, fairness, transfer volume, and failure recovery.
-- [ ] 7.6 Add and run a direct-hint controller without local policies, covering request-free retention, movement, query, and release.
+- [x] 7.6 Add and run a direct-hint controller without local policies, covering request-free retention, movement, query, and release.
 - [ ] 7.7 Add and run session/branch/range/shared-prefix workflows, asserting logical cleanup and independent retention lifetimes.
 - [ ] 7.8 Add an application-directed rollout controller using supported Retain/Prefetch hints and actual operation results, with no custom hint types or handler plugins.
 - [ ] 7.9 Add and run closed-loop control/recovery examples for duplicate hints, prefetch/resume races, capacity deferral, backend errors, and engine restart.

@@ -16,9 +16,11 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorMetadata,
     KVConnectorWorkerMetadata,
 )
+from vllm.distributed.kv_transfer.kv_connector.v1.control import KVTransferRankResult
 from vllm.logger import init_logger
 from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import is_non_overlapping_and_dense
+from vllm.v1.core.kv_cache_transfer import KVCacheTransferLease
 from vllm.v1.core.kv_cache_utils import (
     BlockHash,
     BlockHashListWithBlockSize,
@@ -835,11 +837,13 @@ class MooncakeStoreWorkerMetadata(KVConnectorWorkerMetadata):
     """Maps ``ReqMeta.store_job_id`` to the number of ranks done with that job."""
 
     completed_saves: dict[int, int] = field(default_factory=dict)
+    control_results: list[KVTransferRankResult] = field(default_factory=list)
 
     def aggregate(
         self, other: "KVConnectorWorkerMetadata"
     ) -> "MooncakeStoreWorkerMetadata":
         assert isinstance(other, MooncakeStoreWorkerMetadata)
+        self.control_results.extend(other.control_results)
         for store_job_id, count in other.completed_saves.items():
             self.completed_saves[store_job_id] = (
                 self.completed_saves.get(store_job_id, 0) + count
@@ -856,6 +860,7 @@ class MooncakeStoreConnectorMetadata(KVConnectorMetadata):
         preempted_req_ids: set[str],
     ):
         self.requests: list[ReqMeta] = []
+        self.control_transfers: list[KVCacheTransferLease] = []
         self.unfinished_request_ids = unfinished_request_ids
         self.preempted_req_ids = preempted_req_ids
 

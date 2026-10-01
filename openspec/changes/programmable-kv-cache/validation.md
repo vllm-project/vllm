@@ -427,3 +427,66 @@ references during Demote, and reset before worker acknowledgement. This phase
 introduces no advertised production transfer adapter yet. It does not establish
 actual byte transfer, connector liveness, all-rank readiness or model equivalence;
 those are the next integration gate, and tasks 4.1/5.1 remain open.
+
+## Native Mooncake execution and real cross-engine reuse
+
+Added request-free connector metadata, per-rank/generation acknowledgements,
+backend submission through registered Store buffer layouts, and progress through
+existing empty model-runner steps. Native load reservations remain unpublished
+until all ranks finish; a compatible resume waits instead of starting another
+load. Store writes precede eligible GPU reclamation. Share keeps the source and
+reports Store accessibility, with destination Prefetch handled by the controller.
+
+The complete related gate was:
+
+```bash
+CUDA_VISIBLE_DEVICES=0,3 .venv/bin/python -m pytest \
+  tests/v1/core/test_prefix_caching.py tests/v1/core/test_deferred_block_free.py \
+  tests/v1/core/test_single_type_kv_cache_manager.py \
+  tests/v1/core/test_scheduler.py tests/v1/core/test_async_scheduler.py \
+  tests/v1/test_kv_hint_control.py tests/v1/test_kv_hint_state.py \
+  tests/v1/engine/test_kv_control.py tests/v1/kv_offload/tiering/test_kvcr_tier.py \
+  tests/v1/kv_connector/unit/test_mooncake_store_*.py \
+  tests/entrypoints/serve/kv_control/test_api.py -q
+```
+
+Result: **991 passed**, 457.16 seconds. The Store regression before the added
+control tests passed **348 tests**; the complete updated scheduler/worker suites
+passed **237 tests**. In-process cooperative polling subsequently passed the
+complete engine/control/HTTP suites: **142 passed**, 41.13 seconds.
+After adding the paused/sleeping admission guard, complete prefix/engine/control
+suites pass **331 tests**, 97.80 seconds. Logical Retain remains usable while
+movement is deferred; a retry with the original IDs retains its original outcome.
+
+The real Store suite now passes **42 tests**, including native control driving
+actual GPU buffers through two rank-local layouts, missing-rank completion and
+reset while worker buffers remain held. Combined with the full prefix-cache suite,
+the final missing-result refinement passes **242 tests**, 82.86 seconds. The first
+integration fixture omitted hash initialization; adding the same initialization
+used by the existing cache suites resolved it. No simulated copy counts as GPU
+transfer evidence. Get must return the expected byte count; truncated or failed
+objects are never registered.
+
+The Qwen TP=2 HTTP workflow, with real Mooncake and ordinary request lookup disabled,
+passes Share, Demote, request-free Prefetch, missing content and request association
+checks. Demote stores and reclaims **4 group copies**; Prefetch registers **4 copies**
+and the next request hits **784 tokens** with identical greedy output token IDs.
+The separate two-engine run passes: A preserves its source, B completes Prefetch
+before its first inference, and B hits **784 tokens** with A's output token IDs.
+Both engines use GPUs 0/3; B uses GPU utilization 0.45 and the same fixed 4 GiB KV
+cache per rank. Model servers and the isolated Store are stopped after validation.
+Commands and configurations are in the benchmark README.
+
+The movement accuracy run uses the same 128 seeded GSM8K questions, eight-shot
+rationales and a 1,024-token output limit in both passes. Per-question salts force
+recomputation; the comparison pass explicitly demotes/prefetches the common prefix
+before each eight-question batch. Both score **124/128 (96.875%)**, with **zero**
+truncations and **zero** final numeric-answer mismatches. Cached tokens are
+**0 / 100,352**. Durations are 593.50 / 589.27 seconds, including driver warmup and
+control work; no speedup or disabled-path overhead conclusion is drawn. All rows,
+control outcomes and HTTP responses are saved in the three `mooncake-*.json.gz`
+artifacts under `benchmarks/programmable_kv_cache/results/`.
+
+This verifies the fixed-weight local Qwen profile and the direct-controller path.
+Live weight updates, policy-driven movement, pressure/fairness measurements and
+the external GPT-OSS/DeepSeek matrix remain incomplete.

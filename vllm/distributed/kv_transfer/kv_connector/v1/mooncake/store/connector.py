@@ -45,9 +45,11 @@ from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig
+from vllm.v1.kv_hints.transfers import KVTransferAdapter
 from vllm.v1.outputs import KVConnectorOutput
 from vllm.v1.request import Request
 
+from .control import MooncakeControlAdapter
 from .data import MooncakeStoreConnectorMetadata
 from .metrics import MooncakeStoreConnectorStats, MooncakeStorePromMetrics
 from .scheduler import MooncakeStoreScheduler
@@ -233,6 +235,23 @@ class MooncakeStoreConnector(KVConnectorBase_V1, SupportsHMA):
         return self.connector_scheduler.update_state_after_alloc(
             request, blocks, num_external_tokens
         )
+
+    def create_kv_control_adapters(self) -> tuple[KVTransferAdapter, ...]:
+        scheduler = self.connector_scheduler
+        assert scheduler is not None
+        parallel = self._vllm_config.parallel_config
+        if (
+            self._capacity_only
+            or parallel.prefill_context_parallel_size != 1
+            or parallel.decode_context_parallel_size != 1
+            or self._kv_cache_config.hisparse_host_num_blocks is not None
+        ):
+            return ()
+        if scheduler.control is None:
+            scheduler.control = MooncakeControlAdapter(
+                self._vllm_config, self._kv_cache_config, scheduler._hash_block_size
+            )
+        return (scheduler.control,)
 
     def bind_gpu_block_pool(self, gpu_block_pool: BlockPool) -> None:
         assert self.connector_scheduler is not None

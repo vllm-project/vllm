@@ -29,6 +29,7 @@ class KVTransferCompletion:
     generation: int
     success: bool
     reason: str = ""
+    missing: bool = False
 
 
 class KVTransferAdapter(Protocol):
@@ -191,7 +192,9 @@ class KVTransferOperations:
                     if valid:
                         movement.succeeded.add(job.lease.key)
                     else:
-                        movement.errors["failed"] += 1
+                        movement.errors[
+                            "missing" if completion.missing else "failed"
+                        ] += 1
                         if completion.reason and len(movement.reasons) < 3:
                             movement.reasons.append(completion.reason[:512])
                     if not movement.pending:

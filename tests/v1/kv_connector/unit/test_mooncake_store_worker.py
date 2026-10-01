@@ -28,6 +28,9 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store import (
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store import (
     worker as mooncake_store_worker,
 )
+from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.control import (
+    MooncakeControlWorker,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.data import (
     BlobBlockHashes,
     ChunkedTokenDatabase,
@@ -45,7 +48,12 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.metrics import 
     MooncakeStoreConnectorStats,
 )
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
-from vllm.v1.core.kv_cache_utils import BlockHash, maybe_convert_block_hash
+from vllm.v1.core.kv_cache_transfer import KVCacheTransferLease
+from vllm.v1.core.kv_cache_utils import (
+    BlockHash,
+    make_block_hash_with_group_id,
+    maybe_convert_block_hash,
+)
 from vllm.v1.kv_cache_interface import (
     CircularBufferSpec,
     FullAttentionSpec,
@@ -4854,3 +4862,77 @@ def test_blob_block_hashes_empty():
     view = BlobBlockHashes(memoryview(b""), 0)
     assert len(view) == 0
     assert list(view) == []
+
+
+@pytest.mark.parametrize(
+    "direction,result,success",
+    [
+        ("load", [64], True),
+        ("load", [0], False),
+        ("load", [-1], False),
+        ("load", [], False),
+        ("store", [0], True),
+        ("store", [-1], False),
+    ],
+)
+def test_control_worker_reports_exact_copy_outcomes(direction, result, success):
+    store = MagicMock()
+    store.batch_get_into_multi_buffers.return_value = result
+    store.batch_put_from_multi_buffers.return_value = result
+    layout = RankLocalStoreLayout(KeyMetadata("model", 0, 0, 0, 0), 16, 16)
+    layout.set_kv_caches_base_addr([0x1000])
+    layout.set_block_len([64])
+    lease = KVCacheTransferLease(
+        1,
+        2,
+        direction,
+        "mooncake/compatibility",
+        make_block_hash_with_group_id(BlockHash(b"h" * 32), 0),
+        16,
+        3,
+    )
+    control = MooncakeControlWorker(
+        store,
+        {0: layout},
+        rank=0,
+        tp_rank=0,
+        group_replication={0: 1},
+    )
+    ready = MagicMock()
+    try:
+        completed = control._transfer(lease, ready)
+        ready.synchronize.assert_called_once()
+        assert completed.success == success
+        assert completed.generation == 2 and completed.rank == 0
+        method = (
+            store.batch_get_into_multi_buffers
+            if direction == "load"
+            else store.batch_put_from_multi_buffers
+        )
+        keys, addresses, sizes = method.call_args.args
+        assert keys[0].startswith("kv-control:mooncake/compatibility@model")
+        assert addresses == [[0x1000 + 3 * 64]] and sizes == [[64]]
+    finally:
+        control.close()
+
+
+def test_control_worker_never_reads_source_before_compute_event():
+    store = MagicMock()
+    control = MooncakeControlWorker(store, {}, rank=0, tp_rank=0, group_replication={})
+    ready = MagicMock()
+    ready.synchronize.side_effect = RuntimeError("compute event failed")
+    lease = KVCacheTransferLease(
+        1,
+        0,
+        "store",
+        "mooncake/compatibility",
+        make_block_hash_with_group_id(BlockHash(b"h" * 32), 0),
+        16,
+        3,
+    )
+    try:
+        completed = control._transfer(lease, ready)
+        assert not completed.success
+        store.batch_put_from_multi_buffers.assert_not_called()
+    finally:
+        control.close()

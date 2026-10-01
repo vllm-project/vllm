@@ -30,6 +30,18 @@ results. Extend the same core suite with a queued adapter to check independent
 task cancellation, capacity/partial failures, source preservation, and reset races
 through native submission and operation queries. This fake adapter verifies the
 engine contract only; Mooncake worker and live-model tests must prove real bytes.
+Mooncake control metadata carries approved leases, and each worker reports its
+rank/generation/result after buffer access stops. Extend the Store scheduler and
+worker suites to check duplicate/stale rank reports, no-request liveness, load
+coordination and byte-count/error handling. Extend the existing real-buffer suite
+to run the actual control worker on registered GPU layouts and observe subsequent
+KVCacheManager hits after all ranks complete. Finally exercise the real Qwen
+HTTP/EngineCore path to validate scheduler and model-runner integration.
+CPU control uses the existing CPUOffloadingManager chunk reservations and
+CPUOffloadingWorker copies. Extend the manager/connector suites for cold capacity,
+independent source/destination holds, missing objects, failed-rank acknowledgement,
+reset rejection during transfer, and native jobs producing no inference receipts.
+GPU worker and live-model checks must exercise both directions and actual reuse.
 Request association consumes active request token/hash observations and produces
 the shared logical index plus an optional bounded growth subscription. Guard
 against rewrites below the first cache-block boundary, implicit growth of snapshot

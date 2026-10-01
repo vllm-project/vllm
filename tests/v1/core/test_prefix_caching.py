@@ -6716,3 +6716,32 @@ def test_native_adapter_submission_failure_does_not_leak_reservation(monkeypatch
     assert result.status == OperationStatus.FAILED
     assert manager.block_pool.get_num_free_blocks() == 1
     assert not manager.get_transfer_manager().has_pending
+
+
+def test_paused_engine_defers_movement_before_acquiring_gpu_capacity():
+    manager, _, controller, adapter, target = make_movement_controller()
+    controller.executor.transfer_allowed = lambda: False
+    payload = {"target": target, "source": "mooncake"}
+    result = submit_movement(controller, "paused", "prefetch", payload)
+    assert result.status == OperationStatus.DEFERRED
+    assert adapter.jobs == [] and manager.block_pool.get_num_free_blocks() == 3
+    retained = submit_movement(
+        controller,
+        "retain-paused",
+        "retain",
+        {
+            "target": target,
+            "owner_id": "owner",
+            "declaration_id": "declaration",
+        },
+    )
+    assert retained.status == OperationStatus.COMPLETED
+    controller.executor.transfer_allowed = lambda: True
+    assert submit_movement(controller, "paused", "prefetch", payload) == result
+    assert (
+        submit_movement(controller, "resumed", "prefetch", payload).status
+        == OperationStatus.RUNNING
+    )
+    adapter.finish()
+    controller.executor.progress()
+    assert controller.registry.get("resumed", "a").status == OperationStatus.COMPLETED

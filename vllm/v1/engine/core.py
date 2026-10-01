@@ -250,6 +250,8 @@ class EngineCore:
                 cast(Any, self.scheduler).kv_cache_manager,
                 self._weight_version,
                 request_lookup=cast(Any, self.scheduler).requests.get,
+                connector=kv_connector,
+                transfer_allowed=lambda: not self.is_sleeping(),
             )
 
         self.aborts_queue = queue.Queue[list[str]]()

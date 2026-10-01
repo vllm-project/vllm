@@ -5,7 +5,10 @@
 import argparse
 import json
 import math
+import random
+import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
@@ -21,6 +24,11 @@ from vllm.v1.core.kv_cache_utils import (
 )
 from vllm.v1.request import Request
 
+if __package__:
+    from .evaluate import answer_number
+else:
+    from evaluate import answer_number
+
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
@@ -28,13 +36,22 @@ def main():
     parser.add_argument("--dataset", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--validate-request-associations", action="store_true")
+    parser.add_argument("--validate-movement", choices=("cpu", "mooncake"))
+    parser.add_argument("--evaluation-samples", type=int, default=0)
+    parser.add_argument("--destination-url")
     args = parser.parse_args()
+    if args.evaluation_samples and not args.validate_movement:
+        parser.error("Movement evaluation requires --validate-movement")
+    if args.destination_url and args.validate_movement != "mooncake":
+        parser.error("Cross-engine preparation requires Mooncake movement")
     session = requests.Session()
     run_id = uuid.uuid4().hex
     report: dict[str, Any] = {"base_url": args.base_url, "actions": {}, "inference": []}
 
-    def post(path, body):
-        response = session.post(args.base_url + path, json=body, timeout=180)
+    def post(path, body, *, base_url=None):
+        response = session.post(
+            (base_url or args.base_url) + path, json=body, timeout=180
+        )
         response.raise_for_status()
         return response.json()
 
@@ -66,17 +83,48 @@ def main():
             {"method": method, "invocation": invocation, "payload": payload},
         )
 
-    def submit(name, kind, payload, version="1"):
-        result = control("submit", envelope(name, kind, payload, version))
+    def submit(name, kind, payload, version="1", *, call=control):
+        result = call("submit", envelope(name, kind, payload, version))
         report["actions"][name] = result
-        queried = operation(name)
-        assert queried == result["results"][0]
+        queried = operation(name, call=call)
+        initial = result["results"][0]
+        assert queried["operation_id"] == initial["operation_id"]
+        assert queried["sequence"] >= initial["sequence"]
+        if initial["status"] not in ("received", "accepted", "running"):
+            assert queried == initial
         return result
 
-    def operation(name):
-        return control(
+    def operation(name, *, call=control):
+        return call(
             "operation", {"message_id": run_id + "-" + name, "action_id": "action"}
         )
+
+    def wait_for_operation(name, *, call=control):
+        deadline = time.monotonic() + 120
+        while time.monotonic() < deadline:
+            result = operation(name, call=call)
+            if result["status"] not in ("received", "accepted", "running"):
+                report["actions"][name + "-terminal"] = result
+                return result
+            time.sleep(0.02)
+        raise AssertionError(f"Operation {name} did not finish")
+
+    def reclaim_after_demote(name, target, result):
+        assert result["status"] in ("completed", "partial"), result
+        assert "cold_copy_stored" in result["completed_steps"], result
+        if not result["blocked_targets"]:
+            return
+        deadline = time.monotonic() + 120
+        attempt = 0
+        while True:
+            evicted = submit(f"{name}-reclaim-{attempt}", "evict", {"target": target})[
+                "results"
+            ][0]
+            if evicted["status"] in ("completed", "missing"):
+                return
+            assert time.monotonic() < deadline, evicted
+            attempt += 1
+            time.sleep(0.05)
 
     model = session.get(args.base_url + "/v1/models", timeout=30).json()["data"][0][
         "id"
@@ -90,9 +138,9 @@ def main():
     text += "Question: What is 1 + 1?\nAnswer:"
     tokens = post("/tokenize", {"model": model, "prompt": text})["tokens"]
 
-    def infer(hints=None):
+    def infer(hints=None, *, base_url=None, model_id=None):
         body = {
-            "model": model,
+            "model": model_id or model,
             "prompt": tokens,
             "temperature": 0,
             "max_tokens": 16,
@@ -100,7 +148,7 @@ def main():
         }
         if hints is not None:
             body["kv_hints"] = hints
-        response = post("/v1/completions", body)
+        response = post("/v1/completions", body, base_url=base_url)
         assert response["choices"][0]["prompt_token_ids"] == tokens
         report["inference"].append(response)
         return response
@@ -258,8 +306,203 @@ def main():
     for name, kind, version in (("pin", "pin", "1"), ("version", "signal", "future")):
         result = submit(name, kind, signal_payload, version)
         assert result["results"][0]["status"] == "unsupported"
-    movement = submit("movement", "prefetch", {"target": target, "source": "cpu"})
-    assert movement["results"][0]["status"] == "unsupported"
+    if args.validate_movement:
+        tier = args.validate_movement
+        assert any(
+            a["action_type"] == "prefetch" and tier in a["tiers"]
+            for a in caps["actions"]
+        ), caps
+        before_movement = infer()
+        assert cached(before_movement) == cached(warm)
+        if tier == "mooncake":
+            peer = None
+            if args.destination_url:
+                (peer,) = session.get(
+                    args.destination_url + "/v1/kv/capabilities", timeout=30
+                ).json()["engines"]
+                assert peer["namespace"] == caps["namespace"], (caps, peer)
+                assert peer["engine_id"] != caps["engine_id"]
+                assert peer["engine_epoch"] != caps["engine_epoch"]
+            submit(
+                "share",
+                "share",
+                {
+                    "target": target,
+                    "destination_engine_id": peer["engine_id"]
+                    if peer
+                    else "validation-peer",
+                },
+            )
+            shared = wait_for_operation("share")
+            assert shared["status"] == "completed", shared
+            assert shared["completed_steps"] == ["cold_copy_stored"]
+            if peer:
+                peer_invocation = {
+                    key: peer[key] for key in ("engine_id", "engine_epoch", "namespace")
+                }
+
+                def peer_control(method, payload):
+                    return post(
+                        "/v1/kv/control",
+                        {
+                            "method": method,
+                            "invocation": peer_invocation,
+                            "payload": payload,
+                        },
+                        base_url=args.destination_url,
+                    )
+
+                submit("peer-evict", "evict", {"target": target}, call=peer_control)
+                submit(
+                    "peer-prefetch",
+                    "prefetch",
+                    {
+                        "target": target,
+                        "source": "mooncake",
+                    },
+                    call=peer_control,
+                )
+                ready = wait_for_operation("peer-prefetch", call=peer_control)
+                assert ready["status"] == "completed", ready
+                peer_model = session.get(
+                    args.destination_url + "/v1/models", timeout=30
+                ).json()["data"][0]["id"]
+                peer_response = infer(
+                    base_url=args.destination_url, model_id=peer_model
+                )
+                assert cached(peer_response) == cached(warm)
+                assert (
+                    peer_response["choices"][0]["token_ids"]
+                    == cold["choices"][0]["token_ids"]
+                )
+                report["cross_engine"] = {"destination": peer, "readiness": ready}
+            assert cached(infer()) == cached(warm)
+        submit("demote", "demote", {"target": target, "destination": tier})
+        demoted = wait_for_operation("demote")
+        reclaim_after_demote("demote", target, demoted)
+        # Only control submissions and queries occur between Demote and readiness.
+        submit("prefetch", "prefetch", {"target": target, "source": tier})
+        prepared = wait_for_operation("prefetch")
+        assert prepared["status"] == "completed", prepared
+        assert "gpu_content_registered" in prepared["completed_steps"], prepared
+        resumed = infer()
+        assert cached(resumed) == cached(warm)
+        assert resumed["choices"][0]["token_ids"] == cold["choices"][0]["token_ids"]
+        report["movement"] = {"tier": tier, "demote": demoted, "prefetch": prepared}
+        missing_target = {
+            **target,
+            "blocks": [{**b, "block_hash": "00" * 32} for b in target["blocks"]],
+        }
+        submit(
+            "missing-prefetch", "prefetch", {"target": missing_target, "source": tier}
+        )
+        missing = wait_for_operation("missing-prefetch")
+        assert missing["status"] in ("failed", "missing"), missing
+        if args.evaluation_samples:
+            test = pq.read_table(
+                args.dataset / "main/test-00000-of-00001.parquet"
+            ).to_pylist()
+            assert 0 < args.evaluation_samples <= len(test)
+            indices = random.Random(0).sample(range(len(test)), args.evaluation_samples)
+            shared_text = "".join(
+                f"Question: {x['question']}\nAnswer: {x['answer']}\n\n"
+                for x in train[:8]
+            )
+
+            def evaluate_question(index, mode):
+                body = {
+                    "model": model,
+                    "prompt": shared_text
+                    + f"Question: {test[index]['question']}\nAnswer:",
+                    "temperature": 0,
+                    "max_tokens": 1024,
+                    "stop": ["Question:", "Assistant:", "<|separator|>"],
+                    "return_token_ids": True,
+                }
+                if mode == "recompute":
+                    body["cache_salt"] = f"{run_id}-question-{index}"
+                response = requests.post(
+                    args.base_url + "/v1/completions",
+                    json=body,
+                    timeout=600,
+                )
+                response.raise_for_status()
+                output = response.json()
+                choice = output["choices"][0]
+                expected = answer_number(test[index]["answer"])
+                predicted = answer_number(choice["text"])
+                return {
+                    "index": index,
+                    "expected": expected,
+                    "predicted": predicted,
+                    "correct": expected is not None and predicted == expected,
+                    "text": choice["text"],
+                    "token_ids": choice["token_ids"],
+                    "finish_reason": choice["finish_reason"],
+                    "cached_tokens": cached(output),
+                }
+
+            evaluation = {"indices": indices, "seed": 0, "num_fewshot": 8, "runs": {}}
+            report["evaluation"] = evaluation
+            for mode in (
+                "recompute",
+                "mooncake_prefetch" if tier == "mooncake" else "cpu_prefetch",
+            ):
+                rows = []
+                started = time.perf_counter()
+                with ThreadPoolExecutor(max_workers=8) as workers:
+                    for offset in range(0, len(indices), 8):
+                        if mode != "recompute":
+                            infer()
+                            name = f"evaluation-demote-{offset}"
+                            submit(
+                                name, "demote", {"target": target, "destination": tier}
+                            )
+                            result = wait_for_operation(name)
+                            reclaim_after_demote(name, target, result)
+                            name = f"evaluation-prefetch-{offset}"
+                            submit(name, "prefetch", {"target": target, "source": tier})
+                            result = wait_for_operation(name)
+                            assert result["status"] == "completed", result
+                        rows.extend(
+                            workers.map(
+                                lambda index, mode=mode: evaluate_question(index, mode),
+                                indices[offset : offset + 8],
+                            )
+                        )
+                result = {
+                    "seconds": time.perf_counter() - started,
+                    "accuracy": sum(r["correct"] for r in rows) / len(rows),
+                    "length_limited": sum(r["finish_reason"] == "length" for r in rows),
+                    "rows": rows,
+                }
+                evaluation["runs"][mode] = result
+                args.output.parent.mkdir(parents=True, exist_ok=True)
+                args.output.write_text(json.dumps(report, indent=2) + "\n")
+                print(
+                    json.dumps(
+                        {
+                            "mode": mode,
+                            "accuracy": result["accuracy"],
+                            "samples": len(rows),
+                        }
+                    ),
+                    flush=True,
+                )
+            baseline, moved = evaluation["runs"].values()
+            assert all(row["cached_tokens"] == 0 for row in baseline["rows"])
+            assert all(row["cached_tokens"] >= end for row in moved["rows"])
+            assert baseline["length_limited"] <= 0.01 * args.evaluation_samples
+            assert moved["length_limited"] <= 0.01 * args.evaluation_samples
+            assert min(baseline["accuracy"], moved["accuracy"]) >= 0.8
+            assert baseline["accuracy"] - moved["accuracy"] <= 0.01
+            evaluation["answer_mismatches"] = sum(
+                a["predicted"] != b["predicted"]
+                for a, b in zip(baseline["rows"], moved["rows"], strict=True)
+            )
+    elif not any(a["action_type"] == "prefetch" for a in caps["actions"]):
+        movement = submit("movement", "prefetch", {"target": target, "source": "cpu"})
+        assert movement["results"][0]["status"] == "unsupported"
     for changes, status in (
         ({"engine_id": "wrong"}, 404),
         ({"engine_epoch": "old"}, 409),
@@ -408,7 +651,7 @@ def main():
     report["operation_events"] = control("events", {"stream": "operation"})
     report["association_events"] = control("events", {"stream": "association"})
     report["cached_tokens"] = [cached(x) for x in report["inference"]]
-    report["cache_transfer_tested"] = False
+    report["cache_transfer_tested"] = bool(args.validate_movement)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(report, indent=2) + "\n")
     print(
