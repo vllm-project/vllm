@@ -29,7 +29,7 @@ Sorted alphabetically by GitHub handle:
 - [@netanel-haber](https://github.com/netanel-haber)
 - [@Rohan138](https://github.com/Rohan138)
 - [@simondanielsson](https://github.com/simondanielsson)
-- [@taneem-ibrahim](https://github.com/taneem-ibrahim)
+- [@taneem-ibrahim](https://github.com/taneem-ibrahim): Pooling models
 - [@TheEpicDolphin](https://github.com/TheEpicDolphin)
 - [@varun-sundar-rabindranath](https://github.com/varun-sundar-rabindranath)
 - [@vllmellm](https://github.com/vllmellm)
