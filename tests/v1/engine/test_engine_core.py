@@ -4,6 +4,7 @@
 import copy
 import time
 import uuid
+from collections import deque
 from concurrent.futures import Future, ThreadPoolExecutor
 from unittest.mock import MagicMock, PropertyMock, patch
 
@@ -23,6 +24,7 @@ from vllm.config import (
 from vllm.engine.arg_utils import EngineArgs
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_default_torch_num_threads
+from vllm.v1.core.sched.interface import PauseState
 from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.engine.core import DPEngineCoreProc, EngineCore, EngineCoreProc
 from vllm.v1.executor.abstract import Executor
@@ -193,8 +195,7 @@ def test_engine_core():
 
 @create_new_process_for_each_test()
 def test_engine_core_advanced_sampling():
-    """
-    A basic end-to-end test to verify that the engine functions correctly
+    """A basic end-to-end test to verify that the engine functions correctly
     when additional sampling parameters, such as top_p, min_tokens, and
     presence_penalty, are set.
     """
@@ -242,9 +243,7 @@ def test_engine_core_advanced_sampling():
 
 @create_new_process_for_each_test()
 def test_engine_core_concurrent_batches():
-    """
-    Test that the engine can handle multiple concurrent batches.
-    """
+    """Test that the engine can handle multiple concurrent batches."""
 
     def make_request_with_max_tokens(req_id: str, max_tokens: int) -> EngineCoreRequest:
         request = make_request()
@@ -265,7 +264,6 @@ def test_engine_core_concurrent_batches():
             non_block=False,
         ) -> Future[ModelRunnerOutput | None]:
             """Make execute_model non-blocking."""
-
             # DummyExecutor used only for testing async case.
             assert non_block
 
@@ -282,7 +280,6 @@ def test_engine_core_concurrent_batches():
             self, grammar_output, non_block=False
         ) -> Future[ModelRunnerOutput]:
             """Make sample_tokens non-blocking."""
-
             # DummyExecutor used only for testing async case.
             assert non_block
 
@@ -399,12 +396,41 @@ def test_engine_core_concurrent_batches():
         req_id = (req_id + 1) % 2
 
 
+@pytest.mark.parametrize("encoder_only", [True, False])
+def test_async_step_skips_sampling_for_mm_encoder_only(encoder_only):
+    """Encoder outputs are complete; only language-model steps need sampling."""
+    core = MagicMock()
+    core.batch_queue = deque()
+    core.batch_queue_size = 2
+    core.is_mm_encoder_only = encoder_only
+    core.is_pooling_model = False
+    core.scheduler.has_requests.side_effect = [True, False, False]
+    scheduled = core.scheduler.schedule.return_value
+    scheduled.total_num_scheduled_tokens = 16
+    scheduled.pending_structured_output_tokens = False
+
+    output = MagicMock()
+    executed: Future[ModelRunnerOutput | None] = Future()
+    executed.set_result(output if encoder_only else None)
+    sampled: Future[ModelRunnerOutput | None] = Future()
+    sampled.set_result(None if encoder_only else output)
+    core.model_executor.execute_model.return_value = executed
+    core.model_executor.sample_tokens.return_value = sampled
+
+    EngineCore.step_with_batch_queue(core)
+    if core.batch_queue:
+        EngineCore.step_with_batch_queue(core)
+
+    core.scheduler.update_from_output.assert_called_once_with(scheduled, output)
+    if encoder_only:
+        core.model_executor.sample_tokens.assert_not_called()
+    else:
+        core.model_executor.sample_tokens.assert_called_once()
+
+
 @multi_gpu_test(num_gpus=2)
 def test_engine_core_tp():
-    """
-    Test engine can initialize worker in tp properly
-    """
-
+    """Test engine can initialize worker in tp properly."""
     """Setup the EngineCore."""
     engine_args = EngineArgs(
         model=MODEL_NAME,
@@ -490,7 +516,7 @@ def test_encoder_instance_zero_kv_cache(
     enable_prefix_caching: bool,
     use_kv_connector: bool,
 ):
-    """EPD (Encoder-Prefill-Decode) Encoder-cache-specific tests
+    """EPD (Encoder-Prefill-Decode) Encoder-cache-specific tests.
 
     This test verifies encoder-only instance initializes with 0 KV cache blocks.
     Under EPD disagg mode, Encoder instances (EC producer role) only execute
@@ -673,6 +699,29 @@ def _pausable_engine_core_proc() -> EngineCoreProc:
     core.engines_running = False
     core._idle_state_callbacks = []
     return core
+
+
+@pytest.mark.parametrize(
+    "pause_state,has_requests,has_batches",
+    [
+        pytest.param(PauseState.UNPAUSED, False, False, id="not-paused"),
+        pytest.param(PauseState.PAUSED_ALL, True, False, id="pending-requests"),
+        pytest.param(PauseState.PAUSED_ALL, False, True, id="pending-batches"),
+    ],
+)
+def test_kv_cache_release_rejects_unsafe_state(pause_state, has_requests, has_batches):
+    """Reject release before touching caches or memory if work can still use KV."""
+    core = _pausable_engine_core_proc()
+    core.scheduler.pause_state = pause_state
+    core.scheduler.has_requests.return_value = has_requests
+    core.batch_queue = [object()] if has_batches else None
+    core._reset_caches = MagicMock()
+
+    with pytest.raises(RuntimeError, match="requires a completed pause"):
+        core.release_kv_cache_memory()
+
+    core._reset_caches.assert_not_called()
+    core.model_executor.discard.assert_not_called()
 
 
 @pytest.mark.parametrize("deferred", [False, True])

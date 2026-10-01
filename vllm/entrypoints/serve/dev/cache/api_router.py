@@ -23,8 +23,7 @@ async def reset_prefix_cache(
     reset_running_requests: bool = Query(default=False),
     reset_external: bool = Query(default=False),
 ):
-    """
-    Reset the local prefix cache.
+    """Reset the local prefix cache.
 
     Optionally, if the query parameter `reset_external=true`
     also resets the external (connector-managed) prefix cache.
@@ -35,6 +34,7 @@ async def reset_prefix_cache(
 
     Example:
        POST /reset_prefix_cache?reset_external=true
+
     """
     logger.info("Resetting prefix cache...")
 
@@ -46,8 +46,7 @@ async def reset_prefix_cache(
 
 @router.post("/reset_mm_cache")
 async def reset_mm_cache(raw_request: Request):
-    """
-    Reset the multi-modal cache. Note that we currently do not check if the
+    """Reset the multi-modal cache. Note that we currently do not check if the
     multi-modal cache is successfully reset in the API server.
     """
     logger.info("Resetting multi-modal cache...")
@@ -57,8 +56,7 @@ async def reset_mm_cache(raw_request: Request):
 
 @router.post("/reset_encoder_cache")
 async def reset_encoder_cache(raw_request: Request):
-    """
-    Reset the encoder cache. Note that we currently do not check if the
+    """Reset the encoder cache. Note that we currently do not check if the
     encoder cache is successfully reset in the API server.
     """
     logger.info("Resetting encoder cache...")
