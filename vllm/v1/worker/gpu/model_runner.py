@@ -164,7 +164,10 @@ from vllm.v1.worker.gpu.spec_decode.rejection_sampler import (
 from vllm.v1.worker.gpu.spec_decode.speculator import DraftModelSpeculator
 from vllm.v1.worker.gpu.spec_decode.utils import DraftTokensHandler
 from vllm.v1.worker.gpu.states import RequestState
-from vllm.v1.worker.gpu.structured_outputs import StructuredOutputsWorker
+from vllm.v1.worker.gpu.structured_outputs import (
+    StructuredOutputsWorker,
+    grammar_invalid_drafts,
+)
 from vllm.v1.worker.gpu.ubatch_utils import (
     UBatchRunner,
     UBatchState,
@@ -1271,6 +1274,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         ]
         is_prefilling_np = num_computed_prefill_tokens_np < prefill_len_np
         has_prefill = bool(is_prefilling_np.any())
+        max_seq_len_np = None
+        if self.use_pp and has_prefill:
+            # consumed by the PP `compute_need_sampled_mask` for batches with prefill.
+            max_seq_len_np = self.req_states.max_seq_len[idx_mapping_np]
 
         num_draft_tokens_np = None
         if draft_tokens:
@@ -1309,6 +1316,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             has_prefill=has_prefill,
             prefill_runs_as_decode_np=prefill_runs_as_decode_np,
             decode_graph_eligible=decode_graph_eligible,
+            max_seq_len_np=max_seq_len_np,
         )
         return batch_state, get_uniform_decode_token_count(
             num_reqs, num_toks, max_query_len, decode_graph_eligible
@@ -1496,6 +1504,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             has_prefill=batch_req_state.has_prefill,
             prefill_runs_as_decode_np=batch_req_state.prefill_runs_as_decode_np,
             decode_graph_eligible=batch_req_state.decode_graph_eligible,
+            max_seq_len_np=batch_req_state.max_seq_len_np,
             input_ids=self.input_buffers.input_ids[:num_tokens_after_padding],
             positions=self.input_buffers.positions[:num_tokens_after_padding],
             is_padding=is_padding,
@@ -1576,6 +1585,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             sample_hidden_states = hidden_states[input_batch.logits_indices]
             logits = self.model.compute_logits(sample_hidden_states)
 
+        invalid_drafts = None
         # A diffusion prefill has no logit rows even when a bitmask row
         # arrived for it.
         if grammar_output is not None and logits.shape[0] > 0:
@@ -1586,6 +1596,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 input_batch,
                 grammar_output.structured_output_request_ids,
                 grammar_output.grammar_bitmask,
+            )
+            invalid_drafts = grammar_invalid_drafts(
+                input_batch,
+                grammar_output.structured_output_request_ids,
+                grammar_output.num_acceptable_drafts,
             )
 
         sampler_output: SamplerOutput | None
@@ -1605,6 +1620,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 input_batch,
                 # Draft logits are needed for probabilistic rejection sampling.
                 self.speculator.draft_logits,
+                invalid_drafts,
             )
 
         if shard_metadata is not None:
@@ -2382,6 +2398,7 @@ class BatchReqState(NamedTuple):
     prefill_len_np: np.ndarray  # [num_reqs]
     num_computed_prefill_tokens_np: np.ndarray  # [num_reqs]
     is_prefilling_np: np.ndarray  # [num_reqs]
+    max_seq_len_np: np.ndarray | None  # [num_reqs], None in non-pp case
     has_prefill: bool
     prefill_runs_as_decode_np: np.ndarray | None  # [num_reqs]
     decode_graph_eligible: bool
