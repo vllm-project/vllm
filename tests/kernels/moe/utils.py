@@ -97,6 +97,43 @@ def make_dummy_moe_config(
     )
 
 
+def make_test_moe_config(
+    *,
+    ep_rank: int,
+    ep_size: int,
+    device: torch.device | str,
+    num_experts: int,
+    num_local_experts: int,
+    hidden_size: int,
+    max_num_tokens: int,
+    dp_size: int = 1,
+    experts_per_token: int = 1,
+    all2all_backend: str = "deepep_high_throughput",
+) -> FusedMoEConfig:
+    return make_dummy_moe_config(
+        num_experts=num_experts,
+        experts_per_token=experts_per_token,
+        hidden_dim=hidden_size,
+        intermediate_size=hidden_size,
+        device=device,
+        moe_parallel_config=FusedMoEParallelConfig(
+            tp_size=1,
+            pcp_size=1,
+            dp_size=dp_size,
+            ep_size=ep_size,
+            tp_rank=0,
+            pcp_rank=0,
+            dp_rank=0,
+            ep_rank=ep_rank,
+            sp_size=1,
+            use_ep=True,
+            all2all_backend=all2all_backend,
+            enable_eplb=False,
+        ),
+        max_num_tokens=max_num_tokens,
+    )
+
+
 def triton_moe(
     a: torch.Tensor,
     w1: torch.Tensor,

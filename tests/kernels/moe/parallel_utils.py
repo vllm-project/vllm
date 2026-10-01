@@ -15,15 +15,13 @@ from typing_extensions import ParamSpec
 
 from vllm.model_executor.layers.fused_moe.config import (
     FUSED_MOE_UNQUANTIZED_CONFIG,
-    FusedMoEConfig,
-    FusedMoEParallelConfig,
     FusedMoEQuantConfig,
 )
 from vllm.platforms import current_platform
 from vllm.utils.import_utils import has_deep_ep, has_deep_ep_v2
 from vllm.utils.network_utils import get_open_port
 
-from .utils import make_dummy_moe_config
+from .utils import make_test_moe_config
 
 if has_deep_ep():
     from vllm.model_executor.layers.fused_moe.prepare_finalize.deepep_ht import (
@@ -55,35 +53,6 @@ class ProcessGroupInfo:
     node_rank: int
     local_rank: int
     device: torch.device
-
-
-def make_test_moe_config(
-    pgi: ProcessGroupInfo,
-    *,
-    num_experts: int,
-    num_local_experts: int,
-    hidden_size: int,
-    max_num_tokens: int,
-    dp_size: int = 1,
-    experts_per_token: int = 1,
-    all2all_backend: str = "deepep_high_throughput",
-) -> FusedMoEConfig:
-    return make_dummy_moe_config(
-        num_experts=num_experts,
-        experts_per_token=experts_per_token,
-        hidden_dim=hidden_size,
-        intermediate_size=hidden_size,
-        device=pgi.device,
-        moe_parallel_config=dataclasses.replace(
-            FusedMoEParallelConfig.make_no_parallel(),
-            dp_size=dp_size,
-            ep_size=pgi.world_size,
-            ep_rank=pgi.rank,
-            use_ep=True,
-            all2all_backend=all2all_backend,
-        ),
-        max_num_tokens=max_num_tokens,
-    )
 
 
 def _worker_parallel_launch(
@@ -198,7 +167,9 @@ def make_deepep_ht_a2a(
     num_experts = ht_args.num_local_experts * pgi.world_size
     return DeepEPHTPrepareAndFinalize(
         make_test_moe_config(
-            pgi,
+            ep_rank=pgi.rank,
+            ep_size=pgi.world_size,
+            device=pgi.device,
             num_experts=num_experts,
             num_local_experts=ht_args.num_local_experts,
             hidden_size=1,
@@ -245,7 +216,9 @@ def make_deepep_ll_a2a(
 
     return DeepEPLLPrepareAndFinalize(
         make_test_moe_config(
-            pgi,
+            ep_rank=pgi.rank,
+            ep_size=pgi.world_size,
+            device=pgi.device,
             num_experts=deepep_ll_args.num_experts,
             num_local_experts=deepep_ll_args.num_experts // pgi.world_size,
             hidden_size=deepep_ll_args.hidden_size,
@@ -327,7 +300,9 @@ def make_deepep_v2_a2a(
     )
     return DeepEPV2PrepareAndFinalize(
         make_test_moe_config(
-            pgi,
+            ep_rank=pgi.rank,
+            ep_size=pgi.world_size,
+            device=pgi.device,
             num_experts=v2_args.num_experts,
             num_local_experts=v2_args.num_local_experts,
             hidden_size=v2_args.hidden_size,

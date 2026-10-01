@@ -18,7 +18,7 @@ import torch
 import torch.nn.functional as F
 from torch.distributed import ProcessGroup
 
-from tests.kernels.moe.utils import make_test_weights
+from tests.kernels.moe.utils import make_test_moe_config, make_test_weights
 from tests.kernels.utils import torch_experts
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
@@ -32,7 +32,6 @@ from vllm.utils.torch_utils import set_random_seed
 from ...utils import multi_gpu_test
 from .parallel_utils import (
     ProcessGroupInfo,
-    make_test_moe_config,
     parallel_launch,
 )
 
@@ -160,7 +159,9 @@ def make_moonep_prepare_finalize(
         max_tokens_per_rank=max_tokens_per_rank,
     )
     moe_config = make_test_moe_config(
-        pgi,
+        ep_rank=pgi.rank,
+        ep_size=pgi.world_size,
+        device=pgi.device,
         num_experts=num_experts,
         num_local_experts=num_experts // pgi.world_size,
         hidden_size=hidden_size,
