@@ -126,16 +126,33 @@ def test_runai_invalid_extra_config_leaves_environ_untouched():
         assert "RUNAI_STREAMER_CONCURRENCY" not in os.environ
 
 
-def test_runai_get_all_weights_matches_load_weights_source():
-    # model_weights (e.g. an s3:// URI) takes precedence over model, and
-    # revision is passed through.
+@pytest.mark.parametrize(
+    "model_config,expected_source",
+    [
+        # Object storage: model_weights holds the URI, model the pulled config dir.
+        (
+            types.SimpleNamespace(
+                model="/tmp/pulled-config-files",
+                model_weights="s3://bucket/weights",
+                revision="myrev",
+            ),
+            "s3://bucket/weights",
+        ),
+        # HF repo or local path: model_weights is empty, model is the source.
+        (
+            types.SimpleNamespace(
+                model="org/model", model_weights="", revision="myrev"
+            ),
+            "org/model",
+        ),
+    ],
+    ids=["object_storage", "hf_repo"],
+)
+def test_runai_get_all_weights_resolves_source(model_config, expected_source):
     fake_self = types.SimpleNamespace(
         _get_weights_iterator=lambda path, revision: iter(
             [(f"{path}@{revision}", None)]
         )
-    )
-    model_config = types.SimpleNamespace(
-        model="org/model", model_weights="s3://bucket/weights", revision="myrev"
     )
 
     weights = list(
@@ -144,7 +161,7 @@ def test_runai_get_all_weights_matches_load_weights_source():
         )
     )
 
-    assert weights == [("s3://bucket/weights@myrev", None)]
+    assert weights == [(f"{expected_source}@myrev", None)]
 
 
 @pytest.mark.parametrize(
