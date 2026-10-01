@@ -168,7 +168,7 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
                 and config.use_fused_e8m0_scale
                 and config.input_scale_group_size == 128
                 and config.weight_scale_group_size == 32
-                and 1 <= config.num_experts <= 256
+                and config.num_experts > 0
                 for config in self.humming_configs.values()
             )
         )
