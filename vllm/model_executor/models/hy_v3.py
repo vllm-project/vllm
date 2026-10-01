@@ -31,7 +31,7 @@ from typing import Any
 
 import torch
 from torch import nn
-from transformers import PretrainedConfig
+from transformers import PreTrainedConfig
 
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig, get_current_vllm_config
@@ -220,7 +220,7 @@ class HYV3MoEFused(nn.Module):
 class HYV3Attention(nn.Module):
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         hidden_size: int,
         num_heads: int,
         num_kv_heads: int,
@@ -300,8 +300,11 @@ class HYV3Attention(nn.Module):
             prefix=f"{prefix}.attn",
         )
         if self.use_qk_norm:
-            self.q_norm = RMSNorm(self.head_dim, rms_norm_eps)
-            self.k_norm = RMSNorm(self.head_dim, rms_norm_eps)
+            # The HPC fused kernel reads norm weights directly in float32;
+            # the fallback path keeps the model default dtype.
+            norm_dtype = torch.float32 if rope_support else None
+            self.q_norm = RMSNorm(self.head_dim, rms_norm_eps, dtype=norm_dtype)
+            self.k_norm = RMSNorm(self.head_dim, rms_norm_eps, dtype=norm_dtype)
 
         # HPC fused RoPE + QK-Norm + KV-Cache-Write (+ optional FP8 Q quant).
         # HunYuan V3 applies QK-Norm *before* RoPE, so NORM_THEN_ROPE.
@@ -362,7 +365,7 @@ class HYV3Attention(nn.Module):
 class HYV3DecoderLayer(nn.Module):
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",

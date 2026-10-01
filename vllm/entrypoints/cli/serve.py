@@ -13,11 +13,13 @@ from vllm.entrypoints.cli.types import CLISubcommand
 from vllm.entrypoints.launchers.api_server.entry import run_server, setup_server
 from vllm.entrypoints.launchers.cli_args import (
     make_arg_parser,
+    propagate_flash_late_interaction,
     validate_parsed_serve_args,
 )
 from vllm.entrypoints.launchers.dp_supervisor import run_dp_supervisor
 from vllm.entrypoints.serve.utils.api_utils import VLLM_SUBCMD_PARSER_EPILOG
 from vllm.logger import init_logger
+from vllm.reasoning import ReasoningParserManager
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm.utils.network_utils import get_tcp_uri
@@ -54,7 +56,7 @@ class ServeSubcommand(CLISubcommand):
             args.model = args.model_tag
 
         if getattr(args, "grpc", False):
-            from vllm.entrypoints.grpc_server import serve_grpc
+            from vllm.entrypoints.launchers.grpc_server import serve_grpc
 
             uvloop.run(serve_grpc(args))
             return
@@ -179,8 +181,12 @@ def run_headless(args: argparse.Namespace):
     if args.api_server_count > 1:
         raise ValueError("api_server_count can't be set in headless mode")
 
+    if args.reasoning_parser_plugin and len(args.reasoning_parser_plugin) > 3:
+        ReasoningParserManager.import_reasoning_parser(args.reasoning_parser_plugin)
+
     # Create the EngineConfig.
     engine_args = vllm.AsyncEngineArgs.from_cli_args(args)
+    propagate_flash_late_interaction(args, engine_args)
     usage_context = UsageContext.OPENAI_API_SERVER
     vllm_config = engine_args.create_engine_config(
         usage_context=usage_context, headless=True
@@ -291,6 +297,7 @@ def run_multi_api_server(args: argparse.Namespace):
     listen_address, sock = setup_server(args, reuse_port=num_api_servers > 1)
 
     engine_args = vllm.AsyncEngineArgs.from_cli_args(args)
+    propagate_flash_late_interaction(args, engine_args)
     engine_args._api_process_count = num_api_servers
     engine_args._api_process_rank = -1
 

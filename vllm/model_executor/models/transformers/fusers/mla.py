@@ -21,10 +21,10 @@ from vllm.model_executor.models.transformers.fx_utils import (
     recover_forward,
     replace_expr,
     returned_linear,
-    single_self_call,
     upstream_linear,
 )
 from vllm.model_executor.models.transformers.utils import (
+    Style,
     log_replacement,
     replace_linear_class,
 )
@@ -34,10 +34,6 @@ if TYPE_CHECKING:
     from vllm.config import VllmConfig
 
 logger = init_logger(__name__)
-
-# Temporaries the fused down-projection binds in the rewritten forward.
-_Q_A_TEMP = "__q_a_fused"
-_KV_A_TEMP = "__kv_a_fused"
 
 
 def _consumes_placeholder(node: fx.Node) -> bool:
@@ -59,7 +55,7 @@ def _is_rms_norm(module: nn.Module) -> bool:
     # Go via `get_fuser` because it caches
     from vllm.model_executor.models.transformers.fuser import get_fuser
 
-    return isinstance(get_fuser(module), RMSNormFuser)
+    return get_fuser(module, RMSNormFuser) is not None
 
 
 def _top_level_index(funcdef: ast.FunctionDef, node: ast.AST) -> int:
@@ -131,32 +127,28 @@ class MLAFuser(StackedFuser):
     kv_b_proj_name: str
     o_proj_name: str | None
     merged_name: ClassVar[str] = "fused_qkv_a_proj"
-    merged_cls: ClassVar[str] = "MergedColumnParallelLinear"
-
-    @property
-    def has_q_lora(self) -> bool:
-        return self.q_a_proj_name is not None
+    merged_cls_name: ClassVar[str] = "MergedColumnParallelLinear"
 
     def info(self, name: str) -> str:
         info_str = (
             f"Fused: {name} ({self.source_cls}) -> MLAAttention (attention interface)"
         )
-        if self.has_q_lora:
+        if self.q_a_proj_name is not None:
             info_str += "; " + super().info(name).removeprefix("Fused: ")
         return info_str
 
     @property
     def shards(self) -> list[tuple[str, ShardId]]:
         """`q_a_proj` and `kv_a_proj_with_mqa` stack into one down-projection."""
-        if self.has_q_lora:
-            return [(self.q_a_proj_name, 0), (self.kv_a_proj_name, 1)]
-        return []
+        if self.q_a_proj_name is None:
+            return []
+        return [(self.q_a_proj_name, 0), (self.kv_a_proj_name, 1)]
 
     @property
     def packed_modules_mapping(self) -> dict[str, list[str]]:
-        if self.has_q_lora:
-            return super().packed_modules_mapping
-        return {}
+        if self.q_a_proj_name is None:
+            return {}
+        return super().packed_modules_mapping
 
     @classmethod
     def match(cls, graph: fx.Graph, module: nn.Module) -> "MLAFuser | None":
@@ -239,34 +231,16 @@ class MLAFuser(StackedFuser):
         Bypass the KV expansion method so the compressed latent reaches the `vllm_mla`
         attention interface unexpanded."""
         funcdef, fn = recover_forward(type(module))
-        if self.has_q_lora:
+        if (q_a_proj_name := self.q_a_proj_name) is not None:
             # q_a_proj is usually inside the `else` of `if self.q_lora_rank is None`.
             # The fused call is inserted at the top-level statement preceding both.
-            q_call = single_self_call(funcdef, self.q_a_proj_name)
-            kv_call = single_self_call(funcdef, self.kv_a_proj_name)
-            if ast.dump(q_call.args[0]) != ast.dump(kv_call.args[0]):
+            names = [q_a_proj_name, self.kv_a_proj_name]
+            calls = self._unguarded_calls(funcdef, names)
+            if ast.dump(calls[0].args[0]) != ast.dump(calls[1].args[0]):
                 raise ValueError("down-projections read different inputs")
-            names = {n.id for n in ast.walk(funcdef) if isinstance(n, ast.Name)}
-            if names & {_Q_A_TEMP, _KV_A_TEMP}:
-                raise ValueError("fused temporaries would shadow existing names")
-
-            merged = f"self.{self.merged_name}"
-            targets = f"{_Q_A_TEMP}, {_KV_A_TEMP}"
-            sections = f"[s // {merged}.tp_size for s in {merged}.output_sizes]"
-            source = f"{targets} = {merged}(__arg__).split({sections}, -1)"
-            assign = ast.parse(source=source).body[0]
-            placeholder = next(
-                node
-                for node in ast.walk(assign)
-                if isinstance(node, ast.Name) and node.id == "__arg__"
-            )
-            replace_expr(assign, placeholder, q_call.args[0])
-
-            index = min(_top_level_index(funcdef, call) for call in (q_call, kv_call))
-            ast.copy_location(assign, funcdef.body[index])
-            funcdef.body.insert(index, assign)
-            replace_expr(funcdef, q_call, ast.Name(id=_Q_A_TEMP, ctx=ast.Load()))
-            replace_expr(funcdef, kv_call, ast.Name(id=_KV_A_TEMP, ctx=ast.Load()))
+            indices = [_top_level_index(funcdef, call) for call in calls]
+            self._check_input_stable(funcdef, module, calls, funcdef.body, indices)
+            self._splice_merged_split(funcdef, calls, funcdef.body, min(indices))
 
         # Transformers expands the latent into full key/value in a dedicated method.
         # `MLAAttention` consumes the latent directly (absorbing `kv_b_proj`),
@@ -281,7 +255,7 @@ class MLAFuser(StackedFuser):
     def update_attrs(self, module: nn.Module, prefix: str, vllm_config: "VllmConfig"):
         quant_config = vllm_config.quant_config
 
-        def replace_linear_by_name(name: str, style: str):
+        def replace_linear_by_name(name: str, style: Style):
             linear = module.get_submodule(name)
             replacement = replace_linear_class(
                 linear, style, quant_config, prefix=maybe_prefix(prefix, name)
@@ -289,8 +263,10 @@ class MLAFuser(StackedFuser):
             setattr(module, name, replacement)
             log_replacement(maybe_prefix(prefix, name), linear, replacement)
 
-        if self.has_q_lora:
-            q_a = module.get_submodule(self.q_a_proj_name)
+        if (q_a_proj_name := self.q_a_proj_name) is not None:
+            # `match` sets the q-LoRA names together, or none of them
+            assert self.q_b_proj_name is not None
+            q_a = module.get_submodule(q_a_proj_name)
             kv_a = module.get_submodule(self.kv_a_proj_name)
             merged = MergedColumnParallelLinear(
                 input_size=q_a.in_features,
@@ -303,7 +279,7 @@ class MLAFuser(StackedFuser):
             )
             logger.debug(
                 "%s: %s, %s: %s -> %s: %s",
-                self.q_a_proj_name,
+                q_a_proj_name,
                 q_a,
                 self.kv_a_proj_name,
                 kv_a,
@@ -312,10 +288,11 @@ class MLAFuser(StackedFuser):
             )
             setattr(module, self.merged_name, merged)
             # The rewritten forward calls the merged projection instead.
-            delattr(module, self.q_a_proj_name)
+            delattr(module, q_a_proj_name)
             delattr(module, self.kv_a_proj_name)
             replace_linear_by_name(self.q_b_proj_name, "colwise")
         else:
+            assert self.q_proj_name is not None
             replace_linear_by_name(self.kv_a_proj_name, "replicate")
             replace_linear_by_name(self.q_proj_name, "colwise")
 
