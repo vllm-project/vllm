@@ -63,6 +63,9 @@ enum JsonParamType<'a> {
     Object(ObjectType<'a>),
     Array(ArrayType<'a>),
     Null,
+    /// A non-string `const` or `enum` value: text spelling it as JSON decodes
+    /// to it.
+    Literal(&'a Value),
     OneOf(Vec<JsonParamType<'a>>),
 }
 
@@ -174,6 +177,14 @@ impl<'a> JsonParamType<'a> {
         }
         let mut types = Vec::new();
         for option in &options {
+            // String literals stay with the string type, which keeps text
+            // verbatim instead of unquoting text that spells one as JSON.
+            if let OptionSource::Literal(value) = option.source
+                && !value.is_string()
+                && !types.contains(&Self::Literal(value))
+            {
+                types.push(Self::Literal(value));
+            }
             let schema = option.schema();
             let param_type = match option.ty {
                 JsonType::String => Self::String,
@@ -199,6 +210,9 @@ impl<'a> JsonParamType<'a> {
                 types.push(param_type);
             }
         }
+        // Text spelling a literal decodes to it before any type, a string in
+        // particular, accepts the same text.
+        types.sort_by_key(|param_type| !matches!(param_type, Self::Literal(_)));
         match types.len() {
             0 => None,
             1 => types.pop(),
@@ -289,6 +303,9 @@ fn try_convert_text_value(param_type: &JsonParamType<'_>, value: &str) -> Option
         JsonParamType::Object(_) => serde_json::from_str(value).ok().filter(Value::is_object),
         JsonParamType::Array(_) => serde_json::from_str(value).ok().filter(Value::is_array),
         JsonParamType::Null => is_null_literal(value).then_some(Value::Null),
+        JsonParamType::Literal(literal) => serde_json::from_str::<Value>(value.trim())
+            .ok()
+            .filter(|value| value == *literal),
         JsonParamType::OneOf(types) => {
             types.iter().find_map(|param_type| try_convert_text_value(param_type, value))
         }
@@ -324,7 +341,8 @@ fn try_convert_elements_value(
         | JsonParamType::Integer
         | JsonParamType::Number
         | JsonParamType::Boolean
-        | JsonParamType::Null => None,
+        | JsonParamType::Null
+        | JsonParamType::Literal(_) => None,
     }
 }
 
@@ -770,6 +788,25 @@ mod tests {
                 "right": { "value": 4 }
             })
         );
+    }
+
+    #[test]
+    fn mixed_enums_decode_text_spelling_a_non_string_literal_to_it() {
+        let params = ToolSchema::from_schema(json!({
+            "type": "object",
+            "properties": {
+                "mode": { "enum": ["fast", 1] },
+                "flag": { "enum": ["auto", true] }
+            }
+        }));
+
+        assert_eq!(params.convert("mode", text("1")), json!(1));
+        assert_eq!(params.convert("mode", text("fast")), json!("fast"));
+        // Text matching no literal keeps the schema order, which tries the
+        // string first.
+        assert_eq!(params.convert("mode", text("2")), json!("2"));
+        assert_eq!(params.convert("flag", text("true")), json!(true));
+        assert_eq!(params.convert("flag", text("auto")), json!("auto"));
     }
 
     #[test]
