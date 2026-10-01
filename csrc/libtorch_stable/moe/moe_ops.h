@@ -36,11 +36,13 @@ void moe_sum(torch::stable::Tensor& input, torch::stable::Tensor& output,
              std::optional<torch::stable::Tensor> topk_ids,
              std::optional<torch::stable::Tensor> expert_map);
 
-void moe_align_block_size(
-    torch::stable::Tensor topk_ids, int64_t num_experts, int64_t block_size,
-    torch::stable::Tensor sorted_token_ids, torch::stable::Tensor experts_ids,
-    torch::stable::Tensor num_tokens_post_pad,
-    std::optional<torch::stable::Tensor> maybe_expert_map);
+void moe_align_block_size(torch::stable::Tensor topk_ids, int64_t num_experts,
+                          int64_t block_size,
+                          torch::stable::Tensor sorted_token_ids,
+                          torch::stable::Tensor experts_ids,
+                          torch::stable::Tensor num_tokens_post_pad,
+                          std::optional<torch::stable::Tensor> maybe_expert_map,
+                          std::optional<torch::stable::Tensor> scatter_idx);
 
 void batched_moe_align_block_size(
     int64_t max_tokens_per_batch, int64_t block_size,
