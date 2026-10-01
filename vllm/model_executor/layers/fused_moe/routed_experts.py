@@ -921,7 +921,9 @@ class RoutedExperts(PluggableLayer):
                 if qual_name.count("experts.") == 1
                 else None
             )
-            # Encoded per-expert weights also have three dimensions.
+            # Encoded per-expert [N, K / block_size, bytes_per_block] weights
+            # have the same rank as fused [E, N, K] weights. An explicit expert
+            # name identifies the per-expert layout without treating N as E.
             is_fused = loaded_weight.dim() == 3 and named_expert is None
             # Fused tensors and ambiguous names keep the full mapping.
             candidates = expert_mapping
