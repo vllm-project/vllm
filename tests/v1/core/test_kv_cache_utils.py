@@ -1022,7 +1022,7 @@ def test_generate_block_hash_extra_keys_lora():
     )
 
     extra_keys, _ = generate_block_hash_extra_keys(request, 0, 3, 0)
-    assert extra_keys == (("lora", "test_lora_adapter"),)
+    assert extra_keys == (("lora", "test_lora_adapter", "/path/to/lora"),)
 
     request.lora_request = None
     extra_keys, _ = generate_block_hash_extra_keys(request, 0, 3, 0)
@@ -1048,6 +1048,28 @@ def test_lora_name_and_cache_salt_block_hashes_do_not_collide(hash_fn):
     assert lora_req.block_hashes[0] != salted_req.block_hashes[0]
 
 
+@pytest.mark.parametrize("hash_fn", [sha256, sha256_cbor])
+def test_lora_path_change_changes_block_hashes(hash_fn):
+    """Re-pointing a LoRA name at another adapter must not reuse its blocks."""
+
+    def make_lora_request(lora_path: str) -> Request:
+        return Request(
+            request_id=lora_path,
+            prompt_token_ids=[0, 1, 2],
+            sampling_params=SamplingParams(max_tokens=1),
+            pooling_params=None,
+            lora_request=LoRARequest(
+                lora_name="foo", lora_int_id=1, lora_path=lora_path
+            ),
+            block_hasher=get_request_block_hasher(3, hash_fn),
+        )
+
+    first = make_lora_request("/path/to/lora_a")
+    second = make_lora_request("/path/to/lora_b")
+
+    assert first.block_hashes[0] != second.block_hashes[0]
+
+
 def test_to_event_extra_keys_keeps_untagged_event_format():
     """KV events keep publishing the extra-key shapes consumers already parse."""
     request = make_request(
@@ -1064,7 +1086,7 @@ def test_to_event_extra_keys_keeps_untagged_event_format():
     extra_keys, _ = generate_block_hash_extra_keys(request, 0, 5, 0)
 
     assert extra_keys == (
-        ("lora", "adapter"),
+        ("lora", "adapter", "/path/to/lora"),
         ("mm", "hash1", 2),
         ("cache_salt", "salt"),
     )
