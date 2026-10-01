@@ -581,7 +581,11 @@ def pack_skinny_int4(unpacked: torch.Tensor) -> torch.Tensor:
     ExLlama shuffle to [N, K//8] int32, viewed as int8 [N, K//2]. On gfx1151
     the row stride is nudged off the cliff (see ``_weight_pad_bytes``).
     """
-    shuffled = pack_int4_exllama_shuffle(unpacked)
+    return _to_skinny_int4(pack_int4_exllama_shuffle(unpacked))
+
+
+def _to_skinny_int4(shuffled: torch.Tensor) -> torch.Tensor:
+    """View shuffled [N, K//8] int32 weights as int8, padding gfx1151 rows."""
     n_rows, k8 = shuffled.shape
     pad_int32 = _weight_pad_bytes(k8 * 4) // 4
     if not (pad_int32 and _on_gfx1151()):
@@ -815,20 +819,28 @@ class RDNAHybridW4A16LinearKernel(MPLinearKernel):
         )
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        import vllm._custom_ops as ops
+
         c = self.config
 
         w_q_raw = getattr(layer, self.w_q_name)
 
-        unpacked = unpack_quantized_values_into_int32(
-            w_q_raw.data, c.weight_type, packed_dim=w_q_raw.packed_dim
-        )
-        # AWQ weights arrive as (K, N) with output_dim=1;
-        # compressed-tensors arrive as (N, K) with output_dim=0.
-        if getattr(w_q_raw, "output_dim", 0) != 0:
-            unpacked = unpacked.t().contiguous()
+        kernel_config = get_current_vllm_config().kernel_config
+        cache_dequant = kernel_config.rdna_hybrid_w4a16_prefill_dequant == "enable"
+        if cache_dequant:
+            unpacked = unpack_quantized_values_into_int32(
+                w_q_raw.data, c.weight_type, packed_dim=w_q_raw.packed_dim
+            )
+            if getattr(w_q_raw, "output_dim", 0) != 0:
+                unpacked = unpacked.t().contiguous()
 
-        # Store as int8; Triton reinterprets via .view(torch.int32) at apply time.
-        w_q_skinny = pack_skinny_int4(unpacked)
+        packed = w_q_raw.data
+        if w_q_raw.packed_dim != 0:
+            packed = packed.t()
+        # GPTQ shuffle mutates a contiguous [K//8, N] tensor.
+        packed = packed.clone(memory_format=torch.contiguous_format)
+        ops.gptq_shuffle(packed, 4)
+        w_q_skinny = _to_skinny_int4(packed.t())
 
         # Permute via `_transform_param`, so the loader params keep their dims.
         if c.zero_points:
@@ -850,8 +862,7 @@ class RDNAHybridW4A16LinearKernel(MPLinearKernel):
             ).data.contiguous(),
         )
 
-        kernel_config = get_current_vllm_config().kernel_config
-        if kernel_config.rdna_hybrid_w4a16_prefill_dequant == "enable":
+        if cache_dequant:
             _, w_s, w_zp = self._get_weight_params(layer)
             self._cache_dequant_weight(
                 layer, unpacked, w_s.data, w_zp.data if w_zp is not None else None
