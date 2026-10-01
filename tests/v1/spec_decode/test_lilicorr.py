@@ -305,56 +305,40 @@ def test_context_anchor_is_last_committed_normalized_feature():
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
-def test_graph_context_step_rereads_staged_inputs():
-    """A replayed context step follows new staged inputs, padding and tail rows."""
+def test_captured_context_anchor_rereads_fixed_inputs():
+    """The anchor runs in the draft's FULL graph: each replay must re-read its
+    fixed-address inputs and ignore a padded request's stale rejected count."""
     from vllm.v1.worker.gpu.spec_decode.dflash.speculator import DFlashSpeculator
 
-    dev, i32 = torch.device("cuda"), torch.int32
+    dev = torch.device("cuda")
+    query_start_loc = torch.zeros(3, dtype=torch.int32, device=dev)
     spec = SimpleNamespace(
-        hidden_states=torch.zeros(8, 2, device=dev),
-        _aux_staging=torch.zeros(4, 4, device=dev),
-        _num_rejected=torch.zeros(2, dtype=i32, device=dev),
-        target_input_buffers=SimpleNamespace(
-            query_start_loc=torch.zeros(3, dtype=i32, device=dev)
-        ),
-        model=SimpleNamespace(
-            combine_hidden_states=lambda aux: aux[:, :2] + aux[:, 2:],
-            model=SimpleNamespace(hidden_norm=lambda x: 2 * x),
-        ),
+        hidden_states=torch.randn(8, 2, device=dev),
+        _aux_staging=None,
+        _num_rejected=torch.zeros(2, dtype=torch.int32, device=dev),
+        target_input_buffers=SimpleNamespace(query_start_loc=query_start_loc),
+        model=SimpleNamespace(model=SimpleNamespace(hidden_norm=lambda x: 2 * x)),
         anchor_hidden=torch.zeros(2, 2, device=dev),
         anchor_valid=torch.zeros(2, dtype=torch.bool, device=dev),
         _num_graph_context_tokens=lambda num_reqs: 2 * num_reqs,
         _precompute_context_kv=lambda start, end: None,
     )
-    spec.prepare_context_anchor = lambda *a: LiLiCorrSpeculator.prepare_context_anchor(
-        spec, *a
+    spec.prepare_context_anchor = lambda *args: (
+        LiLiCorrSpeculator.prepare_context_anchor(spec, *args)
     )
     DFlashSpeculator._prepare_graph_context(spec, 2)
     graph = torch.cuda.CUDAGraph()
     with torch.cuda.graph(graph):
         DFlashSpeculator._prepare_graph_context(spec, 2)
-
-    def replay(query_start_loc, num_rejected, anchor_rows, valid):
-        aux = torch.randn(4, 4, device=dev)
-        spec._aux_staging.copy_(aux)
-        spec.target_input_buffers.query_start_loc.copy_(torch.tensor(query_start_loc))
-        spec._num_rejected.copy_(torch.tensor(num_rejected))
+    # One live request padded to two; the second case anchors past the 4 graph
+    # rows, on a row stored eagerly before replay.
+    for loc, rejected, row in (([0, 2, 2], [1, 5], 0), ([0, 7, 7], [0, 0], 6)):
+        query_start_loc.copy_(torch.tensor(loc))
+        spec._num_rejected.copy_(torch.tensor(rejected))
         graph.replay()
-        torch.testing.assert_close(spec.hidden_states[:4], aux[:, :2] + aux[:, 2:])
-        expected = (
-            2
-            * spec.hidden_states[anchor_rows]
-            * torch.tensor(valid, device=dev)[:, None]
-        )
-        torch.testing.assert_close(spec.anchor_hidden, expected)
-        assert spec.anchor_valid.tolist() == valid
-
-    replay([0, 2, 4], [0, 1], [1, 2], [True, True])
-    # One live request padded to two: its padding row's stale count is ignored.
-    replay([0, 2, 2], [1, 5], [0, 0], [True, False])
-    # A prefill past the graph's rows anchors on a row stored eagerly before replay.
-    spec.hidden_states[4:].copy_(torch.randn(4, 2, device=dev))
-    replay([0, 7, 7], [0, 0], [6, 0], [True, False])
+        torch.testing.assert_close(spec.anchor_hidden[0], 2 * spec.hidden_states[row])
+        assert spec.anchor_valid.tolist() == [True, False]
+        assert not spec.anchor_hidden[1].any()
 
 
 @pytest.mark.parametrize("lilicorr", [False, True])
