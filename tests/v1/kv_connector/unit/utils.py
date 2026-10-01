@@ -554,7 +554,6 @@ def make_nixl_scheduler(
         sched._hisparse_host_blocks_to_recv = {}
         sched._reqs_need_send = {}
         sched._reqs_in_batch = set()
-        sched._reqs_recving = set()
         sched._reqs_not_processed = set()
         sched._reqs_need_save = {}
         sched.use_host_buffer = False
@@ -593,7 +592,6 @@ def make_nixl_push_scheduler(
     sched._reqs_need_recv = {}
     sched._reqs_need_send = {}
     sched._reqs_in_batch = set()
-    sched._reqs_recving = set()
     sched._reqs_not_processed = set()
     sched._reqs_need_save = {}
     sched._kv_lease_duration = 30
