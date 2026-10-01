@@ -86,13 +86,12 @@ CHECK_IMPORTS = {
             "or 'import pybase64 as base64'."
         ),
         allowed_pattern=re.compile(r"^\s*import\s+pybase64(\s*|\s+as\s+base64\s*)$"),
-        allowed_files={"tools/vllm-rocm/therock_wheels.py"},
     ),
     "re": ForbiddenImport(
         pattern=r"^\s*(?:import\s+re(?:$|\s|,)|from\s+re\s+import)",
         tip="Replace 'import re' with 'import regex as re' or 'import regex'.",
         allowed_pattern=re.compile(r"^\s*import\s+regex(\s*|\s+as\s+re\s*)$"),
-        allowed_files={"setup.py", "tools/vllm-rocm/therock_wheels.py"},
+        allowed_files={"setup.py"},
     ),
     "triton": ForbiddenImport(
         pattern=r"^(from|import)\s+triton(\s|\.|$)",

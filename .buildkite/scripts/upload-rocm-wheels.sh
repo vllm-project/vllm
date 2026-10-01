@@ -114,6 +114,8 @@ mkdir -p "$INDICES_OUTPUT_DIR"
 # Use the existing generate-nightly-index.py
 # HACK: Replace regex module with stdlib re (same as CUDA script)
 sed -i 's/import regex as re/import re/g' .buildkite/scripts/generate-nightly-index.py
+sed -i 's/import regex as re/import re/g' tools/vllm-rocm/therock_wheels.py
+sed -i 's/import pybase64 as base64/import base64/g' tools/vllm-rocm/therock_wheels.py
 
 INDEX_ARGS=(--version "$ROCM_SUBPATH" --wheel-dir "${WHEEL_SUBPATH#rocm/}")
 # TheRock's SDK, device kernels and torchvision/torchaudio are linked, not hosted

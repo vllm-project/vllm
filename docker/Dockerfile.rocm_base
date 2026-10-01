@@ -347,7 +347,10 @@ ARG TORCH_VERSION
 ARG ROCM_RELEASE_WHEELS_MULTIARCH_URL
 ARG ROCM_NIGHTLY_WHEELS_MULTIARCH_URL
 COPY tools/vllm-rocm/therock_wheels.py /tmp/therock_wheels.py
-RUN pip download --no-deps --dest /tmp/torch-dl \
+# regex and pybase64 aren't installed here; fall back to the stdlib modules.
+RUN sed -i -e 's/import regex as re/import re/' \
+        -e 's/import pybase64 as base64/import base64/' /tmp/therock_wheels.py \
+    && pip download --no-deps --dest /tmp/torch-dl \
         --index-url ${ROCM_RELEASE_WHEELS_MULTIARCH_URL} \
         --extra-index-url ${ROCM_NIGHTLY_WHEELS_MULTIARCH_URL} \
         "torch==${TORCH_VERSION}" \
