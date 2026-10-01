@@ -2345,3 +2345,36 @@ def test_v41_indexer_forward_q(quant_tuple):
         "use_fp4": False,
         "weights_out_dtype": torch.float32,
     }
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA only")
+def test_v41_ring_slot_mapping_skips_null_block():
+    """Requests on block 0 (dummy runs) and padding map to -1, not the null block."""
+    from vllm.models.deepseek_v41.compressor import _ring_slot_mapping_kernel
+
+    capacity = 8
+    block_table = torch.tensor([[0], [5]], dtype=torch.int32, device="cuda")
+    # req 0 (block 0, like a dummy run): 3 tokens; req 1 (block 5): 4 tokens;
+    # then 2 padding tokens past num_actual_tokens.
+    token_to_req = torch.tensor(
+        [0, 0, 0, 1, 1, 1, 1, 0, 0], dtype=torch.int32, device="cuda"
+    )
+    positions = torch.tensor(
+        [0, 1, 2, 6, 7, 8, 9, 0, 0], dtype=torch.int64, device="cuda"
+    )
+    num_actual_tokens, num_tokens = 7, 9
+    slot_mapping = torch.full((num_tokens,), 123, dtype=torch.int64, device="cuda")
+    _ring_slot_mapping_kernel[(1,)](
+        slot_mapping,
+        block_table,
+        block_table.stride(0),
+        token_to_req,
+        positions,
+        num_actual_tokens,
+        num_tokens,
+        CAPACITY=capacity,
+        BLOCK=16,
+    )
+    expected = [-1, -1, -1] + [5 * capacity + p % capacity for p in (6, 7, 8, 9)]
+    expected += [-1, -1]
+    assert slot_mapping.tolist() == expected
