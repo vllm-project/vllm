@@ -531,13 +531,49 @@ class CudaCommunicator(DeviceCommunicatorBase):
                 output_shape, dtype=input_tensor.dtype, device=input_tensor.device
             )
             use_deterministic_rs = envs.VLLM_BATCH_INVARIANT and world_size > 2
+            heterogeneous = sizes is not None and sizes.count(sizes[0]) != len(sizes)
             if use_deterministic_rs:
                 # Reduce to a fixed root (0) for determinism
                 reduced = torch.empty_like(input_tensor)
                 sizes = sizes if sizes else [chunk_size] * world_size
                 pynccl_comm.reduce(reduced, input_tensor, root=0)
                 pynccl_comm.scatter(output, reduced, sizes, root=0)
-            elif sizes is not None and sizes.count(sizes[0]) != len(sizes):
+            elif heterogeneous and torch.cuda.is_current_stream_capturing():
+                # pynccl.reduce_scatterv() uses Python-computed slice
+                # data_ptr()s baked into the CUDA graph at capture time.  At
+                # replay with a different per-rank batch distribution those
+                # pointers become stale, causing Xid-31 MMU faults (bug
+                # #59607).  Work-around: pad every rank's chunk to max_size,
+                # run a uniform ncclReduceScatter (graph-safe fixed
+                # addresses), then zero-copy slice the first `chunk_size`
+                # rows from the padded output.  Padding rows are zero-filled
+                # so they contribute nothing to the reduction.
+                max_chunk = max(sizes)
+                padded_rows = max_chunk * world_size
+                extra_rows = padded_rows - input_tensor.shape[0]
+                if extra_rows > 0:
+                    padding = input_tensor.new_zeros(
+                        (extra_rows,) + input_tensor.shape[1:]
+                    )
+                    padded_input = torch.cat([input_tensor, padding], dim=0)
+                else:
+                    padded_input = input_tensor
+                # padded_output has a fixed shape; ncclReduceScatter is
+                # graph-friendly because it uses a single contiguous buffer.
+                padded_output = torch.empty(
+                    (max_chunk,) + input_tensor.shape[1:],
+                    dtype=input_tensor.dtype,
+                    device=input_tensor.device,
+                )
+                pynccl_comm.reduce_scatter(padded_output, padded_input)
+                # Trim: only the first `chunk_size` rows are valid; the rest
+                # are padding and must be discarded.  This slice does NOT
+                # produce a new allocation — it is a view with a stable
+                # data_ptr relative to padded_output, so it is safe inside
+                # the already-captured graph when the output tensor is later
+                # used by downstream ops.
+                output.copy_(padded_output[:chunk_size])
+            elif heterogeneous:
                 pynccl_comm.reduce_scatterv(output, input_tensor, sizes=sizes)
             else:
                 pynccl_comm.reduce_scatter(output, input_tensor)
@@ -768,6 +804,8 @@ class CudaCommunicator(DeviceCommunicatorBase):
                 return self._all_gather_symm_mem(input_)
             return self._all_gather_batched_symm_mem(input_)
 
+        heterogeneous = sizes is not None and sizes.count(sizes[0]) != len(sizes)
+
         def _all_gather_single(input_: torch.Tensor, sizes: list[int] | None = None):
             input_size = input_.size()
             if sizes is not None:
@@ -782,7 +820,39 @@ class CudaCommunicator(DeviceCommunicatorBase):
             output_tensor = torch.empty(
                 output_size, dtype=input_.dtype, device=input_.device
             )
-            if sizes is not None:
+            if heterogeneous and torch.cuda.is_current_stream_capturing():
+                # pynccl.all_gatherv() uses Python-computed destination slice
+                # data_ptr()s baked into the CUDA graph.  At replay those
+                # pointers become stale when per-rank batch sizes change,
+                # causing Xid-31 MMU faults (bug #59607).  Work-around: pad
+                # each rank's local tensor to max_size so that all ranks send
+                # the same amount, run a uniform ncclAllGather (graph-safe
+                # fixed addresses), then compact the padded gather result into
+                # output_tensor by copying each rank's valid rows.
+                assert sizes is not None
+                max_size = max(sizes)
+                extra = max_size - input_size[0]
+                if extra > 0:
+                    padding = input_.new_zeros((extra,) + input_size[1:])
+                    padded_input = torch.cat([input_, padding], dim=0)
+                else:
+                    padded_input = input_
+                # Fixed-shape gather buffer: [world_size * max_size, ...]
+                padded_gather = torch.empty(
+                    (max_size * world_size,) + input_size[1:],
+                    dtype=input_.dtype,
+                    device=input_.device,
+                )
+                pynccl_comm.all_gather(padded_gather, padded_input)
+                # Compact: copy each rank's valid rows, discarding padding.
+                write_offset = 0
+                for r, sz in enumerate(sizes):
+                    if sz > 0:
+                        output_tensor[write_offset : write_offset + sz].copy_(
+                            padded_gather[r * max_size : r * max_size + sz]
+                        )
+                    write_offset += sz
+            elif sizes is not None:
                 pynccl_comm.all_gatherv(output_tensor, input_, sizes=sizes)
             else:
                 pynccl_comm.all_gather(output_tensor, input_)
