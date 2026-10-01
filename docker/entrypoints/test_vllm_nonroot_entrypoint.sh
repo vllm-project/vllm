@@ -43,6 +43,7 @@ run_wrapper() {
         _env="$_env $1"; shift
     done
     shift
+    # shellcheck disable=SC2086  # word splitting is intentional: $_env holds multiple NAME=value assignments
     env -i PATH="$WORKDIR/bin:/usr/bin:/bin" $_env "$WRAPPER" "$@" > "$_out"
 }
 
@@ -140,9 +141,8 @@ fake_passwd="$WORKDIR/fake-passwd-prepopulated"
 printf 'vllm:x:%s:%s:vllm:/home/vllm:/bin/bash\n' "$current_uid" "$current_gid" > "$fake_passwd"
 out="$WORKDIR/case6.out"
 run_wrapper "$out" "HOME=$case5_home" "VLLM_PASSWD_FILE=$fake_passwd" -- --model foo
-line_count="$(wc -l < "$fake_passwd")"
-# NOTE: wc may count 0 or 1 depending on trailing newline; accept 1.
-# More robust: count lines matching our UID.
+# wc may count 0 or 1 depending on trailing newline, so count lines
+# matching our UID instead for a robust check.
 uid_lines="$(grep -c ":${current_uid}:" "$fake_passwd" || true)"
 [ "$uid_lines" = "1" ] \
     || { echo "FAIL: case6: expected exactly one entry for UID $current_uid, got $uid_lines"; cat "$fake_passwd"; exit 1; }

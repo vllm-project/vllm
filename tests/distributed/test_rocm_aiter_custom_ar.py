@@ -8,7 +8,7 @@ import torch.distributed as dist
 
 from vllm._aiter_ops import is_aiter_found, rocm_aiter_ops
 from vllm.distributed.communication_op import tensor_model_parallel_all_reduce  # noqa
-from vllm.distributed.parallel_state import get_tp_group, graph_capture
+from vllm.distributed.parallel_state import get_dp_group, get_tp_group, graph_capture
 from vllm.envs import disable_envs_cache
 from vllm.platforms import current_platform
 
@@ -132,3 +132,173 @@ def test_rocm_aiter_custom_allreduce(
     test_target,
 ):
     multi_process_parallel(monkeypatch, tp_size, pipeline_parallel_size, test_target)
+
+
+def _get_aiter_ag_rs_comm():
+    device_communicator = get_dp_group().device_communicator
+    assert device_communicator.use_aiter_ag_rs, (
+        "AITER custom AG/RS was not enabled on the DP group."
+    )
+    aiter_comm = device_communicator.aiter_ar_comm
+    assert aiter_comm is not None, "AITER custom AG/RS was not initialized."
+    assert not aiter_comm.disabled, "AITER custom AG/RS is disabled."
+    return aiter_comm
+
+
+def _assert_aiter_handles_ag(aiter_comm, inp: torch.Tensor) -> None:
+    assert aiter_comm.should_custom_ag(inp), (
+        f"AITER custom all-gather does not support input shape {inp.shape}."
+    )
+
+
+def _assert_aiter_handles_rs(aiter_comm, inp: torch.Tensor) -> None:
+    assert aiter_comm.should_custom_rs(inp, dim=0), (
+        f"AITER custom reduce-scatter does not support input shape {inp.shape}."
+    )
+
+
+@ray.remote(num_gpus=1, max_calls=1)
+def eager_ag_rs(
+    monkeypatch: pytest.MonkeyPatch,
+    tp_size,
+    pp_size,
+    rank,
+    distributed_init_port,
+    data_parallel_size,
+    data_parallel_master_port,
+) -> None:
+    with monkeypatch.context() as m:
+        _configure_aiter_custom_ar_env(m)
+
+        device = torch.device(f"cuda:{rank}")
+        torch.accelerator.set_device_index(device)
+        init_test_distributed_environment(
+            tp_size,
+            pp_size,
+            rank,
+            distributed_init_port,
+            data_parallel_size=data_parallel_size,
+            data_parallel_master_port=data_parallel_master_port,
+        )
+
+        dp_group = get_dp_group()
+        group = dp_group.device_group
+        dp_world = dp_group.world_size
+        aiter_comm = _get_aiter_ag_rs_comm()
+
+        for shape, dtype in test_cases:
+            num_tokens, hidden = shape
+
+            # all-gather: each rank contributes (num_tokens, hidden).
+            inp = torch.ones(shape, dtype=dtype, device=device) * (rank + 1)
+            _assert_aiter_handles_ag(aiter_comm, inp)
+            expected = torch.empty(
+                (num_tokens * dp_world, hidden), dtype=dtype, device=device
+            )
+            dist.all_gather_into_tensor(expected, inp, group=group)
+            out = aiter_comm.custom_all_gather(inp, dim=0)
+            assert out is not None
+            torch.testing.assert_close(out, expected)
+
+            # reduce-scatter: each rank contributes (num_tokens * dp, hidden).
+            rs_in = torch.ones(
+                (num_tokens * dp_world, hidden), dtype=dtype, device=device
+            ) * (rank + 1)
+            _assert_aiter_handles_rs(aiter_comm, rs_in)
+            rs_expected = torch.empty((num_tokens, hidden), dtype=dtype, device=device)
+            dist.reduce_scatter_tensor(rs_expected, rs_in, group=group)
+            rs_out = torch.empty((num_tokens, hidden), dtype=dtype, device=device)
+            aiter_comm.custom_reduce_scatter(rs_in, rs_out, dim=0)
+            torch.testing.assert_close(rs_out, rs_expected)
+
+
+@ray.remote(num_gpus=1, max_calls=1)
+def graph_ag_rs(
+    monkeypatch: pytest.MonkeyPatch,
+    tp_size,
+    pp_size,
+    rank,
+    distributed_init_port,
+    data_parallel_size,
+    data_parallel_master_port,
+) -> None:
+    with monkeypatch.context() as m:
+        _configure_aiter_custom_ar_env(m)
+
+        device = torch.device(f"cuda:{rank}")
+        torch.accelerator.set_device_index(device)
+        init_test_distributed_environment(
+            tp_size,
+            pp_size,
+            rank,
+            distributed_init_port,
+            data_parallel_size=data_parallel_size,
+            data_parallel_master_port=data_parallel_master_port,
+        )
+
+        dp_group = get_dp_group()
+        group = dp_group.device_group
+        dp_world = dp_group.world_size
+        aiter_comm = _get_aiter_ag_rs_comm()
+
+        # Warmup so DP comms is initialized before graph capture
+        data = torch.zeros(1, device=device)
+        dist.all_reduce(data, group=group)
+        torch.accelerator.synchronize()
+        del data
+
+        for shape, dtype in test_cases:
+            num_tokens, hidden = shape
+
+            # all-gather under graph capture.
+            inp = torch.ones(shape, dtype=dtype, device=device) * (rank + 1)
+            _assert_aiter_handles_ag(aiter_comm, inp)
+            ag_expected = torch.empty(
+                (num_tokens * dp_world, hidden), dtype=dtype, device=device
+            )
+            dist.all_gather_into_tensor(ag_expected, inp, group=group)
+            with graph_capture(device=device) as graph_capture_context:
+                torch.accelerator.synchronize()
+                graph = torch.cuda.CUDAGraph()
+                with torch.cuda.graph(graph, stream=graph_capture_context.stream):
+                    ag_out = aiter_comm.custom_all_gather(inp, dim=0)
+            graph.replay()
+            torch.testing.assert_close(ag_out, ag_expected)
+
+            # reduce-scatter under graph capture.
+            rs_in = torch.ones(
+                (num_tokens * dp_world, hidden), dtype=dtype, device=device
+            ) * (rank + 1)
+            _assert_aiter_handles_rs(aiter_comm, rs_in)
+            rs_expected = torch.empty((num_tokens, hidden), dtype=dtype, device=device)
+            dist.reduce_scatter_tensor(rs_expected, rs_in, group=group)
+            rs_out = torch.empty((num_tokens, hidden), dtype=dtype, device=device)
+            with graph_capture(device=device) as graph_capture_context:
+                torch.accelerator.synchronize()
+                graph = torch.cuda.CUDAGraph()
+                with torch.cuda.graph(graph, stream=graph_capture_context.stream):
+                    aiter_comm.custom_reduce_scatter(rs_in, rs_out, dim=0)
+            graph.replay()
+            torch.testing.assert_close(rs_out, rs_expected)
+
+
+@pytest.mark.skipif(not is_aiter_found(), reason="AITER is not installed")
+@multi_gpu_test(num_gpus=2)
+@pytest.mark.parametrize("tp_size", [1])
+@pytest.mark.parametrize("pipeline_parallel_size", [1])
+@pytest.mark.parametrize("data_parallel_size", [2])
+@pytest.mark.parametrize("test_target", [eager_ag_rs, graph_ag_rs])
+def test_rocm_aiter_custom_ag_rs(
+    monkeypatch: pytest.MonkeyPatch,
+    tp_size,
+    pipeline_parallel_size,
+    data_parallel_size,
+    test_target,
+):
+    multi_process_parallel(
+        monkeypatch,
+        tp_size,
+        pipeline_parallel_size,
+        test_target,
+        data_parallel_size=data_parallel_size,
+    )

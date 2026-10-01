@@ -11,7 +11,7 @@ from contextlib import contextmanager
 import pytest
 import torch
 
-from tests.utils import wait_for_rocm_memory_to_settle
+from tests.utils import wait_for_memory_to_settle
 from vllm.distributed import cleanup_dist_env_and_memory
 from vllm.entrypoints.pooling.scoring.utils import compute_maxsim_score
 
@@ -128,9 +128,12 @@ def _load_projection_weight(model_name: str, hf_spec: dict, device: torch.device
     """Download and return the ColBERT linear projection weight."""
     from safetensors.torch import load_file
 
-    from vllm.transformers_utils.repo_utils import hf_api
+    from vllm.transformers_utils.repo_utils import hf_api, with_retry
 
-    path = hf_api().hf_hub_download(model_name, filename=hf_spec["weights_file"])
+    path = with_retry(
+        lambda: hf_api().hf_hub_download(model_name, filename=hf_spec["weights_file"]),
+        f"Error downloading {hf_spec['weights_file']} from {model_name}",
+    )
     weights = load_file(path)
     return weights[hf_spec["weights_key"]].to(device)
 
@@ -165,7 +168,7 @@ def _hf_colbert_model(model_name: str, hf_spec: dict, device: torch.device):
     finally:
         del hf_model, linear_weight
         cleanup_dist_env_and_memory()
-        wait_for_rocm_memory_to_settle()
+        wait_for_memory_to_settle()
 
 
 def _assert_embeddings_close(vllm_outputs, hf_embeddings):
@@ -323,8 +326,8 @@ class TestColbertSharedEngine:
     [
         pytest.param("bert", True, id="bert-v2"),
         pytest.param("modernbert", True, id="modernbert-v2"),
-        pytest.param("jina", False, id="jina-v1"),
-        pytest.param("lfm2", False, id="lfm2-v1"),
+        pytest.param("jina", True, id="jina-v2"),
+        pytest.param("lfm2", True, id="lfm2-v2"),
     ],
 )
 def test_colbert_hf_comparison(vllm_runner, monkeypatch, backend, use_v2):

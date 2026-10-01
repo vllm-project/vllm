@@ -19,15 +19,15 @@ from openai.types.responses import (
 from openai.types.responses.tool import Tool as ResponsesTool
 from partial_json_parser.core.options import Allow
 
-from vllm.entrypoints.openai.chat_completion.protocol import (
-    ChatCompletionNamedToolChoiceParam,
-    ChatCompletionToolsParam,
-)
-from vllm.entrypoints.openai.engine.protocol import (
+from vllm.entrypoints.generate.base.protocol import (
     DeltaFunctionCall,
     DeltaToolCall,
     FunctionCall,
     ToolCall,
+)
+from vllm.entrypoints.openai.chat_completion.protocol import (
+    ChatCompletionNamedToolChoiceParam,
+    ChatCompletionToolsParam,
 )
 from vllm.logger import init_logger
 
@@ -56,8 +56,7 @@ def partial_tag_overlap(text: str, tag: str) -> int:
 
 
 def find_common_prefix(s1: str, s2: str) -> str:
-    """
-    Finds a common prefix that is shared between two strings, if there is one.
+    """Finds a common prefix that is shared between two strings, if there is one.
     Order of arguments is NOT important.
 
     This function is provided as a UTILITY for extracting information from JSON
@@ -79,8 +78,7 @@ def find_common_prefix(s1: str, s2: str) -> str:
 
 
 def find_common_suffix(s1: str, s2: str) -> str:
-    """
-    Finds a common suffix shared between two strings, if there is one. Order of
+    """Finds a common suffix shared between two strings, if there is one. Order of
     arguments is NOT important.
     Stops when the suffix ends OR it hits an alphanumeric character
 
@@ -97,8 +95,7 @@ def find_common_suffix(s1: str, s2: str) -> str:
 
 
 def extract_intermediate_diff(curr: str, old: str) -> str:
-    """
-    Given two strings, extract the difference in the middle between two strings
+    """Given two strings, extract the difference in the middle between two strings
     that are known to have a common prefix and/or suffix.
 
     This function is provided as a UTILITY for extracting information from JSON
@@ -311,14 +308,18 @@ def find_tool_name(
     return False
 
 
+def _params_or_empty_object(params: dict[str, Any] | None) -> dict[str, Any]:
+    # Empty/missing parameters still constrain arguments to a JSON object.
+    return params if params else {"type": "object", "properties": {}}
+
+
 def _get_tool_schema_from_name_and_params(
     name: str, params: dict[str, Any] | None
 ) -> dict:
-    params = params if params else {"type": "object", "properties": {}}
     return {
         "properties": {
             "name": {"type": "string", "enum": [name]},
-            "parameters": params,
+            "parameters": _params_or_empty_object(params),
         },
         "required": ["name", "parameters"],
     }
@@ -350,6 +351,7 @@ def _get_tool_schema_defs(
 
 def _get_json_schema_from_tools(
     tools: list[Tool],
+    parallel_tool_calls: bool | None = None,
 ) -> dict:
     fn_tool_schemas: list[dict[str, Any]] = []
     fn_tools: list[Tool] = []
@@ -364,7 +366,7 @@ def _get_json_schema_from_tools(
         elif _is_function_tool(tool):
             fn_tool_schemas.append(_get_tool_schema_from_tool(tool))
             fn_tools.append(tool)
-    json_schema = {
+    json_schema: dict[str, Any] = {
         "type": "array",
         "minItems": 1,
         "items": {
@@ -372,6 +374,10 @@ def _get_json_schema_from_tools(
             "anyOf": fn_tool_schemas,
         },
     }
+    # Only an explicit `false` opts out of parallel tool calls; `None` means the
+    # field was never set and the default (true) applies.
+    if parallel_tool_calls is False:
+        json_schema["maxItems"] = 1
     json_schema_defs = _get_tool_schema_defs(fn_tools)
     if json_schema_defs:
         json_schema["$defs"] = json_schema_defs
@@ -381,6 +387,7 @@ def _get_json_schema_from_tools(
 def get_json_schema_from_tools(
     tool_choice: str | ToolChoiceFunction | ChatCompletionNamedToolChoiceParam,
     tools: list[Tool] | None,
+    parallel_tool_calls: bool | None = None,
 ) -> str | dict | None:
     # tool_choice: "none"
     if tool_choice in ("none", None) or tools is None:
@@ -400,7 +407,7 @@ def get_json_schema_from_tools(
                     responses_tool_map.setdefault(name.rsplit("__", 1)[1], params)
         if tool_name not in responses_tool_map:
             raise ValueError(f"Tool '{tool_name}' has not been passed in `tools`.")
-        return responses_tool_map[tool_name]
+        return _params_or_empty_object(responses_tool_map[tool_name])
     # tool_choice: Forced Function (ChatCompletion)
     if (not isinstance(tool_choice, str)) and isinstance(
         tool_choice, ChatCompletionNamedToolChoiceParam
@@ -413,10 +420,10 @@ def get_json_schema_from_tools(
         }
         if tool_name not in chat_tool_map:
             raise ValueError(f"Tool '{tool_name}' has not been passed in `tools`.")
-        return chat_tool_map[tool_name].function.parameters
+        return _params_or_empty_object(chat_tool_map[tool_name].function.parameters)
     # tool_choice: "required"
     if tool_choice == "required":
-        return _get_json_schema_from_tools(tools)
+        return _get_json_schema_from_tools(tools, parallel_tool_calls)
     # tool_choice: "auto"
     return None
 
@@ -450,6 +457,7 @@ def get_parameter_value(val: ast.expr) -> Any:
 
     Raises:
         UnexpectedAstError: If the AST node is not a supported literal type.
+
     """
     if isinstance(val, ast.Constant):
         if val.value is None or isinstance(val.value, (str, int, float)):
@@ -528,6 +536,7 @@ def _ast_callable_dotted_name(node: ast.expr) -> str:
     Raises:
         UnexpectedAstError: If the chain does not bottom out in an
             ``ast.Name`` (e.g. subscript or call expression as receiver).
+
     """
     parts: list[str] = []
     current: ast.expr = node
@@ -550,6 +559,7 @@ def handle_single_tool(call: ast.Call) -> ToolCall:
     Raises:
         UnexpectedAstError: If the call target is neither a simple name
             nor a chain of attribute accesses bottoming out in a name.
+
     """
     if not isinstance(call.func, (ast.Name, ast.Attribute)):
         logger.warning(
@@ -921,6 +931,7 @@ def make_valid_python(text: str) -> tuple[str, str] | None:
     Raises:
         UnexpectedAstError: If mismatched brackets or parentheses
             are detected.
+
     """
     bracket_stack: list[str] = []
     for index, char in enumerate(text):
@@ -1088,6 +1099,7 @@ def coerce_to_schema_type(value: str, schema_type: str | list[str]) -> Any:
         value: The raw string value from the model output.
         schema_type: One or more JSON Schema type strings
             (e.g. ``"string"`` or ``["string", "null"]``).
+
     """
     if isinstance(schema_type, str):
         schema_type = [schema_type]
@@ -1176,6 +1188,7 @@ def compute_tool_delta(
     Returns:
         A DeltaToolCall with only the new argument characters, or None
         if there is no difference from what was previously sent.
+
     """
     new_call_args = new_call.function.arguments
     if withheld_suffix:
