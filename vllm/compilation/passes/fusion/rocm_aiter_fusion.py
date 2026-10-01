@@ -801,10 +801,7 @@ class RocmAiterRMSNormQuantFusionPass(VllmPatternMatcherPass):
         # Fuse RMSNormGated + the MXFP4 activation quant of the next linear
         # (GDN out_proj with online MXFP4 and the ASM FP4 GEMM), once per
         # epsilon the layers use.
-        if (
-            gated_norm_mxfp4_shapes
-            and rocm_aiter_ops.is_fused_rms_gated_mxfp4_quant_available()
-        ):
+        if gated_norm_mxfp4_shapes:
             for (
                 epsilon,
                 num_heads,

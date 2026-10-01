@@ -2541,20 +2541,6 @@ class rocm_aiter_ops:
         return cls._AITER_ENABLED and cls._gdn_triton_kernels_importable()
 
     @classmethod
-    @if_aiter_supported
-    @functools.cache
-    def is_fused_rms_gated_mxfp4_quant_available(cls) -> bool:
-        """Whether AITER has the fused gated-RMSNorm + MXFP4 quant that
-        ``rocm_aiter_fused_rms_gated_mxfp4_gemm`` uses below M=32."""
-        try:
-            from aiter.ops.triton.quant import (  # noqa: F401
-                fused_rms_gated_mxfp4_quant,
-            )
-        except ImportError:
-            return False
-        return True
-
-    @classmethod
     def is_rdna_gdn_triton_kernels_available(cls) -> bool:
         """RDNA4 (gfx12) analog of are_gdn_triton_kernels_available()."""
         return cls.is_rdna_aiter_enabled() and cls._gdn_triton_kernels_importable()

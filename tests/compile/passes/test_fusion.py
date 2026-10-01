@@ -888,8 +888,6 @@ def test_aiter_fusion_rmsnorm_gated_mxfp4_gemm(
     out_flatten: bool,
     monkeypatch: pytest.MonkeyPatch,
 ):
-    if not rocm_aiter_ops.is_fused_rms_gated_mxfp4_quant_available():
-        pytest.skip("AITER lacks fused_rms_gated_mxfp4_quant")
     from vllm.platforms.rocm import on_gfx950
 
     if not on_gfx950():
