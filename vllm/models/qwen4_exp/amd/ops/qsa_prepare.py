@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Fused QSA pre-indexer kernel for the AMD Qwen4Exp path.
+"""Fused QSA prepare kernel for the AMD Qwen4Exp path.
 
 Started as a copy of the NVIDIA kernel (``nvidia/ops/qsa_prepare.py``) and is
 kept separate so either vendor can change its own copy without re-validating
@@ -119,6 +119,27 @@ def _norm_rope(
     return tl.reshape(result, (TILE_T, TILE_H, D))
 
 
+@triton.jit
+def _to_dst_dtype(x, dst, scale):
+    """Round to BF16 like the unfused path, then scale for an FP8 destination."""
+    out_ty = dst.dtype.element_ty
+    x = x.to(tl.bfloat16)
+    if out_ty == tl.float8e4nv:
+        x = x.to(tl.float32) / scale
+    return x.to(out_ty)
+
+
+@triton.jit
+def _store_rotated(dst, y, o1, o2, scale):
+    """Store a normalized head whose first ``2 * len(o1)`` dims are rotated."""
+    HALF: tl.constexpr = o1.shape[0]
+    dims = tl.arange(0, y.shape[0])
+    rot = tl.arange(0, HALF)
+    tl.store(dst + dims, _to_dst_dtype(y, dst, scale), mask=dims >= 2 * HALF)
+    tl.store(dst + rot, _to_dst_dtype(o1, dst, scale))
+    tl.store(dst + HALF + rot, _to_dst_dtype(o2, dst, scale))
+
+
 @triton.jit(
     do_not_specialize=[
         "num_tokens",
@@ -127,7 +148,7 @@ def _norm_rope(
         "num_k_work",
     ]
 )
-def _qsa_pre_indexer_kernel(
+def _qsa_prepare_kernel(
     q_ptr,
     q_stride_token,
     k_ptr,
@@ -171,8 +192,86 @@ def _qsa_pre_indexer_kernel(
     CACHE_HAS_ROPE_POS: tl.constexpr,
     MROPE_H: tl.constexpr,
     MROPE_W: tl.constexpr,
+    main_qkv_ptr,
+    main_q_norm_weight_ptr,
+    main_k_norm_weight_ptr,
+    main_eps,
+    main_q_out_ptr,
+    main_gate_out_ptr,
+    main_cache_ptr,
+    main_cache_stride_block,
+    main_cache_stride_token,
+    main_cache_stride_head,
+    main_slots_ptr,
+    main_k_scale,
+    main_v_scale,
+    MAIN_HQ: tl.constexpr,
+    MAIN_HK: tl.constexpr,
+    MAIN_D: tl.constexpr,
+    MAIN_PAGE_SIZE: tl.constexpr,
 ):
     pid = tl.program_id(0)
+    num_index_work = num_k_work + tl.cdiv(num_tokens, TILE_T_Q) * tl.cdiv(HQ, TILE_H_Q)
+    if pid >= num_index_work:
+        # Main attention: one program per (token, Q or KV head) after the
+        # indexer work. RoPE covers the first D // 2 dims, the width of the
+        # shared cos/sin table.
+        main_pid = pid - num_index_work
+        token = main_pid // (MAIN_HQ + MAIN_HK)
+        head = main_pid % (MAIN_HQ + MAIN_HK)
+        HALF: tl.constexpr = D // 4
+        dims = tl.arange(0, MAIN_D)
+        rot = tl.arange(0, HALF)
+        row = main_qkv_ptr + token * (2 * (MAIN_HQ + MAIN_HK) * MAIN_D)
+        is_k = head >= MAIN_HQ
+        kv_head = head - MAIN_HQ
+        if is_k:
+            src = row + (2 * MAIN_HQ + kv_head) * MAIN_D
+            weight_ptr = main_k_norm_weight_ptr
+        else:
+            src = row + 2 * head * MAIN_D
+            weight_ptr = main_q_norm_weight_ptr
+        x = tl.load(src + dims).to(tl.float32)
+        inv_rms = tl.rsqrt(tl.sum(x * x, axis=0) / MAIN_D + main_eps)
+        w = tl.load(weight_ptr + dims).to(tl.float32) + 1.0
+        y = x * inv_rms * w
+        x1 = tl.load(src + rot).to(tl.float32)
+        x2 = tl.load(src + HALF + rot).to(tl.float32)
+        w1 = tl.load(weight_ptr + rot).to(tl.float32) + 1.0
+        w2 = tl.load(weight_ptr + HALF + rot).to(tl.float32) + 1.0
+        x1 = (x1 * inv_rms * w1).to(tl.bfloat16).to(tl.float32)
+        x2 = (x2 * inv_rms * w2).to(tl.bfloat16).to(tl.float32)
+        pos = tl.load(pos_ptr + token * pos_stride_token).to(tl.int64)
+        if IS_2D_POSITIONS:
+            pos_h = tl.load(pos_ptr + pos_stride_axis + token * pos_stride_token)
+            pos_w = tl.load(pos_ptr + 2 * pos_stride_axis + token * pos_stride_token)
+            is_h = (rot % 3 == 1) & (rot < 3 * MROPE_H)
+            is_w = (rot % 3 == 2) & (rot < 3 * MROPE_W)
+            pos = tl.where(
+                is_h, pos_h.to(tl.int64), tl.where(is_w, pos_w.to(tl.int64), pos)
+            )
+        cos = tl.load(cos_sin_ptr + pos * (D // 2) + rot).to(tl.float32)
+        sin = tl.load(cos_sin_ptr + pos * (D // 2) + HALF + rot).to(tl.float32)
+        o1 = x1 * cos - x2 * sin
+        o2 = x2 * cos + x1 * sin
+        if is_k:
+            slot = tl.load(main_slots_ptr + token).to(tl.int64)
+            if slot >= 0:
+                dst = (
+                    main_cache_ptr
+                    + (slot // MAIN_PAGE_SIZE) * main_cache_stride_block
+                    + (slot % MAIN_PAGE_SIZE) * main_cache_stride_token
+                    + kv_head * main_cache_stride_head
+                )
+                _store_rotated(dst, y, o1, o2, main_k_scale)
+                v = tl.load(src + MAIN_HK * MAIN_D + dims)
+                tl.store(dst + MAIN_D + dims, _to_dst_dtype(v, dst, main_v_scale))
+        else:
+            out = (token * MAIN_HQ + head) * MAIN_D
+            _store_rotated(main_q_out_ptr + out, y, o1, o2, None)
+            gate = tl.load(src + MAIN_D + dims)
+            tl.store(main_gate_out_ptr + out + dims, gate)
+        return
     # K work occupies the first programs; the remaining programs tile Q. This
     # keeps both paths in one launch while leaving their register shapes
     # independent.
@@ -447,7 +546,7 @@ def _qsa_pre_indexer_kernel(
                     tl.store(tail + 2, pos_w.to(tl.int64), mask=valid_slot)
 
 
-def qsa_pre_indexer(
+def qsa_prepare(
     q: torch.Tensor,
     k: torch.Tensor,
     positions: torch.Tensor,
@@ -468,11 +567,34 @@ def qsa_pre_indexer(
     compress_ratio: int,
     mrope_section: tuple[int, int, int] | None,
     rope_pos_offset: int | None,
-) -> None:
-    """Normalize Q, compress K, then update the circular raw state."""
+    main_qkv: torch.Tensor,
+    main_q_norm_weight: torch.Tensor,
+    main_k_norm_weight: torch.Tensor,
+    main_eps: float,
+    main_kv_cache: torch.Tensor,
+    main_slot_mapping: torch.Tensor,
+    main_k_scale: float,
+    main_v_scale: float,
+    main_gate_out: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Normalize Q, compress K, then update the circular raw state.
+
+    Also prepares the main attention (QK-norm/RoPE, gate copy, K/V cache write)
+    and returns its Q and gate. ``main_gate_out`` lets the gate land in a
+    caller-owned buffer, e.g. one that outlives an opaque custom op.
+    """
     num_tokens = q.shape[0]
+    main_head_dim = main_kv_cache.shape[-1] // 2
+    num_main_kv_heads = main_kv_cache.shape[2]
+    num_main_q_heads = main_qkv.shape[1] // (2 * main_head_dim) - num_main_kv_heads
+    main_q_out = main_qkv.new_empty(num_tokens, num_main_q_heads, main_head_dim)
+    if main_gate_out is None:
+        main_gate_out = torch.empty_like(main_q_out)
+    else:
+        assert main_gate_out.shape == main_q_out.shape
+        assert main_gate_out.is_contiguous()
     if num_tokens == 0:
-        return
+        return main_q_out, main_gate_out
     num_q_heads, head_dim = q_out.shape[1:]
     assert cos_sin_cache.shape[-1] * 2 == head_dim
     assert q.shape == (num_tokens, num_q_heads * head_dim)
@@ -497,6 +619,9 @@ def qsa_pre_indexer(
         pos_stride_axis, pos_stride_token = 0, positions.stride(0)
     section = mrope_section if mrope_section is not None else (0, 0, 0)
     assert len(section) == 3
+    qkv_width = 2 * (num_main_q_heads + num_main_kv_heads) * main_head_dim
+    assert main_qkv.shape == (num_tokens, qkv_width) and main_qkv.is_contiguous()
+    assert main_slot_mapping.shape == (num_tokens,)
 
     # Swept on MI355X (64-lane wavefronts) over TILE_T_Q 1-16, TILE_H_Q 1-4 and
     # num_warps 1/2/4, from 4 to 16384 tokens: no config beat these by more
@@ -507,7 +632,8 @@ def qsa_pre_indexer(
         TILE_T_Q, TILE_H_Q = 2, 4
     num_k_work = k_work_metadata.shape[0]
     num_q_work = triton.cdiv(num_tokens, TILE_T_Q) * triton.cdiv(num_q_heads, TILE_H_Q)
-    _qsa_pre_indexer_kernel[(num_k_work + num_q_work,)](
+    num_main_work = num_tokens * (num_main_q_heads + num_main_kv_heads)
+    _qsa_prepare_kernel[(num_k_work + num_q_work + num_main_work,)](
         q,
         q.stride(0),
         k,
@@ -551,8 +677,26 @@ def qsa_pre_indexer(
         CACHE_HAS_ROPE_POS=cache_has_rope_pos,
         MROPE_H=section[1],
         MROPE_W=section[2],
+        main_qkv_ptr=main_qkv,
+        main_q_norm_weight_ptr=main_q_norm_weight,
+        main_k_norm_weight_ptr=main_k_norm_weight,
+        main_eps=main_eps,
+        main_q_out_ptr=main_q_out,
+        main_gate_out_ptr=main_gate_out,
+        main_cache_ptr=main_kv_cache,
+        main_cache_stride_block=main_kv_cache.stride(0),
+        main_cache_stride_token=main_kv_cache.stride(1),
+        main_cache_stride_head=main_kv_cache.stride(2),
+        main_slots_ptr=main_slot_mapping,
+        main_k_scale=main_k_scale,
+        main_v_scale=main_v_scale,
+        MAIN_HQ=num_main_q_heads,
+        MAIN_HK=num_main_kv_heads,
+        MAIN_D=main_head_dim,
+        MAIN_PAGE_SIZE=main_kv_cache.shape[1],
         num_warps=1,
     )
+    return main_q_out, main_gate_out
 
 
-__all__ = ["qsa_pre_indexer", "supports_fused_pre_indexer"]
+__all__ = ["qsa_prepare", "supports_fused_pre_indexer"]
