@@ -3,7 +3,6 @@
 """Compare the with and without prefix caching."""
 
 import copy
-import inspect
 from collections.abc import Callable
 from dataclasses import replace
 from math import lcm
@@ -248,22 +247,32 @@ def make_hisparse_kv_cache_manager(
     )
 
 
-def _allocate_scheduled(manager: KVCacheManager, request: Request, *args, **kwargs):
+def _allocate_scheduled(
+    manager: KVCacheManager,
+    request: Request,
+    num_new_tokens: int,
+    *,
+    num_new_computed_tokens: int = 0,
+    num_external_computed_tokens: int = 0,
+    **kwargs,
+) -> KVCacheBlocks | None:
     """``allocate_slots`` plus the per-step residency work the connector runs."""
-    blocks = manager.allocate_slots(request, *args, **kwargs)
+    blocks = manager.allocate_slots(
+        request,
+        num_new_tokens,
+        num_new_computed_tokens=num_new_computed_tokens,
+        num_external_computed_tokens=num_external_computed_tokens,
+        **kwargs,
+    )
     if blocks is None or kwargs.get("delay_cache_blocks"):
         return blocks
-    bound = inspect.signature(manager.allocate_slots).bind(request, *args, **kwargs)
-    bound.apply_defaults()
     num_computed_tokens = min(
         request.num_computed_tokens
-        + bound.arguments["num_new_computed_tokens"]
-        + bound.arguments["num_external_computed_tokens"],
+        + num_new_computed_tokens
+        + num_external_computed_tokens,
         manager.max_model_len,
     )
-    num_tokens = min(
-        num_computed_tokens + bound.arguments["num_new_tokens"], request.num_tokens
-    )
+    num_tokens = min(num_computed_tokens + num_new_tokens, request.num_tokens)
     get_hisparse_coordinator(manager).advance_scheduled(
         [(request.request_id, num_tokens)]
     )

@@ -99,7 +99,8 @@ class HiSparseCoordinator:
         kv_cache_config: KVCacheConfig,
         managers: tuple[SingleTypeKVCacheManager, ...],
         max_model_len: int,
-        num_reprefillable_tokens: int = 0,
+        *,
+        num_reprefillable_tokens: int,
     ) -> None:
         self.managers = managers
         self.max_model_len = max_model_len
@@ -873,7 +874,7 @@ def get_hisparse_coordinator(
         kv_cache_manager.kv_cache_config,
         managers,
         kv_cache_manager.max_model_len,
-        kv_cache_manager.coordinator.num_reprefillable_tokens,
+        num_reprefillable_tokens=kv_cache_manager.coordinator.num_reprefillable_tokens,
     )
     if coordinator.host_manager is None:
         raise ValueError("No HiSparse cache group is configured.")

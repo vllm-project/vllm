@@ -126,6 +126,7 @@ class HiSparseConnectorScheduler:
                 scheduler_output.num_scheduled_tokens.items()
             )
         )
+        # Runs first: it plans this step's transfers and table updates.
         self.coordinator.advance_scheduled(
             (
                 request_id,
