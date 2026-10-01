@@ -1130,8 +1130,15 @@ class ServerRole:
                 timed_out.append(jid)
         if timed_out is None:
             return []
+        # Inflight transfers still read the primary slots pinned by these
+        # jobs. Only transport completion or failure may release those pins.
+        inflight_job_ids = {
+            jid for xfer in self._inflight.values() for jid in xfer.job_ids
+        }
         results: list[StoreResult] = []
         for jid in timed_out:
+            if jid in inflight_job_ids:
+                continue
             del self._store_jobs[jid]
             results.append(StoreResult(job_id=jid, success=False))
             logger.warning("P2PSession %s: store job %d timed out", self._peer_id, jid)

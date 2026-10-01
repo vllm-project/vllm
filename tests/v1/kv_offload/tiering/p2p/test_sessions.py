@@ -1631,13 +1631,12 @@ class TestServerFlows:
         stores = session.poll().stores
         assert StoreResult(job_id=1, success=False) in stores
 
-    def test_store_timeout_then_late_completion_no_duplicate(self):
-        """A job timed out by _timeout_pending_store_jobs must not also
-        emit a contradictory StoreResult(success=True) when the transport
-        later reports the same transfer as done."""
+    @pytest.mark.parametrize("success", [True, False])
+    def test_store_timeout_keeps_inflight_slots_pinned(self, success):
         session, conn, transport = _make_session()
         _activate(session, conn)
         session.add_stored_blocks("req-1", [b"k1"], [0], job_id=1)
+        session.add_stored_blocks("req-2", [b"k2"], [1], job_id=2)
         conn.enqueue(
             {
                 TYPE_KEY: FetchMsg.TYPE,
@@ -1650,50 +1649,21 @@ class TestServerFlows:
         session.poll()
         tid = next(iter(transport._transfers))
 
-        # Backdate the store job so the next poll times it out.
-        session._server._store_jobs[1] = time.monotonic() - 60.0
-        stores = session.poll().stores
-        assert StoreResult(job_id=1, success=False) in stores
-        assert StoreResult(job_id=1, success=True) not in stores
+        for jid in (1, 2):
+            session._server._store_jobs[jid] = time.monotonic() - 60.0
+        # A StoreResult releases the primary slot. Only the job still
+        # waiting for a fetch may time out while the transfer is active.
+        assert session.poll().stores == [StoreResult(job_id=2, success=False)]
+        assert session.poll().stores == []
+        assert not any(m[TYPE_KEY] == TransferDoneMsg.TYPE for m in conn._sent)
 
-        # Transport later reports the same transfer as done — must not
-        # emit a second (contradictory) StoreResult for job_id=1.
-        transport._poll_done.append(tid)
-        stores = session.poll().stores
-        assert all(s.job_id != 1 for s in stores), (
-            f"unexpected duplicate StoreResult after timeout: {stores}"
-        )
-
-    def test_store_timeout_then_late_failure_no_duplicate(self):
-        """Symmetric guard: a timed-out job must not also emit a second
-        StoreResult(success=False) when the transport later reports the
-        same transfer as failed."""
-        session, conn, transport = _make_session()
-        _activate(session, conn)
-        session.add_stored_blocks("req-1", [b"k1"], [0], job_id=1)
-        conn.enqueue(
-            {
-                TYPE_KEY: FetchMsg.TYPE,
-                FetchMsg.ROUND_SEQ: 0,
-                FetchMsg.KV_REQUEST_ID: "req-1",
-                FetchMsg.KEYS: [b"k1"],
-                FetchMsg.BLOCK_INDEXES: [5],
-            }
-        )
-        session.poll()
-        tid = next(iter(transport._transfers))
-
-        session._server._store_jobs[1] = time.monotonic() - 60.0
-        stores = session.poll().stores
-        assert [s for s in stores if s.job_id == 1] == [
-            StoreResult(job_id=1, success=False)
-        ]
-
-        transport._poll_failed.append(tid)
-        stores = session.poll().stores
-        assert all(s.job_id != 1 for s in stores), (
-            f"unexpected duplicate StoreResult after timeout: {stores}"
-        )
+        completed = transport._poll_done if success else transport._poll_failed
+        completed.append(tid)
+        assert session.poll().stores == [StoreResult(job_id=1, success=success)]
+        terminal = [m for m in conn._sent if m[TYPE_KEY] == TransferDoneMsg.TYPE]
+        assert len(terminal) == 1
+        assert terminal[0][TransferDoneMsg.SUCCESS] is success
+        assert session.poll().stores == []
 
 
 # ---------------------------------------------------------------------------
