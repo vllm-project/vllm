@@ -358,3 +358,91 @@ def test_causal_conv1d_varlen(
     )
     unpadded_out = out[:, : out_ref_tensor.shape[-1]]
     assert torch.allclose(unpadded_out, out_ref_tensor, rtol=rtol, atol=atol)
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="GPU drafter checkpoint path"
+)
+@pytest.mark.parametrize("width", [2, 3, 4])
+@pytest.mark.parametrize(
+    ("itype", "dim_first"), [(torch.float32, False), (torch.bfloat16, True)]
+)
+def test_causal_conv1d_draft_checkpoint_preserves_history(width, itype, dim_first):
+    """Rejected tokens and temporary draft steps must not enter committed history."""
+    set_random_seed(0)
+    dim, num_slots, num_spec = 67, 8, 3
+    history_len = width - 1
+    shape = (num_slots, dim, history_len + num_spec)
+    if not dim_first:
+        shape = (num_slots, history_len + num_spec, dim)
+    conv_states = torch.randn(shape, device=DEVICE, dtype=itype)
+    if not dim_first:
+        conv_states = conv_states.transpose(1, 2)
+    checkpoint = torch.randn(num_slots, dim, history_len, device=DEVICE, dtype=itype)
+    checkpoint_ref = checkpoint.clone()
+    weight = torch.randn(dim, width, device=DEVICE, dtype=itype)
+    bias = torch.randn(dim, device=DEVICE, dtype=itype)
+    rtol, atol = (1e-2, 5e-2) if itype == torch.bfloat16 else (3e-4, 1e-3)
+
+    # Prefill across a chunk boundary, reorder requests, then reuse a request slot.
+    for request_slots, lengths, correction_offsets, has_initial_states in [
+        ([5, 1, 3], [131, 2, 9], [130, 1, 8], [False, False, False]),
+        ([3, 5, 1], [5, 5, 5], [1, 2, 4], [True, True, True]),
+        ([1, 3, 5], [5, 5, 5], [4, 1, 1], [False, True, True]),
+    ]:
+        query_starts = [0]
+        for length in lengths + [2]:
+            query_starts.append(query_starts[-1] + length)
+        x = torch.randn(query_starts[-1] + 1, dim, device=DEVICE, dtype=itype)[1:].T
+        state_slots = [6, 2, 4]
+        # The null row must leave both state allocations unchanged.
+        cache_indices = torch.tensor(
+            state_slots + [NULL_BLOCK_ID], device=DEVICE, dtype=torch.int32
+        )
+        request_indices = torch.tensor(
+            request_slots + [0], device=DEVICE, dtype=torch.int32
+        )
+        correction_indices = torch.tensor(
+            [query_starts[i] + n for i, n in enumerate(correction_offsets)]
+            + [query_starts[-2]],
+            device=DEVICE,
+            dtype=torch.int64,
+        )
+        conv_states_ref = conv_states.clone()
+        out = causal_conv1d_fn(
+            x,
+            weight,
+            bias,
+            conv_states,
+            torch.tensor(query_starts, device=DEVICE, dtype=torch.int32),
+            cache_indices=cache_indices,
+            has_initial_state=torch.tensor(has_initial_states + [False], device=DEVICE),
+            activation=None,
+            draft_checkpoint=checkpoint,
+            draft_request_indices=request_indices,
+            draft_correction_indices=correction_indices,
+        )
+        for i, slot in enumerate(request_slots):
+            prior = checkpoint_ref[slot]
+            if not has_initial_states[i]:
+                prior = torch.zeros_like(prior)
+            inputs = x[:, query_starts[i] : query_starts[i + 1]]
+            padded = torch.cat([prior, inputs], dim=-1)
+            expected, _ = causal_conv1d_ref(
+                inputs[None], weight, bias, initial_states=prior[None], activation=None
+            )
+            torch.testing.assert_close(
+                out[:, query_starts[i] : query_starts[i + 1]],
+                expected[0],
+                rtol=rtol,
+                atol=atol,
+            )
+            correction = correction_offsets[i]
+            checkpoint_ref[slot] = padded[:, correction : correction + history_len]
+            conv_states_ref[state_slots[i], :, :history_len] = padded[
+                :, correction + 1 : correction + 1 + history_len
+            ]
+        torch.testing.assert_close(checkpoint, checkpoint_ref, rtol=0, atol=0)
+        torch.testing.assert_close(conv_states, conv_states_ref, rtol=0, atol=0)
+        # Emulate subsequent draft steps overwriting only temporary state.
+        conv_states.normal_()
