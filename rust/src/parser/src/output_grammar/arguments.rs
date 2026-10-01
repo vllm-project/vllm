@@ -29,7 +29,7 @@ use serde_json::{Value, json};
 use xgrammar_structural_tag::format::{Format, JsonSchemaFormat};
 
 pub use crate::schema::JsonType;
-use crate::schema::{self, OptionSource, SchemaOption, SchemaView};
+use crate::schema::{self, OptionSource, SchemaOption, SchemaRoot};
 
 /// The schema accepting any value.
 static ANY_SCHEMA: Value = Value::Bool(true);
@@ -143,14 +143,14 @@ pub struct ArgumentOptions {
 /// Request state shared by the value options of one call.
 struct ArgumentContext<'a> {
     options: &'a ArgumentOptions,
-    schema: SchemaView<'a>,
+    root: SchemaRoot<'a>,
 }
 
 impl ArgumentContext<'_> {
     /// A JSON value under `schema`, which keeps the root's definitions so its
     /// local `$ref`s still resolve.
     fn json(&self, mut schema: Value) -> Format {
-        if let (Some(schema), Some(root)) = (schema.as_object_mut(), self.schema.root().as_object())
+        if let (Some(schema), Some(root)) = (schema.as_object_mut(), self.root.schema().as_object())
         {
             for key in ["$defs", "definitions"] {
                 if let Some(definitions) = root.get(key) {
@@ -168,8 +168,8 @@ impl ArgumentContext<'_> {
 
     /// Every option of a value under `schema`.
     fn value_options<'s>(&'s self, schema: &'s Value) -> Vec<ValueOption<'s>> {
-        let view: SchemaView<'s> = self.schema;
-        view.options(schema)
+        let root: SchemaRoot<'s> = self.root;
+        root.options(schema)
             .into_iter()
             .map(|SchemaOption { ty, source }| ValueOption {
                 ty,
@@ -185,12 +185,12 @@ impl ArgumentContext<'_> {
 pub fn arguments(schema: &Value, syntax: &dyn ArgumentSyntax, options: &ArgumentOptions) -> Format {
     let cx = ArgumentContext {
         options,
-        schema: SchemaView::new(schema),
+        root: SchemaRoot::new(schema),
     };
     let parameter =
         |key: ParameterKey<'_>, schema: &Value| syntax.parameter(key, &cx.value_options(schema));
 
-    let schema = cx.schema.resolve(schema);
+    let schema = cx.root.resolved();
     let (properties, additional) = match schema {
         Value::Object(schema) => {
             let additional = match schema.get("additionalProperties") {
@@ -339,18 +339,18 @@ mod tests {
         }
 
         fn parameter(&self, key: ParameterKey<'_>, options: &[ValueOption<'_>]) -> Option<Format> {
-            let tags = group_by(options, |option| option.ty.name())
+            let tags = group_by(options, |option| option.ty)
                 .into_iter()
-                .filter_map(|(type_name, options)| {
+                .filter_map(|(ty, options)| {
                     let values = options
                         .into_iter()
-                        .filter_map(|option| match option.ty {
+                        .filter_map(|option| match ty {
                             JsonType::String => option.raw_string(&["</arg>"]),
                             _ => Some(option.json()),
                         })
                         .collect::<Vec<_>>();
                     (!values.is_empty()).then(|| {
-                        let suffix = format!("\" type=\"{type_name}\">");
+                        let suffix = format!("\" type=\"{}\">", ty.name());
                         key.tag("<arg key=\"", &suffix, one_of(values), "</arg>")
                     })
                 })
