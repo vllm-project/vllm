@@ -63,9 +63,12 @@ The mask is also available via the `/inference/v1/generate` HTTP endpoint:
 | `top_k > 0` | Bounds mask size; pure top-p can produce vocab-sized masks |
 | Model Runner V2 | Required by the async D2H copy pipeline |
 
+Speculative decoding is supported; each emitted token gets the support of the
+target distribution at its position.
+
 The engine rejects unsupported combinations at startup or request time:
 
-- Speculative decoding
+- Speculative decoding with adaptive verification
 - Diffusion models
 - Custom logits processors (engine-level `--logits-processors`)
 
