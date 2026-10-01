@@ -157,7 +157,8 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
                 "Total time spent reading from secondary tiers into the primary "
                 "tier, in seconds, labeled by tier. Tiers that do not report "
                 "per-job transfer time have no series here. Use "
-                "PROMOTION_LATENCY for tier-independent promotion timing."
+                "vllm:kv_offload_tiering_promotion_latency_seconds for "
+                "tier-independent promotion timing."
             ),
             labelnames=("tier",),
         )
@@ -246,8 +247,9 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
             OffloadingHistogramMetadata(
                 documentation=(
                     "Histogram of per-job latency for secondary-tier promotion "
-                    "attempts, measured from job creation until the tier reports "
-                    "completion so that tier queueing is included, labeled by "
+                    "attempts, measured from job creation until the tiering "
+                    "manager observes completion so that tier queueing is "
+                    "included, labeled by "
                     "tier, in seconds. Includes failed attempts."
                 ),
                 labelnames=("tier",),
