@@ -322,6 +322,7 @@ class LLMEngine:
                 outputs.outputs,
                 engine_core_timestamp=outputs.timestamp,
                 iteration_stats=iteration_stats,
+                sampling_masks=outputs.sampling_masks,
             )
             self.output_processor.update_scheduler_stats(outputs.scheduler_stats)
 

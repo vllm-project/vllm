@@ -49,7 +49,7 @@ from vllm.v1.core.sched.interface import PauseState
 from vllm.v1.core.sched.output import CachedRequestData, SchedulerOutput
 from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.core.single_type_kv_cache_manager import register_all_kvcache_specs
-from vllm.v1.engine import FinishReason
+from vllm.v1.engine import EngineCoreOutputs, FinishReason
 from vllm.v1.engine.core import EngineCore
 from vllm.v1.executor.uniproc_executor import UniProcExecutor
 from vllm.v1.hisparse.coordinator import get_hisparse_coordinator
@@ -897,15 +897,14 @@ def test_update_from_output_routes_sampling_masks_by_request():
         ),
     )
 
-    outputs = scheduler.update_from_output(scheduler_output, model_output)[0].outputs
+    engine_core_outputs = scheduler.update_from_output(scheduler_output, model_output)
+    outputs = engine_core_outputs[0].outputs
+    masks = _request_sampling_masks(engine_core_outputs[0])
 
     assert [out.request_id for out in outputs] == [req.request_id for req in requests]
-    assert [out.new_sampling_mask.token_ids.tolist() for out in outputs] == [
-        [1, 2],
-        [3],
-        [4, 5, 6],
-    ]
-    assert all(out.new_sampling_mask.offsets is None for out in outputs)
+    assert [out.sampling_mask_row for out in outputs] == [0, 1, 2]
+    assert [mask.token_ids.tolist() for mask in masks] == [[1, 2], [3], [4, 5, 6]]
+    assert all(mask.offsets is None for mask in masks)
 
 
 def test_update_from_output_routes_multi_position_sampling_masks():
@@ -943,11 +942,75 @@ def test_update_from_output_routes_multi_position_sampling_masks():
         ),
     )
 
-    outputs = scheduler.update_from_output(scheduler_output, model_output)[0].outputs
+    engine_core_outputs = scheduler.update_from_output(scheduler_output, model_output)
+    outputs = engine_core_outputs[0].outputs
 
-    assert [out.new_sampling_mask.to_nested_list() for out in outputs] == [
+    assert [out.sampling_mask_row for out in outputs] == [0, 2]
+    assert [
+        mask.to_nested_list()
+        for mask in _request_sampling_masks(engine_core_outputs[0])
+    ] == [
         [[1, 6], [2]],
         [[3, 7, 8], [4], [5, 9]],
+    ]
+
+
+def test_update_from_output_slices_sampling_masks_per_client():
+    """With several frontends, each output carries its own mask slice."""
+    scheduler = create_scheduler()
+    scheduler.return_sampling_mask = True
+    requests = create_requests(num_requests=3, max_tokens=10)
+    for client_index, req in zip([0, 1, 0], requests):
+        req.client_index = client_index
+        req.num_computed_tokens = req.num_tokens
+        scheduler.requests[req.request_id] = req
+        scheduler.running.append(req)
+        req.status = RequestStatus.RUNNING
+
+    scheduler_output = SchedulerOutput(
+        scheduled_new_reqs=[],
+        scheduled_cached_reqs=CachedRequestData.make_empty(),
+        num_scheduled_tokens={req.request_id: 1 for req in requests},
+        total_num_scheduled_tokens=3,
+        scheduled_encoder_inputs={},
+        scheduled_spec_decode_tokens={},
+        num_common_prefix_blocks=[],
+        finished_req_ids=set(),
+        free_encoder_mm_hashes=[],
+    )
+    model_output = ModelRunnerOutput(
+        req_ids=[req.request_id for req in requests],
+        req_id_to_index={req.request_id: i for i, req in enumerate(requests)},
+        sampled_token_ids=[[1], [3], [4]],
+        logprobs=None,
+        prompt_logprobs_dict={},
+        pooler_output=[],
+        sampling_masks=SamplingMaskLists(
+            np.array([1, 2, 3, 4, 5, 6], dtype=np.int32), np.array([0, 2, 3, 6])
+        ),
+    )
+
+    engine_core_outputs = scheduler.update_from_output(scheduler_output, model_output)
+
+    masks = {}
+    for eco in engine_core_outputs.values():
+        assert eco.sampling_masks is None
+        for out in eco.outputs:
+            assert out.sampling_mask_row is None
+            masks[out.request_id] = out.new_sampling_mask.token_ids.tolist()
+    assert masks == {
+        requests[0].request_id: [1, 2],
+        requests[1].request_id: [3],
+        requests[2].request_id: [4, 5, 6],
+    }
+
+
+def _request_sampling_masks(eco: EngineCoreOutputs) -> list[SamplingMaskLists]:
+    assert eco.sampling_masks is not None
+    assert all(out.new_sampling_mask is None for out in eco.outputs)
+    return [
+        eco.sampling_masks.slice_request(out.sampling_mask_row, len(out.new_token_ids))
+        for out in eco.outputs
     ]
 
 

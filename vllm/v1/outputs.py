@@ -66,10 +66,14 @@ class SamplingMaskLists(NamedTuple):
     # [num_requests + 1] for multi-position request batches.
     cu_num_generated_tokens: list[int] | None = None
 
+    def request_row(self, req_idx: int) -> int:
+        """Index of the request's first position row."""
+        cu = self.cu_num_generated_tokens
+        return req_idx if cu is None else cu[req_idx]
+
     def slice_request(self, req_idx: int, num_positions: int) -> "SamplingMaskLists":
         assert self.offsets is not None
-        cu = self.cu_num_generated_tokens
-        start = req_idx if cu is None else cu[req_idx]
+        start = self.request_row(req_idx)
         end = start + num_positions
         lo, hi = self.offsets[start], self.offsets[end]
         if num_positions == 1:
@@ -84,6 +88,27 @@ class SamplingMaskLists(NamedTuple):
             return [token_ids]
         offsets = self.offsets.tolist()
         return [token_ids[offsets[i] : offsets[i + 1]] for i in range(len(offsets) - 1)]
+
+    @staticmethod
+    def concat_to_nested_list(
+        chunks: Sequence["SamplingMaskLists"],
+    ) -> list[list[int]]:
+        """Like ``to_nested_list`` over all chunks, with one ``tolist()``."""
+        token_ids = np.concatenate([chunk.token_ids for chunk in chunks]).tolist()
+        nested: list[list[int]] = []
+        start = 0
+        for chunk in chunks:
+            if chunk.offsets is None:
+                end = start + len(chunk.token_ids)
+                nested.append(token_ids[start:end])
+            else:
+                offsets = (chunk.offsets + start).tolist()
+                nested.extend(
+                    token_ids[lo:hi] for lo, hi in zip(offsets[:-1], offsets[1:])
+                )
+                end = offsets[-1]
+            start = end
+        return nested
 
 
 class LogprobsTensors(NamedTuple):

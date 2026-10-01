@@ -230,6 +230,8 @@ class EngineCoreOutput(
     # so `array_like` positional serialization stays backward compatible.
     mm_cache_miss_hashes: list[str] | None = None
 
+    # Per-request sampling mask. The scheduler sends the masks of a step once
+    # in EngineCoreOutputs.sampling_masks and sets sampling_mask_row instead.
     new_sampling_mask: SamplingMaskLists | None = None
 
     # Per-request spec-decode acceptance; attached only on the final output.
@@ -238,6 +240,11 @@ class EngineCoreOutput(
 
     # [num_scored_rows, num_token_ids]; appended last for array_like compatibility.
     prompt_token_id_logprobs: torch.Tensor | None = None
+
+    # First row of this output in EngineCoreOutputs.sampling_masks; the output
+    # owns len(new_token_ids) consecutive rows. Appended last for array_like
+    # compatibility.
+    sampling_mask_row: int | None = None
 
     @property
     def finished(self) -> bool:
@@ -281,6 +288,11 @@ class EngineCoreOutputs(
     # In DP case, used to signal that a request was received for an
     # "old" wave, so the next wave needs to be started in other engines.
     start_wave: int | None = None
+
+    # Sampling masks of this step as one CSR block with a row per generated
+    # position, so they are serialized once instead of once per request.
+    # Outputs reference their rows via EngineCoreOutput.sampling_mask_row.
+    sampling_masks: SamplingMaskLists | None = None
 
     def __post_init__(self):
         if self.timestamp == 0.0:

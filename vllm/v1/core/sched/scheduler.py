@@ -66,7 +66,12 @@ from vllm.v1.metrics.stats import (
     RequestSpecDecodeMetrics,
     SchedulerStats,
 )
-from vllm.v1.outputs import DraftTokenIds, KVConnectorOutput, ModelRunnerOutput
+from vllm.v1.outputs import (
+    DraftTokenIds,
+    KVConnectorOutput,
+    ModelRunnerOutput,
+    SamplingMaskLists,
+)
 from vllm.v1.request import Request, RequestStatus, StreamingUpdate
 from vllm.v1.spec_decode.dynamic.utils import build_dynamic_sd_schedule_lookup
 from vllm.v1.spec_decode.metrics import SpecDecodingStats
@@ -1980,6 +1985,9 @@ class Scheduler(SchedulerInterface):
     ) -> dict[int, EngineCoreOutputs]:
         sampled_token_ids = model_runner_output.sampled_token_ids
         logprobs = model_runner_output.logprobs
+        sampling_masks = (
+            model_runner_output.sampling_masks if self.return_sampling_mask else None
+        )
         prompt_logprobs_dict = model_runner_output.prompt_logprobs_dict
         prompt_token_id_logprobs_dict = (
             model_runner_output.prompt_token_id_logprobs_dict
@@ -2104,7 +2112,7 @@ class Scheduler(SchedulerInterface):
 
             stopped = False
             new_logprobs = None
-            new_sampling_mask = None
+            sampling_mask_row = None
             new_token_ids = generated_token_ids
             pooler_output = pooler_outputs[req_index] if pooler_outputs else None
             kv_transfer_params = None
@@ -2195,12 +2203,8 @@ class Scheduler(SchedulerInterface):
                 else:
                     stopped_preempted_reqs.add(request)
 
-            if self.return_sampling_mask:
-                sampling_masks = model_runner_output.sampling_masks
-                if new_token_ids and sampling_masks is not None:
-                    new_sampling_mask = sampling_masks.slice_request(
-                        req_index, len(new_token_ids)
-                    )
+            if sampling_masks is not None and new_token_ids:
+                sampling_mask_row = sampling_masks.request_row(req_index)
 
             if num_nans_in_logits is not None and req_id in num_nans_in_logits:
                 request.num_nans_in_logits = num_nans_in_logits[req_id]
@@ -2216,7 +2220,7 @@ class Scheduler(SchedulerInterface):
                         new_token_ids=new_token_ids,
                         finish_reason=finish_reason,
                         new_logprobs=new_logprobs,
-                        new_sampling_mask=new_sampling_mask,
+                        sampling_mask_row=sampling_mask_row,
                         new_prompt_logprobs_tensors=prompt_logprobs_tensors,
                         prompt_token_id_logprobs=prompt_token_id_logprobs,
                         pooling_output=pooler_output,
@@ -2340,6 +2344,8 @@ class Scheduler(SchedulerInterface):
             client_index: EngineCoreOutputs(outputs=outs)
             for client_index, outs in outputs.items()
         }
+        if sampling_masks is not None:
+            self._attach_sampling_masks(engine_core_outputs, sampling_masks)
 
         finished_req_ids = self.finished_req_ids_dict
         if finished_req_ids:
@@ -2382,6 +2388,28 @@ class Scheduler(SchedulerInterface):
                 request, num_computed_tokens
             )
         )
+
+    @staticmethod
+    def _attach_sampling_masks(
+        engine_core_outputs: dict[int, EngineCoreOutputs],
+        sampling_masks: SamplingMaskLists,
+    ) -> None:
+        # Rows are addressed by position from here on, so drop the
+        # request -> row mapping.
+        assert sampling_masks.offsets is not None
+        masks = SamplingMaskLists(sampling_masks.token_ids, sampling_masks.offsets)
+        if len(engine_core_outputs) == 1:
+            next(iter(engine_core_outputs.values())).sampling_masks = masks
+            return
+        # Multiple frontends: send per-request slices so that no frontend
+        # receives the masks of requests it does not own.
+        for eco in engine_core_outputs.values():
+            for output in eco.outputs:
+                if output.sampling_mask_row is not None:
+                    output.new_sampling_mask = masks.slice_request(
+                        output.sampling_mask_row, len(output.new_token_ids)
+                    )
+                    output.sampling_mask_row = None
 
     @staticmethod
     def _is_blocked_waiting_status(status: RequestStatus) -> bool:

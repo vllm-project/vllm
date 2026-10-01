@@ -441,11 +441,7 @@ class RequestState:
         sampling_mask = None
         if (delta or finished) and self.sampling_mask_chunks:
             sampling_mask = SamplingMask(
-                [
-                    position
-                    for chunk in self.sampling_mask_chunks
-                    for position in chunk.to_nested_list()
-                ]
+                SamplingMaskLists.concat_to_nested_list(self.sampling_mask_chunks)
             )
             if delta:
                 self.sampling_mask_chunks.clear()
@@ -654,6 +650,7 @@ class OutputProcessor:
         engine_core_outputs: list[EngineCoreOutput],
         engine_core_timestamp: float | None = None,
         iteration_stats: IterationStats | None = None,
+        sampling_masks: SamplingMaskLists | None = None,
     ) -> OutputProcessorOutput:
         """Process the EngineCoreOutputs:
         1) Compute stats for logging
@@ -718,10 +715,14 @@ class OutputProcessor:
             if pooling_output is None:
                 assert req_state.detokenizer is not None
                 assert req_state.logprobs_processor is not None
-                if engine_core_output.new_sampling_mask is not None:
-                    req_state.sampling_mask_chunks.append(
-                        engine_core_output.new_sampling_mask
+                new_sampling_mask = engine_core_output.new_sampling_mask
+                if engine_core_output.sampling_mask_row is not None:
+                    assert sampling_masks is not None
+                    new_sampling_mask = sampling_masks.slice_request(
+                        engine_core_output.sampling_mask_row, len(new_token_ids)
                     )
+                if new_sampling_mask is not None:
+                    req_state.sampling_mask_chunks.append(new_sampling_mask)
                 # 2) Detokenize the token ids into text and perform stop checks.
                 stop_string = req_state.detokenizer.update(
                     new_token_ids, finish_reason == FinishReason.STOP
