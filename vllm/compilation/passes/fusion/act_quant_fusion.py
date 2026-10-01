@@ -8,6 +8,7 @@ import torch
 from torch._higher_order_ops.auto_functionalize import auto_functionalized
 from torch._ops import OpOverload
 
+from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
@@ -118,6 +119,43 @@ class SiluMulFp8StaticQuantPattern(ActivationQuantPattern):
                 self.FUSED_OP, result=result, input=input, scale=scale
             )
             return at[1]
+
+        return _replacement
+
+
+class RocmAiterSiluMulFp8StaticQuantPattern(SiluMulFp8StaticQuantPattern):
+    """Fuse SiluMul + AITER static quantization while preserving its scale output."""
+
+    @property
+    def pattern(self):
+        def _pattern(
+            input: torch.Tensor,
+            scale: torch.Tensor,
+        ) -> tuple[torch.Tensor, torch.Tensor]:
+            result_silu_mul = self.silu_and_mul_matcher(input)
+            out = torch.empty_like(result_silu_mul, dtype=self.quant_dtype)
+            _, out, scale = auto_functionalized(
+                torch.ops.vllm.rocm_aiter_per_tensor_quant.default,
+                out=out,
+                x=result_silu_mul,
+                scale=scale,
+                is_dynamic=False,
+            )
+            # The shared AITER op declares scale mutable for its dynamic variant.
+            # Static quant preserves it; keep this graph output when replacing it.
+            return out, scale
+
+        return _pattern
+
+    @property
+    def replacement(self):
+        fused = super().replacement
+
+        def _replacement(
+            input: torch.Tensor,
+            scale: torch.Tensor,
+        ) -> tuple[torch.Tensor, torch.Tensor]:
+            return fused(input, scale), scale
 
         return _replacement
 
@@ -287,6 +325,8 @@ class ActivationQuantFusionPass(VllmFusionPatternMatcherPass):
         super().__init__(config, "activation_quant_fusion_pass")
 
         self.register(SiluMulFp8StaticQuantPattern())
+        if current_platform.is_rocm() and rocm_aiter_ops.is_enabled():
+            self.register(RocmAiterSiluMulFp8StaticQuantPattern())
 
         if silu_and_mul_nvfp4_quant_supported:
             self.register(SiluMulNvfp4QuantPattern())

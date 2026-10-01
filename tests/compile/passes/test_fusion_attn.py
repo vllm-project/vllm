@@ -470,7 +470,10 @@ def test_attention_quant_pattern(
     # Check quantization ops in the graph before and after fusion
     if "-quant_fp8" in custom_ops_list:
         quant_op = torch.ops.aten.reciprocal
-    elif getattr(model_class, "aiter_quant", False):
+    elif (
+        getattr(model_class, "aiter_quant", False)
+        or rocm_aiter_ops.is_linear_fp8_enabled()
+    ):
         quant_op = torch.ops.vllm.rocm_aiter_per_tensor_quant.default
     else:
         quant_op = QUANT_OPS[quant_key]

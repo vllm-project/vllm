@@ -84,13 +84,15 @@ class TestSiluMulFp8QuantModel(torch.nn.Module):
         return x2
 
     def ops_in_model_before(self):
+        if not self.enable_quant_fp8_custom_op:
+            quant_op = torch.ops.aten.reciprocal
+        elif rocm_aiter_ops.is_linear_fp8_enabled():
+            quant_op = torch.ops.vllm.rocm_aiter_per_tensor_quant.default
+        else:
+            quant_op = QUANT_OPS[kFp8StaticTensorSym]
         return [
             SILU_MUL_OP if self.enable_silu_mul_custom_op else torch.ops.aten.mul,
-            (
-                QUANT_OPS[kFp8StaticTensorSym]
-                if self.enable_quant_fp8_custom_op
-                else torch.ops.aten.reciprocal
-            ),
+            quant_op,
         ]
 
     def ops_in_model_after(self):
