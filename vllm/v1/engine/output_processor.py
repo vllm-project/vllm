@@ -439,7 +439,7 @@ class RequestState:
             logprobs = logprobs[-num_new_tokens:] if num_new_tokens else logprobs[:0]
 
         sampling_mask = None
-        if finished and self.sampling_mask_chunks:
+        if (delta or finished) and self.sampling_mask_chunks:
             sampling_mask = SamplingMask(
                 [
                     position
@@ -447,6 +447,8 @@ class RequestState:
                     for position in chunk.to_nested_list()
                 ]
             )
+            if delta:
+                self.sampling_mask_chunks.clear()
 
         # Concatenate routed experts on finish
         routed_experts = None

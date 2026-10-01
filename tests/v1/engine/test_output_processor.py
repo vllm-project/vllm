@@ -18,7 +18,7 @@ from tests.v1.engine.utils import (
 from vllm import PoolingParams
 from vllm.logprobs import FlatLogprobs, Logprob, PromptLogprobs, SampleLogprobs
 from vllm.lora.request import LoRARequest
-from vllm.outputs import CompletionOutput, RequestOutput
+from vllm.outputs import CompletionOutput, RequestOutput, SamplingMask
 from vllm.sampling_params import RequestOutputKind, SamplingParams
 from vllm.tokenizers import TokenizerLike
 from vllm.v1.engine import (
@@ -1575,3 +1575,58 @@ def test_abort_requests(runner: str, abort_by: str, dummy_test_vectors):
             output_processor.abort_requests([request.request_id], internal=True)
         else:
             output_processor.abort_requests([request.external_req_id], internal=False)
+
+
+@pytest.mark.parametrize("output_kind", list(RequestOutputKind))
+def test_sampling_masks_follow_output_kind(output_kind):
+    state = RequestState.__new__(RequestState)
+    state.detokenizer = MagicMock()
+    state.detokenizer.get_next_output_text.return_value = ""
+    state.logprobs_processor = MagicMock()
+    state.logprobs_processor.logprobs = None
+    state.logprobs_processor.cumulative_logprob = None
+    state.output_kind = output_kind
+    state.request_index = 0
+    state.sampling_mask_chunks = []
+    state.routed_experts_chunks = []
+    state.spec_decode_metrics = None
+
+    supports = [[10, 11], [20], [30, 31]]
+    masks = []
+    for position, support in enumerate(supports):
+        state.sampling_mask_chunks.append(SamplingMaskLists(np.asarray(support)))
+        finish = FinishReason.LENGTH if position == len(supports) - 1 else None
+        mask = state._new_completion_output([support[0]], finish, None).sampling_mask
+        masks.append(mask.token_ids if mask is not None else None)
+
+    if output_kind == RequestOutputKind.DELTA:
+        assert masks == [[support] for support in supports]
+    else:
+        assert masks == [None, None, supports]
+
+
+def test_request_output_add_merges_delta_sampling_masks():
+    def delta(token_ids, sampling_mask):
+        completion = CompletionOutput(
+            index=0,
+            text="",
+            token_ids=token_ids,
+            cumulative_logprob=None,
+            logprobs=None,
+            sampling_mask=sampling_mask,
+        )
+        return RequestOutput(
+            request_id="request",
+            prompt=None,
+            prompt_token_ids=[1],
+            prompt_logprobs=None,
+            outputs=[completion],
+            finished=False,
+        )
+
+    merged = delta([], None)
+    merged.add(delta([10], SamplingMask([[10, 11]])), aggregate=True)
+    merged.add(delta([20], SamplingMask([[20]])), aggregate=True)
+
+    assert merged.outputs[0].token_ids == [10, 20]
+    assert merged.outputs[0].sampling_mask.token_ids == [[10, 11], [20]]
