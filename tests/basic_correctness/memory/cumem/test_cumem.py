@@ -235,6 +235,25 @@ def test_discard_tags():
     assert torch.allclose(weights, torch.ones_like(weights))
 
 
+@pytest.mark.parametrize("tag", ["workspace", None], ids=["workspace", "default"])
+@create_new_process_for_each_test("fork" if current_platform.is_cuda() else "spawn")
+def test_selective_wake_restores_internal_tags(tag):
+    """A selective wake defers only weights/kv_cache; other tags always wake."""
+    allocator = get_mem_allocator_instance()
+    with allocator.use_memory_pool(tag):
+        internal = torch.empty(16 << 20, dtype=torch.uint8, device=DEVICE_TYPE)
+    with allocator.use_memory_pool("kv_cache"):
+        kv = torch.empty(32 << 20, dtype=torch.uint8, device=DEVICE_TYPE)
+
+    allocator.sleep(offload_tags=())
+    assert mapped_usage(allocator) == 0
+
+    allocator.wake_up(tags=["weights"])
+    assert mapped_usage(allocator) == internal.nbytes
+    allocator.wake_up(tags=["kv_cache"])
+    assert mapped_usage(allocator) == internal.nbytes + kv.nbytes
+
+
 @create_new_process_for_each_test("fork" if current_platform.is_cuda() else "spawn")
 @pytest.mark.skipif(current_platform.is_xpu(), reason="Uses the CuMem allocator")
 def test_workspace_scratch_discarded_on_sleep():

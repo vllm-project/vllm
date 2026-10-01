@@ -9,7 +9,7 @@ from typing import Any
 
 import torch
 
-from vllm.device_allocator import AllocationData, HandleType
+from vllm.device_allocator import DEFERRABLE_TAGS, AllocationData, HandleType
 from vllm.logger import init_logger
 from vllm.utils.torch_utils import PIN_MEMORY
 
@@ -267,7 +267,11 @@ class XpuMemAllocator:
         for ptr, data in self.pointer_to_data.items():
             if not data.is_asleep:
                 continue
-            if tags is not None and data.tag not in tags:
+            if (
+                tags is not None
+                and data.tag not in tags
+                and data.tag in DEFERRABLE_TAGS
+            ):
                 continue
             create_and_allocate(data.handle)
             data.is_asleep = False

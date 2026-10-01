@@ -16,7 +16,7 @@ from typing import Any
 
 import torch
 
-from vllm.device_allocator import AllocationData, HandleType
+from vllm.device_allocator import DEFERRABLE_TAGS, AllocationData, HandleType
 from vllm.device_allocator.alloc_conf import (
     EXPANDABLE_SEGMENTS,
     conf_flag_enabled,
@@ -334,9 +334,9 @@ class CuMemAllocator:
         memory, and the rest of the data will have empty memory.
 
         Args:
-            tags: The tags of the memory allocation that will be loaded
-                back to GPU memory. If None, all memory allocation will be loaded
-                back to GPU memory.
+            tags: The deferrable tags (weights, kv_cache) to load back to GPU
+                memory; every other tag is always loaded back. If None, all
+                memory allocation will be loaded back to GPU memory.
 
         """
         gc.collect()
@@ -345,7 +345,7 @@ class CuMemAllocator:
         for ptr, data in self.pointer_to_data.items():
             if not data.is_asleep:
                 continue
-            if tags is None or data.tag in tags:
+            if tags is None or data.tag in tags or data.tag not in DEFERRABLE_TAGS:
                 handle = data.handle
                 create_and_map(handle)
                 data.is_asleep = False
