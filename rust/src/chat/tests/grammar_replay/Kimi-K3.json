@@ -56,21 +56,18 @@
                             "type": "or",
                             "elements": [
                               {
-                                "type": "plus",
+                                "type": "tag",
+                                "begin": "<|open|>argument key=\"location\" type=\"string\"<|sep|>",
                                 "content": {
-                                  "type": "tag",
-                                  "begin": "<|open|>argument key=\"location\" type=\"string\"<|sep|>",
-                                  "content": {
-                                    "type": "any_text",
-                                    "excludes": [
-                                      "<|close|>argument<|sep|>",
-                                      "<|close|>call<|sep|>"
-                                    ],
-                                    "max_tokens": null,
-                                    "max_chars": null
-                                  },
-                                  "end": "<|close|>argument<|sep|>"
-                                }
+                                  "type": "any_text",
+                                  "excludes": [
+                                    "<|close|>argument<|sep|>",
+                                    "<|close|>call<|sep|>"
+                                  ],
+                                  "max_tokens": null,
+                                  "max_chars": null
+                                },
+                                "end": "<|close|>argument<|sep|>"
                               },
                               {
                                 "type": "tag",
@@ -119,60 +116,57 @@
                             "type": "or",
                             "elements": [
                               {
-                                "type": "plus",
-                                "content": {
-                                  "type": "or",
-                                  "elements": [
-                                    {
-                                      "type": "tag",
-                                      "begin": "<|open|>argument key=\"y\" type=\"number\"<|sep|>",
-                                      "content": {
-                                        "type": "json_schema",
-                                        "json_schema": {
-                                          "type": "number"
-                                        },
-                                        "style": "json",
-                                        "any_order": false,
-                                        "max_whitespace_cnt": null,
-                                        "excludes": []
+                                "type": "sequence",
+                                "elements": [
+                                  {
+                                    "type": "tag",
+                                    "begin": "<|open|>argument key=\"y\" type=\"number\"<|sep|>",
+                                    "content": {
+                                      "type": "json_schema",
+                                      "json_schema": {
+                                        "type": "number"
                                       },
-                                      "end": "<|close|>argument<|sep|>"
+                                      "style": "json",
+                                      "any_order": false,
+                                      "max_whitespace_cnt": null,
+                                      "excludes": []
                                     },
-                                    {
-                                      "type": "tag",
-                                      "begin": "<|open|>argument key=\"x\" type=\"number\"<|sep|>",
-                                      "content": {
-                                        "type": "json_schema",
-                                        "json_schema": {
-                                          "type": "number"
-                                        },
-                                        "style": "json",
-                                        "any_order": false,
-                                        "max_whitespace_cnt": null,
-                                        "excludes": []
+                                    "end": "<|close|>argument<|sep|>"
+                                  },
+                                  {
+                                    "type": "tag",
+                                    "begin": "<|open|>argument key=\"x\" type=\"number\"<|sep|>",
+                                    "content": {
+                                      "type": "json_schema",
+                                      "json_schema": {
+                                        "type": "number"
                                       },
-                                      "end": "<|close|>argument<|sep|>"
+                                      "style": "json",
+                                      "any_order": false,
+                                      "max_whitespace_cnt": null,
+                                      "excludes": []
                                     },
-                                    {
-                                      "type": "tag",
-                                      "begin": "<|open|>argument key=\"items\" type=\"array\"<|sep|>",
-                                      "content": {
-                                        "type": "json_schema",
-                                        "json_schema": {
-                                          "type": "array",
-                                          "items": {
-                                            "type": "string"
-                                          }
-                                        },
-                                        "style": "json",
-                                        "any_order": false,
-                                        "max_whitespace_cnt": null,
-                                        "excludes": []
+                                    "end": "<|close|>argument<|sep|>"
+                                  },
+                                  {
+                                    "type": "tag",
+                                    "begin": "<|open|>argument key=\"items\" type=\"array\"<|sep|>",
+                                    "content": {
+                                      "type": "json_schema",
+                                      "json_schema": {
+                                        "type": "array",
+                                        "items": {
+                                          "type": "string"
+                                        }
                                       },
-                                      "end": "<|close|>argument<|sep|>"
-                                    }
-                                  ]
-                                }
+                                      "style": "json",
+                                      "any_order": false,
+                                      "max_whitespace_cnt": null,
+                                      "excludes": []
+                                    },
+                                    "end": "<|close|>argument<|sep|>"
+                                  }
+                                ]
                               },
                               {
                                 "type": "tag",
@@ -287,21 +281,18 @@
                           "type": "or",
                           "elements": [
                             {
-                              "type": "plus",
+                              "type": "tag",
+                              "begin": "<|open|>argument key=\"location\" type=\"string\"<|sep|>",
                               "content": {
-                                "type": "tag",
-                                "begin": "<|open|>argument key=\"location\" type=\"string\"<|sep|>",
-                                "content": {
-                                  "type": "any_text",
-                                  "excludes": [
-                                    "<|close|>argument<|sep|>",
-                                    "<|close|>call<|sep|>"
-                                  ],
-                                  "max_tokens": null,
-                                  "max_chars": null
-                                },
-                                "end": "<|close|>argument<|sep|>"
-                              }
+                                "type": "any_text",
+                                "excludes": [
+                                  "<|close|>argument<|sep|>",
+                                  "<|close|>call<|sep|>"
+                                ],
+                                "max_tokens": null,
+                                "max_chars": null
+                              },
+                              "end": "<|close|>argument<|sep|>"
                             },
                             {
                               "type": "tag",
@@ -350,60 +341,57 @@
                           "type": "or",
                           "elements": [
                             {
-                              "type": "plus",
-                              "content": {
-                                "type": "or",
-                                "elements": [
-                                  {
-                                    "type": "tag",
-                                    "begin": "<|open|>argument key=\"y\" type=\"number\"<|sep|>",
-                                    "content": {
-                                      "type": "json_schema",
-                                      "json_schema": {
-                                        "type": "number"
-                                      },
-                                      "style": "json",
-                                      "any_order": false,
-                                      "max_whitespace_cnt": null,
-                                      "excludes": []
+                              "type": "sequence",
+                              "elements": [
+                                {
+                                  "type": "tag",
+                                  "begin": "<|open|>argument key=\"y\" type=\"number\"<|sep|>",
+                                  "content": {
+                                    "type": "json_schema",
+                                    "json_schema": {
+                                      "type": "number"
                                     },
-                                    "end": "<|close|>argument<|sep|>"
+                                    "style": "json",
+                                    "any_order": false,
+                                    "max_whitespace_cnt": null,
+                                    "excludes": []
                                   },
-                                  {
-                                    "type": "tag",
-                                    "begin": "<|open|>argument key=\"x\" type=\"number\"<|sep|>",
-                                    "content": {
-                                      "type": "json_schema",
-                                      "json_schema": {
-                                        "type": "number"
-                                      },
-                                      "style": "json",
-                                      "any_order": false,
-                                      "max_whitespace_cnt": null,
-                                      "excludes": []
+                                  "end": "<|close|>argument<|sep|>"
+                                },
+                                {
+                                  "type": "tag",
+                                  "begin": "<|open|>argument key=\"x\" type=\"number\"<|sep|>",
+                                  "content": {
+                                    "type": "json_schema",
+                                    "json_schema": {
+                                      "type": "number"
                                     },
-                                    "end": "<|close|>argument<|sep|>"
+                                    "style": "json",
+                                    "any_order": false,
+                                    "max_whitespace_cnt": null,
+                                    "excludes": []
                                   },
-                                  {
-                                    "type": "tag",
-                                    "begin": "<|open|>argument key=\"items\" type=\"array\"<|sep|>",
-                                    "content": {
-                                      "type": "json_schema",
-                                      "json_schema": {
-                                        "type": "array",
-                                        "items": {
-                                          "type": "string"
-                                        }
-                                      },
-                                      "style": "json",
-                                      "any_order": false,
-                                      "max_whitespace_cnt": null,
-                                      "excludes": []
+                                  "end": "<|close|>argument<|sep|>"
+                                },
+                                {
+                                  "type": "tag",
+                                  "begin": "<|open|>argument key=\"items\" type=\"array\"<|sep|>",
+                                  "content": {
+                                    "type": "json_schema",
+                                    "json_schema": {
+                                      "type": "array",
+                                      "items": {
+                                        "type": "string"
+                                      }
                                     },
-                                    "end": "<|close|>argument<|sep|>"
-                                  }
-                                ]
-                              }
+                                    "style": "json",
+                                    "any_order": false,
+                                    "max_whitespace_cnt": null,
+                                    "excludes": []
+                                  },
+                                  "end": "<|close|>argument<|sep|>"
+                                }
+                              ]
                             },
                             {
                               "type": "tag",
@@ -517,21 +505,18 @@
                           "type": "or",
                           "elements": [
                             {
-                              "type": "plus",
+                              "type": "tag",
+                              "begin": "<|open|>argument key=\"location\" type=\"string\"<|sep|>",
                               "content": {
-                                "type": "tag",
-                                "begin": "<|open|>argument key=\"location\" type=\"string\"<|sep|>",
-                                "content": {
-                                  "type": "any_text",
-                                  "excludes": [
-                                    "<|close|>argument<|sep|>",
-                                    "<|close|>call<|sep|>"
-                                  ],
-                                  "max_tokens": null,
-                                  "max_chars": null
-                                },
-                                "end": "<|close|>argument<|sep|>"
-                              }
+                                "type": "any_text",
+                                "excludes": [
+                                  "<|close|>argument<|sep|>",
+                                  "<|close|>call<|sep|>"
+                                ],
+                                "max_tokens": null,
+                                "max_chars": null
+                              },
+                              "end": "<|close|>argument<|sep|>"
                             },
                             {
                               "type": "tag",

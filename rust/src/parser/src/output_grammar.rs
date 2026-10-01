@@ -17,6 +17,7 @@ use xgrammar_structural_tag::{
 
 use crate::tool::Tool;
 
+pub mod arguments;
 #[cfg(any(test, feature = "test-util"))]
 pub mod test_utils;
 

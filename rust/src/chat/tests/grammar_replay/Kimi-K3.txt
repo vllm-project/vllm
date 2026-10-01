@@ -10,18 +10,17 @@ sequence
             /[1-9][0-9]*/
             `"<|sep|>`
             or
-              plus tag `<|open|>argument key="location" type="string"<|sep|>` text excluding [`<|close|>argument<|sep|>`, `<|close|>call<|sep|>`] `<|close|>argument<|sep|>`
+              tag `<|open|>argument key="location" type="string"<|sep|>` text excluding [`<|close|>argument<|sep|>`, `<|close|>call<|sep|>`] `<|close|>argument<|sep|>`
               tag `<|open|>json type="object"<|sep|>` json({ location: string }) `<|close|>json<|sep|>`
         tag `<|open|>call tool="add" index="` .. `<|close|>call<|sep|>`
           sequence
             /[1-9][0-9]*/
             `"<|sep|>`
             or
-              plus
-                or
-                  tag `<|open|>argument key="y" type="number"<|sep|>` json(number) `<|close|>argument<|sep|>`
-                  tag `<|open|>argument key="x" type="number"<|sep|>` json(number) `<|close|>argument<|sep|>`
-                  tag `<|open|>argument key="items" type="array"<|sep|>` json(string[]) `<|close|>argument<|sep|>`
+              sequence
+                tag `<|open|>argument key="y" type="number"<|sep|>` json(number) `<|close|>argument<|sep|>`
+                tag `<|open|>argument key="x" type="number"<|sep|>` json(number) `<|close|>argument<|sep|>`
+                tag `<|open|>argument key="items" type="array"<|sep|>` json(string[]) `<|close|>argument<|sep|>`
               tag `<|open|>json type="object"<|sep|>` json({ y: number, x: number, items: string[] }) `<|close|>json<|sep|>`
   optional `<|close|>message<|sep|>`
 
@@ -36,18 +35,17 @@ sequence
           /[1-9][0-9]*/
           `"<|sep|>`
           or
-            plus tag `<|open|>argument key="location" type="string"<|sep|>` text excluding [`<|close|>argument<|sep|>`, `<|close|>call<|sep|>`] `<|close|>argument<|sep|>`
+            tag `<|open|>argument key="location" type="string"<|sep|>` text excluding [`<|close|>argument<|sep|>`, `<|close|>call<|sep|>`] `<|close|>argument<|sep|>`
             tag `<|open|>json type="object"<|sep|>` json({ location: string }) `<|close|>json<|sep|>`
       tag `<|open|>call tool="add" index="` .. `<|close|>call<|sep|>`
         sequence
           /[1-9][0-9]*/
           `"<|sep|>`
           or
-            plus
-              or
-                tag `<|open|>argument key="y" type="number"<|sep|>` json(number) `<|close|>argument<|sep|>`
-                tag `<|open|>argument key="x" type="number"<|sep|>` json(number) `<|close|>argument<|sep|>`
-                tag `<|open|>argument key="items" type="array"<|sep|>` json(string[]) `<|close|>argument<|sep|>`
+            sequence
+              tag `<|open|>argument key="y" type="number"<|sep|>` json(number) `<|close|>argument<|sep|>`
+              tag `<|open|>argument key="x" type="number"<|sep|>` json(number) `<|close|>argument<|sep|>`
+              tag `<|open|>argument key="items" type="array"<|sep|>` json(string[]) `<|close|>argument<|sep|>`
             tag `<|open|>json type="object"<|sep|>` json({ y: number, x: number, items: string[] }) `<|close|>json<|sep|>`
   optional `<|close|>message<|sep|>`
 
@@ -62,6 +60,6 @@ sequence
           /[1-9][0-9]*/
           `"<|sep|>`
           or
-            plus tag `<|open|>argument key="location" type="string"<|sep|>` text excluding [`<|close|>argument<|sep|>`, `<|close|>call<|sep|>`] `<|close|>argument<|sep|>`
+            tag `<|open|>argument key="location" type="string"<|sep|>` text excluding [`<|close|>argument<|sep|>`, `<|close|>call<|sep|>`] `<|close|>argument<|sep|>`
             tag `<|open|>json type="object"<|sep|>` json({ location: string }) `<|close|>json<|sep|>`
   optional `<|close|>message<|sep|>`
