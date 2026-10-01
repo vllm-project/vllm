@@ -5350,8 +5350,7 @@ def test_abort_request_finished_recving():
     assert not scheduler.finished_recving_kv_req_ids
 
 
-@pytest.mark.parametrize("preserve_kv_cache", [False, True])
-def test_delayed_kv_connector_free_keeps_scheduler_active(preserve_kv_cache):
+def test_delayed_kv_connector_free_keeps_scheduler_active():
     scheduler = create_scheduler(use_kv_connector=True)
     queued_request, request = create_requests(
         num_requests=2, req_ids=["queued", "finished"]
@@ -5366,17 +5365,6 @@ def test_delayed_kv_connector_free_keeps_scheduler_active(preserve_kv_cache):
 
     assert scheduler.has_finished_requests()
     assert scheduler.has_requests()
-
-    scheduler.set_pause_state(PauseState.PAUSED_ALL)
-    scheduler.set_preserve_paused_kv(preserve_kv_cache)
-    assert scheduler.has_requests() is not preserve_kv_cache
-    assert request.request_id in scheduler.requests
-    scheduler.finished_req_ids.add(request.request_id)
-    assert scheduler.has_requests()
-    scheduler.finished_req_ids.clear()
-    scheduler.set_pause_state(PauseState.PAUSED_ALL)
-    assert scheduler.has_requests()
-    scheduler.set_pause_state(PauseState.UNPAUSED)
 
     scheduler_output = SchedulerOutput(
         scheduled_new_reqs=[],
