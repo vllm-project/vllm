@@ -423,7 +423,7 @@ def test_inc_get_quant_method_unquantized_routed_experts_with_model_prefix(
 
     config = make_config(extra_config={"model.moe_layer": {"bits": 16}})
     layer = object.__new__(RoutedExperts)
-    layer.moe_config = None  # type: ignore[assignment]  # No MoE config used by this stub.
+    layer.moe_config = None
 
     method = config.get_quant_method(layer, "moe_layer")
 
@@ -730,7 +730,7 @@ def test_wna16_cuda_low_bit_moe_routes_to_humming(monkeypatch, bits) -> None:
     )
 
     layer = object.__new__(RoutedExperts)
-    layer.moe_config = DummyMoeConfig()  # type: ignore[assignment]
+    layer.moe_config = DummyMoeConfig()
     layer_config = make_layer_config(bits=bits)
     method = INCWna16Scheme().get_moe_method(
         make_config(), layer, "model.layers.0.mlp", layer_config
@@ -861,7 +861,7 @@ def test_qwen3_30b_a3b_w4a16_autoround_routes_to_gptq_moe(
 
     config = make_qwen3_autoround_config("qwen3_30b_a3b_w4a16")
     layer = object.__new__(RoutedExperts)
-    layer.moe_config = DummyMoeConfig()  # type: ignore[assignment]
+    layer.moe_config = DummyMoeConfig()
 
     method = config.get_quant_method(layer, "model.layers.0.mlp")
 
@@ -890,7 +890,7 @@ def test_qwen3_30b_a3b_mxfp4_autoround_routes_to_mxfp4_moe(
 
     config = make_qwen3_autoround_config("qwen3_30b_a3b_mxfp4")
     layer = object.__new__(RoutedExperts)
-    layer.moe_config = DummyMoeConfig()  # type: ignore[assignment]
+    layer.moe_config = DummyMoeConfig()
 
     ignored_method = config.get_quant_method(
         object.__new__(LinearBase), "model.layers.0.self_attn.q_proj"
@@ -1186,7 +1186,7 @@ def test_wna16_xpu_moe_routes_to_gptq_moe(monkeypatch) -> None:
     )
 
     layer = object.__new__(RoutedExperts)
-    layer.moe_config = DummyMoeConfig()  # type: ignore[assignment]
+    layer.moe_config = DummyMoeConfig()
     method = INCWna16Scheme().get_moe_method(
         make_config(),
         layer,
@@ -1669,7 +1669,7 @@ def test_inc_get_quant_method_unquantized_moe_returns_unquantized(
     when extra_config has bits >= 16."""
     config = make_config(extra_config={"layer": {"bits": 16}})
     layer = object.__new__(RoutedExperts)
-    layer.moe_config = None  # type: ignore[assignment]  # No MoE config used by this stub.
+    layer.moe_config = None
 
     class DummyUnquantizedFusedMoEMethod:
         def __init__(self, moe_config) -> None:

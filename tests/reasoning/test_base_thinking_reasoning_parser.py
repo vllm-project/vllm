@@ -68,7 +68,7 @@ class TestBaseThinkingReasoningParserInit:
     def test_initialization_with_missing_tokenizer(self):
         """Test that initialization fails without tokenizer."""
         with pytest.raises(ValueError, match="model tokenizer must be passed"):
-            TestThinkingReasoningParser(None)  # type: ignore[arg-type]
+            TestThinkingReasoningParser(None)
 
     def test_initialization_with_missing_tokens(self, test_tokenizer):
         """Test that initialization fails when tokens are not in vocabulary."""
