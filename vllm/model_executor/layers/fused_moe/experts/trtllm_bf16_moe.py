@@ -31,6 +31,15 @@ from vllm.platforms import current_platform
 from vllm.utils.flashinfer import has_flashinfer_trtllm_fused_moe
 
 
+def view_as_block_major_k(weight: torch.Tensor) -> torch.Tensor:
+    """View packed storage, including legacy 4D IPC cache entries."""
+    if weight.ndim == 4:
+        return weight
+    experts, rows, cols = weight.shape
+    block_k = 128 // weight.element_size()
+    return weight.view(experts, cols // block_k, rows, block_k)
+
+
 class TrtLlmBf16ExpertsBase:
     """BF16 unquantized TRTLLM-Gen MoE kernels. Shared base for modular and
     monolithic interfaces.
@@ -200,8 +209,8 @@ class TrtLlmBf16ExpertsModular(TrtLlmBf16ExpertsBase, mk.FusedMoEExpertsModular)
         result = flashinfer.fused_moe.trtllm_bf16_routed_moe(
             topk_ids=(topk_ids, topk_weights),
             hidden_states=hidden_states,
-            gemm1_weights=w1,
-            gemm2_weights=w2,
+            gemm1_weights=view_as_block_major_k(w1),
+            gemm2_weights=view_as_block_major_k(w2),
             num_experts=global_num_experts,
             top_k=topk_ids.size(1),
             n_group=None,
@@ -281,8 +290,8 @@ class TrtLlmBf16ExpertsMonolithic(TrtLlmBf16ExpertsBase, mk.FusedMoEExpertsMonol
             routing_logits=router_logits,
             routing_bias=e_score_correction_bias,
             hidden_states=hidden_states,
-            gemm1_weights=w1,
-            gemm2_weights=w2,
+            gemm1_weights=view_as_block_major_k(w1),
+            gemm2_weights=view_as_block_major_k(w2),
             num_experts=global_num_experts,
             top_k=self.topk,
             n_group=num_expert_group,

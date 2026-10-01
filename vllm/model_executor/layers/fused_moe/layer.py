@@ -137,6 +137,7 @@ def FusedMoEFactory(
     runner_args: dict[str, Any] | None = None,
     routed_experts_cls: type[RoutedExperts] | None = None,
     routed_experts_args: dict[str, Any] | None = None,
+    skip_padding: bool = False,
 ) -> MoERunner:
     """Factory function for creating MoE execution pipeline.
 
@@ -213,6 +214,7 @@ def FusedMoEFactory(
         runner_args: Additional arguments for runner constructor
         routed_experts_cls: Custom RoutedExperts class (None = use default)
         routed_experts_args: Additional arguments for routed_experts constructor
+        skip_padding: Whether grouped routing should invalidate padding rows.
 
     Returns:
         MoERunner: Configured MoE execution pipeline ready for forward passes
@@ -308,6 +310,7 @@ def FusedMoEFactory(
             else 1.0,
             e_score_correction_bias=e_score_correction_bias,
             num_fused_shared_experts=num_fused_shared_experts,
+            skip_padding=(skip_padding and moe_parallel_config.use_deepep_v2_kernels),
             # Fused shared-expert slot weight. With apply_routed_scale_to_output
             # the runner scales the combined output by routed_scaling_factor, so
             # the shared slot weight must be 1/routed_scaling_factor for its net
@@ -360,6 +363,7 @@ def FusedMoEFactory(
         activation=moe_activation,
         device=vllm_config.device_config.device,
         routing_method=router.routing_method_type,  # Not ideal
+        has_hash_routing=hash_indices_table is not None,
         swiglu_limit=swiglu_limit,
         swiglu_alpha=swiglu_alpha,
         swiglu_beta=swiglu_beta,
