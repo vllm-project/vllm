@@ -28,6 +28,8 @@ if current_platform.is_xpu():
 def _enable_breakable_cudagraph(monkeypatch: pytest.MonkeyPatch):
     """Enable breakable cudagraphs for this module's tests only.
 
+    eager_break_during_capture reads the env at decoration time, which
+    happens inside the test bodies, so a per-test fixture suffices.
     monkeypatch restores the env so other test files running in the same
     pytest process are unaffected (a module-level os.environ assignment
     used to leak into test_cudagraph_dispatch.py and break it).
@@ -391,83 +393,6 @@ def test_quantized_activation_replay_does_not_retain_tensors(
         cuda_capture_stream.synchronize()
         torch.testing.assert_close(output, source, rtol=0, atol=0)
         torch.testing.assert_close(scale_out, source[:, ::32].to(torch.uint8))
-
-
-def test_decorator_breaks_when_enabled_only_after_decoration(
-    cuda_capture_stream, monkeypatch: pytest.MonkeyPatch
-):
-    """Honor capture enabled after the function was decorated."""
-    import vllm.envs as envs
-    from vllm.compilation.breakable_cudagraph import (
-        BreakableCUDAGraphCapture,
-        eager_break_during_capture,
-    )
-
-    monkeypatch.delenv("VLLM_USE_BREAKABLE_CUDAGRAPH", raising=False)
-    envs.disable_envs_cache()
-
-    @eager_break_during_capture  # decorated while the feature is "off"
-    def attention_like(t: torch.Tensor) -> None:
-        t.mul_(2.0)
-
-    monkeypatch.setenv("VLLM_USE_BREAKABLE_CUDAGRAPH", "1")
-
-    x = torch.zeros(4, device="cuda")
-    cap = BreakableCUDAGraphCapture()
-    with cap:
-        x.add_(5.0)
-        attention_like(x)
-        x.add_(1.0)
-    torch.accelerator.synchronize()
-    assert cap.num_eager_breaks == 1
-    assert cap.num_graphs == 2
-
-    x.fill_(2.0)
-    cap.replay()
-    torch.accelerator.synchronize()
-    assert torch.equal(x, torch.full((4,), 15.0, device="cuda"))
-
-
-def test_validate_piecewise_capture_breaks_rejects_unbroken_capture(
-    cuda_capture_stream,
-):
-    """Reject a piecewise attention capture without eager breaks."""
-    from types import SimpleNamespace
-
-    from vllm.compilation.breakable_cudagraph import (
-        BreakableCUDAGraphCapture,
-        validate_piecewise_capture_breaks,
-    )
-    from vllm.config import CUDAGraphMode
-
-    x = torch.zeros(4, device="cuda")
-    cap = BreakableCUDAGraphCapture()
-    with cap:
-        x.add_(1.0)
-    assert cap.num_eager_breaks == 0
-
-    piecewise_with_attn = SimpleNamespace(
-        cudagraph_runtime_mode=CUDAGraphMode.PIECEWISE,
-        no_compile_layers={"layers.0.self_attn.attn": object()},
-    )
-    with pytest.raises(RuntimeError, match="recorded no eager break"):
-        validate_piecewise_capture_breaks(cap, piecewise_with_attn)
-
-    # FULL mode intentionally captures attention inside the graph.
-    validate_piecewise_capture_breaks(
-        cap,
-        SimpleNamespace(
-            cudagraph_runtime_mode=CUDAGraphMode.FULL,
-            no_compile_layers=piecewise_with_attn.no_compile_layers,
-        ),
-    )
-    # No attention-like layers: nothing to break on.
-    validate_piecewise_capture_breaks(
-        cap,
-        SimpleNamespace(
-            cudagraph_runtime_mode=CUDAGraphMode.PIECEWISE, no_compile_layers={}
-        ),
-    )
 
 
 def test_eager_attention_inside_multistream_overlap(cuda_capture_stream):

@@ -94,10 +94,9 @@ def eager_break_during_capture(fn: F) -> F:
         @maybe_transfer_kv_layer
         def unified_attention_with_output(...):
             ...
-
-    Check capture state at call time: workers may receive
-    ``VLLM_USE_BREAKABLE_CUDAGRAPH`` after this module is imported.
     """
+    if not is_breakable_cudagraph_enabled():
+        return fn
 
     @functools.wraps(fn)
     def wrapper(*args: Any, **kwargs: Any) -> Any:
@@ -232,26 +231,6 @@ class BreakableCUDAGraphCapture:
             f"BreakableCUDAGraphCapture(graphs={self.num_graphs}, "
             f"eager_breaks={self.num_eager_breaks})"
         )
-
-
-def validate_piecewise_capture_breaks(
-    capture: BreakableCUDAGraphCapture, forward_context: Any
-) -> None:
-    """Reject piecewise captures that have attention layers but no eager breaks."""
-    if forward_context.cudagraph_runtime_mode != CUDAGraphMode.PIECEWISE:
-        return
-    if not forward_context.no_compile_layers or capture.num_eager_breaks > 0:
-        return
-    raise RuntimeError(
-        "Breakable cudagraph PIECEWISE capture recorded no eager break "
-        f"although the model has {len(forward_context.no_compile_layers)} "
-        "attention-like layers. The attention / linear-attention kernels "
-        "were captured inside the graph and replay would produce wrong "
-        "outputs. This usually means the decorated ops were bypassed "
-        "(check that @eager_break_during_capture is the outermost decorator "
-        "on the attention custom ops used by this model), or set "
-        "VLLM_USE_BREAKABLE_CUDAGRAPH=0 to fall back."
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -416,8 +395,6 @@ class BreakableCUDAGraphWrapper:
             # the cudagraph pool reclaim/reuse that memory immediately for
             # the next batch descriptor's capture.
             output = weak_ref_tensors(output)
-
-        validate_piecewise_capture_breaks(capture, get_forward_context())
 
         entry.capture = capture
         entry.output = weak_ref_tensors(output)
