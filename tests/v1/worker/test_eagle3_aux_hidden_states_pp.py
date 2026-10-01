@@ -102,7 +102,10 @@ def minimax_pp_stage(monkeypatch):
         )
         model = minimax_m3.MiniMaxM3Model(
             vllm_config=SimpleNamespace(
-                model_config=SimpleNamespace(hf_text_config=config), quant_config=None
+                model_config=SimpleNamespace(hf_text_config=config),
+                quant_config=None,
+                speculative_config=None,
+                use_v2_model_runner=False,
             )
         )
         model._set_aux_hidden_state_layers(taps)
