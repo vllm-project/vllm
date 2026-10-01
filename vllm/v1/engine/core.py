@@ -906,9 +906,8 @@ class EngineCore:
             self.scheduler.finish_requests(None, RequestStatus.FINISHED_ABORTED)
 
         pause_state = PauseState.PAUSED_ALL if mode == "keep" else PauseState.PAUSED_NEW
-        self.scheduler.set_pause_state(
-            pause_state, preserve_kv_cache=mode == "keep" and not clear_cache
-        )
+        self.scheduler.set_pause_state(pause_state)
+        self.scheduler.set_preserve_paused_kv(mode == "keep" and not clear_cache)
         self._finish_pause(clear_cache)
 
         return None
@@ -2018,9 +2017,8 @@ class EngineCoreProc(EngineCore):
             self._send_abort_outputs(aborted_reqs)
 
         pause_state = PauseState.PAUSED_ALL if mode == "keep" else PauseState.PAUSED_NEW
-        self.scheduler.set_pause_state(
-            pause_state, preserve_kv_cache=mode == "keep" and not clear_cache
-        )
+        self.scheduler.set_pause_state(pause_state)
+        self.scheduler.set_preserve_paused_kv(mode == "keep" and not clear_cache)
 
         if self._pause_complete():
             self._finish_pause(clear_cache)

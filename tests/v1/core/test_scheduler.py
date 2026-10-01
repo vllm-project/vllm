@@ -5367,9 +5367,8 @@ def test_delayed_kv_connector_free_keeps_scheduler_active(preserve_kv_cache):
     assert scheduler.has_finished_requests()
     assert scheduler.has_requests()
 
-    scheduler.set_pause_state(
-        PauseState.PAUSED_ALL, preserve_kv_cache=preserve_kv_cache
-    )
+    scheduler.set_pause_state(PauseState.PAUSED_ALL)
+    scheduler.set_preserve_paused_kv(preserve_kv_cache)
     assert scheduler.has_requests() is not preserve_kv_cache
     assert request.request_id in scheduler.requests
     scheduler.finished_req_ids.add(request.request_id)

@@ -208,10 +208,13 @@ class SchedulerInterface(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def set_pause_state(
-        self, pause_state: PauseState, *, preserve_kv_cache: bool = False
-    ) -> None:
+    def set_pause_state(self, pause_state: PauseState) -> None:
         raise NotImplementedError
+
+    def set_preserve_paused_kv(self, preserve: bool) -> None:  # noqa: B027
+        """Let a ``PAUSED_ALL`` pause complete while finished requests still
+        hold connector-retained KV. Optional: without it, the pause waits for
+        that KV to be released."""
 
     @abstractmethod
     def reset_prefix_cache(

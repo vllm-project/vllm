@@ -2603,12 +2603,12 @@ class Scheduler(SchedulerInterface):
     def pause_state(self) -> PauseState:
         return self._pause_state
 
-    def set_pause_state(
-        self, pause_state: PauseState, *, preserve_kv_cache: bool = False
-    ) -> None:
+    def set_pause_state(self, pause_state: PauseState) -> None:
         logger.info("setting pause state to %s", pause_state.name)
         self._pause_state = pause_state
-        self._preserve_paused_kv = preserve_kv_cache
+
+    def set_preserve_paused_kv(self, preserve: bool) -> None:
+        self._preserve_paused_kv = preserve
 
     def _request_blocks_can_be_freed(self, request: Request) -> bool:
         # We must defer freeing blocks if an async kv connector may

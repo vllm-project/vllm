@@ -710,9 +710,8 @@ def test_pause_synchronizes_device_before_cache_reset(
     core._reset_caches = lambda: order.append("reset_caches")
 
     result = EngineCoreProc.pause_scheduler(core, mode="keep", clear_cache=clear_cache)
-    core.scheduler.set_pause_state.assert_called_once_with(
-        PauseState.PAUSED_ALL, preserve_kv_cache=not clear_cache
-    )
+    core.scheduler.set_pause_state.assert_called_once_with(PauseState.PAUSED_ALL)
+    core.scheduler.set_preserve_paused_kv.assert_called_once_with(not clear_cache)
     if deferred:
         assert isinstance(result, Future)
         assert not result.done() and order == []
