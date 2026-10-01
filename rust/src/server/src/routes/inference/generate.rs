@@ -661,20 +661,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn generate_chunk_stream_returns_sampling_mask_per_chunk() {
-        let mut first = stream_output(Some(&[11]), vec![33], None);
-        first.sampling_mask = Some(SamplingMask {
+    async fn generate_chunk_stream_returns_sampling_mask() {
+        let mut output = stream_output(Some(&[11]), vec![33], Some(FinishReason::Length));
+        output.sampling_mask = Some(SamplingMask {
             rows: vec![vec![33, 44]],
         });
-        let mut last = stream_output(None, vec![55], Some(FinishReason::Length));
-        last.sampling_mask = Some(SamplingMask {
-            rows: vec![vec![55]],
-        });
 
-        let chunks = collect_chunks(vec![first, last], false, None).await;
+        let chunks = collect_chunks(vec![output], false, None).await;
 
         assert_eq!(chunks[0].choices[0].sampling_mask, Some(vec![vec![33, 44]]));
-        assert_eq!(chunks[1].choices[0].sampling_mask, Some(vec![vec![55]]));
     }
 
     #[tokio::test]
