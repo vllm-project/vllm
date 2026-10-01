@@ -313,6 +313,7 @@ async def test_build_transfer_params_separates_prefill_pp_layers():
     worker.use_mla = False
     worker.kv_cache_config = _make_test_kv_cache_config()
     worker._physical_blocks_per_logical_kv_block = 1
+    worker._layer_specs = {}
     worker.transfer_topo = SimpleNamespace(
         local_replicates_kv_cache=False,
         total_num_kv_heads=4,
@@ -1914,6 +1915,7 @@ async def test_build_transfer_params_sends_packed_region_once(
         num_blocks=4, num_groups=len(local_ids)
     )
     worker._physical_blocks_per_logical_kv_block = 1
+    worker._layer_specs = {}
     worker.transfer_topo = SimpleNamespace(
         local_replicates_kv_cache=False,
         total_num_kv_heads=1,

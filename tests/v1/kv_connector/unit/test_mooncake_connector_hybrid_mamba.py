@@ -17,7 +17,6 @@ import torch
 from tests.v1.attention.utils import dense_kv_cache_views
 from vllm.config import set_current_vllm_config
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_connector import (
-    _SHARED_REGION_GROUP_ID,
     KVConnectorRole,
     MooncakeConnector,
     MooncakeConnectorScheduler,
@@ -36,6 +35,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheGroupSpec,
     KVCacheLayout,
     MambaSpec,
+    UniformTypeKVCacheSpecs,
 )
 
 from .test_mooncake_connector import patch_worker_dependencies
@@ -713,26 +713,39 @@ def test_get_transfer_regions_tolerates_peer_pp_stage_layers(monkeypatch):
 
 def test_transfer_rule_follows_plain_head_mapping_for_hybrid_attention(monkeypatch):
     """Hybrid attention follows the head mapping of plain models; Mamba/GDN
-    states shard by TP ratio, or copy whole when replicated across TP."""
+    states shard by TP ratio, or copy whole when replicated across TP. The rule
+    comes from each layer's own spec, also when the group's spec wraps its
+    layers in a UniformTypeKVCacheSpecs, as hybrid models such as Qwen3.8 do."""
     monkeypatch.setenv("VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT", "5")
     vllm_config = create_vllm_config(
         kv_connector="MooncakeConnector",
         kv_role="kv_consumer",
     )
-    base = make_hybrid_gdn_kv_cache_config(vllm_config.cache_config.block_size)
+    block_size = vllm_config.cache_config.block_size
+    base = make_hybrid_gdn_kv_cache_config(block_size)
+    attention_spec = base.kv_cache_groups[0].kv_cache_spec
+    gdn_spec = base.kv_cache_groups[1].kv_cache_spec
     replicated_spec = MambaSpec(
-        block_size=vllm_config.cache_config.block_size,
+        block_size=block_size,
         shapes=((4, 3),),
         dtypes=(torch.float16,),
         mamba_type=MambaAttentionBackendEnum.SHORT_CONV,
         tp_replicated=True,
     )
+
+    def wrapped(name: str, spec) -> KVCacheGroupSpec:
+        return KVCacheGroupSpec(
+            [name],
+            UniformTypeKVCacheSpecs(block_size=block_size, kv_cache_specs={name: spec}),
+        )
+
     kv_cache_config = KVCacheConfig(
         num_blocks=base.num_blocks,
         kv_cache_tensors=[],
         kv_cache_groups=[
-            *base.kv_cache_groups,
-            KVCacheGroupSpec(["model.layers.2.ple"], replicated_spec),
+            wrapped("model.layers.0.self_attn", attention_spec),
+            wrapped("model.layers.1.linear_attn", gdn_spec),
+            wrapped("model.layers.2.ple", replicated_spec),
         ],
     )
 
@@ -744,12 +757,12 @@ def test_transfer_rule_follows_plain_head_mapping_for_hybrid_attention(monkeypat
         )
         worker = connector.connector_worker
 
-        attention_rule = (False, worker.transfer_topo.total_num_kv_heads)
-        assert worker._transfer_rule(0) == attention_rule
-        # Packed rows shared by several groups only hold attention pages.
-        assert worker._transfer_rule(_SHARED_REGION_GROUP_ID) == attention_rule
-        assert worker._transfer_rule(1) == (False, None)
-        assert worker._transfer_rule(2) == (True, None)
+        assert worker._transfer_rule("model.layers.0.self_attn") == (
+            False,
+            worker.transfer_topo.total_num_kv_heads,
+        )
+        assert worker._transfer_rule("model.layers.1.linear_attn") == (False, None)
+        assert worker._transfer_rule("model.layers.2.ple") == (True, None)
 
         worker.shutdown()
         worker.shutdown = noop_shutdown

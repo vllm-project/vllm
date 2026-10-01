@@ -1534,7 +1534,7 @@ class MooncakeConnectorWorker:
             ] = {}
             for local_region, remote_region in zip(local_regions, remote_regions):
                 local_group, remote_group = regions_by_rule.setdefault(
-                    self._transfer_rule(local_region.group_index), ([], [])
+                    self._transfer_rule(local_region.layer_name), ([], [])
                 )
                 local_group.append(local_region)
                 remote_group.append(remote_region)
@@ -1869,7 +1869,7 @@ class MooncakeConnectorWorker:
                     remote_kv_block_len=remote_region.kv_block_len,
                     remote_tp_rank=agent_meta.remote_tp_rank,
                     remote_tp_size=agent_meta.remote_tp_size,
-                    group_index=local_region.group_index,
+                    layer_name=local_region.layer_name,
                 )
                 if not should_transfer:
                     # Replicated KV cache: only one producer rank in the TP group
@@ -2727,7 +2727,7 @@ class MooncakeConnectorWorker:
         # attention KV is replicated.
         tp_ratio = _get_tp_ratio(self.tp_size, meta.remote_tp_size)
         if tp_ratio == 1 or all(
-            self._transfer_rule(region.group_index)[0] for region in local_regions
+            self._transfer_rule(region.layer_name)[0] for region in local_regions
         ):
             covered_both_sides = len(local_regions) == len(pre_align_local) and len(
                 remote_regions
@@ -2810,9 +2810,8 @@ class MooncakeConnectorWorker:
             self.tp_size != remote_tp_size
             and not is_conv_state_dim_first()
             and any(
-                isinstance(group.kv_cache_spec, MambaSpec)
-                and not group.kv_cache_spec.tp_replicated
-                for group in self.kv_cache_config.transfer_groups
+                isinstance(spec, MambaSpec) and not spec.tp_replicated
+                for spec in self._layer_specs.values()
             )
         ):
             return (
@@ -2821,18 +2820,19 @@ class MooncakeConnectorWorker:
             )
         return None
 
-    def _transfer_rule(self, group_index: int) -> tuple[bool, int | None]:
-        """Replication rule for a KV group's regions under heterogeneous TP.
+    def _transfer_rule(self, layer_name: str) -> tuple[bool, int | None]:
+        """Replication rule for a region under heterogeneous TP.
 
-        Returns (producer_cache_replicated, total_num_kv_heads). Attention
-        follows the head mapping of plain models, also in hybrid models (packed
-        rows shared by several groups are attention-only). Mamba/GDN states
-        shard by the TP ratio, or are copied whole when replicated across TP.
+        Returns (producer_cache_replicated, total_num_kv_heads), read from the
+        region's own layer spec: a group's spec can wrap several layers in a
+        UniformTypeKVCacheSpecs. Attention follows the head mapping of plain
+        models, also in hybrid models (a packed row shared by several groups is
+        named after an attention layer). Mamba/GDN states shard by the TP
+        ratio, or are copied whole when replicated across TP.
         """
-        if group_index != _SHARED_REGION_GROUP_ID:
-            spec = self.kv_cache_config.transfer_groups[group_index].kv_cache_spec
-            if isinstance(spec, MambaSpec):
-                return spec.tp_replicated, None
+        spec = self._layer_specs.get(layer_name)
+        if isinstance(spec, MambaSpec):
+            return spec.tp_replicated, None
         return (
             self._producer_cache_is_replicated(),
             None if self.use_mla else self.transfer_topo.total_num_kv_heads,
@@ -2844,9 +2844,9 @@ class MooncakeConnectorWorker:
         remote_kv_block_len: int,
         remote_tp_rank: int,
         remote_tp_size: int,
-        group_index: int,
+        layer_name: str,
     ) -> tuple[bool, int, int, int]:
-        producer_cache_replicated, total_num_kv_heads = self._transfer_rule(group_index)
+        producer_cache_replicated, total_num_kv_heads = self._transfer_rule(layer_name)
         return _compute_sender_transfer_plan(
             local_tp_rank=self.tp_rank,
             local_tp_size=self.tp_size,
