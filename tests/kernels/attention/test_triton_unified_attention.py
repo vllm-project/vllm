@@ -9,11 +9,11 @@ from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import next_power_of_2
 from vllm.utils.torch_utils import set_random_seed
+from vllm.v1.attention.ops import triton_unified_attention as triton_ua
 from vllm.v1.attention.ops.triton_attention_helpers import (
     apply_softcap,
     compute_tile_loop_bounds,
 )
-from vllm.v1.attention.ops import triton_unified_attention as triton_ua
 from vllm.v1.attention.ops.triton_unified_attention import unified_attention
 from vllm.v1.kv_cache_interface import KVQuantMode
 
@@ -58,6 +58,25 @@ def test_select_query_block(
     expected: tuple[int, int, bool],
 ) -> None:
     monkeypatch.setattr(triton_ua, "_is_gfx1100", lambda: is_gfx1100)
+    monkeypatch.setattr(triton_ua, "_is_gfx1151", lambda: False)
+    assert triton_ua._select_query_block(max_seqlen_q, nq_per_kv) == expected
+
+
+@pytest.mark.parametrize(
+    ("max_seqlen_q", "nq_per_kv", "expected"),
+    [
+        (8192, 6, (64, 8, True)),
+        (511, 6, (16, 2, False)),
+    ],
+)
+def test_select_query_block_gfx1151(
+    monkeypatch: pytest.MonkeyPatch,
+    max_seqlen_q: int,
+    nq_per_kv: int,
+    expected: tuple[int, int, bool],
+) -> None:
+    monkeypatch.setattr(triton_ua, "_is_gfx1100", lambda: False)
+    monkeypatch.setattr(triton_ua, "_is_gfx1151", lambda: True)
     assert triton_ua._select_query_block(max_seqlen_q, nq_per_kv) == expected
 
 
