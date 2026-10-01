@@ -25,6 +25,9 @@ def _causal_conv1d_fwd_kernel(  # continuous batching
     query_start_loc_ptr,
     batch_ptr,
     token_chunk_offset_ptr,
+    draft_checkpoint_ptr,  # (max_num_reqs, dim, width - 1)
+    draft_request_indices_ptr,
+    draft_correction_indices_ptr,
     o_ptr,  # (dim, seqlen) - actually pointing to x_ptr
     # Matrix dimensions
     dim: tl.constexpr,
@@ -38,6 +41,9 @@ def _causal_conv1d_fwd_kernel(  # continuous batching
     stride_istate_dim: tl.constexpr,
     stride_istate_token: tl.constexpr,
     stride_cache_indices: tl.constexpr,
+    stride_checkpoint_seq: tl.constexpr,
+    stride_checkpoint_dim: tl.constexpr,
+    stride_checkpoint_token: tl.constexpr,
     stride_o_dim: tl.constexpr,
     stride_o_token: tl.int64,
     # others
@@ -48,6 +54,7 @@ def _causal_conv1d_fwd_kernel(  # continuous batching
     KERNEL_WIDTH: tl.constexpr,
     SILU_ACTIVATION: tl.constexpr,
     HAS_NULL_BLOCK: tl.constexpr,
+    HAS_DRAFT_CHECKPOINT: tl.constexpr,
     NP2_STATELEN: tl.constexpr,
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
@@ -109,6 +116,18 @@ def _causal_conv1d_fwd_kernel(  # continuous batching
         + (conv_states_input_coord * stride_conv_state_seq)
         + (idx_feats * stride_conv_state_dim)
     )  # [BLOCK_N,]
+    if HAS_DRAFT_CHECKPOINT:
+        request_idx = tl.load(draft_request_indices_ptr + idx_seq).to(tl.int64)
+        checkpoint_base = (
+            draft_checkpoint_ptr
+            + request_idx * stride_checkpoint_seq
+            + idx_feats * stride_checkpoint_dim
+        )
+        initial_states_base = checkpoint_base
+        initial_states_stride = stride_checkpoint_token
+    else:
+        initial_states_base = conv_states_base
+        initial_states_stride = stride_conv_state_tok
 
     w_base = w_ptr + (idx_feats * stride_w_dim)  # [BLOCK_N,]
 
@@ -120,7 +139,7 @@ def _causal_conv1d_fwd_kernel(  # continuous batching
         load_init_state = tl.load(has_initial_states_ptr + idx_seq).to(tl.int1)
         if load_init_state:
             # load from conv_states
-            prior_tokens = conv_states_base + (state_len - 1) * stride_conv_state_tok
+            prior_tokens = initial_states_base + (state_len - 1) * initial_states_stride
             mask_w = idx_feats < dim
             if KERNEL_WIDTH == 2:
                 conv_states_ptrs = prior_tokens  # [BLOCK_N]
@@ -128,23 +147,23 @@ def _causal_conv1d_fwd_kernel(  # continuous batching
             if KERNEL_WIDTH == 3:
                 conv_states_ptrs = prior_tokens  # [BLOCK_N]
                 col1 = tl.load(conv_states_ptrs, mask_w, 0.0)
-                conv_states_ptrs = prior_tokens - 1 * stride_conv_state_tok  # [BLOCK_N]
+                conv_states_ptrs = prior_tokens - 1 * initial_states_stride  # [BLOCK_N]
                 col0 = tl.load(conv_states_ptrs, mask_w, 0.0)
             if KERNEL_WIDTH == 4:
                 conv_states_ptrs = prior_tokens  # [BLOCK_N]
                 col2 = tl.load(conv_states_ptrs, mask_w, 0.0)
-                conv_states_ptrs = prior_tokens - 1 * stride_conv_state_tok  # [BLOCK_N]
+                conv_states_ptrs = prior_tokens - 1 * initial_states_stride  # [BLOCK_N]
                 col1 = tl.load(conv_states_ptrs, mask_w, 0.0)
-                conv_states_ptrs = prior_tokens - 2 * stride_conv_state_tok  # [BLOCK_N]
+                conv_states_ptrs = prior_tokens - 2 * initial_states_stride  # [BLOCK_N]
                 col0 = tl.load(conv_states_ptrs, mask_w, 0.0)
             if KERNEL_WIDTH == 5:
                 conv_states_ptrs = prior_tokens  # [BLOCK_N]
                 col3 = tl.load(conv_states_ptrs, mask_w, 0.0)
-                conv_states_ptrs = prior_tokens - 1 * stride_conv_state_tok  # [BLOCK_N]
+                conv_states_ptrs = prior_tokens - 1 * initial_states_stride  # [BLOCK_N]
                 col2 = tl.load(conv_states_ptrs, mask_w, 0.0)
-                conv_states_ptrs = prior_tokens - 2 * stride_conv_state_tok  # [BLOCK_N]
+                conv_states_ptrs = prior_tokens - 2 * initial_states_stride  # [BLOCK_N]
                 col1 = tl.load(conv_states_ptrs, mask_w, 0.0)
-                conv_states_ptrs = prior_tokens - 3 * stride_conv_state_tok  # [BLOCK_N]
+                conv_states_ptrs = prior_tokens - 3 * initial_states_stride  # [BLOCK_N]
                 col0 = tl.load(conv_states_ptrs, mask_w, 0.0)
         else:
             # prior-tokens are zeros
@@ -160,7 +179,40 @@ def _causal_conv1d_fwd_kernel(  # continuous batching
 
         # STEP 2:
         # here prepare data for updating conv_state
-        if (
+        if HAS_DRAFT_CHECKPOINT:
+            # The next round replays correction; subsequent draft steps consume it.
+            correction = (
+                tl.load(draft_correction_indices_ptr + idx_seq) - sequence_start_index
+            )
+            # Reuse initial columns before overwriting the checkpoint.
+            tl.debug_barrier()
+            for state_col in tl.static_range(KERNEL_WIDTH):
+                token = correction - state_len + state_col
+                value = tl.load(
+                    x_base + token * stride_x_token,
+                    (idx_feats < dim) & (token >= 0),
+                    other=0.0,
+                )
+                prior = col0
+                if KERNEL_WIDTH >= 3:
+                    prior = tl.where(token == -1, col1, prior)
+                if KERNEL_WIDTH >= 4:
+                    prior = tl.where(token == -2, col1, prior)
+                    prior = tl.where(token == -1, col2, prior)
+                value = tl.where(token < 0, prior, value)
+                if state_col < state_len:
+                    tl.store(
+                        checkpoint_base + state_col * stride_checkpoint_token,
+                        value,
+                        idx_feats < dim,
+                    )
+                if state_col > 0:
+                    tl.store(
+                        conv_states_base + (state_col - 1) * stride_conv_state_tok,
+                        value,
+                        idx_feats < dim,
+                    )
+        elif (
             state_len <= seqlen
         ):  # SMALL_CACHE=True (only move part of 'x' into conv_state cache)
             # just read from 'x'
@@ -393,6 +445,9 @@ def causal_conv1d_fn(
     null_block_id: int = NULL_BLOCK_ID,
     metadata=None,
     validate_data=False,
+    draft_checkpoint: torch.Tensor | None = None,
+    draft_request_indices: torch.Tensor | None = None,
+    draft_correction_indices: torch.Tensor | None = None,
 ):
     """Support varlen + continuous batching when x is 2D tensor.
 
@@ -434,9 +489,17 @@ def causal_conv1d_fn(
         in this case, the kernel will not process entries at
         indices 0 and 3
     out: same shape as `x`
+    draft_checkpoint: (max_num_reqs, dim, width - 1)
+        Step-0 drafter history before the correction token. Read as the initial
+        state and updated at draft_correction_indices, indexed by stable request
+        slots in draft_request_indices. conv_states is updated after correction.
     """
     if isinstance(activation, bool) and activation:
         activation = "silu"
+
+    if draft_checkpoint is not None:
+        assert draft_request_indices is not None
+        assert draft_correction_indices is not None
 
     args = None
     # Store original dtype to cast back at the end
@@ -463,6 +526,8 @@ def causal_conv1d_fn(
     is_channel_last = (x.stride(0) == 1) & (x.stride(1) > 1)
     dim, cu_seqlen = x.shape
     _, width = weight.shape
+    if draft_checkpoint is not None:
+        assert 2 <= width <= 4
     state_len = width - 1
     np2_statelen = triton.next_power_of_2(state_len)
 
@@ -601,6 +666,9 @@ def causal_conv1d_fn(
         query_start_loc,
         batch_ptr,
         token_chunk_offset_ptr,
+        draft_checkpoint,
+        draft_request_indices,
+        draft_correction_indices,
         out,
         # Matrix dimensions
         dim,
@@ -614,6 +682,9 @@ def causal_conv1d_fn(
         stride_istate_dim,
         stride_istate_token,
         stride_cache_indices,
+        draft_checkpoint.stride(0) if draft_checkpoint is not None else 0,
+        draft_checkpoint.stride(1) if draft_checkpoint is not None else 0,
+        draft_checkpoint.stride(2) if draft_checkpoint is not None else 0,
         stride_o_dim,
         stride_o_token,
         # others
@@ -624,6 +695,7 @@ def causal_conv1d_fn(
         KERNEL_WIDTH=width,
         SILU_ACTIVATION=activation in ["silu", "swish"],
         HAS_NULL_BLOCK=null_block_id is not None,
+        HAS_DRAFT_CHECKPOINT=draft_checkpoint is not None,
         NP2_STATELEN=np2_statelen,
         # launch_cooperative_grid=True
         BLOCK_M=BLOCK_M,
