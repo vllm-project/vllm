@@ -96,6 +96,15 @@ import vllm.v1.worker.gpu.buffer_utils as gpu_buffer_utils
 import vllm.v1.worker.cpu.buffer_utils as cpu_buffer_utils
 
 gpu_buffer_utils.UvaBuffer = cpu_buffer_utils.UvaBuffer
+gpu_buffer_utils.UvaBufferPool = cpu_buffer_utils.UvaBufferPool
+gpu_buffer_utils.UvaBackedTensor = cpu_buffer_utils.UvaBackedTensor
+gpu_buffer_utils.StagedWriteTensor = cpu_buffer_utils.StagedWriteTensor
+
+import vllm.v1.worker.gpu.async_utils as gpu_async_utils
+import vllm.v1.worker.cpu.async_utils as cpu_async_utils
+
+gpu_async_utils.AsyncOutput = cpu_async_utils.AsyncOutput
+gpu_async_utils.AsyncPoolingOutput = cpu_async_utils.AsyncPoolingOutput
 
 # Patch Triton
 from vllm.triton_utils import HAS_TRITON, tl
