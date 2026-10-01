@@ -472,11 +472,16 @@ def test_pynvvideocodec_decoder_slots_are_configured_once(
         PyNvVideoCodecVideoBackendMixin._configure_decoder_slots(3)
 
 
-def test_pynvvideocodec_failed_rebuild_invalidates_decoder_slot():
+def test_pynvvideocodec_failed_rebuild_retires_decoder_slot(
+    monkeypatch: pytest.MonkeyPatch,
+):
     events: list[tuple[str, str]] = []
 
     class FakeStream:
         cuda_stream = "cuda-stream"
+
+        def synchronize(self):
+            events.append(("synchronize", "cuda-stream"))
 
     class FakeDecoder:
         poisoned = False
@@ -485,6 +490,9 @@ def test_pynvvideocodec_failed_rebuild_invalidates_decoder_slot():
             self.poisoned = True
             events.append(("reconfigure", file_path))
             raise RuntimeError("reconfigure failed")
+
+        def stop(self):
+            events.append(("stop", "valid.mp4"))
 
     old_decoder = FakeDecoder()
     slot = PyNvVideoCodecDecoderSlot(FakeStream())
@@ -526,12 +534,28 @@ def test_pynvvideocodec_failed_rebuild_invalidates_decoder_slot():
 
         assert events == [
             ("reconfigure", "unsupported-8k.mp4"),
+            ("stop", "valid.mp4"),
+            ("synchronize", "cuda-stream"),
             ("construct", "unsupported-8k.mp4"),
+            ("synchronize", "cuda-stream"),
         ]
         assert old_decoder.poisoned
         assert slot.decoder is None
         assert slot.source_path is None
-        assert pool.slots == [slot]
+        assert pool.slots == []
+        assert pool.active == 0
+
+        replacement_slot = object()
+        monkeypatch.setattr(
+            PyNvVideoCodecVideoBackendMixin,
+            "_create_decoder_slot",
+            classmethod(lambda cls: replacement_slot),
+        )
+        with PyNvVideoCodecVideoBackendMixin._borrow_decoder_slot() as borrowed:
+            assert borrowed is replacement_slot
+
+        assert pool.slots == [replacement_slot]
+        assert pool.active == 1
     finally:
         pool.slots = old_slots
         pool.active = old_active
