@@ -411,7 +411,7 @@ class TestChunkedEmbeddingProcessing:
     @classmethod
     def _make_handler(cls):
         handler = object.__new__(EmbedIOProcessor)
-        handler.model_config = cls._FakeModelConfig()  # type: ignore[assignment]
+        handler.model_config = cls._FakeModelConfig()
         handler.enable_chunked_processing = True
         return handler
 
