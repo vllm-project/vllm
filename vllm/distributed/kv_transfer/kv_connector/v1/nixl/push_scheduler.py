@@ -290,6 +290,8 @@ class NixlPushConnectorScheduler(NixlBaseConnectorScheduler):
             dcp_size=self.vllm_config.parallel_config.decode_context_parallel_size,
             pp_size=self.vllm_config.parallel_config.pipeline_parallel_size,
             remote_num_tokens=remote_num_tokens,
+            remote_blocks_expiry_time=self._reqs_need_send.get(request.request_id),
+            remote_blocks_lease_duration=self._kv_lease_duration,
             transfer_mode=self._TRANSFER_MODE,
         )
 

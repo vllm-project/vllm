@@ -24,6 +24,8 @@ GET_META_MSG = b"get_meta_msg"
 # Sent worker-to-worker over NIXL: D worker -> P worker, encoded as
 # PUSH_REG_NOTIF_PREFIX + msgpack(registration_data).
 PUSH_REG_NOTIF_PREFIX = b"PUSH_REG:"
+# P worker -> D worker: P will not push this D request (its lease ended).
+PUSH_FAIL_NOTIF_PREFIX = b"PUSH_FAIL:"
 #
 # NIXL Connector Version
 #
@@ -232,6 +234,7 @@ class RemoteMeta:
     engine_id: str
     request_id: str
     blocks_expiry_time: float | None = None
+    blocks_lease_duration: float | None = None
     num_tokens: int | None = None
 
 
@@ -332,6 +335,9 @@ class NixlConnectorMetadata(KVConnectorMetadata):
             host=kv_transfer_params["remote_host"],
             port=kv_transfer_params["remote_port"],
             blocks_expiry_time=kv_transfer_params.get("remote_blocks_expiry_time"),
+            blocks_lease_duration=kv_transfer_params.get(
+                "remote_blocks_lease_duration"
+            ),
             num_tokens=kv_transfer_params.get("remote_num_tokens"),
         )
         self.reqs_to_recv[request_id] = req
