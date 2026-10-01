@@ -337,3 +337,12 @@ steps:
   concurrency_group: "amd-disagg/mi350/4node"
   commands:
   - MODEL_NAME=DeepSeek-R1-MXFP4 xP=2 yD=2 NODES=4 GPUS_PER_NODE=8 WIDE_EP_MODE=1 MORIIO_READ_MODE=0 RUN_AFTER_HEALTH=accuracy ROUTER_TYPE=vllm-router WAIT=1 bash .buildkite/amd-disagg/run-slurm-disagg-test.sh
+
+- label: "Kimi-K2.5-MXFP4-PD-2P2D-EP16/DP16-WideEP-MoRIIO-vllm-router"
+  agents:
+    queue: amd_mi350_ainic
+  timeout_in_minutes: 180
+  concurrency: 2
+  concurrency_group: "amd-disagg/mi350/4node"
+  commands:
+  - MODEL_NAME=Kimi-K2.5-MXFP4 xP=2 yD=2 NODES=4 GPUS_PER_NODE=8 WIDE_EP_MODE=1 MORIIO_READ_MODE=0 RUN_AFTER_HEALTH=accuracy ROUTER_TYPE=vllm-router WAIT=1 bash .buildkite/amd-disagg/run-slurm-disagg-test.sh
