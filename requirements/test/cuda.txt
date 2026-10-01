@@ -1272,7 +1272,7 @@ tokenizers==0.23.1
     #   -r requirements/test/../common.txt
     #   cohere
     #   transformers
-torch==2.14.0+cu130
+torch==2.14.1+cu130
     # via
     #   -c requirements/cuda.txt
     #   -r requirements/test/cuda.in
@@ -1304,7 +1304,7 @@ torchcodec==0.14.0+cu130
     # via
     #   -c requirements/cuda.txt
     #   -r requirements/test/cuda.in
-torchvision==0.29.0+cu130
+torchvision==0.29.1+cu130
     # via
     #   -c requirements/cuda.txt
     #   -r requirements/test/cuda.in

@@ -1170,7 +1170,7 @@ tokenizers==0.23.1
     #   -r requirements/test/../common.txt
     #   cohere
     #   transformers
-torch==2.14.0+cpu
+torch==2.14.1+cpu
     # via
     #   -r requirements/test/cuda.in
     #   accelerate
@@ -1198,7 +1198,7 @@ torchaudio==2.11.0+cpu
     #   vocos
 torchcodec==0.14.0+cpu
     # via -r requirements/test/cuda.in
-torchvision==0.29.0+cpu
+torchvision==0.29.1+cpu
     # via
     #   -r requirements/test/cuda.in
     #   open-clip-torch
