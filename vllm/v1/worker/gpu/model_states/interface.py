@@ -127,7 +127,7 @@ class ModelState(ABC):
     def apply_staged_writes(self) -> None:
         return None
 
-    def capture_cudagraphs(
+    def capture_inner_cudagraphs(
         self,
         input_buffers: InputBuffers,
         block_tables: BlockTables,

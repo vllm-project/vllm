@@ -439,20 +439,20 @@ class DeepseekV41ModelState(DefaultModelState):
         capture_desc: BatchExecutionDescriptor | None = None,
     ) -> None:
         """Set the replay layers' batch for this forward, or none when nothing
-        trims. Eager steps trim, and so do PIECEWISE graph steps above the trim
-        threshold, whose graph breaks out to the replay layers; FULL graphs and
-        smaller PIECEWISE ones keep the layers on the whole batch. Ranks share
-        the graph mode and size; under data parallelism every rank replays if
-        any does."""
+        trims. Eager steps trim, and so do PIECEWISE graph steps at the trim
+        threshold or above, whose graph breaks out to the replay layers; FULL
+        graphs and smaller PIECEWISE ones keep the layers on the whole batch.
+        Ranks share the graph mode and size; under data parallelism every rank
+        replays if any does."""
         layers = self.decoder_replay_layers
         assert layers is not None
         layers.replay_batch = None
-        # Captures and PIECEWISE graphs above the trim threshold (which break out
-        # to the replay layers) run the layers on a replay batch, trimmed or not.
+        # Captures and PIECEWISE graphs at the trim threshold or above (which break
+        # out to the replay layers) run them on a replay batch, trimmed or not.
         replays = capture_desc is not None or (
             cudagraph_mode == CUDAGraphMode.PIECEWISE
             and layers.trim_threshold is not None
-            and input_batch.num_tokens_after_padding > layers.trim_threshold
+            and input_batch.num_tokens_after_padding >= layers.trim_threshold
         )
         if cudagraph_mode != CUDAGraphMode.NONE and not replays:
             return
@@ -520,7 +520,7 @@ class DeepseekV41ModelState(DefaultModelState):
             run_graph,
         )
 
-    def capture_cudagraphs(
+    def capture_inner_cudagraphs(
         self,
         input_buffers: InputBuffers,
         block_tables: BlockTables,
@@ -627,12 +627,16 @@ class DeepseekV41ModelState(DefaultModelState):
     ) -> list[list[AttentionGroup]]:
         """The attention groups with metadata builders of their own, like each
         microbatch's: a builder keeps the metadata it built, and the runner's
-        hold the batch's."""
+        hold the batch's. Only the groups the replay layers read are built."""
         if self._replay_attn_groups is None:
+            assert self.decoder_replay_layers is not None
+            prefixes = self.decoder_replay_layers.metadata_prefixes
             self._replay_attn_groups = []
             for groups in attn_groups:
                 replay_groups = []
                 for group in groups:
+                    if prefixes.isdisjoint(group.layer_names):
+                        continue
                     replay_group = replace(group, metadata_builders=[])
                     replay_group.create_metadata_builders(
                         self.vllm_config,

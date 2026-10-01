@@ -577,9 +577,9 @@ class CompilationConfig:
     that upper bound. Explicit sizes override this inference and must not exceed
     max_num_batched_tokens. Larger replay batches run eagerly."""
 
-    decoder_replay_trim_threshold: int = Field(default=1024, ge=0)
-    """For YOCO models (e.g. DeepSeek-V4.1), PIECEWISE graphs with more padded
-    tokens than this trim the decoder replay batch. Set to 0 to trim at every size.
+    decoder_replay_trim_threshold: int = Field(default=768, ge=0)
+    """For YOCO models (e.g. DeepSeek-V4.1), PIECEWISE graphs with at least this
+    many padded tokens trim the decoder replay batch. Set to 0 to trim at every size.
     Independent of the replay graph capture sizes; eager steps still trim."""
 
     # Inductor capture

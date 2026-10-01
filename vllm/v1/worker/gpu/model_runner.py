@@ -1065,7 +1065,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                             self.lora_config, self
                         ),
                     )
-                    self.model_state.capture_cudagraphs(
+                    self.model_state.capture_inner_cudagraphs(
                         input_buffers,
                         self.block_tables,
                         self.attn_groups,

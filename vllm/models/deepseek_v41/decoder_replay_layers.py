@@ -43,7 +43,8 @@ class DecoderReplayLayers:
     ``run_layers`` takes a batch's layer inputs and returns its per-row
     outputs. ``row_buffers`` hold per-row results the source layer's indexer
     publishes for the layers after it; they are compacted to the replay rows
-    in place.
+    in place. ``metadata_prefixes`` are the attention metadata keys the layers
+    read, so the replay batch builds only those.
     """
 
     def __init__(
@@ -51,13 +52,15 @@ class DecoderReplayLayers:
         window: int,
         run_layers: Callable[..., tuple[torch.Tensor, ...]],
         row_buffers: list[torch.Tensor],
+        metadata_prefixes: set[str],
     ) -> None:
         self.window = window
         self.run_layers = run_layers
         self.row_buffers = row_buffers
+        self.metadata_prefixes = metadata_prefixes
         # Set by the model state every step; None runs the layers on the batch.
         self.replay_batch: ReplayBatch | None = None
-        # PIECEWISE model graphs of more tokens break out of the graph to run the
+        # PIECEWISE model graphs of at least this many tokens break out to run the
         # layers on the replay batch; set with the replay graphs.
         self.trim_threshold: int | None = None
         self._graph_outputs: list[torch.Tensor] | None = None
@@ -68,7 +71,7 @@ class DecoderReplayLayers:
         if self.trim_threshold is not None and in_piecewise_cudagraph():
             batch_descriptor = get_forward_context().batch_descriptor
             assert batch_descriptor is not None
-            if batch_descriptor.num_tokens > self.trim_threshold:
+            if batch_descriptor.num_tokens >= self.trim_threshold:
                 return self._run_in_graph_break(hidden_states, *states)
         return self._run(hidden_states, *states)
 
