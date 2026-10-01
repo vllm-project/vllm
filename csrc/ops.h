@@ -120,6 +120,9 @@ void splitq_to_int8(torch::Tensor cache, torch::Tensor block_table,
                     torch::Tensor v_out, torch::Tensor k_scale_out,
                     torch::Tensor v_scale_out, int64_t bits);
 
+void splitq_rotate(torch::Tensor x, torch::Tensor signs, bool nope_only,
+                   bool inverse);
+
 torch::Tensor dynamic_4bit_int_moe_cpu(
     torch::Tensor x, torch::Tensor topk_ids, torch::Tensor topk_weights,
     torch::Tensor w13_packed, torch::Tensor w2_packed, int64_t hidden_size,

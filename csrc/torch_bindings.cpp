@@ -94,6 +94,10 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "Tensor! k_out, Tensor! v_out, Tensor! k_scale_out, "
       "Tensor! v_scale_out, int bits) -> ()");
   ops.impl("splitq_to_int8", torch::kCUDA, &splitq_to_int8);
+  ops.def(
+      "splitq_rotate(Tensor! x, Tensor signs, bool nope_only, bool inverse) "
+      "-> ()");
+  ops.impl("splitq_rotate", torch::kCUDA, &splitq_rotate);
 }
 
 #ifdef USE_ROCM

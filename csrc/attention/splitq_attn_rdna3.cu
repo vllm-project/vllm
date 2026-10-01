@@ -806,6 +806,44 @@ __global__ void __launch_bounds__(32)
   }
 }
 
+// ---------------------------------------------------------------------------
+// In-place rotation of [T, H, 256] vectors for the prefill path: the NoPE
+// dims (signs, then 64-dim Hadamard blocks) or all 256 dims (one block);
+// `inverse` applies the transform then the signs. grid (T, H), block 32.
+// ---------------------------------------------------------------------------
+template <typename T>
+__global__ void __launch_bounds__(32)
+    rotate_kernel(T* __restrict__ x, const int* __restrict__ signs,
+                  bool nope_only, bool inverse, int64_t s0, int64_t s1) {
+  const int lane = threadIdx.x;
+  T* p = x + blockIdx.x * s0 + blockIdx.y * s1 + lane * DPL;
+  if (nope_only && lane < R / DPL) return;
+  float v[DPL];
+  #pragma unroll
+  for (int i = 0; i < DPL; ++i) v[i] = to_f<T>(p[i]);
+  const int base = nope_only ? R : 0;
+  if (!inverse) {
+  #pragma unroll
+    for (int i = 0; i < DPL; ++i) v[i] *= sign_of(signs, lane * DPL + i - base);
+  }
+  float scale;
+  if (nope_only) {
+    // Lanes 0-7 returned; the xor partners of lanes 8-31 stay within their
+    // 8-lane group, so the shuffles never read an exited lane.
+    fwht_wave<4>(v, lane);
+    scale = 0.125f;
+  } else {
+    fwht_wave<16>(v, lane);
+    scale = 0.0625f;
+  }
+  #pragma unroll
+  for (int i = 0; i < DPL; ++i) {
+    float y = v[i] * scale;
+    if (inverse) y *= sign_of(signs, lane * DPL + i - base);
+    p[i] = from_f<T>(y);
+  }
+}
+
 }  // namespace splitq
 
 // ---------------------------------------------------------------------------
@@ -984,6 +1022,24 @@ void splitq_to_int8(torch::Tensor cache, torch::Tensor block_table,
   #undef SQ_I8
 }
 
+void splitq_rotate(torch::Tensor x, torch::Tensor signs, bool nope_only,
+                   bool inverse) {
+  if (x.numel() == 0) return;
+  TORCH_CHECK(x.dim() == 3 && x.size(2) == D && x.stride(2) == 1,
+              "splitq_rotate: x must be [T, H, 256] with contiguous last dim");
+  const at::cuda::OptionalCUDAGuard guard(device_of(x));
+  auto stream = at::cuda::getCurrentCUDAStream().stream();
+  dim3 grid(x.size(0), x.size(1));
+  if (x.dtype() == at::kBFloat16)
+    rotate_kernel<__hip_bfloat16><<<grid, 32, 0, stream>>>(
+        (__hip_bfloat16*)x.data_ptr(), signs.data_ptr<int>(), nope_only,
+        inverse, x.stride(0), x.stride(1));
+  else
+    rotate_kernel<half><<<grid, 32, 0, stream>>>(
+        (half*)x.data_ptr(), signs.data_ptr<int>(), nope_only, inverse,
+        x.stride(0), x.stride(1));
+}
+
 #else
 void splitq_cache_store(torch::Tensor, torch::Tensor, torch::Tensor,
                         torch::Tensor, torch::Tensor, torch::Tensor, int64_t) {
@@ -997,6 +1053,9 @@ void splitq_decode(torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor,
 void splitq_to_int8(torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor,
                     int64_t, torch::Tensor, torch::Tensor, torch::Tensor,
                     torch::Tensor, int64_t) {
+  TORCH_CHECK(false, "splitq requires ROCm");
+}
+void splitq_rotate(torch::Tensor, torch::Tensor, bool, bool) {
   TORCH_CHECK(false, "splitq requires ROCm");
 }
 #endif

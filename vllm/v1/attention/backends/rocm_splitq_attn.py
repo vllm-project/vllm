@@ -318,17 +318,14 @@ class RocmSplitQAttentionImpl(AttentionImpl[TritonAttentionMetadata]):
         num_p = num_reqs - nd
         if num_p <= 0 or ndt >= n:
             return
-        dev, fmt, r = q.device, self.fmt, self.fmt.rope_dim
-        nope_sgn = sq.signs(fmt.nope_dim, str(dev))
-        v_sgn = sq.signs(self.head_size, str(dev))
-        v_block = sq.v_block(self.head_size)
-        dtype = q.dtype
-
+        dev, fmt = q.device, self.fmt
+        nope_signs, v_signs = self._signs(dev)
         q_rot = q[ndt:n].clone()
-        q_rot[..., r:] = sq.rotate(q_rot[..., r:], nope_sgn).to(dtype)
         k_rot = key[ndt:n].clone()
-        k_rot[..., r:] = sq.rotate(k_rot[..., r:], nope_sgn).to(dtype)
-        v_rot = sq.rotate(value[ndt:n], v_sgn, v_block).to(dtype)
+        v_rot = value[ndt:n].clone()
+        torch.ops._C.splitq_rotate(q_rot, nope_signs, True, False)
+        torch.ops._C.splitq_rotate(k_rot, nope_signs, True, False)
+        torch.ops._C.splitq_rotate(v_rot, v_signs, False, False)
 
         qsl = (md.query_start_loc[nd:] - ndt).to(torch.int32)
         seq_lens = md.seq_lens[nd:num_reqs].to(torch.int32)
@@ -375,4 +372,5 @@ class RocmSplitQAttentionImpl(AttentionImpl[TritonAttentionMetadata]):
             self.scale,
             True,
         )
-        out[ndt:n] = sq.unrotate(o_rot, v_sgn, v_block).to(out.dtype)
+        torch.ops._C.splitq_rotate(o_rot, v_signs, False, True)
+        out[ndt:n] = o_rot
