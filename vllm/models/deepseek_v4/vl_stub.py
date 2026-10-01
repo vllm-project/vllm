@@ -9,6 +9,6 @@ class DeepseekV4ForConditionalGeneration(nn.Module):
     def __init__(self, *, vllm_config, prefix: str = ""):
         super().__init__()
         raise NotImplementedError(
-            "DeepSeek-V4 vision (DeepseekV4ForConditionalGeneration) is only "
-            "supported on NVIDIA GPUs for now."
+            "DeepSeek-V4 vision (DeepseekV4ForConditionalGeneration) is not "
+            "supported on the current platform; use CUDA or ROCm."
         )
