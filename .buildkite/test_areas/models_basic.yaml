@@ -205,16 +205,6 @@ steps:
   - tests/models/qwen4_exp/
   commands:
     - pytest -v -s models/qwen4_exp/test_config.py models/qwen4_exp/test_ple.py
-  mirror:
-    amd:
-      label: ":amd: (CPU) Qwen4 Exp"
-      dind: false
-      device: mi250_1
-      no_gpu: true
-      working_dir: "/vllm-workspace/tests"
-      timeout_in_minutes: 35
-      depends_on:
-      - image-build-amd
 
 - label: ":computer: (CPU) Basic Models Other"
   key: basic-models-test-other-cpu
