@@ -19,8 +19,16 @@ from vllm.models.inkling.amd.ops.rel_attention_decode import (
     inkling_rel_attention_split_kv_decode,
     use_split_kv_decode,
 )
-from vllm.platforms.rocm import on_gfx950
+from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
+
+# vllm.platforms.rocm queries torch.cuda at import time.
+if current_platform.is_rocm():
+    from vllm.platforms.rocm import on_gfx950
+else:
+
+    def on_gfx950() -> bool:
+        return False
 
 
 def bucket_max_seqlen_q(max_seqlen_q: int) -> int:
