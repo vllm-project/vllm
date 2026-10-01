@@ -23,7 +23,7 @@ Sorted alphabetically by GitHub handle:
 - [@kliuae](https://github.com/kliuae)
 - [@lengrongfu](https://github.com/lengrongfu)
 - [@linitra24](https://github.com/linitra24)
-- [@LopezCastroRoberto](https://github.com/LopezCastroRoberto)
+- [@LopezCastroRoberto](https://github.com/LopezCastroRoberto): Kernels and quantization
 - [@mawong-amd](https://github.com/mawong-amd)
 - [@micah-wil](https://github.com/micah-wil)
 - [@netanel-haber](https://github.com/netanel-haber)
