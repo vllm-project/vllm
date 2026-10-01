@@ -94,21 +94,14 @@ class DFlashSpeculator(DraftModelSpeculator):
         )
 
         # Stable-address inputs of the FULL graph's context step: the target's
-        # concatenated aux hidden states, which the graph combines, and the
-        # rejected counts for the context anchor.
+        # concatenated aux hidden states, which the graph combines (allocated at
+        # capture), and the rejected counts, set by an anchor that reads them.
         aux_layers = get_eagle3_aux_layers_from_config(speculative_config)
-        decode_mode = vllm_config.compilation_config.cudagraph_mode.decode_mode()
-        self._aux_staging: torch.Tensor | None = None
-        if aux_layers and decode_mode == CUDAGraphMode.FULL:
-            self._aux_staging = torch.zeros(
-                self._num_graph_context_tokens(self.max_num_reqs),
-                len(aux_layers) * vllm_config.model_config.get_hidden_size(),
-                dtype=self.dtype,
-                device=device,
-            )
-        self._num_rejected = torch.zeros(
-            self.max_num_reqs, dtype=torch.int32, device=device
+        self._aux_width = (
+            len(aux_layers or ()) * vllm_config.model_config.get_hidden_size()
         )
+        self._aux_staging: torch.Tensor | None = None
+        self._num_rejected: torch.Tensor | None = None
 
         # Per-mask-token sampling buffers. Flattened from (num_reqs, num_spec_tokens).
         max_num_sampled_tokens = self.max_num_reqs * self.num_speculative_steps
@@ -177,6 +170,13 @@ class DFlashSpeculator(DraftModelSpeculator):
         self.sample_idx_mapping.fill_(-1)
         # Capture must not write context K/V.
         self._context_slot_mappings.fill_(PAD_SLOT_ID)
+        if self._aux_width and self._aux_staging is None:
+            self._aux_staging = torch.zeros(
+                self._num_graph_context_tokens(self.max_num_reqs),
+                self._aux_width,
+                dtype=self.dtype,
+                device=self.device,
+            )
         assert self.query_cudagraph_manager is not None
         self.query_cudagraph_manager.capture(
             self._generate_draft,
@@ -377,7 +377,10 @@ class DFlashSpeculator(DraftModelSpeculator):
         self._precompute_context_kv(0, num_context)
 
     def prepare_context_anchor(
-        self, num_reqs: int, query_start_loc: torch.Tensor, num_rejected: torch.Tensor
+        self,
+        num_reqs: int,
+        query_start_loc: torch.Tensor,
+        num_rejected: torch.Tensor | None,
     ) -> None:
         """Publish context features required by a draft's candidate head. Runs
         inside the FULL graph, so it must not sync with the host."""
@@ -528,7 +531,8 @@ class DFlashSpeculator(DraftModelSpeculator):
             self._store_hidden_states(
                 num_staged, num_target_tokens, last_hidden_states, aux_hidden_states
             )
-            self._num_rejected[:num_reqs].copy_(num_rejected[:num_reqs])
+            if self._num_rejected is not None:
+                self._num_rejected[:num_reqs].copy_(num_rejected[:num_reqs])
             if dummy_run:
                 # Dummy block tables are placeholders: write no context K/V.
                 self._context_slot_mappings[:, :num_context].fill_(PAD_SLOT_ID)

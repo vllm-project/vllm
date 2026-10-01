@@ -23,6 +23,9 @@ class LiLiCorrSpeculator(DFlash2Speculator):
         self.anchor_valid = torch.zeros(
             self.max_num_reqs, dtype=torch.bool, device=device
         )
+        self._num_rejected = torch.zeros(
+            self.max_num_reqs, dtype=torch.int32, device=device
+        )
 
     def load_draft_model(
         self, target_model: nn.Module, target_attn_layer_names: set[str]
@@ -66,8 +69,12 @@ class LiLiCorrSpeculator(DFlash2Speculator):
         return model
 
     def prepare_context_anchor(
-        self, num_reqs: int, query_start_loc: torch.Tensor, num_rejected: torch.Tensor
+        self,
+        num_reqs: int,
+        query_start_loc: torch.Tensor,
+        num_rejected: torch.Tensor | None,
     ) -> None:
+        assert num_rejected is not None
         starts = query_start_loc[:num_reqs]
         ends = query_start_loc[1 : num_reqs + 1] - num_rejected[:num_reqs]
         valid = ends > starts
