@@ -1,11 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from typing import cast
+
 import torch
 
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.forward_context import get_forward_context
+from vllm.model_executor.layers.attention.mla_attention import MLACommonMetadata
 from vllm.model_executor.layers.sparse_attn_indexer import SparseAttnIndexer
 from vllm.model_executor.models.deepseek_v2 import DeepseekV32IndexerCache
 from vllm.models.deepseek_v32.attention import DeepseekV32Attention, DeepseekV32Indexer
@@ -179,6 +182,8 @@ class DeepseekV32MLAAttention(DeepseekV32Attention):
         else:
             attn_metadata = attn_metadata_raw
 
+        attn_metadata = cast(MLACommonMetadata | None, attn_metadata)
+
         slot_mapping = forward_context.slot_mapping
         assert isinstance(slot_mapping, dict)
         mla_slot = slot_mapping.get(self.layer_name)
@@ -213,6 +218,10 @@ class DeepseekV32MLAAttention(DeepseekV32Attention):
             mla_kv_cache = self.kv_cache
             mla_k_scale = self._k_scale
 
+        use_mha = attn_metadata is not None and self._use_sparse_mha(attn_metadata)
+        kv_c_out = torch.empty_like(kv_c) if use_mha else None
+        k_pe_out = torch.empty_like(k_pe) if use_mha else None
+
         q_c = fused_norm_rope(
             positions,
             q_c,
@@ -237,9 +246,18 @@ class DeepseekV32MLAAttention(DeepseekV32Attention):
             mla_k_scale=mla_k_scale,
             has_indexer=has_indexer,
             index_rope_interleave=self._index_rope_interleave,
+            kv_c_out=kv_c_out,
+            k_pe_out=k_pe_out,
         )
 
-        ql_nope, q_pe = self._compute_ql_nope(q_c)
+        if use_mha:
+            q = self.q_b_proj(q_c)[0].view(-1, self.num_local_heads, self.qk_head_dim)
+            q_nope, q_pe = q.split(
+                [self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1
+            )
+            ql_nope = q_nope
+        else:
+            ql_nope, q_pe = self._compute_ql_nope(q_c)
 
         if self.indexer is not None and not self.skip_topk:
             index_q = self.indexer.wq_b(q_c)[0]
@@ -260,7 +278,7 @@ class DeepseekV32MLAAttention(DeepseekV32Attention):
             indexer_n_head_scale,
             has_indexer=has_indexer,
             index_rope_interleave=self._index_rope_interleave,
-            quantize_mqa=self._fp8_kv,
+            quantize_mqa=self._fp8_kv and not use_mha,
         )
 
         if self.indexer is not None and not self.skip_topk:
@@ -268,6 +286,19 @@ class DeepseekV32MLAAttention(DeepseekV32Attention):
 
         if attn_metadata is None:
             output.zero_()
+            return
+
+        if use_mha:
+            assert kv_c_out is not None and k_pe_out is not None
+            mha_q = torch.cat((q_nope, mqa_q), dim=-1)
+            self.forward_impl(
+                mha_q,
+                kv_c_out,
+                k_pe_out.unsqueeze(1),
+                self.kv_cache,
+                attn_metadata,
+                output,
+            )
             return
 
         num_actual = attn_metadata.num_actual_tokens  # type: ignore[attr-defined]

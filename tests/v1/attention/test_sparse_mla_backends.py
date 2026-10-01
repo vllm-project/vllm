@@ -131,6 +131,7 @@ def _skip_cuda_specific_sparse_mla_tests_on_rocm(request):
     rocm_portable_tests = {
         "test_sparse_backend_decode_correctness",
         "test_sparse_backend_prefill_correctness",
+        "test_rocm_fused_v32_routes_dense_prefill",
     }
     if (
         current_platform.is_rocm()
@@ -4007,3 +4008,78 @@ def test_sparse_mla_common_impl_resolves_buffer_lazily():
     assert isinstance(SparseMLACommonImpl.topk_indices_buffer, property), (
         "topk_indices_buffer must stay a lazily-resolved property"
     )
+
+
+@pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm model implementation")
+@pytest.mark.parametrize("num_decodes", [0, 1])
+@pytest.mark.parametrize("fp8_kv", [False, True])
+def test_rocm_fused_v32_routes_dense_prefill(monkeypatch, num_decodes, fp8_kv):
+    """The fused model must pass unabsorbed queries and normalized KV to MHA."""
+    from vllm.models.deepseek_v32.amd import rocm as model_mod
+
+    num_tokens = 3
+    metadata = SimpleNamespace(num_actual_tokens=num_tokens, num_decodes=num_decodes)
+    kv_c = torch.arange(12, dtype=torch.float32).view(num_tokens, 4)
+    k_pe = torch.arange(3, dtype=torch.float32).view(num_tokens, 1)
+    q_c = torch.ones(num_tokens, 2)
+    q = torch.arange(18, dtype=torch.float32).view(num_tokens, 2, 3)
+    output = torch.zeros(num_tokens, 4)
+
+    def norm_rope(*args, **kwargs):
+        kwargs["kv_c_out"].copy_(kv_c + 7)
+        kwargs["k_pe_out"].copy_(k_pe + 11)
+        return q_c + 3
+
+    def prepare_query(*args, **kwargs):
+        assert not kwargs["quantize_mqa"]
+        return None, None, args[1] + 13
+
+    fused_mqa = MagicMock(side_effect=AssertionError("Dense prefill used sparse MQA"))
+    forward_impl = MagicMock(side_effect=lambda *args: args[-1].fill_(1))
+    layer = SimpleNamespace(
+        layer_name="layer",
+        indexer=None,
+        kv_cache=torch.zeros(1, 4),
+        kv_cache_dtype="fp8" if fp8_kv else "auto",
+        _k_scale=torch.tensor(1.0),
+        _q_scale=torch.tensor(1.0),
+        q_a_layernorm=SimpleNamespace(weight=torch.ones(2), variance_epsilon=1e-6),
+        kv_a_layernorm=SimpleNamespace(weight=torch.ones(4), variance_epsilon=1e-6),
+        rotary_emb=SimpleNamespace(cos_sin_cache=torch.zeros(1)),
+        topk_indices_buffer=torch.zeros(num_tokens, 4, dtype=torch.int32),
+        _index_rope_interleave=False,
+        _fp8_kv=fp8_kv,
+        _use_sparse_mha=lambda _: True,
+        num_local_heads=2,
+        qk_head_dim=3,
+        qk_nope_head_dim=2,
+        qk_rope_head_dim=1,
+        q_b_proj=MagicMock(return_value=(q.flatten(1), None)),
+        _compute_ql_nope=fused_mqa,
+        impl=SimpleNamespace(forward_mqa=fused_mqa),
+        forward_impl=forward_impl,
+    )
+    monkeypatch.setattr(
+        model_mod,
+        "get_forward_context",
+        lambda: SimpleNamespace(
+            attn_metadata={"layer": metadata}, slot_mapping={"layer": None}
+        ),
+    )
+    monkeypatch.setattr(model_mod, "fused_norm_rope", norm_rope)
+    monkeypatch.setattr(model_mod, "fused_q", prepare_query)
+
+    model_mod.DeepseekV32MLAAttention._fused_attention(
+        layer, torch.arange(num_tokens), q_c, kv_c, k_pe, None, None, output
+    )
+
+    fused_mqa.assert_not_called()
+    forward_impl.assert_called_once()
+    args = forward_impl.call_args.args
+    torch.testing.assert_close(args[0], torch.cat((q[..., :2], q[..., 2:] + 13), -1))
+    torch.testing.assert_close(args[1], kv_c + 7)
+    torch.testing.assert_close(args[2], (k_pe + 11).unsqueeze(1))
+    assert args[3] is layer.kv_cache
+    assert args[4] is metadata
+    assert args[5] is output
+    torch.testing.assert_close(output, torch.ones_like(output))
