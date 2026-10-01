@@ -1052,9 +1052,11 @@ def unified_attention(
         )
 
     # Launch the 2D kernel if
-    # 1. No intermediate tiled softmax buffers for the 3D kernel have been allocated, or
-    # 2. A request has over MAX_3D_QUERY_LEN queries or non-causal masking, or
-    # 3. The number of Q blocks per KV head exceeds the configured threshold, or
+    # 1. No split-K threshold or scratch buffers, or they are invalid, or
+    # 2. max_seqlen_q > 1 and either it exceeds MAX_3D_QUERY_LEN, masking is
+    #    non-causal, per-sequence causal, or mm-prefix, or the tuned
+    #    large-head path applies, or
+    # 3. The number of Q blocks exceeds seq_threshold_3D, or
     # 4. Batch invariance is enabled
     use_3d = not (
         seq_threshold_3D is None

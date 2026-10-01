@@ -94,6 +94,20 @@ def _uses_splitk(
     return kernel.__getitem__.return_value.call_args.kwargs["IS_3D"]
 
 
+def _spy_reduce_segments(monkeypatch):
+    original = attention.reduce_segments
+    grids = []
+
+    def launch(grid):
+        grids.append(grid)
+        return original[grid]
+
+    spy = MagicMock()
+    spy.__getitem__.side_effect = launch
+    monkeypatch.setattr(attention, "reduce_segments", spy)
+    return grids
+
+
 @pytest.mark.parametrize(
     ("query_len", "buffer_index", "defect"),
     [
@@ -275,7 +289,8 @@ def test_reduce_segments_leaves_graph_padding_untouched(query_lens, seq_lens) ->
     ids=["w2", "w4", "w6", "w8", "mixed"],
 )
 @pytest.mark.parametrize("sliding_window", [None, 32])
-def test_speculative_splitk_matches_reference(seq_lens, sliding_window):
+def test_speculative_splitk_matches_reference(monkeypatch, seq_lens, sliding_window):
+    reduce_grids = _spy_reduce_segments(monkeypatch)
     test_triton_unified_attn(
         seq_lens=seq_lens,
         num_heads=(8, 1),
@@ -288,9 +303,11 @@ def test_speculative_splitk_matches_reference(seq_lens, sliding_window):
         q_dtype=None,
         seq_threshold_3D=32,
     )
+    assert len(reduce_grids) == 1
 
 
-def test_speculative_splitk_bf16_query_fp8_kv():
+def test_speculative_splitk_bf16_query_fp8_kv(monkeypatch):
+    reduce_grids = _spy_reduce_segments(monkeypatch)
     test_triton_unified_attn_bf16_query_fp8_kv(
         seq_lens=[(6, 128), (6, 129), (6, 4097)],
         num_heads=(8, 1),
@@ -299,6 +316,7 @@ def test_speculative_splitk_bf16_query_fp8_kv():
         num_blocks=64,
         seq_threshold_3D=16,
     )
+    assert len(reduce_grids) == 1
 
 
 def _native_graph_inputs(window, width, num_seqs):
