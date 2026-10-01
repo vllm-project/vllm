@@ -312,7 +312,7 @@ class Base(
         orig_to_new_renaming: list[WeightRenaming] = []
         orig_to_new_regex: dict[re.Pattern, str | None] = {}
 
-        mappings = list(get_model_conversion_mapping(self.model))
+        mappings = get_model_conversion_mapping(self.model)
         # Renames registered on the head class (e.g. `*ForCausalLM`), which
         # isn't instantiated because the backend builds `AutoModel`
         for arch in self.config.architectures or []:
