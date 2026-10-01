@@ -6,6 +6,7 @@ import asyncio
 import json
 from http import HTTPStatus
 
+import msgspec
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request, Response
 from fastapi.responses import JSONResponse, StreamingResponse
 
@@ -40,6 +41,18 @@ def engine_client(request: Request) -> EngineClient:
     return request.app.state.engine_client
 
 
+def generate_response_to_json(response: GenerateResponse) -> Response:
+    if all(choice.sampling_mask is None for choice in response.choices):
+        return JSONResponse(content=response.model_dump())
+    # Sampling masks hold one list of token ids per generated token. Dump the
+    # rest of the response, re-attach the masks by reference instead of
+    # copying them in model_dump(), and encode with msgspec.
+    content = response.model_dump(exclude={"choices": {"__all__": {"sampling_mask"}}})
+    for choice, choice_content in zip(response.choices, content["choices"]):
+        choice_content["sampling_mask"] = choice.sampling_mask
+    return Response(content=msgspec.json.encode(content), media_type="application/json")
+
+
 router = APIRouter()
 
 
@@ -68,7 +81,7 @@ async def generate(request: GenerateRequest, raw_request: Request):
         )
 
     elif isinstance(generator, GenerateResponse):
-        return JSONResponse(content=generator.model_dump())
+        return generate_response_to_json(generator)
 
     return StreamingResponse(content=generator, media_type="text/event-stream")
 
