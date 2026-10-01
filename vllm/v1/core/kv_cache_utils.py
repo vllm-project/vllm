@@ -21,7 +21,6 @@ from vllm.utils.math_utils import cdiv, round_up
 from vllm.utils.mem_utils import format_gib
 from vllm.utils.torch_utils import get_dtype_size
 from vllm.v1.hisparse.layout import (
-    expand_hisparse_kv_cache_specs,
     get_hisparse_host_pool_bytes,
     get_hisparse_kv_cache_config,
     get_hisparse_kv_cache_groups,
@@ -2499,8 +2498,6 @@ def _max_memory_usage_bytes_from_groups(
     Each group independently claims blocks from the shared pool, so a request consumes
     the sum of the per-group block counts, i.e. ``bytes_per_block * total_blocks``.
     """
-    # Host-resident groups have their own pool.
-    kv_cache_groups = [group for group in kv_cache_groups if not group.host_resident]
     if not kv_cache_groups:
         return 0
 
@@ -2732,13 +2729,6 @@ def get_kv_cache_configs(
         The generated KVCacheConfigs for each worker.
 
     """
-    # HiSparse derives resident and hot caches from its attention layers; name
-    # them so grouping, projection and sizing see every cache a worker allocates.
-    kv_cache_specs = [
-        expand_hisparse_kv_cache_specs(vllm_config, kv_cache_spec_one_worker)
-        for kv_cache_spec_one_worker in kv_cache_specs
-    ]
-
     # Merge the KV cache specs of all workers. Different PP stages may have
     # different layer names, and different TP ranks of the same PP stage should
     # have the same KV cache spec.
@@ -2816,9 +2806,11 @@ def get_kv_cache_configs(
     for groups, avail_mem in zip(projected_groups_per_worker, check_memory):
         if not groups:
             continue
+        # HiSparse's host-resident group has its own pool.
+        gpu_pool_groups = [group for group in groups if not group.host_resident]
         _check_enough_kv_cache_memory(
             avail_mem,
-            partial(_max_memory_usage_bytes_from_groups, vllm_config, groups),
+            partial(_max_memory_usage_bytes_from_groups, vllm_config, gpu_pool_groups),
             vllm_config.model_config.max_model_len,
             partial(_estimate_max_model_len_from_groups, vllm_config, groups),
         )

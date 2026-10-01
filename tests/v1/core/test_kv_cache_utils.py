@@ -278,6 +278,13 @@ def test_hisparse_pool_must_fit_max_model_len(
     config.model_config.hf_config.index_topk = 128
     config.cache_config.num_gpu_blocks_override = num_gpu_blocks
     config.cache_config.kv_cache_layout = "BLHNC"
+    # Workers report the resident/hot caches HiSparse derives.
+    specs |= {
+        name: group.kv_cache_spec
+        for group in get_hisparse_kv_cache_groups(config, specs) or []
+        if isinstance(group.kv_cache_spec, (HiSparseResidentSpec, HiSparseHotSpec))
+        for name in group.layer_names
+    }
 
     if ok:
         kv_cache_utils.get_kv_cache_configs(config, [specs], [2**34])
