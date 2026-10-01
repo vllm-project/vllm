@@ -428,25 +428,28 @@ class FlashInferBackend(AttentionBackend):
 
     @staticmethod
     def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int | MultipleOf]:
+        vllm_config = get_current_vllm_config_or_none()
+        if not FlashInferBackend.supports_large_pages(vllm_config):
+            return [16, 32, 64]
+        return [16, 32, 64, 128, 256, 512, 1024]
+
+    @staticmethod
+    def supports_large_pages(vllm_config: VllmConfig | None) -> bool:
         # Page sizes >= 128 only run on the trtllm-gen dynamic kernel (GQA/MQA
         # on Blackwell); advertise them only when usable so selection never
         # picks a large kernel block we cannot serve.
-        use_large_pages = False
-        vllm_config = get_current_vllm_config_or_none()
-        if vllm_config is not None and vllm_config.model_config is not None:
-            pc = vllm_config.parallel_config
-            mc = vllm_config.model_config
-            num_qo_heads = mc.get_num_attention_heads(pc)
-            num_kv_heads = mc.get_num_kv_heads(pc)
-            use_large_pages = (
-                num_kv_heads > 0
-                and num_qo_heads // num_kv_heads > 1
-                and current_platform.is_device_capability_family(100)
-                and can_use_trtllm_attention(num_qo_heads, num_kv_heads)
-            )
-        if not use_large_pages:
-            return [16, 32, 64]
-        return [16, 32, 64, 128, 256, 512, 1024]
+        if vllm_config is None or vllm_config.model_config is None:
+            return False
+        pc = vllm_config.parallel_config
+        mc = vllm_config.model_config
+        num_qo_heads = mc.get_num_attention_heads(pc)
+        num_kv_heads = mc.get_num_kv_heads(pc)
+        return (
+            num_kv_heads > 0
+            and num_qo_heads // num_kv_heads > 1
+            and current_platform.is_device_capability_family(100)
+            and can_use_trtllm_attention(num_qo_heads, num_kv_heads)
+        )
 
     @staticmethod
     def get_name() -> str:
