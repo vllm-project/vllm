@@ -17,13 +17,11 @@ from vllm.model_executor.layers.linear import (
     RowParallelLinear,
 )
 from vllm.model_executor.layers.mamba.checkpoint import (
+    MambaPrefillCheckpointExporter,
     MambaPrefillCheckpointMetadata,
-)
-from vllm.model_executor.layers.mamba.gdn.base import GatedDeltaNetAttention
-from vllm.model_executor.layers.mamba.kda_checkpoint import (
-    FlashKDAPrefillCheckpointExporter,
     kda_prefill_checkpoint_alignment,
 )
+from vllm.model_executor.layers.mamba.gdn.base import GatedDeltaNetAttention
 from vllm.model_executor.layers.mamba.mamba_utils import (
     MambaStateDtypeCalculator,
     MambaStateShapeCalculator,
@@ -350,7 +348,7 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         self._flashkda_buffer_specs: (
             tuple[tuple[tuple[int, ...], torch.dtype], ...] | None
         ) = None
-        self._checkpoint_exporter: FlashKDAPrefillCheckpointExporter | None = None
+        self._checkpoint_exporter: MambaPrefillCheckpointExporter | None = None
         if self.kda_prefill_backend == "flashkda":
             import vllm._flashkda_C  # noqa: F401
 
@@ -376,7 +374,7 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
                     vllm_config.model_config.dtype,
                 ),
             )
-            self._checkpoint_exporter = FlashKDAPrefillCheckpointExporter(
+            self._checkpoint_exporter = MambaPrefillCheckpointExporter(
                 state_len=self.conv_size - 1
             )
 
@@ -440,7 +438,7 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
             assert recurrent_state is not None
             self._checkpoint_exporter.export(
                 checkpoint,
-                raw_qkv=raw_qkv,
+                conv_input=raw_qkv,
                 conv_state=conv_state,
                 recurrent_checkpoint=checkpoint_state,
                 recurrent_state=recurrent_state,
