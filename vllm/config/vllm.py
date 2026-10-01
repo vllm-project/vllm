@@ -1825,13 +1825,10 @@ class VllmConfig:
                 # HiSparse picks its prefill path from per-step page residency and
                 # mirrors prefill KV to host outside CUDA graphs, so prefill
                 # batches cannot be captured.
-                logger.warning_once(
-                    "HiSparse does not support cudagraph_mode=FULL. Overriding to "
-                    "FULL_AND_PIECEWISE, which still captures FULL graphs for "
-                    "decode batches."
-                )
-                self.compilation_config.cudagraph_mode = (
-                    CUDAGraphMode.FULL_AND_PIECEWISE
+                raise ValueError(
+                    "HiSparse does not support cudagraph_mode=FULL; use "
+                    "FULL_AND_PIECEWISE (the default), which captures FULL graphs "
+                    "for decode batches."
                 )
             if not self.scheduler_config.scheduler_reserve_full_isl:
                 # Without it, async loads admitted against free host blocks can

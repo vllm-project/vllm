@@ -502,26 +502,15 @@ def test_hisparse_rejects_pipeline_parallelism(monkeypatch):
         )
 
 
-@pytest.mark.parametrize("hisparse", [True, False])
-def test_hisparse_overrides_full_cudagraph_mode(monkeypatch, hisparse):
-    """HiSparse cannot capture prefill batches, so FULL keeps only its FULL
-    decode graphs; other configs keep FULL."""
+def test_hisparse_rejects_full_cudagraph_mode(monkeypatch):
     monkeypatch.setattr(current_platform, "is_cuda", lambda: True)
     monkeypatch.setattr(current_platform, "support_static_graph_mode", lambda: True)
     monkeypatch.setattr("vllm.config.vllm.HAS_TRITON", True)
-    attention_config = (
-        AttentionConfig(hisparse_config=HiSparseConfig())
-        if hisparse
-        else AttentionConfig()
-    )
-    config = VllmConfig(
-        attention_config=attention_config,
-        compilation_config=CompilationConfig(cudagraph_mode=CUDAGraphMode.FULL),
-    )
-
-    cudagraph_mode = config.compilation_config.cudagraph_mode
-    assert cudagraph_mode.decode_mode() == CUDAGraphMode.FULL
-    assert (cudagraph_mode.mixed_mode() == CUDAGraphMode.FULL) is not hisparse
+    with pytest.raises(ValueError, match="does not support cudagraph_mode=FULL"):
+        VllmConfig(
+            attention_config=AttentionConfig(hisparse_config=HiSparseConfig()),
+            compilation_config=CompilationConfig(cudagraph_mode=CUDAGraphMode.FULL),
+        )
 
 
 def test_hisparse_rejects_disabled_hybrid_kv_cache_manager(monkeypatch):
