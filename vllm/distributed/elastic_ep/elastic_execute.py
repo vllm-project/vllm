@@ -22,6 +22,7 @@ from vllm.distributed import (
     get_tp_group,
     get_world_group,
 )
+from vllm.distributed.elastic_ep import rocm_debug
 from vllm.distributed.elastic_ep.standby_state import (
     create_standby_groups,
     get_standby_dp_group,
@@ -290,6 +291,11 @@ class ElasticEPScalingExecutor:
         )
         standby_ep_group = get_standby_ep_group()
         assert standby_ep_group is not None
+        if current_platform.is_rocm():
+            rocm_debug.dump_static()
+            rocm_debug.dump(
+                "prepare", {"dp": get_standby_dp_group(), "ep": standby_ep_group}
+            )
         all2all_manager = get_ep_all2all_manager(standby_ep_group)
         all2all_manager.stage_ep_size()
         if not self._can_reuse_fused_moe_kernel():
@@ -602,8 +608,11 @@ class ElasticEPScalingExecutor:
             mapping = self.receive_expert_mapping()
             self.worker.model_runner.setup_eplb_from_mapping(mapping)
         if current_platform.is_rocm():
+            groups = {"dp": get_dp_group(), "ep": get_ep_group()}
+            rocm_debug.dump("scale_up before empty_cache", groups)
             torch.accelerator.empty_cache()
-            self._warm_target_groups(get_dp_group(), get_ep_group())
+            rocm_debug.dump("scale_up after empty_cache", groups)
+            rocm_debug.warm_each(groups, "scale_up")
         if not self._can_reuse_fused_moe_kernel():
             self.warm_and_capture()
         self._perform_eplb_reshuffle(async_op=True)
@@ -617,8 +626,11 @@ class ElasticEPScalingExecutor:
         else:
             retired_groups = self.switch_and_prepare()
             if current_platform.is_rocm():
+                groups = {"dp": get_dp_group(), "ep": get_ep_group()}
+                rocm_debug.dump("scale_down before empty_cache", groups)
                 torch.accelerator.empty_cache()
-                self._warm_target_groups(get_dp_group(), get_ep_group())
+                rocm_debug.dump("scale_down after empty_cache", groups)
+                rocm_debug.warm_each(groups, "scale_down")
             if not self._can_reuse_fused_moe_kernel():
                 self.warm_and_capture()
             self._start_group_cleanup(retired_groups)
