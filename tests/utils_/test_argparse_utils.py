@@ -151,6 +151,24 @@ def test_config_args_with_equals_syntax(parser_with_config, cli_config_file):
     assert args.port == 12312
 
 
+def test_config_equals_syntax_with_served_model_name(
+    parser_with_config, cli_config_file_with_model
+):
+    # The served-model-name check and the config expansion must agree on what
+    # counts as a config argument: with `--config=<path>` and no positional
+    # model, the model comes from the config file instead of raising.
+    args = parser_with_config.parse_args(
+        [
+            "serve",
+            f"--config={cli_config_file_with_model}",
+            "--served-model-name",
+            "cli-name",
+        ]
+    )
+    assert args.model == "config-model"
+    assert args.served_model_name == "cli-name"
+
+
 def test_config_file(parser_with_config):
     with pytest.raises(FileNotFoundError):
         parser_with_config.parse_args(
@@ -161,6 +179,10 @@ def test_config_file(parser_with_config):
         parser_with_config.parse_args(
             ["serve", "mymodel", "--config", "./data/test_config.json"]
         )
+
+    # An empty `--config=` is an error, not a silently ignored config.
+    with pytest.raises(ValueError):
+        parser_with_config.parse_args(["serve", "mymodel", "--config="])
 
     with pytest.raises(ValueError):
         parser_with_config.parse_args(
