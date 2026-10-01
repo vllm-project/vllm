@@ -609,7 +609,9 @@ def _engram_head_shard_weight_loader(
 # RemoveLayoutConversions.
 # TODO: Remove the 3.8 check once Triton ships
 # https://github.com/triton-lang/triton/pull/10706.
-_SORTED_IS_CONSTEXPR = tl.constexpr(triton.__version__.startswith("3.8"))
+_SORTED_IS_CONSTEXPR = tl.constexpr(
+    triton.__version__.startswith("3.8") and current_platform.is_rocm()
+)
 
 
 @triton.jit(
