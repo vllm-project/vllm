@@ -1017,6 +1017,29 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
         self.indexer_decode_block_table_buffer: torch.Tensor | None = None
         self._max_num_batched_tokens = scheduler_config.max_num_batched_tokens
 
+    def _to_storage_block_table(self, block_table: torch.Tensor) -> torch.Tensor | None:
+        """Re-express a kernel-block table in indexer storage blocks.
+
+        ``block_table`` counts ``kernel_block_size``-token blocks while the
+        compressed indexer cache is viewed in ``kv_cache_spec.block_size``-token
+        blocks. Returns None when the two already agree.
+        """
+        kernel_block_size = self.kernel_block_size
+        storage_block_size = self.kv_cache_spec.block_size
+        if kernel_block_size is None or kernel_block_size == storage_block_size:
+            return None
+        if storage_block_size % kernel_block_size == 0:
+            factor = storage_block_size // kernel_block_size
+            return block_table[:, ::factor] // factor
+        if kernel_block_size % storage_block_size == 0:
+            # Kernel block k spans storage blocks k * factor .. k * factor + factor - 1.
+            factor = kernel_block_size // storage_block_size
+            offsets = torch.arange(
+                factor, dtype=block_table.dtype, device=block_table.device
+            )
+            return (block_table.unsqueeze(-1) * factor + offsets).flatten(1)
+        return None
+
     def _dcp_localize_decode_seq_lens(
         self,
         seq_lens: torch.Tensor,
@@ -1313,14 +1336,9 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
         compressed_slot_mapping = slot_mapping
         indexer_block_table = block_table
         if self.compress_ratio > 1:
-            kernel_block_size = self.kernel_block_size
-            if (
-                kernel_block_size is not None
-                and self.kv_cache_spec.block_size != kernel_block_size
-                and self.kv_cache_spec.block_size % kernel_block_size == 0
-            ):
-                factor = self.kv_cache_spec.block_size // kernel_block_size
-                indexer_block_table = (block_table[:, ::factor] // factor).contiguous()
+            storage_block_table = self._to_storage_block_table(block_table)
+            if storage_block_table is not None:
+                indexer_block_table = storage_block_table.contiguous()
             padded_num_tokens = num_tokens
             local_slot_mapping = slot_mapping
             if self.use_pcp:
@@ -1561,14 +1579,8 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                 )
 
             if self.compress_ratio > 1:
-                kernel_block_size = self.kernel_block_size
-                if (
-                    kernel_block_size is not None
-                    and self.kv_cache_spec.block_size != kernel_block_size
-                    and self.kv_cache_spec.block_size % kernel_block_size == 0
-                ):
-                    factor = self.kv_cache_spec.block_size // kernel_block_size
-                    compressed = block_table[:, ::factor] // factor
+                compressed = self._to_storage_block_table(block_table)
+                if compressed is not None:
                     rows, cols = compressed.shape
                     if self.indexer_decode_block_table_buffer is None:
                         self.indexer_decode_block_table_buffer = torch.zeros(

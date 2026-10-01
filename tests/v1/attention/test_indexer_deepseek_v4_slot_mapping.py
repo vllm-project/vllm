@@ -380,6 +380,125 @@ def test_indexer_builder_deepseek_v4_compressed_slot_mapping_uses_num_states():
     torch.testing.assert_close(valid_slots, expected)
 
 
+def _kpool_storage_split_builder(device):
+    """GLM-5.3-Flash on ROCm: a 1152-token MLA block whose 288 kpool states are
+    stored as nine 32-state pages, so the block table counts 1152-token blocks
+    while the indexer cache is addressed in 128-token storage blocks."""
+    kv_cache_spec = MLAAttentionSpec(
+        block_size=128,
+        num_kv_heads=1,
+        head_size=128,
+        dtype=torch.uint8,
+        tokens_per_state=4,
+    )
+    vllm_config = create_vllm_config(max_model_len=4608)
+    max_num_blocks = kv_cache_spec.max_num_blocks_per_req(vllm_config, 4608)
+    builder = DeepseekV32IndexerMetadataBuilder(
+        kv_cache_spec=kv_cache_spec,
+        layer_names=["dummy"],
+        vllm_config=vllm_config,
+        device=device,
+        block_table_width=get_block_table_width(max_num_blocks, 128),
+    )
+    builder.set_kernel_block_size(1152)
+    return builder
+
+
+def _expected_storage_slot(kernel_block_table, pos, kernel_block_size=1152):
+    kernel_block = kernel_block_table[pos // kernel_block_size]
+    state = (pos % kernel_block_size) // 4
+    return kernel_block * (kernel_block_size // 4) + state
+
+
+@pytest.mark.parametrize(
+    ("kernel_block_size", "storage_block_size", "expected"),
+    [
+        (None, 128, None),
+        (128, 128, None),
+        # Kernel blocks smaller than storage blocks: keep every factor-th id.
+        (64, 128, [[2, 3]]),
+        # Kernel blocks larger than storage blocks: split each into factor ids.
+        (256, 128, [[8, 9, 10, 11, 12, 13, 14, 15]]),
+    ],
+)
+def test_to_storage_block_table(kernel_block_size, storage_block_size, expected):
+    builder = SimpleNamespace(
+        kernel_block_size=kernel_block_size,
+        kv_cache_spec=SimpleNamespace(block_size=storage_block_size),
+    )
+    block_table = torch.tensor([[4, 5, 6, 7]], dtype=torch.int32)
+    out = DeepseekV32IndexerMetadataBuilder._to_storage_block_table(
+        builder, block_table
+    )
+    if expected is None:
+        assert out is None
+    else:
+        assert out.dtype == block_table.dtype
+        assert out.tolist() == expected
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+def test_indexer_builder_expands_kernel_blocks_to_storage_blocks():
+    """Regression test: with kernel blocks larger than the indexer storage
+    block, slots and decode block tables must address storage blocks. Using
+    the kernel-block table directly aliased every state past the request's
+    first few storage pages onto the null block."""
+    device = torch.device("cuda")
+    builder = _kpool_storage_split_builder(device)
+    kernel_block_table = [5, 7, 2]
+
+    # Prefill tokens 1400..1439: compressed states 350..359, in kernel block 7.
+    query_start_loc = torch.tensor([0, 40], dtype=torch.int32, device=device)
+    seq_lens = torch.tensor([1440], dtype=torch.int32, device=device)
+    common = CommonAttentionMetadata(
+        query_start_loc=query_start_loc,
+        query_start_loc_cpu=query_start_loc.cpu(),
+        seq_lens=seq_lens,
+        seq_lens_cpu_upper_bound=seq_lens.cpu(),
+        num_reqs=1,
+        num_actual_tokens=40,
+        max_query_len=40,
+        max_seq_len=1440,
+        block_table_tensor=torch.tensor(
+            [kernel_block_table], dtype=torch.int32, device=device
+        ),
+        slot_mapping=torch.full((40,), -123, dtype=torch.int64, device=device),
+        causal=True,
+    )
+    md = builder.build(common_prefix_len=0, common_attn_metadata=common)
+    valid_slots = md.slot_mapping[md.slot_mapping >= 0].tolist()
+    assert valid_slots == [
+        _expected_storage_slot(kernel_block_table, pos) for pos in range(1403, 1440, 4)
+    ]
+
+    # Decode at token 3000 (kernel block 2): the paged-logits kernel reads
+    # state p from block_table[p // 32] * 32 + p % 32.
+    query_start_loc = torch.tensor([0, 1], dtype=torch.int32, device=device)
+    seq_lens = torch.tensor([3001], dtype=torch.int32, device=device)
+    common = CommonAttentionMetadata(
+        query_start_loc=query_start_loc,
+        query_start_loc_cpu=query_start_loc.cpu(),
+        seq_lens=seq_lens,
+        seq_lens_cpu_upper_bound=seq_lens.cpu(),
+        num_reqs=1,
+        num_actual_tokens=1,
+        max_query_len=1,
+        max_seq_len=3001,
+        block_table_tensor=torch.tensor(
+            [kernel_block_table], dtype=torch.int32, device=device
+        ),
+        slot_mapping=torch.full((1,), -123, dtype=torch.int64, device=device),
+        causal=True,
+    )
+    md = builder.build(common_prefix_len=0, common_attn_metadata=common)
+    storage_table = md.decode.block_table[0].tolist()
+    for pos in range(0, 3000, 4):
+        state = pos // 4
+        assert storage_table[state // 32] * 32 + state % 32 == _expected_storage_slot(
+            kernel_block_table, pos
+        ), pos
+
+
 @pytest.mark.parametrize("compress_ratio", [1, 4])
 def test_indexer_prefill_budget_matches_compressed_workspace(compress_ratio):
     """The chunker budget is in compressed rows, like the K-gather workspace."""
