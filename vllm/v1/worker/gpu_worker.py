@@ -613,7 +613,7 @@ class Worker(WorkerBase):
         if kv_cache_memory_bytes := self.cache_config.kv_cache_memory_bytes:
             # still need a profile run which compiles the model for
             # max_num_batched_tokens
-            self.model_runner.profile_run()
+            self.model_runner.profile_run(randomize_inputs=self.randomize_dummy_inputs)
 
             msg = (
                 f"Initial free memory {format_gib(self.init_snapshot.free_memory)} "
@@ -650,7 +650,7 @@ class Worker(WorkerBase):
             # memory_profiling measures, restoring the original limit.
             self._scoped_allocator_max_split(max_split_size_mb=20),
         ):
-            self.model_runner.profile_run()
+            self.model_runner.profile_run(randomize_inputs=self.randomize_dummy_inputs)
 
         # Profile CUDA graph memory if graphs will be captured.
         # ROCm is included: #44825 moved the profiler to
@@ -885,7 +885,12 @@ class Worker(WorkerBase):
         # We skip EPLB here since we don't want to record dummy metrics
         for size in sorted(warmup_sizes, reverse=True):
             logger.info("Compile and warming up model for size %d", size)
-            self.model_runner._dummy_run(size, skip_eplb=True, remove_lora=False)
+            self.model_runner._dummy_run(
+                size,
+                skip_eplb=True,
+                remove_lora=False,
+                randomize_inputs=self.randomize_dummy_inputs,
+            )
         self.model_runner.maybe_remove_all_loras(self.model_runner.lora_config)
 
         # Warmup and tune the kernels used during model execution before
@@ -1387,9 +1392,21 @@ class Worker(WorkerBase):
                     # Recreate it so the next profile_prefix is honored.
                     self.profiler = None
 
+    @property
+    def randomize_dummy_inputs(self) -> bool:
+        # Not cached: elastic EP rewrites parallel_config in place on reconfigure.
+        return (
+            envs.VLLM_RANDOMIZE_DP_DUMMY_INPUTS
+            and self.parallel_config.data_parallel_size > 1
+        )
+
     def execute_dummy_batch(self) -> None:
         num_tokens = getattr(self.model_runner, "uniform_decode_query_len", 1)
-        self.model_runner._dummy_run(num_tokens, uniform_decode=True)
+        self.model_runner._dummy_run(
+            num_tokens,
+            uniform_decode=True,
+            randomize_inputs=self.randomize_dummy_inputs,
+        )
 
     def add_lora(self, lora_request: LoRARequest) -> bool:
         return self.model_runner.add_lora(lora_request)

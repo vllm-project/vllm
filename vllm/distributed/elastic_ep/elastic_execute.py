@@ -721,7 +721,12 @@ class ElasticEPScalingExecutor:
             self._suppress_eplb(),
             serving_state,
         ):
-            runner._dummy_run(runner.max_num_tokens, is_profile=True, skip_eplb=True)
+            runner._dummy_run(
+                runner.max_num_tokens,
+                is_profile=True,
+                skip_eplb=True,
+                randomize_inputs=self.worker.randomize_dummy_inputs,
+            )
             self.worker.compile_or_warm_up_model()
 
         lock_workspace()
