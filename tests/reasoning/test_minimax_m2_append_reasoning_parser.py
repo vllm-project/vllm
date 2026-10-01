@@ -251,6 +251,7 @@ def test_append_think_tool_composition_keeps_closing_delimiter():
         reasoning_parser_name=parser_name,
         enable_auto_tools=True,
     )
+    assert parser_cls is not None
     parser = parser_cls(FakeTokenizer(), tools)
     request = ChatCompletionRequest.model_validate(
         {
@@ -261,12 +262,11 @@ def test_append_think_tool_composition_keeps_closing_delimiter():
         }
     )
 
-    reasoning, content = parser.extract_reasoning(model_output, request)
-    assert reasoning is None
-    tool_calls, content = parser._extract_tool_calls(
-        content, request, enable_auto_tools=True
+    reasoning, content, tool_calls = parser.parse(
+        model_output, request, enable_auto_tools=True
     )
 
+    assert reasoning is None
     assert content == "<think>I should add them.</think>"
     assert tool_calls is not None and len(tool_calls) == 1
     assert tool_calls[0].name == "add"
