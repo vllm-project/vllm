@@ -40,6 +40,7 @@ from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
 )
 from vllm.model_executor.layers.fused_moe.oracle.nvfp4 import (
     NvFp4MoeBackend,
+    convert_to_nvfp4_moe_kernel_format,
     map_nvfp4_backend,
 )
 from vllm.model_executor.layers.fused_moe.oracle.nvfp4 import (
@@ -301,3 +302,16 @@ def test_mxfp4_checkpoints_keep_the_default_epilogue():
     """MXFP4 has no per-tensor global scales; the megakernel needs no alphas."""
     quant_config = FusedMoEQuantConfig.make("nvfp4", weight_dtype="mxfp4")
     assert epilogue_from_quant_config(quant_config) == fi_ep.FlashInferMoeEpEpilogue()
+
+
+def test_nvfp4_kernel_format_passes_megakernel_weights_through():
+    """The megakernel takes the canonical tensors as they are; the oracle must
+    not reject or reshape them."""
+    tensors = tuple(torch.arange(4.0).reshape(2, 2) + i for i in range(8))
+    converted = convert_to_nvfp4_moe_kernel_format(
+        NvFp4MoeBackend.FLASHINFER_MOE_EP_CUTEDSL,
+        SimpleNamespace(),
+        *tensors,
+        is_act_and_mul=True,
+    )
+    assert all(out is src for out, src in zip(converted, tensors))
