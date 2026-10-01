@@ -307,5 +307,32 @@ def test_drop_checkpoint_cache_releases_local_weight_files(
     fadvise.assert_called_once()
 
 
+def test_loader_releases_checkpoint_cache_after_load(tmp_path, monkeypatch):
+    """The loader evicts the checkpoint after loading, and barriers first."""
+    from types import SimpleNamespace
+
+    from vllm.config.load import LoadConfig
+    from vllm.model_executor.model_loader.dummy_loader import DummyModelLoader
+
+    (tmp_path / "weights.safetensors").touch()
+
+    order: list[str] = []
+    # Single-process test: without these the barrier branch never runs and the
+    # ordering assertion below would be vacuous.
+    monkeypatch.setattr("torch.distributed.is_available", lambda: True)
+    monkeypatch.setattr("torch.distributed.is_initialized", lambda: True)
+    monkeypatch.setattr("torch.distributed.barrier", lambda: order.append("barrier"))
+    monkeypatch.setattr("os.posix_fadvise", lambda *a: order.append("fadvise"))
+
+    loader = DummyModelLoader(LoadConfig())
+    loader._drop_checkpoint_page_cache(
+        SimpleNamespace(model=str(tmp_path), model_weights=None, revision=None),
+        SimpleNamespace(download_dir=None),
+    )
+
+    # All ranks must be past reading before any of them evicts.
+    assert order == ["barrier", "fadvise"]
+
+
 if __name__ == "__main__":
     test_download_weights_from_hf()

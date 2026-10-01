@@ -14,6 +14,7 @@ from vllm.model_executor.model_loader.utils import (
     initialize_model,
     process_weights_after_loading,
 )
+from vllm.model_executor.model_loader.weight_utils import drop_checkpoint_cache
 from vllm.platforms import current_platform
 from vllm.tracing import instrument
 from vllm.utils.mem_utils import format_gib
@@ -57,6 +58,29 @@ class BaseModelLoader(ABC):
         log_model_inspection(model)
         return model
 
+    def _drop_checkpoint_page_cache(
+        self, model_config: ModelConfig, load_config: LoadConfig
+    ) -> None:
+        """Release the checkpoint from the page cache now that it is loaded.
+
+        Reading the checkpoint leaves it resident as clean page cache, which
+        the kernel then reclaims only reactively -- with whatever allocation
+        triggered the reclaim blocked waiting on it. Releasing it here returns
+        the host memory while nothing is waiting.
+
+        Synchronizes first: the eviction covers the whole checkpoint directory
+        and ranks reach this point seconds apart, so an early finisher would
+        otherwise evict shards a slower peer has not read yet, forcing a
+        re-read from what is usually a network filesystem.
+        """
+        if torch.distributed.is_available() and torch.distributed.is_initialized():
+            torch.distributed.barrier()
+        drop_checkpoint_cache(
+            model_config.model_weights or model_config.model,
+            revision=model_config.revision,
+            cache_dir=load_config.download_dir,
+        )
+
     @instrument(span_name="Load model")
     def load_model(
         self, vllm_config: VllmConfig, model_config: ModelConfig, prefix: str = ""
@@ -78,6 +102,8 @@ class BaseModelLoader(ABC):
 
             logger.debug("Loading weights on %s ...", load_device)
             self.load_weights(model, model_config)
+
+            self._drop_checkpoint_page_cache(model_config, load_config)
 
             # Log peak GPU memory after loading weights. This is needed
             # to have test coverage on peak memory for online quantization.
