@@ -10,6 +10,7 @@ import torch
 from vllm import envs
 from vllm.config import VllmConfig
 from vllm.distributed import (
+    get_dcp_group,
     get_tensor_model_parallel_world_size,
     tensor_model_parallel_all_reduce,
 )
@@ -45,6 +46,7 @@ from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
     rocm_sparse_attn_prefill,
 )
 from vllm.v1.kv_cache_interface import KVCacheSpec
+from vllm.v1.worker.cp_utils import cp_global_to_local_block, cp_is_local_pos
 from vllm.v1.worker.workspace import current_workspace_manager
 
 logger = init_logger(__name__)
@@ -320,6 +322,9 @@ def _compute_topk_lens_kernel(
     topk,
     is_valid_token_ptr,
     TRITON_BLOCK_SIZE: tl.constexpr,
+    DCP_WORLD_SIZE: tl.constexpr,
+    DCP_RANK: tl.constexpr,
+    CP_KV_CACHE_INTERLEAVE_SIZE: tl.constexpr,
 ):
     token_idx = tl.program_id(0)
     is_valid_token = tl.load(is_valid_token_ptr + token_idx)
@@ -333,7 +338,17 @@ def _compute_topk_lens_kernel(
             mask=mask,
             other=-1,
         )
-        count += tl.sum((local_idx >= 0).to(tl.int32), axis=0)
+        counted = local_idx >= 0
+        if DCP_WORLD_SIZE > 1:
+            # Sharded compressed cache: the ragged row holds only the
+            # candidates this rank owns (ownership in compressed-slot space).
+            counted = counted & cp_is_local_pos(
+                local_idx,
+                DCP_WORLD_SIZE,
+                DCP_RANK,
+                CP_KV_CACHE_INTERLEAVE_SIZE,
+            )
+        count += tl.sum(counted.to(tl.int32), axis=0)
 
     tl.store(topk_lens_ptr + token_idx, tl.where(is_valid_token, count, 0))
 
@@ -350,34 +365,77 @@ def _pack_global_topk_ragged_kernel(
     block_size,
     topk,
     BLOCK_SIZE: tl.constexpr,
+    DCP_WORLD_SIZE: tl.constexpr,
+    DCP_RANK: tl.constexpr,
+    CP_KV_CACHE_INTERLEAVE_SIZE: tl.constexpr,
 ):
     token_idx = tl.program_id(0)
-    block_idx = tl.program_id(1)
-    offset = block_idx * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
 
     out_start = tl.load(topk_indptr_ptr + token_idx)
     out_end = tl.load(topk_indptr_ptr + token_idx + 1)
     out_len = out_end - out_start
-    if block_idx * BLOCK_SIZE >= out_len:
-        return
 
-    req_idx = tl.load(token_to_req_indices_ptr + token_idx)
-    mask = (offset < out_len) & (offset < topk)
-    local_idx = tl.load(
-        topk_indices_ptr + token_idx * topk_indices_stride + offset,
-        mask=mask,
-        other=-1,
-    )
-    valid = mask & (local_idx >= 0)
-    block_indices = local_idx // block_size
-    block_numbers = tl.load(
-        block_table_ptr + req_idx * block_table_stride + block_indices,
-        mask=valid,
-        other=0,
-    )
-    block_offsets = local_idx % block_size
-    slot_ids = tl.where(valid, block_numbers * block_size + block_offsets, -1)
-    tl.store(global_topk_ragged_ptr + out_start + offset, slot_ids, mask=mask)
+    if DCP_WORLD_SIZE == 1:
+        block_idx = tl.program_id(1)
+        offset = block_idx * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+        if block_idx * BLOCK_SIZE >= out_len:
+            return
+
+        req_idx = tl.load(token_to_req_indices_ptr + token_idx)
+        mask = (offset < out_len) & (offset < topk)
+        local_idx = tl.load(
+            topk_indices_ptr + token_idx * topk_indices_stride + offset,
+            mask=mask,
+            other=-1,
+        )
+        valid = mask & (local_idx >= 0)
+        block_indices = local_idx // block_size
+        block_numbers = tl.load(
+            block_table_ptr + req_idx * block_table_stride + block_indices,
+            mask=valid,
+            other=0,
+        )
+        block_offsets = local_idx % block_size
+        slot_ids = tl.where(valid, block_numbers * block_size + block_offsets, -1)
+        tl.store(global_topk_ragged_ptr + out_start + offset, slot_ids, mask=mask)
+    else:
+        # Sharded compressed cache: keep only this rank's owned candidates,
+        # converted global id -> local slot with the same interleave math the
+        # write path uses, compacted into the owned-length ragged row. One
+        # program walks the whole row because the compaction carries a running
+        # count (the dcp=1 tiles above stay parallel).
+        req_idx = tl.load(token_to_req_indices_ptr + token_idx)
+        written = tl.zeros((), dtype=tl.int32)
+        for i in range(0, topk, BLOCK_SIZE):
+            offset = i + tl.arange(0, BLOCK_SIZE)
+            mask = offset < topk
+            local_idx = tl.load(
+                topk_indices_ptr + token_idx * topk_indices_stride + offset,
+                mask=mask,
+                other=-1,
+            )
+            local_blocks, local_offsets, is_local = cp_global_to_local_block(
+                local_idx,
+                block_size,
+                DCP_WORLD_SIZE,
+                DCP_RANK,
+                CP_KV_CACHE_INTERLEAVE_SIZE,
+            )
+            owned = mask & (local_idx >= 0) & is_local
+            block_numbers = tl.load(
+                block_table_ptr + req_idx * block_table_stride + local_blocks,
+                mask=owned,
+                other=0,
+            )
+            slot_ids = block_numbers * block_size + local_offsets
+
+            dest = written + tl.cumsum(owned.to(tl.int32), axis=0) - 1
+            tl.store(
+                global_topk_ragged_ptr + out_start + dest,
+                slot_ids,
+                mask=owned,
+            )
+            written += tl.sum(owned.to(tl.int32), axis=0)
 
 
 def compute_global_topk_ragged_indices_and_indptr(
@@ -386,6 +444,9 @@ def compute_global_topk_ragged_indices_and_indptr(
     block_table: torch.Tensor,
     block_size: int,
     is_valid_token: torch.Tensor,
+    dcp_world_size: int = 1,
+    dcp_rank: int = 0,
+    cp_kv_cache_interleave_size: int = 1,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     topk_indices = topk_indices.reshape(topk_indices.shape[0], -1).contiguous()
     num_tokens = topk_indices.shape[0]
@@ -399,6 +460,9 @@ def compute_global_topk_ragged_indices_and_indptr(
         topk,
         is_valid_token,
         TRITON_BLOCK_SIZE=1024,
+        DCP_WORLD_SIZE=dcp_world_size,
+        DCP_RANK=dcp_rank,
+        CP_KV_CACHE_INTERLEAVE_SIZE=cp_kv_cache_interleave_size,
     )
 
     topk_indptr = _build_indptr_from_lengths(topk_lens)
@@ -409,7 +473,10 @@ def compute_global_topk_ragged_indices_and_indptr(
     )
     if global_topk_ragged.numel() > 0:
         block = 128
-        _pack_global_topk_ragged_kernel[(num_tokens, triton.cdiv(topk, block))](
+        # The dcp>1 compaction carries a running count across the row, so it
+        # runs one program per token; dcp=1 keeps the parallel tiles.
+        tiles = triton.cdiv(topk, block) if dcp_world_size == 1 else 1
+        _pack_global_topk_ragged_kernel[(num_tokens, tiles)](
             global_topk_ragged,
             topk_indptr,
             topk_indices,
@@ -420,6 +487,9 @@ def compute_global_topk_ragged_indices_and_indptr(
             block_size,
             topk,
             BLOCK_SIZE=block,
+            DCP_WORLD_SIZE=dcp_world_size,
+            DCP_RANK=dcp_rank,
+            CP_KV_CACHE_INTERLEAVE_SIZE=cp_kv_cache_interleave_size,
         )
     return global_topk_ragged, topk_indptr, topk_lens
 
@@ -695,6 +765,14 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
             self.indexer.aux_stream = None
         self._use_aiter_sparse_mla = _aiter_sparse_mla_enabled(self._has_kv_transfer)
 
+        parallel_config = vllm_config.parallel_config
+        self.dcp_world_size = parallel_config.decode_context_parallel_size
+        self.cp_kv_cache_interleave_size = (
+            parallel_config.cp_kv_cache_interleave_size
+        )
+        self.dcp_rank = (
+            get_dcp_group().rank_in_group if self.dcp_world_size > 1 else 0
+        )
         self.dcp_manager: MLADCPManager | None = None
         if vllm_config.parallel_config.decode_context_parallel_size > 1:
             self.dcp_manager = MLADCPManager(
@@ -1414,6 +1492,9 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
                     attn_metadata.block_table[:num_decodes],
                     block_size,
                     is_valid,
+                    dcp_world_size=self.dcp_world_size,
+                    dcp_rank=self.dcp_rank,
+                    cp_kv_cache_interleave_size=self.cp_kv_cache_interleave_size,
                 )
             else:
                 topk_indices = attn_metadata.c128a_global_decode_topk_indices
