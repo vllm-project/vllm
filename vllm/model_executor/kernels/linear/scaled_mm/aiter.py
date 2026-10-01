@@ -263,9 +263,11 @@ class AiterPreshuffledPerTokenFp8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
         out = rocm_aiter_ops.preshuffled_per_token_w8a8_gemm(
             A, B, As, Bs, None, out_dtype
         )[:, :n_before_padding]
+        # Slicing off the padding leaves a row-strided view; return a contiguous
+        # (M, N) tensor like the unpadded path. Adding bias already makes a copy.
         if bias is not None:
-            out = out + bias
-        return out
+            return out + bias
+        return out.contiguous()
 
 
 class AiterHipbMMPerTokenFp8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
