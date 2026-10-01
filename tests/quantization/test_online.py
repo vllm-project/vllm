@@ -210,9 +210,9 @@ def test_online_nvfp4_reuses_kernel_when_weights_are_reprocessed(
     monkeypatch,
 ) -> None:
     method = object.__new__(Nvfp4OnlineMoEMethod)
-    method.moe = SimpleNamespace(is_act_and_mul=True)  # type: ignore[assignment]
-    method.nvfp4_backend = object()  # type: ignore[assignment]  # Opaque mocked-backend sentinel.
-    method.experts_cls = object  # type: ignore[assignment]  # Opaque mocked-expert sentinel.
+    method.moe = SimpleNamespace(is_act_and_mul=True)
+    method.nvfp4_backend = object()
+    method.experts_cls = object
     method.moe_quant_config = None
     method.moe_kernel = None
 
@@ -1432,7 +1432,7 @@ def test_online_int8_moe_w2_scale_matches_unsharded(monkeypatch) -> None:
         layer.w2_weight = torch.nn.Parameter(w2_in, requires_grad=False)
         layer.num_experts = layer.local_num_experts = w13.shape[0]
         method = SimpleNamespace(moe=SimpleNamespace(tp_size=moe_tp_size))
-        Int8OnlineMoEMethod._quantize_weights(method, layer)  # type: ignore[arg-type]
+        Int8OnlineMoEMethod._quantize_weights(method, layer)
         return layer.w2_weight, layer.w2_scale
 
     full_weight, full_scale = quantize(w2, 1)

@@ -9,7 +9,7 @@ import os
 from collections import defaultdict
 from collections.abc import Callable, Iterable, Iterator, Sequence
 from dataclasses import dataclass, field, replace
-from functools import partial
+from functools import partial, reduce
 from typing import TYPE_CHECKING, Any, NamedTuple, NewType, TypeAlias, cast, overload
 
 from vllm import envs
@@ -565,20 +565,24 @@ def _gen_mm_extra_hash_keys(
     return extra_keys, curr_mm_idx
 
 
-def _gen_lora_extra_hash_keys(request: Request) -> list[tuple[str, str]]:
+def _gen_lora_extra_hash_keys(request: Request) -> list[tuple[str, str, str]]:
     """Generate extra keys related to LoRA for block hash computation.
+
+    The adapter path is included so that re-pointing a LoRA name at a different
+    adapter does not reuse KV computed with the previous one.
 
     Args:
         request: The request object.
 
     Returns:
-        Return LoRA name of the request if it is a LoRA request. Return empty
-        list otherwise.
+        Return the LoRA name and path of the request if it is a LoRA request.
+        Return empty list otherwise.
 
     """
-    if not request.lora_request:
+    lora_request = request.lora_request
+    if not lora_request:
         return []
-    return [("lora", request.lora_request.lora_name)]
+    return [("lora", lora_request.lora_name, lora_request.lora_path)]
 
 
 def _gen_prompt_embeds_extra_hash_keys(
@@ -2409,6 +2413,26 @@ def get_kv_cache_groups(
     return groups
 
 
+def _layer_tp_replicas(spec: KVCacheSpec, tp_size: int, dcp_size: int) -> int:
+    if not isinstance(spec, AttentionSpec) or spec.max_tp_shards is None:
+        return 1
+    if spec.dcp_sharded and dcp_size > 1:
+        return 1
+    return max(1, tp_size // spec.max_tp_shards)
+
+
+def kv_cache_groups_tp_replicas(
+    groups: list[KVCacheGroupSpec], tp_size: int, dcp_size: int = 1
+) -> int:
+    """Consecutive TP ranks holding identical KV for every layer."""
+    specs = [spec for g in groups for spec in iter_layer_specs(g.kv_cache_spec)]
+    if not specs:
+        return 1
+    return reduce(
+        math.gcd, (_layer_tp_replicas(s, tp_size, dcp_size) for s in specs), tp_size
+    )
+
+
 def generate_scheduler_kv_cache_config(
     kv_cache_configs: list[KVCacheConfig],
 ) -> KVCacheConfig:
@@ -2821,6 +2845,13 @@ def get_kv_cache_configs(
         groups = kv_cache_config.kv_cache_groups
         kv_cache_configs[i] = get_kv_cache_config_from_groups(
             vllm_config, groups, min_num_blocks * _pool_bytes_per_block(groups)
+        )
+
+    for kv_cache_config in kv_cache_configs:
+        kv_cache_config.kv_tp_replicas = kv_cache_groups_tp_replicas(
+            kv_cache_config.kv_cache_groups,
+            vllm_config.parallel_config.tensor_parallel_size,
+            vllm_config.parallel_config.decode_context_parallel_size,
         )
 
     return kv_cache_configs
