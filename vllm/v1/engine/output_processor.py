@@ -493,6 +493,11 @@ class OutputProcessor:
         self.lora_states = LoRARequestStates(log_stats)
         self.tracing_enabled = tracing_enabled
         self.admission_stats = admission_stats
+        # Total prompt tokens of prefilling requests, updated wherever a
+        # request enters or leaves prefill so that reading it (on every
+        # admission check and every output batch) does not scan
+        # request_states, which can hold many thousands of requests.
+        self._num_queued_tokens = 0
 
     def get_num_unfinished_requests(self):
         return len(self.request_states)
@@ -507,9 +512,19 @@ class OutputProcessor:
         scheduler's ``num_computed_tokens`` is not propagated to the API
         server until prefill completes.  See ``SchedulerConfig`` docs.
         """
-        return sum(
-            req.prompt_len for req in self.request_states.values() if req.is_prefilling
-        )
+        return self._num_queued_tokens
+
+    @staticmethod
+    def _queued_tokens(req_state: RequestState) -> int:
+        return req_state.prompt_len if req_state.is_prefilling else 0
+
+    def _apply_streaming_update(
+        self, req_state: RequestState, update: StreamingUpdate
+    ) -> None:
+        # The update extends the prompt and restarts prefill.
+        queued_before = self._queued_tokens(req_state)
+        req_state.apply_streaming_update(update)
+        self._num_queued_tokens += self._queued_tokens(req_state) - queued_before
 
     def has_unfinished_requests(self) -> bool:
         return len(self.request_states) > 0
@@ -556,6 +571,7 @@ class OutputProcessor:
         for request_id in internal_req_ids:
             req_state = self.request_states.pop(request_id, None)
             if req_state is not None:
+                self._num_queued_tokens -= self._queued_tokens(req_state)
                 self.lora_states.request_finished(request_id, req_state.lora_name)
                 request_ids_to_abort.append(request_id)
                 # Produce final abort output.
@@ -609,6 +625,7 @@ class OutputProcessor:
             stream_interval=self.stream_interval,
         )
         self.request_states[request_id] = req_state
+        self._num_queued_tokens += self._queued_tokens(req_state)
         if parent_req:
             self.parent_requests[parent_req.request_id] = parent_req
 
@@ -643,7 +660,7 @@ class OutputProcessor:
 
         # Apply request updates now if the last input already completed.
         if req_state.input_chunk_queue is None:
-            req_state.apply_streaming_update(update)
+            self._apply_streaming_update(req_state, update)
             req_state.input_chunk_queue = deque()
         else:
             # Queue the streaming update otherwise.
@@ -710,6 +727,7 @@ class OutputProcessor:
                     )
                 if req_state.remote_prefill_cached_tokens is not None:
                     req_state.num_cached_tokens = req_state.remote_prefill_cached_tokens
+                self._num_queued_tokens -= req_state.prompt_len
                 req_state.is_prefilling = False
 
             if engine_core_output.spec_decode_metrics is not None:
@@ -758,7 +776,7 @@ class OutputProcessor:
                 if req_state.streaming_input:
                     if req_state.input_chunk_queue:
                         update = req_state.input_chunk_queue.popleft()
-                        req_state.apply_streaming_update(update)
+                        self._apply_streaming_update(req_state, update)
                     else:
                         req_state.input_chunk_queue = None
                 else:
@@ -783,6 +801,7 @@ class OutputProcessor:
     def _finish_request(self, req_state: RequestState) -> None:
         req_id = req_state.request_id
         self.request_states.pop(req_id)
+        self._num_queued_tokens -= self._queued_tokens(req_state)
 
         internal_ids = self.external_req_ids[req_state.external_req_id]
         internal_ids.remove(req_id)

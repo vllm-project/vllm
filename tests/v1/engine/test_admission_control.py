@@ -5,6 +5,7 @@
 
 These tests cover:
 - OutputProcessor.get_num_queued_tokens() token counting
+- The vllm:num_queued_tokens gauge that exports it
 - AsyncLLM.check_admission() admission control logic
 - Exception classes (GracefulHTTPError, QueueOverflowError, MaxQueuedTokensError)
 - create_error_response() mapping GracefulHTTPError to HTTP 503
@@ -21,8 +22,10 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from prometheus_client import REGISTRY
 from pydantic import ValidationError
 
+from vllm.config import ModelConfig, VllmConfig
 from vllm.config.scheduler import SchedulerConfig
 from vllm.entrypoints.serve.exception_handling.error_response import (
     create_error_response,
@@ -36,10 +39,12 @@ from vllm.exceptions import (
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams
 from vllm.utils.argparse_utils import human_readable_int
-from vllm.v1.engine import EngineCoreRequest
+from vllm.v1.engine import EngineCoreOutput, EngineCoreRequest, FinishReason
 from vllm.v1.engine.admission_control import SharedAdmissionStats
 from vllm.v1.engine.async_llm import AsyncLLM
 from vllm.v1.engine.output_processor import OutputProcessor
+from vllm.v1.metrics.loggers import StatLoggerManager
+from vllm.v1.metrics.prometheus import unregister_vllm_metrics
 
 pytestmark = pytest.mark.cpu_test
 
@@ -75,15 +80,28 @@ def _make_async_llm(
 
 
 def _make_output_processor(**request_states) -> OutputProcessor:
-    op = OutputProcessor.__new__(OutputProcessor)
-    op.request_states = request_states
+    """A real OutputProcessor holding one request per keyword, each described
+    by _make_req_state. A request that is not prefilling has had its first
+    output, so the count is built through the same paths as in serving."""
+    op = OutputProcessor(None, log_stats=False)
+    for request_id, state in request_states.items():
+        _add_request(op, request_id, state.prompt_len)
+    op.process_outputs(
+        [
+            EngineCoreOutput(request_id=request_id, new_token_ids=[1])
+            for request_id, state in request_states.items()
+            if not state.is_prefilling
+        ]
+    )
     return op
 
 
-def _make_engine_request(request_id: str, n: int) -> EngineCoreRequest:
+def _make_engine_request(
+    request_id: str, n: int, prompt_len: int = 1
+) -> EngineCoreRequest:
     return EngineCoreRequest(
         request_id=request_id,
-        prompt_token_ids=[1],
+        prompt_token_ids=[1] * prompt_len,
         mm_features=None,
         sampling_params=SamplingParams(n=n),
         pooling_params=None,
@@ -92,6 +110,17 @@ def _make_engine_request(request_id: str, n: int) -> EngineCoreRequest:
         cache_salt=None,
         data_parallel_rank=None,
     )
+
+
+def _add_request(
+    op: OutputProcessor, request_id: str, prompt_len: int, resumable: bool = False
+) -> None:
+    """Hand a request to the OutputProcessor with external_req_id set, as the
+    InputProcessor does before AsyncLLM adds it."""
+    request = _make_engine_request(request_id, 1, prompt_len)
+    request.external_req_id = request_id
+    request.resumable = resumable
+    op.add_request(request, None)
 
 
 def _make_request_test_llm(
@@ -229,6 +258,55 @@ def test_queued_tokens_all_non_prefilling():
         r1=_make_req_state(100, is_prefilling=False),
         r2=_make_req_state(200, is_prefilling=False),
     )
+    assert op.get_num_queued_tokens() == 0
+
+
+def test_queued_tokens_gauge_tracks_prefill_backlog():
+    """The gauge reports the count admission uses: it drops when a request's
+    first output arrives and when a prefilling request is aborted."""
+    vllm_config = VllmConfig(model_config=ModelConfig(model="distilbert/distilgpt2"))
+    labels = {"model_name": vllm_config.model_config.served_model_name}
+    op = OutputProcessor(None, log_stats=False)
+    _add_request(op, "a", 100)
+    _add_request(op, "b", 50)
+
+    try:
+        stat_loggers = StatLoggerManager(vllm_config)
+
+        def read_gauge() -> float | None:
+            stat_loggers.record_num_queued_tokens(op.get_num_queued_tokens())
+            return REGISTRY.get_sample_value("vllm:num_queued_tokens", labels)
+
+        assert read_gauge() == 150
+        op.process_outputs([EngineCoreOutput(request_id="a", new_token_ids=[1])])
+        assert read_gauge() == 50
+        op.abort_requests(["b"], internal=True)
+        assert read_gauge() == 0
+    finally:
+        unregister_vllm_metrics()
+
+
+def test_queued_tokens_follow_streaming_input():
+    """A streaming-input chunk waits while the current one runs, then restarts
+    prefill with the whole extended prompt once the engine finishes it."""
+    op = OutputProcessor(None, log_stats=False)
+    _add_request(op, "s", 100, resumable=True)
+    assert op.get_num_queued_tokens() == 100
+    op.process_outputs([EngineCoreOutput(request_id="s", new_token_ids=[1])])
+    assert op.get_num_queued_tokens() == 0
+
+    _add_request(op, "s", 30, resumable=True)
+    assert op.get_num_queued_tokens() == 0
+    op.process_outputs(
+        [
+            EngineCoreOutput(
+                request_id="s", new_token_ids=[1], finish_reason=FinishReason.LENGTH
+            )
+        ]
+    )
+    assert op.get_num_queued_tokens() == 130
+
+    op.abort_requests(["s"], internal=True)
     assert op.get_num_queued_tokens() == 0
 
 

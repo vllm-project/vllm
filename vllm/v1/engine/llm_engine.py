@@ -338,6 +338,9 @@ class LLMEngine:
                     iteration_stats=iteration_stats,
                     mm_cache_stats=self.renderer.stat_mm_cache(),
                 )
+                self.logger_manager.record_num_queued_tokens(
+                    self.output_processor.get_num_queued_tokens()
+                )
                 if outputs.outputs:
                     self.do_log_stats_with_interval()
 
