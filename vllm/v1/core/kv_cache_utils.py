@@ -2563,7 +2563,6 @@ def _estimate_max_model_len_from_groups(
     def fits(model_len: int) -> bool:
         vllm_config.model_config.max_model_len = model_len
         if hisparse_enabled:
-            # Building HiSparse's config checks that its host pool fits.
             try:
                 get_kv_cache_config_from_groups(
                     vllm_config, kv_cache_groups, available_memory
