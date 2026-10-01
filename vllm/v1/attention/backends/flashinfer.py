@@ -26,6 +26,8 @@ from vllm import _custom_ops as custom_ops
 from vllm import envs
 from vllm.config import (
     CUDAGraphMode,
+    ModelConfig,
+    ParallelConfig,
     VllmConfig,
     get_current_vllm_config_or_none,
 )
@@ -440,14 +442,28 @@ class FlashInferBackend(AttentionBackend):
         # picks a large kernel block we cannot serve.
         if vllm_config is None or vllm_config.model_config is None:
             return False
-        pc = vllm_config.parallel_config
-        mc = vllm_config.model_config
+        if not current_platform.is_device_capability_family(100):
+            return False
+        tgt_supports = FlashInferBackend._model_supports_large_pages(
+            vllm_config.model_config, vllm_config.parallel_config
+        )
+        sd_config = vllm_config.speculative_config
+        if sd_config is None or sd_config.draft_model_config is None:
+            return tgt_supports  # no spec-decode
+
+        draft_supports = FlashInferBackend._model_supports_large_pages(
+            sd_config.draft_model_config,
+            sd_config.draft_parallel_config or vllm_config.parallel_config,
+        )
+        return tgt_supports and draft_supports
+
+    @staticmethod
+    def _model_supports_large_pages(mc: ModelConfig, pc: ParallelConfig) -> bool:
         num_qo_heads = mc.get_num_attention_heads(pc)
         num_kv_heads = mc.get_num_kv_heads(pc)
         return (
             num_kv_heads > 0
             and num_qo_heads // num_kv_heads > 1
-            and current_platform.is_device_capability_family(100)
             and can_use_trtllm_attention(num_qo_heads, num_kv_heads)
         )
 
