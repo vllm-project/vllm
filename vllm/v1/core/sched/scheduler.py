@@ -1855,11 +1855,13 @@ class Scheduler(SchedulerInterface):
             # If no encoder input chunking is allowed, we do not want to
             # partially schedule a multimodal item. If the scheduled range would
             # only cover part of the mm input, roll back to before the mm item.
+            # An item can run past a prompt a KV connector cut short for P/D
+            # prefill; covering the rest of the prompt covers it then.
             if (
                 self.scheduler_config.disable_chunked_mm_input
                 and num_computed_tokens < start_pos
                 and (num_computed_tokens + num_new_tokens)
-                < (start_pos + num_encoder_tokens)
+                < min(start_pos + num_encoder_tokens, request.num_prompt_tokens)
             ):
                 # Account for EAGLE shift when rolling back to avoid
                 # encoder cache miss. This ensures the scheduled range
