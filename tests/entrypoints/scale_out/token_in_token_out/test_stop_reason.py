@@ -6,7 +6,7 @@ from collections.abc import AsyncGenerator
 
 import pytest
 
-from vllm.entrypoints.openai.engine.protocol import RequestResponseMetadata
+from vllm.entrypoints.generate.base.protocol import RequestResponseMetadata
 from vllm.entrypoints.scale_out.token_in_token_out.protocol import GenerateRequest
 from vllm.entrypoints.scale_out.token_in_token_out.serving import ServingTokens
 from vllm.outputs import CompletionOutput, RequestOutput
