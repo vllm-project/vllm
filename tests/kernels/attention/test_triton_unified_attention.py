@@ -42,8 +42,8 @@ SEQ_THRESHOLD_3D_VALUES = [0, 8]
     ("is_gfx1100", "max_seqlen_q", "nq_per_kv", "expected"),
     [
         (True, 512, 4, (64, 16, True)),
-        (True, 8192, 5, (64, 8, True)),
-        (True, 8192, 7, (64, 8, True)),
+        (True, 8192, 5, (64, 12, True)),
+        (True, 8192, 7, (64, 9, True)),
         (True, 512, 16, (64, 4, True)),
         (True, 511, 4, (16, 4, False)),
         (True, 8192, 17, (32, 1, False)),
@@ -65,7 +65,7 @@ def test_select_query_block(
 @pytest.mark.parametrize(
     ("max_seqlen_q", "nq_per_kv", "expected"),
     [
-        (8192, 6, (64, 8, True)),
+        (8192, 6, (64, 10, True)),
         (511, 6, (16, 2, False)),
     ],
 )

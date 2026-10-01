@@ -838,8 +838,7 @@ def _select_query_block(
     )
     if tuned_long_prefill:
         block_m = 64
-        block_q = block_m // triton.next_power_of_2(num_queries_per_kv)
-        return block_m, block_q, True
+        return block_m, block_m // num_queries_per_kv, True
 
     block_m = (
         16 if num_queries_per_kv <= 16 else triton.next_power_of_2(num_queries_per_kv)
