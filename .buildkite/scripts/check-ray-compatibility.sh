@@ -30,7 +30,11 @@ if python3 -c "import torch; assert torch.version.hip" 2>/dev/null; then
     fi
 else
     if [ "${TORCH_NIGHTLY:-0}" = "1" ]; then
-        TORCH_INDEX_URL="https://download.pytorch.org/whl/nightly/cu130"
+        # cu132, not cu130: CUDA 13.0 left PyTorch's binary build matrix on
+        # 2026-09-28 (pytorch/pytorch#198913) and the cu130 nightly index has
+        # published nothing since 2.15.0.dev20260928. The release index below
+        # still carries cu130 wheels, so it is left alone.
+        TORCH_INDEX_URL="https://download.pytorch.org/whl/nightly/cu132"
     else
         TORCH_INDEX_URL="https://download.pytorch.org/whl/cu130"
     fi
