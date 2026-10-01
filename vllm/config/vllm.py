@@ -2082,6 +2082,14 @@ class VllmConfig:
                     f"only; got dtype={self.model_config.dtype}. Use a "
                     "different --all2all-backend or --dtype bfloat16."
                 )
+            if self.model_config is not None and self.model_config.enable_sleep_mode:
+                raise ValueError(
+                    "The moonep all2all backend does not support sleep mode: "
+                    "its expert weights live in CUDA VMM allocations outside "
+                    "the sleep-mode allocator and would be neither offloaded "
+                    "nor discarded. Disable --enable-sleep-mode or use a "
+                    "different --all2all-backend."
+                )
             if self.parallel_config.enable_eplb:
                 raise ValueError(
                     "The moonep all2all backend does not support EPLB yet: "
