@@ -183,9 +183,11 @@ def test_commit_after_replay_matches_native_states(accepted):
         [min(accepted, q) for q in qlens], dtype=torch.int32, device="cuda"
     )
     ctx.commit(acc, d["slots"], d["qsl"])
+    # The commit replays the recorded corrections, keys and decays with the
+    # kernel's own update, so it reproduces the native states bit for bit.
     for i, slot in enumerate(d["slots"].tolist()):
         ref = native_state[idx[i, int(acc[i]) - 1]]
-        torch.testing.assert_close(ckpt[slot], ref, rtol=1e-4, atol=1e-5)
+        assert torch.equal(ckpt[slot], ref)
 
 
 def test_graph_padding_rows_are_skipped():
