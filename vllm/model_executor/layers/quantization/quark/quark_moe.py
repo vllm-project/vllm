@@ -26,7 +26,6 @@ from vllm.model_executor.layers.fused_moe.config import (
     mxfp4_w4a16_moe_quant_config,
     ocp_mx_moe_quant_config,
 )
-from vllm.model_executor.layers.fused_moe.modular_kernel import W13Layout
 from vllm.model_executor.layers.fused_moe.moe_output import UnfinalizedMoEOutput
 from vllm.model_executor.layers.fused_moe.oracle.fp8 import (
     convert_to_fp8_moe_kernel_format,
@@ -1609,27 +1608,27 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
             get_current_vllm_config().model_config.hf_config, "model_type", None
         )
 
-        _use_gpt_oss = self.model_type == "gpt_oss"
+        is_gpt_oss = self.model_type == "gpt_oss"
 
         # Select backend based on OCP MX scheme
         if self.ocp_mx_scheme == "w_mxfp4":
             # W4A16: weight-only MXFP4
             self.mxfp4_backend, self.experts_cls = select_mxfp4_moe_backend(
-                moe, use_gpt_oss_priority=_use_gpt_oss
+                moe, use_gpt_oss_priority=is_gpt_oss
             )
         elif self.ocp_mx_scheme == "w_mxfp4_a_fp8" and self.static_input_scales:
             # W4A8: MXFP4 weights + static FP8 activations
             self.mxfp4_backend, self.experts_cls = select_mxfp4_moe_backend(
                 moe,
                 activation_key=kFp8StaticTensorSym,
-                use_gpt_oss_priority=_use_gpt_oss,
+                use_gpt_oss_priority=is_gpt_oss,
             )
         elif self.ocp_mx_scheme == "w_mxfp4_a_mxfp4":
             # W4A4: MXFP4 weights + MXFP4 activations
             self.mxfp4_backend, self.experts_cls = select_mxfp4_moe_backend(
                 moe,
                 activation_key=kMxfp4Dynamic,
-                use_gpt_oss_priority=_use_gpt_oss,
+                use_gpt_oss_priority=is_gpt_oss,
             )
 
         # Validation for unsupported schemes
@@ -1813,12 +1812,6 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
         w13_bias = getattr(layer, "w13_bias", None)
         w2_bias = getattr(layer, "w2_bias", None)
 
-        _input_layout = (
-            W13Layout.INTERLEAVED_W1W3
-            if self.model_type == "gpt_oss"
-            else W13Layout.CONTIGUOUS_W1W3
-        )
-
         # Convert weights to kernel format (handles all backend-specific logic)
         w13, w2, w13_scale, w2_scale, w13_bias, w2_bias = (
             convert_weight_to_mxfp4_moe_kernel_format(
@@ -1830,7 +1823,8 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
                 w2_weight_scale=layer.w2_weight_scale,
                 w13_bias=w13_bias,
                 w2_bias=w2_bias,
-                input_w13_layout=_input_layout,
+                # GPT-OSS checkpoints store w13 with gate/up interleaved.
+                is_w13_interleaved=self.model_type == "gpt_oss",
             )
         )
 

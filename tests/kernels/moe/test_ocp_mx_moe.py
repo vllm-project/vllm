@@ -1650,7 +1650,6 @@ ROCM_BACKEND_CONFIGS = {
 
 
 @pytest.mark.parametrize("backend_name", list(ROCM_BACKEND_CONFIGS.keys()))
-@pytest.mark.parametrize("input_layout", ["CONTIGUOUS_W1W3", "INTERLEAVED_W1W3"])
 @pytest.mark.parametrize("topk", [4])
 @pytest.mark.parametrize("num_experts", [8])
 @pytest.mark.parametrize("num_tokens,hidden_size,intermediate_size", [(16, 256, 256)])
@@ -1661,7 +1660,6 @@ ROCM_BACKEND_CONFIGS = {
 @torch.inference_mode()
 def test_rocm_mxfp4_moe_oracle(
     backend_name: str,
-    input_layout: str,
     topk: int,
     num_experts: int,
     num_tokens: int,
@@ -1672,8 +1670,8 @@ def test_rocm_mxfp4_moe_oracle(
     """Test ROCm MXFP4 MoE using oracle functions.
 
     This test validates that the oracle functions work end-to-end:
-    - convert_weight_to_mxfp4_moe_kernel_format() converts weights correctly
-      for both CONTIGUOUS_W1W3 and INTERLEAVED_W1W3 input layouts
+    - convert_weight_to_mxfp4_moe_kernel_format() converts weights correctly,
+      for interleaved (GPT-OSS, SWIGLUOAI) and contiguous w13 checkpoints
     - make_mxfp4_moe_quant_config() builds a valid quant config
     - make_mxfp4_moe_kernel() creates a kernel that runs without error
     - The kernel output is within accuracy tolerance of reference
@@ -1691,7 +1689,6 @@ def test_rocm_mxfp4_moe_oracle(
     import vllm.distributed.parallel_state as ps
     from vllm.config import VllmConfig, set_current_vllm_config
     from vllm.model_executor.layers.fused_moe.activation import MoEActivation
-    from vllm.model_executor.layers.fused_moe.modular_kernel import W13Layout
     from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
         Mxfp4MoeBackend,
         _interleave_w13,
@@ -1722,9 +1719,6 @@ def test_rocm_mxfp4_moe_oracle(
 
     # Use first experts class
     experts_cls = experts_cls_list[0]
-
-    # Resolve input layout enum
-    w13_layout = W13Layout[input_layout]
 
     torch.manual_seed(42)
     dtype = torch.bfloat16
@@ -1802,9 +1796,10 @@ def test_rocm_mxfp4_moe_oracle(
     w13_bias_ref = w13_bias.clone()
     w2_bias_ref = w2_bias.clone()
 
-    # Prepare input layout: quantized weights start as CONTIGUOUS_W1W3,
-    # interleave if the test requests INTERLEAVED_W1W3 input.
-    if w13_layout == W13Layout.INTERLEAVED_W1W3:
+    # SWIGLUOAI models (GPT-OSS) ship gate/up interleaved w13; others are
+    # contiguous. The reference always uses the contiguous weights.
+    is_w13_interleaved = activation == MoEActivation.SWIGLUOAI
+    if is_w13_interleaved:
         w13_quant, w13_scale, w13_bias = _interleave_w13(w13_quant, w13_scale, w13_bias)
 
     # Create mock layer for oracle functions
@@ -1837,7 +1832,7 @@ def test_rocm_mxfp4_moe_oracle(
             w2_weight_scale=w2_scale,
             w13_bias=w13_bias,
             w2_bias=w2_bias,
-            input_w13_layout=w13_layout,
+            is_w13_interleaved=is_w13_interleaved,
         )
     )
 

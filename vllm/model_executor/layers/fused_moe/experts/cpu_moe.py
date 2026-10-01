@@ -34,7 +34,6 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
     RoutingMethodType,
 )
-from vllm.model_executor.layers.fused_moe.modular_kernel import W13Layout
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceNoOP,
 )
@@ -610,14 +609,6 @@ class CPUExpertsMxfp4(mk.FusedMoEExpertsModular):
     @staticmethod
     def _supports_activation(activation: MoEActivation) -> bool:
         return activation in (MoEActivation.SILU, MoEActivation.SWIGLUOAI)
-
-    @staticmethod
-    def _expected_w13_layout(
-        activation: MoEActivation,
-        weight_key: "QuantKey | None" = None,
-        activation_key: "QuantKey | None" = None,
-    ) -> W13Layout:
-        return W13Layout.CONTIGUOUS_W1W3
 
     @staticmethod
     def _supports_parallel_config(
