@@ -314,6 +314,139 @@ def test_non_owner_cannot_filter_other_connector_send_completion(async_saves):
     _assert_save_state_cleared(async_saves)
 
 
+@pytest.fixture(params=[False, True], ids=["direct-first", "nested-first"])
+def nested_mc(request):
+    child = {
+        "kv_connector": "MockConnector",
+        "kv_role": "kv_both",
+        "kv_connector_module_path": __name__,
+    }
+    children = [
+        child,
+        {
+            "kv_connector": "MultiConnector",
+            "kv_role": "kv_both",
+            "kv_connector_extra_config": {"connectors": [child]},
+        },
+    ]
+    if request.param:
+        children.reverse()
+    config = create_vllm_config(
+        kv_connector="MultiConnector",
+        kv_connector_extra_config={"connectors": children},
+    )
+    connector = MultiConnector(
+        config,
+        KVConnectorRole.SCHEDULER,
+        KVCacheConfig(num_blocks=0, kv_cache_tensors=[], kv_cache_groups=[]),
+    )
+    nested_first = request.param
+    direct = connector.sub_connectors[int(nested_first)]
+    nested = connector.sub_connectors[int(not nested_first)]
+    for leaf in [direct, *nested.sub_connectors]:
+        leaf.get_num_new_matched_tokens.return_value = 0, False
+        leaf.get_finished_count.return_value = 1
+        leaf.request_finished.return_value = False, None
+    return connector, direct, nested, int(nested_first)
+
+
+def test_nested_nonowner_does_not_swallow_receive_completion(nested_mc):
+    """A nested non-loader must not strand the selected child's request."""
+    nested_mc, direct, nested, direct_index = nested_mc
+    direct.get_num_new_matched_tokens.return_value = 16, True
+    request = SimpleNamespace(request_id="r")
+    nested_mc.on_new_request(request)
+    assert nested_mc.get_num_new_matched_tokens(request, 0) == (16, True)
+    nested_mc.update_state_after_alloc(request, MagicMock(), 16)
+
+    leaf_meta = MagicMock(spec=KVConnectorWorkerMetadata)
+    nested_meta = MultiKVConnectorWorkerMetadata(metadata=(leaf_meta,))
+    child_metadata: list[KVConnectorWorkerMetadata | None] = [nested_meta, nested_meta]
+    child_metadata[direct_index] = None
+    metadata = MultiKVConnectorWorkerMetadata(metadata=tuple(child_metadata))
+    output = KVConnectorOutput(
+        finished_recving={"r"}, kv_connector_worker_meta=metadata
+    )
+    nested_mc.update_connector_output(output)
+
+    assert output.finished_recving == {"r"}
+    assert output.finished_sending is None
+    assert output.kv_connector_worker_meta is metadata
+    assert metadata.metadata[1 - direct_index] is nested_meta
+    leaf_output = nested.sub_connectors[0].update_connector_output.call_args.args[0]
+    assert leaf_output.kv_connector_worker_meta is leaf_meta
+    assert not nested_mc.request_finished(request, [1])[0]
+
+
+def test_child_output_updates_survive_receive_isolation(nested_mc):
+    """Copying completions must not discard child error or auxiliary updates."""
+    nested_mc, direct, nested, direct_index = nested_mc
+    direct.get_num_new_matched_tokens.return_value = 16, True
+    request = SimpleNamespace(request_id="r")
+    nested_mc.on_new_request(request)
+    assert nested_mc.get_num_new_matched_tokens(request, 0) == (16, True)
+    nested_mc.update_state_after_alloc(request, MagicMock(), 16)
+    stats, events = MagicMock(), MagicMock()
+
+    def report_errors(output):
+        output.finished_recving.clear()
+        output.invalid_block_ids = output.invalid_block_ids | {2}
+        output.failed_recving = output.failed_recving | {"r"}
+        output.kv_connector_stats = stats
+        output.kv_cache_events = events
+        output.expected_finished_count = 3
+
+    def report_more_errors(output):
+        output.invalid_block_ids.add(3)
+        output.failed_recving.add("other")
+
+    direct.update_connector_output.side_effect = report_errors
+    nested.sub_connectors[0].update_connector_output.side_effect = report_more_errors
+    output = KVConnectorOutput(finished_recving={"r"}, invalid_block_ids={1})
+    nested_mc.update_connector_output(output)
+
+    assert output.finished_recving == {"r"}
+    assert output.invalid_block_ids == {1, 2, 3}
+    assert output.failed_recving == {"r", "other"}
+    assert output.kv_connector_stats is stats
+    assert output.kv_cache_events is events
+    assert output.expected_finished_count == 3
+
+
+@pytest.mark.parametrize("receive_first", [True, False])
+def test_cancelled_nested_loader_waits_for_other_save_owner(nested_mc, receive_first):
+    """Cancellation releases once, after both the nested load and sibling save."""
+    nested_mc, direct, nested, direct_index = nested_mc
+    direct.request_finished.return_value = True, None
+    nested.sub_connectors[0].get_num_new_matched_tokens.return_value = 16, True
+    scheduler, request = _scheduler_with_request(
+        nested_mc, RequestStatus.FINISHED_ABORTED
+    )
+    assert nested_mc.get_num_new_matched_tokens(request, 0) == (16, True)
+    nested_mc.update_state_after_alloc(request, MagicMock(), 16)
+    assert nested_mc.request_finished(request, [1])[0]
+
+    steps = [{"receiving": {"r"}}, {"notifications": [(direct_index, 0)]}]
+    if not receive_first:
+        steps.reverse()
+    first = _send_step(nested_mc, scheduler=scheduler, **steps[0])
+    assert first.finished_recving is None
+    assert first.finished_sending is None
+    scheduler._free_request_blocks.assert_not_called()
+
+    last = _send_step(nested_mc, scheduler=scheduler, **steps[1])
+    assert last.finished_recving is None
+    assert last.finished_sending == {"r"}
+    scheduler._free_request_blocks.assert_called_once_with(request)
+
+    duplicate = _send_step(
+        nested_mc, [(direct_index, 0)], receiving={"r"}, scheduler=scheduler
+    )
+    assert duplicate.finished_recving is None
+    assert duplicate.finished_sending is None
+    scheduler._free_request_blocks.assert_called_once_with(request)
+
+
 def test_scheduler_child_completion_waits_for_other_save_owner(async_saves):
     """A child may finish in update_connector_output, without a worker ACK."""
     _finish_with_async_saves(async_saves)

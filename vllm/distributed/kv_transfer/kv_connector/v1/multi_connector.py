@@ -3,7 +3,7 @@
 import copy
 from collections.abc import Callable, Iterable
 from contextlib import AbstractContextManager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any, cast
 
 import torch
@@ -517,54 +517,69 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
             multi_connector_worker_meta = connector_output.kv_connector_worker_meta
 
         finished_sending: set[str] = set()
-        try:
-            for i, c in enumerate(self._connectors):
-                if multi_connector_worker_meta is not None:
-                    # set the connector-specific worker metadata
-                    connector_output.kv_connector_worker_meta = (
-                        multi_connector_worker_meta.metadata[i]
-                    )
-                child_sending: set[str] = set()
-                if (
-                    multi_connector_worker_meta is not None
-                    and multi_connector_worker_meta.finished_sending
-                ):
-                    expected = (
-                        c.get_finished_count()
-                        or connector_output.expected_finished_count
-                        or self._world_size
-                    )
-                    for req_id, ranks in multi_connector_worker_meta.finished_sending[
-                        i
-                    ].items():
-                        completed = self._completed_async_saves.get(req_id)
-                        owners = self._async_save_owners.get(req_id)
-                        if (
-                            completed is None
-                            or i in completed
-                            or (owners is not None and i not in owners)
-                        ):
-                            continue
-                        workers = self._send_workers[i].setdefault(req_id, set())
-                        workers.update(ranks)
-                        if len(workers) >= expected:
-                            child_sending.add(req_id)
-                connector_output.finished_sending = child_sending or None
-                c.update_connector_output(connector_output)
-                for req_id in connector_output.finished_sending or ():
+        for i, c in enumerate(self._connectors):
+            child_sending: set[str] = set()
+            if (
+                multi_connector_worker_meta is not None
+                and multi_connector_worker_meta.finished_sending
+            ):
+                expected = (
+                    c.get_finished_count()
+                    or connector_output.expected_finished_count
+                    or self._world_size
+                )
+                for req_id, ranks in multi_connector_worker_meta.finished_sending[
+                    i
+                ].items():
                     completed = self._completed_async_saves.get(req_id)
                     owners = self._async_save_owners.get(req_id)
-                    if completed is None or (owners is not None and i not in owners):
+                    if (
+                        completed is None
+                        or i in completed
+                        or (owners is not None and i not in owners)
+                    ):
                         continue
-                    completed.add(i)
-                    self._send_workers[i].pop(req_id, None)
-                    if owners is not None:
-                        owners.discard(i)
-                        if not owners and req_id not in self._async_load_owners:
-                            finished_sending.add(req_id)
-        finally:
-            # restore kv_connector_worker_meta
-            connector_output.kv_connector_worker_meta = multi_connector_worker_meta
+                    workers = self._send_workers[i].setdefault(req_id, set())
+                    workers.update(ranks)
+                    if len(workers) >= expected:
+                        child_sending.add(req_id)
+            # Nested connectors reconcile their own completions. Neither their
+            # filtering nor in-place mutations may erase a sibling's receives.
+            child_output = replace(
+                connector_output,
+                kv_connector_worker_meta=(
+                    multi_connector_worker_meta.metadata[i]
+                    if multi_connector_worker_meta is not None
+                    else None
+                ),
+                finished_sending=child_sending or None,
+                finished_recving=(
+                    set(connector_output.finished_recving)
+                    if connector_output.finished_recving is not None
+                    else None
+                ),
+            )
+            c.update_connector_output(child_output)
+            # Only completion and metadata reconciliation is wrapper-owned.
+            # Preserve all other child updates, including replacement payloads.
+            connector_output.invalid_block_ids = child_output.invalid_block_ids
+            connector_output.failed_recving = child_output.failed_recving
+            connector_output.kv_connector_stats = child_output.kv_connector_stats
+            connector_output.kv_cache_events = child_output.kv_cache_events
+            connector_output.expected_finished_count = (
+                child_output.expected_finished_count
+            )
+            for req_id in child_output.finished_sending or ():
+                completed = self._completed_async_saves.get(req_id)
+                owners = self._async_save_owners.get(req_id)
+                if completed is None or (owners is not None and i not in owners):
+                    continue
+                completed.add(i)
+                self._send_workers[i].pop(req_id, None)
+                if owners is not None:
+                    owners.discard(i)
+                    if not owners and req_id not in self._async_load_owners:
+                        finished_sending.add(req_id)
         finished_recving: set[str] = set()
         for req_id in connector_output.finished_recving or ():
             if self._async_load_owners.pop(req_id, None) is None:
