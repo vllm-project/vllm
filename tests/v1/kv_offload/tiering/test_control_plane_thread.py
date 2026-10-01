@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Tests for OffloadingManager.lock() and the tiering control-plane thread.
+"""Tests for OffloadingManager.lock and the tiering control-plane thread.
 
 The control plane of a tier that answers something the engine does not drive --
 a remote peer, say -- used to advance only from on_schedule_end(), so a peer's
@@ -11,6 +11,7 @@ services such tiers between steps and the exclusion that makes it safe.
 import threading
 import time
 from collections.abc import Iterable
+from contextlib import nullcontext
 from typing import ClassVar
 from unittest.mock import MagicMock
 
@@ -19,11 +20,13 @@ import pytest
 from vllm.v1.kv_offload.base import (
     LookupResult,
     Medium,
+    OffloadingManager,
     OffloadKey,
     ReqContext,
     RequestOffloadingContext,
     ScheduleEndContext,
 )
+from vllm.v1.kv_offload.cpu.manager import CPUOffloadingManager
 from vllm.v1.kv_offload.tiering.base import (
     JobResult,
     ParentManager,
@@ -138,7 +141,7 @@ def _live_control_threads() -> list[threading.Thread]:
 
 
 def test_control_thread_and_scheduler_never_overlap(manager_and_tier):
-    """lock() must keep the two threads out of the manager at the same time.
+    """The lock must keep the two threads out of the manager at the same time.
 
     Both sides must also make progress: a thread that never runs would pass a
     mutual-exclusion check trivially, and so would one that starves the
@@ -159,11 +162,8 @@ def test_control_thread_and_scheduler_never_overlap(manager_and_tier):
     steps = 0
     deadline = time.monotonic() + _SETTLE_S
     while time.monotonic() < deadline:
-        manager.lock()
-        try:
+        with manager.lock:
             critical_section()
-        finally:
-            manager.unlock()
         steps += 1
 
     assert state["overlaps"] == 0
@@ -180,11 +180,8 @@ def test_serves_while_the_scheduler_is_outside_the_lock(manager_and_tier):
     """
     manager, tier = manager_and_tier
 
-    manager.lock()
-    try:
+    with manager.lock:
         manager.on_schedule_end(_EMPTY_SCHEDULE_END)
-    finally:
-        manager.unlock()
 
     tier.served.clear()
     serves_before = tier.serves
@@ -216,11 +213,8 @@ def test_zero_interval_disables_the_thread(manager_and_tier):
     assert not tier.served.wait(0.05)
     assert tier.serves == 0
 
-    manager.lock()
-    try:
+    with manager.lock:
         manager.on_schedule_end(_EMPTY_SCHEDULE_END)
-    finally:
-        manager.unlock()
 
     assert tier.serves == 1
 
@@ -260,11 +254,8 @@ def test_tier_that_did_not_opt_in_is_not_serviced_off_thread():
         assert quiet.serves == 0
         assert quiet.polls == 0
 
-        manager.lock()
-        try:
+        with manager.lock:
             manager.on_schedule_end(_EMPTY_SCHEDULE_END)
-        finally:
-            manager.unlock()
 
         # on_schedule_end still serves every tier, so the thread dying degrades
         # to per-step servicing rather than to none.
@@ -303,27 +294,42 @@ def test_shutdown_joins_the_control_thread_before_tier_teardown(manager_and_tier
     assert not _live_control_threads()
 
 
-def test_locked_helper_releases_on_error(manager_and_tier):
-    """locked() must not leak the lock when its body raises."""
+def test_lock_releases_on_error(manager_and_tier):
+    """Leaving a with-block on an exception must not leak the lock."""
     manager, _ = manager_and_tier
 
-    with pytest.raises(RuntimeError), manager.locked():
+    with pytest.raises(RuntimeError), manager.lock:
         raise RuntimeError("boom")
 
-    assert manager.lock(timeout=0.5), "locked() leaked the lock"
-    manager.unlock()
+    assert manager.lock.acquire(timeout=0.5), "lock leaked after an error"
+    manager.lock.release()
 
 
-def test_lock_timeout_reports_failure(manager_and_tier):
-    """A timed lock() returns False rather than blocking forever."""
+def test_lock_excludes_other_threads(manager_and_tier):
+    """While one thread holds the lock, another cannot take it."""
     manager, _ = manager_and_tier
 
-    manager.lock()
-    try:
+    with manager.lock:
         acquired: list[bool] = []
-        t = threading.Thread(target=lambda: acquired.append(manager.lock(timeout=0.01)))
+        t = threading.Thread(
+            target=lambda: acquired.append(manager.lock.acquire(timeout=0.01))
+        )
         t.start()
         t.join(timeout=5.0)
         assert acquired == [False]
-    finally:
-        manager.unlock()
+
+
+def test_lock_defaults_to_no_op():
+    """Managers entered from one thread only pay nothing for the lock.
+
+    The base default must be a no-op context manager, while the CPU manager,
+    which runs under the plain offloading connector, keeps a real one.
+    """
+    base_lock = OffloadingManager.lock.fget(MagicMock())
+    assert isinstance(base_lock, nullcontext)
+    with base_lock, base_lock:
+        pass
+
+    cpu = CPUOffloadingManager(num_chunks=4)
+    with cpu.lock:
+        assert not cpu.lock.acquire(blocking=False)

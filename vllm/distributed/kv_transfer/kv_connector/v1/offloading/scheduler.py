@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import time
 from collections.abc import Iterable, Iterator, Sequence
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, field, replace
 from itertools import chain, islice
 from typing import Any, NamedTuple
@@ -634,18 +634,19 @@ class OffloadingConnectorScheduler:
 
         self._events_tracker = OffloadingEventsTracker(spec.kv_events_config)
 
-    # True while this thread holds the manager lock for the current schedule().
+    # Holds the manager lock for the current schedule(), or None between steps.
     # Read and written only by the scheduler thread, so it needs no
     # synchronization of its own. Declared on the class so an instance built
-    # without __init__ still reads False rather than raising.
-    _manager_held: bool = False
+    # without __init__ still reads None rather than raising.
+    _step_region: ExitStack | None = None
 
     # ------------------------------------------------------------------
     # Manager exclusion
     #
     # The manager is entered from the scheduler thread and, for managers that
     # run one, from a control-plane thread. Manager methods never take their
-    # own lock, so the exclusion boundary lives here.
+    # own lock, so the exclusion boundary lives here. manager.lock may be a
+    # no-op for a manager that needs no exclusion; it is entered regardless.
     #
     # schedule() holds one region for the whole step: opened by the first
     # manager-touching hook and closed at the end of build_connector_meta.
@@ -657,21 +658,26 @@ class OffloadingConnectorScheduler:
     #
     # Hooks outside schedule() use a short region instead, so the manager is
     # free while the engine runs the model.
+    #
+    # The step region outlives any single call, so it cannot be a with-block;
+    # an ExitStack carries the entered lock from open to close instead.
     # ------------------------------------------------------------------
 
     def _acquire_step(self) -> None:
         """Open the step-scoped region. Idempotent within a step."""
-        if self._manager_held:
+        if self._step_region is not None:
             return
-        self.manager.lock()
-        self._manager_held = True
+        region = ExitStack()
+        region.enter_context(self.manager.lock)
+        self._step_region = region
 
     def _release_step(self) -> None:
         """Close the step-scoped region, letting other threads in."""
-        if not self._manager_held:
+        region = self._step_region
+        if region is None:
             return
-        self._manager_held = False
-        self.manager.unlock()
+        self._step_region = None
+        region.close()
 
     @contextmanager
     def _manager_locked(self) -> Iterator[None]:
@@ -684,17 +690,14 @@ class OffloadingConnectorScheduler:
         previous schedule() raised between _acquire_step() and the release in
         build_connector_meta. Recover instead of deadlocking.
         """
-        if self._manager_held:
+        if self._step_region is not None:
             logger.error(
                 "Offloading manager lock was left held by a previous "
                 "schedule(); releasing it before continuing."
             )
             self._release_step()
-        self.manager.lock()
-        try:
+        with self.manager.lock:
             yield
-        finally:
-            self.manager.unlock()
 
     def _maybe_observe_lookup_async_delay(
         self, req_status: RequestOffloadState

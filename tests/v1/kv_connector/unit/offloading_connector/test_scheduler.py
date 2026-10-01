@@ -758,13 +758,13 @@ def test_on_schedule_end_is_the_last_manager_call_of_a_step(request_runner):
     def spy(scheduler_output):
         first = len(runner.manager.mock_calls)
         meta = build_meta(scheduler_output)
-        # lock()/unlock() bracket the step; only the state operations they guard
-        # are ordered relative to on_schedule_end.
+        # Entering and exiting manager.lock brackets the step; only the state
+        # operations it guards are ordered relative to on_schedule_end.
         windows.append(
             [
                 name
                 for name, _, _ in runner.manager.mock_calls[first:]
-                if name not in ("lock", "unlock")
+                if not name.startswith("lock.")
             ]
         )
         return meta
@@ -804,9 +804,10 @@ def test_step_releases_the_manager_before_the_model_runs(request_runner):
     runner.run(decoded_tokens=[EOS_TOKEN_ID])
 
     scheduler = runner.connector_scheduler
-    assert scheduler._manager_held is False
-    assert runner.manager.lock.call_count > 0
-    assert runner.manager.lock.call_count == runner.manager.unlock.call_count
+    assert scheduler._step_region is None
+    lock = runner.manager.lock
+    assert lock.__enter__.call_count > 0
+    assert lock.__enter__.call_count == lock.__exit__.call_count
 
 
 def test_has_pending_push_work_does_not_open_the_step_region(request_runner):
@@ -825,8 +826,9 @@ def test_has_pending_push_work_does_not_open_the_step_region(request_runner):
     runner.manager.has_pending_work.return_value = False
 
     assert scheduler.has_pending_push_work() is False
-    assert scheduler._manager_held is False
-    assert runner.manager.lock.call_count == runner.manager.unlock.call_count
+    assert scheduler._step_region is None
+    lock = runner.manager.lock
+    assert lock.__enter__.call_count == lock.__exit__.call_count
 
 
 def test_take_events_drains_the_manager_inside_the_region(request_runner):
@@ -849,8 +851,10 @@ def test_take_events_drains_the_manager_inside_the_region(request_runner):
 
     assert events == []
     assert runner.manager.take_events.call_count == 1
-    assert scheduler._manager_held is False
-    assert runner.manager.lock.call_count == runner.manager.unlock.call_count
+    assert scheduler._step_region is None
+    lock = runner.manager.lock
+    assert lock.__enter__.call_count == 1
+    assert lock.__exit__.call_count == 1
 
 
 def test_scheduler_reports_lookup_async_delay_on_resolve(request_runner):

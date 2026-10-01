@@ -201,7 +201,7 @@ class P2PSecondaryTierManager(SecondaryTierManager):
     over the same control connection.
 
     Never entered concurrently: every public method runs under the tiering
-    manager's ``lock()``, taken either by the scheduler thread for the length of
+    manager's ``lock``, held either by the scheduler thread for the length of
     a step or by the control-plane thread for the length of one round. Peers are
     not driven by the engine, so this tier opts into that thread
     (``needs_control_plane_thread``); without it a peer's lookup or fetch waits

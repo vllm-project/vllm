@@ -225,7 +225,10 @@ class TieringOffloadingManager(OffloadingManager):
                 engine step as before.
 
         """
-        super().__init__()
+        # Guards this manager and every tier it composes, the primary tier
+        # included; the primary's own lock is not used underneath it. A real
+        # lock because the control-plane thread enters the manager too.
+        self._lock = threading.Lock()
         self.primary_tier: CPUPrimaryTierOffloadingManager = primary_tier
         self.secondary_tiers = secondary_tiers or []
 
@@ -279,6 +282,11 @@ class TieringOffloadingManager(OffloadingManager):
         self._control_plane_thread: threading.Thread | None = None
         self._start_control_plane()
 
+    @property
+    @override
+    def lock(self) -> threading.Lock:
+        return self._lock
+
     # ------------------------------------------------------------------
     # Control plane
     # ------------------------------------------------------------------
@@ -322,7 +330,7 @@ class TieringOffloadingManager(OffloadingManager):
         stalled_since: float | None = None
         errors = 0
         while not self._control_plane_stop.is_set():
-            if not self.lock(timeout=_CONTROL_PLANE_LOCK_TIMEOUT_S):
+            if not self._lock.acquire(timeout=_CONTROL_PLANE_LOCK_TIMEOUT_S):
                 now = time.monotonic()
                 if stalled_since is None:
                     stalled_since = now
@@ -346,7 +354,7 @@ class TieringOffloadingManager(OffloadingManager):
                 errors += 1
                 logger.exception("KV offload control-plane round failed")
             finally:
-                self.unlock()
+                self._lock.release()
             if errors >= _CONTROL_PLANE_MAX_CONSECUTIVE_ERRORS:
                 logger.error(
                     "KV offload control-plane thread stopping after %d "
@@ -354,7 +362,7 @@ class TieringOffloadingManager(OffloadingManager):
                     errors,
                 )
                 return
-            # Yield unconditionally, and only after unlock(). Python locks are
+            # Yield unconditionally, and only after release(). Python locks are
             # not fair, so a release-then-reacquire loop could starve the
             # scheduler thread; this pause is what bounds its wait to one round.
             self._control_plane_stop.wait(self._control_plane_interval_s)
@@ -372,7 +380,7 @@ class TieringOffloadingManager(OffloadingManager):
         promotion that a lookup() from this path initiates therefore waits for
         the next on_schedule_end() to be submitted.
 
-        The caller must hold lock() for the whole call. serve_external_requests()
+        The caller must hold self.lock for the whole call. serve_external_requests()
         relies on that: it establishes lookup() HITs and then pins them, and the
         two must not be separated by an eviction.
         """
@@ -1152,7 +1160,7 @@ class TieringOffloadingManager(OffloadingManager):
         """
         self._stop_control_plane()
         if self._control_plane_thread is not None:
-            if not self.lock(timeout=_CONTROL_PLANE_JOIN_TIMEOUT_S):
+            if not self._lock.acquire(timeout=_CONTROL_PLANE_JOIN_TIMEOUT_S):
                 logger.error(
                     "KV offload control-plane thread is still running and the "
                     "manager lock is unavailable; skipping tier shutdown."
@@ -1161,7 +1169,7 @@ class TieringOffloadingManager(OffloadingManager):
             try:
                 self._shutdown_tiers()
             finally:
-                self.unlock()
+                self._lock.release()
             return
         self._shutdown_tiers()
 

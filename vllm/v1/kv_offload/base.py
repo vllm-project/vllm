@@ -2,10 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Core abstractions for KV cache offloading in vLLM v1."""
 
-import threading
 from abc import ABC, abstractmethod
-from collections.abc import Collection, Iterable, Iterator, Sequence
-from contextlib import contextmanager
+from collections.abc import Collection, Iterable, Sequence
+from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass, field
 from enum import Enum, auto
 from typing import TYPE_CHECKING, Any, ClassVar, NamedTuple, NewType, TypeVar
@@ -201,12 +200,14 @@ The class provides the following primitives:
         Following this call, the given blocks will become loadable.
 
 Exclusion:
-    lock() / unlock() guard a manager's whole state subtree: the manager
-    itself, every tier it composes, and any front-end state those tiers own.
-    Manager methods never take the lock themselves, so a caller holds it
-    across as many operations as its invariants need -- notably a lookup()
-    HIT and the prepare_load() that pins the result, which must not be
-    separated by another thread's eviction.
+    lock is a context manager guarding a manager's whole state subtree: the
+    manager itself, every tier it composes, and any front-end state those
+    tiers own. Manager methods never take the lock themselves, so a caller
+    holds it across as many operations as its invariants need -- notably a
+    lookup() HIT and the prepare_load() that pins the result, which must not
+    be separated by another thread's eviction. The default is a no-op;
+    managers that can be entered from more than one thread supply a real
+    lock.
 """
 
 
@@ -242,53 +243,25 @@ class OffloadingKVEventsConfig:
 
 
 class OffloadingManager(ABC):
-    def __init__(self) -> None:
-        self._manager_lock = threading.Lock()
-
-    def lock(self, timeout: float | None = None) -> bool:
-        """Acquire exclusive access to this manager's state subtree.
+    @property
+    def lock(self) -> AbstractContextManager[Any]:
+        """Context manager granting exclusive access to this manager's state.
 
         Scope is the manager, every tier it composes, and any front-end state
         those tiers own (e.g. a tier's async lookup front end). Every caller of
-        an OffloadingManager method must hold this lock. Manager methods never
-        acquire it themselves, so a caller may hold it across an arbitrary
-        sequence of operations -- which is required wherever one call
-        establishes a fact a later call relies on, such as a lookup() HIT
-        followed by the prepare_load() that pins it.
+        an OffloadingManager method must hold it. Manager methods never enter
+        it themselves, so a caller may hold it across an arbitrary sequence of
+        operations -- which is required wherever one call establishes a fact a
+        later call relies on, such as a lookup() HIT followed by the
+        prepare_load() that pins it.
 
-        Not reentrant. A thread must not call lock() twice without an
-        intervening unlock(); use the held state the caller already tracks, or
-        a *_unlocked-style helper, rather than re-acquiring.
-
-        Args:
-            timeout: Seconds to wait. None blocks until acquired.
-
-        Returns:
-            True if the lock was acquired, False only on timeout.
-
+        The default is a no-op, for managers that are only ever entered from
+        one thread. A manager that may be entered from another thread -- its
+        own background thread, say -- returns a real lock instead. Callers must
+        not assume either: always enter it, and never re-enter it while held,
+        since a real lock need not be reentrant.
         """
-        if timeout is None:
-            return self._manager_lock.acquire()
-        return self._manager_lock.acquire(timeout=timeout)
-
-    def unlock(self) -> None:
-        """Release a lock() acquired by the calling thread."""
-        self._manager_lock.release()
-
-    @contextmanager
-    def locked(self, timeout: float | None = None) -> Iterator[bool]:
-        """Scoped lock()/unlock() for callers that need no step granularity.
-
-        Yields whether the lock was acquired; the body still runs on timeout,
-        so a caller passing a timeout must check the value before touching the
-        manager.
-        """
-        acquired = self.lock(timeout)
-        try:
-            yield acquired
-        finally:
-            if acquired:
-                self.unlock()
+        return nullcontext()
 
     @abstractmethod
     def lookup(self, key: OffloadKey, req_context: ReqContext) -> LookupResult:
