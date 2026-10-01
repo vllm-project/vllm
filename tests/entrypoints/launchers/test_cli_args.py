@@ -14,6 +14,7 @@ from vllm.entrypoints.launchers.cli_args import (
     validate_parsed_serve_args,
 )
 from vllm.entrypoints.openai.models.protocol import LoRAModulePath
+from vllm.entrypoints.serve.utils.api_utils import jsonify_non_default_args
 from vllm.exceptions import VLLMValidationError
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 
@@ -173,6 +174,47 @@ def test_multiple_valid_inputs(serve_parser):
 
 
 ### Tests for serve argument validation that run prior to loading
+def test_rust_grpc_port_reaches_frontend_args(serve_parser, monkeypatch):
+    monkeypatch.setenv("VLLM_USE_RUST_FRONTEND", "1")
+    args = serve_parser.parse_args(
+        [
+            "--grpc-port",
+            "50051",
+            "--data-parallel-size",
+            "8",
+            "--data-parallel-size-local",
+            "4",
+            "--data-parallel-start-rank",
+            "4",
+            "--data-parallel-hybrid-lb",
+        ]
+    )
+    validate_parsed_serve_args(args)
+    assert jsonify_non_default_args(args)["grpc_port"] == 50051
+
+
+@pytest.mark.parametrize(
+    "rust_enabled, extra_args, port",
+    [
+        (False, [], 50051),
+        (True, ["--grpc"], 50051),
+        (True, ["--headless"], 50051),
+        (True, ["--api-server-count", "0"], 50051),
+        (True, ["--api-server-count", "-1"], 50051),
+        (True, ["--data-parallel-multi-port-external-lb"], 50051),
+        (True, [], -1),
+        (True, [], 65536),
+    ],
+)
+def test_rust_grpc_port_rejects_incompatible_launch(
+    serve_parser, monkeypatch, rust_enabled, extra_args, port
+):
+    monkeypatch.setenv("VLLM_USE_RUST_FRONTEND", "1" if rust_enabled else "0")
+    args = serve_parser.parse_args(["--grpc-port", str(port), *extra_args])
+    with pytest.raises(ValueError, match="--grpc-port"):
+        validate_parsed_serve_args(args)
+
+
 def test_enable_auto_choice_passes_without_tool_call_parser(serve_parser):
     """Ensure validation fails if tool choice is enabled with no call parser."""
     # If we enable-auto-tool-choice, explode with no tool-call-parser
@@ -265,13 +307,21 @@ def launch_render_parser():
     return _build_launch_render_parser()
 
 
-def test_launch_render_validates_serve_args(launch_render_parser):
+@pytest.mark.parametrize(
+    "cli_args, error",
+    [
+        (["--enable-auto-tool-choice"], TypeError),
+        (["--grpc-port", "50051"], ValueError),
+    ],
+)
+def test_launch_render_validates_serve_args(
+    launch_render_parser, monkeypatch, cli_args, error
+):
     """`vllm launch render` reuses the serve parser, so it gets the serve checks"""
-    args = launch_render_parser.parse_args(
-        args=["launch", "render", "--enable-auto-tool-choice"]
-    )
+    monkeypatch.setenv("VLLM_USE_RUST_FRONTEND", "1")
+    args = launch_render_parser.parse_args(args=["launch", "render", *cli_args])
     assert args.subparser == "launch"
-    with pytest.raises(TypeError):
+    with pytest.raises(error):
         validate_parsed_serve_args(args)
 
 

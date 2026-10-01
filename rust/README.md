@@ -43,6 +43,18 @@ For example:
 VLLM_USE_RUST_FRONTEND=1 vllm serve Qwen/Qwen3-0.6B
 ```
 
+To also expose the Rust frontend's gRPC inference and control services, add
+`--grpc-port`. The HTTP listener remains on `--port`:
+
+```bash
+VLLM_USE_RUST_FRONTEND=1 vllm serve Qwen/Qwen3-0.6B \
+  --host 127.0.0.1 --port 8000 --grpc-port 50051
+```
+
+This also works with Python-supervised hybrid data parallelism. It requires a
+frontend process and cannot be combined with `--headless`, the separate Python
+`--grpc` server, or `--data-parallel-multi-port-external-lb`.
+
 ### RL weight synchronization
 
 With `VLLM_SERVER_DEV_MODE=1`, the Rust frontend supports the HTTP weight-transfer

@@ -284,6 +284,9 @@ class FrontendArgs(BaseFrontendArgs):
     """Host name."""
     port: int = 8000
     """Port number."""
+    grpc_port: int | None = None
+    """Additional gRPC listener port for the Rust frontend. Requires
+    `VLLM_USE_RUST_FRONTEND=1 vllm serve`; HTTP remains on `--port`."""
     data_parallel_supervisor_port: int = 9256
     """HTTP port for aggregated health endpoints in multi-port external LB
     mode."""
@@ -477,6 +480,30 @@ def validate_parsed_serve_args(args: argparse.Namespace):
             "--chat-template is set; the hf parser still expects "
             "the checkpoint's output format."
         )
+
+    if getattr(args, "grpc_port", None) is not None:
+        if (
+            not envs.VLLM_USE_RUST_FRONTEND
+            or getattr(args, "subparser", "serve") != "serve"
+        ):
+            raise ValueError("--grpc-port requires VLLM_USE_RUST_FRONTEND=1 vllm serve")
+        if (
+            args.grpc
+            or args.headless
+            or (args.api_server_count is not None and args.api_server_count <= 0)
+        ):
+            raise ValueError(
+                "--grpc-port requires a Rust frontend; remove --grpc, "
+                "--headless, and non-positive --api-server-count"
+            )
+        if args.data_parallel_multi_port_external_lb:
+            raise ValueError(
+                "--grpc-port is incompatible with "
+                "--data-parallel-multi-port-external-lb: "
+                "its frontends would share the same gRPC port"
+            )
+        if not 0 <= args.grpc_port <= 65535:
+            raise ValueError("--grpc-port must be between 0 and 65535")
 
     # Enable auto tool needs a tool call parser to be valid
     if args.enable_auto_tool_choice and not args.tool_call_parser:
