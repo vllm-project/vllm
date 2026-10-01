@@ -948,6 +948,31 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
             device=device,
         )
 
+        # get_ps_metadata_v1 builds the plan on the host and writes its outputs with
+        # blocking hipMemcpy that is not ordered on the current stream. Writing the
+        # device buffers directly lets step N+1's build (async scheduling) overwrite a
+        # plan that step N's prefill kernels are still reading. Build into pinned host
+        # staging instead and copy on the current stream. Two staging slots, each
+        # reused only after its previous H2D copy has completed.
+        self._fp8_ps_device_outputs = (
+            self.fp8_ps_work_indptr,
+            self.fp8_ps_work_info,
+            self.fp8_ps_reduce_indptr,
+            self.fp8_ps_reduce_final_map,
+            self.fp8_ps_reduce_partial_map,
+        )
+        self._fp8_ps_staging = [
+            tuple(
+                torch.empty(t.shape, dtype=t.dtype, device="cpu", pin_memory=True)
+                for t in self._fp8_ps_device_outputs
+            )
+            for _ in range(2)
+        ]
+        # One event per slot, recorded after that slot's H2D copy. synchronize()
+        # on an event that has not been recorded yet returns immediately.
+        self._fp8_ps_staging_free = [torch.cuda.Event(), torch.cuda.Event()]
+        self._fp8_ps_slot = 0
+
         from vllm.platforms import current_platform
         from vllm.v1.worker.workspace import current_workspace_manager
 
@@ -1043,6 +1068,20 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
         kvlen_granularity = 128
         block_size = 1  # non-paged: each "page" is one token
 
+        slot = self._fp8_ps_slot
+        self._fp8_ps_slot ^= 1
+        staging_free = self._fp8_ps_staging_free[slot]
+        with gpu_sync_allowed():
+            staging_free.synchronize()
+        (
+            work_indptr_host,
+            work_info_host,
+            reduce_indptr_host,
+            reduce_final_map_host,
+            reduce_partial_map_host,
+        ) = self._fp8_ps_staging[slot]
+
+        # work_metadata is not written by the host planner; it stays on device.
         get_ps_metadata_v1(
             qo_indptr_cpu,
             kv_indptr_cpu,
@@ -1050,17 +1089,20 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
             gqa_ratio,
             num_head_k,
             self.fp8_ps_work_metadata,
-            self.fp8_ps_work_indptr,
-            self.fp8_ps_work_info,
-            self.fp8_ps_reduce_indptr,
-            self.fp8_ps_reduce_final_map,
-            self.fp8_ps_reduce_partial_map,
+            work_indptr_host,
+            work_info_host,
+            reduce_indptr_host,
+            reduce_final_map_host,
+            reduce_partial_map_host,
             qhead_granularity=qhead_granularity,
             qlen_granularity=qlen_granularity,
             kvlen_granularity=kvlen_granularity,
             block_size=block_size,
             is_causal=True,
         )
+        for dst, src in zip(self._fp8_ps_device_outputs, self._fp8_ps_staging[slot]):
+            dst.copy_(src, non_blocking=True)
+        staging_free.record()
 
         total_prefill_tokens = int(qo_indptr_cpu[-1].item())
         kv_indices = torch.arange(
@@ -1068,12 +1110,8 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
         )
 
         # The actual number of active partial tiles for this batch is the
-        # final value of reduce_indptr.  Resolving it here (during metadata
-        # build) keeps it off the per-layer forward path where a sync would
-        # break CUDA Graph capture.  Using the device-side reduce_indptr is
-        # acceptable since build is allowed to incur an occasional sync.
-        with gpu_sync_allowed():
-            num_partial_tiles = int(self.fp8_ps_reduce_indptr[-1].item())
+        # final value of reduce_indptr, read from the host plan (no GPU sync).
+        num_partial_tiles = int(reduce_indptr_host[-1])
 
         # Attach PS metadata to the metadata object so forward_mha can read it.
         metadata.fp8_prefill_qo_indptr = qo_indptr
