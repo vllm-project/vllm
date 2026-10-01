@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import logging
 import math
+import os
 import queue
 import threading
 import time
@@ -29,6 +30,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_common import (
     ROLE,
+    _positive_finite_timeout,
     EngineId,
     HandshakeError,
     MoRIIOAgentMetadata,
@@ -647,13 +649,21 @@ class MoRIIOConnectorScheduler:
         # For chunked prefill, we perform layer-wise access within the final chunk.
         # TODO: Perform transfer at end chunk.
         self._reqs_need_pending_save: dict[ReqId, tuple[Request, BlockIds]] = {}
-        # WRITE-mode consumer watchdog (ROCm/mori#655): per-request deadline
-        # and block ids, plus the failed set to ship to the worker.
+        # WRITE-mode consumer receive timer (ROCm/mori#655). A timeout fails
+        # the request but must not free its blocks: a write from the old
+        # transfer can still land, so they stay held until a real
+        # finished_recving (vllm-project/vllm#59382).
         self._write_recv_deadline: dict[ReqId, float] = {}
         self._write_recv_block_ids: dict[ReqId, list[int]] = {}
+        # Requests that finished (abort or error) while their receive was still
+        # pending. The scheduler is holding their blocks, so keep timing the
+        # receive; at the deadline they get a log line, not a second terminal
+        # outcome.
+        self._write_recv_orphaned: set[ReqId] = set()
         self._write_load_failed_block_ids: list[int] = []
-        self._write_recv_timeout = float(
-            os.environ.get("VLLM_MORIIO_WRITE_TIMEOUT_S", "540")
+        self._write_recv_timeout = _positive_finite_timeout(
+            "VLLM_MORIIO_WRITE_TIMEOUT_S",
+            os.environ.get("VLLM_MORIIO_WRITE_TIMEOUT_S", "540"),
         )
 
         if self.is_producer:
@@ -1156,19 +1166,26 @@ class MoRIIOConnectorScheduler:
                     block_notify_list = (
                         blocks.get_block_ids()[0] if num_external_tokens > 0 else []
                     )
-                    # Arm the WRITE-consumer watchdog (ROCm/mori#655): if the
-                    # producer's write_done never arrives, reclaim these blocks
+                    # Arm the WRITE-consumer receive timer (ROCm/mori#655): if
+                    # the producer's write_done never arrives, fail the request
                     # instead of wedging in WAITING_FOR_REMOTE_KVS.
                     if (
                         block_notify_list
                         and request.request_id not in self._write_recv_deadline
                     ):
-                        self._write_recv_deadline[request.request_id] = (
-                            time.monotonic() + self._write_recv_timeout
-                        )
-                        self._write_recv_block_ids[request.request_id] = list(
-                            block_notify_list
-                        )
+                        # Record only the blocks this request owns.
+                        # get_block_ids() also returns prefix-cache hits shared
+                        # with other requests; reporting those at the deadline
+                        # would fail those requests too. NIXL and Mooncake use
+                        # the unhashed ids for the same reason.
+                        own_block_ids = blocks.get_unhashed_block_ids_all_groups()[0]
+                        if own_block_ids:
+                            self._write_recv_deadline[request.request_id] = (
+                                time.monotonic() + self._write_recv_timeout
+                            )
+                            self._write_recv_block_ids[request.request_id] = (
+                                own_block_ids
+                            )
 
                     # Wide-EP multi-pod: a pod binds notify sockets only for
                     # its LOCAL ranks, so the port offset must use the per-pod
@@ -1300,7 +1317,14 @@ class MoRIIOConnectorScheduler:
         return meta
 
     def _reap_stale_write_recvs(self) -> None:
-        """Time out WRITE-consumer requests whose write_done never arrived."""
+        """Time out WRITE-consumer requests whose write_done never arrived.
+
+        A timeout means "stop waiting", NOT "these blocks are reusable". RDMA
+        writes are one-sided, so the deadline passing does not establish that
+        the producer's NIC has stopped; a late write into a reused block would
+        silently corrupt another request. Release stays gated on a real
+        finished_recving (vllm-project/vllm#59382).
+        """
         if not self._write_recv_deadline:
             return
         now = time.monotonic()
@@ -1312,21 +1336,36 @@ class MoRIIOConnectorScheduler:
         for req_id in expired:
             self._write_recv_deadline.pop(req_id, None)
             block_ids = self._write_recv_block_ids.pop(req_id, [])
+            if req_id in self._write_recv_orphaned:
+                # The client already gave up, so the request is terminal.
+                # Failing it again would be a second terminal outcome; just
+                # record why its blocks are still out.
+                self._write_recv_orphaned.discard(req_id)
+                logger.warning(
+                    "WRITE-mode KV recv for finished req %s still incomplete "
+                    "after %.0fs (VLLM_MORIIO_WRITE_TIMEOUT_S); its %d block(s) "
+                    "stay allocated because the producer may still write them.",
+                    req_id,
+                    self._write_recv_timeout,
+                    len(block_ids),
+                )
+                continue
             self._write_load_failed_block_ids.extend(block_ids)
             logger.error(
                 "WRITE-mode KV recv TIMED OUT for req %s after %.0fs "
                 "(VLLM_MORIIO_WRITE_TIMEOUT_S); producer write_done never "
-                "arrived. Reclaiming %d block(s) and failing the request "
-                "instead of wedging in WAITING_FOR_REMOTE_KVS.",
+                "arrived. Failing the request; its %d block(s) stay allocated "
+                "because the producer may still write them.",
                 req_id,
                 self._write_recv_timeout,
                 len(block_ids),
             )
 
-    def clear_write_recv_watchdog(self, req_id) -> None:
-        """Drop watchdog state for a request that completed normally."""
+    def clear_write_recv_watchdog(self, req_id: ReqId) -> None:
+        """Stop the receive timer once the request finished receiving."""
         self._write_recv_deadline.pop(req_id, None)
         self._write_recv_block_ids.pop(req_id, None)
+        self._write_recv_orphaned.discard(req_id)
 
     def shutdown(self):
         for path, sock in self.paths.items():
@@ -1406,7 +1445,15 @@ class MoRIIOConnectorScheduler:
         """
         request_id = request.request_id
         params = request.kv_transfer_params
-        self.clear_write_recv_watchdog(request_id)
+        # Do NOT stop the receive timer here. A client that aborts while the
+        # request sits in WAITING_FOR_REMOTE_KVS lands in this method, but the
+        # scheduler keeps its blocks (finish_requests sets delay_free_blocks)
+        # until a real finished_recving arrives; dropping the timer with the
+        # request is vllm-project/vllm#59114. Receive tracking is independent
+        # of the client, so keep timing it and mark it orphaned. The timer is
+        # stopped on receive completion instead, in update_connector_output.
+        if request_id in self._write_recv_deadline:
+            self._write_recv_orphaned.add(request_id)
         # Consumer: can unmap transfer_id<->request_id immediately since done_recving
         #   has fired at this point (i.e. KV has been transferred)
         # Producer: must keep the mapping until we get notification that blocks can
@@ -1537,10 +1584,21 @@ class MoRIIOConnectorScheduler:
           send was already reaped) and is dropped.
 
         Consumers never populate finished_sending (they report
-        finished_recving), and they unmap in request_finished, so this is a
-        no-op for them.
+        finished_recving), so the producer reconciliation below does not apply
+        to them. For consumers this stops the receive timer of requests that
+        finished receiving.
         """
         if not self.is_producer:
+            # Stop the timer on RECEIVE completion, not request completion. A
+            # request that got write_done early and is still decoding at its
+            # deadline would otherwise keep a running timer, and
+            # _handle_invalid_blocks scans self.running with evict_blocks=True,
+            # so a healthy request would be rolled back or failed.
+            # connector_output is the aggregated output, so a request appears
+            # here only once every worker reports it -- in the same step the
+            # scheduler marks it ready, before it can run.
+            for req_id in connector_output.finished_recving or ():
+                self.clear_write_recv_watchdog(req_id)
             return
 
         incoming = set(connector_output.finished_sending or ())
@@ -1674,9 +1732,6 @@ class MoRIIOConnectorWorker:
         # Completions that arrived before transfer_id_to_request_id was populated.
         # Retried each step until the mapping is established.
         self._unmatched_write_completions: set[str] = set()
-        # WRITE-mode consumer blocks the scheduler timed out; drained by
-        # get_block_ids_with_load_errors each step (ROCm/mori#655).
-        self._write_load_failed_block_ids: set[int] = set()
         # Producer-side READ-mode ACK fan-in. When decode TP is larger than
         # prefill TP, multiple decode ranks can read from one prefill rank and
         # notify the same transfer_id. Blocks are reusable only after all ACKs.
@@ -2760,14 +2815,6 @@ class MoRIIOConnectorWorker:
                 exc_info=True,
             )
 
-    def get_block_ids_with_load_errors(self) -> set[int]:
-        """Drain WRITE-consumer blocks the scheduler timed out."""
-        if not self._write_load_failed_block_ids:
-            return set()
-        failed = self._write_load_failed_block_ids
-        self._write_load_failed_block_ids = set()
-        return failed
-
     def _pop_done_transfers(self) -> set[str]:
         done_req_ids: set[str] = set()
         _xfer_timeout = self.moriio_config.recv_abort_timeout
@@ -3123,10 +3170,11 @@ class MoRIIOConnectorWorker:
         """Start loading by triggering non-blocking moriio_xfer.
         We check for these trnxs to complete in each step().
         """
+        # WRITE-consumer blocks the scheduler watchdog timed out. Feed them into
+        # the existing invalid-block set rather than a parallel one, so they
+        # drain through get_block_ids_with_load_errors like READ failures do.
         if getattr(metadata, "write_load_failed_block_ids", None):
-            self._write_load_failed_block_ids.update(
-                metadata.write_load_failed_block_ids
-            )
+            self._invalid_block_ids.update(metadata.write_load_failed_block_ids)
         self.transfer_id_to_request_id = metadata.transfer_id_to_request_id
         if self.is_producer:
             live_transfer_ids = set(self.transfer_id_to_request_id)
