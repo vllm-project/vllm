@@ -14,6 +14,7 @@
 #   upload   - Upload wheels to cache
 #   download - Download wheels from cache
 #   key      - Output the cache key
+#   path     - Output the full S3 cache path
 #
 # Environment variables:
 #   S3_BUCKET          - S3 bucket name (default: vllm-wheels)
