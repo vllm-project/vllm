@@ -36,6 +36,13 @@ class MoRIIOHeartbeat:
             self.shutdown()
             raise
 
+    def check_health(self) -> None:
+        returncode = self._process.poll()
+        if returncode is not None:
+            raise RuntimeError(
+                f"MoRIIO discovery heartbeat exited with code {returncode}"
+            )
+
     def shutdown(self) -> None:
         assert self._process.stdin is not None
         try:
@@ -72,6 +79,9 @@ def main() -> None:
             try:
                 sock.send(payload)
                 failures = 0
+            except zmq.Again:
+                failures = 0
+                logger.warning("MoRIIO discovery heartbeat send failed; retrying")
             except zmq.ZMQError:
                 failures += 1
                 logger.exception("MoRIIO discovery heartbeat send failed")

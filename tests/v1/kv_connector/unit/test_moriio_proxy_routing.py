@@ -299,3 +299,37 @@ sys.stdin.read()
             if child_pid is not None and not child_exited:
                 with contextlib.suppress(ProcessLookupError):
                     os.kill(child_pid, 9)
+
+
+def test_discovery_heartbeat_recovers_after_router_outage(capfd):
+    from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_heartbeat import (
+        MoRIIOHeartbeat,
+    )
+
+    payload = {"type": "P", "http_address": "127.0.0.1:8000"}
+    with zmq.Context() as context:
+        with context.socket(zmq.ROUTER) as socket:
+            port = socket.bind_to_random_port("tcp://127.0.0.1")
+            endpoint = f"tcp://127.0.0.1:{port}"
+            heartbeat = MoRIIOHeartbeat(endpoint, payload, 0.001, max_retries=1)
+            try:
+                assert socket.poll(5000), "Discovery did not register"
+                assert msgpack.unpackb(socket.recv_multipart()[1]) == payload
+            except BaseException:
+                heartbeat.shutdown()
+                raise
+        try:
+            # Fill the real DEALER queue while discovery is unavailable.
+            deadline = time.monotonic() + 10
+            errors = ""
+            while "heartbeat send failed" not in errors:
+                errors += capfd.readouterr().err
+                assert time.monotonic() < deadline, "No send timeout during outage"
+                time.sleep(0.01)
+            with context.socket(zmq.ROUTER) as socket:
+                socket.bind(endpoint)
+                assert socket.poll(5000), "Discovery did not recover after outage"
+                assert msgpack.unpackb(socket.recv_multipart()[1]) == payload
+                assert heartbeat._process.poll() is None
+        finally:
+            heartbeat.shutdown()
