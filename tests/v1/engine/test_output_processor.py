@@ -16,6 +16,7 @@ from tests.v1.engine.utils import (
     MockEngineCore,
 )
 from vllm import PoolingParams
+from vllm.exceptions import VLLMValidationError
 from vllm.logprobs import FlatLogprobs, Logprob, PromptLogprobs, SampleLogprobs
 from vllm.lora.request import LoRARequest
 from vllm.outputs import CompletionOutput, RequestOutput
@@ -35,6 +36,7 @@ from vllm.v1.engine.output_processor import (
     RequestState,
 )
 from vllm.v1.metrics.stats import IterationStats, PrefillStats, SchedulerStats
+from vllm.v1.outputs import LogprobsLists
 
 
 @pytest.mark.parametrize("flat_logprobs", [False, True])
@@ -1549,3 +1551,144 @@ def test_abort_requests(runner: str, abort_by: str, dummy_test_vectors):
             output_processor.abort_requests([request.request_id], internal=True)
         else:
             output_processor.abort_requests([request.external_req_id], internal=False)
+
+
+def _make_streaming_request(
+    prompt_token_ids: list[int],
+    logprobs: int | None,
+    output_kind: RequestOutputKind,
+) -> EngineCoreRequest:
+    return EngineCoreRequest(
+        request_id="request-internal",
+        external_req_id="request-external",
+        prompt_token_ids=prompt_token_ids,
+        mm_features=None,
+        arrival_time=0,
+        lora_request=None,
+        cache_salt=None,
+        data_parallel_rank=None,
+        sampling_params=SamplingParams(
+            detokenize=False,
+            logprobs=logprobs,
+            max_tokens=1,
+            output_kind=output_kind,
+        ),
+        pooling_params=None,
+        resumable=True,
+    )
+
+
+def _make_sample_logprobs(token_id: int) -> LogprobsLists:
+    return LogprobsLists(
+        np.array([[token_id, token_id + 1]], dtype=np.int32),
+        np.array([[-0.1, -1.0]], dtype=np.float32),
+        np.array([1], dtype=np.int32),
+    )
+
+
+def _process_streaming_logprobs(
+    logprobs_per_chunk: list[int | None],
+    output_kind: RequestOutputKind,
+    continuations_queued: bool,
+) -> list[CompletionOutput]:
+    output_processor = OutputProcessor(tokenizer=None, log_stats=False)
+    requests = [
+        _make_streaming_request([index], logprobs, output_kind)
+        for index, logprobs in enumerate(logprobs_per_chunk)
+    ]
+    output_processor.add_request(requests[0], prompt=None)
+    if continuations_queued:
+        for request in requests[1:]:
+            output_processor.add_request(request, prompt=None)
+
+    outputs = []
+    for index, (request, logprobs) in enumerate(zip(requests, logprobs_per_chunk)):
+        if index and not continuations_queued:
+            output_processor.add_request(request, prompt=None)
+        processed = output_processor.process_outputs(
+            [
+                EngineCoreOutput(
+                    request_id=request.request_id,
+                    new_token_ids=[10 + index],
+                    new_logprobs=(
+                        _make_sample_logprobs(10 + index)
+                        if logprobs is not None
+                        else None
+                    ),
+                    finish_reason=(
+                        FinishReason.LENGTH
+                        if index < len(logprobs_per_chunk) - 1
+                        else None
+                    ),
+                )
+            ]
+        )
+        outputs.append(processed.request_outputs[0].outputs[0])
+    return outputs
+
+
+@pytest.mark.parametrize("continuation_queued", [False, True])
+@pytest.mark.parametrize(
+    ("first_logprobs", "continuation_logprobs"), [(None, 1), (1, None)]
+)
+def test_streaming_delta_continuation_updates_logprobs(
+    continuation_queued: bool,
+    first_logprobs: int | None,
+    continuation_logprobs: int | None,
+):
+    output = _process_streaming_logprobs(
+        [first_logprobs, continuation_logprobs],
+        RequestOutputKind.DELTA,
+        continuation_queued,
+    )[-1]
+    logprobs = output.logprobs
+    if continuation_logprobs is None:
+        assert logprobs is None
+    else:
+        assert logprobs is not None
+        assert set(logprobs[0]) == {11, 12}
+
+
+def test_streaming_queued_delta_continuations_track_logprob_config():
+    outputs = _process_streaming_logprobs(
+        [None, 1, None], RequestOutputKind.DELTA, continuations_queued=True
+    )
+    assert outputs[1].logprobs is not None
+    assert outputs[2].logprobs is None
+
+
+@pytest.mark.parametrize("continuation_queued", [False, True])
+def test_streaming_cumulative_continuation_preserves_logprobs(
+    continuation_queued: bool,
+):
+    output = _process_streaming_logprobs(
+        [1, 1], RequestOutputKind.CUMULATIVE, continuation_queued
+    )[-1]
+    assert output.token_ids == [10, 11]
+    assert output.logprobs is not None
+    assert len(output.logprobs) == len(output.token_ids)
+    assert output.cumulative_logprob == pytest.approx(-0.2)
+
+
+@pytest.mark.parametrize(
+    ("first_logprobs", "continuation_logprobs"), [(None, 1), (1, None)]
+)
+def test_streaming_cumulative_rejects_logprob_changes(
+    first_logprobs: int | None,
+    continuation_logprobs: int | None,
+):
+    output_processor = OutputProcessor(tokenizer=None, log_stats=False)
+    output_processor.add_request(
+        _make_streaming_request([1], first_logprobs, RequestOutputKind.CUMULATIVE),
+        prompt=None,
+    )
+    with pytest.raises(
+        VLLMValidationError,
+        match="Changing logprob configuration.*requires output_kind=DELTA",
+    ):
+        output_processor.add_request(
+            _make_streaming_request(
+                [2], continuation_logprobs, RequestOutputKind.CUMULATIVE
+            ),
+            prompt=None,
+        )
