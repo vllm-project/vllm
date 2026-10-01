@@ -65,8 +65,8 @@ def run_model(
         )
 
         # Fetch match table from each worker via RPC and sum across workers.
-        worker_tables: list[dict[str, int]] = (
-            llm.llm_engine.engine_core.collective_rpc("get_compilation_match_table")
+        worker_tables: list[dict[str, int]] = llm.llm_engine.engine_core.collective_rpc(
+            "get_compilation_match_table"
         )
         combined: defaultdict[str, int] = defaultdict(int)
         for table in worker_tables:
