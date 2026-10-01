@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import contextlib
+
 import torch
 
 from vllm.triton_utils import tl, triton
@@ -867,11 +869,14 @@ def fused_qkvr_prep(
         )
         return q_out, rel_out
 
+    # No aux stream on non-CUDA-alike platforms: run K/V inline.
     kv_stream = aux_stream()
-    assert kv_stream is not None
-    current_stream = torch.cuda.current_stream()
-    kv_stream.wait_stream(current_stream)
-    with torch.cuda.stream(kv_stream):
+    kv_ctx: contextlib.AbstractContextManager = contextlib.nullcontext()
+    if kv_stream is not None:
+        current_stream = torch.cuda.current_stream()
+        kv_stream.wait_stream(current_stream)
+        kv_ctx = torch.cuda.stream(kv_stream)
+    with kv_ctx:
         _run_tiled_kv(
             qkvr,
             k_weight,
@@ -914,5 +919,6 @@ def fused_qkvr_prep(
         head_dim=head_dim,
         d_rel=d_rel,
     )
-    current_stream.wait_stream(kv_stream)
+    if kv_stream is not None:
+        current_stream.wait_stream(kv_stream)
     return q_out, rel_out
