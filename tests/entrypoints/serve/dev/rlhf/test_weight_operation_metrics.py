@@ -4,6 +4,7 @@
 
 from pathlib import Path
 
+import pytest
 import requests
 import torch
 from prometheus_client.multiprocess import MultiProcessCollector
@@ -18,6 +19,7 @@ from vllm.distributed.weight_transfer import (
     WeightTransferTrainerFactory,
 )
 from vllm.distributed.weight_transfer.ipc_engine import IPCTrainerInitInfo
+from vllm.platforms import current_platform
 
 DURATION = "vllm:rl_weight_update_operation_duration_seconds"
 IN_FLIGHT = "vllm:rl_weight_update_operations_in_flight"
@@ -48,6 +50,9 @@ def pids_that_recorded(multiproc_dir: Path) -> set[str]:
     }
 
 
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="IPC weight transfer uses CUDA IPC."
+)
 def test_weight_sync_metrics_aggregate_across_api_servers(tmp_path):
     args = [
         "--load-format",
