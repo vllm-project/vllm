@@ -1821,6 +1821,18 @@ class VllmConfig:
                 raise ValueError(
                     "HiSparse does not support decode context parallelism."
                 )
+            if self.compilation_config.cudagraph_mode == CUDAGraphMode.FULL:
+                # HiSparse picks its prefill path from per-step page residency and
+                # mirrors prefill KV to host outside CUDA graphs, so prefill
+                # batches cannot be captured.
+                logger.warning_once(
+                    "HiSparse does not support cudagraph_mode=FULL. Overriding to "
+                    "FULL_AND_PIECEWISE, which still captures FULL graphs for "
+                    "decode batches."
+                )
+                self.compilation_config.cudagraph_mode = (
+                    CUDAGraphMode.FULL_AND_PIECEWISE
+                )
             if not self.scheduler_config.scheduler_reserve_full_isl:
                 # Without it, async loads admitted against free host blocks can
                 # each wait on host pages the others hold, and waiting requests
