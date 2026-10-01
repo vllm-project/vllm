@@ -1447,7 +1447,7 @@ class TestDetectMergeInlineSystem:
             model_config=None,
         )
         assert (
-            AnthropicServingMessages._should_merge_inline_system(online_renderer)  # type: ignore[arg-type]
+            AnthropicServingMessages._should_merge_inline_system(online_renderer)
             is expected
         )
         assert mock_logger.warning_once.called is expected
