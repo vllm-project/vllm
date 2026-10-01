@@ -8,6 +8,7 @@ import numpy as np
 import pytest
 import torch
 
+import vllm.utils.gpu_sync_debug as gsd
 from tests.v1.attention.test_gdn_metadata_builder import (
     BLOCK_SIZE,
     DEVICE,
@@ -53,6 +54,18 @@ def test_add_request_seeds_state_with_scoped_block_size(
 
 
 @pytest.mark.parametrize(
+    "staging_device",
+    [
+        "cpu",
+        pytest.param(
+            "cuda",
+            marks=pytest.mark.skipif(
+                not torch.cuda.is_available(), reason="requires CUDA"
+            ),
+        ),
+    ],
+)
+@pytest.mark.parametrize(
     ("computed", "scheduled", "drafts", "prefilling", "expected_prefilling"),
     [
         (256, 4, 3, True, False),  # Cached prompt tail plus placeholders.
@@ -70,13 +83,25 @@ def test_prepare_attn_forwards_positions_and_stages_replayssm_prefill(
     drafts,
     prefilling,
     expected_prefilling,
+    staging_device,
 ) -> None:
     state = object.__new__(MambaHybridModelState)
     state.vllm_config = SimpleNamespace(num_speculative_tokens=3)
     state.model_config = SimpleNamespace(max_model_len=8192)
     state._align_mode = False
     state._use_flashinfer_replayssm = True
-    state._is_prefilling_gpu = torch.zeros(1, dtype=torch.bool)
+    if staging_device == "cpu":
+        monkeypatch.setattr("vllm.v1.utils.PIN_MEMORY", False)
+    state._replayssm_prefilling = mamba_hybrid.CpuGpuBuffer(
+        1,
+        dtype=torch.bool,
+        device=torch.device(staging_device),
+        pin_memory=staging_device == "cuda",
+    )
+    state._replayssm_all_decode_gpu = torch.zeros(
+        1, dtype=torch.bool, device=staging_device
+    )
+    state._mamba_ctx = None
     state.num_accepted_tokens_gpu = torch.ones(1, dtype=torch.int32)
     state._get_mamba_group_info = Mock(return_value=([], None))
     state._ensure_mamba_postprocess_ctx = Mock()
@@ -108,7 +133,15 @@ def test_prepare_attn_forwards_positions_and_stages_replayssm_prefill(
     build_attn_metadata = Mock(return_value=expected_metadata)
     monkeypatch.setattr(mamba_hybrid, "build_attn_metadata", build_attn_metadata)
 
-    metadata = state.prepare_attn(
+    prepare_attn = state.prepare_attn
+    if staging_device == "cuda":
+        assert state._replayssm_prefilling.cpu.is_pinned()
+        monkeypatch.setattr(gsd, "_SYNC_CHECK_MODE", "error")
+        monkeypatch.setattr(gsd, "_sync_check_enabled", True)
+        gsd.enable_gpu_sync_check()
+        prepare_attn = gsd.with_gpu_sync_check(prepare_attn)
+
+    metadata = prepare_attn(
         input_batch=input_batch,
         cudagraph_mode=CUDAGraphMode.NONE,
         block_tables=(),
@@ -119,7 +152,7 @@ def test_prepare_attn_forwards_positions_and_stages_replayssm_prefill(
 
     assert metadata is expected_metadata
     assert build_attn_metadata.call_args.kwargs["positions"] is positions
-    assert state._is_prefilling_gpu.item() == expected_prefilling
+    assert state._replayssm_step_is_prefilling.item() == expected_prefilling
 
 
 def test_padded_prompt_tail_builds_as_spec_decode(
@@ -230,7 +263,9 @@ def test_flashinfer_replayssm_prefix_uses_original_accepted_counts() -> None:
     state.recoverssm = None
     state.num_accepted_tokens_gpu = torch.ones(4, dtype=torch.int32, device="cuda")
     state._mamba_state_idx_gpu = torch.zeros(4, dtype=torch.int32, device="cuda")
-    state._is_prefilling_gpu = torch.zeros(4, dtype=torch.bool, device="cuda")
+    state._replayssm_step_is_prefilling = torch.zeros(
+        4, dtype=torch.bool, device="cuda"
+    )
     state._replayssm_query_start_loc = torch.tensor(
         [0, 4], dtype=torch.int32, device="cuda"
     )

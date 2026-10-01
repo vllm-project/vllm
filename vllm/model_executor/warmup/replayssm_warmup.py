@@ -134,3 +134,16 @@ def replayssm_autotune_warmup(runner: "GPUModelRunner") -> None:
     max_num_reqs, decode_kwargs = autotune
     with _temporary_replayssm_autotune_state(runner, max_num_reqs):
         runner._dummy_run(**decode_kwargs)
+
+
+def prepare_replayssm_runtime(runner: "GPUModelRunner") -> None:
+    """Resolve ReplaySSM's fixed kernels and tactics before execution."""
+    from vllm.model_executor.layers.mamba.mamba_mixer2 import MambaMixer2
+
+    runtime = _replayssm_autotune_kwargs(runner, {})
+    if runtime is None:
+        return
+    max_num_reqs, _ = runtime
+    for module in runner.get_model().modules():
+        if isinstance(module, MambaMixer2):
+            module.prepare_replayssm_runtime_kernel(max_num_reqs)

@@ -133,10 +133,29 @@ def test_flashinfer_replayssm_ring_dtype_is_independent_of_state(
     else:
         VllmConfig.validate_mamba_cached_kernel(config)
         assert config.cache_config.mamba_ssm_cache_dtype == state_dtype
-        config.use_v2_model_runner = False
-        config.parallel_config.use_ubatching = True
-        with pytest.raises(ValueError, match="V1 does not support microbatching"):
-            VllmConfig.validate_mamba_cached_kernel(config)
+
+
+@pytest.mark.parametrize("use_v2", [False, True], ids=["v1", "v2"])
+def test_flashinfer_replayssm_rejects_microbatching(use_v2):
+    config = SimpleNamespace(
+        cache_config=SimpleNamespace(
+            use_replayssm=True,
+            mamba_cache_mode="align",
+            replayssm_buffer_len=16,
+        ),
+        num_speculative_tokens=3,
+        model_config=SimpleNamespace(
+            supports_replayssm=True,
+            architecture="NemotronHForCausalLM",
+            dtype=torch.bfloat16,
+        ),
+        mamba_config=SimpleNamespace(backend=MambaBackendEnum.FLASHINFER),
+        parallel_config=SimpleNamespace(pipeline_parallel_size=1, use_ubatching=True),
+        kv_transfer_config=None,
+        use_v2_model_runner=use_v2,
+    )
+    with pytest.raises(ValueError, match="ReplaySSM does not support microbatching"):
+        VllmConfig.validate_mamba_cached_kernel(config)
 
 
 def _write_json(path: Path, value: object) -> None:

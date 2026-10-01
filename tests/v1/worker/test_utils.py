@@ -5,7 +5,6 @@ import mmap
 from collections import deque
 from contextlib import nullcontext
 from types import SimpleNamespace
-from typing import Any
 from unittest.mock import MagicMock, call
 
 import numpy as np
@@ -30,12 +29,15 @@ from vllm.utils.mem_constants import GiB_bytes
 from vllm.utils.mem_utils import MemorySnapshot
 from vllm.v1.core.kv_cache_utils import KVCacheBlockCopy
 from vllm.v1.hisparse.types import SparseKVPageTransfer, SparseKVRowMirror
+from vllm.v1.worker.replayssm_utils import (
+    ReplaySSMBlockCopier,
+    get_replayssm_block_copy_tensors,
+)
 from vllm.v1.worker.utils import (
     bind_kv_cache,
     bind_kv_cache_to_layers,
     clear_layer_kv_caches,
     copy_kv_cache_blocks_inplace,
-    get_replayssm_block_copy_tensors,
     request_memory,
 )
 
@@ -1256,6 +1258,46 @@ def test_hisparse_worker_shutdown_releases_pinned_state(monkeypatch):
     assert released
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+def test_replayssm_block_copier_copies_strided_cuda_segments():
+    num_blocks = 4
+    raw = torch.zeros(num_blocks * 32, dtype=torch.uint8, device="cuda")
+    first = torch.as_strided(raw, (num_blocks, 8), (32, 1), storage_offset=0)
+    second = torch.as_strided(raw, (num_blocks, 4), (32, 1), storage_offset=8)
+    tracker = torch.zeros(num_blocks, dtype=torch.int32, device="cuda")
+
+    first[0].fill_(7)
+    first[1].fill_(8)
+    second[0].fill_(17)
+    second[1].fill_(18)
+    tracker[0] = 27
+    tracker[1] = 28
+
+    copier = ReplaySSMBlockCopier([first, second, tracker], num_blocks)
+    copier.copy([KVCacheBlockCopy(0, 2), KVCacheBlockCopy(1, 3)])
+    torch.accelerator.synchronize()
+
+    torch.testing.assert_close(first[2], first[0])
+    torch.testing.assert_close(first[3], first[1])
+    torch.testing.assert_close(second[2], second[0])
+    torch.testing.assert_close(second[3], second[1])
+    assert tracker.tolist() == [27, 28, 27, 28]
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+def test_replayssm_block_copier_preserves_overlapping_copy_semantics():
+    num_blocks = 3
+    cache = torch.arange(num_blocks * 4, device="cuda").view(num_blocks, 4)
+    original = cache.clone()
+
+    copier = ReplaySSMBlockCopier([cache], num_blocks)
+    copier.copy([KVCacheBlockCopy(0, 1), KVCacheBlockCopy(1, 2)])
+    torch.accelerator.synchronize()
+
+    torch.testing.assert_close(cache[1], original[0])
+    torch.testing.assert_close(cache[2], original[1])
+
+
 class _TestReplaySSMMixer(MambaMixer2):
     def __init__(self) -> None:
         torch.nn.Module.__init__(self)
@@ -1266,16 +1308,10 @@ class _TestReplaySSMMixer(MambaMixer2):
         self._replayssm_prev_num_accepted = torch.empty(0, dtype=torch.int32)
 
     def get_state_shape(self) -> tuple[tuple[int, ...], ...]:
-        return ((2,), (3,))
+        return ((2,), (3,), (4,), (5,), (6,))
 
     def get_state_dtype(self) -> tuple[torch.dtype, ...]:
-        return (torch.float32, torch.float32)
-
-    def get_replayssm_state_shape(self) -> tuple[tuple[int, ...], ...]:
-        return ((4,), (5,), (6,))
-
-    def get_replayssm_state_dtype(self) -> tuple[torch.dtype, ...]:
-        return (torch.float32,) * 3
+        return (torch.float32,) * 5
 
 
 class _TestTritonReplaySSMMixer(_TestReplaySSMMixer):
@@ -1290,12 +1326,6 @@ class _TestTritonReplaySSMMixer(_TestReplaySSMMixer):
     def get_state_dtype(self) -> tuple[torch.dtype, ...]:
         return (torch.float32,) * 5
 
-    def get_replayssm_state_shape(self) -> tuple[tuple[int, ...], ...]:
-        return ()
-
-    def get_replayssm_state_dtype(self) -> tuple[torch.dtype, ...]:
-        return ()
-
 
 def test_clear_layer_kv_caches_releases_shared_replayssm_trackers():
     mixers = [_TestReplaySSMMixer(), _TestReplaySSMMixer()]
@@ -1305,21 +1335,31 @@ def test_clear_layer_kv_caches_releases_shared_replayssm_trackers():
         mixer.replayssm_cache = (torch.ones(8, 4),)
         mixer._replayssm_ring_start = tracker
         mixer._replayssm_prev_num_accepted = tracker
+        mixer._replayssm_group_rand_seeds = torch.ones(3, dtype=torch.int64)
+        mixer._replayssm_rand_seed = mixer._replayssm_group_rand_seeds[:1]
     clear_layer_kv_caches(mixers)
     for mixer in mixers:
         assert not mixer.kv_cache
         assert not mixer.replayssm_cache
         assert mixer._replayssm_ring_start.numel() == 0
         assert mixer._replayssm_prev_num_accepted.numel() == 0
+        assert mixer._replayssm_rand_seed.numel() == 0
+        assert mixer._replayssm_group_rand_seeds.numel() == 0
 
 
 def _packed_replayssm_cache(num_blocks: int) -> torch.Tensor:
-    return torch.zeros((num_blocks, 1, 1, 20), dtype=torch.int8)
+    return torch.zeros((num_blocks, 1, 1, 80), dtype=torch.int8)
 
 
 @pytest.mark.parametrize("layers_only", [False, True])
-def test_bind_kv_cache_shares_replayssm_trackers_by_cache_group(layers_only):
+@pytest.mark.parametrize("stochastic_rounding", [False, True])
+def test_bind_kv_cache_shares_replayssm_trackers_by_cache_group(
+    layers_only, stochastic_rounding
+):
     mixers = [_TestReplaySSMMixer() for _ in range(3)]
+    for mixer in mixers:
+        mixer.mamba_config.enable_stochastic_rounding = stochastic_rounding
+        mixer.cache_config = SimpleNamespace(mamba_cache_mode="align")
     layer_names = [f"layers.{i}.mixer" for i in range(3)]
     ctx = dict(zip(layer_names, mixers))
     # Reverse insertion order: updater must follow layer index, not dict order.
@@ -1332,25 +1372,12 @@ def test_bind_kv_cache_shares_replayssm_trackers_by_cache_group(layers_only):
         SimpleNamespace(layer_names=[layer_names[0], layer_names[2]]),
         SimpleNamespace(layer_names=[layer_names[1]]),
     ]
-    replayssm_caches = {
-        name: [
-            torch.zeros((4, *shape), dtype=torch.float32)
-            for shape in mixer.get_replayssm_state_shape()
-        ]
-        for name, mixer in ctx.items()
-    }
+    if layers_only:
+        bind_kv_cache_to_layers(kv_cache, ctx, kv_cache_groups=kv_cache_groups)
+    else:
+        bind_kv_cache(kv_cache, ctx, [], kv_cache_groups=kv_cache_groups)
 
-    bind = bind_kv_cache_to_layers if layers_only else bind_kv_cache
-    args: tuple[Any, ...] = (kv_cache, ctx) if layers_only else (kv_cache, ctx, [])
-    bind(
-        *args,
-        kv_cache_groups=kv_cache_groups,
-        replayssm_caches={
-            name: tuple(cache) for name, cache in replayssm_caches.items()
-        },
-    )
-
-    assert all(len(mixer.kv_cache) == 2 for mixer in mixers)
+    assert all(len(mixer.kv_cache) == 5 for mixer in mixers)
     assert all(len(mixer.replayssm_cache) == 3 for mixer in mixers)
 
     tracker_names = (
@@ -1363,6 +1390,17 @@ def test_bind_kv_cache_shares_replayssm_trackers_by_cache_group(layers_only):
         assert group_tracker.data_ptr() != getattr(mixers[1], tracker_name).data_ptr()
         assert group_tracker.shape == (4,)
         assert torch.count_nonzero(group_tracker) == 0
+
+    if stochastic_rounding:
+        seeds = [mixer._replayssm_rand_seed for mixer in mixers]
+        assert all(seed.numel() == 1 and seed.dtype == torch.int64 for seed in seeds)
+        assert len({seed.item() for seed in seeds}) == len(mixers)
+        assert (
+            mixers[0]._replayssm_group_rand_seeds
+            is mixers[2]._replayssm_group_rand_seeds
+        )
+        assert mixers[0]._replayssm_group_rand_seeds.numel() == 3
+        assert mixers[1]._replayssm_group_rand_seeds.numel() == 2
 
 
 def test_replayssm_block_copy_includes_rings_and_group_trackers(monkeypatch):
@@ -1378,20 +1416,12 @@ def test_replayssm_block_copy_includes_rings_and_group_trackers(monkeypatch):
         SimpleNamespace(layer_names=[layer_names[0], layer_names[2]]),
         SimpleNamespace(layer_names=[layer_names[1]]),
     ]
-    replayssm_caches = {
-        name: tuple(
-            torch.zeros((4, *shape), dtype=torch.float32)
-            for shape in mixer.get_replayssm_state_shape()
-        )
-        for name, mixer in ctx.items()
-    }
     runner_kv_caches: list[torch.Tensor] = []
     bind_kv_cache(
         kv_cache,
         ctx,
         runner_kv_caches,
         kv_cache_groups=kv_cache_groups,
-        replayssm_caches=replayssm_caches,
     )
 
     src, dst = 1, 2
@@ -1459,14 +1489,14 @@ def test_triton_replayssm_raw_page_copy_includes_all_five_states(monkeypatch):
 
 
 @pytest.mark.parametrize(
-    ("backend", "state_count", "auxiliary_count"),
+    ("backend", "state_count"),
     [
-        (MambaBackendEnum.TRITON, 5, 0),
-        (MambaBackendEnum.FLASHINFER, 2, 3),
+        (MambaBackendEnum.TRITON, 5),
+        (MambaBackendEnum.FLASHINFER, 5),
     ],
 )
 def test_replayssm_cache_layout_is_backend_scoped(
-    monkeypatch, backend: MambaBackendEnum, state_count: int, auxiliary_count: int
+    monkeypatch, backend: MambaBackendEnum, state_count: int
 ):
     monkeypatch.setattr(
         "vllm.model_executor.layers.mamba.mamba_mixer2."
@@ -1493,8 +1523,6 @@ def test_replayssm_cache_layout_is_backend_scoped(
 
     assert len(mixer.get_state_shape()) == state_count
     assert len(mixer.get_state_dtype()) == state_count
-    assert len(mixer.get_replayssm_state_shape()) == auxiliary_count
-    assert len(mixer.get_replayssm_state_dtype()) == auxiliary_count
 
 
 def test_bind_kv_cache(default_vllm_config):

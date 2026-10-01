@@ -242,9 +242,10 @@ PREFIX_CACHING_PROMPTS = [
     _PC_PREFIX + "Surprisingly, the experiments showed that",
     _PC_PREFIX + "The most important conclusion was that",
 ]
-# All-mode MTP must cache at least two full state blocks: the drafter drops
-# the volatile trailing block before resuming from the preceding boundary.
-_PC_MTP_PREFIX = _PC_SENTENCE * 240
+# MTP prefix caching must retain two full packed ReplaySSM state blocks: the
+# drafter drops the volatile trailing block before resuming from the preceding
+# boundary.
+_PC_MTP_PREFIX = _PC_SENTENCE * 280
 MTP_PREFIX_CACHING_PROMPTS = [
     _PC_MTP_PREFIX + prompt.removeprefix(_PC_PREFIX)
     for prompt in PREFIX_CACHING_PROMPTS
@@ -310,13 +311,9 @@ def _check_replayssm_prefix_caching(
         ) as llm:
             assert llm.llm.llm_engine.vllm_config.use_v2_model_runner is use_v2
             replay_block_size = llm.llm.llm_engine.vllm_config.cache_config.block_size
-            if mamba_backend == "flashinfer":
-                # FlashInfer rings are auxiliary and cannot affect the shared page.
-                assert replay_block_size == baseline_block_size
-            else:
-                # Triton retains the original packed five-state page. Its rings may
-                # increase the attention block size needed to match that page.
-                assert replay_block_size >= baseline_block_size
+            # Both backends retain a packed five-state page. Its rings may
+            # increase the attention block size needed to match that page.
+            assert replay_block_size >= baseline_block_size
             llm.generate_greedy_logprobs(
                 PREFIX_CACHING_PROMPTS, max_tokens=32, num_logprobs=5
             )
@@ -418,6 +415,9 @@ def test_flashinfer_replayssm_prefix_cache_mtp(vllm_runner, monkeypatch, use_v2,
         mamba_cache_mode=mode,
         mamba_backend="flashinfer",
         dtype="bfloat16",
+        mamba_ssm_cache_dtype="float16",
+        enable_mamba_cache_stochastic_rounding=True,
+        mamba_cache_philox_rounds=5,
         disable_log_stats=False,
         speculative_config={"method": "mtp", "num_speculative_tokens": 3},
     )
@@ -449,6 +449,12 @@ def test_flashinfer_replayssm_prefix_cache_mtp(vllm_runner, monkeypatch, use_v2,
                     MTP_PREFIX_CACHING_PROMPTS, max_tokens=32, num_logprobs=5
                 )
                 cached_hits = _prefix_cache_hits(llm)
+                accepted_count = sum(
+                    metric.value
+                    for metric in llm.llm.get_metrics()
+                    if isinstance(metric, Counter)
+                    and metric.name == "vllm:spec_decode_num_accepted_tokens"
+                )
                 draft_count = sum(
                     metric.value
                     for metric in llm.llm.get_metrics()
@@ -460,9 +466,11 @@ def test_flashinfer_replayssm_prefix_cache_mtp(vllm_runner, monkeypatch, use_v2,
 
     assert cached_hits > first_pass_hits
     assert draft_count > 0
+    assert accepted_count > 0
     print(
         f"ReplaySSM v{2 if use_v2 else 1} {mode}: "
-        f"prefix_hit_delta={cached_hits - first_pass_hits}, drafts={draft_count}"
+        f"prefix_hit_delta={cached_hits - first_pass_hits}, "
+        f"drafts={draft_count}, accepted={accepted_count}"
     )
     check_logprobs_close(
         outputs_0_lst=baseline,

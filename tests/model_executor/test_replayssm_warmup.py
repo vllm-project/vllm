@@ -179,3 +179,76 @@ def test_replayssm_autotune_slots_restore_state_and_trackers(use_v2, fail_warmup
         assert torch.all(tensor[3] == 3)
     for tensor in (mixer._replayssm_ring_start, mixer._replayssm_prev_num_accepted):
         assert torch.count_nonzero(tensor) == 0
+
+
+def test_prepare_replayssm_runtime_binds_every_mixer():
+    mixers = []
+    for _ in range(2):
+        mixer = MambaMixer2.__new__(MambaMixer2)
+        torch.nn.Module.__init__(mixer)
+        mixer.prepare_replayssm_runtime_kernel = Mock()
+        mixers.append(mixer)
+    runner = SimpleNamespace(
+        get_model=lambda: SimpleNamespace(modules=lambda: (*mixers, object()))
+    )
+
+    with patch.object(warmup, "_replayssm_autotune_kwargs", return_value=(37, {})):
+        warmup.prepare_replayssm_runtime(runner)
+
+    for mixer in mixers:
+        mixer.prepare_replayssm_runtime_kernel.assert_called_once_with(37)
+
+
+@pytest.mark.parametrize("state_dtype", [torch.float16, torch.float32, torch.int8])
+def test_mixer_prepares_exact_replayssm_runtime_specialization(state_dtype):
+    mixer = MambaMixer2.__new__(MambaMixer2)
+    torch.nn.Module.__init__(mixer)
+    mixer.use_flashinfer_replayssm = True
+    mixer.num_spec = 3
+    mixer._replayssm_runtime_kernel = None
+    mixer._replayssm_runtime_policies = ()
+    mixer.kv_cache = (
+        torch.empty(0),
+        torch.empty(2, 32, 64, 128, dtype=state_dtype),
+    )
+    mixer.replayssm_cache = (
+        torch.empty(2, 32, 20, 64, dtype=torch.bfloat16),
+        torch.empty(2, 32, 20, dtype=torch.float32),
+        torch.empty(2, 2, 20, 128, dtype=torch.bfloat16),
+    )
+    mixer.D = torch.nn.Parameter(torch.empty(32, dtype=torch.bfloat16))
+    mixer.A = torch.nn.Parameter(torch.empty(32, dtype=torch.float32))
+    mixer.mamba_config = SimpleNamespace(
+        enable_stochastic_rounding=True,
+        stochastic_rounding_philox_rounds=5,
+    )
+    kernel = Mock()
+    policies = ((False, 1, 0, 0, 0),) * 38
+
+    with patch(
+        "vllm.model_executor.layers.mamba.mamba_mixer2."
+        "prepare_flashinfer_replayssm_runtime",
+        return_value=(kernel, policies),
+    ) as prepare:
+        mixer.prepare_replayssm_runtime_kernel(37)
+
+    prepare.assert_called_once_with(
+        state_dtype=state_dtype,
+        input_dtype=torch.bfloat16,
+        dt_dtype=torch.bfloat16,
+        weight_dtype=torch.bfloat16,
+        matrix_a_dtype=torch.float32,
+        state_index_dtype=torch.int32,
+        dim=64,
+        dstate=128,
+        num_predicted_tokens=4,
+        max_window=16,
+        heads_per_group=16,
+        num_groups=2,
+        max_batch_size=37,
+        device=mixer.kv_cache[1].device,
+        use_rand_seed=True,
+        philox_rounds=5,
+    )
+    assert mixer._replayssm_runtime_kernel is kernel
+    assert mixer._replayssm_runtime_policies is policies

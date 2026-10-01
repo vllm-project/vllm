@@ -137,6 +137,9 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
         self.decode_replayssm_scratch: (
             tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None
         ) = None
+        self._decode_replayssm_scratch_views: dict[
+            int, tuple[torch.Tensor, torch.Tensor, torch.Tensor]
+        ] = {}
         self.decode_replayssm_state_indices_d: torch.Tensor | None = None
         # ReplaySSM CUDA-graph buffers for the selected backend.
         if self.use_replayssm and not self.use_flashinfer_replayssm:
@@ -170,7 +173,7 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
                 allocate_checkpointing_ssu_scratch,
             )
 
-            nheads = kv_cache_spec.replayssm_shapes[0][0]
+            nheads = kv_cache_spec.shapes[2][0]
             self.decode_replayssm_scratch = allocate_checkpointing_ssu_scratch(
                 batch_size=scheduler_config.max_num_seqs,
                 num_heads=nheads,
@@ -179,9 +182,8 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
                 dtype=vllm_config.model_config.dtype,
                 device=device,
             )
-            # Full CUDA graphs retain capture-time tensor addresses. Keep the
-            # contiguous first-column view used by FlashInfer in a persistent
-            # buffer and refresh its contents before each replay.
+            # The public FlashInfer wrapper requires contiguous indices.
+            # Keep their address stable across CUDA graph replays.
             self.decode_replayssm_state_indices_d = torch.empty(
                 (self.decode_cudagraph_max_bs,), dtype=torch.int32, device=device
             )
@@ -189,6 +191,21 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
         self._init_reorder_batch_threshold(1, self.use_spec_decode)
         if self.use_spec_decode:
             self.supports_update_block_table = False
+
+    def _get_replayssm_scratch_view(
+        self, batch_size: int
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        view = self._decode_replayssm_scratch_views.get(batch_size)
+        if view is None:
+            assert self.decode_replayssm_scratch is not None
+            cb_scaled, cum_adt, cb_old = self.decode_replayssm_scratch
+            view = (
+                cb_scaled[:batch_size],
+                cum_adt[:batch_size],
+                cb_old[:batch_size],
+            )
+            self._decode_replayssm_scratch_views[batch_size] = view
+        return view
 
     def build_for_cudagraph_capture(
         self, common_attn_metadata: CommonAttentionMetadata
@@ -558,15 +575,6 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
                 device=common_attn_metadata.query_start_loc.device,
             )
 
-        if self.use_flashinfer_replayssm and num_decodes > 0:
-            assert self.decode_replayssm_scratch is not None
-            cb_scaled, cumAdt_vec, cb_old = self.decode_replayssm_scratch
-            replayssm_scratch = (
-                cb_scaled[:num_decodes],
-                cumAdt_vec[:num_decodes],
-                cb_old[:num_decodes],
-            )
-
         bc_pre_scratch = None
         if (
             self.use_replayssm
@@ -657,13 +665,7 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
                 if self.decode_bc_pre_scratch is not None:
                     bc_pre_scratch = self.decode_bc_pre_scratch[:padded_bs]
             elif self.use_flashinfer_replayssm:
-                assert self.decode_replayssm_scratch is not None
-                cb_scaled, cumAdt_vec, cb_old = self.decode_replayssm_scratch
-                replayssm_scratch = (
-                    cb_scaled[:padded_bs],
-                    cumAdt_vec[:padded_bs],
-                    cb_old[:padded_bs],
-                )
+                replayssm_scratch = self._get_replayssm_scratch_view(padded_bs)
                 assert self.decode_replayssm_state_indices_d is not None
                 self.decode_replayssm_state_indices_d[:padded_bs].copy_(
                     state_indices_tensor_d[:, 0], non_blocking=True
@@ -677,6 +679,7 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
             and state_indices_tensor_d is not None
             and replayssm_state_indices_d is None
         ):
+            replayssm_scratch = self._get_replayssm_scratch_view(metadata.num_decodes)
             replayssm_state_indices_d = state_indices_tensor_d[:, 0].contiguous()
 
         return replace(

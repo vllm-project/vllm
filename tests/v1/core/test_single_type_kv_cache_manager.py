@@ -241,8 +241,7 @@ def test_replayssm_queues_live_copy_for_new_state_block():
         block_size=4,
         shapes=((2,), (3,)),
         dtypes=(torch.float32, torch.float32),
-        replayssm_shapes=((4,), (5,), (6,)),
-        replayssm_dtypes=(torch.float32,) * 3,
+        requires_live_state_copy=True,
         mamba_cache_mode="align",
     )
     block_pool = BlockPool(num_gpu_blocks=6, enable_caching=True, hash_block_size=4)

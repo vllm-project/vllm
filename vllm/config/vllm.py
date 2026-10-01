@@ -3519,11 +3519,8 @@ class VllmConfig:
                     "FlashInfer ReplaySSM align requires bfloat16 model inputs "
                     "for its replay rings; SSM state cache dtype is independent"
                 )
-            if not self.use_v2_model_runner and self.parallel_config.use_ubatching:
-                raise ValueError(
-                    "FlashInfer ReplaySSM with Model Runner V1 does not support "
-                    "microbatching"
-                )
+            if self.parallel_config.use_ubatching:
+                raise ValueError("FlashInfer ReplaySSM does not support microbatching")
             if self.parallel_config.pipeline_parallel_size > 1:
                 raise ValueError(
                     "FlashInfer ReplaySSM currently requires pipeline_parallel_size=1"

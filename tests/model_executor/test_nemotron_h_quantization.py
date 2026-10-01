@@ -68,10 +68,10 @@ def test_relu2_fp8_fusion_uses_registry():
     ("backend", "expected_num_states"),
     [
         (MambaBackendEnum.TRITON, 5),
-        (MambaBackendEnum.FLASHINFER, 2),
+        (MambaBackendEnum.FLASHINFER, 5),
     ],
 )
-def test_nemotron_h_replayssm_platform_sizing_is_backend_scoped(
+def test_nemotron_h_replayssm_platform_sizing_includes_packed_rings(
     backend: MambaBackendEnum,
     expected_num_states: int,
 ):
