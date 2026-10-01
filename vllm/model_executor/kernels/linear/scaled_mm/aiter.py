@@ -184,47 +184,32 @@ class AiterPreshuffledPerTokenFp8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
             )
 
         # Aiter's shuffled per-token Gemm performs better than torch only when its
-        # tuned, at N itself or, for PADDED_N_SHAPES, at the padded N.
+        # tuned, either at N itself or at N padded to PADDED_N_ALIGNMENT.
         if cls._n_padding(N, K) is None:
+            N_padded = N + (-N % cls.PADDED_N_ALIGNMENT)
             return (
                 False,
-                f"requires a tuned configuration for N: {N} and K: {K} "
-                f"and fp8 dtype {fp8_dtype}.",
+                f"requires a tuned configuration for N: {N} (or padded N: "
+                f"{N_padded}) and K: {K} and fp8 dtype {fp8_dtype}.",
             )
 
         return True, None
 
-    # Pad N up to a multiple of this so that e.g. N=6288 can use the tuned
-    # (FlyDSL) configs for N=6400. Mirrors ATOM's
+    # Pad N up to a multiple of this so that e.g. N=6288 / N=2112 can use the
+    # tuned (FlyDSL) configs for N=6400 / N=2176. Mirrors ATOM's
     # _maybe_pad_a8w8_preshuffle_output.
     PADDED_N_ALIGNMENT = 128
-
-    # (N, K) shapes that are padded. A tuned config at the padded N does not
-    # mean the padded Gemm beats the torch fallback (e.g. 2112x7168 -> 2176 is
-    # up to 1.37x slower for M >= 256 on MI355X), so only shapes benchmarked
-    # against it across M are listed; every other shape keeps the same kernel
-    # selection as without padding.
-    PADDED_N_SHAPES = frozenset(
-        {
-            (6288, 7168),  # Kimi-K3 KDA in_proj (TP8)
-        }
-    )
 
     @classmethod
     def _n_padding(cls, N: int, K: int) -> int | None:
         """Padding to add to N so the Gemm runs a tuned shape, or None if
-        neither N nor (for PADDED_N_SHAPES) the padded N is tuned. A tuned N
-        is never padded."""
+        neither N nor the padded N is tuned. A tuned N is never padded."""
         fp8_dtype = current_platform.fp8_dtype()
         if rocm_aiter_ops.is_shuffled_per_token_w8a8_gemm_tuned(N, K, fp8_dtype):
             return 0
         n_padding = -N % cls.PADDED_N_ALIGNMENT
-        if (
-            n_padding
-            and (N, K) in cls.PADDED_N_SHAPES
-            and rocm_aiter_ops.is_shuffled_per_token_w8a8_gemm_tuned(
-                N + n_padding, K, fp8_dtype
-            )
+        if n_padding and rocm_aiter_ops.is_shuffled_per_token_w8a8_gemm_tuned(
+            N + n_padding, K, fp8_dtype
         ):
             return n_padding
         return None
