@@ -183,15 +183,15 @@ def run_headless(args: argparse.Namespace):
     if args.reasoning_parser_plugin and len(args.reasoning_parser_plugin) > 3:
         ReasoningParserManager.import_reasoning_parser(args.reasoning_parser_plugin)
 
+    if args.data_parallel_hybrid_lb:
+        raise ValueError("data_parallel_hybrid_lb is not applicable in headless mode")
+
     # Create the EngineConfig.
     engine_args = vllm.AsyncEngineArgs.from_cli_args(args)
     usage_context = UsageContext.OPENAI_API_SERVER
     vllm_config = engine_args.create_engine_config(
         usage_context=usage_context, headless=True
     )
-
-    if engine_args.data_parallel_hybrid_lb:
-        raise ValueError("data_parallel_hybrid_lb is not applicable in headless mode")
 
     parallel_config = vllm_config.parallel_config
     local_engine_count = parallel_config.data_parallel_size_local
