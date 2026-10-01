@@ -6,6 +6,8 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorMetadata,
     KVConnectorWorkerMetadata,
 )
+from vllm.distributed.kv_transfer.kv_connector.v1.control import KVTransferRankResult
+from vllm.v1.core.kv_cache_transfer import KVCacheTransferLease
 from vllm.v1.kv_offload.base import LoadStoreSpec
 
 ReqId = str
@@ -65,11 +67,19 @@ class TransferJob:
 
 
 @dataclass
+class CPUControlJob:
+    lease: KVCacheTransferLease
+    src_spec: LoadStoreSpec | None
+    dst_spec: LoadStoreSpec | None
+
+
+@dataclass
 class OffloadingConnectorMetadata(KVConnectorMetadata):
     # Keyed by scheduler-assigned job IDs.
     load_jobs: dict[int, TransferJob]
     store_jobs: dict[int, TransferJob]
     jobs_to_flush: set[int] | None = None
+    control_jobs: list[CPUControlJob] = field(default_factory=list)
 
 
 @dataclass
@@ -84,6 +94,7 @@ class OffloadingWorkerMetadata(KVConnectorWorkerMetadata):
 
     completed_jobs: dict[int, int] = field(default_factory=dict)
     transfer_stats: TransferStats = field(default_factory=TransferStats)
+    control_results: list[KVTransferRankResult] = field(default_factory=list)
 
     def mark_completed(self, job_id: int) -> None:
         """Record a transfer job completion from this worker."""
@@ -101,4 +112,5 @@ class OffloadingWorkerMetadata(KVConnectorWorkerMetadata):
         return OffloadingWorkerMetadata(
             completed_jobs=merged,
             transfer_stats=self.transfer_stats.aggregate(other.transfer_stats),
+            control_results=[*self.control_results, *other.control_results],
         )

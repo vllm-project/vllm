@@ -154,3 +154,26 @@ entries with PCP=DCP=1; capability discovery reports these limits. Keys include
 the control compatibility namespace and are separate from ordinary offload keys.
 Paused/sleeping engines defer new physical work. In-process Python clients advance
 idle connector work cooperatively during control polling.
+
+## Native CPU movement
+
+Use the same Qwen HTTP server configuration, replacing the connector argument with:
+
+```bash
+--kv-transfer-config '{"kv_connector":"OffloadingConnector","kv_role":"kv_both","kv_connector_extra_config":{"cpu_bytes_to_use":8589934592,"blocks_per_chunk":1}}'
+```
+
+Run `http_control.py` with `--validate-movement cpu`. The driver supplies the existing
+`kv_transfer_params.max_load_tokens=0` on measured inference requests, so automatic
+CPU lookup cannot substitute for the explicit Prefetch. The native adapter uses the
+existing CPUOffloadingManager capacity and CPUOffloadingWorker copies. It accepts
+full group boundaries and one block per CPU chunk, with PCP=DCP=1. Tiering/KVCR and
+SimpleCPU do not advertise this native CPU adapter; CPU Share remains unsupported.
+
+The recorded TP=2 workflow stores/reclaims and then restores **four group copies**,
+and resumed inference hits **784 tokens** with the same greedy output. With
+`--evaluation-samples 128`, recomputation scores **124/128 (96.875%)** and CPU
+Prefetch scores **125/128 (97.65625%)**; neither truncates an answer. There is one
+final numeric-answer difference. Cached tokens are **0 / 100,352**. Full outputs
+and control results are in the `cpu-*.json.gz` result files. These are correctness
+evaluations, not evidence that movement improves model accuracy or serving speed.

@@ -16,6 +16,9 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading.common import (
     ReqId,
     TransferJob,
 )
+from vllm.distributed.kv_transfer.kv_connector.v1.offloading.control import (
+    CPUControlAdapter,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.events import (
     OffloadingEventGroupSpec,
     OffloadingEventsTracker,
@@ -561,6 +564,8 @@ def _create_req_context(req: Request) -> ReqContext:
 class OffloadingConnectorScheduler:
     """Implementation of Scheduler side methods"""
 
+    control: CPUControlAdapter | None = None
+
     def __init__(
         self,
         spec: OffloadingSpec,
@@ -1060,6 +1065,8 @@ class OffloadingConnectorScheduler:
                   (between scheduler steps).
 
         """
+        if self.control is not None and self.control.awaiting_load(request):
+            return None, False
         req_status = self._req_status[request.request_id]
         for group_state in req_status.group_states:
             group_state.block_ids.clear()
@@ -1778,6 +1785,10 @@ class OffloadingConnectorScheduler:
         self, scheduler_output: SchedulerOutput
     ) -> KVConnectorMetadata:
         self._update_req_states(scheduler_output)
+        control_jobs = self.control.take_jobs() if self.control is not None else []
+        self._current_batch_allocated_block_ids.update(
+            job.lease.block_id for job in control_jobs if job.lease.direction == "load"
+        )
         schedule_end_context = ScheduleEndContext(
             new_req_ids=[req.req_id for req in scheduler_output.scheduled_new_reqs],
             preempted_req_ids=scheduler_output.preempted_req_ids or (),
@@ -1813,6 +1824,7 @@ class OffloadingConnectorScheduler:
             load_jobs=self._current_batch_load_jobs,
             store_jobs=partial_store_jobs | normal_store_jobs,
             jobs_to_flush=self._current_batch_jobs_to_flush,
+            control_jobs=control_jobs,
         )
 
         # All prepare_store calls for finished requests have been issued.
@@ -1836,7 +1848,11 @@ class OffloadingConnectorScheduler:
         While True, build_connector_meta() and update_connector_output()
         continue to be called even when no requests are scheduled.
         """
-        return bool(self._jobs) or self.manager.has_pending_work()
+        return (
+            bool(self._jobs)
+            or self.manager.has_pending_work()
+            or (self.control is not None and self.control.has_pending)
+        )
 
     def update_connector_output(self, connector_output: KVConnectorOutput):
         """Update KVConnector state from worker-side connectors output.
@@ -1850,6 +1866,8 @@ class OffloadingConnectorScheduler:
         if not isinstance(meta, OffloadingWorkerMetadata):
             assert meta is None
             meta = OffloadingWorkerMetadata()
+        if self.control is not None:
+            self.control.update(meta.control_results)
         if not meta.transfer_stats.is_empty():
             transfer_stats = OffloadingConnectorStats()
             if not meta.transfer_stats.load.is_empty():

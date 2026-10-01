@@ -20,6 +20,7 @@ from tests.v1.kv_connector.unit.utils import EOS_TOKEN_ID
 from vllm.config import KVEventsConfig
 from vllm.distributed.kv_events import MEDIUM_CPU, BlockRemoved, BlockStored
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.common import (
+    CPUControlJob,
     OffloadingConnectorMetadata,
     OffloadingWorkerMetadata,
 )
@@ -38,6 +39,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading.scheduler import (
 )
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
+from vllm.v1.core.kv_cache_transfer import KVCacheTransferLease
 from vllm.v1.core.kv_cache_utils import (
     BlockHash,
     KVCacheBlock,
@@ -64,6 +66,7 @@ from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 from vllm.v1.kv_hints import KvHintsEnvelope
 from vllm.v1.kv_offload.base import (
     GPULoadStoreSpec,
+    LoadStoreSpec,
     LookupResult,
     Medium,
     OffloadingEvent,
@@ -364,8 +367,8 @@ def test_aligned_boundary_store_maps_sparse_group_id_to_dense_transfer_slot():
     assert job.src_spec.block_indices == [0]
 
 
-@pytest.mark.parametrize("cow_reuse", [False, True])
-def test_aligned_boundary_store_flushes_before_block_reuse(cow_reuse):
+@pytest.mark.parametrize("reuse", ["request", "cow", "control"])
+def test_aligned_boundary_store_flushes_before_block_reuse(reuse):
     scheduler = _make_partial_tail_scheduler()
     _make_partial_tail_request(scheduler)
     scheduler.manager.prepare_store.side_effect = lambda keys, req_context: (
@@ -382,8 +385,22 @@ def test_aligned_boundary_store_flushes_before_block_reuse(cow_reuse):
     [job_id] = meta.store_jobs
 
     output = SchedulerOutput.make_empty()
-    if cow_reuse:
+    if reuse == "cow":
         output.kv_cache_block_copies = [KVCacheBlockCopy(98, 99)]
+    elif reuse == "control":
+        lease = KVCacheTransferLease(
+            17,
+            0,
+            "load",
+            "cpu/namespace",
+            make_block_hash_with_group_id(BlockHash(b"control"), 0),
+            16,
+            99,
+        )
+        control_job = CPUControlJob(
+            lease, LoadStoreSpec(), GPULoadStoreSpec([99], [1, 0], [0, 0])
+        )
+        scheduler.control = SimpleNamespace(take_jobs=lambda: [control_job])
     else:
         output.scheduled_cached_reqs.req_ids = ["req"]
         output.scheduled_cached_reqs.new_block_ids = [([], [99])]

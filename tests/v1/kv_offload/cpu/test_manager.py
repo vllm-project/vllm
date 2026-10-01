@@ -3,10 +3,18 @@
 from collections import OrderedDict
 from collections.abc import Iterable
 from dataclasses import dataclass
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
 
+from vllm.distributed.kv_transfer.kv_connector.v1.control import KVTransferRankResult
+from vllm.distributed.kv_transfer.kv_connector.v1.offloading.control import (
+    CPUControlAdapter,
+)
+from vllm.v1.core.kv_cache_transfer import KVCacheTransferLease
+from vllm.v1.core.kv_cache_utils import BlockHash, make_block_hash_with_group_id
+from vllm.v1.kv_hints.control import ControlError
 from vllm.v1.kv_offload.base import (
     LoadStoreSpec,
     LookupResult,
@@ -1561,3 +1569,85 @@ def test_request_key_positions_order_tails_across_kv_groups():
     output = manager.prepare_store(to_keys([10, 11]), make_req_context("evict"))
     assert output is not None
     assert set(output.evicted_keys) == {group_0_tail, group_1_tail}
+
+
+def make_control_lease(identifier, direction, content=b"a", namespace="current"):
+    return KVCacheTransferLease(
+        identifier,
+        0,
+        direction,
+        f"cpu/{namespace}",
+        make_block_hash_with_group_id(BlockHash(content * 32), 0),
+        16,
+        3,
+    )
+
+
+def make_cpu_control_adapter(num_chunks=1):
+    manager = make_cpu_manager(num_chunks=num_chunks)
+    config = SimpleNamespace(
+        num_workers=2,
+        blocks_per_chunk=1,
+        tokens_per_hash=16,
+        kv_group_configs=(SimpleNamespace(group_idx=0, tokens_per_block=16),),
+    )
+    return manager, CPUControlAdapter(manager, config)
+
+
+def complete_control_cpu(adapter, lease, success=True):
+    adapter.update(
+        [
+            KVTransferRankResult(lease.transfer_id, lease.generation, rank, success)
+            for rank in range(2)
+        ]
+    )
+    (result,) = adapter.poll()
+    return result
+
+
+@pytest.mark.parametrize("direction", ["load", "store"])
+def test_native_cpu_ready_copy_stays_protected_until_all_consumers_finish(direction):
+    manager, adapter = make_cpu_control_adapter()
+    stored = make_control_lease(1, "store")
+    adapter.submit(stored)
+    (store_job,) = adapter.take_jobs()
+    check_split_usage_stats(manager, write=1, read=0, total=1)
+    ack = KVTransferRankResult(1, 0, 0, True)
+    adapter.update([ack, ack])
+    assert adapter.poll() == () and adapter.has_pending
+    check_split_usage_stats(manager, write=1, read=0, total=1)
+    assert complete_control_cpu(adapter, stored).success
+    check_split_usage_stats(manager, write=0, read=0, total=0)
+    reading = make_control_lease(2, direction)
+    adapter.submit(reading)
+    (read_job,) = adapter.take_jobs()
+    if direction == "load":
+        assert np.array_equal(read_job.src_spec.chunk_ids, store_job.dst_spec.chunk_ids)
+    else:
+        assert read_job.src_spec is None and read_job.dst_spec is None
+    check_split_usage_stats(manager, write=0, read=1, total=1)
+    with pytest.raises(ControlError, match="admission"):
+        adapter.submit(make_control_lease(3, "store", content=b"b"))
+    assert complete_control_cpu(adapter, reading).success
+    replacing = make_control_lease(4, "store", content=b"b")
+    adapter.submit(replacing)
+    adapter.take_jobs()
+    assert not complete_control_cpu(adapter, replacing, success=False).success
+    check_split_usage_stats(manager, write=0, read=0, total=0)
+    with pytest.raises(ControlError, match="missing"):
+        adapter.submit(make_control_lease(5, "load", content=b"b"))
+    assert not adapter.has_pending
+
+
+def test_native_cpu_namespace_prevents_loading_another_weight_versions_copy():
+    _, adapter = make_cpu_control_adapter()
+    stored = make_control_lease(1, "store", namespace="old")
+    adapter.submit(stored)
+    adapter.take_jobs()
+    assert complete_control_cpu(adapter, stored).success
+    with pytest.raises(ControlError, match="missing"):
+        adapter.submit(make_control_lease(2, "load", namespace="new"))
+    original = make_control_lease(3, "load", namespace="old")
+    adapter.submit(original)
+    assert len(adapter.take_jobs()) == 1
+    assert complete_control_cpu(adapter, original).success

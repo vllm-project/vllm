@@ -148,6 +148,8 @@ def main():
         }
         if hints is not None:
             body["kv_hints"] = hints
+        if args.validate_movement == "cpu":
+            body["kv_transfer_params"] = {"max_load_tokens": 0}
         response = post("/v1/completions", body, base_url=base_url)
         assert response["choices"][0]["prompt_token_ids"] == tokens
         report["inference"].append(response)
@@ -421,6 +423,8 @@ def main():
                 }
                 if mode == "recompute":
                     body["cache_salt"] = f"{run_id}-question-{index}"
+                if tier == "cpu":
+                    body["kv_transfer_params"] = {"max_load_tokens": 0}
                 response = requests.post(
                     args.base_url + "/v1/completions",
                     json=body,

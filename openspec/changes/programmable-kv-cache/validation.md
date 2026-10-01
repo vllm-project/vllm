@@ -490,3 +490,60 @@ artifacts under `benchmarks/programmable_kv_cache/results/`.
 This verifies the fixed-weight local Qwen profile and the direct-controller path.
 Live weight updates, policy-driven movement, pressure/fairness measurements and
 the external GPT-OSS/DeepSeek matrix remain incomplete.
+
+## Native CPU movement through the existing offload path
+
+The CPU adapter shares existing CPUOffloadingManager capacity and reservations,
+with namespaced cold keys and ordinary CPUOffloadingWorker copies. Each rank
+acknowledges native work separately from request jobs; no fake inference request
+or inference completion receipt is produced. Ready cold copies remain referenced
+until all ranks finish, and reset is refused while native work owns cold buffers.
+Share is unsupported on CPU. Initial support requires one GPU block per CPU chunk,
+full primary boundaries and PCP=DCP=1; tiering/KVCR is not advertised as this adapter.
+
+Native destination allocations now join the connector's existing reuse fence.
+This is necessary because ordinary CPU saves can keep reading an idle GPU block
+until a later step flushes them. The old store is submitted/waited before a native
+load can overwrite a reused block. The existing boundary-store test now covers
+request allocation, CoW and native-control reuse.
+
+```bash
+CUDA_VISIBLE_DEVICES=0,3 HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 \
+  .venv/bin/python -m pytest tests/v1/kv_offload/cpu/test_manager.py \
+  tests/v1/kv_offload/cpu/test_gpu_worker.py \
+  tests/v1/kv_connector/unit/offloading_connector/ -q -rs
+```
+
+Result: **565 passed, 1 skipped**, 162.90 seconds. The skip is ROCm-specific.
+After the reuse-fence refinement, the complete connector scheduler suite passed
+**312 tests**, 89.59 seconds. New manager/worker checks cover cold capacity holds,
+duplicate rank reports, failure cleanup, namespace separation and absent inference
+receipts. Normal hooks and manual mypy 3.12 passed before the final fence refinement;
+the final checks are recorded with the phase commit.
+
+A broader initial run also included `unit/test_offloading_connector.py`, which
+actually loads multiple models: **558 passed, 1 skipped, 11 failed**. Six Llama
+cases hit gated-repository 403 responses, Gemma was unavailable from the configured
+mirror/local cache, and four public-model cases failed their startup memory check
+while the live validation engines occupied GPUs. This run is not counted as a
+passing model matrix; the local Qwen checks below have their own actual evidence.
+After releasing both Qwen instances, an offline `-k 'mamba or Falcon'` rerun passed
+the Mamba-130m model test. The other three cases now reach weight loading and fail
+because Falcon-H1-0.5B and Mamba-1.4B weights are absent from the local snapshots
+(**1 passed, 3 failed, 7 deselected**, 139.53 seconds). Those model cases remain
+unvalidated; no code failure is inferred from missing artifacts. The final normal
+pre-commit hooks and manual mypy 3.12 pass for the implemented CPU phase.
+
+The full HTTP Qwen CPU workflow passes, including request-free Demote/Prefetch,
+missing content, request association and source-reference checks. Measured requests
+set the existing `max_load_tokens=0` to exclude automatic CPU loading. Demote
+reclaims **4 group copies**; explicit Prefetch restores them before inference,
+which hits **784 tokens** and preserves the short greedy output token IDs.
+
+The 128-question accuracy run scores **124/128 (96.875%)** for recomputation and
+**125/128 (97.65625%)** after CPU movement before each eight-question batch. Both
+have zero truncated answers; **one** final numeric answer differs. Cache hits are
+**0 / 100,352**. Timings are 709.25 / 724.20 seconds, including driver warmup and
+control work, so no serving-speed or accuracy improvement is claimed. The complete
+rows and operation results are in the two `cpu-*.json.gz` artifacts. The model
+server is stopped afterward; GPU 1's unrelated workload is untouched.

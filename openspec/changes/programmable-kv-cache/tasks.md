@@ -41,7 +41,7 @@
 ## 5. Independent backend execution
 
 - [x] 5.1 Add request-free operation dispatch/progress/completion to engine and connector liveness without synthetic inference requests.
-- [ ] 5.2 Adapt the selected CPU offload path for approved Demote and Prefetch, including resume/load coordination.
+- [x] 5.2 Adapt the selected CPU offload path for approved Demote and Prefetch, including resume/load coordination.
 - [x] 5.3 Adapt Mooncake Store lookup, approved buffers, transfer metadata, and completion for independent operations using unchanged backend APIs.
 - [x] 5.4 Implement the agreed Share orchestration/result semantics and per-backend unsupported results.
 - [ ] 5.5 Verify real transfer correctness, partial failures, cancellation, all-rank completion, reset races, and source reclamation timing.
