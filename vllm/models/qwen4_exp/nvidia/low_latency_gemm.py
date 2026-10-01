@@ -43,7 +43,13 @@ QWEN4_EXP_GEMM_PLANS: dict[tuple[int, int], dict[int, SkinnyGemmConfig]] = {
         8: SkinnyGemmConfig(8, 128, 1, k_unroll=4, vector_width=4),
         16: SkinnyGemmConfig(16, 128, 1, k_unroll=4, vector_width=4),
     },
-    # QSA fused QKV/gate projection, TP=4.
+    # QSA fused QKV/gate + replicated indexer Q/K, TP=4 (GB300).
+    (4224, 2560): {
+        1: SkinnyGemmConfig(1, 128, 4, vector_width=4, static_k=2560),
+        2: SkinnyGemmConfig(2, 128, 2, vector_width=4, static_k=2560),
+        4: SkinnyGemmConfig(4, 64, 4, vector_width=4, static_k=2560),
+    },
+    # Separate QSA QKV/gate projection when indexer fusion is unavailable, TP=4.
     (3584, 2560): {
         1: SkinnyGemmConfig(1, 128, 4, k_unroll=4, vector_width=4),
         2: SkinnyGemmConfig(2, 64, 2, k_unroll=2),
@@ -102,7 +108,7 @@ QWEN4_EXP_SM90_GEMM_PLANS: dict[tuple[int, int], dict[int, SkinnyGemmConfig]] = 
         8: SkinnyGemmConfig(8, 128, 1, vector_width=4, static_k=2560),
         16: SkinnyGemmConfig(16, 128, 1, vector_width=4, static_k=2560),
     },
-    # QSA fused QKV/gate projection, TP=4.
+    # Separate QSA QKV/gate projection when indexer fusion is unavailable, TP=4.
     (3584, 2560): {
         1: SkinnyGemmConfig(1, 128, 4, vector_width=2, static_k=2560),
         2: SkinnyGemmConfig(2, 64, 4, k_unroll=5),
