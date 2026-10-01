@@ -35,6 +35,7 @@ from vllm.v1.attention.backends.mla.sparse_utils import (
     triton_filter_and_convert_dcp_index,
 )
 from vllm.v1.kv_cache_interface import AttentionSpec
+from vllm.v1.worker.workspace import current_workspace_manager
 
 if TYPE_CHECKING:
     from vllm.model_executor.models.deepseek_v2 import Indexer
@@ -291,17 +292,16 @@ class FlashInferMLASparseTRTLLMMetadataBuilder(FlashInferMLASparseMetadataBuilde
                 vllm_config.parallel_config
             )
             _get_workspace_buffer(
-                device,
                 _required_workspace_bytes(
                     self.dcp_world_size,
                     num_q_heads,
                     vllm_config.scheduler_config.max_num_batched_tokens,
-                ),
+                )
             )
 
 
-# Global workspace buffer (lazily initialized)
-_fi_sparse_workspace: torch.Tensor | None = None
+# Workspace bytes requested from the WorkspaceManager (DCP raises it).
+_fi_sparse_workspace_bytes = 0
 
 # trtllm-gen carves a softmax-stats slab from the workspace whenever LSE is
 # requested (FlashInfer csrc/trtllm_fmha_kernel_launcher.cu, unchanged from
@@ -381,24 +381,20 @@ def _required_workspace_bytes(
     return env_bytes
 
 
-def _get_workspace_buffer(
-    device: torch.device, min_bytes: int | None = None
-) -> torch.Tensor:
-    global _fi_sparse_workspace
+def _get_workspace_buffer(min_bytes: int | None = None) -> torch.Tensor:
+    global _fi_sparse_workspace_bytes
     required = (
         min_bytes
         if min_bytes is not None
         else envs.VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE
     )
-    if _fi_sparse_workspace is None or _fi_sparse_workspace.numel() < required:
-        # FlashInfer's CuteDSL MLA-decode tactic requires an int8 workspace;
-        # the trtllm-gen path views it as uint8, so int8 is safe for all backends.
-        _fi_sparse_workspace = torch.zeros(
-            required,
-            dtype=torch.int8,
-            device=device,
-        )
-    return _fi_sparse_workspace
+    _fi_sparse_workspace_bytes = max(_fi_sparse_workspace_bytes, required)
+    # FlashInfer's CuteDSL MLA-decode tactic requires an int8 workspace;
+    # the trtllm-gen path views it as uint8, so int8 is safe for all backends.
+    (workspace,) = current_workspace_manager().get_simultaneous(
+        ((_fi_sparse_workspace_bytes,), torch.int8)
+    )
+    return workspace
 
 
 class FlashInferMLASparseImpl(SparseMLACommonImpl[FlashInferMLASparseMetadata]):
@@ -460,7 +456,8 @@ class FlashInferMLASparseImpl(SparseMLACommonImpl[FlashInferMLASparseMetadata]):
             **mla_args,
         )
 
-        self._workspace_buffer: torch.Tensor | None = None
+        # Reserve before CUDA graph capture; re-requested on every call.
+        _get_workspace_buffer()
         self.bmm1_scale: float | None = None
         self.bmm2_scale: float | None = None
 
@@ -492,7 +489,7 @@ class FlashInferMLASparseImpl(SparseMLACommonImpl[FlashInferMLASparseMetadata]):
         assert self.topk_indices_buffer is not None
         topk_indices = self.topk_indices_buffer[:num_actual_toks]
 
-        self._prepare_mqa_kernel(layer, q.device)
+        self._prepare_mqa_kernel(layer)
 
         index_group = self.index_group
         if isinstance(index_group, HiSparseMLAIndexGroup):
@@ -597,14 +594,7 @@ class FlashInferMLASparseImpl(SparseMLACommonImpl[FlashInferMLASparseMetadata]):
             seq_lens,
         )
 
-    def _prepare_mqa_kernel(
-        self,
-        layer: AttentionLayer,
-        device: torch.device,
-    ) -> None:
-        if self._workspace_buffer is None:
-            self._workspace_buffer = _get_workspace_buffer(device)
-
+    def _prepare_mqa_kernel(self, layer: AttentionLayer) -> None:
         if self.bmm1_scale is None:
             self.bmm1_scale = self.scale
             if is_quantized_kv_cache(self.kv_cache_dtype):
@@ -624,7 +614,7 @@ class FlashInferMLASparseImpl(SparseMLACommonImpl[FlashInferMLASparseMetadata]):
         kv_cache = runtime.hot.attention_cache
         num_tokens = runtime.max_num_reqs
         topk_tokens = self.topk_indices_buffer.shape[1]
-        self._prepare_mqa_kernel(layer, kv_cache.device)
+        self._prepare_mqa_kernel(layer)
 
         q_dtype = (
             current_platform.fp8_dtype()
@@ -664,7 +654,6 @@ class FlashInferMLASparseImpl(SparseMLACommonImpl[FlashInferMLASparseMetadata]):
         topk_indices: torch.Tensor,
         seq_lens: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
-        assert self._workspace_buffer is not None
         assert self.bmm1_scale is not None
         assert self.bmm2_scale is not None
 
@@ -705,7 +694,7 @@ class FlashInferMLASparseImpl(SparseMLACommonImpl[FlashInferMLASparseMetadata]):
         kernel_out = trtllm_batch_decode_with_kv_cache_mla(
             query=query,
             kv_cache=kv_cache.unsqueeze(1),
-            workspace_buffer=self._workspace_buffer,
+            workspace_buffer=_get_workspace_buffer(),
             qk_nope_head_dim=self.qk_nope_head_dim,
             kv_lora_rank=self.kv_lora_rank,
             qk_rope_head_dim=self.qk_rope_head_dim,
