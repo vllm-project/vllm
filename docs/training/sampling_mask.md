@@ -107,6 +107,39 @@ log_prob = log_softmax(masked_logits)[sampled_token_id]
 Both sides normalize over the same token set, so the importance ratio is
 consistent.
 
+## Score centering with top-k logprobs
+
+[Score centering](https://arxiv.org/abs/2609.20807) needs the sampler's top-k
+token IDs and logprobs plus the sampled token's logprob; the paper uses
+`k=128` and does not need the exact sampling support. vLLM already returns
+this through the ordinary `logprobs` parameter:
+
+```bash
+vllm serve <model> --logprobs-mode processed_logprobs --max-logprobs 128
+```
+
+```json
+{"sampling_params": {"temperature": 1.0, "top_p": 0.9, "logprobs": 128}}
+```
+
+Each position then carries the sampled token's logprob and the top-128
+`(token_id, logprob)` pairs, normalized over the post-truncation support:
+
+```json
+{"token": "token_id:11", "logprob": -0.757,
+ "top_logprobs": [{"token": "token_id:11", "logprob": -0.757},
+                  {"token": "token_id:13", "logprob": -0.632},
+                  {"token": "token_id:0",  "logprob": -9999.0}, ...]}
+```
+
+- `--max-logprobs` defaults to 20; raise it to the requested `k`.
+- Tokens outside the support are returned as `-9999.0` with arbitrary IDs;
+  drop them. The finite entries are the sampling mask when it has at most `k`
+  tokens.
+- The sampled token is always the first entry and may repeat inside the top-k.
+- `/inference/v1/generate` encodes IDs as `token_id:<id>`; the OpenAI
+  endpoints need `return_tokens_as_token_ids`.
+
 ## Limitations
 
 - **Engine-level flag:** `--return-sampling-mask` globally disables the
