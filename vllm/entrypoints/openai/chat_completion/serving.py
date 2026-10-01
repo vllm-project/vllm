@@ -392,6 +392,11 @@ class OpenAIServingChat(GenerateBaseServing):
                     }
                     if parser is not None and parser.reasoning_parser is not None
                     else None,
+                    **(
+                        {"kv_hints": request.kv_hints}
+                        if request.kv_hints is not None
+                        else {}
+                    ),
                 )
 
             generators.append(generator)

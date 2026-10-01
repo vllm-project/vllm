@@ -9,6 +9,7 @@ import msgspec
 import pytest
 
 from vllm.v1.kv_hints import KvHintAction, KvHintsEnvelope
+from vllm.v1.kv_hints.api import KVControlService, unwrap_control_reply
 from vllm.v1.kv_hints.control import (
     ControlContext,
     ControlError,
@@ -879,3 +880,77 @@ def test_native_result_and_deduplication_are_bound_to_cache_compatibility(contro
     )
     with pytest.raises(ControlError, match="different content"):
         updated.submit(hint, CONTEXT)
+
+
+def test_utility_submission_queries_and_events_share_the_same_records(controller):
+    service = KVControlService(controller)
+    invocation = {"engine_id": CONTEXT.engine_id, "engine_epoch": CONTEXT.engine_epoch}
+    envelope = command(
+        "control", "signal", {"target": SESSION_TARGET, "signal": "tool_wait"}
+    )
+    submitted = unwrap_control_reply(
+        service.call("submit", invocation, msgspec.to_builtins(envelope))
+    )
+    query = unwrap_control_reply(
+        service.call(
+            "operation", invocation, {"message_id": "control", "action_id": "action"}
+        )
+    )
+    events = unwrap_control_reply(
+        service.call("events", invocation, {"stream": "operation", "after": 0})
+    )
+    assert query == submitted["results"][0] == events[-1]
+    assert query["status"] == "unconsumed"
+    assert unwrap_control_reply(
+        service.call("submit", invocation, msgspec.to_builtins(envelope))
+    )["replayed"]
+
+
+@pytest.mark.parametrize(
+    "route,payload,method,code",
+    [
+        ({"engine_id": "other"}, {}, "associations", "wrong_engine"),
+        ({"engine_epoch": "previous"}, {}, "associations", "stale_epoch"),
+        ({"namespace": "old-weights"}, {}, "associations", "incompatible"),
+        ({"binding_id": "inference"}, {}, "associations", "invalid_payload"),
+        ({}, {"limit": 0}, "associations", "invalid_payload"),
+        ({}, {"limit": True}, "associations", "invalid_payload"),
+        ({}, {"unexpected": 1}, "associations", "invalid_payload"),
+        ({}, {"stream": "operation", "after": 100}, "events", "event_gap"),
+        ({"consumer": "backend"}, {}, "associations", "unsupported"),
+        ({}, {}, "unknown", "unsupported"),
+        ({}, {"message_id": "absent", "action_id": "a"}, "operation", "missing"),
+    ],
+)
+def test_utility_rejections_preserve_engine_state(
+    controller, route, payload, method, code
+):
+    invocation = {
+        "engine_id": CONTEXT.engine_id,
+        "engine_epoch": CONTEXT.engine_epoch,
+        **route,
+    }
+    before = controller.index.query()
+    with pytest.raises(ControlError) as failure:
+        unwrap_control_reply(
+            KVControlService(controller).call(method, invocation, payload)
+        )
+    assert failure.value.code == code
+    assert controller.index.query() == before
+
+
+def test_utility_pagination_cursor_survives_json_conversion(controller):
+    create_session(controller, "a")
+    create_session(controller, "b")
+    invocation = {"engine_id": CONTEXT.engine_id, "engine_epoch": CONTEXT.engine_epoch}
+    service = KVControlService(controller)
+    first = unwrap_control_reply(service.call("associations", invocation, {"limit": 1}))
+    second = unwrap_control_reply(
+        service.call(
+            "associations",
+            invocation,
+            {"after": first["next_after"], "revision": first["revision"]},
+        )
+    )
+    assert first["items"][0]["session_id"] == "a"
+    assert second["items"][0]["session_id"] == "b"

@@ -3,14 +3,14 @@
 ## 1. Resolve remaining design questions
 
 - [x] 1.1 Record the user's scheduler-cooperation scope and RL workload choice; update design and affected specs before implementing dependent behavior.
-- [ ] 1.2 Agree on the control transport/profile, explicit engine routing, target coverage, CPU adapter, and per-backend capability matrix.
+- [x] 1.2 Agree on the control transport/profile, explicit engine routing, target coverage, CPU adapter, and per-backend capability matrix.
 - [x] 1.3 Specify operation statuses, deduplication/retry limits, declaration timing, task cleanup ordering, and bounded index/result storage.
 - [x] 1.4 Specify reference policies, composer conflict rules, and any optional admission/score behavior without allowing cache plugins to mutate queues directly.
 - [x] 1.5 Identify the model, usable GPU allocation, Mooncake deployment, and open-source rollout example for reproducible validation.
 - [x] 1.6 Confirm application control through the merged hints, explicit state commands separate from policy signals, and incremental association events with queries.
 - [x] 1.7 Define snapshot/follow-growth target scope, derived-plan outcomes, and stale/retried logical-state updates.
 - [x] 1.8 Confirm lightweight orchestrator for first delivery, one interpretation path per entire envelope, preserved KVCR forwarding, and a separate future-work tracker.
-- [ ] 1.9 Specify native/backend route selection in invocation/configuration, consumer capability reporting, and native payload validation without changing merged hint fields.
+- [x] 1.9 Specify native/backend route selection in invocation/configuration, consumer capability reporting, and native payload validation without changing merged hint fields.
 
 ## 2. Environment and test design
 
@@ -28,7 +28,7 @@
 - [x] 3.6 Implement the agreed explicit association/continuation/task management commands separately from optional policy signals.
 - [ ] 3.7 Implement bounded logical-state queries and the agreed association events, including new membership on cache hits.
 - [ ] 3.8 Verify derived-step correlation, partial effects, unknown versions, bounded/pruned index behavior, and stale logical updates.
-- [ ] 3.9 Implement whole-envelope native/backend dispatch and ensure native-consumed envelopes are not also forwarded through KVCR's existing request hook.
+- [x] 3.9 Implement whole-envelope native/backend dispatch and ensure native-consumed envelopes are not also forwarded through KVCR's existing request hook.
 
 ## 4. Local execution and policy integration
 
@@ -49,10 +49,10 @@
 
 ## 6. Serving and observability
 
-- [ ] 6.1 Wire request-attached hints through the agreed public serving paths into the common control implementation.
-- [ ] 6.2 Expose independent submission, capability queries, and operation results through the agreed transport with explicit engine targeting.
+- [x] 6.1 Wire request-attached hints through the agreed public serving paths into the common control implementation.
+- [x] 6.2 Expose independent submission, capability queries, and operation results through the agreed transport with explicit engine targeting.
 - [ ] 6.3 Add association/residency/result reporting and restart/gap handling from common state records.
-- [ ] 6.4 Verify serving protocol compatibility, version errors, engine routing, and agreement between events and queries.
+- [x] 6.4 Verify serving protocol compatibility, version errors, engine routing, and agreement between events and queries.
 
 ## 7. Examples and evaluation
 

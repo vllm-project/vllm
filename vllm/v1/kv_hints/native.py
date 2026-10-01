@@ -3,7 +3,7 @@
 """Payload schemas for vLLM's native consumer of the merged hint envelope."""
 
 import math
-from typing import Annotated, Literal, TypeAlias
+from typing import Annotated, Any, Literal, TypeAlias
 
 import msgspec
 
@@ -176,6 +176,7 @@ class ConsumerCapabilities(msgspec.Struct, frozen=True):  # type: ignore[call-ar
     result_ttl_seconds: float
     max_actions: int
     max_envelope_bytes: int
+    cache_profile: dict[str, Any] | None = None
 
 
 def validate_target(target: Target) -> None:

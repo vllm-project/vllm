@@ -1085,6 +1085,14 @@ class AsyncLLM(EngineClient):
         await self.renderer.clear_mm_cache_async()
         await self.engine_core.reset_mm_cache_async()
 
+    async def get_kv_control_capabilities(self) -> list[dict[str, Any]]:
+        return await self.engine_core.get_kv_control_capabilities_async()
+
+    async def kv_control(
+        self, method: str, invocation: dict[str, Any], payload: dict[str, Any]
+    ) -> Any:
+        return await self.engine_core.kv_control_async(method, invocation, payload)
+
     async def reset_prefix_cache(
         self, reset_running_requests: bool = False, reset_connector: bool = False
     ) -> bool:

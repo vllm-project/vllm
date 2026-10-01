@@ -15,7 +15,7 @@ from functools import partial
 from inspect import isclass, signature
 from logging import DEBUG
 from multiprocessing.queues import Queue
-from typing import Any, TypeVar, cast, get_args
+from typing import TYPE_CHECKING, Any, TypeVar, cast, get_args
 
 import msgspec
 import zmq
@@ -101,6 +101,9 @@ from vllm.v1.utils import compute_iteration_details
 from vllm.version import __version__ as VLLM_VERSION
 
 logger = init_logger(__name__)
+
+if TYPE_CHECKING:
+    from vllm.v1.kv_hints.api import KVControlService
 
 
 HANDSHAKE_TIMEOUT_MINS = 5
@@ -237,6 +240,16 @@ class EngineCore:
             self.step if self.batch_queue is None else self.step_with_batch_queue
         )
         self.async_scheduling = vllm_config.scheduler_config.async_scheduling
+
+        self.kv_control_service: KVControlService | None = None
+        if vllm_config.kv_control_config is not None:
+            from vllm.v1.kv_hints.engine import create_control_service
+
+            self.kv_control_service = create_control_service(
+                vllm_config,
+                cast(Any, self.scheduler).kv_cache_manager,
+                self._weight_version,
+            )
 
         self.aborts_queue = queue.Queue[list[str]]()
 
@@ -483,6 +496,28 @@ class EngineCore:
             )
         return metadata
 
+    def get_kv_control_capabilities(self) -> dict[str, Any] | None:
+        """Discover this engine's control epoch and currently supported scope."""
+        if self.kv_control_service is None:
+            return None
+        return msgspec.json.decode(
+            msgspec.json.encode(self.kv_control_service.controller.capabilities())
+        )
+
+    def kv_control(
+        self, method: str, invocation: dict[str, Any], payload: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Process request-free control on the engine's existing utility channel."""
+        if self.kv_control_service is None:
+            return {
+                "ok": False,
+                "error": {
+                    "code": "unsupported",
+                    "message": "Programmable KV control is disabled",
+                },
+            }
+        return self.kv_control_service.call(method, invocation, payload)
+
     def add_request(self, request: Request, request_wave: int = 0):
         """Add request to the scheduler.
 
@@ -522,6 +557,29 @@ class EngineCore:
                 "Got ec_transfer_params, but no ECConnector found. "
                 "Disabling ECTransfer for this request."
             )
+
+        service = getattr(self, "kv_control_service", None)
+        if service is not None and request.kv_hints is not None:
+            from vllm.v1.kv_hints.control import ControlContext, ControlError
+
+            settings = self.vllm_config.kv_control_config
+            assert settings is not None
+            registry = service.controller.registry
+            context = ControlContext(
+                registry.engine_id, registry.engine_epoch, settings.attached_consumer
+            )
+            try:
+                receipt = service.controller.consume_attached(
+                    request.kv_hints, context, request_id=request.request_id
+                )
+                if receipt is not None:
+                    request.kv_hints = None
+            except ControlError as error:
+                logger.warning(
+                    "Request-attached KV control rejected: %s: %s", error.code, error
+                )
+                request.kv_hints = None
+                request.abort_immediately = True
 
         self.scheduler.add_request(request)
         if request.abort_immediately:

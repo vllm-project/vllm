@@ -23,6 +23,67 @@ alias growth, stale revisions, cleanup and capacity reclamation, retention scope
 and unchanged expiry across branches, and correlated replay of rejected rewrites.
 This change has no serving/model-path effect yet.
 
+## Native startup and Python/HTTP serving control
+
+Added opt-in `KVControlConfig`, an initialized model/group/hash compatibility
+profile, safe utility serialization, explicit engine/epoch targeting, Python and
+HTTP submission/query/events, and request-attached completion/chat/streaming
+forwarding into the merged envelope. Native envelopes are removed before the
+legacy connector hook; backend envelopes preserve their opaque records. Invalid
+attached wrappers abort their request. Request targeting and automatic growth are
+not advertised yet. CPU/Mooncake adapters and policies remain pending.
+
+Complete regression command:
+
+```bash
+CUDA_VISIBLE_DEVICES=0,3 .venv/bin/python -m pytest \
+  tests/v1/test_kv_hint_control.py tests/v1/test_kv_hint_state.py \
+  tests/v1/engine/test_kv_control.py \
+  tests/v1/engine/test_kv_cache_group_metadata.py \
+  tests/v1/engine/test_engine_args.py tests/v1/test_request.py \
+  tests/v1/test_serial_utils.py tests/v1/core/test_prefix_caching.py \
+  tests/v1/core/test_deferred_block_free.py \
+  tests/v1/core/test_single_type_kv_cache_manager.py \
+  tests/v1/core/test_scheduler.py tests/v1/core/test_async_scheduler.py \
+  tests/v1/kv_offload/tiering/test_kvcr_tier.py \
+  tests/entrypoints/serve/kv_control/test_api.py -q
+```
+
+Result: **641 passed**, 322.58 seconds. An earlier run caught tuple/list differences
+between in-process and serialized replies; the facade now returns the same JSON
+shape. After adding attached dispatch, its complete control/engine/KVCR suites
+passed **134 tests** (38.90 seconds), and the final engine suite passed **12 tests**.
+After adding serving fields, the complete HTTP, Responses protocol/sampling and
+admission suites passed **72 tests** (21.33 seconds). DP routing tests verify a
+mutation reaches only its named engine, reject ambiguous names, and reject unknown
+engines before sending a mutation. Normal hooks and manual mypy 3.12 passed.
+The final complete control/state/engine/HTTP/Responses/admission suites pass
+**234 tests**, 88.83 seconds, after the serving and capability changes.
+
+The enabled-controller 128-question Qwen TP=2 command adds `--enable-kv-control` to
+the recorded `evaluate.py` command. The request-free utility lifecycle passes;
+recompute and prefix-cache modes both score **125/128 (97.65625%)**, with zero
+truncations and zero final numeric-answer mismatches. Cache hits are **0 / 99,568**;
+token sequences differ on 33 questions. Timings are 356.190 / 325.700 seconds;
+these concurrent-development runs are not a controlled overhead/speedup experiment.
+The accuracy run preceded final HTTP/profile-reporting changes; those were tested
+separately through the live server. No transfer or policy benefit is claimed.
+
+Started the actual local Qwen HTTP server and ran `http_control.py` using the exact
+commands in the benchmark README. Result: **passed**, with **0 → 784 → 0** cached
+tokens across cold, warm, and physically evicted requests. Evict reports **4 copies
+reclaimed**, no blocked/missing targets; all three greedy output token sequences
+match. This uses actual initialized Mamba/full-attention groups, native utility
+control and the real BlockPool rather than simulated residency.
+
+The live workflow also passes completion, chat and SSE attached hints; rejects
+multi-prompt/n>1/beam attached scope; checks correlated queries/events, two explicit
+associations of shared content, append-only rewrite rejection, retry, task cleanup,
+unknown action/version and engine/epoch/namespace errors. Movement explicitly
+returns unsupported at this development stage. Raw enabled accuracy and HTTP
+responses are committed as compressed JSON under the benchmark `results/` folder.
+The server is stopped after validation; GPU 2's unrelated workload is untouched.
+
 ## October 1: control record foundation
 
 Implemented immutable correlated operation snapshots, explicit engine/epoch/path

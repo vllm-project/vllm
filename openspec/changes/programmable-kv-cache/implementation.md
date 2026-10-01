@@ -30,6 +30,35 @@ document refines `design.md`; the existing envelope fields remain unchanged.
 
 ## Results, bounds, and lifetime
 
+Startup accepts `--kv-control-config` (or `EngineArgs.kv_control_config`) with a
+`KVControlConfig`; `None` disables optional state and leaves existing hint routing
+in place. A configured engine gets a fresh epoch and a supplied or generated ID;
+named DP engines append `:dp<rank>`. Cache compatibility includes model/cache
+configuration, the initialized group layout and effective block sizes, hash
+algorithm/granularity, parallel layout, and weight version.
+
+Python exposes `get_kv_control_capabilities()` and
+`kv_control(method, invocation, payload)` on LLM/AsyncLLM. HTTP exposes
+`GET /v1/kv/capabilities` and `POST /v1/kv/control`, whose body contains those same
+three fields. Invocation names `engine_id`, `engine_epoch`, `consumer` (default
+`native`), and optional `namespace`. `submit` accepts the unchanged envelope as
+payload; `operation` takes message/action IDs; `associations` takes optional
+session/cursor/revision/limit; `events` takes stream (`operation` or `association`),
+after and limit. Discovery can query all connected engines, while a mutation
+targets exactly one engine without using DP's broadcast utility method. Results
+use the same JSON shape in process, through MP utility, and over HTTP.
+Native request-attached envelopes are consumed before connector admission, then
+removed from the legacy hook's input. Backend-selected envelopes retain their
+opaque versions and payloads through that hook. Invalid wrappers or exhausted
+control-record admission abort only the affected request without forwarding it;
+valid envelopes keep per-action failures in the common queryable registry.
+Completion and chat-completion requests accept `kv_hints` in the existing envelope
+shape and pass the merged records to AsyncLLM, including streaming responses.
+This attached HTTP profile requires one prompt, one completion and no beam search;
+separate branches use distinct envelopes/IDs. The capability cache profile exposes
+hash algorithm/seed/granularity and each group's effective size/reusability so
+hash-addressed controllers can select compatible content without allocator IDs.
+
 Native action version `1` uses `retain`, `release`, `evict`, `demote`, `prefetch`,
 `share`, `associate`, `finish_task`, and `signal`. Their fixed payload schemas live
 in `vllm/v1/kv_hints/native.py`; this is not a handler-registration API. The wrapper

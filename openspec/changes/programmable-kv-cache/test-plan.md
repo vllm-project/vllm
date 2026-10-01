@@ -18,6 +18,14 @@ failures and skipped capabilities; distinguish mocks from real transfers.
 | Serving | Python/HTTP targeting → same engine records | Wrong engine/epoch, version errors, ingress mismatch | Existing engine and OpenAI serving suites plus control endpoint integration |
 
 State tests use a fake monotonic clock, bounded capacities, and observable queries.
+Control utility input is a method, strict invocation context and JSON payload;
+output is JSON-compatible common records or a structured error. Guard against DP
+mutation broadcasts, ambiguous engine names, stale epochs, mixed pagination,
+unsafe serialization and HTTP/Python disagreement. Use the existing control suite
+for the facade and new model-free `engine/test_kv_control.py` for client routing:
+the older engine-client module initializes remote model tokenizers at import and
+cannot provide isolated control routing tests. HTTP ingress tests use an actual
+control service through FastAPI, followed by a real GPU/MP serving run.
 Continuation updates must preserve known hash/group/span associations. Guard
 against rewrite, truncation, group substitution, and tail replacement even with a
 current revision; assert unchanged queries, reverse membership and event position.

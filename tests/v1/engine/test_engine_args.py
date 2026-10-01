@@ -6,11 +6,24 @@ from unittest.mock import patch
 
 import pytest
 
-from vllm.config import ModelConfig
+from vllm.config import KVControlConfig, ModelConfig
 from vllm.engine.arg_utils import EngineArgs
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm.utils.hashing import _xxhash
+
+
+def test_programmable_kv_control_cli_preserves_opt_in_and_validated_limits():
+    parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
+    assert EngineArgs.from_cli_args(parser.parse_args([])).kv_control_config is None
+    args = EngineArgs.from_cli_args(
+        parser.parse_args(
+            ["--kv-control-config", '{"engine_id":"named","max_records":32}']
+        )
+    )
+    assert isinstance(args.kv_control_config, KVControlConfig)
+    assert args.kv_control_config.engine_id == "named"
+    assert args.kv_control_config.max_records == 32
 
 
 def test_prefix_caching_from_cli():

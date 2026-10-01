@@ -4,7 +4,7 @@
 
 from collections.abc import Callable
 from dataclasses import replace
-from typing import Protocol, TypeAlias
+from typing import Any, Protocol, TypeAlias
 
 import msgspec
 
@@ -76,6 +76,7 @@ class NativeKVController:
         *,
         executor: KVOperationExecutor | None = None,
         request_resolver: RequestResolver | None = None,
+        cache_profile: dict[str, Any] | None = None,
     ):
         if (
             index.engine_epoch != registry.engine_epoch
@@ -87,6 +88,7 @@ class NativeKVController:
         self.declarations = declarations
         self.executor = executor
         self.request_resolver = request_resolver
+        self.cache_profile = cache_profile
 
     def submit(
         self,
@@ -233,6 +235,7 @@ class NativeKVController:
             self.registry.result_ttl,
             self.registry.max_actions,
             self.registry.max_envelope_bytes,
+            self.cache_profile,
         )
 
     def _target(
