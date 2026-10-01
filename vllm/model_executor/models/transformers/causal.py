@@ -73,6 +73,9 @@ class CausalMixin(VllmModelForTextGeneration, Base):
             for name, weight in weights:
                 if name.endswith("lm_head.bias") and self.pp_group.is_last_rank:
                     self.lm_head._register_bias()
+                    # Weights are loaded outside the target device context
+                    device = next(self.lm_head.parameters()).device
+                    self.lm_head.bias.data = self.lm_head.bias.data.to(device)
                     self.lm_head.bias.weight_loader(self.lm_head.bias, weight)
                     lm_head_bias.add(name)
                 else:
