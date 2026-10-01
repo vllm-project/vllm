@@ -2833,9 +2833,25 @@ class MooncakeConnectorWorker:
         spec = self._layer_specs.get(layer_name)
         if isinstance(spec, MambaSpec):
             return spec.tp_replicated, None
+        total_num_kv_heads = self.transfer_topo.total_num_kv_heads
+        if (
+            self.kv_cache_config.has_mamba_layers
+            and not self.use_mla
+            and (
+                isinstance(spec, MLAAttentionSpec)
+                or (
+                    isinstance(spec, AttentionSpec)
+                    and spec.num_kv_heads != max(total_num_kv_heads // self.tp_size, 1)
+                )
+            )
+        ):
+            # A hybrid model's auxiliary cache that does not shard with the KV
+            # heads (e.g. a single-head indexer key cache) is the same on every
+            # rank.
+            return True, None
         return (
             self._producer_cache_is_replicated(),
-            None if self.use_mla else self.transfer_topo.total_num_kv_heads,
+            None if self.use_mla else total_num_kv_heads,
         )
 
     def _get_sender_transfer_plan(

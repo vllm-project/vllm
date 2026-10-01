@@ -30,11 +30,13 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_connector im
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 from vllm.v1.kv_cache_interface import (
+    CircularBufferSpec,
     FullAttentionSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
     KVCacheLayout,
     MambaSpec,
+    MLAAttentionSpec,
     UniformTypeKVCacheSpecs,
 )
 
@@ -723,8 +725,28 @@ def test_transfer_rule_follows_plain_head_mapping_for_hybrid_attention(monkeypat
     )
     block_size = vllm_config.cache_config.block_size
     base = make_hybrid_gdn_kv_cache_config(block_size)
-    attention_spec = base.kv_cache_groups[0].kv_cache_spec
     gdn_spec = base.kv_cache_groups[1].kv_cache_spec
+    # Main attention shards the model's KV heads across TP (TP1 here).
+    attention_spec = FullAttentionSpec(
+        block_size=block_size,
+        num_kv_heads=vllm_config.model_config.get_total_num_kv_heads(),
+        head_size=1,
+        dtype=torch.float16,
+    )
+    # Auxiliary caches that every rank holds whole.
+    indexer_ring_spec = CircularBufferSpec(
+        block_size=4,
+        num_kv_heads=1,
+        head_size=8,
+        head_size_v=0,
+        dtype=torch.bfloat16,
+    )
+    compressed_key_spec = MLAAttentionSpec(
+        block_size=block_size,
+        num_kv_heads=1,
+        head_size=8,
+        dtype=torch.bfloat16,
+    )
     replicated_spec = MambaSpec(
         block_size=block_size,
         shapes=((4, 3),),
@@ -746,6 +768,8 @@ def test_transfer_rule_follows_plain_head_mapping_for_hybrid_attention(monkeypat
             wrapped("model.layers.0.self_attn", attention_spec),
             wrapped("model.layers.1.linear_attn", gdn_spec),
             wrapped("model.layers.2.ple", replicated_spec),
+            wrapped("model.layers.3.indexer_ring", indexer_ring_spec),
+            wrapped("model.layers.3.compressed_key", compressed_key_spec),
         ],
     )
 
@@ -763,6 +787,8 @@ def test_transfer_rule_follows_plain_head_mapping_for_hybrid_attention(monkeypat
         )
         assert worker._transfer_rule("model.layers.1.linear_attn") == (False, None)
         assert worker._transfer_rule("model.layers.2.ple") == (True, None)
+        assert worker._transfer_rule("model.layers.3.indexer_ring") == (True, None)
+        assert worker._transfer_rule("model.layers.3.compressed_key") == (True, None)
 
         worker.shutdown()
         worker.shutdown = noop_shutdown
