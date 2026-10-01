@@ -436,13 +436,12 @@ class NixlBaseConnectorWorker:
             region_idx
         ):
             return False
-        # Verify against the region's own recorded KV head count instead of
-        # inferring "SPLIT under a fully-MLA target" implies draft purely by
-        # exclusion. `_resolve_head_sharded_draft_kv_heads` already returns
-        # None for the other constructs that can produce a SPLIT region here
-        # (mamba, CSA-linear), so every SPLIT region left should genuinely be
-        # this draft -- this assertion is what actually confirms that, tied to
-        # a real per-layer model property rather than the absence of one.
+        # Draft models are loaded with the "draft_model" layer prefix.
+        # An MLA target may have its own SPLIT attention regions; those retain
+        # the target mapping rather than using the draft's KV head count.
+        region_name = self.region_names[region_idx]
+        if not region_name.startswith("draft_model."):
+            return False
         region_kv_heads = self._region_num_kv_heads[region_idx]
         assert (
             region_kv_heads is not None
@@ -2625,19 +2624,13 @@ class NixlBaseConnectorWorker:
             )
         has_draft_regions = self._has_head_sharded_draft_regions()
         if has_draft_regions:
-            # tp_ratio is local-vs-remote, and which side is local flips between
-            # pull (local=decode, since decode calls the handshake to read from
-            # prefill) and push (local=prefill, since prefill calls it to learn
-            # where to write into decode). The condition this guards against is
-            # always "prefill TP > decode TP", not "tp_ratio < 0" itself, so it
-            # has to be derived per direction rather than read off the sign
-            # directly -- reusing the pull-mode sign check here would reject
-            # ordinary push topologies (P_TP < D_TP is the common case) instead
-            # of the one this is meant to catch.
             if self._TRANSFER_MODE == "push":
-                prefill_tp_above_decode = tp_ratio > 1
-            else:
-                prefill_tp_above_decode = tp_ratio < 0
+                raise NotImplementedError(
+                    "NIXL push mode does not support a head-sharded draft's KV "
+                    "under an MLA target. Use pull mode."
+                )
+            # In pull mode local is decode and remote is prefill.
+            prefill_tp_above_decode = tp_ratio < 0
             if prefill_tp_above_decode or self.dcp_size > 1 or remote_dcp_size > 1:
                 raise NotImplementedError(
                     "NIXL cannot transfer a head-sharded draft's KV under an MLA "
