@@ -48,19 +48,50 @@ def _compute_num_kv_splits(max_seq_len: int, sm_count: int) -> int:
     return min(ideal_splits, max_splits)
 
 
+# Heads per stage-1 program in the grouped MLA decode kernel (its BLOCK_H).
+_DECODE_HEADS_PER_PROGRAM = 16
+# Tuned on MI325X with microbenchmarks
+_BATCH_OCCUPANCY_MULTIPLIER = 4
+
+
+def _compute_batch_aware_num_kv_splits(
+    max_seq_len: int, num_rows: int, num_heads: int, sm_count: int
+) -> int:
+    # Split only until the stage-1 grid fills the GPU. Past that, splits add
+    # scratch and combine work, and large batches overflow the kernel's int32
+    # attn_logits offsets.
+    programs_per_split = max(1, num_rows) * triton.cdiv(
+        num_heads, _DECODE_HEADS_PER_PROGRAM
+    )
+    occupancy_splits = triton.next_power_of_2(
+        triton.cdiv(_BATCH_OCCUPANCY_MULTIPLIER * sm_count, programs_per_split)
+    )
+    return min(_compute_num_kv_splits(max_seq_len, sm_count), occupancy_splits)
+
+
 def reserve_triton_mla_decode_workspace(
     max_rows: int,
     num_heads: int,
     max_seq_len: int,
     kv_lora_rank: int,
     sm_count: int,
+    *,
+    batch_aware_splits: bool = False,
 ) -> None:
     """Reserve split-KV scratch before warmup locks the workspace manager."""
     if not is_workspace_manager_initialized():
         return
-    max_splits = _compute_num_kv_splits(max_seq_len, sm_count)
+    if batch_aware_splits:
+        # Fewer rows may take more splits, so size for the largest product.
+        max_row_splits = max(
+            rows
+            * _compute_batch_aware_num_kv_splits(max_seq_len, rows, num_heads, sm_count)
+            for rows in range(1, max_rows + 1)
+        )
+    else:
+        max_row_splits = max_rows * _compute_num_kv_splits(max_seq_len, sm_count)
     current_workspace_manager().get_simultaneous(
-        ((max_rows, num_heads, max_splits, kv_lora_rank + 1), torch.float32),
+        ((max_row_splits, num_heads, kv_lora_rank + 1), torch.float32),
     )
 
 
@@ -76,6 +107,8 @@ def triton_mla_decode_forward(
     sm_count: int,
     out_dtype: torch.dtype,
     lse_dtype: torch.dtype,
+    *,
+    batch_aware_splits: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Run the generic split-KV MLA decode over independently bounded rows.
 
@@ -89,6 +122,9 @@ def triton_mla_decode_forward(
     A zero-length row (an empty DCP shard or graph padding) comes back as a
     NaN output with an LSE of -inf. The DCP combine gives it zero weight and
     never reads the output.
+
+    ``batch_aware_splits`` also caps the KV splits by how many rows already
+    fill the GPU. The caller must reserve the workspace with the same flag.
     """
     num_rows, num_heads = q.shape[:2]
     output = torch.zeros(
@@ -96,11 +132,14 @@ def triton_mla_decode_forward(
     )
     # Zeros, matching the historical Triton MLA decode path.
     lse = torch.zeros(num_rows, num_heads, dtype=lse_dtype, device=q.device)
-    num_kv_splits = (
-        1
-        if envs.VLLM_BATCH_INVARIANT
-        else _compute_num_kv_splits(max_seq_len, sm_count)
-    )
+    if envs.VLLM_BATCH_INVARIANT:
+        num_kv_splits = 1
+    elif batch_aware_splits:
+        num_kv_splits = _compute_batch_aware_num_kv_splits(
+            max_seq_len, num_rows, num_heads, sm_count
+        )
+    else:
+        num_kv_splits = _compute_num_kv_splits(max_seq_len, sm_count)
     logits_shape = (
         num_rows,
         num_heads,

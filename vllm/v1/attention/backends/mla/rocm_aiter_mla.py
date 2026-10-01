@@ -978,6 +978,7 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
                 dcp_local_max_seq_len,
                 self.mla_dims.kv_lora_rank,
                 current_platform.num_compute_units(),
+                batch_aware_splits=True,
             )
 
     def _init_fp8_prefill_ps_buffers(
@@ -2488,6 +2489,7 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
             # Matches merge_mla_segments_triton and the fp32 LSE the DCP
             # combine kernel is warmed up for.
             torch.float32,
+            batch_aware_splits=True,
         )
 
     def forward_mqa(
