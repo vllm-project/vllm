@@ -72,7 +72,9 @@ Claude Code assumes the context window of a Claude model, and requests up to 320
 | `CLAUDE_CODE_AUTO_COMPACT_WINDOW` | Set to your `--max-model-len`, so Claude Code compacts the conversation before it outgrows the context window |
 | `CLAUDE_CODE_MAX_OUTPUT_TOKENS`   | Maximum output tokens per request. Lower it when `--max-model-len` leaves little room after the prompt        |
 
-Without `CLAUDE_CODE_AUTO_COMPACT_WINDOW`, a long session can reach `--max-model-len` before Claude Code compacts it. From then on, every request fails because the prompt is too long.
+Without `CLAUDE_CODE_AUTO_COMPACT_WINDOW`, a long session can reach `--max-model-len` before Claude Code compacts it. From then on, every request fails because the prompt is too long. These settings also apply when Claude Code reaches vLLM through a gateway such as LiteLLM.
+
+`CLAUDE_CODE_AUTO_COMPACT_WINDOW` needs Claude Code 2.1.75 or later. On older versions, set `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` instead: the percentage of a 200k-token window at which Claude Code compacts (for example, `20` compacts at about 40k tokens).
 
 For example, for a server started with `--max-model-len 131072`:
 
