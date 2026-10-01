@@ -1323,28 +1323,47 @@ def _check_requirements_preinstalled(requirements: list[str]) -> None:
     unreachable anyway.
     """
     from importlib.metadata import PackageNotFoundError
+    from importlib.metadata import requires as installed_requires
     from importlib.metadata import version as installed_version
 
     from packaging.requirements import Requirement
 
     missing = []
-    for req_str in requirements:
+    checked = set()
+
+    def _check(req_str: str, extra: str | None = None) -> None:
         # Strip inline "# comment" suffixes (as pip does when reading
         # requirements files); packaging.Requirement cannot parse them.
         req_str = re.split(r"\s+#", req_str, maxsplit=1)[0].strip()
         try:
             req = Requirement(req_str)
         except Exception:
-            continue
-        if req.marker is not None and not req.marker.evaluate():
-            continue
+            return
+        # `extra` is only set when recursing into an extra's own deps
+        # below; it selects which `; extra == "..."` markers apply.
+        if req.marker is not None and not req.marker.evaluate(
+            {"extra": extra} if extra else None
+        ):
+            return
+        if (req.name, extra) in checked:
+            return
+        checked.add((req.name, extra))
         try:
             installed = installed_version(req.name)
         except PackageNotFoundError:
             missing.append(req_str)
-            continue
+            return
         if req.specifier and not req.specifier.contains(installed, prereleases=True):
             missing.append(f"{req_str} (found {req.name}=={installed})")
+            return
+        # A requested extra (e.g. "fastapi[standard]") pulls in packages
+        # that easy_install resolves too, so check those as well.
+        for extra_name in req.extras:
+            for dep in installed_requires(req.name) or []:
+                _check(dep, extra=extra_name)
+
+    for req_str in requirements:
+        _check(req_str)
 
     if missing:
         raise RuntimeError(
