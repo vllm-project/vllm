@@ -46,6 +46,11 @@ class FakeQSA:
         self.k1_calls = []
         self.k2_calls = []
 
+    def qsa_k1_selection_serves(self, token_topk, compress_ratio):
+        if (token_topk, compress_ratio) != (TOKEN_TOPK, COMPRESS_RATIO):
+            return "FlyDSL K1 selects 512 blocks at compress ratio 4"
+        return None
+
     def qsa_k1_serves(self, q, k_cache, page_table):
         return self.k1_reason
 
@@ -124,10 +129,22 @@ def test_k1_chunks_rows_by_the_logits_workspace(fake_qsa, monkeypatch):
     assert out[:, 0].tolist() == [1, 1, 2, 2, 3]
 
 
+def test_k1_reads_a_strided_indexer_view(fake_qsa):
+    fake, _ = fake_qsa()
+    inputs = _selection_inputs(3)
+    padded = torch.zeros(8, 16, 1, 256, dtype=torch.bfloat16)
+    inputs["k_cache"] = padded[..., :128]
+    assert not inputs["k_cache"].is_contiguous()
+    assert qsa_flydsl.flydsl_select_paged_tokens(**inputs) is inputs["out"]
+    assert fake.k1_calls == [(3, (4,))]
+
+
 @pytest.mark.parametrize(
     "mutate",
     [
-        pytest.param(lambda i: i.update(k_cache=i["k_cache"][:, ::2]), id="strided"),
+        pytest.param(
+            lambda i: i.update(token_topk=1024, out=torch.empty(3, 1027)), id="budget"
+        ),
         pytest.param(None, id="unserved"),
     ],
 )
