@@ -10,7 +10,9 @@ repack-torch: TheRock's torch wheel hard-pins the triton it was built with.
 
 external-links: list the TheRock wheels the index links to instead of hosting
     (ROCm SDK, device kernels, torchvision/torchaudio, rocm-bootstrap), with
-    versions and GPU arches read from docker/Dockerfile.rocm_base.
+    versions and GPU arches read from docker/Dockerfile.rocm_base. torch's
+    device-<arch> extras can also pull in a GPU-family wheel (e.g.
+    amd-torch-device-gfx110x), so those are read from the torch wheel itself.
 
 patch-amdsmi: rocm-sdk-core ships the amdsmi bindings under
     _rocm_sdk_core/share/amd_smi, and the loader finds libamd_smi relative to
@@ -153,10 +155,30 @@ def _usable(url: str, version: str | None) -> bool:
     )
 
 
-def external_links(dockerfile: Path) -> list[str]:
+def torch_device_requirements(
+    torch_wheel: Path, arches: list[str]
+) -> list[tuple[str, str]]:
+    """(project, version) pairs that torch's device-<arch> extras require."""
+    with zipfile.ZipFile(torch_wheel) as zf:
+        metadata = next(n for n in zf.namelist() if n.endswith(".dist-info/METADATA"))
+        text = zf.read(metadata).decode()
+    wanted = {f"device-{arch}" for arch in arches}
+    reqs = []
+    for m in re.finditer(
+        r'^Requires-Dist: ([\w.-]+)\s*==\s*(\S+)\s*;.*extra == "([^"]+)"', text, re.M
+    ):
+        if m.group(3) in wanted and (m.group(1), m.group(2)) not in reqs:
+            reqs.append((m.group(1), m.group(2)))
+    missing = wanted - set(re.findall(r'extra == "(device-[^"]+)"', text))
+    if missing:
+        raise SystemExit(f"torch has no extras for {sorted(missing)}")
+    return reqs
+
+
+def external_links(dockerfile: Path, torch_wheel: Path) -> list[str]:
     args = dockerfile_args(dockerfile)
     index = args["ROCM_RELEASE_WHEELS_MULTIARCH_URL"]
-    sdk, torch_v = args["ROCM_SDK_VERSION"], args["TORCH_VERSION"]
+    sdk = args["ROCM_SDK_VERSION"]
     vision_v, audio_v = args["TORCHVISION_VERSION"], args["TORCHAUDIO_VERSION"]
     arches = [a for a in args["PYTORCH_ROCM_ARCH"].split(";") if a]
     wanted: list[tuple[str, str | None]] = [
@@ -170,9 +192,9 @@ def external_links(dockerfile: Path) -> list[str]:
     for arch in arches:
         wanted += [
             (f"rocm-sdk-device-{arch}", sdk),
-            (f"amd-torch-device-{arch}", torch_v),
             (f"amd-torchvision-device-{arch}", vision_v),
         ]
+    wanted += torch_device_requirements(torch_wheel, arches)
     urls = []
     for project, version in wanted:
         found = [u for u in _project_files(index, project) if _usable(u, version)]
@@ -193,6 +215,7 @@ def main() -> None:
     p.add_argument(
         "--dockerfile", type=Path, default=Path("docker/Dockerfile.rocm_base")
     )
+    p.add_argument("--torch-wheel", type=Path, required=True)
     p = sub.add_parser("patch-amdsmi")
     p.add_argument("src_dir", type=Path)
     p.add_argument("--out-dir", type=Path, default=None)
@@ -201,7 +224,7 @@ def main() -> None:
     if args.cmd == "repack-torch":
         print(repack_torch(args.wheel, args.triton_version, args.out_dir))
     elif args.cmd == "external-links":
-        print("\n".join(external_links(args.dockerfile)))
+        print("\n".join(external_links(args.dockerfile, args.torch_wheel)))
     else:
         out = args.out_dir or Path(tempfile.mkdtemp()) / "amd_smi"
         print(patch_amdsmi(args.src_dir, out))

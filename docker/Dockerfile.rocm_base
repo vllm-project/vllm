@@ -117,9 +117,9 @@ RUN TORCH_VER=$(python3 -c "import torch; print(torch.__version__)") \
         echo "Installing device packages for ${arch}" \
         && pip install --index-url ${ROCM_RELEASE_WHEELS_MULTIARCH_URL} \
             --extra-index-url ${ROCM_NIGHTLY_WHEELS_MULTIARCH_URL} \
-            amd-torch-device-${arch}==${TORCH_VER} \
-            amd-torchvision-device-${arch}==${TORCHVISION_VERSION} \
-            rocm-sdk-device-${arch}==${ROCM_SDK_VERSION}; \
+            "torch[device-${arch}]==${TORCH_VER}" \
+            "torchvision[device-${arch}]==${TORCHVISION_VERSION}" \
+            "rocm[device-${arch}]==${ROCM_SDK_VERSION}"; \
     done
 
 # Remove gfx90a xnack kpacks (ASAN artifacts that cause hipErrorInvalidImage on MI250)
