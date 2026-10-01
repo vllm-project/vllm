@@ -152,7 +152,7 @@ class SecondaryTierManager(ABC):
     # and not only from on_schedule_end(). Set it on tiers that answer a
     # counterpart the engine does not drive -- a remote peer, say -- whose
     # requests would otherwise wait for a step boundary. The tiering manager
-    # runs a thread on behalf of such tiers; see serve_control_plane().
+    # runs a thread on behalf of such tiers; see poll_tiers().
     needs_control_plane_thread: ClassVar[bool] = False
 
     def __init__(

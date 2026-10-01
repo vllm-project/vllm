@@ -59,11 +59,12 @@ from vllm.v1.kv_offload.tiering.metrics import TieringMetricsTracker
 logger = init_logger(__name__)
 
 
-# Pause between control-plane rounds. A round is a non-blocking sweep, so this
-# sets how long a peer's request can sit unserved; 1 ms is three orders of
+# Default pause between control-plane rounds; the user-facing default of the
+# ``tier_poll_interval_s`` extra-config key. A round is a non-blocking sweep, so
+# this sets how long a peer's request can sit unserved; 1 ms is three orders of
 # magnitude below the model step it hides, and matches the pause the p2p tier's
 # own drain loops and EngineCoreProc's GIL-yield sleep already use.
-_CONTROL_PLANE_INTERVAL_S = 0.001
+DEFAULT_TIER_POLL_INTERVAL_S = 0.001
 # How long a round waits for the manager lock before giving up and retrying.
 # Bounded so the thread stays responsive to shutdown even if a caller holds the
 # lock for a long time, or leaked it.
@@ -211,7 +212,7 @@ class TieringOffloadingManager(OffloadingManager):
         self,
         primary_tier: CPUPrimaryTierOffloadingManager,
         secondary_tiers: list[SecondaryTierManager] | None = None,
-        control_plane_interval_s: float = _CONTROL_PLANE_INTERVAL_S,
+        tier_poll_interval_s: float = DEFAULT_TIER_POLL_INTERVAL_S,
     ):
         """Initialize the TieringOffloadingManager.
 
@@ -219,7 +220,7 @@ class TieringOffloadingManager(OffloadingManager):
             primary_tier: The primary tier manager (CPU-based).
             secondary_tiers: List of secondary tier managers (e.g., Storage,
                             Network). Can be None or empty list.
-            control_plane_interval_s: Pause between control-plane rounds for
+            tier_poll_interval_s: Pause between control-plane rounds for
                 tiers that set needs_control_plane_thread. Zero or negative
                 disables the thread, leaving those tiers serviced once per
                 engine step as before.
@@ -277,7 +278,7 @@ class TieringOffloadingManager(OffloadingManager):
             for i, tier in enumerate(self.secondary_tiers)
             if tier.needs_control_plane_thread
         ]
-        self._control_plane_interval_s = control_plane_interval_s
+        self._tier_poll_interval_s = tier_poll_interval_s
         self._control_plane_stop = threading.Event()
         self._control_plane_thread: threading.Thread | None = None
         self._start_control_plane()
@@ -293,7 +294,7 @@ class TieringOffloadingManager(OffloadingManager):
 
     def _start_control_plane(self) -> None:
         """Start the control-plane thread, if any tier asked for one."""
-        if not self._control_plane_tiers or self._control_plane_interval_s <= 0:
+        if not self._control_plane_tiers or self._tier_poll_interval_s <= 0:
             return
         self._control_plane_thread = threading.Thread(
             target=self._control_plane_loop,
@@ -304,7 +305,7 @@ class TieringOffloadingManager(OffloadingManager):
         logger.info(
             "KV offload control-plane thread started for tier(s) %s, interval %.3fs",
             [tier.tier_type for _, tier in self._control_plane_tiers],
-            self._control_plane_interval_s,
+            self._tier_poll_interval_s,
         )
 
     def _stop_control_plane(self) -> None:
@@ -345,7 +346,7 @@ class TieringOffloadingManager(OffloadingManager):
                 continue
             stalled_since = None
             try:
-                self.serve_control_plane()
+                self.poll_tiers()
                 errors = 0
             except Exception:
                 # Never let a round kill the thread silently: on_schedule_end()
@@ -365,9 +366,9 @@ class TieringOffloadingManager(OffloadingManager):
             # Yield unconditionally, and only after release(). Python locks are
             # not fair, so a release-then-reacquire loop could starve the
             # scheduler thread; this pause is what bounds its wait to one round.
-            self._control_plane_stop.wait(self._control_plane_interval_s)
+            self._control_plane_stop.wait(self._tier_poll_interval_s)
 
-    def serve_control_plane(self) -> None:
+    def poll_tiers(self) -> None:
         """Advance the control plane of tiers that cannot wait for a step.
 
         Polls those tiers for finished jobs and lets them serve whatever their

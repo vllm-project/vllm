@@ -199,7 +199,7 @@ def test_serves_while_the_scheduler_is_outside_the_lock(manager_and_tier):
 
 
 @pytest.mark.parametrize(
-    "manager_and_tier", [{"control_plane_interval_s": 0.0}], indirect=True
+    "manager_and_tier", [{"tier_poll_interval_s": 0.0}], indirect=True
 )
 def test_zero_interval_disables_the_thread(manager_and_tier):
     """The escape hatch back to per-step servicing.
