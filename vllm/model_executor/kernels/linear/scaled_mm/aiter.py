@@ -184,16 +184,13 @@ class AiterPreshuffledPerTokenFp8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
             )
 
         # Aiter's shuffled per-token Gemm performs better than torch only when its
-        # tuned. N is looked up after padding to a multiple of
-        # PADDED_N_ALIGNMENT, the shape the Gemm actually runs with.
-        N_padded = N + cls._n_padding(N)
-        if not rocm_aiter_ops.is_shuffled_per_token_w8a8_gemm_tuned(
-            N_padded, K, fp8_dtype
-        ):
+        # tuned, either at N itself or at N padded to PADDED_N_ALIGNMENT.
+        if cls._n_padding(N, K) is None:
+            N_padded = N + (-N % cls.PADDED_N_ALIGNMENT)
             return (
                 False,
-                f"requires a tuned configuration for N: {N_padded} and K: {K} "
-                f"and fp8 dtype {fp8_dtype}.",
+                f"requires a tuned configuration for N: {N} (or padded N: "
+                f"{N_padded}) and K: {K} and fp8 dtype {fp8_dtype}.",
             )
 
         return True, None
@@ -204,8 +201,18 @@ class AiterPreshuffledPerTokenFp8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
     PADDED_N_ALIGNMENT = 128
 
     @classmethod
-    def _n_padding(cls, N: int) -> int:
-        return -N % cls.PADDED_N_ALIGNMENT
+    def _n_padding(cls, N: int, K: int) -> int | None:
+        """Padding to add to N so the Gemm runs a tuned shape, or None if
+        neither N nor the padded N is tuned. A tuned N is never padded."""
+        fp8_dtype = current_platform.fp8_dtype()
+        if rocm_aiter_ops.is_shuffled_per_token_w8a8_gemm_tuned(N, K, fp8_dtype):
+            return 0
+        n_padding = -N % cls.PADDED_N_ALIGNMENT
+        if n_padding and rocm_aiter_ops.is_shuffled_per_token_w8a8_gemm_tuned(
+            N + n_padding, K, fp8_dtype
+        ):
+            return n_padding
+        return None
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         w_name, w_s_name, *_ = self.layer_param_names
@@ -213,12 +220,8 @@ class AiterPreshuffledPerTokenFp8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
 
         # w is (K, N); w_s is per output channel, (N, 1) or (N,).
         N = w.shape[1]
-        n_padding = self._n_padding(N)
-        # Only pad if the unpadded N is not tuned itself.
-        if n_padding and rocm_aiter_ops.is_shuffled_per_token_w8a8_gemm_tuned(
-            N, w.shape[0], current_platform.fp8_dtype()
-        ):
-            n_padding = 0
+        # can_implement() guarantees N or the padded N is tuned.
+        n_padding = self._n_padding(N, w.shape[0]) or 0
         self.n_before_padding = N if n_padding else None
 
         w_nk = w.t()
