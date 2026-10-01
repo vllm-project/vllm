@@ -315,8 +315,10 @@ class Base(
         mappings = get_model_conversion_mapping(self.model)
         # Renames registered on the head class (e.g. `*ForCausalLM`), which
         # isn't instantiated because the backend builds `AutoModel`
+        instantiated = {type(m).__name__ for m in self.model.modules()}
         for arch in self.config.architectures or []:
-            mappings.extend(get_checkpoint_conversion_mapping(arch) or [])
+            if arch not in instantiated:
+                mappings.extend(get_checkpoint_conversion_mapping(arch) or [])
         for mapping in mappings:
             # Handle weights which have been renamed in Transformers
             if isinstance(mapping, WeightRenaming):
