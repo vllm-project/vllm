@@ -1203,7 +1203,9 @@ def test_hisparse_prefix_hit_under_pressure_adopts_surviving_copies(
     manager = make_hisparse_kv_cache_manager(32, 16, enable_caching=True)
     tokens = list(range(4 * HISPARSE_BLOCK_SIZE))
     original = make_request("original", tokens, HISPARSE_BLOCK_SIZE, sha256)
-    assert manager.allocate_slots(original, num_new_tokens=len(tokens)) is not None
+    assert (
+        _allocate_scheduled(manager, original, num_new_tokens=len(tokens)) is not None
+    )
     _publish_hisparse_pages(manager)
     copy_ids = [block.block_id for block in manager.get_blocks("original").blocks[2]]
     manager.free(original)
@@ -1213,7 +1215,8 @@ def test_hisparse_prefix_hit_under_pressure_adopts_surviving_copies(
     resumed = make_request("resumed", tokens, HISPARSE_BLOCK_SIZE, sha256)
     computed, num_computed, _ = manager.get_computed_blocks(resumed)
     assert num_computed == 3 * HISPARSE_BLOCK_SIZE
-    assert manager.allocate_slots(
+    assert _allocate_scheduled(
+        manager,
         resumed,
         num_new_tokens=len(tokens) - num_computed,
         num_new_computed_tokens=num_computed,
@@ -1295,7 +1298,9 @@ def test_hisparse_cleanup_publishes_only_finalized_terminal_pages(
     coordinator = get_hisparse_coordinator(manager)
     request = make_request("terminal", list(range(33)), HISPARSE_BLOCK_SIZE, sha256)
     request.spec_token_ids = list(range(33, 49))
-    assert manager.allocate_slots(request, 49, num_lookahead_tokens=16) is not None
+    assert (
+        _allocate_scheduled(manager, request, 49, num_lookahead_tokens=16) is not None
+    )
     host_blocks = list(manager.get_blocks(request.request_id).blocks[0])
     command = coordinator.build_offload_command()
     counts = {transfer.transfer_id: 1 for transfer in command.page_transfers}
@@ -1334,7 +1339,10 @@ def test_hisparse_prefill_reads_host_once_it_fills_admission_window(
     coordinator = get_hisparse_coordinator(manager)
     tokens = list(range(2 * window_pages * HISPARSE_BLOCK_SIZE))
     request = make_request("prefill", tokens, HISPARSE_BLOCK_SIZE, sha256)
-    assert manager.allocate_slots(request, num_pages * HISPARSE_BLOCK_SIZE) is not None
+    assert (
+        _allocate_scheduled(manager, request, num_pages * HISPARSE_BLOCK_SIZE)
+        is not None
+    )
     pool = coordinator.gpu_pool
     assert pool is not None
     assert pool.get_num_free_blocks() >= coordinator.transition_watermark
@@ -1357,10 +1365,10 @@ def test_hisparse_preempted_prefill_resumes_from_durable_prefix():
     chunk = 2 * HISPARSE_BLOCK_SIZE
     tokens = list(range(3 * chunk))
     request = make_request("long", tokens, HISPARSE_BLOCK_SIZE, sha256)
-    assert manager.allocate_slots(request, chunk) is not None
+    assert _allocate_scheduled(manager, request, chunk) is not None
     request.num_computed_tokens = chunk
     first_chunk_writes = coordinator.build_offload_command().page_transfers
-    assert manager.allocate_slots(request, chunk) is not None
+    assert _allocate_scheduled(manager, request, chunk) is not None
     request.num_computed_tokens = 2 * chunk
     acks = {transfer.transfer_id: 1 for transfer in first_chunk_writes}
     coordinator.update_spills(acks, acks)
@@ -1377,7 +1385,7 @@ def test_hisparse_terminal_prefix_waits_for_all_workers_and_preserves_identity()
     host_pool = coordinator.get_host_block_pool()
     tokens = list(range(2 * HISPARSE_BLOCK_SIZE + 1))
     request = make_request("reused", tokens, HISPARSE_BLOCK_SIZE, sha256)
-    assert manager.allocate_slots(request, len(tokens)) is not None
+    assert _allocate_scheduled(manager, request, len(tokens)) is not None
     old_blocks = list(manager.get_blocks(request.request_id).blocks[0])
     command = coordinator.build_offload_command()
     counts = {transfer.transfer_id: 2 for transfer in command.page_transfers}
@@ -1390,7 +1398,7 @@ def test_hisparse_terminal_prefix_waits_for_all_workers_and_preserves_identity()
     replacement = make_request(
         "reused", list(range(100, 117)), HISPARSE_BLOCK_SIZE, sha256
     )
-    assert manager.allocate_slots(replacement, 17) is not None
+    assert _allocate_scheduled(manager, replacement, 17) is not None
     new_blocks = list(manager.get_blocks(replacement.request_id).blocks[0])
     pressure = host_pool.get_new_blocks(host_pool.get_num_free_blocks())
     assert not {block.block_id for block in old_blocks[:2]} & {

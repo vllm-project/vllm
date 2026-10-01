@@ -264,6 +264,7 @@ class HiSparseCoordinator:
                 if manager.adopt_resident_page(request_id, host_idx, block):
                     manager.block_pool.touch([block])
                     state.pinned_clean.add(host_idx)
+                    self.block_table_updates.add(request_id)
 
     def _record_copies(self, request_id: str, num_computed_tokens: int) -> None:
         """Index the GPU copies of just-published host blocks for later hits."""
