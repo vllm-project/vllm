@@ -376,6 +376,7 @@ class ServingTokens(GenerateBaseServing):
                 token_ids=as_list(output.token_ids),
                 routed_experts=routed_experts_b64,
                 sampling_mask=sampling_mask,
+                weight_versions=output.weight_versions,
             )
 
             choices.append(choice_data)
@@ -491,10 +492,12 @@ class ServingTokens(GenerateBaseServing):
                     finish_reason = output.finish_reason
                     self._raise_if_error(finish_reason, request_id)
 
-                    # Still emit a terminal empty chunk while prompt metadata
-                    # is pending, so zero-token completions deliver it.
+                    # Still emit a terminal empty chunk while prompt metadata or
+                    # weight versions are pending, so zero-token completions
+                    # (e.g. aborts) deliver them.
                     if not delta_token_ids and (
-                        finish_reason is None or prompt_token_ids is None
+                        finish_reason is None
+                        or (prompt_token_ids is None and output.weight_versions is None)
                     ):
                         continue
 
@@ -529,6 +532,7 @@ class ServingTokens(GenerateBaseServing):
                                 token_ids=as_list(delta_token_ids),
                                 routed_experts=routed_experts_b64,
                                 sampling_mask=sampling_mask,
+                                weight_versions=output.weight_versions,
                             )
                         ],
                     )

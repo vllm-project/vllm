@@ -2353,7 +2353,9 @@ class Scheduler(SchedulerInterface):
         # Create EngineCoreOutputs for all clients that have requests with
         # outputs in this step.
         engine_core_outputs = {
-            client_index: EngineCoreOutputs(outputs=outs)
+            client_index: EngineCoreOutputs(
+                outputs=outs, weight_version=scheduler_output.weight_version
+            )
             for client_index, outs in outputs.items()
         }
 
