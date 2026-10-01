@@ -12,6 +12,7 @@ mod hy;
 pub(crate) mod json;
 mod kimi_k2;
 mod mimo;
+mod minicpm5;
 mod minimax_m2;
 mod minimax_m3;
 mod parameters;
@@ -32,6 +33,7 @@ pub use json::{
 };
 pub use kimi_k2::KimiK2ToolParser;
 pub use mimo::MiMoToolParser;
+pub use minicpm5::MiniCpm5ToolParser;
 pub use minimax_m2::MinimaxM2ToolParser;
 pub use minimax_m3::MinimaxM3ToolParser;
 pub use qwen_coder::Qwen3CoderToolParser;
