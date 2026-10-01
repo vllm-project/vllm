@@ -22,18 +22,29 @@ WORDS = {1: "one", 2: "two", 3: "three", 4: "number"}
 
 
 class _Tokenizer:
+    def __init__(self, eos_token_id=None):
+        self.eos_token_id = eos_token_id
+
     def decode(self, token_ids, skip_special_tokens=True):
         return " ".join(WORDS[token_id] for token_id in token_ids)
 
 
-def _derenderer():
+def _derenderer(eos_token_id=None, generation_eos=None):
+    model_config = None
+    if generation_eos is not None:
+        model_config = SimpleNamespace(
+            try_get_generation_config=lambda: {"eos_token_id": generation_eos}
+        )
     return SimpleNamespace(
         parser=None,
-        renderer=SimpleNamespace(get_tokenizer=lambda: _Tokenizer()),
+        model_config=model_config,
+        renderer=SimpleNamespace(
+            get_tokenizer=lambda: _Tokenizer(eos_token_id=eos_token_id)
+        ),
     )
 
 
-def _chat(token_ids, **kwargs):
+def _chat(token_ids, *, eos_token_id=None, generation_eos=None, **kwargs):
     response = GenerateResponse(
         request_id="chatcmpl-stop",
         choices=[
@@ -49,7 +60,11 @@ def _chat(token_ids, **kwargs):
         messages=[{"role": "user", "content": "hi"}],
         **kwargs,
     )
-    choices = OnlineDerenderer._derender_chat(_derenderer(), response, request)
+    choices = OnlineDerenderer._derender_chat(
+        _derenderer(eos_token_id=eos_token_id, generation_eos=generation_eos),
+        response,
+        request,
+    )
     return choices[0]
 
 
@@ -66,17 +81,43 @@ def test_chat_keeps_the_stop_string_when_asked():
     assert choice.stop_reason == "three"
 
 
-def test_chat_token_stop_drops_the_last_id_without_a_client_list():
-    # EOS and end-of-turn ids are added on the server. The client list is a subset.
+def test_chat_keeps_the_last_token_when_it_is_not_a_stop_token():
+    # finish_reason stop alone is not enough. Round-trip fixtures encode
+    # real text and do not append a stop id.
     choice = _chat([1, 2, 3])
+    assert choice.message.content == "one two three"
+    assert choice.stop_reason is None
+
+
+def test_chat_client_stop_token_drops_the_last_id():
+    choice = _chat([1, 2, 3], stop_token_ids=[3])
     assert choice.message.content == "one two"
     assert choice.stop_reason == 3
 
 
-def test_chat_keeps_the_last_token_when_asked():
-    choice = _chat([1, 2, 3], include_stop_str_in_output=True)
+def test_chat_primary_eos_drops_the_last_id_and_leaves_stop_reason_empty():
+    choice = _chat([1, 2, 3], eos_token_id=3)
+    assert choice.message.content == "one two"
+    assert choice.stop_reason is None
+
+
+def test_chat_generation_config_eos_drops_the_last_id():
+    choice = _chat([1, 2, 3], generation_eos=[3, 9])
+    assert choice.message.content == "one two"
+    assert choice.stop_reason == 3
+
+
+def test_chat_keeps_the_stop_token_when_asked():
+    choice = _chat([1, 2, 3], stop_token_ids=[3], include_stop_str_in_output=True)
     assert choice.message.content == "one two three"
     assert choice.stop_reason == 3
+
+
+def test_chat_token_stop_runs_before_the_string_scan():
+    # The engine drops the stop token, then looks for a stop string in what remains.
+    choice = _chat([1, 2, 3], eos_token_id=3, stop=["two"])
+    assert choice.message.content == "one "
+    assert choice.stop_reason == "two"
 
 
 def test_length_finish_keeps_the_last_token():
@@ -120,6 +161,7 @@ def test_stop_helpers_match_the_coupled_rule():
         finish_reason="stop",
         stop=None,
         include_stop_str_in_output=False,
+        stop_token_ids=[3],
     )
     assert text == "one two"
     assert ids == [1, 2]

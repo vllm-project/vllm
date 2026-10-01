@@ -57,6 +57,34 @@ def normalize_stop_strings(stop: str | Sequence[str] | None) -> list[str]:
     return [item for item in stop if item]
 
 
+def generation_eos_ids(model_config: Any) -> set[int]:
+    """EOS ids from the model's generation config, if that config is loaded."""
+    getter = getattr(model_config, "try_get_generation_config", None)
+    if getter is None:
+        return set()
+    config = getter() or {}
+    eos_ids = config.get("eos_token_id")
+    if eos_ids is None:
+        return set()
+    if isinstance(eos_ids, int):
+        return {eos_ids}
+    return {int(token_id) for token_id in eos_ids}
+
+
+def is_stop_token(
+    token_id: int,
+    stop_token_ids: Sequence[int] | None,
+    eos_token_id: int | None,
+    generation_eos: set[int],
+) -> bool:
+    """True when this id is one the engine would treat as a token stop."""
+    if stop_token_ids and token_id in stop_token_ids:
+        return True
+    if eos_token_id is not None and token_id == eos_token_id:
+        return True
+    return token_id in generation_eos
+
+
 def decode_with_stop(
     tokenizer: TokenizerLike,
     token_ids: Sequence[int],
@@ -65,25 +93,34 @@ def decode_with_stop(
     finish_reason: str | None,
     stop: str | Sequence[str] | None,
     include_stop_str_in_output: bool,
+    stop_token_ids: Sequence[int] | None = None,
+    eos_token_id: int | None = None,
+    generation_eos: set[int] | None = None,
 ) -> tuple[str, list[int], int | str | None]:
-    """Decode output text, then apply the engine's stop rule.
+    """Decode output text the way the engine's detokenizer does.
 
-    A matched stop string wins. Otherwise a token stop drops the last id.
-    The client's stop_token_ids list is a subset of the ids the engine uses.
+    A token stop is checked first, and only when the last id is a known stop
+    token. The string check then runs on whatever text is left. A matched
+    stop string wins. The primary EOS leaves stop_reason empty.
     """
     ids = list(token_ids)
+    known_eos = generation_eos or set()
+    token_reason: int | None = None
+    if (
+        finish_reason == "stop"
+        and ids
+        and is_stop_token(ids[-1], stop_token_ids, eos_token_id, known_eos)
+    ):
+        stopped_token = ids[-1]
+        token_reason = None if stopped_token == eos_token_id else stopped_token
+        if not include_stop_str_in_output:
+            ids = ids[:-1]
+
     text = tokenizer.decode(ids, skip_special_tokens=skip_special_tokens)
     text, stopped_str = truncate_at_stop_string(text, stop, include_stop_str_in_output)
     if stopped_str is not None:
         return text, ids, stopped_str
-    if finish_reason != "stop" or not ids:
-        return text, ids, None
-    stopped_token = ids[-1]
-    if include_stop_str_in_output:
-        return text, ids, stopped_token
-    ids = ids[:-1]
-    text = tokenizer.decode(ids, skip_special_tokens=skip_special_tokens)
-    return text, ids, stopped_token
+    return text, ids, token_reason
 
 
 def truncate_at_stop_string(
@@ -217,6 +254,11 @@ class OnlineDerenderer:
                 finish_reason=choice.finish_reason,
                 stop=stop,
                 include_stop_str_in_output=include_stop,
+                stop_token_ids=(
+                    chat_request.stop_token_ids if chat_request is not None else None
+                ),
+                eos_token_id=getattr(tokenizer, "eos_token_id", None),
+                generation_eos=generation_eos_ids(getattr(self, "model_config", None)),
             )
 
             resolved_logprobs = (
@@ -756,6 +798,15 @@ class OnlineDerenderer:
                     finish_reason=choice.finish_reason,
                     stop=stop,
                     include_stop_str_in_output=include_stop,
+                    stop_token_ids=(
+                        completion_request.stop_token_ids
+                        if completion_request is not None
+                        else None
+                    ),
+                    eos_token_id=getattr(tokenizer, "eos_token_id", None),
+                    generation_eos=generation_eos_ids(
+                        getattr(self, "model_config", None)
+                    ),
                 )
                 completion_logprobs = None
                 if choice.logprobs is not None:
