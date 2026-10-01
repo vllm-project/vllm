@@ -1366,3 +1366,23 @@ def test_inductor_asserts_user_override(monkeypatch):
     assert config.inductor_compile_config.get("size_asserts") is True
     if not _is_torch_equal_or_newer(torch.__version__, "2.12.0.dev"):
         assert config.inductor_compile_config.get("alignment_asserts") is False
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"decoder_replay_cudagraph_capture_sizes": [0]},
+        {"decoder_replay_cudagraph_capture_sizes": [128, -1]},
+        {"decoder_replay_trim_threshold": -1},
+    ],
+)
+def test_decoder_replay_config_rejects_invalid_values(kwargs):
+    with pytest.raises(ValueError, match="decoder_replay"):
+        CompilationConfig(**kwargs)
+
+
+def test_decoder_replay_config_changes_compilation_hash():
+    default = CompilationConfig()
+    always_trim = CompilationConfig(decoder_replay_trim_threshold=0)
+    custom_sizes = CompilationConfig(decoder_replay_cudagraph_capture_sizes=[128, 1024])
+    assert len({c.compute_hash() for c in (default, always_trim, custom_sizes)}) == 3

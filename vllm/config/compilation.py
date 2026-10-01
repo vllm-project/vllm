@@ -570,6 +570,18 @@ class CompilationConfig:
     If we limit the video count per prompt to `0`, it will also be set to `0`
     (i.e., fall back to image-only mode)."""
 
+    decoder_replay_cudagraph_capture_sizes: list[int] = field(default_factory=list)
+    """Decoder replay CUDA graph sizes for YOCO models (e.g. DeepSeek-V4.1).
+    If empty, use the model's capture sizes up to
+    min(max_cudagraph_capture_size, max_num_seqs * sliding_window), including
+    that upper bound. Explicit sizes override this inference and must not exceed
+    max_num_batched_tokens. Larger replay batches run eagerly."""
+
+    decoder_replay_trim_threshold: int = Field(default=1024, ge=0)
+    """For YOCO models (e.g. DeepSeek-V4.1), PIECEWISE graphs with more padded
+    tokens than this trim the decoder replay batch. Set to 0 to trim at every size.
+    Independent of the replay graph capture sizes; eager steps still trim."""
+
     # Inductor capture
     compile_sizes: list[int | str] | None = None
     """Sizes to compile for inductor. In addition
@@ -1031,6 +1043,11 @@ class CompilationConfig:
         ]:
             raise ValueError(
                 f"Invalid backend for piecewise compilation: {self.backend}"
+            )
+
+        if any(s <= 0 for s in self.decoder_replay_cudagraph_capture_sizes):
+            raise ValueError(
+                "All decoder_replay_cudagraph_capture_sizes must be positive"
             )
 
         # Validate encoder CUDA graph configuration

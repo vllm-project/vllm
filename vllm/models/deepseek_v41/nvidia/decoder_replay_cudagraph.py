@@ -3,6 +3,7 @@
 """CUDA graphs of the decoder replay layers on a trimming step's replay batch."""
 
 from collections.abc import Callable
+from copy import copy
 from dataclasses import replace
 
 import torch
@@ -21,10 +22,29 @@ class DecoderReplayCudaGraphManager(CudaGraphManager):
     padded size. They read the layer inputs from static buffers."""
 
     def __init__(self, vllm_config: VllmConfig, device, layers: DecoderReplayLayers):
-        super().__init__(vllm_config, device, CUDAGraphMode.PIECEWISE, 1)
+        compilation = copy(vllm_config.compilation_config)
+        scheduler = vllm_config.scheduler_config
+        sizes = compilation.decoder_replay_cudagraph_capture_sizes
+        if not sizes:
+            bound = min(
+                compilation.max_cudagraph_capture_size,
+                scheduler.max_num_seqs * layers.window,
+            )
+            sizes = [min(s, bound) for s in compilation.cudagraph_capture_sizes]
+        sizes = sorted(set(sizes))
+        if sizes and max(sizes) > scheduler.max_num_batched_tokens:
+            raise ValueError(
+                "decoder_replay_cudagraph_capture_sizes must not exceed "
+                "max_num_batched_tokens"
+            )
+        compilation.cudagraph_capture_sizes = sizes
+        compilation.max_cudagraph_capture_size = max(sizes, default=0)
+        replay_config = copy(vllm_config)
+        replay_config.compilation_config = compilation
+        super().__init__(replay_config, device, CUDAGraphMode.PIECEWISE, 1)
         self.layers = layers
         self.breakable_cg_runner: BreakableCUDAGraphWrapper = BreakableCUDAGraphWrapper(
-            layers.run_layers, vllm_config
+            layers.run_layers, replay_config
         )
         config, act = vllm_config.model_config.hf_config, vllm_config.model_config.dtype
         assert isinstance(act, torch.dtype)
@@ -34,7 +54,7 @@ class DecoderReplayCudaGraphManager(CudaGraphManager):
         # hidden_states, positions, input_ids, pre_mix, post_mix, res_mix, residual
         shapes = [(h,), (), (), (hc,), (hc, 1), (hc, hc), (hc, h)]
         dtypes = [act, torch.int64, ids, f32, f32, f32, act]
-        n = self.compilation_config.max_cudagraph_capture_size
+        n = compilation.max_cudagraph_capture_size
         self.inputs = [
             torch.zeros(n, *s, dtype=d, device=device) for s, d in zip(shapes, dtypes)
         ]

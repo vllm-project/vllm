@@ -8,7 +8,6 @@ import torch
 import torch.distributed as dist
 import torch.nn as nn
 
-import vllm.envs as envs
 from vllm.compilation.breakable_cudagraph import is_breakable_cudagraph_enabled
 from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.distributed.parallel_state import get_dp_group, get_pp_group
@@ -255,7 +254,9 @@ class DeepseekV41ModelState(DefaultModelState):
             self.replay_graphs = DecoderReplayCudaGraphManager(
                 vllm_config, device, layers
             )
-            layers.trim_threshold = envs.VLLM_DSV41_DECODER_REPLAY_TRIM_THRESHOLD
+            layers.trim_threshold = (
+                vllm_config.compilation_config.decoder_replay_trim_threshold
+            )
 
     def add_request(self, req_index: int, new_req_data: NewRequestData) -> None:
         super().add_request(req_index, new_req_data)

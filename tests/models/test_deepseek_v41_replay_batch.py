@@ -59,6 +59,7 @@ def state(monkeypatch):
     cfg.scheduler_config.max_num_batched_tokens = 1024
     cfg.parallel_config.data_parallel_size = 1
     cfg.compilation_config.fast_moe_cold_start = False
+    cfg.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
     layers = SimpleNamespace(window=WINDOW, replay_batch=None, trim_threshold=None)
     model = SimpleNamespace(token_lookback_depth=0, decoder_replay_layers=layers)
     builds: list = []
@@ -316,3 +317,32 @@ def test_capture_replays_a_whole_dummy_batch(state):
     assert replay.rows.tolist() == list(range(64))
     assert replay.forward_context.batch_descriptor.num_tokens == 64
     assert state.builds[-1].batch.num_reqs == 16
+
+
+@pytest.mark.parametrize("keep_rows,other_tokens", [(False, 500), (True, 200)])
+def test_replay_above_graph_capacity_falls_back_without_dropping_rows(
+    dp_state, keep_rows, other_tokens
+):
+    """An oversized local or peer batch uses eager replay with unpadded metadata."""
+    dp_state._keeps_rows_np[1] = keep_rows
+    dp_state.other = (True, other_tokens)
+    expected = [0, *range(1 if keep_rows else 301 - WINDOW, 301), *range(301, 401)]
+    dp_state.replay_graphs = _graphs(256)
+    dp_state.replay_graphs.dispatch.return_value = BatchExecutionDescriptor(
+        CUDAGraphMode.NONE, max(len(expected), other_tokens), None
+    )
+    replay, build = _prepare(
+        dp_state, _input_batch(QUERY_LENS, SEQ_LENS, PREFILLING), CUDAGraphMode.NONE
+    )
+    assert dp_state.replay_graphs.dispatch.call_args.args[:2] == (
+        3,
+        max(len(expected), other_tokens),
+    )
+    assert replay.run_graph is None
+    assert replay.rows.tolist() == expected
+    assert replay.forward_context.cudagraph_runtime_mode == CUDAGraphMode.NONE
+    assert replay.forward_context.dp_metadata.num_tokens_across_dp_cpu.tolist() == [
+        len(expected),
+        other_tokens,
+    ]
+    assert build.batch.num_tokens_after_padding == len(expected)
