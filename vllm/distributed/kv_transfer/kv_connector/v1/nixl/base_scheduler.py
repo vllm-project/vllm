@@ -420,12 +420,13 @@ class NixlBaseConnectorScheduler:
             # loads nothing on the decoder, which recomputes its whole prompt.
             and not request.get_skip_reading_prefix_cache()
         ):
+            # A mixed-mode prompt carries token ids, embeddings and a mask.
             if request.prompt_token_ids is not None:
                 del request.prompt_token_ids[-backoff:]
-            elif request.prompt_embeds is not None:
+            if request.prompt_embeds is not None:
                 request.prompt_embeds = request.prompt_embeds[:-backoff]
-            else:
-                return
+            if request.prompt_is_token_ids is not None:
+                del request.prompt_is_token_ids[-backoff:]
 
             del request._all_token_ids[-backoff:]
             request.num_prompt_tokens -= backoff
