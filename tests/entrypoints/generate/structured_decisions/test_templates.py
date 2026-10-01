@@ -40,7 +40,7 @@ def test_default_template_text():
     text = (
         DecisionTemplate(DEFAULT_DECISION_TEMPLATE)
         .render("Support inbox.", questions())
-        .system_text
+        .text
     )
     assert text == (
         "Answer a fixed set of questions about the state the user provides. Each "
@@ -66,7 +66,7 @@ def test_custom_template_and_answer():
         'Write "{{ answer(questions[0], "A") }}".'
     )
     rendered = template.render(None, questions())
-    assert rendered.system_text == (
+    assert rendered.text == (
         'bucket=choice A/billing B/outage;lang=choice A/en B/fr;Write "[bucket] (A)".'
     )
     assert rendered.answer(questions()[1], "B") == "[lang] (B)"

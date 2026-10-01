@@ -64,8 +64,9 @@ class StructuredDecisionResponse(OpenAIBaseModel):
 
 
 class ReadPromptRequest(OpenAIBaseModel):
-    """Chat options for one read's prompt: system and state, then the assistant
-    turn, ending just before the question's label."""
+    """Chat options for one read's prompt: the state and the question in the
+    user turn, then the assistant turn, ending just before the question's
+    label."""
 
     chat_template_kwargs: dict[str, Any] | None = None
 

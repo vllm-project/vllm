@@ -1,17 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Decision templates: Jinja that renders a decision's system prompt and
-defines the answer format.
+"""Decision templates: Jinja that renders the text of one question's read and
+defines the answer format. Each read places the text after the state.
 
 The template receives ``instructions`` (a string or None) and ``questions``,
-each with ``id``, ``type``, ``instructions`` and ``options`` (``label``,
-``name``, ``description``).
+which holds the question being read, with ``id``, ``type``, ``instructions``
+and ``options`` (``label``, ``name``, ``description``).
 
 It may define a macro ``answer(question, label)`` that returns one question's
 answer as the model should write it, ``"<id>: <label>"`` by default. The
 server renders the answer once per label and compares the tokens to find
-where the label goes. The system prompt can call the same macro to show the
-model the exact reply format.
+where the label goes. The text can call the same macro to show the model the
+exact reply format.
 """
 
 import string
@@ -165,13 +165,13 @@ class DecisionTemplate:
                 }
             )
         return RenderedDecision(
-            system_text=str(module), answer_macro=getattr(module, "answer", None)
+            text=str(module), answer_macro=getattr(module, "answer", None)
         )
 
 
 @dataclass(frozen=True)
 class RenderedDecision:
-    system_text: str
+    text: str
     answer_macro: Any
 
     def answer(self, question: Question, label: str) -> str:

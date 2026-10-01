@@ -94,10 +94,10 @@ def select_read_strategy(model_config: ModelConfig) -> type[ReadStrategy] | None
 
 @register_read_strategy("next_token")
 class NextTokenStrategy(ReadStrategy):
-    """Autoregressive models. Each question is one request: the chat prompt with
-    the reply prefilled up to the question's label, one generated token, and the
-    logprobs of the label tokens. The requests share the system prompt and the
-    state. With prefix caching, the shared part is prefilled once."""
+    """Autoregressive models. Each question is one request: the state, then the
+    template rendered for that question alone, the reply prefilled up to the
+    question's label, one generated token, and the logprobs of the label tokens.
+    The requests share the state. With prefix caching, it is prefilled once."""
 
     def limits(self) -> DecisionLimits:
         return DecisionLimits(max_questions=64, max_options=MAX_LOGPROB_TOKEN_IDS)
@@ -116,15 +116,16 @@ class NextTokenStrategy(ReadStrategy):
     ) -> list[QuestionRead]:
         ctx = self.context
         tokenizer = ctx.online_renderer.renderer.get_tokenizer()
-        rendered = template.render(instructions, questions)
         read_request = ReadPromptRequest(chat_template_kwargs=chat_template_kwargs)
 
         slots, engine_inputs = [], []
         for q in questions:
+            # With every question in one prompt, later questions lost accuracy
+            # (Qwen3-0.6B: 81% at the first, 60% at the fourth).
+            rendered = template.render(instructions, [q])
             slot = rendered.slot(tokenizer, q)
             messages = [
-                {"role": "system", "content": rendered.system_text},
-                {"role": "user", "content": state},
+                {"role": "user", "content": f"{state}\n\n{rendered.text}"},
                 {"role": "assistant", "content": tokenizer.decode(slot.prefix_ids)},
             ]
             _, (engine_input,) = await ctx.online_renderer.preprocess_chat(
