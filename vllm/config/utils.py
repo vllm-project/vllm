@@ -208,8 +208,8 @@ def get_attr_docs(cls: type[Any]) -> dict[str, str]:
 
     # Walk the MRO from the most-base class to ``cls`` so that a docstring
     # redefined on a subclass overrides the one inherited from a base class.
-    for klass in reversed(cls.__mro__):
-        _get_own_attr_docs(klass, out)
+    for base in reversed(cls.__mro__):
+        _get_own_attr_docs(base, out)
 
     return out
 
