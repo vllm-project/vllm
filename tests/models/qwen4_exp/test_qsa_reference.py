@@ -540,15 +540,12 @@ def test_qsa_unfused_cache_update_ignores_padded_qk() -> None:
     )
     padded_keys = torch.full((8, 64), torch.nan, dtype=torch.bfloat16, device=device)
     padded_keys[:5].copy_(keys)
-    unused = torch.empty(0, device=device)
     indexer_qsa.QSAIndexer.forward(
         indexer,
         torch.cat((torch.ones_like(padded_keys), padded_keys), dim=-1),
         torch.zeros(8, dtype=torch.long, device=device),
         torch.full((5, 5), -1, dtype=torch.int32, device=device),
         attn=SimpleNamespace(use_fused_qsa_prepare=False),
-        qkv=unused,
-        slot_mapping=unused,
     )
     torch.testing.assert_close(raw_cache[0, :, 0], keys[[4, 1, 2, 3]])
     expected_compressed = torch.zeros_like(compressed_cache)

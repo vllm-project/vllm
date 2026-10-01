@@ -240,8 +240,8 @@ class QSAIndexer(nn.Module):
         out: torch.Tensor | None = None,
         *,
         attn: "Qwen4ExpQSAAttention",
-        qkv: torch.Tensor,
-        slot_mapping: torch.Tensor,
+        qkv: torch.Tensor | None = None,
+        slot_mapping: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, tuple[torch.Tensor, torch.Tensor] | None]:
         """Update side caches and select token indices from pre-projected Q/K.
 
@@ -254,7 +254,7 @@ class QSAIndexer(nn.Module):
         With ``attn.use_fused_qsa_prepare``, the same launch also writes
         ``attn``'s K/V into ``attn.kv_cache`` at ``slot_mapping`` and prepares
         its Q and gate from ``qkv``, returned as the second element (None
-        otherwise).
+        otherwise). ``qkv`` and ``slot_mapping`` are only read in that mode.
         """
         metadata = self._metadata()
         if metadata is None:
@@ -298,6 +298,8 @@ class QSAIndexer(nn.Module):
 
         main_outputs: tuple[torch.Tensor, torch.Tensor] | None = None
         if attn.use_fused_qsa_prepare:
+            if qkv is None or slot_mapping is None:
+                raise ValueError("fused QSA prepare requires qkv and slot_mapping")
             q = projected_q.new_empty(
                 num_tokens,
                 self.index_n_heads,

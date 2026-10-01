@@ -452,13 +452,15 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
         self,
         projected_qk: torch.Tensor,
         positions: torch.Tensor,
-        query: torch.Tensor,
-        key: torch.Tensor,
-        value: torch.Tensor,
+        query: torch.Tensor | None,
+        key: torch.Tensor | None,
+        value: torch.Tensor | None,
         output: torch.Tensor,
-        output_gate: torch.Tensor,
+        output_gate: torch.Tensor | None,
         qkv: torch.Tensor,
     ) -> None:
+        # query/key/value/output_gate are None when the fused prepare runs
+        # inside the indexer launch.
         metadata = get_forward_context().attn_metadata
         if isinstance(metadata, list):
             metadata = metadata[0]
@@ -488,6 +490,7 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
             raise RuntimeError("QSA indexer returned an invalid selection shape")
         impl = cast(Qwen4ExpQSAFlashAttentionImpl, self.impl)
         if main_outputs is None:
+            assert key is not None and value is not None
             impl.do_kv_cache_update(
                 self,
                 key,
@@ -497,6 +500,7 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
             )
         else:
             query, output_gate = main_outputs
+        assert query is not None and output_gate is not None
         impl.forward_qsa(
             self,
             query,
@@ -525,7 +529,7 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
             value = v.view(num_tokens, self.num_kv_heads, self.head_dim)
         else:
             # Norm/RoPE/gate and the K/V cache write happen inside _run_qsa.
-            query = gate = key = value = qkv.new_empty(0)
+            query = key = value = gate = None
         attn_output = qkv.new_empty(num_tokens, self.num_heads, self.head_dim)
         # Keep the index projection outside the eager break.
         projected_qk, _ = self.indexer.index_qk_proj(hidden_states)

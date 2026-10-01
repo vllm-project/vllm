@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Correctness tests for the fused QSA pre-indexer."""
+"""Correctness tests for the fused QSA prepare kernel."""
 
 import pytest
 import torch
@@ -163,7 +163,7 @@ def _check_main_outputs(main: dict, q_out, gate_out, rope, positions) -> None:
         pytest.param(True, True, True, 4, [4097], [4097], [0], id="tiled"),
     ],
 )
-def test_qsa_fused_pre_indexer_matches_unfused(
+def test_qsa_fused_prepare_matches_unfused(
     indexer_dtype,
     mrope,
     is_2d_positions,
@@ -177,7 +177,6 @@ def test_qsa_fused_pre_indexer_matches_unfused(
 
     from vllm.model_executor.layers.rotary_embedding import get_rope
 
-    torch.manual_seed(0)
     device = "cuda"
     rope_params = {
         "partial_rotary_factor": 0.25,
