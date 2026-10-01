@@ -568,6 +568,22 @@ class InputProcessor:
             prompt_input["prompt_embeds"] if prompt_input["type"] == "embeds" else None
         )
 
+        if prompt_embeds is not None:
+            if prompt_embeds.ndim != 2:
+                raise VLLMValidationError(
+                    "`prompt_embeds` must be a 2D tensor of shape "
+                    "(num_tokens, hidden_size); "
+                    f"got shape {tuple(prompt_embeds.shape)}.",
+                    parameter="prompt_embeds",
+                )
+            expected_hidden_size = model_config.get_hidden_size()
+            if prompt_embeds.shape[1] != expected_hidden_size:
+                raise VLLMValidationError(
+                    f"`prompt_embeds` hidden_size {prompt_embeds.shape[1]} "
+                    f"does not match the model's hidden_size {expected_hidden_size}.",
+                    parameter="prompt_embeds",
+                )
+
         prompt_len = length_from_prompt_token_ids_or_embeds(prompt_ids, prompt_embeds)
         self._validate_prompt_len(prompt_len, prompt_type)
 
