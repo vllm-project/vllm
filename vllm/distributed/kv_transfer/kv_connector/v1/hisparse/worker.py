@@ -348,7 +348,7 @@ class HiSparseConnectorWorker:
         self._init_dma()
         if self.is_host_writer:
             for layer_index, handle in enumerate(cache_handles):
-                # Draft layers are mirrored once in wait_for_save instead.
+                # Draft layers are mirrored once in the next start_step instead.
                 if not handle.draft_layer:
                     handle.submit_layer_mirror = partial(
                         self._enqueue_layer_mirror, layer_index
@@ -408,12 +408,12 @@ class HiSparseConnectorWorker:
         self._next_host_write_event ^= 1
         current_stream().wait_event(previous_host_write_event)
         self._release_completed_dma_descriptors()
+        self._dma_submitted = False
+        self._finish_previous_step()
         mirrors = _flatten_row_mirrors(metadata.row_mirrors, request_ids)
         if self._slot_mapping_staging is not None:
             self._slot_mapping_staging.candidates = mirrors
         self._set_row_mirrors(mirrors)
-        self._dma_submitted = False
-        self._draft_mirror_pending = False
         self._clear_forward_mirror_state()
         for handle in self.cache_handles:
             handle.all_context_pages_resident = metadata.all_context_pages_resident
@@ -856,8 +856,8 @@ class HiSparseConnectorWorker:
         if num_rows == 0:
             return
         if self.is_host_writer:
-            # The drafter has not written its layers' rows yet; wait_for_save
-            # mirrors them after it runs.
+            # The drafter has not written its layers' rows yet; the next
+            # start_step mirrors them after it runs.
             self._draft_mirror_pending = bool(self._draft_layers)
             expected_layers = {index for index, _ in active}.difference(
                 self._draft_layers
@@ -904,12 +904,15 @@ class HiSparseConnectorWorker:
                 self.host_write_event.record(compute_stream)
         self._release_completed_dma_descriptors()
 
-    def wait_for_save(self) -> None:
-        """Mirror draft-layer rows, then hand this step's pages to the host.
+    def _finish_previous_step(self) -> None:
+        """Mirror the previous step's draft-layer rows, then hand its pages over.
 
-        Runs after the drafter. Post-forward transfers are ordered behind the
-        draft mirror, so a page is never reported clean, and its resident
-        block never released, before its draft-layer rows reach the host.
+        Runs before this step's work, so after the previous step's drafter.
+        Post-forward transfers are ordered behind the draft mirror, so a page is
+        never reported clean, and its resident block never released, before
+        its draft-layer rows reach the host. Both land in this step's host
+        write event, which the compute stream waits on in finish_forward,
+        before the drafter rewrites those rows.
         """
         if self._draft_mirror_pending:
             self._draft_mirror_pending = False

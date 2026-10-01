@@ -272,7 +272,17 @@ def test_draft_layer_rows_mirrored_after_drafter(monkeypatch, cg_mode):
     draft.view.cache[resident_block] = 2.0
     if cg_mode != CUDAGraphMode.FULL:
         draft.finish_kv_update()
-    connector.wait_for_save()
+    # The next step's start mirrors the drafter's rows, then hands the page over.
+    connector._get_connector_metadata.return_value = HiSparseConnectorMetadata(
+        None, (), (), {}, True
+    )
+    connector.start_load_kv(
+        SimpleNamespace(),
+        request_state_indices=None,
+        request_ids=[],
+        num_tokens=0,
+        attn_metadata={},
+    )
     ((completion_event, _),) = worker._pending_transfer_events
     worker_meta = connector.build_connector_worker_meta()
 

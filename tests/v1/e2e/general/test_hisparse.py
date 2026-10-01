@@ -174,11 +174,11 @@ def test_hisparse_spill_and_prefix_restore(
         )
 
         # The MTP layer writes its rows after the target forward, so it is
-        # mirrored in wait_for_save instead of finish_forward.
+        # mirrored at the start of the next step instead of in finish_forward.
         draft_layers = set(worker._draft_layers)
         assert draft_layers
         original_finish_forward = worker.finish_forward
-        original_wait_for_save = worker.wait_for_save
+        original_finish_previous_step = worker._finish_previous_step
         verified_rows = {"target": 0, "draft": 0}
         copied_nonzero_kv = False
         draft_check_pending = False
@@ -222,15 +222,15 @@ def test_hisparse_spill_and_prefix_restore(
             finally:
                 full_replay_pending = False
 
-        def wait_for_save():
+        def finish_previous_step():
             nonlocal draft_check_pending
-            original_wait_for_save()
+            original_finish_previous_step()
             if draft_check_pending:
                 draft_check_pending = False
                 check_host_rows(draft_layers, "draft")
 
         monkeypatch.setattr(worker, "finish_forward", finish_forward)
-        monkeypatch.setattr(worker, "wait_for_save", wait_for_save)
+        monkeypatch.setattr(worker, "_finish_previous_step", finish_previous_step)
 
         expected = runner.generate_greedy([target], max_tokens=8)
 
