@@ -173,7 +173,7 @@ def test_missing_aiter_raises(monkeypatch):
     monkeypatch.setattr(qsa_flydsl, "_ENABLED", True)
     monkeypatch.setattr(builtins, "__import__", no_flydsl)
     try:
-        with pytest.raises(RuntimeError, match="FlyDSL QSA"):
+        with pytest.raises(ImportError, match="aiter"):
             qsa_flydsl._flydsl_qsa()
     finally:
         qsa_flydsl._flydsl_qsa.cache_clear()
