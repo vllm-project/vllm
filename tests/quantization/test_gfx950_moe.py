@@ -165,7 +165,7 @@ def mxfp4_oracle_config():
     from unittest.mock import patch
 
     with patch(
-        "vllm.model_executor.layers.fused_moe.oracle.mxfp4.get_current_vllm_config"
+        "vllm.model_executor.layers.fused_moe.oracle.mxfp4.get_current_vllm_config_or_none"
     ) as mock_get_config:
         mock_get_config.return_value.model_config.quantization_config = None
         yield

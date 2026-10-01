@@ -7,7 +7,7 @@ import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm import envs
-from vllm.config import get_current_vllm_config
+from vllm.config import get_current_vllm_config_or_none
 from vllm.config.kernel import MoEBackend
 from vllm.config.quantization import QuantizationConfigArgs
 from vllm.logger import init_logger
@@ -477,7 +477,11 @@ def _backend_activation_key(backend: Mxfp4MoeBackend) -> QuantKey | None:
 
 def _user_moe_activation_override() -> QuantKey | None:
     """User's MoE activation override from quantization_config, or None."""
-    args = get_current_vllm_config().model_config.quantization_config
+    vllm_config = get_current_vllm_config_or_none()
+    model_config = vllm_config.model_config if vllm_config is not None else None
+    if model_config is None:
+        return None
+    args = model_config.quantization_config
     if not isinstance(args, QuantizationConfigArgs) or args.moe is None:
         return None
     return args.moe.activation
