@@ -2358,7 +2358,9 @@ class HiSparseSourceManager(FullAttentionManager):
     def pop_blocks_for_free(self, request_id: str) -> list[KVCacheBlock]:
         assert self.coordinator is not None
         self.coordinator.free(request_id)
-        return super().pop_blocks_for_free(request_id)
+        return self.coordinator.hold_freed_host_blocks(
+            super().pop_blocks_for_free(request_id)
+        )
 
 
 class _HiSparseAuxiliaryManager(SingleTypeKVCacheManager):

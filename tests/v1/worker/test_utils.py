@@ -46,6 +46,7 @@ def _make_hisparse_worker() -> HiSparseConnectorWorker:
     worker._submitted_mirror_layers = set()
     worker._draft_layers = ()
     worker._draft_mirror_pending = False
+    worker._step_id = None
     worker._pending_dma_descriptors = deque()
     worker._dma_free_descriptors = []
     worker.host_write_events = (MagicMock(), MagicMock())
@@ -1026,6 +1027,7 @@ def test_hisparse_step_waits_for_previous_host_write(monkeypatch, is_host_writer
             row_mirrors={},
             all_context_pages_resident=True,
             row_mirrors_from_resident=False,
+            step_id=None,
         ),
         None,
     )
@@ -1037,6 +1039,7 @@ def test_hisparse_step_waits_for_previous_host_write(monkeypatch, is_host_writer
             row_mirrors={},
             all_context_pages_resident=True,
             row_mirrors_from_resident=False,
+            step_id=None,
         ),
         None,
     )
@@ -1110,6 +1113,7 @@ def test_hisparse_empty_step_does_not_replay_stale_host_mirror(monkeypatch):
             row_mirrors={},
             all_context_pages_resident=True,
             row_mirrors_from_resident=False,
+            step_id=None,
         ),
         None,
     )

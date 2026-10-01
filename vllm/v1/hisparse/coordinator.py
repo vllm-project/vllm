@@ -172,6 +172,15 @@ class HiSparseCoordinator:
         self.pending_spills: dict[int, _PendingSpill] = {}
         self.request_states: dict[str, _HiSparseRequestState] = {}
         self.next_spill_id = 0
+        # Workers write a step's draft rows and page spills at the next step's
+        # start, after the scheduler may already have freed the destination
+        # host blocks. Freed host blocks wait for the latest scheduled step's
+        # deferred writes before returning to the pool, so no other writer
+        # (e.g. a P/D import) can receive them first.
+        self._latest_step_id: int | None = None
+        # Step id -> [expected, completed] worker reports.
+        self._pending_step_writes: dict[int, list[int]] = {}
+        self._held_host_blocks: list[tuple[int, list[KVCacheBlock]]] = []
         # Published host block hash -> GPU copies of that page, readable until
         # the pool reuses them. Lets a host prefix hit come back GPU-resident.
         self.copies: dict[BlockHashWithGroupId, tuple[KVCacheBlock, ...]] = {}
@@ -232,6 +241,56 @@ class HiSparseCoordinator:
             return
         assert self.host_manager is not None
         self.host_manager.block_pool.free_blocks(reversed(blocks))
+
+    def begin_step(self) -> int:
+        """Return the id the worker reports once this step's deferred writes land."""
+        step_id = self.next_spill_id
+        self.next_spill_id += 1
+        self._latest_step_id = step_id
+        self._pending_step_writes[step_id] = [0, 0]
+        return step_id
+
+    def hold_freed_host_blocks(self, blocks: list[KVCacheBlock]) -> list[KVCacheBlock]:
+        """Keep freed host blocks until the latest step's deferred writes land."""
+        if not blocks or self._latest_step_id is None:
+            return blocks
+        self._held_host_blocks.append((self._latest_step_id, blocks))
+        return []
+
+    def _update_step_writes(
+        self,
+        enqueued_counts: Mapping[int, int],
+        completed_counts: Mapping[int, int],
+    ) -> None:
+        done_step_id: int | None = None
+        for step_id, counts in self._pending_step_writes.items():
+            if counts[0] == 0:
+                counts[0] = enqueued_counts.get(step_id, 0)
+            counts[1] += completed_counts.get(step_id, 0)
+            if counts[0] and counts[1] >= counts[0]:
+                done_step_id = (
+                    step_id if done_step_id is None else max(done_step_id, step_id)
+                )
+        if done_step_id is None:
+            return
+        # Each worker writes steps in order on one stream, so a finished step
+        # implies every earlier one has landed too.
+        self._pending_step_writes = {
+            step_id: counts
+            for step_id, counts in self._pending_step_writes.items()
+            if step_id > done_step_id
+        }
+        released = [
+            blocks
+            for step_id, blocks in self._held_host_blocks
+            if step_id <= done_step_id
+        ]
+        self._held_host_blocks = [
+            entry for entry in self._held_host_blocks if entry[0] > done_step_id
+        ]
+        assert self.host_manager is not None
+        for blocks in released:
+            self.host_manager.block_pool.free_blocks(reversed(blocks))
 
     def get_host_block_pool(self) -> BlockPool | None:
         manager = self.host_manager
@@ -683,7 +742,12 @@ class HiSparseCoordinator:
         )
 
     def has_pending_work(self) -> bool:
-        return bool(self.spills_to_send or self.pending_spills or self._retained_copies)
+        return bool(
+            self.spills_to_send
+            or self.pending_spills
+            or self._retained_copies
+            or self._held_host_blocks
+        )
 
     def update_spills(
         self,
@@ -701,6 +765,7 @@ class HiSparseCoordinator:
 
         self._apply_enqueued_spills()
         self._complete_host_writes()
+        self._update_step_writes(enqueued_counts, completed_counts)
 
     def _apply_enqueued_spills(self) -> None:
         """Drop the GPU pins once every worker has completed the transfer."""

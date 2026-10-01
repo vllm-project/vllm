@@ -305,6 +305,7 @@ class HiSparseConnectorWorker:
             index for index, cache in enumerate(cache_handles) if cache.draft_layer
         )
         self._draft_mirror_pending = False
+        self._step_id: int | None = None
         self._set_row_mirrors(())
         self.cache_layer_names = cache_layer_names
         self._group_leaders = tuple(
@@ -404,6 +405,7 @@ class HiSparseConnectorWorker:
     ) -> None:
         self._stage_row_mirror_mapping(num_tokens)
         self._finish_previous_step()
+        self._step_id = metadata.step_id
         previous_host_write_event = self.host_write_event
         self.host_write_event = self.host_write_events[self._next_host_write_event]
         self._next_host_write_event ^= 1
@@ -728,7 +730,17 @@ class HiSparseConnectorWorker:
         *,
         stream: torch.Stream | None = None,
     ) -> None:
-        if not transfers:
+        self._record_completion(
+            tuple(transfer.transfer_id for transfer in transfers), stream=stream
+        )
+
+    def _record_completion(
+        self,
+        transfer_ids: tuple[int, ...],
+        *,
+        stream: torch.Stream | None = None,
+    ) -> None:
+        if not transfer_ids:
             return
         if stream is None:
             if not self.is_host_writer:
@@ -737,7 +749,6 @@ class HiSparseConnectorWorker:
         assert stream is not None
         completion_event = torch.Event()
         completion_event.record(stream)
-        transfer_ids = tuple(transfer.transfer_id for transfer in transfers)
         self._pending_transfer_events.append((completion_event, transfer_ids))
         self._enqueued_transfer_ids.extend(transfer_ids)
 
@@ -921,6 +932,9 @@ class HiSparseConnectorWorker:
         transfers = self._post_forward_transfers
         self._post_forward_transfers = []
         self._submit_transfers(transfers)
+        # The scheduler holds freed host blocks until this lands.
+        if self._step_id is not None:
+            self._record_completion((self._step_id,))
 
     def take_completed_host_copies(self) -> list[int]:
         """Drain host copies this worker has enqueued for this step."""

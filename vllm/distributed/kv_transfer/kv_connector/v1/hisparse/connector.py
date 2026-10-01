@@ -52,6 +52,7 @@ class HiSparseConnectorMetadata(KVConnectorMetadata):
     source_block_ids: tuple[int, ...]
     row_mirrors: dict[str, tuple[SparseKVRowMirror, ...]]
     all_context_pages_resident: bool
+    step_id: int | None = None
 
 
 @dataclass
@@ -167,6 +168,7 @@ class HiSparseConnectorScheduler:
             tuple(source_block_ids),
             row_mirrors,
             self.coordinator.all_context_pages_resident(scheduled_requests),
+            self.coordinator.begin_step(),
         )
 
     def update_connector_output(self, connector_output: KVConnectorOutput) -> None:
