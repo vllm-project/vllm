@@ -120,7 +120,6 @@ class MultiprocExecutor(Executor):
         # and ensure workers will be terminated.
         self._finalizer = weakref.finalize(self, self.shutdown)
         self.is_failed = False
-        self.last_worker_error: str | None = None
         self.failure_callback: FailureCallback | None = None
 
         tp_size, pp_size, pcp_size = self._get_parallel_sizes()
@@ -207,6 +206,8 @@ class MultiprocExecutor(Executor):
                 if inherited_fds is not None:
                     inherited_fds.append(unready_worker_handle.death_writer.fileno())
                     inherited_fds.append(unready_worker_handle.ready_pipe.fileno())
+                    if (error_reader := unready_worker_handle.error_reader) is not None:
+                        inherited_fds.append(error_reader.fileno())
 
             # Workers must be created before wait_for_ready to avoid
             # deadlock, since worker.init_device() does a device sync.
@@ -300,52 +301,44 @@ class MultiprocExecutor(Executor):
         workers = self.workers
         self_ref = weakref.ref(self)
 
-        # Monitors worker process liveness. If any die unexpectedly,
-        # logs an error, shuts down the executor and invokes the failure
-        # callback to inform the engine.
+        # Monitors worker process liveness and fatal RPC failure notifications.
+        # If any worker dies unexpectedly or reports a fatal failure, logs an
+        # error, shuts down the executor and invokes the failure callback to
+        # inform the engine.
         def monitor_workers():
-            handles = {
-                target: h
-                for h in workers
-                for target in (h.proc.sentinel, h.error_reader)
+            sentinels = {h.proc.sentinel: h.proc for h in workers}
+            error_pipes = {
+                h.error_reader: h.proc for h in workers if h.error_reader is not None
             }
-            ready = multiprocessing.connection.wait(handles.keys())
+            ready = multiprocessing.connection.wait([*sentinels, *error_pipes])
             _self = self_ref()
             if not _self or getattr(_self, "shutting_down", False):
                 logger.debug("MultiprocWorkerMonitor: shutdown already initiated")
                 return
             _self.is_failed = True
-            target = ready[0]
-            worker = handles[target]
-
-            if target == worker.proc.sentinel:
-                logger.error(
-                    "Worker proc %s died unexpectedly (exit code: %s), "
-                    "shutting down executor.",
-                    worker.proc.name,
-                    worker.proc.exitcode,
-                )
-            elif isinstance(target, Connection):
-                try:
-                    err_msg, tb = target.recv()
+            try:
+                if died := [p for s, p in sentinels.items() if s in ready]:
                     logger.error(
-                        "Worker proc %s encountered exception: %s\n%s",
-                        worker.proc.name,
-                        err_msg,
-                        tb,
-                    )
-                except EOFError:
-                    logger.error(
-                        "Worker proc %s error pipe closed unexpectedly, "
+                        "Worker proc %s died unexpectedly (exit code: %s), "
                         "shutting down executor.",
-                        worker.proc.name,
+                        died[0].name,
+                        died[0].exitcode,
                     )
-
-            _self.shutdown()
-            callback = _self.failure_callback
-            if callback is not None:
-                _self.failure_callback = None
-                callback()
+                else:
+                    # The error pipe is only a wake-up signal and is never read,
+                    # so teardown can't depend on a (possibly torn) message.
+                    proc = next(p for r, p in error_pipes.items() if r in ready)
+                    logger.error(
+                        "Worker proc %s reported a fatal error, shutting down "
+                        "executor. See the worker's log above for the root cause.",
+                        proc.name,
+                    )
+                _self.shutdown()
+            finally:
+                callback = _self.failure_callback
+                if callback is not None:
+                    _self.failure_callback = None
+                    callback()
 
         if not inline:
             Thread(
@@ -542,7 +535,7 @@ class MultiprocExecutor(Executor):
                     if w.death_writer is not None:
                         w.death_writer.close()
                         w.death_writer = None
-                    if getattr(w, "error_reader", None) is not None:
+                    if w.error_reader is not None:
                         w.error_reader.close()
                         w.error_reader = None
                 self._ensure_worker_termination([w.proc for w in workers])
@@ -633,6 +626,20 @@ class WorkerProc:
     """Wrapper that runs one Worker in a separate process."""
 
     READY_STR = "READY"
+    # Failures in these RPCs already fail the engine and can leave peer ranks
+    # blocked in collectives, so they are reported to the executor monitor to
+    # fail fast. Failures in other RPCs (e.g. loading an invalid LoRA adapter)
+    # are only returned to the caller.
+    FAIL_FAST_RPCS = frozenset(
+        {
+            "determine_available_memory",
+            "initialize_from_config",
+            "compile_or_warm_up_model",
+            "execute_model",
+            "sample_tokens",
+            "execute_dummy_batch",
+        }
+    )
     rpc_broadcast_mq: MessageQueue | None
     worker_response_mq: MessageQueue | None
     error_writer: Connection | None = None
@@ -750,7 +757,7 @@ class WorkerProc:
         ready_reader, ready_writer = context.Pipe(duplex=False)
         # Death pipe to let child detect parent process exit
         death_reader, death_writer = context.Pipe(duplex=False)
-        # Error pipe to report unhandled worker exceptions to executor monitor
+        # Error pipe to notify the executor monitor of fatal RPC failures
         error_reader, error_writer = context.Pipe(duplex=False)
         if inherited_fds is not None:
             inherited_fds = inherited_fds.copy()
@@ -957,7 +964,10 @@ class WorkerProc:
             )
 
             worker = WorkerProc(*args, **kwargs)
-            worker.error_writer = error_pipe
+            # With fault tolerance, failed steps are recovered in place by the
+            # engine, so they must not tear down the executor.
+            if not kwargs["vllm_config"].parallel_config.enable_fault_tolerance:
+                worker.error_writer = error_pipe
             assert worker.worker_response_mq is not None
             if kwargs["vllm_config"].parallel_config.numa_bind:
                 numa_utils.log_current_affinity_state(f"Worker_{worker.rank}")
@@ -1103,15 +1113,21 @@ class WorkerProc:
             if hasattr(e, "add_note"):
                 e.add_note(traceback.format_exc())
             logger.exception("WorkerProc hit an exception.")
-            # Report exception to executor monitor thread immediately
-            # so collectives don't deadlock
-            if self.error_writer is not None:
-                with suppress(Exception):
-                    self.error_writer.send((str(e), traceback.format_exc()))
+            if method in self.FAIL_FAST_RPCS:
+                self._report_fatal_failure()
             # enqueue_output converts the exception to a FAILURE response
             # containing its string representation before transport.
             if output_rank is None or self.rank == output_rank:
                 self.handle_output(e)
+
+    def _report_fatal_failure(self) -> None:
+        """Wake up the executor monitor, at most once. Only a tiny fixed message
+        is sent so the write can neither block nor be torn; the traceback is
+        already in this worker's log."""
+        writer, self.error_writer = self.error_writer, None
+        if writer is not None:
+            with suppress(Exception):
+                writer.send_bytes(b"\x00")
 
     @staticmethod
     def setup_proc_title_and_log_prefix(enable_ep: bool) -> None:

@@ -125,3 +125,53 @@ def test_llm_startup_error(
             devices=list(range(tensor_parallel_size)),
             threshold_bytes=SHUTDOWN_TEST_THRESHOLD_BYTES,
         )
+
+
+def evil_forward_on_rank_1(self, *args, **kwargs):
+    """Evil forward that raises on TP rank 1 only, so rank 0 blocks in a
+    collective that can never complete."""
+    if get_tensor_model_parallel_rank() == 1:
+        raise Exception("Simulated Error in startup on rank 1!")
+
+    kwargs.setdefault("intermediate_tensors", None)
+    return self.model(*args, **kwargs)
+
+
+@pytest.fixture
+def rocm_evil_forward_on_rank_1(rocm_sitecustomize_factory):
+    lines = [
+        "from vllm.distributed import get_tensor_model_parallel_rank",
+        "from vllm.model_executor.models.llama import LlamaForCausalLM",
+        inspect.getsource(evil_forward_on_rank_1),
+        f"LlamaForCausalLM.forward = {evil_forward_on_rank_1.__name__}",
+    ]
+    rocm_sitecustomize_factory(lines)
+
+
+@pytest.mark.timeout(SHUTDOWN_TEST_TIMEOUT_SEC)
+@pytest.mark.parametrize("model", MODELS)
+def test_async_llm_startup_error_with_peer_in_collective(
+    monkeypatch, rocm_evil_forward_on_rank_1, model: str
+) -> None:
+    """Test that a startup error on one rank fails fast instead of hanging
+    while another rank is blocked in a collective waiting for it."""
+    tensor_parallel_size = 2
+    if current_platform.device_count() < tensor_parallel_size:
+        pytest.skip(reason="Not enough CUDA devices")
+
+    # Monkeypatch an error in the model.
+    monkeypatch.setattr(LlamaForCausalLM, "forward", evil_forward_on_rank_1)
+
+    engine_args = AsyncEngineArgs(
+        model=model, enforce_eager=True, tensor_parallel_size=tensor_parallel_size
+    )
+
+    # Confirm we get an exception.
+    with pytest.raises(Exception, match=r"initialization fail(ed|ure)"):
+        _ = AsyncLLM.from_engine_args(engine_args)
+
+    # Confirm all the processes are cleaned up.
+    wait_for_gpu_memory_to_clear(
+        devices=list(range(tensor_parallel_size)),
+        threshold_bytes=SHUTDOWN_TEST_THRESHOLD_BYTES,
+    )
