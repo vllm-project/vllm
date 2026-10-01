@@ -168,14 +168,6 @@ class Parser:
         )
 
     @property
-    def has_incomplete_tool_call(self) -> bool:
-        return bool(self.incomplete_tool_call_indices)
-
-    @property
-    def incomplete_tool_call_indices(self) -> set[int]:
-        return set()
-
-    @property
     def reasoning_parser(self) -> ReasoningParser | None:
         """The underlying reasoning parser, if any."""
         return self._reasoning_parser

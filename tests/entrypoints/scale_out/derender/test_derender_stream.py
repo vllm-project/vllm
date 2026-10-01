@@ -818,26 +818,6 @@ class TestDerenderChatStreamParsed:
         assert state.output_token_ids == [_FakeParser.CONTENT]
 
     @pytest.mark.asyncio
-    async def test_incomplete_tool_call_keeps_finish_reason(
-        self, parsed_derenderer, monkeypatch
-    ):
-        class IncompleteToolParser(_FakeParser):
-            @property
-            def incomplete_tool_call_indices(self) -> set[int]:
-                return {0}
-
-        monkeypatch.setattr(parsed_derenderer, "parser", IncompleteToolParser)
-        chunk, _ = await parsed_derenderer.derender_chat_stream(
-            model=MODEL_NAME,
-            generate_chunk=_make_stream_chunk(
-                [_FakeParser.TOOL_START], finish_reason="stop"
-            ),
-            chat_request=_chat_request(),
-        )
-        assert chunk.choices[0].delta.tool_calls
-        assert chunk.choices[0].finish_reason == "stop"
-
-    @pytest.mark.asyncio
     async def test_role_sent_once(self, parsed_derenderer):
         chat_request = _chat_request()
         chunk1, state = await parsed_derenderer.derender_chat_stream(

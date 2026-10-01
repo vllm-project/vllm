@@ -378,9 +378,6 @@ class ParsableContext(ConversationContext):
                         tool_calls or [], self.request
                     ),
                     tools=self.request.tools,
-                    incomplete_tool_call_indices=(
-                        self.response_parser.incomplete_tool_call_indices
-                    ),
                 )
             )
         elif completion.text:

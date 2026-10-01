@@ -586,11 +586,7 @@ class OnlineDerenderer:
                 is_named_tool_choice = (
                     type(chat_request.tool_choice) is ChatCompletionNamedToolChoiceParam
                 )
-                if (
-                    tools_streamed
-                    and not is_named_tool_choice
-                    and not parser.has_incomplete_tool_call
-                ):
+                if tools_streamed and not is_named_tool_choice:
                     finish_reason = "tool_calls"
 
             stream_choice = ChatCompletionResponseStreamChoice(

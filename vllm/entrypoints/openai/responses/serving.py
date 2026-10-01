@@ -1039,7 +1039,6 @@ class OpenAIServingResponses(GenerateBaseServing):
                 tool_calls=maybe_filter_parallel_tool_calls(tool_calls or [], request),
                 logprobs=logprobs,
                 tools=request.tools,
-                incomplete_tool_call_indices=parser.incomplete_tool_call_indices,
             )
 
         # Fallback when no parser is configured
@@ -1256,12 +1255,7 @@ class OpenAIServingResponses(GenerateBaseServing):
                 for event in processor.emit_delta(dm, output, _get_logprobs):
                     yield _increment_sequence_number_and_return(event)
 
-        incomplete_tool = bool(
-            context.response_parser and context.response_parser.has_incomplete_tool_call
-        )
-        for event in processor.close_current(
-            item_status="incomplete" if incomplete_tool else "completed"
-        ):
+        for event in processor.close_current():
             yield _increment_sequence_number_and_return(event)
 
         assert isinstance(context, SimpleContext)

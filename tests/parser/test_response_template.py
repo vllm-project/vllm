@@ -666,51 +666,37 @@ def test_gemma4_response_template_reasoning_suppression_matches_registered_parse
     )
 
 
-def test_gemma4_response_template_streams_name_before_validated_arguments():
+def test_streamed_tool_call_is_emitted_when_its_region_parses():
     chunks = [
         "<|tool_call>call:set_alarm{",
         "hour:7,",
         'label:<|"|>morning<|"|>}',
         "<tool_call|>",
     ]
-    req = request()
-    registered_deltas = feed_chunks(
-        Gemma4Parser(FakeTokenizer(GEMMA4_RESPONSE_TEMPLATE), TOOLS),
-        chunks,
-        req,
-    )
-    metadata_deltas = feed_chunks(
+    deltas = feed_chunks(
         ResponseTemplateParser(
             FakeTokenizer(GEMMA4_RESPONSE_TEMPLATE),
             TOOLS,
             enable_auto_tools=True,
         ),
         chunks,
-        req,
+        request(),
     )
 
-    assert any(delta.tool_calls for delta in registered_deltas[:-1])
-    early_calls = [call for delta in metadata_deltas[:-1] for call in delta.tool_calls]
-    assert len(early_calls) == 1
-    assert early_calls[0].id is not None
-    assert early_calls[0].index == 0
-    assert early_calls[0].function is not None
-    assert early_calls[0].function.name == "set_alarm"
-    assert early_calls[0].function.arguments is None
-
-    closing_calls = metadata_deltas[-1].tool_calls
-    assert len(closing_calls) == 1
-    assert closing_calls[0].id is None
-    assert closing_calls[0].index == 0
-    assert closing_calls[0].function is not None
-    assert closing_calls[0].function.name is None
-    assert json.loads(closing_calls[0].function.arguments) == {
+    assert all(not delta.tool_calls for delta in deltas[:-1])
+    calls = deltas[-1].tool_calls
+    assert len(calls) == 1
+    assert calls[0].id is not None
+    assert calls[0].index == 0
+    assert calls[0].function is not None
+    assert calls[0].function.name == "set_alarm"
+    assert json.loads(calls[0].function.arguments) == {
         "hour": 7,
         "label": "morning",
     }
 
 
-def test_response_template_coalesces_name_and_arguments_from_one_chunk():
+def test_response_template_emits_whole_call_from_one_chunk():
     parser = ResponseTemplateParser(
         FakeTokenizer(GEMMA4_RESPONSE_TEMPLATE),
         TOOLS,
@@ -734,7 +720,7 @@ def test_response_template_coalesces_name_and_arguments_from_one_chunk():
     assert json.loads(call.function.arguments) == {"hour": 7, "label": "morning"}
 
 
-def test_response_template_defers_name_derived_from_region_content():
+def test_response_template_takes_name_from_region_content():
     template = {
         "defaults": {"role": "assistant"},
         "start_anchor": PREFIX,
@@ -776,7 +762,7 @@ def test_response_template_defers_name_derived_from_region_content():
     assert json.loads(call.function.arguments) == {"hour": 7}
 
 
-def test_response_template_streams_literal_transformed_name():
+def test_response_template_applies_literal_transformed_name():
     template = {
         "defaults": {"role": "assistant"},
         "start_anchor": PREFIX,
@@ -808,10 +794,9 @@ def test_response_template_streams_literal_transformed_name():
         request(),
     )
 
+    assert len(deltas) == 1
     assert deltas[0].tool_calls[0].function.name == "set_alarm"
-    assert deltas[0].tool_calls[0].function.arguments is None
-    assert deltas[-1].tool_calls[0].function.name is None
-    assert json.loads(deltas[-1].tool_calls[0].function.arguments) == {"hour": 7}
+    assert json.loads(deltas[0].tool_calls[0].function.arguments) == {"hour": 7}
 
 
 def test_gemma4_response_template_drops_incomplete_call():
@@ -964,7 +949,7 @@ def test_streaming_prefill_is_state_only(
         assert delta.content == expected_content
 
 
-def test_malformed_tool_opened_across_prompt_boundary_stays_incomplete():
+def test_malformed_call_opened_across_prompt_boundary_is_dropped():
     parser = ResponseTemplateParser(
         FakeTokenizer(
             GEMMA4_RESPONSE_TEMPLATE,
@@ -988,12 +973,8 @@ def test_malformed_tool_opened_across_prompt_boundary_stays_incomplete():
         finished=True,
     )
 
-    assert opened is not None
+    assert opened is None
     assert delta is None
-    functions = [call.function for call in opened.tool_calls if call.function]
-    assert "".join(function.name or "" for function in functions) == "set_alarm"
-    assert "".join(function.arguments or "" for function in functions) == ""
-    assert parser.incomplete_tool_call_indices == {0}
 
 
 def test_responses_namespace_tools_use_vllm_flattened_names():
@@ -1056,7 +1037,7 @@ def test_streaming_unknown_call_is_forwarded():
     ],
     ids=["malformed", "truncated"],
 )
-def test_streaming_invalid_call_leaves_started_tool_call_incomplete(text):
+def test_streaming_invalid_call_is_dropped(text):
     parser = ResponseTemplateParser(
         FakeTokenizer(GEMMA4_RESPONSE_TEMPLATE),
         TOOLS,
@@ -1068,51 +1049,23 @@ def test_streaming_invalid_call_leaves_started_tool_call_incomplete(text):
         request(),
     )
 
-    assert "".join(delta.content or "" for delta in deltas) == ""
-    tool_calls = [call for delta in deltas for call in delta.tool_calls]
-    assert {call.index for call in tool_calls} == {0}
-    functions = [call.function for call in tool_calls]
-    assert all(function is not None for function in functions)
-    assert "".join(function.name or "" for function in functions) == "set_alarm"
-    assert "".join(function.arguments or "" for function in functions) == ""
-    assert parser.incomplete_tool_call_indices == {0}
+    assert deltas == []
 
 
-def test_closed_malformed_call_does_not_block_following_call():
+def test_malformed_call_does_not_block_following_call():
     parser = ResponseTemplateParser(
         FakeTokenizer(GEMMA4_RESPONSE_TEMPLATE),
         TOOLS,
         enable_auto_tools=True,
     )
-    opening, body = TOOL_GENERATION.split("{", 1)
-    first = parser.parse_delta(
-        opening + "{",
-        [],
-        request(),
-        prompt_token_ids=[1],
-        finished=False,
-    )
-    second = parser.parse_delta(
-        body.replace("<tool_call|>", "unexpected<tool_call|>") + TOOL_GENERATION,
-        [],
-        request(),
-        finished=True,
+    malformed = TOOL_GENERATION.replace("<tool_call|>", "unexpected<tool_call|>")
+
+    _, content, calls = collect_stream(
+        parser, malformed + TOOL_GENERATION, request(), 7
     )
 
-    assert first is not None
-    assert second is not None
-    calls = [call for delta in (first, second) for call in delta.tool_calls]
-    assert {call.index for call in calls} == {0, 1}
-    assert parser.incomplete_tool_call_indices == {0}
-    second_arguments = "".join(
-        call.function.arguments or ""
-        for call in calls
-        if call.index == 1 and call.function is not None
-    )
-    assert json.loads(second_arguments) == {
-        "hour": 7,
-        "label": "morning",
-    }
+    assert content == ""
+    assert calls == [("set_alarm", {"hour": 7, "label": "morning"})]
 
 
 def test_non_streaming_malformed_call_is_dropped():
@@ -1191,7 +1144,6 @@ def test_prefilled_malformed_call_is_dropped():
     )
 
     assert delta is None
-    assert not parser.has_incomplete_tool_call
 
 
 def test_tool_choice_none_preserves_raw_call_as_content():
@@ -1224,44 +1176,21 @@ def test_adjust_request_preserves_parser_delimiters_without_forcing_stop_text():
     assert req.include_stop_str_in_output is False
 
 
-def test_call_without_closer_is_dropped():
-    parser = ResponseTemplateParser(
-        FakeTokenizer(GEMMA4_RESPONSE_TEMPLATE),
-        TOOLS,
-    )
-    parser.set_prompt_token_ids([1])
+def test_call_cut_off_before_its_closer_is_parsed():
+    """A stop-token closer, such as a tool closer that ends generation, is
+    absent from the text; the open region is parsed at the end of the stream."""
     trimmed = TOOL_GENERATION.removesuffix("<tool_call|>")
-
-    _, content, calls = parser.parse(
-        trimmed,
-        request(),
-        enable_auto_tools=True,
-    )
-
-    assert content is None
-    assert calls is None
-
-
-def test_tool_closer_stop_token_completes_call():
-    trimmed = TOOL_GENERATION.removesuffix("<tool_call|>")
-    closer_id = VOCAB["<tool_call|>"]
     parser = ResponseTemplateParser(FakeTokenizer(GEMMA4_RESPONSE_TEMPLATE), TOOLS)
-    parser.set_prompt_token_ids([1])
     streaming = ResponseTemplateParser(
         FakeTokenizer(GEMMA4_RESPONSE_TEMPLATE),
         TOOLS,
         enable_auto_tools=True,
     )
 
-    _, content, calls = parser.parse(
-        trimmed,
-        request(),
-        enable_auto_tools=True,
-        model_output_token_ids=[1, closer_id],
-    )
+    _, content, calls = parser.parse(trimmed, request(), enable_auto_tools=True)
     streamed = streaming.parse_delta(
         trimmed,
-        [1, closer_id],
+        [],
         request(),
         prompt_token_ids=[1],
         finished=True,
@@ -1271,7 +1200,6 @@ def test_tool_closer_stop_token_completes_call():
     assert normalize_calls(calls) == [("set_alarm", {"hour": 7, "label": "morning"})]
     assert streamed is not None
     assert [call.function.name for call in streamed.tool_calls] == ["set_alarm"]
-    assert not streaming.has_incomplete_tool_call
 
 
 @pytest.mark.parametrize(

@@ -773,9 +773,6 @@ class OpenAIServingChat(GenerateBaseServing):
                             tools_streamed[i]
                             and not tool_choice_function_name
                             and output.finish_reason == "stop"
-                            and not (
-                                parser is not None and parser.has_incomplete_tool_call
-                            )
                         ):
                             finish_reason_ = "tool_calls"
                         else:
