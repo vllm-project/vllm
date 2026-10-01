@@ -119,47 +119,6 @@ def _mixed_precision_config(quantized_layers: dict) -> ModelOptMixedPrecisionCon
     )
 
 
-def test_modelopt_q8_vector_decode_uses_checkpoint_metadata_after_mapping():
-    from vllm.model_executor.models.utils import WeightsMapper
-
-    config = _mixed_precision_config(
-        {
-            "arbitrary.vector": {
-                "quant_algo": "Q8_0",
-                "group_size": 32,
-                "block_payload_bytes": 34,
-                "packing": "ggml",
-            }
-        }
-    )
-    config.checkpoint_quantized_layers["arbitrary.matrix"] = (
-        config.checkpoint_quantized_layers["arbitrary.vector"]
-    )
-    config.apply_vllm_mapper(WeightsMapper(orig_to_new_prefix={"arbitrary": "renamed"}))
-    values = torch.arange(-128, 128, dtype=torch.int16).to(torch.int8).view(8, 32)
-    scales = torch.tensor([0, 0.125, -0.25, 1, 2, 4, 8, 16], dtype=torch.float16)
-    blocks = torch.cat(
-        (scales.view(torch.uint8).view(8, 2), values.view(torch.uint8)), 1
-    )
-    matrix = blocks.unsqueeze(0)
-    result = dict(
-        config.process_checkpoint_weights(
-            [
-                ("arbitrary.vector.weight", blocks),
-                ("untagged.weight", blocks),
-                ("arbitrary.matrix.weight", matrix),
-            ],
-            dtype=torch.bfloat16,
-        )
-    )
-    expected = (scales.float()[:, None] * values.float()).flatten().bfloat16()
-    torch.testing.assert_close(
-        result["arbitrary.vector.weight"], expected, rtol=0, atol=0
-    )
-    assert result["untagged.weight"] is blocks
-    assert result["arbitrary.matrix.weight"] is matrix
-
-
 @pytest.mark.parametrize("quantized", [True, False])
 def test_modelopt_gate_metadata_overrides_fp32_storage(
     monkeypatch, default_vllm_config, quantized

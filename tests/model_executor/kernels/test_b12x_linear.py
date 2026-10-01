@@ -862,6 +862,63 @@ def test_b12x_nvfp4_apply_calls_native_blockscaled_gemm(monkeypatch) -> None:
     assert kwargs == {"out_dtype": torch.bfloat16}
 
 
+def test_b12x_nvfp4_w4a16_uses_weight_only_scale_and_a16_dispatch(monkeypatch):
+    import vllm.model_executor.kernels.linear.nvfp4.b12x as b12x_mod
+
+    calls = []
+    packed_weight = object()
+
+    def pack_weight(weight, scale, *, recipe, global_scale):
+        assert weight is layer.weight
+        assert scale is layer.weight_scale
+        assert recipe == "nvfp4"
+        assert global_scale is layer.weight_global_scale
+        return packed_weight
+
+    def mm(source, weight, *, required_mode):
+        assert weight is packed_weight
+        assert required_mode == "a16"
+        assert source.dtype == torch.bfloat16
+        assert source.is_contiguous()
+        calls.append(source)
+        return torch.full((source.shape[0], 48), 3.0, dtype=source.dtype)
+
+    def reject_activation_quantization(*args, **kwargs):
+        pytest.fail("W4A16 must not quantize activations")
+
+    monkeypatch.setattr(b12x_mod, "scaled_fp4_quant", reject_activation_quantization)
+    monkeypatch.setattr(
+        b12x_mod,
+        "_import_b12x_blockscaled",
+        lambda: types.SimpleNamespace(pack_weight=pack_weight, mm=mm),
+    )
+    monkeypatch.setattr(
+        b12x_mod,
+        "_import_b12x_intrinsics",
+        lambda: types.SimpleNamespace(swizzle_block_scale=lambda scale: scale),
+    )
+    layer = torch.nn.Module()
+    layer.weight = torch.nn.Parameter(
+        torch.empty((48, 64), dtype=torch.uint8), requires_grad=False
+    )
+    layer.weight_scale = torch.nn.Parameter(
+        torch.empty((48, 8), dtype=torch.float8_e4m3fn), requires_grad=False
+    )
+    layer.weight_global_scale = torch.tensor([0.125])
+    kernel = object.__new__(B12xNvFp4W4A16LinearKernel)
+    kernel.process_weights_after_loading(layer)
+    assert layer.b12x_warmup_provider is kernel
+    kernel.get_b12x_warmup_unit(layer, (1, 8), torch.bfloat16).compile()
+    assert [source.shape[0] for source in calls] == [1, 8]
+
+    x = torch.randn((2, 3, 256), dtype=torch.bfloat16)[..., ::2]
+    output = kernel.apply_weights(layer, x, torch.ones(48, dtype=torch.bfloat16))
+    torch.testing.assert_close(calls[-1], x.reshape(6, 128))
+    torch.testing.assert_close(output, torch.full((2, 3, 48), 4.0, dtype=x.dtype))
+    with pytest.raises(ValueError, match="requires BF16 input"):
+        kernel.apply_weights(layer, x.float())
+
+
 @pytest.mark.parametrize("m,n,k", [(2, 136, 96), (17, 256, 256)])
 @torch.inference_mode()
 def test_b12x_nvfp4_w4a16_preserves_bf16_activations_under_graph_replay(
@@ -877,9 +934,6 @@ def test_b12x_nvfp4_w4a16_preserves_bf16_activations_under_graph_replay(
         pytest.fail("W4A16 must not quantize activations")
 
     monkeypatch.setattr(b12x_mod, "scaled_fp4_quant", reject_activation_quantization)
-    default_vllm_config.scheduler_config.max_num_batched_tokens = 32
-    default_vllm_config.scheduler_config.max_num_scheduled_tokens = 32
-    default_vllm_config.compilation_config.cudagraph_capture_sizes = [1, 2, 4]
     torch.manual_seed(17)
     codes = torch.randint(0, 16, (n, k), device="cuda")
     scales = (2.0 ** torch.randint(-2, 2, (n, k // 16), device="cuda")).to(
@@ -903,25 +957,22 @@ def test_b12x_nvfp4_w4a16_preserves_bf16_activations_under_graph_replay(
     bias = torch.randn(n, device="cuda", dtype=torch.bfloat16)
     kernel = B12xNvFp4W4A16LinearKernel(None)
     kernel.process_weights_after_loading(layer)
-    try:
-        kernel.get_b12x_warmup_unit(layer, (1, 2, 4, 32), x.dtype).compile()
-        run = torch.compile(
-            lambda inputs: kernel.apply_weights(layer, inputs, bias),
-            fullgraph=True,
-            dynamic=True,
-        )
-        run(x)
-        torch.accelerator.synchronize()
-        graph = torch.cuda.CUDAGraph()
-        with torch.cuda.graph(graph):
-            actual = run(x)
-        for _ in range(2):
-            x_storage.normal_()
-            graph.replay()
-            expected = (x.double() @ decoded.double().T).bfloat16() + bias
-            torch.testing.assert_close(actual, expected, atol=0.005, rtol=0.01)
-    finally:
-        layer.b12x_nvfp4_a16_finalizer()
+    kernel.get_b12x_warmup_unit(layer, (1, 2, 4, 32), x.dtype).compile()
+    run = torch.compile(
+        lambda inputs: kernel.apply_weights(layer, inputs, bias),
+        fullgraph=True,
+        dynamic=True,
+    )
+    run(x)
+    torch.accelerator.synchronize()
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        actual = run(x)
+    for _ in range(2):
+        x_storage.normal_()
+        graph.replay()
+        expected = (x.double() @ decoded.double().T).bfloat16() + bias
+        torch.testing.assert_close(actual, expected, atol=0.005, rtol=0.01)
 
 
 def _block_weights(n, k, codec):

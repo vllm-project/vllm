@@ -30,7 +30,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding,
 )
 from vllm.model_executor.parameter import ModelWeightParameter
-from vllm.utils.b12x import get_b12x_blockscaled
+from vllm.utils.b12x import B12X_BLOCK_CODECS, get_b12x_blockscaled
 
 
 @torch.library.custom_op(
@@ -60,27 +60,13 @@ def _modelopt_block_embedding_chunked_fake(
     return None
 
 
-BLOCK_CODECS = {"IQ2_XS": (256, 74), "IQ2_XXS": (256, 66), "Q8_0": (32, 34)}
-
-
-def decode_q8_0_vector(blocks: torch.Tensor, dtype: torch.dtype) -> torch.Tensor:
-    """Decode a serialized vector before ordinary parameter loading/sharding."""
-    if blocks.dtype != torch.uint8 or blocks.ndim != 2 or blocks.shape[1] != 34:
-        raise ValueError("Q8_0 vectors require uint8 [K/32,34] blocks")
-    scales = blocks[:, :2].contiguous().view(torch.float16).float()
-    if not torch.isfinite(scales).all():
-        raise ValueError("Q8_0 vector scales must be finite")
-    values = blocks[:, 2:].contiguous().view(torch.int8).float()
-    return (scales * values).flatten().to(dtype)
-
-
 class ModelOptBlockQuantMoEMethod(FusedMoEMethodBase):
     """Load native blocks and retain compact b12x prepared expert storage."""
 
     def __init__(self, moe_config: FusedMoEConfig, codec: str = "iq2_xs"):
         super().__init__(moe_config)
-        self.codec = codec
-        self.block_size, self.block_bytes = BLOCK_CODECS[codec.upper()]
+        self.codec = codec.lower()
+        self.block_size, self.block_bytes = B12X_BLOCK_CODECS[self.codec]
         if moe_config.moe_backend not in ("auto", "b12x"):
             raise ValueError(
                 "Block-quantized routed experts require the b12x MoE backend"
@@ -271,13 +257,13 @@ class ModelOptBlockQuantLinearMethod(LinearMethodBase):
     """Load native block payloads and execute the prepared b12x dense API."""
 
     def __init__(self, codec: str = "iq2_xs"):
-        self.codec = codec
-        self.block_size, self.block_bytes = BLOCK_CODECS[codec.upper()]
+        self.codec = codec.lower()
+        self.block_size, self.block_bytes = B12X_BLOCK_CODECS[self.codec]
         self.is_embedding = False
         from vllm.model_executor.kernels.linear import _get_linear_backend
         from vllm.utils.b12x import get_b12x_blockscaled
 
-        if _get_linear_backend(quantization=codec) not in ("auto", "b12x"):
+        if _get_linear_backend(quantization=self.codec) not in ("auto", "b12x"):
             raise ValueError(
                 "Block-quantized dense weights require the b12x linear backend"
             )

@@ -114,6 +114,7 @@ from vllm.model_executor.utils import (
     replace_parameter,
     set_weight_attrs,
 )
+from vllm.utils.b12x import B12X_BLOCK_CODECS
 from vllm.utils.math_utils import cdiv
 
 if TYPE_CHECKING:
@@ -1562,21 +1563,18 @@ class ModelOptMixedPrecisionConfig(ModelOptQuantConfigBase):
         super().__init__(exclude_modules)
         self.kv_cache_quant_method = kv_cache_quant_method
         self.quantized_layers = quantized_layers
-        self.checkpoint_quantized_layers = quantized_layers.copy()
-        from .modelopt_block_quant import BLOCK_CODECS
-
         for prefix, recipe in quantized_layers.items():
-            codec = recipe.get("quant_algo", "").upper()
-            if codec in BLOCK_CODECS and any(
+            codec = recipe.get("quant_algo", "").lower()
+            if codec in B12X_BLOCK_CODECS and any(
                 recipe.get(key) != value
                 for key, value in {
-                    "group_size": BLOCK_CODECS[codec][0],
-                    "block_payload_bytes": BLOCK_CODECS[codec][1],
+                    "group_size": B12X_BLOCK_CODECS[codec][0],
+                    "block_payload_bytes": B12X_BLOCK_CODECS[codec][1],
                     "packing": "ggml",
                 }.items()
             ):
                 raise ValueError(
-                    f"unsupported {codec} block contract for {prefix}: {recipe}"
+                    f"unsupported {codec.upper()} block contract for {prefix}: {recipe}"
                 )
         self.fp8_config = fp8_config
         self.nvfp4_config = nvfp4_config
@@ -1830,7 +1828,7 @@ class ModelOptMixedPrecisionConfig(ModelOptQuantConfigBase):
 
         quant_algo = self._resolve_quant_algo(prefix)
 
-        if quant_algo in ("IQ2_XS", "IQ2_XXS", "Q8_0"):
+        if quant_algo is not None and quant_algo.lower() in B12X_BLOCK_CODECS:
             from .modelopt_block_quant import (
                 ModelOptBlockQuantLinearMethod,
                 ModelOptBlockQuantMoEMethod,
@@ -1883,21 +1881,6 @@ class ModelOptMixedPrecisionConfig(ModelOptQuantConfigBase):
             return None
 
         return None
-
-    def process_checkpoint_weights(self, weights, *, dtype):
-        from .modelopt_block_quant import decode_q8_0_vector
-
-        for name, weight in weights:
-            recipe = self.checkpoint_quantized_layers.get(
-                name.removesuffix(".weight"), {}
-            )
-            if (
-                recipe.get("quant_algo", "").upper() == "Q8_0"
-                and weight.ndim == 2
-                and weight.dtype == torch.uint8
-            ):
-                weight = decode_q8_0_vector(weight, dtype)
-            yield name, weight
 
     def apply_vllm_mapper(self, hf_to_vllm_mapper: "WeightsMapper"):
         super().apply_vllm_mapper(hf_to_vllm_mapper)
