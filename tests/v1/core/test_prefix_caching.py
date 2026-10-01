@@ -1139,6 +1139,52 @@ def test_hisparse_prefix_hit_adopts_gpu_shadow_pages():
     )
 
 
+@pytest.mark.parametrize("free_blocks,adopted_pages", [(7, []), (10, [0, 1])])
+def test_hisparse_prefix_hit_under_pressure_adopts_surviving_copies(
+    free_blocks, adopted_pages
+):
+    """A host prefix hit must not starve its own allocation of free blocks.
+
+    Admission counts free GPU copies as free, but adopting a copy pins it. When
+    adoption ran before the hit's allocation, it took blocks the allocation was
+    promised and the pool ran dry (``Cannot get N free blocks``). The allocation
+    now goes first, evicting a prefix's copies tail first; the copies it leaves
+    are adopted.
+    """
+    manager = make_hisparse_kv_cache_manager(32, 16, enable_caching=True)
+    tokens = list(range(4 * HISPARSE_BLOCK_SIZE))
+    original = make_request("original", tokens, HISPARSE_BLOCK_SIZE, sha256)
+    assert manager.allocate_slots(original, num_new_tokens=len(tokens)) is not None
+    _publish_hisparse_pages(manager)
+    copy_ids = [block.block_id for block in manager.get_blocks("original").blocks[2]]
+    manager.free(original)
+    pool = manager.block_pool
+    pool.get_new_blocks(pool.get_num_free_blocks() - free_blocks)
+
+    resumed = make_request("resumed", tokens, HISPARSE_BLOCK_SIZE, sha256)
+    computed, num_computed, _ = manager.get_computed_blocks(resumed)
+    assert num_computed == 3 * HISPARSE_BLOCK_SIZE
+    assert manager.allocate_slots(
+        resumed,
+        num_new_tokens=len(tokens) - num_computed,
+        num_new_computed_tokens=num_computed,
+        new_computed_blocks=computed,
+    )
+
+    resumed_blocks = manager.get_blocks("resumed").blocks
+    assert [block.block_id for block in resumed_blocks[2][:3]] == [
+        copy_ids[page] if page in adopted_pages else pool.null_block.block_id
+        for page in range(3)
+    ]
+    gpu_ids = [
+        block.block_id
+        for group in resumed_blocks[1:]
+        for block in group
+        if not block.is_null
+    ]
+    assert len(gpu_ids) == len(set(gpu_ids))
+
+
 def test_hisparse_host_backed_request_accepts_local_prefix_hit():
     """Local group-completion hits need no external host import allocation."""
     manager = make_hisparse_kv_cache_manager(32, 16, enable_caching=True)
@@ -1176,6 +1222,81 @@ def test_hisparse_finished_request_leaves_free_copies():
     pool.get_new_blocks(pool.get_num_free_blocks())
     assert not coordinator.copies
     assert not coordinator.spills_to_send
+
+
+@pytest.mark.parametrize(
+    "status,expected_cached_pages",
+    [
+        (RequestStatus.FINISHED_STOPPED, 2),
+        (RequestStatus.FINISHED_ABORTED, 2),
+        (RequestStatus.RUNNING, 0),
+    ],
+    ids=["stopped", "aborted", "running"],
+)
+def test_hisparse_cleanup_publishes_only_finalized_terminal_pages(
+    status, expected_cached_pages
+):
+    """Only terminal cleanup may publish completed, finalized pages."""
+    manager = make_hisparse_kv_cache_manager(32, 16, enable_caching=True)
+    coordinator = get_hisparse_coordinator(manager)
+    request = make_request("terminal", list(range(33)), HISPARSE_BLOCK_SIZE, sha256)
+    request.spec_token_ids = list(range(33, 49))
+    assert manager.allocate_slots(request, 49, num_lookahead_tokens=16) is not None
+    host_blocks = list(manager.get_blocks(request.request_id).blocks[0])
+    command = coordinator.build_offload_command()
+    counts = {transfer.transfer_id: 1 for transfer in command.page_transfers}
+    assert len(counts) == 2
+    request.status = status
+    manager.free(request)
+    coordinator.update_spills(counts, counts)
+    assert all(
+        block.block_hash is not None for block in host_blocks[:expected_cached_pages]
+    )
+    assert all(
+        block.block_hash is None for block in host_blocks[expected_cached_pages:]
+    )
+    assert all(block.ref_cnt == 0 for block in host_blocks)
+    assert not coordinator.has_pending_work()
+
+
+def test_hisparse_terminal_prefix_waits_for_all_workers_and_preserves_identity():
+    """Old completions retain their pages through pressure and request-ID reuse."""
+    manager = make_hisparse_kv_cache_manager(32, 8, enable_caching=True)
+    coordinator = get_hisparse_coordinator(manager)
+    host_pool = coordinator.get_host_block_pool()
+    tokens = list(range(2 * HISPARSE_BLOCK_SIZE + 1))
+    request = make_request("reused", tokens, HISPARSE_BLOCK_SIZE, sha256)
+    assert manager.allocate_slots(request, len(tokens)) is not None
+    old_blocks = list(manager.get_blocks(request.request_id).blocks[0])
+    command = coordinator.build_offload_command()
+    counts = {transfer.transfer_id: 2 for transfer in command.page_transfers}
+    partial = dict.fromkeys(counts, 1)
+    first_completions = partial.copy()
+    first_completions[next(iter(counts))] = 2
+    coordinator.update_spills(counts, first_completions)
+    request.status = RequestStatus.FINISHED_LENGTH_CAPPED
+    manager.free(request)
+    replacement = make_request(
+        "reused", list(range(100, 117)), HISPARSE_BLOCK_SIZE, sha256
+    )
+    assert manager.allocate_slots(replacement, 17) is not None
+    new_blocks = list(manager.get_blocks(replacement.request_id).blocks[0])
+    pressure = host_pool.get_new_blocks(host_pool.get_num_free_blocks())
+    assert not {block.block_id for block in old_blocks[:2]} & {
+        block.block_id for block in pressure + new_blocks
+    }
+    assert all(block.block_hash is None for block in old_blocks)
+    coordinator.update_spills({}, partial)
+    repeated = make_request("probe", tokens, HISPARSE_BLOCK_SIZE, sha256)
+    assert manager.get_computed_blocks(repeated)[1] == 2 * HISPARSE_BLOCK_SIZE
+    assert all(block.block_hash is None for block in new_blocks)
+    assert all(block.ref_cnt == 0 for block in old_blocks[:2])
+    coordinator.update_spills({}, partial)
+    assert all(block.ref_cnt == 0 for block in old_blocks[:2])
+    host_pool.free_blocks(pressure)
+    manager.free(replacement)
+    _publish_hisparse_pages(manager)
+    assert not coordinator.has_pending_work()
 
 
 def test_hisparse_reset_prefix_cache_drops_copies():
