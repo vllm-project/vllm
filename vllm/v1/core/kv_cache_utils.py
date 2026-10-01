@@ -2501,7 +2501,9 @@ def _max_memory_usage_bytes_from_groups(
 
     Each group independently claims blocks from the shared pool, so a request consumes
     the sum of the per-group block counts, i.e. ``bytes_per_block * total_blocks``.
+    Host-resident groups have their own pool.
     """
+    kv_cache_groups = [group for group in kv_cache_groups if not group.host_resident]
     if not kv_cache_groups:
         return 0
 
@@ -2558,9 +2560,6 @@ def _estimate_max_model_len_from_groups(
         and bool(kv_cache_groups)
     )
 
-    # HiSparse's host-resident group has its own pool.
-    gpu_pool_groups = [group for group in kv_cache_groups if not group.host_resident]
-
     def fits(model_len: int) -> bool:
         vllm_config.model_config.max_model_len = model_len
         if hisparse_enabled:
@@ -2572,7 +2571,7 @@ def _estimate_max_model_len_from_groups(
             except ValueError:
                 return False
         return (
-            _max_memory_usage_bytes_from_groups(vllm_config, gpu_pool_groups)
+            _max_memory_usage_bytes_from_groups(vllm_config, kv_cache_groups)
             <= available_memory
         )
 
@@ -2813,11 +2812,9 @@ def get_kv_cache_configs(
     for groups, avail_mem in zip(projected_groups_per_worker, check_memory):
         if not groups:
             continue
-        # HiSparse's host-resident group has its own pool.
-        gpu_pool_groups = [group for group in groups if not group.host_resident]
         _check_enough_kv_cache_memory(
             avail_mem,
-            partial(_max_memory_usage_bytes_from_groups, vllm_config, gpu_pool_groups),
+            partial(_max_memory_usage_bytes_from_groups, vllm_config, groups),
             vllm_config.model_config.max_model_len,
             partial(_estimate_max_model_len_from_groups, vllm_config, groups),
         )
