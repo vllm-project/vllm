@@ -208,7 +208,7 @@ def mm_test_helper(
         a=tensors.a,
         b_q=tensors.w_q,
         b_group_scales=tensors.w_g_s,
-        b_group_size=group_size,  # type: ignore[arg-type]
+        b_group_size=group_size,
         b_channel_scales=tensors.w_ch_s,
         a_token_scales=tensors.w_tok_s,
     )
