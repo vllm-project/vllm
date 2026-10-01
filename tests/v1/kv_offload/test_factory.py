@@ -391,8 +391,10 @@ def test_cpu_spec_create_worker_uses_mmap_on_cuda(monkeypatch):
     kv_caches = MagicMock()
     spec.create_worker(kv_caches)
 
-    assert region_calls[0]["engine_id"] == "test-engine"
-    assert region_calls[0]["kv_bytes_per_chunk"] == worker_kv_bytes_per_block * 4
+    # Each rank gets its own region holding only its slots (5 % 4 == 1).
+    assert region_calls[0]["engine_id"] == "test-engine_1"
+    assert region_calls[0]["rank"] == 0
+    assert region_calls[0]["kv_bytes_per_chunk"] == worker_kv_bytes_per_block
     assert worker_calls[0]["kv_caches"] is kv_caches
     assert worker_calls[0]["mmap_region"] is region
 
@@ -461,16 +463,16 @@ def test_cpu_spec_create_worker_skips_mmap_for_empty_cache(monkeypatch):
 
 
 @pytest.mark.parametrize(
-    ("replicated_layout", "device_index", "world_size", "expected_rank"),
+    ("replicated_layout", "device_index", "world_size", "expected_engine_id"),
     [
-        (True, 5, 4, 0),  # replicated: always slot 0
-        (True, 0, 4, 0),  # replicated: slot 0 regardless of device
-        (False, 5, 4, 1),  # non-replicated: 5 % 4 == 1
-        (False, 7, 4, 3),  # non-replicated: 7 % 4 == 3
+        (True, 5, 4, "test-engine"),  # replicated: one region for all ranks
+        (True, 0, 4, "test-engine"),
+        (False, 5, 4, "test-engine_1"),  # per-rank: 5 % 4 == 1
+        (False, 7, 4, "test-engine_3"),  # per-rank: 7 % 4 == 3
     ],
 )
-def test_cpu_spec_create_worker_rank_assignment(
-    monkeypatch, replicated_layout, device_index, world_size, expected_rank
+def test_cpu_spec_create_worker_region_assignment(
+    monkeypatch, replicated_layout, device_index, world_size, expected_engine_id
 ):
     import vllm.v1.kv_offload.cpu.spec as cpu_spec_module
 
@@ -498,7 +500,8 @@ def test_cpu_spec_create_worker_rank_assignment(
 
     spec.create_worker(MagicMock())
 
-    assert region_calls[0]["rank"] == expected_rank
+    assert region_calls[0]["engine_id"] == expected_engine_id
+    assert region_calls[0]["rank"] == 0
 
 
 def test_offloading_spec_has_replicated_layout_default():
