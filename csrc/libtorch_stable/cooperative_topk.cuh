@@ -272,7 +272,7 @@ __device__ void large_topk(const float* __restrict__ row_input,
   const auto tx = threadIdx.x;
   const auto lane = tx % hist4096::kWarpSize;
 
-  extern __shared__ uint8_t smem_raw[];
+  extern __shared__ __align__(128) uint8_t smem_raw[];
   auto* smem = reinterpret_cast<SmemType*>(smem_raw);
   int32_t* s_topk = reinterpret_cast<int32_t*>(smem_raw + sizeof(SmemType));
 
@@ -453,9 +453,7 @@ __device__ void large_topk(const float* __restrict__ row_input,
     row_output[prefix_above + i] =
         s_topk[i] + my_start;  // my_start: block-local -> row-global index
   }
-  const uint32_t common_le = min(le, hist4096::kBlockSize);
-  if (tx < common_le) {
-    const uint32_t i = tx;
+  for (uint32_t i = tx; i < le; i += hist4096::kBlockSize) {
     const auto t = smem->tie_buffer[i];
     const uint32_t p = s_total_above + prefix_equal + i;
     if (p < TopK) {
@@ -465,12 +463,6 @@ __device__ void large_topk(const float* __restrict__ row_input,
     if (tp < kCoarseTieCapacity) {
       tie_ws[tp] = hist4096::Tie{t.idx + my_start, t.score};
     }
-  }
-  // The common path copies one tie per thread; handle remaining ties only
-  // when the threshold bin exceeds that capacity.
-  if (__builtin_expect(le > hist4096::kBlockSize, 0)) {
-    copy_extra_coarse_ties<TopK>(smem->tie_buffer, le, prefix_equal,
-                                 s_total_above, my_start, tie_ws, row_output);
   }
 
   // Tie refinement
@@ -497,8 +489,8 @@ __device__ void large_topk(const float* __restrict__ row_input,
     } else {
       // The fast refiner fits one tie per thread; use the extended refiner
       // when the threshold bin exceeds that capacity.
-      refine_large_coarse_ties<TopK>(tie_ws, s_total_equal, s_total_above,
-                                     row_output, smem);
+      hist4096::tie_handle_large<TopK, kCoarseTieCapacity>(
+          tie_ws, s_total_equal, s_total_above, row_output, smem);
     }
   } else {
     // TopK=2048: process directly from tie_ws (GMEM)
@@ -536,7 +528,7 @@ __device__ void cooperative_topk_body(CooperativeTopKParams<TopK> params) {
   // Short-Medium path: histogram_4096_topk on rank 0 only - all data fits in RF
   if (sl <= static_cast<int32_t>(hist4096::kHist4096MaxLen)) {
     if (rank == 0) {
-      extern __shared__ uint8_t sr[];
+      extern __shared__ __align__(128) uint8_t sr[];
       hist4096::histogram_4096_topk<
           TopK, 12, hist4096::kHist4096VecsPerThread, false,
           hist4096::OverflowRecovery::kRescan>(
@@ -562,7 +554,7 @@ __device__ void cooperative_topk_body(CooperativeTopKParams<TopK> params) {
                                                 : kMaxSinglePassStages;
   using FusedSmem = SmemFused<kFusedStages>;
 
-  extern __shared__ uint8_t sr[];
+  extern __shared__ __align__(128) uint8_t sr[];
 
   constexpr uint32_t kTieWsPerRow = kCoarseTieCapacity;
   hist4096::Tie* row_tie_ws = params.tie_ws + row * kTieWsPerRow;
