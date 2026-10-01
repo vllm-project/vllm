@@ -214,10 +214,7 @@ class ServingScores(PoolingServing):
         if not query_keys:
             return
 
-        assert ctx.n_queries is not None
-        assert ctx.engine_inputs is not None
-        n_docs = len(ctx.engine_inputs) - ctx.n_queries
-        doc_keys = [f"{ctx.request_id}-doc-{i}" for i in range(n_docs)]
+        doc_keys = ctx.late_interaction_doc_keys or []
 
         try:
             # Stop documents before removing the query tensors they reference.
@@ -285,7 +282,9 @@ class ServingScores(PoolingServing):
         query_keys = ctx.late_interaction_query_keys
         if query_keys is None:
             raise RuntimeError("Late-interaction query keys were not initialized.")
-        doc_keys = [f"{ctx.request_id}-doc-{i}" for i in range(n_docs)]
+        doc_namespace = random_uuid()
+        doc_keys = [f"late-interaction-{doc_namespace}-doc-{i}" for i in range(n_docs)]
+        ctx.late_interaction_doc_keys = doc_keys
 
         for i in range(n_docs):
             query_idx = 0 if n_queries == 1 else i
