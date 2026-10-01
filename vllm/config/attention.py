@@ -43,6 +43,22 @@ class AttentionConfig:
     minimax_m3_msa_decode_backend: MiniMaxM3MSADecodeBackend = "triton"
     """Sparse decode kernel used by the MiniMax M3 MSA backend."""
 
+    minimax_m3_fused_decode: bool = False
+    """Run MiniMax M3 decode through AITER's fused sparse-layer kernel: each
+    sparse MoE layer of a decode step becomes one launch per GPU, with both
+    all-reduces done inside the kernel. Steps of up to 16 tokens take this path
+    (speculative verify steps included); prefill and larger steps keep the
+    regular layers.
+
+    Requires ROCm gfx950, tensor parallel size 4, `--kv-cache-dtype fp8`,
+    `--block-size 128`, `indexer_kv_dtype="fp8"`, `--moe-backend aiter` and
+    `VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS=1`; startup fails otherwise.
+
+    The kernel reads FP8 per-channel attention projections. Unless a
+    `--quantization-config` is given, the sparse layers' `qkv_proj` and
+    `o_proj` are quantized to FP8 per-channel at load; all other weights keep
+    the checkpoint's precision."""
+
     backend_per_kind: dict[str, AttentionBackendEnum] = field(default_factory=dict)
     """Per-KV-cache-group attention backend overrides, keyed by
     `KVCacheSpecKind` (e.g. `{"mla_attention": "FLASHINFER_MLA",
