@@ -71,6 +71,7 @@ from vllm.v1.request import Request, RequestStatus, StreamingUpdate
 from vllm.v1.spec_decode.dynamic.utils import build_dynamic_sd_schedule_lookup
 from vllm.v1.spec_decode.metrics import SpecDecodingStats
 from vllm.v1.structured_output import StructuredOutputManager
+from vllm.v1.structured_output.utils import strip_speculative_padding
 from vllm.v1.utils import record_function_or_nullcontext
 
 logger = init_logger(__name__)
@@ -1115,6 +1116,7 @@ class Scheduler(SchedulerInterface):
                     if (
                         not self.scheduler_config.enable_chunked_prefill
                         and num_new_tokens > request_token_budget
+                        and not self.is_mm_encoder_only
                     ):
                         # If chunked_prefill is disabled,
                         # we can stop the scheduling here.
@@ -1962,7 +1964,14 @@ class Scheduler(SchedulerInterface):
             structured_output_request_ids,
             scheduler_output.scheduled_spec_decode_tokens,
         )
-        return GrammarOutput(structured_output_request_ids, bitmask)
+        spec_tokens = scheduler_output.scheduled_spec_decode_tokens
+        num_acceptable_drafts = [
+            len(strip_speculative_padding(spec_tokens.get(req_id, [])))
+            for req_id in structured_output_request_ids
+        ]
+        return GrammarOutput(
+            structured_output_request_ids, bitmask, num_acceptable_drafts
+        )
 
     def update_from_output(
         self,
@@ -3002,6 +3011,7 @@ class Scheduler(SchedulerInterface):
             num_local_computed_tokens=request.num_computed_tokens,
             num_tokens_main_model=full_num_tokens,
             apply_admission_cap=True,
+            prefill_end=max(request.num_prompt_tokens, request.num_tokens - 1),
         )
         return num_blocks + self._spec_decode_step_blocks()
 
