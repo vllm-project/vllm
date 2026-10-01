@@ -184,14 +184,16 @@ class AnthropicServingMessages(OpenAIServingChat):
             default_chat_template_kwargs=default_chat_template_kwargs,
         )
         self._merge_inline_system = self._should_merge_inline_system(online_renderer)
-        mm_config = self.model_config.multimodal_config
-        self._image_input = (
-            mm_config is not None and mm_config.get_limit_per_prompt("image") > 0
-        )
         # Resolved lazily from the renderer when "auto".
         self._disabled_thinking_effort: AnthropicDisabledThinkingEffort | None = (
             None if disabled_thinking_effort == "auto" else disabled_thinking_effort
         )
+
+    @property
+    def _image_input(self) -> bool:
+        """Whether the served model accepts images."""
+        mm_config = self.model_config.multimodal_config
+        return mm_config is not None and mm_config.get_limit_per_prompt("image") > 0
 
     async def _get_disabled_thinking_effort(self) -> AnthropicDisabledThinkingEffort:
         if self._disabled_thinking_effort is None:
