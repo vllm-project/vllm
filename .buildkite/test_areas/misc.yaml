@@ -530,7 +530,7 @@ steps:
   - vllm/v1/
   - vllm/version.py
   - cmake/utils.cmake
-  - tests/test_access_log_filter.py
+  - tests/test_uvicorn_logging.py
   - tests/test_attention_backend_registry.py
   - tests/test_audio_media_size_precheck.py
   - tests/test_cmake_utils.py
@@ -571,7 +571,7 @@ steps:
   - pip install cmake # test_cmake_utils.py shells out to cmake; the CPU image has none
   - python3 standalone_tests/lazy_imports.py
   - pytest -v -s device_allocator
-  - pytest -v -s test_access_log_filter.py
+  - pytest -v -s test_uvicorn_logging.py
   - pytest -v -s test_attention_backend_registry.py
   - pytest -v -s test_audio_media_size_precheck.py
   - pytest -v -s test_cmake_utils.py

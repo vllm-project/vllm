@@ -1,14 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Access log filter for uvicorn to exclude specific endpoints from logging.
-
-This module provides a logging filter that can be used to suppress access logs
-for specific endpoints (e.g., /health, /metrics) to reduce log noise in
-production environments.
-"""
+"""Uvicorn logging configuration and access log filtering."""
 
 import logging
+from typing import Literal
 from urllib.parse import urlparse
+
+from vllm.logging_utils.formatter import JSON_FORMAT
 
 
 class UvicornAccessLogFilter(logging.Filter):
@@ -70,8 +68,9 @@ class UvicornAccessLogFilter(logging.Filter):
 def create_uvicorn_log_config(
     excluded_paths: list[str] | None = None,
     log_level: str = "info",
+    formatter: Literal["text", "json"] = "text",
 ) -> dict:
-    """Create a uvicorn logging configuration with access log filtering.
+    """Create a uvicorn logging configuration with optional access filtering.
 
     This function generates a logging configuration dictionary that can be
     passed to uvicorn's `log_config` parameter. It sets up the access log
@@ -80,6 +79,7 @@ def create_uvicorn_log_config(
     Args:
         excluded_paths: List of URL paths to exclude from access logs.
         log_level: The log level for uvicorn loggers.
+        formatter: Format used for uvicorn logs.
 
     Returns:
         A dictionary containing the logging configuration.
@@ -140,4 +140,13 @@ def create_uvicorn_log_config(
             },
         },
     }
+    if formatter == "json":
+        json_formatter = {
+            "class": "pythonjsonlogger.jsonlogger.JsonFormatter",
+            "format": JSON_FORMAT,
+        }
+        config["formatters"] = {
+            "default": json_formatter.copy(),
+            "access": json_formatter.copy(),
+        }
     return config
