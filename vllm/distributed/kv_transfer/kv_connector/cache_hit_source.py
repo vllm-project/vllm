@@ -26,8 +26,10 @@ class CacheHitSource(str, Enum):
     @classmethod
     def outermost(cls, sources: Iterable[CacheHitSource]) -> CacheHitSource:
         """The tier in ``sources`` farthest from the accelerator."""
-        order = list(cls)
-        return max(sources, key=order.index)
+        return max(sources, key=_SOURCE_ORDER.__getitem__)
+
+
+_SOURCE_ORDER = {source: rank for rank, source in enumerate(CacheHitSource)}
 
 
 @dataclass

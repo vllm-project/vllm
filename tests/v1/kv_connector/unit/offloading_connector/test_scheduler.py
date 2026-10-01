@@ -692,6 +692,43 @@ def test_external_cache_hit_sources_reconcile_different_group_chunk_sizes(
     assert scheduler.get_external_cache_hit_sources(request, 2 * block_size) == expected
 
 
+@pytest.mark.parametrize(
+    ("ranges", "expected"),
+    [
+        pytest.param(
+            [(8, 12, "host"), (0, 8, "host"), (4, 10, "host")],
+            CachedTokensBySource(host=8, external_unspecified=4),
+            id="overlapping-same-source-and-adjacent-endpoints",
+        ),
+        pytest.param(
+            [(10, 20, "p2p"), (6, 10, "disk"), (0, 8, "host"), (4, 12, "host")],
+            CachedTokensBySource(host=2, disk=4, p2p=6),
+            id="nested-tiers-and-clipped-ranges",
+        ),
+        pytest.param(
+            [(0, 4, "disk"), (16, 20, "disk"), (8, 8, "disk")],
+            CachedTokensBySource(external_unspecified=12),
+            id="no-covering-ranges",
+        ),
+    ],
+)
+def test_external_cache_hit_sources_range_boundaries(ranges, expected):
+    scheduler = _make_partial_tail_scheduler()
+    request = _make_partial_tail_request(scheduler)
+    state = scheduler._req_status[request.request_id]
+    state.num_locally_computed_tokens = 4
+    for idx, (lo, hi, source) in enumerate(ranges):
+        key = make_offload_key(str(idx).encode(), 0)
+        state.load_key_ranges.append((lo, hi, key))
+    scheduler.manager.get_load_source.side_effect = lambda key, ctx: ranges[
+        int(get_offload_block_hash(key))
+    ][2]
+
+    result = scheduler.get_external_cache_hit_sources(request, 12)
+    assert result == expected
+    assert result.total == 12
+
+
 @pytest.mark.parametrize("source", ["host", "disk", "p2p", "external_unspecified"])
 def test_external_cache_hit_sources_recurrent_only_state(source):
     scheduler = _make_partial_tail_scheduler(recurrent_only=True)

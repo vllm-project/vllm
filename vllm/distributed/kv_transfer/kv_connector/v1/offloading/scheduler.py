@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import time
+from collections import Counter
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field, replace
 from itertools import chain, islice
@@ -1117,25 +1118,32 @@ class OffloadingConnectorScheduler:
         start = req_status.num_locally_computed_tokens
         end = start + num_external_tokens
 
-        def tier(key: OffloadKey) -> CacheHitSource:
-            return CacheHitSource(
+        events: list[tuple[int, int, CacheHitSource]] = [
+            (end, 0, CacheHitSource.EXTERNAL_UNSPECIFIED)
+        ]
+        for lo, hi, key in req_status.load_key_ranges:
+            lo, hi = max(start, lo), min(end, hi)
+            if lo >= hi:
+                continue
+            source = CacheHitSource(
                 self.manager.get_load_source(key, req_status.req_context)
             )
+            events.extend(((lo, 1, source), (hi, -1, source)))
 
-        ranges = [
-            (max(start, lo), min(end, hi), tier(key))
-            for lo, hi, key in req_status.load_key_ranges
-            if max(start, lo) < min(end, hi)
-        ]
-        bounds = sorted({start, end, *(b for lo, hi, _ in ranges for b in (lo, hi))})
-        for lo, hi in zip(bounds, bounds[1:]):
-            tiers = [t for r_lo, r_hi, t in ranges if r_lo <= lo < r_hi]
-            sources.add(
-                CacheHitSource.outermost(tiers)
-                if tiers
-                else CacheHitSource.EXTERNAL_UNSPECIFIED,
-                hi - lo,
-            )
+        # Sweep endpoints instead of rescanning every range for each interval.
+        active: Counter[CacheHitSource] = Counter()
+        position = start
+        for boundary, delta, source in sorted(events):
+            if boundary > position:
+                tiers = [tier for tier, count in active.items() if count > 0]
+                sources.add(
+                    CacheHitSource.outermost(tiers)
+                    if tiers
+                    else CacheHitSource.EXTERNAL_UNSPECIFIED,
+                    boundary - position,
+                )
+            active[source] += delta
+            position = boundary
         return sources
 
     def update_state_after_alloc(
