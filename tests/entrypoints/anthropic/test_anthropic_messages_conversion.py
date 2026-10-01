@@ -2032,3 +2032,166 @@ class TestProbeDisabledThinkingEffort:
     @pytest.mark.asyncio
     async def test_renderer_rejects_none(self):
         assert await self._probe(self._reject_none) == "low"
+
+
+class TestContinuousUsageStream:
+    """Intermediate cumulative usage flows as mid-stream message_delta
+    events (continuous usage stats), in the same shape Anthropic's SDK
+    accumulator treats as authoritative cumulative totals: an empty
+    ``delta`` payload alongside ``usage``. Only the terminal
+    message_delta (from the OpenAI empty-choices final chunk) may carry
+    ``stop_reason`` and cache details.
+    """
+
+    @pytest.mark.asyncio
+    async def test_intermediate_usage_deltas_emitted(self):
+        async def sse_input():
+            yield _make_stream_chunk(
+                delta=DeltaMessage(role="assistant"),
+                usage=UsageInfo(prompt_tokens=10, total_tokens=10),
+            )
+            # Intermediate chunks carrying continuous usage, as
+            # chat_completion_stream_generator stamps them.
+            yield _make_stream_chunk(
+                delta=DeltaMessage(content="Hello"),
+                usage=UsageInfo(prompt_tokens=10, completion_tokens=1, total_tokens=11),
+            )
+            yield _make_stream_chunk(
+                delta=DeltaMessage(content=" world"),
+                usage=UsageInfo(
+                    prompt_tokens=10, completion_tokens=60, total_tokens=70
+                ),
+            )
+            yield _make_stream_chunk(finish_reason="stop")
+            yield _make_stream_chunk(
+                choices=[],
+                usage=UsageInfo(
+                    prompt_tokens=10, completion_tokens=61, total_tokens=71
+                ),
+            )
+            yield "data: [DONE]"
+
+        converter = _make_stream_converter()
+        output = []
+        async for event in converter.message_stream_converter(sse_input()):
+            output.append(event)
+        events = _parse_sse_events(output)
+
+        usage_deltas = [data for ev, data in events if ev == "message_delta"]
+        # First intermediate (eager), second (interval crossed), terminal.
+        assert len(usage_deltas) == 3
+        # Intermediate deltas: cumulative output_tokens, no stop_reason.
+        assert usage_deltas[0]["usage"]["output_tokens"] == 1
+        assert "stop_reason" not in usage_deltas[0]["delta"]
+        assert usage_deltas[1]["usage"]["output_tokens"] == 60
+        assert "stop_reason" not in usage_deltas[1]["delta"]
+        # Terminal delta: last count + stop_reason end_turn.
+        assert usage_deltas[2]["usage"]["output_tokens"] == 61
+        assert usage_deltas[2]["delta"]["stop_reason"] == "end_turn"
+
+    @pytest.mark.asyncio
+    async def test_monotonic_intermediate_counts(self):
+        async def sse_input():
+            yield _make_stream_chunk(
+                delta=DeltaMessage(role="assistant"),
+                usage=UsageInfo(prompt_tokens=10, total_tokens=10),
+            )
+            for i in range(1, 220):
+                yield _make_stream_chunk(
+                    delta=DeltaMessage(content="x"),
+                    usage=UsageInfo(
+                        prompt_tokens=10, completion_tokens=i, total_tokens=10 + i
+                    ),
+                )
+            yield _make_stream_chunk(finish_reason="stop")
+            yield _make_stream_chunk(
+                choices=[],
+                usage=UsageInfo(
+                    prompt_tokens=10, completion_tokens=220, total_tokens=230
+                ),
+            )
+            yield "data: [DONE]"
+
+        converter = _make_stream_converter()
+        output = []
+        async for event in converter.message_stream_converter(sse_input()):
+            output.append(event)
+        events = _parse_sse_events(output)
+
+        usage_deltas = [data for ev, data in events if ev == "message_delta"]
+        output_counts = [u["usage"]["output_tokens"] for u in usage_deltas]
+        assert output_counts == sorted(output_counts)
+        # Interval 50 → several ~50-token-spaced emissions plus terminal.
+        assert len(usage_deltas) >= 4
+        # No intermediate delta carries the terminal stop_reason.
+        assert all("stop_reason" not in u["delta"] for u in usage_deltas[:-1])
+        # Terminal delta carries the final count.
+        assert output_counts[-1] == 220
+
+    @pytest.mark.asyncio
+    async def test_no_intermediate_update_after_finish_reason(self):
+        async def sse_input():
+            yield _make_stream_chunk(
+                delta=DeltaMessage(role="assistant"),
+                usage=UsageInfo(prompt_tokens=10, total_tokens=10),
+            )
+            # finish_reason chunk that also carries usage: suppressed
+            # because the terminal state is reached.
+            yield _make_stream_chunk(
+                delta=DeltaMessage(content="done"),
+                finish_reason="stop",
+                usage=UsageInfo(
+                    prompt_tokens=10, completion_tokens=99, total_tokens=109
+                ),
+            )
+            yield _make_stream_chunk(
+                choices=[],
+                usage=UsageInfo(
+                    prompt_tokens=10, completion_tokens=99, total_tokens=109
+                ),
+            )
+            yield "data: [DONE]"
+
+        converter = _make_stream_converter()
+        output = []
+        async for event in converter.message_stream_converter(sse_input()):
+            output.append(event)
+        events = _parse_sse_events(output)
+
+        usage_deltas = [data for ev, data in events if ev == "message_delta"]
+        assert len(usage_deltas) == 1
+        assert usage_deltas[0]["delta"]["stop_reason"] == "end_turn"
+        assert usage_deltas[0]["usage"]["output_tokens"] == 99
+
+    @pytest.mark.asyncio
+    async def test_stream_without_intermediate_usage_unchanged(self):
+        """Streams that never stamp usage on intermediate chunks (e.g.
+        continuous_usage_stats off in the underlying OpenAI layer) must
+        produce exactly the pre-existing event shape: only the terminal
+        message_delta carries usage."""
+
+        async def sse_input():
+            yield _make_stream_chunk(
+                delta=DeltaMessage(role="assistant", content="Hello"),
+                usage=UsageInfo(prompt_tokens=10, total_tokens=10),
+            )
+            yield _make_stream_chunk(delta=DeltaMessage(content=" world"))
+            yield _make_stream_chunk(finish_reason="stop")
+            yield _make_stream_chunk(
+                choices=[],
+                usage=UsageInfo(prompt_tokens=10, completion_tokens=2, total_tokens=12),
+            )
+            yield "data: [DONE]"
+
+        converter = _make_stream_converter()
+        output = []
+        async for event in converter.message_stream_converter(sse_input()):
+            output.append(event)
+        events = _parse_sse_events(output)
+
+        usage_deltas = [data for ev, data in events if ev == "message_delta"]
+        assert len(usage_deltas) == 1
+        assert usage_deltas[0]["delta"]["stop_reason"] == "end_turn"
+        # message ordering is untouched
+        assert events[0][0] == "message_start"
+        assert events[-1][0] == "message_stop"

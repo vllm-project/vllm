@@ -301,6 +301,60 @@ def should_include_usage(
     return include_usage, include_continuous_usage
 
 
+# Minimum token delta between two consecutive intermediate usage updates.
+# Matches Anthropic's observed ~50-token cadence for mid-stream
+# ``message_delta`` usage events; keeps SSE volume bounded without
+# starving progress consumers when generation is short.
+CONTINUOUS_USAGE_EMISSION_TOKEN_INTERVAL = 50
+
+
+class ContinuousUsageStatsThrottler:
+    """Rate-limits intermediate usage emissions on one stream.
+
+    Sits next to ``should_include_usage`` as the shared usage-stats
+    streaming policy: the *production* of per-chunk running usage is
+    single-sourced in the OpenAI chat stream generator (which both
+    ``/v1/chat/completions`` and ``/v1/messages`` drive), while this
+    throttler defines a single *emission cadence* for protocols like
+    Anthropic Messages, where mid-stream usage rides on discrete
+    ``message_delta`` events and Anthropic's observed cadence is roughly
+    one update per 50 tokens.
+
+    Emits the first update eagerly (so clients see early progress), then
+    only after ``output_tokens`` grew by at least ``interval`` since the
+    last emission. The final usage summary chunk is exempt — callers
+    detect the terminal state themselves and pass ``terminal=True`` to
+    suppress a redundant trailing update for the same counts.
+    """
+
+    def __init__(
+        self, interval: int = CONTINUOUS_USAGE_EMISSION_TOKEN_INTERVAL
+    ) -> None:
+        self.interval = interval
+        self._last_emitted_completion_tokens: int | None = None
+
+    def should_emit(self, output_tokens: int, *, terminal: bool = False) -> bool:
+        """Whether an intermediate usage update should be emitted.
+
+        Args:
+            output_tokens: Cumulative completion tokens on this chunk.
+            terminal: ``True`` when the stream has already reached its
+                terminal state (finish reason observed on a choice, or the
+                final usage summary chunk was seen); drops this update so
+                only the true final summary carries the last counts.
+
+        """
+        if terminal:
+            return False
+        if self._last_emitted_completion_tokens is None:
+            self._last_emitted_completion_tokens = output_tokens
+            return True
+        if output_tokens - self._last_emitted_completion_tokens >= self.interval:
+            self._last_emitted_completion_tokens = output_tokens
+            return True
+        return False
+
+
 def process_lora_modules(
     args_lora_modules: list[LoRAModulePath], default_mm_loras: dict[str, str] | None
 ) -> list[LoRAModulePath]:

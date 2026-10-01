@@ -91,6 +91,37 @@ async def test_anthropic_streaming(client: anthropic.AsyncAnthropic):
 
 
 @pytest.mark.asyncio
+async def test_anthropic_streaming_continuous_usage(client: anthropic.AsyncAnthropic):
+    """Intermediate message_delta events carry cumulative usage while
+    streaming, with no stop_reason; the terminal message_delta carries
+    the final counts and stop_reason."""
+    resp = await client.messages.create(
+        model="claude-3-7-sonnet-latest",
+        max_tokens=1024,
+        messages=[{"role": "user", "content": "Count from 1 to 100, one per line."}],
+        stream=True,
+    )
+
+    message_deltas = []
+    async for chunk in resp:
+        if chunk.type == "message_delta":
+            message_deltas.append(chunk)
+
+    assert message_deltas, "no message_delta events observed"
+    assert all(d.usage is not None for d in message_deltas)
+    # Every intermediate delta has no stop_reason; only the last one does.
+    for delta in message_deltas[:-1]:
+        assert delta.delta.stop_reason is None
+        assert delta.usage.output_tokens > 0
+    last = message_deltas[-1]
+    assert last.delta.stop_reason is not None
+    # Cumulative counts never regress.
+    counts = [d.usage.output_tokens for d in message_deltas]
+    assert counts == sorted(counts)
+    assert counts[-1] == max(counts)
+
+
+@pytest.mark.asyncio
 async def test_anthropic_tool_call(client: anthropic.AsyncAnthropic):
     resp = await client.messages.create(
         model="claude-3-7-sonnet-latest",
