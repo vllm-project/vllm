@@ -22,26 +22,6 @@ HW_MODULE = "vllm.model_executor.hw_agnostic.layers.layernorm"
 
 
 @pytest.fixture
-def caplog_vllm(caplog):
-    """`caplog`, but also captures vLLM's loggers.
-
-    vllm/logger.py configures the "vllm" logger with propagate=False, so
-    records from child loggers like this module's `layers` logger reach
-    vLLM's own handler but never bubble up to the root logger where plain
-    `caplog` listens -- and once any `LLM`/`vllm_runner` has been constructed
-    earlier in the same pytest session (e.g. by test_backend.py in this same
-    job), that's the only path left. Attach caplog's handler directly to
-    "vllm" to see them too, regardless of session ordering.
-    """
-    logger = logging.getLogger("vllm")
-    logger.addHandler(caplog.handler)
-    try:
-        yield caplog
-    finally:
-        logger.removeHandler(caplog.handler)
-
-
-@pytest.fixture
 def fake_hw_layernorm(monkeypatch):
     """Inject a hw-agnostic `layernorm` module exposing a sentinel `RMSNorm`.
 
