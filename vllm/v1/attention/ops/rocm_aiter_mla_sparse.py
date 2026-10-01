@@ -22,8 +22,10 @@ from vllm.v1.attention.ops.common import pack_seq_triton, unpack_seq_triton
 from vllm.v1.worker.workspace import current_workspace_manager
 
 if current_platform.is_rocm():
-    from vllm.platforms.rocm import _ON_GFX942, _ON_GFX950
+    from vllm.platforms.rocm import _ON_GFX1X, _ON_GFX12X, _ON_GFX942, _ON_GFX950
 else:
+    _ON_GFX1X = False
+    _ON_GFX12X = False
     _ON_GFX942 = False
     _ON_GFX950 = False
 
@@ -1026,12 +1028,21 @@ def _mask_tile(rows: int) -> int:
     return 4096 if rows >= 64 else 2048
 
 
+# gfx9 counts stores in vmcnt; gfx10+ moved them to a separate counter.
+if _ON_GFX12X:
+    _STORE_WAIT = "s_wait_storecnt 0x0"
+elif _ON_GFX1X:
+    _STORE_WAIT = "s_waitcnt_vscnt null, 0x0"
+else:
+    _STORE_WAIT = "s_waitcnt vmcnt(0)"
+
+
 @triton.jit
-def _wait_global_stores(x):
+def _wait_global_stores(x, STORE_WAIT: tl.constexpr):
     # tl.debug_barrier only waits on LDS traffic on AMD; the flags live in
     # global memory, so their stores must land before the barrier.
     tl.inline_asm_elementwise(
-        "s_waitcnt vmcnt(0)", "=v,v", [x], dtype=tl.int32, is_pure=False, pack=1
+        STORE_WAIT, "=v,v", [x], dtype=tl.int32, is_pure=False, pack=1
     )
 
 
@@ -1055,6 +1066,7 @@ def _mask_candidates_strided_kernel(
     HAS_STARTS: tl.constexpr,
     ROW_REPEAT: tl.constexpr,
     TILE: tl.constexpr,
+    STORE_WAIT: tl.constexpr,
 ):
     row = tl.program_id(0).to(tl.int64)
     start = tl.load(starts + row // ROW_REPEAT * stride_start) if HAS_STARTS else 0
@@ -1111,10 +1123,10 @@ def _mask_candidates_strided_kernel(
             & (cand < live_blocks)
             & ((cand // TILE_BLOCKS) % num_progs == pid)
         )
-        _wait_global_stores(pid)
+        _wait_global_stores(pid, STORE_WAIT)
         tl.debug_barrier()
         tl.store(row_flags + cand, 1, owned)
-        _wait_global_stores(pid)
+        _wait_global_stores(pid, STORE_WAIT)
         tl.debug_barrier()
 
         offsets = tl.arange(0, BLOCK_P2)
@@ -1185,6 +1197,7 @@ def _apply_candidate_mask_strided(
         row_ks is not None,
         row_repeat,
         tile,
+        _STORE_WAIT,
     )
 
 
