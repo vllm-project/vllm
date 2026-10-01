@@ -702,8 +702,8 @@ def test_dp_sync_interval_idle_pause_consensus_on_first_step(monkeypatch):
 def test_idle_dp_rank_announces_wave_for_new_work(
     request_wave, engines_running, pause_state, announces
 ):
-    """An idle rank handed work announces the wave itself: the front-end's wake
-    may have been dropped by a peer that was still paused."""
+    """An idle rank handed work announces the wave itself, since only engines
+    start waves; a paused rank waits for resume."""
     core = object.__new__(DPEngineCoreProc)
     core.has_coordinator = True
     core.current_wave = 3
