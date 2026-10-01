@@ -1195,6 +1195,7 @@ class AsyncMPClient(MPClient):
 
                     if outputs.outputs or outputs.scheduler_stats:
                         outputs_queue.put_nowait(outputs)
+                        await asyncio.sleep(0)
             except Exception as e:
                 outputs_queue.put_nowait(e)
             except asyncio.CancelledError:
