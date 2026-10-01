@@ -33,6 +33,7 @@ from vllm.v1.attention.backends.mla.compressor_utils import (
 )
 from vllm.v1.attention.backends.utils import split_decodes_and_prefills
 from vllm.v1.attention.ops.flashmla import FlashMLASchedMeta, get_mla_metadata
+from vllm.v1.worker.cp_utils import cp_is_local_pos
 from vllm.v1.kv_cache_interface import (
     KVCacheSpec,
     MLAAttentionSpec,
@@ -467,6 +468,18 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
         self.decode_threshold = max_decode_query_len(self.vllm_config)
         self.reorder_batch_threshold = None
 
+        parallel_config = self.vllm_config.parallel_config
+        self.dcp_world_size = parallel_config.decode_context_parallel_size
+        self.cp_kv_cache_interleave_size = (
+            parallel_config.cp_kv_cache_interleave_size
+        )
+        if self.dcp_world_size > 1:
+            from vllm.distributed import get_dcp_group
+
+            self.dcp_rank = get_dcp_group().rank_in_group
+        else:
+            self.dcp_rank = 0
+
         hf_config = self.vllm_config.model_config.hf_config
         assert hasattr(hf_config, "sliding_window")
         self.window_size = hf_config.sliding_window
@@ -657,6 +670,9 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
                     token_offset=0,
                 )
             else:
+                # Decode rows under DCP attend only this rank's owned window
+                # positions (compacted, owned-only lens); prefill rows below
+                # keep the dcp=1 form until prefill context parallelism lands.
                 _COMPUTE_SWA_INDICES_AND_LENS_KERNEL(
                     decode_swa_indices,
                     self.decode_swa_lens,
@@ -673,6 +689,9 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
                     replay_start,
                     num_tokens=num_decode_tokens,
                     token_offset=0,
+                    dcp_world_size=self.dcp_world_size,
+                    dcp_rank=self.dcp_rank,
+                    cp_kv_cache_interleave_size=self.cp_kv_cache_interleave_size,
                 )
 
         # Vision variant: per-token in-image visibility for prefill tokens.
@@ -842,6 +861,8 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
         assert metadata.decode_swa_lens is not None
         assert metadata.replay_start is not None
 
+        # Draft decode stays dcp=1 form: spec decode with DCP is gated off,
+        # and an MTP x DCP port must thread the ownership filter here too.
         _COMPUTE_SWA_INDICES_AND_LENS_KERNEL(
             metadata.decode_swa_indices,
             metadata.decode_swa_lens,
@@ -1027,6 +1048,9 @@ def _compute_swa_indices_and_lens_kernel(
     token_offset,
     HAS_IMAGE: tl.constexpr,
     TRITON_BLOCK_SIZE: tl.constexpr,
+    DCP_WORLD_SIZE: tl.constexpr,
+    DCP_RANK: tl.constexpr,
+    CP_KV_CACHE_INTERLEAVE_SIZE: tl.constexpr,
 ):
     pid = tl.program_id(0)
     token_idx = pid + token_offset
@@ -1069,26 +1093,70 @@ def _compute_swa_indices_and_lens_kernel(
     end_pos = pos + right + 1
 
     swa_len = end_pos - start_pos
-    tl.store(swa_lens_ptr + pid, swa_len)
 
-    for i in range(0, index_width, TRITON_BLOCK_SIZE):
-        offset = i + tl.arange(0, TRITON_BLOCK_SIZE)
+    if DCP_WORLD_SIZE == 1:
+        tl.store(swa_lens_ptr + pid, swa_len)
 
-        pos_offset = start_pos + offset
-        block_indices = pos_offset // block_size
-        block_numbers = tl.load(
-            block_table_ptr + req_idx * block_table_stride + block_indices,
-            mask=pos_offset < end_pos,
-        )
-        block_offsets = pos_offset % block_size
-        slot_ids = block_numbers * block_size + block_offsets
+        for i in range(0, index_width, TRITON_BLOCK_SIZE):
+            offset = i + tl.arange(0, TRITON_BLOCK_SIZE)
 
-        slot_ids = tl.where(offset < swa_len, slot_ids, -1)
-        tl.store(
-            swa_indices_ptr + pid * swa_indices_stride + offset,
-            slot_ids,
-            mask=offset < index_width,
-        )
+            pos_offset = start_pos + offset
+            block_indices = pos_offset // block_size
+            block_numbers = tl.load(
+                block_table_ptr + req_idx * block_table_stride + block_indices,
+                mask=pos_offset < end_pos,
+            )
+            block_offsets = pos_offset % block_size
+            slot_ids = block_numbers * block_size + block_offsets
+
+            slot_ids = tl.where(offset < swa_len, slot_ids, -1)
+            tl.store(
+                swa_indices_ptr + pid * swa_indices_stride + offset,
+                slot_ids,
+                mask=offset < index_width,
+            )
+    else:
+        # DCP over replicated SWA storage: every rank holds the whole window
+        # but attends only the positions it owns, compacted to the front so
+        # (row, len) consumers see a shorter row; the per-rank softmaxes then
+        # merge disjointly by LSE. Ownership interleaves RAW token positions
+        # with the same convention the sharded caches use for their slots.
+        owned_count = tl.zeros((), dtype=tl.int32)
+        for i in range(0, index_width, TRITON_BLOCK_SIZE):
+            offset = i + tl.arange(0, TRITON_BLOCK_SIZE)
+
+            pos_offset = start_pos + offset
+            owned = (offset < swa_len) & cp_is_local_pos(
+                pos_offset,
+                DCP_WORLD_SIZE,
+                DCP_RANK,
+                CP_KV_CACHE_INTERLEAVE_SIZE,
+            )
+            block_indices = pos_offset // block_size
+            block_numbers = tl.load(
+                block_table_ptr + req_idx * block_table_stride + block_indices,
+                mask=owned,
+            )
+            slot_ids = block_numbers * block_size + pos_offset % block_size
+
+            dest = owned_count + tl.cumsum(owned.to(tl.int32), axis=0) - 1
+            tl.store(
+                swa_indices_ptr + pid * swa_indices_stride + dest,
+                slot_ids,
+                mask=owned,
+            )
+            owned_count += tl.sum(owned.to(tl.int32), axis=0)
+        tl.store(swa_lens_ptr + pid, owned_count)
+
+        # -1-fill past the owned prefix: non-owned tails must not leak stale
+        # slots into (indices >= 0) fallback counts.
+        for i in range(0, index_width, TRITON_BLOCK_SIZE):
+            offset = i + tl.arange(0, TRITON_BLOCK_SIZE)
+            tl.store(
+                swa_indices_ptr + pid * swa_indices_stride + offset,
+                -1,
+                mask=(offset >= owned_count) & (offset < index_width),
+            )
 
 
 class ComputeSWAIndicesAndLensKernel(
@@ -1101,6 +1169,9 @@ class ComputeSWAIndicesAndLensKernel(
         has_image: int
         block_size: int
         triton_block_size: int
+        dcp_world_size: int = 1
+        dcp_rank: int = 0
+        cp_kv_cache_interleave_size: int = 1
 
     kernel = staticmethod(_compute_swa_indices_and_lens_kernel)
 
@@ -1119,6 +1190,9 @@ class ComputeSWAIndicesAndLensKernel(
         window_size: int,
         block_size: int,
         max_image_tokens: int = 0,
+        dcp_world_size: int = 1,
+        dcp_rank: int = 0,
+        cp_kv_cache_interleave_size: int = 1,
     ) -> list[CompileKey]:
         # Decode rows always use the plain causal window. Vision models widen
         # prefill rows by max_image_tokens and additionally need the in-image
@@ -1129,11 +1203,25 @@ class ComputeSWAIndicesAndLensKernel(
                 (window_size + max_image_tokens, 0),
                 (window_size + max_image_tokens, 1),
             ]
+        # Decode rows under DCP attend owned positions only; prefill rows
+        # keep the dcp=1 form, so both variants warm up.
+        cp_variants = [(1, 0, 1)]
+        if dcp_world_size > 1:
+            cp_variants.append(
+                (dcp_world_size, dcp_rank, cp_kv_cache_interleave_size)
+            )
         return self._trace_dispatch(self.dispatch)(
             zip_inputs(
                 *(
-                    dict(index_width=index_width, has_image=has_image)
+                    dict(
+                        index_width=index_width,
+                        has_image=has_image,
+                        dcp_world_size=world,
+                        dcp_rank=rank,
+                        cp_kv_cache_interleave_size=interleave,
+                    )
                     for index_width, has_image in width_has_image
+                    for world, rank, interleave in cp_variants
                 )
             ),
             window_size=window_size,
@@ -1159,6 +1247,9 @@ class ComputeSWAIndicesAndLensKernel(
             num_tokens=1,
             token_offset=0,
             has_image=bool(compile_key.has_image),
+            dcp_world_size=compile_key.dcp_world_size,
+            dcp_rank=compile_key.dcp_rank,
+            cp_kv_cache_interleave_size=compile_key.cp_kv_cache_interleave_size,
         )
 
     @kernel_launcher
@@ -1181,12 +1272,18 @@ class ComputeSWAIndicesAndLensKernel(
         num_tokens: int,
         token_offset: int,
         has_image: bool = False,
+        dcp_world_size: int = 1,
+        dcp_rank: int = 0,
+        cp_kv_cache_interleave_size: int = 1,
     ) -> LaunchSpec:
         return (num_tokens,), dict(
             swa_indices_stride=swa_indices.stride(0),
             block_table_stride=block_table.stride(0),
             HAS_IMAGE=has_image,
             TRITON_BLOCK_SIZE=1024,
+            DCP_WORLD_SIZE=dcp_world_size,
+            DCP_RANK=dcp_rank,
+            CP_KV_CACHE_INTERLEAVE_SIZE=cp_kv_cache_interleave_size,
         )
 
 

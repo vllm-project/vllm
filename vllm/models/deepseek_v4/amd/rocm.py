@@ -17,6 +17,7 @@ from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.models.deepseek_v4.attention import DeepseekV4Attention
 from vllm.models.deepseek_v4.common.ops import dequantize_and_gather_k_cache
+from vllm.models.deepseek_v4.common.ops.dcp import apply_attn_sink
 from vllm.models.deepseek_v4.sparse_mla import (
     DeepseekV4FlashMLAMetadata,
     DeepseekV4SparseMLABackend,
@@ -34,6 +35,7 @@ from vllm.v1.attention.backends.mla.sparse_swa import (
     DeepseekSparseSWAMetadata,
     DeepseekSparseSWAMetadataBuilder,
 )
+from vllm.v1.attention.ops.dcp import MLADCPManager
 from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
     build_prefill_topk_ragged_indices,
     build_ragged_indices_from_dense,
@@ -693,6 +695,24 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
             self.indexer.aux_stream = None
         self._use_aiter_sparse_mla = _aiter_sparse_mla_enabled(self._has_kv_transfer)
 
+        self.dcp_manager: MLADCPManager | None = None
+        if vllm_config.parallel_config.decode_context_parallel_size > 1:
+            self.dcp_manager = MLADCPManager(
+                vllm_config=vllm_config,
+                device=next(self.wq_b.parameters()).device,
+                num_heads=self.n_local_heads,
+                query_head_dim=self.head_dim,
+                output_head_dim=self.head_dim,
+                query_dtype=vllm_config.model_config.dtype,
+                output_dtype=vllm_config.model_config.dtype,
+                # The Triton sparse decode takes its head count at runtime, so
+                # the gathered query needs no fixed-head padding.
+                padded_num_heads=None,
+                # The decode reduce stores natural-log LSE (lse_out).
+                is_lse_base_on_e=True,
+                use_pcp=False,
+            )
+
     def _run_sequential_pipeline(
         self,
         hidden_states: torch.Tensor,
@@ -1285,7 +1305,49 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
         # BF16 einsum path hands its rotation off to the decode.
         fuse_inv_rope = self._wo_a_fp8_weight is None
         rotated = 0
-        if num_decodes > 0:
+        adaptive_splits = (
+            _ON_GFX950
+            and not swa_only
+            and self.compress_ratio == 128
+            and rocm_metadata is not None
+            and rocm_metadata.for_cudagraph_capture
+        )
+        if num_decodes > 0 and self.dcp_manager is not None:
+            # DCP decode: gather the real query heads across the DCP group,
+            # attend the local KV shard sink-free and unrotated, LSE-merge the
+            # partials, then apply the sink once. A rank owning none of a
+            # token's attended slots stores LSE=-inf, which the merge weights
+            # to zero. The merged rows come back unrotated (rotated stays 0),
+            # so the standalone inverse-RoPE settle-up below covers them.
+            assert self.dcp_manager.query_gather is not None
+            gathered_q = self.dcp_manager.query_gather(
+                q[:num_decode_tokens, : self.n_local_heads].contiguous()
+            )
+            gathered_out = torch.empty_like(gathered_q)
+            lse = q.new_empty(gathered_q.shape[:2], dtype=torch.float32)
+            self._forward_decode(
+                q=gathered_q,
+                positions=None,
+                kv_cache=self_kv_cache,
+                swa_metadata=swa_metadata,
+                attn_metadata=rocm_metadata,
+                swa_only=swa_only,
+                output=gathered_out,
+                adaptive_splits=adaptive_splits,
+                lse_out=lse,
+                fold_sink=False,
+            )
+            merged, merged_lse = self.dcp_manager.combine(
+                gathered_out,
+                lse,
+                seq_lens=None,
+                query_start_loc=None,
+                return_lse=True,
+            )
+            output[:num_decode_tokens, : self.n_local_heads].copy_(
+                apply_attn_sink(merged, merged_lse, self.attn_sink)
+            )
+        elif num_decodes > 0:
             rotated = self._forward_decode(
                 q=q[:num_decode_tokens],
                 positions=positions[:num_decode_tokens] if fuse_inv_rope else None,
@@ -1294,13 +1356,7 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
                 attn_metadata=rocm_metadata,
                 swa_only=swa_only,
                 output=output[:num_decode_tokens],
-                adaptive_splits=(
-                    _ON_GFX950
-                    and not swa_only
-                    and self.compress_ratio == 128
-                    and rocm_metadata is not None
-                    and rocm_metadata.for_cudagraph_capture
-                ),
+                adaptive_splits=adaptive_splits,
             )
         if fuse_inv_rope:
             # Only the decode reduce rotates its own rows, and only the leading
@@ -1325,8 +1381,15 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
         swa_only: bool,
         output: torch.Tensor,
         adaptive_splits: bool,
+        lse_out: torch.Tensor | None = None,
+        fold_sink: bool = True,
     ) -> int:
-        """Returns how many leading rows the decode epilogue inverse-RoPE'd."""
+        """Returns how many leading rows the decode epilogue inverse-RoPE'd.
+
+        ``lse_out`` / ``fold_sink=False`` put the decode in cross-rank-merge
+        form: the kernel returns its natural-log LSE and leaves the softmax
+        sink to the caller (applied once after the merge).
+        """
         num_decodes = swa_metadata.num_decodes
         num_decode_tokens = swa_metadata.num_decode_tokens
 
@@ -1358,7 +1421,9 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
                 topk_ragged_indices = attn_metadata.c128a_decode_topk_ragged_indices
                 topk_ragged_indptr = attn_metadata.c128a_decode_topk_ragged_indptr
 
-        if self._use_aiter_sparse_mla:
+        # The aiter kernel folds the sink and returns no LSE, so the
+        # cross-rank-merge form has to take the Triton split-K path.
+        if self._use_aiter_sparse_mla and lse_out is None and fold_sink:
             assert swa_metadata.decode_swa_ragged_indices is not None
             assert swa_metadata.decode_swa_ragged_indptr is not None
             self._aiter_sparse_mla(
@@ -1387,7 +1452,7 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
             swa_ragged_indptr=swa_metadata.decode_swa_ragged_indptr,
             topk_ragged_indices=topk_ragged_indices,
             topk_ragged_indptr=topk_ragged_indptr,
-            attn_sink=self.attn_sink,
+            attn_sink=self.attn_sink if fold_sink else None,
             scale=self.scale,
             head_dim=self.head_dim,
             nope_head_dim=self.nope_head_dim,
@@ -1401,6 +1466,7 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
                 self._has_kv_transfer,
                 not swa_only and kv_cache is not None,
             ),
+            lse_out=lse_out,
         )
 
     def _forward_prefill(

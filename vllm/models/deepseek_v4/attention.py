@@ -388,11 +388,28 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
                 _COMPUTE_SWA_INDICES_AND_LENS_KERNEL,
             )
 
+            parallel_config = vllm_config.parallel_config
+            dcp_world_size = parallel_config.decode_context_parallel_size
+            if dcp_world_size > 1:
+                from vllm.distributed import get_dcp_group
+
+                try:
+                    dcp_rank = get_dcp_group().rank_in_group
+                except AssertionError:
+                    # DCP group not initialized (single-process warmup tracing).
+                    dcp_rank = 0
+            else:
+                dcp_rank = 0
             _COMPUTE_PREFILL_METADATA_KERNEL.register_warmup()
             _COMPUTE_SWA_INDICES_AND_LENS_KERNEL.register_warmup(
                 window_size=self.window_size,
                 block_size=self.swa_cache_layer.block_size,
                 max_image_tokens=self.max_image_tokens,
+                dcp_world_size=dcp_world_size,
+                dcp_rank=dcp_rank,
+                cp_kv_cache_interleave_size=(
+                    parallel_config.cp_kv_cache_interleave_size
+                ),
             )
 
             if self.compress_ratio > 1:
