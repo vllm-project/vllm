@@ -2689,8 +2689,6 @@ class Scheduler(SchedulerInterface):
         return (
             self.has_unfinished_requests()
             or bool(self.finished_req_ids)
-            # A cache-preserving pause keeps exported blocks allocated rather
-            # than waiting on passive remote-reader leases.
             or (not self._preserve_paused_kv and self.has_finished_requests())
             or (self.connector is not None and self.connector.has_pending_push_work())
             or (
