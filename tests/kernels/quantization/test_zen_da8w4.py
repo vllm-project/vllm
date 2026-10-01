@@ -394,20 +394,20 @@ INTERMEDIATE = 128
 
 
 def _make_moe_weights(group_size: int = 32):
-    """Build CT-layout MoE weights: w13 [E, H//8, 2I], w2 [E, I//8, H]."""
+    """Build CT-layout MoE weights: w13 [E, 2I, H//8], w2 [E, H, I//8]."""
     torch.manual_seed(0)
     w13_q, w13_s, w2_q, w2_s = [], [], [], []
     for _ in range(NUM_EXPERTS):
         w13 = torch.randn(2 * INTERMEDIATE, HIDDEN, dtype=torch.bfloat16)
         q13, s13 = _quantize_per_group(w13, group_size)
-        # CT packs along the input dim, storing [K//8, N] per expert.
-        w13_q.append(pack_to_int32(q13.t().contiguous(), 4, packed_dim=0))
-        w13_s.append(s13.t().contiguous())
+        # CT is N-first and packs along the input dim: [N, K//8] per expert.
+        w13_q.append(pack_to_int32(q13, 4, packed_dim=1))
+        w13_s.append(s13)
 
         w2 = torch.randn(HIDDEN, INTERMEDIATE, dtype=torch.bfloat16)
         q2, s2 = _quantize_per_group(w2, group_size)
-        w2_q.append(pack_to_int32(q2.t().contiguous(), 4, packed_dim=0))
-        w2_s.append(s2.t().contiguous())
+        w2_q.append(pack_to_int32(q2, 4, packed_dim=1))
+        w2_s.append(s2)
     return (
         torch.stack(w13_q),
         torch.stack(w2_q),
@@ -427,8 +427,8 @@ def test_zen_cpu_first_in_cpu_backend_priority(monkeypatch):
 def test_zen_cpu_process_weights_layout(mock_zentorch_ops):
     group_size = 32
     w13, w2, w13_scale, w2_scale = _make_moe_weights(group_size)
-    assert w13.shape == (NUM_EXPERTS, HIDDEN // 8, 2 * INTERMEDIATE)
-    assert w2.shape == (NUM_EXPERTS, INTERMEDIATE // 8, HIDDEN)
+    assert w13.shape == (NUM_EXPERTS, 2 * INTERMEDIATE, HIDDEN // 8)
+    assert w2.shape == (NUM_EXPERTS, HIDDEN, INTERMEDIATE // 8)
 
     converted = int_wna16._process_weights_zen_cpu(w13, w2, w13_scale, w2_scale)
     w13_out, w2_out, w13_s_out, w2_s_out = converted[:4]
@@ -453,9 +453,9 @@ def test_zen_cpu_repack_is_value_exact(mock_zentorch_ops):
     expected = _import_unpack_from_int32()(
         w13,
         4,
-        torch.Size([NUM_EXPERTS, HIDDEN, 2 * INTERMEDIATE]),
-        packed_dim=0,
-    ).transpose(1, 2)
+        torch.Size([NUM_EXPERTS, 2 * INTERMEDIATE, HIDDEN]),
+        packed_dim=1,
+    )
     for expert in range(NUM_EXPERTS):
         torch.testing.assert_close(
             _unpack_s4(w13_out[expert], HIDDEN),
@@ -637,8 +637,8 @@ def test_swigluoai_perm_only_for_zen_swigluoai():
 
 
 def test_swigluoai_perm_interleaves_weights_scales_and_bias(mock_zentorch_ops):
-    """The permutation is a gather on w13's output-channel axis, which is the
-    last dim for the packed weights and their group scales."""
+    """The permutation is a gather on w13's output-channel axis, which is dim 1
+    for the N-first packed weights and their group scales."""
     from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 
     group_size = 32
@@ -648,7 +648,7 @@ def test_swigluoai_perm_interleaves_weights_scales_and_bias(mock_zentorch_ops):
 
     baseline = int_wna16._process_weights_zen_cpu(w13, w2, w13_scale, w2_scale)[0]
     permuted = int_wna16._process_weights_zen_cpu(
-        w13[..., perm].contiguous(), w2, w13_scale[..., perm].contiguous(), w2_scale
+        w13[:, perm].contiguous(), w2, w13_scale[:, perm].contiguous(), w2_scale
     )[0]
 
     for expert in range(NUM_EXPERTS):
