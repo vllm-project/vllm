@@ -28,7 +28,7 @@ Sorted alphabetically by GitHub handle:
 - [@micah-wil](https://github.com/micah-wil)
 - [@netanel-haber](https://github.com/netanel-haber)
 - [@Rohan138](https://github.com/Rohan138)
-- [@simondanielsson](https://github.com/simondanielsson)
+- [@simondanielsson](https://github.com/simondanielsson): ROCm performance (CDNA), MoRI-IO.
 - [@taneem-ibrahim](https://github.com/taneem-ibrahim): Pooling models
 - [@TheEpicDolphin](https://github.com/TheEpicDolphin)
 - [@varun-sundar-rabindranath](https://github.com/varun-sundar-rabindranath)
