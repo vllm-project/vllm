@@ -335,7 +335,10 @@ class HarmonyParser(DelegatingParser):
         segments: list[Segment] = []
         reasoning_token_count = 0
         for token_id in token_ids:
-            self._harmony_parser.process(token_id)
+            try:
+                self._harmony_parser.process(token_id)
+            except HarmonyError:
+                continue
             channel = self._harmony_parser.current_channel
             recipient = self._normalize_recipient(
                 self._harmony_parser.current_recipient
@@ -376,7 +379,10 @@ class HarmonyParser(DelegatingParser):
         parser = get_streamable_parser_for_assistant()
         count = 0
         for token_id in token_ids:
-            parser.process(token_id)
+            try:
+                parser.process(token_id)
+            except HarmonyError:
+                continue
             recipient = self._normalize_recipient(parser.current_recipient)
             if self._is_reasoning_token(token_id, parser.current_channel, recipient):
                 count += 1
