@@ -227,7 +227,7 @@ def test_modelopt_mixed_precision_config_is_normalized():
             },
         },
     }
-    hf_config = PretrainedConfig(quantization_config=quantization_config)
+    hf_config = PreTrainedConfig(quantization_config=quantization_config)
 
     convertor = ModelArchConfigConvertorBase(hf_config, hf_config)
 

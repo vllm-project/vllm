@@ -175,6 +175,7 @@ def test_modelopt_mixed_precision_loads_uniform_layerwise_kv_cache(
         }
     )
 
+    assert isinstance(config, ModelOptMixedPrecisionConfig)
     assert config.quantized_layers == {}
     assert config.get_kv_cache_dtype("model.layers.0.self_attn.attn") == expected_dtype
     assert config.get_kv_cache_dtype("model.layers.1.self_attn.attn") == expected_dtype
@@ -228,6 +229,7 @@ def test_modelopt_explicit_kv_algo_precedes_legacy_scheme():
         }
     )
 
+    assert isinstance(config, ModelOptFp8Config)
     assert config.kv_cache_quant_method == "NVFP4"
 
 
