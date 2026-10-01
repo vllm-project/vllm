@@ -380,6 +380,7 @@ def test_can_implement_group_size_must_divide_k(monkeypatch, group_size, expecte
     )
     assert ok is expected_ok, reason
     if not expected_ok:
+        assert reason is not None
         assert "must divide input size" in reason
 
 
