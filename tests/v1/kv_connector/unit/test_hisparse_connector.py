@@ -167,7 +167,8 @@ def test_draft_layer_rows_mirrored_after_drafter(monkeypatch, cg_mode):
     monkeypatch.setattr(torch, "Stream", lambda *args, **kwargs: MagicMock())
     monkeypatch.setattr(torch.cuda, "Stream", lambda *args, **kwargs: MagicMock())
     monkeypatch.setattr(torch.cuda, "stream", lambda _: contextlib.nullcontext())
-    monkeypatch.setattr(worker_module, "current_stream", MagicMock)
+    compute_stream = MagicMock()
+    monkeypatch.setattr(worker_module, "current_stream", lambda: compute_stream)
     monkeypatch.setattr(worker_module.ops, "swap_blocks_batch", swap_blocks_batch)
     monkeypatch.setattr(
         runtime_module,
@@ -273,6 +274,7 @@ def test_draft_layer_rows_mirrored_after_drafter(monkeypatch, cg_mode):
     if cg_mode != CUDAGraphMode.FULL:
         draft.finish_kv_update()
     # The next step's start mirrors the drafter's rows, then hands the page over.
+    compute_stream.wait_event.reset_mock()
     connector._get_connector_metadata.return_value = HiSparseConnectorMetadata(
         None, (), (), {}, True
     )
@@ -305,6 +307,12 @@ def test_draft_layer_rows_mirrored_after_drafter(monkeypatch, cg_mode):
     assert len(draft_copies) == 1
     assert enqueued_before_draft == []
     assert log.index(("event", completion_event)) > draft_copies[0]
+    # The next forward waits for the draft copy: the scheduler may already
+    # have handed the blocks it reads and writes to another request.
+    draft_copy_event = next(
+        entry[1] for entry in log[draft_copies[0] :] if entry[0] == "event"
+    )
+    assert compute_stream.wait_event.call_args_list[0].args == (draft_copy_event,)
     assert worker_meta is not None
     assert worker_meta.enqueued_transfer_counts == {transfer_id: 1}
     assert worker_meta.completed_transfer_counts == {transfer_id: 1}

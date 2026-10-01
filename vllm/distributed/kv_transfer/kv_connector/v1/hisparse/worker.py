@@ -403,13 +403,13 @@ class HiSparseConnectorWorker:
         num_tokens: int = 0,
     ) -> None:
         self._stage_row_mirror_mapping(num_tokens)
+        self._finish_previous_step()
         previous_host_write_event = self.host_write_event
         self.host_write_event = self.host_write_events[self._next_host_write_event]
         self._next_host_write_event ^= 1
         current_stream().wait_event(previous_host_write_event)
         self._release_completed_dma_descriptors()
         self._dma_submitted = False
-        self._finish_previous_step()
         mirrors = _flatten_row_mirrors(metadata.row_mirrors, request_ids)
         if self._slot_mapping_staging is not None:
             self._slot_mapping_staging.candidates = mirrors
@@ -910,9 +910,10 @@ class HiSparseConnectorWorker:
         Runs before this step's work, so after the previous step's drafter.
         Post-forward transfers are ordered behind the draft mirror, so a page is
         never reported clean, and its resident block never released, before
-        its draft-layer rows reach the host. Both land in this step's host
-        write event, which the compute stream waits on in finish_forward,
-        before the drafter rewrites those rows.
+        its draft-layer rows reach the host. Both land in the previous step's
+        host write event, which this step waits on before its forward and its
+        host copies, since the scheduler may already have reused the
+        finished requests' blocks they read and write.
         """
         if self._draft_mirror_pending:
             self._draft_mirror_pending = False
