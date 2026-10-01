@@ -8,6 +8,7 @@ Users of vLLM should always import **only** these wrappers.
 import contextlib
 import functools
 import importlib
+import importlib.metadata
 import importlib.util
 import os
 import shutil
@@ -17,6 +18,7 @@ from typing import Any, NoReturn
 
 import requests
 import torch
+from packaging.version import Version
 
 import vllm.envs as envs
 from vllm.logger import init_logger
@@ -128,6 +130,56 @@ def has_flashinfer() -> bool:
         )
         return False
     return True
+
+
+def _installed_version(distribution: str) -> str | None:
+    try:
+        return Version(importlib.metadata.version(distribution)).public
+    except importlib.metadata.PackageNotFoundError:
+        return None
+
+
+def warn_if_flashinfer_kernels_missing() -> None:
+    """Warn on Hopper and newer GPUs when FlashInfer's precompiled kernels are
+    missing or were installed for another FlashInfer version."""
+    if not (
+        current_platform.is_cuda()
+        and current_platform.has_device_capability(90)
+        and has_flashinfer()
+    ):
+        return
+    flashinfer_version = _installed_version("flashinfer-python")
+    if flashinfer_version is None:
+        return
+    packages = ["flashinfer-jit-cache"]
+    if not envs.VLLM_HAS_FLASHINFER_CUBIN:
+        packages.insert(0, "flashinfer-cubin")
+    installed = {name: _installed_version(name) for name in packages}
+    stale = [
+        f"{name}=={version}"
+        for name, version in installed.items()
+        if version not in (None, flashinfer_version)
+    ]
+    missing = [name for name, version in installed.items() if version is None]
+    if stale:
+        # FlashInfer refuses to import with mismatched kernel packages, and its
+        # CLI imports FlashInfer, so the update needs the version check bypassed.
+        logger.warning_once(
+            "FlashInfer's precompiled kernels (%s) do not match "
+            "flashinfer-python==%s. Run `FLASHINFER_DISABLE_VERSION_CHECK=1 "
+            "flashinfer download-kernels` in this Python environment to update "
+            "them.",
+            ", ".join(stale),
+            flashinfer_version,
+        )
+    elif missing:
+        logger.warning_once(
+            "FlashInfer's precompiled kernels are not installed (missing %s), so "
+            "FlashInfer downloads and compiles kernels on first use, which can "
+            "add several minutes to startup. Run `flashinfer download-kernels` "
+            "in this Python environment to install them.",
+            ", ".join(missing),
+        )
 
 
 @functools.cache
@@ -1345,4 +1397,5 @@ __all__ = [
     "should_use_flashinfer_for_blockscale_fp8_gemm",
     "is_flashinfer_fp8_blockscale_gemm_supported",
     "is_flashinfer_cudnn_fp8_prefill_attn_supported",
+    "warn_if_flashinfer_kernels_missing",
 ]

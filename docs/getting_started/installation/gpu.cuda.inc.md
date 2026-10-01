@@ -23,12 +23,32 @@ Therefore, it is recommended to install vLLM with a **fresh new** environment. I
 
 ```bash
 uv pip install vllm --torch-backend=auto
+flashinfer download-kernels
 ```
 
 ??? console "pip"
     ```bash
     # Install vLLM with CUDA 12.9.
     pip install vllm --extra-index-url https://download.pytorch.org/whl/cu129
+    flashinfer download-kernels
+    ```
+
+`flashinfer download-kernels` installs [FlashInfer](https://docs.flashinfer.ai/)'s
+precompiled kernels for the installed FlashInfer and CUDA versions. Without them,
+vLLM downloads and compiles kernels at startup, which can add several minutes on
+Hopper and newer GPUs, **especially Blackwell**, and logs a warning. Run it in the
+same Python environment after every vLLM install below, and in custom container
+images. Use `flashinfer show-config` to check the result, and see the
+[FlashInfer CLI documentation](https://docs.flashinfer.ai/cli.html#download-kernels)
+for CUDA overrides and nightly kernels.
+
+!!! note "Upgrading vLLM"
+    Kernels are tied to the FlashInfer version, and FlashInfer refuses to import
+    when they do not match. After upgrading vLLM in an environment that already
+    has them, update them with:
+
+    ```bash
+    FLASHINFER_DISABLE_VERSION_CHECK=1 flashinfer download-kernels
     ```
 
 We recommend leveraging `uv` to [automatically select the appropriate PyTorch index at runtime](https://docs.astral.sh/uv/guides/integration/pytorch/#automatic-backend-selection) by inspecting the installed CUDA driver version via `--torch-backend=auto` (or `UV_TORCH_BACKEND=auto`). To select a specific backend (e.g., `cu130`), set `--torch-backend=cu130` (or `UV_TORCH_BACKEND=cu130`). If this doesn't work, try running `uv self update` to update `uv` first.
@@ -44,29 +64,8 @@ export VLLM_VERSION=$(curl -s https://api.github.com/repos/vllm-project/vllm/rel
 export CUDA_VERSION=130 # or other
 export CPU_ARCH=$(uname -m) # x86_64 or aarch64
 uv pip install "https://github.com/vllm-project/vllm/releases/download/v${VLLM_VERSION}/vllm-${VLLM_VERSION}+cu${CUDA_VERSION}-cp38-abi3-manylinux_2_28_${CPU_ARCH}.whl" --extra-index-url "https://download.pytorch.org/whl/cu${CUDA_VERSION}"
-```
-
-#### Install FlashInfer precompiled kernels {#install-flashinfer-kernels}
-
-We strongly recommend installing FlashInfer's precompiled kernels to reduce
-downloads and compilation at startup, particularly on Hopper and newer GPUs,
-**especially Blackwell**.
-
-After installing vLLM, run the following in the same Python environment:
-
-```bash
 flashinfer download-kernels
 ```
-
-The CLI automatically selects compatible kernels for your installed FlashInfer
-and CUDA versions. Use `flashinfer show-config` to check the installation, or
-`flashinfer download-kernels --dry-run` to preview the installation commands.
-
-For custom container images, run this step after installing vLLM in the Python
-environment included in the final image. Some workloads may still compile
-additional kernels at runtime.
-See the [FlashInfer CLI documentation](https://docs.flashinfer.ai/cli.html#download-kernels)
-for CUDA overrides and nightly kernels.
 
 #### Install the latest code
 
@@ -81,6 +80,7 @@ To install from nightly index, run:
 uv pip install -U vllm \
     --torch-backend=auto \
     --extra-index-url https://wheels.vllm.ai/nightly # add variant subdirectory here if needed
+flashinfer download-kernels
 ```
 
 !!! warning "`pip` caveat"
@@ -116,17 +116,15 @@ If you only need to change Python code, you can build and install vLLM without c
 git clone https://github.com/vllm-project/vllm.git
 cd vllm
 VLLM_USE_PRECOMPILED=1 uv pip install --editable . --torch-backend=auto
+flashinfer download-kernels
 ```
 
-This command will do the following:
+The install command will do the following:
 
 1. Look for the current branch in your vLLM clone.
 1. Identify the corresponding base commit in the main branch.
 1. Download the pre-built wheel of the base commit.
 1. Use its compiled libraries and `vllm-rs` binary in the installation.
-
-We also recommend installing FlashInfer's precompiled kernels. Follow
-[Install FlashInfer precompiled kernels](#install-flashinfer-kernels) after the editable install.
 
 !!! note
     1. If you change C++ or kernel code, you cannot use Python-only build; otherwise you will see an import error about library not found or undefined symbol.
