@@ -145,7 +145,7 @@ class XpuMemAllocator:
     def __init__(self):
         self.pointer_to_data: dict[int, AllocationData] = {}
         self.current_tag: str = XpuMemAllocator.default_tag
-        self.allocator_and_pools: dict[str, Any] = {}
+        self.allocator_and_pools: dict[str, list[Any]] = {}
         self.python_malloc_callback = self._python_malloc_callback
         self.python_free_callback = self._python_free_callback
 
@@ -300,7 +300,7 @@ class XpuMemAllocator:
         # MemPool teardown may invoke allocator virtual methods (e.g. raw_delete)
         # when releasing cached blocks. If allocator wrappers are dropped first,
         # C++ can hit "pure virtual method called" during shutdown.
-        pool_entries = list(self.allocator_and_pools.values())
+        pool_entries = [e for es in self.allocator_and_pools.values() for e in es]
         self.allocator_and_pools.clear()
 
         mem_pools = [entry[0] for entry in pool_entries]
@@ -333,7 +333,8 @@ class XpuMemAllocator:
                 self.python_malloc_callback,
                 self.python_free_callback,
             ) as data:
-                self.allocator_and_pools[tag] = data
+                # Keep every entry's pool alive (pytorch/pytorch#146431).
+                self.allocator_and_pools.setdefault(tag, []).append(data)
                 yield
         finally:
             self.current_tag = old_tag

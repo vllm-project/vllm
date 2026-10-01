@@ -235,6 +235,22 @@ def test_discard_tags():
 
 @create_new_process_for_each_test("fork" if current_platform.is_cuda() else "spawn")
 @pytest.mark.skipif(current_platform.is_xpu(), reason="Uses the CuMem allocator")
+def test_reentered_tag_does_not_reuse_trimmed_segment():
+    """Exit unmaps fully free segments behind torch's back; re-entering the tag
+    must not be handed such a segment."""
+    allocator = get_mem_allocator_instance()
+    with allocator.use_memory_pool("t"):
+        x = torch.empty(64 << 20, dtype=torch.uint8, device=DEVICE_TYPE)
+        del x
+    with allocator.use_memory_pool("t"):
+        y = torch.empty(64 << 20, dtype=torch.uint8, device=DEVICE_TYPE)
+    y.fill_(1)
+    torch.accelerator.synchronize()
+    assert int(y.sum()) == y.numel()
+
+
+@create_new_process_for_each_test("fork" if current_platform.is_cuda() else "spawn")
+@pytest.mark.skipif(current_platform.is_xpu(), reason="Uses the CuMem allocator")
 def test_level2_discards_ordinary_tensor_with_weights_tag():
     """Reproduce the level-2 variant for an ordinary tensor in weights."""
     allocator = get_mem_allocator_instance()
