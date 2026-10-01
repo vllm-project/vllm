@@ -1101,15 +1101,12 @@ class MambaMixer2(MambaBase, PluggableLayer):
         spec = super().get_kv_cache_spec(vllm_config)
         if not isinstance(spec, MambaSpec):
             return spec
-        # Align mode can export the block-boundary state from inside one
-        # forward pass, so the scheduler need not split the prefill. The
-        # metadata builder puts a chunk end exactly on the checkpoint, so any
-        # token position works and no alignment is required.
-        align = vllm_config.cache_config.mamba_cache_mode == "align"
+        # The block-boundary state can be exported from inside one forward
+        # pass, so the scheduler need not split the prefill; every reader
+        # acts on this only in align mode. The metadata builder puts a chunk
+        # end exactly on the checkpoint, so any token position works.
         return replace(
-            spec,
-            num_prefill_checkpoint_blocks=int(align),
-            prefill_checkpoint_alignment=1 if align else None,
+            spec, num_prefill_checkpoint_blocks=1, prefill_checkpoint_alignment=1
         )
 
     def get_state_dtype(self) -> tuple[torch.dtype, ...]:
