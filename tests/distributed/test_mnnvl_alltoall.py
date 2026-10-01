@@ -223,6 +223,8 @@ def test_one_sided_combine_into_compatibility(supports_output):
             payload,
             runtime_max_tokens_per_rank,
             output=None,
+            *,
+            use_low_precision=False,
         ):
             result = payload + runtime_max_tokens_per_rank
             if output is None:
@@ -243,9 +245,7 @@ def test_one_sided_combine_into_compatibility(supports_output):
 
 @pytest.mark.parametrize("low_precision_combine", [False, True])
 def test_one_sided_combine_into_low_precision(low_precision_combine):
-    """The fp8 combine opt-in reaches the kernel, and stays off the call
-    signature entirely when disabled so older FlashInfer keeps working.
-    """
+    """The fp8 combine setting is passed through to the kernel."""
     from vllm.distributed.device_communicators.all2all import (
         FlashInferNVLinkOneSidedManager,
     )
@@ -266,8 +266,7 @@ def test_one_sided_combine_into_low_precision(low_precision_combine):
 
     manager.combine_into(payload, runtime_max_tokens_per_rank=2, output=output)
 
-    expected = {"use_low_precision": True} if low_precision_combine else {}
-    assert seen_kwargs == expected
+    assert seen_kwargs == {"use_low_precision": low_precision_combine}
     torch.testing.assert_close(output, payload + 2)
 
 

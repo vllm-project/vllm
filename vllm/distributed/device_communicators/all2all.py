@@ -729,6 +729,27 @@ class FlashInferNVLinkOneSidedManager(All2AllManagerBase):
         self.top_k = 0
         self.num_experts = 0
         self._combine_supports_output = False
+        self.low_precision_combine = self._resolve_low_precision_combine()
+
+    def _resolve_low_precision_combine(self) -> bool:
+        """Whether to use the low-precision combine: requested via the env var
+        and supported by the installed FlashInfer.
+        """
+        if not envs.VLLM_FLASHINFER_MOE_A2A_LOW_PRECISION_COMBINE:
+            return False
+        try:
+            supported = supports_kw(
+                MoeAlltoAll.combine, "use_low_precision", allow_var_kwargs=False
+            )
+        except (TypeError, ValueError):
+            supported = False
+        if not supported:
+            logger.warning_once(
+                "VLLM_FLASHINFER_MOE_A2A_LOW_PRECISION_COMBINE is set, but the "
+                "installed FlashInfer MoeAlltoAll.combine() does not accept "
+                "`use_low_precision`. Falling back to a BF16 combine."
+            )
+        return supported
 
     def initialize(
         self,
@@ -746,24 +767,6 @@ class FlashInferNVLinkOneSidedManager(All2AllManagerBase):
             + top_k * 4  # int32 topks ids
             + top_k * 4  # float32 topk weights
         )
-        # probe the class to see if the FlashInfer combine version supports
-        # low-precision output
-        try:
-            combine_supports_low_precision = supports_kw(
-                MoeAlltoAll.combine, "use_low_precision", allow_var_kwargs=False
-            )
-        except (TypeError, ValueError):
-            combine_supports_low_precision = False
-
-        self.low_precision_combine = envs.VLLM_FLASHINFER_MOE_A2A_LOW_PRECISION_COMBINE
-        if self.low_precision_combine and not combine_supports_low_precision:
-            logger.warning_once(
-                "VLLM_FLASHINFER_MOE_A2A_LOW_PRECISION_COMBINE is set, but the "
-                "installed FlashInfer MoeAlltoAll.combine() does not accept "
-                "`use_low_precision`. Falling back to a BF16 combine."
-            )
-            self.low_precision_combine = False
-
         # Sized from the bf16 payload passed to combine(), which is what the
         # kernel checks this region against. Low-precision transport quantizes
         # on write, so it does not shrink the requirement.
@@ -878,23 +881,18 @@ class FlashInferNVLinkOneSidedManager(All2AllManagerBase):
     ) -> None:
         """Combine into ``output``, with a fallback for older FlashInfer."""
         assert self.moe_alltoall is not None
-        # pass the kwarg only when enabling it, so FlashInfer builds without
-        # the parameter keep working.
-        low_precision = (
-            {"use_low_precision": True} if self.low_precision_combine else {}
-        )
         if self._combine_supports_output:
             self.moe_alltoall.combine(
                 payload=payload,
                 runtime_max_tokens_per_rank=runtime_max_tokens_per_rank,
                 output=output,
-                **low_precision,
+                use_low_precision=self.low_precision_combine,
             )
         else:
+            # FlashInfer < 0.6.16 has neither `output` nor `use_low_precision`.
             combined_output = self.moe_alltoall.combine(
                 payload=payload,
                 runtime_max_tokens_per_rank=runtime_max_tokens_per_rank,
-                **low_precision,
             )
             output.copy_(combined_output)
 
