@@ -1087,12 +1087,14 @@ def test_triton_unified_attn_unclamped_mm_matches_dense_reference(
     sliding_window: int | None,
 ) -> None:
     """Tile pruning under unclamped mm_prefix must not drop any key a row can
-    attend: image ranges reaching behind the window (request 1) and spanning
-    the context/query boundary (request 2) still match the dense reference."""
+    attend: Q-blocks cutting through an image range (request 1), a range
+    spanning the context/query boundary (request 2), and image keys past the
+    causal bound still match the dense reference. Ranges are no longer than
+    the window, as the model runner drops longer ones for unclamped models."""
     set_random_seed(0)
     query_lens = [384, 96]
     kv_lens_list = [384, 320]
-    mm_ranges = [[(32, 200)], [(8, 287)]]
+    mm_ranges = [[(100, 227)], [(200, 300)]]
     block_size = 16
     num_query_heads = 4
     num_kv_heads = 2
@@ -1140,9 +1142,7 @@ def test_triton_unified_attn_unclamped_mm_matches_dense_reference(
         [0] + query_lens, dtype=torch.int32, device=DEVICE_TYPE
     ).cumsum(0, dtype=torch.int32)
     kv_lens = torch.tensor(kv_lens_list, dtype=torch.int32, device=DEVICE_TYPE)
-    mm_prefix_range = torch.tensor(
-        [[[32, 200]], [[8, 287]]], dtype=torch.int32, device=DEVICE_TYPE
-    )
+    mm_prefix_range = torch.tensor(mm_ranges, dtype=torch.int32, device=DEVICE_TYPE)
     window_size = (sliding_window - 1, 0) if sliding_window is not None else (-1, -1)
     actual = torch.empty_like(query)
 
