@@ -82,6 +82,7 @@ def _xpress_latent_kernel(
     H: tl.constexpr,
     BP: tl.constexpr,
     HT: tl.constexpr,
+    DO_MLP: tl.constexpr,
 ):
     """The latent stage of one Jacobi pass for one block, fused end to end.
 
@@ -146,7 +147,11 @@ def _xpress_latent_kernel(
 
     ub = u.to(wg_ptr.dtype.element_ty)
     x = u
-    for h0 in range(0, H, HT):
+    # DO_MLP=False stops after the mixer and hands u back, so the caller can run the
+    # SwiGLU as cuBLAS GEMMs. The MLP's wg/wu/wd are ~768KB of the ~940KB this program
+    # reads, and with grid (N,) one SM pulls all of it; cuBLAS spreads the same reads
+    # over many SMs, and under a CUDA graph the extra launches cost nothing.
+    for h0 in range(0, H if DO_MLP else 0, HT):
         offs_ht = h0 + tl.arange(0, HT)
         g = tl.dot(
             ub,
@@ -173,7 +178,8 @@ def _xpress_latent_kernel(
 
 
 def xpress_latent_pass(
-    blk, tok_am1, xh, lat_out, w1_weight, wlat_t, mix_kjc, wg_t, wu_t, wd_t
+    blk, tok_am1, xh, lat_out, w1_weight, wlat_t, mix_kjc, wg_t, wu_t, wd_t,
+    do_mlp: bool = True,
 ) -> None:
     """Run ``_xpress_latent_kernel`` over N blocks; see its docstring for shapes.
 
@@ -199,8 +205,13 @@ def xpress_latent_pass(
         H=H,
         BP=triton.next_power_of_2(B),
         HT=64,
+        DO_MLP=do_mlp,
         num_warps=8,
-        num_stages=1,
+        # 3 stages, measured: one pass at bs=1 drops 76.7us -> 61.0us, because the
+        # weight loads (wlat, wg, wu, wd: ~940KB per program) then overlap with the
+        # dots instead of each one exposing its full latency. 4+ stages do not
+        # compile -- the tiles already use most of the shared memory.
+        num_stages=3,
     )
 
 
@@ -283,4 +294,62 @@ def fused_add_argmax_to_blk(
         out_idx.stride(0),
         BLOCK_N=64,
         num_warps=1,
+    )
+
+@triton.jit
+def _xpress_topc_argmax_to_blk_kernel(
+    base_ptr,
+    bias_ptr,
+    cand_ptr,
+    blk_ptr,
+    C,
+    B: tl.constexpr,
+    BLOCK_C: tl.constexpr,
+):
+    """argmax over a slot's C candidates, written straight back as a token id.
+
+    Grid: (N * (B - 1),), one program per draft slot. The candidate axis fits in one
+    block at the C values this path uses, so unlike the full-vocab epilogue there is
+    no partial/reduce split; the gather from candidate index to vocab id happens in
+    the same program, which removes a second kernel and its round trip.
+
+    Args:
+        base_ptr: [rows, C] base logits gathered at the candidates (bf16).
+        bias_ptr: [rows, C] refiner bias on the same candidates.
+        cand_ptr: [rows, C] int64 vocab ids of the candidates.
+        blk_ptr: [N, B] int64 block tokens; slot j of row n is written at j + 1.
+        C: candidates per slot.
+        B: block size, to map a row back to its (block, slot).
+        BLOCK_C: C rounded up to a power of two.
+
+    """
+    row = tl.program_id(0).to(tl.int64)
+    offs = tl.arange(0, BLOCK_C)
+    mask = offs < C
+    a = tl.load(base_ptr + row * C + offs, mask=mask, other=0.0).to(tl.float32)
+    b = tl.load(bias_ptr + row * C + offs, mask=mask, other=0.0).to(tl.float32)
+    # Round the sum back to the input dtype before comparing, exactly as the
+    # full-vocab epilogue does: the reference spelling adds two bf16 tensors, so
+    # keeping fp32 precision here would break ties differently and change the draft.
+    s = (a + b).to(base_ptr.dtype.element_ty).to(tl.float32)
+    s = tl.where(mask, s, float("-inf"))
+    best = tl.argmax(s, axis=0)
+    tok = tl.load(cand_ptr + row * C + best)
+    n = row // (B - 1)
+    j = row % (B - 1)
+    tl.store(blk_ptr + n * B + j + 1, tok)
+
+
+def fused_topc_argmax_to_blk(base_c, bias_c, cand, blk) -> None:
+    """Run ``_xpress_topc_argmax_to_blk_kernel``; see it for shapes."""
+    N, Bm1, C = base_c.shape
+    _xpress_topc_argmax_to_blk_kernel[(N * Bm1,)](
+        base_c,
+        bias_c,
+        cand,
+        blk,
+        C,
+        B=Bm1 + 1,
+        BLOCK_C=triton.next_power_of_2(C),
+        num_warps=4,
     )

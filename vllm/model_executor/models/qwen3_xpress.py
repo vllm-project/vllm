@@ -9,7 +9,7 @@ import torch.nn.functional as F
 
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
-from vllm.model_executor.layers.logits_processor import LogitsProcessor
+from vllm.model_executor.layers.logits_processor import LogitsProcessor, _topk
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.v1.worker.gpu.spec_decode.xpress import kernels
 
@@ -28,6 +28,7 @@ class XPressRefinerHead(nn.Module):
         rank: int = 256,
         mlp_hidden: int = 512,
         max_num_reqs: int = 256,
+        topc: int = 512,
     ) -> None:
         super().__init__()
         self.vocab_size = int(vocab_size)
@@ -35,6 +36,13 @@ class XPressRefinerHead(nn.Module):
         self.block_size = int(block_size)
         self.rank = int(rank)
         self.max_num_reqs = int(max_num_reqs)
+        # Score each pass on the base logits' top-C candidates instead of the full
+        # vocabulary. The readout weight read per pass drops from [r, V] (78MB at
+        # V=152k) to [r, C] gathered once per step, which is what the pass is
+        # bandwidth-bound on. 0 keeps exact full-vocab scoring: under top-C the
+        # refiner cannot reach a token the drafter left outside its top-C, so the
+        # block it converges to is no longer the exact sequential decode.
+        self.topc = int(topc)
         r = self.rank
         self.w1 = nn.Embedding(vocab_size, r)
         self.down_h = nn.Linear(hidden_size, r, bias=False)
@@ -119,8 +127,11 @@ class XPressRefinerHead(nn.Module):
         hcache = self.hidden_cache(h_full)
         blk = torch.empty(N, B, dtype=torch.long, device=h_full.device)
         blk[:, 0] = anchor_ids
-        blk[:, 1:] = base_logits_full[:, 1:, :].argmax(dim=-1)
 
+        assert N <= self.max_num_reqs, (
+            f"{N} requests exceeds the max_num_reqs={self.max_num_reqs} the "
+            "scratch buffers were sized for"
+        )
         buf = self._fused_buf
         assert buf is not None, (
             "the fused buffers are built from the loaded weights; call "
@@ -128,10 +139,53 @@ class XPressRefinerHead(nn.Module):
         )
         rows = N * (B - 1)
         v = base_logits_full.shape[-1]
-        assert N <= self.max_num_reqs, (
-            f"{N} requests exceeds the max_num_reqs={self.max_num_reqs} the "
-            "scratch buffers were sized for"
-        )
+        blk[:, 1:] = base_logits_full[:, 1:, :].argmax(dim=-1)
+
+        if self.topc:
+            # One pass over the base logits yields the candidate set, its logits and
+            # the block's starting argmax: the chunk maxima's own maximum IS the
+            # full-vocabulary argmax. Gathered once per draft step, never rescored
+            # between passes, which is what keeps the per-pass [r, V] read away.
+            c = min(self.topc, v)
+            c = min(self.topc, v)
+            slots = base_logits_full[:, 1:, :]
+            # _topk routes to flashinfer's kernel when it is available, which is
+            # about twice torch.topk's speed and is the largest fixed cost of this
+            # path. The candidate set is only ever indexed, never traversed in rank
+            # order, so its ordering does not matter.
+            base_c, cand = _topk(slots.reshape(rows, v), c)
+            base_c, cand = base_c.view(rows, c), cand.view(rows, c)
+            w2c = self.w2.weight[cand].reshape(rows, c, self.rank)
+            xh0 = torch.mm(hcache.view(N * B, -1), buf["whc_t"]).view(N, B, self.rank)
+            lat0 = torch.empty(
+                N,
+                B - 1,
+                self.rank,
+                dtype=base_logits_full.dtype,
+                device=base_logits_full.device,
+            )
+            for _ in range(num_passes):
+                kernels.xpress_latent_pass(
+                    blk,
+                    tok_am1_ids,
+                    xh0,
+                    lat0,
+                    self.w1.weight,
+                    buf["wlat_t"],
+                    buf["mix_kjc"],
+                    buf["wg_t"],
+                    buf["wu_t"],
+                    buf["wd_t"],
+                )
+                bias_c = torch.bmm(w2c, lat0.view(rows, self.rank, 1)).view(
+                    N, B - 1, c
+                )
+                # One launch for add + argmax + the candidate-to-vocab gather.
+                kernels.fused_topc_argmax_to_blk(
+                    base_c.view(N, B - 1, c), bias_c, cand.view(N, B - 1, c), blk
+                )
+            return blk[:, 1:]
+
         sc = self._scratch_buffers(base_logits_full.dtype, base_logits_full.device, v)
         lat, bias = sc["lat"][:N], sc["bias"][:rows]
         base, ov, oi = sc["base"][:rows], sc["ov"][:rows], sc["oi"][:rows]
@@ -211,6 +265,7 @@ class Qwen3XPressModel(DFlashQwen3Model):
             rank=getattr(config, "xpress_rank", 256),
             mlp_hidden=getattr(config, "xpress_mlp_hidden", 512),
             max_num_reqs=vllm_config.scheduler_config.max_num_seqs,
+            topc=getattr(config, "xpress_topc", 512),
         )
         self.draft_vocab_size = draft_vocab_size
         if getattr(config, "xpress_compile_head", True):
