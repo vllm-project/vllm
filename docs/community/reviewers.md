@@ -31,7 +31,7 @@ Sorted alphabetically by GitHub handle:
 - [@simondanielsson](https://github.com/simondanielsson): ROCm performance (CDNA), MoRI-IO.
 - [@taneem-ibrahim](https://github.com/taneem-ibrahim): Pooling models
 - [@TheEpicDolphin](https://github.com/TheEpicDolphin)
-- [@varun-sundar-rabindranath](https://github.com/varun-sundar-rabindranath)
+- [@varun-sundar-rabindranath](https://github.com/varun-sundar-rabindranath): KV cache offloading, LoRA
 - [@vllmellm](https://github.com/vllmellm)
 - [@wangxiyuan](https://github.com/wangxiyuan)
 
