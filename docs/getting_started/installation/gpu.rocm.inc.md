@@ -9,6 +9,8 @@ vLLM supports AMD GPUs with ROCm 6.3 or above. Pre-built wheels are available fo
 | ------------ | -------------- | ------------ | ----------------- | ------------------ |
 | `rocm700` | 3.12 | 7.0 | >= 2.35 | `0.14.0` to `0.18.0` |
 | `rocm721` | 3.12 | 7.2.1 | >= 2.35 | Nightly releases after commit `171775f306a333a9cf105bfd533bf3e113d401d9` |
+| `rocm72` | 3.12 | 7.2 | >= 2.35 | Nightly releases on the legacy ROCm 7.2 stack |
+| `rocm100` | 3.12 | 10.0 | >= 2.35 | Nightly releases (default) |
 
 --8<-- [end:installation]
 --8<-- [start:requirements]
@@ -49,7 +51,7 @@ uv pip install "vllm[device-gfx942]" --extra-index-url https://wheels.vllm.ai/ro
 !!! tip
     The ROCm 10.0 wheels install the ROCm SDK from pip ([TheRock](https://github.com/ROCm/TheRock)), and the `device-<gfx>` extra adds the GPU kernels for that architecture (`device-all` installs every supported one). To find your GPU's target, run `uvx --from rocm-bootstrap rocm-bootstrap-detect --unique`.
 
-    Wheels for the legacy ROCm 7.2 stack, which use a system ROCm installation, remain available at `https://wheels.vllm.ai/rocm/${VLLM_VERSION}/rocm723`.
+    Wheels for the legacy ROCm 7.2 stack, which use a system ROCm installation, remain available at `https://wheels.vllm.ai/rocm/${VLLM_VERSION}/rocm72`.
 
 !!! tip
     You can find out about which ROCm version the latest vLLM supports by checking the `vllm` package in index in extra-index-url <https://wheels.vllm.ai/rocm/> at [https://wheels.vllm.ai/rocm/vllm](https://wheels.vllm.ai/rocm/vllm) .
@@ -201,9 +203,9 @@ install it without re-running the full installation:
     and place it in `vllm/vllm-rs`.
 
 If you see an error about a wheel not being found, the wheel for your base
-commit and ROCm patch version might not be available. Check the available
-variants under `https://wheels.vllm.ai/rocm/<commit>/`. For example, ROCm 7.2.1
-uses the `rocm721` variant.
+commit and ROCm version might not be available. Check the available
+variants under `https://wheels.vllm.ai/rocm/<commit>/`. Variants are named by ROCm
+major and minor version, e.g. ROCm 7.2.3 uses the `rocm72` variant.
 
 There are more environment variables to control the behavior of Python-only
 build:
@@ -214,7 +216,7 @@ build:
 - `VLLM_PRECOMPILED_WHEEL_COMMIT`: override the full commit hash used to
   download the pre-compiled wheel.
 - `VLLM_PRECOMPILED_WHEEL_VARIANT`: specify the ROCm variant subdirectory, e.g.,
-  `rocm700` or `rocm721`. If not specified, the variant is auto-detected based
+  `rocm72` or `rocm100`. If not specified, the variant is auto-detected based
   on your system's ROCm version. An explicitly specified variant must match the
   detected environment.
 

@@ -13,8 +13,8 @@
 #   ROCM_STACK_DOCKERFILE       the matching vLLM Dockerfile (base name minus _base)
 #   ROCM_STACK_THEROCK          1 if the ROCm SDK comes from TheRock wheels
 #   ROCM_STACK_VERSION          ROCm version, e.g. 10.0.0 or 7.2.3
-#   ROCM_STACK_VARIANT          wheel index variant, same rule as setup.py (rocm100, rocm723)
-#   ROCM_STACK_FLAVOR           Docker Hub tag flavor from major.minor (rocm100, rocm72)
+#   ROCM_STACK_VARIANT          wheel variant and Docker Hub tag flavor from major.minor,
+#                               same rule as setup.py (rocm100, rocm72)
 #   ROCM_STACK_IMAGE_KEY        hash of the base Dockerfile (base image cache key)
 #   ROCM_STACK_WHEEL_KEY        hash of the base Dockerfile plus files it COPYs from
 #                               the repo (base wheel cache key)
@@ -49,8 +49,7 @@ rocm_stack_init() {
 
     local major minor
     IFS=. read -r major minor _ <<< "$ROCM_STACK_VERSION"
-    ROCM_STACK_VARIANT="rocm$(tr -d . <<< "$ROCM_STACK_VERSION" | cut -c1-3)"
-    ROCM_STACK_FLAVOR="rocm${major}${minor}"
+    ROCM_STACK_VARIANT="rocm${major}${minor}"
 
     ROCM_STACK_IMAGE_KEY=$(sha256sum "$base" | cut -c1-16)
     local inputs
@@ -69,7 +68,7 @@ rocm_stack_init() {
     ROCM_STACK_VLLM_WHEEL_DIR="artifacts/${ROCM_STACK_VARIANT}-vllm-wheel"
 
     export ROCM_STACK_BASE_DOCKERFILE ROCM_STACK_DOCKERFILE ROCM_STACK_THEROCK \
-        ROCM_STACK_VERSION ROCM_STACK_VARIANT ROCM_STACK_FLAVOR ROCM_STACK_IMAGE_KEY \
+        ROCM_STACK_VERSION ROCM_STACK_VARIANT ROCM_STACK_IMAGE_KEY \
         ROCM_STACK_WHEEL_KEY ROCM_STACK_ECR_BASE ROCM_STACK_ECR_IMAGE \
         ROCM_STACK_BASE_WHEELS_DIR ROCM_STACK_VLLM_WHEEL_DIR
 }

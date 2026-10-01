@@ -147,16 +147,16 @@ fi
 # default stack also owns the plain :latest / :v<ver> tags.
 
 publish_rocm_stack() {
-  local base_dockerfile="$1" default="$2" flavor
+  local base_dockerfile="$1" default="$2" suffix
   (
     # shellcheck source=.buildkite/scripts/rocm/stack.sh
     source .buildkite/scripts/rocm/stack.sh "$base_dockerfile"
-    local flavors=("-${ROCM_STACK_FLAVOR}")
-    [[ "$default" == "1" ]] && flavors=("" "-${ROCM_STACK_FLAVOR}")
+    local suffixes=("-${ROCM_STACK_VARIANT}")
+    [[ "$default" == "1" ]] && suffixes=("" "-${ROCM_STACK_VARIANT}")
     docker pull "$ROCM_STACK_ECR_IMAGE"
     docker pull "$ROCM_STACK_ECR_BASE"
-    for flavor in "${flavors[@]}"; do
-      for tag in "latest${flavor}" "v${RELEASE_VERSION}${flavor}"; do
+    for suffix in "${suffixes[@]}"; do
+      for tag in "latest${suffix}" "v${RELEASE_VERSION}${suffix}"; do
         docker tag "$ROCM_STACK_ECR_IMAGE" "vllm/vllm-openai-rocm:${tag}"
         docker tag "$ROCM_STACK_ECR_BASE" "vllm/vllm-openai-rocm:${tag}-base"
         docker push "vllm/vllm-openai-rocm:${tag}"

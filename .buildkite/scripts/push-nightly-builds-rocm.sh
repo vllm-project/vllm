@@ -3,7 +3,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 #
 # Push a ROCm stack's nightly base image and nightly image from ECR to Docker Hub
-# under vllm/vllm-openai-rocm, as base-nightly-<flavor>, nightly-<flavor> and their
+# under vllm/vllm-openai-rocm, as base-nightly-<variant>, nightly-<variant> and their
 # -<commit> forms, then prune old nightly tags. With --default, also push the plain
 # base-nightly and nightly tags for the same images.
 # Run when NIGHTLY=1 after the stack's release image has been pushed to ECR.
@@ -46,10 +46,10 @@ DRY_RUN="${DRY_RUN:-0}"
 # shellcheck source=.buildkite/scripts/rocm/stack.sh
 source "$(dirname "${BASH_SOURCE[0]}")/rocm/stack.sh" "$1"
 DOCKERHUB_REPO="vllm/vllm-openai-rocm"
-FLAVOR="$ROCM_STACK_FLAVOR"
+VARIANT="$ROCM_STACK_VARIANT"
 
-BASE_TAGS=("base-nightly-${FLAVOR}" "base-nightly-${FLAVOR}-${BUILDKITE_COMMIT}")
-TAGS=("nightly-${FLAVOR}" "nightly-${FLAVOR}-${BUILDKITE_COMMIT}")
+BASE_TAGS=("base-nightly-${VARIANT}" "base-nightly-${VARIANT}-${BUILDKITE_COMMIT}")
+TAGS=("nightly-${VARIANT}" "nightly-${VARIANT}-${BUILDKITE_COMMIT}")
 if [[ "$PUSH_DEFAULT" == "1" ]]; then
   BASE_TAGS+=("base-nightly" "base-nightly-${BUILDKITE_COMMIT}")
   TAGS+=("nightly" "nightly-${BUILDKITE_COMMIT}")
@@ -76,10 +76,10 @@ for tag in "${BASE_TAGS[@]}" "${TAGS[@]}"; do docker push "$DOCKERHUB_REPO:$tag"
 echo "Pushed $DOCKERHUB_REPO: ${BASE_TAGS[*]} ${TAGS[*]}"
 
 # Keep only the last 14 builds of each tag family. The plain nightly- families
-# exclude the flavored ones sharing their prefix; commit SHAs never start with "rocm".
+# exclude the variant ones sharing their prefix; commit SHAs never start with "rocm".
 CLEANUP=.buildkite/scripts/cleanup-nightly-builds.sh
-bash "$CLEANUP" "nightly-${FLAVOR}-" "$DOCKERHUB_REPO"
-bash "$CLEANUP" "base-nightly-${FLAVOR}-" "$DOCKERHUB_REPO"
+bash "$CLEANUP" "nightly-${VARIANT}-" "$DOCKERHUB_REPO"
+bash "$CLEANUP" "base-nightly-${VARIANT}-" "$DOCKERHUB_REPO"
 if [[ "$PUSH_DEFAULT" == "1" ]]; then
   bash "$CLEANUP" "nightly-" "$DOCKERHUB_REPO" "nightly-rocm"
   bash "$CLEANUP" "base-nightly-" "$DOCKERHUB_REPO" "base-nightly-rocm"
