@@ -27,4 +27,4 @@ triton @ https://github.com/triton-lang/triton-cpu/releases/download/v3.8.0/trit
 triton @ https://github.com/triton-lang/triton-cpu/releases/download/v3.8.0/triton-3.8.0+cpu-cp312-abi3-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl ; platform_machine == "x86_64" and python_version >= "3.12"
 
 # Use this to gather CPU info and optimize based on ARM Neoverse cores
-py-cpuinfo; platform_machine == "aarch64"
+py-cpuinfo2 ~= 10.1; platform_machine == "aarch64"
