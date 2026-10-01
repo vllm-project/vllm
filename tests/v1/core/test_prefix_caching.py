@@ -1139,6 +1139,52 @@ def test_hisparse_prefix_hit_adopts_gpu_shadow_pages():
     )
 
 
+@pytest.mark.parametrize("free_blocks,adopted_pages", [(7, []), (10, [0, 1])])
+def test_hisparse_prefix_hit_under_pressure_adopts_surviving_copies(
+    free_blocks, adopted_pages
+):
+    """A host prefix hit must not starve its own allocation of free blocks.
+
+    Admission counts free GPU copies as free, but adopting a copy pins it. When
+    adoption ran before the hit's allocation, it took blocks the allocation was
+    promised and the pool ran dry (``Cannot get N free blocks``). The allocation
+    now goes first, evicting a prefix's copies tail first; the copies it leaves
+    are adopted.
+    """
+    manager = make_hisparse_kv_cache_manager(32, 16, enable_caching=True)
+    tokens = list(range(4 * HISPARSE_BLOCK_SIZE))
+    original = make_request("original", tokens, HISPARSE_BLOCK_SIZE, sha256)
+    assert manager.allocate_slots(original, num_new_tokens=len(tokens)) is not None
+    _publish_hisparse_pages(manager)
+    copy_ids = [block.block_id for block in manager.get_blocks("original").blocks[2]]
+    manager.free(original)
+    pool = manager.block_pool
+    pool.get_new_blocks(pool.get_num_free_blocks() - free_blocks)
+
+    resumed = make_request("resumed", tokens, HISPARSE_BLOCK_SIZE, sha256)
+    computed, num_computed, _ = manager.get_computed_blocks(resumed)
+    assert num_computed == 3 * HISPARSE_BLOCK_SIZE
+    assert manager.allocate_slots(
+        resumed,
+        num_new_tokens=len(tokens) - num_computed,
+        num_new_computed_tokens=num_computed,
+        new_computed_blocks=computed,
+    )
+
+    resumed_blocks = manager.get_blocks("resumed").blocks
+    assert [block.block_id for block in resumed_blocks[2][:3]] == [
+        copy_ids[page] if page in adopted_pages else pool.null_block.block_id
+        for page in range(3)
+    ]
+    gpu_ids = [
+        block.block_id
+        for group in resumed_blocks[1:]
+        for block in group
+        if not block.is_null
+    ]
+    assert len(gpu_ids) == len(set(gpu_ids))
+
+
 def test_hisparse_host_backed_request_accepts_local_prefix_hit():
     """Local group-completion hits need no external host import allocation."""
     manager = make_hisparse_kv_cache_manager(32, 16, enable_caching=True)
