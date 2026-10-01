@@ -76,8 +76,16 @@ and engine/epoch/namespace errors. It checks identical greedy output token IDs
 across cold, warm and evicted runs. Local results are **0 → 784 → 0 cached tokens**
 and **4 GPU copies reclaimed**. Raw responses are saved under `results/`.
 
-Current execution supports local GPU operations. CPU/Mooncake movement, automatic
-request association/growth and policy workloads remain incomplete; the script
+Current execution supports local GPU operations and explicit request associations.
+Add `--validate-request-associations` to check request snapshot scope, generated
+growth, a resumed continuation with tool tokens, cache-hit membership and rejected
+rewrites through real serving. Request growth requires `associate.observe_growth`;
+completion alone never finishes a task. The recorded snapshot/hit prefixes contain
+1,302 tokens, while the resumed live continuation contains 1,344. Each tracked
+request hits 784 cached tokens. These checks use the common logical index and
+actual engine observations, rather than application-invented residency.
+
+CPU/Mooncake movement and policy workloads remain incomplete; the script
 explicitly expects unsupported movement in this development stage. Update that
 assertion when the adapters are connected. No serving speedup is inferred from
 these runs.

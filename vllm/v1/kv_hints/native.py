@@ -117,6 +117,7 @@ class AssociatePayload(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
     target: HashTarget | RequestTarget
     task_parent_id: Identifier | None = None
     parent_prefix: ParentPrefix | None = None
+    observe_growth: bool = False
 
 
 class FinishTaskPayload(msgspec.Struct, frozen=True, forbid_unknown_fields=True):  # type: ignore[call-arg]
@@ -247,6 +248,14 @@ def parse_native_action(action: KvHintAction) -> NativePayload:
             raise ControlError(
                 "invalid_payload", "Growth requires an explicit continuation"
             )
+    if (
+        isinstance(payload, AssociatePayload)
+        and payload.observe_growth
+        and not isinstance(payload.target, RequestTarget)
+    ):
+        raise ControlError(
+            "invalid_payload", "Request growth requires a request target"
+        )
     if (
         isinstance(payload, SignalPayload)
         and payload.resume_after_seconds is not None

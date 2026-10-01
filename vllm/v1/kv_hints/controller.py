@@ -3,8 +3,9 @@
 """Native command interpretation, kept separate from physical resource approval."""
 
 from collections.abc import Callable
+from contextlib import AbstractContextManager
 from dataclasses import replace
-from typing import Any, Protocol, TypeAlias
+from typing import TYPE_CHECKING, Any, Protocol, TypeAlias
 
 import msgspec
 
@@ -24,6 +25,7 @@ from vllm.v1.kv_hints.native import (
     ActionCapability,
     AssociatePayload,
     ConsumerCapabilities,
+    ContentSpan,
     DemotePayload,
     EvictPayload,
     FinishTaskPayload,
@@ -42,6 +44,9 @@ from vllm.v1.kv_hints.native import (
 from vllm.v1.kv_hints.protocol import KvHintsEnvelope
 from vllm.v1.kv_hints.retention import RetentionDeclarations
 from vllm.v1.kv_hints.state import LogicalResolution, SessionPrefixIndex
+
+if TYPE_CHECKING:
+    from vllm.v1.request import Request
 
 PhysicalPayload: TypeAlias = (
     EvictPayload | DemotePayload | PrefetchPayload | SharePayload
@@ -67,6 +72,21 @@ class KVOperationExecutor(Protocol):
     def cancel_owners(self, owners: tuple[str, ...]) -> None: ...
 
 
+class KVRequestObserver(Protocol):
+    def attach(self, request: "Request") -> AbstractContextManager[None]: ...
+
+    def resolve(self, target: RequestTarget, request_id: str | None) -> HashTarget: ...
+
+    def associate(
+        self,
+        payload: AssociatePayload,
+        request_id: str | None,
+        blocks: tuple[ContentSpan, ...],
+    ) -> None: ...
+
+    def observe(self) -> None: ...
+
+
 class NativeKVController:
     def __init__(
         self,
@@ -77,6 +97,7 @@ class NativeKVController:
         executor: KVOperationExecutor | None = None,
         request_resolver: RequestResolver | None = None,
         cache_profile: dict[str, Any] | None = None,
+        request_observer: KVRequestObserver | None = None,
     ):
         if (
             index.engine_epoch != registry.engine_epoch
@@ -89,6 +110,7 @@ class NativeKVController:
         self.executor = executor
         self.request_resolver = request_resolver
         self.cache_profile = cache_profile
+        self.request_observer = request_observer
 
     def submit(
         self,
@@ -253,6 +275,8 @@ class NativeKVController:
         self, operation: OperationResult, payload: NativePayload, request_id: str | None
     ) -> None:
         steps: tuple[str, ...]
+        status = OperationStatus.COMPLETED
+        missing_scope = 0
         if isinstance(payload, SignalPayload):
             self.registry.update(
                 operation,
@@ -276,7 +300,16 @@ class NativeKVController:
                 else OperationStatus.COMPLETED
             )
             self.registry.update(
-                operation, status, completed_steps=("declaration_effective",)
+                operation,
+                status,
+                completed_steps=("declaration_effective",),
+                missing_targets=sum(
+                    len(p.partial_blocks) + len(p.missing_ranges)
+                    for p in scope.prefixes
+                ),
+                reason="Range includes unrepresented or unaligned content"
+                if status == OperationStatus.PARTIAL
+                else "",
             )
             return
         if isinstance(payload, ReleasePayload):
@@ -284,6 +317,10 @@ class NativeKVController:
                 raise ControlError("missing", "Declaration is unknown or expired")
             steps = ("declaration_released",)
         elif isinstance(payload, AssociatePayload):
+            if payload.observe_growth and self.request_observer is None:
+                raise ControlError(
+                    "unsupported", "Request growth observation is not configured"
+                )
             target = self._target(payload.target, request_id)
             assert isinstance(target, HashTarget)
             scope = self.index.resolve(target)
@@ -293,24 +330,38 @@ class NativeKVController:
                 raise ControlError(
                     "invalid_payload", "Association range splits content"
                 )
-            self.index.associate(
-                payload.session_id,
-                payload.continuation_id,
-                tuple(b for p in scope.prefixes for b in p.blocks),
-                expected_revision=payload.expected_revision,
-                task_parent_id=payload.task_parent_id,
-                parent_prefix=payload.parent_prefix,
+            blocks = tuple(b for p in scope.prefixes for b in p.blocks)
+            if self.request_observer is not None:
+                self.request_observer.associate(payload, request_id, blocks)
+            else:
+                self.index.associate(
+                    payload.session_id,
+                    payload.continuation_id,
+                    blocks,
+                    expected_revision=payload.expected_revision,
+                    task_parent_id=payload.task_parent_id,
+                    parent_prefix=payload.parent_prefix,
+                )
+            if any(p.missing_ranges for p in scope.prefixes):
+                status = OperationStatus.PARTIAL
+                missing_scope = sum(len(p.missing_ranges) for p in scope.prefixes)
+            steps = (
+                ("association_updated", "request_observation_bound")
+                if payload.observe_growth
+                else ("association_updated",)
             )
-            steps = ("association_updated",)
         elif isinstance(payload, FinishTaskPayload):
             owners = self.declarations.finish_task(
                 payload.session_id, expected_revision=payload.expected_revision
             )
             steps = ("declarations_released", "associations_removed")
-            if self.executor is not None:
+            if self.executor is not None or self.request_observer is not None:
                 self.registry.update(
                     operation, OperationStatus.ACCEPTED, completed_steps=steps
                 )
+            if self.request_observer is not None:
+                self.request_observer.observe()
+            if self.executor is not None:
                 self.executor.cancel_owners(owners)
         else:
             assert isinstance(
@@ -325,7 +376,11 @@ class NativeKVController:
             self.executor.submit(operation, payload, self.index.resolve(target))
             return
         self.registry.update(
-            operation, OperationStatus.COMPLETED, completed_steps=steps
+            operation,
+            status,
+            completed_steps=steps,
+            missing_targets=missing_scope,
+            reason="Range includes unrepresented content" if missing_scope else "",
         )
 
     def _submission(self, receipt: Submission) -> Submission:

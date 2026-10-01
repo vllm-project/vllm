@@ -27,6 +27,7 @@ def main():
     parser.add_argument("--base-url", required=True)
     parser.add_argument("--dataset", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--validate-request-associations", action="store_true")
     args = parser.parse_args()
     session = requests.Session()
     run_id = uuid.uuid4().hex
@@ -281,6 +282,129 @@ def main():
     )
     assert finished["results"][0]["status"] == "completed"
     assert control("associations", {})["items"] == []
+    if args.validate_request_associations:
+        tracked = "requests-" + run_id
+
+        def associated_inference(
+            name, continuation, input_tokens, revision=0, growth=False
+        ):
+            hints = envelope(
+                name,
+                "associate",
+                {
+                    "session_id": tracked,
+                    "continuation_id": continuation,
+                    "expected_revision": revision,
+                    "target": {"kind": "request", "request_id": "$request"},
+                    "observe_growth": growth,
+                },
+            )
+            response = post(
+                "/v1/completions",
+                {
+                    "model": model,
+                    "prompt": input_tokens,
+                    "max_tokens": 16,
+                    "temperature": 0,
+                    "return_token_ids": True,
+                    "kv_hints": hints,
+                },
+            )
+            result = operation(name)
+            assert result["status"] in ("completed", "partial"), result
+            report["actions"][name] = result
+            report.setdefault("request_inference", []).append(response)
+            rows = control("associations", {"session_id": tracked})["items"]
+            state = next(x for x in rows if x["continuation_id"] == continuation)
+            return response, state
+
+        snapshot_response, snapshot = associated_inference(
+            "snapshot-request", "snapshot", tokens
+        )
+        assert snapshot["checkpoint"]["token_count"] == len(tokens)
+        live_response, live = associated_inference(
+            "live-request", "live", tokens, growth=True
+        )
+        history = tokens + live_response["choices"][0]["token_ids"]
+        assert live["checkpoint"]["token_count"] == len(history)
+        followed = submit(
+            "follow-request",
+            "retain",
+            {
+                "owner_id": tracked,
+                "declaration_id": "following",
+                "priority": 90,
+                "ttl_seconds": 300,
+                "scope": "follow_growth",
+                "target": {
+                    "kind": "session",
+                    "session_id": tracked,
+                    "continuation_id": "live",
+                },
+            },
+        )
+        assert followed["results"][0]["status"] in ("completed", "partial")
+        tool_tokens = post(
+            "/tokenize", {"model": model, "prompt": "\nTool result: 2. Continue.\n"}
+        )["tokens"]
+        resumed_input = history + tool_tokens
+        resumed_response, resumed = associated_inference(
+            "resume-request",
+            "live",
+            resumed_input,
+            revision=live["revision"],
+            growth=True,
+        )
+        assert resumed["checkpoint"]["token_count"] == len(resumed_input) + len(
+            resumed_response["choices"][0]["token_ids"]
+        )
+        _, hit = associated_inference("cache-hit-request", "hit", tokens)
+        assert {x["block_hash"] for x in hit["blocks"]} == {
+            x["block_hash"] for x in snapshot["blocks"]
+        }
+        bad_tokens = tokens.copy()
+        bad_tokens[0] = (bad_tokens[0] + 1) % 1000
+        invalid_hint = envelope(
+            "request-rewrite",
+            "associate",
+            {
+                "session_id": tracked,
+                "continuation_id": "live",
+                "expected_revision": resumed["revision"],
+                "target": {"kind": "request", "request_id": "$request"},
+            },
+        )
+        post(
+            "/v1/completions",
+            {
+                "model": model,
+                "prompt": bad_tokens,
+                "max_tokens": 1,
+                "temperature": 0,
+                "kv_hints": invalid_hint,
+            },
+        )
+        rejected = operation("request-rewrite")
+        assert (
+            rejected["status"] == "failed"
+            and "new continuation ID" in rejected["reason"]
+        )
+        report["actions"]["request-rewrite"] = rejected
+        final = control("associations", {"session_id": tracked})
+        assert (
+            next(x for x in final["items"] if x["continuation_id"] == "live") == resumed
+        )
+        report["request_associations"] = final
+        request_finished = submit(
+            "finish-requests",
+            "finish_task",
+            {
+                "session_id": tracked,
+                "expected_revision": final["revision"],
+            },
+        )
+        assert request_finished["results"][0]["status"] == "completed"
+        assert control("associations", {})["items"] == []
     report["operation_events"] = control("events", {"stream": "operation"})
     report["association_events"] = control("events", {"stream": "association"})
     report["cached_tokens"] = [cached(x) for x in report["inference"]]

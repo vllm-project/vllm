@@ -9,7 +9,7 @@ import time
 from collections import defaultdict, deque
 from collections.abc import Callable, Generator, Sequence
 from concurrent.futures import Future
-from contextlib import ExitStack, contextmanager
+from contextlib import ExitStack, contextmanager, nullcontext
 from enum import IntEnum
 from functools import partial
 from inspect import isclass, signature
@@ -249,6 +249,7 @@ class EngineCore:
                 vllm_config,
                 cast(Any, self.scheduler).kv_cache_manager,
                 self._weight_version,
+                request_lookup=cast(Any, self.scheduler).requests.get,
             )
 
         self.aborts_queue = queue.Queue[list[str]]()
@@ -569,9 +570,13 @@ class EngineCore:
                 registry.engine_id, registry.engine_epoch, settings.attached_consumer
             )
             try:
-                receipt = service.controller.consume_attached(
-                    request.kv_hints, context, request_id=request.request_id
-                )
+                observer = service.controller.request_observer
+                with (
+                    observer.attach(request) if observer is not None else nullcontext()
+                ):
+                    receipt = service.controller.consume_attached(
+                        request.kv_hints, context, request_id=request.request_id
+                    )
                 if receipt is not None:
                     request.kv_hints = None
             except ControlError as error:
@@ -593,6 +598,7 @@ class EngineCore:
         # specific finish reason, TBD whether we propagate that
         # (i.e. client-aborted vs stop criteria met).
         self.scheduler.finish_requests(request_ids, RequestStatus.FINISHED_ABORTED)
+        self._observe_kv_requests()
 
     @contextmanager
     def log_error_detail(self, scheduler_output: SchedulerOutput):
@@ -717,6 +723,7 @@ class EngineCore:
         return engine_core_outputs, scheduler_output.total_num_scheduled_tokens > 0
 
     def post_step(self, model_executed: bool) -> None:
+        self._observe_kv_requests()
         # When using async scheduling we can't get draft token ids in advance,
         # so we update draft token ids in the worker process and don't
         # need to update draft token ids here.
@@ -724,6 +731,11 @@ class EngineCore:
             draft_token_ids = self.model_executor.take_draft_token_ids()
             if draft_token_ids is not None:
                 self.scheduler.update_draft_token_ids(draft_token_ids)
+
+    def _observe_kv_requests(self) -> None:
+        service = getattr(self, "kv_control_service", None)
+        if service is not None and service.controller.request_observer is not None:
+            service.controller.request_observer.observe()
 
     def step_with_batch_queue(
         self,

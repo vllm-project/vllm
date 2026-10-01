@@ -84,6 +84,49 @@ returns unsupported at this development stage. Raw enabled accuracy and HTTP
 responses are committed as compressed JSON under the benchmark `results/` folder.
 The server is stopped after validation; GPU 2's unrelated workload is untouched.
 
+## Request association and explicit generation observation
+
+Request targets now resolve through the initialized engine's active requests,
+including an attached `$request`. Associations record token-prefix evidence even
+before a reusable block exists; rewriting that prefix or changing its cache salt
+requires a new continuation. `observe_growth=true` explicitly follows one request
+until completion. Snapshot association does not grow implicitly. Competing writers
+are deferred; bounds failures preserve the last state and emit an observable
+failure event. Metadata changes do not invalidate an unchanged retention view.
+
+```bash
+CUDA_VISIBLE_DEVICES=0,3 .venv/bin/python -m pytest \
+  tests/v1/engine/test_kv_control.py tests/v1/test_kv_hint_control.py \
+  tests/v1/test_kv_hint_state.py tests/v1/core/test_prefix_caching.py \
+  tests/v1/core/test_deferred_block_free.py tests/v1/core/test_scheduler.py \
+  tests/v1/core/test_async_scheduler.py -q
+```
+
+Result: **568 passed**, 302.80 seconds. Tests use actual Request/KVCacheManager
+objects for cached-prefix membership, allocation stability, snapshot/growth,
+token-prefix rewrites, original retention expiry, concurrent writers, capacity
+failure reporting, final observations, inherited-prefix mismatch, and cleanup
+before ID recreation. Range outcomes report missing/unaligned portions explicitly.
+The short-alias branch boundary is also covered by the final state suite.
+The final complete control/state/engine/HTTP suites pass **178 tests** in
+48.72 seconds. Normal pre-commit hooks, manual mypy 3.12 and OpenSpec validation
+pass for this phase.
+
+Reran the real Qwen TP=2 server with the README configuration and added
+`--validate-request-associations` to `http_control.py`. Result: **passed**.
+The snapshot and cache-hit continuations remain at **1,302 tokens**; the live
+continuation grows to **1,318**, accepts **10 tool tokens**, and reaches **1,344**
+after another 16 generated tokens. All four tracked inference requests hit
+**784 cached tokens**. A request rewriting the live prefix fails while the
+continuation remains unchanged. Explicit task cleanup succeeds afterward.
+
+The same run repeats the actual GPU Evict/reuse, chat/SSE, routing/version and
+event/query checks from the previous phase. Cold/warm/evicted cache hits remain
+**0 → 784 → 0**, with four reclaimed copies and identical greedy output token IDs.
+Raw observations/responses are in
+`results/qwen3.8-27b-tp2-request-associations.json.gz`. This validates request/state
+and local GPU behavior, not cold-tier movement or full RL/policy performance.
+
 ## October 1: control record foundation
 
 Implemented immutable correlated operation snapshots, explicit engine/epoch/path

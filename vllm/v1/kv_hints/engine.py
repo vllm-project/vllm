@@ -5,6 +5,7 @@
 import hashlib
 import json
 import uuid
+from collections.abc import Callable
 
 from vllm.config import VllmConfig
 from vllm.v1.core.kv_cache_manager import KVCacheManager
@@ -12,13 +13,19 @@ from vllm.v1.core.kv_cache_utils import get_none_hash_seed
 from vllm.v1.kv_hints.api import KVControlService
 from vllm.v1.kv_hints.control import OperationRegistry
 from vllm.v1.kv_hints.controller import NativeKVController
+from vllm.v1.kv_hints.request_observer import RequestContinuationObserver
 from vllm.v1.kv_hints.resources import KVResourceController
 from vllm.v1.kv_hints.retention import RetentionDeclarations
 from vllm.v1.kv_hints.state import SessionPrefixIndex
+from vllm.v1.request import Request
 
 
 def create_control_service(
-    config: VllmConfig, manager: KVCacheManager, weight_version: str
+    config: VllmConfig,
+    manager: KVCacheManager,
+    weight_version: str,
+    *,
+    request_lookup: Callable[[str], Request | None] | None = None,
 ) -> KVControlService:
     settings = config.kv_control_config
     assert settings is not None
@@ -97,6 +104,15 @@ def create_control_service(
             )
         ],
     }
+    observer = None
+    if request_lookup is not None and not getattr(
+        config.model_config, "is_diffusion", False
+    ):
+        observer = RequestContinuationObserver(index, manager, request_lookup)
+        cache_profile["request_limitations"] = (
+            "Finite text-token requests; no LoRA, multimodal, "
+            "prompt embeddings or resumable input"
+        )
     return KVControlService(
         NativeKVController(
             registry,
@@ -104,5 +120,7 @@ def create_control_service(
             declarations,
             executor=executor,
             cache_profile=cache_profile,
+            request_resolver=observer.resolve if observer is not None else None,
+            request_observer=observer,
         )
     )

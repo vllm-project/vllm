@@ -18,6 +18,16 @@ failures and skipped capabilities; distinguish mocks from real transfers.
 | Serving | Python/HTTP targeting → same engine records | Wrong engine/epoch, version errors, ingress mismatch | Existing engine and OpenAI serving suites plus control endpoint integration |
 
 State tests use a fake monotonic clock, bounded capacities, and observable queries.
+Request association consumes active request token/hash observations and produces
+the shared logical index plus an optional bounded growth subscription. Guard
+against rewrites below the first cache-block boundary, implicit growth of snapshot
+commands, busy concurrent writers, inherited-prefix mismatch, lost alias coverage,
+late observations after cleanup/recreation, and silently dropped capacity errors.
+Use actual Request/KVCacheManager instances in the existing engine control suite;
+assert common action outcomes, state/events and unchanged allocation/reference
+counts. Metadata-only growth must preserve the retention projection and TTL.
+Then exercise request-addressed associations and generated growth on real Qwen
+HTTP serving, alongside the existing GPU eviction/reuse workflow.
 Control utility input is a method, strict invocation context and JSON payload;
 output is JSON-compatible common records or a structured error. Guard against DP
 mutation broadcasts, ambiguous engine names, stale epochs, mixed pagination,

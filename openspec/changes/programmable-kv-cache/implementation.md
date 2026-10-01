@@ -24,6 +24,23 @@ document refines `design.md`; the existing envelope fields remain unchanged.
   token ancestry. Request observation must also check the actual token prefix.
   A new branch never retargets existing snapshot operations or following Retain
   declarations, and association updates never renew their TTL.
+- Request-addressed association records a token-count/digest/context checkpoint
+  in the shared index, including prefixes too short for a cache block. A later
+  request must preserve that token prefix and cache salt. Finite text-token
+  requests are supported; multimodal/embedding, LoRA, resumable-input and diffusion
+  request targeting remain unsupported. Hash-addressed operations retain their
+  independently advertised group/layout coverage.
+- `associate.observe_growth` defaults to false. Setting it explicitly on a request
+  target subscribes to that request's committed token/hash observations until it
+  finishes. It does not observe another request or branch automatically. Only one
+  request may grow a continuation at a time; competing writers are deferred.
+  Cleanup removes the subscription; late observations cannot attach to a recreated
+  continuation. Capacity failures preserve the last valid state and emit a bounded
+  `observation_failed` event. Ordinary operation/declaration snapshots remain fixed.
+- Request and checkpoint-backed session resolution reports unknown/unaligned tails
+  as partial coverage. Association or retention may take effect with a partial
+  result; that result does not assert residency. Metadata-only checkpoint changes
+  advance logical revisions/events without rebuilding the eviction-priority view.
 - Content identity includes the existing block hash and cache group, within the
   engine's compatibility namespace. Token ranges are half-open. Resolution reports
   each group's reusable coverage; it never rounds outward without reporting it.

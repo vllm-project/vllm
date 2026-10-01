@@ -106,6 +106,19 @@ def test_known_partial_alias_fully_covers_a_shorter_range(index):
     assert resolved.missing_ranges == ()
 
 
+def test_branch_can_capture_a_short_alias_without_inheriting_the_longer_prefix(index):
+    alias, full = span(1, 0, 8), span(2)
+    associate(index, "parent", (alias, full))
+    branch = associate(
+        index,
+        "child",
+        (span(3, 8, 16),),
+        parent_prefix=ParentPrefix("parent", "main", 8),
+    )
+    assert branch.blocks == (alias, span(3, 8, 16))
+    assert index.members(0, full.block_hash) == (("parent", "main"),)
+
+
 def test_known_empty_is_distinct_from_unknown_and_pruned(index):
     empty = associate(index, "empty")
     assert index.resolve(SessionTarget("empty")).prefixes[0].blocks == ()

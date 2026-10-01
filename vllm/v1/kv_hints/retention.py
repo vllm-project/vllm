@@ -188,7 +188,10 @@ class RetentionDeclarations:
     def priority_snapshot(self) -> tuple[tuple[int, int], Mapping[ContentKey, int]]:
         """Return a cached eviction view, invalidated by expiry or followed growth."""
         self.expire()
-        version = (self._generation, self.index.revision if self._following else 0)
+        version = (
+            self._generation,
+            self.index.content_revision if self._following else 0,
+        )
         if version != self._projection_version:
             priorities = {
                 key: max(values.values()) for key, values in self._by_content.items()

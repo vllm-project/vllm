@@ -20,6 +20,13 @@ ContentKey: TypeAlias = tuple[int, str]
 
 
 @dataclass(frozen=True)
+class TokenPrefixCheckpoint:
+    token_count: int
+    token_digest: str
+    context_digest: str
+
+
+@dataclass(frozen=True)
 class ContinuationState:
     session_id: str
     continuation_id: str
@@ -27,6 +34,7 @@ class ContinuationState:
     incarnation: int
     blocks: tuple[ContentSpan, ...]
     parent_prefix: ParentPrefix | None = None
+    checkpoint: TokenPrefixCheckpoint | None = None
 
 
 @dataclass(frozen=True)
@@ -36,8 +44,11 @@ class AssociationEvent:
     revision: int
     session_id: str
     continuation_id: str
-    kind: Literal["associated", "removed", "updated", "pruned", "finished"]
+    kind: Literal[
+        "associated", "removed", "updated", "pruned", "finished", "observation_failed"
+    ]
     content: ContentSpan | None = None
+    reason: str = ""
 
 
 @dataclass(frozen=True)
@@ -121,6 +132,7 @@ class SessionPrefixIndex:
         self.max_associations = max_associations
         self.max_tombstones = max_tombstones
         self.revision = 0
+        self.content_revision = 0
         self._sequence = 0
         self._association_count = 0
         self._sessions: dict[str, _Session] = {}
@@ -154,6 +166,7 @@ class SessionPrefixIndex:
         expected_revision: int,
         task_parent_id: str | None = None,
         parent_prefix: ParentPrefix | None = None,
+        checkpoint: TokenPrefixCheckpoint | None = None,
     ) -> ContinuationState:
         """Record an append-only branch, including prefix-cache-hit observations."""
         _validate_id(session_id, "session_id")
@@ -163,7 +176,9 @@ class SessionPrefixIndex:
         self._check_revision(
             expected_revision, 0 if previous is None else previous.revision
         )
-        validate_target(HashTarget(self.namespace, blocks))
+        same_blocks = previous is not None and blocks is previous.blocks
+        if not same_blocks:
+            validate_target(HashTarget(self.namespace, blocks))
         session = self._sessions.get(session_id)
         if task_parent_id is not None:
             if task_parent_id == session_id:
@@ -174,7 +189,7 @@ class SessionPrefixIndex:
                 raise ControlError("conflict", "Task reparenting is not supported")
         if previous is not None and parent_prefix != previous.parent_prefix:
             raise ControlError("conflict", "Continuation parent prefix cannot change")
-        if parent_prefix is not None:
+        if parent_prefix is not None and not same_blocks:
             if (parent_prefix.session_id, parent_prefix.continuation_id) == key:
                 raise ControlError(
                     "invalid_payload", "A continuation cannot parent itself"
@@ -194,6 +209,12 @@ class SessionPrefixIndex:
                 )
             if any(
                 b.start_token < parent_prefix.end_token < b.end_token
+                and not any(
+                    alias.group_id == b.group_id
+                    and alias.start_token == b.start_token
+                    and alias.end_token == parent_prefix.end_token
+                    for alias in parent.blocks
+                )
                 for b in parent.blocks
             ):
                 raise ControlError(
@@ -211,10 +232,27 @@ class SessionPrefixIndex:
                     )
                 own[position] = block
             blocks = tuple(own.values())
-        blocks = _ordered(blocks)
-        validate_target(HashTarget(self.namespace, blocks))
+        if not same_blocks:
+            blocks = _ordered(blocks)
+            validate_target(HashTarget(self.namespace, blocks))
         old_blocks = () if previous is None else previous.blocks
-        if not set(old_blocks).issubset(blocks):
+        old_checkpoint = None if previous is None else previous.checkpoint
+        if checkpoint is None:
+            checkpoint = old_checkpoint
+        if (
+            old_checkpoint is not None
+            and checkpoint is not None
+            and (
+                checkpoint.token_count < old_checkpoint.token_count
+                or checkpoint.context_digest != old_checkpoint.context_digest
+                or (
+                    checkpoint.token_count == old_checkpoint.token_count
+                    and checkpoint.token_digest != old_checkpoint.token_digest
+                )
+            )
+        ):
+            raise ControlError("conflict", "Continuation token prefix is append-only")
+        if not same_blocks and not set(old_blocks).issubset(blocks):
             raise ControlError(
                 "conflict",
                 "Continuation content is append-only; use a new continuation ID "
@@ -227,9 +265,15 @@ class SessionPrefixIndex:
             or count > self.max_associations
         ):
             raise ControlError("capacity", "Logical index capacity exhausted")
-        if previous is not None and blocks == previous.blocks:
+        if (
+            previous is not None
+            and blocks == previous.blocks
+            and checkpoint == old_checkpoint
+        ):
             return previous
         self.revision += 1
+        if previous is None or blocks != old_blocks:
+            self.content_revision = self.revision
         state = ContinuationState(
             session_id,
             continuation_id,
@@ -237,6 +281,7 @@ class SessionPrefixIndex:
             self.revision if previous is None else previous.incarnation,
             blocks,
             parent_prefix,
+            checkpoint,
         )
         self._sessions[session_id] = _Session(
             session.parent if session is not None else task_parent_id, self.revision
@@ -245,6 +290,9 @@ class SessionPrefixIndex:
         self._continuations[key] = state
         self._tombstones.pop(key, None)
         self._association_count = count
+        if blocks == old_blocks:
+            self._emit(key, "updated")
+            return state
         removed = set(old_blocks) - set(blocks)
         added = set(blocks) - set(old_blocks)
         # Membership is by content, not by position or a reusable allocator ID.
@@ -268,6 +316,14 @@ class SessionPrefixIndex:
     def members(self, group_id: int, block_hash: str) -> tuple[ContinuationKey, ...]:
         return tuple(sorted(self._members.get((group_id, block_hash), ())))
 
+    def report_observation_failure(
+        self, session_id: str, continuation_id: str, *, reason: str
+    ) -> None:
+        self.get(session_id, continuation_id)
+        self._emit(
+            (session_id, continuation_id), "observation_failed", reason=reason[:4096]
+        )
+
     def content_associations(
         self, group_id: int, block_hash: str
     ) -> tuple[tuple[ContinuationKey, tuple[ContentSpan, ...]], ...]:
@@ -277,12 +333,14 @@ class SessionPrefixIndex:
         """Resolve logical coverage; KV managers must still validate group reuse."""
         validate_target(target)
         sources: list[
-            tuple[ContinuationKey | None, int | None, tuple[ContentSpan, ...]]
+            tuple[
+                ContinuationKey | None, int | None, tuple[ContentSpan, ...], int | None
+            ]
         ]
         if isinstance(target, HashTarget):
             if target.namespace != self.namespace:
                 raise ControlError("incompatible", "Target has another cache namespace")
-            sources = [(None, None, target.blocks)]
+            sources = [(None, None, target.blocks, None)]
         elif target.continuation_id is not None:
             state = self.get(target.session_id, target.continuation_id)
             sources = [
@@ -290,12 +348,18 @@ class SessionPrefixIndex:
                     (state.session_id, state.continuation_id),
                     state.revision,
                     state.blocks,
+                    state.checkpoint.token_count if state.checkpoint else None,
                 )
             ]
         else:
             self.session_revision(target.session_id)
             sources = [
-                (key, state.revision, state.blocks)
+                (
+                    key,
+                    state.revision,
+                    state.blocks,
+                    state.checkpoint.token_count if state.checkpoint else None,
+                )
                 for key, state in sorted(self._continuations.items())
                 if key[0] == target.session_id
             ]
@@ -304,16 +368,20 @@ class SessionPrefixIndex:
                     "missing_association", "Session has no tracked continuations"
                 )
         prefixes = []
-        for key, revision, blocks in sources:
+        for key, revision, blocks, known_end in sources:
+            end_token = target.end_token
+            if end_token is None and known_end is not None:
+                end_token = max(
+                    known_end, max((b.end_token for b in blocks), default=0)
+                )
             full, partial = [], []
             for block in blocks:
                 if block.end_token <= target.start_token or (
-                    target.end_token is not None
-                    and block.start_token >= target.end_token
+                    end_token is not None and block.start_token >= end_token
                 ):
                     continue
                 if block.start_token < target.start_token or (
-                    target.end_token is not None and block.end_token > target.end_token
+                    end_token is not None and block.end_token > end_token
                 ):
                     partial.append(block)
                 else:
@@ -326,27 +394,27 @@ class SessionPrefixIndex:
                 if not any(
                     f.group_id == b.group_id
                     and f.start_token <= max(b.start_token, target.start_token)
-                    and f.end_token >= min(b.end_token, target.end_token or b.end_token)
+                    and f.end_token >= min(b.end_token, end_token or b.end_token)
                     for f in full
                 )
             ]
             gaps = []
-            if isinstance(target, SessionTarget) and target.end_token is not None:
+            if end_token is not None and end_token > target.start_token:
                 groups = {b.group_id for b in blocks}
                 if not groups:
-                    gaps.append(RangeGap(None, target.start_token, target.end_token))
+                    gaps.append(RangeGap(None, target.start_token, end_token))
                 for group in sorted(groups):
                     cursor = target.start_token
                     for block in (b for b in blocks if b.group_id == group):
                         start = max(block.start_token, target.start_token)
-                        end = min(block.end_token, target.end_token)
+                        end = min(block.end_token, end_token)
                         if start >= end:
                             continue
                         if start > cursor:
                             gaps.append(RangeGap(group, cursor, start))
                         cursor = max(cursor, end)
-                    if cursor < target.end_token:
-                        gaps.append(RangeGap(group, cursor, target.end_token))
+                    if cursor < end_token:
+                        gaps.append(RangeGap(group, cursor, end_token))
             prefixes.append(
                 ResolvedPrefix(key, revision, tuple(full), tuple(partial), tuple(gaps))
             )
@@ -449,13 +517,27 @@ class SessionPrefixIndex:
     def _emit(
         self,
         key: ContinuationKey,
-        kind: Literal["associated", "removed", "updated", "pruned", "finished"],
+        kind: Literal[
+            "associated",
+            "removed",
+            "updated",
+            "pruned",
+            "finished",
+            "observation_failed",
+        ],
         content: ContentSpan | None = None,
+        reason: str = "",
     ) -> None:
         self._sequence += 1
         self._events.append(
             AssociationEvent(
-                self.engine_epoch, self._sequence, self.revision, *key, kind, content
+                self.engine_epoch,
+                self._sequence,
+                self.revision,
+                *key,
+                kind,
+                content,
+                reason,
             )
         )
 
@@ -463,6 +545,7 @@ class SessionPrefixIndex:
         self, key: ContinuationKey, reason: Literal["pruned", "finished"]
     ) -> None:
         state = self._continuations.pop(key)
+        self.content_revision = self.revision
         self._association_count -= len(state.blocks)
         for content in {content_key(block) for block in state.blocks}:
             members = self._members[content]

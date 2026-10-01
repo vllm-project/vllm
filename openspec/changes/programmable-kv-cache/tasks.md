@@ -21,12 +21,12 @@
 ## 3. Control contracts and logical state
 
 - [x] 3.1 Implement validated action payloads, target/capability records, and bounded correlated operation results using the existing envelope.
-- [ ] 3.2 Implement the logical session/continuation index and hash/group-aware resolution, including cache-hit associations and reported coverage. Logical index/resolution implemented; engine request/cache hooks and physical group validation remain.
+- [x] 3.2 Implement the logical session/continuation index and hash/group-aware resolution, including cache-hit associations and reported coverage.
 - [x] 3.3 Implement independent Retain declarations, expiry, Release, and explicit task-tree cleanup.
 - [x] 3.4 Verify shared-prefix lifetimes, branch selection, missing content, duplicate control, and unconsumed signals.
-- [ ] 3.5 Implement consumption of the merged hint contract for supported cache/state actions, with shared request-attached/request-free validation and action/version capability discovery.
+- [x] 3.5 Implement consumption of the merged hint contract for supported cache/state actions, with shared request-attached/request-free validation and action/version capability discovery.
 - [x] 3.6 Implement the agreed explicit association/continuation/task management commands separately from optional policy signals.
-- [ ] 3.7 Implement bounded logical-state queries and the agreed association events, including new membership on cache hits.
+- [x] 3.7 Implement bounded logical-state queries and the agreed association events, including new membership on cache hits.
 - [ ] 3.8 Verify derived-step correlation, partial effects, unknown versions, bounded/pruned index behavior, and stale logical updates.
 - [x] 3.9 Implement whole-envelope native/backend dispatch and ensure native-consumed envelopes are not also forwarded through KVCR's existing request hook.
 
