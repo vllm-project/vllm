@@ -5,13 +5,17 @@
 from __future__ import annotations
 
 import copy
-from collections.abc import Sequence
+import json
+from collections.abc import Callable, Iterable, Sequence
 from typing import TYPE_CHECKING, Any, cast
 
 from openai.types.responses import ToolChoiceFunction
 
+from vllm.entrypoints.chat_utils import make_tool_call_id
 from vllm.entrypoints.generate.base.protocol import (
+    DeltaFunctionCall,
     DeltaMessage,
+    DeltaToolCall,
     FunctionCall,
 )
 from vllm.entrypoints.openai.chat_completion.protocol import (
@@ -19,17 +23,15 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
 )
 from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
+from vllm.parser.abstract_parser import Parser
 from vllm.parser.chat_parsing import ResponseParser
+from vllm.parser.chat_parsing.content_parsers import _apply_transform
 from vllm.parser.chat_parsing.response_templates import (
     ResponseTemplate,
     load_response_template,
 )
-from vllm.parser.engine.adapters import make_adapters
-from vllm.parser.engine.parser_engine import ParserEngine
-from vllm.parser.engine.parser_engine_config import ParserEngineConfig, ParserState
-from vllm.parser.engine.response_template_event_engine import (
-    ResponseTemplateEventEngine,
-)
+from vllm.reasoning.abs_reasoning_parsers import ReasoningParser
+from vllm.tool_parsers.abstract_tool_parser import ToolParser
 from vllm.tool_parsers.utils import iter_response_function_tool_dicts
 
 if TYPE_CHECKING:
@@ -282,32 +284,337 @@ def _ends_within(token_ids: Sequence[int], end_ids: list[int], num_new: int) -> 
     )
 
 
-def _response_template_engine_config(
-    template: ResponseTemplate,
-) -> ParserEngineConfig:
-    terminals: dict[str, str] = {}
-    thinking = template.fields.get(THINKING_FIELD)
-    if thinking is not None and thinking.open_literals:
-        terminals["THINK_START"] = thinking.open_literals[0]
-    if thinking is not None and thinking.close_literals:
-        terminals["THINK_END"] = thinking.close_literals[0]
-    return ParserEngineConfig(
-        name="response_template",
-        terminals=terminals,
-        initial_state=ParserState.CONTENT,
-        strip_trailing_reasoning_whitespace=False,
-        drop_whitespace_only_content_before_tools=False,
-        strip_content_whitespace_with_tools=False,
-        defer_content_after_tools=False,
-    )
+def _serving_template(
+    tokenizer: Any,
+    template: dict[str, Any] | None,
+) -> ResponseTemplate:
+    """The validated streaming form of `template` or the tokenizer's metadata."""
+    template = resolve_response_template(tokenizer, template)
+    if template is None:
+        raise ValueError(
+            "The hf parser requires `response_template` "
+            "metadata in the tokenizer configuration"
+        )
+    validate_response_template_for_serving(template)
+    return _streaming_template(template)
 
 
-class ResponseTemplateParser(ParserEngine):
+def _open_tool_name(template: ResponseTemplate, captures: dict | None) -> str | None:
+    """Name already fixed by the opener, before the region body exists."""
+    field = template.fields.get(TOOL_FIELD)
+    transform = None if field is None or field.transform_each else field.transform
+    function = transform.get("function") if isinstance(transform, dict) else None
+    if not isinstance(function, dict):
+        return None
+    try:
+        name = _apply_transform(function.get("name"), captures or {})
+    except (KeyError, ValueError):
+        return None
+    return name if isinstance(name, str) and name else None
+
+
+def _to_tool_calls(value: Any) -> list[tuple[str, str]]:
+    """`(name, arguments)` of each call in a tool region value, or nothing if
+    any call is incomplete."""
+    values = value if isinstance(value, list) else [value]
+    calls: list[tuple[str, str]] = []
+    for item in values:
+        function = item.get("function") if isinstance(item, dict) else None
+        if not isinstance(function, dict):
+            return []
+        name = function.get("name")
+        arguments = function.get("arguments")
+        if not isinstance(name, str) or not name or arguments is None:
+            return []
+        if not isinstance(arguments, str):
+            arguments = json.dumps(arguments, ensure_ascii=False)
+        calls.append((name, arguments))
+    return calls
+
+
+class ResponseTemplateReasoningParser(ReasoningParser):
+    """Reasoning end detection for `--reasoning-parser hf`.
+
+    `ResponseTemplateParser` parses the output; this parser tells it and the
+    structured-output engine where reasoning ends.
+    """
+
+    def __init__(
+        self,
+        tokenizer: TokenizerLike,
+        *args,
+        response_template: dict[str, Any] | None = None,
+        **kwargs,
+    ) -> None:
+        super().__init__(tokenizer, *args, **kwargs)
+        self.response_template = _serving_template(tokenizer, response_template)
+        chat_template_kwargs = kwargs.get("chat_template_kwargs") or {}
+        self._thinking_disabled = not chat_template_kwargs.get("enable_thinking", True)
+        self._reasoning_end_ids = _reasoning_end_ids(
+            tokenizer, self.vocab, self.response_template
+        )
+
+    @property
+    def reasoning_start_str(self) -> str | None:
+        thinking = self.response_template.fields.get(THINKING_FIELD)
+        literals = thinking.open_literals if thinking else None
+        return literals[0] if literals else None
+
+    @property
+    def reasoning_end_str(self) -> str | None:
+        thinking = self.response_template.fields.get(THINKING_FIELD)
+        literals = thinking.close_literals if thinking else None
+        return literals[0] if literals else None
+
+    def is_reasoning_end(self, input_ids: Sequence[int]) -> bool:
+        try:
+            parser = ResponseParser(
+                self.response_template,
+                prefix=_decode(self.model_tokenizer, input_ids),
+            )
+        except Exception:
+            return False
+        return _reasoning_has_ended(
+            parser,
+            self.response_template,
+            thinking_disabled=self._thinking_disabled,
+        )
+
+    def is_reasoning_end_streaming(
+        self, input_ids: Sequence[int], delta_ids: Iterable[int]
+    ) -> bool:
+        if self._reasoning_end_ids is None:
+            return self.is_reasoning_end(input_ids)
+        num_new = len(list(delta_ids))
+        return any(
+            _ends_within(input_ids, end_ids, num_new)
+            for end_ids in self._reasoning_end_ids
+        )
+
+    def extract_content_ids(self, input_ids: list[int]) -> list[int]:
+        raise NotImplementedError("ResponseTemplateParser extracts content")
+
+    def extract_reasoning(
+        self,
+        model_output: str,
+        request: ChatCompletionRequest | ResponsesRequest,
+    ) -> tuple[str | None, str | None]:
+        raise NotImplementedError("ResponseTemplateParser extracts reasoning")
+
+    def extract_reasoning_streaming(
+        self,
+        previous_text: str,
+        current_text: str,
+        delta_text: str,
+        previous_token_ids: Sequence[int],
+        current_token_ids: Sequence[int],
+        delta_token_ids: Sequence[int],
+    ) -> DeltaMessage | None:
+        raise NotImplementedError("ResponseTemplateParser extracts reasoning")
+
+
+class ResponseTemplateToolParser(ToolParser):
+    """Registers `--tool-call-parser hf`; `ResponseTemplateParser` extracts the
+    tool calls."""
+
+
+class _DeltaBuilder:
+    """Accumulates one `DeltaMessage`, one entry per tool call index."""
+
+    def __init__(self) -> None:
+        self.reasoning: list[str] = []
+        self.content: list[str] = []
+        self.tool_calls: dict[int, DeltaToolCall] = {}
+
+    def start_tool_call(
+        self,
+        index: int,
+        tool_call_id: str,
+        name: str,
+        arguments: str | None = None,
+    ) -> None:
+        self.tool_calls[index] = DeltaToolCall(
+            index=index,
+            id=tool_call_id,
+            type="function",
+            function=DeltaFunctionCall(name=name, arguments=arguments or None),
+        )
+
+    def add_tool_arguments(self, index: int, arguments: str) -> None:
+        call = self.tool_calls.get(index)
+        if call is None or call.function is None:
+            self.tool_calls[index] = DeltaToolCall(
+                index=index,
+                function=DeltaFunctionCall(arguments=arguments),
+            )
+        else:
+            call.function.arguments = (call.function.arguments or "") + arguments
+
+    def build(self) -> DeltaMessage | None:
+        fields: dict[str, Any] = {}
+        if reasoning := "".join(self.reasoning):
+            fields["reasoning"] = reasoning
+        if content := "".join(self.content):
+            fields["content"] = content
+        if self.tool_calls:
+            fields["tool_calls"] = list(self.tool_calls.values())
+        return DeltaMessage(**fields) if fields else None
+
+
+class _ResponseStream:
+    """One generation fed through `ResponseParser`, routed to message deltas."""
+
+    def __init__(
+        self,
+        template: ResponseTemplate,
+        *,
+        prefix: str,
+        tools: list[dict[str, Any]],
+        parse_reasoning: bool,
+        include_reasoning: bool,
+        parse_tools: bool,
+        stream_tool_names: bool,
+        new_tool_call_id: Callable[[str], str],
+    ) -> None:
+        self.template = template
+        self.parse_reasoning = parse_reasoning
+        self.include_reasoning = include_reasoning
+        self.parse_tools = parse_tools
+        self.stream_tool_names = stream_tool_names
+        self.new_tool_call_id = new_tool_call_id
+        tool_field = template.fields.get(TOOL_FIELD)
+        self._tool_has_closer = (
+            tool_field is not None and tool_field.close_re is not None
+        )
+        self.parser = ResponseParser(template, prefix=prefix, tools=tools)
+        self._prefix_end = len(self.parser.input_text)
+        self._initial_events = list(self.parser.initial_events)
+        self._next_tool_index = 0
+        self._pending_tool: tuple[int, str] | None = None
+        self._finalized = False
+        self.incomplete_tool_call_indices: set[int] = set()
+
+    def feed(self, text: str, *, finished: bool) -> DeltaMessage | None:
+        if self._finalized:
+            return None
+        delta = _DeltaBuilder()
+        self._route(self.parser.feed(text), delta)
+        if finished:
+            self._finalized = True
+            if len(self.parser.input_text) > self._prefix_end:
+                _, events = self.parser.finalize()
+                self._route(events, delta)
+        return delta.build()
+
+    def _initial_tool_open(self) -> list[dict[str, Any]]:
+        """A tool region left open by the prompt prefix, replayed once."""
+        events, self._initial_events = self._initial_events, []
+        for event in reversed(events):
+            if event.get("field") == TOOL_FIELD and event["type"] != "region_chunk":
+                return [event] if event["type"] == "region_open" else []
+        return []
+
+    def _generated_text(self, event: dict[str, Any]) -> str:
+        if event["type"] == "region_chunk":
+            return event["text"]
+        start = max(event["start"], self._prefix_end)
+        return self.parser.input_text[start : event["end"]]
+
+    def _is_unusable_tool_end(self, event: dict[str, Any]) -> bool:
+        """Whether a tool region ended malformed, or at end of stream without its
+        closer because the call was cut off."""
+        return event["type"] == "region_malformed" or (
+            event["type"] == "region_close"
+            and self._tool_has_closer
+            and event["start"] == len(self.parser.input_text)
+        )
+
+    def _route(self, events: Sequence[dict[str, Any]], delta: _DeltaBuilder) -> None:
+        events = self._initial_tool_open() + list(events)
+        unusable_opens: set[int] = set()
+        open_index = None
+        for index, event in enumerate(events):
+            if event.get("field") == TOOL_FIELD:
+                if event["type"] == "region_open":
+                    open_index = index
+                elif self._is_unusable_tool_end(event) and open_index is not None:
+                    unusable_opens.add(open_index)
+        for index, event in enumerate(events):
+            field = event.get("field")
+            if field == TOOL_FIELD:
+                self._route_tool_event(
+                    event, delta, suppress_open=index in unusable_opens
+                )
+            elif event["type"] == "region_chunk":
+                if field == THINKING_FIELD and self.parse_reasoning:
+                    if self.include_reasoning:
+                        delta.reasoning.append(event["text"])
+                elif field in (THINKING_FIELD, CONTENT_FIELD):
+                    delta.content.append(event["text"])
+
+    def _route_tool_event(
+        self,
+        event: dict[str, Any],
+        delta: _DeltaBuilder,
+        *,
+        suppress_open: bool,
+    ) -> None:
+        """Emit a tool call only when it ends with its closer and parses.
+        Otherwise drop it, leaving a streamed name incomplete.
+        With tool parsing disabled, the region passes through as content."""
+        if not self.parse_tools:
+            if text := self._generated_text(event):
+                delta.content.append(text)
+            return
+        if event["type"] == "region_open":
+            if not suppress_open and self.stream_tool_names:
+                self._open_tool(event, delta)
+            return
+        if event["type"] == "region_chunk":
+            return
+
+        calls = []
+        if not self._is_unusable_tool_end(event):
+            calls = _to_tool_calls(event.get("value"))
+        pending, self._pending_tool = self._pending_tool, None
+        if pending is not None and (len(calls) != 1 or calls[0][0] != pending[1]):
+            calls = []
+        if not calls:
+            logger.warning("response_template: dropping malformed or cut-off tool call")
+            if pending is not None:
+                self.incomplete_tool_call_indices.add(pending[0])
+        elif pending is not None:
+            if arguments := calls[0][1]:
+                delta.add_tool_arguments(pending[0], arguments)
+        else:
+            for name, arguments in calls:
+                delta.start_tool_call(
+                    self._allocate_tool_index(),
+                    self.new_tool_call_id(name),
+                    name,
+                    arguments,
+                )
+
+    def _open_tool(self, event: dict[str, Any], delta: _DeltaBuilder) -> None:
+        name = _open_tool_name(self.template, event.get("captures"))
+        if name is None:
+            return
+        index = self._allocate_tool_index()
+        self._pending_tool = (index, name)
+        delta.start_tool_call(index, self.new_tool_call_id(name), name)
+
+    def _allocate_tool_index(self) -> int:
+        index = self._next_tool_index
+        self._next_tool_index += 1
+        return index
+
+
+class ResponseTemplateParser(Parser):
     """Parse reasoning, content, and tool calls with one response template."""
 
+    reasoning_parser_cls: type[ReasoningParser] | None = ResponseTemplateReasoningParser
+    tool_parser_cls: type[ToolParser] | None = ResponseTemplateToolParser
     always_adjust_request = True
-    _parse_reasoning = True
-    _parse_tools = True
     _enable_auto_tools = False
 
     def __init__(
@@ -316,119 +623,35 @@ class ResponseTemplateParser(ParserEngine):
         tools: list[Tool] | None = None,
         *,
         response_template: dict[str, Any] | None = None,
-        parse_reasoning: bool | None = None,
-        parse_tools: bool | None = None,
         enable_auto_tools: bool | None = None,
         **kwargs,
     ) -> None:
-        template = resolve_response_template(tokenizer, response_template)
-        if template is None:
-            raise ValueError(
-                "The hf parser requires `response_template` "
-                "metadata in the tokenizer configuration"
-            )
-        validate_response_template_for_serving(template)
-        self.response_template = _streaming_template(template)
-        self._chat_template_kwargs = kwargs.get("chat_template_kwargs") or {}
-        self._parse_reasoning_enabled = (
-            self._parse_reasoning if parse_reasoning is None else parse_reasoning
-        )
-        self._parse_tools_enabled = (
-            self._parse_tools if parse_tools is None else parse_tools
-        )
-        self._auto_tools_enabled = (
-            self._enable_auto_tools if enable_auto_tools is None else enable_auto_tools
-        )
-        event_engine = ResponseTemplateEventEngine(
-            self.response_template,
-            tools=_as_tool_dicts(tools),
-            parse_reasoning=self._parse_reasoning_enabled,
-            parse_tools=self._parse_tools_enabled,
-            enable_auto_tools=self._auto_tools_enabled,
-        )
+        self.response_template = _serving_template(tokenizer, response_template)
         super().__init__(
-            tokenizer,
-            tools,
-            parser_engine_config=_response_template_engine_config(
-                self.response_template
-            ),
-            streaming_engine=event_engine,
-            **kwargs,
+            tokenizer, tools, response_template=response_template, **kwargs
         )
-        self._reasoning_parser = (
-            cast(Any, self)
-            if self._parse_reasoning_enabled
-            and THINKING_FIELD in self.response_template.fields
-            else None
-        )
-        self._tool_parser = None
+        if enable_auto_tools is not None:
+            self._enable_auto_tools = enable_auto_tools
+        self._tools = _as_tool_dicts(tools)
         tool_field = self.response_template.fields.get(TOOL_FIELD)
         close_literals = (tool_field.close_literals if tool_field else None) or []
+        vocab = tokenizer.get_vocab()
         self._tool_closers = {
             token_id: literal
             for literal in close_literals
-            if (token_id := self.vocab.get(literal)) is not None
+            if (token_id := vocab.get(literal)) is not None
         }
-        self._reasoning_end_ids = _reasoning_end_ids(
-            tokenizer, self.vocab, self.response_template
-        )
-        self._prompt_initialized = False
-        self._stream_reasoning: list[str] | None = None
-        self._stream_content: list[str] | None = None
-        self._active_auto_tools = self._auto_tools_enabled
-
-    @property
-    def _response_engine(self) -> ResponseTemplateEventEngine:
-        return cast(ResponseTemplateEventEngine, self._engine)
-
-    def prepare_structured_tag(self, original_tag, tool_server):
-        return original_tag
+        self._prompt_token_ids: list[int] | None = None
+        self._prefix = ""
+        self._stream: _ResponseStream | None = None
 
     def set_prompt_token_ids(self, prompt_token_ids: Sequence[int]) -> None:
-        prefix = _decode(self.model_tokenizer, prompt_token_ids)
-        if self._prompt_initialized and prefix == self._response_engine.prefix:
+        prompt_token_ids = list(prompt_token_ids)
+        if prompt_token_ids == self._prompt_token_ids:
             return
-        self._prompt_initialized = True
-        self._response_engine.prefix = prefix
-        self._reset()
-        self._stream_reasoning = None
-        self._stream_content = None
-
-    def adjust_initial_state_from_prompt(
-        self,
-        prompt_token_ids: Sequence[int],
-    ) -> None:
-        self.set_prompt_token_ids(prompt_token_ids)
-
-    def _preprocess_feed(
-        self,
-        delta_text: str,
-        delta_token_ids: Sequence[int],
-    ) -> tuple[str, Sequence[int]]:
-        # A tool closer that stops generation is dropped from the text but kept in
-        # the token ids; restore it so the call is not mistaken for a cut-off one.
-        closer = (
-            self._tool_closers.get(delta_token_ids[-1]) if delta_token_ids else None
-        )
-        if closer is not None and not delta_text.endswith(closer):
-            delta_text += closer
-        return delta_text, delta_token_ids
-
-    def _check_skip_tool_parsing(
-        self,
-        request: ChatCompletionRequest | ResponsesRequest,
-    ) -> None:
-        self._suppress_tool_calls = False
-        self._response_engine.tool_parsing_enabled = (
-            self._parse_tools_enabled
-            and _tool_parsing_enabled(
-                request, enable_auto_tools=self._active_auto_tools
-            )
-        )
-
-    def _fix_arg_types(self, args_json: str, func_name: str) -> str:
-        del func_name
-        return args_json
+        self._prompt_token_ids = prompt_token_ids
+        self._prefix = _decode(self.model_tokenizer, prompt_token_ids)
+        self._stream = None
 
     def adjust_request(
         self,
@@ -443,7 +666,7 @@ class ResponseTemplateParser(ParserEngine):
         if hasattr(request, "spaces_between_special_tokens"):
             request.spaces_between_special_tokens = False
         if (
-            self._parse_tools_enabled
+            self._tool_parser is not None
             and request.tools
             and request.tool_choice != "none"
             and (unsupported := _unsupported_tool_guarantee(request)) is not None
@@ -457,33 +680,9 @@ class ResponseTemplateParser(ParserEngine):
         return request
 
     def is_reasoning_end(self, input_ids: list[int]) -> bool:
-        if not self._parse_reasoning_enabled:
-            return True
-        try:
-            parser = ResponseParser(
-                self.response_template,
-                prefix=_decode(self.model_tokenizer, input_ids),
-            )
-        except Exception:
-            return False
-        return _reasoning_has_ended(
-            parser,
-            self.response_template,
-            thinking_disabled=not self._chat_template_kwargs.get(
-                "enable_thinking", True
-            ),
-        )
-
-    def is_reasoning_end_streaming(
-        self, input_ids: list[int], delta_ids: list[int]
-    ) -> bool:
-        if not self._parse_reasoning_enabled:
-            return True
-        if self._reasoning_end_ids is None:
-            return self.is_reasoning_end(input_ids)
-        return any(
-            _ends_within(input_ids, end_ids, len(delta_ids))
-            for end_ids in self._reasoning_end_ids
+        return (
+            self._reasoning_parser is None
+            or self._reasoning_parser.is_reasoning_end(input_ids)
         )
 
     def parse(
@@ -493,30 +692,29 @@ class ResponseTemplateParser(ParserEngine):
         enable_auto_tools: bool = False,
         model_output_token_ids: Sequence[int] = (),
     ) -> tuple[str | None, str | None, list[FunctionCall] | None]:
-        # A finished stream has consumed the engine state, so return what it streamed.
-        if self._stream_content is not None and self._response_engine.finalized:
-            tool_call_info = self._build_extracted_result()
-            tool_calls = [
-                FunctionCall(
-                    id=tool_call.id,
-                    name=tool_call.function.name,
-                    arguments=tool_call.function.arguments,
-                )
-                for tool_call in tool_call_info.tool_calls
-            ]
-            return (
-                "".join(self._stream_reasoning or ()) or None,
-                "".join(self._stream_content) or None,
-                tool_calls or None,
-            )
-        self._active_auto_tools = enable_auto_tools
-        self._response_engine.stream_tool_names = False
-        return super().parse(
-            model_output,
+        self._initialize_history_tool_call_cnt(request)
+        stream = self._new_stream(
             request,
             enable_auto_tools=enable_auto_tools,
-            model_output_token_ids=model_output_token_ids,
+            include_reasoning=True,
+            stream_tool_names=False,
         )
+        delta = stream.feed(
+            self._restore_stop_closer(model_output, model_output_token_ids),
+            finished=True,
+        )
+        if delta is None:
+            return None, None, None
+        tool_calls = [
+            FunctionCall(
+                id=call.id,
+                name=call.function.name or "",
+                arguments=call.function.arguments or "{}",
+            )
+            for call in delta.tool_calls
+            if call.function is not None
+        ]
+        return delta.reasoning, delta.content, tool_calls or None
 
     def parse_delta(
         self,
@@ -527,37 +725,61 @@ class ResponseTemplateParser(ParserEngine):
         *,
         finished: bool,
     ) -> DeltaMessage | None:
-        if not self._prompt_initialized and prompt_token_ids is not None:
+        self._initialize_history_tool_call_cnt(request)
+        if self._prompt_token_ids is None and prompt_token_ids is not None:
             self.set_prompt_token_ids(prompt_token_ids)
-        self._prompt_streaming_prepared = True
-        self._active_auto_tools = self._auto_tools_enabled
-        self._response_engine.stream_tool_names = True
-        if self._stream_content is None:
-            self._stream_reasoning = []
-            self._stream_content = []
-
-        delta = super().parse_delta(
-            delta_text,
-            delta_token_ids,
-            request,
-            prompt_token_ids=None,
+        if self._stream is None:
+            self._stream = self._new_stream(
+                request,
+                enable_auto_tools=self._enable_auto_tools,
+                include_reasoning=request.include_reasoning,
+                stream_tool_names=True,
+            )
+        return self._stream.feed(
+            self._restore_stop_closer(delta_text, delta_token_ids),
             finished=finished,
         )
 
-        if delta is not None:
-            if delta.reasoning:
-                assert self._stream_reasoning is not None
-                self._stream_reasoning.append(delta.reasoning)
-            if delta.content:
-                self._stream_content.append(delta.content)
-        return delta
-
     @property
     def incomplete_tool_call_indices(self) -> set[int]:
-        return self._response_engine.incomplete_tool_call_indices
+        if self._stream is None:
+            return set()
+        return set(self._stream.incomplete_tool_call_indices)
 
+    def _new_stream(
+        self,
+        request: ChatCompletionRequest | ResponsesRequest,
+        *,
+        enable_auto_tools: bool,
+        include_reasoning: bool,
+        stream_tool_names: bool,
+    ) -> _ResponseStream:
+        return _ResponseStream(
+            self.response_template,
+            prefix=self._prefix,
+            tools=self._tools,
+            parse_reasoning=self._reasoning_parser is not None,
+            include_reasoning=include_reasoning,
+            parse_tools=self._tool_parser is not None
+            and _tool_parsing_enabled(request, enable_auto_tools=enable_auto_tools),
+            stream_tool_names=stream_tool_names,
+            new_tool_call_id=self._new_tool_call_id,
+        )
 
-ResponseTemplateReasoningParser, ResponseTemplateToolParser = make_adapters(
-    ResponseTemplateParser
-)
-ResponseTemplateToolParser.supports_required_and_named = False
+    def _new_tool_call_id(self, name: str) -> str:
+        state = self._stream_state
+        tool_call_id = make_tool_call_id(
+            id_type=state.tool_call_id_type,
+            func_name=name,
+            idx=state.history_tool_call_cnt,
+        )
+        state.history_tool_call_cnt += 1
+        return tool_call_id
+
+    def _restore_stop_closer(self, text: str, token_ids: Sequence[int]) -> str:
+        # A tool closer that stops generation is dropped from the text but kept in
+        # the token ids; restore it so the call is not mistaken for a cut-off one.
+        closer = self._tool_closers.get(token_ids[-1]) if token_ids else None
+        if closer is not None and not text.endswith(closer):
+            text += closer
+        return text

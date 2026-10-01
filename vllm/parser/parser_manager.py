@@ -155,8 +155,6 @@ class ParserManager:
                 reasoning_parser_cls = r_cls
                 tool_parser_cls = t_cls
                 tool_strict_level = strict_level
-                _parse_reasoning = r_cls is not None
-                _parse_tools = t_cls is not None
                 _enable_auto_tools = auto_tools
 
             return _ResponseTemplateParser

@@ -10,7 +10,7 @@ any changes to the serving layer itself.
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Iterator, Sequence
+from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from typing import TYPE_CHECKING
 
@@ -64,13 +64,6 @@ class ParserEngineReasoningAdapter(ReasoningParser):
 
     def is_reasoning_end(self, input_ids: Sequence[int]) -> bool:
         return self._parser_engine.is_reasoning_end(list(input_ids))
-
-    def is_reasoning_end_streaming(
-        self, input_ids: Sequence[int], delta_ids: Iterable[int]
-    ) -> bool:
-        return self._parser_engine.is_reasoning_end_streaming(
-            list(input_ids), list(delta_ids)
-        )
 
     def find_reasoning_end_offset(self, token_ids: Sequence[int]) -> int | None:
         return self._parser_engine.find_reasoning_end_offset(token_ids)
