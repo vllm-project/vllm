@@ -207,6 +207,83 @@ QWEN4_EXP_SM100_GEMM_PLANS: dict[tuple[int, int], dict[int, SkinnyGemmConfig]] =
 }
 
 
+# GB10 (SM12x) plans for TP2 local shapes, measured on SM121
+# (DGX Spark).  Each config was chosen by exhaustive timing of every
+# valid SkinnyGemmConfig inside CUDA graphs, with weight copies
+# rotated past L2.  See https://github.com/vllm-project/vllm/issues/59605.
+QWEN4_EXP_SM12X_GEMM_PLANS: dict[
+    tuple[int, int], dict[int, SkinnyGemmConfig]
+] = {
+    # Shared-expert gate projection, replicated.
+    (1, 2560): {
+        1: SkinnyGemmConfig(1, 128, 1, k_unroll=4, vector_width=4, static_k=2560),
+    },
+    # GDN fused B/A projection, TP=2.
+    (48, 2560): {
+        1: SkinnyGemmConfig(1, 128, 1, k_unroll=4, vector_width=4, static_k=2560),
+        2: SkinnyGemmConfig(2, 128, 2, k_unroll=4, vector_width=4, static_k=2560),
+        4: SkinnyGemmConfig(4, 128, 1, k_unroll=4, vector_width=4, static_k=2560),
+        8: SkinnyGemmConfig(8, 128, 1, k_unroll=4, vector_width=4, static_k=2560),
+        16: SkinnyGemmConfig(16, 128, 1, k_unroll=2, vector_width=4, static_k=2560),
+    },
+    # HC merged down/injection projection, replicated.
+    (336, 10240): {
+        1: SkinnyGemmConfig(1, 256, 1, k_unroll=4, static_k=10240),
+        2: SkinnyGemmConfig(2, 256, 1, k_unroll=4, static_k=10240),
+        4: SkinnyGemmConfig(4, 256, 2, static_k=10240),
+        8: SkinnyGemmConfig(8, 256, 3, static_k=10240),
+    },
+    # Router projection, TP=2.
+    (512, 2560): {
+        1: SkinnyGemmConfig(1, 128, 2, k_unroll=4, vector_width=4, static_k=2560),
+        2: SkinnyGemmConfig(2, 128, 2, k_unroll=4, vector_width=4, static_k=2560),
+        4: SkinnyGemmConfig(4, 128, 1, k_unroll=4, vector_width=4, static_k=2560),
+    },
+    # Shared-expert fused gate/up and QSA indexer Q/K, replicated.
+    (640, 2560): {
+        1: SkinnyGemmConfig(1, 128, 2, k_unroll=4, vector_width=4, static_k=2560),
+        2: SkinnyGemmConfig(2, 128, 1, k_unroll=4, vector_width=4, static_k=2560),
+        4: SkinnyGemmConfig(4, 128, 1, k_unroll=4, vector_width=4, static_k=2560),
+        8: SkinnyGemmConfig(8, 128, 1, k_unroll=4, vector_width=4, static_k=2560),
+    },
+    # GDN and QSA output projections, TP=2.
+    (2560, 3072): {
+        1: SkinnyGemmConfig(1, 128, 2, k_unroll=2, vector_width=4, static_k=3072),
+        2: SkinnyGemmConfig(2, 64, 2, k_unroll=2, static_k=3072),
+        4: SkinnyGemmConfig(4, 64, 2, k_unroll=2, static_k=3072),
+    },
+    # QSA fused QKV/gate projection, TP=2.
+    (6656, 2560): {
+        1: SkinnyGemmConfig(1, 128, 4, k_unroll=2, vector_width=4, static_k=2560),
+        2: SkinnyGemmConfig(2, 128, 4, k_unroll=2, vector_width=4, static_k=2560),
+        4: SkinnyGemmConfig(4, 64, 2, k_unroll=4, vector_width=4, static_k=2560),
+    },
+    # GDN fused QKVZ projection, TP=2.
+    (8192, 2560): {
+        1: SkinnyGemmConfig(1, 128, 2, vector_width=4, static_k=2560),
+        2: SkinnyGemmConfig(2, 64, 2, k_unroll=2, static_k=2560),
+        4: SkinnyGemmConfig(4, 64, 2, k_unroll=4, vector_width=4, static_k=2560),
+    },
+    # HC up projection, TP=2.  K=320 only supports block_size=32,
+    # vector_width=2; M=16 loses to cuBLAS.
+    (10240, 320): {
+        1: SkinnyGemmConfig(1, 32, 2, k_unroll=2, vector_width=2),
+        2: SkinnyGemmConfig(2, 32, 2, k_unroll=2, vector_width=2),
+        4: SkinnyGemmConfig(4, 32, 2, k_unroll=2, vector_width=2),
+        8: SkinnyGemmConfig(8, 32, 1, k_unroll=2, vector_width=2),
+    },
+    # LM head, TP=2.
+    (124160, 2560): {
+        1: SkinnyGemmConfig(1, 128, 2, k_unroll=4, vector_width=4),
+        2: SkinnyGemmConfig(2, 64, 2, k_unroll=2),
+    },
+}
+
+
+def _is_sm12x() -> bool:
+    return current_platform.is_device_capability_family(120)
+
+
 def _is_sm100() -> bool:
     return current_platform.is_device_capability((10, 0))
 
@@ -220,6 +297,8 @@ def _is_sm90() -> bool:
 
 
 def _gemm_plans() -> dict[tuple[int, int], dict[int, SkinnyGemmConfig]]:
+    if _is_sm12x():
+        return QWEN4_EXP_SM12X_GEMM_PLANS
     if _is_sm103():
         return QWEN4_EXP_GEMM_PLANS
     if _is_sm100():
