@@ -5,7 +5,6 @@ pull_request_rules:
     - label != stale
     - -closed
     - or:
-      - files~=^[^/]+\.md$
       - files~=^docs/
       - files~=^examples/
   actions:
