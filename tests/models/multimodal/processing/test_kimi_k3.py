@@ -38,14 +38,10 @@ def _noise_image(width: int, height: int) -> Image.Image:
     ("width", "height"),
     [(310, 470), (7300, 30), (13, 9)],
 )
-def test_fused_image_processor_matches_hf(
-    image_processors, width: int, height: int
-):
+def test_fused_image_processor_matches_hf(image_processors, width: int, height: int):
     fused, hf = image_processors
     image = _noise_image(width, height)
-    expected = hf.preprocess(
-        [{"type": "image", "image": image}], return_tensors="pt"
-    )
+    expected = hf.preprocess([{"type": "image", "image": image}], return_tensors="pt")
     actual = fused.preprocess([{"type": "image", "image": image}], return_tensors="pt")
 
     torch.testing.assert_close(actual["grid_thws"], expected["grid_thws"])

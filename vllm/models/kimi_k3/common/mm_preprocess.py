@@ -29,10 +29,10 @@ from vllm.multimodal.processing import (
 )
 from vllm.transformers_utils.configs.kimi_k3 import KimiK3Config
 from vllm.transformers_utils.processor import cached_get_image_processor
+from vllm.transformers_utils.processors.kimi_k3 import KimiK3Processor
 from vllm.transformers_utils.processors.kimi_k25_vision_fused import (
     KimiK25FusedVisionProcessor,
 )
-from vllm.transformers_utils.processors.kimi_k3 import KimiK3Processor
 
 logger = init_logger(__name__)
 
