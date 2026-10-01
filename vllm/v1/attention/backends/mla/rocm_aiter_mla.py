@@ -24,7 +24,6 @@ from vllm.model_executor.layers.attention.mla_attention import (
     QueryLenSupport,
 )
 from vllm.platforms import current_platform
-from vllm.platforms.rocm import on_gfx942
 from vllm.triton_utils import tl, triton
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.math_utils import cdiv, largest_power_of_2_divisor
@@ -244,6 +243,8 @@ def _segmented_dcp_verify_supported(dcp_world_size: int, cp_interleave: int) -> 
     gfx942 uses generic split-KV Triton instead: AITER segmented MLA is
     LDS-unsafe at TILE-128 on that arch.
     """
+    from vllm.platforms.rocm import on_gfx942
+
     return (
         dcp_world_size > 1
         and cp_interleave == 1
@@ -260,6 +261,8 @@ def _triton_dcp_verify_supported(dcp_world_size: int, cp_interleave: int) -> boo
     speculative method: gfx942 has no cprr kernel and segmented TILE-128 is
     LDS-unsafe. qlen==1 and non-causal stay on the plain ASM decode.
     """
+    from vllm.platforms.rocm import on_gfx942
+
     return on_gfx942() and dcp_world_size > 1 and cp_interleave == 1
 
 
@@ -1243,15 +1246,18 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
             f"DCP verify needs {max_local_blocks} blocks per request but the "
             f"block table only has {block_table.shape[1]}"
         )
-        subpage_offsets = torch.arange(
-            pages_per_block,
-            dtype=block_table.dtype,
-            device=block_table.device,
-        )
-        per_req_page_table = (
-            block_table[:num_reqs, :max_local_blocks, None] * pages_per_block
-            + subpage_offsets
-        ).flatten(1)[:, :max_local_pages]
+        if pages_per_block == 1:
+            per_req_page_table = block_table[:num_reqs, :max_local_pages]
+        else:
+            subpage_offsets = torch.arange(
+                pages_per_block,
+                dtype=block_table.dtype,
+                device=block_table.device,
+            )
+            per_req_page_table = (
+                block_table[:num_reqs, :max_local_blocks, None] * pages_per_block
+                + subpage_offsets
+            ).flatten(1)[:, :max_local_pages]
         # Broadcast the request's page list across its rows instead of
         # materializing a repeat_interleave copy.
         row_block_table.unflatten(0, (num_reqs, qlen)).copy_(
@@ -2241,8 +2247,7 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
 
     def _forward_triton_dcp_verify(
         self,
-        q_nope: torch.Tensor,
-        q_pe: torch.Tensor,
+        q_mla: torch.Tensor,
         verify: AiterMLADCPVerifyMetadata,
         kv_c_and_k_pe_cache: torch.Tensor,
         layer: AttentionLayer,
@@ -2250,7 +2255,7 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """gfx942 causal verify using the LDS-safe generic split-KV kernel."""
         return triton_mla_decode_forward(
-            torch.cat([q_nope, q_pe], dim=-1),
+            q_mla,
             kv_c_and_k_pe_cache,
             verify.block_table,
             verify.row_lens,
@@ -2376,7 +2381,24 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
             return o, None
 
         dcp_route = decode.dcp_route
-        if _is_row_view_dcp_route(dcp_route):
+        if dcp_route is _DCPDecodeRoute.TRITON:
+            verify = decode.dcp_verify
+            assert verify is not None
+            q_mla = torch.cat(q, dim=-1) if isinstance(q, tuple) else q
+            if (
+                is_quantized_kv_cache(self.kv_cache_dtype)
+                and q_mla.dtype != torch.bfloat16
+            ):
+                q_mla = q_mla.to(torch.bfloat16) * layer._q_scale
+            return self._forward_triton_dcp_verify(
+                q_mla,
+                verify,
+                kv_c_and_k_pe_cache,
+                layer,
+                decode.attn_out_dtype,
+            )
+
+        if dcp_route is _DCPDecodeRoute.SEGMENTED:
             verify = decode.dcp_verify
             assert verify is not None
             if type(q) is tuple:
@@ -2391,15 +2413,6 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
             ):
                 q_nope = q_nope.to(torch.bfloat16) * layer._q_scale
                 q_pe = q_pe.to(torch.bfloat16) * layer._q_scale
-            if dcp_route is _DCPDecodeRoute.TRITON:
-                return self._forward_triton_dcp_verify(
-                    q_nope,
-                    q_pe,
-                    verify,
-                    kv_c_and_k_pe_cache,
-                    layer,
-                    decode.attn_out_dtype,
-                )
             return self._forward_segmented_dcp_verify(
                 q_nope,
                 q_pe,

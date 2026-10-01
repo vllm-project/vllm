@@ -1321,7 +1321,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
     ),
     # Kernel for causal multi-token (spec-decode) verify steps under decode
     # context parallelism on gfx950: "asm" uses AITER's round-robin ASM
-    # decode, "segmented" the Triton segmented MLA path.
+    # decode, "segmented" the Triton segmented MLA path. Ignored on gfx942,
+    # which always uses the generic Triton split-KV decode for these steps.
     "VLLM_ROCM_AITER_MLA_DCP_VERIFY": env_with_choices(
         "VLLM_ROCM_AITER_MLA_DCP_VERIFY",
         "segmented",

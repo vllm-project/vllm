@@ -14,9 +14,9 @@ from vllm.platforms import current_platform
 if not current_platform.is_rocm():
     pytest.skip("ROCm AITER MLA tests", allow_module_level=True)
 
-from vllm.v1.attention.backends.mla import (
-    rocm_aiter_mla,  # noqa: E402
-    triton_mla,  # noqa: E402
+from vllm.v1.attention.backends.mla import (  # noqa: E402
+    rocm_aiter_mla,
+    triton_mla,
 )
 from vllm.v1.attention.backends.mla.rocm_aiter_mla import (  # noqa: E402
     AiterMLAHelper,
@@ -35,7 +35,7 @@ from vllm.v1.attention.ops.rocm_aiter_mla_merge import (  # noqa: E402
 @pytest.fixture(autouse=True)
 def default_to_non_gfx942(monkeypatch):
     """Keep architecture-neutral routing tests independent of the test host."""
-    monkeypatch.setattr(rocm_aiter_mla, "on_gfx942", lambda: False)
+    monkeypatch.setattr("vllm.platforms.rocm.on_gfx942", lambda: False)
 
 
 class _NoOpTritonKernel:
@@ -584,7 +584,7 @@ def test_gfx942_dcp_verify_build_uses_triton_fallback(monkeypatch):
 def test_gfx942_causal_verify_without_dcp_keeps_aiter(monkeypatch):
     """Independent DSpark on gfx942 already served causal qlen>1 on ASM."""
     qlen = 4
-    monkeypatch.setattr(rocm_aiter_mla, "on_gfx942", lambda: True)
+    monkeypatch.setattr("vllm.platforms.rocm.on_gfx942", lambda: True)
     get_mla_metadata_v1 = mock.MagicMock()
     monkeypatch.setitem(
         sys.modules,
@@ -621,7 +621,7 @@ def test_gfx942_single_token_dcp_decode_keeps_aiter(monkeypatch, mtp_decode_qlen
     speculative server's qlen==1 step is the same asm call as a plain DCP
     server's. Eagle and DSpark both take this path outside verification.
     """
-    monkeypatch.setattr(rocm_aiter_mla, "on_gfx942", lambda: True)
+    monkeypatch.setattr("vllm.platforms.rocm.on_gfx942", lambda: True)
     get_mla_metadata_v1 = mock.MagicMock()
     monkeypatch.setitem(
         sys.modules,
@@ -662,7 +662,7 @@ def test_gfx942_non_causal_dcp_block_stays_on_asm(monkeypatch):
     does take Triton; this guards the other half of that split.
     """
     qlen = 4
-    monkeypatch.setattr(rocm_aiter_mla, "on_gfx942", lambda: True)
+    monkeypatch.setattr("vllm.platforms.rocm.on_gfx942", lambda: True)
     get_mla_metadata_v1 = mock.MagicMock()
     monkeypatch.setitem(
         sys.modules,
@@ -1112,8 +1112,7 @@ def test_gfx942_triton_dcp_verify_matches_causal_attention(kv_dtype):
         impl._sm_count = current_platform.num_compute_units()
         partials.append(
             impl._forward_triton_dcp_verify(
-                q_nope,
-                q_pe,
+                torch.cat([q_nope, q_pe], dim=-1),
                 view,
                 kv_cache,
                 SimpleNamespace(_k_scale=torch.tensor(kv_scale, device=device)),
