@@ -233,6 +233,7 @@ class VocabParallelEmbedding(PluggableLayer):
         quant_config: quant config for the layer
         prefix: full name of the layer in the state dict
         disable_tp: If true, tensor parallelism will be disabled for this layer.
+
     """  # noqa: E501
 
     # --8<-- [end:vocab_parallel_embedding]
@@ -533,6 +534,7 @@ class ParallelLMHead(VocabParallelEmbedding):
         org_num_embeddings: original vocabulary size (without LoRA).
         padding_size: padding size for the vocabulary.
         disable_tp: If true, tensor parallelism will be disabled for this layer.
+
     """
 
     # --8<-- [end:parallel_lm_head]
