@@ -119,10 +119,6 @@ class NixlBaseConnectorScheduler:
         # Reqs to send and their expiration time
         self._reqs_need_send: dict[ReqId, float] = {}
         self._reqs_in_batch: set[ReqId] = set()
-        # Reqs whose remote KV read was handed to the workers but has not
-        # completed. Split DRAM/VRAM reads notify P only once a worker polls
-        # them done, so the engine must keep stepping even while paused.
-        self._reqs_recving: set[ReqId] = set()
         # Reqs to remove from processed set because they're not to send after
         # remote prefill or aborted.
         self._reqs_not_processed: set[ReqId] = set()
@@ -490,8 +486,6 @@ class NixlBaseConnectorScheduler:
             awaiting_kvs,
         ) in self._reqs_need_recv.items():
             assert req.kv_transfer_params is not None
-            if awaiting_kvs:
-                self._reqs_recving.add(req_id)
             meta.add_new_req_to_recv(
                 request_id=req_id,
                 local_block_ids=block_ids,
@@ -530,10 +524,9 @@ class NixlBaseConnectorScheduler:
         """Stop heartbeating for requests whose KV transfer completed."""
         for req_id in connector_output.finished_recving or ():
             self._stop_heartbeat(req_id)
-            self._reqs_recving.discard(req_id)
 
     def has_pending_push_work(self) -> bool:
-        return bool(self._reqs_recving)
+        return False
 
     ############################################################
     # Abstract methods that subclasses must implement
