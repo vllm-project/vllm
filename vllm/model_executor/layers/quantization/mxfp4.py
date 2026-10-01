@@ -23,7 +23,6 @@ from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
     Mxfp4MoeBackend,
     convert_gpt_oss_weight_to_mxfp4_moe_kernel_format,
     convert_weight_to_mxfp4_moe_kernel_format,
-    deepseek_v41_humming_activation_key,
     make_mxfp4_moe_kernel,
     make_mxfp4_moe_quant_config,
     mxfp4_round_up_hidden_size_and_intermediate_size,
@@ -486,16 +485,6 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
 
         self.weight_dtype = "mxfp4"
         self.mxfp4_backend, self.experts_cls = select_deepseek_v4_mxfp4_moe_backend(moe)
-        self.humming_activation_key = (
-            deepseek_v41_humming_activation_key(moe)
-            if self.mxfp4_backend == Mxfp4MoeBackend.HUMMING
-            else None
-        )
-        if self.humming_activation_key is not None:
-            logger.info_once(
-                "DeepSeek V4.1 on SM90: using Humming MoE with per-token FP8 "
-                "activations by default."
-            )
 
         self.max_capture_size = moe.max_capture_size
 
@@ -748,7 +737,6 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
                 _cache_permute_indices=self._cache_permute_indices,
                 activation=self.moe.activation,
                 use_separated_a4w4=self.moe.use_mxfp4_w4a4_dsv4,
-                humming_activation_key=self.humming_activation_key,
             )
         )
 
