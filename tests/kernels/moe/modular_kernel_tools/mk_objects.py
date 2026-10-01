@@ -448,24 +448,6 @@ if cutlass_fp4_supported() or has_flashinfer_cutlass_fused_moe():
     ]
 
 
-def _slice(rank: int, num_local_experts: int, t: torch.Tensor) -> torch.Tensor:
-    s = rank * num_local_experts
-    e = s + num_local_experts
-    return t[s:e]
-
-
-def make_cutlass_strides(
-    e: int,
-    n: int,
-    k: int,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    ab_strides1 = torch.full((e,), k, device="cuda", dtype=torch.int64)
-    ab_strides2 = torch.full((e,), n, device="cuda", dtype=torch.int64)
-    c_strides1 = torch.full((e,), 2 * n, device="cuda", dtype=torch.int64)
-    c_strides2 = torch.full((e,), k, device="cuda", dtype=torch.int64)
-    return ab_strides1, ab_strides2, c_strides1, c_strides2
-
-
 def make_fused_experts(
     fused_experts_type: mk.FusedMoEExpertsModular,
     moe: FusedMoEConfig,

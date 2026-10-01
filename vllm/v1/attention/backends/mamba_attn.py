@@ -70,6 +70,9 @@ class BaseMambaAttentionMetadata:
     # last_chunk_indices_p is a tensor of shape (batch,) that contains the
     # index of the last chunk for every sequence in the (prefill) batch.
     last_chunk_indices_p: torch.Tensor | None = None
+    # Number of block-aligned SSM states the prefill path writes, i.e.
+    # sum(block_idx_last_scheduled_token_p - block_idx_first_scheduled_token_p).
+    num_state_writes_p: int = 0
 
     # The following attributes are for triton implementation of causal_conv1d
     nums_dict: dict | None = None
@@ -84,6 +87,8 @@ class BaseMambaAttentionMetadata:
     bc_pre_scratch: torch.Tensor | None = None
     # ReplaySSM — FlashInfer checkpointing_ssu two-kernel scratch.
     replayssm_scratch: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None
+    # Contiguous cache-slot indices shared by all FlashInfer ReplaySSM layers.
+    replayssm_state_indices_d: torch.Tensor | None = None
 
 
 class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
@@ -94,6 +99,7 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
 
     # Will be disabled if speculative decoding is used
     supports_update_block_table: bool = True
+    needs_causal_conv1d_metadata: bool = True
 
     def __init__(
         self,
@@ -178,6 +184,7 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
         self.decode_replayssm_scratch: (
             tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None
         ) = None
+        self.decode_replayssm_state_indices_d: torch.Tensor | None = None
         # ReplaySSM CUDA-graph buffers for the selected backend.
         if self.use_replayssm and not self.use_flashinfer_replayssm:
             self.decode_write_pos_d: torch.Tensor = torch.empty(
@@ -214,10 +221,16 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
             self.decode_replayssm_scratch = allocate_checkpointing_ssu_scratch(
                 batch_size=scheduler_config.max_num_seqs,
                 num_heads=nheads,
-                num_predicted_tokens=1,
+                num_predicted_tokens=1 + self.num_spec_tokens,
                 max_window=self.replayssm_buffer_len,
                 dtype=vllm_config.model_config.dtype,
                 device=device,
+            )
+            # Full CUDA graphs retain capture-time tensor addresses. Keep the
+            # contiguous first-column view used by FlashInfer in a persistent
+            # buffer and refresh its contents before each replay.
+            self.decode_replayssm_state_indices_d = torch.empty(
+                (self.decode_cudagraph_max_bs,), dtype=torch.int32, device=device
             )
 
         self._init_reorder_batch_threshold(1, self.use_spec_decode)
@@ -348,8 +361,10 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
 
     def _prefill_cpu_metadata(
         self,
-        common: M,
         common_attn_metadata: CommonAttentionMetadata,
+        num_reqs: int,
+        num_prefills: int,
+        num_decode_tokens: int,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Prefill context lengths and query offsets, from CPU data only.
 
@@ -361,11 +376,9 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
         """
         seq_lens_cpu = common_attn_metadata.seq_lens_cpu_upper_bound
         assert seq_lens_cpu is not None
-        num_reqs = common.num_reqs
-        num_prefills = common.num_prefills
         query_start_loc_p_cpu = (
             common_attn_metadata.query_start_loc_cpu[-num_prefills - 1 :]
-            - common.num_decode_tokens
+            - num_decode_tokens
         )
         prefill_query_lens_cpu = query_start_loc_p_cpu[1:] - query_start_loc_p_cpu[:-1]
         num_computed_tokens_p_cpu = (
@@ -385,7 +398,10 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
         num_prefills = common.num_prefills
 
         num_computed_tokens_p_cpu, query_start_loc_p_cpu = self._prefill_cpu_metadata(
-            common, common_attn_metadata
+            common_attn_metadata,
+            common.num_reqs,
+            num_prefills,
+            common.num_decode_tokens,
         )
 
         cu_chunk_seqlen, seq_idx, last_chunk_indices = self._compute_chunk_metadata(
@@ -533,6 +549,7 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
         block_idx_last_computed_token = None
         block_idx_last_scheduled_token = None
         block_idx_last_scheduled_token_prev_step = None
+        num_state_writes_p = 0
 
         # for causal_conv1d
         nums_dict, batch_ptr, token_chunk_offset_ptr = None, None, None
@@ -584,22 +601,21 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
             ]
             state_indices_tensor_p = state_indices_tensor_p[:, 0]
 
-        # Sometimes even with specdec enabled we get single-token prefill chunks that
-        # should be treated as decodes but don't have num_accepted_tokens set.
-        # These should be fine to process as non-spec decodes since there's only
-        # one token, so no risk of placing accepted tokens in the wrong slot.
-        if num_decodes > 0 and self.use_spec_decode and num_accepted_tokens is not None:
+        if num_decodes > 0 and self.use_spec_decode:
             query_start_loc_d = common_attn_metadata.query_start_loc[: num_decodes + 1]
-            num_accepted_tokens = num_accepted_tokens[:num_decodes]
+            if num_accepted_tokens is None:
+                # Single-token prefill chunks can be reclassified as decodes before
+                # speculative decoding has produced acceptance counts. Treat each
+                # token as accepted so recurrent state and ReplaySSM trackers follow
+                # the normal speculative-decode path.
+                num_accepted_tokens = torch.diff(query_start_loc_d)
+            else:
+                num_accepted_tokens = num_accepted_tokens[:num_decodes]
 
         if num_prefills > 0:
             if num_computed_tokens is None:
                 num_computed_tokens = common_attn_metadata.compute_num_computed_tokens()
 
-            query_start_loc_p_cpu = (
-                common_attn_metadata.query_start_loc_cpu[-num_prefills - 1 :]
-                - num_decode_tokens
-            )
             query_start_loc_p = (
                 common_attn_metadata.query_start_loc[-num_prefills - 1 :]
                 - num_decode_tokens
@@ -608,12 +624,17 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
                 num_computed_tokens[num_reqs - num_prefills : num_reqs] > 0
             )
 
-            nums_dict, batch_ptr, token_chunk_offset_ptr = (
-                compute_causal_conv1d_metadata(
-                    query_start_loc_p_cpu,
-                    device=common_attn_metadata.query_start_loc.device,
+            if self.needs_causal_conv1d_metadata:
+                query_start_loc_p_cpu = (
+                    common_attn_metadata.query_start_loc_cpu[-num_prefills - 1 :]
+                    - num_decode_tokens
                 )
-            )
+                nums_dict, batch_ptr, token_chunk_offset_ptr = (
+                    compute_causal_conv1d_metadata(
+                        query_start_loc_p_cpu,
+                        device=common_attn_metadata.query_start_loc.device,
+                    )
+                )
 
             if self.vllm_config.cache_config.mamba_cache_mode == "all":
                 assert num_computed_tokens is not None
@@ -624,6 +645,23 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
                 block_idx_first_scheduled_token_p = block_idx_first_scheduled_token[
                     num_reqs - num_prefills : num_reqs
                 ]
+
+                # How many block-aligned states prefill will write: the same
+                # (block_idx_last - block_idx_first) as above, from CPU data so
+                # the mixer needs no D2H read. The -1 in both indices cancels.
+                block_size = self.kv_cache_spec.block_size
+                seq_lens_p_cpu = seq_lens_cpu[num_reqs - num_prefills : num_reqs]
+                num_computed_tokens_p_cpu, _ = self._prefill_cpu_metadata(
+                    common_attn_metadata, num_reqs, num_prefills, num_decode_tokens
+                )
+                num_state_writes_p = int(
+                    (
+                        (seq_lens_p_cpu + block_size - 1) // block_size
+                        - (num_computed_tokens_p_cpu + block_size) // block_size
+                    )
+                    .clamp(min=0)
+                    .sum()
+                )
 
         if self.use_replayssm and not self.use_flashinfer_replayssm and num_decodes > 0:
             decode_base_cpu = common_attn_metadata.replayssm_decode_base_cpu
@@ -728,6 +766,7 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
             query_start_loc_d=query_start_loc_d,
             block_idx_last_scheduled_token=block_idx_last_scheduled_token,
             block_idx_first_scheduled_token_p=block_idx_first_scheduled_token_p,
+            num_state_writes_p=num_state_writes_p,
             block_idx_last_computed_token=block_idx_last_computed_token,
             block_idx_last_scheduled_token_prev_step=(
                 block_idx_last_scheduled_token_prev_step
@@ -761,6 +800,7 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
         is_flush_d = metadata.is_flush_d
         bc_pre_scratch = metadata.bc_pre_scratch
         replayssm_scratch = metadata.replayssm_scratch
+        replayssm_state_indices_d = None
         if (
             metadata.num_prefills == 0
             and metadata.num_decodes <= self.decode_cudagraph_max_bs
@@ -849,6 +889,20 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
                     cumAdt_vec[:padded_bs],
                     cb_old[:padded_bs],
                 )
+                assert self.decode_replayssm_state_indices_d is not None
+                self.decode_replayssm_state_indices_d[:padded_bs].copy_(
+                    state_indices_tensor_d[:, 0], non_blocking=True
+                )
+                replayssm_state_indices_d = self.decode_replayssm_state_indices_d[
+                    :padded_bs
+                ]
+
+        if (
+            self.use_flashinfer_replayssm
+            and state_indices_tensor_d is not None
+            and replayssm_state_indices_d is None
+        ):
+            replayssm_state_indices_d = state_indices_tensor_d[:, 0].contiguous()
 
         return replace(
             metadata,
@@ -859,6 +913,7 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
             is_flush_d=is_flush_d,
             bc_pre_scratch=bc_pre_scratch,
             replayssm_scratch=replayssm_scratch,
+            replayssm_state_indices_d=replayssm_state_indices_d,
             block_idx_last_scheduled_token=block_idx_last_scheduled_token,
             block_idx_last_computed_token=block_idx_last_computed_token,
             block_idx_last_scheduled_token_prev_step=(

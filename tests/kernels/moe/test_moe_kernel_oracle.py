@@ -102,17 +102,22 @@ def test_humming_oracle_selects_for_effective_schemas(
     checkpoint_weight, requantized_weight = object(), object()
     checkpoint_input, requantized_input = object(), object()
     monkeypatch.setattr(
-        oracle.humming_utils,
+        oracle.humming_schema,
+        "check_and_fallback_input_schema",
+        lambda **kwargs: kwargs["input_schema"],
+    )
+    monkeypatch.setattr(
+        oracle.humming_schema,
         "weight_schema_to_quant_key",
-        lambda schema: {
+        lambda schema, param_dtype: {
             checkpoint_weight: kNvfp4Static,
             requantized_weight: kMxfp4Static,
         }[schema],
     )
     monkeypatch.setattr(
-        oracle.humming_utils,
+        oracle.humming_schema,
         "input_schema_to_quant_key",
-        lambda schema: {
+        lambda schema, param_dtype: {
             checkpoint_input: None,
             requantized_input: kInt8DynamicTokenSym,
         }[schema],

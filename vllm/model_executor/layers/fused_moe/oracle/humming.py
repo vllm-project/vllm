@@ -1,12 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Expert selection, weight conversion, and kernel construction for Humming MoE."""
+"""Configure, prepare weights for, and assemble Humming MoE kernels."""
 
 from typing import TYPE_CHECKING, Any
 
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
+import vllm.model_executor.layers.quantization.utils.humming.schema as humming_schema
 from vllm import envs
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.all2all_utils import (
@@ -21,7 +22,12 @@ from vllm.model_executor.layers.fused_moe.experts.fused_humming_moe import (
     HummingGroupedExperts,
     HummingIndexedExperts,
 )
-from vllm.model_executor.layers.quantization.utils import humming_utils
+from vllm.model_executor.layers.quantization.utils.humming.moe import (
+    make_humming_moe_quant_config,
+)
+from vllm.model_executor.layers.quantization.utils.humming.schema import (
+    humming_is_layer_skipped,
+)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     FP8_DTYPE,
     GroupShape,
@@ -67,8 +73,10 @@ def get_humming_moe_quant_config(
         q_dtype is not None
         and q_dtype.startswith("float8")
         and input_scale_group_size == 128
+        and weight_schema.hadamard_block_size <= 1
+        and input_schema.input_quant_mode in (None, "dynamic_group")
     ):
-        q_dtype = humming_utils._HUMMING_TO_QUANT_DTYPE.get(
+        q_dtype = humming_schema._HUMMING_TO_QUANT_DTYPE.get(
             input_schema.a_dtype, FP8_DTYPE
         )
         activation_group_shape = GroupShape(row=1, col=input_scale_group_size)
@@ -86,7 +94,7 @@ def get_humming_moe_quant_config(
     else:
         weight_group_shape = GroupShape(row=weight_scale_group_size, col=1)
 
-    return humming_utils.make_humming_moe_quant_config(
+    config = make_humming_moe_quant_config(
         quant_dtype=q_dtype,
         weight_dtype=str(weight_schema.b_dtype),
         weight_group_shape=weight_group_shape,
@@ -104,6 +112,17 @@ def get_humming_moe_quant_config(
         gemm1_clamp_limit=gemm1_clamp_limit,
         humming_configs=humming_configs,
     )
+    for prefix, sublayer in (("w1", "w13"), ("w2", "w2")):
+        setattr(
+            config,
+            f"{prefix}_hadamard_block_size",
+            layer.weight_schemas[sublayer].hadamard_block_size,
+        )
+        for name in ("input_scale", "input_scale_2"):
+            key = f"{prefix}_{name}"
+            value = getattr(layer, f"{sublayer}_{name}", None)
+            setattr(config, key, value)
+    return config
 
 
 def select_humming_moe_experts(
@@ -112,6 +131,7 @@ def select_humming_moe_experts(
     input_schema: "BaseInputSchema",
     force_weight_schema: "HummingWeightSchema | None" = None,
     force_input_schema: "HummingInputSchema | None" = None,
+    allow_input_schema_fallback: bool = True,
 ) -> type[mk.FusedMoEExperts] | None:
     """Select the primary Humming MoE Experts class
     Note: Shape-specific fallbacks may still occur at runtime.
@@ -119,12 +139,17 @@ def select_humming_moe_experts(
     if not has_humming():
         return None
 
-    # Select for the final schemas, including any requested requantization.
-    weight_key = humming_utils.weight_schema_to_quant_key(
-        force_weight_schema or weight_schema
+    weight_key = humming_schema.weight_schema_to_quant_key(
+        force_weight_schema or weight_schema, config.in_dtype
     )
-    activation_key = humming_utils.input_schema_to_quant_key(
-        force_input_schema or input_schema
+    runtime_input_schema = humming_schema.check_and_fallback_input_schema(
+        weight_schema=force_weight_schema or weight_schema,
+        input_schema=force_input_schema or input_schema,
+        param_dtype=config.in_dtype,
+        allow_fallback=allow_input_schema_fallback,
+    )
+    activation_key = humming_schema.input_schema_to_quant_key(
+        runtime_input_schema, config.in_dtype
     )
 
     # NOTE: the kernels are selected in the following order.
@@ -277,12 +302,6 @@ def _convert_sublayer_to_humming(
         Tuple of (converted_weight_schema, converted_input_schema)
 
     """
-    from vllm.utils.humming import HummingWeightSchema
-
-    if isinstance(weight_schema, HummingWeightSchema):
-        # Already in Humming format
-        return weight_schema, input_schema
-
     tensors = _extract_sublayer_tensors(layer, sublayer_name)
 
     shape_k_stacks = [shape_k]
@@ -298,13 +317,14 @@ def _convert_sublayer_to_humming(
         num_experts=num_experts,
     )
 
-    converted_input_schema, _ = input_schema.convert_humming(
-        tensors=converted_tensors,
+    converted_input_schema, input_tensors = input_schema.convert_humming(
+        tensors=tensors,
         shape_n_stacks=shape_n_stacks,
         shape_k_stacks=shape_k_stacks,
         param_dtype=param_dtype,
         num_experts=num_experts,
     )
+    converted_tensors.update(input_tensors)
 
     _replace_layer_parameters(layer, sublayer_name, converted_tensors)
 
@@ -338,11 +358,16 @@ def _prepare_and_transform_sublayer(
         has_bias=has_bias,
         num_experts=num_experts,
         torch_dtype=param_dtype,
+        device=getattr(layer, f"{sublayer_name}_weight").device,
     )
-    tensors = transform_humming_tensors(
-        config,
-        _extract_sublayer_tensors(layer, sublayer_name),
-    )
+    source_tensors = _extract_sublayer_tensors(layer, sublayer_name)
+    for name in ("input_scale", "input_scale_2"):
+        if name != input_schema.static_tensor_scale_name:
+            source_tensors.pop(name, None)
+    tensors = transform_humming_tensors(config, source_tensors)
+    for name in ("input_scale", "input_scale_2"):
+        if name in source_tensors:
+            tensors[name] = source_tensors[name]
     _replace_layer_parameters(layer, sublayer_name, tensors)
     return config
 
@@ -358,6 +383,7 @@ def _process_single_sublayer(
     num_experts: int,
     param_dtype: torch.dtype,
     force_weight_schema: Any | None = None,
+    allow_input_schema_fallback: bool = True,
 ) -> tuple[Any, Any, "LayerConfig"]:
     """Process a single sublayer: convert, optionally requant, prepare, and transform.
 
@@ -375,6 +401,7 @@ def _process_single_sublayer(
         num_experts: Number of experts
         param_dtype: Parameter data type
         force_weight_schema: Optional schema to force requantization to
+        allow_input_schema_fallback: Whether incompatible input schemas may be replaced.
 
     Returns:
         Tuple of the final weight schema, input schema, and Humming layer config.
@@ -397,19 +424,28 @@ def _process_single_sublayer(
     # Step 2: Force requant if needed
     assert isinstance(current_weight_schema, HummingWeightSchema)
     if force_weight_schema is not None and current_weight_schema != force_weight_schema:
-        tensors = _extract_sublayer_tensors(layer, sublayer_name)
+        source_tensors = _extract_sublayer_tensors(layer, sublayer_name)
 
         tensors = current_weight_schema.requant_tensors(
-            tensors=tensors,
+            tensors=source_tensors,
             target_weight_schema=force_weight_schema,
             param_dtype=param_dtype,
         )
+        name = current_input_schema.static_tensor_scale_name
+        if name is not None:
+            tensors[name] = source_tensors[name]
 
         current_weight_schema = force_weight_schema
         _replace_layer_parameters(layer, sublayer_name, tensors, preserve_bias=True)
         del tensors
 
     # Step 3: Prepare layer metadata and transform weights
+    current_input_schema = humming_schema.check_and_fallback_input_schema(
+        weight_schema=current_weight_schema,
+        input_schema=current_input_schema,
+        param_dtype=param_dtype,
+        allow_fallback=allow_input_schema_fallback,
+    )
     config = _prepare_and_transform_sublayer(
         layer=layer,
         sublayer_name=sublayer_name,
@@ -432,6 +468,7 @@ def convert_to_humming_moe_kernel_format(
     weight_schema: Any | None = None,
     input_schema: Any | None = None,
     force_weight_schema: Any | None = None,
+    allow_input_schema_fallback: bool = True,
 ) -> dict[str, "LayerConfig"]:
     """Convert MoE weights from checkpoint format to Humming kernel format.
 
@@ -454,6 +491,7 @@ def convert_to_humming_moe_kernel_format(
         input_schema: Optional initial input quantization schema.
                      If None, built from quant_config or env vars.
         force_weight_schema: Optional schema to force requantization to
+        allow_input_schema_fallback: Whether incompatible input schemas may be replaced.
 
     Side effects:
         - Modifies layer parameters in place
@@ -472,20 +510,23 @@ def convert_to_humming_moe_kernel_format(
                 "Must provide either weight_schema/input_schema or quant_config"
             )
 
-        from vllm.model_executor.layers.quantization.utils.humming_utils import (
-            humming_is_layer_skipped,
-        )
         from vllm.utils.humming import BaseWeightSchema, HummingInputSchema
 
         if weight_schema is None:
             weight_schema = BaseWeightSchema.from_config(quant_config)
 
         if input_schema is None:
-            input_quant_config = envs.VLLM_HUMMING_INPUT_QUANT_CONFIG or {}
+            input_quant_config = (envs.VLLM_HUMMING_INPUT_QUANT_CONFIG or {}).copy()
             if humming_is_layer_skipped(input_quant_config, layer.layer_name):
                 input_schema = HummingInputSchema()
             else:
                 # TODO: read input_quant_config from quant_config
+                input_quant_config = humming_schema.resolve_humming_layer_config(
+                    input_quant_config, layer.layer_name
+                )
+                allow_input_schema_fallback = input_quant_config.pop(
+                    "allow_fallback", False
+                )
                 input_schema = HummingInputSchema.from_config(input_quant_config)
 
     # Build sublayer configs from layer properties if not provided
@@ -520,6 +561,7 @@ def convert_to_humming_moe_kernel_format(
                 num_experts=num_experts,
                 param_dtype=param_dtype,
                 force_weight_schema=force_weight_schema,
+                allow_input_schema_fallback=allow_input_schema_fallback,
             )
         )
 
