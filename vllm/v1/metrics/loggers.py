@@ -739,15 +739,28 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
                 for idx in engine_indexes
             }
 
+        custom_buckets = vllm_config.observability_config.custom_histogram_buckets
         request_tokens_buckets = histogram_buckets(
-            "request_tokens", max_model_len=max_model_len
+            "request_tokens", max_model_len=max_model_len, overrides=custom_buckets
         )
-        iteration_tokens_buckets = histogram_buckets("iteration_tokens")
-        request_params_n_buckets = histogram_buckets("request_params_n")
-        time_to_first_token_buckets = histogram_buckets("time_to_first_token")
-        inter_token_latency_buckets = histogram_buckets("inter_token_latency")
-        request_latency_buckets = histogram_buckets("request_latency")
-        request_num_preemptions_buckets = histogram_buckets("request_num_preemptions")
+        iteration_tokens_buckets = histogram_buckets(
+            "iteration_tokens", overrides=custom_buckets
+        )
+        request_params_n_buckets = histogram_buckets(
+            "request_params_n", overrides=custom_buckets
+        )
+        time_to_first_token_buckets = histogram_buckets(
+            "time_to_first_token", overrides=custom_buckets
+        )
+        inter_token_latency_buckets = histogram_buckets(
+            "inter_token_latency", overrides=custom_buckets
+        )
+        request_latency_buckets = histogram_buckets(
+            "request_latency", overrides=custom_buckets
+        )
+        request_num_preemptions_buckets = histogram_buckets(
+            "request_num_preemptions", overrides=custom_buckets
+        )
 
         #
         # Histograms of counts
@@ -925,7 +938,9 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
         # KV Cache residency metrics
         #
         if self.kv_cache_metrics_enabled:
-            kv_cache_residency_buckets = histogram_buckets("kv_cache_residency")
+            kv_cache_residency_buckets = histogram_buckets(
+                "kv_cache_residency", overrides=custom_buckets
+            )
 
             histogram_kv_block_lifetime = self._histogram_cls(
                 name="vllm:kv_block_lifetime_seconds",
