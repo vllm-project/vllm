@@ -1610,8 +1610,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # treats topk_id == -1 as a skip sentinel
     "VLLM_MOE_SKIP_PADDING": lambda: bool(int(os.getenv("VLLM_MOE_SKIP_PADDING", "1"))),
     # Test-only limit on assignments per expert per source rank. Unset disables
-    # token dropping; zero drops all assignments. Requires eager execution and
-    # a prepare/finalize backend that supports token dropping.
+    # token dropping; zero drops all assignments. Requires a prepare/finalize
+    # backend that supports token dropping; eager and CUDA graphs are supported.
     "VLLM_TEST_MOE_EXPERT_CAPACITY": lambda: maybe_convert_int(
         os.getenv("VLLM_TEST_MOE_EXPERT_CAPACITY")
     ),

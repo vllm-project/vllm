@@ -49,8 +49,10 @@ env:
   VLLM_TEST_MOE_EXPERT_CAPACITY: "128"
 ```
 
-Use `--enforce-eager` and a compatible modular MoE backend, such as
-`--moe-backend triton`. Unset the variable for the baseline; zero drops all
+Use a compatible modular MoE backend, such as `--moe-backend triton`.
+Token dropping supports eager execution and CUDA graph capture/replay, but
+not direct `torch.compile` tracing of the dropping function.
+Unset the variable for the baseline; zero drops all
 assignments, and negative values are rejected. Prepare/finalize backends that
 do not support token dropping ignore the limit; monolithic kernels reject it.
 Keep concurrency and scheduler batch limits fixed when comparing accuracy.

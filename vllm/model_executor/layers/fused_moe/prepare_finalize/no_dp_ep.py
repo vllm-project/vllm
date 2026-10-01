@@ -40,6 +40,17 @@ def _quantize_input(
 class MoEPrepareAndFinalizeNoDPEPModular(mk.FusedMoEPrepareAndFinalizeModular):
     supports_token_dropping = True
 
+    def __init__(self):
+        super().__init__()
+        self.expert_capacity: int | None = None
+
+    def post_init_setup(self, fused_experts: mk.FusedMoEExperts):
+        self.expert_capacity = fused_experts.expert_capacity
+        self._configure_standard_compaction(
+            fused_experts,
+            self.supports_token_dropping,
+        )
+
     @property
     def activation_format(self) -> mk.FusedMoEActivationFormat:
         return mk.FusedMoEActivationFormat.Standard
@@ -67,17 +78,23 @@ class MoEPrepareAndFinalizeNoDPEPModular(mk.FusedMoEPrepareAndFinalizeModular):
         quant_config: FusedMoEQuantConfig,
         defer_input_quant: bool = False,
     ) -> mk.PrepareResultType:
+        hidden_states, topk_ids, topk_weights = self._compact_standard_dispatch_input(
+            a1,
+            topk_ids,
+            topk_weights,
+            0,
+        )
         if apply_router_weight_on_input:
             topk = topk_ids.size(1)
             # TODO: this only works for topK=1, will need to update for topK>1
             assert topk == 1, (
                 "apply_router_weight_on_input is only implemented for topk=1"
             )
-            a1 = a1 * topk_weights.to(a1.dtype)
+            hidden_states = hidden_states * topk_weights.to(hidden_states.dtype)
 
-        a1q, a1q_scale = _quantize_input(a1, quant_config, defer_input_quant)
+        a1q, a1q_scale = _quantize_input(hidden_states, quant_config, defer_input_quant)
 
-        return a1q, a1q_scale, None, None, None
+        return a1q, a1q_scale, None, topk_ids, topk_weights
 
     def finalize(
         self,
@@ -90,13 +107,24 @@ class MoEPrepareAndFinalizeNoDPEPModular(mk.FusedMoEPrepareAndFinalizeModular):
     ) -> None:
         if isinstance(weight_and_reduce_impl, TopKWeightAndReduceDelegate):
             weight_and_reduce_impl = TopKWeightAndReduceContiguous()
-        weight_and_reduce_impl.apply(
-            output=output,
-            fused_expert_output=fused_expert_output,
-            topk_weights=topk_weights,
-            topk_ids=topk_ids,
-            apply_router_weight_on_input=apply_router_weight_on_input,
-        )
+        if self._is_standard_compacted(0):
+            compact_output = weight_and_reduce_impl.apply(
+                output=None,
+                fused_expert_output=fused_expert_output,
+                topk_weights=topk_weights,
+                topk_ids=topk_ids,
+                apply_router_weight_on_input=apply_router_weight_on_input,
+            )
+            receiver = self._scatter_standard_output(output, compact_output, 0)
+            receiver()
+        else:
+            weight_and_reduce_impl.apply(
+                output=output,
+                fused_expert_output=fused_expert_output,
+                topk_weights=topk_weights,
+                topk_ids=topk_ids,
+                apply_router_weight_on_input=apply_router_weight_on_input,
+            )
 
 
 class MoEPrepareAndFinalizeNoDPEPMonolithic(mk.FusedMoEPrepareAndFinalizeMonolithic):

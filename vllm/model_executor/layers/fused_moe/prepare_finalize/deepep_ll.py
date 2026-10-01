@@ -98,6 +98,7 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         # combine function.
         self.handles: list[tuple | None] = [None, None]
         self.num_dispatchers_ = num_dispatchers
+        self.expert_capacity: int | None = None
 
         topk_indices_dtype = self.topk_indices_dtype()
 
@@ -117,6 +118,13 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         self.use_ue8m0_dispatch = False
 
     def post_init_setup(self, fused_experts: mk.FusedMoEExperts):
+        self._configure_batched_compaction(
+            fused_experts,
+            self.max_tokens_per_rank,
+            self.num_dispatchers_,
+            self.supports_token_dropping,
+            self.use_fp8_dispatch,
+        )
         if not fused_experts.supports_packed_ue8m0_act_scales():
             # Early exit.
             return
@@ -132,6 +140,8 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
                 f"activations despite ({fused_experts.__class__.__name__}) being able "
                 "to support quantized activations.",
             )
+
+        self.expert_capacity = fused_experts.expert_capacity
 
     def num_dispatchers(self) -> int:
         return self.num_dispatchers_
@@ -296,6 +306,8 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
             a1,
             dispatch_topk_ids,
             self.max_tokens_per_rank,
+            # if self.expert_capacity is None
+            # else self.expert_capacity,
             num_experts,
             use_fp8=self.use_fp8_dispatch,
             round_scale=self.use_ue8m0_dispatch,
@@ -319,6 +331,7 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
                 quant_config.a1_scale,
                 a1.dtype,
                 quant_config,
+                a2a_idx,
             ),
         )
 
@@ -329,7 +342,9 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         a1_scale: torch.Tensor | None,
         a1_dtype: torch.dtype,
         quant_config: FusedMoEQuantConfig,
+        a2a_idx: int,
     ) -> mk.PrepareResultType:
+        expert_x = self._compact_batched_experts(expert_x, a2a_idx)
         expert_x, expert_x_scale = self._do_quant(expert_x, a1_dtype, quant_config)
 
         expert_tokens_meta = mk.ExpertTokensMetadata(
@@ -385,6 +400,12 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         handle = self.handles[a2a_idx]
         assert handle is not None
 
+        # receiver = lambda: None
+        fused_expert_output, receiver = self._restore_batched_experts(
+            fused_expert_output,
+            a2a_idx,
+        )
+
         combine_topk_weights = topk_weights
         if apply_router_weight_on_input:
             # weights have already been applied.
@@ -404,7 +425,7 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
             out=output,
         )
 
-        return recv_hook, lambda: None
+        return recv_hook, receiver
 
     def finalize_async(
         self,
@@ -434,7 +455,7 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         apply_router_weight_on_input: bool,
         weight_and_reduce_impl: mk.TopKWeightAndReduce,
     ) -> None:
-        self._finalize(
+        _, receiver = self._finalize(
             output,
             fused_expert_output,
             topk_weights,
@@ -443,3 +464,4 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
             weight_and_reduce_impl,
             do_async=False,
         )
+        receiver()

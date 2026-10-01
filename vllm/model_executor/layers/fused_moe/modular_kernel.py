@@ -5,7 +5,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from enum import Enum
 from math import prod
-from typing import final
+from typing import Protocol, final
 
 import torch
 
@@ -34,6 +34,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
 )
 from vllm.platforms import current_platform
+from vllm.triton_utils import tl, triton
 from vllm.utils.torch_utils import PIN_MEMORY
 from vllm.v1.worker.ubatching import (
     dbo_enabled,
@@ -172,6 +173,59 @@ PrepareMonolithicResultType = tuple[
 
 ReceiverType = Callable[[], PrepareResultType]
 
+
+class SupportsStandardCompaction(Protocol):
+    """Structural interface for standard-format token compaction."""
+
+    def configure(
+        self,
+        experts: "FusedMoEExperts",
+        supports_token_dropping: bool,
+    ) -> None: ...
+
+    def compact_dispatch_input(
+        self,
+        hidden_states: torch.Tensor,
+        topk_ids: torch.Tensor,
+        topk_weights: torch.Tensor,
+        ubatch_id: int,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]: ...
+
+    def is_compacted(self, ubatch_id: int) -> bool: ...
+
+    def scatter_output(
+        self,
+        output: torch.Tensor,
+        compact_output: torch.Tensor,
+        ubatch_id: int,
+    ) -> Callable[[], None]: ...
+
+
+class SupportsBatchedCompaction(Protocol):
+    """Structural interface for batched-expert payload compaction."""
+
+    def configure(
+        self,
+        experts: "FusedMoEExperts",
+        max_tokens_per_rank: int,
+        num_dispatchers: int,
+        supports_token_dropping: bool,
+        use_fp8_dispatch: bool,
+    ) -> None: ...
+
+    def compact(
+        self,
+        x: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
+        ubatch_id: int,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]: ...
+
+    def restore(
+        self,
+        output: torch.Tensor,
+        ubatch_id: int,
+    ) -> tuple[torch.Tensor, Callable[[], None]]: ...
+
+
 ################################################################################
 # Prepare/Finalize
 ################################################################################
@@ -246,6 +300,109 @@ class FusedMoEPrepareAndFinalizeModular(FusedMoEPrepareAndFinalize):
     """
 
     supports_token_dropping: bool = False
+    _standard_compaction: SupportsStandardCompaction | None = None
+    _batched_compaction: SupportsBatchedCompaction | None = None
+
+    def _get_standard_compaction(self) -> SupportsStandardCompaction:
+        if self._standard_compaction is None:
+            if self.activation_format != FusedMoEActivationFormat.Standard:
+                raise RuntimeError(
+                    "Standard compaction requires the standard activation format"
+                )
+            from .prepare_finalize.standard_compaction import (
+                StandardTokenRowCompaction,
+            )
+
+            self._standard_compaction = StandardTokenRowCompaction()
+        return self._standard_compaction
+
+    def _get_batched_compaction(self) -> SupportsBatchedCompaction:
+        if self._batched_compaction is None:
+            if self.activation_format != FusedMoEActivationFormat.BatchedExperts:
+                raise RuntimeError(
+                    "Batched compaction requires the batched-experts format"
+                )
+            from .prepare_finalize.batched_compaction import (
+                BatchedExpertCompaction,
+            )
+
+            self._batched_compaction = BatchedExpertCompaction()
+        return self._batched_compaction
+
+    @property
+    def _compaction(
+        self,
+    ) -> SupportsStandardCompaction | SupportsBatchedCompaction | None:
+        """Return the compactor matching this prepare/finalize format."""
+        if self.activation_format == FusedMoEActivationFormat.Standard:
+            return self._get_standard_compaction()
+        return self._get_batched_compaction()
+
+    def _configure_standard_compaction(
+        self,
+        experts: "FusedMoEExperts",
+        supports_token_dropping: bool,
+    ) -> None:
+        self._get_standard_compaction().configure(experts, supports_token_dropping)
+
+    def _compact_standard_dispatch_input(
+        self,
+        hidden_states: torch.Tensor,
+        topk_ids: torch.Tensor,
+        topk_weights: torch.Tensor,
+        ubatch_id: int,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        return self._get_standard_compaction().compact_dispatch_input(
+            hidden_states,
+            topk_ids,
+            topk_weights,
+            ubatch_id,
+        )
+
+    def _is_standard_compacted(self, ubatch_id: int) -> bool:
+        return self._get_standard_compaction().is_compacted(ubatch_id)
+
+    def _scatter_standard_output(
+        self,
+        output: torch.Tensor,
+        compact_output: torch.Tensor,
+        ubatch_id: int,
+    ) -> Callable[[], None]:
+        return self._get_standard_compaction().scatter_output(
+            output,
+            compact_output,
+            ubatch_id,
+        )
+
+    def _configure_batched_compaction(
+        self,
+        experts: "FusedMoEExperts",
+        max_tokens_per_rank: int,
+        num_dispatchers: int,
+        supports_token_dropping: bool,
+        use_fp8_dispatch: bool,
+    ) -> None:
+        self._get_batched_compaction().configure(
+            experts,
+            max_tokens_per_rank,
+            num_dispatchers,
+            supports_token_dropping,
+            use_fp8_dispatch,
+        )
+
+    def _compact_batched_experts(
+        self,
+        x: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
+        ubatch_id: int,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        return self._get_batched_compaction().compact(x, ubatch_id)
+
+    def _restore_batched_experts(
+        self,
+        output: torch.Tensor,
+        ubatch_id: int,
+    ) -> tuple[torch.Tensor, Callable[[], None]]:
+        return self._get_batched_compaction().restore(output, ubatch_id)
 
     @abstractmethod
     def prepare(
@@ -836,8 +993,8 @@ class FusedMoEExpertsModular(FusedMoEExperts):
         Scratch shapes may use self.expert_capacity as a bound on valid
         assignments per expert per dispatcher, preserving required padding.
         It is None when prepare/finalize does not support token dropping.
-        Standard layouts use the dispatched M directly: support for skipping
-        assignments does not imply that the dispatcher compacts token rows.
+        Standard layouts use the dispatched M directly unless the dispatcher
+        removes rows whose assignments were all dropped.
         The output shape must cover the full dispatched layout regardless of
         capacity.
 
@@ -1075,6 +1232,72 @@ class FusedMoEExpertsMonolithic(FusedMoEExperts):
 ################################################################################
 # Kernel
 ################################################################################
+
+
+_DROP_TOKENS_MAX_ASSIGNMENTS = 16 * 1024
+_DROP_TOKENS_MAX_TOP_K = 8
+
+
+@triton.jit
+def _drop_tokens_kernel(
+    ids_ptr,
+    weights_ptr,
+    output_ids_ptr,
+    output_weights_ptr,
+    dropped_rows_ptr,
+    num_slots,
+    capacity,
+    total_assignments,
+    NUM_SLOTS: tl.constexpr,
+    BLOCK: tl.constexpr,
+):
+    token = tl.program_id(0)
+    slot_offsets = tl.arange(0, NUM_SLOTS)
+    slot_mask = slot_offsets < num_slots
+    assignment_offsets = token * num_slots + slot_offsets
+    experts = tl.load(ids_ptr + assignment_offsets, mask=slot_mask, other=-1)
+    weights = tl.load(
+        weights_ptr + assignment_offsets,
+        mask=slot_mask,
+        other=float("-inf"),
+    )
+    counts = tl.zeros([NUM_SLOTS], dtype=tl.int32)
+
+    for start in range(0, total_assignments, BLOCK):
+        other_offsets = start + tl.arange(0, BLOCK)
+        other_mask = other_offsets < total_assignments
+        other_experts = tl.load(
+            ids_ptr + other_offsets,
+            mask=other_mask,
+            other=-1,
+        )
+        other_weights = tl.load(
+            weights_ptr + other_offsets,
+            mask=other_mask,
+            other=float("-inf"),
+        )
+        same_expert = other_experts[None, :] == experts[:, None]
+        higher_weight = other_weights[None, :] > weights[:, None]
+        equal_weight = other_weights[None, :] == weights[:, None]
+        earlier_assignment = other_offsets[None, :] < assignment_offsets[:, None]
+        higher_priority = same_expert & (
+            higher_weight | (equal_weight & earlier_assignment)
+        )
+        counts += tl.sum(higher_priority.to(tl.int32), axis=1)
+
+    keep = (counts < capacity) & (experts >= 0)
+    tl.store(
+        output_ids_ptr + assignment_offsets,
+        tl.where(keep, experts, -1),
+        mask=slot_mask,
+    )
+    tl.store(
+        output_weights_ptr + assignment_offsets,
+        tl.where(keep, weights, tl.zeros_like(weights)),
+        mask=slot_mask,
+    )
+    dropped_row = tl.sum(keep.to(tl.int32), axis=0) == 0
+    tl.store(dropped_rows_ptr + token, dropped_row, mask=num_slots > 0)
 
 
 @final
@@ -1490,7 +1713,7 @@ class FusedMoEKernelModularImpl:
 
         return output
 
-    def _drop_tokens(
+    def _drop_tokens_reference(
         self,
         topk_ids: torch.Tensor,
         topk_weights: torch.Tensor,
@@ -1506,9 +1729,7 @@ class FusedMoEKernelModularImpl:
         capacity = self.expert_capacity
         if capacity is None:
             return topk_ids, topk_weights, None
-        if torch.compiler.is_compiling() or (
-            topk_ids.is_cuda and torch.cuda.is_current_stream_capturing()
-        ):
+        if torch.compiler.is_compiling():
             raise RuntimeError("Token dropping requires eager execution")
 
         if topk_ids.numel() == 0:
@@ -1538,14 +1759,57 @@ class FusedMoEKernelModularImpl:
         keep_sorted = (sorted_ids >= 0) & (positions - starts < capacity)
         keep = torch.empty_like(keep_sorted)
         keep.scatter_(0, order, keep_sorted)
-        keep = keep.reshape_as(topk_ids)
-        dropped_rows = ~keep.any(dim=1)
+        discard = ~(keep.reshape_as(topk_ids))
+        dropped_rows = discard.all(dim=1)
 
         return (
-            topk_ids.masked_fill(~keep, -1),
-            topk_weights.masked_fill(~keep, 0),
+            topk_ids.masked_fill(discard, -1),
+            topk_weights.masked_fill(discard, 0),
             dropped_rows,
         )
+
+    def _drop_tokens(
+        self,
+        topk_ids: torch.Tensor,
+        topk_weights: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
+        """Cap expert assignments without changing token positions."""
+        capacity = self.expert_capacity
+        if capacity is None or topk_ids.numel() == 0 or capacity == 0:
+            return self._drop_tokens_reference(topk_ids, topk_weights)
+
+        num_tokens, num_slots = topk_ids.shape
+        use_triton = (
+            topk_ids.is_cuda
+            and not torch.compiler.is_compiling()
+            and topk_ids.is_contiguous()
+            and topk_weights.is_contiguous()
+            and num_slots <= _DROP_TOKENS_MAX_TOP_K
+            and topk_ids.numel() <= _DROP_TOKENS_MAX_ASSIGNMENTS
+        )
+        if not use_triton:
+            return self._drop_tokens_reference(topk_ids, topk_weights)
+
+        output_ids = torch.empty_like(topk_ids)
+        output_weights = torch.empty_like(topk_weights)
+        dropped_rows = torch.empty(num_tokens, dtype=torch.bool, device=topk_ids.device)
+        total_assignments = topk_ids.numel()
+        block_size = min(1024, max(128, triton.next_power_of_2(total_assignments)))
+        num_warps = 8 if total_assignments > 4 * 1024 else 4
+        _drop_tokens_kernel[(num_tokens,)](
+            topk_ids,
+            topk_weights,
+            output_ids,
+            output_weights,
+            dropped_rows,
+            num_slots,
+            capacity,
+            total_assignments,
+            NUM_SLOTS=triton.next_power_of_2(num_slots),
+            BLOCK=block_size,
+            num_warps=num_warps,
+        )
+        return output_ids, output_weights, dropped_rows
 
     def apply(
         self,

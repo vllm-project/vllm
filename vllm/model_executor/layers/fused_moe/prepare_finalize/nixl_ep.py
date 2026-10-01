@@ -109,6 +109,13 @@ class NixlEPPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         self.use_ue8m0_dispatch = False
 
     def post_init_setup(self, fused_experts: mk.FusedMoEExperts):
+        self._configure_batched_compaction(
+            fused_experts,
+            self.max_tokens_per_rank,
+            self.num_dispatchers_,
+            self.supports_token_dropping,
+            self.use_fp8_dispatch,
+        )
         if not fused_experts.supports_packed_ue8m0_act_scales():
             # Early exit.
             return
@@ -271,6 +278,7 @@ class NixlEPPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
                 quant_config.a1_scale,
                 a1.dtype,
                 quant_config,
+                a2a_idx,
             ),
         )
 
@@ -281,7 +289,9 @@ class NixlEPPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         a1_scale: torch.Tensor | None,
         a1_dtype: torch.dtype,
         quant_config: FusedMoEQuantConfig,
+        a2a_idx: int,
     ) -> mk.PrepareResultType:
+        expert_x = self._compact_batched_experts(expert_x, a2a_idx)
         expert_x, expert_x_scale = self._do_quant(expert_x, a1_dtype, quant_config)
 
         expert_tokens_meta = mk.ExpertTokensMetadata(
@@ -337,6 +347,11 @@ class NixlEPPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         handle = self.handles[a2a_idx]
         assert handle is not None
 
+        fused_expert_output, receiver = self._restore_batched_experts(
+            fused_expert_output,
+            a2a_idx,
+        )
+
         combine_topk_weights = topk_weights
         if apply_router_weight_on_input:
             # weights have already been applied.
@@ -356,7 +371,7 @@ class NixlEPPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
             out=output,
         )
 
-        return recv_hook, lambda: None
+        return recv_hook, receiver
 
     def finalize_async(
         self,
@@ -386,7 +401,7 @@ class NixlEPPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         apply_router_weight_on_input: bool,
         weight_and_reduce_impl: mk.TopKWeightAndReduce,
     ) -> None:
-        self._finalize(
+        _, receiver = self._finalize(
             output,
             fused_expert_output,
             topk_weights,
@@ -395,3 +410,4 @@ class NixlEPPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
             weight_and_reduce_impl,
             do_async=False,
         )
+        receiver()
