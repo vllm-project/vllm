@@ -35,9 +35,9 @@ steps:
   - pytest -v -s distributed/test_sharded_rdt_trainer.py
   mirror:
     amd:
-      label: ":amd: (MI355) Sharded RDT Weight Transfer"
+      label: ":amd: (MI355 DPX) Sharded RDT Weight Transfer"
       dind: false
-      device: mi355_1
+      device: mi355_dpx
       num_devices: 1
       timeout_in_minutes: 45
       working_dir: /vllm-workspace/tests
@@ -67,7 +67,7 @@ steps:
   - vllm/distributed/
   - "!vllm/distributed/kv_transfer/"
   - vllm/engine/
-  - vllm/executor/
+  - vllm/v1/executor/
   - vllm/worker/worker_base.py
   - vllm/v1/engine/
   - vllm/v1/worker/
@@ -98,7 +98,7 @@ steps:
       - vllm/distributed/
       - "!vllm/distributed/kv_transfer/"
       - vllm/engine/
-      - vllm/executor/
+      - vllm/v1/executor/
       - vllm/worker/worker_base.py
       - vllm/v1/engine/
       - vllm/v1/worker/
@@ -117,7 +117,7 @@ steps:
   - vllm/distributed/
   - "!vllm/distributed/kv_transfer/"
   - vllm/engine/
-  - vllm/executor/
+  - vllm/v1/executor/
   - vllm/worker/worker_base.py
   - vllm/v1/engine/
   - vllm/v1/worker/
@@ -141,7 +141,7 @@ steps:
       - vllm/distributed/
       - "!vllm/distributed/kv_transfer/"
       - vllm/engine/
-      - vllm/executor/
+      - vllm/v1/executor/
       - vllm/worker/worker_base.py
       - vllm/v1/engine/
       - vllm/v1/worker/
@@ -162,7 +162,7 @@ steps:
   - vllm/distributed/
   - "!vllm/distributed/kv_transfer/"
   - vllm/engine/
-  - vllm/executor/
+  - vllm/v1/executor/
   - vllm/worker/worker_base.py
   - vllm/v1/engine/
   - vllm/v1/worker/
@@ -224,7 +224,7 @@ steps:
       label: ":amd: (MI355) Distributed Torchrun + Examples"
       dind: false
       device: mi355_4
-      timeout_in_minutes: 45
+      timeout_in_minutes: 55
       depends_on:
       - image-build-amd
       source_file_dependencies:
@@ -373,6 +373,7 @@ steps:
     - VLLM_USE_DEEP_GEMM=1 VLLM_LOGGING_LEVEL=DEBUG python3 examples/features/data_parallel/data_parallel_offline.py --model=Qwen/Qwen1.5-MoE-A2.7B -tp=1 -dp=2 --max-model-len=2048 --all2all-backend=deepep_high_throughput
     - pytest -v -s tests/v1/distributed/test_dbo.py
     - VLLM_ALLOW_INSECURE_SERIALIZATION=1 pytest -v -s tests/distributed/test_weight_transfer.py
+    - VLLM_ALLOW_INSECURE_SERIALIZATION=1 pytest -v -s tests/distributed/test_weight_transfer_m2n.py
     - pytest -v -s tests/distributed/test_packed_tensor.py
   mirror:
     amd:
@@ -438,6 +439,27 @@ steps:
     - pytest -v -s tests/distributed/test_nccl_symm_mem.py
     - pytest -v -s tests/v1/distributed/test_dbo.py
     - pytest -v -s tests/distributed/test_mnnvl_alltoall.py
+  mirror:
+    amd:
+      label: ":amd: (MI355) Distributed AgRs All2All"
+      dind: false
+      device: mi355_2
+      num_devices: 2
+      timeout_in_minutes: 30
+      working_dir: "/vllm-workspace/"
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - .buildkite/test_areas/distributed.yaml
+      - vllm/distributed/
+      - vllm/config/parallel.py
+      - vllm/config/vllm.py
+      - vllm/forward_context.py
+      - vllm/platforms/rocm.py
+      - tests/distributed/test_mnnvl_alltoall.py
+      - tests/utils.py
+      commands:
+      - pytest -v -s tests/distributed/test_mnnvl_alltoall.py::test_args_dispatch_combine
 
 - label: ":nvidia: (B200) GEMM-RS/AR"
   key: gemm-rs-ar-2xb200
@@ -451,6 +473,34 @@ steps:
     - tests/kernels/test_gemm_rs_ar.py
   commands:
     - pytest -v -s tests/kernels/test_gemm_rs_ar.py
+  mirror:
+    amd:
+      label: ":amd: (MI355) GEMM-RS-AR"
+      dind: false
+      device: mi355_4
+      num_devices: 4
+      timeout_in_minutes: 20
+      working_dir: /vllm-workspace/
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - .buildkite/test_areas/distributed.yaml
+      - tests/kernels/test_gemm_rs_ar.py
+      - tests/kernels/test_rocm_gemm_rs_ar.py
+      - tests/conftest.py
+      - vllm/models/common/ops/sequence_parallel.py
+      - vllm/model_executor/layers/linear.py
+      - vllm/model_executor/layers/utils.py
+      - vllm/model_executor/layers/quantization/online/
+      - vllm/model_executor/layers/quantization/utils/mxfp8_utils.py
+      - vllm/model_executor/kernels/linear/
+      - vllm/distributed/
+      - vllm/_aiter_ops.py
+      - vllm/_custom_ops.py
+      - csrc/rocm/skinny_gemms.cu
+      - vllm/platforms/rocm.py
+      commands:
+      - pytest -v -s tests/kernels/test_rocm_gemm_rs_ar.py
 
 - label: ":nvidia: (L4) Distributed 2-Node"
   key: 2-node-test-4-gpus
@@ -464,7 +514,7 @@ steps:
   - vllm/distributed/
   - "!vllm/distributed/kv_transfer/"
   - vllm/engine/
-  - vllm/executor/
+  - vllm/v1/executor/
   - vllm/model_executor/models/
   - tests/distributed/
   - examples/features/data_parallel/data_parallel_offline.py
@@ -481,8 +531,10 @@ steps:
   - vllm/distributed/
   - "!vllm/distributed/kv_transfer/"
   - vllm/engine/
-  - vllm/executor/
+  - vllm/v1/executor/
   - vllm/model_executor/models/
+  - vllm/v1/worker/gpu/
+  - vllm/v1/worker/gpu_worker.py
   - tests/distributed/
   - tests/v1/distributed/test_pp_dp_v2.py
   commands:
@@ -501,7 +553,7 @@ steps:
       - vllm/distributed/
       - "!vllm/distributed/kv_transfer/"
       - vllm/engine/
-      - vllm/executor/
+      - vllm/v1/executor/
       - vllm/model_executor/models/
       - vllm/model_executor/layers/
       - vllm/v1/attention/backends/
@@ -523,11 +575,11 @@ steps:
   - tests/distributed/test_ray_v2_executor.py
   - tests/distributed/test_ray_v2_executor_e2e.py
   - tests/distributed/test_pipeline_parallel.py
-  - tests/basic_correctness/test_basic_correctness.py
+  - tests/basic_correctness/models/test_basic_correctness.py
   commands:
   - export VLLM_USE_RAY_V2_EXECUTOR_BACKEND=1
   - export NCCL_CUMEM_HOST_ENABLE=0
   - pytest -v -s distributed/test_ray_v2_executor.py
   - pytest -v -s distributed/test_ray_v2_executor_e2e.py
   - pytest -v -s distributed/test_pipeline_parallel.py -k "ray"
-  - TARGET_TEST_SUITE=L4 pytest -v -s basic_correctness/test_basic_correctness.py -k "ray"
+  - TARGET_TEST_SUITE=L4 pytest -v -s basic_correctness/models/test_basic_correctness.py -k "ray"
