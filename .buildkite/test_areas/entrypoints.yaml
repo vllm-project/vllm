@@ -51,6 +51,7 @@ steps:
 - label: ":nvidia: (H200 MIG 35GB) Entrypoints Integration (LLM)"
   device: h200_35gb
   key: entrypoints-integration-llm
+  automatic_shard: true
   timeout_in_minutes: 60
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
