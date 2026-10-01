@@ -33,6 +33,7 @@ class RetainDeclaration:
     follows_growth: bool
     continuation_incarnation: int | None
     snapshot: LogicalResolution
+    policy_name: str | None = None
 
 
 class RetentionDeclarations:
@@ -71,7 +72,13 @@ class RetentionDeclarations:
         self._projection_version: tuple[int, int] | None = None
         self._projection: Mapping[ContentKey, int] = MappingProxyType({})
 
-    def retain(self, payload: RetainPayload) -> RetainDeclaration:
+    def retain(
+        self,
+        payload: RetainPayload,
+        *,
+        policy_name: str | None = None,
+        resolution: LogicalResolution | None = None,
+    ) -> RetainDeclaration:
         """Create/update a declaration after native validation and deduplication."""
         if payload.tier != "gpu":
             raise ControlError(
@@ -89,7 +96,13 @@ class RetentionDeclarations:
             raise ControlError(
                 "invalid_payload", "Growth requires a named continuation"
             )
-        resolution = self.index.resolve(payload.target)
+        resolution = (
+            resolution if resolution is not None else self.index.resolve(payload.target)
+        )
+        if resolution.namespace != self.index.namespace:
+            raise ControlError(
+                "incompatible", "Retention snapshot belongs to another namespace"
+            )
         self.expire()
         key = payload.owner_id, payload.declaration_id
         snapshot_keys = {content_key(b) for p in resolution.prefixes for b in p.blocks}
@@ -131,6 +144,7 @@ class RetentionDeclarations:
             follows,
             incarnation,
             resolution,
+            policy_name,
         )
         self._declarations[key] = declaration
         self._owners.setdefault(payload.owner_id, set()).add(key)
@@ -220,6 +234,10 @@ class RetentionDeclarations:
             )
             self._projection_version = version
         return version, self._projection
+
+    def active_declarations(self) -> tuple[RetainDeclaration, ...]:
+        self.expire()
+        return tuple(self._declarations.values())
 
     def release(self, owner_id: str, declaration_id: str) -> bool:
         self.expire()

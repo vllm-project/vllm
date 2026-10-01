@@ -96,6 +96,68 @@ def test_http_submission_and_python_query_share_results_and_retries(control_clie
     assert events[-1] == query
 
 
+def test_http_association_events_recover_from_gaps_without_residency_claims(
+    control_client,
+):
+    client, service = control_client
+    invocation = {
+        "engine_id": "engine",
+        "engine_epoch": "epoch",
+        "namespace": "namespace",
+    }
+    envelope = {
+        "protocol_version": "0.1",
+        "message_id": "association",
+        "actions": [
+            {
+                "action_id": "a",
+                "action_type": "associate",
+                "action_version": "1",
+                "payload": {
+                    "session_id": "s",
+                    "continuation_id": "c",
+                    "expected_revision": 0,
+                    "target": {
+                        "kind": "hashes",
+                        "namespace": "namespace",
+                        "blocks": [],
+                    },
+                },
+            }
+        ],
+    }
+    submitted = client.post(
+        "/v1/kv/control",
+        json={"method": "submit", "invocation": invocation, "payload": envelope},
+    ).json()
+    assert submitted["results"][0]["status"] == "completed"
+    events = client.post(
+        "/v1/kv/control",
+        json={
+            "method": "events",
+            "invocation": invocation,
+            "payload": {"stream": "association"},
+        },
+    ).json()
+    assert {event["kind"] for event in events} == {"updated"}
+    state = client.post(
+        "/v1/kv/control",
+        json={"method": "associations", "invocation": invocation, "payload": {}},
+    ).json()
+    assert state["items"][0]["session_id"] == "s"
+    assert state["items"][0]["blocks"] == []
+    stale = client.post(
+        "/v1/kv/control",
+        json={
+            "method": "events",
+            "invocation": {**invocation, "engine_epoch": "restarted"},
+            "payload": {"stream": "association"},
+        },
+    )
+    assert stale.status_code == 409
+    assert stale.json()["error"]["code"] == "stale_epoch"
+
+
 @pytest.mark.parametrize(
     "invocation,status,code",
     [

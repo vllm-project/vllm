@@ -156,3 +156,17 @@ F8 不是当前“配置式插件”的隐含要求；首版更换插件需重�
 双路径依据还包括用户本次提供的 Karen/Zhuohang 讨论及
 “Same typed envelope; different payload interpreters”图。该图中 shared dispatch
 和 future KVCR G1 hooks 是设计要求/未来方向，不能据图声称已合入。
+
+## 首版交付对账（2026-10-02）
+
+已交付并有本地或真实链路证据的首版范围包括：统一 envelope/native 与
+KVCR opaque 分发、SessionPrefixIndex 与独立声明、engine-owned 预约/取消、
+CPU/Mooncake request-free movement、真实 Mooncake 跨 engine、Python/HTTP
+控制、策略/调度扩展、直接控制器、分支/range 工作流以及增量关联查询。
+对应实现任务和测试结果仍以 OpenSpec `tasks.md` 与 `validation.md` 为准。
+
+以下首版验收仍保留在 OpenSpec 未完成任务中，不能在本清单中移到 F1–F8：
+verl/Agent Loop 的实际运行、策略压力/公平性对比、外部 GPT-OSS-120B 与
+DeepSeek-V4-Flash 评测、live weight-version 失效、真实 HTTP recovery
+演练，以及最终发布前 GitHub 查重（当前 CLI 未认证）。本文件的后续项仍只
+描述明确不属于首版的 Dynamo、混合 consumer、KVCR G1 和独立 KVCR 控制。

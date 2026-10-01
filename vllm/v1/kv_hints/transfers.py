@@ -19,7 +19,14 @@ from vllm.v1.kv_hints.control import (
     OperationResult,
     OperationStatus,
 )
-from vllm.v1.kv_hints.native import DemotePayload, PrefetchPayload, SharePayload
+from vllm.v1.kv_hints.native import (
+    DemotePayload,
+    EvictPayload,
+    NativePayload,
+    PrefetchPayload,
+    RetainPayload,
+    SharePayload,
+)
 from vllm.v1.kv_hints.state import LogicalResolution
 
 
@@ -89,6 +96,11 @@ class KVTransferOperations:
         self._operations: dict[int, _Movement] = {}
         self._jobs: dict[int, _Job] = {}
 
+    @property
+    def has_pending(self) -> bool:
+        """Whether request-free work still needs an engine progress tick."""
+        return bool(self._operations or self._jobs)
+
     def submit(
         self,
         operation: OperationResult,
@@ -127,8 +139,8 @@ class KVTransferOperations:
         movement.errors["unsupported"] = sum(
             len(p.partial_blocks) for p in target.prefixes
         )
-        self.registry.update(operation, OperationStatus.ACCEPTED)
         self._operations[operation.operation_id] = movement
+        approved = False
         for key, num_tokens in selected.items():
             try:
                 lease, created = self.resources.acquire(
@@ -144,6 +156,9 @@ class KVTransferOperations:
             if lease is None:
                 movement.succeeded.add(key)
                 continue
+            if not approved:
+                self.registry.update(operation, OperationStatus.ACCEPTED)
+                approved = True
             if created:
                 assert self.resources.start(lease)
                 try:
@@ -204,6 +219,34 @@ class KVTransferOperations:
         for movement in tuple(self._operations.values()):
             if movement.owners.intersection(owners):
                 self._cancel(movement, "Task finished")
+
+    def cancel_operations(self, operation_ids: set[int], reason: str) -> None:
+        for operation_id in operation_ids:
+            movement = self._operations.get(operation_id)
+            if movement is not None:
+                self._cancel(movement, reason)
+
+    def conflicts_with_explicit(
+        self,
+        payload: NativePayload,
+        keys: set[BlockHashWithGroupId],
+    ) -> bool:
+        for movement in self._operations.values():
+            if movement.operation.origin is not None or not movement.keys.intersection(
+                keys
+            ):
+                continue
+            if isinstance(payload, EvictPayload):
+                return True
+            if isinstance(payload, (RetainPayload, PrefetchPayload)) and isinstance(
+                movement.payload, DemotePayload
+            ):
+                return True
+            if isinstance(payload, DemotePayload) and isinstance(
+                movement.payload, PrefetchPayload
+            ):
+                return True
+        return False
 
     def _cancel(self, movement: _Movement, reason: str) -> None:
         caller = movement.operation.operation_id

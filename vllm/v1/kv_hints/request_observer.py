@@ -92,6 +92,9 @@ class RequestContinuationObserver:
         request = self._request(target, request_id)
         return self._resolve(request, target)
 
+    def session_for(self, target: RequestTarget, request_id: str | None) -> str | None:
+        return self._request(target, request_id).session_id
+
     def _resolve(self, request: Request, target: RequestTarget) -> HashTarget:
         end = request.num_tokens if target.end_token is None else target.end_token
         if end > request.num_tokens or target.start_token >= end:

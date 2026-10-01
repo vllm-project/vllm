@@ -5,7 +5,7 @@ import time
 from collections import defaultdict, deque
 from collections.abc import Iterable
 from dataclasses import replace
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from vllm.compilation.cuda_graph import CUDAGraphStat
 from vllm.config import KVEventsConfig, VllmConfig
@@ -75,6 +75,9 @@ from vllm.v1.utils import record_function_or_nullcontext
 
 logger = init_logger(__name__)
 
+if TYPE_CHECKING:
+    from vllm.v1.kv_hints.policy_runtime import KVPolicyRuntime
+
 
 class Scheduler(SchedulerInterface):
     def __init__(
@@ -89,6 +92,7 @@ class Scheduler(SchedulerInterface):
         log_stats: bool = False,
     ) -> None:
         self.vllm_config = vllm_config
+        self.kv_policy_runtime: KVPolicyRuntime | None = None
         self.scheduler_config = vllm_config.scheduler_config
         self.cache_config = vllm_config.cache_config
         self.lora_config = vllm_config.lora_config
@@ -601,6 +605,9 @@ class Scheduler(SchedulerInterface):
         scheduled_timestamp = time.monotonic()
 
         self.kv_cache_manager.new_step_starts()
+        policy_runtime = self.kv_policy_runtime
+        if policy_runtime is not None:
+            policy_runtime.observe_requests()
 
         # DP prefill balancing: on a throttled (non-cadence-aligned) step, defer
         # all prefill compute unless saturated.
@@ -875,7 +882,11 @@ class Scheduler(SchedulerInterface):
             step_skipped_kv_holding: deque[Request] = deque()
 
             def skip_request(from_queue: RequestQueue) -> None:
-                request_to_skip = from_queue.pop_request()
+                if policy_runtime is None:
+                    request_to_skip = from_queue.pop_request()
+                else:
+                    request_to_skip = request
+                    from_queue.remove_request(request_to_skip)
                 self.deferred_waiting.add(request_to_skip)
                 if self._holds_kv_blocks(request_to_skip):
                     step_skipped_kv_holding.appendleft(request_to_skip)
@@ -893,8 +904,20 @@ class Scheduler(SchedulerInterface):
                 if num_running >= self.max_num_active_reqs:
                     break
 
-                request = request_queue.peek_request()
+                request = (
+                    request_queue.peek_request()
+                    if policy_runtime is None
+                    else policy_runtime.select_request(
+                        request_queue, priority=self.policy == SchedulingPolicy.PRIORITY
+                    )
+                )
                 request_id = request.request_id
+
+                if policy_runtime is not None and not policy_runtime.allows_request(
+                    request
+                ):
+                    skip_request(request_queue)
+                    continue
 
                 ready_to_schedule = self._handle_blocked_waiting_request(request)
                 if not ready_to_schedule:
@@ -1287,7 +1310,10 @@ class Scheduler(SchedulerInterface):
                     skip_request(request_queue)
                     continue
 
-                request = request_queue.pop_request()
+                if policy_runtime is None:
+                    request = request_queue.pop_request()
+                else:
+                    request_queue.remove_request(request)
                 self.deferred_waiting.discard(request)
                 self.running.append(request)
                 if num_external_computed_tokens > 0:

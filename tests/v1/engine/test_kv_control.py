@@ -96,6 +96,21 @@ def test_engine_utility_uses_safe_serialization_and_disabled_path_has_no_state()
     assert MsgpackDecoder().decode(MsgpackEncoder().encode(reply)) == reply
 
 
+def test_engine_liveness_includes_request_free_executor_progress():
+    engine = object.__new__(EngineCore)
+    engine.scheduler = SimpleNamespace(has_requests=lambda: False)
+    engine.batch_queue = None
+    engine.engines_running = False
+    engine.kv_control_service = SimpleNamespace(
+        controller=SimpleNamespace(
+            executor=SimpleNamespace(has_pending=True), policies=None
+        )
+    )
+    assert engine.has_pending_kv_control()
+    engine.kv_control_service.controller.executor.has_pending = False
+    assert not engine.has_pending_kv_control()
+
+
 @pytest.mark.asyncio
 async def test_dp_control_mutation_is_sent_only_to_the_named_engine():
     client = object.__new__(DPLBAsyncMPClient)

@@ -47,12 +47,25 @@ class OperationStatus(str, Enum):
 
 
 @dataclass(frozen=True)
+class OperationReference:
+    message_id: str
+    action_id: str
+    operation_id: int
+
+
+@dataclass(frozen=True)
+class OperationOrigin(OperationReference):
+    policy_name: str
+
+
+@dataclass(frozen=True)
 class ControlContext:
     engine_id: str
     engine_epoch: str
     consumer: Literal["native", "backend"]
     binding_id: str | None = None
     namespace: str | None = None
+    origin: OperationOrigin | None = None
 
 
 @dataclass(frozen=True)
@@ -73,6 +86,8 @@ class OperationResult:
     blocked_targets: int = 0
     missing_targets: int = 0
     displaced_blocks: int = 0
+    origin: OperationOrigin | None = None
+    derived_operations: tuple[OperationReference, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -169,9 +184,21 @@ def envelope_fingerprint(
         raise ControlError("invalid_envelope", "Envelope byte limit exceeded")
     digest = hashlib.sha256()
     digest.update(
-        json.dumps((context.consumer, context.binding_id, context.namespace)).encode(
-            "utf-8"
-        )
+        json.dumps(
+            (
+                context.consumer,
+                context.binding_id,
+                context.namespace,
+                None
+                if context.origin is None
+                else (
+                    context.origin.message_id,
+                    context.origin.action_id,
+                    context.origin.operation_id,
+                    context.origin.policy_name,
+                ),
+            )
+        ).encode("utf-8")
     )
     digest.update(encoded)
     return digest.digest()
@@ -230,6 +257,18 @@ class OperationRegistry:
             _validate_id(context.binding_id, "binding_id")
         if context.namespace is not None:
             _validate_id(context.namespace, "namespace")
+        if context.origin is not None:
+            for value in (
+                context.origin.message_id,
+                context.origin.action_id,
+                context.origin.policy_name,
+            ):
+                _validate_id(value, "origin")
+            if (
+                type(context.origin.operation_id) is not int
+                or context.origin.operation_id < 1
+            ):
+                raise ControlError("invalid_payload", "Invalid originating operation")
 
     def submit(self, envelope: KvHintsEnvelope, context: ControlContext) -> Submission:
         self.validate_context(context)
@@ -264,6 +303,7 @@ class OperationRegistry:
                 self._sequence,
                 binding_id=context.binding_id,
                 namespace=context.namespace,
+                origin=context.origin,
             )
             results[action.action_id] = result
             self._events.append(result)
@@ -286,6 +326,7 @@ class OperationRegistry:
         blocked_targets: int | None = None,
         missing_targets: int | None = None,
         displaced_blocks: int | None = None,
+        derived_operations: tuple[OperationReference, ...] | None = None,
     ) -> OperationResult:
         """Publish progress after the executor has validated the physical outcome."""
         self.validate_context(
@@ -301,6 +342,7 @@ class OperationRegistry:
             or operation.binding_id != current.binding_id
             or operation.consumer != current.consumer
             or operation.namespace != current.namespace
+            or operation.origin != current.origin
         ):
             raise ControlError(
                 "stale_operation", "Completion refers to an expired action"
@@ -321,6 +363,27 @@ class OperationRegistry:
         if len(reason) > 4096:
             raise ValueError("Operation reason exceeds 4096 characters")
         steps = current.completed_steps if completed_steps is None else completed_steps
+        derived = (
+            current.derived_operations
+            if derived_operations is None
+            else derived_operations
+        )
+        if (
+            not isinstance(derived, tuple)
+            or len(derived) > 128
+            or derived[: len(current.derived_operations)] != current.derived_operations
+            or any(not isinstance(ref, OperationReference) for ref in derived)
+        ):
+            raise ValueError(
+                "Derived operations must be bounded append-only references"
+            )
+        for ref in derived:
+            _validate_id(ref.message_id, "derived message_id")
+            _validate_id(ref.action_id, "derived action_id")
+            if type(ref.operation_id) is not int or ref.operation_id < 1:
+                raise ValueError("Invalid derived operation incarnation")
+        if len(set(derived)) != len(derived):
+            raise ValueError("Duplicate derived operation reference")
         if (
             not isinstance(steps, tuple)
             or len(steps) > 128
@@ -335,6 +398,7 @@ class OperationRegistry:
             status == current.status
             and reason == current.reason
             and steps == current.completed_steps
+            and derived == current.derived_operations
             and all(getattr(current, name) == value for name, value in counts.items())
         ):
             return current
@@ -363,6 +427,7 @@ class OperationRegistry:
             blocked_targets=counts["blocked_targets"],
             missing_targets=counts["missing_targets"],
             displaced_blocks=counts["displaced_blocks"],
+            derived_operations=derived,
         )
         message = self._messages[operation.message_id]
         message.results[operation.action_id] = result

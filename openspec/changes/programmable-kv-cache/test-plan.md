@@ -42,6 +42,14 @@ CPUOffloadingWorker copies. Extend the manager/connector suites for cold capacit
 independent source/destination holds, missing objects, failed-rank acknowledgement,
 reset rejection during transfer, and native jobs producing no inference receipts.
 GPU worker and live-model checks must exercise both directions and actual reuse.
+Policy tests extend the existing control/state and scheduler suites. Inputs are
+immutable capacity/request observations and signals; outputs are native proposals
+or advisory admission/scores. Guard against duplicate signal effects, lost parent
+correlation, stale predicted resumes, policy mutation of explicit declarations,
+unbounded proposal state, and policy-induced starvation. Use fake clocks for
+prediction and aging, actual queues for admission, and the same native transfer
+fixtures for conflicting proposals and shared work. Then run real policy-driven
+Mooncake and CPU workflows; simulated policy outcomes do not establish speedup.
 Request association consumes active request token/hash observations and produces
 the shared logical index plus an optional bounded growth subscription. Guard
 against rewrites below the first cache-block boundary, implicit growth of snapshot

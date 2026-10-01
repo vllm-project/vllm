@@ -547,3 +547,58 @@ have zero truncated answers; **one** final numeric answer differs. Cache hits ar
 control work, so no serving-speed or accuracy improvement is claimed. The complete
 rows and operation results are in the two `cpu-*.json.gz` artifacts. The model
 server is stopped afterward; GPU 1's unrelated workload is untouched.
+
+## Policy and scheduler extension checks (2026-10-02)
+
+The optional policy runtime now supplies immutable cache pressure/request
+observations, proposal-only retention/tool-wait/quota policies, deterministic
+composer output and bounded derived operation records. Scheduler guidance is
+applied only when configured; the scheduler still owns queue operations and its
+existing preemption algorithm. Request-free transfer liveness includes pending
+executor jobs, so an idle engine continues progress without a synthetic request.
+
+```bash
+.venv/bin/python -m pytest \
+  tests/v1/test_kv_hint_control.py tests/v1/test_kv_hint_state.py \
+  tests/v1/engine/test_kv_control.py tests/v1/core/test_prefix_caching.py \
+  tests/v1/core/test_scheduler.py -q
+```
+
+Result: **574 passed**, 14 warnings, 250.00 seconds. The policy-focused subset
+passed 9 tests and the scheduler extension subset passed 2 tests. Additional
+HTTP association recovery and KVCR opaque-forwarding tests passed in the
+following run:
+
+```bash
+.venv/bin/python -m pytest \
+  tests/entrypoints/serve/kv_control/test_api.py \
+  tests/v1/kv_offload/tiering/test_kvcr_tier.py -q
+```
+
+Result: **34 passed**, 14 warnings, 11.31 seconds. `coverage_check.py` reports
+all control/state/movement/policy/workload artifact rows have concrete files.
+`rollout.py` and `verl_agent_loop.py` deterministic plan generation was run
+without a live server; `recovery.py` still requires a running HTTP engine.
+
+The real CPU/Mooncake transfer, local Qwen cross-engine, and GSM8K correctness
+results above remain the acceptance evidence for those paths. Policy pressure,
+fairness, external model, live weight-update and full recovery-server runs are
+still unexecuted and remain open tasks.
+
+## Duplicate-work check (2026-10-02)
+
+The required pre-publication commands were repeated:
+
+```bash
+gh issue view 57103 --repo vllm-project/vllm --comments
+gh pr list --repo vllm-project/vllm --state open --search "57103 in:body"
+gh pr list --repo vllm-project/vllm --state open --search "programmable kv cache"
+```
+
+Each command stopped with GitHub CLI exit code 4 because this environment is
+not authenticated. No PR was opened. The earlier public REST check recorded in
+this document found request-free prefetch PR #58198 and retention PR #38514;
+this change keeps those execution/reuse and standalone-retention boundaries and
+adds the merged-envelope control, logical state, policy composition, and
+cross-engine orchestration layers. Authentication and a final human duplicate
+review are required before publication.

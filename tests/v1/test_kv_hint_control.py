@@ -13,6 +13,7 @@ from vllm.v1.kv_hints.api import KVControlService, unwrap_control_reply
 from vllm.v1.kv_hints.control import (
     ControlContext,
     ControlError,
+    OperationOrigin,
     OperationRegistry,
     OperationStatus,
 )
@@ -954,3 +955,20 @@ def test_utility_pagination_cursor_survives_json_conversion(controller):
     )
     assert first["items"][0]["session_id"] == "a"
     assert second["items"][0]["session_id"] == "b"
+
+
+def test_derived_retry_and_completion_cannot_change_origin(registry):
+    parent = registry.submit(envelope("signal"), CONTEXT).results[0]
+    origin = OperationOrigin(
+        parent.message_id, parent.action_id, parent.operation_id, "policy"
+    )
+    context = replace(CONTEXT, origin=origin)
+    child = registry.submit(envelope("derived"), context).results[0]
+    assert child.origin == origin
+    different = replace(origin, operation_id=origin.operation_id + 1)
+    with pytest.raises(ControlError, match="different content"):
+        registry.submit(envelope("derived"), replace(context, origin=different))
+    with pytest.raises(ControlError, match="expired action"):
+        registry.update(replace(child, origin=different), OperationStatus.COMPLETED)
+    completed = registry.update(child, OperationStatus.COMPLETED)
+    assert registry.submit(envelope("derived"), context).results == (completed,)

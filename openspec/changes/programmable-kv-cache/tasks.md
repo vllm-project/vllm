@@ -27,16 +27,16 @@
 - [x] 3.5 Implement consumption of the merged hint contract for supported cache/state actions, with shared request-attached/request-free validation and action/version capability discovery.
 - [x] 3.6 Implement the agreed explicit association/continuation/task management commands separately from optional policy signals.
 - [x] 3.7 Implement bounded logical-state queries and the agreed association events, including new membership on cache hits.
-- [ ] 3.8 Verify derived-step correlation, partial effects, unknown versions, bounded/pruned index behavior, and stale logical updates.
+- [x] 3.8 Verify derived-step correlation, partial effects, unknown versions, bounded/pruned index behavior, and stale logical updates.
 - [x] 3.9 Implement whole-envelope native/backend dispatch and ensure native-consumed envelopes are not also forwarded through KVCR's existing request hook.
 
 ## 4. Local execution and policy integration
 
 - [x] 4.1 Add engine-owned operation approval, reservation/reference accounting, cancellation, and stale-completion protection through existing KV manager paths.
 - [x] 4.2 Implement retention-aware eviction and explicit local Evict while preserving active references and the feature-disabled path.
-- [ ] 4.3 Add startup-configured policy/composer interfaces and a common pressure/demand snapshot.
-- [ ] 4.4 Implement the agreed reference policies and scheduler-cooperation extension.
-- [ ] 4.5 Verify deduplicated work, competing capacity requests, declaration independence, and pressure-induced deferral.
+- [x] 4.3 Add startup-configured policy/composer interfaces and a common pressure/demand snapshot.
+- [x] 4.4 Implement the agreed reference policies and scheduler-cooperation extension.
+- [x] 4.5 Verify deduplicated work, competing capacity requests, declaration independence, and pressure-induced deferral.
 
 ## 5. Independent backend execution
 
@@ -44,34 +44,34 @@
 - [x] 5.2 Adapt the selected CPU offload path for approved Demote and Prefetch, including resume/load coordination.
 - [x] 5.3 Adapt Mooncake Store lookup, approved buffers, transfer metadata, and completion for independent operations using unchanged backend APIs.
 - [x] 5.4 Implement the agreed Share orchestration/result semantics and per-backend unsupported results.
-- [ ] 5.5 Verify real transfer correctness, partial failures, cancellation, all-rank completion, reset races, and source reclamation timing.
-- [ ] 5.6 Extend existing KVCR forwarding/query/deliver/cleanup regression coverage; preserve opaque payload values and prevent forwarding receipts from claiming GPU readiness.
+- [x] 5.5 Verify real transfer correctness, partial failures, cancellation, all-rank completion, reset races, and source reclamation timing.
+- [x] 5.6 Extend existing KVCR forwarding/query/deliver/cleanup regression coverage; preserve opaque payload values and prevent forwarding receipts from claiming GPU readiness.
 
 ## 6. Serving and observability
 
 - [x] 6.1 Wire request-attached hints through the agreed public serving paths into the common control implementation.
 - [x] 6.2 Expose independent submission, capability queries, and operation results through the agreed transport with explicit engine targeting.
-- [ ] 6.3 Add association/residency/result reporting and restart/gap handling from common state records.
+- [x] 6.3 Add association/residency/result reporting and restart/gap handling from common state records.
 - [x] 6.4 Verify serving protocol compatibility, version errors, engine routing, and agreement between events and queries.
 
 ## 7. Examples and evaluation
 
-- [ ] 7.1 Add a reproducible multi-round shared-prefix rollout workload with controllable pressure, pauses, branches, and resume predictions.
+- [x] 7.1 Add a reproducible multi-round shared-prefix rollout workload with controllable pressure, pauses, branches, and resume predictions.
 - [ ] 7.2 Add the agreed open-source workload integration and RL weight-version correctness coverage.
 - [x] 7.3 Add and run the two-engine Mooncake example, proving actual destination cache hits after request-free preparation.
 - [ ] 7.4 Run native/router-directive/local-policy/composed-policy comparisons and labeled oracle experiments; save raw measurements and commands.
 - [ ] 7.5 Run relevant model evaluations and measure overhead, regressions, admission delay, fairness, transfer volume, and failure recovery.
 - [x] 7.6 Add and run a direct-hint controller without local policies, covering request-free retention, movement, query, and release.
-- [ ] 7.7 Add and run session/branch/range/shared-prefix workflows, asserting logical cleanup and independent retention lifetimes.
-- [ ] 7.8 Add an application-directed rollout controller using supported Retain/Prefetch hints and actual operation results, with no custom hint types or handler plugins.
+- [x] 7.7 Add and run session/branch/range/shared-prefix workflows, asserting logical cleanup and independent retention lifetimes.
+- [x] 7.8 Add an application-directed rollout controller using supported Retain/Prefetch hints and actual operation results, with no custom hint types or handler plugins.
 - [ ] 7.9 Add and run closed-loop control/recovery examples for duplicate hints, prefetch/resume races, capacity deferral, backend errors, and engine restart.
-- [ ] 7.10 Check all rows in coverage.md against concrete examples and tests; distinguish implemented, unsupported backend scope, and unexecuted validation.
-- [ ] 7.11 Run the primary lightweight-orchestrator → envelope → native vLLM semantics → real Mooncake scenario; correlate each action with backend completion and actual reuse.
+- [x] 7.10 Check all rows in coverage.md against concrete examples and tests; distinguish implemented, unsupported backend scope, and unexecuted validation.
+- [x] 7.11 Run the primary lightweight-orchestrator → envelope → native vLLM semantics → real Mooncake scenario; correlate each action with backend completion and actual reuse.
 
 ## 8. Complete the reviewable delivery
 
-- [ ] 8.1 Document configuration, plugin extension contracts, operation semantics, backend coverage, examples, and measured limitations.
-- [ ] 8.2 Run relevant unit/integration suites and required lint checks; record commands and results.
-- [ ] 8.3 Repeat duplicate-work checks and document the concrete differences/reuse boundaries with related retention and prefetch work.
-- [ ] 8.4 Prepare one complete PR description with AI disclosure, test/model-evaluation evidence, and human review/testing requirements; publication must follow repository contribution rules.
-- [ ] 8.5 Reconcile delivered coverage with docs/programmable-kvc/task2do.md; keep first-release failures/incomplete validation in this task list rather than relabeling them future work.
+- [x] 8.1 Document configuration, plugin extension contracts, operation semantics, backend coverage, examples, and measured limitations.
+- [x] 8.2 Run relevant unit/integration suites and required lint checks; record commands and results.
+- [x] 8.3 Repeat duplicate-work checks and document the concrete differences/reuse boundaries with related retention and prefetch work.
+- [x] 8.4 Prepare one complete PR description with AI disclosure, test/model-evaluation evidence, and human review/testing requirements; publication must follow repository contribution rules.
+- [x] 8.5 Reconcile delivered coverage with docs/programmable-kvc/task2do.md; keep first-release failures/incomplete validation in this task list rather than relabeling them future work.

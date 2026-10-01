@@ -177,3 +177,48 @@ Prefetch scores **125/128 (97.65625%)**; neither truncates an answer. There is o
 final numeric-answer difference. Cached tokens are **0 / 100,352**. Full outputs
 and control results are in the `cpu-*.json.gz` result files. These are correctness
 evaluations, not evidence that movement improves model accuracy or serving speed.
+
+## Policy, rollout and recovery controllers
+
+The native policy runtime is configured at engine startup. An empty `policies`
+list keeps signal actions unconsumed while explicit Retain/Release/Prefetch
+commands continue to work. A minimal configuration is:
+
+```json
+{
+  "engine_id": "policy-validation",
+  "policies": [
+    {"name": "retention", "implementation": "retention", "options": {"ttl_seconds": 30}},
+    {"name": "movement", "implementation": "tool_wait", "options": {"tier": "mooncake"}},
+    {"name": "quota", "implementation": "quota", "options": {"max_wait_seconds": 1}}
+  ],
+  "composer": "priority"
+}
+```
+
+Policies receive immutable pressure/request observations and submit proposals
+through the same engine approval path as application commands. They cannot
+rewrite explicit destinations or mutate scheduler queues; changing the policy
+set requires an engine restart. The policy tests cover shared proposals,
+cancellation, capacity competition, request scoring and prediction invalidation.
+
+`rollout.py` generates a seeded multi-round, multi-branch plan with a finite
+pressure budget. With `--base-url` it sends association, retention, prefetch
+and release actions through HTTP and records every result:
+
+```bash
+.venv/bin/python benchmarks/programmable_kv_cache/rollout.py \
+  --base-url http://127.0.0.1:18083 --rounds 3 --branches 4 \
+  --pressure-blocks 8 --seed 7 --output /tmp/programmable-rollout.json
+```
+
+`recovery.py` exercises duplicate replay, unknown action versions, event gaps
+and a stale restarted epoch. `verl_agent_loop.py` consumes a JSONL export from
+the open-source verl Agent Loop, emits supported envelope actions, and records
+the weight version so obsolete local or remote results can be rejected after a
+version change. `coverage_check.py` verifies that each implemented coverage row
+has source, tests and a runnable workload artifact.
+
+These adapters provide reproducible control/workload evidence. They do not
+replace the required real-transfer and external-model evaluations; those remain
+listed as incomplete when their environment is unavailable.

@@ -143,6 +143,56 @@ def test_add_requests():
         assert len(scheduler.waiting) == i + 1
 
 
+def test_optional_kv_policy_selects_without_mutating_scheduler_queues():
+    scheduler = create_scheduler(max_num_seqs=1, max_num_batched_tokens=16)
+    requests = create_requests(num_requests=2, num_tokens=4, req_ids=["a", "b"])
+    for request in requests:
+        scheduler.add_request(request)
+
+    class Policy:
+        def __init__(self):
+            self.observed = 0
+
+        def observe_requests(self):
+            self.observed += 1
+
+        def select_request(self, queue, *, priority):
+            assert not priority
+            return list(queue)[-1]
+
+        def allows_request(self, request):
+            return request.request_id == "b"
+
+    policy = Policy()
+    scheduler.kv_policy_runtime = policy
+    scheduler.schedule()
+    assert policy.observed == 1
+    assert [request.request_id for request in scheduler.running] == ["b"]
+    assert [request.request_id for request in scheduler.waiting] == ["a"]
+
+
+def test_optional_kv_policy_can_defer_admission_without_changing_preemption():
+    scheduler = create_scheduler(max_num_seqs=2, max_num_batched_tokens=16)
+    requests = create_requests(num_requests=2, num_tokens=4, req_ids=["a", "b"])
+    for request in requests:
+        scheduler.add_request(request)
+
+    class Policy:
+        def observe_requests(self):
+            pass
+
+        def select_request(self, queue, *, priority):
+            return queue.peek_request()
+
+        def allows_request(self, request):
+            return request.request_id != "a"
+
+    scheduler.kv_policy_runtime = Policy()
+    scheduler.schedule()
+    assert [request.request_id for request in scheduler.running] == ["b"]
+    assert [request.request_id for request in scheduler.waiting] == ["a"]
+
+
 @pytest.mark.parametrize("max_tokens", [1, 2])
 def test_routed_experts_prompt_start_at_prompt_end(max_tokens):
     """A prompt-end offset should return empty routing data, not crash."""

@@ -23,6 +23,7 @@ from vllm.v1.kv_hints.native import (
     ActionCapability,
     DemotePayload,
     EvictPayload,
+    NativePayload,
     PrefetchPayload,
     SharePayload,
 )
@@ -234,3 +235,28 @@ class KVResourceController:
     def progress(self) -> None:
         if self.transfers is not None:
             self.transfers.progress()
+
+    @property
+    def has_pending(self) -> bool:
+        """Whether a request-free transfer still needs engine progress."""
+        return self.transfers is not None and self.transfers.has_pending
+
+    def cancel_operations(self, operation_ids: set[int], reason: str) -> None:
+        if self.transfers is not None:
+            self.transfers.cancel_operations(operation_ids, reason)
+
+    def conflicts_with_explicit(
+        self,
+        payload: NativePayload,
+        scope: LogicalResolution,
+    ) -> bool:
+        if self.transfers is None:
+            return False
+        keys = {
+            make_block_hash_with_group_id(
+                BlockHash(bytes.fromhex(b.block_hash)), b.group_id
+            )
+            for prefix in scope.prefixes
+            for b in prefix.blocks
+        }
+        return self.transfers.conflicts_with_explicit(payload, keys)

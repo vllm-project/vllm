@@ -159,6 +159,19 @@ arrival-order tie breaking. The scheduler applies guidance and keeps its existin
 preemption algorithm. Parameters and adverse workloads must be recorded with each
 evaluation; these examples do not promise universal performance gains.
 
+Policies receive immutable observations and return proposals, including an optional
+not-before time for predicted resume. The runtime bounds pending proposals and
+work per step. Each derived command keeps an `origin` containing its signal's
+message/action/operation IDs and the configured policy name. A signal's completion
+means its observation was consumed; movement readiness comes from the derived
+command's own result. The envelope fields remain unchanged.
+
+Scheduler guidance uses the existing request `session_id` (also exposed by HTTP).
+Its occupancy and token/group demand estimates are advisory; allocation still
+uses KVCacheManager. Scores affect waiting-request selection, without changing
+request priorities or the existing preemption algorithm. Quota deferral has a
+maximum wait and cannot manufacture physical capacity from unused logical shares.
+
 ## Adapter coverage
 
 | Path | First-delivery behavior |

@@ -61,6 +61,20 @@ class KVCacheTransferManager:
     def has_pending(self) -> bool:
         return bool(self._transfers)
 
+    def held_block_counts(self) -> tuple[int, int]:
+        """Return destination and source counts, already charged in pool usage."""
+        loads = {
+            t.block.block_id
+            for t in self._transfers.values()
+            if t.lease.direction == "load"
+        }
+        stores = {
+            t.block.block_id
+            for t in self._transfers.values()
+            if t.lease.direction == "store"
+        }
+        return len(loads), len(stores)
+
     def acquire(
         self,
         direction: Literal["load", "store"],

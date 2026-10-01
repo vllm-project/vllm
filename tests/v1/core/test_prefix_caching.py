@@ -15,6 +15,7 @@ import torch
 
 import vllm.v1.core.kv_cache_manager as kv_cache_manager
 import vllm.v1.core.kv_cache_utils as kv_cache_utils
+from vllm.config.kv_control import KVControlConfig, KVPolicyConfig
 from vllm.distributed.kv_events import (
     MEDIUM_CPU,
     MEDIUM_GPU,
@@ -71,6 +72,7 @@ from vllm.v1.kv_cache_interface import (
 from vllm.v1.kv_hints.control import ControlContext, OperationRegistry, OperationStatus
 from vllm.v1.kv_hints.controller import NativeKVController
 from vllm.v1.kv_hints.native import ContentSpan, HashTarget, RetainPayload
+from vllm.v1.kv_hints.policy_runtime import KVPolicyRuntime
 from vllm.v1.kv_hints.protocol import KvHintAction, KvHintsEnvelope
 from vllm.v1.kv_hints.resources import KVResourceController, KVRetentionPriority
 from vllm.v1.kv_hints.retention import RetentionDeclarations
@@ -6745,3 +6747,238 @@ def test_paused_engine_defers_movement_before_acquiring_gpu_capacity():
     adapter.finish()
     controller.executor.progress()
     assert controller.registry.get("resumed", "a").status == OperationStatus.COMPLETED
+
+
+def install_movement_policies(manager, controller, *names, **limits):
+    now = [0.0]
+    controller.declarations._clock = lambda: now[0]
+    runtime = KVPolicyRuntime(
+        KVControlConfig(
+            policies=[
+                KVPolicyConfig(name=name, implementation="tool_wait") for name in names
+            ],
+            **limits,
+        ),
+        controller,
+        manager,
+        lambda: (),
+        clock=lambda: now[0],
+        wall_clock=lambda: 0,
+    )
+    controller.policies = runtime
+    return runtime, now
+
+
+def derived_results(controller, parent):
+    children = tuple(
+        controller.registry.get(ref.message_id, ref.action_id)
+        for ref in parent.derived_operations
+    )
+    for child, reference in zip(children, parent.derived_operations):
+        assert child.operation_id == reference.operation_id
+        assert child.origin.message_id == parent.message_id
+        assert child.origin.action_id == parent.action_id
+        assert child.origin.operation_id == parent.operation_id
+    return children
+
+
+def test_policy_signal_receipt_and_duplicate_do_not_claim_gpu_readiness():
+    manager, request, controller, adapter, target = make_movement_controller()
+    install_movement_policies(manager, controller, "first", "second")
+    payload = {"target": target, "signal": "resume"}
+    parent = submit_movement(controller, "signal", "signal", payload)
+    assert parent.status == OperationStatus.COMPLETED
+    children = derived_results(controller, parent)
+    assert [c.status for c in children] == [OperationStatus.RUNNING] * 2
+    assert {c.origin.policy_name for c in children} == {"first", "second"}
+    assert len(adapter.jobs) == 1
+    assert manager.get_computed_blocks(request)[1] == 0
+    assert manager.block_pool.get_num_free_blocks() == 2
+    assert submit_movement(controller, "signal", "signal", payload) == parent
+    assert len(adapter.jobs) == 1
+    adapter.finish()
+    controller.executor.progress()
+    assert [c.status for c in derived_results(controller, parent)] == [
+        OperationStatus.COMPLETED
+    ] * 2
+    assert manager.get_computed_blocks(request)[1] == 4
+
+
+def test_policy_predictions_capture_scope_and_do_not_retarget_new_growth():
+    manager, _, controller, adapter, target = make_movement_controller()
+    runtime, now = install_movement_policies(manager, controller, "movement")
+    submit_movement(
+        controller,
+        "associate",
+        "associate",
+        {
+            "session_id": "s",
+            "continuation_id": "c",
+            "expected_revision": 0,
+            "target": target,
+        },
+    )
+    parent = submit_movement(
+        controller,
+        "prediction",
+        "signal",
+        {
+            "target": {"kind": "session", "session_id": "s", "continuation_id": "c"},
+            "signal": "resume_prediction",
+            "resume_after_seconds": 2,
+        },
+    )
+    assert derived_results(controller, parent)[0].status == OperationStatus.RECEIVED
+    assert not adapter.jobs and runtime.has_pending
+    old = controller.index.get("s", "c")
+    controller.index.associate(
+        "s",
+        "c",
+        (*old.blocks, ContentSpan("abcd", 0, 4, 8)),
+        expected_revision=old.revision,
+    )
+    now[0] = 2
+    runtime.tick()
+    assert len(adapter.jobs) == 1
+    assert adapter.jobs[0].num_tokens == 4
+    adapter.finish()
+    controller.executor.progress()
+    assert derived_results(controller, parent)[0].affected_blocks == 1
+
+
+@pytest.mark.parametrize("invalidate", ["reset", "cleanup", "explicit"])
+def test_stale_policy_prediction_cannot_undo_newer_engine_state(invalidate):
+    manager, _, controller, adapter, target = make_movement_controller()
+    runtime, now = install_movement_policies(manager, controller, "movement")
+    submit_movement(
+        controller,
+        "associate",
+        "associate",
+        {
+            "session_id": "s",
+            "continuation_id": "c",
+            "expected_revision": 0,
+            "target": target,
+        },
+    )
+    selector = {"kind": "session", "session_id": "s", "continuation_id": "c"}
+    parent = submit_movement(
+        controller,
+        "prediction",
+        "signal",
+        {"target": selector, "signal": "resume_prediction", "resume_after_seconds": 2},
+    )
+    if invalidate == "reset":
+        assert manager.reset_prefix_cache()
+    elif invalidate == "cleanup":
+        submit_movement(
+            controller,
+            "finish",
+            "finish_task",
+            {
+                "session_id": "s",
+                "expected_revision": controller.index.session_revision("s"),
+            },
+        )
+    else:
+        submit_movement(controller, "evict", "evict", {"target": selector})
+    now[0] = 3
+    runtime.tick()
+    assert derived_results(controller, parent)[0].status == OperationStatus.CANCELLED
+    assert not adapter.jobs and not runtime.has_pending
+    assert manager.block_pool.get_num_free_blocks() == 3
+
+
+def test_explicit_retention_defers_policy_demotion_without_rewriting_declaration():
+    manager, request, controller, adapter, target = make_movement_controller()
+    runtime, _ = install_movement_policies(manager, controller, "movement")
+    manager.allocate_slots(request, 5)
+    manager.free(request)
+    submit_movement(
+        controller,
+        "retain",
+        "retain",
+        {
+            "target": target,
+            "owner_id": "application",
+            "declaration_id": "d",
+            "priority": 80,
+            "ttl_seconds": 5,
+        },
+    )
+    declaration = controller.declarations.get("application", "d")
+    parent = submit_movement(
+        controller, "wait", "signal", {"target": target, "signal": "tool_wait"}
+    )
+    assert derived_results(controller, parent)[0].status == OperationStatus.DEFERRED
+    assert controller.declarations.get("application", "d") == declaration
+    assert not adapter.jobs
+    view = runtime.observation()
+    assert view.cached_blocks == view.reclaimable_cached_blocks == 1
+    assert view.retention_declarations == 1
+
+
+def test_policy_and_explicit_loads_compete_for_actual_capacity():
+    manager, _, controller, adapter, target = make_movement_controller(num_blocks=2)
+    runtime, _ = install_movement_policies(manager, controller, "movement")
+    first = submit_movement(
+        controller, "resume", "signal", {"target": target, "signal": "resume"}
+    )
+    view = runtime.observation()
+    assert view.free_blocks == 0
+    assert view.load_reservations == view.referenced_blocks == 1
+    other_target = {**target, "blocks": [{**target["blocks"][0], "block_hash": "abcd"}]}
+    second = submit_movement(
+        controller,
+        "competing",
+        "prefetch",
+        {"target": other_target, "source": "mooncake"},
+    )
+    assert second.status == OperationStatus.DEFERRED
+    assert len(adapter.jobs) == 1
+    adapter.finish()
+    controller.executor.progress()
+    assert derived_results(controller, first)[0].status == OperationStatus.COMPLETED
+
+
+def test_partial_policy_admission_keeps_every_registered_step_correlated():
+    manager, _, controller, adapter, target = make_movement_controller()
+    runtime, _ = install_movement_policies(manager, controller, "first", "second")
+    controller.registry.max_records = 2
+    parent = submit_movement(
+        controller, "resume", "signal", {"target": target, "signal": "resume"}
+    )
+    assert parent.status == OperationStatus.PARTIAL
+    assert parent.completed_steps == ("policy_context_updated",)
+    children = derived_results(controller, parent)
+    assert len(children) == 1 and children[0].status == OperationStatus.DEFERRED
+    assert not adapter.jobs and not runtime.has_pending
+
+
+def test_policy_cancel_preserves_an_explicit_shared_transfer_interest():
+    manager, request, controller, adapter, target = make_movement_controller()
+    runtime, _ = install_movement_policies(manager, controller, "movement")
+    parent = submit_movement(
+        controller, "resume", "signal", {"target": target, "signal": "resume"}
+    )
+    explicit = submit_movement(
+        controller, "prefetch", "prefetch", {"target": target, "source": "mooncake"}
+    )
+    submit_movement(
+        controller, "newer", "signal", {"target": target, "signal": "tool_wait"}
+    )
+    assert derived_results(controller, parent)[0].status == OperationStatus.CANCELLED
+    assert (
+        controller.registry.get(explicit.message_id, explicit.action_id).status
+        == OperationStatus.RUNNING
+    )
+    assert len(adapter.jobs) == 1
+    adapter.finish()
+    controller.executor.progress()
+    assert (
+        controller.registry.get(explicit.message_id, explicit.action_id).status
+        == OperationStatus.COMPLETED
+    )
+    assert manager.get_computed_blocks(request)[1] == 4
+    runtime.tick(force=True)
+    assert runtime.observation().pending_policy_actions == 0

@@ -409,7 +409,9 @@ class InprocClient(EngineCoreClient):
             self.engine_core.kv_control(method, invocation, payload)
         )
         scheduler = self.engine_core.scheduler
-        if not scheduler.has_unfinished_requests() and scheduler.has_requests():
+        if not scheduler.has_unfinished_requests() and (
+            scheduler.has_requests() or self.engine_core.has_pending_kv_control()
+        ):
             # This client has no busy loop. Control polling cooperatively drains
             # connector work without creating an inference request.
             self.get_output()

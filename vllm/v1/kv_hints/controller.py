@@ -46,6 +46,7 @@ from vllm.v1.kv_hints.retention import RetentionDeclarations
 from vllm.v1.kv_hints.state import LogicalResolution, SessionPrefixIndex
 
 if TYPE_CHECKING:
+    from vllm.v1.kv_hints.policy_runtime import KVPolicyRuntime
     from vllm.v1.request import Request
 
 PhysicalPayload: TypeAlias = (
@@ -73,6 +74,12 @@ class KVOperationExecutor(Protocol):
 
     def progress(self) -> None: ...
 
+    def cancel_operations(self, operation_ids: set[int], reason: str) -> None: ...
+
+    def conflicts_with_explicit(
+        self, payload: NativePayload, scope: LogicalResolution
+    ) -> bool: ...
+
 
 class KVRequestObserver(Protocol):
     def attach(self, request: "Request") -> AbstractContextManager[None]: ...
@@ -87,6 +94,10 @@ class KVRequestObserver(Protocol):
     ) -> None: ...
 
     def observe(self) -> None: ...
+
+    def session_for(
+        self, target: RequestTarget, request_id: str | None
+    ) -> str | None: ...
 
 
 class NativeKVController:
@@ -113,6 +124,7 @@ class NativeKVController:
         self.request_resolver = request_resolver
         self.cache_profile = cache_profile
         self.request_observer = request_observer
+        self.policies: KVPolicyRuntime | None = None
 
     def submit(
         self,
@@ -163,31 +175,41 @@ class NativeKVController:
             except ControlError as error:
                 parsed.append(error)
         for operation, payload in zip(receipt.results, parsed):
-            try:
-                if isinstance(payload, ControlError):
-                    raise payload
-                self._execute(operation, payload, request_id)
-            except ControlError as error:
-                status = {
-                    "unsupported": OperationStatus.UNSUPPORTED,
-                    "unsupported_action": OperationStatus.UNSUPPORTED,
-                    "unsupported_version": OperationStatus.UNSUPPORTED,
-                    "missing": OperationStatus.MISSING,
-                    "missing_association": OperationStatus.MISSING,
-                    "capacity": OperationStatus.DEFERRED,
-                    "busy": OperationStatus.DEFERRED,
-                }.get(error.code, OperationStatus.FAILED)
-                self._record_failure(operation, status, f"{error.code}: {error}"[:4096])
-            except Exception as error:
-                logger.exception(
-                    "KV control failed for message %r action %r",
-                    operation.message_id,
-                    operation.action_id,
-                )
-                self._record_failure(
-                    operation, OperationStatus.FAILED, type(error).__name__
-                )
+            self.execute_registered(operation, payload, request_id=request_id)
         return self._submission(receipt)
+
+    def execute_registered(
+        self,
+        operation: OperationResult,
+        payload: NativePayload | ControlError,
+        *,
+        request_id: str | None = None,
+        resolution: LogicalResolution | None = None,
+    ) -> None:
+        try:
+            if isinstance(payload, ControlError):
+                raise payload
+            self._execute(operation, payload, request_id, resolution)
+        except ControlError as error:
+            status = {
+                "unsupported": OperationStatus.UNSUPPORTED,
+                "unsupported_action": OperationStatus.UNSUPPORTED,
+                "unsupported_version": OperationStatus.UNSUPPORTED,
+                "missing": OperationStatus.MISSING,
+                "missing_association": OperationStatus.MISSING,
+                "capacity": OperationStatus.DEFERRED,
+                "busy": OperationStatus.DEFERRED,
+            }.get(error.code, OperationStatus.FAILED)
+            self._record_failure(operation, status, f"{error.code}: {error}"[:4096])
+        except Exception as error:
+            logger.exception(
+                "KV control failed for message %r action %r",
+                operation.message_id,
+                operation.action_id,
+            )
+            self._record_failure(
+                operation, OperationStatus.FAILED, type(error).__name__
+            )
 
     def consume_attached(
         self,
@@ -274,12 +296,19 @@ class NativeKVController:
         return target
 
     def _execute(
-        self, operation: OperationResult, payload: NativePayload, request_id: str | None
+        self,
+        operation: OperationResult,
+        payload: NativePayload,
+        request_id: str | None,
+        resolution: LogicalResolution | None = None,
     ) -> None:
         steps: tuple[str, ...]
         status = OperationStatus.COMPLETED
         missing_scope = 0
         if isinstance(payload, SignalPayload):
+            if self.policies is not None:
+                self.policies.on_signal(operation, payload, request_id)
+                return
             self.registry.update(
                 operation,
                 OperationStatus.UNCONSUMED,
@@ -287,12 +316,25 @@ class NativeKVController:
             )
             return
         if isinstance(payload, RetainPayload):
-            target = self._target(payload.target, request_id)
-            if self.executor is not None:
-                self.executor.validate_scope(self.index.resolve(target))
-            declaration = self.declarations.retain(
-                msgspec.structs.replace(payload, target=target)
+            target = (
+                payload.target
+                if resolution is not None
+                else self._target(payload.target, request_id)
             )
+            assert not isinstance(target, RequestTarget)
+            scope = resolution if resolution is not None else self.index.resolve(target)
+            if self.executor is not None:
+                self.executor.validate_scope(scope)
+            self._check_policy_declaration(
+                operation, payload.owner_id, payload.declaration_id
+            )
+            declaration = self.declarations.retain(
+                msgspec.structs.replace(payload, target=target),
+                policy_name=operation.origin.policy_name if operation.origin else None,
+                resolution=scope,
+            )
+            if self.policies is not None and operation.origin is None:
+                self.policies.before_explicit(payload, scope)
             scope = self.declarations.coverage(
                 declaration.owner_id, declaration.declaration_id
             )
@@ -315,6 +357,9 @@ class NativeKVController:
             )
             return
         if isinstance(payload, ReleasePayload):
+            self._check_policy_declaration(
+                operation, payload.owner_id, payload.declaration_id
+            )
             if not self.declarations.release(payload.owner_id, payload.declaration_id):
                 raise ControlError("missing", "Declaration is unknown or expired")
             steps = ("declaration_released",)
@@ -365,6 +410,8 @@ class NativeKVController:
                 self.request_observer.observe()
             if self.executor is not None:
                 self.executor.cancel_owners(owners)
+            if self.policies is not None:
+                self.policies.cleanup(owners)
         else:
             assert isinstance(
                 payload, (EvictPayload, DemotePayload, PrefetchPayload, SharePayload)
@@ -373,9 +420,14 @@ class NativeKVController:
                 raise ControlError(
                     "unsupported", "No physical operation executor configured"
                 )
-            target = self._target(payload.target, request_id)
-            assert not isinstance(target, RequestTarget)
-            self.executor.submit(operation, payload, self.index.resolve(target))
+            if resolution is None:
+                target = self._target(payload.target, request_id)
+                assert not isinstance(target, RequestTarget)
+                resolution = self.index.resolve(target)
+            if self.policies is not None and operation.origin is None:
+                self.executor.validate_scope(resolution)
+                self.policies.before_explicit(payload, resolution)
+            self.executor.submit(operation, payload, resolution)
             return
         self.registry.update(
             operation,
@@ -384,6 +436,23 @@ class NativeKVController:
             missing_targets=missing_scope,
             reason="Range includes unrepresented content" if missing_scope else "",
         )
+
+    def _check_policy_declaration(
+        self,
+        operation: OperationResult,
+        owner_id: str,
+        declaration_id: str,
+    ) -> None:
+        if operation.origin is None:
+            return
+        existing = self.declarations.get(owner_id, declaration_id)
+        if (
+            existing is not None
+            and existing.policy_name != operation.origin.policy_name
+        ):
+            raise ControlError(
+                "busy", "A policy cannot replace another caller's declaration"
+            )
 
     def _submission(self, receipt: Submission) -> Submission:
         results = []

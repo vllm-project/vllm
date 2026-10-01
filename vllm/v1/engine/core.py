@@ -252,7 +252,11 @@ class EngineCore:
                 request_lookup=cast(Any, self.scheduler).requests.get,
                 connector=kv_connector,
                 transfer_allowed=lambda: not self.is_sleeping(),
+                requests=lambda: cast(Any, self.scheduler).requests.values(),
             )
+            policies = self.kv_control_service.controller.policies
+            if policies is not None and policies.has_guidance:
+                cast(Any, self.scheduler).kv_policy_runtime = policies
 
         self.aborts_queue = queue.Queue[list[str]]()
 
@@ -729,6 +733,8 @@ class EngineCore:
         if service is not None and service.controller.executor is not None:
             service.controller.executor.progress()
         self._observe_kv_requests()
+        if service is not None and service.controller.policies is not None:
+            service.controller.policies.tick()
         # When using async scheduling we can't get draft token ids in advance,
         # so we update draft token ids in the worker process and don't
         # need to update draft token ids here.
@@ -736,6 +742,19 @@ class EngineCore:
             draft_token_ids = self.model_executor.take_draft_token_ids()
             if draft_token_ids is not None:
                 self.scheduler.update_draft_token_ids(draft_token_ids)
+
+    def has_pending_kv_control(self) -> bool:
+        service = getattr(self, "kv_control_service", None)
+        return bool(
+            service is not None
+            and (
+                getattr(service.controller.executor, "has_pending", False)
+                or (
+                    service.controller.policies is not None
+                    and service.controller.policies.has_pending
+                )
+            )
+        )
 
     def _observe_kv_requests(self) -> None:
         service = getattr(self, "kv_control_service", None)
@@ -1535,6 +1554,7 @@ class EngineCoreProc(EngineCore):
             self.engines_running
             or self.scheduler.has_requests()
             or bool(self.batch_queue)
+            or self.has_pending_kv_control()
         )
 
     def is_running(self) -> bool:
@@ -1613,6 +1633,8 @@ class EngineCoreProc(EngineCore):
         # the GIL briefly to allow background transfer threads to make progress.
         if not model_executed and self.scheduler.has_requests():
             time.sleep(0.001)
+        elif not model_executed and self.has_pending_kv_control():
+            time.sleep(0.01)
 
         return model_executed
 

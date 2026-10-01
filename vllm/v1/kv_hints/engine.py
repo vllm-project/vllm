@@ -5,7 +5,7 @@
 import hashlib
 import json
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from typing import TYPE_CHECKING
 
 from vllm.config import VllmConfig
@@ -32,6 +32,7 @@ def create_control_service(
     request_lookup: Callable[[str], Request | None] | None = None,
     connector: "KVConnectorBase_V1 | None" = None,
     transfer_allowed: Callable[[], bool] | None = None,
+    requests: Callable[[], Iterable[Request]] | None = None,
 ) -> KVControlService:
     settings = config.kv_control_config
     assert settings is not None
@@ -122,14 +123,20 @@ def create_control_service(
             "Finite text-token requests; no LoRA, multimodal, "
             "prompt embeddings or resumable input"
         )
-    return KVControlService(
-        NativeKVController(
-            registry,
-            index,
-            declarations,
-            executor=executor,
-            cache_profile=cache_profile,
-            request_resolver=observer.resolve if observer is not None else None,
-            request_observer=observer,
-        )
+    controller = NativeKVController(
+        registry,
+        index,
+        declarations,
+        executor=executor,
+        cache_profile=cache_profile,
+        request_resolver=observer.resolve if observer is not None else None,
+        request_observer=observer,
     )
+    if settings.policies:
+        from vllm.v1.kv_hints.policy_runtime import KVPolicyRuntime
+
+        controller.policies = KVPolicyRuntime(
+            settings, controller, manager, requests or (lambda: ())
+        )
+        cache_profile["policies"] = tuple(controller.policies.policies)
+    return KVControlService(controller)
