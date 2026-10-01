@@ -1,0 +1,27 @@
+# auto (from_token_zero)
+sequence
+  optional
+    sequence
+      tag `<think>` text `</think>`
+      `\n\n`
+  triggered_tags [`<tool_call>`] excluding [`<think>`, `</think>`]
+    tag `<tool_call>\n{"name": "get_weather", "arguments": ` json({ location: string }) `}\n</tool_call>`
+    tag `<tool_call>\n{"name": "add", "arguments": ` json({ y: number, x: number, items: string[] }) `}\n</tool_call>`
+
+# required (from_token_zero)
+sequence
+  optional
+    sequence
+      tag `<think>` text `</think>`
+      `\n\n`
+  triggered_tags [`<tool_call>`] excluding [`<think>`, `</think>`] at_least_one
+    tag `<tool_call>\n{"name": "get_weather", "arguments": ` json({ location: string }) `}\n</tool_call>`
+    tag `<tool_call>\n{"name": "add", "arguments": ` json({ y: number, x: number, items: string[] }) `}\n</tool_call>`
+
+# named (from_token_zero)
+sequence
+  optional
+    sequence
+      tag `<think>` text `</think>`
+      `\n\n`
+  tag `<tool_call>\n{"name": "get_weather", "arguments": ` json({ location: string }) `}\n</tool_call>`

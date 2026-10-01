@@ -364,6 +364,7 @@ mod tests {
     };
 
     use super::KimiK3StructuralTagBuilder;
+    use crate::output_grammar::test_utils::outline;
 
     fn tool(name: &str, parameters: serde_json::Value) -> ToolParam {
         ToolParam::Function(FunctionToolParam::new(
@@ -395,7 +396,27 @@ mod tests {
         )
         .unwrap();
 
-        expect![[r##"{"type":"structural_tag","format":{"type":"sequence","elements":[{"type":"optional","content":{"type":"const_string","value":"<|open|>response<|sep|>"}},{"type":"tag","begin":"","content":{"type":"any_text","excludes":["<|open|>","<|close|>","<|end_of_msg|>"],"max_tokens":null,"max_chars":null},"end":"<|close|>response<|sep|>"},{"type":"tag","begin":"<|open|>tools<|sep|>","content":{"type":"tags_with_separator","tags":[{"type":"tag","begin":"<|open|>call tool=\"get_weather\" index=\"","content":{"type":"sequence","elements":[{"type":"regex","pattern":"[1-9][0-9]*"},{"type":"const_string","value":"\"<|sep|>"},{"type":"or","elements":[{"type":"plus","content":{"type":"or","elements":[{"type":"tag","begin":"<|open|>argument key=\"unit\" type=\"string\"<|sep|>","content":{"type":"or","elements":[{"type":"const_string","value":"celsius"},{"type":"const_string","value":"fahrenheit"}]},"end":"<|close|>argument<|sep|>"},{"type":"tag","begin":"<|open|>argument key=\"place\" type=\"object\"<|sep|>","content":{"type":"json_schema","json_schema":{"$ref":"#/$defs/place","type":"object","$defs":{"place":{"type":"object","properties":{"city":{"type":"string"}}}}},"style":"json","any_order":false,"max_whitespace_cnt":null,"excludes":[]},"end":"<|close|>argument<|sep|>"}]}},{"type":"tag","begin":"<|open|>json type=\"object\"<|sep|>","content":{"type":"json_schema","json_schema":{"$defs":{"place":{"type":"object","properties":{"city":{"type":"string"}}}},"type":"object","properties":{"unit":{"type":"string","enum":["celsius","fahrenheit"]},"place":{"$ref":"#/$defs/place","type":"object"}},"required":["place"]},"style":"json","any_order":false,"max_whitespace_cnt":null,"excludes":[]},"end":"<|close|>json<|sep|>"}]}]},"end":"<|close|>call<|sep|>"}],"separator":"","at_least_one":true,"stop_after_first":false},"end":"<|close|>tools<|sep|>"},{"type":"optional","content":{"type":"const_string","value":"<|close|>message<|sep|>"}}]}}"##]].assert_eq(&tag.to_json_string().unwrap());
+        expect![[r#"
+            sequence
+              optional `<|open|>response<|sep|>`
+              tag `` text excluding [`<|open|>`, `<|close|>`, `<|end_of_msg|>`] `<|close|>response<|sep|>`
+              tag `<|open|>tools<|sep|>` .. `<|close|>tools<|sep|>`
+                tags_with_separator `` at_least_one
+                  tag `<|open|>call tool="get_weather" index="` .. `<|close|>call<|sep|>`
+                    sequence
+                      /[1-9][0-9]*/
+                      `"<|sep|>`
+                      or
+                        plus
+                          or
+                            tag `<|open|>argument key="unit" type="string"<|sep|>` .. `<|close|>argument<|sep|>`
+                              or
+                                `celsius`
+                                `fahrenheit`
+                            tag `<|open|>argument key="place" type="object"<|sep|>` json(place & object where place = { city?: string }) `<|close|>argument<|sep|>`
+                        tag `<|open|>json type="object"<|sep|>` json({ unit?: "celsius" | "fahrenheit", place: place & object } where place = { city?: string }) `<|close|>json<|sep|>`
+              optional `<|close|>message<|sep|>`
+        "#]].assert_eq(&outline(&tag.format));
     }
 
     #[test]

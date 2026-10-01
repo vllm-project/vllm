@@ -1150,6 +1150,7 @@ fn check_grammar_replay_file(
 ) -> Result<()> {
     let model_name = case.model_id.rsplit_once('/').map_or(case.model_id, |(_, name)| name);
     let path = grammar_replay_dir().join(format!("{model_name}.json"));
+    let outline_path = path.with_extension("txt");
     let results = results
         .into_iter()
         .filter_map(|(variant, result)| {
@@ -1157,11 +1158,13 @@ fn check_grammar_replay_file(
         })
         .collect::<Vec<_>>();
     if results.is_empty() {
-        ensure!(
-            !path.exists(),
-            "{} builds no output grammar, but grammar replay file {path:?} exists",
-            case.model_id
-        );
+        for path in [&path, &outline_path] {
+            ensure!(
+                !path.exists(),
+                "{} builds no output grammar, but grammar replay file {path:?} exists",
+                case.model_id
+            );
+        }
         return Ok(());
     }
 
@@ -1204,6 +1207,25 @@ fn check_grammar_replay_file(
             },
         );
     }
+
+    // A readable outline of the same grammars, for review only.
+    let mut outline = String::new();
+    for (variant, case) in &cases {
+        if !outline.is_empty() {
+            outline.push('\n');
+        }
+        let variant = serde_json::to_value(variant)?;
+        let coverage = serde_json::to_value(case.grammar.coverage)?;
+        outline.push_str(&format!(
+            "# {} ({})\n",
+            variant.as_str().context("variant name")?,
+            coverage.as_str().context("coverage name")?,
+        ));
+        outline.push_str(&vllm_parser::output_grammar::test_utils::outline(
+            &case.grammar.format,
+        ));
+    }
+    expect_test::expect_file![outline_path].assert_eq(&outline);
 
     let file = GrammarReplayFile {
         model_id: case.model_id,
