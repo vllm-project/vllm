@@ -285,8 +285,9 @@ class FrontendArgs(BaseFrontendArgs):
     port: int = 8000
     """Port number."""
     grpc_port: int | None = None
-    """Additional gRPC listener port for the Rust frontend. Requires
-    `VLLM_USE_RUST_FRONTEND=1 vllm serve`; HTTP remains on `--port`."""
+    """Enable the Rust frontend's additional gRPC Inference and Control services
+    on this port. Requires `VLLM_USE_RUST_FRONTEND=1 vllm serve`; HTTP remains on
+    `--port`. Cannot be combined with the Python gRPC server's `--grpc` flag."""
     data_parallel_supervisor_port: int = 9256
     """HTTP port for aggregated health endpoints in multi-port external LB
     mode."""
@@ -454,8 +455,10 @@ def make_arg_parser(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
         "--grpc",
         action="store_true",
         default=False,
-        help="Launch a gRPC server instead of the HTTP OpenAI-compatible "
-        "server. Requires: pip install vllm[grpc].",
+        help="Launch the Python gRPC (SMG VllmEngine) server on --port instead "
+        "of the HTTP OpenAI-compatible server. Requires: pip install vllm[grpc]. "
+        "Cannot be combined with --grpc-port, which enables the Rust "
+        "frontend's gRPC services.",
     )
     parser = FrontendArgs.add_cli_args(parser)
     parser = AsyncEngineArgs.add_cli_args(parser)
@@ -482,19 +485,23 @@ def validate_parsed_serve_args(args: argparse.Namespace):
         )
 
     if getattr(args, "grpc_port", None) is not None:
+        if args.grpc:
+            raise ValueError(
+                "--grpc and --grpc-port are mutually exclusive. Use --grpc "
+                "--port for the Python gRPC server, or VLLM_USE_RUST_FRONTEND=1 "
+                "with --grpc-port for the Rust frontend."
+            )
         if (
             not envs.VLLM_USE_RUST_FRONTEND
             or getattr(args, "subparser", "serve") != "serve"
         ):
             raise ValueError("--grpc-port requires VLLM_USE_RUST_FRONTEND=1 vllm serve")
-        if (
-            args.grpc
-            or args.headless
-            or (args.api_server_count is not None and args.api_server_count <= 0)
+        if args.headless or (
+            args.api_server_count is not None and args.api_server_count <= 0
         ):
             raise ValueError(
-                "--grpc-port requires a Rust frontend; remove --grpc, "
-                "--headless, and non-positive --api-server-count"
+                "--grpc-port requires a Rust frontend; remove --headless "
+                "and non-positive --api-server-count"
             )
         if args.data_parallel_multi_port_external_lb:
             raise ValueError(

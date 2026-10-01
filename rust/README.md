@@ -52,8 +52,13 @@ VLLM_USE_RUST_FRONTEND=1 vllm serve Qwen/Qwen3-0.6B \
 ```
 
 This also works with Python-supervised hybrid data parallelism. It requires a
-frontend process and cannot be combined with `--headless`, the separate Python
-`--grpc` server, or `--data-parallel-multi-port-external-lb`.
+frontend process and cannot be combined with `--headless` or
+`--data-parallel-multi-port-external-lb`.
+
+The separate `vllm serve MODEL --grpc --port 50051` command launches the Python
+SMG `VllmEngine` gRPC server in place of HTTP. The Rust listener exposes the
+`vllm.Inference` and `vllm.Control` services alongside HTTP. These are different
+gRPC APIs; `--grpc` and `--grpc-port` are mutually exclusive.
 
 ### RL weight synchronization
 
