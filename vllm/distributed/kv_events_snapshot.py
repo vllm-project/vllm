@@ -56,7 +56,7 @@ _Scope = tuple[str | None, int | None, str | None, str | None]
 _BlockKey = tuple[_Scope, ExternalBlockHash]
 
 
-class _Record(msgspec.Struct, gc=False):
+class _Record(msgspec.Struct, gc=False):  # type: ignore[call-arg]
     """Hash inputs of one block and the reasons it is retained.
 
     Records name other blocks by hash only, so they cannot form reference
