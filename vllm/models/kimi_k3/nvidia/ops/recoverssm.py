@@ -569,6 +569,22 @@ def _commit_kda_state_kernel(
     tl.store(final_ptrs, state, mask=mask_state)
 
 
+# Verify narrows its value tiles for small speculative batches (tuned on B200).
+_VERIFY_SMALL_BATCH = 8
+
+
+def _verify_block_v(key_dim: int, value_dim: int, batch: int) -> int:
+    small_batch = batch <= _VERIFY_SMALL_BATCH
+    tile = (4 if small_batch else 8) if key_dim == 128 else 32
+    return min(triton.next_power_of_2(value_dim), tile)
+
+
+# Consumed by kimi_k3_triton_warmup.py during kernel_warmup().
+def get_kda_recoverssm_verify_warmup_batches() -> tuple[int, ...]:
+    """Return one speculative batch size per verify launch variant."""
+    return (1, _VERIFY_SMALL_BATCH + 1)
+
+
 def kda_recoverssm_verify(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -665,10 +681,7 @@ def kda_recoverssm_verify(
         return out
 
     block_k = triton.next_power_of_2(key_dim)
-    block_v = min(
-        triton.next_power_of_2(value_dim),
-        (4 if batch <= 8 else 8) if key_dim == 128 else 32,
-    )
+    block_v = _verify_block_v(key_dim, value_dim, batch)
     grid = (triton.cdiv(value_dim, block_v), batch, num_heads)
     _kda_recoverssm_verify_kernel[grid](
         q,
@@ -1054,4 +1067,8 @@ class KDARecoverSSMCommitContext:
         )
 
 
-__all__ = ["KDARecoverSSMCommitContext", "kda_recoverssm_verify"]
+__all__ = [
+    "KDARecoverSSMCommitContext",
+    "get_kda_recoverssm_verify_warmup_batches",
+    "kda_recoverssm_verify",
+]
