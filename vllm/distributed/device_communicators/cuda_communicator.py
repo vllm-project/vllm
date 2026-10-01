@@ -146,6 +146,7 @@ class CudaCommunicator(DeviceCommunicatorBase):
             self.aiter_ar_comm = AiterCustomAllreduce(
                 group=self.cpu_group,
                 device=self.device,
+                register_graph_buffers=register,
             )
 
         if use_custom_allreduce and self.aiter_ar_comm is None and self.world_size > 1:
@@ -169,6 +170,7 @@ class CudaCommunicator(DeviceCommunicatorBase):
             self.aiter_ar_comm = AiterCustomAllreduce(
                 group=self.cpu_group,
                 device=self.device,
+                register_graph_buffers=register,
             )
             if self.aiter_ar_comm.disabled:
                 self.aiter_ar_comm = None
