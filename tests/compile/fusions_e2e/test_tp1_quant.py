@@ -224,19 +224,29 @@ def test_tp1_fp4_mixed_precision_default_act_fusion(
 ):
     """A MIXED_PRECISION NVFP4 checkpoint gets act+quant fusion by default.
 
-    The pass config is left unset so fuse_act_quant comes from the
-    optimization level, which only enables it when NVFP4 is detected.
+    fuse_act_quant is left unset so it comes from the optimization level,
+    which only enables it when NVFP4 is detected. The other quant fusions
+    are disabled so only the act+quant matches are counted.
     """
     model_kwargs["hf_overrides"] = hf_overrides(n_layers)
     model_kwargs["load_format"] = "dummy"
     model_kwargs["max_model_len"] = 1024
     model_kwargs["kernel_config"] = {"enable_flashinfer_autotune": False}
 
+    compilation_config = dict(
+        use_inductor_graph_partition=inductor_graph_partition,
+        pass_config=PassConfig(
+            fuse_norm_quant=False,
+            fuse_attn_quant=False,
+            enable_qk_norm_rope_fusion=False,
+        ),
+    )
+
     run_e2e_fusion_test(
         model_name,
         matches_fn(n_layers),
         model_kwargs,
         attn_backend,
-        dict(use_inductor_graph_partition=inductor_graph_partition),
+        compilation_config,
         ["act_quant_fusion"],
     )
