@@ -59,6 +59,19 @@ REASONING_ONLY_END_THINK = {
     "content": "No thoughts!",
 }
 
+# generation stopped before </think>, e.g. because of max_tokens
+UNFINISHED_REASONING = {
+    "output": f"{START_REASONING}unfinished",
+    "reasoning": "unfinished",
+    "content": None,
+}
+
+UNFINISHED_REASONING_NO_START_THINK = {
+    "output": "unfinished",
+    "reasoning": "unfinished",
+    "content": None,
+}
+
 TEST_CASES = [
     pytest.param(
         False,  # not streaming
@@ -94,6 +107,16 @@ TEST_CASES = [
         False,  # not streaming
         REASONING_ONLY_END_THINK,
         id="yes_reasoning_only_end_think",
+    ),
+    pytest.param(
+        False,  # not streaming
+        UNFINISHED_REASONING,
+        id="unfinished_reasoning",
+    ),
+    pytest.param(
+        False,  # not streaming
+        UNFINISHED_REASONING_NO_START_THINK,
+        id="unfinished_reasoning_no_start_think",
     ),
     pytest.param(
         True,  # enable streaming
@@ -134,6 +157,16 @@ TEST_CASES = [
         True,  # enable streaming
         REASONING_ONLY_END_THINK,
         id="yes_reasoning_only_end_think_streaming",
+    ),
+    pytest.param(
+        True,  # enable streaming
+        UNFINISHED_REASONING,
+        id="unfinished_reasoning_streaming",
+    ),
+    pytest.param(
+        True,  # enable streaming
+        UNFINISHED_REASONING_NO_START_THINK,
+        id="unfinished_reasoning_no_start_think_streaming",
     ),
 ]
 
