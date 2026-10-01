@@ -970,7 +970,7 @@ def _distributed_direct_a2a_worker(env: dict[str, str]) -> None:
             query_start_loc = torch.cat(
                 (
                     query_lens_tensor.new_zeros(1),
-                    query_lens_tensor.cumsum(0),
+                    query_lens_tensor.cumsum(0, dtype=torch.int32),
                 )
             )
             empty_rows = torch.repeat_interleave(seq_lens == 0, query_lens_tensor)
