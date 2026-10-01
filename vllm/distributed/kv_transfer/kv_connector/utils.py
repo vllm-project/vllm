@@ -33,16 +33,14 @@ EngineId = str
 BlockIds = tuple[list[int], ...] | list[list[int]]
 
 
-def clip_ssm_state_blocks(
-    blocks: list[int], num_spec_blocks: int, positional: bool
-) -> list[int]:
-    """Drop speculative scratch slots, retaining position-indexed or running state."""
+def clip_ssm_state_blocks(blocks: list[int], num_spec_blocks: int) -> list[int]:
+    """Drop speculative scratch slots and keep only the running-state slot."""
     if not blocks:
         return blocks
     # Keep at least the running-state slot, even before scratch allocation.
     if num_scratch := min(num_spec_blocks, len(blocks) - 1):
         blocks = blocks[:-num_scratch]
-    return blocks if positional else blocks[-1:]
+    return blocks[-1:]
 
 
 def get_kv_connector_cache_layout(vllm_config: VllmConfig | None = None):

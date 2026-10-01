@@ -450,13 +450,6 @@ def _validate_hybrid_speculation(vllm_config: VllmConfig) -> None:
             "MoRIIO hybrid READ supports DSpark speculative decoding only, got "
             f"method={speculative_config.method!r}"
         )
-    if vllm_config.cache_config.mamba_cache_mode == "all":
-        # Positional allocation counts lookahead, so its local tail can exceed
-        # the single running-state block supported by hybrid READ.
-        raise MoRIIOError(
-            "MoRIIO hybrid READ does not support DSpark with "
-            "mamba_cache_mode='all'; use 'align'"
-        )
 
 
 def _validate_mamba_specs(specs: Collection[MambaSpec]) -> MambaSpec | None:
@@ -521,11 +514,6 @@ class MoRIIOConnectorScheduler:
                     "MoRIIO hybrid (mamba/KDA) transfer is implemented for READ "
                     "mode only; set kv_connector_extra_config.read_mode=true"
                 )
-        # Only "all" mode keeps a state per block position; the other modes keep
-        # a single running state in the last slot.
-        self._ssm_state_slots_are_positional = (
-            vllm_config.cache_config.mamba_cache_mode == "all"
-        )
         self._num_ssm_scratch_blocks = (
             mamba_spec.num_speculative_blocks if mamba_spec is not None else 0
         )
@@ -1288,8 +1276,8 @@ class MoRIIOConnectorScheduler:
         """Select transferable attention and Mamba block groups.
 
         The wire payload stores the attention group first, followed by every
-        Mamba group in transfer-group order. Outside ``mamba_cache_mode="all"``,
-        only each group's running-state slot is transferred.
+        Mamba group in transfer-group order. Only each group's running-state
+        slot is transferred.
         """
         if not block_ids:
             return [], []
@@ -1301,7 +1289,6 @@ class MoRIIOConnectorScheduler:
             clip_ssm_state_blocks(
                 list(transfer_block_ids[group_id]),
                 self._num_ssm_scratch_blocks,
-                self._ssm_state_slots_are_positional,
             )
             for group_id in self._mamba_group_ids
         ]

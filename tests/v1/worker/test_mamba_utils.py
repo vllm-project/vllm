@@ -398,7 +398,7 @@ def _make_kv_cache_config(cfg: _TestConfig, layer_names: list[str]) -> KVCacheCo
             (cfg.temporal_state_dim,),
         ),
         dtypes=(cfg.dtype, cfg.dtype),
-        mamba_cache_mode="all",
+        mamba_cache_mode="align",
     )
     group = KVCacheGroupSpec(
         layer_names=layer_names,

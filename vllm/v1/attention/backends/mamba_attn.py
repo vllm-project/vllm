@@ -39,7 +39,6 @@ class BaseMambaAttentionMetadata:
     # the batch has no prefill requests.
     has_initial_states_p: torch.Tensor | None
     query_start_loc_p: torch.Tensor | None
-    num_computed_tokens_p: torch.Tensor | None
     state_indices_tensor_p: torch.Tensor | None
 
     # The following tensors are used for decode requests and
@@ -52,13 +51,6 @@ class BaseMambaAttentionMetadata:
     # Includes the bonus token (so minimum is 1)
     num_accepted_tokens: torch.Tensor | None  # shape: [batch,]
 
-    # The following tensors are only used for prefix caching in all mode and
-    # are None if disabled
-    block_idx_last_scheduled_token: torch.Tensor | None
-    block_idx_first_scheduled_token_p: torch.Tensor | None
-    block_idx_last_computed_token: torch.Tensor | None
-    block_idx_last_scheduled_token_prev_step: torch.Tensor | None
-
     # The following tensor is only used for prefix caching in align mode
     seq_lens: torch.Tensor
 
@@ -70,9 +62,6 @@ class BaseMambaAttentionMetadata:
     # last_chunk_indices_p is a tensor of shape (batch,) that contains the
     # index of the last chunk for every sequence in the (prefill) batch.
     last_chunk_indices_p: torch.Tensor | None = None
-    # Number of block-aligned SSM states the prefill path writes, i.e.
-    # sum(block_idx_last_scheduled_token_p - block_idx_first_scheduled_token_p).
-    num_state_writes_p: int = 0
 
     # The following attributes are for triton implementation of causal_conv1d
     nums_dict: dict | None = None
@@ -130,47 +119,11 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
                 self.compilation_config.max_cudagraph_capture_size,
             )
 
-        if self.vllm_config.cache_config.mamba_cache_mode == "all":
-            max_num_blocks = (
-                cdiv(
-                    self.vllm_config.model_config.max_model_len,
-                    kv_cache_spec.block_size,
-                )
-                + kv_cache_spec.num_speculative_blocks
-            )
-            # TODO: reduce this size as needed for decode-only cudagraph capture
-            self.state_indices_tensor_d: torch.Tensor = torch.empty(
-                (
-                    self.decode_cudagraph_max_bs,
-                    max_num_blocks,
-                ),
-                dtype=torch.int32,
-                device=device,
-            )
-            self.block_idx_last_scheduled_token: torch.Tensor = torch.empty(
-                (self.decode_cudagraph_max_bs,),
-                dtype=torch.int32,
-                device=device,
-            )
-            self.block_idx_last_computed_token: torch.Tensor = torch.empty(
-                (self.decode_cudagraph_max_bs,),
-                dtype=torch.int32,
-                device=device,
-            )
-            if self.use_spec_decode:
-                self.block_idx_last_scheduled_token_prev_step: torch.Tensor = (
-                    torch.empty(
-                        (self.decode_cudagraph_max_bs,),
-                        dtype=torch.int32,
-                        device=device,
-                    )
-                )
-        else:
-            self.state_indices_tensor_d = torch.empty(
-                (self.decode_cudagraph_max_bs, 1 + self.num_spec_tokens),
-                dtype=torch.int32,
-                device=device,
-            )
+        self.state_indices_tensor_d = torch.empty(
+            (self.decode_cudagraph_max_bs, 1 + self.num_spec_tokens),
+            dtype=torch.int32,
+            device=device,
+        )
 
         # For speculative decoding, we need to store the following buffers
         # for CUDA graph capture during decode
@@ -259,23 +212,7 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
         if self.num_spec_tokens > 0:
             num_accepted_tokens = torch.diff(m.query_start_loc)
 
-        prev_last_scheduled_idx = None
-        if (
-            self.use_spec_decode
-            and self.vllm_config.cache_config.mamba_cache_mode == "all"
-        ):
-            prev_last_scheduled_idx = torch.zeros(
-                (m.num_reqs,),
-                dtype=torch.int32,
-                device=m.query_start_loc.device,
-            )
-
-        return self.build(
-            0,
-            m,
-            num_accepted_tokens=num_accepted_tokens,
-            prev_last_scheduled_idx=prev_last_scheduled_idx,
-        )
+        return self.build(0, m, num_accepted_tokens=num_accepted_tokens)
 
     def build(
         self,
@@ -284,7 +221,6 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
         fast_build: bool = False,
         *,
         num_accepted_tokens: torch.Tensor | None = None,
-        prev_last_scheduled_idx: torch.Tensor | None = None,
         num_decode_draft_tokens_cpu: torch.Tensor | None = None,
         **kwargs: Any,
     ) -> M:
@@ -294,7 +230,6 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
         return self._compute_common_metadata(
             common_attn_metadata,
             num_accepted_tokens=num_accepted_tokens,
-            prev_last_scheduled_idx=prev_last_scheduled_idx,
             num_decode_draft_tokens_cpu=num_decode_draft_tokens_cpu,
         )
 
@@ -423,56 +358,11 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
         )
         return cu_chunk_seqlen_p, seq_idx_p, last_chunk_indices_p
 
-    def _compute_prefix_caching_block_indices(
-        self,
-        common_attn_metadata: CommonAttentionMetadata,
-        mamba_block_size: int,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        num_computed_tokens = common_attn_metadata.compute_num_computed_tokens()
-        # Block index of the last computed token
-        block_idx_last_computed_token = (
-            torch.div(
-                num_computed_tokens + mamba_block_size - 1,
-                mamba_block_size,
-                rounding_mode="floor",
-            )
-            - 1
-        )
-        # which is <= block index for the first scheduled token
-        block_idx_first_scheduled_token = (
-            torch.div(
-                num_computed_tokens + mamba_block_size,
-                mamba_block_size,
-                rounding_mode="floor",
-            )
-            - 1
-        )
-        # which is <= block index of the last scheduled token
-        block_idx_last_scheduled_token = (
-            torch.div(
-                common_attn_metadata.seq_lens + mamba_block_size - 1,
-                mamba_block_size,
-                rounding_mode="floor",
-            )
-            - 1
-        )
-        # -1 in case it's non-computed and causes later issues with indexing
-        block_idx_last_computed_token.clamp_(min=0)
-        # -1 in the case we have a padded request (0 seq-len)
-        block_idx_last_scheduled_token.clamp_(min=0)
-
-        return (
-            block_idx_last_computed_token,
-            block_idx_first_scheduled_token,
-            block_idx_last_scheduled_token,
-        )
-
     def _compute_common_metadata(
         self,
         common_attn_metadata: CommonAttentionMetadata,
         *,
         num_accepted_tokens: torch.Tensor | None = None,
-        prev_last_scheduled_idx: torch.Tensor | None = None,
         num_decode_draft_tokens_cpu: torch.Tensor | None = None,
     ) -> M:
         """Compute metadata common to both Mamba1 and Mamba2."""
@@ -540,16 +430,6 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
         has_initial_states_p = None
         query_start_loc_p = None
         query_start_loc_d = None
-        num_computed_tokens = None
-        num_computed_tokens_p = None
-
-        # for prefix caching
-        block_idx_first_scheduled_token = None
-        block_idx_first_scheduled_token_p = None
-        block_idx_last_computed_token = None
-        block_idx_last_scheduled_token = None
-        block_idx_last_scheduled_token_prev_step = None
-        num_state_writes_p = 0
 
         # for causal_conv1d
         nums_dict, batch_ptr, token_chunk_offset_ptr = None, None, None
@@ -557,35 +437,12 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
         is_flush_d = None
         replayssm_scratch = None
 
-        if self.vllm_config.cache_config.mamba_cache_mode == "all":
-            num_computed_tokens = common_attn_metadata.compute_num_computed_tokens()
-
-            # Return a tensor of shape (#requests, #max blocks)
-            state_indices_tensor = common_attn_metadata.block_table_tensor
-            # Additional cache-related variables:
-            mamba_block_size = self.kv_cache_spec.block_size
-            (
-                block_idx_last_computed_token,
-                block_idx_first_scheduled_token,
-                block_idx_last_scheduled_token,
-            ) = self._compute_prefix_caching_block_indices(
-                common_attn_metadata, mamba_block_size
-            )
-            if self.use_spec_decode and prev_last_scheduled_idx is not None:
-                fallback = (num_computed_tokens - 1) // mamba_block_size
-                fallback.clamp_(min=0)
-                block_idx_last_scheduled_token_prev_step = torch.where(
-                    prev_last_scheduled_idx >= 0,
-                    prev_last_scheduled_idx,
-                    fallback,
-                )
-        else:
-            state_indices_tensor = mamba_get_block_table_tensor(
-                common_attn_metadata.block_table_tensor,
-                common_attn_metadata.seq_lens,
-                self.kv_cache_spec,
-                self.vllm_config.cache_config.mamba_cache_mode,
-            )
+        state_indices_tensor = mamba_get_block_table_tensor(
+            common_attn_metadata.block_table_tensor,
+            common_attn_metadata.seq_lens,
+            self.kv_cache_spec,
+            self.vllm_config.cache_config.mamba_cache_mode,
+        )
 
         if state_indices_tensor.dim() == 1:
             state_indices_tensor = state_indices_tensor.unsqueeze(-1)
@@ -595,11 +452,8 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
             [num_decodes, num_prefills],
             dim=0,
         )
-        if self.vllm_config.cache_config.mamba_cache_mode != "all":
-            state_indices_tensor_d = state_indices_tensor_d[
-                :, : 1 + self.num_spec_tokens
-            ]
-            state_indices_tensor_p = state_indices_tensor_p[:, 0]
+        state_indices_tensor_d = state_indices_tensor_d[:, : 1 + self.num_spec_tokens]
+        state_indices_tensor_p = state_indices_tensor_p[:, 0]
 
         if num_decodes > 0 and self.use_spec_decode:
             query_start_loc_d = common_attn_metadata.query_start_loc[: num_decodes + 1]
@@ -613,8 +467,7 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
                 num_accepted_tokens = num_accepted_tokens[:num_decodes]
 
         if num_prefills > 0:
-            if num_computed_tokens is None:
-                num_computed_tokens = common_attn_metadata.compute_num_computed_tokens()
+            num_computed_tokens = common_attn_metadata.compute_num_computed_tokens()
 
             query_start_loc_p = (
                 common_attn_metadata.query_start_loc[-num_prefills - 1 :]
@@ -634,33 +487,6 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
                         query_start_loc_p_cpu,
                         device=common_attn_metadata.query_start_loc.device,
                     )
-                )
-
-            if self.vllm_config.cache_config.mamba_cache_mode == "all":
-                assert num_computed_tokens is not None
-                num_computed_tokens_p = num_computed_tokens[
-                    num_reqs - num_prefills : num_reqs
-                ]
-                assert block_idx_first_scheduled_token is not None
-                block_idx_first_scheduled_token_p = block_idx_first_scheduled_token[
-                    num_reqs - num_prefills : num_reqs
-                ]
-
-                # How many block-aligned states prefill will write: the same
-                # (block_idx_last - block_idx_first) as above, from CPU data so
-                # the mixer needs no D2H read. The -1 in both indices cancels.
-                block_size = self.kv_cache_spec.block_size
-                seq_lens_p_cpu = seq_lens_cpu[num_reqs - num_prefills : num_reqs]
-                num_computed_tokens_p_cpu, _ = self._prefill_cpu_metadata(
-                    common_attn_metadata, num_reqs, num_prefills, num_decode_tokens
-                )
-                num_state_writes_p = int(
-                    (
-                        (seq_lens_p_cpu + block_size - 1) // block_size
-                        - (num_computed_tokens_p_cpu + block_size) // block_size
-                    )
-                    .clamp(min=0)
-                    .sum()
                 )
 
         if self.use_replayssm and not self.use_flashinfer_replayssm and num_decodes > 0:
@@ -764,14 +590,6 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
             replayssm_scratch=replayssm_scratch,
             num_accepted_tokens=num_accepted_tokens,
             query_start_loc_d=query_start_loc_d,
-            block_idx_last_scheduled_token=block_idx_last_scheduled_token,
-            block_idx_first_scheduled_token_p=block_idx_first_scheduled_token_p,
-            num_state_writes_p=num_state_writes_p,
-            block_idx_last_computed_token=block_idx_last_computed_token,
-            block_idx_last_scheduled_token_prev_step=(
-                block_idx_last_scheduled_token_prev_step
-            ),
-            num_computed_tokens_p=num_computed_tokens_p,
             num_reqs=num_reqs,
             seq_lens=common_attn_metadata.seq_lens,
             nums_dict=nums_dict,
@@ -791,11 +609,6 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
         state_indices_tensor_d = metadata.state_indices_tensor_d
         query_start_loc_d = metadata.query_start_loc_d
         num_accepted_tokens = metadata.num_accepted_tokens
-        block_idx_last_scheduled_token = metadata.block_idx_last_scheduled_token
-        block_idx_last_computed_token = metadata.block_idx_last_computed_token
-        block_idx_last_scheduled_token_prev_step = (
-            metadata.block_idx_last_scheduled_token_prev_step
-        )
         write_pos_d = metadata.write_pos_d
         is_flush_d = metadata.is_flush_d
         bc_pre_scratch = metadata.bc_pre_scratch
@@ -823,44 +636,6 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
                 num_accepted_tokens[metadata.num_decodes :] = (
                     1  # pad with 1st slot index
                 )
-
-            if self.vllm_config.cache_config.mamba_cache_mode == "all":
-                assert block_idx_last_scheduled_token is not None
-                assert block_idx_last_computed_token is not None
-                self.block_idx_last_scheduled_token[: metadata.num_decodes].copy_(
-                    block_idx_last_scheduled_token[: metadata.num_decodes],
-                    non_blocking=True,
-                )
-                block_idx_last_scheduled_token = self.block_idx_last_scheduled_token[
-                    :padded_bs
-                ]
-                block_idx_last_scheduled_token[metadata.num_decodes :] = 0
-
-                self.block_idx_last_computed_token[: metadata.num_decodes].copy_(
-                    block_idx_last_computed_token[: metadata.num_decodes],
-                    non_blocking=True,
-                )
-                block_idx_last_computed_token = self.block_idx_last_computed_token[
-                    :padded_bs
-                ]
-                block_idx_last_computed_token[metadata.num_decodes :] = 0
-
-                if (
-                    self.use_spec_decode
-                    and block_idx_last_scheduled_token_prev_step is not None
-                ):
-                    self.block_idx_last_scheduled_token_prev_step[
-                        : metadata.num_decodes
-                    ].copy_(
-                        block_idx_last_scheduled_token_prev_step[
-                            : metadata.num_decodes
-                        ],
-                        non_blocking=True,
-                    )
-                    block_idx_last_scheduled_token_prev_step = (
-                        self.block_idx_last_scheduled_token_prev_step[:padded_bs]
-                    )
-                    block_idx_last_scheduled_token_prev_step[metadata.num_decodes :] = 0
 
             if self.use_replayssm and not self.use_flashinfer_replayssm:
                 assert write_pos_d is not None
@@ -914,11 +689,6 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
             bc_pre_scratch=bc_pre_scratch,
             replayssm_scratch=replayssm_scratch,
             replayssm_state_indices_d=replayssm_state_indices_d,
-            block_idx_last_scheduled_token=block_idx_last_scheduled_token,
-            block_idx_last_computed_token=block_idx_last_computed_token,
-            block_idx_last_scheduled_token_prev_step=(
-                block_idx_last_scheduled_token_prev_step
-            ),
         )
 
     def update_block_table(
@@ -950,11 +720,8 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
             [metadata.num_decodes, metadata.num_prefills],
             dim=0,
         )
-        if self.vllm_config.cache_config.mamba_cache_mode != "all":
-            state_indices_tensor_d = state_indices_tensor_d[
-                :, : 1 + self.num_spec_tokens
-            ]
-            state_indices_tensor_p = state_indices_tensor_p[:, 0]
+        state_indices_tensor_d = state_indices_tensor_d[:, : 1 + self.num_spec_tokens]
+        state_indices_tensor_p = state_indices_tensor_p[:, 0]
 
         new_metadata = replace(
             metadata,

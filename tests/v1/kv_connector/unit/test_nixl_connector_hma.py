@@ -856,28 +856,6 @@ def test_apply_prefix_caching_mamba_hybrid(
             [[6, 7, 8, 9], [99]],
             id="fa_prefix_hit_and_ssm_trim",
         ),
-        # Multi-slot SSM ("all" mode): a local prefix hit leaves fewer local
-        # slots; the earlier remote slots are covered locally → remote tail.
-        pytest.param(
-            10,
-            10,
-            [list(range(10)), [5, 6]],
-            [list(range(10)), [1, 2, 3]],
-            [list(range(10)), [5, 6]],
-            [list(range(10)), [2, 3]],
-            id="ssm_multi_block_local_hit_tail",
-        ),
-        # Multi-slot SSM ("all" mode): the one trailing local position holds
-        # the token D recomputes itself → local head-clip.
-        pytest.param(
-            10,
-            10,
-            [list(range(10)), [4, 5, 6]],
-            [list(range(10)), [8, 9]],
-            [list(range(10)), [4, 5]],
-            [list(range(10)), [8, 9]],
-            id="ssm_multi_block_local_extra_head_clip",
-        ),
     ],
 )
 def test_apply_prefix_caching_ssm_prefix_cache_hit(
@@ -2034,13 +2012,12 @@ def test_logical_to_kernel_block_ids_with_remote_ratio(
 
 @pytest.mark.cpu_test
 def test_exchange_clipped_blocks_ssm_single_state():
-    """In single-state cache modes, SSM lists are reduced to the running
-    state slot: speculative scratch slots, null placeholders and the previous
-    step's state carry nothing. Attention groups pass through untouched."""
+    """SSM lists are reduced to the running state slot: speculative scratch
+    slots, null placeholders and the previous step's state carry nothing.
+    Attention groups pass through untouched."""
     sched = make_nixl_scheduler(has_mamba=True, is_hma_required=True)
     sched.blocks_per_sw = [0, 0]
     sched._ssm_spec_blocks = [None, 2]
-    sched._ssm_state_slots_are_positional = False
 
     # Align-mode list: null placeholders, state block, 2 speculative slots.
     clipped = sched.get_exchange_clipped_blocks(([1, 2, 3], [0, 0, 7, 8, 9]))
@@ -2067,19 +2044,6 @@ def test_exchange_clipped_blocks_ssm_single_state():
     # Non-mamba models pass through unchanged.
     fa_sched = make_nixl_scheduler(has_mamba=False)
     assert fa_sched.get_exchange_clipped_blocks(([1, 2],)) == ([1, 2],)
-
-
-@pytest.mark.cpu_test
-def test_exchange_clipped_blocks_ssm_positional_states():
-    """In "all" mode every position holds a state, so only the speculative
-    slots go; placeholders stay to keep the list position-indexed."""
-    sched = make_nixl_scheduler(has_mamba=True, is_hma_required=True)
-    sched.blocks_per_sw = [0, 0]
-    sched._ssm_spec_blocks = [None, 2]
-    sched._ssm_state_slots_are_positional = True
-
-    clipped = sched.get_exchange_clipped_blocks(([1, 2, 3], [0, 5, 6, 7, 8, 9]))
-    assert clipped == ([1, 2, 3], [0, 5, 6, 7])
 
 
 # ── Hybrid MLA+SSM (KimiLinear-shaped KDA+MLA) tests ─────────────────────
