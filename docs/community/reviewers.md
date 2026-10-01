@@ -12,7 +12,7 @@ Sorted alphabetically by GitHub handle:
 - [@andylolu2](https://github.com/andylolu2)
 - [@bnellnm](https://github.com/bnellnm) MoE, Quantization layers
 - [@BowenBao](https://github.com/BowenBao)
-- [@cjackal](https://github.com/cjackal)
+- [@cjackal](https://github.com/cjackal): Multimodality; KV Connector and offload
 - [@divakar-amd](https://github.com/divakar-amd)
 - [@etelis](https://github.com/etelis): KV cache offloading (CPU, filesystem, and P2P connectors; KV transfer and cache layouts); MoE serving and expert parallelism (developing review focus)
 - [@Fangzhou-Ai](https://github.com/Fangzhou-Ai)
