@@ -466,6 +466,39 @@ def make_arg_parser(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
     return parser
 
 
+def validate_grpc_port_arg(args: argparse.Namespace) -> None:
+    """Validate the Rust frontend's optional gRPC listener."""
+    if getattr(args, "grpc_port", None) is None:
+        return
+
+    if args.grpc:
+        raise ValueError(
+            "--grpc and --grpc-port are mutually exclusive. Use --grpc "
+            "--port for the Python gRPC server, or VLLM_USE_RUST_FRONTEND=1 "
+            "with --grpc-port for the Rust frontend."
+        )
+    if (
+        not envs.VLLM_USE_RUST_FRONTEND
+        or getattr(args, "subparser", "serve") != "serve"
+    ):
+        raise ValueError("--grpc-port requires VLLM_USE_RUST_FRONTEND=1 vllm serve")
+    if args.headless or (
+        args.api_server_count is not None and args.api_server_count <= 0
+    ):
+        raise ValueError(
+            "--grpc-port requires a Rust frontend; remove --headless "
+            "and non-positive --api-server-count"
+        )
+    if args.data_parallel_multi_port_external_lb:
+        raise ValueError(
+            "--grpc-port is incompatible with "
+            "--data-parallel-multi-port-external-lb: "
+            "its frontends would share the same gRPC port"
+        )
+    if not 0 <= args.grpc_port <= 65535:
+        raise ValueError("--grpc-port must be between 0 and 65535")
+
+
 def validate_parsed_serve_args(args: argparse.Namespace):
     """Quick checks for model serve args that raise prior to loading."""
     # `vllm launch <component>` builds its parser with make_arg_parser too (see
@@ -484,33 +517,7 @@ def validate_parsed_serve_args(args: argparse.Namespace):
             "the checkpoint's output format."
         )
 
-    if getattr(args, "grpc_port", None) is not None:
-        if args.grpc:
-            raise ValueError(
-                "--grpc and --grpc-port are mutually exclusive. Use --grpc "
-                "--port for the Python gRPC server, or VLLM_USE_RUST_FRONTEND=1 "
-                "with --grpc-port for the Rust frontend."
-            )
-        if (
-            not envs.VLLM_USE_RUST_FRONTEND
-            or getattr(args, "subparser", "serve") != "serve"
-        ):
-            raise ValueError("--grpc-port requires VLLM_USE_RUST_FRONTEND=1 vllm serve")
-        if args.headless or (
-            args.api_server_count is not None and args.api_server_count <= 0
-        ):
-            raise ValueError(
-                "--grpc-port requires a Rust frontend; remove --headless "
-                "and non-positive --api-server-count"
-            )
-        if args.data_parallel_multi_port_external_lb:
-            raise ValueError(
-                "--grpc-port is incompatible with "
-                "--data-parallel-multi-port-external-lb: "
-                "its frontends would share the same gRPC port"
-            )
-        if not 0 <= args.grpc_port <= 65535:
-            raise ValueError("--grpc-port must be between 0 and 65535")
+    validate_grpc_port_arg(args)
 
     # Enable auto tool needs a tool call parser to be valid
     if args.enable_auto_tool_choice and not args.tool_call_parser:
