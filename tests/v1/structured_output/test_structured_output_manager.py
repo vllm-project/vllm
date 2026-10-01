@@ -11,6 +11,7 @@ from vllm.config import DeviceConfig, StructuredOutputsConfig, VllmConfig
 from vllm.config.model import ModelConfig
 from vllm.config.speculative import SpeculativeConfig
 from vllm.config.structured_outputs import StructuredOutputsBackend
+from vllm.parser.engine.adapters import ParserEngineReasoningAdapter
 from vllm.sampling_params import SamplingParams, StructuredOutputsParams
 from vllm.v1.request import Request
 from vllm.v1.structured_output import StructuredOutputManager
@@ -59,6 +60,34 @@ class MockReasoner:
         return self.is_reasoning_end(delta_ids)
 
 
+class MockEngineReasoner(ParserEngineReasoningAdapter):
+    """Adapter-typed reasoner over fixed end-token sets; no real engine."""
+
+    def __init__(self, tokenizer, end_token_ids, content_end_token_ids=()):
+        self._end_token_ids = frozenset(end_token_ids)
+        self._content_end_token_ids = frozenset(content_end_token_ids)
+
+    @property
+    def reasoning_end_token_ids(self):
+        return self._end_token_ids
+
+    @property
+    def reasoning_end_content_token_ids(self):
+        return self._content_end_token_ids
+
+    def find_reasoning_end_offset(self, token_ids):
+        for offset, token in enumerate(token_ids):
+            if token in self._end_token_ids:
+                return offset
+        return len(token_ids)
+
+    def is_reasoning_end(self, input_ids):
+        return any(token in self._end_token_ids for token in input_ids)
+
+    def is_reasoning_end_streaming(self, input_ids, delta_ids):
+        raise AssertionError("engine fast path must not rescan draft prefixes")
+
+
 def _single_token(tokenizer, text: str) -> int:
     token_ids = tokenizer.encode(text)
     assert len(token_ids) == 1, (text, token_ids)
@@ -93,6 +122,7 @@ def _build_harness(
     enable_in_reasoning: bool = False,
     reasoning_parser_kwargs: dict | None = None,
     structured_outputs: StructuredOutputsParams | None = None,
+    reasoner_cls: type = MockReasoner,
 ) -> tuple[StructuredOutputManager, Request]:
     vllm_config = VllmConfig(
         model_config=ModelConfig(tokenizer=TOKENIZER),
@@ -108,7 +138,7 @@ def _build_harness(
     )
     manager = StructuredOutputManager(vllm_config)
     if use_reasoner:
-        manager.reasoner_cls = MockReasoner
+        manager.reasoner_cls = reasoner_cls
 
     sampling_params = SamplingParams(
         structured_outputs=structured_outputs
@@ -458,6 +488,69 @@ def test_regex_flow(
         # accept_tokens() latches reasoning_ended once it accepts any token.
         expected_reasoning=True if validated else None,
         expect_terminated=terminated,
+    )
+
+
+@pytest.mark.parametrize("backend", REGEX_BACKENDS)
+def test_content_marker_is_constrained_and_fed_to_grammar(
+    tokenizer, backend: StructuredOutputsBackend
+):
+    """A reasoning terminator that is itself grammar content (e.g. GLM's
+    ``<tool_call>``) must be constrained and consumed by the grammar; skipping
+    it leaves the grammar expecting the marker and forces a duplicate
+    (#59608)."""
+    marker = _single_token(tokenizer, "z")
+    manager, request = _build_harness(
+        tokenizer,
+        backend,
+        reasoning_ended=False,
+        reasoning_parser_kwargs={
+            "end_token_ids": {marker},
+            "content_end_token_ids": {marker},
+        },
+        structured_outputs=StructuredOutputsParams(regex="z[0-9]+"),
+        reasoner_cls=MockEngineReasoner,
+    )
+    drafts = _to_token_ids(tokenizer, (" ", "z", "1"))
+    _run_real_flow(
+        manager,
+        request,
+        raw_drafts=drafts,
+        expected_validated=drafts,
+        expected_row_pattern="UCCC",
+        expected_reasoning=True,
+        expect_terminated=False,
+    )
+    # The grammar consumed the marker: a digit extends the match, while a
+    # duplicate marker is no longer valid.
+    two = _single_token(tokenizer, "2")
+    assert manager.validate_tokens(request, [two]) == [two]
+    assert manager.validate_tokens(request, [marker]) == []
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_pure_marker_constraint_starts_after_marker(
+    tokenizer, backend: StructuredOutputsBackend
+):
+    """A pure reasoning terminator (``</think>``) is not grammar content: the
+    constraint starts after it and the grammar never consumes it."""
+    marker = _single_token(tokenizer, THINK_END)
+    manager, request = _build_harness(
+        tokenizer,
+        backend,
+        reasoning_ended=False,
+        reasoning_parser_kwargs={"end_token_ids": {marker}},
+        reasoner_cls=MockEngineReasoner,
+    )
+    drafts = _to_token_ids(tokenizer, (" ", THINK_END, "{", ' "'))
+    _run_real_flow(
+        manager,
+        request,
+        raw_drafts=drafts,
+        expected_validated=drafts,
+        expected_row_pattern="UUCCC",
+        expected_reasoning=True,
+        expect_terminated=False,
     )
 
 

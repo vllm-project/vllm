@@ -115,6 +115,10 @@ class ParserEngineReasoningAdapter(ReasoningParser):
     def reasoning_end_token_ids(self) -> frozenset[int]:
         return self._parser_engine.reasoning_end_token_ids
 
+    @property
+    def reasoning_end_content_token_ids(self) -> frozenset[int]:
+        return self._parser_engine.reasoning_end_content_token_ids
+
     def adjust_request(
         self,
         request: ChatCompletionRequest | ResponsesRequest,

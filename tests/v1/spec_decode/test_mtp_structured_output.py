@@ -105,6 +105,9 @@ def test_xgrammar_validate_tokens_stops_at_termination(capfd):
 class _EngineReasonerStub(ParserEngineReasoningAdapter):
     """Adapter-typed reasoner with a fixed end-token set and no real engine."""
 
+    # The stub's marker stands in for a pure ``</think>`` terminator.
+    reasoning_end_content_token_ids = frozenset()
+
     def __init__(self, end_token_ids):
         self._end_token_ids = frozenset(end_token_ids)
         self.windows: list[list[int]] = []

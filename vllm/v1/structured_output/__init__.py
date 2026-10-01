@@ -264,6 +264,14 @@ class StructuredOutputManager:
         ):
             offset = reasoner.find_reasoning_end_offset(spec_tokens)
             if offset is not None:
+                if (
+                    offset < num_spec_tokens
+                    and spec_tokens[offset] in reasoner.reasoning_end_content_token_ids
+                ):
+                    # The terminator is itself the first content token (e.g.
+                    # GLM's <tool_call>): constrain from the marker and feed it
+                    # to the grammar, or the grammar forces a duplicate marker.
+                    return offset
                 return offset + 1
 
         # Fallback to `find_reasoning_end_offset`

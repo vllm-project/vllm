@@ -106,3 +106,17 @@ class TestExtractContentIds:
     def test_thinking_disabled(self, no_thinking_parser):
         ids = [THINK_S, TEXT, TOOL_S]
         assert no_thinking_parser.extract_content_ids(ids) == ids
+
+
+class TestReasoningEndTokenIds:
+    def test_tool_opener_tracked_as_content(self, parser):
+        # ``<tool_call>`` ends reasoning but is also the first content token,
+        # so the structured-output gate must constrain from the marker itself
+        # rather than from the token after it.
+        assert parser.reasoning_end_token_ids == {THINK_E, TOOL_S}
+        assert parser.reasoning_end_content_token_ids == {TOOL_S}
+        assert parser.find_reasoning_end_offset([TEXT, TOOL_S, TEXT]) == 1
+
+    def test_thinking_disabled(self, no_thinking_parser):
+        assert no_thinking_parser.reasoning_end_token_ids == {TOOL_S}
+        assert no_thinking_parser.reasoning_end_content_token_ids == {TOOL_S}
