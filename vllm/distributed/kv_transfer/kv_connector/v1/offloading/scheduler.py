@@ -379,11 +379,9 @@ class RequestOffloadState:
     # Fine-grained token boundary selected beyond the last complete offload
     # chunk. It is consumed when the corresponding load is scheduled.
     partial_tail_boundary: int | None = None
-    # Keys selected for this load, for cache-hit attribution. Full-attention
-    # keys supply their own token range; sparse-group (SWA, recurrent) keys
-    # are needed to reuse the whole prefix.
+    # Loaded attention keys cover their token positions. Recurrent state
+    # supports the whole reused external prefix.
     load_key_ranges: list[tuple[int, int, OffloadKey]] = field(default_factory=list)
-    sparse_load_keys: list[OffloadKey] = field(default_factory=list)
     # True once on_request_finished has been signaled to the manager.
     finished_signaled: bool = False
 
@@ -1107,8 +1105,9 @@ class OffloadingConnectorScheduler:
     ) -> CachedTokensBySource:
         """Split the accepted external hit by the tier each loaded key came from.
 
-        A token needs every group's KV, so when groups disagree the outermost
-        tier is reported. Tokens no loaded key covers are
+        Attention keys cover only their loaded token ranges; recurrent state
+        covers the whole reused prefix. Overlaps report the outermost tier.
+        Uncovered tokens, including omitted sliding-window history, are
         ``external_unspecified``.
         """
         sources = CachedTokensBySource()
@@ -1123,7 +1122,6 @@ class OffloadingConnectorScheduler:
                 self.manager.get_load_source(key, req_status.req_context)
             )
 
-        sparse_tiers = [tier(key) for key in req_status.sparse_load_keys]
         ranges = [
             (max(start, lo), min(end, hi), tier(key))
             for lo, hi, key in req_status.load_key_ranges
@@ -1131,7 +1129,7 @@ class OffloadingConnectorScheduler:
         ]
         bounds = sorted({start, end, *(b for lo, hi, _ in ranges for b in (lo, hi))})
         for lo, hi in zip(bounds, bounds[1:]):
-            tiers = sparse_tiers + [t for r_lo, r_hi, t in ranges if r_lo <= lo < r_hi]
+            tiers = [t for r_lo, r_hi, t in ranges if r_lo <= lo < r_hi]
             sources.add(
                 CacheHitSource.outermost(tiers)
                 if tiers
@@ -1156,7 +1154,6 @@ class OffloadingConnectorScheduler:
 
         keys_to_load: list[OffloadKey] = []
         req_status.load_key_ranges.clear()
-        req_status.sparse_load_keys.clear()
         dst_block_ids: list[int] = []
         # per group
         group_sizes: list[int] = []
@@ -1220,8 +1217,11 @@ class OffloadingConnectorScheduler:
                         )
                     )
                 keys_to_load.extend(group_keys_to_load)
-                if group_config.sliding_window_size_in_chunks is not None:
-                    req_status.sparse_load_keys.extend(group_keys_to_load)
+                if isinstance(group_config.kv_cache_spec, MambaSpec):
+                    req_status.load_key_ranges.extend(
+                        (num_locally_computed_tokens, num_cached_tokens, key)
+                        for key in group_keys_to_load
+                    )
                 else:
                     for chunk_idx, key in enumerate(
                         group_keys_to_load, start_chunk_idx

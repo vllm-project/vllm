@@ -730,15 +730,14 @@ def test_external_cache_hit_sources_recurrent_only_state(source):
 @pytest.mark.parametrize(
     "sparse_source", ["host", "disk", "p2p", "external_unspecified", "mixed"]
 )
-def test_external_cache_hit_sources_use_required_sparse_state(
+def test_external_cache_hit_sources_use_loaded_attention_ranges(
     sparse_kind,
     blocks_per_chunk,
     local_tokens,
     full_attention,
     sparse_source,
 ):
-    """Skipped keys do not participate. Sparse state covers the whole prefix,
-    so each token range reports the outermost of its sources."""
+    """SWA/local attention affects only loaded positions, not omitted history."""
     block_size = 4
     chunk_size = block_size * blocks_per_chunk
     spec_kwargs = dict(
@@ -797,24 +796,25 @@ def test_external_cache_hit_sources_use_required_sparse_state(
             if sparse_source == "mixed":
                 return "host" if chunk_idx == 2 else "disk"
             return sparse_source
-        return "host" if chunk_idx < 2 else "disk"
+        return "host"
 
     scheduler.manager.get_load_source.side_effect = get_load_source
     count = 4 * chunk_size - local_tokens
     scheduler.update_state_after_alloc(
         request, KVCacheBlocks(tuple(block_groups)), count
     )
-    sparse_tiers = ["host", "disk"] if sparse_source == "mixed" else [sparse_source]
-
-    def outermost(*tiers):
-        return CacheHitSource.outermost(map(CacheHitSource, tiers))
-
     expected = CachedTokensBySource()
-    if full_attention:
-        expected.add(outermost("host", *sparse_tiers), 2 * chunk_size - local_tokens)
-        expected.add(outermost("disk", *sparse_tiers), 2 * chunk_size)
-    else:
-        expected.add(outermost(*sparse_tiers), count)
+    expected.add(
+        CacheHitSource.HOST if full_attention else CacheHitSource.EXTERNAL_UNSPECIFIED,
+        2 * chunk_size - local_tokens,
+    )
+    for chunk_idx in range(2, 4):
+        source = (
+            ("host" if chunk_idx == 2 else "disk")
+            if sparse_source == "mixed"
+            else sparse_source
+        )
+        expected.add(CacheHitSource(source), chunk_size)
     result = scheduler.get_external_cache_hit_sources(request, count)
     assert result == expected
     assert result.total == count
