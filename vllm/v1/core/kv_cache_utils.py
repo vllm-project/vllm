@@ -606,8 +606,11 @@ def _gen_prompt_embeds_extra_hash_keys(
     embeds_hash = request._prompt_embeds_per_block_hashes.get(block_range)
     if embeds_hash is None:
         block_prompt_embeds = request.prompt_embeds[start_token_idx:end_token_idx]
-        # Hash prompt embeds once per block and cache on request
-        embeds_hash = hashlib.sha256(tensor_data(block_prompt_embeds)).digest()
+        # Equal bytes can encode different values (e.g. float16 vs bfloat16).
+        # Include the dtype in the digest, preserving the KV event key format.
+        hasher = hashlib.sha256(str(block_prompt_embeds.dtype).encode() + b"\0")
+        hasher.update(tensor_data(block_prompt_embeds))
+        embeds_hash = hasher.digest()
         request._prompt_embeds_per_block_hashes[block_range] = embeds_hash
     return [("prompt_embeds", embeds_hash)]
 
