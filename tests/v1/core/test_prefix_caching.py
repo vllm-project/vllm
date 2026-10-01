@@ -1139,6 +1139,52 @@ def test_hisparse_prefix_hit_adopts_gpu_shadow_pages():
     )
 
 
+@pytest.mark.parametrize("free_blocks,adopted_pages", [(7, []), (10, [0, 1])])
+def test_hisparse_prefix_hit_under_pressure_adopts_surviving_copies(
+    free_blocks, adopted_pages
+):
+    """A host prefix hit must not starve its own allocation of free blocks.
+
+    Admission counts free GPU copies as free, but adopting a copy pins it. When
+    adoption ran before the hit's allocation, it took blocks the allocation was
+    promised and the pool ran dry (``Cannot get N free blocks``). The allocation
+    now goes first, evicting a prefix's copies tail first; the copies it leaves
+    are adopted.
+    """
+    manager = make_hisparse_kv_cache_manager(32, 16, enable_caching=True)
+    tokens = list(range(4 * HISPARSE_BLOCK_SIZE))
+    original = make_request("original", tokens, HISPARSE_BLOCK_SIZE, sha256)
+    assert manager.allocate_slots(original, num_new_tokens=len(tokens)) is not None
+    _publish_hisparse_pages(manager)
+    copy_ids = [block.block_id for block in manager.get_blocks("original").blocks[2]]
+    manager.free(original)
+    pool = manager.block_pool
+    pool.get_new_blocks(pool.get_num_free_blocks() - free_blocks)
+
+    resumed = make_request("resumed", tokens, HISPARSE_BLOCK_SIZE, sha256)
+    computed, num_computed, _ = manager.get_computed_blocks(resumed)
+    assert num_computed == 3 * HISPARSE_BLOCK_SIZE
+    assert manager.allocate_slots(
+        resumed,
+        num_new_tokens=len(tokens) - num_computed,
+        num_new_computed_tokens=num_computed,
+        new_computed_blocks=computed,
+    )
+
+    resumed_blocks = manager.get_blocks("resumed").blocks
+    assert [block.block_id for block in resumed_blocks[2][:3]] == [
+        copy_ids[page] if page in adopted_pages else pool.null_block.block_id
+        for page in range(3)
+    ]
+    gpu_ids = [
+        block.block_id
+        for group in resumed_blocks[1:]
+        for block in group
+        if not block.is_null
+    ]
+    assert len(gpu_ids) == len(set(gpu_ids))
+
+
 def test_hisparse_host_backed_request_accepts_local_prefix_hit():
     """Local group-completion hits need no external host import allocation."""
     manager = make_hisparse_kv_cache_manager(32, 16, enable_caching=True)
@@ -1213,6 +1259,63 @@ def test_hisparse_cleanup_publishes_only_finalized_terminal_pages(
     assert not coordinator.has_pending_work()
 
 
+@pytest.mark.parametrize("num_pages,reads_host", [(4, True), (3, False)])
+def test_hisparse_prefill_reads_host_once_it_fills_admission_window(
+    num_pages, reads_host
+):
+    """A prefill switches to host reads once it fills its admission window.
+
+    Admission caps each request's resident pages at the in-flight window,
+    assuming older pages move to host, but pinned pages were released only
+    once free blocks fell below a fixed watermark. A chunked prefill larger
+    than the watermark outgrew the pool first and was preempted.
+    """
+    window_pages = 4
+    manager = make_hisparse_kv_cache_manager(
+        32,
+        16,
+        enable_caching=True,
+        max_in_flight_tokens=window_pages * HISPARSE_BLOCK_SIZE,
+    )
+    coordinator = get_hisparse_coordinator(manager)
+    tokens = list(range(2 * window_pages * HISPARSE_BLOCK_SIZE))
+    request = make_request("prefill", tokens, HISPARSE_BLOCK_SIZE, sha256)
+    assert manager.allocate_slots(request, num_pages * HISPARSE_BLOCK_SIZE) is not None
+    pool = coordinator.gpu_pool
+    assert pool is not None
+    assert pool.get_num_free_blocks() >= coordinator.transition_watermark
+
+    hot_manager = coordinator.hot_managers[0]
+    assert (request.request_id in hot_manager.hot_required) == reads_host
+
+
+def test_hisparse_preempted_prefill_resumes_from_durable_prefix():
+    """A prefill preempted mid-way must resume from the pages already on host.
+
+    Host writes trail a chunked prefill by a chunk, and host pages were only
+    published once the whole computed prefix was durable. Each chunk moved
+    that target past the finished writes, so nothing was published before the
+    prefill ended: a prefill preempted each time it outgrew the GPU pool
+    recomputed from the start forever.
+    """
+    manager = make_hisparse_kv_cache_manager(32, 16, enable_caching=True)
+    coordinator = get_hisparse_coordinator(manager)
+    chunk = 2 * HISPARSE_BLOCK_SIZE
+    tokens = list(range(3 * chunk))
+    request = make_request("long", tokens, HISPARSE_BLOCK_SIZE, sha256)
+    assert manager.allocate_slots(request, chunk) is not None
+    request.num_computed_tokens = chunk
+    first_chunk_writes = coordinator.build_offload_command().page_transfers
+    assert manager.allocate_slots(request, chunk) is not None
+    request.num_computed_tokens = 2 * chunk
+    acks = {transfer.transfer_id: 1 for transfer in first_chunk_writes}
+    coordinator.update_spills(acks, acks)
+    manager.free(request)
+
+    resumed = make_request("resumed", tokens, HISPARSE_BLOCK_SIZE, sha256)
+    assert manager.get_computed_blocks(resumed)[1] == chunk
+
+
 def test_hisparse_terminal_prefix_waits_for_all_workers_and_preserves_identity():
     """Old completions retain their pages through pressure and request-ID reuse."""
     manager = make_hisparse_kv_cache_manager(32, 8, enable_caching=True)
@@ -1239,7 +1342,9 @@ def test_hisparse_terminal_prefix_waits_for_all_workers_and_preserves_identity()
     assert not {block.block_id for block in old_blocks[:2]} & {
         block.block_id for block in pressure + new_blocks
     }
-    assert all(block.block_hash is None for block in old_blocks)
+    # Only the page every worker finished writing is published.
+    assert old_blocks[0].block_hash is not None
+    assert all(block.block_hash is None for block in old_blocks[1:])
     coordinator.update_spills({}, partial)
     repeated = make_request("probe", tokens, HISPARSE_BLOCK_SIZE, sha256)
     assert manager.get_computed_blocks(repeated)[1] == 2 * HISPARSE_BLOCK_SIZE
