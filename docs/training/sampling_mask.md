@@ -53,6 +53,8 @@ The mask is also available via the `/inference/v1/generate` HTTP endpoint:
 }
 ```
 
+With `stream=true`, each chunk carries the masks of the tokens it emits.
+
 ## Requirements
 
 | Requirement | Reason |
@@ -145,5 +147,3 @@ Each position then carries the sampled token's logprob and the top-128
 - **Engine-level flag:** `--return-sampling-mask` globally disables the
   FlashInfer fused sampler. All requests pay the cost of the PyTorch sampling
   path, even if they don't need the mask.
-- **No streaming support:** The mask is returned only in the final response,
-  not in intermediate streaming chunks.

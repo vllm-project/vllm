@@ -231,6 +231,7 @@ async fn generate_chunk_stream(
                         logprobs,
                         finish_reason: finish_reason.map(|reason| reason.as_str().to_string()),
                         token_ids,
+                        sampling_mask: output.sampling_mask.map(|mask| mask.rows),
                     }],
                     usage: include_continuous_usage
                         .then(|| Usage::from_token_usage(usage, enable_prompt_tokens_details)),
@@ -331,6 +332,7 @@ fn collect_generate(
             logprobs,
             finish_reason: Some(finish_reason),
             token_ids: collected.token_ids,
+            sampling_mask: collected.sampling_mask.map(|mask| mask.rows),
         }],
         prompt_logprobs,
         prompt_token_id_logprobs: collected
@@ -516,6 +518,7 @@ mod tests {
     use futures::{TryStreamExt as _, stream};
     use vllm_engine_core_client::protocol::multimodal::{MmModality, PlaceholderRange};
     use vllm_engine_core_client::protocol::output::RequestSpecDecodeMetrics;
+    use vllm_engine_core_client::protocol::sampling_mask::SamplingMask;
     use vllm_llm::GeneratePromptInfo;
 
     use super::*;
@@ -658,6 +661,18 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn generate_chunk_stream_returns_sampling_mask() {
+        let mut output = stream_output(Some(&[11]), vec![33], Some(FinishReason::Length));
+        output.sampling_mask = Some(SamplingMask {
+            rows: vec![vec![33, 44]],
+        });
+
+        let chunks = collect_chunks(vec![output], false, None).await;
+
+        assert_eq!(chunks[0].choices[0].sampling_mask, Some(vec![vec![33, 44]]));
+    }
+
+    #[tokio::test]
     async fn generate_chunk_stream_omits_prompt_metadata_by_default() {
         let chunks = collect_chunks(
             vec![
@@ -792,7 +807,9 @@ mod tests {
             kv_transfer_params: None,
             ec_transfer_params: None,
             prompt_token_ids: vec![10, 20],
-            sampling_mask: None,
+            sampling_mask: Some(SamplingMask {
+                rows: vec![vec![30, 40]],
+            }),
             spec_decode_metrics: None,
         };
 
@@ -813,6 +830,7 @@ mod tests {
 
         assert!(response.prompt_token_ids.is_none());
         assert!(response.mm_placeholders.is_none());
+        assert_eq!(response.choices[0].sampling_mask, Some(vec![vec![30, 40]]));
     }
 
     #[test]

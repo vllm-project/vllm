@@ -197,6 +197,12 @@ class RequestOutput:
                         if next_completion.logprobs:
                             assert completion.logprobs is not None
                             completion.logprobs.extend(next_completion.logprobs)  # type: ignore[arg-type]
+                        if next_completion.sampling_mask is not None:
+                            if completion.sampling_mask is None:
+                                completion.sampling_mask = SamplingMask([])
+                            completion.sampling_mask.token_ids.extend(
+                                next_completion.sampling_mask.token_ids
+                            )
                         completion.cumulative_logprob = (
                             next_completion.cumulative_logprob
                         )
