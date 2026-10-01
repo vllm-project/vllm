@@ -898,6 +898,12 @@ def _distributed_direct_a2a_worker(env: dict[str, str]) -> None:
             actual = workspace.lse_reduce(partial_output, partial_lse, is_lse_base_on_e)
             torch.accelerator.synchronize()
 
+            # Layout alone must not alter even one output bit.
+            packed = workspace.lse_reduce(
+                partial_output, partial_lse.contiguous(), is_lse_base_on_e
+            )
+            torch.testing.assert_close(actual, packed, rtol=0, atol=0)
+
             reference_output = partial_output.contiguous()
             reference_lse = partial_lse.contiguous()
             gathered_output = [
@@ -1060,6 +1066,11 @@ def _distributed_direct_a2a_worker(env: dict[str, str]) -> None:
         for _ in range(3):
             graph.replay()
         torch.accelerator.synchronize()
+
+        packed = workspace.lse_reduce(
+            partial_output, partial_lse.contiguous(), is_lse_base_on_e
+        )
+        torch.testing.assert_close(actual, packed, rtol=0, atol=0)
 
         reference_output = partial_output.contiguous()
         reference_lse = partial_lse.contiguous()
