@@ -220,9 +220,9 @@ def _lora_shrink(
     GROUP_SIZE_M = kernel_config.get("group_size_m", 8)
     EVEN_K = K % (BLOCK_K * SPLIT_K) == 0  # type: ignore
 
-    # TODO (varun): This grid formulation maximizes parallelization at the
-    # cost of wasteful thread block launch when only few of the input tokens
-    # require LoRA. This might not be the best in all cases.
+    # The grid uses the maximum number of tokens assigned to any active LoRA.
+    # Using the global token count can result in excessive thread block launches
+    # for fragmented Multi-LoRA workloads.
     grid = (
         SPLIT_K * triton.cdiv(MAX_LORA_M, BLOCK_M) * triton.cdiv(N, BLOCK_N),
         NUM_SLICES,
