@@ -5,12 +5,17 @@
 import pytest
 import torch
 
+from vllm.config import CUDAGraphMode
 from vllm.forward_context import (
+    BatchDescriptor,
     ForwardContext,
     get_forward_context,
     override_forward_context,
 )
-from vllm.models.deepseek_v41.decoder_replay_layers import DecoderReplayLayers
+from vllm.models.deepseek_v41.decoder_replay_layers import (
+    DecoderReplayLayers,
+    ReplayBatch,
+)
 
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA")
 
@@ -32,9 +37,9 @@ def _context(metadata):
 
 
 def _set_replay_batch(layers, rows, metadata):
-    layers.rows = torch.tensor(rows, device=DEVICE)
-    layers.forward_context = ForwardContext(
-        no_compile_layers={}, attn_metadata=metadata, slot_mapping={}
+    layers.replay_batch = ReplayBatch(
+        torch.tensor(rows, device=DEVICE),
+        ForwardContext(no_compile_layers={}, attn_metadata=metadata, slot_mapping={}),
     )
 
 
@@ -102,3 +107,23 @@ def test_no_replay_batch_runs_the_whole_batch():
     with override_forward_context(_context(full)):
         (output,) = layers(*states)
     assert output is states[0] and seen["attn_metadata"] is full
+
+
+def test_graph_break_writes_fixed_buffers():
+    """Above the trim threshold, a PIECEWISE graph's replay layers write fixed
+    buffers, which the graph's next segment reads on every replay."""
+    layers = DecoderReplayLayers(WINDOW, lambda hidden, *rest: (hidden * 2,), [])
+    layers.trim_threshold = NUM_TOKENS - 1
+    context = ForwardContext(
+        no_compile_layers={},
+        attn_metadata=object(),
+        slot_mapping={},
+        cudagraph_runtime_mode=CUDAGraphMode.PIECEWISE,
+        batch_descriptor=BatchDescriptor(num_tokens=NUM_TOKENS),
+    )
+    states = _states(NUM_TOKENS)
+    with override_forward_context(context):
+        (first,) = layers(*states)
+        (second,) = layers(states[0] * 3, *states[1:])
+    assert first.data_ptr() == second.data_ptr()
+    assert torch.equal(second, states[0] * 6)

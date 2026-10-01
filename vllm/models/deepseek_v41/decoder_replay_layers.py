@@ -8,15 +8,33 @@ in eager prefill steps they run on each request's last ``window`` rows only.
 metadata and a forward context of its own, like a microbatch;
 ``DecoderReplayLayers`` gathers the layer inputs by its rows, runs the layers
 under that context and scatters the outputs back to batch rows. Steps that run
-in a CUDA graph keep the layers on the whole batch, inside the graph.
+in a CUDA graph keep the layers on the whole batch, inside the graph; an eager
+step's replay batch may run in a graph of its own (decoder_replay_cudagraph.py).
 """
 
 from collections.abc import Callable
+from dataclasses import dataclass
 
 import torch
 
-from vllm.forward_context import ForwardContext, override_forward_context
+from vllm.compilation.breakable_cudagraph import eager_break_during_capture
+from vllm.forward_context import (
+    ForwardContext,
+    get_forward_context,
+    in_piecewise_cudagraph,
+    override_forward_context,
+)
 from vllm.model_executor.layers.fused_moe.moe_output import MoEOutput
+
+
+@dataclass
+class ReplayBatch:
+    """The replay layers' batch of one forward: its rows of the batch, its
+    forward context and, when it runs in a CUDA graph, the graph's runner."""
+
+    rows: torch.Tensor
+    forward_context: ForwardContext
+    run_graph: Callable[..., tuple[torch.Tensor, ...]] | None = None
 
 
 class DecoderReplayLayers:
@@ -37,28 +55,59 @@ class DecoderReplayLayers:
         self.window = window
         self.run_layers = run_layers
         self.row_buffers = row_buffers
-        # The replay batch, set by the model state every step: its rows of the
-        # batch and its forward context. None runs the layers on the batch.
-        self.rows: torch.Tensor | None = None
-        self.forward_context: ForwardContext | None = None
+        # Set by the model state every step; None runs the layers on the batch.
+        self.replay_batch: ReplayBatch | None = None
+        # PIECEWISE model graphs of more tokens break out of the graph to run the
+        # layers on the replay batch; set with the replay graphs.
+        self.trim_threshold: int | None = None
+        self._graph_outputs: list[torch.Tensor] | None = None
 
     def __call__(
         self, hidden_states: torch.Tensor | MoEOutput, *states: torch.Tensor | None
     ) -> tuple[torch.Tensor, ...]:
-        rows = self.rows
-        if rows is None:
+        if self.trim_threshold is not None and in_piecewise_cudagraph():
+            batch_descriptor = get_forward_context().batch_descriptor
+            assert batch_descriptor is not None
+            if batch_descriptor.num_tokens > self.trim_threshold:
+                return self._run_in_graph_break(hidden_states, *states)
+        return self._run(hidden_states, *states)
+
+    @eager_break_during_capture
+    def _run_in_graph_break(
+        self, hidden_states: torch.Tensor | MoEOutput, *states: torch.Tensor | None
+    ) -> tuple[torch.Tensor, ...]:
+        """An eager break of the model's graph: the outputs land in fixed buffers,
+        which the graph's next segment reads."""
+        outputs = self._run(hidden_states, *states)
+        if self._graph_outputs is None:
+            # The largest model graph is captured first.
+            self._graph_outputs = [torch.empty_like(out) for out in outputs]
+        return tuple(
+            buf[: out.shape[0]].copy_(out)
+            for buf, out in zip(self._graph_outputs, outputs)
+        )
+
+    def _run(
+        self, hidden_states: torch.Tensor | MoEOutput, *states: torch.Tensor | None
+    ) -> tuple[torch.Tensor, ...]:
+        replay_batch = self.replay_batch
+        if replay_batch is None:
             return self.run_layers(hidden_states, *states)
         # A trimming step holds a prefill longer than the window, more tokens
         # than any step whose MoE leaves its finalize to the next layer.
         assert isinstance(hidden_states, torch.Tensor)
+        rows = replay_batch.rows
         num_rows = rows.shape[0]
         for buf in self.row_buffers:
             buf[:num_rows].copy_(buf.index_select(0, rows))
-        with override_forward_context(self.forward_context):
-            row_outputs = self.run_layers(
-                hidden_states.index_select(0, rows),
-                *(None if t is None else t.index_select(0, rows) for t in states),
-            )
+        inputs = (hidden_states, *states)
+        with override_forward_context(replay_batch.forward_context):
+            if replay_batch.run_graph is not None:
+                row_outputs = replay_batch.run_graph(rows, inputs)
+            else:
+                row_outputs = self.run_layers(
+                    *(None if t is None else t.index_select(0, rows) for t in inputs)
+                )
         # The trimmed rows' outputs stay zero; nothing reads them.
         num_tokens = hidden_states.shape[0]
         return tuple(

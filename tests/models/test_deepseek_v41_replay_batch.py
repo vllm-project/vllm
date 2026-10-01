@@ -12,6 +12,8 @@ import torch
 
 from vllm.config import CUDAGraphMode
 from vllm.models.deepseek_v41.nvidia.model_state import DeepseekV41ModelState
+from vllm.v1.attention.backends.utils import PAD_SLOT_ID
+from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
 from vllm.v1.worker.gpu.model_states.default import DefaultModelState
 
@@ -57,7 +59,7 @@ def state(monkeypatch):
     cfg.scheduler_config.max_num_batched_tokens = 1024
     cfg.parallel_config.data_parallel_size = 1
     cfg.compilation_config.fast_moe_cold_start = False
-    layers = SimpleNamespace(window=WINDOW, rows=None, forward_context=None)
+    layers = SimpleNamespace(window=WINDOW, replay_batch=None, trim_threshold=None)
     model = SimpleNamespace(token_lookback_depth=0, decoder_replay_layers=layers)
     builds: list = []
 
@@ -127,13 +129,8 @@ def _prepare(state, batch, cg_mode):
         [],
         GROUPS,
     )
-    layers = state.decoder_replay_layers
-    if layers.rows is None:
-        assert layers.forward_context is None
-        return None, None
-    return SimpleNamespace(
-        rows=layers.rows, forward_context=layers.forward_context
-    ), state.builds[-1]
+    replay = state.decoder_replay_layers.replay_batch
+    return (None, None) if replay is None else (replay, state.builds[-1])
 
 
 def test_replay_batch_keeps_each_request_window(state):
@@ -204,6 +201,23 @@ def test_only_eager_steps_trim(state):
     assert build.batch.num_tokens_after_padding == len(REPLAY_ROWS)
 
 
+def test_piecewise_graphs_above_the_trim_threshold_replay(state):
+    """A PIECEWISE graph above the trim threshold breaks out to the replay layers,
+    which run on a replay batch even when nothing trims."""
+    state.decoder_replay_layers.trim_threshold = 256
+    batch = _input_batch(QUERY_LENS, SEQ_LENS, PREFILLING, num_tokens_after_padding=512)
+    replay, _ = _prepare(state, batch, CUDAGraphMode.PIECEWISE)
+    assert replay is not None and replay.rows.tolist() == REPLAY_ROWS
+    assert _prepare(state, batch, CUDAGraphMode.FULL) == (None, None)
+    short = _input_batch(
+        [100, 100], [100, 100], [True, True], num_tokens_after_padding=512
+    )
+    replay, _ = _prepare(state, short, CUDAGraphMode.PIECEWISE)
+    assert replay is not None and replay.rows.tolist() == list(range(200))
+    state.decoder_replay_layers.trim_threshold = 512
+    assert _prepare(state, batch, CUDAGraphMode.PIECEWISE) == (None, None)
+
+
 def test_whole_batch_forwards_get_no_replay_batch(state):
     short = _input_batch([100, 100], [100, 100], [True, True])
     for cg_mode in (CUDAGraphMode.NONE, CUDAGraphMode.PIECEWISE, CUDAGraphMode.FULL):
@@ -257,3 +271,48 @@ def test_idle_dp_rank_dummy_trims_with_its_peers(dp_state):
     assert replay is not None and replay.rows.shape[0] == WINDOW
     dp_metadata = replay.forward_context.dp_metadata
     assert dp_metadata.num_tokens_across_dp_cpu.tolist() == [WINDOW, 129]
+
+
+def _graphs(num_tokens: int):
+    desc = BatchExecutionDescriptor(CUDAGraphMode.PIECEWISE, num_tokens, None)
+    return SimpleNamespace(
+        run=object(),
+        dispatch=MagicMock(return_value=desc),
+        capture_replay_graphs=lambda f: f(desc),
+    )
+
+
+def test_replay_batch_pads_to_its_graph_on_every_rank(dp_state):
+    """An eager step whose replay batch fits a graph pads it to the graph that
+    fits the largest rank's batch."""
+    dp_state.replay_graphs = _graphs(512)
+    dp_state.other = (True, 300)
+    replay, build = _prepare(
+        dp_state, _input_batch(QUERY_LENS, SEQ_LENS, PREFILLING), CUDAGraphMode.NONE
+    )
+    assert dp_state.replay_graphs.dispatch.call_args.args[:2] == (3, 300)
+    assert replay.run_graph is dp_state.replay_graphs.run
+    context = replay.forward_context
+    assert context.cudagraph_runtime_mode == CUDAGraphMode.PIECEWISE
+    assert context.batch_descriptor.num_tokens == 512
+    assert context.dp_metadata.num_tokens_across_dp_cpu.tolist() == [512, 512]
+    assert replay.rows.tolist() == REPLAY_ROWS
+    assert build.batch.num_tokens == len(REPLAY_ROWS)
+    assert build.batch.num_tokens_after_padding == 512
+    assert (build.slot_mappings[:, len(REPLAY_ROWS) :] == PAD_SLOT_ID).all()
+
+
+def test_capture_replays_a_whole_dummy_batch(state):
+    """A capture builds its graph's replay batch from a dummy batch that keeps
+    every row."""
+    _prepare(state, _input_batch(QUERY_LENS, SEQ_LENS, PREFILLING), CUDAGraphMode.NONE)
+    state.replay_graphs = _graphs(64)
+    block_tables = SimpleNamespace(
+        get_dummy_block_tables=lambda n: tuple(t[:n] for t in BLOCK_TABLES),
+        get_dummy_slot_mappings=lambda n: _slot_mappings(n).fill_(PAD_SLOT_ID),
+    )
+    state.capture_cudagraphs(InputBuffers(16, 1024, DEVICE), block_tables, [], GROUPS)
+    replay = state.decoder_replay_layers.replay_batch
+    assert replay.rows.tolist() == list(range(64))
+    assert replay.forward_context.batch_descriptor.num_tokens == 64
+    assert state.builds[-1].batch.num_reqs == 16

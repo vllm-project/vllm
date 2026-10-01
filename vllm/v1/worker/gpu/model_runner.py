@@ -1065,6 +1065,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                             self.lora_config, self
                         ),
                     )
+                    self.model_state.capture_cudagraphs(
+                        input_buffers,
+                        self.block_tables,
+                        self.attn_groups,
+                        self.kv_cache_config,
+                    )
                     if self.speculator is not None:
                         with use_workspace_lane(self._draft_workspace_lane):
                             self.speculator.capture()
