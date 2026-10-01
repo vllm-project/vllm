@@ -85,10 +85,6 @@ def test_dspark_markov_head_is_replicated(
     assert head.markov_w2.tp_size == 1
     assert head.markov_w1.weight.shape == (128, 8)
     assert head.markov_w2.weight.shape == (128, 8)
-    # Real model loading always finalizes a layer's quant_method after its
-    # weights are loaded; skipping this leaves markov_w2 without a working
-    # gemm dispatch (e.g. no `cpu_linear` on a CPU build) since bias() below
-    # never sees a device transfer to dispatch on otherwise.
     head.markov_w2.quant_method.process_weights_after_loading(head.markov_w2)
 
     def fail_collective(*args, **kwargs):
