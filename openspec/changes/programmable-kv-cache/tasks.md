@@ -8,7 +8,7 @@
 - [x] 1.4 Specify reference policies, composer conflict rules, and any optional admission/score behavior without allowing cache plugins to mutate queues directly.
 - [x] 1.5 Identify the model, usable GPU allocation, Mooncake deployment, and open-source rollout example for reproducible validation.
 - [x] 1.6 Confirm application control through the merged hints, explicit state commands separate from policy signals, and incremental association events with queries.
-- [ ] 1.7 Define snapshot/follow-growth target scope, derived-plan outcomes, and stale/retried logical-state updates.
+- [x] 1.7 Define snapshot/follow-growth target scope, derived-plan outcomes, and stale/retried logical-state updates.
 - [x] 1.8 Confirm lightweight orchestrator for first delivery, one interpretation path per entire envelope, preserved KVCR forwarding, and a separate future-work tracker.
 - [ ] 1.9 Specify native/backend route selection in invocation/configuration, consumer capability reporting, and native payload validation without changing merged hint fields.
 

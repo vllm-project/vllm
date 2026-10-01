@@ -155,7 +155,7 @@ class SessionPrefixIndex:
         task_parent_id: str | None = None,
         parent_prefix: ParentPrefix | None = None,
     ) -> ContinuationState:
-        """Record resolved content, including observations from prefix-cache hits."""
+        """Record an append-only branch, including prefix-cache-hit observations."""
         _validate_id(session_id, "session_id")
         _validate_id(continuation_id, "continuation_id")
         key = session_id, continuation_id
@@ -214,6 +214,12 @@ class SessionPrefixIndex:
         blocks = _ordered(blocks)
         validate_target(HashTarget(self.namespace, blocks))
         old_blocks = () if previous is None else previous.blocks
+        if not set(old_blocks).issubset(blocks):
+            raise ControlError(
+                "conflict",
+                "Continuation content is append-only; use a new continuation ID "
+                "to rewrite or truncate its prefix",
+            )
         count = self._association_count - len(old_blocks) + len(blocks)
         if (
             (session is None and len(self._sessions) >= self.max_sessions)

@@ -118,7 +118,9 @@ def test_known_empty_is_distinct_from_unknown_and_pruned(index):
 
 def test_stale_update_cannot_replace_newer_or_recreated_content(index):
     first = associate(index, "s", (span(1),))
-    current = index.associate("s", "main", (span(2),), expected_revision=first.revision)
+    current = index.associate(
+        "s", "main", (span(1), span(2, 16, 32)), expected_revision=first.revision
+    )
     with pytest.raises(ControlError, match="revision"):
         index.associate("s", "main", first.blocks, expected_revision=first.revision)
     index.prune("s", "main", expected_revision=current.revision)
@@ -171,14 +173,15 @@ def test_capacity_failure_preserves_queries_membership_and_event_position(bound)
     assert index.members(0, span(2).block_hash) == ()
 
 
-def test_replacing_associations_updates_reverse_index_and_reclaims_capacity():
+def test_pruning_old_branch_reclaims_capacity_for_a_new_continuation():
     index = SessionPrefixIndex("namespace", "epoch", max_associations=2)
     old = associate(index, "a", (span(1), span(2, 16, 32)))
-    index.associate("a", "main", (span(3),), expected_revision=old.revision)
+    index.prune("a", "main", expected_revision=old.revision)
+    associate(index, "a", (span(3),), continuation="rewritten")
     associate(index, "b", (span(4),))
     assert index.members(0, span(1).block_hash) == ()
     assert index.members(0, span(2).block_hash) == ()
-    assert index.members(0, span(3).block_hash) == (("a", "main"),)
+    assert index.members(0, span(3).block_hash) == (("a", "rewritten"),)
 
 
 def test_duplicate_content_at_distinct_positions_does_not_break_membership_cleanup(
@@ -186,11 +189,54 @@ def test_duplicate_content_at_distinct_positions_does_not_break_membership_clean
 ):
     blocks = (span(1), span(1, 16, 32))
     first = associate(index, "a", blocks)
-    index.associate("a", "main", (), expected_revision=first.revision)
+    index.prune("a", "main", expected_revision=first.revision)
     assert index.members(0, blocks[0].block_hash) == ()
     other = associate(index, "b", blocks)
     index.finish_task("b", expected_revision=other.revision)
     assert index.members(0, blocks[0].block_hash) == ()
+
+
+@pytest.mark.parametrize(
+    "updated",
+    [
+        (),
+        (span(1),),
+        (span(3), span(2, 16, 32)),
+        (span(1), span(2, 16, 32, group=1)),
+        (span(1), span(3, 16, 48)),
+    ],
+    ids=["clear", "truncate", "rewrite", "change-group", "replace-tail"],
+)
+def test_rewriting_continuation_is_rejected_without_changing_state(index, updated):
+    old = associate(index, "s", (span(1), span(2, 16, 32)))
+    baseline = index.query()
+    events = index.events(0, epoch="epoch")
+    with pytest.raises(ControlError, match="new continuation ID"):
+        index.associate("s", "main", updated, expected_revision=old.revision)
+    assert index.query() == baseline
+    assert index.events(0, epoch="epoch") == events
+    assert index.members(0, span(1).block_hash) == (("s", "main"),)
+    assert index.members(0, span(2).block_hash) == (("s", "main"),)
+    assert index.members(0, span(3).block_hash) == ()
+
+
+def test_growth_preserves_short_alias_and_accepts_new_group_observations(index):
+    alias = span(1, 0, 8)
+    old = associate(index, "s", (alias,))
+    grown = index.associate(
+        "s",
+        "main",
+        (alias, span(2), span(3, 16, 32), span(4, 0, 32, group=1)),
+        expected_revision=old.revision,
+    )
+    assert grown.incarnation == old.incarnation
+    assert index.resolve(SessionTarget("s", "main", end_token=8)).prefixes[
+        0
+    ].blocks == (alias,)
+    assert (
+        index.associate("s", "main", grown.blocks, expected_revision=grown.revision)
+        == grown
+    )
 
 
 def test_paginated_queries_reject_a_mixed_revision_snapshot(index):
@@ -308,11 +354,13 @@ def test_cache_hits_and_following_growth_do_not_renew_ttl(index, declarations, n
 
 
 def test_snapshot_and_follow_growth_have_separate_scope_and_release(
-    index, declarations
+    index, declarations, now
 ):
     initial = associate(index, "s", (span(1),))
     snapshot = retain(declarations, "s", 80, declaration_id="snapshot")
-    retain(declarations, "s", 30, declaration_id="following", follow=True)
+    following = retain(
+        declarations, "s", 30, 10, declaration_id="following", follow=True
+    )
     index.associate(
         "s", "main", (span(1), span(2, 16, 32)), expected_revision=initial.revision
     )
@@ -321,9 +369,16 @@ def test_snapshot_and_follow_growth_have_separate_scope_and_release(
     assert len(declarations.coverage("s", "following").prefixes[0].blocks) == 2
     assert declarations.priority(0, span(2).block_hash) == 30
     assert declarations.priority(0, span(3).block_hash) == 0
+    current = index.get("s", "main")
+    with pytest.raises(ControlError, match="append-only"):
+        index.associate("s", "main", (span(3),), expected_revision=current.revision)
+    assert declarations.get("s", "following") == following
+    assert declarations.coverage("s", "following").prefixes[0].blocks == current.blocks
     assert declarations.release("s", "snapshot")
     assert not declarations.release("s", "snapshot")
     assert declarations.priority(0, span(1).block_hash) == 30
+    now[0] += 10
+    assert declarations.priority(0, span(1).block_hash) == 0
 
 
 def test_redeclare_keeps_new_lifetime_when_old_expiry_fires(index, declarations, now):

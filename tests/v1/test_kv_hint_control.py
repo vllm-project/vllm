@@ -595,6 +595,28 @@ def test_native_retry_does_not_renew_a_declaration(controller, now):
     assert controller.declarations.get("s", "d") is None
 
 
+def test_native_rewrite_conflict_is_correlated_and_replayed_without_effects(controller):
+    create_session(controller)
+    before = controller.index.query()
+    hint = command(
+        "rewrite",
+        "associate",
+        {
+            "session_id": "s",
+            "continuation_id": "c",
+            "expected_revision": controller.index.get("s", "c").revision,
+            "target": {**HASH_TARGET, "blocks": []},
+        },
+    )
+    first = controller.submit(hint, CONTEXT)
+    assert first.results[0].status == OperationStatus.FAILED
+    assert "new continuation ID" in first.results[0].reason
+    assert controller.index.query() == before
+    retry = controller.submit(hint, CONTEXT)
+    assert retry.replayed
+    assert retry.results == first.results
+
+
 def test_unconsumed_signal_does_not_even_create_an_unknown_association(controller):
     result = controller.submit(
         command(

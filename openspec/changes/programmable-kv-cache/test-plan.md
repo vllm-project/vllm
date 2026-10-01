@@ -18,6 +18,11 @@ failures and skipped capabilities; distinguish mocks from real transfers.
 | Serving | Python/HTTP targeting → same engine records | Wrong engine/epoch, version errors, ingress mismatch | Existing engine and OpenAI serving suites plus control endpoint integration |
 
 State tests use a fake monotonic clock, bounded capacities, and observable queries.
+Continuation updates must preserve known hash/group/span associations. Guard
+against rewrite, truncation, group substitution, and tail replacement even with a
+current revision; assert unchanged queries, reverse membership and event position.
+Accept growth retaining a short alias and newly observed groups. Check that a new
+branch cannot inherit a named follow-growth declaration or extend its expiry.
 Use seeded interleavings for shared declarations, retries, cancellation and reset;
 do not replace real worker/engine integration with a simulated operation loop.
 

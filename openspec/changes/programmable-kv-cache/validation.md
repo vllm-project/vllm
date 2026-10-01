@@ -3,6 +3,26 @@
 This is an execution record, not a claim that the full change is complete.
 Local dates use Asia/Shanghai. All Python commands use the repository `.venv`.
 
+## Append-only continuation contract
+
+The user selected option A: a live continuation grows by adding content; rewriting
+or truncating it requires a new ID within the same or a different session. The
+index rejects removal or substitution of known hash/group/span associations before
+changing revisions, membership or events. Short aliases remain recorded when a
+tail grows. Sparse observations can add previously unknown groups and ranges.
+Hash-only associations remain application declarations; token ancestry must also
+be validated at request observation when the engine path is connected.
+
+```bash
+CUDA_VISIBLE_DEVICES=0,3 .venv/bin/python -m pytest \
+  tests/v1/test_kv_hint_state.py tests/v1/test_kv_hint_control.py -q
+```
+
+Result: **127 passed**, 36.65 seconds. Complete suites cover rejection atomicity,
+alias growth, stale revisions, cleanup and capacity reclamation, retention scope
+and unchanged expiry across branches, and correlated replay of rejected rewrites.
+This change has no serving/model-path effect yet.
+
 ## October 1: control record foundation
 
 Implemented immutable correlated operation snapshots, explicit engine/epoch/path

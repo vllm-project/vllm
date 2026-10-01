@@ -16,6 +16,14 @@ document refines `design.md`; the existing envelope fields remain unchanged.
 - Session/continuation mutations use expected revisions. A stale revision fails
   without effects. Transport retries with the same IDs return the original result;
   changing content under those IDs is a conflict.
+- A live continuation is append-only. Rewriting or truncating its prefix requires
+  a new continuation ID, which may remain in the same session. Association updates
+  preserve every previously observed hash/group/span, including shorter aliases
+  when a tail grows; they may add observations for previously unknown groups or
+  ranges. Hash-addressed association is a declaration of content, not proof of
+  token ancestry. Request observation must also check the actual token prefix.
+  A new branch never retargets existing snapshot operations or following Retain
+  declarations, and association updates never renew their TTL.
 - Content identity includes the existing block hash and cache group, within the
   engine's compatibility namespace. Token ranges are half-open. Resolution reports
   each group's reusable coverage; it never rounds outward without reporting it.
