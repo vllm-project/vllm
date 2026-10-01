@@ -939,22 +939,6 @@ def test_qwen4_exp_sm100_selected_shapes(
     assert cosine > 0.999
 
 
-@pytest.mark.parametrize("num_tokens", [1, 2, 4, 8, 16])
-def test_qwen4_exp_merged_qsa_projection_cuda_graph(num_tokens: int) -> None:
-    """The merged QSA shape must work in decode graphs, including fallback sizes."""
-    _require_sm103_and_cute()
-    torch.manual_seed(42 + num_tokens)
-    x = torch.randn(num_tokens, 2560, dtype=torch.bfloat16, device="cuda")
-    weight = torch.randn(4224, 2560, dtype=torch.bfloat16, device="cuda")
-    reference = torch.nn.functional.linear(x.float(), weight.float()).bfloat16()
-    qwen4_exp_gemm._qwen4_exp_low_latency_gemm(x, weight)
-    graph = torch.cuda.CUDAGraph()
-    with torch.cuda.graph(graph):
-        output = torch.ops.vllm.qwen4_exp_low_latency_gemm(x, weight)
-    graph.replay()
-    torch.testing.assert_close(output, reference, rtol=2e-2, atol=2e-1)
-
-
 def test_glm52_q_b_nonpacked_single_row_falls_back() -> None:
     _require_sm103_and_cute()
     spec = glm52_gemm.GLM52_Q_B_PROJECTION

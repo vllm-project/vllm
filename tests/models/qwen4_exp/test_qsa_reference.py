@@ -113,7 +113,6 @@ def test_qsa_merged_projection_preserves_shards_and_replicates_indexer(
     from vllm.model_executor.layers import linear
     from vllm.model_executor.models.utils import WeightsMapper
     from vllm.models.qwen4_exp.nvidia.qsa import (
-        QSAQKVIndexerLinear,
         Qwen4ExpQSAAttention,
     )
 
@@ -140,7 +139,7 @@ def test_qsa_merged_projection_preserves_shards_and_replicates_indexer(
         qkv = linear.QKVParallelLinear(
             hidden_size, head_dim, num_heads, kv_heads, bias=False
         )
-        merged = QSAQKVIndexerLinear(qkv, index_size, None)
+        merged = linear.Qwen4ExpQSAQKVIndexerLinear(qkv, index_size, None)
         if loader_version == 1:
             merged.weight.weight_loader = merged.weight_loader
         owner = Qwen4ExpQSAAttention.__new__(Qwen4ExpQSAAttention)
