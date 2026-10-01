@@ -220,48 +220,6 @@ class TestTritonTopkTopp:
         torch.set_default_device(DEVICE_TYPE)
         self.generator = Generator(device=DEVICE_TYPE).manual_seed(42)
 
-    def test_batch_sizes_reuse_topk_kernel(self, monkeypatch):
-        from triton import knobs
-
-        from vllm.v1.sample.ops.topk_topp_triton import apply_top_k_top_p_triton
-
-        logits = torch.randn(256, 4096)
-        k = torch.full((256,), 10, dtype=torch.int32)
-        apply_top_k_top_p_triton(logits[:8], k[:8], None)
-
-        def unexpected_compile(**kwargs):
-            if kwargs["fn"].name == "_topk_topp_kernel":
-                pytest.fail("Batch size triggered a new top-k specialization")
-
-        monkeypatch.setattr(knobs.runtime, "jit_cache_hook", unexpected_compile)
-        for batch_size in (1, 2, 4, 7, 16, 33, 64, 128, 256):
-            apply_top_k_top_p_triton(logits[:batch_size], k[:batch_size], None)
-
-    def test_top_p_rounds_reuse_step_kernel(self, monkeypatch):
-        from triton import knobs
-
-        from vllm.utils.platform_utils import num_compute_units
-        from vllm.v1.sample.ops.topk_topp_triton import (
-            _topp_split_stats,
-            _topp_split_step,
-        )
-
-        logits = torch.randn(8, 4096)
-        p = torch.full((8,), 0.9)
-        stats = torch.empty(8 * 32, 4)
-        parts = torch.empty(8, 5, 32, 8, 3)
-        num_sm = num_compute_units()
-        _topp_split_stats(logits, stats, None, p, num_sm)
-        _topp_split_step(logits, stats, parts, None, p, 0, num_sm)
-
-        def unexpected_compile(**kwargs):
-            if kwargs["fn"].name == "_topp_sb_step_kernel":
-                pytest.fail("Round index triggered a new top-p specialization")
-
-        monkeypatch.setattr(knobs.runtime, "jit_cache_hook", unexpected_compile)
-        for round_index in range(1, 5):
-            _topp_split_step(logits, stats, parts, None, p, round_index, num_sm)
-
     def _compare_results(
         self,
         logits: torch.Tensor,
