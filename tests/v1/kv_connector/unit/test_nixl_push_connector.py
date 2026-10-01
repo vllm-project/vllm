@@ -1141,17 +1141,26 @@ class TestPushSchedulerNegative:
         assert sched._reqs_need_recv == {}
 
     def test_update_state_after_alloc_zero_external_tokens_does_not_register(self):
-        """num_external_tokens=0 should not stage a D registration."""
+        """num_external_tokens=0 (a full prefix-cache hit on D) should not
+        stage a D registration, and should stop renewing P's lease instead of
+        holding P's blocks until the request ends."""
         sched = make_nixl_push_scheduler()
         _stub_sw_clipping(sched)
+        sched._heartbeat_by_engine = {}
+        sched._heartbeat_req_engine = {}
 
         request = _make_request(request_id="req-zero-ext")
+        sched.on_new_request(request)
+        assert request.request_id in sched._heartbeat_req_engine
         sched.update_state_after_alloc(
             request, _BlocksMock(([1, 2, 3],)), num_external_tokens=0
         )
 
         assert sched._push_pending_registrations == {}
         assert sched._push_registration_deadlines == {}
+        assert sched._heartbeat_by_engine == {}
+        sched.request_finished(request, ([1, 2, 3],))
+        assert sched._reqs_need_recv == {}
 
     def test_request_finished_unfinished_status_does_not_stage(self):
         """If a request is still RUNNING, request_finished must not stash
