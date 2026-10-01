@@ -55,6 +55,17 @@ class KVEventsConfig:
     index, then resume with contiguous live batches from the same publisher.
     """
 
+    snapshot_max_blocks: int = 1_000_000
+    """The most block records the snapshot recorder retains, and separately the
+    most live block references across all tiers. Exceeding either makes
+    snapshots unavailable until the publisher restarts.
+    """
+
+    snapshot_max_response_bytes: int = 256 * 1024 * 1024
+    """The most encoded bytes in one snapshot reply. A larger snapshot makes
+    snapshots unavailable until the publisher restarts.
+    """
+
     def __post_init__(self):
         if self.publisher is None:
             self.publisher = "zmq" if self.enable_kv_cache_events else "null"

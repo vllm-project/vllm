@@ -88,9 +88,9 @@ def test_duplicate_references_survive_one_remove():
     assert consume(wire(snap.export())) == consume(history)
 
 
-def test_sparse_store_is_unavailable():
-    # Block records need one token span per hash; consumers cannot index
-    # sparse spans either, so the recorder reports itself unavailable.
+def test_sparse_store_alone_is_unavailable():
+    # A store that leaves out blocks gives no hash its own token span, so
+    # without another store of those hashes they cannot be rebuilt.
     snap = KVCacheSnapshot()
     snap.apply([store([1, 3], tokens=list(range(12)))])
     assert snap.tainted == 2
@@ -115,9 +115,13 @@ def test_offload_bytes_resolve_integer_gpu_hash(monkeypatch):
 
 
 @pytest.mark.parametrize("field", ["ownership", "locality"])
-def test_residency_scopes_fail_closed(field):
-    # Snapshot consumers reject these scopes, so a snapshot cannot carry them.
-    event = store([1])
+def test_residency_scopes_are_preserved(field):
+    event = store([1], medium="CPU", tokens=[])
     setattr(event, field, "REMOTE")
-    with pytest.raises(ValueError, match="locality or ownership"):
-        KVCacheSnapshot().apply([event])
+    other = store([1], medium="CPU", tokens=[])
+    snap = KVCacheSnapshot()
+    snap.apply([store([1]), event, other, remove([1])])
+    snap.apply([remove([1], medium="CPU")])
+    exported = wire(snap.export())
+    assert {getattr(e, field) for e in exported} == {"REMOTE"}
+    assert consume(exported) == Counter({("CPU", None, 1): 1})

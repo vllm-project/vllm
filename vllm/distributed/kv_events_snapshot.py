@@ -8,10 +8,11 @@ parents first, removes the dead ones again, stores each live residency by hash
 with its exact count, and then removes the first store of each live block.
 
 State is per block, not per source event. A block's record holds its parent,
-tokens and hash inputs. A record is retained while the block is resident in
-any tier, while a retained record names it as parent, or while it is among the
-most recently dead blocks, because an offload store can arrive after its GPU
-copy was evicted. Retention therefore follows the live cache, not the event
+tokens and hash inputs. Residency is counted per scope: medium, KV cache group,
+locality and ownership. A record is retained while the block is resident in
+any scope, while a retained record names it as parent, or while it is among
+the most recently dead blocks, because an offload store can arrive after its
+GPU copy was evicted. Retention therefore follows the live cache, not the event
 history.
 
 The recorder must observe the stream from its beginning. A block it cannot
@@ -50,51 +51,43 @@ from vllm.v1.core.kv_cache_utils import (
 
 logger = init_logger(__name__)
 SNAPSHOT_UNAVAILABLE_SEQ = -2
-_BlockKey = tuple[str | None, int | None, ExternalBlockHash]
+# medium, group_idx, locality, ownership
+_Scope = tuple[str | None, int | None, str | None, str | None]
+_BlockKey = tuple[_Scope, ExternalBlockHash]
 
 
-class _Record:
-    """Hash inputs of one block and the reasons it is retained."""
+class _Record(msgspec.Struct, gc=False):
+    """Hash inputs of one block and the reasons it is retained.
 
-    __slots__ = (
-        "parent",
-        "tokens",
-        "block_size",
-        "extra_key",
-        "lora_id",
-        "lora_name",
-        "group",
-        "live",
-        "children",
-        "death",
-        "tainted",
-    )
+    Records name other blocks by hash only, so they cannot form reference
+    cycles and stay out of the cyclic garbage collector.
+    """
 
-    def __init__(self, group: int | None) -> None:
-        # Without tokens the record is a placeholder for a hash whose inputs
-        # were never seen.
-        self.parent: ExternalBlockHash | None = None
-        self.tokens = array("I")
-        self.block_size = 0
-        self.extra_key: Any = None
-        self.lora_id: int | None = None
-        self.lora_name: str | None = None
-        self.group = group
-        # Live residency references across all scopes.
-        self.live = 0
-        # Retained records that name this block as their parent.
-        self.children = 0
-        # Ring generation while recently dead, else 0.
-        self.death = 0
-        # The block cannot be rebuilt: a placeholder or conflicting inputs.
-        self.tainted = False
+    # The group whose GPU scope teaches the block while it is dead.
+    group: int | None
+    parent: ExternalBlockHash | None = None
+    # Packed unsigned token ids. Without tokens the record is a placeholder
+    # for a hash whose inputs were never seen.
+    tokens: bytes = b""
+    block_size: int = 0
+    extra_key: Any = None
+    # Offload stores can omit extra keys; they are compared once stated.
+    extra_known: bool = False
+    lora_id: int | None = None
+    lora_name: str | None = None
+    # Live residency references across all scopes.
+    live: int = 0
+    # Retained records that name this block as their parent.
+    children: int = 0
+    # Ring generation while recently dead, else 0.
+    death: int = 0
+    # The block cannot be rebuilt: a placeholder or conflicting inputs.
+    tainted: bool = False
 
 
 class KVCacheSnapshot:
     """Live residency and the block records needed to reconstruct it."""
 
-    MAX_RECORDS = 1_000_000
-    MAX_REFERENCES = 1_000_000
     # A block's offload store can complete after its GPU eviction: reusing a
     # block flushes its pending store in the same scheduler step, and the
     # completion is published with that step's or the next step's batch. A
@@ -105,7 +98,9 @@ class KVCacheSnapshot:
     RING_BATCHES = 64
     MAX_RING_BLOCKS = 65_536
 
-    def __init__(self) -> None:
+    def __init__(self, max_blocks: int = 1_000_000) -> None:
+        # Limits block records and, separately, live residency references.
+        self.max_blocks = max_blocks
         self._live: dict[_BlockKey, int] = {}
         self._records: dict[ExternalBlockHash, _Record] = {}
         # group_idx -> (kv_cache_spec_kind, sliding window) as last announced.
@@ -146,34 +141,33 @@ class KVCacheSnapshot:
             if isinstance(event, BlockStored):
                 self._store(event)
             elif isinstance(event, BlockRemoved):
-                self._check_scope(event)
+                scope = self._scope(event)
                 for h in event.block_hashes:
-                    self._remove((event.medium, event.group_idx, self._hash(h)))
+                    self._remove((scope, self._hash(h)))
             elif isinstance(event, AllBlocksCleared):
-                for key in [k for k in self._live if k[0] in (MEDIUM_GPU, None)]:
+                for key in [k for k in self._live if k[0][0] in (MEDIUM_GPU, None)]:
                     count = self._live.pop(key)
                     self._references -= count
-                    self._release_live(key[2], count)
+                    self._release_live(key[1], count)
             else:
                 raise ValueError(f"Unsupported KV event: {type(event).__name__}")
         self._collect()
 
     @staticmethod
-    def _check_scope(event: BlockStored | BlockRemoved) -> None:
-        if event.locality is not None or event.ownership is not None:
-            raise ValueError("Snapshot does not support block locality or ownership")
+    def _scope(event: BlockStored | BlockRemoved) -> _Scope:
+        return (event.medium, event.group_idx, event.locality, event.ownership)
 
     def _store(self, event: BlockStored) -> None:
         if not event.block_hashes:
             return
-        self._check_scope(event)
         if event.kv_cache_spec_kind is not None:
             self._groups[event.group_idx] = (
                 event.kv_cache_spec_kind,
                 event.kv_cache_spec_sliding_window,
             )
+        scope = self._scope(event)
         hashes = [self._hash(h) for h in event.block_hashes]
-        if self._references + len(hashes) > self.MAX_REFERENCES:
+        if self._references + len(hashes) > self.max_blocks:
             raise ValueError("Snapshot reference budget exceeded")
         size = event.block_size
         if (
@@ -181,33 +175,32 @@ class KVCacheSnapshot:
             or size <= 0
             or len(event.token_ids) != size * len(hashes)
         ):
-            # Rebuilding a block needs its own token span.
-            sparse = bool(event.token_ids)
+            # A token-less offload store, or a store that skips null or masked
+            # blocks (sliding window, Mamba), does not give each block its own
+            # token span. It adds residency to blocks other stores taught.
             for h in hashes:
-                record = self._records.get(h)
-                if record is None:
-                    record = self._new_record(h, event.group_idx)
-                    self._taint(record, f"no reconstruction metadata for {h!r}")
-                elif sparse or record.group != event.group_idx:
-                    self._taint(
-                        record, f"conflicting reconstruction metadata for {h!r}"
-                    )
-                self._add_live((event.medium, event.group_idx, h))
+                if h not in self._records:
+                    placeholder = self._new_record(h, event.group_idx)
+                    self._taint(placeholder, f"no reconstruction metadata for {h!r}")
+                self._add_live((scope, h))
             return
         parent = (
             None
             if event.parent_block_hash is None
             else self._hash(event.parent_block_hash)
         )
+        packed = array("I", event.token_ids)
+        width = size * packed.itemsize
+        data = packed.tobytes()
         extra = event.extra_keys
         for i, h in enumerate(hashes):
-            tokens = array("I", event.token_ids[i * size : (i + 1) * size])
+            tokens = data[i * width : (i + 1) * width]
             extra_key = extra[i] if extra else None
             record = self._records.get(h)
             if record is None:
                 record = self._new_record(h, event.group_idx)
                 self._fill(record, parent, tokens, event, extra_key)
-            elif not record.tokens and record.group == event.group_idx:
+            elif not record.tokens:
                 self._fill(record, parent, tokens, event, extra_key)
                 record.tainted = False
                 self.tainted -= 1
@@ -215,27 +208,24 @@ class KVCacheSnapshot:
                 record.parent,
                 record.tokens,
                 record.block_size,
-                record.extra_key,
                 record.lora_id,
                 record.lora_name,
-                record.group,
-            ) != (
-                parent,
-                tokens,
-                size,
-                extra_key,
-                event.lora_id,
-                event.lora_name,
-                event.group_idx,
+            ) != (parent, tokens, size, event.lora_id, event.lora_name) or (
+                extra is not None
+                and record.extra_known
+                and record.extra_key != extra_key
             ):
-                # One record per hash: a block hashed differently per group,
-                # or restated with other inputs, cannot be rebuilt.
+                # One record per hash: a hash restated with other inputs, as by
+                # KV cache groups with different block sizes, cannot be rebuilt.
                 self._taint(record, f"conflicting reconstruction metadata for {h!r}")
-            self._add_live((event.medium, event.group_idx, h))
+            elif extra is not None and not record.extra_known:
+                record.extra_key = extra_key
+                record.extra_known = True
+            self._add_live((scope, h))
             parent = h
 
     def _new_record(self, h: ExternalBlockHash, group: int | None) -> _Record:
-        if len(self._records) >= self.MAX_RECORDS:
+        if len(self._records) >= self.max_blocks:
             raise ValueError("Snapshot record budget exceeded")
         record = self._records[h] = _Record(group)
         return record
@@ -244,7 +234,7 @@ class KVCacheSnapshot:
         self,
         record: _Record,
         parent: ExternalBlockHash | None,
-        tokens: array,
+        tokens: bytes,
         event: BlockStored,
         extra_key: Any,
     ) -> None:
@@ -252,6 +242,7 @@ class KVCacheSnapshot:
         record.tokens = tokens
         record.block_size = event.block_size
         record.extra_key = extra_key
+        record.extra_known = event.extra_keys is not None
         record.lora_id = event.lora_id
         record.lora_name = event.lora_name
         record.group = event.group_idx
@@ -273,7 +264,7 @@ class KVCacheSnapshot:
     def _add_live(self, key: _BlockKey) -> None:
         self._live[key] = self._live.get(key, 0) + 1
         self._references += 1
-        record = self._records[key[2]]
+        record = self._records[key[1]]
         record.live += 1
         if record.death:
             record.death = 0
@@ -282,7 +273,7 @@ class KVCacheSnapshot:
     def _remove(self, key: _BlockKey) -> None:
         count = self._live.get(key)
         if count is None:
-            if key[2] not in self._records:
+            if key[1] not in self._records:
                 self.forgotten_removals += 1
             return
         if count > 1:
@@ -290,7 +281,7 @@ class KVCacheSnapshot:
         else:
             del self._live[key]
         self._references -= 1
-        self._release_live(key[2], 1)
+        self._release_live(key[1], 1)
 
     def _release_live(self, h: ExternalBlockHash, count: int) -> None:
         record = self._records[h]
@@ -350,19 +341,23 @@ class KVCacheSnapshot:
         Only an untainted snapshot can be exported.
         """
         assert not self.tainted
-        children: dict[ExternalBlockHash, list[ExternalBlockHash]] = {}
+        # Most blocks have one child, so only branch points allocate a list.
+        first_child: dict[ExternalBlockHash, ExternalBlockHash] = {}
+        more_children: dict[ExternalBlockHash, list[ExternalBlockHash]] = {}
         roots: list[ExternalBlockHash] = []
         for h, record in self._records.items():
             if record.parent is None:
                 roots.append(h)
+            elif record.parent not in first_child:
+                first_child[record.parent] = h
             else:
-                children.setdefault(record.parent, []).append(h)
-        live_scope: dict[ExternalBlockHash, tuple[str | None, int | None]] = {}
-        for medium, group, h in self._live:
-            live_scope.setdefault(h, (medium, group))
+                more_children.setdefault(record.parent, []).append(h)
+        live_scope: dict[ExternalBlockHash, _Scope] = {}
+        for live_key in self._live:
+            live_scope.setdefault(live_key[1], live_key[0])
 
-        def scope(h: ExternalBlockHash) -> tuple[str | None, int | None]:
-            return live_scope.get(h) or (MEDIUM_GPU, self._records[h].group)
+        def scope(h: ExternalBlockHash) -> _Scope:
+            return live_scope.get(h) or (MEDIUM_GPU, self._records[h].group, None, None)
 
         def attrs(h: ExternalBlockHash) -> tuple:
             record = self._records[h]
@@ -370,18 +365,18 @@ class KVCacheSnapshot:
 
         def segment(blocks: list[ExternalBlockHash]) -> BlockStored:
             first = self._records[blocks[0]]
-            medium, group = scope(blocks[0])
+            medium, group, locality, ownership = scope(blocks[0])
             kind, window = self._groups.get(group, (None, None))
-            tokens: list[int] = []
+            tokens = array("I")
             extra: list[Any] = []
             for h in blocks:
                 record = self._records[h]
-                tokens.extend(record.tokens)
+                tokens.frombytes(record.tokens)
                 extra.append(record.extra_key)
             return BlockStored(
                 block_hashes=blocks,
                 parent_block_hash=first.parent,
-                token_ids=tokens,
+                token_ids=tokens.tolist(),
                 block_size=first.block_size,
                 lora_id=first.lora_id,
                 medium=medium,
@@ -390,18 +385,22 @@ class KVCacheSnapshot:
                 group_idx=group,
                 kv_cache_spec_kind=kind,
                 kv_cache_spec_sliding_window=window,
+                locality=locality,
+                ownership=ownership,
             )
 
         def removals(hashes: Iterator[ExternalBlockHash]) -> Iterator[BlockRemoved]:
-            scoped: dict[tuple[str | None, int | None], list[ExternalBlockHash]] = {}
+            scoped: dict[_Scope, list[ExternalBlockHash]] = {}
             for h in hashes:
                 scoped.setdefault(scope(h), []).append(h)
-            for (medium, group), blocks in scoped.items():
+            for (medium, group, locality, ownership), blocks in scoped.items():
                 for start in range(0, len(blocks), max_blocks_per_event):
                     yield BlockRemoved(
                         block_hashes=blocks[start : start + max_blocks_per_event],
                         medium=medium,
                         group_idx=group,
+                        locality=locality,
+                        ownership=ownership,
                     )
 
         stack = list(reversed(roots))
@@ -410,11 +409,12 @@ class KVCacheSnapshot:
             blocks = [h]
             key = attrs(h)
             while True:
-                kids = children.get(h, ())
-                if len(kids) != 1:
-                    stack.extend(reversed(kids))
+                child = first_child.get(h)
+                if child is None:
                     break
-                child = kids[0]
+                if h in more_children:
+                    stack.extend(reversed([child, *more_children[h]]))
+                    break
                 if attrs(child) != key or len(blocks) == max_blocks_per_event:
                     stack.append(child)
                     break
@@ -425,11 +425,10 @@ class KVCacheSnapshot:
         yield from removals(h for h in self._records if h not in live_scope)
 
         # Every live scope reaches its exact count, one reference per round.
-        refs: dict[tuple[str | None, int | None], list[tuple[ExternalBlockHash, int]]]
-        refs = {}
-        for (medium, group, h), count in self._live.items():
-            refs.setdefault((medium, group), []).append((h, count))
-        for (medium, group), owed in refs.items():
+        refs: dict[_Scope, list[tuple[ExternalBlockHash, int]]] = {}
+        for (live_scope_key, h), count in self._live.items():
+            refs.setdefault(live_scope_key, []).append((h, count))
+        for (medium, group, locality, ownership), owed in refs.items():
             round_ = 0
             while owed:
                 hashes = [h for h, _ in owed]
@@ -445,6 +444,8 @@ class KVCacheSnapshot:
                         medium=medium,
                         lora_name=None,
                         group_idx=group,
+                        locality=locality,
+                        ownership=ownership,
                     )
                 round_ += 1
                 owed = [(h, count) for h, count in owed if count > round_]
@@ -456,12 +457,14 @@ class KVEventSnapshotRecorder:
     """Owns snapshot state and its ROUTER socket on one thread.
 
     Input is the immutable payload sent on PUB. While the snapshot is tainted,
-    requests receive the unavailable sequence. If one did, `stream_id` changes
-    when the taint clears, so consumers that fell back to live events alone
-    bootstrap again. Lost input or exhausted budgets invalidate the recorder
-    for this publisher lifetime; live publishing continues.
+    requests receive the unavailable sequence and retry later. `stream_id`
+    changes only with the publisher, so consumers that are following the live
+    stream keep their state. Lost input or exhausted budgets invalidate the
+    recorder for this publisher lifetime; live publishing continues.
     """
 
+    # Reply framing, polling and backpressure. Deployment-dependent limits
+    # are constructor arguments.
     EVENTS_PER_CHUNK = 256
     BLOCKS_PER_EVENT = 1024
     POLL_INTERVAL_MS = 20
@@ -469,21 +472,27 @@ class KVEventSnapshotRecorder:
     MAX_PENDING_BYTES = 64 * 1024 * 1024
     # The publisher waits this long for room before the recorder gives up.
     MAX_RECORD_WAIT_S = 1.0
-    MAX_REPLY_BYTES = 256 * 1024 * 1024
     MAX_REQUESTS = 32
     REPORT_INTERVAL_S = 60.0
 
-    def __init__(self, endpoint: str, data_parallel_rank: int) -> None:
+    def __init__(
+        self,
+        endpoint: str,
+        data_parallel_rank: int,
+        max_blocks: int = 1_000_000,
+        max_response_bytes: int = 256 * 1024 * 1024,
+    ) -> None:
         self._dp_rank = data_parallel_rank
+        self._max_blocks = max_blocks
+        self._max_response_bytes = max_response_bytes
         # The publisher identity sent with every live frame and reply.
         self.stream_id = uuid.uuid4().bytes
         self._inbox: deque[tuple[int, bytes]] = deque()
         self._pending_bytes = 0
         self._room = threading.Condition()
-        self._snapshot = KVCacheSnapshot()
+        self._snapshot = KVCacheSnapshot(max_blocks)
         self._seq = -1
         self._tainted = False
-        self._served_unavailable = False
         self._reported = (0, 0)
         self._next_report = 0.0
         self._failed = threading.Event()
@@ -578,7 +587,7 @@ class KVEventSnapshotRecorder:
             self._seq = seq
             self._report(seq)
         if self._failed.is_set():
-            self._snapshot = KVCacheSnapshot()
+            self._snapshot = KVCacheSnapshot(self._max_blocks)
 
     def _report(self, seq: int) -> None:
         snapshot = self._snapshot
@@ -589,14 +598,6 @@ class KVEventSnapshotRecorder:
                     "KV snapshots unavailable from sequence %d: %s",
                     seq,
                     snapshot.taint_reason,
-                )
-            elif self._served_unavailable:
-                self._served_unavailable = False
-                self.stream_id = uuid.uuid4().bytes
-                logger.info(
-                    "KV snapshots available again from sequence %d under a new "
-                    "publisher identity",
-                    seq,
                 )
             else:
                 logger.info("KV snapshots available again from sequence %d", seq)
@@ -622,14 +623,12 @@ class KVEventSnapshotRecorder:
                 envelopes.append(frames[:1])
         self._drain(decoder)
         reply = [self._seq.to_bytes(8, "big", signed=True), self.stream_id]
-        if self._snapshot.tainted:
-            self._served_unavailable = True
-        elif not self._failed.is_set():
+        if not (self._failed.is_set() or self._snapshot.tainted):
             try:
                 size = 0
                 for chunk in self._encode_chunks(encoder):
                     size += len(chunk)
-                    if size > self.MAX_REPLY_BYTES:
+                    if size > self._max_response_bytes:
                         raise ValueError("Snapshot response budget exceeded")
                     reply.append(chunk)
             except Exception:

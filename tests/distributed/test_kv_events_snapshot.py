@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import gc
 import random
 import threading
 import time
@@ -14,10 +15,12 @@ from examples.features.kv_events.kv_events_snapshot_subscriber import (
     ResyncRequired,
     SnapshotClient,
 )
+from vllm.config.kv_events import KVEventsConfig
 from vllm.distributed.kv_events import (
     AllBlocksCleared,
     BlockRemoved,
     BlockStored,
+    EventPublisherFactory,
     KVEventBatch,
     ZmqEventPublisher,
 )
@@ -26,18 +29,31 @@ from vllm.distributed.kv_events_snapshot import KVCacheSnapshot, KVEventSnapshot
 pytestmark = pytest.mark.skip_global_cleanup
 
 
-def stored(hashes, parent=None, medium="GPU", group=None):
+def stored(
+    hashes,
+    parent=None,
+    medium="GPU",
+    group=None,
+    *,
+    tokens=None,
+    extra_keys=None,
+    locality=None,
+    ownership=None,
+):
+    if tokens is None:
+        tokens = medium == "GPU"
     return BlockStored(
         block_hashes=hashes,
         parent_block_hash=parent,
-        token_ids=[h * 4 + j for h in hashes for j in range(4)]
-        if medium == "GPU"
-        else [],
-        block_size=4 if medium == "GPU" else 0,
+        token_ids=[h * 4 + j for h in hashes for j in range(4)] if tokens else [],
+        block_size=4 if tokens else 0,
         lora_id=None,
         lora_name=None,
         medium=medium,
+        extra_keys=extra_keys,
         group_idx=group,
+        locality=locality,
+        ownership=ownership,
     )
 
 
@@ -194,7 +210,11 @@ def test_store_after_ring_window_heals_when_restated(monkeypatch):
     consumer = RouterModel()
     consumer.apply(wire(snap.export()))
     assert consumer.refs == Counter(
-        {(("cpu", None), 1): 1, (("gpu", None), 1): 1, (("gpu", None), 9): 1}
+        {
+            (("cpu", None, None, None), 1): 1,
+            (("gpu", None, None, None), 1): 1,
+            (("gpu", None, None, None), 9): 1,
+        }
     )
 
 
@@ -219,10 +239,98 @@ def test_conflicting_metadata_taints_until_the_block_leaves(monkeypatch):
     for h in range(10, 10 + KVCacheSnapshot.RING_BATCHES):
         snap.apply([stored([h])])
     assert not snap.tainted
+    # A group with twice the block size names the second block's hash for
+    # both blocks' tokens.
     snap = KVCacheSnapshot()
-    snap.apply([stored([1], group=0)])
-    snap.apply([stored([1], medium="CPU", group=1)])
+    snap.apply([stored([1, 2], group=0)])
+    coarse = stored([1, 2], group=1)
+    snap.apply(
+        [
+            BlockStored(
+                block_hashes=[2],
+                parent_block_hash=None,
+                token_ids=coarse.token_ids,
+                block_size=8,
+                lora_id=None,
+                lora_name=None,
+                medium="GPU",
+                group_idx=1,
+            )
+        ]
+    )
+    assert snap.tainted == 1 and "conflicting" in snap.taint_reason
+
+
+def test_groups_share_block_records():
+    """KV cache groups store the same hash with the same inputs. A store that
+    skips null or masked blocks lists fewer hashes than its token span and
+    only adds residency."""
+    snap = KVCacheSnapshot()
+    snap.apply([stored([1, 2, 3], group=0), stored([1, 2, 3], group=1)])
+    full = stored([4, 5, 6], parent=3, group=0)
+    window = BlockStored(
+        block_hashes=[6],
+        parent_block_hash=3,
+        token_ids=full.token_ids,
+        block_size=4,
+        lora_id=None,
+        lora_name=None,
+        medium="GPU",
+        group_idx=1,
+    )
+    snap.apply([full, window])
+    assert not snap.tainted
+    expected = Counter({("GPU", 0, h): 1 for h in range(1, 7)})
+    expected.update(("GPU", 1, h) for h in (1, 2, 3, 6))
+    assert counts(wire(snap.export())) == expected
+
+
+def test_store_skipping_blocks_needs_another_store():
+    window = BlockStored(
+        block_hashes=[3],
+        parent_block_hash=None,
+        token_ids=stored([1, 2, 3]).token_ids,
+        block_size=4,
+        lora_id=None,
+        lora_name=None,
+        medium="GPU",
+        group_idx=1,
+    )
+    snap = KVCacheSnapshot()
+    snap.apply([window])
+    assert snap.tainted == 1 and "no reconstruction metadata" in snap.taint_reason
+    snap.apply([stored([1, 2, 3], group=0)])
+    assert not snap.tainted
+    # The same batch, in either order.
+    snap = KVCacheSnapshot()
+    snap.apply([window, stored([1, 2, 3], group=0)])
+    assert not snap.tainted
+
+
+def test_omitted_extra_keys_do_not_conflict():
+    """Offload stores can omit extra keys. The recorder keeps keys a store
+    stated, learns them from a later store, and compares them once known."""
+    salted = stored([1], extra_keys=[("salt",)])
+    offloaded = stored([1], medium="CPU", tokens=True)
+    snap = KVCacheSnapshot()
+    snap.apply([salted, offloaded])
+    assert not snap.tainted
+    assert wire(snap.export())[0].extra_keys == [("salt",)]
+
+    snap = KVCacheSnapshot()
+    snap.apply([offloaded])
+    snap.apply([salted])
+    assert not snap.tainted
+    assert wire(snap.export())[0].extra_keys == [("salt",)]
+    snap.apply([stored([1], extra_keys=[("other",)])])
     assert snap.tainted == 1
+
+
+def test_records_are_not_tracked_by_the_garbage_collector():
+    snap = KVCacheSnapshot()
+    snap.apply([stored([1, 2], extra_keys=[("salt",), None])])
+    for record in snap._records.values():
+        assert not gc.is_tracked(record) and not gc.is_tracked(record.tokens)
 
 
 def test_offloaded_history_exports_live_state():
@@ -259,14 +367,16 @@ class ConsumerFailure(Exception):
 class RouterModel:
     """The llm-d router's event consumer, reduced to its key semantics.
 
-    Request keys chain over (parent request key, tokens, extra key). The
-    router forgets an engine hash when it is evicted while no scope holds its
-    request key, so an offload store that lands after that is lost; with
+    Request keys chain over (parent request key, tokens, extra key, adapter).
+    The router forgets an engine hash when it is evicted while no scope holds
+    its request key, so an offload store that lands after that is lost; with
     `forget` off the model keeps every hash and holds the engine's residency.
-    Stores and removes are reference counted per (tier, group, hash) and only
-    the last remove evicts. A strict consumer fails on any engine hash it
-    cannot resolve; otherwise the event, or the hash of a token-less store, is
-    skipped, as the router does.
+    Stores and removes are reference counted per (tier, group, locality,
+    ownership, hash) and only the last remove evicts. A store whose token
+    span is not one block per hash, as from a group that skips null or masked
+    blocks, only names blocks, like a token-less store. A strict consumer
+    fails on any engine hash it cannot resolve; otherwise the event, or the
+    hash of a token-less store, is skipped, as the router does.
     """
 
     def __init__(self, strict: bool = True, forget: bool = True):
@@ -281,11 +391,16 @@ class RouterModel:
             raise ConsumerFailure(f"engine key not found: {h!r}")
         return self.keys.get(h)
 
+    @staticmethod
+    def scope(e):
+        return ((e.medium or "GPU").lower(), e.group_idx, e.locality, e.ownership)
+
     def apply(self, events):
         for e in events:
             if isinstance(e, BlockStored):
-                scope = ((e.medium or "GPU").lower(), e.group_idx)
-                if e.token_ids:
+                scope = self.scope(e)
+                size = e.block_size
+                if e.token_ids and len(e.token_ids) == size * len(e.block_hashes):
                     key = (
                         ()
                         if e.parent_block_hash is None
@@ -293,12 +408,10 @@ class RouterModel:
                     )
                     if key is None:
                         continue
-                    size = e.block_size
                     for i, h in enumerate(e.block_hashes):
                         extra = e.extra_keys[i] if e.extra_keys else None
-                        key = hash(
-                            (key, tuple(e.token_ids[i * size : (i + 1) * size]), extra)
-                        )
+                        tokens = tuple(e.token_ids[i * size : (i + 1) * size])
+                        key = hash((key, tokens, extra, e.lora_name))
                         self.keys[h] = key
                         self.entries.add((scope, key))
                     hashes = e.block_hashes
@@ -309,7 +422,7 @@ class RouterModel:
                 for h in hashes:
                     self.refs[(scope, h)] += 1
             elif isinstance(e, BlockRemoved):
-                scope = ((e.medium or "GPU").lower(), e.group_idx)
+                scope = self.scope(e)
                 for h in e.block_hashes:
                     if self.refs[(scope, h)] > 1:
                         self.refs[(scope, h)] -= 1
@@ -328,6 +441,10 @@ class RouterModel:
 
     def state(self):
         return frozenset(self.entries), frozenset((+self.refs).items())
+
+    def resolved(self):
+        """The request key of each resident engine hash."""
+        return frozenset((h, self.keys.get(h)) for _, h in +self.refs)
 
 
 def test_dead_alias_does_not_remove_live_block():
@@ -357,20 +474,36 @@ def test_dead_alias_does_not_remove_live_block():
     assert consumer.state() == reference.state() and reference.entries
 
 
-def cache_history(seed, steps=300, lag=3):
+def cache_history(
+    seed,
+    steps=300,
+    lag=3,
+    groups=False,
+    adapters=False,
+    self_describing=False,
+    locality=None,
+):
     """Prefix-sharing requests over a small GPU pool and an LRU CPU tier.
 
     GPU blocks are evicted tail first, CPU blocks head first, offload stores
     complete up to `lag` steps late (after their GPU copy may be gone), and a
     step's block-pool events precede its connector events, as in vLLM. Idle
     heartbeats come between steps.
+
+    With `groups`, a second KV cache group stores each chunk after the first
+    group, leaving out some blocks as sliding-window and Mamba groups do, and
+    evicts on its own. `adapters` gives requests LoRA adapters and per-block
+    extra keys, which enter the block hash. Offload stores carry the blocks'
+    inputs with `self_describing`, and the CPU tier's `locality`.
     """
     rng = random.Random(seed)
     prefixes = [
         [rng.randrange(1000) for _ in range(4 * rng.randrange(1, 6))] for _ in range(8)
     ]
     gpu: dict = {}  # hash -> (refs, order)
+    window: dict = {}  # second group: hash -> (refs, order)
     cpu: dict = {}  # hash -> order
+    blocks: dict = {}  # hash -> (parent, tokens, adapter, extra key)
     pending: list = []  # (due step, hash)
     tick = 0
     for step in range(steps):
@@ -378,48 +511,74 @@ def cache_history(seed, steps=300, lag=3):
         prompt = list(rng.choice(prefixes)) + [
             rng.randrange(1000) for _ in range(4 * rng.randrange(0, 8))
         ]
+        adapter = salt = None
+        if adapters:
+            adapter = rng.choice((None, (1, "a"), (2, "b")))
+            salt = rng.choice((None, ("salt-0",), ("salt-1",)))
         parent: int | None = None
-        new: list[tuple[int, int | None, tuple[int, ...]]] = []
+        new: list[int] = []
         for i in range(0, len(prompt), 4):
             block = tuple(prompt[i : i + 4])
-            h = hash((parent, block)) & ((1 << 63) - 1)
+            extra = salt if i == 0 else None
+            h = hash((parent, block, adapter, extra)) & ((1 << 63) - 1)
+            blocks[h] = (parent, block, adapter, extra)
             tick += 1
             if new or h not in gpu:
                 # The prefix hit ends at the first miss; every later block is
                 # computed and cached again, a second copy if still resident.
-                new.append((h, parent, block))
+                new.append(h)
                 gpu[h] = (gpu.get(h, (0, 0))[0] + 1, tick)
             else:
                 gpu[h] = (gpu[h][0], tick)
             parent = h
+
+        def store(hashes, parent, tokens, medium, group, kind, adapter, **scope):
+            return BlockStored(
+                block_hashes=hashes,
+                parent_block_hash=parent,
+                token_ids=tokens,
+                block_size=4 if tokens else 0,
+                lora_id=adapter[0] if adapter and tokens else None,
+                lora_name=adapter[1] if adapter and tokens else None,
+                medium=medium,
+                extra_keys=[blocks[h][3] for h in hashes] if tokens else None,
+                group_idx=group,
+                kv_cache_spec_kind=kind,
+                **scope,
+            )
+
         # store new blocks in chunks, each chunk chained to the previous block
         while new:
             n = rng.randrange(1, len(new) + 1)
             chunk, new = new[:n], new[n:]
+            first_parent = blocks[chunk[0]][0]
+            tokens = [t for h in chunk for t in blocks[h][1]]
             pool_events.append(
-                BlockStored(
-                    block_hashes=[h for h, _, _ in chunk],
-                    parent_block_hash=chunk[0][1],
-                    token_ids=[t for _, _, b in chunk for t in b],
-                    block_size=4,
-                    lora_id=None,
-                    lora_name=None,
-                    medium="GPU",
-                    extra_keys=[None] * len(chunk),
-                    group_idx=0,
-                    kv_cache_spec_kind="full_attention",
-                )
+                store(chunk, first_parent, tokens, "GPU", 0, "full_attention", adapter)
             )
-            for h, _, _ in chunk:
+            if groups:
+                # Left-out blocks leave no hash; token_ids keep the span.
+                kept = [h for h in chunk if rng.random() < 0.7]
+                for h in kept:
+                    window[h] = (window.get(h, (0, 0))[0] + 1, tick)
+                pool_events.append(
+                    store(
+                        kept, first_parent, tokens, "GPU", 1, "sliding_window", adapter
+                    )
+                )
+            for h in chunk:
                 if h not in cpu and rng.random() < 0.8:
                     pending.append((step + rng.randrange(0, lag + 1), h))
         # evict GPU down to 40 blocks, youngest first within the oldest request
-        while len(gpu) > 40:
-            victim = min(gpu, key=lambda h: (gpu[h][1] // 64, -gpu[h][1]))
-            refs = gpu.pop(victim)[0]
-            pool_events.append(
-                BlockRemoved(block_hashes=[victim] * refs, medium="GPU", group_idx=0)
-            )
+        for pool, group, size in ((gpu, 0, 40), (window, 1, 30)):
+            while len(pool) > size:
+                victim = min(pool, key=lambda h: (pool[h][1] // 64, -pool[h][1]))
+                refs = pool.pop(victim)[0]
+                pool_events.append(
+                    BlockRemoved(
+                        block_hashes=[victim] * refs, medium="GPU", group_idx=group
+                    )
+                )
         # offload completions, then CPU LRU eviction oldest first
         due = [h for s, h in pending if s <= step]
         pending = [(s, h) for s, h in pending if s > step]
@@ -427,44 +586,85 @@ def cache_history(seed, steps=300, lag=3):
             if h not in cpu:
                 tick += 1
                 cpu[h] = tick
+                parent, tokens, block_adapter, _ = blocks[h]
+                payload = list(tokens) if self_describing else []
                 connector_events.append(
-                    BlockStored(
-                        block_hashes=[h],
-                        parent_block_hash=None,
-                        token_ids=[],
-                        block_size=0,
-                        lora_id=None,
-                        lora_name=None,
-                        medium="CPU",
-                        group_idx=0,
+                    store(
+                        [h],
+                        parent if payload else None,
+                        payload,
+                        "CPU",
+                        0,
+                        None,
+                        block_adapter,
+                        locality=locality,
                     )
                 )
         while len(cpu) > 120:
             victim = min(cpu, key=lambda h: cpu[h])
             del cpu[victim]
             connector_events.append(
-                BlockRemoved(block_hashes=[victim], medium="CPU", group_idx=0)
+                BlockRemoved(
+                    block_hashes=[victim], medium="CPU", group_idx=0, locality=locality
+                )
             )
         if rng.random() < 0.01:
             pool_events.append(AllBlocksCleared())
             gpu.clear()
+            window.clear()
         yield pool_events + connector_events
         for _ in range(rng.choice((0, 0, 0, 1, 5, 40))):
             yield []
 
 
-@pytest.mark.parametrize("seed", range(20))
-def test_router_loads_residency_at_any_cut(seed):
-    reference = RouterModel(forget=False)
+HISTORIES = {
+    "plain": {},
+    "groups": {"groups": True},
+    "adapters": {"adapters": True},
+    "offload": {"adapters": True, "self_describing": True, "locality": "LOCAL"},
+    "everything": {"groups": True, "adapters": True, "self_describing": True},
+}
+
+
+@pytest.mark.parametrize("seed", range(4))
+@pytest.mark.parametrize("variant", HISTORIES)
+def test_snapshot_then_live_follows_the_full_stream(variant, seed):
+    """Load a snapshot at every cut and follow the live stream for longer
+    than a dead block's record is kept. A consumer that keeps engine hashes
+    matches one that read the whole stream, and resolves every late offload
+    store, including those of blocks that died before the cut. A router that
+    forgets hashes matches at the cut and never holds residency the engine
+    lacks."""
+    lag = 3
+    history = list(cache_history(seed, steps=150, lag=lag, **HISTORIES[variant]))
+    full_stream = RouterModel(forget=False)
+    states = []
+    for events in history:
+        full_stream.apply(events)
+        states.append(
+            (full_stream.state(), full_stream.resolved(), Counter(full_stream.refs))
+        )
+    carrying = [i for i, events in enumerate(history) if events]
+    follow = KVCacheSnapshot.RING_BATCHES + lag + 1
     snap = KVCacheSnapshot()
-    for cut, events in enumerate(cache_history(seed)):
-        reference.apply(events)
-        snap.apply(events)
-        if cut % 7:
-            continue
-        consumer = RouterModel()
-        consumer.apply(wire(snap.export(max_blocks_per_event=5)))
-        assert consumer.state() == reference.state()
+    for n, cut in enumerate(carrying):
+        for events in history[carrying[n - 1] + 1 if n else 0 : cut + 1]:
+            snap.apply(events)
+        assert not snap.tainted, snap.taint_reason
+        exported = wire(snap.export(max_blocks_per_event=5))
+        exact, router = RouterModel(forget=False), RouterModel(strict=False)
+        exact.apply(exported)
+        router.apply(exported)
+        state, resolved, _ = states[cut]
+        assert (exact.state(), exact.resolved()) == (state, resolved)
+        assert router.state() == state
+        end = carrying[min(n + follow, len(carrying) - 1)]
+        for events in history[cut + 1 : end + 1]:
+            exact.apply(events)
+            router.apply(events)
+        state, resolved, refs = states[end]
+        assert (exact.state(), exact.resolved()) == (state, resolved)
+        assert router.entries <= state[0] and router.refs <= refs
 
 
 @pytest.mark.parametrize("seed", range(3))
@@ -624,56 +824,53 @@ def test_recorder_that_stays_behind_fails_without_losing_live_batch(
         c.close()
 
 
-def test_healing_renews_identity_after_unavailable_reply(publisher, monkeypatch):
+def test_unavailable_period_keeps_identity_and_live_followers(publisher, monkeypatch):
+    """A consumer following the live stream keeps its state while snapshots
+    are unavailable and after they heal; requesters retry."""
     monkeypatch.setattr(KVCacheSnapshot, "RING_BATCHES", 8)
     pub, port, _ = publisher
-    publish(pub, [stored([1], medium="CPU")])
-    reply = request(port)
-    assert int.from_bytes(reply[0], "big", signed=True) == -2
-    assert reply[1] == pub._snapshot_stream_id
-    old = reply[1]
-    publish(pub, [BlockRemoved(block_hashes=[1], medium="CPU")])
-    for h in range(10, 10 + KVCacheSnapshot.RING_BATCHES):
-        publish(pub, [stored([h])])
-    reply = request(port)
-    assert int.from_bytes(reply[0], "big", signed=True) >= 0
-    assert reply[1] == pub._snapshot_stream_id != old
     c = client(port)
     try:
-        _, payloads = c.bootstrap()
-        assert c.stream_id == reply[1]
-        decoder = msgspec.msgpack.Decoder(type=KVEventBatch)
-        restored = counts(e for p in payloads for e in decoder.decode(p).events)
-        assert len(restored) == KVCacheSnapshot.RING_BATCHES
+        c.bootstrap()
+        identity = c.stream_id
+        publish(pub, [stored([1], medium="CPU")])
+        reply = request(port)
+        assert int.from_bytes(reply[0], "big", signed=True) == -2
+        assert reply[1] == identity
+        publish(pub, [BlockRemoved(block_hashes=[1], medium="CPU")])
+        for h in range(10, 10 + KVCacheSnapshot.RING_BATCHES):
+            publish(pub, [stored([h])])
+        reply = request(port)
+        assert int.from_bytes(reply[0], "big", signed=True) >= 0
+        assert reply[1] == identity == pub._snapshot_stream_id
+        target = pub._buffer[-1][0] + 1
+        while c.next_seq < target:
+            c.poll()
+        assert c.ready and c.stream_id == identity
     finally:
         c.close()
 
 
-def test_healing_keeps_identity_without_unavailable_reply(publisher, monkeypatch):
-    monkeypatch.setattr(KVCacheSnapshot, "RING_BATCHES", 8)
-    pub, port, _ = publisher
-    old = pub._snapshot_stream_id
-    publish(pub, [stored([1], medium="CPU")])
-    publish(pub, [BlockRemoved(block_hashes=[1], medium="CPU")])
-    for h in range(10, 10 + KVCacheSnapshot.RING_BATCHES):
-        publish(pub, [stored([h])])
-    reply = request(port)
-    assert int.from_bytes(reply[0], "big", signed=True) >= 0
-    assert reply[1] == old == pub._snapshot_stream_id
-
-
-@pytest.mark.parametrize("budget", ["records", "reply"])
-def test_resource_budget_fails_closed(publisher, monkeypatch, budget):
-    pub, port, _ = publisher
-    recorder = pub._snapshot_recorder
-    if budget == "records":
-        monkeypatch.setattr(recorder._snapshot, "MAX_RECORDS", 0)
-    else:
-        monkeypatch.setattr(recorder, "MAX_REPLY_BYTES", 1)
-    publish(pub, [stored([1])])
-    reply = request(port)
-    assert int.from_bytes(reply[0], "big", signed=True) == -2
-    assert len(reply) == 2
+@pytest.mark.parametrize(
+    "limit", ["snapshot_max_blocks", "snapshot_max_response_bytes"]
+)
+def test_configured_budget_fails_closed(random_port, limit):
+    config = KVEventsConfig(
+        enable_kv_cache_events=True,
+        endpoint=f"inproc://snapshot-live-{random_port}",
+        snapshot_endpoint=f"inproc://snapshot-state-{random_port}",
+        **{limit: 1},
+    )
+    pub = EventPublisherFactory.create(config)
+    try:
+        resolved = pub.get_publisher_config()
+        assert getattr(resolved, limit) == 1
+        publish(pub, [stored([1, 2])])
+        reply = request((resolved.endpoint, resolved.snapshot_endpoint))
+        assert int.from_bytes(reply[0], "big", signed=True) == -2
+        assert len(reply) == 2
+    finally:
+        pub.shutdown()
 
 
 def test_concurrent_requests(publisher):

@@ -325,6 +325,11 @@ class ZmqEventPublisher(EventPublisher):
         cache state. When enabled, live sequence frames append a 16-byte
         publisher identity to the sequence number, and idle publishers emit
         empty KV batches every second. See `vllm.distributed.kv_events_snapshot`.
+    snapshot_max_blocks:
+        Most block records the snapshot recorder retains, and separately most
+        live block references across all tiers.
+    snapshot_max_response_bytes:
+        Most encoded bytes in one snapshot reply.
     buffer_steps:
         Number of past batches to keep for replay.
     hwm:
@@ -349,6 +354,8 @@ class ZmqEventPublisher(EventPublisher):
         max_queue_size: int = 100_000,
         topic: str = "",
         snapshot_endpoint: str | None = None,
+        snapshot_max_blocks: int = 1_000_000,
+        snapshot_max_response_bytes: int = 256 * 1024 * 1024,
     ) -> None:
         # Storage
         super().__init__(data_parallel_rank)
@@ -375,6 +382,8 @@ class ZmqEventPublisher(EventPublisher):
             endpoint=self._endpoint,
             replay_endpoint=self._replay_endpoint,
             snapshot_endpoint=snapshot_endpoint,
+            snapshot_max_blocks=snapshot_max_blocks,
+            snapshot_max_response_bytes=snapshot_max_response_bytes,
             buffer_steps=buffer_steps,
             hwm=hwm,
             max_queue_size=max_queue_size,
@@ -382,20 +391,27 @@ class ZmqEventPublisher(EventPublisher):
         )
 
         self._snapshot_recorder: KVEventSnapshotRecorder | None = None
+        # Appended to each live and replay sequence frame when snapshots are on.
+        self._snapshot_stream_id = b""
         if snapshot_endpoint is not None:
+            # Imported here because kv_events_snapshot imports this module.
             from vllm.distributed import kv_events_snapshot
 
             try:
                 self._snapshot_recorder = kv_events_snapshot.KVEventSnapshotRecorder(
-                    snapshot_endpoint, self._dp_rank
+                    snapshot_endpoint,
+                    self._dp_rank,
+                    max_blocks=snapshot_max_blocks,
+                    max_response_bytes=snapshot_max_response_bytes,
                 )
             except Exception:
-                assert self._pub is not None
-                self._pub.close(linger=0)
+                if self._pub is not None:
+                    self._pub.close(linger=0)
                 if self._replay is not None:
                     self._replay.close(linger=0)
                 raise
             self._publisher_config.snapshot_endpoint = self._snapshot_recorder.endpoint
+            self._snapshot_stream_id = self._snapshot_recorder.stream_id
 
         # Payload
         self._seq_gen = count()
@@ -412,12 +428,6 @@ class ZmqEventPublisher(EventPublisher):
 
     def get_publisher_config(self) -> KVEventsConfig:
         return self._publisher_config
-
-    @property
-    def _snapshot_stream_id(self) -> bytes:
-        # The recorder renews it when snapshots become available again.
-        recorder = self._snapshot_recorder
-        return b"" if recorder is None else recorder.stream_id
 
     def publish(self, events: EventBatch) -> None:
         if not self._running:
