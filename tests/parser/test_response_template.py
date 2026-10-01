@@ -401,7 +401,7 @@ def test_response_template_parser_rejects_other_parsers():
 
 
 def test_request_chat_template_is_honored_with_warning(monkeypatch):
-    warnings = []
+    warnings: list[str] = []
     monkeypatch.setattr(
         response_template_module.logger, "warning_once", warnings.append
     )
@@ -448,7 +448,7 @@ def streamed_reasoning_end(reasoner, output, prompt=PROMPT_TOKEN_IDS):
 def test_streaming_reasoning_gate_matches_thinking_closer_without_decoding():
     tokenizer = FakeTokenizer(GEMMA4_RESPONSE_TEMPLATE)
     reasoner = ResponseTemplateReasoningParser(tokenizer)
-    tokenizer.decode = lambda *_args, **_kwargs: pytest.fail("decoded")
+    tokenizer.decode = lambda *_args, **_kwargs: pytest.fail("decoded")  # type: ignore[method-assign]
     output = [50, 101] + [102] * 100 + [51, 103]
 
     assert streamed_reasoning_end(reasoner, output) == len(output) - 2

@@ -172,7 +172,7 @@ class ResponseTemplateEventEngine:
             if event.get("field") == TOOL_FIELD:
                 if event["type"] == "region_open":
                     open_index = index
-                elif self._is_unusable_tool_end(event):
+                elif self._is_unusable_tool_end(event) and open_index is not None:
                     unusable_opens.add(open_index)
         output: list[SemanticEvent] = []
         for index, event in enumerate(events):

@@ -69,7 +69,7 @@ class ParserEngineReasoningAdapter(ReasoningParser):
         self, input_ids: Sequence[int], delta_ids: Iterable[int]
     ) -> bool:
         return self._parser_engine.is_reasoning_end_streaming(
-            input_ids, list(delta_ids)
+            list(input_ids), list(delta_ids)
         )
 
     def find_reasoning_end_offset(self, token_ids: Sequence[int]) -> int | None:
