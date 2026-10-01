@@ -119,6 +119,36 @@ class Sampler:
         num_logprobs = max_num_logprobs if max_num_logprobs != NO_LOGPROBS else 0
         return num_logprobs, max_token_ids
 
+    def top_k_logits_width(self, idx_mapping_np: np.ndarray, max_k: int) -> int:
+        """Largest top_k of the batch when its sampling needs no logits outside
+        each row's top-k, else 0.
+
+        Temperature, min_p and top_p only compare logits inside the top-k set,
+        so a row holding just its top-k logits (-inf elsewhere) samples the
+        same distribution. Anything that rewrites or reads logits outside that
+        set before top_k (bias, penalties, bad words, thinking budget) or after
+        it (logprobs, sampling masks, trace replay) needs the full vocabulary.
+        """
+        if self.return_sampling_mask or self.trace_replay_state is not None:
+            return 0
+        top_k = self.sampling_states.top_k.np[idx_mapping_np]
+        if top_k.size == 0 or top_k.max() > max_k:
+            return 0
+        if (
+            np.any(self.logit_bias_state.use_logit_bias[idx_mapping_np])
+            or np.any(self.penalties_state.use_penalty[idx_mapping_np])
+            or np.any(self.bad_words_state.num_bad_words.np[idx_mapping_np] > 0)
+            or (
+                self.thinking_budget_state.enabled
+                and np.any(
+                    self.thinking_budget_state.use_thinking_budget[idx_mapping_np]
+                )
+            )
+            or self.get_logprobs_dims(idx_mapping_np) is not None
+        ):
+            return 0
+        return int(top_k.max())
+
     def __call__(
         self,
         logits: torch.Tensor,

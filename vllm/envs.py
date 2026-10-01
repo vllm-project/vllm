@@ -250,6 +250,7 @@ if TYPE_CHECKING:
     VLLM_COMPUTE_NANS_IN_LOGITS: bool = False
     VLLM_RAISE_ON_LOGIT_NANS: bool = False
     VLLM_NAN_LOGITS_RECOMPUTE: bool = False
+    VLLM_TOP_K_LOGITS_MAX: int = 0
     VLLM_RDNA3_CUSTOM_AR_CAP: int = 0
     VLLM_JART_AR: bool = False
     VLLM_JART_AR_ALGO: int = 6
@@ -1841,6 +1842,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_NAN_LOGITS_RECOMPUTE": lambda: bool(
         int(os.getenv("VLLM_NAN_LOGITS_RECOMPUTE", "0"))
     ),
+    # Under TP, when every request in the batch samples with top_k <= this
+    # value (and nothing else needs the full vocabulary: penalties, logit bias,
+    # bad words, thinking budget, logprobs, grammar), each rank sends its local
+    # top-k logits instead of its whole vocabulary shard. Exact: nothing
+    # outside the global top-k survives top_k. 0 = off.
+    "VLLM_TOP_K_LOGITS_MAX": lambda: int(os.getenv("VLLM_TOP_K_LOGITS_MAX", "0")),
     # Bytes up to which the custom all-reduce stays on for gfx11 (0 = off).
     # Only on a box whose PCIe fabric routes peer reads: on one that does not,
     # the collective silently returns garbage.

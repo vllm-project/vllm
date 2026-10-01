@@ -1463,6 +1463,22 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         )
         return block_tables, slot_mappings
 
+    def _top_k_logits_width(
+        self, input_batch: InputBatch, grammar_output: GrammarOutput | None
+    ) -> int:
+        """k to sample the batch from gathered top-k logits, or 0 for the full
+        vocabulary. Every input is replicated, so all TP ranks agree."""
+        max_k = envs.VLLM_TOP_K_LOGITS_MAX
+        if (
+            max_k <= 0
+            or grammar_output is not None
+            or self.parallel_config.tensor_parallel_size <= 1
+            or not hasattr(self.model, "compute_top_k_logits")
+            or not hasattr(self.sampler, "top_k_logits_width")
+        ):
+            return 0
+        return self.sampler.top_k_logits_width(input_batch.idx_mapping_np, max_k)
+
     def sample(
         self,
         hidden_states: torch.Tensor,
@@ -1486,7 +1502,25 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             logits = logits[:, : self.vocab_size]
         else:
             sample_hidden_states = hidden_states[input_batch.logits_indices]
-            logits = self.model.compute_logits(sample_hidden_states)
+            top_k = self._top_k_logits_width(input_batch, grammar_output)
+            if top_k:
+                logger.info_once(
+                    "Sampling from gathered top-k logits (k <= %d).", top_k
+                )
+                # Gather only each rank's top-k logits; the rest of the row gets
+                # the lowest fp16 logit, which top_k masks anyway (a finite fill:
+                # with -inf the top-k/top-p pivot search does not converge and
+                # takes 2.4x longer). top_k keeps ties with the k-th logit, so a
+                # few more are gathered to keep them.
+                ids, values = self.model.compute_top_k_logits(
+                    sample_hidden_states, top_k + 8
+                )
+                logits = values.new_full(
+                    (values.shape[0], self.vocab_size),
+                    torch.finfo(torch.float16).min,
+                ).scatter_(1, ids, values)
+            else:
+                logits = self.model.compute_logits(sample_hidden_states)
 
         if grammar_output is not None:
             # Apply grammar bitmask to the logits in-place.
