@@ -49,7 +49,7 @@ def get_hisparse_kv_cache_groups(
 ) -> list[KVCacheGroupSpec] | None:
     """The groups HiSparse allocates: the host source group, then the GPU
     groups sharing one device pool. Derived resident/hot specs in
-    `kv_cache_spec` (see `expand_hisparse_kv_cache_specs`) are laid out again
+    `kv_cache_spec` (see `resolve_hisparse_specs`) are laid out again
     from the attention specs they belong to."""
     attention_config = getattr(vllm_config, "attention_config", None)
     if attention_config is None or attention_config.hisparse_config is None:
@@ -60,8 +60,6 @@ def get_hisparse_kv_cache_groups(
         for name, spec in kv_cache_spec.items()
         if isinstance(spec, MLAAttentionSpec)
     }
-    if not mla_specs:
-        return None
     other_specs = {
         name: spec
         for name, spec in kv_cache_spec.items()
@@ -69,6 +67,8 @@ def get_hisparse_kv_cache_groups(
             spec, (MLAAttentionSpec, HiSparseResidentSpec, HiSparseHotSpec)
         )
     }
+    if not mla_specs:
+        return None
 
     from vllm.v1.core.kv_cache_utils import get_kv_cache_groups
 
@@ -79,23 +79,6 @@ def get_hisparse_kv_cache_groups(
         get_kv_cache_groups(vllm_config, other_specs) if other_specs else []
     )
     return _lay_out_hisparse_groups(vllm_config, [mla_group, *regular_groups])
-
-
-def expand_hisparse_kv_cache_specs(
-    vllm_config: VllmConfig, kv_cache_spec: dict[str, KVCacheSpec]
-) -> dict[str, KVCacheSpec]:
-    """Add a spec for each resident/hot cache HiSparse derives from an attention
-    layer, so each worker's specs name every cache it allocates."""
-    groups = get_hisparse_kv_cache_groups(vllm_config, kv_cache_spec)
-    if groups is None:
-        return kv_cache_spec
-    derived = {
-        layer_name: group.kv_cache_spec
-        for group in groups
-        if isinstance(group.kv_cache_spec, (HiSparseResidentSpec, HiSparseHotSpec))
-        for layer_name in group.layer_names
-    }
-    return {**kv_cache_spec, **derived}
 
 
 def get_hisparse_host_pool_bytes(vllm_config: VllmConfig) -> int:
@@ -262,13 +245,8 @@ def create_hisparse_layout(
         raise ValueError("HiSparse has no allocatable host blocks.")
     # Every computed page needs a host block, so one request at max_model_len
     # must fit alongside the pool's null block and a copy-on-write tail.
-    min_host_blocks = (
-        cdiv(
-            vllm_config.model_config.max_model_len,
-            source_group.kv_cache_spec.block_size,
-        )
-        + 2
-    )
+    gpu_block_size = source_group.kv_cache_spec.block_size
+    min_host_blocks = cdiv(vllm_config.model_config.max_model_len, gpu_block_size) + 2
     if host_num_blocks < min_host_blocks:
         raise ValueError(
             f"HiSparse host pool has {host_num_blocks} blocks but max_model_len "
