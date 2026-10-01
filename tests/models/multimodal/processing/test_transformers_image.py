@@ -1,8 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import copy
 from unittest.mock import patch
 
 import pytest
+from transformers.models.llava_next.processing_llava_next import (
+    LlavaNextProcessorKwargs,
+)
 
 from vllm.assets.image import ImageAsset
 from vllm.model_executor.models.transformers.multimodal import (
@@ -322,10 +326,12 @@ _MODEL_ID = "llava-hf/llava-onevision-qwen2-0.5b-ov-hf"
 _SCOPED_SIZE = {"height": 768, "width": 768}
 
 
-def _probe_num_image_tokens(mm_processor_kwargs, request_kwargs=None) -> list[int]:
+def _probe_num_image_tokens(
+    mm_processor_kwargs, request_kwargs=None, model_id=_MODEL_ID
+) -> list[int]:
     """The per-image token counts vLLM predicts for a single image."""
     mm_processor = create_processor(
-        _MODEL_ID, LegacyMultiModalProcessor, mm_processor_kwargs
+        model_id, LegacyMultiModalProcessor, mm_processor_kwargs
     )
     image = ImageAsset("cherry_blossom").pil_image
     mm_items = mm_processor.info.parse_mm_data({"image": image})
@@ -351,19 +357,28 @@ def test_scoped_images_kwargs_reach_the_token_count():
     assert scoped == flat
 
 
-def test_request_mm_processor_kwargs_reach_the_token_count():
-    """Per-request ``mm_processor_kwargs`` must reach vLLM's own token count too.
+_NEXT_MODEL_ID = "llava-hf/llava-v1.6-mistral-7b-hf"
+# The stock shortest edge is 336, so this changes the feature count.
+_NEXT_SIZE = {"shortest_edge": 672}
 
-    The request overrides build the HF processor that produces the features, so
-    a token count that only merges the model-config overrides predicts a
-    different number of placeholder tokens than the processor actually emits.
+
+def test_request_mm_processor_kwargs_do_not_leak_into_later_requests():
+    """One request's ``mm_processor_kwargs`` must not move a later token count.
+
+    LLaVA-NeXT's ``_get_num_multimodal_tokens`` updates its class-level
+    ``images_kwargs`` defaults in place with the kwargs it is given, so handing
+    it a request's overrides would apply them to every request after it.
     """
-    stock = _probe_num_image_tokens(None)
-    flat = _probe_num_image_tokens({"size": _SCOPED_SIZE})
-    assert flat != stock
+    defaults = copy.deepcopy(LlavaNextProcessorKwargs._defaults)
+    with patch.object(LlavaNextProcessorKwargs, "_defaults", defaults):
+        stock = _probe_num_image_tokens(None, model_id=_NEXT_MODEL_ID)
+        _probe_num_image_tokens(None, {"size": _NEXT_SIZE}, model_id=_NEXT_MODEL_ID)
+        assert _probe_num_image_tokens(None, model_id=_NEXT_MODEL_ID) == stock
 
-    for request_kwargs in (
-        {"size": _SCOPED_SIZE},
-        {"images_kwargs": {"size": _SCOPED_SIZE}},
-    ):
-        assert _probe_num_image_tokens(None, request_kwargs) == flat
+        # Precondition, checked last because it updates the same defaults: the
+        # override really does move the count, so the assertion above is not
+        # vacuous.
+        overridden = _probe_num_image_tokens(
+            {"size": _NEXT_SIZE}, model_id=_NEXT_MODEL_ID
+        )
+        assert overridden != stock

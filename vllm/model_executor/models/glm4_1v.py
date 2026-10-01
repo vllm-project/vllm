@@ -1089,6 +1089,9 @@ class Glm4vProcessingInfo(BaseProcessingInfo):
         count), not an edge length.  The HF processor passes it directly to
         ``smart_resize`` as the ``max_pixels`` argument, which constrains
         ``t_bar * h_bar * w_bar <= max_pixels``.
+
+        ``modality=None`` reads only the flat ``mm_processor_kwargs`` and
+        ignores every modality scope, including ``images_kwargs``.
         """
         mm_kwargs = self.ctx.get_modality_mm_kwargs({}, modality)
         if (override_max_pixels := mm_kwargs.get("max_pixels")) is not None:

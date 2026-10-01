@@ -65,7 +65,6 @@ from vllm.multimodal.processing import (
     cached_encode,
 )
 from vllm.sequence import IntermediateTensors
-from vllm.utils.func_utils import get_allowed_kwarg_only_overrides
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.torch_utils import async_tensor_h2d
 
@@ -513,15 +512,9 @@ class LegacyMultiModalProcessor(_MultiModalProcessorBase):
             (size.height, size.width)
             for size in map(images.get_image_size, range(len(images)))
         ]
-        count_tokens = processor._get_num_multimodal_tokens
-        return count_tokens(
+        return processor._get_num_multimodal_tokens(
             image_sizes=image_sizes,
-            **get_allowed_kwarg_only_overrides(
-                count_tokens,
-                self.info.ctx.get_modality_mm_kwargs(hf_processor_mm_kwargs, "image"),
-                requires_kw_only=False,
-                allow_var_kwargs=True,
-            ),
+            **self.info.ctx.get_modality_mm_kwargs({}, "image"),
         )
 
     def _apply_vision(
@@ -600,11 +593,7 @@ class LegacyMultiModalProcessor(_MultiModalProcessorBase):
             # transforms outputs to `MultiModalKwargs` which is not going to
             # work for Transformers. The vision path has logic tied to
             # `mm_tokens_per_modality` in _apply_vision()
-            # These options belong to the HF processor call only. They stay out
-            # of `hf_processor_mm_kwargs` because that dict also reaches the
-            # sizing helpers, which read every kwarg as an image processor
-            # override.
-            call_mm_kwargs = {
+            hf_processor_mm_kwargs = {
                 # vLLM needs the untruncated sequence to keep placeholder
                 # tokens aligned. Note that the text inputs are just dummy
                 # text, not the original prompt. The original prompt is
@@ -618,7 +607,7 @@ class LegacyMultiModalProcessor(_MultiModalProcessorBase):
             }
 
             processor_data, _, passthrough_data = self._get_hf_mm_inputs(
-                mm_items, call_mm_kwargs
+                mm_items, hf_processor_mm_kwargs
             )
 
             # The real prompt is fed to the processor below and the placeholder
@@ -634,9 +623,9 @@ class LegacyMultiModalProcessor(_MultiModalProcessorBase):
 
             try:
                 processed_data = self.info.ctx.call_hf_processor(
-                    self.info.get_hf_processor(**call_mm_kwargs),
+                    self.info.get_hf_processor(**hf_processor_mm_kwargs),
                     dict(text=prompt_text, **processor_data),
-                    call_mm_kwargs,
+                    hf_processor_mm_kwargs,
                 )
             except ValueError:
                 if has_mm_data:
@@ -648,7 +637,7 @@ class LegacyMultiModalProcessor(_MultiModalProcessorBase):
                     dict(input_ids=[prompt_ids]), tensor_type="pt"
                 )
             self._unpad_images(processed_data)
-            self._unpad_audios(processed_data, processor_data, call_mm_kwargs)
+            self._unpad_audios(processed_data, processor_data, hf_processor_mm_kwargs)
             processed_data.update(passthrough_data)
 
             input_ids = processed_data.pop("input_ids")
@@ -767,7 +756,6 @@ class OffsetsMultiModalProcessor(_MultiModalProcessorBase):
         hf_inputs: "BatchFeature",
         mm_data: Mapping[str, object],
         num_images: int,
-        hf_processor_mm_kwargs: Mapping[str, object],
     ) -> torch.Tensor:
         """How many rows of the image fields belong to each image.
 
@@ -776,9 +764,7 @@ class OffsetsMultiModalProcessor(_MultiModalProcessorBase):
         """
         if (grid := hf_inputs.get("image_grid_thw")) is not None:
             num_patches = grid.prod(-1)
-        elif (
-            counts := self._get_num_patches_per_image(mm_data, hf_processor_mm_kwargs)
-        ) is not None:
+        elif (counts := self._get_num_patches_per_image(mm_data)) is not None:
             num_patches = torch.tensor(counts)
         else:
             num_patches = torch.ones(num_images, dtype=torch.long)
@@ -799,28 +785,16 @@ class OffsetsMultiModalProcessor(_MultiModalProcessorBase):
         return num_patches
 
     def _get_num_patches_per_image(
-        self,
-        mm_data: Mapping[str, object],
-        hf_processor_mm_kwargs: Mapping[str, object],
+        self, mm_data: Mapping[str, object]
     ) -> list[int] | None:
         """Ask the HF processor how many rows of image data each image produces."""
         images = mm_data.get("images")
         if not isinstance(images, Iterable) or not images:
             return None
         try:
-            processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
-            count_tokens = processor._get_num_multimodal_tokens
             sizes = [(image.height, image.width) for image in images]
-            mm_tokens = count_tokens(
-                image_sizes=sizes,
-                **get_allowed_kwarg_only_overrides(
-                    count_tokens,
-                    self.info.ctx.get_modality_mm_kwargs(
-                        hf_processor_mm_kwargs, "image"
-                    ),
-                    requires_kw_only=False,
-                    allow_var_kwargs=True,
-                ),
+            mm_tokens = self.info.get_hf_processor()._get_num_multimodal_tokens(
+                image_sizes=sizes, **self.info.ctx.get_modality_mm_kwargs({}, "image")
             )
             return list(mm_tokens["num_image_patches"])
         except (AttributeError, KeyError, TypeError):
@@ -834,10 +808,6 @@ class OffsetsMultiModalProcessor(_MultiModalProcessorBase):
         mm_items: MultiModalDataItems,
         hf_kwargs: Mapping[str, object],
     ) -> "BatchFeature":
-        # `_get_hf_mm_inputs` folds call-only options such as `truncation` into
-        # the kwargs it returns, which a sizing helper would read as an image
-        # processor override, so keep the request kwargs for those.
-        request_mm_kwargs = hf_kwargs
         hf_data, hf_kwargs, passthrough_data = self._get_hf_mm_inputs(
             mm_items, hf_kwargs
         )
@@ -910,7 +880,7 @@ class OffsetsMultiModalProcessor(_MultiModalProcessorBase):
             )
             if modality == "image":
                 hf_inputs["num_image_patches"] = self._get_num_image_patches(
-                    hf_inputs, hf_data, len(seqs), request_mm_kwargs
+                    hf_inputs, hf_data, len(seqs)
                 )
             elif modality == "audio":
                 counts = []
