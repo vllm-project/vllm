@@ -614,14 +614,22 @@ def _reference_decode_index_score(
     return out
 
 
-def test_prefill_index_topk_correctness():
+# 3600: 29 blocks over 12 splits of 3, so the last busy split has 2 blocks.
+@pytest.mark.parametrize("prefix_len", [1024, 3600])
+@pytest.mark.parametrize("force_split_k", [False, True])
+def test_prefill_index_topk_correctness(monkeypatch, prefix_len, force_split_k):
+    if force_split_k:
+        # Take the SM12.0-only split-K launch on any CUDA GPU.
+        monkeypatch.setattr(
+            current_platform, "is_device_capability", lambda cap, *_: cap == (12, 0)
+        )
     topk = 6
     init_blocks = 0
     local_blocks = 1
     num_idx_heads = 2
     head_dim = 16
     q_lens = torch.tensor((4, 3), device="cuda", dtype=torch.int32)
-    prefix_lens = torch.tensor((0, 1024), device="cuda", dtype=torch.int32)
+    prefix_lens = torch.tensor((0, prefix_len), device="cuda", dtype=torch.int32)
     seq_lens = prefix_lens + q_lens
     batch = q_lens.numel()
     max_seq_len = seq_lens.max().item()
