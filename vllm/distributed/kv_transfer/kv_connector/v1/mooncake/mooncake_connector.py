@@ -1123,12 +1123,13 @@ class MooncakeConnectorScheduler:
             # loads nothing on the decoder, which recomputes past its local hit.
             and not request.skip_reading_external_kv
         ):
+            # A mixed-mode prompt carries token ids, embeddings and a mask.
             if request.prompt_token_ids is not None:
                 request.prompt_token_ids.pop()
-            elif request.prompt_embeds is not None:
+            if request.prompt_embeds is not None:
                 request.prompt_embeds = request.prompt_embeds[:-1]
-            else:
-                return
+            if request.prompt_is_token_ids is not None:
+                request.prompt_is_token_ids.pop()
 
             request._all_token_ids.pop()
             request.num_prompt_tokens -= 1

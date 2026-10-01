@@ -1781,8 +1781,14 @@ def test_mamba_n1_p_side_truncation():
     assert fa_req.prompt_token_ids is not None
     fa_original = len(fa_req.prompt_token_ids)
 
+    # A mixed token-id / embeddings prompt is cut consistently.
+    fa_req.prompt_embeds = torch.zeros(fa_original, 8)
+    fa_req.prompt_is_token_ids = [True] * (fa_original - 2) + [False] * 2
     fa_sched.on_new_request(fa_req)
     assert len(fa_req.prompt_token_ids) == fa_original - 1
+    assert len(fa_req.prompt_embeds) == fa_original - 1
+    assert len(fa_req.prompt_is_token_ids) == fa_original - 1
+    assert fa_req.num_tokens == fa_original - 1
 
     swa_sched = make_nixl_scheduler(is_hma_required=True)
     swa_req = create_request(num_tokens=10, do_remote_decode=True)
