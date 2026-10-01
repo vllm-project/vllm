@@ -59,13 +59,23 @@ class AnthropicContentBlock(BaseModel):
     is_error: bool | None = None
     # For tool_reference content
     tool_name: str | None = None
-    # For tool_addition / tool_removal content
-    tool: dict[str, Any] | None = None
     # For thinking content
     thinking: str | None = None
     signature: str | None = None
     # For redacted thinking content (safety-filtered by the API)
     data: str | None = None
+    # For tool_addition/tool_removal content
+    tool: "AnthropicToolChange | None" = None
+
+    @model_validator(mode="after")
+    def validate_tool_change(self) -> "AnthropicContentBlock":
+        if self.type not in ("tool_addition", "tool_removal"):
+            return self
+        if self.tool is None:
+            raise ValueError(f"tool is required for {self.type} blocks")
+        if self.type == "tool_removal" and self.tool.type != "tool_reference":
+            raise ValueError("tool_removal only accepts a tool_reference")
+        return self
 
 
 class AnthropicMessage(BaseModel):
@@ -73,6 +83,16 @@ class AnthropicMessage(BaseModel):
 
     role: Literal["user", "assistant", "system"]
     content: str | list[AnthropicContentBlock]
+
+    @model_validator(mode="after")
+    def validate_tool_change_role(self) -> "AnthropicMessage":
+        if self.role != "system" and not isinstance(self.content, str):
+            for block in self.content:
+                if block.type in ("tool_addition", "tool_removal"):
+                    raise ValueError(
+                        f"{block.type} blocks are only allowed in system messages"
+                    )
+        return self
 
 
 class AnthropicTool(BaseModel):
@@ -92,6 +112,26 @@ class AnthropicTool(BaseModel):
         if "type" not in v:
             v["type"] = "object"  # Default to object type
         return v
+
+
+class AnthropicToolChangeReference(BaseModel):
+    """A tool named by a tool_addition or tool_removal block."""
+
+    type: Literal["tool_reference"]
+    name: str
+
+
+class AnthropicToolChangeDefinition(BaseModel):
+    """A tool defined by value in a tool_addition block."""
+
+    type: Literal["tool_definition"]
+    definition: AnthropicTool
+
+
+AnthropicToolChange = Annotated[
+    AnthropicToolChangeReference | AnthropicToolChangeDefinition,
+    Field(discriminator="type"),
+]
 
 
 class AnthropicToolChoice(BaseModel):

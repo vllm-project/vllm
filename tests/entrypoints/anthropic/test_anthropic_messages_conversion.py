@@ -2034,147 +2034,77 @@ class TestProbeDisabledThinkingEffort:
         assert await self._probe(self._reject_none) == "low"
 
 
-# ======================================================================
-# Mid-conversation tool changes (tool_addition / tool_removal)
-# ======================================================================
-
-
-class TestDynamicToolChanges:
-    """Tests for dynamic mid-conversation tool change content blocks
-    (tool_addition and tool_removal), used by Claude Code tool search
-    and the mid-conversation-tool-changes beta header.
-    """
+class TestMidConversationToolChanges:
+    """``tool_addition``/``tool_removal`` blocks decide which tools the chat
+    template is given, since it has no other way to see them."""
 
     @staticmethod
-    def _make_api_app(handler: MagicMock):
-        app = FastAPI()
-        attach_router(app)
-        app.state.args = Namespace(log_error_stack=False)
-        app.exception_handler(RequestValidationError)(validation_exception_handler)
-        app.state.anthropic_serving_messages = handler
-        return app
-
-    def test_tool_addition_block_conversion(self):
-        """tool_addition block is accepted without 400 and passed over
-        during OpenAI conversion so text is preserved."""
+    def _convert_tools(*changes: dict) -> dict[str, bool | None]:
         request = _make_request(
             [
+                {"role": "user", "content": "Hello"},
                 {
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "tool_addition",
-                            "tool": {
-                                "name": "Bash",
-                                "description": "Run shell commands",
-                                "input_schema": {
-                                    "type": "object",
-                                    "properties": {"command": {"type": "string"}},
-                                    "required": ["command"],
-                                },
-                            },
-                        },
-                        {"type": "text", "text": "Run ls"},
-                    ],
-                }
-            ]
-        )
-        result = _convert(request)
-        user_msgs = [m for m in result.messages if m.get("role") == "user"]
-        assert len(user_msgs) == 1
-        assert user_msgs[0].get("content") == "Run ls"
-
-    def test_tool_removal_block_conversion(self):
-        """tool_removal block is accepted without 400 and passed over
-        during OpenAI conversion."""
-        request = _make_request(
-            [
-                {
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "tool_removal",
-                            "tool": {"name": "Bash"},
-                        },
-                        {"type": "text", "text": "Tool removed"},
-                    ],
-                }
-            ]
-        )
-        result = _convert(request)
-        user_msgs = [m for m in result.messages if m.get("role") == "user"]
-        assert len(user_msgs) == 1
-        assert user_msgs[0].get("content") == "Tool removed"
-
-    def test_tool_addition_and_removal_multi_turn(self):
-        """Full multi-turn conversation containing both tool_addition and
-        tool_removal blocks converts without error."""
-        request = _make_request(
-            [
-                {
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "tool_addition",
-                            "tool": {
-                                "name": "Calculator",
-                                "input_schema": {"type": "object"},
-                            },
-                        },
-                        {"type": "text", "text": "Calculate 2+2"},
-                    ],
+                    "role": "system",
+                    "content": [{"type": "text", "text": "Tools changed."}, *changes],
                 },
-                {
-                    "role": "assistant",
-                    "content": [
-                        {
-                            "type": "tool_removal",
-                            "tool": {"name": "Calculator"},
-                        },
-                        {"type": "text", "text": "Result is 4"},
-                    ],
-                },
-            ]
-        )
-        result = _convert(request)
-        assert len(result.messages) == 2
-        assert result.messages[0]["content"] == "Calculate 2+2"
-        assert result.messages[1]["content"] == "Result is 4"
-
-    def test_api_endpoint_accepts_tool_addition_request(self):
-        """Endpoint /v1/messages should parse and accept tool_addition
-        request payload without returning a 400 Bad Request."""
-        handler = MagicMock(spec=AnthropicServingMessages)
-        response_mock = MagicMock()
-        handler.create_messages.return_value = response_mock
-
-        app = self._make_api_app(handler)
-        body = {
-            "model": "test-model",
-            "max_tokens": 1024,
-            "messages": [
-                {
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "tool_addition",
-                            "tool": {
-                                "name": "Bash",
-                                "description": "Run shell commands",
-                                "input_schema": {
-                                    "type": "object",
-                                    "properties": {"command": {"type": "string"}},
-                                    "required": ["command"],
-                                },
-                            },
-                        },
-                        {"type": "text", "text": "Hello, world!"},
-                    ],
-                }
             ],
-        }
-        with TestClient(app, raise_server_exceptions=False) as client:
-            response = client.post("/v1/messages", json=body)
+            tools=[
+                {"name": "bash", "input_schema": {}},
+                {"name": "search", "input_schema": {}, "defer_loading": True},
+                {"name": "fetch", "input_schema": {}, "defer_loading": True},
+            ],
+        )
+        result = _convert(request)
+        assert result.messages[-1] == {"role": "system", "content": "Tools changed."}
+        assert result.tools is not None
+        return {t.function.name: t.function.defer_loading for t in result.tools}
 
-        assert response.status_code == HTTPStatus.OK
-        assert handler.create_messages.called
+    @staticmethod
+    def _change(block_type: str, name: str) -> dict:
+        return {"type": block_type, "tool": {"type": "tool_reference", "name": name}}
+
+    def test_addition_loads_deferred_tool(self):
+        tools = self._convert_tools(self._change("tool_addition", "search"))
+        assert tools == {"bash": None, "search": None, "fetch": True}
+
+    def test_removal_withdraws_tool_until_added_again(self):
+        removal = self._change("tool_removal", "bash")
+        assert "bash" not in self._convert_tools(removal)
+        readded = self._convert_tools(removal, self._change("tool_addition", "bash"))
+        assert list(readded) == ["bash", "search", "fetch"]
+
+    def test_addition_defines_tool_by_value(self):
+        definition = {"name": "db_query", "input_schema": {}}
+        tools = self._convert_tools(
+            {
+                "type": "tool_addition",
+                "tool": {"type": "tool_definition", "definition": definition},
+            }
+        )
+        assert list(tools) == ["bash", "search", "fetch", "db_query"]
+
+    def test_unknown_tool_reference_is_rejected(self):
+        with pytest.raises(ValueError, match="not declared in tools"):
+            self._convert_tools(self._change("tool_addition", "missing"))
+
+    def test_removal_by_value_is_rejected(self):
+        definition = {"name": "bash", "input_schema": {}}
+        with pytest.raises(ValidationError, match="only accepts a tool_reference"):
+            self._convert_tools(
+                {
+                    "type": "tool_removal",
+                    "tool": {"type": "tool_definition", "definition": definition},
+                }
+            )
+
+    def test_tool_change_outside_system_message_is_rejected(self):
+        with pytest.raises(ValidationError, match="only allowed in system messages"):
+            _make_request(
+                [
+                    {
+                        "role": "user",
+                        "content": [self._change("tool_addition", "search")],
+                    }
+                ],
+                tools=[{"name": "search", "input_schema": {}, "defer_loading": True}],
+            )
