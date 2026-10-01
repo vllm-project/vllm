@@ -754,6 +754,9 @@ _FREE_KERNEL_CASES = [
     (96, 32, 4, 2048),
     (160, 16, 1, 256),
     (160, 32, 4, 2048),
+    (80, 16, 4, 2048),
+    (192, 16, 4, 2048),
+    (224, 32, 4, 2048),
     (256, 16, 1, 256),  # single partition
     (256, 16, 4, 4096),
     (256, 32, 7, 8192),
@@ -827,55 +830,4 @@ def test_num_heads_not_divisible_by_num_kv_heads(attention_cls: type) -> None:
             head_size=head_size,
             scale=scale,
             num_kv_heads=num_kv_heads,
-        )
-
-
-UNSUPPORTED_HEAD_SIZES = [32, 80, 96, 160, 192, 224, 256]
-
-
-@pytest.mark.skipif(
-    not current_platform.is_rocm(), reason="ROCm-only paged attention kernel"
-)
-@pytest.mark.parametrize("head_size", UNSUPPORTED_HEAD_SIZES)
-def test_paged_attention_unsupported_head_sizes(
-    kv_cache_factory, head_size: int
-) -> None:
-    """Verify ROCm paged attention rejects unsupported head sizes."""
-    torch.set_default_device("cuda")
-    num_seqs, num_kv_heads, block_size, max_seq_len = 1, 8, 16, 128
-    scale = head_size**-0.5
-
-    query = torch.empty(num_seqs, num_kv_heads, head_size, dtype=torch.bfloat16)
-    key_caches, value_caches = kv_cache_factory(
-        NUM_BLOCKS, block_size, 1, num_kv_heads, head_size, "auto", torch.bfloat16, 0
-    )
-    block_tables = torch.zeros(num_seqs, 1, dtype=torch.int32)
-    seq_lens = torch.tensor([max_seq_len], dtype=torch.int32)
-
-    output = torch.empty_like(query)
-    num_partitions = (max_seq_len + PARTITION_SIZE_ROCM - 1) // PARTITION_SIZE_ROCM
-    tmp_output = torch.empty(num_seqs, num_kv_heads, num_partitions, head_size)
-    exp_sums = torch.empty(num_seqs, num_kv_heads, num_partitions, dtype=torch.float32)
-    k_scale = v_scale = torch.tensor(1.0, dtype=torch.float32, device="cuda")
-
-    with pytest.raises(RuntimeError, match="Unsupported head size"):
-        ops.paged_attention_rocm(
-            output,
-            exp_sums,
-            torch.empty_like(exp_sums),
-            tmp_output,
-            query,
-            key_caches[0],
-            value_caches[0],
-            num_kv_heads,
-            scale,
-            block_tables,
-            seq_lens,
-            None,
-            block_size,
-            max_seq_len,
-            None,
-            "auto",
-            k_scale,
-            v_scale,
         )
