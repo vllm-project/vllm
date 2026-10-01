@@ -381,6 +381,7 @@ class KVCacheManager:
         full_sequence_must_fit: bool = False,
         reserved_blocks: int = 0,
         has_scheduled_reqs: bool = True,
+        skip_zeroing_group_ids: tuple[int, ...] = (),
     ) -> KVCacheBlocks | None:
         """Add slots for a request with new tokens to append.
 
@@ -398,9 +399,7 @@ class KVCacheManager:
                 KV caches are not cached by vLLM but cached by the connector.
             delay_cache_blocks: Whether to skip caching the blocks. This is
                 used by P/D when allocating blocks used in a KV transfer
-                which will complete in a future step. The blocks for external
-                tokens are then not zeroed either, which would race the
-                transfer.
+                which will complete in a future step.
             num_encoder_tokens: The number of encoder tokens to allocate for
                 cross-attention in encoder-decoder models(e.g., Whisper).
                 For decoder-only models, this should be 0.
@@ -415,6 +414,8 @@ class KVCacheManager:
                 blocks an already in-flight (prefilling) sequence is relying on.
             has_scheduled_reqs: Whether any requests are already scheduled to run
                 this step, controls whether watermark is applied.
+            skip_zeroing_group_ids: Groups whose external-token blocks will be
+                written by an async load and must not be zeroed concurrently.
 
         Blocks layout:
         ```
@@ -582,7 +583,7 @@ class KVCacheManager:
                 new_computed_blocks=new_computed_block_list,
                 num_local_computed_tokens=num_local_computed_tokens,
                 num_external_computed_tokens=num_external_computed_tokens,
-                record_for_zeroing=not delay_cache_blocks,
+                skip_zeroing_group_ids=skip_zeroing_group_ids,
             )
 
         new_blocks = self.coordinator.allocate_new_blocks(

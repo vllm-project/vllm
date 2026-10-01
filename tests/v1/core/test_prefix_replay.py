@@ -282,13 +282,14 @@ def test_hit_no_longer_than_window_is_ignored(via_connector):
 
 
 @pytest.mark.parametrize("is_async", [True, False])
-def test_kv_load_blocks_not_zeroed_under_async_load(is_async):
-    """The blocks allocated for an async KV load are written by the connector
-    after this step, so zeroing them would race the write. That includes the
-    window blocks below the local hit, which the replayed group never caches.
-    A sync load writes after the zeroing, so its blocks are still zeroed."""
+@pytest.mark.parametrize("loads_window", [True, False])
+def test_kv_load_zeroing_respects_loaded_groups(is_async, loads_window):
+    """Only groups restored by an async load skip zeroing. P/D loads include
+    the non-cacheable window; stores leave it to be initialized locally."""
     local = 5 * BLOCK_SIZE
     scheduler = _replay_scheduler(use_kv_connector=MockKVConfig())
+    if loads_window:
+        scheduler.connector.get_loaded_kv_cache_group_ids = lambda request: (FULL, SWA)
     assert scheduler.needs_kv_cache_zeroing
     first = create_requests(
         num_requests=1, num_tokens=local, same_prompt=True, block_size=BLOCK_SIZE
@@ -318,14 +319,13 @@ def test_kv_load_blocks_not_zeroed_under_async_load(is_async):
         not b.is_null and b.block_id not in hit_ids
         for b in swa_blocks[: local // BLOCK_SIZE]
     )
-    new_ids = {
-        b.block_id
-        for g in manager.get_blocks(request.request_id).blocks
-        for b in g
-        if not b.is_null and b.block_id not in hit_ids
-    }
     zeroed = set(out.new_block_ids_to_zero or ())
-    if is_async:
-        assert not new_ids & zeroed
-    else:
-        assert new_ids <= zeroed
+    for group_id, blocks in enumerate(manager.get_blocks(request.request_id).blocks):
+        new_ids = {
+            b.block_id for b in blocks if not b.is_null and b.block_id not in hit_ids
+        }
+        assert new_ids
+        if is_async and (group_id == FULL or loads_window):
+            assert not new_ids & zeroed
+        else:
+            assert new_ids <= zeroed

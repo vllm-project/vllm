@@ -1211,6 +1211,11 @@ class Scheduler(SchedulerInterface):
                     num_lookahead_tokens=effective_lookahead_tokens,
                     num_external_computed_tokens=num_external_computed_tokens,
                     delay_cache_blocks=load_kv_async,
+                    skip_zeroing_group_ids=(
+                        self.connector.get_loaded_kv_cache_group_ids(request)
+                        if load_kv_async and self.connector is not None
+                        else ()
+                    ),
                     num_encoder_tokens=num_encoder_tokens,
                     full_sequence_must_fit=self.scheduler_reserve_full_isl,
                     reserved_blocks=reserved_blocks,
