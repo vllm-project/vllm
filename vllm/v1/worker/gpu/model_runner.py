@@ -31,8 +31,9 @@ import torch.nn as nn
 import vllm.envs as envs
 from vllm.compilation.counter import compilation_counter
 from vllm.compilation.cuda_graph import CUDAGraphStat
+from vllm.compilation.wrapper import compile_model_with_stock_torch
 from vllm.config import VllmConfig
-from vllm.config.compilation import CUDAGraphMode
+from vllm.config.compilation import CompilationMode, CUDAGraphMode
 from vllm.distributed.aux_output_connector.worker import (
     AuxOutputWorkerConnector,
     get_aux_output_connector,
@@ -163,7 +164,10 @@ from vllm.v1.worker.gpu.spec_decode.rejection_sampler import (
 from vllm.v1.worker.gpu.spec_decode.speculator import DraftModelSpeculator
 from vllm.v1.worker.gpu.spec_decode.utils import DraftTokensHandler
 from vllm.v1.worker.gpu.states import RequestState
-from vllm.v1.worker.gpu.structured_outputs import StructuredOutputsWorker
+from vllm.v1.worker.gpu.structured_outputs import (
+    StructuredOutputsWorker,
+    grammar_invalid_drafts,
+)
 from vllm.v1.worker.gpu.ubatch_utils import (
     UBatchRunner,
     UBatchState,
@@ -233,10 +237,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         # Persistent buffer for intermediate tensors (non-first PP ranks).
         self.intermediate_tensors: IntermediateTensors | None = None
-
-        # Data parallelism.
-        self.dp_size = self.parallel_config.data_parallel_size
-        self.dp_rank = self.parallel_config.data_parallel_rank
 
         # Dual batch overlap. Created in initialize_kv_cache(), once everything
         # it runs the microbatched forward with exists.
@@ -494,7 +494,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     ),
                 )
             self.prompt_logprobs_worker = PromptLogprobsWorker(
-                self.max_num_reqs, logprobs_mode=self.model_config.logprobs_mode
+                self.max_num_reqs,
+                self.device,
+                logprobs_mode=self.model_config.logprobs_mode,
             )
             self.structured_outputs_worker = StructuredOutputsWorker(
                 max_num_logits=self.max_num_reqs * self.decode_query_len,
@@ -507,9 +509,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         if self.is_pooling_model and self.is_last_pp_rank:
             self.pooling_runner = PoolingRunner(self.model, self.vllm_config)
         eplb_models_added |= self.eplb.maybe_register_model(
-            self.model, self.model_config, load_dummy_weights
+            self.model, self.model_config
         )
-        self.eplb.maybe_start_async_loop(eplb_models_added)
+        self.eplb.maybe_start_async_loop(eplb_models_added, load_dummy_weights)
 
         if not self.is_first_pp_rank:
             # For non-first PP ranks, create intermediate tensors sized
@@ -523,6 +525,19 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             )
 
         get_offloader().post_init()
+
+        if self.compilation_config.mode == CompilationMode.STOCK_TORCH_COMPILE:
+            compile_model_with_stock_torch(self.model, self.vllm_config)
+
+    @property
+    def dp_size(self) -> int:
+        # Not cached: elastic EP rewrites parallel_config in place on reconfigure.
+        return self.parallel_config.data_parallel_size
+
+    @property
+    def dp_rank(self) -> int:
+        # Not cached: elastic EP rewrites parallel_config in place on reconfigure.
+        return self.parallel_config.data_parallel_rank
 
     def get_model(self) -> nn.Module:
         return self.model
@@ -797,7 +812,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 "skip_attn must only be True for initial memory profiling."
             )
 
-        # Create a dummy scheduler output.
+        # Create a dummy scheduler output. Plain draft-model speculation adds
+        # one correction slot per request during prefill. The scheduler
+        # accounts for these slots, while dummy runs bypass the scheduler.
+        # Adjust the dummy token count only when the expanded draft batch
+        # would exceed the token budget.
         num_reqs = min(num_tokens, self.max_num_reqs)
         if uniform_decode:
             # HACK(lucas): for now since the worker is shared between MRV1 and MRV2,
@@ -811,8 +830,15 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             num_reqs = min(
                 num_reqs, self.max_num_tokens // self.speculator.num_query_per_req
             )
+            num_tokens = min(
+                num_tokens,
+                self.max_num_tokens
+                - num_reqs * self.speculator.num_extra_query_per_req,
+            )
+
         # Distribute the remainder evenly so no dummy request exceeds
         # ceil(num_tokens / num_reqs) <= max_model_len tokens.
+
         num_tokens_per_request = [
             num_tokens // num_reqs + (i >= num_reqs - num_tokens % num_reqs)
             for i in range(num_reqs)
@@ -891,8 +917,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 spec_hidden_states = pre_hc_hidden_states[: hidden_states.shape[0]]  # type: ignore[union-attr]
             if isinstance(self.sampler, GPUWatermarkSampler):
                 self.speculator.prepare_watermarking(
-                    self.sampler._get_contexts(input_batch.idx_mapping),
-                    self.sampler.watermarking.gpu[input_batch.idx_mapping],
+                    self.sampler, input_batch.idx_mapping
                 )
             with use_workspace_lane(self._draft_workspace_lane):
                 self.speculator.propose(
@@ -1229,7 +1254,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         if dummy_run:
             # Dummy batches are uniform by construction.
             return None, get_uniform_decode_token_count(
-                num_reqs, num_toks, max_query_len, has_prefill=False
+                num_reqs, num_toks, max_query_len, decode_graph_eligible=True
             )
 
         draft_tokens = scheduler_output.scheduled_spec_decode_tokens
@@ -1248,24 +1273,53 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             idx_mapping_np
         ]
         is_prefilling_np = num_computed_prefill_tokens_np < prefill_len_np
+        has_prefill = bool(is_prefilling_np.any())
+        max_seq_len_np = None
+        if self.use_pp and has_prefill:
+            # consumed by the PP `compute_need_sampled_mask` for batches with prefill.
+            max_seq_len_np = self.req_states.max_seq_len[idx_mapping_np]
 
-        if self.adaptive_verification is not None and draft_tokens:
-            num_toks = self.adaptive_verification.get_num_tokens(
-                num_tokens_per_req, draft_tokens
+        num_draft_tokens_np = None
+        if draft_tokens:
+            num_drafts_iter = (len(draft_tokens.get(req_id, ())) for req_id in req_ids)
+            num_draft_tokens_np = np.fromiter(
+                num_drafts_iter, dtype=np.int32, count=num_reqs
+            )
+            if self.adaptive_verification is not None:
+                num_toks = self.adaptive_verification.get_num_tokens(
+                    num_tokens_per_req, draft_tokens
+                )
+
+        prefill_runs_as_decode_np = None
+        decode_graph_eligible = not has_prefill
+        if has_prefill and self.pcp_manager is None:
+            # One new prompt token over existing context (possibly padded with
+            # placeholder drafts) runs as a decode. PCP partitions prefill rows.
+            num_new_tokens = num_scheduled_tokens
+            if num_draft_tokens_np is not None:
+                num_new_tokens = num_new_tokens - num_draft_tokens_np
+            one_token_ext = (num_new_tokens == 1) & (num_computed_prefill_tokens_np > 0)
+            prefill_runs_as_decode_np = is_prefilling_np & one_token_ext
+            decode_graph_eligible = bool(
+                (prefill_runs_as_decode_np | ~is_prefilling_np).all()
             )
 
         batch_state = BatchReqState(
             req_ids=req_ids,
             num_scheduled_tokens=num_scheduled_tokens,
             num_tokens=num_toks,
+            num_draft_tokens_np=num_draft_tokens_np,
             idx_mapping_np=idx_mapping_np,
             prefill_len_np=prefill_len_np,
             num_computed_prefill_tokens_np=num_computed_prefill_tokens_np,
             is_prefilling_np=is_prefilling_np,
-            has_prefill=bool(is_prefilling_np.any()),
+            has_prefill=has_prefill,
+            prefill_runs_as_decode_np=prefill_runs_as_decode_np,
+            decode_graph_eligible=decode_graph_eligible,
+            max_seq_len_np=max_seq_len_np,
         )
         return batch_state, get_uniform_decode_token_count(
-            num_reqs, num_toks, max_query_len, batch_state.has_prefill
+            num_reqs, num_toks, max_query_len, decode_graph_eligible
         )
 
     def prepare_inputs(
@@ -1307,11 +1361,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 num_reqs, dtype=torch.int32, device=self.device
             )
         else:
-            num_draft_tokens_per_req = np.fromiter(
-                (len(draft_tokens.get(req_id, ())) for req_id in req_ids),
-                dtype=np.int32,
-                count=num_reqs,
-            )
+            num_draft_tokens_per_req = batch_req_state.num_draft_tokens_np
+            if num_draft_tokens_per_req is None:
+                num_draft_tokens_per_req = np.zeros(num_reqs, dtype=np.int32)
             num_bonus_tokens = self.model_state.num_new_sampled_tokens_per_step
             total_num_draft_tokens = int(num_draft_tokens_per_req.sum())
             total_num_logits = num_reqs * num_bonus_tokens + total_num_draft_tokens
@@ -1450,6 +1502,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             num_computed_prefill_tokens_np=batch_req_state.num_computed_prefill_tokens_np,
             is_prefilling_np=batch_req_state.is_prefilling_np,
             has_prefill=batch_req_state.has_prefill,
+            prefill_runs_as_decode_np=batch_req_state.prefill_runs_as_decode_np,
+            decode_graph_eligible=batch_req_state.decode_graph_eligible,
+            max_seq_len_np=batch_req_state.max_seq_len_np,
             input_ids=self.input_buffers.input_ids[:num_tokens_after_padding],
             positions=self.input_buffers.positions[:num_tokens_after_padding],
             is_padding=is_padding,
@@ -1530,6 +1585,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             sample_hidden_states = hidden_states[input_batch.logits_indices]
             logits = self.model.compute_logits(sample_hidden_states)
 
+        invalid_drafts = None
         # A diffusion prefill has no logit rows even when a bitmask row
         # arrived for it.
         if grammar_output is not None and logits.shape[0] > 0:
@@ -1540,6 +1596,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 input_batch,
                 grammar_output.structured_output_request_ids,
                 grammar_output.grammar_bitmask,
+            )
+            invalid_drafts = grammar_invalid_drafts(
+                input_batch,
+                grammar_output.structured_output_request_ids,
+                grammar_output.num_acceptable_drafts,
             )
 
         sampler_output: SamplerOutput | None
@@ -1559,6 +1620,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 input_batch,
                 # Draft logits are needed for probabilistic rejection sampling.
                 self.speculator.draft_logits,
+                invalid_drafts,
             )
 
         if shard_metadata is not None:
@@ -2017,6 +2079,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # Non-last PP rank: hidden_states is None because this rank produced
             # IntermediateTensors instead of final hidden states. Receive the
             # sampled tokens broadcast from the last rank and update local state.
+            if self.pcp_manager is not None:
+                input_batch = self.pcp_manager.global_batch
             assert self.pp_handler is not None
             all_decode_next = self.pp_handler.receive(input_batch)
             # Optimistically update num_computed_tokens for entire batch here.
@@ -2063,6 +2127,14 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.req_states.num_computed_tokens.gpu,
             self.req_states.prompt_len.np,
         )
+        prompt_token_id_logprobs_dict = (
+            self.prompt_logprobs_worker.compute_prompt_token_id_logprobs(
+                self.model.compute_logits,
+                hidden_states,
+                input_batch,
+                self.req_states.prompt_len.np,
+            )
+        )
 
         # Prepare the model runner output.
         model_runner_output = ModelRunnerOutput(
@@ -2072,6 +2144,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             req_id_to_index={req_id: i for i, req_id in enumerate(input_batch.req_ids)},
             sampled_token_ids=None,  # type: ignore
             prompt_logprobs_dict=prompt_logprobs_dict,  # type: ignore[arg-type]
+            prompt_token_id_logprobs_dict=prompt_token_id_logprobs_dict,
             cudagraph_stats=cudagraph_stats,
         )
         pending_aux_output = None
@@ -2136,8 +2209,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 spec_hidden_states = pre_hc_hidden_states[: draft_hidden_states.size(0)]
             if isinstance(self.sampler, GPUWatermarkSampler):
                 self.speculator.prepare_watermarking(
-                    self.sampler._get_contexts(input_batch.idx_mapping),
-                    self.sampler.watermarking.gpu[input_batch.idx_mapping],
+                    self.sampler, input_batch.idx_mapping
                 )
             with use_workspace_lane(self._draft_workspace_lane):
                 draft_tokens = self.speculator.propose(
@@ -2291,9 +2363,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     def setup_eplb_from_mapping(
         self, expanded_physical_to_logical: torch.Tensor
     ) -> None:
-        self.eplb.setup_from_mapping(
-            self.model, self.model_config, expanded_physical_to_logical
-        )
+        self.eplb.setup_from_mapping(self.model_config, expanded_physical_to_logical)
 
     ########### EPLB methods end ###########
 
@@ -2323,11 +2393,15 @@ class BatchReqState(NamedTuple):
     # May be less than scheduler_output.total_num_scheduled_tokens:
     # adaptive verification trims the draft budget before running.
     num_tokens: int
+    num_draft_tokens_np: np.ndarray | None  # [num_reqs], None if no drafts
     idx_mapping_np: np.ndarray  # [num_reqs]
     prefill_len_np: np.ndarray  # [num_reqs]
     num_computed_prefill_tokens_np: np.ndarray  # [num_reqs]
     is_prefilling_np: np.ndarray  # [num_reqs]
+    max_seq_len_np: np.ndarray | None  # [num_reqs], None in non-pp case
     has_prefill: bool
+    prefill_runs_as_decode_np: np.ndarray | None  # [num_reqs]
+    decode_graph_eligible: bool
 
 
 def sort_batch_req_ids(

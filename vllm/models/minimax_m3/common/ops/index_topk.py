@@ -101,6 +101,7 @@ def _index_block_score_kernel(
     stride_bt_b,
     BLOCK_SIZE_Q: tl.constexpr,
     BLOCK_SIZE_K: tl.constexpr,  # == SPARSE_BLOCK_SIZE (128)
+    USE_SPLIT_K: tl.constexpr,
 ):
     pid_q = tl.program_id(0)
     pid_bh = tl.program_id(1)
@@ -123,6 +124,10 @@ def _index_block_score_kernel(
         order=(1, 0),
     )
     q = tl.load(q_ptrs, boundary_check=(0,), padding_option="zero")
+    # FP8 has no mixed-dtype dot with bf16/fp32. Leave bf16 and fp32 loads
+    # in their stored dtype so fp32 pipeline tests keep full precision.
+    if q.dtype.is_fp8():
+        q = q.to(tl.bfloat16)
     q_start = prefix_len + pid_q * BLOCK_SIZE_Q
 
     off_q = tl.arange(0, BLOCK_SIZE_Q) + pid_q * BLOCK_SIZE_Q + prefix_len
@@ -132,8 +137,19 @@ def _index_block_score_kernel(
     bt_row = block_table_ptr + pid_b * stride_bt_b
     # Causal window: only blocks up to the last query token's position.
     hi = min(seq_len, prefix_len + (pid_q + 1) * BLOCK_SIZE_Q)
-    for i in tl.range(0, hi, BLOCK_SIZE_K):
-        blk = i // BLOCK_SIZE_K
+    num_blocks = tl.cdiv(hi, BLOCK_SIZE_K)
+    if USE_SPLIT_K:
+        pid_k = tl.program_id(2)
+        blocks_per_split = tl.cdiv(num_blocks, tl.num_programs(2))
+        block_start = pid_k * blocks_per_split
+        block_end = tl.minimum(block_start + blocks_per_split, num_blocks)
+        if block_start >= block_end:
+            return
+    else:
+        block_start = 0
+        block_end = num_blocks
+    for blk in tl.range(block_start, block_end):
+        i = blk * BLOCK_SIZE_K
         page = tl.load(bt_row + blk).to(tl.int64)
         pos = i + off_k
         # index-K for this page: [BLOCK_SIZE_D, BLOCK_SIZE_K] (transposed)
@@ -146,7 +162,9 @@ def _index_block_score_kernel(
             + off_k[None, :] * stride_ik_pos
             + off_d[:, None] * stride_ik_d,
         )
-        qk = tl.dot(q, k)
+        if k.dtype.is_fp8():
+            k = k.to(tl.bfloat16)
+        qk = tl.dot(q, k, out_dtype=tl.float32)
         # apply causal mask as needed
         if q_start < i + BLOCK_SIZE_K:
             qk = tl.where(off_q[:, None] >= pos[None, :], qk, float("-inf"))
@@ -360,6 +378,8 @@ def _decode_index_score_kernel(
         mask=q_mask[None, :],
         other=0.0,
     )  # [D,HQ]
+    if q.dtype.is_fp8():
+        q = q.to(tl.bfloat16)
     for blk in tl.range(chunk_start_block, chunk_end_block):
         page = tl.load(bt_row + blk).to(tl.int64)
         pos = blk * BLOCK_SIZE_K + off_k
@@ -373,9 +393,11 @@ def _decode_index_score_kernel(
             + off_k[:, None] * stride_ik_pos
             + off_d * stride_ik_d,
         )  # [N,D]
-        # fp32 accumulation is required for the fp8 (e4m3) index cache: q/k are
-        # loaded in their stored dtype (bf16 or e4m3) and the MMA accumulates in
-        # fp32 so the per-block max score is exact for the fp8 indexer too.
+        # Upcast only FP8 cache loads. BF16 operands keep FP8 dot
+        # instructions out of the fallback path; FP32 accumulation
+        # preserves score accuracy. BF16/FP32 loads stay as stored.
+        if k.dtype.is_fp8():
+            k = k.to(tl.bfloat16)
         kq = tl.dot(k, q, out_dtype=tl.float32)  # [N,HQ]
         kq = tl.where(pos_mask & q_mask[None, :], kq, float("-inf"))
         score = tl.max(kq, axis=0)  # [HQ]
@@ -676,7 +698,17 @@ def minimax_m3_index_score(
         device=idx_q.device,
     )
     BLOCK_SIZE_Q = 64
-    grid_score = (triton.cdiv(max_query_len, BLOCK_SIZE_Q), batch * num_idx_heads)
+    n_q_tiles = triton.cdiv(max_query_len, BLOCK_SIZE_Q)
+    SCORE_TARGET_GRID = 48
+    split_k = max(
+        1,
+        min(max_block, SCORE_TARGET_GRID // max(1, n_q_tiles * batch * num_idx_heads)),
+    )
+    if not (
+        current_platform.is_cuda() and current_platform.is_device_capability((12, 0))
+    ):
+        split_k = 1
+    grid_score = (n_q_tiles, batch * num_idx_heads, split_k)
     _index_block_score_kernel[grid_score](
         idx_q,
         index_kv_cache,
@@ -699,6 +731,7 @@ def minimax_m3_index_score(
         block_table.stride(0),
         BLOCK_SIZE_Q=BLOCK_SIZE_Q,
         BLOCK_SIZE_K=SPARSE_BLOCK_SIZE,
+        USE_SPLIT_K=split_k > 1,
     )
     return score
 
@@ -812,7 +845,7 @@ def minimax_m3_index_decode_score(
         )
     # split-K over seq blocks; chunk count depends only on shape constants so
     # the grid is fixed within a cuda graph.
-    TARGET_GRID = 512
+    TARGET_GRID = 4096
     MAX_NUM_KV_CHUNKS = 256
     # Use the configured max decode length to avoid Triton recompiles when
     # switching between qlen=1 and spec-decode verification batches.
@@ -911,7 +944,7 @@ def minimax_m3_index_decode(
         )
     # Chunk count is shape-constant (cudagraph-safe), capped so the merge sorts
     # pow2(num_topk_chunks * pow2(topk)) candidates.
-    TOPK_TARGET_GRID = 64
+    TOPK_TARGET_GRID = 512
     MAX_NUM_TOPK_CHUNKS = 16
     topk_target = max(
         1, min(MAX_NUM_TOPK_CHUNKS, TOPK_TARGET_GRID // max(1, batch * num_idx_heads))
