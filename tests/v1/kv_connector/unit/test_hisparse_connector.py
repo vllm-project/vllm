@@ -114,3 +114,56 @@ def test_full_graph_step_prepares_host_mirror_outside_model():
 
     worker._enqueue_row_dma.assert_called_once_with((0,), ready_event=None)
     runtime.invalidate_written_slots.assert_called_once()
+
+
+def test_scheduled_prefix_hit_publishes_adopted_copies():
+    """Copies adopted after scheduling must reach the worker's block table."""
+    from tests.v1.core.test_prefix_caching import (
+        HISPARSE_BLOCK_SIZE,
+        _allocate_scheduled,
+        _publish_hisparse_pages,
+        make_hisparse_kv_cache_manager,
+        make_request,
+        sha256,
+    )
+    from vllm.v1.core.kv_cache_utils import init_none_hash
+
+    init_none_hash(sha256)
+    manager = make_hisparse_kv_cache_manager(32, 16, enable_caching=True)
+    tokens = list(range(4 * HISPARSE_BLOCK_SIZE))
+    original = make_request("original", tokens, HISPARSE_BLOCK_SIZE, sha256)
+    assert _allocate_scheduled(manager, original, num_new_tokens=len(tokens))
+    _publish_hisparse_pages(manager)
+    copy_ids = [block.block_id for block in manager.get_blocks("original").blocks[2]]
+    manager.free(original)
+
+    resumed = make_request("resumed", tokens, HISPARSE_BLOCK_SIZE, sha256)
+    computed, num_computed, _ = manager.get_computed_blocks(resumed)
+    num_new_tokens = len(tokens) - num_computed
+    assert manager.allocate_slots(
+        resumed,
+        num_new_tokens=num_new_tokens,
+        num_new_computed_tokens=num_computed,
+        new_computed_blocks=computed,
+    )
+    scheduler = HiSparseConnectorScheduler(async_speculative=False)
+    scheduler.bind_coordinator(get_hisparse_coordinator(manager))
+    scheduler.requests[resumed.request_id] = resumed
+    scheduler_output = SimpleNamespace(
+        scheduled_new_reqs=[
+            SimpleNamespace(
+                req_id=resumed.request_id,
+                num_computed_tokens=num_computed,
+                block_ids=manager.get_block_ids(resumed.request_id),
+            )
+        ],
+        scheduled_cached_reqs=SimpleNamespace(
+            req_ids=[], num_computed_tokens=[], new_block_ids=[]
+        ),
+        num_scheduled_tokens={resumed.request_id: num_new_tokens},
+    )
+
+    scheduler.build_connector_meta(scheduler_output)
+
+    resident_ids = scheduler_output.block_table_updates[resumed.request_id][2]
+    assert resident_ids[:3] == copy_ids[:3]

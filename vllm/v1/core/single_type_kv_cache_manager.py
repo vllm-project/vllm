@@ -2366,12 +2366,6 @@ class _HiSparseAuxiliaryManager(SingleTypeKVCacheManager):
 
     coordinator: "HiSparseCoordinator | None" = None
 
-    def __init__(self, kv_cache_spec: KVCacheSpec, **kwargs) -> None:
-        # Never prefix-cached, but the per-step ``cache_blocks`` hook is where
-        # residency work runs, so stay opted in regardless of prefix caching.
-        kwargs["enable_caching"] = True
-        super().__init__(kv_cache_spec, **kwargs)
-
     def cache_blocks(
         self,
         request: Request,
@@ -2550,18 +2544,6 @@ class HiSparseResidentManager(_HiSparseAuxiliaryManager):
         self.num_cached_block[request_id] = 0
         assert self.coordinator is not None
         self.coordinator.commit_computed_blocks(request_id, num_host_pages)
-
-    def cache_blocks(
-        self,
-        request: Request,
-        num_tokens: int,
-        retention_interval: int | None = None,
-        *,
-        replay_boundaries: Sequence[int],
-    ) -> None:
-        assert self.coordinator is not None
-        self.coordinator.plan_prefix_materialization(request.request_id, num_tokens)
-        self.coordinator.update_residency(request.request_id)
 
     def allocate_new_blocks(
         self, request_id: str, num_tokens: int, num_tokens_main_model: int
