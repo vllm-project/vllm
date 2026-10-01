@@ -73,7 +73,8 @@ def _make_p_node_turn2_request(
         do_remote_decode=True,
     )
     if remote_num_tokens is None:
-        remote_num_tokens = num_remote_blocks * block_size
+        # D's KV ends inside the new prompt, as in a follow-up turn.
+        remote_num_tokens = min(num_remote_blocks * block_size, num_tokens - 2)
     request.kv_transfer_params["remote_block_ids"] = [list(range(num_remote_blocks))]
     request.kv_transfer_params["remote_num_tokens"] = remote_num_tokens
     request.kv_transfer_params["remote_engine_id"] = "decode-engine"
@@ -270,40 +271,41 @@ def test_abort_p_side_non_length_capped():
     assert_scheduler_empty(scheduler)
 
 
-def test_remote_blocks_exceed_prompt_tokens():
-    """D provides more remote tokens than P's prompt needs.
-    P caps external tokens to prompt length."""
+@pytest.mark.parametrize(
+    ("num_tokens", "remote_num_tokens", "expected_pull"),
+    [
+        # D's KV runs past the prompt (e.g. a regenerated turn).
+        (80, 160, 0),
+        # D's KV covers the whole prompt, which P cuts to 64 (N % 32 == 1).
+        (65, 65, 0),
+        (80, 64, 64),
+    ],
+)
+def test_p_node_pulls_only_kv_ending_where_it_resumes(
+    num_tokens, remote_num_tokens, expected_pull
+):
+    """The workers pair P's and D's blocks from the end of the sequence, so P
+    may pull D's KV only if it resumes where that KV ends; otherwise every
+    pulled block would land one or more positions off."""
     vllm_config = create_vllm_config(
-        kv_connector_extra_config=BIDIR_KV_EXTRA_CONFIG,
+        kv_connector_extra_config=BIDIR_KV_EXTRA_CONFIG, block_size=32
     )
     scheduler = create_scheduler(vllm_config)
-    BS = vllm_config.cache_config.block_size
-    NUM_TOKENS = int(BS * 2.5)
     req = _make_p_node_turn2_request(
-        300, BS, NUM_TOKENS, num_remote_blocks=5, remote_num_tokens=5 * BS
+        300,
+        32,
+        num_tokens,
+        num_remote_blocks=-(-remote_num_tokens // 32),
+        remote_num_tokens=remote_num_tokens,
     )
     scheduler.add_request(req)
-    req_id = req.request_id
     so = scheduler.schedule()
-    assert req.status == RequestStatus.WAITING_FOR_REMOTE_KVS
-    # P stops short of the last prompt token, which decode recomputes.
-    assert req.num_computed_tokens == NUM_TOKENS - 1
-    scheduler.update_from_output(so, EMPTY_MODEL_RUNNER_OUTPUT)
-    so = scheduler.schedule()
-    mro = copy.deepcopy(EMPTY_MODEL_RUNNER_OUTPUT)
-    mro.kv_connector_output = KVConnectorOutput(finished_recving={req_id})
-    scheduler.update_from_output(so, mro)
-    so = scheduler.schedule()
-    mro = create_model_runner_output(reqs=[req])
-    scheduler.update_from_output(so, mro)
-    assert req.status == RequestStatus.FINISHED_LENGTH_CAPPED
-    so = scheduler.schedule()
-    scheduler.update_from_output(so, EMPTY_MODEL_RUNNER_OUTPUT)
-    so = scheduler.schedule()
-    mro = copy.deepcopy(EMPTY_MODEL_RUNNER_OUTPUT)
-    mro.kv_connector_output = KVConnectorOutput(finished_sending={req_id})
-    scheduler.update_from_output(so, mro)
-    assert_scheduler_empty(scheduler)
+    if expected_pull:
+        assert req.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+        assert req.num_computed_tokens == expected_pull
+    else:
+        assert req.status == RequestStatus.RUNNING
+        assert req.num_computed_tokens == so.num_scheduled_tokens[req.request_id]
 
 
 def test_p_node_pulls_partial_last_block_from_d():
