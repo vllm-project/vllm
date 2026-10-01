@@ -13,7 +13,6 @@ from torch._ops import OpOverload
 import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
-from vllm.utils.import_utils import PlaceholderModule
 from vllm.utils.torch_utils import direct_register_custom_op
 from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
     rocm_aiter_sparse_attn_indexer,
@@ -25,18 +24,25 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
-try:
-    import pandas as pd
-except ImportError:
-    pd = PlaceholderModule("pandas")
-
 # fp8_dtype is not cached.
 # on ROCm the fp8_dtype always calls is_fp8_fnuz
 # which is a host op, so we cache it once here.
 FP8_DTYPE = current_platform.fp8_dtype()
 _HIPB_MM_INITIALIZED_DEVICES: set[int] = set()
+_FP8_E4M3_DTYPES = {
+    dtype
+    for dtype in (
+        getattr(torch, "float8_e4m3fn", None),
+        getattr(torch, "float8_e4m3fnuz", None),
+    )
+    if dtype is not None
+}
 KB = 1024
 MB = 1024 * KB
+
+
+def _is_fp8_e4m3_tensor(t: torch.Tensor | None) -> bool:
+    return t is not None and t.dtype in _FP8_E4M3_DTYPES
 
 
 def _get_or_create_aiter_qr_rmsnorm_comm(
@@ -231,27 +237,42 @@ def is_aiter_found_and_supported_on_rdna4() -> bool:
     return False
 
 
-@functools.cache
-def _load_gemm_tuned_configs(
-    q_dtype_w: torch.dtype, csv_path: str
-) -> set[tuple[int, int, int]]:
-    try:
-        df = pd.read_csv(csv_path).drop_duplicates()
-        df = df[df["q_dtype_w"] == str(q_dtype_w)]
-        return set(zip(df["N"].astype(int), df["K"].astype(int), df["M"].astype(int)))
-    except Exception:
-        return set()
+def _triton_gemm_config_is_tuned(config_name: str, N: int, K: int) -> bool:
+    from aiter.ops.triton.utils.gemm_config_utils import get_gemm_config
+
+    # any M shape under 1024 should be tuned
+    M_TUNE_PROBE = 128
+
+    return get_gemm_config(config_name, M_TUNE_PROBE, N, K)[1]
 
 
-def _check_kernel_tuned(N: int, K: int, q_dtype_w: torch.dtype, csv_path: str) -> bool:
-    configs = _load_gemm_tuned_configs(q_dtype_w, csv_path)
+def _ck_gemm_shape_is_tuned(
+    N: int, K: int, q_dtype_w: torch.dtype, csv_attr: str
+) -> bool:
     l_m = (
         [1, 2, 4]
         + list(range(8, 513, 8))
         + [1024, 1536]
         + [2**i for i in range(11, 19)]
     )
-    return any((N, K, M) in configs for M in l_m)
+    try:
+        from aiter.ops.gemm_op_a8w8 import (
+            AITER_CONFIGS,
+            get_GEMM_config_with_quant_type,
+        )
+
+        csv_path = getattr(AITER_CONFIGS, csv_attr)
+        return any(
+            get_GEMM_config_with_quant_type(M, N, K, q_dtype_w, csv_path) is not None
+            for M in l_m
+        )
+    except (AttributeError, ImportError, OSError):
+        logger.warning_once(
+            "Could not read aiter CK GEMM configs from AITER_CONFIGS.%s; "
+            "treating all shapes as untuned.",
+            csv_attr,
+        )
+        return False
 
 
 def if_aiter_supported(func: Callable) -> Callable:
@@ -324,6 +345,7 @@ def _rocm_aiter_fused_moe_impl(
     shared_w1_scale: torch.Tensor | None = None,
     shared_w2_scale: torch.Tensor | None = None,
     shared_expert_id: int = -1,
+    q_dtype_a: torch.dtype | None = None,
 ) -> torch.Tensor:
     has_shared_expert = _validate_rocm_aiter_fused_moe_shared_expert_args(
         shared_w1,
@@ -357,6 +379,12 @@ def _rocm_aiter_fused_moe_impl(
             shared_w2_scale=shared_w2_scale,
             shared_expert_id=shared_expert_id,
         )
+    if q_dtype_a is not None:
+        # DeepSeek V4.1 a4w4 override (use_mxfp4_w4a4_dsv4 in
+        # rocm_aiter_moe.py). rocm_aiter_ops.fused_moe_supports_quant_dtype_a()
+        # is checked at config time, so this is only reached on an AITER
+        # build new enough to accept it.
+        extra_kwargs["quant_dtype_a"] = q_dtype_a
 
     return fused_moe(
         hidden_states,
@@ -414,6 +442,7 @@ def _rocm_aiter_fused_moe_fake(
     shared_w1_scale: torch.Tensor | None = None,
     shared_w2_scale: torch.Tensor | None = None,
     shared_expert_id: int = -1,
+    q_dtype_a: torch.dtype | None = None,
 ) -> torch.Tensor:
     if output_dtype is not None:
         return torch.empty_like(hidden_states, dtype=output_dtype)
@@ -1849,28 +1878,39 @@ def _mhc_delayed_pre_tail(
 _OPS_REGISTERED = False
 
 
+_AITER_SITUV2_ACT_ENV = {
+    "a8w4": "AITER_SITUV2_A8W4",
+    "a4w4": "AITER_SITUV2_A4W4",
+}
+
+
+def _resolve_situv2_activation() -> str:
+    """VLLM_ROCM_USE_AITER_MOE_SITUV2 -> a4w4 | a8w4 | a16w4.
+
+    auto (default) and the legacy 1 mean a4w4; legacy 0 means a16w4.
+    """
+    value = envs.VLLM_ROCM_USE_AITER_MOE_SITUV2.lower()
+    if value in ("auto", "1"):
+        return "a4w4"
+    if value == "0":
+        return "a16w4"
+    return value
+
+
 def _sync_aiter_situv2_moe_env() -> None:
-    """Mirror the SiTUv2 MoE toggle into AITER's a4w4 dispatch env.
+    """Set the AITER_SITUV2_* env matching VLLM_ROCM_USE_AITER_MOE_SITUV2.
 
-    AITER selects afp8 vs afp4 activation kernels via AITER_SITUV2_A8W4 /
-    AITER_SITUV2_A4W4 (see ROCm/aiter fused_moe.py, A8W4 checked first).
-    When VLLM_ROCM_USE_AITER_MOE_SITUV2 is enabled we route to a4w4
-    (afp4_wfp4_fp4 kernels) and clear any legacy AITER_SITUV2_A8W4 override.
-
-    Requires AITER with ROCm/aiter#4463 (first tagged in v0.1.20): a4w4
-    dispatch plus kimik3_a4w4_{un,}tuned_fmoe.csv. Older AITER still runs
-    afp4 FlyDSL but falls back to heuristic configs, which is not the
-    tuned a4w4 path this recipe is meant to use.
+    AITER reads AITER_SITUV2_A8W4 / AITER_SITUV2_A4W4 and defaults to a16w4,
+    so exactly one is set for a8w4/a4w4 and both are cleared for a16w4.
     """
     import os
 
-    import vllm.envs as envs
-
-    if envs.VLLM_ROCM_USE_AITER_MOE_SITUV2:
-        os.environ["AITER_SITUV2_A4W4"] = "1"
-        os.environ.pop("AITER_SITUV2_A8W4", None)
-    else:
-        os.environ.pop("AITER_SITUV2_A4W4", None)
+    selected = _AITER_SITUV2_ACT_ENV.get(_resolve_situv2_activation())
+    for name in _AITER_SITUV2_ACT_ENV.values():
+        if name == selected:
+            os.environ[name] = "1"
+        else:
+            os.environ.pop(name, None)
 
 
 class rocm_aiter_ops:
@@ -1895,8 +1935,10 @@ class rocm_aiter_ops:
         VLLM_ROCM_USE_AITER_FP8BMM: Controls FP8 batched matrix multiply.
         VLLM_ROCM_USE_AITER_FP4_ASM_GEMM: Controls FP4 assembly GEMM.
         VLLM_ROCM_USE_AITER_TRITON_ROPE: Controls Triton rotary embeddings.
+        VLLM_ROCM_USE_AITER_TRITON_SPARSE_MLA: Controls Triton sparse MLA (gfx950).
         VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS: Controls shared expert fusion.
-        VLLM_ROCM_USE_AITER_MOE_SITUV2: Controls SiTUv2 FlyDSL MoE (a4w4).
+        VLLM_ROCM_USE_AITER_MOE_SITUV2: SiTUv2 FlyDSL MoE activation
+            dtype (a16w4 | a8w4 | a4w4).
         VLLM_ROCM_USE_AITER_TRITON_GEMM: Controls Triton unquantized GEMM.
 
     Note:
@@ -1965,8 +2007,9 @@ class rocm_aiter_ops:
     _FP4_GEMM_DYNAMIC_QUANT_ASM = envs.VLLM_ROCM_USE_AITER_FP4_ASM_GEMM
     # TODO: Consolidate under VLLM_ROCM_USE_AITER_ROPE
     _TRITON_ROTARY_EMBED = envs.VLLM_ROCM_USE_AITER_TRITON_ROPE
+    _TRITON_SPARSE_MLA = envs.VLLM_ROCM_USE_AITER_TRITON_SPARSE_MLA
     _MOE_SHARED_EXPERTS_ENABLED = envs.VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS
-    _MOE_SITUV2 = envs.VLLM_ROCM_USE_AITER_MOE_SITUV2
+    _MOE_SITUV2 = _resolve_situv2_activation()
     # TODO: Consolidate under _LINEAR_ENABLED
     _TRITON_UNQUANT_GEMM = envs.VLLM_ROCM_USE_AITER_TRITON_GEMM
     # Lazily probed: whether aiter.topk_softmax supports the
@@ -1994,10 +2037,12 @@ class rocm_aiter_ops:
         cls._LINEAR_HIPBMM_ENABLED = envs.VLLM_ROCM_USE_AITER_LINEAR_HIPBMM
         cls._FP4_GEMM_DYNAMIC_QUANT_ASM = envs.VLLM_ROCM_USE_AITER_FP4_ASM_GEMM
         cls._TRITON_ROTARY_EMBED = envs.VLLM_ROCM_USE_AITER_TRITON_ROPE
+        cls._TRITON_SPARSE_MLA = envs.VLLM_ROCM_USE_AITER_TRITON_SPARSE_MLA
         cls._MOE_SHARED_EXPERTS_ENABLED = envs.VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS
-        cls._MOE_SITUV2 = envs.VLLM_ROCM_USE_AITER_MOE_SITUV2
+        cls._MOE_SITUV2 = _resolve_situv2_activation()
         _sync_aiter_situv2_moe_env()
         cls._TRITON_UNQUANT_GEMM = envs.VLLM_ROCM_USE_AITER_TRITON_GEMM
+        cls._MOE_DISPATCH_POLICY = envs.VLLM_ROCM_AITER_MOE_DISPATCH_POLICY
 
     @staticmethod
     def get_aiter_activation_type(activation_str: str) -> "ActivationType | None":
@@ -2110,9 +2155,25 @@ class rocm_aiter_ops:
     @classmethod
     @if_aiter_supported
     def is_fused_moe_situv2_enabled(cls) -> bool:
-        # _MOE_SITUV2 is a variant of aiter fused moe, so aiter
-        # fused moe must be enabled as well.
-        return cls.is_fused_moe_enabled() and cls._MOE_SITUV2
+        """True when a low-precision (a8w4/a4w4) SiTUv2 activation is selected."""
+        return cls.is_fused_moe_enabled() and cls._MOE_SITUV2 != "a16w4"
+
+    @classmethod
+    @if_aiter_supported
+    def get_fused_moe_situv2_activation(cls) -> str:
+        """SiTUv2 activation dtype name: a16w4, a8w4 or a4w4."""
+        return cls._MOE_SITUV2
+
+    @classmethod
+    @if_aiter_supported
+    def is_fused_moe_situv2_gate_up_interleaved(cls) -> bool:
+        """Whether the SiTUv2 kernels expect gate/up-interleaved w13.
+
+        The a8w4 FlyDSL stage-1 kernels (_gui_) are interleaved; a16w4 and
+        a4w4 are separated. Weight shuffle (oracle/mxfp4.py) and gate_mode
+        (experts/rocm_aiter_moe.py) must both use this.
+        """
+        return cls._MOE_SITUV2 == "a8w4"
 
     @classmethod
     @if_aiter_supported
@@ -2202,6 +2263,106 @@ class rocm_aiter_ops:
 
     @classmethod
     @if_aiter_supported
+    def fused_qknorm_idxrqknorm_enabled(
+        cls,
+        kv_cache_dtype: str,
+        k_scale: torch.Tensor | None = None,
+        v_scale: torch.Tensor | None = None,
+    ) -> bool:
+        """Whether MiniMax-M3 can use AITER's consolidated fused QK-norm.
+
+        Requires AITER to be installed and enabled. bf16 (``auto``) always
+        qualifies; fp8 e4m3 also needs K/V scales. Other cache dtypes fall
+        back to vLLM's fused kernel.
+        """
+        if not cls._AITER_ENABLED:
+            return False
+        if kv_cache_dtype == "auto":
+            return True
+        if kv_cache_dtype in ("fp8", "fp8_e4m3"):
+            return k_scale is not None and v_scale is not None
+        return False
+
+    @classmethod
+    def fused_qknorm_idxrqknorm(
+        cls,
+        qkv: torch.Tensor,
+        q_norm_weight: torch.Tensor,
+        k_norm_weight: torch.Tensor,
+        cos_sin_cache: torch.Tensor,
+        positions: torch.Tensor,
+        num_heads: int,
+        num_kv_heads: int,
+        rotary_dim: int,
+        eps: float,
+        slot_mapping: torch.Tensor,
+        kv_cache_k: torch.Tensor,
+        kv_cache_v: torch.Tensor,
+        q_out: torch.Tensor,
+        kv_cache_dtype: str,
+        k_scale: torch.Tensor | None = None,
+        v_scale: torch.Tensor | None = None,
+        index_q_norm_weight: torch.Tensor | None = None,
+        index_k_norm_weight: torch.Tensor | None = None,
+        num_index_heads: int = 0,
+        index_cache: torch.Tensor | None = None,
+        index_q_out: torch.Tensor | None = None,
+        index_slot_mapping: torch.Tensor | None = None,
+        skip_index_branch: bool = False,
+    ) -> None:
+        """Run consolidated MiniMax-M3 QK-norm fusion.
+
+        Callers must check ``fused_qknorm_idxrqknorm_enabled`` first. Runtime
+        failures from the AITER op are deliberately propagated.
+        """
+        if kv_cache_dtype == "auto":
+            aiter_kv_cache_dtype = "auto"
+            aiter_k_scale = None
+            aiter_v_scale = None
+        elif kv_cache_dtype in ("fp8", "fp8_e4m3"):
+            aiter_kv_cache_dtype = "fp8_e4m3_static"
+            aiter_k_scale = k_scale
+            aiter_v_scale = v_scale
+        else:
+            raise ValueError(
+                "AITER fused QK-norm requires kv_cache_dtype 'auto', 'fp8', "
+                f"or 'fp8_e4m3', got {kv_cache_dtype!r}"
+            )
+        aiter_index_cache_dtype = "fp8" if _is_fp8_e4m3_tensor(index_cache) else "auto"
+
+        from aiter import fused_qknorm_idxrqknorm
+
+        fused_qknorm_idxrqknorm(
+            qkv,
+            q_norm_weight,
+            k_norm_weight,
+            cos_sin_cache,
+            positions,
+            num_heads,
+            num_kv_heads,
+            rotary_dim,
+            eps,
+            index_q_norm_weight=index_q_norm_weight,
+            index_k_norm_weight=index_k_norm_weight,
+            num_index_heads=num_index_heads,
+            slot_mapping=slot_mapping,
+            kv_cache_k=kv_cache_k,
+            kv_cache_v=kv_cache_v,
+            index_cache=index_cache,
+            block_size=16,
+            q_out=q_out,
+            index_q_out=index_q_out,
+            index_slot_mapping=index_slot_mapping,
+            kv_cache_dtype=aiter_kv_cache_dtype,
+            index_cache_dtype=aiter_index_cache_dtype,
+            k_scale=aiter_k_scale,
+            v_scale=aiter_v_scale,
+            asm_layout=True,
+            skip_index_branch=skip_index_branch,
+        )
+
+    @classmethod
+    @if_aiter_supported
     def is_triton_unified_attn_enabled(cls) -> bool:
         return cls._AITER_ENABLED and cls._TRITON_UNIFIED_ATTN_ENABLED
 
@@ -2240,6 +2401,25 @@ class rocm_aiter_ops:
     @if_aiter_supported
     def is_triton_rotary_embed_enabled(cls) -> bool:
         return cls._AITER_ENABLED and cls._TRITON_ROTARY_EMBED
+
+    @classmethod
+    @if_aiter_supported
+    def is_triton_sparse_mla_enabled(cls) -> bool:
+        if not cls._TRITON_SPARSE_MLA:
+            return False
+        from vllm.platforms.rocm import on_gfx950
+
+        if not cls._AITER_ENABLED:
+            reason = "VLLM_ROCM_USE_AITER is off"
+        elif not on_gfx950():
+            reason = "the kernel is gfx950-only"
+        else:
+            return True
+        logger.warning_once(
+            "VLLM_ROCM_USE_AITER_TRITON_SPARSE_MLA is set, but %s; ignoring it.",
+            reason,
+        )
+        return False
 
     @classmethod
     @if_aiter_supported
@@ -2312,6 +2492,21 @@ class rocm_aiter_ops:
         from aiter.fused_moe import fused_moe
 
         return "gate_mode" in inspect.signature(fused_moe).parameters
+
+    @classmethod
+    @if_aiter_supported
+    @functools.cache
+    def fused_moe_supports_quant_dtype_a(cls) -> bool:
+        """Probe whether the installed aiter.fused_moe accepts `quant_dtype_a`.
+
+        Added in https://github.com/ROCm/aiter/pull/5439 (unreleased at
+        merge time). Older AITER can't override the activation quant dtype.
+        """
+        import inspect
+
+        from aiter.fused_moe import fused_moe
+
+        return "quant_dtype_a" in inspect.signature(fused_moe).parameters
 
     @staticmethod
     def _probe_dsv4_i384_fhmoe_capability(num_tokens: int) -> bool:
@@ -2833,6 +3028,7 @@ class rocm_aiter_ops:
         shared_w1_scale: torch.Tensor | None = None,
         shared_w2_scale: torch.Tensor | None = None,
         shared_expert_id: int = -1,
+        q_dtype_a: torch.dtype | None = None,
     ) -> torch.Tensor:
         return torch.ops.vllm.rocm_aiter_fused_moe(
             hidden_states,
@@ -2864,6 +3060,7 @@ class rocm_aiter_ops:
             shared_w1_scale,
             shared_w2_scale,
             shared_expert_id,
+            q_dtype_a,
         )
 
     @staticmethod
@@ -2986,6 +3183,57 @@ class rocm_aiter_ops:
         gate_up: bool,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         return torch.ops.vllm.rocm_aiter_fused_topk(x, router_logits, top_k, gate_up)
+
+    @staticmethod
+    def triton_sparse_mla_fwd(
+        q: torch.Tensor,
+        kv_buffer: torch.Tensor,
+        o: torch.Tensor,
+        sm_scale: float,
+        kv_indptr: torch.Tensor,
+        kv_indices: torch.Tensor,
+        kv_lora_rank: int = 512,
+        qk_rope_head_dim: int = 64,
+        q_scale: torch.Tensor | None = None,
+        kv_scale: torch.Tensor | None = None,
+        attn_sink: torch.Tensor | None = None,
+        extra_kv_buffer: torch.Tensor | None = None,
+        extra_kv_indptr: torch.Tensor | None = None,
+        extra_kv_indices: torch.Tensor | None = None,
+        has_invalid: bool = True,
+    ) -> None:
+        """Sparse MLA read straight from the KV cache, for prefill and decode.
+
+        kv_indices are ragged global slot ids. With has_invalid they may hold
+        -1, which the kernel masks; a caller whose stream never holds a
+        negative slot passes False, which lets the fp8 kernel stage K straight
+        into LDS. The cache format (bf16, per-tensor fp8, or DeepSeek V4's
+        paged fp8_ds_mla) is inferred from kv_buffer and kv_scale. An fp8 q
+        must come with its q_scale and runs both dots in fp8. The extra segment
+        is DeepSeek V4's second cache: SWA window in kv_buffer, top-k
+        compressed tokens here.
+        """
+        from aiter.ops.triton.attention.sparse_mla import sparse_mla_fwd
+
+        fp8_q = q.dtype == FP8_DTYPE
+        sparse_mla_fwd(
+            q,
+            kv_buffer,
+            kv_indptr,
+            kv_indices,
+            sm_scale,
+            kv_scale=kv_scale,
+            kv_lora_rank=kv_lora_rank,
+            qk_rope_head_dim=qk_rope_head_dim,
+            has_invalid=has_invalid,
+            dot_precision="fp8" if fp8_q else "bf16",
+            q_scale=q_scale if fp8_q else None,
+            out=o,
+            attn_sink=attn_sink,
+            extra_kv=extra_kv_buffer,
+            extra_indptr=extra_kv_indptr,
+            extra_indices=extra_kv_indices,
+        )
 
     @staticmethod
     def mla_decode_fwd(
@@ -3242,6 +3490,115 @@ class rocm_aiter_ops:
         )
 
     @staticmethod
+    def fused_qk_norm_mrope_and_cache(
+        qkv: torch.Tensor,
+        q_weight: torch.Tensor,
+        k_weight: torch.Tensor,
+        cos_sin_cache: torch.Tensor,
+        positions: torch.Tensor,
+        num_heads_q: int,
+        num_heads_k: int,
+        head_dim: int,
+        is_neox: bool,
+        mrope_section: list[int],
+        is_interleaved: bool,
+        rms_norm_eps: float,
+        q_out: torch.Tensor,
+        k_cache: torch.Tensor,
+        v_cache: torch.Tensor,
+        slot_mapping: torch.Tensor,
+        k_scale: torch.Tensor,
+        v_scale: torch.Tensor,
+        block_size: int,
+        x: int,
+        rotary_dim: int = 0,
+    ) -> None:
+        from aiter.ops.fused_qk_norm_mrope_cache_quant import (
+            fused_qk_norm_mrope_3d_cache_pts_quant_shuffle,
+        )
+
+        fused_qk_norm_mrope_3d_cache_pts_quant_shuffle(
+            qkv,
+            q_weight,
+            k_weight,
+            cos_sin_cache,
+            positions,
+            qkv.size(0),
+            num_heads_q,
+            num_heads_k,
+            num_heads_k,
+            head_dim,
+            is_neox,
+            mrope_section,
+            is_interleaved,
+            rms_norm_eps,
+            q_out,
+            k_cache,
+            v_cache,
+            slot_mapping,
+            k_scale,
+            v_scale,
+            None,
+            None,
+            False,
+            False,
+            block_size,
+            x,
+            rotary_dim,
+        )
+
+    @staticmethod
+    def do_qk_norm_mrope_kvcache_update(
+        qkv: torch.Tensor,
+        q_weight: torch.Tensor,
+        k_weight: torch.Tensor,
+        cos_sin_cache: torch.Tensor,
+        positions: torch.Tensor,
+        num_heads_q: int,
+        num_heads_k: int,
+        head_dim: int,
+        is_neox: bool,
+        mrope_section: list[int],
+        is_interleaved: bool,
+        rms_norm_eps: float,
+        q_out: torch.Tensor,
+        key_cache: torch.Tensor,
+        value_cache: torch.Tensor,
+        slot_mapping: torch.Tensor,
+        k_scale: torch.Tensor,
+        v_scale: torch.Tensor,
+        kv_cache_dtype: str,
+        rotary_dim: int = 0,
+    ) -> None:
+        if kv_cache_dtype.startswith("fp8"):
+            key_cache = key_cache.view(current_platform.fp8_dtype())
+            value_cache = value_cache.view(current_platform.fp8_dtype())
+
+        rocm_aiter_ops.fused_qk_norm_mrope_and_cache(
+            qkv=qkv,
+            q_weight=q_weight,
+            k_weight=k_weight,
+            cos_sin_cache=cos_sin_cache,
+            positions=positions,
+            num_heads_q=num_heads_q,
+            num_heads_k=num_heads_k,
+            head_dim=head_dim,
+            is_neox=is_neox,
+            mrope_section=mrope_section,
+            is_interleaved=is_interleaved,
+            rms_norm_eps=rms_norm_eps,
+            q_out=q_out,
+            k_cache=key_cache,
+            v_cache=value_cache,
+            slot_mapping=slot_mapping,
+            k_scale=k_scale,
+            v_scale=v_scale,
+            block_size=key_cache.shape[1],
+            x=16 // key_cache.element_size(),
+            rotary_dim=rotary_dim,
+        )
+
+    @staticmethod
     def triton_rope_and_cache(
         query: torch.Tensor,
         key: torch.Tensor,
@@ -3285,7 +3642,7 @@ class rocm_aiter_ops:
         X: torch.Tensor,
         W: torch.Tensor,
         w_scale: torch.Tensor,
-        Y: torch.Tensor,
+        Y: torch.Tensor | None = None,
         transpose_bm: bool | None = False,
         prequant: bool | None = False,
         y_scale: torch.Tensor | None = None,
@@ -3346,89 +3703,41 @@ class rocm_aiter_ops:
         )
 
     @staticmethod
+    @functools.cache
     def is_triton_gemm_w8a8_tuned(n: int, k: int) -> bool:
         if not current_platform.is_rocm():
             return False
-        from vllm.platforms.rocm import on_gfx950, on_rdna4
-
-        gfx950_tuned = {
-            (1024, 8192),
-            (2112, 7168),
-            (3072, 1536),
-            (32768, 8192),
-            (4096, 7168),
-            (4608, 7168),
-            (512, 7168),
-            (7168, 2048),
-            (7168, 256),
-            (8192, 1024),
-            (8192, 32768),
-        }
-        rdna4_tuned = gfx950_tuned | {
-            (2048, 2048),
-            (2624, 6144),
-            (3072, 6144),
-            (3584, 512),
-            (4096, 512),
-            (6144, 1536),
-            (6144, 2048),
-            (7168, 2304),
-            (7168, 16384),
-            (7168, 18432),
-            (8192, 8192),
-            (16384, 1536),
-            (24576, 1536),
-            (32768, 512),
-            (36864, 7168),
-        }
-        if on_rdna4():
-            return (n, k) in rdna4_tuned
-        if on_gfx950():
-            return (n, k) in gfx950_tuned
-        return False
+        try:
+            return _triton_gemm_config_is_tuned("GEMM-A8W8_BLOCKSCALE", n, k)
+        except (AssertionError, ImportError):
+            return False
 
     @staticmethod
-    def is_triton_gemm_afp4wfp4_presh_ws_tuned(n: int, k: int) -> bool:
-        return (n, k) in [
-            (8192, 4096),
-            (1280, 8192),
-            (16384, 53248),
-            (106496, 16384),
-            (57344, 8192),
-            (8192, 2048),
-            (2560, 8192),
-            (10240, 8192),
-            (16384, 16384),
-            (8192, 28672),
-            (28672, 8192),
-            (18432, 16384),
-            (8192, 1024),
-            (7168, 8192),
-            (5120, 8192),
-            (8192, 8192),
-            (8192, 7168),
-            (14336, 8192),
-            (8192, 14336),
-            (8192, 3584),
-        ]
+    @functools.cache
+    def is_triton_gemm_afp4wfp4_presh_ws_tuned(n: int, k_bytes: int) -> bool:
+        if not current_platform.is_rocm():
+            return False
+        # Input = weight.shape[1] (bytes); *4 for fp4 and aiter config 2*k
+        try:
+            return _triton_gemm_config_is_tuned(
+                "GEMM-AFP4WFP4_PRESHUFFLED", n, 4 * k_bytes
+            )
+        except (AssertionError, ImportError):
+            return False
 
     @staticmethod
+    @functools.cache
     def is_shuffled_per_token_w8a8_gemm_tuned(
         N: int, K: int, q_dtype_w: torch.dtype
     ) -> bool:
-        import aiter.ops.gemm_op_a8w8 as aiter_gemm_a8w8_ops
-
-        csv_path = (
-            aiter_gemm_a8w8_ops.AITER_CONFIGS.AITER_CONFIG_GEMM_A8W8_BPRESHUFFLE_FILE
+        return _ck_gemm_shape_is_tuned(
+            N, K, q_dtype_w, "AITER_CONFIG_GEMM_A8W8_BPRESHUFFLE_FILE"
         )
-        return _check_kernel_tuned(N, K, q_dtype_w, csv_path)
 
     @staticmethod
+    @functools.cache
     def is_per_token_w8a8_gemm_tuned(N: int, K: int, q_dtype_w: torch.dtype) -> bool:
-        import aiter.ops.gemm_op_a8w8 as aiter_gemm_a8w8_ops
-
-        csv_path = aiter_gemm_a8w8_ops.AITER_CONFIGS.AITER_CONFIG_GEMM_A8W8_FILE
-        return _check_kernel_tuned(N, K, q_dtype_w, csv_path)
+        return _ck_gemm_shape_is_tuned(N, K, q_dtype_w, "AITER_CONFIG_GEMM_A8W8_FILE")
 
     @staticmethod
     def shuffle_weight(
@@ -3950,6 +4259,57 @@ class rocm_aiter_ops:
             layer_input.view(*outer_shape, hidden_size),
             next_pre_mix.view(*outer_shape, hc_mult),
         )
+
+    @staticmethod
+    def mhc_fused_post_pre_delayed_rms_norm(
+        residual: torch.Tensor,
+        fn: torch.Tensor,
+        hc_scale: torch.Tensor,
+        hc_base: torch.Tensor,
+        rms_eps: float,
+        hc_pre_eps: float,
+        hc_sinkhorn_eps: float,
+        hc_post_mult_value: float,
+        sinkhorn_repeat: int,
+        pre_mix: torch.Tensor | None,
+        sublayer_out: torch.Tensor | None,
+        post_layer_mix: torch.Tensor | None,
+        comb_res_mix: torch.Tensor | None,
+        norm_weight: torch.Tensor,
+        norm_eps: float,
+        residual_out: torch.Tensor | None,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """:meth:`mhc_pre_delayed` with the RMSNorm of the collapse folded in.
+
+        Runs aiter's fused Triton kernel ``mhc_fused_post_pre_delayed_rmsnorm``;
+        the returned ``layer_input`` is already normalised with ``norm_weight`` /
+        ``norm_eps``.
+        """
+        from aiter.ops.triton.fusions.mhc_fused_post_pre_delayed_rmsnorm import (
+            mhc_fused_post_pre_delayed_rmsnorm,
+        )
+
+        _, post_mix, comb_mix, layer_input, next_pre_mix = (
+            mhc_fused_post_pre_delayed_rmsnorm(
+                residual,
+                fn,
+                hc_scale,
+                hc_base,
+                rms_eps,
+                hc_pre_eps,
+                hc_sinkhorn_eps,
+                hc_post_mult_value,
+                sinkhorn_repeat,
+                pre_mix,
+                sublayer_out,
+                post_layer_mix,
+                comb_res_mix,
+                norm_weight,
+                norm_eps,
+                residual_out=residual_out,
+            )
+        )
+        return post_mix, comb_mix, layer_input, next_pre_mix
 
     @staticmethod
     def mhc_fused_post_pre_delayed_prefers_unfused(num_tokens: int) -> bool:

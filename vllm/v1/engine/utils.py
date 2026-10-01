@@ -28,9 +28,9 @@ from vllm.utils.network_utils import (
     get_tcp_uri,
     zmq_socket_ctx,
 )
-from vllm.utils.system_utils import get_mp_context
+from vllm.utils.system_utils import get_mp_context, set_env_var
 from vllm.v1.engine.coordinator import DPCoordinator
-from vllm.v1.executor import Executor
+from vllm.v1.executor import Executor, UniProcExecutor
 from vllm.v1.executor.ray_utils import WORKER_SPECIFIC_ENV_VARS
 from vllm.v1.utils import _SubprocessWrapper, get_engine_client_zmq_addr, shutdown
 
@@ -124,6 +124,31 @@ def _get_bundle_node_ip(bundle: dict[str, float]) -> str:
     raise ValueError(f"Missing node affinity in placement bundle: {bundle}")
 
 
+def _dp_nodes_master_first(
+    available_resources: dict[str, dict], dp_master_ip: str
+) -> list[tuple[str, dict]]:
+    """Live Ray nodes as ``(node_id, resources)`` with the DP master first.
+
+    The master is found through the ``node:<ip>`` resource Ray sets on every
+    node, so this works with the resource maps from ``ray._private.state``.
+    Do not replace it with ``ray.util.state.list_nodes()``: that API goes
+    through the dashboard HTTP server and only exists with ``ray[default]``
+    (see #23822).
+    """
+    master_key = f"node:{dp_master_ip}"
+    nodes = sorted(
+        available_resources.items(), key=lambda item: master_key not in item[1]
+    )
+    assert len(nodes) > 0, "No nodes with resources found in Ray cluster."
+    assert master_key in nodes[0][1], (
+        f"The DP master node (ip: {dp_master_ip}) is missing or dead"
+    )
+    assert len(nodes) == 1 or master_key not in nodes[1][1], (
+        "There can only be one head node"
+    )
+    return nodes
+
+
 def _node_ip_from_resources(node_resources: dict) -> str | None:
     """Return the node IP encoded in a Ray per-node resource dict, or None.
 
@@ -139,6 +164,42 @@ def _node_ip_from_resources(node_resources: dict) -> str | None:
         ):
             return key.split(":", 1)[1]
     return None
+
+
+@contextlib.contextmanager
+def _configure_uniproc_startup_threads(
+    executor_class: type[Executor], local_engine_count: int
+) -> Iterator[None]:
+    if (
+        not issubclass(executor_class, UniProcExecutor)
+        or current_platform.is_cpu()
+        or "OMP_NUM_THREADS" in os.environ
+    ):
+        yield
+        return
+
+    import torch
+
+    from vllm.utils.torch_utils import (
+        OMP_NUM_THREADS_SET_BY_VLLM,
+        set_default_torch_num_threads,
+        startup_omp_num_threads,
+    )
+
+    original_threads = torch.get_num_threads()
+    num_threads = min(original_threads, startup_omp_num_threads(local_engine_count))
+    torch_threads = (
+        set_default_torch_num_threads(num_threads)
+        if num_threads < original_threads
+        else contextlib.nullcontext()
+    )
+    # Fork inherits Torch's setting; spawn reads OMP_NUM_THREADS on import.
+    with (
+        set_env_var("OMP_NUM_THREADS", str(num_threads)),
+        set_env_var(OMP_NUM_THREADS_SET_BY_VLLM, "1"),
+        torch_threads,
+    ):
+        yield
 
 
 class CoreEngineProcManager:
@@ -204,34 +265,36 @@ class CoreEngineProcManager:
         # pickles process args at start() time, sequentially per rank.
         user_assigned_gpu_ids = vllm_config.parallel_config.assigned_physical_gpu_ids
         try:
-            for proc, local_dp_rank in zip(self.processes, local_dp_ranks):
-                # Populate the logical-to-physical GPU mapping in DP for
-                # platforms that cannot rely on
-                # torch.accelerator.set_device_index(), and for Ray.
-                needs_device_env_isolation = not (
-                    current_platform.is_cuda_alike() or current_platform.is_xpu()
-                )
-                if is_dp and (
-                    needs_device_env_isolation or vllm_config.parallel_config.use_ray
-                ):
-                    set_assigned_physical_gpu_ids_for_dp_rank(
-                        vllm_config, local_dp_rank, user_assigned_gpu_ids
+            with _configure_uniproc_startup_threads(executor_class, local_engine_count):
+                for proc, local_dp_rank in zip(self.processes, local_dp_ranks):
+                    # Populate the logical-to-physical GPU mapping in DP for
+                    # platforms that cannot rely on
+                    # torch.accelerator.set_device_index(), and for Ray.
+                    needs_device_env_isolation = not (
+                        current_platform.is_cuda_alike() or current_platform.is_xpu()
                     )
+                    if is_dp and (
+                        needs_device_env_isolation
+                        or vllm_config.parallel_config.use_ray
+                    ):
+                        set_assigned_physical_gpu_ids_for_dp_rank(
+                            vllm_config, local_dp_rank, user_assigned_gpu_ids
+                        )
 
-                with numa_utils.configure_subprocess(
-                    # EngineCore itself does not have a TP/PP-local rank.
-                    # When DP is enabled, set_assigned_physical_gpu_ids_for_dp_rank()
-                    # populates the logical-to-physical mapping for this DP
-                    # shard, so local_rank=0 means "the first local GPU in
-                    # this shard". The actual TP/PP worker processes spawned
-                    # by the executor are bound separately with their own
-                    # local_rank values.
-                    vllm_config,
-                    local_rank=0,
-                    dp_local_rank=local_dp_rank,
-                    process_kind="EngineCore",
-                ):
-                    proc.start()
+                    with numa_utils.configure_subprocess(
+                        # EngineCore itself does not have a TP/PP-local rank.
+                        # set_assigned_physical_gpu_ids_for_dp_rank() populates
+                        # the logical-to-physical mapping for this DP
+                        # shard, so local_rank=0 means "the first local GPU in
+                        # this shard". The actual TP/PP worker processes spawned
+                        # by the executor are bound separately with their own
+                        # local_rank values.
+                        vllm_config,
+                        local_rank=0,
+                        dp_local_rank=local_dp_rank,
+                        process_kind="EngineCore",
+                    ):
+                        proc.start()
         finally:
             # Kill other procs if not all are running.
             if self.finished_procs():
@@ -561,14 +624,12 @@ class CoreEngineActorManager:
         placement_groups: list[PlacementGroup] = []
         local_dp_ranks: list[int] = []
 
-        dp_master_ip_key = f"node:{dp_master_ip}"
-        nodes = sorted(
-            available_resources.values(), key=lambda x: dp_master_ip_key not in x
-        )
-        assert len(nodes) > 0, "No nodes with resources found in Ray cluster."
-        assert dp_master_ip_key in nodes[0], (
-            f"The DP master node (ip: {dp_master_ip}) is missing or dead"
-        )
+        nodes = [
+            node_resources
+            for _, node_resources in _dp_nodes_master_first(
+                available_resources, dp_master_ip
+            )
+        ]
 
         # optionally restrict DP placement to a caller-provided node set.
         requested_node_ips = {
@@ -767,7 +828,6 @@ class CoreEngineActorManager:
             available_resources_per_node,
             total_resources_per_node,
         )
-        from ray.util.state import list_nodes
 
         old_dp_size = old_vllm_config.parallel_config.data_parallel_size
         num_pg_to_create = new_data_parallel_size - old_dp_size
@@ -778,30 +838,27 @@ class CoreEngineActorManager:
         dp_master_ip = old_vllm_config.parallel_config.data_parallel_master_ip
         world_size = old_vllm_config.parallel_config.world_size
 
-        nodes = list_nodes()
-        nodes = sorted(nodes, key=lambda node: node.node_ip != dp_master_ip)
-        assert nodes[0].node_ip == dp_master_ip, "The first node must be the head node"
-        assert len(nodes) == 1 or nodes[1].node_ip != dp_master_ip, (
-            "There can only be one head node"
-        )
-
+        # Both maps are keyed by node id and only contain live nodes.
         available_resources = available_resources_per_node()
         total_resources = total_resources_per_node()
+        nodes = _dp_nodes_master_first(available_resources, dp_master_ip)
 
         placement_groups = []
         local_dp_ranks = []
         num_pg_created = 0
 
         device_str = current_platform.ray_device_key
-        for node in nodes:
+        for node_id, node_resources in nodes:
             if num_pg_created >= num_pg_to_create:
                 break
 
-            node_ip = node.node_ip
-            node_id = node.node_id
-            if device_str not in available_resources[node_id]:
+            node_ip = _node_ip_from_resources(node_resources)
+            assert node_ip is not None, (
+                f"No node IP key found in node resources: {node_resources}"
+            )
+            if device_str not in node_resources:
                 continue
-            available_gpus = int(available_resources[node_id][device_str])
+            available_gpus = int(node_resources[device_str])
 
             # Get total GPUs on this node from the node's resources
             # Ray stores node resources with node ID as key
@@ -1128,6 +1185,7 @@ def launch_core_engines(
         coordinator = DPCoordinator(
             parallel_config,
             enable_wave_coordination=vllm_config.model_config.is_moe,
+            logging_config=vllm_config.logging_config,
         )
 
         addresses.coordinator_input, addresses.coordinator_output = (

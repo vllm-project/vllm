@@ -605,13 +605,21 @@ def make_nvfp4_moe_kernel(
         routing_tables=routing_tables,
         allow_new_interface=True,
         use_monolithic=issubclass(experts_cls, mk.FusedMoEExpertsMonolithic),
+        input_dtype=moe_config.in_dtype if per_token_activation else None,
     )
     assert prepare_finalize is not None
 
     logger.info_once("Using %s", prepare_finalize.__class__.__name__)
 
     extra_kwargs = {}
-    if backend == NvFp4MoeBackend.FLASHINFER_TRTLLM and per_token_activation:
+    if (
+        backend
+        in (
+            NvFp4MoeBackend.FLASHINFER_TRTLLM,
+            NvFp4MoeBackend.FLASHINFER_CUTEDSL,
+        )
+        and per_token_activation
+    ):
         extra_kwargs["per_token_activation"] = True
 
     # Create Experts.

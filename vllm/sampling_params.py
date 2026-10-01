@@ -289,6 +289,12 @@ class SamplingParams(
     prompt_logprobs: int | None = None
     """Number of log probabilities to return per prompt token.
     When set to -1, return all `vocab_size` log probabilities."""
+    prompt_logprob_token_ids: list[int] | None = None
+    """Token IDs to score at each scored causal prompt row, where row i scores
+    them as predictions of prompt token i + 1. The last prompt row is excluded,
+    so the result has `max(prompt_len - 1 - prompt_logprob_start, 0)` rows."""
+    prompt_logprob_start: int | None = None
+    """First causal prompt row to score; defaults to the first row."""
     logprob_token_ids: list[int] | None = None
     """Specific token IDs to return logprobs for. More efficient than
     logprobs=-1 when you only need logprobs for a small set of tokens.
@@ -398,6 +404,8 @@ class SamplingParams(
         min_tokens: int = 0,
         logprobs: int | None = None,
         prompt_logprobs: int | None = None,
+        prompt_logprob_token_ids: list[int] | None = None,
+        prompt_logprob_start: int | None = None,
         detokenize: bool = True,
         skip_special_tokens: bool = True,
         spaces_between_special_tokens: bool = True,
@@ -464,6 +472,8 @@ class SamplingParams(
             min_tokens=min_tokens,
             logprobs=logprobs,
             prompt_logprobs=prompt_logprobs,
+            prompt_logprob_token_ids=prompt_logprob_token_ids,
+            prompt_logprob_start=prompt_logprob_start,
             logprob_token_ids=logprob_token_ids,
             detokenize=detokenize,
             skip_special_tokens=skip_special_tokens,
@@ -526,6 +536,16 @@ class SamplingParams(
 
         self._verify_args()
 
+        if (
+            envs.VLLM_BATCH_INVARIANT
+            and self.temperature >= _SAMPLING_EPS
+            and self.seed is None
+        ):
+            logger.warning_once(
+                "Random sampling without an explicit seed may not be batch "
+                "invariant. Set seed in SamplingParams or use temperature=0."
+            )
+
         if self.temperature < _SAMPLING_EPS:
             # Zero temperature means greedy sampling.
             self.top_p = 1.0
@@ -540,7 +560,10 @@ class SamplingParams(
             # If prefix caching is enabled,
             # the output of prompt logprobs may less than n_prompt_tokens,
             # we need to skip reading cache at this request.
-            self.skip_reading_prefix_cache = self.prompt_logprobs is not None
+            self.skip_reading_prefix_cache = (
+                self.prompt_logprobs is not None
+                or self.prompt_logprob_token_ids is not None
+            )
 
     def _verify_args(self) -> None:
         _verify_num_sequences(self.n, "n")
@@ -892,6 +915,56 @@ class SamplingParams(
                     value=num_prompt_logprobs,
                 )
 
+        # Validate prompt_logprob_token_ids.
+        if self.prompt_logprob_token_ids is not None:
+            n = len(self.prompt_logprob_token_ids)
+            if n == 0:
+                raise VLLMValidationError(
+                    "prompt_logprob_token_ids must not be empty.",
+                    parameter="prompt_logprob_token_ids",
+                    value=n,
+                )
+            if n > max_logprobs:
+                raise VLLMValidationError(
+                    f"Requested prompt_logprob_token_ids of length {n}, "
+                    f"which is greater than max allowed: {max_logprobs}. "
+                    f"Set max_logprobs (--max-logprobs) to at least {n}.",
+                    parameter="prompt_logprob_token_ids",
+                    value=n,
+                )
+            vocab_size = model_config.get_vocab_size()
+            invalid_token_ids = [
+                token_id
+                for token_id in self.prompt_logprob_token_ids
+                if token_id < 0 or token_id >= vocab_size
+            ]
+            if invalid_token_ids:
+                raise VLLMValidationError(
+                    f"token_id(s) {invalid_token_ids} in "
+                    f"prompt_logprob_token_ids contain out-of-vocab token ids. "
+                    f"Vocabulary size: {vocab_size}",
+                    parameter="prompt_logprob_token_ids",
+                    value=invalid_token_ids,
+                )
+            if len(set(self.prompt_logprob_token_ids)) != n:
+                raise VLLMValidationError(
+                    "prompt_logprob_token_ids must not contain duplicates.",
+                    parameter="prompt_logprob_token_ids",
+                    value=self.prompt_logprob_token_ids,
+                )
+            if self.prompt_logprob_start is not None and self.prompt_logprob_start < 0:
+                raise VLLMValidationError(
+                    "prompt_logprob_start must be non-negative.",
+                    parameter="prompt_logprob_start",
+                    value=self.prompt_logprob_start,
+                )
+        elif self.prompt_logprob_start is not None:
+            raise VLLMValidationError(
+                "prompt_logprob_start requires prompt_logprob_token_ids.",
+                parameter="prompt_logprob_start",
+                value=self.prompt_logprob_start,
+            )
+
     def _validate_stop_token_ids(self, model_config: ModelConfig) -> None:
         """Validate stop_token_ids are within vocabulary range."""
         if not self.stop_token_ids:
@@ -958,6 +1031,10 @@ class SamplingParams(
         if self.prompt_logprobs is not None:
             raise ValueError(
                 "trace_decode_token_ids is not supported with prompt_logprobs."
+            )
+        if self.prompt_logprob_token_ids is not None:
+            raise ValueError(
+                "trace_decode_token_ids is not supported with prompt_logprob_token_ids."
             )
         if speculative_config is not None:
             raise ValueError(
@@ -1144,6 +1221,18 @@ class SamplingParams(
             raise VLLMValidationError(
                 "structured_outputs.regex must not contain a NUL character ('\\x00')"
             )
+        # Note(arpera):
+        # We do NOT check here structured output regex on emptiness because
+        # empty regex is indeed compiles to a valid grammar as well as
+        # whitespace-only regexps, for instance, regex="\n" or regex=" "
+        # are valid patterns and we MUST process them.
+        if (
+            isinstance(self.structured_outputs.structural_tag, str)
+            and self.structured_outputs.structural_tag.strip() == ""
+        ):
+            raise VLLMValidationError(
+                "structured_outputs.structural_tag cannot be an empty string"
+            )
 
         from vllm.v1.structured_output.backend_guidance import (
             has_guidance_unsupported_json_features,
@@ -1156,6 +1245,7 @@ class SamplingParams(
             validate_structured_output_request_outlines,
         )
         from vllm.v1.structured_output.backend_xgrammar import validate_xgrammar_grammar
+        from vllm.v1.structured_output.utils import grammar_is_likely_lark
 
         if backend.startswith("xgrammar"):
             # xgrammar with no fallback
@@ -1188,6 +1278,22 @@ class SamplingParams(
                     "backends or tokenizer_mode='hf' instead."
                 )
             validate_structured_output_request_lm_format_enforcer(self)
+        elif (
+            backend == "auto"
+            and is_mistral_tokenizer(tokenizer)
+            and tokenizer.is_tekken
+            and self.structured_outputs.grammar
+            and grammar_is_likely_lark(self.structured_outputs.grammar)
+        ):
+            # Lark grammars for Tekken Mistral tokenizers, including the ones
+            # the Mistral tool parser generates, go to guidance. llguidance
+            # takes the tokenizer from mistral-common and never lets a regex
+            # match a special token. The xgrammar backend declares no special
+            # tokens for Mistral tokenizers, so a regex like `.` can match
+            # `[TOOL_CALLS]` or `[INST]` as plain text.
+            validate_guidance_grammar(self, tokenizer=_get_llg_tokenizer(tokenizer))
+            self.structured_outputs._backend = "guidance"
+            self.structured_outputs._backend_was_auto = True
         else:
             # NOTE: backend must be "auto" here, because we have
             # checked supported_backends above.

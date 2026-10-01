@@ -3,8 +3,9 @@
 
 import math
 import time
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, Mock
 
+import numpy as np
 import pytest
 
 from tests.v1.engine.utils import (
@@ -17,7 +18,7 @@ from tests.v1.engine.utils import (
 from vllm import PoolingParams
 from vllm.logprobs import FlatLogprobs, Logprob, PromptLogprobs, SampleLogprobs
 from vllm.lora.request import LoRARequest
-from vllm.outputs import CompletionOutput, RequestOutput
+from vllm.outputs import CompletionOutput, RequestOutput, SamplingMask
 from vllm.sampling_params import RequestOutputKind, SamplingParams
 from vllm.tokenizers import TokenizerLike
 from vllm.v1.engine import (
@@ -34,6 +35,7 @@ from vllm.v1.engine.output_processor import (
     RequestState,
 )
 from vllm.v1.metrics.stats import IterationStats, PrefillStats, SchedulerStats
+from vllm.v1.outputs import SamplingMaskLists
 
 
 @pytest.mark.parametrize("flat_logprobs", [False, True])
@@ -59,6 +61,31 @@ def test_delta_output_without_new_tokens_returns_empty_logprobs(
 
     assert isinstance(output.logprobs, FlatLogprobs if flat_logprobs else list)
     assert len(output.logprobs) == 0
+
+
+def test_completion_output_preserves_each_sampling_mask_position() -> None:
+    state = RequestState.__new__(RequestState)
+    state.detokenizer = MagicMock()
+    state.detokenizer.get_next_output_text.return_value = ""
+    state.logprobs_processor = MagicMock()
+    state.logprobs_processor.logprobs = None
+    state.logprobs_processor.cumulative_logprob = None
+    state.output_kind = RequestOutputKind.DELTA
+    state.request_index = 0
+    state.sampling_mask_chunks = [
+        SamplingMaskLists(
+            token_ids=np.array([10, 11, 20]),
+            offsets=np.array([0, 2, 3]),
+        ),
+        SamplingMaskLists(token_ids=np.array([30, 31, 32])),
+    ]
+    state.routed_experts_chunks = []
+    state.spec_decode_metrics = None
+
+    output = state._new_completion_output([1, 2, 3], FinishReason.LENGTH, None)
+
+    assert output.sampling_mask is not None
+    assert output.sampling_mask.token_ids == [[10, 11], [20], [30, 31, 32]]
 
 
 def _ref_convert_id_to_token(
@@ -1307,6 +1334,7 @@ def test_lora_request_tracking(log_stats: bool, dummy_test_vectors):
 async def test_request_output_collector():
     NUM_REQS = 3
     TEXT = "a"
+    routed_experts = np.arange(12, dtype=np.uint8).reshape(2, 3, 2)
 
     def make_outputs() -> list[RequestOutput]:
         return [
@@ -1322,6 +1350,9 @@ async def test_request_output_collector():
                         token_ids=[idx],
                         cumulative_logprob=(idx + 1 * 1.0),
                         logprobs=[{"a": idx, "b": idx}],
+                        routed_experts=(
+                            routed_experts if idx == NUM_REQS - 1 else None
+                        ),
                         finish_reason="length" if (idx == NUM_REQS - 1) else None,
                     )
                 ],
@@ -1374,6 +1405,7 @@ async def test_request_output_collector():
 
     assert output.finished
     assert output.outputs[0].finish_reason == "length"
+    np.testing.assert_array_equal(output.outputs[0].routed_experts, routed_experts)
     # Text, token_ids, and logprobs should get merged.
     assert output.outputs[0].text == TEXT * num_to_put
     for tok_0, tok_1 in zip(output.outputs[0].token_ids, list(range(num_to_put))):
@@ -1383,6 +1415,46 @@ async def test_request_output_collector():
     # Cumulative logprobs should be the last one.
     cumulative_logprob_expected = 1.0 * num_to_put
     assert output.outputs[0].cumulative_logprob == cumulative_logprob_expected
+
+
+def test_routed_experts_are_accumulated_until_finish():
+    state = RequestState(
+        request_id="request-int",
+        external_req_id="request",
+        parent_req=None,
+        request_index=0,
+        lora_request=None,
+        output_kind=RequestOutputKind.DELTA,
+        prompt="prompt",
+        prompt_token_ids=[1, 2, 3, 4],
+        prompt_embeds=None,
+        logprobs_processor=Mock(
+            logprobs=None,
+            cumulative_logprob=0.0,
+            pop_prompt_logprobs=Mock(return_value=None),
+        ),
+        detokenizer=Mock(get_next_output_text=Mock(return_value="")),
+        max_tokens_param=2,
+        arrival_time=0.0,
+        queue=None,
+        log_stats=False,
+        stream_interval=1,
+    )
+    prompt_chunk = np.arange(24, dtype=np.uint8).reshape(4, 3, 2)
+    decode_chunk = np.arange(12, dtype=np.uint8).reshape(2, 3, 2) + 24
+    state.routed_experts_chunks.append(prompt_chunk)
+
+    partial = state.make_request_output([5], None, None, None)
+    assert partial is not None
+    assert partial.outputs[0].routed_experts is None
+
+    state.routed_experts_chunks.append(decode_chunk)
+    finished = state.make_request_output([6], None, FinishReason.LENGTH, None)
+    assert finished is not None
+    np.testing.assert_array_equal(
+        finished.outputs[0].routed_experts,
+        np.concatenate((prompt_chunk, decode_chunk)),
+    )
 
 
 @pytest.mark.asyncio
@@ -1503,3 +1575,58 @@ def test_abort_requests(runner: str, abort_by: str, dummy_test_vectors):
             output_processor.abort_requests([request.request_id], internal=True)
         else:
             output_processor.abort_requests([request.external_req_id], internal=False)
+
+
+@pytest.mark.parametrize("output_kind", list(RequestOutputKind))
+def test_sampling_masks_follow_output_kind(output_kind):
+    state = RequestState.__new__(RequestState)
+    state.detokenizer = MagicMock()
+    state.detokenizer.get_next_output_text.return_value = ""
+    state.logprobs_processor = MagicMock()
+    state.logprobs_processor.logprobs = None
+    state.logprobs_processor.cumulative_logprob = None
+    state.output_kind = output_kind
+    state.request_index = 0
+    state.sampling_mask_chunks = []
+    state.routed_experts_chunks = []
+    state.spec_decode_metrics = None
+
+    supports = [[10, 11], [20], [30, 31]]
+    masks = []
+    for position, support in enumerate(supports):
+        state.sampling_mask_chunks.append(SamplingMaskLists(np.asarray(support)))
+        finish = FinishReason.LENGTH if position == len(supports) - 1 else None
+        mask = state._new_completion_output([support[0]], finish, None).sampling_mask
+        masks.append(mask.token_ids if mask is not None else None)
+
+    if output_kind == RequestOutputKind.DELTA:
+        assert masks == [[support] for support in supports]
+    else:
+        assert masks == [None, None, supports]
+
+
+def test_request_output_add_merges_delta_sampling_masks():
+    def delta(token_ids, sampling_mask):
+        completion = CompletionOutput(
+            index=0,
+            text="",
+            token_ids=token_ids,
+            cumulative_logprob=None,
+            logprobs=None,
+            sampling_mask=sampling_mask,
+        )
+        return RequestOutput(
+            request_id="request",
+            prompt=None,
+            prompt_token_ids=[1],
+            prompt_logprobs=None,
+            outputs=[completion],
+            finished=False,
+        )
+
+    merged = delta([], None)
+    merged.add(delta([10], SamplingMask([[10, 11]])), aggregate=True)
+    merged.add(delta([20], SamplingMask([[20]])), aggregate=True)
+
+    assert merged.outputs[0].token_ids == [10, 20]
+    assert merged.outputs[0].sampling_mask.token_ids == [[10, 11], [20]]
