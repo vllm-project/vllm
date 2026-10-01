@@ -48,6 +48,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker import (
     NixlBaseConnectorWorker,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
+    PUSH_FAIL_NOTIF_PREFIX,
     PUSH_REG_NOTIF_PREFIX,
     NixlConnectorMetadata,
     RemoteMeta,
@@ -104,7 +105,9 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
         # ``_sending_transfers_lock``.
         self._sending_transfers = defaultdict[ReqId, list[TransferHandle]](list)
         self._send_failures: set[ReqId] = set()
-        self._sending_transfers_lock = threading.Lock()
+        self._sending_transfers_lock = threading.RLock()
+        # D-side: requests a producer reported it will not push (PUSH_FAIL).
+        self._push_failed_reqs: set[ReqId] = set()
 
         # Writer-thread owned matching state.
         # P-side: finished request blocks received from scheduler metadata
@@ -337,6 +340,12 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
             notif_agents_only=True,
         )
         if fut is None:
+            meta = self._recving_metadata.get(req_id)
+            if meta is not None and self._is_lease_expired(meta):
+                self._log_failure("remote_lease_expired", req_id, meta=meta)
+                self.xfer_stats.record_kv_expired_req()
+                self._failed_recv_reqs.put(req_id)
+                return
             self._do_send_reg_notif(req_id, reg_data)
             return
 
@@ -503,7 +512,18 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
         )
 
         t0 = time.perf_counter()
-        self._xfer_blocks_for_req(req_id=request_id, meta=push_meta)
+        # The lease is reaped under this lock, so the blocks stay leased here.
+        with self._sending_transfers_lock:
+            if request_id not in self._reqs_to_process:
+                self._log_failure("push_lease_expired", request_id)
+                notif = (
+                    PUSH_FAIL_NOTIF_PREFIX
+                    + f"{decode_request_id}:{self.world_size}".encode()
+                )
+                for agent_name in self._remote_agents[decode_engine_id].values():
+                    self.nixl_wrapper.send_notif(agent_name, notif_msg=notif)
+                return
+            self._xfer_blocks_for_req(req_id=request_id, meta=push_meta)
         elapsed_ms = (time.perf_counter() - t0) * 1000.0
         if elapsed_ms > 200.0:
             logger.warning(
@@ -744,6 +764,10 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
 
     # --- Notification handling on engine main thread ------------------ #
 
+    def _reap_expired_send_leases(self, done_sending: set[str]) -> None:
+        with self._sending_transfers_lock:
+            super()._reap_expired_send_leases(done_sending)
+
     def _get_new_notifs(self) -> set[str]:
         """Drain HB / completion notifs forwarded by the writer thread.
 
@@ -763,6 +787,10 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
             if msg.startswith("HB:"):
                 self._handle_heartbeat(msg[3:])
                 continue
+            # Like a WRITE completion, a PUSH_FAIL ends one producer's push.
+            push_failed = msg.startswith(PUSH_FAIL_NOTIF_PREFIX.decode())
+            if push_failed:
+                msg = msg[len(PUSH_FAIL_NOTIF_PREFIX) :]
 
             req_id, tp_size = msg.rsplit(":", 1)
 
@@ -775,10 +803,18 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
                     producers_per_consumer = max(1, int(tp_size) // self.world_size)
                     expected_notifs = meta.pp_size * producers_per_consumer
                     self.consumer_notification_counts_by_req[req_id] += 1
+                    if push_failed:
+                        self._push_failed_reqs.add(req_id)
                     notifs = self.consumer_notification_counts_by_req[req_id]
                     if notifs < expected_notifs:
                         continue
                     del self.consumer_notification_counts_by_req[req_id]
+                    if req_id in self._push_failed_reqs:
+                        # Every producer is done writing: the blocks may be reused.
+                        self._push_failed_reqs.remove(req_id)
+                        self.xfer_stats.record_kv_expired_req()
+                        self._failed_recv_reqs.put(req_id)
+                        continue
                     # P drove the transfer (we own no NIXL handle), so
                     # materialise an empty ``_recving_transfers`` entry for
                     # ``_pop_done_transfers`` to report done.

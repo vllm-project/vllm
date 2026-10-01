@@ -4258,3 +4258,142 @@ def test_explicit_kv_role_no_deprecation_warning(default_vllm_config, dist_init)
             mock_logger.warning_once.assert_not_called(),
             (f"kv_role={role!r} should not emit deprecation warning"),
         )
+
+
+@patch(
+    "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker.NixlWrapper",
+    FakeNixlWrapper,
+)
+def test_decoder_reads_only_while_the_prefillers_lease_holds(
+    default_vllm_config, dist_init, monkeypatch
+):
+    """The prefiller may reuse a request's blocks once the lease it exported
+    ends, and nothing confirms that a heartbeat extended it. So a decoder that
+    admits 4 requests per step fails the load (recomputed or reported per the
+    KV load failure policy) of every request it schedules within the safety
+    margin of that expiry or later, however long it heartbeated or slept, and
+    reads all others."""
+    vllm_config = create_vllm_config()
+    kv_cache_config = make_kv_cache_config(block_size=16, num_blocks=64)
+    clock = [1000.0]
+    monkeypatch.setattr(time, "perf_counter", lambda: clock[0])
+    scheduler = NixlConnectorScheduler(
+        vllm_config, vllm_config.kv_transfer_config.engine_id, kv_cache_config
+    )
+    connector = NixlConnector(vllm_config, KVConnectorRole.WORKER, kv_cache_config)
+    connector.connector_worker = worker = FakeNixlConnectorWorker(
+        vllm_config,
+        connector.engine_id,
+        hand_shake_latency=0,
+        kv_cache_config=kv_cache_config,
+    )
+    reads = patch.object(worker, "_read_blocks", wraps=worker._read_blocks).start()
+    remote = FakeNixlConnectorWorker.REMOTE_ENGINE_ID
+    worker._ensure_handshake(remote, "localhost", 1234, 1)
+    while remote not in worker._remote_agents:
+        time.sleep(0.01)
+    worker._engine_clock_offset[remote] = 0.0
+
+    def arrive(num: int):
+        request = create_request(request_id=num, do_remote_prefill=True)
+        request.kv_transfer_params.update(
+            remote_engine_id=remote,
+            remote_block_ids=([4, 5, 6],),
+            remote_blocks_expiry_time=clock[0] + 30,  # kv_lease_duration
+        )
+        scheduler.on_new_request(request)
+        return request
+
+    failed: set[str] = set()
+    done: set[str] = set()
+
+    def step(now: float, admit=()) -> None:
+        clock[0] = now
+        for request in admit:
+            block = int(request.request_id.rsplit("-", 1)[1])
+            scheduler._reqs_need_recv[request.request_id] = (
+                request,
+                ([block],),
+                (),
+                True,
+            )
+        connector.bind_connector_metadata(scheduler.build_connector_meta(MagicMock()))
+        connector.start_load_kv(MagicMock())
+        connector.clear_connector_metadata()
+        for _ in range(100):
+            results = connector.get_transfer_results(finished_req_ids=set())
+            failed.update(results.failed_recving)
+            done.update(results.finished_recving)
+            if not worker._recving_transfers:
+                break
+
+    queued = [arrive(i) for i in range(1, 33)]  # leased until 1030
+    step(1000)  # heartbeats go out every 5 s while the decoder runs
+    step(1005, queued[0:4])
+    step(1010)
+    step(1015, queued[4:8])
+    step(1020)
+    step(1024, queued[8:12])  # 6 s left: read
+    step(1026, queued[12:16])  # within the 5 s margin: declined
+    # Asleep from 1026 to 1090.
+    clock[0] = 1090.0
+    fresh = arrive(40)  # prefilled after the wake-up: leased until 1120
+    for i, now in enumerate(range(1090, 1094)):
+        step(now, queued[16 + 4 * i : 20 + 4 * i])
+    step(1094, [fresh])
+
+    ids = [r.request_id for r in queued]
+    assert failed == set(ids[12:])
+    assert done == set(ids) | {fresh.request_id}
+    assert [c.kwargs["request_id"] for c in reads.call_args_list] == ids[:12] + [
+        fresh.request_id
+    ]
+    assert worker.get_block_ids_with_load_errors() == set(range(13, 33))
+    scheduler.shutdown()
+
+
+@pytest.mark.parametrize(
+    ("local_lease", "remote_lease", "offset", "expired"),
+    [
+        (30, None, 0.0, True),  # an older remote: our 5 s margin covers 3 s
+        (4, None, 0.0, False),  # our short lease: a 1 s margin
+        (30, 4, 0.0, False),  # the remote's short lease decides: 1 s margin
+        (4, 30, 0.0, True),  # the remote's long lease decides: 5 s margin
+        (30, 4, None, True),  # the remote was evicted: its lease is unknown
+    ],
+)
+@patch(
+    "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker.NixlWrapper",
+    FakeNixlWrapper,
+)
+def test_lease_margin_follows_the_remote_lease(
+    dist_init, local_lease, remote_lease, offset, expired
+):
+    """The safety margin is a fraction of the lease the remote granted, so a
+    short lease stays usable whatever the local configuration."""
+    vllm_config = create_vllm_config(
+        kv_connector_extra_config={"kv_lease_duration": local_lease}
+    )
+    worker = FakeNixlConnectorWorker(
+        vllm_config,
+        vllm_config.kv_transfer_config.engine_id,
+        hand_shake_latency=0,
+        kv_cache_config=make_kv_cache_config(block_size=16),
+    )
+    if offset is not None:
+        worker._engine_clock_offset["remote"] = offset
+    metadata = NixlConnectorMetadata()
+    metadata.add_new_req_to_recv(
+        request_id="req",
+        local_block_ids=([1],),
+        kv_transfer_params={
+            "remote_block_ids": ([1],),
+            "remote_engine_id": "remote",
+            "remote_request_id": "p-req",
+            "remote_host": "localhost",
+            "remote_port": 1234,
+            "remote_blocks_expiry_time": time.perf_counter() + 3.0,
+            "remote_blocks_lease_duration": remote_lease,
+        },
+    )
+    assert worker._is_lease_expired(metadata.reqs_to_recv["req"]) is expired
