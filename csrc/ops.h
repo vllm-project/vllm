@@ -101,17 +101,17 @@ void pth_decode_int8_rdna3(torch::Tensor out, torch::Tensor query,
                            torch::Tensor q_to_klen, torch::Tensor mid_o_buf,
                            double sm_scale, int64_t num_kv_splits);
 
-// SplitQ KV cache (ROCm).
+// SplitQ KV cache (ROCm). fmt: V bits (3 or 4), plus 16 for compact K.
 void splitq_cache_store(torch::Tensor key, torch::Tensor value,
                         torch::Tensor cache, torch::Tensor slot_mapping,
                         torch::Tensor k_signs, torch::Tensor v_signs,
-                        int64_t bits);
+                        int64_t fmt);
 
 void splitq_decode(torch::Tensor out, torch::Tensor query, torch::Tensor cache,
                    torch::Tensor block_table, torch::Tensor q_to_req,
                    torch::Tensor q_to_klen, torch::Tensor mid_o,
                    torch::Tensor k_signs, torch::Tensor v_signs,
-                   double sm_scale, int64_t num_kv_splits, int64_t bits,
+                   double sm_scale, int64_t num_kv_splits, int64_t fmt,
                    int64_t query_group, bool use_wmma);
 
 void splitq_rotate(torch::Tensor x, torch::Tensor signs, bool k_layout,
@@ -121,7 +121,7 @@ void splitq_prefill(torch::Tensor out, torch::Tensor q, torch::Tensor k,
                     torch::Tensor v, torch::Tensor cache,
                     torch::Tensor block_table, torch::Tensor cu_seqlens_q,
                     torch::Tensor seq_lens, int64_t max_query_len,
-                    double sm_scale, int64_t bits);
+                    double sm_scale, int64_t fmt);
 
 torch::Tensor dynamic_4bit_int_moe_cpu(
     torch::Tensor x, torch::Tensor topk_ids, torch::Tensor topk_weights,

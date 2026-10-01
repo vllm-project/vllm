@@ -17,6 +17,11 @@ pytestmark = pytest.mark.skipif(
 )
 
 HEAD, ROPE, BLOCK = 256, 64, 16
+CACHE_DTYPES = ["splitq_k3v4", "splitq_k3v3", "splitq_k3v3_compact"]
+
+
+def _format(cache_dtype: str) -> sq.SplitQFormat:
+    return sq.SplitQFormat.from_cache_dtype(cache_dtype, HEAD, ROPE)
 
 
 def _rel(a: torch.Tensor, b: torch.Tensor) -> float:
@@ -29,20 +34,22 @@ def _token_slots(cache: torch.Tensor, slots: torch.Tensor) -> torch.Tensor:
     return flat[slots]
 
 
-def _fill(cache, block_ids, k, v, k_signs, v_signs, v_bits):
+def _fill(cache, block_ids, k, v, k_signs, v_signs, fmt):
     n = k.shape[0]
     slots = (
         block_ids.long().repeat_interleave(BLOCK)[:n] * BLOCK
         + torch.arange(n, device=k.device) % BLOCK
     )
-    torch.ops._C.splitq_cache_store(k, v, cache, slots, k_signs, v_signs, v_bits)
+    torch.ops._C.splitq_cache_store(
+        k, v, cache, slots, k_signs, v_signs, fmt.kernel_code
+    )
     return slots
 
 
-@pytest.mark.parametrize("v_bits", [4, 3])
-def test_store_matches_reference(v_bits):
+@pytest.mark.parametrize("cache_dtype", CACHE_DTYPES)
+def test_store_matches_reference(cache_dtype):
     torch.manual_seed(0)
-    dev, fmt = "cuda", sq.SplitQFormat(HEAD, ROPE, v_bits)
+    dev, fmt = "cuda", _format(cache_dtype)
     ksg = vsg = sq.sign_bits(HEAD).to(dev)
     t, hkv = 1024, 2
     k = torch.randn(t, hkv, HEAD, device=dev)
@@ -51,35 +58,36 @@ def test_store_matches_reference(v_bits):
     v = torch.randn(t, hkv, HEAD, device=dev).bfloat16()
     nblk = t // BLOCK + 4
     cache = torch.zeros(nblk, hkv, BLOCK, fmt.slot_bytes, dtype=torch.uint8, device=dev)
-    slots = _fill(cache, torch.randperm(nblk, device=dev), k, v, ksg, vsg, v_bits)
+    slots = _fill(cache, torch.randperm(nblk, device=dev), k, v, ksg, vsg, fmt)
 
     k_got, v_got = sq.reference_dequantize(_token_slots(cache, slots), fmt)
     ref = sq.reference_quantize(k.float(), v.float(), fmt)
     k_ref, v_ref = sq.reference_dequantize(ref, fmt)
     # Same codes up to rounding ties from a different summation order.
     assert _rel(k_got, k_ref) < 1e-2 and _rel(v_got, v_ref) < 1e-2
-    # Lloyd-Max on Gaussian data: 4-bit RoPE / 3-bit NoPE K, v_bits V.
+    # Lloyd-Max on Gaussian data: 3-bit codes (4-bit for block K's RoPE
+    # block) keep ~19% of the norm as error, 4-bit ~10%.
     assert _rel(k_got, k) < 0.2
-    assert _rel(v_got, v) < (0.12 if v_bits == 4 else 0.22)
+    assert _rel(v_got, v) < (0.12 if fmt.v_bits == 4 else 0.22)
 
 
-@pytest.mark.parametrize("v_bits", [4, 3])
+@pytest.mark.parametrize("cache_dtype", CACHE_DTYPES)
 @pytest.mark.parametrize("query_group", [1, 4])
 @pytest.mark.parametrize("num_splits", [1, 7, 64])
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("use_wmma", [True, False])
-def test_decode_matches_reference(v_bits, query_group, num_splits, dtype, use_wmma):
+def test_decode_matches_reference(
+    cache_dtype, query_group, num_splits, dtype, use_wmma
+):
     """Covers MTP verification: up to 4 consecutive query tokens per request,
     each with its own causal length, plus a padded query with no request.
     ``use_wmma=False`` forces the portable kernel every architecture runs."""
     torch.manual_seed(1)
-    dev, fmt = "cuda", sq.SplitQFormat(HEAD, ROPE, v_bits)
+    dev, fmt = "cuda", _format(cache_dtype)
     ksg = vsg = sq.sign_bits(HEAD).to(dev)
     hkv, group = 1, 6
     lens = [1, 16, 37, 700, 3000]
-    cache = torch.zeros(
-        512, hkv, BLOCK, fmt.slot_bytes, dtype=torch.uint8, device=dev
-    )
+    cache = torch.zeros(512, hkv, BLOCK, fmt.slot_bytes, dtype=torch.uint8, device=dev)
     max_blocks = max(math.ceil(n / BLOCK) for n in lens)
     block_table = torch.zeros(len(lens), max_blocks, dtype=torch.int32, device=dev)
     free = torch.randperm(512, device=dev)
@@ -90,7 +98,7 @@ def test_decode_matches_reference(v_bits, query_group, num_splits, dtype, use_wm
         used += nb
         k = torch.randn(n, hkv, HEAD, device=dev).bfloat16()
         v = torch.randn(n, hkv, HEAD, device=dev).bfloat16()
-        _fill(cache, block_table[i, :nb], k, v, ksg, vsg, v_bits)
+        _fill(cache, block_table[i, :nb], k, v, ksg, vsg, fmt)
         nq = min(query_group, n)
         for j in range(nq):
             q_to_req.append(i)
@@ -107,26 +115,43 @@ def test_decode_matches_reference(v_bits, query_group, num_splits, dtype, use_wm
         num_q, hkv * group, num_splits, HEAD + 2, dtype=torch.float32, device=dev
     )
     torch.ops._C.splitq_decode(
-        out, q, cache, block_table, q_to_req, q_to_klen, mid, ksg, vsg,
-        1 / 16, num_splits, v_bits, query_group, use_wmma,
+        out,
+        q,
+        cache,
+        block_table,
+        q_to_req,
+        q_to_klen,
+        mid,
+        ksg,
+        vsg,
+        1 / 16,
+        num_splits,
+        fmt.kernel_code,
+        query_group,
+        use_wmma,
     )
     ref = sq.reference_attention(
-        q.float(), cache, block_table, q_to_req.clamp(max=len(lens) - 1),
-        q_to_klen, fmt, 1 / 16,
+        q.float(),
+        cache,
+        block_table,
+        q_to_req.clamp(max=len(lens) - 1),
+        q_to_klen,
+        fmt,
+        1 / 16,
     )
     # Only the kernel's query precision (fp16 or int8) differs.
     assert _rel(out[:-1], ref[:-1]) < 2e-2
     assert out[-1].abs().max().item() == 0
 
 
-@pytest.mark.parametrize("v_bits", [4, 3])
+@pytest.mark.parametrize("cache_dtype", CACHE_DTYPES)
 @pytest.mark.parametrize("query_lens", [[300], [129, 1, 517]])
-def test_prefill_matches_reference(v_bits, query_lens):
+def test_prefill_matches_reference(cache_dtype, query_lens):
     """Chunked prefill: each request's chunk attends causally to itself
     (unquantized K/V) and to its cached prefix (packed cache), in the rotated
     space the backend runs it in."""
     torch.manual_seed(3)
-    dev, fmt = "cuda", sq.SplitQFormat(HEAD, ROPE, v_bits)
+    dev, fmt = "cuda", _format(cache_dtype)
     ksg = vsg = sq.sign_bits(HEAD).to(dev)
     hkv, group = 1, 6
     ctx_lens = [2500, 0, 4100][: len(query_lens)]
@@ -143,7 +168,7 @@ def test_prefill_matches_reference(v_bits, query_lens):
         used += nb
         k = torch.randn(n, hkv, HEAD, device=dev).half()
         v = torch.randn(n, hkv, HEAD, device=dev).half()
-        _fill(cache, block_table[i, :nb], k, v, ksg, vsg, v_bits)
+        _fill(cache, block_table[i, :nb], k, v, ksg, vsg, fmt)
         ks.append(k)
         vs.append(v)
 
@@ -153,14 +178,22 @@ def test_prefill_matches_reference(v_bits, query_lens):
     k_new = torch.cat([k[c:] for k, c in zip(ks, ctx_lens)])
     v_new = torch.cat([v[c:] for v, c in zip(vs, ctx_lens)])
     q_rot, k_rot, v_rot = q.clone(), k_new.clone(), v_new.clone()
-    torch.ops._C.splitq_rotate(q_rot, ksg, True, False)
-    torch.ops._C.splitq_rotate(k_rot, ksg, True, False)
+    torch.ops._C.splitq_rotate(q_rot, ksg, not fmt.compact, False)
+    torch.ops._C.splitq_rotate(k_rot, ksg, not fmt.compact, False)
     torch.ops._C.splitq_rotate(v_rot, vsg, False, False)
     out = torch.empty_like(q_rot)
     torch.ops._C.splitq_prefill(
-        out, q_rot, k_rot, v_rot, cache, block_table, qsl,
+        out,
+        q_rot,
+        k_rot,
+        v_rot,
+        cache,
+        block_table,
+        qsl,
         torch.tensor(seq_lens, dtype=torch.int32, device=dev),
-        max(query_lens), 1 / 16, v_bits,
+        max(query_lens),
+        1 / 16,
+        fmt.kernel_code,
     )
     torch.ops._C.splitq_rotate(out, vsg, False, True)
 
@@ -176,7 +209,10 @@ def test_prefill_matches_reference(v_bits, query_lens):
         v_all = v_all.repeat_interleave(group, 1)
         qi = q[int(qsl[i]) : int(qsl[i + 1])].float()
         s = torch.einsum("qhd,thd->hqt", qi, k_all) / 16
-        mask = torch.arange(c + n, device=dev)[None] > (c + torch.arange(n, device=dev))[:, None]
+        mask = (
+            torch.arange(c + n, device=dev)[None]
+            > (c + torch.arange(n, device=dev))[:, None]
+        )
         p = torch.softmax(s.masked_fill(mask, float("-inf")), -1)
         ref[int(qsl[i]) : int(qsl[i + 1])] = torch.einsum("hqt,thd->qhd", p, v_all)
     # Only the kernel's int8 query and fp16 P/V rounding differ.

@@ -13,7 +13,7 @@ head) and `splitq_k3v4` (248 B), codebook scale `x·x̂ = |x|²`.
 ## Capacity (tokens of KV cache that fit)
 
 | KV cache | Bytes / token / KV head | Tokens (MTP) | Tokens (no MTP) |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | fp16 | 1024 | 445,825 | 481,237 |
 | `turboquant_3bit_nc` | 198 | 2,053,571 | — |
 | `turboquant_k3v4_nc` | 230 | 1,790,625 | 2,059,504 |
@@ -25,26 +25,28 @@ With MTP the draft layer also takes KV cache, hence the smaller counts.
 
 ## TTFT, `vllm bench serve`
 
-Random prompts (no prefix reuse), `--max-concurrency 1`, temperature 0.6,
-top-p 0.95, top-k 20. Median of 4 / 3 / 2 / 1 requests at 8k / 32k / 100k /
-380k (TurboQuant's first request pays a Triton warm-up, so its mean is
-higher; the median is the fair number).
+Cold time to first token: `--dataset-name random` with a different seed for
+each length (with one seed, prompts of different lengths share their prefix
+and prefix caching hides part of the prefill), `--max-concurrency 1`, a 4k
+warm-up request first, temperature 0.6, MTP on.
 
-| KV cache | 8k | 32k | 100k | 380k |
-|---|---|---|---|---|
-| fp16 | 4.20 s | 13.36 s | 44.7 s | 310.6 s |
-| `turboquant_k3v4_nc` | 4.10 s | 13.10 s | 77.2 s | 565.4 s |
-| `turboquant_3bit_nc` | 4.09 s | 13.42 s | 75.0 s | 553.4 s |
-| `turboquant_k3v4_nc`, no MTP | 3.98 s | 12.73 s | 76.6 s | 560.3 s |
-| **`splitq_k3v3`** | 4.13 s | 13.15 s | **42.7 s** | **287.0 s** |
-| **`splitq_k3v4`** | 4.14 s | 13.24 s | **42.9 s** | **286.4 s** |
+| KV cache | 100k (2 requests) | 380k |
+| --- | --- | --- |
+| fp16 (`TRITON_ATTN`) | 61.4 / 61.5 s | 371.0 s |
+| `turboquant_k3v4_nc` | 154.8 / 59.9 s * | 620.6 s |
+| **`splitq_k3v3_compact`** | **57.2 / 57.2 s** | **297.4 s** |
+| `splitq_k3v3` | 56.7 / 56.7 s | 300.5 s |
+| `splitq_k3v4` | 56.9 / 57.0 s | 300.4 s |
 
-At 100k and 380k SplitQ prefills **1.8-2.0× faster than TurboQuant** end
-to end (these TTFT rows predate the faster prefill kernel below) and **4-8% faster than fp16**. Up to 32k the prefix is short and
-every row is bound by the model's GEMMs. Most of the TurboQuant gap is not in its
-attention kernel; it is around it. Not measured yet: the likely cost is the per-layer host-device
-traffic of its multi-token path, which is also what keeps that path out of
-CUDA graphs.
+\* TurboQuant's first long request is slow, likely a Triton compile for new
+shapes (not verified); its second request is the fair number.
+
+At 380k SplitQ reaches the first token 2.1× faster than TurboQuant and 20%
+faster than fp16. At 100k the prefill is bound by the model's GEMMs and
+all-reduce, and the gap narrows to 5-7% over fp16.
+
+Earlier rows in this file (100k 42.7 s, 380k 287 s) used one seed for every
+length and were partly served from the prefix cache; they were dropped.
 
 ## Long document: prefill and decode at 380k
 
@@ -52,7 +54,7 @@ CUDA graphs.
 (for the NLL), then 400 tokens generated with the document cached.
 
 | KV cache | Prefill 380k | Decode at 380k |
-|---|---|---|
+| --- | --- | --- |
 | fp16 | 399.7 s | 2.7 tok/s |
 | `turboquant_k3v4_nc` | 379.3 s | 177.5 tok/s * |
 | `turboquant_3bit_nc` | 405.6 s | 176.8 tok/s * |
@@ -81,7 +83,7 @@ multi-token path copies between host and device and cannot be captured.
 Times are per layer.
 
 | Batch | fp16 (`TRITON_ATTN`) | `turboquant_k3v4_nc` | **`splitq_k3v3`** | **`splitq_k3v4`** |
-|---|---|---|---|---|
+| --- | --- | --- | --- | --- |
 | decode, 8k | 63 µs | 92 µs | **25 µs** | 26 µs |
 | decode, 32k | 238 µs | 273 µs | **63 µs** | 67 µs |
 | decode, 100k | 639 µs | 744 µs | **173 µs** | 195 µs |
@@ -133,8 +135,8 @@ Real Q/K/V of every full-attention layer of the rank-0 shard, captured from
 a 32k-token prefill. Error of the attention output against exact fp32
 attention:
 
-| | Format error | Kernel vs format reference |
-|---|---|---|
+|  | Format error | Kernel vs format reference |
+| --- | --- | --- |
 | Prefill (2048-token chunk over 30k prefix), k3v3 | 6.31% | 0.20% |
 | Prefill, k3v4 | 5.12% | 0.20% |
 | Decode (last token over 32k), k3v3 | 13.43% | 0.02% |

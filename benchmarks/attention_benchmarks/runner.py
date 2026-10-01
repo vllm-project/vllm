@@ -37,6 +37,7 @@ from vllm.config import (
     set_current_vllm_config,
 )
 from vllm.platforms import current_platform
+from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
 from vllm.v1.attention.backends.utils import (
     CommonAttentionMetadata,
     get_supported_kv_cache_layouts,
@@ -51,7 +52,6 @@ from vllm.v1.kv_cache_interface import (
     create_kv_cache_views,
     get_kv_quant_mode,
 )
-from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
 
 # ============================================================================
 # Backend Configuration

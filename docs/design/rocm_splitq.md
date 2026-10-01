@@ -1,9 +1,10 @@
 # ROCm SplitQ KV cache
 
 `ROCM_SPLITQ` is an attention backend for AMD GPUs that keeps the KV cache of
-full-attention layers at 3-4 bits per value, written entirely in HIP. It is
-selected with `--kv-cache-dtype splitq_k3v3` or `splitq_k3v4` (the backend is
-picked from the cache dtype; `--attention-backend ROCM_SPLITQ` also works).
+full-attention layers at 3-4 bits per value, with native kernels (HIP today). It is
+selected with `--kv-cache-dtype splitq_k3v3_compact`, `splitq_k3v3` or
+`splitq_k3v4` (the backend is picked from the cache dtype;
+`--attention-backend ROCM_SPLITQ` also works).
 
 ## Why it exists
 
@@ -37,22 +38,38 @@ sinks, soft-capping and encoder attention are not supported.
 
 ## Format
 
-One slot per (token, KV head). K is rotated in four 64-dim blocks (random
-signs, then a Walsh-Hadamard transform per block), V as one 256-dim block.
-The first K block holds exactly the 64 rotary dims and gets 4 bits per dim;
-the three NoPE blocks get 3 bits; V gets 3 or 4.
+One slot per (token, KV head). V is always rotated as one 256-dim block
+(random signs, then a Walsh-Hadamard transform) and gets 3 or 4 bits per dim.
+K has two layouts:
 
-| Bytes | Content |
-|---|---|
+- **Block K** (`splitq_k3v3`, `splitq_k3v4`): four 64-dim blocks, each rotated
+  on its own. The first block holds exactly the 64 rotary dims and gets 4 bits
+  per dim, the three NoPE blocks 3 bits; each block has its own scale.
+- **Compact K** (`splitq_k3v3_compact`): rotated over all 256 dims like V,
+  3 bits per dim, one scale. The rotation spreads the rotary dims over the
+  whole head, so they need no extra bits; slots pad to 4 bytes instead of 8.
+
+| Bytes (block K) | Content |
+| --- | --- |
 | `[0, 32)` | K RoPE block, 4-bit codes |
 | `[32, 104)` | K NoPE blocks, 3-bit codes |
 | next `256·v/8` | V, `v`-bit codes |
 | next 10 | fp16 scales (K blocks 0-3, V) |
 
-| Cache dtype | V bits | Slot bytes | Bits per value |
-|---|---|---|---|
-| `splitq_k3v3` | 3 | 216 | 3.38 |
-| `splitq_k3v4` | 4 | 248 | 3.88 |
+| Bytes (compact K) | Content |
+| --- | --- |
+| `[0, 96)` | K, 3-bit codes |
+| `[96, 192)` | V, 3-bit codes |
+| `[192, 196)` | fp16 scales (K, V) |
+
+| Cache dtype | Slot bytes | Bits per value |
+| --- | --- | --- |
+| `splitq_k3v3_compact` | 196 | 3.06 |
+| `splitq_k3v3` | 216 | 3.38 |
+| `splitq_k3v4` | 248 | 3.88 |
+
+For reference, `turboquant_3bit_nc` uses 198 bytes and `turboquant_k3v4_nc`
+230.
 
 After the rotation the coordinates are close to Gaussian, so each code
 indexes the Lloyd-Max codebook of N(0, 1) for its width, stored as int8
@@ -67,12 +84,14 @@ dictionaries. The kernels map four codes to their int8 values with one
 bandwidth and the dot products stay integer. The byte layout's source of
 truth is the PyTorch reference in `vllm/v1/attention/ops/rocm_splitq.py`.
 
-Why this split: measured on real Q/K/V of Qwen3.8-27B (32k tokens, every
-full-attention layer, attention-output error), V precision matters more than
-K precision per byte, and the rotary dims quantize as well as the others once
-rotated. Spending the bytes on V at 4 bits and on a 4-bit rotary block beats
-the alternatives at the same size; the int8 codebook loses nothing against
-the floating-point one.
+Why these layouts: measured on real Q/K/V of Qwen3.8-27B (32k tokens, every
+full-attention layer, attention-output error), both K layouts sit on the same
+bytes-versus-error curve, about 25-30% below TurboQuant at equal size; block
+K reaches the 4-bit rotary block, compact K the smallest slot. Rotating the
+rotary block alone at 3 bits does not work (one layer reaches 32% error);
+rotating it with the rest of the head does. Moving bits between K and V or
+weighting K channels by query energy did not help at a fixed size. The int8
+codebook loses nothing against the floating-point one.
 
 Attention runs in the rotated space: the query is rotated like K and the
 output is rotated back once per query. The rotations are orthogonal, so the
@@ -81,7 +100,7 @@ scores are those of the unrotated vectors.
 ## Kernels and data flow
 
 | Step | Kernel | File |
-|---|---|---|
+| --- | --- | --- |
 | Cache write | `splitq_cache_store`: one wave per slot, rotate + quantize + pack | `csrc/attention/splitq_attn.cu` |
 | Decode / MTP verify (≤128 query tokens per request) | `splitq_decode`: split-KV; WMMA tier on gfx11, portable dot4 tier elsewhere; consecutive query tokens of a request share each K/V read | `splitq_decode_wmma_rdna3.cu`, `splitq_attn.cu` |
 | Split reduce + inverse V rotation | `reduce_kernel` | `splitq_attn.cu` |
@@ -96,8 +115,11 @@ causal length) work without special cases.
 
 ## Architecture contract
 
-SplitQ is HIP-only. There is no Triton fallback: an architecture without a
-required kernel is rejected at startup with an error naming what is missing.
+Kernels are native: HIP or FlyDSL, never Triton. There is no fallback: an
+architecture without a required kernel is rejected at startup with an error
+naming what is missing. The kernels in this tree are HIP; a FlyDSL kernel
+(for example a CDNA prefill) must keep the same signature and semantics, pass
+the same tests, and report a clear error when `flydsl` is not installed.
 
 Every AMD target vLLM builds (gfx906, gfx908, gfx90a, gfx942, gfx950, gfx1030,
 gfx11xx, gfx12xx, gfx1250) compiles every SplitQ source; architecture-specific
@@ -105,7 +127,7 @@ code is guarded and the portable tier uses only 32-lane shuffles, so it is
 correct on wave64 (CDNA) as well as wave32 (RDNA).
 
 | Piece | gfx11 (RDNA3) | gfx12 (RDNA4) | gfx90a / gfx942 / gfx950 (MI200/MI300/MI350) | gfx1030 (RDNA2) |
-|---|---|---|---|---|
+| --- | --- | --- | --- | --- |
 | int8 dot4 (`splitq_arch.cuh`) | `v_dot4_i32_iu8` | `v_dot4_i32_iu8` | `v_dot4_i32_i8` | `v_dot4_i32_i8` |
 | Codebook lookup (`splitq_format.cuh`) | `v_perm_b32` | `v_perm_b32` | `v_perm_b32` | `v_perm_b32` |
 | Cache store, reduce, rotate | portable | portable | portable | portable |
@@ -114,7 +136,7 @@ correct on wave64 (CDNA) as well as wave32 (RDNA).
 
 To add an architecture:
 
-1. Implement `splitq_prefill` for it (same signature and semantics as
+1. Implement `splitq_prefill` for it, in HIP or FlyDSL (same signature and semantics as
    `splitq_prefill_rdna3.cu`: phase-1 partials over the packed prefix, phase-2
    chunk attention and merge, rotated space in and out). On CDNA the natural
    building blocks are `v_mfma_i32_16x16x32_i8` (gfx942/gfx950) or
@@ -134,7 +156,7 @@ parallel 4, MTP k=3, 8 GB of KV cache per GPU.
 ### Capacity
 
 | KV cache | Tokens that fit |
-|---|---|
+| --- | --- |
 | fp16 | TBD |
 | `turboquant_k3v4_nc` | 1,790,625 |
 | `splitq_k4v4` | 1,402k |

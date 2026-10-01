@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""SplitQ attention backend for AMD GPUs (HIP kernels only).
+"""SplitQ attention backend for AMD GPUs (native kernels: HIP or FlyDSL).
 
 KV cache format and reference: ``vllm/v1/attention/ops/rocm_splitq.py``.
 Kernels: ``csrc/attention/splitq_attn.cu`` (portable) and the per-architecture
@@ -38,8 +38,8 @@ from vllm.v1.kv_cache_interface import AttentionSpec
 from vllm.v1.kv_cache_layout import KVCacheLayout
 
 # Per-architecture kernel tiers (gcnArchName prefix -> (decode, prefill)).
-# Decode always has the portable dot4 kernel; prefill needs a HIP kernel per
-# architecture and there is no Triton fallback.
+# Decode always has the portable dot4 kernel; prefill needs a native kernel
+# (HIP or FlyDSL) per architecture and there is no Triton fallback.
 _ARCH_TIERS: dict[str, tuple[str, str | None]] = {
     "gfx11": ("wmma", "wmma"),
 }
@@ -67,6 +67,7 @@ class RocmSplitQAttentionBackend(AttentionBackend):
     supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = [
         "splitq_k3v4",
         "splitq_k3v3",
+        "splitq_k3v3_compact",
     ]
 
     @staticmethod
@@ -117,7 +118,7 @@ class RocmSplitQMetadataBuilder(TritonAttentionMetadataBuilder):
     for spec-decode verification steps."""
 
 
-class RocmSplitQAttentionImpl(AttentionImpl[TritonAttentionMetadata]):
+class RocmSplitQAttentionImpl(AttentionImpl):
     def __init__(
         self,
         num_heads: int,
@@ -168,7 +169,7 @@ class RocmSplitQAttentionImpl(AttentionImpl[TritonAttentionMetadata]):
         arch, (decode_tier, prefill_tier) = _arch_tiers()
         if prefill_tier is None:
             raise NotImplementedError(
-                f"ROCM_SPLITQ has no HIP prefill kernel for {arch} yet; see the "
+                f"ROCM_SPLITQ has no native prefill kernel for {arch} yet; see the "
                 "architecture contract in docs/design/rocm_splitq.md"
             )
         self._use_wmma = decode_tier == "wmma"
@@ -238,7 +239,7 @@ class RocmSplitQAttentionImpl(AttentionImpl[TritonAttentionMetadata]):
             slot_mapping,
             k_signs,
             v_signs,
-            self.fmt.v_bits,
+            self.fmt.kernel_code,
         )
 
     def forward(
@@ -277,13 +278,15 @@ class RocmSplitQAttentionImpl(AttentionImpl[TritonAttentionMetadata]):
 
         num_dt = attn_metadata.num_decode_tokens
         if num_dt > 0:
+            q_to_req, q_to_klen = attn_metadata.q_to_req, attn_metadata.q_to_klen
+            assert q_to_req is not None and q_to_klen is not None
             self._decode(
                 out[:num_dt],
                 q[:num_dt],
                 kv_cache,
                 attn_metadata,
-                attn_metadata.q_to_req[:num_dt],
-                attn_metadata.q_to_klen[:num_dt],
+                q_to_req[:num_dt],
+                q_to_klen[:num_dt],
             )
         self._prefill(out, q, key, value, kv_cache, attn_metadata)
         return output
@@ -320,7 +323,7 @@ class RocmSplitQAttentionImpl(AttentionImpl[TritonAttentionMetadata]):
             v_signs,
             self.scale,
             splits,
-            self.fmt.v_bits,
+            self.fmt.kernel_code,
             4 if md.max_query_len > 1 else 1,
             self._use_wmma,
         )
@@ -346,8 +349,9 @@ class RocmSplitQAttentionImpl(AttentionImpl[TritonAttentionMetadata]):
         q_rot = q[ndt:n].to(torch.float16, copy=True)
         k_rot = key[ndt:n].to(torch.float16, copy=True)
         v_rot = value[ndt:n].to(torch.float16, copy=True)
-        torch.ops._C.splitq_rotate(q_rot, k_signs, True, False)
-        torch.ops._C.splitq_rotate(k_rot, k_signs, True, False)
+        k_blocks = not self.fmt.compact
+        torch.ops._C.splitq_rotate(q_rot, k_signs, k_blocks, False)
+        torch.ops._C.splitq_rotate(k_rot, k_signs, k_blocks, False)
         torch.ops._C.splitq_rotate(v_rot, v_signs, False, False)
         o_rot = torch.empty_like(q_rot)
         torch.ops._C.splitq_prefill(
@@ -361,7 +365,7 @@ class RocmSplitQAttentionImpl(AttentionImpl[TritonAttentionMetadata]):
             md.seq_lens[nd:num_reqs].to(torch.int32),
             md.max_query_len,
             self.scale,
-            self.fmt.v_bits,
+            self.fmt.kernel_code,
         )
         torch.ops._C.splitq_rotate(o_rot, v_signs, False, True)
         out[ndt:n] = o_rot

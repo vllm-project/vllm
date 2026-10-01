@@ -2,12 +2,15 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """SplitQ KV-cache format: layout, rotations and a PyTorch reference.
 
-Each (token, KV head) is stored in one byte slot. K is split at the rotary
-boundary and V is quantized whole:
+Each (token, KV head) is stored in one byte slot. V is always quantized
+whole; K has two layouts:
 
-* K: random sign flips plus a Walsh-Hadamard transform over each 64-dim
-  block. The RoPE blocks get 4-bit codes, the NoPE blocks 3-bit codes, and
-  every block has its own scale.
+* Block K (``splitq_k3v4``, ``splitq_k3v3``): random sign flips plus a
+  Walsh-Hadamard transform over each 64-dim block. The RoPE blocks get 4-bit
+  codes, the NoPE blocks 3-bit codes, and every block has its own scale.
+* Compact K (``splitq_k3v3_compact``): sign flips plus one Hadamard transform
+  over all dims, 3-bit codes, one scale. Spreading the RoPE dims over the
+  whole head lets them share the 3-bit budget.
 * V: sign flips plus one Hadamard transform over all dims, ``v_bits`` codes.
 
 The rotated coordinates are close to Gaussian, so each code indexes a
@@ -24,6 +27,8 @@ Slot layout (bytes)::
 
     [k_rope codes][k_nope codes][v codes][fp16 scales][pad to 8]
 
+Compact K has no 4-bit part and pads to 4 bytes.
+
 4-bit codes: each little-endian uint32 covers 8 dims; byte j holds dim j in
 its low nibble and dim j + 4 in its high nibble, so ``w & 0x0F0F0F0F`` and
 ``(w >> 4) & 0x0F0F0F0F`` give dims 0..3 and 4..7 as bytes.
@@ -32,7 +37,7 @@ its low nibble and dim j + 4 in its high nibble, so ``w & 0x0F0F0F0F`` and
 gives dims 4i..4i+3) followed by a 1-bit plane (uint32 per 32 dims;
 ``(w >> i) & 0x01010101`` gives dims 4i..4i+3). code = lo + 4 * hi.
 
-Scales (fp16): one per 64-dim K block, then V.
+Scales (fp16): one per 64-dim K block (one in total for compact K), then V.
 """
 
 import functools
@@ -87,9 +92,7 @@ def registered_rope_dim(head_size: int) -> int:
             )
         register_rope_dim(
             head_size,
-            rope_dim_from_hf_config(
-                vllm_config.model_config.hf_text_config, head_size
-            ),
+            rope_dim_from_hf_config(vllm_config.model_config.hf_text_config, head_size),
         )
     return _rope_dim_by_head_size[head_size]
 
@@ -99,11 +102,16 @@ class SplitQFormat:
     head_size: int
     rope_dim: int
     v_bits: int
+    compact: bool = False
 
     def __post_init__(self):
         d, r = self.head_size, self.rope_dim
         if self.v_bits not in (3, 4):
             raise ValueError(f"SplitQ supports 3- or 4-bit V, got {self.v_bits}")
+        if self.compact and d & (d - 1):
+            raise ValueError(
+                f"Compact SplitQ K needs a power-of-two head_size, got {d}"
+            )
         if r % HADAMARD_BLOCK or d % HADAMARD_BLOCK:
             raise ValueError(
                 f"SplitQ needs head_size and rope_dim in multiples of "
@@ -112,8 +120,26 @@ class SplitQFormat:
 
     @classmethod
     def from_cache_dtype(cls, cache_dtype: str, head_size: int, rope_dim: int):
-        v_bits = {"splitq_k3v4": 4, "splitq_k3v3": 3}[cache_dtype]
-        return cls(head_size, rope_dim, v_bits)
+        v_bits, compact = {
+            "splitq_k3v4": (4, False),
+            "splitq_k3v3": (3, False),
+            "splitq_k3v3_compact": (3, True),
+        }[cache_dtype]
+        return cls(head_size, rope_dim, v_bits, compact)
+
+    @property
+    def kernel_code(self) -> int:
+        """Format id the kernels take: V bits, plus 16 for compact K."""
+        return self.v_bits + (16 if self.compact else 0)
+
+    @property
+    def k_rotation_block(self) -> int:
+        return self.head_size if self.compact else HADAMARD_BLOCK
+
+    @property
+    def k_wide_dim(self) -> int:
+        """K dims stored with ROPE_BITS codes (the rest use NOPE_BITS)."""
+        return 0 if self.compact else self.rope_dim
 
     @property
     def nope_dim(self) -> int:
@@ -129,24 +155,29 @@ class SplitQFormat:
 
     @property
     def off_k_nope(self) -> int:
-        return self.rope_dim * ROPE_BITS // 8
+        return self.k_wide_dim * ROPE_BITS // 8
 
     @property
     def off_v(self) -> int:
-        return self.off_k_nope + self.nope_dim * NOPE_BITS // 8
+        return self.off_k_nope + (self.head_size - self.k_wide_dim) * NOPE_BITS // 8
 
     @property
     def off_scales(self) -> int:
         return self.off_v + self.head_size * self.v_bits // 8
 
     @property
+    def num_k_scales(self) -> int:
+        return 1 if self.compact else self.num_k_blocks
+
+    @property
     def num_scales(self) -> int:
-        return self.num_k_blocks + 1
+        return self.num_k_scales + 1
 
     @property
     def slot_bytes(self) -> int:
         raw = self.off_scales + 2 * self.num_scales
-        return (raw + 7) // 8 * 8
+        align = 4 if self.compact else 8
+        return (raw + align - 1) // align * align
 
 
 @functools.cache
@@ -262,20 +293,26 @@ def reference_quantize(
     out = torch.zeros(t, h, fmt.slot_bytes, dtype=torch.uint8, device=dev)
     nkb = fmt.num_k_blocks
 
-    k = rotate(key, signs(d, str(dev))).view(t, h, nkb, HADAMARD_BLOCK)
-    nr = fmt.num_rope_blocks
-    kr_codes, kr_scale = _quantize_lut(k[:, :, :nr], ROPE_BITS)
-    kn_codes, kn_scale = _quantize_lut(k[:, :, nr:], NOPE_BITS)
-    out[..., : fmt.off_k_nope] = _pack(kr_codes.view(t, h, r), ROPE_BITS)
-    out[..., fmt.off_k_nope : fmt.off_v] = _pack(
-        kn_codes.view(t, h, fmt.nope_dim), NOPE_BITS
-    )
+    if fmt.compact:
+        k = rotate(key, signs(d, str(dev)), d)
+        k_codes, k_scale = _quantize_lut(k, NOPE_BITS)
+        out[..., : fmt.off_v] = _pack(k_codes, NOPE_BITS)
+    else:
+        k = rotate(key, signs(d, str(dev))).view(t, h, nkb, HADAMARD_BLOCK)
+        nr = fmt.num_rope_blocks
+        kr_codes, kr_scale = _quantize_lut(k[:, :, :nr], ROPE_BITS)
+        kn_codes, kn_scale = _quantize_lut(k[:, :, nr:], NOPE_BITS)
+        out[..., : fmt.off_k_nope] = _pack(kr_codes.view(t, h, r), ROPE_BITS)
+        out[..., fmt.off_k_nope : fmt.off_v] = _pack(
+            kn_codes.view(t, h, fmt.nope_dim), NOPE_BITS
+        )
+        k_scale = torch.cat((kr_scale[..., 0], kn_scale[..., 0]), -1)
 
     vr = rotate(value, signs(d, str(dev)), v_block(d))
     v_codes, v_scale = _quantize_lut(vr, fmt.v_bits)
     out[..., fmt.off_v : fmt.off_scales] = _pack(v_codes, fmt.v_bits)
 
-    scales = torch.cat((kr_scale[..., 0], kn_scale[..., 0], v_scale), -1)
+    scales = torch.cat((k_scale, v_scale), -1)
     sc = scales.to(torch.float16).view(torch.uint8).view(t, h, -1)
     out[..., fmt.off_scales : fmt.off_scales + sc.shape[-1]] = sc
     return out
@@ -298,17 +335,21 @@ def reference_dequantize(
         .float()
         / LUT_ONE
     )
-    kr = _unpack(slots[..., : fmt.off_k_nope], r, ROPE_BITS)
-    kn = _unpack(slots[..., fmt.off_k_nope : fmt.off_v], fmt.nope_dim, NOPE_BITS)
-    k = torch.cat(
-        (_lut(ROPE_BITS, str(dev))[kr], _lut(NOPE_BITS, str(dev))[kn]), -1
-    ).view(t, h, fmt.num_k_blocks, HADAMARD_BLOCK)
-    k = (k * sc[..., : fmt.num_k_blocks, None]).view(t, h, d)
+    if fmt.compact:
+        k = _unpack(slots[..., : fmt.off_v], d, NOPE_BITS)
+        k = _lut(NOPE_BITS, str(dev))[k] * sc[..., :1]
+    else:
+        kr = _unpack(slots[..., : fmt.off_k_nope], r, ROPE_BITS)
+        kn = _unpack(slots[..., fmt.off_k_nope : fmt.off_v], fmt.nope_dim, NOPE_BITS)
+        k = torch.cat(
+            (_lut(ROPE_BITS, str(dev))[kr], _lut(NOPE_BITS, str(dev))[kn]), -1
+        ).view(t, h, fmt.num_k_blocks, HADAMARD_BLOCK)
+        k = (k * sc[..., : fmt.num_k_blocks, None]).view(t, h, d)
 
     v = _unpack(slots[..., fmt.off_v : fmt.off_scales], d, fmt.v_bits)
     v = _lut(fmt.v_bits, str(dev))[v] * sc[..., -1:]
     if not rotated:
-        k = unrotate(k, signs(d, str(dev)))
+        k = unrotate(k, signs(d, str(dev)), fmt.k_rotation_block)
         v = unrotate(v, signs(d, str(dev)), v_block(d))
     return k, v
 

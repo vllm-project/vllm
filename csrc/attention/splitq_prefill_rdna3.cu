@@ -73,15 +73,15 @@ __device__ __forceinline__ int split_len(int ctx, int used) {
 // ===========================================================================
 // Phase 1: prefix
 // ===========================================================================
-constexpr int NW = 8;          // compute wave pairs (16 query vectors each)
-constexpr int NL = 8;          // loader waves
-constexpr int KROW = D + 16;   // bytes per K row in LDS
+constexpr int NW = 8;         // compute wave pairs (16 query vectors each)
+constexpr int NL = 8;         // loader waves
+constexpr int KROW = D + 16;  // bytes per K row in LDS
 constexpr float PSCALE = 4096.0f;
 // The LDS read of PV step c waits for the WMMA of step c - DEPV, which keeps
 // the scheduler from hoisting every read (and spilling).
 constexpr int DEPV = 4;
 constexpr int NTHREADS = (2 * NW + NL) * 32;
-constexpr int VPAD = 16;  // halfs after every 8 rows of V^T
+constexpr int VPAD = 16;  // halves after every 8 rows of V^T
 constexpr int HD = D / 2;
 constexpr int QSTEPS = HD / 16;
 constexpr int OFRAGS = HD / 16;
@@ -130,7 +130,7 @@ __device__ __forceinline__ uint32_t block_codes(const uint32_t* raw,
   }
 }
 
-template <int VB>
+template <int VB, bool KC>
 __global__ __launch_bounds__(NTHREADS) void prefix_attn(
     const __half* __restrict__ q, const uint8_t* __restrict__ cache,
     const int* __restrict__ block_table, const int* __restrict__ cu_seqlens_q,
@@ -139,7 +139,7 @@ __global__ __launch_bounds__(NTHREADS) void prefix_attn(
     int num_splits, int total_q_tokens, int64_t sq_tok, int64_t sq_head,
     int64_t scb, int64_t sch, int64_t sct) {
   #ifndef SPLITQ_PREFILL_STUB
-  using F = Format<VB>;
+  using F = Format<VB, KC>;
   const int seq = blockIdx.x, kvh = blockIdx.y;
   const int rowtile = blockIdx.z / num_splits, split = blockIdx.z % num_splits;
   const int tid = threadIdx.x;
@@ -210,9 +210,11 @@ __global__ __launch_bounds__(NTHREADS) void prefix_attn(
     };
     // 4-bit: dwords 2 kp, 2 kp + 1 of the RoPE codes. 3-bit: dword kp of the
     // block's 2-bit plane and dword kp / 2 of its 1-bit plane.
-    const int b = kq - 1;
-    const int koff0 = kq ? F::OFF_KN + 16 * b + 4 * kp : 8 * kp;
-    const int koff1 = kq ? F::OFF_KN + 48 + 8 * b + 4 * (kp >> 1) : 8 * kp + 4;
+    const bool k3 = KC || kq > 0;
+    const int b = KC ? kq : kq - 1;  // 3-bit block index
+    const int koff0 = k3 ? F::OFF_KN + 16 * b + 4 * kp : 8 * kp;
+    const int koff1 =
+        k3 ? F::OFF_KN + F::KN / 4 + 8 * b + 4 * (kp >> 1) : 8 * kp + 4;
     constexpr int VW = VB == 4 ? 1 : 2;  // dwords of 8 V dims
     struct Stg {
       uint32_t k0, k1;
@@ -234,15 +236,21 @@ __global__ __launch_bounds__(NTHREADS) void prefix_attn(
           S.v[i][1] = *(const uint32_t*)(pv + D / 4 + 4 * (vd >> 5));
         }
       }
-      // Threads 0-15: the four K scales of token lt; 16-31: the V scale of
-      // token lt - KT (low half of s0). Both are 8-byte loads inside the slot.
+      // Threads 0-15: the K scales of token lt; 16-31: the V scale of token
+      // lt - KT. Block K: two 8-byte loads inside the slot, V scale in the
+      // low half of s0. Compact K: one 4-byte load {k, v}.
       if (lt < 2 * KT) {
-        const uint8_t* ps =
-            lt < KT ? bK + tok(TK, lt) + F::OFF_SC
-                    : bV + tok(TV, lt - KT) + F::OFF_SC + 8;
-        const u2v x = *(const u2v*)ps;
-        S.s0 = x[0];
-        S.s1 = x[1];
+        if constexpr (KC) {
+          S.s0 = *(const uint32_t*)((lt < KT ? bK + tok(TK, lt)
+                                             : bV + tok(TV, lt - KT)) +
+                                    F::OFF_SC);
+        } else {
+          const uint8_t* ps = lt < KT ? bK + tok(TK, lt) + F::OFF_SC
+                                      : bV + tok(TV, lt - KT) + F::OFF_SC + 8;
+          const u2v x = *(const u2v*)ps;
+          S.s0 = x[0];
+          S.s1 = x[1];
+        }
       }
     };
     auto store_k = [&](const Stg& S, int bf) {
@@ -252,16 +260,20 @@ __global__ __launch_bounds__(NTHREADS) void prefix_attn(
       u4v o;
     #pragma unroll
       for (int x = 0; x < 4; ++x)
-        o[x] = kq ? splitq::lut3(block_codes<3>(r3, hi, hi, x))
+        o[x] = k3 ? splitq::lut3(block_codes<3>(r3, hi, hi, x))
                   : splitq::lut4(block_codes<4>(r4, 0, 0, x));
       *(u4v*)&sK[bf][tk][64 * kq + 16 * kp] = o;
       if (lt < KT) {
         const h2v a = __builtin_bit_cast(h2v, S.s0);
-        const h2v c = __builtin_bit_cast(h2v, S.s1);
-        sKs[bf][0][lt] = (float)a[0];
-        sKs[bf][1][lt] = (float)a[1];
-        sKs[bf][2][lt] = (float)c[0];
-        sKs[bf][3][lt] = (float)c[1];
+        if constexpr (KC) {
+          sKs[bf][0][lt] = (float)a[0];
+        } else {
+          const h2v c = __builtin_bit_cast(h2v, S.s1);
+          sKs[bf][0][lt] = (float)a[0];
+          sKs[bf][1][lt] = (float)a[1];
+          sKs[bf][2][lt] = (float)c[0];
+          sKs[bf][3][lt] = (float)c[1];
+        }
       }
     };
     auto store_v = [&](const Stg& S, int bf) {
@@ -294,9 +306,9 @@ __global__ __launch_bounds__(NTHREADS) void prefix_attn(
                   __builtin_bit_cast(uint32_t, p23 - kofs)};
       }
       if (lt >= KT && lt < 2 * KT)
-        sVs[bf][lt - KT] =
-            (float)__builtin_bit_cast(_Float16, (uint16_t)S.s0) *
-            (PSCALE / LUT_ONE);
+        sVs[bf][lt - KT] = (float)__builtin_bit_cast(
+                               _Float16, (uint16_t)(KC ? S.s0 >> 16 : S.s0)) *
+                           (PSCALE / LUT_ONE);
     };
     // Pipeline: K of tile i + 1 and V of tile i are written in iteration i
     // from registers; the block number of a tile is loaded two tiles ahead.
@@ -395,8 +407,21 @@ __global__ __launch_bounds__(NTHREADS) void prefix_attn(
       // each; block s is scaled into Sn before block s + 1 starts, so one
       // int accumulator is live at a time.
       uint32_t koff = (uint32_t)(rr * KROW + HD * g);
+      if constexpr (KC) {  // one K scale: one accumulator for both blocks
+        v8i_t Si = {0, 0, 0, 0, 0, 0, 0, 0};
     #pragma unroll
-      for (int sg = 0; sg < 2; ++sg) {
+        for (int f = 0; f < 8; ++f) {
+          const u4v a = *(const u4v*)(&sK[i & 1][0][0] + koff + 16 * f);
+          Si = __builtin_amdgcn_wmma_i32_16x16x16_iu8_w32(
+              true, __builtin_bit_cast(v4i_t, a), true,
+              __builtin_bit_cast(v4i_t, Q[f]), Si, false);
+        }
+        const float* ks = &sKs[i & 1][0][0];
+    #pragma unroll
+        for (int e = 0; e < 8; ++e) Sn[e] = ks[2 * e + h] * (float)Si[e];
+      }
+    #pragma unroll
+      for (int sg = 0; sg < (KC ? 0 : 2); ++sg) {
         v8i_t Si = {0, 0, 0, 0, 0, 0, 0, 0};
     #pragma unroll
         for (int f = 4 * sg; f < 4 * sg + 4; ++f) {
@@ -417,9 +442,9 @@ __global__ __launch_bounds__(NTHREADS) void prefix_attn(
     if (i > 0) {
       const int bf = (i - 1) & 1, base = k_begin + (i - 1) * KT;
       const u4v o0 = sS[bf][w ^ 1][0][lane], o1 = sS[bf][w ^ 1][1][lane];
-      const f8v S = Sp + __builtin_bit_cast(f8v, (u8v){o0[0], o0[1], o0[2],
-                                                       o0[3], o1[0], o1[1],
-                                                       o1[2], o1[3]});
+      const f8v S =
+          Sp + __builtin_bit_cast(f8v, (u8v){o0[0], o0[1], o0[2], o0[3], o1[0],
+                                             o1[1], o1[2], o1[3]});
       // Scores in log2 units are S * c1 (c1 > 0). Only the last tile has
       // keys past k_stop; exp2(-inf) = 0, and m = -inf only before the first
       // tile, so nothing else needs a guard.
@@ -453,8 +478,8 @@ __global__ __launch_bounds__(NTHREADS) void prefix_attn(
         for (int c = 0; c < OFRAGS; ++c) O[c] *= alpha;
       }
       u8v pf;
-      // B operand in natural token order: lane half 0 holds the even tokens,
-      // half 1 the odd ones; interleave them per pair.
+        // B operand in natural token order: lane half 0 holds the even tokens,
+        // half 1 the odd ones; interleave them per pair.
     #pragma unroll
       for (int k = 0; k < 4; ++k) {
         const uint32_t o = xhalf(pd[k]);
@@ -501,10 +526,10 @@ __global__ __launch_bounds__(NTHREADS) void prefix_attn(
 // Phase 2: the chunk's own K/V (fp16, causal), merged with the prefix
 // partials. 8 waves, 16 query rows each, one query head per block.
 // ===========================================================================
-constexpr int CW = 8;            // waves
-constexpr int CM = 16 * CW;      // query rows per block
+constexpr int CW = 8;        // waves
+constexpr int CM = 16 * CW;  // query rows per block
 constexpr int FRAGS = D / 16;
-constexpr int X = 8;             // fp16 per 16-byte chunk
+constexpr int X = 8;  // fp16 per 16-byte chunk
 
 __device__ __forceinline__ float row16_max(float v) {
   v = fmaxf(v, __shfl_xor(v, 1));
@@ -519,14 +544,16 @@ __device__ __forceinline__ float row16_sum(float v) {
   return v + __shfl_xor(v, 8);
 }
 
-__global__ void __launch_bounds__(D) chunk_attn(
-    __half* __restrict__ out, const float* __restrict__ ws,
-    const __half* __restrict__ q, const __half* __restrict__ k,
-    const __half* __restrict__ v, const int* __restrict__ cu_seqlens_q,
-    const int* __restrict__ seq_lens, int num_q_heads, int num_kv_heads,
-    int max_ctx, float sm_scale, int num_splits, int total_q_tokens,
-    int64_t sq_tok, int64_t sq_head, int64_t sk_tok, int64_t sk_head,
-    int64_t sv_tok, int64_t sv_head, int64_t so_tok, int64_t so_head) {
+__global__ void __launch_bounds__(D)
+    chunk_attn(__half* __restrict__ out, const float* __restrict__ ws,
+               const __half* __restrict__ q, const __half* __restrict__ k,
+               const __half* __restrict__ v,
+               const int* __restrict__ cu_seqlens_q,
+               const int* __restrict__ seq_lens, int num_q_heads,
+               int num_kv_heads, int max_ctx, float sm_scale, int num_splits,
+               int total_q_tokens, int64_t sq_tok, int64_t sq_head,
+               int64_t sk_tok, int64_t sk_head, int64_t sv_tok, int64_t sv_head,
+               int64_t so_tok, int64_t so_head) {
   #ifndef SPLITQ_PREFILL_STUB
   const int seq = blockIdx.x, head = blockIdx.y;
   const int tid = threadIdx.x, wave = tid >> 5, lane = tid & 31;
@@ -549,19 +576,18 @@ __global__ void __launch_bounds__(D) chunk_attn(
   // Merge the prefix splits (one weight per split; exp(0) = 1 with one).
   const int64_t split_stride = (int64_t)total_q_tokens * num_q_heads * (D + 2);
   const int used = used_splits(ctx, num_splits);
-  #pragma unroll
+    #pragma unroll
   for (int i = 0; i < 8; ++i) {
     m_st[i] = -INFINITY;
     l_st[i] = 0.f;
   }
-  #pragma unroll
+    #pragma unroll
   for (int f = 0; f < FRAGS; ++f) acc[f] = (f8v){0, 0, 0, 0, 0, 0, 0, 0};
-  #pragma unroll
+    #pragma unroll
   for (int i = 0; i < 8; ++i) {
     const int qp = wq0 + 2 * i + hi;
     if (qp >= qlen) continue;
-    const float* w0 =
-        ws + ((int64_t)(q0 + qp) * num_q_heads + head) * (D + 2);
+    const float* w0 = ws + ((int64_t)(q0 + qp) * num_q_heads + head) * (D + 2);
     float mx = -INFINITY;
     for (int s = 0; s < used; ++s) mx = fmaxf(mx, w0[s * split_stride + D]);
     float lsum = 0.f;
@@ -570,7 +596,7 @@ __global__ void __launch_bounds__(D) chunk_attn(
       if (wp[D] == -INFINITY) continue;
       const float wgt = __expf(wp[D] - mx);
       lsum += wp[D + 1] * wgt;
-  #pragma unroll
+    #pragma unroll
       for (int f = 0; f < FRAGS; ++f) acc[f][i] += wp[16 * f + lo] * wgt;
     }
     m_st[i] = mx;
@@ -579,41 +605,41 @@ __global__ void __launch_bounds__(D) chunk_attn(
 
   // Q rows are re-read from global (L1/L2) in the loop instead of being held
   // in registers; out-of-range rows are masked anyway.
-  const __half* qrow =
-      q + (int64_t)(q0 + min(wq0 + lo, qlen - 1)) * sq_tok +
-      (int64_t)head * sq_head;
-  const int kend = min(qlen, tile0 + min(CM, qlen - tile0));
+  const __half* qrow = q + (int64_t)(q0 + min(wq0 + lo, qlen - 1)) * sq_tok +
+                       (int64_t)head * sq_head;
+  const int k_end = min(qlen, tile0 + min(CM, qlen - tile0));
   _Float16* sPw = &sP[wave][0];
-  for (int n0 = 0; n0 < kend; n0 += KT) {
+  for (int n0 = 0; n0 < k_end; n0 += KT) {
     {  // K tile: [16-dim chunk][token][8] fp16
       const int tk = tid / (FRAGS), dc = (tid % FRAGS) * 2;
       const bool ok = n0 + tk < qlen;
-      const __half* row = k + (int64_t)(q0 + n0 + tk) * sk_tok +
-                          (int64_t)kvh * sk_head;
-  #pragma unroll
+      const __half* row =
+          k + (int64_t)(q0 + n0 + tk) * sk_tok + (int64_t)kvh * sk_head;
+    #pragma unroll
       for (int d = 0; d < 2; ++d) {
         int4 x = ok ? *(const int4*)(row + (dc + d) * X) : int4{0, 0, 0, 0};
         *(int4*)&sK[(dc + d) * (KT * X) + tk * X] = x;
       }
     }
     {  // V tile transposed: [dim][token]
-  #pragma unroll
+    #pragma unroll
       for (int p = 0; p < 2; ++p) {
-        const int tk = tid / (D / KT), dbase = ((tid % (D / KT)) + p * (D / KT)) * 8;
+        const int tk = tid / (D / KT),
+                  dbase = ((tid % (D / KT)) + p * (D / KT)) * 8;
         const bool ok = n0 + tk < qlen;
         int4 x = ok ? *(const int4*)(v + (int64_t)(q0 + n0 + tk) * sv_tok +
                                      (int64_t)kvh * sv_head + dbase)
                     : int4{0, 0, 0, 0};
         _Float16 t8[8];
         __builtin_memcpy(t8, &x, 16);
-  #pragma unroll
+    #pragma unroll
         for (int e = 0; e < 8; ++e) sV[(dbase + e) * KT + tk] = t8[e];
       }
     }
     __syncthreads();
     if (nq_wave > 0 && n0 <= wq0 + nq_wave - 1) {
       f8v s = {0, 0, 0, 0, 0, 0, 0, 0};
-  #pragma unroll 2
+    #pragma unroll 2
       for (int f = 0; f < FRAGS; ++f) {
         h16v b, a;
         const int4 klo = *(const int4*)&sK[(2 * f) * (KT * X) + lo * X];
@@ -625,7 +651,7 @@ __global__ void __launch_bounds__(D) chunk_attn(
       }
       const int kabs = n0 + lo;
       float p[8];
-  #pragma unroll
+    #pragma unroll
       for (int i = 0; i < 8; ++i) {
         const int r = 2 * i + hi;
         const bool keep = r < nq_wave && kabs < qlen && kabs <= wq0 + r;
@@ -636,7 +662,7 @@ __global__ void __launch_bounds__(D) chunk_attn(
         p[i] = mn == -INFINITY ? 0.f : __expf(sc - mn);
         l_st[i] = l_st[i] * al + row16_sum(p[i]);
         m_st[i] = mn;
-  #pragma unroll
+    #pragma unroll
         for (int f = 0; f < FRAGS; ++f) acc[f][i] *= al;
         sPw[r * KT + lo] = (_Float16)p[i];
       }
@@ -645,7 +671,7 @@ __global__ void __launch_bounds__(D) chunk_attn(
       const int4 phi = *(const int4*)&sPw[lo * KT + 8];
       __builtin_memcpy(&pa, &plo, 16);
       __builtin_memcpy(((char*)&pa) + 16, &phi, 16);
-  #pragma unroll
+    #pragma unroll
       for (int f = 0; f < FRAGS; ++f) {
         h16v vb;
         const int4 vlo = *(const int4*)&sV[(16 * f + lo) * KT];
@@ -658,13 +684,13 @@ __global__ void __launch_bounds__(D) chunk_attn(
     __syncthreads();
   }
 
-  #pragma unroll
+    #pragma unroll
   for (int i = 0; i < 8; ++i) {
     const int qp = wq0 + 2 * i + hi;
     if (qp >= qlen) continue;
     const float inv = 1.0f / (l_st[i] + 1e-10f);
     __half* orow = out + (int64_t)(q0 + qp) * so_tok + (int64_t)head * so_head;
-  #pragma unroll
+    #pragma unroll
     for (int f = 0; f < FRAGS; ++f)
       orow[16 * f + lo] = __float2half(acc[f][i] * inv);
   }
@@ -688,13 +714,14 @@ float* workspace(int64_t need, const at::TensorOptions& opts) {
 
 }  // namespace splitq_pf
 
+int splitq_slot_bytes(int64_t fmt);
+
 void splitq_prefill(torch::Tensor out, torch::Tensor q, torch::Tensor k,
                     torch::Tensor v, torch::Tensor cache,
                     torch::Tensor block_table, torch::Tensor cu_seqlens_q,
                     torch::Tensor seq_lens, int64_t max_query_len,
-                    double sm_scale, int64_t bits) {
+                    double sm_scale, int64_t fmt) {
   using namespace splitq_pf;
-  TORCH_CHECK(bits == 4 || bits == 3, "splitq_prefill: bits must be 3 or 4");
   TORCH_CHECK(q.dtype() == at::kHalf && k.dtype() == at::kHalf &&
                   v.dtype() == at::kHalf && out.dtype() == at::kHalf,
               "splitq_prefill: fp16 only");
@@ -702,11 +729,12 @@ void splitq_prefill(torch::Tensor out, torch::Tensor q, torch::Tensor k,
               v.stride(2) == 1 && out.stride(2) == 1);
   TORCH_CHECK(cache.dtype() == at::kByte && cache.dim() == 4 &&
               cache.stride(3) == 1);
-  TORCH_CHECK(cache.size(3) ==
-              (bits == 4 ? Format<4>::SLOT : Format<3>::SLOT));
-  TORCH_CHECK(cache.stride(2) % 8 == 0 && cache.stride(1) % 8 == 0 &&
-                  cache.stride(0) % 8 == 0,
-              "splitq_prefill: slots must be 8-byte aligned");
+  TORCH_CHECK(cache.size(3) == splitq_slot_bytes(fmt),
+              "splitq_prefill: slot size mismatch");
+  const int align = fmt & splitq::kCompactFlag ? 4 : 8;
+  TORCH_CHECK(cache.stride(2) % align == 0 && cache.stride(1) % align == 0 &&
+                  cache.stride(0) % align == 0,
+              "splitq_prefill: misaligned slots");
   static const bool arch_ok = [] {
     const auto* prop = at::cuda::getCurrentDeviceProperties();
     return std::string(prop->gcnArchName).rfind("gfx11", 0) == 0;
@@ -734,17 +762,19 @@ void splitq_prefill(torch::Tensor out, torch::Tensor q, torch::Tensor k,
                         q.options().dtype(at::kFloat));
 
   dim3 grid1(num_seqs, hkv, rowtiles * num_splits);
-  #define PREFIX(B)                                                         \
-    prefix_attn<B><<<grid1, NTHREADS, 0, stream>>>(                         \
+  #define PREFIX(B, KC)                                                     \
+    prefix_attn<B, KC><<<grid1, NTHREADS, 0, stream>>>(                     \
         (const __half*)q.data_ptr(), cache.data_ptr<uint8_t>(),             \
         block_table.data_ptr<int>(), cu_seqlens_q.data_ptr<int>(),          \
         seq_lens.data_ptr<int>(), ws, (float)sm_scale, hq, hkv, block_size, \
         max_blocks, num_splits, total_q, q.stride(0), q.stride(1),          \
         cache.stride(0), cache.stride(1), cache.stride(2))
-  if (bits == 4)
-    PREFIX(4);
+  if (fmt == 4)
+    PREFIX(4, false);
+  else if (fmt == 3)
+    PREFIX(3, false);
   else
-    PREFIX(3);
+    PREFIX(3, true);
   #undef PREFIX
   dim3 grid2(num_seqs, hq, (max_query_len + CM - 1) / CM);
   chunk_attn<<<grid2, D, 0, stream>>>(

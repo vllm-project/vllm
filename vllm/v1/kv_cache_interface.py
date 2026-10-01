@@ -55,9 +55,10 @@ class KVQuantMode(IntEnum):
     TURBOQUANT_K3V4_NC = 8
     TURBOQUANT_3BIT_NC = 9
     NVFP4_DS_MLA = 10  # opaque-bytes NVFP4 DS-MLA layouts (FlashMLA sparse)
-    # RoPE dims int8; NoPE K and V Hadamard-rotated uniform 4/3-bit, one slot.
+    # Hadamard-rotated Lloyd-Max codes, packed K+V per slot (ROCm).
     SPLITQ_K3V4 = 11
     SPLITQ_K3V3 = 12
+    SPLITQ_K3V3_COMPACT = 13
 
     @property
     def is_per_token_head(self) -> bool:
@@ -92,7 +93,11 @@ class KVQuantMode(IntEnum):
     @property
     def is_splitq(self) -> bool:
         """True for any SplitQ quantization mode."""
-        return self in (KVQuantMode.SPLITQ_K3V4, KVQuantMode.SPLITQ_K3V3)
+        return self in (
+            KVQuantMode.SPLITQ_K3V4,
+            KVQuantMode.SPLITQ_K3V3,
+            KVQuantMode.SPLITQ_K3V3_COMPACT,
+        )
 
     @property
     def uses_per_query_maps(self) -> bool:
