@@ -27,7 +27,7 @@ Sorted alphabetically by GitHub handle:
 - [@mawong-amd](https://github.com/mawong-amd)
 - [@micah-wil](https://github.com/micah-wil): ROCm / AMD GPU integration, CI
 - [@netanel-haber](https://github.com/netanel-haber): Nemotron/NVIDIA models, Mamba/Linear attention hybrids, VLMs
-- [@Rohan138](https://github.com/Rohan138)
+- [@Rohan138](https://github.com/Rohan138): ROCm performance, CI, torch.compile fusions
 - [@simondanielsson](https://github.com/simondanielsson): ROCm performance (CDNA), MoRI-IO.
 - [@taneem-ibrahim](https://github.com/taneem-ibrahim): Pooling models
 - [@TheEpicDolphin](https://github.com/TheEpicDolphin)
