@@ -480,6 +480,18 @@ def test_compilation_config():
     )
 
 
+def test_trust_request_mm_kwargs_cli():
+    from vllm.entrypoints.launchers.cli_args import FrontendArgs
+
+    parser = FrontendArgs.add_cli_args(FlexibleArgumentParser())
+
+    args = parser.parse_args([])
+    assert not args.trust_request_mm_kwargs
+
+    args = parser.parse_args(["--trust-request-mm-kwargs"])
+    assert args.trust_request_mm_kwargs
+
+
 def test_attention_config():
     from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
