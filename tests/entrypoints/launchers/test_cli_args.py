@@ -76,6 +76,8 @@ def test_logging_config_cli_args(serve_parser):
             [
                 "--logging-config",
                 '{"log_level":"WARNING","pylogging_config_file":"/tmp/json.json"}',
+                "--logging-config.formatter",
+                "json",
                 "--log-level",
                 "DEBUG",
                 "--log-config-file",
@@ -85,6 +87,7 @@ def test_logging_config_cli_args(serve_parser):
 
     config = AsyncEngineArgs.from_cli_args(args).create_logging_config()
     assert config.log_level == "DEBUG"
+    assert config.formatter == "json"
     assert config.pylogging_config_file == "/tmp/flat.json"
 
 
