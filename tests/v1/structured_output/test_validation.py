@@ -184,4 +184,5 @@ def test_auto_backend_falls_back_on_unsupported_schema(schema, expected_backend)
         StructuredOutputsConfig(backend="auto"),
         tokenizer=object(),
     )
+    assert params.structured_outputs is not None
     assert params.structured_outputs._backend == expected_backend

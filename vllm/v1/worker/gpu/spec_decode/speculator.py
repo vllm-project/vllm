@@ -38,6 +38,7 @@ from vllm.v1.worker.gpu.spec_decode.acceptance_estimator import (
 from vllm.v1.worker.utils import AttentionGroup
 
 if TYPE_CHECKING:
+    from vllm.v1.watermarking.gpu_sampler import GPUWatermarkSampler
     from vllm.v1.worker.gpu.pcp_manager import PCPManager
 
 logger = init_logger(__name__)
@@ -58,6 +59,8 @@ def _target_feeds_hc_residual(vllm_config: VllmConfig) -> bool:
 
 class BaseSpeculator(ABC):
     num_query_per_req: int = 1
+    # Extra query slots reserved per request outside the regular queries.
+    num_extra_query_per_req: int = 0
 
     @abstractmethod
     def init_cudagraph_manager(self, cudagraph_mode: CUDAGraphMode) -> None:
@@ -196,6 +199,9 @@ class DraftModelSpeculator(BaseSpeculator):
                 self.max_num_reqs,
                 device,
                 watermark_config.allow_target_only_watermarking,
+                self.num_speculative_steps,
+                watermark_config.deduplicate_contexts,
+                watermark_config.deduplicate_contexts_max_history,
             )
 
         self.supports_mm_inputs = False
@@ -302,6 +308,7 @@ class DraftModelSpeculator(BaseSpeculator):
         step: int,
         causal: bool | Mapping[int, bool] = True,
         dcp_local_seq_lens: torch.Tensor | None = None,
+        slot_mappings: torch.Tensor | None = None,
     ) -> dict[str, Any] | None:
         num_reqs_padded = batch_desc.num_reqs or num_reqs
         # A FULL graph replays a captured shape whose padded requests each hold
@@ -323,7 +330,8 @@ class DraftModelSpeculator(BaseSpeculator):
         block_tables = [
             x[:num_reqs_padded] for x in self.block_tables.input_block_tables
         ]
-        slot_mappings = self.block_tables.slot_mappings[:, :num_tokens]
+        if slot_mappings is None:
+            slot_mappings = self.block_tables.slot_mappings[:, :num_tokens]
         draft_seq_lens_cpu_upper_bound = torch.zeros(
             num_reqs_padded, dtype=torch.int32, device="cpu"
         )
@@ -421,7 +429,12 @@ class DraftModelSpeculator(BaseSpeculator):
 
         logits = self.compute_draft_logits(hidden_states, spec_step_idx)
         if draft_logits is not None:
-            sampled = gumbel_sample(
+            sampler = (
+                gumbel_sample
+                if self.draft_watermarker is None
+                else self.draft_watermarker.sample
+            )
+            sampled = sampler(
                 logits,
                 idx_mapping,
                 temperature,
@@ -433,10 +446,6 @@ class DraftModelSpeculator(BaseSpeculator):
                 logits_cache_col=draft_step,
                 use_fp64=self.use_fp64_gumbel,
             )
-            if self.draft_watermarker is not None:
-                sampled = self.draft_watermarker.sample(
-                    logits, sampled, idx_mapping, temperature
-                )
         else:
             sampled = logits.argmax(dim=-1)
         self._maybe_predict_acceptance(logits, idx_mapping, draft_step)
@@ -469,11 +478,19 @@ class DraftModelSpeculator(BaseSpeculator):
             self.acceptance_estimator.step(idx_mapping, num_sampled, num_rejected)
 
     def prepare_watermarking(
-        self, contexts: torch.Tensor, watermarking: torch.Tensor
+        self,
+        sampler: "GPUWatermarkSampler",
+        idx_mapping: torch.Tensor,
     ) -> None:
         if self.draft_watermarker is None:
             return
-        self.draft_watermarker.prepare(contexts, watermarking)
+        self.draft_watermarker.prepare(
+            sampler._get_contexts(idx_mapping),
+            sampler.watermarking.gpu[idx_mapping],
+            sampler.req_states.all_token_ids.gpu,
+            sampler.req_states.prompt_len.gpu,
+            sampler.req_states.total_len.gpu,
+        )
 
     def _copy_request_inputs(
         self,
