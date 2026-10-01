@@ -20,6 +20,7 @@ from vllm.config.compilation import CUDAGraphMode
 from vllm.v1.attention.backends.gdn_attn import (
     GDNAttentionMetadata,
     GDNAttentionMetadataBuilder,
+    gdn_precompute_metadata,
 )
 from vllm.v1.attention.backends.utils import mamba_get_block_table_tensor
 from vllm.v1.kv_cache_interface import MambaSpec
@@ -175,12 +176,22 @@ def _build(
         common = common.replace(block_table_tensor=block_table)
     kwargs: dict = {}
     if num_decode_draft_tokens is not None:
-        kwargs["num_decode_draft_tokens_cpu"] = torch.tensor(
+        num_decode_draft_tokens_cpu = torch.tensor(
             num_decode_draft_tokens, dtype=torch.int32
         )
-        kwargs["num_accepted_tokens"] = torch.ones(
+        num_accepted_tokens = torch.ones(
             batch_spec.batch_size, dtype=torch.int32, device=DEVICE
         )
+        num_accepted_tokens, gdn_precomputed_metadata = gdn_precompute_metadata(
+            num_decode_draft_tokens_cpu,
+            num_accepted_tokens,
+            common.query_start_loc,
+            common.query_start_loc_cpu,
+            builder.num_spec,
+        )
+        kwargs["num_decode_draft_tokens_cpu"] = num_decode_draft_tokens_cpu
+        kwargs["num_accepted_tokens"] = num_accepted_tokens
+        kwargs["gdn_precomputed_metadata"] = gdn_precomputed_metadata
     return builder.build(common_prefix_len=0, common_attn_metadata=common, **kwargs)
 
 
