@@ -168,6 +168,28 @@ def test_classes_are_types():
     assert endswith_fqname(LocalDummy, ".LocalDummy")
 
 
+def test_ir_config_hash_initializes_provider_and_tracks_implementation(monkeypatch):
+    from types import SimpleNamespace
+
+    from vllm.config.kernel import IrOpPriorityConfig
+    from vllm.ir.op import IrOp
+    from vllm.platforms import current_platform
+
+    op = IrOp.registry["rms_norm"]
+    implementation = SimpleNamespace(uuid=lambda: "first-implementation")
+
+    def import_ir_kernels():
+        monkeypatch.setitem(op.impls, "test_lazy_provider", implementation)
+
+    monkeypatch.setattr(current_platform, "import_ir_kernels", import_ir_kernels)
+    config = IrOpPriorityConfig(rms_norm=["test_lazy_provider"])
+    first_hash = config.compute_hash()
+    assert config.compute_hash() == first_hash
+
+    implementation.uuid = lambda: "changed-implementation"
+    assert config.compute_hash() != first_hash
+
+
 def test_envs_compile_factors_stable():
     """Test that envs.compile_factors() hash is stable across fresh initializations.
 
