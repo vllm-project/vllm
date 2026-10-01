@@ -1001,6 +1001,16 @@ class NemotronH_Nano_VL_V2(
             vision_projection_hidden_size = config.projector_hidden_size
             llm_hidden_size = config.text_config.hidden_size
 
+            # Match the HF vision projector for checkpoints trained with MTP.
+            self.vision_final_layernorm = (
+                nn.LayerNorm(
+                    vit_hidden_size,
+                    eps=getattr(vision_config, "layer_norm_eps", 1e-6),
+                ).to(llm_dtype)
+                if (getattr(config.text_config, "num_nextn_predict_layers", 0) or 0) > 0
+                else None
+            )
+
             mlp1 = nn.Sequential(
                 RMSNorm(
                     hidden_size=vit_hidden_size
@@ -1095,6 +1105,8 @@ class NemotronH_Nano_VL_V2(
         """Dynamic resolution extract_feature for images."""
         _, vit_embeds = self.vision_model(pixel_values, imgs_sizes=imgs_sizes)
         vit_embeds = vit_embeds.to(dtype=torch.bfloat16)
+        if self.vision_final_layernorm is not None:
+            vit_embeds = self.vision_final_layernorm(vit_embeds)
         vit_embeds = self.pixel_shuffle_dynamic_res(vit_embeds, imgs_sizes=imgs_sizes)
         vit_embeds = self.mlp1(vit_embeds)
         return vit_embeds
@@ -1127,6 +1139,8 @@ class NemotronH_Nano_VL_V2(
             else:
                 _, vit_embeds = self.vision_model(chunk)
             vit_embeds = vit_embeds.to(dtype=torch.bfloat16)
+            if self.vision_final_layernorm is not None:
+                vit_embeds = self.vision_final_layernorm(vit_embeds)
             vit_embeds = vit_embeds.reshape(
                 vit_embeds.shape[0], H_patches, W_patches, -1
             )
@@ -1575,7 +1589,7 @@ class NemotronH_Nano_VL_V2(
         """Get the module prefix in multimodal models"""
         return MultiModelKeys.from_string_field(
             language_model="language_model",
-            connector=["mlp1", "sound_encoder.projection"],
+            connector=["vision_final_layernorm", "mlp1", "sound_encoder.projection"],
             tower_model=["vision_model", "sound_encoder.encoder"],
         )
 
@@ -1593,6 +1607,13 @@ class NemotronH_Nano_VL_V2(
             for modality in ("image", "video", "audio")
         )
         adapter_dict = dict(self.mlp1.named_parameters())
+        vision_norm_prefix = "vision_projector.vision_final_layernorm."
+        vision_norm_params = (
+            dict(self.vision_final_layernorm.named_parameters())
+            if load_multimodal_weights and self.vision_final_layernorm is not None
+            else {}
+        )
+        loaded_vision_norm: set[str] = set()
 
         def is_llm(name: str) -> bool:
             return name.startswith("language_model")
@@ -1637,6 +1658,15 @@ class NemotronH_Nano_VL_V2(
                         continue
                     assert self.sound_encoder is not None
                     sound_weights.append((name, w.detach().clone()))
+                elif name.startswith(vision_norm_prefix):
+                    if not load_multimodal_weights:
+                        continue
+                    param_name = name.removeprefix(vision_norm_prefix)
+                    if param_name not in vision_norm_params:
+                        raise ValueError(f"Unexpected vision LayerNorm weight: {name}")
+                    with torch.no_grad():
+                        default_weight_loader(vision_norm_params[param_name], w)
+                    loaded_vision_norm.add(param_name)
 
         # Fully drain the generator so every mm tensor is buffered, even if
         # the LLM loader stops iterating early.
@@ -1644,6 +1674,13 @@ class NemotronH_Nano_VL_V2(
         self.language_model.load_weights(llm_weights_iter)
         for _ in llm_weights_iter:
             pass
+
+        missing_vision_norm = vision_norm_params.keys() - loaded_vision_norm
+        if missing_vision_norm:
+            raise ValueError(
+                "Vision LayerNorm weights were not initialized from checkpoint: "
+                f"{sorted(vision_norm_prefix + name for name in missing_vision_norm)}"
+            )
 
         if load_multimodal_weights:
             for trimmed_name, w in adapter_weights:
