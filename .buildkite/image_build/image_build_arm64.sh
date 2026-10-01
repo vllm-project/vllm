@@ -27,7 +27,9 @@ if [[ "${TORCH_NIGHTLY:-0}" == "1" ]]; then
   # 13.2.1 rather than 13.2.2 because FINAL_BASE_IMAGE resolves to
   # nvidia/cuda:${CUDA_VERSION}-base-ubuntu24.04 and no 13.2.2 tag is published.
   PYTORCH_NIGHTLY_ARGS=(--build-arg PYTORCH_NIGHTLY=1 --build-arg CUDA_VERSION=13.2.1)
-  ARM64_BUILD_BASE_IMAGE="pytorch/manylinuxaarch64-builder:cuda13.2-1a05ba9edb0aa77cf45a518fd280a945321273ae"
+  # Unpinned on purpose -- see image_build_torch_nightly.sh. The non-nightly
+  # pin above is left alone.
+  ARM64_BUILD_BASE_IMAGE="pytorch/manylinuxaarch64-builder:cuda13.2"
 else
   IMAGE="$REGISTRY/$REPO:$BUILDKITE_COMMIT-arm64"
 fi
