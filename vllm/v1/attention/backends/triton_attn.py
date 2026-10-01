@@ -163,7 +163,7 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
         max_num_tokens_3d = self.seq_threshold_3D
         if self.max_seqs_64_segments > 0:
             self.num_par_softmax_segments = 64
-            # build() views the scratch as 4x the rows at 16 segments.
+            # build() reuses this scratch at 16 segments with proportionally more rows.
             max_num_tokens_3d = max(
                 min(self.max_seqs_64_segments, max_num_tokens_3d),
                 cdiv(
