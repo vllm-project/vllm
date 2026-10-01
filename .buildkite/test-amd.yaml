@@ -454,7 +454,7 @@ steps:
   - tests/v1/e2e/general/
   - vllm/platforms/rocm.py
   commands:
-  - pytest -v -s v1/e2e/general --ignore v1/e2e/general/test_async_scheduling.py --ignore v1/e2e/general/test_kv_sharing_fast_prefill.py -k "not test_mamba_prefix_cache_mrv2"
+  - pytest -v -s v1/e2e/general --ignore v1/e2e/general/test_async_scheduling.py --ignore v1/e2e/general/test_async_scheduling_accuracy.py --ignore v1/e2e/general/test_kv_sharing_fast_prefill.py -k "not test_mamba_prefix_cache_mrv2"
 
 - label: ":amd: (MI250) E2E Scheduling" # TBD
   timeout_in_minutes: 55
@@ -469,6 +469,20 @@ steps:
   - vllm/platforms/rocm.py
   commands:
   - pytest -v -s v1/e2e/general/test_async_scheduling.py
+
+- label: ":amd: (MI250) E2E Scheduling Accuracy" # TBD
+  timeout_in_minutes: 55
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx90anightly, amdmi250]
+  dind: false
+  agent_pool: mi250_1
+  optional: true
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - vllm/v1/
+  - tests/v1/e2e/general/
+  - vllm/platforms/rocm.py
+  commands:
+  - pytest -v -s v1/e2e/general/test_async_scheduling_accuracy.py
 
 - label: ":amd: (MI250) V1 Engine" # TBD
   timeout_in_minutes: 45
@@ -2653,6 +2667,20 @@ steps:
   - vllm/platforms/rocm.py
   commands:
   - pytest -v -s v1/e2e/general/test_async_scheduling.py
+
+- label: ":amd: (MI300) E2E Scheduling Accuracy" # TBD
+  timeout_in_minutes: 55
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
+  dind: false
+  agent_pool: mi300_1
+  optional: true
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - vllm/v1/
+  - tests/v1/e2e/general/
+  - vllm/platforms/rocm.py
+  commands:
+  - pytest -v -s v1/e2e/general/test_async_scheduling_accuracy.py
 
 - label: ":amd: (MI300) V1 Engine" # TBD
   timeout_in_minutes: 45
