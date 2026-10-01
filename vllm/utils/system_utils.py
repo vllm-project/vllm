@@ -72,7 +72,13 @@ def suppress_stdout():
         yield
         return
 
-    stdout_fd = sys.stdout.fileno()
+    # C libraries write to STDOUT_FILENO regardless of what `sys.stdout` is
+    # bound to, and `sys.stdout` may not have an fd at all (e.g. under
+    # `redirect_stdout(io.StringIO())` or in a Jupyter kernel). Deriving the
+    # fd from `sys.stdout` either crashes with `io.UnsupportedOperation` or,
+    # when stdout is bound to stderr's fd, silently suppresses stderr.
+    # Suppress STDOUT_FILENO directly so stderr is never a candidate.
+    stdout_fd = 1
     stdout_dup = os.dup(stdout_fd)
     devnull_fd = os.open(os.devnull, os.O_WRONLY)
 
