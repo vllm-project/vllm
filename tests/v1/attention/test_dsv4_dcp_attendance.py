@@ -55,14 +55,15 @@ def _dcp_config(interleave=1, spec=None, eager=True, pcp=1):
         (_PlatformSupported, dict(spec=object()), "Speculative decoding"),
         (_PlatformSupported, dict(eager=False), "CUDA graph"),
         (_PlatformSupported, dict(pcp=2), "Prefill Context Parallelism"),
-        # Every individual requirement met: still fail-closed until the
-        # prefill attention path is DCP-wired.
-        (_PlatformSupported, {}, "prefill attention is not wired"),
     ],
 )
 def test_dcp_support_gate_clauses(cls, config_kwargs, message_part):
     with pytest.raises(NotImplementedError, match=message_part):
         cls._check_dcp_support(_dcp_config(**config_kwargs))
+
+
+def test_dcp_support_gate_passes_when_supported():
+    _PlatformSupported._check_dcp_support(_dcp_config())
 
 
 # ---------------------------------------------------------------------------

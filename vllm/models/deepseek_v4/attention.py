@@ -190,13 +190,6 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
                 "Prefill Context Parallelism is not supported for "
                 "DeepSeek-V4 attention."
             )
-        # Decode is DCP-wired (gather-Q -> sink-free LSE attend -> merge ->
-        # sink once); prefill attention still reads the sharded caches with
-        # the dcp=1 flow. Drop this once prefill DCP lands.
-        raise NotImplementedError(
-            "DeepSeek-V4 DCP prefill attention is not wired yet; decode "
-            "context parallelism cannot be enabled."
-        )
 
     @classmethod
     @abstractmethod
