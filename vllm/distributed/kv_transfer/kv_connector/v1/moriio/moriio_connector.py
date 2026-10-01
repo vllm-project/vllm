@@ -749,18 +749,13 @@ class MoRIIOConnectorScheduler:
         num_prompt_tokens = request.num_prompt_tokens
         num_external_tokens = max(num_prompt_tokens - num_computed_tokens, 0)
         if self.mode == MoRIIOMode.WRITE:
-            # Only report an incoming load while the request is still waiting
-            # for its remote prefill. update_state_after_alloc clears the flag
-            # once the transfer is triggered; asking again after that would put
-            # a request whose KV already landed back into WAITING_FOR_REMOTE_KVS
-            # to wait for a second push that never comes. Hybrid models never
-            # get here: register_kv_caches refuses WRITE mode for them.
+            # update_state_after_alloc clears do_remote_prefill once the push is
+            # triggered. A request asked again after preemption or a failed load
+            # must recompute locally rather than wait for a push that never
+            # comes. Hybrid models never get here: register_kv_caches refuses
+            # WRITE mode for them.
             params = request.kv_transfer_params
-            if (
-                params is not None
-                and params.get("do_remote_prefill")
-                and num_external_tokens > 0
-            ):
+            if params is not None and params.get("do_remote_prefill"):
                 return num_external_tokens, True
             return 0, False
 

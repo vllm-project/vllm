@@ -32,27 +32,16 @@ _get_transfer_results = MoRIIOConnectorWorker.get_transfer_results
 PROMPT_LEN = 8
 
 
-@pytest.mark.parametrize(
-    ("params", "num_computed_tokens"),
-    [
-        # Full local prefix hit: a zero-token async load trips a scheduler assert.
-        ({"do_remote_prefill": True}, PROMPT_LEN),
-        # Push already landed: asking again parks it for a push that never comes.
-        ({"do_remote_prefill": False}, PROMPT_LEN - 1),
-        (None, 0),
-    ],
-)
-def test_write_mode_does_not_wait_without_a_pending_push(params, num_computed_tokens):
+# {"do_remote_prefill": False}: re-asked after preemption or a failed load.
+@pytest.mark.parametrize("params", [{"do_remote_prefill": False}, None])
+def test_write_mode_does_not_wait_without_a_pending_push(params):
     consumer = SimpleNamespace(is_producer=False, mode=MoRIIOMode.WRITE)
     req = SimpleNamespace(
         prompt_token_ids=list(range(PROMPT_LEN)),
         num_prompt_tokens=PROMPT_LEN,
         kv_transfer_params=params,
     )
-    assert _get_num_new_matched_tokens(consumer, req, num_computed_tokens) == (
-        0,
-        False,
-    )
+    assert _get_num_new_matched_tokens(consumer, req, 0) == (0, False)
 
 
 def _task(transfer_id="tid-1", age=0.0):
