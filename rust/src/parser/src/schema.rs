@@ -5,7 +5,7 @@
 //!
 //! Tool parsers coerce generated parameter values by their schema, and output
 //! grammars constrain the same values by it. Both read a parameter's schema
-//! through [`SchemaView`], so they agree on which JSON types the value may take.
+//! through [`SchemaRoot`], so they agree on which JSON types the value may take.
 
 use std::borrow::Cow;
 use std::collections::HashSet;
@@ -21,8 +21,8 @@ static ANY_SCHEMA: Value = Value::Bool(true);
 
 /// A tool's parameters schema, which local `$ref`s resolve against.
 #[derive(Debug, Clone, Copy)]
-pub(crate) struct SchemaView<'a> {
-    root: &'a Value,
+pub(crate) struct SchemaRoot<'a> {
+    schema: &'a Value,
 }
 
 /// Reference targets expanded while collecting one value's options.
@@ -33,15 +33,15 @@ struct Expansion {
     skipped: bool,
 }
 
-/// Views are equal when they read the same schema, which a pointer compare
+/// Roots are equal when they are the same schema, which a pointer compare
 /// decides without walking it.
-impl PartialEq for SchemaView<'_> {
+impl PartialEq for SchemaRoot<'_> {
     fn eq(&self, other: &Self) -> bool {
-        std::ptr::eq(self.root, other.root)
+        std::ptr::eq(self.schema, other.schema)
     }
 }
 
-impl Eq for SchemaView<'_> {}
+impl Eq for SchemaRoot<'_> {}
 
 /// One option of a value: a single JSON type under a narrowed schema, a
 /// constant, or any value of the type.
@@ -75,19 +75,25 @@ pub enum JsonType {
     Array,
 }
 
-impl<'a> SchemaView<'a> {
-    pub(crate) fn new(root: &'a Value) -> Self {
-        Self { root }
+impl<'a> SchemaRoot<'a> {
+    pub(crate) fn new(schema: &'a Value) -> Self {
+        Self { schema }
     }
 
     /// The parameters schema itself.
-    pub(crate) fn root(&self) -> &'a Value {
-        self.root
+    pub(crate) fn schema(&self) -> &'a Value {
+        self.schema
+    }
+
+    /// The parameters schema after following `$ref`s and single-schema
+    /// `allOf`s.
+    pub(crate) fn resolved(&self) -> &'a Value {
+        self.resolve(self.schema)
     }
 
     /// Follow `$ref`s and single-schema `allOf`s. A reference that does not
     /// resolve, or a chain deeper than [`MAX_SCHEMA_DEPTH`], accepts any value.
-    pub(crate) fn resolve(&self, schema: &'a Value) -> &'a Value {
+    fn resolve(&self, schema: &'a Value) -> &'a Value {
         let mut schema = schema;
         for _ in 0..=MAX_SCHEMA_DEPTH {
             if let Some(reference) = schema.get("$ref").and_then(Value::as_str) {
@@ -147,7 +153,7 @@ impl<'a> SchemaView<'a> {
     }
 
     fn resolve_ref(&self, reference: &str) -> Option<&'a Value> {
-        self.root.pointer(reference.strip_prefix('#')?)
+        self.schema.pointer(reference.strip_prefix('#')?)
     }
 
     fn options_at(
@@ -193,20 +199,24 @@ impl<'a> SchemaView<'a> {
             };
         }
         match schema.get("type") {
-            Some(Value::String(name)) => SchemaOption::typed(schema, name).into_iter().collect(),
+            Some(Value::String(name)) => JsonType::parse(name)
+                .map(|ty| SchemaOption::typed(schema, ty))
+                .into_iter()
+                .collect(),
             Some(Value::Array(names)) => names
                 .iter()
                 .filter_map(Value::as_str)
-                .filter_map(|name| SchemaOption::typed(schema, name))
+                .filter_map(JsonType::parse)
+                .map(|ty| SchemaOption::typed(schema, ty))
                 .collect(),
             Some(_) => Self::any(),
             None if schema.contains_key("properties")
                 || schema.contains_key("additionalProperties") =>
             {
-                SchemaOption::typed(schema, JsonType::Object.name()).into_iter().collect()
+                vec![SchemaOption::typed(schema, JsonType::Object)]
             }
             None if schema.contains_key("items") => {
-                SchemaOption::typed(schema, JsonType::Array.name()).into_iter().collect()
+                vec![SchemaOption::typed(schema, JsonType::Array)]
             }
             None => Self::any(),
         }
@@ -222,13 +232,12 @@ impl<'a> SchemaOption<'a> {
         }
     }
 
-    /// The option of `schema` whose type is named `type_name`, or `None` for an
-    /// unknown name.
-    fn typed(schema: &'a Map<String, Value>, type_name: &str) -> Option<Self> {
-        Some(Self {
-            ty: JsonType::parse(type_name)?,
+    /// The option of `schema` that takes its values of type `ty`.
+    fn typed(schema: &'a Map<String, Value>, ty: JsonType) -> Self {
+        Self {
+            ty,
             source: OptionSource::Schema(schema),
-        })
+        }
     }
 
     fn literal(value: &'a Value) -> Self {
@@ -355,7 +364,7 @@ mod tests {
     }
 
     fn check_options(root: &Value, schema: &Value, expected: Expect) {
-        let options = SchemaView::new(root)
+        let options = SchemaRoot::new(root)
             .options(schema)
             .into_iter()
             .map(|option| match option.source {
@@ -416,11 +425,16 @@ mod tests {
                 "remote": { "$ref": "https://example.com/schema.json" }
             }
         });
-        let view = SchemaView::new(&root);
+        let schema_root = SchemaRoot::new(&root);
         for key in ["missing", "cycle", "remote"] {
-            assert_eq!(view.resolve(&root["properties"][key]), &ANY_SCHEMA, "{key}");
+            assert_eq!(
+                schema_root.resolve(&root["properties"][key]),
+                &ANY_SCHEMA,
+                "{key}"
+            );
             assert!(
-                view.options(&root["properties"][key])
+                schema_root
+                    .options(&root["properties"][key])
                     .iter()
                     .all(|option| matches!(option.source, OptionSource::Any)),
                 "{key}"

@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 
 use serde_json::{Map, Number, Value};
 
-use crate::schema::{JsonType, OptionSource, SchemaView};
+use crate::schema::{JsonType, OptionSource, SchemaRoot};
 use crate::tool::Tool;
 
 /// Normalized parameter schemas for all tools in one request.
@@ -69,7 +69,7 @@ enum JsonParamType<'a> {
 /// An object type whose field types are normalized on access.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ObjectType<'a> {
-    view: SchemaView<'a>,
+    root: SchemaRoot<'a>,
     properties: Option<&'a Map<String, Value>>,
     additional_properties: Option<&'a Value>,
 }
@@ -77,7 +77,7 @@ struct ObjectType<'a> {
 /// An array type whose item type is normalized on access.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ArrayType<'a> {
-    view: SchemaView<'a>,
+    root: SchemaRoot<'a>,
     items: Option<&'a Value>,
 }
 
@@ -86,7 +86,12 @@ impl ToolSchemas {
     pub(crate) fn from_tools(tools: &[Tool]) -> Self {
         let tools = tools
             .iter()
-            .map(|tool| (tool.name.clone(), ToolSchema::from_schema(&tool.parameters)))
+            .map(|tool| {
+                (
+                    tool.name.clone(),
+                    ToolSchema::from_schema(tool.parameters.clone()),
+                )
+            })
             .collect();
 
         Self { tools }
@@ -139,10 +144,8 @@ impl ToolSchema {
     }
 
     /// Keep an OpenAI-style tool parameters JSON schema.
-    fn from_schema(parameters: &Value) -> Self {
-        Self {
-            parameters: parameters.clone(),
-        }
+    fn from_schema(parameters: Value) -> Self {
+        Self { parameters }
     }
 
     /// Convert one parameter value using its normalized schema type.
@@ -151,12 +154,12 @@ impl ToolSchema {
     /// the value fails to convert, this falls back to returning the raw
     /// string as a JSON string value, or object-like JSON for structured input.
     fn convert(&self, name: &str, input: ParamInput) -> Value {
-        let view = SchemaView::new(&self.parameters);
-        let param_type = view
-            .resolve(&self.parameters)
+        let root = SchemaRoot::new(&self.parameters);
+        let param_type = root
+            .resolved()
             .get("properties")
             .and_then(|properties| properties.get(name))
-            .and_then(|schema| JsonParamType::from_schema(&view, schema));
+            .and_then(|schema| JsonParamType::from_schema(&root, schema));
         convert_with_optional_schema(param_type.as_ref(), &input)
     }
 }
@@ -164,8 +167,8 @@ impl ToolSchema {
 impl<'a> JsonParamType<'a> {
     /// Normalize one parameter or nested value schema, or `None` when it does
     /// not constrain the value's type.
-    fn from_schema(view: &SchemaView<'a>, schema: &'a Value) -> Option<Self> {
-        let options = view.options(schema);
+    fn from_schema(root: &SchemaRoot<'a>, schema: &'a Value) -> Option<Self> {
+        let options = root.options(schema);
         if options.iter().all(|option| matches!(option.source, OptionSource::Any)) {
             return None;
         }
@@ -179,7 +182,7 @@ impl<'a> JsonParamType<'a> {
                 JsonType::Boolean => Self::Boolean,
                 JsonType::Null => Self::Null,
                 JsonType::Object => Self::Object(ObjectType {
-                    view: *view,
+                    root: *root,
                     properties: schema
                         .and_then(|schema| schema.get("properties"))
                         .and_then(Value::as_object),
@@ -188,7 +191,7 @@ impl<'a> JsonParamType<'a> {
                         .filter(|schema| schema.is_object()),
                 }),
                 JsonType::Array => Self::Array(ArrayType {
-                    view: *view,
+                    root: *root,
                     items: schema.and_then(|schema| schema.get("items")),
                 }),
             };
@@ -212,14 +215,14 @@ impl<'a> ObjectType<'a> {
             .properties
             .and_then(|properties| properties.get(name))
             .or(self.additional_properties)?;
-        JsonParamType::from_schema(&self.view, schema)
+        JsonParamType::from_schema(&self.root, schema)
     }
 }
 
 impl<'a> ArrayType<'a> {
     /// The type of the array's items.
     fn items(&self) -> Option<JsonParamType<'a>> {
-        JsonParamType::from_schema(&self.view, self.items?)
+        JsonParamType::from_schema(&self.root, self.items?)
     }
 }
 
@@ -421,7 +424,7 @@ mod tests {
 
     #[test]
     fn invalid_schema_converts_everything_as_string() {
-        let params = ToolSchema::from_schema(&json!({ "type": "object" }));
+        let params = ToolSchema::from_schema(json!({ "type": "object" }));
 
         assert_eq!(params.convert("count", text("42")), json!("42"));
         assert_eq!(params.convert("count", text("null")), json!(null));
@@ -429,7 +432,7 @@ mod tests {
 
     #[test]
     fn skips_unknown_property_schema_and_unknown_type() {
-        let params = ToolSchema::from_schema(&json!({
+        let params = ToolSchema::from_schema(json!({
             "type": "object",
             "properties": {
                 "unknown_schema": true,
@@ -445,7 +448,7 @@ mod tests {
 
     #[test]
     fn converts_supported_types() {
-        let params = ToolSchema::from_schema(&json!({
+        let params = ToolSchema::from_schema(json!({
             "type": "object",
             "properties": {
                 "text": { "type": "string" },
@@ -484,7 +487,7 @@ mod tests {
 
     #[test]
     fn number_conversion_preserves_json_number_spelling_with_legacy_fallback() {
-        let params = ToolSchema::from_schema(&json!({
+        let params = ToolSchema::from_schema(json!({
             "type": "object",
             "properties": {
                 "value": { "type": "number" }
@@ -531,7 +534,7 @@ mod tests {
 
     #[test]
     fn non_string_values_ignore_surrounding_whitespace() {
-        let params = ToolSchema::from_schema(&json!({
+        let params = ToolSchema::from_schema(json!({
             "type": "object",
             "properties": {
                 "text": { "type": "string" },
@@ -554,7 +557,7 @@ mod tests {
 
     #[test]
     fn numbers_accept_digit_separators() {
-        let params = ToolSchema::from_schema(&json!({
+        let params = ToolSchema::from_schema(json!({
             "type": "object",
             "properties": {
                 "count": { "type": "integer" },
@@ -571,7 +574,7 @@ mod tests {
 
     #[test]
     fn nullable_schemas_accept_null() {
-        let params = ToolSchema::from_schema(&json!({
+        let params = ToolSchema::from_schema(json!({
             "type": "object",
             "properties": {
                 "text": { "type": "string", "nullable": true },
@@ -588,7 +591,7 @@ mod tests {
 
     #[test]
     fn composite_values_must_decode_to_their_type() {
-        let params = ToolSchema::from_schema(&json!({
+        let params = ToolSchema::from_schema(json!({
             "type": "object",
             "properties": {
                 "payload": { "type": "object" },
@@ -608,7 +611,7 @@ mod tests {
 
     #[test]
     fn converts_upstream_aliases() {
-        let params = ToolSchema::from_schema(&json!({
+        let params = ToolSchema::from_schema(json!({
             "type": "object",
             "properties": {
                 "s": { "type": "varchar" },
@@ -630,13 +633,13 @@ mod tests {
 
     #[test]
     fn preserves_union_type_order() {
-        let integer_first = ToolSchema::from_schema(&json!({
+        let integer_first = ToolSchema::from_schema(json!({
             "type": "object",
             "properties": {
                 "value": { "type": ["integer", "string"] }
             }
         }));
-        let string_first = ToolSchema::from_schema(&json!({
+        let string_first = ToolSchema::from_schema(json!({
             "type": "object",
             "properties": {
                 "value": { "type": ["string", "integer"] }
@@ -649,7 +652,7 @@ mod tests {
 
     #[test]
     fn converts_composite_schemas() {
-        let params = ToolSchema::from_schema(&json!({
+        let params = ToolSchema::from_schema(json!({
             "type": "object",
             "properties": {
                 "choice": {
@@ -677,7 +680,7 @@ mod tests {
 
     #[test]
     fn resolves_references_in_pydantic_schemas() {
-        let params = ToolSchema::from_schema(&json!({
+        let params = ToolSchema::from_schema(json!({
             "$defs": {
                 "Place": {
                     "properties": { "city": { "type": "string" }, "days": { "type": "integer" } },
@@ -707,7 +710,7 @@ mod tests {
 
     #[test]
     fn recursive_references_convert_without_unbounded_expansion() {
-        let params = ToolSchema::from_schema(&json!({
+        let params = ToolSchema::from_schema(json!({
             "$defs": {
                 "Node": {
                     "type": "object",
@@ -734,7 +737,7 @@ mod tests {
     fn branching_recursive_references_convert_structured_values_by_level() {
         // Two recursive children per node expand to 2^depth types if the schema
         // is walked ahead of the value.
-        let params = ToolSchema::from_schema(&json!({
+        let params = ToolSchema::from_schema(json!({
             "$defs": {
                 "Tree": {
                     "type": "object",
@@ -770,7 +773,7 @@ mod tests {
 
     #[test]
     fn integer_enums_convert_to_numbers() {
-        let params = ToolSchema::from_schema(&json!({
+        let params = ToolSchema::from_schema(json!({
             "type": "object",
             "properties": { "level": { "enum": [1, 2, 3] } }
         }));
@@ -780,7 +783,7 @@ mod tests {
 
     #[test]
     fn infers_type_from_schema_shape_without_type() {
-        let params = ToolSchema::from_schema(&json!({
+        let params = ToolSchema::from_schema(json!({
             "type": "object",
             "properties": {
                 "choice": { "enum": ["a", "b"] },
@@ -863,7 +866,7 @@ mod tests {
         // A `string`-typed param whose value is the literal text "null"/"NULL"
         // must stay a string (the original case is preserved), rather than being
         // coerced to JSON null. Non-string types keep coercing "null" to null.
-        let params = ToolSchema::from_schema(&json!({
+        let params = ToolSchema::from_schema(json!({
             "type": "object",
             "properties": {
                 "name": { "type": "string" },
@@ -886,7 +889,7 @@ mod tests {
         // must coerce to JSON null (matching Python's `extract_types_from_schema`,
         // which infers `null` from the enum values), while a non-null enum keeps
         // "null" as a string.
-        let params = ToolSchema::from_schema(&json!({
+        let params = ToolSchema::from_schema(json!({
             "type": "object",
             "properties": {
                 "mode": { "enum": [null, "auto"] },
