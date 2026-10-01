@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import gc
 import os
 import tempfile
 import threading
@@ -101,11 +102,29 @@ class PyNvVideoCodecDecoderSlot:
         self.source_path: str | None = None
 
     def invalidate(self) -> None:
+        decoder = self.decoder
         self.decoder = None
         self.source_path = None
+        if decoder is not None:
+            with suppress(Exception):
+                decoder.stop()
+
+    def recover(self) -> None:
+        """Release decoder resources and drain work after a failed request."""
+        self.invalidate()
+        gc.collect()
+
+        with suppress(Exception):
+            self.stream.synchronize()
+
+        with suppress(Exception):
+            import torch
+
+            with torch.cuda.device(self.stream.device):
+                torch.cuda.synchronize()
+                torch.cuda.empty_cache()
 
     def _construct(self, file_path: str, nvc, device_index: int) -> None:
-        self.invalidate()
         decoder = nvc.SimpleDecoder(
             file_path,
             output_color_type=nvc.OutputColorType.RGB,
@@ -127,6 +146,7 @@ class PyNvVideoCodecDecoderSlot:
                 self.source_path = file_path
             except Exception:
                 # reconfigure unsupported/unsafe for this source -> rebuild.
+                self.recover()
                 self._construct(file_path, nvc, device_index)
         return self.decoder
 
@@ -222,9 +242,12 @@ class PyNvVideoCodecVideoBackendMixin:
             borrow_succeeded = True
         finally:
             if not borrow_succeeded:
-                slot.invalidate()
+                slot.recover()
             with pool.cond:
-                pool.slots.append(slot)
+                if borrow_succeeded:
+                    pool.slots.append(slot)
+                else:
+                    pool.active -= 1
                 pool.cond.notify()
 
     @staticmethod
