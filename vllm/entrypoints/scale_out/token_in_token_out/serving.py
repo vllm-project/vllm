@@ -515,6 +515,10 @@ class ServingTokens(GenerateBaseServing):
                         else None
                     )
 
+                    sampling_mask = None
+                    if output.sampling_mask is not None:
+                        sampling_mask = output.sampling_mask.token_ids
+
                     chunk = GenerateStreamResponse(
                         request_id=request_id,
                         choices=[
@@ -524,6 +528,7 @@ class ServingTokens(GenerateBaseServing):
                                 finish_reason=finish_reason,
                                 token_ids=as_list(delta_token_ids),
                                 routed_experts=routed_experts_b64,
+                                sampling_mask=sampling_mask,
                             )
                         ],
                     )

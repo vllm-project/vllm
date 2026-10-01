@@ -564,6 +564,9 @@ class MockModelConfig:
     def get_diff_sampling_param(self):
         return self.diff_sampling_param or {}
 
+    def get_vocab_size(self) -> int:
+        return 50257
+
 
 @dataclass
 class MockParallelConfig:
@@ -2860,7 +2863,16 @@ async def test_chat_kv_transfer_prompt_token_ids_rejects_invalid_ids(ids):
 
 
 @pytest.mark.asyncio
-async def test_chat_kv_transfer_prompt_token_ids_rejection_notifies_kv_connector():
+@pytest.mark.parametrize(
+    ("ids", "stream", "match"),
+    [
+        ([1.5], False, "non-negative integers"),
+        ([999999], True, r"out of vocabulary.*kv_transfer_params\.prompt_token_ids"),
+    ],
+)
+async def test_chat_kv_transfer_prompt_token_ids_rejection_notifies_kv_connector(
+    ids, stream, match
+):
     """A render-time 400 on a decode request notifies the KV connector."""
     mock_engine = _build_mock_engine()
     mock_engine.notify_kv_transfer_request_rejected = AsyncMock()
@@ -2870,9 +2882,10 @@ async def test_chat_kv_transfer_prompt_token_ids_rejection_notifies_kv_connector
     request = ChatCompletionRequest(
         model=MODEL_NAME,
         messages=[{"role": "user", "content": "hi"}],
-        kv_transfer_params={"prompt_token_ids": [1.5], "do_remote_prefill": True},
+        stream=stream,
+        kv_transfer_params={"prompt_token_ids": ids, "do_remote_prefill": True},
     )
-    with pytest.raises(VLLMValidationError, match="non-negative integers"):
+    with pytest.raises(VLLMValidationError, match=match):
         await serving_chat.create_chat_completion(request)
 
     mock_engine.notify_kv_transfer_request_rejected.assert_awaited_once_with(
