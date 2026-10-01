@@ -1,6 +1,29 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Stats and Prometheus metrics for the NIXL connector."""
+"""Stats and Prometheus metrics for the NIXL connector.
+
+Metric aggregation semantics (TP > 1)
+-------------------------------------
+Each tensor-parallel (TP) rank independently records per-transfer telemetry
+via ``NixlKVConnectorStats.record_transfer()``. Stats from all ranks are then
+concatenated by ``aggregate()`` (list.extend) before ``reduce()`` computes
+summary values.
+
+This means the CLI log line ("KV Transfer metrics: ...") reflects a **combined
+pool of observations across all ranks**, not per-rank or per-engine totals:
+
+* **Num successful transfers** — total count across all ranks.
+* **Avg MB per transfer** — average over individual rank-level transfers,
+  not the total bytes moved for a single logical KV-cache transfer.
+* **Throughput (MB/s)** — ``total_MB_all_ranks / total_time_all_ranks``,
+  i.e. an average per-rank throughput, not aggregate system throughput.
+* **P90 / averages** — computed over the combined distribution of all ranks'
+  transfer times.
+
+This is intentional (workers fire-and-forget stats; the logger process only
+sees the aggregated payload). Interpreting the numbers as system-wide
+throughput or per-engine totals will over/under-count in multi-rank setups.
+"""
 
 import copy
 from dataclasses import dataclass
@@ -23,7 +46,12 @@ if TYPE_CHECKING:
 
 @dataclass
 class NixlKVConnectorStats(KVConnectorStats):
-    """Container for transfer performance metrics."""
+    """Container for NIXL transfer performance metrics.
+
+    Stats are collected per TP rank and later aggregated across ranks before
+    summary statistics are computed. See the module docstring for the exact
+    aggregation semantics and how to interpret the logged metrics.
+    """
 
     def __post_init__(self):
         if not self.data:
@@ -82,6 +110,12 @@ class NixlKVConnectorStats(KVConnectorStats):
         )
 
     def aggregate(self, other: KVConnectorStats) -> KVConnectorStats:
+        """Concatenate per-rank observations into this container.
+
+        Called when combining stats from multiple TP ranks (or successive
+        intervals). After aggregation, ``reduce()`` operates on the combined
+        pool of rank-level observations — see module docstring.
+        """
         if not other.is_empty():
             for k, v in other.data.items():
                 accumulator = self.data[k]
@@ -90,12 +124,23 @@ class NixlKVConnectorStats(KVConnectorStats):
         return self
 
     def reduce(self) -> dict[str, int | float]:
-        # Compute compact representative stats suitable for CLI logging.
-        # Failure counts are reported on every interval: transfer, handshake
-        # and notification failures are grouped as sporadic
-        # lower-transport-layer events, while KV expiry is reported separately
-        # as it is an actionable autoscaler signal rather than a transport
-        # issue.
+        """Reduce the (already rank-aggregated) observations to summary stats.
+
+        Important semantics for multi-rank (TP > 1) deployments:
+
+        * ``Num successful transfers`` is the **total** across all ranks.
+        * ``Avg MB per transfer`` is the mean over individual rank-level
+          transfers, not the total bytes of one logical engine transfer.
+        * ``Throughput (MB/s)`` is ``sum(MB) / sum(time)`` over the combined
+          pool — effectively an average per-rank throughput, **not** aggregate
+          system throughput.
+        * Percentiles (P90) are taken over the combined distribution of all
+          ranks' transfer times.
+
+        Failure counts are reported every interval: transfer, handshake and
+        notification failures are grouped as sporadic lower-transport-layer
+        events; KV expiry is reported separately as an autoscaler signal.
+        """
         failure_counts = {
             "Num failed transfers": len(self.data["num_failed_transfers"])
             + len(self.data["num_failed_handshakes"])

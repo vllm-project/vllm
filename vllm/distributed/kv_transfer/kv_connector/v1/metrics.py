@@ -34,7 +34,11 @@ class KVConnectorStats:
         raise NotImplementedError
 
     def aggregate(self, other: "KVConnectorStats") -> "KVConnectorStats":
-        """Aggregate stats with another `KVConnectorStats` object."""
+        """Aggregate stats with another `KVConnectorStats` object.
+
+        Typically used to concatenate per-worker / per-rank observations
+        into a single pool before ``reduce()`` is called.
+        """
         raise NotImplementedError
 
     def reduce(self) -> dict[str, int | float]:
@@ -42,6 +46,10 @@ class KVConnectorStats:
         more representative values (eg avg/median/sum of the series).
         This is meant to be called by the logger to produce a summary of the
         stats for the last time interval.
+
+        Note: by the time ``reduce()`` runs, stats have usually already been
+        aggregated across workers/ranks. Summary values therefore reflect the
+        combined observation pool, not a single rank.
         """
         raise NotImplementedError
 
@@ -51,6 +59,22 @@ class KVConnectorStats:
 
 
 class KVConnectorLogging:
+    """Periodic logging of connector transfer metrics.
+
+    Pipeline:
+
+    1. ``observe()`` — receives a stats payload that is already aggregated
+       across workers for a single connector (or MultiConnector) sync.
+    2. ``aggregate()`` — accumulates those payloads over the logging interval.
+    3. ``reduce()`` — produces a compact summary dict for the CLI log line.
+    4. ``log()`` — emits the summary and resets the accumulator.
+
+    Because workers fire-and-forget and the logger only sees the combined
+    payload, multi-rank (TP > 1) metrics are rank-aggregated. See
+    ``vllm.distributed.kv_transfer.kv_connector.v1.nixl.stats`` for the
+    concrete semantics of the NIXL connector metrics.
+    """
+
     def __init__(self, kv_transfer_config: KVTransferConfig | None):
         # Instantiate the connector's stats class.
         if kv_transfer_config and kv_transfer_config.kv_connector:
