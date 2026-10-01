@@ -54,11 +54,9 @@ def flydsl_select_paged_tokens(
     qsa = _flydsl_qsa()
     if qsa is None:
         return None
-    # K1 makes the cache contiguous, which would copy it on every call.
-    if not k_cache.is_contiguous():
-        logger.warning_once("FlyDSL QSA K1 skipped: indexer cache is strided.")
-        return None
-    reason = qsa.qsa_k1_serves(q, k_cache, page_table)
+    reason = qsa.qsa_k1_selection_serves(
+        token_topk, compress_ratio
+    ) or qsa.qsa_k1_serves(q, k_cache, page_table)
     if reason is not None:
         logger.warning_once("FlyDSL QSA K1 skipped: %s", reason)
         return None
