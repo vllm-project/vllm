@@ -1,7 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from dataclasses import replace
-
 import pytest
 import torch
 import torch.nn.functional as F
@@ -15,6 +13,7 @@ from nvfp4_utils import (
 from vllm import _custom_ops as ops
 from vllm.model_executor.kernels.linear.nvfp4 import NvFp4LinearLayerConfig
 from vllm.model_executor.kernels.linear.nvfp4.flashinfer import (
+    FlashInferCuteDslNvFp4LinearKernel,
     FlashInferCuteDslNvFp4W4A16LinearKernel,
     FlashInferCutlassNvFp4LinearKernel,
 )
@@ -53,12 +52,18 @@ CUDA_DEVICES = ["cuda:0"]
 
 
 @pytest.mark.parametrize("token_shape", [(17,), (1, 17), (2, 17)])
+@pytest.mark.parametrize(
+    "kernel_cls",
+    [FlashInferCutlassNvFp4LinearKernel, FlashInferCuteDslNvFp4LinearKernel],
+)
 @torch.inference_mode()
-def test_flashinfer_cutlass_nvfp4_preserves_quantized_input_shape(
+def test_flashinfer_nvfp4_preserves_quantized_input_shape(
     token_shape: tuple[int, ...],
+    kernel_cls: type[FlashInferCutlassNvFp4LinearKernel]
+    | type[FlashInferCuteDslNvFp4LinearKernel],
 ) -> None:
-    """Pre-quantized 3D inputs must match flat GEMM and retain token dimensions."""
-    supported, reason = FlashInferCutlassNvFp4LinearKernel.is_supported()
+    """Pre-quantized inputs must match the tensor path and retain token dimensions."""
+    supported, reason = kernel_cls.is_supported()
     if not supported:
         pytest.skip(reason)
 
@@ -70,28 +75,24 @@ def test_flashinfer_cutlass_nvfp4_preserves_quantized_input_shape(
     weight_scale = (FLOAT8_E4M3_MAX * FLOAT4_E2M1_MAX / weight.abs().max()).float()
     x_fp4, x_blockscale = ops.scaled_fp4_quant(x.reshape(-1, hidden_size), input_scale)
     weight_fp4, weight_blockscale = ops.scaled_fp4_quant(weight, weight_scale)
-    flat_input = QuantizedActivation(
-        data=x_fp4,
+    quantized_input = QuantizedActivation(
+        data=x_fp4.reshape(*token_shape, hidden_size // 2),
         scale=x_blockscale,
         orig_dtype=x.dtype,
-        orig_shape=torch.Size((x_fp4.shape[0], hidden_size)),
-        quant_key=kNvfp4Dynamic,
-    )
-    shaped_input = replace(
-        flat_input,
-        data=x_fp4.reshape(*token_shape, hidden_size // 2),
         orig_shape=x.shape,
+        quant_key=kNvfp4Dynamic,
     )
     layer = torch.nn.Module()
     layer.input_size_per_partition = hidden_size
     layer.output_size_per_partition = output_size
     layer.weight = weight_fp4
     layer.weight_scale = weight_blockscale
+    layer.input_global_scale_inv = input_scale
     layer.alpha = (input_scale * weight_scale).reciprocal()
-    kernel = FlashInferCutlassNvFp4LinearKernel(NvFp4LinearLayerConfig())
+    kernel = kernel_cls(NvFp4LinearLayerConfig())
 
-    expected = kernel.apply_weights(layer, flat_input)
-    actual = kernel.apply_weights(layer, shaped_input)
+    expected = kernel.apply_weights(layer, x.reshape(-1, hidden_size))
+    actual = kernel.apply_weights(layer, quantized_input)
 
     assert actual.shape == (*token_shape, output_size)
     assert actual.dtype == x.dtype
