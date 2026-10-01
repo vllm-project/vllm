@@ -294,7 +294,11 @@ def _warmup_kernels(
         model_runner.scheduler_config.max_num_batched_tokens
         // max(prompt_len, decode_query_len),
     )
-    if max_blocks_per_req > 0:
+    block_tables = getattr(model_runner, "block_tables", None)
+    null_blocks = block_tables is not None and (
+        block_tables.redirect_writes_to_null_block
+    )
+    if max_blocks_per_req > 0 and not null_blocks:
         # Reserve block 0 (null block) and ensure we have enough blocks.
         # Encoder-only models allocate no KV blocks, so this cap doesn't apply.
         num_reqs = min(
@@ -445,14 +449,11 @@ def _warmup_kernels(
         for step_indices, step_spec_flags in decode_steps:
             _run_decode_step(step_indices, step_spec_flags)
 
-    # The deferred PP post-update path only runs on real steps, so the steps
-    # above never JIT-compile its kernel on non-last ranks.
-    if not model_runner.is_last_pp_rank and model_runner.pp_handler is not None:
-        model_runner.warmup_pp_decode_update()
-
     # Clean up - process finish_req_ids.
     cleanup_output = SchedulerOutput.make_empty()
     cleanup_output.finished_req_ids = set(req_ids)
     worker_execute_model(cleanup_output)
     model_runner.kv_connector.set_disabled(False)
+    if model_runner.kv_block_zeroer is not None:
+        model_runner.kv_block_zeroer.zero_block_ids([0])
     torch.accelerator.synchronize()

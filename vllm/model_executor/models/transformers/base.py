@@ -29,7 +29,7 @@ import torch
 import transformers
 from packaging.version import Version
 from torch import nn
-from transformers import AutoModel, PretrainedConfig
+from transformers import AutoModel, PreTrainedConfig
 from transformers.conversion_mapping import (
     WeightRenaming,
     get_model_conversion_mapping,
@@ -71,6 +71,7 @@ from vllm.model_executor.models.transformers.utils import (
     named_state,
     replace_conv_class,
     replace_embedding_class,
+    replace_layernorm_class,
     replace_linear_class,
 )
 from vllm.model_executor.models.utils import (
@@ -433,9 +434,9 @@ class Base(
     def _vocab_embeddings(self) -> set[nn.Embedding]:
         """The `nn.Embedding`s in `self.model` which hold a vocab table."""
 
-        def vocab_sizes(config: PretrainedConfig):
+        def vocab_sizes(config: PreTrainedConfig):
             for key, value in vars(config).items():
-                if isinstance(value, PretrainedConfig):
+                if isinstance(value, PreTrainedConfig):
                     yield from vocab_sizes(value)
                 elif "vocab_size" in key and isinstance(value, int):
                     yield value
@@ -466,6 +467,7 @@ class Base(
         - `nn.Conv2d` / `nn.Conv3d` with vLLM's `Conv2d` / `Conv3d`
         - Vocab `nn.Embedding`s with vLLM's `VocabParallelEmbedding`
         - RMSNorm (detected from their dataflow) with vLLM's `RMSNorm`or `GemmaRMSNorm`
+        - `nn.LayerNorm` with vLLM's `LayerNorm`
         """
         tp_plan = self.model.tp_plan or {}
 
@@ -556,6 +558,8 @@ class Base(
                     new_module = replace_embedding_class(
                         child_module, self.quant_config, prefix=qual_name
                     )
+                elif isinstance(child_module, nn.LayerNorm):
+                    new_module = replace_layernorm_class(child_module)
                 elif child_module_fusers := fusers[child_module]:
                     for fuser in child_module_fusers:
                         register_fusion(fuser, qual_name, child_module)

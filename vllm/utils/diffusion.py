@@ -15,7 +15,6 @@ def validate_diffusion_sampling_params(
     *,
     canvas_length: int | None,
     vocab_size: int,
-    async_scheduling: bool | None,
 ) -> None:
     """Validate request options and normalize one-canvas reads at admission."""
     extra = params.extra_args
@@ -94,11 +93,14 @@ def validate_diffusion_sampling_params(
             params.max_tokens = min(params.max_tokens or expected_len, expected_len)
         params.ignore_eos = True
 
-    check(
-        bool(async_scheduling)
-        or width is None
-        or canvas_length is None
-        or width == canvas_length,
-        "A diffusion_canvas_length smaller than the served canvas "
-        "requires --async-scheduling.",
-    )
+    constrained = extra.get("diffusion_constrained")
+    if constrained is not None:
+        check(
+            isinstance(constrained, (bool, int)) and constrained in (0, 1),
+            "diffusion_constrained must be a boolean (or 0/1).",
+        )
+    if constrained:
+        check(
+            bool(params.logprob_token_ids),
+            "diffusion_constrained needs logprob_token_ids: they are the allowed set.",
+        )
