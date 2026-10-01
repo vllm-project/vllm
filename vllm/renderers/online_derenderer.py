@@ -157,87 +157,28 @@ def strip_finished_stop_token(
     stop_token_ids: Sequence[int] | None,
     eos_token_id: int | None,
     generation_eos: set[int],
-) -> tuple[list[int], int | None, bool]:
+) -> tuple[list[int], int | None]:
     """Drop a trailing stop id on a finished chunk, matching the engine.
 
-    Returns the ids to detokenize, the stop_reason for a non-primary stop
-    id, and whether a token was removed. The primary EOS leaves the reason
-    empty. ``include_in_output`` keeps the id.
+    Returns the ids to detokenize and the stop_reason for a non-primary
+    stop id. The primary EOS leaves the reason empty.
+    ``include_in_output`` keeps the id and still reports the reason.
+    This looks only at the current chunk, so streaming stores nothing for it.
     """
     ids = list(token_ids)
     if (
         finish_reason != "stop"
         or not ids
-        or include_in_output
         or not is_stop_token(ids[-1], stop_token_ids, eos_token_id, generation_eos)
     ):
-        return ids, None, False
+        return ids, None
     token_id = ids[-1]
     reason = (
         None if eos_token_id is not None and token_id == eos_token_id else token_id
     )
-    return ids[:-1], reason, True
-
-
-def apply_streaming_stop(
-    state: DerenderStreamState,
-    new_text: str,
-    *,
-    stop: str | Sequence[str] | None,
-    include_in_output: bool,
-    finished: bool,
-    token_stripped: bool,
-    token_stop_reason: int | None,
-) -> tuple[str, DerenderStreamState, int | str | None]:
-    """Hold back a possible stop-string prefix across streaming chunks.
-
-    The engine keeps ``max(len(stop)) - 1`` characters until the next chunk
-    or the finish. A matched stop string is cut here, and it wins over a
-    token stop. Once a stop has fired, later chunks emit nothing.
-    """
-    if state.stop_fired:
-        reason = state.matched_stop_reason if finished else None
-        return "", state, reason
-
-    combined = state.held_text + new_text
-    strings = normalize_stop_strings(stop)
-    matched: str | None = None
-    if strings:
-        combined, matched = truncate_at_stop_string(
-            combined, strings, include_in_output
-        )
-
-    fired = matched is not None or token_stripped
-    if matched is not None:
-        reason: int | str | None = matched
-        held = ""
-        emit = combined
-    elif fired or finished or not strings or include_in_output:
-        reason = token_stop_reason if token_stripped else None
-        held = ""
-        emit = combined
-    else:
-        buffer = max(len(item) for item in strings) - 1
-        reason = None
-        if buffer <= 0:
-            held = ""
-            emit = combined
-        elif len(combined) <= buffer:
-            held = combined
-            emit = ""
-        else:
-            emit = combined[:-buffer]
-            held = combined[-buffer:]
-
-    updated = state.model_copy(
-        update={
-            "held_text": held,
-            "stop_fired": fired,
-            "matched_stop_reason": reason if fired else None,
-        }
-    )
-    shown = reason if finished or matched is not None else None
-    return emit, updated, shown
+    if include_in_output:
+        return ids, reason
+    return ids[:-1], reason
 
 
 class OnlineDerenderer:
@@ -569,7 +510,6 @@ class OnlineDerenderer:
         skip_special = (
             chat_request.skip_special_tokens if chat_request is not None else True
         )
-        stop = chat_request.stop if chat_request is not None else None
         include_stop = (
             chat_request.include_stop_str_in_output
             if chat_request is not None
@@ -585,7 +525,7 @@ class OnlineDerenderer:
 
         for choice in generate_chunk.choices:
             raw_tids = list(choice.token_ids or [])
-            decode_tids, token_reason, token_stripped = strip_finished_stop_token(
+            decode_tids, stop_reason = strip_finished_stop_token(
                 raw_tids,
                 finish_reason=choice.finish_reason,
                 include_in_output=include_stop,
@@ -598,15 +538,6 @@ class OnlineDerenderer:
                 decode_tids,
                 updated_state,
                 skip_special_tokens=skip_special,
-            )
-            emit, updated_state, stop_reason = apply_streaming_stop(
-                updated_state,
-                new_text,
-                stop=stop,
-                include_in_output=include_stop,
-                finished=choice.finish_reason is not None,
-                token_stripped=token_stripped,
-                token_stop_reason=token_reason,
             )
 
             # NOTE: parser-configured servers dispatch to
@@ -636,7 +567,7 @@ class OnlineDerenderer:
 
             delta = DeltaMessage(
                 role="assistant" if include_role else None,
-                content=emit if emit else None,
+                content=new_text if new_text else None,
             )
             stream_choices.append(
                 ChatCompletionResponseStreamChoice(
@@ -1000,7 +931,6 @@ class OnlineDerenderer:
             if completion_request is not None
             else True
         )
-        stop = completion_request.stop if completion_request is not None else None
         include_stop = (
             completion_request.include_stop_str_in_output
             if completion_request is not None
@@ -1018,7 +948,7 @@ class OnlineDerenderer:
 
         for choice in generate_chunk.choices:
             raw_tids = list(choice.token_ids or [])
-            decode_tids, token_reason, token_stripped = strip_finished_stop_token(
+            decode_tids, stop_reason = strip_finished_stop_token(
                 raw_tids,
                 finish_reason=choice.finish_reason,
                 include_in_output=include_stop,
@@ -1031,15 +961,6 @@ class OnlineDerenderer:
                 decode_tids,
                 updated_state,
                 skip_special_tokens=skip_special,
-            )
-            emit, updated_state, stop_reason = apply_streaming_stop(
-                updated_state,
-                new_text,
-                stop=stop,
-                include_in_output=include_stop,
-                finished=choice.finish_reason is not None,
-                token_stripped=token_stripped,
-                token_stop_reason=token_reason,
             )
 
             completion_logprobs = None
@@ -1058,14 +979,14 @@ class OnlineDerenderer:
                     "logprob_context_token_ids": _logprob_context_tail(
                         state.logprob_context_token_ids, raw_tids
                     ),
-                    "logprob_text_offset": state.logprob_text_offset + len(emit),
+                    "logprob_text_offset": state.logprob_text_offset + len(new_text),
                 }
             )
 
             stream_choices.append(
                 CompletionResponseStreamChoice(
                     index=choice.index,
-                    text=emit,
+                    text=new_text,
                     logprobs=completion_logprobs,
                     finish_reason=choice.finish_reason,
                     stop_reason=stop_reason,

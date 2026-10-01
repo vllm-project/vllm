@@ -38,6 +38,16 @@ from ..token_in_token_out.protocol import (
 
 logger = init_logger(__name__)
 
+# Streaming derender does not hold a stop string across chunks. The engine
+# already does that hold-back when the caller asks for output_mode=text.
+_STREAMING_STOP_STRINGS = (
+    "stop strings are not supported on streaming /derender. "
+    "The engine holds them back with output_mode=text "
+    "(https://github.com/vllm-project/vllm/issues/56851). "
+    "Send the finished generate response to the non-streaming "
+    "derender endpoint."
+)
+
 
 class ServingDerender(BaseServing):
     def __init__(
@@ -274,16 +284,10 @@ class ServingDerender(BaseServing):
                 "markup into content."
             )
 
-        if (
-            self.online_derenderer.parser is not None
-            and request.chat_request is not None
-            and normalize_stop_strings(request.chat_request.stop)
+        if request.chat_request is not None and normalize_stop_strings(
+            request.chat_request.stop
         ):
-            return self.create_error_response(
-                "stop strings are not supported on streaming /derender when "
-                "a tool or reasoning parser is configured. Send the finished "
-                "generate response to the non-streaming derender endpoint."
-            )
+            return self.create_error_response(_STREAMING_STOP_STRINGS)
 
         if (
             self.online_derenderer.parser is not None
@@ -380,6 +384,11 @@ class ServingDerender(BaseServing):
         error_check_ret = await self._check_model(request)
         if error_check_ret is not None:
             return error_check_ret
+
+        if request.completion_request is not None and normalize_stop_strings(
+            request.completion_request.stop
+        ):
+            return self.create_error_response(_STREAMING_STOP_STRINGS)
 
         model_name = request.model or self.models.model_name()
         try:

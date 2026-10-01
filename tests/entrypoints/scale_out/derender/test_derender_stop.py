@@ -9,7 +9,6 @@ from types import SimpleNamespace
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.entrypoints.openai.completion.protocol import CompletionRequest
 from vllm.entrypoints.scale_out.token_in_token_out.protocol import (
-    DerenderStreamState,
     GenerateResponse,
     GenerateResponseChoice,
     GenerateResponseStreamChoice,
@@ -17,7 +16,6 @@ from vllm.entrypoints.scale_out.token_in_token_out.protocol import (
 )
 from vllm.renderers.online_derenderer import (
     OnlineDerenderer,
-    apply_streaming_stop,
     decode_with_stop,
     normalize_stop_strings,
     truncate_at_stop_string,
@@ -187,64 +185,6 @@ def test_stop_helpers_match_the_coupled_rule():
     assert reason == "three"
 
 
-def test_stream_holds_a_stop_prefix_until_the_word_arrives():
-    state = DerenderStreamState()
-    emit, state, reason = apply_streaming_stop(
-        state,
-        "one two ",
-        stop=["three"],
-        include_in_output=False,
-        finished=False,
-        token_stripped=False,
-        token_stop_reason=None,
-    )
-    assert emit == "one "
-    assert state.held_text == "two "
-    assert reason is None
-
-    emit, state, reason = apply_streaming_stop(
-        state,
-        "three",
-        stop=["three"],
-        include_in_output=False,
-        finished=True,
-        token_stripped=False,
-        token_stop_reason=None,
-    )
-    assert emit == "two "
-    assert state.held_text == ""
-    assert state.stop_fired
-    assert reason == "three"
-
-    extra, state, extra_reason = apply_streaming_stop(
-        state,
-        "more",
-        stop=["three"],
-        include_in_output=False,
-        finished=False,
-        token_stripped=False,
-        token_stop_reason=None,
-    )
-    assert extra == ""
-    assert extra_reason is None
-
-
-def test_stream_finish_flushes_the_hold_when_the_stop_never_arrives():
-    state = DerenderStreamState(held_text="two ")
-    emit, state, reason = apply_streaming_stop(
-        state,
-        "",
-        stop=["three"],
-        include_in_output=False,
-        finished=True,
-        token_stripped=False,
-        token_stop_reason=None,
-    )
-    assert emit == "two "
-    assert state.held_text == ""
-    assert reason is None
-
-
 def _stream_chunk(token_ids, finish_reason=None):
     return GenerateStreamResponse(
         request_id="cmpl-stream-stop",
@@ -258,20 +198,20 @@ def _stream_chunk(token_ids, finish_reason=None):
     )
 
 
-def test_completion_stream_cuts_a_stop_word_split_across_chunks():
-    pieces = iter(["one two ", "three"])
+def test_completion_stream_drops_a_known_stop_token_on_the_final_chunk():
     seen: list[list[int]] = []
 
     async def detok(tokenizer, delta_token_ids, stream_state, skip_special_tokens=True):
         seen.append(list(delta_token_ids))
-        return next(pieces), stream_state
+        text = " ".join(WORDS[token_id] for token_id in delta_token_ids)
+        return text, stream_state
 
     derenderer = SimpleNamespace(
         _detokenize_delta_async=detok,
-        renderer=SimpleNamespace(get_tokenizer=lambda: _Tokenizer()),
+        renderer=SimpleNamespace(get_tokenizer=lambda: _Tokenizer(eos_token_id=9)),
         model_config=None,
     )
-    request = CompletionRequest(model="tiny", prompt="hi", stop=["three"])
+    request = CompletionRequest(model="tiny", prompt="hi", stop_token_ids=[3])
 
     async def run():
         first, stream_state = await OnlineDerenderer.derender_completion_stream(
@@ -290,9 +230,39 @@ def test_completion_stream_cuts_a_stop_word_split_across_chunks():
         return first, second, stream_state
 
     first, second, stream_state = asyncio.run(run())
-    assert first.choices[0].text == "one "
+    assert first.choices[0].text == "one two"
     assert first.choices[0].stop_reason is None
-    assert second.choices[0].text == "two "
-    assert second.choices[0].stop_reason == "three"
-    assert stream_state.stop_fired
-    assert seen == [[1, 2], [3]]
+    assert second.choices[0].text == ""
+    assert second.choices[0].stop_reason == 3
+    assert not hasattr(stream_state, "held_text")
+    assert seen == [[1, 2], []]
+
+
+def test_completion_stream_keeps_the_stop_token_when_asked():
+    async def detok(tokenizer, delta_token_ids, stream_state, skip_special_tokens=True):
+        text = " ".join(WORDS[token_id] for token_id in delta_token_ids)
+        return text, stream_state
+
+    derenderer = SimpleNamespace(
+        _detokenize_delta_async=detok,
+        renderer=SimpleNamespace(get_tokenizer=lambda: _Tokenizer()),
+        model_config=None,
+    )
+    request = CompletionRequest(
+        model="tiny",
+        prompt="hi",
+        stop_token_ids=[3],
+        include_stop_str_in_output=True,
+    )
+
+    async def run():
+        return await OnlineDerenderer.derender_completion_stream(
+            derenderer,
+            "tiny",
+            _stream_chunk([1, 3], finish_reason="stop"),
+            completion_request=request,
+        )
+
+    chunk, _ = asyncio.run(run())
+    assert chunk.choices[0].text == "one three"
+    assert chunk.choices[0].stop_reason == 3

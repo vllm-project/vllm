@@ -600,26 +600,6 @@ class DerenderStreamState(BaseModel):
     when replay reprocesses a tool call that already has a pinned ID.
     """
 
-    held_text: str = Field(default="", max_length=65536)
-    """Plain-path suffix that might still grow into a stop string.
-
-    The engine holds back ``max(len(stop)) - 1`` characters. Streaming
-    derender does the same here so a stop word split across chunks is not
-    emitted early. Unused on the parser path, which rejects stop strings.
-    """
-
-    stop_fired: bool = False
-    """True once a stop string or stop token has been applied.
-
-    Later chunks emit no further text.
-    """
-
-    matched_stop_reason: str | int | None = None
-    """Stop string or token id that fired, when ``stop_fired`` is set.
-
-    Empty for the primary EOS, matching the non-streaming derender path.
-    """
-
 
 class DerenderChatStreamRequest(BaseModel):
     """One chunk streaming derender request for /v1/chat/completions/derender.
