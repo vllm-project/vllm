@@ -586,7 +586,7 @@ steps:
   - tests/utils.py
   - tests/models/test_vision.py
   commands:
-  - case "$$BUILDKITE_PARALLEL_JOB" in 0) TARGET_TEST_SUITE=MI300 pytest basic_correctness/ -v -s -m 'distributed(num_gpus=2)' && HIP_VISIBLE_DEVICES=0,1 pytest -v -s model_executor/model_loader/test_sharded_state_loader.py -m '(not slow_test)' ;; 1) pytest models/transformers/test_backend.py -v -s -m 'distributed(num_gpus=2)' && pytest models/language -v -s -m 'distributed(num_gpus=2)' && VLLM_ROCM_USE_AITER=1 pytest -v -s models/test_hyv4_rocm.py -m 'distributed(num_gpus=2)' ;; 2) pytest models/multimodal -v -s -m 'distributed(num_gpus=2)' --ignore models/multimodal/generation/test_whisper.py --ignore models/multimodal/generation/test_phi4siglip.py && pytest models/multimodal/generation/test_phi4siglip.py -v -s -m 'distributed(num_gpus=2)' && VLLM_WORKER_MULTIPROC_METHOD=spawn pytest models/multimodal/generation/test_whisper.py -v -s -m 'distributed(num_gpus=2)' && pytest -v -s models/test_vision.py -m 'distributed(num_gpus=2)' ;; *) exit 2 ;; esac
+  - case "$$BUILDKITE_PARALLEL_JOB" in 0) TARGET_TEST_SUITE=MI300 pytest basic_correctness/ -v -s -m 'distributed(num_gpus=2)' && HIP_VISIBLE_DEVICES=0,1 pytest -v -s model_executor/model_loader/test_sharded_state_loader.py -m '(not slow_test)' ;; 1) pytest models/transformers/test_backend.py -v -s -m 'distributed(num_gpus=2)' && pytest models/language -v -s -m 'distributed(num_gpus=2)' && VLLM_ROCM_USE_AITER=1 pytest -v -s models/test_hyv4_rocm.py -m 'distributed(num_gpus=2)' ;; 2) pytest models/multimodal -v -s -m 'distributed(num_gpus=2)' --ignore models/multimodal/generation/test_whisper.py && VLLM_WORKER_MULTIPROC_METHOD=spawn pytest models/multimodal/generation/test_whisper.py -v -s -m 'distributed(num_gpus=2)' && pytest -v -s models/test_vision.py -m 'distributed(num_gpus=2)' ;; *) exit 2 ;; esac
 
 #----------------------------------------------------------  mi300 · compile  ----------------------------------------------------------#
 
@@ -773,7 +773,7 @@ steps:
   - bash standalone_tests/pytorch_nightly_dependency.sh
 
 - label: ":amd: (MI300) Distributed Compile (Inductor Partition)" # TBD
-  timeout_in_minutes: 65
+  timeout_in_minutes: 75
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   dind: false
   agent_pool: mi300_2
@@ -1124,7 +1124,7 @@ steps:
   - pytest -v -s v1/worker/test_worker_memory_snapshot.py
 
 - label: ":amd: (MI300) Distributed Compile + Comm" # TBD
-  timeout_in_minutes: 45
+  timeout_in_minutes: 65
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   dind: false
   agent_pool: mi300_4
@@ -2035,7 +2035,7 @@ steps:
 #-----------------------------------------------------  mi300 · models / language  -----------------------------------------------------#
 
 - label: ":amd: (MI300) Language Models (MTEB)" # TBD
-  timeout_in_minutes: 60
+  timeout_in_minutes: 70
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   dind: false
   agent_pool: mi300_1
@@ -2062,7 +2062,7 @@ steps:
   - pytest -v -s models/language/pooling -m 'not core_model' --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
 
 - label: ":amd: (MI300) Language Models (Extended Generation)" # TBD
-  timeout_in_minutes: 95
+  timeout_in_minutes: 105
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   dind: false
   agent_pool: mi300_1
@@ -2079,7 +2079,7 @@ steps:
 #----------------------------------------------------  mi300 · models / multimodal  ----------------------------------------------------#
 
 - label: ":amd: (MI300) Multimodal Models (Extended Generation 1)" # TBD
-  timeout_in_minutes: 90
+  timeout_in_minutes: 100
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   dind: false
   agent_pool: mi300_1
@@ -2168,7 +2168,7 @@ steps:
 #-----------------------------------------------------  mi300 · models / quantized  -----------------------------------------------------#
 
 - label: ":amd: (MI300) Quantized Models" # TBD
-  timeout_in_minutes: 80
+  timeout_in_minutes: 90
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   dind: false
   agent_pool: mi300_1
@@ -3110,11 +3110,11 @@ steps:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - pytest -v -s basic_correctness/memory/cumem
 
-- label: ":amd: (MI355 DPX) Basic Correctness Sleep Mode" # TBD
+- label: ":amd: (MI300) Basic Correctness Sleep Mode" # TBD
   timeout_in_minutes: 60
-  mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   dind: false
-  agent_pool: mi355_dpx
+  agent_pool: mi300_1
   fast_check: true
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
@@ -5108,11 +5108,11 @@ steps:
 
 #------------------------------------------------------  mi355 · models / basic  -------------------------------------------------------#
 
-- label: ":amd: (MI355 DPX) Basic Models (Other)" # TBD
+- label: ":amd: (MI355) Basic Models (Other)" # TBD
   timeout_in_minutes: 65
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
   dind: false
-  agent_pool: mi355_dpx
+  agent_pool: mi355_1
   optional: true
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:

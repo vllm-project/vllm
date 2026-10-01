@@ -85,6 +85,12 @@ struct Utils {
 #endif
 
 #ifndef USE_ROCM
+  #define VLLM_TRAP() __trap()
+#else
+  #define VLLM_TRAP() __builtin_trap()
+#endif
+
+#ifndef USE_ROCM
   #define VLLM_DevFuncAttribute_SET_MaxDynamicSharedMemorySize(FUNC, VAL) \
     cudaFuncSetAttribute(FUNC, cudaFuncAttributeMaxDynamicSharedMemorySize, VAL)
 #else

@@ -128,6 +128,7 @@ class Resolve:
             self.lru,
             _dev(self.state_indices),
             self.hot_size,
+            self.top_k,  # max_union_rows: one row per request here
             outs["miss"],
             None,  # stats
             outs["attn"],
