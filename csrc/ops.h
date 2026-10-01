@@ -101,6 +101,25 @@ void pth_decode_int8_rdna3(torch::Tensor out, torch::Tensor query,
                            torch::Tensor q_to_klen, torch::Tensor mid_o_buf,
                            double sm_scale, int64_t num_kv_splits);
 
+// SplitQ KV cache (RDNA3).
+void splitq_cache_store(torch::Tensor key, torch::Tensor value,
+                        torch::Tensor cache, torch::Tensor slot_mapping,
+                        torch::Tensor nope_signs, torch::Tensor v_signs,
+                        int64_t bits);
+
+void splitq_decode(torch::Tensor out, torch::Tensor query, torch::Tensor cache,
+                   torch::Tensor block_table, torch::Tensor q_to_req,
+                   torch::Tensor q_to_klen, torch::Tensor mid_o,
+                   torch::Tensor nope_signs, torch::Tensor v_signs,
+                   double sm_scale, int64_t num_kv_splits, int64_t bits,
+                   int64_t query_group);
+
+void splitq_to_int8(torch::Tensor cache, torch::Tensor block_table,
+                    torch::Tensor query_start_loc, torch::Tensor seq_lens,
+                    int64_t max_ctx_pad, torch::Tensor k_out,
+                    torch::Tensor v_out, torch::Tensor k_scale_out,
+                    torch::Tensor v_scale_out, int64_t bits);
+
 torch::Tensor dynamic_4bit_int_moe_cpu(
     torch::Tensor x, torch::Tensor topk_ids, torch::Tensor topk_weights,
     torch::Tensor w13_packed, torch::Tensor w2_packed, int64_t hidden_size,

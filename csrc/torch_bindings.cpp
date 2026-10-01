@@ -76,6 +76,24 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "Tensor q_to_req, Tensor q_to_klen, "
       "Tensor! mid_o_buf, float sm_scale, int num_kv_splits) -> ()");
   ops.impl("pth_decode_int8_rdna3", torch::kCUDA, &pth_decode_int8_rdna3);
+
+  // SplitQ KV cache (RDNA3): store, split-KV decode, int8 expansion.
+  ops.def(
+      "splitq_cache_store(Tensor key, Tensor value, Tensor! cache, "
+      "Tensor slot_mapping, Tensor nope_signs, Tensor v_signs, int bits) -> ()");
+  ops.impl("splitq_cache_store", torch::kCUDA, &splitq_cache_store);
+  ops.def(
+      "splitq_decode(Tensor! out, Tensor query, Tensor cache, "
+      "Tensor block_table, Tensor q_to_req, Tensor q_to_klen, "
+      "Tensor! mid_o, Tensor nope_signs, Tensor v_signs, float sm_scale, "
+      "int num_kv_splits, int bits, int query_group) -> ()");
+  ops.impl("splitq_decode", torch::kCUDA, &splitq_decode);
+  ops.def(
+      "splitq_to_int8(Tensor cache, Tensor block_table, "
+      "Tensor query_start_loc, Tensor seq_lens, int max_ctx_pad, "
+      "Tensor! k_out, Tensor! v_out, Tensor! k_scale_out, "
+      "Tensor! v_scale_out, int bits) -> ()");
+  ops.impl("splitq_to_int8", torch::kCUDA, &splitq_to_int8);
 }
 
 #ifdef USE_ROCM

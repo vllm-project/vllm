@@ -133,7 +133,7 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
     ):
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
 
-        self._is_per_token_head = kv_cache_spec.kv_quant_mode.is_per_token_head
+        self._is_per_token_head = kv_cache_spec.kv_quant_mode.uses_per_query_maps
         if self._is_per_token_head:
             self._init_reorder_batch_threshold(1, supports_spec_as_decode=False)
             # Persistent GPU buffers for the kernel's per-query maps. Sized

@@ -55,6 +55,9 @@ class KVQuantMode(IntEnum):
     TURBOQUANT_K3V4_NC = 8
     TURBOQUANT_3BIT_NC = 9
     NVFP4_DS_MLA = 10  # opaque-bytes NVFP4 DS-MLA layouts (FlashMLA sparse)
+    # RoPE dims int8; NoPE K and V Hadamard-rotated uniform 4/3-bit, one slot.
+    SPLITQ_K4V4 = 11
+    SPLITQ_K3V3 = 12
 
     @property
     def is_per_token_head(self) -> bool:
@@ -87,6 +90,16 @@ class KVQuantMode(IntEnum):
         return head_size // factor
 
     @property
+    def is_splitq(self) -> bool:
+        """True for any SplitQ quantization mode."""
+        return self in (KVQuantMode.SPLITQ_K4V4, KVQuantMode.SPLITQ_K3V3)
+
+    @property
+    def uses_per_query_maps(self) -> bool:
+        """True when kernels take per-query request and causal-length maps."""
+        return self.is_per_token_head or self.is_splitq
+
+    @property
     def is_turboquant(self) -> bool:
         """True for any turboquant quantization mode."""
         return self in (
@@ -113,6 +126,8 @@ def get_kv_quant_mode(kv_cache_dtype: str) -> KVQuantMode:
     if kv_cache_dtype.startswith("nvfp4"):
         return KVQuantMode.NVFP4
     if isinstance(kv_cache_dtype, str) and kv_cache_dtype.startswith("turboquant_"):
+        return KVQuantMode[kv_cache_dtype.upper()]
+    if isinstance(kv_cache_dtype, str) and kv_cache_dtype.startswith("splitq_"):
         return KVQuantMode[kv_cache_dtype.upper()]
     if isinstance(kv_cache_dtype, str) and kv_cache_dtype.startswith("fp8"):
         return KVQuantMode.FP8_PER_TENSOR
