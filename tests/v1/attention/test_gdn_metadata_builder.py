@@ -65,6 +65,17 @@ GDN_BUILD_TEST_CASES = {
         expected_num_prefill_tokens=0,
         expected_num_spec_decodes=2,
     ),
+    # Padded (CUDA graph) sequences trail the spec decodes
+    "pure_spec_decode_with_padding": GDNBuildTestCase(
+        seq_lens=[50, 30, 16],
+        query_lens=[3, 3, 0],
+        num_decode_draft_tokens=[2, 2, -1],
+        num_speculative_tokens=2,
+        expected_num_decodes=0,
+        expected_num_prefills=0,
+        expected_num_prefill_tokens=0,
+        expected_num_spec_decodes=2,
+    ),
     # No speculative config at all — standard decode path
     "pure_regular_decode": GDNBuildTestCase(
         seq_lens=[40, 30, 20],
@@ -143,8 +154,9 @@ def _create_gdn_builder(
         model_name="Qwen/Qwen3.5-0.8B",
         block_size=BLOCK_SIZE,
     )
-    if full_cuda_graph:
-        vllm_config.compilation_config.cudagraph_mode = CUDAGraphMode.FULL_AND_PIECEWISE
+    vllm_config.compilation_config.cudagraph_mode = (
+        CUDAGraphMode.FULL_AND_PIECEWISE if full_cuda_graph else CUDAGraphMode.NONE
+    )
     if num_speculative_tokens > 0:
         vllm_config.speculative_config = SpeculativeConfig(
             method="ngram",
@@ -197,6 +209,8 @@ def test_gdn_build_classification(test_case: GDNBuildTestCase):
     assert meta.num_prefills == test_case.expected_num_prefills
     assert meta.num_prefill_tokens == test_case.expected_num_prefill_tokens
     assert meta.num_spec_decodes == test_case.expected_num_spec_decodes
+    if meta.spec_state_indices_tensor is not None:
+        assert len(meta.spec_state_indices_tensor) == meta.num_spec_decodes
 
 
 @pytest.mark.parametrize("mamba_cache_mode", ["none", "align"])
