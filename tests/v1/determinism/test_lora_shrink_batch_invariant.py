@@ -4,7 +4,7 @@
 
 import pytest
 import torch
-from utils import skip_if_not_cuda
+from utils import skip_if_not_cuda_alike
 
 import vllm.lora.ops.triton_ops.lora_shrink_op as shrink_op
 import vllm.lora.ops.triton_ops.utils as lora_utils
@@ -39,7 +39,7 @@ def _shrink(inputs, weights, mapping, scaling):
     return out
 
 
-@skip_if_not_cuda
+@skip_if_not_cuda_alike
 @pytest.mark.parametrize(
     "hidden_size,rank,nslices,dtype",
     [
@@ -68,7 +68,7 @@ def test_lora_shrink_matches_reference(hidden_size, rank, nslices, dtype):
     torch.testing.assert_close(out, ref, rtol=5e-3, atol=5e-3)
 
 
-@skip_if_not_cuda
+@skip_if_not_cuda_alike
 @pytest.mark.parametrize("nslices", [1, 3])
 def test_lora_shrink_invariant_across_batch_sizes(monkeypatch, nslices):
     reduce_kernel, reduce_grids = shrink_op._lora_shrink_reduce_kernel, []
