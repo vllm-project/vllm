@@ -68,15 +68,17 @@ def _ipc_probe(size: int) -> dict[str, str]:
 def dump(tag: str, groups: dict | None = None) -> None:
     try:
         device = torch.accelerator.current_device_index()
-        free, total = torch.cuda.mem_get_info(device)
+        free, total = torch.accelerator.get_memory_info(device)
         get_settings = getattr(torch._C, "_accelerator_getAllocatorSettings", None)
         info = {
             "pid": os.getpid(),
             "device": device,
             "free_gib": round(free / 2**30, 2),
             "total_gib": round(total / 2**30, 2),
-            "allocated_gib": round(torch.cuda.memory_allocated(device) / 2**30, 2),
-            "reserved_gib": round(torch.cuda.memory_reserved(device) / 2**30, 2),
+            "allocated_gib": round(
+                torch.accelerator.memory_allocated(device) / 2**30, 2
+            ),
+            "reserved_gib": round(torch.accelerator.memory_reserved(device) / 2**30, 2),
             "allocator_backend": torch.cuda.memory.get_allocator_backend(),
             "allocator_settings": get_settings() if get_settings else None,
         }
