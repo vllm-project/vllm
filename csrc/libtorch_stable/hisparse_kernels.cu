@@ -1229,8 +1229,8 @@ void hisparse_resolve_residency(
   const int hash_size = static_cast<int>(max_union_rows) + 1;
   const int num_buffer_chunks = (hot_size + kWarpSize - 1) / kWarpSize;
   const size_t smem_bytes =
-      sizeof(int32_t) * (2 * hash_size + 2 * (num_buffer_chunks + 1) +
-                         kResidencyCounters) +
+      sizeof(int32_t) *
+          (2 * hash_size + 2 * (num_buffer_chunks + 1) + kResidencyCounters) +
       sizeof(VLLM_BALLOT_MASK_T) * num_buffer_chunks +
       sizeof(int16_t) * hot_size;
 
