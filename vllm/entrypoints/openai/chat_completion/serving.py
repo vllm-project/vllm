@@ -310,8 +310,6 @@ class OpenAIServingChat(GenerateBaseServing):
         mm_token_counts: dict[str, int] | None = None
         for i, engine_input in enumerate(engine_inputs):
             prompt_token_ids = self._extract_prompt_components(engine_input).token_ids
-            if parser is not None and prompt_token_ids is not None:
-                parser.set_prompt_token_ids(prompt_token_ids)
             mm_token_counts = _get_mm_token_counts(engine_input)
 
             # If we are creating sub requests for multiple prompts, ensure that they
@@ -977,6 +975,8 @@ class OpenAIServingChat(GenerateBaseServing):
                 parser = self._make_parser(
                     request, tokenizer, self._effective_chat_template_kwargs(request)
                 )
+            if parser is not None and final_res.prompt_token_ids is not None:
+                parser.set_prompt_token_ids(final_res.prompt_token_ids)
             token_ids = output.token_ids
             out_logprobs = output.logprobs
 
