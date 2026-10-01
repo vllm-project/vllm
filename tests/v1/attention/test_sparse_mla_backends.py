@@ -65,6 +65,7 @@ from vllm.model_executor.layers.attention.sparse_mla_attention import (
 )
 from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import current_stream
+from vllm.v1.attention.backend import AttentionCGSupport
 from vllm.v1.attention.backends.mla import index_group as index_group_module
 from vllm.v1.attention.backends.mla.flashattn_mla_sparse import (
     FlashAttnMLASparseImpl,
@@ -182,6 +183,22 @@ def test_nope_flashinfer_sparse_mla_uses_model_scale(monkeypatch):
 
     assert recorded_scale == model_scale
     assert recorded_scale != kv_lora_rank**-0.5
+
+
+@pytest.mark.parametrize("hisparse", [False, True])
+def test_hisparse_caps_cudagraph_support_at_uniform_batch(hisparse):
+    """HiSparse cannot capture mixed batches, so even a backend that can
+    reports at most UNIFORM_BATCH, and cudagraph_mode=FULL falls back."""
+    builder_cls = FlashInferMLASparseTRTLLMBackend.get_builder_cls()
+    config = SimpleNamespace(
+        attention_config=SimpleNamespace(
+            hisparse_config=HiSparseConfig() if hisparse else None
+        )
+    )
+    expected = (
+        AttentionCGSupport.UNIFORM_BATCH if hisparse else AttentionCGSupport.ALWAYS
+    )
+    assert builder_cls.get_cudagraph_support(config, None) == expected
 
 
 def test_hisparse_routes_prefill_to_sparse_mqa():
